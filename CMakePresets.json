@@ -23,11 +23,7 @@
         "SHELF_ENABLE_SYCL": "OFF",
         "SHELF_ENABLE_HIP": "ON",
         "SHELF_BUILD_TESTS": "ON",
-        "CMAKE_CXX_COMPILER": "/opt/zen/.venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/llvm/bin/clang++",
         "CMAKE_HIP_ARCHITECTURES": "gfx1201"
-      },
-      "environment": {
-        "CMAKE_PREFIX_PATH": "/opt/zen/.venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/cmake"
       }
     }
   ],

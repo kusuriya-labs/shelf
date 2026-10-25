@@ -4,20 +4,15 @@
 # Optional backends pull their toolchains here.
 
 if(SHELF_ENABLE_HIP)
-    # ROCm SDK location is provided via CMAKE_PREFIX_PATH (see the `hip`
-    # preset). On this machine: pip package _rocm_sdk_devel (ROCm 7.14),
-    # whose lib/cmake/hip exports hip::host / hip::device.
+    # ROCm root (and therefore the hip::host/hip::device config) was resolved
+    # in cmake/RocmRoot.cmake via -DSHELF_ROCM_ROOT / ROCM_PATH /
+    # `rocm-sdk path --root` — machine-specific paths are never hardcoded.
     find_package(hip CONFIG REQUIRED)
 
-    # HIP language TUs (kernels). The compiler must come from the same ROCm
-    # root as hip-config, and the whole project is then built with that
-    # clang++ (preset pins CMAKE_CXX_COMPILER) so host and device TUs share
-    # one C++ ABI. Device arch is a single explicit target (gfx1201).
+    # HIP language TUs (kernels). Compiler was pinned to the same ROCm
+    # clang++ in RocmRoot.cmake; device arch is a single explicit target.
     if(NOT DEFINED CMAKE_HIP_COMPILER)
-        get_filename_component(_shelf_rocm_root "${hip_DIR}" DIRECTORY)
-        get_filename_component(_shelf_rocm_root "${_shelf_rocm_root}" DIRECTORY)
-        get_filename_component(_shelf_rocm_root "${_shelf_rocm_root}" DIRECTORY)
-        set(CMAKE_HIP_COMPILER "${_shelf_rocm_root}/lib/llvm/bin/clang++")
+        set(CMAKE_HIP_COMPILER "${SHELF_ROCM_ROOT}/lib/llvm/bin/clang++")
     endif()
     if(NOT CMAKE_HIP_ARCHITECTURES)
         set(CMAKE_HIP_ARCHITECTURES "gfx1201")

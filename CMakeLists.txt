@@ -1,6 +1,10 @@
 # shelf — inference runtime (skeleton: Phase 1)
 cmake_minimum_required(VERSION 3.25)
 
+# ROCm root must be discovered before project() pins the compilers
+# (never hardcode a machine-specific SDK path).
+include(cmake/RocmRoot.cmake)
+
 project(shelf
     VERSION 0.1.0
     DESCRIPTION "Model-agnostic LLM inference runtime (skeleton)"
