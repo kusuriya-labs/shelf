@@ -14,7 +14,6 @@ Status PagedKVLayout::check() const {
         dt != DataType::u8) {  // u8 = fp8 e4m3 payload later
         return Status::unsupported("paged-kv: unsupported KV dtype", __FILE__, __LINE__);
     }
-    const std::size_t canonical_head = block_size * 2 * head_dim;
     const std::size_t canonical_slot = 2 * head_dim;
     if (slot_stride == 0 || head_stride == 0 || block_stride == 0)
         return Status::invalid_argument("paged-kv: strides unset (call prepare)",

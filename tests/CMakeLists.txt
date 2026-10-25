@@ -24,6 +24,12 @@ add_executable(test_paged_kv_abi unit/test_paged_kv_abi.cpp)
 target_link_libraries(test_paged_kv_abi PRIVATE shelf::backend_common shelf::runtime_state)
 add_test(NAME unit.paged_kv_abi COMMAND test_paged_kv_abi)
 
+if(SHELF_ENABLE_HIP)
+    add_executable(test_hip_gemm_bf16 unit/test_hip_gemm_bf16.cpp)
+    target_link_libraries(test_hip_gemm_bf16 PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_gemm_bf16 COMMAND test_hip_gemm_bf16)
+endif()
+
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
 target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

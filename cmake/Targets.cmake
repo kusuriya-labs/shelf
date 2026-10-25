@@ -40,15 +40,22 @@ target_include_directories(shelf_runtime_state PUBLIC
 target_link_libraries(shelf_runtime_state PUBLIC shelf::foundation)
 
 # ---------------------------------------------------------------- backend/hip
-# Host-side runtime API from ordinary C++ TUs (no kernels yet; Phase 5 will
-# add HIP-language TUs for device code). HIP headers/types stay confined here.
+# Host-side runtime API + device kernels. HIP headers/types stay confined here.
 if(SHELF_ENABLE_HIP)
+    file(GLOB SHELF_HIP_KERNEL_SRCS CONFIGURE_DEPENDS
+         "${PROJECT_SOURCE_DIR}/src/backend/hip/kernels/*.hip")
     add_library(shelf_backend_hip STATIC
-        src/backend/hip/hip_api.cpp)
+        src/backend/hip/hip_api.cpp
+        ${SHELF_HIP_KERNEL_SRCS})
     add_library(shelf::backend_hip ALIAS shelf_backend_hip)
     target_include_directories(shelf_backend_hip PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/hip/include>")
-    target_link_libraries(shelf_backend_hip PUBLIC shelf::backend_common hip::host)
+    target_link_libraries(shelf_backend_hip
+        PUBLIC shelf::backend_common hip::host
+        PRIVATE hip::device)
+    # CMake passes CMAKE_HIP_ARCHITECTURES; pin it explicitly for determinism.
+    target_compile_options(shelf_backend_hip PRIVATE
+        "--offload-arch=${CMAKE_HIP_ARCHITECTURES}")
 endif()
 
 # ---------------------------------------------------------------- ir

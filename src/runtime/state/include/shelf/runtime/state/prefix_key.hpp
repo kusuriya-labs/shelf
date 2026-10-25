@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <compare>
 #include <cstdint>
 
 namespace shelf::runtime::state {

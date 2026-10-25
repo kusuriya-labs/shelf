@@ -53,6 +53,13 @@ causal_conv_step/gdn_step/attention_gqa_step）・`apps/shelf_run.cpp` は **新
 PhaseShift（`~/work/phaseshift-bf16-fp8-tp4`、自己制作）の qwen35 runtime family は
 GPU 高速化段階で kernel・paged KV を移植予定（未移植）。
 
+## PR-008a（PhaseShift HIP kernel 移植開始）
+
+`src/backend/hip/kernels/linear_bf16.hip` と公開ヘッダは PhaseShift
+`kernels/optimized/linear/{bf16.h,config.h}` の **self-work vendoring**
+（名前空間 `ps::kernel`→`shelf::hipk`・型は shelf `bf16_t` へ置換のみ、
+数式変更なし）。PhaseShift は自己制作のため著作権表記不要。
+
 ## 設計のみ参照（コード未移植）
 
 | shelf 側の設計 | XeStrata からの参照点 |
