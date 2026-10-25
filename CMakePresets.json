@@ -9,17 +9,39 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "SHELF_ENABLE_SYCL": "OFF",
+        "SHELF_ENABLE_HIP": "OFF",
         "SHELF_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "hip",
+      "displayName": "HIP backend (AMD ROCm, gfx1201)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SHELF_ENABLE_SYCL": "OFF",
+        "SHELF_ENABLE_HIP": "ON",
+        "SHELF_BUILD_TESTS": "ON"
+      },
+      "environment": {
+        "CMAKE_PREFIX_PATH": "/opt/zen/.venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/cmake"
       }
     }
   ],
   "buildPresets": [
-    { "name": "cpu", "configurePreset": "cpu" }
+    { "name": "cpu", "configurePreset": "cpu" },
+    { "name": "hip", "configurePreset": "hip" }
   ],
   "testPresets": [
     {
       "name": "cpu",
       "configurePreset": "cpu",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "hip",
+      "configurePreset": "hip",
       "output": { "outputOnFailure": true }
     }
   ]

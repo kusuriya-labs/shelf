@@ -1,5 +1,14 @@
 # Third-party dependencies for shelf.
 #
-# Intentionally empty in Phase 1: the skeleton must build CPU-only with the
-# standard library alone. Future deps (SYCL runtime, testing frameworks) will
-# be added here per plan §3 (third_party/) and must record their licenses.
+# Phase 1 core must build CPU-only with the standard library alone.
+# Optional backends pull their toolchains here.
+
+if(SHELF_ENABLE_HIP)
+    # ROCm SDK location is provided via CMAKE_PREFIX_PATH (see the `hip`
+    # preset). On this machine: pip package _rocm_sdk_devel (ROCm 7.14),
+    # whose lib/cmake/hip exports hip::host / hip::device.
+    find_package(hip CONFIG REQUIRED)
+endif()
+
+# SYCL runtime is NOT installed on this machine (planned). backend/sycl stays
+# empty until a SYCL toolchain lands; do not silently substitute HIP for it.

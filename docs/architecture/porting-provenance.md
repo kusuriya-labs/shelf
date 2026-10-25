@@ -32,3 +32,10 @@
 |---|---|
 | `include/phaseshift/quantization/quant_contract.h` ほか | QuantSpec / Codec 契約（Phase 3 で移植候補） |
 | `include/phaseshift/core/memory/tensor.h` | GPU Tensor ビュー（Phase 2 で Device 層と合わせて移植候補） |
+
+## PR-003（Phase 2: Device/Buffer/Queue/Event）
+
+`src/backend/common/` と `src/backend/hip/` は **新規実装**（コード移植なし）。
+PhaseShift の `core/gpu/`・`core/memory/` は設計のみ参照（RAII・error マッピング方針）。
+環境依存の事実記録: GPU は gfx1201 (R9700) x4、ROCm SDK は pip の `_rocm_sdk_devel`。
+SYCL ランタイムは未導入のため `backend/sycl` は空で保持（ユーザー指示: sycl は将来必ず使う）。

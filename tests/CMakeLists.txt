@@ -9,3 +9,9 @@ target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_compile_features(test_architecture_boundaries PRIVATE cxx_std_20)
 add_test(NAME architecture.boundaries COMMAND test_architecture_boundaries)
+
+if(SHELF_ENABLE_HIP)
+    add_executable(test_hip_device unit/test_hip_device.cpp)
+    target_link_libraries(test_hip_device PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_device COMMAND test_hip_device)
+endif()

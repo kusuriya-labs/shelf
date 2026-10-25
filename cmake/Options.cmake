@@ -3,6 +3,7 @@
 # Option names follow docs plan (shelf_rebuild_plan §Phase 1).
 
 option(SHELF_ENABLE_SYCL "Enable SYCL backend targets" OFF)
+option(SHELF_ENABLE_HIP "Enable HIP (AMD ROCm) backend targets" OFF)
 option(SHELF_BUILD_TESTS "Build unit / architecture tests" ON)
 
 set(CMAKE_CXX_STANDARD 20)

@@ -24,6 +24,7 @@ public:
         invalid_state,
         not_found,
         unsupported,
+        device_error,
     };
 
     static Status make_ok();
@@ -34,6 +35,9 @@ public:
     static Status invalid_state(const char* msg, const char* file, int line);
     static Status not_found(const char* msg, const char* file, int line);
     static Status unsupported(const char* msg, const char* file, int line);
+    // Backend-neutral device API failure. Message must be produced by the
+    // backend that can interpret the native error code (HIP/SYCL/etc.).
+    static Status device_error(const char* expr, const char* msg, const char* file, int line);
 
     bool ok() const noexcept { return code_ == Code::ok; }
     Code code() const noexcept { return code_; }
@@ -133,6 +137,12 @@ inline Status Status::unsupported(const char* msg, const char* file, int line) {
     char buf[512];
     std::snprintf(buf, sizeof(buf), "%s:%d: unsupported: %s", file, line, msg);
     return Status{Code::unsupported, std::string(buf)};
+}
+
+inline Status Status::device_error(const char* expr, const char* msg, const char* file, int line) {
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s:%d: device error (%s): %s", file, line, expr, msg);
+    return Status{Code::device_error, std::string(buf)};
 }
 
 // ---- checked arithmetic (overflow-detecting helpers) ----
