@@ -20,6 +20,10 @@ add_executable(test_reference_executor unit/test_reference_executor.cpp)
 target_link_libraries(test_reference_executor PRIVATE shelf::backend_cpu)
 add_test(NAME unit.reference_executor COMMAND test_reference_executor)
 
+add_executable(test_paged_kv_abi unit/test_paged_kv_abi.cpp)
+target_link_libraries(test_paged_kv_abi PRIVATE shelf::backend_common shelf::runtime_state)
+add_test(NAME unit.paged_kv_abi COMMAND test_paged_kv_abi)
+
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
 target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

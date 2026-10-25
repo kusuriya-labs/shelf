@@ -22,12 +22,22 @@ target_compile_features(shelf_foundation PUBLIC cxx_std_20)
 
 # ---------------------------------------------------------------- backend/common
 add_library(shelf_backend_common STATIC
-    src/backend/common/backend_common.cpp)
+    src/backend/common/backend_common.cpp
+    src/backend/common/paged_kv.cpp)
 add_library(shelf::backend_common ALIAS shelf_backend_common)
 target_include_directories(shelf_backend_common PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/common/include>")
 target_link_libraries(shelf_backend_common PUBLIC shelf::foundation)
+
+# ---------------------------------------------------------------- runtime/state
+# Prefix-sharing identity contract (pool/eviction arrive with batching).
+add_library(shelf_runtime_state STATIC
+    src/runtime/state/prefix_key.cpp)
+add_library(shelf::runtime_state ALIAS shelf_runtime_state)
+target_include_directories(shelf_runtime_state PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/state/include>")
+target_link_libraries(shelf_runtime_state PUBLIC shelf::foundation)
 
 # ---------------------------------------------------------------- backend/hip
 # Host-side runtime API from ordinary C++ TUs (no kernels yet; Phase 5 will

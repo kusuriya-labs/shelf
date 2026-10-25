@@ -67,4 +67,5 @@ Golden Fixture・KV state 更新検証）。
 - `tools/parity_logits.py` が parity チェック
 
 - 依存ルール（機械検査される契約表): [docs/architecture/dependency-rules.md](docs/architecture/dependency-rules.md)
+- Paged KV / prefix 共有（radix 相当）ABI: [docs/architecture/paged-kv-abi.md](docs/architecture/paged-kv-abi.md)
 - 移植由来・ライセンス台帳（PhaseShift は自己制作のため表記不要 / XeStrata LGPL 方針）: [docs/architecture/porting-provenance.md](docs/architecture/porting-provenance.md)
