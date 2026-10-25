@@ -47,6 +47,23 @@ std::size_t numel(const std::vector<std::size_t>& s) {
     return n;
 }
 
+// Read one tensor with checkpoint-native bf16 bits (no conversion).
+Result<std::vector<bf16_t>> read_bf16(
+        const std::map<std::string, artifact::safetensors::Reader*>& where,
+        const std::string& name) {
+    auto it = where.find(name);
+    if (it == where.end()) return Status::not_found("tensor not in shards: " + name, __FILE__, __LINE__);
+    const auto* reader = it->second;
+    const auto* entry = reader->catalog().find(name);
+    if (!entry) return Status::not_found("catalog miss: " + name, __FILE__, __LINE__);
+    if (entry->dtype != DataType::bf16)
+        return Status::unsupported("not bf16 on disk: " + name, __FILE__, __LINE__);
+    const std::size_t bytes = entry->end - entry->begin;
+    std::vector<bf16_t> out(bytes / 2);
+    SHELF_RETURN_IF_ERROR(reader->read_tensor(name, out.data(), bytes));
+    return out;
+}
+
 // Read one tensor from whichever shard holds it, converted to f32.
 Result<std::vector<float>> read_f32(
         const std::map<std::string, artifact::safetensors::Reader*>& where,
@@ -160,6 +177,14 @@ int main(int argc, char** argv) {
         ho.rope_rotary_dim = cfg.rotary_dim;
         hip_exec = std::make_unique<backend::hip::HipStepExecutor>(ho);
         for (const auto& w : plan.weights) {
+            auto tb = read_bf16(where, w.checkpoint_name);
+            if (tb.ok()) {
+                if (tb.value().size() != numel(w.shape))
+                    return fail("shape mismatch for " + w.checkpoint_name);
+                auto st = hip_exec->upload_weight_bf16(w.id, tb.value().data(), tb.value().size());
+                if (!st.ok()) return fail("upload " + w.checkpoint_name + ": " + st.message());
+                continue;
+            }
             auto t = read_f32(where, w.checkpoint_name);
             if (!t.ok()) return fail(t.status().message());
             if (t.value().size() != numel(w.shape))

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <shelf/backend/hip/kernels/gdn_types.h>
+#include <shelf/foundation/numeric.hpp>
 #include <shelf/foundation/shape.hpp>
 #include <shelf/ir/graph.hpp>
 #include <shelf/status.hpp>
@@ -49,6 +50,8 @@ public:
 
     // Weight upload (host f32 -> device bf16, RNE).
     Status upload_weight(TensorId id, const std::vector<float>& f32);
+    // Checkpoint-native bf16: raw bits straight to device (no host conversion).
+    Status upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n);
 
     // Device allocation + zero-init for every declared state.
     Status declare_states(const ir::Graph& g);

@@ -107,6 +107,17 @@ Status HipStepExecutor::upload_weight(TensorId id, const std::vector<float>& f32
     return Status::make_ok();
 }
 
+Status HipStepExecutor::upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n) {
+    if (weight_dev_.count(id.value()))
+        return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
+    bf16_t* dev = nullptr;
+    SHELF_RETURN_IF_ERROR(hipok(malloc_dev(&dev, n), "malloc weight bf16"));
+    SHELF_RETURN_IF_ERROR(hipok(
+        hipMemcpy(dev, data, n * sizeof(bf16_t), hipMemcpyHostToDevice), "upload weight bf16"));
+    weight_dev_[id.value()] = dev;
+    return Status::make_ok();
+}
+
 Status HipStepExecutor::declare_states(const ir::Graph& g) {
     weight_shape_.clear();
     for (const auto& w : g.all_weights()) weight_shape_[w.id.value()] = w.shape;
