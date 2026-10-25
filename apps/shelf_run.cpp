@@ -111,9 +111,17 @@ int main(int argc, char** argv) {
     const std::size_t capacity = ids.size() + static_cast<std::size_t>(steps) + 4;
 
     // ---- graph ----
+    const std::size_t prefill_rows =
+        (device == "hip") ? std::min<std::size_t>(ids.size(), 64) : 1;
     auto plan_r = model::qwen35::build_step_graph(cfg, capacity);
     if (!plan_r.ok()) return fail(plan_r.status().message());
     auto& plan = plan_r.value();
+    std::unique_ptr<model::qwen35::StepGraphPlan> pfplan;
+    if (prefill_rows > 1) {
+        auto pr = model::qwen35::build_step_graph(cfg, capacity, prefill_rows);
+        if (!pr.ok()) return fail("prefill graph: " + pr.status().message());
+        pfplan = std::make_unique<model::qwen35::StepGraphPlan>(pr.release());
+    }
     std::printf("graph: %zu primitives, %zu weights, %zu states, kv_capacity=%zu\n",
                 plan.graph.size(), plan.weights.size(), plan.states.size(), capacity);
 
@@ -228,6 +236,30 @@ int main(int argc, char** argv) {
     // ---- replay prompt, then greedy decode ----
     std::vector<std::int64_t> seq = ids;
     std::vector<float> last_logits;
+#ifdef SHELF_HAVE_HIP
+    if (hip_exec && pfplan) {
+        std::vector<std::int32_t> win;
+        for (std::size_t c = 0; c < ids.size(); c += prefill_rows) {
+            const std::size_t n = std::min(prefill_rows, ids.size() - c);
+            win.clear();
+            for (std::size_t i = 0; i < n; ++i)
+                win.push_back(static_cast<std::int32_t>(ids[c + i]));
+            const bool last_chunk = c + n == ids.size();
+            auto st = hip_exec->run_step(pfplan->graph, win.data(), n,
+                                         static_cast<std::uint32_t>(c));
+            if (!st.ok()) return fail("prefill chunk " + std::to_string(c) + ": " + st.message());
+            std::printf("prefill chunk rows=%zu base=%zu (%.2f ms)\n", n, c,
+                        hip_exec->stats().last_step_ms);
+            if (last_chunk) {
+                auto lg = hip_exec->fetch_logits(pfplan->graph);
+                if (!lg.ok()) return fail(lg.status().message());
+                auto& full = lg.value();  // [n,V]: keep last row
+                last_logits.assign(full.end() - static_cast<std::ptrdiff_t>(full.size() / n),
+                                   full.end());
+            }
+        }
+    } else
+#endif
     for (std::size_t p = 0; p < ids.size(); ++p) {
         auto st = run_step(seq[p], p, p + 1 == ids.size() ? &last_logits : nullptr);
         if (!st.ok()) return fail("prefill step " + std::to_string(p) + ": " + st.message());

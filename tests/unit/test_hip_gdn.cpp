@@ -344,6 +344,29 @@ void run_case(CaseDims d) {
         compare(got_s, want_s, 5e-3, slabel);
     }
 
+    // 2b) multi-row request equivalence: one launch {0,2} == two {step,1}
+    {
+        std::vector<float> out_seq(out_elems), s_seq(s_elems);
+        HIP_OK(hipMemcpy(out_seq.data(), dout, out_elems * sizeof(float), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(s_seq.data(), dS, s_elems * sizeof(float), hipMemcpyDeviceToHost));
+
+        HIP_OK(hipMemcpy(dS, s0_host.data(), s_elems * sizeof(float), hipMemcpyHostToDevice));
+        HIP_OK(hipMemset(dout, 0, out_elems * sizeof(float)));
+        hreq.row_begin = 0;
+        hreq.row_count = 2;
+        HIP_OK(hipMemcpy(dreq, &hreq, sizeof(GdnRequestDescriptor), hipMemcpyHostToDevice));
+        HIP_OK(shelf::hipk::launch_gdn_recurrence_f32(ra, 0));
+
+        std::vector<float> out_b(out_elems), s_b(s_elems);
+        HIP_OK(hipMemcpy(out_b.data(), dout, out_elems * sizeof(float), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(s_b.data(), dS, s_elems * sizeof(float), hipMemcpyDeviceToHost));
+        std::vector<double> g1(out_elems), w1(out_elems), g2(s_elems), w2(s_elems);
+        for (size_t i = 0; i < out_elems; ++i) { g1[i] = out_b[i]; w1[i] = out_seq[i]; }
+        for (size_t i = 0; i < s_elems; ++i) { g2[i] = s_b[i]; w2[i] = s_seq[i]; }
+        compare(g1, w1, 1e-5, "recurrence batched==split out");
+        compare(g2, w2, 1e-5, "recurrence batched==split state");
+    }
+
     // ------------------------------------------------------------------
     // 3) fused conv+silu step: two launches, fp32 state [C,3] persists
     // ------------------------------------------------------------------
@@ -412,6 +435,7 @@ void run_case(CaseDims d) {
 
     std::vector<float> conv_out(2u * C, 0.0f);
     std::vector<shelf::bf16_t> act(2u * C, shelf::bf16_t{0});
+    std::vector<float> cst_seq_final;
     for (uint32_t step = 0; step < 2u; ++step) {
         hreq.row_begin = step;
         hreq.row_count = 1;
@@ -459,6 +483,35 @@ void run_case(CaseDims d) {
         char l3[64];
         std::snprintf(l3, sizeof(l3), "conv state [C,3] after step%u", step);
         compare(got_st, want_st, 1e-3, l3);
+        if (step + 1u == 2u) cst_seq_final = cdev;   // split-path final fp32 state
+    }
+
+    // 3b) multi-row conv request equivalence
+    {
+        std::vector<float> conv_seq(2u * C), cdev2(cst0.size());
+        std::vector<shelf::bf16_t> act_seq(2u * C);
+        HIP_OK(hipMemcpy(conv_seq.data(), dconvout, conv_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(act_seq.data(), dact, act_seq.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(dcst, cst0.data(), cst0.size() * sizeof(float), hipMemcpyHostToDevice));
+        HIP_OK(hipMemset(dconvout, 0, conv_seq.size() * sizeof(float)));
+        HIP_OK(hipMemset(dact, 0, act_seq.size() * sizeof(shelf::bf16_t)));
+        cc.max_request_rows = 2;
+        hreq.row_begin = 0;
+        hreq.row_count = 2;
+        HIP_OK(hipMemcpy(dreq, &hreq, sizeof(GdnRequestDescriptor), hipMemcpyHostToDevice));
+        HIP_OK(shelf::hipk::launch_fused_gdn_conv_silu(ca, 0));
+
+        std::vector<float> conv_b(2u * C);
+        std::vector<shelf::bf16_t> act_b(2u * C);
+        HIP_OK(hipMemcpy(conv_b.data(), dconvout, conv_b.size() * sizeof(float), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(act_b.data(), dact, act_b.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
+        HIP_OK(hipMemcpy(cdev2.data(), dcst, cdev2.size() * sizeof(float), hipMemcpyDeviceToHost));
+        std::vector<double> g1(2u * C), w1(2u * C), g2(cst0.size()), w2(cst0.size());
+        for (size_t i = 0; i < 2u * C; ++i) { g1[i] = shelf::bf16_to_f32(act_b[i]); w1[i] = shelf::bf16_to_f32(act_seq[i]); }
+        for (size_t i = 0; i < cst0.size(); ++i) { g2[i] = cdev2[i]; w2[i] = cst_seq_final[i]; }
+        compare(g1, w1, 1e-6, "conv batched==split act");
+        compare(g2, w2, 1e-6, "conv batched==split state");
+        (void)conv_seq; (void)conv_b;
     }
 
     hipFree(dq); hipFree(dk_); hipFree(dnq); hipFree(dsq); hipFree(dnk);

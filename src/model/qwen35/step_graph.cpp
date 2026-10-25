@@ -15,8 +15,8 @@ Status bad(const std::string& msg) {
 
 class Builder {
 public:
-    Builder(const TextConfig& cfg, std::size_t kv_capacity)
-        : cfg_(cfg), cap_(kv_capacity) {}
+    Builder(const TextConfig& cfg, std::size_t kv_capacity, std::size_t rows)
+        : cfg_(cfg), cap_(kv_capacity), rows_(rows) {}
 
     Result<StepGraphPlan> build() {
         StepGraphPlan plan;
@@ -24,7 +24,7 @@ public:
         plan.tied_embeddings = cfg_.tie_word_embeddings;
 
         tokens_ = nid();
-        SHELF_RETURN_IF_ERROR(g_.declare_input(vdesc(tokens_, {1}, DataType::i32)));
+        SHELF_RETURN_IF_ERROR(g_.declare_input(vdesc(tokens_, {rows_}, DataType::i32)));
         plan.tokens = tokens_;
         cos_ = nid();
         sin_ = nid();
@@ -56,6 +56,19 @@ private:
     ValueDesc vdesc(ValueId id, std::initializer_list<std::size_t> dims,
                     DataType dt = DataType::f32) {
         return ValueDesc{id, TensorShape::create(dims).value(), dt};
+    }
+    ValueDesc vdesc(ValueId id, const std::vector<std::size_t>& dims,
+                    DataType dt = DataType::f32) {
+        return ValueDesc{id, TensorShape::create(dims).value(), dt};
+    }
+
+    // Batch-optional shape: leading rows_ only when rows_ > 1 (rank-1 decode
+    // graphs keep their historical shapes; prefill graphs carry the batch).
+    std::vector<std::size_t> B(std::initializer_list<std::size_t> d) {
+        std::vector<std::size_t> v;
+        if (rows_ > 1) v.push_back(rows_);
+        for (auto x : d) v.push_back(x);
+        return v;
     }
 
     TensorId wid(const std::string& name, std::initializer_list<std::size_t> shape) {
@@ -90,10 +103,32 @@ private:
         return p_kind_value(st, kind);
     }
 
+    ValueId prim_vec(Kind kind, std::vector<ValueId> ins, std::vector<TensorId> ws,
+                     const std::vector<std::size_t>& out_dims, Attr attr) {
+        Primitive p;
+        p.kind = kind;
+        p.attr = std::move(attr);
+        p.inputs = std::move(ins);
+        p.weights = std::move(ws);
+        p.output = vdesc(nid(), out_dims);
+        auto st = g_.add_primitive(std::move(p));
+        if (!st.ok()) { last_ = st; return ValueId{}; }
+        return g_.primitives().back().output.id;
+    }
+
     ValueId p_kind_value(const Status&, Kind) { return g_.primitives().back().output.id; }
 
     ValueId reshape_to(ValueId x, std::initializer_list<std::size_t> dims) {
         return prim(Kind::reshape, {x}, {}, dims);
+    }
+    ValueId reshape_to(ValueId x, const std::vector<std::size_t>& dims) {
+        Primitive p;
+        p.kind = Kind::reshape;
+        p.inputs = {x};
+        p.output = vdesc(nid(), dims);
+        auto st = g_.add_primitive(std::move(p));
+        if (!st.ok()) { last_ = st; return ValueId{}; }
+        return g_.primitives().back().output.id;
     }
 
     ValueId add_embedding() {
@@ -101,7 +136,7 @@ private:
                              {cfg_.vocab_size, cfg_.hidden_size});
         if (!table.valid()) return ValueId{};
         embed_id_ = table;
-        return prim(Kind::embedding, {tokens_}, {table}, {1, cfg_.hidden_size});
+        return prim(Kind::embedding, {tokens_}, {table}, {rows_, cfg_.hidden_size});
     }
 
     ValueId add_norm(ValueId x, const std::string& wname, bool plus_one) {
@@ -110,7 +145,7 @@ private:
         Attr a;
         a.epsilon = static_cast<float>(cfg_.rms_eps);
         a.gamma_plus_one = plus_one;
-        return prim(Kind::rmsnorm, {x}, {g}, {1, cfg_.hidden_size}, a);
+        return prim(Kind::rmsnorm, {x}, {g}, {rows_, cfg_.hidden_size}, a);
     }
 
     ValueId add_mlp(ValueId x, std::size_t l) {
@@ -119,15 +154,15 @@ private:
         TensorId up = wid(base + "up_proj.weight", {cfg_.intermediate_size, cfg_.hidden_size});
         TensorId down = wid(base + "down_proj.weight", {cfg_.hidden_size, cfg_.intermediate_size});
         if (!gate.valid() || !up.valid() || !down.valid()) return ValueId{};
-        ValueId g = prim(Kind::linear, {x}, {gate}, {1, cfg_.intermediate_size});
+        ValueId g = prim(Kind::linear, {x}, {gate}, {rows_, cfg_.intermediate_size});
         if (!g.valid()) return g;
-        ValueId s = prim(Kind::silu, {g}, {}, {1, cfg_.intermediate_size});
+        ValueId s = prim(Kind::silu, {g}, {}, {rows_, cfg_.intermediate_size});
         if (!s.valid()) return s;
-        ValueId u = prim(Kind::linear, {x}, {up}, {1, cfg_.intermediate_size});
+        ValueId u = prim(Kind::linear, {x}, {up}, {rows_, cfg_.intermediate_size});
         if (!u.valid()) return u;
-        ValueId m = prim(Kind::elem_mul, {s, u}, {}, {1, cfg_.intermediate_size});
+        ValueId m = prim(Kind::elem_mul, {s, u}, {}, {rows_, cfg_.intermediate_size});
         if (!m.valid()) return m;
-        return prim(Kind::linear, {m}, {down}, {1, cfg_.hidden_size});
+        return prim(Kind::linear, {m}, {down}, {rows_, cfg_.hidden_size});
     }
 
     ValueId add_full_attention(ValueId x, std::size_t l) {
@@ -148,40 +183,40 @@ private:
         Attr rope;
         rope.rotary_dim = static_cast<std::int64_t>(cfg_.rotary_dim);
 
-        ValueId qg = prim(Kind::linear, {x}, {wq}, {1, cfg_.q_gate_out_features()});
+        ValueId qg = prim(Kind::linear, {x}, {wq}, {rows_, cfg_.q_gate_out_features()});
         if (!qg.valid()) return qg;
         // q_proj view [1, nq, 2D]: per-head [q | gate] interleave — split on the
         // LAST dim after reshaping, not on the flattened row.
-        ValueId qg3 = reshape_to(qg, {1, nq, 2 * D});
+        ValueId qg3 = reshape_to(qg, {rows_, nq, 2 * D});
         if (!qg3.valid()) return qg3;
         Attr sl_q;  sl_q.slice_begin = 0;  sl_q.slice_end = static_cast<std::int64_t>(D);
         Attr sl_g;  sl_g.slice_begin = static_cast<std::int64_t>(D);
                       sl_g.slice_end = static_cast<std::int64_t>(2 * D);
-        ValueId q3 = prim(Kind::slice, {qg3}, {}, {1, nq, D}, sl_q);
+        ValueId q3 = prim(Kind::slice, {qg3}, {}, {rows_, nq, D}, sl_q);
         if (!q3.valid()) return q3;
-        ValueId gate = prim(Kind::slice, {qg3}, {}, {1, nq, D}, sl_g);
+        ValueId gate = prim(Kind::slice, {qg3}, {}, {rows_, nq, D}, sl_g);
         if (!gate.valid()) return gate;
-        ValueId qn = prim(Kind::rmsnorm, {q3}, {wqn}, {1, nq, D}, eps);
+        ValueId qn = prim(Kind::rmsnorm, {q3}, {wqn}, {rows_, nq, D}, eps);
         if (!qn.valid()) return qn;
-        ValueId qr = prim(Kind::rope, {qn, cos_, sin_}, {}, {1, nq, D}, rope);
+        ValueId qr = prim(Kind::rope, {qn, cos_, sin_}, {}, {rows_, nq, D}, rope);
         if (!qr.valid()) return qr;
-        ValueId q2 = reshape_to(qr, {nq, D});
+        ValueId q2 = reshape_to(qr, B({nq, D}));
         if (!q2.valid()) return q2;
 
-        ValueId kflat = prim(Kind::linear, {x}, {wk}, {1, kvh * D});
+        ValueId kflat = prim(Kind::linear, {x}, {wk}, {rows_, kvh * D});
         if (!kflat.valid()) return kflat;
-        ValueId k3 = reshape_to(kflat, {1, kvh, D});
+        ValueId k3 = reshape_to(kflat, {rows_, kvh, D});
         if (!k3.valid()) return k3;
-        ValueId kn = prim(Kind::rmsnorm, {k3}, {wkn}, {1, kvh, D}, eps);
+        ValueId kn = prim(Kind::rmsnorm, {k3}, {wkn}, {rows_, kvh, D}, eps);
         if (!kn.valid()) return kn;
-        ValueId kr = prim(Kind::rope, {kn, cos_, sin_}, {}, {1, kvh, D}, rope);
+        ValueId kr = prim(Kind::rope, {kn, cos_, sin_}, {}, {rows_, kvh, D}, rope);
         if (!kr.valid()) return kr;
-        ValueId k2 = reshape_to(kr, {kvh, D});
+        ValueId k2 = reshape_to(kr, B({kvh, D}));
         if (!k2.valid()) return k2;
 
-        ValueId vflat = prim(Kind::linear, {x}, {wv}, {1, kvh * D});
+        ValueId vflat = prim(Kind::linear, {x}, {wv}, {rows_, kvh * D});
         if (!vflat.valid()) return vflat;
-        ValueId v2 = reshape_to(vflat, {kvh, D});
+        ValueId v2 = reshape_to(vflat, B({kvh, D}));
         if (!v2.valid()) return v2;
 
         ir::StateId kv = add_state(ir::StateKind::kv_cache, {cap_, 2, kvh, D});
@@ -191,18 +226,18 @@ private:
         att.inputs = {q2, k2, v2};
         att.state_read = {kv};
         att.state_write = {kv};
-        att.output = vdesc(nid(), {nq, D});
+        att.output = vdesc(nid(), B({nq, D}));
         auto st = g_.add_primitive(std::move(att));
         if (!st.ok()) { last_ = st; return ValueId{}; }
         ValueId attn = g_.primitives().back().output.id;
 
-        ValueId attn2 = reshape_to(attn, {1, nq * D});
+        ValueId attn2 = reshape_to(attn, {rows_, nq * D});
         if (!attn2.valid()) return attn2;
-        ValueId gate2 = reshape_to(gate, {1, nq * D});
+        ValueId gate2 = reshape_to(gate, {rows_, nq * D});
         if (!gate2.valid()) return gate2;
-        ValueId gated = prim(Kind::sigmoid_gate, {attn2, gate2}, {}, {1, nq * D});
+        ValueId gated = prim(Kind::sigmoid_gate, {attn2, gate2}, {}, {rows_, nq * D});
         if (!gated.valid()) return gated;
-        return prim(Kind::linear, {gated}, {wo}, {1, cfg_.hidden_size});
+        return prim(Kind::linear, {gated}, {wo}, {rows_, cfg_.hidden_size});
     }
 
     ValueId add_linear_attention(ValueId x, std::size_t l) {
@@ -226,9 +261,9 @@ private:
             !wal.valid() || !wdt.valid() || !wn.valid() || !wout.valid())
             return ValueId{};
 
-        ValueId qkv = prim(Kind::linear, {x}, {wqkv}, {1, C});
+        ValueId qkv = prim(Kind::linear, {x}, {wqkv}, {rows_, C});
         if (!qkv.valid()) return qkv;
-        ValueId qkv1 = reshape_to(qkv, {C});
+        ValueId qkv1 = reshape_to(qkv, B({C}));
         if (!qkv1.valid()) return qkv1;
 
         ir::StateId convst = add_state(ir::StateKind::conv, {C, cfg_.conv_kernel - 1});
@@ -239,7 +274,7 @@ private:
         conv.weights = {wconv};
         conv.state_read = {convst};
         conv.state_write = {convst};
-        conv.output = vdesc(nid(), {C});
+        conv.output = vdesc(nid(), B({C}));
         auto st = g_.add_primitive(std::move(conv));
         if (!st.ok()) { last_ = st; return ValueId{}; }
         ValueId mixed = g_.primitives().back().output.id;
@@ -248,7 +283,7 @@ private:
             Attr sl;
             sl.slice_begin = static_cast<std::int64_t>(b);
             sl.slice_end = static_cast<std::int64_t>(e);
-            return prim(Kind::slice, {mixed}, {}, {e - b}, sl);
+            return prim_vec(Kind::slice, {mixed}, {}, B({e - b}), sl);
         };
         ValueId qf = split(0, Kd);
         if (!qf.valid()) return qf;
@@ -256,24 +291,24 @@ private:
         if (!kf.valid()) return kf;
         ValueId vf = split(2 * Kd, C);
         if (!vf.valid()) return vf;
-        ValueId q = reshape_to(qf, {nkh, dk});
+        ValueId q = reshape_to(qf, B({nkh, dk}));
         if (!q.valid()) return q;
-        ValueId k = reshape_to(kf, {nkh, dk});
+        ValueId k = reshape_to(kf, B({nkh, dk}));
         if (!k.valid()) return k;
-        ValueId v = reshape_to(vf, {nvh, dv});
+        ValueId v = reshape_to(vf, B({nvh, dv}));
         if (!v.valid()) return v;
 
-        ValueId z = prim(Kind::linear, {x}, {wz}, {1, Vd});
+        ValueId z = prim(Kind::linear, {x}, {wz}, {rows_, Vd});
         if (!z.valid()) return z;
-        ValueId z2 = reshape_to(z, {nvh, dv});
+        ValueId z2 = reshape_to(z, B({nvh, dv}));
         if (!z2.valid()) return z2;
-        ValueId b = prim(Kind::linear, {x}, {wb}, {1, nvh});
+        ValueId b = prim(Kind::linear, {x}, {wb}, {rows_, nvh});
         if (!b.valid()) return b;
-        ValueId b1 = reshape_to(b, {nvh});
+        ValueId b1 = reshape_to(b, B({nvh}));
         if (!b1.valid()) return b1;
-        ValueId a = prim(Kind::linear, {x}, {wa}, {1, nvh});
+        ValueId a = prim(Kind::linear, {x}, {wa}, {rows_, nvh});
         if (!a.valid()) return a;
-        ValueId a1 = reshape_to(a, {nvh});
+        ValueId a1 = reshape_to(a, B({nvh}));
         if (!a1.valid()) return a1;
 
         ir::StateId S = add_state(ir::StateKind::recurrent, {nvh, dk, dv});
@@ -284,18 +319,18 @@ private:
         gdn.weights = {wal, wdt};
         gdn.state_read = {S};
         gdn.state_write = {S};
-        gdn.output = vdesc(nid(), {nvh, dv});
+        gdn.output = vdesc(nid(), B({nvh, dv}));
         auto st2 = g_.add_primitive(std::move(gdn));
         if (!st2.ok()) { last_ = st2; return ValueId{}; }
         ValueId core = g_.primitives().back().output.id;
 
         Attr eps;
         eps.epsilon = 1e-6f;  // RMSNormGated variance eps (HF default; GDN contract)
-        ValueId yg = prim(Kind::rmsnorm_gated, {core, z2}, {wn}, {nvh, dv}, eps);
+        ValueId yg = prim_vec(Kind::rmsnorm_gated, {core, z2}, {wn}, B({nvh, dv}), eps);
         if (!yg.valid()) return yg;
-        ValueId yflat = reshape_to(yg, {1, Vd});
+        ValueId yflat = reshape_to(yg, {rows_, Vd});
         if (!yflat.valid()) return yflat;
-        return prim(Kind::linear, {yflat}, {wout}, {1, cfg_.hidden_size});
+        return prim(Kind::linear, {yflat}, {wout}, {rows_, cfg_.hidden_size});
     }
 
     ValueId add_layer(std::size_t l, ValueId h) {
@@ -306,13 +341,13 @@ private:
                           ? add_full_attention(x, l)
                           : add_linear_attention(x, l);
         if (!att.valid()) return att;
-        ValueId h2 = prim(Kind::residual_add, {h, att}, {}, {1, cfg_.hidden_size});
+        ValueId h2 = prim(Kind::residual_add, {h, att}, {}, {rows_, cfg_.hidden_size});
         if (!h2.valid()) return h2;
         ValueId x2 = add_norm(h2, base + "post_attention_layernorm.weight", true);
         if (!x2.valid()) return x2;
         ValueId m = add_mlp(x2, l);
         if (!m.valid()) return m;
-        return prim(Kind::residual_add, {h2, m}, {}, {1, cfg_.hidden_size});
+        return prim(Kind::residual_add, {h2, m}, {}, {rows_, cfg_.hidden_size});
     }
 
     ValueId add_final(ValueId h) {
@@ -320,7 +355,7 @@ private:
         if (!hn.valid()) return hn;
         if (!embed_id_.valid()) { last_ = bad("embedding weight missing"); return ValueId{}; }
         // tied embeddings: lm_head IS the embedding table (same logical weight id)
-        return prim(Kind::output_projection, {hn}, {embed_id_}, {1, cfg_.vocab_size});
+        return prim(Kind::output_projection, {hn}, {embed_id_}, {rows_, cfg_.vocab_size});
     }
 
     const TextConfig& cfg_;
@@ -330,14 +365,16 @@ private:
     std::vector<StateRef> states_;
     std::uint32_t next_value_ = 1;
     ValueId tokens_, cos_, sin_;
+    std::size_t rows_;
     TensorId embed_id_;
     Status last_ = Status::make_ok();
 };
 
 } // namespace
 
-Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity) {
-    Builder b(cfg, kv_capacity);
+Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity,
+                                       std::size_t rows) {
+    Builder b(cfg, kv_capacity, rows);
     return b.build();
 }
 

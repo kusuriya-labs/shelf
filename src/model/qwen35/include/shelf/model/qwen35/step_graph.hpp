@@ -44,6 +44,8 @@ struct StepGraphPlan {
 };
 
 // kv_capacity: max tokens resident in each full-attention KV state.
-Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity);
+// rows = activation batch leading dim (1 = decode step; >1 = prefill chunk).
+Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity,
+                                       std::size_t rows = 1);
 
 } // namespace shelf::model::qwen35

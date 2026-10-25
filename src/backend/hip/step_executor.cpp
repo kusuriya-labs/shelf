@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 
 #include <shelf/backend/hip/kernels/aux_ops.h>
@@ -50,16 +51,17 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     hipSetDevice(opts_.device);
     hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
     hipMalloc(&arena_dev_, opts_.arena_bytes);
-    hipMalloc(reinterpret_cast<void**>(&token_dev_), sizeof(std::int32_t));
-    hipMalloc(reinterpret_cast<void**>(&posrep_dev_), 64 * sizeof(std::uint32_t));
-    hipMalloc(reinterpret_cast<void**>(&rowpos_dev_), sizeof(std::uint32_t));
+    hipMalloc(reinterpret_cast<void**>(&token_dev_),
+              kMaxStepRows * sizeof(std::int32_t));
+    hipMalloc(reinterpret_cast<void**>(&posrep_dev_), kPosScratch * sizeof(std::uint32_t));
+    hipMalloc(reinterpret_cast<void**>(&rowpos_dev_), kPosScratch * sizeof(std::uint32_t));
     hipMalloc(reinterpret_cast<void**>(&slot_zero_dev_), sizeof(std::uint32_t));
     hipMemset(slot_zero_dev_, 0, sizeof(std::uint32_t));
     hipMalloc(reinterpret_cast<void**>(&errword_dev_), sizeof(std::uint32_t));
     hipMalloc(reinterpret_cast<void**>(&req_dev_), sizeof(hipk::GdnRequestDescriptor));
     hipMalloc(reinterpret_cast<void**>(&inv_freq_dev_),
               sizeof(double) * std::max<std::size_t>(2, opts_.rope_rotary_dim / 2));
-    posrep_host_.assign(64, 0u);
+    posrep_host_.assign(kPosScratch, 0u);
 }
 
 HipStepExecutor::~HipStepExecutor() {
@@ -168,42 +170,78 @@ void* HipStepExecutor::arena_alloc(std::size_t bytes) {
     return p;
 }
 
-Status HipStepExecutor::run_step(const ir::Graph& g, std::int32_t token,
-                                 std::uint32_t position) {
+Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
+                                 std::size_t n, std::uint32_t base_pos) {
     if (!states_declared_)
         return Status::invalid_state("declare_states first", __FILE__, __LINE__);
+    if (n == 0 || n > kMaxStepRows)
+        return Status::invalid_argument("run_step: rows out of range", __FILE__, __LINE__);
     arena_cap_ = opts_.arena_bytes;
     arena_reset();
     value_dev_.clear();
+    step_rows_ = n;
+    step_base_pos_ = base_pos;
 
     const auto t0 = std::chrono::steady_clock::now();
 
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(token_dev_, &token, sizeof(token),
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
                                                hipMemcpyHostToDevice, stream_),
                                 "token upload"));
-    std::uint32_t pos32 = position;
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(rowpos_dev_, &pos32, sizeof(pos32),
+    for (std::size_t i = 0; i < n; ++i) posrep_host_[i] = base_pos + static_cast<std::uint32_t>(i);
+    hipk::GdnRequestDescriptor req{0u, 0u, u32(n)};
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(req_dev_, &req, sizeof(req),
+                                               hipMemcpyHostToDevice, stream_),
+                                "gdn req upload"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(rowpos_dev_, posrep_host_.data(),
+                                               n * sizeof(std::uint32_t),
                                                hipMemcpyHostToDevice, stream_),
                                 "rowpos upload"));
-    std::fill(posrep_host_.begin(), posrep_host_.end(), pos32);
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(posrep_dev_, posrep_host_.data(),
-                                               posrep_host_.size() * sizeof(std::uint32_t),
-                                               hipMemcpyHostToDevice, stream_),
-                                "posrep upload"));
 
     const auto& inputs = g.all_inputs();
     if (inputs.empty())
         return Status::invalid_argument("graph lacks token input", __FILE__, __LINE__);
-    value_dev_[inputs[0].id.value()] = ValueLoc{token_dev_, false, 1};
+    value_dev_[inputs[0].id.value()] = ValueLoc{token_dev_, false, n};
 
     for (const auto& p : g.primitives()) {
-        SHELF_RETURN_IF_ERROR(run_primitive(g, p, position));
+        SHELF_RETURN_IF_ERROR(run_primitive(g, p, step_base_pos_));
+        if (const char* d = std::getenv("SHELF_HIP_DEBUG_SYNC")) { (void)d;
+            hipError_t e = hipStreamSynchronize(stream_);
+            if (e != hipSuccess)
+                return Status::from(Status::Code::device_error,
+                                    std::string("after ") + ir::kind_name(p.kind) + ": " +
+                                    hipGetErrorString(e), __FILE__, __LINE__);
+        }
     }
 
     SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "step sync"));
     stats_.last_step_ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
     return Status::make_ok();
+}
+
+Result<std::vector<float>> HipStepExecutor::fetch_value_debug(const ir::Graph& /*g*/,
+                                                              ir::ValueId id) {
+    auto it = value_dev_.find(id.value());
+    if (it == value_dev_.end() || !it->second.dev)
+        return Status::not_found("value not materialized", __FILE__, __LINE__);
+    const ValueLoc& l = it->second;
+    std::vector<bf16_t> tmp;
+    std::vector<float> out(l.elems);
+    if (l.f32) {
+        SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(out.data(), l.dev, l.elems * sizeof(float),
+                                              hipMemcpyDeviceToHost), "val readback"));
+    } else if (id.value() == 0u && l.elems == 1 && !l.f32) {
+        // token input: i32[1]
+        std::int32_t t; hipMemcpy(&t, l.dev, 4, hipMemcpyDeviceToHost);
+        out[0] = static_cast<float>(t);
+    } else {
+        tmp.resize(l.elems);
+        SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(tmp.data(), l.dev, l.elems * sizeof(bf16_t),
+                                              hipMemcpyDeviceToHost), "val readback"));
+        for (std::size_t i = 0; i < l.elems; ++i)
+            out[i] = __bfloat162float(__ushort_as_bfloat16(tmp[i].data));
+    }
+    return out;
 }
 
 Result<std::vector<float>> HipStepExecutor::fetch_logits(const ir::Graph& g) {
@@ -261,8 +299,8 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         if (!vocab) return Status::invalid_state("embedding: unknown weight", __FILE__, __LINE__);
         void* o = alloc(false);
         SHELF_RETURN_IF_ERROR(hipok(launch_embedding_bf16(
-            static_cast<const bf16_t*>(wt(0)), token_dev_, static_cast<bf16_t*>(o), 1u,
-            u32(vocab), u32(H), u32(H), errword_dev_, stream_), "embedding"));
+            static_cast<const bf16_t*>(wt(0)), token_dev_, static_cast<bf16_t*>(o),
+            u32(step_rows_), u32(vocab), u32(H), u32(H), errword_dev_, stream_), "embedding"));
         return set_out(false, o);
     }
     case K::linear:
@@ -272,11 +310,13 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const bool f32_out = (p.kind == K::output_projection);
         void* o = alloc(f32_out);
         const std::size_t N = p.output.shape.dim(p.output.shape.rank() - 1);
-        Bf16GemmConfig cfg{Bf16GemmConfigId::ExactRows, 1u};
+        const std::size_t rows = step_rows_;
+        const std::size_t K = x->elems / rows;  // input [rows, K]
+        Bf16GemmConfig cfg{Bf16GemmConfigId::ExactRows, static_cast<std::uint8_t>(rows)};
         SHELF_RETURN_IF_ERROR(hipok(launch_gemm_bf16(
             cfg, static_cast<const bf16_t*>(wt(0)), static_cast<const bf16_t*>(x->dev), o,
             f32_out ? Bf16GemmOutputDType::F32 : Bf16GemmOutputDType::BF16,
-            1u, u32(N), u32(x->elems), u32(x->elems), u32(N), stream_), "gemm"));
+            u32(rows), u32(N), u32(K), u32(K), u32(N), stream_), "gemm"));
         if (f32_out) logits_dev_ = static_cast<float*>(o);
         return set_out(f32_out, o);
     }
@@ -306,9 +346,18 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
             launch_bf16_to_f32(static_cast<const bf16_t*>(x->dev),
                                static_cast<float*>(xf), u32(out_n), stream_),
             "rope cvt"));
-        const std::size_t D = x->elems ? p.output.shape.dim(p.output.shape.rank() - 1) : 0;
-        const std::size_t rows = out_n / D;
+        const std::size_t D = p.output.shape.dim(p.output.shape.rank() - 1);
+        const std::size_t rows = out_n / D;               // P * heads_per_token
+        const std::size_t per_tok = rows / step_rows_;    // q or kv heads
+        if (rows % step_rows_) return Status::invalid_state("rope: row count not multiple of batch", __FILE__, __LINE__);
         const std::size_t rd = static_cast<std::size_t>(p.attr.rotary_dim);
+        // rope position of row r = base_pos + r/per_tok (all heads of one token share pos)
+        for (std::size_t r = 0; r < rows; ++r)
+            posrep_host_[r] = step_base_pos_ + static_cast<std::uint32_t>(r / per_tok);
+        SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(posrep_dev_, posrep_host_.data(),
+                                                   rows * sizeof(std::uint32_t),
+                                                   hipMemcpyHostToDevice, stream_),
+                                    "rope pos upload"));
         SHELF_RETURN_IF_ERROR(hipok(launch_rope_f32_bf16(
             static_cast<const float*>(xf), u32(D), static_cast<bf16_t*>(o), u32(D),
             posrep_dev_, u32(rows), u32(D), u32(D), u32(rd),
@@ -353,9 +402,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         ValueLoc* x = in(0);
         SHELF_RETURN_IF_ERROR(need(x, false, "silu"));
         void* o = alloc(true);  // bf16 -> f32 (no bf16->bf16 silu in family)
+        const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
         SHELF_RETURN_IF_ERROR(hipok(launch_silu_bf16_f32(
-            static_cast<const bf16_t*>(x->dev), u32(x->elems), static_cast<float*>(o),
-            u32(out_n), 1u, u32(out_n), stream_), "silu"));
+            static_cast<const bf16_t*>(x->dev), u32(F), static_cast<float*>(o),
+            u32(F), u32(out_n / F), u32(F), stream_), "silu"));
         return set_out(true, o);
     }
     case K::elem_mul: {
@@ -365,7 +415,8 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const bool a32 = a->f32, b32 = b->f32;
         void* af = nullptr; void* bf = nullptr;
         const float *pa32 = nullptr, *pb32 = nullptr;
-        std::size_t ars = a->elems, brs = b->elems;
+        const std::size_t Fx = p.output.shape.dim(p.output.shape.rank() - 1);
+        std::size_t ars = Fx, brs = Fx;   // row strides (elements)
         if (a32) pa32 = static_cast<const float*>(a->dev);
         else { af = arena_alloc(out_n * 4); pa32 = static_cast<const float*>(af);
                SHELF_RETURN_IF_ERROR(hipok(launch_bf16_to_f32(
@@ -377,9 +428,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
                    static_cast<const bf16_t*>(b->dev), static_cast<float*>(bf), u32(b->elems),
                    stream_), "mul cvt b")); }
         void* o = alloc(false);
+        const std::size_t Fm = p.output.shape.dim(p.output.shape.rank() - 1);
         SHELF_RETURN_IF_ERROR(hipok(launch_mul_f32_f32_bf16(
-            pa32, u32(ars), pb32, u32(brs), static_cast<bf16_t*>(o), u32(out_n), 1u,
-            u32(out_n), stream_), "elem_mul"));
+            pa32, u32(ars), pb32, u32(brs), static_cast<bf16_t*>(o), u32(Fm),
+            u32(out_n / Fm), u32(Fm), stream_), "elem_mul"));
         (void)af; (void)bf;
         return set_out(false, o);
     }
@@ -391,7 +443,8 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         void* o = alloc(false);
         SHELF_RETURN_IF_ERROR(hipok(launch_residual_add_bf16(
             static_cast<const bf16_t*>(a->dev), u32(F), static_cast<const bf16_t*>(b->dev),
-            u32(F), static_cast<bf16_t*>(o), u32(F), 1u, u32(F), stream_), "residual_add"));
+            u32(F), static_cast<bf16_t*>(o), u32(F), u32(out_n / F), u32(F), stream_),
+            "residual_add"));
         return set_out(false, o);
     }
     case K::causal_conv_step: {
@@ -402,8 +455,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
             return Status::invalid_state("causal_conv_step: state/weight missing", __FILE__,
                                          __LINE__);
         StateLoc& st = sit->second;
-        const std::size_t C = x->elems;
-        void* of = arena_alloc(C * sizeof(float));
+        const auto* cs = g.find_value(p.inputs[0]);
+        const std::size_t C = cs ? cs->shape.dim(cs->shape.rank() - 1) : 0;
+        if (!C) return Status::invalid_state("causal_conv_step: unknown C", __FILE__, __LINE__);
+        void* of = arena_alloc(x->elems * sizeof(float));
         void* o = alloc(false);
         FusedGdnConvSiluArgs args{};
         args.conv.input = static_cast<const bf16_t*>(x->dev);
@@ -412,8 +467,8 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         args.conv.conv_state = static_cast<float*>(st.dev);
         args.conv.requests = req_dev_;
         args.conv.num_requests = 1u;
-        args.conv.actual_rows = 1u;
-        args.conv.max_request_rows = 1u;
+        args.conv.actual_rows = u32(step_rows_);
+        args.conv.max_request_rows = u32(step_rows_);
         args.conv.input_row_stride = u32(C);
         args.conv.output_row_stride = u32(C);
         args.conv.conv_dim = u32(C);
@@ -438,22 +493,23 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         if (sit == state_dev_.end() || !wt(0) || !wt(1))
             return Status::invalid_state("gdn_step: state/weights missing", __FILE__, __LINE__);
         StateLoc& st = sit->second;
-        const TensorShape& qs = g.find_value(p.inputs[0])->shape;  // [nkh,dk]
-        const TensorShape& vs = g.find_value(p.inputs[2])->shape;  // [nvh,dv]
-        const std::size_t nkh = qs.dim(0), dk = qs.dim(1);
-        const std::size_t nvh = vs.dim(0), dv = vs.dim(1);
+        const TensorShape& qs = g.find_value(p.inputs[0])->shape;  // [nkh,dk]|[P,nkh,dk]
+        const TensorShape& vs = g.find_value(p.inputs[2])->shape;  // [nvh,dv]|[P,nvh,dv]
+        const std::size_t nkh = qs.dim(qs.rank() - 2), dk = qs.dim(qs.rank() - 1);
+        const std::size_t nvh = vs.dim(vs.rank() - 2), dv = vs.dim(vs.rank() - 1);
         const std::size_t qk_n = nkh * dk;
 
-        void* nqf = arena_alloc(qk_n * 4);
-        void* sqf = arena_alloc(qk_n * 4);
-        void* nkf = arena_alloc(qk_n * 4);
+        const std::size_t prep_n = step_rows_ * qk_n;   // one row per token
+        void* nqf = arena_alloc(prep_n * 4);
+        void* sqf = arena_alloc(prep_n * 4);
+        void* nkf = arena_alloc(prep_n * 4);
         void* o = alloc(true);  // f32 [nvh,dv]
         if (!nqf || !sqf || !nkf || !o)
             return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
 
         FusedGdnQkPrepareArgs prep{};
         prep.q = static_cast<const bf16_t*>(q->dev);
-        prep.q_row_stride = u32(qk_n);
+        prep.q_row_stride = u32(qk_n);   // q value [rows, nkh*dk]
         prep.k = static_cast<const bf16_t*>(k->dev);
         prep.k_row_stride = u32(qk_n);
         prep.nq_out = static_cast<float*>(nqf);
@@ -464,7 +520,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         prep.sq_row_stride = u32(qk_n);
         prep.eps = 1e-6f;
         prep.scale = 1.0f / std::sqrt(static_cast<float>(dk));
-        prep.rows = 1u;
+        prep.rows = u32(step_rows_);
         prep.features = u32(qk_n);
         prep.group_size = u32(dk);
         SHELF_RETURN_IF_ERROR(hipok(launch_fused_gdn_qk_prepare(prep, stream_), "qk_prepare"));
@@ -481,21 +537,49 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         rec.output = static_cast<float*>(o);
         rec.requests = req_dev_;
         rec.num_requests = 1u;
-        rec.actual_rows = 1u;
+        rec.actual_rows = u32(step_rows_);
         rec.q_row_stride = u32(qk_n);
         rec.k_row_stride = u32(qk_n);
         rec.v_row_stride = u32(nvh * dv);
         rec.a_row_stride = u32(nvh);
         rec.b_row_stride = u32(nvh);
         rec.output_row_stride = u32(nvh * dv);
+        rec.recurrent_slot_stride = nvh * dk * dv;
+        rec.recurrent_layer_stride = nvh * dk * dv;
         rec.state_index = 0u;
         rec.max_sequences = 1u;
         rec.key_heads = u32(nkh);
         rec.num_v_heads = u32(nvh);
         rec.head_k = u32(dk);
         rec.head_v = u32(dv);
+        if (std::getenv("SHELF_DEBUG_GDN")) {
+            hipStreamSynchronize(stream_);
+            std::vector<float> sqh(qk_n), nkh_(qk_n), oh(nvh * dv), sh(std::min<std::size_t>(8, st.elems));
+            std::vector<bf16_t> vh(nvh * dv), ah(nvh), bh(nvh);
+            hipMemcpy(sqh.data(), sqf, qk_n * 4, hipMemcpyDeviceToHost);
+            hipMemcpy(nkh_.data(), nkf, qk_n * 4, hipMemcpyDeviceToHost);
+            hipMemcpy(vh.data(), v->dev, nvh * dv * 2, hipMemcpyDeviceToHost);
+            hipMemcpy(ah.data(), a->dev, nvh * 2, hipMemcpyDeviceToHost);
+            hipMemcpy(bh.data(), b->dev, nvh * 2, hipMemcpyDeviceToHost);
+            hipMemcpy(oh.data(), o, nvh * dv * 4, hipMemcpyDeviceToHost);
+            std::fprintf(stderr, "[ptr] q=%p k=%p nq=%p sq=%p nk=%p v=%p out=%p\n", q->dev, k->dev, nqf, sqf, nkf, v->dev, o);
+            std::fprintf(stderr, "[gdn P=%zu pre] sq[0..3]=%.6g,%.6g,%.6g,%.6g nk[0..3]=%.6g,%.6g,%.6g,%.6g v0=%.6g a0=%.6g b0=%.6g out0=%.6g out_last=%.6g st0=%.6g\n",
+                step_rows_, sqh[0], sqh[1], sqh[2], sqh[3], nkh_[0], nkh_[1], nkh_[2], nkh_[3],
+                __bfloat162float(__ushort_as_bfloat16(vh[0].data)),
+                __bfloat162float(__ushort_as_bfloat16(ah[0].data)),
+                __bfloat162float(__ushort_as_bfloat16(bh[0].data)),
+                oh[0], oh[oh.size()-1], sh[0]);
+        }
         SHELF_RETURN_IF_ERROR(hipok(launch_gdn_recurrence_f32(rec, stream_), "recurrence"));
-        ++st.rows;
+        if (std::getenv("SHELF_DEBUG_GDN")) {
+            hipStreamSynchronize(stream_);
+            std::vector<float> oh(nvh * dv), sh(std::min<std::size_t>(4, st.elems));
+            hipMemcpy(oh.data(), o, nvh * dv * 4, hipMemcpyDeviceToHost);
+            hipMemcpy(sh.data(), st.dev, sh.size() * 4, hipMemcpyDeviceToHost);
+            std::fprintf(stderr, "[gdn P=%zu post] out0=%.9g outlast=%.9g st0=%.9g st1=%.9g\n",
+                         step_rows_, oh[0], oh[oh.size()-1], sh[0], sh[sh.size()-1]);
+        }
+        st.rows += step_rows_;
         return set_out(true, o);
     }
     case K::rmsnorm_gated: {
@@ -543,26 +627,28 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
             return Status::invalid_state("attention_gqa_step: state missing", __FILE__, __LINE__);
         StateLoc& st = sit->second;
         const ir::StateDesc* desc = g.find_state(p.state_write[0]);
-        if (st.rows >= desc->logical_shape.dim(0))
+        if (st.rows + step_rows_ > desc->logical_shape.dim(0))
             return Status::out_of_range("attention_gqa_step: KV context full", __FILE__,
                                         __LINE__);
         const std::size_t bs = opts_.kv_block_size;
         const std::size_t kvh = desc->logical_shape.dim(2);
         const std::size_t D = desc->logical_shape.dim(3);
-        const std::size_t nq = q->elems / D;
+        const std::size_t P = step_rows_;
+        const std::size_t nq = q->elems / (D * P);   // per-token query heads
+        if (q->elems % (D * P)) return Status::invalid_state("attention: q width mismatch", __FILE__, __LINE__);
         const std::size_t ept = kvh * D, epp = bs * ept, epl = st.pages * epp;
 
         KvAppendBf16Args ap{};
         ap.common.k_input = static_cast<const bf16_t*>(k->dev);
         ap.common.v_input = static_cast<const bf16_t*>(v->dev);
-        ap.common.k_row_stride = u32(kvh * D);
-        ap.common.v_row_stride = u32(kvh * D);
+        ap.common.k_row_stride = u32(k->elems / P);
+        ap.common.v_row_stride = u32(v->elems / P);
         ap.common.row_sequence_slots = slot_zero_dev_;
         ap.common.row_positions = rowpos_dev_;
         ap.common.block_tables = st.table;
         ap.common.block_table_stride = u32(st.pages);
         ap.common.max_sequences = 1u;
-        ap.common.rows = 1u;
+        ap.common.rows = u32(step_rows_);
         ap.common.layer = 0u;
         ap.common.page_tokens = u32(bs);
         ap.common.num_pages = u32(st.pages);
@@ -589,7 +675,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         at.block_tables = st.table;
         at.block_table_stride = u32(st.pages);
         at.max_sequences = 1u;
-        at.rows = 1u;
+        at.rows = u32(step_rows_);
         at.layer = 0u;
         at.page_tokens = u32(bs);
         at.num_pages = u32(st.pages);
@@ -605,7 +691,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         SHELF_RETURN_IF_ERROR(hipok(launch_attention_paged_bf16(
             at, static_cast<const bf16_t*>(st.k_pool), static_cast<const bf16_t*>(st.v_pool),
             stream_), "attn_paged"));
-        ++st.rows;
+        st.rows += step_rows_;
         return set_out(false, o);
     }
     default:

@@ -55,10 +55,18 @@ public:
     // Zero all state buffers and reset usage rows (new sequence).
     Status reset_states();
 
-    // One decode step at absolute context position `position`.
-    Status run_step(const ir::Graph& g, std::int32_t token, std::uint32_t position);
+    // One step over `n` tokens at absolute positions base_pos..base_pos+n-1.
+    // The graph's batch mode must match (n == graph leading rows).
+    static constexpr std::size_t kMaxStepRows = 64u;
+    Status run_step(const ir::Graph& g, const std::int32_t* tokens, std::size_t n,
+                    std::uint32_t base_pos);
+    Status run_step(const ir::Graph& g, std::int32_t token, std::uint32_t position) {
+        return run_step(g, &token, 1, position);
+    }
 
     Result<std::vector<float>> fetch_logits(const ir::Graph& g);
+    // Debug/parity: read back an activation value produced by the last run_step.
+    Result<std::vector<float>> fetch_value_debug(const ir::Graph& g, ir::ValueId id);
 
     struct Stats { double last_step_ms = 0.0; };
     const Stats& stats() const { return stats_; }
@@ -94,15 +102,18 @@ private:
     std::unordered_set<std::uint32_t> f32_out_rmsnorms_;          // ValueIds of rmsnorms feeding rope/gdn-norm
 
     // per-step device scratch
-    std::int32_t* token_dev_ = nullptr;
-    std::uint32_t* posrep_dev_ = nullptr;   // 64 copies of position (rope rows)
-    std::uint32_t* rowpos_dev_ = nullptr;   // single row position (kv append/attn)
+    static constexpr std::size_t kPosScratch = 4096u;
+    std::int32_t* token_dev_ = nullptr;     // kMaxStepRows ids
+    std::uint32_t* posrep_dev_ = nullptr;   // per-rope-row positions (rows*heads)
+    std::uint32_t* rowpos_dev_ = nullptr;   // per-token row positions (kv append/attn)
     std::uint32_t* slot_zero_dev_ = nullptr;  // device constant 0 (row_sequence_slots)
     std::uint32_t* errword_dev_ = nullptr;  // embedding error word
     double* inv_freq_dev_ = nullptr;        // rope table (rotary/2)
+    std::size_t step_rows_ = 1;
+    std::uint32_t step_base_pos_ = 0;
     hipk::GdnRequestDescriptor* req_dev_ = nullptr;
     float* logits_dev_ = nullptr;
-    std::vector<std::uint32_t> posrep_host_;
+    std::vector<std::uint32_t> posrep_host_;  // scratch positions (kMaxPosScratch)
 
     bool states_declared_ = false;
     Stats stats_;

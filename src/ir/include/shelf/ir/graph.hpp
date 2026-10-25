@@ -285,11 +285,13 @@ private:
                 const StateDesc* st = find_state(p.state_read[0]);
                 const ValueDesc* x = in(0);
                 const TensorShape* w = wshape(0);
-                if (!x || x->shape.rank() != 1) return bad("causal_conv_step x [C]");
-                if (!w || w->rank() != 2 || w->dim(0) != x->shape.dim(0) || w->dim(1) != 4)
+                const std::size_t xr = x->shape.rank();
+                const std::size_t Cdim = x ? x->shape.dim(xr - 1) : 0;
+                if (!x || (xr != 1 && xr != 2)) return bad("causal_conv_step x [C] or [P,C]");
+                if (!w || w->rank() != 2 || w->dim(0) != Cdim || w->dim(1) != 4)
                     return bad("causal_conv_step weights [C,4]");
                 if (!st || st->kind != StateKind::conv || st->logical_shape.rank() != 2 ||
-                    st->logical_shape.dim(0) != x->shape.dim(0) || st->logical_shape.dim(1) != 3) {
+                    st->logical_shape.dim(0) != Cdim || st->logical_shape.dim(1) != 3) {
                     return bad("conv state [C,3]");
                 }
                 return expect_out(p, x->shape, out);
@@ -310,22 +312,31 @@ private:
                 const TensorShape* al = wshape(0);
                 const TensorShape* dtb = wshape(1);
                 if (!q || !k || !v || !b || !a) return bad("gdn_step inputs");
-                if (q->shape.rank() != 2 || k->shape.rank() != 2 || v->shape.rank() != 2 ||
-                    b->shape.rank() != 1 || a->shape.rank() != 1 ||
-                    !same_shape(q->shape, k->shape)) {
-                    return bad("gdn_step q/k [nkh,dk] v [nvh,dv] b/a [nvh]");
+                const std::size_t qr = q->shape.rank(), kr = k->shape.rank();
+                const std::size_t vr = v->shape.rank(), br = b->shape.rank();
+                if ((qr != 2 && qr != 3) || qr != kr || !same_shape(q->shape, k->shape) ||
+                    (vr != 2 && vr != 3) || (br != 1 && br != 2) || b->shape.rank() != a->shape.rank()) {
+                    return bad("gdn_step q/k [nkh,dk]|[P,nkh,dk] v [nvh,dv]|[P,nvh,dv] b/a [nvh]|[P,nvh]");
                 }
-                if (v->shape.dim(0) % q->shape.dim(0) != 0) return bad("gdn_step nvh % nkh");
-                if (b->shape.dim(0) != v->shape.dim(0) || a->shape.dim(0) != v->shape.dim(0))
+                const std::size_t bq = qr == 3 ? q->shape.dim(0) : 0;
+                const bool consistent =
+                    (!bq && qr == 2 && vr == 2 && br == 1) ||
+                    (bq && qr == 3 && kr == 3 && vr == 3 && k->shape.dim(0) == bq &&
+                     v->shape.dim(0) == bq && br == 2 && b->shape.dim(0) == bq &&
+                     a->shape.dim(0) == bq);
+                if (!consistent) return bad("gdn_step batch mismatch");
+                const std::size_t nkh = q->shape.dim(qr - 2), nvh = v->shape.dim(vr - 2);
+                if (nvh % nkh != 0) return bad("gdn_step nvh % nkh");
+                if (b->shape.dim(br - 1) != nvh || a->shape.dim(a->shape.rank() - 1) != nvh)
                     return bad("gdn_step b/a must be [nvh]");
-                if (!al || al->rank() != 1 || al->dim(0) != v->shape.dim(0) ||
-                    !dtb || dtb->rank() != 1 || dtb->dim(0) != v->shape.dim(0)) {
+                if (!al || al->rank() != 1 || al->dim(0) != nvh ||
+                    !dtb || dtb->rank() != 1 || dtb->dim(0) != nvh) {
                     return bad("gdn_step A_log/dt_bias [nvh]");
                 }
                 if (!st || st->kind != StateKind::recurrent || st->logical_shape.rank() != 3 ||
-                    st->logical_shape.dim(0) != v->shape.dim(0) ||
-                    st->logical_shape.dim(1) != q->shape.dim(1) ||
-                    st->logical_shape.dim(2) != v->shape.dim(1)) {
+                    st->logical_shape.dim(0) != nvh ||
+                    st->logical_shape.dim(1) != q->shape.dim(qr - 1) ||
+                    st->logical_shape.dim(2) != v->shape.dim(vr - 1)) {
                     return bad("recurrent state [nvh,dk,dv]");
                 }
                 return expect_out(p, v->shape, out);
@@ -348,12 +359,17 @@ private:
                 const ValueDesc* kn = in(1);
                 const ValueDesc* vn = in(2);
                 if (!q || !kn || !vn) return bad("attention_gqa_step inputs");
-                if (q->shape.rank() != 2 || q->shape.dim(1) != D) return bad("q [nq,head_dim]");
-                if (!same_shape(kn->shape, vn->shape) || kn->shape.rank() != 2 ||
-                    kn->shape.dim(0) != kvh || kn->shape.dim(1) != D) {
-                    return bad("k_new/v_new [kvh,head_dim]");
+                const std::size_t qr = q->shape.rank();
+                if ((qr != 2 && qr != 3) || q->shape.dim(qr - 1) != D)
+                    return bad("q [nq,head_dim] or [P,nq,head_dim]");
+                const std::size_t kr = kn->shape.rank();
+                if (!same_shape(kn->shape, vn->shape) || (kr != 2 && kr != 3) ||
+                    kn->shape.dim(kr - 1) != D || kn->shape.dim(kr - 2) != kvh) {
+                    return bad("k_new/v_new [kvh,head_dim] or [P,kvh,head_dim]");
                 }
-                if (q->shape.dim(0) % kvh != 0) return bad("nq % kvh");
+                if ((qr == 3) != (kr == 3) || (qr == 3 && q->shape.dim(0) != kn->shape.dim(0)))
+                    return bad("attention_gqa_step batch mismatch");
+                if (q->shape.dim(qr - 2) % kvh != 0) return bad("nq % kvh");
                 return expect_out(p, q->shape, out);
             }
             default:
