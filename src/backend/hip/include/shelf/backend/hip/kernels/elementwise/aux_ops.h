@@ -1,4 +1,4 @@
-// shelf backend/hip — auxiliary bf16 glue ops (see kernels/aux_ops.hip)
+// shelf backend/hip — auxiliary bf16 glue ops (see kernels/elementwise/aux_ops.hip)
 #pragma once
 
 #include <hip/hip_runtime.h>

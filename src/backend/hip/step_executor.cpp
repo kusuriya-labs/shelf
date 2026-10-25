@@ -10,17 +10,17 @@
 #include <cstdlib>
 #include <cmath>
 
-#include <shelf/backend/hip/kernels/aux_ops.h>
-#include <shelf/backend/hip/kernels/embedding.h>
-#include <shelf/backend/hip/kernels/elementwise.h>
-#include <shelf/backend/hip/kernels/gdn_conv_silu.h>
-#include <shelf/backend/hip/kernels/gdn_qk_prepare.h>
-#include <shelf/backend/hip/kernels/gdn_recurrence.h>
-#include <shelf/backend/hip/kernels/linear_bf16.h>
-#include <shelf/backend/hip/kernels/kv_append.h>
-#include <shelf/backend/hip/kernels/paged_attention.h>
-#include <shelf/backend/hip/kernels/rope.h>
-#include <shelf/backend/hip/kernels/rmsnorm.h>
+#include <shelf/backend/hip/kernels/elementwise/aux_ops.h>
+#include <shelf/backend/hip/kernels/elementwise/embedding.h>
+#include <shelf/backend/hip/kernels/elementwise/elementwise.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_conv_silu.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_qk_prepare.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_recurrence.h>
+#include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
+#include <shelf/backend/hip/kernels/attention/kv_append.h>
+#include <shelf/backend/hip/kernels/attention/paged_attention.h>
+#include <shelf/backend/hip/kernels/attention/rope.h>
+#include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/foundation/numeric.hpp>
 
 namespace shelf::backend::hip {

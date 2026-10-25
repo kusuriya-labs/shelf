@@ -1,6 +1,6 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/kv_append.h>
-#include <shelf/backend/hip/kernels/kv_types.h>
+#include <shelf/backend/hip/kernels/attention/kv_append.h>
+#include <shelf/backend/hip/kernels/attention/kv_types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>

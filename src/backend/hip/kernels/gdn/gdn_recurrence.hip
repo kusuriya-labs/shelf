@@ -15,7 +15,7 @@
 // replaced by direct float access; GdnRequestDescriptor instead of
 // ps::runtime::DeviceRequestDescriptor; the gfx12 WMMA chunk/decode1/
 // decode_rows/commit variants (fp16 state, fixed head shapes) are not ported.
-#include <shelf/backend/hip/kernels/gdn_recurrence.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_recurrence.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

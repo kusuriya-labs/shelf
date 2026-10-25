@@ -18,10 +18,10 @@
 #include <random>
 #include <vector>
 
-#include <shelf/backend/hip/kernels/gdn_conv1d.h>
-#include <shelf/backend/hip/kernels/gdn_conv_silu.h>
-#include <shelf/backend/hip/kernels/gdn_qk_prepare.h>
-#include <shelf/backend/hip/kernels/gdn_recurrence.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_conv1d.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_conv_silu.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_qk_prepare.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_recurrence.h>
 #include <shelf/foundation/numeric.hpp>
 
 namespace {

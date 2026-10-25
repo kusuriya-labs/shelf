@@ -1,7 +1,7 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 #pragma once
 
-#include <shelf/backend/hip/kernels/rmsnorm.h>
+#include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/gdn_qk_prepare.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_qk_prepare.h>
 #include <shelf/backend/hip/kernels/detail/gdn_prepare_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>

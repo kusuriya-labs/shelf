@@ -55,7 +55,7 @@ GPU 高速化段階で kernel・paged KV を移植予定（未移植）。
 
 ## PR-008a（PhaseShift HIP kernel 移植開始）
 
-`src/backend/hip/kernels/linear_bf16.hip` と公開ヘッダは PhaseShift
+`src/backend/hip/kernels/gemm/linear_bf16.hip` と公開ヘッダは PhaseShift
 `kernels/optimized/linear/{bf16.h,config.h}` の **self-work vendoring**
 （名前空間 `ps::kernel`→`shelf::hipk`・型は shelf `bf16_t` へ置換のみ、
 数式変更なし）。PhaseShift は自己制作のため著作権表記不要。
@@ -88,14 +88,31 @@ SYCL ランタイムは未導入のため `backend/sycl` は空で保持（ユ�
 
 | shelf TU | 移植元 |
 |---|---|
-| `attention_paged_decode.hip` / `attention_kv_append.hip` | `kernels/optimized/attention/{paged_bf16,kv_append}.hip`（2 プール separate-pool addressing、ABI は `paged-kv-abi.md` rev2 に一致） |
-| `attention_rope.hip` | `kernels/optimized/rope/`（f32 入力・device inv_freq、D=256/rotary=64 ペアカーネル） |
-| `gdn_{qk_prepare,conv_silu,conv1d,recurrence}.hip` | `kernels/optimized/gdn/`（conv state は shelf では fp32 `[slot][layer][C][3]` oldest-first に拡張 — PhaseShift の bf16 `[3][C]` からの**意図的乖離**、recurrent state fp32 不変） |
-| `elementwise_{rmsnorm,ops,embedding,l2_normalize}.hip` | `kernels/optimized/{norm,elementwise,embedding}/`（zero-centered `ONE_PLUS` gamma ネイティブ、embedding error-word プロトコルの `ProgramStatus` は wire 値同一の自前宣言） |
-| `aux_ops.hip` | 新規（row slice / sigmoid-gate / argmax / bf16↔f32 変換） |
+| `attention/attention_paged_decode.hip` / `attention/attention_kv_append.hip` | `kernels/optimized/attention/{paged_bf16,kv_append}.hip`（2 プール separate-pool addressing、ABI は `paged-kv-abi.md` rev2 に一致） |
+| `attention/attention_rope.hip` | `kernels/optimized/rope/`（f32 入力・device inv_freq、D=256/rotary=64 ペアカーネル） |
+| `gdn/gdn_{qk_prepare,conv_silu,conv1d,recurrence}.hip` | `kernels/optimized/gdn/`（conv state は shelf では fp32 `[slot][layer][C][3]` oldest-first に拡張 — PhaseShift の bf16 `[3][C]` からの**意図的乖離**、recurrent state fp32 不変） |
+| `elementwise/elementwise_{rmsnorm,ops,embedding,l2_normalize}.hip` | `kernels/optimized/{norm,elementwise,embedding}/`（zero-centered `ONE_PLUS` gamma ネイティブ、embedding error-word プロトコルの `ProgramStatus` は wire 値同一の自前宣言） |
+| `elementwise/aux_ops.hip` | 新規（row slice / sigmoid-gate / argmax / bf16↔f32 変換） |
 
 `src/backend/hip/step_executor.{hpp,cpp}` は **新規実装**: IR の全 Kind を
 上記カーネルへディスパッチ（bf16 激活 / f32 GDN 状態・logits、KV は
 bf16 separate pools、1 文脈 identity ブロックテーブル）。CPU reference
 executor が数値 golden のままで、GPU 経路は greedy 一致で検証
 （Qwen3.5-4B: 21 token 全一致、約 18 ms/token ≈ 55 tok/s、CPU 比約 190 倍）。
+
+## PR-009d（backend/hip カーネル配置整理）
+
+`src/backend/hip/kernels/` と `include/shelf/backend/hip/kernels/` を
+ファミリー別サブディレクトリへ（`.hip` と公開ヘッダは同一ミラー配置、
+共有 device ヘルパは `kernels/detail/` に残置）:
+
+| ディレクトリ | 内容 |
+|---|---|
+| `gemm/` | linear_bf16（ExactRows / ExactRowsDot2 / Wmma 系） |
+| `attention/` | paged decode・kv_append・rope・kv 型 |
+| `gdn/` | qk_prepare・conv(+silu)・recurrence・型 |
+| `elementwise/` | rmsnorm・ops(silu/mul/swiglu/residual)・embedding・l2_normalize・aux(glue) |
+
+CMake は `GLOB_RECURSE`。レイアウトの動機は XeStrata の演算名整理規則
+（設計参照のみ）と rebuild-plan §6。公共インクルードパスは
+`shelf/backend/hip/kernels/<family>/<name>.h` に統一。

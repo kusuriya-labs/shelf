@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work, CopenDeCamp); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/linear_bf16.h>
+#include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>

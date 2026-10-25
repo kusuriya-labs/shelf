@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/elementwise.h>
+#include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/detail/vector_io.h>
 #include <shelf/backend/hip/kernels/detail/residual_add_device.h>
 #include <shelf/backend/hip/kernels/detail/target_swiglu_device.h>

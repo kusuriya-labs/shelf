@@ -24,7 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <shelf/backend/hip/kernels/gdn_types.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_types.h>
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/foundation/shape.hpp>
 #include <shelf/ir/graph.hpp>

@@ -6,7 +6,7 @@
 // parity/debug (PhaseShift contract).
 #pragma once
 
-#include <shelf/backend/hip/kernels/gdn_conv1d.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_conv1d.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 

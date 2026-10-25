@@ -6,7 +6,7 @@
 #include <vector>
 
 #include <hip/hip_runtime.h>
-#include <shelf/backend/hip/kernels/linear_bf16.h>
+#include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 
 using namespace shelf;
 using namespace shelf::hipk;

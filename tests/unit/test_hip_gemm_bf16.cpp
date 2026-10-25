@@ -8,7 +8,7 @@
 #include <random>
 #include <vector>
 
-#include <shelf/backend/hip/kernels/linear_bf16.h>
+#include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/foundation/numeric.hpp>
 
 namespace {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <shelf/backend/hip/kernels/linear_bf16_config.h>
+#include <shelf/backend/hip/kernels/gemm/linear_bf16_config.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 

@@ -12,9 +12,9 @@
 #include <random>
 #include <vector>
 
-#include <shelf/backend/hip/kernels/kv_append.h>
-#include <shelf/backend/hip/kernels/paged_attention.h>
-#include <shelf/backend/hip/kernels/rope.h>
+#include <shelf/backend/hip/kernels/attention/kv_append.h>
+#include <shelf/backend/hip/kernels/attention/paged_attention.h>
+#include <shelf/backend/hip/kernels/attention/rope.h>
 #include <shelf/foundation/numeric.hpp>
 
 namespace {

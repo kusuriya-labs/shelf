@@ -22,7 +22,7 @@
 //     fast paths).
 #pragma once
 
-#include <shelf/backend/hip/kernels/gdn_types.h>
+#include <shelf/backend/hip/kernels/gdn/gdn_types.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 

@@ -1,7 +1,7 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/paged_attention.h>
+#include <shelf/backend/hip/kernels/attention/paged_attention.h>
 #include <shelf/backend/hip/kernels/e4m3_codec.h>
-#include <shelf/backend/hip/kernels/kv_types.h>
+#include <shelf/backend/hip/kernels/attention/kv_types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>

@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/rmsnorm.h>
+#include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/backend/hip/kernels/detail/rmsnorm_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>

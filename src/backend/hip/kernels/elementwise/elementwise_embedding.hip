@@ -2,8 +2,8 @@
 //
 // PhaseShift included <phaseshift/runtime/program/device_program.h> here for
 // ProgramStatus (the device error-word protocol) and an unused e4m3 codec
-// header; shelf vendors the enum into <shelf/backend/hip/kernels/embedding.h>.
-#include <shelf/backend/hip/kernels/embedding.h>
+// header; shelf vendors the enum into <shelf/backend/hip/kernels/elementwise/embedding.h>.
+#include <shelf/backend/hip/kernels/elementwise/embedding.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

@@ -1,12 +1,11 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 //
-// shelf adaptations (see gdn_conv1d.h for the full note): conv state is fp32
-// in shelf's [C,3] channel-major IR layout (PhaseShift: bf16 [3,C]
-// history-major); requests are shelf GdnRequestDescriptor; row_parent/history
-// capture/SPEC-VERIFY serving branches not ported. Math per element is
-// identical: y = w0*s0 + w1*s1 + w2*s2 + w3*x with s0..s2 oldest-first, then
-// the history shift s0=s1, s1=s2, s2=x.
-#include <shelf/backend/hip/kernels/gdn_conv1d.h>
+// shelf adaptations (see gdn_conv1d.h note): fp32 conv state in shelf [C,3]
+// channel-major layout; shelf GdnRequestDescriptor; serving-only branches
+// (row_parent trees, history capture, SPEC-VERIFY) not ported. Conv math and
+// SiLU (x / (1 + expf(-x))) identical to PhaseShift.
+#include <shelf/backend/hip/kernels/gdn/gdn_conv_silu.h>
+#include <shelf/backend/hip/kernels/detail/gdn_prepare_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
@@ -20,13 +19,13 @@ namespace {
 
 using bf16 = __hip_bfloat16;
 
-constexpr uint32_t kConvThreads = 256;
-static_assert(kConvThreads == kGdnConv1dThreads);
-constexpr uint32_t kConvRowTile = 32;
+constexpr uint32_t kConvSiluThreads = 256;
+static_assert(kConvSiluThreads == kGdnConv1dThreads);
+constexpr uint32_t kConvSiluRowTile = 32;
 
-uint32_t conv_row_tile() {
+uint32_t conv_silu_row_tile() {
     const char* e = std::getenv("PHASESHIFT_GDN_CONV1D_TILE");
-    if (e == nullptr) return kConvRowTile;
+    if (e == nullptr) return kConvSiluRowTile;
     const long v = std::strtol(e, nullptr, 10);
     if (v <= 0) return 0;
     return static_cast<uint32_t>(v);
@@ -34,18 +33,18 @@ uint32_t conv_row_tile() {
 
 }  // namespace
 
-uint32_t gdn_conv1d_row_tile() { return conv_row_tile(); }
-
-extern "C" __global__ __launch_bounds__(kConvThreads)
-void phaseshift_gdn_conv1d_bf16_f32(
+extern "C" __global__ __launch_bounds__(kConvSiluThreads)
+void phaseshift_fused_gdn_conv_silu(
     const bf16* __restrict__ input,
     float* __restrict__ output,
+    bf16* __restrict__ act_output,
     const bf16* __restrict__ conv_weight,
     float* __restrict__ conv_state,
     const GdnRequestDescriptor* __restrict__ requests,
     uint32_t actual_rows,
     uint32_t input_row_stride,
     uint32_t output_row_stride,
+    uint32_t act_row_stride,
     uint32_t conv_dim,
     uint32_t state_index,
     uint32_t max_sequences,
@@ -79,8 +78,6 @@ void phaseshift_gdn_conv1d_bf16_f32(
         s1 = state_row[1];
         s2 = state_row[2];
     } else {
-        // tile continuation: history comes from this request's input rows
-        // (requires row_begin >= 3; decode launches one row, t0 always 0).
         s0 = __bfloat162float(
             input[static_cast<size_t>(row0 - 3u) * input_row_stride + ch]);
         s1 = __bfloat162float(
@@ -103,6 +100,8 @@ void phaseshift_gdn_conv1d_bf16_f32(
         s1 = s2;
         s2 = x;
         output[static_cast<size_t>(row) * output_row_stride + ch] = y;
+        act_output[static_cast<size_t>(row) * act_row_stride + ch] =
+            __float2bfloat16(detail::gdn_silu_f32(y));
     }
 
     if (t0 + t_end >= req.row_count) {
@@ -112,34 +111,39 @@ void phaseshift_gdn_conv1d_bf16_f32(
     }
 }
 
-hipError_t launch_gdn_conv1d_bf16_f32(
-    const GdnConv1dArgs& args,
+hipError_t launch_fused_gdn_conv_silu(
+    const FusedGdnConvSiluArgs& args,
     hipStream_t stream) {
-    if (args.input == nullptr || args.output == nullptr ||
-        args.conv_weight == nullptr || args.conv_state == nullptr ||
-        args.requests == nullptr)
+    const GdnConv1dArgs& c = args.conv;
+    if (c.input == nullptr || c.output == nullptr ||
+        c.conv_weight == nullptr || c.conv_state == nullptr ||
+        c.requests == nullptr)
         return hipErrorInvalidValue;
-    if (args.num_requests == 0u || args.actual_rows == 0u || args.conv_dim == 0u)
+    if (args.act_out == nullptr)
         return hipErrorInvalidValue;
-    if (args.conv_history != 3u)
+    if (c.num_requests == 0u || c.actual_rows == 0u || c.conv_dim == 0u)
+        return hipErrorInvalidValue;
+    if (c.conv_history != 3u)
         return hipErrorNotSupported;
-    if (args.input_row_stride < args.conv_dim ||
-        args.output_row_stride < args.conv_dim)
+    if (c.input_row_stride < c.conv_dim || c.output_row_stride < c.conv_dim ||
+        args.act_row_stride < c.conv_dim)
         return hipErrorInvalidValue;
-    const uint32_t row_tile = conv_row_tile();
+    const uint32_t row_tile = conv_silu_row_tile();
     const uint32_t tiled_rows =
-        args.max_request_rows != 0u ? args.max_request_rows : args.actual_rows;
+        c.max_request_rows != 0u ? c.max_request_rows : c.actual_rows;
     const uint32_t tiles = gdn_conv1d_tiles(row_tile, tiled_rows);
-    const uint32_t blocks_x = gdn_conv1d_blocks_x(args.conv_dim);
-    dim3 grid(blocks_x, args.num_requests, tiles);
-    phaseshift_gdn_conv1d_bf16_f32<<<grid, kConvThreads, 0, stream>>>(
-        reinterpret_cast<const bf16*>(args.input), args.output,
-        reinterpret_cast<const bf16*>(args.conv_weight), args.conv_state,
-        args.requests,
-        args.actual_rows, args.input_row_stride, args.output_row_stride,
-        args.conv_dim, args.state_index, args.max_sequences,
-        args.conv_slot_stride, args.conv_layer_stride,
-        gdn_conv1d_resolved_row_tile(row_tile, args.actual_rows));
+    const uint32_t blocks_x = gdn_conv1d_blocks_x(c.conv_dim);
+    dim3 grid(blocks_x, c.num_requests, tiles);
+    phaseshift_fused_gdn_conv_silu<<<grid, kConvSiluThreads, 0, stream>>>(
+        reinterpret_cast<const bf16*>(c.input), c.output,
+        reinterpret_cast<bf16*>(args.act_out),
+        reinterpret_cast<const bf16*>(c.conv_weight), c.conv_state,
+        c.requests,
+        c.actual_rows, c.input_row_stride, c.output_row_stride,
+        args.act_row_stride,
+        c.conv_dim, c.state_index, c.max_sequences,
+        c.conv_slot_stride, c.conv_layer_stride,
+        gdn_conv1d_resolved_row_tile(row_tile, c.actual_rows));
     return hipGetLastError();
 }
 

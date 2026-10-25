@@ -42,7 +42,7 @@ target_link_libraries(shelf_runtime_state PUBLIC shelf::foundation)
 # ---------------------------------------------------------------- backend/hip
 # Host-side runtime API + device kernels. HIP headers/types stay confined here.
 if(SHELF_ENABLE_HIP)
-    file(GLOB SHELF_HIP_KERNEL_SRCS CONFIGURE_DEPENDS
+    file(GLOB_RECURSE SHELF_HIP_KERNEL_SRCS CONFIGURE_DEPENDS
          "${PROJECT_SOURCE_DIR}/src/backend/hip/kernels/*.hip")
     add_library(shelf_backend_hip STATIC
         src/backend/hip/hip_api.cpp

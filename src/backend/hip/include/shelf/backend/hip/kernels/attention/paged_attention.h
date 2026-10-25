@@ -1,7 +1,7 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 #pragma once
 
-#include <shelf/backend/hip/kernels/kv_types.h>
+#include <shelf/backend/hip/kernels/attention/kv_types.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 

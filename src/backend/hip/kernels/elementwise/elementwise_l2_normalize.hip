@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/l2_normalize.h>
+#include <shelf/backend/hip/kernels/elementwise/l2_normalize.h>
 #include <shelf/backend/hip/kernels/detail/l2_normalize_device.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>

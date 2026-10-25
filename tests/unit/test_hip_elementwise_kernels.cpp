@@ -12,10 +12,10 @@
 #include <random>
 #include <vector>
 
-#include <shelf/backend/hip/kernels/elementwise.h>
-#include <shelf/backend/hip/kernels/embedding.h>
-#include <shelf/backend/hip/kernels/l2_normalize.h>
-#include <shelf/backend/hip/kernels/rmsnorm.h>
+#include <shelf/backend/hip/kernels/elementwise/elementwise.h>
+#include <shelf/backend/hip/kernels/elementwise/embedding.h>
+#include <shelf/backend/hip/kernels/elementwise/l2_normalize.h>
+#include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/foundation/numeric.hpp>
 
 namespace {

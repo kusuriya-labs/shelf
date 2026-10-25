@@ -1,5 +1,5 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
-#include <shelf/backend/hip/kernels/rope.h>
+#include <shelf/backend/hip/kernels/attention/rope.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
