@@ -41,6 +41,22 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(shelf_backend_hip PUBLIC shelf::backend_common hip::host)
 endif()
 
+# ---------------------------------------------------------------- ir
+add_library(shelf_ir INTERFACE)
+add_library(shelf::ir ALIAS shelf_ir)
+target_include_directories(shelf_ir INTERFACE
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/ir/include>")
+target_link_libraries(shelf_ir INTERFACE shelf::foundation)
+
+# ---------------------------------------------------------------- backend/cpu
+# CPU reference executor (correctness golden; SIMD kernels arrive later).
+add_library(shelf_backend_cpu STATIC
+    src/backend/cpu/reference_executor.cpp)
+add_library(shelf::backend_cpu ALIAS shelf_backend_cpu)
+target_include_directories(shelf_backend_cpu PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/cpu/include>")
+target_link_libraries(shelf_backend_cpu PUBLIC shelf::ir shelf::foundation)
+
 # ---------------------------------------------------------------- artifact
 add_library(shelf_artifact STATIC
     src/artifact/safetensors/reader.cpp)

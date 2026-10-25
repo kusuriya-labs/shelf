@@ -32,6 +32,12 @@
 - safetensors は PhaseShift で先に読み書き検証済みのコンテナ。GGUF/EXL3 の
   マルチコンテナ解決（Phase 3 完了条件）は GGUF Reader 導入時に拡張。
 
+## PR-005（Phase 4: Primitive IR / CPU 参照 Executor）
+
+`src/ir/`・`src/backend/cpu/` は **新規実装**（移植コードなし）。
+PhaseShift の inference/program 系は Phase 6 の Lowering 検討時に設計参照予定。
+Primitive 集合は Phase 4 候補から GDN・ExpertCompute を除外（Layer Parity 段階で追加）。
+
 ## 設計のみ参照（コード未移植）
 
 | shelf 側の設計 | XeStrata からの参照点 |

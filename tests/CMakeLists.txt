@@ -12,6 +12,14 @@ add_executable(test_weights_catalog unit/test_weights_catalog.cpp)
 target_link_libraries(test_weights_catalog PRIVATE shelf::weights)
 add_test(NAME unit.weights_catalog COMMAND test_weights_catalog)
 
+add_executable(test_ir_graph_validation unit/test_ir_graph_validation.cpp)
+target_link_libraries(test_ir_graph_validation PRIVATE shelf::ir)
+add_test(NAME unit.ir_graph_validation COMMAND test_ir_graph_validation)
+
+add_executable(test_reference_executor unit/test_reference_executor.cpp)
+target_link_libraries(test_reference_executor PRIVATE shelf::backend_cpu)
+add_test(NAME unit.reference_executor COMMAND test_reference_executor)
+
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
 target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
