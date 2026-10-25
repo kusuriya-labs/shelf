@@ -40,13 +40,20 @@ gfx1201 の自前 kernel 族（bf16/fp8 paged decode・split-K・kv_append）は
 
 ## prefix 共有（rev2.1: ツリー共有は採用しない）
 
-`~/work/references/Strata` の実測調査により、**Radix/TreeAttention は不要**と
-判定（2026-10-26、ユーザー結論）。Strata 側の事実:
+`~/work/references/Strata`・`~/work/references/XeStrata-exl3` の read-only 全監査
+（2026-10-26、`docs/architecture/feature-inventory.md`）により、**Radix/TreeAttention
+は不要**と判定（ユーザー結論を監査が追認）。両者共通の事実:
 
-- ページング自体は存在（page_table + 位置 arena + pinned-RAM/VRAM 2 段 +
-  選択駆動 CLOCK 追い出し）。vLLM 型の動的アロケータではない
+- ページング自体は存在（page_table + 位置 arena + pinned-RAM/VRAM 2 段）。
+  vLLM 型の動的アロケータではない
+- **追い出しは CLOCK ではない**（訂正）: Strata の expert tier は decayed-count
+  （LFU 系・満杯時は非追い出し）、checkpoint は LRU/spread、parking は oldest-first。
+  CLOCK second-chance は XeStrata の KV ストリーミング限定
+- XeStrata 側も明言: "a radix cache's tree collapsed onto one branch"
+  （`program/conv_cache.hpp`）= ツリーでなく **1 分岐上の checkpoint 鎖**
 - 共有は「任意長のツリー」でなく **離散点**で効かせる: ターン境界 /
-  `--prompt-cache-every` / system prompt root / park / 明示 pin。
+  `--prompt-cache-every` / system prompt root / park / 明示 pin（`pin=N` は
+  長文書終端を固定し後続質問を分岐させる上位契約）。
   位置=トークン位置なので「checkpoint から再開」は KV をそのまま再利用
 - 並列時はスロット単位の会話キャッシュ = 粗い共有で十分
   （"fine granularity buys nothing and costs per-token indirection"）
