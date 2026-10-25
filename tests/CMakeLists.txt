@@ -4,6 +4,14 @@ add_executable(test_foundation unit/test_foundation.cpp)
 target_link_libraries(test_foundation PRIVATE shelf::foundation)
 add_test(NAME unit.foundation COMMAND test_foundation)
 
+add_executable(test_artifact_safetensors unit/test_artifact_safetensors.cpp)
+target_link_libraries(test_artifact_safetensors PRIVATE shelf::artifact)
+add_test(NAME unit.artifact_safetensors COMMAND test_artifact_safetensors)
+
+add_executable(test_weights_catalog unit/test_weights_catalog.cpp)
+target_link_libraries(test_weights_catalog PRIVATE shelf::weights)
+add_test(NAME unit.weights_catalog COMMAND test_weights_catalog)
+
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
 target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

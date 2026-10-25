@@ -41,5 +41,23 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(shelf_backend_hip PUBLIC shelf::backend_common hip::host)
 endif()
 
+# ---------------------------------------------------------------- artifact
+add_library(shelf_artifact STATIC
+    src/artifact/safetensors/reader.cpp)
+add_library(shelf::artifact ALIAS shelf_artifact)
+target_include_directories(shelf_artifact PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/artifact/common/include>"
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/artifact/safetensors/include>")
+target_link_libraries(shelf_artifact PUBLIC shelf::foundation PRIVATE shelf::nlohmann)
+
+# ---------------------------------------------------------------- weights
+# Header-only Canonical Catalog for now (binding/materialization later).
+add_library(shelf_weights INTERFACE)
+add_library(shelf::weights ALIAS shelf_weights)
+target_include_directories(shelf_weights INTERFACE
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/weights/catalog/include>")
+target_link_libraries(shelf_weights INTERFACE shelf::artifact shelf::foundation)
+
 # ---------------------------------------------------------------- api (PR-008+)
 # shelf_api will be added when a facade exists. include/shelf/ stays minimal.

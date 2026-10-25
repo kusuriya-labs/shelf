@@ -28,6 +28,8 @@ public:
     };
 
     static Status make_ok();
+    // Generic constructor with pre-built message (supports std::string concat).
+    static Status from(Code code, const std::string& msg, const char* file, int line);
     static Status invalid_argument(const char* msg, const char* file, int line);
     static Status out_of_range(const char* msg, const char* file, int line);
     static Status overflow(const char* msg, const char* file, int line);
@@ -35,6 +37,14 @@ public:
     static Status invalid_state(const char* msg, const char* file, int line);
     static Status not_found(const char* msg, const char* file, int line);
     static Status unsupported(const char* msg, const char* file, int line);
+    // std::string overloads (message may be built dynamically).
+    static Status invalid_argument(const std::string& msg, const char* file, int line) { return from(Code::invalid_argument, msg, file, line); }
+    static Status out_of_range(const std::string& msg, const char* file, int line) { return from(Code::out_of_range, msg, file, line); }
+    static Status overflow(const std::string& msg, const char* file, int line) { return from(Code::overflow, msg, file, line); }
+    static Status insufficient_memory(const std::string& msg, const char* file, int line) { return from(Code::insufficient_memory, msg, file, line); }
+    static Status invalid_state(const std::string& msg, const char* file, int line) { return from(Code::invalid_state, msg, file, line); }
+    static Status not_found(const std::string& msg, const char* file, int line) { return from(Code::not_found, msg, file, line); }
+    static Status unsupported(const std::string& msg, const char* file, int line) { return from(Code::unsupported, msg, file, line); }
     // Backend-neutral device API failure. Message must be produced by the
     // backend that can interpret the native error code (HIP/SYCL/etc.).
     static Status device_error(const char* expr, const char* msg, const char* file, int line);
@@ -95,6 +105,12 @@ private:
 
 inline Status Status::make_ok() {
     return Status{Code::ok, ""};
+}
+
+inline Status Status::from(Code code, const std::string& msg, const char* file, int line) {
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s:%d: %s", file, line, msg.c_str());
+    return Status{code, std::string(buf)};
 }
 
 inline Status Status::invalid_argument(const char* msg, const char* file, int line) {

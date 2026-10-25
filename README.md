@@ -44,9 +44,11 @@ cmake --build --preset hip
 ctest --test-dir build/hip --output-on-failure
 ```
 
-Phase 1–2 完了分: `foundation`（Status/Result, TensorShape, DataType, TensorId,
+Phase 1–2 完了 + PR-004: `foundation`（Status/Result, TensorShape, DataType, TensorId,
 TensorSpec, bf16/fp16変換）+ `backend/common`（Device/BufferView 等の中立契約）+
-`backend/hip`（Device/Stream/Event/DeviceBuffer・転送・依存同期）。
+`backend/hip`（Device/Stream/Event/DeviceBuffer・転送・依存同期）+
+`artifact/safetensors`（BF16 Reader・Raw Tensor Catalog）+ `weights/catalog`
+（Canonical Tensor Catalog・マルチシャード解決）。
 `backend/sycl` は SYCL ランタイム導入まで空（意図的に HIP で代替しない）。
 
 - 依存ルール（機械検査される契約表): [docs/architecture/dependency-rules.md](docs/architecture/dependency-rules.md)

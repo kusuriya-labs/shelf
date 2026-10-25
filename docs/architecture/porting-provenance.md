@@ -21,6 +21,17 @@
 | `src/foundation/include/shelf/foundation/numeric.hpp` | `include/phaseshift/core/memory/types.h` | namespace を `shelf` に。`bf16_to_f32` を追加（新規実装） |
 | `tests/architecture/test_architecture_boundaries.cpp` | `tests/unit/test_architecture_boundaries.cpp` | shelf の依存ルールに合わせて規則を全面書き換え（機構：include 走査＋モデル名 raw 走査は踏襲） |
 
+## PR-004（Phase 3 前倒し: BF16 Weight Reader / Catalog）
+
+- `src/artifact/safetensors/`・`src/artifact/common/`・`src/weights/catalog/` は
+  **新規実装**（PhaseShift `io/safetensors_reader` の API 形状のみ参照。mmap でなく
+  ifstream、pimpl でなく素の RAII。仕様の直接実装なので移植コードはない）。
+- ベンダー依存: **nlohmann/json 3.12.0（MIT）** を `third_party/nlohmann/` に同梱
+  （PhaseShift の vendor と同一ファイル、改変なし。詳細は third_party/README.md）。
+  artifact の PRIVATE 依存に限定し、公開ヘッダに json 型を漏らさない。
+- safetensors は PhaseShift で先に読み書き検証済みのコンテナ。GGUF/EXL3 の
+  マルチコンテナ解決（Phase 3 完了条件）は GGUF Reader 導入時に拡張。
+
 ## 設計のみ参照（コード未移植）
 
 | shelf 側の設計 | XeStrata からの参照点 |
