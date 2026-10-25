@@ -4,4 +4,4 @@ cmake_install/
 compile_commands.json
 *.user
 /models
-shelf-out/
+/shelf-out*/

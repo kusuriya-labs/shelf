@@ -36,6 +36,10 @@ if(SHELF_ENABLE_HIP)
     add_executable(test_hip_gdn unit/test_hip_gdn.cpp)
     target_link_libraries(test_hip_gdn PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_gdn COMMAND test_hip_gdn)
+
+    add_executable(test_hip_elementwise_kernels unit/test_hip_elementwise_kernels.cpp)
+    target_link_libraries(test_hip_elementwise_kernels PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_elementwise_kernels COMMAND test_hip_elementwise_kernels)
 endif()
 
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)

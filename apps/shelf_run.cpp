@@ -3,6 +3,7 @@
 // token-by-token (prefill == decode here; slow but exact-by-construction),
 // greedy-samples and dumps final logits for oracle parity checks.
 #include <algorithm>
+#include <filesystem>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,11 @@
 #include <shelf/backend/cpu/reference_executor.hpp>
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/model/qwen35/step_graph.hpp>
+
+#ifdef SHELF_HAVE_HIP
+#include <memory>
+#include <shelf/backend/hip/step_executor.hpp>
+#endif
 
 namespace {
 
@@ -70,7 +76,8 @@ Result<std::vector<float>> read_f32(
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string model_dir, ids_csv, out_dir = "shelf-out";
+    std::string model_dir, ids_csv, out_dir = "shelf-out", device = "cpu";
+    int gpu = 0;
     int steps = 16;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -82,7 +89,10 @@ int main(int argc, char** argv) {
         else if (a == "--ids") ids_csv = next("ids");
         else if (a == "--steps") steps = std::atoi(next("steps").c_str());
         else if (a == "--out") out_dir = next("out");
-        else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR]");
+        else if (a == "--device") device = next("cpu|hip");
+        else if (a == "--gpu") gpu = std::atoi(next("gpu index").c_str());
+        else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
+                         "[--device cpu|hip]");
     }
     if (model_dir.empty() || ids_csv.empty()) return fail("--model and --ids required");
 
@@ -130,24 +140,47 @@ int main(int argc, char** argv) {
             if (!where.contains(name)) where.emplace(name, &r);
 
     // ---- weights ----
+#ifdef SHELF_HAVE_HIP
+    std::unique_ptr<backend::hip::HipStepExecutor> hip_exec;
+#endif
     backend::cpu::HostStorage storage;
-    std::size_t loaded_params = 0;
-    for (const auto& w : plan.weights) {
-        auto t = read_f32(where, w.checkpoint_name);
-        if (!t.ok()) return fail(t.status().message());
-        if (t.value().size() != numel(w.shape)) {
-            return fail("shape mismatch for " + w.checkpoint_name + ": file has " +
-                        std::to_string(t.value().size()) + ", IR contract needs " +
-                        std::to_string(numel(w.shape)));
+    if (device == "hip") {
+#ifdef SHELF_HAVE_HIP
+        backend::hip::HipStepExecutorOptions ho;
+        ho.device = gpu;
+        ho.rope_theta = cfg.rope_theta;
+        ho.rope_rotary_dim = cfg.rotary_dim;
+        hip_exec = std::make_unique<backend::hip::HipStepExecutor>(ho);
+        for (const auto& w : plan.weights) {
+            auto t = read_f32(where, w.checkpoint_name);
+            if (!t.ok()) return fail(t.status().message());
+            if (t.value().size() != numel(w.shape))
+                return fail("shape mismatch for " + w.checkpoint_name);
+            auto st = hip_exec->upload_weight(w.id, t.value());
+            if (!st.ok()) return fail("upload " + w.checkpoint_name + ": " + st.message());
         }
-        auto st = storage.set_weight(w.id, t.release());
-        if (!st.ok()) return fail("set_weight " + w.checkpoint_name + ": " + st.message());
+        auto st = hip_exec->declare_states(plan.graph);
+        if (!st.ok()) return fail("declare_states: " + st.message());
+#else
+        return fail("built without HIP support");
+#endif
+    } else {
+        for (const auto& w : plan.weights) {
+            auto t = read_f32(where, w.checkpoint_name);
+            if (!t.ok()) return fail(t.status().message());
+            if (t.value().size() != numel(w.shape)) {
+                return fail("shape mismatch for " + w.checkpoint_name + ": file has " +
+                            std::to_string(t.value().size()) + ", IR contract needs " +
+                            std::to_string(numel(w.shape)));
+            }
+            auto st = storage.set_weight(w.id, t.release());
+            if (!st.ok()) return fail("set_weight " + w.checkpoint_name + ": " + st.message());
+        }
+        for (const auto& s : plan.states) {
+            auto st = storage.init_state(s.id, std::vector<float>(numel(s.shape), 0.0f));
+            if (!st.ok()) return fail("init_state: " + st.message());
+        }
     }
-    for (const auto& s : plan.states) {
-        auto st = storage.init_state(s.id, std::vector<float>(numel(s.shape), 0.0f));
-        if (!st.ok()) return fail("init_state: " + st.message());
-    }
-    (void)loaded_params;
 
     // ---- rope tables (text path: all mrope channels equal -> identity; HF
     //      computes inv_freq/cos/sin in f32 — we compute in double and round) ----
@@ -158,6 +191,20 @@ int main(int argc, char** argv) {
 
     auto run_step = [&](std::int64_t token, std::size_t pos, std::vector<float>* logits_out)
         -> Status {
+#ifdef SHELF_HAVE_HIP
+        if (hip_exec) {
+            SHELF_RETURN_IF_ERROR(
+                hip_exec->run_step(plan.graph, static_cast<std::int32_t>(token),
+                                   static_cast<std::uint32_t>(pos)));
+            if (logits_out) {
+                auto lg = hip_exec->fetch_logits(plan.graph);
+                if (!lg.ok()) return lg.status();
+                *logits_out = lg.value();
+            }
+            std::printf("  hip step: %.2f ms\n", hip_exec->stats().last_step_ms);
+            return Status::make_ok();
+        }
+#endif
         storage.reset_values();
         auto st = storage.set_value_int(plan.tokens, {static_cast<std::int32_t>(token)});
         if (!st.ok()) return st;
@@ -210,7 +257,9 @@ int main(int argc, char** argv) {
     }
     std::printf("seq: %s\n", ids_line.c_str());
     if (!last_logits.empty()) {
+        std::filesystem::create_directories(out_dir);
         std::ofstream f(out_dir + "/logits_f32.bin", std::ios::binary);
+        if (!f) return fail("cannot write " + out_dir + "/logits_f32.bin");
         f.write(reinterpret_cast<const char*>(last_logits.data()),
                 static_cast<std::streamsize>(last_logits.size() * sizeof(float)));
         std::printf("wrote %s/logits_f32.bin (%zu floats)\n", out_dir.c_str(), last_logits.size());

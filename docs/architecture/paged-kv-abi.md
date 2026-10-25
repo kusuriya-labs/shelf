@@ -38,18 +38,31 @@ gfx1201 の自前 kernel 族（bf16/fp8 paged decode・split-K・kv_append）は
 
 `PagedKVArgs::validate()` が table×seqused×pool 容量の整合を一箇所で検査する。
 
-## prefix 共有（radix 相当）の契約
+## prefix 共有（rev2.1: ツリー共有は採用しない）
 
-- 共有単位 = attention カーネルが address する**ブロックそのもの**
-  （radix ノード = ページ = eviction 単位が一致する）
-- ブロック ID = **全 prefix を織り込んだ 128bit chained hash**:
-  `key(block) = mix(key(parent), tokens)`（`chain_block_key`、決定論的）
-- 誤 hit 防止: hash 一致は**必ず token 列比較で確認**してから再利用
-  （SGLang 型 trie でなく hash map の退化 radix。機能は等価で、
-  eviction・fork(COW)・マルチランクが trie なしで単純に実装できる）
-- GDN など hybrid 状態の prefix hit は **checkpoint interval**（attention
-  block とは独立の設定）で支援する設計。実装は Phase 8（linear state の
-  checkpoint 追加時に `StateKind::recurrent` 側へ対応 ABI を切る）
+`~/work/references/Strata` の実測調査により、**Radix/TreeAttention は不要**と
+判定（2026-10-26、ユーザー結論）。Strata 側の事実:
+
+- ページング自体は存在（page_table + 位置 arena + pinned-RAM/VRAM 2 段 +
+  選択駆動 CLOCK 追い出し）。vLLM 型の動的アロケータではない
+- 共有は「任意長のツリー」でなく **離散点**で効かせる: ターン境界 /
+  `--prompt-cache-every` / system prompt root / park / 明示 pin。
+  位置=トークン位置なので「checkpoint から再開」は KV をそのまま再利用
+- 並列時はスロット単位の会話キャッシュ = 粗い共有で十分
+  （"fine granularity buys nothing and costs per-token indirection"）
+
+shelf の採用方針:
+
+1. **ページ arena は位置インデックス**（1 文脈 = 論理ブロック列 → 物理ページ）。
+   プレフィックス再利用は「位置が同じなら KV も同じ」という positional 同一性で足りる
+2. 共有・再開の単位は **離散 checkpoint**（ターン境界・固定間隔・明示 pin）。
+   `BlockKey`（chained 128bit hash、`runtime/state/prefix_key.hpp`）は
+   **trie ではなく checkpoint→KV の同一性マップ**（prompt cache エントリ照合）
+   として使う。hit 確認は token 列比較（誤 hit 不可）
+3. ブロック共有 CoW / beam 共有は **当面実装しない**（必要になった時点で
+   refcount+COW は同じ ABI の上に載る設計のまま温存）
+4. GDN など hybrid 状態の再開は **checkpoint interval**（attention block と
+   独立設定）で recurrent/conv state を保存。実装は Phase 8
 
 ## 次（GPU 実装 PR）
 

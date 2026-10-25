@@ -78,3 +78,24 @@ GPU 高速化段階で kernel・paged KV を移植予定（未移植）。
 PhaseShift の `core/gpu/`・`core/memory/` は設計のみ参照（RAII・error マッピング方針）。
 環境依存の事実記録: GPU は gfx1201 (R9700) x4、ROCm SDK は pip の `_rocm_sdk_devel`。
 SYCL ランタイムは未導入のため `backend/sycl` は空で保持（ユーザー指示: sycl は将来必ず使う）。
+
+## PR-008（PhaseShift HIP kernel 資産の完全移植 + GPU step executor）
+
+`src/backend/hip/kernels/` の以下は PhaseShift `kernels/optimized/` の
+**self-work vendoring**（`ps::kernel`→`shelf::hipk`、`ps::bf16_t`→
+`shelf::bf16_t`、include 書き換えのみ。数式・カーネルシンボル
+（`phaseshift_*`）は不改変。PhaseShift は自己制作のため著作権表記不要）:
+
+| shelf TU | 移植元 |
+|---|---|
+| `attention_paged_decode.hip` / `attention_kv_append.hip` | `kernels/optimized/attention/{paged_bf16,kv_append}.hip`（2 プール separate-pool addressing、ABI は `paged-kv-abi.md` rev2 に一致） |
+| `attention_rope.hip` | `kernels/optimized/rope/`（f32 入力・device inv_freq、D=256/rotary=64 ペアカーネル） |
+| `gdn_{qk_prepare,conv_silu,conv1d,recurrence}.hip` | `kernels/optimized/gdn/`（conv state は shelf では fp32 `[slot][layer][C][3]` oldest-first に拡張 — PhaseShift の bf16 `[3][C]` からの**意図的乖離**、recurrent state fp32 不変） |
+| `elementwise_{rmsnorm,ops,embedding,l2_normalize}.hip` | `kernels/optimized/{norm,elementwise,embedding}/`（zero-centered `ONE_PLUS` gamma ネイティブ、embedding error-word プロトコルの `ProgramStatus` は wire 値同一の自前宣言） |
+| `aux_ops.hip` | 新規（row slice / sigmoid-gate / argmax / bf16↔f32 変換） |
+
+`src/backend/hip/step_executor.{hpp,cpp}` は **新規実装**: IR の全 Kind を
+上記カーネルへディスパッチ（bf16 激活 / f32 GDN 状態・logits、KV は
+bf16 separate pools、1 文脈 identity ブロックテーブル）。CPU reference
+executor が数値 golden のままで、GPU 経路は greedy 一致で検証
+（Qwen3.5-4B: 21 token 全一致、約 18 ms/token ≈ 55 tok/s、CPU 比約 190 倍）。

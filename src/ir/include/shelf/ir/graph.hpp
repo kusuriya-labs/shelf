@@ -67,6 +67,10 @@ public:
     }
 
     const std::vector<Primitive>& primitives() const noexcept { return primitives_; }
+    const std::vector<StateDesc>& all_states() const noexcept { return states_; }
+    struct WeightDecl { TensorId id; TensorShape shape; };
+    const std::vector<WeightDecl>& all_weights() const noexcept { return weights_; }
+    const std::vector<ValueDesc>& all_inputs() const noexcept { return inputs_; }
     std::size_t size() const noexcept { return primitives_.size(); }
 
     const ValueDesc* find_value(ValueId id) const {
@@ -91,8 +95,7 @@ public:
     }
 
 private:
-    struct WeightDecl { TensorId id; TensorShape shape; };
-
+    
     static Status bad(const std::string& msg) {
         return Status::invalid_argument("ir/graph: " + msg, __FILE__, __LINE__);
     }

@@ -97,4 +97,31 @@ hipError_t launch_f32_argmax(const float* logits, uint32_t n, uint32_t* out_tok,
     return hipGetLastError();
 }
 
+// dtype conversions for activation streams
+extern "C" __global__ __launch_bounds__(256)
+void bf16_to_f32_k(const shelf::bf16_t* __restrict__ in, float* __restrict__ out, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = __bfloat162float(__ushort_as_bfloat16(in[i].data));
+}
+
+extern "C" __global__ __launch_bounds__(256)
+void f32_to_bf16_k(const float* __restrict__ in, shelf::bf16_t* __restrict__ out, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(in[i]))};
+}
+
+hipError_t launch_bf16_to_f32(const shelf::bf16_t* in, float* out, uint32_t n,
+                              hipStream_t stream) {
+    bf16_to_f32_k<<<(n + 255u) / 256u, 256, 0, stream>>>(in, out, n);
+    return hipGetLastError();
+}
+
+hipError_t launch_f32_to_bf16(const float* in, shelf::bf16_t* out, uint32_t n,
+                              hipStream_t stream) {
+    f32_to_bf16_k<<<(n + 255u) / 256u, 256, 0, stream>>>(in, out, n);
+    return hipGetLastError();
+}
+
 } // namespace shelf::hipk
