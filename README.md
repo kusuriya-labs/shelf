@@ -53,5 +53,18 @@ SSA・shape 代数・state 宣言整合）+ `backend/cpu`（CPU 参照 Executor�
 Golden Fixture・KV state 更新検証）。
 `backend/sycl` は SYCL ランタイム導入まで空（意図的に HIP で代替しない）。
 
+### Qwen3.5-4B（BF16）が shelf で動作（CPU 参照路径・遅いが正確）
+
+```bash
+./build/app/apps/shelf-run --model ~/work/models/Qwen3.5-4B \
+    --ids 760,6511,314,9338,369 --steps 16 --out shelf-out
+```
+
+- `model/qwen35`: config.json → per-layer Graph lowering（hybrid 3:1 linear/full、
+  GDN recurrent・conv state・GQA+sigmoid gate・partial RoPE・tied embeddings）
+- 検証: f64 oracle（`~/work/references/qwen35-f64-oracle`、transformers op-for-op）に対し
+  prefill 最終位置 logits top-1 一致・最大差 <5e-5（f32 CPU）
+- `tools/parity_logits.py` が parity チェック
+
 - 依存ルール（機械検査される契約表): [docs/architecture/dependency-rules.md](docs/architecture/dependency-rules.md)
 - 移植由来・ライセンス台帳（PhaseShift は自己制作のため表記不要 / XeStrata LGPL 方針）: [docs/architecture/porting-provenance.md](docs/architecture/porting-provenance.md)

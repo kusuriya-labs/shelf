@@ -57,6 +57,16 @@ target_include_directories(shelf_backend_cpu PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/cpu/include>")
 target_link_libraries(shelf_backend_cpu PUBLIC shelf::ir shelf::foundation)
 
+# ---------------------------------------------------------------- model/qwen35
+add_library(shelf_model_qwen35 STATIC
+    src/model/qwen35/text_config.cpp
+    src/model/qwen35/step_graph.cpp)
+add_library(shelf::model_qwen35 ALIAS shelf_model_qwen35)
+target_include_directories(shelf_model_qwen35 PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/model/qwen35/include>")
+target_link_libraries(shelf_model_qwen35 PUBLIC shelf::ir)
+target_link_libraries(shelf_model_qwen35 PRIVATE shelf::nlohmann)
+
 # ---------------------------------------------------------------- artifact
 add_library(shelf_artifact STATIC
     src/artifact/safetensors/reader.cpp)

@@ -27,6 +27,7 @@
 
 - **モデル名の禁止:** `qwen / llama / deepseek / mistral / phi-` のリテラルは
   `src/model/` 以外ではソース本文中も禁止（`if (model == Qwen...)` 分岐を防ぐ）。
+  ただし `apps/` は composition root（モデル結合を明示的に行う層）として走査対象外。
 - **SYCL型の禁止（現状）:** `src/backend/sycl/` は SYCL ランタイム導入まで空。
   導入後は `<sycl/sycl.hpp>` の include を `src/backend/sycl/` のみに限定する。
 - **HIP型の封じ込め:** `<hip/...>` を include できるのは `src/backend/hip/` のみ。

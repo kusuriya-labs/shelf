@@ -48,6 +48,14 @@ public:
     }
     const std::vector<float>* state_const(ir::StateId id) const { return get_float(states_, id.value()); }
 
+    // Step loop support: activations are per-step, weights and state are not.
+    void reset_values() { values_.clear(); }
+    // Usage rows tracked by the executor for stateful primitives (KV/GDN).
+    std::size_t state_rows(ir::StateId id) const {
+        auto it = rows_.find(id.value());
+        return it == rows_.end() ? 0 : it->second;
+    }
+
 private:
     struct Slot {
         std::vector<float> floats;
@@ -65,6 +73,7 @@ private:
     std::map<std::uint32_t, Slot> values_;
     std::map<std::uint32_t, Slot> weights_;
     std::map<std::uint32_t, Slot> states_;
+    std::map<std::uint32_t, std::size_t> rows_;  // StateId -> usage rows (persists across run()s)
     friend class ReferenceExecutor;
 };
 
@@ -76,8 +85,7 @@ public:
     static Status run(const ir::Graph& graph, HostStorage& storage);
 
 private:
-    static Status run_primitive(const ir::Graph& graph, const ir::Primitive& p, HostStorage& storage,
-                                std::map<std::uint32_t, std::size_t>& kv_rows);
+    static Status run_primitive(const ir::Graph& graph, const ir::Primitive& p, HostStorage& storage);
 };
 
 } // namespace shelf::backend::cpu

@@ -12,6 +12,8 @@ include(Options)
 include(Dependencies)
 include(Targets)
 
+add_subdirectory(apps)
+
 if(SHELF_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

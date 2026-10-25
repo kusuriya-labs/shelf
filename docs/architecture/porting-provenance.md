@@ -38,6 +38,21 @@
 PhaseShift の inference/program 系は Phase 6 の Lowering 検討時に設計参照予定。
 Primitive 集合は Phase 4 候補から GDN・ExpertCompute を除外（Layer Parity 段階で追加）。
 
+## PR-006（Qwen3.5-4B text path 動作・CPU 参照）
+
+`src/model/qwen35/`・IR 拡張 Kind（slice/reshape/sigmoid_gate/rmsnorm_gated/
+causal_conv_step/gdn_step/attention_gqa_step）・`apps/shelf_run.cpp` は **新規実装**。
+
+数式契約の根拠（設計参照のみ・コード移植なし）:
+- `~/work/references/qwen35-f64-oracle/ARCHITECTURE.md`（transformers op-for-op 仕様。
+  oracle 側の `py/ref_forward.py` は transformers 5.20 の rope/GDN API 変更に伴い
+  oracle リポジトリ側で適合修正済み）
+- Ground truth: 同 oracle `--load full --pure`（f64）の logits.bin。
+  shelf f32 CPU と top-1 一致・最大差 <5e-5。
+
+PhaseShift（`~/work/phaseshift-bf16-fp8-tp4`、自己制作）の qwen35 runtime family は
+GPU 高速化段階で kernel・paged KV を移植予定（未移植）。
+
 ## 設計のみ参照（コード未移植）
 
 | shelf 側の設計 | XeStrata からの参照点 |

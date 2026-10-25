@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <initializer_list>
+#include <vector>
 
 #include <shelf/status.hpp>
 
@@ -34,6 +35,10 @@ public:
 
     static Result<TensorShape> create(std::initializer_list<std::size_t> dims) {
         return create(dims.begin(), dims.size());
+    }
+
+    static Result<TensorShape> create(const std::vector<std::size_t>& dims) {
+        return create(dims.data(), dims.size());
     }
 
     TensorShape() = default;

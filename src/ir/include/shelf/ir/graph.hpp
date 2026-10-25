@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <shelf/ir/primitives.hpp>
@@ -127,8 +128,9 @@ private:
                 if (p.inputs.size() != 1 || p.weights.size() != 1) return bad("rmsnorm arity");
                 const ValueDesc* x = in(0);
                 const TensorShape* g = wshape(0);
-                if (!x || x->shape.rank() != 2) return bad("rmsnorm input [M,H]");
-                if (!g || g->rank() != 1 || g->dim(0) != x->shape.dim(1)) return bad("rmsnorm gamma [H]");
+                if (!x || x->shape.rank() < 2) return bad("rmsnorm input [..,H]");
+                if (!g || g->rank() != 1 || g->dim(0) != x->shape.dim(x->shape.rank() - 1))
+                    return bad("rmsnorm gamma [H]");
                 return expect_out(p, x->shape, out);
             }
             case Kind::linear:
@@ -161,13 +163,16 @@ private:
                 const ValueDesc* c = in(1);
                 const ValueDesc* sn = in(2);
                 if (!x || !c || !sn) return bad("rope inputs");
-                if (!same_shape(x->shape, c->shape) || !same_shape(x->shape, sn->shape)) {
-                    return bad("rope cos/sin shape must match x");
-                }
-                if (x->shape.rank() != 2) return bad("rope x [H] as [1,H]");
-                const std::size_t rd = p.attr.rotary_dim == 0 ? x->shape.dim(1)
+                if (x->shape.rank() < 2) return bad("rope x [..,H]");
+                const std::size_t H = x->shape.dim(x->shape.rank() - 1);
+                const std::size_t rd = p.attr.rotary_dim == 0 ? H
                                                               : static_cast<std::size_t>(p.attr.rotary_dim);
-                if (rd == 0 || rd % 2 != 0 || rd > x->shape.dim(1)) return bad("rope rotary_dim invalid");
+                if (rd == 0 || rd % 2 != 0 || rd > H) return bad("rope rotary_dim invalid");
+                // cos/sin either full-row ([..,H] like x) or rotary-only ([rd]) broadcast to every row
+                const bool full = same_shape(c->shape, x->shape) && same_shape(sn->shape, x->shape);
+                const bool narrow = c->shape.rank() == 1 && c->shape.dim(0) == rd &&
+                                    sn->shape.rank() == 1 && sn->shape.dim(0) == rd;
+                if (!full && !narrow) return bad("rope cos/sin must match x or be [rotary_dim]");
                 return expect_out(p, x->shape, out);
             }
             case Kind::attention_decode: {
@@ -218,6 +223,135 @@ private:
                                            ? probs->shape.num_elements().value() : 0;
                 if (eo->shape.dim(0) != pe) return bad("moe_merge E mismatch");
                 return expect_out(p, TensorShape::create({eo->shape.dim(1)}).release(), out);
+            }
+            case Kind::slice: {
+                if (p.inputs.size() != 1 || !p.weights.empty()) return bad("slice arity");
+                const ValueDesc* x = in(0);
+                if (!x || x->shape.rank() < 1) return bad("slice input");
+                const std::size_t N = x->shape.dim(x->shape.rank() - 1);
+                const std::int64_t b = p.attr.slice_begin;
+                const std::int64_t e = p.attr.slice_end == -1 ? static_cast<std::int64_t>(N)
+                                                              : p.attr.slice_end;
+                if (b < 0 || e <= b || static_cast<std::size_t>(e) > N) {
+                    return bad("slice range invalid for last dim of size " + std::to_string(N));
+                }
+                std::vector<std::size_t> dims;
+                for (std::size_t i = 0; i < x->shape.rank(); ++i) dims.push_back(x->shape.dim(i));
+                dims.back() = static_cast<std::size_t>(e - b);
+                return expect_out(p, TensorShape::create(dims).release(), out);
+            }
+            case Kind::reshape: {
+                if (p.inputs.size() != 1 || !p.weights.empty()) return bad("reshape arity");
+                const ValueDesc* x = in(0);
+                if (!x) return bad("reshape input");
+                auto n_in = x->shape.num_elements();
+                auto n_out = p.output.shape.num_elements();
+                if (!n_in.ok() || !n_out.ok() || n_in.value() != n_out.value())
+                    return bad("reshape needs identical element counts");
+                if (out != nullptr) {
+                    auto n_stored = out->shape.num_elements();
+                    if (!n_stored.ok() || n_stored.value() != n_in.value())
+                        return bad("reshape stored output element count mismatch");
+                }
+                return Status::make_ok();
+            }
+            case Kind::sigmoid_gate: {
+                if (p.inputs.size() != 2 || !p.weights.empty()) return bad("sigmoid_gate arity");
+                const ValueDesc* a = in(0);
+                const ValueDesc* g = in(1);
+                if (!a || !g || !same_shape(a->shape, g->shape)) return bad("sigmoid_gate needs identical shapes");
+                return expect_out(p, a->shape, out);
+            }
+            case Kind::rmsnorm_gated: {
+                if (p.inputs.size() != 2 || p.weights.size() != 1) return bad("rmsnorm_gated arity (x,z)");
+                const ValueDesc* x = in(0);
+                const ValueDesc* z = in(1);
+                const TensorShape* g = wshape(0);
+                if (!x || !z || !same_shape(x->shape, z->shape) || x->shape.rank() < 2)
+                    return bad("rmsnorm_gated x/z [..,H] identical");
+                if (!g || g->rank() != 1 || g->dim(0) != x->shape.dim(x->shape.rank() - 1))
+                    return bad("rmsnorm_gated gamma [H]");
+                return expect_out(p, x->shape, out);
+            }
+            case Kind::causal_conv_step: {
+                if (p.inputs.size() != 1 || p.weights.size() != 1) return bad("causal_conv_step arity");
+                if (p.state_read.size() != 1 || p.state_write.size() != 1 ||
+                    p.state_read[0] != p.state_write[0]) {
+                    return bad("causal_conv_step needs one conv state read+write");
+                }
+                const StateDesc* st = find_state(p.state_read[0]);
+                const ValueDesc* x = in(0);
+                const TensorShape* w = wshape(0);
+                if (!x || x->shape.rank() != 1) return bad("causal_conv_step x [C]");
+                if (!w || w->rank() != 2 || w->dim(0) != x->shape.dim(0) || w->dim(1) != 4)
+                    return bad("causal_conv_step weights [C,4]");
+                if (!st || st->kind != StateKind::conv || st->logical_shape.rank() != 2 ||
+                    st->logical_shape.dim(0) != x->shape.dim(0) || st->logical_shape.dim(1) != 3) {
+                    return bad("conv state [C,3]");
+                }
+                return expect_out(p, x->shape, out);
+            }
+            case Kind::gdn_step: {
+                if (p.inputs.size() != 5 || p.weights.size() != 2)
+                    return bad("gdn_step arity (q,k,v,b,a)");
+                if (p.state_read.size() != 1 || p.state_write.size() != 1 ||
+                    p.state_read[0] != p.state_write[0]) {
+                    return bad("gdn_step needs one recurrent state read+write");
+                }
+                const StateDesc* st = find_state(p.state_read[0]);
+                const ValueDesc* q = in(0);
+                const ValueDesc* k = in(1);
+                const ValueDesc* v = in(2);
+                const ValueDesc* b = in(3);
+                const ValueDesc* a = in(4);
+                const TensorShape* al = wshape(0);
+                const TensorShape* dtb = wshape(1);
+                if (!q || !k || !v || !b || !a) return bad("gdn_step inputs");
+                if (q->shape.rank() != 2 || k->shape.rank() != 2 || v->shape.rank() != 2 ||
+                    b->shape.rank() != 1 || a->shape.rank() != 1 ||
+                    !same_shape(q->shape, k->shape)) {
+                    return bad("gdn_step q/k [nkh,dk] v [nvh,dv] b/a [nvh]");
+                }
+                if (v->shape.dim(0) % q->shape.dim(0) != 0) return bad("gdn_step nvh % nkh");
+                if (b->shape.dim(0) != v->shape.dim(0) || a->shape.dim(0) != v->shape.dim(0))
+                    return bad("gdn_step b/a must be [nvh]");
+                if (!al || al->rank() != 1 || al->dim(0) != v->shape.dim(0) ||
+                    !dtb || dtb->rank() != 1 || dtb->dim(0) != v->shape.dim(0)) {
+                    return bad("gdn_step A_log/dt_bias [nvh]");
+                }
+                if (!st || st->kind != StateKind::recurrent || st->logical_shape.rank() != 3 ||
+                    st->logical_shape.dim(0) != v->shape.dim(0) ||
+                    st->logical_shape.dim(1) != q->shape.dim(1) ||
+                    st->logical_shape.dim(2) != v->shape.dim(1)) {
+                    return bad("recurrent state [nvh,dk,dv]");
+                }
+                return expect_out(p, v->shape, out);
+            }
+            case Kind::attention_gqa_step: {
+                if (p.inputs.size() != 3 || !p.weights.empty())
+                    return bad("attention_gqa_step arity (q,k_new,v_new)");
+                if (p.state_read.size() != 1 || p.state_write.size() != 1 ||
+                    p.state_read[0] != p.state_write[0]) {
+                    return bad("attention_gqa_step needs one KV state read+write (append)");
+                }
+                const StateDesc* kv = find_state(p.state_read[0]);
+                if (!kv || kv->kind != StateKind::kv_cache || kv->logical_shape.rank() != 4 ||
+                    kv->logical_shape.dim(1) != 2) {
+                    return bad("KV state [capacity,2,kvh,head_dim]");
+                }
+                const std::size_t kvh = kv->logical_shape.dim(2);
+                const std::size_t D = kv->logical_shape.dim(3);
+                const ValueDesc* q = in(0);
+                const ValueDesc* kn = in(1);
+                const ValueDesc* vn = in(2);
+                if (!q || !kn || !vn) return bad("attention_gqa_step inputs");
+                if (q->shape.rank() != 2 || q->shape.dim(1) != D) return bad("q [nq,head_dim]");
+                if (!same_shape(kn->shape, vn->shape) || kn->shape.rank() != 2 ||
+                    kn->shape.dim(0) != kvh || kn->shape.dim(1) != D) {
+                    return bad("k_new/v_new [kvh,head_dim]");
+                }
+                if (q->shape.dim(0) % kvh != 0) return bad("nq % kvh");
+                return expect_out(p, q->shape, out);
             }
             default:
                 return bad("unknown primitive kind");
