@@ -1,21 +1,29 @@
 // shelf backend/common — Paged KV physical ABI (kernel-visible contract).
 //
-// This is the layout a paged-attention kernel sees. It deliberately mirrors
-// the proven libr4d ABI (radiance, gfx1201): a flat block pool indexed by a
-// per-sequence int32 block table, K and V interleaved per slot. Porting a
-// kernel must be an adapter, never a redesign.
+// This is the layout a paged-attention kernel sees. Porting a kernel must
+// be an adapter, never a redesign. (Revision 2: the vendored gfx1201 kernel
+// family — paged decode bf16/fp8, split-K reduce, kv_append — addresses
+// TWO separate K/V pools; making that the canonical packing removes a
+// per-step conversion copy. The libr4d/radiance single-pool interleaved
+// packing stays first-class for porting those kernels.)
 //
 // Physical truth lives HERE; the IR's kv_cache StateDesc stays LOGICAL
 // (capacity/head semantics). The mapping logical -> physical is a lowering/
 // runtime concern (runtime/state).
 //
-// Canonical slot layout, in elements of `dtype`:
+// Packing, in elements of `dtype`:
 //
-//   element(block b, kv_head h, token-in-block s, kind k∈{K,V}, dim d)
-//     = b*block_stride + h*head_stride + s*slot_stride + k*head_dim + d
+//  SeparatePools (canonical) — offset WITHIN ONE POOL (caller picks K or V):
+//    element(b, s, h, d) = b*block_stride + s*slot_stride + h*head_stride + d
+//    canonical: slot_stride = kv_heads*head_dim ("token-major"),
+//               head_stride = head_dim, block_stride = block_size*slot_stride
 //
-// with slot_stride == 2*head_dim ("K then V per slot"). Strides are declared,
-// not assumed equal, exactly as the libr4d entry points accept them.
+//  InterleavedKV (libr4d portable) — single pool, kind k∈{K,V}:
+//    element(b, h, s, k, d) = b*block_stride + h*head_stride +
+//                             s*slot_stride + k*head_dim + d
+//    canonical: slot_stride = 2*head_dim ("K then V per token"),
+//               head_stride = block_size*slot_stride,
+//               block_stride = kv_heads*head_stride
 #pragma once
 
 #include <cstddef>
@@ -27,36 +35,49 @@
 namespace shelf::backend::common {
 
 // Tokens per KV block. NOT a core constant: it comes from the resolved
-// attention kernel's constraint (radiance rule). 16 is what the current
-// paged kernels are compiled for; other values need kernels for them.
+// attention kernel's constraint. 16 is what the current paged kernels are
+// compiled for; other values need kernels for them.
+enum class KVPacking : std::uint8_t {
+    SeparatePools,  // two allocations; kind = which pool pointer
+    InterleavedKV,  // one allocation; kind = +head_dim inside the slot
+};
+
 struct PagedKVLayout {
     std::size_t block_size = 16;   // tokens per block
     std::size_t kv_heads = 0;      // kvh (GQA)
     std::size_t head_dim = 0;      // D
     std::size_t num_blocks = 0;    // pool capacity in blocks
     DataType dtype = DataType::bf16;
+    KVPacking packing = KVPacking::SeparatePools;
 
-    // strides in ELEMENTS (not bytes), matching kernel arguments
-    std::size_t block_stride = 0;  // between consecutive blocks
-    std::size_t head_stride = 0;   // between kv heads inside a block
-    std::size_t slot_stride = 0;   // between token slots; K at +0, V at +head_dim
+    // strides in ELEMENTS (not bytes), semantics per packing (see above)
+    std::size_t block_stride = 0;
+    std::size_t head_stride = 0;
+    std::size_t slot_stride = 0;
 
     // Validate internal consistency (const) — strides must already be set.
     Status check() const;
-    // Fill canonical contiguous strides when all zero (block_stride =
-    // kv_heads*block_size*2*head_dim, head_stride = block_size*2*head_dim,
-    // slot_stride = 2*head_dim), then check().
+    // Fill canonical contiguous strides when all zero, then check().
     Status prepare();
 
+    // Elements per block in ONE pool (Separate) or the single pool (Interleaved).
     std::size_t elements_per_block() const noexcept {
-        return kv_heads * block_size * 2 * head_dim;
+        return packing == KVPacking::SeparatePools
+                   ? block_size * kv_heads * head_dim
+                   : kv_heads * block_size * 2 * head_dim;
     }
 };
 
-// Element offset of one K or V element. Kind: 0 = K, 1 = V.
+// Element offset. Kind: 0 = K, 1 = V.
+// SeparatePools: returned offset is INSIDE the chosen pool (kind ignored;
+//   the caller passes k_pool or v_pool as base).
+// InterleavedKV: single pool; kind adds +head_dim.
 inline std::size_t paged_kv_offset(const PagedKVLayout& L, std::size_t block,
                                    std::size_t kv_head, std::size_t slot_in_block,
                                    std::size_t kind, std::size_t dim) noexcept {
+    if (L.packing == KVPacking::SeparatePools)
+        return block * L.block_stride + slot_in_block * L.slot_stride +
+               kv_head * L.head_stride + dim;
     return block * L.block_stride + kv_head * L.head_stride +
            slot_in_block * L.slot_stride + kind * L.head_dim + dim;
 }
@@ -64,6 +85,9 @@ inline std::size_t paged_kv_offset(const PagedKVLayout& L, std::size_t block,
 // Per-batch block table: physical block id per (sequence, logical block).
 // int32 rows of width max_blocks, row stride `row_stride` (>= max_blocks).
 // -1 marks an unallocated tail (legal: kernels must not touch beyond seqused).
+// Kernel-native tables may store uint32 instead: -1 bit-casts to 0xFFFFFFFF,
+// which uint32-consuming kernels treat as ">= num_pages" invalid — the two
+// conventions are bit-compatible for the valid range.
 struct BlockTableView {
     const std::int32_t* ids = nullptr;
     std::size_t num_seqs = 0;
@@ -90,11 +114,15 @@ struct SeqUsedView {
     std::size_t num_seqs = 0;
 };
 
-// fp8-KV dequant descales (per sequence, per kv head); null layout for
-// bf16/f32 KV. Carried in the ABI now so an fp8 kernel needs no ABI change.
+// fp8-KV dequant descales; null layout for bf16/f32 KV. Carried in the ABI
+// now so an fp8 kernel needs no ABI change.
+// NOTE: the vendored fp8 kernel uses PerTokenHead granularity
+// ([layer][page][off][kvh] inside the pool span); the neutral view keeps
+// PerSeqHead for simple runtimes. fp8 KV activation will add the token
+// table view at that stage (both fit this struct family).
 struct DescaleView {
-    const float* k = nullptr;   // [num_seqs, kv_heads]
-    const float* v = nullptr;   // [num_seqs, kv_heads]
+    const float* k = nullptr;   // [num_seqs, kv_heads] (PerSeqHead)
+    const float* v = nullptr;   // [num_seqs, kv_heads] (PerSeqHead)
     std::size_t num_seqs = 0;
     std::size_t kv_heads = 0;
     bool enabled() const noexcept { return k != nullptr && v != nullptr; }

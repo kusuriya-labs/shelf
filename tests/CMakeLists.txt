@@ -28,6 +28,14 @@ if(SHELF_ENABLE_HIP)
     add_executable(test_hip_gemm_bf16 unit/test_hip_gemm_bf16.cpp)
     target_link_libraries(test_hip_gemm_bf16 PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_gemm_bf16 COMMAND test_hip_gemm_bf16)
+
+    add_executable(test_hip_attention unit/test_hip_attention.cpp)
+    target_link_libraries(test_hip_attention PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_attention COMMAND test_hip_attention)
+
+    add_executable(test_hip_gdn unit/test_hip_gdn.cpp)
+    target_link_libraries(test_hip_gdn PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_gdn COMMAND test_hip_gdn)
 endif()
 
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
