@@ -25,22 +25,56 @@
         "SHELF_BUILD_TESTS": "ON",
         "CMAKE_HIP_ARCHITECTURES": "gfx1201"
       }
+    },
+    {
+      "name": "hip-rel",
+      "displayName": "HIP backend release (perf measurement)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-rel",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SHELF_ENABLE_SYCL": "OFF",
+        "SHELF_ENABLE_HIP": "ON",
+        "SHELF_BUILD_TESTS": "ON",
+        "CMAKE_HIP_ARCHITECTURES": "gfx1201"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "cpu", "configurePreset": "cpu" },
-    { "name": "hip", "configurePreset": "hip" }
+    {
+      "name": "cpu",
+      "configurePreset": "cpu"
+    },
+    {
+      "name": "hip",
+      "configurePreset": "hip"
+    },
+    {
+      "name": "hip-rel",
+      "configurePreset": "hip-rel"
+    }
   ],
   "testPresets": [
     {
       "name": "cpu",
       "configurePreset": "cpu",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "hip",
       "configurePreset": "hip",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "hip-rel",
+      "configurePreset": "hip-rel",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

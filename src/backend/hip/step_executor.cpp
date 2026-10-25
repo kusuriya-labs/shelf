@@ -45,22 +45,32 @@ std::size_t numel(const TensorShape& s) {
 
 std::uint32_t u32(std::size_t v) { return static_cast<std::uint32_t>(v); }
 
+// hipMalloc wants void**; passing reinterpret_cast<Typed**> is a strict
+// aliasing violation (observed to miscompile the typed loads at -O2).
+// Allocate into a local void*, then assign through the correctly-typed lvalue.
+template <class T> hipError_t malloc_dev(T** out, std::size_t count) {
+    void* p = nullptr;
+    const hipError_t e = hipMalloc(&p, count * sizeof(T));
+    *out = static_cast<T*>(p);
+    return e;
+}
+
 } // namespace
 
 HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     hipSetDevice(opts_.device);
     hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
-    hipMalloc(&arena_dev_, opts_.arena_bytes);
-    hipMalloc(reinterpret_cast<void**>(&token_dev_),
-              kMaxStepRows * sizeof(std::int32_t));
-    hipMalloc(reinterpret_cast<void**>(&posrep_dev_), kPosScratch * sizeof(std::uint32_t));
-    hipMalloc(reinterpret_cast<void**>(&rowpos_dev_), kPosScratch * sizeof(std::uint32_t));
-    hipMalloc(reinterpret_cast<void**>(&slot_zero_dev_), sizeof(std::uint32_t));
+    const hipError_t e0 = hipMalloc(&arena_dev_, opts_.arena_bytes);
+    const hipError_t e1 = malloc_dev(&token_dev_, kMaxStepRows);
+    const hipError_t e2 = malloc_dev(&posrep_dev_, kPosScratch);
+    const hipError_t e3 = malloc_dev(&rowpos_dev_, kPosScratch);
+    const hipError_t e4 = malloc_dev(&slot_zero_dev_, 1u);
+    const hipError_t e5 = malloc_dev(&errword_dev_, 1u);
+    const hipError_t e6 = malloc_dev(&req_dev_, 1u);
+    const hipError_t e7 = malloc_dev(&inv_freq_dev_,
+                                      std::max<std::size_t>(2, opts_.rope_rotary_dim / 2));
+    (void)e0; (void)e1; (void)e2; (void)e3; (void)e4; (void)e5; (void)e6; (void)e7;
     hipMemset(slot_zero_dev_, 0, sizeof(std::uint32_t));
-    hipMalloc(reinterpret_cast<void**>(&errword_dev_), sizeof(std::uint32_t));
-    hipMalloc(reinterpret_cast<void**>(&req_dev_), sizeof(hipk::GdnRequestDescriptor));
-    hipMalloc(reinterpret_cast<void**>(&inv_freq_dev_),
-              sizeof(double) * std::max<std::size_t>(2, opts_.rope_rotary_dim / 2));
     posrep_host_.assign(kPosScratch, 0u);
 }
 
@@ -121,9 +131,7 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
                 hipok(hipMemset(loc.v_pool, 0, pool_elems * sizeof(bf16_t)), "zero kv V"));
             std::vector<std::uint32_t> t(loc.pages);
             for (std::size_t i = 0; i < loc.pages; ++i) t[i] = u32(i);
-            SHELF_RETURN_IF_ERROR(hipok(hipMalloc(reinterpret_cast<void**>(&loc.table),
-                                                  t.size() * sizeof(std::uint32_t)),
-                                        "kv table"));
+            SHELF_RETURN_IF_ERROR(hipok(malloc_dev(&loc.table, t.size()), "kv table"));
             SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(loc.table, t.data(),
                                                   t.size() * sizeof(std::uint32_t),
                                                   hipMemcpyHostToDevice),
@@ -312,7 +320,12 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t N = p.output.shape.dim(p.output.shape.rank() - 1);
         const std::size_t rows = step_rows_;
         const std::size_t K = x->elems / rows;  // input [rows, K]
-        Bf16GemmConfig cfg{Bf16GemmConfigId::ExactRows, static_cast<std::uint8_t>(rows)};
+        // bench_gemv_hip on the model's real shapes: rows==1 -> ExactRows
+        // wins everywhere; rows>=2 -> ExactRowsDot2 wins on most N (k/v/o/
+        // mlp/gdn_out), losing only ~1-4 us on q_gate/gdn_qkv. Net positive.
+        Bf16GemmConfig cfg{rows >= 2u ? Bf16GemmConfigId::ExactRowsDot2
+                                      : Bf16GemmConfigId::ExactRows,
+                           static_cast<std::uint8_t>(rows)};
         SHELF_RETURN_IF_ERROR(hipok(launch_gemm_bf16(
             cfg, static_cast<const bf16_t*>(wt(0)), static_cast<const bf16_t*>(x->dev), o,
             f32_out ? Bf16GemmOutputDType::F32 : Bf16GemmOutputDType::BF16,

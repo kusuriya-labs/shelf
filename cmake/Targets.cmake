@@ -48,6 +48,14 @@ if(SHELF_ENABLE_HIP)
         src/backend/hip/hip_api.cpp
         src/backend/hip/step_executor.cpp
         ${SHELF_HIP_KERNEL_SRCS})
+    if(SHELF_EXECUTOR_O0)
+        set_source_files_properties(src/backend/hip/step_executor.cpp
+            PROPERTIES COMPILE_OPTIONS "-O0")
+    endif()
+    if(SHELF_EXECUTOR_SANITIZE)
+        set_source_files_properties(src/backend/hip/step_executor.cpp
+            PROPERTIES COMPILE_OPTIONS "${SHELF_EXECUTOR_SANITIZE_FLAGS}")
+    endif()
     add_library(shelf::backend_hip ALIAS shelf_backend_hip)
     target_include_directories(shelf_backend_hip PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/hip/include>")
