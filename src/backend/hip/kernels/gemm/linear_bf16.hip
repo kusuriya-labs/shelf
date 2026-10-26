@@ -33,6 +33,51 @@ static_assert(kWideRowTiles == kBf16WmmaWideRowTiles);
 static_assert(kThreadsPerBlock == kBf16WmmaThreads);
 static_assert(kSplitThreadsPerBlock == kBf16SplitKWmmaThreads);
 
+// ---------------------------------------------------------------------------
+// Tile primitives (tile-refactor Phase 2). Private to this HIP TU until the
+// responsibilities stabilize (procedure docs/architecture/hip-tile-refactor-procedure.md §4).
+// These wrap hardware behavior — layout contract is documented at each use.
+// ---------------------------------------------------------------------------
+namespace tile {
+
+using Bf16x8 = short8_t;  // one WMMA input fragment row-slice per lane (16B)
+using F32x8 = float8_t;   // one WMMA accumulator fragment per lane
+
+// gfx1201 wave32 BF16 WMMA 16x16x16. Thin wrapper over the builtin: must not
+// introduce copies or change the instruction sequence (gate: ISA histogram).
+__device__ __forceinline__ F32x8 dot_bf16_16x16x16(Bf16x8 a, Bf16x8 b, F32x8 acc) {
+    return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc);
+}
+
+}  // namespace tile
+
+// Static lane layout for the single-wave WMMA kernels (see Phase 1 contract §1).
+// A/C fragment row = lane_low4; the lane owns K halves selected by k_half.
+struct WmmaLinearMap {
+    uint32_t lane;       // threadIdx.x, 0..31
+    uint32_t lane_low4;  // lane & 15  -> A row / C row
+    uint32_t k_half;     // lane >> 4  -> which 8 of the 16 K columns
+
+    __device__ __forceinline__ static WmmaLinearMap current() {
+        const uint32_t lane = threadIdx.x;
+        return {lane, lane & 15u, lane >> 4};
+    }
+};
+
+// Static lane/wave layout for the Split-K WMMA kernel (contract §2): 8 waves
+// each own a contiguous K-tile range; lanes carry the same WMMA fragment map.
+struct SplitKMap {
+    uint32_t lane;
+    uint32_t wave;       // K partition index 0..kSplitWarps-1
+    uint32_t lane_low4;
+    uint32_t k_half;
+
+    __device__ __forceinline__ static SplitKMap current() {
+        const uint32_t lane = threadIdx.x & 31u;
+        return {lane, threadIdx.x >> 5u, lane & 15u, lane >> 4};
+    }
+};
+
 __device__ __forceinline__ uint64_t load_bf16x4_masked(
     const shelf::bf16_t* base, uint32_t start_k, uint32_t logical_k) {
     const shelf::bf16_t* p = base + start_k;
@@ -84,7 +129,7 @@ __device__ __forceinline__ void wide_tile(
         b0 = load_bf16x4_masked(xrow, ks + k_half * 4u, k);
         b1 = load_bf16x4_masked(xrow, ks + 8u + k_half * 4u, k);
     }
-    acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, assemble_short8(b0, b1), acc);
+    acc = tile::dot_bf16_16x16x16(a, assemble_short8(b0, b1), acc);
 }
 
 template <uint32_t kRowTiles>
@@ -119,9 +164,10 @@ __device__ __forceinline__ void bf16_wmma_body(
     const uint32_t output_row_stride) {
     static_assert(kRowTiles >= 1u, "bf16 wmma row tiles must be positive");
 
-    const uint32_t lane = threadIdx.x;
-    const uint32_t lane_low4 = lane & 15u;
-    const uint32_t k_half = lane >> 4;
+    const WmmaLinearMap map = WmmaLinearMap::current();
+    const uint32_t lane = map.lane;
+    const uint32_t lane_low4 = map.lane_low4;
+    const uint32_t k_half = map.k_half;
 
     const uint32_t out_start = blockIdx.x * kTileOut;
     const uint32_t row_start = blockIdx.y * (kRowTiles * kTileRow);
@@ -220,10 +266,11 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
     const uint32_t k,
     const uint32_t input_row_stride,
     const uint32_t output_row_stride) {
-    const uint32_t lane = threadIdx.x & 31u;
-    const uint32_t warp = threadIdx.x >> 5u;
-    const uint32_t lane_low4 = lane & 15u;
-    const uint32_t k_half = lane >> 4;
+    const SplitKMap smap = SplitKMap::current();
+    const uint32_t lane = smap.lane;
+    const uint32_t warp = smap.wave;
+    const uint32_t lane_low4 = smap.lane_low4;
+    const uint32_t k_half = smap.k_half;
 
     const uint32_t out_start = blockIdx.x * kTileOut;
     const uint32_t row_start = blockIdx.y * kTileRow;
@@ -257,7 +304,7 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
         }
         const short8_t a = assemble_short8(a0, a1);
         const short8_t b = assemble_short8(b0, b1);
-        acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, acc);
+        acc = tile::dot_bf16_16x16x16(a, b, acc);
     }
 
     __shared__ float red[kSplitWarps][8][32];
