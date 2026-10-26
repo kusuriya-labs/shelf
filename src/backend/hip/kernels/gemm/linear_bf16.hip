@@ -151,6 +151,56 @@ __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
     }
 }
 
+// Algorithm layer (Phase 3): tile context — block tiling, A-side view, K tile
+// count, uniform activation flag (contract §1: same expressions, relocated).
+struct GemmTileContext {
+    WmmaLinearMap map;
+    uint32_t out_start;   // N index of tile origin
+    uint32_t row_start;   // row index of tile origin
+    const shelf::bf16_t* wrow;
+    bool out_valid;
+    uint32_t k_tiles;
+    bool block_active;    // block-uniform return condition
+};
+
+template <uint32_t kRowTiles>
+__device__ __forceinline__ GemmTileContext gemm_make_tile_context(
+    const shelf::bf16_t* weight, uint32_t rows, uint32_t out_features, uint32_t k) {
+    GemmTileContext ctx{};
+    ctx.map = WmmaLinearMap::current();
+    ctx.out_start = blockIdx.x * kTileOut;
+    ctx.row_start = blockIdx.y * (kRowTiles * kTileRow);
+    ctx.block_active = ctx.out_start < out_features && ctx.row_start < rows;
+    if (!ctx.block_active)
+        return ctx;
+    const uint32_t a_row = ctx.out_start + ctx.map.lane_low4;
+    ctx.out_valid = a_row < out_features;
+    ctx.wrow = weight + static_cast<size_t>(a_row) * k;
+    ctx.k_tiles = (k + 15u) >> 4;
+    return ctx;
+}
+
+// B-side row views for each row tile (contract §1: b_col / row_valid / xrow).
+template <uint32_t kRowTiles>
+struct GemmRowViews {
+    const shelf::bf16_t* xrow[kRowTiles];
+    bool row_valid[kRowTiles];
+};
+
+template <uint32_t kRowTiles>
+__device__ __forceinline__ GemmRowViews<kRowTiles> gemm_prepare_row_views(
+    const GemmTileContext& ctx, const shelf::bf16_t* input, uint32_t rows,
+    uint32_t input_row_stride) {
+    GemmRowViews<kRowTiles> v{};
+    #pragma unroll
+    for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
+        const uint32_t b_col = ctx.row_start + rt * kTileRow + ctx.map.lane_low4;
+        v.row_valid[rt] = b_col < rows;
+        v.xrow[rt] = input + static_cast<size_t>(b_col) * input_row_stride;
+    }
+    return v;
+}
+
 // Algorithm layer (Phase 3, contract §1 store mapping): one output tile row
 // `r = row_start + rt*16 + lane_low4`, columns `out_start + 8*k_half + j`.
 // Body extracted verbatim; no rounding or tail-mask changes.
@@ -182,6 +232,50 @@ __device__ __forceinline__ void bf16_wmma_store(
     }
 }
 
+// Accumulator fragments start zeroed (contract §1: all elements, register
+// usage unchanged).
+template <uint32_t kRowTiles>
+__device__ __forceinline__ void gemm_init_accumulators(float8_t (&acc)[kRowTiles]) {
+    #pragma unroll
+    for (uint32_t rt = 0; rt < kRowTiles; ++rt)
+        acc[rt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+}
+
+// K-tile accumulation dispatch (contract §1: `active` switch over 1..4 and
+// the ascending K-tile order are preserved).
+template <uint32_t kRowTiles>
+__device__ __forceinline__ void gemm_accumulate_wmma(
+    const GemmTileContext& ctx, const GemmRowViews<kRowTiles>& views,
+    float8_t (&acc)[kRowTiles], uint32_t rows, uint32_t k) {
+    const uint32_t k_half = ctx.map.k_half;
+    if constexpr (kRowTiles == 1u) {
+        gemm_bf16_wmma_ktiles<1u>(ctx.wrow, views.xrow, views.row_valid, acc, ctx.k_tiles,
+                                  k, k_half, ctx.out_valid);
+    } else {
+        const uint32_t active = (rows - ctx.row_start + kTileRow - 1u) / kTileRow;
+        switch (active) {
+        case 1u:
+            gemm_bf16_wmma_ktiles<1u>(ctx.wrow, views.xrow, views.row_valid, acc, ctx.k_tiles,
+                                      k, k_half, ctx.out_valid);
+            break;
+        case 2u:
+            if constexpr (kRowTiles >= 2u)
+                gemm_bf16_wmma_ktiles<2u>(ctx.wrow, views.xrow, views.row_valid, acc,
+                                          ctx.k_tiles, k, k_half, ctx.out_valid);
+            break;
+        case 3u:
+            if constexpr (kRowTiles >= 3u)
+                gemm_bf16_wmma_ktiles<3u>(ctx.wrow, views.xrow, views.row_valid, acc,
+                                          ctx.k_tiles, k, k_half, ctx.out_valid);
+            break;
+        default:
+            gemm_bf16_wmma_ktiles<kRowTiles>(ctx.wrow, views.xrow, views.row_valid, acc,
+                                             ctx.k_tiles, k, k_half, ctx.out_valid);
+            break;
+        }
+    }
+}
+
 template <uint32_t kRowTiles>
 __device__ __forceinline__ void bf16_wmma_body(
     const shelf::bf16_t* __restrict__ weight,
@@ -195,59 +289,20 @@ __device__ __forceinline__ void bf16_wmma_body(
     const uint32_t output_row_stride) {
     static_assert(kRowTiles >= 1u, "bf16 wmma row tiles must be positive");
 
-    const WmmaLinearMap map = WmmaLinearMap::current();
-    const uint32_t lane_low4 = map.lane_low4;
-    const uint32_t k_half = map.k_half;
-
-    const uint32_t out_start = blockIdx.x * kTileOut;
-    const uint32_t row_start = blockIdx.y * (kRowTiles * kTileRow);
-
-    if (out_start >= out_features || row_start >= rows)
+    const GemmTileContext ctx =
+        gemm_make_tile_context<kRowTiles>(weight, rows, out_features, k);
+    if (!ctx.block_active)
         return;
 
-    const uint32_t a_row = out_start + lane_low4;
-    const bool out_valid = a_row < out_features;
-
-    const shelf::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
-
     float8_t acc[kRowTiles];
-    #pragma unroll
-    for (uint32_t rt = 0; rt < kRowTiles; ++rt)
-        acc[rt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    gemm_init_accumulators<kRowTiles>(acc);
 
-    const shelf::bf16_t* xrow[kRowTiles];
-    bool row_valid[kRowTiles];
-    #pragma unroll
-    for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
-        const uint32_t b_col = row_start + rt * kTileRow + lane_low4;
-        row_valid[rt] = b_col < rows;
-        xrow[rt] = input + static_cast<size_t>(b_col) * input_row_stride;
-    }
+    const GemmRowViews<kRowTiles> views =
+        gemm_prepare_row_views<kRowTiles>(ctx, input, rows, input_row_stride);
 
-    const uint32_t k_tiles = (k + 15u) >> 4;
-    if constexpr (kRowTiles == 1u) {
-        gemm_bf16_wmma_ktiles<1u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
-    } else {
-        const uint32_t active = (rows - row_start + kTileRow - 1u) / kTileRow;
-        switch (active) {
-        case 1u:
-            gemm_bf16_wmma_ktiles<1u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
-            break;
-        case 2u:
-            if constexpr (kRowTiles >= 2u)
-                gemm_bf16_wmma_ktiles<2u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
-            break;
-        case 3u:
-            if constexpr (kRowTiles >= 3u)
-                gemm_bf16_wmma_ktiles<3u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
-            break;
-        default:
-            gemm_bf16_wmma_ktiles<kRowTiles>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
-            break;
-        }
-    }
+    gemm_accumulate_wmma<kRowTiles>(ctx, views, acc, rows, k);
 
-    bf16_wmma_store<kRowTiles>(map, out_start, row_start, rows, out_features,
+    bf16_wmma_store<kRowTiles>(ctx.map, ctx.out_start, ctx.row_start, rows, out_features,
                                output_row_stride, output, output_dtype, acc);
 }
 
