@@ -1,0 +1,29 @@
+# Extensions
+*.log
+*.o
+*.so
+
+# IDE / OS
+/.cache/
+/.vscode/
+/.superpowers/
+
+# Build Artifacts
+/build*/
+/Testing/
+/.worktrees/
+
+# Models (bare names also cover worktree symlinks)
+/models*
+
+# AGENTS
+AGENTS.local.md
+
+# Python
+__pycache__/
+/perf/
+
+# Raw measurement artifacts
+/artifacts/
+/environment/
+/.rocprofv3/

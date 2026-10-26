@@ -1,0 +1,70 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "cpu",
+      "displayName": "CPU-only (skeleton / CI)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SHELF_ENABLE_HIP": "OFF",
+        "SHELF_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "hip",
+      "displayName": "HIP backend (AMD ROCm, gfx1201)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SHELF_ENABLE_HIP": "ON",
+        "SHELF_BUILD_TESTS": "ON",
+        "CMAKE_HIP_ARCHITECTURES": "gfx1201"
+      }
+    },
+    {
+      "name": "hip-rel",
+      "displayName": "HIP backend release (perf measurement)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-rel",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SHELF_ENABLE_HIP": "ON",
+        "SHELF_BUILD_TESTS": "ON",
+        "CMAKE_HIP_ARCHITECTURES": "gfx1201"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "cpu",
+      "configurePreset": "cpu"
+    },
+    {
+      "name": "hip",
+      "configurePreset": "hip"
+    },
+    {
+      "name": "hip-rel",
+      "configurePreset": "hip-rel"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu",
+      "configurePreset": "cpu",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "hip",
+      "configurePreset": "hip",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
