@@ -11,11 +11,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(SHELF_ENABLE_SYCL)
-    # Phase 5 will introduce backend/sycl. Until then the flag is inert so
-    # CI presets stay valid.
-    message(WARNING
-        "SHELF_ENABLE_SYCL=OFF is currently the only supported setting; "
-        "the SYCL backend is not implemented yet (skeleton). Ignoring.")
+    # backend/sycl is implemented (SYCL port of backend/hip). It compiles
+    # through AdaptiveCpp (hipSYCL): cmake/Dependencies.cmake resolves
+    # AdaptiveCppConfig, and the backend's TUs are routed through the acpp
+    # driver by add_sycl_to_target. Choose the SYCL compilation targets with
+    # the SHELF_SYCL_TARGETS cache variable (default: generic SSCP;
+    # e.g. "hip:gfx1201" for AOT on AMD, "omp" for CPU-only correctness
+    # testing — wave32 kernels report unsupported on non-32-lane devices).
+    set(SHELF_SYCL_TARGETS "generic" CACHE STRING
+        "AdaptiveCpp --acpp-targets value for the SYCL backend")
 endif()
 
 if(MSVC)

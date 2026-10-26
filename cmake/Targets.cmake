@@ -67,6 +67,30 @@ if(SHELF_ENABLE_HIP)
         "--offload-arch=${CMAKE_HIP_ARCHITECTURES}")
 endif()
 
+# ---------------------------------------------------------------- backend/sycl
+# SYCL port of backend/hip (host runtime API + kernels), compiled through
+# AdaptiveCpp. ACPP_TARGETS (env at configure time) selects the backend
+# flow: "omp" (CPU), "generic" (SSCP, JIT at runtime), "hip:gfxNNNN"
+# (AOT AMD). Every TU here carries submit() calls, so all of them go
+# through the acpp driver launcher installed by add_sycl_to_target.
+if(SHELF_ENABLE_SYCL)
+    file(GLOB_RECURSE SHELF_SYCL_KERNEL_SRCS CONFIGURE_DEPENDS
+         "${PROJECT_SOURCE_DIR}/src/backend/sycl/kernels/*.cpp")
+    add_library(shelf_backend_sycl STATIC
+        src/backend/sycl/sycl_api.cpp
+        src/backend/sycl/step_executor.cpp
+        ${SHELF_SYCL_KERNEL_SRCS})
+    add_library(shelf::backend_sycl ALIAS shelf_backend_sycl)
+    target_include_directories(shelf_backend_sycl PUBLIC
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/sycl/include>")
+    target_link_libraries(shelf_backend_sycl
+        PUBLIC shelf::backend_common shelf::ir AdaptiveCpp::acpp-rt)
+    add_sycl_to_target(TARGET shelf_backend_sycl
+        SOURCES src/backend/sycl/sycl_api.cpp
+                src/backend/sycl/step_executor.cpp
+                ${SHELF_SYCL_KERNEL_SRCS})
+endif()
+
 # ---------------------------------------------------------------- ir
 add_library(shelf_ir INTERFACE)
 add_library(shelf::ir ALIAS shelf_ir)

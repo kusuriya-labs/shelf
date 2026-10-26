@@ -30,8 +30,37 @@ if(SHELF_ENABLE_HIP)
     endif()
 endif()
 
-# SYCL runtime is NOT installed on this machine (planned). backend/sycl stays
-# empty until a SYCL toolchain lands; do not silently substitute HIP for it.
+# SYCL runtime: AdaptiveCpp (hipSYCL). Not required by CPU/HIP-only builds.
+# Discovery order (machine-specific paths are never hardcoded):
+#   -DAdaptiveCpp_DIR=<dir with AdaptiveCppConfig.cmake>
+#   -DSHELF_SYCL_ROOT=<install prefix>   (or ACPP_PATH env var)
+#   `acpp` on PATH (installation root parsed from `acpp --help`)
+if(SHELF_ENABLE_SYCL)
+    if(NOT DEFINED AdaptiveCpp_DIR)
+        set(_shelf_sycl_root "${SHELF_SYCL_ROOT}")
+        if(_shelf_sycl_root STREQUAL "" AND DEFINED ENV{ACPP_PATH})
+            set(_shelf_sycl_root "$ENV{ACPP_PATH}")
+        endif()
+        if(_shelf_sycl_root STREQUAL "")
+            find_program(SHELF_ACPP_EXECUTABLE NAMES acpp)
+            if(SHELF_ACPP_EXECUTABLE)
+                execute_process(
+                    COMMAND "${SHELF_ACPP_EXECUTABLE}" --help
+                    OUTPUT_VARIABLE _shelf_acpp_help ERROR_QUIET)
+                string(REGEX MATCH "Installation root: ([^ \n]+)"
+                       _shelf_acpp_match "${_shelf_acpp_help}")
+                if(CMAKE_MATCH_1)
+                    set(_shelf_sycl_root "${CMAKE_MATCH_1}")
+                endif()
+            endif()
+        endif()
+        if(NOT _shelf_sycl_root STREQUAL "")
+            set(AdaptiveCpp_DIR "${_shelf_sycl_root}/lib/cmake/AdaptiveCpp")
+        endif()
+        unset(_shelf_sycl_root)
+    endif()
+    find_package(AdaptiveCpp CONFIG REQUIRED)
+endif()
 
 # Vendored header-only deps (see third_party/README.md for licenses/provenance).
 add_library(shelf_nlohmann INTERFACE)

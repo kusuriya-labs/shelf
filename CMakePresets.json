@@ -38,6 +38,38 @@
         "SHELF_BUILD_TESTS": "ON",
         "CMAKE_HIP_ARCHITECTURES": "gfx1201"
       }
+    },
+    {
+      "name": "sycl",
+      "displayName": "SYCL backend (AdaptiveCpp, AOT hip:gfx1201)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sycl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SHELF_ENABLE_SYCL": "ON",
+        "SHELF_ENABLE_HIP": "OFF",
+        "SHELF_BUILD_TESTS": "ON",
+        "SHELF_SYCL_TARGETS": "hip:gfx1201"
+      },
+      "environment": {
+        "ACPP_TARGETS": "hip:gfx1201"
+      }
+    },
+    {
+      "name": "sycl-cpu",
+      "displayName": "SYCL backend (AdaptiveCpp, OpenMP device \u2014 host-API CI)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sycl-cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SHELF_ENABLE_SYCL": "ON",
+        "SHELF_ENABLE_HIP": "OFF",
+        "SHELF_BUILD_TESTS": "ON",
+        "SHELF_SYCL_TARGETS": "omp"
+      },
+      "environment": {
+        "ACPP_TARGETS": "omp"
+      }
     }
   ],
   "buildPresets": [
@@ -52,6 +84,14 @@
     {
       "name": "hip-rel",
       "configurePreset": "hip-rel"
+    },
+    {
+      "name": "sycl",
+      "configurePreset": "sycl"
+    },
+    {
+      "name": "sycl-cpu",
+      "configurePreset": "sycl-cpu"
     }
   ],
   "testPresets": [
@@ -72,6 +112,20 @@
     {
       "name": "hip-rel",
       "configurePreset": "hip-rel",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sycl",
+      "configurePreset": "sycl",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sycl-cpu",
+      "configurePreset": "sycl-cpu",
       "output": {
         "outputOnFailure": true
       }
