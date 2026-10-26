@@ -968,6 +968,13 @@ int main() {
     run_attention_case(64, /*do_rope=*/true, /*use_split=*/false);
     // split-K path exists for q_per_kv in {4,6}; nq=8 kvh=2 exercises it
     run_attention_case(256, /*do_rope=*/false, /*use_split=*/true, /*q_heads=*/8);
+    // REGRESSION (fix df37c07): q_per_kv=4 with head_dim != kHeadLimit(256)
+    // once fell through a dead "if (full_head)" guard in the bf16
+    // split/split_reduce launchers -> NO kernel launched, partials stayed
+    // zero, output read back all-zero, and hipGetLastError still reported
+    // success. The named AOT kernels only cover D=256, so this case pins
+    // the template instantiations (impl<4u,false>) that the hole orphaned.
+    run_attention_case(128, /*do_rope=*/false, /*use_split=*/true, /*q_heads=*/8);
 
     // PR-0 gap fill: split counts, q_per_kv=6, head-grouping reduce variants
     run_attention_case(256, false, true, 8, 2u);    // splits=2
