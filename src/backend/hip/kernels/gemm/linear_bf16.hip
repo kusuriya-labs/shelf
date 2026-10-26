@@ -322,6 +322,106 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
                               output_row_stride);
 }
 
+// Algorithm layer (Phase 4, contract §2): split-K context — 8 waves each own
+// a contiguous K-tile range; frozen floor-division split boundaries.
+struct SplitKContext {
+    SplitKMap map;
+    uint32_t out_start;
+    uint32_t row_start;
+    const shelf::bf16_t* wrow;
+    const shelf::bf16_t* xrow;
+    bool out_valid;
+    bool row_valid;
+    uint32_t kb_begin;
+    uint32_t kb_end;
+    bool block_active;   // block-uniform return condition
+};
+
+__device__ __forceinline__ SplitKContext gemm_make_splitk_context(
+    const shelf::bf16_t* weight, const shelf::bf16_t* input,
+    uint32_t rows, uint32_t out_features, uint32_t k, uint32_t input_row_stride) {
+    SplitKContext ctx{};
+    ctx.map = SplitKMap::current();
+    ctx.out_start = blockIdx.x * kTileOut;
+    ctx.row_start = blockIdx.y * kTileRow;
+    ctx.block_active = ctx.out_start < out_features && ctx.row_start < rows;
+    if (!ctx.block_active)
+        return ctx;
+    const uint32_t a_row = ctx.out_start + ctx.map.lane_low4;
+    const uint32_t b_col = ctx.row_start + ctx.map.lane_low4;
+    ctx.out_valid = a_row < out_features;
+    ctx.row_valid = b_col < rows;
+    ctx.wrow = weight + static_cast<size_t>(a_row) * k;
+    ctx.xrow = input + static_cast<size_t>(b_col) * input_row_stride;
+    const uint32_t k_tiles = (k + 15u) >> 4;
+    ctx.kb_begin = (k_tiles * ctx.map.wave) / kSplitWarps;
+    ctx.kb_end = (k_tiles * (ctx.map.wave + 1u)) / kSplitWarps;
+    return ctx;
+}
+
+// Partial dot over this wave's K range (contract §2: load pairs and order fixed).
+__device__ __forceinline__ float8_t gemm_accumulate_splitk(const SplitKContext& ctx,
+                                                           uint32_t k) {
+    float8_t acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    const uint32_t k_half = ctx.map.k_half;
+    for (uint32_t kb = ctx.kb_begin; kb < ctx.kb_end; ++kb) {
+        const uint32_t ks = kb * 16u;
+        uint64_t a0 = 0, a1 = 0, b0 = 0, b1 = 0;
+        if (ctx.out_valid) {
+            a0 = load_bf16x4_masked(ctx.wrow, ks + k_half * 4u, k);
+            a1 = load_bf16x4_masked(ctx.wrow, ks + 8u + k_half * 4u, k);
+        }
+        if (ctx.row_valid) {
+            b0 = load_bf16x4_masked(ctx.xrow, ks + k_half * 4u, k);
+            b1 = load_bf16x4_masked(ctx.xrow, ks + 8u + k_half * 4u, k);
+        }
+        const short8_t a = assemble_short8(a0, a1);
+        const short8_t b = assemble_short8(b0, b1);
+        acc = tile::dot_bf16_16x16x16(a, b, acc);
+    }
+    return acc;
+}
+
+// Stage wave partials to LDS. Barrier stays at the call site (contract §2:
+// single unconditional __syncthreads between stage and reduce).
+__device__ __forceinline__ void gemm_write_splitk_partials(
+    const SplitKMap& map, const float8_t& acc, float (&red)[kSplitWarps][8][32]) {
+    #pragma unroll
+    for (int j = 0; j < 8; ++j)
+        red[map.wave][j][map.lane] = acc[j];
+}
+
+// Wave-0-only reduction in ascending wave order, then store (contract §2:
+// s[j] += red[w][j][lane] sequential; no pairwise reassociation).
+__device__ __forceinline__ void gemm_reduce_store_splitk(
+    const SplitKContext& ctx, const float (&red)[kSplitWarps][8][32],
+    void* __restrict__ output, uint32_t output_dtype, uint32_t rows,
+    uint32_t out_features, uint32_t output_row_stride) {
+    float s[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    #pragma unroll
+    for (uint32_t w = 0; w < kSplitWarps; ++w) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j)
+            s[j] += red[w][j][ctx.map.lane];
+    }
+    const uint32_t r = ctx.row_start + ctx.map.lane_low4;
+    if (r < rows) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const uint32_t o = ctx.out_start + 8u * (ctx.map.lane >> 4) + static_cast<uint32_t>(j);
+            if (o >= out_features)
+                continue;
+            const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
+            if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
+                static_cast<shelf::bf16_t*>(output)[out_idx] =
+                    shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(s[j]))};
+            } else {
+                static_cast<float*>(output)[out_idx] = s[j];
+            }
+        }
+    }
+}
+
 __device__ __forceinline__ void bf16_splitk_wmma_body(
     const shelf::bf16_t* __restrict__ weight,
     const shelf::bf16_t* __restrict__ input,
@@ -332,78 +432,19 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
     const uint32_t k,
     const uint32_t input_row_stride,
     const uint32_t output_row_stride) {
-    const SplitKMap smap = SplitKMap::current();
-    const uint32_t lane = smap.lane;
-    const uint32_t warp = smap.wave;
-    const uint32_t lane_low4 = smap.lane_low4;
-    const uint32_t k_half = smap.k_half;
-
-    const uint32_t out_start = blockIdx.x * kTileOut;
-    const uint32_t row_start = blockIdx.y * kTileRow;
-
-    if (out_start >= out_features || row_start >= rows)
+    const SplitKContext ctx = gemm_make_splitk_context(
+        weight, input, rows, out_features, k, input_row_stride);
+    if (!ctx.block_active)
         return;
 
-    const uint32_t a_row = out_start + lane_low4;
-    const uint32_t b_col = row_start + lane_low4;
-    const bool out_valid = a_row < out_features;
-    const bool row_valid = b_col < rows;
-
-    const shelf::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
-    const shelf::bf16_t* xrow = input + static_cast<size_t>(b_col) * input_row_stride;
-
-    float8_t acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-
-    const uint32_t k_tiles = (k + 15u) >> 4;
-    const uint32_t kb_begin = (k_tiles * warp) / kSplitWarps;
-    const uint32_t kb_end = (k_tiles * (warp + 1u)) / kSplitWarps;
-    for (uint32_t kb = kb_begin; kb < kb_end; ++kb) {
-        const uint32_t ks = kb * 16u;
-        uint64_t a0 = 0, a1 = 0, b0 = 0, b1 = 0;
-        if (out_valid) {
-            a0 = load_bf16x4_masked(wrow, ks + k_half * 4u, k);
-            a1 = load_bf16x4_masked(wrow, ks + 8u + k_half * 4u, k);
-        }
-        if (row_valid) {
-            b0 = load_bf16x4_masked(xrow, ks + k_half * 4u, k);
-            b1 = load_bf16x4_masked(xrow, ks + 8u + k_half * 4u, k);
-        }
-        const short8_t a = assemble_short8(a0, a1);
-        const short8_t b = assemble_short8(b0, b1);
-        acc = tile::dot_bf16_16x16x16(a, b, acc);
-    }
+    const float8_t acc = gemm_accumulate_splitk(ctx, k);
 
     __shared__ float red[kSplitWarps][8][32];
-    #pragma unroll
-    for (int j = 0; j < 8; ++j)
-        red[warp][j][lane] = acc[j];
+    gemm_write_splitk_partials(ctx.map, acc, red);
     __syncthreads();
-
-    if (warp == 0u) {
-        float s[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        #pragma unroll
-        for (uint32_t w = 0; w < kSplitWarps; ++w) {
-            #pragma unroll
-            for (int j = 0; j < 8; ++j)
-                s[j] += red[w][j][lane];
-        }
-        const uint32_t r = row_start + lane_low4;
-        if (r < rows) {
-            #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const uint32_t o = out_start + 8u * (lane >> 4) + static_cast<uint32_t>(j);
-                if (o >= out_features)
-                    continue;
-                const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
-                if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
-                    static_cast<shelf::bf16_t*>(output)[out_idx] =
-                        shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(s[j]))};
-                } else {
-                    static_cast<float*>(output)[out_idx] = s[j];
-                }
-            }
-        }
-    }
+    if (ctx.map.wave == 0u)
+        gemm_reduce_store_splitk(ctx, red, output, output_dtype, rows,
+                                 out_features, output_row_stride);
 }
 
 __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_kernel(
@@ -420,26 +461,14 @@ __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_k
                           out_features, k, input_row_stride, output_row_stride);
 }
 
-template <uint32_t kRows, bool kDot2 = false>
-__device__ __forceinline__ void gemm_bf16_exact_rows_body(
-    const shelf::bf16_t* __restrict__ weight,
-    const shelf::bf16_t* __restrict__ input,
-    void* __restrict__ output,
-    const uint32_t output_dtype,
-    const uint32_t n,
-    const uint32_t k,
-    const uint32_t input_row_stride,
-    const uint32_t output_row_stride) {
-    const uint32_t wave = threadIdx.x >> 5u;
+// Algorithm layer (Phase 4, contract §3): ExactRows is NOT a WMMA path — it
+// keeps its own scalar / fdot2 partial-dot stage, shuffle-down reduce tree,
+// and lane0 store. All loop orders and builtin call sequences preserved.
+template <uint32_t kRows, bool kDot2>
+__device__ __forceinline__ void gemm_exact_rows_stage(
+    const shelf::bf16_t* wrow, const shelf::bf16_t* input,
+    uint32_t k, uint32_t input_row_stride, float (&acc)[kRows]) {
     const uint32_t lane = threadIdx.x & 31u;
-    const uint32_t r = blockIdx.x * 8u + wave;
-    if (r >= n)
-        return;
-    const shelf::bf16_t* wrow = weight + static_cast<size_t>(r) * k;
-    float acc[kRows];
-    #pragma unroll
-    for (uint32_t m = 0; m < kRows; ++m)
-        acc[m] = 0.0f;
     const uint32_t iters = k >> 8u;
     for (uint32_t i = 0; i < iters; ++i) {
         const uint32_t off = (i << 8) + (lane << 3);
@@ -482,6 +511,13 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
                         * bf16_f32(static_cast<short>(xrow[base + j].data));
         }
     }
+}
+
+// Shuffle-down reduce (s=16..1) then lane0 transposed store (contract §3).
+template <uint32_t kRows>
+__device__ __forceinline__ void gemm_exact_rows_reduce_store(
+    const float (&acc)[kRows], uint32_t lane, void* __restrict__ output,
+    uint32_t output_dtype, uint32_t r, uint32_t output_row_stride) {
     #pragma unroll
     for (uint32_t m = 0; m < kRows; ++m) {
         float a = acc[m];
@@ -497,6 +533,31 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
                 static_cast<float*>(output)[oidx] = a;
         }
     }
+}
+
+template <uint32_t kRows, bool kDot2 = false>
+__device__ __forceinline__ void gemm_bf16_exact_rows_body(
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t n,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t output_row_stride) {
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t r = blockIdx.x * 8u + wave;
+    if (r >= n)
+        return;
+    const shelf::bf16_t* wrow = weight + static_cast<size_t>(r) * k;
+    float acc[kRows];
+    #pragma unroll
+    for (uint32_t m = 0; m < kRows; ++m)
+        acc[m] = 0.0f;
+    gemm_exact_rows_stage<kRows, kDot2>(wrow, input, k, input_row_stride, acc);
+    gemm_exact_rows_reduce_store<kRows>(acc, lane, output, output_dtype, r,
+                                        output_row_stride);
 }
 
 template <uint32_t kRows>
