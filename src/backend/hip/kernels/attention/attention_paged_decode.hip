@@ -46,25 +46,265 @@ __device__ __forceinline__ float warp_max_all(float x) {
     return x;
 }
 
+// ---------------------------------------------------------------------------
+// Algorithm layer (Phase 5, contract §4 / guide §7.1). BF16 decode stages:
+//   task map -> visible range -> query load -> page walk + online softmax
+//   (+ tree ancestors) -> stage wave partials -> [barrier] -> merge -> store.
+// Barriers and block-uniform returns stay in the body; helper bodies are the
+// original code moved verbatim (same expressions, same order).
+// ---------------------------------------------------------------------------
+
+struct DecodeTaskMap {
+    uint32_t row;
+    uint32_t q_head;
+    uint32_t kv_head;
+    bool active;   // row < rows; block-uniform (task = blockIdx.x)
+};
+
+__device__ __forceinline__ DecodeTaskMap attention_map_decode_task(
+    const PagedAttentionCommonArgs& a) {
+    const uint32_t task = blockIdx.x;
+    const uint32_t q_per_kv = a.q_heads / a.kv_heads;
+    DecodeTaskMap t{};
+    t.row = task / a.q_heads;
+    t.q_head = task % a.q_heads;
+    t.kv_head = t.q_head / q_per_kv;
+    t.active = t.row < a.rows;
+    return t;
+}
+
+// tid0 metadata pass: sequence slot validity, visible range incl. tree
+// ancestor contiguity fold-in, block-table pointer (contract §4 formulas).
+__device__ __forceinline__ void attention_initialize_visible_range(
+    const PagedAttentionCommonArgs& a, uint32_t row,
+    uint32_t& row_valid_shared, uint32_t& visible_shared, uint32_t& invalid_shared,
+    const uint32_t*& block_table_shared, uint32_t& anc_base_shared, uint32_t& anc_count_shared) {
+    const uint32_t page_tokens = a.page_tokens;
+    const uint32_t slot = a.row_sequence_slots[row];
+    uint32_t valid = 1u;
+    uint32_t visible = 0u;
+    anc_base_shared = 0u;
+    anc_count_shared = 0u;
+    if (slot >= a.max_sequences) {
+        valid = 0u;
+    } else if (a.tree_anc_offsets != nullptr) {
+        anc_base_shared = a.tree_anc_offsets[row];
+        uint32_t anc_count = a.tree_anc_offsets[row + 1u] - anc_base_shared;
+        const uint32_t committed_end = a.tree_committed_end_rows != nullptr
+                                           ? a.tree_committed_end_rows[row]
+                                           : a.tree_committed_end;
+        bool contiguous = true;
+        for (uint32_t i = 0u; i < anc_count; ++i) {
+            if (a.tree_anc_positions[anc_base_shared + i] != committed_end + i) {
+                contiguous = false;
+                break;
+            }
+        }
+        const uint64_t v64 = contiguous
+                                 ? static_cast<uint64_t>(committed_end) + anc_count
+                                 : static_cast<uint64_t>(committed_end);
+        const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
+        if (v64 > cap) valid = 0u;
+        else {
+            visible = static_cast<uint32_t>(v64);
+            anc_count_shared = contiguous ? 0u : anc_count;
+        }
+    } else {
+        const uint64_t v64 = static_cast<uint64_t>(a.row_positions[row]) + 1u;
+        const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
+        if (v64 > cap) valid = 0u;
+        else visible = static_cast<uint32_t>(v64);
+    }
+    row_valid_shared = valid;
+    visible_shared = visible;
+    invalid_shared = 0u;
+    block_table_shared = a.block_tables
+        + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
+}
+
+// Query tile into registers: lane holds d = lane + 32*j (contract §4).
+template <bool kFullHead>
+__device__ __forceinline__ void attention_load_query_tile(
+    const PagedAttentionCommonArgs& a, const DecodeTaskMap& task, uint32_t lane,
+    float (&q_reg)[kElemsPerLane]) {
+    const uint32_t head_dim = a.head_dim;
+    const bf16* q_row = reinterpret_cast<const bf16*>(a.q)
+        + static_cast<size_t>(task.row) * a.q_row_stride
+        + static_cast<size_t>(task.q_head) * head_dim;
+    #pragma unroll
+    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
+        const uint32_t d = lane + 32u * j;
+        q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
+    }
+}
+
+// Shared addressing state for the token walk.
+struct DecodeWalkState {
+    uint64_t head_off;
+    uint64_t layer_base;
+    const uint32_t* block_table;
+    uint32_t page_tokens;
+    uint32_t visible;
+    uint64_t elems_per_page;
+    uint64_t elems_per_token;
+    uint32_t num_pages;
+    uint32_t wave;
+    uint32_t lane;
+};
+
+// One token: masked K/V load, wave-reduced dot, online softmax update.
+// Order frozen: j-ascending partial -> warp_sum_all -> *scale -> max/alpha/
+// weight -> run_sum -> acc[j] (contract §4).
+template <bool kFullHead>
+__device__ __forceinline__ void attention_attend_token_bf16(
+    const float (&q_reg)[kElemsPerLane],
+    const bf16* k_head, const bf16* v_head,
+    uint32_t head_dim, uint32_t lane, float scale,
+    float& run_max, float& run_sum, float (&acc)[kElemsPerLane]) {
+    bf16 k_reg[kElemsPerLane];
+    bf16 v_reg[kElemsPerLane];
+    #pragma unroll
+    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
+        const uint32_t d = lane + 32u * j;
+        if (kFullHead || d < head_dim) {
+            k_reg[j] = k_head[d];
+            v_reg[j] = v_head[d];
+        } else {
+            k_reg[j] = __float2bfloat16(0.0f);
+            v_reg[j] = __float2bfloat16(0.0f);
+        }
+    }
+    float partial = 0.0f;
+    #pragma unroll
+    for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+        partial += q_reg[j] * __bfloat162float(k_reg[j]);
+    const float score = warp_sum_all(partial) * scale;
+    const float next_max = fmaxf(run_max, score);
+    const float alpha = __expf(run_max - next_max);
+    const float weight = __expf(score - next_max);
+    run_sum = run_sum * alpha + weight;
+    run_max = next_max;
+    #pragma unroll
+    for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+        acc[j] = acc[j] * alpha + weight * __bfloat162float(v_reg[j]);
+}
+
+template <bool kFullHead>
+__device__ __forceinline__ void attention_visit_pages_bf16(
+    const DecodeWalkState& st, const bf16* k_pool, const bf16* v_pool,
+    const float (&q_reg)[kElemsPerLane], uint32_t head_dim, float scale,
+    float& run_max, float& run_sum, float (&acc)[kElemsPerLane], uint32_t& bad) {
+    const uint32_t page_count = (st.visible + st.page_tokens - 1u) / st.page_tokens;
+    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
+        const uint32_t page = st.block_table[page_index];
+        if (page >= st.num_pages) {
+            bad = 1u;
+            break;
+        }
+        const uint64_t page_base =
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
+        const uint32_t page_start = page_index * st.page_tokens;
+        const uint32_t tokens_here =
+            (st.visible - page_start < st.page_tokens) ? (st.visible - page_start) : st.page_tokens;
+        for (uint32_t off = st.wave; off < tokens_here; off += kWaves) {
+            const uint64_t elem =
+                page_base + static_cast<uint64_t>(off) * st.elems_per_token;
+            attention_attend_token_bf16<kFullHead>(
+                q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+                head_dim, st.lane, scale, run_max, run_sum, acc);
+        }
+    }
+}
+
+template <bool kFullHead>
+__device__ __forceinline__ void attention_visit_ancestors_bf16(
+    const DecodeWalkState& st, uint32_t anc_base, uint32_t anc_count,
+    const uint32_t* tree_anc_positions, const bf16* k_pool, const bf16* v_pool,
+    const float (&q_reg)[kElemsPerLane], uint32_t head_dim, float scale,
+    float& run_max, float& run_sum, float (&acc)[kElemsPerLane], uint32_t& bad) {
+    for (uint32_t ai = st.wave; ai < anc_count; ai += kWaves) {
+        const uint32_t pos = tree_anc_positions[anc_base + ai];
+        const uint32_t anc_page_index = pos / st.page_tokens;
+        const uint32_t anc_off = pos % st.page_tokens;
+        const uint32_t page = st.block_table[anc_page_index];
+        if (page >= st.num_pages) {
+            bad = 1u;
+            break;
+        }
+        const uint64_t elem =
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page +
+            static_cast<uint64_t>(anc_off) * st.elems_per_token;
+        attention_attend_token_bf16<kFullHead>(
+            q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+            head_dim, st.lane, scale, run_max, run_sum, acc);
+    }
+}
+
+__device__ __forceinline__ void attention_stage_wave_partials(
+    uint32_t tid, uint32_t lane, uint32_t wave, uint32_t head_dim,
+    float run_max, float run_sum, uint32_t bad, const float (&acc)[kElemsPerLane],
+    float (&merge_max_shared)[kWaves], float (&merge_sum_shared)[kWaves],
+    uint32_t& invalid_shared, float (&acc_shared)[kWaves * kHeadLimit]) {
+    if (lane == 0u) {
+        merge_max_shared[wave] = run_max;
+        merge_sum_shared[wave] = run_sum;
+        if (bad != 0u) invalid_shared = 1u;
+    }
+    #pragma unroll
+    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
+        const uint32_t d = lane + 32u * j;
+        if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
+    }
+    (void)tid;
+}
+
+// Wave merge with the frozen reduction order (contract §4).
+__device__ __forceinline__ void attention_merge_wave_partials(
+    uint32_t lane, const float (&merge_max_shared)[kWaves],
+    const float (&merge_sum_shared)[kWaves],
+    float (&weight_shared)[kWaves], float& sum_total) {
+    const float global_max =
+        warp_max_all((lane < kWaves) ? merge_max_shared[lane] : -FLT_MAX);
+    sum_total = 0.0f;
+    #pragma unroll
+    for (uint32_t w = 0u; w < kWaves; ++w) {
+        weight_shared[w] = __expf(merge_max_shared[w] - global_max);
+        sum_total += merge_sum_shared[w] * weight_shared[w];
+    }
+}
+
+__device__ __forceinline__ void attention_store_output_bf16(
+    const PagedAttentionCommonArgs& a, const DecodeTaskMap& task, void* out_base,
+    uint32_t tid, uint32_t head_dim,
+    const float (&acc_shared)[kWaves * kHeadLimit], const float (&weight_shared)[kWaves],
+    float sum_total) {
+    if (tid < head_dim && sum_total > 0.0f) {
+        float total = 0.0f;
+        #pragma unroll
+        for (uint32_t w = 0u; w < kWaves; ++w)
+            total += acc_shared[w * kHeadLimit + tid] * weight_shared[w];
+        const float result = total / sum_total;
+        if (a.output_dtype == PagedAttentionOutputDType::F32) {
+            reinterpret_cast<float*>(out_base)
+                [static_cast<size_t>(task.row) * a.output_row_stride + static_cast<size_t>(task.q_head) * head_dim + tid] = result;
+        } else {
+            reinterpret_cast<bf16*>(out_base)
+                [static_cast<size_t>(task.row) * a.output_row_stride + static_cast<size_t>(task.q_head) * head_dim + tid] = __float2bfloat16(result);
+        }
+    }
+}
+
 template <bool kFullHead>
 __device__ __forceinline__ void attention_paged_bf16_body(
     const PagedAttentionCommonArgs& a,
     const bf16* k_pool,
     const bf16* v_pool,
     void* out_base) {
+    const DecodeTaskMap task = attention_map_decode_task(a);
+    if (!task.active) return;
+
     const uint32_t head_dim = a.head_dim;
-    const uint32_t q_heads = a.q_heads;
-    const uint32_t kv_heads = a.kv_heads;
-    const uint32_t page_tokens = a.page_tokens;
-    const uint32_t q_per_kv = q_heads / kv_heads;
     const float scale = a.scale;
-
-    const uint32_t task = blockIdx.x;
-    const uint32_t row = task / q_heads;
-    const uint32_t q_head = task % q_heads;
-    const uint32_t kv_head = q_head / q_per_kv;
-
-    if (row >= a.rows) return;
 
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
@@ -81,202 +321,54 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     __shared__ uint32_t anc_count_shared;
 
     if (tid == 0u) {
-        const uint32_t slot = a.row_sequence_slots[row];
-        uint32_t valid = 1u;
-        uint32_t visible = 0u;
-        anc_base_shared = 0u;
-        anc_count_shared = 0u;
-        if (slot >= a.max_sequences) {
-            valid = 0u;
-        } else if (a.tree_anc_offsets != nullptr) {
-            anc_base_shared = a.tree_anc_offsets[row];
-            uint32_t anc_count = a.tree_anc_offsets[row + 1u] - anc_base_shared;
-            const uint32_t committed_end = a.tree_committed_end_rows != nullptr
-                                               ? a.tree_committed_end_rows[row]
-                                               : a.tree_committed_end;
-            bool contiguous = true;
-            for (uint32_t i = 0u; i < anc_count; ++i) {
-                if (a.tree_anc_positions[anc_base_shared + i] != committed_end + i) {
-                    contiguous = false;
-                    break;
-                }
-            }
-            const uint64_t v64 = contiguous
-                                     ? static_cast<uint64_t>(committed_end) + anc_count
-                                     : static_cast<uint64_t>(committed_end);
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else {
-                visible = static_cast<uint32_t>(v64);
-                anc_count_shared = contiguous ? 0u : anc_count;
-            }
-        } else {
-            const uint64_t v64 = static_cast<uint64_t>(a.row_positions[row]) + 1u;
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else visible = static_cast<uint32_t>(v64);
-        }
-        row_valid_shared = valid;
-        visible_shared = visible;
-        invalid_shared = 0u;
-        block_table_shared = a.block_tables
-            + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
+        attention_initialize_visible_range(a, task.row, row_valid_shared, visible_shared,
+                                           invalid_shared, block_table_shared,
+                                           anc_base_shared, anc_count_shared);
     }
     __syncthreads();
     if (row_valid_shared == 0u) return;
 
-    const uint32_t visible = visible_shared;
-    const uint32_t anc_base = anc_base_shared;
-    const uint32_t anc_count = anc_count_shared;
-    const uint32_t* block_table = block_table_shared;
-
-    const bf16* q_row = reinterpret_cast<const bf16*>(a.q)
-        + static_cast<size_t>(row) * a.q_row_stride
-        + static_cast<size_t>(q_head) * head_dim;
-
     float q_reg[kElemsPerLane];
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
-        q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
-    }
+    attention_load_query_tile<kFullHead>(a, task, lane, q_reg);
 
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
-    const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
-    const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
+    DecodeWalkState st{};
+    st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
+    st.block_table = block_table_shared;
+    st.page_tokens = a.page_tokens;
+    st.visible = visible_shared;
+    st.elems_per_page = a.elems_per_page;
+    st.elems_per_token = a.elems_per_token;
+    st.num_pages = a.num_pages;
+    st.wave = wave;
+    st.lane = lane;
 
     float run_max = -FLT_MAX;
     float run_sum = 0.0f;
     float acc[kElemsPerLane] = {};
     uint32_t bad = 0u;
 
-    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
-            bad = 1u;
-            break;
-        }
-        const uint64_t page_base =
-            layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
-        const uint32_t page_start = page_index * page_tokens;
-        const uint32_t tokens_here =
-            (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        for (uint32_t off = wave; off < tokens_here; off += kWaves) {
-            const uint64_t elem =
-                page_base + static_cast<uint64_t>(off) * a.elems_per_token;
-            const bf16* k_head = k_pool + elem + head_off;
-            const bf16* v_head = v_pool + elem + head_off;
-            bf16 k_reg[kElemsPerLane];
-            bf16 v_reg[kElemsPerLane];
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-                const uint32_t d = lane + 32u * j;
-                if (kFullHead || d < head_dim) {
-                    k_reg[j] = k_head[d];
-                    v_reg[j] = v_head[d];
-                } else {
-                    k_reg[j] = __float2bfloat16(0.0f);
-                    v_reg[j] = __float2bfloat16(0.0f);
-                }
-            }
-            float partial = 0.0f;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                partial += q_reg[j] * __bfloat162float(k_reg[j]);
-            const float score = warp_sum_all(partial) * scale;
-            const float next_max = fmaxf(run_max, score);
-            const float alpha = __expf(run_max - next_max);
-            const float weight = __expf(score - next_max);
-            run_sum = run_sum * alpha + weight;
-            run_max = next_max;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                acc[j] = acc[j] * alpha + weight * __bfloat162float(v_reg[j]);
-        }
-    }
+    attention_visit_pages_bf16<kFullHead>(st, k_pool, v_pool, q_reg, head_dim, scale,
+                                          run_max, run_sum, acc, bad);
 
     if (a.tree_anc_offsets != nullptr) {
-        for (uint32_t ai = wave; ai < anc_count; ai += kWaves) {
-            const uint32_t pos = a.tree_anc_positions[anc_base + ai];
-            const uint32_t anc_page_index = pos / page_tokens;
-            const uint32_t anc_off = pos % page_tokens;
-            const uint32_t page = block_table[anc_page_index];
-            if (page >= a.num_pages) {
-                bad = 1u;
-                break;
-            }
-            const uint64_t elem =
-                layer_base + static_cast<uint64_t>(page) * a.elems_per_page +
-                static_cast<uint64_t>(anc_off) * a.elems_per_token;
-            const bf16* k_head = k_pool + elem + head_off;
-            const bf16* v_head = v_pool + elem + head_off;
-            bf16 k_reg[kElemsPerLane];
-            bf16 v_reg[kElemsPerLane];
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-                const uint32_t d = lane + 32u * j;
-                if (kFullHead || d < head_dim) {
-                    k_reg[j] = k_head[d];
-                    v_reg[j] = v_head[d];
-                } else {
-                    k_reg[j] = __float2bfloat16(0.0f);
-                    v_reg[j] = __float2bfloat16(0.0f);
-                }
-            }
-            float partial = 0.0f;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                partial += q_reg[j] * __bfloat162float(k_reg[j]);
-            const float score = warp_sum_all(partial) * scale;
-            const float next_max = fmaxf(run_max, score);
-            const float alpha = __expf(run_max - next_max);
-            const float weight = __expf(score - next_max);
-            run_sum = run_sum * alpha + weight;
-            run_max = next_max;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                acc[j] = acc[j] * alpha + weight * __bfloat162float(v_reg[j]);
-        }
+        attention_visit_ancestors_bf16<kFullHead>(
+            st, anc_base_shared, anc_count_shared, a.tree_anc_positions,
+            k_pool, v_pool, q_reg, head_dim, scale, run_max, run_sum, acc, bad);
     }
 
-    if (lane == 0u) {
-        merge_max_shared[wave] = run_max;
-        merge_sum_shared[wave] = run_sum;
-        if (bad != 0u) invalid_shared = 1u;
-    }
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
-        if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
-    }
+    attention_stage_wave_partials(tid, lane, wave, head_dim, run_max, run_sum, bad, acc,
+                                  merge_max_shared, merge_sum_shared, invalid_shared,
+                                  acc_shared);
     __syncthreads();
     if (invalid_shared != 0u) return;
 
-    const float global_max =
-        warp_max_all((lane < kWaves) ? merge_max_shared[lane] : -FLT_MAX);
-
     float weight_shared[kWaves];
     float sum_total = 0.0f;
-    #pragma unroll
-    for (uint32_t w = 0u; w < kWaves; ++w) {
-        weight_shared[w] = __expf(merge_max_shared[w] - global_max);
-        sum_total += merge_sum_shared[w] * weight_shared[w];
-    }
-
-    if (tid < head_dim && sum_total > 0.0f) {
-        float total = 0.0f;
-        #pragma unroll
-        for (uint32_t w = 0u; w < kWaves; ++w)
-            total += acc_shared[w * kHeadLimit + tid] * weight_shared[w];
-        const float result = total / sum_total;
-        if (a.output_dtype == PagedAttentionOutputDType::F32) {
-            reinterpret_cast<float*>(out_base)
-                [static_cast<size_t>(row) * a.output_row_stride + static_cast<size_t>(q_head) * head_dim + tid] = result;
-        } else {
-            reinterpret_cast<bf16*>(out_base)
-                [static_cast<size_t>(row) * a.output_row_stride + static_cast<size_t>(q_head) * head_dim + tid] = __float2bfloat16(result);
-        }
-    }
+    attention_merge_wave_partials(lane, merge_max_shared, merge_sum_shared,
+                                  weight_shared, sum_total);
+    attention_store_output_bf16(a, task, out_base, tid, head_dim, acc_shared,
+                                weight_shared, sum_total);
 }
 
 template <bool kFullHead>
