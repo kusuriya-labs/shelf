@@ -432,77 +432,66 @@ constexpr uint32_t kSplitThreads = kSplitWaves * 32u;
 static_assert(kSplitThreads == kPagedAttentionSplitBlock);
 constexpr uint32_t kSplitMaxSplits = 16u;
 
-template <uint32_t kQPerKV, bool kFullHead>
-__device__ __forceinline__ void attention_paged_split_bf16_body(
-    const PagedAttentionCommonArgs& a,
-    const bf16* k_pool,
-    const bf16* v_pool,
-    float* partials,
-    uint32_t splits) {
-    const uint32_t head_dim = a.head_dim;
-    const uint32_t kv_heads = a.kv_heads;
-    const uint32_t page_tokens = a.page_tokens;
-    const float scale = a.scale;
+// ---------------------------------------------------------------------------
+// Algorithm layer (Phase 5, contract §4): BF16 split staging. Same stage
+// names as decode where the responsibilities match; split owns a page window
+// [page_begin, page_end) and writes per-split partials (workspace layout of
+// the two-launch scheme is unchanged).
+// ---------------------------------------------------------------------------
 
+struct SplitTaskMap {
+    uint32_t split;
+    uint32_t row;
+    uint32_t kv_head;
+    bool active;   // row < rows; block-uniform
+};
+
+__device__ __forceinline__ SplitTaskMap attention_map_split_task(
+    const PagedAttentionCommonArgs& a, uint32_t splits) {
     const uint32_t task = blockIdx.x;
-    const uint32_t split = task % splits;
+    SplitTaskMap t{};
+    t.split = task % splits;
     const uint32_t rest = task / splits;
-    const uint32_t kv_head = rest % kv_heads;
-    const uint32_t row = rest / kv_heads;
+    t.kv_head = rest % a.kv_heads;
+    t.row = rest / a.kv_heads;
+    t.active = t.row < a.rows;
+    return t;
+}
 
-    if (row >= a.rows) return;
-
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t wave = tid >> 5;
-
-    __shared__ float q_lds[kQPerKV * kHeadLimit];
-    __shared__ float acc_lds[kSplitWaves * kQPerKV * kHeadLimit];
-    __shared__ float m_lds[kSplitWaves * kQPerKV];
-    __shared__ float s_lds[kSplitWaves * kQPerKV];
-    __shared__ uint32_t row_valid_shared;
-    __shared__ uint32_t visible_shared;
-    __shared__ uint32_t page_begin_shared;
-    __shared__ uint32_t page_end_shared;
-    __shared__ const uint32_t* block_table_shared;
-
-    if (tid == 0u) {
-        const uint32_t slot = a.row_sequence_slots[row];
-        uint32_t valid = 1u;
-        uint32_t visible = 0u;
-        if (slot >= a.max_sequences) {
-            valid = 0u;
-        } else {
-            const uint64_t v64 = static_cast<uint64_t>(a.row_positions[row]) + 1u;
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else visible = static_cast<uint32_t>(v64);
-        }
-        const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
-        const uint32_t per = (page_count + splits - 1u) / splits;
-        row_valid_shared = valid;
-        visible_shared = visible;
-        page_begin_shared = split * per;
-        page_end_shared = (page_count < page_begin_shared + per) ? page_count : page_begin_shared + per;
-        block_table_shared = a.block_tables
-            + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
+__device__ __forceinline__ void attention_split_init_page_range(
+    const PagedAttentionCommonArgs& a, const SplitTaskMap& task, uint32_t splits,
+    uint32_t& row_valid_shared, uint32_t& visible_shared, uint32_t& page_begin_shared,
+    uint32_t& page_end_shared, const uint32_t*& block_table_shared) {
+    const uint32_t page_tokens = a.page_tokens;
+    const uint32_t slot = a.row_sequence_slots[task.row];
+    uint32_t valid = 1u;
+    uint32_t visible = 0u;
+    if (slot >= a.max_sequences) {
+        valid = 0u;
+    } else {
+        const uint64_t v64 = static_cast<uint64_t>(a.row_positions[task.row]) + 1u;
+        const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
+        if (v64 > cap) valid = 0u;
+        else visible = static_cast<uint32_t>(v64);
     }
-    __syncthreads();
-    if (row_valid_shared == 0u) return;
+    const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
+    const uint32_t per = (page_count + splits - 1u) / splits;
+    row_valid_shared = valid;
+    visible_shared = visible;
+    page_begin_shared = task.split * per;
+    page_end_shared = (page_count < page_begin_shared + per) ? page_count : page_begin_shared + per;
+    block_table_shared = a.block_tables
+        + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
+}
 
-    const uint32_t visible = visible_shared;
-    const uint32_t* block_table = block_table_shared;
-    const uint32_t page_begin = page_begin_shared;
-    const uint32_t page_end = page_end_shared;
-
-    float* partial_base = partials
-        + static_cast<size_t>((static_cast<size_t>(row) * kv_heads + kv_head) * splits + split)
-          * (kQPerKV * (2u + kHeadLimit));
-
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_load_q_tile_split(
+    const PagedAttentionCommonArgs& a, const SplitTaskMap& task, uint32_t tid,
+    float (&q_lds)[kQPerKV * kHeadLimit]) {
+    const uint32_t head_dim = a.head_dim;
     const bf16* q_base = reinterpret_cast<const bf16*>(a.q)
-        + static_cast<size_t>(row) * a.q_row_stride
-        + static_cast<size_t>(kv_head * kQPerKV) * head_dim;
-
+        + static_cast<size_t>(task.row) * a.q_row_stride
+        + static_cast<size_t>(task.kv_head * kQPerKV) * head_dim;
     for (uint32_t e = tid; e < kQPerKV * kHeadLimit; e += kSplitThreads) {
         const uint32_t qh = e / kHeadLimit;
         const uint32_t d = e % kHeadLimit;
@@ -510,40 +499,48 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
             ? __bfloat162float(q_base[static_cast<size_t>(qh) * head_dim + d])
             : 0.0f;
     }
-    __syncthreads();
+}
 
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
-    const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
+struct SplitWalkState {
+    uint64_t head_off;
+    uint64_t layer_base;
+    const uint32_t* block_table;
+    uint32_t page_tokens;
+    uint32_t visible;
+    uint32_t page_begin;
+    uint32_t page_end;
+    uint64_t elems_per_page;
+    uint64_t elems_per_token;
+    uint32_t num_pages;
+    uint32_t wave;
+    uint32_t lane;
+};
 
-    float run_max[kQPerKV];
-    float run_sum[kQPerKV];
-    float acc[kQPerKV][kElemsPerLane];
-    #pragma unroll
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        run_max[qh] = -FLT_MAX;
-        run_sum[qh] = 0.0f;
-        #pragma unroll
-        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-            acc[qh][j] = 0.0f;
-    }
-    uint32_t bad = 0u;
-
-    for (uint32_t page_index = page_begin; page_index < page_end; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
+// Page walk over this split's window; inner q-head loop order and the float
+// K/V staging (converted at load) are the frozen split semantics (contract §4).
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_visit_pages_split_bf16(
+    const SplitWalkState& st, const bf16* k_pool, const bf16* v_pool,
+    const float (&q_lds)[kQPerKV * kHeadLimit], uint32_t head_dim, float scale,
+    float (&run_max)[kQPerKV], float (&run_sum)[kQPerKV],
+    float (&acc)[kQPerKV][kElemsPerLane], uint32_t& bad) {
+    const uint32_t lane = st.lane;
+    for (uint32_t page_index = st.page_begin; page_index < st.page_end; ++page_index) {
+        const uint32_t page = st.block_table[page_index];
+        if (page >= st.num_pages) {
             bad = 1u;
             break;
         }
         const uint64_t page_base =
-            layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
-        const uint32_t page_start = page_index * page_tokens;
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
+        const uint32_t page_start = page_index * st.page_tokens;
         const uint32_t tokens_here =
-            (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
+            (st.visible - page_start < st.page_tokens) ? (st.visible - page_start) : st.page_tokens;
+        for (uint32_t off = st.wave; off < tokens_here; off += kSplitWaves) {
             const uint64_t elem =
-                page_base + static_cast<uint64_t>(off) * a.elems_per_token;
-            const bf16* k_head = k_pool + elem + head_off;
-            const bf16* v_head = v_pool + elem + head_off;
+                page_base + static_cast<uint64_t>(off) * st.elems_per_token;
+            const bf16* k_head = k_pool + elem + st.head_off;
+            const bf16* v_head = v_pool + elem + st.head_off;
             float kf[kElemsPerLane];
             float vf[kElemsPerLane];
             #pragma unroll
@@ -575,18 +572,15 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
             }
         }
     }
+}
 
-    if (bad != 0u) {
-        #pragma unroll
-        for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-            run_max[qh] = -FLT_MAX;
-            run_sum[qh] = 0.0f;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                acc[qh][j] = 0.0f;
-        }
-    }
-
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_stage_split_wave_partials(
+    uint32_t lane, uint32_t wave, uint32_t head_dim,
+    const float (&run_max)[kQPerKV], const float (&run_sum)[kQPerKV],
+    const float (&acc)[kQPerKV][kElemsPerLane],
+    float (&m_lds)[kSplitWaves * kQPerKV], float (&s_lds)[kSplitWaves * kQPerKV],
+    float (&acc_lds)[kSplitWaves * kQPerKV * kHeadLimit]) {
     if (lane == 0u) {
         #pragma unroll
         for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
@@ -603,8 +597,15 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
                 acc_lds[(wave * kQPerKV + qh) * kHeadLimit + d] = acc[qh][j];
         }
     }
-    __syncthreads();
+}
 
+// In-block wave merge (fmaxf tree m0..m3 exactly as before) + partial write.
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_merge_store_split_partials(
+    uint32_t tid, const float (&m_lds)[kSplitWaves * kQPerKV],
+    const float (&s_lds)[kSplitWaves * kQPerKV],
+    const float (&acc_lds)[kSplitWaves * kQPerKV * kHeadLimit],
+    float* partial_base, uint32_t head_dim) {
     #pragma unroll
     for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
         float m[kSplitWaves];
@@ -632,6 +633,173 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
                 for (uint32_t w = 0u; w < kSplitWaves; ++w)
                     total += acc_lds[(w * kQPerKV + qh) * kHeadLimit + d] * wgt[w];
                 partial_base[2u * kQPerKV + qh * kHeadLimit + d] = total;
+            }
+        }
+    }
+}
+
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_paged_split_bf16_body(
+    const PagedAttentionCommonArgs& a,
+    const bf16* k_pool,
+    const bf16* v_pool,
+    float* partials,
+    uint32_t splits) {
+    const uint32_t head_dim = a.head_dim;
+    const uint32_t kv_heads = a.kv_heads;
+    const float scale = a.scale;
+
+    const SplitTaskMap task = attention_map_split_task(a, splits);
+    if (!task.active) return;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5;
+
+    __shared__ float q_lds[kQPerKV * kHeadLimit];
+    __shared__ float acc_lds[kSplitWaves * kQPerKV * kHeadLimit];
+    __shared__ float m_lds[kSplitWaves * kQPerKV];
+    __shared__ float s_lds[kSplitWaves * kQPerKV];
+    __shared__ uint32_t row_valid_shared;
+    __shared__ uint32_t visible_shared;
+    __shared__ uint32_t page_begin_shared;
+    __shared__ uint32_t page_end_shared;
+    __shared__ const uint32_t* block_table_shared;
+
+    if (tid == 0u) {
+        attention_split_init_page_range(a, task, splits, row_valid_shared, visible_shared,
+                                        page_begin_shared, page_end_shared,
+                                        block_table_shared);
+    }
+    __syncthreads();
+    if (row_valid_shared == 0u) return;
+
+    float* partial_base = partials
+        + static_cast<size_t>((static_cast<size_t>(task.row) * kv_heads + task.kv_head) * splits + task.split)
+          * (kQPerKV * (2u + kHeadLimit));
+
+    attention_load_q_tile_split<kQPerKV, kFullHead>(a, task, tid, q_lds);
+    __syncthreads();
+
+    SplitWalkState st{};
+    st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
+    st.block_table = block_table_shared;
+    st.page_tokens = a.page_tokens;
+    st.visible = visible_shared;
+    st.page_begin = page_begin_shared;
+    st.page_end = page_end_shared;
+    st.elems_per_page = a.elems_per_page;
+    st.elems_per_token = a.elems_per_token;
+    st.num_pages = a.num_pages;
+    st.wave = wave;
+    st.lane = lane;
+
+    float run_max[kQPerKV];
+    float run_sum[kQPerKV];
+    float acc[kQPerKV][kElemsPerLane];
+    #pragma unroll
+    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+        run_max[qh] = -FLT_MAX;
+        run_sum[qh] = 0.0f;
+        #pragma unroll
+        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+            acc[qh][j] = 0.0f;
+    }
+    uint32_t bad = 0u;
+
+    attention_visit_pages_split_bf16<kQPerKV, kFullHead>(
+        st, k_pool, v_pool, q_lds, head_dim, scale, run_max, run_sum, acc, bad);
+
+    if (bad != 0u) {
+        #pragma unroll
+        for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+            run_max[qh] = -FLT_MAX;
+            run_sum[qh] = 0.0f;
+            #pragma unroll
+            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+                acc[qh][j] = 0.0f;
+        }
+    }
+
+    attention_stage_split_wave_partials<kQPerKV, kFullHead>(lane, wave, head_dim,
+                                                            run_max, run_sum, acc,
+                                                            m_lds, s_lds, acc_lds);
+    __syncthreads();
+
+    attention_merge_store_split_partials<kQPerKV, kFullHead>(
+        tid, m_lds, s_lds, acc_lds, partial_base, head_dim);
+}
+
+
+// ---------------------------------------------------------------------------
+// Algorithm layer (Phase 5): second launch of the split scheme. Reads the
+// partials produced above; three-barrier LDS publish order is contract §5.
+// ---------------------------------------------------------------------------
+
+template <uint32_t kQPerKV>
+__device__ __forceinline__ void attention_reduce_max_pass(
+    const float* base, uint32_t splits, uint32_t tid, float (&g_lds)[kQPerKV]) {
+    const uint64_t a_stride = kQPerKV * (2u + kHeadLimit);
+    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+        if (tid == qh) {
+            float g = -FLT_MAX;
+            for (uint32_t s = 0u; s < splits; ++s)
+                g = fmaxf(g, base[static_cast<uint64_t>(s) * a_stride + qh]);
+            g_lds[qh] = g;
+        }
+    }
+}
+
+template <uint32_t kQPerKV>
+__device__ __forceinline__ void attention_reduce_weight_sum_pass(
+    const float* base, uint32_t splits, uint32_t tid, const float (&g_lds)[kQPerKV],
+    float (&wgt_lds)[kQPerKV * kSplitMaxSplits], float (&sum_lds)[kQPerKV]) {
+    const uint64_t a_stride = kQPerKV * (2u + kHeadLimit);
+    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+        if (tid == qh) {
+            const float g = g_lds[qh];
+            float sum_total = 0.0f;
+            for (uint32_t s = 0u; s < splits; ++s) {
+                const float m_s = base[static_cast<uint64_t>(s) * a_stride + qh];
+                const float w_s = __expf(m_s - g);
+                wgt_lds[qh * kSplitMaxSplits + s] = w_s;
+                sum_total += w_s * base[static_cast<uint64_t>(s) * a_stride + kQPerKV + qh];
+            }
+            sum_lds[qh] = sum_total;
+        }
+    }
+}
+
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_reduce_store_bf16(
+    const PagedAttentionCommonArgs& a, uint32_t row, uint32_t kv_head,
+    const float* base, const float (&sum_lds)[kQPerKV],
+    const float (&wgt_lds)[kQPerKV * kSplitMaxSplits],
+    void* out_base, uint32_t tid, uint32_t head_dim, uint32_t splits) {
+    const uint64_t a_stride = kQPerKV * (2u + kHeadLimit);
+    const uint32_t q_head0 = kv_head * kQPerKV;
+    #pragma unroll
+    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+        const float sum_total = sum_lds[qh];
+        if (sum_total <= 0.0f) continue;
+        #pragma unroll
+        for (uint32_t r = 0u; r < 2u; ++r) {
+            const uint32_t d = tid + r * 128u;
+            if (kFullHead || d < head_dim) {
+                float total = 0.0f;
+                for (uint32_t s = 0u; s < splits; ++s)
+                    total += wgt_lds[qh * kSplitMaxSplits + s]
+                        * base[static_cast<uint64_t>(s) * a_stride + 2u * kQPerKV + qh * kHeadLimit + d];
+                const float result = total / sum_total;
+                const uint64_t out_off =
+                    static_cast<uint64_t>(row) * a.output_row_stride
+                    + static_cast<uint64_t>(q_head0 + qh) * head_dim + d;
+                if (a.output_dtype == PagedAttentionOutputDType::F32) {
+                    reinterpret_cast<float*>(out_base)[out_off] = result;
+                } else {
+                    reinterpret_cast<bf16*>(out_base)[out_off] = __float2bfloat16(result);
+                }
             }
         }
     }
@@ -669,56 +837,12 @@ __device__ __forceinline__ void attention_paged_split_reduce_bf16_body(
         + static_cast<size_t>((static_cast<size_t>(row) * kv_heads + kv_head) * splits)
           * kQPerKV * (2u + kHeadLimit);
 
-    const uint64_t a_stride = kQPerKV * (2u + kHeadLimit);
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        if (tid == qh) {
-            float g = -FLT_MAX;
-            for (uint32_t s = 0u; s < splits; ++s)
-                g = fmaxf(g, base[static_cast<uint64_t>(s) * a_stride + qh]);
-            g_lds[qh] = g;
-        }
-    }
+    attention_reduce_max_pass<kQPerKV>(base, splits, tid, g_lds);
     __syncthreads();
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        if (tid == qh) {
-            const float g = g_lds[qh];
-            float sum_total = 0.0f;
-            for (uint32_t s = 0u; s < splits; ++s) {
-                const float m_s = base[static_cast<uint64_t>(s) * a_stride + qh];
-                const float w_s = __expf(m_s - g);
-                wgt_lds[qh * kSplitMaxSplits + s] = w_s;
-                sum_total += w_s * base[static_cast<uint64_t>(s) * a_stride + kQPerKV + qh];
-            }
-            sum_lds[qh] = sum_total;
-        }
-    }
+    attention_reduce_weight_sum_pass<kQPerKV>(base, splits, tid, g_lds, wgt_lds, sum_lds);
     __syncthreads();
-
-    const uint32_t q_head0 = kv_head * kQPerKV;
-    #pragma unroll
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        const float sum_total = sum_lds[qh];
-        if (sum_total <= 0.0f) continue;
-        #pragma unroll
-        for (uint32_t r = 0u; r < 2u; ++r) {
-            const uint32_t d = tid + r * 128u;
-            if (kFullHead || d < head_dim) {
-                float total = 0.0f;
-                for (uint32_t s = 0u; s < splits; ++s)
-                    total += wgt_lds[qh * kSplitMaxSplits + s]
-                        * base[static_cast<uint64_t>(s) * a_stride + 2u * kQPerKV + qh * kHeadLimit + d];
-                const float result = total / sum_total;
-                const uint64_t out_off =
-                    static_cast<uint64_t>(row) * a.output_row_stride
-                    + static_cast<uint64_t>(q_head0 + qh) * head_dim + d;
-                if (a.output_dtype == PagedAttentionOutputDType::F32) {
-                    reinterpret_cast<float*>(out_base)[out_off] = result;
-                } else {
-                    reinterpret_cast<bf16*>(out_base)[out_off] = __float2bfloat16(result);
-                }
-            }
-        }
-    }
+    attention_reduce_store_bf16<kQPerKV, kFullHead>(a, row, kv_head, base, sum_lds,
+                                                    wgt_lds, out_base, tid, head_dim, splits);
 }
 
 

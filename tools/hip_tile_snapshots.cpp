@@ -217,8 +217,15 @@ Built run(const Cfg& cf) {
         hipMemset(d_part, 0x5A, pn * 4);
         st = cf.fp8 ? launch_attention_paged_fp8_split(a, fp8k, fp8v, (const float*)d_ks, (const float*)d_vs, (float*)d_part, cf.splits, nullptr)
                     : launch_attention_paged_bf16_split(a, (const shelf::bf16_t*)d_k, (const shelf::bf16_t*)d_v, (float*)d_part, cf.splits, nullptr);
-        if (st == hipSuccess)
+        if (st == hipSuccess) {
+            // head-grouping env variants: default qh1 path for most cases;
+            // explicit reduce-branch coverage for select cases
+            if (cf.tree == false && cf.split && cf.splits == 4u && cf.D == 256u && cf.qh == 8u && !cf.fp8)
+                setenv("PHASESHIFT_PAGED_ATTENTION_SPLIT_REDUCE_QH", "4", 1);  // base entry
             st = launch_attention_paged_bf16_split_reduce(a, (const float*)d_part, cf.splits, nullptr);
+            if (cf.tree == false && cf.split && cf.splits == 4u && cf.D == 256u && cf.qh == 8u && !cf.fp8)
+                unsetenv("PHASESHIFT_PAGED_ATTENTION_SPLIT_REDUCE_QH");
+        }
         if (st == hipSuccess) {
             r.partials.resize(pn * 4);
             hipMemcpy(r.partials.data(), d_part, pn * 4, hipMemcpyDeviceToHost);
@@ -256,8 +263,9 @@ const Cfg kCfgs[] = {
 };
 std::string name(const Cfg& c) {
     char b[96];
-    std::snprintf(b, sizeof b, "attn_%s_D%u_qh%u_%s%s_sp%u", c.fp8 ? "fp8" : "bf16", c.D,
-                  c.qh, c.split ? "split" : "decode", c.tree ? "_tree" : "", c.splits);
+    std::snprintf(b, sizeof b, "attn_%s_D%u_qh%u_%s%s_sp%u%s", c.fp8 ? "fp8" : "bf16", c.D,
+                  c.qh, c.split ? "split" : "decode", c.tree ? "_tree" : "", c.splits,
+                  (c.split && c.splits == 4u && c.D == 256u && c.qh == 8u && !c.fp8) ? "_redqh4" : "");
     return b;
 }
 
