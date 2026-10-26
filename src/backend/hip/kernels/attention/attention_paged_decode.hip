@@ -170,11 +170,13 @@ hipError_t launch_attention_paged_bf16_split(
         return hipGetLastError();
     }
     if (q_per_kv == 4u) {
-        if (full_head) {
-            attention_paged_split_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
-                a, reinterpret_cast<const bf16*>(k_pool),
-                reinterpret_cast<const bf16*>(v_pool), partials, splits);
-        }
+        // FIX(upstream hole): the former "if (full_head)" guard here was dead
+        // code (full_head is handled by the named kernel above), so head_dim
+        // != kHeadLimit silently launched NO split kernel and left partials
+        // untouched. Reaching this branch always means !full_head.
+        attention_paged_split_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
+            a, reinterpret_cast<const bf16*>(k_pool),
+            reinterpret_cast<const bf16*>(v_pool), partials, splits);
     } else {
         if (full_head) {
             PagedAttentionSplitArgs stable{};
@@ -263,10 +265,10 @@ hipError_t launch_attention_paged_bf16_split_reduce(
         return hipGetLastError();
     }
     if (q_per_kv == 4u) {
-        if (full_head) {
-            attention_paged_split_reduce_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
-                a, partials, splits, common.output);
-        }
+        // FIX(upstream hole): see launch_attention_paged_bf16_split; the
+        // inner full_head test was dead, so non-256 reduce never launched.
+        attention_paged_split_reduce_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
+            a, partials, splits, common.output);
     } else {
         if (full_head) {
             PagedAttentionSplitReduceArgs stable{};
