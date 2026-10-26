@@ -150,6 +150,8 @@ struct DecodeWalkState {
     uint32_t num_pages;
     uint32_t wave;
     uint32_t lane;
+    uint32_t kv_head;   // used by FP8 scale indexing
+    uint32_t kv_heads;
 };
 
 // One token: masked K/V load, wave-reduced dot, online softmax update.
@@ -342,6 +344,8 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     st.num_pages = a.num_pages;
     st.wave = wave;
     st.lane = lane;
+    st.kv_head = task.kv_head;
+    st.kv_heads = a.kv_heads;
 
     float run_max = -FLT_MAX;
     float run_sum = 0.0f;
@@ -514,6 +518,8 @@ struct SplitWalkState {
     uint32_t num_pages;
     uint32_t wave;
     uint32_t lane;
+    uint32_t kv_head;   // used by FP8 scale indexing
+    uint32_t kv_heads;
 };
 
 // Page walk over this split's window; inner q-head loop order and the float
@@ -694,6 +700,8 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
     st.num_pages = a.num_pages;
     st.wave = wave;
     st.lane = lane;
+    st.kv_head = task.kv_head;
+    st.kv_heads = kv_heads;
 
     float run_max[kQPerKV];
     float run_sum[kQPerKV];
@@ -1269,6 +1277,140 @@ __device__ __forceinline__ float fp8_lut_value(
     return __bfloat162float(__ushort_as_bfloat16(lut[code]));
 }
 
+// ---------------------------------------------------------------------------
+// Algorithm layer (Phase 5, contract §4): FP8 decode reuses the BF16 decode
+// stage skeleton (task map / visible range / query tile / stage / merge /
+// store are shared via v_decode_bf16:: helpers — same shapes and orders);
+// only the token body differs: LUT decode + per-token k_scale / v_scale.
+// ---------------------------------------------------------------------------
+
+// stride must match the launch block (kThreads decode / kSplitThreads split).
+__device__ __forceinline__ void attention_build_decode_lut(
+    uint32_t tid, uint32_t stride, unsigned short (&decode_lut)[256]) {
+    for (uint32_t i = tid; i < 256u; i += stride)
+        decode_lut[i] = f2bf_p8(e4m3_decode_f32(static_cast<uint8_t>(i)));
+}
+
+// Frozen FP8 token order (contract §4): masked fp8 loads -> partial += q*
+// lut(k) ascending -> (warp_sum_all * k_scale) * scale -> max/alpha/weight ->
+// v_weight = weight * v_scale -> acc = acc*alpha + v_weight*lut(v).
+template <bool kFullHead>
+__device__ __forceinline__ void attention_attend_token_fp8(
+    const float (&q_reg)[v_decode_bf16::kElemsPerLane],
+    const fp8* k_head, const fp8* v_head, const unsigned short* decode_lut,
+    float k_scale, float v_scale, uint32_t head_dim, uint32_t lane, float scale,
+    float& run_max, float& run_sum, float (&acc)[v_decode_bf16::kElemsPerLane]) {
+    fp8 k_reg[v_decode_bf16::kElemsPerLane];
+    fp8 v_reg[v_decode_bf16::kElemsPerLane];
+    #pragma unroll
+    for (uint32_t j = 0u; j < v_decode_bf16::kElemsPerLane; ++j) {
+        const uint32_t d = lane + 32u * j;
+        if (kFullHead || d < head_dim) {
+            k_reg[j] = k_head[d];
+            v_reg[j] = v_head[d];
+        } else {
+            k_reg[j] = static_cast<fp8>(0u);
+            v_reg[j] = static_cast<fp8>(0u);
+        }
+    }
+    float partial = 0.0f;
+    #pragma unroll
+    for (uint32_t j = 0u; j < v_decode_bf16::kElemsPerLane; ++j)
+        partial += q_reg[j] * fp8_lut_value(decode_lut, k_reg[j]);
+    const float score = warp_sum_all(partial) * k_scale * scale;
+    const float next_max = fmaxf(run_max, score);
+    const float alpha = __expf(run_max - next_max);
+    const float weight = __expf(score - next_max);
+    const float v_weight = weight * v_scale;
+    run_sum = run_sum * alpha + weight;
+    run_max = next_max;
+    #pragma unroll
+    for (uint32_t j = 0u; j < v_decode_bf16::kElemsPerLane; ++j)
+        acc[j] = acc[j] * alpha + v_weight * fp8_lut_value(decode_lut, v_reg[j]);
+}
+
+struct Fp8ScaleWalk {
+    const float* k_scale_pool;
+    const float* v_scale_pool;
+    size_t scale_layer_base;
+};
+
+template <bool kFullHead>
+__device__ __forceinline__ void attention_visit_pages_fp8(
+    const v_decode_bf16::DecodeWalkState& st, const Fp8ScaleWalk& sc,
+    const fp8* k_pool, const fp8* v_pool,
+    const float (&q_reg)[v_decode_bf16::kElemsPerLane], uint32_t head_dim, float scale,
+    const unsigned short* decode_lut,
+    float& run_max, float& run_sum, float (&acc)[v_decode_bf16::kElemsPerLane],
+    uint32_t& bad) {
+    const uint32_t page_tokens = st.page_tokens;
+    const uint32_t kv_heads_n = st.kv_heads;
+    const uint32_t page_count = (st.visible + page_tokens - 1u) / page_tokens;
+    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
+        const uint32_t page = st.block_table[page_index];
+        if (page >= st.num_pages) {
+            bad = 1u;
+            break;
+        }
+        const uint64_t page_base =
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
+        const size_t page_scale_base =
+            sc.scale_layer_base + static_cast<size_t>(page) * page_tokens * kv_heads_n;
+        const uint32_t page_start = page_index * page_tokens;
+        const uint32_t tokens_here =
+            (st.visible - page_start < page_tokens) ? (st.visible - page_start) : page_tokens;
+        for (uint32_t off = st.wave; off < tokens_here; off += v_decode_bf16::kWaves) {
+            const uint64_t elem =
+                page_base + static_cast<uint64_t>(off) * st.elems_per_token;
+            const size_t si =
+                page_scale_base + static_cast<size_t>(off) * kv_heads_n +
+                st.kv_head;
+            const float k_scale = sc.k_scale_pool[si];
+            const float v_scale = sc.v_scale_pool[si];
+            attention_attend_token_fp8<kFullHead>(
+                q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+                decode_lut, k_scale, v_scale, head_dim, st.lane, scale,
+                run_max, run_sum, acc);
+        }
+    }
+}
+
+template <bool kFullHead>
+__device__ __forceinline__ void attention_visit_ancestors_fp8(
+    const v_decode_bf16::DecodeWalkState& st, const Fp8ScaleWalk& sc,
+    uint32_t anc_base, uint32_t anc_count, const uint32_t* tree_anc_positions,
+    const fp8* k_pool, const fp8* v_pool,
+    const float (&q_reg)[v_decode_bf16::kElemsPerLane], uint32_t head_dim, float scale,
+    const unsigned short* decode_lut,
+    float& run_max, float& run_sum, float (&acc)[v_decode_bf16::kElemsPerLane],
+    uint32_t& bad) {
+    const uint32_t page_tokens = st.page_tokens;
+    const uint32_t kv_heads_n = st.kv_heads;
+    for (uint32_t ai = st.wave; ai < anc_count; ai += v_decode_bf16::kWaves) {
+        const uint32_t pos = tree_anc_positions[anc_base + ai];
+        const uint32_t anc_page_index = pos / page_tokens;
+        const uint32_t anc_off = pos % page_tokens;
+        const uint32_t page = st.block_table[anc_page_index];
+        if (page >= st.num_pages) {
+            bad = 1u;
+            break;
+        }
+        const uint64_t elem =
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page +
+            static_cast<uint64_t>(anc_off) * st.elems_per_token;
+        const size_t si =
+            sc.scale_layer_base +
+            (static_cast<size_t>(page) * page_tokens + anc_off) * kv_heads_n +
+            st.kv_head;
+        const float k_scale = sc.k_scale_pool[si];
+        const float v_scale = sc.v_scale_pool[si];
+        attention_attend_token_fp8<kFullHead>(
+            q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+            decode_lut, k_scale, v_scale, head_dim, st.lane, scale,
+            run_max, run_sum, acc);
+    }
+}
+
 template <bool kFullHead>
 __global__ __launch_bounds__(kThreads)
 void attention_paged_fp8_impl(
@@ -1279,26 +1421,18 @@ void attention_paged_fp8_impl(
     const float* v_scale_pool,
     void* out_base) {
     const uint32_t head_dim = a.head_dim;
-    const uint32_t q_heads = a.q_heads;
-    const uint32_t kv_heads = a.kv_heads;
-    const uint32_t page_tokens = a.page_tokens;
-    const uint32_t q_per_kv = q_heads / kv_heads;
     const float scale = a.scale;
 
-    const uint32_t task = blockIdx.x;
-    const uint32_t row = task / q_heads;
-    const uint32_t q_head = task % q_heads;
-    const uint32_t kv_head = q_head / q_per_kv;
-
-    if (row >= a.rows) return;
+    const v_decode_bf16::DecodeTaskMap task = v_decode_bf16::attention_map_decode_task(a);
+    if (!task.active) return;
 
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
     const uint32_t wave = tid >> 5;
 
-    __shared__ float merge_max_shared[kWaves];
-    __shared__ float merge_sum_shared[kWaves];
-    __shared__ float acc_shared[kWaves * kHeadLimit];
+    __shared__ float merge_max_shared[v_decode_bf16::kWaves];
+    __shared__ float merge_sum_shared[v_decode_bf16::kWaves];
+    __shared__ float acc_shared[v_decode_bf16::kWaves * v_decode_bf16::kHeadLimit];
     __shared__ uint32_t row_valid_shared;
     __shared__ uint32_t visible_shared;
     __shared__ uint32_t invalid_shared;
@@ -1307,220 +1441,67 @@ void attention_paged_fp8_impl(
     __shared__ uint32_t anc_base_shared;
     __shared__ uint32_t anc_count_shared;
 
-    for (uint32_t i = tid; i < 256u; i += kThreads)
-        decode_lut[i] = f2bf_p8(e4m3_decode_f32(static_cast<uint8_t>(i)));
+    attention_build_decode_lut(tid, kThreads, decode_lut);
 
     if (tid == 0u) {
-        const uint32_t slot = a.row_sequence_slots[row];
-        uint32_t valid = 1u;
-        uint32_t visible = 0u;
-        anc_base_shared = 0u;
-        anc_count_shared = 0u;
-        if (slot >= a.max_sequences) {
-            valid = 0u;
-        } else if (a.tree_anc_offsets != nullptr) {
-            anc_base_shared = a.tree_anc_offsets[row];
-            uint32_t anc_count = a.tree_anc_offsets[row + 1u] - anc_base_shared;
-            const uint32_t committed_end = a.tree_committed_end_rows != nullptr
-                                               ? a.tree_committed_end_rows[row]
-                                               : a.tree_committed_end;
-            bool contiguous = true;
-            for (uint32_t i = 0u; i < anc_count; ++i) {
-                if (a.tree_anc_positions[anc_base_shared + i] != committed_end + i) {
-                    contiguous = false;
-                    break;
-                }
-            }
-            const uint64_t v64 = contiguous
-                                     ? static_cast<uint64_t>(committed_end) + anc_count
-                                     : static_cast<uint64_t>(committed_end);
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else {
-                visible = static_cast<uint32_t>(v64);
-                anc_count_shared = contiguous ? 0u : anc_count;
-            }
-        } else {
-            const uint64_t v64 = static_cast<uint64_t>(a.row_positions[row]) + 1u;
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else visible = static_cast<uint32_t>(v64);
-        }
-        row_valid_shared = valid;
-        visible_shared = visible;
-        invalid_shared = 0u;
-        block_table_shared = a.block_tables
-            + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
+        v_decode_bf16::attention_initialize_visible_range(
+            a, task.row, row_valid_shared, visible_shared, invalid_shared,
+            block_table_shared, anc_base_shared, anc_count_shared);
     }
     __syncthreads();
     if (row_valid_shared == 0u) return;
 
-    const uint32_t visible = visible_shared;
-    const uint32_t anc_base = anc_base_shared;
-    const uint32_t anc_count = anc_count_shared;
-    const uint32_t* block_table = block_table_shared;
+    float q_reg[v_decode_bf16::kElemsPerLane];
+    v_decode_bf16::attention_load_query_tile<kFullHead>(a, task, lane, q_reg);
 
-    const bf16* q_row = reinterpret_cast<const bf16*>(a.q)
-        + static_cast<size_t>(row) * a.q_row_stride
-        + static_cast<size_t>(q_head) * head_dim;
+    v_decode_bf16::DecodeWalkState st{};
+    st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
+    st.block_table = block_table_shared;
+    st.page_tokens = a.page_tokens;
+    st.visible = visible_shared;
+    st.elems_per_page = a.elems_per_page;
+    st.elems_per_token = a.elems_per_token;
+    st.kv_head = task.kv_head;
+    st.kv_heads = a.kv_heads;
+    st.num_pages = a.num_pages;
+    st.wave = wave;
+    st.lane = lane;
 
-    float q_reg[kElemsPerLane];
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
-        q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
-    }
-
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
-    const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
-    const size_t scale_layer_base =
+    Fp8ScaleWalk sc{};
+    sc.k_scale_pool = k_scale_pool;
+    sc.v_scale_pool = v_scale_pool;
+    sc.scale_layer_base =
         static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.kv_heads;
-    const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
 
     float run_max = -FLT_MAX;
     float run_sum = 0.0f;
-    float acc[kElemsPerLane] = {};
+    float acc[v_decode_bf16::kElemsPerLane] = {};
     uint32_t bad = 0u;
 
-    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
-            bad = 1u;
-            break;
-        }
-        const uint64_t page_base =
-            layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
-        const size_t page_scale_base =
-            scale_layer_base + static_cast<size_t>(page) * page_tokens * a.kv_heads;
-        const uint32_t page_start = page_index * page_tokens;
-        const uint32_t tokens_here =
-            (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        for (uint32_t off = wave; off < tokens_here; off += kWaves) {
-            const uint64_t elem =
-                page_base + static_cast<uint64_t>(off) * a.elems_per_token;
-            const size_t si = page_scale_base + static_cast<size_t>(off) * a.kv_heads + kv_head;
-            const float k_scale = k_scale_pool[si];
-            const float v_scale = v_scale_pool[si];
-            const fp8* k_head = k_pool + elem + head_off;
-            const fp8* v_head = v_pool + elem + head_off;
-            fp8 k_reg[kElemsPerLane];
-            fp8 v_reg[kElemsPerLane];
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-                const uint32_t d = lane + 32u * j;
-                if (kFullHead || d < head_dim) {
-                    k_reg[j] = k_head[d];
-                    v_reg[j] = v_head[d];
-                } else {
-                    k_reg[j] = static_cast<fp8>(0u);
-                    v_reg[j] = static_cast<fp8>(0u);
-                }
-            }
-            float partial = 0.0f;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                partial += q_reg[j] * fp8_lut_value(decode_lut, k_reg[j]);
-            const float score = warp_sum_all(partial) * k_scale * scale;
-            const float next_max = fmaxf(run_max, score);
-            const float alpha = __expf(run_max - next_max);
-            const float weight = __expf(score - next_max);
-            const float v_weight = weight * v_scale;
-            run_sum = run_sum * alpha + weight;
-            run_max = next_max;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                acc[j] = acc[j] * alpha + v_weight * fp8_lut_value(decode_lut, v_reg[j]);
-        }
-    }
+    attention_visit_pages_fp8<kFullHead>(st, sc, k_pool, v_pool, q_reg, head_dim,
+                                         scale, decode_lut, run_max, run_sum, acc, bad);
 
     if (a.tree_anc_offsets != nullptr) {
-        for (uint32_t ai = wave; ai < anc_count; ai += kWaves) {
-            const uint32_t pos = a.tree_anc_positions[anc_base + ai];
-            const uint32_t anc_page_index = pos / page_tokens;
-            const uint32_t anc_off = pos % page_tokens;
-            const uint32_t page = block_table[anc_page_index];
-            if (page >= a.num_pages) {
-                bad = 1u;
-                break;
-            }
-            const uint64_t elem =
-                layer_base + static_cast<uint64_t>(page) * a.elems_per_page +
-                static_cast<uint64_t>(anc_off) * a.elems_per_token;
-            const size_t si =
-                scale_layer_base +
-                (static_cast<size_t>(page) * page_tokens + anc_off) * a.kv_heads + kv_head;
-            const float k_scale = k_scale_pool[si];
-            const float v_scale = v_scale_pool[si];
-            const fp8* k_head = k_pool + elem + head_off;
-            const fp8* v_head = v_pool + elem + head_off;
-            fp8 k_reg[kElemsPerLane];
-            fp8 v_reg[kElemsPerLane];
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-                const uint32_t d = lane + 32u * j;
-                if (kFullHead || d < head_dim) {
-                    k_reg[j] = k_head[d];
-                    v_reg[j] = v_head[d];
-                } else {
-                    k_reg[j] = static_cast<fp8>(0u);
-                    v_reg[j] = static_cast<fp8>(0u);
-                }
-            }
-            float partial = 0.0f;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                partial += q_reg[j] * fp8_lut_value(decode_lut, k_reg[j]);
-            const float score = warp_sum_all(partial) * k_scale * scale;
-            const float next_max = fmaxf(run_max, score);
-            const float alpha = __expf(run_max - next_max);
-            const float weight = __expf(score - next_max);
-            const float v_weight = weight * v_scale;
-            run_sum = run_sum * alpha + weight;
-            run_max = next_max;
-            #pragma unroll
-            for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-                acc[j] = acc[j] * alpha + v_weight * fp8_lut_value(decode_lut, v_reg[j]);
-        }
+        attention_visit_ancestors_fp8<kFullHead>(
+            st, sc, anc_base_shared, anc_count_shared, a.tree_anc_positions,
+            k_pool, v_pool, q_reg, head_dim, scale, decode_lut,
+            run_max, run_sum, acc, bad);
     }
 
-    if (lane == 0u) {
-        merge_max_shared[wave] = run_max;
-        merge_sum_shared[wave] = run_sum;
-        if (bad != 0u) invalid_shared = 1u;
-    }
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
-        if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
-    }
+    v_decode_bf16::attention_stage_wave_partials(
+        tid, lane, wave, head_dim, run_max, run_sum, bad, acc,
+        merge_max_shared, merge_sum_shared, invalid_shared, acc_shared);
     __syncthreads();
     if (invalid_shared != 0u) return;
 
-    const float global_max =
-        warp_max_all((lane < kWaves) ? merge_max_shared[lane] : -FLT_MAX);
-
-    float weight_shared[kWaves];
+    float weight_shared[v_decode_bf16::kWaves];
     float sum_total = 0.0f;
-    #pragma unroll
-    for (uint32_t w = 0u; w < kWaves; ++w) {
-        weight_shared[w] = __expf(merge_max_shared[w] - global_max);
-        sum_total += merge_sum_shared[w] * weight_shared[w];
-    }
-
-    if (tid < head_dim && sum_total > 0.0f) {
-        float total = 0.0f;
-        #pragma unroll
-        for (uint32_t w = 0u; w < kWaves; ++w)
-            total += acc_shared[w * kHeadLimit + tid] * weight_shared[w];
-        const float result = total / sum_total;
-        if (a.output_dtype == PagedAttentionOutputDType::F32) {
-            reinterpret_cast<float*>(out_base)
-                [static_cast<size_t>(row) * a.output_row_stride + static_cast<size_t>(q_head) * head_dim + tid] = result;
-        } else {
-            reinterpret_cast<bf16*>(out_base)
-                [static_cast<size_t>(row) * a.output_row_stride + static_cast<size_t>(q_head) * head_dim + tid] = __float2bfloat16(result);
-        }
-    }
+    v_decode_bf16::attention_merge_wave_partials(lane, merge_max_shared,
+                                                 merge_sum_shared, weight_shared,
+                                                 sum_total);
+    v_decode_bf16::attention_store_output_bf16(a, task, out_base, tid, head_dim,
+                                               acc_shared, weight_shared, sum_total);
 }
 
 } }  // namespace v_decode_fp8
@@ -1569,132 +1550,49 @@ constexpr uint32_t kSplitWaves = 4u;
 constexpr uint32_t kSplitThreads = kSplitWaves * 32u;
 static_assert(kSplitThreads == kPagedAttentionSplitBlock);
 
+// ---------------------------------------------------------------------------
+// Algorithm layer (Phase 5): FP8 split reuses the BF16 split skeleton
+// (task / page window / Q tile / stage / merge-store via v_decode_bf16_split
+// helpers). The token body keeps FP8 semantics — note the V accumulation
+// uses weight * v_scale * vf (left-assoc as written) and score folds
+// k_scale after the warp_sum: these differ from the decode body and MUST
+// stay separate (contract §4).
+// ---------------------------------------------------------------------------
+
 template <uint32_t kQPerKV, bool kFullHead>
-__device__ __forceinline__ void attention_paged_split_fp8_body(
-    const PagedAttentionCommonArgs& a,
-    const fp8* k_pool,
-    const fp8* v_pool,
-    const float* k_scale_pool,
-    const float* v_scale_pool,
-    float* partials,
-    uint32_t splits) {
-    const uint32_t head_dim = a.head_dim;
-    const uint32_t kv_heads = a.kv_heads;
-    const uint32_t page_tokens = a.page_tokens;
-    const float scale = a.scale;
-
-    const uint32_t task = blockIdx.x;
-    const uint32_t split = task % splits;
-    const uint32_t rest = task / splits;
-    const uint32_t kv_head = rest % kv_heads;
-    const uint32_t row = rest / kv_heads;
-
-    if (row >= a.rows) return;
-
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t wave = tid >> 5;
-
-    __shared__ float q_lds[kQPerKV * kHeadLimit];
-    __shared__ float acc_lds[kSplitWaves * kQPerKV * kHeadLimit];
-    __shared__ float m_lds[kSplitWaves * kQPerKV];
-    __shared__ float s_lds[kSplitWaves * kQPerKV];
-    __shared__ uint32_t row_valid_shared;
-    __shared__ uint32_t visible_shared;
-    __shared__ uint32_t page_begin_shared;
-    __shared__ uint32_t page_end_shared;
-    __shared__ const uint32_t* block_table_shared;
-    __shared__ unsigned short decode_lut[256];
-
-    for (uint32_t i = tid; i < 256u; i += kSplitThreads)
-        decode_lut[i] = f2bf_p8(e4m3_decode_f32(static_cast<uint8_t>(i)));
-
-    if (tid == 0u) {
-        const uint32_t slot = a.row_sequence_slots[row];
-        uint32_t valid = 1u;
-        uint32_t visible = 0u;
-        if (slot >= a.max_sequences) {
-            valid = 0u;
-        } else {
-            const uint64_t v64 = static_cast<uint64_t>(a.row_positions[row]) + 1u;
-            const uint64_t cap = static_cast<uint64_t>(a.block_table_stride) * page_tokens;
-            if (v64 > cap) valid = 0u;
-            else visible = static_cast<uint32_t>(v64);
-        }
-        const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
-        const uint32_t per = (page_count + splits - 1u) / splits;
-        row_valid_shared = valid;
-        visible_shared = visible;
-        page_begin_shared = split * per;
-        page_end_shared = (page_count < page_begin_shared + per) ? page_count : page_begin_shared + per;
-        block_table_shared = a.block_tables
-            + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
-    }
-    __syncthreads();
-    if (row_valid_shared == 0u) return;
-
-    const uint32_t visible = visible_shared;
-    const uint32_t* block_table = block_table_shared;
-    const uint32_t page_begin = page_begin_shared;
-    const uint32_t page_end = page_end_shared;
-
-    float* partial_base = partials
-        + static_cast<size_t>((static_cast<size_t>(row) * kv_heads + kv_head) * splits + split)
-          * (kQPerKV * (2u + kHeadLimit));
-
-    const bf16* q_base = reinterpret_cast<const bf16*>(a.q)
-        + static_cast<size_t>(row) * a.q_row_stride
-        + static_cast<size_t>(kv_head * kQPerKV) * head_dim;
-
-    for (uint32_t e = tid; e < kQPerKV * kHeadLimit; e += kSplitThreads) {
-        const uint32_t qh = e / kHeadLimit;
-        const uint32_t d = e % kHeadLimit;
-        q_lds[e] = (kFullHead || d < head_dim)
-            ? __bfloat162float(q_base[static_cast<size_t>(qh) * head_dim + d])
-            : 0.0f;
-    }
-    __syncthreads();
-
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
-    const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
-    const size_t scale_layer_base =
-        static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.kv_heads;
-
-    float run_max[kQPerKV];
-    float run_sum[kQPerKV];
-    float acc[kQPerKV][kElemsPerLane];
-    #pragma unroll
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        run_max[qh] = -FLT_MAX;
-        run_sum[qh] = 0.0f;
-        #pragma unroll
-        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-            acc[qh][j] = 0.0f;
-    }
-    uint32_t bad = 0u;
-
-    for (uint32_t page_index = page_begin; page_index < page_end; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
+__device__ __forceinline__ void attention_visit_pages_split_fp8(
+    const v_decode_bf16_split::SplitWalkState& st,
+    const fp8* k_pool, const fp8* v_pool,
+    const float* k_scale_pool, const float* v_scale_pool, size_t scale_layer_base,
+    const float (&q_lds)[kQPerKV * kHeadLimit], uint32_t head_dim, float scale,
+    const unsigned short* decode_lut,
+    float (&run_max)[kQPerKV], float (&run_sum)[kQPerKV],
+    float (&acc)[kQPerKV][kElemsPerLane], uint32_t& bad) {
+    const uint32_t lane = st.lane;
+    const uint32_t page_tokens = st.page_tokens;
+    const uint32_t kv_heads = st.kv_heads;
+    for (uint32_t page_index = st.page_begin; page_index < st.page_end; ++page_index) {
+        const uint32_t page = st.block_table[page_index];
+        if (page >= st.num_pages) {
             bad = 1u;
             break;
         }
         const uint64_t page_base =
-            layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
+            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
         const size_t page_scale_base =
             scale_layer_base + static_cast<size_t>(page) * page_tokens * kv_heads;
         const uint32_t page_start = page_index * page_tokens;
         const uint32_t tokens_here =
-            (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
+            (st.visible - page_start < page_tokens) ? (st.visible - page_start) : page_tokens;
+        for (uint32_t off = st.wave; off < tokens_here; off += kSplitWaves) {
             const uint64_t elem =
-                page_base + static_cast<uint64_t>(off) * a.elems_per_token;
+                page_base + static_cast<uint64_t>(off) * st.elems_per_token;
             const size_t si =
-                page_scale_base + static_cast<size_t>(off) * kv_heads + kv_head;
+                page_scale_base + static_cast<size_t>(off) * kv_heads + st.kv_head;
             const float k_scale = k_scale_pool[si];
             const float v_scale = v_scale_pool[si];
-            const fp8* k_head = k_pool + elem + head_off;
-            const fp8* v_head = v_pool + elem + head_off;
+            const fp8* k_head = k_pool + elem + st.head_off;
+            const fp8* v_head = v_pool + elem + st.head_off;
             float kf[kElemsPerLane];
             float vf[kElemsPerLane];
             #pragma unroll
@@ -1726,6 +1624,93 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
             }
         }
     }
+}
+
+template <uint32_t kQPerKV, bool kFullHead>
+__device__ __forceinline__ void attention_paged_split_fp8_body(
+    const PagedAttentionCommonArgs& a,
+    const fp8* k_pool,
+    const fp8* v_pool,
+    const float* k_scale_pool,
+    const float* v_scale_pool,
+    float* partials,
+    uint32_t splits) {
+    const uint32_t head_dim = a.head_dim;
+    const uint32_t kv_heads = a.kv_heads;
+    const float scale = a.scale;
+
+    const v_decode_bf16_split::SplitTaskMap task =
+        v_decode_bf16_split::attention_map_split_task(a, splits);
+    if (!task.active) return;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5;
+
+    __shared__ float q_lds[kQPerKV * kHeadLimit];
+    __shared__ float acc_lds[kSplitWaves * kQPerKV * kHeadLimit];
+    __shared__ float m_lds[kSplitWaves * kQPerKV];
+    __shared__ float s_lds[kSplitWaves * kQPerKV];
+    __shared__ uint32_t row_valid_shared;
+    __shared__ uint32_t visible_shared;
+    __shared__ uint32_t page_begin_shared;
+    __shared__ uint32_t page_end_shared;
+    __shared__ const uint32_t* block_table_shared;
+    __shared__ unsigned short decode_lut[256];
+
+    attention_build_decode_lut(tid, kSplitThreads, decode_lut);
+
+    if (tid == 0u) {
+        v_decode_bf16_split::attention_split_init_page_range(
+            a, task, splits, row_valid_shared, visible_shared, page_begin_shared,
+            page_end_shared, block_table_shared);
+    }
+    __syncthreads();
+    if (row_valid_shared == 0u) return;
+
+    float* partial_base = partials
+        + static_cast<size_t>((static_cast<size_t>(task.row) * kv_heads + task.kv_head) * splits + task.split)
+          * (kQPerKV * (2u + kHeadLimit));
+
+    v_decode_bf16_split::attention_load_q_tile_split<kQPerKV, kFullHead>(
+        a, task, tid, q_lds);
+    __syncthreads();
+
+    v_decode_bf16_split::SplitWalkState st{};
+    st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
+    st.block_table = block_table_shared;
+    st.page_tokens = a.page_tokens;
+    st.visible = visible_shared;
+    st.page_begin = page_begin_shared;
+    st.page_end = page_end_shared;
+    st.elems_per_page = a.elems_per_page;
+    st.elems_per_token = a.elems_per_token;
+    st.num_pages = a.num_pages;
+    st.wave = wave;
+    st.lane = lane;
+    st.kv_head = task.kv_head;
+    st.kv_heads = kv_heads;
+
+    const size_t scale_layer_base =
+        static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.kv_heads;
+
+    float run_max[kQPerKV];
+    float run_sum[kQPerKV];
+    float acc[kQPerKV][kElemsPerLane];
+    #pragma unroll
+    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
+        run_max[qh] = -FLT_MAX;
+        run_sum[qh] = 0.0f;
+        #pragma unroll
+        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+            acc[qh][j] = 0.0f;
+    }
+    uint32_t bad = 0u;
+
+    attention_visit_pages_split_fp8<kQPerKV, kFullHead>(
+        st, k_pool, v_pool, k_scale_pool, v_scale_pool, scale_layer_base,
+        q_lds, head_dim, scale, decode_lut, run_max, run_sum, acc, bad);
 
     if (bad != 0u) {
         #pragma unroll
@@ -1738,54 +1723,12 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
         }
     }
 
-    if (lane == 0u) {
-        #pragma unroll
-        for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-            m_lds[wave * kQPerKV + qh] = run_max[qh];
-            s_lds[wave * kQPerKV + qh] = run_sum[qh];
-        }
-    }
-    #pragma unroll
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        #pragma unroll
-        for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-            const uint32_t d = lane + 32u * j;
-            if (kFullHead || d < head_dim)
-                acc_lds[(wave * kQPerKV + qh) * kHeadLimit + d] = acc[qh][j];
-        }
-    }
+    v_decode_bf16_split::attention_stage_split_wave_partials<kQPerKV, kFullHead>(
+        lane, wave, head_dim, run_max, run_sum, acc, m_lds, s_lds, acc_lds);
     __syncthreads();
 
-    #pragma unroll
-    for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
-        float m[kSplitWaves];
-        #pragma unroll
-        for (uint32_t w = 0u; w < kSplitWaves; ++w)
-            m[w] = m_lds[w * kQPerKV + qh];
-        const float g = fmaxf(fmaxf(m[0], m[1]), fmaxf(m[2], m[3]));
-        float wgt[kSplitWaves];
-        float p_total = 0.0f;
-        #pragma unroll
-        for (uint32_t w = 0u; w < kSplitWaves; ++w) {
-            wgt[w] = __expf(m[w] - g);
-            p_total += s_lds[w * kQPerKV + qh] * wgt[w];
-        }
-        if (tid == 0u) {
-            partial_base[qh] = g;
-            partial_base[kQPerKV + qh] = p_total;
-        }
-        #pragma unroll
-        for (uint32_t r = 0u; r < 2u; ++r) {
-            const uint32_t d = tid + r * 128u;
-            if (kFullHead || d < head_dim) {
-                float total = 0.0f;
-                #pragma unroll
-                for (uint32_t w = 0u; w < kSplitWaves; ++w)
-                    total += acc_lds[(w * kQPerKV + qh) * kHeadLimit + d] * wgt[w];
-                partial_base[2u * kQPerKV + qh * kHeadLimit + d] = total;
-            }
-        }
-    }
+    v_decode_bf16_split::attention_merge_store_split_partials<kQPerKV, kFullHead>(
+        tid, m_lds, s_lds, acc_lds, partial_base, head_dim);
 }
 
 template <uint32_t kQPerKV, bool kFullHead>
