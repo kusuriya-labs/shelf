@@ -48,15 +48,34 @@ if(SHELF_ENABLE_HIP)
 endif()
 
 if(SHELF_ENABLE_SYCL)
+    # Device determinism for the pure-SYCL test binaries:
+    #  - omp (CPU) flows: hide the HIP backend and pin the host device.
+    #    The registry lists all runtime devices, so devices[0]/the default
+    #    may otherwise land on a GPU that carries no launcher in an
+    #    omp-target binary (USM/memcpy commands then fail).
+    #  - flows that compiled device launchers (hip:* AOT, generic/SSCP):
+    #    pin the GPU device.
+    if(DEFINED ENV{ACPP_TARGETS} AND "$ENV{ACPP_TARGETS}" MATCHES "omp"
+       AND NOT "$ENV{ACPP_TARGETS}" MATCHES "hip:")
+        set(SHELF_SYCL_TEST_ENV "SHELF_SYCL_DEVICE=cpu;ACPP_VISIBILITY_MASK=omp")
+    else()
+        set(SHELF_SYCL_TEST_ENV "SHELF_SYCL_DEVICE=gpu")
+    endif()
+    macro(shelf_sycl_test_env tgt)
+        set_tests_properties(${tgt} PROPERTIES ENVIRONMENT "${SHELF_SYCL_TEST_ENV}")
+    endmacro()
+
     add_executable(test_sycl_device unit/test_sycl_device.cpp)
     target_link_libraries(test_sycl_device PRIVATE shelf::backend_sycl)
     add_sycl_to_target(TARGET test_sycl_device SOURCES unit/test_sycl_device.cpp)
     add_test(NAME unit.sycl_device COMMAND test_sycl_device)
+    shelf_sycl_test_env(unit.sycl_device)
 
     add_executable(test_sycl_kernels unit/test_sycl_kernels.cpp)
     target_link_libraries(test_sycl_kernels PRIVATE shelf::backend_sycl)
     add_sycl_to_target(TARGET test_sycl_kernels SOURCES unit/test_sycl_kernels.cpp)
     add_test(NAME unit.sycl_kernels COMMAND test_sycl_kernels)
+    shelf_sycl_test_env(unit.sycl_kernels)
 
     add_executable(test_sycl_step_executor unit/test_sycl_step_executor.cpp)
     target_link_libraries(test_sycl_step_executor PRIVATE shelf::backend_sycl
@@ -64,6 +83,7 @@ if(SHELF_ENABLE_SYCL)
     add_sycl_to_target(TARGET test_sycl_step_executor
         SOURCES unit/test_sycl_step_executor.cpp)
     add_test(NAME unit.sycl_step_executor COMMAND test_sycl_step_executor)
+    shelf_sycl_test_env(unit.sycl_step_executor)
 endif()
 
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
