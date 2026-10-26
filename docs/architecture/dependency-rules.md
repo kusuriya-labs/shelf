@@ -17,7 +17,7 @@
 | backend | CPU/SYCL Kernel実行 | Qwen等のモデル判定 | model/compiler/runtime/placement |
 | backend/common | Device/Buffer等の中立値型契約 | HIP/SYCL型の露出、万能仮想Backend化 | sycl/, hip/ |
 | backend/hip | HIP (ROCm) 実装 | モデル判定、SYCL混在 | sycl/ |
-| backend/sycl | SYCL 実装（導入待ち・空） | HIP混在、モデル判定 | hip/ |
+| backend/sycl | SYCL 実装（backend/hip の移植・AdaptiveCpp） | HIP混在、モデル判定 | hip/ |
 | placement | デバイス配置・常駐管理 | 演算の数値的定義 | model/runtime, sycl/ |
 | runtime | Session・Batch・State・実行制御 | ファイル形式の解析 | artifact/api, sycl/ |
 | api | 外部向けFacade | GPU Kernelの直接実装 | sycl/ |

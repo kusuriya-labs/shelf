@@ -77,7 +77,9 @@ GPU 高速化段階で kernel・paged KV を移植予定（未移植）。
 `src/backend/common/` と `src/backend/hip/` は **新規実装**（コード移植なし）。
 PhaseShift の `core/gpu/`・`core/memory/` は設計のみ参照（RAII・error マッピング方針）。
 環境依存の事実記録: GPU は gfx1201 (R9700) x4、ROCm SDK は pip の `_rocm_sdk_devel`。
-SYCL ランタイムは未導入のため `backend/sycl` は空で保持（ユーザー指示: sycl は将来必ず使う）。
+SYCL ランタイム導入に伴い `backend/sycl` は `backend/hip` の SYCL 移植で満たした
+（PhaseShift 由来の演算内容は HIP 版と同一系譜、WMMA/.amdgcn 組み込みはスカラー
+フォールバック。移植由来の追加第三者ライセンスなし）。
 
 ## PR-008（PhaseShift HIP kernel 資産の完全移植 + GPU step executor）
 

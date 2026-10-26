@@ -42,6 +42,16 @@ ctest --test-dir build/cpu --output-on-failure
 cmake --preset hip
 cmake --build --preset hip
 ctest --test-dir build/hip --output-on-failure
+
+# SYCL バックエンド（AdaptiveCpp 経由 / gfx1201 GPU 向け AOT）
+ACPP_PATH=/opt/acpp cmake --preset sycl -DSHELF_SYCL_ROOT=$ACPP_PATH
+cmake --build --preset sycl
+ctest --test-dir build/sycl --output-on-failure
+
+# SYCL バックエンド（OpenMP デバイス = CPU 上での API/カーネル統合検証）
+cmake --preset sycl-cpu -DSHELF_SYCL_ROOT=<AdaptiveCpp prefix>
+cmake --build --preset sycl-cpu
+ctest --test-dir build/sycl-cpu --output-on-failure
 ```
 
 Phase 1–2 完了 + PR-004/PR-005: `foundation`（Status/Result, TensorShape, DataType,
@@ -51,7 +61,15 @@ TensorId, TensorSpec, bf16/fp16変換）+ `backend/common`（Device/BufferView �
 （Canonical Tensor Catalog・マルチシャード解決）+ `ir`（Primitive 契約と Graph 検証:
 SSA・shape 代数・state 宣言整合）+ `backend/cpu`（CPU 参照 Executor・合成モデル
 Golden Fixture・KV state 更新検証）。
-`backend/sycl` は SYCL ランタイム導入まで空（意図的に HIP で代替しない）。
+`backend/sycl` は `backend/hip` の SYCL 移植（AdaptiveCpp でビルド）。
+hip_api→sycl_api（in-order queue/USM）、hipk→syclk（nd_range/nd_item +
+local memory + sub_group collective）、WMMA/gfx12 組み込み命令はスカラー
+FMA タイルへフォールバック済み。実行は 32 レーン sub_group（AMD wave32）
+必須のカーネル群と、CPU でも動く純 elementwise 群に分かれる。
+GPU AOT（`hip:gfx1201`）は AdaptiveCpp がビルドされた LLVM と ROCm
+device library の LLVM メジャーが一致する環境が必要（このマシン:
+AdaptiveCpp 25.10/LLVM 21 vs pip ROCm 10.0/LLVM 23 → 不一致で AOT/JIT
+不可。`sycl-cpu` プリセットは動作）。
 
 ### Qwen3.5-4B（BF16）が shelf で動作（CPU 参照路径・遅いが正確）
 
