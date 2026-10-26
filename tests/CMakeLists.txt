@@ -47,6 +47,25 @@ if(SHELF_ENABLE_HIP)
     add_test(NAME unit.hip_step_executor COMMAND test_hip_step_executor)
 endif()
 
+if(SHELF_ENABLE_SYCL)
+    add_executable(test_sycl_device unit/test_sycl_device.cpp)
+    target_link_libraries(test_sycl_device PRIVATE shelf::backend_sycl)
+    add_sycl_to_target(TARGET test_sycl_device SOURCES unit/test_sycl_device.cpp)
+    add_test(NAME unit.sycl_device COMMAND test_sycl_device)
+
+    add_executable(test_sycl_kernels unit/test_sycl_kernels.cpp)
+    target_link_libraries(test_sycl_kernels PRIVATE shelf::backend_sycl)
+    add_sycl_to_target(TARGET test_sycl_kernels SOURCES unit/test_sycl_kernels.cpp)
+    add_test(NAME unit.sycl_kernels COMMAND test_sycl_kernels)
+
+    add_executable(test_sycl_step_executor unit/test_sycl_step_executor.cpp)
+    target_link_libraries(test_sycl_step_executor PRIVATE shelf::backend_sycl
+        shelf::model_qwen35)
+    add_sycl_to_target(TARGET test_sycl_step_executor
+        SOURCES unit/test_sycl_step_executor.cpp)
+    add_test(NAME unit.sycl_step_executor COMMAND test_sycl_step_executor)
+endif()
+
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
 target_compile_definitions(test_architecture_boundaries PRIVATE
     SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
