@@ -151,6 +151,37 @@ __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
     }
 }
 
+// Algorithm layer (Phase 3, contract §1 store mapping): one output tile row
+// `r = row_start + rt*16 + lane_low4`, columns `out_start + 8*k_half + j`.
+// Body extracted verbatim; no rounding or tail-mask changes.
+template <uint32_t kRowTiles>
+__device__ __forceinline__ void bf16_wmma_store(
+    const WmmaLinearMap& map, uint32_t out_start, uint32_t row_start,
+    uint32_t rows, uint32_t out_features, uint32_t output_row_stride,
+    void* __restrict__ output, uint32_t output_dtype, const float8_t (&acc)[kRowTiles]) {
+    #pragma unroll
+    for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
+        if (row_start + rt * kTileRow < rows) {
+            const uint32_t r = row_start + rt * kTileRow + map.lane_low4;
+            if (r < rows) {
+                #pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const uint32_t o = out_start + 8u * (map.lane >> 4) + static_cast<uint32_t>(j);
+                    if (o >= out_features)
+                        continue;
+                    const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
+                    if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
+                        static_cast<shelf::bf16_t*>(output)[out_idx] =
+                            shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[rt][j]))};
+                    } else {
+                        static_cast<float*>(output)[out_idx] = acc[rt][j];
+                    }
+                }
+            }
+        }
+    }
+}
+
 template <uint32_t kRowTiles>
 __device__ __forceinline__ void bf16_wmma_body(
     const shelf::bf16_t* __restrict__ weight,
@@ -165,7 +196,6 @@ __device__ __forceinline__ void bf16_wmma_body(
     static_assert(kRowTiles >= 1u, "bf16 wmma row tiles must be positive");
 
     const WmmaLinearMap map = WmmaLinearMap::current();
-    const uint32_t lane = map.lane;
     const uint32_t lane_low4 = map.lane_low4;
     const uint32_t k_half = map.k_half;
 
@@ -217,27 +247,8 @@ __device__ __forceinline__ void bf16_wmma_body(
         }
     }
 
-    #pragma unroll
-    for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
-        if (row_start + rt * kTileRow < rows) {
-            const uint32_t r = row_start + rt * kTileRow + lane_low4;
-            if (r < rows) {
-                #pragma unroll
-                for (int j = 0; j < 8; ++j) {
-                    const uint32_t o = out_start + 8u * (lane >> 4) + static_cast<uint32_t>(j);
-                    if (o >= out_features)
-                        continue;
-                    const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
-                    if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
-                        static_cast<shelf::bf16_t*>(output)[out_idx] =
-                            shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[rt][j]))};
-                    } else {
-                        static_cast<float*>(output)[out_idx] = acc[rt][j];
-                    }
-                }
-            }
-        }
-    }
+    bf16_wmma_store<kRowTiles>(map, out_start, row_start, rows, out_features,
+                               output_row_stride, output, output_dtype, acc);
 }
 
 template <uint32_t kRowTiles>
