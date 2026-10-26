@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include <shelf/backend/hip/kernels/attention/paged_attention.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/foundation/numeric.hpp>
 
@@ -98,6 +99,170 @@ std::vector<uint8_t> snapshot_one(const Case& c, Bf16GemmConfigId id,
     return out;
 }
 
+// ---------------------------------------------------------------- attention
+// fixed-geometry builders for paged decode/split snapshots (contract §4).
+namespace attn {
+
+constexpr uint32_t kPageTokens = 16u, kTableWidth = 8u, kNumPages = 16u;
+
+struct Built {
+    std::vector<uint8_t> out;       // output bytes (bf16 elements)
+    std::vector<uint8_t> partials;  // split workspace bytes (empty if none)
+    bool ok = false;
+};
+
+inline std::size_t ept(uint32_t kvh, uint32_t D) { return std::size_t(kvh) * D; }
+inline std::size_t epp(uint32_t kvh, uint32_t D) { return std::size_t(kPageTokens) * ept(kvh, D); }
+inline std::size_t idx(uint32_t page, uint32_t off, uint32_t h, uint32_t d, uint32_t kvh, uint32_t D) {
+    return std::size_t(page) * epp(kvh, D) + std::size_t(off) * ept(kvh, D) + std::size_t(h) * D + d;
+}
+
+struct Cfg {
+    uint32_t D, qh, kvh, rows;
+    bool fp8, split, tree;
+    uint32_t splits;
+};
+
+Built run(const Cfg& cf) {
+    Built r;
+    std::mt19937 rng(31337 + cf.D * 101u + cf.qh * 17u + cf.kvh + (cf.fp8 ? 7u : 0u) +
+                     (cf.split ? 13u : 0u) + (cf.tree ? 29u : 0u));
+    std::uniform_real_distribution<float> dist(-1.5f, 1.5f);
+    const uint32_t seqused[2] = {35u, 20u};
+    std::vector<uint32_t> table = {3, 0, 5, ~0u, ~0u, ~0u, ~0u, ~0u,
+                                   7, 1, 5, ~0u, ~0u, ~0u, ~0u, ~0u};
+    const size_t qn = size_t(cf.rows) * cf.qh * cf.D;
+    std::vector<shelf::bf16_t> q(qn);
+    for (auto& v : q) v = shelf::f32_to_bf16(dist(rng));
+
+    const size_t pk = kNumPages * epp(cf.kvh, cf.D);
+    std::vector<shelf::bf16_t> kb16, vb16;
+    std::vector<uint8_t> k8, v8;
+    std::vector<float> ks, vs;
+    if (cf.fp8) {
+        k8.assign(pk, 0x00u); v8.assign(pk, 0x00u);
+        auto code = [&]() { uint8_t x; do { x = uint8_t(rng() & 0xFFu); } while (((x >> 3) & 0xFu) > 8u || (x & 0x7Fu) == 0x7Fu); return x; };
+        for (auto& e : k8) e = code();
+        for (auto& e : v8) e = code();
+        ks.assign(size_t(kNumPages) * kPageTokens * cf.kvh, 1.0f);
+        vs = ks;
+        for (auto& e : ks) e = 0.75f + 0.5f * dist(rng) / 1.5f;
+        for (auto& e : vs) e = 0.75f + 0.5f * dist(rng) / 1.5f;
+    } else {
+        kb16.assign(pk, shelf::bf16_t{uint16_t(0x3C3Cu)});
+        vb16 = kb16;
+        for (auto& e : kb16) e = shelf::f32_to_bf16(dist(rng));
+        for (auto& e : vb16) e = shelf::f32_to_bf16(dist(rng));
+    }
+    // pools are fully pre-filled deterministically; unused slots never read
+
+    void *d_k, *d_v, *d_q, *d_o, *d_ks = nullptr, *d_vs = nullptr, *d_part = nullptr;
+    uint32_t *d_tbl, *d_slots, *d_pos, *d_ao = nullptr, *d_ap = nullptr, *d_ce = nullptr;
+    if (cf.fp8) { hipMalloc(&d_k, pk); hipMalloc(&d_v, pk);
+        hipMalloc(&d_ks, ks.size() * 4); hipMalloc(&d_vs, vs.size() * 4);
+        hipMemcpy(d_k, k8.data(), pk, hipMemcpyHostToDevice);
+        hipMemcpy(d_v, v8.data(), pk, hipMemcpyHostToDevice);
+        hipMemcpy(d_ks, ks.data(), ks.size() * 4, hipMemcpyHostToDevice);
+        hipMemcpy(d_vs, vs.data(), vs.size() * 4, hipMemcpyHostToDevice);
+    } else {
+        hipMalloc(&d_k, pk * 2); hipMalloc(&d_v, pk * 2);
+        hipMemcpy(d_k, kb16.data(), pk * 2, hipMemcpyHostToDevice);
+        hipMemcpy(d_v, vb16.data(), pk * 2, hipMemcpyHostToDevice);
+    }
+    hipMalloc(&d_q, q.size() * 2); hipMalloc(&d_o, q.size() * 2);
+    hipMemset(d_o, 0x5A, q.size() * 2);
+    hipMemcpy(d_q, q.data(), q.size() * 2, hipMemcpyHostToDevice);
+    hipMalloc(&d_tbl, table.size() * 4);
+    hipMemcpy(d_tbl, table.data(), table.size() * 4, hipMemcpyHostToDevice);
+    hipMalloc(&d_slots, cf.rows * 4); hipMalloc(&d_pos, cf.rows * 4);
+    {
+        uint32_t slots[2] = {0, 1}, pos[2] = {34, 19};
+        hipMemcpy(d_slots, slots, 8, hipMemcpyHostToDevice);
+        hipMemcpy(d_pos, pos, 8, hipMemcpyHostToDevice);
+    }
+    using namespace shelf::hipk;
+    PagedAttentionCommonArgs a{};
+    a.q = (const shelf::bf16_t*)d_q; a.output = d_o;
+    a.output_dtype = PagedAttentionOutputDType::BF16;
+    a.q_row_stride = cf.qh * cf.D; a.output_row_stride = cf.qh * cf.D;
+    a.row_sequence_slots = d_slots; a.row_positions = d_pos;
+    a.block_tables = d_tbl; a.block_table_stride = kTableWidth;
+    a.max_sequences = cf.rows; a.rows = cf.rows; a.layer = 0;
+    a.page_tokens = kPageTokens; a.num_pages = kNumPages; a.num_attention_layers = 1;
+    a.q_heads = cf.qh; a.kv_heads = cf.kvh; a.head_dim = cf.D;
+    a.elems_per_token = (uint32_t)ept(cf.kvh, cf.D);
+    a.elems_per_page = (uint32_t)epp(cf.kvh, cf.D);
+    a.elems_per_layer = (uint32_t)(kNumPages * epp(cf.kvh, cf.D));
+    a.scale = 1.0f / std::sqrt(float(cf.D));
+    if (cf.tree) {
+        uint32_t ao[3] = {0, 3, 6}, ap[6] = {16, 17, 20, 32, 33, 34}, ce[2] = {16, 32};
+        hipMalloc(&d_ao, sizeof ao); hipMalloc(&d_ap, sizeof ap); hipMalloc(&d_ce, sizeof ce);
+        hipMemcpy(d_ao, ao, sizeof ao, hipMemcpyHostToDevice);
+        hipMemcpy(d_ap, ap, sizeof ap, hipMemcpyHostToDevice);
+        hipMemcpy(d_ce, ce, sizeof ce, hipMemcpyHostToDevice);
+        a.tree_anc_offsets = d_ao; a.tree_anc_positions = d_ap;
+        a.tree_committed_end_rows = d_ce;
+    }
+
+    hipError_t st = hipErrorInvalidValue;
+    const auto fp8k = reinterpret_cast<const shelf::hipk::fp8e4m3_storage_t*>(d_k);
+    const auto fp8v = reinterpret_cast<const shelf::hipk::fp8e4m3_storage_t*>(d_v);
+    if (!cf.split) {
+        st = cf.fp8 ? launch_attention_paged_fp8_e4m3(a, fp8k, fp8v, (const float*)d_ks, (const float*)d_vs, nullptr)
+                    : launch_attention_paged_bf16(a, (const shelf::bf16_t*)d_k, (const shelf::bf16_t*)d_v, nullptr);
+    } else {
+        const uint32_t qpk = cf.qh / cf.kvh;
+        const size_t pn = size_t(cf.rows) * cf.kvh * cf.splits * qpk * (2u + 256u);
+        hipMalloc(&d_part, pn * 4);
+        hipMemset(d_part, 0x5A, pn * 4);
+        st = cf.fp8 ? launch_attention_paged_fp8_split(a, fp8k, fp8v, (const float*)d_ks, (const float*)d_vs, (float*)d_part, cf.splits, nullptr)
+                    : launch_attention_paged_bf16_split(a, (const shelf::bf16_t*)d_k, (const shelf::bf16_t*)d_v, (float*)d_part, cf.splits, nullptr);
+        if (st == hipSuccess)
+            st = launch_attention_paged_bf16_split_reduce(a, (const float*)d_part, cf.splits, nullptr);
+        if (st == hipSuccess) {
+            r.partials.resize(pn * 4);
+            hipMemcpy(r.partials.data(), d_part, pn * 4, hipMemcpyDeviceToHost);
+        }
+        hipFree(d_part);
+    }
+    if (st == hipSuccess) {
+        r.out.resize(q.size() * 2);
+        hipMemcpy(r.out.data(), d_o, q.size() * 2, hipMemcpyDeviceToHost);
+        r.ok = true;
+    }
+    hipFree(d_k); hipFree(d_v); hipFree(d_q); hipFree(d_o);
+    if (d_ks) hipFree(d_ks);
+    if (d_vs) hipFree(d_vs);
+    hipFree(d_tbl); hipFree(d_slots); hipFree(d_pos);
+    if (d_ao) hipFree(d_ao);
+    if (d_ap) hipFree(d_ap);
+    if (d_ce) hipFree(d_ce);
+    return r;
+}
+
+const Cfg kCfgs[] = {
+    {256, 4, 2, 2, false, false, false, 0},   // bf16 decode full head
+    {64,  4, 2, 2, false, false, false, 0},   // bf16 decode partial head
+    {256, 4, 2, 2, false, false, true,  0},   // bf16 tree ancestors
+    {64,  4, 2, 2, false, false, true,  0},
+    {256, 8, 2, 2, false, true,  false, 4u},  // bf16 split qpk4
+    {64,  8, 2, 2, false, true,  false, 2u},  // bf16 split partial head splits=2
+    {256, 12, 2, 2, false, true, false, 8u},  // bf16 split qpk6
+    {256, 4, 2, 2, true,  false, false, 0},   // fp8 decode
+    {64,  4, 2, 2, true,  false, false, 0},
+    {256, 8, 2, 2, true,  true,  false, 4u},  // fp8 split
+    {64,  8, 2, 2, true,  true,  false, 4u},
+    {256, 12, 2, 2, true,  true,  false, 16u},// fp8 split qpk6 splits16
+};
+std::string name(const Cfg& c) {
+    char b[96];
+    std::snprintf(b, sizeof b, "attn_%s_D%u_qh%u_%s%s_sp%u", c.fp8 ? "fp8" : "bf16", c.D,
+                  c.qh, c.split ? "split" : "decode", c.tree ? "_tree" : "", c.splits);
+    return b;
+}
+
+}  // namespace attn
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -123,6 +288,12 @@ int main(int argc, char** argv) {
                         c, Bf16GemmConfigId(ci),
                         oi ? Bf16GemmOutputDType::BF16 : Bf16GemmOutputDType::F32));
                 }
+        for (const auto& ac : attn::kCfgs) {
+            auto built = attn::run(ac);
+            all.emplace_back(attn::name(ac) + ".out", built.ok ? built.out : std::vector<uint8_t>{0xFE});
+            if (built.ok && !built.partials.empty())
+                all.emplace_back(attn::name(ac) + ".partials", built.partials);
+        }
         return all;
     };
 
