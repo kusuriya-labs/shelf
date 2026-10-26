@@ -159,9 +159,42 @@ struct Wave32 {
     }
 };
 
-// Host-side pre-dispatch check: the ported wave32 kernels require hardware
-// subgroups of exactly 32 (true for AMD targets; not for the OpenMP device).
+// Whether this binary carries SYCL-compiled launchers for the device's
+// backend (AdaptiveCpp defines the target macros per --acpp-targets). The
+// HIP-interop launchers deliberately bypass this and use native kernels.
+inline bool sycl_compiled_for_device(const ::sycl::device& d) {
+    switch (d.get_backend()) {
+        case ::sycl::backend::hip:
+#if defined(__ACPP_ENABLE_HIP_TARGET__) || defined(__ACPP_ENABLE_LLVM_SSCP_TARGET__)
+            return true;
+#else
+            return false;
+#endif
+        case ::sycl::backend::cuda:
+#if defined(__ACPP_ENABLE_CUDA_TARGET__) || defined(__ACPP_ENABLE_LLVM_SSCP_TARGET__)
+            return true;
+#else
+            return false;
+#endif
+        case ::sycl::backend::omp:
+            return true;  // host kernels are always compiled for the OMP device
+        default:
+            return false;
+    }
+}
+
+// Pre-dispatch check for the ported wave32 SYCL kernels: compiled launchers
+// for this device AND hardware sub-groups of exactly 32 (true on AMD; false
+// on the OpenMP device).
+//
+// Note: `[[sycl::reqd_sub_group_size(32)]]` would pin this statically, but
+// AdaptiveCpp 25.10 does not implement that attribute; the lane/wave mapping
+// is derived from the local id (frozen 32-wide), so on backends whose natural
+// wave is 64 lanes the runtime check must reject the launch. Re-verify with
+// the GPU harness (tests/unit/test_sycl_interop_gemm.cpp for the native path,
+// and a subgroup-size printout once an AdaptiveCpp/ROCm LLVM match exists).
 inline bool wave32_supported(const ::sycl::device& d) {
+    if (!sycl_compiled_for_device(d)) return false;
     for (const auto s : d.get_info<::sycl::info::device::sub_group_sizes>())
         if (s == kWaveSize) return true;
     return false;

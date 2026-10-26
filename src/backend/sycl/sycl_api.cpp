@@ -19,39 +19,26 @@ struct DeviceEntry {
     ::sycl::device dev;
     std::shared_ptr<::sycl::queue> alloc_q;
     DeviceInfo info;
+    bool profiling = false;
 };
 
 std::vector<DeviceEntry>& registry() {
     static std::vector<DeviceEntry> reg = [] {
         std::vector<DeviceEntry> out;
-        // Keep only devices this binary can actually execute kernels on:
-        // the SSCP/generic flow is portable to every backend; classic flows
-        // carry launchers only for the compiled targets.
-        const bool portable =
-#if defined(__ACPP_ENABLE_LLVM_SSCP_TARGET__)
-            true;
-#else
-            false;
-#endif
+        // All runtime devices are listed (USM/transfers/interop work on any
+        // of them); whether *SYCL-compiled* kernels can execute on a given
+        // device is decided by shelf::syclk::sycl_compiled_for_device at
+        // launch time — the HIP-interop path deliberately uses devices whose
+        // kernels were compiled by the hipcc toolchain instead.
         for (const auto& d : ::sycl::device::get_devices()) {
-            if (!portable) {
-                const bool gpu_ok =
-#if defined(__ACPP_ENABLE_HIP_TARGET__) || defined(__ACPP_ENABLE_CUDA_TARGET__)
-                    true;
-#else
-                    false;
-#endif
-                const bool cpu_ok =
-#if defined(__ACPP_ENABLE_OMPHOST_TARGET__)
-                    true;
-#else
-                    false;
-#endif
-                if (d.is_gpu() && !gpu_ok) continue;
-                if (d.is_cpu() && !cpu_ok) continue;
-            }
             DeviceEntry e;
             e.dev = d;
+            e.profiling = d.has(::sycl::aspect::queue_profiling);
+        if (e.profiling)
+            e.alloc_q = std::make_shared<::sycl::queue>(
+                d, ::sycl::property_list{::sycl::property::queue::in_order{},
+                                         ::sycl::property::queue::enable_profiling{}});
+        else
             e.alloc_q = std::make_shared<::sycl::queue>(
                 d, ::sycl::property::queue::in_order{});
             DeviceInfo info;
@@ -158,11 +145,39 @@ Status get_device(DeviceId& out) {
         if (reg.empty())
             return Status::device_error("no SYCL device available",
                                         "shelf::sycl::get_device", __FILE__, __LINE__);
-        // Default device: first GPU, else first device (HIP semantics would
-        // have failed here; the SYCL registry makes a defined choice).
+        // Default device: the first device this binary can run *SYCL-compiled*
+        // kernels on (preferred: GPUs). Devices of other backends stay
+        // addressable via set_device for the HIP-interop path, which uses
+        // natively compiled kernels instead.
+        auto runnable = [](const ::sycl::device& d) {
+            switch (d.get_backend()) {
+                case ::sycl::backend::hip:
+#if defined(__ACPP_ENABLE_HIP_TARGET__) || defined(__ACPP_ENABLE_LLVM_SSCP_TARGET__)
+                    return true;
+#else
+                    return false;
+#endif
+                case ::sycl::backend::cuda:
+#if defined(__ACPP_ENABLE_CUDA_TARGET__) || defined(__ACPP_ENABLE_LLVM_SSCP_TARGET__)
+                    return true;
+#else
+                    return false;
+#endif
+                case ::sycl::backend::omp:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        bool gpu_found = false;
         for (const auto& e : reg)
-            if (e.info.kind == backend::DeviceKind::gpu) { g_current = e.info.id; break; }
-        if (g_current == backend::kInvalidDevice) g_current = reg.front().info.id;
+            if (e.info.kind == backend::DeviceKind::gpu && runnable(e.dev)) {
+                g_current = e.info.id; gpu_found = true; break;
+            }
+        if (!gpu_found)
+            for (const auto& e : reg)
+                if (runnable(e.dev)) { g_current = e.info.id; gpu_found = true; break; }
+        if (!gpu_found) g_current = reg.front().info.id;
     }
     out = g_current;
     return Status::make_ok();
@@ -226,7 +241,8 @@ Status Event::record(const Stream& stream) const {
     if (!stream.q_) return Status::invalid_state("Stream has no queue", __FILE__, __LINE__);
     try {
         // Marker command: completes after everything submitted to this
-        // (in-order) queue before this submission.
+        // (in-order) queue before this submission. enable_profiling was set
+        // at queue creation when the device supports it (see Stream::create).
         handle_ = std::make_shared<::sycl::event>(
             stream.q_->submit([](::sycl::handler& cgh) {
                 cgh.single_task([]() {});
@@ -287,6 +303,19 @@ Result<double> Event::elapsed_us(const Event& start, const Event& end) {
     } catch (...) {
         return map_exception("Event::elapsed_us", __FILE__, __LINE__);
     }
+    // Preferred: standard SYCL 2020 event profiling (device timestamps).
+    // Start-marker command_start -> end-marker command_end covers all work
+    // recorded between the two records on this in-order stream.
+    try {
+        const uint64_t t0 = start.handle_->get_profiling_info<
+            ::sycl::info::event_profiling::command_start>();
+        const uint64_t t1 = end.handle_->get_profiling_info<
+            ::sycl::info::event_profiling::command_end>();
+        if (t1 >= t0) return static_cast<double>(t1 - t0) / 1000.0;
+    } catch (const ::sycl::exception&) {
+        // aspect/property not enabled on this queue -> host fallback below.
+    }
+    // Fallback: host timestamps around record() (coarse).
     const auto d = end.recorded_at_ - start.recorded_at_;
     return std::chrono::duration<double, std::micro>(d).count();
 }
@@ -307,7 +336,13 @@ Result<Stream> Stream::create(bool non_blocking) {
         // hipStreamNonBlocking; all queues are in-order and never block the
         // host on submission, matching the flag's practical effect here.
         (void)non_blocking;
-        s.q_ = std::make_shared<::sycl::queue>(e->dev, ::sycl::property::queue::in_order{});
+        if (e->profiling)
+            s.q_ = std::make_shared<::sycl::queue>(
+                e->dev, ::sycl::property_list{::sycl::property::queue::in_order{},
+                                              ::sycl::property::queue::enable_profiling{}});
+        else
+            s.q_ = std::make_shared<::sycl::queue>(
+                e->dev, ::sycl::property::queue::in_order{});
     } catch (...) {
         return map_exception("Stream::create", __FILE__, __LINE__);
     }

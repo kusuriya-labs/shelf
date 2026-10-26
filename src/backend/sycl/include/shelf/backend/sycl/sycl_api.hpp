@@ -14,10 +14,14 @@
 //     event into a queue" in SYCL 2020; record() submits a no-op marker, so
 //     the event completes after every command submitted to that stream before
 //     the record. wait()/synchronize() map to depends_on()/event::wait().
-//   * Event timing (elapsed_us) has no SYCL 2020 equivalent; we approximate
-//     with host timestamps taken at record() time. Accurate only when the
-//     stream is idle at both records — sufficient for coarse API timing, not
-//     for kernel micro-benchmarking.
+//   * Event timing: when the device exposes the queue_profiling aspect, the
+//     stream queue is created with sycl::property::queue::enable_profiling and
+//     elapsed_us() uses the standard SYCL 2020 event profiling
+//     (info::event_profiling::command_start/command_end around the marker
+//     commands: start = beginning of the start-marker, end = completion of
+//     the done-marker, so the in-order stream's work between records is
+//     measured). Host-timestamp approximation is only a fallback when the
+//     aspect is unavailable.
 //   * DeviceBuffer -> USM device allocation (sycl::malloc_device). The
 //     kernels take raw device pointers, mirroring the HIP kernel ABI.
 #pragma once
