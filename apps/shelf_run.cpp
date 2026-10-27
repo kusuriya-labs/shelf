@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
         else if (a == "--device") device = next("cpu|hip");
         else if (a == "--gpu") gpu = std::atoi(next("gpu index").c_str());
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
-                         "[--device cpu|hip");
+                         "[--device cpu|hip]");
     }
     if (model_dir.empty() || ids_csv.empty()) return fail("--model and --ids required");
 
