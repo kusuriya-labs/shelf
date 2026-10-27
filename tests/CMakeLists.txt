@@ -58,3 +58,18 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(test_hip_device PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_device COMMAND test_hip_device)
 endif()
+
+# shelf-bench の CLI 契約（phaseshift-bench と同じ規約）:
+# --help は装置初期化・モデルロードの前に必ず exit 0、用法の誤りは非 0。
+add_test(NAME bench.help COMMAND shelf-bench --help)
+add_test(NAME bench.kernel.help COMMAND shelf-bench kernel --help)
+add_test(NAME bench.unknown_command COMMAND shelf-bench bogus)
+set_tests_properties(bench.unknown_command PROPERTIES WILL_FAIL TRUE)
+add_test(NAME bench.kernel.unknown_name COMMAND shelf-bench kernel no-such-kernel)
+set_tests_properties(bench.kernel.unknown_name PROPERTIES WILL_FAIL TRUE)
+
+# 未知の --key は exit 2（hip では実装が無いとカーネル計測まで進み exit 0 になる）。
+add_test(NAME bench.unknown_option
+         COMMAND shelf-bench kernel rmsnorm --rows 8 --features 8
+                 --warmup 0 --samples 1 --launches 1 --bogus 1)
+set_tests_properties(bench.unknown_option PROPERTIES WILL_FAIL TRUE)

@@ -43,6 +43,14 @@ std::size_t numel(const TensorShape& s) {
     return n;
 }
 
+// 1 ステップ分のアリーナ必要量（auto 時の式。shelf-validate と同一）:
+// 64 MiB 基底 + 全 primitive 出力を f32 で見た 2 倍（一時バッファ余白）。
+std::size_t arena_bytes_for(const ir::Graph& g) {
+    std::size_t bytes = 64u << 20;
+    for (const auto& p : g.primitives()) bytes += numel(p.output.shape) * sizeof(float) * 2u;
+    return bytes;
+}
+
 std::uint32_t u32(std::size_t v) { return static_cast<std::uint32_t>(v); }
 
 // hipMalloc wants void**; passing reinterpret_cast<Typed**> is a strict
@@ -60,7 +68,12 @@ template <class T> hipError_t malloc_dev(T** out, std::size_t count) {
 HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     hipSetDevice(opts_.device);
     hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
-    const hipError_t e0 = hipMalloc(&arena_dev_, opts_.arena_bytes);
+    // arena_bytes == 0 ならアリーナは declare_states のグラフから自動算出する。
+    hipError_t e0 = hipSuccess;
+    if (opts_.arena_bytes > 0) {
+        e0 = hipMalloc(&arena_dev_, opts_.arena_bytes);
+        if (e0 == hipSuccess) arena_cap_ = opts_.arena_bytes;
+    }
     const hipError_t e1 = malloc_dev(&token_dev_, kMaxStepRows);
     const hipError_t e2 = malloc_dev(&posrep_dev_, kPosScratch);
     const hipError_t e3 = malloc_dev(&rowpos_dev_, kPosScratch);
@@ -75,6 +88,10 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
 }
 
 HipStepExecutor::~HipStepExecutor() {
+    // 解放の先にキューを消化する。発射済みカーネル／コピーが生きているまま
+    // メモリを解放すると HSA のメモリフォルト／ハングになり得る
+    // （エラー経路でここへ来ることがある）。
+    if (stream_) (void)hipStreamSynchronize(stream_);
     for (auto& [id, loc] : state_dev_) {
         if (loc.dev) hipFree(loc.dev);
         if (loc.k_pool) hipFree(loc.k_pool);
@@ -165,6 +182,27 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
                                inv_freq_dev_, u32(opts_.rope_rotary_dim / 2),
                                static_cast<float>(opts_.rope_theta), stream_),
                                "inv_freq init"));
+
+    // アリーナが未指定なら、この 1 ステップで要る量をグラフから自動算出する。
+    // 式は shelf-validate と同一（64 MiB 基底 + 全 primitive 出力を f32 で見た
+    // 2 倍 = 一時バッファ余白）。バンプ割当でステップ内再利用が無いため行数に
+    // 比例する（4B 級モデルの実測: rows=16/32/64 の必要量は 192/384/768 MiB 未満、
+    // 従来の既定 64 MiB は prefill 16 行で枯渇していた）。
+    if (opts_.arena_bytes == 0) {
+        const std::size_t bytes = arena_bytes_for(g);
+        if (arena_dev_) {
+            (void)hipFree(arena_dev_);
+            arena_dev_ = nullptr;
+            arena_top_ = 0;
+        }
+        const hipError_t ea = hipMalloc(&arena_dev_, bytes);
+        if (ea != hipSuccess) {
+            arena_cap_ = 0;
+            return hipok(ea, "arena malloc (auto from graph)");
+        }
+        arena_cap_ = bytes;
+    }
+
     states_declared_ = true;
     return Status::make_ok();
 }
@@ -195,26 +233,52 @@ Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
         return Status::invalid_state("declare_states first", __FILE__, __LINE__);
     if (n == 0 || n > kMaxStepRows)
         return Status::invalid_argument("run_step: rows out of range", __FILE__, __LINE__);
-    arena_cap_ = opts_.arena_bytes;
+    // auto: 複数グラフ（例: decode rows=1 と prefill rows=N）を同じ実行器で使うと
+    // declare 時の算出で足りないことがある（shelf-run がまさにこの形）。最初に
+    // 使うグラフの必要量へここで広げる（縮めない。明示指定時は触らない）。
+    if (opts_.arena_bytes == 0) {
+        const std::size_t need = arena_bytes_for(g);
+        if (need > arena_cap_) {
+            if (arena_dev_) (void)hipFree(arena_dev_);  // 直前ステップは同期済み
+            arena_dev_ = nullptr;
+            arena_top_ = 0;
+            const hipError_t ea = hipMalloc(&arena_dev_, need);
+            if (ea != hipSuccess) {
+                arena_cap_ = 0;
+                return hipok(ea, "arena malloc (auto, per graph)");
+            }
+            arena_cap_ = need;
+        }
+    }
     arena_reset();
     value_dev_.clear();
+    logits_dev_ = nullptr;   // 解放済みアリーナを指さないよう消す
     step_rows_ = n;
     step_base_pos_ = base_pos;
 
     const auto t0 = std::chrono::steady_clock::now();
 
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
-                                               hipMemcpyHostToDevice, stream_),
-                                "token upload"));
+    // エラー時のみ未消化のカーネル／コピーを先に流し切ってから返す。
+    // ここで返った後に呼び出し側がメモリを解放すると、生きているカーネルが
+    // 解放済みメモリを触り HSA のメモリフォルト／ハングになるため。
+    const auto sync_on_error = [&](const Status& s) -> Status {
+        if (!s.ok()) (void)hipStreamSynchronize(stream_);
+        return s;
+    };
+
+    SHELF_RETURN_IF_ERROR(sync_on_error(
+        hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
+                             hipMemcpyHostToDevice, stream_),
+              "token upload")));
     for (std::size_t i = 0; i < n; ++i) posrep_host_[i] = base_pos + static_cast<std::uint32_t>(i);
     hipk::GdnRequestDescriptor req{0u, 0u, u32(n)};
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(req_dev_, &req, sizeof(req),
-                                               hipMemcpyHostToDevice, stream_),
-                                "gdn req upload"));
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(rowpos_dev_, posrep_host_.data(),
-                                               n * sizeof(std::uint32_t),
-                                               hipMemcpyHostToDevice, stream_),
-                                "rowpos upload"));
+    SHELF_RETURN_IF_ERROR(sync_on_error(
+        hipok(hipMemcpyAsync(req_dev_, &req, sizeof(req), hipMemcpyHostToDevice, stream_),
+              "gdn req upload")));
+    SHELF_RETURN_IF_ERROR(sync_on_error(
+        hipok(hipMemcpyAsync(rowpos_dev_, posrep_host_.data(),
+                             n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
+              "rowpos upload")));
 
     const auto& inputs = g.all_inputs();
     if (inputs.empty())
@@ -222,7 +286,7 @@ Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
     value_dev_[inputs[0].id.value()] = ValueLoc{token_dev_, false, n};
 
     for (const auto& p : g.primitives()) {
-        SHELF_RETURN_IF_ERROR(run_primitive(g, p, step_base_pos_));
+        SHELF_RETURN_IF_ERROR(sync_on_error(run_primitive(g, p, step_base_pos_)));
         if (const char* d = std::getenv("SHELF_HIP_DEBUG_SYNC")) { (void)d;
             hipError_t e = hipStreamSynchronize(stream_);
             if (e != hipSuccess)
@@ -296,6 +360,12 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         void* p_ = arena_alloc(out_n * (f32 ? sizeof(float) : sizeof(bf16_t)));
         return p_;
     };
+    // アリーナ枯渇を「null 出力へのカーネル発射」（デバイスフォルトの原因）に
+    // しないため、alloc の直後に必ず検査してから発射する。
+    const auto arena_ok = [](const void* p) -> Status {
+        if (p) return Status::make_ok();
+        return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
+    };
     const auto set_out = [&](bool f32, void* dev) -> Status {
         if (!dev) return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
         value_dev_[p.output.id.value()] = ValueLoc{dev, f32, out_n};
@@ -317,6 +387,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t vocab = ws == weight_shape_.end() ? 0 : ws->second.dim(0);
         if (!vocab) return Status::invalid_state("embedding: unknown weight", __FILE__, __LINE__);
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_embedding_bf16(
             static_cast<const bf16_t*>(wt(0)), token_dev_, static_cast<bf16_t*>(o),
             u32(step_rows_), u32(vocab), u32(H), u32(H), errword_dev_, stream_), "embedding"));
@@ -328,6 +399,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         SHELF_RETURN_IF_ERROR(need(x, false, "linear"));
         const bool f32_out = (p.kind == K::output_projection);
         void* o = alloc(f32_out);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         const std::size_t N = p.output.shape.dim(p.output.shape.rank() - 1);
         const std::size_t rows = step_rows_;
         const std::size_t K = x->elems / rows;  // input [rows, K]
@@ -351,6 +423,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
         const std::size_t rows = out_n / F;
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_rmsnorm(
             x->dev, RmsNormDataType::BF16, wt(0), RmsNormDataType::BF16,
             RmsNormWeightLayout::PER_FEATURE,
@@ -402,6 +475,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
                                                      : static_cast<std::size_t>(p.attr.slice_end);
         const std::size_t rows = out_n / (end - begin);
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_bf16_row_slice(
             static_cast<const bf16_t*>(x->dev), static_cast<bf16_t*>(o), u32(rows),
             u32(end - begin), u32(begin), u32(F_in), stream_), "slice"));
@@ -417,6 +491,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         SHELF_RETURN_IF_ERROR(need(x, false, "sigmoid_gate"));
         SHELF_RETURN_IF_ERROR(need(z, false, "sigmoid_gate"));
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_bf16_sigmoid_gate(
             static_cast<const bf16_t*>(x->dev), static_cast<const bf16_t*>(z->dev),
             static_cast<bf16_t*>(o), u32(out_n), stream_), "sigmoid_gate"));
@@ -426,6 +501,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         ValueLoc* x = in(0);
         SHELF_RETURN_IF_ERROR(need(x, false, "silu"));
         void* o = alloc(true);  // bf16 -> f32 (no bf16->bf16 silu in family)
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
         SHELF_RETURN_IF_ERROR(hipok(launch_silu_bf16_f32(
             static_cast<const bf16_t*>(x->dev), u32(F), static_cast<float*>(o),
@@ -443,15 +519,18 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         std::size_t ars = Fx, brs = Fx;   // row strides (elements)
         if (a32) pa32 = static_cast<const float*>(a->dev);
         else { af = arena_alloc(out_n * 4); pa32 = static_cast<const float*>(af);
+               SHELF_RETURN_IF_ERROR(arena_ok(af));
                SHELF_RETURN_IF_ERROR(hipok(launch_bf16_to_f32(
                    static_cast<const bf16_t*>(a->dev), static_cast<float*>(af), u32(a->elems),
                    stream_), "mul cvt a")); }
         if (b32) pb32 = static_cast<const float*>(b->dev);
         else { bf = arena_alloc(out_n * 4); pb32 = static_cast<const float*>(bf);
+               SHELF_RETURN_IF_ERROR(arena_ok(bf));
                SHELF_RETURN_IF_ERROR(hipok(launch_bf16_to_f32(
                    static_cast<const bf16_t*>(b->dev), static_cast<float*>(bf), u32(b->elems),
                    stream_), "mul cvt b")); }
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         const std::size_t Fm = p.output.shape.dim(p.output.shape.rank() - 1);
         SHELF_RETURN_IF_ERROR(hipok(launch_mul_f32_f32_bf16(
             pa32, u32(ars), pb32, u32(brs), static_cast<bf16_t*>(o), u32(Fm),
@@ -465,6 +544,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         SHELF_RETURN_IF_ERROR(need(b, false, "residual_add"));
         const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_residual_add_bf16(
             static_cast<const bf16_t*>(a->dev), u32(F), static_cast<const bf16_t*>(b->dev),
             u32(F), static_cast<bf16_t*>(o), u32(F), u32(out_n / F), u32(F), stream_),
@@ -484,6 +564,8 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         if (!C) return Status::invalid_state("causal_conv_step: unknown C", __FILE__, __LINE__);
         void* of = arena_alloc(x->elems * sizeof(float));
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(of));
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         FusedGdnConvSiluArgs args{};
         args.conv.input = static_cast<const bf16_t*>(x->dev);
         args.conv.output = static_cast<float*>(of);
@@ -616,18 +698,21 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         void* norm;
         if (x->f32) {
             norm = alloc(true);
+            SHELF_RETURN_IF_ERROR(arena_ok(norm));
             SHELF_RETURN_IF_ERROR(hipok(launch_rmsnorm(
                 x->dev, RmsNormDataType::F32, wt(0), RmsNormDataType::BF16,
                 RmsNormWeightLayout::PER_FEATURE, RmsNormWeightMode::DIRECT, norm,
                 RmsNormDataType::F32, u32(rows), u32(F), u32(F), u32(F), u32(F),
                 p.attr.epsilon, stream_), "gdn norm"));
             void* normb = arena_alloc(out_n * sizeof(bf16_t));
+            SHELF_RETURN_IF_ERROR(arena_ok(normb));
             SHELF_RETURN_IF_ERROR(hipok(launch_f32_to_bf16(
                 static_cast<const float*>(norm), static_cast<bf16_t*>(normb), u32(out_n),
                 stream_), "gdn norm cvt"));
             norm = normb;
         } else {
             norm = arena_alloc(out_n * sizeof(bf16_t));
+            SHELF_RETURN_IF_ERROR(arena_ok(norm));
             SHELF_RETURN_IF_ERROR(hipok(launch_rmsnorm(
                 x->dev, RmsNormDataType::BF16, wt(0), RmsNormDataType::BF16,
                 RmsNormWeightLayout::PER_FEATURE, RmsNormWeightMode::DIRECT, norm,
@@ -636,6 +721,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         }
         SHELF_RETURN_IF_ERROR(need(z, false, "rmsnorm_gated z"));
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         SHELF_RETURN_IF_ERROR(hipok(launch_swiglu_bf16(
             static_cast<const bf16_t*>(z->dev), u32(F), static_cast<const bf16_t*>(norm),
             u32(F), static_cast<bf16_t*>(o), u32(F), u32(rows), u32(F), stream_), "gdn post"));
@@ -688,6 +774,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
                                                           stream_), "kv_append"));
 
         void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
         PagedAttentionCommonArgs at{};
         at.q = static_cast<const bf16_t*>(q->dev);
         at.output = o;

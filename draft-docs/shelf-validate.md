@@ -1,6 +1,9 @@
 # shelf-validate 仕様（草案）
 
-状態: 草案 v0（実装前）。実装完了後に `docs/` へ移す。
+状態: 草案 v1（V0 は実装済み・未マージ）。
+
+* **現行仕様は `docs/spec/validate.md`、運用手順は `docs/guide/shelf-validate.md` に分離した**
+  （実装済みの内容だけを `docs/` に置き、本ドキュメントは仕様・計画（V1 以降・PP 設計・未決事項）を扱う）。
 関連: `draft-docs/parity-policy.md`（T0〜T3 の判定）、`draft-docs/engine-contract.md`、
 `draft-docs/directory_design.md`（§5 D7 検証・§3.5）、`draft-docs/port_strata_cpu_gpu_coop.md`
 
@@ -57,12 +60,19 @@ shelf-validate \
      成果物の ids をコミットする（CI と実行はスクリプトに依存しない）
 * 要件: 同じ ids を exact / approx の**両方にそのまま適用**する（テンプレート適用済みの完成形を置く）
 * なぜ fixture か: `parity-policy.md` の T0（決定性）を再現可能にし、tokenizer をアプリから切り離すため
+* **V0 実装での確定事項**:
+  * 成果物は `apps/fixtures/prefill_fixture.hpp`（256 tok）。生成は `apps/fixtures/make_fixture.py`（開発時のみ）
+  * テンプレートは **思考モード OFF**（`enable_thinking=false`）。ON だと decode が思考だけで予算を消費し
+    StopToken に到達しなかった（実測: 思考 ON で 256 tok 全消費 → `budget_exhausted`）
+  * プロンプトは「約 150 語で即答（計画・見出し・前置きなし）」を指示し、decode が 128..256 tok の範囲で
+    StopToken に収まるようにした（実測: decode 246 tok で `stop_token`）
+  * 長さは 256 tok ちょうどに固定（超過分の末尾切り詰めはアシスタント開始トークンを壊すため禁止）
 
 ---
 
 ## 4. 実行手順
 
-1. **設定読み**: `config.json` / `generation_config.json` からレイヤ数・几何・`eos_token_id` を得る
+1. **設定読み**: `config.json` / `generation_config.json` からレイヤ数・幾何・`eos_token_id` を得る
 2. **ロード**: exact / approx をそれぞれ読み、§6 の構成（PP）に従って stage 割当する
    （approx はレイヤ単位ファイル `layers-N.safetensors` を前提に読む。§7 V1 参照）
 3. **prefill**: 位置 1..N を一括投入して logits を得る。
@@ -181,6 +191,24 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
 | **V1** | approx 経路の読み込みと実行 → T1/T2 比較 | exact と approx のトークン列比較が出力され、diverged 時に margin が出る |
 | **V2** | pipeline-parallel（`--pipeline-parallel=K`） | `exact(PP=1)` と `exact(PP=K)` のトークン列が一致（T1） |
 | **V3** | 自動化: `ctest` のラベル（例 `e2e`）で回し、モデル無しの環境では skip | CI 相当の流れで 1 件が守られる |
+
+### V0 実績と実装メモ（2026-10-27）
+
+* **DoD 達成**: `--exact-model=models/Qwen3.5-4B --runs=2 --device=hip --gpu=1` で T0 `identical`・exit 0。
+  実測: prefill 256 tok（64 行 × 4 チャンク、各約 130 ms）/ decode 246 tok で StopToken 停止（各約 5.0 s）、
+  VRAM 常駐 10.1 GB、全体約 19 s。範囲外入力（`--prefill-tokens=64`、`--budget=300` 等）は起動前に exit 2 で拒否。
+* **arena の自動サイズ**: rows=64 prefill グラフは出力総和が大きく、従来の既定
+  `arena_bytes = 64 MB` では logits `[64, vocab]` f32（約 64 MB）だけで枯渇する。
+  検出後、「64 MB + 2×Σ 全 primitive 出力(f32)（一時バッファ余白）」の式を
+  **executor 側の自動算出**として library に移した（`arena_bytes = 0` 既定、
+  `declare_states` のグラフから算出）。アプリは行数の大きい prefill グラフ (rows=64) を
+  `declare_states` に渡す（rows=1 の decode グラフを渡すと不足）。4B では約 1.96 GB。
+* **executor へのガード追加**（`src/backend/hip/step_executor.cpp`）: アリーナ枯渇時に null 出力のまま
+  カーネルを発射するとデバイスフォルト（GPU ハング）になるため、全 alloc 点で発射前に検査するようにした。
+* **CPU 側の対応**: `HostStorage::reset_states()` を追加（`HipStepExecutor::reset_states()` と対になる
+  ステートと使用行のリセット。`--runs=n` の反復で必要）。
+* `--device=cpu` の全トークン実行は未実施（**実測 16 s/token** = Debug ビルドで 7 step 110 s。
+  256 + 246 tok なら 1 run 約 2 時間）。CPU 経路の比較は §8「CPU 経路の扱い」の未決に同じ）。
 
 ### V1 の前提となる実装（別作業）
 
