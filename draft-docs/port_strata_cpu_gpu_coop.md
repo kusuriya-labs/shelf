@@ -103,7 +103,10 @@ Strata は本質的に、**MoE エキスパートを VRAM に適応的にキャ�
   ステップ列なので、graph は同じ形を繰り返す最適化にすぎず、外しても意味論は保たれる。
   HIP 固有の順序制約のみ §7 のリスクに記載
 * CUDA 固有の仮想メモリ管理（`--vram-elastic` は HIP では無効化されている: `expert_cache.cpp:6-8`）
-* helper GPU / peer tier / layer split（CUDA P2P 前提。shelf は単一 GPU）
+* helper GPU / peer tier（CUDA P2P 前提。shelf は対象外）
+* layer split — 従来は「shelf は単一 GPU」を理由に対象外としていたが、**PP として必要になった**。
+  設計は `draft-docs/shelf-validate.md` §6.1 に記載（Strata `docs/MULTI_GPU.md` が本命、
+  `phaseshift-fp8` の bench `--pp 1|4` が第 2 参照）
 * `STRATA_*` 環境変数 757 種と per-arch 既定値テーブル
 * KV ストリーミング（`docs/kv-streaming-design.md` はリポジトリに存在せず、コード注記から復元するしかない）
 
