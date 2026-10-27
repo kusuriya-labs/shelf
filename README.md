@@ -19,8 +19,7 @@ shelf/
 │   ├── backend/
 │   │   ├── common/
 │   │   ├── cpu/
-│   │   ├── hip/
-│   │   └── sycl/
+│   │   └── hip/
 │   ├── placement/
 │   └── runtime/
 ├── apps/

@@ -46,7 +46,7 @@ public:
     static Status not_found(const std::string& msg, const char* file, int line) { return from(Code::not_found, msg, file, line); }
     static Status unsupported(const std::string& msg, const char* file, int line) { return from(Code::unsupported, msg, file, line); }
     // Backend-neutral device API failure. Message must be produced by the
-    // backend that can interpret the native error code (HIP/SYCL/etc.).
+    // backend that can interpret the native error code (HIP/etc.).
     static Status device_error(const char* expr, const char* msg, const char* file, int line);
 
     bool ok() const noexcept { return code_ == Code::ok; }

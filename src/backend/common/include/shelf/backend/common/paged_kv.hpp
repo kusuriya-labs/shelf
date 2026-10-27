@@ -4,9 +4,7 @@
 // be an adapter, never a redesign. (Revision 2: the vendored gfx1201 kernel
 // family — paged decode bf16/fp8, split-K reduce, kv_append — addresses
 // TWO separate K/V pools; making that the canonical packing removes a
-// per-step conversion copy. The libr4d/radiance single-pool interleaved
-// packing stays first-class for porting those kernels.)
-//
+// per-step conversion copy.)
 // Physical truth lives HERE; the IR's kv_cache StateDesc stays LOGICAL
 // (capacity/head semantics). The mapping logical -> physical is a lowering/
 // runtime concern (runtime/state).
@@ -17,13 +15,6 @@
 //    element(b, s, h, d) = b*block_stride + s*slot_stride + h*head_stride + d
 //    canonical: slot_stride = kv_heads*head_dim ("token-major"),
 //               head_stride = head_dim, block_stride = block_size*slot_stride
-//
-//  InterleavedKV (libr4d portable) — single pool, kind k∈{K,V}:
-//    element(b, h, s, k, d) = b*block_stride + h*head_stride +
-//                             s*slot_stride + k*head_dim + d
-//    canonical: slot_stride = 2*head_dim ("K then V per token"),
-//               head_stride = block_size*slot_stride,
-//               block_stride = kv_heads*head_stride
 #pragma once
 
 #include <cstddef>
@@ -39,7 +30,6 @@ namespace shelf::backend::common {
 // compiled for; other values need kernels for them.
 enum class KVPacking : std::uint8_t {
     SeparatePools,  // two allocations; kind = which pool pointer
-    InterleavedKV,  // one allocation; kind = +head_dim inside the slot
 };
 
 struct PagedKVLayout {
@@ -60,26 +50,21 @@ struct PagedKVLayout {
     // Fill canonical contiguous strides when all zero, then check().
     Status prepare();
 
-    // Elements per block in ONE pool (Separate) or the single pool (Interleaved).
+    // 1 プール（K または V）あたりの要素数。
     std::size_t elements_per_block() const noexcept {
-        return packing == KVPacking::SeparatePools
-                   ? block_size * kv_heads * head_dim
-                   : kv_heads * block_size * 2 * head_dim;
+        return block_size * kv_heads * head_dim;
     }
 };
 
-// Element offset. Kind: 0 = K, 1 = V.
-// SeparatePools: returned offset is INSIDE the chosen pool (kind ignored;
-//   the caller passes k_pool or v_pool as base).
-// InterleavedKV: single pool; kind adds +head_dim.
+// Element offset. Kind: 0 = K, 1 = V だが未使用（InterleavedKV 削除後は
+// K/V が常に別プールなので、呼び出し側が k_pool / v_pool の base を渡す）。
+// 返されるのは、選ばれた 1 プールの先頭からのオフセット。
 inline std::size_t paged_kv_offset(const PagedKVLayout& L, std::size_t block,
                                    std::size_t kv_head, std::size_t slot_in_block,
                                    std::size_t kind, std::size_t dim) noexcept {
-    if (L.packing == KVPacking::SeparatePools)
-        return block * L.block_stride + slot_in_block * L.slot_stride +
-               kv_head * L.head_stride + dim;
-    return block * L.block_stride + kv_head * L.head_stride +
-           slot_in_block * L.slot_stride + kind * L.head_dim + dim;
+    (void)kind;
+    return block * L.block_stride + slot_in_block * L.slot_stride +
+           kv_head * L.head_stride + dim;
 }
 
 // Per-batch block table: physical block id per (sequence, logical block).

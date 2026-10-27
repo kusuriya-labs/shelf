@@ -1,7 +1,7 @@
 // shelf backend/cpu — CPU reference executor (plan Phase 4).
 //
 // Correctness-first naive implementations in f32. This is the golden
-// reference every fast kernel (CPU SIMD / HIP / SYCL) must match within the
+// reference every fast kernel (CPU SIMD / HIP) must match within the
 // defined tolerance. No performance ambition here, no model names.
 #pragma once
 

@@ -20,14 +20,11 @@
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/model/qwen35/step_graph.hpp>
 
-#if defined(SHELF_HAVE_HIP) || defined(SHELF_HAVE_SYCL)
+#if defined(SHELF_HAVE_HIP)
 #include <memory>
 #endif
 #ifdef SHELF_HAVE_HIP
 #include <shelf/backend/hip/step_executor.hpp>
-#endif
-#ifdef SHELF_HAVE_SYCL
-#include <shelf/backend/sycl/step_executor.hpp>
 #endif
 
 namespace {
@@ -111,10 +108,10 @@ int main(int argc, char** argv) {
         else if (a == "--ids") ids_csv = next("ids");
         else if (a == "--steps") steps = std::atoi(next("steps").c_str());
         else if (a == "--out") out_dir = next("out");
-        else if (a == "--device") device = next("cpu|hip|sycl");
+        else if (a == "--device") device = next("cpu|hip");
         else if (a == "--gpu") gpu = std::atoi(next("gpu index").c_str());
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
-                         "[--device cpu|hip|sycl]");
+                         "[--device cpu|hip");
     }
     if (model_dir.empty() || ids_csv.empty()) return fail("--model and --ids required");
 
@@ -134,7 +131,7 @@ int main(int argc, char** argv) {
 
     // ---- graph ----
     const std::size_t prefill_rows =
-        (device == "hip" || device == "sycl") ? std::min<std::size_t>(ids.size(), 64) : 1;
+        (device == "hip") ? std::min<std::size_t>(ids.size(), 64) : 1;
     auto plan_r = model::qwen35::build_step_graph(cfg, capacity);
     if (!plan_r.ok()) return fail(plan_r.status().message());
     auto& plan = plan_r.value();
@@ -173,9 +170,6 @@ int main(int argc, char** argv) {
 #ifdef SHELF_HAVE_HIP
     std::unique_ptr<backend::hip::HipStepExecutor> hip_exec;
 #endif
-#ifdef SHELF_HAVE_SYCL
-    std::unique_ptr<backend::sycl::SyclStepExecutor> sycl_exec;
-#endif
     backend::cpu::HostStorage storage;
     const auto upload_weights = [&](auto& ex) -> int {
         for (const auto& w : plan.weights) {
@@ -198,18 +192,7 @@ int main(int argc, char** argv) {
         if (!st.ok()) return fail("declare_states: " + st.message());
         return 0;
     };
-    if (device == "sycl") {
-#ifdef SHELF_HAVE_SYCL
-        backend::sycl::SyclStepExecutorOptions so;
-        so.device = gpu;
-        so.rope_theta = cfg.rope_theta;
-        so.rope_rotary_dim = cfg.rotary_dim;
-        sycl_exec = std::make_unique<backend::sycl::SyclStepExecutor>(so);
-        if (int rc = upload_weights(sycl_exec)) return rc;
-#else
-        return fail("built without SYCL support");
-#endif
-    } else if (device == "hip") {
+    if (device == "hip") {
 #ifdef SHELF_HAVE_HIP
         backend::hip::HipStepExecutorOptions ho;
         ho.device = gpu;
@@ -261,20 +244,6 @@ int main(int argc, char** argv) {
             return Status::make_ok();
         }
 #endif
-#ifdef SHELF_HAVE_SYCL
-        if (sycl_exec) {
-            SHELF_RETURN_IF_ERROR(
-                sycl_exec->run_step(plan.graph, static_cast<std::int32_t>(token),
-                                    static_cast<std::uint32_t>(pos)));
-            if (logits_out) {
-                auto lg = sycl_exec->fetch_logits(plan.graph);
-                if (!lg.ok()) return lg.status();
-                *logits_out = lg.value();
-            }
-            std::printf("  sycl step: %.2f ms\n", sycl_exec->stats().last_step_ms);
-            return Status::make_ok();
-        }
-#endif
         storage.reset_values();
         auto st = storage.set_value_int(plan.tokens, {static_cast<std::int32_t>(token)});
         if (!st.ok()) return st;
@@ -323,9 +292,6 @@ int main(int argc, char** argv) {
     };
 #ifdef SHELF_HAVE_HIP
     if (hip_exec && pfplan) { if (int rc = gpu_prefill(hip_exec)) return rc; } else
-#endif
-#ifdef SHELF_HAVE_SYCL
-    if (sycl_exec && pfplan) { if (int rc = gpu_prefill(sycl_exec)) return rc; } else
 #endif
     for (std::size_t p = 0; p < ids.size(); ++p) {
         auto st = run_step(seq[p], p, p + 1 == ids.size() ? &last_logits : nullptr);

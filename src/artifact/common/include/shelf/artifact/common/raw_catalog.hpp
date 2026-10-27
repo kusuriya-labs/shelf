@@ -19,8 +19,6 @@ namespace shelf::artifact {
 
 enum class ContainerFormat : std::uint8_t {
     safetensors = 0,
-    gguf,
-    exl3,
 };
 
 struct RawTensorEntry {

@@ -17,42 +17,25 @@ Status PagedKVLayout::check() const {
     if (slot_stride == 0 || head_stride == 0 || block_stride == 0)
         return Status::invalid_argument("paged-kv: strides unset (call prepare)",
                                         __FILE__, __LINE__);
-    if (packing == KVPacking::SeparatePools) {
-        if (head_stride < head_dim)
-            return Status::invalid_argument("paged-kv(sep): head_stride < head_dim",
-                                            __FILE__, __LINE__);
-        if (slot_stride < kv_heads * head_stride)
-            return Status::invalid_argument("paged-kv(sep): slot_stride overlaps heads",
-                                            __FILE__, __LINE__);
-        if (block_stride < block_size * slot_stride)
-            return Status::invalid_argument("paged-kv(sep): block_stride overlaps slots",
-                                            __FILE__, __LINE__);
-    } else {
-        if (slot_stride < 2 * head_dim)
-            return Status::invalid_argument("paged-kv(int): slot_stride must fit K+V",
-                                            __FILE__, __LINE__);
-        if (head_stride < block_size * slot_stride)
-            return Status::invalid_argument("paged-kv(int): head_stride overlaps slots",
-                                            __FILE__, __LINE__);
-        if (block_stride < kv_heads * head_stride)
-            return Status::invalid_argument("paged-kv(int): block_stride overlaps heads",
-                                            __FILE__, __LINE__);
-    }
+    // packing は SeparatePools のみ（InterleavedKV は削除済み）。
+    if (head_stride < head_dim)
+        return Status::invalid_argument("paged-kv: head_stride < head_dim",
+                                        __FILE__, __LINE__);
+    if (slot_stride < kv_heads * head_stride)
+        return Status::invalid_argument("paged-kv: slot_stride overlaps heads",
+                                        __FILE__, __LINE__);
+    if (block_stride < block_size * slot_stride)
+        return Status::invalid_argument("paged-kv: block_stride overlaps slots",
+                                        __FILE__, __LINE__);
     return Status::make_ok();
 }
 
 Status PagedKVLayout::prepare() {
     const bool all_zero = block_stride == 0 && head_stride == 0 && slot_stride == 0;
     if (all_zero) {
-        if (packing == KVPacking::SeparatePools) {
-            head_stride = head_dim;
-            slot_stride = kv_heads * head_stride;
-            block_stride = block_size * slot_stride;
-        } else {
-            slot_stride = 2 * head_dim;
-            head_stride = block_size * slot_stride;
-            block_stride = kv_heads * head_stride;
-        }
+        head_stride = head_dim;
+        slot_stride = kv_heads * head_stride;
+        block_stride = block_size * slot_stride;
     }
     return check();
 }

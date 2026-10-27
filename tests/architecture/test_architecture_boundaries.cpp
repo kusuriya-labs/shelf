@@ -50,7 +50,7 @@ std::string read_file(const fs::path& p) {
 bool is_source(const fs::path& p) {
     const auto ext = p.extension().string();
     return ext == ".h" || ext == ".hpp" || ext == ".cpp" || ext == ".cc" ||
-           ext == ".cu" || ext == ".hip" || ext == ".sycl";
+           ext == ".cu" || ext == ".hip";
 }
 
 std::vector<fs::path> scan(const fs::path& root) {
@@ -138,46 +138,43 @@ int main() {
 
     // Module include rules (lowercase substrings of include paths).
     // Keep in sync with docs/architecture/dependency-rules.md.
-    // HIP types confined to src/backend/hip/, SYCL types to src/backend/sycl/.
+    // HIP types confined to src/backend/hip/.
     const std::vector<Rule> rules = {
         {src / "foundation",
          {"shelf/model/", "shelf/ir/", "shelf/artifact/", "shelf/quant/", "shelf/weights/",
           "shelf/compiler/", "shelf/backend/", "shelf/placement/", "shelf/runtime/",
-          "sycl/", "hip/"}},
+          "hip/"}},
         {src / "model",
          {"shelf/artifact/", "shelf/quant/", "shelf/backend/", "shelf/compiler/",
-          "shelf/runtime/", "shelf/placement/", "sycl/", "hip/"}},
+          "shelf/runtime/", "shelf/placement/", "hip/"}},
         {src / "ir",
          {"shelf/backend/", "shelf/compiler/", "shelf/runtime/", "shelf/placement/",
-          "sycl/", "hip/"}},
+          "hip/"}},
         {src / "artifact",
-         {"shelf/model/", "shelf/runtime/", "shelf/backend/", "sycl/", "hip/"}},
+         {"shelf/model/", "shelf/runtime/", "shelf/backend/", "hip/"}},
         {src / "quant",
-         {"shelf/model/", "shelf/backend/", "shelf/runtime/", "sycl/", "hip/"}},
+         {"shelf/model/", "shelf/backend/", "shelf/runtime/", "hip/"}},
         {src / "weights",
-         {"shelf/runtime/", "shelf/api/", "sycl/", "hip/"}},
+         {"shelf/runtime/", "shelf/api/", "hip/"}},
         {src / "compiler",
          {"shelf/runtime/", "shelf/api/", "hip/"}},
         {src / "backend",
          {"shelf/model/", "shelf/compiler/", "shelf/runtime/", "shelf/placement/"}},
-        {src / "backend/common", {"sycl/", "hip/"}},
-        {src / "backend/cpu",   {"sycl/", "hip/"}},
-        {src / "backend/hip",   {"sycl/"}},
-        {src / "backend/sycl",  {"hip/"}},
+        {src / "backend/common", {"hip/"}},
+        {src / "backend/cpu",   {"hip/"}},
         {src / "placement",
-         {"shelf/model/", "shelf/runtime/", "sycl/", "hip/"}},
+         {"shelf/model/", "shelf/runtime/", "hip/"}},
         {src / "runtime",
-         {"shelf/artifact/", "shelf/api/", "sycl/", "hip/"}},
+         {"shelf/artifact/", "shelf/api/", "hip/"}},
         {src / "api",
-         {"sycl/", "hip/"}},
+         {"hip/"}},
         {root / "include/shelf",
-         {"sycl/", "hip/", "shelf/backend/", "shelf/foundation/"}},
+         {"hip/", "shelf/backend/", "shelf/foundation/"}},
     };
     for (const auto& rule : rules) check_includes(rule);
 
     // Note: src/backend rule forbids model includes; the raw scan below also
-    // forbids model *names* in backend/runtime/etc. src/backend/sycl/ may
-    // include <sycl/sycl.hpp> (SYCL types confined to the SYCL backend).
+    // forbids model *names* in backend/runtime/etc.
 
     check_no_model_names({src, root / "include"}, {src / "model"});
 

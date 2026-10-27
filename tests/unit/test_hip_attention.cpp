@@ -2,7 +2,7 @@
 // Parity vs fresh naive f64 attention honoring the kernel's physical layout
 // (separate K/V pools, [block][slot][kvh][d] packing, uint32 block table).
 // NOTE (ABI): the vendored kernels do NOT consume the shelf locked paged_kv
-// ABI (single interleaved pool); this test builds the PhaseShift layout.
+// ABI (raw strides, not PagedKVLayout); this test builds the PhaseShift layout.
 #include <hip/hip_runtime.h>
 
 #include <cmath>

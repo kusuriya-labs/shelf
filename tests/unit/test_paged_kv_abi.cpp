@@ -29,31 +29,12 @@ void test_layout() {
           L.block_stride == 16 * 4 * 256, "canonical sep strides");
     check(L.elements_per_block() == 16 * 4 * 256, "elements_per_block sep");
 
-    const std::size_t o = paged_kv_offset(L, 3, 2, 5, 1, 7);
-    check(o == 3 * L.block_stride + 5 * L.slot_stride + 2 * 256 + 7,
-          "sep offset kind-invariant (per-pool)");
-
     PagedKVLayout bad = L;
-    bad.head_stride = 128;  // < head_dim invalid even for sep
+    bad.head_stride = 128;  // < head_dim は不正
     check(!bad.check().ok(), "sep head_stride < D rejected");
     bad = L;
     bad.block_stride = 0;
     check(!bad.check().ok(), "unset strides need prepare");
-
-    // InterleavedKV (libr4d portable mode)
-    PagedKVLayout I;
-    I.block_size = 16; I.kv_heads = 4; I.head_dim = 256; I.num_blocks = 128;
-    I.packing = KVPacking::InterleavedKV;
-    check(I.prepare().ok(), "prepare canonical strides (int)");
-    check(I.slot_stride == 512 && I.head_stride == 16 * 512 &&
-          I.block_stride == 4 * 16 * 512, "canonical interleaved strides");
-    check(I.elements_per_block() == 4 * 16 * 512, "elements_per_block int");
-    const std::size_t io = paged_kv_offset(I, 3, 2, 5, 1, 7);
-    check(io == 3 * I.block_stride + 2 * I.head_stride + 5 * I.slot_stride + 256 + 7,
-          "int offset K-then-V per slot");
-    PagedKVLayout bad2 = I;
-    bad2.slot_stride = 10;
-    check(!bad2.check().ok(), "int slot_stride too small rejected");
 }
 
 void test_args() {

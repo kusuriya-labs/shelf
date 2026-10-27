@@ -1,6 +1,6 @@
 // shelf foundation — logical data types.
 //
-// foundation must stay independent of any model, container format or SYCL
+// foundation must stay independent of any model, container format
 // (see docs/architecture/dependency-rules.md). Quantized payload formats are
 // NOT DataTypes here: physical quantization is a QuantSpec concern (quant/).
 #pragma once

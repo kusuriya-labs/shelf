@@ -1,7 +1,7 @@
 // shelf backend/common — device & memory value contracts (plan §4.5 Resource).
 //
 // Backend-neutral vocabulary ONLY: ids, descriptors, non-owning views.
-// No HIP/SYCL types here, and intentionally no polymorphic "universal
+// No HIP types here, and intentionally no polymorphic "universal
 // Backend" interface — execution plans hold concrete backend handles chosen
 // at compile time (plan §1.2).
 #pragma once
