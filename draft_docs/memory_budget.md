@@ -1,18 +1,18 @@
-# memory-budget — KV・VRAM の予算と所在（別紙）
+# memory_budget — KV・VRAM の予算と所在（別紙）
 
-状態: 骨（**数値の決定は `engine-contract.md` §8 にあり、本書はその受け皿**。
+状態: 骨（**数値の決定は `engine_contract.md` §8 にあり、本書はその受け皿**。
 実装・運用の詳細を書くのは実装期）
-関連: `engine-contract.md` §8（決定済みの数値・2 段 admission・超過時の挙動）、
+関連: `engine_contract.md` §8（決定済みの数値・2 段 admission・超過時の挙動）、
 `directory_design.md` D2（予算計算は `placement/`、実確保は backend）、
 `port_strata_cpu_gpu_coop.md`（tier 移動の実装接続）
 
-本書の位置づけ: `engine-contract.md` が「契約として決めた数値」を、本書が
+本書の位置づけ: `engine_contract.md` が「契約として決めた数値」を、本書が
 「その数値の算出・監視・運用」を書く。**同じ数値を 2 箇所で書き換えないこと**
 （片方を変えたら本書も更新する）。
 
 ---
 
-## 1. 決定済みの数値（`engine-contract.md` §8.1 / §8.2 の写像 — 変更はそちらで行う）
+## 1. 決定済みの数値（`engine_contract.md` §8.1 / §8.2 の写像 — 変更はそちらで行う）
 
 | 項目 | 決定値 |
 | --- | --- |
@@ -31,11 +31,11 @@
   （radiance「推測禁止、既知量の算術」／ paiton の `fits` 判定を踏襲）。
   `MemoryKind` / `BufferView`（`backend/common`）で所在を表し、実確保のみ backend が行う
 * **入力**: 空き VRAM / 空き pinned の取得方法、headroom の既定値、
-  GDN 固定費の扱い（`engine-contract` §8.7 が「予算に未計上」と指摘している点）
+  GDN 固定費の扱い（`engine_contract` §8.7 が「予算に未計上」と指摘している点）
 * **出力と失敗**: `Status::insufficient_memory` を投げるタイミングと文言
-  （`serve-protocol.md` §3 では `overloaded` / 503 に写像される）
+  （`serve_protocol.md` §3 では `overloaded` / 503 に写像される）
 
-## 3. 段 2 の実行側の選択肢（`engine-contract.md` §8.6 で (a) に確定）
+## 3. 段 2 の実行側の選択肢（`engine_contract.md` §8.6 で (a) に確定）
 
 * (a) admission を絞る / (b) pinned 直読み / (c) 層単位受け持ち
 * 「VRAM に無い active block をどう読むか」が性能を決める（同 §8.3 の試算:
@@ -43,8 +43,8 @@
 
 ## 4. 未決（本書で拾う）
 
-* **tier 移動の発動体** — いつ pinned ↔ VRAM を動かすか（`engine-contract` §6 / §8.5 の残件）
-* 思考打ち切り（reasoning cap）の判定主体（`engine-contract` §8.4）
+* **tier 移動の発動体** — いつ pinned ↔ VRAM を動かすか（`engine_contract` §6 / §8.5 の残件）
+* 思考打ち切り（reasoning cap）の判定主体（`engine_contract` §8.4）
 * プレフィル時の chunk 予約と KV の headroom の兼ね合い
 * 正本（pinned）の確保方式 — `hipHostRegister` か `hipHostMalloc` か、ラージページの要否
   （現状 shelf に `hipHostMalloc` の利用はゼロ。協調推論計画 フェーズ 3 の pinned 論点と共通）

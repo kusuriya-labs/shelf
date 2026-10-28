@@ -15,7 +15,7 @@ target_link_libraries(shelf-run PRIVATE
     shelf::backend_cpu)
 
 # shelf-validate — 無損失経路と量子化経路の比較検証ドライバ
-# (draft-docs/shelf-validate.md, V0: アプリ骨格)
+# (draft_docs/shelf_validate.md, V0: アプリ骨格)
 add_executable(shelf-validate shelf_validate.cpp)
 target_link_libraries(shelf-validate PRIVATE
     shelf::model_qwen35

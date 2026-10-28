@@ -1,7 +1,7 @@
 # shelf-validate 仕様
 
 対応実装: `apps/shelf-validate`（現行フェーズ V0）。
-計画・未実装フェーズの詳細は `draft-docs/shelf-validate.md`。
+計画・未実装フェーズの詳細は `draft_docs/shelf_validate.md`。
 
 ---
 
@@ -217,7 +217,7 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため、
   `--gpu` で空きを選ぶ（`rocm-smi` で確認）。
-* 実走の実測（prefill / decode / stop_reason）は `draft-docs/shelf-validate.md` §7
+* 実走の実測（prefill / decode / stop_reason）は `draft_docs/shelf_validate.md` §7
   「V0 実績（9B・2026-10-28・修正後）」を参照。
 
 ### 11.3 CPU 経路
@@ -229,5 +229,5 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 ## 12. 現行の対応外（計画のみ）
 
-未実装フェーズ（V1〜V3）の内容と未決事項は `draft-docs/shelf-validate.md` §7 / §8 に記す
+未実装フェーズ（V1〜V3）の内容と未決事項は `draft_docs/shelf_validate.md` §7 / §8 に記す
 （本書は実装済みの仕様のみを書く）。

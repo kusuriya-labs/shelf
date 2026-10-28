@@ -4,7 +4,7 @@
 
 * **prefill（`pp`）**・**decode（`tg`）**・**単一カーネル（`kernel <name>`）** の速度を測る道具。
 * 入力は合成トークン列・合成バッファで、**モデルの答えは見ない**（正しさの検証は
-  `docs/guide/validate.md`、計画上の位置づけは `draft-docs/directory_design.md` §5 のフェーズ 0）。
+  `docs/guide/validate.md`、計画上の位置づけは `draft_docs/directory_design.md` §5 のフェーズ 0）。
 * `--help` は GPU を触らず exit 0（CPU ビルドでも動く）。**本体は HIP ビルドのみ**。
 
 ---
@@ -25,7 +25,7 @@
 ```bash
 # 計測用 = Release（**数値は必ずこれで取る**）
 cmake --preset hip-rel          # 初回のみ（設定）
-cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench
+cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-bench
 
 # 動作確認用 = Debug（計測には使わない）
 cmake --preset hip

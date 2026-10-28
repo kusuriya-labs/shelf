@@ -2,7 +2,7 @@
 
 状態: 方針書（設計とフェーズ区切り。ファイル単位の作業分解は着手時に詰める）
 参照: `/opt/zen/work/references/` 配下の実装（PhaseShift 系 / radiance / Python 系 / Strata）
-関連: `draft-docs/port_strata_cpu_gpu_coop.md`（協調推論の移植計画。本計画と一部フェーズを共有）
+関連: `draft_docs/port_strata_cpu_gpu_coop.md`（協調推論の移植計画。本計画と一部フェーズを共有）
 
 ---
 
@@ -36,7 +36,7 @@
 
 * **両方を開発時点の標準モデルとする**。文書・CLI の例示・デフォルト引数はすべてこれに合わせる
 * `text_config` の必須キー充足を確認済み（32 層 / full_attention 8 層 / kv_heads 4 / head_dim 256 /
-  vocab 248,320、`layer_types` 32 件）。KV は 1 tok = 32 KiB（`draft-docs/engine-contract.md` §8.2）
+  vocab 248,320、`layer_types` 32 件）。KV は 1 tok = 32 KiB（`draft_docs/engine_contract.md` §8.2）
 * **未測定の値は「未測定」と書く**（例: 9B の rows=1 / 16 / 32 のアリーナ必要量。
   rows=64 は 2,299 MiB と 2026-10-28 に測定済み）
 
@@ -74,9 +74,7 @@
 4. **起動とエンジン初期化の境界が曖昧** — デバイス問い合わせ・アリーナ確保・状態確保が
    実行器 ctor の内部にあり、アプリからは観測できない
 5. **境界ルールの正本が未整備** — 境界テストのコメントが
-   `docs/architecture/dependency-rules.md` を参照しているが未作成。作業中の正本は
-   `draft-docs/dependency-rules.md` に置き、実装完了時に `docs/architecture/` へ移す
-   （AGENTS.md のドキュメント規則。協調推論計画 §7 と同じ指摘）
+   `docs/architecture/dependency_rules.md` を参照しているが未作成。
 
 ---
 
@@ -150,7 +148,7 @@ shelf のカーネルの出所であり、Qwen3 系ランタイムとして最�
 * 「方略は純粋関数として切り出し、制御・統計・ログは 1 か所に置く」という
   Strata 自身の成功例（`detail::*` 純粋関数、`void* stream` 抽象）はそのまま借りる
 * 反面は `generate.cpp` 17,091 行の単一 `main`、既定値が static / env / `setup.py` / CMake の
-  4 箇所に分散、コア層が CUDA を直接知る状態（`draft-docs/port_strata_cpu_gpu_coop.md` §2.4）
+  4 箇所に分散、コア層が CUDA を直接知る状態（`draft_docs/port_strata_cpu_gpu_coop.md` §2.4）
 
 ### 2.4 radiance（`radiance`）— 5 段階を最も強く設計に刻んだ実装
 
@@ -213,7 +211,7 @@ AMD GPU 向け C++/HIP エンジン。「3 種の .so プラグイン（カー�
 | テスト | JSONL なのでエンジン無しで応答部をフェイク可能（プロセス・async は要る） | **仮想スケジューラでポート・モデル無し**に全エンドポイントと SSE を検証 | ログ文言依存で脆い |
 | 隔離 | プロセス分離 ＋ 言語差により include は構造的に不可能（`check_no_server_deps` で C++ 側も強制） | 同プロセス（ヘッダ規則で強制。step path に virtual なしと明記） | プロセス分離だが観測手段が文字列 |
 | 主な依存 | **Python + aiohttp + `transformers`（重い）** | C++ のみ（httplib を vendor） | Python |
-| 問題点 | `/v1/completions` 無し。Python を製品依存に追加 | `core/` と同居、media / audio / LoRA まで抱える、トークナイザの規模 | 蜜結合（`draft-docs/port_strata_cpu_gpu_coop.md` §2.4-5） |
+| 問題点 | `/v1/completions` 無し。Python を製品依存に追加 | `core/` と同居、media / audio / LoRA まで抱える、トークナイザの規模 | 蜜結合（`draft_docs/port_strata_cpu_gpu_coop.md` §2.4-5） |
 
 **結論（決定）: PhaseShift を一次ソース＝パス A として採用。radiance は条件付きの代替（パス B）**
 
@@ -284,8 +282,8 @@ shelf/
 │                               エンジン境界の仮想 IF。`hip/` を見ず runtime の公開 API のみ
 ├── apps/                       段階1  薄い main のみ（shelf-run = CLI、shelf-serve = Server）
 ├── tests/{unit, architecture, support}
-└── docs/architecture/dependency-rules.md（境界ルールの正本。
-    実装完了時に draft-docs/ から移す）
+└── docs/architecture/dependency_rules.md（境界ルールの正本。
+    実装完了時に draft_docs/ から移す）
 ```
 
 **5 段階の最終マッピング**
@@ -359,7 +357,7 @@ shelf/
 * virtual call（パス B）/ JSONL のディスパッチ（パス A）は**受付・通信スレッドにのみ**置き、
   step path（`backend/*/kernels`）には 1 つも置かない
 * Server 層がエンジンを**ログ文言や内部状態で観測しない**（Strata の教訓）
-* エラーの写像は `draft-docs/serve-protocol.md` の表に従う
+* エラーの写像は `draft_docs/serve_protocol.md` の表に従う
   （`Status::Code` → `code` → HTTP の 3 段。表とテストは 1 対 1）
 * テストはフェイクのエンジンで動かす（パス A は JSONL を直接話すフェイク、パス B は仮想 IF のフェイク）。
   ポート・モデル無しで応答列と SSE を検証する（radiance の方針）
@@ -380,9 +378,9 @@ shelf/
    ② torch 無しで `AutoProcessor` が動くか、`trust_remote_code` を使うモデルの扱いを着手前に確認する。
    （別案の `gigatoken` + `jinja2` は依存が軽いが、②③のテンプレートと応答パースが要自前実装のため不採用。
    パス B（C++）ではこの資産が使えない点は、パス選定の決め手のまま）
-2. **スケジューラ（submit / cancel / 進行通知）** — **契約は `engine-contract.md` §8.1 の
+2. **スケジューラ（submit / cancel / 進行通知）** — **契約は `engine_contract.md` §8.1 の
    「最大 4 並列（スロット = 4）」で確定**。ただし現状実装は 1 シーケンス直列の `run_step` のみで
-   `max_sequences = 1` 固定（`engine-contract` §8.7 のギャップ表）。**D8 は 1 並列から開始**し、
+   `max_sequences = 1` 固定（`engine_contract` §8.7 のギャップ表）。**D8 は 1 並列から開始**し、
    4 並列化（ブロック表の slots 配列化 + step 内マージ）は後続フェーズに委ねる
 3. **プロトコル / 依存** — パス A は JSONL スキーマと Python の依存管理、
    パス B は httplib の vendor とスレッド構成
@@ -391,16 +389,16 @@ shelf/
 
 ## 4. 移行フェーズ（区切りと完了条件）
 
-既存の協調推論計画（`draft-docs/port_strata_cpu_gpu_coop.md` §5）とフェーズを共有する。
+既存の協調推論計画（`draft_docs/port_strata_cpu_gpu_coop.md` §5）とフェーズを共有する。
 **各フェーズは独立してマージでき、境界テストと既存テストが常に通る**こと。
 
-関連文書: **`draft-docs/engine-contract.md`**（Server とエンジンの操作・イベント・
+関連文書: **`draft_docs/engine_contract.md`**（Server とエンジンの操作・イベント・
 生成パラメータ `temperature` / `top_k` / `top_p` / `min_p` / `seed`・キャンセルの契約 —
 D1 と D8 の前提。草案 v0 済み）
 
 | # | フェーズ | 内容 | 完了条件（DoD） |
 | --- | --- | --- | --- |
-| D0 | ルールの正本化 | 5 段階とディレクトリの対応表を `draft-docs/dependency-rules.md` に書く（境界テストのコメントが参照するのは `docs/architecture/` 側。**実装完了時にそこへ移す** — AGENTS.md のドキュメント規則） | 文書があり、既存 14 ルールの意図と本文書 §3.3 が一致する |
+| D0 | ルールの正本化 | 5 段階とディレクトリの対応表を `draft_docs/dependency_rules.md` に書く（境界テストのコメントが参照するのは `docs/architecture/` 側。**実装完了時にそこへ移す** — AGENTS.md のドキュメント規則） | 文書があり、既存 14 ルールの意図と本文書 §3.3 が一致する |
 | D1 | 起動の分離 | デバイス probe と設定解決を `runtime/boot/` へ。probe は構造化データを返し、要求機能表で受理判定してからエンジンを起こす。`apps/shelf_run.cpp` は薄く | `main` に「probe → 判定 → 生成」以外の段階が無い。機能不足の起動が原因付きで失敗するテストがある（挙動は現状と不変） |
 | D2 | 予算と確保の分離 | 予算・所在の計算を `placement/`（純粋、GPU 非依存）へ。所在は `backend/common` の `MemoryKind` で表し、実確保のみ backend に残す | placement の単体テストが GPU なしで通る。全 device 常駐の既定で性能・結果が不変（= 協調推論計画のフェーズ 1 と同一成果物） |
 | D3 | ロードの分離 | `upload_weights` ラムダを `runtime/load/` へ。「読取 → 検証 → 実体化計画 → upload」を型で固定し、無損 relayout のみ許可する | apps から safetensors の直接読みが消える。`weights/catalog` が実体化計画の入口として接線する |
@@ -408,7 +406,7 @@ D1 と D8 の前提。草案 v0 済み）
 | D5 | 量子化の契約 | `quant/` に encoding（数）と**参照 dequant の型・契約**を置き、CPU 実装は `backend/cpu`（境界ルールで `src/quant` は `shelf/backend/` を include 禁止のため）。**有損 dequant はホットパス（GEMM 内）のみ**と規約化。**本命の重み量子化は EXL3 4bit（2026-10-28 決定。参照: `references/exllamav3` 公式と Strata `src/dsv41/vendor/exl3.*`（CPU 参照つき・HIP 経路の注記あり）。最初の適用は `shelf-validate` V1**）。fp8 KV の codec は `backend/hip` に残すが型の定義は `quant/` へ | 量子化スキーマの追加で動く箇所が `quant/`（型・契約）と `backend` の 2 実装（CPU 参照 / GPU 本番）に限られる（= 協調計画の量子化分岐と統合） |
 | D6 | バックエンド起動契約 | `backend/common` に機能表（required/optional）と、選択を 1 度だけ行う dispatch を定義 | 選択が複数回・複数箇所で行われない。未対応機能要求が受理前に検出される |
 | D7 | 検証の固定化 | 境界テストに §3.3 の新ルールを追加、1 ディレクトリ = 1 ターゲットの整合確認、性能の回帰ゲート | cpu / hip 両プリセットで全テストが通り、境界テストが新ルールを検査している |
-| D8 | Server 層の導入 | **パス A で確定（§2.5 / §3.5）** → `src/api` にエンジン抽象と型付き JSONL ブリッジ、OpenAI 面は `apps/server/`（Python + aiohttp + HF `transformers`）。あわせて `engine-contract.md` §3 の **5 パラメータ（`temperature` / `top_k` / `top_p` / `min_p` / `seed`）をエンジン側に実装**（現状は greedy 専用のため追加が必要） | `/v1/chat/completions` の受付〜ストリーム完了までを**フェイクエンジン**で、ポート・モデル無しに検証するテストがある。エラーは `draft-docs/serve-protocol.md` §3 の表駆動で検証する。`src/api` が `hip/` と `shelf/backend/` を含まないことを境界テストが検査 |
+| D8 | Server 層の導入 | **パス A で確定（§2.5 / §3.5）** → `src/api` にエンジン抽象と型付き JSONL ブリッジ、OpenAI 面は `apps/server/`（Python + aiohttp + HF `transformers`）。あわせて `engine_contract.md` §3 の **5 パラメータ（`temperature` / `top_k` / `top_p` / `min_p` / `seed`）をエンジン側に実装**（現状は greedy 専用のため追加が必要） | `/v1/chat/completions` の受付〜ストリーム完了までを**フェイクエンジン**で、ポート・モデル無しに検証するテストがある。エラーは `draft_docs/serve_protocol.md` §3 の表駆動で検証する。`src/api` が `hip/` と `shelf/backend/` を含まないことを境界テストが検査 |
 
 補足:
 
@@ -417,7 +415,7 @@ D1 と D8 の前提。草案 v0 済み）
 * **D4 と D5 が最も工数を見込む**。D4 は `step_executor` の実装方式、D5 は EXL3 の
   デコード GEMM の規模に依存するため、着手前に `shelf-validate` V1 のスモーク
   （1 テンソルのデコードを exllamav3 と突合）で可否と規模を測る
-* 財産の一方通行: 各フェーズで `draft-docs/dependency-rules.md` を更新し、文書と
+* 財産の一方通行: 各フェーズで `draft_docs/dependency_rules.md` を更新し、文書と
   境界テストの乖離を残さない（PhaseShift が `docs/developer/*.md` で経験した陳腐化の回避）
 
 ---
@@ -428,7 +426,7 @@ D1 と D8 の前提。草案 v0 済み）
   ただし WMMA の FMA や累積の順序差による丸めで完全一致しない可能性を前提に置き、
   **不一致時は不一致位置の margin と dtype 誤差の実測値で「丸め由来かバグか」を判定する**。
   判定フロー（T0 決定性 → T1 完全一致 → T2 誤差判定 → T3 条件改訂）・測定手順・改訂手続きの
-  **正本は `draft-docs/parity-policy.md`**
+  **正本は `draft_docs/parity_policy.md`**
 * **構造**: `tests/architecture/test_architecture_boundaries.cpp` が新ルールを含めて通ること。
   これが「5 段階の分離が守られている」唯一の機械的保証になる
 * **挙動不変のフェーズ（D1〜D3）**: 既存テスト全通過 ＋ フェーズ 0 相当の計測で
@@ -436,7 +434,7 @@ D1 と D8 の前提。草案 v0 済み）
 * **純粋レイヤ（placement / boot / quant の算術）**: GPU 不要の単体テスト。CPU プリセットで
   通ることを条件にする（参照の「エンジン非依存層は依存ゼロ」を宣言と実装の両方で守る）
 * **量子化（D5）**: 参照 dequant（CPU）とホットパス（GPU）の一致を parity で測る。
-  比較ペアの差し替えと許容基準となる誤差の取り直しは `draft-docs/parity-policy.md` §3 の
+  比較ペアの差し替えと許容基準となる誤差の取り直しは `draft_docs/parity_policy.md` §3 の
   手順に従う。「canonical payload を本番カーネルが直接読まない」ことをテストで確認
 * **起動（D1/D6）**: 機能不足・予算不足が、エンジン起動前に原因付きで拒否されるテスト
 * **Server（D8）**: フェイクエンジン方式で検証する（パス A は JSONL を直接話すフェイク、
@@ -459,7 +457,7 @@ D1 と D8 の前提。草案 v0 済み）
 | Server の機能肥大 | radiance は Server が media / audio / LoRA / liveview まで抱え `core/` に同居している。写すと同型になる | 移植対象を `/v1/chat/completions` と `/v1/completions` の最小集合に限定し、追加は要件が出た時点で |
 | トークナイザ不在 | shelf は token id の入出力のみで、chat template も無い（OpenAI 互換の受付には要る） | パス A は HF `transformers`（**決定**、PhaseShift 同様）。パス B は C++ 自前（radiance `core/text/` 23,870 行）。torch 無しでの `AutoProcessor` 動作を D8 着手前に確認 |
 | Python 依存の追加（パス A） | shelf は現状 Python が一切無い（ビルド・テストとも C++）。Server 用に Python・aiohttp・HF `transformers`（＋依存ツリー）を製品依存に加える | 製品方針の確認を D8 の前提とし、依存は Server の exe に限定する（ライブラリと ctest 本体は Python 不要のまま）。torch 無しでの `AutoProcessor` 動作を先に確認 |
-| スケジューラ不在（実装） | 契約は最大 4 並列（`engine-contract` §8.1）だが、実装は 1 シーケンス直列（`max_sequences = 1` 固定、`engine-contract` §8.7 のギャップ） | D8 は 1 並列から開始し、4 並列化（slots 配列化 + step 内マージ）は後続フェーズへ。契約と実装の差は §8.7 の表で追えるようにする |
+| スケジューラ不在（実装） | 契約は最大 4 並列（`engine_contract` §8.1）だが、実装は 1 シーケンス直列（`max_sequences = 1` 固定、`engine_contract` §8.7 のギャップ） | D8 は 1 並列から開始し、4 並列化（slots 配列化 + step 内マージ）は後続フェーズへ。契約と実装の差は §8.7 の表で追えるようにする |
 
 未決:
 
@@ -473,7 +471,7 @@ D1 と D8 の前提。草案 v0 済み）
   staging は PhaseShift の copy + chmod を踏襲するか（gigatoken 等の軽量構成は不採用とした）
 * パス B に**切り替える場合のみ**: `src/api` のターゲット分割（スキーマ層とトランスポート層）と、
   `cpp-httplib` の置き場（`vendor/` を新設するか `cmake/Dependencies.cmake` に足すか）。
-  切替時は `serve-protocol.md` §7 の手順（`code` の表現）を通す
+  切替時は `serve_protocol.md` §7 の手順（`code` の表現）を通す
 * **prefix cache の移植元と時期** — 本体は **radiance `core/mem/prefix.*` を shelf の
   `prefix_key` ABI 上に移植**（推奨）。Strata は寿命の階層（live → parked → disk）と
   `--prompt-cache-tail`（分岐しやすい位置の追加チェックポイント）だけ参照する。

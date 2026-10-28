@@ -8,7 +8,7 @@ CI と実行はこのスクリプトに依存しない（成果物のヘッダ�
 使い方（リポジトリルートで実行）:
     python3 apps/fixtures/make_fixture.py
 
-仕様: draft-docs/shelf-validate.md §3
+仕様: draft_docs/shelf_validate.md §3
 """
 
 import argparse

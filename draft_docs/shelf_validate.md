@@ -2,17 +2,17 @@
 
 状態: 草案 v1（V0 は実装済み・未マージ）。
 
-* **現行仕様は `docs/spec/validate.md`、運用手順は `docs/guide/shelf-validate.md` に分離した**
+* **現行仕様は `docs/spec/validate.md`、運用手順は `docs/guide/shelf_validate.md` に分離した**
   （実装済みの内容だけを `docs/` に置き、本ドキュメントは仕様・計画（V1 以降・PP 設計・未決事項）を扱う）。
-関連: `draft-docs/parity-policy.md`（T0〜T3 の判定）、`draft-docs/engine-contract.md`、
-`draft-docs/directory_design.md`（§5 D7 検証・§3.5）、`draft-docs/port_strata_cpu_gpu_coop.md`
+関連: `draft_docs/parity_policy.md`（T0〜T3 の判定）、`draft_docs/engine_contract.md`、
+`draft_docs/directory_design.md`（§5 D7 検証・§3.5）、`draft_docs/port_strata_cpu_gpu_coop.md`
 
 ---
 
 ## 0. 目的
 
 実モデルで **無損失経路（exact）** と **プロダクション量子化経路（approx）** を同じ入力で走らせ、
-出力トークン列を比較する。`parity-policy.md` の T0（決定性）・T1（完全一致）・T2（誤差由来の判定）
+出力トークン列を比較する。`parity_policy.md` の T0（決定性）・T1（完全一致）・T2（誤差由来の判定）
 を**実モデル上で実行する道具**が本アプリである。
 
 * 内部での量子化変換は行わない（exact と approx はそれぞれ渡されたディレクトリをそのまま読む）
@@ -59,7 +59,7 @@ shelf-validate \
   2. 生成スクリプト（Python、モデル同梱の `tokenizer.json` を使用）を**開発時のみ**実行し、
      成果物の ids をコミットする（CI と実行はスクリプトに依存しない）
 * 要件: 同じ ids を exact / approx の**両方にそのまま適用**する（テンプレート適用済みの完成形を置く）
-* なぜ fixture か: `parity-policy.md` の T0（決定性）を再現可能にし、tokenizer をアプリから切り離すため
+* なぜ fixture か: `parity_policy.md` の T0（決定性）を再現可能にし、tokenizer をアプリから切り離すため
 * **V0 実装での確定事項**:
   * 成果物は `apps/fixtures/prefill_fixture.hpp`（256 tok）。生成は `apps/fixtures/make_fixture.py`（開発時のみ）
   * テンプレートは **思考モード OFF**（`enable_thinking=false`）。ON だと decode が思考だけで予算を消費し
@@ -96,11 +96,11 @@ shelf-validate \
 
 ## 5. 比較と判定
 
-| 軸 | 内容 | 対応する parity-policy |
+| 軸 | 内容 | 対応する parity_policy |
 | --- | --- | --- |
 | **T0 決定性** | 同一構成で `--runs=2` 回実行し、トークン列が一致するか | T0 |
 | **T1 完全一致**（主） | exact と approx の decode トークン列が StopToken まで一致するか | T1 |
-| **T2 誤差判定** | 不一致のとき、**最初の不一致位置**での exact 側の top-1 / top-2 の margin と、不一致位置の logits 差を計算し、`parity-policy.md` §3 の dtype 誤差実測と比較 | T2 |
+| **T2 誤差判定** | 不一致のとき、**最初の不一致位置**での exact 側の top-1 / top-2 の margin と、不一致位置の logits 差を計算し、`parity_policy.md` §3 の dtype 誤差実測と比較 | T2 |
 | **構成比較**（V2 以降） | `exact(PP=1) vs exact(PP=K)` — PP は数値を変えないはずなので T1 で検証 | T1 の応用 |
 
 **出力（`--out`）**: JSON に以下を記録する
@@ -199,7 +199,7 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
 
 * **2026-10-28 の資材更新と開発モデルの選定**: `models/` から `Qwen3.5-4B` と `Qwen3.8-*` が削除され、
   在庫は `Qwen3.5-9B`（bf16）と `Qwen3.5-9B-exl3`（EXL3 4bit）の 2 組のみ。
-  **この 2 つを開発時点の標準モデルに選定**した（統一した記載は `draft-docs/directory_design.md` §1.0）。
+  **この 2 つを開発時点の標準モデルに選定**した（統一した記載は `draft_docs/directory_design.md` §1.0）。
   以下の数値は **旧 4B での実測（履歴）**。以後の DoD・計測は **9B を対象**とし、
   未測定の値は「未測定」と書く（config は `text_config` の必須キー全充足を確認済み）。
 
@@ -255,7 +255,7 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
   `unit.step_graph` として登録（cpu 13 件 / hip 19 件が全通過）
 * **修正後の確認**: prefix = 1 / 8 / 32 のいずれでも HF と **8/8 トークン一致・文字列一致**
 * **教訓**: **T0（決定性）は出力の妥当性を保証しない**。上記バグは T0 を通っていた。
-  実装の妥当性は外部参照（HF）とのトークン列比較で確認する（`parity-policy.md` に追記）
+  実装の妥当性は外部参照（HF）とのトークン列比較で確認する（`parity_policy.md` に追記）
 
 ### V1 の前提となる実装（別作業）— **EXL3 に変更（2026-10-28）**
 
@@ -277,34 +277,46 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
   非量子化テンソル（`embed_tokens` / `lm_head` / 各 layernorm / `norm` 等）は F16・BF16 のまま格納
 * ファイルは単一 `model.safetensors`（1,363 テンソル、dtype は F16 / F32 / I32 / I16 / BF16）。
   読み込みは既存の artifact 層（safetensors reader）の上に **`tensor_storage` 表の解釈**を足す形
-* **未解決の前提（shelf 側・要判断）**: `.trellis` の dtype は `I16` だが、shelf の safetensors リーダは
-  `F64 / F32 / F16 / BF16 / I64 / I32 / U8` のみ対応（`src/artifact/safetensors/reader.cpp:20-29`）。
-  現状は **EXL3 checkpoint を開けない**（`unsupported dtype 'I16'` で `Reader::open` が失敗する）。
-  * (A) `DataType::i16` を追加 — 数値型としては自然な拡張（`u16`/`u32`/`i32`/`i64` は既にある）。
-    `suh`(F16) と `mcg`(I32) は既に読めるため、対象は `.trellis` だけ
-  * (B) raw 経路 — リーダが dtype 判定なしでバイト範囲を返し、意味論は `quant/` の QuantSpec に委ねる
-    （「量子化ペイロードは DataType ではない」という契約に素直だが変更が大きい）
-  * **推奨は (A) ＋ 責務の明記**: DataType は「バイト長・符号性のメタ」、
-    意味論（codebook・trellis 読出）は QuantSpec の役目、と割り切る。**要承認**
+* **未解決の前提 → 解消（2026-10-28、(A) を採用して実装済み）**: `.trellis` の dtype は `I16` で、
+  当初の shelf リーダは `F64 / F32 / F16 / BF16 / I64 / I32 / U8` のみ対応で EXL3 checkpoint を開けなかった
+  （`src/artifact/safetensors/reader.cpp`）。
+  * **(A) `DataType::i16` を追加した**（`u16`/`u32`/`i32`/`i64` との一貫した数値型拡張）。
+    責務の切り分けも明記: **DataType は「バイト長・符号性のメタ」、意味論（codebook・trellis 読出）は
+    `src/quant` の QuantSpec の役目**（`src/quant` は model / backend / runtime / hip を include しない）
+  * 実装範囲: enum + `element_size` + `map_dtype("I16")`、テストは `unit.foundation`（i16 size /
+    非浮動小数点）と `unit.artifact_safetensors`（I16 テンソルの読出・バイト一致）
+  * 当初の (B) raw 経路は採用しない（変更が大きく、意味論の委ね先が未定義になるため）
 
 **（2）EXL3 GEMM（ホットパス dequant）** — shelf には現状 4bit の経路も FP8 も無い
-（bf16 のみ、fp8 は KV 側にのみ存在）。契約（`parity-policy` / 量子化契約）どおり **dequant はカーネル内**。
+（bf16 のみ、fp8 は KV 側にのみ存在）。契約（`parity_policy` / 量子化契約）どおり **dequant はカーネル内**。
 
-* **移植の一次候補: Strata `src/dsv41/vendor/exl3.cu`（1,745 行）と `exl3_cpu.cpp`（1,281 行）**
+* **採用方針（2026-10-28 決定）: 4 段構成の INT8 W8A8 経路**（`exl3_hip_int8_prefill_mcg` を移植元にする。
+  gfx1201 実機で INT8 GEMM 照合 0/256・mcg 65,536 状態の網羅検証を完了済み）。段構成と要点は次のとおり:
+  1. **入力**: `X × suh` → **Hadamard128（K 方向）** → FP32 → 行単位の動的スケールで INT8 量子化
+     → `A8[M,K]` + `A_scale[M]`（スケールは Hadamard **後**の値から計算）
+  2. **重み**: `mcg` から **W8 を直接復元**（スケール固定 `1/32`）。**W8 に Hadamard は行わない**
+     （W_inner の直接復元という前提のため）
+  3. **GEMM**: `A8 × W8 → C32`（INT8 WMMA → INT32 累積）
+  4. **出力**: `C32` を **FP32 に変換してから Hadamard128（N 方向）** → `× (A_scale / 32)` → `× svh` → 出力型
+  * **順序の要点**: `svh` は列ごとに異なるので **必ず出力 Hadamard の後**（前へ移さない）。
+    per-token の `A_scale` と固定 weight scale は行内で一定なので Hadamard と**可換**（どこに掛けても同じ）。
+    4 種の Hadamard には正規化 `1/sqrt(128)`。INT32 のまま蝶形を繰り返さない（オーバーフロー回避のため
+    FP32 変換後に行う）
+  * **不採用（当初）**: `reconstruct_hgemm` 系 — 両側 Hadamard を重み復元時に折り込む経路で、
+    大きい Prefill では原 ExLlamaV3 も使うが、**固定 weight scale `1/32` の利点を失う**ため見送り
+  * **最適化候補（後回し）**: 出力 Hadamard を GEMM の epilogue に融合。最初は 4 カーネル分離で十分
+* **移植の一次候補（参照）: Strata `src/dsv41/vendor/exl3.cu`（1,745 行）と `exl3_cpu.cpp`（1,281 行）**
   — Project Maya (MIT) 経由で exllamav3 (MIT) の codebook / trellis 算術に準拠。
   ヘッダに **HIP 向けの道筋が明記**されている（sm_80 以降は tile を tensor core フラグメントへ
   直デコード、**HIP と旧 GPU は F32 FMAs**）。移植時は `third_party/project-maya/NOTICE.md` の追従
 * **答え合わせ**: `references/exllamav3`（公式）の
   `modules/quant/exl3_lib/`、`tests/kernels/gemm/test_exl3_{gemv,gemm_shapes,mgemm_sliced,gemv_tail}.py`、
   `tests/testlib/exl3.py`。Python/CUDA 中心なので **移植せず参照と突合に使う**
-* **設計論点（V1 で決める）**:
-  * (a) **検証経路**: カーネル内でデコードし bf16 WMMA のオペランドにする（実装容易、契約適合）
-  * (b) **本番経路**: Strata HIP 準拠の F32 FMAs、または exllamav3 の tensor core 直デコード
-  * V1 は (a) で開始し、(b) は性能フェーズへ回す
 
 **（3）注意（従来どおり）**: 「ロード時に bf16 へ展開してから既存の bf16 GEMM で計算する」のは
-**契約違反**（有損 dequant をロード時に置かない）。**カーネル内で**デコードして bf16 オペランドに
-することは許される（(a) がこれに当たる）。暫定で外に出す場合は契約上の位置づけを明記する。
+**契約違反**（有損 dequant をロード時に置かない）。**カーネル内で**デコードして INT8 / bf16 の
+オペランドにすること（採用した 4 段経路はこれに当たる）は許される。
+暫定で外に出す場合は契約上の位置づけを明記する。
 
 **（4）V1 の着手順（可否の実測 → 仕様確定 → 本体）**
 
@@ -312,9 +324,9 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
    `.trellis` / `.suh` / `.svh` / `.mcg` + `mcg_multiplier`）を、Strata `exl3_cpu.cpp` か
    `exllamav3` を参照してデコードし、**exllamav3 の出力と一致する**ことを確認する
    （ここで「材料が読める／仕様が足りる」が確定する）— **→ (5) で完了（2026-10-28）**
-2. **GEMM 方針の決定**（(a)/(b)）。初期値は (a)
+2. **GEMM 方針の決定** — **決定済み（2026-10-28）: 4 段構成の INT8 W8A8 経路**（上記 (2)）
 3. **V1 本体**: リーダ → GEMM → T1/T2 → 終了コード 0/1/2
-4. **T2 の基準取り**: `parity-policy.md` §3 の手順で EXL3 4bit の誤差規模を測る（§8 参照）
+4. **T2 の基準取り**: `parity_policy.md` §3 の手順で EXL3 4bit の誤差規模を測る（§8 参照）
 
 **（5）スモーク実績（2026-10-28、着手順 1 完了）**
 
@@ -362,6 +374,6 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
   片方だけ打ち切った場合をどう数えるか（推奨: 不一致として T2 に回さず `budget_exhausted` 単独で報告）
 * **PP の分割方法**: `--pipeline-parallel=K` は **stage 数（phaseshift bench の均等分割を既定）**にするか、
   **Strata 形で開始レイヤ番号を明示**するか。`auto`（境界探索）はコストモデルが Strata 固有のため後回しでよいか
-* **CPU 経路の扱い**: `--device=cpu` は T0 の補助としてどこまで使うか（CPU f32 は parity-policy の基準
+* **CPU 経路の扱い**: `--device=cpu` は T0 の補助としてどこまで使うか（CPU f32 は parity_policy の基準
   だが、9B / Release で prefill 4.90・decode 3.68 s/token（旧 4B の Debug 実測は 16 s/token）。
   → CPU 経路は T0 と小規模モデルの検証に限定する、という運用でよいか）

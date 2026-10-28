@@ -2,7 +2,7 @@
 
 対応実装: `apps/bench/`（ターゲット `shelf-bench`。共有ヘルパは `apps/common/`）。
 運用手順は `docs/guide/bench.md`。計画上の位置づけ（フェーズ 0 の計測手段）は
-`draft-docs/directory_design.md` §5。
+`draft_docs/directory_design.md` §5。
 
 ---
 
@@ -27,7 +27,7 @@
 ## 2. ビルドと実行形態
 
 ```bash
-cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench（**計測はこれ**）
+cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-bench（**計測はこれ**）
 cmake --build --preset hip      # → build/hip/apps/shelf-bench（Debug・動作確認用）
 cmake --build --preset cpu      # → build/cpu/apps/shelf-bench（--help のみ）
 ```
@@ -277,7 +277,7 @@ common options:
 | 64 | **777〜784 MiB** | **2,298 MiB** | × |
 
 * 自動算出は最小必要に対して、行数とともに **約 1.5 → 2.4 → 2.6 → 2.9 倍**と膨らむ（過大確保）。
-  予算計画（`draft-docs/memory-budget.md` / `directory_design.md` D2）と整合させることが残課題。
+  予算計画（`draft_docs/memory_budget.md` / `directory_design.md` D2）と整合させることが残課題。
   根本の削減は D4（declare/run 二相でバッファ寿命の共有）
 * 従来の既定 64 MiB では **`shelf-run --device hip` の 16 トークン prefill が枯渇した**
   （自動算出と `--arena-mib` 追加で解消）
@@ -299,7 +299,7 @@ common options:
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため
   `--gpu` で空きを選ぶ（`rocm-smi`）
-* 実走の実測（prefill / decode / stop）は `draft-docs/shelf-validate.md` §7「V0 実績（9B）」
+* 実走の実測（prefill / decode / stop）は `draft_docs/shelf_validate.md` §7「V0 実績（9B）」
 
 ---
 
