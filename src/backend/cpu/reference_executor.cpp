@@ -38,6 +38,12 @@ Status HostStorage::set_float(std::map<std::uint32_t, Slot>& m, std::uint32_t ke
     return Status::make_ok();
 }
 
+void HostStorage::reset_states() {
+    for (auto& entry : states_)
+        std::fill(entry.second.floats.begin(), entry.second.floats.end(), 0.0f);
+    rows_.clear();
+}
+
 Status ReferenceExecutor::run(const Graph& graph, HostStorage& storage) {
     SHELF_RETURN_IF_ERROR(graph.validate());
     for (const auto& p : graph.primitives()) {

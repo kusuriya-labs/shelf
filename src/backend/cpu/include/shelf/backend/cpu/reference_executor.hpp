@@ -50,6 +50,9 @@ public:
 
     // Step loop support: activations are per-step, weights and state are not.
     void reset_values() { values_.clear(); }
+    // New sequence: zero every state buffer and drop tracked usage rows.
+    // (HipStepExecutor::reset_states() と対になる CPU 側の入口)
+    void reset_states();
     // Usage rows tracked by the executor for stateful primitives (KV/GDN).
     std::size_t state_rows(ir::StateId id) const {
         auto it = rows_.find(id.value());

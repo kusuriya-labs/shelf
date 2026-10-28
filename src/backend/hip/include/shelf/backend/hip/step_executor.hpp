@@ -34,7 +34,12 @@ namespace shelf::backend::hip {
 
 struct HipStepExecutorOptions {
     int device = 0;
-    std::size_t arena_bytes = 64u << 20;   // activations per step
+    // 1 ステップ分の活性化アリーナ。0 = declare_states のグラフから自動算出
+    // （64 MiB + 2×Σ 出力(f32)。バンプ割当でステップ内の再利用が無いため
+    //   必要量は行数に比例する: 4B 級モデルの実測で rows=16/32/64 が
+    //   192/384/768 MiB 未満、既定だった 64 MiB は prefill 16 行で枯渇する）。
+    // 明示指定するとそれを上限にする（枯渇時は insufficient_memory）。
+    std::size_t arena_bytes = 0;           // activations per step (0 = auto)
     double rope_theta = 1.0e7;             // from model config (composition root)
     std::size_t rope_rotary_dim = 64;      // pair-kernel constraint (model config)
     std::size_t kv_block_size = 16;        // from the resolved kernel
@@ -73,6 +78,10 @@ public:
 
     struct Stats { double last_step_ms = 0.0; };
     const Stats& stats() const { return stats_; }
+
+    // 実際に確保しているアリーナのバイト数。
+    // auto（arena_bytes == 0）では declare_states のグラフから決まる値を返す。
+    std::size_t arena_bytes() const noexcept { return arena_cap_; }
 
 private:
     struct ValueLoc { void* dev = nullptr; bool f32 = false; std::size_t elems = 0; };
