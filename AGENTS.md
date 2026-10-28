@@ -20,12 +20,12 @@
 
 # Document
 
-* 計画・契約・設計などの文書は `draft-docs/` に置く。`docs/` に正式な文書を書いてよいのは**実装完了後**のみ。
+* 計画・契約・設計などの文書は `draft_docs/` に置く。`docs/` に正式な文書を書いてよいのは**実装完了後**のみ。
 * 実装していない内容を `docs/` に書かない（実装と文書の乖離を避けるため）。
-* `draft-docs/` から `docs/` への移行は、該当する実装がマージされた時点で行う。
+* `draft_docs/` から `docs/` への移行は、該当する実装がマージされた時点で行う。
 * 例外として、既存コードのコメントが指す `docs/` のパス（例: 境界ルールの正本
-  `docs/architecture/dependency-rules.md`）は移行先を指したままにしてよい。
-  作業中の正本は `draft-docs/` に置く。
+  `docs/architecture/dependency_rules.md`）は移行先を指したままにしてよい。
+  作業中の正本は `draft_docs/` に置く。
 
 ---
 

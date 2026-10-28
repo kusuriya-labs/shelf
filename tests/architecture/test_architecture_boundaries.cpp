@@ -137,7 +137,7 @@ int main() {
     const fs::path src = root / "src";
 
     // Module include rules (lowercase substrings of include paths).
-    // Keep in sync with docs/architecture/dependency-rules.md.
+    // Keep in sync with docs/architecture/dependency_rules.md.
     // HIP types confined to src/backend/hip/.
     const std::vector<Rule> rules = {
         {src / "foundation",

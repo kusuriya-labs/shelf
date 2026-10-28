@@ -105,7 +105,7 @@ Strata は本質的に、**MoE エキスパートを VRAM に適応的にキャ�
 * CUDA 固有の仮想メモリ管理（`--vram-elastic` は HIP では無効化されている: `expert_cache.cpp:6-8`）
 * helper GPU / peer tier（CUDA P2P 前提。shelf は対象外）
 * layer split — 従来は「shelf は単一 GPU」を理由に対象外としていたが、**PP として必要になった**。
-  設計は `draft-docs/shelf-validate.md` §6.1 に記載（Strata `docs/MULTI_GPU.md` が本命、
+  設計は `draft_docs/shelf_validate.md` §6.1 に記載（Strata `docs/MULTI_GPU.md` が本命、
   `phaseshift-fp8` の bench `--pp 1|4` が第 2 参照）
 * `STRATA_*` 環境変数 757 種と per-arch 既定値テーブル
 * KV ストリーミング（`docs/kv-streaming-design.md` はリポジトリに存在せず、コード注記から復元するしかない）
@@ -202,7 +202,7 @@ Strata は責務分離ができていない箇所を含み、そのまま写す�
 6. **数値の境界** — CPU 参照は f32 専用、GPU は bf16 活性化 + f32 累積。合流点でどの型を受け渡すか
    を決める（ここが曖昧だと parity が取れない）
 7. **数値の等価性** — 主目標は**出力トークン列の完全一致**。WMMA の FMA・累積順序の差は前提に置き、
-   許容するか否かは **dtype 誤差の実測（`draft-docs/parity-policy.md` §3）**から決める
+   許容するか否かは **dtype 誤差の実測（`draft_docs/parity_policy.md` §3）**から決める
 8. **縮退** — 転送失敗・VRAM 不足時に CPU 全件へ落として継続する（止まらないこと）
 9. **量子化** — 現状 shelf は bf16 中心。低 VRAM の主目的に対して容量効率が弱い。
    `src/quant`（空）を本機能と同時に作るかどうかは、フェーズ 4 の後に判断する分岐
@@ -222,17 +222,17 @@ Strata は責務分離ができていない箇所を含み、そのまま写す�
 | 4 | 並行実行（協調そのもの） | GPU と CPU を重ねる | 1 ステップ内で両経路が重なり、合流点で正確に待つ。イベント時刻から重なりが計測できる（ステップ時間の内訳） |
 | 5 | 適応的な配置 | VRAM に合わせて在庫を選ぶ | 実績から常駐対象を選び直す policy が入り、予算変更に追従する（縮伸できる） |
 | 6 | 縮退と障害 | 止まらない | 転送失敗・VRAM 不足で CPU 全件に落ち、推論が継続するテストがある |
-| 7 | 検証と性能の固定化 | 回帰を防ぐ | parity・境界・性能の測定を CI 相当の流れに載せ、低 VRAM 構成での目標値を文書化。依存ルールの説明文書（`draft-docs/dependency-rules.md`、境界テストのコメントが参照）も整備 |
+| 7 | 検証と性能の固定化 | 回帰を防ぐ | parity・境界・性能の測定を CI 相当の流れに載せ、低 VRAM 構成での目標値を文書化。依存ルールの説明文書（`draft_docs/dependency_rules.md`、境界テストのコメントが参照）も整備 |
 
 補足:
 
 * **フェーズ 1 は挙動を変えずに型だけ足す**ことで、後段の差分を小さくする
 * **フェーズ 2 がクリティカルパス**。shelf は現状 dense/GDN のモデルグラフで MoE を組んでいない
   （`src/model/qwen35/step_graph.cpp` に該当なし）ため、協調推論の前提になる
-* **KV の低 VRAM 化 — 方針は `draft-docs/engine-contract.md` §8.1 / §8.3 で確定済み**
+* **KV の低 VRAM 化 — 方針は `draft_docs/engine_contract.md` §8.1 / §8.3 で確定済み**
   （KV 正本 = PinnedHostRAM、VRAM は online 分のみ。正本 4.00 GiB / online 2.50 GiB、
   admission は pinned 容量に対して 2 段で行う）。本計画が担うのは**実装の接続**
-  （tier 移動・pinned 正本・載せ替え）で、運用の詳細は `draft-docs/memory-budget.md` へ委ねる。
+  （tier 移動・pinned 正本・載せ替え）で、運用の詳細は `draft_docs/memory_budget.md` へ委ねる。
   Strata でもエキスパートと KV は別の問題として扱われている
   （Strata `docs/VRAM_ELASTIC.md` は「動くのは expert cache のみ」と明記）
 
@@ -244,7 +244,7 @@ Strata は責務分離ができていない箇所を含み、そのまま写す�
   ただし WMMA の FMA や累積の順序差による丸めで完全一致しない可能性を前提に置き、
   **不一致時は不一致位置の margin と dtype 誤差の実測値で「丸め由来かバグか」を判定する**。
   判定フロー（T0 決定性 → T1 完全一致 → T2 誤差判定 → T3 条件改訂）・測定手順・改訂手続きの
-  **正本は `draft-docs/parity-policy.md`**。既存 parity
+  **正本は `draft_docs/parity_policy.md`**。既存 parity
   （`tests/unit/test_reference_executor.cpp`, `tests/unit/test_hip_step_executor.cpp`,
   `tests/unit/test_hip_attention.cpp`）の作り方を踏襲する
 * **境界**: `tests/architecture/test_architecture_boundaries.cpp` が通ること。
@@ -263,12 +263,12 @@ Strata は責務分離ができていない箇所を含み、そのまま写す�
 | MoE 未導入 | shelf は dense/GDN 前提。協調対象（エキスパート）が現状グラフに存在しない。`top_k` は宣言のみ未接線 | フェーズ 2 を独立させ、先に MoE 単体の正しさを固める |
 | 量子化の空白 | 低 VRAM の主目的に対して bf16 の容量効率が弱い（`src/quant` は空） | フェーズ 4 後に判断。先行させると範囲が膨らむ |
 | CPU 性能 | Strata は AVX-512/AVX2 + ggml の実装を持つが、shelf に CPU 性能経路は存在しない | フェーズ 3 は「正しい経路」、高速化は後続 |
-| 数値の非対称 | CPU 参照は f32 専用、GPU は bf16 活性化。合流点の型が未定だと parity が取れない | フェーズ 3 で境界の方針を先に確定させる。判定自体は `draft-docs/parity-policy.md`（不一致位置の margin と dtype 誤差の比較）に従う |
+| 数値の非対称 | CPU 参照は f32 専用、GPU は bf16 活性化。合流点の型が未定だと parity が取れない | フェーズ 3 で境界の方針を先に確定させる。判定自体は `draft_docs/parity_policy.md`（不一致位置の margin と dtype 誤差の比較）に従う |
 | pinned 不在 | `hipHostMalloc` 未使用のため、転送が CPU をブロックし重なりが出ない可能性 | フェーズ 3 で要否を決め、フェーズ 4 の計測で判定する |
 | 同期の設計ミス | 合流点の待ちが甘いと結果が壊れる（racy）。判定時点を後ろ倒しにすると前のレイヤーの分担で計算する（§3.1） | 合流点を 1 箇所に集約し、判定は enqueue と同時刻に。境界テストと stress で担保 |
 | 参照の数値を持ち込む | Strata の tok/s は Strata のモデル・量子化・機械前提で、そのまま目標値にならない | 目標は自前のフェーズ 0 計測から決める |
 | 蜜結合の移植 | 参照実装の制御・統計・ログ一体構造を写し込むと依存方向が壊れる | §2.3 の方針（再実装）を守り、境界テストで検知する |
-| 依存ルールの文書不足 | 境界テストのコメントが `docs/architecture/dependency-rules.md` を参照しているが未作成。正本は `draft-docs/dependency-rules.md` に置き、実装完了時に移す（AGENTS.md 規則） | フェーズ 7 で整備（設計判断の根拠を残す） |
+| 依存ルールの文書不足 | 境界テストのコメントが `docs/architecture/dependency_rules.md` を参照しているが未作成。正本は `draft_docs/dependency_rules.md` に置き、実装完了時に移す（AGENTS.md 規則） | フェーズ 7 で整備（設計判断の根拠を残す） |
 | ドアベルのホスト可視化 | gfx1201 では mapped pinned への plain store が L2 に留まり、sync までホストに届かない（Strata の実測: sync なし 0/100 → fence 後 100/100） | host-visible な flag → system fence → volatile 読みを明示的な手順として実装し、単体テストで検証する |
 | HIP のストリーム間依存 | 共有エキスパートの fork/join は CUDA では既定オン、**HIP では既定オフ**（gfx1201 で 62.9 vs 43.4 tok/s） | 1 ストリームで順に並べるのを既定にし、event は合流点だけに張る |
 | VRAM の伸縮（VMM） | Strata の `--vram-elastic` は HIP では無効化されており（CUDA driver API 依存）、HIP の VMM API の可用性も未確認 | 本計画では必須としない。必要が出た時点で別課題として検証する |
@@ -277,15 +277,15 @@ Strata は責務分離ができていない箇所を含み、そのまま写す�
 決定済み（旧未決から解消）:
 
 * 計画（residency plan）の型の置き場 — **`backend/common`**（本計画 §3 の `placement` 行と
-  `draft-docs/directory_design.md` D2 / 目標ツリーと統一。`MemoryKind` / `BufferView` が
+  `draft_docs/directory_design.md` D2 / 目標ツリーと統一。`MemoryKind` / `BufferView` が
   既にそこに在ること、placement が include 可能であることが根拠）
 
 未決:
 
 * CPU ワーカーの所有者（runtime / backend/cpu のどちらがスレッドを握るか）
-* KV の低 VRAM 化の**実装時期** — 方針は `draft-docs/engine-contract.md` §8.1 / §8.3 で
+* KV の低 VRAM 化の**実装時期** — 方針は `draft_docs/engine_contract.md` §8.1 / §8.3 で
   確定済み（正本 = pinned）。pinned 正本・tier 移動の実装は本計画の後続フェーズ
-  （§5 補足）と `draft-docs/memory-budget.md` に委ねる
+  （§5 補足）と `draft_docs/memory_budget.md` に委ねる
 
 ---
 

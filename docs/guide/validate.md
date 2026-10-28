@@ -6,7 +6,7 @@
   一致するか（**T0 決定性**）を検証し、結果を JSON に残す道具。
 * `--exact-model` 単独で動作する。`--approx-model`（T1/T2 比較）と
   `--pipeline-parallel`（K>1）は**現状未実装**（起動前に exit 2 で拒否）。
-  それらの計画は `draft-docs/shelf-validate.md` §7 を参照。
+  それらの計画は `draft_docs/shelf_validate.md` §7 を参照。
 
 ---
 
@@ -25,7 +25,7 @@
 ```bash
 # 計測用 = Release（prefill / decode の時間は必ずこれで取る）
 cmake --preset hip-rel          # 初回のみ（設定）
-cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-validate
+cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-validate
 
 # 動作確認・決定性確認用 = Debug
 cmake --preset hip
@@ -76,7 +76,7 @@ T0 (run0 vs run1): identical
 16 s/token は履歴）。既定の入力（prefill 256 + decode 230）なら 1 run は**約 35 分**。
 
 * CPU 経路は **小規模な経路確認にのみ使う**（27B 級は対象外。
-  `draft-docs/shelf-validate.md` §8 の未決事項に同じ）。
+  `draft_docs/shelf_validate.md` §8 の未決事項に同じ）。
 * 全トークンでの実走が要る場合は `--runs=1` とし、放置可能な時間帯に
   バックグラウンドで回す。
 
@@ -187,12 +187,12 @@ python3 apps/fixtures/make_fixture.py   # 長さ 256 の厳密一致を検査し
 | `budget_exhausted` だけで StopToken に達しない | fixture の思考モードが ON になっていないか `make_fixture.py` で再生成する |
 | `入力長が --prefill-tokens より短い` | `--prefill-tokens` を fixture 長（256）以下にするか、`--ids-file` / fixture 再生成で補う |
 | `このビルドは HIP 非対応です` | `cpu` プリセットのビルドで `--device=cpu` を使う |
-| `approx 経路は未実装です` / `pipeline-parallel > 1 は未実装です` | 未実装フェーズの実装を待つ（`draft-docs/shelf-validate.md` §7） |
+| `approx 経路は未実装です` / `pipeline-parallel > 1 は未実装です` | 未実装フェーズの実装を待つ（`draft_docs/shelf_validate.md` §7） |
 | `prefill: ... arena exhausted` | arena は executor の自動算出（`declare_states` に渡した rows=64 グラフから）で確保される。§3 出力の `arena:` 行が実際の確保量。継続する場合は issue 化 |
 
 ---
 
 ## 10. 未実装（計画のみ）
 
-未実装フェーズ（V1〜V3）の内容・設計・未決事項は `draft-docs/shelf-validate.md` §7 / §8 に記す
+未実装フェーズ（V1〜V3）の内容・設計・未決事項は `draft_docs/shelf_validate.md` §7 / §8 に記す
 （本書は実装済みの扱いのみを書く）。

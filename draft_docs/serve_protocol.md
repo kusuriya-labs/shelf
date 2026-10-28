@@ -1,8 +1,8 @@
-# serve-protocol — OpenAI API 互換 Server のプロトコル仕様（骨）
+# serve_protocol — OpenAI API 互換 Server のプロトコル仕様（骨）
 
 状態: 骨（**Status → HTTP の写像を本文とした**。エンジン抽象と JSONL の詳細は §7 の未決参照）
-対象: `draft-docs/directory_design.md` §3.5（パス A / パス B、`src/api/` の Server 層）
-関連: `draft-docs/dependency-rules.md`（依存方向）、`draft-docs/parity-policy.md`（検証の基準）
+対象: `draft_docs/directory_design.md` §3.5（パス A / パス B、`src/api/` の Server 層）
+関連: `draft_docs/dependency_rules.md`（依存方向）、`draft_docs/parity_policy.md`（検証の基準）
 
 本書は Server 層（`src/api/`）と外部クライアントの契約を定める。目的はただ一つ、
 **エンジン内部の `shelf::Status` を Server にも、クライアントにも漏らさないこと**。
@@ -102,8 +102,8 @@ envelope に足してよいのは次の 2 つだけ。追加はここに書き�
 ## 7. 未決
 
 **解消済み（記録）**: エンジン抽象と JSONL の詳細（メッセージ集合・`capabilities` 握手・
-背圧・切断時挙動）は `engine-contract.md` に書いた。本書と 1 対 1（位置づけは
-`draft-docs/directory_design.md` §3.5 / §6）。
+背圧・切断時挙動）は `engine_contract.md` に書いた。本書と 1 対 1（位置づけは
+`draft_docs/directory_design.md` §3.5 / §6）。
 
 * 専用 `type` を採るか（`not_found_error` / `rate_limit_error` / `authentication_error`）—
   互換クライアントが読むことを確認してから

@@ -2,7 +2,7 @@
 
 状態: 契約（決定済みの方針と、決定に必要な実測手順）
 適用先: 協調推論計画のフェーズ 2〜4・量子化（D5）・カーネル変更の回帰・Server のテスト
-関連: `draft-docs/directory_design.md` §5、`draft-docs/port_strata_cpu_gpu_coop.md` §4/§6
+関連: `draft_docs/directory_design.md` §5、`draft_docs/port_strata_cpu_gpu_coop.md` §4/§6
 
 ---
 
@@ -31,7 +31,7 @@
   **これ自体を合格条件にはしない**（主目標はトークン一致のまま保つ）。
 * **T0 だけでは足りない（2026-10-28 の実例）**: untied モデルで `lm_head` を埋め込みと取り違える
   バグがあったが、**T0（決定性）は通っていた**（出力だけが劣化）。
-  出所と経緯は `draft-docs/shelf-validate.md`「発見したバグと修正」。
+  出所と経緯は `draft_docs/shelf_validate.md`「発見したバグと修正」。
   → **初期導入の手順に「外部参照（HF / `transformers`）との同一入力でのトークン列比較」を含める**。
   T0 は「同じ入力を繰り返せば同じ出力」の保証であって、**正しい出力の保証ではない**
 

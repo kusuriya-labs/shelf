@@ -28,7 +28,7 @@
       "name": "hip-rel",
       "displayName": "HIP backend release (perf measurement)",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/hip-rel",
+      "binaryDir": "${sourceDir}/build/hip_rel",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "SHELF_ENABLE_HIP": "ON",

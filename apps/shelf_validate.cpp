@@ -1,7 +1,7 @@
 // shelf-validate — 実モデルで無損失経路 (exact) と量子化経路 (approx) を
 // 同じ入力で走らせ、生成トークン列を比較する検証ドライバ。
 //
-// 仕様: docs/spec/validate.md（計画・未実装は draft-docs/shelf-validate.md）
+// 仕様: docs/spec/validate.md（計画・未実装は draft_docs/shelf_validate.md）
 //   本実装は V0（アプリ骨格）: CLI・予算検査・fixture 入力・64 行チャンク
 //   prefill・greedy decode・StopToken 解決・T0 決定性比較と JSON 出力。
 //   approx 経路（T1/T2 比較）は V1、pipeline-parallel は V2 で追加する。

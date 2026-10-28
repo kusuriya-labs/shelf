@@ -1,9 +1,9 @@
-# 生成エンジン抽象契約（engine-contract）
+# 生成エンジン抽象契約（engine_contract）
 
 状態: 草案 v0（D1 / D8 の入口。決定済み: **sampling はエンジン側**、パラメータは
 `temperature` / `top_k` / `top_p` / `min_p` / `seed` の 5 つ）
-関連: `draft-docs/directory_design.md` §3.5（Server の置き場）、
-`draft-docs/port_strata_cpu_gpu_coop.md`（KV 世代と協調推論）
+関連: `draft_docs/directory_design.md` §3.5（Server の置き場）、
+`draft_docs/port_strata_cpu_gpu_coop.md`（KV 世代と協調推論）
 
 ---
 
@@ -13,11 +13,11 @@
 
 本書が決めないもの（別紙）:
 
-* HTTP / OpenAI の応答形と未知フィールド方針 → `serve-protocol.md`
+* HTTP / OpenAI の応答形と未知フィールド方針 → `serve_protocol.md`
 * KV の予算と世代 → **本書 §8（追補）**。予算（§8.1）・世代と寿命（§8.5）・超過時の挙動
   （§8.6）は確定。残る未決は tier 移動の発動体と §8.4 の思考打ち切り方
-* 数値の等価性 → `parity-policy.md`
-* 予算と所在 → `memory-budget.md`
+* 数値の等価性 → `parity_policy.md`
+* 予算と所在 → `memory_budget.md`
 
 ---
 
@@ -65,7 +65,7 @@
 
 **`min_p` は OpenAI 公式には無い拡張**（vLLM / llama.cpp 系の方言）。採用する以上、
 HTTP 側も `min_p` を明示的に許可フィールドとして扱う（未知フィールドの一般方針は
-`serve-protocol.md`）。出所は radiance の chain 仕様。
+`serve_protocol.md`）。出所は radiance の chain 仕様。
 
 ### 3.1 実行順序（列挙順ではない — 契約）
 
@@ -125,7 +125,7 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 * エンジンの `shelf::Status::Code` → `error{code, message}` の対応表を本書で持つ
   （`invalid_argument` / `out_of_range` / `insufficient_memory` / `invalid_state` /
   `not_found` / `unsupported` / `device_error`）
-* HTTP への写像（400 / 404 / 409 / 500）は `serve-protocol.md` の担当
+* HTTP への写像（400 / 404 / 409 / 500）は `serve_protocol.md` の担当
 
 ---
 
@@ -136,7 +136,7 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 
 * プロトコルのバージョン表記（`ping` の `capabilities` に含めるか、行頭に持たせるか）
 * `logit_bias` / `logprobs` は受けない方針でよいか（現時点では**受けない**）
-* 未知フィールドの HTTP 側方針（`serve-protocol.md`）
+* 未知フィールドの HTTP 側方針（`serve_protocol.md`）
 
 ---
 
@@ -166,7 +166,7 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 | 項目 | 決定値 | §1 / §2 への接続 |
 | --- | --- | --- |
 | KV の使用方式 | **PagedKV で動的使用**（ブロック単位の割当と再利用） | §4「将来: キャンセルで KV を即時解放」の前提条件 |
-| **KV の正本（所在）** | **基本的に PinnedHostRAM**。VRAM は online 分だけを載せる | 予算と所在の数値は `memory-budget.md`（別紙）へ |
+| **KV の正本（所在）** | **基本的に PinnedHostRAM**。VRAM は online 分だけを載せる | 予算と所在の数値は `memory_budget.md`（別紙）へ |
 | 1 リクエストの decode 予算 | **32,768 tok** | `generate.max_new_tokens` ≤ 32,768。超過は `error{invalid_argument}`（§3.2 と同じ扱い） |
 | うち思考（reasoning）予算 | **24,576 tok まで** | 残り 8,192 tok は非思考として常に確保 |
 | ContinuousBatching | **最大 4 並列** | スロット = 4。1 decode step の出力は最大 4 tok（prefill は別） |
@@ -240,14 +240,14 @@ decode は**毎トークン、active な文脈の全 block を読む**。VRAM �
   （誤りは保存側と実行側の取り違えであって、数字そのものではない）
 * (a) を採ると実効並列が絞られる（満額 32,768 の同時 2 件相当）。これを避けたい場合の代償が
   (b)(c) で、どちらも上記の転送量（約 2.5 GiB / トークン）になる
-* 段 2 の扱いは **§8.6 で (a) に確定**した。運用の詳細は `memory-budget.md` に書く
+* 段 2 の扱いは **§8.6 で (a) に確定**した。運用の詳細は `memory_budget.md` に書く
   （§8.5 で選んだ素材を使う）
 
 ### 8.4 思考予算（reasoning cap）の扱い — 判定主体は未決
 
 * 構造: 総 32,768 の**内部枠** 24,576。思考が使い切っても非思考 8,192 は書ける
 * 計上: 思考トークンは `done.generated_tokens` に**含める**（OpenAI の `max_tokens` の
-  解釈と一致させる）。`reasoning_content` と本文の分離は `serve-protocol.md` の担当
+  解釈と一致させる）。`reasoning_content` と本文の分離は `serve_protocol.md` の担当
 * **未決: 打ち切り方**（2 案、推奨は B）
   * 案 A — Server が思考トークンを計上し、24,576 到達で `cancel` → 思考を閉じて再開
     （round-trip が 1 回増える）
@@ -345,13 +345,13 @@ PhaseShift 型（ターン毎全解放 + prefix cache 再構築）は **VRAM 正
 ### 8.6 予算超過・枯渇時の挙動 — 確定（末尾の 1 点だけ未決）
 
 根拠は 3 系統（Strata / radiance / PhaseShift）の共通点。**HTTP の番号は
-`serve-protocol.md` §3 の表に従う**（本節は `shelf::Status::Code` とエンジンの挙動を決める）。
+`serve_protocol.md` §3 の表に従う**（本節は `shelf::Status::Code` とエンジンの挙動を決める）。
 
 **方針**
 
 1. **プロンプトは切り詰めない**（3/3）。切るのは出力予算だけ — `max_tokens` を残りへ短縮し、
    それでも入らないときのみ受付拒否（`out_of_range` → 400 `context_length_exceeded`。
-   `serve-protocol.md` §5-② で `n_prompt_tokens` / `n_ctx` を添えてクライアントが履歴を詰められるようにする）
+   `serve_protocol.md` §5-② で `n_prompt_tokens` / `n_ctx` を添えてクライアントが履歴を詰められるようにする）
 2. **外部 HTTP の生成上限は OpenAI 由来の `max_tokens` のみ**（デファクト）。
    内部 JSONL の `max_new_tokens` はエンジンの語法として維持し（§1）、写像は Server 側
 3. **キュー頭で永久待機しない**（radiance `can_ever_fit`）— 最悪ケースが見込めないものは入口で拒否
@@ -360,7 +360,7 @@ PhaseShift 型（ターン毎全解放 + prefix cache 再構築）は **VRAM 正
    **pinned 側に対して行い、VRAM online 上限（81,920 tok）は予約対象にしない**
 6. **枯渇の順序は evict → preempt → fail**（§8.5 採用 6）。**予算超過でリクエストを殺さない**
 
-| 状況 | 決定した挙動 | `Status::Code`（→ HTTP は serve-protocol §3） |
+| 状況 | 決定した挙動 | `Status::Code`（→ HTTP は serve_protocol §3） |
 | --- | --- | --- |
 | prompt > context（受付時） | 拒否（**プロンプトは切り詰めない**） | `out_of_range` → 400 |
 | prompt は入るが prompt + max_tokens が入らない | `max_tokens` を残りへ短縮して続行（既定） | エラーなし（200） |
@@ -378,17 +378,17 @@ Strata 型の miss キャッシュ（CLOCK）が成立しない（§8.5 caveat�
 
 **残る未決 1 点 — 待機キュー満杯と 429**
 
-* 受付拒否（上表 3 行目）を 409 `busy` で吸収する現行方針（`serve-protocol.md` §3 の例示）と、
+* 受付拒否（上表 3 行目）を 409 `busy` で吸収する現行方針（`serve_protocol.md` §3 の例示）と、
   **参照 3 系統が queue 満杯に使う 429 + Retry-After**（Strata `serve/server.py:4006-4032,
   6855-6862`、radiance `core/server/server.cpp:338-355`。PhaseShift は拒否せず待機）を
-  どちらにするか。429 は `serve-protocol.md` §7（レート制限の要否）と**セットで**決める。
+  どちらにするか。429 は `serve_protocol.md` §7（レート制限の要否）と**セットで**決める。
   決まったら本表に「待機キュー満杯」の 1 行を足す
 * 事実として押さえておく: Strata の 409 は**制御系専用**（`POST /v1/vram`・`/unload`）で
   **推論には使っておらず**、radiance / PhaseShift にも推論用の 409 は無い。
   推論の受付を 409 で表すのは shelf の新規判断
 
 **tier 移動（§8.3 段 2）の残未決**: 発動体（デバイス側 resolve カーネル方式か host 側の周期処理か）、
-TTL / LRU の要否、prefetch の要否 → `memory-budget.md` と協調推論計画のフェーズに委ねる。
+TTL / LRU の要否、prefetch の要否 → `memory_budget.md` と協調推論計画のフェーズに委ねる。
 
 ### 8.7 実装ギャップ（現状の shelf）
 
@@ -399,7 +399,7 @@ TTL / LRU の要否、prefetch の要否 → `memory-budget.md` と協調推論�
 | `max_sequences = 1` 固定 | `src/backend/hip/step_executor.cpp:677,704` | 4 並列化（slots の配列化 + step 内マージ） |
 | reset が世代を区別しない | 同 `:172` | §8.5 の決定後に実装 |
 | GDN 固定費が予算に未計上 | 本文 §8.2 | フェーズ 0 の計測 |
-| **KV の正本が device のみ**（pinned 正本・載せ替え経路が無い） | 現状 KV は upfront の device `hipMalloc`（`src/backend/hip/step_executor.cpp:132-142`）。`hipHostMalloc` はゼロ | §8.3 段 2 と `memory-budget.md`（参照調査の素材を使う） |
+| **KV の正本が device のみ**（pinned 正本・載せ替え経路が無い） | 現状 KV は upfront の device `hipMalloc`（`src/backend/hip/step_executor.cpp:132-142`）。`hipHostMalloc` はゼロ | §8.3 段 2 と `memory_budget.md`（参照調査の素材を使う） |
 
 ### 8.8 決済と接続
 
