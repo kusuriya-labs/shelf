@@ -355,7 +355,15 @@ private:
         if (!hn.valid()) return hn;
         if (!embed_id_.valid()) { last_ = bad("embedding weight missing"); return ValueId{}; }
         // tied embeddings: lm_head IS the embedding table (same logical weight id)
-        return prim(Kind::output_projection, {hn}, {embed_id_}, {rows_, cfg_.vocab_size});
+        TensorId out = embed_id_;
+        if (!cfg_.tie_word_embeddings) {
+            // untied (tie_word_embeddings = false): the checkpoint carries its own
+            // lm_head.weight. Reusing the embedding here computes logits against the
+            // wrong table (Qwen3.5-9B で観測: hidden は HF と一致するのに出力が劣化)。
+            out = wid("lm_head.weight", {cfg_.vocab_size, cfg_.hidden_size});
+            if (!out.valid()) return ValueId{};   // 失敗時 Status は wid が last_ に設定済み
+        }
+        return prim(Kind::output_projection, {hn}, {out}, {rows_, cfg_.vocab_size});
     }
 
     const TextConfig& cfg_;

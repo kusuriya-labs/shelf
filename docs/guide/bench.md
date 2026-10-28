@@ -23,14 +23,21 @@
 ## 2. ビルド
 
 ```bash
-# HIP（GPU）版
-cmake --preset hip          # 初回のみ
-cmake --build --preset hip  # → build/hip/apps/shelf-bench
+# 計測用 = Release（**数値は必ずこれで取る**）
+cmake --preset hip-rel          # 初回のみ（設定）
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench
+
+# 動作確認用 = Debug（計測には使わない）
+cmake --preset hip
+cmake --build --preset hip      # → build/hip/apps/shelf-bench
 
 # CPU 版（--help のみ有効。本体は exit 1）
 cmake --preset cpu
-cmake --build --preset cpu  # → build/cpu/apps/shelf-bench
+cmake --build --preset cpu      # → build/cpu/apps/shelf-bench
 ```
+
+> **性能値は `hip-rel`（Release）で測定する**（2026-10-28 決定）。
+> Debug は桁違いに遅く、そのままでは性能値にならない。Debug ビルドは動作確認にのみ使う。
 
 ---
 
@@ -40,32 +47,32 @@ cmake --build --preset cpu  # → build/cpu/apps/shelf-bench
 
 ```bash
 ./build/hip/apps/shelf-bench pp \
-    --model-dir /opt/zen/work/models/Qwen3.5-4B \
+    --model-dir /opt/zen/work/models/Qwen3.5-9B \
     --prompt-tokens 64 --runs 2 --warmup 1 --gpu 2
 ```
 
-出力例（実機: R9700 / gfx1201、Qwen3.5-4B）:
+出力例（開発モデル `Qwen3.5-9B`・2026-10-28 実測、R9700 / gfx1201・**Release ビルド（hip-rel）**）:
 
 ```text
 shelf-bench pp
 schema_version=1
 device=hip
 gpu=2
-model=/opt/zen/work/models/Qwen3.5-4B
+model=/opt/zen/work/models/Qwen3.5-9B
 prompt_tokens=64
 prefill_chunk=64
 runs=2
 warmup=1
-arena_mib=1961
-wall_ms_median=127.706
-wall_ms_min=124.697
-wall_ms_p10=124.697
-wall_ms_p90=127.706
-wall_ms_stddev=1.504
-wall_us_per_token=1995.405
-wall_tokens_per_sec=501.15
-run_wall_ms[0]=124.697
-run_wall_ms[1]=127.706
+arena_mib=2298
+wall_ms_median=198.746
+wall_ms_min=198.473
+wall_ms_p10=198.473
+wall_ms_p90=198.746
+wall_ms_stddev=0.137
+wall_us_per_token=3105.412
+wall_tokens_per_sec=322.02
+run_wall_ms[0]=198.746
+run_wall_ms[1]=198.473
 ```
 
 * 主指標は `wall_ms_median` と `wall_tokens_per_sec`。`run_wall_ms[i]` は個票
@@ -75,33 +82,33 @@ run_wall_ms[1]=127.706
 
 ```bash
 ./build/hip/apps/shelf-bench tg \
-    --model-dir /opt/zen/work/models/Qwen3.5-4B \
+    --model-dir /opt/zen/work/models/Qwen3.5-9B \
     --context 64 --tokens 8 --warmup 2 --gpu 2
 ```
 
-出力例:
+出力例（開発モデル `Qwen3.5-9B`・2026-10-28 実測・**Release ビルド（hip-rel）**）:
 
 ```text
 shelf-bench tg
 schema_version=2
 device=hip
 gpu=2
-model=/opt/zen/work/models/Qwen3.5-4B
+model=/opt/zen/work/models/Qwen3.5-9B
 context=64
 tokens=8
 prefill_chunk=64
 warmup=2
-arena_mib=1961
+arena_mib=2298
 mode=forward
-context_prefill_ms=136.775
-wall_ms_total=147.496
-wall_us_per_token=18436.957
-wall_tokens_per_sec=54.24
-first_token_ms=18.378
-step_ms_mean=18.399
-step_ms_p50=18.397
-step_ms_p90=18.412
-step_ms_max=18.443
+context_prefill_ms=222.515
+wall_ms_total=244.079
+wall_us_per_token=30509.929
+wall_tokens_per_sec=32.78
+first_token_ms=30.435
+step_ms_mean=30.499
+step_ms_p50=30.520
+step_ms_p90=30.559
+step_ms_max=30.573
 ```
 
 * コンテキストの prefill は**計測区間の外**（`context_prefill_ms` は参考値）。
@@ -174,8 +181,8 @@ rocm-smi                       # VRAM% / GPU% を見る
 ./build/hip/apps/shelf-bench pp ... --gpu=1
 ```
 
-空き 1 GPU で 4B bf16 を動かす目安: 重み（bf16, ディスク 8.7 GB）+ アリーナ
-（rows=64 の自動算出で約 2 GB）。容量の内訳は `docs/spec/bench.md` §11。
+空き 1 GPU で開発モデル `Qwen3.5-9B` bf16 を動かす目安（2026-10-28 実測）: 重み payload 19.31 GB
++ アリーナ 2,299 MiB（rows=64 自動算出／最小必要 777〜784 MiB）。容量の内訳は `docs/spec/bench.md` §11。
 
 ---
 

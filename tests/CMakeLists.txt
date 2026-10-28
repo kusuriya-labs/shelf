@@ -16,6 +16,10 @@ add_executable(test_ir_graph_validation unit/test_ir_graph_validation.cpp)
 target_link_libraries(test_ir_graph_validation PRIVATE shelf::ir)
 add_test(NAME unit.ir_graph_validation COMMAND test_ir_graph_validation)
 
+add_executable(test_step_graph unit/test_step_graph.cpp)
+target_link_libraries(test_step_graph PRIVATE shelf::model_qwen35)
+add_test(NAME unit.step_graph COMMAND test_step_graph)
+
 add_executable(test_reference_executor unit/test_reference_executor.cpp)
 target_link_libraries(test_reference_executor PRIVATE shelf::backend_cpu)
 add_test(NAME unit.reference_executor COMMAND test_reference_executor)

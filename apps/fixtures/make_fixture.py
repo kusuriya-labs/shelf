@@ -69,7 +69,7 @@ def main() -> int:
     here = Path(__file__).resolve()
     repo = here.parents[2]
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--tokenizer-dir", default=str(repo / "models" / "Qwen3.5-4B"))
+    ap.add_argument("--tokenizer-dir", default=str(repo / "models" / "Qwen3.5-9B"))
     ap.add_argument("--tokens", type=int, default=256, help="fixture の長さ（既定 256）")
     ap.add_argument("--out", default=str(here.parent / "prefill_fixture.hpp"))
     args = ap.parse_args()

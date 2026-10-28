@@ -4,8 +4,9 @@
 
 * 実モデルの **無損失経路（exact, bf16）** を同一入力で 2 回走らせ、生成トークン列が
   一致するか（**T0 決定性**）を検証し、結果を JSON に残す道具。
-* `--exact-model` 単独で動作する。`--approx-model`（T1/T2 比較）は V1、
-  `--pipeline-parallel` は V2 で有効になる（現状は起動前に exit 2 で拒否）。
+* `--exact-model` 単独で動作する。`--approx-model`（T1/T2 比較）と
+  `--pipeline-parallel`（K>1）は**現状未実装**（起動前に exit 2 で拒否）。
+  それらの計画は `draft-docs/shelf-validate.md` §7 を参照。
 
 ---
 
@@ -22,14 +23,20 @@
 ## 2. ビルド
 
 ```bash
-# HIP（GPU）版
-cmake --preset hip          # 初回のみ
-cmake --build --preset hip  # → build/hip/apps/shelf-validate
+# 計測用 = Release（prefill / decode の時間は必ずこれで取る）
+cmake --preset hip-rel          # 初回のみ（設定）
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-validate
+
+# 動作確認・決定性確認用 = Debug
+cmake --preset hip
+cmake --build --preset hip      # → build/hip/apps/shelf-validate
 
 # CPU（f32 参照）版
 cmake --preset cpu
-cmake --build --preset cpu  # → build/cpu/apps/shelf-validate
+cmake --build --preset cpu      # → build/cpu/apps/shelf-validate
 ```
+
+> **性能値は `hip-rel`（Release）で測定する**（2026-10-28 決定）。
 
 ---
 
@@ -37,33 +44,36 @@ cmake --build --preset cpu  # → build/cpu/apps/shelf-validate
 
 ```bash
 ./build/hip/apps/shelf-validate \
-    --exact-model=models/Qwen3.5-4B \
+    --exact-model=models/Qwen3.5-9B \
     --runs=2 \
     --device=hip \
     --gpu=1 \
     --out=/tmp/sv-result
 ```
 
-出力例（既定の入力）:
+出力例（開発モデル `Qwen3.5-9B`・2026-10-28 実測、R9700 / gfx1201・**Release ビルド（hip-rel）**）:
 
 ```text
-  arena: 1961 MB（自動算出: prefill グラフ rows=64）
-  prefill チャンク 位置 0..63 (134.3 ms)
-  prefill チャンク 位置 64..127 (128.2 ms)
-  prefill チャンク 位置 128..191 (130.1 ms)
-  prefill チャンク 位置 192..255 (130.5 ms)
-run 1/2: 246 tok 生成 (stop_token), prefill 555.0 ms / decode 5022.1 ms
-  prefill チャンク 位置 0..63 (127.7 ms)
-  ...
-run 2/2: 246 tok 生成 (stop_token), prefill 554.5 ms / decode 5036.7 ms
+  arena: 2299 MB（自動算出: prefill グラフ rows=64）
+  prefill チャンク 位置 0..63 (196.8 ms)
+  prefill チャンク 位置 64..127 (202.4 ms)
+  prefill チャンク 位置 128..191 (202.5 ms)
+  prefill チャンク 位置 192..255 (202.0 ms)
+run 1/2: 230 tok 生成 (stop_token), prefill 831.8 ms / decode 7121.2 ms
+  prefill チャンク 位置 0..63 (199.1 ms)
+  prefill チャンク 位置 64..127 (202.6 ms)
+  prefill チャンク 位置 128..191 (202.8 ms)
+  prefill チャンク 位置 192..255 (203.1 ms)
+run 2/2: 230 tok 生成 (stop_token), prefill 836.5 ms / decode 7126.0 ms
 T0 (run0 vs run1): identical
 判定: 合格 (exit 0) — 結果: /tmp/sv-result/result.json
 ```
 
 ### 3.1 CPU 経路
 
-`--device=cpu` は f32 参照経路（トークン 1 行ずつ）で **約 16 s/token**（4B 級・Debug ビルド）。
-既定の入力（prefill 256 + decode 246）なら 1 run あたり**約 2 時間**かかる。
+`--device=cpu` は f32 参照経路（トークン 1 行ずつ）。**9B / Release 実測（2026-10-28、差分計測）**:
+**prefill 4.90 s/token、decode 3.68 s/token**（ロードは約 23 s で別途。旧 4B の Debug 実測
+16 s/token は履歴）。既定の入力（prefill 256 + decode 230）なら 1 run は**約 35 分**。
 
 * CPU 経路は **小規模な経路確認にのみ使う**（27B 級は対象外。
   `draft-docs/shelf-validate.md` §8 の未決事項に同じ）。
@@ -77,11 +87,11 @@ T0 (run0 vs run1): identical
 | オプション | 既定 | 説明 |
 | --- | --- | --- |
 | `--exact-model=<dir>` | （必須） | 無損失 (bf16) 側のモデルディレクトリ |
-| `--approx-model=<dir>` | なし | 量子化側。**V1 以降で有効**（現状は exit 2） |
+| `--approx-model=<dir>` | なし | 量子化側。**現行未実装**（指定で exit 2） |
 | `--prefill-tokens=<N>` | 256 | prefill 長。範囲 **128..384** |
 | `--budget=<N>` | 512 | prefill + decode の合計上限。**`budget - N ≥ 128` が必須** |
 | `--stop-id=<id>` | 設定由来 | StopToken の明示指定 |
-| `--pipeline-parallel=<K>` | 1 | **K>1 は V2 以降で有効**（現状は exit 2） |
+| `--pipeline-parallel=<K>` | 1 | **K>1 は現行未実装**（指定で exit 2） |
 | `--device=<hip\|cpu>` | hip※ | ※HIP ビルドなら `hip`、CPU ビルドなら `cpu` |
 | `--gpu=<n>` | 0 | HIP 使用時の GPU 番号 |
 | `--runs=<n>` | 2 | 決定性チェックの反復数（1 で T0 省略） |
@@ -111,8 +121,10 @@ rocm-smi                       # VRAM% / GPU% を見る
 ./build/hip/apps/shelf-validate ... --gpu=1
 ```
 
-空き 1 GPU で 4B bf16 を動かす目安: 重み（bf16, ディスク 8.7 GB）+ arena 約 2 GB
-（VRAM 常駐の実測 10.09 GB）。
+空き 1 GPU で開発モデル `Qwen3.5-9B` bf16 を動かす目安（2026-10-28 実測）:
+重み payload 19.31 GB ＋ arena **2,299 MiB**（rows=64 自動算出）で、
+**VRAM 常駐合計 20.56 GB**（重み + KV 状態 + arena の `free` 差分）。
+approx（`Qwen3.5-9B-exl3`、EXL3 4bit）の重みは 7.19 GB。内訳は `docs/spec/validate.md` §11.2。
 
 ---
 
@@ -141,7 +153,7 @@ python3 apps/fixtures/make_fixture.py   # 長さ 256 の厳密一致を検査し
 | コード | 意味 |
 | --- | --- |
 | `0` | 合格（T0 一致） |
-| `1` | 条件付き合格（T2 誤差判定。**V1 以降**で発生） |
+| `1` | 条件付き合格（T2 誤差判定。**現行では発生しない**＝未実装） |
 | `2` | 不合格（T0 不一致・判定不能）**または起動エラー** |
 
 比較結果は `result.json` の `comparisons[]` に入る:
@@ -149,7 +161,7 @@ python3 apps/fixtures/make_fixture.py   # 長さ 256 の厳密一致を検査し
 * `identical` — トークン列と停止理由がともに一致
 * `diverged` — 最初の不一致位置 `diverged_at`、その位置での exact 側
   `a_top1` / `a_top2_value` / `a_margin`（top1 − top2）、top-1 値の差 `top1_value_gap`
-  （vocab 全体の logits 差は V1 以降）
+  （vocab 全体の logits 差は現行では保持しない）
 * `incomparable` — トークン列は同じだが停止理由が異なる（片方だけ予算打ち切り等）
 
 ---
@@ -175,15 +187,12 @@ python3 apps/fixtures/make_fixture.py   # 長さ 256 の厳密一致を検査し
 | `budget_exhausted` だけで StopToken に達しない | fixture の思考モードが ON になっていないか `make_fixture.py` で再生成する |
 | `入力長が --prefill-tokens より短い` | `--prefill-tokens` を fixture 長（256）以下にするか、`--ids-file` / fixture 再生成で補う |
 | `このビルドは HIP 非対応です` | `cpu` プリセットのビルドで `--device=cpu` を使う |
-| `approx 経路は未実装です` / `pipeline-parallel > 1 は未実装です` | V1 / V2 の実装を待つ（`draft-docs/shelf-validate.md` §7） |
+| `approx 経路は未実装です` / `pipeline-parallel > 1 は未実装です` | 未実装フェーズの実装を待つ（`draft-docs/shelf-validate.md` §7） |
 | `prefill: ... arena exhausted` | arena は executor の自動算出（`declare_states` に渡した rows=64 グラフから）で確保される。§3 出力の `arena:` 行が実際の確保量。継続する場合は issue 化 |
 
 ---
 
 ## 10. 未実装（計画のみ）
 
-* **V1**: approx（FP8）読み込みと実行 → T1 完全一致・T2 誤差判定（終了コード 1）
-* **V2**: pipeline-parallel（`--pipeline-parallel=K`）→ `exact(PP=1)` vs `exact(PP=K)` の T1
-* **V3**: `ctest` の `e2e` ラベル化と、モデル無し環境での skip
-
-詳細と設計（PP の分割方法・参照調査・未決事項）は `draft-docs/shelf-validate.md`。
+未実装フェーズ（V1〜V3）の内容・設計・未決事項は `draft-docs/shelf-validate.md` §7 / §8 に記す
+（本書は実装済みの扱いのみを書く）。

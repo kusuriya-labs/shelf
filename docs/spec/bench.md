@@ -27,9 +27,13 @@
 ## 2. ビルドと実行形態
 
 ```bash
-cmake --build --preset hip  # → build/hip/apps/shelf-bench（本体）
-cmake --build --preset cpu  # → build/cpu/apps/shelf-bench（--help のみ）
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench（**計測はこれ**）
+cmake --build --preset hip      # → build/hip/apps/shelf-bench（Debug・動作確認用）
+cmake --build --preset cpu      # → build/cpu/apps/shelf-bench（--help のみ）
 ```
+
+* 初回は `cmake --preset <name>` で設定する。**性能値はすべて `hip-rel`（Release）で測定する**
+  （2026-10-28 決定。Debug は桁違いに遅く性能値にならない）
 
 * ソース: `apps/bench/{main,bench_common,pp,tg,kernel}.cpp`（+ `bench_common.hpp`）。
   モデル読取・重みアップロードは `apps/common/app_support.*` を `shelf-run` と共有
@@ -259,32 +263,43 @@ common options:
   `insufficient_memory`（`arena exhausted`）を返す（null 出力でのカーネル発射は行わない）。
   実効値は `HipStepExecutor::arena_bytes()` / 出力の `arena_mib`
 
-### 11.2 実測した必要量（Qwen3.5-4B、32 層、vocab 248,320）
+### 11.2 実測した必要量（開発モデル `Qwen3.5-9B`、32 層、vocab 248,320・**Release**）
+
+> 2026-10-28、R9700 / gfx1201、`hip-rel`（Release）で計測。
+> 計測: `shelf-bench pp --model-dir …/Qwen3.5-9B --prompt-tokens 64 --prefill-chunk <rows>
+> --runs 1 --warmup 0 --gpu <n> [--arena-mib N]`（最小必要は 64 MiB 刻みで二分探索）。
 
 | prefill 行数 | 最小必要（二分探索） | 自動算出の実効値 | 従来の既定 64 MiB |
 | --- | --- | --- | --- |
-| 1（decode） | ≤ 64 MiB | 93 MiB（rows=1 グラフ） | ○ |
-| 16 | 129〜192 MiB | 538 MiB | × |
-| 32 | 257〜384 MiB | 1012 MiB | × |
-| 64 | 641〜768 MiB | 1961 MiB | × |
+| 1（decode） | ≤ 64 MiB | 98 MiB | ○ |
+| 16 | 193〜256 MiB | 622 MiB | × |
+| 32 | 385〜448 MiB | 1,181 MiB | × |
+| 64 | **777〜784 MiB** | **2,298 MiB** | × |
 
-* 自動算出は実測必要量に対して**約 2.5 倍**（過大確保）。予算計画
-  （`draft-docs/memory-budget.md` / `directory_design.md` D2）と整合させることが残課題。
+* 自動算出は最小必要に対して、行数とともに **約 1.5 → 2.4 → 2.6 → 2.9 倍**と膨らむ（過大確保）。
+  予算計画（`draft-docs/memory-budget.md` / `directory_design.md` D2）と整合させることが残課題。
   根本の削減は D4（declare/run 二相でバッファ寿命の共有）
 * 従来の既定 64 MiB では **`shelf-run --device hip` の 16 トークン prefill が枯渇した**
   （自動算出と `--arena-mib` 追加で解消）
+* 渡すプランで自動算出は 1 MiB ずれる: `shelf-bench pp` の rows=64 グラフは **2,298 MiB**、
+  `shelf-validate` の prefill グラフは **2,299 MiB**（kv_capacity の差。出力例は
+  `docs/guide/bench.md` §3 に別掲）
+* **参考（旧 `Qwen3.5-4B`・履歴・Debug ビルド）**: 最小必要 1: ≤64 / 16: 129〜192 /
+  32: 257〜384 / 64: 641〜768 MiB、自動算出 93 / 538 / 1012 / 1961 MiB（約 2.5 倍）
 
-### 11.3 容量の目安（4B bf16、1 GPU）
+### 11.3 容量の目安（開発モデル `Qwen3.5-9B` bf16、1 GPU）
 
 | 項目 | 目安 |
 | --- | --- |
-| 重み（bf16, ディスク） | 約 8.7 GB |
-| アリーナ（rows=64、自動算出） | 約 1.96 GB |
-| VRAM 常駐合計 | 約 10.7 GB（`tg` も同程度） |
-| KV（既定 context 128、single sequence） | 数十 MB 程度 |
+| 重み payload（mtp を含む・ディスク） | 19.31 GB（safetensors ヘッダ集計の実測） |
+| アリーナ（rows=64、自動算出） | **2,298 MiB**（pp グラフ・実測／validate グラフは 2,299 MiB）／最小必要 **777〜784 MiB**（§11.2） |
+| VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測 2026-10-28）** |
+| KV（既定 context 128、single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
+| approx `Qwen3.5-9B-exl3`（EXL3 4bit）の重み | 7.19 GB（ディスク実測・VRAM 常駐は未計測） |
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため
   `--gpu` で空きを選ぶ（`rocm-smi`）
+* 実走の実測（prefill / decode / stop）は `draft-docs/shelf-validate.md` §7「V0 実績（9B）」
 
 ---
 

@@ -175,11 +175,13 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 
 ※ 曾案の「総 20,480 / 思考 14,336」は不採用。上表が正式。
 
-### 8.2 予算式と換算（Qwen3.5-4B の実測）
+### 8.2 予算式と換算（開発モデル `Qwen3.5-9B`）
 
-`/opt/zen/work/models/Qwen3.5-4B/config.json`: 32 層のうち **full_attention は 8 層**
+`/opt/zen/work/models/Qwen3.5-9B/config.json`: 32 層のうち **full_attention は 8 層**
 （残り 24 層は linear_attention = GDN でトークン比例しない）、`num_key_value_heads = 4`、
 `head_dim = 256`、bf16。
+（2026-10-28 に開発モデルを 9B へ選定。旧 `Qwen3.5-4B` は**同一幾何** — 32 層 / full 8 層 /
+kv_heads 4 × head_dim 256 — だったため、**換算値 1 tok = 32 KiB は変わらない**）
 
 ```
 KV_bytes(T) = T × L_full × 2 × kv_heads × head_dim × sizeof(bf16)

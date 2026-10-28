@@ -31,7 +31,7 @@ cmake --build --preset cpu  # → build/cpu/apps/shelf-validate（f32 参照経�
 
 ```bash
 ./build/hip/apps/shelf-validate \
-    --exact-model=models/Qwen3.5-4B \
+    --exact-model=models/Qwen3.5-9B \
     --runs=2 --device=hip --gpu=1 --out=/tmp/sv-result
 ```
 
@@ -204,17 +204,21 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 * 指定値（`arena_bytes > 0`）を使う場合はそれが上限となり、枯渇時は
   `insufficient_memory`（`arena exhausted`）を返す。null 出力でのカーネル発射は行わない。
 
-### 11.2 容量の目安（4B bf16、1 GPU）
+### 11.2 容量の目安（開発モデル = `Qwen3.5-9B` bf16、1 GPU）
 
 | 項目 | 目安 |
 | --- | --- |
-| 重み（bf16, ディスク） | 約 8.7 GB |
-| アリーナ（rows = 64、自動算出） | 約 2 GB |
-| VRAM 常駐合計 | 約 10.1 GB |
-| KV（既定 `budget = 512` の single sequence） | 数十 MB 程度 |
+| 重み payload（mtp を含む・ディスク） | 19.31 GB（safetensors ヘッダ集計の実測） |
+| アリーナ（rows = 64、自動算出） | **2,299 MiB（実測 2026-10-28、表示は "2299 MB"）**／最小必要 **777〜784 MiB**（`docs/spec/bench.md` §11.2） |
+| VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測）** |
+| KV（既定 `budget = 512` の single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
+| approx `Qwen3.5-9B-exl3`（EXL3 4bit）の重み | 7.19 GB（ディスク実測・VRAM 常駐は未計測） |
+| 参考: 旧 `Qwen3.5-4B`（削除済み・実測） | 重み 8.7 GB / アリーナ約 2 GB / 合計 10.1 GB |
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため、
   `--gpu` で空きを選ぶ（`rocm-smi` で確認）。
+* 実走の実測（prefill / decode / stop_reason）は `draft-docs/shelf-validate.md` §7
+  「V0 実績（9B・2026-10-28・修正後）」を参照。
 
 ### 11.3 CPU 経路
 
@@ -225,10 +229,5 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 ## 12. 現行の対応外（計画のみ）
 
-| フェーズ | 内容 |
-| --- | --- |
-| V1 | approx（FP8）読み込み・実行 → T1 完全一致 / T2 誤差判定（終了コード 1） |
-| V2 | pipeline-parallel（`--pipeline-parallel=K`）→ `exact(PP=1)` vs `exact(PP=K)` の T1 |
-| V3 | `ctest` の `e2e` ラベル化、モデル無し環境での skip |
-
-設計と未決事項は `draft-docs/shelf-validate.md`。
+未実装フェーズ（V1〜V3）の内容と未決事項は `draft-docs/shelf-validate.md` §7 / §8 に記す
+（本書は実装済みの仕様のみを書く）。

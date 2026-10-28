@@ -21,7 +21,7 @@
 | ContinuousBatching | 最大 4 並列（スロット = 4）。予算は 4x = 131,072 tok |
 | VRAM 上の online KV 上限 | 81,920 tok = 2.50 GiB（正本 4.00 GiB と別桁。大小比較しない） |
 | 予算式 | `KV_bytes(T) = T × L_full × 2 × kv_heads × head_dim × sizeof(bf16)`
-  （Qwen3.5-4B で 1 tok = 32 KiB。`L_full` は full_attention 層のみ、GDN は固定費） |
+  （開発モデル `Qwen3.5-9B` で 1 tok = 32 KiB。`L_full` は full_attention 層のみ、GDN は固定費） |
 | admission | **2 段**: ① pinned 容量に対して `Σ (prompt_i + max_new_i − 1)`、
   ② 実行は active 文脈の合計 ≤ 81,920 tok |
 

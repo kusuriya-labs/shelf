@@ -24,8 +24,8 @@
 
 ```
 shelf-validate \
-    --exact-model=<dir>        # bf16（無損失側）      例: ./models/Qwen3.8-27B
-    --approx-model=<dir>       # 量子化（FP8 等）      例: ./models/Qwen3.8-27B-FP8
+    --exact-model=<dir>        # bf16（無損失側）      例: ./models/Qwen3.5-9B
+    --approx-model=<dir>       # 量子化（EXL3 4bit）  例: ./models/Qwen3.5-9B-exl3
     [--prefill-tokens=<N>]     # prefill の長さ。既定 256（範囲 128..384）
     [--budget=512]             # prefill + decode の合計。既定 512
     [--stop-id=<id>]           # 省略時は config の eos_token_id（後述の解決順）
@@ -74,7 +74,8 @@ shelf-validate \
 
 1. **設定読み**: `config.json` / `generation_config.json` からレイヤ数・幾何・`eos_token_id` を得る
 2. **ロード**: exact / approx をそれぞれ読み、§6 の構成（PP）に従って stage 割当する
-   （approx はレイヤ単位ファイル `layers-N.safetensors` を前提に読む。§7 V1 参照）
+   （approx は `quantization_config.json` の **`tensor_storage` 表を正**として単一
+   `model.safetensors` を読む。§7 V1 参照）
 3. **prefill**: 位置 1..N を一括投入して logits を得る。
    行数上限は `kMaxStepRows = 64` のため **64 行ずつチャンク**で回す
    （既存の `apps/shelf_run.cpp` の `gpu_prefill` と同じ経路。最後のチャンクの最終行の logits を採用）
@@ -116,10 +117,12 @@ shelf-validate \
 ## 6. pipeline-parallel（比較の前提となる実行形態）
 
 * **要る理由**: 27B 級（bf16 で約 54 GB）は 1 GPU に入らない。例: `--exact-model=./Qwen3.8-27B --pipeline-parallel=4`
+  （9B bf16 の 19.3 GB は 1 GPU に載るため、**PP の実績は 27B 級の取得後**。27B は現状未取得）
 * **分割**: レイヤ境界で K ステージに分割（Hybrid の GDN 層があってもレイヤ単位で同一）
   - stage `s` = `[layer_s, layer_{s+1})` を担当し、decode 1 token が K ステージを順に通る
-  - 各 stage の重みは**担当デバイスに部分ロード**。approx の `layers-N.safetensors` はレイヤ単位なので
-    ステージ割当と天然に一致する
+  - 各 stage の重みは**担当デバイスに部分ロード**。approx（EXL3）は単一 `model.safetensors` なので
+    レイヤ単位ファイルは無いが、テンソルの byte range は safetensors ヘッダから取れ、
+    量子化 / 非量子化の別は `tensor_storage` 表で判るため、レイヤ範囲の部分ロードは成立する
   - **KV はレイヤを持つ stage 側に置く**（レイヤ分割なので KV もレイヤに従って分散する）
   - stage 間の活性化受け渡しと同期の方式 → **参照調査の報告を待って §6.1 に追記する**
 * **正しさの担保**: PP は数値を変えないはずなので、`exact(PP=1) vs exact(PP=K)` の T1 一致を必須とする
@@ -187,12 +190,18 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
 
 | # | 内容 | 完了条件（DoD） |
 | --- | --- | --- |
-| **V0** | アプリ骨格: CLI（§1）・予算検査（§2）・fixture 入力・prefill（64 行チャンク）・greedy decode・StopToken 解決・比較と JSON 出力。`--exact-model` のみで運用 | Qwen3.5-4B で `--runs=2` の T0 が通り、終了コードと JSON が仕様どおり。入力 N=256 / budget=512 の検査も通る |
-| **V1** | approx 経路の読み込みと実行 → T1/T2 比較 | exact と approx のトークン列比較が出力され、diverged 時に margin が出る |
+| **V0** | アプリ骨格: CLI（§1）・予算検査（§2）・fixture 入力・prefill（64 行チャンク）・greedy decode・StopToken 解決・比較と JSON 出力。`--exact-model` のみで運用 | `Qwen3.5-9B` で `--runs=2` の T0 が通り、終了コードと JSON が仕様どおり。入力 N=256 / budget=512 の検査も通る（**2026-10-28 に 9B で達成**: T0 identical / stop_token 230 tok / exit 0。2026-10-27 の旧 4B での達成は履歴） |
+| **V1** | approx（**EXL3 4bit**）経路の読み込みと実行 → T1/T2 比較。前提と着手順は下記「V1 の前提となる実装」 | exact と approx のトークン列比較が出力され、diverged 時に margin が出る |
 | **V2** | pipeline-parallel（`--pipeline-parallel=K`） | `exact(PP=1)` と `exact(PP=K)` のトークン列が一致（T1） |
 | **V3** | 自動化: `ctest` のラベル（例 `e2e`）で回し、モデル無しの環境では skip | CI 相当の流れで 1 件が守られる |
 
 ### V0 実績と実装メモ（2026-10-27）
+
+* **2026-10-28 の資材更新と開発モデルの選定**: `models/` から `Qwen3.5-4B` と `Qwen3.8-*` が削除され、
+  在庫は `Qwen3.5-9B`（bf16）と `Qwen3.5-9B-exl3`（EXL3 4bit）の 2 組のみ。
+  **この 2 つを開発時点の標準モデルに選定**した（統一した記載は `draft-docs/directory_design.md` §1.0）。
+  以下の数値は **旧 4B での実測（履歴）**。以後の DoD・計測は **9B を対象**とし、
+  未測定の値は「未測定」と書く（config は `text_config` の必須キー全充足を確認済み）。
 
 * **DoD 達成**: `--exact-model=models/Qwen3.5-4B --runs=2 --device=hip --gpu=1` で T0 `identical`・exit 0。
   実測: prefill 256 tok（64 行 × 4 チャンク、各約 130 ms）/ decode 246 tok で StopToken 停止（各約 5.0 s）、
@@ -207,33 +216,152 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
   カーネルを発射するとデバイスフォルト（GPU ハング）になるため、全 alloc 点で発射前に検査するようにした。
 * **CPU 側の対応**: `HostStorage::reset_states()` を追加（`HipStepExecutor::reset_states()` と対になる
   ステートと使用行のリセット。`--runs=n` の反復で必要）。
-* `--device=cpu` の全トークン実行は未実施（**実測 16 s/token** = Debug ビルドで 7 step 110 s。
-  256 + 246 tok なら 1 run 約 2 時間）。CPU 経路の比較は §8「CPU 経路の扱い」の未決に同じ）。
+* `--device=cpu` の速度は **9B / Release で差分計測済み（2026-10-28）**: prefill **4.90 s/token**、
+  decode **3.68 s/token**（ロード約 23 s は別途。既定入力で 1 run 約 35 分）。
+  旧 4B の Debug 実測 16 s/token は履歴。**全トークンでの CPU 比較（T1）は未実施**で、
+  §8「CPU 経路の扱い」の未決に同じ
 
-### V1 の前提となる実装（別作業）
+### V0 実績（開発モデル 9B・2026-10-28・修正後）
 
-* **approx（FP8）の読み込み**: `Qwen3.8-27B-FP8` は
-  `quantization_config` = `fp8` / `e4m3` / `weight_block_size: [128, 128]` / `activation_scheme: dynamic`、
-  ファイルは `layers-N.safetensors` ×64 + `model.safetensors.index.json`。
-  → **128×128 ブロックスケールの解釈**と、`modules_to_not_convert`（layernorm / lm_head / embed /
-  `linear_attn` 系パラメータ）は **bf16 のまま読む**という読み分けが必要
-* **FP8 GEMM（ホットパス dequant）**: shelf には現状 fp8 GEMM が無い（bf16 のみ。
-  fp8 は KV 側にのみ存在）。契約（`parity-policy` / 量子化契約）どおり **dequant はカーネル内**。
-  - 移植の一次候補: `phaseshift-fp8` の `src/phaseshift/kernels/optimized/linear/fp8.hip`
-    （同じ `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12` を使う。shelf のカーネルの出所と同系統）
-* **注意**: 「読み込んで bf16 に展開してから既存の bf16 GEMM で計算する」のは**契約違反**（有損 dequant を
-  ロード時に置かない）。検証のための暫定として使う場合も、契約上の位置づけを明記してから使う
+`shelf-validate --exact-model=/opt/zen/work/models/Qwen3.5-9B --runs=2 --device=hip --gpu=0 --out=<dir>`
+
+* **DoD 達成**: `t0 = identical`、`stop_reason = stop_token`（**230 tok**）、**exit 0**。
+  範囲外入力の拒否（exit 2）は従来どおり
+* **実測**（R9700 / gfx1201・**Release ビルド（hip-rel）**、2026-10-28）:
+  * prefill 256 tok = 64 行 × 4 チャンク（196.8〜203.1 ms、run ごとに **831.8 / 836.5 ms**）
+  * decode 230 tok = **7,121 / 7,126 ms** → **30.96 ms/tok（≒ 32.3 tok/s）**
+  * **arena 自動算出 2,299 MiB**（rows=64 グラフ、表示は "2299 MB"）、
+    `device_mem_used_bytes` = **20.56 GB**（`free_before − free_after`＝重み ＋ KV 状態 ＋ arena。
+    修正で `lm_head`（2.03 GB）がロード対象に加わった分を含む）
+  * ロード 9.1 s / 全体 25.0 s
+* **参考（ビルドとモデルが両方異なるので単純比較はしない）**: 旧 4B（Debug・履歴）は
+  prefill 130 ms/chunk・decode 20.4 ms/tok。9B（Release）は 202 ms/chunk・31.0 ms/tok
+* **StopToken**: 9B は `generation_config.json` を持たず、`resolve_stop` の手順 3
+  （`text_config` の `eos_token_id = 248044`）で解決。tokenizer の eos 248046 は停止条件に
+  入らないが、実走で `stop_token` 停止を確認済み
+
+### 発見したバグと修正（2026-10-28・HF との A/B で発覚）
+
+* **症状**: 同一 fixture で 9B を実行すると出力が劣化（中国語・ロシア語・同一トークン 55 連打）、
+  256 tok 全消費で `budget_exhausted`。**T0 は `identical` で合格していた**
+* **切り分け**: HF / `transformers` と同一 ids で比較して **48 tok 中 0 一致**。
+  prefill 直後 logits の 3 者比較で **CPU ≈ GPU（cos 0.9999）だが両方とも HF と不一致** → カーネルでなくグラフ側。
+ さらに `cos(shelf logits, h@embed) = 0.9997`（argmax 一致）／`cos(shelf logits, h@lm_head) = -0.046` →
+  **出力投影が埋め込み表を束ねていた**（hidden は HF と一致 = 前方は正常）
+* **原因**: `src/model/qwen35/step_graph.cpp` の `add_final()` が `tie_word_embeddings` を見ずに
+  `embed_id_` を出力に使用。9B は untied（`lm_head.weight` が別在）で、埋め込みとの内積がロジットになっていた
+* **修正**: `tie_word_embeddings == false` なら `lm_head.weight`（`[vocab, hidden]`）を束縛。
+  回帰テスト `tests/unit/test_step_graph.cpp`（untied / tied の両ケース）を追加し
+  `unit.step_graph` として登録（cpu 13 件 / hip 19 件が全通過）
+* **修正後の確認**: prefix = 1 / 8 / 32 のいずれでも HF と **8/8 トークン一致・文字列一致**
+* **教訓**: **T0（決定性）は出力の妥当性を保証しない**。上記バグは T0 を通っていた。
+  実装の妥当性は外部参照（HF）とのトークン列比較で確認する（`parity-policy.md` に追記）
+
+### V1 の前提となる実装（別作業）— **EXL3 に変更（2026-10-28）**
+
+> FP8 での V1 は**キャンセル**した。理由は次のとおり: ① checkpoint が既にある
+> （`models/Qwen3.5-9B-exl3`、7.19 GB）② 今後の量子化も `exllamav3` で自作する方針
+> ③ 4bit は低 VRAM 協調推論の主目的に直結 ④ 参照実装が 3 系統ある
+> （`exllamav3` 公式 / Strata `vendor/exl3.*` / exllamav3 の GEMM テスト群）。
+
+**（1）approx（EXL3）の読み込み**
+
+* 対象: `models/Qwen3.5-9B-exl3`。`quantization_config.json`（**config.json とは別ファイル**、
+  314 KB）に `quant_method: exl3`, `version: 0.0.22`, `bits: 4.0`, `head_bits: 6`,
+  `out_scales: always`, `codebook: mcg`, `calibration: {rows: 250, cols: 2048}`
+* **正は `tensor_storage`（355 エントリ）**: 各エントリが `stored_tensors`（実テンソル名・shape・dtype）+
+  `quant_format` + `bits_per_weight` + `mcg_multiplier` を持つ。
+  → FP8 の `modules_to_not_convert` みたいな**推測判定は不要、表駆動**になる
+* ペイロード（例 `layers.0.mlp.down_proj`）: `.trellis`（I16、例 [768,256,64] の符号列）+
+  `.suh` / `.svh`（F16 のスケール系）+ `.mcg`（I32 スカラー + `mcg_multiplier`）。
+  非量子化テンソル（`embed_tokens` / `lm_head` / 各 layernorm / `norm` 等）は F16・BF16 のまま格納
+* ファイルは単一 `model.safetensors`（1,363 テンソル、dtype は F16 / F32 / I32 / I16 / BF16）。
+  読み込みは既存の artifact 層（safetensors reader）の上に **`tensor_storage` 表の解釈**を足す形
+* **未解決の前提（shelf 側・要判断）**: `.trellis` の dtype は `I16` だが、shelf の safetensors リーダは
+  `F64 / F32 / F16 / BF16 / I64 / I32 / U8` のみ対応（`src/artifact/safetensors/reader.cpp:20-29`）。
+  現状は **EXL3 checkpoint を開けない**（`unsupported dtype 'I16'` で `Reader::open` が失敗する）。
+  * (A) `DataType::i16` を追加 — 数値型としては自然な拡張（`u16`/`u32`/`i32`/`i64` は既にある）。
+    `suh`(F16) と `mcg`(I32) は既に読めるため、対象は `.trellis` だけ
+  * (B) raw 経路 — リーダが dtype 判定なしでバイト範囲を返し、意味論は `quant/` の QuantSpec に委ねる
+    （「量子化ペイロードは DataType ではない」という契約に素直だが変更が大きい）
+  * **推奨は (A) ＋ 責務の明記**: DataType は「バイト長・符号性のメタ」、
+    意味論（codebook・trellis 読出）は QuantSpec の役目、と割り切る。**要承認**
+
+**（2）EXL3 GEMM（ホットパス dequant）** — shelf には現状 4bit の経路も FP8 も無い
+（bf16 のみ、fp8 は KV 側にのみ存在）。契約（`parity-policy` / 量子化契約）どおり **dequant はカーネル内**。
+
+* **移植の一次候補: Strata `src/dsv41/vendor/exl3.cu`（1,745 行）と `exl3_cpu.cpp`（1,281 行）**
+  — Project Maya (MIT) 経由で exllamav3 (MIT) の codebook / trellis 算術に準拠。
+  ヘッダに **HIP 向けの道筋が明記**されている（sm_80 以降は tile を tensor core フラグメントへ
+  直デコード、**HIP と旧 GPU は F32 FMAs**）。移植時は `third_party/project-maya/NOTICE.md` の追従
+* **答え合わせ**: `references/exllamav3`（公式）の
+  `modules/quant/exl3_lib/`、`tests/kernels/gemm/test_exl3_{gemv,gemm_shapes,mgemm_sliced,gemv_tail}.py`、
+  `tests/testlib/exl3.py`。Python/CUDA 中心なので **移植せず参照と突合に使う**
+* **設計論点（V1 で決める）**:
+  * (a) **検証経路**: カーネル内でデコードし bf16 WMMA のオペランドにする（実装容易、契約適合）
+  * (b) **本番経路**: Strata HIP 準拠の F32 FMAs、または exllamav3 の tensor core 直デコード
+  * V1 は (a) で開始し、(b) は性能フェーズへ回す
+
+**（3）注意（従来どおり）**: 「ロード時に bf16 へ展開してから既存の bf16 GEMM で計算する」のは
+**契約違反**（有損 dequant をロード時に置かない）。**カーネル内で**デコードして bf16 オペランドに
+することは許される（(a) がこれに当たる）。暫定で外に出す場合は契約上の位置づけを明記する。
+
+**（4）V1 の着手順（可否の実測 → 仕様確定 → 本体）**
+
+1. **スモーク**: `models/Qwen3.5-9B-exl3` の 1 テンソル（例 `layers.0.mlp.down_proj` の
+   `.trellis` / `.suh` / `.svh` / `.mcg` + `mcg_multiplier`）を、Strata `exl3_cpu.cpp` か
+   `exllamav3` を参照してデコードし、**exllamav3 の出力と一致する**ことを確認する
+   （ここで「材料が読める／仕様が足りる」が確定する）— **→ (5) で完了（2026-10-28）**
+2. **GEMM 方針の決定**（(a)/(b)）。初期値は (a)
+3. **V1 本体**: リーダ → GEMM → T1/T2 → 終了コード 0/1/2
+4. **T2 の基準取り**: `parity-policy.md` §3 の手順で EXL3 4bit の誤差規模を測る（§8 参照）
+
+**（5）スモーク実績（2026-10-28、着手順 1 完了）**
+
+* **経路**: `references/exllamav3` の **`tests/testlib/trellis.py`**（拡張不要の純 Python 参照）。
+  `decode():62` / `unpack():99` / `tile_perm():47` / `dequant_rotated():149` /
+  `sylvester():159` / `dequant():166`（`W = diag(suh) · H · W' · H · diag(svh)`）。
+  本体パッケージには pure 経路が無く（`ext.py` は import 即 JIT コンパイル）、拡張は ROCm 未対応のため
+  自作は不要だった
+* **対象**: `model.language_model.layers.0.mlp.down_proj`（k = intermediate 12288、n = hidden 4096、K = 4）
+* **(A) 構造 — 全項目 OK**: `trellis (768,256,64) int16`（= k/16, n/16, 16·4）、`suh (12288) fp16`、
+  `svh (4096) fp16`、`.mcg` int32 = `0xCBAC1FED`。**tail-biting 検査 全 196,608 タイル True**
+  （ビットストリームの解釈が書き込み側と一致）
+* **(B) 妥当性 vs bf16 元**（主判定）: コサイン **0.997012**（行 min 0.996837、>0.99 の行 100%）、
+  相対 Frobenius **7.73%**（SQNR ≈ 22 dB）、MAE = **重み std の 6.00%**、最大絶対差 = |w|max の 3.5%、
+  行相対 L2 mean/median/max = 0.0773 / 0.0773 / 0.0795 → **4bit として妥当な値域**
+* **(C) レイアウト健全性 — 破壊で全て大幅悪化**（正: 7.73% / cos 0.997）:
+  タイル格子転置 136.9%（cos 0.063）/ 転置合わせなし比較（cos 0.0001）/
+  suh・svh 入れ替え 116.1% / 入出力 Hadamard 省略 141.3%（cos ≈ 0）
+* **判定: 材料は読めている／仕様は足りている**。**入力回転の追加要件は不要**（dense 等価 W に
+  両 Hadamard が畳み込み済み。GEMV を W を物化せず行う場合のみカーネルがその場で H を掛ける —
+  Strata `exl3_cpu.hpp` の通り）
+* **`.mcg` の実用**: 値 = `codebook_mcg_mult = 0xCBAC1FED`（`quantize.py:19`）= `mcg_multiplier` 3417055213
+  → リーダが**起動時にコードブック照合**できる固定マーカ（Strata の命名もこれで正しい）
+* **成果物**: `.cache/exl3_smoke/{exl3_smoke.py, smoke.log}`（gitignore 済み・未コミット）
+* **残りの未検証**: `head_bits = 6` / `out_scales = always` の語義（down_proj では非影響を確認）、
+  他テンソル（gate/up・embed）と全体推論、exllamav3 拡張との bit 一致（ROCm 未対応で未実施）
 
 ---
 
 ## 8. 未決
 
-* **exact モデルの所在**: `./Qwen3.8-27B`（例示）は手元に未確認。bf16 の 27B チェックポイントが無ければ
-  V1 は「4B の approx（未取得）」でも成り立たない。取得先を確定させる
+* **exact / approx のペア** — **解消（2026-10-28）**: `./models/Qwen3.5-9B`（bf16、4 シャード 19.3 GB）と
+  `./models/Qwen3.5-9B-exl3`（EXL3 4bit、7.19 GB）を取得。V1 はこの 9B ペアで行う。
+  bf16 9B は単一 GPU に収まる見込み。27B 級 bf16 は現状未取得のまま（PP の実績も後ろ倒し）
+* **`.trellis` の `I16` への対応方針** — §7 (1) の未解決前提 (A)/(B) の採否。
+  **V1 のリーダ着手前に要決定**（推奨: (A) + 「dtype はメタ、意味論は QuantSpec」の責務明記）
+* **スモーク成果物の置き場**: 現状 `.cache/exl3_smoke/`（gitignore 済み・未コミット）。
+  V1 実装時に `tests/` 配下の support かツールとして再配置し、答え合わせに使える形にするか
 * **StopToken の配列の扱い**: `generation_config` の `[248046, 248044]` を「最初に現れた方」で止めるでよいか
+* **fixture の 9B での妥当性 — 解消（2026-10-28）**: 9B の tokenizer で fixture（256 ids）を
+  decode → 再 encode した結果**完全一致**（round-trip True、文面も成立）。StopToken は
+  `generation_config.json` が無いため手順 3 の `text_config.eos_token_id = 248044` で解決され、
+  実走でも `stop_token` 停止を確認（§7「V0 実績（9B）」参照）
 * **budget 打ち切り時の判定**: 両経路とも同一位置で打ち切られれば一致として扱うが、
   片方だけ打ち切った場合をどう数えるか（推奨: 不一致として T2 に回さず `budget_exhausted` 単独で報告）
 * **PP の分割方法**: `--pipeline-parallel=K` は **stage 数（phaseshift bench の均等分割を既定）**にするか、
   **Strata 形で開始レイヤ番号を明示**するか。`auto`（境界探索）はコストモデルが Strata 固有のため後回しでよいか
-* **CPU 経路の扱い**: `--device=cpu` は T0/T1 の補助として使うか（CPU f32 は parity-policy の基準だが、
-  27B を CPU で回す時間は非現実的 → 4B のみ有効、という運用でよいか）
+* **CPU 経路の扱い**: `--device=cpu` は T0 の補助としてどこまで使うか（CPU f32 は parity-policy の基準
+  だが、9B / Release で prefill 4.90・decode 3.68 s/token（旧 4B の Debug 実測は 16 s/token）。
+  → CPU 経路は T0 と小規模モデルの検証に限定する、という運用でよいか）
