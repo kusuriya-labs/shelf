@@ -292,10 +292,11 @@ common options:
 | 項目 | 目安 |
 | --- | --- |
 | 重み payload（mtp を含む・ディスク） | 19.31 GB（safetensors ヘッダ集計の実測） |
+| うちアップロード対象（`language_model.*` ＋ `lm_head`） | 17.91 GB（`visual` 0.91 GB と `mtp` 0.49 GB は読まない） |
 | アリーナ（rows=64、自動算出） | **2,298 MiB**（pp グラフ・実測／validate グラフは 2,299 MiB）／最小必要 **777〜784 MiB**（§11.2） |
 | VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測 2026-10-28）** |
 | KV（既定 context 128、single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
-| approx `Qwen3.5-9B-exl3`（EXL3 4bit）の重み | 7.19 GB（ディスク実測・VRAM 常駐は未計測） |
+| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。**VRAM 常駐は未計測** |
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため
   `--gpu` で空きを選ぶ（`rocm-smi`）

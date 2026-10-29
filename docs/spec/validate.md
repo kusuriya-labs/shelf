@@ -209,10 +209,11 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 | 項目 | 目安 |
 | --- | --- |
 | 重み payload（mtp を含む・ディスク） | 19.31 GB（safetensors ヘッダ集計の実測） |
+| うちアップロード対象（`language_model.*` ＋ `lm_head`） | 17.91 GB（`visual` 0.91 GB と `mtp` 0.49 GB は読まない） |
 | アリーナ（rows = 64、自動算出） | **2,299 MiB（実測 2026-10-28、表示は "2299 MB"）**／最小必要 **777〜784 MiB**（`docs/spec/bench.md` §11.2） |
 | VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測）** |
 | KV（既定 `budget = 512` の single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
-| approx `Qwen3.5-9B-exl3`（EXL3 4bit）の重み | 7.19 GB（ディスク実測・VRAM 常駐は未計測） |
+| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。**VRAM 常駐は未計測**（現行は `--approx-model` 未対応） |
 | 参考: 旧 `Qwen3.5-4B`（削除済み・実測） | 重み 8.7 GB / アリーナ約 2 GB / 合計 10.1 GB |
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため、

@@ -27,18 +27,23 @@
 
 ## 1. 現状の shelf と 5 段階の対応
 
-### 1.0 開発モデル（2026-10-28 選定）
+### 1.0 開発モデル（2026-10-28 選定・2026-10-29 更新）
 
 | 用途 | ディレクトリ | 形式・容量 |
 | --- | --- | --- |
-| **exact / 通常実行** | `models/Qwen3.5-9B` | bf16、4 シャード（ディスク約 19.3 GB） |
-| **approx / 量子化検証** | `models/Qwen3.5-9B-exl3` | EXL3 4bit（ディスク 7.19 GB） |
+| **exact / 通常実行（正本）** | `models/Qwen3.5-9B` | bf16、4 シャード（ディスク約 19.3 GB） |
+| **approx / 量子化検証（製品量子化版）** | `models/Qwen3.5-9B-FP8` | FP8 W8A8（compressed-tensors・float-quantized）、単一 13.52 GB ＋ `model_mtp.safetensors` 0.49 GB（ディスク約 14.0 GB） |
 
 * **両方を開発時点の標準モデルとする**。文書・CLI の例示・デフォルト引数はすべてこれに合わせる
+* 2026-10-28 に選定した approx 候補 `models/Qwen3.5-9B-exl3`（EXL3 4bit、7.19 GB）は
+  2026-10-29 に在庫から除外した（経緯と実績は `draft_docs/shelf_validate.md` §7「（6）履歴」）
+* FP8 版の量子化範囲: `mlp.{gate,up,down}_proj` × 32 層と `self_attn.{q,k,v,o}_proj` ×
+  `full_attention` 8 層の **128 Linear**（`F8_E4M3` ＋ `weight_scale` は `BF16` `[out,1]`）。
+  `lm_head` / `embed_tokens` / `linear_attn.*` / `visual.*` / `mtp.*` は bf16 のまま
 * `text_config` の必須キー充足を確認済み（32 層 / full_attention 8 層 / kv_heads 4 / head_dim 256 /
   vocab 248,320、`layer_types` 32 件）。KV は 1 tok = 32 KiB（`draft_docs/engine_contract.md` §8.2）
 * **未測定の値は「未測定」と書く**（例: 9B の rows=1 / 16 / 32 のアリーナ必要量。
-  rows=64 は 2,299 MiB と 2026-10-28 に測定済み）
+  rows=64 は 2,299 MiB と 2026-10-28 に測定済み。FP8 版の VRAM 常駐量も未測定）
 
 ### 1.1 現在のツリーと担い手
 
@@ -48,7 +53,7 @@
 | 2. メモリ確保 | 3 系統に分散: ①実行器のアリーナ（`arena_alloc`、既定 64MiB の定数、毎ステップ reset）②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | **予算（budget）の概念が存在しない**。確保量は定数と論理 shape から決まる |
 | 3. モデルロード | `artifact/safetensors` reader → `apps` の `read_bf16` / `read_f32` → **同じラムダ内で** `upload_weight*` と `declare_states` を呼ぶ | 読取・実体化・状態確保が 1 ラムダに融合。`weights/catalog` は「実行にもデバイスにも触れない」宣言のみで未接線 |
 | 4. エンジン起動 | `apps` の `if (device == "hip") ... else` による排他分岐と、`HipStepExecutorOptions` の組み立て。CPU は `HostStorage` + `ReferenceExecutor` | 選択肢が 2 値（cpu / hip）で、起動可否の契約（機能の実在判定）が無い |
-| 5. ホットパス Dequant | **未実装**。重みは bf16 のままロードして GEMM も bf16 専用。fp8 は KV キャッシュ側にのみ存在（`e4m3_codec` / paged attention の fp8 版） | `src/quant` は空、`DataType` に量子化ペイロードを持たせない方針（`dtype.hpp:24-27`）と、Dequant 実装の置き場が未定 |
+| 5. ホットパス Dequant | **未実装**。重みは bf16 のままロードして GEMM も bf16 専用。fp8 は KV キャッシュ側にのみ存在（`e4m3_codec` / paged attention の fp8 版）。製品量子化版 `models/Qwen3.5-9B-FP8`（`F8_E4M3`）は現行リーダの `map_dtype` が対応しておらず開けない | `src/quant` は空、`DataType` に量子化ペイロードを持たせない方針（`dtype.hpp:24-27`）と、Dequant 実装の置き場が未定 |
 
 ### 1.2 既に効いている分離（維持する）
 
@@ -403,7 +408,7 @@ D1 と D8 の前提。草案 v0 済み）
 | D2 | 予算と確保の分離 | 予算・所在の計算を `placement/`（純粋、GPU 非依存）へ。所在は `backend/common` の `MemoryKind` で表し、実確保のみ backend に残す | placement の単体テストが GPU なしで通る。全 device 常駐の既定で性能・結果が不変（= 協調推論計画のフェーズ 1 と同一成果物） |
 | D3 | ロードの分離 | `upload_weights` ラムダを `runtime/load/` へ。「読取 → 検証 → 実体化計画 → upload」を型で固定し、無損 relayout のみ許可する | apps から safetensors の直接読みが消える。`weights/catalog` が実体化計画の入口として接線する |
 | D4 | declare / run 二相 | バッファ寿命と offsets を declare 相（`compiler/` の受け皿）で決め、run 相から allocator を外す | run 相のコードに割当 API が現れない（radiance の `arena.h` 規約）。ステップ時間が悪化しない（フェーズ 0 の計測と比較） |
-| D5 | 量子化の契約 | `quant/` に encoding（数）と**参照 dequant の型・契約**を置き、CPU 実装は `backend/cpu`（境界ルールで `src/quant` は `shelf/backend/` を include 禁止のため）。**有損 dequant はホットパス（GEMM 内）のみ**と規約化。**本命の重み量子化は EXL3 4bit（2026-10-28 決定。参照: `references/exllamav3` 公式と Strata `src/dsv41/vendor/exl3.*`（CPU 参照つき・HIP 経路の注記あり）。最初の適用は `shelf-validate` V1**）。fp8 KV の codec は `backend/hip` に残すが型の定義は `quant/` へ | 量子化スキーマの追加で動く箇所が `quant/`（型・契約）と `backend` の 2 実装（CPU 参照 / GPU 本番）に限られる（= 協調計画の量子化分岐と統合） |
+| D5 | 量子化の契約 | `quant/` に encoding（数）と**参照 dequant の型・契約**を置き、CPU 実装は `backend/cpu`（境界ルールで `src/quant` は `shelf/backend/` を include 禁止のため）。**有損 dequant はホットパス（GEMM 内）のみ**と規約化。**製品量子化版は FP8 W8A8（2026-10-29 決定。checkpoint `models/Qwen3.5-9B-FP8`。参照: compressed-tensors の `float-quantized` 仕様 / `transformers` の fp8 linear / `references/` の phaseshift-fp8。最初の適用は `shelf-validate` V1**）。低 VRAM 向けの 4bit 級（EXL3 など）は未決定（実測記録は `draft_docs/shelf_validate.md` §7「（6）履歴」）。fp8 KV の codec は `backend/hip` に残すが型の定義は `quant/` へ | 量子化スキーマの追加で動く箇所が `quant/`（型・契約）と `backend` の 2 実装（CPU 参照 / GPU 本番）に限られる（= 協調計画の量子化分岐と統合） |
 | D6 | バックエンド起動契約 | `backend/common` に機能表（required/optional）と、選択を 1 度だけ行う dispatch を定義 | 選択が複数回・複数箇所で行われない。未対応機能要求が受理前に検出される |
 | D7 | 検証の固定化 | 境界テストに §3.3 の新ルールを追加、1 ディレクトリ = 1 ターゲットの整合確認、性能の回帰ゲート | cpu / hip 両プリセットで全テストが通り、境界テストが新ルールを検査している |
 | D8 | Server 層の導入 | **パス A で確定（§2.5 / §3.5）** → `src/api` にエンジン抽象と型付き JSONL ブリッジ、OpenAI 面は `apps/server/`（Python + aiohttp + HF `transformers`）。あわせて `engine_contract.md` §3 の **5 パラメータ（`temperature` / `top_k` / `top_p` / `min_p` / `seed`）をエンジン側に実装**（現状は greedy 専用のため追加が必要） | `/v1/chat/completions` の受付〜ストリーム完了までを**フェイクエンジン**で、ポート・モデル無しに検証するテストがある。エラーは `draft_docs/serve_protocol.md` §3 の表駆動で検証する。`src/api` が `hip/` と `shelf/backend/` を含まないことを境界テストが検査 |
@@ -412,9 +417,9 @@ D1 と D8 の前提。草案 v0 済み）
 
 * **D1〜D3 は挙動を変えずに構造だけ動かす**フェーズとし、差分を小さく保つ（PhaseShift の
   `initialize` が陥った「1 関数に段階を集める」の逆）
-* **D4 と D5 が最も工数を見込む**。D4 は `step_executor` の実装方式、D5 は EXL3 の
-  デコード GEMM の規模に依存するため、着手前に `shelf-validate` V1 のスモーク
-  （1 テンソルのデコードを exllamav3 と突合）で可否と規模を測る
+* **D4 と D5 が最も工数を見込む**。D4 は `step_executor` の実装方式、D5 は FP8 GEMM
+  （gfx1201 の fp8 マトリクス命令の実在）の規模に依存するため、着手前に `shelf-validate` V1 のスモーク
+  （1 テンソルの dequant を torch / `transformers` と突合、加えて fp8 命令のミニベンチ）で可否と規模を測る
 * 財産の一方通行: 各フェーズで `draft_docs/dependency_rules.md` を更新し、文書と
   境界テストの乖離を残さない（PhaseShift が `docs/developer/*.md` で経験した陳腐化の回避）
 

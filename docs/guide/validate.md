@@ -124,7 +124,8 @@ rocm-smi                       # VRAM% / GPU% を見る
 空き 1 GPU で開発モデル `Qwen3.5-9B` bf16 を動かす目安（2026-10-28 実測）:
 重み payload 19.31 GB ＋ arena **2,299 MiB**（rows=64 自動算出）で、
 **VRAM 常駐合計 20.56 GB**（重み + KV 状態 + arena の `free` 差分）。
-approx（`Qwen3.5-9B-exl3`、EXL3 4bit）の重みは 7.19 GB。内訳は `docs/spec/validate.md` §11.2。
+approx（`Qwen3.5-9B-FP8`、FP8 W8A8）の重みはディスク 14.01 GB（`language_model` ＋ `lm_head` で 12.61 GB）。
+内訳は `docs/spec/validate.md` §11.2。
 
 ---
 
