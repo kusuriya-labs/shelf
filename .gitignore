@@ -27,6 +27,3 @@ __pycache__/
 /artifacts/
 /environment/
 /.rocprofv3/
-
-# 参照実装（コミット禁止 — 依頼元の指定どおり。正本は移植先の src/ 側）
-/DONT_COMMIT/

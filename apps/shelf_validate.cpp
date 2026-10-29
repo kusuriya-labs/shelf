@@ -33,11 +33,14 @@
 #include <shelf/backend/hip/step_executor.hpp>
 #endif
 
+#include "common/app_support.hpp"
+#include "common/pipeline.hpp"
 #include "fixtures/prefill_fixture.hpp"
 
 namespace {
 
 using namespace shelf;
+namespace app = shelf::app;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -77,49 +80,6 @@ std::size_t numel(const std::vector<std::size_t>& s) {
     return n;
 }
 
-// checkpoint の bf16 ビットをそのまま読む（変換なし）。
-Result<std::vector<bf16_t>> read_bf16(
-        const std::map<std::string, artifact::safetensors::Reader*>& where,
-        const std::string& name) {
-    auto it = where.find(name);
-    if (it == where.end()) return Status::not_found("shard に無いテンソル: " + name, __FILE__, __LINE__);
-    const auto* reader = it->second;
-    const auto* entry = reader->catalog().find(name);
-    if (!entry) return Status::not_found("catalog 不一致: " + name, __FILE__, __LINE__);
-    if (entry->dtype != DataType::bf16)
-        return Status::unsupported("bf16 でない: " + name, __FILE__, __LINE__);
-    const std::size_t bytes = entry->end - entry->begin;
-    std::vector<bf16_t> out(bytes / 2);
-    SHELF_RETURN_IF_ERROR(reader->read_tensor(name, out.data(), bytes));
-    return out;
-}
-
-// f32 か bf16 を f32 として読む（CPU 参照経路用）。
-Result<std::vector<float>> read_f32(
-        const std::map<std::string, artifact::safetensors::Reader*>& where,
-        const std::string& name) {
-    auto it = where.find(name);
-    if (it == where.end()) return Status::not_found("shard に無いテンソル: " + name, __FILE__, __LINE__);
-    const auto* reader = it->second;
-    const auto* entry = reader->catalog().find(name);
-    if (!entry) return Status::not_found("catalog 不一致: " + name, __FILE__, __LINE__);
-    const std::size_t bytes = entry->end - entry->begin;
-    if (entry->dtype == DataType::f32) {
-        std::vector<float> out(bytes / sizeof(float));
-        SHELF_RETURN_IF_ERROR(reader->read_tensor(name, out.data(), bytes));
-        return out;
-    }
-    if (entry->dtype == DataType::bf16) {
-        std::vector<bf16_t> raw(bytes / 2);
-        auto st = reader->read_tensor(name, raw.data(), bytes);
-        if (!st.ok()) return st;
-        std::vector<float> out(raw.size());
-        for (std::size_t i = 0; i < raw.size(); ++i) out[i] = bf16_to_f32(raw[i]);
-        return out;
-    }
-    return Status::unsupported("未対応 dtype: " + name, __FILE__, __LINE__);
-}
-
 std::string usage_text() {
     return
         "使い方:\n"
@@ -127,16 +87,18 @@ std::string usage_text() {
         "\n"
         "オプション:\n"
         "  --exact-model=<dir>       無損失 (bf16) 側のモデルディレクトリ（必須）\n"
-        "  --approx-model=<dir>      量子化側のモデルディレクトリ（V1 以降で有効）\n"
+        "  --approx-model=<dir>      量子化 (FP8 W8A8) 側のモデルディレクトリ\n"
         "  --prefill-tokens=<N>      prefill 長（既定 256、範囲 128..384）\n"
         "  --budget=<N>              prefill + decode の合計上限（既定 512）\n"
         "  --stop-id=<id>            StopToken（既定: モデル設定の eos_token_id）\n"
-        "  --pipeline-parallel=<K>   ステージ数（既定 1、K>1 は V2 以降で有効）\n"
+        "  --pipeline-parallel=<K>   レイヤ分割のステージ数（既定 1）。GPU は --gpu から K 台使う\n"
         "  --device=<hip|cpu>        実行デバイス（既定: HIP ビルドなら hip、それ以外 cpu）\n"
         "  --gpu=<n>                 GPU 番号（既定 0）\n"
         "  --runs=<n>                決定性チェックの反復数（既定 2）\n"
         "  --ids-file=<path>         入力 token ids（既定: 同梱 fixture。区切りは空白・カンマ）\n"
         "  --out=<dir>               結果 JSON の保存先（既定 shelf-validate-out）\n"
+        "  --t2-margin=<x>           T2 判定の margin 上限（既定: 未設定 = 基準値待ちで保留）\n"
+        "  --pp-baseline=<on|off>    PP>1 のとき PP=1 でも走らせて一致を確認（既定 off）\n"
         "  --help                    このヘルプを表示\n"
         "\n"
         "終了コード: 0 = 合格 / 1 = 条件付き合格（T2、V1 以降）/ 2 = 不合格または起動エラー\n";
@@ -151,8 +113,10 @@ struct Options {
     std::size_t prefill_tokens = 256;
     std::size_t budget = 512;
     std::size_t pipeline_parallel = 1;
+    std::string pp_baseline = "off";     // on = PP=1 でも走らせて一致を確認（V2 の門）
     std::size_t runs = 2;
     int gpu = 0;
+    double t2_margin = -1.0;     // < 0 = 未設定（T2 は pending）
     bool stop_id_set = false;
     std::int64_t stop_id = -1;
 };
@@ -332,6 +296,22 @@ int main(int argc, char** argv) {
                 return -1;
             }
         };
+        if (key == "--pipeline-parallel") {
+            try { o.pipeline_parallel = std::stoul(val); }
+            catch (...) { return fail("--pipeline-parallel は整数です: " + val); }
+            if (o.pipeline_parallel == 0) return fail("--pipeline-parallel は 1 以上");
+            continue;
+        }
+        if (key == "--pp-baseline") {
+            if (val != "on" && val != "off") return fail("--pp-baseline は on / off");
+            o.pp_baseline = val;
+            continue;
+        }
+        if (key == "--t2-margin") {
+            try { o.t2_margin = std::stod(val); }
+            catch (...) { return fail("--t2-margin は数値です: " + val); }
+            continue;
+        }
         if (key == "--exact-model") {
             o.exact_model = val;
         } else if (key == "--approx-model") {
@@ -374,10 +354,8 @@ int main(int argc, char** argv) {
 
     // ---- 仕様検査（§2）。起動前に拒否する ----
     if (o.exact_model.empty()) return fail("--exact-model は必須です\n" + usage_text());
-    if (!o.approx_model.empty())
-        return fail("approx 経路は未実装です（V1 で追加します）");
-    if (o.pipeline_parallel != 1)
-        return fail("pipeline-parallel > 1 は未実装です（V2 で追加します）");
+    if (o.pipeline_parallel > 1 && o.device != "hip")
+        return fail("--pipeline-parallel > 1 は hip のみ対応です");
     if (o.prefill_tokens < kMinRunTokens || o.prefill_tokens > kMaxPrefillTokens)
         return fail("--prefill-tokens は " + std::to_string(kMinRunTokens) + ".." +
                     std::to_string(kMaxPrefillTokens) + " の範囲で指定してください（" +
@@ -440,83 +418,55 @@ int main(int argc, char** argv) {
         if (id < 0 || static_cast<std::size_t>(id) >= cfg.vocab_size)
             return fail("入力トークンが語彙外です: " + std::to_string(id));
 
-    // ---- グラフ（§4 手順 3: 行数上限 64 のため prefill はチャンク） ----
-    auto plan_r = model::qwen35::build_step_graph(cfg, capacity);
-    if (!plan_r.ok()) return fail(plan_r.status().message());
-    auto& plan = plan_r.value();
-    std::unique_ptr<model::qwen35::StepGraphPlan> prefill_plan;
-    if (use_hip) {
-        auto pr = model::qwen35::build_step_graph(cfg, capacity, kPrefillChunkRows);
-        if (!pr.ok()) return fail("prefill グラフ: " + pr.status().message());
-        prefill_plan = std::make_unique<model::qwen35::StepGraphPlan>(pr.release());
-    }
+    // ---- 1 モデル分のロードと実行（exact / approx で呼ぶ） ----
+    // §4 の手順を model_dir に対してそのまま行う。exact と approx を**同時に VRAM
+    // へ載せられない**（9B で bf16 17.9 GB + FP8 12.6 GB ≳ GPU の搭載 VRAM）ため、
+    // exact を走らせてから実行器とシャードを解放し、approx を読む。
+    // 比較は host 側に保持したトークン列と top-1/2（§5 の T1/T2 の入力）で行う。
+    struct ModelRun {
+        std::vector<RunResult> runs;
+        double load_ms = 0.0;
+        bool device_used_known = false;
+        std::size_t device_used_bytes = 0;
+        std::size_t arena_bytes = 0;
+        std::size_t stages = 1;                // pipeline-parallel のステージ数
+        std::string fp8_declared;              // 空 = 量子化されていない
+        std::uint32_t fp8_act_group = 0u;
+    };
 
-    // ---- シャード ----
-    nlohmann::json index;
-    try {
-        index = nlohmann::json::parse(read_file_str(o.exact_model + "/model.safetensors.index.json"));
-    } catch (...) {
-        return fail("model.safetensors.index.json を読めません: " + o.exact_model);
+    auto run_model = [&](const std::string& model_dir, const char* key,
+                         const model::qwen35::TextConfig& cfg, const StopSet& stop,
+                         ModelRun& mr) -> int {
+    // ---- グラフ（§4 手順 3: 行数上限 64 のため prefill はチャンク） ----
+    // HIP は pipeline（PP=1 なら 1 ステージ）がグラフと実行器を持つ。
+    // CPU 参照経路は全層 1 グラフ（PP 非対応）。
+    model::qwen35::StepGraphPlan plan_holder;
+    if (!use_hip) {
+        auto plan_r = model::qwen35::build_step_graph(cfg, capacity);
+        if (!plan_r.ok()) return fail(plan_r.status().message());
+        plan_holder = plan_r.release();
     }
-    std::vector<std::string> shard_files;
-    for (const auto& f : index.at("weight_map").items()) {
-        const std::string file = f.value().get<std::string>();
-        if (std::find(shard_files.begin(), shard_files.end(), file) == shard_files.end())
-            shard_files.push_back(file);
+#ifdef SHELF_HAVE_HIP
+    app::Pipeline pipeline;
+#endif
+
+    // ---- シャード（apps 共通の読み方を使う: 正本は app_support） ----
+    app::ShardSet shards;
+    if (auto st = app::open_shards(model_dir, &shards); !st.ok())
+        return fail(st.message());
+
+    // FP8 の形は checkpoint の宣言が正（approx 側が量子化されている場合のみ効く）。
+    auto fmt_r = app::read_fp8_format(app::read_file_str(model_dir + "/config.json"));
+    if (!fmt_r.ok()) return fail("quantization_config: " + fmt_r.status().message());
+    const auto fmt = fmt_r.value();
+    if (fmt.quantized) {
+        mr.fp8_declared = fmt.declared;
+        mr.fp8_act_group = fmt.act_group;
     }
-    std::vector<artifact::safetensors::Reader> readers;
-    for (const auto& f : shard_files) {
-        auto r = artifact::safetensors::Reader::open(o.exact_model + "/" + f);
-        if (!r.ok()) return fail("shard を開けません " + f + ": " + r.status().message());
-        readers.push_back(r.release());
-    }
-    std::map<std::string, artifact::safetensors::Reader*> where;
-    for (auto& r : readers)
-        for (const auto& name : r.list_tensors())
-            if (!where.contains(name)) where.emplace(name, &r);
 
     // ---- ロード（§4 手順 2） ----
     const double t_load = now_ms();
-#ifdef SHELF_HAVE_HIP
-    std::unique_ptr<backend::hip::HipStepExecutor> hip_exec;
-#endif
     backend::cpu::HostStorage storage;
-    std::size_t device_used_bytes = 0;
-    bool device_used_known = false;
-
-    // arena の自動算出（HIP, `arena_bytes = 0`）は declare_states のグラフに依存する
-    // ため、行数の大きい prefill グラフ (rows=64) を優先して渡す。
-    // 両プランのステート集合が同一であることを先に検査しておく。
-    const model::qwen35::StepGraphPlan& declare_plan = prefill_plan ? *prefill_plan : plan;
-    if (prefill_plan) {
-        if (prefill_plan->states.size() != plan.states.size())
-            return fail("prefill / decode グラフのステート集合が一致しない（サイズ）");
-        for (std::size_t i = 0; i < plan.states.size(); ++i)
-            if (prefill_plan->states[i].id.value() != plan.states[i].id.value())
-                return fail("prefill / decode グラフのステート集合が一致しない（id）");
-    }
-
-    const auto upload_weights = [&](auto& ex) -> int {
-        for (const auto& w : plan.weights) {
-            auto tb = read_bf16(where, w.checkpoint_name);
-            if (tb.ok()) {
-                if (tb.value().size() != numel(w.shape))
-                    return fail("要素数不一致: " + w.checkpoint_name);
-                auto st = ex->upload_weight_bf16(w.id, tb.value().data(), tb.value().size());
-                if (!st.ok()) return fail("upload " + w.checkpoint_name + ": " + st.message());
-                continue;
-            }
-            auto t = read_f32(where, w.checkpoint_name);
-            if (!t.ok()) return fail(t.status().message());
-            if (t.value().size() != numel(w.shape))
-                return fail("要素数不一致: " + w.checkpoint_name);
-            auto st = ex->upload_weight(w.id, t.value());
-            if (!st.ok()) return fail("upload " + w.checkpoint_name + ": " + st.message());
-        }
-        auto st = ex->declare_states(declare_plan.graph);
-        if (!st.ok()) return fail("declare_states: " + st.message());
-        return 0;
-    };
 
     if (use_hip) {
 #ifdef SHELF_HAVE_HIP
@@ -539,40 +489,46 @@ int main(int argc, char** argv) {
             st = meminfo(free_before, total_before);
             if (!st.ok()) return fail(st.message());
         }
-        // arena は既定の auto（arena_bytes = 0）を使い、executor が
-        // declare_states に渡すグラフから算出する（行数の大きい prefill グラフを渡す）。
-        backend::hip::HipStepExecutorOptions ho;
-        ho.device = o.gpu;
-        ho.rope_theta = cfg.rope_theta;
-        ho.rope_rotary_dim = cfg.rotary_dim;
-        hip_exec = std::make_unique<backend::hip::HipStepExecutor>(ho);
-        if (int rc = upload_weights(hip_exec)) return rc;
-        std::printf("  arena: %.0f MB（自動算出: prefill グラフ rows=64）\n",
-                    static_cast<double>(hip_exec->arena_bytes()) / (1024.0 * 1024.0));
+        // pipeline: レイヤ範囲でステージ分割（PP=1 は 1 ステージ = 従来と同じ）。
+        // arena は各ステージで自動算出（prefill グラフの行数に合わせる）。
+        app::PipelineOptions po;
+        for (std::size_t k = 0; k < o.pipeline_parallel; ++k)
+            po.devices.push_back(o.gpu + static_cast<int>(k));
+        po.kv_capacity = capacity;
+        po.chunk_rows = kPrefillChunkRows;
+        po.rope_theta = cfg.rope_theta;
+        po.rope_rotary_dim = cfg.rotary_dim;
+        po.fp8_act_group = fmt.act_group;
+        po.verbose = true;
+        auto pl = app::make_pipeline(cfg, shards, fmt, po);
+        if (!pl.ok()) return fail("pipeline: " + pl.status().message());
+        pipeline = pl.release();
+        mr.stages = pipeline.stages.size();
+        mr.arena_bytes = pipeline.arena_bytes;
         {
             auto st = meminfo(free_after, total_after);
             if (!st.ok()) return fail(st.message());
         }
-        device_used_bytes = free_before - free_after;
-        device_used_known = true;
+        mr.device_used_bytes = free_before - free_after;
+        mr.device_used_known = true;
 #else
         return fail("このビルドは HIP 非対応です");
 #endif
     } else {
-        for (const auto& w : plan.weights) {
-            auto t = read_f32(where, w.checkpoint_name);
-            if (!t.ok()) return fail(t.status().message());
-            if (t.value().size() != numel(w.shape))
+        for (const auto& w : plan_holder.weights) {
+            auto t = app::read_f32(shards.where, w.checkpoint_name);
+            if (!t.ok()) return fail(w.checkpoint_name + ": " + t.status().message());
+            if (t.value().size() != app::numel(w.shape))
                 return fail("要素数不一致: " + w.checkpoint_name);
             auto st = storage.set_weight(w.id, t.release());
             if (!st.ok()) return fail("set_weight " + w.checkpoint_name + ": " + st.message());
         }
-        for (const auto& s : plan.states) {
+        for (const auto& s : plan_holder.states) {
             auto st = storage.init_state(s.id, std::vector<float>(numel(s.shape), 0.0f));
             if (!st.ok()) return fail("init_state: " + st.message());
         }
     }
-    const double load_ms = now_ms() - t_load;
+    mr.load_ms = now_ms() - t_load;
 
     // ---- RoPE 周波数表（CPU 経路のみ使用。f32 の inv_freq を double で再現） ----
     const std::size_t rd = cfg.rotary_dim;
@@ -583,29 +539,24 @@ int main(int argc, char** argv) {
     // ---- 1 行ステップ（位置 pos の token を 1 つ投入して logits を得る） ----
     auto step1 = [&](std::int32_t token, std::uint32_t pos, std::vector<float>* logits) -> Status {
 #ifdef SHELF_HAVE_HIP
-        if (hip_exec) {
-            SHELF_RETURN_IF_ERROR(hip_exec->run_step(plan.graph, token, pos));
-            if (logits) {
-                auto lg = hip_exec->fetch_logits(plan.graph);
-                if (!lg.ok()) return lg.status();
-                *logits = std::move(lg.value());
-            }
-            return Status::make_ok();
+        if (!pipeline.stages.empty()) {
+            const std::int32_t t = token;
+            return app::pipeline_step(pipeline, &t, 1, pos, logits);
         }
 #endif
         storage.reset_values();
-        SHELF_RETURN_IF_ERROR(storage.set_value_int(plan.tokens, {token}));
+        SHELF_RETURN_IF_ERROR(storage.set_value_int(plan_holder.tokens, {token}));
         std::vector<float> cosv(rd), sinv(rd);
         for (std::size_t j = 0; j < rd / 2; ++j) {
             const double f = static_cast<double>(pos) * inv[j];
             cosv[j] = cosv[j + rd / 2] = static_cast<float>(std::cos(f));
             sinv[j] = sinv[j + rd / 2] = static_cast<float>(std::sin(f));
         }
-        SHELF_RETURN_IF_ERROR(storage.set_value(plan.cos, std::move(cosv)));
-        SHELF_RETURN_IF_ERROR(storage.set_value(plan.sin, std::move(sinv)));
-        SHELF_RETURN_IF_ERROR(backend::cpu::ReferenceExecutor::run(plan.graph, storage));
+        SHELF_RETURN_IF_ERROR(storage.set_value(plan_holder.cos, std::move(cosv)));
+        SHELF_RETURN_IF_ERROR(storage.set_value(plan_holder.sin, std::move(sinv)));
+        SHELF_RETURN_IF_ERROR(backend::cpu::ReferenceExecutor::run(plan_holder.graph, storage));
         if (logits) {
-            const auto* lv = storage.value(plan.logits);
+            const auto* lv = storage.value(plan_holder.logits);
             if (!lv) return Status::invalid_state("run 後に logits が無い", __FILE__, __LINE__);
             *logits = *lv;
         }
@@ -617,7 +568,7 @@ int main(int argc, char** argv) {
     auto prefill = [&](const std::vector<std::int64_t>& ids, std::vector<float>* last_logits)
         -> Status {
 #ifdef SHELF_HAVE_HIP
-        if (hip_exec) {
+        if (!pipeline.stages.empty()) {
             const std::size_t full_chunks = ids.size() / kPrefillChunkRows;
             std::vector<std::int32_t> win;
             for (std::size_t c = 0; c < full_chunks; ++c) {
@@ -625,14 +576,22 @@ int main(int argc, char** argv) {
                 for (std::size_t i = 0; i < kPrefillChunkRows; ++i)
                     win.push_back(static_cast<std::int32_t>(ids[c * kPrefillChunkRows + i]));
                 const std::size_t base = c * kPrefillChunkRows;
-                auto st = hip_exec->run_step(prefill_plan->graph, win.data(), kPrefillChunkRows,
-                                             static_cast<std::uint32_t>(base));
+                const bool tail_pending = (ids.size() != full_chunks * kPrefillChunkRows);
+                const bool last_chunk = (c + 1 == full_chunks) && !tail_pending;
+                std::vector<float> lg;
+                auto st = app::pipeline_step(pipeline, win.data(), kPrefillChunkRows,
+                                             static_cast<std::uint32_t>(base),
+                                             (last_chunk && last_logits) ? &lg : nullptr);
                 if (!st.ok())
                     return Status::invalid_state("prefill チャンク 位置 " +
                                                      std::to_string(base) + ": " + st.message(),
                                                  __FILE__, __LINE__);
                 std::printf("  prefill チャンク 位置 %zu..%zu (%.1f ms)\n", base,
-                            base + kPrefillChunkRows - 1, hip_exec->stats().last_step_ms);
+                            base + kPrefillChunkRows - 1, pipeline.last_step_ms);
+                if (last_chunk && last_logits) {
+                    const std::size_t rows = lg.size() / kPrefillChunkRows;
+                    last_logits->assign(lg.end() - static_cast<std::ptrdiff_t>(rows), lg.end());
+                }
             }
             const std::size_t tail = ids.size() - full_chunks * kPrefillChunkRows;
             for (std::size_t i = 0; i < tail; ++i) {
@@ -641,14 +600,6 @@ int main(int argc, char** argv) {
                 SHELF_RETURN_IF_ERROR(step1(static_cast<std::int32_t>(ids[p]),
                                             static_cast<std::uint32_t>(p),
                                             is_last ? last_logits : nullptr));
-            }
-            if (tail == 0 && last_logits) {
-                // 末尾がチャンクのとき: 64 行分のうち最終行の logits を採用する。
-                auto lg = hip_exec->fetch_logits(prefill_plan->graph);
-                if (!lg.ok()) return lg.status();
-                const auto& full = lg.value();
-                const std::size_t rows = full.size() / kPrefillChunkRows;
-                last_logits->assign(full.end() - static_cast<std::ptrdiff_t>(rows), full.end());
             }
             return Status::make_ok();
         }
@@ -692,12 +643,11 @@ int main(int argc, char** argv) {
     };
 
     // ---- 実行（§4）。毎回ステートをリセットして反復間の決定性を確かめる ----
-    std::vector<RunResult> run_results;
-    run_results.reserve(o.runs);
+    mr.runs.reserve(o.runs);
     for (std::size_t r = 0; r < o.runs; ++r) {
 #ifdef SHELF_HAVE_HIP
-        if (hip_exec) {
-            auto st = hip_exec->reset_states();
+        if (!pipeline.stages.empty()) {
+            auto st = app::pipeline_reset(pipeline);
             if (!st.ok()) return fail("reset_states: " + st.message());
         } else
 #endif
@@ -706,7 +656,7 @@ int main(int argc, char** argv) {
         }
 
         RunResult rr;
-        rr.config_key = "exact";
+        rr.config_key = key;
         rr.index = r;
 
         std::vector<float> logits;
@@ -723,23 +673,57 @@ int main(int argc, char** argv) {
         std::printf("run %zu/%zu: %zu tok 生成 (%s), prefill %.1f ms / decode %.1f ms\n",
                     r + 1, o.runs, rr.tokens.size(), rr.stop_reason.c_str(), rr.prefill_ms,
                     rr.decode_ms);
-        run_results.push_back(std::move(rr));
+        mr.runs.push_back(std::move(rr));
+    }
+    return 0;
+    };  // run_model
+
+    ModelRun exact_run;
+    if (int rc = run_model(o.exact_model, "exact", cfg, stop, exact_run)) return rc;
+    ModelRun approx_run;
+    if (!o.approx_model.empty()) {
+        auto acfg_r = model::qwen35::load_text_config_json(
+            app::read_file_str(o.approx_model + "/config.json"));
+        if (!acfg_r.ok()) return fail("approx の config.json: " + acfg_r.status().message());
+        const auto& acfg = acfg_r.value();
+        if (acfg.vocab_size != cfg.vocab_size || acfg.num_layers != cfg.num_layers ||
+            acfg.hidden_size != cfg.hidden_size || acfg.layer_kinds != cfg.layer_kinds)
+            return fail("exact と approx が同じ構成ではありません（T1 は同じモデルの比較）");
+        auto astop_r = resolve_stop(o, o.approx_model, acfg);
+        if (!astop_r.ok())
+            return fail("approx の停止トークン: " + astop_r.status().message());
+        if (astop_r.value().ids != stop.ids)
+            return fail("exact と approx で停止トークン集合が違います（比較不可）");
+        if (int rc = run_model(o.approx_model, "approx", acfg, stop, approx_run)) return rc;
     }
 
-    // ---- 比較（§5）。V0 の軸は T0（同一構成の反復一致）のみ ----
+    // ---- 比較（§5） ----
+    // T0: 同一 config 内の反復（決定性）。exact / approx の各自で行う。
+    // T1: exact run0 vs approx run0（トークン列の一致）。
+    // T2: T1 が diverged のとき、不一致位置での exact 側 margin（top1-top2）を
+    //     基準値（--t2-margin、parity_policy §3 の margin 分布 p99）と比較する。
+    //     margin が基準以下 = 正本側でもほぼ同点だった位置 → 条件付き合格 (exit 1)。
+    //     margin が基準超 = 正本が明確に決めていた位置で割れた → 不合格 (exit 2)。
+    //     基準未設定なら pending（exit 1）として、測った値を JSON に残す。
     std::vector<json> comparisons;
-    for (std::size_t i = 1; i < run_results.size(); ++i)
-        comparisons.push_back(compare_runs(run_results[0], run_results[i], "T0"));
+    const auto add_t0 = [&](const ModelRun& mr) {
+        for (std::size_t i2 = 1; i2 < mr.runs.size(); ++i2)
+            comparisons.push_back(compare_runs(mr.runs[0], mr.runs[i2], "T0"));
+    };
+    add_t0(exact_run);
+    add_t0(approx_run);
 
     int exit_code = 0;
     std::string t0_verdict = comparisons.empty() ? "skipped" : "identical";
     for (const auto& c : comparisons) {
         const std::string v = c.at("verdict").get<std::string>();
-        std::printf("T0 (run%zu vs run%zu): %s\n", c.at("a_index").get<std::size_t>(),
-                    c.at("b_index").get<std::size_t>(), v.c_str());
+        std::printf("T0 (%s run%zu vs run%zu): %s\n",
+                    c.at("a_config").get<std::string>().c_str(),
+                    c.at("a_index").get<std::size_t>(), c.at("b_index").get<std::size_t>(),
+                    v.c_str());
         if (v != "identical") {
             t0_verdict = v;
-            exit_code = 2;   // T1/T2 の条件付き合格 (exit 1) は V1 以降
+            exit_code = 2;
             if (v == "diverged") {
                 const std::size_t k = c.at("diverged_at").get<std::size_t>();
                 std::string margin = "n/a";
@@ -749,9 +733,89 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- V2 の門: PP=K が PP=1 と同じ数値になること（Strata の --split-device と同型）----
+    ModelRun pp_baseline_run;
+    std::string t1pp_verdict = "skipped";
+    if (o.pp_baseline == "on" && o.pipeline_parallel > 1) {
+        if (!o.approx_model.empty())
+            return fail("--pp-baseline=on は approx 併用時は未対応（exact 単独で使う）");
+        const std::size_t saved = o.pipeline_parallel;
+        o.pipeline_parallel = 1;
+        std::printf("--- PP=1 基線（一致確認のため再実行）---\n");
+        if (int rc = run_model(o.exact_model, "exact_pp1", cfg, stop, pp_baseline_run)) return rc;
+        o.pipeline_parallel = saved;
+        const json c = compare_runs(exact_run.runs[0], pp_baseline_run.runs[0], "T1pp");
+        t1pp_verdict = c.at("verdict").get<std::string>();
+        comparisons.push_back(c);
+        std::printf("T1pp (PP=%zu vs PP=1): %s\n", saved, t1pp_verdict.c_str());
+        if (t1pp_verdict != "identical") exit_code = 2;
+    }
+
+    std::string t1_verdict = "skipped", t2_verdict = "skipped";
+    json t2 = nullptr;
+    if (!approx_run.runs.empty()) {
+        const json t1 = compare_runs(exact_run.runs[0], approx_run.runs[0], "T1");
+        t1_verdict = t1.at("verdict").get<std::string>();
+        comparisons.push_back(t1);
+        std::printf("T1 (exact vs approx): %s\n", t1_verdict.c_str());
+        if (t1_verdict == "identical") {
+            std::printf("  トークン列は全一致（%zu tok）\n",
+                        t1.at("token_count").get<std::size_t>());
+        } else if (t1_verdict == "diverged") {
+            const std::size_t k = t1.at("diverged_at").get<std::size_t>();
+            const double m = t1.contains("a_margin") ? t1.at("a_margin").get<double>() : -1.0;
+            std::printf("  不一致位置 k=%zu  exact=%lld approx=%lld  exact margin=%.4f\n", k,
+                        static_cast<long long>(t1.contains("a_token_at_k")
+                                                   ? t1.at("a_token_at_k").get<std::int64_t>()
+                                                   : -1),
+                        static_cast<long long>(t1.contains("b_token_at_k")
+                                                   ? t1.at("b_token_at_k").get<std::int64_t>()
+                                                   : -1),
+                        m);
+            if (o.t2_margin < 0.0) {
+                t2_verdict = "pending_baseline";
+                t2 = {{"status", t2_verdict},
+                      {"exact_margin", m},
+                      {"note", "--t2-margin 未設定。まず margin を測って parity_policy §3 の"
+                               "基準値（分布の p99）を決める"}};
+                exit_code = std::max(exit_code, 1);
+            } else if (m >= 0.0 && m <= o.t2_margin) {
+                t2_verdict = "within_margin";
+                t2 = {{"status", t2_verdict},
+                      {"exact_margin", m},
+                      {"threshold", o.t2_margin}};
+                exit_code = std::max(exit_code, 1);
+            } else {
+                t2_verdict = "outside_margin";
+                t2 = {{"status", t2_verdict},
+                      {"exact_margin", m},
+                      {"threshold", o.t2_margin}};
+                exit_code = 2;
+            }
+            std::printf("T2: %s (exact margin=%.4f, 基準=%s)\n", t2_verdict.c_str(), m,
+                        o.t2_margin < 0.0 ? "未設定" : std::to_string(o.t2_margin).c_str());
+        } else {
+            // incomparable: 片方が StopToken に達するなど、比較の前提が崩れている。
+            exit_code = 2;
+        }
+    }
+
     // ---- 結果 JSON（§5） ----
+    const auto model_run_json = [](const ModelRun& mr) {
+        return json{
+            {"load_ms", mr.load_ms},
+            {"device_mem_used_bytes", mr.device_used_known ? json(mr.device_used_bytes)
+                                                          : json(nullptr)},
+            {"arena_bytes", mr.arena_bytes},
+            {"stages", mr.stages},
+            {"fp8", mr.fp8_declared.empty() ? json(nullptr) : json(mr.fp8_declared)},
+            {"fp8_act_group", mr.fp8_declared.empty() ? json(nullptr)
+                                                      : json(mr.fp8_act_group)},
+        };
+    };
+
     json result;
-    result["schema"] = "shelf-validate/v0";
+    result["schema"] = "shelf-validate/v1";
     result["exit_code"] = exit_code;
     result["config"] = {
         {"device", o.device},
@@ -761,26 +825,50 @@ int main(int argc, char** argv) {
         {"budget", o.budget},
         {"decode_cap", decode_cap},
         {"pipeline_parallel", o.pipeline_parallel},
-        {"models", {{"exact", o.exact_model}, {"approx", nullptr}}},
+        {"models", {{"exact", o.exact_model},
+                    {"approx", o.approx_model.empty() ? json(nullptr) : json(o.approx_model)}}},
+        {"t2_margin", o.t2_margin < 0.0 ? json(nullptr) : json(o.t2_margin)},
         {"input", {{"source", input_source},
                    {"length", o.prefill_tokens},
                    {"truncated", truncated}}},
         {"stop", {{"ids", stop.ids}, {"primary", stop.primary()}, {"source", stop.source}}},
-        {"device_mem_used_bytes", device_used_known ? json(device_used_bytes) : json(nullptr)},
+        {"device_mem_used_bytes",
+         exact_run.device_used_known ? json(exact_run.device_used_bytes) : json(nullptr)},
     };
     result["t0"] = t0_verdict;
+    result["t1pp"] = t1pp_verdict;
+    result["t1"] = t1_verdict;
+    result["t2"] = t2;
+    result["models_run"] = {{"exact", model_run_json(exact_run)},
+                            {"exact_pp1", model_run_json(pp_baseline_run)},
+                            {"approx", model_run_json(approx_run)}};
     json jr = json::array();
-    for (const auto& rr : run_results)
-        jr.push_back({{"config", rr.config_key},
-                      {"index", rr.index},
-                      {"token_count", rr.tokens.size()},
-                      {"stop_reason", rr.stop_reason},
-                      {"prefill_ms", rr.prefill_ms},
-                      {"decode_ms", rr.decode_ms},
-                      {"tokens", rr.tokens}});
+    const auto push_runs = [&](const ModelRun& mr) {
+        for (const auto& rr : mr.runs) {
+            json jttops = json::array();
+            for (const auto& t : rr.tops)
+                jttops.push_back({{"top1", t.top1},
+                                  {"top1_value", t.top1_val},
+                                  {"margin", static_cast<double>(t.top1_val) -
+                                             static_cast<double>(t.top2_val)}});
+            jr.push_back({{"config", rr.config_key},
+                          {"index", rr.index},
+                          {"token_count", rr.tokens.size()},
+                          {"stop_reason", rr.stop_reason},
+                          {"prefill_ms", rr.prefill_ms},
+                          {"decode_ms", rr.decode_ms},
+                          {"tokens", rr.tokens},
+                          {"tops", jttops}});
+        }
+    };
+    push_runs(exact_run);
+    push_runs(pp_baseline_run);
+    push_runs(approx_run);
     result["runs"] = jr;
     result["comparisons"] = json(comparisons);
-    result["timing"] = {{"load_ms", load_ms}, {"elapsed_ms", now_ms() - t_start}};
+    result["timing"] = {{"load_ms", exact_run.load_ms + approx_run.load_ms +
+                                     pp_baseline_run.load_ms},
+                        {"elapsed_ms", now_ms() - t_start}};
 
     std::error_code ec;
     fs::create_directories(o.out_dir, ec);
@@ -792,6 +880,7 @@ int main(int argc, char** argv) {
         f << result.dump(2) << "\n";
     }
     std::printf("判定: %s (exit %d) — 結果: %s\n",
-                exit_code == 0 ? "合格" : "不合格", exit_code, out_path.c_str());
+                exit_code == 0 ? "合格" : (exit_code == 1 ? "条件付き合格" : "不合格"),
+                exit_code, out_path.c_str());
     return exit_code;
 }

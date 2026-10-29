@@ -22,6 +22,9 @@ bool map_dtype(const std::string& s, DataType& out) {
     if (s == "F32")  { out = DataType::f32;  return true; }
     if (s == "F16")  { out = DataType::fp16; return true; }
     if (s == "BF16") { out = DataType::bf16; return true; }
+    // FP8（E4M3）ペイロード。スケール粒度などの意味論は quant/ の契約側で、
+    // リーダは「1 バイトの浮動小数型」という事実だけを扱う。
+    if (s == "F8_E4M3") { out = DataType::fp8_e4m3; return true; }
     if (s == "I64")  { out = DataType::i64;  return true; }
     if (s == "I32")  { out = DataType::i32;  return true; }
     if (s == "U8")   { out = DataType::u8;   return true; }

@@ -15,17 +15,43 @@ Status bad(const std::string& msg) {
 
 class Builder {
 public:
-    Builder(const TextConfig& cfg, std::size_t kv_capacity, std::size_t rows)
-        : cfg_(cfg), cap_(kv_capacity), rows_(rows) {}
+    Builder(const TextConfig& cfg, std::size_t kv_capacity, std::size_t rows, StageRange range)
+        : cfg_(cfg), cap_(kv_capacity), rows_(rows),
+          lo_(range.layer_lo),
+          hi_(range.layer_hi == 0 ? cfg.num_layers : range.layer_hi) {}
 
     Result<StepGraphPlan> build() {
+        if (lo_ >= hi_ || hi_ > cfg_.num_layers)
+            return bad("layer range out of bounds (lo=" + std::to_string(lo_) +
+                       ", hi=" + std::to_string(hi_) + ", num_layers=" +
+                       std::to_string(cfg_.num_layers) + ")");
         StepGraphPlan plan;
         plan.kv_capacity = cap_;
         plan.tied_embeddings = cfg_.tie_word_embeddings;
+        plan.layer_lo = lo_;
+        plan.layer_hi = hi_;
+        plan.is_first = (lo_ == 0);
+        plan.is_final = (hi_ == cfg_.num_layers);
 
-        tokens_ = nid();
-        SHELF_RETURN_IF_ERROR(g_.declare_input(vdesc(tokens_, {rows_}, DataType::i32)));
-        plan.tokens = tokens_;
+        // 入力の並び: 先頭は「データ入力」（トークン or 前段 hidden）、続いて cos/sin。
+        // 実行器は dtype でデータ入力を見分ける（i32 = tokens、bf16 = hidden）。
+        ValueId h;
+        if (plan.is_first) {
+            tokens_ = nid();
+            SHELF_RETURN_IF_ERROR(g_.declare_input(vdesc(tokens_, {rows_}, DataType::i32)));
+            plan.tokens = tokens_;
+            h = add_embedding();
+            if (!h.valid()) return last_;
+        } else {
+            // 前段の hidden をそのまま受け取る（bf16 の生ビット）。
+            hidden_in_ = nid();
+            // IR の dtype は論理宣言（他の活性化と同じ f32）。物理は実行器が bf16 で
+            // 扱い、前段の `hidden_out` の生ビットをそのまま受け取る。
+            SHELF_RETURN_IF_ERROR(
+                g_.declare_input(vdesc(hidden_in_, {rows_, cfg_.hidden_size})));
+            plan.hidden_in = hidden_in_;
+            h = hidden_in_;
+        }
         cos_ = nid();
         sin_ = nid();
         const std::size_t rd = cfg_.rotary_dim;
@@ -33,16 +59,17 @@ public:
         SHELF_RETURN_IF_ERROR(g_.declare_input(vdesc(sin_, {rd})));
         plan.cos = cos_;
         plan.sin = sin_;
-
-        ValueId h = add_embedding();
-        if (!h.valid()) return last_;
-        for (std::size_t l = 0; l < cfg_.num_layers; ++l) {
+        for (std::size_t l = lo_; l < hi_; ++l) {
             h = add_layer(l, h);
             if (!h.valid()) return last_;
         }
-        ValueId logits = add_final(h);
-        if (!logits.valid()) return last_;
-        plan.logits = logits;
+        if (plan.is_final) {
+            ValueId logits = add_final(h);
+            if (!logits.valid()) return last_;
+            plan.logits = logits;
+        } else {
+            plan.hidden_out = h;
+        }
 
         plan.graph = std::move(g_);
         plan.weights = std::move(weights_);
@@ -353,10 +380,18 @@ private:
     ValueId add_final(ValueId h) {
         ValueId hn = add_norm(h, "model.language_model.norm.weight", true);
         if (!hn.valid()) return hn;
-        if (!embed_id_.valid()) { last_ = bad("embedding weight missing"); return ValueId{}; }
-        // tied embeddings: lm_head IS the embedding table (same logical weight id)
-        TensorId out = embed_id_;
-        if (!cfg_.tie_word_embeddings) {
+        // tied embeddings: lm_head IS the embedding table (same logical weight id)。
+        // pipeline-parallel で最終ステージが先頭でない場合、embedding は先頭ステージに
+        // あるため tied は成立しない（明示エラー。untied の checkpoint は問題ない）。
+        TensorId out;
+        if (cfg_.tie_word_embeddings) {
+            if (!embed_id_.valid()) {
+                last_ = bad("tied embeddings は pipeline-parallel の最終ステージ単独では"
+                            "成立しない（embedding が先頭ステージにある）");
+                return ValueId{};
+            }
+            out = embed_id_;
+        } else {
             // untied (tie_word_embeddings = false): the checkpoint carries its own
             // lm_head.weight. Reusing the embedding here computes logits against the
             // wrong table (Qwen3.5-9B で観測: hidden は HF と一致するのに出力が劣化)。
@@ -368,11 +403,13 @@ private:
 
     const TextConfig& cfg_;
     std::size_t cap_;
+    std::size_t lo_ = 0;   // 担当レイヤ範囲 [lo_, hi_)
+    std::size_t hi_ = 0;
     ir::Graph g_;
     std::vector<WeightRef> weights_;
     std::vector<StateRef> states_;
     std::uint32_t next_value_ = 1;
-    ValueId tokens_, cos_, sin_;
+    ValueId tokens_, hidden_in_, cos_, sin_;
     std::size_t rows_;
     TensorId embed_id_;
     Status last_ = Status::make_ok();
@@ -381,8 +418,8 @@ private:
 } // namespace
 
 Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity,
-                                       std::size_t rows) {
-    Builder b(cfg, kv_capacity, rows);
+                                       std::size_t rows, StageRange range) {
+    Builder b(cfg, kv_capacity, rows, range);
     return b.build();
 }
 

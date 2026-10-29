@@ -60,7 +60,7 @@ if(SHELF_ENABLE_HIP)
     target_include_directories(shelf_backend_hip PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/hip/include>")
     target_link_libraries(shelf_backend_hip
-        PUBLIC shelf::backend_common shelf::ir hip::host
+        PUBLIC shelf::backend_common shelf::ir shelf::quant hip::host
         PRIVATE hip::device)
     # CMake passes CMAKE_HIP_ARCHITECTURES; pin it explicitly for determinism.
     target_compile_options(shelf_backend_hip PRIVATE
@@ -102,6 +102,18 @@ target_include_directories(shelf_artifact PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/artifact/common/include>"
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/artifact/safetensors/include>")
 target_link_libraries(shelf_artifact PUBLIC shelf::foundation PRIVATE shelf::nlohmann)
+
+# ---------------------------------------------------------------- quant
+# FP8 W8A8（compressed-tensors / float-quantized）の契約: E4M3 コーデックと
+# 断片順 relayout（ホスト側のみ）。デバイス側の e4m3 変換命令は backend/hip の
+# e4m3_codec に残り、意味論（スケールの粒度）はここが定義する。
+add_library(shelf_quant STATIC
+    src/quant/fp8_w8a8.cpp)
+add_library(shelf::quant ALIAS shelf_quant)
+target_include_directories(shelf_quant PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/quant/include>")
+target_link_libraries(shelf_quant PUBLIC shelf::foundation)
 
 # ---------------------------------------------------------------- weights
 # Header-only Canonical Catalog for now (binding/materialization later).

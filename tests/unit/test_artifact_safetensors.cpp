@@ -121,10 +121,10 @@ void test_error_probes() {
               "range/shape mismatch rejected");
         std::error_code ec; std::filesystem::remove(path, ec);
     }
-    {   // unsupported dtype (still unimplemented codec family)
+    {   // unsupported dtype（E5M2 系は未対応。E4M3 は下記で受理を確認する）
         const auto path = st_fixture::tmp_path("dtype");
         st_fixture::write_raw(path,
-            "{\"t\":{\"dtype\":\"F8_E4M3\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+            "{\"t\":{\"dtype\":\"F8_E5M2\",\"shape\":[4],\"data_offsets\":[0,4]}}",
             std::string(4, '\0'));
         check(safetensors::Reader::open(path).code() == Status::Code::unsupported,
               "unknown dtype -> unsupported");
@@ -146,9 +146,37 @@ void test_error_probes() {
 
 } // namespace
 
+// F8_E4M3 は受理する（1 バイトの浮動小数型として。意味論は quant/ の契約）。
+namespace {
+void test_fp8_e4m3_supported() {
+    const auto path = st_fixture::tmp_path("fp8");
+    std::vector<std::uint8_t> codes{0x38u, 0x00u, 0x7Eu, 0xFEu, 0x08u, 0x01u};
+    st_fixture::Tensor w{"mlp.down_proj.weight", "F8_E4M3", {2, 3}, codes};
+    st_fixture::Tensor s{"mlp.down_proj.weight_scale", "BF16", {2, 1},
+                         std::vector<std::uint8_t>{0x80, 0x3F, 0x00, 0x3E}};
+    check(st_fixture::write_file(path, {w, s}), "fp8 fixture written");
+    auto reader = safetensors::Reader::open(path);
+    check(reader.ok(), "F8_E4M3 を開ける");
+    if (!reader.ok()) return;
+    const auto* e = reader.value().catalog().find(w.name);
+    check(e != nullptr, "fp8 テンソルが見つかる");
+    if (e != nullptr) {
+        check(e->dtype == DataType::fp8_e4m3, "dtype fp8_e4m3");
+        check(e->end - e->begin == 6, "byte range = 要素数（1 バイト/要素）");
+    }
+    std::vector<std::uint8_t> out(6, 0u);
+    check(reader.value().read_tensor(w.name, out.data(), out.size()).ok(), "fp8 読み出し");
+    check(out == codes, "fp8 コードはバイト一致");
+    const auto* sc = reader.value().catalog().find(s.name);
+    check(sc != nullptr && sc->dtype == DataType::bf16, "weight_scale は BF16");
+    std::error_code ec; std::filesystem::remove(path, ec);
+}
+}  // namespace
+
 int main() {
     test_valid_file();
     test_error_probes();
+    test_fp8_e4m3_supported();
     std::printf("test_artifact_safetensors: failures=%d\n", failures);
     return failures == 0 ? 0 : 1;
 }

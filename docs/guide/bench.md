@@ -205,6 +205,7 @@ rocm-smi                       # VRAM% / GPU% を見る
 | `--gpu N` | 0 | GPU 番号 |
 | `--seed N` | 1234 | 合成トークン列のシード |
 | `--arena-mib N` | 0 | アリーナ（MiB）。**0 = グラフから自動算出**、正の値で固定 |
+| `--pipeline-parallel K` | 1 | レイヤ分割のステージ数（`pp` / `tg` 共通）。GPU は `--gpu` から K 台使う。**1 GPU に載らないモデル向け**（27B-FP8 は K=2 以上で prefill rows=64 が載る） |
 | `--output PATH` | なし | CSV を追記（ファイルが無ければヘッダを書く） |
 | `--help` | — | 使い方を表示（GPU 非依存・exit 0） |
 

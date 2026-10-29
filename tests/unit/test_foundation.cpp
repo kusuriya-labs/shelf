@@ -81,9 +81,12 @@ void test_dtype() {
     using shelf::DataType;
     check(shelf::element_size(DataType::bf16) == 2, "bf16 size");
     check(shelf::element_size(DataType::f32) == 4, "f32 size");
+    check(shelf::element_size(DataType::fp8_e4m3) == 1, "fp8_e4m3 size 1");
     check(shelf::element_size(DataType::unknown) == 0, "unknown size 0");
     check(shelf::is_floating_point(DataType::fp16), "fp16 is float");
+    check(shelf::is_floating_point(DataType::fp8_e4m3), "fp8_e4m3 is float");
     check(!shelf::is_floating_point(DataType::i32), "i32 not float");
+    check(!shelf::is_floating_point(DataType::u8), "u8 not float");
 }
 
 void test_numeric_conversions() {

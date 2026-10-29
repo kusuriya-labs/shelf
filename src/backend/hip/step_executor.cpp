@@ -3,6 +3,9 @@
 // Numerics policy: bf16 activations with fp32-accumulating kernels (the
 // vendored PhaseShift family). The CPU reference executor (f32) remains
 // the numerical golden; this executor is the speed path.
+// FP8 経路（approx 側）: 重みは E4M3 コードのまま断片順で載せ、活性化は
+// ステップごとに per-token スケールで量子化する。dequant はカーネル内
+// （行列命令が E4M3 を直接読む）。契約は src/quant/fp8_w8a8.hpp。
 #include <shelf/backend/hip/step_executor.hpp>
 
 #include <algorithm>
@@ -11,17 +14,20 @@
 #include <cmath>
 
 #include <shelf/backend/hip/kernels/elementwise/aux_ops.h>
+#include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
 #include <shelf/backend/hip/kernels/elementwise/embedding.h>
 #include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/gdn/gdn_conv_silu.h>
 #include <shelf/backend/hip/kernels/gdn/gdn_qk_prepare.h>
 #include <shelf/backend/hip/kernels/gdn/gdn_recurrence.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
+#include <shelf/backend/hip/kernels/gemm/linear_fp8.h>
 #include <shelf/backend/hip/kernels/attention/kv_append.h>
 #include <shelf/backend/hip/kernels/attention/paged_attention.h>
 #include <shelf/backend/hip/kernels/attention/rope.h>
 #include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/foundation/numeric.hpp>
+#include <shelf/quant/fp8_w8a8.hpp>
 
 namespace shelf::backend::hip {
 
@@ -48,6 +54,12 @@ std::size_t numel(const TensorShape& s) {
 std::size_t arena_bytes_for(const ir::Graph& g) {
     std::size_t bytes = 64u << 20;
     for (const auto& p : g.primitives()) bytes += numel(p.output.shape) * sizeof(float) * 2u;
+    // pipeline-parallel: 非先頭ステージは前段の hidden をアリーナに受ける。
+    // 入力もアリーナから取るので、その分を上乗せする（f32 換算で余裕を見る）。
+    // 先頭の入力が i32（トークン）でなければ前段 hidden を受けるステージ。
+    const auto& ins = g.all_inputs();
+    if (!ins.empty() && ins[0].dtype != DataType::i32)
+        bytes += numel(ins[0].shape) * sizeof(float);
     return bytes;
 }
 
@@ -66,7 +78,7 @@ template <class T> hipError_t malloc_dev(T** out, std::size_t count) {
 } // namespace
 
 HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
-    hipSetDevice(opts_.device);
+    (void)hipSetDevice(opts_.device);
     hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
     // arena_bytes == 0 ならアリーナは declare_states のグラフから自動算出する。
     hipError_t e0 = hipSuccess;
@@ -88,6 +100,7 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
 }
 
 HipStepExecutor::~HipStepExecutor() {
+    (void)hipSetDevice(opts_.device);
     // 解放の先にキューを消化する。発射済みカーネル／コピーが生きているまま
     // メモリを解放すると HSA のメモリフォルト／ハングになり得る
     // （エラー経路でここへ来ることがある）。
@@ -99,6 +112,12 @@ HipStepExecutor::~HipStepExecutor() {
         if (loc.table) hipFree(loc.table);
     }
     for (auto& [id, p] : weight_dev_) hipFree(p);
+    for (auto& [id, w] : weight_fp8_) {
+        if (w.codes) hipFree(w.codes);
+        if (w.scales) hipFree(w.scales);
+    }
+    hipFree(fp8_codes_dev_);
+    hipFree(fp8_scales_dev_);
     hipFree(arena_dev_);
     hipFree(token_dev_);
     hipFree(posrep_dev_);
@@ -111,6 +130,7 @@ HipStepExecutor::~HipStepExecutor() {
 }
 
 Status HipStepExecutor::upload_weight(TensorId id, const std::vector<float>& f32) {
+    (void)hipSetDevice(opts_.device);
     if (weight_dev_.count(id.value()))
         return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
     std::vector<bf16_t> b(f32.size());
@@ -125,6 +145,7 @@ Status HipStepExecutor::upload_weight(TensorId id, const std::vector<float>& f32
 }
 
 Status HipStepExecutor::upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n) {
+    (void)hipSetDevice(opts_.device);
     if (weight_dev_.count(id.value()))
         return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
     bf16_t* dev = nullptr;
@@ -135,7 +156,61 @@ Status HipStepExecutor::upload_weight_bf16(TensorId id, const bf16_t* data, std:
     return Status::make_ok();
 }
 
+Status HipStepExecutor::upload_weight_fp8(TensorId id, const std::uint8_t* codes,
+                                          std::size_t n_codes, const float* scales,
+                                          std::size_t features, std::uint32_t k_padded,
+                                          bool weight_block128) {
+    (void)hipSetDevice(opts_.device);
+    using namespace shelf::quant::fp8;
+    if (weight_fp8_.count(id.value()) || weight_dev_.count(id.value()))
+        return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
+    if (features == 0u || (k_padded % kTileK) != 0u)
+        return Status::invalid_argument("upload_weight_fp8: 形の指定不正", __FILE__, __LINE__);
+    // codes は 16 行単位で切り上げた tiled_bytes(features, k_padded)。
+    if (n_codes != tiled_bytes(u32(features), k_padded))
+        return Status::invalid_argument(
+            "upload_weight_fp8: コード数がレイアウトと不一致（" + std::to_string(n_codes) +
+            " != " + std::to_string(tiled_bytes(u32(features), k_padded)) + "）",
+            __FILE__, __LINE__);
+    const WeightScaleGranularity g =
+        weight_block128 ? WeightScaleGranularity::Block128 : WeightScaleGranularity::PerChannel;
+    const std::size_t want_scales = weight_scale_count(g, u32(features), k_padded);
+    if (want_scales == 0u)
+        return Status::invalid_argument("upload_weight_fp8: スケール数が不正", __FILE__, __LINE__);
+    std::uint8_t* cdev = nullptr;
+    float* sdev = nullptr;
+    SHELF_RETURN_IF_ERROR(hipok(malloc_dev(&cdev, n_codes), "malloc weight fp8 codes"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMalloc(&sdev, want_scales * sizeof(float)),
+                                "malloc weight fp8 scales"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(cdev, codes, n_codes, hipMemcpyHostToDevice),
+                                "upload weight fp8 codes"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(sdev, scales, want_scales * sizeof(float),
+                                          hipMemcpyHostToDevice),
+                                "upload weight fp8 scales"));
+    weight_fp8_[id.value()] = Fp8Weight{cdev, sdev, weight_block128};
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::ensure_fp8_scratch(std::size_t code_bytes, std::size_t scale_floats) {
+    if (code_bytes > fp8_codes_cap_) {
+        if (fp8_codes_dev_) hipFree(fp8_codes_dev_);
+        fp8_codes_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(hipok(malloc_dev(&fp8_codes_dev_, code_bytes),
+                                    "malloc fp8 act codes"));
+        fp8_codes_cap_ = code_bytes;
+    }
+    if (scale_floats > fp8_scales_cap_) {
+        if (fp8_scales_dev_) hipFree(fp8_scales_dev_);
+        fp8_scales_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(hipok(hipMalloc(&fp8_scales_dev_, scale_floats * sizeof(float)),
+                                    "malloc fp8 act scales"));
+        fp8_scales_cap_ = scale_floats;
+    }
+    return Status::make_ok();
+}
+
 Status HipStepExecutor::declare_states(const ir::Graph& g) {
+    (void)hipSetDevice(opts_.device);
     weight_shape_.clear();
     for (const auto& w : g.all_weights()) weight_shape_[w.id.value()] = w.shape;
 
@@ -208,6 +283,7 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
 }
 
 Status HipStepExecutor::reset_states() {
+    (void)hipSetDevice(opts_.device);
     for (auto& [id, loc] : state_dev_) {
         loc.rows = 0;
         if (loc.dev)
@@ -229,6 +305,13 @@ void* HipStepExecutor::arena_alloc(std::size_t bytes) {
 
 Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
                                  std::size_t n, std::uint32_t base_pos) {
+    return run_stage(g, tokens, nullptr, n, base_pos);
+}
+
+Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens,
+                                  const bf16_t* hidden, std::size_t n,
+                                  std::uint32_t base_pos) {
+    (void)hipSetDevice(opts_.device);   // 複数デバイスの実行器を同じ process で使うため
     if (!states_declared_)
         return Status::invalid_state("declare_states first", __FILE__, __LINE__);
     if (n == 0 || n > kMaxStepRows)
@@ -266,10 +349,6 @@ Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
         return s;
     };
 
-    SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
-                             hipMemcpyHostToDevice, stream_),
-              "token upload")));
     for (std::size_t i = 0; i < n; ++i) posrep_host_[i] = base_pos + static_cast<std::uint32_t>(i);
     hipk::GdnRequestDescriptor req{0u, 0u, u32(n)};
     SHELF_RETURN_IF_ERROR(sync_on_error(
@@ -280,10 +359,43 @@ Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
                              n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
               "rowpos upload")));
 
+    // データ入力: i32 = トークン（先頭ステージ）、それ以外 = 前段の hidden（以降のステージ）。
     const auto& inputs = g.all_inputs();
     if (inputs.empty())
-        return Status::invalid_argument("graph lacks token input", __FILE__, __LINE__);
-    value_dev_[inputs[0].id.value()] = ValueLoc{token_dev_, false, n};
+        return Status::invalid_argument("graph lacks data input", __FILE__, __LINE__);
+    // データ入力は必ず先頭（i32 = トークン、それ以外 = 前段 hidden）。
+    const ir::ValueDesc* tokens_in = (inputs[0].dtype == DataType::i32) ? &inputs[0] : nullptr;
+    const ir::ValueDesc* hidden_in = (inputs[0].dtype == DataType::i32) ? nullptr : &inputs[0];
+    if (tokens_in != nullptr) {
+        if (tokens == nullptr)
+            return Status::invalid_argument("run_stage: このステージには tokens が必要",
+                                            __FILE__, __LINE__);
+        SHELF_RETURN_IF_ERROR(sync_on_error(
+            hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
+                                 hipMemcpyHostToDevice, stream_),
+                  "token upload")));
+        value_dev_[tokens_in->id.value()] = ValueLoc{token_dev_, false, n};
+    }
+    if (hidden_in != nullptr) {
+        if (hidden == nullptr)
+            return Status::invalid_argument("run_stage: このステージには hidden が必要",
+                                            __FILE__, __LINE__);
+        const std::size_t elems = numel(hidden_in->shape);
+        if (elems != n * (elems / n))
+            return Status::invalid_argument("run_stage: hidden の要素数が行数で割れない",
+                                            __FILE__, __LINE__);
+        void* dst = arena_alloc(elems * sizeof(bf16_t));
+        if (dst == nullptr)
+            return Status::insufficient_memory("arena exhausted (hidden input)", __FILE__,
+                                               __LINE__);
+        SHELF_RETURN_IF_ERROR(sync_on_error(
+            hipok(hipMemcpyAsync(dst, hidden, elems * sizeof(bf16_t),
+                                 hipMemcpyHostToDevice, stream_),
+                  "hidden upload")));
+        value_dev_[hidden_in->id.value()] = ValueLoc{dst, false, elems};
+    }
+    if (tokens_in == nullptr && hidden_in == nullptr)
+        return Status::invalid_argument("graph lacks data input", __FILE__, __LINE__);
 
     for (const auto& p : g.primitives()) {
         SHELF_RETURN_IF_ERROR(sync_on_error(run_primitive(g, p, step_base_pos_)));
@@ -327,7 +439,24 @@ Result<std::vector<float>> HipStepExecutor::fetch_value_debug(const ir::Graph& /
     return out;
 }
 
+Result<std::vector<bf16_t>> HipStepExecutor::fetch_value_bf16(const ir::Graph& /*g*/,
+                                                               ir::ValueId id) {
+    (void)hipSetDevice(opts_.device);
+    auto it = value_dev_.find(id.value());
+    if (it == value_dev_.end() || !it->second.dev)
+        return Status::not_found("value not materialized", __FILE__, __LINE__);
+    const ValueLoc& l = it->second;
+    if (l.f32)
+        return Status::invalid_state("fetch_value_bf16: f32 の値は PP の hand-off に使えない",
+                                     __FILE__, __LINE__);
+    std::vector<bf16_t> out(l.elems);
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(out.data(), l.dev, l.elems * sizeof(bf16_t),
+                                          hipMemcpyDeviceToHost), "stage readback"));
+    return out;
+}
+
 Result<std::vector<float>> HipStepExecutor::fetch_logits(const ir::Graph& g) {
+    (void)hipSetDevice(opts_.device);
     if (!logits_dev_)
         return Status::invalid_state("logits not produced (run_step first)", __FILE__,
                                      __LINE__);
@@ -403,6 +532,49 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t N = p.output.shape.dim(p.output.shape.rank() - 1);
         const std::size_t rows = step_rows_;
         const std::size_t K = x->elems / rows;  // input [rows, K]
+        // 重みが FP8（E4M3）で upload されていれば W8A8 経路。同じ層の中でも
+        // linear_attn 側は bf16 のまま（checkpoint の ignore）なので、この分岐は
+        // 重み単位で決まる。
+        const auto f8 = p.weights.empty()
+                            ? weight_fp8_.end()
+                            : weight_fp8_.find(p.weights[0].value());
+        if (f8 != weight_fp8_.end()) {
+            using namespace shelf::quant::fp8;
+            const std::uint32_t kp = pad_k(u32(K));
+            if (kp != u32(K))
+                return Status::unsupported(
+                    "linear(fp8): K が 32 の倍数でないと断片順に置けない", __FILE__, __LINE__);
+            if (!fp8_gemm_shape_supported(u32(rows), u32(N), kp))
+                return Status::unsupported("linear(fp8): 形が fp8 GEMM の受理範囲外",
+                                           __FILE__, __LINE__);
+            Fp8GemmScaleArgs sa;
+            // 128 で割り切れない K ではグループ量子化を使えない（行全体に落とす）。
+            sa.act_group =
+                (opts_.fp8_act_group != 0u && (kp % kActGroupK) == 0u) ? kActGroupK : 0u;
+            sa.weight_block128 = f8->second.block128;
+            sa.activation_scale_stride = act_scale_groups(kp, sa.act_group);
+            sa.weight_scale_k_blocks = scale_k_blocks(kp);
+            if (!fp8_scale_args_supported(sa, u32(rows), u32(N), kp))
+                return Status::unsupported("linear(fp8): スケール配置が不正", __FILE__,
+                                           __LINE__);
+            SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
+                                                     activation_scale_count(u32(rows), kp,
+                                                                            sa.act_group)));
+            SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
+                                          static_cast<const bf16_t*>(x->dev), fp8_codes_dev_,
+                                          fp8_scales_dev_, u32(rows), u32(K), kp, u32(K),
+                                          sa.act_group, stream_),
+                                      "fp8 act quantize"));
+            SHELF_RETURN_IF_ERROR(hipok(launch_gemm_fp8_w8a8(
+                                          Fp8GemmConfig{}, f8->second.codes, f8->second.scales,
+                                          fp8_codes_dev_, fp8_scales_dev_, o,
+                                          f32_out ? Fp8GemmOutputDType::F32
+                                                  : Fp8GemmOutputDType::BF16,
+                                          u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                      "gemm fp8"));
+            if (f32_out) logits_dev_ = static_cast<float*>(o);
+            return set_out(f32_out, o);
+        }
         // bench_gemv_hip on the model's real shapes: rows==1 -> ExactRows
         // wins everywhere; rows>=2 -> ExactRowsDot2 wins on most N (k/v/o/
         // mlp/gdn_out), losing only ~1-4 us on q_gate/gdn_qkv. Net positive.

@@ -15,6 +15,7 @@
 
 #include "bench_common.hpp"
 #include "common/app_support.hpp"
+#include "common/pipeline.hpp"
 
 #include <shelf/model/qwen35/step_graph.hpp>
 #include <shelf/model/qwen35/text_config.hpp>
@@ -85,7 +86,7 @@ int run_tg(int argc, char** argv) {
 
     // 未知のオプションは起動エラー（shelf-validate と同じ規約）。
     {
-        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "output"};
+        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "output", "pipeline-parallel"};
         std::string bad;
         if (!only_known_keys(a, allowed, &bad)) {
             std::fprintf(stderr, "tg: unknown option: --%s\n", bad.c_str());
@@ -102,6 +103,7 @@ int run_tg(int argc, char** argv) {
     const std::int64_t gpu = a.i64("gpu", 0, &ok);
     const std::int64_t seed = a.i64("seed", 1234, &ok);
     const std::int64_t arena_mib = a.i64("arena-mib", 0, &ok);
+    const std::int64_t pp = a.i64("pipeline-parallel", 1, &ok);
     const std::string mode = a.str("mode", "forward");
     const std::string model_dir = a.str("model-dir", a.str("model"));
     const std::string output = a.str("output");
@@ -121,7 +123,7 @@ int run_tg(int argc, char** argv) {
         return kExitUsage;
     }
     if (context <= 0 || tokens <= 0 || warmup < 0 || gpu < 0 || seed < 0 ||
-        arena_mib < 0 || !a.positional().empty()) {
+        arena_mib < 0 || pp < 1 || pp > 64 || !a.positional().empty()) {
         std::fprintf(stderr, "tg: bad option value or unexpected argument\n");
         usage(stderr);
         return kExitUsage;
@@ -130,19 +132,28 @@ int run_tg(int argc, char** argv) {
 #ifndef SHELF_HAVE_HIP
     (void)chunk_arg;
     (void)arena_mib;
+    (void)pp;
     std::fprintf(stderr,
                   "tg: this build has no HIP backend (rebuild with SHELF_ENABLE_HIP=ON)\n");
     return kExitRuntime;
 #else
     namespace qwen = shelf::model::qwen35;
 
-    const auto cfg_r = qwen::load_text_config_json(
-        app::read_file_str(model_dir + "/config.json"));
+    const std::string config_text = app::read_file_str(model_dir + "/config.json");
+    const auto cfg_r = qwen::load_text_config_json(config_text);
     if (!cfg_r.ok()) {
         std::fprintf(stderr, "tg: config: %s\n", cfg_r.status().message().c_str());
         return kExitRuntime;
     }
     const auto& cfg = cfg_r.value();
+    // FP8 の粒度は checkpoint の宣言が正（実行器へはここから渡す）。
+    const auto fmt_r = app::read_fp8_format(config_text);
+    if (!fmt_r.ok()) {
+        std::fprintf(stderr, "tg: quantization_config: %s\n",
+                     fmt_r.status().message().c_str());
+        return kExitRuntime;
+    }
+    const auto fmt = fmt_r.value();
 
     const std::size_t max_rows = shelf::backend::hip::HipStepExecutor::kMaxStepRows;
     const std::size_t chunk =
@@ -186,12 +197,28 @@ int run_tg(int argc, char** argv) {
     ho.rope_theta = cfg.rope_theta;
     ho.rope_rotary_dim = cfg.rotary_dim;
     if (arena_mib > 0) ho.arena_bytes = static_cast<std::size_t>(arena_mib) << 20;
-    shelf::backend::hip::HipStepExecutor ex(ho);
-    // 重み id は config 由来なので decode プランの weights を上げれば両方で使える。
-    if (auto st = app::upload_plan(ex, decode_plan, shards); !st.ok()) {
-        std::fprintf(stderr, "tg: upload: %s\n", st.message().c_str());
+    ho.fp8_act_group = fmt.act_group;
+    std::printf("%s: fp8 %s (act_group=%u)\n", "tg",
+                fmt.quantized ? fmt.declared.c_str() : "なし（bf16 のまま）",
+                fmt.act_group);
+    // pipeline-parallel（1 = 単一 GPU）。
+    app::PipelineOptions po;
+    for (int k = 0; k < pp; ++k) po.devices.push_back(static_cast<int>(gpu) + k);
+    po.kv_capacity = capacity;
+    po.chunk_rows = chunk;
+    po.arena_bytes = ho.arena_bytes;
+    po.rope_theta = cfg.rope_theta;
+    po.rope_rotary_dim = cfg.rotary_dim;
+    po.fp8_act_group = fmt.act_group;
+    po.verbose = true;
+    auto pl = app::make_pipeline(cfg, shards, fmt, po);
+    if (!pl.ok()) {
+        std::fprintf(stderr, "tg: pipeline: %s\n", pl.status().message().c_str());
         return kExitRuntime;
     }
+    app::Pipeline pipeline = pl.release();
+    (void)decode_plan;
+    (void)prefill_plan;
     const auto ctx_tokens =
         make_tokens(static_cast<std::size_t>(context), cfg.vocab_size, seed);
 
@@ -203,15 +230,16 @@ int run_tg(int argc, char** argv) {
             std::fprintf(stderr,
                          "tg: hint: the arena is a per-step bump allocator; raise "
                          "--arena-mib above the current %lld MiB\n",
-                         static_cast<long long>(ex.arena_bytes() >> 20));
+                         static_cast<long long>(pipeline.arena_bytes >> 20));
     };
 
     // ---- コンテキスト prefill（計測区間外） ----
     const auto pf0 = std::chrono::steady_clock::now();
     for (std::size_t c = 0; c < ctx_tokens.size(); c += chunk) {
         const std::size_t n = std::min(chunk, ctx_tokens.size() - c);
-        const auto st = ex.run_step(pf_graph, ctx_tokens.data() + c, n,
-                                    static_cast<std::uint32_t>(c));
+        const auto st = app::pipeline_step(pipeline, ctx_tokens.data() + c, n,
+                                           static_cast<std::uint32_t>(c), nullptr);
+        (void)pf_graph;
         if (!st.ok()) {
             fail_step("context chunk", st);
             return kExitRuntime;
@@ -225,13 +253,11 @@ int run_tg(int argc, char** argv) {
     std::uint32_t pos = static_cast<std::uint32_t>(context);
 
     auto step_once = [&](bool want_logits) -> shelf::Status {
-        SHELF_RETURN_IF_ERROR(ex.run_step(decode_plan.graph, &feed, 1, pos));
+        std::vector<float> lg;
+        SHELF_RETURN_IF_ERROR(app::pipeline_step(pipeline, &feed, 1, pos,
+                                                 want_logits ? &lg : nullptr));
         ++pos;
-        if (want_logits) {
-            auto lg = ex.fetch_logits(decode_plan.graph);
-            SHELF_RETURN_IF_ERROR(lg.status());
-            feed = argmax_i32(lg.value());
-        }
+        if (want_logits) feed = argmax_i32(lg);
         return shelf::Status::make_ok();
     };
 
@@ -255,7 +281,7 @@ int run_tg(int argc, char** argv) {
             fail_step("decode step", st);
             return kExitRuntime;
         }
-        step_ms.push_back(ex.stats().last_step_ms);
+        step_ms.push_back(pipeline.last_step_ms);
         if (!greedy) feed = ctx_tokens.back();
     }
     const double wall_ms = std::chrono::duration<double, std::milli>(
@@ -269,7 +295,7 @@ int run_tg(int argc, char** argv) {
     const double first_token_ms = step_ms.empty() ? 0.0 : step_ms.front();
 
     // 実際に確保されたサイズ（prefill で自動拡張されている場合があるので最後に読む）。
-    const std::int64_t arena_eff = static_cast<std::int64_t>(ex.arena_bytes() >> 20);
+    const std::int64_t arena_eff = static_cast<std::int64_t>(pipeline.arena_bytes >> 20);
 
     std::printf("shelf-bench tg\n");
     kv_print("schema_version", static_cast<std::int64_t>(2));

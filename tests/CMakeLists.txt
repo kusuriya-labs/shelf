@@ -12,6 +12,15 @@ add_executable(test_weights_catalog unit/test_weights_catalog.cpp)
 target_link_libraries(test_weights_catalog PRIVATE shelf::weights)
 add_test(NAME unit.weights_catalog COMMAND test_weights_catalog)
 
+add_executable(test_quant_fp8 unit/test_quant_fp8.cpp)
+target_link_libraries(test_quant_fp8 PRIVATE shelf::quant)
+add_test(NAME unit.quant_fp8 COMMAND test_quant_fp8)
+
+# quantization_config の解析（apps/common の実装を使う）
+add_executable(test_fp8_format unit/test_fp8_format.cpp)
+target_link_libraries(test_fp8_format PRIVATE shelf_app_common)
+add_test(NAME unit.fp8_format COMMAND test_fp8_format)
+
 add_executable(test_ir_graph_validation unit/test_ir_graph_validation.cpp)
 target_link_libraries(test_ir_graph_validation PRIVATE shelf::ir)
 add_test(NAME unit.ir_graph_validation COMMAND test_ir_graph_validation)
@@ -32,6 +41,18 @@ if(SHELF_ENABLE_HIP)
     add_executable(test_hip_gemm_bf16 unit/test_hip_gemm_bf16.cpp)
     target_link_libraries(test_hip_gemm_bf16 PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_gemm_bf16 COMMAND test_hip_gemm_bf16)
+
+    add_executable(test_hip_gemm_fp8 unit/test_hip_gemm_fp8.cpp)
+    target_link_libraries(test_hip_gemm_fp8 PRIVATE shelf::backend_hip shelf::quant)
+    add_test(NAME unit.hip_gemm_fp8 COMMAND test_hip_gemm_fp8)
+
+    # pipeline-parallel（レイヤ分割）が数値を変えないこと（全ステージ同一 GPU で検証）
+    add_executable(test_hip_pipeline unit/test_hip_pipeline.cpp)
+    target_link_libraries(test_hip_pipeline PRIVATE
+        shelf::backend_hip
+        shelf::model_qwen35
+        shelf_app_common)
+    add_test(NAME unit.hip_pipeline COMMAND test_hip_pipeline)
 
     add_executable(test_hip_attention unit/test_hip_attention.cpp)
     target_link_libraries(test_hip_attention PRIVATE shelf::backend_hip)

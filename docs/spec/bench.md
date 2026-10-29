@@ -296,7 +296,19 @@ common options:
 | アリーナ（rows=64、自動算出） | **2,298 MiB**（pp グラフ・実測／validate グラフは 2,299 MiB）／最小必要 **777〜784 MiB**（§11.2） |
 | VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測 2026-10-28）** |
 | KV（既定 context 128、single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
-| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。**VRAM 常駐は未計測** |
+| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。単一 GPU で pp / tg 実走済み。**VRAM 常駐 15.09 GB（実測 2026-10-29・arena 2,298 MiB 込み）** |
+| `Qwen3.8-27B-FP8`（FP8 blockwise 128×128・`weight_scale_inv` BF16） | `language_model` ＋ `lm_head` = 29.5 GB（`F8_E4M3` 24.33 GB ＋ bf16 5.14 GB、66 シャード）。rows=64 の arena（約 5.6 GiB）は載らない。`--prefill-chunk 16`（arena 1,530 MiB）で pp / tg 実測済み |
+
+* **pipeline-parallel（`--pipeline-parallel=K`）の実測（`hip-rel`・2026-10-29）**:
+  9B-FP8 `pp` 1024 tok は PP=1 515.2 → PP=2 512.0 tok/s（+0.6%）、`tg` ctx512 は
+  25.02 → 26.94 ms/tok（+7.7%）。27B-FP8 は PP=2 で `pp` 164.0 tok/s・`tg` 63.48 ms/tok
+  （PP=4 は 158.8 tok/s・64.23 ms/tok）。**27B-FP8 は PP=2 以上でのみ prefill rows=64 が載る**
+  （stage あたり arena 約 2.9 GiB）
+* **FP8 の実測（`hip-rel`・GPU 0・2026-10-29）**: `pp` 2048 tok（chunk 64）で bf16 6,680.9 ms
+  （306.6 tok/s）→ FP8 4,048.0 ms（505.9 tok/s）＝ **1.65 倍**。`tg` context 512・128 tok で
+  bf16 30.838 ms/tok（32.42 tok/s）→ FP8 25.035 ms/tok（39.93 tok/s）＝ **1.23 倍**。
+  27B-FP8 は `pp` 2048 tok（chunk 16）12,157.7 ms＝168.5 tok/s、`tg` context 512・64 tok
+  61.10 ms/tok＝16.36 tok/s。量子化の形（`config.json` の宣言）は CSV ではなく stdout に印字する
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため
   `--gpu` で空きを選ぶ（`rocm-smi`）

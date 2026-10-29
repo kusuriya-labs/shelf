@@ -33,6 +33,7 @@
 | --- | --- | --- |
 | **exact / 通常実行（正本）** | `models/Qwen3.5-9B` | bf16、4 シャード（ディスク約 19.3 GB） |
 | **approx / 量子化検証（製品量子化版）** | `models/Qwen3.5-9B-FP8` | FP8 W8A8（compressed-tensors・float-quantized）、単一 13.52 GB ＋ `model_mtp.safetensors` 0.49 GB（ディスク約 14.0 GB） |
+| **製品量子化版（大きい方）** | `models/Qwen3.8-27B-FP8` | FP8 W8A8 blockwise（`quant_method: fp8`、`weight_block_size: [128,128]`、`activation_scheme: dynamic`）、66 シャード・`language_model` ＋ `lm_head` で 29.5 GB（2026-10-29 入手） |
 
 * **両方を開発時点の標準モデルとする**。文書・CLI の例示・デフォルト引数はすべてこれに合わせる
 * 2026-10-28 に選定した approx 候補 `models/Qwen3.5-9B-exl3`（EXL3 4bit、7.19 GB）は
@@ -53,7 +54,7 @@
 | 2. メモリ確保 | 3 系統に分散: ①実行器のアリーナ（`arena_alloc`、既定 64MiB の定数、毎ステップ reset）②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | **予算（budget）の概念が存在しない**。確保量は定数と論理 shape から決まる |
 | 3. モデルロード | `artifact/safetensors` reader → `apps` の `read_bf16` / `read_f32` → **同じラムダ内で** `upload_weight*` と `declare_states` を呼ぶ | 読取・実体化・状態確保が 1 ラムダに融合。`weights/catalog` は「実行にもデバイスにも触れない」宣言のみで未接線 |
 | 4. エンジン起動 | `apps` の `if (device == "hip") ... else` による排他分岐と、`HipStepExecutorOptions` の組み立て。CPU は `HostStorage` + `ReferenceExecutor` | 選択肢が 2 値（cpu / hip）で、起動可否の契約（機能の実在判定）が無い |
-| 5. ホットパス Dequant | **未実装**。重みは bf16 のままロードして GEMM も bf16 専用。fp8 は KV キャッシュ側にのみ存在（`e4m3_codec` / paged attention の fp8 版）。製品量子化版 `models/Qwen3.5-9B-FP8`（`F8_E4M3`）は現行リーダの `map_dtype` が対応しておらず開けない | `src/quant` は空、`DataType` に量子化ペイロードを持たせない方針（`dtype.hpp:24-27`）と、Dequant 実装の置き場が未定 |
+| 5. ホットパス Dequant | **実装済み（2026-10-29）**: `DataType::fp8_e4m3` と `map_dtype("F8_E4M3")`、`src/quant` の fp8 契約（コーデック・断片順レイアウト・粒度）、HIP 側に fp8 WMMA GEMM と活性化量子化カーネル。dequant は GEMM 内（ロード時は無損 relayout のみ）。CPU 参照は fp8 を**明示的に拒否** | 粒度は checkpoint の宣言が正（9B: 重み channel・活性化 token／27B: 重み 128×128 block・活性化 1×128）。宣言に無い粒度は実装しない |
 
 ### 1.2 既に効いている分離（維持する）
 

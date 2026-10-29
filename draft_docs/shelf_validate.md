@@ -267,99 +267,151 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
 * **教訓**: **T0（決定性）は出力の妥当性を保証しない**。上記バグは T0 を通っていた。
   実装の妥当性は外部参照（HF）とのトークン列比較で確認する（`parity_policy.md` に追記）
 
-### V1 の前提となる実装（別作業）— **FP8 に確定（2026-10-29）**
+### V1 実装（2026-10-29）— approx = FP8 W8A8
 
-> 製品量子化版を **FP8（W8A8・活性化は dynamic）** に決めた。exact = `models/Qwen3.5-9B`（bf16・正本）、
-> approx = `models/Qwen3.5-9B-FP8`（FP8）で V1 を行う。EXL3 4bit 経路は 2026-10-29 に中止
-> （下記「（6）履歴」）。決め手: ① checkpoint が既にある（`models/Qwen3.5-9B-FP8`、ディスク 14.01 GB）
-> ② 正本と**同一の safetensors 形式・同一のテンソル名**で、量子化されていないテンソルは bf16 のまま
-> 同梱されている（差分が量子化された Linear だけなので比較が素直）③ 量子化の記述が `config.json` の
-> `quantization_config` に集約され、ヘッダの dtype でテンソル単位に判別できる（表駆動）
-> ④ shelf 既存の fp8 資産（`e4m3_codec`・paged attention の fp8 版）と語彙が揃う
-> ⑤ 参照が公式まわりに多い（`transformers` の fp8 linear / compressed-tensors の float-quantized 仕様 /
-> phaseshift-fp8 の fp8 経路）。
-> **代償として容量効率は落ちる**（EXL3 4bit 7.19 GB → FP8 14.01 GB）。低 VRAM 協調推論の本命量子化は
-> 未決定のまま（`draft_docs/directory_design.md` D5 / §8 の未決）
+**方針の確定**: 製品量子化版を **FP8 W8A8・活性化 dynamic** に決めた（EXL3 4bit は同日中止、
+下記の「（6）履歴」）。決め手は ① checkpoint が既にある ② 正本と同一の safetensors 形式・
+同一テンソル名で、量子化されていないテンソルは bf16 のまま同梱（差分が量子化 Linear だけ）
+③ 量子化の記述が `config.json` の `quantization_config` に集約され、ヘッダの dtype で
+テンソル単位に判別できる（表駆動）④ 参照実装が多い（`transformers` の fp8 linear、
+compressed-tensors の `float-quantized`、`references/phaseshift-fp8` の WMMA 経路）。
+**代償は容量**（EXL3 4bit 7.19 GB → FP8 14.01 GB）。
 
-**（1）approx（FP8）の読み込み**
+**スモーク（§7 (4) 1 に相当、実施済み）**: 9B-FP8 の
+`model.language_model.layers.0.mlp.down_proj`（`F8_E4M3` `[4096,12288]`、`weight_scale` BF16
+`[4096,1]`）をリーダで読み、コード×スケールの dequant が成立することを確認。
+`unit.artifact_safetensors` に `F8_E4M3` の読出テストを追加。
 
-* 対象: `models/Qwen3.5-9B-FP8`
-  * ファイル: 単一 `model.safetensors`（13.52 GB・**888 テンソル**）＋ `model_mtp.safetensors`
-    （0.49 GB・15 テンソル）。`model.safetensors.index.json`（`total_size` 14.01 GB）で対応付ける
-  * `config.json` の **`quantization_config`**（EXL3 のような別ファイルではない）:
-    `quant_method: compressed-tensors`、`format: float-quantized`、`version: 0.14.1.a20260325`、
-    `targets: [Linear]`、`ignore` 232 件、`kv_cache_scheme: null`（**KV は量子化されていない**）
-  * 量子化パラメータ（`config_groups.group_0`）
-    * 重み: `type: float` / `num_bits: 8` / `strategy: channel`（出力チャネル単位）/
-      `symmetric: true` / `dynamic: false`（静的・スケール格納済み、observer `memoryless_minmax`）
-    * 活性化: `type: float` / `num_bits: 8` / `strategy: token`（トークン単位）/
-      `symmetric: true` / `dynamic: true`（**実行時に計算**、`input_scale` テンソルは存在しない）
-* **正は safetensors ヘッダの dtype とスケール名の対応**: 量子化 Linear は `*.weight` が `F8_E4M3`、
-  同じ基底名の `*.weight_scale` が **`BF16`** で shape `[out, 1]`（**128 テンソルずつ**・`input_scale` は 0 件）。
-  テンソル単位で量子化の有無が判る（推測判定は不要）
-* 量子化された Linear（`F8_E4M3`・5.30 GB）: `mlp.{gate,up,down}_proj` × 32 層（96）
-  ＋ `self_attn.{q,k,v,o}_proj` × `full_attention` 8 層（32）= **128**
-* 量子化されないテンソル（`BF16` のまま）: `lm_head`（2.03 GB）/ `embed_tokens`（2.03 GB）/
-  各 layernorm と `self_attn.{q,k}_norm` / **`linear_attn.*` すべて**（`out_proj` /
-  `in_proj_{qkv,z,b,a}` — ignore に `re:.*linear_attn.*`）/ `visual.*` / `mtp.*`（ignore に `re:^mtp.*`）
-  → **同一層内でも dtype が混在する**（Hybrid の `linear_attn` 側は bf16、`self_attn` 側は FP8）
-* shelf が実際に読む payload（`model.language_model.*` ＋ `lm_head`）は **12.61 GB**
-  （language_model 10.57 GB = bf16 5.27 GB ＋ fp8 5.30 GB、lm_head 2.03 GB）。
-  `visual` 0.91 GB と `mtp` 0.49 GB は現行の実行経路では対象外
-* **未解決の前提（着手前に要決定）**: 現行 `main` の safetensors リーダは
-  `F64 / F32 / F16 / BF16 / I64 / I32 / U8` のみ対応（`src/artifact/safetensors/reader.cpp` の
-  `map_dtype`）で、`F8_E4M3` は `unsupported dtype` となり **FP8 checkpoint を開けない**。
-  * 採る方針: **`DataType::fp8_e4m3` を追加**（1 バイト・符号ありのメタとして）。
-    責務の切り分けは EXL3 時に確定した考え方維持 — **DataType は「バイト長・符号性のメタ」、
-    意味論（スケール適用・ペイロード解釈）は `src/quant` の QuantSpec の役目**
-    （`src/quant` は model / backend / runtime / hip を include しない）
-  * **`dtype.hpp:24-27` の注記と矛盾しない**: 「量子化ペイロードを enum に載せない」は
-    trellis のような **opaque な符号列**（`unknown` + QuantSpec）についての話で、
-    e4m3 は **実在する 1 バイトの浮動小数型**。載せるのは型であり、
-    スケール（`weight_scale` 適用）の意味論は引き続き `quant/` の QuantSpec 側
-  * `u8` を流用しない（KV 側の fp8 ペイロードとは別物で、誤用と境界テストの緩みを防ぐ）
-  * 実装範囲の目安: enum + `element_size`（1）+ `map_dtype("F8_E4M3")` +
-    `unit.foundation`（size / 浮動小数点判定）と `unit.artifact_safetensors`（F8_E4M3 テンソルの読出・バイト一致）
-  * `weight_scale` が **BF16**（FP32 ではない）である点はスケーリング実装で明示する（読み間違い防止）
+#### 実装した範囲
 
-**（2）FP8 GEMM（ホットパス dequant）** — shelf には現状、重みの量子化経路が無い
-（bf16 のみ、fp8 は KV 側にのみ存在）。契約（`parity_policy` / 量子化契約）どおり **dequant はカーネル内**。
+| 層 | 場所 | 内容 |
+| --- | --- | --- |
+| dtype | `src/foundation/include/shelf/foundation/dtype.hpp` | `DataType::fp8_e4m3`（1 バイト・実在する浮動小数型）。`element_size` = 1。`u8` は流用しない |
+| リーダ | `src/artifact/safetensors/reader.cpp` | `map_dtype("F8_E4M3")` を追加 |
+| 量子化契約 | `src/quant/{include/shelf/quant/fp8_w8a8.hpp,fp8_w8a8.cpp}`（新 target `shelf::quant`） | e4m3 コーデック（RNE・satfinite・NaN 保持）、**断片順（preshuffle）レイアウト**の定義と offset 計算、粒度 helper（`WeightScaleGranularity` / `act_scale_groups` / `scale_k_blocks`） |
+| GEMM | `src/backend/hip/kernels/gemm/linear_fp8.hip` ＋ detail | gfx1201 の `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12` を使用（**命令は実在＝実測確認**）。rows=1 は GEMV 形（Decode1）、rows≤16/32/64 は RowBlock1/2/4 |
+| 活性化量子化 | `src/backend/hip/kernels/elementwise/activation_quantize_fp8.hip` | 独立カーネル（1 ブロック = 1 トークン）。宣言が `token` なら 2 パスで行 amax、`1×128` なら 1 wave = 1 ブロックで単一パス。**GEMM の prologue には融合しない**（§8 の未決は独立カーネルで確定） |
+| 実行器 | `src/backend/hip/step_executor.{hpp,cpp}` | `upload_weight_fp8`（断片順コード＋スケール）、FP8 活性化_scratch、`Kind::linear` / `output_projection` で FP8 重みなら活性化量子化→FP8 GEMM へ分岐（**dequant はホットパス内。ロード時の有損変換は無い**＝契約 P5 遵守） |
+| apps | `apps/common/app_support.{hpp,cpp}` | `read_fp8_format`（`quantization_config` 解析）・`build_fp8_weight`（スケール読みと preshuffle）・`upload_plan`（dtype で bf16 / f32 / FP8 を判別）。shelf-validate も同じ loader を使うようにした |
 
-* checkpoint の定義から決まる最小構成（4 段）:
-  1. **入力**: 行（トークン）ごとに max から `a_scale[row]` を計算 → e4m3 に量子化（**dynamic**）
-  2. **重み**: `F8_E4M3` をそのままオペランドに使う（**ロード時に bf16 へ展開しない**）
-  3. **GEMM**: `A8 × W8 → C32`（fp8 入力・**f32 累積**）
-  4. **出力**: `out = C32 × a_scale[row] × weight_scale[col]` → 出力型
-  * **順序の要点**: `weight_scale` は列（出力チャネル）ごとに異なるので**累積の後**に掛ける。
-    `a_scale` は行内で一定なので可換。per-channel スケールは K ループへ折り込まない
-    （`Σ_k a_k w_k` をスケール付きで割る形にすると丸めが増える）
-* **未確認の前提（実測前に決めない）**: gfx1201（R9700）に **FP8 e4m3 のマトリクス命令が
-  WMMA/MFMA として実在するか**。実在すれば (3) を fp8 GEMM、無ければ
-  「**カーネル内で** e4m3 → bf16/fp16 に dequant して bf16 GEMM」（契約は守られる）にフォールバックする。
-  分岐の決定は §8 の未決（ミニベンチで確認してから決める）
-* 精度の見込み（実測で確定させる）: e4m3 は仮数 3 ビットで相対分解能が粗いが、
-  重みは per-channel・活性化は per-token の動的スケールで範囲を寄せるため、
-  4bit 程には崩れない可能性が高い。**T1 が通るかは見込みではなく実測**（`parity_policy.md` §3）
-* **参照（移植ではなく定義の突合に使う）**: `transformers` の fp8 linear
-  （`W ≈ weight.float() × weight_scale.float()` の定義）、compressed-tensors の `float-quantized` 仕様、
-  `references/` の phaseshift-fp8（fp8 の GEMM / KV の語彙とスケーールの置き方）
+**スケール折り込みの位置（数値に効く）** : 未スケールの e4m3 コード（最大 448）を K 全体で
+足すと桁上がりの打ち消しで誤差が増えるため、**スケールが切り替わるブロック（128 K）ごとに
+累積へ掛ける**（移植元 PhaseShift と同じ手順。活性化側が per-token でも同じブロック単位で
+掛ける）。32 K タイル毎に掛ける形（初版）からは decode 23.2 → 25.0 ms/tok と少し遅くなったが、
+宣言どおりの粒度で統一した。
 
-**（3）注意（従来どおり）**: 「ロード時に bf16 へ展開してから既存の bf16 GEMM で計算する」のは
-**契約違反**（有損 dequant をロード時に置かない）。**カーネル内で**デコードして fp8 / bf16 の
-オペランドにすることは許される。暫定で外に出す場合は契約上の位置づけを明記する。
+#### 粒度は checkpoint の宣言が正（2026-10-29 の実測で確定）
 
-**（4）V1 の着手順（可否の実測 → 仕様確定 → 本体）**
+`apps` 側が `config.json` の `quantization_config` を読み、実行器に渡す。**実装側の決め打ちはない**
+（`--fp8-act-group` は実験用の上書きで、使った場合は印字する）。
 
-1. **スモーク**: `models/Qwen3.5-9B-FP8` の 1 テンソル（例
-   `model.language_model.layers.0.mlp.down_proj` の `.weight`（`F8_E4M3`、`[4096,12288]`）と
-   `.weight_scale`（`BF16`、`[4096,1]`））を CPU 参照で dequant し、
-   torch / `transformers` の `weight.float() × weight_scale.float()` と**一致する**ことを確認する
-   （ここで「材料が読める／`F8_E4M3` の解釈が合っている」が確定する）
-2. **GEMM 方針の決定**: gfx1201 の FP8 マトリクス命令の実在をミニベンチで確認し、
-   fp8 GEMM と in-kernel dequant + bf16 GEMM のどちらかを**実測で**決める
-3. **V1 本体**: リーダ（`F8_E4M3` と `weight_scale`）→ 活性化量子化（per-token）→ GEMM →
-   T1/T2 → 終了コード 0/1/2
-4. **T2 の基準取り**: `parity_policy.md` §3 の手順で **FP8 W8A8** の誤差規模を測る（§8 参照）
+| checkpoint | `quant_method` | 重みスケール | 活性化 | 実測の動作 |
+| --- | --- | --- | --- | --- |
+| `Qwen3.5-9B-FP8` | `compressed-tensors`（ModelOpt `FP8_DYNAMIC`） | `strategy: channel` → `<base>.weight_scale` BF16 `[out,1]` | `strategy: token` / `dynamic` → **行全体 1 スケール**（`act_group=0`） | 単一 GPU で pp/tg/validate 動作 |
+| `Qwen3.8-27B-FP8` | `fp8`（HF blockwise, `fmt: e4m3`） | `weight_block_size: [128,128]` → `<base>.weight_scale_inv` BF16 `[⌈N/128⌉,⌈K/128⌉]`（格納値は実乗数） | `activation_scheme: dynamic` → **1×128**（`act_group=128`） | 単一 GPU で pp/tg 動作（rows=64 prefill は VRAM 不足） |
+
+* 活性化の粒度差は本モデルでは小さい（実活性化 15,872 行で相対 L2 誤差 0.02112 → 0.01850、
+  **平均 1.14 倍**の改善、K=12288 で 1.28 倍、外れ値のある行で最大 10 倍）。
+  深層で打ち消すため T1 がどこまで改善するかは未測（宣言と違う粒度は使わない）
+* スケールの dtype は BF16 / F32 両対応（実行器へ渡す時点で f32 に正規化）
+* `kv_cache_scheme` が non-null、静的活性化（`input_scale`）、`group_size≠128`、
+  128×128 以外の block、int 系量子化は**明示的に失敗**させる（近似しない）。単体テスト
+  `unit.fp8_format` がこの境界を固定している
+
+#### 検証（テスト）
+
+* `unit.quant_fp8`（CPU）: コーデックの全 code 往復境界、RNE/tie、satfinite、NaN、
+  tiled_offset と preshuffle/untile の一致、粒度 helper の個数
+* `unit.fp8_format`（CPU）: 9B / 27B の宣言を実形へ落とせること、未対応宣言の失敗
+* `unit.hip_gemm_fp8`（HIP）: ① 活性化量子化の**デバイス出力＝host 再現**（粒度 2 種）
+  ② GEMM を f64 golden と照合（**粒度 4 組合せ × 境界形状 15 件**。判定は
+  「項の絶対値総和に対する比 ≤ 1.0e-4」で、打ち消しによる要素相対誤差の膨張を除外する）
+  ③ bf16 GEMM（同じ量子化値）との突合、④ decode1 の BF16 出力
+* cpu 15 件 / hip 22 件が全通過（2026-10-29）
+
+#### 実測（R9700 / gfx1201・Release = `hip-rel`・GPU 0）
+
+| 計測 | bf16 正本 | FP8 製品版 | 比率 |
+| --- | --- | --- | --- |
+| `bench pp` 2048 tok（chunk 64） | 6,680.9 ms = 306.6 tok/s | 4,048.0 ms = 505.9 tok/s | **1.65×** |
+| `bench tg` ctx 512・128 tok（warmup 8） | 30.838 ms/tok = 32.42 tok/s | 25.035 ms/tok = 39.93 tok/s | **1.23×** |
+| `shelf-run` 256→24 tok（Debug ビルド） | 30.68 ms/tok | 25.03 ms/tok | 1.23× |
+| `shelf-validate` run（Debug・2 run） | prefill 846.7 ms / decode 7,496.5 ms（230 tok） | 524.6 ms / 5,783.3 ms（212 tok） | 1.61× / 1.30× |
+| VRAM 常駐（`device_mem_used_bytes`・arena 2,298 MiB 込み） | 20.55 GB | **15.09 GB** | 0.73× |
+| 27B-FP8 `pp` 2048 tok（chunk 16） | —（bf16 正本が在庫に無い） | 12,157.7 ms = 168.5 tok/s | — |
+| 27B-FP8 `tg` ctx 512・64 tok | — | 61.10 ms/tok = 16.36 tok/s | — |
+
+* 9B-FP8 の `shelf-run`（fixture 256 tok・24 decode）は **bf16 と 24/24 トークン一致**（Debug・
+  上記 `bench` とは別実走）。27B-FP8 は同一 fixture で「Ancient sailors oriented by the sun and
+  stars, but lacked precision. The astrolabe, used by Arab navigators…」と継続し、出力は成立
+* **VRAM**: 9B-FP8 は単一 GPU に収まる（`bench` の arena 2,298 MiB 含む）。
+  **27B-FP8 は rows=64 の prefill グラフ（arena 約 5.6 GiB）が載らず**、`shelf-run` には
+  `--prefill-rows` を追加して 16（arena 1,530 MiB）で計測した。rows=32 は arena 2,997 MiB で可
+* `--device=cpu` の FP8 は**明示エラー**（`read_f32` が「FP8 の重みは f32 ゴールデンでは読まない」
+  を返す）。CPU 参照に fp8 経路は作らない
+
+#### V2 実装（2026-10-29）— pipeline-parallel
+
+* **分割**: `even_stage_ranges(num_layers, K)` で均等に切り、**余りは最後のステージへ**
+  （全層を必ず覆う）。`--pipeline-parallel=K` で GPU は `--gpu` から K 台使う
+* **グラフ**: `build_step_graph(cfg, kv_capacity, rows, StageRange{lo,hi})`。
+  先頭ステージだけ embedding を持ちトークンを入力に、以降のステージは前段の hidden
+  （bf16 生ビット）を入力に、最終ステージだけ final norm ＋ lm_head を持つ。
+  状態（KV・conv・recurrent）はレイヤ単位宣言なので、範囲を絞れば自然に分散する
+* **受け渡し**: `HipStepExecutor::run_stage(tokens or hidden, n, base)` と
+  `fetch_value_bf16` で **bf16 のまま**往復（f32 を経由しない = 丸めを入れない）。
+  各ステージの `run_stage` は内部で同期するので、**直列 hand-off** になる
+* **正しさの門**: `tests/unit/test_hip_pipeline.cpp`（全ステージを同一 GPU に置く Strata の
+  `--split-device 0` と同型）で、**1 ステージと 2/4 ステージ・不均等分割（5 層を [0,2)/[2,5)）・
+  prefill 4 行チャンクの logits がビット一致**することを固定（hip 23 件の 1 つ）
+* **実モデルでの確認**:
+  * 9B-FP8: `--pipeline-parallel 1 / 2 / 4` で **280 トークン完全一致**
+  * 27B-FP8: PP=2（GPU 0-1）と PP=4（GPU 0-3）で **280 トークン完全一致**。
+    1 GPU では rows=64 の prefill が載らなかったモデルが、PP では
+    `--prefill-rows 16` で 2 台（arena 782/813 MiB）でも走る
+  * `shelf-validate --pipeline-parallel=2 --pp-baseline=on` で
+    **T1pp (PP=2 vs PP=1): identical / exit 0**（9B・128 tok。`--pp-baseline` は
+    PP>1 のとき PP=1 でも走らせて一致を確認する門。PP=1 が載らないモデルでは使わない）
+* **実測（Release = `hip-rel`・GPU 0 起点）**:
+
+| 計測 | PP=1 | PP=2 | PP=4 |
+| --- | --- | --- | --- |
+| 9B-FP8 `pp` 1024 tok（chunk 64） | 1,987.6 ms = **515.2 tok/s** | 2,000.0 ms = 512.0 tok/s（+0.6%） | — |
+| 9B-FP8 `tg` ctx512・64 tok | 25.02 ms/tok = 39.96 tok/s | 26.94 ms/tok = 37.12（+7.7%） | — |
+| 27B-FP8 `pp` 1024 tok（chunk 16） | 不可（VRAM） | 6,245.3 ms = **164.0 tok/s** | 6,450.2 ms = 158.8 tok/s |
+| 27B-FP8 `tg` ctx512・64 tok | 不可 | 63.48 ms/tok = 15.75 tok/s | 64.23 ms/tok = 15.57 tok/s |
+| 27B-FP8 `shelf-run` prefill rows=64 | 不可（arena 約 5.6 GiB が載らない） | **可**（stage あたり arena 2,937 / 3,059 MiB） | 可 |
+| 27B-FP8 `shelf-validate`（PP=2・128 tok） | — | prefill 969.9 ms / decode 8,060.9 ms、**exit 0** | — |
+
+  * 直列 hand-off の代償は **prefill +0.6〜3%・decode +4〜8%**（ステージ数が増えてもほぼ横ばい）。
+    27B の PP=2 は単一 GPU（chunk 16）の 1024 tok 換算 6,079 ms に対して +2.7%
+  * **27B-FP8 は PP=2 以上で rows=64 の prefill が載る**（単一 GPU では不可能）。
+    これが「27B を validate できない」制約の直接の解消で、validate の既定 chunk（64 行）がそのまま使える
+* **未実装（意図的）**: prefill のチャンク重畳（flag による非同期 hand-off）と
+  `auto` の分割探索（コストモデルが Strata 固有）。まず直列で正しさを固定した
+
+#### V1 の判定実績（exact = 9B bf16 / approx = 9B FP8・Debug・GPU 0）
+
+| 実行 | T0 | T1 | 不一致位置 | exact margin | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| `--prefill-tokens=256 --budget=512 --runs=2` | identical（exact 230 tok / approx 212 tok、共に stop_token） | **diverged** | k=46（exact 279 / approx 264） | **0.1051** | T2 `pending_baseline` → **exit 1（条件付き合格）** |
+| `--budget=384 --runs=1 --t2-margin=0.25` | skipped | **diverged** | k=46（同上） | 0.1051 | `within_margin` → exit 1（基準内の実証） |
+| 同上で `--t2-margin=0.05` | skipped | **diverged** | k=46 | 0.1051 | `outside_margin` → **exit 2**（基準外の検出） |
+| `--prefill-tokens=192 --budget=448 --runs=1` | — | **diverged** | k=156（exact 2708 / approx 10033） | **0.1923** | 同上（exit 1） |
+
+* **T1 は恒常には通らない**（§8 の予測どおり）。両ケースとも**正本側がほぼ同点の位置**で割れており
+  （margin 0.10 / 0.19、 logits の絶対規模に対して小さい）、`parity_policy.md` §3 の
+  「本戦場は T2」が実測で裏付いた
+* T2 の基準値（**margin 分布の p99**）は未採取。`--t2-margin=<x>` で閾値を与えると
+  `within_margin`（exit 1）/ `outside_margin`（exit 2）を判定する。基準が無い現状は
+  `pending_baseline` として measured margin を JSON に残す
+* 出力 JSON は `schema: shelf-validate/v1`（`t1` / `t2` / `models_run.<exact|approx>.fp8`
+  ・`fp8_act_group`・`device_mem_used_bytes`・step 毎の `tops` を含む）
+* exact と approx は**同時には VRAM に載せない**（9B で bf16 17.91 GB ＋ FP8 12.61 GB ≳ 搭載 VRAM）。
+  exact を走らせてから実行器とシャードを解放し、approx を読む。比較は host 側のトークン列と
+  top-1/2 で行う
+* 比較の前提として **exact と approx が同一構成・同一停止トークン集合**であることを検査する
+  （違うモデルを渡すと exit 2 で拒否）
 
 **（5）正本と製品版の既知の差分（比較の前提）**
 
@@ -403,22 +455,28 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
 * **exact / approx のペア** — **解消（2026-10-29 に更新）**: 正本 `./models/Qwen3.5-9B`
   （bf16、4 シャード 19.3 GB）と製品量子化版 `./models/Qwen3.5-9B-FP8`
   （FP8 W8A8、単一 13.52 GB ＋ `mtp` 0.49 GB／ディスク合計 14.01 GB）を在庫とする。
-  V1 はこの 9B ペアで行う。bf16 9B は単一 GPU に収まる（実測 VRAM 常駐 20.56 GB）。
-  approx 側の payload は 12.61 GB なので単一 GPU に収まる見込み（**VRAM 常駐は未測定**）。
-  旧 approx だった `Qwen3.5-9B-exl3` は 2026-10-29 に在庫から除外（§7「（6）履歴」）。
-  27B 級 bf16 は現状未取得のまま（PP の実績も後ろ倒し）
-* **`F8_E4M3` のリーダ対応** — §7 (1) の未解決前提。`DataType::fp8_e4m3` を追加（推奨）するか
-  `u8` 流用で踏むか。**V1 のリーダ着手前に要決定**
-* **FP8 GEMM の命令実在** — gfx1201 に fp8 e4m3 のマトリクス命令（WMMA/MFMA）が実在するか。
-  無ければ in-kernel dequant ＋ bf16 GEMM（§7 (2)）。**ミニベンチで測ってから決める**（決め打ちしない）
-* **活性化量子化の置き場** — per-token の `a_scale` 計算を独立カーネルにするか GEMM の prologue に
-  融合するか（prefill rows=64 と decode rows=1 の両形）。最初は分離でよいか
-* **量子化範囲の非対称** — `linear_attn.*` は bf16 のまま（ignore）で、**同一層内で dtype が混在**する。
-  Linear primitive がテンソル単位で dtype を選ぶ形になるため、step graph 側の扱いを決める
-  （KV・GDN 状態の dtype は現行どおりでよいか）
-* **スモーク成果物の置き場**: EXL3 時の `.cache/exl3_smoke/` は履歴として残るだけ。
-  FP8 のスモーク（§7 (4) の 1）は `tests/` 配下の support かツールとして置き、
-  答え合わせに使える形にするか
+  V1 はこの 9B ペアで行う（**2026-10-29 に実施済み・§7 の V1 実測**）。bf16 9B は単一 GPU に収まる
+  （実測 VRAM 常駐 20.56 GB）。approx 9B-FP8 も単一 GPU に収まる（**実測 VRAM 常駐 15.09 GB**・arena 2,298 MiB 込み、
+  pp/tg 実測済み）。旧 approx だった `Qwen3.5-9B-exl3` は 2026-10-29 に在庫から除外
+  （§7「（6）履歴」）。
+* **2026-10-29 追加**: 製品量子化版として `./models/Qwen3.8-27B-FP8`（HF blockwise fp8、
+  `weight_block_size: [128,128]`、66 シャード 24.3 GB（`language_model` + `lm_head`））を在庫化。
+  **bf16 の 27B 正本は未所持**なので 27B では T1（正本との比較）が取れない。
+  単独では pp 168 tok / s・tg 16.36 tok/s を実測（§7 の表）
+* **`F8_E4M3` のリーダ対応 — 解消（2026-10-29）**: `DataType::fp8_e4m3` を追加（`u8` は流用しない）。
+  責務の切り分けは予定どおり（dtype はバイト長・符号性のメタ、スケール意味論は `src/quant`）。
+  `unit.foundation` / `unit.artifact_safetensors` で固定
+* **FP8 GEMM の命令実在 — 解消（2026-10-29）**: `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12`
+  が gfx1201 で実在し、f64 golden 照合が通る（`unit.hip_gemm_fp8`）。in-kernel dequant フォールバックは
+  不要だった
+* **活性化量子化の置き場 — 解消（2026-10-29）**: **独立カーネル**にした（GEMM の prologue には融合しない）。
+  ただし 1 ブロック = 1 トークンの形なので **decode（rows=1）では 256 スレッド 1 ブロックしか立たず**、
+  宣言 `token` の場合は 2 パス（amax → 量子化）になる。この占有時間は未測（`bench kernel` の
+  fp8 エントリを追加して測る。融合するかはその後で決める）
+* **量子化範囲の非対称 — 解消（2026-10-29）**: 実行器は `TensorId` ごとに FP8 重み表を引いて
+  分岐する（`linear_attn.*` は bf16 のままupload）。step graph も KV・GDN 状態の dtype も変更不要だった
+* **スモーク成果物の置き場 — 解消（2026-10-29）**: 答え合わせは `unit.quant_fp8` /
+  `unit.fp8_format` / `unit.hip_gemm_fp8` に固定した（モデル資材に依存しない合成データと inline JSON）
 * **StopToken の配列の扱い**: `generation_config` が配列（例 `[248046, 248044]`）のときに
   「最初に現れた方」で止めるでよいか。
   **2026-10-29 確認**: 製品版 `Qwen3.5-9B-FP8` の `generation_config.json` は**単値 `248044`**、
@@ -427,10 +485,27 @@ expert pool / hc に密結合）、hand-off の `hc × n_embd` サイズ（shelf
   decode → 再 encode した結果**完全一致**（round-trip True、文面も成立）。StopToken は
   `generation_config.json` が無いため手順 3 の `text_config.eos_token_id = 248044` で解決され、
   実走でも `stop_token` 停止を確認（§7「V0 実績（9B）」参照）
+* **T2 の基準値（margin 分布の p99）が未採取**: 現状のデータは 2 点（0.1051 / 0.1923）だけ。
+  prompt を変えた複数実行（fixture の切り替え・`--ids-file`）と budget 違いで分布を取り、
+  `parity_policy.md` §6 に記録して `--t2-margin` の既定値にする
+* **27B-FP8 の比較対象が在庫に無い**: bf16 の 27B 正本が手元に無いため 27B では T1 を取れない。
+  27B の検証は ① 同一モデルの T0（決定性）② PP 導入後の `exact(PP=1)` vs `exact(PP=K)`
+  ③ HF 側の blockwise fp8 との外部照合（できるなら）に留める。27B 側の実測は §7 の表のとおり
+* **27B の prefill 行数**: rows=64 の arena（約 5.6 GiB）が 27B-FP8（重み 27.4 GiB）と両立しない。
+  運用値（`--prefill-rows=16` で arena 1,530 MiB、rows=32 で 2,997 MiB）をどちらにするか、
+  もしくは arena のチャンク毎再確保／rows 上限の自動決定を入れるか未決
+* **活性化粒度を宣言から変えた場合の T1 改善量**: 128 グループは活性化側の実測誤差を平均 1.14 倍
+  改善するが、T1 の一致率が変わるかは未測。方針は「宣言が正」で据え置き（上書きは実験用）
 * **budget 打ち切り時の判定**: 両経路とも同一位置で打ち切られれば一致として扱うが、
   片方だけ打ち切った場合をどう数えるか（推奨: 不一致として T2 に回さず `budget_exhausted` 単独で報告）
-* **PP の分割方法**: `--pipeline-parallel=K` は **stage 数（phaseshift bench の均等分割を既定）**にするか、
-  **Strata 形で開始レイヤ番号を明示**するか。`auto`（境界探索）はコストモデルが Strata 固有のため後回しでよいか
+* **PP の分割方法 — 解消（2026-10-29）**: `--pipeline-parallel=K` を **ステージ数**とし、
+  均等分割（余りは最後のステージ）で実装した。開始レイヤ番号の明示指定（Strata 形）と
+  `auto` 探索は未実装のまま（コストモデルが装置依存のため）
+* **PP の重畳**: 直列 hand-off のみ。prefill チャンクの重畳（flag publish + wait）と
+  ステージ間の overlap は未実装（速度は伸びしろ。正しさは直列で固定済み）
+* **PP と approx の併用**: `shelf-validate` は exact/approx の双方を同じ K で PP 実行できるが、
+  `--pp-baseline=on`（PP=1 との一致確認）は exact 単独時のみ。approx 側の PP 一致確認は
+  未実装（同じ pipeline 実装なので数値は同一になる見込み）
 * **CPU 経路の扱い**: `--device=cpu` は T0 の補助としてどこまで使うか（CPU f32 は parity_policy の基準
   だが、9B / Release で prefill 4.90・decode 3.68 s/token（旧 4B の Debug 実測は 16 s/token）。
   → CPU 経路は T0 と小規模モデルの検証に限定する、という運用でよいか）

@@ -12,13 +12,13 @@
 
 * 内部での量子化変換は行わない（渡されたディレクトリをそのまま読む）
 * 比較の対象は decode で生成したトークン列（StopToken は含めない）
-* **現行の対応範囲は T0（同一構成の決定性）のみ**
+* **対応範囲は T0（同一構成の決定性）と T1/T2（exact vs approx・2026-10-29 実装）**
 
 | 項目 | 状態 |
 | --- | --- |
 | exact 単独での実行・T0 判定・JSON 出力 | 対応 |
-| `--approx-model`（T1 完全一致 / T2 誤差判定） | **未対応**（指定で起動拒否） |
-| `--pipeline-parallel`（K ≥ 2） | **未対応**（指定で起動拒否） |
+| `--approx-model`（T1 完全一致 / T2 誤差判定） | **対応**（V1・2026-10-29。approx は FP8 W8A8 を想定） |
+| `--pipeline-parallel`（K ≥ 2） | **対応**（V2・2026-10-29。レイヤ分割・K 台の GPU） |
 
 ---
 
@@ -50,16 +50,17 @@ cmake --build --preset cpu  # → build/cpu/apps/shelf-validate（f32 参照経�
 
 オプション:
   --exact-model=<dir>       無損失 (bf16) 側のモデルディレクトリ（必須）
-  --approx-model=<dir>      量子化側のモデルディレクトリ（V1 以降で有効）
+  --approx-model=<dir>      量子化 (FP8 W8A8) 側のモデルディレクトリ
   --prefill-tokens=<N>      prefill 長（既定 256、範囲 128..384）
   --budget=<N>              prefill + decode の合計上限（既定 512）
   --stop-id=<id>            StopToken（既定: モデル設定の eos_token_id）
-  --pipeline-parallel=<K>   ステージ数（既定 1、K>1 は V2 以降で有効）
+  --pipeline-parallel=<K>   レイヤ分割のステージ数（既定 1）。GPU は --gpu から K 台使う
   --device=<hip|cpu>        実行デバイス（既定: HIP ビルドなら hip、それ以外 cpu）
   --gpu=<n>                 GPU 番号（既定 0）
   --runs=<n>                決定性チェックの反復数（既定 2）
   --ids-file=<path>         入力 token ids（既定: 同梱 fixture。区切りは空白・カンマ）
   --out=<dir>               結果 JSON の保存先（既定 shelf-validate-out）
+  --t2-margin=<x>           T2 判定の margin 上限（既定: 未設定 = 基準値待ちで保留）
   --help                    このヘルプを表示
 
 終了コード: 0 = 合格 / 1 = 条件付き合格（T2、V1 以降）/ 2 = 不合格または起動エラー
@@ -70,8 +71,9 @@ cmake --build --preset cpu  # → build/cpu/apps/shelf-validate（f32 参照経�
 | 条件 | 制約 |
 | --- | --- |
 | `--exact-model` | 必須 |
-| `--approx-model` | 指定すると拒否（未実装） |
-| `--pipeline-parallel` | `K = 1` のみ許可 |
+| `--approx-model` | 指定可。exact と **同一構成**（`vocab_size` / `num_layers` / `hidden_size` / `layer_types`）かつ**同一の停止トークン集合**でなければならない（満たさなければ拒否） |
+| `--pipeline-parallel` | `K ≥ 1`。`K > num_layers` は拒否。`K > 1` は `--device=hip` のみ |
+| `--pp-baseline` | `on` / `off`。`on` は `K > 1` のとき PP=1 でも走らせて一致を確認（exact 単独時のみ） |
 | `--prefill-tokens` | `128 ≤ N ≤ 384` |
 | `--budget` | `budget − N ≥ 128`（decode が下限 128 に達すること） |
 | `--runs` | `≥ 1` |
@@ -142,10 +144,17 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 ---
 
-## 8. 比較判定（現行: T0 のみ）
+## 8. 比較判定（T0 と T1）
 
-比較は `comparisons[]` に 1 件以上入る（`runs = 1` では空、`t0 = "skipped"`）。
-軸は `"T0"`、比較ペアは `a = run0`、`b = run i（i ≥ 1）`。
+比較は `comparisons[]` に 1 件以上入る（`runs = 1` かつ approx 無しでは空、`t0 = "skipped"`）。
+
+* **T0**: 同一 config 内の反復。ペアは `a = run0`、`b = run i（i ≥ 1）`（exact / approx 各自）
+* **T1**: `a = exact run0`、`b = approx run0`（approx を指定した場合のみ）。`a` が正本側なので
+  `a_margin` は**正本の top1 − top2**（T2 の判定入力）
+* **T2**: T1 が `diverged` のとき、`a_margin` を `--t2-margin` の基準と比較する
+  （`within_margin` / `outside_margin` / 基準未設定なら `pending_baseline`）。結果は `t2` に書く
+* **T1pp**（`--pp-baseline=on` かつ `K > 1` のときのみ）: `a = exact PP=K`、`b = exact PP=1`。
+  **主ステージ分割は数値を変えない**ので `identical` が必須（違えば exit 2）
 
 | verdict | 条件 | 追加記録 |
 | --- | --- | --- |
@@ -161,9 +170,11 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 | コード | 条件 |
 | --- | --- |
-| `0` | 全比較が `identical`（または `runs = 1` で比較なし） |
-| `1` | 条件付き合格（T2 誤差判定）— **現行では発生しない**（V1 以降） |
-| `2` | 比較が `diverged` / `incomparable`、または起動・実行時のエラー |
+| `0` | 全比較が `identical`（または比較なし）。approx 指定時は T1 `identical` も必要 |
+| `1` | 条件付き合格: T1 が `diverged` で、T2 が `within_margin` または `pending_baseline` |
+| `2` | T0 の `diverged` / `incomparable`、T1 の `incomparable`、T2 の `outside_margin`、または起動・実行時のエラー |
+
+* 優先度は `2 > 1 > 0`（複数の結果があるときは最も厳しい方を返す）
 
 ---
 
@@ -173,18 +184,23 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 | キー | 内容 |
 | --- | --- |
-| `schema` | `"shelf-validate/v0"` |
+| `schema` | `"shelf-validate/v1"` |
 | `exit_code` | 終了コード（§9） |
 | `t0` | `identical` / `diverged` / `incomparable` / `skipped` |
 | `config.device` / `config.gpu` | 実行デバイス / GPU 番号 |
 | `config.runs` | 反復数 |
 | `config.prefill_tokens` / `config.budget` / `config.decode_cap` | `N` / `budget` / `budget − N` |
-| `config.pipeline_parallel` | 現行は常に `1` |
-| `config.models.exact` / `config.models.approx` | モデルディレクトリ（approx は現行 `null`） |
+| `config.pipeline_parallel` | 指定値（`--pipeline-parallel`）と実行時の `pipeline_parallel_effective`（ステージ数） |
+| `config.models.exact` / `config.models.approx` | モデルディレクトリ（approx 未指定は `null`） |
+| `config.t2_margin` | T2 の margin 基準（`--t2-margin` 未設定は `null`） |
+| `t1` | `identical` / `diverged` / `incomparable` / `skipped`（approx 未指定は `skipped`） |
+| `t1pp` | `identical` / `diverged` / `skipped`（`--pp-baseline` 未使用は `skipped`） |
+| `t2` | `status`（`within_margin` / `outside_margin` / `pending_baseline`）、`exact_margin`、`threshold`。T1 が一致・未指定なら `null` |
+| `models_run.{exact,exact_pp1,approx}` | モデル毎の内訳: `load_ms`、`device_mem_used_bytes`、`arena_bytes`、`stages`、`fp8`（宣言の要約、非量子化は `null`）、`fp8_act_group` |
 | `config.input` | `source`（`fixture:...` または `ids-file:...`）、`length`、`truncated` |
 | `config.stop` | `ids`（全停止条件）、`primary`、`source`（§6） |
 | `config.device_mem_used_bytes` | VRAM 常駐量（HIP: `hipMemGetInfo` の前後差、CPU: `null`） |
-| `runs[]` | 毎 run: `config`、`index`、`token_count`、`stop_reason`、`prefill_ms`、`decode_ms`、`tokens[]`（decode 生成分のみ） |
+| `runs[]` | 毎 run: `config`（`exact` / `approx`）、`index`、`token_count`、`stop_reason`、`prefill_ms`、`decode_ms`、`tokens[]`（decode 生成分のみ）、`tops[]`（毎ステップの `top1` / `top1_value` / `margin`） |
 | `comparisons[]` | §8 の判定結果 |
 | `timing` | `load_ms`、`elapsed_ms` |
 
@@ -213,7 +229,11 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 | アリーナ（rows = 64、自動算出） | **2,299 MiB（実測 2026-10-28、表示は "2299 MB"）**／最小必要 **777〜784 MiB**（`docs/spec/bench.md` §11.2） |
 | VRAM 常駐合計（重み + KV 状態 + arena、`free` 差分） | **20.56 GB（実測）** |
 | KV（既定 `budget = 512` の single sequence） | 数十 MB 程度（1 tok = 32 KiB） |
-| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。**VRAM 常駐は未計測**（現行は `--approx-model` 未対応） |
+| approx `Qwen3.5-9B-FP8`（FP8 W8A8）の重み | ディスク 14.01 GB（単一 13.52 GB ＋ `mtp` 0.49 GB）／うち `language_model` ＋ `lm_head` = 12.61 GB（bf16 5.27 GB ＋ `F8_E4M3` 5.30 GB）。単一 GPU で動作。**VRAM 常駐 15.09 GB（実測 2026-10-29・arena 2,298 MiB 込み）**、arena 自動算出 2,299 MiB（rows=64） |
+| `Qwen3.8-27B-FP8`（FP8 blockwise 128×128） | `language_model` ＋ `lm_head` = 29.5 GB（`F8_E4M3` 24.33 GB ＋ bf16 5.14 GB、66 シャード）。rows=64 の arena（約 5.6 GiB）は載らず、rows=16（arena 1,530 MiB）で pp / tg 実測済み |
+
+* exact と approx は**同時には VRAM に載せない**（9B ペアで bf16 17.91 GB ＋ FP8 12.61 GB ≳ 搭載 VRAM）。
+  exact を走らせてから実行器とシャードを解放し、approx を読む（比較は host 側のトークン列と top-1/2）
 | 参考: 旧 `Qwen3.5-4B`（削除済み・実測） | 重み 8.7 GB / アリーナ約 2 GB / 合計 10.1 GB |
 
 * GPU が占有されていると重みアップロードが `out of memory` で失敗するため、
@@ -230,5 +250,5 @@ python3 apps/fixtures/make_fixture.py   # 256 tok の厳密一致を検査して
 
 ## 12. 現行の対応外（計画のみ）
 
-未実装フェーズ（V1〜V3）の内容と未決事項は `draft_docs/shelf_validate.md` §7 / §8 に記す
+未実装フェーズ（V2 以降: pipeline-parallel、CI 連携）の内容と未決事項は `draft_docs/shelf_validate.md` §7 / §8 に記す
 （本書は実装済みの仕様のみを書く）。

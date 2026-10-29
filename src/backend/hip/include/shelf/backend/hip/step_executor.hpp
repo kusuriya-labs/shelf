@@ -43,6 +43,9 @@ struct HipStepExecutorOptions {
     double rope_theta = 1.0e7;             // from model config (composition root)
     std::size_t rope_rotary_dim = 64;      // pair-kernel constraint (model config)
     std::size_t kv_block_size = 16;        // from the resolved kernel
+    // 活性化の FP8 量子化粒度（K のブロック長）。apps 側が checkpoint の宣言
+    // （quantization_config）から決めて渡す。0 = 行（= トークン）全体で 1 スケール。
+    std::uint32_t fp8_act_group = 128u;
 };
 
 class HipStepExecutor {
@@ -57,6 +60,12 @@ public:
     Status upload_weight(TensorId id, const std::vector<float>& f32);
     // Checkpoint-native bf16: raw bits straight to device (no host conversion).
     Status upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n);
+    // FP8 W8A8 重み（E4M3 コードは断片順、スケールは f32）。
+    // weight_block128 = false: 出力特征ごと [features]（この checkpoint の宣言）
+    // weight_block128 = true : 128(出力)×128(K) ブロック [n_blocks][k_blocks]
+    Status upload_weight_fp8(TensorId id, const std::uint8_t* codes, std::size_t n_codes,
+                             const float* scales, std::size_t features,
+                             std::uint32_t k_padded, bool weight_block128);
 
     // Device allocation + zero-init for every declared state.
     Status declare_states(const ir::Graph& g);
@@ -71,6 +80,18 @@ public:
     Status run_step(const ir::Graph& g, std::int32_t token, std::uint32_t position) {
         return run_step(g, &token, 1, position);
     }
+
+    // pipeline-parallel の 1 ステージ実行。
+    //   * 先頭ステージ（embedding を持つ）: `tokens` を渡し `hidden` は nullptr。
+    //   * 中間・最終ステージ: `hidden`（前段の `hidden_out` の bf16 生ビット）を渡し
+    //     `tokens` は nullptr。グラフの入力 dtype で判別する。
+    // グラフの行数（prefill チャンク / decode 1 行）は n と一致させること。
+    Status run_stage(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
+                     std::size_t n, std::uint32_t base_pos);
+
+    // ステージ出力（bf16 のまま）を host へ。PP の hand-off 専用
+    // （f32 経由にすると丸めが入りうるので生ビットで出す）。
+    Result<std::vector<bf16_t>> fetch_value_bf16(const ir::Graph& g, ir::ValueId id);
 
     Result<std::vector<float>> fetch_logits(const ir::Graph& g);
     // Debug/parity: read back an activation value produced by the last run_step.
@@ -101,6 +122,13 @@ private:
     void* arena_alloc(std::size_t bytes);
     void arena_reset() { arena_top_ = 0; }
 
+    // FP8 活性化の per-step scratch（断片順コード + per-token スケール）。
+    // 同一ステップ内で GEMM が順次消費するため 1 本で足りる（行数が最大になる
+    // 時点で確保し、以降は再利用）。
+    struct Fp8Weight { std::uint8_t* codes = nullptr; float* scales = nullptr; bool block128 = false; };
+    // scale_floats = rows × (活性化スケールのブロック数)。
+    Status ensure_fp8_scratch(std::size_t code_bytes, std::size_t scale_floats);
+
     HipStepExecutorOptions opts_;
     hipStream_t stream_ = nullptr;
     void* arena_dev_ = nullptr;
@@ -108,6 +136,10 @@ private:
 
     std::unordered_map<std::uint32_t, void*> weight_dev_;        // TensorId -> bf16*
     std::unordered_map<std::uint32_t, TensorShape> weight_shape_;
+    std::unordered_map<std::uint32_t, Fp8Weight> weight_fp8_;    // TensorId -> fp8 (W8A8)
+    std::uint8_t* fp8_codes_dev_ = nullptr;                      // 断片順コード scratch
+    float* fp8_scales_dev_ = nullptr;                            // per-token スケール scratch
+    std::size_t fp8_codes_cap_ = 0, fp8_scales_cap_ = 0;
     std::vector<ir::StateId> state_ids_;
     std::unordered_map<std::uint32_t, StateLoc> state_dev_;
     std::unordered_map<std::uint32_t, ValueLoc> value_dev_;
