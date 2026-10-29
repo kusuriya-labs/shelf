@@ -14,3 +14,10 @@ if(MSVC)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
+
+# 性能の回帰ゲート（壁時計）。既定 OFF:
+#   * 時間は装置・負荷でぶれるため、通常の ctest には入れない
+#   * 有効化: `cmake -DSHELF_ENABLE_PERF_GATE=ON ...` で configure し、
+#     `ctest -R gate.perf` を空いている GPU で実行する（基準の取り直しは
+#     `test_perf_gate --dump`）
+option(SHELF_ENABLE_PERF_GATE "Add the wall-clock performance regression gate" OFF)

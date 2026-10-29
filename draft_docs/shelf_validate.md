@@ -354,6 +354,11 @@ compressed-tensors の `float-quantized`、`references/phaseshift-fp8` の WMMA 
 
 * **分割**: `even_stage_ranges(num_layers, K)` で均等に切り、**余りは最後のステージへ**
   （全層を必ず覆う）。`--pipeline-parallel=K` で GPU は `--gpu` から K 台使う
+* **置き場（2026-10-29 更新）**: ステップ実行・hand-off・時間計測は
+  **エンジン側 `src/runtime/pipeline`**（`StageGraphs` ＋ `backend::StageExecutor` インターフェース）。
+  `apps/common/pipeline.{hpp,cpp}` はステージの生成（グラフ・実行器・重み投入）だけを行う
+  composition root に縮めた。`runtime` は `hip/` もモデル型も見ない（移設時に境界テストが
+  モデル名の漏れを検出し、`StageGraphs` を `ir` だけで表す形に直した）
 * **グラフ**: `build_step_graph(cfg, kv_capacity, rows, StageRange{lo,hi})`。
   先頭ステージだけ embedding を持ちトークンを入力に、以降のステージは前段の hidden
   （bf16 生ビット）を入力に、最終ステージだけ final norm ＋ lm_head を持つ。

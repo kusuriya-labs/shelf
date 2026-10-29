@@ -17,6 +17,11 @@ target_link_libraries(test_quant_fp8 PRIVATE shelf::quant)
 add_test(NAME unit.quant_fp8 COMMAND test_quant_fp8)
 
 # quantization_config の解析（apps/common の実装を使う）
+# 性能の回帰ゲート（コストモデル。GPU 不要・決定論的）
+add_executable(test_cost_model architecture/test_cost_model.cpp)
+target_link_libraries(test_cost_model PRIVATE shelf::model_qwen35 shelf::ir)
+add_test(NAME architecture.cost_model COMMAND test_cost_model)
+
 add_executable(test_fp8_format unit/test_fp8_format.cpp)
 target_link_libraries(test_fp8_format PRIVATE shelf_app_common)
 add_test(NAME unit.fp8_format COMMAND test_fp8_format)
@@ -24,6 +29,21 @@ add_test(NAME unit.fp8_format COMMAND test_fp8_format)
 add_executable(test_ir_graph_validation unit/test_ir_graph_validation.cpp)
 target_link_libraries(test_ir_graph_validation PRIVATE shelf::ir)
 add_test(NAME unit.ir_graph_validation COMMAND test_ir_graph_validation)
+
+# 起動の受理判定（D1）— GPU 不要の純粋関数
+# 読み取りと実体化（D3）— 合成の供給元で GPU 不要
+add_executable(test_runtime_load unit/test_runtime_load.cpp)
+target_link_libraries(test_runtime_load PRIVATE shelf::runtime_load)
+add_test(NAME unit.runtime_load COMMAND test_runtime_load)
+
+# declare 相（D4）: アリーナ offsets の純粋計算
+add_executable(test_arena_plan unit/test_arena_plan.cpp)
+target_link_libraries(test_arena_plan PRIVATE shelf::compiler shelf::model_qwen35)
+add_test(NAME unit.arena_plan COMMAND test_arena_plan)
+
+add_executable(test_runtime_boot unit/test_runtime_boot.cpp)
+target_link_libraries(test_runtime_boot PRIVATE shelf::runtime_boot)
+add_test(NAME unit.runtime_boot COMMAND test_runtime_boot)
 
 add_executable(test_step_graph unit/test_step_graph.cpp)
 target_link_libraries(test_step_graph PRIVATE shelf::model_qwen35)
@@ -82,6 +102,20 @@ if(SHELF_ENABLE_HIP)
     add_executable(test_hip_device unit/test_hip_device.cpp)
     target_link_libraries(test_hip_device PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_device COMMAND test_hip_device)
+endif()
+
+# 性能の回帰ゲート（壁時計）。実行ファイルは常に作り、ctest への登録だけ opt-in。
+if(SHELF_ENABLE_HIP)
+    add_executable(test_perf_gate perf/test_perf_gate.cpp)
+    target_link_libraries(test_perf_gate PRIVATE shelf::foundation)
+    if(SHELF_ENABLE_PERF_GATE)
+        add_test(NAME gate.perf.hip
+                 COMMAND test_perf_gate $<TARGET_FILE:shelf-bench>
+                         ${CMAKE_CURRENT_SOURCE_DIR}/perf/baseline_hip.txt)
+        set_tests_properties(gate.perf.hip PROPERTIES
+            LABELS perf
+            TIMEOUT 900)
+    endif()
 endif()
 
 # shelf-bench の CLI 契約（phaseshift-bench と同じ規約）:

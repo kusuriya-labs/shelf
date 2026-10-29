@@ -34,6 +34,7 @@
 #endif
 
 #include "common/app_support.hpp"
+#include "common/boot.hpp"
 #include "common/pipeline.hpp"
 #include "fixtures/prefill_fixture.hpp"
 
@@ -369,9 +370,16 @@ int main(int argc, char** argv) {
     if (o.device != "hip" && o.device != "cpu")
         return fail("--device は hip か cpu です: " + o.device);
     const bool use_hip = (o.device == "hip");
-#ifndef SHELF_HAVE_HIP
-    if (use_hip) return fail("このビルドは HIP 非対応です（cpu を指定してください）");
-#endif
+
+    // ---- 起動（D1）: エンジンを起こす前に装置と要求を突き合わせる ----
+    {
+        app::BootRequest breq;
+        breq.device_execution = use_hip;
+        breq.first_device = static_cast<std::size_t>(o.gpu);
+        breq.pipeline_parallel = o.pipeline_parallel;
+        const auto booted = app::boot(breq, /*print=*/true);
+        if (!booted.accepted) return fail("起動条件を満たしません: " + booted.reason);
+    }
 
     const std::size_t decode_cap = o.budget - o.prefill_tokens;
     const std::size_t capacity = o.prefill_tokens + decode_cap + 4;
@@ -454,6 +462,9 @@ int main(int argc, char** argv) {
     app::ShardSet shards;
     if (auto st = app::open_shards(model_dir, &shards); !st.ok())
         return fail(st.message());
+    // 重みの実体化計画は正準カタログを入口にする（D3: 名前・形状・dtype の検証）。
+    auto cat_r = app::build_catalog(shards);
+    if (!cat_r.ok()) return fail("catalog: " + cat_r.status().message());
 
     // FP8 の形は checkpoint の宣言が正（approx 側が量子化されている場合のみ効く）。
     auto fmt_r = app::read_fp8_format(app::read_file_str(model_dir + "/config.json"));
@@ -500,7 +511,7 @@ int main(int argc, char** argv) {
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
         po.verbose = true;
-        auto pl = app::make_pipeline(cfg, shards, fmt, po);
+        auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
         pipeline = pl.release();
         mr.stages = pipeline.stages.size();
@@ -515,18 +526,9 @@ int main(int argc, char** argv) {
         return fail("このビルドは HIP 非対応です");
 #endif
     } else {
-        for (const auto& w : plan_holder.weights) {
-            auto t = app::read_f32(shards.where, w.checkpoint_name);
-            if (!t.ok()) return fail(w.checkpoint_name + ": " + t.status().message());
-            if (t.value().size() != app::numel(w.shape))
-                return fail("要素数不一致: " + w.checkpoint_name);
-            auto st = storage.set_weight(w.id, t.release());
-            if (!st.ok()) return fail("set_weight " + w.checkpoint_name + ": " + st.message());
-        }
-        for (const auto& s : plan_holder.states) {
-            auto st = storage.init_state(s.id, std::vector<float>(numel(s.shape), 0.0f));
-            if (!st.ok()) return fail("init_state: " + st.message());
-        }
+        // CPU 参照経路も同じ入口（正準カタログ → runtime/load）を通す。
+        auto st = app::load_host_plan(storage, plan_holder, cat_r.value(), shards, fmt);
+        if (!st.ok()) return fail(st.message());
     }
     mr.load_ms = now_ms() - t_load;
 

@@ -39,6 +39,49 @@ target_include_directories(shelf_runtime_state PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/state/include>")
 target_link_libraries(shelf_runtime_state PUBLIC shelf::foundation)
 
+# ---------------------------------------------------------------- compiler
+# declare 相（D4）: グラフから offsets を決める純粋計算。ヘッダのみ。
+add_library(shelf_compiler INTERFACE)
+add_library(shelf::compiler ALIAS shelf_compiler)
+target_include_directories(shelf_compiler INTERFACE
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/compiler/include>")
+target_link_libraries(shelf_compiler INTERFACE shelf::ir shelf::foundation)
+
+# ---------------------------------------------------------------- runtime/boot
+# 起動の分離（D1）: 構造化された probe と、要求機能による受理判定（純粋）。
+add_library(shelf_runtime_boot STATIC
+    src/runtime/boot/probe.cpp)
+add_library(shelf::runtime_boot ALIAS shelf_runtime_boot)
+target_include_directories(shelf_runtime_boot PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/boot/include>")
+target_link_libraries(shelf_runtime_boot PUBLIC shelf::backend_common shelf::foundation)
+
+# ---------------------------------------------------------------- runtime/pipeline
+# pipeline-parallel の編成（D3/エンジン側）。ステージの生成は apps が行い、
+# ここは非所有のポインタで受け取って順に回すだけ（HIP を知らない）。
+add_library(shelf_runtime_pipeline STATIC
+    src/runtime/pipeline/pipeline.cpp)
+add_library(shelf::runtime_pipeline ALIAS shelf_runtime_pipeline)
+target_include_directories(shelf_runtime_pipeline PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/pipeline/include>")
+target_link_libraries(shelf_runtime_pipeline PUBLIC
+    shelf::backend_common
+    shelf::model_qwen35
+    shelf::foundation)
+
+# ---------------------------------------------------------------- runtime/load
+# 読み取りの分離（D3）: 供給元（TensorSource）から検証・実体化まで。
+# artifact には依存しない（供給元はアプリが実装して差し込む）。
+add_library(shelf_runtime_load STATIC
+    src/runtime/load/materialize.cpp)
+add_library(shelf::runtime_load ALIAS shelf_runtime_load)
+target_include_directories(shelf_runtime_load PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/load/include>")
+target_link_libraries(shelf_runtime_load PUBLIC
+    shelf::foundation
+    shelf::quant
+    shelf::nlohmann)
+
 # ---------------------------------------------------------------- backend/hip
 # Host-side runtime API + device kernels. HIP headers/types stay confined here.
 if(SHELF_ENABLE_HIP)
@@ -60,7 +103,7 @@ if(SHELF_ENABLE_HIP)
     target_include_directories(shelf_backend_hip PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/hip/include>")
     target_link_libraries(shelf_backend_hip
-        PUBLIC shelf::backend_common shelf::ir shelf::quant hip::host
+        PUBLIC shelf::backend_common shelf::compiler shelf::ir shelf::quant hip::host
         PRIVATE hip::device)
     # CMake passes CMAKE_HIP_ARCHITECTURES; pin it explicitly for determinism.
     target_compile_options(shelf_backend_hip PRIVATE
@@ -122,3 +165,7 @@ add_library(shelf::weights ALIAS shelf_weights)
 target_include_directories(shelf_weights INTERFACE
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/weights/catalog/include>")
 target_link_libraries(shelf_weights INTERFACE shelf::artifact shelf::foundation)
+
+# ---------------------------------------------------------------- D7 整合確認
+# 1 ディレクトリ ≒ 1 ターゲット。定義の最後に一度だけ検査する（configure で止まる）。
+include("${CMAKE_CURRENT_LIST_DIR}/CheckModuleTargets.cmake")

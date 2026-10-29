@@ -50,10 +50,10 @@
 
 | 段階 | 現在の担い手 | 状態 |
 | --- | --- | --- |
-| 1. 起動 | `apps/shelf_run.cpp` の `main`（CLI 解析・`--device` 選択・`index.json` と shard reader の開放・`build_step_graph`）。装置初期化は `HipStepExecutor` のコンストラクタ内部 | app に集約。デバイス問い合わせが backend の ctor に埋没 |
-| 2. メモリ確保 | 3 系統に分散: ①実行器のアリーナ（`arena_alloc`、既定 64MiB の定数、毎ステップ reset）②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | **予算（budget）の概念が存在しない**。確保量は定数と論理 shape から決まる |
-| 3. モデルロード | `artifact/safetensors` reader → `apps` の `read_bf16` / `read_f32` → **同じラムダ内で** `upload_weight*` と `declare_states` を呼ぶ | 読取・実体化・状態確保が 1 ラムダに融合。`weights/catalog` は「実行にもデバイスにも触れない」宣言のみで未接線 |
-| 4. エンジン起動 | `apps` の `if (device == "hip") ... else` による排他分岐と、`HipStepExecutorOptions` の組み立て。CPU は `HostStorage` + `ReferenceExecutor` | 選択肢が 2 値（cpu / hip）で、起動可否の契約（機能の実在判定）が無い |
+| 1. 起動 | **D1 仕上げ済み（2026-10-29）**: probe と受理判定は `runtime/boot`（純粋）、HIP の有無の吸収とログは `apps/common/boot.cpp` の `app::boot()` 1 か所。run / validate / bench の 3 アプリが同じ手順を呼ぶ。CLI 解析とグラフ生成は app に残る | デバイス問い合わせは `main` から呼ばれる（backend の ctor には埋没しない） |
+| 2. メモリ確保 | ①活性化アリーナは **declare 相**（`compiler/arena_offsets.hpp`）が lifetime から offsets を決め、実行器は確保しない（D4 完了）。②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | ①は寿命解析で再利用する。②③は**予算（budget）の概念が未導入**（D2） |
+| 3. モデルロード | **D3 仕上げ済み（2026-10-29）**: `weights/catalog`（正準名 → 安定 id・形状・dtype）→ `runtime/load`（読取・検証・無損 relayout）→ 実行器（upload ＋ 状態宣言）。`app::plan_materialization()` が入口 | 読取の直前に「checkpoint に無い / 形が違う / dtype が想定外」が分かる（デバイスに触る前に落ちる） |
+| 4. エンジン起動 | `app::boot()` が受理判定を済ませた後、`apps` が `make_pipeline` で実行器を組み立てる。CPU は `HostStorage` + `ReferenceExecutor` | 拒否は「エンジン構築の前」に理由付きで返る。**機能表（D6）は未導入**（選択肢は今も cpu / hip の 2 値） |
 | 5. ホットパス Dequant | **実装済み（2026-10-29）**: `DataType::fp8_e4m3` と `map_dtype("F8_E4M3")`、`src/quant` の fp8 契約（コーデック・断片順レイアウト・粒度）、HIP 側に fp8 WMMA GEMM と活性化量子化カーネル。dequant は GEMM 内（ロード時は無損 relayout のみ）。CPU 参照は fp8 を**明示的に拒否** | 粒度は checkpoint の宣言が正（9B: 重み channel・活性化 token／27B: 重み 128×128 block・活性化 1×128）。宣言に無い粒度は実装しない |
 
 ### 1.2 既に効いている分離（維持する）
@@ -79,8 +79,10 @@
    実装は `backend/hip/kernels`（fp8 KV のみ）。3 箇所にまたがり、段階 5 の所在が決まっていない
 4. **起動とエンジン初期化の境界が曖昧** — デバイス問い合わせ・アリーナ確保・状態確保が
    実行器 ctor の内部にあり、アプリからは観測できない
-5. **境界ルールの正本が未整備** — 境界テストのコメントが
-   `docs/architecture/dependency_rules.md` を参照しているが未作成。
+5. **境界ルールの正本が未整備 → 解消（2026-10-29・D0）** — 境界テストのコメントが
+   `docs/architecture/dependency_rules.md` を参照しているが未作成だった。正本を
+   `draft_docs/dependency_rules.md` に作成（14 ルールの対象・禁止・理由、モデル名スキャンの仕様、
+   違反時の直し方、追加手順、未適用候補）。移行先は `docs/architecture/`（実装完了時）。
 
 ---
 
@@ -312,12 +314,12 @@ shelf/
 3. `src/weights` / `src/artifact` は `shelf/model/` を禁止（既存）→ アーティファクトが
    モデル知識を持たない（encoding ⊥ layout の前提）
 4. **新設**: `src/placement` は `shelf/artifact/` も禁止（既存は model/runtime/hip）→
-   予算計算がファイルを触らない
+   予算計算がファイルを触らない — **適用済み（2026-10-29・D7）**
 5. **新設**: `src/compiler` は `shelf/placement/` を含めてよい（既存ルールに backend/runtime/api のみ）
    が、`hip/` は禁止のまま（既存）
 6. モデル名（qwen 等）の生スキャンは `src/model/` 以外禁止（既存）を維持
 7. **新設**: `src/api` は `shelf/backend/` も禁止（既存は `hip/` のみ）→ Server は
-   `runtime` の公開 API を経るだけで、実行器・カーネルを直接知らない
+   `runtime` の公開 API を経るだけで、実行器・カーネルを直接知らない — **適用済み（2026-10-29・D7）**
 
 ### 3.4 ビルド単位
 
@@ -404,15 +406,59 @@ D1 と D8 の前提。草案 v0 済み）
 
 | # | フェーズ | 内容 | 完了条件（DoD） |
 | --- | --- | --- | --- |
-| D0 | ルールの正本化 | 5 段階とディレクトリの対応表を `draft_docs/dependency_rules.md` に書く（境界テストのコメントが参照するのは `docs/architecture/` 側。**実装完了時にそこへ移す** — AGENTS.md のドキュメント規則） | 文書があり、既存 14 ルールの意図と本文書 §3.3 が一致する |
-| D1 | 起動の分離 | デバイス probe と設定解決を `runtime/boot/` へ。probe は構造化データを返し、要求機能表で受理判定してからエンジンを起こす。`apps/shelf_run.cpp` は薄く | `main` に「probe → 判定 → 生成」以外の段階が無い。機能不足の起動が原因付きで失敗するテストがある（挙動は現状と不変） |
+| D0 | ルールの正本化 | 5 段階とディレクトリの対応表を `draft_docs/dependency_rules.md` に書く（境界テストのコメントが参照するのは `docs/architecture/` 側。**実装完了時にそこへ移す** — AGENTS.md のドキュメント規則） | 文書があり、既存 14 ルールの意図と本文書 §3.3 が一致する。**2026-10-29 達成**: `draft_docs/dependency_rules.md`（14 ルールを対象・禁止・理由の 3 列で記載し、テストの表と機械照合で一致を確認。§3.3 の未適用候補と D3 で決める論点も明記） |
+| D1 | 起動の分離 | デバイス probe と設定解決を `runtime/boot/` へ。probe は構造化データを返し、要求機能表で受理判定してからエンジンを起こす。`apps/shelf_run.cpp` は薄く | `main` に「probe → 判定 → 生成」以外の段階が無い。機能不足の起動が原因付きで失敗するテストがある（挙動は現状と不変）。**2026-10-29 達成**: `src/runtime/boot`（`Probe` / `Requirements` / `evaluate` / `describe` / `resolve`）を新設し、`apps/common/boot.cpp` の `app::boot()` が HIP の有無を吸収して「probe → 判定 → 1 行ログ」を 1 か所で行う。run / validate / bench の 4 ドライバが同じ関数を呼び、受理されない場合はモデルの読み込み前に理由付きで終了する。`unit.runtime_boot`（純粋 9 ケース）で判定を固定 |
 | D2 | 予算と確保の分離 | 予算・所在の計算を `placement/`（純粋、GPU 非依存）へ。所在は `backend/common` の `MemoryKind` で表し、実確保のみ backend に残す | placement の単体テストが GPU なしで通る。全 device 常駐の既定で性能・結果が不変（= 協調推論計画のフェーズ 1 と同一成果物） |
-| D3 | ロードの分離 | `upload_weights` ラムダを `runtime/load/` へ。「読取 → 検証 → 実体化計画 → upload」を型で固定し、無損 relayout のみ許可する | apps から safetensors の直接読みが消える。`weights/catalog` が実体化計画の入口として接線する |
-| D4 | declare / run 二相 | バッファ寿命と offsets を declare 相（`compiler/` の受け皿）で決め、run 相から allocator を外す | run 相のコードに割当 API が現れない（radiance の `arena.h` 規約）。ステップ時間が悪化しない（フェーズ 0 の計測と比較） |
+| D3 | ロードの分離 | `upload_weights` ラムダを `runtime/load/` へ。「読取 → 検証 → 実体化計画 → upload」を型で固定し、無損 relayout のみ許可する | apps から safetensors の直接読みが消える。`weights/catalog` が実体化計画の入口として接線する。**2026-10-29 達成**: `src/runtime/load`（`TensorSource` / `materialize` / `read_fp8_format`）を新設し、`apps/common/app_support` は供給元アダプタ（`ShardSource`）と「材料→実行器」だけに縮めた。`unit.runtime_load` で bf16/f32/fp8（両スケール規約）・欠落・不一致・CPU 拒否を固定。**`app::build_catalog()` → `plan_materialization()`** を追加し、正準カタログ（名 → 安定 id・形状・dtype）で検証してから実体化する（次数が違う場合は要素数で照合。例: conv1d の `[C,1,K]` と IR の `[C,K]`）。GPU 経路（`upload_plan`）も CPU 参照経路（`load_host_plan`）もこの入口を通るので、apps から safetensors を直接読む箇所が消えた |
+| D4 | declare / run 二相 | バッファ寿命と offsets を declare 相（`compiler/` の受け皿）で決め、run 相から allocator を外す | run 相のコードに割当 API が現れない（radiance の `arena.h` 規約）。ステップ時間が悪化しない（フェーズ 0 の計測と比較）。**2026-10-29 達成**: `compiler/arena_offsets.hpp` の `plan_arena()` が寿命解析（SSA の使用位置）で offsets を決め、`backend/hip` は `slot_of()` / `scratch_of()` で引くだけになった（`arena_alloc` を撤去）。9B / 27B・PP=1/2 でトークン列が旧実装と完全一致、アリーナは 2,299 → 91 MiB（9B-PP1）。詳細は §4 の「D4 の実装記録」 |
 | D5 | 量子化の契約 | `quant/` に encoding（数）と**参照 dequant の型・契約**を置き、CPU 実装は `backend/cpu`（境界ルールで `src/quant` は `shelf/backend/` を include 禁止のため）。**有損 dequant はホットパス（GEMM 内）のみ**と規約化。**製品量子化版は FP8 W8A8（2026-10-29 決定。checkpoint `models/Qwen3.5-9B-FP8`。参照: compressed-tensors の `float-quantized` 仕様 / `transformers` の fp8 linear / `references/` の phaseshift-fp8。最初の適用は `shelf-validate` V1**）。低 VRAM 向けの 4bit 級（EXL3 など）は未決定（実測記録は `draft_docs/shelf_validate.md` §7「（6）履歴」）。fp8 KV の codec は `backend/hip` に残すが型の定義は `quant/` へ | 量子化スキーマの追加で動く箇所が `quant/`（型・契約）と `backend` の 2 実装（CPU 参照 / GPU 本番）に限られる（= 協調計画の量子化分岐と統合） |
 | D6 | バックエンド起動契約 | `backend/common` に機能表（required/optional）と、選択を 1 度だけ行う dispatch を定義 | 選択が複数回・複数箇所で行われない。未対応機能要求が受理前に検出される |
-| D7 | 検証の固定化 | 境界テストに §3.3 の新ルールを追加、1 ディレクトリ = 1 ターゲットの整合確認、性能の回帰ゲート | cpu / hip 両プリセットで全テストが通り、境界テストが新ルールを検査している |
+| D7 | 検証の固定化 | 境界テストに §3.3 の新ルールを追加、1 ディレクトリ = 1 ターゲットの整合確認、性能の回帰ゲート | cpu / hip 両プリセットで全テストが通り、境界テストが新ルールを検査している。**2026-10-29 達成**: §3.3-4 / §3.3-7 をテストに追加（14 ルール → 検査内容を更新）、`cmake/CheckModuleTargets.cmake` で configure 時に整合を強制（違反 2 種を注入して失敗を確認）、`architecture.cost_model`（決定論的な性能ゲート）と `gate.perf.hip`（壁時計、opt-in）を追加。cpu 16 件 / hip 24 件が通過 |
 | D8 | Server 層の導入 | **パス A で確定（§2.5 / §3.5）** → `src/api` にエンジン抽象と型付き JSONL ブリッジ、OpenAI 面は `apps/server/`（Python + aiohttp + HF `transformers`）。あわせて `engine_contract.md` §3 の **5 パラメータ（`temperature` / `top_k` / `top_p` / `min_p` / `seed`）をエンジン側に実装**（現状は greedy 専用のため追加が必要） | `/v1/chat/completions` の受付〜ストリーム完了までを**フェイクエンジン**で、ポート・モデル無しに検証するテストがある。エラーは `draft_docs/serve_protocol.md` §3 の表駆動で検証する。`src/api` が `hip/` と `shelf/backend/` を含まないことを境界テストが検査 |
+
+### D4 の設計メモ（2026-10-29・着手前の合意）
+
+* **declare 相**（`src/compiler/`）: グラフ＋行数から、活性化バッファの
+  **offsets 表**（`{ValueId, offset, bytes, dtype}` の列）を純粋関数で作る。
+  `run 相は offsets を受け取るだけ`にし、`arena_alloc` を実行器から外す。
+* **アリーナの契約**: 現行の `64 MiB + 2×Σ出力(f32)` は暫定。declare 相では
+  「同一ステップ内で寿命が重ならない出力は同じ offset を再利用できる」ため、
+  区間グラフの最大同時使用量（peak）を計算して**必要量を下げる**。
+* **検証**: ① offsets 表は GPU 不要の単体テスト（peak ≤ 現行の自動算出値、
+  alias が重ならないこと）② 実行結果が D4 前と**ビット一致**（9B/27B・PP=1/2）
+  ③ ステップ時間が悪化しない（`architecture.cost_model` と `bench tg`）。
+* **段取り**: `compiler/` のオフセット計算＋単体テスト → 実行器に offsets を渡す
+  経路を追加（既存のアリーナ計算と併存）→ 既定を offsets 経路へ切替 → 旧経路を削除。
+
+### D4 の実装記録（2026-10-29）
+
+* **declare 相**（`compiler/arena_offsets.hpp`）: グラフから `ArenaPlan`
+  （値の offsets ＋ primitive 内の一時領域 ＋ 必要な総量）を作る純粋関数。
+  値の寿命は SSA の使用位置から閉区間で決め、重ならない区間は同じ offset を再利用する。
+  `reshape`（view）は元の値と同じ offset を指し、f32 の値を reshape しても f32 のまま。
+  一時領域は 1 primitive の内側でしか生きないので、全 primitive で 1 本を共有する
+  （直列実行のため重ならない）。
+* **run 相**（`backend/hip/step_executor.cpp`）: `arena_alloc` を撤去し、`plan_->slot_of()`
+  と `scratch_of()` で引くだけにした。宣言量より多く要求された場合は
+  `insufficient_memory` で止める（黙って隣の値を壊さない）。
+* **実測（2026-10-29・R9700 1 台 / PP は 2 台）**:
+
+  | モデル | PP | アリーナ（旧 → 新） | トークン列 |
+  | --- | --- | --- | --- |
+  | 9B-FP8 | 1 | 2,299 MiB → **91 MiB** | 旧実装と完全一致（logits のバイト列も一致） |
+  | 9B-FP8 | 2 | 2,299 MiB → 30 / 92 MiB | PP=1 と完全一致 |
+  | 27B-FP8 | 2 | 423 MiB → 51 / 112 MiB | 旧実装と完全一致 |
+
+* **検証**: `unit.arena_plan`（寿命の重なり・再利用・view・決定論・上限）、
+  `unit.hip_pipeline`（1 ステージ vs 2 ステージのビット一致）、
+  `unit.hip_step_executor`（バッチ 4 行 vs 1 行 × 4 のビット一致）。
+* **デバッグ経路**: ステップ後に中間値を読む `--dump-acts` は
+  `HipStepExecutorOptions::arena_reuse = false`（寿命再利用なし）で回す。
+* **マージ時に `docs/` へ反映するもの**（AGENTS.md のドキュメント規則により、いまは
+  `draft_docs/` に留める）: `docs/spec/bench.md` §（アリーナの自動算出式 64 MiB + 2×Σ と
+  行数別の二分探索表）と `docs/guide/bench.md` の `arena exhausted` の説明。
+  新しい契約は「declare 相がグラフから必要量を決める（寿命の重ならない値は offset を共有）」、
+  `--arena-mib` は上限の明示指定（足りなければ `insufficient_memory`）。
 
 補足:
 
@@ -435,6 +481,10 @@ D1 と D8 の前提。草案 v0 済み）
   **正本は `draft_docs/parity_policy.md`**
 * **構造**: `tests/architecture/test_architecture_boundaries.cpp` が新ルールを含めて通ること。
   これが「5 段階の分離が守られている」唯一の機械的保証になる
+* **配置とターゲット**: `cmake/CheckModuleTargets.cmake` が configure 時に
+  「1 ディレクトリ ≒ 1 ターゲット」を強制する（宣言外の場所にソースを置けない）
+* **性能**: 決定論的なコストモデル（`architecture.cost_model`。重み・活性化のバイト数と
+  primitive 個数）を主ゲートにし、壁時計（`gate.perf.hip`）は opt-in で空いた装置で回す
 * **挙動不変のフェーズ（D1〜D3）**: 既存テスト全通過 ＋ フェーズ 0 相当の計測で
   ステップ時間・VRAM 常駐量が変わらないこと
 * **純粋レイヤ（placement / boot / quant の算術）**: GPU 不要の単体テスト。CPU プリセットで
@@ -468,10 +518,12 @@ D1 と D8 の前提。草案 v0 済み）
 未決:
 
 * `runtime/boot` と `runtime/load` を 1 ターゲットにまとめるか、分けたままにするか
-* `compiler/` に declare 相を置くか、`runtime/` の下に置くか（現状 `compiler/` は空で、
-  `paged_kv.hpp` の注記は lowering を runtime/compiler の責務としている）
-* D4（アリーナ offsets の事前計算）の**実施時期** — 協調推論計画 フェーズ 4 の前か後か。
-  実施自体は P4 原則として確定。先送りする場合も「run 相に割当 API を使わない」方針は維持する
+  （現状は分けたまま。依存も役割も違うので、統合の利点は今のところ無い）
+* ~~`compiler/` に declare 相を置くか、`runtime/` の下に置くか~~ → **`compiler/` に確定**
+  （2026-10-29・D4）。境界ルール 8 から `shelf/compiler/` の禁止を外し、backend が
+  offsets 表を受け取る向きにした（compiler は backend を include しない = 非巡回）
+* ~~D4（アリーナ offsets の事前計算）の実施時期~~ → **完了**（2026-10-29）。
+  残るのは D2（予算）と D6（機能表）で、どちらも `type` の追加が主
 * パス A（**確定済み**）の実務確認 — HF `transformers` の依存管理（`aiohttp` と併せ、
   **torch 無しでの `AutoProcessor` 動作**と `trust_remote_code` の扱い）と、
   staging は PhaseShift の copy + chmod を踏襲するか（gigatoken 等の軽量構成は不採用とした）

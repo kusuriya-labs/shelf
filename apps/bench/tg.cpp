@@ -15,6 +15,8 @@
 
 #include "bench_common.hpp"
 #include "common/app_support.hpp"
+#include "common/boot.hpp"
+#include <shelf/runtime/boot/probe.hpp>
 #include "common/pipeline.hpp"
 
 #include <shelf/model/qwen35/step_graph.hpp>
@@ -155,6 +157,20 @@ int run_tg(int argc, char** argv) {
     }
     const auto fmt = fmt_r.value();
 
+    // 起動（D1）: エンジンを起こす前に装置と要求を突き合わせる。
+    {
+        app::BootRequest breq;
+        breq.device_execution = true;
+        breq.first_device = static_cast<std::size_t>(gpu);
+        breq.pipeline_parallel = static_cast<std::size_t>(pp);
+        const auto booted = app::boot(breq, /*print=*/true);
+        if (!booted.accepted) {
+            std::fprintf(stderr, "%s: 起動条件を満たしません: %s\n", "tg",
+                         booted.reason.c_str());
+            return kExitRuntime;
+        }
+    }
+
     const std::size_t max_rows = shelf::backend::hip::HipStepExecutor::kMaxStepRows;
     const std::size_t chunk =
         chunk_arg > 0 ? static_cast<std::size_t>(chunk_arg)
@@ -191,6 +207,12 @@ int run_tg(int argc, char** argv) {
         std::fprintf(stderr, "tg: %s\n", st.message().c_str());
         return kExitRuntime;
     }
+    // 重みの実体化計画は正準カタログを入口にする（D3）。
+    auto cat_r = app::build_catalog(shards);
+    if (!cat_r.ok()) {
+        std::fprintf(stderr, "tg: catalog: %s\n", cat_r.status().message().c_str());
+        return kExitRuntime;
+    }
 
     shelf::backend::hip::HipStepExecutorOptions ho;
     ho.device = static_cast<int>(gpu);
@@ -211,7 +233,7 @@ int run_tg(int argc, char** argv) {
     po.rope_rotary_dim = cfg.rotary_dim;
     po.fp8_act_group = fmt.act_group;
     po.verbose = true;
-    auto pl = app::make_pipeline(cfg, shards, fmt, po);
+    auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
     if (!pl.ok()) {
         std::fprintf(stderr, "tg: pipeline: %s\n", pl.status().message().c_str());
         return kExitRuntime;
@@ -228,8 +250,8 @@ int run_tg(int argc, char** argv) {
         std::fprintf(stderr, "tg: %s: %s\n", what, st.message().c_str());
         if (st.message().find("arena") != std::string::npos)
             std::fprintf(stderr,
-                         "tg: hint: the arena is a per-step bump allocator; raise "
-                         "--arena-mib above the current %lld MiB\n",
+                         "tg: hint: the arena is sized by the declare-phase offsets table; "
+                         "raise --arena-mib above the current %lld MiB\n",
                          static_cast<long long>(pipeline.arena_bytes >> 20));
     };
 

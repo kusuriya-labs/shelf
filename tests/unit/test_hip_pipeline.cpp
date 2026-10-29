@@ -136,7 +136,8 @@ app::Pipeline make_staged(const model::qwen35::TextConfig& cfg,
                           std::size_t chunk) {
     app::Pipeline p;
     p.hidden_size = cfg.hidden_size;
-    p.handoff.assign(cfg.hidden_size * (chunk > 1 ? chunk : 1), bf16_t{0u});
+    p.engine.hidden_size = cfg.hidden_size;
+    CHECK(runtime::pipeline::prepare(p.engine, chunk).ok(), "engine prepare");
     for (const auto& r : ranges) {
         app::PipelineStage st;
         st.layer_lo = r.layer_lo;
@@ -149,6 +150,19 @@ app::Pipeline make_staged(const model::qwen35::TextConfig& cfg,
         st.exec = std::make_unique<backend::hip::HipStepExecutor>(exec_opts(cfg));
         upload_synthetic(*st.exec, st.prefill ? *st.prefill : st.decode);
         p.stages.push_back(std::move(st));
+    }
+    // エンジンへ編成を渡す（アプリ側の生成物はヒープ上で安定）。
+    p.engine.stages.reserve(p.stages.size());
+    for (auto& st : p.stages) {
+        runtime::pipeline::Stage es;
+        es.graphs.decode = &st.decode.graph;
+        es.graphs.prefill = st.prefill ? &st.prefill->graph : nullptr;
+        es.graphs.hidden_out_decode = st.decode.hidden_out;
+        es.graphs.hidden_out_prefill = st.prefill ? st.prefill->hidden_out : ir::ValueId{};
+        es.exec = st.exec.get();
+        es.layer_lo = st.layer_lo;
+        es.layer_hi = st.layer_hi;
+        p.engine.stages.push_back(es);
     }
     return p;
 }

@@ -18,7 +18,11 @@
 #include <shelf/model/qwen35/step_graph.hpp>
 
 #include "common/app_support.hpp"
+#include "common/boot.hpp"
 #include "common/pipeline.hpp"
+#ifdef SHELF_HAVE_HIP
+#include <shelf/runtime/boot/probe.hpp>
+#endif
 
 #if defined(SHELF_HAVE_HIP)
 #include <memory>
@@ -77,6 +81,15 @@ int main(int argc, char** argv) {
     if (pp < 1) return fail("--pipeline-parallel は 1 以上");
     if (pp > 1 && device != "hip") return fail("--pipeline-parallel > 1 は hip のみ");
 
+    // ---- 起動（D1）: エンジンを起こす前に装置と要求を突き合わせる ----
+    app::BootRequest breq;
+    breq.device_execution = (device == "hip");
+    breq.first_device = static_cast<std::size_t>(gpu);
+    breq.pipeline_parallel = static_cast<std::size_t>(pp);
+    breq.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
+    const auto booted = app::boot(breq, /*print=*/true);
+    if (!booted.accepted) return fail("起動条件を満たしません: " + booted.reason);
+
     // ---- config ----
     const std::string config_text = app::read_file_str(model_dir + "/config.json");
     auto cfg_r = model::qwen35::load_text_config_json(config_text);
@@ -119,6 +132,9 @@ int main(int argc, char** argv) {
     app::ShardSet shards;
     if (auto sst = app::open_shards(model_dir, &shards); !sst.ok())
         return fail(sst.message());
+    // 重みの実体化計画は正準カタログを入口にする（D3: 名前・形状・dtype の検証）。
+    auto cat_r = app::build_catalog(shards);
+    if (!cat_r.ok()) return fail("catalog: " + cat_r.status().message());
 
     // ---- weights ----
 #ifdef SHELF_HAVE_HIP
@@ -135,11 +151,13 @@ int main(int argc, char** argv) {
         po.kv_capacity = capacity;
         po.chunk_rows = (pf_rows > 1) ? pf_rows : 1;
         po.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
+        // --dump-acts はステップ後に中間値を読むので、offset の再利用を切る。
+        po.arena_reuse = dump_acts.empty();
         po.rope_theta = cfg.rope_theta;
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
         po.verbose = true;
-        auto pl = app::make_pipeline(cfg, shards, fmt, po);
+        auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
         pipeline = pl.release();
         std::printf("fp8: %s (act_group=%u%s)\n",
@@ -154,21 +172,9 @@ int main(int argc, char** argv) {
         return fail("built without HIP support");
 #endif
     } else {
-        for (const auto& w : plan.weights) {
-            auto t = app::read_f32(shards.where, w.checkpoint_name);
-            if (!t.ok()) return fail(t.status().message());
-            if (t.value().size() != app::numel(w.shape)) {
-                return fail("shape mismatch for " + w.checkpoint_name + ": file has " +
-                            std::to_string(t.value().size()) + ", IR contract needs " +
-                            std::to_string(app::numel(w.shape)));
-            }
-            auto st = storage.set_weight(w.id, t.release());
-            if (!st.ok()) return fail("set_weight " + w.checkpoint_name + ": " + st.message());
-        }
-        for (const auto& s : plan.states) {
-            auto st = storage.init_state(s.id, std::vector<float>(app::numel(s.shape), 0.0f));
-            if (!st.ok()) return fail("init_state: " + st.message());
-        }
+        // CPU 参照経路も同じ入口（正準カタログ → runtime/load）を通す。
+        auto st = app::load_host_plan(storage, plan, cat_r.value(), shards, fmt);
+        if (!st.ok()) return fail(st.message());
     }
 
     // ---- rope tables (text path: all mrope channels equal -> identity; HF

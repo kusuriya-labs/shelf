@@ -137,7 +137,9 @@ int main() {
     const fs::path src = root / "src";
 
     // Module include rules (lowercase substrings of include paths).
-    // Keep in sync with docs/architecture/dependency_rules.md.
+    // 正本: draft_docs/dependency_rules.md（作業中）→ 実装完了時に
+    // docs/architecture/dependency_rules.md へ移す（D0）。ルールを足すときは
+    // 本書の表と同じコミットで更新する。
     // HIP types confined to src/backend/hip/.
     const std::vector<Rule> rules = {
         {src / "foundation",
@@ -158,16 +160,18 @@ int main() {
          {"shelf/runtime/", "shelf/api/", "hip/"}},
         {src / "compiler",
          {"shelf/runtime/", "shelf/api/", "hip/"}},
+        // backend は compiler の declare 相（offsets 表）**だけ**を受け取る。
+        // アリーナの置き場を決めるのは compiler、書くのは backend（D4）。
         {src / "backend",
-         {"shelf/model/", "shelf/compiler/", "shelf/runtime/", "shelf/placement/"}},
+         {"shelf/model/", "shelf/runtime/", "shelf/placement/"}},
         {src / "backend/common", {"hip/"}},
         {src / "backend/cpu",   {"hip/"}},
         {src / "placement",
-         {"shelf/model/", "shelf/runtime/", "hip/"}},
+         {"shelf/model/", "shelf/runtime/", "hip/", "shelf/artifact/"}},
         {src / "runtime",
          {"shelf/artifact/", "shelf/api/", "hip/"}},
         {src / "api",
-         {"hip/"}},
+         {"hip/", "shelf/backend/"}},
         {root / "include/shelf",
          {"hip/", "shelf/backend/", "shelf/foundation/"}},
     };

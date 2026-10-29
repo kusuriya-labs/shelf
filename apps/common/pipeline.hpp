@@ -1,11 +1,14 @@
-// shelf apps/common — pipeline-parallel（レイヤ分割・1 ステージ = 1 デバイス）。
+// shelf apps/common — pipeline-parallel の**組み立て**（composition root）。
+//
+// 実行そのものは `runtime/pipeline`（エンジン側）が担う。ここは
+//   * ステージ毎のグラフ生成（レイヤ範囲）
+//   * 実行器の生成と重み投入（そのステージの範囲だけ）
+//   * エンジンへ非所有ポインタで編成を渡す
+// だけを行い、ステップ実行・hand-off・時間計測はエンジンに任せる。
 //
 // 設計（draft_docs/shelf_validate.md §6 / §6.1）:
 //   * レイヤ境界で K ステージに均等分割（余りは最後のステージへ寄せて全層を覆う）
-//   * 各ステージは自分のレイヤ範囲の重みと状態（KV / conv / recurrent）だけを持つ
-//   * ステージ間の受け渡しは **bf16 の生ビット**（数値を変えない）。直列 hand-off:
-//     前段の `run_stage` が同期で終わってから次段へ渡す（Strata の既定と同じ）
-//   * 正しさの担保は `exact(PP=1)` と `exact(PP=K)` の T1 一致
+//   * ステージ間は bf16 の生ビット（数値を変えない）・直列 hand-off
 //   * head（final norm + lm_head）は最終ステージ、embedding は先頭ステージ
 #pragma once
 
@@ -15,6 +18,7 @@
 #include <vector>
 
 #include <shelf/model/qwen35/step_graph.hpp>
+#include <shelf/runtime/pipeline/pipeline.hpp>
 
 #include "app_support.hpp"
 
@@ -26,10 +30,17 @@ namespace shelf::app {
 
 #ifdef SHELF_HAVE_HIP
 
-// 均等分割。`k` が層数より大きい場合はエラー（呼び手が検査する）。
-// 余りは**最後のステージ**に寄せる（全層を必ず覆う）。
-std::vector<model::qwen35::StageRange> even_stage_ranges(std::size_t num_layers, std::size_t k);
+// 均等分割（エンジン側の実装をそのまま使う）。
+inline std::vector<model::qwen35::StageRange> even_stage_ranges(std::size_t num_layers,
+                                                                std::size_t k) {
+    const auto r = runtime::pipeline::even_stage_ranges(num_layers, k);
+    std::vector<model::qwen35::StageRange> out;
+    out.reserve(r.size());
+    for (const auto& s : r) out.push_back(model::qwen35::StageRange{s.lo, s.hi});
+    return out;
+}
 
+// 1 ステージ分の所有物（apps が持つ。エンジンはポインタだけ参照する）。
 struct PipelineStage {
     model::qwen35::StepGraphPlan decode;                    // rows = 1
     std::unique_ptr<model::qwen35::StepGraphPlan> prefill;   // rows = chunk（不要なら null）
@@ -39,16 +50,14 @@ struct PipelineStage {
 };
 
 struct Pipeline {
-    std::vector<PipelineStage> stages;
-    std::vector<bf16_t> handoff;   // ステージ間の hidden（再利用する 1 本のバッファ）
+    std::vector<PipelineStage> stages;            // 所有（生成順で安定）
+    runtime::pipeline::Pipeline engine;           // 編成（非所有ポインタ）
     std::size_t hidden_size = 0;
-    std::size_t arena_bytes = 0;   // 先頭ステージの確保量（表示用）
+    std::size_t arena_bytes = 0;                  // 先頭ステージの確保量（表示用）
+    std::size_t weight_bytes = 0;                 // checkpoint 上の重みの生バイト数（表示用）
     double last_step_ms = 0.0;
 
-    bool is_first(std::size_t s) const { return stages[s].layer_lo == 0u; }
-    bool is_final(std::size_t s) const {
-        return s + 1 == stages.size();
-    }
+    bool empty() const noexcept { return engine.empty(); }
 };
 
 struct PipelineOptions {
@@ -56,20 +65,25 @@ struct PipelineOptions {
     std::size_t kv_capacity = 0;
     std::size_t chunk_rows = 1;      // >1 なら prefill 用グラフも作る
     std::size_t arena_bytes = 0;     // 0 = グラフから自動
+    // 寿命の重ならない出力に同じ offset を割り当てる（D4）。中間値をステップ後に
+    // 読むデバッグ経路では false にする（別のテンソルが入っているため）。
+    bool arena_reuse = true;
     double rope_theta = 1.0e7;
     std::size_t rope_rotary_dim = 64;
     std::uint32_t fp8_act_group = 0;
     bool verbose = false;
 };
 
-// 各ステージのプラン構築 → 重みのアップロード（そのレイヤ範囲だけ）→ 状態宣言。
+// 各ステージのプラン構築 → 重みのアップロード（そのレイヤ範囲だけ）→ 状態宣言 →
+// エンジンへ編成を渡す。
+// 重みの実体化計画は正準カタログ（weights/catalog）を入口にする（D3）。
 Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const ShardSet& shards,
-                               const Fp8ModelFormat& fmt, const PipelineOptions& opts);
+                               const weights::TensorCatalog& catalog, const Fp8ModelFormat& fmt,
+                               const PipelineOptions& opts);
 
-Status pipeline_reset(Pipeline& p);
+inline Status pipeline_reset(Pipeline& p) { return runtime::pipeline::reset(p.engine); }
 
-// 1 ステップ（n 行 = 1 or prefill チャンク）。最終ステージのみ logits を返す
-// （`logits` が nullptr でも実行でき、その場合は読み戻さない）。
+// 1 ステップ（エンジンへ委譲し、計測値を持ち帰る）。
 Status pipeline_step(Pipeline& p, const std::int32_t* tokens, std::size_t n,
                      std::uint32_t base_pos, std::vector<float>* logits);
 

@@ -20,6 +20,16 @@ static int failures = 0;
         }                                                                    \
     } while (0)
 
+// 失敗理由（Status の中身）も出す版。declare 相の offsets と実行器の方針が
+// 食い違ったとき、どの primitive で止まったかが分かる。
+#define CHECK_ST(cond, msg, st)                                              \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::printf("FAIL: %s: %s\n", msg, (st).message().c_str());       \
+            ++failures;                                                      \
+        }                                                                    \
+    } while (0)
+
 template <typename C> static std::size_t numelof(const C& c) {
     std::size_t n = 1;
     for (auto d : c) n *= d;
@@ -72,21 +82,26 @@ int main(int argc, char** argv) {
         for (auto& x : f) x = nd(rng);
         CHECK(ex.upload_weight(w.id, f).ok(), "upload weight");
     }
-    CHECK(ex.declare_states(pd.graph).ok(), "declare states");
+    const auto st_decl = ex.declare_states(pd.graph);
+    CHECK_ST(st_decl.ok(), "declare states", st_decl);
 
     std::vector<std::int32_t> toks = {7, 111, 512, 900};
 
     // sequential
-    for (std::size_t i = 0; i < toks.size(); ++i)
-        CHECK(ex.run_step(pd.graph, toks[i], static_cast<std::uint32_t>(i)).ok(),
-              "seq step");
+    for (std::size_t i = 0; i < toks.size(); ++i) {
+        const auto st = ex.run_step(pd.graph, toks[i], static_cast<std::uint32_t>(i));
+        CHECK_ST(st.ok(), "seq step", st);
+    }
     auto lseq = ex.fetch_logits(pd.graph);
     CHECK(lseq.ok() && lseq.value().size() == cfg.vocab_size, "seq logits");
 
     CHECK(ex.reset_states().ok(), "reset");
 
     // batched
-    CHECK(ex.run_step(pb.graph, toks.data(), toks.size(), 0).ok(), "batch step");
+    {
+        const auto st = ex.run_step(pb.graph, toks.data(), toks.size(), 0);
+        CHECK_ST(st.ok(), "batch step", st);
+    }
     auto lbat = ex.fetch_logits(pb.graph);
     CHECK(lbat.ok() && lbat.value().size() == toks.size() * cfg.vocab_size,
           "batch logits [P,V]");

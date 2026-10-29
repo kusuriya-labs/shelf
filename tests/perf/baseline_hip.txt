@@ -1,0 +1,5 @@
+# shelf-bench kernel gemm（--rows 1,16,64 --n 4096 --k 4096）の us_p50
+# 取り直し: test_perf_gate <shelf-bench> <this file> --dump（空いた GPU で）
+1x4096x4096 36.194
+16x4096x4096 54.429
+64x4096x4096 207.036

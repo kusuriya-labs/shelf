@@ -2,9 +2,10 @@
 //
 // Executes one decode step of an ir::Graph on the device:
 //   - weights pre-uploaded as bf16 (raw checkpoint bits),
-//   - activations bf16 in a bump arena (per-step reset), f32 where the
-//     vendored kernels demand it (post-rmsnorm-before-rope, GDN prepared
-//     q/k, GDN output, logits),
+//   - activations bf16 in an arena whose offsets are decided in the declare
+//     phase (compiler/arena_offsets.hpp): the run phase only writes through
+//     them, it never allocates. f32 where the vendored kernels demand it
+//     (post-rmsnorm-before-rope, GDN prepared q/k, GDN output, logits),
 //   - states device-resident (paged KV separate pools / conv / recurrent),
 //     usage rows persist across steps (single sequence).
 //
@@ -20,11 +21,14 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include <shelf/backend/common/stage_executor.hpp>
 #include <shelf/backend/hip/kernels/gdn/gdn_types.h>
+#include <shelf/compiler/arena_offsets.hpp>
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/foundation/shape.hpp>
 #include <shelf/ir/graph.hpp>
@@ -34,12 +38,14 @@ namespace shelf::backend::hip {
 
 struct HipStepExecutorOptions {
     int device = 0;
-    // 1 ステップ分の活性化アリーナ。0 = declare_states のグラフから自動算出
-    // （64 MiB + 2×Σ 出力(f32)。バンプ割当でステップ内の再利用が無いため
-    //   必要量は行数に比例する: 4B 級モデルの実測で rows=16/32/64 が
-    //   192/384/768 MiB 未満、既定だった 64 MiB は prefill 16 行で枯渇する）。
-    // 明示指定するとそれを上限にする（枯渇時は insufficient_memory）。
+    // 1 ステップ分の活性化アリーナ。0 = declare 相（compiler/arena_offsets.hpp）が
+    // グラフから決めた必要量をそのまま確保する。明示指定するとそれを上限にする
+    // （offsets 表が収まらなければ insufficient_memory。行数を増やしたグラフを
+    //   同じ実行器で回す場合は、足りない分だけ広げる）。
     std::size_t arena_bytes = 0;           // activations per step (0 = auto)
+    // 寿命の重ならない出力に同じ offset を割り当てる（D4）。ステップ後に中間値を
+    // 読むデバッグ経路（`fetch_value_debug`）では false にする。
+    bool arena_reuse = true;
     double rope_theta = 1.0e7;             // from model config (composition root)
     std::size_t rope_rotary_dim = 64;      // pair-kernel constraint (model config)
     std::size_t kv_block_size = 16;        // from the resolved kernel
@@ -48,7 +54,7 @@ struct HipStepExecutorOptions {
     std::uint32_t fp8_act_group = 128u;
 };
 
-class HipStepExecutor {
+class HipStepExecutor : public backend::StageExecutor {
 public:
     explicit HipStepExecutor(HipStepExecutorOptions opts = {});
     ~HipStepExecutor();
@@ -70,7 +76,7 @@ public:
     // Device allocation + zero-init for every declared state.
     Status declare_states(const ir::Graph& g);
     // Zero all state buffers and reset usage rows (new sequence).
-    Status reset_states();
+    Status reset_states() override;
 
     // One step over `n` tokens at absolute positions base_pos..base_pos+n-1.
     // The graph's batch mode must match (n == graph leading rows).
@@ -87,13 +93,13 @@ public:
     //     `tokens` は nullptr。グラフの入力 dtype で判別する。
     // グラフの行数（prefill チャンク / decode 1 行）は n と一致させること。
     Status run_stage(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
-                     std::size_t n, std::uint32_t base_pos);
+                     std::size_t n, std::uint32_t base_pos) override;
 
     // ステージ出力（bf16 のまま）を host へ。PP の hand-off 専用
     // （f32 経由にすると丸めが入りうるので生ビットで出す）。
-    Result<std::vector<bf16_t>> fetch_value_bf16(const ir::Graph& g, ir::ValueId id);
+    Result<std::vector<bf16_t>> fetch_value_bf16(const ir::Graph& g, ir::ValueId id) override;
 
-    Result<std::vector<float>> fetch_logits(const ir::Graph& g);
+    Result<std::vector<float>> fetch_logits(const ir::Graph& g) override;
     // Debug/parity: read back an activation value produced by the last run_step.
     Result<std::vector<float>> fetch_value_debug(const ir::Graph& g, ir::ValueId id);
 
@@ -102,7 +108,8 @@ public:
 
     // 実際に確保しているアリーナのバイト数。
     // auto（arena_bytes == 0）では declare_states のグラフから決まる値を返す。
-    std::size_t arena_bytes() const noexcept { return arena_cap_; }
+    std::size_t arena_bytes() const noexcept override { return arena_cap_; }
+    double last_step_ms() const override { return stats_.last_step_ms; }
 
 private:
     struct ValueLoc { void* dev = nullptr; bool f32 = false; std::size_t elems = 0; };
@@ -117,10 +124,15 @@ private:
         std::size_t elems = 0;          // elems per single buffer
     };
 
-    Status run_primitive(const ir::Graph& g, const ir::Primitive& p,
+    // 1 primitive 分の実行。`prim_index` は declare 相の一時領域を引くための添字。
+    Status run_primitive(const ir::Graph& g, const ir::Primitive& p, std::size_t prim_index,
                          std::uint32_t position);
-    void* arena_alloc(std::size_t bytes);
-    void arena_reset() { arena_top_ = 0; }
+
+    // declare 相の offsets 表（グラフ毎に一度だけ作って使い回す）。
+    const compiler::ArenaPlan& plan_for(const ir::Graph& g);
+    // 値の置き場・一時領域（計画に無ければ nullptr）。
+    void* slot_ptr(ir::ValueId v, bool f32) const;
+    void* scratch_ptr(std::size_t prim_index, std::uint8_t slot, std::size_t need) const;
 
     // FP8 活性化の per-step scratch（断片順コード + per-token スケール）。
     // 同一ステップ内で GEMM が順次消費するため 1 本で足りる（行数が最大になる
@@ -132,7 +144,19 @@ private:
     HipStepExecutorOptions opts_;
     hipStream_t stream_ = nullptr;
     void* arena_dev_ = nullptr;
-    std::size_t arena_cap_ = 0, arena_top_ = 0;
+    std::size_t arena_cap_ = 0;
+    const compiler::ArenaPlan* plan_ = nullptr;   // このステップで使う offsets 表
+
+    // グラフ → offsets 表。ポインタが同じでも中身が入れ替わりうるので、
+    // プリミティブ数と端の ValueId も鍵に入れて取り違えを防ぐ。
+    // ヒープに置く（push/破棄で他の要素が動かない = `plan_` が無効化されない）。
+    struct CachedPlan {
+        const ir::Graph* graph = nullptr;
+        std::size_t primitives = 0;
+        std::uint32_t first_value = 0, last_value = 0;
+        compiler::ArenaPlan plan;
+    };
+    std::vector<std::unique_ptr<CachedPlan>> plans_;
 
     std::unordered_map<std::uint32_t, void*> weight_dev_;        // TensorId -> bf16*
     std::unordered_map<std::uint32_t, TensorShape> weight_shape_;

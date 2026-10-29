@@ -49,19 +49,9 @@ std::size_t numel(const TensorShape& s) {
     return n;
 }
 
-// 1 ステップ分のアリーナ必要量（auto 時の式。shelf-validate と同一）:
-// 64 MiB 基底 + 全 primitive 出力を f32 で見た 2 倍（一時バッファ余白）。
-std::size_t arena_bytes_for(const ir::Graph& g) {
-    std::size_t bytes = 64u << 20;
-    for (const auto& p : g.primitives()) bytes += numel(p.output.shape) * sizeof(float) * 2u;
-    // pipeline-parallel: 非先頭ステージは前段の hidden をアリーナに受ける。
-    // 入力もアリーナから取るので、その分を上乗せする（f32 換算で余裕を見る）。
-    // 先頭の入力が i32（トークン）でなければ前段 hidden を受けるステージ。
-    const auto& ins = g.all_inputs();
-    if (!ins.empty() && ins[0].dtype != DataType::i32)
-        bytes += numel(ins[0].shape) * sizeof(float);
-    return bytes;
-}
+// 1 ステップ分のアリーナ必要量は declare 相（compiler/arena_offsets.hpp）が決める。
+// ここにあった「64 MiB + 2×Σ出力(f32)」の自動算出は D4 で撤去した（offsets 表が
+// 寿命の重ならない値を再利用するため、同じグラフでも必要量は小さくなる）。
 
 std::uint32_t u32(std::size_t v) { return static_cast<std::uint32_t>(v); }
 
@@ -258,24 +248,28 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
                                static_cast<float>(opts_.rope_theta), stream_),
                                "inv_freq init"));
 
-    // アリーナが未指定なら、この 1 ステップで要る量をグラフから自動算出する。
-    // 式は shelf-validate と同一（64 MiB 基底 + 全 primitive 出力を f32 で見た
-    // 2 倍 = 一時バッファ余白）。バンプ割当でステップ内再利用が無いため行数に
-    // 比例する（4B 級モデルの実測: rows=16/32/64 の必要量は 192/384/768 MiB 未満、
-    // 従来の既定 64 MiB は prefill 16 行で枯渇していた）。
+    // アリーナが未指定なら、declare 相が決めた必要量をそのまま確保する。
+    // 複数のグラフ（decode rows=1 / prefill rows=N）を同じ実行器で回す場合、
+    // 足りなければ run_stage が広げる。
     if (opts_.arena_bytes == 0) {
-        const std::size_t bytes = arena_bytes_for(g);
+        const std::size_t bytes = plan_for(g).peak_bytes;
         if (arena_dev_) {
             (void)hipFree(arena_dev_);
             arena_dev_ = nullptr;
-            arena_top_ = 0;
         }
         const hipError_t ea = hipMalloc(&arena_dev_, bytes);
         if (ea != hipSuccess) {
             arena_cap_ = 0;
-            return hipok(ea, "arena malloc (auto from graph)");
+            return hipok(ea, "arena malloc (declare phase)");
         }
         arena_cap_ = bytes;
+    } else {
+        const std::size_t need = plan_for(g).peak_bytes;
+        if (need > arena_cap_)
+            return Status::insufficient_memory(
+                "アリーナが offsets 表に足りない（必要 " + std::to_string(need) +
+                    " B / 確保 " + std::to_string(arena_cap_) + " B）",
+                __FILE__, __LINE__);
     }
 
     states_declared_ = true;
@@ -295,12 +289,44 @@ Status HipStepExecutor::reset_states() {
     return Status::make_ok();
 }
 
-void* HipStepExecutor::arena_alloc(std::size_t bytes) {
-    arena_top_ = (arena_top_ + 255u) & ~std::size_t(255u);
-    if (arena_top_ + bytes > arena_cap_) return nullptr;
-    void* p = static_cast<char*>(arena_dev_) + arena_top_;
-    arena_top_ += bytes;
-    return p;
+const compiler::ArenaPlan& HipStepExecutor::plan_for(const ir::Graph& g) {
+    const std::uint32_t first_value =
+        g.primitives().empty() ? 0u : g.primitives().front().output.id.value();
+    const std::uint32_t last_value =
+        g.primitives().empty() ? 0u : g.primitives().back().output.id.value();
+    for (auto& c : plans_) {
+        if (c->graph == &g && c->primitives == g.size() && c->first_value == first_value &&
+            c->last_value == last_value)
+            return c->plan;
+    }
+    auto c = std::make_unique<CachedPlan>();
+    c->graph = &g;
+    c->primitives = g.size();
+    c->first_value = first_value;
+    c->last_value = last_value;
+    c->plan = compiler::plan_arena(g, opts_.arena_reuse);
+    // 使うグラフは 1 実行器あたり高々 2 本（decode / prefill）。古いものから捨てる。
+    if (plans_.size() >= 4) plans_.erase(plans_.begin());
+    const auto& plan = c->plan;
+    plans_.push_back(std::move(c));
+    return plan;
+}
+
+void* HipStepExecutor::slot_ptr(ir::ValueId v, bool f32) const {
+    if (plan_ == nullptr || arena_dev_ == nullptr) return nullptr;
+    const auto* s = plan_->slot_of(v);
+    if (s == nullptr || s->f32 != f32) return nullptr;
+    return static_cast<char*>(arena_dev_) + s->offset;
+}
+
+void* HipStepExecutor::scratch_ptr(std::size_t prim_index, std::uint8_t slot,
+                                   std::size_t need) const {
+    if (plan_ == nullptr || arena_dev_ == nullptr) return nullptr;
+    const auto* s = plan_->scratch_of(prim_index, slot);
+    // 必要量が宣言より大きい = declare 相と実行器の方針が食い違っている。
+    // 黙って隣を壊すより、ここで止める。
+    if (s == nullptr || s->bytes < need) return nullptr;
+    return static_cast<char*>(arena_dev_) + plan_->scratch_base + s->offset;
 }
 
 Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
@@ -316,24 +342,27 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
         return Status::invalid_state("declare_states first", __FILE__, __LINE__);
     if (n == 0 || n > kMaxStepRows)
         return Status::invalid_argument("run_step: rows out of range", __FILE__, __LINE__);
+    // declare 相の offsets 表を選ぶ（グラフ毎に一度だけ計算し、以降は使い回す）。
     // auto: 複数グラフ（例: decode rows=1 と prefill rows=N）を同じ実行器で使うと
-    // declare 時の算出で足りないことがある（shelf-run がまさにこの形）。最初に
-    // 使うグラフの必要量へここで広げる（縮めない。明示指定時は触らない）。
-    if (opts_.arena_bytes == 0) {
-        const std::size_t need = arena_bytes_for(g);
-        if (need > arena_cap_) {
-            if (arena_dev_) (void)hipFree(arena_dev_);  // 直前ステップは同期済み
-            arena_dev_ = nullptr;
-            arena_top_ = 0;
-            const hipError_t ea = hipMalloc(&arena_dev_, need);
-            if (ea != hipSuccess) {
-                arena_cap_ = 0;
-                return hipok(ea, "arena malloc (auto, per graph)");
-            }
-            arena_cap_ = need;
+    // declare 時の確保で足りないことがある（shelf-run がまさにこの形）。足りなければ
+    // ここで広げる（縮めない。明示指定時は触らない）。
+    const compiler::ArenaPlan& plan = plan_for(g);
+    if (arena_cap_ < plan.peak_bytes) {
+        if (opts_.arena_bytes > 0)
+            return Status::insufficient_memory(
+                "アリーナが offsets 表に足りない（必要 " + std::to_string(plan.peak_bytes) +
+                    " B / 確保 " + std::to_string(arena_cap_) + " B）",
+                __FILE__, __LINE__);
+        if (arena_dev_) (void)hipFree(arena_dev_);  // 直前ステップは同期済み
+        arena_dev_ = nullptr;
+        const hipError_t ea = hipMalloc(&arena_dev_, plan.peak_bytes);
+        if (ea != hipSuccess) {
+            arena_cap_ = 0;
+            return hipok(ea, "arena malloc (declare phase, per graph)");
         }
+        arena_cap_ = plan.peak_bytes;
     }
-    arena_reset();
+    plan_ = &plan;
     value_dev_.clear();
     logits_dev_ = nullptr;   // 解放済みアリーナを指さないよう消す
     step_rows_ = n;
@@ -384,10 +413,11 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
         if (elems != n * (elems / n))
             return Status::invalid_argument("run_stage: hidden の要素数が行数で割れない",
                                             __FILE__, __LINE__);
-        void* dst = arena_alloc(elems * sizeof(bf16_t));
-        if (dst == nullptr)
-            return Status::insufficient_memory("arena exhausted (hidden input)", __FILE__,
-                                               __LINE__);
+        void* dst = static_cast<char*>(arena_dev_) + plan.input_offset;
+        if (elems * sizeof(bf16_t) > plan.input_bytes) {
+            return Status::insufficient_memory(
+                "hidden 入力が declare 相の受け口より大きい", __FILE__, __LINE__);
+        }
         SHELF_RETURN_IF_ERROR(sync_on_error(
             hipok(hipMemcpyAsync(dst, hidden, elems * sizeof(bf16_t),
                                  hipMemcpyHostToDevice, stream_),
@@ -397,8 +427,10 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
     if (tokens_in == nullptr && hidden_in == nullptr)
         return Status::invalid_argument("graph lacks data input", __FILE__, __LINE__);
 
-    for (const auto& p : g.primitives()) {
-        SHELF_RETURN_IF_ERROR(sync_on_error(run_primitive(g, p, step_base_pos_)));
+    const auto& prims = g.primitives();
+    for (std::size_t pi = 0; pi < prims.size(); ++pi) {
+        const auto& p = prims[pi];
+        SHELF_RETURN_IF_ERROR(sync_on_error(run_primitive(g, p, pi, step_base_pos_)));
         if (const char* d = std::getenv("SHELF_HIP_DEBUG_SYNC")) { (void)d;
             hipError_t e = hipStreamSynchronize(stream_);
             if (e != hipSuccess)
@@ -472,7 +504,7 @@ Result<std::vector<float>> HipStepExecutor::fetch_logits(const ir::Graph& g) {
 }
 
 Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p,
-                                      std::uint32_t /*position*/) {
+                                      std::size_t prim_index, std::uint32_t /*position*/) {
     using K = ir::Kind;
     const auto in = [&](std::size_t i) -> ValueLoc* {
         if (i >= p.inputs.size()) return nullptr;
@@ -485,15 +517,32 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         return it == weight_dev_.end() ? nullptr : it->second;
     };
     const std::size_t out_n = numel(p.output.shape);
-    const auto alloc = [&](bool f32) -> void* {
-        void* p_ = arena_alloc(out_n * (f32 ? sizeof(float) : sizeof(bf16_t)));
-        return p_;
-    };
+    // 出力の置き場は declare 相（compiler/arena_offsets.hpp）が決めている。
+    // run 相は offset を引くだけで、割り当てはしない。f32 の別が食い違うと
+    // nullptr になり、下の arena_ok が理由付きで止める。
+    const auto alloc = [&](bool f32) -> void* { return slot_ptr(p.output.id, f32); };
     // アリーナ枯渇を「null 出力へのカーネル発射」（デバイスフォルトの原因）に
     // しないため、alloc の直後に必ず検査してから発射する。
-    const auto arena_ok = [](const void* p) -> Status {
-        if (p) return Status::make_ok();
-        return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
+    const auto arena_ok = [&](const void* ptr) -> Status {
+        if (ptr) return Status::make_ok();
+        const auto* slot = plan_ == nullptr ? nullptr : plan_->slot_of(p.output.id);
+        std::string why = slot == nullptr ? "offsets 表に無い"
+                                          : "f32/bf16 の方針が食い違う";
+        return Status::insufficient_memory(
+            std::string("declare 相の出力置き場が使えない（") + ir::kind_name(p.kind) + ": " +
+                why + "）",
+            __FILE__, __LINE__);
+    };
+    const auto scratch_ok = [&](const void* ptr) -> Status {
+        if (ptr) return Status::make_ok();
+        return Status::insufficient_memory(
+            std::string("declare 相の一時領域が足りない（") + ir::kind_name(p.kind) +
+                ": offsets 表の宣言より大きい）",
+            __FILE__, __LINE__);
+    };
+    // primitive 内の一時領域（rope の f32 展開など）。宣言量より多く要れば止める。
+    const auto scratch = [&](std::uint8_t slot, std::size_t bytes) -> void* {
+        return scratch_ptr(prim_index, slot, bytes);
     };
     const auto set_out = [&](bool f32, void* dev) -> Status {
         if (!dev) return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
@@ -608,7 +657,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         ValueLoc* x = in(0);
         SHELF_RETURN_IF_ERROR(need(x, false, "rope"));
         // vendored rope computes f32 sincos and takes f32 input; expand bf16 first
-        void* xf = arena_alloc(out_n * sizeof(float));
+        void* xf = scratch(0, out_n * sizeof(float));
         void* o = alloc(false);
         if (!xf || !o) return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
         SHELF_RETURN_IF_ERROR(hipok(
@@ -690,14 +739,14 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t Fx = p.output.shape.dim(p.output.shape.rank() - 1);
         std::size_t ars = Fx, brs = Fx;   // row strides (elements)
         if (a32) pa32 = static_cast<const float*>(a->dev);
-        else { af = arena_alloc(out_n * 4); pa32 = static_cast<const float*>(af);
-               SHELF_RETURN_IF_ERROR(arena_ok(af));
+        else { af = scratch(0, out_n * sizeof(float)); pa32 = static_cast<const float*>(af);
+               SHELF_RETURN_IF_ERROR(scratch_ok(af));
                SHELF_RETURN_IF_ERROR(hipok(launch_bf16_to_f32(
                    static_cast<const bf16_t*>(a->dev), static_cast<float*>(af), u32(a->elems),
                    stream_), "mul cvt a")); }
         if (b32) pb32 = static_cast<const float*>(b->dev);
-        else { bf = arena_alloc(out_n * 4); pb32 = static_cast<const float*>(bf);
-               SHELF_RETURN_IF_ERROR(arena_ok(bf));
+        else { bf = scratch(1, out_n * sizeof(float)); pb32 = static_cast<const float*>(bf);
+               SHELF_RETURN_IF_ERROR(scratch_ok(bf));
                SHELF_RETURN_IF_ERROR(hipok(launch_bf16_to_f32(
                    static_cast<const bf16_t*>(b->dev), static_cast<float*>(bf), u32(b->elems),
                    stream_), "mul cvt b")); }
@@ -734,7 +783,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const auto* cs = g.find_value(p.inputs[0]);
         const std::size_t C = cs ? cs->shape.dim(cs->shape.rank() - 1) : 0;
         if (!C) return Status::invalid_state("causal_conv_step: unknown C", __FILE__, __LINE__);
-        void* of = arena_alloc(x->elems * sizeof(float));
+        void* of = scratch(0, x->elems * sizeof(float));
         void* o = alloc(false);
         SHELF_RETURN_IF_ERROR(arena_ok(of));
         SHELF_RETURN_IF_ERROR(arena_ok(o));
@@ -778,9 +827,9 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t qk_n = nkh * dk;
 
         const std::size_t prep_n = step_rows_ * qk_n;   // one row per token
-        void* nqf = arena_alloc(prep_n * 4);
-        void* sqf = arena_alloc(prep_n * 4);
-        void* nkf = arena_alloc(prep_n * 4);
+        void* nqf = scratch(0, prep_n * sizeof(float));
+        void* sqf = scratch(1, prep_n * sizeof(float));
+        void* nkf = scratch(2, prep_n * sizeof(float));
         void* o = alloc(true);  // f32 [nvh,dv]
         if (!nqf || !sqf || !nkf || !o)
             return Status::insufficient_memory("arena exhausted", __FILE__, __LINE__);
@@ -869,22 +918,22 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const std::size_t rows = out_n / F;
         void* norm;
         if (x->f32) {
-            norm = alloc(true);
-            SHELF_RETURN_IF_ERROR(arena_ok(norm));
+            norm = scratch(0, out_n * sizeof(float));
+            SHELF_RETURN_IF_ERROR(scratch_ok(norm));
             SHELF_RETURN_IF_ERROR(hipok(launch_rmsnorm(
                 x->dev, RmsNormDataType::F32, wt(0), RmsNormDataType::BF16,
                 RmsNormWeightLayout::PER_FEATURE, RmsNormWeightMode::DIRECT, norm,
                 RmsNormDataType::F32, u32(rows), u32(F), u32(F), u32(F), u32(F),
                 p.attr.epsilon, stream_), "gdn norm"));
-            void* normb = arena_alloc(out_n * sizeof(bf16_t));
-            SHELF_RETURN_IF_ERROR(arena_ok(normb));
+            void* normb = scratch(1, out_n * sizeof(bf16_t));
+            SHELF_RETURN_IF_ERROR(scratch_ok(normb));
             SHELF_RETURN_IF_ERROR(hipok(launch_f32_to_bf16(
                 static_cast<const float*>(norm), static_cast<bf16_t*>(normb), u32(out_n),
                 stream_), "gdn norm cvt"));
             norm = normb;
         } else {
-            norm = arena_alloc(out_n * sizeof(bf16_t));
-            SHELF_RETURN_IF_ERROR(arena_ok(norm));
+            norm = scratch(0, out_n * sizeof(bf16_t));
+            SHELF_RETURN_IF_ERROR(scratch_ok(norm));
             SHELF_RETURN_IF_ERROR(hipok(launch_rmsnorm(
                 x->dev, RmsNormDataType::BF16, wt(0), RmsNormDataType::BF16,
                 RmsNormWeightLayout::PER_FEATURE, RmsNormWeightMode::DIRECT, norm,
