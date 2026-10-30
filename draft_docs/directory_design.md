@@ -51,7 +51,7 @@
 | 段階 | 現在の担い手 | 状態 |
 | --- | --- | --- |
 | 1. 起動 | **D1 仕上げ済み（2026-10-29）**: probe と受理判定は `runtime/boot`（純粋）、HIP の有無の吸収とログは `apps/common/boot.cpp` の `app::boot()` 1 か所。run / validate / bench の 3 アプリが同じ手順を呼ぶ。CLI 解析とグラフ生成は app に残る | デバイス問い合わせは `main` から呼ばれる（backend の ctor には埋没しない） |
-| 2. メモリ確保 | ①活性化アリーナは **declare 相**（`compiler/arena_offsets.hpp`）が lifetime から offsets を決め、実行器は確保しない（D4 完了）。②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | ①は寿命解析で再利用する。②③は**予算（budget）の概念が未導入**（D2） |
+| 2. メモリ確保 | ①活性化アリーナは **declare 相**（`compiler/arena_offsets.hpp`）が lifetime から offsets を決め、実行器は確保しない（D4 完了）。②KV 状態の upfront 全量 `hipMalloc`（`declare_states`）③重みの毎テンソル `hipMalloc`（`upload_weight*`） | ①は寿命解析で再利用する。②③は**実行器側に予算（モデル込み上限）と確保台帳を導入**（2026-10-30、`vram_budget_bytes` / `--vram-budget-mib`）。予算・所在の計算を `placement/` へ移す本格分離は未着手（D2） |
 | 3. モデルロード | **D3 仕上げ済み（2026-10-29）**: `weights/catalog`（正準名 → 安定 id・形状・dtype）→ `runtime/load`（読取・検証・無損 relayout）→ 実行器（upload ＋ 状態宣言）。`app::plan_materialization()` が入口 | 読取の直前に「checkpoint に無い / 形が違う / dtype が想定外」が分かる（デバイスに触る前に落ちる） |
 | 4. エンジン起動 | `app::boot()` が受理判定を済ませた後、`apps` が `make_pipeline` で実行器を組み立てる。CPU は `HostStorage` + `ReferenceExecutor` | 拒否は「エンジン構築の前」に理由付きで返る。**機能表（D6）は未導入**（選択肢は今も cpu / hip の 2 値） |
 | 5. ホットパス Dequant | **実装済み（2026-10-29）**: `DataType::fp8_e4m3` と `map_dtype("F8_E4M3")`、`src/quant` の fp8 契約（コーデック・断片順レイアウト・粒度）、HIP 側に fp8 WMMA GEMM と活性化量子化カーネル。dequant は GEMM 内（ロード時は無損 relayout のみ）。CPU 参照は fp8 を**明示的に拒否** | 粒度は checkpoint の宣言が正（9B: 重み channel・活性化 token／27B: 重み 128×128 block・活性化 1×128）。宣言に無い粒度は実装しない |
@@ -408,7 +408,7 @@ D1 と D8 の前提。草案 v0 済み）
 | --- | --- | --- | --- |
 | D0 | ルールの正本化 | 5 段階とディレクトリの対応表を `draft_docs/dependency_rules.md` に書く（境界テストのコメントが参照するのは `docs/architecture/` 側。**実装完了時にそこへ移す** — AGENTS.md のドキュメント規則） | 文書があり、既存 14 ルールの意図と本文書 §3.3 が一致する。**2026-10-29 達成**: `draft_docs/dependency_rules.md`（14 ルールを対象・禁止・理由の 3 列で記載し、テストの表と機械照合で一致を確認。§3.3 の未適用候補と D3 で決める論点も明記） |
 | D1 | 起動の分離 | デバイス probe と設定解決を `runtime/boot/` へ。probe は構造化データを返し、要求機能表で受理判定してからエンジンを起こす。`apps/shelf_run.cpp` は薄く | `main` に「probe → 判定 → 生成」以外の段階が無い。機能不足の起動が原因付きで失敗するテストがある（挙動は現状と不変）。**2026-10-29 達成**: `src/runtime/boot`（`Probe` / `Requirements` / `evaluate` / `describe` / `resolve`）を新設し、`apps/common/boot.cpp` の `app::boot()` が HIP の有無を吸収して「probe → 判定 → 1 行ログ」を 1 か所で行う。run / validate / bench の 4 ドライバが同じ関数を呼び、受理されない場合はモデルの読み込み前に理由付きで終了する。`unit.runtime_boot`（純粋 9 ケース）で判定を固定 |
-| D2 | 予算と確保の分離 | 予算・所在の計算を `placement/`（純粋、GPU 非依存）へ。所在は `backend/common` の `MemoryKind` で表し、実確保のみ backend に残す | placement の単体テストが GPU なしで通る。全 device 常駐の既定で性能・結果が不変（= 協調推論計画のフェーズ 1 と同一成果物） |
+| D2 | 予算と確保の分離 | 予算・所在の計算を `placement/`（純粋、GPU 非依存）へ。所在は `backend/common` の `MemoryKind` で表し、実確保のみ backend に残す | placement の単体テストが GPU なしで通る。全 device 常駐の既定で性能・結果が不変（= 協調推論計画のフェーズ 1 と同一成果物）。**2026-10-30 部分着手**: 実行器に予算と確保台帳を導入（`HipStepExecutor::dev_reserve()` が hipMalloc 前に予算を見る。超過は 「確保済み + 要求 > 予算」の数字付き。run / validate / bench が `--vram-budget-mib` で渡せる）。`placement/` への分離と `MemoryKind` は未着手 |
 | D3 | ロードの分離 | `upload_weights` ラムダを `runtime/load/` へ。「読取 → 検証 → 実体化計画 → upload」を型で固定し、無損 relayout のみ許可する | apps から safetensors の直接読みが消える。`weights/catalog` が実体化計画の入口として接線する。**2026-10-29 達成**: `src/runtime/load`（`TensorSource` / `materialize` / `read_fp8_format`）を新設し、`apps/common/app_support` は供給元アダプタ（`ShardSource`）と「材料→実行器」だけに縮めた。`unit.runtime_load` で bf16/f32/fp8（両スケール規約）・欠落・不一致・CPU 拒否を固定。**`app::build_catalog()` → `plan_materialization()`** を追加し、正準カタログ（名 → 安定 id・形状・dtype）で検証してから実体化する（次数が違う場合は要素数で照合。例: conv1d の `[C,1,K]` と IR の `[C,K]`）。GPU 経路（`upload_plan`）も CPU 参照経路（`load_host_plan`）もこの入口を通るので、apps から safetensors を直接読む箇所が消えた |
 | D4 | declare / run 二相 | バッファ寿命と offsets を declare 相（`compiler/` の受け皿）で決め、run 相から allocator を外す | run 相のコードに割当 API が現れない（radiance の `arena.h` 規約）。ステップ時間が悪化しない（フェーズ 0 の計測と比較）。**2026-10-29 達成**: `compiler/arena_offsets.hpp` の `plan_arena()` が寿命解析（SSA の使用位置）で offsets を決め、`backend/hip` は `slot_of()` / `scratch_of()` で引くだけになった（`arena_alloc` を撤去）。9B / 27B・PP=1/2 でトークン列が旧実装と完全一致、アリーナは 2,299 → 91 MiB（9B-PP1）。詳細は §4 の「D4 の実装記録」 |
 | D5 | 量子化の契約 | `quant/` に encoding（数）と**参照 dequant の型・契約**を置き、CPU 実装は `backend/cpu`（境界ルールで `src/quant` は `shelf/backend/` を include 禁止のため）。**有損 dequant はホットパス（GEMM 内）のみ**と規約化。**製品量子化版は FP8 W8A8（2026-10-29 決定。checkpoint `models/Qwen3.5-9B-FP8`。参照: compressed-tensors の `float-quantized` 仕様 / `transformers` の fp8 linear / `references/` の phaseshift-fp8。最初の適用は `shelf-validate` V1**）。低 VRAM 向けの 4bit 級（EXL3 など）は未決定（実測記録は `draft_docs/shelf_validate.md` §7「（6）履歴」）。fp8 KV の codec は `backend/hip` に残すが型の定義は `quant/` へ | 量子化スキーマの追加で動く箇所が `quant/`（型・契約）と `backend` の 2 実装（CPU 参照 / GPU 本番）に限られる（= 協調計画の量子化分岐と統合） |
@@ -469,6 +469,53 @@ D1 と D8 の前提。草案 v0 済み）
   （1 テンソルの dequant を torch / `transformers` と突合、加えて fp8 命令のミニベンチ）で可否と規模を測る
 * 財産の一方通行: 各フェーズで `draft_docs/dependency_rules.md` を更新し、文書と
   境界テストの乖離を残さない（PhaseShift が `docs/developer/*.md` で経験した陳腐化の回避）
+
+---
+
+## 4.5 FP8 カーネルの最適化（2026-10-30）
+
+参照実装（`~/work/references/phaseshift-fp8` と `radiance`）の FP8 GEMM を突き合わせ、
+shelf の `backend/hip` に **prefill 用の 2 次元タイル**（`Fp8GemmConfigId::Prefill2D`）を
+追加した。
+
+* **形**: 1 ブロック = 64 行 × 64 出力、8 波（256 スレッド）。`wave_m`（2）× `wave_n`（4）で
+  32 行 × 16 出力ずつを担当し、活性化のコードを 8 波で共有する。
+  活性化スケールは 128 K ブロックごとに 64 行ぶんを共有メモリへ 1 回だけ置く。
+* **数値**: RowBlock と同一（128 K ブロックごとに同じ順で累積し、同じ位置でスケールを掛ける）。
+  `tests/unit/test_hip_gemm_fp8.cpp` が RowBlock4 と Prefill2D の出力を `memcmp` で比較し、
+  さらに 9B-FP8 の実モデルでトークン列と logits が完全一致することを確認した。
+* **実測（64 × 4096 × 4096 の 1 本、`shelf-bench kernel gemm --dtype fp8`）**:
+  RowBlock4 42.3 µs → Prefill2D 27.4 µs（**1.55 倍**。`Auto` は 64 行で Prefill2D を選ぶ）。
+  ただし**モデル全体の prefill は 508.7 → 516.6 tok/s（+1.5%）**にとどまる。
+* **その理由（`SHELF_HIP_PROFILE=1` で 64 行 1 チャンクを内訳計測）**: 合計 134 ms のうち
+  `gdn_step` 58.9 ms（44%）、`linear` 40.8 ms、`output_projection` 14.4 ms、
+  `attention_gqa_step` 5.2 ms。**FP8 GEMM は prefill の主コストではない**。
+  次の改善対象は GDN の再帰カーネル（24 層 × 2.4 ms/層）であって、行列積ではない。
+* **decode（rows=1）**: 1 本の GEMM は 535 GB/s（roofline の 8 割超）で、カーネル単体の
+  伸びしろは小さい。一方、ステップ全体は 25.4 ms で、重み 7.7 GB を 339 GB/s でしか
+  流せていない。差は量子化・正規化・注意・起動の隙間（1 ステップ約 350 発射）にある。
+  radiance の split-K はこの帯でも効くが、**K の部分和の順序が変わるため出力が変わる**
+  （radiance 自身も「短い prefill チャンクでは出力が変わる」と記録している）。
+  採用するなら T2 の基準取り直しとセットで行う。
+
+**ラスタライズ（tile swizzle）は測って見送った**: radiance は prefill タイルで
+m 方向を `kGroupM = 8` 本ずつまとめて流し（活性化の帯を MALL に載せ続ける）、phaseshift も
+2D カーネルに同じ狙いの grid swizzle を持つ。shelf の prefill は 1 ステップ 64 行
+（= m タイル 1 本）なので並べ替えは恒等写像で、共通カーネルに除算を足すと
+N=12288 の形が 51.3 → 59.0 µs（**-14%**、VReg 圧迫）と悪化したため取り込んでいない。
+行数の上限を上げるときは `gridDim.y` を既知にした swizzle 版を別カーネルとして起こす。
+
+**decode の split-K も見送り（数値が変わる）**: radiance の narrow tile は
+`ksplit` で K を分割し、部分和を固定順で畳む（`kSplitTarget = 128`）。スレッド数は増えて
+帯域は伸びるが、K の部分和の順序が変わるため出力が変わり、radiance 自身も
+「M が小さい帯では split を弱めると出力が変わる」と記録している。採用するなら T2 の
+基準取り直しとセットにする。
+
+補助として次を足した（どちらも恒久の道具）:
+
+* `shelf-bench kernel gemm --dtype fp8 [--act-group 0|128] [--block128 0|1] [--config …]`
+  — FP8 GEMM の形別 microbench（従来は bf16 のみ）。
+* `SHELF_HIP_PROFILE=1` — 実行器が primitive ごとの所要時間を 1 行ずつ出す（既定は無効）。
 
 ---
 
