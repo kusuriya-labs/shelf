@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -278,6 +279,42 @@ int run_gemm_case(const Case& c, bool golden_f64) {
                                              c.features, sa, nullptr));
     std::vector<float> out(out_elems, 0.0f);
     HIP_OK(hipMemcpy(out.data(), dout, out_elems * sizeof(float), hipMemcpyDeviceToHost));
+
+    // prefill の 2 次元タイル（Prefill2D）は RowBlock と**ビット一致**すること。
+    // 累積の順（128 K ブロックごとに同じ位置でスケールを掛ける）を変えないので、
+    // 置き換えても数値が動かない。ここで担保する。
+    if (shelf::hipk::fp8_prefill2d_supported(c.rows, c.features, kp)) {
+        Fp8GemmConfig cfg2;
+        cfg2.id = Fp8GemmConfigId::Prefill2D;
+        HIP_OK(hipMemset(dout, 0, out_elems * sizeof(float)));
+        HIP_OK(shelf::hipk::launch_gemm_fp8_w8a8(cfg2, dw, dws, dac, das, dout,
+                                                 Fp8GemmOutputDType::F32, c.rows, c.features,
+                                                 kp, c.features, sa, nullptr));
+        std::vector<float> out2(out_elems, 0.0f);
+        HIP_OK(hipMemcpy(out2.data(), dout, out_elems * sizeof(float),
+                         hipMemcpyDeviceToHost));
+        if (std::memcmp(out.data(), out2.data(), out_elems * sizeof(float)) != 0) {
+            double w = 0.0; std::size_t wi = 0;
+            for (std::size_t q = 0; q < out.size(); ++q)
+                if (std::fabs(out[q] - out2[q]) > w) { w = std::fabs(out[q] - out2[q]); wi = q; }
+            std::printf("    2D vs RowBlock: worst=%.3e at %zu (ref=%.6f got=%.6f) rows=%u N=%u K=%u\n",
+                        w, wi, out[wi], out2[wi], c.rows, c.features, c.k);
+        }
+        check(std::memcmp(out.data(), out2.data(), out_elems * sizeof(float)) == 0,
+              "Prefill2D は RowBlock とビット一致");
+        // Auto も Prefill2D を選ぶ（同じ結果になること）。
+        Fp8GemmConfig cfg3;
+        cfg3.id = Fp8GemmConfigId::Auto;
+        HIP_OK(hipMemset(dout, 0, out_elems * sizeof(float)));
+        HIP_OK(shelf::hipk::launch_gemm_fp8_w8a8(cfg3, dw, dws, dac, das, dout,
+                                                 Fp8GemmOutputDType::F32, c.rows, c.features,
+                                                 kp, c.features, sa, nullptr));
+        std::vector<float> out3(out_elems, 0.0f);
+        HIP_OK(hipMemcpy(out3.data(), dout, out_elems * sizeof(float),
+                         hipMemcpyDeviceToHost));
+        check(std::memcmp(out2.data(), out3.data(), out_elems * sizeof(float)) == 0,
+              "Auto は Prefill2D を選ぶ（rows=64 のとき）");
+    }
     std::vector<std::uint8_t> a_codes(a_bytes, 0u);
     HIP_OK(hipMemcpy(a_codes.data(), dac, a_bytes, hipMemcpyDeviceToHost));
     std::vector<float> ascales(a_scale_count, 0.0f);
@@ -375,10 +412,18 @@ int run_gemm_case(const Case& c, bool golden_f64) {
                          hipMemcpyHostToDevice));
         HIP_OK(hipMemcpy(dbx, axq.data(), axq.size() * sizeof(bf16_t), hipMemcpyHostToDevice));
         HIP_OK(hipMemset(dbo, 0, out_elems * sizeof(float)));
+        // bf16 の突合は「ExactRows 系が使える行数（<= 16）」のときだけ行う。
+        // それより多い行数は fp8 側だけを見る（別途 f64 golden で検証済み）。
+        if (c.rows > 16u) {
+            (void)hipFree(dbw);
+            (void)hipFree(dbx);
+            (void)hipFree(dbo);
+            return 0;
+        }
         shelf::hipk::Bf16GemmConfig bcfg{
             c.rows >= 2u ? shelf::hipk::Bf16GemmConfigId::ExactRowsDot2
                          : shelf::hipk::Bf16GemmConfigId::ExactRows,
-            static_cast<std::uint8_t>(c.rows)};   // exact_rows == rows（<= 64）が条件
+            static_cast<std::uint8_t>(c.rows)};   // exact_rows == rows（<= 16）が条件
         HIP_OK(shelf::hipk::launch_gemm_bf16(bcfg, dbw, dbx, dbo,
                                              shelf::hipk::Bf16GemmOutputDType::F32, c.rows,
                                              c.features, c.k, c.k, c.features, nullptr));
@@ -438,8 +483,12 @@ int test_supported_predicates() {
     using namespace shelf::quant::fp8;
     check(shelf::hipk::fp8_gemm_shape_supported(1u, 4096u, 4096u), "rows=1 受理");
     check(shelf::hipk::fp8_gemm_shape_supported(64u, 12288u, 4096u), "rows=64 受理");
-    check(!shelf::hipk::fp8_gemm_shape_supported(65u, 4096u, 4096u), "rows>64 は不受理");
-    check(!shelf::hipk::fp8_gemm_shape_supported(4u, 4096u, 4100u), "K が 32 倍数でないと不受理");
+    check(!shelf::hipk::fp8_gemm_shape_supported(2049u, 4096u, 4096u), "rows>2048 は不受理");
+    check(shelf::hipk::fp8_gemm_shape_supported(2048u, 4096u, 4096u),
+          "prefill の 2048 行は受理");
+    check(shelf::hipk::fp8_gemm_shape_supported(256u, 4096u, 4096u),
+          "prefill の 256 行は受理");
+    check(!shelf::hipk::fp8_gemm_shape_supported(4u, 4096u, 4128u), "K が 64 倍数でないと不受理");
     check(shelf::hipk::fp8_decode1_supported(1u, 1024u, 4096u), "decode1 受理");
     check(!shelf::hipk::fp8_decode1_supported(2u, 1024u, 4096u), "decode1 は rows=1 のみ");
     check(!shelf::hipk::fp8_decode1_supported(1u, 1020u, 4096u), "decode1 は N が 16 の倍数必要");
@@ -465,7 +514,10 @@ int test_supported_predicates() {
 
     check(shelf::hipk::activation_quantize_fp8_supported(4096u, 4096u, kActGroupK),
           "量子化カーネル act=128 受理");
-    check(shelf::hipk::activation_quantize_fp8_supported(96u, 96u, 0u), "量子化カーネル act=0 受理");
+    check(shelf::hipk::activation_quantize_fp8_supported(96u, 128u, 0u),
+          "量子化カーネル act=0 受理（k_padded は 64 倍数）");
+    check(!shelf::hipk::activation_quantize_fp8_supported(96u, 96u, 0u),
+          "k_padded が 64 倍数でないと不受理");
     check(!shelf::hipk::activation_quantize_fp8_supported(96u, 96u, kActGroupK),
           "K が 128 未満で act=128 は不受理");
     check(!shelf::hipk::activation_quantize_fp8_supported(4096u, 4096u, 64u),
@@ -492,7 +544,11 @@ int main() {
                    Case{16u, 256u, 256u, 128u, false},  Case{16u, 256u, 256u, 128u, true},
                    Case{17u, 256u, 12288u, 128u, false}, Case{33u, 100u, 256u, 128u, true},
                    Case{64u, 1024u, 4096u, 128u, false}, Case{64u, 1024u, 4096u, 128u, true},
-                   Case{64u, 1024u, 4096u, 0u, true}})
+                   Case{64u, 1024u, 4096u, 0u, true},
+                   // 128 行は広いタイル（128×128・8 波）を通る。RowBlock との
+                   // ビット一致もここで検査される。
+                   Case{128u, 128u, 256u, 128u, false},
+                   Case{128u, 256u, 128u, 0u, true}})
         if (run_gemm_case(c, /*golden_f64=*/true) != 0) return 1;
 
     // 実モデル形状（bf16 GEMM 突合は効かないので golden は軽量なものだけ、

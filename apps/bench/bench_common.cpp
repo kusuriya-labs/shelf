@@ -23,7 +23,7 @@ bool Args::parse(int argc, char** argv, std::string* error) {
                 continue;
             }
             const std::string key = a.substr(2);
-            if (key == "help" || key == "h") {  // フラグ（値を取らない）
+            if (is_valueless_flag(key)) {  // フラグ（値を取らない）
                 keys_.push_back(key);
                 kv_.emplace_back(key, "");
                 continue;

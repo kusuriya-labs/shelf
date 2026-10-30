@@ -1,6 +1,7 @@
 // HIP executor: batched prefill step must equal sequential decode steps
 // (same kernels, same state updates) on a tiny synthetic Qwen35-family graph.
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <random>
@@ -159,6 +160,61 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    // ---- prefill logits を最終行だけにする（lm_head の重複計算を消す） ----
+    // 同じ batch グラフで、head だけ 1 行に絞った版を作る。
+    // 期待: logits の要素数は V、値は全行版の最終行と一致（同じ hidden 行を
+    // 同じ重みで読むので差は rows=1 側 GEMM の累加順に由来する微小差）、argmax は一致。
+    {
+        model::qwen35::GraphOptions go;
+        go.logits_last_row_only = true;
+        auto plr = model::qwen35::build_step_graph(cfg, 16, 4, {}, go);
+        CHECK(plr.ok(), "last-row graph");
+        if (plr.ok()) {
+            auto& pl = plr.value();
+            CHECK(pl.logits_rows == 1u, "last-row: logits_rows == 1");
+            CHECK(ex.reset_states().ok(), "reset before last-row");
+            CHECK(ex.run_step(pl.graph, toks.data(), toks.size(), 0).ok(), "last-row step");
+            auto ll = ex.fetch_logits(pl.graph);
+            CHECK(ll.ok() && ll.value().size() == V, "last-row logits size");
+            if (ll.ok() && lbat.ok() && lbat.value().size() == toks.size() * V) {
+                const auto& a = ll.value();
+                const auto& b = lbat.value();
+                const std::size_t off = (toks.size() - 1) * V;
+                double mx = 0.0;
+                for (std::size_t i = 0; i < V; ++i)
+                    mx = std::max(mx, std::fabs(static_cast<double>(a[i]) -
+                                                  static_cast<double>(b[off + i])));
+                std::printf("last-row logits: worst|diff| vs batch last row = %.3e\n", mx);
+                CHECK(mx <= 1e-5, "last-row logits == batch last row (<=1e-5)");
+                std::size_t ba = 0, bb = 0;
+                for (std::size_t i = 1; i < V; ++i) { if (a[i] > a[ba]) ba = i; }
+                for (std::size_t i = 1; i < V; ++i) { if (b[off + i] > b[off + bb]) bb = i; }
+                CHECK(ba == bb, "last-row argmax == batch argmax");
+            }
+        }
+    }
+
+    // ---- device 予算（D2 の入口: モデル込みの上限） ----
+    // 予算を超えても hipMalloc に進まず、確保済み/要求/予算の数字付きで止まる。
+    {
+        backend::hip::HipStepExecutorOptions hb;
+        hb.rope_theta = cfg.rope_theta;
+        hb.rope_rotary_dim = cfg.rotary_dim;
+        hb.vram_budget_bytes = 1u << 20;  // 1 MiB（起動時 scratch + 重み 1 本に届かない）
+        backend::hip::HipStepExecutor exb(hb);
+        // 起動時 scratch は予算の gate を通さない（失敗しても後で使う時点でエラーに
+        // なる設計）。その分を base として押さえたうえで、超過の挙動を見る。
+        const std::size_t base = exb.device_bytes();
+        CHECK(base > 0u && base < hb.vram_budget_bytes, "budget: 起動時 scratch は予算内");
+        std::vector<float> big(numelof(pd.weights.front().shape), 0.0f);
+        const auto st = exb.upload_weight(pd.weights.front().id, big);
+        CHECK(!st.ok(), "budget: 予算を超えた upload_weight は失敗");
+        CHECK(st.message().find("予算超過") != std::string::npos,
+              "budget: 理由に予算超過と出る");
+        CHECK(exb.device_bytes() == base, "budget: 拒否後に確保が増えていない");
+    }
+    CHECK(ex.device_bytes() > 0u, "budget: 通常実行器も確保を計上している");
 
     std::printf("test_hip_step_executor: failures=%d\n", failures);
     return failures ? 1 : 0;

@@ -21,8 +21,19 @@ inline constexpr int kExitOk = 0;
 inline constexpr int kExitRuntime = 1;
 inline constexpr int kExitUsage = 2;
 
+// 値を取らないフラグ（`--help` 系と on/off 選択のみ）。値を取るオプションと
+// 混ると「次トークンを値として飲み込む」誤設定になる（計測 harness の欠陥として
+// 実測済み）。ここに足すときは allowed リストにも同じ名前を入れること。
+inline constexpr const char* const kValuelessFlags[] = {"help", "h", "logits-all-rows"};
+
+inline bool is_valueless_flag(const std::string& key) {
+    for (const char* f : kValuelessFlags)
+        if (key == f) return true;
+    return false;
+}
+
 // --key value と --key=value の両対応。それ以外は位置引数として残す。
-// --help / -h は値を取らないフラグ（位置によっても動くようにするため）。
+// 値を取らないフラグは `kValuelessFlags` で決める（位置によっても動くようにするため）。
 class Args {
 public:
     bool parse(int argc, char** argv, std::string* error);

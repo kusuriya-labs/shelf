@@ -102,6 +102,14 @@ uint32_t rmsnorm_bf16_pf_oneplus_block_size(uint32_t group_size) noexcept;
 uint32_t rmsnorm_bf16_pf_oneplus_grid(uint32_t rows, uint32_t features,
                                       uint32_t group_size) noexcept;
 
+// rmsnorm + fp8 活性化量子化の融合（blockwise=128、PER_FEATURE、ONE_PLUS、bf16 が入出力）。
+// 対応外の形（features が 128 の倍数でない、K のパディングが必要な等）は hipErrorNotSupported。
+hipError_t launch_rmsnorm_bf16_quantize(
+    const void* input, const void* weight, void* output,
+    std::uint8_t* codes, float* scales, std::uint32_t rows, std::uint32_t features,
+    std::uint32_t input_row_stride, std::uint32_t output_row_stride, float eps,
+    hipStream_t stream);
+
 hipError_t launch_rmsnorm(
     const void* input,
     RmsNormDataType input_dtype,

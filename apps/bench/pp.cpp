@@ -41,6 +41,8 @@ void usage(std::FILE* out) {
         "  --gpu N             GPU 番号（既定 0）\n"
         "  --seed N            合成トークン列のシード（既定 1234）\n"
         "  --arena-mib N       アリーナサイズ MiB（既定 0 = グラフから自動算出、正の値で固定）\n"
+        "  --vram-budget-mib N device 予算 MiB（モデル込み、既定 0 = 無制限）\n"
+        "  --logits-all-rows   prefill の全行で logits を作る（既定は最終行のみ）\n"
         "  --output PATH       CSV を追記（ファイルが無ければヘッダを書く）\n"
         "  --help, -h          このヘルプ（GPU を触らず exit 0）\n"
         "\n"
@@ -83,7 +85,7 @@ int run_pp(int argc, char** argv) {
 
     // 未知のオプションは起動エラー（shelf-validate と同じ規約）。
     {
-        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "prompt-tokens", "prefill-chunk", "runs", "warmup", "gpu", "seed", "arena-mib", "output", "pipeline-parallel"};
+        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "prompt-tokens", "prefill-chunk", "runs", "warmup", "gpu", "seed", "arena-mib", "vram-budget-mib", "logits-all-rows", "output", "pipeline-parallel"};
         std::string bad;
         if (!only_known_keys(a, allowed, &bad)) {
             std::fprintf(stderr, "pp: unknown option: --%s\n", bad.c_str());
@@ -100,6 +102,7 @@ int run_pp(int argc, char** argv) {
     const std::int64_t gpu = a.i64("gpu", 0, &ok);
     const std::int64_t seed = a.i64("seed", 1234, &ok);
     const std::int64_t arena_mib = a.i64("arena-mib", 0, &ok);
+    const std::int64_t budget_mib = a.i64("vram-budget-mib", 0, &ok);
     const std::int64_t pp = a.i64("pipeline-parallel", 1, &ok);
     const std::string model_dir = a.str("model-dir", a.str("model"));
     const std::string output = a.str("output");
@@ -204,6 +207,9 @@ int run_pp(int argc, char** argv) {
     po.kv_capacity = capacity;
     po.chunk_rows = chunk;
     po.arena_bytes = ho.arena_bytes;
+    if (budget_mib > 0) po.vram_budget_bytes = static_cast<std::size_t>(budget_mib) << 20;
+    // 既定: prefill の logits は最終行だけ（lm_head の重複計算を消す）。
+    po.logits_last_row_only = !a.has("logits-all-rows");
     po.rope_theta = cfg.rope_theta;
     po.rope_rotary_dim = cfg.rotary_dim;
     po.fp8_act_group = fmt.act_group;
@@ -280,6 +286,8 @@ int run_pp(int argc, char** argv) {
     kv_print("runs", runs);
     kv_print("warmup", warmup);
     kv_print("arena_mib", arena_eff);
+    kv_print("vram_budget_mib", static_cast<std::int64_t>(budget_mib));
+    kv_print("device_used_mib", static_cast<std::int64_t>(pipeline.device_bytes >> 20));
     kv_print("wall_ms_median", s.p50);
     kv_print("wall_ms_min", s.min);
     kv_print("wall_ms_p10", s.p10);

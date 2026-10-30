@@ -180,9 +180,16 @@ Status Reader::read_tensor(const std::string& name, void* dst, std::size_t dst_b
                 " (got " + std::to_string(dst_bytes) + ", need " + std::to_string(needed) + ")",
             __FILE__, __LINE__);
     }
-    std::ifstream f(path_, std::ios::binary);
-    if (!f) return Status::not_found("cannot reopen artifact: " + path_, __FILE__, __LINE__);
-    f.seekg(static_cast<std::streamoff>(data_base_offset_ + entry->begin));
+    if (!stream_open_) {
+        stream_.open(path_, std::ios::binary);
+        if (!stream_) return Status::not_found("cannot reopen artifact: " + path_,
+                                              __FILE__, __LINE__);
+        stream_open_ = true;
+    }
+    std::ifstream& f = stream_;
+    if (!f.seekg(static_cast<std::streamoff>(data_base_offset_ + entry->begin))) {
+        return Status::invalid_state("seek failed for tensor " + name, __FILE__, __LINE__);
+    }
     f.read(static_cast<char*>(dst), static_cast<std::streamsize>(needed));
     if (static_cast<std::size_t>(f.gcount()) != needed) {
         return Status::invalid_state("short read for tensor " + name, __FILE__, __LINE__);

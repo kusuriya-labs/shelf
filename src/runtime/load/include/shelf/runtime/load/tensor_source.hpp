@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <shelf/foundation/dtype.hpp>
@@ -35,6 +36,16 @@ public:
     virtual bool has(const std::string& name) const = 0;
     // 無ければ not_found、dtype/サイズの異常は invalid_state で返す。
     virtual Result<TensorBlob> read(const std::string& name) const = 0;
+
+    // 呼び手のバッファを使い回して読む（既定は read() を move するだけ）。
+    // 29 GB のロードではテンソルごとの確保がページフォルトで支配するため、
+    // 供給元はこちらを上書きして容量を再利用するとよい。
+    virtual Status read_into(const std::string& name, TensorBlob* out) const {
+        auto b = read(name);
+        if (!b.ok()) return b.status();
+        *out = std::move(b.value());
+        return Status::make_ok();
+    }
 };
 
 }  // namespace shelf::runtime::load

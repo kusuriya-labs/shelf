@@ -9,6 +9,8 @@
 // だけ。HIP の型は公開面に出さない（`SHELF_HAVE_HIP` の内側だけ）。
 #pragma once
 
+#include <chrono>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -87,6 +89,7 @@ public:
         : where_(where) {}
     bool has(const std::string& name) const override { return where_.count(name) != 0u; }
     Result<runtime::load::TensorBlob> read(const std::string& name) const override;
+    Status read_into(const std::string& name, runtime::load::TensorBlob* out) const override;
 
 private:
     const std::map<std::string, artifact::safetensors::Reader*>& where_;
@@ -121,6 +124,15 @@ Status load_host_plan(HostStorageT& storage, const model::qwen35::StepGraphPlan&
     auto mp = plan_materialization(catalog, plan);
     if (!mp.ok()) return mp.status();
     ShardSource src(shards.where);
+    // ロードの内訳（read / materialize / upload）を測る開発用スイッチ。
+    const bool timing = std::getenv("SHELF_LOAD_TIMING") != nullptr;
+    double t_mat = 0.0, t_up = 0.0;
+    std::size_t bytes = 0;
+    const auto now_ms = [] {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
     for (std::size_t i = 0; i < plan.weights.size(); ++i) {
         const auto& w = plan.weights[i];
         auto t = runtime::load::read_f32(src, mp.value().requests[i].checkpoint_name);
@@ -150,11 +162,26 @@ Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
     if (!mp.ok()) return mp.status();
     if (report) *report = mp.value();
     ShardSource src(shards.where);
+    // ロードの内訳（materialize / upload）を測る開発用スイッチ。
+    const bool timing = std::getenv("SHELF_LOAD_TIMING") != nullptr;
+    double t_mat = 0.0, t_up = 0.0;
+    std::size_t bytes = 0;
+    const auto now_ms = [] {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
+    runtime::load::MaterializeBuffers bufs;   // テンソルをまたいで使い回す
     for (std::size_t i = 0; i < plan.weights.size(); ++i) {
         const auto& w = plan.weights[i];
         const auto& req = mp.value().requests[i];
-        auto m = runtime::load::materialize(src, req, fmt);
+        const double t0 = timing ? now_ms() : 0.0;
+        auto m = runtime::load::materialize(src, req, fmt, &bufs);
         if (!m.ok()) return m.status();
+        if (timing) t_mat += now_ms() - t0;
+        const double t1 = timing ? now_ms() : 0.0;
+        bytes += m.value().bf16.size() * 2 + m.value().f32.size() * 4 +
+                 m.value().codes.size();
         switch (m.value().kind) {
         case WeightKind::Bf16:
             SHELF_RETURN_IF_ERROR(ex.upload_weight_bf16(w.id, m.value().bf16.data(),
@@ -172,7 +199,15 @@ Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
             return Status::not_found("weight not in shards: " + w.checkpoint_name, __FILE__,
                                      __LINE__);
         }
+        if (timing) t_up += now_ms() - t1;
+        // 使い終わった実体を作業領域へ戻す（次で容量を使い回す）。
+        bufs.codes = std::move(m.value().codes);
+        bufs.bf16 = std::move(m.value().bf16);
+        bufs.f32 = std::move(m.value().f32);
     }
+    if (timing)
+        std::fprintf(stderr, "[load] weights=%zu bytes=%.1f GB materialize=%.0f ms upload=%.0f ms\n",
+                     plan.weights.size(), static_cast<double>(bytes) / 1e9, t_mat, t_up);
     return ex.declare_states(plan.graph);
 }
 

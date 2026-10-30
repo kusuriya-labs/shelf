@@ -386,6 +386,43 @@ void run_swiglu_bf16() {
     report(mx, kTolBf16, "swiglu_bf16 (up*gate*sigmoid(gate))", mr);
 }
 
+// grid.y の上限（65535）を超える行数は分割発射になる。
+// 実モデルでは 2048 行 × value head 数（48）= 98,304 行がこの領域に入る
+// （rmsnorm_gated の swiglu）。発射が成功すること、および 2 つ目のチャンク
+// （行 65,535 以降）まで正しく書かれることを確認する。
+void run_swiglu_bf16_many_rows() {
+    const uint32_t rows = 66000u, feat = 8u, stride = 8u;
+    const size_t n = static_cast<size_t>(rows) * stride;
+    std::vector<bf16_t> g(n), u(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double r = static_cast<double>(i / stride) * 0.001;  // 行で決まる値
+        g[i] = f32_to_bf16(static_cast<float>(std::sin(r) * 3.0));
+        u[i] = f32_to_bf16(static_cast<float>(std::cos(r)));  // |out| < 6
+    }
+    Buf dG(n * 2u), dU(n * 2u), dOut(n * 2u);
+    dG.fill(0);
+    dU.fill(0);
+    dOut.fill(0);
+    expect_ok(hipMemcpy(dG.p, g.data(), n * 2u, hipMemcpyHostToDevice), "many-rows g");
+    expect_ok(hipMemcpy(dU.p, u.data(), n * 2u, hipMemcpyHostToDevice), "many-rows u");
+    const hipError_t err = launch_swiglu_bf16(static_cast<const bf16_t*>(dG.p), stride,
+                                              static_cast<const bf16_t*>(dU.p), stride,
+                                              static_cast<bf16_t*>(dOut.p), stride, rows, feat, 0);
+    expect_ok(err, "swiglu launch rows=66000（grid.y 上限超え）");
+    if (err != hipSuccess) return;
+    std::vector<bf16_t> out(n, bf16_t{0});
+    expect_ok(hipMemcpy(out.data(), dOut.p, n * 2u, hipMemcpyDeviceToHost), "many-rows out");
+    double mx = 0.0, mr = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double gv = bf16_to_f32(g[i]), uv = bf16_to_f32(u[i]);
+        const double ref = uv * (gv / (1.0 + std::exp(-gv)));
+        const double got = static_cast<double>(bf16_to_f32(out[i]));
+        mx = std::max(mx, std::abs(got - ref));
+        mr = std::max(mr, rel_err(got, ref));
+    }
+    report(mx, kTolBf16, "swiglu_bf16 rows=66000（grid.y 分割発射）", mr);
+}
+
 void run_scale_f32() {
     const uint32_t rows = 2, feat = 70, stride = 71;
     const size_t n = static_cast<size_t>(rows) * stride;
@@ -723,6 +760,7 @@ int main() {
     run_residual_add();
     run_sigmoid_bf16_f32();
     run_swiglu_bf16();
+    run_swiglu_bf16_many_rows();
     run_scale_f32();
     run_split_concat();
     run_l2_normalize();

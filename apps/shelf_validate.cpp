@@ -50,10 +50,10 @@ constexpr std::size_t kMinRunTokens = 128;
 // 仕様 §1: 入力長の上限（budget 512 のとき decode 128 tok を満たす最大 N）。
 constexpr std::size_t kMaxPrefillTokens = 384;
 // prefill チャンクの行数（HIP の 1 ステップ上限と一致させる）。
-constexpr std::size_t kPrefillChunkRows = 64;
+constexpr std::size_t kPrefillChunkRows = 1024;
 
 #ifdef SHELF_HAVE_HIP
-static_assert(kPrefillChunkRows == backend::hip::HipStepExecutor::kMaxStepRows,
+static_assert(kPrefillChunkRows <= backend::hip::HipStepExecutor::kMaxStepRows,
               "prefill チャンク行数は HIP の 1 ステップ上限と一致させること");
 #endif
 
@@ -95,6 +95,7 @@ std::string usage_text() {
         "  --pipeline-parallel=<K>   レイヤ分割のステージ数（既定 1）。GPU は --gpu から K 台使う\n"
         "  --device=<hip|cpu>        実行デバイス（既定: HIP ビルドなら hip、それ以外 cpu）\n"
         "  --gpu=<n>                 GPU 番号（既定 0）\n"
+        "  --vram-budget-mib=<N>     device 予算 MiB（モデル込み、既定 0 = 無制限）\n"
         "  --runs=<n>                決定性チェックの反復数（既定 2）\n"
         "  --ids-file=<path>         入力 token ids（既定: 同梱 fixture。区切りは空白・カンマ）\n"
         "  --out=<dir>               結果 JSON の保存先（既定 shelf-validate-out）\n"
@@ -117,6 +118,7 @@ struct Options {
     std::string pp_baseline = "off";     // on = PP=1 でも走らせて一致を確認（V2 の門）
     std::size_t runs = 2;
     int gpu = 0;
+    std::size_t vram_budget_mib = 0;   // device 予算（モデル込み、0 = 無制限）
     double t2_margin = -1.0;     // < 0 = 未設定（T2 は pending）
     bool stop_id_set = false;
     std::int64_t stop_id = -1;
@@ -332,6 +334,10 @@ int main(int argc, char** argv) {
             const long long v = num();
             if (v < 0) return fail("--gpu が不正です: " + val);
             o.gpu = static_cast<int>(v);
+        } else if (key == "--vram-budget-mib") {
+            const long long v = num();
+            if (v < 0) return fail("--vram-budget-mib が不正です: " + val);
+            o.vram_budget_mib = static_cast<std::size_t>(v);
         } else if (key == "--prefill-tokens") {
             const long long v = num();
             if (v < 0) return fail("--prefill-tokens が不正です: " + val);
@@ -437,6 +443,7 @@ int main(int argc, char** argv) {
         bool device_used_known = false;
         std::size_t device_used_bytes = 0;
         std::size_t arena_bytes = 0;
+        std::size_t device_bytes = 0;        // 実行器が計上した確保合計（モデル込み）
         std::size_t stages = 1;                // pipeline-parallel のステージ数
         std::string fp8_declared;              // 空 = 量子化されていない
         std::uint32_t fp8_act_group = 0u;
@@ -511,11 +518,13 @@ int main(int argc, char** argv) {
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
         po.verbose = true;
+        po.vram_budget_bytes = o.vram_budget_mib << 20;
         auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
         pipeline = pl.release();
         mr.stages = pipeline.stages.size();
         mr.arena_bytes = pipeline.arena_bytes;
+        mr.device_bytes = pipeline.device_bytes;
         {
             auto st = meminfo(free_after, total_after);
             if (!st.ok()) return fail(st.message());
@@ -809,6 +818,7 @@ int main(int argc, char** argv) {
             {"device_mem_used_bytes", mr.device_used_known ? json(mr.device_used_bytes)
                                                           : json(nullptr)},
             {"arena_bytes", mr.arena_bytes},
+            {"device_bytes_accounted", mr.device_bytes},
             {"stages", mr.stages},
             {"fp8", mr.fp8_declared.empty() ? json(nullptr) : json(mr.fp8_declared)},
             {"fp8_act_group", mr.fp8_declared.empty() ? json(nullptr)

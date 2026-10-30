@@ -34,6 +34,17 @@ bool activation_quantize_fp8_supported(std::uint32_t k, std::uint32_t k_padded,
 // input  : bf16 [rows, input_row_stride]（有効列は k 個。非有限値は 0 として扱う）
 // codes  : 断片順 u8（GEMM がそのまま読む）
 // scales : f32[rows][k_blocks]（k_blocks = act_group ? k_padded/128 : 1）
+// SwiGLu + fp8 活性化量子化の融合（act_group=128 のみ。それ以外は hipErrorNotSupported）。
+// gate・up から直接コード/スケールを出し、bf16 中間材料を書かない。
+hipError_t launch_swiglu_quantize_fp8(
+    const shelf::bf16_t* gate, const shelf::bf16_t* up,
+    shelf::bf16_t* out,   // nullptr なら bf16 出力は書かない
+    std::uint8_t* codes, float* scales,
+    std::uint32_t rows, std::uint32_t k, std::uint32_t k_padded,
+    std::uint32_t gate_row_stride, std::uint32_t up_row_stride,
+    std::uint32_t out_row_stride,
+    std::uint32_t act_group, hipStream_t stream);
+
 hipError_t launch_activation_quantize_fp8(
     const shelf::bf16_t* input, std::uint8_t* codes, float* scales,
     std::uint32_t rows, std::uint32_t k, std::uint32_t k_padded,

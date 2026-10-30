@@ -34,6 +34,14 @@ struct StageRange {
     std::size_t layer_hi = 0;
 };
 
+// グラフ構築の選択（既定 = 既存動作）。
+struct GraphOptions {
+    // prefill の logits を最終行だけにする（lm_head の重複計算を消す）。
+    // 1 ステップで rows 行あっても、次のトークンの選択は最終行の logits だけで決まる。
+    // 行ごとの logits を読む経路（shelf-validate の T1 比較など）では false のまま使う。
+    bool logits_last_row_only = false;
+};
+
 struct StepGraphPlan {
     ir::Graph graph;
 
@@ -46,7 +54,9 @@ struct StepGraphPlan {
     ir::ValueId hidden_out;
     ir::ValueId cos;      // f32 [rotary_dim]（CPU 参照経路が使う。HIP は無視）
     ir::ValueId sin;      // f32 [rotary_dim]
-    ir::ValueId logits;   // f32 [rows, vocab]（最終ステージのみ有効）
+    ir::ValueId logits;   // f32 [logits_rows, vocab]（最終ステージのみ有効）
+    // logits の先頭次元。GraphOptions::logits_last_row_only で絞った場合は 1。
+    std::size_t logits_rows = 0;
 
     // このプランが担当するレイヤ範囲（[layer_lo, layer_hi)）。
     std::size_t layer_lo = 0;
@@ -67,6 +77,7 @@ struct StepGraphPlan {
 //   範囲を絞ると、そのレイヤ範囲の重み・状態（KV / conv / recurrent）だけが
 //   プランに入る（= ステージ分割で自然に部分ロードになる）。
 Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity,
-                                       std::size_t rows = 1, StageRange range = {});
+                                       std::size_t rows = 1, StageRange range = {},
+                                       GraphOptions gopt = {});
 
 } // namespace shelf::model::qwen35

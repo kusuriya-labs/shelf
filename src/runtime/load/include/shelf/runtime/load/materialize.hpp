@@ -59,9 +59,23 @@ struct MaterializedWeight {
     bool weight_block128 = false;
 };
 
+// テンソルごとに 30 MB 級の vector を確保すると、29 GB のロードでページフォルトが
+// 支配して 2.4 GB/s まで落ちる（使い回すと 18 GB/s）。呼び手が持ち回る作業領域。
+struct MaterializeBuffers {
+    TensorBlob src_blob;                // 供給元からの読み取り（容量を使い回す）
+    std::vector<std::uint8_t> src;      // 読み取り先
+    std::vector<std::uint8_t> codes;    // 断片順の出力先
+    std::vector<float> scales;
+    std::vector<bf16_t> bf16;
+    std::vector<float> f32;
+};
+
 // 読取 → 検証 → 実体化。要素数の不一致や未対応 dtype は推測せず失敗させる。
+// `bufs` を渡すと作業領域を使い回す（返る `MaterializedWeight` はその中身を
+// move して受け取る。呼び手は使い終わったら戻すとよい）。
 Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequest& req,
-                                       const Fp8ModelFormat& fmt);
+                                       const Fp8ModelFormat& fmt,
+                                       MaterializeBuffers* bufs = nullptr);
 
 // CPU 参照経路用: f32 として読む（bf16 は無損拡張、fp8 は明示エラー）。
 Result<std::vector<float>> read_f32(const TensorSource& src, const std::string& name);

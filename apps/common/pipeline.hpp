@@ -55,6 +55,7 @@ struct Pipeline {
     std::size_t hidden_size = 0;
     std::size_t arena_bytes = 0;                  // 先頭ステージの確保量（表示用）
     std::size_t weight_bytes = 0;                 // checkpoint 上の重みの生バイト数（表示用）
+    std::size_t device_bytes = 0;               // 全ステージの device 確保合計（予算の分子）
     double last_step_ms = 0.0;
 
     bool empty() const noexcept { return engine.empty(); }
@@ -64,7 +65,13 @@ struct PipelineOptions {
     std::vector<int> devices;        // ステージ毎の GPU 番号（stages と同じ長さ）
     std::size_t kv_capacity = 0;
     std::size_t chunk_rows = 1;      // >1 なら prefill 用グラフも作る
+    // prefill の logits を最終行だけにする（lm_head の重複計算を消す）。
+    // 行ごと logits を読む経路（shelf-validate の T1 比較）では false を保つ。
+    bool logits_last_row_only = false;
     std::size_t arena_bytes = 0;     // 0 = グラフから自動
+    // device メモリの予算（モデル込み）。ステージ毎の実行器が確保する合計への上限
+    // （0 = 無制限）。超過は hipMalloc 前に insufficient_memory として止まる。
+    std::size_t vram_budget_bytes = 0;
     // 寿命の重ならない出力に同じ offset を割り当てる（D4）。中間値をステップ後に
     // 読むデバッグ経路では false にする（別のテンソルが入っているため）。
     bool arena_reuse = true;

@@ -82,6 +82,11 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(test_hip_gdn PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_gdn COMMAND test_hip_gdn)
 
+    # GDN のチャンク版（FP16 WMMA）が逐次版と丸めの範囲で一致すること
+    add_executable(test_hip_gdn_chunk unit/test_hip_gdn_chunk.cpp)
+    target_link_libraries(test_hip_gdn_chunk PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_gdn_chunk COMMAND test_hip_gdn_chunk)
+
     add_executable(test_hip_elementwise_kernels unit/test_hip_elementwise_kernels.cpp)
     target_link_libraries(test_hip_elementwise_kernels PRIVATE shelf::backend_hip)
     add_test(NAME unit.hip_elementwise_kernels COMMAND test_hip_elementwise_kernels)

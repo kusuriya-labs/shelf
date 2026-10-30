@@ -2,11 +2,13 @@
 #include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/detail/vector_io.h>
 #include <shelf/backend/hip/kernels/detail/residual_add_device.h>
+#include <shelf/backend/hip/kernels/detail/row_grid.h>
 #include <shelf/backend/hip/kernels/detail/target_swiglu_device.h>
 #include <shelf/backend/hip/kernels/detail/elementwise_math.h>
 #include <shelf/backend/hip/kernels/detail/sigmoid_device.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -58,14 +60,23 @@ hipError_t launch_concat_bf16(
     if (rows == 0u || features_a == 0u || features_b == 0u) return hipErrorInvalidValue;
     if (a == nullptr || b == nullptr || output == nullptr) return hipErrorInvalidValue;
     const uint32_t features = features_a + features_b;
-    const uint64_t gx =
-        (static_cast<uint64_t>(features) + kThreads * kVec - 1u) / (kThreads * kVec);
-    dim3 grid(static_cast<uint32_t>(gx), rows);
-    op_concat_bf16::impl<<<grid, kThreads, 0, stream>>>(
-        reinterpret_cast<const bf16*>(a), a_row_stride,
-        reinterpret_cast<const bf16*>(b), b_row_stride,
-        reinterpret_cast<bf16*>(output), output_row_stride, features_a, features);
-    return hipGetLastError();
+    const uint32_t gx =
+        static_cast<uint32_t>((static_cast<uint64_t>(features) + kThreads * kVec - 1u) /
+                              (kThreads * kVec));
+    // grid.y 上限（65535）を超える行は基底ポインタを進めて分割発射する。
+    for (uint32_t begin = 0u; begin < rows; begin += detail::kMaxGridY) {
+        const uint32_t n = std::min(rows - begin, detail::kMaxGridY);
+        op_concat_bf16::impl<<<dim3(gx, n), kThreads, 0, stream>>>(
+            reinterpret_cast<const bf16*>(a) + static_cast<size_t>(begin) * a_row_stride,
+            a_row_stride,
+            reinterpret_cast<const bf16*>(b) + static_cast<size_t>(begin) * b_row_stride,
+            b_row_stride,
+            reinterpret_cast<bf16*>(output) + static_cast<size_t>(begin) * output_row_stride,
+            output_row_stride, features_a, features);
+        const hipError_t e = hipGetLastError();
+        if (e != hipSuccess) return e;
+    }
+    return hipSuccess;
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -99,9 +110,11 @@ hipError_t launch_residual_add_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_residual_add_bf16<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,2,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_residual_add_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -146,9 +159,11 @@ hipError_t launch_scale_f32(
     args.features = features;
     args.scalar_a = scale;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_scale_f32<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{4,2,4,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_scale_f32<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -191,9 +206,11 @@ hipError_t launch_sigmoid_bf16_f32(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_sigmoid_bf16_f32<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,4,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_sigmoid_bf16_f32<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -236,9 +253,11 @@ hipError_t launch_silu_bf16_f32(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_silu_bf16_f32<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,4,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_silu_bf16_f32<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -281,9 +300,11 @@ hipError_t launch_silu_f32_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_silu_f32_bf16<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{4,2,2,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_silu_f32_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -316,9 +337,11 @@ hipError_t launch_mul_f32_f32_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_mul_f32_f32_bf16<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{4,4,2,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_mul_f32_f32_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -396,9 +419,11 @@ hipError_t launch_split_bf16(
     args.aux = head_dim;
     args.reserved = interleaved ? 1u : 0u;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_split_bf16<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,2,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_split_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 extern "C" __global__ __launch_bounds__(256)
@@ -450,9 +475,11 @@ hipError_t launch_swiglu_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
-    phaseshift_swiglu_bf16<<<grid, kThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,2,2},
+                         [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
+                             phaseshift_swiglu_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);
+                         });
 }
 
 }  // namespace shelf::hipk

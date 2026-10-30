@@ -107,21 +107,23 @@ int main() {
     // 4. FP8（per-channel + `_scale`）: 断片順へ relayout される
     {
         MemSource src;
-        std::vector<std::uint8_t> codes(2 * 32, 0x3C);
+        std::vector<std::uint8_t> codes(2 * 64, 0x3C);   // K は 64 の倍数（断片順の単位）
         src.put_u8("w.weight", DataType::fp8_e4m3, codes);
         src.put_bf16("w.weight_scale", {shelf::f32_to_bf16(0.5f), shelf::f32_to_bf16(0.25f)});
         Fp8ModelFormat fmt;
         fmt.quantized = true;
         fmt.act_group = 0;
         fmt.scale_suffix = "_scale";
-        WeightRequest req{"w.weight", {2, 32}};
+        WeightRequest req{"w.weight", {2, 64}};
         auto m = shelf::runtime::load::materialize(src, req, fmt);
+        if (!m.ok()) std::printf("    materialize 失敗: %s\n", m.status().message().c_str());
         check(m.ok(), "fp8 を実体化できる");
         if (m.ok()) {
             check(m.value().kind == WeightKind::Fp8W8A8, "kind は Fp8W8A8");
-            check(m.value().codes.size() == tiled_bytes(2, 32), "コードは断片順の容量");
+            // k_padded は 64 倍数へ切り上げ（K=32 -> 64）。断片順の容量もそれに従う。
+            check(m.value().codes.size() == tiled_bytes(2, 64), "コードは断片順の容量");
             check(m.value().scales.size() == 2, "スケールは per-channel の 2 個");
-            check(m.value().k_padded == 32 && m.value().features == 2, "shape の記録");
+            check(m.value().k_padded == 64 && m.value().features == 2, "shape の記録");
             check(!m.value().weight_block128, "per-channel は block128 ではない");
             check(m.value().scales[0] == 0.5f && m.value().scales[1] == 0.25f,
                   "スケール値が保たれる");
@@ -145,10 +147,10 @@ int main() {
     // 6. スケール欠落 → 明示エラー
     {
         MemSource src;
-        src.put_u8("w.weight", DataType::fp8_e4m3, std::vector<std::uint8_t>(64, 1));
+        src.put_u8("w.weight", DataType::fp8_e4m3, std::vector<std::uint8_t>(128, 1));
         Fp8ModelFormat fmt;
         fmt.quantized = true;
-        WeightRequest req{"w.weight", {2, 32}};
+        WeightRequest req{"w.weight", {2, 64}};
         auto m = shelf::runtime::load::materialize(src, req, fmt);
         check(!m.ok(), "スケール欠落は失敗");
     }
@@ -159,7 +161,7 @@ int main() {
         src.put_bf16("w.weight_scale", {shelf::f32_to_bf16(1.0f)});   // 2 個必要
         Fp8ModelFormat fmt;
         fmt.quantized = true;
-        WeightRequest req{"w.weight", {2, 32}};
+        WeightRequest req{"w.weight", {2, 64}};
         auto m = shelf::runtime::load::materialize(src, req, fmt);
         check(!m.ok(), "スケール数の不一致は失敗");
     }

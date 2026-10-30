@@ -176,6 +176,10 @@ launch_attention_paged_bf16(
 
     hipStream_t stream);
 
+// prefill 用 kernel の受理判定（rows>1 / head_dim 256 / page_tokens 16 / GQA 整数比）。
+// 実行器はこれを満たすときだけ prefill 経路を選び、それ以外は decode 用 kernel を使う。
+bool attention_paged_prefill_bf16_supported(const PagedAttentionCommonArgs& common);
+
 hipError_t
 launch_attention_paged_prefill_bf16(
     const PagedAttentionCommonArgs& common,

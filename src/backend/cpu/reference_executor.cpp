@@ -144,6 +144,14 @@ Status ReferenceExecutor::run_primitive(const Graph& graph, const Primitive& p, 
             }
             return storage.set_value(p.output.id, std::move(out));
         }
+        case Kind::swiglu: {
+            const std::vector<float>* g = get(p.inputs[0]);
+            const std::vector<float>* u = get(p.inputs[1]);
+            if (!g || !u) return err("swiglu inputs missing");
+            std::vector<float> out(out_n);
+            for (std::size_t i = 0; i < out_n; ++i) out[i] = (*u)[i] * silu_f((*g)[i]);
+            return storage.set_value(p.output.id, std::move(out));
+        }
         case Kind::elem_mul:
         case Kind::residual_add: {
             const std::vector<float>* a = get(p.inputs[0]);
@@ -272,6 +280,29 @@ Status ReferenceExecutor::run_primitive(const Graph& graph, const Primitive& p, 
                     out[r * len + d] = (*x)[r * N + static_cast<std::size_t>(b) + d];
                 }
             }
+            return storage.set_value(p.output.id, std::move(out));
+        }
+        case Kind::row_slice: {
+            // 先頭次元（行）の連続スライス。
+            const std::vector<float>* x = get(p.inputs[0]);
+            if (!x) return err("row_slice input missing");
+            const TensorShape& xs = graph.find_value(p.inputs[0])->shape;
+            const std::size_t R = xs.dim(0);
+            const std::size_t C = xs.num_elements().value() / R;
+            if (p.attr.row_last) {
+                std::vector<float> out(x->begin() + static_cast<std::ptrdiff_t>((R - 1) * C),
+                                       x->begin() + static_cast<std::ptrdiff_t>(R * C));
+                if (out.size() != out_n) return err("row_slice(row_last) output shape mismatch");
+                return storage.set_value(p.output.id, std::move(out));
+            }
+            const std::int64_t b = p.attr.row_begin;
+            const std::int64_t e = p.attr.row_end == -1 ? static_cast<std::int64_t>(R)
+                                                        : p.attr.row_end;
+            if (b < 0 || e <= b || static_cast<std::size_t>(e) > R)
+                return err("row_slice range invalid for leading dim of size " + std::to_string(R));
+            std::vector<float> out(x->begin() + static_cast<std::ptrdiff_t>(b) * C,
+                                   x->begin() + static_cast<std::ptrdiff_t>(e) * C);
+            if (out.size() != out_n) return err("row_slice output shape mismatch");
             return storage.set_value(p.output.id, std::move(out));
         }
         case Kind::reshape: {

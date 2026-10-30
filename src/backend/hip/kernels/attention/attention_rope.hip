@@ -246,6 +246,93 @@ hipError_t launch_rope_f32_bf16_generic(
     return hipGetLastError();
 }
 
+__device__ __forceinline__ void rope_bf16_pair_body(
+    const bf16* __restrict__ input, uint32_t input_row_stride,
+    bf16* __restrict__ output, uint32_t output_row_stride,
+    const uint32_t* __restrict__ positions,
+    const double* __restrict__ inv_freq,
+    uint32_t features, float attention_factor) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t heads = features >> 8;
+    const size_t in_base = static_cast<size_t>(row) * input_row_stride;
+    const size_t out_base = static_cast<size_t>(row) * output_row_stride;
+
+    float cos_f = 0.0f;
+    float sin_f = 0.0f;
+    if (tid < kPairHalf) {
+        const uint32_t pos = positions != nullptr ? positions[row] : row;
+        const double freq = inv_freq[tid];
+        const double angle = static_cast<double>(pos) * freq;
+        double sn = 0.0;
+        double cs = 0.0;
+        sincos(angle, &sn, &cs);
+        cos_f = static_cast<float>(cs) * attention_factor;
+        sin_f = static_cast<float>(sn) * attention_factor;
+    }
+
+    if (tid < kPairHalf) {
+        #pragma unroll 4
+        for (uint32_t head = 0; head < heads; ++head) {
+            const size_t in_off = in_base + static_cast<size_t>(head) * kPairHeadDim;
+            const size_t out_off = out_base + static_cast<size_t>(head) * kPairHeadDim;
+            const float a = __bfloat162float(input[in_off + tid]);
+            const float b = __bfloat162float(input[in_off + tid + kPairHalf]);
+            const float y0 = __fmaf_rn(a, cos_f, -__fmul_rn(b, sin_f));
+            const float y1 = __fmaf_rn(b, cos_f, __fmul_rn(a, sin_f));
+            output[out_off + tid] = __float2bfloat16(y0);
+            output[out_off + tid + kPairHalf] = __float2bfloat16(y1);
+        }
+    } else {
+        const uint32_t col = kPairRotary + (tid - kPairHalf) * 2u;
+        #pragma unroll 4
+        for (uint32_t head = 0; head < heads; ++head) {
+            const size_t in_off = in_base + static_cast<size_t>(head) * kPairHeadDim + col;
+            const size_t out_off = out_base + static_cast<size_t>(head) * kPairHeadDim + col;
+            // bf16 2 個 = 4 B をそのまま運ぶ（f32 経由の往復と同じ結果）。
+            *reinterpret_cast<uint32_t*>(output + out_off) =
+                *reinterpret_cast<const uint32_t*>(input + in_off);
+        }
+    }
+}
+
+extern "C" __global__ __launch_bounds__(kPairThreads)
+void phaseshift_rope_bf16_pair(RopeBf16PairArgs args) {
+    rope_bf16_pair_body(
+        reinterpret_cast<const bf16*>(args.input), args.input_row_stride,
+        reinterpret_cast<bf16*>(args.output),
+        args.output_row_stride, args.positions, args.inv_freq, args.features,
+        args.attention_factor);
+}
+
+hipError_t launch_rope_bf16_pair(
+    const bf16_t* input, uint32_t input_row_stride,
+    bf16_t* output, uint32_t output_row_stride,
+    const uint32_t* positions, uint32_t rows, uint32_t features, uint32_t head_dim,
+    uint32_t rotary_dim, float theta, const double* inv_freq, float attention_factor,
+    hipStream_t stream) {
+    if (input == nullptr || output == nullptr || inv_freq == nullptr)
+        return hipErrorInvalidValue;
+    if (rows == 0u || features == 0u || head_dim != kPairHeadDim ||
+        features % head_dim != 0u)
+        return hipErrorInvalidValue;
+    if (rotary_dim != kPairRotary) return hipErrorNotSupported;
+    if ((input_row_stride & 1u) || (output_row_stride & 1u)) return hipErrorNotSupported;
+    if (!(attention_factor > 0.0f) || !std::isfinite(attention_factor))
+        return hipErrorInvalidValue;
+    RopeBf16PairArgs args{};
+    args.input = input;
+    args.input_row_stride = input_row_stride;
+    args.output = output;
+    args.output_row_stride = output_row_stride;
+    args.positions = positions;
+    args.inv_freq = inv_freq;
+    args.features = features;
+    args.attention_factor = attention_factor;
+    phaseshift_rope_bf16_pair<<<dim3(rows), kPairThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
 hipError_t launch_rope_f32_bf16_pair(
     const float* input, uint32_t input_row_stride,
     bf16_t* output, uint32_t output_row_stride,

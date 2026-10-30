@@ -25,6 +25,7 @@ enum class Bf16GemmConfigId : uint8_t {
     WmmaKPartition,
     ExactRows,
     ExactRowsDot2,
+    Prefill2D,   // prefill 用: 1 ブロック = 64 行 × 64 出力（256 スレッド・8 波）
 };
 
 struct Bf16GemmConfig {

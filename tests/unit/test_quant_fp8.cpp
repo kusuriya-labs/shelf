@@ -125,9 +125,9 @@ void test_tiled_offset_is_bijection() {
     }
     check(!dup && ones == static_cast<std::size_t>(rows) * cols,
           "有効領域を 1 回だけ覆い、詰め領域は未使用");
-    check(fp8::pad_k(96) == 96 && fp8::pad_k(97) == 128, "pad_k は 32 倍数へ切り上げ");
+    check(fp8::pad_k(64) == 64 && fp8::pad_k(65) == 128, "pad_k は 64 倍数へ切り上げ");
     check(fp8::pad_rows(17) == 32, "pad_rows は 16 行単位");
-    check(fp8::tiled_bytes(16, 32) == 512, "タイル 16x32 = 512 バイト");
+    check(fp8::tiled_bytes(16, 64) == 1024, "タイル 16x64 = 1024 バイト（レーン 32 B）");
 }
 
 void test_preshuffle_roundtrip() {
@@ -156,16 +156,19 @@ void test_preshuffle_roundtrip() {
 }
 
 void test_preshuffle_matches_fragment_addresses() {
-    // カーネル側のアドレス式（16 行タイル優先 → 32 K タイル → 16 K 半分行優先）と
-    // 一致する例を直計算で確認する（レイアウトの取り違え検出）。
-    const std::uint32_t kp = 64;
-    // (row 3, col 20): ntile 0, ktile 0, half 1 (20/16), 0*512 + 256 + 3*16 + 4 = 308
-    check(fp8::tiled_offset(3, 20, kp) == 256 + 3u * 16u + 4u, "半分行優先の例");
-    // (row 17, col 40): ntile 1 (1*kp*16 = 1024) + ktile 1 (512) + half 0（40 は
-    // K[32,64) の前半 16 側）+ 1*16 + 8
-    check(fp8::tiled_offset(17, 40, kp) == 1024u + 512u + 16u + 8u, "タイル境界の例");
-    // (row 17, col 56): 同上で half 1（+256）
-    check(fp8::tiled_offset(17, 56, kp) == 1024u + 512u + 256u + 16u + 8u, "16 K 半分の例");
+    // カーネル側のアドレス式（16 行 × 64 K タイル、レーン 32 バイト）と一致するかを
+    // 直計算で確認する（レイアウトの取り違え検出）。
+    const std::uint32_t kp = 128;
+    // (row 3, col 20): 行グループ 0・タイル 0、lane = 3 + 16*((20%16)/8 = 0) = 3、
+    // 断片 (20%64)/16 = 1（+8）、byte = 20%8 = 4 → 3*32 + 8 + 4
+    check(fp8::tiled_offset(3, 20, kp) == 3u * 32u + 8u + 4u, "レーン 32 バイトの例");
+    // (row 17, col 40): 行グループ 1（kp*16 = 2048）、タイル 0、lane = 1 + 16*1 = 17、
+    // 断片 (40%64)/16 = 2（+16）、byte = 0 → 2048 + 17*32 + 16
+    check(fp8::tiled_offset(17, 40, kp) == 2048u + 17u * 32u + 16u, "行グループの例");
+    // (row 17, col 72): タイル 1（+1024）、lane = 1 + 16*1 = 17、断片 (72%64)/16 = 0
+    check(fp8::tiled_offset(17, 72, kp) == 2048u + 1024u + 17u * 32u, "タイル 1 の例");
+    // (row 17, col 120): タイル 1、lane = 17、断片 (120%64)/16 = 3（+24）、byte 0
+    check(fp8::tiled_offset(17, 120, kp) == 2048u + 1024u + 17u * 32u + 24u, "断片 3 の例");
 }
 
 void test_scale_contract() {

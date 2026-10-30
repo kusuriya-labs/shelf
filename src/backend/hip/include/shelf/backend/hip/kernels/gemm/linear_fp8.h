@@ -28,11 +28,12 @@ enum class Fp8GemmOutputDType : std::uint8_t {
 };
 
 enum class Fp8GemmConfigId : std::uint8_t {
-    Auto,         // rows から選ぶ（rows=1 は Decode1、それ以外は RowBlock1/2/4）
+    Auto,         // rows から選ぶ（rows=1 は Decode1、64 行は Prefill2D、他は RowBlock）
     Decode1,      // rows == 1（GEMV 形・行列命令 1 本で足し積む）
     RowBlock1,    // rows <= 16
     RowBlock2,    // rows <= 32
     RowBlock4,    // rows <= 64（kMaxStepRows）
+    Prefill2D,    // 1 ブロック = 64 行 × 64 出力（8 波・256 スレッド）。prefill 用
 };
 
 struct Fp8GemmConfig {
@@ -55,6 +56,10 @@ bool fp8_gemm_shape_supported(std::uint32_t rows, std::uint32_t features,
 // スケール配置が受理できるか（act_group は 0/128、stride 整合）。
 bool fp8_scale_args_supported(const Fp8GemmScaleArgs& sc, std::uint32_t rows,
                               std::uint32_t features, std::uint32_t k_padded) noexcept;
+
+// Prefill2D が使える形か（64 行単位・64 出力単位・K が 64 の倍数）。
+bool fp8_prefill2d_supported(std::uint32_t rows, std::uint32_t features,
+                             std::uint32_t k_padded) noexcept;
 
 // rows=1 専用カーネルが使える形か（GEMV 形は 16 出力単位・K が 32 の倍数）。
 bool fp8_decode1_supported(std::uint32_t rows, std::uint32_t features,

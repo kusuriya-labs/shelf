@@ -54,6 +54,27 @@ hipError_t launch_rope_inv_freq_yarn_init(
     uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,
     bool truncate, hipStream_t stream);
 
+// bf16 入力・bf16 出力の pair kernel（head_dim 256・rotary 64 固定）。
+// f32 中間材料を作らない。bf16→f32 は損失のない widening なので値は f32 入力版と
+// ビット同一になる（非 rotary 部はそのままコピー）。
+struct RopeBf16PairArgs {
+    const bf16_t* input = nullptr;
+    uint32_t input_row_stride = 0;
+    bf16_t* output = nullptr;
+    uint32_t output_row_stride = 0;
+    const uint32_t* positions = nullptr;
+    const double* inv_freq = nullptr;
+    uint32_t features = 0;
+    float attention_factor = 1.0f;
+};
+
+hipError_t launch_rope_bf16_pair(
+    const bf16_t* input, uint32_t input_row_stride,
+    bf16_t* output, uint32_t output_row_stride,
+    const uint32_t* positions, uint32_t rows, uint32_t features, uint32_t head_dim,
+    uint32_t rotary_dim, float theta, const double* inv_freq, float attention_factor,
+    hipStream_t stream);
+
 hipError_t launch_rope_f32_bf16_generic(
     const float* input, uint32_t input_row_stride,
     bf16_t* output, uint32_t output_row_stride,

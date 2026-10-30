@@ -1,11 +1,13 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 #include <shelf/backend/hip/kernels/elementwise/l2_normalize.h>
+#include <shelf/backend/hip/kernels/detail/row_grid.h>
 #include <shelf/backend/hip/kernels/detail/l2_normalize_device.h>
 #include <shelf/foundation/numeric.hpp>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 
 namespace shelf::hipk {
@@ -64,9 +66,19 @@ hipError_t launch_l2_normalize_bf16_f32(
     args.output_row_stride = output_row_stride;
     args.group_size = group_size;
     args.eps = eps;
-    dim3 grid(groups, rows);
-    phaseshift_l2_normalize_bf16_f32<<<grid, kL2Threads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向は grid.y 上限（65535）で分割発射する（基底ポインタを進める）。
+    for (uint32_t begin = 0u; begin < rows; begin += detail::kMaxGridY) {
+        L2NormalizeArgs chunk = args;
+        const uint32_t n = std::min(rows - begin, detail::kMaxGridY);
+        chunk.input = static_cast<const bf16*>(args.input) +
+                      static_cast<size_t>(begin) * args.input_row_stride;
+        chunk.output = static_cast<float*>(args.output) +
+                       static_cast<size_t>(begin) * args.output_row_stride;
+        phaseshift_l2_normalize_bf16_f32<<<dim3(groups, n), kL2Threads, 0, stream>>>(chunk);
+        const hipError_t e = hipGetLastError();
+        if (e != hipSuccess) return e;
+    }
+    return hipSuccess;
 }
 
 }  // namespace shelf::hipk

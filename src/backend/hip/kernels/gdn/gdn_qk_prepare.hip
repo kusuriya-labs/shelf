@@ -1,10 +1,12 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 #include <shelf/backend/hip/kernels/gdn/gdn_qk_prepare.h>
+#include <shelf/backend/hip/kernels/detail/row_grid.h>
 #include <shelf/backend/hip/kernels/detail/gdn_prepare_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 
 namespace shelf::hipk {
@@ -66,9 +68,22 @@ hipError_t launch_fused_gdn_qk_prepare(
         args.sq_row_stride < args.features)
         return hipErrorInvalidValue;
     const uint32_t groups = args.features / args.group_size;
-    dim3 grid(2u * groups, args.rows);
-    phaseshift_fused_gdn_qk_prepare<<<grid, kQkThreads, 0, stream>>>(args);
-    return hipGetLastError();
+    // 行方向（token 行 × key head 数）が grid.y 上限（65535）を超える場合は
+    // 基底ポインタを進めて分割発射する。
+    for (uint32_t begin = 0u; begin < args.rows; begin += detail::kMaxGridY) {
+        FusedGdnQkPrepareArgs chunk = args;
+        const uint32_t n = std::min(args.rows - begin, detail::kMaxGridY);
+        chunk.q = args.q + static_cast<size_t>(begin) * args.q_row_stride;
+        chunk.k = args.k + static_cast<size_t>(begin) * args.k_row_stride;
+        chunk.nq_out = args.nq_out + static_cast<size_t>(begin) * args.nq_row_stride;
+        chunk.nk_out = args.nk_out + static_cast<size_t>(begin) * args.nk_row_stride;
+        chunk.sq_out = args.sq_out + static_cast<size_t>(begin) * args.sq_row_stride;
+        chunk.rows = n;
+        phaseshift_fused_gdn_qk_prepare<<<dim3(2u * groups, n), kQkThreads, 0, stream>>>(chunk);
+        const hipError_t e = hipGetLastError();
+        if (e != hipSuccess) return e;
+    }
+    return hipSuccess;
 }
 
 }  // namespace shelf::hipk

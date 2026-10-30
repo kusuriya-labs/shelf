@@ -66,6 +66,10 @@ enum class Kind : std::uint8_t {
     causal_conv_step,   // depthwise causal conv width 4 with rolling state
     gdn_step,           // one-token gated delta-rule recurrent update
     attention_gqa_step, // GQA multi-head decode vs KV state (appends rows)
+
+    // 追加は末尾のみ（既存 Kind の数値を変えない）。
+    row_slice,          // leading-dim (row) contiguous slice [row_begin,row_end)
+    swiglu,             // out = up * (gate / (1+exp(-gate)))  (bf16 in/out, f32 中間)
 };
 
 inline const char* kind_name(Kind kind) noexcept {
@@ -82,6 +86,8 @@ inline const char* kind_name(Kind kind) noexcept {
         case Kind::moe_merge: return "moe_merge";
         case Kind::output_projection: return "output_projection";
         case Kind::slice: return "slice";
+        case Kind::row_slice: return "row_slice";
+        case Kind::swiglu: return "swiglu";
         case Kind::reshape: return "reshape";
         case Kind::sigmoid_gate: return "sigmoid_gate";
         case Kind::rmsnorm_gated: return "rmsnorm_gated";
@@ -102,6 +108,11 @@ struct Attr {
     bool gamma_plus_one = false;  // rmsnorm weight convention: *(1 + w)
     std::int64_t slice_begin = 0;  // slice
     std::int64_t slice_end = -1;   // slice (-1 => up to last element)
+    std::int64_t row_begin = 0;    // row_slice (先頭次元 = 行)
+    std::int64_t row_end = -1;     // row_slice (-1 => 最後まで)
+    // row_slice: true = 「このステップで実際に渡された行数」の最終行だけを 1 行取る。
+    // prefill チャンク частично（n < グラフの rows）でも正しい行を選べるようにする。
+    bool row_last = false;
     std::int64_t head_rep = 0;     // gdn_step: value-heads per key-head (0 => derive)
 };
 

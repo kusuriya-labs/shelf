@@ -23,8 +23,11 @@
 #include <shelf/backend/hip/kernels/attention/paged_attention.h>
 #include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
+#include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16_config.h>
+#include <shelf/backend/hip/kernels/gemm/linear_fp8.h>
+#include <shelf/quant/fp8_w8a8.hpp>
 #endif
 
 namespace shelf::bench {
@@ -36,7 +39,7 @@ struct KernelEntry {
 };
 
 const KernelEntry kKernels[] = {
-    {"gemm", "linear (GEMV/GEMM): --rows --n --k"},
+    {"gemm", "linear (GEMV/GEMM): --rows --n --k [--dtype bf16|fp8] [--act-group 0|128 --block128 0|1 --config auto|rowblock1|rowblock2|rowblock4|decode1|2d]"},
     {"rmsnorm", "rms normalization: --rows --features"},
     {"elementwise", "residual_add (bf16): --rows --features"},
     {"kv-append", "paged KV append: --rows --kv-heads --head-dim --page-tokens --num-pages --seq-len"},
@@ -64,6 +67,7 @@ void usage(std::FILE* out) {
         "notes:\n"
         "  すべて合成バッファ（0 埋め）。モデルは不要。\n"
         "  gemm の --rows は [1,64]、--k は 8 の倍数（カーネル契約）。\n"
+        "  --dtype fp8 で FP8 W8A8 経路（--k は 32 の倍数）。\n"
         "  exit codes: 0 = ok, 1 = runtime error, 2 = usage error\n");
 }
 
@@ -238,6 +242,118 @@ bool setup_kv(const KvSetup& s, KvBufs* b, std::string* error) {
 
 // ---- 各カーネル -------------------------------------------------------------
 
+// ---- FP8 W8A8 の GEMM（--fp8） -------------------------------------------------
+// 重み・活性化のコードは 0 埋めのまま（値は時間に影響しない）。形状は
+// 実行器が渡すものと同じ規約（断片順サイズは quant/fp8 の tiled_bytes）。
+shelf::hipk::Fp8GemmConfigId parse_fp8_config(const std::string& name, bool* ok) {
+    if (name.empty() || name == "auto") return shelf::hipk::Fp8GemmConfigId::Auto;
+    if (name == "decode1") return shelf::hipk::Fp8GemmConfigId::Decode1;
+    if (name == "rowblock1") return shelf::hipk::Fp8GemmConfigId::RowBlock1;
+    if (name == "rowblock2") return shelf::hipk::Fp8GemmConfigId::RowBlock2;
+    if (name == "rowblock4") return shelf::hipk::Fp8GemmConfigId::RowBlock4;
+    if (name == "2d" || name == "prefill2d") return shelf::hipk::Fp8GemmConfigId::Prefill2D;
+    *ok = false;
+    return shelf::hipk::Fp8GemmConfigId::Auto;
+}
+
+int bench_gemm_fp8(const Args& a, const std::vector<std::int64_t>& rows_list, std::int64_t n,
+                   std::int64_t k, std::int64_t gpu, const std::string& output,
+                   std::int64_t warmup, std::int64_t samples, std::int64_t launches) {
+    bool ok = true;
+    const std::int64_t act_group = a.i64("act-group", 128, &ok);
+    const std::int64_t block128 = a.i64("block128", 0, &ok);
+    bool cfg_ok = true;
+    const auto cfg_id = parse_fp8_config(a.str("config"), &cfg_ok);
+    if (!ok || !cfg_ok || (k % 32) != 0 || (act_group != 0 && act_group != 128) ||
+        (block128 != 0 && block128 != 1)) {
+        std::fprintf(stderr,
+                     "gemm: --dtype fp8 requires k %% 32 == 0, --act-group 0|128, --block128 0|1\n");
+        return kExitUsage;
+    }
+    using namespace shelf::quant::fp8;
+    const auto gran = block128 != 0 ? WeightScaleGranularity::Block128
+                                    : WeightScaleGranularity::PerChannel;
+    const std::uint32_t kp = static_cast<std::uint32_t>(k);
+    const std::uint32_t feats = static_cast<std::uint32_t>(n);
+    const std::size_t max_rows = static_cast<std::size_t>(
+        *std::max_element(rows_list.begin(), rows_list.end()));
+    shelf::hipk::Fp8GemmScaleArgs sc;
+    sc.act_group = static_cast<std::uint32_t>(act_group);
+    sc.weight_block128 = block128 != 0;
+    sc.activation_scale_stride = act_scale_groups(kp, sc.act_group);
+    sc.weight_scale_k_blocks = scale_k_blocks(kp);
+
+    std::string error;
+    if (!set_device(gpu, &error)) {
+        std::fprintf(stderr, "gemm: %s\n", error.c_str());
+        return kExitRuntime;
+    }
+
+    DevBuf wcodes, wscales, acodes, ascales, out;
+    if (!wcodes.alloc(tiled_bytes(feats, kp), "weight codes", &error)) goto fail;
+    if (!wscales.alloc(weight_scale_count(gran, feats, kp) * sizeof(float), "weight scales",
+                       &error))
+        goto fail;
+    if (!acodes.alloc(shelf::hipk::fp8_activation_bytes(static_cast<std::uint32_t>(max_rows), kp),
+                      "activation codes", &error))
+        goto fail;
+    if (!ascales.alloc(activation_scale_count(static_cast<std::uint32_t>(max_rows), kp,
+                                              sc.act_group) * sizeof(float),
+                       "activation scales", &error))
+        goto fail;
+    if (!out.alloc(max_rows * static_cast<std::size_t>(n) * sizeof(shelf::bf16_t), "out",
+                   &error))
+        goto fail;
+
+    {
+        StreamTimer timer;
+        if (!timer.init(&error)) {
+            std::fprintf(stderr, "gemm: %s\n", error.c_str());
+            return kExitRuntime;
+        }
+        for (std::int64_t rows : rows_list) {
+            const shelf::hipk::Fp8GemmConfig cfg{cfg_id};
+            const auto launch = [&](hipStream_t s) {
+                return shelf::hipk::launch_gemm_fp8_w8a8(
+                    cfg, static_cast<const std::uint8_t*>(wcodes.p),
+                    static_cast<const float*>(wscales.p),
+                    static_cast<const std::uint8_t*>(acodes.p),
+                    static_cast<const float*>(ascales.p), out.p,
+                    shelf::hipk::Fp8GemmOutputDType::BF16, static_cast<std::uint32_t>(rows),
+                    feats, kp, feats, sc, s);
+            };
+            Stats us;
+            if (!timer.measure(static_cast<int>(warmup), static_cast<int>(samples),
+                               static_cast<int>(launches), launch, &us, &error)) {
+                std::fprintf(stderr, "gemm: %s\n", error.c_str());
+                return kExitRuntime;
+            }
+            KernelResult r;
+            r.name = "gemm";
+            r.shape = std::to_string(rows) + "x" + std::to_string(n) + "x" + std::to_string(k);
+            r.us = us;
+            const double flops = 2.0 * static_cast<double>(rows) * static_cast<double>(n) *
+                                 static_cast<double>(k);
+            r.throughput = us.p50 > 0.0 ? flops / (us.p50 * 1e-6) / 1e9 : 0.0;
+            r.unit = "GFLOP/s";
+            r.extra = {{"rows", std::to_string(rows)},
+                       {"n", std::to_string(n)},
+                       {"k", std::to_string(k)},
+                       {"dtype", "fp8"},
+                       {"act_group", std::to_string(act_group)},
+                       {"block128", std::to_string(block128)},
+                       {"config", a.str("config").empty() ? std::string("auto")
+                                                          : a.str("config")}};
+            report(r, gpu, warmup, samples, launches, output);
+        }
+    }
+    return kExitOk;
+
+fail:
+    std::fprintf(stderr, "gemm: %s\n", error.c_str());
+    return kExitRuntime;
+}
+
 int bench_gemm(const Args& a, std::int64_t gpu, const std::string& output, int argc) {
     bool ok = true;
     const std::vector<std::int64_t> rows_list = a.i64_list("rows", {1, 16}, &ok);
@@ -250,11 +366,23 @@ int bench_gemm(const Args& a, std::int64_t gpu, const std::string& output, int a
         return kExitUsage;
     }
     for (std::int64_t r : rows_list) {
-        if (r < 1 || r > 64) {
-            std::fprintf(stderr, "gemm: --rows must be in [1,64] (got %lld)\n",
+        if (r < 1 || r > 512) {
+            std::fprintf(stderr, "gemm: --rows must be in [1,512] (got %lld)\n",
                          static_cast<long long>(r));
             return kExitUsage;
         }
+    }
+    // --dtype fp8 は FP8 W8A8 経路（bf16 の重みは確保しない）。
+    const std::string dtype = a.str("dtype", "bf16");
+    if (dtype == "fp8")
+        return bench_gemm_fp8(a, rows_list, n, k, gpu, output, warmup, samples, launches);
+    if (dtype != "bf16") {
+        std::fprintf(stderr, "gemm: --dtype must be bf16 or fp8\n");
+        return kExitUsage;
+    }
+    if (a.has("act-group") || a.has("block128") || a.has("config")) {
+        std::fprintf(stderr, "gemm: --act-group/--block128/--config は --dtype fp8 と一緒に使う\n");
+        return kExitUsage;
     }
     std::string error;
     if (!set_device(gpu, &error)) {
@@ -282,10 +410,22 @@ int bench_gemm(const Args& a, std::int64_t gpu, const std::string& output, int a
             return kExitRuntime;
         }
         for (std::int64_t rows : rows_list) {
-            const shelf::hipk::Bf16GemmConfig cfg{
-                rows >= 2 ? shelf::hipk::Bf16GemmConfigId::ExactRowsDot2
-                          : shelf::hipk::Bf16GemmConfigId::ExactRows,
-                static_cast<std::uint8_t>(rows)};
+            // 実行器と同じ選択: 64 行以上の形は 2 次元タイル、16 行超は汎用 Wmma。
+            shelf::hipk::Bf16GemmConfig cfg{};
+            if (rows >= 64 &&
+                shelf::hipk::bf16_prefill2d_supported(static_cast<std::uint32_t>(rows),
+                                                      static_cast<std::uint32_t>(n),
+                                                      static_cast<std::uint32_t>(k))) {
+                cfg.id = shelf::hipk::Bf16GemmConfigId::Prefill2D;
+                cfg.exact_rows = 0u;
+            } else if (rows > 16) {
+                cfg.id = shelf::hipk::Bf16GemmConfigId::Wmma;
+                cfg.exact_rows = 0u;
+            } else {
+                cfg.id = rows >= 2 ? shelf::hipk::Bf16GemmConfigId::ExactRowsDot2
+                                   : shelf::hipk::Bf16GemmConfigId::ExactRows;
+                cfg.exact_rows = static_cast<std::uint8_t>(rows);
+            }
             const auto launch = [&](hipStream_t s) {
                 return shelf::hipk::launch_gemm_bf16(
                     cfg, static_cast<const shelf::bf16_t*>(weight.p),
@@ -684,7 +824,7 @@ int run_kernel(int argc, char** argv) {
             for (const char* k : extra) allowed.emplace_back(k);
         };
         if (name == "gemm") {
-            add({"rows", "n", "k"});
+            add({"rows", "n", "k", "dtype", "act-group", "block128", "config"});
         } else if (name == "rmsnorm" || name == "elementwise") {
             add({"rows", "features"});
         } else if (name == "kv-append") {

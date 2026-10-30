@@ -70,6 +70,13 @@ struct GdnRecurrenceArgs {
     uint64_t recurrent_layer_stride = 0;  // elements per layer (nvh*dk*dv)
 };
 
+// decode（1 行）専用の WMMA 再帰。lossy=true は f16 一成分（hi/lo 補正なし）。
+// 受理条件は `gdn_recurrence_wmma_decode1_supported`（head_k=128・head_v が 64 の倍数・
+// requests[0].row_count==1 など）。
+bool gdn_recurrence_wmma_decode1_supported(const GdnRecurrenceArgs& args);
+hipError_t launch_gdn_recurrence_wmma_decode1(const GdnRecurrenceArgs& args, bool lossy,
+                                              hipStream_t stream);
+
 hipError_t launch_gdn_recurrence_f32(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);

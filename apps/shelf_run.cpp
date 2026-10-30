@@ -47,9 +47,11 @@ int main(int argc, char** argv) {
     int gpu = 0;
     int steps = 16;
     long long arena_mib = 0;  // 0 = declare_states のグラフから自動算出
+    long long budget_mib = 0;  // device 予算 MiB（モデル込み、0 = 無制限）
+    bool logits_all_rows = false;  // true = prefill の全行で logits を作る
     std::string dump_acts;    // 指定すると prefill 後の linear 入力（f32）を保存する
     int fp8_act_group = -1;   // FP8 活性化の量子化粒度。-1 = config.json の宣言に従う
-    int prefill_rows = 64;    // prefill の 1 チャンク行数（VRAM が足りないとき落とす）
+    int prefill_rows = 1024;   // prefill の 1 チャンク行数（VRAM が足りないとき落とす）
     int pp = 1;               // pipeline-parallel のステージ数（1 = 単一 GPU）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -64,20 +66,24 @@ int main(int argc, char** argv) {
         else if (a == "--device") device = next("cpu|hip");
         else if (a == "--gpu") gpu = std::atoi(next("gpu index").c_str());
         else if (a == "--arena-mib") arena_mib = std::atoll(next("arena MiB").c_str());
+        else if (a == "--vram-budget-mib") budget_mib = std::atoll(next("vram budget MiB").c_str());
+        else if (a == "--logits-all-rows") logits_all_rows = true;
         else if (a == "--dump-acts") dump_acts = next("dir");
         else if (a == "--fp8-act-group") fp8_act_group = std::atoi(next("auto|0|128").c_str());
         else if (a == "--prefill-rows") prefill_rows = std::atoi(next("rows").c_str());
         else if (a == "--pipeline-parallel") pp = std::atoi(next("K").c_str());
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
-                         "[--device cpu|hip] [--gpu N] [--arena-mib N] [--dump-acts DIR] "
+                         "[--device cpu|hip] [--gpu N] [--arena-mib N] [--vram-budget-mib N] "
+                         "[--dump-acts DIR] "
                          "[--fp8-act-group auto|0|128] [--prefill-rows N] [--pipeline-parallel K]");
     }
     if (fp8_act_group != -1 && fp8_act_group != 0 && fp8_act_group != 128)
         return fail("--fp8-act-group は auto（省略）か 0 か 128");
     if (model_dir.empty() || ids_csv.empty()) return fail("--model and --ids required");
     if (arena_mib < 0) return fail("--arena-mib must be >= 0");
-    if (prefill_rows < 1 || prefill_rows > 64)
-        return fail("--prefill-rows must be in [1, 64]");
+    if (budget_mib < 0) return fail("--vram-budget-mib must be >= 0");
+    if (prefill_rows < 1 || prefill_rows > 2048)
+        return fail("--prefill-rows must be in [1, 2048]");
     if (pp < 1) return fail("--pipeline-parallel は 1 以上");
     if (pp > 1 && device != "hip") return fail("--pipeline-parallel > 1 は hip のみ");
 
@@ -151,6 +157,8 @@ int main(int argc, char** argv) {
         po.kv_capacity = capacity;
         po.chunk_rows = (pf_rows > 1) ? pf_rows : 1;
         po.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
+        po.vram_budget_bytes = budget_mib > 0 ? static_cast<std::size_t>(budget_mib) << 20 : 0;
+        po.logits_last_row_only = !logits_all_rows;
         // --dump-acts はステップ後に中間値を読むので、offset の再利用を切る。
         po.arena_reuse = dump_acts.empty();
         po.rope_theta = cfg.rope_theta;
@@ -164,10 +172,13 @@ int main(int argc, char** argv) {
                     fmt.quantized ? fmt.declared.c_str() : "量子化なし（bf16 のまま）",
                     fmt.act_group,
                     fp8_act_group >= 0 ? " ※--fp8-act-group で上書き" : " ※config.json の宣言");
-        std::printf("pipeline: %d stage (gpu %d..%d), arena %.0f MiB (%s)\n", pp, gpu,
-                    gpu + pp - 1,
+        std::printf("pipeline: %d stage (gpu %d..%d), arena %.0f MiB (%s), device %.0f MiB%s\n",
+                    pp, gpu, gpu + pp - 1,
                     static_cast<double>(pipeline.arena_bytes) / (1024.0 * 1024.0),
-                    arena_mib > 0 ? "pinned" : "auto");
+                    arena_mib > 0 ? "pinned" : "auto",
+                    static_cast<double>(pipeline.device_bytes) / (1024.0 * 1024.0),
+                    budget_mib > 0 ? (" / 予算 " + std::to_string(budget_mib) + " MiB").c_str()
+                                  : "");
 #else
         return fail("built without HIP support");
 #endif
@@ -235,8 +246,15 @@ int main(int argc, char** argv) {
             if (!st.ok()) return fail("prefill chunk " + std::to_string(c) + ": " + st.message());
             std::printf("prefill chunk rows=%zu base=%zu\n", n, c);
             if (last_chunk) {
-                // [n,V]: 最終行を採用
-                last_logits.assign(lg.end() - static_cast<std::ptrdiff_t>(lg.size() / n),
+                // [rows_ret, V] の最終行を採用する。`logits_last_row_only` で
+                // rows_ret = 1 のことがある（= n とは限らない）ので、行数は
+                // 返された長さから決める。
+                const std::size_t vocab = cfg.vocab_size;
+                const std::size_t rows_ret = vocab > 0u ? lg.size() / vocab : 0u;
+                if (rows_ret == 0u || lg.size() % vocab != 0u)
+                    return fail("prefill logits の長さが語彙数と不一致: " +
+                                std::to_string(lg.size()));
+                last_logits.assign(lg.end() - static_cast<std::ptrdiff_t>(lg.size() / rows_ret),
                                    lg.end());
             }
 #else

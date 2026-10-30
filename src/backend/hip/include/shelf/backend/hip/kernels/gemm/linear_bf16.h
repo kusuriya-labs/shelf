@@ -105,6 +105,10 @@ enum class Bf16GemmOutputDType : uint8_t {
     F32,
 };
 
+// prefill 用 2 次元タイル（rows は 64 の倍数、out_features は 64 の倍数）。
+// 受理条件は `bf16_prefill2d_supported` が正。
+bool bf16_prefill2d_supported(uint32_t rows, uint32_t out_features, uint32_t k) noexcept;
+
 hipError_t launch_gemm_bf16(
     const Bf16GemmConfig& config,
     const bf16_t* weight,

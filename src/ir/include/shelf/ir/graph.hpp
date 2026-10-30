@@ -243,6 +243,39 @@ private:
                 dims.back() = static_cast<std::size_t>(e - b);
                 return expect_out(p, TensorShape::create(dims).release(), out);
             }
+            case Kind::swiglu: {
+                // silu + elem_mul を 1 pass に畳んだ形（同じ値、丸め回数は積の 1 回だけ）。
+                if (p.inputs.size() != 2 || !p.weights.empty()) return bad("swiglu arity");
+                const ValueDesc* g = in(0);
+                const ValueDesc* u = in(1);
+                if (!g || !u) return bad("swiglu input");
+                if (!(g->shape == u->shape)) return bad("swiglu inputs must have the same shape");
+                return expect_out(p, g->shape, out);
+            }
+            case Kind::row_slice: {
+                if (p.inputs.size() != 1 || !p.weights.empty()) return bad("row_slice arity");
+                const ValueDesc* x = in(0);
+                if (!x || x->shape.rank() < 2) return bad("row_slice needs rank >= 2 input");
+                if (p.attr.row_last) {
+                    // 実行時の最終行。宣言上の形は [1, ...] で固定できる。
+                    std::vector<std::size_t> dims;
+                    dims.push_back(1u);
+                    for (std::size_t i = 1; i < x->shape.rank(); ++i) dims.push_back(x->shape.dim(i));
+                    return expect_out(p, TensorShape::create(dims).release(), out);
+                }
+                const std::size_t R = x->shape.dim(0);
+                const std::int64_t b = p.attr.row_begin;
+                const std::int64_t e = p.attr.row_end == -1 ? static_cast<std::int64_t>(R)
+                                                            : p.attr.row_end;
+                if (b < 0 || e <= b || static_cast<std::size_t>(e) > R) {
+                    return bad("row_slice range invalid for leading dim of size " +
+                               std::to_string(R));
+                }
+                std::vector<std::size_t> dims;
+                for (std::size_t i = 0; i < x->shape.rank(); ++i) dims.push_back(x->shape.dim(i));
+                dims[0] = static_cast<std::size_t>(e - b);
+                return expect_out(p, TensorShape::create(dims).release(), out);
+            }
             case Kind::reshape: {
                 if (p.inputs.size() != 1 || !p.weights.empty()) return bad("reshape arity");
                 const ValueDesc* x = in(0);

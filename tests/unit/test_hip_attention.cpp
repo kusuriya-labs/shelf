@@ -296,6 +296,107 @@ void compare_attention_gap(const AttnCase& c, const char* tag,
     }
 }
 
+// prefill 用 kernel（Q 32 行タイル × KV ページ、bf16 WMMA、online softmax）を
+// f64 参照と比較する。単一系列・rows=96（タイル 3 個）で causal は行位置から決まる。
+// あわせて受理境界（rows=1 は不受理、head_dim != 256 は launch 拒否）も固定する。
+void run_prefill_attention_case() {
+    const uint32_t rows = 96u, qh = 6u, kvh = 2u, D = 256u, page = 16u, tw = 8u;
+    const uint32_t pages = (rows + page - 1u) / page;
+    AttnCase c;
+    c.rows = rows; c.q_heads = qh; c.kv_heads = kvh; c.head_dim = D;
+    c.seqused.assign(rows, 0u);
+    for (uint32_t r = 0u; r < rows; ++r) c.seqused[r] = r + 1u;
+    c.table.assign(static_cast<size_t>(rows) * tw, ~0u);
+    for (uint32_t r = 0u; r < rows; ++r)
+        for (uint32_t p = 0u; p < pages; ++p) c.table[static_cast<size_t>(r) * tw + p] = p;
+
+    PoolGeom g;
+    g.page_tokens = page; g.table_width = tw; g.num_pages = pages;
+    g.kv_heads = kvh; g.head_dim = D;
+
+    std::mt19937 rng(20261030u);
+    std::uniform_real_distribution<float> dist(-1.5f, 1.5f);
+    const size_t qn = static_cast<size_t>(rows) * qh * D;
+    std::vector<shelf::bf16_t> q(qn);
+    for (auto& v : q) v = shelf::f32_to_bf16(dist(rng));
+    const size_t kn = static_cast<size_t>(rows) * kvh * D;
+    std::vector<shelf::bf16_t> ktk(kn), vtk(kn);
+    for (auto& v : ktk) v = shelf::f32_to_bf16(dist(rng));
+    for (auto& v : vtk) v = shelf::f32_to_bf16(dist(rng));
+
+    std::vector<shelf::bf16_t> kpool(g.epl()), vpool(g.epl());
+    fill_pool(kpool, g, kFillPat);
+    fill_pool(vpool, g, kFillPat);
+    for (uint32_t t = 0u; t < rows; ++t)
+        for (uint32_t h = 0u; h < kvh; ++h)
+            for (uint32_t d = 0u; d < D; ++d) {
+                const size_t src = (static_cast<size_t>(t) * kvh + h) * D + d;
+                kpool[g.idx(t / page, t % page, h, d)] = ktk[src];
+                vpool[g.idx(t / page, t % page, h, d)] = vtk[src];
+            }
+
+    std::vector<double> ref;
+    reference_attention(c, g, q, kpool, vpool, ref);
+
+    shelf::bf16_t *d_k = nullptr, *d_v = nullptr, *d_q = nullptr, *d_o = nullptr;
+    uint32_t *d_tbl = nullptr, *d_slots = nullptr, *d_pos = nullptr;
+    HIP_OK(hipMalloc(&d_k, kpool.size() * sizeof(shelf::bf16_t)));
+    HIP_OK(hipMalloc(&d_v, vpool.size() * sizeof(shelf::bf16_t)));
+    HIP_OK(hipMalloc(&d_q, q.size() * sizeof(shelf::bf16_t)));
+    HIP_OK(hipMalloc(&d_o, q.size() * sizeof(shelf::bf16_t)));
+    HIP_OK(hipMalloc(&d_tbl, c.table.size() * sizeof(uint32_t)));
+    HIP_OK(hipMalloc(&d_slots, rows * sizeof(uint32_t)));
+    HIP_OK(hipMalloc(&d_pos, rows * sizeof(uint32_t)));
+    HIP_OK(hipMemcpy(d_k, kpool.data(), kpool.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_v, vpool.data(), vpool.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_q, q.data(), q.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_tbl, c.table.data(), c.table.size() * sizeof(uint32_t), hipMemcpyHostToDevice));
+    std::vector<uint32_t> pos(rows), slots(rows, 0u);
+    for (uint32_t r = 0u; r < rows; ++r) pos[r] = r;
+    HIP_OK(hipMemcpy(d_slots, slots.data(), rows * sizeof(uint32_t), hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(d_pos, pos.data(), rows * sizeof(uint32_t), hipMemcpyHostToDevice));
+
+    PagedAttentionCommonArgs a{};
+    a.q = d_q; a.output = d_o;
+    a.output_dtype = PagedAttentionOutputDType::BF16;
+    a.q_row_stride = qh * D; a.output_row_stride = qh * D;
+    a.row_sequence_slots = d_slots; a.row_positions = d_pos;
+    a.block_tables = d_tbl; a.block_table_stride = tw; a.max_sequences = 1u;
+    a.rows = rows; a.layer = 0u; a.page_tokens = page; a.num_pages = pages;
+    a.num_attention_layers = 1u; a.q_heads = qh; a.kv_heads = kvh; a.head_dim = D;
+    a.elems_per_token = static_cast<uint32_t>(g.ept());
+    a.elems_per_page = static_cast<uint32_t>(g.epp());
+    a.elems_per_layer = static_cast<uint32_t>(g.epl());
+    a.scale = 1.0f / std::sqrt(static_cast<float>(D));
+
+    if (!attention_paged_prefill_bf16_supported(a)) {
+        ++failures; std::printf("FAIL: prefill attn 受理条件（rows=96, D=256, page=16）\n");
+    }
+    hipError_t e = launch_attention_paged_prefill_bf16(a, d_k, d_v, nullptr);
+    if (e != hipSuccess) {
+        ++failures; std::printf("FAIL: prefill attn launch: %s\n", hipGetErrorString(e));
+    } else {
+        std::vector<shelf::bf16_t> got(q.size(), shelf::bf16_t{0});
+        HIP_OK(hipMemcpy(got.data(), d_o, got.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
+        compare_attention_gap(c, "prefill attn", got, ref, 5e-2);
+    }
+
+    // 受理境界
+    {
+        PagedAttentionCommonArgs b = a; b.rows = 1u;
+        if (attention_paged_prefill_bf16_supported(b)) {
+            ++failures; std::printf("FAIL: prefill attn は rows=1 を不受理にすべき\n");
+        }
+        b = a; b.rows = 8u; b.head_dim = 128u;
+        if (launch_attention_paged_prefill_bf16(b, d_k, d_v, nullptr) != hipErrorInvalidValue) {
+            ++failures; std::printf("FAIL: prefill attn は head_dim=128 を拒否すべき\n");
+        }
+    }
+
+    hipFree(d_k); hipFree(d_v); hipFree(d_q); hipFree(d_o);
+    hipFree(d_tbl); hipFree(d_slots); hipFree(d_pos);
+}
+
 // Build pool + table on host, run paged decode on device, f64 reference compare.
 // If do_rope: apply the rope kernel to q (f32) and to generated K token rows
 // (f32) before they enter the pool; reference consumes the kernel outputs.
@@ -986,6 +1087,7 @@ int main() {
     unsetenv("PHASESHIFT_PAGED_ATTENTION_SPLIT_REDUCE_QH");
 
     // PR-0 gap fill: tree ancestors (non-contiguous + contiguous merge)
+    run_prefill_attention_case();
     run_attention_tree_case(256);
     run_attention_tree_case(64);
 

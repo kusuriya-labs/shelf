@@ -15,6 +15,7 @@
 #include <shelf/backend/hip/kernels/e4m3_codec.h>
 #include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
 #include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/backend/hip/kernels/detail/target_swiglu_device.h>
 
 namespace shelf::hipk {
 namespace {
@@ -26,6 +27,7 @@ using shelf::quant::fp8::kTileRows;
 
 constexpr std::uint32_t kThreadsPerRow = 256u;              // 1 ブロック = 1 トークン
 constexpr std::uint32_t kLanes = 32u;
+constexpr std::uint32_t kSuperK = shelf::quant::fp8::kSuperK;   // 64 K = 4 断片
 constexpr std::uint32_t kWavesPerRow = kThreadsPerRow / kLanes;   // 8
 constexpr std::uint32_t kElemsPerLane = 4u;                 // 8 バイト読み / 4 バイト書き
 
@@ -35,14 +37,16 @@ __device__ __forceinline__ float bf16_word_to_f32(std::uint32_t word) {
 
 // quant/fp8 の tiled_offset と同一の式（一致は tests/unit/test_hip_gemm_fp8.cpp が
 // readback で検証する — 定義の二重実装であり、片方を壊すとテストが落ちる）。
+// quant/fp8 の tiled_offset と同一（16 行 × 64 K タイル = 32 レーン × 32 バイト）。
 __device__ __forceinline__ std::size_t code_offset(std::uint32_t row, std::uint32_t col,
                                                    std::uint32_t k_padded) {
+    const std::uint32_t lane = (row % kTileRows) + kTileRows * ((col % 16u) / 8u);
     return static_cast<std::size_t>(row / kTileRows) *
                (static_cast<std::size_t>(k_padded) * kTileRows) +
-           static_cast<std::size_t>(col / kTileK) * (kTileRows * kTileK) +
-           static_cast<std::size_t>((col % kTileK) / 16u) * (kTileRows * 16u) +
-           static_cast<std::size_t>(row % kTileRows) * 16u +
-           static_cast<std::size_t>(col % 16u);
+           static_cast<std::size_t>(col / kSuperK) * (kTileRows * kSuperK) +
+           static_cast<std::size_t>(lane) * 32u +
+           static_cast<std::size_t>((col % kSuperK) / 16u) * 8u +
+           static_cast<std::size_t>(col % 8u);
 }
 
 __device__ __forceinline__ float load_f32_at(const shelf::bf16_t* xrow, std::uint32_t i,
@@ -68,7 +72,6 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_group_
     const std::uint32_t lane = threadIdx.x & 31u;
 
     const shelf::bf16_t* xrow = input + static_cast<std::size_t>(r) * input_row_stride;
-    std::uint8_t* crow = codes + code_offset(r, 0, k_padded);
     float* rscales = scales + static_cast<std::size_t>(r) * k_blocks;
 
     for (std::uint32_t g = wave; g < k_blocks; g += kWavesPerRow) {
@@ -102,7 +105,96 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_group_
             const std::uint8_t c = (sc > 0.0f) ? e4m3_encode_u8(v[l] * inv) : 0u;
             packed |= static_cast<std::uint32_t>(c) << (8u * l);
         }
-        *reinterpret_cast<std::uint32_t*>(crow + code_offset(0, i0, k_padded)) = packed;
+        *reinterpret_cast<std::uint32_t*>(codes + code_offset(r, i0, k_padded)) = packed;
+    }
+}
+
+// ---- SwiGLu 融合（act_group = 128） ---------------------------------------
+// gate・up を読むだけで bf16 中間材料を書かずに fp8 コード/スケールを出す。
+// 値は `phaseshift_swiglu_bf16` と同じ順で計算し、**bf16 に丸めてから**量子化する
+// （现状の「swiglu → 量子化」と 1 バイトも違わないようにするため）。
+__global__ void __launch_bounds__(kThreadsPerRow) swiglu_quantize_fp8_group_kernel(
+    const shelf::bf16_t* __restrict__ gate,
+    const shelf::bf16_t* __restrict__ up,
+    shelf::bf16_t* __restrict__ out,
+    std::uint8_t* __restrict__ codes,
+    float* __restrict__ scales,
+    const std::uint32_t rows,
+    const std::uint32_t k,
+    const std::uint32_t k_padded,
+    const std::uint32_t gate_row_stride,
+    const std::uint32_t up_row_stride,
+    const std::uint32_t out_row_stride,
+    const std::uint32_t k_blocks) {
+    const std::uint32_t r = blockIdx.x;
+    if (r >= rows) return;
+    const std::uint32_t wave = threadIdx.x >> 5u;
+    const std::uint32_t lane = threadIdx.x & 31u;
+
+    const shelf::bf16_t* grow = gate + static_cast<std::size_t>(r) * gate_row_stride;
+    const shelf::bf16_t* urow = up + static_cast<std::size_t>(r) * up_row_stride;
+    float* rscales = scales + static_cast<std::size_t>(r) * k_blocks;
+    // bf16 出力も書く（fp8 を読まない消費者や owner 再利用が失敗した
+    // フォールバックでも正しい値を読めるようにする）。v は bf16 丸め済みの値。
+    shelf::bf16_t* orow = out != nullptr
+        ? out + static_cast<std::size_t>(r) * out_row_stride : nullptr;
+
+    for (std::uint32_t g = wave; g < k_blocks; g += kWavesPerRow) {
+        const std::uint32_t i0 = g * kActGroupK + lane * kElemsPerLane;
+        float v[kElemsPerLane];
+        float amax = 0.0f;
+        if (i0 + kElemsPerLane <= k) {
+            const std::uint64_t gr = *reinterpret_cast<const std::uint64_t*>(grow + i0);
+            const std::uint64_t ur = *reinterpret_cast<const std::uint64_t*>(urow + i0);
+#pragma unroll
+            for (std::uint32_t l = 0; l < kElemsPerLane; ++l) {
+                const float gf = bf16_word_to_f32(static_cast<std::uint32_t>(gr >> (16u * l)));
+                const float uf = bf16_word_to_f32(static_cast<std::uint32_t>(ur >> (16u * l)));
+                const float t = shelf::hipk::detail::target_swiglu_f32(gf, uf);
+                const float b = __bfloat162float(__float2bfloat16(t));   // bf16 丸めの再現
+                v[l] = std::isfinite(b) ? b : 0.0f;
+                amax = fmaxf(amax, fabsf(v[l]));
+            }
+        } else {
+#pragma unroll
+            for (std::uint32_t l = 0; l < kElemsPerLane; ++l) {
+                const float gf = load_f32_at(grow, i0 + l, k);
+                const float uf = load_f32_at(urow, i0 + l, k);
+                const float b = __bfloat162float(__float2bfloat16(
+                    shelf::hipk::detail::target_swiglu_f32(gf, uf)));
+                v[l] = std::isfinite(b) ? b : 0.0f;
+                amax = fmaxf(amax, fabsf(v[l]));
+            }
+        }
+        for (std::uint32_t off = 16u; off > 0u; off >>= 1u)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffffffffffull, amax, off));
+        const float sc = amax_scale(amax);
+        const float inv = (sc > 0.0f) ? 1.0f / sc : 0.0f;
+        if (lane == 0u) rscales[g] = sc;
+
+        if (orow != nullptr) {
+            std::uint32_t lo = 0u;
+            std::uint32_t hi = 0u;
+#pragma unroll
+            for (std::uint32_t l = 0u; l < kElemsPerLane; ++l) {
+                const std::uint32_t w = static_cast<std::uint32_t>(
+                    __bfloat16_as_ushort(__float2bfloat16(v[l])));
+                if (l < 2u) lo |= w << (16u * l);
+                else hi |= w << (16u * (l - 2u));
+            }
+            uint2 st{};
+            st.x = lo;
+            st.y = hi;
+            *reinterpret_cast<uint2*>(orow + i0) = st;
+        }
+
+        std::uint32_t packed = 0u;
+#pragma unroll
+        for (std::uint32_t l = 0; l < kElemsPerLane; ++l) {
+            const std::uint8_t c = (sc > 0.0f) ? e4m3_encode_u8(v[l] * inv) : 0u;
+            packed |= static_cast<std::uint32_t>(c) << (8u * l);
+        }
+        *reinterpret_cast<std::uint32_t*>(codes + code_offset(r, i0, k_padded)) = packed;
     }
 }
 
@@ -119,7 +211,6 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_row_ke
     if (r >= rows) return;
 
     const shelf::bf16_t* xrow = input + static_cast<std::size_t>(r) * input_row_stride;
-    std::uint8_t* crow = codes + code_offset(r, 0, k_padded);
 
     float amax = 0.0f;
     for (std::uint32_t i0 = threadIdx.x * kElemsPerLane; i0 < k;
@@ -150,7 +241,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_row_ke
             const std::uint8_t c = (sc > 0.0f) ? e4m3_encode_u8(v * inv) : 0u;
             packed |= static_cast<std::uint32_t>(c) << (8u * l);
         }
-        *reinterpret_cast<std::uint32_t*>(crow + code_offset(0, i0, k_padded)) = packed;
+        *reinterpret_cast<std::uint32_t*>(codes + code_offset(r, i0, k_padded)) = packed;
     }
 }
 
@@ -168,7 +259,7 @@ std::size_t activation_quantize_fp8_scale_count(std::uint32_t rows, std::uint32_
 bool activation_quantize_fp8_supported(std::uint32_t k, std::uint32_t k_padded,
                                        std::uint32_t act_group) noexcept {
     if (k == 0u || k_padded < k) return false;
-    if ((k_padded % kTileK) != 0u) return false;
+    if ((k_padded % kSuperK) != 0u) return false;
     if (act_group == 0u) return true;
     if (act_group != kActGroupK) return false;
     return (k_padded % kActGroupK) == 0u;      // 128 で割り切れること
@@ -191,6 +282,24 @@ hipError_t launch_activation_quantize_fp8(
         activation_quantize_fp8_group_kernel<<<rows, kThreadsPerRow, 0, stream>>>(
             input, codes, scales, rows, k, k_padded, input_row_stride, kb);
     }
+    return hipGetLastError();
+}
+
+hipError_t launch_swiglu_quantize_fp8(
+    const shelf::bf16_t* gate, const shelf::bf16_t* up,
+    shelf::bf16_t* out,
+    std::uint8_t* codes, float* scales,
+    std::uint32_t rows, std::uint32_t k, std::uint32_t k_padded,
+    std::uint32_t gate_row_stride, std::uint32_t up_row_stride,
+    std::uint32_t out_row_stride,
+    std::uint32_t act_group, hipStream_t stream) {
+    // 融合版は 128 ブロック量子化のみ対応（行全体 1 スケールの宣言では従来経路）。
+    if (act_group != kActGroupK) return hipErrorNotSupported;
+    const std::uint32_t k_blocks = k / kActGroupK + (k % kActGroupK ? 1u : 0u);
+    if (k_blocks == 0u || rows == 0u) return hipErrorInvalidValue;
+    swiglu_quantize_fp8_group_kernel<<<dim3(rows), kThreadsPerRow, 0, stream>>>(
+        gate, up, out, codes, scales, rows, k, k_padded, gate_row_stride, up_row_stride,
+        out_row_stride, k_blocks);
     return hipGetLastError();
 }
 

@@ -133,10 +133,16 @@ int run_case(uint32_t rows, uint32_t n, uint32_t k,
         Bf16GemmConfigId::ExactRows, Bf16GemmConfigId::ExactRowsDot2,
         Bf16GemmConfigId::Wmma, Bf16GemmConfigId::WmmaWide,
         Bf16GemmConfigId::WmmaKPartition,
+        // prefill 用の 2 次元タイル（64 行 × 64 出力・16 波）。形が合うときだけ。
+        Bf16GemmConfigId::Prefill2D,
     };
     const char* names[] = {"ExactRows", "ExactRowsDot2", "Wmma", "WmmaWide",
-                           "WmmaKPartition"};
-    for (int i = 0; i < 5; ++i) {
+                           "WmmaKPartition", "Prefill2D"};
+    for (int i = 0; i < 6; ++i) {
+        // 2 次元タイルは形が合うときだけ（他は hipErrorNotSupported を返すのが正しい）。
+        if (ids[i] == Bf16GemmConfigId::Prefill2D &&
+            !shelf::hipk::bf16_prefill2d_supported(rows, n, k))
+            continue;
         Bf16GemmConfig cfg{ids[i], static_cast<uint8_t>(rows <= 255u ? rows : 0u)};
         test_config(cfg, names[i], Bf16GemmOutputDType::F32);
         // BF16 store path (skip huge outputs to keep the test light; Wmma-family

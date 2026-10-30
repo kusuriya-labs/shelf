@@ -43,7 +43,10 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
         st.layer_hi = r.layer_hi;
         st.decode = dr.release();
         if (opts.chunk_rows > 1) {
-            auto pr = model::qwen35::build_step_graph(cfg, opts.kv_capacity, opts.chunk_rows, r);
+            model::qwen35::GraphOptions go;
+            go.logits_last_row_only = opts.logits_last_row_only;
+            auto pr = model::qwen35::build_step_graph(cfg, opts.kv_capacity, opts.chunk_rows, r,
+                                                     go);
             if (!pr.ok())
                 return Status::invalid_state("pipeline: ステージ " + std::to_string(s) +
                                                  " の prefill グラフ: " +
@@ -57,6 +60,7 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
         ho.rope_theta = opts.rope_theta;
         ho.rope_rotary_dim = opts.rope_rotary_dim;
         ho.arena_bytes = opts.arena_bytes;
+        ho.vram_budget_bytes = opts.vram_budget_bytes;
         ho.arena_reuse = opts.arena_reuse;
         ho.fp8_act_group = opts.fp8_act_group;
         st.exec = std::make_unique<backend::hip::HipStepExecutor>(ho);
@@ -71,13 +75,20 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
                                          __FILE__, __LINE__);
         if (s == 0) p.arena_bytes = st.exec->arena_bytes();
         p.weight_bytes += mp.bytes;
+        p.device_bytes += st.exec->device_bytes();
         if (opts.verbose) {
-            std::printf("  stage %zu: gpu %d layers [%zu, %zu) %s%s weights %zu arena %.0f MB\n",
+            std::printf("  stage %zu: gpu %d layers [%zu, %zu) %s%s weights %zu arena %.0f MB "
+                        "device %.0f MB%s\n",
                         s, opts.devices[s], r.layer_lo, r.layer_hi,
                         (r.layer_lo == 0 ? "embed+" : ""),
                         (r.layer_hi == cfg.num_layers ? "+head" : ""),
                         st.decode.weights.size(),
-                        static_cast<double>(st.exec->arena_bytes()) / (1024.0 * 1024.0));
+                        static_cast<double>(st.exec->arena_bytes()) / (1024.0 * 1024.0),
+                        static_cast<double>(st.exec->device_bytes()) / (1024.0 * 1024.0),
+                        opts.vram_budget_bytes > 0
+                            ? (" / budget " +
+                               std::to_string(opts.vram_budget_bytes >> 20) + " MB").c_str()
+                            : "");
         }
         p.stages.push_back(std::move(st));
     }
@@ -100,6 +111,23 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
     }
     p.engine.hidden_size = p.hidden_size;
     p.engine.arena_bytes = p.arena_bytes;
+
+    // 予算を使っている場合、実 device の空きも出す（accounting は HIP コンテキストを
+    // 含まないので、実使用量はこれより数百 MB 大きい）。
+    if (opts.verbose && opts.vram_budget_bytes > 0) {
+        for (std::size_t s = 0; s < p.stages.size(); ++s) {
+            (void)hipSetDevice(opts.devices[s]);
+            std::size_t f = 0u, t = 0u;
+            if (hipMemGetInfo(&f, &t) == hipSuccess) {
+                std::printf("  stage %zu: gpu %d 実 device 空き %.0f MiB / 総 %.0f MiB "
+                            "(予算計上 %.0f MiB / 予算 %.0f MiB)\n",
+                            s, opts.devices[s], static_cast<double>(f >> 20),
+                            static_cast<double>(t >> 20),
+                            static_cast<double>(p.stages[s].exec->device_bytes() >> 20),
+                            static_cast<double>(opts.vram_budget_bytes >> 20));
+            }
+        }
+    }
     return p;
 }
 

@@ -167,6 +167,9 @@ app::Pipeline make_staged(const model::qwen35::TextConfig& cfg,
     return p;
 }
 
+template <class R>
+std::vector<float> ok_or_empty(const R& r) { return r.ok() ? r.value() : std::vector<float>{}; }
+
 bool bit_equal(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.size() != b.size()) return false;
     return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
@@ -176,6 +179,14 @@ bool bit_equal(const std::vector<float>& a, const std::vector<float>& b) {
 }  // namespace
 
 int main() {
+    // GDN のチャンク版（prefill・FP16 WMMA）と decode1 WMMA 版（1 行）は**別アルゴリズム**
+    // なので、逐次 f32 版とビット一致しない（差は `unit.hip_gdn_chunk` が丸めの範囲で
+    // 押さえる: exact は rel 3.1e-6、lossy は 4.6e-4）。このテストの契約は
+    // 「PP の受け渡しと prefill のチャンク分けが数値を変えないこと」なので、
+    // 比較中は GDN を逐次版に固定する（下の块で WMMA 版でも PP 分割が一致することは
+    // 別途確認する）。
+    (void)setenv("SHELF_GDN_CHUNK", "0", 1);
+    (void)setenv("SHELF_GDN_DECODE1", "off", 1);
     CHECK(hipSetDevice(0) == hipSuccess, "hipSetDevice");
 
     // ---- 均等分割の性質 ----
@@ -255,6 +266,18 @@ int main() {
         auto stp = app::pipeline_step(p, toks.data(), chunk, 0, &got);
         CHECK_ST(stp.ok(), "pipeline chunk", stp);
         const std::vector<float> refv = ref.ok() ? ref.value() : std::vector<float>{};
+        if (!bit_equal(refv, got)) {
+            int worst = -1; float wd = 0.f; int ndiff = 0;
+            for (std::size_t q = 0; q < refv.size() && q < got.size(); ++q) {
+                if (refv[q] != got[q]) {
+                    ++ndiff;
+                    const float d = std::fabs(refv[q] - got[q]);
+                    if (d > wd) { wd = d; worst = static_cast<int>(q); }
+                }
+            }
+            std::printf("    ndiff=%d worst_idx=%d ref=%.6f got=%.6f\n", ndiff, worst,
+                        worst >= 0 ? refv[worst] : 0.f, worst >= 0 ? got[worst] : 0.f);
+        }
         CHECK(bit_equal(refv, got), "prefill 4 行チャンクでもビット一致");
         if (!bit_equal(refv, got)) {
             double worst = 0.0;
@@ -284,6 +307,29 @@ int main() {
         CHECK(all_eq, "5 層の不均等 2 分割でもビット一致");
         CHECK(app::even_stage_ranges(cfg.num_layers, 2)[0].layer_hi == 2,
               "奇数層の境界（[0,2)/[2,5)）");
+    }
+
+    // ---- GDN を WMMA decode1 に切り替えても PP 分割は数値を変えない ----
+    // （同じ kernel を両側で使う限り、分割の仕方は結果に影響しないという契約）
+    {
+        (void)setenv("SHELF_GDN_DECODE1", "exact", 1);
+        const auto cfg = make_cfg(4);
+        Single s = make_single(cfg, 1);
+        app::Pipeline p = make_staged(cfg, app::even_stage_ranges(cfg.num_layers, 2), 1);
+        const std::vector<std::int32_t> toks = {7, 111};
+        bool same_all = true;
+        for (std::size_t i = 0; i < toks.size(); ++i) {
+            const auto pos = static_cast<std::uint32_t>(i);
+            const auto sw = s.exec->run_step(s.decode.graph, toks[i], pos);
+            CHECK_ST(sw.ok(), "wmma single step", sw);
+            auto ref = s.exec->fetch_logits(s.decode.graph);
+            std::vector<float> got;
+            const auto sp = app::pipeline_step(p, &toks[i], 1, pos, &got);
+            CHECK_ST(sp.ok(), "wmma pipeline step", sp);
+            if (!bit_equal(ok_or_empty(ref), got)) same_all = false;
+        }
+        CHECK(same_all, "GDN decode1 WMMA でも 2 ステージと 1 ステージがビット一致");
+        (void)setenv("SHELF_GDN_DECODE1", "off", 1);
     }
 
     std::printf("test_hip_pipeline: failures=%d\n", failures);

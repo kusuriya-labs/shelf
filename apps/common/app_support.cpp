@@ -114,6 +114,20 @@ Result<std::vector<std::uint8_t>> read_u8(
     return runtime::load::read_u8(ShardSource(where), name);
 }
 
+Status ShardSource::read_into(const std::string& name,
+                               runtime::load::TensorBlob* out) const {
+    auto it = where_.find(name);
+    if (it == where_.end())
+        return Status::not_found("tensor not in shards: " + name, __FILE__, __LINE__);
+    const auto* entry = it->second->catalog().find(name);
+    if (entry == nullptr)
+        return Status::not_found("catalog miss: " + name, __FILE__, __LINE__);
+    const std::size_t bytes = static_cast<std::size_t>(entry->end - entry->begin);
+    out->dtype = entry->dtype;
+    out->bytes.resize(bytes);   // 容量を使い回す
+    return it->second->read_tensor(name, out->bytes.data(), bytes);
+}
+
 WeightKind classify(const std::map<std::string, artifact::safetensors::Reader*>& where,
                     const std::string& name) {
     return runtime::load::classify(ShardSource(where), name);

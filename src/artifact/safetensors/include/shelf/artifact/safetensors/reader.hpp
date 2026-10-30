@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -47,6 +48,10 @@ public:
 private:
     Reader() = default;
     std::string path_;
+    // テンソルごとに open/seek し直すと 29 GB のロードで 7 倍遅くなる。
+    // 1 回だけ開いて使い回す（Reader は単一スレッドで使う前提）。
+    mutable std::ifstream stream_;
+    mutable bool stream_open_ = false;
     RawTensorCatalog catalog_;
     std::map<std::string, std::string> metadata_;
     std::uint64_t data_base_offset_ = 0;

@@ -15,8 +15,9 @@ Status bad(const std::string& msg) {
 
 class Builder {
 public:
-    Builder(const TextConfig& cfg, std::size_t kv_capacity, std::size_t rows, StageRange range)
-        : cfg_(cfg), cap_(kv_capacity), rows_(rows),
+    Builder(const TextConfig& cfg, std::size_t kv_capacity, std::size_t rows, StageRange range,
+            GraphOptions gopt)
+        : cfg_(cfg), cap_(kv_capacity), rows_(rows), gopt_(gopt),
           lo_(range.layer_lo),
           hi_(range.layer_hi == 0 ? cfg.num_layers : range.layer_hi) {}
 
@@ -67,6 +68,8 @@ public:
             ValueId logits = add_final(h);
             if (!logits.valid()) return last_;
             plan.logits = logits;
+            plan.logits_rows =
+                gopt_.logits_last_row_only && rows_ > 1 ? 1u : rows_;
         } else {
             plan.hidden_out = h;
         }
@@ -166,13 +169,14 @@ private:
         return prim(Kind::embedding, {tokens_}, {table}, {rows_, cfg_.hidden_size});
     }
 
-    ValueId add_norm(ValueId x, const std::string& wname, bool plus_one) {
+    ValueId add_norm(ValueId x, const std::string& wname, bool plus_one,
+                     std::size_t rows = 0) {
         TensorId g = wid(wname, {cfg_.hidden_size});
         if (!g.valid()) return ValueId{};
         Attr a;
         a.epsilon = static_cast<float>(cfg_.rms_eps);
         a.gamma_plus_one = plus_one;
-        return prim(Kind::rmsnorm, {x}, {g}, {rows_, cfg_.hidden_size}, a);
+        return prim(Kind::rmsnorm, {x}, {g}, {(rows ? rows : rows_), cfg_.hidden_size}, a);
     }
 
     ValueId add_mlp(ValueId x, std::size_t l) {
@@ -183,11 +187,11 @@ private:
         if (!gate.valid() || !up.valid() || !down.valid()) return ValueId{};
         ValueId g = prim(Kind::linear, {x}, {gate}, {rows_, cfg_.intermediate_size});
         if (!g.valid()) return g;
-        ValueId s = prim(Kind::silu, {g}, {}, {rows_, cfg_.intermediate_size});
-        if (!s.valid()) return s;
         ValueId u = prim(Kind::linear, {x}, {up}, {rows_, cfg_.intermediate_size});
         if (!u.valid()) return u;
-        ValueId m = prim(Kind::elem_mul, {s, u}, {}, {rows_, cfg_.intermediate_size});
+        // silu と積を 1 pass に畳む（`up` の bf16→f32 変換 pass と f32 中間も消える）。
+        // 値は silu→elem_mul と逐次同一（`up * silu(gate)`、中間の f32 は丸めなし）。
+        ValueId m = prim(Kind::swiglu, {g, u}, {}, {rows_, cfg_.intermediate_size});
         if (!m.valid()) return m;
         return prim(Kind::linear, {m}, {down}, {rows_, cfg_.hidden_size});
     }
@@ -378,7 +382,20 @@ private:
     }
 
     ValueId add_final(ValueId h) {
-        ValueId hn = add_norm(h, "model.language_model.norm.weight", true);
+        // lm_head は vocab × hidden の大きい行列を rows 分行う。次のトークンは
+        // 最終行の logits で決まるので、行ごと logits を読まない経路では
+        // 最終行だけに絞る（`row_slice` 1 行 + norm + projection）。
+        // 数値は絞らない場合の最終行と一致する（同じ重み・同じ入力行を使う）。
+        std::size_t hrows = rows_;
+        if (gopt_.logits_last_row_only && rows_ > 1) {
+            Attr rs;
+            rs.row_last = true;   // 実行時の最終行（部分チャンクでも正しい行）
+            ValueId last = prim(Kind::row_slice, {h}, {}, {1, cfg_.hidden_size}, rs);
+            if (!last.valid()) return last;
+            h = last;
+            hrows = 1;
+        }
+        ValueId hn = add_norm(h, "model.language_model.norm.weight", true, hrows);
         if (!hn.valid()) return hn;
         // tied embeddings: lm_head IS the embedding table (same logical weight id)。
         // pipeline-parallel で最終ステージが先頭でない場合、embedding は先頭ステージに
@@ -398,13 +415,14 @@ private:
             out = wid("lm_head.weight", {cfg_.vocab_size, cfg_.hidden_size});
             if (!out.valid()) return ValueId{};   // 失敗時 Status は wid が last_ に設定済み
         }
-        return prim(Kind::output_projection, {hn}, {out}, {rows_, cfg_.vocab_size});
+        return prim(Kind::output_projection, {hn}, {out}, {hrows, cfg_.vocab_size});
     }
 
     const TextConfig& cfg_;
     std::size_t cap_;
     std::size_t lo_ = 0;   // 担当レイヤ範囲 [lo_, hi_)
     std::size_t hi_ = 0;
+    GraphOptions gopt_;    // 構築時の選択（logits を最終行に絞る 等）
     ir::Graph g_;
     std::vector<WeightRef> weights_;
     std::vector<StateRef> states_;
@@ -418,8 +436,8 @@ private:
 } // namespace
 
 Result<StepGraphPlan> build_step_graph(const TextConfig& cfg, std::size_t kv_capacity,
-                                       std::size_t rows, StageRange range) {
-    Builder b(cfg, kv_capacity, rows, range);
+                                       std::size_t rows, StageRange range, GraphOptions gopt) {
+    Builder b(cfg, kv_capacity, rows, range, gopt);
     return b.build();
 }
 

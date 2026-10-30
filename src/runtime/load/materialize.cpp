@@ -183,7 +183,8 @@ Result<Fp8ModelFormat> read_fp8_format(const std::string& config_json_text) {
 }
 
 Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequest& req,
-                                       const Fp8ModelFormat& fmt) {
+                                       const Fp8ModelFormat& fmt,
+                                       MaterializeBuffers* bufs) {
     MaterializedWeight out;
     out.kind = classify(src, req.checkpoint_name);
     if (out.kind == WeightKind::Missing)
@@ -196,6 +197,7 @@ Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequ
     if (out.kind == WeightKind::Bf16) {
         auto t = read_bf16(src, req.checkpoint_name);
         if (!t.ok()) return t.status();
+        (void)bufs;
         if (t.value().size() != want)
             return Status::invalid_state("要素数が shape と不一致: " + req.checkpoint_name,
                                          __FILE__, __LINE__);
@@ -224,12 +226,24 @@ Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequ
     const std::uint32_t cols = static_cast<std::uint32_t>(req.shape[1]);
     const std::uint32_t kp = pad_k(cols);
     if (kp != cols)
-        return Status::unsupported("fp8 重みで K が 32 の倍数でない（断片順に置けない）: " +
+        return Status::unsupported("fp8 重みで K が 64 の倍数でない（断片順に置けない）: " +
                                        req.checkpoint_name,
                                    __FILE__, __LINE__);
-    auto codes = read_u8(src, req.checkpoint_name);
-    if (!codes.ok()) return codes.status();
-    if (codes.value().size() != want)
+    TensorBlob blob;
+    if (bufs != nullptr) {
+        const Status st = src.read_into(req.checkpoint_name, &bufs->src_blob);
+        if (!st.ok()) return st;
+        blob = std::move(bufs->src_blob);
+    } else {
+        auto b = src.read(req.checkpoint_name);
+        if (!b.ok()) return b.status();
+        blob = std::move(b.value());
+    }
+    if (blob.dtype != DataType::fp8_e4m3 && blob.dtype != DataType::u8)
+        return Status::unsupported("fp8 重みの dtype が想定外: " + req.checkpoint_name,
+                                   __FILE__, __LINE__);
+    const std::vector<std::uint8_t>& codes = blob.bytes;
+    if (codes.size() != want)
         return Status::invalid_state("fp8 コード数が shape と不一致: " + req.checkpoint_name,
                                      __FILE__, __LINE__);
 
@@ -264,9 +278,14 @@ Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequ
     out.k_padded = kp;
     out.weight_block128 = (fmt.weight == WeightScaleGranularity::Block128);
     out.scales = std::move(sc).value();
-    out.codes.assign(tiled_bytes(features, kp), 0u);
-    SHELF_RETURN_IF_ERROR(preshuffle_codes(codes.value().data(), features, cols, kp,
-                                           out.codes.data()));
+    // 出力バッファは呼び手の作業領域から move して受け取り、容量を使い回す。
+    std::vector<std::uint8_t> tiled;
+    if (bufs != nullptr) tiled = std::move(bufs->codes);
+    tiled.assign(tiled_bytes(features, kp), 0u);   // 容量は残る（resize 相当）
+    SHELF_RETURN_IF_ERROR(preshuffle_codes(codes.data(), features, cols, kp,
+                                           tiled.data()));
+    out.codes = std::move(tiled);   // 呼び手は使い終わったら bufs->codes へ戻す
+    if (bufs != nullptr) bufs->src_blob = std::move(blob);   // 容量を戻す
     return out;
 }
 

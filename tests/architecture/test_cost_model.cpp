@@ -40,12 +40,13 @@ std::size_t numel(const TensorShape& s) {
 // 基準値（2026-10-29 実測。`test_cost_model --dump` で取り直して更新する）。
 // 変更理由（融合・ノード追加など）はコミットメッセージに書く。
 constexpr std::size_t kBaselineWeights = 27307552;
-constexpr std::size_t kBaselineActRows1 = 159808;
-constexpr std::size_t kBaselineActRows64 = 10227712;
+// 2026-10-30 更新: MLP の silu + elem_mul を swiglu 1 pass に畳んだ
+// （f32 中間と bf16→f32 変換が消えて活性化バイト数が減少。数値は同一）。
+constexpr std::size_t kBaselineActRows1 = 151616;
+constexpr std::size_t kBaselineActRows64 = 9703424;
 const std::map<std::string, std::size_t> kBaselinePrims = {
     {"attention_gqa_step", 2},
     {"causal_conv_step", 2},
-    {"elem_mul", 4},
     {"embedding", 1},
     {"gdn_step", 2},
     {"linear", 30},
@@ -56,8 +57,8 @@ const std::map<std::string, std::size_t> kBaselinePrims = {
     {"rmsnorm_gated", 2},
     {"rope", 4},
     {"sigmoid_gate", 2},
-    {"silu", 4},
     {"slice", 10},
+    {"swiglu", 4},
 };
 
 struct Baseline {

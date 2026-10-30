@@ -105,18 +105,27 @@ constexpr std::size_t activation_scale_count(std::uint32_t rows, std::uint32_t k
 
 // ---- 断片順のコード配置（WMMA のフラグメント順と一致させるレイアウト） ----------
 //
-// 16 行 × 32 K を 1 タイル（512 バイト）として、
-//   [K の前半 16 の 16 行][K の後半 16 の 16 行]
-// 行内は K が 16 バイト連続。タイルは (row/16) 優先、続いて (col/32)。
-//   offset = (row/16)*(k_padded*16) + (col/32)*512 + ((col%32)/16)*256
-//            + (row%16)*16 + (col%16)
-// K 方向は k_padded（kTileK の倍数）まで 0 埋め、行方向は 16 行単位で切り上げた
+// 1 タイル = **16 行 × 64 K（1024 バイト）= 32 レーン × 32 バイト**。
+// レーン l（= 行の下位 4 ビット + 16×(K の 8 要素組)）の 32 バイトは、
+// 4 つの断片（16 行 × 16 K）を back-to-back に並べたもので、バイト 8t が断片 t。
+//   lane  = (row%16) + 16 * ((col%16)/8)
+//   frag  = (col%64)/16          バイト位置 8*frag + (col%8)
+//   offset = (row/16)*(k_padded*16) + (col/64)*1024 + lane*32 + frag*8 + (col%8)
+//
+// 16 K 断片 1 本（1 レーン 8 バイト = 1 波 256 バイトのリクエスト）では LDS 経由の
+// 転置にすら負けるため、参照実装（radiance の r4d_fp8_frag.h）と同じく
+// **1 レーン 32 バイト = 1 波 1 KiB のリクエスト**になるよう 64 K を単位にする。
+// 数値の並びは置換なので、ロード時の relayout は依然として無損。
+//
+// K 方向は k_padded（kSuperK の倍数）まで 0 埋め、行方向は 16 行単位で切り上げた
 // バイト数だけ確保する（詰め領域の値は 0）。
 inline constexpr std::uint32_t kTileRows = 16u;
-inline constexpr std::uint32_t kTileK = 32u;
+inline constexpr std::uint32_t kTileK = 16u;     // 1 断片の K 幅（WMMA 1 命令分）
+inline constexpr std::uint32_t kSuperK = 64u;    // 1 タイルの K 幅（4 断片 = レーン 32 B）
+inline constexpr std::uint32_t kLaneBytes = 32u;
 
 constexpr std::uint32_t pad_k(std::uint32_t k) noexcept {
-    return ((k + kTileK - 1u) / kTileK) * kTileK;
+    return ((k + kSuperK - 1u) / kSuperK) * kSuperK;
 }
 
 constexpr std::uint32_t pad_rows(std::uint32_t rows) noexcept {
@@ -131,12 +140,13 @@ constexpr std::size_t tiled_bytes(std::uint32_t rows, std::uint32_t k_padded) no
 // 要素 (row, col) のバイトオフセット。k_padded は pad_k() の結果であること。
 constexpr std::size_t tiled_offset(std::uint32_t row, std::uint32_t col,
                                    std::uint32_t k_padded) noexcept {
+    const std::uint32_t lane = (row % kTileRows) + kTileRows * ((col % 16u) / 8u);
     return static_cast<std::size_t>(row / kTileRows) *
                (static_cast<std::size_t>(k_padded) * kTileRows) +
-           static_cast<std::size_t>(col / kTileK) * (kTileRows * kTileK) +
-           static_cast<std::size_t>((col % kTileK) / 16u) * (kTileRows * 16u) +
-           static_cast<std::size_t>(row % kTileRows) * 16u +
-           static_cast<std::size_t>(col % 16u);
+           static_cast<std::size_t>(col / kSuperK) * (kTileRows * kSuperK) +
+           static_cast<std::size_t>(lane) * kLaneBytes +
+           static_cast<std::size_t>((col % kSuperK) / 16u) * 8u +
+           static_cast<std::size_t>(col % 8u);
 }
 
 // 断片順レイアウトとして受理できる形か（k_padded の整合）。

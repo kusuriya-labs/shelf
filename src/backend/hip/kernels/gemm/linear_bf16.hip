@@ -58,6 +58,73 @@ __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_k
                           out_features, k, input_row_stride, output_row_stride);
 }
 
+
+// ---- prefill 用の 2 次元タイル（rows = 64 のみ）--------------------------------
+//
+// 1 ブロック = 64 行 × 64 出力（8 波 = 256 スレッド）。FP8 の Prefill2D と同じ形。
+// 従来の ExactRowsDot2 は 16 行ずつ 4 回に分けて N/8 ブロックで回すため、行方向の
+// 再利用が無く **実効 71 GB/s**（DRAM 境界の 1/8）だった。ここでは 1 ブロックが
+// 64 行ぶんの活性化を使って 64 出力を担当するので、重みの流し方が帯域律速に乗る。
+constexpr std::uint32_t k2dRows = 64u;
+constexpr std::uint32_t k2dOut = 64u;
+// 1 波 = 16 行 × 16 出力。64 行 × 64 出力 = 16 波（512 スレッド）。
+// 波数を増やすのは、ブロック数が少ない形（N=4096 で 64 ブロック）でも
+// resident wave を確保するため（8 波だと 16/CU で頭打ち。実測 147 µs → 70 µs）。
+constexpr std::uint32_t k2dThreads = 32u * 16u;
+
+using bf16x8_t = short __attribute__((ext_vector_type(8)));
+
+__global__ void __launch_bounds__(k2dThreads) gemm_bf16_prefill_2d_kernel(
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const std::uint32_t output_dtype,
+    const std::uint32_t rows,
+    const std::uint32_t out_features,
+    const std::uint32_t k,
+    const std::uint32_t input_row_stride,
+    const std::uint32_t output_row_stride) {
+    const std::uint32_t tid = threadIdx.x;
+    const std::uint32_t wave = tid >> 5u;
+    const std::uint32_t lane = tid & 31u;
+    const std::uint32_t wave_m = wave >> 2u;    // 0..3（16 行ずつ）
+    const std::uint32_t wave_n = wave & 3u;     // 0..3（16 出力ずつ）
+    const std::uint32_t lm = lane & 15u;        // 断片の行
+    const std::uint32_t kh = lane >> 4u;        // K の 8 要素組
+
+    // x = 行タイル、y = 出力タイル（重みの L2 再利用。fp8 の wide と同じ理由）。
+    const std::uint32_t n0 = blockIdx.y * k2dOut + wave_n * 16u;
+    const std::uint32_t m0 = blockIdx.x * k2dRows + wave_m * 16u;
+    if (n0 >= out_features || m0 >= rows) return;
+
+    const shelf::bf16_t* arow =
+        input + static_cast<std::size_t>(m0 + lm) * input_row_stride + kh * 8u;
+    const shelf::bf16_t* brow =
+        weight + static_cast<std::size_t>(n0 + lm) * k + kh * 8u;
+
+    F32x8 acc = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+
+    for (std::uint32_t kt = 0; kt < k; kt += 16u) {
+        const bf16x8_t b = *reinterpret_cast<const bf16x8_t*>(brow + kt);
+        const bf16x8_t a = *reinterpret_cast<const bf16x8_t*>(arow + kt);
+        acc = dot_bf16_16x16x16(a, b, acc);
+    }
+
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const std::uint32_t rr = m0 + kh * 8u + static_cast<std::uint32_t>(j);
+        if (rr >= rows) continue;
+        const std::size_t idx = static_cast<std::size_t>(rr) * output_row_stride +
+                                (n0 + lm);
+        if (output_dtype == static_cast<std::uint32_t>(Bf16GemmOutputDType::BF16)) {
+            static_cast<shelf::bf16_t*>(output)[idx] =
+                shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[j]))};
+        } else {
+            static_cast<float*>(output)[idx] = acc[j];
+        }
+    }
+}
+
 template <uint32_t kRows>
 __global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_exact_rows_kernel(
     const shelf::bf16_t* __restrict__ weight,
@@ -94,6 +161,18 @@ __global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_exact_rows_dot2_k
             weight, input, output, static_cast<uint32_t>(output_dtype),            \
             out_features, k, input_row_stride, output_row_stride);                 \
         break;
+
+
+hipError_t launch_gemm_bf16_prefill_2d(
+    const bf16_t* weight, const bf16_t* input, void* output, Bf16GemmOutputDType output_dtype,
+    std::uint32_t rows, std::uint32_t out_features, std::uint32_t k,
+    std::uint32_t input_row_stride, std::uint32_t output_row_stride, hipStream_t stream) {
+    const dim3 grid(rows / k2dRows, out_features / k2dOut, 1);
+    gemm_bf16_prefill_2d_kernel<<<grid, k2dThreads, 0, stream>>>(
+        weight, input, output, static_cast<std::uint32_t>(output_dtype), rows, out_features, k,
+        input_row_stride, output_row_stride);
+    return hipGetLastError();
+}
 
 hipError_t launch_gemm_bf16_exact_rows_dot2(
     const bf16_t* weight,
@@ -244,6 +323,14 @@ hipError_t launch_gemm_bf16_exact_rows_dot2(
 
 }  // namespace
 
+// prefill 用 2 次元タイルの受理条件（rows は 64 の倍数、出力は 64 の倍数、K は 16 の倍数）。
+bool bf16_prefill2d_supported(uint32_t rows, uint32_t out_features, uint32_t k) noexcept {
+    if (rows == 0u || out_features == 0u || k == 0u) return false;
+    if ((rows % 64u) != 0u) return false;
+    if ((out_features % 64u) != 0u) return false;
+    return (k % 16u) == 0u;
+}
+
 extern "C" __global__ __launch_bounds__(kExactRowsThreads)
 void phaseshift_gemm_bf16_exact_rows_1(Bf16GemmExactRowsArgs args) {
     gemm_bf16_exact_rows_body<1>(
@@ -326,6 +413,12 @@ hipError_t launch_gemm_bf16(
     const uint32_t out_tiles = bf16_wmma_grid_x(out_features);
 
     switch (config.id) {
+    case Bf16GemmConfigId::Prefill2D: {
+        if (!bf16_prefill2d_supported(rows, out_features, k)) return hipErrorNotSupported;
+        return launch_gemm_bf16_prefill_2d(weight, input, output, output_dtype, rows,
+                                           out_features, k, input_row_stride,
+                                           output_row_stride, stream);
+    }
     case Bf16GemmConfigId::ExactRows: {
         if (config.exact_rows == 0u || config.exact_rows > kBf16GemmExactRowsMax ||
             config.exact_rows != rows)
