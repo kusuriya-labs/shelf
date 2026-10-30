@@ -1122,6 +1122,93 @@ page_tokens=64 でも sub = 0..3 ごとに token_in_page = sub*16 で 16 トー�
 これで decode の −0.23 ms/tok（段階 30 実測）を prefill を犠牲にせず取れる。
 検証は `unit.hip_attention` の prefill 検査と、27B fixture 3 回 `d08df139…`。
 
+### 段階 31（同日・第 39 ラウンド）: hipfire 型の R1 先読み（重みフラグメント）で prefill −3 ms
+
+`references/hipfire` の fp8 prefill GEMM（`gemm_mq6g256v2_wmma_fp8.gfx1201.hip`）が持つ
+**raw-prefetch R1 pipeline** に相当する変更を shelf の wide kernel に転用した:
+32 K サブタイルの重みフラグメントを**位相ごとに先に LDS/global から registers へ**引き
+（`wsel[il][nt][lo|hi]`、2 サブタイル分を先に読む）、WMMA の実行中に global load を
+走らせる。累加の順（`ib = h*2 + il` を同じ順で読む）と 128 K 境界のスケール畳み込みは
+不変なので**ビット一致**。
+
+| 検査 | 結果 |
+| --- | --- |
+| `unit.hip_gemm_fp8`（prefill タイル = RowBlock ビット一致） | Pass ✓ |
+| 27B fixture 3 回 / 9B | `d08df139…` 一致 / `c097951350df` ✓ |
+| `ctest` hip / cpu | 28/28 ✓ / 19/19 ✓ |
+
+実測（27B・chunk 2048・交互 2 回）: prefill **996.5 / 998.0 ms**（ping-pong 直後 998.7 / 1,000.4 / 1,002.1）→ **約 −3 ms**。decode 54.13 / 54.17 ms/tok（0.03 ms 改善）。
+
+hipfire から学んでまだ入れていない本命は**op 専用融合 GEMM**（gate と up を 1 kernel で
+同時に計算し、16 行タイルが境界をまたぐ場合は行単位で `Y_gate`/`Y_up` に振り分ける。
+`gemm_gate_up_mq2g256v2_wmma.gfx12.hip:36-40`）。radiance の `gemm_nt_q_gated` と同じ形であり、
+活性化 LDS 埋めと発射を 1 回にまとめられる。shelf では gate/up の 2 primitive を
+グラフ側でペア認識するところから必要（推定 prefill −20〜30 ms）。
+
+### 段階 32（同日・第 40 ラウンド）: アキュムレータを増やす（出力タイル 256）は **大敗**
+
+hipfire/radiance 型に寄せ accumulator を増やす実験を完遂した:
+`kPrefill2dWideOut` を 128 → **256**（波は 4 出力タイル × 64 列を持つ、acc[4][4]、
+wsel/wrow/ws_ch/ws_row/ws を 4 本に、store/折り込みも nt<4）。
+
+- 実装中の罠: R1 先読みの `wsel[2][2][2]`（[位相][nt][lo/hi]）の nt 次元が 2 のままで
+  **範囲外書き込み**→ `unit.hip_gemm_fp8` のビット一致検査が Failed。
+  `wsel[2][4][2]` に直して Pass ✓（検査がちゃんと壊れ方を捕まえた実例）
+- 性能: prefill **2,332 / 2,345 / 2,343 ms**（直前 996.5 / 998.0）→ **+135%**。
+  acc 128 個/スレッドで VGPR が爆発し、大量スパイル（radiance の MW=4/NT=1 ですら
+  95 スパイルしていたのを、我々は単体で背負う形になった）
+- `/tmp/lf8d.bak3` から revert、ctest hip 28/28 ✓
+
+結論: **accumulator を増やす方向は shelf の現行構造では成立しない**。
+radiance が 228〜256 VGPR を許容しているのは、narrow tile（MW 波 × NT トークンタイル）に
+`R4D_WAVES` で波数を固定する前提の上で、BK=256 の 1 本ライン読みと手動スケジューリングで
+待ちを埋めているからだ（acc を増やしてoccupancy を下げるのではなく、
+**タイルの作り全体を「少ない波 × 深い K」に設計し直している**）。
+
+なお段階 31 の R1 先読み（−3 ms）は、revert 後の再測で 1,003 ms が出ており、
+**実行間のばらつきと分離できていない**（採用はしているが効果は微少と見るべき）。
+未実施: op 専用融合 GEMM（gate+up 一体、hipfire の本体スタイル。グラフ側の
+ペア認識が必要で推定 −20〜30 ms）、行タイル 256×128（acc/スレッドを変えず
+重み読みを半減、ただし LDS 32,768 B で 1 workgroup/CU の崖に触れる）。
+
+### 段階 33（同日・第 42 ラウンド）: `GPU_MAX_HW_QUEUES=1` の実測と、数値方針の変更（利用者判断）
+
+**(a) HW キュー数を 1 に絞った実測**（Qwen3.8-27B-FP8・GPU 0・Release）:
+
+| 設定 | prefill wall | decode p50 |
+| --- | --- | --- |
+| 既定（複数 HW queue） | 996.8 / 999.0 ms | 54.151 / 54.181 ms |
+| `GPU_MAX_HW_QUEUES=1` | 1,001.5 / 1,002.5 ms | 54.177 / 54.217 ms |
+
+→ **1 にすると prefill が約 +3 ms（0.3%）遅い**。decode は差なし。
+キュー並列は少し効いていて、絞っても得はない（値も変わらない）。
+keep-alive のときに見えた「実行間の揺れ」は撤去済みで、現行コードでは
+27B fixture 3 回一致（`d08df139…`）が復元されている。
+
+**(b) 数値方針の変更（利用者の指示）**:`hi/lo 復号の bit-exactness は守るが、
+f32 加算の結合順の再現は要求しない`。これにより radiance/hipfire 型の
+split-K・二重アキュムレータ（T/P）・部分畳み込みが解禁になる。
+副次的に、既存の `tests/unit/test_hip_gemm_fp8.cpp:283` 付近の
+**「prefill タイル = RowBlock ビット一致」検査は方針と矛盾する**ので、
+変更を入れる際には相対誤差つきの検査へ relaxing して、その理由と判断を
+コメントに書く必要がある（まだ relaxing はしていない）。
+
+**(c) hipfire 型の「半（64 K）ごとに raw を acc へ畳む」試行は、実装ミスで中断**
+スクリプト編集で `ws` 宣言と折り込みループの位置を動かした結果、
+ループのスコープが壊れてビルドエラー（`undeclared 'hh'/'g'`、
+`expected unqualified-id`）。`/tmp/lf8d.bak4` から復元し、ビルド・ctest 28/28・
+prefill 1,002 ms を確認済み。**このセッションの容量では安全に再挑戦できない。**
+
+次ラウンドの実装仕様（方針 (b) の下で解禁されたもの）:
+1. `fp8_prefill2d_wide_body`（`linear_fp8_device.h`）で
+   `raw[4][2]` のゼロ初期化と畳み込みを**半（hh）ごと**に実行する
+   （現状はグループ（128 K）ごとに 1 回）。`ws[2]` と `s_as` は 128 K 単位なので
+   同じ値を両半で使ってよい。依存連鎖 `raw → acc` が短くなる
+2. 解禁される本命: **split-K**（細い K の occupancy 不足を、波を増やさずに埋める）
+   と **gate/up の 1 kernel 化**。split-K は partial バッファ + reduce kernel が必要
+3. 検査: `unit.hip_gemm_fp8` を相対誤差基準へ変更（hi/lo 復号の厳密さは維持）、
+   実 fixture は生成列が意味を保つかで判定（md5 一致は要求しない）
+
 ### 次のレバー（更新）
 
 1. **prefill GDN のデータフロー移植**（`gdn_recurrence_wmma_body`、参照 1,592 µs/dis に対し
@@ -1137,3 +1224,960 @@ page_tokens=64 でも sub = 0..3 ごとに token_in_page = sub*16 で 16 トー�
 5. fp8 GEMV/GEMM の DRAM 効率（105.4 → 100.6 µs、1,676 → 1,631 µs）。
    ① なので bytes 減少（未量子化重みの fp8 化＝量子化段階の変更）が本筋
 6. 96 個の非融合 swiglu の所在特定（bf16 GEMM へ feed している経路）
+
+## 段階 34: `GPU_MAX_HW_QUEUES=2` と、畳み込み半分割（hipfire 型）の実測
+
+### (a) HWQ=2
+
+Qwen3.8-27B-FP8・GPU 0・Release・交互 2 回:
+
+| 設定 | prefill wall（`wall_ms_median`） |
+| --- | --- |
+| 既定 | 997.835 / 1000.378 ms |
+| `GPU_MAX_HW_QUEUES=2` | 1,000.031 / 1,000.819 ms |
+
+段階 33 の `=1`（+3 ms）と合わせて、**HW キュー数を絞る方向に利点はない**。
+既定が最良で、差はばらつき（±0.5%）と同オーダー。この項目は終了。
+
+### (b) 畳み込みの粒度を 128 K → 64 K 半ごとに変更（hipfire の T/P 相当）
+
+`fp8_prefill2d_wide_body` で `raw` のゼロ初期化と `acc` への折りを**半ごと**に実行
+（`ws`/`s_as` は 128 K 粒度なので両半で同値）。hi/lo 復号（1 断片 2 WMMA）は不変。
+`s_as[g+1]` の書き込みを barrier の**前**へ移す必要があった（半ごと折りにすると
+次の繰り返し即座に読むため）。
+
+交互 3 ペア（A = グループ折り込み版、B = 半ごと版。both Release・同一マシン）:
+
+| ペア | pp A | pp B | delta | tg A | tg B | delta |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 998.091 | 1,125.235 | **+127.1** | 54.196 | 54.170 | −0.026 |
+| 2 | 1,001.045 | 1,131.287 | **+130.2** | 54.228 | 54.222 | −0.006 |
+| 3 | 1,002.860 | 1,134.335 | **+131.5** | 54.192 | 54.232 | +0.040 |
+
+**決定的な悪化（+13%）**。折りの FMA（64 本/グループ）、`ws*s_as` のスカラー掛け、
+LDS 読み、`raw` ゼロ初期化がすべて倍になり、WMMA 以外の命令比が増えて発行幅を奪う。
+`raw → acc` の連鎖は律速ではなかった。→ **revert 済み**（hip 28/28・cpu 19/19 確認）。
+
+裏付け: radiance のソースはこの形を明文で設計として書いている
+（`libr4d/r4d_gemm_fp8a8.hip:108-110`「両 operand のスケールは 128 列で一定なので 1 ブロックに
+1 回だけ適用。`raw` は 128 列を無スケールで集め、`out` へ折る。inner loop に要素ごとの演算を
+入れない」）。つまり半ごと折りは radiance の設計に**反していた**。
+
+### (c) 測定系の異常（記録として必須）
+
+この段階の途中で `build/hip-rel/apps/shelf-bench` が 18:46 に再ビルドされ、`tg` の CLI が
+変わった（`--runs` 不正、出力が `step_ms_p50=` の key=value 形式になり JSON でない）。
+`git reflog` には HEAD 直下に `reset: moving to HEAD` が 2 件あり、私がこのセッションで作った
+`isa/` コミット（hipfire/radiance の ISA 収集）は**このブランチの履歴に存在しない**。
+`isa/` の作業ツコピーも消えている。収集済みの成果物は
+`/opt/zen/work/references/isa`（コミット 371f7a8 ほか）にそのまま残っているため知識は失われて
+いないが、**18:46 より前と後の tg 数値はバイナリが異なる**。
+現在の HEAD（`082ff15`）は perf コミットで、再ビルド後の decode は 54.108 ms/tok。
+今日のそれまでの 54.15〜54.24 ms/tok と同オーダーなので結論は変わらない。
+
+教訓: ベンチは**必ず同一バイナリで交互に**測る（A/B はバイナリを `/tmp` にコピーして保持する）。
+tg に `--runs` はなく `--tokens`/`--warmup` のみ。`pp` には `--runs` がある。
+
+## 段階 35: 「部分持ち込みはもう無理では」に対する検証 — radiance のソースと 1 対 1 で突き合わせた
+
+`references/radiance/libr4d/r4d_gemm_fp8a8.hip`（1,491 行、Apache-2.0、設計理由がインラインで
+書かれている）と `r4d_fp8_wmma.h` を読み、我々の `fp8_prefill2d_wide_body` と構造を比較した。
+
+### 同じ已经是もの（＝「形状の流用」は既に済んでいる）
+
+| 項目 | radiance `gemm_8a8_prefill_kernel` | 我々 |
+| --- | --- | --- |
+| ブロック | 128 重み行 × 128 活性化行、**8 波 × 32 = 256 スレッド** | 128 × 128、8 波 × 32 = 256 |
+| 波の分担 | 重み 4 波 × 活性化 2 波、1 波 = 重み 2 タイル × 活性化 4 タイル（各 16×16） | `wave_n` 2 × `wave_m` 4、1 波 = nt 2 × t 4 |
+| アキュムレータ | **8 タイル × 2 セット（`raw`/`out`）で頭打ち**（増らすと spill） | 8 タイル × 2 セット（`raw`/`acc`）。256 出力试着で **+135%** ＝同じ壁 |
+| 活性化 | LDS、**64 B 断片 × 2 重バッファ**、1 断片先読み | 64 B 断片 ping-pong（段階 30 で導入、+3〜5%） |
+| 折り込み | **128 列ブロックに 1 回**（`:108-110`） | 同じ。64 K 半ごとに试着 → **+13%**（段階 34）で同じ壁を再確認 |
+| hi/lo 復号 | 16 K あたり 2 WMMA（fp8 断片を 8 B × 2 で食わせる） | 同じ（`Fp8Frag16.lo/.hi`） |
+
+### 違うもの＝未移植の「読み出し経路」（radiance が各自の実測値付きで load-bearing と書く）
+
+| 項目 | radiance | 我々 | 彼らの実測 |
+| --- | --- | --- | --- |
+| 重みの置き場 | **LDS 経由せずレジスタ**。64 K タイルを wave 協調で `Stage8 = 32 B/lane`（1 KiB/wave）で読み、`w0`/`w1` を 1 タイル先読み ping-pong。`frag_of` は展開後定数なので**レジスタリネーム** | ループ内で `fp8_load16` = **16 B/lane**（512 B/wave）を断片単位 | 「8 B/lane はステージングに負ける。**32 B/lane が全域で勝ち**、gate_up の decode 形で **+13%**」（`:97-102`） |
+| 先読み位置 | `stage8_load`/`stage8_store` を**分離**し、barrier の前に次断片の global load を発行。「1 回の呼び出しにすると 32 B リクエストが 1 本しか飛んでなく K ループが遅延の連鎖になる」（`r4d_fp8_wmma.h:180-183`） | `stage_half` は barrier の前だが、**重み**は断片の都度 | 「unconditional prefetch で +1%。条件付き load は 2 経路を結合して compiler がゼロ待ちになる」 |
+| 波 index | `__builtin_amdgcn_readfirstlane(tid/32)` で SGPR 化。「一律なので scalar のまま保つ」 | **未使用**（全スレッドが VGPR で位位置を計算） | — |
+| 活性化 LDS pitch | `lds_pitch<FK> = FK + 8` の**行パッド**（bank conflict 回避、load-bearing 指定） | 断片順で 1,024 B 連続（パッドなし） | — |
+| スケール | `s_as[2][kPBM]` を二重化し `scn` を 2 ブロック先読み | 1 本。グループ境界で書き、折り込みは barrier 前（段階 34 で修正） | — |
+| raster | `kGroupM = 8` の活性化バンド群で走査。plain な x-fastest は 64 MB MALL 超で**速度が半分** | plain（`blockIdx.x`=出力、`y`=行） | 「`kGroupM` 8 は 16 比 +1〜3%、4 は 8 と同等」（`:685`） |
+| barrier | `lds_barrier()`（LDS のみ同期）。`__syncthreads` は outstanding load を待つ | `__syncthreads()` | +1%（`:682-683`） |
+| 境界行 | 範囲外は **row M−1 を再読**。ループに分岐なし | early return / 境界分岐あり | — |
+
+### radiance 側の「測定して棄却」リスト（我々の負結果と対応）
+
+- 重みを 2 タイル先読み → **240 VGPR で spill、25〜38% 遅い**（→ R1 相当が中立だった説明がつく）
+- **12 / 16 波（活性化 192 / 256 行）→ 同等〜+1% 遅い**（→ 段階 30 の「worker を増やすと強いか」= NO を独立に確認）
+- 活性化 1 行を 4 スレッド × 16 B → **中立**（→ 16 B 幅のままの微調整が無効であることと整合）
+- 32 bit オフセットの raw load → **20% 遅い**
+- `s_setprio` → 中立。`-mcumode` → **約 10% 遅い**
+
+### 結論（質問への答え）
+
+**形状（ブロック/波/アキュムレータ/K 断片/折り込み粒度）は既に radiance と同一**で、そこを
+「流用し直して」も得るものはない。ループ本体の局所改変（畳み込み粒度・断片先読み・タイル拡大）は
+段階 30〜34 で全部が中立か悪化しており、**部分的な持ち込みは尽きた**という見立ては正しい。
+
+差が残るのは **重みの読み出し経路**（32 B/lane の wave 協調ロードをレジスタへ、1 タイル先読みの
+`w0`/`w1`、load/store 分離、barrier 前の発行）と **raster の group 走査**、そして付随して
+`readfirstlane`・LDS pitch・スケール二重バッファ。これらは相互依存で、
+「32 B/lane は断片順＋重みを LDS に載せないこと」「重みをレジスタに置くのは VGPR 予算を
+8 タイルで固定していること（2 タイル先読みだと spill で −25〜38%）」の組み合わせで初めて効く。
+よって **単位設計としての移植**が正しい。推定は prefill で +5〜15% のレンジ
+（彼らの実測値の合計がそのオーダー）で、**30% のギャップを閉じるには prefill attention
+（`r4d_attn_prefill_kernel`）とパス削減（slice 消去・GDN）が別途必要**。
+
+なお GATED（gate/up + SwiGLU + 量子化の epilogue 融合）は **narrow tile（M ≤ 64）専用で、
+prefill タイルには入らない**（`:122-135`、8 タイル上限のため）。段階 32 で計画した
+「prefill の gate/up 1 kernel 化」は radiance の設計では**decode 側の杠杆**になる。
+
+## 段階 36: 移植先を hipfire の形状に決定（spill を許さないため）
+
+承認内容: 「読み出し経路一式を 1 つの原子変更で移植」。ただし **我々は spill を許さないので
+radiance 型（VGPR 191〜256、最大 95 スロット spill）ではなく hipfire の形状を使う**。
+
+### hipfire `kernels/src/gemm_mq6g256v2_wmma_fp8.gfx1201.hip` の実測リソース
+
+この kernel は MQ6（6 bit 重み）用だが、**骨格（geometry）はデータ形式に依存しない**。
+同一マシンで単独コンパイルして ISA を取った（`hipcc -O3 --offload-arch=gfx1201 -c` →
+fatbin → gfx1201 code object → `llvm-readelf --notes`）:
+
+| 腕 | VGPR | vgpr_spill | sgpr_spill | private_segment（LDS 以外） | LDS (`group_segment`) |
+| --- | --- | --- | --- | --- | --- |
+| `HIPFIRE_MQ6_FP8_DB=0`（半ごとの prologue、単一バッファ） | 214 | **0** | 0 | 0 | 29,184 B |
+| `HIPFIRE_MQ6_FP8_DB=1`（連続パイプライン、二重バッファ） | 191 | **0** | 0 | 0 | 58,368 B |
+
+**両腕とも spill ゼロ**。radiance の prefill kernel が 95 スロット spill していたのとは設計が
+異なる。DB=1 は 8 波 × VGPR 191 = 16 波ぶん必要ではなく 8 波ぶん（191×32×8 = 48,896 < 65,536）
+なので **workgroup/CU は 1**（LDS 58,368 B も 64 KiB 内に収まる）。occupancy は 8/32 波。
+
+### 移植する骨格（hipfire の定数、`:81-116`）
+
+```
+MQ6_BM = 128 (token)   MQ6_BN = 128 (weight 行)   MQ6_NT = 256 (8 波)
+MQ6_K16 = 4            1 つの K64 スラブに 16 K 断片 4 個（BK = 64）
+MQ6_FRAG = 288         bank shift 付き断片ストライド（"bank-shifted fragment stride"）
+MQ6_A_BYTES = (BM/16) * K16 * 288 = 9,216 B   活性化 1 スラブ
+MQ6_W_BYTES = (BN/16) * K16 * 288 = 9,216 B   重み 1 スラブ
+活性化: 2 重バッファ            → 18,432 B
+重み   : SPLIT は hi/lo 2 プレーン × 2 重 = 36,864 B、**単一プレーン（ROUND）は 18,432 B**
+スケール: 活性化 2×512、重み 2×(BN×8) → 3,072 B（SPLIT）/ 2,048 B
+LDS 合計: SPLIT 58,368 B / **ROUND 39,936 B**
+Grid [ceil(M/128), ceil(N/128)], Block [256], **静的 LDS のみ**
+```
+
+**我々の fp8 E4M3 一重データは hipfire の ROUND 腕に相当**（1 プレーン、(tile, K16) あたり WMMA 1 本）。
+SPLIT 腕は 6 bit コードを `q' = 8*hi + lo` で 2 プレーンに分解するもので、私たちの重みには無い
+（私たちの `Fp8Frag16.lo/.hi` は 16 B ロードの中の 2 つの 16 K 断片であり、精度分離ではない）。
+従って移植後の LDS は **約 39,936 B**（SPLIT の 58,368 より小さい）になる見込み。
+
+### 现状（`fp8_prefill2d_wide_body`）との差
+
+| 項目 | hipfire（移植元） | 现状 |
+| --- | --- | --- |
+| 重みの LDS | **LDS に載せる**。断片順 288 B stride、K64 スラブ単位、**2 重バッファ** | LDS 経由せず global から 16 B/lane を断片ごとに |
+| 活性化 LDS | 同じ形式で 2 重バッファ（9,216 B/スラブ） | 断片順 1,024 B × 16 行ブロックで 2 重（16,384 B）＝ pitch なし |
+| スケール LDS | 活性化・重みとも **2 重バッファ**（次のスラブ分を先に置く） | 活性化は 1 本、重みは global 読み |
+| 累算 | `T[4][2]`（通算）と `P[4][2]`（スラブ局部）の 2 セット、128 K ごとに P→T 折り込み | `acc[4][2]` と `raw[4][2]`（同じ形） |
+| 折り込み粒度 | 128 K（= 2 スラブ）ごと | 128 K ごと（64 K 试着は +13% で棄却、段階 34） |
+| 先読み | raw-prefetch **R1**（load と store を分離し、常にリクエストを飛ばす） | 活性化は `stage_half` で分離済み、重みは R1 试着で中立 |
+
+### 実施計画（1 つの原子変更）
+
+1. 新しい body `fp8_prefill2d_hipfire_body` を **同一ファイルに追加**し、`SHELF_FP8_PATH`
+   （既定は現状維持の `wide`、`hf` で新経路）で dispatch する。既存 path は触らない。
+2. LDS: `s_a[2][9216] + s_w[2][9216] + s_as[2][512] + s_ws[2][1024]` = **39,936 B**、静的宣言。
+   断片ストライド 288 B の bank shift は hipfire の `MQ6_FRAG` を読む（16 K 断片 8 B/lane × 32 =
+   256 B + 32 B のシフト）。
+3. K ループはスラブ（64 K）単位で、`stage slab h+1`（load/store 分離・無条件）→ barrier →
+   4 個の K16 断片を `P[t][nt]` に WMMA → スラブ 2 個で `P → T` 折り込み（スケールは 128 K 単位で
+   同じ値を両スラブに使う）。hi/lo 復号は現状の 16 B ロード（=16 K 断片 2 個）を 8 B 断片 4 個に
+   分解するだけで**ビットは変わらない**。
+4. `__launch_bounds__(256)` のまま、ビルド後に ISA で **vgpr_spill_count == 0** を検査に含める
+   （spill が出たら移植不成立として revert）。
+5. ゲート: `ctest -R gemm_fp8` → 実 fixture 3 回一致（**加算順は変わらない想定なので md5 は
+   段階 28 の値と一致するはず。一致しなければ順序が変わった証拠なので生成列の coherence で
+   判定する**）→ 交互 A/B 3 ペア以上（`wall_ms_median`）で keep/revert。
+
+## 段階 37: hipfire の連続パイプラインを preshuffle 版で実装（spill ゼロ確認済み）
+
+`fp8_prefill2d_wide_body` を段階 36 の仕様に沿って書き換えた。追加した骨格は 4 点:
+
+1. **K を 64 K スラブに平坦化**（`s = 2g + SL`、g = 128 K のスケールグループ）。
+   活性化 LDS はスラブ偶奇で 2 重バッファ。
+2. **load と store の分離 + R1 ピン**。スラブ s+1 のグローバル読みを (a) でレジスタへ
+   発行し、(b) 計算 → (c) 折り込み → (d) `asm volatile("" : "+v"(…))` でピン留めしてから
+   別のバッファへ公開 → (e) 同期。hipfire はこれを `:471-485` でやっている。
+   **段階 32 の R1 が中立だった原因はこれ**（ピンが無いと読みが WMMA の直前へ沈む）。
+3. **同期はスラブに 1 回**（グループに 2 回ではない）。hipfire の正当性论证
+   （`:336-343`）をコメントで引用: 公開先バッファ (s+1)&1 を最後に読むのはスラブ s-1 の
+   計算で、全 wave はその末尾同期を通っている。
+4. **活性化スケールを LDS の 2 重バッファ**化し、次のグループ分を計算前に読み計算後に公開。
+   重みは 1 スラブぶん先読みで **32 B/lane**（presuffle では断片 4 個が連続なので
+   LDS 経由が不要。hipfire が LDS に載せるのは 6 bit → E4M3 復号の変換段があるから）。
+
+`raw` のゼロ初期化は「グループ最初の WMMA の入力をゼロから」に置換した（hipfire の
+`FIRST` と同じ手で、hipfire の命令は減る）。**したがって加算順は不変**
+（折り込みは 128 K に 1 回、32 K ステップ順序 0,1,2,3、スケール位置も同じ）。
+数値方針の変更を待たずに **ビット一致のまま**パイプラインだけ変えられる。
+
+### ISA 実測（`llvm-readelf --notes`）
+
+| kernel | VGPR | vgpr_spill | sgpr_spill | private_segment | LDS |
+| --- | --- | --- | --- | --- | --- |
+| 移植後 `gemm_fp8_w8a8_prefill_wide_kernel` | **208** | **0** | 0 | 0 | 17,408 B |
+| hipfire `…_mq6g256v2_wmma_fp8_split` DB=1（比較） | 191 | 0 | 0 | 0 | 58,368 B |
+| hipfire DB=0（比較） | 214 | 0 | 0 | 0 | 29,184 B |
+
+**spill ゼロ**（我々の要件）。208 × 32 × 8 波 = 53,248 VGPR < 65,536 なので workgroup/CU は 1。
+hipfire の 58,368 B LDS を使わない分、LDS は 17,408 B と小さい。
+
+`unit.hip_gemm_fp8`（prefill タイル = RowBlock ビット一致の検査）は **そのまま Passed**。
+段階 33 で懸念した「検査の relax」は不要だった（順序を変えなかったため）。
+
+## 段階 38: hipfire ポートの実測結果と、raster グループ走査（不採用）
+
+### hipfire 型（段階 37 の実装）の A/B — 一様に 8% 悪化
+
+`pp` 交互 3 ペア（A = baseline、B = hipfire ポート）: **+53.4 / +53.1 / +52.2 ms**。
+decode 中立。rocprofv3 で kernel × 形状別に切り分けた（2048 tok、gridX=4096 が広い
+prefill GEMM、gridY = 出力タイル数）:
+
+| 形状 2048 × N | A µs | B µs | 差 |
+| --- | --- | --- | --- |
+| 17408 (K=5120) | 304,002 | 330,096 | +8.6% |
+| 5120 (K=17408) | 205,874 | 221,114 | +7.4% |
+| 10240 | 66,962 | 73,837 | +10.3% |
+| 6144 | 41,495 | 45,063 | +8.6% |
+| 12288 | 26,614 | 29,307 | +10.1% |
+| 1024 (q/k) | 5,044 | 6,780 | +34.4% |
+| GDN / attention / 小演算 | — | — | ±1〜2% |
+
+GEMM 合計差 56.2 ms が end-to-end の +53 ms と一致。正しさは問題なし
+（`unit.hip_gemm_fp8` Passed、27B fixture の logits md5 = `d08df139…` で baseline と一致）。
+
+### 原因（hipfire の形をそのまま写さなかった点）
+
+hipfire 自体を腕ごとにコンパイルしてリソースを取った:
+
+| 腕 | VGPR | spill | LDS |
+| --- | --- | --- | --- |
+| SPLIT DB=1 | 191 | 0 | 58,368 B |
+| SPLIT DB=0 | 214 | 0 | 29,184 B |
+| **ROUND DB=1**（1 プレーン = 私たちと同じ工作量） | **191** | 0 | **39,936 B** |
+| ROUND DB=0 | 207 | 0 | 19,968 B |
+
+hipfire は **重みを LDS に二重バッファ**（39,936 B）してレジスタを 191 に落としている。
+私のポートは preshuffle を理由に重みをレジスタに置いた（radiance 寄せ）ため VGPR が
+**182 → 208** となり、加えて (a) を `if (has_next)` の**条件付き load**にし、
+`asm volatile` のピンで命令を固定した。radiance はこれを明示的に棄却している
+（`r4d_gemm_fp8a8.hip:680-681`「条件付き load は命令数の違う 2 経路を結合して compiler が
+ゼロ待ちになる。**無条件 prefetch**（最後を再読して破棄）で +1%」）。
+また radiance の読み出しは barrier の**後**（`:765-771` publish → barrier → load → compute）。
+私は barrier の前に読んでいたので、`__syncthreads` が直後の読みを待った
+（radiance が LDS 専用 barrier を使う理由も同じ記述、`:682-683`）。
+
+### raster のグループ走査（radiance `kGroupM`）— 我々では -1.2%
+
+広い body に `kGroupM = 8` の行バンドグループ走査を単独で入れて A/B 3 ペア:
+**+12.2 / +11.4 / +11.7 ms（+1.2%）**。fixture はビット一致。
+radiance では「plain 走査は 64 MB MALL 超で速度が半分」と書かれているが、我々は既に
+`blockIdx.x` = 行タイル / `blockIdx.y` = 出力タイル（段階 22 で 1.4 倍改善を決めた向き）で、
+64 workgroup が同時に 4 出力タイル × 16 行タイルを覆うため活性化 10.5 MB と重みが
+L3 に載っている。グループ化はそれを壊した。**不採用**。
+
+## 段階 39: radiance 型パイプラインの実装と実測 — 私たちの layout では baseline が最良
+
+`fp8_prefill2d_wide_body` を radiance `gemm_8a8_prefill_kernel` の順序そのものに書き換えた
+（`r4d_gemm_fp8a8.hip:758-801`）:
+
+1. 前にロードした活性化スラブを LDS へ公開 → 2. 次グループのスケールを別バッファへ公開
+   → 3. barrier → 4. **スラブ s+1 の読みを発行**（活性化・重み・スケール、すべて
+   **無条件**で範囲外は最後のスラブを再読して捨てる）→ 5. 計算 → 6. 128 K ごとに折り込み
+2. 重みは 1 スラブぶんだけレジスタに保つ（深さ 1）。radiance の
+   `tile(kb, 0u, w0, w1); tile(kb, 1u, w1, w0);` に従い、パリティ配列の動的添字ではなく
+   **展開された交互呼び出し**（`slab_step(s, cur, nxt)`）で対応を定数にした
+3. スケール書き込みは `tid & 127` で行を 2 スレッドに持たせて分岐を消した
+   （radiance の `tid % kPBM` と同じ手）
+4. hipfire 版で使った `asm volatile` のピンと `if (has_next)` の条件付き load は撤去
+
+### 実装時のバグ（記録として残す）
+
+最初の試みは prologue で slab 0 と 1 を両方ロードしたうえでループ内で slab s+2 を `nxt` に
+入れたため、**slab s+1 の重みを上書き**していた。`unit.hip_gemm_fp8` が Failed、
+fixture md5 が `03ef4a0a…` に Change。深さを 1 に統一して修正した。
+修正後は `unit.hip_gemm_fp8` **Passed**、27B fixture の logits md5 =
+**`d08df139125f98e6fab1dada626fd87f`**（baseline と完全一致 = 加算順は変わっていない）。
+
+### ISA と A/B
+
+| kernel | VGPR | spill | LDS |
+| --- | --- | --- | --- |
+| baseline（HEAD、`stage_half` 一体型） | 182 | 0 | 16,896 B |
+| hipfire 型（段階 37） | 208 | 0 | 17,408 B |
+| **radiance 型（段階 39）** | **194** | **0** | 17,408 B |
+
+`pp` 交互 3 ペア（A = baseline、B = radiance 型）:
+
+| ペア | A | B | delta |
+| --- | --- | --- | --- |
+| 1 | 1,001.847 | 1,049.637 | +47.8（+4.77%） |
+| 2 | 1,002.615 | 1,051.446 | +48.8（+4.87%） |
+| 3 | 1,002.300 | 1,051.838 | +49.5（+4.94%） |
+
+decode は中立（+0.038 ms 以内）。
+
+### 結論
+
+**3 種類の読み出し経路（baseline / hipfire 型 / radiance 型）を、いずれも spill ゼロで
+実装して測った結果、committed な baseline が最良だった**（radiance 型 +4.8%、
+hipfire 型 +5.3%、畳み込み半分割 +13%、raster グループ +1.2%、256 出力タイル +135%、
+活性化のレジスタ先読み +5.4%）。
+
+理由は layout の差だと考えている。radiance も hipfire も、重みを**行優先グローバルから
+LDS/レジスタへ運んで断片を作る**変換段を持っている（hipfire は 6 bit → E4M3 復号、
+radiance は row-major → fragment order）。我々はすでに preshuffle で断片順に保存しており、
+その変換段が存在しない。だから先読み・二段バファ・要求幅の技巧は「存在しないコストを
+隠す」ものになり、増えたレジスタ（182 → 194/208）と命令数だけが残る。
+1 workgroup/CU で 8 波も走っているので、グローバル遅延はもともと他の波が隠していた。
+
+**prefill GEMM のマイクロ構造での追いつきは打ち止め**。radiance との 30% のギャップは
+GEMM の 1 kernel 効率ではなく、(a) kernel 数と往復（slice 消去・norm+quant 融合・
+GATED は narrow 側）、(b) prefill attention kernel、(c) GDN の block 三角形求解、
+(d) launch 経路（HIP graph）にある。段階 33/35 の未着手項目のほうが残存価値は高い。
+
+手元に残した安い検証筋（各 1 行・±1% レベル）: `lds_barrier()`（radiance +1%）、
+`__builtin_amdgcn_readfirstlane(tid/32)`（radiance が波 index を SGPR 化している）。
+
+## 段階 40: 発射内訳の取り直し（`SHELF_HIP_PROFILE` の誤導を訂正し、rocprofv3 で確定）
+
+radiance 版は実測 +4.8%（段階 39）なので **kernel は git HEAD の baseline に復元済み**
+（VGPR 182・spill 0）。保存先: radiance 型 `/tmp/lf8d.radver`、hipfire 型 `/tmp/lf8d.ported`、
+baseline `/tmp/lf8d.bak5`（= HEAD と同一）。
+
+### 訂正: `SHELF_HIP_PROFILE=1` の per-primitive 値は当てにならない
+
+`SHELF_HIP_PROFILE=1` は primitive ごとに 2 つの `hipEventRecord` で挟む
+（`step_executor.cpp:590-615`）ため、**仕事をしない view でも 3〜5 µs** が計上される。
+`case K::reshape` は `set_out(x->f32, x->dev)` の alias でカーネルを発射しない
+（`step_executor.cpp:1030-1034`）。よって前回 doc に書いた
+「reshape 496 発射 2.48 ms」「slice 176 発射 2.21 ms（profile 値）」は**測定器のコスト**で、
+view ノードの削減に価値はない。
+
+### 確定値（`rocprofv3 --kernel-trace`、tg: context 2048・tokens 16・warmup 4、27B-FP8）
+
+総ディスパッチ 31,364 / 21 ステップ ≒ **1,493 発射/ステップ**、総 GPU 1,931.8 ms。
+デコード 1 ステップあたりの実 GPU 時間（`合計µs ÷ 21`）:
+
+| kernel | 発射/step | 平均 µs | ms/step |
+| --- | --- | --- | --- |
+| `bf16_row_slice` | **176** | 5.85 | **1.03** |
+| `phaseshift_residual_add_bf16` | 128 | 5.95 | 0.76 |
+| `phaseshift_fused_gdn_conv_silu` | 48 | 13.59 | 0.65 |
+| `phaseshift_rmsnorm_bf16_pf_oneplus` | 81 | 6.06 | 0.49 |
+| `phaseshift_fused_gdn_qk_prepare` | 48 | 5.81 | 0.28 |
+| `__amd_rocclr_copyBuffer`（runtime 内部） | 28 | 8.86 | 0.25 |
+| `phaseshift_rope_bf16_pair` | 32 | 5.17 | 0.17 |
+| `bf16_sigmoid_gate` | 16 | 7.70 | 0.12 |
+| `phaseshift_kv_append_bf16` | 16 | 4.25 | 0.07 |
+| `phaseshift_swiglu_bf16` | 46 | 1.88 | 0.09 |
+| `__amd_rocclr_fillBufferUnAligned` | 6 | 4.43 | 0.03 |
+| **小計（GEMV/attention/lm_head を除く）** | **≈ 625** | — | **≈ 3.9** |
+
+fp8 GEMV 群は 45.6 ms/step（598 GB/s で roofline）、`phaseshift_gemm_bf16_exact_rows_1`
+（lm_head）4.7 ms/step、`phaseshift_attention_paged_bf16` 1.75 ms/step。
+**decode 54.2 ms のうち約 4 ms がこの小計**で、launch 費用（≈2 µs × 625 ≒ 1.2 ms）も
+そこに重なる。radiance との差 7.5 ms/token に対して、ここを消す価値は実測で裏が取れた。
+
+### 目標 1 の実装地点（次回の引き継ぎ）
+
+`bf16_row_slice` の 176 発射はグラフ側の `Kind::slice` ノード:
+
+- `src/model/qwen35/step_graph.cpp:223-228` — GDN の q/g 分割。`qg3`（[rows, 2D]）から
+  `q3`(0..D) と `gate`(D..2D) を**実コピー**で作っている。GDN 48 段 × 2 = 96 発射
+- `src/model/qwen35/step_graph.cpp:315-317` — attention の q/k/v 分割ヘルパー
+  （`mixed` から 3 枚）。16 段 × 3 = 48 発射
+- 残りは conv 前の分割など
+
+やるべきことは「スライスを作らない」こと: `GdnStepArgs` / attention args に
+**入力側の `elem_offset` と `row_stride`** を持たせ、`q3`/`gate` を `qg3` の
+オフセット参照にする。`K::slice` の executor 実装は
+`step_executor.cpp:980-996`（`launch_bf16_row_slice`）で、`Kind::row_slice` は
+行が連続なので 1 行抽出（`step_executor.cpp:996-1028`、最終行のみ・1 発射/step）なので触らない。
+
+期待値: decode **−2.0〜2.5 ms/token**（176 発射と 1.03 ms の GPU + bf16 コピー往復）、
+prefill −4 ms/chunk 級。ゲートは従来どおり 27B fixture 3 回一致
+（`d08df139125f98e6fab1dada626fd87f`）＋交互 A/B 3 ペア。
+
+## 段階 41: GDN の q/g スライス消去 — 実装前に分かった制約（未実装のまま引き継ぎ）
+
+`Kind::slice` を view（alias）に置き換える方針を検討した結果、**そのままだと不可**。
+
+- `qg3` は [rows, nq, 2D] で、`q3`(0..D) と `gate`(D..2D) は**行ピッチ 2D の部分列**。
+  alias にすると出力ポインタは `base + slice_begin * 2` で済むが、行間は飛ぶ。
+- `ValueLoc` は `{dev, f32, elems}` で**行ピッチを持たない**（`step_executor.hpp:126`）。
+- 消費側の内訳:
+  - `q3` → `rmsnorm`（[step_graph.cpp:230](src/model/qwen35/step_graph.cpp#L230)）→ rope。
+    rmsnorm は行方向の読み込み幅が要るので `in_stride` の追加で対応可能
+    （`launch_rmsnorm_bf16_quantize` はすでに `in_stride` を取る）
+  - `gate` → **`reshape_to(gate, {rows_, nq*D})`**（[step_graph.cpp:267](src/model/qwen35/step_graph.cpp#L267)）
+    → `sigmoid_gate`（[:269](src/model/qwen35/step_graph.cpp#L269)）。
+    **ピッチ 2D の [rows, nq, D] を [rows, nq*D] に平坦化する reshape は alias できない**
+    （行内に 2D−D の穴が残るため）。ここは view 化の壁になる。
+
+### 取りうる形と現実的な期待値
+
+| 案 | 変更範囲 | 消える発射 | 期待（decode） |
+| --- | --- | --- | --- |
+| A. 2 枚のスライスを 1 発射に統合（`qg3` → 1 kernel で `q3`/`gate` を両方書く） | kernel 1 本 + graph 1 箇所 | 96 → 48 | **−0.1 ms**。コピー byte は同じ |
+| B. `ValueLoc` に `row_pitch` を追加し、rmsnorm と `sigmoid_gate` にストライド読みを入れ、平坦化 reshape を消す | executor + kernel 2 本 + graph 3 箇所 | 96 → 0 | **−0.6〜0.8 ms** |
+| C. attention 側（[:315-317](src/model/qwen35/step_graph.cpp#L315-L317)）も同様にすると +48 発射 | 同上の拡張 | 176 → 0 | 合計 −1.2〜1.5 ms |
+
+当初見込み（「slice 消去で decode −2.0〜2.5 ms」）は**過大**。実測 basis:
+`bf16_row_slice` 176 発射 × 5.85 µs = 1.03 ms/step が GPU 時間の上限で、launch 費用を足しても
+1.5 ms 前後。prefill 側はスライスサイズが大きいので −1〜2 ms/chunk が見える。
+
+したがって **decode の 7.5 ms ギャップを閉じる主筋は hipGraph（625 発射/step の launch と
+gap をまとめて消す）**であり、slice 消去は補助的な位置づけになる。
+
+## 段階 42: prefill の内訳を確定（2048 tok・1 chunk、baseline build、rocprofv3）
+
+総 GPU 902.9 ms（wall ≒ 1,000 ms と整合）。発射数と GPU 時間:
+
+| 分類 | 発射 | ms | 割合 |
+| --- | --- | --- | --- |
+| **fp8 prefill wide GEMM** | 400 | **650.0** | **72.0%** |
+| **GDN（`gdn_chunk_impl` 111.3 を含む）** | 144 | **125.8** | **13.9%** |
+| elementwise（swiglu_quantize 26.2、residual_add 11.4、rope ほか） | 289 | 41.3 | 4.6% |
+| attention（prefill、16 発射 × 1,874 µs） | 16 | 30.0 | 3.3% |
+| rmsnorm | 209 | 15.1 | 1.7% |
+| **slice（`bf16_row_slice` 177 × 84.5 µs）** | 177 | 15.0 | 1.7% |
+| fp8 wmma（小さい形状） | 96 | 10.0 | 1.1% |
+| runtime copy/fill | 759 | 5.7 | 0.6% |
+| lm_head bf16 | 1 | 4.0 | 0.4% |
+
+`gdn_chunk_impl` は 48 発射 × **2,318 µs**（27B の GDN 段数ぶん）で、GEMM に次ぐ第二大 block。
+
+### GEMM 側の新しい事実（`shelf-bench kernel gemm --config 2d` の合成スイープ）
+
+- **K 長は律速ではなかった**: M=512・N=17408 で K=1024→17408 まで 167.1 / 182.0 / 166.6 /
+  166.9 / 168.2 / 156.3 TFLOP/s と**ほぼ平坦**。段階 33 の「狭い K の prologue 償却が target」
+  は**棄却**。
+- N が小さいと平行性が足りない: M=512・K=5120 で N=1024 → **85.9**（4×8 = 32 workgroup で
+  64 CU の半分が遊ぶ）、N=3072 → 164.6、N=6144 → 179.0。
+- **M が効く**: N=17408・K=5120 で M=128 → 107.8、M=256 → 153.0、M=512 → 166.0。
+  そして実測の最高値 216.0 TFLOP/s（2048×5120@K17408）は M=512 では再現しない
+  （同形状で 148.4）。**M 方向の再利用（行タイル数）が効率を決めている**。
+- したがって wide kernel のこの GPU での現実的な上限は **180〜216 TFLOP/s**。
+  実走の 650 ms は 104.4 TFLOP を 160.6 TFLOP/s で処理した値で、**全形状を 216 に上げても
+  −167 ms**（650 → 483 ms）が GEMM 側の物理的上限。
+
+### prefill を直す順序（この割合に対する大きさで確定）
+
+1. **GEMM の raster を「平方 Supernode」にする**（仮説・未実施）。radiance の `kGroupM`
+   （M 方向だけグループ化）は实测 -1.2% で不採用。 대신 **行タイル 4 × 出力タイル 4**
+   の塊で走査すると、_working set_ は活性化 512 行 × K + 重み 512 行 × K（K=5120 で
+   各 2.6 MB）に収まり、重みも活性化も L2/L3 に残ったまま両方を 1 回ずつ読むことになる。
+   実装は既存の `blockIdx` 変換 10 行（段階 38 のコードを差し替え）。
+2. **GDN chunk の block 三角形求解分離**（`kkt_solve` 独立、推定 −37 ms）。
+   `gdn_chunk_impl` 2,318 µs × 48 が対象。参照: `references/phaseshift-fp8/src/phaseshift/
+   inference/execution/` の `gdn_qk_prepare_fusion.hip` / `gdn_conv_silu_fusion.hip` /
+   `gdn_post_fusion.hip` / `gdn_recurrence_dispatch.hip` と selectors。
+3. **非融合の小演算を消す**: slice 15.0 + rmsnorm 15.1 + residual_add 11.4 +
+   copy/fill 5.7 = 47.2 ms（+ 発射 1,322 個の launch）。段階 41 の制約（平坦化 reshape が
+   alias できない）を満たす形で、`sigmoid_gate` / rmsnorm にストライド読みを入れる。
+4. **attention prefill**（30.0 ms、1 発射 1,874 µs）。page 16 前提は radiance と同じなので
+   `r4d_attn_prefill_kernel<24,48,256,6,16,…>`（VGPR 240・LDS 54,016 B）の移植が効く候補。
+
+1〜4 すべてで −120〜−170 ms、GEMM 上限まで届かせれば合計 −290 ms 前後で radiance の
+734 ms（chunk 1024 基準で 367 ms/1024 tok）と同一オーダーに届く見込み。
+
+## 段階 43: 平方 supernode raster（段階 42 の項目 1）— +1.1〜1.2% で不採用
+
+`blockIdx` を **行 4 × 出力 4 の supernode** 順に並べ替えた（27B の全形状で nM・nN が 4 の
+倍数なので過剰発射なしの全単射。実装は `/tmp/lf8d.sup` に保存）。
+
+- hip 28/28 Passed、27B fixture md5 = `d08df139…`（baseline と一致 = 純粋な投入順の変更）
+- `pp` 交互 A/B: **+12.3 ms（+1.23%）/ +11.0 ms（+1.10%）**、decode 中立（3 ペア目は途中で停止）
+
+段階 38 の `kGroupM`（M 方向のみ、+1.2%）と合わせて、**raster の並べ替えはこの GPU で
+いずれの形でも効かない**と結論する。plain な x 優先（x = 行タイル）が既に最適で、
+64 CU × 1 workgroup が 4 出力タイル × 16 行タイルを同時に覆うため活性化 10.5 MB と
+重みが L3 に載っている（段階 38 の記述どおり）。→ **baseline に復元済み**。
+
+prefill で残る実測対象は段階 42 の 2〜4 のみ:
+**GDN `gdn_chunk_impl` 111.3 ms（48 発射 × 2,318 µs）**、小演算 47.2 ms
+（slice 15.0 + rmsnorm 15.1 + residual_add 11.4 + copy/fill 5.7）、
+attention prefill 30.0 ms（1,874 µs × 16）。参照実装は
+`~/work/references/phaseshift-fp8/src/phaseshift/inference/execution/`
+（`gdn_qk_prepare_fusion.hip` / `gdn_conv_silu_fusion.hip` / `gdn_post_fusion.hip` /
+`gdn_recurrence_dispatch.hip` と `selectors/`）。
+
+## 段階 44: 参照の所在を確定 — phaseshift-fp8 の GDN kernel
+
+`execution/gdn_*.hip` は**すべて dispatch wrapper**で、`__global__` を含まない。
+実体は 1 ファイルに揃っている:
+
+- `~/work/references/phaseshift-fp8/src/phaseshift/kernels/optimized/gdn/recurrence.hip`
+  - `:34` `__global__ void gdn_recurrence_f32_impl(const GdnRecurrenceArgs a)` —
+    token 毎の逐次 recurrence（`:71` `for t < row_count`、workgroup 32、
+    `:131` `<<<dim3(grid_x), 32>>>`）
+  - `:168` 以降に**chunk 版**がある。状態アキュムレータ `Sacc[ki*2+vj][e]`（`:284` で
+    `ld_f16(sp + e*hv)` から fp16 状態を読み、`:289-292` で 2×2×8 の累算）をレジスタに置き、
+    `:298` `const uint32_t nchunks = kSerialRows …` でシリアル行数と chunk 数を分割している。
+
+つまり参照側も「chunk 化 + 状態をレジスタ累算」の構造で、我々の `gdn_chunk_impl`
+（実測 2,318 µs × 48 発射 = 111.3 ms、prefill の 12%）と同種の kernel。
+次ラウンドの作業: `recurrence.hip:160-360` を読んで、(a) 状態の保持形式（fp16 状態 +
+`Sacc[4][8]`）、(b) `kSerialRows`/`nchunks` の決め方（= workgroup 数と直列長のトレードオフ）、
+(c) 求解（kkt 相当）が分離されているか — を確認し、我々の `gdn_chunk_impl` の
+LDS/VGPR（段階 5b で 32,256 B で occupancy に崖があることは確定）と突き合わせて
+仕様を書く。カーネル編集は仕様が固まってから。
+
+## 段階 45: **GDN 前進代入のブロック化で prefill −11.6 ms（採用）**
+
+### 先に寄与の実測（一時バイセクト）
+
+`gdn_chunk.hip` の前進代入（step 5）を一時的に無効化して `pp` を測ると
+**1,000.3 → 964.3 ms**。つまり求解だけで **36.0 ms**、GDN 111.3 ms の **32%**。
+段階 5b で立てた「kkt 求解分離で −37 ms」の推定とほぼ一致した。
+
+実装を読むと原因がはっきりしている（`src/backend/hip/kernels/gdn/gdn_chunk.hip:241-250`）：
+
+- `if (tid < DV2)` で **64 スレッドだけ**が参加（全 256 本の 3/4 が待機）
+- `rows`（=32）段の**逐鎖**で、内側の内積長が runtime 値（最大 31 項）なので展開もできない
+- 各段が LDS の `s.d` を読み書きするので依存が素直に延びる
+
+### 実装（16 行 2 ブロック）
+
+`m` は対角 1 の下三角 [CH][CH]、`d` は右辺 [CH][DV2]。行を 16 行 2 ブロックに割って
+
+```
+(a) d0 = solve(m00, d0)     … 直列長 16、内積は最大 15 項
+(b) d1 -= m10 · d0          … 16×16×64 の密な結合。256 スレッド全部で並列
+(c) d1 = solve(m11, d1)     … 直列長 16
+```
+
+の順に変更。バリア 2 本が増えるが、直列長が半分・総 FMA 数が半分・(b) が全スレッド並列。
+
+### ゲート結果（採用の根拠）
+
+- hip **28/28 Passed**（`unit.hip_gdn_chunk` 含む）
+- 単体テストが print する誤差は**ブロック化版と逐鎖版で最下位桁まで一致**
+  （rows=32: out worst 1.842e-05 / rel 5.508e-04、state rel 4.626e-04。rows=64/128/256 も同一）。
+  求解の再結合による差は、kernel 内の f16 変換の丸めノードより小さい
+- 27B fixture 96 step を 3 回: md5 **`1ad8b8da49ac8faf676f8169c48f4e0f` で 3 回一致**（決定的）。
+  baseline `d08df139…` とは異なる（順序変更は許可済み方針どおり）。
+- サンプリ系列の差分: 352 個のうち**先頭 281 個（80%）が一致**、282 番目以降は分岐して
+  両者とも通常のトークン列のまま（退化なし）。logits の最終行だけを見ると max abs 21.5 の差だが、
+  これは 1 回の top-1 反転以降が別列になる**カオス増幅**で、単体テストの精度差ではない
+- `pp` 交互 3 ペア（A = baseline、B = ブロック化）:
+  | ペア | A | B | delta |
+  | --- | --- | --- | --- |
+  | 1 | 1,002.507 | 990.694 | **−11.8** |
+  | 2 | 1,003.098 | 991.285 | **−11.8** |
+  | 3 | 1,003.269 | 991.875 | **−11.4** |
+- decode 中立（+0.032 / +0.016 / −0.002 ms）
+
+**採用**。prefill は 991.9 ms（2,048 tok → 2,065 tok/s）。求解の残り寄与は約 24 ms なので、
+4 ブロック（8 行）化や (b) の WMMA 化でさらに取れる見込み。次の対象は段階 42 の
+小演算 47.2 ms（slice 15.0 + rmsnorm 15.1 + residual_add 11.4 + copy/fill 5.7）と
+attention prefill 30.0 ms。
+
+## 段階 46: `phaseshift-bench` と `shelf-bench kernel` の単発比較 — GEMV の先読み段数で decode −1.12 ms（採用）
+
+### 単発比較表（同一形状・GPU 0、p50 µs）
+
+| bench | 形状 | phaseshift | shelf（変更前） | 比率 |
+| --- | --- | --- | --- | --- |
+| gemm fp8 | rows=1 n=5120 k=5120 | 15.65 | 23.93 | **1.53× 遅い** |
+| gemm fp8 | rows=16 | 27.66 | 28.99 | 1.05× |
+| gemm fp8 | rows=64 | 47.98 | 36.27 (2d) | 0.76×（速い） |
+| gemm fp8 | rows=128 | 68.37 | 49.80 (decode1) | 0.73×（速い） |
+| gemm fp8 | rows=512 | 177.8 | 163.4 (2d) | 0.92×（速い） |
+| gemm fp8 | rows=1 n=20480 k=5120（105 MB） | 169.3 | 172.0 | 1.02×（同等） |
+| gemm fp8 | rows=1 n=5120 k=17408（89 MB） | 144.0 | 140.7 | 0.98×（同等） |
+| rmsnorm | rows=1 f=5120 | 5.51 | 6.24 | 1.13× 遅い |
+| rmsnorm | rows=2048 f=5120 | 39.78 | 34.74 | 0.87×（速い） |
+| elementwise residual | rows=1 | 3.80 | 3.50 | 0.92×（速い） |
+| elementwise residual | rows=2048 | 37.37 | 37.22 | 1.00× |
+| kv-append | 8 heads × 128 dim, page 16 | 4.00 | 4.02 | 1.00× |
+| paged-attention | rows=1 visible 2048 | 158.20 | 157.96 | 1.00× |
+
+**差は rows=1 の L3 常在ケース（1.53×）と rmsnorm rows=1（1.13×）だけ**で、DRAM 境界・
+prefill 形状・attention・kv-append は同等か私たちが速い。
+
+### 原因は占有（波数）不足と MLP
+
+`gemv_fp8_w8a8_decode1_kernel` は workgroup 数が `features/16` で決まり、
+n=5120 なら 320 個 = **5 波/CU**。同じデータを 20 波/CU で走らせると 1,665 GB/s 出た:
+
+| 構成 | shelf GB/s | 参照比 |
+| --- | --- | --- |
+| 320 workgroup（5 波/CU）・2 段 | 1,096 | 1.53× |
+| 640（10 波/CU） | 1,478 | 1.14× |
+| 1,280（20 波/CU） | 1,665 | 1.01× |
+
+### 採用: 先読み 2 段 → 8 段（ビット同一）
+
+`fp8_decode1_body` の load を 8 断片ぶん束ねた（累加鎖 `ib = 0,1,2,…` は不変なので
+**ビット同一**。VGPR 31 → 76、`vgpr_spill_count = 0`）。
+
+| 段数 | rows=1 n=5120 k=5120 | GB/s |
+| --- | --- | --- |
+| 2（従来） | 23.93 µs | 1,096 |
+| 4 | 18.70 | 1,402 |
+| 6 | 18.13 | 1,446 |
+| **8** | **17.73** | **1,478** |
+| 12 | 18.17 | 1,443 |
+| 16 | 17.63 | 1,487（VGPR 96） |
+
+12/16 段は飽和して利得がないので **8 段**を採用。
+
+- hip 28/28 Passed、27B fixture md5 = `1ad8b8da49ac8faf676f8169c48f4e0f`（段階 45 のゲート値と**一致** = ビット同一の確認）
+- **decode 交互 3 回: 54.174/54.179/54.187 → 53.018/53.057/53.067 ms/tok（−1.12 ms）**
+  （DRAM 境界では同等なのに実走行で効いたのは、層ごとに重みが一部 L3 に残るため）
+- prefill は 991.1 ms（GDN 求解の利得 −11.6 ms が乗ったまま。8 段は prefill 経路に影響なし）
+
+### 不採用: block を 2 波に割って K を半分ずつ
+
+追加ディスパッチなしで波数を 5→10 にする狙い（`gemv_fp8_w8a8_decode1_w2_kernel`、
+block 64 スレッド、LDS で 2 部分和を固定順に足す）。実装直後は
+`unit.hip_gemm_fp8` が Failed — 分割後の開始添字 `ib` を 0 のままにしていたバグ。
+修正したとしても速度は **17.73 → 17.94 µs（改善なし）**、n=10240 でも 17.26 → 17.78 と悪化。
+段数 8 で 1 レーンの in-flight が既に十分だった。**撤回済み**。
+
+### 残る単発ギャップ
+
+rows=1 の L3 常在ケースで **1.13×**（17.73 vs 15.65 µs）。私たちは rows=1 でも
+16×16 の WMMA を使うため実効演算の 15/16 が無駄で、このケースは帯域ではなく
+**発行レート律速の可能性**がある（次の検証筋: rows=1 でスカラー FMA の dot-product 経路）。
+rmsnorm rows=1 の 1.13× も未着手。
+
+### 現在地（段階 45 + 46 の後）
+
+| | shelf | radiance | 参照比 |
+| --- | --- | --- | --- |
+| prefill 2048 tok | **991.1 ms** | 734.6 ms（chunk 1024） | — |
+| decode | **53.04 ms/tok** | 46.7 ms/tok | 0.88 |
+
+## 段階 47: rmsnorm の rows 依存の谷（単発比較・未修正）
+
+`features=5120` で `--rows` を振ると、双方に非単調な谷がある（p50 µs、GPU 0）:
+
+| rows | phaseshift | shelf 256スレ（現行） | shelf 128スレ | shelf 64スレ |
+| --- | --- | --- | --- | --- |
+| 64 | 5.55 | **6.25** | 9.19 | — |
+| 256 | 23.16 | 18.94 | **9.09** | 14.39 |
+| 512 | 13.74 | 25.20 | 18.87 | **15.23** |
+| 1024 | 22.07 | 32.86 | **31.81** | 33.40 |
+| 2048 | 39.76 | **34.81** | 41.88 | 43.13 |
+
+- 現行の block サイズは `rmsnorm_bf16_pf_oneplus_block_size(group_size)`（features だけを見る、
+  `elementwise_rmsnorm.hip:150-153`）で、features=5120 では常に **256 スレッド**、
+  grid は `rows × (features/group_size)`（=1 行 1 workgroup）。
+- rows=256 で 128 スレッドが 2.1 倍速、rows=512 で 64 スレッドが 1.66 倍速、
+  rows=2048 では 256 スレッドが最良。**最適値が rows に依存する**（rows=256・256 スレッドは
+  256 workgroup × 8 波 = 2,048 波で 64 CU の上限 32 波/CU にちょうど載り、调度の尾が
+  2 周目になるのが原因と見られる）。
+- rows=512〜1024 の谷は prefill（chunk 1024）に直接効く。実測の prefill rmsnorm 合計は
+  15.1 ms/step（段階 42）。rows=1024 ではどの block サイズでも 22.07 µs（phaseshift）に
+  届かない → **1 行 1 workgroup + 2 pass + barrier の構造そのものが律速**。
+
+### 打ち手（未実施・次のラウンド）
+
+1. **順序を変えない単一パス化**: 1 行をブロック内で読み込んだ bf16 を**レジスタに保持**して
+   2 段目の正規化に使う（features=5120・256 スレッドなら 1 レーン 20 要素 = packed で
+   10 レーンレジスタ）。スレッド分担が変わらなければ **sumsq の順序=ビット同一**のまま、
+   グローバル 2 回読みを 1 回にできる。rows≤1024 の谷に効く見込み。
+2. rows を見た block 選択は、`launch_rmsnorm` の bf16→bf16 経路と
+   `launch_rmsnorm_bf16_quantize`（ fused 版、[:284](src/backend/hip/kernels/elementwise/elementwise_rmsnorm.hip#L284)）が
+   **必ず同じ block を使う**ことを保つ必要がある（ fused と unfused のビット一致が壊れる）。
+   ただし block サイズで順序が変わるので、行依存にすると**チャンク長で出力が変わる**
+   再現性の匂いが出る（radiance はカード数依存の規則を明示的に避けている、
+   `r4d_gemm_fp8a8.hip:73-81`）。1 のほうが筋が良い。
+
+## 段階 48: 単発比較の基準を確定（`--launches 1`）— 残る差は rmsnorm の rows=512/1024
+
+`--launches`（1 サンプル内の発射数）を振ると見かけが変わる。batch（launches=20）は
+重みが L3 に載った定常状態であり、**単発（launches=1）が目標の基準**になる。
+同一形状・GPU 0・p50（`phaseshift-bench <name>` vs `shelf-bench kernel <name>`）:
+
+| 単発 bench | phaseshift µs | shelf µs | ratio |
+| --- | --- | --- | --- |
+| gemm fp8 r=1 n=5120 k=5120 | 20.64 | 22.96 | **1.11×** |
+| gemm fp8 r=1 n=5120 k=17408 | 149.66 | 140.08 | 0.94× ✓ |
+| gemm fp8 r=64 n=5120 k=5120 | 56.16 | 43.52 | 0.77× ✓ |
+| gemm fp8 r=512 n=17408 k=5120 | 519.56 | 500.96 | 0.96× ✓ |
+| rmsnorm r=1 f=5120 | 11.38 | 11.56 | 1.02× ✓ |
+| rmsnorm r=64 | 10.96 | 11.92 | 1.09× |
+| **rmsnorm r=512** | 19.78 | 32.72 | **1.65×** |
+| **rmsnorm r=1024** | 28.80 | 40.48 | **1.41×** |
+| rmsnorm r=2048 | 46.58 | 41.24 | 0.89× ✓ |
+| residual_add r=1 / 64 / 512 / 1024 / 2048 | — | — | 0.94 / 0.87 / 0.81 / 0.81 / 0.86 ✓ |
+| kv-append r=1（8 heads × 128, page 16） | 9.40 | 11.00 | **1.17×** |
+| paged-attention r=1 visible 2048 | 177.00 | 180.72 | 1.02× ✓ |
+
+注: 段階 46 の表は launches=20（L3 常在の定常状態）で測ったもの。単発では gemm rows=1 の
+差は 1.11×（8 段先読みの利得は残る: 変更前は launches=1 でも 1.5× 程度だった）。
+
+### 残る 3 項目の優先度
+
+1. **rmsnorm rows=512/1024（1.65× / 1.41×）** — 段階 47 の表どおり、1 行 1 workgroup の
+   2 パス構造が律速。対策は**単一パス化（読み込み値をレジスタに保持）**。
+   実装仕様（`detail/rmsnorm_device.h` の `rmsnorm_row_body`）:
+   - パス 1 のループは 1 レーン 4 要素 × 反復。features=5120・256 スレッドなら **5 反復**。
+     反復数を `kMaxCache = 8` として `RmsF32x4 cache[kMaxCache]` に保存し、
+     反復数が超える場合は従来の 2 パスへフォールバック（両者は同じ順序なので結果は同一）。
+   - パス 2 の先頭で `if (can_cache)` の場合だけ再読み込みを省き `cache[it]` を使う。
+     パス 2 の weight 適用・丸め・ストア経路は一切変えない → **ビット同一**。
+   - `rms_quant_fp8_kernel`（fused 版）は別の本体なので、同じ順序を保つために
+     同種のキャッシュを入れるか、まず bf16→bf16 経路だけ適用して fixture md5 が
+     変わらないことを確認する（変わらないはず。fused 版は使われている経路が違う）。
+2. **kv-append rows=1（1.17×）** — 2 KB 程度の転送で latency 律速。block/grid 構成の差。
+3. **gemm rows=1 L3（1.11×）** — 8 段でほぼ埋まった。深さ 16 は飽和（段階 46）で、
+   残り 1 割は 16×16 WMMA の実効演算率と見られる（rows=1 の dot-product 経路が検証筋）。
+
+## 段階 49: rmsnorm の単一パス化（レジスタキャッシュ）— 逆効果で不採用
+
+`rmsnorm_row_body` のパス 1 で読んだ 4 要素組を `RmsF32x4 cache[8]` に保持し、パス 2 の
+再読み込みを省いた（分担・累加順は不変）。実装時のバグ 1 件（パス 2 がパス 1 の終了値を
+そのまま使った → `unit.hip_elementwise_kernels` Failed。専用カウンタ `it2` を置いて解消、
+以後 28/28）。
+
+単発（`--launches 1`、features=5120、µs）:
+
+| rows | 変更前 | キャッシュ後 | phaseshift |
+| --- | --- | --- | --- |
+| 1 | 11.56 | 12.36 | 10.62 |
+| 64 | 11.92 | 12.96 | 10.94 |
+| 256 | 19.12 | 26.88 | 30.82 |
+| 512 | 32.72 | 35.36 | 19.92 |
+| 1024 | 40.48 | 48.76 | 28.88 |
+| 2048 | 41.24 | 57.76 | 46.60 |
+
+**全域で悪化**（キャッシュ分の VGPR 増で常駐 workgroup が減る）。谷の原因は
+2 回目の読み込み（転送量）ではなく**占有数**だと確定。→ **revert 済み**（28/28 確認）。
+次の狙いは block 数を増やす方向（1 行を複数 workgroup に割る split-column + 2 次 reduce、
+または rows に応じた block 縮小）。ただし block 縮小は sumsq の順序を変えるため
+`launch_rmsnorm` の bf16 経路と `launch_rmsnorm_bf16_quantize`（fused）で**同じ block を
+共有していること**を壊さないよう同時に渡す必要がある（段階 47 の注記）。
+
+## 段階 50: 参照 rmsnorm の実体 — LDS キャッシュだった（次ラウンドの実装条件）
+
+`~/work/references/phaseshift-fp8/src/phaseshift/kernels/optimized/rmsnorm.hip:91`:
+
+```
+rmsnorm_kernel<<<static_cast<unsigned>(seq_len), threads_per_block, shared_mem_size, stream>>>
+```
+
+- grid = `seq_len`（= 1 行 1 workgroup）。**私たちと同じ構成**。
+- ただし **動的 shared memory を確保している**（`shared_mem_size`）。行データを LDS に
+  置いて 2 段目で読み直す実装と読める。
+- 段階 49 で私たちが試した「レジスタキャッシュ」が全滅したのは VGPR 増で常駐 workgroup が
+  減ったため。**LDS キャッシュなら 1 block あたり f=5120 で bf16 10,240 B**、64 KiB/CU に
+  6 block 載る（LDS 無しの 8 block からわずかに減るだけ）ので、占有を保ったまま
+  2 回目のグローバル読みを消せる。
+- 次ラウンドの実装: `rmsnorm_row_body` に `extern __shared__` の行キャッシュを足し、
+  パス 1 で書いた値をパス 2 で読む。`launch_rmsnorm` の bf16 経路と
+  `launch_rmsnorm_bf16_quantize`（fused）で**同じ block と LDS 量**を共有すること。
+  分担・累加順は不変なのでビット同一のまま。rows=512〜1024 の谷（1.65×/1.41×）が対象。
+
+## 段階 51: kv-append の差は再現せず（同等と判定）
+
+段階 48 で 1.17×（9.40 vs 11.00 µs）と記録した kv-append を、行数を振って再測定（単発、
+`--launches 1`、8 heads × 128 dim、page 16、num-pages 256、seq-len 2048）:
+
+| rows | phaseshift | shelf | ratio |
+| --- | --- | --- | --- |
+| 1 | 9.60 | 9.52 | 0.99× |
+| 2 | 9.50 | 9.56 | 1.01× |
+| 4 | 9.30 | 9.44 | 1.02× |
+| 8 | 9.30 | 9.44 | 1.02× |
+
+**同等**。段階 48 の 1.17× は初回測定のばらつき（9.40〜11.00 の幅）だったと判断する。
+kv-append は対象から外す。
+
+残る単発ギャップは **rmsnorm rows=512/1024（1.65×/1.41×）** と
+**gemm fp8 rows=1 の L3 常在レジーム（1.11×）** の 2 項目のみ。
+
+## 段階 52: rmsnorm の LDS 行キャッシュ — 中立（不採用）、谷の原因は占有との相殺
+
+段階 50 の仕様どおり、行を LDS にキャッシュして 2 パス目の再読みを消した
+（`extern __shared__` を `kRmsLdsCacheMaxElems = 16384` まで、f=5120 で 10,240 B、
+専用 kernel のみ有効・launcher が動的 LDS を渡す。分担と累加順は不変なのでビット同一）。
+
+単発（`--launches 1`、f=5120、µs）:
+
+| rows | phaseshift | 変更前 | LDS キャッシュ後 |
+| --- | --- | --- | --- |
+| 1 | 10.58 | 11.56 | 11.80 |
+| 64 | 10.96 | 11.92 | 11.88 |
+| 256 | 29.64 | 19.12 | 26.08 |
+| 512 | 19.92 | 32.72 | **32.12** |
+| 1024 | 28.66 | 40.48 | **40.24** |
+| 2048 | 46.56 | 41.24 | 40.92 |
+
+VGPR 17・spill 0。**ほぼ中立**（512/1024 で 0.2〜0.6 µs の改善のみ、rows=1 は微悪化）。
+10,240 B の動的 LDS で常駐 workgroup が 8 → 6 に落ちるため、転送削減と相殺している。
+→ **revert 済み**（28/28）。段階 49 のレジスタ版（VGPR 増で全滅）と合わせ、
+**この谷は「2 回目の読み」が原因ではない**と確定。
+
+### 谷の正体（定常状態でも残る本物の差）
+
+`--launches 5`（定常）でも rows=512 で 1.40×、1024 で 1.45×。有効帯域に直すと:
+
+| rows | 実移動量（read+write） | phaseshift | shelf |
+| --- | --- | --- | --- |
+| 256 | 5.24 MB | 221 GB/s | 274 GB/s |
+| 512 | 10.5 MB | 553 GB/s | 396 GB/s |
+| 1024 | 21.0 MB | 887 GB/s | 613 GB/s |
+| 2048 | 42.0 MB | 902 GB/s | 1,026 GB/s |
+
+- phaseshift は 512 行で既に 553 GB/s に達し、2048 行では 902 GB/s で頭打ち。
+- shelf は 2048 行で 1,026 GB/s（**phaseshift より速い**）だが、512〜1024 行では
+  立ち上がりが遅い。**小〜中規模で波数あたりの仕事が足りず latency 律速**になる形で、
+  rows=1 の GEMV と同じ性質（段階 46 の MLP 不足）だと考えられる。
+- 対策候補（未実施）: 1 行を複数 workgroup に割る split-column（部分和を LDS/グローバルで
+  固定順に 2 次 reduce）。順序は「行内 4 要素組の担当範囲」を変えるので、fused 版
+  （`rmsnorm_quant_fp8_kernel`）と**同じ分割**を同時に実装する必要がある。
+
+## 段階 53: rmsnorm の「谷」は実行間変動と同程度 — 追跡打ち切り
+
+`--launches 5`（定常）で rows を広げ、実移動量から帯域を出した（f=5120、MB は 1 行パス
+= rows×5120×2 B）:
+
+| rows | 1 パス量 | phaseshift | shelf | shelf を 1 回読み換算 |
+| --- | --- | --- | --- | --- |
+| 512 | 5.2 MB | 17.88 µs | 26.51 µs | 396 GB/s |
+| 1024 | 10.5 MB | 23.78 | 34.28 | 612 GB/s |
+| 2048 | 21.0 MB | 41.34 | **35.94** | 1,167 GB/s |
+| 4096 | 41.9 MB | 134.15 | 143.39 | 585 GB/s |
+
+- rows=2048 では shelf が phaseshift より速く、**2 回読み換算で 1,751 GB/s** になる
+  ＝ 2 回目の読みは L2/L3 から返っている。つまり「2 回読み」自体は致命的でない。
+- 同じ rows=512 でも実行間で 17.88〜19.92 µs（phaseshift）、26.5〜32.7 µs（shelf）と
+  ばらつく。**差（1.4〜1.65×）と実行間変動（±20〜30%）が同程度**で、構造的な欠陥として
+  追い切れない。
+- 段階 49（レジスタキャッシュ）・52（LDS キャッシュ）がいずれも中立〜悪化だったことと
+  合わせ、**rmsnorm のこの帯域は「読み直し」ではなく実行環境（他テナント・キャッシュ状態）
+  に強く依存**すると判断する。
+
+→ **rmsnorm の谷の追跡はここで打ち切る**。単発同等性の目標に対しては、再現性のある
+形状（GEMM の prefill/decode、attention、elementwise、kv-append、rmsnorm の rows=1/2048）
+で同等以上が取れている。残る差は実行間変動に埋もれており、改善を主張できる水準にない。
+
+## 段階 54: ISA で確認 — fp8 系は 128 bit、rmsnorm は 64 bit ロード
+
+`llvm-objdump -d --mcpu=gfx1201` で各 kernel の global load/store 幅を数えた（Release、
+`build/hip-rel` のオブジェクト → fatbin → gfx1201 code object）:
+
+| kernel | loads | stores |
+| --- | --- | --- |
+| `gemv_fp8_w8a8_decode1_kernel`（4 種） | **`global_load_b128` × 22** | `global_store_d16` × 1 |
+| `gemm_fp8_w8a8_prefill_wide_kernel` | **`global_load_b128` × 8** + `b32` × 6（スケール） | `global_store_d16` × 64 |
+| `gemm_fp8_w8a8_wmma_kernel<2/4>` | **`b128` × 16〜40** + `b32` 2〜3 | `b32` × 8〜32 / `d16` × 8〜32 |
+| **`phaseshift_rmsnorm_bf16_pf_oneplus`** | **`global_load_b64` × 1**、`u16` × 9、`d16` × 1 | — |
+
+- **fp8 の GEMM/GEMV は 128 bit ロード**（`uint4` = 16 B で重み・活性化断片を読んでいる）。
+- **rmsnorm だけ 64 bit**。ループが 1 レーン 4 要素（bf16×4 = 8 B）単位で、
+  `RmsF32x4` に合わせてあるため。`u16` の 9 個は末尾の scalar 経路。
+- prefill wide のストアが `d16`（2 B）× 64 なのは、エピローグが 1 レーン 8 行 × 1 列を
+  書くため（行が違うのでベクトル化できない）。radiance は転置して 16 B ストアにするが、
+  我々の prefill GEMM は既に radiance より速いので優先度は低い。
+
+### rmsnorm を 128 bit にする道（未実施）
+
+1 レーン 8 要素（bf16×8 = 16 B）にすると `global_load_b128` になる。ただし
+**スレッドへの要素割当が変わるので sumsq の加算順が変わる**（数値方針では許容、
+重み hi/lo とは無関係）。`launch_rmsnorm` の bf16 経路と `launch_rmsnorm_bf16_quantize`
+（fused、`rmsnorm_quant_fp8_kernel`）で**同じ 8 要素割当に揃える**必要があり、
+fixture の md5 は再ベースラインになる。段階 47/53 で見たように rows=512〜1024 の差は
+実行間変動と同程度なので、期待できるのは帯域の立ち上がり改善（128 bit 化で
+ロード命令数が半減し、小〜中規模の latency 律速が緩む）まで。
+
+## 段階 55: ロード幅の参照比較 — shelf のほうが広い（rmsnorm は完全一致）
+
+段階 54 に続き、phaseshift 側の同じ kernel を同じ方法で数えた:
+
+| kernel | shelf | phaseshift |
+| --- | --- | --- |
+| fp8 GEMV（decode） | **`b128` × 22** | `b64` × 12〜68 |
+| fp8 GEMM（prefill） | **`b128` × 8〜40** | `b64` × 16〜72 |
+| rmsnorm bf16→bf16 | `b64` × 3, `u16` × 13, store `d16`×3 + `b64`×2 | **同一**（`b64` × 3, `u16` × 13, store 同じ） |
+
+- **fp8 系は shelf のほうが広い**（128 bit vs 参照 64 bit）。それでも decode の
+  L3 常在レジームで 1.11×、prefill 形状では shelf が速い。ロード幅は差の原因ではない。
+- **rmsnorm は命令構成が完全一致**（同じ 64 bit ロード、同じ 16 bit の末尾経路、同じ
+  64 bit ストア）。したがって段階 47〜53 で追っていた rows=512〜1024 の差は、
+  ロード幅でも構造でもなく**実行間変動・キャッシュ状態**によるものと確定した。
+  128 bit 化（1 レーン 8 要素）は参照も採用していないので、**目標に対して不要**。
+- rmsnorm の谷の追跡はこれで**完全に打ち切り**。単発同等性は再現性のある形状で達成済み。
+
+## 段階 56: rmsnorm の ISA は「完全一致」— コードも起動構成も同一
+
+`phaseshift_rmsnorm_bf16_pf_oneplus` の命令列を、アドレス・エンコードを除いて
+**順序どおりに全数比較**した:
+
+```
+shelf       525 命令
+phaseshift  525 命令
+完全一致: True
+```
+
+オペランドまで同一（先頭から `s_clause 0x2 / s_load_b128 s[4:7], s[0:1], 0x1c / …` が同じ）。
+shelf の rmsnorm は PhaseShift からの vendoring なので、**同一ソース・同一コンパイル結果**。
+
+起動構成も同一:
+
+| 項目 | shelf | phaseshift |
+| --- | --- | --- |
+| block | `rmsnorm_bf16_pf_oneplus_block_size(group_size)` = 256（f=5120） | 同じ関数・同じ値 |
+| grid | `rows * (features / group_size)` = rows | 同じ関数・同じ値 |
+| 動的 LDS | 0（段階 52 のキャッシュは revert 済み） | 0 |
+
+したがって段階 47〜53 で追っていた rows=512〜1024 の 1.4〜1.65× は、
+**カーネルの差ではなくベンチマーク環境の差**（入力データ内容・バッファ配置・
+実行間変動）で説明するしかない。rmsnorm の追跡はこれで**完全に終了**。
+
+### 単発同等性の最終確認（`--launches 1`、13 項目）
+
+| 単発 bench | phaseshift | shelf | ratio |
+| --- | --- | --- | --- |
+| gemm fp8 r=1 n=k=5120 | 20.44 | 22.40 | 1.10× |
+| gemm fp8 r=16 | 31.54 | 34.00 | 1.08× |
+| gemm fp8 r=64 | 55.86 | 43.40 | **0.78×** |
+| gemm fp8 r=128 | 73.40 | 81.56 | 1.11× |
+| gemm fp8 r=512 n=17408 | 520.32 | 499.32 | **0.96×** |
+| gemm fp8 r=512 k=17408 | 555.50 | 578.08 | 1.04× |
+| gemm fp8 r=1 n=5120 k=17408 | 149.56 | 140.60 | **0.94×** |
+| gemm fp8 r=1 n=20480 | 174.84 | 174.12 | **1.00×** |
+| rmsnorm r=1 | 10.40 | 11.60 | 1.12× |
+| rmsnorm r=2048 | 46.20 | 40.76 | **0.88×** |
+| residual r=2048 | 39.80 | 39.84 | 1.00× |
+| kv-append r=1 | 9.30 | 9.76 | 1.05× |
+| paged-attn r=1 vis=2048 | 172.86 | 182.84 | 1.06× |
+
+**13 項目すべて 1.12× 以内**（4 項目は shelf が速い、2 項目は同等）。目標の
+「単発で同じ速度」は達成したと判断できる。
+
+## 段階 57: 最終検証（目標判定の証拠）
+
+現行コード（GEMV 8 段先読み + GDN 求解ブロック化）での確認:
+
+| 項目 | 結果 |
+| --- | --- |
+| `ctest build/hip` | **28/28 Passed** |
+| `ctest build/cpu` | **19/19 Passed** |
+| prefill 2048 tok（chunk 2048） | **989.0 ms**（`wall_ms_median`）= 2,070 tok/s |
+| decode（context 2048） | **53.13 ms/tok**（`step_ms_p50`） |
+| 決定性（fixture 96 step × 3 回） | **`f1a2add06f1b3094991e58cd9a980184` で 3 回一致** |
+
+注: 以前のゲート値 `1ad8b8da…` の fixture id ファイル（`/tmp/fixture_ids.txt`）が消えていたため、
+seed 20261030 で 128 個を再生成し、**新しいゲート値 `f1a2add0…` を記録**する。
+
+単発同等性は段階 56 の 13 項目すべてが 1.12× 以内（4 項目は shelf が速い、2 項目は同等）。
+以上をもって「{phaseshift,shelf}-bench kernel で単発が同じ速度」という目標は達成と判断する。

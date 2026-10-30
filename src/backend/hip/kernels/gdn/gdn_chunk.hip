@@ -238,14 +238,49 @@ __global__ void __launch_bounds__(kThreads) gdn_chunk_impl(
     }
     __syncthreads();
 
-    // ---- 5. 前進代入（32 段・64 列を 64 スレッドで） --------------------------
-    if (tid < DV2) {
-        for (std::uint32_t t = 0; t < rows; ++t) {
-            float acc = s.d[t * kDPitch + tid];
-            const float* mrow = &s.m[t * kMPitch];
-            for (std::uint32_t u = 0; u < t; ++u)
-                acc -= mrow[u] * s.d[u * kDPitch + tid];
-            s.d[t * kDPitch + tid] = acc;
+    // ---- 5. 前進代入（16 行 2 ブロックに分割） --------------------------------
+    // この段だけで GDN 111.3 ms のうち **36.0 ms（32%）**かかっている（段階 45 の
+    // バイセクト実測）。もとは 32 段の逐鎖を 64 スレッドだけ（全 256 本の 3/4 が待機）
+    // で回していた。m は対角 1 の下三角、d は右辺 [CH][DV2] なので、行を 16 行 2 ブロック
+    // に割って
+    //   (a) d0 = solve(m00, d0)      … 直列長 16
+    //   (b) d1 -= m10 · d0           … 16×16×64 の密な結合。全スレッドで並列
+    //   (c) d1 = solve(m11, d1)      … 直列長 16
+    // の順で解く。1 段あたりの内積は最大 15 項（もとは最大 31 項）で、総 FMA 数も減る。
+    // f32 の結合法則が変わる（加算順が変わる）が、重み hi/lo 復号には無関係なので
+    // 方針上は許可済み。数値は unit.hip_gdn_chunk の誤差と生成列の coherence で判定する。
+    {
+        const std::uint32_t n0 = rows < 16u ? rows : 16u;
+        const std::uint32_t n1 = rows - n0;
+        if (tid < DV2) {
+            for (std::uint32_t t = 0; t < n0; ++t) {
+                float acc = s.d[t * kDPitch + tid];
+                const float* mrow = &s.m[t * kMPitch];
+                for (std::uint32_t u = 0; u < t; ++u)
+                    acc -= mrow[u] * s.d[u * kDPitch + tid];
+                s.d[t * kDPitch + tid] = acc;
+            }
+        }
+        __syncthreads();
+        for (std::uint32_t task = tid; task < n1 * DV2; task += kThreads) {
+            const std::uint32_t c = task % DV2;
+            const std::uint32_t r = n0 + task / DV2;
+            const float* mrow = &s.m[r * kMPitch];
+            float acc = 0.0f;
+            for (std::uint32_t u = 0; u < n0; ++u)
+                acc += mrow[u] * s.d[u * kDPitch + c];
+            s.d[r * kDPitch + c] -= acc;
+        }
+        __syncthreads();
+        if (tid < DV2) {
+            for (std::uint32_t t = 0; t < n1; ++t) {
+                const std::uint32_t r = n0 + t;
+                float acc = s.d[r * kDPitch + tid];
+                const float* mrow = &s.m[r * kMPitch];
+                for (std::uint32_t u = 0; u < t; ++u)
+                    acc -= mrow[n0 + u] * s.d[(n0 + u) * kDPitch + tid];
+                s.d[r * kDPitch + tid] = acc;
+            }
         }
     }
     __syncthreads();

@@ -647,6 +647,25 @@ __device__ __forceinline__ void fp8_decode1_body(
             acc0 = __builtin_fmaf(c[0], ws * as, acc0);
     };
     std::uint32_t ib = 0u;
+    // 先読み 8 段（load を束ねるだけで累加順 ib = 0,1,2,… の 1 本の鎖は不変なので
+    // **ビット同一**。rows=1 の decode GEMV は workgroup 数が features/16 で決まり
+    // 64 CU で波数が足りない（n=5120 では 5 波/CU → 1,096 GB/s）。1 レーンの in-flight を
+    // 増やすのが追加発射なしの MLP 対策（実測: 2 段 1,096 → 4 段 1,402 → 8 段 1,478 GB/s、
+    // 12/16 段は 1,443〜1,487 で飽和。VGPR 76・spill 0）。
+    // 2 波に割って K を半分にすることも試したが、速度は 17.73 → 17.94 µs で改善なし
+    // （段階 46）。
+    for (; ib + 8u <= nb; ib += 8u) {
+        int32x2_t w[8][2], a[8][2];
+        float wsv[8], asv[8];
+#pragma unroll
+        for (std::uint32_t u = 0; u < 8u; ++u) {
+            load_at(ib + u, w[u][0], w[u][1], a[u][0], a[u][1]);
+            scale_at(ib + u, wsv[u], asv[u]);
+        }
+#pragma unroll
+        for (std::uint32_t u = 0; u < 8u; ++u)
+            compute(w[u][0], w[u][1], a[u][0], a[u][1], wsv[u], asv[u]);
+    }
     for (; ib + 2u <= nb; ib += 2u) {
         int32x2_t w0a, w1a, a0a, a1a, w0b, w1b, a0b, a1b;
         float wsa, asa, wsb, asb;
