@@ -16,6 +16,11 @@ add_executable(test_quant_fp8 unit/test_quant_fp8.cpp)
 target_link_libraries(test_quant_fp8 PRIVATE shelf::quant)
 add_test(NAME unit.quant_fp8 COMMAND test_quant_fp8)
 
+# MXFP4（E2M1/E8M0 コーデックと断片順 relayout）
+add_executable(test_quant_mxfp4 unit/test_quant_mxfp4.cpp)
+target_link_libraries(test_quant_mxfp4 PRIVATE shelf::quant)
+add_test(NAME unit.quant_mxfp4 COMMAND test_quant_mxfp4)
+
 # quantization_config の解析（apps/common の実装を使う）
 # 性能の回帰ゲート（コストモデル。GPU 不要・決定論的）
 add_executable(test_cost_model architecture/test_cost_model.cpp)
@@ -45,6 +50,25 @@ add_executable(test_runtime_boot unit/test_runtime_boot.cpp)
 target_link_libraries(test_runtime_boot PRIVATE shelf::runtime_boot)
 add_test(NAME unit.runtime_boot COMMAND test_runtime_boot)
 
+# placement（D2）: 予算と所在の純粋算術（GPU 不要）
+add_executable(test_placement unit/test_placement.cpp)
+target_link_libraries(test_placement PRIVATE shelf::placement)
+add_test(NAME unit.placement COMMAND test_placement)
+
+# D8 の C++ 側: sampling の契約（順序・greedy・seed の純粋性）と JSONL の型
+add_executable(test_api_sampling unit/test_api_sampling.cpp)
+target_link_libraries(test_api_sampling PRIVATE shelf::api)
+add_test(NAME unit.api_sampling COMMAND test_api_sampling)
+
+add_executable(test_api_protocol unit/test_api_protocol.cpp)
+target_link_libraries(test_api_protocol PRIVATE shelf::api)
+add_test(NAME unit.api_protocol COMMAND test_api_protocol)
+
+# フェイクエンジンとのセッション（パイプ越し・ポートもモデルも使わない）
+add_executable(test_api_session unit/test_api_session.cpp)
+target_link_libraries(test_api_session PRIVATE shelf::api)
+add_test(NAME unit.api_session COMMAND test_api_session)
+
 add_executable(test_step_graph unit/test_step_graph.cpp)
 target_link_libraries(test_step_graph PRIVATE shelf::model_qwen35)
 add_test(NAME unit.step_graph COMMAND test_step_graph)
@@ -66,6 +90,16 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(test_hip_gemm_fp8 PRIVATE shelf::backend_hip shelf::quant)
     add_test(NAME unit.hip_gemm_fp8 COMMAND test_hip_gemm_fp8)
 
+    # MXFP4 W4A8（E2M1 重み × E4M3 活性化の GEMV）
+    add_executable(test_hip_gemm_mxfp4 unit/test_hip_gemm_mxfp4.cpp)
+    target_link_libraries(test_hip_gemm_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
+    add_test(NAME unit.hip_gemm_mxfp4 COMMAND test_hip_gemm_mxfp4)
+
+    # 活性化の MXFP4 量子化（E2M1 + E8M0、断片順）
+    add_executable(test_hip_activation_mxfp4 unit/test_hip_activation_mxfp4.cpp)
+    target_link_libraries(test_hip_activation_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
+    add_test(NAME unit.hip_activation_mxfp4 COMMAND test_hip_activation_mxfp4)
+
     # pipeline-parallel（レイヤ分割）が数値を変えないこと（全ステージ同一 GPU で検証）
     add_executable(test_hip_pipeline unit/test_hip_pipeline.cpp)
     target_link_libraries(test_hip_pipeline PRIVATE
@@ -73,6 +107,11 @@ if(SHELF_ENABLE_HIP)
         shelf::model_qwen35
         shelf_app_common)
     add_test(NAME unit.hip_pipeline COMMAND test_hip_pipeline)
+
+    # 状態の初期化: reset を挟んで同じ列を流すと一致するか（serve の欠陥の再現）
+    add_executable(test_hip_reset unit/test_hip_reset.cpp)
+    target_link_libraries(test_hip_reset PRIVATE shelf::backend_hip shelf::model_qwen35)
+    add_test(NAME unit.hip_reset COMMAND test_hip_reset)
 
     add_executable(test_hip_attention unit/test_hip_attention.cpp)
     target_link_libraries(test_hip_attention PRIVATE shelf::backend_hip)
@@ -137,3 +176,11 @@ add_test(NAME bench.unknown_option
          COMMAND shelf-bench kernel rmsnorm --rows 8 --features 8
                  --warmup 0 --samples 1 --launches 1 --bogus 1)
 set_tests_properties(bench.unknown_option PROPERTIES WILL_FAIL TRUE)
+
+if(SHELF_ENABLE_HIP)
+    # shelf-compute のプロトコル（モデル・GPU 不要。--help と ping/generate の枠）
+    add_test(NAME serve.protocol
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/serve_protocol.sh
+                     $<TARGET_FILE:shelf-compute>)
+endif()
+

@@ -37,9 +37,71 @@ Probe probe_with(std::size_t gpus) {
     return p;
 }
 
+// D6: 機能表。probe が申告した機能に、要求が含まれるかを起動前に判定する。
+void test_features() {
+    using shelf::backend::Feature;
+    using shelf::backend::FeatureSet;
+
+    Probe p = probe_with(2);
+    p.features = shelf::backend::build_features(/*device_runtime=*/true);
+    check(p.features.has(Feature::fp8_w8a8), "HIP ビルドは fp8_w8a8 を申告する");
+    check(p.features.has(Feature::pipeline_parallel), "HIP ビルドは pipeline_parallel を申告する");
+
+    Requirements req;
+    req.need_device_execution = true;
+    req.required.add(Feature::fp8_w8a8);
+    req.required.add(Feature::device_execution);
+    const auto ok = shelf::runtime::boot::evaluate(p, req);
+    check(ok.accepted, "要求機能が揃っていれば受理");
+
+    // 要求が環境に無い場合（CPU ビルド相当）
+    Probe cpu;
+    cpu.backend = "cpu";
+    cpu.features = shelf::backend::build_features(/*device_runtime=*/false);
+    Requirements need_gpu;
+    need_gpu.need_device_execution = false;
+    need_gpu.required.add(Feature::fp8_w8a8);
+    const auto ng = shelf::runtime::boot::evaluate(cpu, need_gpu);
+    check(!ng.accepted, "fp8_w8a8 が無いビルドは拒否");
+    check(ng.reason.find("fp8_w8a8") != std::string::npos,
+          "拒否理由に不足した機能名が入る");
+
+    // 任意機能の不足は記録だけ（拒否しない）
+    Requirements opt;
+    opt.need_device_execution = true;
+    opt.optional.add(Feature::mxfp4);
+    opt.optional.add(Feature::device_execution);
+    Probe no_mxfp4 = p;
+    no_mxfp4.features = p.features;
+    no_mxfp4.features.remove(Feature::mxfp4);
+    const auto ro = shelf::runtime::boot::evaluate(no_mxfp4, opt);
+    check(ro.accepted, "任意機能の不足では拒否しない");
+    check(ro.missing_optional.has(Feature::mxfp4), "任意機能の不足を記録する");
+
+    // 機能を申告しない probe（従来の挙動）では機能判定をしない
+    Probe empty = probe_with(1);
+    Requirements r2;
+    r2.need_device_execution = true;
+    r2.required.add(Feature::fp8_w8a8);
+    check(shelf::runtime::boot::evaluate(empty, r2).accepted,
+          "probe が機能未申告なら機能判定をしない（後方互換）");
+
+    // 集合演算
+    FeatureSet a;
+    a.add(Feature::fp8_w8a8).add(Feature::gdn);
+    FeatureSet b;
+    b.add(Feature::fp8_w8a8).add(Feature::mxfp4);
+    check(a.missing_from(b).has(Feature::mxfp4) && a.missing_from(b).size() == 1,
+          "missing_from は不足分だけ");
+    check(!a.contains_all(b), "contains_all は不足を見逃さない");
+    check(a.join() == "fp8_w8a8, gdn", "join は定義順");
+    check(FeatureSet{}.join() == "なし", "空集合の表示");
+}
+
 }  // namespace
 
 int main() {
+    test_features();
     // 1. GPU 実行を要求したが 1 台も無い → 理由付きで拒否
     {
         Probe p = probe_with(0);

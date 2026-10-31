@@ -6,7 +6,8 @@
 #include <cstdio>
 #include <string>
 
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 
 #include "common/app_support.hpp"
 
@@ -14,7 +15,7 @@ namespace {
 
 using shelf::app::Fp8ModelFormat;
 using shelf::app::read_fp8_format;
-using shelf::quant::fp8::WeightScaleGranularity;
+using shelf::quant::fp8::fine::WeightScaleGranularity;
 
 int failures = 0;
 void check(bool cond, const char* what) {
@@ -135,6 +136,35 @@ int main() {
               "weights": {"num_bits":8,"type":"float","strategy":"channel"},
               "input_activations": {"num_bits":8,"type":"float","strategy":"group","group_size":64,"dynamic":true}}}}})");
         check(!f.ok(), "活性化 group_size=64 は失敗（128 のみ実装）");
+    }
+
+    {
+        // MXFP4（amd-quark）: 実測の宣言。`weight` U8[out,K/2] / `weight_scale` U8[out,K/32]
+        auto r = read_fp8_format(R"({
+          "quantization_config": {"quant_method":"quark","version":"0.13+unknown",
+            "global_quant_config": {"weight": {"dtype":"fp4","qscheme":"per_group",
+              "group_size":32,"scale_format":"e8m0","scale_type":"float",
+              "observer_cls":"PerBlockMXObserver"},
+              "input_tensors": {"dtype":"fp4","qscheme":"per_group","group_size":32,
+              "scale_format":"e8m0"}}}})");
+        check(r.ok(), "quark(MXFP4) の宣言を解析できる");
+        if (r.ok()) {
+            const auto& f = r.value();
+            check(f.quantized && f.mxfp4, "MXFP4 として印が付く");
+            check(f.mxfp4_group == 32u, "group 32");
+            check(f.scale_suffix == "_scale", "スケール名は weight_scale");
+            std::printf("  MXFP4 形: %s\n", f.declared.c_str());
+        }
+        // 逸脱は明示的に失敗させる（近似しない）
+        auto bad_dtype = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"int4","qscheme":"per_group","group_size":32}}}})");
+        check(!bad_dtype.ok(), "quark の int4 は拒否");
+        auto bad_group = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group","group_size":16}}}})");
+        check(!bad_group.ok(), "quark の group_size=16 は拒否");
+        auto bad_scheme = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_tensor","group_size":32}}}})");
+        check(!bad_scheme.ok(), "quark の per_tensor は拒否");
     }
 
     std::printf("test_fp8_format: failures=%d\n", failures);

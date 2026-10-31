@@ -1,7 +1,8 @@
 // vendored from PhaseShift (own work); namespace/type adapted only.
 #include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/backend/hip/kernels/e4m3_codec.h>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 #include <shelf/backend/hip/kernels/detail/rmsnorm_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
@@ -171,7 +172,7 @@ namespace {
 constexpr std::uint32_t kRmsQThreads = 256u;
 constexpr std::uint32_t kRmsQLanes = 32u;
 constexpr std::uint32_t kRmsQWaves = kRmsQThreads / kRmsQLanes;
-using shelf::quant::fp8::kActGroupK;
+using shelf::quant::fp8::fine::kActGroupK;
 using shelf::quant::fp8::kTileRows;
 using shelf::quant::fp8::kSuperK;
 using shelf::quant::fp8::amax_scale;

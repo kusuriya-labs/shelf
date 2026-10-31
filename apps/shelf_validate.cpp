@@ -95,7 +95,6 @@ std::string usage_text() {
         "  --pipeline-parallel=<K>   レイヤ分割のステージ数（既定 1）。GPU は --gpu から K 台使う\n"
         "  --device=<hip|cpu>        実行デバイス（既定: HIP ビルドなら hip、それ以外 cpu）\n"
         "  --gpu=<n>                 GPU 番号（既定 0）\n"
-        "  --vram-budget-mib=<N>     device 予算 MiB（モデル込み、既定 0 = 無制限）\n"
         "  --runs=<n>                決定性チェックの反復数（既定 2）\n"
         "  --ids-file=<path>         入力 token ids（既定: 同梱 fixture。区切りは空白・カンマ）\n"
         "  --out=<dir>               結果 JSON の保存先（既定 shelf-validate-out）\n"
@@ -118,7 +117,6 @@ struct Options {
     std::string pp_baseline = "off";     // on = PP=1 でも走らせて一致を確認（V2 の門）
     std::size_t runs = 2;
     int gpu = 0;
-    std::size_t vram_budget_mib = 0;   // device 予算（モデル込み、0 = 無制限）
     double t2_margin = -1.0;     // < 0 = 未設定（T2 は pending）
     bool stop_id_set = false;
     std::int64_t stop_id = -1;
@@ -334,10 +332,6 @@ int main(int argc, char** argv) {
             const long long v = num();
             if (v < 0) return fail("--gpu が不正です: " + val);
             o.gpu = static_cast<int>(v);
-        } else if (key == "--vram-budget-mib") {
-            const long long v = num();
-            if (v < 0) return fail("--vram-budget-mib が不正です: " + val);
-            o.vram_budget_mib = static_cast<std::size_t>(v);
         } else if (key == "--prefill-tokens") {
             const long long v = num();
             if (v < 0) return fail("--prefill-tokens が不正です: " + val);
@@ -383,6 +377,17 @@ int main(int argc, char** argv) {
         breq.device_execution = use_hip;
         breq.first_device = static_cast<std::size_t>(o.gpu);
         breq.pipeline_parallel = o.pipeline_parallel;
+        // D6: 要求機能（approx が FP8 なら fp8_w8a8 が要る）。判定は起動時に 1 回だけ。
+        if (use_hip) breq.required.add(shelf::backend::Feature::device_execution);
+        if (o.pipeline_parallel > 1)
+            breq.required.add(shelf::backend::Feature::pipeline_parallel);
+        if (!o.approx_model.empty()) {
+            const auto afmt = app::read_fp8_format(
+                app::read_file_str(o.approx_model + "/config.json"));
+            if (!afmt.ok()) return fail("approx の config.json: " + afmt.status().message());
+            if (afmt.value().quantized)
+                breq.required.add(shelf::backend::Feature::fp8_w8a8);
+        }
         const auto booted = app::boot(breq, /*print=*/true);
         if (!booted.accepted) return fail("起動条件を満たしません: " + booted.reason);
     }
@@ -518,7 +523,6 @@ int main(int argc, char** argv) {
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
         po.verbose = true;
-        po.vram_budget_bytes = o.vram_budget_mib << 20;
         auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
         pipeline = pl.release();

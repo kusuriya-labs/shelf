@@ -1,0 +1,6 @@
+# shelf server（任意コンポーネント）。ライブラリと ctest 本体は Python 不要。
+# バージョンは動作確認済みの環境（/opt/zen/.venv）に合わせている。
+aiohttp>=3.9,<4
+transformers>=4.44
+# テストのみ
+pytest>=8

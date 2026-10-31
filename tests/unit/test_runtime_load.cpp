@@ -5,7 +5,8 @@
 #include <string>
 #include <vector>
 
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 #include <shelf/runtime/load/materialize.hpp>
 
 namespace {
@@ -74,6 +75,7 @@ std::vector<bf16_t> bf16_seq(std::size_t n, float scale) {
 
 int main() {
     using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
 
     // 1. bf16 の 1 次元（norm）も通る（移設時に 2 次元要求で落ちた回帰の門）
     {

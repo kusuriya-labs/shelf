@@ -5,7 +5,7 @@
 // the numerical golden; this executor is the speed path.
 // FP8 経路（approx 側）: 重みは E4M3 コードのまま断片順で載せ、活性化は
 // ステップごとに per-token スケールで量子化する。dequant はカーネル内
-// （行列命令が E4M3 を直接読む）。契約は src/quant/fp8_w8a8.hpp。
+// （行列命令が E4M3 を直接読む）。契約は src/quant/fp8_perchannel.hpp。
 #include <shelf/backend/hip/step_executor.hpp>
 
 #include <algorithm>
@@ -23,12 +23,15 @@
 #include <shelf/backend/hip/kernels/gdn/gdn_recurrence.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/backend/hip/kernels/gemm/linear_fp8.h>
+#include <shelf/backend/hip/kernels/gemm/linear_mxfp4.h>
 #include <shelf/backend/hip/kernels/attention/kv_append.h>
 #include <shelf/backend/hip/kernels/attention/paged_attention.h>
 #include <shelf/backend/hip/kernels/attention/rope.h>
 #include <shelf/backend/hip/kernels/elementwise/rmsnorm.h>
 #include <shelf/foundation/numeric.hpp>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
+#include <shelf/quant/mxfp4.hpp>
 
 namespace shelf::backend::hip {
 
@@ -70,20 +73,10 @@ template <class T> hipError_t malloc_dev(T** out, std::size_t count) {
 
 } // namespace
 
-// ---- device 確保の計上（予算 enforcement） ----------------------------------
-// 予算（vram_budget_bytes）はこの実行器が確保した合計への上限として働き、
-// hipMalloc を試みる前に止める。確保済み・要求・予算を MiB で出すので、
-// 行数や状態容量をどう動かせば収まるかが読み出し可能になる。
+// ---- device 確保の計上 ------------------------------------------------------
 Status HipStepExecutor::dev_reserve(void** out, std::size_t bytes, const char* what) {
     if (out == nullptr || bytes == 0u)
         return Status::invalid_argument("dev_reserve: null/zero", __FILE__, __LINE__);
-    if (opts_.vram_budget_bytes > 0 && dev_bytes_ + bytes > opts_.vram_budget_bytes) {
-        return Status::insufficient_memory(
-            std::string(what) + ": VRAM 予算超過（確保済み " + std::to_string(mib(dev_bytes_)) +
-                " MiB + 要求 " + std::to_string(mib(bytes)) + " MiB > 予算 " +
-                std::to_string(mib(opts_.vram_budget_bytes)) + " MiB）",
-            __FILE__, __LINE__);
-    }
     const hipError_t e = hipMalloc(out, bytes);
     if (e != hipSuccess)
         return Status::from(Status::Code::device_error,
@@ -208,12 +201,49 @@ Status HipStepExecutor::upload_weight_bf16(TensorId id, const bf16_t* data, std:
     return Status::make_ok();
 }
 
+Status HipStepExecutor::upload_weight_mxfp4(TensorId id, const std::uint8_t* codes,
+                                            std::size_t n_codes, const std::uint8_t* scales,
+                                            std::size_t n_scales, std::size_t features,
+                                            std::uint32_t k_padded) {
+    (void)hipSetDevice(opts_.device);
+    using namespace shelf::quant::mxfp4;
+    if (weight_mxfp4_.count(id.value()) || weight_fp8_.count(id.value()) ||
+        weight_dev_.count(id.value()))
+        return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
+    if (features == 0u || (k_padded % kBlockK) != 0u)
+        return Status::invalid_argument("upload_weight_mxfp4: 形の指定不正", __FILE__, __LINE__);
+    const std::size_t want_codes = tiled_bytes(u32(features), k_padded);
+    const std::size_t want_scales =
+        static_cast<std::size_t>(features) * (k_padded / kBlockK);
+    if (n_codes != want_codes)
+        return Status::invalid_argument(
+            "upload_weight_mxfp4: コード数がレイアウトと不一致（" + std::to_string(n_codes) +
+            " != " + std::to_string(want_codes) + "）", __FILE__, __LINE__);
+    if (n_scales != want_scales)
+        return Status::invalid_argument(
+            "upload_weight_mxfp4: スケール数が不一致（" + std::to_string(n_scales) + " != " +
+            std::to_string(want_scales) + "）", __FILE__, __LINE__);
+    std::uint8_t* cdev = nullptr;
+    std::uint8_t* sdev = nullptr;
+    SHELF_RETURN_IF_ERROR(dev_reserve(reinterpret_cast<void**>(&cdev), n_codes,
+                                      "malloc mxfp4 codes"));
+    SHELF_RETURN_IF_ERROR(dev_reserve(reinterpret_cast<void**>(&sdev), n_scales,
+                                      "malloc mxfp4 scales"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(cdev, codes, n_codes, hipMemcpyHostToDevice),
+                                "upload mxfp4 codes"));
+    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(sdev, scales, n_scales, hipMemcpyHostToDevice),
+                                "upload mxfp4 scales"));
+    weight_mxfp4_[id.value()] = Mxfp4Weight{cdev, sdev, features, k_padded};
+    return Status::make_ok();
+}
+
 Status HipStepExecutor::upload_weight_fp8(TensorId id, const std::uint8_t* codes,
                                           std::size_t n_codes, const float* scales,
                                           std::size_t features, std::uint32_t k_padded,
                                           bool weight_block128) {
     (void)hipSetDevice(opts_.device);
     using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
     if (weight_fp8_.count(id.value()) || weight_dev_.count(id.value()))
         return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
     if (features == 0u || (k_padded % kTileK) != 0u)
@@ -273,6 +303,7 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
             const std::size_t bs = opts_.kv_block_size;
             loc.pages = (cap + bs - 1) / bs;
             const std::size_t pool_elems = loc.pages * bs * kvh * D;
+            loc.pool_bytes = pool_elems * sizeof(bf16_t);   // reset で 0 クリアする
             SHELF_RETURN_IF_ERROR(
                 dev_reserve(&loc.k_pool, pool_elems * sizeof(bf16_t), "kv pool K"));
             SHELF_RETURN_IF_ERROR(
@@ -336,14 +367,33 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
 
 Status HipStepExecutor::reset_states() {
     (void)hipSetDevice(opts_.device);
+    // **必ず実行ストリーム上で** 0 クリアする。`hipMemset`（既定ストリーム）は
+    // 実行器の non-blocking stream_ と順序が保証されず、直前のカーネルと競合する
+    // （実測: 2 回目のシーケンスだけ結果が変わる原因だった）。
     for (auto& [id, loc] : state_dev_) {
         loc.rows = 0;
         if (loc.dev)
-            SHELF_RETURN_IF_ERROR(
-                hipok(hipMemset(loc.dev, 0, loc.elems * sizeof(float)), "reset state"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(loc.dev, 0, loc.elems * sizeof(float), stream_), "reset state"));
+        if (loc.k_pool != nullptr && loc.pool_bytes != 0)
+            SHELF_RETURN_IF_ERROR(hipok(hipMemsetAsync(loc.k_pool, 0, loc.pool_bytes, stream_),
+                                        "reset kv K"));
+        if (loc.v_pool != nullptr && loc.pool_bytes != 0)
+            SHELF_RETURN_IF_ERROR(hipok(hipMemsetAsync(loc.v_pool, 0, loc.pool_bytes, stream_),
+                                        "reset kv V"));
     }
-    // KV pools keep stale bytes; rowpos/rows=0 makes them unreachable by the
-    // paged addressing (kernels read positions < rows only).
+    // KV プールも 0 に戻す。rows=0 なら「読まれない」はずだが、**ブロック単位で
+    // 読むカーネル**（1 ブロック 16 トークン等）では未書き込み域の残骸が見える経路が
+    // あり、実測で 2 回目のシーケンスが 1 回目と変わった（`shelf-validate` の T0 が
+    // bf16 / FP8 の両方で diverged）。declare 直後と同じ条件へ戻すためゼロで埋める。
+    //
+    // アリーナ（活性化＋ declare 相の scratch）はステップ内で再利用するため、
+    // **前のシーケンスの最終ステップの値**が残る。1 ステップ目に scratch を
+    // 読むカーネル（rope の展開・GDN の準備領域など）があると、2 回目以降の
+    // リクエストが 1 回目と違う結果になる（実測: 同一プロンプト・greedy でも
+    // 2 回目が変わる）。新しいシーケンスの 1 ステップ目でアリーナを 0 クリアして
+    // 「プロセス起動直後と同じ条件」に戻す。
+    arena_zero_pending_ = true;
     return Status::make_ok();
 }
 
@@ -398,7 +448,7 @@ const HipStepExecutor::FuseCache& HipStepExecutor::fuse_for(const ir::Graph& g) 
             const std::uint32_t v = p.output.id.value();
             if (users[v] != 1u) continue;
             const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
-            if (F == 0u || (F % shelf::quant::fp8::kActGroupK) != 0u) continue;
+            if (F == 0u || (F % shelf::quant::fp8::fine::kActGroupK) != 0u) continue;
             if (shelf::quant::fp8::pad_k(u32(F)) != u32(F)) continue;
             for (const auto& q : g.primitives()) {
                 if (q.inputs.empty() || q.inputs[0].value() != v) continue;
@@ -443,7 +493,7 @@ const HipStepExecutor::FuseCache& HipStepExecutor::fuse_for(const ir::Graph& g) 
             const std::uint32_t v = p.output.id.value();
             if (!fp8_leaf(v)) continue;
             const std::size_t F = p.output.shape.dim(p.output.shape.rank() - 1);
-            if (F == 0u || (F % shelf::quant::fp8::kActGroupK) != 0u) continue;
+            if (F == 0u || (F % shelf::quant::fp8::fine::kActGroupK) != 0u) continue;
             if (shelf::quant::fp8::pad_k(u32(F)) != u32(F)) continue;
             c->rmsnorm_out.push_back(v);
         }
@@ -518,6 +568,9 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
             return st;
         }
         arena_cap_ = plan.peak_bytes;
+        // 新しいアリーナはゼロ初期化されていない（hipMalloc は未定義）。最初の
+        // ステップの scratch を読むカーネルのために、確保したら 0 で埋める。
+        arena_zero_pending_ = true;
     }
     plan_ = &plan;
     value_dev_.clear();
@@ -779,11 +832,67 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         // 重みが FP8（E4M3）で upload されていれば W8A8 経路。同じ層の中でも
         // linear_attn 側は bf16 のまま（checkpoint の ignore）なので、この分岐は
         // 重み単位で決まる。
+        // 重みが MXFP4（quark: E2M1 ＋ E8M0）なら W4A8 経路。活性化は既存の
+        // FP8 量子化をそのまま使い、GEMM だけ MXFP4 版に差し替える。
+        const auto mx = p.weights.empty()
+                            ? weight_mxfp4_.end()
+                            : weight_mxfp4_.find(p.weights[0].value());
+        if (mx != weight_mxfp4_.end()) {
+            using namespace shelf::quant::mxfp4;
+            const std::uint32_t kp = pad_k(u32(K));
+            if (kp != u32(K))
+                return Status::unsupported(
+                    "linear(mxfp4): K が 32 の倍数でない", __FILE__, __LINE__);
+            const std::uint32_t act_group =
+                (opts_.fp8_act_group != 0u &&
+                 (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                    ? shelf::quant::fp8::fine::kActGroupK
+                    : 0u;
+            const std::size_t act_scales =
+                shelf::quant::fp8::fine::activation_scale_count(u32(rows), kp, act_group);
+            SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
+                shelf::quant::fp8::tiled_bytes(u32(rows), kp), act_scales));
+            SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
+                                          static_cast<const bf16_t*>(x->dev), fp8_codes_dev_,
+                                          fp8_scales_dev_, u32(rows), u32(K), kp, u32(K),
+                                          act_group, stream_),
+                                      "mxfp4 act quantize (fp8/uint8)"));
+            // prefill 用カーネルは 128 行タイルだが、端数の行は読み込み側で clamp
+            // 済み（`linear_mxfp4_prefill.hip`。単体テストで 16/32/64/96 行が誤差 0）。
+            // カーネルの前提は K が 128 の倍数であること。
+            if ((kp % 128u) != 0u)
+                return Status::unsupported(
+                    "linear(mxfp4): prefill は K が 128 の倍数のみ（k_padded " +
+                        std::to_string(kp) + "）",
+                    __FILE__, __LINE__);
+            Mxfp4GemmScaleArgs sa;
+            sa.act_group = act_group;
+            sa.activation_scale_stride =
+                static_cast<std::uint32_t>(act_scales / (rows == 0 ? 1 : rows));
+            sa.weight_scale_stride = kp / kBlockK;
+            const auto dt = f32_out ? Mxfp4GemmOutputDType::F32 : Mxfp4GemmOutputDType::BF16;
+            if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
+                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_decode1(
+                                              mx->second.codes, mx->second.scales,
+                                              fp8_codes_dev_, fp8_scales_dev_, o, dt,
+                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                          "gemm mxfp4 w4a8 decode1"));
+            else
+                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_prefill(
+                                              mx->second.codes, mx->second.scales,
+                                              fp8_codes_dev_, fp8_scales_dev_, o, dt,
+                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                          "gemm mxfp4 w4a8 prefill"));
+            if (f32_out) logits_dev_ = static_cast<float*>(o);
+            return set_out(f32_out, o);
+        }
+
         const auto f8 = p.weights.empty()
                             ? weight_fp8_.end()
                             : weight_fp8_.find(p.weights[0].value());
         if (f8 != weight_fp8_.end()) {
             using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
             const std::uint32_t kp = pad_k(u32(K));
             if (kp != u32(K))
                 return Status::unsupported(
@@ -870,9 +979,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         if (p.attr.gamma_plus_one &&
             std::find(fuse.rmsnorm_out.begin(), fuse.rmsnorm_out.end(),
                       p.output.id.value()) != fuse.rmsnorm_out.end() &&
-            F % shelf::quant::fp8::kActGroupK == 0u &&
+            F % shelf::quant::fp8::fine::kActGroupK == 0u &&
             shelf::quant::fp8::pad_k(u32(F)) == u32(F)) {
             using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
             const std::uint32_t kp = u32(F);
             if (ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
                                    activation_scale_count(u32(rows), kp, kActGroupK)).ok()) {
@@ -1070,9 +1180,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const auto& fuse = fuse_for(g);
         const bool fusable = std::find(fuse.swiglu_out.begin(), fuse.swiglu_out.end(),
                                        p.output.id.value()) != fuse.swiglu_out.end() &&
-                             F % shelf::quant::fp8::kActGroupK == 0u;
+                             F % shelf::quant::fp8::fine::kActGroupK == 0u;
         if (fusable) {
             using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
             const std::uint32_t kp = u32(F);
             if (ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
                                    activation_scale_count(u32(rows), kp, kActGroupK)).ok()) {
@@ -1345,11 +1456,12 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         const auto& gfuse = fuse_for(g);
         // rows==1（decode）では 2 発射に負けた（54.19 → 54.36 ms/tok）ので prefill のみ。
         if (feat_flat != 0u && step_rows_ > 1u &&
-            feat_flat % shelf::quant::fp8::kActGroupK == 0u &&
+            feat_flat % shelf::quant::fp8::fine::kActGroupK == 0u &&
             shelf::quant::fp8::pad_k(u32(feat_flat)) == u32(feat_flat) &&
             std::find(gfuse.gated_out.begin(), gfuse.gated_out.end(),
                       p.output.id.value()) != gfuse.gated_out.end()) {
             using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
             const std::uint32_t kp = u32(feat_flat);
             if (ensure_fp8_scratch(fp8_activation_bytes(u32(step_rows_), kp),
                                    activation_scale_count(u32(step_rows_), kp,
@@ -1448,17 +1560,28 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         // 複数行（prefill）で受理条件を満たすならタイル化 prefill kernel。
         // 1 行（decode）は従来どおり（grid が 1 CTA に直列化して遅くなる）。
         // `SHELF_ATTN_PREFILL=0` で per-query 経路に固定できる（数値の A/B 用）。
+        // prefill は既定で転置コア版（S^T = K·Q^T）。`SHELF_ATTN_PREFILL_ST=0` で
+        // 従来の S = Q·K^T 版に戻せる（A/B と切り分け用）。
         const char* attn_env = std::getenv("SHELF_ATTN_PREFILL");
+        const bool st_env = [] {
+            const char* e = std::getenv("SHELF_ATTN_PREFILL_ST");
+            return e == nullptr || e[0] != '0';
+        }();
+        const bool st_path = st_env && attention_paged_prefill_st_bf16_supported(at);
         const bool prefill_path = attention_paged_prefill_bf16_supported(at) &&
                                   (attn_env == nullptr || attn_env[0] != '0');
         {
-            const hipError_t ea = prefill_path
-                ? launch_attention_paged_prefill_bf16(
+            const hipError_t ea = st_path
+                ? launch_attention_paged_prefill_st_bf16(
                       at, static_cast<const bf16_t*>(st.k_pool),
                       static_cast<const bf16_t*>(st.v_pool), stream_)
-                : launch_attention_paged_bf16(
-                      at, static_cast<const bf16_t*>(st.k_pool),
-                      static_cast<const bf16_t*>(st.v_pool), stream_);
+                : (prefill_path
+                      ? launch_attention_paged_prefill_bf16(
+                            at, static_cast<const bf16_t*>(st.k_pool),
+                            static_cast<const bf16_t*>(st.v_pool), stream_)
+                      : launch_attention_paged_bf16(
+                            at, static_cast<const bf16_t*>(st.k_pool),
+                            static_cast<const bf16_t*>(st.v_pool), stream_));
             SHELF_RETURN_IF_ERROR(hipok(ea, "attention paged"));
         }
         // NOTE(split-KV decode): `launch_attention_paged_bf16_split` + `..._split_reduce`

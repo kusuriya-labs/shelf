@@ -113,16 +113,42 @@ __global__ void __launch_bounds__(kThreads) gdn_chunk_impl(
         const std::uint32_t rows = (row_end - rb < CH) ? (row_end - rb) : CH;
 
     // ---- 1. k を LDS へ（K と Kᵀ）、ゲートを用意する -------------------------
-    for (std::uint32_t e = tid; e < CH * DK; e += kThreads) {
-        const std::uint32_t t = e / DK;
-        const std::uint32_t i = e % DK;
-        float val = 0.0f;
-        if (t < rows) val = k_base[static_cast<std::size_t>(rb + t) * args.k_row_stride + i];
-        const _Float16 h = static_cast<_Float16>(val);
-        s.k[t * kPitch + i] = h;   // 転置版（kt）は持たない。状態更新側で転置読みする
-        float qv = 0.0f;
-        if (t < rows) qv = q_base[static_cast<std::size_t>(rb + t) * args.q_row_stride + i];
-        s.q[t * kQP + i] = static_cast<_Float16>(qv);   // 換算は従来と同じ 1 回だけ
+    // 4 要素ずつ運ぶ（f32 の float4 = 16 B ロード、LDS へは half 4 個 = 8 B ストア）。
+    // 行ストライドが 4 の倍数でない形は従来どおり 1 要素ずつ。
+    if ((args.k_row_stride % 4u) == 0u && (args.q_row_stride % 4u) == 0u) {
+        constexpr std::uint32_t kG4 = DK / 4u;
+        for (std::uint32_t e = tid; e < CH * kG4; e += kThreads) {
+            const std::uint32_t t = e / kG4;
+            const std::uint32_t i = (e - t * kG4) * 4u;
+            float4 kv = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 qv = {0.0f, 0.0f, 0.0f, 0.0f};
+            if (t < rows) {
+                kv = *reinterpret_cast<const float4*>(
+                    k_base + static_cast<std::size_t>(rb + t) * args.k_row_stride + i);
+                qv = *reinterpret_cast<const float4*>(
+                    q_base + static_cast<std::size_t>(rb + t) * args.q_row_stride + i);
+            }
+            // 4 個の half をローカルに作り、8 B のまま LDS へ写す。
+            _Float16 hk[4] = {static_cast<_Float16>(kv.x), static_cast<_Float16>(kv.y),
+                              static_cast<_Float16>(kv.z), static_cast<_Float16>(kv.w)};
+            _Float16 hq[4] = {static_cast<_Float16>(qv.x), static_cast<_Float16>(qv.y),
+                              static_cast<_Float16>(qv.z), static_cast<_Float16>(qv.w)};
+            // 行内は連続（kPitch=136・kQP=132 はともに 4 の倍数）なので 8 B ストアで書ける。
+            *reinterpret_cast<uint2*>(&s.k[t * kPitch + i]) = *reinterpret_cast<const uint2*>(hk);
+            *reinterpret_cast<uint2*>(&s.q[t * kQP + i]) = *reinterpret_cast<const uint2*>(hq);
+        }
+    } else {
+        for (std::uint32_t e = tid; e < CH * DK; e += kThreads) {
+            const std::uint32_t t = e / DK;
+            const std::uint32_t i = e % DK;
+            float val = 0.0f;
+            if (t < rows) val = k_base[static_cast<std::size_t>(rb + t) * args.k_row_stride + i];
+            const _Float16 h = static_cast<_Float16>(val);
+            s.k[t * kPitch + i] = h;   // 転置版（kt）は持たない。状態更新側で転置読みする
+            float qv = 0.0f;
+            if (t < rows) qv = q_base[static_cast<std::size_t>(rb + t) * args.q_row_stride + i];
+            s.q[t * kQP + i] = static_cast<_Float16>(qv);   // 換算は従来と同じ 1 回だけ
+        }
     }
     if (tid == 0u) {
         const float dt_bias = bf16f(args.dt_bias + v_head);

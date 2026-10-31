@@ -1,7 +1,7 @@
 // shelf GEMM FP8 W8A8 device layer（gfx1201 の E4M3 行列命令）。Private header、
 // 使う TU は src/backend/hip/kernels/gemm/linear_fp8.hip のみ。
 //
-// 断片順レイアウト（`src/quant/include/shelf/quant/fp8_w8a8.hpp` と一致させる）:
+// 断片順レイアウト（`src/quant/include/shelf/quant/fp8_perchannel.hpp` と一致させる）:
 //   16 行（出力特征）× 32 K を 1 タイル（512 バイト）として
 //     [K 前半 16 の 16 行][K 後半 16 の 16 行]、行内は K が 16 バイト連続。
 //   lane は m_lane = tid & 15（その行）、k_group = tid >> 4（16 K の中の 8 バイト組）を担う。

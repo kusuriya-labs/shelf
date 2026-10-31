@@ -42,8 +42,12 @@ BootOutcome boot(const BootRequest& req, bool print) {
     breq.first_device = req.first_device;
     breq.pipeline_parallel = req.pipeline_parallel;
     breq.arena_bytes = req.arena_bytes;
+    breq.required = req.required;
+    breq.optional = req.optional;
     const auto resolved = ::shelf::runtime::boot::resolve(probe, breq);
     out.summary = ::shelf::runtime::boot::describe(probe, resolved.decision);
+    out.features = probe.features;
+    out.missing_optional = resolved.decision.missing_optional;
     if (print) std::printf("boot: %s\n", out.summary.c_str());
     if (!resolved.accepted) return rejected(out, resolved.reason);
     out.accepted = true;
@@ -56,6 +60,7 @@ BootOutcome boot(const BootRequest& req, bool print) {
         return rejected(out,
                         "このビルドは HIP 非対応（SHELF_ENABLE_HIP=ON で再構築してください）");
     out.summary = "backend=cpu（HIP 非対応ビルド）";
+    out.features = ::shelf::backend::build_features(/*device_runtime=*/false);
     if (print) std::printf("boot: %s\n", out.summary.c_str());
     out.accepted = true;
     return out;

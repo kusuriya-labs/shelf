@@ -6,7 +6,8 @@
 #include <random>
 #include <vector>
 
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 
 namespace {
 
@@ -175,18 +176,18 @@ void test_scale_contract() {
     check(fp8::token_scale(0.0f) == 0.0f, "amax 0 -> scale 0");
     check(fp8::token_scale(448.0f) == 1.0f, "amax 448 -> scale 1");
     check(fp8::kE4m3Max == 448.0f, "E4M3 の最大値は 448");
-    check(fp8::weight_scale_count(fp8::WeightScaleGranularity::PerChannel, 4096u, 12288u) == 4096u,
+    check(fp8::fine::weight_scale_count(fp8::fine::WeightScaleGranularity::PerChannel, 4096u, 12288u) == 4096u,
           "per-channel は出力特征ごと");
-    check(fp8::weight_scale_count(fp8::WeightScaleGranularity::Block128, 4096u, 12288u) ==
+    check(fp8::fine::weight_scale_count(fp8::fine::WeightScaleGranularity::Block128, 4096u, 12288u) ==
               32u * 96u,
           "block128 は 128(出力) × 128(K) タイルごと");
-    check(fp8::scale_k_blocks(12288u) == 96u && fp8::scale_k_blocks(4096u) == 32u,
+    check(fp8::fine::scale_k_blocks(12288u) == 96u && fp8::fine::scale_k_blocks(4096u) == 32u,
           "K 方向のスケールブロック数");
-    check(fp8::scale_n_blocks(fp8::WeightScaleGranularity::Block128, 4096u) == 32u,
+    check(fp8::fine::scale_n_blocks(fp8::fine::WeightScaleGranularity::Block128, 4096u) == 32u,
           "N 方向のスケールブロック数");
-    check(fp8::act_scale_groups(12288u, fp8::kActGroupK) == 96u, "act_group=128 のグループ数");
-    check(fp8::act_scale_groups(12288u, fp8::kActGroupWholeRow) == 1u, "act_group=0 は 1 グループ");
-    check(fp8::activation_scale_count(64u, 4096u, fp8::kActGroupK) == 64u * 32u,
+    check(fp8::fine::act_scale_groups(12288u, fp8::fine::kActGroupK) == 96u, "act_group=128 のグループ数");
+    check(fp8::fine::act_scale_groups(12288u, fp8::fine::kActGroupWholeRow) == 1u, "act_group=0 は 1 グループ");
+    check(fp8::fine::activation_scale_count(64u, 4096u, fp8::fine::kActGroupK) == 64u * 32u,
           "活性化スケールの総数 = rows × グループ数");
     check(fp8::amax_scale(896.0f) == 2.0f, "amax からスケール");
     check(!fp8::validate_tiling(4, 4, 30).ok(), "k_padded は 32 倍数でないと拒否");

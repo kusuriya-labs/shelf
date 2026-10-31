@@ -25,15 +25,24 @@
 | admission | **2 段**: ① pinned 容量に対して `Σ (prompt_i + max_new_i − 1)`、
   ② 実行は active 文脈の合計 ≤ 81,920 tok |
 
-## 2. 予算の算出と決定者（未着手 — D2 の実装時に書く）
+## 2. 予算の算出と決定者（2026-10-30 実装 — D2）
 
-* **算出は純粋関数**: `placement/` が GPU 非依存で必要量を積み、不足を名前付きで返す
-  （radiance「推測禁止、既知量の算術」／ paiton の `fits` 判定を踏襲）。
-  `MemoryKind` / `BufferView`（`backend/common`）で所在を表し、実確保のみ backend が行う
-* **入力**: 空き VRAM / 空き pinned の取得方法、headroom の既定値、
-  GDN 固定費の扱い（`engine_contract` §8.7 が「予算に未計上」と指摘している点）
-* **出力と失敗**: `Status::insufficient_memory` を投げるタイミングと文言
+* **算出は純粋関数**（`src/placement/include/shelf/placement/budget.hpp`）:
+  * `kv_bytes_per_token(full_layers, kv_heads, head_dim)` — §1 の式そのもの（式の正本）
+  * `plan_budget(footprint, demand, limits)` — **最大ステージ**で判定し、不足を
+    **名前付き**（`device: 最大ステージ X が使える Y を Z 超過` / `host(pinned): KV …`）で返す
+  * `place_all_device`（既定 = 全 device 常駐）/ `place_fitting_budget`（opt-in で pinned へ）
+  * `Limits.device_free_bytes == 0` は「不明」として**判定しない**（不明を 0 として
+    誤って拒否しない）。`headroom` 既定 5%
+* **入力の取り方**: 呼び手（`apps/common/pipeline.cpp`）が
+  ① 重み = 実体化計画のバイト数 ② 状態 = 宣言済み state の f32 ③ アリーナ =
+  `compiler::plan_arena` の `peak_bytes`（`--arena-mib` 固定時はその値）を積み、
+  空き VRAM は `hipMemGetInfo` で実測して渡す。**確保（hipMalloc）はこの判定の後**
+* **出力と失敗**: 判定は `Status::insufficient_memory` として返り、アプリは
+  `pipeline: budget: 必要 X / 使える Y [不足] …` を出して**確保前に**終了する
   （`serve_protocol.md` §3 では `overloaded` / 503 に写像される）
+* **GDN 固定費**: 状態は `steps` 宣言から自動的に積まれる（`kv_capacity` 非依存の分も
+  含む）。§8.7 の「未計上」は解消（pinned 正本の KV は `Demand.host_kv_tokens` で計上可能）
 
 ## 3. 段 2 の実行側の選択肢（`engine_contract.md` §8.6 で (a) に確定）
 
@@ -49,7 +58,15 @@
 * 正本（pinned）の確保方式 — `hipHostRegister` か `hipHostMalloc` か、ラージページの要否
   （現状 shelf に `hipHostMalloc` の利用はゼロ。協調推論計画 フェーズ 3 の pinned 論点と共通）
 
-## 5. 検証（実装時に書く）
+## 5. 検証（2026-10-30 実装分）
 
-* 予算不足がエンジン起動前・受付時に**原因付き**で拒否されるテスト（`directory_design` D1/D6）
-* 計測: 予算値と実測（`cudaMemGetInfo` 相当）の対表 — `docs/benchmark/`（実装後に正式化）
+* `unit.placement`（GPU 不要・cpu プリセット）: KV の式（9B = 32 KiB/token）、
+  収まる/収まらない、容量不明で拒否しない、PP は最大ステージで判定、headroom、
+  ステージ数の不一致、既定 = 全 device 常駐、pinned への落とし方
+* 予算不足の**原因付き拒否**（実測・R9700）: 27B-FP8 に `--arena-mib 8000` を付けた実行が
+  `pipeline: budget: 必要 37.17 GiB / 使える 30.19 GiB [不足] device: 最大ステージ … を
+  6.98 GiB 超過` で**確保前に exit 1**
+* 正常系の対表: 9B-FP8 の PP=2 で `必要 6.20 GiB / 使える 30.19 GiB [ok]`、
+  ステージ毎の計上（6040 / 6041 MiB）と実測の空き減（約 6.0 GiB）が一致
+* 起動受理の機能表（D6）: `unit.runtime_boot` の `test_features`（要求充足・不足・
+  任意機能・後方互換）。アプリは `app::boot` の 1 箇所で要求を宣言する

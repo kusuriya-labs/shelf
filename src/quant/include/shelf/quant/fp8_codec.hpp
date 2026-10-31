@@ -1,20 +1,11 @@
-// shelf quant — FP8 W8A8（compressed-tensors / float-quantized）の契約とホスト側変換。
+// shelf quant — FP8（E4M3）の数値コーデックと断片順レイアウト（両形式の共通部）。
 //
-// checkpoint 側の正（`config.json` の `quantization_config`）:
-//   * weights     : type float / num_bits 8 / strategy **channel** / symmetric / dynamic false
-//   * activations : type float / num_bits 8 / strategy **token**   / symmetric / dynamic true
-//   * 格納: `<name>.weight` が `F8_E4M3`、`<name>.weight_scale` が `BF16 [out, 1]`
+// ここだけは「通常 FP8」と「ブロック単位スケール形式」で共通:
+//   * E4M3 の符号化・復号、amax からのスケール
+//   * 行列命令（gfx1201 の FP8 WMMA）が読む**断片順**のレイアウトと relayout
+//     （行優先 → 断片順は要素の値を変えない**無損**。有損の dequant はしない）
 //
-// 実装側の契約（本ヘッダが定義するもの）:
-//   1. 数値は `code(1 バイト) × scale(f32)`。実数値 = code * scale。
-//   2. 重みスケールは**出力チャネル単位**（K に依存しない。1 行に 1 個）。
-//   3. 活性化スケールは**トークン（行）単位**で実行時に計算する（`amax / kE4m3Max`）。
-//      checkpoint に `input_scale` は存在しない（dynamic のため）。
-//   4. 行列命令（gfx1201 の FP8 WMMA）が読むコード配置は**断片順**（下記 tiled_*）。
-//      行優先 → 断片順の再配置は要素の値を変えない**無損 relayout** なので、
-//      「ロード時の変換は無損な relayout のみ」という契約（directory_design P5）に従う。
-//      有損の dequant は行わない（行わない限り、どこでやってもよい）。
-//
+// 形式ごとの違い（スケールの粒度）は fp8_perchannel.hpp と fp8_finegrained.hpp が持つ。
 // 依存: foundation のみ（境界ルール上、quant は model / backend / runtime / hip を
 // include しない。デバイス側の e4m3 変換命令は backend/hip の codec にある）。
 #pragma once
@@ -52,55 +43,6 @@ SHELF_QUANT_HOST_DEVICE inline float amax_scale(float amax) noexcept {
 // 行全体（= トークン単位）の amax から作る場合の名残。式は同じ。
 SHELF_QUANT_HOST_DEVICE inline float token_scale(float amax) noexcept {
     return amax_scale(amax);
-}
-
-// 観測最大値から決まるスケーリングの基準。
-//   group = 0 のとき 1 行（= トークン）全体、group = kActGroupK のとき K を 128
-//   要素のグループにしたもの。**どちらを使うかは checkpoint の宣言が正**で、
-//   apps 側が `quantization_config` から読む（決め打ちしない）:
-//     9B-FP8  : strategy=token        -> 0     / 重み strategy=channel
-//     27B-FP8 : blockwise dynamic   -> 128   / 重み weight_block_size=[128,128]
-//   粒度の実測差（同じ実活性化に対する相対 L2 誤差 1.14 倍改善）は
-//   draft_docs/shelf_validate.md に記録してあるが、宣言に無い粒度は使わない。
-inline constexpr std::uint32_t kActGroupWholeRow = 0u;
-inline constexpr std::uint32_t kActGroupK = 128u;
-
-// 活性化スケールの個数（行あたり）。
-constexpr std::uint32_t act_scale_groups(std::uint32_t k_padded, std::uint32_t group) noexcept {
-    return (group == 0u) ? 1u : (k_padded / group);
-}
-
-// 重みスケールの粒度。
-//   PerChannel : 出力特征ごとに 1 個（この checkpoint の宣言 `strategy: channel`）
-//   Block128   : 128(出力) × 128(K) タイルに 1 個（移植元 PhaseShift の native 形）
-enum class WeightScaleGranularity : std::uint8_t {
-    PerChannel,
-    Block128,
-};
-
-// K 方向のスケールブロック数（128 単位。端数は切り上げ = 詰めを含むタイル数）。
-constexpr std::uint32_t scale_k_blocks(std::uint32_t k_padded) noexcept {
-    return (k_padded + kActGroupK - 1u) / kActGroupK;
-}
-// 出力方向のブロック数（Block128 のとき 128 単位、PerChannel のときは特征数そのもの）。
-constexpr std::uint32_t scale_n_blocks(WeightScaleGranularity g, std::uint32_t features) noexcept {
-    return (g == WeightScaleGranularity::Block128) ? ((features + kActGroupK - 1u) / kActGroupK)
-                                                   : features;
-}
-
-// 重みスケール配列の要素数（f32）。
-//   PerChannel : 出力特征ごと（K 方向は 1）
-//   Block128   : [ceil(features/128)][ceil(k_padded/128)]
-constexpr std::size_t weight_scale_count(WeightScaleGranularity g, std::uint32_t features,
-                                         std::uint32_t k_padded) noexcept {
-    if (g == WeightScaleGranularity::Block128)
-        return static_cast<std::size_t>(scale_n_blocks(g, features)) * scale_k_blocks(k_padded);
-    return features;
-}
-// 活性化スケール配列の要素数（f32、行優先 [rows][k_blocks]）。
-constexpr std::size_t activation_scale_count(std::uint32_t rows, std::uint32_t k_padded,
-                                             std::uint32_t act_group) noexcept {
-    return static_cast<std::size_t>(rows) * act_scale_groups(k_padded, act_group);
 }
 
 // ---- 断片順のコード配置（WMMA のフラグメント順と一致させるレイアウト） ----------
@@ -164,5 +106,6 @@ Status untile_codes(const std::uint8_t* tiled, std::uint32_t rows, std::uint32_t
 
 // 重みスケールの型は f32 で統一する（checkpoint が BF16 [out,1] でも、実行器に
 // 渡す時点で f32 に正規化する。値域は狭いので無損）。
+
 
 }  // namespace shelf::quant::fp8

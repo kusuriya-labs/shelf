@@ -17,6 +17,8 @@
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/model/qwen35/step_graph.hpp>
 
+#include <shelf/api/sampling.hpp>
+
 #include "common/app_support.hpp"
 #include "common/boot.hpp"
 #include "common/pipeline.hpp"
@@ -53,6 +55,12 @@ int main(int argc, char** argv) {
     int fp8_act_group = -1;   // FP8 活性化の量子化粒度。-1 = config.json の宣言に従う
     int prefill_rows = 1024;   // prefill の 1 チャンク行数（VRAM が足りないとき落とす）
     int pp = 1;               // pipeline-parallel のステージ数（1 = 単一 GPU）
+    // 生成パラメータ（`engine_contract.md` §3。既定は greedy = 従来と同じ）
+    double temperature = 0.0;
+    int top_k = 0;
+    double top_p = 1.0;
+    double min_p = 0.0;
+    long long seed = -1;     // -1 = 未指定（エンジンが採番）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* what) -> std::string {
@@ -66,35 +74,42 @@ int main(int argc, char** argv) {
         else if (a == "--device") device = next("cpu|hip");
         else if (a == "--gpu") gpu = std::atoi(next("gpu index").c_str());
         else if (a == "--arena-mib") arena_mib = std::atoll(next("arena MiB").c_str());
-        else if (a == "--vram-budget-mib") budget_mib = std::atoll(next("vram budget MiB").c_str());
         else if (a == "--logits-all-rows") logits_all_rows = true;
         else if (a == "--dump-acts") dump_acts = next("dir");
         else if (a == "--fp8-act-group") fp8_act_group = std::atoi(next("auto|0|128").c_str());
         else if (a == "--prefill-rows") prefill_rows = std::atoi(next("rows").c_str());
         else if (a == "--pipeline-parallel") pp = std::atoi(next("K").c_str());
+        else if (a == "--temperature") temperature = std::atof(next("T").c_str());
+        else if (a == "--top-k") top_k = std::atoi(next("K").c_str());
+        else if (a == "--top-p") top_p = std::atof(next("P").c_str());
+        else if (a == "--min-p") min_p = std::atof(next("P").c_str());
+        else if (a == "--seed") seed = std::atoll(next("seed").c_str());
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
-                         "[--device cpu|hip] [--gpu N] [--arena-mib N] [--vram-budget-mib N] "
+                         "[--device cpu|hip] [--gpu N] [--arena-mib N] "
                          "[--dump-acts DIR] "
-                         "[--fp8-act-group auto|0|128] [--prefill-rows N] [--pipeline-parallel K]");
+                         "[--fp8-act-group auto|0|128] [--prefill-rows N] [--pipeline-parallel K] "
+                         "[--temperature T] [--top-k K] [--top-p P] [--min-p P] [--seed N]");
     }
     if (fp8_act_group != -1 && fp8_act_group != 0 && fp8_act_group != 128)
         return fail("--fp8-act-group は auto（省略）か 0 か 128");
     if (model_dir.empty() || ids_csv.empty()) return fail("--model and --ids required");
     if (arena_mib < 0) return fail("--arena-mib must be >= 0");
-    if (budget_mib < 0) return fail("--vram-budget-mib must be >= 0");
     if (prefill_rows < 1 || prefill_rows > 2048)
         return fail("--prefill-rows must be in [1, 2048]");
     if (pp < 1) return fail("--pipeline-parallel は 1 以上");
+    if (seed < -1) return fail("--seed は 0 以上");
+    api::Sampling sampling;
+    sampling.temperature = temperature;
+    sampling.top_k = static_cast<std::uint32_t>(top_k < 0 ? 0 : top_k);
+    sampling.top_p = top_p;
+    sampling.min_p = min_p;
+    if (seed >= 0) sampling.seed = static_cast<std::uint64_t>(seed);
+    {
+        std::string sp;
+        const auto st = api::validate_sampling(sampling, &sp);
+        if (!st.ok()) return fail(st.message());
+    }
     if (pp > 1 && device != "hip") return fail("--pipeline-parallel > 1 は hip のみ");
-
-    // ---- 起動（D1）: エンジンを起こす前に装置と要求を突き合わせる ----
-    app::BootRequest breq;
-    breq.device_execution = (device == "hip");
-    breq.first_device = static_cast<std::size_t>(gpu);
-    breq.pipeline_parallel = static_cast<std::size_t>(pp);
-    breq.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
-    const auto booted = app::boot(breq, /*print=*/true);
-    if (!booted.accepted) return fail("起動条件を満たしません: " + booted.reason);
 
     // ---- config ----
     const std::string config_text = app::read_file_str(model_dir + "/config.json");
@@ -107,6 +122,25 @@ int main(int argc, char** argv) {
     if (!fmt_r.ok()) return fail(fmt_r.status().message());
     app::Fp8ModelFormat fmt = fmt_r.value();
     if (fp8_act_group >= 0) fmt.act_group = static_cast<std::uint32_t>(fp8_act_group);
+
+    // 生成パラメータの seed を確定する（未指定ならエンジンが採番。§3.4）。
+    sampling.seed = api::assign_seed(sampling.seed, 0);
+    std::printf("sampling: %s seed=%llu\n",
+                sampling.is_greedy() ? "greedy" : "sample",
+                static_cast<unsigned long long>(*sampling.seed));
+
+    // ---- 起動（D1/D6）: 装置と要求機能を突き合わせる（エンジンを起こす前）----
+    //   config.json は数 KB なので先に読む（FP8 かどうかで要求機能が変わる）。
+    app::BootRequest breq;
+    breq.device_execution = (device == "hip");
+    breq.first_device = static_cast<std::size_t>(gpu);
+    breq.pipeline_parallel = static_cast<std::size_t>(pp);
+    breq.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
+    if (device == "hip") breq.required.add(shelf::backend::Feature::device_execution);
+    if (pp > 1) breq.required.add(shelf::backend::Feature::pipeline_parallel);
+    if (fmt.quantized) breq.required.add(shelf::backend::Feature::fp8_w8a8);
+    const auto booted = app::boot(breq, /*print=*/true);
+    if (!booted.accepted) return fail("起動条件を満たしません: " + booted.reason);
 
     std::vector<std::int64_t> ids;
     {
@@ -157,7 +191,6 @@ int main(int argc, char** argv) {
         po.kv_capacity = capacity;
         po.chunk_rows = (pf_rows > 1) ? pf_rows : 1;
         po.arena_bytes = arena_mib > 0 ? static_cast<std::size_t>(arena_mib) << 20 : 0;
-        po.vram_budget_bytes = budget_mib > 0 ? static_cast<std::size_t>(budget_mib) << 20 : 0;
         po.logits_last_row_only = !logits_all_rows;
         // --dump-acts はステップ後に中間値を読むので、offset の再利用を切る。
         po.arena_reuse = dump_acts.empty();
@@ -318,12 +351,17 @@ int main(int argc, char** argv) {
                                &last_logits);
             if (!st.ok()) return fail("decode step " + std::to_string(s) + ": " + st.message());
         }
-        std::size_t best = 0;
-        for (std::size_t i = 1; i < last_logits.size(); ++i)
-            if (last_logits[i] > last_logits[best]) best = i;
-        seq.push_back(static_cast<std::int64_t>(best));
-        std::printf("decode pos=%zu tok=%zu\n", ids.size() + static_cast<std::size_t>(s), best);
-        if (static_cast<std::int64_t>(best) == cfg.eos_token_id) break;
+        // 抽選は `runtime/generate` の契約実装（`api` 経由で再輸出）。
+        // position は「これから置くトークンの位置」= 乱数の鍵（§3.4）。
+        const auto draw = api::sample(last_logits, sampling,
+                                      ids.size() + static_cast<std::size_t>(s));
+        if (!draw.ok()) return fail("sampling: " + draw.status().message());
+        const std::int64_t best = static_cast<std::int64_t>(draw.value().index);
+        seq.push_back(best);
+        std::printf("decode pos=%zu tok=%lld%s\n", ids.size() + static_cast<std::size_t>(s),
+                    static_cast<long long>(best),
+                    draw.value().used_random ? "" : " (greedy)");
+        if (best == cfg.eos_token_id) break;
     }
 
     // ---- outputs ----

@@ -1,5 +1,7 @@
 // shelf runtime/load — 検証と実体化の実装（D3）。
 #include <shelf/runtime/load/materialize.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
+#include <shelf/quant/mxfp4.hpp>
 
 #include <cstring>
 #include <exception>
@@ -11,6 +13,7 @@ namespace shelf::runtime::load {
 namespace {
 
 using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
 
 std::size_t numel_of(const std::vector<std::size_t>& shape) {
     std::size_t n = 1;
@@ -20,7 +23,8 @@ std::size_t numel_of(const std::vector<std::size_t>& shape) {
 
 }  // namespace
 
-WeightKind classify(const TensorSource& src, const std::string& name) {
+WeightKind classify(const TensorSource& src, const std::string& name,
+                    const Fp8ModelFormat& fmt) {
     if (!src.has(name)) return WeightKind::Missing;
     auto v = src.read(name);
     if (!v.ok()) return WeightKind::Missing;
@@ -31,6 +35,11 @@ WeightKind classify(const TensorSource& src, const std::string& name) {
         return WeightKind::F32;
     case DataType::fp8_e4m3:
         return WeightKind::Fp8W8A8;
+    // MXFP4（quark）: `weight` は U8（E2M1 を 2 値/バイトでパック）。宣言が
+    // MXFP4 のときだけ許す（U8 は他の用途で現れない）。**case として書く**
+    // （前の case の直後に if を置くと到達不能になり、U8 が Missing に落ちる）。
+    case DataType::u8:
+        return fmt.mxfp4 ? WeightKind::Mxfp4 : WeightKind::Missing;
     default:
         return WeightKind::Missing;
     }
@@ -82,7 +91,7 @@ Result<std::vector<float>> read_f32(const TensorSource& src, const std::string& 
 }
 
 Result<Fp8ModelFormat> read_fp8_format(const std::string& config_json_text) {
-    using shelf::quant::fp8::WeightScaleGranularity;
+    using shelf::quant::fp8::fine::WeightScaleGranularity;
     Fp8ModelFormat f;
     if (config_json_text.empty()) return f;      // config 自体が読めない場合は非量子化扱い
     nlohmann::json root;
@@ -179,6 +188,37 @@ Result<Fp8ModelFormat> read_fp8_format(const std::string& config_json_text) {
         return f;
     }
 
+    if (method == "quark") {
+        // MXFP4（amd-quark の export）。実測の宣言:
+        //   qscheme per_group / group_size 32 / dtype fp4 / scale_format e8m0 /
+        //   weight_format real_quantized / pack_method reorder
+        // 実テンソルは `weight` U8[out, K/2]（1 バイト 2 値）と
+        // `weight_scale` U8[out, K/32]（E8M0 1 バイト）。
+        f.quantized = true;
+        f.mxfp4 = true;
+        f.scale_suffix = "_scale";
+        const auto& wj = q.contains("global_quant_config") && q.at("global_quant_config").is_object()
+                             ? q.at("global_quant_config")
+                             : q;
+        if (!wj.contains("weight") || !wj.at("weight").is_object())
+            return bad("quark に global_quant_config.weight が無い");
+        const auto& w = wj.at("weight");
+        if (w.value("dtype", std::string()) != "fp4")
+            return bad("quark の weight dtype='" + w.value("dtype", std::string()) +
+                       "' は未対応（fp4 のみ）");
+        if (w.value("qscheme", std::string()) != "per_group")
+            return bad("quark の qscheme='" + w.value("qscheme", std::string()) +
+                       "' は未対応（per_group のみ）");
+        const std::uint64_t gs = w.value("group_size", 0ull);
+        if (gs != 32ull)
+            return bad("quark の group_size=" + std::to_string(gs) + " は未対応（32 のみ）");
+        if (w.value("scale_format", std::string("e8m0")) != "e8m0")
+            return bad("quark の scale_format は e8m0 のみ対応");
+        f.mxfp4_group = 32u;
+        f.declared = "quark mxfp4 (fp4/group32/e8m0)";
+        return f;
+    }
+
     return bad("quant_method='" + method + "' 未対応");
 }
 
@@ -186,10 +226,11 @@ Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequ
                                        const Fp8ModelFormat& fmt,
                                        MaterializeBuffers* bufs) {
     MaterializedWeight out;
-    out.kind = classify(src, req.checkpoint_name);
+    out.kind = classify(src, req.checkpoint_name, fmt);
     if (out.kind == WeightKind::Missing)
-        return Status::not_found("weight not in source: " + req.checkpoint_name, __FILE__,
-                                 __LINE__);
+        return Status::not_found("weight not in source: " + req.checkpoint_name + "（長さ " +
+                                     std::to_string(req.checkpoint_name.size()) + "）",
+                                 __FILE__, __LINE__);
     if (req.shape.empty())
         return Status::invalid_argument("shape が空: " + req.checkpoint_name, __FILE__, __LINE__);
 
@@ -211,6 +252,52 @@ Result<MaterializedWeight> materialize(const TensorSource& src, const WeightRequ
             return Status::invalid_state("要素数が shape と不一致: " + req.checkpoint_name,
                                          __FILE__, __LINE__);
         out.f32 = std::move(t).value();
+        return out;
+    }
+
+    // ---- MXFP4（quark: E2M1 ニブル + E8M0 スケール）----
+    // 実テンソル: `weight` U8[out, K/2]（1 バイト 2 値・行優先）、
+    //             `weight_scale` U8[out, K/32]（E8M0 1 バイト・行優先）。
+    // 出力: 断片順コード（tiled_bytes）＋ mx_scales（E8M0 は f32 にしない）。
+    if (out.kind == WeightKind::Mxfp4) {
+        if (req.shape.size() != 2u)
+            return Status::unsupported("mxfp4 重みが 2 次元でない: " + req.checkpoint_name,
+                                       __FILE__, __LINE__);
+        const std::uint32_t rows = static_cast<std::uint32_t>(req.shape[0]);
+        const std::uint32_t mcols = static_cast<std::uint32_t>(req.shape[1]);
+        const std::uint32_t mpad = shelf::quant::mxfp4::pad_k(mcols);
+        if (mpad != mcols)
+            return Status::unsupported("mxfp4 重みで K が 32 の倍数でない: " +
+                                           req.checkpoint_name,
+                                       __FILE__, __LINE__);
+        auto codes = read_u8(src, req.checkpoint_name);
+        if (!codes.ok()) return codes.status();
+        if (codes.value().size() != static_cast<std::size_t>(rows) * (mcols / 2))
+            return Status::invalid_state("mxfp4 のコード数が shape と不一致: " +
+                                             req.checkpoint_name,
+                                         __FILE__, __LINE__);
+        std::string sname = req.checkpoint_name;
+        const std::string suffix = ".weight";
+        if (sname.size() > suffix.size() &&
+            sname.compare(sname.size() - suffix.size(), suffix.size(), suffix) == 0)
+            sname = sname.substr(0, sname.size() - suffix.size()) + ".weight" + fmt.scale_suffix;
+        auto scales = read_u8(src, sname);
+        if (!scales.ok())
+            return Status::unsupported("mxfp4 の重みにスケールが無い: " + sname, __FILE__,
+                                       __LINE__);
+        if (scales.value().size() !=
+            static_cast<std::size_t>(rows) * (mcols / shelf::quant::mxfp4::kBlockK))
+            return Status::invalid_state("mxfp4 のスケール数が shape と不一致: " + sname,
+                                         __FILE__, __LINE__);
+        const Status vt = shelf::quant::mxfp4::validate_tiling(rows, mcols, mpad);
+        if (!vt.ok()) return vt;
+        out.codes.assign(shelf::quant::mxfp4::tiled_bytes(rows, mpad), 0u);
+        const Status ps = shelf::quant::mxfp4::preshuffle_codes(
+            codes.value().data(), rows, mcols, mpad, out.codes.data());
+        if (!ps.ok()) return ps;
+        out.mx_scales = std::move(scales).value();
+        out.features = rows;
+        out.k_padded = mpad;
         return out;
     }
 

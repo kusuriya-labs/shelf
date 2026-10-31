@@ -22,7 +22,7 @@
 #include <shelf/foundation/dtype.hpp>
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/model/qwen35/step_graph.hpp>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
 #ifdef SHELF_HAVE_HIP
 #include <shelf/runtime/boot/probe.hpp>
 #endif
@@ -64,7 +64,7 @@ using WeightKind = runtime::load::WeightKind;
 using Fp8ModelFormat = runtime::load::Fp8ModelFormat;
 using Fp8WeightPayload = runtime::load::MaterializedWeight;
 WeightKind classify(const std::map<std::string, artifact::safetensors::Reader*>& where,
-                    const std::string& name);
+                    const std::string& name, const Fp8ModelFormat& fmt);
 
 // checkpoint の `quantization_config` の解析は runtime/load が持つ（D3）。
 // ここは従来の名前で呼べるようにする薄い入口。
@@ -111,7 +111,8 @@ struct MaterializationPlan {
     std::string summary;     // 例: "bf16 427 / fp8 0 / 0 B"
 };
 Result<MaterializationPlan> plan_materialization(const weights::TensorCatalog& catalog,
-                                                 const model::qwen35::StepGraphPlan& plan);
+                                                 const model::qwen35::StepGraphPlan& plan,
+                                                 const Fp8ModelFormat& fmt);
 
 // ホスト（CPU 参照経路）向けの実体化。重みを f32 で読み、状態を 0 で初期化する。
 // GPU 経路の `upload_plan` と同じ入口（正準カタログ → runtime/load）を通すので、
@@ -121,7 +122,7 @@ Status load_host_plan(HostStorageT& storage, const model::qwen35::StepGraphPlan&
                       const weights::TensorCatalog& catalog, const ShardSet& shards,
                       const Fp8ModelFormat& fmt) {
     (void)fmt;  // CPU 参照は fp8 を読まない（runtime/load が明示エラーにする）
-    auto mp = plan_materialization(catalog, plan);
+    auto mp = plan_materialization(catalog, plan, fmt);
     if (!mp.ok()) return mp.status();
     ShardSource src(shards.where);
     // ロードの内訳（read / materialize / upload）を測る開発用スイッチ。
@@ -158,7 +159,7 @@ template <class Exec>
 Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
                    const weights::TensorCatalog& catalog, const ShardSet& shards,
                    const Fp8ModelFormat& fmt, MaterializationPlan* report = nullptr) {
-    auto mp = plan_materialization(catalog, plan);
+    auto mp = plan_materialization(catalog, plan, fmt);
     if (!mp.ok()) return mp.status();
     if (report) *report = mp.value();
     ShardSource src(shards.where);
@@ -194,6 +195,13 @@ Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
             SHELF_RETURN_IF_ERROR(ex.upload_weight_fp8(
                 w.id, m.value().codes.data(), m.value().codes.size(), m.value().scales.data(),
                 m.value().features, m.value().k_padded, m.value().weight_block128));
+            break;
+        case WeightKind::Mxfp4:
+            // MXFP4（quark）: 断片順の E2M1 コードと E8M0 スケールをそのまま渡す。
+            SHELF_RETURN_IF_ERROR(ex.upload_weight_mxfp4(
+                w.id, m.value().codes.data(), m.value().codes.size(),
+                m.value().mx_scales.data(), m.value().mx_scales.size(), m.value().features,
+                m.value().k_padded));
             break;
         default:
             return Status::not_found("weight not in shards: " + w.checkpoint_name, __FILE__,

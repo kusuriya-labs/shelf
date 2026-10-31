@@ -21,6 +21,22 @@ void bf16_row_slice(const shelf::bf16_t* __restrict__ in, shelf::bf16_t* __restr
     out[i] = in[static_cast<size_t>(r) * row_stride + begin + d];
 }
 
+// 8 要素（bf16 × 8 = 16 B）ずつ運ぶ版。`cols` が 8 の倍数で、入力側の開始位置
+// （row_stride・begin）も 8 要素境界にあるときだけ使う（呼び手が判定する）。
+// 1 命令 16 B のロード/ストアになるので、prefill の大きいスライス（数百 KB）で効く。
+extern "C" __global__ __launch_bounds__(256)
+void bf16_row_slice_vec8(const shelf::bf16_t* __restrict__ in,
+                         shelf::bf16_t* __restrict__ out, uint32_t cols, uint32_t begin,
+                         uint32_t row_stride, uint32_t vec_per_row, uint32_t total_vec) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total_vec) return;
+    const uint32_t r = i / vec_per_row;
+    const uint32_t d = i - r * vec_per_row;
+    const uint4 v = *reinterpret_cast<const uint4*>(
+        in + static_cast<size_t>(r) * row_stride + begin + static_cast<size_t>(d) * 8u);
+    *reinterpret_cast<uint4*>(out + static_cast<size_t>(r) * cols + static_cast<size_t>(d) * 8u) = v;
+}
+
 // out = x * sigmoid(z), elementwise bf16.
 extern "C" __global__ __launch_bounds__(256)
 void bf16_sigmoid_gate(const shelf::bf16_t* __restrict__ x, const shelf::bf16_t* __restrict__ z,
@@ -73,6 +89,14 @@ void f32_argmax(const float* __restrict__ logits, uint32_t n, uint32_t* __restri
 hipError_t launch_bf16_row_slice(const shelf::bf16_t* in, shelf::bf16_t* out, uint32_t rows,
                                  uint32_t cols, uint32_t begin, uint32_t in_row_stride,
                                  hipStream_t stream) {
+    // 8 要素（16 B）単位で運べる形ならそちらを使う（アラインメントは要素数で判定）。
+    if ((cols % 8u) == 0u && (begin % 8u) == 0u && (in_row_stride % 8u) == 0u) {
+        const uint32_t vpr = cols / 8u;
+        const uint32_t total_vec = rows * vpr;
+        bf16_row_slice_vec8<<<(total_vec + 255u) / 256u, 256, 0, stream>>>(
+            in, out, cols, begin, in_row_stride, vpr, total_vec);
+        return hipGetLastError();
+    }
     const uint32_t total = rows * cols;
     bf16_row_slice<<<(total + 255u) / 256u, 256, 0, stream>>>(in, out, cols, begin,
                                                               in_row_stride, total);

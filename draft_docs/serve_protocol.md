@@ -98,6 +98,10 @@ envelope に足してよいのは次の 2 つだけ。追加はここに書き�
 * envelope の形（4 フィールドの存在と型）を固定フィクスチャで照合する
 * 「traceback が出ないこと」「受付時の 400 がエンジンに届かないこと」も表に 1 行ずつ足す
 * parity と同様、**この文書の表とテストは 1 対 1**。表を変えたらテストを変える
+* **実装（2026-10-31・C++ 側）**: §3 の対応表は `src/api/protocol.cpp` の
+  `code_from_status` が唯一の実装で、`unit.api_protocol` が §3 の全行（9 行 + `invalid_state`
+  の 2 分岐）を照合する。`message` にソース位置・改行が混ざらないことは
+  `unit.api_session` が確認する。HTTP 面（Python）の表駆動テストは未着手
 
 ## 7. 未決
 

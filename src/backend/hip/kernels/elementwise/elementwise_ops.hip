@@ -94,6 +94,54 @@ void phaseshift_residual_add_bf16(ElementwiseArgs args) {
                            col0, features);
 }
 
+// 8 要素（bf16 × 8 = 16 B）ずつ処理する残差加算。`features` が 8 の倍数で、
+// 3 つの行ストライドが 8 要素境界にあるときだけ使う（呼び手が判定）。
+// 4 要素版（`phaseshift_residual_add_bf16`）は 1 命令 8 B なので、大きい行列で
+// ロード/ストアの命令数が半減する。
+extern "C" __global__ __launch_bounds__(256)
+void residual_add_bf16_x8(ElementwiseArgs args) {
+    const bf16* a = static_cast<const bf16*>(args.in0);
+    const bf16* b = static_cast<const bf16*>(args.in1);
+    bf16* out = static_cast<bf16*>(args.out0);
+    const uint32_t features = args.features;
+    const uint32_t row = blockIdx.y;
+    const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * 8u;
+    if (col0 >= features) return;
+    const bf16* a_row = a + static_cast<size_t>(row) * args.in0_row_stride;
+    const bf16* b_row = b + static_cast<size_t>(row) * args.in1_row_stride;
+    bf16* out_row = out + static_cast<size_t>(row) * args.out0_row_stride;
+    if (col0 + 8u > features) {   // 端数はスカラーで
+        for (uint32_t i = 0u; col0 + i < features; ++i) {
+            out_row[col0 + i] = __float2bfloat16(__bfloat162float(a_row[col0 + i]) +
+                                                 __bfloat162float(b_row[col0 + i]));
+        }
+        return;
+    }
+    const uint4 xa = *reinterpret_cast<const uint4*>(a_row + col0);
+    const uint4 xb = *reinterpret_cast<const uint4*>(b_row + col0);
+    const uint32_t ha[4] = {xa.x, xa.y, xa.z, xa.w};
+    const uint32_t hb[4] = {xb.x, xb.y, xb.z, xb.w};
+    uint32_t ho[4];
+#pragma unroll
+    for (int w4 = 0; w4 < 4; ++w4) {
+        uint32_t v = 0u;
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const std::uint16_t pa = static_cast<std::uint16_t>((ha[w4] >> (16u * h)) & 0xFFFFu);
+            const std::uint16_t pb = static_cast<std::uint16_t>((hb[w4] >> (16u * h)) & 0xFFFFu);
+            const __hip_bfloat16 ba = __ushort_as_bfloat16(pa);
+            const __hip_bfloat16 bb = __ushort_as_bfloat16(pb);
+            const std::uint16_t po = __bfloat16_as_ushort(__float2bfloat16(
+                __bfloat162float(ba) + __bfloat162float(bb)));
+            v |= static_cast<uint32_t>(po) << (16u * h);
+        }
+        ho[w4] = v;
+    }
+    uint4 xo;
+    xo.x = ho[0]; xo.y = ho[1]; xo.z = ho[2]; xo.w = ho[3];
+    *reinterpret_cast<uint4*>(out_row + col0) = xo;
+}
+
 hipError_t launch_residual_add_bf16(
     const bf16_t* a, uint32_t a_row_stride,
     const bf16_t* b, uint32_t b_row_stride,
@@ -111,6 +159,15 @@ hipError_t launch_residual_add_bf16(
     args.features = features;
     args.rows = rows;
     // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
+    // 8 要素（16 B）単位で運べる形ならそちらを使う。
+    if ((features % 8u) == 0u && (a_row_stride % 8u) == 0u && (b_row_stride % 8u) == 0u &&
+        (output_row_stride % 8u) == 0u) {
+        const uint32_t gx = (features / 8u + kThreads - 1u) / kThreads;
+        return launch_rows(args, gx, PortElemSize{2,2,2,2},
+                           [&](const ElementwiseArgs& a, uint32_t gx_, uint32_t gy) {
+                               residual_add_bf16_x8<<<dim3(gx_, gy), kThreads, 0, stream>>>(a);
+                           });
+    }
     return launch_rows(args, elementwise_grid_x(features), PortElemSize{2,2,2,2},
                          [&](const ElementwiseArgs& a, uint32_t gx, uint32_t gy) {
                              phaseshift_residual_add_bf16<<<dim3(gx, gy), kThreads, 0, stream>>>(a);

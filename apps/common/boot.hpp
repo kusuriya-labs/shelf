@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <shelf/backend/common/capabilities.hpp>
+
 namespace shelf::app {
 
 // 起動要求（CLI の生値）。`arena_bytes` は 0 = グラフから自動。
@@ -20,6 +22,10 @@ struct BootRequest {
     std::size_t first_device = 0;       // --gpu
     std::size_t pipeline_parallel = 1;  // --pipeline-parallel
     std::size_t arena_bytes = 0;        // --arena-mib（0 = 自動）
+    // 要求機能（D6）。モデルと指定から決まる（FP8 checkpoint → fp8_w8a8 など）。
+    // 足りなければモデルを読む前に理由付きで拒否される。
+    backend::FeatureSet required;
+    backend::FeatureSet optional;
 };
 
 struct BootOutcome {
@@ -29,6 +35,8 @@ struct BootOutcome {
     std::size_t arena_bytes = 0;
     std::size_t pipeline_parallel = 1;
     std::vector<int> stage_devices;     // ステージ番号順の GPU 番号
+    backend::FeatureSet features;       // この環境で使える機能（監査証跡）
+    backend::FeatureSet missing_optional;
 };
 
 // 装置を問い合わせ、要求と突き合わせる。`print` が真なら要約を 1 行 stdout へ。

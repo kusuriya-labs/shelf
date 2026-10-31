@@ -189,6 +189,18 @@ launch_attention_paged_prefill_bf16(
 
     hipStream_t stream);
 
+// 転置コア版（S^T = K·Q^T、P を LDS に置かない）。受理条件は prefill 版と同じ。
+bool attention_paged_prefill_st_bf16_supported(const PagedAttentionCommonArgs& common);
+
+hipError_t
+launch_attention_paged_prefill_st_bf16(
+    const PagedAttentionCommonArgs& common,
+
+    const bf16_t* k_pool,
+    const bf16_t* v_pool,
+
+    hipStream_t stream);
+
 hipError_t
 launch_attention_paged_prefill_fp8_e4m3(
     const PagedAttentionCommonArgs& common,

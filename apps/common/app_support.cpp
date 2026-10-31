@@ -3,13 +3,14 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
 #ifdef SHELF_HAVE_HIP
 #include <shelf/backend/hip/hip_api.hpp>
 #include <shelf/runtime/boot/probe.hpp>
@@ -37,8 +38,38 @@ Status open_shards(const std::string& model_dir, ShardSet* out) {
         return Status::invalid_argument("open_shards: null out", __FILE__, __LINE__);
     const std::string index_path = model_dir + "/model.safetensors.index.json";
     const std::string text = read_file_str(index_path);
-    if (text.empty())
-        return Status::not_found("cannot read " + index_path, __FILE__, __LINE__);
+    std::vector<std::string> shard_files;
+    if (text.empty()) {
+        // index を持たないチェックポイント（quark の export など）は、ディレクトリ直下の
+        // `*.safetensors` を列挙して使う（名前順で決定的）。
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(model_dir, ec)) {
+            if (!e.is_regular_file()) continue;
+            const std::string name = e.path().filename().string();
+            if (name.size() > 12 && name.compare(name.size() - 12, 12, ".safetensors") == 0)
+                shard_files.push_back(name);
+        }
+        std::sort(shard_files.begin(), shard_files.end());
+        if (shard_files.empty())
+            return Status::not_found("cannot read " + index_path +
+                                         "（*.safetensors も見つからない）",
+                                     __FILE__, __LINE__);
+        out->readers.clear();
+        out->where.clear();
+        for (const auto& file : shard_files) {
+            auto r = artifact::safetensors::Reader::open(model_dir + "/" + file);
+            if (!r.ok())
+                return Status::invalid_argument("open " + file + ": " + r.status().message(),
+                                                __FILE__, __LINE__);
+            out->readers.push_back(std::make_unique<artifact::safetensors::Reader>(r.release()));
+        }
+        for (auto& rp : out->readers)
+            for (const auto& name : rp->list_tensors())
+                if (!out->where.contains(name)) out->where.emplace(name, rp.get());
+        std::fprintf(stderr, "[shards] index 無し: %zu ファイル / %zu テンソル\n",
+                     out->readers.size(), out->where.size());
+        return Status::make_ok();
+    }
 
     nlohmann::json index;
     try {
@@ -50,7 +81,6 @@ Status open_shards(const std::string& model_dir, ShardSet* out) {
     if (!index.contains("weight_map") || !index.at("weight_map").is_object())
         return Status::invalid_argument("index.json: missing weight_map", __FILE__, __LINE__);
 
-    std::vector<std::string> shard_files;
     for (const auto& f : index.at("weight_map").items()) {
         if (!f.value().is_string()) continue;
         const std::string file = f.value().get<std::string>();
@@ -129,8 +159,8 @@ Status ShardSource::read_into(const std::string& name,
 }
 
 WeightKind classify(const std::map<std::string, artifact::safetensors::Reader*>& where,
-                    const std::string& name) {
-    return runtime::load::classify(ShardSource(where), name);
+                    const std::string& name, const Fp8ModelFormat& fmt) {
+    return runtime::load::classify(ShardSource(where), name, fmt);
 }
 
 Result<weights::TensorCatalog> build_catalog(const ShardSet& shards) {
@@ -172,7 +202,8 @@ std::size_t shape_elems_of(const std::vector<std::size_t>& s) {
 }  // namespace
 
 Result<MaterializationPlan> plan_materialization(const weights::TensorCatalog& catalog,
-                                                 const model::qwen35::StepGraphPlan& plan) {
+                                                 const model::qwen35::StepGraphPlan& plan,
+                                                 const Fp8ModelFormat& fmt) {
     MaterializationPlan out;
     out.requests.reserve(plan.weights.size());
     for (const auto& w : plan.weights) {
@@ -184,6 +215,13 @@ Result<MaterializationPlan> plan_materialization(const weights::TensorCatalog& c
         // checkpoint はコンテナ側の軸を残すことがある（例: conv1d の [C, 1, K] に
         // 対して IR の論理形状は [C, K]）。同じペイロードを別の形で見ているだけ。
         if (spec->shape.rank() == w.shape.size()) {
+            // MXFP4（quark）は K 方向が 2 値/バイトでパックされている（ファイルは
+            // [out, K/2]、IR の論理形は [out, K]）。最終軸だけ 2 倍を許す。
+            const bool packed_k = fmt.mxfp4 && w.shape.size() == 2u &&
+                                  spec->shape.dim(0) == w.shape[0] &&
+                                  spec->shape.dim(1) * 2u == w.shape[1];
+            // `continue` は使わない（要求の追加まで飛んでしまう）。形状検査だけ飛ばす。
+            if (!packed_k)
             for (std::size_t i = 0; i < w.shape.size(); ++i) {
                 if (spec->shape.dim(i) != w.shape[i])
                     return Status::invalid_state(
@@ -203,6 +241,14 @@ Result<MaterializationPlan> plan_materialization(const weights::TensorCatalog& c
         case DataType::bf16: ++out.bf16; break;
         case DataType::f32: ++out.f32; break;
         case DataType::fp8_e4m3: ++out.fp8; break;
+        // MXFP4（quark）は U8 でパックされている。宣言が MXFP4 のときだけ許す。
+        case DataType::u8:
+            if (!fmt.mxfp4)
+                return Status::unsupported(
+                    "実体化できない dtype: " + w.checkpoint_name + "（u8）", __FILE__,
+                    __LINE__);
+            ++out.fp8;
+            break;
         default:
             return Status::unsupported(
                 "実体化できない dtype: " + w.checkpoint_name + "（" +
@@ -223,7 +269,13 @@ shelf::runtime::boot::Probe probe_devices(bool want_device_execution) {
     shelf::runtime::boot::Probe p;
     p.cpu_reference = true;
     p.backend = want_device_execution ? "hip" : "cpu";
-    if (!want_device_execution) return p;
+    // 機能表（D6）: このビルドに組み込まれた機能。HIP 非対応ビルドでは
+    // device_runtime = false になり、GPU 系の機能は申告されない。
+    if (!want_device_execution) {
+        p.features = shelf::backend::build_features(false);
+        return p;
+    }
+    p.features = shelf::backend::build_features(/*device_runtime=*/true);
     auto devs = shelf::hip::enumerate_devices();
     if (devs.ok()) p.devices = devs.release();
     // 失敗は「デバイス 0 台」として扱う（evaluate が理由付きで拒否する）。

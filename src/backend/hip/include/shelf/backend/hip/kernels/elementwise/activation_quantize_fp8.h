@@ -1,6 +1,6 @@
 // shelf backend/hip — 活性化の FP8(E4M3) 動的量子化。
 //
-// 契約（src/quant/include/shelf/quant/fp8_w8a8.hpp）:
+// 契約（src/quant/include/shelf/quant/fp8_perchannel.hpp）:
 //   scale(row, kb) = amax(row, kb) / 448            … 実行時に計算（dynamic）
 //   code(row,k)    = e4m3( x(row,k) / scale(row, kb) )
 //   kb = K を 128 要素に切ったブロック番号（`act_group = 128`）。

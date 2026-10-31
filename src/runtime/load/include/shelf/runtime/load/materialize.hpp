@@ -13,7 +13,8 @@
 #include <vector>
 
 #include <shelf/foundation/numeric.hpp>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 #include <shelf/runtime/load/tensor_source.hpp>
 #include <shelf/status.hpp>
 
@@ -24,22 +25,33 @@ enum class WeightKind : std::uint8_t {
     Bf16,
     F32,
     Fp8W8A8,
+    // MXFP4（`quant_method: quark`）: 重みは E2M1 ニブル（断片順）、スケールは E8M0。
+    // E8M0 は**f32 へ変換しない**（カーネルが `uint8_t` のまま食うため）。
+    Mxfp4,
     Missing,
 };
 
-WeightKind classify(const TensorSource& src, const std::string& name);
 
 // checkpoint の `quantization_config`（FP8 の宣言）。**宣言が正**で、実装側で
 // 粒度を決め打ちしない。解析は apps ではなくここ（ロードの契約）が持つ。
 struct Fp8ModelFormat {
     bool quantized = false;
-    shelf::quant::fp8::WeightScaleGranularity weight =
-        shelf::quant::fp8::WeightScaleGranularity::PerChannel;
+    // MXFP4（`quant_method: quark`・fp4 / group 32 / E8M0 スケール）。
+    // `weight` / `act_group` は FP8 用なので、MXFP4 のときは `mxfp4` を見る。
+    bool mxfp4 = false;
+    std::uint32_t mxfp4_group = 32u;           // K 方向のブロック長
+    shelf::quant::fp8::fine::WeightScaleGranularity weight =
+        shelf::quant::fp8::fine::WeightScaleGranularity::PerChannel;
     std::uint32_t act_group = 0u;              // 0 = 行全体、128 = K を 128 単位
     std::string scale_suffix = "_scale";       // weight_scale / weight_scale_inv
     std::string declared;                      // 表示用の要約（監査証跡）
 };
 Result<Fp8ModelFormat> read_fp8_format(const std::string& config_json_text);
+
+// 重みの種類は**コンテナの dtype**と宣言（`fmt`）で決める（名前の推測はしない）。
+WeightKind classify(const TensorSource& src, const std::string& name,
+                    const Fp8ModelFormat& fmt);
+
 
 // 実体化の要求（グラフの重み 1 件分。id は呼び手が解釈する）。
 struct WeightRequest {
@@ -57,6 +69,7 @@ struct MaterializedWeight {
     std::uint32_t features = 0u;
     std::uint32_t k_padded = 0u;
     bool weight_block128 = false;
+    std::vector<std::uint8_t> mx_scales;   // kind == Mxfp4（E8M0・行優先 [out, K/32]）
 };
 
 // テンソルごとに 30 MB 級の vector を確保すると、29 GB のロードでページフォルトが

@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include <shelf/backend/common/capabilities.hpp>
 #include <shelf/backend/common/device.hpp>
 
 namespace shelf::runtime::boot {
@@ -24,6 +25,8 @@ struct Probe {
     std::vector<DeviceInfo> devices;   // 実行に使える GPU（無ければ空）
     bool cpu_reference = true;         // 参照経路（backend/cpu）が使えるか
     std::string backend;               // 表示用（"hip" / "cpu"）
+    // このビルド／装置で使える機能（D6）。空なら機能判定をしない（従来の挙動）。
+    backend::FeatureSet features;
 };
 
 // 起動に要求する機能。足りなければ**理由付きで拒否**する。
@@ -32,6 +35,9 @@ struct Requirements {
     std::size_t first_device = 0;         // 使い始めるデバイス番号（--gpu）
     std::size_t devices_needed = 1;       // 同時に使う台数（PP の K。単一なら 1）
     bool need_cpu_reference = false;      // 参照経路が同時に要る（validate の exact 等）
+    // 要求機能（D6）。`required` が欠ければ**理由付きで拒否**、`optional` は記録だけ。
+    backend::FeatureSet required;
+    backend::FeatureSet optional;
 };
 
 struct Decision {
@@ -39,6 +45,7 @@ struct Decision {
     std::string reason;                    // 拒否理由（accepted なら空）
     std::size_t device_count = 0;          // probe が見つけた台数
     std::vector<DeviceId> devices;         // 実際に使うデバイス（accepted のとき）
+    backend::FeatureSet missing_optional;  // 使えない任意機能（記録用）
 };
 
 // 要求と probe を突き合わせる（純粋関数。GPU 不要で単体テストできる）。
@@ -51,6 +58,8 @@ struct RunRequest {
     std::size_t first_device = 0;
     std::size_t pipeline_parallel = 1;
     std::size_t arena_bytes = 0;      // 0 = グラフから自動
+    backend::FeatureSet required;     // モデル・指定から決まる要求機能（D6）
+    backend::FeatureSet optional;
 };
 
 struct ResolvedConfig {

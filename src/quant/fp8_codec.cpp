@@ -3,7 +3,8 @@
 #include <cstring>
 #include <limits>
 
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 
 namespace shelf::quant::fp8 {
 

@@ -14,6 +14,9 @@ target_link_libraries(shelf_app_common PUBLIC
     shelf::quant
     shelf::runtime_load
     shelf::runtime_pipeline
+    shelf::placement
+    shelf::compiler
+    shelf::api
     shelf::nlohmann)
 # pipeline-parallel のドライバは HIP 実行器に依存する。HIP 有効時は
 # このライブラリ自体を HIP 前提でビルドし、依存側にも同じ定義を伝播させる
@@ -41,6 +44,15 @@ target_link_libraries(shelf-validate PRIVATE
     shelf::quant
     shelf::nlohmann)
 
+# shelf-compute — エンジンの実体（JSONL ドライバ。engine_contract §1/§2）
+# 参照実装の `phaseshift-compute` の対応物で、Server（`apps/server`）から
+# サブプロセスとして起動される。`--model-dir` は参照と同じ綴り。
+# エンジンは GPU 実行が前提（HIP ビルドのみ）。プロトコルのみのモードも HIP ビルドで使う。
+if(SHELF_ENABLE_HIP)
+    add_executable(shelf-compute shelf_compute.cpp)
+    target_link_libraries(shelf-compute PRIVATE shelf_app_common)
+endif()
+
 # shelf-bench — pp / tg / kernel <name> の計測エントリ
 # (docs/spec/bench.md / docs/guide/bench.md)。HIP 無しのビルドでも --help の契約
 # （GPU 非依存で exit 0）を守れるようにする。
@@ -59,4 +71,6 @@ if(SHELF_ENABLE_HIP)
     target_compile_definitions(shelf-validate PRIVATE SHELF_HAVE_HIP=1)
     target_link_libraries(shelf-bench PRIVATE shelf::backend_hip)
     target_compile_definitions(shelf-bench PRIVATE SHELF_HAVE_HIP=1)
+    target_link_libraries(shelf-compute PRIVATE shelf::backend_hip)
+    target_compile_definitions(shelf-compute PRIVATE SHELF_HAVE_HIP=1)
 endif()

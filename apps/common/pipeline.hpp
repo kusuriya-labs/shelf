@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <shelf/model/qwen35/step_graph.hpp>
+#include <shelf/placement/budget.hpp>
 #include <shelf/runtime/pipeline/pipeline.hpp>
 
 #include "app_support.hpp"
@@ -56,6 +57,7 @@ struct Pipeline {
     std::size_t arena_bytes = 0;                  // 先頭ステージの確保量（表示用）
     std::size_t weight_bytes = 0;                 // checkpoint 上の重みの生バイト数（表示用）
     std::size_t device_bytes = 0;               // 全ステージの device 確保合計（予算の分子）
+    placement::Report budget;                   // D2 の判定結果（確保前の算術）
     double last_step_ms = 0.0;
 
     bool empty() const noexcept { return engine.empty(); }
@@ -69,9 +71,12 @@ struct PipelineOptions {
     // 行ごと logits を読む経路（shelf-validate の T1 比較）では false を保つ。
     bool logits_last_row_only = false;
     std::size_t arena_bytes = 0;     // 0 = グラフから自動
+    // D2: 確保の前に予算を判定する（既定 on）。`device_free_bytes` が 0 なら
+    // 1 台目の空きを実測する（実測できない場合は判定しない）。
+    bool check_budget = true;
+    std::uint64_t device_free_bytes = 0;
     // device メモリの予算（モデル込み）。ステージ毎の実行器が確保する合計への上限
     // （0 = 無制限）。超過は hipMalloc 前に insufficient_memory として止まる。
-    std::size_t vram_budget_bytes = 0;
     // 寿命の重ならない出力に同じ offset を割り当てる（D4）。中間値をステップ後に
     // 読むデバッグ経路では false にする（別のテンソルが入っているため）。
     bool arena_reuse = true;

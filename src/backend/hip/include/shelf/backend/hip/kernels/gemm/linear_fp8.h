@@ -1,6 +1,6 @@
 // shelf backend/hip — FP8 W8A8 linear（E4M3 行列命令・gfx1201）。
 //
-// 数値の契約（`src/quant/include/shelf/quant/fp8_w8a8.hpp` と同一）:
+// 数値の契約（`src/quant/include/shelf/quant/fp8_perchannel.hpp` と同一）:
 //   out[m, n] = ( Σ_k a_code[m,k] · w_code[n,k] ) · a_scale[m][kb] · w_scale[nb][kb]
 //   * 活性化: `act_group = 128` のとき K を 128 要素のブロックごとに 1 スケール、
 //     0 のときは行（= トークン）全体で 1 スケール。**どちらかは checkpoint の宣言が正**。

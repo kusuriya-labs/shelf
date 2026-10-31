@@ -19,6 +19,7 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+#include <shelf/quant/fp8_finegrained.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -48,8 +49,6 @@ struct HipStepExecutorOptions {
     // 0 = 無制限（従来動作）。予算を超える確保は hipMalloc を試みる前に
     // insufficient_memory として返す（どれを増やせばよいか数字で示す）。
     // HIP コンテキスト自体（数百 MB）は計上しないので、実_device 使用量はこれより
-    // 大きくなる。apps 側は `--vram-budget-mib` で渡す。
-    std::size_t vram_budget_bytes = 0;
     // 寿命の重ならない出力に同じ offset を割り当てる（D4）。ステップ後に中間値を
     // 読むデバッグ経路（`fetch_value_debug`）では false にする。
     bool arena_reuse = true;
@@ -73,6 +72,12 @@ public:
     Status upload_weight(TensorId id, const std::vector<float>& f32);
     // Checkpoint-native bf16: raw bits straight to device (no host conversion).
     Status upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n);
+    // MXFP4（quark）重み: E2M1 ニブルは断片順、スケールは **E8M0 の U8**
+    // （カーネルが `const std::uint8_t*` で受けるため f32 にしない）。
+    Status upload_weight_mxfp4(TensorId id, const std::uint8_t* codes, std::size_t n_codes,
+                               const std::uint8_t* scales, std::size_t n_scales,
+                               std::size_t features, std::uint32_t k_padded);
+
     // FP8 W8A8 重み（E4M3 コードは断片順、スケールは f32）。
     // weight_block128 = false: 出力特征ごと [features]（この checkpoint の宣言）
     // weight_block128 = true : 128(出力)×128(K) ブロック [n_blocks][k_blocks]
@@ -116,10 +121,9 @@ public:
     // 実際に確保しているアリーナのバイト数。
     // auto（arena_bytes == 0）では declare_states のグラフから決まる値を返す。
     std::size_t arena_bytes() const noexcept override { return arena_cap_; }
-    // 予算 accounting: この実行器が現在確保している device バイト合計
-    // （`vram_budget_bytes` の分子。モデルの重みを含む）。
+    // accounting: この実行器が現在確保している device バイト合計
+    // （モデルの重みを含む）。
     std::size_t device_bytes() const noexcept { return dev_bytes_; }
-    std::size_t vram_budget_bytes() const noexcept { return opts_.vram_budget_bytes; }
     double last_step_ms() const override { return stats_.last_step_ms; }
 
 private:
@@ -133,6 +137,7 @@ private:
         std::size_t pages = 0;
         ir::StateKind kind = ir::StateKind::kv_cache;
         std::size_t elems = 0;          // elems per single buffer
+        std::size_t pool_bytes = 0;     // kv: 1 プールあたりのバイト数（reset 用）
     };
 
     // 1 primitive 分の実行。`prim_index` は declare 相の一時領域を引くための添字。
@@ -164,6 +169,8 @@ private:
     // 同一ステップ内で GEMM が順次消費するため 1 本で足りる（行数が最大になる
     // 時点で確保し、以降は再利用）。
     struct Fp8Weight { std::uint8_t* codes = nullptr; float* scales = nullptr; bool block128 = false; };
+    struct Mxfp4Weight { std::uint8_t* codes = nullptr; std::uint8_t* scales = nullptr;
+                         std::size_t features = 0; std::uint32_t k_padded = 0; };
     // scale_floats = rows × (活性化スケールのブロック数)。
     Status ensure_fp8_scratch(std::size_t code_bytes, std::size_t scale_floats);
 
@@ -190,6 +197,8 @@ private:
     hipStream_t stream_ = nullptr;
     void* arena_dev_ = nullptr;
     std::size_t arena_cap_ = 0;
+    // 新しいシーケンスの最初のステップでアリーナを 0 クリアする（下の reset_states 参照）。
+    bool arena_zero_pending_ = false;
     const compiler::ArenaPlan* plan_ = nullptr;   // このステップで使う offsets 表
 
     // グラフ → offsets 表。ポインタが同じでも中身が入れ替わりうるので、
@@ -206,6 +215,7 @@ private:
     std::unordered_map<std::uint32_t, void*> weight_dev_;        // TensorId -> bf16*
     std::unordered_map<std::uint32_t, TensorShape> weight_shape_;
     std::unordered_map<std::uint32_t, Fp8Weight> weight_fp8_;    // TensorId -> fp8 (W8A8)
+    std::unordered_map<std::uint32_t, Mxfp4Weight> weight_mxfp4_;  // TensorId -> mxfp4
     std::uint8_t* fp8_codes_dev_ = nullptr;                      // 断片順コード scratch
     float* fp8_scales_dev_ = nullptr;                            // per-token スケール scratch
     std::size_t fp8_codes_cap_ = 0, fp8_scales_cap_ = 0;

@@ -33,8 +33,27 @@ constexpr uint32_t kHeadLimit = kPagedAttentionHeadLimit;
 static_assert(kThreads == kPagedAttentionBlock);
 constexpr uint32_t kElemsPerLane = kHeadLimit / 32u;
 
+// full-head 形（head_dim == kHeadLimit）の K/V 断片割り当て：レーンが 8 要素 =
+// 16 B の連続断片を持つ。従来の d = lane + 32*j だと 1 命令 2 B のロードが 8 本
+// 必要だったが、この割り当てなら K/V/query とも 1 本の 16 B ロードで取れる。
+constexpr uint32_t kFragElems = 8u;
+static_assert(kHeadLimit == 32u * kFragElems,
+              "fragment mapping assumes eight contiguous elements per lane");
+// 同一 wave が続けて担当するトークンの K/V ロードをまとめて発行する本数。
+constexpr uint32_t kTokensPerStep = 2u;
+
 using tile::warp_sum_all;
 using tile::warp_max_all;
+
+// uint4（16 B = bf16 8 個）の各要素。bf16 -> f32 は指数部の桁移動だけなので、
+// 下位 16 bit は <<16、上位 16 bit はそのまま f32 のビット列になる。
+__device__ __forceinline__ float bf16_low_to_f32(uint32_t w) {
+    return __uint_as_float((w & 0x0000FFFFu) << 16u);
+}
+
+__device__ __forceinline__ float bf16_high_to_f32(uint32_t w) {
+    return __uint_as_float(w & 0xFFFF0000u);
+}
 
 // ---------------------------------------------------------------------------
 // Algorithm layer (Phase 5, contract §4 / guide §7.1). BF16 decode stages:
@@ -113,6 +132,7 @@ __device__ __forceinline__ void attention_initialize_visible_range(
 }
 
 // Query tile into registers: lane holds d = lane + 32*j (contract §4).
+// FP8 変種と full-head 以外の形が使う従来形。
 template <bool kFullHead>
 __device__ __forceinline__ void attention_load_query_tile(
     const PagedAttentionCommonArgs& a, const DecodeTaskMap& task, uint32_t lane,
@@ -126,6 +146,26 @@ __device__ __forceinline__ void attention_load_query_tile(
         const uint32_t d = lane + 32u * j;
         q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
     }
+}
+
+// full-head 形の query 読み込み: レーンが d = 8*lane + j を 1 本の 16 B ロードで取る。
+template <bool kFullHead>
+__device__ __forceinline__ void attention_load_query_frag(
+    const PagedAttentionCommonArgs& a, const DecodeTaskMap& task, uint32_t lane,
+    float (&q_reg)[kElemsPerLane]) {
+    static_assert(kFullHead, "fragment query load is the full-head form");
+    const bf16* q_row = reinterpret_cast<const bf16*>(a.q)
+        + static_cast<size_t>(task.row) * a.q_row_stride
+        + static_cast<size_t>(task.q_head) * a.head_dim;
+    const uint4 raw = *reinterpret_cast<const uint4*>(q_row + kFragElems * lane);
+    q_reg[0] = bf16_low_to_f32(raw.x);
+    q_reg[1] = bf16_high_to_f32(raw.x);
+    q_reg[2] = bf16_low_to_f32(raw.y);
+    q_reg[3] = bf16_high_to_f32(raw.y);
+    q_reg[4] = bf16_low_to_f32(raw.z);
+    q_reg[5] = bf16_high_to_f32(raw.z);
+    q_reg[6] = bf16_low_to_f32(raw.w);
+    q_reg[7] = bf16_high_to_f32(raw.w);
 }
 
 // Shared addressing state for the token walk.
@@ -144,41 +184,124 @@ struct DecodeWalkState {
     uint32_t kv_heads;
 };
 
+// 断片（レーン 8 要素）どうしのドット積。j 昇順の逐次加算は従来と同じ形。
+__device__ __forceinline__ float attention_frag_dot(
+    const float (&q_reg)[kElemsPerLane], const uint4& kraw) {
+    float partial = 0.0f;
+    partial += q_reg[0] * bf16_low_to_f32(kraw.x);
+    partial += q_reg[1] * bf16_high_to_f32(kraw.x);
+    partial += q_reg[2] * bf16_low_to_f32(kraw.y);
+    partial += q_reg[3] * bf16_high_to_f32(kraw.y);
+    partial += q_reg[4] * bf16_low_to_f32(kraw.z);
+    partial += q_reg[5] * bf16_high_to_f32(kraw.z);
+    partial += q_reg[6] * bf16_low_to_f32(kraw.w);
+    partial += q_reg[7] * bf16_high_to_f32(kraw.w);
+    return partial;
+}
+
+struct OnlineStep {
+    float alpha;
+    float weight;
+};
+
+// オンライン softmax の 1 トークン分。式と順序は contract §4 のまま。
+__device__ __forceinline__ OnlineStep attention_online_step(
+    float score, float& run_max, float& run_sum) {
+    const float next_max = fmaxf(run_max, score);
+    const float alpha = __expf(run_max - next_max);
+    const float weight = __expf(score - next_max);
+    run_sum = run_sum * alpha + weight;
+    run_max = next_max;
+    return OnlineStep{alpha, weight};
+}
+
+__device__ __forceinline__ void attention_frag_accumulate(
+    float alpha, float weight, const uint4& vraw, float (&acc)[kElemsPerLane]) {
+    acc[0] = acc[0] * alpha + weight * bf16_low_to_f32(vraw.x);
+    acc[1] = acc[1] * alpha + weight * bf16_high_to_f32(vraw.x);
+    acc[2] = acc[2] * alpha + weight * bf16_low_to_f32(vraw.y);
+    acc[3] = acc[3] * alpha + weight * bf16_high_to_f32(vraw.y);
+    acc[4] = acc[4] * alpha + weight * bf16_low_to_f32(vraw.z);
+    acc[5] = acc[5] * alpha + weight * bf16_high_to_f32(vraw.z);
+    acc[6] = acc[6] * alpha + weight * bf16_low_to_f32(vraw.w);
+    acc[7] = acc[7] * alpha + weight * bf16_high_to_f32(vraw.w);
+}
+
+// 同一 wave が続けて担当する kTokens 個のトークンをまとめて処理する。K/V の
+// 断片ロードを先に全部発行し、その後で 1 トークンずつソフトマックスを更新する
+// ので、トークンの処理順（したがって数値）は逐次版と同一のままロードの
+// メモリレベル並列だけが増える。count < kTokens のスロットは先頭トークンを
+// 読み直すだけで、更新は行わない。
+template <uint32_t kTokens>
+__device__ __forceinline__ void attention_attend_frag_batch(
+    const float (&q_reg)[kElemsPerLane],
+    const bf16* k_first, const bf16* v_first, uint64_t token_stride_elems,
+    uint32_t count, float scale,
+    float& run_max, float& run_sum, float (&acc)[kElemsPerLane]) {
+    static_assert(kTokens >= 1u);
+    uint4 kraw[kTokens];
+    uint4 vraw[kTokens];
+    #pragma unroll
+    for (uint32_t t = 0u; t < kTokens; ++t) {
+        const uint64_t delta =
+            static_cast<uint64_t>(t < count ? t : 0u) * token_stride_elems;
+        kraw[t] = *reinterpret_cast<const uint4*>(k_first + delta);
+        vraw[t] = *reinterpret_cast<const uint4*>(v_first + delta);
+    }
+    #pragma unroll
+    for (uint32_t t = 0u; t < kTokens; ++t) {
+        if (t < count) {
+            const float score = warp_sum_all(attention_frag_dot(q_reg, kraw[t])) * scale;
+            const OnlineStep step = attention_online_step(score, run_max, run_sum);
+            attention_frag_accumulate(step.alpha, step.weight, vraw[t], acc);
+        }
+    }
+}
+
 // One token: masked K/V load, wave-reduced dot, online softmax update.
 // Order frozen: j-ascending partial -> warp_sum_all -> *scale -> max/alpha/
 // weight -> run_sum -> acc[j] (contract §4).
+// full-head 形は断片ロード（16 B）を使う。full-head 以外だけ従来の 2 B ロード。
 template <bool kFullHead>
 __device__ __forceinline__ void attention_attend_token_bf16(
     const float (&q_reg)[kElemsPerLane],
     const bf16* k_head, const bf16* v_head,
     uint32_t head_dim, uint32_t lane, float scale,
     float& run_max, float& run_sum, float (&acc)[kElemsPerLane]) {
-    bf16 k_reg[kElemsPerLane];
-    bf16 v_reg[kElemsPerLane];
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
-        if (kFullHead || d < head_dim) {
-            k_reg[j] = k_head[d];
-            v_reg[j] = v_head[d];
-        } else {
-            k_reg[j] = __float2bfloat16(0.0f);
-            v_reg[j] = __float2bfloat16(0.0f);
+    if constexpr (kFullHead) {
+        const uint4 kraw = *reinterpret_cast<const uint4*>(k_head + kFragElems * lane);
+        const uint4 vraw = *reinterpret_cast<const uint4*>(v_head + kFragElems * lane);
+        const float score = warp_sum_all(attention_frag_dot(q_reg, kraw)) * scale;
+        const OnlineStep step = attention_online_step(score, run_max, run_sum);
+        attention_frag_accumulate(step.alpha, step.weight, vraw, acc);
+    } else {
+        bf16 k_reg[kElemsPerLane];
+        bf16 v_reg[kElemsPerLane];
+        #pragma unroll
+        for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
+            const uint32_t d = lane + 32u * j;
+            if (d < head_dim) {
+                k_reg[j] = k_head[d];
+                v_reg[j] = v_head[d];
+            } else {
+                k_reg[j] = __float2bfloat16(0.0f);
+                v_reg[j] = __float2bfloat16(0.0f);
+            }
         }
+        float partial = 0.0f;
+        #pragma unroll
+        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+            partial += q_reg[j] * __bfloat162float(k_reg[j]);
+        const float score = warp_sum_all(partial) * scale;
+        const float next_max = fmaxf(run_max, score);
+        const float alpha = __expf(run_max - next_max);
+        const float weight = __expf(score - next_max);
+        run_sum = run_sum * alpha + weight;
+        run_max = next_max;
+        #pragma unroll
+        for (uint32_t j = 0u; j < kElemsPerLane; ++j)
+            acc[j] = acc[j] * alpha + weight * __bfloat162float(v_reg[j]);
     }
-    float partial = 0.0f;
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-        partial += q_reg[j] * __bfloat162float(k_reg[j]);
-    const float score = warp_sum_all(partial) * scale;
-    const float next_max = fmaxf(run_max, score);
-    const float alpha = __expf(run_max - next_max);
-    const float weight = __expf(score - next_max);
-    run_sum = run_sum * alpha + weight;
-    run_max = next_max;
-    #pragma unroll
-    for (uint32_t j = 0u; j < kElemsPerLane; ++j)
-        acc[j] = acc[j] * alpha + weight * __bfloat162float(v_reg[j]);
 }
 
 template <bool kFullHead>
@@ -198,12 +321,30 @@ __device__ __forceinline__ void attention_visit_pages_bf16(
         const uint32_t page_start = page_index * st.page_tokens;
         const uint32_t tokens_here =
             (st.visible - page_start < st.page_tokens) ? (st.visible - page_start) : st.page_tokens;
-        for (uint32_t off = st.wave; off < tokens_here; off += kWaves) {
-            const uint64_t elem =
-                page_base + static_cast<uint64_t>(off) * st.elems_per_token;
-            attention_attend_token_bf16<kFullHead>(
-                q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
-                head_dim, st.lane, scale, run_max, run_sum, acc);
+        if constexpr (kFullHead) {
+            const bf16* k_base = k_pool + page_base + st.head_off + kFragElems * st.lane;
+            const bf16* v_base = v_pool + page_base + st.head_off + kFragElems * st.lane;
+            const uint64_t token_stride =
+                static_cast<uint64_t>(kWaves) * st.elems_per_token;
+            constexpr uint32_t kStep = kTokensPerStep * kWaves;
+            for (uint32_t off = st.wave; off < tokens_here; off += kStep) {
+                const uint32_t remain = tokens_here - off;
+                const uint32_t count = (remain + kWaves - 1u) / kWaves;
+                const uint64_t elem_off =
+                    static_cast<uint64_t>(off) * st.elems_per_token;
+                attention_attend_frag_batch<kTokensPerStep>(
+                    q_reg, k_base + elem_off, v_base + elem_off, token_stride,
+                    count < kTokensPerStep ? count : kTokensPerStep, scale,
+                    run_max, run_sum, acc);
+            }
+        } else {
+            for (uint32_t off = st.wave; off < tokens_here; off += kWaves) {
+                const uint64_t elem =
+                    page_base + static_cast<uint64_t>(off) * st.elems_per_token;
+                attention_attend_token_bf16<kFullHead>(
+                    q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+                    head_dim, st.lane, scale, run_max, run_sum, acc);
+            }
         }
     }
 }
@@ -232,6 +373,7 @@ __device__ __forceinline__ void attention_visit_ancestors_bf16(
     }
 }
 
+template <bool kFullHead>
 __device__ __forceinline__ void attention_stage_wave_partials(
     uint32_t tid, uint32_t lane, uint32_t wave, uint32_t head_dim,
     float run_max, float run_sum, uint32_t bad, const float (&acc)[kElemsPerLane],
@@ -244,7 +386,8 @@ __device__ __forceinline__ void attention_stage_wave_partials(
     }
     #pragma unroll
     for (uint32_t j = 0u; j < kElemsPerLane; ++j) {
-        const uint32_t d = lane + 32u * j;
+        // full-head 形はレーンが 8 連続要素を持つ。
+        const uint32_t d = kFullHead ? (kFragElems * lane + j) : (lane + 32u * j);
         if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
     }
     (void)tid;
@@ -322,7 +465,8 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     if (row_valid_shared == 0u) return;
 
     float q_reg[kElemsPerLane];
-    attention_load_query_tile<kFullHead>(a, task, lane, q_reg);
+    if constexpr (kFullHead) attention_load_query_frag<kFullHead>(a, task, lane, q_reg);
+    else attention_load_query_tile<kFullHead>(a, task, lane, q_reg);
 
     DecodeWalkState st{};
     st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
@@ -352,9 +496,9 @@ __device__ __forceinline__ void attention_paged_bf16_body(
             k_pool, v_pool, q_reg, head_dim, scale, run_max, run_sum, acc, bad);
     }
 
-    attention_stage_wave_partials(tid, lane, wave, head_dim, run_max, run_sum, bad, acc,
-                                  merge_max_shared, merge_sum_shared, invalid_shared,
-                                  acc_shared);
+    attention_stage_wave_partials<kFullHead>(
+        tid, lane, wave, head_dim, run_max, run_sum, bad, acc,
+        merge_max_shared, merge_sum_shared, invalid_shared, acc_shared);
     __syncthreads();
     if (invalid_shared != 0u) return;
 
@@ -1212,7 +1356,8 @@ void attention_paged_fp8_impl(
             run_max, run_sum, acc, bad);
     }
 
-    v_decode_bf16::attention_stage_wave_partials(
+    // FP8 変種は従来の d = lane + 32*j 割り当てのまま。
+    v_decode_bf16::attention_stage_wave_partials<false>(
         tid, lane, wave, head_dim, run_max, run_sum, bad, acc,
         merge_max_shared, merge_sum_shared, invalid_shared, acc_shared);
     __syncthreads();

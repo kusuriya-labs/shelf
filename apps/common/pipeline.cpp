@@ -3,11 +3,18 @@
 // 実行はエンジン（runtime/pipeline）が担う。ここはステージの**生成**だけを行う。
 #include "pipeline.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
+#include <shelf/compiler/arena_offsets.hpp>
 #include <shelf/ir/graph.hpp>
+#include <shelf/placement/budget.hpp>
 #include <string>
 #include <utility>
+
+#ifdef SHELF_HAVE_HIP
+#include <hip/hip_runtime.h>
+#endif
 
 #ifdef SHELF_HAVE_HIP
 namespace shelf::app {
@@ -30,6 +37,60 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
     Pipeline p;
     p.hidden_size = cfg.hidden_size;
     p.stages.reserve(ranges.size());
+
+    // ---- 予算判定（D2）: 確保の前に「載るか」を既知量の算術で決める ----
+    //   重み = 実体化計画のバイト数、状態 = 宣言済み state の f32、scratch = アリーナ。
+    //   実確保（hipMalloc）はこの判定を通ってから行う。
+    if (opts.check_budget) {
+        placement::Footprint fp;
+        for (std::size_t s = 0; s < ranges.size(); ++s) {
+            const auto& r = ranges[s];
+            const bool final_stage = (s + 1 == ranges.size());
+            auto dp = model::qwen35::build_step_graph(cfg, opts.kv_capacity, 1, r);
+            if (!dp.ok()) continue;   // 形の誤りは後段の本構築が報告する
+            auto pp = model::qwen35::build_step_graph(cfg, opts.kv_capacity,
+                                                     std::max<std::size_t>(opts.chunk_rows, 1), r);
+            const auto& declare_plan = pp.ok() ? pp.value() : dp.value();
+            auto mp = plan_materialization(catalog, declare_plan, fmt);
+            placement::StageCost cost;
+            if (mp.ok()) cost.weight_bytes = mp.value().bytes;
+            for (const auto& stt : declare_plan.states) {
+                std::size_t n = 1;
+                for (const auto d : stt.shape) n *= d;
+                cost.state_bytes += static_cast<std::uint64_t>(n) * sizeof(float);
+            }
+            // アリーナは declare 相の見積り。`--arena-mib` で固定した場合はその値を
+            // 使う（固定値の方が大きいことがある。過小見積りで予算を偽らない）。
+            cost.scratch_bytes = opts.arena_bytes != 0
+                                     ? opts.arena_bytes
+                                     : compiler::plan_arena(declare_plan.graph, opts.arena_reuse)
+                                           .peak_bytes;
+            fp.add_stage(cost);
+        }
+        placement::Demand dem;
+        dem.stages = ranges.size();
+        const std::size_t full_layers = static_cast<std::size_t>(std::count_if(
+            cfg.layer_kinds.begin(), cfg.layer_kinds.end(),
+            [](model::qwen35::LayerKind k) { return k == model::qwen35::LayerKind::full_attention; }));
+        dem.kv_bytes_per_token =
+            placement::kv_bytes_per_token(full_layers, cfg.num_kv_heads, cfg.head_dim);
+        placement::Limits lim;
+        lim.device_free_bytes = opts.device_free_bytes;
+        if (lim.device_free_bytes == 0) {
+            // 呼び手が渡していない場合は 1 台目の空きを実測する（不明なら判定しない）。
+            std::size_t free_b = 0, total_b = 0;
+            if (hipSetDevice(opts.devices.front()) == hipSuccess &&
+                hipMemGetInfo(&free_b, &total_b) == hipSuccess)
+                lim.device_free_bytes = free_b;
+        }
+        const auto report = placement::plan_budget(fp, dem, lim);
+        p.budget = report;
+        if (opts.verbose) std::printf("  %s\n", report.describe().c_str());
+        if (!report.ok())
+            return Status::insufficient_memory("pipeline: " + report.describe(), __FILE__,
+                                               __LINE__);
+    }
+
 
     for (std::size_t s = 0; s < ranges.size(); ++s) {
         const auto& r = ranges[s];
@@ -60,7 +121,6 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
         ho.rope_theta = opts.rope_theta;
         ho.rope_rotary_dim = opts.rope_rotary_dim;
         ho.arena_bytes = opts.arena_bytes;
-        ho.vram_budget_bytes = opts.vram_budget_bytes;
         ho.arena_reuse = opts.arena_reuse;
         ho.fp8_act_group = opts.fp8_act_group;
         st.exec = std::make_unique<backend::hip::HipStepExecutor>(ho);
@@ -78,17 +138,13 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
         p.device_bytes += st.exec->device_bytes();
         if (opts.verbose) {
             std::printf("  stage %zu: gpu %d layers [%zu, %zu) %s%s weights %zu arena %.0f MB "
-                        "device %.0f MB%s\n",
+                        "device %.0f MB\n",
                         s, opts.devices[s], r.layer_lo, r.layer_hi,
                         (r.layer_lo == 0 ? "embed+" : ""),
                         (r.layer_hi == cfg.num_layers ? "+head" : ""),
                         st.decode.weights.size(),
                         static_cast<double>(st.exec->arena_bytes()) / (1024.0 * 1024.0),
-                        static_cast<double>(st.exec->device_bytes()) / (1024.0 * 1024.0),
-                        opts.vram_budget_bytes > 0
-                            ? (" / budget " +
-                               std::to_string(opts.vram_budget_bytes >> 20) + " MB").c_str()
-                            : "");
+                        static_cast<double>(st.exec->device_bytes()) / (1024.0 * 1024.0));
         }
         p.stages.push_back(std::move(st));
     }
@@ -112,19 +168,18 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
     p.engine.hidden_size = p.hidden_size;
     p.engine.arena_bytes = p.arena_bytes;
 
-    // 予算を使っている場合、実 device の空きも出す（accounting は HIP コンテキストを
-    // 含まないので、実使用量はこれより数百 MB 大きい）。
-    if (opts.verbose && opts.vram_budget_bytes > 0) {
+    // 実 device の空きも出す（accounting は HIP コンテキストを含まないので、
+    // 実使用量はこれより数百 MB 大きい）。
+    if (opts.verbose) {
         for (std::size_t s = 0; s < p.stages.size(); ++s) {
             (void)hipSetDevice(opts.devices[s]);
             std::size_t f = 0u, t = 0u;
             if (hipMemGetInfo(&f, &t) == hipSuccess) {
                 std::printf("  stage %zu: gpu %d 実 device 空き %.0f MiB / 総 %.0f MiB "
-                            "(予算計上 %.0f MiB / 予算 %.0f MiB)\n",
+                            "(計上 %.0f MiB)\n",
                             s, opts.devices[s], static_cast<double>(f >> 20),
                             static_cast<double>(t >> 20),
-                            static_cast<double>(p.stages[s].exec->device_bytes() >> 20),
-                            static_cast<double>(opts.vram_budget_bytes >> 20));
+                            static_cast<double>(p.stages[s].exec->device_bytes() >> 20));
             }
         }
     }

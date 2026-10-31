@@ -57,6 +57,13 @@ hipError_t launch_attention_paged_bf16(
     const PagedAttentionCommonArgs a = common;
     const dim3 grid(static_cast<uint32_t>(grid_x));
     if (common.head_dim == kHeadLimit) {
+        // 断片経路は bf16 8 個 = 16 B 単位でロードするので、行頭とプール先頭が
+        // 16 B 境界に乗っていることを要求する（レイアウトの取り違えを早期に弾く）。
+        if (common.q_row_stride % 8u != 0u) return hipErrorInvalidValue;
+        const uintptr_t align_bits = reinterpret_cast<uintptr_t>(common.q) |
+                                     reinterpret_cast<uintptr_t>(k_pool) |
+                                     reinterpret_cast<uintptr_t>(v_pool);
+        if (align_bits % 16u != 0u) return hipErrorInvalidValue;
         PagedAttentionBf16Args args{};
         args.common = a;
         args.k_pool = k_pool;

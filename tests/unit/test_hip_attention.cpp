@@ -22,6 +22,8 @@ namespace {
 using shelf::hipk::launch_attention_paged_bf16;
 using shelf::hipk::launch_attention_paged_bf16_split;
 using shelf::hipk::launch_attention_paged_bf16_split_reduce;
+using shelf::hipk::attention_paged_prefill_st_bf16_supported;
+using shelf::hipk::launch_attention_paged_prefill_st_bf16;
 using shelf::hipk::launch_kv_append_bf16;
 using shelf::hipk::launch_rope_f32_bf16;
 using shelf::hipk::launch_rope_inv_freq_init;
@@ -299,8 +301,8 @@ void compare_attention_gap(const AttnCase& c, const char* tag,
 // prefill 用 kernel（Q 32 行タイル × KV ページ、bf16 WMMA、online softmax）を
 // f64 参照と比較する。単一系列・rows=96（タイル 3 個）で causal は行位置から決まる。
 // あわせて受理境界（rows=1 は不受理、head_dim != 256 は launch 拒否）も固定する。
-void run_prefill_attention_case() {
-    const uint32_t rows = 96u, qh = 6u, kvh = 2u, D = 256u, page = 16u, tw = 8u;
+void run_prefill_attention_case(uint32_t rows = 96u, uint32_t tw = 8u) {
+    const uint32_t qh = 6u, kvh = 2u, D = 256u, page = 16u;
     const uint32_t pages = (rows + page - 1u) / page;
     AttnCase c;
     c.rows = rows; c.q_heads = qh; c.kv_heads = kvh; c.head_dim = D;
@@ -379,6 +381,19 @@ void run_prefill_attention_case() {
         std::vector<shelf::bf16_t> got(q.size(), shelf::bf16_t{0});
         HIP_OK(hipMemcpy(got.data(), d_o, got.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
         compare_attention_gap(c, "prefill attn", got, ref, 5e-2);
+    }
+
+    // 転置コア版（S^T = K·Q^T、P を LDS に置かない）も同じ f64 参照に一致すること。
+    if (!attention_paged_prefill_st_bf16_supported(a)) {
+        ++failures; std::printf("FAIL: prefill attn (転置コア) 受理条件\n");
+    }
+    hipError_t est = launch_attention_paged_prefill_st_bf16(a, d_k, d_v, nullptr);
+    if (est != hipSuccess) {
+        ++failures; std::printf("FAIL: prefill attn (転置コア) launch: %s\n", hipGetErrorString(est));
+    } else {
+        std::vector<shelf::bf16_t> gst(q.size(), shelf::bf16_t{0});
+        HIP_OK(hipMemcpy(gst.data(), d_o, gst.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
+        compare_attention_gap(c, "prefill attn st", gst, ref, 5e-2);
     }
 
     // 受理境界
@@ -1087,7 +1102,10 @@ int main() {
     unsetenv("PHASESHIFT_PAGED_ATTENTION_SPLIT_REDUCE_QH");
 
     // PR-0 gap fill: tree ancestors (non-contiguous + contiguous merge)
-    run_prefill_attention_case();
+    run_prefill_attention_case();                 // 96 行 = 64 + 32（2 タイル）
+    run_prefill_attention_case(4u, 1u);           // 最小（1 ページ・生きたレーン 4）
+    run_prefill_attention_case(16u, 1u);          // 1 ページ・生きたレーン 16
+    run_prefill_attention_case(65u, 8u);          // 64 + 1（端数のタイル）
     run_attention_tree_case(256);
     run_attention_tree_case(64);
 

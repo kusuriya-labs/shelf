@@ -33,6 +33,8 @@
   フィールド名つきで返す（ログに出してはいけない。ログは観測であってプロトコルではない）
 * `max_new_tokens` はエンジンの語法。OpenAI の `max_tokens` は Server 側で写像する
 * 1 行 = 1 オブジェクト、末尾改行。1 プロセスにつき **stdin 書込み 1、stdout 読取り 1**
+* **実装（2026-10-31）**: `src/api/protocol.{hpp,cpp}`（`parse_request` / `encode_request`）。
+  未知キー・型違い・範囲違反は `invalid_argument`（フィールド名つき）で返る
 
 ---
 
@@ -50,6 +52,9 @@
 * **`done` に `seed` を必ず返す**（§3.4）— 再現に必要なので最初から載せる
 * `request_id` は Server 側で一意。terminal（`done` / `error`）を受けるまで mailbox を廃棄しない
 * **統計フィールドは最初から持たせる**: 後付けするとプロトコルが壊れる
+* **実装（2026-10-31）**: `src/api/protocol.{hpp,cpp}`（`encode_event` / `parse_event`、
+  `Status::Code` → `code` の対応表 `code_from_status`）。`unit.api_session` がパイプ越しの
+  フェイクエンジンで generate / cancel / ping / error / 枠（1 行 1 オブジェクト）を検証
 
 ---
 
@@ -62,6 +67,10 @@
 | `top_p` | float | **1.0** | (0, 1] | 累積確率が P 以上になる最小の候補集合 |
 | `min_p` | float | **0.0** | [0, 1] | 最大確率に対する相対閾値 `p_i < min_p * p_max` を除外。**0 = off** |
 | `seed` | uint64 | 未指定 | ≥ 0 | 乱数の種（§3.4） |
+
+**実装（2026-10-31）**: `src/api/sampling.{hpp,cpp}`。検証・順序・greedy・
+Philox4x32-10 の `(seed, position)` 純粋関数・採番（`assign_seed`）を実装し、
+`unit.api_sampling` が契約の各行を固定している（順序の判別・温度の効果・再現性）。
 
 **`min_p` は OpenAI 公式には無い拡張**（vLLM / llama.cpp 系の方言）。採用する以上、
 HTTP 側も `min_p` を明示的に許可フィールドとして扱う（未知フィールドの一般方針は
@@ -93,6 +102,11 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 * shelf の初期実装: ホスト（現状 `run_step` → `fetch_logits` の D2H 経路を拡張）。
   後日にデバイス実装へ移しても **本書の契約は変更しない**
 * 実装の置き場: `runtime/`（生成の進行層）。`backend/` は logits を出すだけ
+* **実装（2026-10-31）**: `src/runtime/generate/sampling.{hpp,cpp}`（`shelf::runtime::generate`）。
+  `src/api` は境界ルール #12（runtime は api を include しない）に従い**再輸出だけ**を行う。
+  `shelf-run` は `--temperature/--top-k/--top-p/--min-p/--seed` を受け、デコードの抽選を
+  `sample(logits, sampling, position)` に置き換えた（既定 = greedy で従来と同一、seed を
+  指定すると `(seed, position)` で再現可能）
 
 ### 3.4 seed の規約
 
@@ -398,8 +412,13 @@ TTL / LRU の要否、prefetch の要否 → `memory_budget.md` と協調推論�
 | ブロック表が恒等写像で再利用なし | `src/backend/hip/step_executor.cpp:143` | `runtime/state` の pool / eviction（`cmake/Targets.cmake:34`「pool/eviction arrive with batching」） |
 | `max_sequences = 1` 固定 | `src/backend/hip/step_executor.cpp:677,704` | 4 並列化（slots の配列化 + step 内マージ） |
 | reset が世代を区別しない | 同 `:172` | §8.5 の決定後に実装 |
-| GDN 固定費が予算に未計上 | 本文 §8.2 | フェーズ 0 の計測 |
+| GDN 固定費が予算に未計上 → **解消（2026-10-30・D2）** | `src/placement` の `plan_budget` が宣言済み state（KV・conv・recurrent）を積む | 完了 |
 | **KV の正本が device のみ**（pinned 正本・載せ替え経路が無い） | 現状 KV は upfront の device `hipMalloc`（`src/backend/hip/step_executor.cpp:132-142`）。`hipHostMalloc` はゼロ | §8.3 段 2 と `memory_budget.md`（参照調査の素材を使う） |
+| **sampling 5 パラメータが未実装（greedy のみ）** → **解消（2026-10-31・D8 の C++ 側）** | `src/api/sampling.{hpp,cpp}`（`unit.api_sampling`） | 完了 |
+| **JSONL の型付き境界が無い** → **解消（2026-10-31）** | `src/api/protocol.{hpp,cpp}` ＋ `unit.api_protocol` / `unit.api_session`（フェイクエンジン） | 完了 |
+| **JSONL ドライバ（エンジン側の実体）が無い** → **解消（2026-10-31）** | `apps/shelf_compute.cpp`（実行ファイル `shelf-compute`）。`--model` 無しで ping のみ、`generate` は prefill チャンク → decode → `token`/`done`、`cancel` は生成中も受け付ける。`serve.protocol` がプロトコル枠を検査 | 完了 |
+| **状態の再利用（同一プロセスで 2 件目以降の generate）** → **解消（2026-10-31）** | 原因は `reset_states()` の `hipMemset` が**既定ストリーム**で走り、実行器の non-blocking `stream_` と順序が無いこと（0 クリアが競合して部分的にしか効かず、2 回目のシーケンスが残骸を読んだ）。`hipMemsetAsync(..., stream_)` に変更し、KV プールとアリーナも同じ条件へ戻すようにした。根拠: `unit.hip_reset`（reset を挟んで 3 回同一）、`shelf-validate` の T0 が bf16 / FP8 の両方で **identical** に復帰、`shelf-compute` の連続 2 要求が一致 | 完了 |
+| **HTTP 面（OpenAI 互換）が無い** | `apps/server/` は未作成（パス A = Python + aiohttp + HF `transformers`）。**製品判断（Python 依存の追加）待ち** | D8 の残り |
 
 ### 8.8 決済と接続
 

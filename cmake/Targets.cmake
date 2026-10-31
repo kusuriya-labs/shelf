@@ -23,12 +23,41 @@ target_compile_features(shelf_foundation PUBLIC cxx_std_20)
 # ---------------------------------------------------------------- backend/common
 add_library(shelf_backend_common STATIC
     src/backend/common/backend_common.cpp
+    src/backend/common/capabilities.cpp
     src/backend/common/paged_kv.cpp)
 add_library(shelf::backend_common ALIAS shelf_backend_common)
 target_include_directories(shelf_backend_common PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/backend/common/include>")
 target_link_libraries(shelf_backend_common PUBLIC shelf::foundation)
+
+# ---------------------------------------------------------------- placement (D2)
+# 予算と所在の純粋算術（GPU 非依存）。モデル型・HIP 型は持たない。
+add_library(shelf_placement STATIC src/placement/budget.cpp)
+add_library(shelf::placement ALIAS shelf_placement)
+target_include_directories(shelf_placement PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/placement/include>")
+target_link_libraries(shelf_placement PUBLIC shelf::backend_common shelf::foundation)
+
+# ---------------------------------------------------------------- runtime/generate
+# 生成の進行層（sampling の契約実装）。`engine_contract.md` §3.3 の置き場。
+# logits → token id の純粋関数だけを持ち、backend も HIP も知らない。
+add_library(shelf_runtime_generate STATIC src/runtime/generate/sampling.cpp)
+add_library(shelf::runtime_generate ALIAS shelf_runtime_generate)
+target_include_directories(shelf_runtime_generate PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/generate/include>")
+target_link_libraries(shelf_runtime_generate PUBLIC shelf::foundation)
+
+# ---------------------------------------------------------------- api (D8 の C++ 側)
+# Server とエンジンの境界: 生成パラメータの契約・型付き JSONL・status → code の写像。
+# backend も HIP も持たない（境界ルール #13）。
+add_library(shelf_api STATIC
+    src/api/protocol.cpp)
+add_library(shelf::api ALIAS shelf_api)
+target_include_directories(shelf_api PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/api/include>")
+target_link_libraries(shelf_api PUBLIC shelf::foundation shelf::nlohmann
+    shelf::runtime_generate)
 
 # ---------------------------------------------------------------- runtime/state
 # Prefix-sharing identity contract (pool/eviction arrive with batching).
@@ -151,7 +180,8 @@ target_link_libraries(shelf_artifact PUBLIC shelf::foundation PRIVATE shelf::nlo
 # 断片順 relayout（ホスト側のみ）。デバイス側の e4m3 変換命令は backend/hip の
 # e4m3_codec に残り、意味論（スケールの粒度）はここが定義する。
 add_library(shelf_quant STATIC
-    src/quant/fp8_w8a8.cpp)
+    src/quant/fp8_codec.cpp
+    src/quant/mxfp4.cpp)
 add_library(shelf::quant ALIAS shelf_quant)
 target_include_directories(shelf_quant PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"

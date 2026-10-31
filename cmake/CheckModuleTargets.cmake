@@ -28,8 +28,10 @@ set(SHELF_MODULE_TARGETS
     "src/runtime/boot:shelf_runtime_boot"      # 未作成（D1）
     "src/runtime/pipeline:shelf_runtime_pipeline"
     "src/runtime/load:shelf_runtime_load"      # D3
+    "src/runtime/generate:shelf_runtime_generate"   # D8（sampling の契約実装）
     "src/compiler:shelf_compiler"              # 未作成（D4）
-    "src/placement:shelf_placement"            # 未作成（D2）
+    "src/placement:shelf_placement"            # D2
+    "src/api:shelf_api"                        # D8（Server 境界。C++ 側）
     "src/backend/common:shelf_backend_common"
     "src/backend/cpu:shelf_backend_cpu"
     "src/backend/hip:shelf_backend_hip:${SHELF_ENABLE_HIP}"   # HIP 無効ビルドでは作らない

@@ -14,6 +14,16 @@ Decision evaluate(const Probe& probe, const Requirements& req) {
     Decision d;
     d.device_count = probe.devices.size();
 
+    // 機能表（D6）: 要求機能が probe の機能集合に含まれなければ**起動前に**拒否する。
+    // probe が機能を申告しない（空）場合は従来どおり判定しない。
+    if (!probe.features.empty() && !probe.features.contains_all(req.required)) {
+        d.reason = "この環境では要求機能を満たせません（不足: " +
+                   probe.features.missing_from(req.required).join() + " / 利用可能: " +
+                   probe.features.join() + "）";
+        return d;
+    }
+    if (!probe.features.empty()) d.missing_optional = probe.features.missing_from(req.optional);
+
     if (req.need_cpu_reference && !probe.cpu_reference) {
         d.reason = "参照経路（backend/cpu）が無いビルドです";
         return d;
@@ -52,6 +62,8 @@ ResolvedConfig resolve(const Probe& probe, const RunRequest& req) {
     r.need_device_execution = req.device_execution;
     r.first_device = req.first_device;
     r.devices_needed = req.pipeline_parallel;
+    r.required = req.required;
+    r.optional = req.optional;
     out.decision = evaluate(probe, r);
     out.accepted = out.decision.accepted;
     out.reason = out.decision.reason;

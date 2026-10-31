@@ -38,13 +38,15 @@
 | `src/weights` | `shelf::weights`（INTERFACE） | 3c | 型のみ |
 | `src/ir` | `shelf::ir`（INTERFACE） | 論理 | あり |
 | `src/model/qwen35` | `shelf::model_qwen35` | モデル固有 | あり |
-| `src/compiler` | 未作成 | 4a declare | 空 |
-| `src/placement` | 未作成 | 2a | 空 |
+| `src/compiler` | `shelf::compiler`（INTERFACE） | 4a declare | あり（`arena_offsets`。D4 進行中） |
+| `src/placement` | `shelf::placement` | 2a | あり（2026-10-30・D2: 予算と所在の純粋算術。`budget`） |
 | `src/runtime/state` | `shelf::runtime_state` | 4 | あり（`prefix_key`） |
 | `src/runtime/boot` | `shelf::runtime_boot` | 1 | あり（2026-10-29・D1: probe 型と受理判定。run/validate/bench が使用） |
 | `src/runtime/load` | `shelf::runtime_load` | 3 | あり（2026-10-29・D3: 検証と実体化） |
 | `src/runtime/pipeline` | `shelf::runtime_pipeline` | 5（編成） | あり（2026-10-29: PP の実行を apps から移設） |
-| `src/backend/common` | `shelf::backend_common` | 2b/4b | あり |
+| `src/runtime/generate` | `shelf::runtime_generate` | 5（生成） | あり（2026-10-31・D8: sampling の契約実装。`api` が再輸出） |
+| `src/api` | `shelf::api` | 6（Server 境界） | あり（2026-10-31・D8 の C++ 側: 型付き JSONL と status→code の写像） |
+| `src/backend/common` | `shelf::backend_common` | 2b/4b | あり（2026-10-30・D6: 機能表 `capabilities`） |
 | `src/backend/cpu` | `shelf::backend_cpu` | 4c 参照 | あり |
 | `src/backend/hip` | `shelf::backend_hip` | 4c/5 | あり |
 | `src/api` | 未作成 | Server | 未着手 |
@@ -174,4 +176,6 @@
 | --- | --- |
 | 2026-10-29 | D0 として本書を作成。既存 14 ルールとモデル名スキャンを正本化し、`directory_design.md` §1.3-5（正本未整備）を解消 |
 | 2026-10-29 | D7: §3.3-4（placement→artifact）と §3.3-7（api→backend）をテストに追加。モジュールとターゲットの configure 時検査、コストモデルのゲート、壁時計の回帰ゲート（opt-in）を追加し、§7 に一覧を起こした |
+| 2026-10-31 | D8（C++ 側）: `src/api`（`shelf_api`）と `src/runtime/generate`（`shelf_runtime_generate`）を追加。抽選の実装は **runtime 側**（契約 §3.3）に置き、`api` が再輸出する — ルール #12（runtime は api を include しない）を守るため。新規の禁止依存は無し（api は hip/backend を禁止済み = #13） |
+| 2026-10-30 | D2/D6: `placement` を実体化（`shelf::placement`・純粋算術）し、`backend/common` に機能表（`capabilities`）を追加。include ルールの変更は無し（既存の #11 / #8 の範囲）。機能の受理判定は `runtime/boot` の 1 箇所（`evaluate`）に寄せた |
 | 2026-10-29 | D4: ルール 8（`src/backend`）から `shelf/compiler/` の禁止を外した。declare 相（`compiler/arena_offsets.hpp`）が決めた活性化の offsets を実行器が受け取る向きで、compiler は backend を include しない（非巡回）。テストの表と同じ変更で更新 |

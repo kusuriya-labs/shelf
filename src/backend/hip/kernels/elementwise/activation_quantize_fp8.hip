@@ -14,14 +14,15 @@
 
 #include <shelf/backend/hip/kernels/e4m3_codec.h>
 #include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 #include <shelf/backend/hip/kernels/detail/target_swiglu_device.h>
 
 namespace shelf::hipk {
 namespace {
 
 using shelf::quant::fp8::amax_scale;
-using shelf::quant::fp8::kActGroupK;
+using shelf::quant::fp8::fine::kActGroupK;
 using shelf::quant::fp8::kTileK;
 using shelf::quant::fp8::kTileRows;
 
@@ -253,7 +254,7 @@ std::size_t activation_quantize_fp8_bytes(std::uint32_t rows, std::uint32_t k_pa
 
 std::size_t activation_quantize_fp8_scale_count(std::uint32_t rows, std::uint32_t k_padded,
                                                 std::uint32_t act_group) noexcept {
-    return shelf::quant::fp8::activation_scale_count(rows, k_padded, act_group);
+    return shelf::quant::fp8::fine::activation_scale_count(rows, k_padded, act_group);
 }
 
 bool activation_quantize_fp8_supported(std::uint32_t k, std::uint32_t k_padded,

@@ -27,7 +27,8 @@
 #include <shelf/backend/hip/kernels/gemm/linear_bf16.h>
 #include <shelf/backend/hip/kernels/gemm/linear_bf16_config.h>
 #include <shelf/backend/hip/kernels/gemm/linear_fp8.h>
-#include <shelf/quant/fp8_w8a8.hpp>
+#include <shelf/quant/fp8_perchannel.hpp>
+#include <shelf/quant/fp8_finegrained.hpp>
 #endif
 
 namespace shelf::bench {
@@ -271,6 +272,7 @@ int bench_gemm_fp8(const Args& a, const std::vector<std::int64_t>& rows_list, st
         return kExitUsage;
     }
     using namespace shelf::quant::fp8;
+using namespace shelf::quant::fp8::fine;
     const auto gran = block128 != 0 ? WeightScaleGranularity::Block128
                                     : WeightScaleGranularity::PerChannel;
     const std::uint32_t kp = static_cast<std::uint32_t>(k);
@@ -366,8 +368,8 @@ int bench_gemm(const Args& a, std::int64_t gpu, const std::string& output, int a
         return kExitUsage;
     }
     for (std::int64_t r : rows_list) {
-        if (r < 1 || r > 512) {
-            std::fprintf(stderr, "gemm: --rows must be in [1,512] (got %lld)\n",
+        if (r < 1 || r > 4096) {
+            std::fprintf(stderr, "gemm: --rows must be in [1,4096] (got %lld)\n",
                          static_cast<long long>(r));
             return kExitUsage;
         }

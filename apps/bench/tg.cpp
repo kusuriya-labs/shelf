@@ -43,7 +43,6 @@ void usage(std::FILE* out) {
         "  --gpu N             GPU 番号（既定 0）\n"
         "  --seed N            合成トークン列のシード（既定 1234）\n"
         "  --arena-mib N       アリーナサイズ MiB（既定 0 = グラフから自動算出、正の値で固定）\n"
-        "  --vram-budget-mib N device 予算 MiB（モデル込み、既定 0 = 無制限）\n"
         "  --logits-all-rows   prefill の全行で logits を作る（既定は最終行のみ）\n"
         "  --output PATH       CSV を追記（ファイルが無ければヘッダを書く）\n"
         "  --help, -h          このヘルプ（GPU を触らず exit 0）\n"
@@ -90,7 +89,7 @@ int run_tg(int argc, char** argv) {
 
     // 未知のオプションは起動エラー（shelf-validate と同じ規約）。
     {
-        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "vram-budget-mib", "logits-all-rows", "output", "pipeline-parallel"};
+        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "logits-all-rows", "output", "pipeline-parallel"};
         std::string bad;
         if (!only_known_keys(a, allowed, &bad)) {
             std::fprintf(stderr, "tg: unknown option: --%s\n", bad.c_str());
@@ -107,7 +106,6 @@ int run_tg(int argc, char** argv) {
     const std::int64_t gpu = a.i64("gpu", 0, &ok);
     const std::int64_t seed = a.i64("seed", 1234, &ok);
     const std::int64_t arena_mib = a.i64("arena-mib", 0, &ok);
-    const std::int64_t budget_mib = a.i64("vram-budget-mib", 0, &ok);
     const std::int64_t pp = a.i64("pipeline-parallel", 1, &ok);
     const std::string mode = a.str("mode", "forward");
     const std::string model_dir = a.str("model-dir", a.str("model"));
@@ -166,6 +164,10 @@ int run_tg(int argc, char** argv) {
         breq.device_execution = true;
         breq.first_device = static_cast<std::size_t>(gpu);
         breq.pipeline_parallel = static_cast<std::size_t>(pp);
+        // D6: このモデル・この指定で要る機能を宣言する（不足は起動前に拒否）。
+        breq.required.add(shelf::backend::Feature::device_execution);
+        if (pp > 1) breq.required.add(shelf::backend::Feature::pipeline_parallel);
+        if (fmt.quantized) breq.required.add(shelf::backend::Feature::fp8_w8a8);
         const auto booted = app::boot(breq, /*print=*/true);
         if (!booted.accepted) {
             std::fprintf(stderr, "%s: 起動条件を満たしません: %s\n", "tg",
@@ -232,7 +234,6 @@ int run_tg(int argc, char** argv) {
     po.kv_capacity = capacity;
     po.chunk_rows = chunk;
     po.arena_bytes = ho.arena_bytes;
-    if (budget_mib > 0) po.vram_budget_bytes = static_cast<std::size_t>(budget_mib) << 20;
     // 既定: prefill の logits は最終行だけ（lm_head の重複計算を消す）。
     po.logits_last_row_only = !a.has("logits-all-rows");
     po.rope_theta = cfg.rope_theta;
@@ -335,7 +336,6 @@ int run_tg(int argc, char** argv) {
     kv_print("prefill_chunk", static_cast<std::int64_t>(chunk));
     kv_print("warmup", warmup);
     kv_print("arena_mib", arena_eff);
-    kv_print("vram_budget_mib", static_cast<std::int64_t>(budget_mib));
     kv_print("device_used_mib", static_cast<std::int64_t>(pipeline.device_bytes >> 20));
     kv_print("mode", mode);
     kv_print("context_prefill_ms", context_prefill_ms);
