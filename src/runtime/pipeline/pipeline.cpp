@@ -86,4 +86,87 @@ Status step(Pipeline& p, const std::int32_t* tokens, std::size_t n, std::uint32_
     return Status::make_ok();
 }
 
+namespace {
+
+Status step_rows(Pipeline& p, const std::int32_t* tokens, std::size_t n,
+                 const backend::StageExecutor::RowBatch& rows, bool prefill,
+                 std::vector<float>* logits) {
+    if (p.stages.empty())
+        return Status::invalid_state("pipeline: ステージが無い", __FILE__, __LINE__);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (std::size_t s = 0; s < p.stages.size(); ++s) {
+        const Stage& st = p.stages[s];
+        if (st.exec == nullptr || st.graphs.decode == nullptr)
+            return Status::invalid_state("pipeline: ステージ " + std::to_string(s) + " が未設定",
+                                         __FILE__, __LINE__);
+        const ir::Graph* graph = nullptr;
+        ir::ValueId hidden_out{};
+        if (prefill) {
+            graph = st.graphs.prefill;
+            hidden_out = st.graphs.hidden_out_prefill;
+            if (graph == nullptr)
+                return Status::invalid_state("pipeline: ステージ " + std::to_string(s) +
+                                                 " に prefill グラフが無い",
+                                             __FILE__, __LINE__);
+        } else if (n == 1u) {
+            graph = st.graphs.decode;
+            hidden_out = st.graphs.hidden_out_decode;
+        } else {
+            const std::size_t idx = n - 2u;
+            if (idx >= st.graphs.decode_batch.size() || st.graphs.decode_batch[idx] == nullptr)
+                return Status::invalid_state("pipeline: ステージ " + std::to_string(s) +
+                                                 " に " + std::to_string(n) +
+                                                 " 行の decode グラフが無い",
+                                             __FILE__, __LINE__);
+            graph = st.graphs.decode_batch[idx];
+            hidden_out = st.graphs.hidden_out_batch[idx];
+        }
+        const bool first = (s == 0);
+        const bool final = (s + 1 == p.stages.size());
+        auto rs = st.exec->run_stage_batch(*graph, first ? tokens : nullptr,
+                                           first ? nullptr : p.handoff.data(), n, rows);
+        if (!rs.ok())
+            return Status::invalid_state(
+                "pipeline: ステージ " + std::to_string(s) + ": " + rs.message(), __FILE__,
+                __LINE__);
+        if (!final) {
+            if (!hidden_out.valid())
+                return Status::invalid_state("pipeline: ステージ " + std::to_string(s) +
+                                                 " に hidden_out が無い",
+                                             __FILE__, __LINE__);
+            auto hb = st.exec->fetch_value_bf16(*graph, hidden_out);
+            if (!hb.ok())
+                return Status::invalid_state("pipeline: ステージ " + std::to_string(s) +
+                                                 " の hidden 読み出し: " + hb.status().message(),
+                                             __FILE__, __LINE__);
+            if (hb.value().size() > p.handoff.size())
+                return Status::invalid_state("pipeline: hand-off バッファが小さい", __FILE__,
+                                             __LINE__);
+            std::copy(hb.value().begin(), hb.value().end(), p.handoff.begin());
+        } else if (logits != nullptr) {
+            auto lg = st.exec->fetch_logits(*graph);
+            if (!lg.ok()) return lg.status();
+            *logits = std::move(lg.value());
+        }
+    }
+    p.last_step_ms = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count();
+    return Status::make_ok();
+}
+
+}  // namespace
+
+Status step_batch_prefill(Pipeline& p, const std::int32_t* tokens, std::size_t n,
+                          const backend::StageExecutor::RowBatch& rows,
+                          std::vector<float>* logits) {
+    return step_rows(p, tokens, n, rows, /*prefill=*/true, logits);
+}
+
+Status step_batch_decode(Pipeline& p, const std::int32_t* tokens, std::size_t n,
+                         const backend::StageExecutor::RowBatch& rows,
+                         std::vector<float>* logits) {
+    return step_rows(p, tokens, n, rows, /*prefill=*/false, logits);
+}
+
 }  // namespace shelf::runtime::pipeline

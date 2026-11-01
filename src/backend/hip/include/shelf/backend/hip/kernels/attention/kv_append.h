@@ -50,6 +50,11 @@ struct KvAppendBf16Args {
     KvAppendCommonArgs common{};
     bf16_t* k_pool = nullptr;
     bf16_t* v_pool = nullptr;
+    // T14: online KV ミラー（直近ページ）。null なら書かない。
+    bf16_t* online_k = nullptr;
+    bf16_t* online_v = nullptr;
+    uint32_t online_pages = 0u;
+    uint32_t online_reserved = 0u;
 };
 
 static_assert(sizeof(KvAppendCommonArgs) == 96);
@@ -73,10 +78,13 @@ static_assert(offsetof(KvAppendCommonArgs, head_dim) == 80);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_token) == 84);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_page) == 88);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_layer) == 92);
-static_assert(sizeof(KvAppendBf16Args) == 112);
+static_assert(sizeof(KvAppendBf16Args) == 136);
 static_assert(alignof(KvAppendBf16Args) == 8);
 static_assert(offsetof(KvAppendBf16Args, k_pool) == 96);
 static_assert(offsetof(KvAppendBf16Args, v_pool) == 104);
+static_assert(offsetof(KvAppendBf16Args, online_k) == 112);
+static_assert(offsetof(KvAppendBf16Args, online_v) == 120);
+static_assert(offsetof(KvAppendBf16Args, online_pages) == 128);
 
 hipError_t
 launch_kv_append_bf16(
@@ -85,7 +93,10 @@ launch_kv_append_bf16(
     bf16_t* k_pool,
     bf16_t* v_pool,
 
-    hipStream_t stream);
+    hipStream_t stream,
+    bf16_t* online_k = nullptr,
+    bf16_t* online_v = nullptr,
+    uint32_t online_pages = 0u);
 
 hipError_t
 launch_kv_append_fp8_e4m3(

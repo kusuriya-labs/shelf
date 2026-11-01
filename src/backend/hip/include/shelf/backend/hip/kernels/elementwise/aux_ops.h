@@ -23,4 +23,13 @@ hipError_t launch_bf16_to_f32(const shelf::bf16_t* in, float* out, uint32_t n,
 hipError_t launch_f32_to_bf16(const float* in, shelf::bf16_t* out, uint32_t n,
                               hipStream_t stream);
 
+hipError_t launch_moe_router_logit(const shelf::bf16_t* x, const shelf::bf16_t* w,
+                                   float* out, uint32_t experts, uint32_t hidden,
+                                   hipStream_t stream);
+hipError_t launch_moe_accumulate(float* acc, const shelf::bf16_t* x, float scale,
+                                 uint32_t n, hipStream_t stream);
+hipError_t launch_scaled_f32_to_bf16(const float* in, shelf::bf16_t* out, float scale,
+                                     uint32_t n, hipStream_t stream);
+hipError_t launch_moe_add_f32(float* acc, const float* in, uint32_t n, hipStream_t stream);
+
 } // namespace shelf::hipk

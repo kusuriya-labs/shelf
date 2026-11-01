@@ -12,9 +12,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
+#include <thread>
 
 #include <shelf/backend/hip/kernels/elementwise/aux_ops.h>
 #include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
+#include <shelf/backend/hip/kernels/elementwise/activation_quantize_mxfp4.h>
 #include <shelf/backend/hip/kernels/elementwise/embedding.h>
 #include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/gdn/gdn_chunk.h>
@@ -61,6 +64,105 @@ std::uint32_t u32(std::size_t v) { return static_cast<std::uint32_t>(v); }
 
 std::size_t mib(std::size_t bytes) { return bytes >> 20; }
 
+// ---- T17: CPU 側のエキスパート計算（pinned host の重み）----
+//
+// GPU と同じ値になることを優先した素朴な実装。量子化重みは復号しながら内積を取る
+// （重みを f32 に展開して持つとメモリが 4 倍になるため、その場で E2M1 を引く）。
+inline float bf16_host_to_float(bf16_t v) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(v.data) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+// bf16 への丸め（GPU の swiglu / bf16 GEMM と同じ bit にする）。
+inline float bf16_round_host(float v) {
+    std::uint32_t u;
+    std::memcpy(&u, &v, sizeof u);
+    u = (u + 0x8000u + ((u >> 16) & 1u)) >> 16;
+    const std::uint32_t bits = u << 16;
+    float out;
+    std::memcpy(&out, &bits, sizeof out);
+    return out;
+}
+
+inline float e2m1_lut(std::uint8_t nib) {
+    static const float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    const float m = kMag[nib & 7u];
+    return (nib & 8u) != 0u ? -m : m;
+}
+
+inline float e8m0_lut(std::uint8_t b) {
+    return std::ldexp(1.0f, static_cast<int>(b) - 127);
+}
+
+float dot_bf16_row(const bf16_t* w, const float* x, std::size_t k) {
+    float acc = 0.0f;
+    for (std::size_t i = 0; i < k; ++i) acc += bf16_host_to_float(w[i]) * x[i];
+    return acc;
+}
+
+// 断片順の MXFP4 1 行（出力 1 個）と f32 ベクトルの内積。
+float dot_mxfp4_row(const std::uint8_t* codes, const std::uint8_t* scales, std::uint32_t row,
+                    const float* x, std::uint32_t k, std::uint32_t k_padded) {
+    const std::uint32_t nb = k_padded / shelf::quant::mxfp4::kBlockK;
+    const std::size_t tile_base =
+        static_cast<std::size_t>(row / shelf::quant::mxfp4::kTileRows) * (nb * 256u) +
+        static_cast<std::size_t>(row % shelf::quant::mxfp4::kTileRows) *
+            shelf::quant::mxfp4::kLaneBytes;
+    const std::uint8_t* sc = scales + static_cast<std::size_t>(row) * nb;
+    float acc = 0.0f;
+    for (std::uint32_t kb = 0; kb < nb; ++kb) {
+        const float s = e8m0_lut(sc[kb]);
+        const std::uint8_t* bp = codes + tile_base + static_cast<std::size_t>(kb) * 256u;
+        const float* xb = x + static_cast<std::size_t>(kb) * 32u;
+        for (std::uint32_t j = 0; j < 16u; ++j) {
+            if (kb * 32u + j >= k) break;
+            acc += xb[j] * e2m1_lut(bp[j] & 0x0Fu) * s;
+            if (kb * 32u + 16u + j < k)
+                acc += xb[16u + j] * e2m1_lut(bp[j] >> 4) * s;
+        }
+    }
+    return acc;
+}
+
+
+// GPU の活性化量子化と同じ契約で f32 ベクトルを作り直す（CPU 分担用）。
+// W4A4 は E2M1 + E8M0（32 要素ごと）、W4A8 は E4M3 + 動的スケール。
+void quantize_act_mxfp4_host(const float* x, std::uint32_t k, std::vector<float>& out) {
+    using namespace shelf::quant::mxfp4;
+    const std::uint32_t kp = pad_k(k);
+    std::vector<std::uint8_t> codes(static_cast<std::size_t>(kp) / 2u);
+    std::vector<std::uint8_t> scales(static_cast<std::size_t>(kp) / kBlockK);
+    if (!quantize_row(x, k, kp, codes.data(), scales.data()).ok()) {
+        out.assign(x, x + k);
+        return;
+    }
+    out.resize(k);
+    for (std::uint32_t i = 0; i < k; ++i) {
+        const std::uint8_t byte = codes[i / 2u];
+        const std::uint8_t nib = (i % 2u == 0u) ? (byte & 0x0Fu) : (byte >> 4);
+        out[i] = e2m1_lut(nib) * e8m0_lut(scales[i / kBlockK]);
+    }
+}
+
+void quantize_act_fp8_host(const float* x, std::uint32_t k, std::uint32_t group,
+                           std::vector<float>& out) {
+    using namespace shelf::quant::fp8;
+    const std::uint32_t g = group == 0u ? k : group;
+    out.resize(k);
+    for (std::uint32_t b = 0; b < k; b += g) {
+        const std::uint32_t e = std::min(k, b + g);
+        float amax = 0.0f;
+        for (std::uint32_t i = b; i < e; ++i) amax = std::max(amax, std::fabs(x[i]));
+        const float s = amax_scale(amax);
+        for (std::uint32_t i = b; i < e; ++i) {
+            const std::uint8_t code = e4m3_encode(s > 0.0f ? x[i] / s : 0.0f);
+            out[i] = e4m3_decode(code) * s;
+        }
+    }
+}
+
 // hipMalloc wants void**; passing reinterpret_cast<Typed**> is a strict
 // aliasing violation (observed to miscompile the typed loads at -O2).
 // Allocate into a local void*, then assign through the correctly-typed lvalue.
@@ -99,7 +201,171 @@ void HipStepExecutor::dev_release(void* p) {
     (void)hipFree(p);
 }
 
+bool HipStepExecutor::is_pinned_dev(void* p) const noexcept {
+    for (const auto& [host, dev] : pinned_allocs_) {
+        (void)host;
+        if (dev == p) return true;
+    }
+    return false;
+}
+
+void HipStepExecutor::release_weight_ptr(void* p) noexcept {
+    if (p == nullptr || is_pinned_dev(p)) return;
+    dev_release(p);
+}
+
+Status HipStepExecutor::alloc_weight_payload(void** dev_out, std::size_t bytes,
+                                             const void* src, const char* what, TensorId id,
+                                             int kind) {
+    if (dev_out == nullptr || bytes == 0u)
+        return Status::invalid_argument("alloc_weight_payload: null/zero", __FILE__, __LINE__);
+    // pinned host に確保する（明示指定・縮退の両方から使う）。
+    const auto alloc_pinned = [&]() -> Status {
+        void* host = nullptr;
+        hipError_t e = hipHostMalloc(&host, bytes, hipHostMallocMapped);
+        if (e != hipSuccess)
+            return Status::from(Status::Code::device_error,
+                                std::string(what) + ": hipHostMalloc(mapped): " +
+                                    hipGetErrorString(e),
+                                __FILE__, __LINE__);
+        void* dev = nullptr;
+        e = hipHostGetDevicePointer(&dev, host, 0);
+        if (e != hipSuccess) {
+            (void)hipHostFree(host);
+            return Status::from(Status::Code::device_error,
+                                std::string(what) + ": hipHostGetDevicePointer: " +
+                                    hipGetErrorString(e),
+                                __FILE__, __LINE__);
+        }
+        if (src != nullptr) std::memcpy(host, src, bytes);
+        *dev_out = dev;
+        pinned_allocs_.emplace_back(host, dev);
+        host_weight_index_[id.value()] = host_weights_.size();
+        host_weights_.push_back(HostWeight{id, kind, host, bytes, false, {}, 0u, 0u});
+        host_weight_bytes_ += bytes;
+        return Status::make_ok();
+    };
+    if (pending_weight_pinned_ || fail_dev_alloc_ > 0) {
+        if (fail_dev_alloc_ > 0) --fail_dev_alloc_;
+        return alloc_pinned();
+    }
+    const Status ds = dev_reserve(dev_out, bytes, what);
+    if (!ds.ok()) {
+        // T17 の縮退: VRAM が足りない / 転送失敗でも止めない。pinned host に
+        // 置いて CPU（MoE）または mapped host 経由の GPU で継続する。
+        if (!allow_host_fallback_) return ds;
+        return alloc_pinned();
+    }
+    if (src != nullptr)
+        SHELF_RETURN_IF_ERROR(
+            hipok(hipMemcpy(*dev_out, src, bytes, hipMemcpyHostToDevice), what));
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::alloc_pinned_aux(void** dev_out, std::size_t bytes, const void* src,
+                                         const char* what) {
+    if (dev_out == nullptr || bytes == 0u)
+        return Status::invalid_argument("alloc_pinned_aux: null/zero", __FILE__, __LINE__);
+    void* host = nullptr;
+    hipError_t e = hipHostMalloc(&host, bytes, hipHostMallocMapped);
+    if (e != hipSuccess)
+        return Status::from(Status::Code::device_error,
+                            std::string(what) + ": hipHostMalloc(mapped): " +
+                                hipGetErrorString(e),
+                            __FILE__, __LINE__);
+    void* dev = nullptr;
+    e = hipHostGetDevicePointer(&dev, host, 0);
+    if (e != hipSuccess) {
+        (void)hipHostFree(host);
+        return Status::from(Status::Code::device_error,
+                            std::string(what) + ": hipHostGetDevicePointer: " +
+                                hipGetErrorString(e),
+                            __FILE__, __LINE__);
+    }
+    if (src != nullptr) std::memcpy(host, src, bytes);
+    *dev_out = dev;
+    pinned_allocs_.emplace_back(host, dev);
+    host_weight_bytes_ += bytes;
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::promote_host_weights() {
+    (void)hipSetDevice(opts_.device);
+    for (auto& hw : host_weights_) {
+        if (hw.promoted) continue;
+        void* dev = nullptr;
+        SHELF_RETURN_IF_ERROR(dev_reserve(&dev, hw.bytes, "promote weight"));
+        SHELF_RETURN_IF_ERROR(
+            hipok(hipMemcpyAsync(dev, hw.host, hw.bytes, hipMemcpyHostToDevice, stream_),
+                  "promote weight copy"));
+        SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "promote sync"));
+        switch (hw.kind) {
+            case 0:
+                weight_dev_[hw.id.value()] = dev;
+                break;
+            case 1: {
+                const auto it = weight_fp8_.find(hw.id.value());
+                if (it == weight_fp8_.end())
+                    return Status::invalid_state("promote: fp8 weight not found", __FILE__,
+                                                 __LINE__);
+                it->second.codes = static_cast<std::uint8_t*>(dev);
+                break;
+            }
+            case 2: {
+                const auto it = weight_mxfp4_.find(hw.id.value());
+                if (it == weight_mxfp4_.end())
+                    return Status::invalid_state("promote: mxfp4 weight not found", __FILE__,
+                                                 __LINE__);
+                it->second.codes = static_cast<std::uint8_t*>(dev);
+                break;
+            }
+            default:
+                return Status::invalid_state("promote: unknown kind", __FILE__, __LINE__);
+        }
+        hw.promoted = true;
+        promoted_weight_bytes_ += hw.bytes;
+    }
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::alloc_state_pool(void** dev_out, void** host_out, std::size_t bytes,
+                                         const char* what) {
+    if (dev_out == nullptr || host_out == nullptr || bytes == 0u)
+        return Status::invalid_argument("alloc_state_pool: null/zero", __FILE__, __LINE__);
+    if (!opts_.kv_pinned_host) {
+        *host_out = nullptr;
+        return dev_reserve(dev_out, bytes, what);
+    }
+    void* host = nullptr;
+    hipError_t e = hipHostMalloc(&host, bytes, hipHostMallocMapped);
+    if (e != hipSuccess)
+        return Status::from(Status::Code::device_error,
+                            std::string(what) + ": hipHostMalloc(mapped): " +
+                                hipGetErrorString(e),
+                            __FILE__, __LINE__);
+    void* dev = nullptr;
+    e = hipHostGetDevicePointer(&dev, host, 0);
+    if (e != hipSuccess) {
+        (void)hipHostFree(host);
+        return Status::from(Status::Code::device_error,
+                            std::string(what) + ": hipHostGetDevicePointer: " +
+                                hipGetErrorString(e),
+                            __FILE__, __LINE__);
+    }
+    *dev_out = dev;
+    *host_out = host;
+    pinned_allocs_.emplace_back(host, dev);
+    host_kv_bytes_ += bytes;
+    return Status::make_ok();
+}
+
 HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
+    max_sequences_ = std::max<std::size_t>(opts_.max_sequences, 1u);
+    allow_host_fallback_ = opts_.allow_host_fallback;
+    // テスト用の故障注入: 先頭 N 回の device 確保を失敗させる（縮退の検証）。
+    if (const char* e = std::getenv("SHELF_TEST_FAIL_DEV_ALLOC")) {
+        fail_dev_alloc_ = static_cast<int>(std::strtol(e, nullptr, 10));
+    }
     // KV ページ（ブロック）寸法は既定 16（解決済み kernel 由来）。
     // decode attention は 16 トークンごとに block_table を引くので、
     // 間接参照の本数が律速の可能性を試すため `SHELF_KV_PAGE` で変えられるようにする。
@@ -120,10 +386,12 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     const hipError_t e3 = malloc_dev(&rowpos_dev_, kPosScratch);
     const hipError_t e4 = malloc_dev(&slot_zero_dev_, kMaxStepRows);
     const hipError_t e5 = malloc_dev(&errword_dev_, 1u);
-    const hipError_t e6 = malloc_dev(&req_dev_, 1u);
+    const hipError_t e6 = malloc_dev(&req_dev_, std::max<std::size_t>(max_sequences_, 1u));
+    const hipError_t e8 = malloc_dev(&rowslot_dev_, kMaxStepRows);
+    const hipError_t e9 = malloc_dev(&slot_window_dev_, max_sequences_);
     const hipError_t e7 = malloc_dev(&inv_freq_dev_,
                                       std::max<std::size_t>(2, opts_.rope_rotary_dim / 2));
-    (void)e0; (void)e1; (void)e2; (void)e3; (void)e4; (void)e5; (void)e6; (void)e7;
+    (void)e0; (void)e1; (void)e2; (void)e3; (void)e4; (void)e5; (void)e6; (void)e7; (void)e8;
     // 起動時 scratch は確保失敗を無視する（その値を使う時点でエラーになる）。
     // 予算 accounting には成功分だけを計上する。
     const auto charge = [&](void* p, std::size_t bytes) {
@@ -138,7 +406,8 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     charge(rowpos_dev_, kPosScratch * sizeof(std::uint32_t));
     charge(slot_zero_dev_, kMaxStepRows * sizeof(std::uint32_t));
     charge(errword_dev_, sizeof(std::uint32_t));
-    charge(req_dev_, sizeof(std::uint32_t));
+    charge(req_dev_, max_sequences_ * sizeof(hipk::GdnRequestDescriptor));
+    charge(rowslot_dev_, kMaxStepRows * sizeof(std::uint32_t));
     charge(inv_freq_dev_, std::max<std::size_t>(2, opts_.rope_rotary_dim / 2) * sizeof(double));
     hipMemset(slot_zero_dev_, 0, kMaxStepRows * sizeof(std::uint32_t));
     posrep_host_.assign(kPosScratch, 0u);
@@ -151,18 +420,33 @@ HipStepExecutor::~HipStepExecutor() {
     // （エラー経路でここへ来ることがある）。
     if (stream_) (void)hipStreamSynchronize(stream_);
     for (auto& [id, loc] : state_dev_) {
-        if (loc.dev) dev_release(loc.dev);
-        if (loc.k_pool) dev_release(loc.k_pool);
-        if (loc.v_pool) dev_release(loc.v_pool);
-        if (loc.table) dev_release(loc.table);
+        if (loc.dev) release_weight_ptr(loc.dev);
+        if (loc.k_pool) release_weight_ptr(loc.k_pool);
+        if (loc.v_pool) release_weight_ptr(loc.v_pool);
+        if (loc.table) release_weight_ptr(loc.table);
     }
-    for (auto& [id, p] : weight_dev_) dev_release(p);
+    for (auto& [id, p] : weight_dev_) release_weight_ptr(p);
     for (auto& [id, w] : weight_fp8_) {
-        if (w.codes) dev_release(w.codes);
-        if (w.scales) dev_release(w.scales);
+        release_weight_ptr(w.codes);
+        release_weight_ptr(w.scales);
     }
+    for (auto& [id, w] : weight_mxfp4_) {
+        release_weight_ptr(w.codes);
+        release_weight_ptr(w.scales);
+    }
+    // pinned（mapped host）は device 側の hipFree では解放できない。
+    for (auto& [host, dev] : pinned_allocs_) {
+        (void)dev;
+        if (host) (void)hipHostFree(host);
+    }
+    pinned_allocs_.clear();
     dev_release(fp8_codes_dev_);
     dev_release(fp8_scales_dev_);
+    dev_release(mxfp4_act_codes_dev_);
+    dev_release(mxfp4_act_scales_dev_);
+    dev_release(moe_scratch_dev_);
+    dev_release(moe_act_codes_dev_);
+    dev_release(moe_act_scales_dev_);
     dev_release(arena_dev_);
     dev_release(token_dev_);
     dev_release(posrep_dev_);
@@ -170,6 +454,8 @@ HipStepExecutor::~HipStepExecutor() {
     dev_release(slot_zero_dev_);
     dev_release(errword_dev_);
     dev_release(req_dev_);
+    dev_release(rowslot_dev_);
+    dev_release(slot_window_dev_);
     dev_release(inv_freq_dev_);
     hipStreamDestroy(stream_);
 }
@@ -181,10 +467,8 @@ Status HipStepExecutor::upload_weight(TensorId id, const std::vector<float>& f32
     std::vector<bf16_t> b(f32.size());
     for (std::size_t i = 0; i < f32.size(); ++i) b[i] = f32_to_bf16(f32[i]);
     void* dev = nullptr;
-    SHELF_RETURN_IF_ERROR(dev_reserve(&dev, b.size() * sizeof(bf16_t), "malloc weight"));
-    SHELF_RETURN_IF_ERROR(hipok(
-        hipMemcpy(dev, b.data(), b.size() * sizeof(bf16_t), hipMemcpyHostToDevice),
-        "upload weight"));
+    SHELF_RETURN_IF_ERROR(alloc_weight_payload(&dev, b.size() * sizeof(bf16_t), b.data(),
+                                               "upload weight", id, 0));
     weight_dev_[id.value()] = dev;
     return Status::make_ok();
 }
@@ -193,10 +477,9 @@ Status HipStepExecutor::upload_weight_bf16(TensorId id, const bf16_t* data, std:
     (void)hipSetDevice(opts_.device);
     if (weight_dev_.count(id.value()))
         return Status::invalid_state("weight uploaded twice", __FILE__, __LINE__);
-    bf16_t* dev = nullptr;
-    SHELF_RETURN_IF_ERROR(dev_alloc(&dev, n, "malloc weight bf16"));
-    SHELF_RETURN_IF_ERROR(hipok(
-        hipMemcpy(dev, data, n * sizeof(bf16_t), hipMemcpyHostToDevice), "upload weight bf16"));
+    void* dev = nullptr;
+    SHELF_RETURN_IF_ERROR(alloc_weight_payload(&dev, n * sizeof(bf16_t), data,
+                                               "upload weight bf16", id, 0));
     weight_dev_[id.value()] = dev;
     return Status::make_ok();
 }
@@ -223,17 +506,41 @@ Status HipStepExecutor::upload_weight_mxfp4(TensorId id, const std::uint8_t* cod
         return Status::invalid_argument(
             "upload_weight_mxfp4: スケール数が不一致（" + std::to_string(n_scales) + " != " +
             std::to_string(want_scales) + "）", __FILE__, __LINE__);
+    const std::size_t pinned_before = host_weights_.size();
     std::uint8_t* cdev = nullptr;
     std::uint8_t* sdev = nullptr;
-    SHELF_RETURN_IF_ERROR(dev_reserve(reinterpret_cast<void**>(&cdev), n_codes,
-                                      "malloc mxfp4 codes"));
-    SHELF_RETURN_IF_ERROR(dev_reserve(reinterpret_cast<void**>(&sdev), n_scales,
-                                      "malloc mxfp4 scales"));
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(cdev, codes, n_codes, hipMemcpyHostToDevice),
-                                "upload mxfp4 codes"));
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(sdev, scales, n_scales, hipMemcpyHostToDevice),
-                                "upload mxfp4 scales"));
+    SHELF_RETURN_IF_ERROR(alloc_weight_payload(reinterpret_cast<void**>(&cdev), n_codes,
+                                               codes, "upload mxfp4 codes", id, 2));
+    // スケールも device に置くが、確保に失敗したら pinned host へ落とす（縮退）。
+    {
+        Status ss = Status::make_ok();
+        if (fail_dev_alloc_ > 0) {
+            --fail_dev_alloc_;
+            ss = Status::from(Status::Code::device_error, "mxfp4 scales: 故障注入",
+                              __FILE__, __LINE__);
+        } else {
+            ss = dev_reserve(reinterpret_cast<void**>(&sdev), n_scales, "malloc mxfp4 scales");
+        }
+        if (!ss.ok()) {
+            if (!allow_host_fallback_) return ss;
+            SHELF_RETURN_IF_ERROR(alloc_pinned_aux(reinterpret_cast<void**>(&sdev), n_scales,
+                                                   scales, "pinned mxfp4 scales"));
+        } else {
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemcpy(sdev, scales, n_scales, hipMemcpyHostToDevice),
+                "upload mxfp4 scales"));
+        }
+    }
     weight_mxfp4_[id.value()] = Mxfp4Weight{cdev, sdev, features, k_padded};
+    // pinned host に置いた場合、CPU 計算用にスケールの正本も持つ
+    // （コードは `host_weights_.back().host` が正本。scales だけ device に
+    //  行ってしまうため、ここで複製する）。
+    if (host_weights_.size() != pinned_before) {
+        HostWeight& hw = host_weights_.back();
+        hw.host_scales.assign(scales, scales + n_scales);
+        hw.features = features;
+        hw.k_padded = k_padded;
+    }
     return Status::make_ok();
 }
 
@@ -261,13 +568,28 @@ using namespace shelf::quant::fp8::fine;
         return Status::invalid_argument("upload_weight_fp8: スケール数が不正", __FILE__, __LINE__);
     std::uint8_t* cdev = nullptr;
     float* sdev = nullptr;
-    SHELF_RETURN_IF_ERROR(dev_alloc(&cdev, n_codes, "malloc weight fp8 codes"));
-    SHELF_RETURN_IF_ERROR(dev_alloc(&sdev, want_scales, "malloc weight fp8 scales"));
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(cdev, codes, n_codes, hipMemcpyHostToDevice),
-                                "upload weight fp8 codes"));
-    SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(sdev, scales, want_scales * sizeof(float),
-                                          hipMemcpyHostToDevice),
-                                "upload weight fp8 scales"));
+    SHELF_RETURN_IF_ERROR(alloc_weight_payload(reinterpret_cast<void**>(&cdev), n_codes,
+                                               codes, "upload weight fp8 codes", id, 1));
+    {
+        Status ss = Status::make_ok();
+        if (fail_dev_alloc_ > 0) {
+            --fail_dev_alloc_;
+            ss = Status::from(Status::Code::device_error, "fp8 scales: 故障注入", __FILE__,
+                              __LINE__);
+        } else {
+            ss = dev_alloc(&sdev, want_scales, "malloc weight fp8 scales");
+        }
+        if (!ss.ok()) {
+            if (!allow_host_fallback_) return ss;
+            SHELF_RETURN_IF_ERROR(alloc_pinned_aux(
+                reinterpret_cast<void**>(&sdev), want_scales * sizeof(float), scales,
+                "pinned fp8 scales"));
+        } else {
+            SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(sdev, scales, want_scales * sizeof(float),
+                                                  hipMemcpyHostToDevice),
+                                        "upload weight fp8 scales"));
+        }
+    }
     weight_fp8_[id.value()] = Fp8Weight{cdev, sdev, weight_block128};
     return Status::make_ok();
 }
@@ -288,7 +610,551 @@ Status HipStepExecutor::ensure_fp8_scratch(std::size_t code_bytes, std::size_t s
     return Status::make_ok();
 }
 
+Status HipStepExecutor::ensure_mxfp4_scratch(std::size_t code_bytes, std::size_t scale_bytes) {
+    if (code_bytes > mxfp4_act_codes_cap_) {
+        if (mxfp4_act_codes_dev_) dev_release(mxfp4_act_codes_dev_);
+        mxfp4_act_codes_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(
+            dev_alloc(&mxfp4_act_codes_dev_, code_bytes, "malloc mxfp4 act codes"));
+        mxfp4_act_codes_cap_ = code_bytes;
+    }
+    if (scale_bytes > mxfp4_act_scales_cap_) {
+        if (mxfp4_act_scales_dev_) dev_release(mxfp4_act_scales_dev_);
+        mxfp4_act_scales_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(
+            dev_alloc(&mxfp4_act_scales_dev_, scale_bytes, "malloc mxfp4 act scales"));
+        mxfp4_act_scales_cap_ = scale_bytes;
+    }
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::ensure_moe_scratch(std::size_t bytes) {
+    if (bytes <= moe_scratch_cap_) return Status::make_ok();
+    if (moe_scratch_dev_) dev_release(moe_scratch_dev_);
+    moe_scratch_dev_ = nullptr;
+    SHELF_RETURN_IF_ERROR(dev_alloc(&moe_scratch_dev_, bytes, "malloc moe scratch"));
+    moe_scratch_cap_ = bytes;
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::ensure_moe_act_scratch(std::size_t code_bytes,
+                                               std::size_t scale_bytes) {
+    if (code_bytes > moe_act_codes_cap_) {
+        if (moe_act_codes_dev_) dev_release(moe_act_codes_dev_);
+        moe_act_codes_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(
+            dev_alloc(&moe_act_codes_dev_, code_bytes, "malloc moe act codes"));
+        moe_act_codes_cap_ = code_bytes;
+    }
+    if (scale_bytes > moe_act_scales_cap_) {
+        if (moe_act_scales_dev_) dev_release(moe_act_scales_dev_);
+        moe_act_scales_dev_ = nullptr;
+        SHELF_RETURN_IF_ERROR(
+            dev_alloc(&moe_act_scales_dev_, scale_bytes, "malloc moe act scales"));
+        moe_act_scales_cap_ = scale_bytes;
+    }
+    return Status::make_ok();
+}
+
+// MoE の 1 行（1 トークン）を計算する。ルーティングだけホストで行い、
+// エキスパートの行列積はデバイスのカーネルに任せる（正しさ優先の実装。
+// GPU 側で分担を決める最適化は後段。判定は「この呼び出しの先頭」で固定する）。
+Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
+                                    bf16_t* out_row, std::size_t H, std::size_t E,
+                                    std::size_t I, std::size_t Is, bool shared) {
+    const std::size_t W = std::max(I, Is);
+    // ---- 重みの形式（エキスパートは全員同じ形式。ルーターは bf16）----
+    const auto dev_of = [&](std::size_t i) -> void* {
+        const auto it = weight_dev_.find(p.weights[i].value());
+        return it == weight_dev_.end() ? nullptr : it->second;
+    };
+    const auto mx_of = [&](std::size_t i) -> const Mxfp4Weight* {
+        const auto it = weight_mxfp4_.find(p.weights[i].value());
+        return it == weight_mxfp4_.end() ? nullptr : &it->second;
+    };
+    if (dev_of(0) == nullptr)
+        return Status::unsupported("moe_mlp: router は bf16 のみ対応", __FILE__, __LINE__);
+    const bool expert_mx = mx_of(1) != nullptr;
+    if (!expert_mx && dev_of(1) == nullptr)
+        return Status::unsupported("moe_mlp: エキスパート重みが bf16/MXFP4 以外",
+                                   __FILE__, __LINE__);
+
+    // ---- 一時領域 ----
+    std::size_t off = 0;
+    const auto take = [&off](std::size_t bytes) {
+        off = (off + 15u) & ~std::size_t(15u);
+        const std::size_t at = off;
+        off += bytes;
+        return at;
+    };
+    const std::size_t off_gate = take(W * sizeof(bf16_t));
+    const std::size_t off_up = take(W * sizeof(bf16_t));
+    const std::size_t off_mid = take(W * sizeof(bf16_t));
+    const std::size_t off_eout = take(H * sizeof(bf16_t));
+    const std::size_t off_acc = take(H * sizeof(float));
+    const std::size_t off_logits = take(E * sizeof(float));
+    // CPU で計算した寄与を H2D するための f32 1 行分。
+    const std::size_t off_cpu = take(H * sizeof(float));
+    const std::size_t total = take(16u);
+    SHELF_RETURN_IF_ERROR(ensure_moe_scratch(total));
+    auto* base = static_cast<std::uint8_t*>(moe_scratch_dev_);
+    auto* gate_buf = reinterpret_cast<bf16_t*>(base + off_gate);
+    auto* up_buf = reinterpret_cast<bf16_t*>(base + off_up);
+    auto* mid_buf = reinterpret_cast<bf16_t*>(base + off_mid);
+    auto* eout_buf = reinterpret_cast<bf16_t*>(base + off_eout);
+    auto* acc_buf = reinterpret_cast<float*>(base + off_acc);
+    auto* logits_dev = reinterpret_cast<float*>(base + off_logits);
+    auto* cpu_acc_dev = reinterpret_cast<float*>(base + off_cpu);
+
+    // ---- ルーター（1 行分の logits をデバイスで作ってホストで top-k）----
+    SHELF_RETURN_IF_ERROR(hipok(
+        launch_moe_router_logit(x_row, static_cast<const bf16_t*>(dev_of(0)), logits_dev,
+                                u32(E), u32(H), stream_),
+        "moe router logits"));
+    std::vector<float> logits(E);
+    std::vector<bf16_t> x_host(H);   // CPU 分担の入力（GPU と同じ bf16 の生ビット）
+    SHELF_RETURN_IF_ERROR(hipok(
+        hipMemcpyAsync(logits.data(), logits_dev, E * sizeof(float), hipMemcpyDeviceToHost,
+                       stream_),
+        "moe router readback"));
+    SHELF_RETURN_IF_ERROR(hipok(
+        hipMemcpyAsync(x_host.data(), x_row, H * sizeof(bf16_t), hipMemcpyDeviceToHost,
+                       stream_),
+        "moe cpu input readback"));
+    SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "moe router sync"));
+
+    const std::size_t k = static_cast<std::size_t>(p.attr.top_k);
+    if (k == 0u || k > E)
+        return Status::invalid_state("moe_mlp: top_k out of range", __FILE__, __LINE__);
+    // softmax（f32）→ top-k（同値は小さい index）→ 選択分を再正規化。
+    float mx = -INFINITY;
+    for (float v : logits) mx = std::max(mx, v);
+    float sum = 0.0f;
+    for (auto& v : logits) {
+        v = std::exp(v - mx);
+        sum += v;
+    }
+    for (auto& v : logits) v /= sum;
+    std::vector<char> used(E, 0);
+    std::vector<std::size_t> sel(k, 0);
+    std::vector<float> sel_w(k, 0.0f);
+    float keep = 0.0f;
+    for (std::size_t j = 0; j < k; ++j) {
+        std::size_t best = E;
+        for (std::size_t e = 0; e < E; ++e) {
+            if (used[e]) continue;
+            if (best == E || logits[e] > logits[best]) best = e;
+        }
+        used[best] = 1;
+        sel[j] = best;
+        sel_w[j] = logits[best];
+        keep += logits[best];
+    }
+    if (keep <= 0.0f)
+        return Status::invalid_state("moe_mlp: top-k weights are zero", __FILE__, __LINE__);
+    for (auto& v : sel_w) v /= keep;
+
+    SHELF_RETURN_IF_ERROR(hipok(
+        hipMemsetAsync(acc_buf, 0, H * sizeof(float), stream_), "moe acc zero"));
+
+    // ---- MXFP4 の活性化 scratch（1 行分）。x は全エキスパートで共通。----
+    const bool w4a4 = opts_.mxfp4_activation;
+    std::uint32_t x_kp = 0;
+    std::uint32_t x_group = 0;
+    if (expert_mx) {
+        using namespace shelf::quant::mxfp4;
+        x_kp = pad_k(u32(H));
+        if (x_kp != u32(H))
+            return Status::unsupported("moe_mlp: H が 32 の倍数でない", __FILE__, __LINE__);
+        if (w4a4) {
+            SHELF_RETURN_IF_ERROR(
+                ensure_mxfp4_scratch(tiled_bytes(1u, x_kp), scale_bytes(1u, x_kp)));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_activation_quantize_mxfp4(x_row, mxfp4_act_codes_dev_,
+                                                 mxfp4_act_scales_dev_, 1u, u32(H), x_kp,
+                                                 u32(H), stream_),
+                "moe mxfp4 act quantize"));
+        } else {
+            x_group = (opts_.fp8_act_group != 0u &&
+                       (x_kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                          ? shelf::quant::fp8::fine::kActGroupK
+                          : 0u;
+            SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
+                shelf::quant::fp8::tiled_bytes(1u, x_kp),
+                shelf::quant::fp8::fine::activation_scale_count(1u, x_kp, x_group)));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_activation_quantize_fp8(x_row, fp8_codes_dev_, fp8_scales_dev_, 1u,
+                                               u32(H), x_kp, u32(H), x_group, stream_),
+                "moe mxfp4 act quantize (fp8)"));
+        }
+    }
+
+    // エキスパート 1 個の MLP（gate/up → swiglu → down → 累積）。
+    const auto run_expert = [&](std::size_t w_idx, std::size_t width, float weight) -> Status {
+        const Mxfp4Weight* mx_g = mx_of(w_idx);
+        if (mx_g != nullptr) {
+            using namespace shelf::quant::mxfp4;
+            const std::uint32_t kp = pad_k(u32(H));
+            const Mxfp4Weight* mx_u = mx_of(w_idx + 1);
+            if (mx_u == nullptr)
+                return Status::invalid_state("moe_mlp: expert weight kind mismatch",
+                                             __FILE__, __LINE__);
+            Mxfp4GemmScaleArgs sa;
+            sa.weight_scale_stride = kp / kBlockK;
+            if (w4a4) {
+                sa.act_group = 0u;
+                sa.activation_scale_stride = kp / kBlockK;
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a4_decode1(mx_g->codes, mx_g->scales,
+                                                   mxfp4_act_codes_dev_,
+                                                   mxfp4_act_scales_dev_, gate_buf,
+                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                                   kp, u32(width), sa, stream_),
+                    "moe expert gate (w4a4)"));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a4_decode1(mx_u->codes, mx_u->scales,
+                                                   mxfp4_act_codes_dev_,
+                                                   mxfp4_act_scales_dev_, up_buf,
+                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                                   kp, u32(width), sa, stream_),
+                    "moe expert up (w4a4)"));
+            } else {
+                sa.act_group = x_group;
+                sa.activation_scale_stride =
+                    x_group == shelf::quant::fp8::fine::kActGroupK ? kp / x_group : 1u;
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a8_decode1(mx_g->codes, mx_g->scales, fp8_codes_dev_,
+                                                   fp8_scales_dev_, gate_buf,
+                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                                   kp, u32(width), sa, stream_),
+                    "moe expert gate (w4a8)"));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a8_decode1(mx_u->codes, mx_u->scales, fp8_codes_dev_,
+                                                   fp8_scales_dev_, up_buf,
+                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                                   kp, u32(width), sa, stream_),
+                    "moe expert up (w4a8)"));
+            }
+        } else {
+            Bf16GemmConfig cfg;
+            cfg.id = Bf16GemmConfigId::ExactRows;
+            cfg.exact_rows = 1u;
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(w_idx)), x_row,
+                                 gate_buf, Bf16GemmOutputDType::BF16, 1u, u32(width), u32(H),
+                                 u32(H), u32(width), stream_),
+                "moe expert gate"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(w_idx + 1)), x_row,
+                                 up_buf, Bf16GemmOutputDType::BF16, 1u, u32(width), u32(H),
+                                 u32(H), u32(width), stream_),
+                "moe expert up"));
+        }
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_swiglu_bf16(gate_buf, u32(width), up_buf, u32(width), mid_buf,
+                               u32(width), 1u, u32(width), stream_),
+            "moe expert swiglu"));
+        // down: mid（bf16, 幅 width）→ [H]
+        const Mxfp4Weight* mx_d = mx_of(w_idx + 2);
+        if (mx_d != nullptr) {
+            using namespace shelf::quant::mxfp4;
+            const std::uint32_t kp = pad_k(u32(width));
+            if (kp != u32(width))
+                return Status::unsupported("moe_mlp: down の K が 32 の倍数でない", __FILE__,
+                                           __LINE__);
+            Mxfp4GemmScaleArgs sa;
+            sa.weight_scale_stride = kp / kBlockK;
+            if (w4a4) {
+                SHELF_RETURN_IF_ERROR(
+                    ensure_moe_act_scratch(tiled_bytes(1u, kp), scale_bytes(1u, kp)));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_activation_quantize_mxfp4(mid_buf, moe_act_codes_dev_,
+                                                     moe_act_scales_dev_, 1u, u32(width), kp,
+                                                     u32(width), stream_),
+                    "moe expert down act quantize (w4a4)"));
+                sa.act_group = 0u;
+                sa.activation_scale_stride = kp / kBlockK;
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a4_decode1(mx_d->codes, mx_d->scales,
+                                                   moe_act_codes_dev_, moe_act_scales_dev_,
+                                                   eout_buf, Mxfp4GemmOutputDType::BF16, 1u,
+                                                   u32(H), kp, u32(H), sa, stream_),
+                    "moe expert down (w4a4)"));
+            } else {
+                const std::uint32_t group =
+                    (opts_.fp8_act_group != 0u &&
+                     (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                        ? shelf::quant::fp8::fine::kActGroupK
+                        : 0u;
+                SHELF_RETURN_IF_ERROR(ensure_moe_act_scratch(
+                    shelf::quant::fp8::tiled_bytes(1u, kp),
+                    shelf::quant::fp8::fine::activation_scale_count(1u, kp, group) *
+                        sizeof(float)));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_activation_quantize_fp8(mid_buf, moe_act_codes_dev_,
+                                                   reinterpret_cast<float*>(moe_act_scales_dev_),
+                                                   1u, u32(width), kp, u32(width), group,
+                                                   stream_),
+                    "moe expert down act quantize"));
+                sa.act_group = group;
+                sa.activation_scale_stride =
+                    group == shelf::quant::fp8::fine::kActGroupK ? kp / group : 1u;
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_mxfp4_w4a8_decode1(
+                        mx_d->codes, mx_d->scales, moe_act_codes_dev_,
+                        reinterpret_cast<const float*>(moe_act_scales_dev_), eout_buf,
+                        Mxfp4GemmOutputDType::BF16, 1u, u32(H), kp, u32(H), sa, stream_),
+                    "moe expert down (w4a8)"));
+            }
+        } else {
+            Bf16GemmConfig cfg;
+            cfg.id = Bf16GemmConfigId::ExactRows;
+            cfg.exact_rows = 1u;
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(w_idx + 2)), mid_buf,
+                                 eout_buf, Bf16GemmOutputDType::BF16, 1u, u32(H), u32(width),
+                                 u32(width), u32(H), stream_),
+                "moe expert down"));
+        }
+        return hipok(launch_moe_accumulate(acc_buf, eout_buf, weight, u32(H), stream_),
+                     "moe expert accumulate");
+    };
+
+    // ---- 分担の判定（この行の先頭で固定する）----
+    // 3 本とも pinned host のまま（VRAM に載せていない）エキスパートは CPU で計算する。
+    // 混在（一部だけ pinned）は GPU に任せる（mapped host を読むので遅いが正しい）。
+    const auto pinned_hosted = [&](std::size_t w_idx) -> bool {
+        // 切分けの検証用: CPU 分担を止めて GPU（mapped host 読み）に固定する。
+        if (std::getenv("SHELF_MOE_NO_CPU") != nullptr) return false;
+        for (std::size_t t = 0; t < 3u; ++t) {
+            const auto it = host_weight_index_.find(p.weights[w_idx + t].value());
+            if (it == host_weight_index_.end()) return false;
+            if (host_weights_[it->second].promoted) return false;
+        }
+        return true;
+    };
+    std::vector<std::size_t> cpu_sel;
+    for (std::size_t j = 0; j < k; ++j) {
+        const std::size_t e = sel[j];
+        if (pinned_hosted(1u + 3u * e)) {
+            cpu_sel.push_back(j);
+        } else {
+            ++moe_gpu_experts_;
+            SHELF_RETURN_IF_ERROR(run_expert(1u + 3u * e, I, sel_w[j]));
+        }
+    }
+
+    // ---- CPU 分担の本体（GPU のカーネルが流れている間に計算する）----
+    std::vector<float> cpu_acc(cpu_sel.empty() ? 0u : H, 0.0f);
+    std::vector<float> xf(x_host.size());
+    for (std::size_t i = 0; i < x_host.size(); ++i) xf[i] = bf16_host_to_float(x_host[i]);
+    // 量子化エキスパートの入力は全エキスパートで共通なので 1 回だけ量子化する。
+    std::vector<float> xq_row;
+    bool cpu_mx = false;
+    for (std::size_t j : cpu_sel) {
+        const auto it = host_weight_index_.find(p.weights[1u + 3u * sel[j]].value());
+        if (it != host_weight_index_.end() && host_weights_[it->second].kind == 2) cpu_mx = true;
+    }
+    if (cpu_mx) {
+        if (w4a4) {
+            quantize_act_mxfp4_host(xf.data(), u32(H), xq_row);
+        } else {
+            quantize_act_fp8_host(xf.data(), u32(H), x_group, xq_row);
+        }
+    }
+    const auto cpu_expert = [&](std::size_t w_idx, std::size_t width, float weight,
+                                float* acc_out) -> Status {
+        const auto host_of = [&](std::size_t i) -> const HostWeight* {
+            const auto it = host_weight_index_.find(p.weights[i].value());
+            if (it == host_weight_index_.end() || host_weights_[it->second].promoted)
+                return nullptr;
+            return &host_weights_[it->second];
+        };
+        const HostWeight* g = host_of(w_idx);
+        const HostWeight* u = host_of(w_idx + 1u);
+        const HostWeight* d = host_of(w_idx + 2u);
+        if (!g || !u || !d)
+            return Status::invalid_state(
+                "moe cpu: pinned weight missing (w_idx=" + std::to_string(w_idx) +
+                    ", ids=" + std::to_string(p.weights[w_idx].value()) + "/" +
+                    std::to_string(p.weights[w_idx + 1u].value()) + "/" +
+                    std::to_string(p.weights[w_idx + 2u].value()) + ")",
+                __FILE__, __LINE__);
+        std::vector<float> gate(width), up(width), mid(width), out(H);
+        const bool mx = g->kind == 2;
+        if (mx) {
+            const auto* gc = static_cast<const std::uint8_t*>(g->host);
+            const auto* uc = static_cast<const std::uint8_t*>(u->host);
+            const auto* dc = static_cast<const std::uint8_t*>(d->host);
+            // GPU と同じ活性化量子化を通す（W4A4 / W4A8）。これで VRAM 予算の
+            // 違い（CPU 分担か GPU か）で数値が変わらない方向に揃う。
+            // 入力 x は行で共通なので、量子化は `xq_row` を 1 回だけ作って使う。
+            const float* act = xq_row.empty() ? xf.data() : xq_row.data();
+            for (std::size_t i = 0; i < width; ++i) {
+                gate[i] = dot_mxfp4_row(gc, g->host_scales.data(), u32(i), act, u32(H),
+                                        g->k_padded);
+                up[i] = dot_mxfp4_row(uc, u->host_scales.data(), u32(i), act, u32(H),
+                                      u->k_padded);
+            }
+            for (std::size_t i = 0; i < width; ++i) {
+                // GPU は gate/up を bf16 で書き、swiglu も bf16 を読む。
+                // 同じ丸めを通してから量子化しないと、mid の E2M1 コードが
+                // 境界で食い違う（実測: 共有/近接 top-1 の入れ替わり）。
+                const float gv = bf16_round_host(gate[i]);
+                const float uv = bf16_round_host(up[i]);
+                mid[i] = bf16_round_host((gv / (1.0f + std::exp(-gv))) * uv);
+            }
+            std::vector<float> mq;
+            if (w4a4) {
+                quantize_act_mxfp4_host(mid.data(), u32(width), mq);
+            } else {
+                const bool g128 = opts_.fp8_act_group != 0u &&
+                                  (width % shelf::quant::fp8::fine::kActGroupK) == 0u;
+                quantize_act_fp8_host(mid.data(), u32(width),
+                                      g128 ? shelf::quant::fp8::fine::kActGroupK : 0u, mq);
+            }
+            for (std::size_t h = 0; h < H; ++h)
+                out[h] = dot_mxfp4_row(dc, d->host_scales.data(), u32(h), mq.data(),
+                                       u32(width), d->k_padded);
+        } else {
+            const auto* gw = static_cast<const bf16_t*>(g->host);
+            const auto* uw = static_cast<const bf16_t*>(u->host);
+            const auto* dw = static_cast<const bf16_t*>(d->host);
+            for (std::size_t i = 0; i < width; ++i) {
+                gate[i] = dot_bf16_row(gw + i * H, xf.data(), H);
+                up[i] = dot_bf16_row(uw + i * H, xf.data(), H);
+            }
+            for (std::size_t i = 0; i < width; ++i) {
+                const float gv = bf16_round_host(gate[i]);
+                const float uv = bf16_round_host(up[i]);
+                mid[i] = bf16_round_host((gv / (1.0f + std::exp(-gv))) * uv);
+            }
+            for (std::size_t h = 0; h < H; ++h)
+                out[h] = dot_bf16_row(dw + h * width, mid.data(), width);
+        }
+        for (std::size_t h = 0; h < H; ++h) acc_out[h] += weight * out[h];
+        return Status::make_ok();
+    };
+
+    // ---- 共有エキスパート（sigmoid ゲート）----
+    if (shared) {
+        const std::size_t sbase = 1u + 3u * E;
+        // ゲート値は logits バッファを 1 要素分だけ使い回す。
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_moe_router_logit(x_row, static_cast<const bf16_t*>(dev_of(sbase + 3u)),
+                                    logits_dev, 1u, u32(H), stream_),
+            "moe shared gate logit"));
+        float gv = 0.0f;
+        SHELF_RETURN_IF_ERROR(hipok(
+            hipMemcpyAsync(&gv, logits_dev, sizeof(float), hipMemcpyDeviceToHost, stream_),
+            "moe shared gate readback"));
+        SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "moe shared gate sync"));
+        const float sg = 1.0f / (1.0f + std::exp(-gv));
+        // 共有エキスパートは bf16（checkpoint の量子化除外宣言）。
+        if (dev_of(sbase) == nullptr || dev_of(sbase + 1u) == nullptr ||
+            dev_of(sbase + 2u) == nullptr)
+            return Status::unsupported("moe_mlp: 共有エキスパートは bf16 のみ対応", __FILE__,
+                                       __LINE__);
+        Bf16GemmConfig cfg;
+        cfg.id = Bf16GemmConfigId::ExactRows;
+        cfg.exact_rows = 1u;
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(sbase)), x_row, gate_buf,
+                             Bf16GemmOutputDType::BF16, 1u, u32(Is), u32(H), u32(H), u32(Is),
+                             stream_),
+            "moe shared gate"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(sbase + 1u)), x_row,
+                             up_buf, Bf16GemmOutputDType::BF16, 1u, u32(Is), u32(H), u32(H),
+                             u32(Is), stream_),
+            "moe shared up"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_swiglu_bf16(gate_buf, u32(Is), up_buf, u32(Is), mid_buf, u32(Is), 1u,
+                               u32(Is), stream_),
+            "moe shared swiglu"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_bf16(cfg, static_cast<const bf16_t*>(dev_of(sbase + 2u)), mid_buf,
+                             eout_buf, Bf16GemmOutputDType::BF16, 1u, u32(H), u32(Is), u32(Is),
+                             u32(H), stream_),
+            "moe shared down"));
+        SHELF_RETURN_IF_ERROR(
+            hipok(launch_moe_accumulate(acc_buf, eout_buf, sg, u32(H), stream_),
+                  "moe shared accumulate"));
+    }
+
+    // ---- CPU 分担の合流 ----
+    // GPU のカーネル（エキスパート・共有）は enqueue 済みで流れている。その間に
+    // CPU が pinned のエキスパートを計算し、最後に 1 回だけ H2D して足す。
+    if (!cpu_sel.empty()) {
+        const auto cpu_t0 = std::chrono::steady_clock::now();
+        // エキスパート単位で分割する（結果は固定の分割・固定の足し順なので決定的）。
+        unsigned nt = std::thread::hardware_concurrency();
+        if (nt == 0u) nt = 1u;
+        if (const char* e = std::getenv("SHELF_MOE_CPU_THREADS"))
+            nt = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+        nt = std::max(1u, std::min<unsigned>(nt, 16u));
+        nt = std::min<unsigned>(nt, static_cast<unsigned>(cpu_sel.size()));
+        std::vector<std::vector<float>> partial(
+            nt, std::vector<float>(H, 0.0f));
+        std::vector<Status> errs(nt, Status::make_ok());
+        if (nt <= 1u) {
+            for (std::size_t idx = 0; idx < cpu_sel.size(); ++idx) {
+                const std::size_t pos = cpu_sel[idx];
+                const std::size_t e = sel[pos];
+                errs[0] = cpu_expert(1u + 3u * e, I, sel_w[pos], partial[0].data());
+                if (!errs[0].ok()) break;
+            }
+        } else {
+            std::vector<std::thread> workers;
+            workers.reserve(nt);
+            for (unsigned t = 0; t < nt; ++t) {
+                workers.emplace_back([&, t] {
+                    for (std::size_t idx = t; idx < cpu_sel.size(); idx += nt) {
+                        const std::size_t pos = cpu_sel[idx];
+                        const std::size_t e = sel[pos];
+                        errs[t] = cpu_expert(1u + 3u * e, I, sel_w[pos],
+                                             partial[t].data());
+                        if (!errs[t].ok()) return;
+                    }
+                });
+            }
+            for (auto& w : workers) w.join();
+        }
+        for (unsigned t = 0; t < nt; ++t)
+            SHELF_RETURN_IF_ERROR(errs[t]);
+        for (unsigned t = 0; t < nt; ++t)
+            for (std::size_t h = 0; h < H; ++h) cpu_acc[h] += partial[t][h];
+        moe_cpu_experts_ += cpu_sel.size();
+        moe_cpu_ms_ += std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - cpu_t0)
+                           .count();
+        SHELF_RETURN_IF_ERROR(hipok(
+            hipMemcpyAsync(cpu_acc_dev, cpu_acc.data(), H * sizeof(float),
+                           hipMemcpyHostToDevice, stream_),
+            "moe cpu acc upload"));
+        SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "moe cpu acc sync"));
+        SHELF_RETURN_IF_ERROR(
+            hipok(launch_moe_add_f32(acc_buf, cpu_acc_dev, u32(H), stream_),
+                  "moe cpu acc add"));
+    }
+
+    return hipok(launch_f32_to_bf16(acc_buf, out_row, u32(H), stream_), "moe output");
+}
+
 Status HipStepExecutor::declare_states(const ir::Graph& g) {
+    const auto declare_t0 = std::chrono::steady_clock::now();
+    kv_shared_pool_ = opts_.kv_blocks != 0u;
+    kv_total_pages_ = 0;
+    kv_pages_per_seq_ = 0;
+    struct DeclareTimer {
+        std::chrono::steady_clock::time_point t0;
+        double* out;
+        ~DeclareTimer() {
+            *out = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count();
+        }
+    } declare_timer{declare_t0, &stats_.declare_ms};
     (void)hipSetDevice(opts_.device);
     weight_shape_.clear();
     for (const auto& w : g.all_weights()) weight_shape_[w.id.value()] = w.shape;
@@ -302,25 +1168,81 @@ Status HipStepExecutor::declare_states(const ir::Graph& g) {
             const std::size_t cap = sh.dim(0), kvh = sh.dim(2), D = sh.dim(3);
             const std::size_t bs = opts_.kv_block_size;
             loc.pages = (cap + bs - 1) / bs;
-            const std::size_t pool_elems = loc.pages * bs * kvh * D;
+            // T16: グローバルプール。既定はスロットごとの固定範囲（従来と同じ）。
+            const std::size_t pages = loc.pages;
+            loc.total_pages = opts_.kv_blocks != 0u ? opts_.kv_blocks
+                                                    : pages * max_sequences_;
+            if (loc.total_pages < pages)
+                return Status::invalid_argument(
+                    "kv_blocks が 1 シーケンス分（" + std::to_string(pages) +
+                        "）より小さい",
+                    __FILE__, __LINE__);
+            if (kv_pages_per_seq_ != 0 && kv_pages_per_seq_ != pages)
+                return Status::invalid_state("KV 層で 1 シーケンスのページ数が食い違う",
+                                             __FILE__, __LINE__);
+            if (kv_total_pages_ != 0 && kv_total_pages_ != loc.total_pages)
+                return Status::invalid_state("KV 層でグローバル block 数が食い違う",
+                                             __FILE__, __LINE__);
+            kv_pages_per_seq_ = pages;
+            kv_total_pages_ = loc.total_pages;
+            const std::size_t pool_elems = loc.total_pages * bs * kvh * D;
             loc.pool_bytes = pool_elems * sizeof(bf16_t);   // reset で 0 クリアする
-            SHELF_RETURN_IF_ERROR(
-                dev_reserve(&loc.k_pool, pool_elems * sizeof(bf16_t), "kv pool K"));
-            SHELF_RETURN_IF_ERROR(
-                dev_reserve(&loc.v_pool, pool_elems * sizeof(bf16_t), "kv pool V"));
-            SHELF_RETURN_IF_ERROR(
-                hipok(hipMemset(loc.k_pool, 0, pool_elems * sizeof(bf16_t)), "zero kv K"));
-            SHELF_RETURN_IF_ERROR(
-                hipok(hipMemset(loc.v_pool, 0, pool_elems * sizeof(bf16_t)), "zero kv V"));
-            std::vector<std::uint32_t> t(loc.pages);
-            for (std::size_t i = 0; i < loc.pages; ++i) t[i] = u32(i);
+            const std::size_t pool_bytes = pool_elems * sizeof(bf16_t);
+            SHELF_RETURN_IF_ERROR(alloc_state_pool(&loc.k_pool, &loc.host_k, pool_bytes,
+                                                   "kv pool K"));
+            SHELF_RETURN_IF_ERROR(alloc_state_pool(&loc.v_pool, &loc.host_v, pool_bytes,
+                                                   "kv pool V"));
+            // T14: online KV（直近ページの VRAM ミラー）。
+            if (opts_.online_kv_pages != 0u) {
+                if (loc.host_k == nullptr)
+                    return Status::invalid_argument(
+                        "online_kv_pages は kv_pinned_host のときだけ使える", __FILE__,
+                        __LINE__);
+                const std::size_t per_page = bs * kvh * D;
+                const std::size_t online_elems =
+                    max_sequences_ * opts_.online_kv_pages * per_page;
+                const std::size_t online_bytes = online_elems * sizeof(bf16_t);
+                SHELF_RETURN_IF_ERROR(
+                    dev_reserve(&loc.online_k, online_bytes, "online kv K"));
+                SHELF_RETURN_IF_ERROR(
+                    dev_reserve(&loc.online_v, online_bytes, "online kv V"));
+                SHELF_RETURN_IF_ERROR(
+                    hipok(hipMemset(loc.online_k, 0, online_bytes), "zero online kv K"));
+                SHELF_RETURN_IF_ERROR(
+                    hipok(hipMemset(loc.online_v, 0, online_bytes), "zero online kv V"));
+                loc.online_pages = opts_.online_kv_pages;
+                loc.online_bytes = online_bytes;
+            }
+            if (loc.host_k != nullptr) {
+                std::memset(loc.host_k, 0, pool_bytes);
+            } else {
+                SHELF_RETURN_IF_ERROR(
+                    hipok(hipMemset(loc.k_pool, 0, pool_bytes), "zero kv K"));
+            }
+            if (loc.host_v != nullptr) {
+                std::memset(loc.host_v, 0, pool_bytes);
+            } else {
+                SHELF_RETURN_IF_ERROR(
+                    hipok(hipMemset(loc.v_pool, 0, pool_bytes), "zero kv V"));
+            }
+            // ブロック表は slot ごとに `pages` エントリ。既定は
+            // `slot * pages + 論理 page`（従来の identity）。共有プールでは
+            // `assign_kv_blocks` が任意のグローバル block を指す。
+            std::vector<std::uint32_t> t(max_sequences_ * pages);
+            for (std::size_t slot = 0; slot < max_sequences_; ++slot)
+                for (std::size_t p = 0; p < pages; ++p) {
+                    const std::size_t v = slot * pages + p;
+                    t[slot * pages + p] =
+                        static_cast<std::uint32_t>(v < loc.total_pages ? v
+                                                                      : loc.total_pages - 1);
+                }
             SHELF_RETURN_IF_ERROR(dev_alloc(&loc.table, t.size(), "kv table"));
             SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(loc.table, t.data(),
                                                   t.size() * sizeof(std::uint32_t),
                                                   hipMemcpyHostToDevice),
                                         "kv table upload"));
         } else {
-            loc.elems = numel(sh);
+            loc.elems = numel(sh) * max_sequences_;   // スロット先頭オフセットで並べる
             SHELF_RETURN_IF_ERROR(
                 dev_reserve(&loc.dev, loc.elems * sizeof(float), "state alloc"));
             SHELF_RETURN_IF_ERROR(
@@ -370,17 +1292,37 @@ Status HipStepExecutor::reset_states() {
     // **必ず実行ストリーム上で** 0 クリアする。`hipMemset`（既定ストリーム）は
     // 実行器の non-blocking stream_ と順序が保証されず、直前のカーネルと競合する
     // （実測: 2 回目のシーケンスだけ結果が変わる原因だった）。
+    // pinned host の KV はストリーム上で memset できない。実行中のカーネルを
+    // 待ってからホスト側で 0 を書く（次のステップはその後で発射する）。
+    bool any_host_kv = false;
+    for (const auto& [id, loc] : state_dev_)
+        if (loc.host_k != nullptr || loc.host_v != nullptr) any_host_kv = true;
+    if (any_host_kv) (void)hipStreamSynchronize(stream_);
     for (auto& [id, loc] : state_dev_) {
         loc.rows = 0;
         if (loc.dev)
             SHELF_RETURN_IF_ERROR(hipok(
                 hipMemsetAsync(loc.dev, 0, loc.elems * sizeof(float), stream_), "reset state"));
-        if (loc.k_pool != nullptr && loc.pool_bytes != 0)
-            SHELF_RETURN_IF_ERROR(hipok(hipMemsetAsync(loc.k_pool, 0, loc.pool_bytes, stream_),
-                                        "reset kv K"));
-        if (loc.v_pool != nullptr && loc.pool_bytes != 0)
-            SHELF_RETURN_IF_ERROR(hipok(hipMemsetAsync(loc.v_pool, 0, loc.pool_bytes, stream_),
-                                        "reset kv V"));
+        if (loc.k_pool != nullptr && loc.pool_bytes != 0) {
+            if (loc.host_k != nullptr)
+                std::memset(loc.host_k, 0, loc.pool_bytes);
+            else
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemsetAsync(loc.k_pool, 0, loc.pool_bytes, stream_), "reset kv K"));
+        }
+        if (loc.v_pool != nullptr && loc.pool_bytes != 0) {
+            if (loc.host_v != nullptr)
+                std::memset(loc.host_v, 0, loc.pool_bytes);
+            else
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemsetAsync(loc.v_pool, 0, loc.pool_bytes, stream_), "reset kv V"));
+        }
+        if (loc.online_k != nullptr && loc.online_bytes != 0)
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(loc.online_k, 0, loc.online_bytes, stream_), "reset online K"));
+        if (loc.online_v != nullptr && loc.online_bytes != 0)
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(loc.online_v, 0, loc.online_bytes, stream_), "reset online V"));
     }
     // KV プールも 0 に戻す。rows=0 なら「読まれない」はずだが、**ブロック単位で
     // 読むカーネル**（1 ブロック 16 トークン等）では未書き込み域の残骸が見える経路が
@@ -393,7 +1335,76 @@ Status HipStepExecutor::reset_states() {
     // リクエストが 1 回目と違う結果になる（実測: 同一プロンプト・greedy でも
     // 2 回目が変わる）。新しいシーケンスの 1 ステップ目でアリーナを 0 クリアして
     // 「プロセス起動直後と同じ条件」に戻す。
-    arena_zero_pending_ = true;
+    // アリーナ（ステップ scratch）も 0 に戻す。前シーケンスの最終ステップの値が
+    // 残ると、1 ステップ目に scratch を読むカーネル（rope 展開・GDN 準備）が
+    // 影響を受ける。reset_states は要求境界なので、ここで一度だけ払う。
+    if (arena_dev_ != nullptr && arena_cap_ != 0)
+        SHELF_RETURN_IF_ERROR(
+            hipok(hipMemsetAsync(arena_dev_, 0, arena_cap_, stream_), "reset arena"));
+    arena_zero_pending_ = false;
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::reset_slot(std::size_t slot) {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("reset_slot: slot >= max_sequences", __FILE__, __LINE__);
+    (void)hipSetDevice(opts_.device);
+    bool any_host_kv = false;
+    for (const auto& [id, loc] : state_dev_)
+        if (loc.host_k != nullptr || loc.host_v != nullptr) any_host_kv = true;
+    if (any_host_kv) (void)hipStreamSynchronize(stream_);
+    for (auto& [id, loc] : state_dev_) {
+        loc.rows = 0;
+        if (loc.kind == ir::StateKind::kv_cache && kv_shared_pool_) {
+            // 共有プールでは KV ページを 0 にしない（他スロットが参照しうる）。
+            // スロットのブロック表だけ無効化し、呼び手が assign し直す。
+            if (loc.table != nullptr && loc.pages != 0)
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemsetAsync(loc.table + slot * loc.pages, 0,
+                                   loc.pages * sizeof(std::uint32_t), stream_),
+                    "reset slot table"));
+        } else if (loc.kind == ir::StateKind::kv_cache) {
+            // pool_bytes は全スロット分。1 スロット分に割って先頭をずらす。
+            const std::size_t bytes =
+                loc.pool_bytes / std::max<std::size_t>(max_sequences_, 1u);
+            const std::size_t off = slot * bytes;
+            if (loc.host_k != nullptr)
+                std::memset(static_cast<char*>(loc.host_k) + off, 0, bytes);
+            else
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemsetAsync(static_cast<char*>(loc.k_pool) + off, 0, bytes, stream_),
+                    "reset slot kv K"));
+            if (loc.host_v != nullptr)
+                std::memset(static_cast<char*>(loc.host_v) + off, 0, bytes);
+            else
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemsetAsync(static_cast<char*>(loc.v_pool) + off, 0, bytes, stream_),
+                    "reset slot kv V"));
+        } else if (loc.dev != nullptr) {
+            const std::size_t per = loc.elems / std::max<std::size_t>(max_sequences_, 1u);
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(static_cast<char*>(loc.dev) +
+                                   slot * per * sizeof(float),
+                               0, per * sizeof(float), stream_),
+                "reset slot state"));
+        }
+        // T14: スロット再利用時に前の要求の K/V がミラーに残らないようにする。
+        if (loc.online_k != nullptr && loc.online_bytes != 0) {
+            const std::size_t per = loc.online_bytes / std::max<std::size_t>(max_sequences_, 1u);
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(static_cast<char*>(loc.online_k) + slot * per, 0, per,
+                               stream_),
+                "reset slot online K"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemsetAsync(static_cast<char*>(loc.online_v) + slot * per, 0, per,
+                               stream_),
+                "reset slot online V"));
+        }
+    }
+    // 共有 scratch（アリーナ）の残骸も落とす（他スロットの状態は壊さない）。
+    if (arena_dev_ != nullptr && arena_cap_ != 0)
+        SHELF_RETURN_IF_ERROR(
+            hipok(hipMemsetAsync(arena_dev_, 0, arena_cap_, stream_), "reset slot arena"));
     return Status::make_ok();
 }
 
@@ -532,6 +1543,114 @@ void* HipStepExecutor::scratch_ptr(std::size_t prim_index, std::uint8_t slot,
     return static_cast<char*>(arena_dev_) + plan_->scratch_base + s->offset;
 }
 
+Result<std::vector<float>> HipStepExecutor::export_gdn_state(std::size_t slot) const {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("export_gdn_state: slot が範囲外", __FILE__,
+                                        __LINE__);
+    (void)hipSetDevice(opts_.device);
+    (void)hipStreamSynchronize(stream_);
+    std::vector<float> out;
+    for (const auto id : state_ids_) {
+        const auto it = state_dev_.find(id.value());
+        if (it == state_dev_.end()) continue;
+        const StateLoc& loc = it->second;
+        if (loc.kind == ir::StateKind::kv_cache || loc.dev == nullptr) continue;
+        const std::size_t per =
+            loc.elems / std::max<std::size_t>(max_sequences_, 1u);
+        const std::size_t at = out.size();
+        out.resize(at + per);
+        const hipError_t e =
+            hipMemcpy(out.data() + at,
+                      static_cast<const char*>(loc.dev) + slot * per * sizeof(float),
+                      per * sizeof(float), hipMemcpyDeviceToHost);
+        if (e != hipSuccess)
+            return Status::from(Status::Code::device_error,
+                                std::string("export_gdn_state: ") + hipGetErrorString(e),
+                                __FILE__, __LINE__);
+    }
+    return out;
+}
+
+Status HipStepExecutor::import_gdn_state(std::size_t slot, const std::vector<float>& data) {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("import_gdn_state: slot が範囲外", __FILE__,
+                                        __LINE__);
+    (void)hipSetDevice(opts_.device);
+    (void)hipStreamSynchronize(stream_);
+    std::size_t at = 0;
+    for (const auto id : state_ids_) {
+        const auto it = state_dev_.find(id.value());
+        if (it == state_dev_.end()) continue;
+        StateLoc& loc = it->second;
+        if (loc.kind == ir::StateKind::kv_cache || loc.dev == nullptr) continue;
+        const std::size_t per =
+            loc.elems / std::max<std::size_t>(max_sequences_, 1u);
+        if (at + per > data.size())
+            return Status::invalid_argument("import_gdn_state: データが短い", __FILE__,
+                                            __LINE__);
+        const hipError_t e =
+            hipMemcpy(static_cast<char*>(loc.dev) + slot * per * sizeof(float),
+                      data.data() + at, per * sizeof(float), hipMemcpyHostToDevice);
+        if (e != hipSuccess)
+            return Status::from(Status::Code::device_error,
+                                std::string("import_gdn_state: ") + hipGetErrorString(e),
+                                __FILE__, __LINE__);
+        at += per;
+    }
+    if (at != data.size())
+        return Status::invalid_argument("import_gdn_state: データが長すぎる", __FILE__,
+                                        __LINE__);
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::assign_kv_blocks(std::size_t slot, const std::uint32_t* blocks,
+                                         std::size_t count, std::size_t offset) {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("assign_kv_blocks: slot が範囲外", __FILE__,
+                                        __LINE__);
+    if (count == 0u) return Status::make_ok();
+    if (blocks == nullptr)
+        return Status::invalid_argument("assign_kv_blocks: blocks が null", __FILE__,
+                                        __LINE__);
+    if (kv_pages_per_seq_ == 0u || offset + count > kv_pages_per_seq_)
+        return Status::invalid_argument("assign_kv_blocks: 論理 page が範囲外", __FILE__,
+                                        __LINE__);
+    for (std::size_t i = 0; i < count; ++i)
+        if (blocks[i] >= kv_total_pages_)
+            return Status::invalid_argument("assign_kv_blocks: グローバル block が範囲外",
+                                            __FILE__, __LINE__);
+    for (auto& [id, loc] : state_dev_) {
+        if (loc.kind != ir::StateKind::kv_cache || loc.table == nullptr) continue;
+        const std::size_t base = slot * loc.pages + offset;
+        SHELF_RETURN_IF_ERROR(hipok(
+            hipMemcpyAsync(loc.table + base, blocks, count * sizeof(std::uint32_t),
+                           hipMemcpyHostToDevice, stream_),
+            "assign kv blocks"));
+        // T16 + T14: prefix で共有したページは kv_append を通らないため、
+        // online ミラーへも複製しておく（窓内で読まれる可能性がある）。
+        if (loc.online_pages != 0u && loc.online_k != nullptr &&
+            loc.k_pool != nullptr && loc.total_pages != 0u) {
+            const std::size_t page_bytes = loc.pool_bytes / loc.total_pages;
+            for (std::size_t i = 0; i < count; ++i) {
+                const std::uint32_t logical = u32(offset + i);
+                const std::size_t dst =
+                    (slot * loc.online_pages + (logical % loc.online_pages)) * page_bytes;
+                const std::size_t src = static_cast<std::size_t>(blocks[i]) * page_bytes;
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemcpyAsync(static_cast<char*>(loc.online_k) + dst,
+                                   static_cast<const char*>(loc.k_pool) + src, page_bytes,
+                                   hipMemcpyDeviceToDevice, stream_),
+                    "prefix -> online K"));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemcpyAsync(static_cast<char*>(loc.online_v) + dst,
+                                   static_cast<const char*>(loc.v_pool) + src, page_bytes,
+                                   hipMemcpyDeviceToDevice, stream_),
+                    "prefix -> online V"));
+            }
+        }
+    }
+    return Status::make_ok();
+}
 Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
                                  std::size_t n, std::uint32_t base_pos) {
     return run_stage(g, tokens, nullptr, n, base_pos);
@@ -540,6 +1659,24 @@ Status HipStepExecutor::run_step(const ir::Graph& g, const std::int32_t* tokens,
 Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens,
                                   const bf16_t* hidden, std::size_t n,
                                   std::uint32_t base_pos) {
+    return run_impl(g, tokens, hidden, n, base_pos, nullptr);
+}
+
+Status HipStepExecutor::run_batch(const ir::Graph& g, const std::int32_t* tokens,
+                                  const bf16_t* hidden, std::size_t n, const BatchRows& rows) {
+    return run_impl(g, tokens, hidden, n, 0, &rows);
+}
+
+Status HipStepExecutor::run_stage_batch(const ir::Graph& g, const std::int32_t* tokens,
+                                        const bf16_t* hidden, std::size_t n,
+                                        const RowBatch& rows) {
+    const BatchRows br{rows.slots, rows.positions};
+    return run_batch(g, tokens, hidden, n, br);
+}
+
+Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
+                                 const bf16_t* hidden, std::size_t n,
+                                 std::uint32_t base_pos, const BatchRows* rows) {
     (void)hipSetDevice(opts_.device);   // 複数デバイスの実行器を同じ process で使うため
     if (!states_declared_)
         return Status::invalid_state("declare_states first", __FILE__, __LINE__);
@@ -580,6 +1717,24 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
 
     const auto t0 = std::chrono::steady_clock::now();
 
+    // ステップ内訳（SHELF_HIP_STEP_PROFILE=1）。イベントは 3 点:
+    //   sa = 入力アップロード前 / sk = カーネル列の前 / sb = カーネル列の後。
+    // 既定では作らない（ホットパスに追加コストを載せない）。
+    const bool step_profile = std::getenv("SHELF_HIP_STEP_PROFILE") != nullptr;
+    hipEvent_t ev_sa = nullptr, ev_sk = nullptr, ev_sb = nullptr;
+    struct EventGuard {
+        hipEvent_t* e;
+        ~EventGuard() {
+            if (*e) (void)hipEventDestroy(*e);
+        }
+    } guard_sa{&ev_sa}, guard_sk{&ev_sk}, guard_sb{&ev_sb};
+    if (step_profile) {
+        (void)hipEventCreate(&ev_sa);
+        (void)hipEventCreate(&ev_sk);
+        (void)hipEventCreate(&ev_sb);
+        (void)hipEventRecord(ev_sa, stream_);
+    }
+
     // エラー時のみ未消化のカーネル／コピーを先に流し切ってから返す。
     // ここで返った後に呼び出し側がメモリを解放すると、生きているカーネルが
     // 解放済みメモリを触り HSA のメモリフォルト／ハングになるため。
@@ -588,15 +1743,72 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
         return s;
     };
 
-    for (std::size_t i = 0; i < n; ++i) posrep_host_[i] = base_pos + static_cast<std::uint32_t>(i);
-    hipk::GdnRequestDescriptor req{0u, 0u, u32(n)};
+    // 行ごとの slot / 位置（run_batch でなければ全行 slot 0・連続位置）。
+    rowslot_host_.assign(n, 0u);
+    cur_max_pos_ = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::uint32_t slot = (rows != nullptr && rows->slots != nullptr)
+                                       ? rows->slots[i]
+                                       : 0u;
+        if (slot >= max_sequences_)
+            return Status::invalid_argument("run_batch: slot >= max_sequences", __FILE__,
+                                            __LINE__);
+        const std::uint32_t pos = (rows != nullptr && rows->positions != nullptr)
+                                      ? rows->positions[i]
+                                      : base_pos + static_cast<std::uint32_t>(i);
+        rowslot_host_[i] = slot;
+        posrep_host_[i] = pos;
+        cur_max_pos_ = std::max(cur_max_pos_, pos + 1u);
+    }
+    // T14: online KV の窓（スロットごとに書き込まれた論理ページ数）。
+    // 行の位置からスロット最大を取り、device 配列に載せる（attention が読む）。
+    slot_window_host_.assign(max_sequences_, 0u);
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::uint32_t pages =
+            (posrep_host_[i] + 1u + u32(opts_.kv_block_size) - 1u) /
+            u32(opts_.kv_block_size);
+        std::uint32_t& w = slot_window_host_[rowslot_host_[i]];
+        w = std::max(w, pages);
+    }
     SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(req_dev_, &req, sizeof(req), hipMemcpyHostToDevice, stream_),
+        hipok(hipMemcpyAsync(slot_window_dev_, slot_window_host_.data(),
+                             max_sequences_ * sizeof(std::uint32_t), hipMemcpyHostToDevice,
+                             stream_),
+              "slot window upload")));
+    // 複数スロットか（行は slot ごとに連続している前提）。
+    rows_multi_slot_ = false;
+    for (std::size_t i = 1; i < n; ++i)
+        if (rowslot_host_[i] != rowslot_host_[0]) rows_multi_slot_ = true;
+
+    // GDN のリクエスト記述子: 連続する同一 slot を 1 リクエストにまとめる。
+    std::vector<hipk::GdnRequestDescriptor> descs(max_sequences_);
+    cur_requests_ = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (i == 0 || rowslot_host_[i] != rowslot_host_[i - 1]) {
+            descs[cur_requests_] = hipk::GdnRequestDescriptor{
+                rowslot_host_[i], u32(i), 0u};
+            ++cur_requests_;
+        }
+    }
+    for (std::uint32_t r = 0; r < cur_requests_; ++r) {
+        const std::size_t begin = descs[r].row_begin;
+        const std::size_t end =
+            (r + 1u < cur_requests_) ? descs[r + 1u].row_begin : n;
+        descs[r].row_count = u32(end - begin);
+    }
+    SHELF_RETURN_IF_ERROR(sync_on_error(
+        hipok(hipMemcpyAsync(req_dev_, descs.data(),
+                             cur_requests_ * sizeof(hipk::GdnRequestDescriptor),
+                             hipMemcpyHostToDevice, stream_),
               "gdn req upload")));
     SHELF_RETURN_IF_ERROR(sync_on_error(
         hipok(hipMemcpyAsync(rowpos_dev_, posrep_host_.data(),
                              n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
               "rowpos upload")));
+    SHELF_RETURN_IF_ERROR(sync_on_error(
+        hipok(hipMemcpyAsync(rowslot_dev_, rowslot_host_.data(),
+                             n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
+              "rowslot upload")));
 
     // データ入力: i32 = トークン（先頭ステージ）、それ以外 = 前段の hidden（以降のステージ）。
     const auto& inputs = g.all_inputs();
@@ -636,6 +1848,8 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
     }
     if (tokens_in == nullptr && hidden_in == nullptr)
         return Status::invalid_argument("graph lacks data input", __FILE__, __LINE__);
+
+    if (step_profile) (void)hipEventRecord(ev_sk, stream_);
 
     const auto& prims = g.primitives();
     // 開発用の内訳計測（SHELF_HIP_PROFILE=1）。primitive ごとに 2 イベントで挟み、
@@ -682,9 +1896,25 @@ Status HipStepExecutor::run_stage(const ir::Graph& g, const std::int32_t* tokens
         (void)hipEventDestroy(ev_a);
         (void)hipEventDestroy(ev_b);
     }
+    if (step_profile) (void)hipEventRecord(ev_sb, stream_);
     SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "step sync"));
     stats_.last_step_ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
+    if (step_profile) {
+        float total = 0.0f, kern = 0.0f, up = 0.0f;
+        (void)hipEventElapsedTime(&total, ev_sa, ev_sb);
+        (void)hipEventElapsedTime(&kern, ev_sk, ev_sb);
+        (void)hipEventElapsedTime(&up, ev_sa, ev_sk);
+        stats_.last_gpu_ms = static_cast<double>(total);
+        stats_.last_kernel_ms = static_cast<double>(kern);
+        stats_.last_upload_ms = static_cast<double>(up);
+        stats_.last_host_ms = std::max(0.0, stats_.last_step_ms - stats_.last_gpu_ms);
+    } else {
+        stats_.last_gpu_ms = 0.0;
+        stats_.last_kernel_ms = 0.0;
+        stats_.last_upload_ms = 0.0;
+        stats_.last_host_ms = 0.0;
+    }
     return Status::make_ok();
 }
 
@@ -832,8 +2062,10 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         // 重みが FP8（E4M3）で upload されていれば W8A8 経路。同じ層の中でも
         // linear_attn 側は bf16 のまま（checkpoint の ignore）なので、この分岐は
         // 重み単位で決まる。
-        // 重みが MXFP4（quark: E2M1 ＋ E8M0）なら W4A8 経路。活性化は既存の
-        // FP8 量子化をそのまま使い、GEMM だけ MXFP4 版に差し替える。
+        // 重みが MXFP4（quark: E2M1 ＋ E8M0）のとき、活性化は checkpoint の
+        // 宣言で W4A4（A も E2M1+E8M0）と W4A8（A は既存の FP8）を選ぶ。
+        //   * W4A4: `global_quant_config.input_tensors.dtype == fp4`（T09）
+        //   * W4A8: それ以外（従来動作）
         const auto mx = p.weights.empty()
                             ? weight_mxfp4_.end()
                             : weight_mxfp4_.find(p.weights[0].value());
@@ -843,46 +2075,78 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
             if (kp != u32(K))
                 return Status::unsupported(
                     "linear(mxfp4): K が 32 の倍数でない", __FILE__, __LINE__);
-            const std::uint32_t act_group =
-                (opts_.fp8_act_group != 0u &&
-                 (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
-                    ? shelf::quant::fp8::fine::kActGroupK
-                    : 0u;
-            const std::size_t act_scales =
-                shelf::quant::fp8::fine::activation_scale_count(u32(rows), kp, act_group);
-            SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
-                shelf::quant::fp8::tiled_bytes(u32(rows), kp), act_scales));
-            SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
-                                          static_cast<const bf16_t*>(x->dev), fp8_codes_dev_,
-                                          fp8_scales_dev_, u32(rows), u32(K), kp, u32(K),
-                                          act_group, stream_),
-                                      "mxfp4 act quantize (fp8/uint8)"));
             // prefill 用カーネルは 128 行タイルだが、端数の行は読み込み側で clamp
             // 済み（`linear_mxfp4_prefill.hip`。単体テストで 16/32/64/96 行が誤差 0）。
-            // カーネルの前提は K が 128 の倍数であること。
+            // カーネルの前提は K が 128 の倍数であること（W4A4/W4A8 とも）。
             if ((kp % 128u) != 0u)
                 return Status::unsupported(
                     "linear(mxfp4): prefill は K が 128 の倍数のみ（k_padded " +
                         std::to_string(kp) + "）",
                     __FILE__, __LINE__);
-            Mxfp4GemmScaleArgs sa;
-            sa.act_group = act_group;
-            sa.activation_scale_stride =
-                static_cast<std::uint32_t>(act_scales / (rows == 0 ? 1 : rows));
-            sa.weight_scale_stride = kp / kBlockK;
             const auto dt = f32_out ? Mxfp4GemmOutputDType::F32 : Mxfp4GemmOutputDType::BF16;
-            if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
-                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_decode1(
-                                              mx->second.codes, mx->second.scales,
-                                              fp8_codes_dev_, fp8_scales_dev_, o, dt,
-                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
-                                          "gemm mxfp4 w4a8 decode1"));
-            else
-                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_prefill(
-                                              mx->second.codes, mx->second.scales,
-                                              fp8_codes_dev_, fp8_scales_dev_, o, dt,
-                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
-                                          "gemm mxfp4 w4a8 prefill"));
+            Mxfp4GemmScaleArgs sa;
+            sa.weight_scale_stride = kp / kBlockK;
+            if (opts_.mxfp4_activation) {
+                // ---- W4A4: 活性化を E2M1 + E8M0 へ（断片順ニブル + E8M0）----
+                if (!activation_quantize_mxfp4_supported(u32(K), kp))
+                    return Status::unsupported(
+                        "linear(mxfp4/w4a4): 活性化の形が受理範囲外", __FILE__, __LINE__);
+                const std::size_t codes_n = tiled_bytes(u32(rows), kp);
+                const std::size_t scales_n = scale_bytes(u32(rows), kp);
+                SHELF_RETURN_IF_ERROR(ensure_mxfp4_scratch(codes_n, scales_n));
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_activation_quantize_mxfp4(
+                        static_cast<const bf16_t*>(x->dev), mxfp4_act_codes_dev_,
+                        mxfp4_act_scales_dev_, u32(rows), u32(K), kp, u32(K), stream_),
+                    "mxfp4/w4a4 act quantize"));
+                sa.act_group = 0u;
+                sa.activation_scale_stride = kp / kBlockK;
+                if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
+                    SHELF_RETURN_IF_ERROR(hipok(
+                        launch_gemm_mxfp4_w4a4_decode1(
+                            mx->second.codes, mx->second.scales, mxfp4_act_codes_dev_,
+                            mxfp4_act_scales_dev_, o, dt, u32(rows), u32(N), kp, u32(N), sa,
+                            stream_),
+                        "gemm mxfp4 w4a4 decode1"));
+                else
+                    SHELF_RETURN_IF_ERROR(hipok(
+                        launch_gemm_mxfp4_w4a4_prefill(
+                            mx->second.codes, mx->second.scales, mxfp4_act_codes_dev_,
+                            mxfp4_act_scales_dev_, o, dt, u32(rows), u32(N), kp, u32(N), sa,
+                            stream_),
+                        "gemm mxfp4 w4a4 prefill"));
+            } else {
+                // ---- W4A8: 活性化は既存の FP8 量子化 ----
+                const std::uint32_t act_group =
+                    (opts_.fp8_act_group != 0u &&
+                     (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                        ? shelf::quant::fp8::fine::kActGroupK
+                        : 0u;
+                const std::size_t act_scales =
+                    shelf::quant::fp8::fine::activation_scale_count(u32(rows), kp, act_group);
+                SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
+                    shelf::quant::fp8::tiled_bytes(u32(rows), kp), act_scales));
+                SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
+                                              static_cast<const bf16_t*>(x->dev),
+                                              fp8_codes_dev_, fp8_scales_dev_, u32(rows),
+                                              u32(K), kp, u32(K), act_group, stream_),
+                                          "mxfp4 act quantize (fp8/uint8)"));
+                sa.act_group = act_group;
+                sa.activation_scale_stride =
+                    static_cast<std::uint32_t>(act_scales / (rows == 0 ? 1 : rows));
+                if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
+                    SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_decode1(
+                                                  mx->second.codes, mx->second.scales,
+                                                  fp8_codes_dev_, fp8_scales_dev_, o, dt,
+                                                  u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                              "gemm mxfp4 w4a8 decode1"));
+                else
+                    SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_prefill(
+                                                  mx->second.codes, mx->second.scales,
+                                                  fp8_codes_dev_, fp8_scales_dev_, o, dt,
+                                                  u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                              "gemm mxfp4 w4a8 prefill"));
+            }
             if (f32_out) logits_dev_ = static_cast<float*>(o);
             return set_out(f32_out, o);
         }
@@ -1178,7 +2442,9 @@ using namespace shelf::quant::fp8::fine;
         // 融合: この値を使う fp8 GEMM がすぐ来るなら、bf16 中間材料を書かずに
         // コード/スケールだけ生成する（bf16 の往復 2 回分と発射 1 回を浮かせられる）。
         const auto& fuse = fuse_for(g);
-        const bool fusable = std::find(fuse.swiglu_out.begin(), fuse.swiglu_out.end(),
+        // W4A4 のときは FP8 への融合をしない（次の linear が E2M1 で量子化し直すため）。
+        const bool fusable = !opts_.mxfp4_activation &&
+                             std::find(fuse.swiglu_out.begin(), fuse.swiglu_out.end(),
                                        p.output.id.value()) != fuse.swiglu_out.end() &&
                              F % shelf::quant::fp8::fine::kActGroupK == 0u;
         if (fusable) {
@@ -1275,7 +2541,7 @@ using namespace shelf::quant::fp8::fine;
         args.conv.conv_weight = static_cast<const bf16_t*>(wt(0));
         args.conv.conv_state = static_cast<float*>(st.dev);
         args.conv.requests = req_dev_;
-        args.conv.num_requests = 1u;
+        args.conv.num_requests = cur_requests_;
         args.conv.actual_rows = u32(step_rows_);
         args.conv.max_request_rows = u32(step_rows_);
         args.conv.input_row_stride = u32(C);
@@ -1283,7 +2549,7 @@ using namespace shelf::quant::fp8::fine;
         args.conv.conv_dim = u32(C);
         args.conv.conv_history = 3u;
         args.conv.state_index = 0u;
-        args.conv.max_sequences = 1u;
+        args.conv.max_sequences = u32(max_sequences_);
         args.conv.conv_layer_stride = C * 3;
         args.conv.conv_slot_stride = C * 3;
         args.act_out = static_cast<bf16_t*>(o);
@@ -1345,7 +2611,7 @@ using namespace shelf::quant::fp8::fine;
         rec.recurrent_state = static_cast<float*>(st.dev);
         rec.output = static_cast<float*>(o);
         rec.requests = req_dev_;
-        rec.num_requests = 1u;
+        rec.num_requests = cur_requests_;
         rec.actual_rows = u32(step_rows_);
         rec.q_row_stride = u32(qk_n);
         rec.k_row_stride = u32(qk_n);
@@ -1356,7 +2622,7 @@ using namespace shelf::quant::fp8::fine;
         rec.recurrent_slot_stride = nvh * dk * dv;
         rec.recurrent_layer_stride = nvh * dk * dv;
         rec.state_index = 0u;
-        rec.max_sequences = 1u;
+        rec.max_sequences = u32(max_sequences_);
         rec.key_heads = u32(nkh);
         rec.num_v_heads = u32(nvh);
         rec.head_k = u32(dk);
@@ -1415,7 +2681,7 @@ using namespace shelf::quant::fp8::fine;
             std::fprintf(stderr, "[gdn P=%zu post] out0=%.9g outlast=%.9g st0=%.9g st1=%.9g\n",
                          step_rows_, oh[0], oh[oh.size()-1], sh[0], sh[sh.size()-1]);
         }
-        st.rows += step_rows_;
+        st.rows = std::max<std::size_t>(st.rows, cur_max_pos_);
         return set_out(true, o);
     }
     case K::rmsnorm_gated: {
@@ -1455,7 +2721,7 @@ using namespace shelf::quant::fp8::fine;
         const std::size_t feat_flat = step_rows_ != 0u ? out_n / step_rows_ : 0u;
         const auto& gfuse = fuse_for(g);
         // rows==1（decode）では 2 発射に負けた（54.19 → 54.36 ms/tok）ので prefill のみ。
-        if (feat_flat != 0u && step_rows_ > 1u &&
+        if (!opts_.mxfp4_activation && feat_flat != 0u && step_rows_ > 1u &&
             feat_flat % shelf::quant::fp8::fine::kActGroupK == 0u &&
             shelf::quant::fp8::pad_k(u32(feat_flat)) == u32(feat_flat) &&
             std::find(gfuse.gated_out.begin(), gfuse.gated_out.end(),
@@ -1496,7 +2762,8 @@ using namespace shelf::quant::fp8::fine;
             return Status::invalid_state("attention_gqa_step: state missing", __FILE__, __LINE__);
         StateLoc& st = sit->second;
         const ir::StateDesc* desc = g.find_state(p.state_write[0]);
-        if (st.rows + step_rows_ > desc->logical_shape.dim(0))
+        // バッチでは行ごとに位置が違うので、最大位置 + 1 で容量を判定する。
+        if (cur_max_pos_ > desc->logical_shape.dim(0))
             return Status::out_of_range("attention_gqa_step: KV context full", __FILE__,
                                         __LINE__);
         const std::size_t bs = opts_.kv_block_size;
@@ -1505,22 +2772,25 @@ using namespace shelf::quant::fp8::fine;
         const std::size_t P = step_rows_;
         const std::size_t nq = q->elems / (D * P);   // per-token query heads
         if (q->elems % (D * P)) return Status::invalid_state("attention: q width mismatch", __FILE__, __LINE__);
-        const std::size_t ept = kvh * D, epp = bs * ept, epl = st.pages * epp;
+        const std::size_t ept = kvh * D, epp = bs * ept,
+                          epl = (st.total_pages != 0 ? st.total_pages : st.pages) * epp;
 
         KvAppendBf16Args ap{};
         ap.common.k_input = static_cast<const bf16_t*>(k->dev);
         ap.common.v_input = static_cast<const bf16_t*>(v->dev);
         ap.common.k_row_stride = u32(k->elems / P);
         ap.common.v_row_stride = u32(v->elems / P);
-        ap.common.row_sequence_slots = slot_zero_dev_;
+        ap.common.row_sequence_slots = rowslot_dev_;
         ap.common.row_positions = rowpos_dev_;
         ap.common.block_tables = st.table;
         ap.common.block_table_stride = u32(st.pages);
-        ap.common.max_sequences = 1u;
+        ap.common.max_sequences = u32(max_sequences_);
         ap.common.rows = u32(step_rows_);
         ap.common.layer = 0u;
         ap.common.page_tokens = u32(bs);
-        ap.common.num_pages = u32(st.pages);
+        // num_pages はプール全体のページ数（kernel は block_table の値をこれで
+        // bound する）。block_table_stride は 1 シーケンス分（st.pages）。
+        ap.common.num_pages = u32(st.total_pages != 0 ? st.total_pages : st.pages);
         ap.common.num_attention_layers = 1u;
         ap.common.kv_heads = u32(kvh);
         ap.common.head_dim = u32(D);
@@ -1529,8 +2799,13 @@ using namespace shelf::quant::fp8::fine;
         ap.common.elems_per_layer = epl;
         ap.k_pool = static_cast<bf16_t*>(st.k_pool);
         ap.v_pool = static_cast<bf16_t*>(st.v_pool);
-        SHELF_RETURN_IF_ERROR(hipok(launch_kv_append_bf16(ap.common, ap.k_pool, ap.v_pool,
-                                                          stream_), "kv_append"));
+        ap.online_k = static_cast<bf16_t*>(st.online_k);
+        ap.online_v = static_cast<bf16_t*>(st.online_v);
+        ap.online_pages = u32(st.online_pages);
+        SHELF_RETURN_IF_ERROR(hipok(launch_kv_append_bf16(
+                                        ap.common, ap.k_pool, ap.v_pool, stream_,
+                                        ap.online_k, ap.online_v, ap.online_pages),
+                                    "kv_append"));
         void* o = alloc(false);
         SHELF_RETURN_IF_ERROR(arena_ok(o));
         PagedAttentionCommonArgs at{};
@@ -1539,15 +2814,15 @@ using namespace shelf::quant::fp8::fine;
         at.output_dtype = PagedAttentionOutputDType::BF16;
         at.q_row_stride = u32(nq * D);
         at.output_row_stride = u32(nq * D);
-        at.row_sequence_slots = slot_zero_dev_;
+        at.row_sequence_slots = rowslot_dev_;
         at.row_positions = rowpos_dev_;
         at.block_tables = st.table;
         at.block_table_stride = u32(st.pages);
-        at.max_sequences = 1u;
+        at.max_sequences = u32(max_sequences_);
         at.rows = u32(step_rows_);
         at.layer = 0u;
         at.page_tokens = u32(bs);
-        at.num_pages = u32(st.pages);
+        at.num_pages = u32(st.total_pages != 0 ? st.total_pages : st.pages);
         at.num_attention_layers = 1u;
         at.q_heads = u32(nq);
         at.kv_heads = u32(kvh);
@@ -1557,6 +2832,7 @@ using namespace shelf::quant::fp8::fine;
         at.elems_per_layer = epl;
         at.scale = p.attr.score_scale != 0.0f ? p.attr.score_scale
                                               : 1.0f / std::sqrt(static_cast<float>(D));
+        at.slot_window_end = slot_window_dev_;
         // 複数行（prefill）で受理条件を満たすならタイル化 prefill kernel。
         // 1 行（decode）は従来どおり（grid が 1 CTA に直列化して遅くなる）。
         // `SHELF_ATTN_PREFILL=0` で per-query 経路に固定できる（数値の A/B 用）。
@@ -1567,21 +2843,32 @@ using namespace shelf::quant::fp8::fine;
             const char* e = std::getenv("SHELF_ATTN_PREFILL_ST");
             return e == nullptr || e[0] != '0';
         }();
-        const bool st_path = st_env && attention_paged_prefill_st_bf16_supported(at);
-        const bool prefill_path = attention_paged_prefill_bf16_supported(at) &&
+        // 複数スロットのバッチでは prefill 用タイルカーネルを使わない
+        // （あちらは 1 タイル = 1 スロット前提で row0 の slot を共有する）。
+        // decode 用カーネルは行ごとに slot / 位置 / ブロック表を引く。
+        const bool multi_slot = rows_multi_slot_;
+        const bool st_path = !multi_slot && st_env &&
+                             attention_paged_prefill_st_bf16_supported(at);
+        const bool prefill_path = !multi_slot && attention_paged_prefill_bf16_supported(at) &&
                                   (attn_env == nullptr || attn_env[0] != '0');
         {
             const hipError_t ea = st_path
                 ? launch_attention_paged_prefill_st_bf16(
                       at, static_cast<const bf16_t*>(st.k_pool),
-                      static_cast<const bf16_t*>(st.v_pool), stream_)
+                      static_cast<const bf16_t*>(st.v_pool), stream_,
+                      static_cast<const bf16_t*>(st.online_k),
+                      static_cast<const bf16_t*>(st.online_v), u32(st.online_pages))
                 : (prefill_path
                       ? launch_attention_paged_prefill_bf16(
                             at, static_cast<const bf16_t*>(st.k_pool),
-                            static_cast<const bf16_t*>(st.v_pool), stream_)
+                            static_cast<const bf16_t*>(st.v_pool), stream_,
+                            static_cast<const bf16_t*>(st.online_k),
+                            static_cast<const bf16_t*>(st.online_v), u32(st.online_pages))
                       : launch_attention_paged_bf16(
                             at, static_cast<const bf16_t*>(st.k_pool),
-                            static_cast<const bf16_t*>(st.v_pool), stream_));
+                            static_cast<const bf16_t*>(st.v_pool), stream_,
+                            static_cast<const bf16_t*>(st.online_k),
+                            static_cast<const bf16_t*>(st.online_v), u32(st.online_pages)));
             SHELF_RETURN_IF_ERROR(hipok(ea, "attention paged"));
         }
         // NOTE(split-KV decode): `launch_attention_paged_bf16_split` + `..._split_reduce`
@@ -1594,7 +2881,43 @@ using namespace shelf::quant::fp8::fine;
                          "[attn] rows=%zu D=%zu page=%zu qh=%zu kvh=%zu stride=%u npages=%u "
                          "path=%s\n", step_rows_, D, bs, nq, kvh, u32(st.pages),
                          u32(st.pages), prefill_path ? "prefill_wmma" : "per_query");
-        st.rows += step_rows_;
+        st.rows = std::max<std::size_t>(st.rows, cur_max_pos_);
+        return set_out(false, o);
+    }
+    case K::moe_mlp: {
+        // 疎な MoE ブロック。ルーティングはホスト（top-k の決定は enqueue と
+        // 同時刻に固定する必要があるため、この行の先頭で決める）、行列積はデバイス。
+        ValueLoc* x = in(0);
+        SHELF_RETURN_IF_ERROR(need(x, false, "moe_mlp"));
+        if (p.output.shape.rank() != 2)
+            return Status::invalid_state("moe_mlp: output must be rank 2", __FILE__, __LINE__);
+        const std::size_t H = p.output.shape.dim(1);
+        if (H == 0u || out_n % H != 0u)
+            return Status::invalid_state("moe_mlp: output width", __FILE__, __LINE__);
+        const std::size_t rows = out_n / H;
+        if (rows == 0u || x->elems != rows * H)
+            return Status::invalid_state("moe_mlp: input rows", __FILE__, __LINE__);
+        const auto rit = weight_shape_.find(p.weights[0].value());
+        const auto git = weight_shape_.find(p.weights[1].value());
+        if (rit == weight_shape_.end() || git == weight_shape_.end())
+            return Status::invalid_state("moe_mlp: weight shape missing", __FILE__, __LINE__);
+        const std::size_t E = rit->second.dim(0);
+        const std::size_t I = git->second.dim(0);
+        const bool shared = p.weights.size() == 3u * E + 5u;
+        std::size_t Is = 0;
+        if (shared) {
+            const auto sit = weight_shape_.find(p.weights[3u * E + 2u].value());
+            if (sit == weight_shape_.end())
+                return Status::invalid_state("moe_mlp: shared shape missing", __FILE__, __LINE__);
+            Is = sit->second.dim(0);
+        }
+        void* o = alloc(false);
+        SHELF_RETURN_IF_ERROR(arena_ok(o));
+        auto* xb = static_cast<const bf16_t*>(x->dev);
+        auto* ob = static_cast<bf16_t*>(o);
+        for (std::size_t r = 0; r < rows; ++r)
+            SHELF_RETURN_IF_ERROR(
+                run_moe_row(p, xb + r * H, ob + r * H, H, E, I, Is, shared));
         return set_out(false, o);
     }
     default:

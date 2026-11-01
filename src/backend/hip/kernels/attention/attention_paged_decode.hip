@@ -33,14 +33,28 @@ void phaseshift_attention_paged_bf16(
     ::shelf::hipk::PagedAttentionBf16Args args) {
     v_decode_bf16::attention_paged_bf16_body<true>(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
-        reinterpret_cast<const bf16*>(args.v_pool), args.common.output);
+        reinterpret_cast<const bf16*>(args.v_pool), args.common.output,
+        reinterpret_cast<const bf16*>(args.online_k),
+        reinterpret_cast<const bf16*>(args.online_v), args.online_pages);
 }
+
+namespace {
+inline void online_into(PagedAttentionBf16Args& args, const bf16_t* ok, const bf16_t* ov,
+                        uint32_t pages) {
+    args.online_k = ok;
+    args.online_v = ov;
+    args.online_pages = pages;
+}
+}  // namespace
 
 hipError_t launch_attention_paged_bf16(
     const PagedAttentionCommonArgs& common,
     const bf16_t* k_pool,
     const bf16_t* v_pool,
-    hipStream_t stream) {
+    hipStream_t stream,
+    const bf16_t* online_k,
+    const bf16_t* online_v,
+    uint32_t online_pages) {
     using namespace v_decode_bf16;
     if (common.rows == 0u || common.head_dim == 0u || common.head_dim > kHeadLimit)
         return hipErrorInvalidValue;
@@ -68,10 +82,13 @@ hipError_t launch_attention_paged_bf16(
         args.common = a;
         args.k_pool = k_pool;
         args.v_pool = v_pool;
+        online_into(args, online_k, online_v, online_pages);
         phaseshift_attention_paged_bf16<<<grid, kThreads, 0, stream>>>(args);
     } else {
         attention_paged_bf16_impl<false><<<grid, kThreads, 0, stream>>>(
-            a, reinterpret_cast<const bf16*>(k_pool), reinterpret_cast<const bf16*>(v_pool), common.output);
+            a, reinterpret_cast<const bf16*>(k_pool), reinterpret_cast<const bf16*>(v_pool),
+            common.output, reinterpret_cast<const bf16*>(online_k),
+            reinterpret_cast<const bf16*>(online_v), online_pages);
     }
     return hipGetLastError();
 }

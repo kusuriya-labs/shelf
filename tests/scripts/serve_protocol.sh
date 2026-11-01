@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# shelf-serve のプロトコル検査（モデル・GPU を使わない）。
-# 使い方: serve_protocol.sh <shelf-serve のパス>
+# shelf-compute のプロトコル検査（モデル・GPU を使わない）。
+# 使い方: serve_protocol.sh <shelf-compute のパス>
 set -u
 
-BIN="${1:?usage: serve_protocol.sh <shelf-serve>}"
+BIN="${1:?usage: serve_protocol.sh <shelf-compute>}"
 fail=0
 out="$(printf '%s\n' \
   '{"op":"ping"}' \

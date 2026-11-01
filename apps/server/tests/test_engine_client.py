@@ -1,6 +1,7 @@
 """エンジンクライアントとエラー写像のテスト（モデル・GPU・ポート不要）。
 
 `draft_docs/serve_protocol.md` §3 の表と 1 対 1 にする（表を変えたらここも変える）。
+T02（done の伝搬）と T03（cancel・子プロセス終了）もここで固定する。
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))   # apps/server
 sys.path.insert(0, HERE)                     # tests/
 
-from engine_client import EngineClient, EngineError, EngineProtocolError  # noqa: E402
+from engine_client import Done, EngineClient, EngineError, EngineProtocolError  # noqa: E402
 import openai_errors as oe  # noqa: E402
 
 FAKE = [sys.executable, os.path.join(HERE, "fake_engine.py")]
@@ -23,6 +24,18 @@ FAKE = [sys.executable, os.path.join(HERE, "fake_engine.py")]
 
 def run(coro):
     return asyncio.run(coro)
+
+
+async def _collect(client, input_ids, **kwargs):
+    """(token ids, Done) を集める。"""
+    toks: list[int] = []
+    done = None
+    async for ev in client.generate(input_ids, **kwargs):
+        if isinstance(ev, Done):
+            done = ev
+        else:
+            toks.append(int(ev["token_id"]))
+    return toks, done
 
 
 def test_ping_capabilities():
@@ -42,35 +55,47 @@ def test_generate_streams_tokens_then_done():
     async def go():
         client = EngineClient(FAKE)
         await client.start()
-        toks, done = [], None
         try:
-            async for ev in client.generate([5], max_new_tokens=3):
-                toks.append(ev["token_id"])
-            # done は yield されない（戻り値相当）。ここでは件数だけ確認する。
-            done = True
+            return await _collect(client, [5], max_new_tokens=3)
         finally:
             await client.close()
-        return toks, done
 
     toks, done = run(go())
     assert toks == [6, 7, 8], toks          # フェイクは入力末尾 +1..+3
-    assert done
+    assert isinstance(done, Done)
+    assert done.generated_ids == toks
+    assert done.finish_reason == "length"
+    assert done.prompt_tokens == 1
+    assert done.generated_tokens == 3
+
+
+def test_done_carries_finish_reason_stop():
+    """エンジンの `stop` をそのまま伝搬する（HTTP 側で推測しない）。"""
+    async def go():
+        client = EngineClient(FAKE)
+        await client.start()
+        try:
+            return await _collect(client, [998], max_new_tokens=8)
+        finally:
+            await client.close()
+
+    toks, done = run(go())
+    assert toks == [999, 1000]              # 998 + 1, 998 + 2
+    assert done is not None and done.finish_reason == "stop"
 
 
 def test_generate_seed_is_echoed():
     async def go():
         client = EngineClient(FAKE)
         await client.start()
-        seen = []
         try:
-            async for ev in client.generate([1], max_new_tokens=1, seed=42):
-                seen.append(ev)
+            return await _collect(client, [1], max_new_tokens=1, seed=42)
         finally:
             await client.close()
-        return seen
 
-    seen = run(go())
-    assert seen and seen[0]["token_id"] == 2
+    toks, done = run(go())
+    assert toks == [2]
+    assert done is not None and done.seed == 42
 
 
 def test_engine_error_maps_to_api_error():
@@ -87,10 +112,57 @@ def test_engine_error_maps_to_api_error():
         raise AssertionError("error が来なかった")
 
     exc = run(go())
-    assert exc.code  # overloaded 等
+    assert exc.code == "overloaded"
     api = oe.from_engine(exc.code, exc.message, exc.param)
     assert api.status == oe.status_for_code(exc.code)
     assert api.body()["error"]["type"] == oe.type_for_status(api.status)
+
+
+def test_abort_sends_cancel_with_matching_request_id():
+    """消費側が途中で止めたら、その request_id の cancel を送る（T03）。"""
+    async def go():
+        client = EngineClient(FAKE)
+        await client.start()
+        sent: list[dict] = []
+        orig = client._send
+
+        async def spy(obj):
+            sent.append(dict(obj))
+            await orig(obj)
+
+        client._send = spy  # noqa: SLF001 - テストのため
+        try:
+            gen = client.generate([777], max_new_tokens=2)   # 777 = 遅い生成
+            first = await gen.__anext__()
+            await gen.aclose()
+            # 中断後も次の要求が流れる（terminal まで drain 済み）。
+            toks, done = await _collect(client, [777], max_new_tokens=2)
+            return first, sent, toks, done
+        finally:
+            await client.close()
+
+    first, sent, toks, done = run(go())
+    assert first["token_id"] == 778
+    cancels = [o for o in sent if o.get("op") == "cancel"]
+    assert cancels, "cancel が送られていない"
+    assert cancels[0]["request_id"] == "1"      # 中断した要求の ID
+    assert toks and toks[0] == 778
+    assert done is not None
+
+
+def test_engine_exit_unblocks_waiting_generate():
+    """子プロセスが終了したら、待っている要求は 500 系で起きる（T03）。"""
+    async def go():
+        client = EngineClient(FAKE + ["--die-after-ping"])
+        await client.start()
+        try:
+            return await asyncio.wait_for(_collect(client, [1], max_new_tokens=1), timeout=5.0)
+        finally:
+            await client.close()
+
+    with pytest.raises(EngineError) as exc:
+        run(go())
+    assert exc.value.code in ("state_error", "internal_error")
 
 
 def test_unknown_field_is_rejected_before_engine():
@@ -112,6 +184,8 @@ def test_unknown_field_is_rejected_before_engine():
     ("overflow", 400),
     ("context_length_exceeded", 400),
     ("unsupported_parameter", 400),
+    ("request_too_large", 413),
+    ("unsupported_media_type", 415),
     ("model_not_found", 404),
     ("busy", 409),
     ("overloaded", 503),

@@ -42,11 +42,14 @@ target_link_libraries(shelf_placement PUBLIC shelf::backend_common shelf::founda
 # ---------------------------------------------------------------- runtime/generate
 # 生成の進行層（sampling の契約実装）。`engine_contract.md` §3.3 の置き場。
 # logits → token id の純粋関数だけを持ち、backend も HIP も知らない。
-add_library(shelf_runtime_generate STATIC src/runtime/generate/sampling.cpp)
+add_library(shelf_runtime_generate STATIC
+    src/runtime/generate/sampling.cpp
+    src/runtime/generate/stop_tokens.cpp
+    src/runtime/generate/batch_scheduler.cpp)
 add_library(shelf::runtime_generate ALIAS shelf_runtime_generate)
 target_include_directories(shelf_runtime_generate PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/generate/include>")
-target_link_libraries(shelf_runtime_generate PUBLIC shelf::foundation)
+target_link_libraries(shelf_runtime_generate PUBLIC shelf::foundation shelf::nlohmann)
 
 # ---------------------------------------------------------------- api (D8 の C++ 側)
 # Server とエンジンの境界: 生成パラメータの契約・型付き JSONL・status → code の写像。
@@ -62,7 +65,8 @@ target_link_libraries(shelf_api PUBLIC shelf::foundation shelf::nlohmann
 # ---------------------------------------------------------------- runtime/state
 # Prefix-sharing identity contract (pool/eviction arrive with batching).
 add_library(shelf_runtime_state STATIC
-    src/runtime/state/prefix_key.cpp)
+    src/runtime/state/prefix_key.cpp
+    src/runtime/state/prefix_cache.cpp)
 add_library(shelf::runtime_state ALIAS shelf_runtime_state)
 target_include_directories(shelf_runtime_state PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/runtime/state/include>")

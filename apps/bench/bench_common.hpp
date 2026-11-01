@@ -24,7 +24,8 @@ inline constexpr int kExitUsage = 2;
 // 値を取らないフラグ（`--help` 系と on/off 選択のみ）。値を取るオプションと
 // 混ると「次トークンを値として飲み込む」誤設定になる（計測 harness の欠陥として
 // 実測済み）。ここに足すときは allowed リストにも同じ名前を入れること。
-inline constexpr const char* const kValuelessFlags[] = {"help", "h", "logits-all-rows"};
+inline constexpr const char* const kValuelessFlags[] = {"help", "h", "logits-all-rows",
+                                                        "profile"};
 
 inline bool is_valueless_flag(const std::string& key) {
     for (const char* f : kValuelessFlags)

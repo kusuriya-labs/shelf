@@ -14,6 +14,7 @@ target_link_libraries(shelf_app_common PUBLIC
     shelf::quant
     shelf::runtime_load
     shelf::runtime_pipeline
+    shelf::runtime_state
     shelf::placement
     shelf::compiler
     shelf::api

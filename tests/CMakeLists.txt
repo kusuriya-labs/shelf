@@ -63,6 +63,15 @@ add_test(NAME unit.api_sampling COMMAND test_api_sampling)
 add_executable(test_api_protocol unit/test_api_protocol.cpp)
 target_link_libraries(test_api_protocol PRIVATE shelf::api)
 add_test(NAME unit.api_protocol COMMAND test_api_protocol)
+# T01 / T03: 停止トークンの解決（generation_config + モデル設定）と
+# request_id を照合する cancel。GPU もモデルも使わない純粋関数。
+add_executable(test_runtime_generate_stop unit/test_runtime_generate_stop.cpp)
+target_link_libraries(test_runtime_generate_stop PRIVATE shelf::runtime_generate)
+add_test(NAME unit.runtime_generate_stop COMMAND test_runtime_generate_stop)
+# T15: 連続バッチングのスケジューラ（受付・Prefill チャンク・decode バッチ・再利用）
+add_executable(test_runtime_batch_scheduler unit/test_runtime_batch_scheduler.cpp)
+target_link_libraries(test_runtime_batch_scheduler PRIVATE shelf::runtime_generate)
+add_test(NAME unit.runtime_batch_scheduler COMMAND test_runtime_batch_scheduler)
 
 # フェイクエンジンとのセッション（パイプ越し・ポートもモデルも使わない）
 add_executable(test_api_session unit/test_api_session.cpp)
@@ -77,9 +86,19 @@ add_executable(test_reference_executor unit/test_reference_executor.cpp)
 target_link_libraries(test_reference_executor PRIVATE shelf::backend_cpu)
 add_test(NAME unit.reference_executor COMMAND test_reference_executor)
 
+# T17: MoE ブロックの契約（config の MoE 欄・moe_mlp の形状検証・CPU 参照の
+# top-k ルーティングと共有エキスパート・step_graph の lowering）
+add_executable(test_ir_moe unit/test_ir_moe.cpp)
+target_link_libraries(test_ir_moe PRIVATE shelf::backend_cpu shelf::model_qwen35)
+add_test(NAME unit.ir_moe COMMAND test_ir_moe)
+
 add_executable(test_paged_kv_abi unit/test_paged_kv_abi.cpp)
 target_link_libraries(test_paged_kv_abi PRIVATE shelf::backend_common shelf::runtime_state)
 add_test(NAME unit.paged_kv_abi COMMAND test_paged_kv_abi)
+# T16: Prefix Cache（最長共通 prefix・参照カウント・LRU・COW・世代）
+add_executable(test_runtime_prefix_cache unit/test_runtime_prefix_cache.cpp)
+target_link_libraries(test_runtime_prefix_cache PRIVATE shelf::runtime_state)
+add_test(NAME unit.runtime_prefix_cache COMMAND test_runtime_prefix_cache)
 
 if(SHELF_ENABLE_HIP)
     add_executable(test_hip_gemm_bf16 unit/test_hip_gemm_bf16.cpp)
@@ -134,6 +153,17 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(test_hip_step_executor PRIVATE shelf::backend_hip
         shelf::model_qwen35)
     add_test(NAME unit.hip_step_executor COMMAND test_hip_step_executor)
+
+    # T17: MoE ブロック（router + top-k + エキスパート + 共有）の HIP 実行が
+    # CPU リファレンスと一致すること。
+    add_executable(test_hip_moe unit/test_hip_moe.cpp)
+    target_link_libraries(test_hip_moe PRIVATE shelf::backend_hip shelf::backend_cpu)
+    add_test(NAME unit.hip_moe COMMAND test_hip_moe)
+
+    # T17: MXFP4（W4A4）エキスパートの GPU / CPU 分担が同じ値になること。
+    add_executable(test_hip_moe_mxfp4 unit/test_hip_moe_mxfp4.cpp)
+    target_link_libraries(test_hip_moe_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
+    add_test(NAME unit.hip_moe_mxfp4 COMMAND test_hip_moe_mxfp4)
 endif()
 
 add_executable(test_architecture_boundaries architecture/test_architecture_boundaries.cpp)
@@ -182,5 +212,17 @@ if(SHELF_ENABLE_HIP)
     add_test(NAME serve.protocol
              COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/serve_protocol.sh
                      $<TARGET_FILE:shelf-compute>)
+endif()
+
+# Python 面（apps/server）の pytest。aiohttp / pytest が無ければ skip（77）。
+# `unit.*` と同じ ctest に載せる（CI は `ctest` 1 本で C++ と Python の両方を見る）。
+find_program(SHELF_PYTHON NAMES python3 python)
+if(SHELF_PYTHON)
+    add_test(NAME serve.python
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_python_tests.sh
+                     ${SHELF_PYTHON} ${CMAKE_SOURCE_DIR}/apps/server/tests)
+    set_tests_properties(serve.python PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
 endif()
 

@@ -40,17 +40,16 @@
 | `src/model/qwen35` | `shelf::model_qwen35` | モデル固有 | あり |
 | `src/compiler` | `shelf::compiler`（INTERFACE） | 4a declare | あり（`arena_offsets`。D4 進行中） |
 | `src/placement` | `shelf::placement` | 2a | あり（2026-10-30・D2: 予算と所在の純粋算術。`budget`） |
-| `src/runtime/state` | `shelf::runtime_state` | 4 | あり（`prefix_key`） |
+| `src/runtime/state` | `shelf::runtime_state` | 4 | あり（`prefix_key` / 2026-11-01: `prefix_cache` のブロック管理） |
 | `src/runtime/boot` | `shelf::runtime_boot` | 1 | あり（2026-10-29・D1: probe 型と受理判定。run/validate/bench が使用） |
 | `src/runtime/load` | `shelf::runtime_load` | 3 | あり（2026-10-29・D3: 検証と実体化） |
 | `src/runtime/pipeline` | `shelf::runtime_pipeline` | 5（編成） | あり（2026-10-29: PP の実行を apps から移設） |
-| `src/runtime/generate` | `shelf::runtime_generate` | 5（生成） | あり（2026-10-31・D8: sampling の契約実装。`api` が再輸出） |
+| `src/runtime/generate` | `shelf::runtime_generate` | 5（生成） | あり（2026-10-31・D8: sampling の契約実装。`api` が再輸出。2026-11-01: 停止 ID の解決 `stop_tokens` と cancel の照合 `cancel` を追加） |
 | `src/api` | `shelf::api` | 6（Server 境界） | あり（2026-10-31・D8 の C++ 側: 型付き JSONL と status→code の写像） |
 | `src/backend/common` | `shelf::backend_common` | 2b/4b | あり（2026-10-30・D6: 機能表 `capabilities`） |
 | `src/backend/cpu` | `shelf::backend_cpu` | 4c 参照 | あり |
 | `src/backend/hip` | `shelf::backend_hip` | 4c/5 | あり |
-| `src/api` | 未作成 | Server | 未着手 |
-| `apps/` | `shelf-run` / `shelf-validate` / `shelf-bench` | 1 | あり |
+| `apps/` | `shelf-run` / `shelf-validate` / `shelf-bench` / `shelf-compute` | 1 | あり（`shelf-compute` は HIP ビルドのみ） |
 
 ---
 

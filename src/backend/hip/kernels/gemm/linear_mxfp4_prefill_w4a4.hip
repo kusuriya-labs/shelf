@@ -98,7 +98,11 @@ __device__ __forceinline__ void mxfp4_w4a4_prefill_body(
     const std::uint8_t* wsrow[2];
 #pragma unroll
     for (int nt = 0; nt < 2; ++nt) {
-        const std::uint32_t o = o0 + static_cast<std::uint32_t>(nt) * kTileOut + m_lane;
+        // 出力方向の端数（features が 128 の倍数でない層）でも**存在しない出力行を
+        // 読まない**ように clamp する（格納側は `col >= features` でガード済み）。
+        // clamp しないと重みの範囲外読みで HSA のメモリフォルトになる。
+        const std::uint32_t o_raw = o0 + static_cast<std::uint32_t>(nt) * kTileOut + m_lane;
+        const std::uint32_t o = min(o_raw, features - 1u);
         wrow[nt] = weight_codes + static_cast<std::size_t>(o >> 4u) *
                                       (static_cast<std::size_t>(nb) * kBlockBytes) +
                    static_cast<std::size_t>(o & 15u) * 16u +
@@ -133,9 +137,15 @@ __device__ __forceinline__ void mxfp4_w4a4_prefill_body(
             const std::uint32_t r = u >> 2u;                            // 0..127
             const std::uint32_t il = u & 3u;                            // 0..3
             const std::uint32_t ib = h * 2u + (il >> 1u);
+            // 128 行タイルの端数（rows < row_start + 128）では、**存在しない行群を
+            // 読まない**ように行群を実際の行数で clamp する（読み値は捨てられる。
+            // 格納側は `rr >= rows` でガード済み）。clamp しないと範囲外読みで
+            // HSA のメモリフォルトになる（rows=64 で再現）。
+            const std::uint32_t grp_max = (rows + 15u) / 16u - 1u;
+            const std::uint32_t grp = min(row_start / 16u + r / 16u, grp_max);
             const std::uint8_t* src =
                 activation_codes +
-                static_cast<std::size_t>(row_start / 16u + r / 16u) *
+                static_cast<std::size_t>(grp) *
                     (static_cast<std::size_t>(nb) * kBlockBytes) +
                 static_cast<std::size_t>(ib) * kBlockBytes +
                 static_cast<std::size_t>(r & 15u) * 16u;

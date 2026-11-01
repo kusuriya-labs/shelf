@@ -23,7 +23,10 @@
 | 予算式 | `KV_bytes(T) = T × L_full × 2 × kv_heads × head_dim × sizeof(bf16)`
   （開発モデル `Qwen3.5-9B` で 1 tok = 32 KiB。`L_full` は full_attention 層のみ、GDN は固定費） |
 | admission | **2 段**: ① pinned 容量に対して `Σ (prompt_i + max_new_i − 1)`、
-  ② 実行は active 文脈の合計 ≤ 81,920 tok |
+  ② 実行は active 文脈の合計 ≤ 81,920 tok。**現状の実装**: 容量はスロット ×
+  最大文脈で固定し、①は per-request の `prompt + max_new <= max_context`、
+  ②は T15 のスロット待ち（`--max-inflight` / スケジューラ）が担う。オンライン
+  ミラーは容量を増やさないキャッシュなので、新しい admission は不要 |
 
 ## 2. 予算の算出と決定者（2026-10-30 実装 — D2）
 
@@ -34,6 +37,20 @@
   * `place_all_device`（既定 = 全 device 常駐）/ `place_fitting_budget`（opt-in で pinned へ）
   * `Limits.device_free_bytes == 0` は「不明」として**判定しない**（不明を 0 として
     誤って拒否しない）。`headroom` 既定 5%
+* **実装（2026-11-01・T14 第 1 段）**: `place_fitting_budget` を**実確保へ接続**した。
+  `make_pipeline` が重み候補（checkpoint 名・バイト数）を作り、状態とアリーナを
+  差し引いた device 量を渡す。pinned host になった重みは `hipHostMalloc(mapped)` に
+  正本を置き、カーネルには `hipHostGetDevicePointer` のポインタを渡す。
+  `promote_host_weights()` で VRAM へ移せる（転送 + 再配置。`shelf-run
+  --promote-after N`）。9B-FP8 で 1940 MB を落としても生成列は一致し、
+  promote 後に 88 ms/step → 21 ms/step へ戻ることを確認（詳細は
+  `draft_docs/vram_placement_2026-11-01.md`）。
+  **KV も pinned 直読み方式で実装済み**（`--kv-in-host` / 予算不足時の
+  `--allow-host-kv`。K/V プールを `hipHostMalloc(mapped)` に置き attention が直接読む）。
+  さらに **online KV ミラー**（`--online-kv-pages N`）を実装: pinned 正本の直近
+  N ページを VRAM に複製し、attention は窓内を VRAM・古いページを host から読む。
+  窓はスロットごと（最大 4）で、4 スロット × 40 ステップでも host のみと
+  logits 完全一致（`vram_placement_2026-11-01.md` §1.5）。
 * **入力の取り方**: 呼び手（`apps/common/pipeline.cpp`）が
   ① 重み = 実体化計画のバイト数 ② 状態 = 宣言済み state の f32 ③ アリーナ =
   `compiler::plan_arena` の `peak_bytes`（`--arena-mib` 固定時はその値）を積み、
@@ -56,7 +73,8 @@
 * 思考打ち切り（reasoning cap）の判定主体（`engine_contract` §8.4）
 * プレフィル時の chunk 予約と KV の headroom の兼ね合い
 * 正本（pinned）の確保方式 — `hipHostRegister` か `hipHostMalloc` か、ラージページの要否
-  （現状 shelf に `hipHostMalloc` の利用はゼロ。協調推論計画 フェーズ 3 の pinned 論点と共通）
+  （2026-11-01: **重み**で `hipHostMalloc(mapped)` の利用を開始。KV はまだ device のみ。
+  協調推論計画 フェーズ 3 の pinned 論点と共通）
 
 ## 5. 検証（2026-10-30 実装分）
 

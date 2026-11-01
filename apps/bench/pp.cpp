@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,12 +43,14 @@ void usage(std::FILE* out) {
         "  --seed N            合成トークン列のシード（既定 1234）\n"
         "  --arena-mib N       アリーナサイズ MiB（既定 0 = グラフから自動算出、正の値で固定）\n"
         "  --logits-all-rows   prefill の全行で logits を作る（既定は最終行のみ）\n"
+        "  --profile           ステップ内訳（GPU/カーネル/アップロード/ホスト/リセット）を出す\n"
         "  --output PATH       CSV を追記（ファイルが無ければヘッダを書く）\n"
         "  --help, -h          このヘルプ（GPU を触らず exit 0）\n"
         "\n"
         "notes:\n"
         "  入力トークンは合成列（内容は不問・語彙内に収める）。\n"
-        "  wall_* はステップ末同期込みの壁時計時間。GPU event 計測は未実装。\n"
+        "  wall_* はステップ末同期込みの壁時計時間。--profile を付けると GPU event で\n"
+        "  カーネル列・アップロード・ホスト側の内訳も出す（SHELF_HIP_STEP_PROFILE=1 相当）。\n"
         "  各 run は reset_states() で独立させる。\n"
         "  アリーナはステップ内で再利用しない（バンプ割当）ため必要量は行数に比例する。\n"
         "  「arena exhausted」が出たら --arena-mib を増やす。\n");
@@ -84,7 +87,7 @@ int run_pp(int argc, char** argv) {
 
     // 未知のオプションは起動エラー（shelf-validate と同じ規約）。
     {
-        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "prompt-tokens", "prefill-chunk", "runs", "warmup", "gpu", "seed", "arena-mib", "logits-all-rows", "output", "pipeline-parallel"};
+        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "prompt-tokens", "prefill-chunk", "runs", "warmup", "gpu", "seed", "arena-mib", "logits-all-rows", "output", "pipeline-parallel", "profile"};
         std::string bad;
         if (!only_known_keys(a, allowed, &bad)) {
             std::fprintf(stderr, "pp: unknown option: --%s\n", bad.c_str());
@@ -104,6 +107,7 @@ int run_pp(int argc, char** argv) {
     const std::int64_t pp = a.i64("pipeline-parallel", 1, &ok);
     const std::string model_dir = a.str("model-dir", a.str("model"));
     const std::string output = a.str("output");
+    const bool profile = a.has("profile");
     if (!ok) {
         std::fprintf(stderr, "pp: numeric option has a bad value\n");
         usage(stderr);
@@ -238,14 +242,50 @@ int run_pp(int argc, char** argv) {
                          static_cast<long long>(arena_eff));
     };
 
-    auto run_once = [&](double* wall_ms) -> shelf::Status {
+    if (profile) (void)setenv("SHELF_HIP_STEP_PROFILE", "1", 1);
+
+    struct StepSample {
+        std::int64_t run = 0;
+        std::size_t step = 0;
+        std::size_t rows = 0;
+        double wall_ms = 0.0;
+        double gpu_ms = 0.0;
+        double kernel_ms = 0.0;
+        double upload_ms = 0.0;
+        double host_ms = 0.0;
+        double reset_ms = 0.0;
+    };
+    std::vector<StepSample> samples;
+
+    auto run_once = [&](double* wall_ms, std::int64_t run_index) -> shelf::Status {
         // 各 run を独立させる（行数と KV 使用行を詰め直す）。
+        const auto t_reset = std::chrono::steady_clock::now();
         SHELF_RETURN_IF_ERROR(app::pipeline_reset(pipeline));
+        const double reset_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_reset)
+                .count();
         const auto t0 = std::chrono::steady_clock::now();
-        for (std::size_t c = 0; c < tokens.size(); c += chunk) {
+        std::size_t step = 0;
+        for (std::size_t c = 0; c < tokens.size(); c += chunk, ++step) {
             const std::size_t n = std::min(chunk, tokens.size() - c);
             SHELF_RETURN_IF_ERROR(app::pipeline_step(pipeline, tokens.data() + c, n,
                                                     static_cast<std::uint32_t>(c), nullptr));
+            if (profile || std::getenv("SHELF_HIP_STEP_PROFILE") != nullptr) {
+                StepSample smp;
+                smp.run = run_index;
+                smp.step = step;
+                smp.rows = n;
+                smp.wall_ms = pipeline.stages.empty() ? 0.0 : pipeline.last_step_ms;
+                smp.reset_ms = reset_ms;
+                for (auto& st : pipeline.stages) {
+                    const auto& es = st.exec->stats();
+                    smp.gpu_ms += es.last_gpu_ms;
+                    smp.kernel_ms += es.last_kernel_ms;
+                    smp.upload_ms += es.last_upload_ms;
+                    smp.host_ms += es.last_host_ms;
+                }
+                samples.push_back(smp);
+            }
         }
         *wall_ms = std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - t0)
@@ -255,18 +295,21 @@ int run_pp(int argc, char** argv) {
 
     for (std::int64_t w = 0; w < warmup; ++w) {
         double ms = 0.0;
-        const auto st = run_once(&ms);
+        const auto st = run_once(&ms, -1);
         if (!st.ok()) {
             fail_step("warmup", st);
             return kExitRuntime;
         }
     }
 
+    // declare 相（アリーナ・状態の確保）の起動時コスト。
+    double declare_ms = 0.0;
+    for (auto& st : pipeline.stages) declare_ms += st.exec->stats().declare_ms;
     std::vector<double> xs;
     xs.reserve(static_cast<std::size_t>(runs));
     for (std::int64_t r = 0; r < runs; ++r) {
         double ms = 0.0;
-        const auto st = run_once(&ms);
+        const auto st = run_once(&ms, r);
         if (!st.ok()) {
             fail_step("run", st);
             return kExitRuntime;
@@ -279,6 +322,7 @@ int run_pp(int argc, char** argv) {
 
     std::printf("shelf-bench pp\n");
     kv_print("schema_version", static_cast<std::int64_t>(1));
+    kv_print("declare_ms_total", declare_ms);
     kv_print("device", std::string("hip"));
     kv_print("gpu", gpu);
     kv_print("model", model_dir);
@@ -297,6 +341,37 @@ int run_pp(int argc, char** argv) {
     kv_print("wall_tokens_per_sec", tokens_per_sec, 2);
     for (std::size_t i = 0; i < xs.size(); ++i)
         std::printf("run_wall_ms[%zu]=%.3f\n", i, xs[i]);
+
+    if (profile) {
+        for (const auto& s : samples) {
+            std::printf("[step] run=%lld step=%zu rows=%zu wall_ms=%.3f gpu_ms=%.3f "
+                        "kernel_ms=%.3f upload_ms=%.3f host_ms=%.3f reset_ms=%.3f\n",
+                        static_cast<long long>(s.run), s.step, s.rows, s.wall_ms, s.gpu_ms,
+                        s.kernel_ms, s.upload_ms, s.host_ms, s.reset_ms);
+        }
+        // 集計（warmup を除く計測 run の中央値）。PP>1 では GPU/host はステージ毎の和。
+        std::vector<double> gpu, kern, up, host, reset, wall;
+        for (const auto& s : samples) {
+            if (s.run < 0) continue;
+            gpu.push_back(s.gpu_ms);
+            kern.push_back(s.kernel_ms);
+            up.push_back(s.upload_ms);
+            host.push_back(s.host_ms);
+            reset.push_back(s.reset_ms);
+            wall.push_back(s.wall_ms);
+        }
+        if (!gpu.empty()) {
+            const Stats g = summarize(gpu), k = summarize(kern), u = summarize(up),
+                        h = summarize(host), rs = summarize(reset), w = summarize(wall);
+            kv_print("profile_steps", static_cast<std::int64_t>(gpu.size()));
+            kv_print("profile_wall_ms_median", w.p50);
+            kv_print("profile_gpu_ms_median", g.p50);
+            kv_print("profile_kernel_ms_median", k.p50);
+            kv_print("profile_upload_ms_median", u.p50);
+            kv_print("profile_host_ms_median", h.p50);
+            kv_print("profile_reset_ms_median", rs.p50);
+        }
+    }
 
     if (!output.empty()) {
         const char* kHeader =

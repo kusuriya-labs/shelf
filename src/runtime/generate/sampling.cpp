@@ -92,16 +92,21 @@ std::uint64_t assign_seed(std::optional<std::uint64_t> requested, std::uint64_t 
 }
 
 Result<Draw> sample(const std::vector<float>& logits, const Sampling& s, std::uint64_t position) {
+    return sample_range(logits.data(), logits.size(), s, position);
+}
+
+Result<Draw> sample_range(const float* logits, std::size_t n, const Sampling& s,
+                          std::uint64_t position) {
     std::string param;
     SHELF_RETURN_IF_ERROR(validate_sampling(s, &param));
-    if (logits.empty())
+    if (logits == nullptr || n == 0u)
         return Status::invalid_argument("sampling: logits が空", __FILE__, __LINE__);
 
     // 1) 有限値だけを候補にする（NaN / -inf は落とす。全部落ちたら invalid 扱い）。
     std::vector<std::uint32_t> idx;
-    idx.reserve(logits.size());
+    idx.reserve(n);
     float max_logit = -std::numeric_limits<float>::infinity();
-    for (std::uint32_t i = 0; i < logits.size(); ++i) {
+    for (std::uint32_t i = 0; i < n; ++i) {
         const float v = logits[i];
         if (!std::isfinite(v)) continue;
         idx.push_back(i);

@@ -227,6 +227,66 @@ private:
                 if (eo->shape.dim(0) != pe) return bad("moe_merge E mismatch");
                 return expect_out(p, TensorShape::create({eo->shape.dim(1)}).release(), out);
             }
+            case Kind::moe_mlp: {
+                // 契約（疎な MoE ブロック）:
+                //   inputs[0] = x [R,H]
+                //   weights   = router [E,H]
+                //               + 3E 個のエキスパート重み（e ごとに
+                //                 gate [I,H], up [I,H], down [H,I]）
+                //               + 共有エキスパート 4 個（任意）:
+                //                 gate [Is,H], up [Is,H], down [H,Is], gate_vec [1,H]
+                //   attr.top_k = 1 トークンで選ぶエキスパート数（1..E）
+                // 出力は x と同じ形。非選択エキスパートの寄与は 0（= top-k 再正規化
+                // 後の重みで選択分だけを足す）。共有エキスパートは
+                // sigmoid(x @ gate_vec^T) を掛けて加える。
+                if (p.inputs.size() != 1 || p.weights.size() < 4) return bad("moe_mlp arity");
+                if (!p.state_read.empty() || !p.state_write.empty())
+                    return bad("moe_mlp must not use state");
+                const ValueDesc* x = in(0);
+                if (!x || x->shape.rank() != 2) return bad("moe_mlp input [R,H]");
+                const std::size_t H = x->shape.dim(1);
+                const TensorShape* router = wshape(0);
+                if (!router || router->rank() != 2 || router->dim(0) == 0)
+                    return bad("moe_mlp router [E,H]");
+                const std::size_t E = router->dim(0);
+                if (router->dim(1) != H) return bad("moe_mlp router K != H");
+                if (p.attr.top_k <= 0 || static_cast<std::size_t>(p.attr.top_k) > E)
+                    return bad("moe_mlp top_k out of range");
+                const std::size_t experts = 3u * E;
+                if (p.weights.size() != experts + 1u && p.weights.size() != experts + 5u)
+                    return bad("moe_mlp weight count (router + 3E [+4 shared])");
+                std::size_t I = 0;
+                for (std::size_t e = 0; e < E; ++e) {
+                    const TensorShape* g = wshape(1u + 3u * e);
+                    const TensorShape* u = wshape(2u + 3u * e);
+                    const TensorShape* d = wshape(3u + 3u * e);
+                    if (!g || !u || !d || g->rank() != 2 || u->rank() != 2 || d->rank() != 2)
+                        return bad("moe_mlp expert weights must be rank 2");
+                    if (g->dim(1) != H || u->dim(1) != H)
+                        return bad("moe_mlp expert gate/up K != H");
+                    if (g->dim(0) != u->dim(0)) return bad("moe_mlp expert gate/up N mismatch");
+                    if (d->dim(0) != H || d->dim(1) != g->dim(0))
+                        return bad("moe_mlp expert down must be [H,I]");
+                    if (I == 0) I = g->dim(0);
+                    if (g->dim(0) != I) return bad("moe_mlp expert width differs");
+                }
+                if (p.weights.size() == experts + 5u) {
+                    const TensorShape* sg = wshape(experts + 1u);
+                    const TensorShape* su = wshape(experts + 2u);
+                    const TensorShape* sd = wshape(experts + 3u);
+                    const TensorShape* sv = wshape(experts + 4u);
+                    if (!sg || !su || !sd || !sv || sg->rank() != 2 || su->rank() != 2 ||
+                        sd->rank() != 2 || sv->rank() != 2)
+                        return bad("moe_mlp shared weights must be rank 2");
+                    if (sg->dim(1) != H || su->dim(1) != H || sg->dim(0) != su->dim(0))
+                        return bad("moe_mlp shared gate/up mismatch");
+                    if (sd->dim(0) != H || sd->dim(1) != sg->dim(0))
+                        return bad("moe_mlp shared down must be [H,Is]");
+                    if (sv->dim(0) != 1 || sv->dim(1) != H)
+                        return bad("moe_mlp shared gate_vec must be [1,H]");
+                }
+                return expect_out(p, x->shape, out);
+            }
             case Kind::slice: {
                 if (p.inputs.size() != 1 || !p.weights.empty()) return bad("slice arity");
                 const ValueDesc* x = in(0);

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <random>
 #include <vector>
@@ -74,6 +75,7 @@ int main(int argc, char** argv) {
     ho.rope_theta = cfg.rope_theta;
     ho.rope_rotary_dim = cfg.rotary_dim;
     ho.arena_bytes = 16u << 20;
+    ho.max_sequences = 2;   // T15: 2 スロットで状態が分離されることを確認する
     backend::hip::HipStepExecutor ex(ho);
 
     std::mt19937 rng(42);
@@ -162,6 +164,253 @@ int main(int argc, char** argv) {
                 std::printf("divergence: prim %zu kind=%s abs=%.4g rel=%.4g batchmax=%.4g\n", k,
                             ir::kind_name(pb.graph.primitives()[k].kind), w, wr, mx);
             }
+        }
+    }
+
+    // ---- T14: 複数スロットの online KV（4 スロット、host とミラーが同一値）----
+    {
+        model::qwen35::TextConfig c4 = cfg;
+        c4.num_layers = 2;
+        c4.layer_kinds.assign(2, model::qwen35::LayerKind::full_attention);
+        auto g4 = model::qwen35::build_step_graph(c4, 64, 4);
+        CHECK(g4.ok(), "online: graph");
+        if (g4.ok()) {
+            const auto& plan = g4.value();
+            auto make = [&](std::size_t online_pages) {
+                backend::hip::HipStepExecutorOptions o = ho;
+                o.max_sequences = 4;
+                o.kv_pinned_host = true;
+                o.online_kv_pages = online_pages;
+                o.arena_bytes = 16u << 20;
+                auto e = std::make_unique<backend::hip::HipStepExecutor>(o);
+                std::mt19937 rng(123);
+                std::normal_distribution<float> nd(0.f, 0.05f);
+                for (const auto& w : plan.weights) {
+                    std::vector<float> f(numelof(w.shape));
+                    for (auto& x : f) x = nd(rng);
+                    CHECK(e->upload_weight(w.id, f).ok(), "online: upload");
+                }
+                const auto ds = e->declare_states(plan.graph);
+                CHECK_ST(ds.ok(), "online: declare", ds);
+                return e;
+            };
+            auto host = make(0);
+            auto mir4 = make(4);
+            auto mir1 = make(1);
+            std::vector<std::int32_t> toks4(4);
+            std::vector<std::uint32_t> slots4 = {0u, 1u, 2u, 3u};
+            std::vector<std::uint32_t> pos4(4);
+            double worst4 = 0.0, worst1 = 0.0;
+            for (std::uint32_t step = 0; step < 40; ++step) {
+                for (std::size_t r = 0; r < 4; ++r) {
+                    toks4[r] = static_cast<std::int32_t>(1000 + step * 4 + r);
+                    pos4[r] = step;
+                }
+                backend::hip::HipStepExecutor::BatchRows br{slots4.data(), pos4.data()};
+                const auto rh = host->run_batch(plan.graph, toks4.data(), nullptr, 4, br);
+                const auto r4 = mir4->run_batch(plan.graph, toks4.data(), nullptr, 4, br);
+                const auto r1 = mir1->run_batch(plan.graph, toks4.data(), nullptr, 4, br);
+                CHECK_ST(rh.ok(), "online: host step", rh);
+                CHECK_ST(r4.ok(), "online: mirror4 step", r4);
+                CHECK_ST(r1.ok(), "online: mirror1 step", r1);
+                if (!rh.ok() || !r4.ok() || !r1.ok()) break;
+                auto lh = host->fetch_logits(plan.graph);
+                auto l4 = mir4->fetch_logits(plan.graph);
+                auto l1 = mir1->fetch_logits(plan.graph);
+                CHECK(lh.ok() && l4.ok() && l1.ok(), "online: logits");
+                if (!lh.ok() || !l4.ok() || !l1.ok()) break;
+                for (std::size_t i = 0; i < lh.value().size(); ++i) {
+                    worst4 = std::max(worst4, std::fabs(static_cast<double>(lh.value()[i]) -
+                                                        static_cast<double>(l4.value()[i])));
+                    worst1 = std::max(worst1, std::fabs(static_cast<double>(lh.value()[i]) -
+                                                        static_cast<double>(l1.value()[i])));
+                }
+            }
+            std::printf("online KV (4 slots, 40 steps): worst R=4 %.3e / R=1 %.3e\n", worst4,
+                        worst1);
+            CHECK(worst4 == 0.0, "online KV 4 slots matches host exactly (R=4)");
+            CHECK(worst1 == 0.0, "online KV 4 slots matches host exactly (R=1)");
+        }
+    }
+
+    // ---- T16: グローバル KV ブロック + ブロック表の書き換え（prefix 共有）----
+    {
+        model::qwen35::TextConfig c2 = cfg;
+        c2.layer_kinds.assign(cfg.num_layers, model::qwen35::LayerKind::full_attention);
+        auto pref = model::qwen35::build_step_graph(c2, 64, 16);
+        auto dec = model::qwen35::build_step_graph(c2, 64, 1);
+        CHECK(pref.ok() && dec.ok(), "t16 graphs");
+        if (pref.ok() && dec.ok()) {
+            std::vector<std::int32_t> P(16);
+            for (std::size_t i = 0; i < P.size(); ++i) P[i] = static_cast<std::int32_t>(30 + i);
+            auto upload = [&](backend::hip::HipStepExecutor& e) {
+                std::mt19937 rng(7);
+                std::normal_distribution<float> nd(0.f, 0.05f);
+                for (const auto& w : pref.value().weights) {
+                    std::vector<float> f(numelof(w.shape));
+                    for (auto& x : f) x = nd(rng);
+                    CHECK(e.upload_weight(w.id, f).ok(), "t16 upload");
+                }
+                return e.declare_states(pref.value().graph);
+            };
+            backend::hip::HipStepExecutor shared(ho);
+            shared.set_weight_placement(false);
+            auto st1 = upload(shared);
+            CHECK_ST(st1.ok(), "t16 declare shared", st1);
+            CHECK(shared.kv_blocks() == 8, "kv_blocks を明示できる");
+
+            // 共有プールの slot0 で 16 トークンを prefill（block0 を使う）。
+            std::vector<std::uint32_t> slots0(16, 0u), pos16(16);
+            for (std::size_t i = 0; i < 16; ++i) pos16[i] = static_cast<std::uint32_t>(i);
+            backend::hip::HipStepExecutor::BatchRows br0{slots0.data(), pos16.data()};
+            const auto r0 = shared.run_batch(pref.value().graph, P.data(), nullptr, 16, br0);
+            CHECK_ST(r0.ok(), "t16 prefill", r0);
+            auto lg0 = shared.fetch_logits(pref.value().graph);
+            CHECK(lg0.ok() && lg0.value().size() == 16 * cfg.vocab_size, "t16 logits [16,V]");
+            std::int32_t next = 0;
+            if (lg0.ok()) {
+                const float* last = lg0.value().data() + 15 * cfg.vocab_size;
+                for (std::size_t i = 1; i < cfg.vocab_size; ++i)
+                    if (last[i] > last[static_cast<std::size_t>(next)])
+                        next = static_cast<std::int32_t>(i);
+            }
+
+            // slot1 は page0 を block0（slot0 と共有）、page1 を block3 に向ける。
+            const std::uint32_t table[4] = {0u, 3u, 0u, 0u};
+            const auto as = shared.assign_kv_blocks(1, table, 4);
+            CHECK_ST(as.ok(), "t16 assign blocks", as);
+            const std::uint32_t bad_table[2] = {0u, 99u};
+            CHECK(!shared.assign_kv_blocks(1, bad_table, 2).ok(), "範囲外 block は拒否");
+
+            // slot1 で 17 個目を流す（位置16・共有 prefix を読む）。
+            std::uint32_t one_slot = 1u, one_pos = 16u;
+            backend::hip::HipStepExecutor::BatchRows br1{&one_slot, &one_pos};
+            const auto r1 = shared.run_batch(dec.value().graph, &next, nullptr, 1, br1);
+            CHECK_ST(r1.ok(), "t16 continuation", r1);
+            auto lg1 = shared.fetch_logits(dec.value().graph);
+
+            // 参照: 別の実行器（従来の固定プール）で同じ 17 トークンを流す。
+            backend::hip::HipStepExecutor ref(ho);
+            auto st2 = upload(ref);
+            CHECK_ST(st2.ok(), "t16 declare ref", st2);
+            std::vector<std::uint32_t> rs(16, 0u);
+            backend::hip::HipStepExecutor::BatchRows rbr{rs.data(), pos16.data()};
+            const auto rrp = ref.run_batch(pref.value().graph, P.data(), nullptr, 16, rbr);
+            CHECK_ST(rrp.ok(), "t16 ref prefill", rrp);
+            std::uint32_t zslot = 0u, zpos = 16u;
+            backend::hip::HipStepExecutor::BatchRows zbr{&zslot, &zpos};
+            const auto rrs = ref.run_batch(dec.value().graph, &next, nullptr, 1, zbr);
+            CHECK_ST(rrs.ok(), "t16 ref step", rrs);
+            auto lgr = ref.fetch_logits(dec.value().graph);
+            CHECK(lg1.ok() && lgr.ok(), "t16 ref logits");
+            if (lg1.ok() && lgr.ok()) {
+                double worst = 0.0;
+                for (std::size_t i = 0; i < lg1.value().size(); ++i)
+                    worst = std::max(worst, std::abs(static_cast<double>(lg1.value()[i]) -
+                                                     static_cast<double>(lgr.value()[i])));
+                std::printf("t16 shared-block logits diff = %.3e\n", worst);
+                CHECK(worst < 1e-5, "共有ブロック経由の logits が再計算と一致");
+            }
+        }
+    }
+
+    // ---- T16: GDN 状態の export/import（prefix 共有の前提）----
+    {
+        model::qwen35::TextConfig c3 = cfg;
+        c3.num_layers = 2;
+        c3.layer_kinds = {model::qwen35::LayerKind::full_attention,
+                          model::qwen35::LayerKind::linear_attention};
+        auto pref3 = model::qwen35::build_step_graph(c3, 64, 16);
+        auto dec3 = model::qwen35::build_step_graph(c3, 64, 1);
+        CHECK(pref3.ok() && dec3.ok(), "t16 gdn graphs");
+        if (pref3.ok() && dec3.ok()) {
+            std::vector<std::int32_t> P(16);
+            for (std::size_t i = 0; i < P.size(); ++i) P[i] = static_cast<std::int32_t>(60 + i);
+            auto setup = [&](backend::hip::HipStepExecutor& e) {
+                std::mt19937 rng(11);
+                std::normal_distribution<float> nd(0.f, 0.05f);
+                for (const auto& w : pref3.value().weights) {
+                    std::vector<float> f(numelof(w.shape));
+                    for (auto& x : f) x = nd(rng);
+                    CHECK(e.upload_weight(w.id, f).ok(), "t16 gdn upload");
+                }
+                return e.declare_states(pref3.value().graph);
+            };
+            backend::hip::HipStepExecutor a(ho);   // ho.kv_blocks は 0（固定プール）
+            backend::hip::HipStepExecutor b(ho);
+            CHECK_ST(setup(a).ok(), "t16 gdn declare a", setup(a));
+            CHECK_ST(setup(b).ok(), "t16 gdn declare b", setup(b));
+            std::vector<std::uint32_t> s0(16, 0u), p16(16);
+            for (std::size_t i = 0; i < 16; ++i) p16[i] = static_cast<std::uint32_t>(i);
+            backend::hip::HipStepExecutor::BatchRows br{s0.data(), p16.data()};
+            CHECK_ST(a.run_batch(pref3.value().graph, P.data(), nullptr, 16, br).ok(),
+                     "t16 gdn prefill a", a.run_batch(pref3.value().graph, P.data(), nullptr, 16, br));
+            CHECK_ST(b.run_batch(pref3.value().graph, P.data(), nullptr, 16, br).ok(),
+                     "t16 gdn prefill b", b.run_batch(pref3.value().graph, P.data(), nullptr, 16, br));
+            auto blob = a.export_gdn_state(0);
+            CHECK(blob.ok() && !blob.value().empty(), "GDN 状態を export できる");
+            if (blob.ok()) {
+                // b を同じ状態へ戻す（KV はそのまま。ここでは GDN だけを差し替える）。
+                CHECK_ST(b.import_gdn_state(0, blob.value()).ok(), "GDN 状態を import",
+                         b.import_gdn_state(0, blob.value()));
+                CHECK(b.export_gdn_state(0).ok() &&
+                          b.export_gdn_state(0).value() == blob.value(),
+                      "import 後に export すると同じ値");
+            }
+            // 17 個目: 両者は同じ状態なので logits が一致する。
+            std::uint32_t zs = 0u, zp = 16u;
+            backend::hip::HipStepExecutor::BatchRows zbr{&zs, &zp};
+            std::int32_t next = 77;
+            CHECK_ST(a.run_batch(dec3.value().graph, &next, nullptr, 1, zbr).ok(),
+                     "t16 gdn step a", a.run_batch(dec3.value().graph, &next, nullptr, 1, zbr));
+            CHECK_ST(b.run_batch(dec3.value().graph, &next, nullptr, 1, zbr).ok(),
+                     "t16 gdn step b", b.run_batch(dec3.value().graph, &next, nullptr, 1, zbr));
+            auto la = a.fetch_logits(dec3.value().graph);
+            auto lb = b.fetch_logits(dec3.value().graph);
+            if (la.ok() && lb.ok()) {
+                double worst = 0.0;
+                for (std::size_t i = 0; i < la.value().size(); ++i)
+                    worst = std::max(worst, std::abs(static_cast<double>(la.value()[i]) -
+                                                     static_cast<double>(lb.value()[i])));
+                std::printf("t16 gdn export/import logits diff = %.3e\n", worst);
+                CHECK(worst == 0.0, "GDN 状態の export/import で logits が一致");
+            }
+        }
+    }
+
+    // ---- T15: 2 スロットのバッチ（それぞれ独立した KV / GDN 状態）----
+    {
+        const std::int32_t a0 = 7, a1 = 111, b0 = 512, b1 = 900;
+        CHECK(ex.reset_states().ok(), "ms reset a");
+        CHECK(ex.run_step(pd.graph, a0, 0).ok(), "ms a0");
+        CHECK(ex.run_step(pd.graph, a1, 1).ok(), "ms a1");
+        auto la = ex.fetch_logits(pd.graph);
+        CHECK(ex.reset_states().ok(), "ms reset b");
+        CHECK(ex.run_step(pd.graph, b0, 0).ok(), "ms b0");
+        CHECK(ex.run_step(pd.graph, b1, 1).ok(), "ms b1");
+        auto lb = ex.fetch_logits(pd.graph);
+        CHECK(ex.reset_states().ok(), "ms reset batch");
+        const std::int32_t toks4[4] = {a0, a1, b0, b1};
+        const std::uint32_t slots[4] = {0u, 0u, 1u, 1u};
+        const std::uint32_t pos[4] = {0u, 1u, 0u, 1u};
+        backend::hip::HipStepExecutor::BatchRows rows{slots, pos};
+        const auto stb = ex.run_batch(pb.graph, toks4, nullptr, 4, rows);
+        CHECK_ST(stb.ok(), "ms batch", stb);
+        auto lbat2 = ex.fetch_logits(pb.graph);
+        CHECK(lbat2.ok() && lbat2.value().size() == 4 * V, "ms batch logits [4,V]");
+        if (la.ok() && lb.ok() && lbat2.ok()) {
+            const auto diff = [&](const std::vector<float>& x, const float* y) {
+                double w = 0.0;
+                for (std::size_t i = 0; i < V; ++i)
+                    w = std::max(w, std::abs(static_cast<double>(x[i]) -
+                                             static_cast<double>(y[i])));
+                return w;
+            };
+            const double wa = diff(la.value(), lbat2.value().data() + V);
+            const double wb = diff(lb.value(), lbat2.value().data() + 3 * V);
+            std::printf("multislot: |a|=%.3e |b|=%.3e\n", wa, wb);
+            CHECK(wa < 5e-2, "multislot slot0 matches single-slot logits");
+            CHECK(wb < 5e-2, "multislot slot1 matches single-slot logits");
         }
     }
 

@@ -18,16 +18,20 @@ namespace op_kv_append_bf16 {
 using bf16 = __hip_bfloat16;
 
 __device__ __forceinline__ void kv_append_bf16_body(const KvAppendCommonArgs& a,
-                                                   bf16* k_pool, bf16* v_pool) {
+                                                   bf16* k_pool, bf16* v_pool,
+                                                   bf16* online_k, bf16* online_v,
+                                                   uint32_t online_pages) {
     const uint32_t head_dim = a.head_dim;
     const uint32_t row = blockIdx.x / a.kv_heads;
     const uint32_t head = blockIdx.x % a.kv_heads;
 
     __shared__ uint64_t token_base_shared;
+    __shared__ uint64_t online_base_shared;
     __shared__ uint32_t valid_shared;
 
     if (threadIdx.x == 0u) {
         uint64_t token_base = 0;
+        uint64_t online_base = 0;
         uint32_t valid = 1u;
         const uint32_t slot = a.row_sequence_slots[row];
         if (slot >= a.max_sequences) {
@@ -46,10 +50,17 @@ __device__ __forceinline__ void kv_append_bf16_body(const KvAppendCommonArgs& a,
                     token_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer
                                + static_cast<uint64_t>(page) * a.elems_per_page
                                + static_cast<uint64_t>(offset) * a.elems_per_token;
+                    if (online_pages != 0u) {
+                        online_base =
+                            (static_cast<uint64_t>(slot) * online_pages +
+                             (logical_block % online_pages)) * a.elems_per_page +
+                            static_cast<uint64_t>(offset) * a.elems_per_token;
+                    }
                 }
             }
         }
         token_base_shared = token_base;
+        online_base_shared = online_base;
         valid_shared = valid;
     }
     __syncthreads();
@@ -58,36 +69,40 @@ __device__ __forceinline__ void kv_append_bf16_body(const KvAppendCommonArgs& a,
     const uint64_t dst_base = token_base_shared + static_cast<uint64_t>(head) * head_dim;
     const bf16* k_src = reinterpret_cast<const bf16*>(a.k_input) + static_cast<size_t>(row) * a.k_row_stride + static_cast<size_t>(head) * head_dim;
     const bf16* v_src = reinterpret_cast<const bf16*>(a.v_input) + static_cast<size_t>(row) * a.v_row_stride + static_cast<size_t>(head) * head_dim;
-    bf16* k_dst = k_pool + dst_base;
-    bf16* v_dst = v_pool + dst_base;
 
     const uint32_t full = head_dim >> 2;
     const uint32_t rem = head_dim & 3u;
-    const bool aligned8 =
-        (reinterpret_cast<uintptr_t>(k_src) & 7u) == 0u &&
-        (reinterpret_cast<uintptr_t>(k_dst) & 7u) == 0u &&
-        (reinterpret_cast<uintptr_t>(v_src) & 7u) == 0u &&
-        (reinterpret_cast<uintptr_t>(v_dst) & 7u) == 0u;
-
-    if (static_cast<uint32_t>(threadIdx.x) < full) {
-        const uint32_t i = static_cast<uint32_t>(threadIdx.x) << 2;
-        if (aligned8) {
-            const uint64_t kb = *reinterpret_cast<const uint64_t*>(k_src + i);
-            const uint64_t vb = *reinterpret_cast<const uint64_t*>(v_src + i);
-            *reinterpret_cast<uint64_t*>(k_dst + i) = kb;
-            *reinterpret_cast<uint64_t*>(v_dst + i) = vb;
-        } else {
-            k_dst[i] = k_src[i]; k_dst[i + 1] = k_src[i + 1];
-            k_dst[i + 2] = k_src[i + 2]; k_dst[i + 3] = k_src[i + 3];
-            v_dst[i] = v_src[i]; v_dst[i + 1] = v_src[i + 1];
-            v_dst[i + 2] = v_src[i + 2]; v_dst[i + 3] = v_src[i + 3];
+    const auto copy_rows = [&](bf16* k_dst, bf16* v_dst) {
+        const bool aligned8 =
+            (reinterpret_cast<uintptr_t>(k_src) & 7u) == 0u &&
+            (reinterpret_cast<uintptr_t>(k_dst) & 7u) == 0u &&
+            (reinterpret_cast<uintptr_t>(v_src) & 7u) == 0u &&
+            (reinterpret_cast<uintptr_t>(v_dst) & 7u) == 0u;
+        if (static_cast<uint32_t>(threadIdx.x) < full) {
+            const uint32_t i = static_cast<uint32_t>(threadIdx.x) << 2;
+            if (aligned8) {
+                const uint64_t kb = *reinterpret_cast<const uint64_t*>(k_src + i);
+                const uint64_t vb = *reinterpret_cast<const uint64_t*>(v_src + i);
+                *reinterpret_cast<uint64_t*>(k_dst + i) = kb;
+                *reinterpret_cast<uint64_t*>(v_dst + i) = vb;
+            } else {
+                k_dst[i] = k_src[i]; k_dst[i + 1] = k_src[i + 1];
+                k_dst[i + 2] = k_src[i + 2]; k_dst[i + 3] = k_src[i + 3];
+                v_dst[i] = v_src[i]; v_dst[i + 1] = v_src[i + 1];
+                v_dst[i + 2] = v_src[i + 2]; v_dst[i + 3] = v_src[i + 3];
+            }
+        } else if (static_cast<uint32_t>(threadIdx.x) == full && rem != 0u) {
+            const uint32_t i = full << 2;
+            for (uint32_t j = 0; j < rem; ++j) {
+                k_dst[i + j] = k_src[i + j];
+                v_dst[i + j] = v_src[i + j];
+            }
         }
-    } else if (static_cast<uint32_t>(threadIdx.x) == full && rem != 0u) {
-        const uint32_t i = full << 2;
-        for (uint32_t j = 0; j < rem; ++j) {
-            k_dst[i + j] = k_src[i + j];
-            v_dst[i + j] = v_src[i + j];
-        }
+    };
+    copy_rows(k_pool + dst_base, v_pool + dst_base);
+    if (online_pages != 0u && online_k != nullptr && online_v != nullptr) {
+        const uint64_t ob = online_base_shared + static_cast<uint64_t>(head) * head_dim;
+        copy_rows(online_k + ob, online_v + ob);
     }
 }
 
@@ -98,10 +113,14 @@ extern "C" __global__ __launch_bounds__(256)
 void phaseshift_kv_append_bf16(::shelf::hipk::KvAppendBf16Args args) {
     op_kv_append_bf16::kv_append_bf16_body(
         args.common, reinterpret_cast<op_kv_append_bf16::bf16*>(args.k_pool),
-        reinterpret_cast<op_kv_append_bf16::bf16*>(args.v_pool));
+        reinterpret_cast<op_kv_append_bf16::bf16*>(args.v_pool),
+        reinterpret_cast<op_kv_append_bf16::bf16*>(args.online_k),
+        reinterpret_cast<op_kv_append_bf16::bf16*>(args.online_v), args.online_pages);
 }
 
-hipError_t launch_kv_append_bf16(const KvAppendCommonArgs& common, bf16_t* k_pool, bf16_t* v_pool, hipStream_t stream) {
+hipError_t launch_kv_append_bf16(const KvAppendCommonArgs& common, bf16_t* k_pool,
+                                 bf16_t* v_pool, hipStream_t stream, bf16_t* online_k,
+                                 bf16_t* online_v, uint32_t online_pages) {
     if (common.rows == 0u || common.head_dim == 0u || common.kv_heads == 0u)
         return hipErrorInvalidValue;
     if (common.page_tokens == 0u || common.block_table_stride == 0u || common.num_pages == 0u)
@@ -118,6 +137,9 @@ hipError_t launch_kv_append_bf16(const KvAppendCommonArgs& common, bf16_t* k_poo
     args.common = common;
     args.k_pool = k_pool;
     args.v_pool = v_pool;
+    args.online_k = online_k;
+    args.online_v = online_v;
+    args.online_pages = online_pages;
     phaseshift_kv_append_bf16<<<dim3(static_cast<uint32_t>(grid_x)), block,
                                         0, stream>>>(args);
     return hipGetLastError();

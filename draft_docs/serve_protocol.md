@@ -78,9 +78,26 @@ HTTP ハンドラが type を status から生成し envelope を組む
 | 404 | 未知のルート（`/v1/*` 以外も同じ envelope で返す） |
 | 413 | リクエスト本文が上限超過 |
 | 415 | `Content-Type` が `application/json` でない |
-| 403 | 許可されない Origin（API key 検証が要件になったときは 401 を §7 に追加） |
+| 401 | `--api-key` 設定時にキーが無い・違う（`invalid_api_key`、`WWW-Authenticate: Bearer`） |
 | 409 | Server 側で既に進行中のリクエストと衝突（エンジン由来の `busy` とは別。発生源をログで区別する） |
-| 503 | エンジン未起動・停止中（`overloaded` と同じ type） |
+| 429 | 同時要求が `max_inflight + max_queue` を超えた（`rate_limit_exceeded`） |
+| 503 | エンジン未起動・停止中・エンジン死亡（`service_unavailable` / `overloaded`。`/readyz` も 503） |
+| 504 | `--request-timeout` を超えた（`timeout`。SSE は 200 のまま error を流して `[DONE]`） |
+
+`code` は §3 の表に無い Server 自身の判定として次を足す（`openai_errors.py` が正本）:
+`request_too_large` → 413、`unsupported_media_type` → 415、`invalid_api_key` → 401、
+`rate_limit_exceeded` → 429、`service_unavailable` → 503、`timeout` → 504、
+`cancelled` → 400。`type` は status から機械生成する（500 未満 =
+`invalid_request_error`、500 以上 = `server_error`）。
+
+### 4.1 運用エンドポイント（T18）
+
+| パス | 認証 | 応答 |
+| --- | --- | --- |
+| `/healthz` | 不要 | 200 `{"status":"ok"}`（プロセス生存のみ） |
+| `/readyz` | 不要 | 200/503 `{"status":"ready"/"not_ready"}`。受付可・停止中でない・エンジン生存の 3 条件 |
+| `/metrics` | 必要（キー設定時） | Prometheus テキスト。名前は `draft_docs/ops_2026-11-01.md` §2.5 |
+| `/v1/*` | 必要（キー設定時） | 受付不可・停止中は 503、超過は 429、タイムアウトは 504 |
 
 ## 5. 追加フィールド（有限に固定する）
 
@@ -101,7 +118,15 @@ envelope に足してよいのは次の 2 つだけ。追加はここに書き�
 * **実装（2026-10-31・C++ 側）**: §3 の対応表は `src/api/protocol.cpp` の
   `code_from_status` が唯一の実装で、`unit.api_protocol` が §3 の全行（9 行 + `invalid_state`
   の 2 分岐）を照合する。`message` にソース位置・改行が混ざらないことは
-  `unit.api_session` が確認する。HTTP 面（Python）の表駆動テストは未着手
+  `unit.api_session` が確認する
+* **実装（2026-11-01・Python 面）**: `apps/server/tests/` の pytest 116 件が
+  §3 の code → status / type / param を表駆動で照合し、受付時の 400・413・415 が
+  **エンジンに届かない**こと（フェイクエンジン）、envelope が 4 フィールド固定であること、
+  traceback が出ないことを固定する。`ctest -R serve.python` から実行する
+  （`aiohttp` / `pytest` が無い環境は skip）。`stop` / `n > 1` のような**未対応の
+  パラメータは `unsupported_parameter` で明示的に 400** にする（黙って捨てない）。
+  T18 の 8 件（認証・429・504・ストリーム timeout・readiness・metrics・エンジン死亡）は
+  `tests/test_ops.py` が `ops_2026-11-01.md` §3 と 1 対 1 で照合する
 
 ## 7. 未決
 

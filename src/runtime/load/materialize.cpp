@@ -215,7 +215,34 @@ Result<Fp8ModelFormat> read_fp8_format(const std::string& config_json_text) {
         if (w.value("scale_format", std::string("e8m0")) != "e8m0")
             return bad("quark の scale_format は e8m0 のみ対応");
         f.mxfp4_group = 32u;
-        f.declared = "quark mxfp4 (fp4/group32/e8m0)";
+
+        // 活性化の宣言（W4A4 の選択条件）。
+        //   input_tensors.dtype == fp4 かつ per_group / 32 / e8m0 → A も MXFP4
+        //   e4m3 / fp8 → 既存の FP8 活性化（W4A8）
+        //   `input_tensors` が無い checkpoint は W4A8（従来動作）へ倒す。
+        if (wj.contains("input_tensors") && wj.at("input_tensors").is_object()) {
+            const auto& a = wj.at("input_tensors");
+            const std::string adt = a.value("dtype", std::string());
+            if (adt == "fp4") {
+                if (a.value("qscheme", std::string()) != "per_group")
+                    return bad("quark の activation qscheme='" +
+                               a.value("qscheme", std::string()) + "' は未対応");
+                const std::uint64_t ags = a.value("group_size", 0ull);
+                if (ags != 32ull)
+                    return bad("quark の activation group_size=" + std::to_string(ags) +
+                               " は未対応（32 のみ）");
+                if (a.value("scale_format", std::string("e8m0")) != "e8m0")
+                    return bad("quark の activation scale_format は e8m0 のみ対応");
+                f.mxfp4_activation = true;
+            } else if (adt == "fp8" || adt == "e4m3") {
+                f.mxfp4_activation = false;
+            } else {
+                return bad("quark の activation dtype='" + adt +
+                           "' は未対応（fp4 / e4m3）");
+            }
+        }
+        f.declared = "quark mxfp4 (fp4/group32/e8m0) + A=" +
+                     std::string(f.mxfp4_activation ? "fp4 (W4A4)" : "fp8 (W4A8)");
         return f;
     }
 

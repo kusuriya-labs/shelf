@@ -14,6 +14,7 @@ using runtime::generate::Philox4x32;
 using runtime::generate::Sampling;
 using runtime::generate::assign_seed;
 using runtime::generate::sample;
+using runtime::generate::sample_range;
 using runtime::generate::validate_sampling;
 
 }  // namespace shelf::api

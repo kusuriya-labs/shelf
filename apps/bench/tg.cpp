@@ -44,6 +44,7 @@ void usage(std::FILE* out) {
         "  --seed N            合成トークン列のシード（既定 1234）\n"
         "  --arena-mib N       アリーナサイズ MiB（既定 0 = グラフから自動算出、正の値で固定）\n"
         "  --logits-all-rows   prefill の全行で logits を作る（既定は最終行のみ）\n"
+        "  --profile           デコード 1 歩の内訳（GPU/ホスト/リセット）を出す\n"
         "  --output PATH       CSV を追記（ファイルが無ければヘッダを書く）\n"
         "  --help, -h          このヘルプ（GPU を触らず exit 0）\n"
         "\n"
@@ -89,7 +90,7 @@ int run_tg(int argc, char** argv) {
 
     // 未知のオプションは起動エラー（shelf-validate と同じ規約）。
     {
-        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "logits-all-rows", "output", "pipeline-parallel"};
+        const std::vector<std::string> allowed = {"help", "h", "model-dir", "model", "context", "tokens", "prefill-chunk", "warmup", "mode", "gpu", "seed", "arena-mib", "logits-all-rows", "output", "profile", "pipeline-parallel"};
         std::string bad;
         if (!only_known_keys(a, allowed, &bad)) {
             std::fprintf(stderr, "tg: unknown option: --%s\n", bad.c_str());
@@ -110,6 +111,7 @@ int run_tg(int argc, char** argv) {
     const std::string mode = a.str("mode", "forward");
     const std::string model_dir = a.str("model-dir", a.str("model"));
     const std::string output = a.str("output");
+    const bool profile = a.has("profile");
     if (!ok) {
         std::fprintf(stderr, "tg: numeric option has a bad value\n");
         usage(stderr);
@@ -290,6 +292,8 @@ int run_tg(int argc, char** argv) {
         return shelf::Status::make_ok();
     };
 
+    if (profile) (void)setenv("SHELF_HIP_STEP_PROFILE", "1", 1);
+
     // ---- warmup（破棄） ----
     for (std::int64_t w = 0; w < warmup; ++w) {
         const auto st = step_once(false);
@@ -301,8 +305,11 @@ int run_tg(int argc, char** argv) {
 
     // ---- 測定 ----
     const bool greedy = mode == "greedy";
-    std::vector<double> step_ms;
+    std::vector<double> step_ms, gpu_ms, kernel_ms, host_ms;
     step_ms.reserve(static_cast<std::size_t>(tokens));
+    gpu_ms.reserve(static_cast<std::size_t>(tokens));
+    kernel_ms.reserve(static_cast<std::size_t>(tokens));
+    host_ms.reserve(static_cast<std::size_t>(tokens));
     const auto t0 = std::chrono::steady_clock::now();
     for (std::int64_t s = 0; s < tokens; ++s) {
         const auto st = step_once(greedy);
@@ -311,6 +318,18 @@ int run_tg(int argc, char** argv) {
             return kExitRuntime;
         }
         step_ms.push_back(pipeline.last_step_ms);
+        if (profile) {
+            double g = 0.0, k = 0.0, h = 0.0;
+            for (auto& pst : pipeline.stages) {
+                const auto& es = pst.exec->stats();
+                g += es.last_gpu_ms;
+                k += es.last_kernel_ms;
+                h += es.last_host_ms;
+            }
+            gpu_ms.push_back(g);
+            kernel_ms.push_back(k);
+            host_ms.push_back(h);
+        }
         if (!greedy) feed = ctx_tokens.back();
     }
     const double wall_ms = std::chrono::duration<double, std::milli>(
@@ -319,12 +338,25 @@ int run_tg(int argc, char** argv) {
 
     std::vector<double> per_step = step_ms;
     const Stats st_step = summarize(std::move(per_step));
+    std::vector<double> gpu_copy = gpu_ms, kernel_copy = kernel_ms, host_copy = host_ms;
+    const Stats st_gpu = summarize(std::move(gpu_copy));
+    const Stats st_kernel = summarize(std::move(kernel_copy));
+    const Stats st_host = summarize(std::move(host_copy));
     const double us_per_token = wall_ms * 1000.0 / static_cast<double>(tokens);
     const double tokens_per_sec = us_per_token > 0.0 ? 1e6 / us_per_token : 0.0;
     const double first_token_ms = step_ms.empty() ? 0.0 : step_ms.front();
 
     // 実際に確保されたサイズ（prefill で自動拡張されている場合があるので最後に読む）。
     const std::int64_t arena_eff = static_cast<std::int64_t>(pipeline.arena_bytes >> 20);
+
+    if (profile) {
+        double declare_ms = 0.0;
+        for (auto& pst : pipeline.stages) declare_ms += pst.exec->stats().declare_ms;
+        kv_print("declare_ms_total", declare_ms);
+        kv_print("profile_gpu_ms_median", st_gpu.p50);
+        kv_print("profile_kernel_ms_median", st_kernel.p50);
+        kv_print("profile_host_ms_median", st_host.p50);
+    }
 
     std::printf("shelf-bench tg\n");
     kv_print("schema_version", static_cast<std::int64_t>(2));

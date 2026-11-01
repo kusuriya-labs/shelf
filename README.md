@@ -40,3 +40,13 @@ cmake --preset hip
 cmake --build --preset hip
 ctest --test-dir build/hip --output-on-failure
 ```
+
+Python 面（`apps/server`・OpenAI 互換 HTTP）は任意コンポーネントで、実行ファイルの
+ビルドには結線しない。テストは ctest の `serve.python` から実行する
+（`pytest` / `aiohttp` が無い環境は skip）。
+
+```bash
+python3 -m pytest apps/server/tests -q
+# または
+ctest --test-dir build/cpu -R serve.python
+```

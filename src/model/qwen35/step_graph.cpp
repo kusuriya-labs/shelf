@@ -196,6 +196,46 @@ private:
         return prim(Kind::linear, {m}, {down}, {rows_, cfg_.hidden_size});
     }
 
+    // MoE ブロック（router + top-k + エキスパート + 共有エキスパート）を 1 ノードで組む。
+    // エキスパートごとに 3 本の重みを宣言順に並べる（graph の moe_mlp 契約）。
+    // 疎選択は実行器の内部事情なので、グラフは dense と同じ「全エキスパートを
+    // 重みとして持つ」形だけを表す。
+    ValueId add_moe_mlp(ValueId x, std::size_t l) {
+        const std::string base = "model.language_model.layers." + std::to_string(l) + ".mlp.";
+        const std::size_t E = cfg_.num_experts;
+        const std::size_t I = cfg_.moe_intermediate_size;
+        std::vector<TensorId> ws;
+        ws.reserve(3u * E + 4u);
+        TensorId router = wid(base + "gate.weight", {E, cfg_.hidden_size});
+        if (!router.valid()) return ValueId{};
+        ws.push_back(router);
+        for (std::size_t e = 0; e < E; ++e) {
+            const std::string eb = base + "experts." + std::to_string(e) + ".";
+            TensorId g = wid(eb + "gate_proj.weight", {I, cfg_.hidden_size});
+            TensorId u = wid(eb + "up_proj.weight", {I, cfg_.hidden_size});
+            TensorId d = wid(eb + "down_proj.weight", {cfg_.hidden_size, I});
+            if (!g.valid() || !u.valid() || !d.valid()) return ValueId{};
+            ws.push_back(g);
+            ws.push_back(u);
+            ws.push_back(d);
+        }
+        if (cfg_.has_shared_expert()) {
+            const std::size_t Is = cfg_.shared_expert_intermediate_size;
+            TensorId sg = wid(base + "shared_expert.gate_proj.weight", {Is, cfg_.hidden_size});
+            TensorId su = wid(base + "shared_expert.up_proj.weight", {Is, cfg_.hidden_size});
+            TensorId sd = wid(base + "shared_expert.down_proj.weight", {cfg_.hidden_size, Is});
+            TensorId sv = wid(base + "shared_expert_gate.weight", {1, cfg_.hidden_size});
+            if (!sg.valid() || !su.valid() || !sd.valid() || !sv.valid()) return ValueId{};
+            ws.push_back(sg);
+            ws.push_back(su);
+            ws.push_back(sd);
+            ws.push_back(sv);
+        }
+        Attr a;
+        a.top_k = static_cast<std::int64_t>(cfg_.num_experts_per_tok);
+        return prim(Kind::moe_mlp, {x}, std::move(ws), {rows_, cfg_.hidden_size}, a);
+    }
+
     ValueId add_full_attention(ValueId x, std::size_t l) {
         const std::string base = "model.language_model.layers." + std::to_string(l) + ".self_attn.";
         const std::size_t D = cfg_.head_dim, nq = cfg_.num_heads, kvh = cfg_.num_kv_heads;
@@ -376,7 +416,7 @@ private:
         if (!h2.valid()) return h2;
         ValueId x2 = add_norm(h2, base + "post_attention_layernorm.weight", true);
         if (!x2.valid()) return x2;
-        ValueId m = add_mlp(x2, l);
+        ValueId m = cfg_.is_moe_layer(l) ? add_moe_mlp(x2, l) : add_mlp(x2, l);
         if (!m.valid()) return m;
         return prim(Kind::residual_add, {h2, m}, {}, {rows_, cfg_.hidden_size});
     }

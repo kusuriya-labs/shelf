@@ -3,6 +3,8 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
 
+#include <cstdlib>
+
 #include <cstdint>
 
 #include <shelf/foundation/numeric.hpp>
@@ -90,7 +92,18 @@ hipError_t launch_bf16_row_slice(const shelf::bf16_t* in, shelf::bf16_t* out, ui
                                  uint32_t cols, uint32_t begin, uint32_t in_row_stride,
                                  hipStream_t stream) {
     // 8 要素（16 B）単位で運べる形ならそちらを使う（アラインメントは要素数で判定）。
-    if ((cols % 8u) == 0u && (begin % 8u) == 0u && (in_row_stride % 8u) == 0u) {
+    // A/B 用: `SHELF_FORCE_ELEM_V4=1`（全体）または
+    // `SHELF_FORCE_SLICE_SCALAR=1`（行スライスだけ）でスカラー版に固定する。
+    static const bool force_v4 = std::getenv("SHELF_FORCE_ELEM_V4") != nullptr ||
+                                 std::getenv("SHELF_FORCE_SLICE_SCALAR") != nullptr;
+    static const bool dump_elem = std::getenv("SHELF_DUMP_ELEM") != nullptr;
+    if (dump_elem) {
+        static int dumped = 0;
+        if (dumped++ < 200)
+            std::fprintf(stderr, "[elem] slice rows=%u cols=%u begin=%u in_rs=%u\n",
+                         rows, cols, begin, in_row_stride);
+    }
+    if (!force_v4 && (cols % 8u) == 0u && (begin % 8u) == 0u && (in_row_stride % 8u) == 0u) {
         const uint32_t vpr = cols / 8u;
         const uint32_t total_vec = rows * vpr;
         bf16_row_slice_vec8<<<(total_vec + 255u) / 256u, 256, 0, stream>>>(
@@ -147,5 +160,81 @@ hipError_t launch_f32_to_bf16(const float* in, shelf::bf16_t* out, uint32_t n,
     f32_to_bf16_k<<<(n + 255u) / 256u, 256, 0, stream>>>(in, out, n);
     return hipGetLastError();
 }
+
+// ---- T17: MoE の接着剤 --------------------------------------------------
+// ルーター logits: 1 ブロック = 1 エキスパート。H をスレッドで分担して
+// 合計する（決定的な順序: スレッド i が h = i, i+256, ... を足す）。
+extern "C" __global__ __launch_bounds__(256)
+void moe_router_logit(const shelf::bf16_t* __restrict__ x,
+                      const shelf::bf16_t* __restrict__ w, float* __restrict__ out,
+                      uint32_t hidden) {
+    __shared__ float red[256];
+    const uint32_t e = blockIdx.x;
+    const shelf::bf16_t* row = w + static_cast<size_t>(e) * hidden;
+    float acc = 0.0f;
+    for (uint32_t h = threadIdx.x; h < hidden; h += blockDim.x) {
+        acc += __bfloat162float(__ushort_as_bfloat16(x[h].data)) *
+               __bfloat162float(__ushort_as_bfloat16(row[h].data));
+    }
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1) {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0u) out[e] = red[0];
+}
+
+// acc[h] += scale * x[h]（f32 累積に bf16 のエキスパート出力を足す）。
+extern "C" __global__ __launch_bounds__(256)
+void moe_accumulate(float* __restrict__ acc, const shelf::bf16_t* __restrict__ x,
+                    float scale, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    acc[i] += scale * __bfloat162float(__ushort_as_bfloat16(x[i].data));
+}
+
+// out[h] = scale * x[h]（f32 の共有エキスパート出力を bf16 にする経路）。
+extern "C" __global__ __launch_bounds__(256)
+void scaled_f32_to_bf16(const float* __restrict__ in, shelf::bf16_t* __restrict__ out,
+                        float scale, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(in[i] * scale))};
+}
+
+hipError_t launch_moe_router_logit(const shelf::bf16_t* x, const shelf::bf16_t* w,
+                                   float* out, uint32_t experts, uint32_t hidden,
+                                   hipStream_t stream) {
+    if (experts == 0u || hidden == 0u) return hipErrorInvalidValue;
+    moe_router_logit<<<experts, 256, 0, stream>>>(x, w, out, hidden);
+    return hipGetLastError();
+}
+
+hipError_t launch_moe_accumulate(float* acc, const shelf::bf16_t* x, float scale,
+                                 uint32_t n, hipStream_t stream) {
+    moe_accumulate<<<(n + 255u) / 256u, 256, 0, stream>>>(acc, x, scale, n);
+    return hipGetLastError();
+}
+
+hipError_t launch_scaled_f32_to_bf16(const float* in, shelf::bf16_t* out, float scale,
+                                     uint32_t n, hipStream_t stream) {
+    scaled_f32_to_bf16<<<(n + 255u) / 256u, 256, 0, stream>>>(in, out, scale, n);
+    return hipGetLastError();
+}
+
+// acc[h] += in[h]（f32。CPU で計算したエキスパートの寄与を足す）。
+extern "C" __global__ __launch_bounds__(256)
+void moe_add_f32(float* __restrict__ acc, const float* __restrict__ in, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    acc[i] += in[i];
+}
+
+hipError_t launch_moe_add_f32(float* acc, const float* in, uint32_t n, hipStream_t stream) {
+    moe_add_f32<<<(n + 255u) / 256u, 256, 0, stream>>>(acc, in, n);
+    return hipGetLastError();
+}
+
 
 } // namespace shelf::hipk

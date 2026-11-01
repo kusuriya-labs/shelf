@@ -135,6 +135,7 @@ struct alignas(16) StShared {
     uint32_t visible_max;
     uint32_t page_count;
     uint32_t invalid;
+    uint32_t slot;
     const uint32_t* block_table;
 };
 
@@ -143,7 +144,10 @@ void attention_paged_prefill_st_bf16_body(
     const PagedAttentionCommonArgs a,
     const bf16* k_pool,
     const bf16* v_pool,
-    void* out_base) {
+    void* out_base,
+    const bf16* online_k = nullptr,
+    const bf16* online_v = nullptr,
+    uint32_t online_pages = 0u) {
     const uint32_t q_per_kv = a.q_heads / a.kv_heads;
     const float scale_log2e = a.scale * 1.4426950408889634f;
 
@@ -178,6 +182,7 @@ void attention_paged_prefill_st_bf16_body(
         }
         if (valid == 0u) s.invalid = 1u;
         s.visible_max = vis_max;
+        s.slot = slot;
         s.page_count = (vis_max + kPageTokens - 1u) / kPageTokens;
         s.block_table = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
@@ -188,6 +193,7 @@ void attention_paged_prefill_st_bf16_body(
     const uint32_t rows_here = s.rows_here;
     const uint32_t visible_max = s.visible_max;
     const uint32_t page_count = s.page_count;
+    const uint32_t slot = s.slot;
     const uint32_t* block_table = s.block_table;
 
     const uint32_t rloc = rg * 16u + c;   // このレーンが持つクエリ行（タイル内）
@@ -220,18 +226,28 @@ void attention_paged_prefill_st_bf16_body(
     const uint32_t vj = tid & 7u;
     const uint32_t lgi = tid >> 3u;
 
+    const uint32_t window =
+        (a.slot_window_end != nullptr && a.slot_window_end[slot] != 0u)
+            ? a.slot_window_end[slot]
+            : page_count;
+    const uint32_t first_online =
+        (online_pages != 0u && window > online_pages) ? window - online_pages : 0u;
     for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
+        const bool mirrored = online_pages != 0u && page_index >= first_online;
+        const uint32_t page = mirrored ? 0u : block_table[page_index];
+        if (!mirrored && page >= a.num_pages) {
             if (tid == 0u) s.invalid = 1u;
             break;
         }
         const uint32_t page_start = page_index * kPageTokens;
         uint32_t tokens_here = (visible_max > page_start) ? (visible_max - page_start) : 0u;
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
-        const uint64_t page_base = layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
-        const bf16* k_src = k_pool + page_base + head_off;
-        const bf16* v_src = v_pool + page_base + head_off;
+        const uint64_t page_base = mirrored
+            ? (static_cast<uint64_t>(slot) * online_pages +
+               (page_index % online_pages)) * a.elems_per_page
+            : layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
+        const bf16* k_src = (mirrored ? online_k : k_pool) + page_base + head_off;
+        const bf16* v_src = (mirrored ? online_v : v_pool) + page_base + head_off;
 
         // K: [key][dim] のまま LDS へ（A フラグメントが 16 B 連続になる）。
         #pragma unroll
@@ -373,8 +389,12 @@ __global__ __launch_bounds__(kThreads, 1)
 void attention_paged_prefill_st_bf16_impl(const PagedAttentionCommonArgs a,
                                           const bf16* k_pool,
                                           const bf16* v_pool,
-                                          void* out_base) {
-    attention_paged_prefill_st_bf16_body(a, k_pool, v_pool, out_base);
+                                          void* out_base,
+                                          const bf16* online_k = nullptr,
+                                          const bf16* online_v = nullptr,
+                                          uint32_t online_pages = 0u) {
+    attention_paged_prefill_st_bf16_body(a, k_pool, v_pool, out_base, online_k, online_v,
+                                         online_pages);
 }
 
 }  // namespace prefill_st
@@ -386,7 +406,9 @@ void phaseshift_attention_paged_prefill_st_bf16(
     using namespace prefill_st;
     attention_paged_prefill_st_bf16_body(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
-        reinterpret_cast<const bf16*>(args.v_pool), args.common.output);
+        reinterpret_cast<const bf16*>(args.v_pool), args.common.output,
+        reinterpret_cast<const bf16*>(args.online_k),
+        reinterpret_cast<const bf16*>(args.online_v), args.online_pages);
 }
 
 bool attention_paged_prefill_st_bf16_supported(const PagedAttentionCommonArgs& common) {
@@ -406,13 +428,18 @@ hipError_t launch_attention_paged_prefill_st_bf16(
     const PagedAttentionCommonArgs& common,
     const bf16_t* k_pool,
     const bf16_t* v_pool,
-    hipStream_t stream) {
+    hipStream_t stream,
+    const bf16_t* online_k,
+    const bf16_t* online_v,
+    uint32_t online_pages) {
     using namespace prefill_st;
     if (!attention_paged_prefill_st_bf16_supported(common)) return hipErrorInvalidValue;
     const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
     attention_paged_prefill_st_bf16_impl<<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
         common, reinterpret_cast<const bf16*>(k_pool),
-        reinterpret_cast<const bf16*>(v_pool), common.output);
+        reinterpret_cast<const bf16*>(v_pool), common.output,
+        reinterpret_cast<const bf16*>(online_k),
+        reinterpret_cast<const bf16*>(online_v), online_pages);
     return hipGetLastError();
 }
 

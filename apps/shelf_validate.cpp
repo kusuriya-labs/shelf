@@ -28,6 +28,7 @@
 #include <shelf/backend/cpu/reference_executor.hpp>
 #include <shelf/foundation/numeric.hpp>
 #include <shelf/model/qwen35/step_graph.hpp>
+#include <shelf/runtime/generate/stop_tokens.hpp>
 
 #ifdef SHELF_HAVE_HIP
 #include <shelf/backend/hip/step_executor.hpp>
@@ -141,29 +142,28 @@ Result<StopSet> resolve_stop(const Options& o, const std::string& model_dir,
                              const model::qwen35::TextConfig& cfg) {
     if (o.stop_id_set) return StopSet{{o.stop_id}, "cli"};
 
+    // 解決順は `runtime/generate/stop_tokens` が唯一の実装（engine と同じ規則）:
+    // generation_config.json を主、モデル設定を従にした和集合。
     const std::string gen_path = model_dir + "/generation_config.json";
-    if (fs::exists(gen_path)) {
-        StopSet s;
-        s.source = "generation_config.json";
-        try {
-            const auto g = json::parse(read_file_str(gen_path));
-            if (g.contains("eos_token_id") && !g["eos_token_id"].is_null()) {
-                const auto& v = g["eos_token_id"];
-                if (v.is_array()) {
-                    for (const auto& e : v) s.ids.push_back(e.get<std::int64_t>());
-                } else {
-                    s.ids.push_back(v.get<std::int64_t>());
-                }
-                if (!s.ids.empty()) return s;
-            }
-        } catch (const std::exception& e) {
-            return Status::invalid_argument(std::string("generation_config.json の解析失敗: ") +
-                                            e.what(), __FILE__, __LINE__);
-        }
-    }
-    if (cfg.eos_token_id >= 0) return StopSet{{cfg.eos_token_id}, "config.json"};
-    return Status::not_found("StopToken が見つからない（--stop-id で指定してください）",
-                             __FILE__, __LINE__);
+    const bool has_gen = fs::exists(gen_path);
+    auto resolved = runtime::generate::resolve_stop_tokens(
+        read_file_str(model_dir + "/config.json"),
+        has_gen ? read_file_str(gen_path) : "",
+        read_file_str(model_dir + "/tokenizer_config.json"),
+        read_file_str(model_dir + "/tokenizer.json"));
+    if (!resolved.ok()) return resolved.status();
+
+    StopSet s;
+    for (const std::int32_t id : resolved.value().ids) s.ids.push_back(id);
+    auto gen_only = runtime::generate::parse_generation_config(
+        has_gen ? read_file_str(gen_path) : "");
+    s.source = (gen_only.ok() && !gen_only.value().empty()) ? "generation_config.json"
+                                                            : "config.json";
+    if (s.ids.empty())
+        return Status::not_found("StopToken が見つからない（--stop-id で指定してください）",
+                                 __FILE__, __LINE__);
+    (void)cfg;
+    return s;
 }
 
 // decode 1 ステップ分の top-1 / top-2（T2 の margin 判定に使う）。
@@ -522,6 +522,7 @@ int main(int argc, char** argv) {
         po.rope_theta = cfg.rope_theta;
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
+        po.mxfp4_activation = fmt.mxfp4_activation;
         po.verbose = true;
         auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());

@@ -65,6 +65,11 @@ struct Draw {
 // 検証違反は `invalid_argument`（呼ぶ前に `validate_sampling` を通すのが本来）。
 Result<Draw> sample(const std::vector<float>& logits, const Sampling& s, std::uint64_t position);
 
+// 連続バッチの行など、`logits` の部分列をそのまま抽選する版（コピーしない）。
+// `n` は語彙数（範囲外アクセスはしない）。
+Result<Draw> sample_range(const float* logits, std::size_t n, const Sampling& s,
+                          std::uint64_t position);
+
 // seed 未指定のときの採番（エンジン側）。`done.seed` に載せて返す。
 // 0 も正規の値として扱う（契約 §3.4）。
 std::uint64_t assign_seed(std::optional<std::uint64_t> requested, std::uint64_t nonce) noexcept;

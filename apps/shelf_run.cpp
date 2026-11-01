@@ -53,6 +53,13 @@ int main(int argc, char** argv) {
     bool logits_all_rows = false;  // true = prefill の全行で logits を作る
     std::string dump_acts;    // 指定すると prefill 後の linear 入力（f32）を保存する
     int fp8_act_group = -1;   // FP8 活性化の量子化粒度。-1 = config.json の宣言に従う
+    int act_quant = 0;        // 0 = 宣言、1 = FP8（W4A8）、2 = MXFP4（W4A4）
+    long long offload_mib = 0;   // T14: 重みを pinned host へ落とす量（0 = なし）
+    bool allow_host_weights = false;  // 予算超過時に host へ落として続行
+    long long promote_after = -1;     // T14: N ステップ後に host 重みを VRAM へ移す
+    bool kv_in_host = false;          // T14: KV プールを pinned host に置く
+    bool allow_host_kv = false;       // 予算不足時に KV を host へ
+    std::size_t online_kv_pages = 0;  // T14: 直近 N ページを VRAM にミラー
     int prefill_rows = 1024;   // prefill の 1 チャンク行数（VRAM が足りないとき落とす）
     int pp = 1;               // pipeline-parallel のステージ数（1 = 単一 GPU）
     // 生成パラメータ（`engine_contract.md` §3。既定は greedy = 従来と同じ）
@@ -77,6 +84,21 @@ int main(int argc, char** argv) {
         else if (a == "--logits-all-rows") logits_all_rows = true;
         else if (a == "--dump-acts") dump_acts = next("dir");
         else if (a == "--fp8-act-group") fp8_act_group = std::atoi(next("auto|0|128").c_str());
+        else if (a == "--offload-weights-mib") offload_mib = std::atoll(next("MiB").c_str());
+        else if (a == "--vram-budget-mib") budget_mib = std::atoll(next("MiB").c_str());
+        else if (a == "--allow-host-weights") allow_host_weights = true;
+        else if (a == "--promote-after") promote_after = std::atoll(next("N").c_str());
+        else if (a == "--kv-in-host") kv_in_host = true;
+        else if (a == "--allow-host-kv") allow_host_kv = true;
+        else if (a == "--online-kv-pages")
+            online_kv_pages = static_cast<std::size_t>(std::strtoull(next("N").c_str(), nullptr, 10));
+        else if (a == "--act-quant") {
+            const std::string v = next("auto|fp4|fp8");
+            if (v == "auto") act_quant = 0;
+            else if (v == "fp4") act_quant = 2;
+            else if (v == "fp8") act_quant = 1;
+            else return fail("--act-quant は auto / fp4 / fp8");
+        }
         else if (a == "--prefill-rows") prefill_rows = std::atoi(next("rows").c_str());
         else if (a == "--pipeline-parallel") pp = std::atoi(next("K").c_str());
         else if (a == "--temperature") temperature = std::atof(next("T").c_str());
@@ -87,7 +109,11 @@ int main(int argc, char** argv) {
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
                          "[--device cpu|hip] [--gpu N] [--arena-mib N] "
                          "[--dump-acts DIR] "
-                         "[--fp8-act-group auto|0|128] [--prefill-rows N] [--pipeline-parallel K] "
+                         "[--fp8-act-group auto|0|128] [--act-quant auto|fp4|fp8] "
+                         "[--offload-weights-mib N] [--vram-budget-mib N] "
+                         "[--allow-host-weights] [--promote-after N] "
+                         "[--kv-in-host] [--allow-host-kv] [--online-kv-pages N] "
+                         "[--prefill-rows N] [--pipeline-parallel K] "
                          "[--temperature T] [--top-k K] [--top-p P] [--min-p P] [--seed N]");
     }
     if (fp8_act_group != -1 && fp8_act_group != 0 && fp8_act_group != 128)
@@ -98,6 +124,9 @@ int main(int argc, char** argv) {
         return fail("--prefill-rows must be in [1, 2048]");
     if (pp < 1) return fail("--pipeline-parallel は 1 以上");
     if (seed < -1) return fail("--seed は 0 以上");
+    if (offload_mib < 0) return fail("--offload-weights-mib は 0 以上");
+    if (budget_mib < 0) return fail("--vram-budget-mib は 0 以上");
+    if (promote_after < -1) return fail("--promote-after は -1（なし）か 0 以上");
     api::Sampling sampling;
     sampling.temperature = temperature;
     sampling.top_k = static_cast<std::uint32_t>(top_k < 0 ? 0 : top_k);
@@ -122,6 +151,10 @@ int main(int argc, char** argv) {
     if (!fmt_r.ok()) return fail(fmt_r.status().message());
     app::Fp8ModelFormat fmt = fmt_r.value();
     if (fp8_act_group >= 0) fmt.act_group = static_cast<std::uint32_t>(fp8_act_group);
+    if (act_quant == 1) fmt.mxfp4_activation = false;
+    if (act_quant == 2) fmt.mxfp4_activation = true;
+    if (fmt.mxfp4_activation && !fmt.mxfp4)
+        return fail("--act-quant fp4 は MXFP4 重みのときだけ使える");
 
     // 生成パラメータの seed を確定する（未指定ならエンジンが採番。§3.4）。
     sampling.seed = api::assign_seed(sampling.seed, 0);
@@ -197,6 +230,13 @@ int main(int argc, char** argv) {
         po.rope_theta = cfg.rope_theta;
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
+        po.mxfp4_activation = fmt.mxfp4_activation;
+        po.offload_weights_bytes = static_cast<std::uint64_t>(offload_mib) << 20;
+        po.allow_host_weights = allow_host_weights;
+        if (budget_mib > 0) po.device_free_bytes = static_cast<std::uint64_t>(budget_mib) << 20;
+        po.kv_pinned_host = kv_in_host;
+        po.allow_host_kv = allow_host_kv;
+        po.online_kv_pages = online_kv_pages;
         po.verbose = true;
         auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
@@ -205,11 +245,14 @@ int main(int argc, char** argv) {
                     fmt.quantized ? fmt.declared.c_str() : "量子化なし（bf16 のまま）",
                     fmt.act_group,
                     fp8_act_group >= 0 ? " ※--fp8-act-group で上書き" : " ※config.json の宣言");
-        std::printf("pipeline: %d stage (gpu %d..%d), arena %.0f MiB (%s), device %.0f MiB%s\n",
+        std::printf("pipeline: %d stage (gpu %d..%d), arena %.0f MiB (%s), device %.0f MiB, "
+                    "host weights %.0f MiB, host KV %.0f MiB%s\n",
                     pp, gpu, gpu + pp - 1,
                     static_cast<double>(pipeline.arena_bytes) / (1024.0 * 1024.0),
                     arena_mib > 0 ? "pinned" : "auto",
                     static_cast<double>(pipeline.device_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(pipeline.host_weight_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(pipeline.host_kv_bytes) / (1024.0 * 1024.0),
                     budget_mib > 0 ? (" / 予算 " + std::to_string(budget_mib) + " MiB").c_str()
                                   : "");
 #else
@@ -346,6 +389,16 @@ int main(int argc, char** argv) {
     // position of token seq[i] is i; the token sampled from prefill logits
     // occupies position T, so step s>=1 feeds seq.back() at position T+s-1.
     for (int s = 0; s < steps; ++s) {
+#ifdef SHELF_HAVE_HIP
+        if (promote_after >= 0 && s == static_cast<int>(promote_after)) {
+            if (auto st = app::pipeline_promote(pipeline); !st.ok())
+                return fail("promote: " + st.message());
+            std::printf("promoted: %.0f MiB\n",
+                        static_cast<double>(pipeline.promoted_weight_bytes) / (1024.0 * 1024.0));
+        }
+#else
+        (void)promote_after;   // CPU ビルドでは pinned 正本の載せ替えを行わない
+#endif
         if (s > 0) {
             auto st = run_step(seq.back(), ids.size() + static_cast<std::size_t>(s) - 1,
                                &last_logits);
@@ -361,7 +414,12 @@ int main(int argc, char** argv) {
         std::printf("decode pos=%zu tok=%lld%s\n", ids.size() + static_cast<std::size_t>(s),
                     static_cast<long long>(best),
                     draw.value().used_random ? "" : " (greedy)");
-        if (best == cfg.eos_token_id) break;
+        // 停止 ID は複数ありうる（モデル設定の eos_token_id は整数または配列）。
+        const bool is_eos =
+            best == cfg.eos_token_id ||
+            std::find(cfg.eos_token_ids.begin(), cfg.eos_token_ids.end(), best) !=
+                cfg.eos_token_ids.end();
+        if (is_eos) break;
     }
 
     // ---- outputs ----

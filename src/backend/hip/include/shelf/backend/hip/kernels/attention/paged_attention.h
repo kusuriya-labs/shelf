@@ -83,15 +83,26 @@ struct PagedAttentionCommonArgs {
     uint32_t elems_per_layer = 0;
 
     float scale = 0.0f;
+
+    // T14: online KV の窓（スロットごとの、書き込まれた論理ページ数）。
+    // `slot_window_end[slot]` が 0 のスロットは「行の page_count」にフォールバック。
+    // online_pages と組で「直近 R ページ」を決める。null / 0 = online 無効。
+    const uint32_t* slot_window_end = nullptr;
 };
 
 struct PagedAttentionBf16Args {
     PagedAttentionCommonArgs common{};
     const bf16_t* k_pool = nullptr;
     const bf16_t* v_pool = nullptr;
+    // T14: online KV（直近ページの VRAM ミラー）。0/null なら従来どおり
+    // k_pool/v_pool（pinned host でも可）だけを読む。
+    const bf16_t* online_k = nullptr;
+    const bf16_t* online_v = nullptr;
+    uint32_t online_pages = 0u;
+    uint32_t online_reserved = 0u;
 };
 
-static_assert(sizeof(PagedAttentionCommonArgs) == 144);
+static_assert(sizeof(PagedAttentionCommonArgs) == 152);
 static_assert(alignof(PagedAttentionCommonArgs) == 8);
 static_assert(offsetof(PagedAttentionCommonArgs, q) == 0);
 static_assert(offsetof(PagedAttentionCommonArgs, output) == 8);
@@ -118,10 +129,14 @@ static_assert(offsetof(PagedAttentionCommonArgs, elems_per_token) == 128);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_page) == 132);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_layer) == 136);
 static_assert(offsetof(PagedAttentionCommonArgs, scale) == 140);
-static_assert(sizeof(PagedAttentionBf16Args) == 160);
+static_assert(offsetof(PagedAttentionCommonArgs, slot_window_end) == 144);
+static_assert(sizeof(PagedAttentionBf16Args) == 192);
 static_assert(alignof(PagedAttentionBf16Args) == 8);
-static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 144);
-static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 152);
+static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 152);
+static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 160);
+static_assert(offsetof(PagedAttentionBf16Args, online_k) == 168);
+static_assert(offsetof(PagedAttentionBf16Args, online_v) == 176);
+static_assert(offsetof(PagedAttentionBf16Args, online_pages) == 184);
 
 struct PagedAttentionSplitArgs {
     PagedAttentionCommonArgs common{};
@@ -137,16 +152,16 @@ struct PagedAttentionSplitReduceArgs {
     uint32_t splits = 0;
 };
 
-static_assert(sizeof(PagedAttentionSplitArgs) == 176);
+static_assert(sizeof(PagedAttentionSplitArgs) == 184);
 static_assert(alignof(PagedAttentionSplitArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 144);
-static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 152);
-static_assert(offsetof(PagedAttentionSplitArgs, partials) == 160);
-static_assert(offsetof(PagedAttentionSplitArgs, splits) == 168);
-static_assert(sizeof(PagedAttentionSplitReduceArgs) == 160);
+static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 152);
+static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 160);
+static_assert(offsetof(PagedAttentionSplitArgs, partials) == 168);
+static_assert(offsetof(PagedAttentionSplitArgs, splits) == 176);
+static_assert(sizeof(PagedAttentionSplitReduceArgs) == 168);
 static_assert(alignof(PagedAttentionSplitReduceArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 144);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 152);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 152);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 160);
 
 struct PagedAttentionFp8SplitArgs {
     PagedAttentionCommonArgs common{};
@@ -158,14 +173,14 @@ struct PagedAttentionFp8SplitArgs {
     uint32_t splits = 0;
 };
 
-static_assert(sizeof(PagedAttentionFp8SplitArgs) == 192);
+static_assert(sizeof(PagedAttentionFp8SplitArgs) == 200);
 static_assert(alignof(PagedAttentionFp8SplitArgs) == 8);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, k_pool) == 144);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, v_pool) == 152);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, k_scale_pool) == 160);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, v_scale_pool) == 168);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, partials) == 176);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, splits) == 184);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, k_pool) == 152);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, v_pool) == 160);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, k_scale_pool) == 168);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, v_scale_pool) == 176);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, partials) == 184);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, splits) == 192);
 
 hipError_t
 launch_attention_paged_bf16(
@@ -174,7 +189,10 @@ launch_attention_paged_bf16(
     const bf16_t* k_pool,
     const bf16_t* v_pool,
 
-    hipStream_t stream);
+    hipStream_t stream,
+    const bf16_t* online_k = nullptr,
+    const bf16_t* online_v = nullptr,
+    uint32_t online_pages = 0u);
 
 // prefill 用 kernel の受理判定（rows>1 / head_dim 256 / page_tokens 16 / GQA 整数比）。
 // 実行器はこれを満たすときだけ prefill 経路を選び、それ以外は decode 用 kernel を使う。
@@ -187,7 +205,10 @@ launch_attention_paged_prefill_bf16(
     const bf16_t* k_pool,
     const bf16_t* v_pool,
 
-    hipStream_t stream);
+    hipStream_t stream,
+    const bf16_t* online_k = nullptr,
+    const bf16_t* online_v = nullptr,
+    uint32_t online_pages = 0u);
 
 // 転置コア版（S^T = K·Q^T、P を LDS に置かない）。受理条件は prefill 版と同じ。
 bool attention_paged_prefill_st_bf16_supported(const PagedAttentionCommonArgs& common);
@@ -199,7 +220,10 @@ launch_attention_paged_prefill_st_bf16(
     const bf16_t* k_pool,
     const bf16_t* v_pool,
 
-    hipStream_t stream);
+    hipStream_t stream,
+    const bf16_t* online_k = nullptr,
+    const bf16_t* online_v = nullptr,
+    uint32_t online_pages = 0u);
 
 hipError_t
 launch_attention_paged_prefill_fp8_e4m3(

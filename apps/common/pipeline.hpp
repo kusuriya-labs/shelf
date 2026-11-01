@@ -45,6 +45,8 @@ inline std::vector<model::qwen35::StageRange> even_stage_ranges(std::size_t num_
 struct PipelineStage {
     model::qwen35::StepGraphPlan decode;                    // rows = 1
     std::unique_ptr<model::qwen35::StepGraphPlan> prefill;   // rows = chunk（不要なら null）
+    // 連続バッチング用: rows = 2..max_sequences の decode グラフ（index = rows - 2）。
+    std::vector<std::unique_ptr<model::qwen35::StepGraphPlan>> decode_batches;
     std::unique_ptr<backend::hip::HipStepExecutor> exec;
     std::size_t layer_lo = 0;
     std::size_t layer_hi = 0;
@@ -56,6 +58,10 @@ struct Pipeline {
     std::size_t hidden_size = 0;
     std::size_t arena_bytes = 0;                  // 先頭ステージの確保量（表示用）
     std::size_t weight_bytes = 0;                 // checkpoint 上の重みの生バイト数（表示用）
+    std::size_t host_weight_bytes = 0;            // pinned host に置いた重み（T14）
+    std::size_t promoted_weight_bytes = 0;        // 実行中に VRAM へ移した重み
+    std::size_t host_kv_bytes = 0;                // pinned host に置いた KV（K+V）
+    std::size_t max_sequences = 1;                // T15: バッチの最大スロット数
     std::size_t device_bytes = 0;               // 全ステージの device 確保合計（予算の分子）
     placement::Report budget;                   // D2 の判定結果（確保前の算術）
     double last_step_ms = 0.0;
@@ -83,6 +89,27 @@ struct PipelineOptions {
     double rope_theta = 1.0e7;
     std::size_t rope_rotary_dim = 64;
     std::uint32_t fp8_act_group = 0;
+    // 重みが MXFP4 のとき、活性化も MXFP4 で量子化する（W4A4）。
+    // `Fp8ModelFormat::mxfp4_activation`（Quark の input_tensors 宣言）から来る。
+    bool mxfp4_activation = false;
+    // T14: 重みの置き場を VRAM と pinned host に分ける。
+    //   offload_weights_bytes > 0 : その分だけ明示的に host へ落とす（検証用）
+    //   allow_host_weights        : 予算超過時に host へ落として起動を続ける
+    // 予算は `device_free_bytes`（0 なら実測）を使う。
+    std::uint64_t offload_weights_bytes = 0;
+    bool allow_host_weights = false;
+    // KV プールを pinned host に置く（T14 の online KV 第 1 段）。
+    //   kv_pinned_host : 強制 / allow_host_kv : 予算不足時に自動
+    bool kv_pinned_host = false;
+    // T14: pinned 正本のうち直近 N ページを VRAM にミラーする（online KV）。
+    // >0 のときは KV を pinned host に置く（kv_pinned_host を自動で立てる）。
+    std::size_t online_kv_pages = 0;
+    bool allow_host_kv = false;
+    // T16: KV のグローバルブロック数（層ごと。0 = 自動）。prefix cache 用。
+    std::size_t kv_blocks = 0;
+    // T15: 連続バッチングの最大スロット数（1 = 従来の直列）。
+    // 2 以上なら rows = 2..N の decode グラフも作る。
+    std::size_t max_sequences = 1;
     bool verbose = false;
 };
 
@@ -94,6 +121,70 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
                                const PipelineOptions& opts);
 
 inline Status pipeline_reset(Pipeline& p) { return runtime::pipeline::reset(p.engine); }
+
+// T15: 1 スロット分の状態を 0 に戻す（新しい要求をスロットへ入れるとき）。
+inline Status pipeline_reset_slot(Pipeline& p, std::size_t slot) {
+    for (auto& st : p.stages) SHELF_RETURN_IF_ERROR(st.exec->reset_slot(slot));
+    return Status::make_ok();
+}
+
+// T15: 行ごとの slot / 位置を渡すステップ（prefill は 1 リクエストのチャンク）。
+inline Status pipeline_step_batch_prefill(Pipeline& p, const std::int32_t* tokens,
+                                          std::size_t n,
+                                          backend::StageExecutor::RowBatch rows,
+                                          std::vector<float>* logits) {
+    const Status st = runtime::pipeline::step_batch_prefill(p.engine, tokens, n, rows, logits);
+    p.last_step_ms = p.engine.last_step_ms;
+    return st;
+}
+inline Status pipeline_step_batch_decode(Pipeline& p, const std::int32_t* tokens,
+                                         std::size_t n,
+                                         backend::StageExecutor::RowBatch rows,
+                                         std::vector<float>* logits) {
+    const Status st = runtime::pipeline::step_batch_decode(p.engine, tokens, n, rows, logits);
+    p.last_step_ms = p.engine.last_step_ms;
+    return st;
+}
+
+// T16: スロットの block table を全ステージへ書き込む。
+inline Status pipeline_assign_blocks(Pipeline& p, std::size_t slot,
+                                     const std::uint32_t* blocks, std::size_t count,
+                                     std::size_t offset) {
+    for (auto& st : p.stages)
+        SHELF_RETURN_IF_ERROR(st.exec->assign_kv_blocks(slot, blocks, count, offset));
+    return Status::make_ok();
+}
+// T16: GDN 状態の退避/復元（ステージごとの連結 float 列）。
+inline Result<std::vector<std::vector<float>>> pipeline_export_gdn(Pipeline& p,
+                                                                   std::size_t slot) {
+    std::vector<std::vector<float>> out;
+    out.reserve(p.stages.size());
+    for (auto& st : p.stages) {
+        auto r = st.exec->export_gdn_state(slot);
+        if (!r.ok()) return r.status();
+        out.push_back(std::move(r.value()));
+    }
+    return out;
+}
+inline Status pipeline_import_gdn(Pipeline& p, std::size_t slot,
+                                  const std::vector<std::vector<float>>& data) {
+    if (data.size() != p.stages.size())
+        return Status::invalid_argument("import_gdn: ステージ数が違う", __FILE__, __LINE__);
+    for (std::size_t s = 0; s < p.stages.size(); ++s)
+        SHELF_RETURN_IF_ERROR(p.stages[s].exec->import_gdn_state(slot, data[s]));
+    return Status::make_ok();
+}
+
+// T14: pinned 正本の重みを VRAM へ移す（転送 + 再配置）。host 側は正本として残る。
+// 次ステップから device の複製を読む。呼ぶのはリクエスト境界など、ステップの外。
+inline Status pipeline_promote(Pipeline& p) {
+    for (auto& st : p.stages) {
+        const std::size_t before = st.exec->promoted_weight_bytes();
+        SHELF_RETURN_IF_ERROR(st.exec->promote_host_weights());
+        p.promoted_weight_bytes += st.exec->promoted_weight_bytes() - before;
+    }
+    return Status::make_ok();
+}
 
 // 1 ステップ（エンジンへ委譲し、計測値を持ち帰る）。
 Status pipeline_step(Pipeline& p, const std::int32_t* tokens, std::size_t n,

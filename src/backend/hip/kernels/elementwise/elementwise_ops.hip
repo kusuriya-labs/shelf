@@ -7,8 +7,10 @@
 #include <shelf/backend/hip/kernels/detail/elementwise_math.h>
 #include <shelf/backend/hip/kernels/detail/sigmoid_device.h>
 #include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 
@@ -121,24 +123,17 @@ void residual_add_bf16_x8(ElementwiseArgs args) {
     const uint4 xb = *reinterpret_cast<const uint4*>(b_row + col0);
     const uint32_t ha[4] = {xa.x, xa.y, xa.z, xa.w};
     const uint32_t hb[4] = {xb.x, xb.y, xb.z, xb.w};
-    uint32_t ho[4];
+    uint4 xo;
+    uint32_t* ho = reinterpret_cast<uint32_t*>(&xo);
 #pragma unroll
     for (int w4 = 0; w4 < 4; ++w4) {
-        uint32_t v = 0u;
-#pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const std::uint16_t pa = static_cast<std::uint16_t>((ha[w4] >> (16u * h)) & 0xFFFFu);
-            const std::uint16_t pb = static_cast<std::uint16_t>((hb[w4] >> (16u * h)) & 0xFFFFu);
-            const __hip_bfloat16 ba = __ushort_as_bfloat16(pa);
-            const __hip_bfloat16 bb = __ushort_as_bfloat16(pb);
-            const std::uint16_t po = __bfloat16_as_ushort(__float2bfloat16(
-                __bfloat162float(ba) + __bfloat162float(bb)));
-            v |= static_cast<uint32_t>(po) << (16u * h);
-        }
-        ho[w4] = v;
+        // bf16 を 2 要素ずつ packed で加算する（`__hadd2`）。要素ごとに
+        // float へ展開して戻すと命令数が 2 倍になり、9B の 128 行で負けていた。
+        const __hip_bfloat162 va = *reinterpret_cast<const __hip_bfloat162*>(&ha[w4]);
+        const __hip_bfloat162 vb = *reinterpret_cast<const __hip_bfloat162*>(&hb[w4]);
+        const __hip_bfloat162 vo = __hadd2(va, vb);
+        ho[w4] = *reinterpret_cast<const uint32_t*>(&vo);
     }
-    uint4 xo;
-    xo.x = ho[0]; xo.y = ho[1]; xo.z = ho[2]; xo.w = ho[3];
     *reinterpret_cast<uint4*>(out_row + col0) = xo;
 }
 
@@ -160,8 +155,19 @@ hipError_t launch_residual_add_bf16(
     args.rows = rows;
     // 行方向は grid.y 上限（65535）で区切って分割発射する（2048 行 × head 数など）。
     // 8 要素（16 B）単位で運べる形ならそちらを使う。
-    if ((features % 8u) == 0u && (a_row_stride % 8u) == 0u && (b_row_stride % 8u) == 0u &&
-        (output_row_stride % 8u) == 0u) {
+    // A/B 用: `SHELF_FORCE_ELEM_V4=1`（全体）または
+    // `SHELF_FORCE_RES_V4=1`（残差加算だけ）で 4 要素版に固定する。
+    static const bool force_v4 = std::getenv("SHELF_FORCE_ELEM_V4") != nullptr ||
+                                 std::getenv("SHELF_FORCE_RES_V4") != nullptr;
+    static const bool dump_elem = std::getenv("SHELF_DUMP_ELEM") != nullptr;
+    if (dump_elem) {
+        static int dumped = 0;
+        if (dumped++ < 200)
+            std::fprintf(stderr, "[elem] residual rows=%u features=%u a_rs=%u b_rs=%u out_rs=%u\n",
+                         rows, features, a_row_stride, b_row_stride, output_row_stride);
+    }
+    if (!force_v4 && (features % 8u) == 0u && (a_row_stride % 8u) == 0u &&
+        (b_row_stride % 8u) == 0u && (output_row_stride % 8u) == 0u) {
         const uint32_t gx = (features / 8u + kThreads - 1u) / kThreads;
         return launch_rows(args, gx, PortElemSize{2,2,2,2},
                            [&](const ElementwiseArgs& a, uint32_t gx_, uint32_t gy) {

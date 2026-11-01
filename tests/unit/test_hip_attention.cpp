@@ -659,11 +659,29 @@ void run_kv_append_case(uint32_t head_dim) {
     a.elems_per_token = static_cast<uint32_t>(g.ept());
     a.elems_per_page = static_cast<uint32_t>(g.epp());
     a.elems_per_layer = static_cast<uint32_t>(g.epl());
-    if (launch_kv_append_bf16(a, d_k, d_v, nullptr) != hipSuccess) {
+    // T14: online KV ミラー（直近 R ページの VRAM コピー）も同時に書く。
+    const uint32_t online_pages = 4u;
+    shelf::bf16_t *d_ok = nullptr, *d_ov = nullptr;
+    HIP_OK(hipMalloc(&d_ok, static_cast<size_t>(rows) * online_pages * g.epp() *
+                               sizeof(shelf::bf16_t)));
+    HIP_OK(hipMalloc(&d_ov, static_cast<size_t>(rows) * online_pages * g.epp() *
+                               sizeof(shelf::bf16_t)));
+    HIP_OK(hipMemset(d_ok, 0, static_cast<size_t>(rows) * online_pages * g.epp() *
+                                  sizeof(shelf::bf16_t)));
+    HIP_OK(hipMemset(d_ov, 0, static_cast<size_t>(rows) * online_pages * g.epp() *
+                                  sizeof(shelf::bf16_t)));
+    if (launch_kv_append_bf16(a, d_k, d_v, nullptr, d_ok, d_ov, online_pages) != hipSuccess) {
         std::printf("FAIL: launch_kv_append_bf16 D=%u\n", head_dim); ++failures;
     }
     HIP_OK(hipMemcpy(kpool.data(), d_k, kpool.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
     HIP_OK(hipMemcpy(vpool.data(), d_v, vpool.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost));
+    std::vector<shelf::bf16_t> okpool(static_cast<size_t>(rows) * online_pages * g.epp()),
+        ovpool(static_cast<size_t>(rows) * online_pages * g.epp());
+    HIP_OK(hipMemcpy(okpool.data(), d_ok, okpool.size() * sizeof(shelf::bf16_t),
+                     hipMemcpyDeviceToHost));
+    HIP_OK(hipMemcpy(ovpool.data(), d_ov, ovpool.size() * sizeof(shelf::bf16_t),
+                     hipMemcpyDeviceToHost));
+    hipFree(d_ok); hipFree(d_ov);
     hipFree(d_k); hipFree(d_v); hipFree(d_kin); hipFree(d_vin);
     hipFree(d_tbl); hipFree(d_slots); hipFree(d_pos);
     HIP_OK(hipGetLastError());
@@ -691,8 +709,30 @@ void run_kv_append_case(uint32_t head_dim) {
         for (uint32_t d = 0; d < head_dim; ++d)
             if (kpool[g.idx(3, 4, h, d)].data != kFillPat ||
                 vpool[g.idx(3, 4, h, d)].data != kFillPat) { ok = false; break; }
+    // online ミラー: ring slot = 論理 page % R に、ホストと同じ値が入る。
+    for (uint32_t s = 0; s < rows && ok; ++s) {
+        const uint32_t pos = rows_pos[s];
+        const uint32_t logical_block = pos / g.page_tokens;
+        const uint32_t off = pos % g.page_tokens;
+        const size_t base = (static_cast<size_t>(s) * online_pages +
+                             logical_block % online_pages) * g.epp() +
+                            static_cast<size_t>(off) * g.ept();
+        for (uint32_t h = 0; h < c.kv_heads && ok; ++h) {
+            for (uint32_t d = 0; d < head_dim; ++d) {
+                const shelf::bf16_t ek = kin[(static_cast<size_t>(s) * c.kv_heads + h)
+                                             * head_dim + d];
+                const shelf::bf16_t ev = vin[(static_cast<size_t>(s) * c.kv_heads + h)
+                                             * head_dim + d];
+                if (okpool[base + static_cast<size_t>(h) * head_dim + d].data != ek.data ||
+                    ovpool[base + static_cast<size_t>(h) * head_dim + d].data != ev.data) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
     char tag[64];
-    std::snprintf(tag, sizeof tag, "kv_append D=%u exact-write + untouched-neighbor", head_dim);
+    std::snprintf(tag, sizeof tag, "kv_append D=%u exact-write + neighbor + online", head_dim);
     check(ok, tag);
 }
 

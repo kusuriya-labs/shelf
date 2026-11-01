@@ -70,6 +70,11 @@ enum class Kind : std::uint8_t {
     // 追加は末尾のみ（既存 Kind の数値を変えない）。
     row_slice,          // leading-dim (row) contiguous slice [row_begin,row_end)
     swiglu,             // out = up * (gate / (1+exp(-gate)))  (bf16 in/out, f32 中間)
+    // 疎な MoE ブロック（1 ノード = ルーター + top-k + エキスパート + 共有）。
+    // 重みの並びは graph 検証の §moe_mlp を参照。route/merge を別ノードに
+    // 分けると [E,H] の中間を全エキスパート分 materialize することになり、
+    // 疎性（E=256 中 top-8）を実行器が活かせないための複合ノード。
+    moe_mlp,
 };
 
 inline const char* kind_name(Kind kind) noexcept {
@@ -94,6 +99,7 @@ inline const char* kind_name(Kind kind) noexcept {
         case Kind::causal_conv_step: return "causal_conv_step";
         case Kind::gdn_step: return "gdn_step";
         case Kind::attention_gqa_step: return "attention_gqa_step";
+        case Kind::moe_mlp: return "moe_mlp";
         default: return "unknown";
     }
 }

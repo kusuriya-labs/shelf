@@ -26,6 +26,10 @@ struct StageGraphs {
     const ir::Graph* prefill = nullptr;      // rows = chunk（任意）
     ir::ValueId hidden_out_decode;           // 非最終ステージの出力（decode）
     ir::ValueId hidden_out_prefill;          // 同（prefill。無ければ invalid）
+    // 連続バッチング用の decode グラフ。`decode_batch[rows - 2]` が rows 行の
+    // グラフ（rows = 2..max_sequences）。無い行数はバッチ実行できない。
+    std::vector<const ir::Graph*> decode_batch;
+    std::vector<ir::ValueId> hidden_out_batch;
 };
 
 struct Stage {
@@ -61,5 +65,15 @@ Status reset(Pipeline& p);
 // 1 ステップ。最終ステージのみ logits を返す（nullptr なら読み戻さない）。
 Status step(Pipeline& p, const std::int32_t* tokens, std::size_t n, std::uint32_t base_pos,
             std::vector<float>* logits);
+
+// T15: 行ごとの slot / 位置を渡す 1 ステップ。
+//   * `step_batch_prefill`: prefill グラフ（n は chunk 行数と一致。通常は全行同一 slot）
+//   * `step_batch_decode` : 1 行なら decode グラフ、n>=2 なら decode_batch[n-2]
+Status step_batch_prefill(Pipeline& p, const std::int32_t* tokens, std::size_t n,
+                          const backend::StageExecutor::RowBatch& rows,
+                          std::vector<float>* logits);
+Status step_batch_decode(Pipeline& p, const std::int32_t* tokens, std::size_t n,
+                         const backend::StageExecutor::RowBatch& rows,
+                         std::vector<float>* logits);
 
 }  // namespace shelf::runtime::pipeline

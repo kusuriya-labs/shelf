@@ -31,6 +31,26 @@ public:
                              const bf16_t* hidden, std::size_t n,
                              std::uint32_t base_pos) = 0;
 
+    // 行ごとの状態スロットと位置（T15 の連続バッチング）。slots[i] は状態
+    // （KV・conv・recurrent）のスロット、positions[i] はその行の絶対位置。
+    struct RowBatch {
+        const std::uint32_t* slots = nullptr;
+        const std::uint32_t* positions = nullptr;
+    };
+
+    // 複数スロットの 1 ステップ。既定は未対応（参照実装は run_stage だけ）。
+    virtual Status run_stage_batch(const ir::Graph& g, const std::int32_t* tokens,
+                                   const bf16_t* hidden, std::size_t n,
+                                   const RowBatch& rows) {
+        (void)g;
+        (void)tokens;
+        (void)hidden;
+        (void)n;
+        (void)rows;
+        return Status::unsupported("run_stage_batch is not supported by this executor",
+                                   __FILE__, __LINE__);
+    }
+
     // 非最終ステージの出力（bf16 のまま。f32 値は受け付けない）。
     virtual Result<std::vector<bf16_t>> fetch_value_bf16(const ir::Graph& g,
                                                          ir::ValueId id) = 0;

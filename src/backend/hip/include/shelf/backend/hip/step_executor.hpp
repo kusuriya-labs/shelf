@@ -58,6 +58,25 @@ struct HipStepExecutorOptions {
     // 活性化の FP8 量子化粒度（K のブロック長）。apps 側が checkpoint の宣言
     // （quantization_config）から決めて渡す。0 = 行（= トークン）全体で 1 スケール。
     std::uint32_t fp8_act_group = 128u;
+    // MXFP4 重みのとき、活性化も MXFP4（E2M1 + E8M0）で量子化する = W4A4。
+    // Quark の `global_quant_config.input_tensors.dtype == fp4` で true になる。
+    // false のときは既存の FP8 活性化 = W4A8。
+    bool mxfp4_activation = false;
+    // T14: KV プールを pinned host（mapped）に置く。VRAM は使わないが、
+    // attention は PCIe 越しに読む（低 VRAM 用の退避経路）。
+    bool kv_pinned_host = false;
+    // T14: pinned 正本のうち直近 N ページを VRAM にミラーする（online KV）。
+    // kv_pinned_host のときだけ有効。0 = 無効（従来どおり全部を host から読む）。
+    std::size_t online_kv_pages = 0;
+    // T15: 状態（KV・conv・recurrent）をスロット数分確保する。
+    // conv/recurrent はスロット先頭オフセットで並べる。
+    std::size_t max_sequences = 1;
+    // T16: KV のグローバルブロック数（層ごと）。0 = 自動（pages × max_sequences）。
+    // 明示するとブロック表を任意のグローバル block へ向けられる（prefix cache 用）。
+    std::size_t kv_blocks = 0;
+    // T17: VRAM の確保に失敗したら pinned host へ落として続行する（縮退）。
+    // 落ちた重みは CPU で計算する（MoE）か、mapped host を GPU が読む。
+    bool allow_host_fallback = false;
 };
 
 class HipStepExecutor : public backend::StageExecutor {
@@ -72,6 +91,27 @@ public:
     Status upload_weight(TensorId id, const std::vector<float>& f32);
     // Checkpoint-native bf16: raw bits straight to device (no host conversion).
     Status upload_weight_bf16(TensorId id, const bf16_t* data, std::size_t n);
+    // 次の `upload_weight_*` の置き場を決める（T14 の置き場接続）。
+    // true = pinned host に確保し、`hipHostGetDevicePointer` のマップ済み
+    // device ポインタをカーネルへ渡す（低 VRAM 用。帯域は PCIe 相当）。
+    // false（既定）= VRAM。upload 1 回ごとに消費される。
+    void set_weight_placement(bool pinned_host) noexcept { pending_weight_pinned_ = pinned_host; }
+
+    // pinned host に置いた重みのバイト数（device の計上には含めない）。
+    std::size_t host_weight_bytes() const noexcept { return host_weight_bytes_; }
+    // pinned host に置いた KV プールのバイト数（K + V）。
+    std::size_t host_kv_bytes() const noexcept { return host_kv_bytes_; }
+    std::size_t promoted_weight_bytes() const noexcept { return promoted_weight_bytes_; }
+    // T17: MoE で CPU が計算した / GPU が計算したエキスパート数の累計。
+    // 「pinned のままの重みは CPU、VRAM の重みは GPU」という分担の実測に使う。
+    std::size_t moe_cpu_experts() const noexcept { return moe_cpu_experts_; }
+    std::size_t moe_gpu_experts() const noexcept { return moe_gpu_experts_; }
+    double moe_cpu_ms() const noexcept { return moe_cpu_ms_; }
+
+    // pinned 正本の重みを VRAM へ移す（転送 + 再配置）。host 側は正本として残す。
+    // カーネルは次ステップから device の複製を読む。
+    Status promote_host_weights();
+
     // MXFP4（quark）重み: E2M1 ニブルは断片順、スケールは **E8M0 の U8**
     // （カーネルが `const std::uint8_t*` で受けるため f32 にしない）。
     Status upload_weight_mxfp4(TensorId id, const std::uint8_t* codes, std::size_t n_codes,
@@ -90,6 +130,39 @@ public:
     // Zero all state buffers and reset usage rows (new sequence).
     Status reset_states() override;
 
+    // T15: 1 スロット分の状態（KV ページ・conv/recurrent）とアリーナ scratch を
+    // 0 に戻す。連続バッチングで **新しい要求をスロットへ入れるとき**に呼ぶ。
+    // `kv_blocks` を明示した（共有プール）ときは KV ページを 0 にしない
+    // （他のスロットが参照している可能性がある）。
+    Status reset_slot(std::size_t slot);
+
+    // T16: スロットのブロック表を書き換える（論理 page `offset` から `count` 個）。
+    // `blocks[p]` はグローバル block（< kv_blocks()）。全 KV 層に同じ表を書く。
+    Status assign_kv_blocks(std::size_t slot, const std::uint32_t* blocks, std::size_t count,
+                            std::size_t offset = 0);
+    // 層あたりのグローバル KV ブロック数（declare 後）。
+    std::size_t kv_blocks() const noexcept { return kv_total_pages_; }
+    std::size_t kv_pages_per_sequence() const noexcept { return kv_pages_per_seq_; }
+
+    // T16: prefix cache 用の GDN 状態（conv/recurrent）の退避と復元。
+    // KV 以外の状態を宣言順に連結した float 列（スロット 1 個分）。
+    // prefix の途中で KV ブロックを共有するには、その長さでの GDN 状態が要る。
+    Result<std::vector<float>> export_gdn_state(std::size_t slot) const;
+    Status import_gdn_state(std::size_t slot, const std::vector<float>& data);
+
+    // 1 ステップ分の行メタデータ（T15）。slots[i] は状態スロット、positions[i] は
+    // その行の絶対位置（KV の書き込み先）。nullptr なら run_stage と同じ
+    // 「全行 slot 0・positions = base_pos + i」。
+    struct BatchRows {
+        const std::uint32_t* slots = nullptr;
+        const std::uint32_t* positions = nullptr;
+    };
+
+    // 複数スロットの 1 ステップ（decode バッチ / 単一スロットの prefill チャンク）。
+    // 行は **slot ごとに連続**していること（GDN のリクエスト記述子をまとめるため）。
+    Status run_batch(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
+                     std::size_t n, const BatchRows& rows);
+
     // One step over `n` tokens at absolute positions base_pos..base_pos+n-1.
     // The graph's batch mode must match (n == graph leading rows).
     static constexpr std::size_t kMaxStepRows = 2048u;
@@ -106,6 +179,9 @@ public:
     // グラフの行数（prefill チャンク / decode 1 行）は n と一致させること。
     Status run_stage(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
                      std::size_t n, std::uint32_t base_pos) override;
+    // `backend::StageExecutor::RowBatch` 版（PP の各ステージへ同じ行メタデータを渡す）。
+    Status run_stage_batch(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
+                           std::size_t n, const RowBatch& rows) override;
 
     // ステージ出力（bf16 のまま）を host へ。PP の hand-off 専用
     // （f32 経由にすると丸めが入りうるので生ビットで出す）。
@@ -115,7 +191,22 @@ public:
     // Debug/parity: read back an activation value produced by the last run_step.
     Result<std::vector<float>> fetch_value_debug(const ir::Graph& g, ir::ValueId id);
 
-    struct Stats { double last_step_ms = 0.0; };
+    // ステップ 1 回分の内訳。`SHELF_HIP_STEP_PROFILE=1` のときだけ
+    // event を取る（既定は last_step_ms だけ。イベントは作らない）。
+    //   gpu_ms   = 入力アップロード + カーネル列の GPU 時間（event elapsed）
+    //   kernel_ms= カーネル列だけ（アップロードを除く）
+    //   upload_ms= 入力アップロード
+    //   host_ms  = wall - gpu（CPU 側の dispatch・同期待ち・ホスト処理）
+    struct Stats {
+        double last_step_ms = 0.0;
+        double last_gpu_ms = 0.0;
+        double last_kernel_ms = 0.0;
+        double last_upload_ms = 0.0;
+        double last_host_ms = 0.0;
+        // declare 相（アリーナ・状態の確保と offsets の適用）にかかった時間。
+        // 起動時に 1 回だけ。PP ではステージ毎に持つ。
+        double declare_ms = 0.0;
+    };
     const Stats& stats() const { return stats_; }
 
     // 実際に確保しているアリーナのバイト数。
@@ -138,7 +229,18 @@ private:
         ir::StateKind kind = ir::StateKind::kv_cache;
         std::size_t elems = 0;          // elems per single buffer
         std::size_t pool_bytes = 0;     // kv: 1 プールあたりのバイト数（reset 用）
+        std::size_t total_pages = 0;    // kv: max_sequences を含む global page 数
+        void* host_k = nullptr;         // pinned host に置いたときのホスト側 K
+        void* host_v = nullptr;         // 同 V
+        void* online_k = nullptr;       // T14: 直近ページの VRAM ミラー
+        void* online_v = nullptr;
+        std::size_t online_pages = 0;   // ミラーのページ数（スロットあたり）
+        std::size_t online_bytes = 0;   // ミラー全体（max_sequences 分）のバイト数
     };
+
+    // run_stage / run_batch の共通実装。rows が nullptr なら全行 slot 0。
+    Status run_impl(const ir::Graph& g, const std::int32_t* tokens, const bf16_t* hidden,
+                    std::size_t n, std::uint32_t base_pos, const BatchRows* rows);
 
     // 1 primitive 分の実行。`prim_index` は declare 相の一時領域を引くための添字。
     Status run_primitive(const ir::Graph& g, const ir::Primitive& p, std::size_t prim_index,
@@ -172,7 +274,21 @@ private:
     struct Mxfp4Weight { std::uint8_t* codes = nullptr; std::uint8_t* scales = nullptr;
                          std::size_t features = 0; std::uint32_t k_padded = 0; };
     // scale_floats = rows × (活性化スケールのブロック数)。
+    // 次の upload の置き場に応じて確保する（device = hipMalloc、host = mapped pinned）。
+    // `src` があれば内容をコピーする。`dev_out` はカーネルが読むポインタ。
+    Status alloc_weight_payload(void** dev_out, std::size_t bytes, const void* src,
+                                const char* what, TensorId id, int kind);
+    // 重みの付属物（スケール等）を pinned host に置く（縮退用。host_weights_ には
+    // 登録しない = CPU 計算の対象にはならない）。
+    Status alloc_pinned_aux(void** dev_out, std::size_t bytes, const void* src,
+                            const char* what);
+    // KV プールの確保（opts_.kv_pinned_host なら mapped pinned）。
+    Status alloc_state_pool(void** dev_out, void** host_out, std::size_t bytes,
+                            const char* what);
+
     Status ensure_fp8_scratch(std::size_t code_bytes, std::size_t scale_floats);
+    // W4A4 の活性化（断片順ニブル + E8M0 1 バイト）の scratch。
+    Status ensure_mxfp4_scratch(std::size_t code_bytes, std::size_t scale_bytes);
 
     // device 確保の計上（予算 enforcement）。`dev_reserve` は hipMalloc を試みる前に
     // 予算を見るので、超過の理由は「確保済み + 要求 > 予算」の数字で分かる。
@@ -218,6 +334,67 @@ private:
     std::unordered_map<std::uint32_t, Mxfp4Weight> weight_mxfp4_;  // TensorId -> mxfp4
     std::uint8_t* fp8_codes_dev_ = nullptr;                      // 断片順コード scratch
     float* fp8_scales_dev_ = nullptr;                            // per-token スケール scratch
+    bool pending_weight_pinned_ = false;   // 次の upload を pinned host に置く
+    bool allow_host_fallback_ = false;     // device 確保失敗時に pinned へ落とす
+    int fail_dev_alloc_ = 0;               // テスト用: 先頭 N 回の device 確保を失敗させる
+    std::size_t host_weight_bytes_ = 0;    // pinned host に置いた重みの合計
+    std::vector<std::pair<void*, void*>> pinned_allocs_;  // (host, mapped dev) の対
+    // 転送（promote）用の pinned 正本。kind: 0 = bf16, 1 = fp8 codes, 2 = mxfp4 codes。
+    struct HostWeight {
+        TensorId id;
+        int kind = 0;
+        void* host = nullptr;
+        std::size_t bytes = 0;
+        bool promoted = false;
+        // kind 2（MXFP4 codes）のとき、CPU 計算用のスケールと形。
+        std::vector<std::uint8_t> host_scales;
+        std::uint32_t features = 0;
+        std::uint32_t k_padded = 0;
+    };
+    std::vector<HostWeight> host_weights_;
+    std::unordered_map<std::uint32_t, std::size_t> host_weight_index_;
+    // T17: CPU で計算した（pinned のままの）エキスパート数の累計。計測・検証用。
+    std::size_t moe_cpu_experts_ = 0;
+    std::size_t moe_gpu_experts_ = 0;
+    double moe_cpu_ms_ = 0.0;   // CPU 分担の計算に使った時間（累計）
+    std::size_t promoted_weight_bytes_ = 0;
+    std::size_t host_kv_bytes_ = 0;
+    std::size_t kv_total_pages_ = 0;    // 層あたりのグローバル KV ブロック数
+    std::size_t kv_pages_per_seq_ = 0;  // 1 シーケンスの最大ブロック数
+    bool kv_shared_pool_ = false;       // kv_blocks を明示した（共有プール）
+    // mapped host の device ポインタか（hipFree してはいけない）。
+    bool is_pinned_dev(void* p) const noexcept;
+    // 重み 1 本の解放（device なら hipFree、pinned なら何もしない＝最後に一括）。
+    void release_weight_ptr(void* p) noexcept;
+    std::size_t max_sequences_ = 1;                              // T15: スロット数
+    std::uint32_t* rowslot_dev_ = nullptr;                       // 行ごとの slot
+    std::uint32_t* slot_window_dev_ = nullptr;                   // T14: slot ごとの online 窓
+    bool rows_multi_slot_ = false;                               // このステップの行が複数スロットか
+    std::vector<std::uint32_t> rowslot_host_;
+    std::vector<std::uint32_t> slot_window_host_;
+    std::vector<std::uint32_t> rowpos_batch_host_;
+    std::uint32_t cur_requests_ = 0;                             // GDN 記述子の数
+    std::uint32_t cur_max_pos_ = 0;                              // バッチ内の最大位置 + 1
+    std::uint8_t* mxfp4_act_codes_dev_ = nullptr;                // W4A4: 断片順ニブル
+    std::uint8_t* mxfp4_act_scales_dev_ = nullptr;               // W4A4: E8M0（1 B/32K）
+    std::size_t mxfp4_act_codes_cap_ = 0;
+    std::size_t mxfp4_act_scales_cap_ = 0;
+    // T17: MoE ブロックの一時領域（ルーター logits・専門家の gate/up/mid/out・
+    // f32 累積）。幅は層で変わるので、必要量が増えたときだけ確保し直す。
+    std::uint8_t* moe_scratch_dev_ = nullptr;
+    std::size_t moe_scratch_cap_ = 0;
+    // MoE の down 用に中間（swiglu 出力）を量子化する scratch。
+    // W4A4 は E8M0 の U8、W4A8 は f32 のスケール。
+    std::uint8_t* moe_act_codes_dev_ = nullptr;
+    std::uint8_t* moe_act_scales_dev_ = nullptr;
+    std::size_t moe_act_codes_cap_ = 0;
+    std::size_t moe_act_scales_cap_ = 0;
+    Status ensure_moe_scratch(std::size_t bytes);
+    Status ensure_moe_act_scratch(std::size_t code_bytes, std::size_t scale_bytes);
+    // MoE の 1 行を計算する（bf16 / MXFP4 の重み形式で分岐）。
+    Status run_moe_row(const ir::Primitive& p, const bf16_t* x_row, bf16_t* out_row,
+                       std::size_t H, std::size_t E, std::size_t I, std::size_t Is,
+                       bool shared);
     std::size_t fp8_codes_cap_ = 0, fp8_scales_cap_ = 0;
     // ---- CP（コマンドプロセッサ）を起こしておく heartbeat -------------------
     // fp8 活性化 scratch に現在入っている値。同じ行・同じ K 切り・同じ粒度で

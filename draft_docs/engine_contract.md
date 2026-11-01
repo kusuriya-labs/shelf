@@ -55,6 +55,31 @@
 * **実装（2026-10-31）**: `src/api/protocol.{hpp,cpp}`（`encode_event` / `parse_event`、
   `Status::Code` → `code` の対応表 `code_from_status`）。`unit.api_session` がパイプ越しの
   フェイクエンジンで generate / cancel / ping / error / 枠（1 行 1 オブジェクト）を検証
+* **実装（2026-11-01・T01 停止）**: 停止 ID は `src/runtime/generate/stop_tokens.{hpp,cpp}`
+  が解決する。`generation_config.json` の `eos_token_id` を主、モデル設定
+  （`text_config.eos_token_id`）を従にして**和集合**を取る。値は整数 / 整数配列の両方を
+  受ける（欠落・`null` は「停止 ID なし」で正常）。`shelf-compute` は
+  decode の各ステップで `decide_step`（純粋関数）を通し、**EOS は `generated_ids` にも
+  `token` イベントにも載せない**。EOS と `max_new_tokens` が競合したときは EOS を優先
+  （最後の 1 トークンで EOS を引いた場合も `stop`）。`--eos-token` / `--no-eos` で上書きできる。
+  検証: `unit.runtime_generate_stop`（解析・併合・競合）と実 9B-FP8 の E2E
+  （`--eos-token` で強制したとき 0 トークン `stop`、`max_new_tokens=1` でも `stop`）
+* **実装（2026-11-01・T02 done の伝搬）**: Python 側 `EngineClient.generate()` は
+  `token`（dict）を逐次返し、最後に `Done`（finish_reason / prompt_tokens /
+  generated_tokens / seed / generated_ids）を返す。HTTP は `done` を正として
+  `finish_reason` / `usage` / `seed` を写す（数え直さない）。SSE の最終 chunk にも
+  `usage` と `seed` を載せる
+* **実装（2026-11-01・T15 連続バッチング）**: エンジンは複数の `generate` を
+  同時に受け付ける（既定 4 スロット、`--max-batch`）。受付→Prefill チャンク→
+  decode バッチ（1 スロット 1 行）→`done` の順に回し、`done` は要求ごとに返す。
+  `cancel` は `request_id` のスロット（または queued）だけを終端させる。
+  1 スロットの状態（KV・conv・recurrent）は `reset_slot` で要求ごとに初期化する。
+* **実装（2026-11-01・T03 cancel）**: cancel は `runtime::generate::CancelToken` で
+  `request_id` を照合する（一致しない cancel は実行中の生成を止めない）。開始前に届いた
+  cancel は保留し、その ID の生成開始時に `done(cancelled, 0 トークン)` にする。
+  Prefill は**チャンクの合間**（および端数の 1 行ごと）に制御行を読むので、Prefill 中でも
+  止まる。Server は HTTP 切断で `cancel` を送り terminal まで drain する。子プロセスの
+  終了時は待っている要求を `state_error` で起こす（無期限に待たない）
 
 ---
 
@@ -126,6 +151,10 @@ Server は値を写像するだけで、logits を受け取らない（vocab 分
 * 終端は `done.finish_reason == "cancelled"`
 * Server 側は「未完了なら必ず `cancel` を送り、terminal イベントを drain してから mailbox を
   解放する」（リーク防止。PhaseShift `compute_client` の `finally` と同型）
+* **実装（2026-11-01）**: `src/runtime/generate/cancel.hpp` の `CancelToken`。照合・保留
+  （上限 64）・冪等を純粋な状態機械にし、`unit.runtime_generate_stop` が固定する。
+  `shelf-compute` の E2E では「別 ID の cancel では継続 → 一致する cancel で
+  `cancelled` → 後続要求が流れる → 開始前 cancel は 0 トークン」を確認
 * **決定（§8.5）**: cancel で即時に解放するのは **スロット（`slot, generation`）だけ**。
   KV 正本（pinned）はターン境界まで残し、後続作業（in-flight の pass・掴み中の prefix）が
   指している間だけ解放を遅延し、commit か sweep で解放する（radiance の「即時が原則 +

@@ -153,8 +153,27 @@ int main() {
             check(f.quantized && f.mxfp4, "MXFP4 として印が付く");
             check(f.mxfp4_group == 32u, "group 32");
             check(f.scale_suffix == "_scale", "スケール名は weight_scale");
+            check(f.mxfp4_activation, "input_tensors=fp4 → W4A4");
             std::printf("  MXFP4 形: %s\n", f.declared.c_str());
         }
+
+        // 活性化の宣言が e4m3 なら W4A8（従来動作）。
+        auto act_fp8 = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group","group_size":32,
+              "scale_format":"e8m0"},
+              "input_tensors":{"dtype":"e4m3","qscheme":"per_group","group_size":32}}}})");
+        check(act_fp8.ok() && !act_fp8.value().mxfp4_activation,
+              "input_tensors=e4m3 → W4A8");
+        // 宣言が無い checkpoint は W4A8 へ倒す（互換）。
+        auto act_absent = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group","group_size":32}}}})");
+        check(act_absent.ok() && !act_absent.value().mxfp4_activation,
+              "input_tensors 無し → W4A8");
+        // 活性化の粒度が 32 以外なら拒否（勝手に丸めない）。
+        auto act_bad = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
+            "global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group","group_size":32},
+              "input_tensors":{"dtype":"fp4","qscheme":"per_group","group_size":64}}}})");
+        check(!act_bad.ok(), "input_tensors の group_size=64 は拒否");
         // 逸脱は明示的に失敗させる（近似しない）
         auto bad_dtype = read_fp8_format(R"({"quantization_config":{"quant_method":"quark",
             "global_quant_config":{"weight":{"dtype":"int4","qscheme":"per_group","group_size":32}}}})");

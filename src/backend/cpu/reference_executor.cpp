@@ -260,6 +260,130 @@ Status ReferenceExecutor::run_primitive(const Graph& graph, const Primitive& p, 
             }
             return storage.set_value(p.output.id, std::move(out));
         }
+        case Kind::moe_mlp: {
+            // 疎な MoE ブロック（graph の moe_mlp 契約）。全エキスパートの重みを
+            // 持つが、計算は top-k の選択分だけを f32 で行う（dense な全 E 計算と
+            // 同じ値になる。非選択の重みは 0 として足すのと同じ）。
+            const std::vector<float>* x = get(p.inputs[0]);
+            if (!x) return err("moe_mlp input missing");
+            const TensorShape& xs = graph.find_value(p.inputs[0])->shape;
+            const std::size_t R = xs.dim(0), H = xs.dim(1);
+            if (out_n != R * H) return err("moe_mlp output shape mismatch");
+
+            const TensorShape* rs = graph.find_weight(p.weights[0]);
+            if (!rs || rs->rank() != 2 || rs->dim(1) != H) return err("moe_mlp router shape");
+            const std::size_t E = rs->dim(0);
+            const std::size_t k = static_cast<std::size_t>(p.attr.top_k);
+            if (k == 0 || k > E) return err("moe_mlp top_k out of range");
+            const std::vector<float>* router = get_w(p.weights[0]);
+            if (!router) return err("moe_mlp router weight missing");
+
+            const auto expert_w = [&](std::size_t tri, std::size_t which)
+                -> const std::vector<float>* { return get_w(p.weights[1u + 3u * tri + which]); };
+            const bool shared = p.weights.size() == 3u * E + 5u;
+
+            // gate/up/down の幅（全エキスパートで同じ。graph が検証済み）。
+            const TensorShape* g0 = graph.find_weight(p.weights[1]);
+            if (!g0 || g0->rank() != 2) return err("moe_mlp expert gate shape");
+            const std::size_t I = g0->dim(0);
+
+            std::vector<float> out(out_n, 0.0f);
+            std::vector<float> logits(E), probs(E), sel_w(k);
+            std::vector<std::size_t> sel(E, 0), sel_idx(k, 0);
+            std::vector<float> mid(I), eout(H);
+            for (std::size_t r = 0; r < R; ++r) {
+                const float* xr = x->data() + r * H;
+                // 1) router logits（f32 累積）→ softmax（全 E）
+                float mx = -INFINITY;
+                for (std::size_t e = 0; e < E; ++e) {
+                    const float* wr = router->data() + e * H;
+                    float acc = 0.0f;
+                    for (std::size_t h = 0; h < H; ++h) acc += xr[h] * wr[h];
+                    logits[e] = acc;
+                    if (acc > mx) mx = acc;
+                }
+                float sum = 0.0f;
+                for (std::size_t e = 0; e < E; ++e) {
+                    probs[e] = std::exp(logits[e] - mx);
+                    sum += probs[e];
+                }
+                for (auto& v : probs) v /= sum;
+                // 2) top-k（同値は小さい index を優先）→ 選択分を再正規化
+                std::fill(sel.begin(), sel.end(), 0u);
+                float keep = 0.0f;
+                for (std::size_t j = 0; j < k; ++j) {
+                    std::size_t best = E;
+                    for (std::size_t e = 0; e < E; ++e) {
+                        if (sel[e]) continue;
+                        if (best == E || probs[e] > probs[best]) best = e;
+                    }
+                    sel[best] = 1u;
+                    sel_idx[j] = best;
+                    sel_w[j] = probs[best];
+                    keep += probs[best];
+                }
+                if (keep <= 0.0f) return err("moe_mlp top-k weights are zero");
+                for (auto& v : sel_w) v /= keep;
+
+                // 3) 選択エキスパートの MLP を重み付きで足す
+                float* orow = out.data() + r * H;
+                for (std::size_t j = 0; j < k; ++j) {
+                    const std::size_t e = sel_idx[j];
+                    const std::vector<float>* wg = expert_w(e, 0);
+                    const std::vector<float>* wu = expert_w(e, 1);
+                    const std::vector<float>* wd = expert_w(e, 2);
+                    if (!wg || !wu || !wd) return err("moe_mlp expert weight missing");
+                    for (std::size_t i = 0; i < I; ++i) {
+                        const float* gr = wg->data() + i * H;
+                        const float* ur = wu->data() + i * H;
+                        float a = 0.0f, b = 0.0f;
+                        for (std::size_t h = 0; h < H; ++h) {
+                            a += xr[h] * gr[h];
+                            b += xr[h] * ur[h];
+                        }
+                        mid[i] = silu_f(a) * b;
+                    }
+                    for (std::size_t h = 0; h < H; ++h) {
+                        const float* dr = wd->data() + h * I;
+                        float acc = 0.0f;
+                        for (std::size_t i = 0; i < I; ++i) acc += mid[i] * dr[i];
+                        eout[h] = acc;
+                    }
+                    for (std::size_t h = 0; h < H; ++h) orow[h] += sel_w[j] * eout[h];
+                }
+
+                // 4) 共有エキスパート（sigmoid ゲート付き）
+                if (shared) {
+                    const std::vector<float>* sg = get_w(p.weights[3u * E + 1u]);
+                    const std::vector<float>* su = get_w(p.weights[3u * E + 2u]);
+                    const std::vector<float>* sd = get_w(p.weights[3u * E + 3u]);
+                    const std::vector<float>* sv = get_w(p.weights[3u * E + 4u]);
+                    if (!sg || !su || !sd || !sv) return err("moe_mlp shared weight missing");
+                    const std::size_t Is = graph.find_weight(p.weights[3u * E + 1u])->dim(0);
+                    float gacc = 0.0f;
+                    for (std::size_t h = 0; h < H; ++h) gacc += xr[h] * (*sv)[h];
+                    const float sg_val = sigmoid_f(gacc);
+                    std::vector<float> smid(Is);
+                    for (std::size_t i = 0; i < Is; ++i) {
+                        const float* gr = sg->data() + i * H;
+                        const float* ur = su->data() + i * H;
+                        float a = 0.0f, b = 0.0f;
+                        for (std::size_t h = 0; h < H; ++h) {
+                            a += xr[h] * gr[h];
+                            b += xr[h] * ur[h];
+                        }
+                        smid[i] = silu_f(a) * b;
+                    }
+                    for (std::size_t h = 0; h < H; ++h) {
+                        const float* dr = sd->data() + h * Is;
+                        float acc = 0.0f;
+                        for (std::size_t i = 0; i < Is; ++i) acc += smid[i] * dr[i];
+                        orow[h] += sg_val * acc;
+                    }
+                }
+            }
+            return storage.set_value(p.output.id, std::move(out));
+        }
         case Kind::slice: {
             const std::vector<float>* x = get(p.inputs[0]);
             if (!x) return err("slice input missing");

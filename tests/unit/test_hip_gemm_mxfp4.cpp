@@ -792,8 +792,18 @@ int main() {
     run_prefill_case(96u, 128u, 512u, 26u);
     run_w4a4_case(256u, 256u, 31u);
     run_w4a4_case(128u, 512u, 32u);
+    // 実機のエキスパート形（I=512, H=2048 と down の H=2048, I=512）
+    run_w4a4_case(512u, 2048u, 33u);
+    run_w4a4_case(2048u, 512u, 34u);
     run_w4a4_prefill_case(128u, 128u, 256u, 41u);
     run_w4a4_prefill_case(128u, 256u, 512u, 42u);
+    // 端数の行（128 の倍数でない）: 読み側の clamp が無いと HSA フォルトになる。
+    run_w4a4_prefill_case(32u, 128u, 256u, 43u);
+    run_w4a4_prefill_case(64u, 128u, 256u, 44u);
+    run_w4a4_prefill_case(96u, 256u, 512u, 45u);
+    // 端数の出力（features が 128 の倍数でない）: 重みの読みを clamp する。
+    run_w4a4_prefill_case(128u, 48u, 256u, 46u);
+    run_w4a4_prefill_case(64u, 48u, 512u, 47u);
     if (const char* md = std::getenv("SHELF_MXFP4_MODEL")) {
         real_model_case(md, "model.language_model.layers.0.mlp.gate_proj", 512u);
     }

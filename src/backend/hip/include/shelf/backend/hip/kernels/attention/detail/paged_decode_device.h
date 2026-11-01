@@ -172,6 +172,7 @@ __device__ __forceinline__ void attention_load_query_frag(
 struct DecodeWalkState {
     uint64_t head_off;
     uint64_t layer_base;
+    uint32_t slot;   // 行の sequence slot（online KV のリング先頭）
     const uint32_t* block_table;
     uint32_t page_tokens;
     uint32_t visible;
@@ -308,22 +309,39 @@ template <bool kFullHead>
 __device__ __forceinline__ void attention_visit_pages_bf16(
     const DecodeWalkState& st, const bf16* k_pool, const bf16* v_pool,
     const float (&q_reg)[kElemsPerLane], uint32_t head_dim, float scale,
-    float& run_max, float& run_sum, float (&acc)[kElemsPerLane], uint32_t& bad) {
+    float& run_max, float& run_sum, float (&acc)[kElemsPerLane], uint32_t& bad,
+    const bf16* online_k = nullptr, const bf16* online_v = nullptr,
+    uint32_t online_pages = 0u, const uint32_t* slot_window_end = nullptr) {
     const uint32_t page_count = (st.visible + st.page_tokens - 1u) / st.page_tokens;
+    // 直近 `online_pages` ページ（論理ページ基準）は VRAM のミラーから読む。
+    // リング先頭は (slot * online_pages + logical_page % online_pages)。
+    // 窓は「このバッチで書き込まれた論理ページ数の最大」で決める（行ごとの
+    // page_count ではない）。古いページは host から読む（host が正本）。
+    const uint32_t window =
+        (slot_window_end != nullptr && slot_window_end[st.slot] != 0u)
+            ? slot_window_end[st.slot]
+            : page_count;
+    const uint32_t first_online =
+        (online_pages != 0u && window > online_pages) ? window - online_pages : 0u;
     for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
-        const uint32_t page = st.block_table[page_index];
-        if (page >= st.num_pages) {
+        const bool mirrored = online_pages != 0u && page_index >= first_online;
+        const uint32_t page = mirrored ? 0u : st.block_table[page_index];
+        if (!mirrored && page >= st.num_pages) {
             bad = 1u;
             break;
         }
-        const uint64_t page_base =
-            st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
+        const uint64_t page_base = mirrored
+            ? (static_cast<uint64_t>(st.slot) * online_pages +
+               (page_index % online_pages)) * st.elems_per_page
+            : st.layer_base + static_cast<uint64_t>(page) * st.elems_per_page;
+        const bf16* kp = mirrored ? online_k : k_pool;
+        const bf16* vp = mirrored ? online_v : v_pool;
         const uint32_t page_start = page_index * st.page_tokens;
         const uint32_t tokens_here =
             (st.visible - page_start < st.page_tokens) ? (st.visible - page_start) : st.page_tokens;
         if constexpr (kFullHead) {
-            const bf16* k_base = k_pool + page_base + st.head_off + kFragElems * st.lane;
-            const bf16* v_base = v_pool + page_base + st.head_off + kFragElems * st.lane;
+            const bf16* k_base = kp + page_base + st.head_off + kFragElems * st.lane;
+            const bf16* v_base = vp + page_base + st.head_off + kFragElems * st.lane;
             const uint64_t token_stride =
                 static_cast<uint64_t>(kWaves) * st.elems_per_token;
             constexpr uint32_t kStep = kTokensPerStep * kWaves;
@@ -342,7 +360,7 @@ __device__ __forceinline__ void attention_visit_pages_bf16(
                 const uint64_t elem =
                     page_base + static_cast<uint64_t>(off) * st.elems_per_token;
                 attention_attend_token_bf16<kFullHead>(
-                    q_reg, k_pool + elem + st.head_off, v_pool + elem + st.head_off,
+                    q_reg, kp + elem + st.head_off, vp + elem + st.head_off,
                     head_dim, st.lane, scale, run_max, run_sum, acc);
             }
         }
@@ -434,7 +452,10 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     const PagedAttentionCommonArgs& a,
     const bf16* k_pool,
     const bf16* v_pool,
-    void* out_base) {
+    void* out_base,
+    const bf16* online_k = nullptr,
+    const bf16* online_v = nullptr,
+    uint32_t online_pages = 0u) {
     const DecodeTaskMap task = attention_map_decode_task(a);
     if (!task.active) return;
 
@@ -470,6 +491,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
 
     DecodeWalkState st{};
     st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.slot = a.row_sequence_slots[task.row];
     st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     st.block_table = block_table_shared;
     st.page_tokens = a.page_tokens;
@@ -488,7 +510,8 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     uint32_t bad = 0u;
 
     attention_visit_pages_bf16<kFullHead>(st, k_pool, v_pool, q_reg, head_dim, scale,
-                                          run_max, run_sum, acc, bad);
+                                          run_max, run_sum, acc, bad, online_k,
+                                          online_v, online_pages, a.slot_window_end);
 
     if (a.tree_anc_offsets != nullptr) {
         attention_visit_ancestors_bf16<kFullHead>(
@@ -516,8 +539,12 @@ void attention_paged_bf16_impl(
     const PagedAttentionCommonArgs a,
     const bf16* k_pool,
     const bf16* v_pool,
-    void* out_base) {
-    attention_paged_bf16_body<kFullHead>(a, k_pool, v_pool, out_base);
+    void* out_base,
+    const bf16* online_k = nullptr,
+    const bf16* online_v = nullptr,
+    uint32_t online_pages = 0u) {
+    attention_paged_bf16_body<kFullHead>(a, k_pool, v_pool, out_base, online_k, online_v,
+                                         online_pages);
 }
 
 }  // namespace v_decode_bf16
@@ -602,6 +629,7 @@ __device__ __forceinline__ void attention_load_q_tile_split(
 struct SplitWalkState {
     uint64_t head_off;
     uint64_t layer_base;
+    uint32_t slot;
     const uint32_t* block_table;
     uint32_t page_tokens;
     uint32_t visible;
@@ -744,7 +772,10 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
     const bf16* k_pool,
     const bf16* v_pool,
     float* partials,
-    uint32_t splits) {
+    uint32_t splits,
+    const bf16* online_k = nullptr,
+    const bf16* online_v = nullptr,
+    uint32_t online_pages = 0u) {
     const uint32_t head_dim = a.head_dim;
     const uint32_t kv_heads = a.kv_heads;
     const float scale = a.scale;
@@ -784,6 +815,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
 
     SplitWalkState st{};
     st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.slot = a.row_sequence_slots[task.row];
     st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     st.block_table = block_table_shared;
     st.page_tokens = a.page_tokens;
@@ -813,6 +845,9 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
 
     attention_visit_pages_split_bf16<kQPerKV, kFullHead>(
         st, k_pool, v_pool, q_lds, head_dim, scale, run_max, run_sum, acc, bad);
+    (void)online_k;
+    (void)online_v;
+    (void)online_pages;
 
     if (bad != 0u) {
         #pragma unroll
@@ -1323,6 +1358,7 @@ void attention_paged_fp8_impl(
 
     v_decode_bf16::DecodeWalkState st{};
     st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.slot = a.row_sequence_slots[task.row];
     st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     st.block_table = block_table_shared;
     st.page_tokens = a.page_tokens;
@@ -1511,6 +1547,7 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
 
     v_decode_bf16_split::SplitWalkState st{};
     st.head_off = static_cast<uint64_t>(task.kv_head) * head_dim;
+    st.slot = a.row_sequence_slots[task.row];
     st.layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     st.block_table = block_table_shared;
     st.page_tokens = a.page_tokens;

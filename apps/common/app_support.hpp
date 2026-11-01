@@ -155,10 +155,13 @@ Status load_host_plan(HostStorageT& storage, const model::qwen35::StepGraphPlan&
 // 実行器向け（現在は HipStepExecutor。HOST 実装が同じ API を持てばそのまま使える）。
 // 実体化（読取 → 検証 → 無損 relayout）は runtime/load が行い、ここは
 // 「材料を要求 → 実行器へ渡す」だけを担う（composition root の仕事）。
+// `host_flags` は `plan.weights` と同じ並び。true の重みは pinned host に置き、
+// カーネルにはマップ済み device ポインタを渡す（T14 の低 VRAM 経路）。
 template <class Exec>
 Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
                    const weights::TensorCatalog& catalog, const ShardSet& shards,
-                   const Fp8ModelFormat& fmt, MaterializationPlan* report = nullptr) {
+                   const Fp8ModelFormat& fmt, MaterializationPlan* report = nullptr,
+                   const std::vector<char>* host_flags = nullptr) {
     auto mp = plan_materialization(catalog, plan, fmt);
     if (!mp.ok()) return mp.status();
     if (report) *report = mp.value();
@@ -180,6 +183,9 @@ Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
         auto m = runtime::load::materialize(src, req, fmt, &bufs);
         if (!m.ok()) return m.status();
         if (timing) t_mat += now_ms() - t0;
+        const bool to_host = host_flags != nullptr && i < host_flags->size() &&
+                             (*host_flags)[i] != 0;
+        ex.set_weight_placement(to_host);
         const double t1 = timing ? now_ms() : 0.0;
         bytes += m.value().bf16.size() * 2 + m.value().f32.size() * 4 +
                  m.value().codes.size();
@@ -207,6 +213,7 @@ Status upload_plan(Exec& ex, const model::qwen35::StepGraphPlan& plan,
             return Status::not_found("weight not in shards: " + w.checkpoint_name, __FILE__,
                                      __LINE__);
         }
+        ex.set_weight_placement(false);
         if (timing) t_up += now_ms() - t1;
         // 使い終わった実体を作業領域へ戻す（次で容量を使い回す）。
         bufs.codes = std::move(m.value().codes);
