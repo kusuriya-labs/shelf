@@ -28,21 +28,13 @@ shelf_set_hip_archs(shelf_gpu)
 add_library(shelf_io STATIC
     src/shelf/io/safetensors_reader.cpp
     src/shelf/io/safetensors_writer.cpp
-    src/shelf/io/row_reader.cpp
-    src/shelf/io/hipfile_reader.cpp
 )
 
 target_compile_features(shelf_io PRIVATE cxx_std_20)
 target_include_directories(shelf_io PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_io SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_io PUBLIC shelf_core)
+target_link_libraries(shelf_io PUBLIC shelf_core hip::host)
 target_compile_options(shelf_io PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-if(hipfile_FOUND)
-    target_compile_definitions(shelf_io PRIVATE SHELF_HAS_HIPFILE=1)
-    target_link_libraries(shelf_io PUBLIC hip::host hip::hipfile)
-else()
-    target_link_libraries(shelf_io PUBLIC hip::host)
-endif()
 
 # Generic weight loading (model-independent): safetensors / quantized
 # safetensors -> GPU MatrixWeight / Tensor. Depends on format + quantization
@@ -103,14 +95,12 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/rmsnorm.hip
     src/shelf/kernels/optimized/l2_normalize.hip
     src/shelf/kernels/optimized/output_gather.hip
-    src/shelf/kernels/optimized/row_gather.hip
     src/shelf/kernels/optimized/activation_quantize.hip
     src/shelf/kernels/optimized/swiglu_quantize.hip
     src/shelf/kernels/optimized/rmsnorm_quantize.hip
     src/shelf/kernels/optimized/resid_rmsnorm_quantize.hip
     src/shelf/kernels/optimized/attn_post_quantize.hip
     src/shelf/kernels/optimized/kv_append.hip
-    src/shelf/kernels/optimized/kv_relocate.hip
     src/shelf/kernels/optimized/gdn/recurrence.hip
     src/shelf/kernels/optimized/gdn/conv1d.hip
     src/shelf/kernels/optimized/gdn/fused_gdn_post.hip
@@ -119,10 +109,6 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/sampling.hip
     src/shelf/kernels/optimized/stochastic_sampling.hip
     src/shelf/kernels/optimized/radix_topn.hip
-    src/shelf/kernels/optimized/group_ops.hip
-    src/shelf/kernels/optimized/moe_ops.hip
-    src/shelf/kernels/optimized/attention/qsa_indexer.hip
-    src/shelf/kernels/optimized/attention/qsa_sparse_attention.hip
 )
 
 # Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
@@ -264,29 +250,6 @@ target_include_directories(shelf_qwen35 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vend
 target_link_libraries(shelf_qwen35 PUBLIC shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
 target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
-# Qwen4Exp (Qwen3.8-Flash-Next). Model-local PLE / Expert / kernel staging.
-add_library(shelf_qwen4exp STATIC
-    src/shelf/models/qwen4exp/model/qwen4exp_config.cpp
-    src/shelf/models/qwen4exp/model/qwen4exp_weights.cpp
-    src/shelf/models/qwen4exp/ple/ple_row_gather.cpp
-)
-target_compile_features(shelf_qwen4exp PRIVATE cxx_std_20)
-target_include_directories(shelf_qwen4exp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(shelf_qwen4exp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(shelf_qwen4exp SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_qwen4exp PUBLIC shelf_weights shelf_io shelf_gpu shelf_kernels_optimized)
-target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-shelf_set_hip_archs(shelf_qwen4exp)
-
-target_sources(shelf_qwen4exp PRIVATE
-    src/shelf/models/qwen4exp/ple/ngram_hash.cpp
-    src/shelf/models/qwen4exp/ple/ple_conv.cpp
-    src/shelf/models/qwen4exp/hyper/gated_residual.cpp
-    src/shelf/models/qwen4exp/runtime/qwen4exp_state.cpp
-    src/shelf/models/qwen4exp/model/lower_to_primitives.cpp
-    src/shelf/models/qwen4exp/ple/ple_forward.cpp
-)
-
 # Qwen3.5 continuous batching runtime.
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/runtime_request.cpp
@@ -333,7 +296,6 @@ target_link_libraries(
         shelf_inference_execution
         shelf_qwen35
         shelf_qwen35_runtime
-        shelf_qwen4exp
         shelf_quant_format
         shelf_quant_bundle
 )

@@ -7,8 +7,6 @@
 #include "detail/gdn.inc"
 #include "detail/embedding.inc"
 #include "detail/output.inc"
-#include "detail/group.inc"
-#include "detail/moe.inc"
 
 namespace ps::kernel {
 
@@ -44,10 +42,6 @@ __device__ ProgramStatus host_execute_binding(
         case KernelId::PAGED_ATTENTION: return detail::exec_paged_attention(env, b);
         case KernelId::STATEFUL_CAUSAL_CONV1D: return detail::exec_gdn_conv1d(env, b);
         case KernelId::GDN_RECURRENCE: return detail::exec_gdn_recurrence(env, b);
-        case KernelId::GROUP_MEAN: return detail::exec_group_mean(env, b);
-        case KernelId::GROUP_BROADCAST_MUL: return detail::exec_group_broadcast_mul(env, b);
-        case KernelId::MOE_ROUTER: return detail::exec_moe_router(env, b);
-        case KernelId::MOE_EXPERTS: return detail::exec_moe_experts(env, b);
         default:
             return ProgramStatus::DISPATCH_FAILED;
     }

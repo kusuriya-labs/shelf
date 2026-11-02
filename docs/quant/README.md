@@ -13,7 +13,7 @@ PSQ5-CB28 などの artifact は AMD Quark のプラグイン（`tools/quark_psq
 
 ## mixed-precision artifact
 
-Qwen3.8-Flash-Next のように PSQ5 と FP8 を混在させる artifact の生成 runner は
-リポジトリに保持しない。生成手順と実測は
-`docs/research/20261024/qwen4exp/quantization_profile.md` と
-`docs/research/20261024/qwen4exp/quantization_artifact.md` を参照。
+PSQ5 と FP8 を混在させる artifact の生成 runner はリポジトリに保持しない。
+合成時の encoding 混在は `synthesize_psq5_quantized_source()` が受け取る
+`architecture` 指定と manifest の per-tensor encoding で決まる
+（詳細は `docs/developer/quantization.md`）。

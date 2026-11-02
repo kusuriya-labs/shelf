@@ -28,10 +28,6 @@ enum class PrimitiveKind : uint16_t {
     OUTPUT_GATHER = 16,
     SAMPLING = 17,
     CONCAT = 18,
-    GROUP_MEAN = 19,
-    GROUP_BROADCAST_MUL = 20,
-    MOE_ROUTER = 21,
-    MOE_EXPERTS = 22,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -55,10 +51,6 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return "OUTPUT_GATHER";
         case PrimitiveKind::SAMPLING: return "SAMPLING";
         case PrimitiveKind::CONCAT: return "CONCAT";
-        case PrimitiveKind::GROUP_MEAN: return "GROUP_MEAN";
-        case PrimitiveKind::GROUP_BROADCAST_MUL: return "GROUP_BROADCAST_MUL";
-        case PrimitiveKind::MOE_ROUTER: return "MOE_ROUTER";
-        case PrimitiveKind::MOE_EXPERTS: return "MOE_EXPERTS";
     }
     return "UNKNOWN";
 }
@@ -181,32 +173,6 @@ struct ConcatNode {
     RowwiseShapeKey input_shape_b;
 };
 
-struct GroupMeanNode {
-    RowwiseShapeKey shape;
-    uint32_t group_size = 0;
-};
-
-struct GroupBroadcastMulNode {
-    RowwiseShapeKey shape;
-    uint32_t group_size = 0;
-};
-
-struct MoERouterNode {
-    MatrixwiseShapeKey weight_shape;
-    uint32_t weight_index = 0;
-    uint32_t experts = 0;
-    uint32_t top_k = 0;
-    bool renorm = false;
-};
-
-struct MoEExpertsNode {
-    MatrixwiseShapeKey gate_up_shape;
-    MatrixwiseShapeKey down_shape;
-    uint32_t weight_index = 0;
-    uint32_t experts = 0;
-    uint32_t top_k = 0;
-};
-
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -226,11 +192,7 @@ using PrimitiveNode = std::variant<
     GdnRecurrenceNode,
     OutputGatherNode,
     SamplingNode,
-    ConcatNode,
-    GroupMeanNode,
-    GroupBroadcastMulNode,
-    MoERouterNode,
-    MoEExpertsNode
+    ConcatNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -255,10 +217,6 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, OutputGatherNode>) return PrimitiveKind::OUTPUT_GATHER;
         else if constexpr (std::is_same_v<T, SamplingNode>) return PrimitiveKind::SAMPLING;
         else if constexpr (std::is_same_v<T, ConcatNode>) return PrimitiveKind::CONCAT;
-        else if constexpr (std::is_same_v<T, GroupMeanNode>) return PrimitiveKind::GROUP_MEAN;
-        else if constexpr (std::is_same_v<T, GroupBroadcastMulNode>) return PrimitiveKind::GROUP_BROADCAST_MUL;
-        else if constexpr (std::is_same_v<T, MoERouterNode>) return PrimitiveKind::MOE_ROUTER;
-        else if constexpr (std::is_same_v<T, MoEExpertsNode>) return PrimitiveKind::MOE_EXPERTS;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

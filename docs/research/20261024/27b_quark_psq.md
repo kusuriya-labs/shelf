@@ -7,7 +7,7 @@
 - 入力: `/opt/zen/work/models/Qwen3.8-27B`（BF16、18 shard、1,199 tensor、55,562,855,904 B）
 - 関連: [PSQ5-CB28 仕様](../quant/PSQ5-CB28.md)、
   [AWQ 判定の経緯](20261023/psq5_cb28_quark_plugin.md)、
-  [PSQ5 精度の試行](qwen4exp/psq5_accuracy_probe.md)
+  PSQ5 精度の試行（qwen4exp の削除に伴い記録はリポジトリに置かない）
 
 ## 1. 適用プロファイル
 
@@ -124,7 +124,8 @@ python3 tools/quantize_psq5.py \
 ## 5. 制約・未実施
 
 - タスク精度（PPL / KLD / Top1）は未測定。
-  重み空間のノイズ感度を含む注意点は [psq5_accuracy_probe.md](qwen4exp/psq5_accuracy_probe.md)。
+  重み空間のノイズ感度を含む注意点は qwen4exp の実験記録に記載していたが、
+  qwen4exp の削除に伴い記録はリポジトリに置かない。
 - PSQ5 の CBR は実測で 5% 程度（FP8 の約 1.9 倍）。AWQ 適用前後で
   rel weight error はほぼ同じ（0.049644 / 0.049611）で、AWQ は
   重みのスケーリングであるため PSQ5 の誤差率を大きく変えていない。

@@ -108,7 +108,7 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
 
 ### Fused rank-3 expert tensor の axis-slice ロード
 
-`[E, N, K]` の fused expert tensor（例: Qwen4Exp `mlp.experts.gate_up_proj`
+`[E, N, K]` の fused expert tensor（例: `mlp.experts.gate_up_proj`
 `[512, 1280, 2560]`）から任意の Expert 範囲 `[unit_begin, unit_begin + unit_count)`
 だけを取り出して rank-2 の `MatrixWeight` としてロードできる。
 モデル全体を VRAM に載せず、指定 Expert 分の byte span だけを GPU へ転送する。

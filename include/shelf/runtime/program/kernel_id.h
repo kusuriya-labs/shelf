@@ -28,11 +28,7 @@ enum class KernelId : uint32_t {
     LINEAR_FP8 = 25,
     LINEAR_PSQ5 = 26,
     VERIFY_ACCEPT = 27,
-    GROUP_MEAN = 28,
-    GROUP_BROADCAST_MUL = 29,
-    MOE_ROUTER = 30,
-    MOE_EXPERTS = 31,
-    COUNT = 33,
+    COUNT = 28,
 };
 
 constexpr uint32_t kernel_id_count() noexcept {
@@ -65,10 +61,6 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::LINEAR_PSQ5: return "LINEAR_PSQ5";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
-        case KernelId::GROUP_MEAN: return "GROUP_MEAN";
-        case KernelId::GROUP_BROADCAST_MUL: return "GROUP_BROADCAST_MUL";
-        case KernelId::MOE_ROUTER: return "MOE_ROUTER";
-        case KernelId::MOE_EXPERTS: return "MOE_EXPERTS";
         default: return "UNKNOWN";
     }
 }

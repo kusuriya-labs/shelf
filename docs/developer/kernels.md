@@ -1,7 +1,7 @@
 # Kernels
 
 model 非依存の最適化済み kernel は `src/shelf/kernels/optimized/`（public は
-`include/shelf/kernels/optimized/`）に置く。Qwen35 と Qwen4Exp が共有する。
+`include/shelf/kernels/optimized/`）に置く。Qwen35 が使う。
 Qwen35 固有 kernel（correctness / dflash2）は
 `src/shelf/models/qwen35/kernels/` に置く。
 配置と分割の詳細は `src/shelf/models/qwen35/kernels/README.md` を参照。

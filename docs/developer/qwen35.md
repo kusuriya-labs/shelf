@@ -413,6 +413,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 | 21 | `ACTIVATION_QUANTIZE_W4A8` |
 | 24 | `CONCAT` |
 | 25 | `LINEAR_FP8` |
+| 26 | `LINEAR_PSQ5` |
 | 27 | `VERIFY_ACCEPT` |
 
 カウントの正本は `KernelId::COUNT`（`include/shelf/runtime/program/kernel_id.h`）である。

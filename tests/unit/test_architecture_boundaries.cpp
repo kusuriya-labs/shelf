@@ -144,7 +144,7 @@ int main() {
         root / "src/shelf/models/common",
     };
     for (const auto& dir : generic_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35", "qwen4exp", "Qwen4Exp",
+        scan_clean(dir, {"qwen35", "Qwen35",
                          "shelf/models/qwen"});
     }
 

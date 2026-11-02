@@ -162,13 +162,6 @@ add_compile_definitions(
 
 find_package(hip REQUIRED CONFIG)
 
-find_package(hipfile QUIET CONFIG)
-if(hipfile_FOUND)
-    message(STATUS "hipFile ${hipfile_VERSION} found")
-else()
-    message(STATUS "hipFile not found: SSD row gather falls back to POSIX")
-endif()
-
 # Applies the single selected GPU architecture to a HIP target. CMake
 # already adds CMAKE_HIP_ARCHITECTURES to every HIP translation unit;
 # this appends the explicit --offload-arch flag for determinism.

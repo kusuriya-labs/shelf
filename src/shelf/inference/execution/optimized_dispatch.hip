@@ -12,7 +12,6 @@
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
 #include <shelf/inference/execution/elementwise_dispatch.h>
-#include <shelf/kernels/optimized/group_ops.h>
 #include <shelf/inference/execution/embedding_dispatch.h>
 #include <shelf/inference/execution/sampling_dispatch.h>
 #include <shelf/inference/execution/l2_normalize_dispatch.h>
@@ -60,7 +59,6 @@ namespace {
  std::atomic<uint32_t> g_paged_attention_optimized_count{0};
  std::atomic<uint32_t> g_gdn_recurrence_optimized_count{0};
  std::atomic<uint32_t> g_elementwise_optimized_count{0};
- std::atomic<uint32_t> g_group_ops_optimized_count{0};
  std::atomic<uint32_t> g_embedding_optimized_count{0};
  std::atomic<uint32_t> g_sampling_optimized_count{0};
  std::atomic<uint32_t> g_l2_normalize_optimized_count{0};
@@ -574,143 +572,6 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
 }
 
-namespace {
-
-struct GroupOpsByteRange {
-    uintptr_t start = 0;
-    uintptr_t end = 0;
-};
-
-GroupOpsByteRange group_ops_range(const HostResolvedValue& v, uint32_t rows) {
-    const size_t extent =
-        (static_cast<size_t>(rows - 1u) * v.row_stride + v.feature_count) * 4u;
-    const uintptr_t base = reinterpret_cast<uintptr_t>(v.ptr);
-    return GroupOpsByteRange{base, base + extent};
-}
-
-bool group_ops_ranges_ok(const GroupOpsByteRange& a, const GroupOpsByteRange& b) {
-    const bool same = (a.start == b.start && a.end == b.end);
-    const bool disjoint = (a.end <= b.start) || (b.end <= a.start);
-    return same || disjoint;
-}
-
-bool group_ops_alias_ok(const GroupOpsByteRange* rs, size_t n) {
-    for (size_t i = 0u; i < n; ++i)
-        for (size_t j = i + 1u; j < n; ++j)
-            if (!group_ops_ranges_ok(rs[i], rs[j])) return false;
-    return true;
-}
-
-Result<OptimizedLaunchResult> try_launch_group_mean(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
-    const HostExecutionContext& ctx,
-    hipStream_t stream) {
-    if (b.input_count != 1u || b.output_count != 1u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const uint32_t group = b.group_size;
-    if (group == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
-    if (!in_res.ok())
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const HostResolvedValue in = in_res.value();
-    auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
-    if (!out_res.ok())
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const HostResolvedValue dst = out_res.value();
-    if (in.dtype != ValueDType::F32 || dst.dtype != ValueDType::F32)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    if (in.row_domain != dst.row_domain)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    if (dst.feature_count == 0u || in.feature_count != dst.feature_count * group)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    if (in.row_stride < in.feature_count || dst.row_stride < dst.feature_count)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const uint32_t rows = rows_for(dst, ctx);
-    if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const GroupOpsByteRange ranges[2] = {group_ops_range(in, rows * group),
-                                         group_ops_range(dst, rows)};
-    if (!group_ops_alias_ok(ranges, 2))
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const hipError_t herr = ::ps::kernel::launch_group_mean_f32(
-        static_cast<const float*>(in.ptr), in.row_stride,
-        static_cast<float*>(dst.ptr), dst.row_stride, rows, dst.feature_count, group,
-        stream);
-    if (herr != hipSuccess)
-        return Status::hip_error("group mean optimized launch", hipGetErrorString(herr),
-                                 __FILE__, __LINE__);
-    record_physical_launch(1);
-    record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
-}
-
-Result<OptimizedLaunchResult> try_launch_group_broadcast_mul(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
-    const HostExecutionContext& ctx,
-    hipStream_t stream) {
-    if (b.input_count != 2u || b.output_count != 1u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const uint32_t group = b.group_size;
-    if (group == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    auto a_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
-    if (!a_res.ok()) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const HostResolvedValue a = a_res.value();
-    auto b_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
-    if (!b_res.ok()) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const HostResolvedValue gate = b_res.value();
-    auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
-    if (!out_res.ok()) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const HostResolvedValue dst = out_res.value();
-    if (a.dtype != ValueDType::F32 || gate.dtype != ValueDType::F32 ||
-        dst.dtype != ValueDType::F32) {
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    }
-    if (a.row_domain != gate.row_domain || a.row_domain != dst.row_domain)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    if (a.feature_count == 0u || gate.feature_count != group ||
-        dst.feature_count != a.feature_count * group) {
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    }
-    if (a.row_stride < a.feature_count || gate.row_stride < gate.feature_count ||
-        dst.row_stride < dst.feature_count) {
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    }
-    const uint32_t rows = rows_for(dst, ctx);
-    if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const GroupOpsByteRange ranges[3] = {group_ops_range(a, rows),
-                                         group_ops_range(gate, rows),
-                                         group_ops_range(dst, rows * group)};
-    if (!group_ops_alias_ok(ranges, 3))
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    const hipError_t herr = ::ps::kernel::launch_group_broadcast_mul_f32(
-        static_cast<const float*>(a.ptr), a.row_stride,
-        static_cast<const float*>(gate.ptr), gate.row_stride,
-        static_cast<float*>(dst.ptr), dst.row_stride, rows, a.feature_count, group,
-        stream);
-    if (herr != hipSuccess)
-        return Status::hip_error("group broadcast mul optimized launch",
-                                 hipGetErrorString(herr), __FILE__, __LINE__);
-    record_physical_launch(1);
-    record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
-}
-
-Result<OptimizedLaunchResult> try_launch_group_ops(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
-    const HostExecutionContext& ctx,
-    hipStream_t stream) {
-    if (b.kernel_id == KernelId::GROUP_MEAN)
-        return try_launch_group_mean(program, b, ctx, stream);
-    return try_launch_group_broadcast_mul(program, b, ctx, stream);
-}
-
-}  // namespace
-
 Result<KernelMode> read_kernel_mode() {
     const char* e = std::getenv("SHELF_QWEN35_KERNEL_MODE");
     if (e == nullptr || e[0] == '\0')
@@ -867,14 +728,6 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         if (!q.ok()) return q.status();
         if (q.value().kind == OptimizedLaunchKind::Launched)
             g_elementwise_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return q;
-    }
-    if (b.kernel_id == KernelId::GROUP_MEAN ||
-        b.kernel_id == KernelId::GROUP_BROADCAST_MUL) {
-        auto q = try_launch_group_ops(program, b, ctx, stream);
-        if (!q.ok()) return q.status();
-        if (q.value().kind == OptimizedLaunchKind::Launched)
-            g_group_ops_optimized_count.fetch_add(1u, std::memory_order_relaxed);
         return q;
     }
     return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};

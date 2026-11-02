@@ -18,7 +18,7 @@ kernels/
 │   │   └── output.inc                   # OUTPUT_GATHER / SAMPLING
 │   └── standalone/                      # kernel 単体テスト用の参照実装（E2E correctness とは別系統）
 optimized kernel（model 非依存）は `src/shelf/kernels/optimized/` に
-移動した。Qwen35 / Qwen4Exp が共有する最適化済み実装はここから参照する。
+移動した。Qwen35 が使う最適化済み実装はここから参照する。
 ```
 
 linear の family-specific KernelConfig 型は

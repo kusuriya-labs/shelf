@@ -13,7 +13,6 @@
 - [architecture.md](architecture.md) — layer 構成と依存ルール、Server を含む責務境界
 - [runtime.md](runtime.md) — execution path と state ownership
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
-- [qwen4exp.md](qwen4exp.md) — Qwen3.8-Flash-Next (qwen4_exp) の architecture contract
 - [sampling.md](sampling.md) — target LM sampling（temperature / top-k / top-p / seed）
 - [prefix_cache.md](prefix_cache.md) — prefix cache の radix tree / 2-tier store と JSONL protocol contract
 

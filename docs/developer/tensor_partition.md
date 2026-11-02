@@ -273,7 +273,7 @@ model-specific な plan は `build_qwen35_tensor_partition_plan`
 `TensorPartitionDesc` へ `head_dim` / `num_heads` / GDN / expert / model family
 などの model 情報は入れない。
 
-## 10. Qwen4Exp expert (EP) の例
+## 10. fused expert tensor (EP) の例
 
 routed expert の fused tensor:
 
@@ -294,7 +294,6 @@ local_shape = [256, 1280, 2560]
 
 descriptor と N-D slicing は 3D tensor を扱える
 （`tests/unit/test_canonical_partition.cpp` の 3D case）。
-Qwen4Exp の EP execution は別の Gate である。
 
 ## 11. 現在の runtime で未対応のもの
 

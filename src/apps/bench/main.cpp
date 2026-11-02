@@ -3,7 +3,6 @@
 #include <string>
 
 int run_pp(int argc, char** argv);
-int run_qwen4exp(int argc, char** argv);
 int run_tp_reduce(int argc, char** argv);
 int run_tg(int argc, char** argv);
 int run_quality(int argc, char** argv);
@@ -32,7 +31,6 @@ void usage() {
     std::printf("  pp                 prefill benchmark\n");
     std::printf("  tg                 decode / token-generation benchmark\n");
     std::printf("  batch              continuous-batching / prefix-cache benchmark\n");
-    std::printf("  qwen4exp           Qwen3.8-Flash-Next prefill forward benchmark\n");
     std::printf("\n");
     std::printf("Linear:\n");
     std::printf("  activation-quantize A8 activation quantization micro-benchmark\n");
@@ -82,7 +80,6 @@ int main(int argc, char** argv) {
     if (sub == "tg") return run_tg(argc - 1, argv + 1);
     if (sub == "quality") return run_quality(argc - 1, argv + 1);
     if (sub == "batch") return run_batch(argc - 1, argv + 1);
-    if (sub == "qwen4exp") return run_qwen4exp(argc - 1, argv + 1);
     if (sub == "activation-quantize") return run_activation_quantize(argc - 1, argv + 1);
     if (sub == "gemm") return run_gemm(argc - 1, argv + 1);
     if (sub == "rmsnorm") return run_rmsnorm(argc - 1, argv + 1);

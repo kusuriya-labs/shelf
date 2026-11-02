@@ -107,68 +107,16 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）を繰り返すため、
 対応 model 外として追跡しない。
 
-## 8. Qwen3.8-Flash-Next (qwen4exp) 対応
-
-- 手順書の Gate 0〜5 まで完了し、`.worktrees/qwen4exp`（ブランチ
-  `investigation/qwen4exp-main`）にコミット済み（required acceptance は全 PASS。
-  コミット分割と件数の正本は
-  [research/20261024/qwen4exp/gates.md](research/20261024/qwen4exp/gates.md)）。
-  **main には未マージ**。
-- ここには**未着手・未接続の作業**だけを残す。Gate の PASS 判定・誤差指標・差分調査票は
-  [research/20261024/qwen4exp/gates.md](research/20261024/qwen4exp/gates.md)、
-  設計判断と未解決の食い違いは
-  [research/20261024/qwen4exp/source_audit.md](research/20261024/qwen4exp/source_audit.md)、
-  現在の contract は [developer/qwen4exp.md](developer/qwen4exp.md) を正本とする。
-
-### 8.1 main へのマージ（最優先）
-
-- worktree は `investigation/qwen4exp-main` 上で完結している。`main` へどう統合するかは
-  未決定。マージ前に required acceptance を main ベースで通し直す。
-
-### 8.2 G5 の PASS 条件外の引き継ぎ（G6 で必要）
-
-| 項目 | 内容 |
-| --- | --- |
-| entrypoint 接続 | `shelf-compute` / `shelf-bench` から qwen4exp を起動する経路が未実装。`qwen35::create_model_executor` は `Qwen35Model` と `lower_qwen35_to_primitives` に密結合しており、qwen4exp へは流用できない |
-| mini runtime | `models/qwen4exp/runtime/` は state owner のみ。手順書 §10 の PASS 条件は小型 fixture（`lowering → build_program → correctness dispatch` 経由）で充足したが、`ContinuousBatcher` / `Executor` と統合した prefill → decode は未着手 |
-| `PrefixCache` 統合 | 新 state（indexer key / PLE conv / PLE n-gram context）の保存・復元構造と owner は `source_audit.md` 付録 G に記録済み、実装は未。`PrefixCache` へは KV page と GDN state しか渡せていない |
-| optimized dispatch | GR / MoE / QSA は現状 **correctness fallback** で動いている。`optimized_dispatch.hip` への `try_launch_*` の追加が未着手。**`kernels/optimized/moe_ops.hip` は router 出力が row_stride 契約（16B パディング）に未対応**（`kernels/correctness/detail/moe.inc` は修正済み）。接続時はまず row_stride 契約へ揃える |
-| `PrimitiveStateKind::INDEXER_KEY_CACHE` | 未登録。`runtime/` の他エージェント作業との衝突回避で保留した。`IndexerKeyPool` は kind 登録を伴わない qwen4exp-local の所有バッファとして成立しており、`PrimitiveGraph` 経由で indexer key を state として扱うには登録が必要 |
-| QSA の接続 | sparse attention kernel（`kernels/optimized/attention/qsa_sparse_attention`）と indexer key pool は実装済みだが、`PagedAttentionNode` への mask 入力（optional な 2 番目入力）と indexer key state の lowering 接続が未（`docs/developer/qwen4exp.md` gap #3 / #4） |
-| PLE の GPU kernel 化 | `models/qwen4exp/ple/ple_forward` は **host F32**。projection / gate / conv の GPU 実行経路が未。実モデル 95.4 GiB table では必須 |
-| `(24,2,256)` の optimized ルール | `paged_attention_selector.cpp` に無い（correctness fallback で機能成立）。**未計測 geometry に Optimized を宣言しない**方針を維持。追加は計測後に判断 |
-
-### 8.3 G6（実モデル E2E）— 着手不可
-
-- **`Qwen3.8-Flash-Next-FP8` checkpoint がローカルに存在しない**。
-  FP8 の `quantization_config`（`quant_method` / `fmt` / `activation_scheme` /
-  `weight_block_size`）と scale tensor の名前・shape が未確定。
-  - これが主なブロッカー。取得後に HF FP8 の受理条件との一致を確認する
-  - **`activation_scheme` を検査すべきか未判定**（手順書は検査を要求、現行 `hf_manifest.cpp`
-    は未検査。実値が無いので推測で実装しない方針）
-- Hugging Face Transformers `qwen4_exp` の参照 commit が未固定。
-  インストール済み `transformers 5.14.1` に `models/qwen4_exp` が存在しない。
-  正本は `docs/developer/qwen4exp.md` と公式 `config.json`
-- **実モデル 512 expert / 48 層の VRAM 常駐・キャッシュ**が未検討（routed expert は約
-  120.8 B パラメータで 32 GiB に常駐しない）。手順書 §1.4「必要 Expert だけを読み込む」
-  と整合するキャッシュ方針が要る（`source_audit.md` の MoE weight 節に選択肢を記録）
-- **PLE の SSD 経路 E2E**（`shard_0..127`、実 table 95.4 GiB）は synthetic fixture では
-  検証していない。G2 は synthetic と fastpath 実測まで
-- MTP（`docs/developer/qwen4exp.md` §11）は forward 正本が未確定（Gate 10）、
-  vision tower は Gate 11 の対象
-
-### 8.4 未解決の仕様差（再確認が必要）
-
-| 項目 | 内容 |
-| --- | --- |
-| indexer の `q_layernorm` / `k_layernorm` | RMSNorm か LayerNorm か、weight mode が `ONE_PLUS` か `DIRECT` か §6.2 に記載が無く、§4.1 に倣って **RMSNorm + ONE_PLUS** で実装。参照実装の入手後に要再確認（oracle を差し替えて再検証できる構成） |
-| Top-K 同点の正本順序 | 未確定のため `(score 降順, block id 昇順)` を契約として定義し、kernel と oracle で一致させた |
-| PLE conv の重み方向 | `w[0]` = 最古 tap としたが、参照実装が不在で数値照合不能。実 checkpoint の `conv1d.weight` を使う経路で再確認する |
-| G4a の GR / PLE conv | host float 実装のまま。GPU kernel 化と融合前後の比較が未 |
-
-### 8.5 docs の後続更新
-
-- `docs/developer/qwen4exp.md` の gap 表（§14）は round 3 時点に更新済みだが、
-  上記が解消しつつ次第に再更新が必要（gap #1 / #3 / #4 が解消対象）
-- G6 実施時: 現在形の契約は `docs/developer/`、性能値は `docs/perf/`、
-  経緯は `docs/research/20261024/qwen4exp/` へ分離する
+# TODO
+## 整理
+* 融合カーネルをすべて分離して一度削除する
+* 起動時の引数の名前を整理する
+* Testの整理
+* リクエストの最大並列数を 4 にし、リクエスト毎の最大推論予算を 32768 tok にする
+## 機能
+* yarnがDFlash2で効かないのを修正
+* preshuffleの有無を設定化
+* カーネルをpreshuffleの有無で分離
+* FP8カーネルでradianceとは違うところを修正する(ただし、Prefillのtok/sが下がってもよいからspillは0に抑える)
+* MTPの実装
+* exl3(mul1)の実装

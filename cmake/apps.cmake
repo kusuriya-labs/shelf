@@ -59,7 +59,6 @@ if(SHELF_BUILD_BENCHMARKS)
     add_executable(shelf-bench
         src/apps/bench/main.cpp
         src/apps/bench/pp.hip
-        src/apps/bench/qwen4exp.hip
         src/apps/bench/tg.hip
         src/apps/bench/quality.hip
         src/apps/bench/batch.hip

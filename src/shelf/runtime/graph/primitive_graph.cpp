@@ -34,10 +34,6 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return {1, 1};
         case PrimitiveKind::SAMPLING: return {1, 1};
         case PrimitiveKind::CONCAT: return {2, 1};
-        case PrimitiveKind::GROUP_MEAN: return {1, 1};
-        case PrimitiveKind::GROUP_BROADCAST_MUL: return {2, 1};
-        case PrimitiveKind::MOE_ROUTER: return {1, 2};
-        case PrimitiveKind::MOE_EXPERTS: return {3, 1};
     }
     return {0, 0};
 }
@@ -143,26 +139,6 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 shapes_ok = valid_shape_key(v.shape) && valid_shape_key(v.input_shape_a) &&
                             valid_shape_key(v.input_shape_b);
             }
-            else if constexpr (std::is_same_v<T, GroupMeanNode>) {
-                shapes_ok = valid_shape_key(v.shape) && v.group_size != 0;
-            }
-            else if constexpr (std::is_same_v<T, GroupBroadcastMulNode>) {
-                shapes_ok = valid_shape_key(v.shape) && v.group_size != 0;
-            }
-            else if constexpr (std::is_same_v<T, MoERouterNode>) {
-                shapes_ok = valid_shape_key(v.weight_shape) && v.experts != 0 &&
-                            v.top_k != 0 && v.top_k <= v.experts &&
-                            v.weight_shape.output_features == v.experts;
-            }
-            else if constexpr (std::is_same_v<T, MoEExpertsNode>) {
-                shapes_ok = valid_shape_key(v.gate_up_shape) &&
-                            valid_shape_key(v.down_shape) && v.experts != 0 &&
-                            v.top_k != 0 && v.top_k <= v.experts &&
-                            v.gate_up_shape.input_features ==
-                                v.down_shape.output_features &&
-                            v.gate_up_shape.output_features ==
-                                2u * v.down_shape.input_features;
-            }
         }, n.node);
         if (!shapes_ok) return fail("invalid shape key");
 
@@ -195,31 +171,6 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 if (v.shape.features !=
                     static_cast<uint64_t>(v.input_shape_a.features) + v.input_shape_b.features) {
                     weight_status = Status::invalid_argument("concat feature sizes mismatch", __FILE__, __LINE__);
-                }
-            } else if constexpr (std::is_same_v<T, MoERouterNode>) {
-                if (v.weight_index >= graph.weight_table.size()) {
-                    weight_status = Status::invalid_argument("moe router weight index out of bounds", __FILE__, __LINE__);
-                } else if (!(graph.weight_table[v.weight_index] == v.weight_shape)) {
-                    weight_status = Status::invalid_argument("moe router weight geometry mismatch", __FILE__, __LINE__);
-                }
-            } else if constexpr (std::is_same_v<T, MoEExpertsNode>) {
-                const uint64_t slots =
-                    static_cast<uint64_t>(v.experts) * 2ull;
-                if (static_cast<uint64_t>(v.weight_index) + slots >
-                    graph.weight_table.size()) {
-                    weight_status = Status::invalid_argument("moe experts weight range out of bounds", __FILE__, __LINE__);
-                } else {
-                    for (uint32_t e = 0; e < v.experts; ++e) {
-                        if (!(graph.weight_table[v.weight_index + e] == v.gate_up_shape)) {
-                            weight_status = Status::invalid_argument("moe experts gate_up geometry mismatch", __FILE__, __LINE__);
-                            break;
-                        }
-                        if (!(graph.weight_table[v.weight_index + v.experts + e] ==
-                              v.down_shape)) {
-                            weight_status = Status::invalid_argument("moe experts down geometry mismatch", __FILE__, __LINE__);
-                            break;
-                        }
-                    }
                 }
             }
         }, n.node);
