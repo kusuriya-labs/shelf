@@ -16,6 +16,7 @@
 #include <cstdint>
 
 #include <array>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -160,7 +161,9 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    uint32_t prefix_tokens = 0u);
+    uint32_t prefix_tokens = 0u,
+    uint32_t page_tokens = 0u,
+    const std::function<void(uint32_t)>& on_chunk_complete = {});
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;

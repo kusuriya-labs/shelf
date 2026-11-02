@@ -270,7 +270,7 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
         request.input_tokens.begin() + static_cast<std::ptrdiff_t>(position));
     SpecRingRef ring;
     const SpecRingRef* ring_ptr = nullptr;
-    if (request.dflash != nullptr && request.dflash->ready &&
+    if (request.dflash != nullptr &&
         request.dflash->context != nullptr &&
         request.dflash->context->initialized) {
         ring.k = request.dflash->context->k_ring.data<bf16_t>();
@@ -796,7 +796,14 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     dflash2_spec_decoder_set_sampling(*session.decoder, request.sampling);
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(),
-        static_cast<uint32_t>(request.input_tokens.size()), request.restored_tokens);
+        static_cast<uint32_t>(request.input_tokens.size()), request.restored_tokens,
+        config_.page_tokens,
+        [this, &request](uint32_t position) {
+            if (config_.page_tokens != 0u &&
+                position % config_.page_tokens == 0u) {
+                prefix_save_prefill(request);
+            }
+        });
     if (!prefill_result.ok()) {
         (void)dflash2_spec_decoder_shutdown(*session.decoder);
         session.decoder.reset();
@@ -807,7 +814,6 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     request.generated.push_back(session.pending_token);
     note_generated_token(request, session.pending_token);
     request.generated_tokens = 1u;
-    prefix_save_prefill(request);
     prefix_begin_capture(request);
     if (dflash_.stats != nullptr) {
         DFlash2BatcherStats& stats = *dflash_.stats;

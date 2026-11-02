@@ -71,6 +71,10 @@ save は page 揃え位置でのみ発生する。
   かつ input の範囲内なら `save_input_boundary` が input prefix を保存する。
   `save_input_boundary` は `seq.position == input_len を page 揃えした値` を必須検証し、
   違反は `invalid_argument` である。`min_prefix_tokens`（64）未満は保存しない。
+  DFlash2 経路では prefill を page 揃えした chunk 境界で区切り、各境界で保存する。
+  最後の chunk は input 末尾より前の直近の page 境界で分割するため、input 長が
+  page 揃えでなくても直近の境界までは保存される。ring は chunk 完了時点の
+  drafter context から保存する。
 - decode: 最終 prefill の完了時に capture を開始し、各 step 後に position が
   page 境界を新しく通過するたびに GDN state を rolling slot へ capture する。
 - 出力末尾: EOS / `max_new_tokens` で終了し、capture 位置が最終 page 境界と一致するとき、

@@ -22,8 +22,9 @@ from support import (Checker, ComputeHarness, compute_binary,  # noqa: E402
 PROMPT = [248041, 77091]
 DFLASH2_MODEL_DIR = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
 MAX_NEW_TOKENS = 64
-PREFIX_PROMPT_TOKENS = 64
-PREFIX_SEED_TOKENS = 16
+PREFIX_PROMPT_TOKENS = 72
+PREFIX_RESTORED_TOKENS = 64
+PREFIX_SEED_TOKENS = 8
 PREFIX_EXTENSION_TOKENS = 8
 
 
@@ -217,11 +218,11 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
             return
         restored = ext_done.get("restored_tokens")
         checker.check(f"{label} prefix restored_tokens",
-                      restored == PREFIX_PROMPT_TOKENS,
-                      f"restored={restored} expected={PREFIX_PROMPT_TOKENS}")
+                      restored == PREFIX_RESTORED_TOKENS,
+                      f"restored={restored} expected={PREFIX_RESTORED_TOKENS}")
         checker.check(f"{label} prefix prefill_tokens",
                       ext_done.get("prefill_tokens") ==
-                      len(extension) - PREFIX_PROMPT_TOKENS,
+                      len(extension) - PREFIX_RESTORED_TOKENS,
                       f"prefill={ext_done.get('prefill_tokens')} "
                       f"input={len(extension)} restored={restored}")
         ext_ids = generated_ids(ext_done)
@@ -235,8 +236,9 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
         checker.check(f"{label} prefix replay ok",
                       not ext2_errors and ext2_done is not None, str(ext2_errors))
         if ext2_done is not None:
-            checker.check(f"{label} same prompt does not restore",
-                          ext2_done.get("restored_tokens") == 0,
+            checker.check(f"{label} same prompt does not restore past end",
+                          ext2_done.get("restored_tokens") in
+                          (0, PREFIX_RESTORED_TOKENS),
                           f"restored={ext2_done.get('restored_tokens')}")
             checker.check(f"{label} prefix replay deterministic",
                           generated_ids(ext2_done) == ext_ids,

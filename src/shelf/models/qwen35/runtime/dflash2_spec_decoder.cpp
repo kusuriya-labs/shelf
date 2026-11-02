@@ -531,7 +531,9 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    uint32_t prefix_tokens) {
+    uint32_t prefix_tokens,
+    uint32_t page_tokens,
+    const std::function<void(uint32_t)>& on_chunk_complete) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -560,8 +562,15 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2PrefillOutput out;
     std::vector<ScheduledRequest> requests;
     uint32_t offset = prefix_tokens;
+    const uint32_t last_boundary =
+        page_tokens == 0u ? prompt_count
+                          : (prompt_count / page_tokens) * page_tokens;
     while (offset < prompt_count) {
         uint32_t n = std::min(chunk_limit, prompt_count - offset);
+        if (page_tokens != 0u && offset < last_boundary &&
+            offset + n > last_boundary) {
+            n = last_boundary - offset;
+        }
         const bool final_chunk = (offset + n == prompt_count);
         ScheduledBatch batch = make_prefill_batch(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,
@@ -595,6 +604,9 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
             decoder.sample_index += 1u;
         }
         offset += n;
+        if (on_chunk_complete) {
+            on_chunk_complete(offset);
+        }
     }
     decoder.token_history.assign(prompt_tokens, prompt_tokens + prompt_count);
     decoder.token_history.push_back(out.pending_token);
