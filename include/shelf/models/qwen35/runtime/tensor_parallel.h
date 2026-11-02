@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -35,14 +36,25 @@ struct TpRankRuntimeConfig {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
     int device_id = 0;
-    std::uint32_t max_scheduled_tokens = 0;
+    std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
-    std::uint32_t kv_cache_capacity_tokens = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    std::size_t working_set_reserve_bytes = 0;
+    const ::ps::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
+    std::size_t drafter_weights_bytes = 0;
+    std::uint32_t drafter_drafts = 0;
+    std::uint32_t drafter_sessions = 0;
+    std::size_t drafter_lm_head_k = 0;
+    bool prefix_cache = false;
+    std::uint32_t prefix_hot_tokens = 0;
+    std::uint32_t prefix_cold_tokens = 0;
+    std::uint32_t prefix_concurrency = 4;
+    std::uint32_t prefix_cold_state_slots = 0;
+    std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
@@ -98,14 +110,25 @@ private:
 struct TpCoordinatorConfig {
     std::string model_dir;
     std::vector<int> devices;
-    std::uint32_t max_scheduled_tokens = 0;
+    std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
     std::uint32_t max_scheduled_output_rows = 0;
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
-    std::uint32_t kv_cache_capacity_tokens = 0;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    std::size_t working_set_reserve_bytes = 0;
+    const ::ps::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
+    std::size_t drafter_weights_bytes = 0;
+    std::uint32_t drafter_drafts = 0;
+    std::uint32_t drafter_sessions = 0;
+    std::size_t drafter_lm_head_k = 0;
+    bool prefix_cache = false;
+    std::uint32_t prefix_hot_tokens = 0;
+    std::uint32_t prefix_cold_tokens = 0;
+    std::uint32_t prefix_concurrency = 4;
+    std::uint32_t prefix_cold_state_slots = 0;
+    std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;

@@ -9,7 +9,8 @@ HTTP request
   -> ChatRequest (reasoning options)
   -> openai_messages_to_hf()
   -> codec.prompt_ids()            chat template へ enable_thinking / reasoning_effort / preserve_thinking
-  -> Compute.generate / generate_stream
+  -> 推論予算と thinking 予算の解決  (prompt token 数で決まる。下記「thinking 予算」)
+  -> Compute.generate / generate_stream   (max_new_tokens / reasoning_budget_tokens / reasoning_close_token)
   -> GenerationRegionParser        REASONING / ANSWER の分割（request ごとに 1 個）
   -> codec.parse_answer()          ANSWER のみを tool parser へ
   -> OpenAI wire serializer
@@ -81,7 +82,41 @@ Token 列を正本にする。
 実装は `src/apps/common/shelf_chat/reasoning.py`（tokenizer 非依存の状態機械）と
 `codec.new_region_parser()` / `codec.split_generation()` にある。
 
-## Tool calling
+## thinking 予算
+
+thinking は生成 Token 数で区切られ、request の推論予算のうち answer reserve を残した地点で
+強制的に閉じる。client から変更できる field は無い（OpenAI API に対応 field が無い）。
+予算の値と決定規則は [../user/server.md](../user/server.md) 「推論予算」に正本として置き、
+ここには compute 側の contract だけを書く。
+
+compute の `generate` は次の 2 つの field を受理する。
+
+| field | 型 | 意味 |
+| --- | --- | --- |
+| `reasoning_budget_tokens` | int >= 0 | thinking に許す最大 Token 数。0 は予算なし |
+| `reasoning_close_token` | int | thinking を閉じる単一 Token ID。`reasoning_budget_tokens > 0` と同時に必須 |
+
+server は thinking 有効の request に対し、有効な生成上限からこれを算出して送る。
+`reasoning_budget_tokens` が `max_new_tokens` を超える場合は compute が 400（`invalid_argument`）で拒否する。
+
+強制終了の位置は commit 時点で決まる。
+
+- 非 speculative: `commit_sampled_token` が、未クローズの thinking Token 数が予算に達した位置の
+  Token を `reasoning_close_token` へ**置換**する。
+- speculative (DFlash2): verify の受理数（`num_accepted_drafts`）と commit 数は変えず、
+  correction / bonus token の位置を `reasoning_close_token` へ置換する。
+  残 budget が 0 の slot は draft を作らない single-target step になり、その 1 Token が close token になる。
+- model が自分で close tag を生成した場合、そこで thinking は閉じられ、以降置換は起きない。
+
+close tag が単一 Token でない model では予算を課さない。server は起動時の
+`codec.reasoning_capability()` で `close_token` を検査し、単一 Token でない場合は
+compute へ budget field を送らない（起動ログに理由を出す）。
+
+
+## Tool calling置換は terminal ではない。置換後の Token が stop token と一致することはないため、
+停止条件の優先順位は変わらない。
+
+
 
 tool parser へ渡すのは `ANSWER` 領域の文字列だけである。
 
@@ -125,8 +160,18 @@ thinking 中に `max_completion_tokens` へ達した要求は `length` であり
 
 ## usage
 
-`completion_tokens` は reasoning を含む生成 Token 数である。reasoning 用の予算を別枠で
-確保しない。
+`completion_tokens` は reasoning を含む生成 Token 数である。
+
+thinking には別枠の予算を与える。request の推論予算を `B`（リクエスト毎の最大推論予算）とすると、
+
+```text
+answer_reserve = min(max(512, B / 4), B / 2)
+thinking_budget = B - answer_reserve
+```
+
+を compute 側へ `reasoning_budget_tokens` / `reasoning_close_token` として送る。
+既定 `B = 32768` なら thinking 24576 / reserve 8192、`B = 65536` なら thinking 49152 /
+reserve 16384 である。`B < 1024` では予算を課さない（compute へ送らない）。
 
 `completion_tokens_details.reasoning_tokens` は未実装である。境界は Token 単位で確定して
 いるため実装可能だが、計数定義（境界 tag を数えるか）を contract として固定してから追加する。
@@ -162,7 +207,8 @@ thinking 中に `max_completion_tokens` へ達した要求は `length` であり
 
 ## 制限
 
-- reasoning token 数の内訳、Thinking の明示的な token budget、強制 answer 遷移は未実装。
+- reasoning token 数の内訳（`completion_tokens_details.reasoning_tokens`）と、
+  client からの thinking 予算指定は未実装である。server 既定値による強制は上記の通り。
 - streaming の decode は累積 Token 列の再 decode である。長い reasoning では P1 で
   増分 decoder を検討する。
 - sampling の既定値は reasoning 有無で変えない（`temperature=0` / `top_p=1.0` / `top_k=0`）。

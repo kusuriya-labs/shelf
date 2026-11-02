@@ -48,6 +48,25 @@ Result<uint64_t> ContinuousBatcher::submit(
     uint32_t max_new_tokens,
     const SamplingConfig& sampling,
     bool speculative_decode) {
+    return submit(std::move(input_tokens), max_new_tokens, sampling,
+                  speculative_decode, ThinkingBudget{});
+}
+
+Result<uint64_t> ContinuousBatcher::submit(
+    std::vector<int32_t> input_tokens,
+    uint32_t max_new_tokens,
+    const SamplingConfig& sampling,
+    const ThinkingBudget& thinking) {
+    return submit(std::move(input_tokens), max_new_tokens, sampling,
+                  dflash2_available(), thinking);
+}
+
+Result<uint64_t> ContinuousBatcher::submit(
+    std::vector<int32_t> input_tokens,
+    uint32_t max_new_tokens,
+    const SamplingConfig& sampling,
+    bool speculative_decode,
+    const ThinkingBudget& thinking) {
     if (input_tokens.empty()) {
         return Status::invalid_argument("submit requires at least one input token",
                                         __FILE__, __LINE__);
@@ -83,6 +102,7 @@ Result<uint64_t> ContinuousBatcher::submit(
     request.max_kv_tokens = max_kv_tokens.value();
     request.max_kv_pages = max_kv_pages;
     request.speculative_decode = speculative_decode;
+    request.thinking = thinking;
 
     requests_.push_back(std::move(request));
     request_index_[requests_.back().id] = std::prev(requests_.end());
@@ -565,7 +585,7 @@ Result<StepResult> ContinuousBatcher::step() {
     }
     kv_state = build_kv_banker_state();
 
-    auto plan_result = schedule_requests(active, config_.max_scheduled_tokens, config_.max_scheduled_requests, config_.page_tokens, &kv_state);
+    auto plan_result = schedule_requests(active, config_.max_num_batched_tokens, config_.max_scheduled_requests, config_.page_tokens, &kv_state);
     if (!plan_result.ok()) {
         return plan_result.status();
     }
@@ -785,6 +805,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     session.pending_token = prefill_result.value().pending_token;
     session.ready = true;
     request.generated.push_back(session.pending_token);
+    note_generated_token(request, session.pending_token);
     request.generated_tokens = 1u;
     prefix_save_prefill(request);
     prefix_begin_capture(request);
@@ -838,6 +859,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         slot.anchor_token = request->dflash->pending_token;
         slot.num_drafts = dflash_.num_drafts;
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
+        slot.thinking_allowance = thinking_allowance(*request);
+        slot.thinking_close_token = request->thinking.close_token;
         slots.push_back(slot);
         slot_requests.push_back(request);
     }
@@ -906,6 +929,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             const DFlash2SpecIterationOutput& step = results.slots[i];
             for (uint32_t j = 0; j < step.emitted_count; ++j) {
                 request.generated.push_back(step.emitted[j]);
+                note_generated_token(request, step.emitted[j]);
             }
             request.generated_tokens = static_cast<uint32_t>(request.generated.size());
             request.dflash->pending_token = step.pending_token;

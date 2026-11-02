@@ -31,6 +31,7 @@ from .openai_protocol import (
     ChatServiceError,
     OpenAIProtocolError,
     openai_messages_to_hf,
+    thinking_budget_tokens,
 )
 
 _FINISH_REASON_MAP = {
@@ -45,6 +46,8 @@ class PreparedChat:
     tools: Optional[list[dict]]
     max_new_tokens: int
     enable_thinking: bool = True
+    reasoning_budget_tokens: int = 0
+    reasoning_close_token: int = -1
 
 
 @dataclass(frozen=True)
@@ -117,20 +120,51 @@ def log_tokens(generated_ids) -> None:
 
 class ChatService:
     def __init__(self, processor, compute, model_name: str, max_seq_len: int,
-                 default_max_output_tokens: int = 65536):
+                 inference_budget_tokens: int = 32768,
+                 large_context_tokens: int = 0,
+                 large_context_inference_budget_tokens: int = 0,
+                 reasoning_close_token: int = -1):
         self._processor = processor
         self._compute = compute
         self._model_name = model_name
         self._max_seq_len = max_seq_len
-        self._default_max_output_tokens = default_max_output_tokens
+        self._inference_budget_tokens = inference_budget_tokens
+        self._large_context_tokens = large_context_tokens
+        self._large_context_inference_budget_tokens = (
+            large_context_inference_budget_tokens)
+        self._reasoning_close_token = reasoning_close_token
 
     @property
     def model_name(self) -> str:
         return self._model_name
 
     @property
-    def default_max_output_tokens(self) -> int:
-        return self._default_max_output_tokens
+    def inference_budget_tokens(self) -> int:
+        return self._inference_budget_tokens
+
+    @property
+    def large_context_tokens(self) -> int:
+        return self._large_context_tokens
+
+    @property
+    def large_context_inference_budget_tokens(self) -> int:
+        return self._large_context_inference_budget_tokens
+
+    @property
+    def inference_budget_ceiling(self) -> int:
+        return max(self._inference_budget_tokens,
+                   self._large_context_inference_budget_tokens)
+
+    @property
+    def reasoning_close_token(self) -> int:
+        return self._reasoning_close_token
+
+    def inference_budget_for(self, prompt_tokens: int) -> int:
+        if (self._large_context_inference_budget_tokens > 0 and
+                self._large_context_tokens > 0 and
+                prompt_tokens > self._large_context_tokens):
+            return self._large_context_inference_budget_tokens
+        return self._inference_budget_tokens
 
     @property
     def max_seq_len(self) -> int:
@@ -172,13 +206,20 @@ class ChatService:
 
         remaining = self._max_seq_len - len(prompt_ids)
 
-        max_new_tokens = min(request.max_new_tokens, remaining)
+        budget = self.inference_budget_for(len(prompt_ids))
+        max_new_tokens = min(request.max_new_tokens, budget, remaining)
+
+        reasoning_budget_tokens = 0
+        if request.enable_thinking and self._reasoning_close_token >= 0:
+            reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
         return PreparedChat(
             prompt_ids=prompt_ids,
             tools=tools,
             max_new_tokens=max_new_tokens,
             enable_thinking=request.enable_thinking,
+            reasoning_budget_tokens=reasoning_budget_tokens,
+            reasoning_close_token=self._reasoning_close_token,
         )
 
     # ----------------------------------------------------------------- non-stream
@@ -238,6 +279,8 @@ class ChatService:
                 top_k=request.top_k,
                 seed=request.seed,
                 prefix_cache_checkpoint_position=0,
+                reasoning_budget_tokens=prepared.reasoning_budget_tokens,
+                reasoning_close_token=prepared.reasoning_close_token,
             )
         except ComputeInvalidArgument as exc:
             raise OpenAIProtocolError(str(exc), param=None) from exc
@@ -278,6 +321,8 @@ class ChatService:
             top_k=request.top_k,
             seed=request.seed,
             prefix_cache_checkpoint_position=0,
+            reasoning_budget_tokens=prepared.reasoning_budget_tokens,
+            reasoning_close_token=prepared.reasoning_close_token,
         )
 
     async def _stream_text(self, prepared: PreparedChat,

@@ -51,7 +51,9 @@ from serverlib.compute_client import AsyncComputeClient, ComputeError  # noqa: E
 from serverlib.openai_protocol import (  # noqa: E402
     ChatServiceError,
     OpenAIProtocolError,
+    answer_reserve_tokens,
     parse_chat_request,
+    thinking_budget_tokens,
 )
 
 
@@ -85,7 +87,7 @@ def build_compute_argv(opts) -> list[str]:
         "--device", str(opts.device),
         "--kv-cache-dtype", opts.kv_cache_dtype,
         "--max-concurrent-requests", str(opts.max_concurrent_requests),
-        "--kv-cache-capacity-tokens", str(opts.kv_cache_capacity_tokens),
+        "--max-num-batched-tokens", str(opts.max_num_batched_tokens),
         "--working-set-reserve-gib", str(opts.working_set_reserve_gib),
         "--rope-factor", opts.rope_factor,
     ]
@@ -154,7 +156,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     try:
         body = await _read_json(request)
         chat = parse_chat_request(
-            body, default_max_new_tokens=service.default_max_output_tokens)
+            body, inference_budget_tokens=service.inference_budget_ceiling)
 
         if chat.model != service.model_name:
             raise OpenAIProtocolError(
@@ -370,8 +372,21 @@ def parse_args(argv=None):
 
     parser.add_argument("--max-seq-len", type=int, default=32768,
                         help="max sequence length (default 32768)")
+    parser.add_argument("--max-num-batched-tokens", type=int, default=2048,
+                        help="token budget per scheduled step; also sets the executor "
+                             "row bucket (default 2048)")
     parser.add_argument("--max-concurrent-requests", type=int, default=4,
                         help="max in-flight requests (default 4)")
+
+    parser.add_argument("--inference-budget-tokens", type=int, default=32768,
+                        help="max generated tokens per request (default 32768)")
+    parser.add_argument("--large-context-tokens", type=int, default=262144,
+                        help="prompt tokens above which the larger inference "
+                             "budget applies (default 262144)")
+    parser.add_argument("--large-context-inference-budget-tokens", type=int,
+                        default=65536,
+                        help="max generated tokens for a request whose prompt is "
+                             "longer than --large-context-tokens (default 65536)")
 
     parser.add_argument("--arena-gib", type=arena_gib_value, default="auto", metavar="N|auto",
                         help="GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto)")
@@ -385,15 +400,11 @@ def parse_args(argv=None):
                         help="KV cache dtype (default bf16)")
     parser.add_argument("--page-tokens", type=int, default=16,
                         help="paged KV page size in tokens (default 16)")
-    parser.add_argument("--kv-cache-capacity-tokens", type=int, default=0,
-                        help="physical KV token capacity (0 = derive from the arena budget)")
-    parser.add_argument("--working-set-reserve-gib", type=int, default=4,
-                        help="arena headroom kept free for the working set (default 4)")
+    parser.add_argument("--working-set-reserve-gib", type=int, default=0,
+                        help="arena headroom kept free for the working set "
+                             "(0 = size it from the row bucket, default 0)")
     parser.add_argument("--rope-factor", default="auto", choices=("auto", "1", "2", "4"),
                         help="static YaRN rope factor forwarded to compute (default auto)")
-
-    parser.add_argument("--default-max-output-tokens", type=int, default=65536,
-                        help="default max_new_tokens when the request omits it (default 65536)")
 
     parser.add_argument("--dflash2-model-dir", default=None,
                         help="DFlash2 draft model directory (enables speculative decoding)")
@@ -416,10 +427,18 @@ def parse_args(argv=None):
 
     if opts.max_seq_len < 1:
         parser.error("--max-seq-len must be >= 1")
+    if not 16 <= opts.max_num_batched_tokens <= 8192:
+        parser.error("--max-num-batched-tokens must be between 16 and 8192")
     if opts.max_concurrent_requests < 1:
         parser.error("--max-concurrent-requests must be >= 1")
-    if opts.default_max_output_tokens < 1:
-        parser.error("--default-max-output-tokens must be >= 1")
+    if opts.inference_budget_tokens < 1:
+        parser.error("--inference-budget-tokens must be >= 1")
+    if opts.large_context_tokens < 0:
+        parser.error("--large-context-tokens must be >= 0")
+    if (opts.large_context_tokens > 0 and
+            opts.large_context_inference_budget_tokens < opts.inference_budget_tokens):
+        parser.error("--large-context-inference-budget-tokens must be >= "
+                     "--inference-budget-tokens")
     if opts.page_tokens < 1:
         parser.error("--page-tokens must be >= 1")
     if opts.dflash2_drafts < 1:
@@ -462,7 +481,11 @@ async def _serve(opts) -> int:
         compute=compute,
         model_name=opts.model,
         max_seq_len=opts.max_seq_len,
-        default_max_output_tokens=opts.default_max_output_tokens,
+        inference_budget_tokens=opts.inference_budget_tokens,
+        large_context_tokens=opts.large_context_tokens,
+        large_context_inference_budget_tokens=(
+            opts.large_context_inference_budget_tokens),
+        reasoning_close_token=reasoning_capability["close_token"],
     )
 
     if opts.dflash2_model_dir:
@@ -474,12 +497,21 @@ async def _serve(opts) -> int:
         "model": opts.model,
         "max_seq_len": opts.max_seq_len,
         "max_concurrent_requests": opts.max_concurrent_requests,
-        "default_max_output_tokens": opts.default_max_output_tokens,
+        "max_num_batched_tokens": opts.max_num_batched_tokens,
+        "inference_budget": {
+            "tokens": opts.inference_budget_tokens,
+            "large_context_tokens": opts.large_context_tokens,
+            "large_context_inference_budget_tokens":
+                opts.large_context_inference_budget_tokens,
+            "answer_reserve_tokens": answer_reserve_tokens(
+                opts.inference_budget_tokens),
+            "thinking_budget_tokens": thinking_budget_tokens(
+                opts.inference_budget_tokens),
+        },
         "arena_gib": opts.arena_gib,
         "device": opts.device,
         "tensor_parallel": opts.tp,
         "kv_cache_dtype": opts.kv_cache_dtype,
-        "kv_cache_capacity_tokens": opts.kv_cache_capacity_tokens,
         "working_set_reserve_gib": opts.working_set_reserve_gib,
         "speculative": speculative,
         "reasoning": {
@@ -505,8 +537,8 @@ async def _serve(opts) -> int:
     _log(f"Endpoint:     {address}/v1")
     _log(f"Context:      {opts.max_seq_len}")
     _log(f"Concurrency:  {opts.max_concurrent_requests}")
+    _log(f"Token budget: {opts.max_num_batched_tokens}")
     _log(f"KV dtype:     {opts.kv_cache_dtype}")
-    _log(f"KV capacity:  {'auto' if opts.kv_cache_capacity_tokens == 0 else opts.kv_cache_capacity_tokens}")
     _log(f"Prefix cache: "
          f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
          f"(capabilities.prefix_cache="
@@ -514,7 +546,17 @@ async def _serve(opts) -> int:
     if opts.dflash2_model_dir:
         _log(f"Speculative:  DFlash2 ({opts.dflash2_drafts} drafts)")
         _log(f"Draft model:  {Path(opts.dflash2_model_dir).name}")
-    _log(f"Default output: {opts.default_max_output_tokens}")
+    _log(f"Inference budget: {opts.inference_budget_tokens} tokens"
+         f" (thinking {thinking_budget_tokens(opts.inference_budget_tokens)}, "
+         f"answer reserve {answer_reserve_tokens(opts.inference_budget_tokens)})")
+    if opts.large_context_tokens > 0:
+        _log(f"  prompt > {opts.large_context_tokens}: "
+             f"{opts.large_context_inference_budget_tokens} tokens "
+             f"(thinking "
+             f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})")
+    if reasoning_capability["close_token"] < 0:
+        _log("  thinking budget is not enforced "
+             "(the reasoning close tag is not one token)")
     _log(f"Reasoning:    enabled (thinking on, effort "
          f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)")
     _log(f"Efforts:      {', '.join(codec.REASONING_EFFORTS)}")

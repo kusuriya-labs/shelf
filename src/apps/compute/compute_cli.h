@@ -19,8 +19,8 @@ struct ComputeOptions {
     unsigned long arena_gib = 16;
     bool arena_gib_auto = true;
     unsigned long page_tokens = 16;
-    unsigned long max_concurrent_requests = 1;
-    unsigned long kv_cache_capacity_tokens = 0;
+    unsigned long max_concurrent_requests = 4;
+    unsigned long max_num_batched_tokens = 2048;
     std::vector<int> devices = {0};
     unsigned long tp = 1;
     std::string kv_cache_dtype = "bf16";
@@ -40,7 +40,7 @@ struct ComputeOptions {
     unsigned long prefix_cache_cold_tokens = 65536;
     unsigned long prefix_cache_concurrency = 4;
     unsigned long prefix_cache_cold_state_slots = 0;
-    unsigned long working_set_reserve_gib = 4;
+    unsigned long working_set_reserve_gib = 0;
     std::string rope_factor = "auto";
 };
 

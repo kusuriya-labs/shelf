@@ -21,7 +21,7 @@ Status validate_scheduled_batch(
     }
     if (max_tokens != 0 && batch.num_tokens > max_tokens) {
         return Status::invalid_argument(
-            "num_tokens exceeds max_scheduled_tokens", __FILE__, __LINE__);
+            "num_tokens exceeds max_num_batched_tokens", __FILE__, __LINE__);
     }
     if (max_requests != 0 && batch.num_requests > max_requests) {
         return Status::invalid_argument(

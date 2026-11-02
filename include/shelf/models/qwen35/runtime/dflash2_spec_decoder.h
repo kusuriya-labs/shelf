@@ -25,6 +25,8 @@ constexpr uint32_t kDFlash2SpecMaxVerifyRows = 512u;
 constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
 constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
 
+constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
+
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
     StopTokens eos_tokens;
@@ -238,6 +240,8 @@ struct DFlash2SpecBatchSlot {
     int32_t anchor_token = 0;
     uint32_t num_drafts = 0u;
     uint32_t remaining_tokens = 0u;
+    uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
+    int32_t thinking_close_token = -1;
 };
 
 struct DFlash2SpecBatchOutput {

@@ -324,6 +324,7 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         if (key != "op" && key != "request_id" && key != "input_ids" &&
             key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
             key != "min_p" && key != "top_k" && key != "seed" &&
+            key != "reasoning_budget_tokens" && key != "reasoning_close_token" &&
             key != "prefix_cache_checkpoint_position") {
             emit_error_with_code(request_id, "invalid_argument",
                                  "unknown request field: " + key);
@@ -422,13 +423,45 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         return false;
     }
 
+    ps::qwen35::runtime::ThinkingBudget thinking;
+    if (request.contains("reasoning_budget_tokens")) {
+        if (!request["reasoning_budget_tokens"].is_number_integer() ||
+            request["reasoning_budget_tokens"].get<long long>() < 0) {
+            emit_error_with_code(request_id, "invalid_argument",
+                                 "reasoning_budget_tokens must be a non-negative integer");
+            return false;
+        }
+        thinking.tokens =
+            static_cast<uint32_t>(request["reasoning_budget_tokens"].get<long long>());
+    }
+    if (request.contains("reasoning_close_token")) {
+        if (!request["reasoning_close_token"].is_number_integer()) {
+            emit_error_with_code(request_id, "invalid_argument",
+                                 "reasoning_close_token must be an integer");
+            return false;
+        }
+        thinking.close_token =
+            static_cast<int32_t>(request["reasoning_close_token"].get<long long>());
+    }
+    if (thinking.tokens > 0 && thinking.close_token < 0) {
+        emit_error_with_code(request_id, "invalid_argument",
+                             "reasoning_close_token is required with "
+                             "reasoning_budget_tokens");
+        return false;
+    }
+    if (thinking.tokens > max_new_tokens) {
+        emit_error_with_code(request_id, "invalid_argument",
+                             "reasoning_budget_tokens exceeds max_new_tokens");
+        return false;
+    }
+
     ServeGeneration generation;
     generation.external_request_id = external_request_id;
     generation.emitted_tokens = 0;
     generation.max_new_tokens = max_new_tokens;
 
     ps::Result<uint64_t> submit_result =
-        runtime.submit(std::move(input_ids), max_new_tokens, sampling);
+        runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
     if (!submit_result.ok()) {
         emit_error_with_code(request_id,
                              status_error_code(submit_result.status().code()),
@@ -562,7 +595,10 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
                     dflash.config.block_size);
             return 1;
         }
+        const std::size_t weights_before = runtime.arena().used();
         auto weights_result = runtime.load_dflash2_weights(dflash.config);
+        fprintf(stderr, "DFLASH2_WEIGHT_ARENA_BYTES=%llu\n",
+                static_cast<unsigned long long>(runtime.arena().used() - weights_before));
         if (!weights_result.ok()) {
             fprintf(stderr, "dflash2 weight load failed: %s\n",
                     weights_result.status().message().c_str());

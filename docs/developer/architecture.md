@@ -170,10 +170,9 @@ ScheduledBatch
 GPU
 ```
 
-論理concurrency `N` (`--max-concurrent-requests`) とphysical KV budget
-(`--kv-cache-capacity-tokens`) は別契約である。`SequenceSlotPool` /
-`GdnStatePool` / `max_scheduled_requests` はNに一致させ、physical KV pagesは
-budgetから決める。budget不足時はKV BankerがQueued requestをActive完了後に
-admissionする。
+論理concurrency `N` (`--max-concurrent-requests`) とphysical KV budgetは別契約である。
+`SequenceSlotPool` / `GdnStatePool` / `max_scheduled_requests` はNに一致させ、
+physical KV pagesは起動時の arena の余りから決める。budget不足時はKV Bankerが
+Queued requestをActive完了後にadmissionする。
 
 serverの対応surfaceは [../user/server.md](../user/server.md) を参照。

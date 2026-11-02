@@ -36,7 +36,7 @@ enum class DecodeStatus : uint8_t {
 };
 
 struct ExecutorConfig {
-    uint32_t max_scheduled_tokens = 0;
+    uint32_t max_batch_rows = 0;
     uint32_t max_scheduled_requests = 0;
     uint32_t max_scheduled_output_rows = 0;
     std::array<uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};

@@ -14,7 +14,7 @@ namespace runtime {
 
 Result<SchedulePlan> schedule_requests(
     std::span<const RuntimeRequest*> active,
-    uint32_t max_scheduled_tokens,
+    uint32_t max_num_batched_tokens,
     uint32_t max_scheduled_requests,
     uint32_t page_tokens,
     KVBankerState* kv);

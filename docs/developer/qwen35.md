@@ -86,7 +86,7 @@ Qwen3.8-27B は `swish` である。
 
 ### 2.1 検証
 
-- `config.max_scheduled_tokens` / `max_scheduled_requests` が > 0
+- `config.max_batch_rows` / `max_scheduled_requests` が > 0
 - `kv_pool.dtype()` が `BF16` か `FP8_E4M3`
 - FP8 時は body/scale の要素数と device 一致
 - GDN state pool 幾何（`GdnStatePoolLayout`）と一致
@@ -96,7 +96,7 @@ Qwen3.8-27B は `swish` である。
 
 `gpu::GpuArena` から連続アロケーション（`allocate_contiguous_tensor`）で割る。
 
-- `input_ids` : `{N}` int32（N = max_scheduled_tokens）
+- `input_ids` : `{N}` int32（N = max_batch_rows）
 - `output_hidden` : `{R, H}` bf16
 - `logits` : `{R, V}` f32
 - `sampled_tokens` : `{R}` int32
@@ -144,8 +144,8 @@ build_program_set(graph, weights, params, DECODE, opts)
 解決結果の同一性は経路ごとに次の契約で保証する。
 
 - **local load**: profile は compute プロセスが `<model_dir>/config.json` から独立に解決する。local load と TP load で同じ `ROPE profile:` 行と同一の生成結果になることを確認済み。
-- **TP**: 1 プロセスで単一の profile を解決し、`TpCoordinatorConfig` → `TpRankRuntimeConfig` → `ExecutorConfig` へ複製する。したがって rank 間で profile がずれる経路は存在しない。TP の KV 予算チェックは rank 単位で行い、不足時は `tp rank arena is too small` で起動を拒否する。
-- **KV 容量計画**: `--rope-factor` は `required_pages` / `kv_page_bytes` に寄与しない。KV 容量は `--max-seq-len` と `--kv-cache-capacity-tokens` のみで決まる。
+- **TP**: 1 プロセスで単一の profile を解決し、`TpCoordinatorConfig` → `TpRankRuntimeConfig` → `ExecutorConfig` へ複製する。したがって rank 間で profile がずれる経路は存在しない。TP の KV 容量は rank ごとの arena の余りから決め、`max_seq_len + 1` が入らない場合は起動を拒否する。
+- **KV 容量計画**: `--rope-factor` は `required_pages` / `kv_page_bytes` に寄与しない。必要な最小ページ数は `--max-seq-len` で決まり、残りは arena の余りで決まる。
 - **PrefixCache**: キーはトークン列のみで rope 識別子を含まないが、factor はプロセス起動時に固定され、キャッシュはプロセスローカルであるため、異なる factor 間で KV を流用する経路は存在しない。prefix の保存は prefill 位置が `page_tokens` の倍数のときに限られ、復元は保存済み prefix より長いプロンプトに限る。
 - **server**: `--rope-factor` は `build_compute_argv` で子 compute へ転送し、入力長検証（`context length exceeded`）は factor と独立に `--max-seq-len` で判定する。
 
@@ -209,7 +209,7 @@ kernel は行ごとに fp16 丸めを適用して 1 行ずつ書き戻す経路�
 
 `build_program_set` は R16 / R32 / R64 / R128 / R256 / R512 / R1024 / R2048 /
 R4096 / R8192 の 10 bucket に対して `build_program` を呼ぶ。`ProgramSet::kRowBucketCount = 10`。
-最上位 bucket が prefill chunk の上限であり、serve の `max_scheduled_tokens` もここで
+最上位 bucket が prefill chunk の上限であり、serve の `max_num_batched_tokens` もここで
 clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 
 ---
@@ -219,7 +219,7 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 ### 4.1 `submit_co_batch`
 
 1. `active_submission_id != 0` なら in-flight バッチ存在でエラー
-2. `validate_scheduled_batch(batch, max_scheduled_tokens, max_scheduled_requests)`
+2. `validate_scheduled_batch(batch, max_num_batched_tokens, max_scheduled_requests)`
 3. 各 request について:
    - `PendingRequestCommit`（sequence / handle / committed_tokens）
    - `DeviceRequestDescriptor` staging（request_handle / row_begin / row_count / prefix_length / sequence_length / execution_class / compute_logits / output_index）

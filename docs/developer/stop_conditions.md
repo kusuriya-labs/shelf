@@ -65,6 +65,27 @@ cancel を transaction 開始前に確定 → terminal_reason = cancelled
 
 cancel は実行中の transaction を途中破棄しない。
 
+### thinking budget による Token 置換
+
+thinking 予算は**停止条件ではなく commit 時の value 置換**である。
+
+```text
+thinking が未クローズ かつ 生成済み thinking Token 数 >= budget
+  → commit する Token を reasoning_close_token へ置換する
+  → thinking をクローズし、terminal は変更しない
+```
+
+- 置換は stop-condition scan の**前**に行う。置換後の Token が scan 対象になる。
+- commit 数・KV・position・GDN state は変更しない。置換されるのは
+  correction / bonus token の位置（＝次 step の anchor）だけで、その Token の KV は
+  まだ計算されていない。
+- model が先に close tag を生成した場合はクローズ済みとし、以後置換しない。
+- EOS と同時に成立することはない（close token は stop token に含まれない）。
+
+`reasoning_close_token` が単一 Tokenでない構成では budget を課さない。
+
+
+
 ### one-way latch
 
 terminal は **one-way latch（first terminal wins）** である。

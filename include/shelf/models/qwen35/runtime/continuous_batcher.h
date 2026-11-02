@@ -23,7 +23,7 @@ struct Executor;
 namespace runtime {
 
 struct ContinuousBatcherConfig {
-    uint32_t max_scheduled_tokens = 0;
+    uint32_t max_num_batched_tokens = 0;
     uint32_t max_scheduled_requests = 0;
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 0;
@@ -106,6 +106,19 @@ class ContinuousBatcher {
         uint32_t max_new_tokens,
         const SamplingConfig& sampling,
         bool speculative_decode);
+
+    Result<uint64_t> submit(
+        std::vector<int32_t> input_tokens,
+        uint32_t max_new_tokens,
+        const SamplingConfig& sampling,
+        const ThinkingBudget& thinking);
+
+    Result<uint64_t> submit(
+        std::vector<int32_t> input_tokens,
+        uint32_t max_new_tokens,
+        const SamplingConfig& sampling,
+        bool speculative_decode,
+        const ThinkingBudget& thinking);
 
     Status cancel(uint64_t id);
 

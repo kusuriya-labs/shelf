@@ -206,7 +206,7 @@ int main() {
     std::vector<int32_t> off_tokens;
     {
         ps::qwen35::ExecutorConfig ec;
-        ec.max_scheduled_tokens = max_tokens;
+        ec.max_batch_rows = max_tokens;
         ec.max_scheduled_requests = 1u;
         ec.max_scheduled_output_rows = 1u;
         auto exec_result =
@@ -251,7 +251,7 @@ int main() {
 
     {
         ps::qwen35::ExecutorConfig ec;
-        ec.max_scheduled_tokens = max_tokens;
+        ec.max_batch_rows = max_tokens;
         ec.max_scheduled_requests = 1u;
         ec.max_scheduled_output_rows = 1u;
         ec.target_hidden_taps = taps;

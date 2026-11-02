@@ -5,6 +5,11 @@
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/request_handle.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/runtime/dflash2_footprint.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/models/qwen35/runtime/prefix_cache.h>
 
 #include <cstdio>
 #include <sstream>
@@ -138,12 +143,6 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     const Qwen35TextConfig& tc = rank->model_.value().text_config();
     const std::uint32_t max_blocks_per_sequence =
         ceil_div(config.max_seq_len + 1u, config.page_tokens) + 1u;
-    const std::uint32_t capacity_tokens =
-        config.kv_cache_capacity_tokens == 0
-            ? config.max_seq_len + 1u
-            : config.kv_cache_capacity_tokens;
-    const std::uint32_t kv_pool_pages =
-        ceil_div(capacity_tokens, config.page_tokens) + 1u;
     const std::uint32_t attention_layers = count_attention_layers(tc);
     const std::uint32_t local_kv_heads = rank->context_.value().local_key_value_heads;
     const std::uint32_t head_dim = static_cast<std::uint32_t>(tc.attention_head_dim);
@@ -151,16 +150,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     const std::size_t kv_page_bytes = PagedKVPool::page_bytes(
         config.page_tokens, attention_layers, local_kv_heads, head_dim,
         config.kv_cache_dtype);
-    const std::size_t kv_bytes =
-        static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes;
-    const std::size_t arena_free_now =
-        rank->arena_->capacity() - rank->arena_->used();
-    if (arena_free_now < kv_bytes) {
-        return Status::insufficient_memory(
-            "tp rank arena is too small: free " + gpu::format_gib(arena_free_now) +
-                ", KV " + gpu::format_gib(kv_bytes) +
-                " (lower --max-seq-len or --max-concurrent-requests)",
-            __FILE__, __LINE__);
+    if (kv_page_bytes == 0u) {
+        return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
 
     auto gdn_layout_result =
@@ -185,13 +176,106 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     if (!gdn_result.ok()) return gdn_result.status();
     rank->gdn_pool_.emplace(gdn_result.release());
 
+    const std::size_t arena_free_now =
+        rank->arena_->capacity() - rank->arena_->used();
+    std::size_t reserved = config.working_set_reserve_bytes;
+    if (reserved == 0u) {
+        qwen35::ExecutorConfig reserve_config;
+        reserve_config.max_batch_rows = config.max_batch_rows;
+        reserve_config.max_scheduled_requests = config.max_scheduled_requests;
+        reserve_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
+        reserve_config.target_hidden_tap_count = config.target_hidden_tap_count;
+        reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
+            rank->model_->text_config(), reserve_config, config.tp_size);
+        std::fprintf(stderr,
+                     "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u)\n",
+                     static_cast<unsigned>(config.tp_rank),
+                     gpu::format_gib(reserved).c_str(),
+                     static_cast<unsigned>(config.max_batch_rows));
+    }
+    if (config.prefix_cache) {
+        PrefixCacheConfig prefix_config;
+        prefix_config.hot_capacity_tokens = config.prefix_hot_tokens;
+        prefix_config.cold_capacity_tokens = config.prefix_cold_tokens;
+        prefix_config.max_concurrent = config.prefix_concurrency;
+        prefix_config.cold_state_slots = config.prefix_cold_state_slots;
+        prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
+        const PrefixCacheGeometry prefix_geometry{
+            .page_tokens = config.page_tokens,
+            .num_attention_layers = attention_layers,
+            .kv_heads = local_kv_heads,
+            .head_dim = head_dim,
+            .dtype = config.kv_cache_dtype,
+        };
+        const PrefixCacheBytes prefix_bytes = prefix_cache_bytes(
+            prefix_config, gdn_layout_result.value(), prefix_geometry);
+        reserved += prefix_bytes.hot_total();
+        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
+                     gpu::format_gib(prefix_bytes.hot_total()).c_str());
+    }
+    if (config.drafter_config != nullptr) {
+        DFlash2SpecDecoderConfig spec_config;
+        spec_config.num_drafts = config.drafter_drafts == 0u ? 7u : config.drafter_drafts;
+        const std::size_t lm_head_k = config.drafter_lm_head_k != 0u
+            ? config.drafter_lm_head_k
+            : static_cast<std::size_t>(rank->private_lm_head().k_padded);
+        const DFlash2Footprint footprint = dflash2_footprint(
+            *config.drafter_config, spec_config, *rank->gdn_pool_,
+            config.drafter_weights_bytes, lm_head_k,
+            config.drafter_sessions == 0u ? config.max_scheduled_requests
+                                          : config.drafter_sessions);
+        reserved += footprint.total();
+        std::fprintf(stderr,
+                     "MEMORY_PLAN tp drafter: weights %s scratch %s spec batch %s "
+                     "session slot %s x %u\n",
+                     gpu::format_gib(footprint.draft_weights).c_str(),
+                     gpu::format_gib(footprint.draft_scratch).c_str(),
+                     gpu::format_gib(footprint.spec_batch).c_str(),
+                     gpu::format_gib(footprint.session_slot).c_str(),
+                     static_cast<unsigned>(footprint.sessions));
+    }
+    if (arena_free_now <= reserved) {
+        return Status::insufficient_memory(
+            "tp rank arena has " + gpu::format_gib(arena_free_now) +
+                " free after weights but the runtime reserves " +
+                gpu::format_gib(reserved) +
+                " for the working set (raise --arena-gib or lower "
+                "--working-set-reserve-gib)",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t pages_fit = static_cast<std::uint32_t>(
+        (arena_free_now - reserved) / kv_page_bytes);
+    if (pages_fit <= 1u) {
+        return Status::insufficient_memory(
+            "tp rank arena cannot hold any KV page after reserving the working set",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t fit_pages = pages_fit - 1u;
+    const std::uint64_t single_request_tokens =
+        static_cast<std::uint64_t>(config.max_seq_len) + 1u;
+    const std::uint32_t required_pages =
+        ceil_div(static_cast<std::uint32_t>(single_request_tokens), config.page_tokens);
+    if (fit_pages < required_pages) {
+        const std::uint32_t max_supportable =
+            fit_pages * config.page_tokens - 1u;
+        return Status::insufficient_memory(
+            "tp rank arena fits " +
+                std::to_string(fit_pages * config.page_tokens) +
+                " KV tokens but max_seq_len " + std::to_string(config.max_seq_len) +
+                " needs " + std::to_string(single_request_tokens) +
+                " (max supportable max_seq_len " + std::to_string(max_supportable) +
+                ")",
+            __FILE__, __LINE__);
+    }
+    const std::uint32_t kv_pool_pages = fit_pages + 1u;
+
     auto kv_result = PagedKVPool::create(
         rank->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
         local_kv_heads, head_dim, config.kv_cache_dtype);
     if (!kv_result.ok()) return kv_result.status();
     rank->kv_pool_.emplace(kv_result.release());
 
-    std::uint32_t exec_tokens = config.max_scheduled_tokens;
+    std::uint32_t exec_tokens = config.max_batch_rows;
     if (exec_tokens == 0) exec_tokens = config.max_seq_len;
     const std::uint32_t row_bucket_max =
         ps::runtime::row_bucket_limit(ps::runtime::RowBucket::R8192);
@@ -199,7 +283,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     if (exec_tokens == 0) exec_tokens = 1;
 
     ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = exec_tokens;
+    exec_config.max_batch_rows = exec_tokens;
     exec_config.max_scheduled_requests = config.max_scheduled_requests;
     exec_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
     exec_config.target_hidden_taps = config.target_hidden_taps;
@@ -208,9 +292,15 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.rope_profile = config.rope_profile;
     exec_config.tp = &rank->context_.value();
 
+    const std::size_t executor_before = rank->arena_->used();
     auto exec_result = create_model_executor(
         rank->model_.value(), rank->seq_pool_.value(), rank->gdn_pool_.value(),
         rank->kv_pool_.value(), rank->arena_.value(), exec_config);
+    std::fprintf(stderr,
+                 "MEMORY_PLAN tp rank %u executor footprint: %s (reserve %s)\n",
+                 static_cast<unsigned>(config.tp_rank),
+                 gpu::format_gib(rank->arena_->used() - executor_before).c_str(),
+                 gpu::format_gib(reserved).c_str());
     if (!exec_result.ok()) return exec_result.status();
     rank->executor_ = exec_result.release();
     rank->executor_ready_ = true;
@@ -306,14 +396,25 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.tp_size = static_cast<std::uint32_t>(devices_.size());
         rank_config.tp_rank = static_cast<std::uint32_t>(r);
         rank_config.device_id = devices_[r];
-        rank_config.max_scheduled_tokens = config.max_scheduled_tokens;
+        rank_config.max_batch_rows = config.max_batch_rows;
         rank_config.max_scheduled_requests = config.max_scheduled_requests;
         rank_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         rank_config.max_seq_len = config.max_seq_len;
         rank_config.page_tokens = config.page_tokens;
-        rank_config.kv_cache_capacity_tokens = config.kv_cache_capacity_tokens;
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
         rank_config.arena_bytes = config.arena_bytes;
+        rank_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
+        rank_config.drafter_config = config.drafter_config;
+        rank_config.drafter_weights_bytes = config.drafter_weights_bytes;
+        rank_config.drafter_drafts = config.drafter_drafts;
+        rank_config.drafter_sessions = config.drafter_sessions;
+        rank_config.drafter_lm_head_k = config.drafter_lm_head_k;
+        rank_config.prefix_cache = config.prefix_cache;
+        rank_config.prefix_hot_tokens = config.prefix_hot_tokens;
+        rank_config.prefix_cold_tokens = config.prefix_cold_tokens;
+        rank_config.prefix_concurrency = config.prefix_concurrency;
+        rank_config.prefix_cold_state_slots = config.prefix_cold_state_slots;
+        rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;

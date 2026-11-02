@@ -126,6 +126,9 @@ target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}
 shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_thinking_budget SOURCE unit/test_thinking_budget.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_dflash2_footprint SOURCE unit/test_dflash2_footprint.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_executor_footprint SOURCE unit/test_executor_footprint.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src/apps/bench")
 shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
@@ -242,6 +245,9 @@ add_custom_target(
         test_qwen35_tp_weight_load
         test_qwen35_mtp_weight_load
         test_dflash2_config
+        test_thinking_budget
+        test_dflash2_footprint
+        test_executor_footprint
         test_quality_metrics
         test_qwen35_config_tie
         test_dflash2_weight_contract
@@ -470,7 +476,7 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # MTP weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_MTP (preferred) or SHELF_MODEL_DIR.
     # Skips (exit 77) when none is set.
-    shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES shelf_weights shelf_qwen35 OpenSSL::Crypto)
+    shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES shelf_weights shelf_qwen35)
 
     # DFlash2 drafter weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_DFLASH2. Skips (exit 77) when unset.

@@ -9,14 +9,14 @@ namespace runtime {
 
 Result<SchedulePlan> schedule_requests(
     std::span<const RuntimeRequest*> active,
-    uint32_t max_scheduled_tokens,
+    uint32_t max_num_batched_tokens,
     uint32_t max_scheduled_requests,
     uint32_t page_tokens,
     KVBankerState* kv) {
     SchedulePlan plan;
 
     auto budget_left = [&]() -> uint32_t {
-        return max_scheduled_tokens - static_cast<uint32_t>(plan.token_ids.size());
+        return max_num_batched_tokens - static_cast<uint32_t>(plan.token_ids.size());
     };
     auto request_cap_reached = [&]() -> bool {
         return max_scheduled_requests != 0 &&

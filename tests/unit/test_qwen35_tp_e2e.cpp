@@ -64,7 +64,7 @@ int main() {
     tp1_opts.model_dir = model_dir;
     tp1_opts.arena_bytes = arena_bytes_from_env(24);
     tp1_opts.max_seq_len = 64;
-    tp1_opts.max_scheduled_tokens = 16;
+    tp1_opts.max_batch_rows = 16;
     tp1_opts.max_scheduled_requests = 2;
     tp1_opts.page_tokens = 16;
     tp1_opts.taps = {0, 3, 7, 15, 31, 62};

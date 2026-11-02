@@ -306,8 +306,10 @@ class AsyncComputeClient:
         top_k: int,
         seed: int,
         prefix_cache_checkpoint_position: int = 0,
+        reasoning_budget_tokens: int = 0,
+        reasoning_close_token: int = -1,
     ) -> None:
-        await self._send({
+        payload = {
             "op": "generate",
             "request_id": request_id,
             "input_ids": list(input_ids),
@@ -318,7 +320,11 @@ class AsyncComputeClient:
             "top_k": int(top_k),
             "seed": int(seed),
             "prefix_cache_checkpoint_position": int(prefix_cache_checkpoint_position),
-        })
+        }
+        if reasoning_budget_tokens > 0:
+            payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
+            payload["reasoning_close_token"] = int(reasoning_close_token)
+        await self._send(payload)
 
     async def cancel(self, request_id: int) -> None:
         try:
@@ -351,6 +357,8 @@ class AsyncComputeClient:
         top_k: int = 0,
         seed: int = 0,
         prefix_cache_checkpoint_position: int = 0,
+        reasoning_budget_tokens: int = 0,
+        reasoning_close_token: int = -1,
     ) -> dict:
         request_id, mailbox = await self._begin_request()
         sent = False
@@ -358,7 +366,8 @@ class AsyncComputeClient:
         try:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
-                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position)
+                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position,
+                reasoning_budget_tokens, reasoning_close_token)
             sent = True
             while True:
                 event = await mailbox.get()
@@ -389,6 +398,8 @@ class AsyncComputeClient:
         top_k: int = 0,
         seed: int = 0,
         prefix_cache_checkpoint_position: int = 0,
+        reasoning_budget_tokens: int = 0,
+        reasoning_close_token: int = -1,
     ) -> AsyncIterator[dict]:
         """Yield ``{"token_id": N}`` events, then one ``{"done": event}``.
 
@@ -404,7 +415,8 @@ class AsyncComputeClient:
         try:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
-                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position)
+                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position,
+                reasoning_budget_tokens, reasoning_close_token)
 
             sent = True
 

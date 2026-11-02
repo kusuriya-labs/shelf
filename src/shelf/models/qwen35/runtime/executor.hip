@@ -432,7 +432,7 @@ Result<PendingBatch> submit_co_batch(
             "executor already has an in-flight batch", __FILE__, __LINE__);
     }
 
-    auto vst = validate_scheduled_batch(batch, executor.config.max_scheduled_tokens, executor.config.max_scheduled_requests);
+    auto vst = validate_scheduled_batch(batch, executor.config.max_batch_rows, executor.config.max_scheduled_requests);
     if (!vst.ok()) return vst;
 
     const uint32_t N = batch.num_tokens;
@@ -1506,9 +1506,9 @@ Result<Executor> create_model_executor(
     gpu::GpuArena& arena,
     const ExecutorConfig& config) {
 
-    if (config.max_scheduled_tokens == 0 || config.max_scheduled_requests == 0) {
+    if (config.max_batch_rows == 0 || config.max_scheduled_requests == 0) {
         return Status::invalid_argument(
-            "max_scheduled_tokens and max_scheduled_requests must be > 0",
+            "max_batch_rows and max_scheduled_requests must be > 0",
             __FILE__, __LINE__);
     }
 
@@ -1599,7 +1599,7 @@ Result<Executor> create_model_executor(
     }
     const std::size_t H = tc.hidden_size;
     const std::size_t V = tc.vocab_size;
-    const uint32_t N = config.max_scheduled_tokens;
+    const uint32_t N = config.max_batch_rows;
     const uint32_t R = config.max_scheduled_requests;
     uint32_t Npad = N;
     {

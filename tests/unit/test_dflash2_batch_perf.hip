@@ -279,7 +279,7 @@ int main() {
 
     const uint32_t max_batch = 4u;
     ps::qwen35::ExecutorConfig ec;
-    ec.max_scheduled_tokens = 2048u;
+    ec.max_batch_rows = 2048u;
     ec.max_scheduled_requests = max_batch;
     ec.max_scheduled_output_rows = max_batch * block_rows;
     ec.target_hidden_taps = taps;

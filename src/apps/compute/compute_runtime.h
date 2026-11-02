@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
@@ -27,10 +28,12 @@ namespace app {
 struct Qwen35RuntimeConfig {
     std::string model_dir;
     std::string dflash2_model_dir;
+    qwen35::dflash2::DFlash2Config draft_config;
+    bool draft_config_ready = false;
+    uint32_t dflash2_drafts = 7;
     uint32_t max_seq_len = 512;
-    uint32_t max_scheduled_tokens = 0;
-    uint32_t max_concurrent_requests = 1;
-    uint32_t kv_cache_capacity_tokens = 0;
+    uint32_t max_num_batched_tokens = 0;
+    uint32_t max_concurrent_requests = 4;
     std::size_t arena_bytes = 0;
     std::size_t draft_bytes = 0;
     bool private_target_weights = false;
@@ -69,6 +72,12 @@ class Qwen35ComputeRuntime {
         std::vector<int32_t> input_ids,
         uint32_t max_new_tokens,
         const qwen35::runtime::SamplingConfig& sampling);
+
+    Result<uint64_t> submit(
+        std::vector<int32_t> input_ids,
+        uint32_t max_new_tokens,
+        const qwen35::runtime::SamplingConfig& sampling,
+        const qwen35::runtime::ThinkingBudget& thinking);
 
     Result<qwen35::runtime::StepResult> step();
 
@@ -129,7 +138,7 @@ class Qwen35ComputeRuntime {
         return batcher_ != nullptr && batcher_->dflash2_available();
     }
 
-    uint32_t max_scheduled_tokens() const noexcept { return exec_max_tokens_; }
+    uint32_t max_num_batched_tokens() const noexcept { return exec_max_tokens_; }
 
     qwen35::runtime::TpCoordinator* tp_coordinator() noexcept {
         return tp_coordinator_.get();
@@ -153,6 +162,10 @@ class Qwen35ComputeRuntime {
     Status initialize(const Qwen35RuntimeConfig& config);
 
     Status initialize_tensor_parallel();
+
+    std::size_t drafter_reserve_bytes(const ::ps::state::GdnStatePool& pool) const;
+
+    void apply_auto_working_set_reserve();
 
     Qwen35RuntimeConfig config_;
     uint32_t exec_max_tokens_ = 0;

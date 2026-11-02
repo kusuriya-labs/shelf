@@ -1,4 +1,5 @@
 #include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/size_format.h>
 #include <shelf/core/status.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
@@ -352,7 +353,11 @@ Result<DeviceAllocationView> GpuArena::allocate_aligned(std::size_t bytes, std::
     }
 
     if (bytes > capacity_ - aligned_offset) {
-        return Status::insufficient_memory("arena capacity exceeded", __FILE__, __LINE__);
+        return Status::insufficient_memory(
+            "arena capacity exceeded: capacity " + gpu::format_gib(capacity_) +
+                " used " + gpu::format_gib(offset_) +
+                " requested " + gpu::format_gib(bytes),
+            __FILE__, __LINE__);
     }
 
     const std::size_t end = aligned_offset + bytes;

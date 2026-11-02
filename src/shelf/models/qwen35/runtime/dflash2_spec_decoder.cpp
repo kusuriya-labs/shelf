@@ -545,7 +545,7 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
             "dflash2_spec_prefill: prefix must leave a suffix to prefill", __FILE__,
             __LINE__);
     }
-    const uint32_t chunk_limit = decoder.target->config.max_scheduled_tokens;
+    const uint32_t chunk_limit = decoder.target->config.max_batch_rows;
     if (chunk_limit == 0u) {
         return Status::invalid_state("dflash2_spec_prefill: target has no token capacity",
                                      __FILE__, __LINE__);
@@ -700,7 +700,8 @@ Status append_committed(
 Status run_single_target(
     DFlash2SpecDecoder& decoder,
     int32_t token,
-    DFlash2SpecIterationOutput& out) {
+    DFlash2SpecIterationOutput& out,
+    int32_t forced_token = -1) {
     DFlash2SpecTiming* tm = decoder.timing;
     const uint32_t position = decoder.sequence->position;
     std::vector<ScheduledRequest> requests;
@@ -730,9 +731,9 @@ Status run_single_target(
         *decoder.draft, *decoder.context, taps.data(), ps::kernel::kDFlash2TargetTaps, 1u,
         position, decoder.stream);
     if (!st.ok()) return st;
-    out.emitted[0] = sampled;
+    out.emitted[0] = forced_token >= 0 ? forced_token : sampled;
     out.emitted_count = 1u;
-    out.pending_token = sampled;
+    out.pending_token = out.emitted[0];
     if (tm != nullptr) ++tm->generated_tokens;
     commit_history_tokens(decoder, out.emitted.data(), 1u);
     return Status::make_ok();
@@ -1195,6 +1196,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         uint32_t row_begin = 0u;
         uint32_t total_rows = 0u;
         uint64_t sample_index = 0u;
+        uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
+        int32_t thinking_close_token = -1;
         bool batched = false;
     };
 
@@ -1218,7 +1221,11 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (slot.remaining_tokens > 1u && room >= 2u) {
             room_max = std::min(slot.remaining_tokens - 1u, room - 1u);
         }
-        const uint32_t drafts = std::min(slot.num_drafts, room_max);
+        const uint32_t drafts_limit =
+            slot.thinking_allowance != kDFlash2NoThinkingAllowance
+                ? std::min(slot.num_drafts, slot.thinking_allowance)
+                : slot.num_drafts;
+        const uint32_t drafts = std::min(drafts_limit, room_max);
         SlotPlan plan;
         plan.decoder = decoder;
         plan.anchor = slot.anchor_token;
@@ -1226,6 +1233,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plan.remaining = slot.remaining_tokens;
         plan.position = position;
         plan.sample_index = decoder->sample_index;
+        plan.thinking_allowance = slot.thinking_allowance;
+        plan.thinking_close_token = slot.thinking_close_token;
         plan.batched = drafts > 0u;
         plan.total_rows = drafts + 1u;
         if (plan.batched) {
@@ -1527,7 +1536,9 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         DFlash2SpecIterationOutput& result_out = out.slots[i];
 
         if (!plan.batched) {
-            const Status st = run_single_target(decoder, plan.anchor, result_out);
+            const int32_t forced =
+                plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
+            const Status st = run_single_target(decoder, plan.anchor, result_out, forced);
             if (!st.ok()) return st;
             if (is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
                 result_out.finished = true;
@@ -1554,6 +1565,13 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             result_out.pending_token = verify.bonus_token;
         } else {
             result_out.pending_token = -1;
+        }
+
+        if (plan.thinking_allowance != kDFlash2NoThinkingAllowance &&
+            plan.thinking_close_token >= 0 && accepted == plan.thinking_allowance &&
+            result_out.emitted_count == accepted + 1u) {
+            result_out.emitted[accepted] = plan.thinking_close_token;
+            result_out.pending_token = plan.thinking_close_token;
         }
 
         const uint32_t page_tokens = decoder.sequence->kv_pool()->page_tokens();

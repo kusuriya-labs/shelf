@@ -107,10 +107,11 @@ allocationのlifetimeを追跡しないため）。
 MEMORY_PLAN mode=auto
   target weights    model load 後の arena used
   draft weights     --dflash2-model-dir の safetensors 合計
+  drafter runtime   drafter の scratch + session pool slot × request 数
   runtime workspace --working-set-reserve-gib
   KV budget         arena 残量から導出した physical KV pool
   prefix cache      hot tier の実サイズ
-  required          target + draft + workspace + KV + prefix
+  required          target + draft + drafter runtime + workspace + KV + prefix
   available         起動時の空き VRAM（fixed では arena capacity）
   arena capacity    reserved virtual address
   left              arena capacity - required
@@ -118,10 +119,77 @@ MEMORY_PLAN mode=auto
 
 `draft weights` は arena からの予約であり、serve 時に drafter を load する
 （single request 経路でも serve 時に load する）。
+`drafter runtime` は DFlash2 の draft executor の scratch と、session pool の
+slot 1 個分（context ring と spec workspace）を `--max-concurrent-requests` 倍した
+値で、`dflash2_footprint.h` が単一の計算式を持つ。KV pool は arena の残りを
+自動で使うため、drafter 分を先に引かないと serve 時の drafter load が
+arena 超過になる。TP=2 は rank ごとに同じ計算を行い、内訳を stderr に出す。
+
+```text
+MEMORY_PLAN tp drafter: weights xx.xx GiB scratch xx.xx GiB session slot xx.xx GiB x N
+DFLASH2_WEIGHT_ARENA_BYTES=<bytes>
+```
+
+`MEMORY_PLAN` の `used` は executor が workspace を確保する前の値である。
+plan 後に必要になる作業領域は `--working-set-reserve-gib` が受け持つため、
+drafter 分を織り込んでも reserve を 1 GiB まで下げると executor 確保で不足する。
+reserve は plan 時点の約束であり、実際の作業領域を超えた場合は plan ではなく
+後続の arena 確保で `insufficient memory` として現れる。
+
+executor が arena から確保する量は起動時に 1 行で出す。
+
+```text
+MEMORY_PLAN executor footprint: xx.xx GiB (reserve xx.xx GiB)
+MEMORY_PLAN tp rank N executor footprint: xx.xx GiB (reserve xx.xx GiB)
+```
+
+内訳の支配項は program workspace（選択した row bucket の `program.workspace.total_bytes`
++ scratch + attention partials）である。program workspace は `build_program_set` の
+結果から決まり、それは `create_model_executor` の内部で構築されるため plan 時点では
+正確な値が分からない。この不确定分を埋めるのが `--working-set-reserve-gib` であり、
+KV auto-fit の計算式には織り込めない。
+
+`--working-set-reserve-gib 0`（既定）は auto であり、`executor_footprint.h` の式で決める。
+
+```text
+reserve = align(values_per_row × Npad × hidden × 2)
+          + align(kScratchFloats × 4) + align(32 MiB)
+          + 静的項 (logits {MO,V}, token_hidden ×(1+taps), sampling, batch context)
+
+values_per_row = 44 × (hidden + intermediate / tp) / (hidden + intermediate)
+```
+
+- `Npad` は `ExecutorConfig::max_batch_rows`（executor の行容量）を row bucket へ寄せた
+  行数。serve 経路では `max_batch_rows = min(--max-num-batched-tokens, 最上位 bucket)` で、
+  `max_seq_len` とは独立である（prefill は chunk 分割）
+- `MO` は `max(max_scheduled_output_rows, max_concurrent_requests)` を `max_batch_rows`
+  で clamp した値、`R` は `max_concurrent_requests`
+- 44 は TP1 の program workspace を実測した行あたり bf16 値数（実測 43.7、上ぶね）。
+  program workspace の大半は `intermediate_size` に比例するため、TP では
+  `intermediate / tp` で縮む。TP2 rank の実測は 22.4 値/row で、この式は 26.9 を出す
+- 静的項は `create_model_executor` の確保と同一の式（`logits {MO, V}`、
+  `token_hidden {Npad, H}`、target hidden taps、sampling radix、
+  `create_device_batch_context` の各 buffer、scratch 32 KiB、attention partials 32 MiB）
+
+executor footprint の実測内訳（TP1 / bucket 4096 / requests 4）は program workspace が
+ほぼ全てである（合計 1.78 GiB のうち 1,780.66 MiB。うち max program 1,748.62 MiB）。
+`logits` は 3.79 MiB、`token_hidden` + sampling で 40.24 MiB、batch context 類は 1 MiB 未満。
+
+auto は過大評価側に置く（reserve が実測を上回れば KV がその分だけ減る）。
+実測との対応は起動 log で確認する。
+
+```text
+MEMORY_PLAN auto: working set reserve 2.03 GiB (row bucket 4096)
+MEMORY_PLAN executor footprint: 1.78 GiB (reserve 2.03 GiB)
+MEMORY_PLAN auto tp rank 0: working set reserve 2.06 GiB (row bucket 4096)
+MEMORY_PLAN tp rank 0 executor footprint: 1.16 GiB (reserve 2.06 GiB)
+```
+`DFLASH2_WEIGHT_ARENA_BYTES` は serve 時に drafter 重みが入った実測増分であり、
+`draft weights` の見積（safetensors 合計）と対応させる。
 
 auto で `required` が `available` を超えるときは次の順で縮小する。
 
-1. `runtime workspace` を KV と draft を引いた残りへ縮小する。
+1. `runtime workspace` を KV と drafter を引いた残りへ縮小する。
    128 MiB を下回る場合は model load 前に `insufficient_memory` で失敗する。
 2. `prefix cache` の hot tokens を 1 page 単位で縮小する。
 3. 1 page も入らなければ prefix cache を無効化する。
@@ -136,7 +204,12 @@ MEMORY_PLAN mode=auto tp=2 arena=xx.xx GiB used=xx.xx GiB available=xx.xx GiB
 
 ## Scheduler
 
-`schedule_requests(span<const RuntimeRequest*>, max_scheduled_tokens,
+名前は2つに分離した。`max_num_batched_tokens` は 1 scheduled step の token 予算
+（CLI は `--max-num-batched-tokens`）で、`ExecutorConfig::max_batch_rows` は executor の
+行容量（`min(max_num_batched_tokens, 最上位 row bucket)` から導出）である。
+旧 `max_scheduled_tokens` は両方の意味で使われていたため廃止した。
+
+`schedule_requests(span<const RuntimeRequest*>, max_num_batched_tokens,
 max_scheduled_requests, page_tokens, KVBankerState*)` はfree function
 （`runtime/token_budget_scheduler.h`）。token budgetとKV capacityの制約下で
 `SchedulePlan`（decode / prefill requestの順序付き選択）を返す。
@@ -187,11 +260,11 @@ timeout 0 pollと1 stepを交互に行い、各stepの前後で `ping` / `cancel
 論理concurrencyとphysical KV budgetは別契約である。
 
 - `max_blocks_per_sequence = ceil_div(max_seq_len + 1, page_tokens) + 1`
-- `physical_capacity_tokens = kv_cache_capacity_tokens == 0 ? max_seq_len + 1
-  : kv_cache_capacity_tokens`
-- `kv_pool_pages = ceil_div(physical_capacity_tokens, page_tokens) + 1`
+- `physical_capacity_tokens = fit_pages * page_tokens`
+- `kv_pool_pages = fit_pages + 1`
 
-`--kv-cache-capacity-tokens 0` は1 context分を意味する。KVを自動的にN倍しない。
+`fit_pages` は起動時に arena の空きから model weight、prefix cache、working set reserve、
+drafter weight を差し引いた後に収まる KV page 数である。実行中に KV を拡張しない。
 physical capacityが不足する場合、KV BankerがActive requestのmax_claimを保証した上で
 Queued requestをadmissionする。`max_concurrent_requests > 1` でも全requestが常にActiveに
 なるとは限らない。
@@ -262,7 +335,7 @@ host-side request objectは解放しない。
   サンプルした最初のトークンを round の分（~55ms）遅らせずに emit するためで、
   TTFT がその分短くなる（8192 の BetterBench で 135 → 83ms）。
 - admission / retire / cancel / prefix cache / KV Banker は通常 decode と同一契約である。
-  DFlash2 専用の KV 容量自動拡張は無い（`--kv-cache-capacity-tokens` は
+  DFlash2 専用の KV 容量自動拡張は無い（起動時に確定した KV pool を
   `ContinuousBatcher` の banker がそのまま使う）。
 - `generated` / `finish_reason` / `restored_tokens` は `RuntimeRequest` が保持し、
   `done` event は通常 decode と同じ経路で出力する。

@@ -69,7 +69,7 @@ inline std::vector<int> tp_devices_from_env() {
 struct RunOptions {
     std::string model_dir;
     std::uint64_t arena_bytes = 1024ull * 1024ull * 1024ull;
-    std::uint32_t max_scheduled_tokens = 16;
+    std::uint32_t max_batch_rows = 16;
     std::uint32_t max_scheduled_requests = 4;
     std::uint32_t max_seq_len = 64;
     std::uint32_t page_tokens = 16;
@@ -241,7 +241,7 @@ inline std::uint32_t count_attention_layers(const Qwen35TextConfig& tc) {
 inline ContinuousBatcherConfig batcher_config(const Qwen35TextConfig& tc,
                                               const RunOptions& opts) {
     ContinuousBatcherConfig config;
-    config.max_scheduled_tokens = opts.max_scheduled_tokens;
+    config.max_num_batched_tokens = opts.max_batch_rows;
     config.max_scheduled_requests = opts.max_scheduled_requests;
     config.max_seq_len = opts.max_seq_len;
     config.page_tokens = opts.page_tokens;
@@ -332,7 +332,7 @@ inline RunResult run_tp1(const RunOptions& opts) {
     PagedKVPool kv_pool = kv_result.release();
 
     ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = opts.max_scheduled_tokens;
+    exec_config.max_batch_rows = opts.max_batch_rows;
     exec_config.max_scheduled_requests = opts.max_scheduled_requests;
     for (std::size_t i = 0; i < opts.taps.size() && i < kMaxTargetHiddenTaps; ++i) {
         exec_config.target_hidden_taps[i] = static_cast<std::uint32_t>(opts.taps[i]);
@@ -411,11 +411,12 @@ inline RunResult run_tp2(const RunOptions& opts) {
     TpCoordinatorConfig config;
     config.model_dir = opts.model_dir;
     config.devices = tp_devices_from_env();
-    config.max_scheduled_tokens = opts.max_scheduled_tokens;
+    config.max_batch_rows = opts.max_batch_rows;
     config.max_scheduled_requests = opts.max_scheduled_requests;
     config.max_seq_len = opts.max_seq_len;
     config.page_tokens = opts.page_tokens;
     config.arena_bytes = opts.arena_bytes;
+    config.working_set_reserve_bytes = 256ull * 1024ull * 1024ull;
     for (std::size_t i = 0; i < opts.taps.size() && i < kMaxTargetHiddenTaps; ++i) {
         config.target_hidden_taps[i] = static_cast<std::uint32_t>(opts.taps[i]);
     }

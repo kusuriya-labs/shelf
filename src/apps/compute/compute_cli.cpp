@@ -63,8 +63,9 @@ void compute_usage(const char* prog) {
     printf("  --arena-gib N|auto     arena capacity in GiB; auto uses free VRAM minus 1 GiB\n");
     printf("                         (default auto)\n");
     printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
-    printf("  --max-concurrent-requests N  max in-flight requests (default 1)\n");
-    printf("  --kv-cache-capacity-tokens N  physical KV token capacity (0 = one context)\n");
+    printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
+    printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
+    printf("                         the executor row bucket (default 2048)\n");
     printf("  --device N|N,M         GPU device(s); count must match --tp (default 0)\n");
     printf("  --tp N                 tensor parallel degree 1 | 2 (default 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
@@ -92,8 +93,9 @@ void compute_usage(const char* prog) {
     printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
     printf("                                 (default 16384)\n");
     printf("  --working-set-reserve-gib N    arena headroom kept free for the working set\n");
-    printf("                                 (executor workspace, DFlash2 session pool,\n");
-    printf("                                 default 4)\n");
+    printf("                                 (executor workspace allocated after the\n");
+    printf("                                 memory plan; 0 = size it from the row\n");
+    printf("                                 bucket, default 0)\n");
     printf("  --prefix-cache-cold-tokens N   prefix cache cold tier capacity in tokens\n");
     printf("                                 (default 65536)\n");
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
@@ -143,8 +145,8 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
     auto& arena_gib = opt.arena_gib;
     auto& arena_gib_auto = opt.arena_gib_auto;
     auto& page_tokens = opt.page_tokens;
-    auto& max_concurrent_requests = opt.max_concurrent_requests;
-    auto& kv_cache_capacity_tokens = opt.kv_cache_capacity_tokens;
+        auto& max_num_batched_tokens = opt.max_num_batched_tokens;
+auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
     auto& kv_cache_dtype = opt.kv_cache_dtype;
@@ -196,9 +198,11 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
             if (!parse_uint(argv[++i], max_concurrent_requests) || max_concurrent_requests == 0) {
                 fprintf(stderr, "bad --max-concurrent-requests\n"); return kComputeParseError;
             }
-        } else if (std::strcmp(argv[i], "--kv-cache-capacity-tokens") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], kv_cache_capacity_tokens)) {
-                fprintf(stderr, "bad --kv-cache-capacity-tokens\n"); return kComputeParseError;
+        } else if (std::strcmp(argv[i], "--max-num-batched-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], max_num_batched_tokens) || max_num_batched_tokens < 16u ||
+                max_num_batched_tokens > 8192u) {
+                fprintf(stderr, "bad --max-num-batched-tokens (16..8192)\n");
+                return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
@@ -283,8 +287,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--working-set-reserve-gib") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], working_set_reserve_gib) ||
-                working_set_reserve_gib == 0) {
+            if (!parse_uint(argv[++i], working_set_reserve_gib)) {
                 fprintf(stderr, "bad --working-set-reserve-gib\n");
                 return kComputeParseError;
             }
@@ -325,7 +328,6 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& arena_gib = opt.arena_gib;
     const auto& page_tokens = opt.page_tokens;
     const auto& max_concurrent_requests = opt.max_concurrent_requests;
-    const auto& kv_cache_capacity_tokens = opt.kv_cache_capacity_tokens;
     const auto& devices = opt.devices;
     const auto& tp = opt.tp;
     const auto& kv_cache_dtype = opt.kv_cache_dtype;

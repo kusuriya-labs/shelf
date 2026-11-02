@@ -148,7 +148,7 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     const auto dflash_config = dflash_config_result.release();
 
     ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = std::max(o.max_scheduled_tokens,
+    exec_config.max_batch_rows = std::max(o.max_batch_rows,
                                                 static_cast<std::uint32_t>(
                                                     dflash_config.block_size));
     exec_config.max_scheduled_requests = o.max_scheduled_requests;
@@ -252,8 +252,8 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     TpCoordinatorConfig config;
     config.model_dir = o.model_dir;
     config.devices = tp_harness::tp_devices_from_env();
-    config.max_scheduled_tokens =
-        std::max(o.max_scheduled_tokens,
+    config.max_batch_rows =
+        std::max(o.max_batch_rows,
                  static_cast<std::uint32_t>(dflash_config.block_size));
     config.max_scheduled_requests = o.max_scheduled_requests;
     config.max_scheduled_output_rows =
@@ -261,6 +261,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     config.max_seq_len = o.max_seq_len;
     config.page_tokens = o.page_tokens;
     config.arena_bytes = o.arena_bytes;
+    config.working_set_reserve_bytes = 256ull * 1024ull * 1024ull;
     for (std::size_t i = 0; i < o.taps.size() && i < kMaxTargetHiddenTaps; ++i) {
         config.target_hidden_taps[i] = static_cast<std::uint32_t>(o.taps[i]);
     }

@@ -109,15 +109,17 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 # TODO
 ## 機能
 * 起動時の引数の名前を整理し、computeで使用可能なものはすべてE2Eで通す (命名をOpenAI API準拠にしたい)
-* リクエストの最大並列数を 4 にし、リクエスト毎の最大推論予算を 32768 tok にする
-* Verifyで使用するbatchは 最大並列数 * 8 にする
-* VerifyとPrefillをMixed可能にする
-* pipeline-parallelの実装
-* preshuffleの有無を設定化
-* カーネルをpreshuffleの有無で分離
-* FP8カーネルでradianceとは違うところを修正する(ただし、Prefillのtok/sが下がってもよいからspillは0に抑える)
+* DFlash2 の drafter footprint 見積を詰める。session slot の見積 0.34 GiB に対し実測 0.094 GiB で、
+  TP2 の KV auto-fit が約 1 GiB 過剰に確保している（`dflash2_footprint.cpp` の spec workspace 項）
+* working set reserve の見積を正確にする。既定は auto（`executor_footprint.h` の
+  `52 × Npad × hidden × 2`）だが、`create_model_executor` を plan（graph lowering +
+  `build_program_set`）と create（arena 確保）へ分けられれば program workspace の
+  実値を使える。TP2 では rank の shard 分だけ過大（見積 2.06 GiB / 実測 1.16 GiB）
+* Decode(投機ONの場合、SpecとVerify)とPrefillを同じバッチ内で同時実行可能にして、pp=row2048が動作している場合でも、Decode出力を止めない
 * MTPの実装
 * exl3(mul1)の実装
 * MXFP4の実装
 * qwen35moe対応・最適化
-*
+* pipeline-parallelの実装
+* expert-parallelの実装
+* Small-M GEMMの最適化

@@ -142,7 +142,7 @@ int main() {
 
     const uint32_t page_tokens = 16;
     const uint32_t max_seq_len = 128;
-    const uint32_t max_scheduled_tokens = 96;
+    const uint32_t max_batch_rows = 96;
     const uint32_t max_scheduled_requests = 4;
 
     auto arena_result = gpu::GpuArena::create(0, 1024ull * 1024ull * 1024ull);
@@ -203,7 +203,7 @@ int main() {
     PagedKVPool kv_pool = kv_result.release();
 
     ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = max_scheduled_tokens;
+    exec_config.max_batch_rows = max_batch_rows;
     exec_config.max_scheduled_requests = max_scheduled_requests;
     auto exec_result =
         create_model_executor(model, seq_pool, gdn_pool, kv_pool, arena, exec_config);
@@ -216,7 +216,7 @@ int main() {
     Executor executor = exec_result.release();
 
     ContinuousBatcherConfig batcher_config;
-    batcher_config.max_scheduled_tokens = max_scheduled_tokens;
+    batcher_config.max_num_batched_tokens = max_batch_rows;
     batcher_config.max_scheduled_requests = max_scheduled_requests;
     batcher_config.max_seq_len = max_seq_len;
     batcher_config.page_tokens = page_tokens;

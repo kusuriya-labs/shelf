@@ -331,7 +331,7 @@ int run_quality(int argc, char** argv) {
         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1u;
 
     ps::qwen35::ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = static_cast<uint32_t>(
+    exec_config.max_batch_rows = static_cast<uint32_t>(
         std::max(opts.prefill_chunk, 2));
     exec_config.max_scheduled_requests = 1u;
     exec_config.max_scheduled_output_rows = 1u;
@@ -376,13 +376,14 @@ int run_quality(int argc, char** argv) {
         ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
-        tp_cfg.max_scheduled_tokens = exec_config.max_scheduled_tokens;
+        tp_cfg.max_batch_rows = exec_config.max_batch_rows;
         tp_cfg.max_scheduled_requests = exec_config.max_scheduled_requests;
         tp_cfg.max_scheduled_output_rows = exec_config.max_scheduled_output_rows;
         tp_cfg.max_seq_len = required_seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
         tp_cfg.kv_cache_dtype = opts.kv_dtype;
         tp_cfg.arena_bytes = arena_bytes;
+        tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
         auto coord_result = ps::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!coord_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
@@ -472,7 +473,7 @@ int run_quality(int argc, char** argv) {
     }
 
     const uint32_t chunk = std::min<uint32_t>(
-        static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_scheduled_tokens);
+        static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows);
     uint32_t processed = 0u;
     while (processed < context) {
         const uint32_t chunk_len = std::min(chunk, context - processed);

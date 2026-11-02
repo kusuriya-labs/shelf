@@ -96,7 +96,7 @@ int main() {
     opts.model_dir = dir.string();
     opts.arena_bytes = 1024ull * 1024ull * 1024ull;
     opts.max_seq_len = 64;
-    opts.max_scheduled_tokens = 16;
+    opts.max_batch_rows = 16;
     opts.max_scheduled_requests = 4;
     opts.page_tokens = 16;
     opts.taps = {0};

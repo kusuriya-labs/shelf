@@ -400,7 +400,7 @@ int run_pp(int argc, char** argv) {
         tp1_kv_pool.emplace(kv_pool_result.release());
 
         ps::qwen35::ExecutorConfig exec_config;
-        exec_config.max_scheduled_tokens = exec_max_tokens;
+        exec_config.max_batch_rows = exec_max_tokens;
         exec_config.max_scheduled_requests = 1;
         exec_config.backend = opts.decode_backend;
 
@@ -415,7 +415,7 @@ int run_pp(int argc, char** argv) {
         ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
-        tp_cfg.max_scheduled_tokens = exec_max_tokens;
+        tp_cfg.max_batch_rows = exec_max_tokens;
         tp_cfg.max_scheduled_requests = 1;
         tp_cfg.max_seq_len = required_seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
@@ -423,6 +423,7 @@ int run_pp(int argc, char** argv) {
                                     ? ps::kernel::KVCacheDType::FP8_E4M3
                                     : ps::kernel::KVCacheDType::BF16;
         tp_cfg.arena_bytes = arena_bytes;
+        tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
         auto tp_result = ps::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!tp_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",

@@ -83,7 +83,7 @@ pip install -e vendor/BetterBench
 ./build/shelf-server --model-dir models/Qwen3.8-27B-FP8 \
     --model Qwen3.8-27B-FP8 --port 8123 --compute ./build/shelf-compute \
     --max-seq-len 8192 --arena-gib 30 --device 1 --kv-cache-dtype fp8 \
-    --max-concurrent-requests 8 \
+    --max-concurrent-requests 4 \
     --dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7
 BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
     --model Qwen3.8-27B-FP8 --quick --decode \
@@ -110,4 +110,3 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
   「受理（tok/round）」と「round 時間」のどちらで説明できるかをこれで切り分ける。
   `SHELF_BATCH_TRACE=1` は step ごとの `arena_used` を出し、
   per-request の増加がないこと（資源規律の回帰）を確認する。
-

@@ -4,6 +4,8 @@
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen35/runtime/dflash2_footprint.h>
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +40,7 @@ struct MemoryPlan {
     std::size_t arena_capacity = 0;
     std::size_t target_weights = 0;
     std::size_t draft_weights = 0;
+    std::size_t drafter_runtime = 0;
     std::size_t workspace = 0;
     std::size_t kv = 0;
     std::size_t prefix = 0;
@@ -48,7 +51,7 @@ struct MemoryPlan {
 
 void print_memory_plan(const MemoryPlan& plan) {
     const std::size_t required = plan.target_weights + plan.draft_weights +
-        plan.workspace + plan.kv + plan.prefix;
+        plan.drafter_runtime + plan.workspace + plan.kv + plan.prefix;
     const std::size_t left = plan.arena_capacity > required
         ? plan.arena_capacity - required
         : 0;
@@ -56,6 +59,7 @@ void print_memory_plan(const MemoryPlan& plan) {
             "MEMORY_PLAN mode=%s\n"
             "  target weights    %s\n"
             "  draft weights     %s\n"
+            "  drafter runtime   %s\n"
             "  runtime workspace %s\n"
             "  KV budget         %s (%u tokens)\n"
             "  prefix cache      %s (%u tokens)\n"
@@ -67,6 +71,7 @@ void print_memory_plan(const MemoryPlan& plan) {
             plan.auto_mode ? "auto" : "fixed",
             gpu::format_gib(plan.target_weights).c_str(),
             gpu::format_gib(plan.draft_weights).c_str(),
+            gpu::format_gib(plan.drafter_runtime).c_str(),
             gpu::format_gib(plan.workspace).c_str(),
             gpu::format_gib(plan.kv).c_str(), plan.kv_tokens,
             plan.prefix_enabled ? gpu::format_gib(plan.prefix).c_str() : "0.00 GiB",
@@ -152,7 +157,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         startup_available_bytes_ = config_.arena_bytes;
     }
 
-    exec_max_tokens_ = config_.max_scheduled_tokens;
+    exec_max_tokens_ = config_.max_num_batched_tokens;
     if (exec_max_tokens_ == 0) {
         exec_max_tokens_ = config_.max_seq_len;
     }
@@ -269,19 +274,25 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     const uint32_t required_pages = ceil_div(max_seq + 1u, config_.page_tokens) + 1u;
     const std::size_t kv_required_bytes = required_pages * kv_page_bytes;
 
+    apply_auto_working_set_reserve();
+    const std::size_t drafter_total_bytes = drafter_reserve_bytes(*gdn_pool_);
+    const std::size_t drafter_runtime_bytes = drafter_total_bytes > config_.draft_bytes
+        ? drafter_total_bytes - config_.draft_bytes
+        : 0u;
+
     if (auto_arena) {
         const std::size_t arena_free_now = arena_->capacity() - arena_->used();
-        const std::size_t fixed_bytes = kv_required_bytes + config_.draft_bytes;
+        const std::size_t fixed_bytes = kv_required_bytes + drafter_total_bytes;
         const std::size_t available_for_runtime =
             arena_free_now > fixed_bytes ? arena_free_now - fixed_bytes : 0u;
         if (config_.working_set_reserve_bytes > available_for_runtime) {
             if (available_for_runtime < kAutoWorkspaceMinimumBytes) {
                 fprintf(stderr,
-                        "MEMORY_PLAN auto: %s free after weights, but KV %s + draft %s + "
+                        "MEMORY_PLAN auto: %s free after weights, but KV %s + drafter %s + "
                         "minimum workspace %s already exceed it\n",
                         gpu::format_gib(arena_free_now).c_str(),
                         gpu::format_gib(kv_required_bytes).c_str(),
-                        gpu::format_gib(config_.draft_bytes).c_str(),
+                        gpu::format_gib(drafter_total_bytes).c_str(),
                         gpu::format_gib(kAutoWorkspaceMinimumBytes).c_str());
                 fflush(stderr);
                 return Status::insufficient_memory(
@@ -346,6 +357,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         plan.arena_capacity = arena_->capacity();
         plan.target_weights = used_after_weights;
         plan.draft_weights = config_.draft_bytes;
+        plan.drafter_runtime = drafter_runtime_bytes;
         plan.workspace = config_.working_set_reserve_bytes;
         plan.kv = kv_bytes;
         plan.kv_tokens = kv_tokens;
@@ -358,7 +370,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     };
 
     const std::size_t reserved_bytes = prefix_bytes.hot_total() +
-        config_.working_set_reserve_bytes + config_.draft_bytes;
+        config_.working_set_reserve_bytes + drafter_total_bytes;
     const std::size_t arena_free = arena_->capacity() - arena_->used();
     if (arena_free <= reserved_bytes) {
         print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
@@ -372,59 +384,30 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     const uint32_t pages_fit =
         static_cast<uint32_t>((arena_free - reserved_bytes) / kv_page_bytes);
 
-    uint32_t physical_capacity_tokens = 0u;
-    if (config_.kv_cache_capacity_tokens == 0) {
-        if (pages_fit <= 1u) {
-            print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
-            return Status::insufficient_memory(
-                "arena budget cannot hold any KV page", __FILE__, __LINE__);
-        }
-        const uint32_t fit_pages = pages_fit - 1u;
-        const uint64_t single_request_tokens = static_cast<uint64_t>(max_seq) + 1u;
-        const uint64_t aggregate_tokens =
-            single_request_tokens * static_cast<uint64_t>(max_concurrent);
-        const uint32_t required_pages =
-            ceil_div(static_cast<uint32_t>(single_request_tokens), config_.page_tokens);
-        if (fit_pages < required_pages) {
-            const uint32_t max_supportable = fit_pages * config_.page_tokens - 1u;
-            print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
-            return Status::insufficient_memory(
-                "the arena budget fits " + std::to_string(fit_pages * config_.page_tokens)
-                + " KV tokens but max_seq_len " + std::to_string(max_seq)
-                + " needs " + std::to_string(single_request_tokens)
-                + " (max supportable max_seq_len " + std::to_string(max_supportable)
-                + " with --arena-gib "
-                + std::to_string(config_.arena_bytes / (1024ull * 1024ull * 1024ull))
-                + ")",
-                __FILE__, __LINE__);
-        }
-        const uint32_t aggregate_pages = static_cast<uint32_t>(
-            (aggregate_tokens + config_.page_tokens - 1u) / config_.page_tokens);
-        physical_capacity_tokens =
-            std::min(fit_pages, aggregate_pages) * config_.page_tokens;
-    } else {
-        physical_capacity_tokens = config_.kv_cache_capacity_tokens;
-        if (physical_capacity_tokens < max_seq + 1) {
-            return Status::invalid_argument(
-                "kv_cache_capacity_tokens must be at least max_seq_len + 1",
-                __FILE__, __LINE__);
-        }
-        const uint32_t requested_pages =
-            ceil_div(physical_capacity_tokens, config_.page_tokens) + 1;
-        if (requested_pages > pages_fit) {
-            print_memory_plan(make_plan(
-                static_cast<std::size_t>(requested_pages) * kv_page_bytes,
-                physical_capacity_tokens));
-            return Status::insufficient_memory(
-                "kv_cache_capacity_tokens " + std::to_string(physical_capacity_tokens)
-                + " needs " + gpu::format_gib(requested_pages * kv_page_bytes)
-                + " but the arena budget only allows "
-                + gpu::format_gib(static_cast<std::size_t>(pages_fit) * kv_page_bytes),
-                __FILE__, __LINE__);
-        }
+    if (pages_fit <= 1u) {
+        print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
+        return Status::insufficient_memory(
+            "arena budget cannot hold any KV page", __FILE__, __LINE__);
     }
-    const uint32_t kv_pool_pages =
-        ceil_div(physical_capacity_tokens, config_.page_tokens) + 1;
+    const uint32_t fit_pages = pages_fit - 1u;
+    const uint64_t single_request_tokens = static_cast<uint64_t>(max_seq) + 1u;
+    const uint32_t min_context_pages =
+        ceil_div(static_cast<uint32_t>(single_request_tokens), config_.page_tokens);
+    if (fit_pages < min_context_pages) {
+        const uint32_t max_supportable = fit_pages * config_.page_tokens - 1u;
+        print_memory_plan(make_plan(kv_required_bytes, max_seq + 1u));
+        return Status::insufficient_memory(
+            "the arena budget fits " + std::to_string(fit_pages * config_.page_tokens)
+            + " KV tokens but max_seq_len " + std::to_string(max_seq)
+            + " needs " + std::to_string(single_request_tokens)
+            + " (max supportable max_seq_len " + std::to_string(max_supportable)
+            + " with --arena-gib "
+            + std::to_string(config_.arena_bytes / (1024ull * 1024ull * 1024ull))
+            + ")",
+            __FILE__, __LINE__);
+    }
+    const uint32_t physical_capacity_tokens = fit_pages * config_.page_tokens;
+    const uint32_t kv_pool_pages = fit_pages + 1u;
     print_memory_plan(make_plan(
         static_cast<std::size_t>(kv_pool_pages) * kv_page_bytes, physical_capacity_tokens));
 
@@ -438,7 +421,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     const std::size_t used_after_kv = arena_->used();
 
     qwen35::ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = exec_max_tokens_;
+    exec_config.max_batch_rows = exec_max_tokens_;
     exec_config.max_scheduled_requests = max_concurrent;
     exec_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     exec_config.target_hidden_taps = config_.target_hidden_taps;
@@ -449,15 +432,21 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         exec_config.rope_profile = *config_.rope_profile;
     }
 
+    const std::size_t executor_before = arena_->used();
     auto exec_result = qwen35::create_model_executor(
         *model_, *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);
+    fprintf(stderr,
+            "MEMORY_PLAN executor footprint: %s (reserve %s)\n",
+            gpu::format_gib(arena_->used() - executor_before).c_str(),
+            gpu::format_gib(config_.working_set_reserve_bytes).c_str());
+    fflush(stderr);
     if (!exec_result.ok()) {
         return exec_result.status();
     }
     executor_ = std::move(exec_result.release());
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
-    batcher_config.max_scheduled_tokens = exec_config.max_scheduled_tokens;
+    batcher_config.max_num_batched_tokens = exec_max_tokens_;
     batcher_config.max_scheduled_requests = exec_config.max_scheduled_requests;
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = config_.page_tokens;
@@ -492,18 +481,63 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     return Status::make_ok();
 }
 
+std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
+    const ::ps::state::GdnStatePool& pool) const {
+    if (!config_.draft_config_ready) {
+        return 0u;
+    }
+    qwen35::runtime::DFlash2SpecDecoderConfig spec_config;
+    spec_config.num_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
+    std::size_t lm_head_k = 0u;
+    if (model_) {
+        lm_head_k = static_cast<std::size_t>(model_->weights().lm_head.k_padded);
+    }
+    return qwen35::runtime::dflash2_footprint(
+        config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
+        config_.max_concurrent_requests).total();
+}
+
+void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
+    if (config_.working_set_reserve_bytes != 0u) {
+        return;
+    }
+    qwen35::ExecutorConfig reserve_config;
+    reserve_config.max_batch_rows = exec_max_tokens_;
+    reserve_config.max_scheduled_requests = config_.max_concurrent_requests;
+    reserve_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
+    reserve_config.target_hidden_tap_count = config_.target_hidden_tap_count;
+    config_.working_set_reserve_bytes = qwen35::runtime::qwen35_executor_reserve_bytes(
+        model_->text_config(), reserve_config, config_.tp);
+    fprintf(stderr, "MEMORY_PLAN auto: working set reserve %s (row bucket %u)\n",
+            gpu::format_gib(config_.working_set_reserve_bytes).c_str(),
+            static_cast<unsigned>(exec_max_tokens_));
+    fflush(stderr);
+}
+
 Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     qwen35::runtime::TpCoordinatorConfig tp_config;
     tp_config.model_dir = config_.model_dir;
     tp_config.devices = config_.devices;
-    tp_config.max_scheduled_tokens = exec_max_tokens_;
+    tp_config.max_batch_rows = exec_max_tokens_;
     tp_config.max_scheduled_requests = config_.max_concurrent_requests;
     tp_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     tp_config.max_seq_len = config_.max_seq_len;
     tp_config.page_tokens = config_.page_tokens;
-    tp_config.kv_cache_capacity_tokens = config_.kv_cache_capacity_tokens;
     tp_config.kv_cache_dtype = config_.kv_cache_dtype;
     tp_config.arena_bytes = config_.arena_bytes;
+    tp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
+    tp_config.prefix_cache = config_.prefix_cache;
+    tp_config.prefix_hot_tokens = config_.prefix_cache_hot_tokens;
+    tp_config.prefix_cold_tokens = config_.prefix_cache_cold_tokens;
+    tp_config.prefix_concurrency = config_.prefix_cache_concurrency;
+    tp_config.prefix_cold_state_slots = config_.prefix_cache_cold_state_slots;
+    tp_config.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+    if (config_.draft_config_ready) {
+        tp_config.drafter_config = &config_.draft_config;
+        tp_config.drafter_weights_bytes = config_.draft_bytes;
+        tp_config.drafter_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
+        tp_config.drafter_sessions = config_.max_concurrent_requests;
+    }
     if (config_.tp > 1 && config_.private_target_weights) {
         const bool load_lm_head = config_.private_target_lm_head;
         tp_config.load_private_weights =
@@ -551,7 +585,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     fflush(stderr);
 
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
-    batcher_config.max_scheduled_tokens = exec_max_tokens_;
+    batcher_config.max_num_batched_tokens = exec_max_tokens_;
     batcher_config.max_scheduled_requests = config_.max_concurrent_requests;
     batcher_config.max_seq_len = config_.max_seq_len;
     batcher_config.page_tokens = config_.page_tokens;
@@ -643,10 +677,19 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     std::vector<int32_t> input_ids,
     uint32_t max_new_tokens,
     const qwen35::runtime::SamplingConfig& sampling) {
+    return submit(std::move(input_ids), max_new_tokens, sampling,
+                  qwen35::runtime::ThinkingBudget{});
+}
+
+Result<uint64_t> Qwen35ComputeRuntime::submit(
+    std::vector<int32_t> input_ids,
+    uint32_t max_new_tokens,
+    const qwen35::runtime::SamplingConfig& sampling,
+    const qwen35::runtime::ThinkingBudget& thinking) {
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
-    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling);
+    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, thinking);
 }
 
 Status Qwen35ComputeRuntime::set_dflash2_batcher(

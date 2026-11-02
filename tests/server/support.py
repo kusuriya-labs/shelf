@@ -221,20 +221,22 @@ class ComputeHarness:
     def __init__(self, log_path: Path | None = None, arena_gib: int = 24,
                  max_seq_len: int = 256, device: int = 0,
                  max_concurrent_requests: int = 1,
-                 kv_cache_capacity_tokens: int = 0,
                  batch_trace: bool = False,
                  graph_debug: bool = False,
                  kv_cache_dtype: str = "bf16",
                  dflash2_model_dir: str | None = None,
                  dflash2_drafts: int = 7,
                  model_path: Path | str | None = None,
-                 working_set_reserve_gib: int | None = None):
+                 working_set_reserve_gib: int | None = None,
+                 tp: int = 1,
+                 devices: str | None = None,
+                 auto_arena: bool = False):
         self.log_path = log_path
         self.arena_gib = arena_gib
+        self.auto_arena = auto_arena
         self.max_seq_len = max_seq_len
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
-        self.kv_cache_capacity_tokens = kv_cache_capacity_tokens
         self.batch_trace = batch_trace
         self.graph_debug = graph_debug
         self.kv_cache_dtype = kv_cache_dtype
@@ -242,6 +244,8 @@ class ComputeHarness:
         self.dflash2_drafts = dflash2_drafts
         self.model_path = Path(model_path) if model_path is not None else None
         self.working_set_reserve_gib = working_set_reserve_gib
+        self.tp = tp
+        self.devices = devices
         self.proc: subprocess.Popen | None = None
         self.stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
@@ -250,19 +254,24 @@ class ComputeHarness:
         binary = compute_binary()
         if not binary.is_file():
             raise Failure(f"shelf-compute not found: {binary}")
-        arena_gib = test_arena_gib(self.arena_gib)
+        arena_gib = self.arena_gib if self.auto_arena else test_arena_gib(self.arena_gib)
         self.arena_gib = arena_gib
+        if self.tp > 1 and not self.devices:
+            raise Failure("devices is required when tp > 1")
+        device_arg = self.devices if self.tp > 1 else str(_test_device(self.device))
         argv = [
             str(binary),
             "--model-dir", str(self.model_path or model_dir()),
             "--serve-stdio",
             "--max-seq-len", str(self.max_seq_len),
-            "--arena-gib", str(arena_gib),
-            "--device", str(_test_device(self.device)),
+            "--device", device_arg,
             "--kv-cache-dtype", self.kv_cache_dtype,
             "--max-concurrent-requests", str(self.max_concurrent_requests),
-            "--kv-cache-capacity-tokens", str(self.kv_cache_capacity_tokens),
         ]
+        if not self.auto_arena:
+            argv += ["--arena-gib", str(arena_gib)]
+        if self.tp > 1:
+            argv += ["--tp", str(self.tp)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)
         if reserve is not None:
             argv += ["--working-set-reserve-gib", str(reserve)]
@@ -383,8 +392,9 @@ def _env_int(name: str) -> int | None:
 
 
 def _test_working_set_reserve_gib(configured: int | None):
-    override = _env_int("SHELF_TEST_WORKING_SET_RESERVE_GIB")
-    return configured if override is None else override
+    if configured is not None:
+        return configured
+    return _env_int("SHELF_TEST_WORKING_SET_RESERVE_GIB")
 
 
 def _test_device(default: int) -> int:
@@ -420,7 +430,6 @@ class ServerHarness:
                  startup_timeout: float = 240.0, max_seq_len: int = 512,
                  arena_gib: int = 24, device: int = 0,
                  max_concurrent_requests: int = 1,
-                 kv_cache_capacity_tokens: int = 0,
                  use_defaults: bool = False,
                  kv_cache_dtype: str = "bf16",
                  dflash2_model_dir: str | None = None,
@@ -436,7 +445,6 @@ class ServerHarness:
         self.arena_gib = arena_gib
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
-        self.kv_cache_capacity_tokens = kv_cache_capacity_tokens
         self.use_defaults = use_defaults
         self.kv_cache_dtype = kv_cache_dtype
         self.dflash2_model_dir = dflash2_model_dir
@@ -464,7 +472,6 @@ class ServerHarness:
                 "--max-seq-len", str(self.max_seq_len),
                 "--arena-gib", str(arena_gib),
                 "--max-concurrent-requests", str(self.max_concurrent_requests),
-                "--kv-cache-capacity-tokens", str(self.kv_cache_capacity_tokens),
                 "--kv-cache-dtype", self.kv_cache_dtype,
             ]
             reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)

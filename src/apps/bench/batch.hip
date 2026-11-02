@@ -255,7 +255,7 @@ int run_batch(int argc, char** argv) {
         ? static_cast<uint32_t>(opts.max_sched_tokens)
         : static_cast<uint32_t>(opts.prefix_tokens);
     ps::qwen35::ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = sched_tokens;
+    exec_config.max_batch_rows = sched_tokens;
     exec_config.max_scheduled_requests = 1;
 
     auto exec_result = ps::qwen35::create_model_executor(
@@ -267,7 +267,7 @@ int run_batch(int argc, char** argv) {
     auto executor = exec_result.release();
 
     ps::qwen35::runtime::ContinuousBatcherConfig cfg;
-    cfg.max_scheduled_tokens = sched_tokens;
+    cfg.max_num_batched_tokens = sched_tokens;
     cfg.max_scheduled_requests = 1;
     cfg.max_seq_len = seq_len;
     cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);

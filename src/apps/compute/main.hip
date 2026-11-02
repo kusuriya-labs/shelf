@@ -62,7 +62,6 @@ int main(int argc, char** argv) {
     config.dflash2_model_dir = ps::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
-    config.kv_cache_capacity_tokens = static_cast<uint32_t>(opt.kv_cache_capacity_tokens);
     config.arena_bytes = opt.arena_gib_auto
         ? 0u
         : static_cast<std::size_t>(opt.arena_gib) * 1024ull * 1024ull * 1024ull;
@@ -112,6 +111,9 @@ int main(int argc, char** argv) {
         config.prefix_cache_spec_ring_bytes =
             static_cast<uint32_t>(dflash_config.context_ring_bytes());
         config.draft_bytes = ps::app::safetensors_dir_bytes(opt.dflash2_model_dir);
+        config.draft_config = dflash_config;
+        config.draft_config_ready = true;
+        config.dflash2_drafts = static_cast<uint32_t>(opt.dflash2_drafts);
         if (opt.tp > 1) {
             config.private_target_weights = true;
             config.private_target_lm_head = true;
@@ -120,11 +122,16 @@ int main(int argc, char** argv) {
 
     std::vector<int32_t> prompt_ids;
     if (opt.serve_stdio) {
-        config.max_scheduled_tokens = config.max_seq_len;
+        config.max_num_batched_tokens = static_cast<uint32_t>(opt.max_num_batched_tokens);
+        if (config.max_num_batched_tokens < config.max_concurrent_requests) {
+            config.max_num_batched_tokens = config.max_concurrent_requests;
+        }
         if (ps::app::compute_dflash_enabled(opt)) {
-            config.max_scheduled_tokens = config.max_seq_len;
             const uint32_t batch_rows = config.max_concurrent_requests *
                 static_cast<uint32_t>(dflash_config.block_size);
+            if (config.max_num_batched_tokens < batch_rows) {
+                config.max_num_batched_tokens = batch_rows;
+            }
             config.max_scheduled_output_rows =
                 batch_rows < ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows
                     ? batch_rows
@@ -156,7 +163,7 @@ int main(int argc, char** argv) {
             unsigned long dflash_tokens =
                 std::max<unsigned long>(prompt_ids.size(), dflash_rows);
             dflash_tokens = std::min<unsigned long>(dflash_tokens, 2048UL);
-            config.max_scheduled_tokens = static_cast<uint32_t>(dflash_tokens);
+            config.max_num_batched_tokens = static_cast<uint32_t>(dflash_tokens);
             config.max_scheduled_output_rows = static_cast<uint32_t>(dflash_rows);
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
@@ -165,7 +172,7 @@ int main(int argc, char** argv) {
                     static_cast<uint32_t>(dflash_config.target_layer_ids[t]);
             }
         } else {
-            config.max_scheduled_tokens = static_cast<uint32_t>(
+            config.max_num_batched_tokens = static_cast<uint32_t>(
                 std::max<unsigned long>(prompt_ids.size() + 1UL, 16UL));
         }
     }

@@ -445,6 +445,7 @@ def probe_reasoning(processor) -> dict[str, Any]:
     capability: dict[str, Any] = {
         "thinking": False,
         "effort": False,
+        "close_token": -1,
         "detail": "",
     }
 
@@ -476,6 +477,12 @@ def probe_reasoning(processor) -> dict[str, Any]:
         )
         if not capability["thinking"]:
             note("chat template does not open <think> for generation")
+
+        if len(close_ids) == 1:
+            capability["close_token"] = int(close_ids[0])
+        else:
+            note(f"reasoning close tag is {len(close_ids)} tokens; "
+                 "the thinking budget cannot be enforced")
 
         rendered = {}
         for effort in REASONING_EFFORTS:

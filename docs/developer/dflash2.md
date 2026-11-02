@@ -549,7 +549,7 @@ token を host へ戻して次の position を決めたりしない。`draft_row
   `offset = prefix_tokens` から再開する。`0 < prefix_tokens < prompt_count` の場合のみ
   有効で、`prefix_tokens >= prompt_count` は error である
   （[prefix_cache.md](prefix_cache.md)）。
-- prompt を `target->config.max_scheduled_tokens` 単位で chunk 実行する。
+- prompt を `target->config.max_batch_rows` 単位で chunk 実行する。
 - intermediate chunk: `compute_logits=false`, `sample=false`。
 - final chunk: `compute_logits=true`, `sample=true`, `num_output_rows=1`。
 - 各 chunk 実行直後に target tap を ring へ append する。
@@ -902,11 +902,11 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 - `max_scheduled_output_rows = block_size`（`shelf-compute` の単一 request 経路）。
   serve mode では `min(max_concurrent_requests × block_size, kDFlash2SpecMaxVerifyRows)`
   であり、1 round の batch verify 行合計の上限になる。
-- `max_scheduled_tokens = min(2048, max(prompt_tokens, block_size))`
+- `max_batch_rows = min(2048, max(prompt_tokens, block_size))`
 - `max_scheduled_output_rows` は `max(max_scheduled_output_rows, max_scheduled_requests)`
-  で切り上げられた後 `max_scheduled_tokens` で上限されるため、
-  `block_size <= max_scheduled_tokens` を満たす必要がある。prefill は
-  `max_scheduled_tokens` 単位で chunk 実行する。
+  で切り上げられた後 `max_batch_rows` で上限されるため、
+  `block_size <= max_batch_rows` を満たす必要がある。prefill は
+  `max_batch_rows` 単位で chunk 実行する。
 
 ### DFlash2 drafter executor config
 
@@ -1000,7 +1000,7 @@ DFLASH2_ROUND_MS
   ring 参照実装へフォールバックする（不成立自体はエラーではない）。
 - GDN history は `history bytes > 2.25 GiB` のとき create を FAIL する。
   27B geometry では `num_drafts <= 15` が上限になる。
-- `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_scheduled_tokens` を
+- `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_batch_rows` を
   満たす必要がある。
 - batched verify は 1 round の行合計 `Σ(Kᵢ+1)` が `max_scheduled_output_rows` と
   `kDFlash2SpecMaxVerifyRows`（512）以下でなければならない。serve では

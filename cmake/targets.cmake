@@ -247,6 +247,8 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
     src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp
+    src/shelf/models/qwen35/runtime/dflash2_footprint.cpp
+    src/shelf/models/qwen35/runtime/executor_footprint.cpp
     src/shelf/models/qwen35/runtime/gdn_spec_history.hip
     src/shelf/models/qwen35/runtime/decode_backend.cpp
     src/shelf/models/qwen35/dflash2/executor.hip

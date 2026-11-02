@@ -122,7 +122,7 @@ def reject_unsupported(body: dict) -> None:
         )
 
 
-def _max_new_tokens(body: dict, default_max_new_tokens: int) -> int:
+def _max_new_tokens(body: dict, inference_budget_tokens: int) -> int:
     old = body.get("max_tokens")
     new = body.get("max_completion_tokens")
 
@@ -134,7 +134,7 @@ def _max_new_tokens(body: dict, default_max_new_tokens: int) -> int:
 
     value = new if new is not None else old
     if value is None:
-        return int(default_max_new_tokens)
+        return int(inference_budget_tokens)
 
     value = int(value)
     if value <= 0:
@@ -142,7 +142,24 @@ def _max_new_tokens(body: dict, default_max_new_tokens: int) -> int:
             "max tokens must be positive",
             param="max_tokens",
         )
-    return value
+    return min(value, int(inference_budget_tokens))
+
+
+ANSWER_RESERVE_MIN_TOKENS = 512
+
+
+def answer_reserve_tokens(budget_tokens: int) -> int:
+    if budget_tokens < 1024:
+        return 0
+    return min(max(ANSWER_RESERVE_MIN_TOKENS, budget_tokens // 4),
+               budget_tokens // 2)
+
+
+def thinking_budget_tokens(budget_tokens: int) -> int:
+    reserve = answer_reserve_tokens(budget_tokens)
+    if reserve == 0:
+        return 0
+    return max(1, budget_tokens - reserve)
 
 
 def parse_tool_choice(value) -> str:
@@ -332,7 +349,7 @@ def _stream_options_include_usage(body: dict) -> bool:
 
 def parse_chat_request(body: Any,
                        *,
-                       default_max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> ChatRequest:
+                       inference_budget_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> ChatRequest:
     if not isinstance(body, dict):
         raise OpenAIProtocolError("request body must be a JSON object")
 
@@ -356,7 +373,7 @@ def parse_chat_request(body: Any,
 
     tool_choice = parse_tool_choice(body.get("tool_choice"))
     tools = normalize_tools(body.get("tools"))
-    max_new_tokens = _max_new_tokens(body, default_max_new_tokens)
+    max_new_tokens = _max_new_tokens(body, inference_budget_tokens)
 
     temperature = _number(body, "temperature", 0.0, low=0.0)
     top_p = _number(body, "top_p", 1.0, low=0.0, high=1.0)

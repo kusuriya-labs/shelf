@@ -47,9 +47,9 @@ Endpoint:     http://127.0.0.1:8000/v1
 Context:      32768
 Concurrency:  4
 KV dtype:     bf16
-KV capacity:  auto
 Prefix cache: enabled (capabilities.prefix_cache=true)
-Default output: 65536
+Inference budget: 32768 tokens (thinking 24576, answer reserve 8192)
+  prompt > 262144: 65536 tokens (thinking 49152)
 
 Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
 Efforts:      low, medium, xhigh
@@ -72,24 +72,50 @@ Ready.
 | `--port PORT` | listen port (default 8000) |
 | `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768) |
+| `--max-num-batched-tokens MAX_NUM_BATCHED_TOKENS` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
+| `--inference-budget-tokens INFERENCE_BUDGET_TOKENS` | max generated tokens per request (default 32768) |
+| `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
+| `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto` | GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tp (default 0) |
 | `--tp {1,2}` | tensor parallel size forwarded to compute (default 1) |
 | `--kv-cache-dtype {bf16,fp8}` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
-| `--kv-cache-capacity-tokens KV_CACHE_CAPACITY_TOKENS` | physical KV token capacity (0 = derive from the arena budget) |
-| `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (default 4) |
+| `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
-| `--default-max-output-tokens DEFAULT_MAX_OUTPUT_TOKENS` | default max_new_tokens when the request omits it (default 65536) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--verify-weights` | verify quantized payload CRC32 on load |
 <!-- /cli:server -->
 
 不正な値は起動時に拒否される。`--max-concurrent-requests` / `--max-seq-len` /
-`--default-max-output-tokens` / `--page-tokens` / `--dflash2-drafts` は 1 以上である。
+`--inference-budget-tokens` / `--page-tokens` / `--dflash2-drafts` は 1 以上である。
+`--large-context-tokens` は 0 以上で、0 は大きい予算を無効化する。
+`--large-context-tokens` が 0 より大きい場合、
+`--large-context-inference-budget-tokens` は `--inference-budget-tokens` 以上でなければならない。
 `--arena-gib auto` は compute と同じ memory plan を compute 側の stderr に出す。
+
+## 推論予算
+
+request 1 個あたりの生成予算（推論予算）は `--inference-budget-tokens`（default 32768）である。
+
+- client が `max_completion_tokens` / `max_tokens` を指定した場合、その値と推論予算の
+  小さい方が生成上限になる。予算を超える指定は 400 ではなく clamp される。
+- 未指定の場合は推論予算そのものが上限になる。
+- prompt の token 数が `--large-context-tokens`（default 262144）を超える request は、
+  予算が `--large-context-inference-budget-tokens`（default 65536）に拡大される。
+  判定基準は当該 request の prompt token 数であり、会話の履歴や server 全体の占有ではない。
+  この段階が発火するには `--max-seq-len` が `--large-context-tokens` より大きいことが
+  必要である（`--max-seq-len 262144` では prompt が閾値を超えられない）。
+- thinking が有効な request では、予算のうち answer reserve を残した地点で thinking を
+  閉じる。reserve は `予算/4`（512 以上、予算/2 以下）なので、
+  32768 なら thinking 24576 / answer reserve 8192、65536 なら thinking 49152 /
+  answer reserve 16384 である。
+- 生成上限は `--max-seq-len` から prompt を引いた残りでも上限を受ける。
+
+細部は [../developer/reasoning.md](../developer/reasoning.md) と
+[../developer/stop_conditions.md](../developer/stop_conditions.md) を参照。
 
 ## DFlash2 speculative decoding
 
@@ -99,8 +125,8 @@ Ready.
 指定時の挙動:
 
 - `--max-concurrent-requests` は指定値を尊重する。DFlash2 でも複数 request を受付できる。
-  KV admission は通常 decode と同じ KV Banker が行うため、
-  `--kv-cache-capacity-tokens` の自動拡張は行わない。不足時は一部の request が
+  KV の物理容量は起動時に arena の余りから確定し、request ごとに拡張しない。
+  KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
 
@@ -179,7 +205,8 @@ usage チャンクの例:
 
 `GET /v1/meta` は server が起動オプションから持つ正本値と、現在の in-flight 状態を返す。
 `limit.context`（OpenCode）や `contextWindow`（DeepSeek Harness）を
-`--max-seq-len` と一致させる際の照合元として使う。
+`--max-seq-len` と一致させる際の照合元として使う。`kv_cache` のページ数と token 数は
+arena、model、prefix cache の設定に依存するため、次の例の値は一例である。
 
 ```bash
 curl http://127.0.0.1:8000/v1/meta
@@ -190,12 +217,17 @@ curl http://127.0.0.1:8000/v1/meta
   "model": "shelf",
   "max_seq_len": 32768,
   "max_concurrent_requests": 4,
-  "default_max_output_tokens": 65536,
+  "inference_budget": {
+    "tokens": 32768,
+    "large_context_tokens": 262144,
+    "large_context_inference_budget_tokens": 65536,
+    "answer_reserve_tokens": 8192,
+    "thinking_budget_tokens": 24576
+  },
   "arena_gib": "auto",
   "device": "0",
   "tensor_parallel": 1,
   "kv_cache_dtype": "bf16",
-  "kv_cache_capacity_tokens": 0,
   "working_set_reserve_gib": 4,
   "speculative": null,
   "prefix_cache": true,
@@ -221,10 +253,10 @@ curl http://127.0.0.1:8000/v1/meta
 | `model` | `--model` で報告する model 名 |
 | `max_seq_len` | `--max-seq-len`。コンテキスト上限の正本 |
 | `max_concurrent_requests` | `--max-concurrent-requests`。最大 in-flight 数 |
-| `default_max_output_tokens` | `--default-max-output-tokens` |
+| `inference_budget` | 推論予算。`tokens`（`--inference-budget-tokens`）、`large_context_tokens`、`large_context_inference_budget_tokens`、既定予算での `answer_reserve_tokens` / `thinking_budget_tokens` |
 | `arena_gib` | `--arena-gib`（`"auto"` または整数 GiB） |
 | `device` / `tensor_parallel` | `--device` / `--tp` |
-| `kv_cache_dtype` / `kv_cache_capacity_tokens` | KV cache 設定（0 = arena 予算から導出） |
+| `kv_cache_dtype` | KV cache の dtype |
 | `working_set_reserve_gib` | `--working-set-reserve-gib` |
 | `speculative` | 有効時の drafter（`{"method": "dflash2", "drafts": 7}` 等）。無効時は `null` |
 | `reasoning` | reasoning の既定（`enabled` / `default_reasoning_effort` / `reasoning_efforts`） |
@@ -417,13 +449,16 @@ model 固有の `<tool_call>` 等の markup は client へ漏れない。
 ### concurrency と cancel
 
 `--max-concurrent-requests N` は最大 in-flight request 数であり、同時に 1 executor step で
-scheduler が扱える最大 request 数でもある。physical KV capacity
-（`--kv-cache-capacity-tokens`）が不足する場合、一部の request は Queued となり、
-KV Banker が Active 完了後に admission する。`--kv-cache-capacity-tokens 0`（default）は
-arena 予算と `--max-concurrent-requests` から導出する。すなわち
-`min(arena の残りで入るページ数, max_concurrent × (max_seq_len + 1))` で、`max_seq_len + 1`
-すら入らない構成・明示指定が予算を超える構成は**起動時に拒否**する
-（`--working-set-reserve-gib` が起動後に必要な余白、DFlash2 有効時は drafter 重みも加算される）。
+scheduler が扱える最大 request 数でもある。physical KV capacity は起動時に arena の余りから
+確定し、実行中に拡張しない。容量が不足する場合、一部の request は Queued となり、
+KV Banker が Active 完了後に admission する。`max_seq_len + 1` すら入らない構成は
+**起動時に拒否**する（`--working-set-reserve-gib` が起動後に必要な余白、
+DFlash2 有効時は drafter の weight と session pool 領域も確保計算に入る）。
+
+`--max-num-batched-tokens N`（既定 2048）は 1 executor step の token 予算で、
+executor の row bucket も決める。prompt が N を超えても prefill は chunk 分割で進む。
+N を下げると program workspace が減り、その分だけ KV capacity が増える
+（context を大きく取る構成では N が実質的な容量ダイヤルになる）。
 
 stream client が connection を切断すると、in-flight generation は cancel される
 （`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight

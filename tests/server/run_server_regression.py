@@ -49,6 +49,7 @@ GROUPS = OrderedDict([
         "test_server_chat.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
+        "test_inference_budget.py",
     ]),
     ("tools", [
         "test_server_tools.py",
@@ -58,6 +59,7 @@ GROUPS = OrderedDict([
     ("reasoning", [
         "test_reasoning_parser.py",
         "test_reasoning_request.py",
+        "test_compute_thinking_budget.py",
         "test_server_reasoning.py",
         "test_server_reasoning_stream.py",
         "test_server_reasoning_tools.py",

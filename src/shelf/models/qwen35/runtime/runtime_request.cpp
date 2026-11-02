@@ -41,10 +41,42 @@ void mark_finished(RuntimeRequest& request, FinishReason reason) {
 
 }
 
+bool thinking_budget_enabled(const RuntimeRequest& request) noexcept {
+    return request.thinking.tokens != 0 && request.thinking.close_token >= 0;
+}
+
+uint32_t thinking_allowance(const RuntimeRequest& request) noexcept {
+    if (!thinking_budget_enabled(request) || request.thinking_closed) {
+        return kDFlash2NoThinkingAllowance;
+    }
+    return request.generated_tokens >= request.thinking.tokens
+               ? 0u
+               : request.thinking.tokens - request.generated_tokens;
+}
+
+void note_generated_token(RuntimeRequest& request, int32_t token) noexcept {
+    if (!request.thinking_closed && request.thinking.close_token >= 0 &&
+        token == request.thinking.close_token) {
+        request.thinking_closed = true;
+    }
+}
+
+int32_t enforce_thinking_budget(RuntimeRequest& request, int32_t token) noexcept {
+    note_generated_token(request, token);
+    if (request.thinking_closed) return token;
+    if (!thinking_budget_enabled(request)) return token;
+    if (request.generated_tokens >= request.thinking.tokens) {
+        token = request.thinking.close_token;
+        request.thinking_closed = true;
+    }
+    return token;
+}
+
 CommitAction commit_sampled_token(
     RuntimeRequest& request,
     int32_t token,
     const StopTokens& stop_tokens) {
+    token = enforce_thinking_budget(request, token);
     ++request.generated_tokens;
     request.generated.push_back(token);
     if (is_stop_token(stop_tokens, token)) {

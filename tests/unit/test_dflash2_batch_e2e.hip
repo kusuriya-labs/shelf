@@ -231,7 +231,7 @@ int main() {
     }
 
     ps::qwen35::ExecutorConfig ec;
-    ec.max_scheduled_tokens = 2048u;
+    ec.max_batch_rows = 2048u;
     ec.max_scheduled_requests = 2u;
     ec.max_scheduled_output_rows = 2u * block_rows;
     ec.target_hidden_taps = taps;

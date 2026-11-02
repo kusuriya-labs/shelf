@@ -254,16 +254,28 @@ per-step barrier でも peer 経路をそのまま使える。
 ## 8. TP arena の予算順序
 
 TP=2 の rank ごとに、ephemeral arena の確保順序は次のとおりである。
-推論に必須の固定消費を先に確保し、残りを KV、残余を prefix cache に割り当てる。
+推論に必須の固定消費を先に確保し、`working_set_reserve_bytes` を除いた arena の余りを
+KV、その後ろの残余を prefix cache に割り当てる。
 
 ```text
 1. private target weights（rank 0 のみ。TP 時に語彙全体が必要な行列）
 2. SequenceSlotPool / GdnStatePool
-3. PagedKVPool（rank-local kv_heads、max_seq_len + 1 tokens）
-4. Executor workspace
+3. PagedKVPool（rank-local kv_heads、arena の余りから計算したページ数）
+4. Executor workspace（working set reserve の範囲）
 5. prefix cache（残余。収まらない場合は hot tokens を縮小し、0 なら無効化）
 6. drafter executor / batch context / session pool（DFlash2）
 ```
+
+3 のページ数は、後で 4 / 5 / 6 に使う分を先に差し引く。
+
+- 4 分: `working_set_reserve_bytes`。0 の場合は `executor_footprint.h` の auto 値
+- 5 分: prefix cache の hot tier（`prefix_cache_bytes()` を rank の local kv heads と
+  GDN layout で計算）
+- 6 分: drafter 重み・draft executor の scratch・spec batch context・session pool の
+  slot × `--max-concurrent-requests`（`dflash2_footprint.h`）
+
+これらは rank ごとに `MEMORY_PLAN tp prefix cache:` / `MEMORY_PLAN tp drafter:` として
+stderr に出る。計算式は `docs/developer/runtime.md` の arena budget と共通である。
 
 private target weights は `TpRankRuntime::create()` が KV より前に確保する。
 
@@ -271,7 +283,7 @@ prefix cache は必須ではない。`prefix_cache_bytes()` で hot 分の arena
 見積もり、`arena_free - draft 予約` を超える場合は page 単位で hot tokens を
 二分探索して縮小する。縮小結果が 0 なら section を無効化する。
 
-KV が arena に収まらない場合は、KV bytes と arena free を含む
+`max_seq_len + 1` tokens を保持できる KV page が arena の余りに収まらない場合は、
 `insufficient_memory` で起動時に fail-closed する。
 
 ## 9. 失敗伝播と shutdown

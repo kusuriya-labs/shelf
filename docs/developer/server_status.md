@@ -40,7 +40,8 @@ HTTP listen である。server が ready になるまで port を accept しな�
 - best-effort tool calling（生成は Transformers の Qwen response parser で解析する。
   parse に失敗した output を捏造・修復しない）
 - reasoning（Qwen3.8 の thinking。既定で有効、`reasoning_effort` は
-  `low` / `medium` / `xhigh`、応答は `reasoning_content` と `content` に分離する）
+  `low` / `medium` / `xhigh`、応答は `reasoning_content` と `content` に分離する。
+  thinking は request の推論予算から answer reserve を引いた地点で compute 側で閉じる）
 - concurrent serving（複数 request が Continuous Batching へ到達する）
 - request cancellation（HTTP client disconnect → JSONL cancel → ContinuousBatcher cancel）
 - DFlash2 speculative decode（constraint なしの通常経路）
@@ -110,8 +111,10 @@ user 向けのフィールド表は [../user/server.md](../user/server.md) を�
 
 ## Known limitations
 
-- reasoning token 数の内訳（`completion_tokens_details.reasoning_tokens`）、
-  Thinking の token budget、履歴の server 側永続化は未実装である。
+- reasoning token 数の内訳（`completion_tokens_details.reasoning_tokens`）と、
+  client からの thinking 予算指定、履歴の server 側永続化は未実装である。
+  thinking 予算自体は server 既定値で compute 側に強制される
+  （[reasoning.md](reasoning.md) 「thinking 予算」）。
 - `Full JSON Schema semantics` は保証しない。tool の JSON Schema は chat template へ
   tool 説明として渡すだけで、生成時の schema enforcement は行わない。
 - embeddings / vision / audio / realtime API / authentication / TLS termination /

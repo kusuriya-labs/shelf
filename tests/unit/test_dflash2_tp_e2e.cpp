@@ -71,7 +71,7 @@ int main() {
     o.model_dir = model_dir;
     o.arena_bytes = 24ull * 1024ull * 1024ull * 1024ull;
     o.max_seq_len = 256;
-    o.max_scheduled_tokens = 32;
+    o.max_batch_rows = 32;
     o.max_scheduled_requests = 2;
     o.page_tokens = 16;
     o.verify_crc = false;

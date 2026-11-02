@@ -397,7 +397,7 @@ int run_tg(int argc, char** argv) {
     auto kv_pool = kv_pool_result.release();
 
     ps::qwen35::ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens =
+    exec_config.max_batch_rows =
         std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
     exec_config.backend = opts.decode_backend;
@@ -459,7 +459,7 @@ int run_tg(int argc, char** argv) {
     }
 
         const uint32_t chunk = std::min<uint32_t>(
-            static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_scheduled_tokens);
+            static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows);
         uint32_t processed = 0;
         while (processed < static_cast<uint32_t>(opts.context)) {
             const uint32_t chunk_len = std::min(chunk, static_cast<uint32_t>(opts.context) - processed);

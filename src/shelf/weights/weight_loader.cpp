@@ -1,3 +1,4 @@
+#include <shelf/core/memory/size_format.h>
 #include <shelf/weights/weight_loader.h>
 
 #include <shelf/core/memory/types.h>
@@ -145,10 +146,15 @@ Result<MatrixWeight> load_bf16_matrix_raw(
     w.k_padded = w.cols;
 
     std::vector<std::size_t> strides = {shape[1], 1};
+    const std::size_t arena_used_before = arena.used();
+    const std::size_t want_bytes = static_cast<std::size_t>(shape[0]) * shape[1] * sizeof(bf16_t);
     w.bf16 = alloc_tensor(shape, strides, arena);
     if (w.bf16.ndim() == 0) {
         return Status::insufficient_memory(
-            ("matrix allocation failed: " + name).c_str(), __FILE__, __LINE__);
+            "matrix allocation failed: " + name + " want " + gpu::format_gib(want_bytes) +
+                " arena used " + gpu::format_gib(arena_used_before) + " / capacity " +
+                gpu::format_gib(arena.capacity()),
+            __FILE__, __LINE__);
     }
     if (!upload_tensor_direct(reader, name, w.bf16.data<void>(), stream).ok()) {
         return Status::invalid_state(

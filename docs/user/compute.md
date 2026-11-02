@@ -14,8 +14,8 @@
 | `--max-seq-len N` | max sequence length (default 512) |
 | `--arena-gib N\|auto` | arena capacity in GiB; auto uses free VRAM minus 1 GiB (default auto) |
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
-| `--max-concurrent-requests N` | max in-flight requests (default 1) |
-| `--kv-cache-capacity-tokens N` | physical KV token capacity (0 = one context) |
+| `--max-concurrent-requests N` | max in-flight requests (default 4) |
+| `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--device N\|N,M` | GPU device(s); count must match --tp (default 0) |
 | `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
@@ -35,7 +35,7 @@
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--prefix-cache-hot-tokens N` | prefix cache hot tier capacity in tokens (default 16384) |
-| `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace, DFlash2 session pool, default 4) |
+| `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
 | `--prefix-cache-cold-tokens N` | prefix cache cold tier capacity in tokens (default 65536) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
 | `--prefix-cache-cold-state-slots N` | cold GDN state slots (default 0 = auto) |
@@ -44,6 +44,13 @@
 <!-- /cli:compute -->
 
 `--arena-gib auto` は起動時の空き VRAM から 1 GiB を引いた容量を arena に使う。
+KV の物理容量は個別に指定できない。model weight、prefix cache、`--working-set-reserve-gib`、
+DFlash2 の drafter（weight と session pool 等の runtime 領域）を確保した後に残る arena の領域を
+すべて KV に割り当てる。
+KV を増やすには `--arena-gib` を増やすか、prefix cache と `--working-set-reserve-gib` を減らす。
+既定は `0`（auto）で、executor が plan 後に確保する量を row bucket から推定して予約する。
+実測値を大きくすれば KV、小さくすれば KV が増える。auto の推定と実測は起動 log の
+`MEMORY_PLAN auto: working set reserve` と `MEMORY_PLAN executor footprint` で比較できる。
 起動時には固定 / auto のどちらでも次の memory plan を stderr へ出す。
 `auto` で `required` が `available` を超える場合は、workspace と prefix cache の
 順に縮小し、それでも足りなければ明示エラーで終了する。
@@ -52,6 +59,7 @@
 MEMORY_PLAN mode=auto
   target weights    xx.xx GiB
   draft weights     xx.xx GiB
+  drafter runtime   xx.xx GiB
   runtime workspace xx.xx GiB
   KV budget         xx.xx GiB (NNNN tokens)
   prefix cache      xx.xx GiB (NNNN tokens)
@@ -63,13 +71,26 @@ MEMORY_PLAN mode=auto
 ```
 
 `target weights` は実際に arena へ load した後の使用量、`draft weights` は
-`--dflash2-model-dir` の safetensors サイズ、`runtime workspace` は
+`--dflash2-model-dir` の safetensors サイズ、`drafter runtime` は drafter の
+scratch と session pool の領域（`--max-concurrent-requests` 分）、`runtime workspace` は
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
 physical KV capacity、`prefix cache` は hot tier の実サイズである。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
 
 `--arena-gib N` を明示した場合は arena 容量を N GiB に固定する（measurement の
 再現用）。
+
+`--max-num-batched-tokens N`（既定 2048）は 1 scheduled step で扱う token 数で、
+executor の row bucket も決める。prefill は chunk 分割で進むため、prompt が N を
+超えても生成は止まらない。N を小さくすると program workspace（executor の arena 確保の
+大半）が減って KV が増え、大きくすると prefill の step 数が減る代わりに arena を
+多く使う。実測（27B FP8 / TP2 / requests 4 / drafter 込み / `--max-seq-len 262144`）:
+
+| `--max-num-batched-tokens` | rank の executor 実測 | 結果 |
+| --- | --- | --- |
+| 8192（`--max-seq-len` に跟随していた旧動作） | 1.84 GiB | KV 上限 207,695 tokens で起動失敗 |
+| 2048（既定） | 0.61 GiB | `SHELF_SERVE_READY` |
+
 
 `--model-dir` は必須。`--input-ids-file` なしでは既定prompt
 （`248041, 77091`）を使用。
@@ -110,7 +131,7 @@ DFlash2 経路でも受け付ける。
 - YaRN の元の長さは `rope_parameters.original_max_position_embeddings`、無ければ `text_config.max_position_embeddings`（Qwen3.8 は 262,144）。
 - `--max-seq-len` の上限は Native 262,144 / 2x 524,288 / 4x 1,000,000（Qwen 公式の案内値）。超える指定は起動時に拒否する。
 - 起動時に `ROPE profile:` 行を stderr へ出し、type / factor / theta / rotary_dim / 元の長さ / attention factor / 決定元（cli か config）を表示する。
-- KV 容量計画は factor と独立である。必要ページ数は `--max-seq-len` と `--kv-cache-capacity-tokens` だけで決まる。
+- KV 容量計画は factor と独立である。必要な最小ページ数は `--max-seq-len` だけで決まり、残りのページ数は arena の余りで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。
 - speculative decoding（`--dflash2-model-dir`）と併用できる。Drafter は target の factor を継承せず、自身の checkpoint の RoPE（通常は `default`）を使う。起動時に `DFLASH2 rope:` 行を stderr へ出す。
 - 2x の全長（524,288）は `--kv-cache-dtype fp8 --tp 2` で容量が成立する（FP8 KV の品質特性は別途評価が必要）。
@@ -161,6 +182,19 @@ request:
 `prefix_cache_checkpoint_position` は `0` のみ受理し、それ以外は
 `invalid_argument` で拒否する。prefix の再利用位置は compute 側の prefix cache が
 radix lookup で決め、checkpoint による指定は受け付けない。silent ignore はしない。
+
+thinking を生成途中で閉じる field は省略できる。
+
+| field | 既定 | 意味 |
+| --- | --- | --- |
+| `reasoning_budget_tokens` | `0`（予算なし） | thinking に許す最大 token 数。thinking が未クローズでこの数に達した位置の token を close token へ置換する |
+| `reasoning_close_token` | `-1` | thinking を閉じる単一 token ID。`reasoning_budget_tokens > 0` のときに必須 |
+
+`reasoning_close_token` が不正、または `reasoning_budget_tokens` が `max_new_tokens` を
+超える場合は `invalid_argument` で拒否する。置換は停止条件ではなく token value の
+置換であり、commit 数・KV・position は変えない。contract は
+[../developer/reasoning.md](../developer/reasoning.md) と
+[../developer/stop_conditions.md](../developer/stop_conditions.md) を参照。
 
 event:
 

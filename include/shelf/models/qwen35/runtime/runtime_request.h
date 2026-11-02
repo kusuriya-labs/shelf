@@ -40,11 +40,18 @@ struct DFlash2RequestSession {
     bool ready = false;
 };
 
+struct ThinkingBudget {
+    uint32_t tokens = 0;
+    int32_t close_token = -1;
+};
+
 struct RuntimeRequest {
     uint64_t id = 0;
 
     std::vector<int32_t> input_tokens;
     uint32_t max_new_tokens = 0;
+    ThinkingBudget thinking{};
+    bool thinking_closed = false;
 
     SamplingConfig sampling{};
 
@@ -92,6 +99,14 @@ CommitAction commit_sampled_token(
     RuntimeRequest& request,
     int32_t token,
     const StopTokens& stop_tokens);
+
+bool thinking_budget_enabled(const RuntimeRequest& request) noexcept;
+
+uint32_t thinking_allowance(const RuntimeRequest& request) noexcept;
+
+void note_generated_token(RuntimeRequest& request, int32_t token) noexcept;
+
+int32_t enforce_thinking_budget(RuntimeRequest& request, int32_t token) noexcept;
 
 CommitAction commit_final_prefill_without_sample(RuntimeRequest& request);
 

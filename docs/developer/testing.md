@@ -44,6 +44,19 @@ Skipped は開発者ローカル向けの表示にすぎず、required acceptanc
 - `tests/server` — Python 経路の contract test。reasoning は
   `tests/server/test_reasoning_parser.py`（GPU / model 不要）と
   `test_reasoning_request.py`（model のみ）、E2E が `test_server_reasoning*.py` である。
+  推論予算と thinking 予算は `test_inference_budget.py`（protocol / model のみ）と
+  `test_compute_thinking_budget.py`（compute E2E）が固定する。
+  `test_compute_thinking_budget.py` の DFlash2 経路は `SHELF_DFLASH2_MODEL_DIR` と
+  `SHELF_TEST_TP_DEVICES`（例 `0,1`）を設定した時だけ実行され、未設定では skip を表示する。
+  27B FP8 target に drafter を足すと 1 枚では収まらないため、DFlash2 経路は TP=2 の
+  GPU 2 枚が必要な test である。KV auto-fit が drafter 分を確保計算に織り込むので、
+  `--working-set-reserve-gib` の計算式は [runtime.md](runtime.md) の arena budget。
+  この case は production と同じ 4 GiB を明示する。1 GiB まで下げると drafter ではなく
+  plan 後の executor workspace が不足して起動しない。
+  この case は `--arena-gib` を渡さず auto にする。TP2 の rank arena で固定値を渡すと
+  物理 commit と競合して weight load が失敗するためである。
+  decode 経路と DFlash2 経路の token 列は比較しない。TP の reduction 違いで
+  分岐しうるため、each 経路で thinking 予算の contract だけを検証する。
 - `tests/correctness` — CPU fixture と GPU correctness path の突き合わせ。
   `SHELF_MODEL_DIR` を要求する optional test である。
 - `tests/quality` — quality regression の runner。`quality` label のみで、
@@ -256,9 +269,13 @@ python3 tests/server/run_server_regression.py --list
 ```
 
 `SHELF_MODEL_DIR` は runner が test を別 directory で起動するため絶対 path で渡す。
-既定の harness は 24 GiB arena・4 GiB working set を前提にするため、27B の FP8 重みを
-載せるホストでは `SHELF_TEST_ARENA_GIB` / `SHELF_TEST_WORKING_SET_RESERVE_GIB` で
-容量を合わせる。値を変えたら起動 log の `MEMORY_PLAN` で実際の割当を確認する。
+既定の harness は 24 GiB arena を前提にするため、27B の FP8 重みを載せるホストでは
+`SHELF_TEST_ARENA_GIB` で容量を合わせる。working set は compute 側の auto（`0`）に
+委ねるため、通常 `SHELF_TEST_WORKING_SET_RESERVE_GIB` は設定しない。明示した場合は
+harness が compute へ渡す。値を変えたら起動 log の `MEMORY_PLAN` で実際の割当を確認する。
+KV auto-fit が入れる drafter 分の計算式は `tests/unit/test_dflash2_footprint.cpp`、
+auto の working set reserve は `tests/unit/test_executor_footprint.cpp`（いずれも cpu）が
+固定する。
 
 group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` が正本である。
 現在の group は `core` / `tools` / `reasoning` / `unsupported` / `concurrency-cancel` / `agent`。
