@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <shelf/kernels/optimized/detail/attention_paged_common.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
 #include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
@@ -118,7 +119,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         block_table_shared = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const uint32_t visible = visible_shared;
@@ -245,7 +246,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         const uint32_t d = lane + 32u * j;
         if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (invalid_shared != 0u) return;
 
     const float global_max =
@@ -391,7 +392,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
         block_table_shared = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const uint32_t visible = visible_shared;
@@ -414,7 +415,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
             ? __bfloat162float(q_base[static_cast<size_t>(qh) * head_dim + d])
             : 0.0f;
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
@@ -507,7 +508,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
                 acc_lds[(wave * kQPerKV + qh) * kHeadLimit + d] = acc[qh][j];
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     #pragma unroll
     for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
@@ -566,7 +567,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_bf16_body(
         const uint32_t slot = a.row_sequence_slots[row];
         row_valid_shared = (slot < a.max_sequences) ? 1u : 0u;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const float* base = partials
@@ -582,7 +583,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_bf16_body(
             g_lds[qh] = g;
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
     for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {
         if (tid == qh) {
             const float g = g_lds[qh];
@@ -596,7 +597,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_bf16_body(
             sum_lds[qh] = sum_total;
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint32_t q_head0 = kv_head * kQPerKV;
     #pragma unroll
@@ -688,7 +689,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_qh_bf16_body(
         const uint32_t slot = a.row_sequence_slots[row];
         row_valid_shared = (slot < a.max_sequences) ? 1u : 0u;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const float* base = partials
@@ -704,7 +705,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_qh_bf16_body(
             g_lds[q] = g;
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
     for (uint32_t q = 0u; q < kQhPerWg; ++q) {
         if (tid == q) {
             const float g = g_lds[q];
@@ -718,7 +719,7 @@ __device__ __forceinline__ void attention_paged_split_reduce_qh_bf16_body(
             sum_lds[q] = sum_total;
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint32_t q_head0 = kv_head * kQPerKV + qh0;
     #pragma unroll
@@ -1132,7 +1133,7 @@ void attention_paged_fp8_impl(
         block_table_shared = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const uint32_t visible = visible_shared;
@@ -1273,7 +1274,7 @@ void attention_paged_fp8_impl(
         const uint32_t d = lane + 32u * j;
         if (d < head_dim) acc_shared[wave * kHeadLimit + d] = acc[j];
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (invalid_shared != 0u) return;
 
     const float global_max =
@@ -1410,7 +1411,7 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
         block_table_shared = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (row_valid_shared == 0u) return;
 
     const uint32_t visible = visible_shared;
@@ -1433,7 +1434,7 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
             ? __bfloat162float(q_base[static_cast<size_t>(qh) * head_dim + d])
             : 0.0f;
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
@@ -1534,7 +1535,7 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
                 acc_lds[(wave * kQPerKV + qh) * kHeadLimit + d] = acc[qh][j];
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     #pragma unroll
     for (uint32_t qh = 0u; qh < kQPerKV; ++qh) {

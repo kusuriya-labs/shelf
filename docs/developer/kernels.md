@@ -66,6 +66,22 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` のexact-rows
   経路が担う。MTP verifyはこの順序に依存する。
 
+## workgroup barrier のスコープ
+
+LDS のやり取りだけを order する barrier は `detail::lds_barrier()`
+（`src/shelf/kernels/optimized/detail/lds_barrier_device.h`）を使う。
+
+`__syncthreads()` は workgroup scope の全 address space に対する acquire-release fence であり、
+gfx1201 では両側に `global_inv scope:SCOPE_SE` が emit される。これは次に読む global
+（KV stream、activation codes、重み）の L0/L1 行を捨てる。`lds_barrier()` は fence を
+`local` address space に限定するため、その invalidate が消える。
+
+- 選択基準: barrier の後に、同一 block の別の thread がその kernel 内で書いた global を
+  読む経路が無いか。無いなら `lds_barrier()`。
+- atomic・arrival counter・block 間 global 通信を扱う barrier は `__syncthreads()` のまま。
+  現状 `src/shelf/kernels/optimized/` で該当するのは `radix_topn.hip` だけである。
+- kernel 境界を跨ぐ global の可視性は launch 自体が保証するため、barrier の役割ではない。
+
 ## paged attention の不変条件
 
 `paged_decode.hip` / `paged_prefill.hip` は次を満たす。

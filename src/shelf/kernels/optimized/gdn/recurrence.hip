@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
@@ -293,7 +294,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
                     Sacc[ki * 2u + vj][e];
         }
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint32_t nchunks = kSerialRows
         ? row_count
@@ -310,7 +311,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             s.bt[tid] = ok ? 1.0f / (1.0f + __expf(-bv)) : 0.0f;
             s.oe[tid] = ok ? neg_exp_a_log * __logf(1.0f + __expf(av + dt_bias)) : 0.0f;
         }
-        __syncthreads();
+        detail::lds_barrier();
         if (tid < 32u) {
             float val = s.oe[tid];
             #pragma unroll
@@ -320,14 +321,14 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             }
             s.G[tid] = val;
         }
-        __syncthreads();
+        detail::lds_barrier();
         if (tid < g::kWt) {
             const float gl = s.G[g::kWt - 1u];
             s.oe[tid] = __expf(s.G[tid]);
             s.de[tid] = __expf(gl - s.G[tid]);
         }
         if (tid == 0u) s.eg = __expf(s.G[g::kWt - 1u]);
-        __syncthreads();
+        detail::lds_barrier();
 
         f32x8_t p_acc = {};
         f32x8_t pk_acc = {};
@@ -376,7 +377,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 }
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
         if (warp < 4u) {
             const uint32_t i0 = mt * 16u + 8u * hi;
             const uint32_t j0 = nt * 16u + lo;
@@ -400,7 +401,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         }
         #pragma unroll
         for (uint32_t e = 0; e < 8u; ++e) oacc[e] *= s.oe[mt * 16u + 8u * hi + e];
-        __syncthreads();
+        detail::lds_barrier();
 
         if (tid < g::kWv) {
             float dlt[g::kWt];
@@ -414,7 +415,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 s.mid.dT[tid][i] = acc;
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         #pragma unroll
         for (uint32_t jt = 0; jt < g::kWt / 16u; ++jt) {
@@ -534,7 +535,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 #pragma unroll
                 for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] = f16_round(Sacc[t][e]);
         }
-        __syncthreads();
+        detail::lds_barrier();
         #pragma unroll
         for (uint32_t ki = 0; ki < 2u; ++ki)
             #pragma unroll
@@ -545,7 +546,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
                         Sacc[ki * 2u + vj][e];
             }
-        __syncthreads();
+        detail::lds_barrier();
     }
 
     const uint32_t slot_store = a.requests[request_index].request_handle.slot;
@@ -636,7 +637,7 @@ void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
                 }
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
         if (bad_index != 0u) return;
     }
 
@@ -882,7 +883,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
                 s.kqfrag[1][kk][lane][d] = fq.h[d];
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         f32x8_t uacc = {};
         f32x8_t oacc = {};
@@ -920,7 +921,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
                                       + static_cast<size_t>(v_head) * hv + v0 + v);
             s.delta[v] = beta * (vv - dval * uacc[0]);
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         if (mt == 0u) {
             #pragma unroll

@@ -1,6 +1,7 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
@@ -109,7 +110,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
                               ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
                               : 0.0f;
             }
-            __syncthreads();
+            detail::lds_barrier();
             const uint32_t blk0 = ag * 2u;
             #pragma unroll
             for (uint32_t bj = 0; bj < 2u; ++bj) {
@@ -144,7 +145,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
                             c[j], ws * smem[as_slot + static_cast<uint32_t>(j)], acc[t][j]);
                 }
             }
-            __syncthreads();
+            detail::lds_barrier();
         }
     };
     if (full_tile)
@@ -246,7 +247,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_pre
                             ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
                             : 0.0f;
         }
-        __syncthreads();
+        detail::lds_barrier();
         const uint32_t blk0 = ag * 2u;
         #pragma unroll
         for (uint32_t bj = 0; bj < 2u; ++bj) {
@@ -408,7 +409,7 @@ __global__ void __launch_bounds__(k2dThreads)
             s_as[ag & 1u][tid] = activation_scales[static_cast<size_t>(row_start + tid) *
                                                        as_row_floats +
                                                    ag];
-        __syncthreads();
+        detail::lds_barrier();
         const uint32_t blk0 = ag * 2u;
         if constexpr (kDeferScale) {
             const float ws_g0 = ws0row[ag];

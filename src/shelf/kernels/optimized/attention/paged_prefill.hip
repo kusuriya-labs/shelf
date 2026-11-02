@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <shelf/kernels/optimized/detail/attention_paged_common.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
 #include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
@@ -161,7 +162,7 @@ void attention_paged_prefill_bf16_body(
         s.block_table = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (s.invalid != 0u) return;
 
     const uint32_t rows = s.rows_here;
@@ -253,7 +254,7 @@ void attention_paged_prefill_bf16_body(
                 }
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             wf8_t c = wf8_t{};
@@ -271,7 +272,7 @@ void attention_paged_prefill_bf16_body(
             for (uint32_t e = 0u; e < 8u; ++e)
                 s.s_part[mt][kq][8u * hi + e][lo] = c[e];
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             const uint32_t r = tid >> 3u;
@@ -312,7 +313,7 @@ void attention_paged_prefill_bf16_body(
                 s.row_alpha[r] = alpha;
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             const wbf8_t fa = frag_nk(&s.p_tile[0][0], kPPitch, mt * 16u, 0u, lane);
@@ -330,13 +331,13 @@ void attention_paged_prefill_bf16_body(
                 oacc[nt] = wmma_bf16(fa_lo, fb, oacc[nt]);
             }
         }
-        if constexpr (kMode != 0u) __syncthreads();
+        if constexpr (kMode != 0u) detail::lds_barrier();
     }
 
     if (s.invalid != 0u) return;
 
     if (tid < kTileRows && tid < rows) s.row_sum[tid] = 1.0f / s.row_sum[tid];
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint32_t r_base = mt * 16u + 8u * hi;
     #pragma unroll
@@ -544,7 +545,7 @@ void attention_paged_prefill_fp8_impl(
         s.block_table = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
-    __syncthreads();
+    detail::lds_barrier();
     if (s.invalid != 0u) return;
 
     const uint32_t rows = s.rows_here;
@@ -590,7 +591,7 @@ void attention_paged_prefill_fp8_impl(
                 s.q_scale[qrow] = (qrow < rows && local_max > 0.0f) ? local_max / kE4m3Max : 1.0f;
         }
     }
-    __syncthreads();
+    detail::lds_barrier();
 
     i32x2_t q_frag[kKsPerWarp];
     {
@@ -667,7 +668,7 @@ void attention_paged_prefill_fp8_impl(
                 }
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             wf8_t c = wf8_t{};
@@ -681,7 +682,7 @@ void attention_paged_prefill_fp8_impl(
             for (uint32_t e = 0u; e < 8u; ++e)
                 s.s_part[mt][kq][8u * hi + e][lo] = c[e];
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             const uint32_t tg = tid & 7u;
@@ -727,7 +728,7 @@ void attention_paged_prefill_fp8_impl(
                 }
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
 
         {
             const i32x2_t fa = frag_kn_fp8(&s.p_tile[0][0], kPPitch,
@@ -748,13 +749,13 @@ void attention_paged_prefill_fp8_impl(
                     oacc[nt][e] += c[e] * s.p_scale[mt * 16u + 8u * hi + e];
             }
         }
-        __syncthreads();
+        detail::lds_barrier();
     }
 
     if (s.invalid != 0u) return;
 
     if (tid < kTileRows && tid < rows) s.row_sum[tid] = 1.0f / s.row_sum[tid];
-    __syncthreads();
+    detail::lds_barrier();
 
     const uint32_t r_base = mt * 16u + 8u * hi;
     #pragma unroll

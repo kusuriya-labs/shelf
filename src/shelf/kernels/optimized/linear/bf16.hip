@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
+#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
@@ -263,7 +264,7 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
     #pragma unroll
     for (int j = 0; j < 8; ++j)
         red[warp][j][lane] = acc[j];
-    __syncthreads();
+    detail::lds_barrier();
 
     if (warp == 0u) {
         float s[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
