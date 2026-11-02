@@ -44,6 +44,8 @@ Skipped は開発者ローカル向けの表示にすぎず、required acceptanc
 - `tests/server` — Python 経路の contract test。reasoning は
   `tests/server/test_reasoning_parser.py`（GPU / model 不要）と
   `test_reasoning_request.py`（model のみ）、E2E が `test_server_reasoning*.py` である。
+- `tests/correctness` — CPU fixture と GPU correctness path の突き合わせ。
+  `SHELF_MODEL_DIR` を要求する optional test である。
 - `tests/quality` — quality regression の runner。`quality` label のみで、
   external model を要求する。性能 test とは分離する。
 

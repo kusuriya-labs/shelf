@@ -489,6 +489,20 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
                          TIMEOUT 4560
                          SKIP_RETURN_CODE 77)
 
+    # CPU f64 fixture と correctness path の layer hidden / greedy token を比較する。
+    # Model dir via SHELF_MODEL_DIR. Skips (exit 77) when unset.
+    add_test(NAME test_qwen35_correctness_fixture
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+                 --gpu-count 1 --cost-gb 30 --timeout 1800
+                 --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+                 -- ${CMAKE_COMMAND} -E env
+                    "SHELF_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                    python3 "${CMAKE_SOURCE_DIR}/tests/correctness/test_qwen35_correctness_fixture.py")
+    set_tests_properties(test_qwen35_correctness_fixture PROPERTIES
+                         LABELS "gpu1;optional;external_files"
+                         TIMEOUT 2760
+                         SKIP_RETURN_CODE 77)
+
     # DFlash2 batched target verify: 2 requests in one verify batch must match the
     # per-request single path exactly.
     shelf_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)

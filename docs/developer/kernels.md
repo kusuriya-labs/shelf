@@ -53,6 +53,16 @@ launcher を持ち、`detail/*.inc` を include して 1 つの HIP translation 
 二重実装を増やさない。可能なら `DispatchBinding` を作って
 `model_dispatch_correctness` 経由で検証し、この階層を縮小する。
 
+correctness path は production と同じ W8A8 contract で動く。activation quantize は
+`Int8ActivationWorkspaceLayout` の preshuffle layout、同じ block scale、同じ丸めを
+使う。`ValueBinding::row_stride` は要素単位であるため、byte pointer で行を進める
+場合は dtype の要素サイズを掛ける。bf16 は `bf16` 型で load し、`uint16_t` を
+数値として変換しない。
+
+`test_activation_quantize_fp8_finegrained`（`gpu1;required`）は、production shape と
+全入力 pattern で `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` の correctness path が
+generic kernel と codes / scales まで一致することを固定する。
+
 ## Optimized
 
 optimized variantは `src/shelf/kernels/optimized/` に実装する。

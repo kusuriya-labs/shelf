@@ -138,9 +138,12 @@ byte order は同一ホスト内での比較を前提とする。
 
 ```text
 --variant correctness|e4m3-generic|e4m3-vec|e4m3-auto   (default e4m3-auto)
+--check                                                CPU reference / correctness path と照合
 ```
 
 FP8 E4M3 activation quantization (correctness 実装と optimized kernel の比較)。
+`--check` は e4m3 系 variant で generic kernel と CPU reference を比較し、
+model-dispatch correctness path の codes / scales も一致することを確認する。
 
 ## gemm
 

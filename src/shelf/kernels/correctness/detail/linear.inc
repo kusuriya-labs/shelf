@@ -148,7 +148,7 @@ __device__ __forceinline__ float act_load_f32(const void* row, uint32_t i, bool 
         __builtin_memcpy(&v, base + i * sizeof(float), sizeof(float));
         return v;
     }
-    uint16_t h;
+    bf16 h;
     __builtin_memcpy(&h, base + i * sizeof(uint16_t), sizeof(uint16_t));
     return __bfloat162float(h);
 }
@@ -189,9 +189,12 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     const uint32_t stride = global_stride(env);
     const void* xin = in.ptr;
     const uint32_t groups = (kp + 127u) / 128u;
+    const size_t row_bytes =
+        static_cast<size_t>(in.row_stride) *
+        ::ps::runtime::value_dtype_bytes(in.dtype);
     for (uint32_t m = global_tid(env); m < rows; m += stride) {
         const void* xrow = static_cast<const uint8_t*>(xin) +
-            static_cast<size_t>(m) * in.row_stride;
+            static_cast<size_t>(m) * row_bytes;
         uint8_t* codes = acodes +
             static_cast<size_t>(m >> 4) * (code_stride * 16u);
         const uint32_t m_slot = m & 15u;

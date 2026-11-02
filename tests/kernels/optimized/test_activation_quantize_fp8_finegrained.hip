@@ -1,6 +1,8 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
+#include <shelf/runtime/program/device_program.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/core/gpu/cleanup.h>
@@ -238,6 +240,129 @@ bool run_kernel(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
     return true;
 }
 
+bool run_correctness(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
+                     uint32_t kp, ps::gpu::GpuArena& arena, hipStream_t stream,
+                     Result& out, std::string& err) {
+    const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
+    auto ws_res = arena.allocate_aligned(layout.total_bytes, 256);
+    auto in_res = arena.allocate_aligned((size_t)rows * k * sizeof(ps::bf16_t), 256);
+    if (!ws_res.ok() || !in_res.ok()) {
+        err = "alloc";
+        return false;
+    }
+    uint8_t* ws = static_cast<uint8_t*>(ws_res.release().data());
+    ps::bf16_t* in = static_cast<ps::bf16_t*>(in_res.release().data());
+    if (hipMemcpy(in, h_in.data(), h_in.size() * 2, hipMemcpyHostToDevice) != hipSuccess) {
+        err = "h2d";
+        return false;
+    }
+    if (hipMemset(ws, 0xAB, layout.total_bytes) != hipSuccess) {
+        err = "memset";
+        return false;
+    }
+
+    ::ps::runtime::DeviceValueBinding value{};
+    value.logical_value = 0;
+    value.storage = ::ps::runtime::ValueStorage::EXTERNAL_INPUT;
+    value.dtype = ::ps::runtime::ValueDType::BF16;
+    value.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    value.feature_count = k;
+    value.row_stride = k;
+    value.offset = reinterpret_cast<uint64_t>(in);
+    value.bytes = static_cast<uint64_t>(rows) * k * sizeof(ps::bf16_t);
+
+    ::ps::runtime::DeviceWorkspaceRange range{};
+    range.offset = 0;
+    range.bytes = layout.total_bytes;
+
+    ::ps::runtime::DeviceValueBinding* values_dev = nullptr;
+    ::ps::runtime::DeviceWorkspaceRange* ranges_dev = nullptr;
+    ::ps::runtime::DeviceBatchContext* ctx_dev = nullptr;
+    float* scratch = nullptr;
+    uint32_t* error_word = nullptr;
+    bool ok = false;
+    do {
+        if (hipMalloc(&values_dev, sizeof(value)) != hipSuccess) { err = "malloc values"; break; }
+        if (hipMalloc(&ranges_dev, sizeof(range)) != hipSuccess) { err = "malloc ranges"; break; }
+        if (hipMalloc(&ctx_dev, sizeof(*ctx_dev)) != hipSuccess) { err = "malloc ctx"; break; }
+        if (hipMalloc(&scratch, 2048u * sizeof(float)) != hipSuccess) { err = "malloc scratch"; break; }
+        if (hipMalloc(&error_word, sizeof(uint32_t)) != hipSuccess) { err = "malloc error"; break; }
+        if (hipMemcpy(values_dev, &value, sizeof(value), hipMemcpyHostToDevice) != hipSuccess ||
+            hipMemcpy(ranges_dev, &range, sizeof(range), hipMemcpyHostToDevice) != hipSuccess) {
+            err = "h2d program";
+            break;
+        }
+        ::ps::runtime::DeviceBatchContext ctx{};
+        ctx.actual_rows = rows;
+        if (hipMemcpy(ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) {
+            err = "h2d ctx";
+            break;
+        }
+        if (hipMemset(error_word, 0, sizeof(uint32_t)) != hipSuccess) {
+            err = "memset error";
+            break;
+        }
+
+        ::ps::runtime::DeviceProgramView program{};
+        program.values = values_dev;
+        program.value_count = 1;
+        program.workspace_ranges = ranges_dev;
+        program.workspace_range_count = 1;
+        program.workspace_base = reinterpret_cast<uint64_t>(ws);
+
+        ::ps::runtime::DispatchBinding binding{};
+        binding.kernel_id = ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
+        binding.workspace_slot = 0;
+        binding.group_size = 32;
+        binding.activation_kp = kp;
+        binding.activation_max_rows = rows;
+        binding.activation_code_stride = layout.code_row_stride_bytes;
+        binding.activation_scale_stride = layout.scale_row_stride_bytes;
+        binding.input_slots[0] = 0;
+        binding.input_count = 1;
+
+        auto st = ::ps::kernel::launch_model_dispatch_correctness(
+            program, binding, ctx_dev, ::ps::kernel::ModelDispatchStateView{},
+            scratch, error_word, stream);
+        if (!st.ok()) {
+            err = "launch: " + st.message();
+            break;
+        }
+        if (hipStreamSynchronize(stream) != hipSuccess) { err = "sync"; break; }
+        uint32_t error = 0;
+        if (hipMemcpy(&error, error_word, sizeof(error), hipMemcpyDeviceToHost) != hipSuccess) {
+            err = "read error";
+            break;
+        }
+        if (error != 0u) {
+            err = "dispatch status " + std::to_string(error);
+            break;
+        }
+        const uint32_t rows_padded = (rows + 15u) & ~15u;
+        out.codes.assign((size_t)rows_padded * layout.code_row_stride_bytes, 0u);
+        out.scales.assign((size_t)rows * (layout.scale_row_stride_bytes / 4u), 0.f);
+        if (hipMemcpy(out.codes.data(), ws, out.codes.size(), hipMemcpyDeviceToHost) != hipSuccess) {
+            err = "d2h codes";
+            break;
+        }
+        if (hipMemcpy(out.scales.data(),
+                      ws + layout.scales_offset, out.scales.size() * 4,
+                      hipMemcpyDeviceToHost) != hipSuccess) {
+            err = "d2h scales";
+            break;
+        }
+        out.ok = true;
+        ok = true;
+    } while (false);
+
+    if (values_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(values_dev));
+    if (ranges_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(ranges_dev));
+    if (ctx_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(ctx_dev));
+    if (scratch != nullptr) ps::gpu::discard_cleanup_result(hipFree(scratch));
+    if (error_word != nullptr) ps::gpu::discard_cleanup_result(hipFree(error_word));
+    return ok;
+}
+
 bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuArena& arena,
                    hipStream_t stream) {
     const uint32_t kp = (k + 63u) & ~63u;
@@ -246,6 +371,7 @@ bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuAren
 
     Result gen;
     Result vec;
+    Result cor;
     std::string err;
     if (!run_kernel(h_in, rows, k, kp, true, arena, stream, gen, err)) {
         std::printf("FAIL: generic rows=%u k=%u %s: %s\n", rows, k, pattern_name(pattern), err.c_str());
@@ -254,6 +380,12 @@ bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuAren
     }
     if (!run_kernel(h_in, rows, k, kp, false, arena, stream, vec, err)) {
         std::printf("FAIL: vec rows=%u k=%u %s: %s\n", rows, k, pattern_name(pattern), err.c_str());
+        failed++;
+        return false;
+    }
+    if (!run_correctness(h_in, rows, k, kp, arena, stream, cor, err)) {
+        std::printf("FAIL: correctness rows=%u k=%u %s: %s\n", rows, k,
+                    pattern_name(pattern), err.c_str());
         failed++;
         return false;
     }
@@ -269,6 +401,9 @@ bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuAren
     const bool codes_ok = (vec.codes == gen.codes);
     const bool scales_ok = (std::memcmp(vec.scales.data(), gen.scales.data(),
                                         vec.scales.size() * 4) == 0);
+    const bool cor_codes_ok = (cor.codes == gen.codes);
+    const bool cor_scales_ok = (std::memcmp(cor.scales.data(), gen.scales.data(),
+                                            cor.scales.size() * 4) == 0);
 
     if (!cpu_codes_ok || !cpu_scales_ok) {
         for (size_t i = 0; i < gen.codes.size() && i < ref_codes.size(); ++i) {
@@ -287,13 +422,18 @@ bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuAren
         }
     }
 
-    char label[224];
+    char label[320];
     std::snprintf(label, sizeof(label),
-                  "rows=%-3u k=%-5u %-15s cpu-codes=%d cpu-scales=%d vec-codes=%d vec-scales=%d",
+                  "rows=%-3u k=%-5u %-15s cpu-codes=%d cpu-scales=%d vec-codes=%d "
+                  "vec-scales=%d cor-codes=%d cor-scales=%d",
                   rows, k, pattern_name(pattern), cpu_codes_ok ? 1 : 0, cpu_scales_ok ? 1 : 0,
-                  codes_ok ? 1 : 0, scales_ok ? 1 : 0);
-    check(cpu_codes_ok && cpu_scales_ok && codes_ok && scales_ok, label);
-    return cpu_codes_ok && cpu_scales_ok && codes_ok && scales_ok;
+                  codes_ok ? 1 : 0, scales_ok ? 1 : 0, cor_codes_ok ? 1 : 0,
+                  cor_scales_ok ? 1 : 0);
+    check(cpu_codes_ok && cpu_scales_ok && codes_ok && scales_ok &&
+              cor_codes_ok && cor_scales_ok,
+          label);
+    return cpu_codes_ok && cpu_scales_ok && codes_ok && scales_ok &&
+           cor_codes_ok && cor_scales_ok;
 }
 
 bool check_padding_generic(uint32_t rows, uint32_t k, ps::gpu::GpuArena& arena,

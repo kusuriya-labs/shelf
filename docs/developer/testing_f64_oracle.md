@@ -107,5 +107,31 @@ bit 一致し、16 token prefill と 18 token prefill の先頭 16 position も
 bit 一致する。
 
 GPU の correctness path と比較するときは、同じ input ids を prefill し、
-各 layer の残差出力をこの safetensors の同名 key と比較する。token は
-`generated_ids` の 64 個をそのまま照合する。
+各 layer の残差出力をこの safetensors の同名 key と比較する。
+
+GPU の correctness path は production と同じ W8A8（weight も activation も
+E4M3、activation は 128 要素ごとの dynamic scale）で実行する。fixture の oracle は
+weight だけを FP8 から復号し、activation は f64 のまま計算するため、次の差は
+実装の誤りではなく数値 class の差である。
+
+- hidden は bf16 の中間値と A8 量子化を含むため、f64 oracle と bit 一致しない。
+  比較は相対 L2 と平均絶対差で行う。
+- greedy token は top1-top2 margin が小さい step で入れ替わり得る。margin が
+  十分大きい step は完全一致し、小さい step は fixture の top5 内の別 token を
+  許容する。
+
+自動検証は `test_qwen35_correctness_fixture`（`gpu1;optional;external_files`）が行う。
+`SHELF_MODEL_DIR` を設定して実行する。
+
+```sh
+SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 SHELF_BUILD_DIR=build \
+  python3 tests/correctness/test_qwen35_correctness_fixture.py
+```
+
+固定する契約:
+
+- `hidden_01..hidden_08` の相対 L2 が `2e-2` 以下、平均絶対差が `2e-2` 以下
+- greedy token は fixture と先頭から一致する
+- 最初の不一致は、fixture の margin が `0.5` 以下かつ生成 token が fixture の
+  top5 に含まれる場合だけ許容する
+- 許容した不一致より前の token は完全一致する

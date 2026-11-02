@@ -45,6 +45,7 @@ void usage(FILE* f) {
         "  --seed N                          (default 1234)\n"
         "  --device N                        (default 0)\n"
         "  --check                           verify codes+scales exact vs CPU reference\n"
+        "                                    and model-dispatch correctness path\n"
         "  --out PATH                        (append CSV rows)\n");
 }
 
@@ -279,10 +280,11 @@ int run_activation_quantize(int argc, char** argv) {
                                          ? std::bind(launch_fp8_finegrained_auto, std::ref(e), std::placeholders::_1)
                                          : std::bind(launch_correctness, std::ref(e), std::placeholders::_1))));
 
-        if (o.check && fp8_finegrained_variant) {
+        if (o.check) {
             const size_t total = e.layout.total_bytes;
             std::vector<uint8_t> got_vec(total);
             std::vector<uint8_t> got_gen(total);
+            std::vector<uint8_t> got_cor(total);
             if (launch_fp8_finegrained_generic(e, stream) != hipSuccess ||
                 hipStreamSynchronize(stream) != hipSuccess) {
                 fprintf(stderr, "check generic launch failed rows=%u\n", rows);
@@ -303,9 +305,52 @@ int run_activation_quantize(int argc, char** argv) {
             if (hipMemcpy(got_vec.data(), e.act_ws, total, hipMemcpyDeviceToHost) != hipSuccess) {
                 rc = 1; teardown(e); continue;
             }
+            if (launch_correctness(e, stream) != hipSuccess ||
+                hipStreamSynchronize(stream) != hipSuccess) {
+                fprintf(stderr, "check correctness launch failed rows=%u\n", rows);
+                rc = 1;
+                teardown(e);
+                continue;
+            }
+            if (hipMemcpy(got_cor.data(), e.act_ws, total, hipMemcpyDeviceToHost) != hipSuccess) {
+                rc = 1; teardown(e); continue;
+            }
             const bool same = (got_vec == got_gen);
-            std::printf("CHECK e4m3 rows=%-4u k=%u vec_equals_generic=%d\n", rows, o.k, same ? 1 : 0);
-            if (!same) rc = 1;
+            const bool cor_same = (got_cor == got_gen);
+            std::printf("CHECK e4m3 rows=%-4u k=%u vec_equals_generic=%d "
+                        "correctness_equals_generic=%d\n",
+                        rows, o.k, same ? 1 : 0, cor_same ? 1 : 0);
+            if (!cor_same) {
+                std::size_t first = total;
+                for (std::size_t i = 0; i < total; ++i) {
+                    if (got_cor[i] != got_gen[i]) { first = i; break; }
+                }
+                std::printf("  first_diff=%zu codes_offset=%llu scales_offset=%llu "
+                            "codes_bytes=%llu\n",
+                            first,
+                            static_cast<unsigned long long>(e.layout.codes_offset),
+                            static_cast<unsigned long long>(e.layout.scales_offset),
+                            static_cast<unsigned long long>(e.layout.codes_bytes()));
+                {
+                    const float* c = reinterpret_cast<const float*>(got_cor.data() + e.layout.scales_offset);
+                    const float* g = reinterpret_cast<const float*>(got_gen.data() + e.layout.scales_offset);
+                    std::printf("  scale0 cor=%g gen=%g\n",
+                                static_cast<double>(c[0]), static_cast<double>(g[0]));
+                }
+                if (first < e.layout.scales_offset) {
+                    std::printf("  code cor=%u gen=%u\n",
+                                static_cast<unsigned>(got_cor[first]),
+                                static_cast<unsigned>(got_gen[first]));
+                } else {
+                    const float* c = reinterpret_cast<const float*>(got_cor.data() + e.layout.scales_offset);
+                    const float* g = reinterpret_cast<const float*>(got_gen.data() + e.layout.scales_offset);
+                    const std::size_t idx = (first - e.layout.scales_offset) / sizeof(float);
+                    std::printf("  scale idx=%zu cor=%g gen=%g\n", idx,
+                                static_cast<double>(c[idx]),
+                                static_cast<double>(g[idx]));
+                }
+            }
+            if (!same || !cor_same) rc = 1;
         }
 
 
