@@ -10,11 +10,23 @@ stdin writer exist per process.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import os
+import signal
 import sys
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
+
+
+_PR_SET_PDEATHSIG = 1
+_libc = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
+
+
+def _set_parent_death_signal() -> None:
+    if _libc is None:
+        return
+    _libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM))
 
 
 class ComputeError(RuntimeError):
@@ -131,15 +143,23 @@ class AsyncComputeClient:
     async def start(self) -> None:
         if self._proc is not None:
             raise ComputeError("compute process already started")
+        subprocess_kwargs = {}
+        if _libc is not None:
+            subprocess_kwargs["preexec_fn"] = _set_parent_death_signal
         self._proc = await asyncio.create_subprocess_exec(
             *self._argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **subprocess_kwargs,
         )
         self._stdout_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
-        pong = await self.ping()
+        try:
+            pong = await self.ping()
+        except Exception:
+            await self.shutdown(timeout=2.0)
+            raise
         self.capabilities = ComputeCapabilities.from_pong(pong)
 
     def is_alive(self) -> bool:

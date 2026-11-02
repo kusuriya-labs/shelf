@@ -570,10 +570,10 @@ async def _serve(opts) -> int:
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         try:
             loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):
+        except (NotImplementedError, RuntimeError, ValueError):
             pass
 
     await stop.wait()

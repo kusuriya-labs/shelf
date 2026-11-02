@@ -26,6 +26,15 @@ shelf-compute --serve-stdio   (token IDs in / token IDs out)
 起動順は model processor load → compute subprocess 起動 → `ping` → capability 取得 →
 HTTP listen である。server が ready になるまで port を accept しない。
 
+compute の親プロセス死亡時の扱い:
+
+- 通常の SIGINT / SIGTERM / SIGHUP では server の cleanup が
+  `compute.shutdown()` を実行し、JSONL shutdown で compute を停止する。
+- server が SIGKILL などで cleanup を実行できない場合も、compute subprocess には
+  Linux の `PR_SET_PDEATHSIG(SIGTERM)` が設定されるため、server の終了に追従して
+  compute も終了する。
+- `ping` に失敗した起動途中の compute も `shutdown()` で停止する。
+
 ## Supported
 
 - `GET /v1/models`（各 model に `context_length` を含む）
