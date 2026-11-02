@@ -74,9 +74,8 @@ RDNA4 (gfx1201) 上で最適化を計測・採否判断するときに今後も�
 - 新しい計測をしていない数値を「更新」しない。
 ## 9. カテゴリ別 serving 計測（BetterBench）
 
-`vendor/BetterBench`（外部 harness、`GGZ14/BetterBench` = gfx1201 側の
-vllm-mxfp4（`references/vllm_mxfp4.md`） と対になる計測器）を OpenAI 互換 endpoint に
-向けて回す。token/s 1 本では見えない「カテゴリ別の受理数」と TTFT が出る。
+`vendor/BetterBench`（外部 harness、`GGZ14/BetterBench`。gfx1201 側の参照実装と
+対になる計測器）を OpenAI 互換 endpoint に向けて回す。token/s 1 本では見えない「カテゴリ別の受理数」と TTFT が出る。
 
 ```sh
 pip install -e vendor/BetterBench
@@ -94,14 +93,13 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
 - corpus は `vendor/BetterBench/corpus/v1`（コード/json/math/summarization/file_edit/
   reasoning/chat/prose）。sampling 既定は temp 0.7 / top_p 0.95 / top_k 20、nonce により
   prefix cache は cold。
-- 参照側の表（`references/vllm_mxfp4.md`）と比較するときは harness の版
+- 参照側の公開表と比較するときは harness の版
   （`betterbench --version`）と corpus 版、`--max-seq-len`、pass 数を併記する。
 - **update 粒度の差**: こちらは `shelf-compute` がトークン 1 個ごとに SSE を出すため
   BetterBench は "one token per update" と判定し、update gap の代わりに ITL を報告する。
   `tok/update` は比較に使えない。**decode t/s・TTFT・prefill は粒度に依らず比較できる**。
 - **リクエスト数の上限**: per-request state は起動時に `max_concurrent_requests` 分
-  pre-allocate されるため、1 リクエストあたりの arena 消費は 0 である
-  （`rnd/reference_gap_analysis.md` §5.3）。
+  pre-allocate されるため、1 リクエストあたりの arena 消費は 0 である。
   `--max-seq-len 65536` でもカテゴリをまたいで連続計測できる。
   KV 容量は arena 予算から導出される（§5.4）。カテゴリ毎の server 再起動は
   依然として行うが、理由は process 間で状態を持ち越さないためである。

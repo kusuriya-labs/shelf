@@ -2,7 +2,7 @@
 
 このdirectoryは **現在の性能値・再現条件・測定方法** のみを置く。
 
-- [current.md](current.md) — 現在再現可能な performance baseline
+- [current.md](current.md) — 現在再現可能な performance baseline（未計測の場合はその状態を書く）
 - [methodology.md](methodology.md) — 今後も使う測定原則
 
 ## ルール

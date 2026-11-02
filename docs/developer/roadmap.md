@@ -27,26 +27,25 @@ batcher が decode region を前置した `ScheduledBatch` を組んで 1 回だ
 する。実装上の制約（mixed batch に載せられる verify request は 1 つまで、
 `capture_rows` と row index の扱い）がある。
 
-drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）で ALU 律速を
-下げたが、draft GPU 時間は依然 request 数に対して増える
-（[../perf/current.md](../perf/current.md)）。
+drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）を選ぶが、
+draft GPU 時間は request 数に比例して増える。
 
 ## 4. リファレンス実装（vllm-mxfp4）との差分から採用するもの
 
 優先順は次のとおり。
 
-1. **small-M split-K decode GEMM（M≤64）** と **kernel trace 内訳に基づく launch 削減**
-   （1 round あたり ~1484 dispatch。swiglu 68、GDN 系 102、rmsnorm+rope 68）。
+1. **small-M split-K decode GEMM（M≤64）** と **kernel trace 内訳に基づく launch 削減**。
+   内訳は rocprofv3 kernel-trace から取り直す（[../perf/methodology.md](../perf/methodology.md) §1）。
 2. **dynamic verify width**（round ごとの draft 数可変）。
 3. 自前計測のうえで採否: fp8 residual stream、KV 容量の決め方、
    GDN conv+recurrent 統合。
 
 ## 5. serving の改善対象（BetterBench で測定）
 
-`vendor/BetterBench` によるカテゴリ別比較の経緯と実測は
-[../perf/current.md](../perf/current.md)。
-当時の計測は MXFP4 model 構成で行い、この構成は現在の runtime では非対応である
-（BF16 / FP8 構成での再計測は未実施）。
+`vendor/BetterBench` によるカテゴリ別比較の手順は
+[../perf/methodology.md](../perf/methodology.md) §9。
+BF16 / FP8 構成でのカテゴリ別計測は未実施であり、`docs/perf/current.md` に
+現在のカテゴリ別数値は無い。
 
 改善対象は長文 prefill のスループットである。
 
