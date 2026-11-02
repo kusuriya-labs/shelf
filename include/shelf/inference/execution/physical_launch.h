@@ -150,8 +150,7 @@ struct PhysicalL2NormalizeLaunch {
 };
 
 enum class PhysicalGdnRecurrenceVariant : uint8_t {
-    DecodeRowsExact = 0,
-    WmmaSerial = 2,
+    WmmaVerify = 0,
     Wmma = 4,
     F32 = 5,
     Unsupported = 255,
@@ -170,6 +169,7 @@ struct PhysicalGdnConv1dLaunch {
 struct PhysicalGdnRecurrenceLaunch {
     ::shelf::kernel::GdnRecurrenceArgs kernel{};
     bool lossy = false;
+    bool split_regions = false;
     uint32_t rows = 0;
     uint32_t num_requests = 0;
     uint32_t max_request_rows = 0;

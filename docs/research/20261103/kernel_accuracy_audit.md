@@ -59,7 +59,7 @@ E2E（TP2 / FP8 KV / prompt 1024 / 32 token）では decode は
 prefill も 297.9 ms と 299.1 ms で差は 0.4% であった。
 
 このため、GDN recurrence は exact を既定にしても decode の性能影響は観測されない。
-一方で、exact にすると decode-rows 専用 kernel が無効になり WmmaSerial へ落ちるため、
+一方で、exact にすると `WmmaVerify` の lossy 専用経路が無効になるため、
 spec verify の rows=2/4/8 と DFlash2 の acceptance rate は別途確認が必要である。
 
 ## 判断

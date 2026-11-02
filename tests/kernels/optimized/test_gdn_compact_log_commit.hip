@@ -241,11 +241,17 @@ int main() {
     for (auto& v : chain_hist) v.resize(state_n);
 
     for (uint32_t r = 0u; r < kRows && ok; ++r) {
+        ::shelf::runtime::DeviceRequestDescriptor req{};
+        req.request_handle.slot = 0u;
+        req.row_begin = r;
+        req.row_count = 1u;
+        if (hipMemcpy(d.requests, &req, sizeof(req), hipMemcpyHostToDevice) != hipSuccess)
+            ok = false;
         for (uint32_t li = 0u; li < kStates && ok; ++li) {
             ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
-            a.row_override = static_cast<int32_t>(r);
-            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess)
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) !=
+                hipSuccess)
                 ok = false;
         }
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
@@ -254,6 +260,14 @@ int main() {
         if (ok)
             ok = read_state_f16(d.hist + (size_t)r * kStates * kSlotStride,
                                 chain_hist[r], state_n);
+    }
+    {
+        ::shelf::runtime::DeviceRequestDescriptor req{};
+        req.request_handle.slot = 0u;
+        req.row_begin = 0u;
+        req.row_count = kRows;
+        if (hipMemcpy(d.requests, &req, sizeof(req), hipMemcpyHostToDevice) != hipSuccess)
+            ok = false;
     }
     check(ok, "spill chain runs");
 
@@ -306,17 +320,17 @@ int main() {
         for (uint32_t li = 0u; li < kStates && sok; ++li) {
             ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
-            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(a, stream) !=
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) !=
                 hipSuccess)
                 sok = false;
         }
         if (sok && hipStreamSynchronize(stream) != hipSuccess) sok = false;
         if (sok)
             sok = read_state_f16(d.state, serial16, state_n);
-        check(sok, "wmma_serial chain runs (multi-layer)");
+        check(sok, "wmma_verify chain runs (multi-layer)");
         size_t first = 0;
         check(all_bits_equal(ref_traj[kRows], serial16, first),
-              "wmma_serial matches per-row wmma chain (multi-layer)");
+              "wmma_verify matches per-row wmma chain (multi-layer)");
     }
 
     {
@@ -335,7 +349,7 @@ int main() {
             std::printf("  [serial-commit] first_bad=%zu ref=%.6g got=%.6g\n", first,
                         (double)serial16[first], (double)got[first]);
         }
-        check(cok, "commit reproduces wmma_serial state (multi-layer, rows=16)");
+        check(cok, "commit reproduces wmma_verify state (multi-layer, rows=16)");
     }
 
     {
@@ -478,17 +492,17 @@ int main() {
             ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
             a.actual_rows = kRowsExact;
-            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(a, stream) !=
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) !=
                 hipSuccess)
                 sok = false;
         }
         if (sok && hipStreamSynchronize(stream) != hipSuccess) sok = false;
         if (sok)
             sok = read_state_f16(d.state, rows8, state_n);
-        check(sok, "decode_rows_exact chain runs (multi-layer)");
+        check(sok, "wmma_verify chain runs (multi-layer)");
         size_t first = 0;
         check(all_bits_equal(ref_traj[kRowsExact], rows8, first),
-              "decode_rows_exact matches per-row wmma chain (multi-layer)");
+              "wmma_verify matches per-row wmma chain (multi-layer)");
 
         std::vector<std::vector<float>> rows8_hist(kRowsExact);
         for (auto& v : rows8_hist) v.resize(state_n);
@@ -505,7 +519,7 @@ int main() {
                             (double)rows8_hist[r][hfirst]);
             }
         }
-        check(hok, "decode_rows_exact history capture matches chain history (multi-layer)");
+        check(hok, "wmma_verify history capture matches chain history (multi-layer)");
     }
 
     {
@@ -524,7 +538,7 @@ int main() {
             std::printf("  [rows-commit] first_bad=%zu ref=%.6g got=%.6g\n", first,
                         (double)rows8[first], (double)got[first]);
         }
-        check(cok, "commit reproduces decode_rows_exact state (multi-layer, rows=8)");
+        check(cok, "commit reproduces wmma_verify state (multi-layer, rows=8)");
     }
 
     d.free_all();

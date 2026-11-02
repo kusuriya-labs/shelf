@@ -16,6 +16,15 @@ __device__ __forceinline__ float bf16f(const bf16_t* p) {
     return __bfloat162float(*reinterpret_cast<const __hip_bfloat16*>(p));
 }
 
+__device__ __forceinline__ bool gdn_request_selected(
+    const GdnRecurrenceArgs& a, const ::shelf::runtime::DeviceRequestDescriptor& req) {
+    if (a.execution_class_filter == 1u)
+        return req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
+    if (a.execution_class_filter == 2u)
+        return req.execution_class != ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
+    return true;
+}
+
 __device__ __forceinline__ float ld_f16(const fp16_t* p) {
     return static_cast<float>(p->value);
 }
@@ -49,6 +58,7 @@ __global__ void gdn_recurrence_f32_impl(const GdnRecurrenceArgs a) {
 
     if (request_index >= a.num_requests) return;
     const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    if (!gdn_request_selected(a, req)) return;
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     const uint32_t row_begin = req.row_begin;
@@ -234,6 +244,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
     if (request_index >= a.num_requests) return;
     const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    if (!gdn_request_selected(a, req)) return;
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     const uint32_t row_begin = req.row_begin;
@@ -241,6 +252,9 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     if (row_begin >= a.actual_rows) return;
     if (row_begin + row_count > a.actual_rows) row_count = a.actual_rows - row_begin;
     if (row_count == 0u) return;
+    if constexpr (kSerialRows) {
+        if (row_count > kGdnRecurrenceVerifyBatchRows) row_count = kGdnRecurrenceVerifyBatchRows;
+    }
     const uint32_t repeat = a.num_v_heads / a.key_heads;
     const uint32_t qk_head = v_head / repeat;
     const uint32_t v0 = vg * g::kWv;
@@ -303,6 +317,44 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         const uint32_t c0 = kSerialRows ? (row_begin + ci) : (row_begin + ci * g::kWt);
         uint32_t nval = kSerialRows ? 1u : (row_count - ci * g::kWt);
         if (nval > g::kWt) nval = g::kWt;
+
+        if constexpr (kSerialRows) {
+            if (a.row_parent != nullptr && ci > 0u) {
+                const int32_t parent = a.row_parent[c0];
+                if (parent != static_cast<int32_t>(c0) - 1) {
+                    const fp16_t* src = state_head;
+                    if (parent >= 0 && a.recurrent_history != nullptr &&
+                        static_cast<uint32_t>(parent) < a.capture_rows) {
+                        src = a.recurrent_history +
+                              static_cast<uint64_t>(parent) * a.recurrent_history_row_stride +
+                              static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride +
+                              static_cast<uint64_t>(v_head) * hd * hv;
+                    }
+                    #pragma unroll
+                    for (uint32_t ki = 0; ki < 2u; ++ki)
+                        #pragma unroll
+                        for (uint32_t vj = 0; vj < 2u; ++vj) {
+                            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
+                            const uint32_t n0 = (vt0 + vj) * 16u + lo;
+                            const fp16_t* sp = src + static_cast<size_t>(m0) * hv + v0 + n0;
+                            #pragma unroll
+                            for (uint32_t e = 0; e < 8u; ++e)
+                                Sacc[ki * 2u + vj][e] =
+                                    ld_f16(sp + static_cast<size_t>(e) * hv);
+                        }
+                    #pragma unroll
+                    for (uint32_t ki = 0; ki < 2u; ++ki)
+                        #pragma unroll
+                        for (uint32_t vj = 0; vj < 2u; ++vj) {
+                            const uint32_t kt = kt0 + ki, vt = vt0 + vj;
+                            #pragma unroll
+                            for (uint32_t e = 0; e < 8u; ++e)
+                                Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch +
+                                    vt * 16u + lo] = Sacc[ki * 2u + vj][e];
+                        }
+                }
+            }
+        }
 
         if (tid < g::kWt) {
             const bool ok = tid < nval;
@@ -484,11 +536,11 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             }
         }
         if constexpr (kSerialRows) {
-            if (a.recurrent_history != nullptr && ci < a.capture_rows &&
+            if (a.recurrent_history != nullptr && c0 < a.capture_rows &&
                 (a.capture_verify_only == 0u ||
                  req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
                 fp16_t* hist_head = a.recurrent_history
-                    + static_cast<uint64_t>(ci) * a.recurrent_history_row_stride
+                    + static_cast<uint64_t>(c0) * a.recurrent_history_row_stride
                     + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
                     + static_cast<uint64_t>(v_head) * hd * hv;
                 #pragma unroll
@@ -567,35 +619,16 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
 }
 #pragma clang diagnostic pop
 
-template <bool kLossy, bool kSerialRows>
-__global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-__attribute__((amdgpu_num_vgpr(256))) void gdn_recurrence_wmma_impl(
-    const GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_body<kLossy, kSerialRows>(a);
-}
-
 extern "C" __global__ __launch_bounds__(256)
 __attribute__((amdgpu_num_vgpr(256)))
 void shelf_gdn_recurrence_wmma_lossy(GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_body<true, false>(a);
+    gdn_recurrence_wmma_body<true>(a);
 }
 
 extern "C" __global__ __launch_bounds__(256)
 __attribute__((amdgpu_num_vgpr(256)))
 void shelf_gdn_recurrence_wmma_exact(GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_body<false, false>(a);
-}
-
-extern "C" __global__ __launch_bounds__(256)
-__attribute__((amdgpu_num_vgpr(256)))
-void shelf_gdn_recurrence_wmma_serial_lossy(GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_body<true, true>(a);
-}
-
-extern "C" __global__ __launch_bounds__(256)
-__attribute__((amdgpu_num_vgpr(256)))
-void shelf_gdn_recurrence_wmma_serial_exact(GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_body<false, true>(a);
+    gdn_recurrence_wmma_body<false>(a);
 }
 
 struct RowSmem {
@@ -736,326 +769,17 @@ void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
     }
 }
 
-template <uint32_t kRows>
-__device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
-    const GdnRecurrenceArgs a) {
-    namespace g = gdngfx12;
-    using g::f32x8_t;
-    using g::Frag2;
-    static_assert(kRows == 2u || kRows == 4u || kRows == 8u,
-                  "decode rows kernel covers verify rows 2/4/8");
 
-    const uint32_t hd = a.head_k;
-    const uint32_t hv = a.head_v;
-    const uint32_t vgroups = hv / g::kWv;
-    const uint32_t vg = blockIdx.x % vgroups;
-    const uint32_t v_head = (blockIdx.x / vgroups) % a.num_v_heads;
-    const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
-    if (request_index >= a.num_requests) return;
-    const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
-    const uint32_t slot = req.request_handle.slot;
-    if (slot >= a.max_sequences) return;
-    const uint32_t row_begin = req.row_begin;
-    if (row_begin >= a.actual_rows) return;
-    if (row_begin + kRows > a.actual_rows) return;
-
-    const uint32_t repeat = a.num_v_heads / a.key_heads;
-    const uint32_t qk_head = v_head / repeat;
-    const uint32_t v0 = vg * g::kWv;
-
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t warp = tid >> 5u;
-    const uint32_t lo = lane & 15u;
-    const uint32_t hi = lane >> 4u;
-    const uint32_t kh = lane >> 4u;
-
-    fp16_t* state_head = a.recurrent_state
-        + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
-        + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-        + static_cast<uint64_t>(v_head) * hd * hv;
-
-    const float* __restrict__ qp_g = a.q + qk_head * hd;
-    const float* __restrict__ kp_g = a.k + qk_head * hd;
-
-    const float dt_bias = g::wbf2f(a.dt_bias + v_head);
-    const float neg_exp_a_log = -__expf(g::wbf2f(a.a_log + v_head));
-
-    __shared__ RowSmem s;
-    float* Sst = &s.S[0][0];
-    const uint32_t spitch = g::kSp;
-
-    const uint32_t mt = warp & 1u;
-    const uint32_t nt = warp >> 1u;
-    const uint32_t kt0 = (warp >> 1u) * 2u;
-    const uint32_t vt0 = (warp & 1u) * 2u;
-
-    f32x8_t Sacc[4];
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-            const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            const fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                Sacc[ki * 2u + vj][e] = ld_f16(sp + static_cast<size_t>(e) * hv);
-        }
-
-    #pragma unroll 1
-    for (uint32_t r = 0u; r < kRows; ++r) {
-        const uint32_t row = row_begin + r;
-        if (a.row_parent != nullptr && r > 0u) {
-            const int32_t parent = a.row_parent[row];
-            if (parent != static_cast<int32_t>(row) - 1) {
-                const fp16_t* src = state_head;
-                if (parent >= 0 && a.recurrent_history != nullptr &&
-                    static_cast<uint32_t>(parent) < a.capture_rows) {
-                    src = a.recurrent_history +
-                          static_cast<uint64_t>(parent) * a.recurrent_history_row_stride +
-                          static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride +
-                          static_cast<uint64_t>(v_head) * hd * hv;
-                }
-                #pragma unroll
-                for (uint32_t ki = 0; ki < 2u; ++ki)
-                    #pragma unroll
-                    for (uint32_t vj = 0; vj < 2u; ++vj) {
-                        const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-                        const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                        #pragma unroll
-                        for (uint32_t e = 0; e < 8u; ++e)
-                            Sacc[ki * 2u + vj][e] =
-                                ld_f16(src + static_cast<size_t>(m0) * hv + v0 + n0 +
-                                       static_cast<size_t>(e) * hv);
-                    }
-            }
-        }
-
-        const float bv = g::wbf2f(a.b + static_cast<size_t>(row) * a.b_row_stride + v_head);
-        const float av = g::wbf2f(a.a + static_cast<size_t>(row) * a.a_row_stride + v_head);
-        const float beta = 1.0f / (1.0f + __expf(-bv));
-        const float gval = neg_exp_a_log * __logf(1.0f + __expf(av + dt_bias));
-        const float dval = __expf(gval);
-        const float de0 = __expf(gval - gval);
-
-        #pragma unroll
-        for (uint32_t ki = 0; ki < 2u; ++ki)
-            #pragma unroll
-            for (uint32_t vj = 0; vj < 2u; ++vj) {
-                const uint32_t kt = kt0 + ki, vt = vt0 + vj;
-                #pragma unroll
-                for (uint32_t e = 0; e < 8u; ++e)
-                    Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
-                        Sacc[ki * 2u + vj][e];
-            }
-
-        fp16_t* hist_head = nullptr;
-        if (a.recurrent_history != nullptr && r < a.capture_rows &&
-            (a.capture_verify_only == 0u ||
-             req.execution_class ==
-                 ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
-            hist_head = a.recurrent_history
-                + static_cast<uint64_t>(r) * a.recurrent_history_row_stride
-                + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-                + static_cast<uint64_t>(v_head) * hd * hv;
-        }
-
-        {
-            const uint32_t kk = warp;
-            const uint32_t ti = lo;
-            const bool iok = ti < 1u;
-            const float* __restrict__ kp = kp_g + static_cast<size_t>(row + ti) * a.k_row_stride;
-            const float* __restrict__ qp = qp_g + static_cast<size_t>(row + ti) * a.q_row_stride;
-            float ktmp[8], qtmp[8];
-            #pragma unroll
-            for (uint32_t q = 0; q < 4u; ++q) {
-                ktmp[q] = iok ? kp[kk * 16u + kh * 4u + q] : 0.0f;
-                ktmp[4u + q] = iok ? kp[kk * 16u + 8u + kh * 4u + q] : 0.0f;
-                qtmp[q] = iok ? qp[kk * 16u + kh * 4u + q] : 0.0f;
-                qtmp[4u + q] = iok ? qp[kk * 16u + 8u + kh * 4u + q] : 0.0f;
-            }
-            const Frag2 fk = g::gdn_decomp8<true>(ktmp);
-            const Frag2 fq = g::gdn_decomp8<true>(qtmp);
-            #pragma unroll
-            for (uint32_t d = 0; d < 8u; ++d) {
-                s.kqfrag[0][kk][lane][d] = fk.h[d];
-                s.kqfrag[1][kk][lane][d] = fq.h[d];
-            }
-        }
-        detail::lds_barrier();
-
-        f32x8_t uacc = {};
-        f32x8_t oacc = {};
-        f32x8_t p_acc = {};
-        if (mt == 0u) {
-            const bool ppk = warp == 0u;
-            #pragma unroll
-            for (uint32_t kk = 0; kk < g::kWk / 16u; ++kk) {
-                float stmp[8];
-                #pragma unroll
-                for (uint32_t q = 0; q < 4u; ++q) {
-                    stmp[q] = Sst[static_cast<size_t>(kk * 16u + kh * 4u + q) * spitch + nt * 16u + lo];
-                    stmp[4u + q] = Sst[static_cast<size_t>(kk * 16u + 8u + kh * 4u + q) * spitch + nt * 16u + lo];
-                }
-                const Frag2 bs = g::gdn_decomp8<true>(stmp);
-                Frag2 ak, aq;
-                #pragma unroll
-                for (uint32_t d = 0; d < 8u; ++d) {
-                    ak.h[d] = s.kqfrag[0][kk][lane][d];
-                    aq.h[d] = s.kqfrag[1][kk][lane][d];
-                }
-                uacc = g::gdn_wmma2<true>(uacc, ak, bs);
-                oacc = g::gdn_wmma2<true>(oacc, aq, bs);
-                if (ppk) {
-                    p_acc = g::gdn_wmma2<true>(p_acc, aq, ak);
-                }
-            }
-        }
-
-        if (warp == 0u && lane == 0u) s.a00 = __expf(gval - gval) * p_acc[0];
-
-        if (mt == 0u && hi == 0u) {
-            const uint32_t v = nt * 16u + lo;
-            const float vv = g::wbf2f(a.v + static_cast<size_t>(row) * a.v_row_stride
-                                      + static_cast<size_t>(v_head) * hv + v0 + v);
-            s.delta[v] = beta * (vv - dval * uacc[0]);
-        }
-        detail::lds_barrier();
-
-        if (mt == 0u) {
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) oacc[e] *= dval;
-
-            float atmp0[8] = {};
-            if (lane == 0u) atmp0[0] = s.a00;
-            const Frag2 aab0 = g::gdn_decomp8<true>(atmp0);
-            float atmp1[8] = {};
-            const Frag2 aab1 = g::gdn_decomp8<true>(atmp1);
-            #pragma unroll
-            for (uint32_t jt = 0; jt < 2u; ++jt) {
-                float dtmp[8] = {};
-                if (jt == 0u && kh == 0u) dtmp[0] = s.delta[nt * 16u + lo];
-                const Frag2 bvb = g::gdn_decomp8<true>(dtmp);
-                oacc = g::gdn_wmma2<true>(oacc, jt == 0u ? aab0 : aab1, bvb);
-            }
-
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) {
-                const uint32_t i = 8u * hi + e;
-                if (i < 1u)
-                    a.output[static_cast<size_t>(row) * a.output_row_stride
-                             + static_cast<size_t>(v_head) * hv + v0 + nt * 16u + lo] = oacc[e];
-            }
-        }
-
-        const float egv = dval;
-        const uint64_t ckbase =
-            a.compact_k != nullptr
-                ? static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride
-                : 0u;
-        const uint64_t cqkdim = static_cast<uint64_t>(a.num_v_heads) * hd;
-        #pragma unroll
-        for (uint32_t t = 0; t < 4u; ++t)
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
-        #pragma unroll
-        for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
-            Frag2 bvv[2];
-            #pragma unroll
-            for (uint32_t vj = 0; vj < 2u; ++vj) {
-                float dtmp[8] = {};
-                if (tstep == 0u && kh == 0u) dtmp[0] = s.delta[(vt0 + vj) * 16u + lo];
-                bvv[vj] = g::gdn_decomp8<true>(dtmp);
-            }
-            #pragma unroll
-            for (uint32_t ki = 0; ki < 2u; ++ki) {
-                float ktmp[8] = {};
-                if (tstep == 0u && kh == 0u) {
-                    ktmp[0] = a.k[static_cast<size_t>(row) * a.k_row_stride + qk_head * hd
-                                  + (kt0 + ki) * 16u + lo] * de0;
-                    if (a.compact_k != nullptr)
-                        a.compact_k[ckbase + static_cast<size_t>(row) * cqkdim +
-                                    static_cast<size_t>(v_head) * hd +
-                                    (kt0 + ki) * 16u + lo] = ktmp[0];
-                }
-                const Frag2 akT = g::gdn_decomp8<true>(ktmp);
-                #pragma unroll
-                for (uint32_t vj = 0; vj < 2u; ++vj)
-                    Sacc[ki * 2u + vj] = g::gdn_wmma2<true>(Sacc[ki * 2u + vj], akT, bvv[vj]);
-            }
-        }
-
-        if (a.compact_delta != nullptr) {
-            const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
-            const uint64_t dbase =
-                static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
-            const uint64_t abase =
-                static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride;
-            for (uint32_t v = tid; v < g::kWv; ++v)
-                a.compact_delta[dbase + static_cast<size_t>(row) * vdim +
-                                static_cast<size_t>(v_head) * hv + v0 + v] = s.delta[v];
-            if (tid == 0u && a.compact_a != nullptr)
-                a.compact_a[abase + static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
-        }
-
-        if (hist_head != nullptr) {
-            #pragma unroll
-            for (uint32_t ki = 0; ki < 2u; ++ki)
-                #pragma unroll
-                for (uint32_t vj = 0; vj < 2u; ++vj) {
-                    const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-                    const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                    fp16_t* hp = hist_head + static_cast<size_t>(m0) * hv + v0 + n0;
-                    #pragma unroll
-                    for (uint32_t e = 0; e < 8u; ++e)
-                        st_f16(hp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
-                }
-        }
-
-        #pragma unroll
-        for (uint32_t t = 0; t < 4u; ++t)
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] = f16_round(Sacc[t][e]);
-
-        if (r + 1u == kRows) {
-            #pragma unroll
-            for (uint32_t ki = 0; ki < 2u; ++ki)
-                #pragma unroll
-                for (uint32_t vj = 0; vj < 2u; ++vj) {
-                    const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-                    const uint32_t n0 = (vt0 + vj) * 16u + lo;
-                    fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
-                    #pragma unroll
-                    for (uint32_t e = 0; e < 8u; ++e)
-                        st_f16(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
-                }
-        }
-    }
-}
-
-template <uint32_t kRows>
-__global__ __launch_bounds__(gdngfx12::kWthreads, 1u) void
-gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_decode_rows_exact_body<kRows>(a);
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void shelf_gdn_recurrence_wmma_verify_lossy(
+    GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, true>(a);
 }
 
 extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_decode_rows_exact_r2(
+void shelf_gdn_recurrence_wmma_verify_exact(
     GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_decode_rows_exact_body<2u>(a);
-}
-
-extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_decode_rows_exact_r4(
-    GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_decode_rows_exact_body<4u>(a);
-}
-
-extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_decode_rows_exact_r8(
-    GdnRecurrenceArgs a) {
-    gdn_recurrence_wmma_decode_rows_exact_body<8u>(a);
+    gdn_recurrence_wmma_body<false, true>(a);
 }
 
 bool gdn_recurrence_lossy_enabled() {
@@ -1093,43 +817,17 @@ hipError_t launch_gdn_recurrence_f32_wmma(
     return hipGetLastError();
 }
 
-hipError_t launch_gdn_recurrence_f32_wmma_serial(
+hipError_t launch_gdn_recurrence_f32_wmma_verify(
     const GdnRecurrenceArgs& args, hipStream_t stream) {
     if (args.head_k != gdngfx12::kWk) return hipErrorInvalidValue;
     if (args.head_v == 0u || args.head_v % gdngfx12::kWv != 0u) return hipErrorInvalidValue;
     if (args.key_heads == 0u || args.num_v_heads == 0u) return hipErrorInvalidValue;
     if (args.num_v_heads % args.key_heads != 0u) return hipErrorInvalidValue;
     if (args.num_requests == 0u || args.actual_rows == 0u) return hipErrorInvalidValue;
-    if (args.q == nullptr || args.k == nullptr || args.v == nullptr || args.a == nullptr || args.b == nullptr)
-        return hipErrorInvalidValue;
-    if (args.dt_bias == nullptr || args.a_log == nullptr) return hipErrorInvalidValue;
-    if (args.recurrent_state == nullptr || args.output == nullptr) return hipErrorInvalidValue;
-    if (args.requests == nullptr || args.max_sequences == 0u) return hipErrorInvalidValue;
-    const uint32_t vgroups = args.head_v / gdngfx12::kWv;
-    const uint64_t grid_x = static_cast<uint64_t>(args.num_requests) * args.num_v_heads * vgroups;
-    if (grid_x == 0u) return hipErrorInvalidValue;
-    const GdnRecurrenceArgs a = args;
-    const dim3 grid(static_cast<uint32_t>(grid_x));
-    if (gdn_recurrence_lossy_enabled())
-        gdn_recurrence_wmma_impl<true, true><<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-    else
-        gdn_recurrence_wmma_impl<false, true><<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-    return hipGetLastError();
-}
-
-bool gdn_recurrence_decode_rows_supported(const GdnRecurrenceArgs& args) {
-    if (!gdn_recurrence_lossy_enabled()) return false;
-    const bool tp1 = args.key_heads == 16u && args.num_v_heads == 48u;
-    const bool tp2 = args.key_heads == 8u && args.num_v_heads == 24u;
-    if (!tp1 && !tp2) return false;
-    if (args.head_k != gdngfx12::kWk || args.head_v != 128u) return false;
-    if (args.num_requests != 1u) return false;
-    return args.actual_rows == 2u || args.actual_rows == 4u || args.actual_rows == 8u;
-}
-
-hipError_t launch_gdn_recurrence_f32_wmma_decode_rows_exact(
-    const GdnRecurrenceArgs& args, hipStream_t stream) {
-    if (!gdn_recurrence_decode_rows_supported(args)) return hipErrorNotSupported;
+    if (args.execution_class_filter == 0u) {
+        if (args.num_requests > kGdnRecurrenceVerifyMaxRequests) return hipErrorInvalidValue;
+        if (args.actual_rows > kGdnRecurrenceVerifyBatchRows) return hipErrorInvalidValue;
+    }
     if (args.q == nullptr || args.k == nullptr || args.v == nullptr || args.a == nullptr ||
         args.b == nullptr)
         return hipErrorInvalidValue;
@@ -1141,22 +839,10 @@ hipError_t launch_gdn_recurrence_f32_wmma_decode_rows_exact(
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
     const dim3 grid(static_cast<uint32_t>(grid_x));
-    switch (args.actual_rows) {
-        case 2u:
-            gdn_recurrence_wmma_decode_rows_exact_impl<2>
-                <<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-            break;
-        case 4u:
-            gdn_recurrence_wmma_decode_rows_exact_impl<4>
-                <<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-            break;
-        case 8u:
-            gdn_recurrence_wmma_decode_rows_exact_impl<8>
-                <<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-            break;
-        default:
-            return hipErrorNotSupported;
-    }
+    if (gdn_recurrence_lossy_enabled())
+        shelf_gdn_recurrence_wmma_verify_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    else
+        shelf_gdn_recurrence_wmma_verify_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     return hipGetLastError();
 }
 

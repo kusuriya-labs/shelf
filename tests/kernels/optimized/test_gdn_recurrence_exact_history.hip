@@ -224,7 +224,7 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
     cand.recurrent_history = d.hist_cand;
     cand.recurrent_history_row_stride = d.slot_stride;
     cand.capture_rows = capture_rows;
-    if (ok && ::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(cand, stream) != hipSuccess)
+    if (ok && ::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(cand, stream) != hipSuccess)
         ok = false;
     if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
 

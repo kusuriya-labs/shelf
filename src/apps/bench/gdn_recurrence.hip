@@ -49,7 +49,7 @@ struct Options {
 void usage(FILE* f) {
     std::fprintf(f,
                  "usage: shelf-bench gdn-recurrence [options]\n"
-                 "  --variant correctness|optimized|optimized-multirow\n"
+                 "  --variant correctness|optimized|optimized-verify\n"
                  "  --rows 1,4,...\n"
                  "  --nreq 1,4,16\n"
                  "  --key-heads N\n"
@@ -376,10 +376,8 @@ hipError_t launch_optimized(const Env& e, hipStream_t s) {
     return ::shelf::kernel::launch_gdn_recurrence_f32(e.ka, s);
 }
 
-hipError_t launch_optimized_multirow(const Env& e, hipStream_t s) {
-    if (::shelf::kernel::gdn_recurrence_decode_rows_supported(e.ka))
-        return ::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(e.ka, s);
-    return launch_optimized(e, s);
+hipError_t launch_optimized_verify(const Env& e, hipStream_t s) {
+    return ::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(e.ka, s);
 }
 
 }  // namespace
@@ -411,7 +409,7 @@ int run_gdn_recurrence(int argc, char** argv) {
         else { usage(stderr); return 2; }
     }
     if (o.variant != "correctness" && o.variant != "optimized" &&
-        o.variant != "optimized-multirow") { usage(stderr); return 2; }
+        o.variant != "optimized-verify") { usage(stderr); return 2; }
     if (o.samples <= 0 || o.launches <= 0) return 2;
     if (hipSetDevice(o.device) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
@@ -453,7 +451,7 @@ int run_gdn_recurrence(int argc, char** argv) {
             }
             auto launch = [&](hipStream_t s) -> hipError_t {
                 if (o.variant == "correctness") return launch_correctness(e, s);
-                if (o.variant == "optimized-multirow") return launch_optimized_multirow(e, s);
+                if (o.variant == "optimized-verify") return launch_optimized_verify(e, s);
                 return launch_optimized(e, s);
             };
             if (o.check) {
@@ -472,7 +470,7 @@ int run_gdn_recurrence(int argc, char** argv) {
                 if (hipMemcpy(got.data(), e.out, got.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) { rc = 1; continue; }
                 std::vector<float> got_state(st_total);
                 if (!download_state(e.state, got_state, st_total)) { rc = 1; continue; }
-                const bool bf16_path = (o.variant == "optimized") && e.ka.head_k == 128u && e.ka.head_v % 64u == 0u;
+                const bool bf16_path = (o.variant == "optimized" || o.variant == "optimized-verify") && e.ka.head_k == 128u && e.ka.head_v % 64u == 0u;
                 double sref_pre = 0.0;
                 if (bf16_path)
                     for (size_t i = 0; i < ref_state.size(); ++i)

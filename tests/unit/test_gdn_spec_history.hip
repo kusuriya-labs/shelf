@@ -307,7 +307,7 @@ int main() {
     for (uint32_t n = 1u; n <= kCapture; ++n) {
         check(pool.reset(0u, stream).ok(), "clean reset");
         auto ra = make_rec_args(n);
-        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) ==
                   hipSuccess,
               "clean recurrence launch");
         auto ca = make_conv_args(n);
@@ -330,7 +330,7 @@ int main() {
         ra.recurrent_history = history.recurrent.data<fp16_t>();
         ra.recurrent_history_row_stride = static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
-        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) ==
                   hipSuccess,
               "capture recurrence launch");
         auto ca = make_conv_args(kCapture);
@@ -417,7 +417,7 @@ int main() {
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
         ra.row_parent = parents_dev_ptr;
-        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) ==
                   hipSuccess,
               "tree chain recurrence launch");
         auto ca = make_conv_args(kCapture);
@@ -457,7 +457,7 @@ int main() {
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
         ra.row_parent = parents_a_dev;
-        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) ==
                   hipSuccess,
               "tree branch recurrence launch A");
         auto ca = make_conv_args(4u);
@@ -499,7 +499,7 @@ int main() {
         set_req_rows(4u);
         check(pool.reset(0u, stream).ok(), "tree branch reset B");
         auto rb = make_rec_args(4u);
-        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(rb, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(rb, stream) ==
                   hipSuccess,
               "tree branch recurrence launch B");
         auto cb = make_conv_args(4u);

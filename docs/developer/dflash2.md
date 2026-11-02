@@ -749,12 +749,23 @@ restore:
 
 target verify の GDN recurrence 本体:
 
-- verify（`role == Verify`）は exact 系 variant を固定選択する
-  （`DecodeRowsExact` / `WmmaSerial`、非対応は `F32`）。
-- `DecodeRowsExact` は 27B geometry（`head_k == 128` かつ `head_v % 64 == 0`）∧
-  `decode_rows_supported` ∧ `SHELF_GDN_RECURRENCE_MULTIROW`（既定 1）で選ぶ。
-  それ以外は `geo_ok` なら `WmmaSerial` に落ちる。
+- verify（`role == Verify`）は `WmmaVerify` を固定選択する。geometry 非対応時のみ `F32`。
+- `WmmaVerify` は 1 回の launch で合計 32 行（M32）までを処理する。
+  最大 4 request × 8 行（anchor + drafts）を同時に verify できる。
+  launcher は pure verify launch で `actual_rows > 32` または `num_requests > 4` を拒否する。
+- `max_concurrent_requests 4` / DFlash2 `block_size 8` の server E2E で、
+  `SHELF_BATCH_STEP requests=4 tokens=32` の verify batch を確認済みである。
+- request ごとに 1 block が割り当てられ、その request の verify 行を処理する。
+  行ごとに `recurrent_history` と compact log を保存し、`row_parent` が示す
+  分岐行は history から親 state を復元する。
+- `WmmaVerify` は lossy / exact の両 decomposition を持ち、切替は
+  `SHELF_GDN_RECURRENCE_EXACT` / `SHELF_GDN_RECURRENCE_LOSSY` に従う。
 - decode / prefill は `Wmma` / `F32` の通常選択のままである。
+- batch に verify と decode/prefill が混在する場合、executor 内部で
+  verify region（`execution_class == SPEC_VERIFY`）とそれ以外へ分け、
+  `WmmaVerify` と `Wmma` を別々に launch する。verify request 数の上限は
+  M32 の範囲（最大 4 request・合計 32 行）で決まり、旧来の
+  「mixed batch は verify 1 request まで」制約は無い。
 
 ### EOS
 

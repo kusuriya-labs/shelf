@@ -69,6 +69,7 @@ struct Case {
     uint32_t rows;
     uint32_t seed;
     bool poison_v = false;
+    bool verify = false;
 };
 
 struct Bufs {
@@ -301,7 +302,9 @@ bool run_case(const Case& c) {
     ka.recurrent_slot_stride = slot_stride;
     ka.recurrent_layer_stride = layer_stride;
     hipError_t he = hipSuccess;
-    if (c.head_k == 128u && (c.head_v % 64u) == 0u) {
+    if (c.verify) {
+        he = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ka, nullptr);
+    } else if (c.head_k == 128u && (c.head_v % 64u) == 0u) {
         he = ::shelf::kernel::launch_gdn_recurrence_f32_wmma(ka, nullptr);
     } else {
         he = ::shelf::kernel::launch_gdn_recurrence_f32(ka, nullptr);
@@ -499,6 +502,10 @@ int main() {
     run({"27b-tp2-prefill", 8, 24, 128, 128, 0, 1, 1, {{0, 0, 64}}, 64, 2028});
     run({"27b-tp2-decode-multi", 8, 24, 128, 128, 0, 1, 4,
          {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, 1}}, 4, 2029});
+    run({"wmma-verify-m32", 16, 32, 128, 128, 0, 1, 4,
+         {{0, 0, 8}, {1, 8, 8}, {2, 16, 8}, {3, 24, 8}}, 32, 3030, false, true});
+    run({"wmma-verify-m32-27b", 8, 24, 128, 128, 0, 1, 4,
+         {{0, 0, 8}, {1, 8, 8}, {2, 16, 8}, {3, 24, 8}}, 32, 3031, false, true});
     run({"nan-input", 16, 32, 128, 128, 0, 1, 1, {{0, 0, 33}}, 33, 1119, true});
     std::printf("%s: %d failures\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

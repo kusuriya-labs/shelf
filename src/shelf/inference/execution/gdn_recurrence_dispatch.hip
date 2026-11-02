@@ -26,15 +26,6 @@ namespace {
 
 using ::shelf::runtime::KernelId;
 
-bool gdn_recurrence_multirow_enabled() {
-    static const bool enabled = []() {
-        const char* x = std::getenv("SHELF_GDN_RECURRENCE_MULTIROW");
-        if (x != nullptr && x[0] == '0') return false;
-        return true;
-    }();
-    return enabled;
-}
-
 const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
     const ::shelf::runtime::Program& program, uint32_t descriptor_slot) {
     if (descriptor_slot == 0u) return nullptr;
@@ -259,18 +250,10 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
                             0u;
 
     PhysicalGdnRecurrenceVariant variant = PhysicalGdnRecurrenceVariant::F32;
-    if (geo_ok && ctx.role == ::shelf::runtime::ExecutionRole::Verify) {
-        const bool multirow = gdn_recurrence_multirow_enabled();
-        if (multirow &&
-            ::shelf::kernel::gdn_recurrence_decode_rows_supported(ra.kernel)) {
-            variant = PhysicalGdnRecurrenceVariant::DecodeRowsExact;
-        } else {
-            variant = PhysicalGdnRecurrenceVariant::WmmaSerial;
-        }
-    } else if (geo_ok) {
-        variant = PhysicalGdnRecurrenceVariant::Wmma;
-    } else {
-        variant = PhysicalGdnRecurrenceVariant::F32;
+    if (geo_ok) {
+        variant = (ctx.role == ::shelf::runtime::ExecutionRole::Verify)
+                      ? PhysicalGdnRecurrenceVariant::WmmaVerify
+                      : PhysicalGdnRecurrenceVariant::Wmma;
     }
 
     out.kernel = ra.kernel;
@@ -279,9 +262,12 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
     out.max_request_rows = ra.max_request_rows;
     out.variant = variant;
     out.lossy = ::shelf::kernel::gdn_recurrence_lossy_enabled();
+    out.split_regions =
+        variant == PhysicalGdnRecurrenceVariant::WmmaVerify &&
+        ctx.num_verify_requests > 0u &&
+        ctx.num_verify_requests < ctx.num_requests;
     if (variant == PhysicalGdnRecurrenceVariant::Wmma ||
-        variant == PhysicalGdnRecurrenceVariant::DecodeRowsExact ||
-        variant == PhysicalGdnRecurrenceVariant::WmmaSerial) {
+        variant == PhysicalGdnRecurrenceVariant::WmmaVerify) {
         out.grid_x = ::shelf::kernel::gdn_recurrence_wmma_grid_x(
             ra.num_requests, ra.kernel.num_v_heads, ra.kernel.head_v);
         out.grid_y = 1u;
@@ -289,9 +275,7 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
         out.workgroup = ::shelf::kernel::kGdnRecurrenceWmmaThreads;
         if (out.grid_x == 0u)
             return PhysicalResolveStatus::NotApplicable;
-        if ((variant == PhysicalGdnRecurrenceVariant::Wmma ||
-             variant == PhysicalGdnRecurrenceVariant::WmmaSerial) &&
-            ra.kernel.num_v_heads % ra.kernel.key_heads != 0u)
+        if (ra.kernel.num_v_heads % ra.kernel.key_heads != 0u)
             return PhysicalResolveStatus::NotApplicable;
     }
     return PhysicalResolveStatus::Applicable;
@@ -315,26 +299,37 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
 
     bool ran_f32 = launch.variant == PhysicalGdnRecurrenceVariant::F32;
     hipError_t herr = hipSuccess;
-    switch (launch.variant) {
-        case PhysicalGdnRecurrenceVariant::DecodeRowsExact:
-            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(
-                launch.kernel, stream);
-            break;
-        case PhysicalGdnRecurrenceVariant::WmmaSerial:
-            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(
-                launch.kernel, stream);
-            break;
-        case PhysicalGdnRecurrenceVariant::Wmma:
-            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma(launch.kernel, stream);
-            break;
-        default:
-            herr = ::shelf::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
-            ran_f32 = true;
-            break;
+    uint32_t physical_launches = 0u;
+    auto launch_variant = [&](PhysicalGdnRecurrenceVariant variant,
+                              uint32_t execution_class_filter) -> hipError_t {
+        ::shelf::kernel::GdnRecurrenceArgs args = launch.kernel;
+        args.execution_class_filter = execution_class_filter;
+        switch (variant) {
+            case PhysicalGdnRecurrenceVariant::WmmaVerify:
+                return ::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(args, stream);
+            case PhysicalGdnRecurrenceVariant::Wmma:
+                return ::shelf::kernel::launch_gdn_recurrence_f32_wmma(args, stream);
+            default:
+                return ::shelf::kernel::launch_gdn_recurrence_f32(args, stream);
+        }
+    };
+
+    if (launch.split_regions) {
+        herr = launch_variant(PhysicalGdnRecurrenceVariant::WmmaVerify, 1u);
+        if (herr == hipSuccess) {
+            ++physical_launches;
+            herr = launch_variant(PhysicalGdnRecurrenceVariant::Wmma, 2u);
+            if (herr == hipSuccess) ++physical_launches;
+        }
+    } else {
+        herr = launch_variant(launch.variant, 0u);
+        if (herr == hipSuccess) ++physical_launches;
     }
+
     if (herr == hipErrorNotSupported) {
-        herr = ::shelf::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
+        herr = launch_variant(PhysicalGdnRecurrenceVariant::F32, 0u);
         ran_f32 = true;
+        physical_launches = 1u;
     }
     if (herr != hipSuccess)
         return Status::hip_error("gdn-recurrence optimized launch",
@@ -343,7 +338,7 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
         record_correctness_fallback(b.kernel_id);
     else
         gdn_recurrence_optimized_hit();
-    record_physical_launch(1u);
+    record_physical_launch(physical_launches);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }

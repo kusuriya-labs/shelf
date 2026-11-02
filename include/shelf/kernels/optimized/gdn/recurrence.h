@@ -53,6 +53,7 @@ struct GdnRecurrenceArgs {
     int32_t row_override = -1;
     uint32_t capture_verify_only = 0;
     const int32_t* row_parent = nullptr;
+    uint32_t execution_class_filter = 0;
 
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
@@ -76,7 +77,7 @@ launch_gdn_recurrence_f32_wmma(
     hipStream_t stream);
 
 hipError_t
-launch_gdn_recurrence_f32_wmma_serial(
+launch_gdn_recurrence_f32_wmma_verify(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
 
@@ -85,21 +86,17 @@ inline constexpr const char* kGdnRecurrenceWmmaLossySymbol =
 inline constexpr const char* kGdnRecurrenceWmmaExactSymbol =
     "shelf_gdn_recurrence_wmma_exact";
 
-inline constexpr const char* kGdnRecurrenceDecodeRowsExactR2Symbol =
-    "shelf_gdn_recurrence_decode_rows_exact_r2";
-inline constexpr const char* kGdnRecurrenceDecodeRowsExactR4Symbol =
-    "shelf_gdn_recurrence_decode_rows_exact_r4";
-inline constexpr const char* kGdnRecurrenceDecodeRowsExactR8Symbol =
-    "shelf_gdn_recurrence_decode_rows_exact_r8";
-
-inline constexpr const char* kGdnRecurrenceWmmaSerialLossySymbol =
-    "shelf_gdn_recurrence_wmma_serial_lossy";
-inline constexpr const char* kGdnRecurrenceWmmaSerialExactSymbol =
-    "shelf_gdn_recurrence_wmma_serial_exact";
+inline constexpr const char* kGdnRecurrenceWmmaVerifyLossySymbol =
+    "shelf_gdn_recurrence_wmma_verify_lossy";
+inline constexpr const char* kGdnRecurrenceWmmaVerifyExactSymbol =
+    "shelf_gdn_recurrence_wmma_verify_exact";
 
 inline constexpr uint32_t kGdnRecurrenceWmmaThreads = 256u;
 inline constexpr uint32_t kGdnRecurrenceWmmaK = 128u;
 inline constexpr uint32_t kGdnRecurrenceWmmaVGroup = 64u;
+inline constexpr uint32_t kGdnRecurrenceVerifyBatchRows = 32u;
+inline constexpr uint32_t kGdnRecurrenceVerifyRowsPerRequest = 8u;
+inline constexpr uint32_t kGdnRecurrenceVerifyMaxRequests = 4u;
 
 constexpr uint32_t gdn_recurrence_wmma_grid_x(uint32_t num_requests,
                                               uint32_t num_v_heads,
@@ -111,10 +108,8 @@ constexpr uint32_t gdn_recurrence_wmma_grid_x(uint32_t num_requests,
 
 bool gdn_recurrence_lossy_enabled();
 
-bool gdn_recurrence_decode_rows_supported(const GdnRecurrenceArgs& args);
-
 hipError_t
-launch_gdn_recurrence_f32_wmma_decode_rows_exact(
+launch_gdn_recurrence_f32_wmma_verify(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
 

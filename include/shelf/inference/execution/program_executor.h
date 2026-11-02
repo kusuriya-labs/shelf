@@ -73,6 +73,10 @@ struct HostExecutionContext {
     uint32_t actual_outputs = 0;
     uint32_t actual_sampled_outputs = 0;
     uint32_t actual_stochastic_outputs = 0;
+    uint32_t num_requests = 0;
+    uint32_t num_decode_requests = 0;
+    uint32_t num_verify_requests = 0;
+    uint32_t num_prefill_requests = 0;
     const ::shelf::runtime::DeviceSamplingParams* output_sampling_params = nullptr;
     const ::shelf::runtime::DeviceRequestDescriptor* device_requests = nullptr;
     uint32_t* device_output_rows = nullptr;

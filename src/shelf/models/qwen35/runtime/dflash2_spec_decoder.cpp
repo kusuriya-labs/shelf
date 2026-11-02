@@ -1394,7 +1394,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     token_ids.reserve(total_rows);
     std::vector<ScheduledRequest> requests;
     requests.reserve(plans.size());
-    uint32_t verify_request_count = 0u;
     for (std::size_t i = 0; i < plans.size(); ++i) {
         SlotPlan& plan = plans[i];
         if (!plan.batched) continue;
@@ -1409,7 +1408,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         req.sequence = decoder.sequence;
         req.handle = decoder.sequence->request_handle();
         req.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
-        ++verify_request_count;
         req.token_begin = plan.row_begin;
         req.num_tokens = plan.total_rows;
         req.prefix_tokens = plan.position;
@@ -1431,12 +1429,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     batch.num_verify_requests = static_cast<uint32_t>(requests.size());
     batch.num_prefill_requests = 0u;
     batch.speculative_verify = true;
-
-    const bool mixed_verify_batch = verify_request_count != requests.size();
-    if (mixed_verify_batch && verify_request_count > 1u) {
-        return Status::unsupported(
-            "mixed verify batch supports a single verify request", __FILE__, __LINE__);
-    }
 
     std::vector<int32_t> sampled;
     std::vector<int32_t> decision_host;
@@ -1620,8 +1612,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 if (!st.ok()) return st;
                 st = restore_gdn_spec_conv(
                     *state.pool, decoder.sequence->slot, context.history[r],
-                    (mixed_verify_batch ? 0u : plan.row_begin) + accepted,
-                    state.stream);
+                    plan.row_begin + accepted, state.stream);
                 if (!st.ok()) return st;
                 GdnCompactLogDeviceView compact{};
                 compact.delta = context.compact[r].delta;

@@ -79,6 +79,9 @@ Status build_host_execution_context(
     uint32_t actual_sampled_outputs,
     uint32_t actual_stochastic_outputs,
     uint32_t request_count,
+    uint32_t num_decode_requests,
+    uint32_t num_verify_requests,
+    uint32_t num_prefill_requests,
     uint32_t min_visible_tokens,
     uint32_t max_visible_tokens,
     ::shelf::runtime::ExecutionRole role,
@@ -194,6 +197,10 @@ Status build_host_execution_context(
             : nullptr;
     ctx.actual_rows = actual_rows;
     ctx.actual_outputs = actual_outputs;
+    ctx.num_requests = request_count;
+    ctx.num_decode_requests = num_decode_requests;
+    ctx.num_verify_requests = num_verify_requests;
+    ctx.num_prefill_requests = num_prefill_requests;
     ctx.layer_override_count = 0;
     for (std::size_t oi = 0;
          oi < executor.layer_override_value_ids.size() &&
@@ -671,6 +678,7 @@ Result<PendingBatch> submit_co_batch(
         const Status ctx_status = build_host_execution_context(
             executor, *program, status_ptr, N, prep.num_outputs,
             prep.num_sampled_outputs, prep.num_stochastic_outputs, R,
+            num_decode, num_verify, num_prefill,
             min_visible_tokens, max_visible_tokens, exec_role, options,
             prep.stochastic_topk_eligible, prep.stochastic_top_k, ctx);
         if (!ctx_status.ok()) return on_error(ctx_status);

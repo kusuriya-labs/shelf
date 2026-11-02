@@ -204,7 +204,7 @@ warmup,samples,launches_per_sample,min_us,p50_us,p95_us,mean_us
 ## gdn-recurrence
 
 ```text
---variant correctness|optimized   (default optimized)
+--variant correctness|optimized|optimized-verify   (default optimized)
 ```
 
 ## elementwise
