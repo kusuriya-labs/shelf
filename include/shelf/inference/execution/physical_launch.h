@@ -156,9 +156,7 @@ struct PhysicalL2NormalizeLaunch {
 
 enum class PhysicalGdnRecurrenceVariant : uint8_t {
     DecodeRowsExact = 0,
-    Decode1Serial = 1,
     WmmaSerial = 2,
-    WmmaDecode1 = 3,
     Wmma = 4,
     F32 = 5,
     Unsupported = 255,

@@ -34,28 +34,6 @@ hipError_t launch_gemm_psq5_w8a8_wmma(
     uint32_t output_row_stride,
     hipStream_t stream);
 
-bool psq5_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded);
-
-uint32_t psq5_decode1_unroll(uint32_t out_features, uint32_t k_padded);
-
-hipError_t launch_gemm_psq5_w8a8_wmma_decode1(
-    const uint8_t* weight_magnitude,
-    const uint8_t* weight_sign,
-    const uint8_t* weight_scale,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    Psq5GemmOutputDType output_dtype,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t output_row_stride,
-    uint32_t unroll,
-    hipStream_t stream);
-
 hipError_t launch_gemm_psq5_w8a8_wmma_auto(
     const Psq5GemmConfig& config,
     const uint8_t* weight_magnitude,

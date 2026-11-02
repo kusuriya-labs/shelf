@@ -866,70 +866,6 @@ gemm_psq5_w8a8_wmma_prefill_2d_wstage_kernel(
     }
 }
 
-
-template <Psq5GemmOutputDType kOutputType, int kUnroll>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-gemv_psq5_w8a8_decode1_kernel(
-    const uint8_t* __restrict__ weight_magnitude,
-    const uint8_t* __restrict__ weight_sign,
-    const uint8_t* __restrict__ weight_scale,
-    const uint8_t* __restrict__ activation_codes,
-    const float* __restrict__ activation_scales,
-    void* __restrict__ output,
-    const uint32_t k_padded,
-    const uint32_t weight_scale_stride) {
-    const uint32_t tid = threadIdx.x;
-    const uint32_t m_lane = tid & 15u;
-    const uint32_t k_group = tid >> 4u;
-
-    const uint32_t o_self = blockIdx.x * kTileOut + m_lane;
-    const uint32_t nb = k_padded >> 5u;
-
-    const uint32_t wtile = o_self >> 4u;
-    const uint32_t wrow_in_tile = o_self & 15u;
-    const uint8_t* wmag = weight_magnitude +
-        static_cast<size_t>(wtile) * (static_cast<size_t>(nb) * kMagBlockBytes) +
-        static_cast<size_t>(wrow_in_tile) * kMagRowBytes + k_group * 4u;
-    const uint8_t* wsign = weight_sign +
-        static_cast<size_t>(wtile) * (static_cast<size_t>(nb) * kSignBlockBytes) +
-        static_cast<size_t>(wrow_in_tile) * kSignRowBytes + k_group;
-    const uint8_t* wscale = weight_scale +
-        static_cast<size_t>(wtile) * static_cast<size_t>(weight_scale_stride) + wrow_in_tile;
-    const uint8_t* arow = activation_codes + k_group * 8u;
-
-    float acc0 = 0.0f;
-    #pragma unroll kUnroll
-    for (uint32_t ib = 0; ib < nb; ++ib) {
-        const uint8_t* mp = wmag + static_cast<size_t>(ib) * kMagBlockBytes;
-        const uint8_t* sp = wsign + static_cast<size_t>(ib) * kSignBlockBytes;
-        const uint32_t m0 = *reinterpret_cast<const uint32_t*>(mp);
-        const uint32_t m1 = *reinterpret_cast<const uint32_t*>(mp + 8u);
-        const uint8_t s0 = sp[0];
-        const uint8_t s1 = sp[2u];
-        const int32x2_t w0 = psq5_unpack_e4m3(m0, s0);
-        const int32x2_t w1 = psq5_unpack_e4m3(m1, s1);
-        const float ws = psq5_scale_f32(wscale[static_cast<size_t>(ib) * kScaleBlockBytes]);
-        const float as = activation_scales[ib >> 2u];
-        const uint8_t* ap = arow + static_cast<size_t>(ib) * 512u;
-        const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
-        const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
-        float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-        acc0 = __builtin_fmaf(c[0], ws * as, acc0);
-    }
-
-    if (k_group == 0u) {
-        const float v = acc0;
-        if constexpr (kOutputType == Psq5GemmOutputDType::BF16) {
-            static_cast<::ps::bf16_t*>(output)[o_self] =
-                ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
-        } else {
-            static_cast<float*>(output)[o_self] = v;
-        }
-    }
-}
-
 #define PSQ5_MB_LAUNCH(MB)                                                     \
     do {                                                                       \
         const dim3 grid((out_features + kTileOut - 1u) / kTileOut,             \
@@ -1078,75 +1014,6 @@ hipError_t launch_gemm_psq5_w8a8_wmma(
         activation_scale_stride_bytes, output_row_stride, stream);
 }
 
-bool psq5_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded) {
-    return rows == 1u && out_features != 0u && (out_features & 15u) == 0u &&
-           (k_padded & 127u) == 0u;
-}
-
-uint32_t psq5_decode1_unroll(uint32_t out_features, uint32_t k_padded) {
-    (void)out_features;
-    (void)k_padded;
-    return 16u;
-}
-
-namespace {
-
-template <Psq5GemmOutputDType kOutputType, int kUnroll>
-void psq5_decode1_launch(
-    dim3 grid,
-    const uint8_t* weight_magnitude,
-    const uint8_t* weight_sign,
-    const uint8_t* weight_scale,
-    const uint8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    hipStream_t stream) {
-    gemv_psq5_w8a8_decode1_kernel<kOutputType, kUnroll>
-        <<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_magnitude, weight_sign, weight_scale, activation_codes,
-            activation_scales, output, k_padded, weight_scale_stride_bytes);
-}
-
-}
-
-hipError_t launch_gemm_psq5_w8a8_wmma_decode1(
-    const uint8_t* weight_magnitude,
-    const uint8_t* weight_sign,
-    const uint8_t* weight_scale,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    Psq5GemmOutputDType output_dtype,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t output_row_stride,
-    uint32_t unroll,
-    hipStream_t stream) {
-    (void)activation_code_stride_bytes;
-    (void)activation_scale_stride_bytes;
-    if (rows == 0 || out_features == 0 || k_padded == 0)
-        return hipSuccess;
-    if (!psq5_decode1_supported(rows, out_features, k_padded))
-        return hipErrorNotSupported;
-    const dim3 grid((out_features + kTileOut - 1u) / kTileOut, 1, 1);
-    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
-    if (unroll == 0u) unroll = 16u;
-    if (output_dtype == Psq5GemmOutputDType::BF16) {
-        if (unroll >= 16u) psq5_decode1_launch<Psq5GemmOutputDType::BF16, 16>(grid, weight_magnitude, weight_sign, weight_scale, acodes, activation_scales, output, k_padded, weight_scale_stride_bytes, stream);
-        else psq5_decode1_launch<Psq5GemmOutputDType::BF16, 4>(grid, weight_magnitude, weight_sign, weight_scale, acodes, activation_scales, output, k_padded, weight_scale_stride_bytes, stream);
-    } else {
-        if (unroll >= 16u) psq5_decode1_launch<Psq5GemmOutputDType::F32, 16>(grid, weight_magnitude, weight_sign, weight_scale, acodes, activation_scales, output, k_padded, weight_scale_stride_bytes, stream);
-        else psq5_decode1_launch<Psq5GemmOutputDType::F32, 4>(grid, weight_magnitude, weight_sign, weight_scale, acodes, activation_scales, output, k_padded, weight_scale_stride_bytes, stream);
-    }
-    return hipGetLastError();
-}
-
 hipError_t launch_gemm_psq5_w8a8_wmma_auto(
     const Psq5GemmConfig& config,
     const uint8_t* weight_magnitude,
@@ -1164,15 +1031,6 @@ hipError_t launch_gemm_psq5_w8a8_wmma_auto(
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
     hipStream_t stream) {
-    if (rows == 1u && psq5_decode1_supported(rows, out_features, k_padded)) {
-        const hipError_t err = launch_gemm_psq5_w8a8_wmma_decode1(
-            weight_magnitude, weight_sign, weight_scale, activation_codes,
-            activation_scales, output, output_dtype, rows, out_features, k_padded,
-            weight_scale_stride_bytes, activation_code_stride_bytes,
-            activation_scale_stride_bytes, output_row_stride, psq5_decode1_unroll(out_features, k_padded),
-            stream);
-        if (err != hipErrorNotSupported) return err;
-    }
     return launch_gemm_psq5_w8a8_wmma_impl(
         config, weight_magnitude, weight_sign, weight_scale, activation_codes,
         activation_scales, output, output_dtype, rows, out_features, k_padded,

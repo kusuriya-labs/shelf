@@ -167,59 +167,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_w8a8_wmma_kernel(
     }
 }
 
-template <Fp8GemmOutputDType kOutputType, int kUnroll>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-gemv_fp8_w8a8_decode1_kernel(
-    const uint8_t* __restrict__ weight_codes,
-    const float* __restrict__ weight_scales,
-    const uint8_t* __restrict__ activation_codes,
-    const float* __restrict__ activation_scales,
-    void* __restrict__ output,
-    const uint32_t k_padded,
-    const uint32_t weight_scale_stride,
-    const uint32_t w_scale_shift) {
-    const uint32_t tid = threadIdx.x;
-    const uint32_t m_lane = tid & 15u;
-    const uint32_t k_group = tid >> 4u;
-
-    const uint32_t o_self = blockIdx.x * kTileOut + m_lane;
-    const uint32_t nb = k_padded >> 5u;
-
-    const uint8_t* wrow = weight_codes +
-        static_cast<size_t>(o_self >> 4u) * (static_cast<size_t>(k_padded) * 16u) +
-        static_cast<size_t>(o_self & 15u) * 16u + k_group * 8u;
-    const float* wsrow = weight_scales +
-        static_cast<size_t>(o_self >> 7u) * (weight_scale_stride / 4u);
-    const uint8_t* arow = activation_codes + k_group * 8u;
-
-    float acc0 = 0.0f;
-    #pragma unroll kUnroll
-    for (uint32_t ib = 0; ib < nb; ++ib) {
-        const uint8_t* wp = wrow + static_cast<size_t>(ib) * 512u;
-        const int32x2_t w0 = *reinterpret_cast<const int32x2_t*>(wp);
-        const int32x2_t w1 = *reinterpret_cast<const int32x2_t*>(wp + 256u);
-        const float ws = wsrow[ib >> w_scale_shift];
-        const float as = activation_scales[ib >> 2u];
-        const uint8_t* ap = arow + static_cast<size_t>(ib) * 512u;
-        const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
-        const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
-        float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-        acc0 = __builtin_fmaf(c[0], ws * as, acc0);
-    }
-
-    if (k_group == 0u) {
-        const float v = acc0;
-        if constexpr (kOutputType == Fp8GemmOutputDType::BF16) {
-            static_cast<::ps::bf16_t*>(output)[o_self] =
-                ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
-        } else {
-            static_cast<float*>(output)[o_self] = v;
-        }
-    }
-}
-
 using u8v8_t = uint8_t __attribute__((ext_vector_type(8)));
 
 constexpr uint32_t k2dThreads = 256u;
@@ -737,117 +684,6 @@ hipError_t launch_gemm_fp8_w8a8_wmma(
         stream, weight_scale_group);
 }
 
-bool fp8_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded) {
-    return rows == 1u && out_features != 0u && (out_features & 15u) == 0u &&
-           (k_padded & 127u) == 0u;
-}
-
-uint32_t fp8_decode1_unroll(uint32_t out_features, uint32_t k_padded) {
-    (void)out_features;
-    (void)k_padded;
-    return 16u;
-}
-
-namespace {
-
-template <Fp8GemmOutputDType kOutputType, int kUnroll>
-void fp8_decode1_launch(
-    dim3 grid,
-    const uint8_t* weight_codes,
-    const float* weight_scales,
-    const uint8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    hipStream_t stream,
-    uint32_t w_scale_shift) {
-    gemv_fp8_w8a8_decode1_kernel<kOutputType, kUnroll>
-        <<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, activation_codes, activation_scales, output,
-            k_padded, weight_scale_stride_bytes, w_scale_shift);
-}
-
-template <Fp8GemmOutputDType kOutputType>
-hipError_t fp8_launch_decode1_dtype(
-    const uint8_t* weight_codes,
-    const float* weight_scales,
-    const uint8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t unroll,
-    hipStream_t stream,
-    uint32_t w_scale_shift) {
-    const dim3 grid(out_features >> 4u);
-    switch (unroll) {
-        case 2u:
-            fp8_decode1_launch<kOutputType, 2>(grid, weight_codes, weight_scales,
-                activation_codes, activation_scales, output, k_padded,
-                weight_scale_stride_bytes, stream, w_scale_shift);
-            break;
-        case 8u:
-            fp8_decode1_launch<kOutputType, 8>(grid, weight_codes, weight_scales,
-                activation_codes, activation_scales, output, k_padded,
-                weight_scale_stride_bytes, stream, w_scale_shift);
-            break;
-        case 16u:
-            fp8_decode1_launch<kOutputType, 16>(grid, weight_codes, weight_scales,
-                activation_codes, activation_scales, output, k_padded,
-                weight_scale_stride_bytes, stream, w_scale_shift);
-            break;
-        default:
-            fp8_decode1_launch<kOutputType, 4>(grid, weight_codes, weight_scales,
-                activation_codes, activation_scales, output, k_padded,
-                weight_scale_stride_bytes, stream, w_scale_shift);
-            break;
-    }
-    return hipGetLastError();
-}
-
-}  // namespace
-
-hipError_t launch_gemm_fp8_w8a8_wmma_decode1(
-    const uint8_t* weight_codes,
-    const float* weight_scales,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    Fp8GemmOutputDType output_dtype,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t output_row_stride,
-    uint32_t unroll,
-    hipStream_t stream,
-    uint32_t weight_scale_group) {
-    (void)activation_code_stride_bytes;
-    (void)activation_scale_stride_bytes;
-    (void)output_row_stride;
-    if (!fp8_decode1_supported(rows, out_features, k_padded))
-        return hipErrorNotSupported;
-    if (weight_scale_group != 128u && weight_scale_group != 64u)
-        return hipErrorNotSupported;
-    const uint32_t w_scale_shift = weight_scale_group == 128u ? 2u : 1u;
-    if (unroll == 0u)
-        unroll = fp8_decode1_unroll(out_features, k_padded);
-    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
-    if (output_dtype == Fp8GemmOutputDType::BF16)
-        return fp8_launch_decode1_dtype<Fp8GemmOutputDType::BF16>(
-            weight_codes, weight_scales, acodes, activation_scales, output,
-            out_features, k_padded, weight_scale_stride_bytes, unroll, stream,
-            w_scale_shift);
-    return fp8_launch_decode1_dtype<Fp8GemmOutputDType::F32>(
-        weight_codes, weight_scales, acodes, activation_scales, output,
-        out_features, k_padded, weight_scale_stride_bytes, unroll, stream,
-        w_scale_shift);
-}
-
 hipError_t launch_gemm_fp8_w8a8_wmma_auto(
     const Fp8GemmConfig& config,
     const uint8_t* weight_codes,
@@ -865,15 +701,6 @@ hipError_t launch_gemm_fp8_w8a8_wmma_auto(
     uint32_t output_row_stride,
     hipStream_t stream,
     uint32_t weight_scale_group) {
-    if (config.id == Fp8GemmConfigId::RowBlock1 &&
-        fp8_decode1_supported(rows, out_features, k_padded)) {
-        return launch_gemm_fp8_w8a8_wmma_decode1(
-            weight_codes, weight_scales, activation_codes, activation_scales,
-            output, output_dtype, rows, out_features, k_padded,
-            weight_scale_stride_bytes, activation_code_stride_bytes,
-            activation_scale_stride_bytes, output_row_stride, 0u, stream,
-            weight_scale_group);
-    }
     return launch_gemm_fp8_w8a8_wmma(
         config, weight_codes, weight_scales, activation_codes, activation_scales, output,
         output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,

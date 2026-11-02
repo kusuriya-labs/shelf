@@ -35,28 +35,6 @@ hipError_t launch_gemm_fp8_w8a8_wmma(
     hipStream_t stream,
     uint32_t weight_scale_group = 128);
 
-bool fp8_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded);
-
-uint32_t fp8_decode1_unroll(uint32_t out_features, uint32_t k_padded);
-
-hipError_t launch_gemm_fp8_w8a8_wmma_decode1(
-    const uint8_t* weight_codes,
-    const float* weight_scales,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    Fp8GemmOutputDType output_dtype,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t output_row_stride,
-    uint32_t unroll,
-    hipStream_t stream,
-    uint32_t weight_scale_group = 128);
-
 hipError_t launch_gemm_fp8_w8a8_wmma_auto(
     const Fp8GemmConfig& config,
     const uint8_t* weight_codes,

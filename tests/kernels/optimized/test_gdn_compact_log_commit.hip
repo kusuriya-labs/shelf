@@ -219,7 +219,7 @@ int main() {
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 
     if (!::ps::kernel::gdn_recurrence_lossy_enabled()) {
-        std::printf("FAIL: lossy mode expected for decode1 commit path\n");
+        std::printf("FAIL: lossy mode expected for wmma commit path\n");
         return 1;
     }
 
@@ -245,7 +245,7 @@ int main() {
             ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
             a.row_override = static_cast<int32_t>(r);
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(a, stream) != hipSuccess)
+            if (::ps::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess)
                 ok = false;
         }
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
@@ -296,7 +296,7 @@ int main() {
         }
         if (m == kRows) all_hist_ok = true;
     }
-    check(all_commit_ok, "commit from compact log is bit-exact vs sequential decode1");
+    check(all_commit_ok, "commit from compact log is bit-exact vs sequential wmma");
     (void)all_hist_ok;
 
     std::vector<float> serial16(state_n);
@@ -306,17 +306,17 @@ int main() {
         for (uint32_t li = 0u; li < kStates && sok; ++li) {
             ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1_serial(a, stream) !=
+            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(a, stream) !=
                 hipSuccess)
                 sok = false;
         }
         if (sok && hipStreamSynchronize(stream) != hipSuccess) sok = false;
         if (sok)
             sok = read_state_f16(d.state, serial16, state_n);
-        check(sok, "decode1_serial chain runs (multi-layer)");
+        check(sok, "wmma_serial chain runs (multi-layer)");
         size_t first = 0;
         check(all_bits_equal(ref_traj[kRows], serial16, first),
-              "decode1_serial matches per-row decode1 chain (multi-layer)");
+              "wmma_serial matches per-row wmma chain (multi-layer)");
     }
 
     {
@@ -335,7 +335,7 @@ int main() {
             std::printf("  [serial-commit] first_bad=%zu ref=%.6g got=%.6g\n", first,
                         (double)serial16[first], (double)got[first]);
         }
-        check(cok, "commit reproduces decode1_serial state (multi-layer, rows=16)");
+        check(cok, "commit reproduces wmma_serial state (multi-layer, rows=16)");
     }
 
     {
@@ -375,7 +375,7 @@ int main() {
                 break;
             }
         }
-        check(p_ok, "commit with prefix row indices matches sequential decode1");
+        check(p_ok, "commit with prefix row indices matches sequential wmma");
         if (idx_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(idx_dev));
     }
 
@@ -488,7 +488,7 @@ int main() {
         check(sok, "decode_rows_exact chain runs (multi-layer)");
         size_t first = 0;
         check(all_bits_equal(ref_traj[kRowsExact], rows8, first),
-              "decode_rows_exact matches per-row decode1 chain (multi-layer)");
+              "decode_rows_exact matches per-row wmma chain (multi-layer)");
 
         std::vector<std::vector<float>> rows8_hist(kRowsExact);
         for (auto& v : rows8_hist) v.resize(state_n);

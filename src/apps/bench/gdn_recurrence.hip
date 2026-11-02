@@ -49,7 +49,7 @@ struct Options {
 void usage(FILE* f) {
     std::fprintf(f,
                  "usage: shelf-bench gdn-recurrence [options]\n"
-                 "  --variant correctness|optimized|optimized-decode1|optimized-decode1-serial|optimized-multirow\n"
+                 "  --variant correctness|optimized|optimized-multirow\n"
                  "  --rows 1,4,...\n"
                  "  --nreq 1,4,16\n"
                  "  --key-heads N\n"
@@ -376,22 +376,10 @@ hipError_t launch_optimized(const Env& e, hipStream_t s) {
     return ::ps::kernel::launch_gdn_recurrence_f32(e.ka, s);
 }
 
-hipError_t launch_optimized_decode1(const Env& e, hipStream_t s) {
-    if (::ps::kernel::gdn_recurrence_decode1_supported(e.ka))
-        return ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(e.ka, s);
-    return launch_optimized(e, s);
-}
-
-hipError_t launch_optimized_decode1_serial(const Env& e, hipStream_t s) {
-    if (::ps::kernel::gdn_recurrence_decode1_supported(e.ka))
-        return ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1_serial(e.ka, s);
-    return launch_optimized(e, s);
-}
-
 hipError_t launch_optimized_multirow(const Env& e, hipStream_t s) {
     if (::ps::kernel::gdn_recurrence_decode_rows_supported(e.ka))
         return ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(e.ka, s);
-    return launch_optimized_decode1_serial(e, s);
+    return launch_optimized(e, s);
 }
 
 }  // namespace
@@ -423,7 +411,6 @@ int run_gdn_recurrence(int argc, char** argv) {
         else { usage(stderr); return 2; }
     }
     if (o.variant != "correctness" && o.variant != "optimized" &&
-        o.variant != "optimized-decode1" && o.variant != "optimized-decode1-serial" &&
         o.variant != "optimized-multirow") { usage(stderr); return 2; }
     if (o.samples <= 0 || o.launches <= 0) return 2;
     if (hipSetDevice(o.device) != hipSuccess) return 1;
@@ -466,8 +453,6 @@ int run_gdn_recurrence(int argc, char** argv) {
             }
             auto launch = [&](hipStream_t s) -> hipError_t {
                 if (o.variant == "correctness") return launch_correctness(e, s);
-                if (o.variant == "optimized-decode1") return launch_optimized_decode1(e, s);
-                if (o.variant == "optimized-decode1-serial") return launch_optimized_decode1_serial(e, s);
                 if (o.variant == "optimized-multirow") return launch_optimized_multirow(e, s);
                 return launch_optimized(e, s);
             };

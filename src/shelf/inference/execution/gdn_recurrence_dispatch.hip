@@ -255,26 +255,18 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
 
     const bool geo_ok = ra.kernel.head_k == ::ps::kernel::kGdnRecurrenceWmmaK &&
                         ra.kernel.head_v %
-                                ::ps::kernel::kGdnRecurrenceWmmaDecode1VGroup ==
+                                ::ps::kernel::kGdnRecurrenceWmmaVGroup ==
                             0u;
-    const bool decode1_ok =
-        ::ps::kernel::gdn_recurrence_decode1_supported(ra.kernel);
 
     PhysicalGdnRecurrenceVariant variant = PhysicalGdnRecurrenceVariant::F32;
     if (geo_ok && ctx.role == ::ps::runtime::ExecutionRole::Verify) {
         const bool multirow = gdn_recurrence_multirow_enabled();
-        if (multirow && decode1_ok &&
+        if (multirow &&
             ::ps::kernel::gdn_recurrence_decode_rows_supported(ra.kernel)) {
             variant = PhysicalGdnRecurrenceVariant::DecodeRowsExact;
-        } else if (ra.num_requests == 1u && decode1_ok) {
-            variant = PhysicalGdnRecurrenceVariant::Decode1Serial;
-        } else if (geo_ok) {
-            variant = PhysicalGdnRecurrenceVariant::WmmaSerial;
         } else {
-            variant = PhysicalGdnRecurrenceVariant::F32;
+            variant = PhysicalGdnRecurrenceVariant::WmmaSerial;
         }
-    } else if (geo_ok && ra.max_request_rows <= 1u && decode1_ok) {
-        variant = PhysicalGdnRecurrenceVariant::WmmaDecode1;
     } else if (geo_ok) {
         variant = PhysicalGdnRecurrenceVariant::Wmma;
     } else {
@@ -287,16 +279,14 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
     out.max_request_rows = ra.max_request_rows;
     out.variant = variant;
     out.lossy = ::ps::kernel::gdn_recurrence_lossy_enabled();
-    if (variant == PhysicalGdnRecurrenceVariant::WmmaDecode1 ||
-        variant == PhysicalGdnRecurrenceVariant::Wmma ||
+    if (variant == PhysicalGdnRecurrenceVariant::Wmma ||
         variant == PhysicalGdnRecurrenceVariant::DecodeRowsExact ||
-        variant == PhysicalGdnRecurrenceVariant::Decode1Serial ||
         variant == PhysicalGdnRecurrenceVariant::WmmaSerial) {
         out.grid_x = ::ps::kernel::gdn_recurrence_wmma_grid_x(
             ra.num_requests, ra.kernel.num_v_heads, ra.kernel.head_v);
         out.grid_y = 1u;
         out.grid_z = 1u;
-        out.workgroup = ::ps::kernel::kGdnRecurrenceWmmaDecode1Threads;
+        out.workgroup = ::ps::kernel::kGdnRecurrenceWmmaThreads;
         if (out.grid_x == 0u)
             return PhysicalResolveStatus::NotApplicable;
         if ((variant == PhysicalGdnRecurrenceVariant::Wmma ||
@@ -330,16 +320,8 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
             herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(
                 launch.kernel, stream);
             break;
-        case PhysicalGdnRecurrenceVariant::Decode1Serial:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1_serial(
-                launch.kernel, stream);
-            break;
         case PhysicalGdnRecurrenceVariant::WmmaSerial:
             herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(
-                launch.kernel, stream);
-            break;
-        case PhysicalGdnRecurrenceVariant::WmmaDecode1:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(
                 launch.kernel, stream);
             break;
         case PhysicalGdnRecurrenceVariant::Wmma:
@@ -357,15 +339,11 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     if (herr != hipSuccess)
         return Status::hip_error("gdn-recurrence optimized launch",
                                  hipGetErrorString(herr), __FILE__, __LINE__);
-    const uint32_t physical_launches =
-        launch.variant == PhysicalGdnRecurrenceVariant::Decode1Serial
-            ? launch.rows
-            : 1u;
     if (ran_f32)
         record_correctness_fallback(b.kernel_id);
     else
         gdn_recurrence_optimized_hit();
-    record_physical_launch(physical_launches);
+    record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1u};
 }

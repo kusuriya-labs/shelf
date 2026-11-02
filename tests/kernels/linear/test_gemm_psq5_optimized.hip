@@ -285,28 +285,6 @@ bool run_case(ps::gpu::GpuArena& arena, uint32_t rows, uint32_t n, uint32_t k,
     if (!run_and_check(config_for(rows), label))
         return false;
 
-    if (rows == 1u && (n & 15u) == 0u) {
-        for (uint32_t unroll : {0u, 4u, 16u}) {
-            hipError_t dk = ps::kernel::launch_gemm_psq5_w8a8_wmma_decode1(
-                d_mag, d_sg, d_sc, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                ps::kernel::Psq5GemmOutputDType::F32, rows, n, kp,
-                wss_bytes, code_stride, as_bytes, n, unroll, 0);
-            if (dk != hipSuccess) {
-                std::printf("FAIL: %s decode1 u=%u: %s\n", label, unroll, hipGetErrorString(dk));
-                ++g_fail;
-                return false;
-            }
-            HIP_ASSERT(hipStreamSynchronize(0));
-            std::vector<float> d1(static_cast<std::size_t>(rows) * n);
-            HIP_ASSERT(hipMemcpy(d1.data(), d_y, out_bytes, hipMemcpyDeviceToHost));
-            if (std::memcmp(d1.data(), got.data(), out_bytes) != 0) {
-                std::printf("FAIL: %s decode1 u=%u not bit-exact\n", label, unroll);
-                ++g_fail;
-                return false;
-            }
-        }
-    }
-
     if (two_d != nullptr) {
         char label2d[64];
         std::snprintf(label2d, sizeof(label2d), "%s_2d", label);
@@ -340,12 +318,12 @@ int main() {
     const Psq5GemmConfig wide_config{Psq5GemmConfigId::Prefill2DWide};
     const Psq5GemmConfig wstage_config{Psq5GemmConfigId::Prefill2DWStage};
     const Case cases[] = {
-        {1, 16, 128, "decode1_small", nullptr, nullptr},
-        {1, 64, 128, "decode1_n64", nullptr, nullptr},
-        {1, 5120, 5120, "decode1_27b_qproj", nullptr, nullptr},
-        {1, 17408, 5120, "decode1_27b_gate", nullptr, nullptr},
-        {1, 5120, 17408, "decode1_27b_down", nullptr, nullptr},
-        {1, 10240, 5120, "decode1_gdn_qkv", nullptr, nullptr},
+        {1, 16, 128, "rows1_small", nullptr, nullptr},
+        {1, 64, 128, "rows1_n64", nullptr, nullptr},
+        {1, 5120, 5120, "rows1_27b_qproj", nullptr, nullptr},
+        {1, 17408, 5120, "rows1_27b_gate", nullptr, nullptr},
+        {1, 5120, 17408, "rows1_27b_down", nullptr, nullptr},
+        {1, 10240, 5120, "rows1_gdn_qkv", nullptr, nullptr},
         {2, 64, 128, "mb1_rows2", nullptr, nullptr},
         {8, 128, 128, "mb1_rows8", nullptr, nullptr},
         {16, 256, 256, "mb2_rows16", nullptr, nullptr},

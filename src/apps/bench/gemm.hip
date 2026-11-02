@@ -42,8 +42,6 @@ struct Options {
     std::string impl = "auto";
     std::string shapes_spec;
     bool verify_small_m = false;
-    bool fp8_decode1 = false;
-    uint32_t fp8_unroll = 0;
     uint32_t split = 1;
 };
 
@@ -70,8 +68,6 @@ void usage(FILE* f) {
         "  --device N                     (default 0)\n"
         "  --verify-small-m               benchmark the speculative verify rows 1,2,4,8\n"
         "  --check                        verify selected path against the production correctness path\n"
-        "  --fp8-decode1                  force the rows=1 FP8 decode1 GEMV path\n"
-        "  --fp8-unroll N                 decode1 unroll 2|4|8|16 (0=auto, implies --fp8-decode1)\n"
         "  --split N                      split rows into N launches (default 1)\n"
         "  --out PATH                     (append CSV rows)\n");
 }
@@ -621,22 +617,13 @@ int run_gemm_fp8(Options& o) {
                         static_cast<size_t>(s * split_sub) * (act_scale_stride / 4u);
                     void* out_off = reinterpret_cast<uint8_t*>(d_output) +
                         static_cast<size_t>(s * split_sub) * n * 2u;
-                    if (o.fp8_decode1) {
-                        hipError_t e = ps::kernel::launch_gemm_fp8_w8a8_wmma_decode1(
-                            d_codes, reinterpret_cast<const float*>(d_scales), a8_off, as_off,
-                            out_off, ps::kernel::Fp8GemmOutputDType::BF16, sub_rows, n, kp,
-                            (kp / 128u) * 4u, kp, static_cast<uint32_t>(act_scale_stride), n,
-                            o.fp8_unroll, stream);
-                        if (e != hipSuccess) return e;
-                    } else {
-                        hipError_t e = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
-                            fp8_cfg, d_codes,
-                            reinterpret_cast<const float*>(d_scales), a8_off, as_off, out_off,
-                            ps::kernel::Fp8GemmOutputDType::BF16, sub_rows, n, kp,
-                            (kp / 128u) * 4u, kp, static_cast<uint32_t>(act_scale_stride), n,
-                            stream);
-                        if (e != hipSuccess) return e;
-                    }
+                    hipError_t e = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+                        fp8_cfg, d_codes,
+                        reinterpret_cast<const float*>(d_scales), a8_off, as_off, out_off,
+                        ps::kernel::Fp8GemmOutputDType::BF16, sub_rows, n, kp,
+                        (kp / 128u) * 4u, kp, static_cast<uint32_t>(act_scale_stride), n,
+                        stream);
+                    if (e != hipSuccess) return e;
                 }
                 return hipSuccess;
             };
@@ -896,12 +883,7 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--device") o.device = std::stoi(next());
         else if (a == "--out") o.out = next();
         else if (a == "--verify-small-m") o.verify_small_m = true;
-        else if (a == "--fp8-decode1") o.fp8_decode1 = true;
         else if (a == "--split") o.split = static_cast<uint32_t>(std::stoi(next()));
-        else if (a == "--fp8-unroll") {
-            o.fp8_unroll = (uint32_t)std::stoul(next());
-            o.fp8_decode1 = true;
-        }
         else if (a == "--check") o.check = true;
         else if (a == "--model-dir") o.model_dir = next();
         else if (a == "--actual-qwen-shapes") o.actual_qwen_shapes = true;

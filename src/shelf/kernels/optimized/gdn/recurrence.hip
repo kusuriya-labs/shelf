@@ -141,8 +141,8 @@ constexpr uint32_t kWt = 32u;
 constexpr uint32_t kWv = 64u;
 constexpr uint32_t kWk = 128u;
 constexpr uint32_t kWthreads = 256u;
-static_assert(kWthreads == kGdnRecurrenceWmmaDecode1Threads);
-static_assert(kWv == kGdnRecurrenceWmmaDecode1VGroup);
+static_assert(kWthreads == kGdnRecurrenceWmmaThreads);
+static_assert(kWv == kGdnRecurrenceWmmaVGroup);
 constexpr uint32_t kSp = 68u;
 constexpr uint32_t kWp = 68u;
 constexpr uint32_t kAp = 34u;
@@ -597,287 +597,12 @@ void shelf_gdn_recurrence_wmma_serial_exact(GdnRecurrenceArgs a) {
     gdn_recurrence_wmma_body<false, true>(a);
 }
 
-struct Decode1Smem {
+struct RowSmem {
     float S[gdngfx12::kWk][gdngfx12::kSp];
     float delta[gdngfx12::kWv];
     float a00;
     _Float16 kqfrag[2][gdngfx12::kWk / 16u][32][16];
 };
-
-extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
-    namespace g = gdngfx12;
-    using g::f32x8_t;
-    using g::Frag2;
-    constexpr bool kLossy = true;
-
-    const uint32_t hd = a.head_k;
-    const uint32_t hv = a.head_v;
-    const uint32_t vgroups = hv / g::kWv;
-    const uint32_t vg = blockIdx.x % vgroups;
-    const uint32_t v_head = (blockIdx.x / vgroups) % a.num_v_heads;
-    const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
-    if (request_index >= a.num_requests) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = a.requests[request_index];
-    const uint32_t slot = req.request_handle.slot;
-    if (slot >= a.max_sequences) return;
-    const uint32_t row_begin = req.row_begin;
-    uint32_t row_count = req.row_count;
-    if (row_begin >= a.actual_rows) return;
-    if (row_begin + row_count > a.actual_rows) row_count = a.actual_rows - row_begin;
-    if (row_count == 0u) return;
-    const uint32_t row =
-        (a.row_override >= 0) ? static_cast<uint32_t>(a.row_override) : row_begin;
-    if (row >= a.actual_rows) return;
-
-    const uint32_t repeat = a.num_v_heads / a.key_heads;
-    const uint32_t qk_head = v_head / repeat;
-    const uint32_t v0 = vg * g::kWv;
-
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t warp = tid >> 5u;
-    const uint32_t lo = lane & 15u;
-    const uint32_t hi = lane >> 4u;
-    const uint32_t kh = lane >> 4u;
-
-    fp16_t* state_head = a.recurrent_state
-        + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
-        + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-        + static_cast<uint64_t>(v_head) * hd * hv;
-
-    const int32_t parent_row =
-        (a.row_parent != nullptr && row < a.actual_rows) ? a.row_parent[row] : -1;
-    const fp16_t* state_read = state_head;
-    if (parent_row >= 0 && a.recurrent_history != nullptr &&
-        static_cast<uint32_t>(parent_row) < a.capture_rows) {
-        state_read = a.recurrent_history
-            + static_cast<uint64_t>(parent_row) * a.recurrent_history_row_stride
-            + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-            + static_cast<uint64_t>(v_head) * hd * hv;
-    }
-
-    const float* __restrict__ qp_g = a.q + qk_head * hd;
-    const float* __restrict__ kp_g = a.k + qk_head * hd;
-
-    const float dt_bias = g::wbf2f(a.dt_bias + v_head);
-    const float neg_exp_a_log = -__expf(g::wbf2f(a.a_log + v_head));
-
-    const float bv = g::wbf2f(a.b + static_cast<size_t>(row) * a.b_row_stride + v_head);
-    const float av = g::wbf2f(a.a + static_cast<size_t>(row) * a.a_row_stride + v_head);
-    const float beta = 1.0f / (1.0f + __expf(-bv));
-    const float gval = neg_exp_a_log * __logf(1.0f + __expf(av + dt_bias));
-    const float dval = __expf(gval);
-    const float de0 = __expf(gval - gval);
-
-    __shared__ Decode1Smem s;
-    float* Sst = &s.S[0][0];
-    const uint32_t spitch = g::kSp;
-
-    fp16_t* hist_head = nullptr;
-    if (a.recurrent_history != nullptr && a.row_override >= 0 &&
-        static_cast<uint32_t>(a.row_override) < a.capture_rows) {
-        hist_head = a.recurrent_history
-            + static_cast<uint64_t>(a.row_override) * a.recurrent_history_row_stride
-            + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-            + static_cast<uint64_t>(v_head) * hd * hv;
-    }
-
-    const uint32_t mt = warp & 1u;
-    const uint32_t nt = warp >> 1u;
-    const uint32_t kt0 = (warp >> 1u) * 2u;
-    const uint32_t vt0 = (warp & 1u) * 2u;
-
-    f32x8_t Sacc[4];
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-            const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            const fp16_t* sp = state_read + static_cast<size_t>(m0) * hv + v0 + n0;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                Sacc[ki * 2u + vj][e] = ld_f16(sp + static_cast<size_t>(e) * hv);
-        }
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t kt = kt0 + ki, vt = vt0 + vj;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                Sst[static_cast<size_t>(kt * 16u + 8u * hi + e) * spitch + vt * 16u + lo] =
-                    Sacc[ki * 2u + vj][e];
-        }
-    {
-        const uint32_t kk = warp;
-        const uint32_t ti = lo;
-        const bool iok = ti < 1u;
-        const float* __restrict__ kp = kp_g + static_cast<size_t>(row + ti) * a.k_row_stride;
-        const float* __restrict__ qp = qp_g + static_cast<size_t>(row + ti) * a.q_row_stride;
-        float ktmp[8], qtmp[8];
-        #pragma unroll
-        for (uint32_t q = 0; q < 4u; ++q) {
-            ktmp[q] = iok ? kp[kk * 16u + kh * 4u + q] : 0.0f;
-            ktmp[4u + q] = iok ? kp[kk * 16u + 8u + kh * 4u + q] : 0.0f;
-            qtmp[q] = iok ? qp[kk * 16u + kh * 4u + q] : 0.0f;
-            qtmp[4u + q] = iok ? qp[kk * 16u + 8u + kh * 4u + q] : 0.0f;
-        }
-        const Frag2 fk = g::gdn_decomp8<kLossy>(ktmp);
-        const Frag2 fq = g::gdn_decomp8<kLossy>(qtmp);
-        #pragma unroll
-        for (uint32_t d = 0; d < 8u; ++d) {
-            s.kqfrag[0][kk][lane][d] = fk.h[d];
-            s.kqfrag[1][kk][lane][d] = fq.h[d];
-        }
-        if constexpr (!kLossy) {
-            #pragma unroll
-            for (uint32_t d = 0; d < 8u; ++d) {
-                s.kqfrag[0][kk][lane][8u + d] = fk.l[d];
-                s.kqfrag[1][kk][lane][8u + d] = fq.l[d];
-            }
-        }
-    }
-    __syncthreads();
-
-    f32x8_t uacc = {};
-    f32x8_t oacc = {};
-    f32x8_t p_acc = {};
-    if (mt == 0u) {
-        const bool ppk = warp == 0u;
-        #pragma unroll
-        for (uint32_t kk = 0; kk < g::kWk / 16u; ++kk) {
-            float stmp[8];
-            #pragma unroll
-            for (uint32_t q = 0; q < 4u; ++q) {
-                stmp[q] = Sst[static_cast<size_t>(kk * 16u + kh * 4u + q) * spitch + nt * 16u + lo];
-                stmp[4u + q] = Sst[static_cast<size_t>(kk * 16u + 8u + kh * 4u + q) * spitch + nt * 16u + lo];
-            }
-            const Frag2 bs = g::gdn_decomp8<kLossy>(stmp);
-            Frag2 ak, aq;
-            #pragma unroll
-            for (uint32_t d = 0; d < 8u; ++d) {
-                ak.h[d] = s.kqfrag[0][kk][lane][d];
-                aq.h[d] = s.kqfrag[1][kk][lane][d];
-            }
-            if constexpr (!kLossy) {
-                #pragma unroll
-                for (uint32_t d = 0; d < 8u; ++d) {
-                    ak.l[d] = s.kqfrag[0][kk][lane][8u + d];
-                    aq.l[d] = s.kqfrag[1][kk][lane][8u + d];
-                }
-            }
-            uacc = g::gdn_wmma2<kLossy>(uacc, ak, bs);
-            oacc = g::gdn_wmma2<kLossy>(oacc, aq, bs);
-            if (ppk) {
-                p_acc = g::gdn_wmma2<kLossy>(p_acc, aq, ak);
-            }
-        }
-    }
-
-    if (warp == 0u && lane == 0u) s.a00 = __expf(gval - gval) * p_acc[0];
-
-    if (mt == 0u && hi == 0u) {
-        const uint32_t v = nt * 16u + lo;
-        const float vv = g::wbf2f(a.v + static_cast<size_t>(row) * a.v_row_stride
-                                  + static_cast<size_t>(v_head) * hv + v0 + v);
-        s.delta[v] = beta * (vv - dval * uacc[0]);
-    }
-    __syncthreads();
-
-    if (mt == 0u) {
-        #pragma unroll
-        for (uint32_t e = 0; e < 8u; ++e) oacc[e] *= dval;
-
-        float atmp0[8] = {};
-        if (lane == 0u) atmp0[0] = s.a00;
-        const Frag2 aab0 = g::gdn_decomp8<kLossy>(atmp0);
-        float atmp1[8] = {};
-        const Frag2 aab1 = g::gdn_decomp8<kLossy>(atmp1);
-        #pragma unroll
-        for (uint32_t jt = 0; jt < 2u; ++jt) {
-            float dtmp[8] = {};
-            if (jt == 0u && kh == 0u) dtmp[0] = s.delta[nt * 16u + lo];
-            const Frag2 bvb = g::gdn_decomp8<kLossy>(dtmp);
-            oacc = g::gdn_wmma2<kLossy>(oacc, jt == 0u ? aab0 : aab1, bvb);
-        }
-
-        #pragma unroll
-        for (uint32_t e = 0; e < 8u; ++e) {
-            const uint32_t i = 8u * hi + e;
-            if (i < 1u)
-                a.output[static_cast<size_t>(row) * a.output_row_stride
-                         + static_cast<size_t>(v_head) * hv + v0 + nt * 16u + lo] = oacc[e];
-        }
-    }
-
-    const float egv = dval;
-    const uint64_t ckbase =
-        a.compact_k != nullptr
-            ? static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride
-            : 0u;
-    const uint64_t cqkdim = static_cast<uint64_t>(a.num_v_heads) * hd;
-    #pragma unroll
-    for (uint32_t t = 0; t < 4u; ++t)
-        #pragma unroll
-        for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
-    #pragma unroll
-    for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
-        Frag2 bv[2];
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            float dtmp[8] = {};
-            if (tstep == 0u && kh == 0u) dtmp[0] = s.delta[(vt0 + vj) * 16u + lo];
-            bv[vj] = g::gdn_decomp8<kLossy>(dtmp);
-        }
-        #pragma unroll
-        for (uint32_t ki = 0; ki < 2u; ++ki) {
-            float ktmp[8] = {};
-            if (tstep == 0u && kh == 0u) {
-                ktmp[0] = a.k[static_cast<size_t>(row) * a.k_row_stride + qk_head * hd
-                              + (kt0 + ki) * 16u + lo] * de0;
-                if (a.compact_k != nullptr)
-                    a.compact_k[ckbase +
-                                static_cast<size_t>(row) * cqkdim +
-                                static_cast<size_t>(v_head) * hd +
-                                (kt0 + ki) * 16u + lo] = ktmp[0];
-            }
-            const Frag2 akT = g::gdn_decomp8<kLossy>(ktmp);
-            #pragma unroll
-            for (uint32_t vj = 0; vj < 2u; ++vj)
-                Sacc[ki * 2u + vj] = g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
-        }
-    }
-
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-            const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            fp16_t* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) st_f16(sp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
-            if (hist_head != nullptr) {
-                fp16_t* hp = hist_head + static_cast<size_t>(m0) * hv + v0 + n0;
-                #pragma unroll
-                for (uint32_t e = 0; e < 8u; ++e)
-                    st_f16(hp + static_cast<size_t>(e) * hv, Sacc[ki * 2u + vj][e]);
-            }
-        }
-
-    if (a.compact_delta != nullptr) {
-        const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
-        const uint64_t base = static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
-        for (uint32_t v = tid; v < g::kWv; ++v)
-            a.compact_delta[base + static_cast<size_t>(row) * vdim +
-                            static_cast<size_t>(v_head) * hv + v0 + v] = s.delta[v];
-        if (tid == 0u && a.compact_a != nullptr)
-            a.compact_a[static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride +
-                        static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
-    }
-}
 
 extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
 void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
@@ -1055,7 +780,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
     const float dt_bias = g::wbf2f(a.dt_bias + v_head);
     const float neg_exp_a_log = -__expf(g::wbf2f(a.a_log + v_head));
 
-    __shared__ Decode1Smem s;
+    __shared__ RowSmem s;
     float* Sst = &s.S[0][0];
     const uint32_t spitch = g::kSp;
 
@@ -1391,49 +1116,12 @@ hipError_t launch_gdn_recurrence_f32_wmma_serial(
     return hipGetLastError();
 }
 
-bool gdn_recurrence_decode1_supported(const GdnRecurrenceArgs& args) {
+bool gdn_recurrence_decode_rows_supported(const GdnRecurrenceArgs& args) {
     if (!gdn_recurrence_lossy_enabled()) return false;
     const bool tp1 = args.key_heads == 16u && args.num_v_heads == 48u;
     const bool tp2 = args.key_heads == 8u && args.num_v_heads == 24u;
     if (!tp1 && !tp2) return false;
-    return args.head_k == gdngfx12::kWk && args.head_v == 128u;
-}
-
-hipError_t launch_gdn_recurrence_f32_wmma_decode1(
-    const GdnRecurrenceArgs& args, hipStream_t stream) {
-    if (!gdn_recurrence_decode1_supported(args))
-        return hipErrorNotSupported;
-    if (args.num_requests == 0u || args.actual_rows == 0u) return hipErrorInvalidValue;
-    if (args.q == nullptr || args.k == nullptr || args.v == nullptr || args.a == nullptr || args.b == nullptr)
-        return hipErrorInvalidValue;
-    if (args.dt_bias == nullptr || args.a_log == nullptr) return hipErrorInvalidValue;
-    if (args.recurrent_state == nullptr || args.output == nullptr) return hipErrorInvalidValue;
-    if (args.requests == nullptr || args.max_sequences == 0u) return hipErrorInvalidValue;
-    const uint32_t vgroups = args.head_v / gdngfx12::kWv;
-    const uint64_t grid_x = static_cast<uint64_t>(args.num_requests) * args.num_v_heads * vgroups;
-    if (grid_x == 0u) return hipErrorInvalidValue;
-    const GdnRecurrenceArgs a = args;
-    const dim3 grid(static_cast<uint32_t>(grid_x));
-    shelf_gdn_recurrence_wmma_decode1<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
-    return hipGetLastError();
-}
-
-hipError_t launch_gdn_recurrence_f32_wmma_decode1_serial(
-    const GdnRecurrenceArgs& args, hipStream_t stream) {
-    if (!gdn_recurrence_decode1_supported(args)) return hipErrorNotSupported;
-    if (args.num_requests != 1u) return hipErrorNotSupported;
-    GdnRecurrenceArgs a = args;
-    for (uint32_t r = 0u; r < args.actual_rows; ++r) {
-        a.row_override = static_cast<int32_t>(r);
-        const hipError_t e = launch_gdn_recurrence_f32_wmma_decode1(a, stream);
-        if (e != hipSuccess) return e;
-    }
-    return hipSuccess;
-}
-
-bool gdn_recurrence_decode_rows_supported(const GdnRecurrenceArgs& args) {
-    if (!gdn_recurrence_lossy_enabled()) return false;
-    if (!gdn_recurrence_decode1_supported(args)) return false;
+    if (args.head_k != gdngfx12::kWk || args.head_v != 128u) return false;
     if (args.num_requests != 1u) return false;
     return args.actual_rows == 2u || args.actual_rows == 4u || args.actual_rows == 8u;
 }

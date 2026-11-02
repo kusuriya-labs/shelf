@@ -212,7 +212,6 @@ shelf_add_test(NAME test_paged_attention SOURCE kernels/optimized/test_paged_att
 shelf_add_test(NAME test_rope SOURCE kernels/optimized/test_rope.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_rope_yarn SOURCE kernels/optimized/test_rope_yarn.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gdn_recurrence SOURCE kernels/optimized/test_gdn_recurrence.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_gdn_recurrence_decode1 SOURCE kernels/optimized/test_gdn_recurrence_decode1.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gdn_recurrence_exact_history SOURCE kernels/optimized/test_gdn_recurrence_exact_history.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gdn_compact_log_commit SOURCE kernels/optimized/test_gdn_compact_log_commit.hip LABELS "gpu1;optional" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gdn_compact_commit_poc SOURCE unit/test_gdn_compact_commit_poc.hip LABELS "gpu1;optional" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
@@ -346,7 +345,6 @@ add_custom_target(
         test_rope
         test_rope_yarn
         test_gdn_recurrence
-        test_gdn_recurrence_decode1
         test_gdn_recurrence_exact_history
         test_gdn_conv1d
         test_elementwise

@@ -749,13 +749,11 @@ restore:
 target verify の GDN recurrence 本体:
 
 - verify（`role == Verify`）は exact 系 variant を固定選択する
-  （`DecodeRowsExact` / `Decode1Serial` / `WmmaSerial`、非対応は `F32`）。
+  （`DecodeRowsExact` / `WmmaSerial`、非対応は `F32`）。
 - `DecodeRowsExact` は 27B geometry（`head_k == 128` かつ `head_v % 64 == 0`）∧
   `decode_rows_supported` ∧ `SHELF_GDN_RECURRENCE_MULTIROW`（既定 1）で選ぶ。
-  それ以外は `num_requests == 1` ∧ `decode1_supported` なら `Decode1Serial`、
-  `geo_ok` なら `WmmaSerial` に落ちる。
-- decode / prefill は `WmmaDecode1` / `Wmma` / `F32` の通常選択のままである
-  （`WmmaDecode1` は geometry ∧ `max_request_rows <= 1` ∧ `decode1_supported`）。
+  それ以外は `geo_ok` なら `WmmaSerial` に落ちる。
+- decode / prefill は `Wmma` / `F32` の通常選択のままである。
 
 ### EOS
 
@@ -1063,7 +1061,7 @@ DFLASH2_ROUND_MS
   `test_dflash2_candidate_selector` / `test_dflash2_kv_ring` /
   `test_dflash2_attention_ring` /
   `test_dflash2_radix_topn` /
-  `test_gdn_spec_history` / `test_gdn_recurrence_decode1`
+  `test_gdn_spec_history`
 - perf（label `gpu1;perf`、正しさテストと分離）: `test_dflash2_radix_topn_perf` /
   `test_dflash2_batch_perf`
 - optional / external: `test_dflash2_weight_real` / `test_dflash2_gate*_real` /

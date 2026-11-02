@@ -176,86 +176,35 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8GemmConfig config, uint32_t rows,
     HIP_ASSERT(hipMemcpy(got.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
 
     if (rows == 1u) {
-        const bool gate = (n & 15u) == 0u;
-        if (!gate) {
-            hipError_t dk = ps::kernel::launch_gemm_fp8_w8a8_wmma_decode1(
-                d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
-                weight_scale_stride_bytes, code_stride, as_bytes, n, 0u, 0, weight_scale_group);
-            if (dk != hipErrorNotSupported) {
-                std::printf("FAIL: %s decode1 gate n=%u kp=%u: %s\n", label, n, kp,
-                            hipGetErrorString(dk));
-                return false;
-            }
-        } else {
-            for (uint32_t unroll : {0u, 2u, 4u, 8u, 16u}) {
-                hipError_t dk = ps::kernel::launch_gemm_fp8_w8a8_wmma_decode1(
-                    d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                    ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
-                    weight_scale_stride_bytes, code_stride, as_bytes, n, unroll, 0, weight_scale_group);
-                if (dk != hipSuccess) {
-                    std::printf("FAIL: %s decode1 F32 u=%u launch: %s\n", label, unroll,
-                                hipGetErrorString(dk));
-                    return false;
-                }
-                HIP_ASSERT(hipStreamSynchronize(0));
-                std::vector<float> d1(static_cast<std::size_t>(rows) * n);
-                HIP_ASSERT(hipMemcpy(d1.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
-                if (std::memcmp(d1.data(), got.data(), out_f32_bytes) != 0) {
-                    std::printf("FAIL: %s decode1 F32 u=%u not bit-exact n=%u k=%u kp=%u\n",
-                                label, unroll, n, k, kp);
-                    return false;
-                }
-            }
-            hipError_t ha = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
-                config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
-                weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
-            if (ha != hipSuccess) {
-                std::printf("FAIL: %s auto F32 launch: %s\n", label, hipGetErrorString(ha));
-                return false;
-            }
-            HIP_ASSERT(hipStreamSynchronize(0));
-            std::vector<float> a1(static_cast<std::size_t>(rows) * n);
-            HIP_ASSERT(hipMemcpy(a1.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
-            if (std::memcmp(a1.data(), got.data(), out_f32_bytes) != 0) {
-                std::printf("FAIL: %s auto F32 not bit-exact vs RowBlock1 n=%u k=%u\n",
-                            label, n, k);
-                return false;
-            }
-
-            const std::size_t out_bf16_bytes = static_cast<std::size_t>(rows) * n * 2u;
-            std::vector<uint8_t> gbf(out_bf16_bytes);
-            hipError_t hg = ps::kernel::launch_gemm_fp8_w8a8_wmma(
-                config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                ps::kernel::Fp8GemmOutputDType::BF16, rows, n, kp,
-                weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
-            if (hg != hipSuccess) {
-                std::printf("FAIL: %s generic BF16 launch: %s\n", label, hipGetErrorString(hg));
-                return false;
-            }
-            HIP_ASSERT(hipStreamSynchronize(0));
-            HIP_ASSERT(hipMemcpy(gbf.data(), d_y, out_bf16_bytes, hipMemcpyDeviceToHost));
-            for (uint32_t unroll : {0u, 8u, 16u}) {
-                hipError_t dk = ps::kernel::launch_gemm_fp8_w8a8_wmma_decode1(
-                    d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-                    ps::kernel::Fp8GemmOutputDType::BF16, rows, n, kp,
-                    weight_scale_stride_bytes, code_stride, as_bytes, n, unroll, 0, weight_scale_group);
-                if (dk != hipSuccess) {
-                    std::printf("FAIL: %s decode1 BF16 u=%u launch: %s\n", label, unroll,
-                                hipGetErrorString(dk));
-                    return false;
-                }
-                HIP_ASSERT(hipStreamSynchronize(0));
-                std::vector<uint8_t> dbf(out_bf16_bytes);
-                HIP_ASSERT(hipMemcpy(dbf.data(), d_y, out_bf16_bytes, hipMemcpyDeviceToHost));
-                if (std::memcmp(dbf.data(), gbf.data(), out_bf16_bytes) != 0) {
-                    std::printf("FAIL: %s decode1 BF16 u=%u not bit-exact n=%u k=%u kp=%u\n",
-                                label, unroll, n, k, kp);
-                    return false;
-                }
-            }
+        hipError_t ha = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+            config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
+            ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
+            weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
+        if (ha != hipSuccess) {
+            std::printf("FAIL: %s auto F32 launch: %s\n", label, hipGetErrorString(ha));
+            return false;
         }
+        HIP_ASSERT(hipStreamSynchronize(0));
+        std::vector<float> a1(static_cast<std::size_t>(rows) * n);
+        HIP_ASSERT(hipMemcpy(a1.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
+        if (std::memcmp(a1.data(), got.data(), out_f32_bytes) != 0) {
+            std::printf("FAIL: %s auto F32 not bit-exact vs RowBlock1 n=%u k=%u\n",
+                        label, n, k);
+            return false;
+        }
+
+        const std::size_t out_bf16_bytes = static_cast<std::size_t>(rows) * n * 2u;
+        std::vector<uint8_t> gbf(out_bf16_bytes);
+        hipError_t hg = ps::kernel::launch_gemm_fp8_w8a8_wmma(
+            config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
+            ps::kernel::Fp8GemmOutputDType::BF16, rows, n, kp,
+            weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
+        if (hg != hipSuccess) {
+            std::printf("FAIL: %s generic BF16 launch: %s\n", label, hipGetErrorString(hg));
+            return false;
+        }
+        HIP_ASSERT(hipStreamSynchronize(0));
+        HIP_ASSERT(hipMemcpy(gbf.data(), d_y, out_bf16_bytes, hipMemcpyDeviceToHost));
     }
 
     float max_abs = 0.0f;
@@ -350,7 +299,7 @@ int main() {
     auto prod_arena = prod_arena_result.release();
     for (const auto& s : prod_shapes) {
         if (run_case(prod_arena, Fp8GemmConfig{Fp8GemmConfigId::RowBlock1},
-                     1u, s[0], s[1], "fp8b128-decode1-prod"))
+                     1u, s[0], s[1], "fp8b128-rows1-prod"))
             ++g_pass;
         else
             ++g_fail;

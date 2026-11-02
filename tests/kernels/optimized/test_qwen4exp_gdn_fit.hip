@@ -647,32 +647,6 @@ bool run_rec_decode_fit() {
             if (step == kSteps / 2 - 1) m_mid = m;
             if (step + 1 == kSteps) m_last = m;
         }
-        if (step == 0) {
-            const bool sup = ::ps::kernel::gdn_recurrence_decode1_supported(
-                make_rec_args(d, 1u));
-            check(sup, "decode1 supported for qwen4exp geometry 16/48/128");
-            if (sup) {
-                ps::gpu::discard_cleanup_result(hipGetLastError());
-                ::ps::kernel::GdnRecurrenceArgs ad = make_rec_args(d, 1u);
-                ad.recurrent_state = reinterpret_cast<::ps::fp16_t*>(d.state2);
-                ad.output = reinterpret_cast<float*>(d.out2);
-                const hipError_t hd =
-                    ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(ad, nullptr);
-                check(hd == hipSuccess,
-                      std::string("decode1 launch: ") +
-                          (hd == hipSuccess ? "ok" : hipGetErrorString(hd)));
-                if (hd == hipSuccess) {
-                    ps::gpu::discard_cleanup_result(hipDeviceSynchronize());
-                    std::vector<float> o2(kVal);
-                    ps::gpu::discard_cleanup_result(
-                        hipMemcpy(o2.data(), d.out2, kVal * 4u, hipMemcpyDeviceToHost));
-                    const Metrics md = diff_metrics(o2.data(), out_c.data(), kVal);
-                    report("rec", "decode1 vs wmma step1 same state", md);
-                    check_close(md, 1.0e-6, 1.0e-6,
-                                "decode1 matches wmma path on same state");
-                }
-            }
-        }
     }
     ps::gpu::discard_cleanup_result(hipDeviceSynchronize());
 
