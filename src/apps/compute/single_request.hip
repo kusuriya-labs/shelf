@@ -337,29 +337,52 @@ int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     const uint64_t request_id = submit_result.release();
 
     auto t_prefill_start = std::chrono::steady_clock::now();
-    auto first_step = runtime.step();
-    if (!first_step.ok()) {
-        fprintf(stderr, "prefill step failed: %s\n", first_step.status().message().c_str());
-        auto cleanup_st = runtime.cancel_all();
-        if (!cleanup_st.ok()) {
-            fprintf(stderr, "cleanup after prefill failure: %s\n", cleanup_st.message().c_str());
+    uint32_t prefill_chunks = 0;
+    for (;;) {
+        const auto* prefill_request = runtime.request(request_id);
+        if (prefill_request == nullptr ||
+            prefill_request->state == shelf::qwen35::runtime::RequestState::Finished ||
+            prefill_request->sequence.position >= prefill_request->input_tokens.size()) {
+            break;
         }
-        return 1;
-    }
-    if (!first_step.value().executed) {
-        fprintf(stderr, "prefill step did not execute\n");
-        auto cleanup_st = runtime.cancel_all();
-        if (!cleanup_st.ok()) {
-            fprintf(stderr, "cleanup after prefill failure: %s\n", cleanup_st.message().c_str());
+        auto prefill_step = runtime.step();
+        if (!prefill_step.ok()) {
+            fprintf(stderr, "prefill step failed: %s\n",
+                    prefill_step.status().message().c_str());
+            auto cleanup_st = runtime.cancel_all();
+            if (!cleanup_st.ok()) {
+                fprintf(stderr, "cleanup after prefill failure: %s\n",
+                        cleanup_st.message().c_str());
+            }
+            return 1;
         }
-        return 1;
+        if (!prefill_step.value().executed) {
+            fprintf(stderr, "prefill step did not execute\n");
+            auto cleanup_st = runtime.cancel_all();
+            if (!cleanup_st.ok()) {
+                fprintf(stderr, "cleanup after prefill failure: %s\n",
+                        cleanup_st.message().c_str());
+            }
+            return 1;
+        }
+        ++prefill_chunks;
+        hipError_t prefill_sync = hipStreamSynchronize(runtime.stream());
+        if (prefill_sync != hipSuccess) {
+            fprintf(stderr, "prefill sync failed: %s\n", hipGetErrorString(prefill_sync));
+            return 1;
+        }
+        if (dumper.file != nullptr) {
+            if (!dumper.step(executor)) return 1;
+        }
     }
     hipError_t herr = hipStreamSynchronize(runtime.stream());
     if (herr != hipSuccess) {
         fprintf(stderr, "prefill sync failed: %s\n", hipGetErrorString(herr));
         return 1;
     }
-    if (!dumper.step(executor)) return 1;
+    if (dumper.file != nullptr) {
+        if (!dumper.step(executor)) return 1;
+    }
     dump_hidden_debug(executor, "prefill");
     dump_tap_hidden(executor, "prefill", prompt_ids.size());
     auto t_prefill_end = std::chrono::steady_clock::now();
@@ -435,6 +458,7 @@ int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
            static_cast<double>(runtime.arena().committed()) / (1024.0 * 1024.0 * 1024.0));
     printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());
     printf("PREFILL_MS=%.1f\n", prefill_ms);
+    printf("PREFILL_CHUNKS=%u\n", prefill_chunks);
     printf("DECODE_MS=%.1f\n", decode_ms);
     printf("DECODE_TOKENS=%u\n", decode_tokens);
     printf("DECODE_TOKENS_PER_SEC=%.2f\n", decode_tps);

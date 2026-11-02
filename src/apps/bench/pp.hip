@@ -423,7 +423,7 @@ int run_pp(int argc, char** argv) {
                                     ? shelf::kernel::KVCacheDType::FP8_E4M3
                                     : shelf::kernel::KVCacheDType::BF16;
         tp_cfg.arena_bytes = arena_bytes;
-        tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
+        tp_cfg.working_set_reserve_bytes = 0;
         auto tp_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!tp_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
