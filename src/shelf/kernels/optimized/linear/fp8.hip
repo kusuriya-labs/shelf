@@ -14,7 +14,7 @@ using int32x2_t = int32_t __attribute__((ext_vector_type(2)));
 using float8_t = float __attribute__((ext_vector_type(8)));
 
 constexpr uint32_t kTileOut = 16u;
-constexpr uint32_t kTileRow = kFp8GemmRowTile;
+constexpr uint32_t kTileRow = kFp8FinegrainedGemmRowTile;
 constexpr uint32_t kThreadsPerBlock = 32u;
 
 __device__ __forceinline__ size_t fp8_act_off(uint32_t r, uint32_t code_stride) {
@@ -23,7 +23,7 @@ __device__ __forceinline__ size_t fp8_act_off(uint32_t r, uint32_t code_stride) 
 }
 
 template <int MB>
-__global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_w8a8_wmma_kernel(
+__global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wmma_kernel(
     const uint8_t* __restrict__ weight_codes,
     const float* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -157,7 +157,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_w8a8_wmma_kernel(
                 continue;
             const float v = acc[t][j];
             const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
-            if (output_dtype == static_cast<uint32_t>(Fp8GemmOutputDType::BF16)) {
+            if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
                 static_cast<::ps::bf16_t*>(output)[out_idx] =
                     ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
             } else {
@@ -170,14 +170,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_w8a8_wmma_kernel(
 using u8v8_t = uint8_t __attribute__((ext_vector_type(8)));
 
 constexpr uint32_t k2dThreads = 256u;
-constexpr uint32_t k2dOutBlock = kFp8GemmPrefill2dOutBlock;
+constexpr uint32_t k2dOutBlock = kFp8FinegrainedGemmPrefill2dOutBlock;
 
 // Prefill path: one block computes a 256 (rows) x 64 (outputs) tile with 8
 // waves. Each wave stages one 16-output x 64-K weight tile into shared memory
 // so the weight is read once and reused across 16 rows. The FP8 128x128 scale
 // is uniform across a 16-output tile.
 template <bool kGuarded>
-__global__ void __launch_bounds__(k2dThreads) gemm_fp8_w8a8_wmma_prefill_2d_kernel(
+__global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_prefill_2d_kernel(
     const uint8_t* __restrict__ weight_codes,
     const float* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -327,7 +327,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_w8a8_wmma_prefill_2d_kern
                     continue;
                 const float v = acc[t][nt][j];
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
-                if (output_dtype == static_cast<uint32_t>(Fp8GemmOutputDType::BF16)) {
+                if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
                     static_cast<::ps::bf16_t*>(output)[out_idx] =
                         ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
                 } else {
@@ -342,7 +342,7 @@ constexpr uint32_t k2dOutBlockWide = 128u;
 
 template <bool kDeferScale>
 __global__ void __launch_bounds__(k2dThreads)
-    gemm_fp8_w8a8_wmma_prefill_2d_wide_kernel(
+    gemm_fp8_finegrained_w8a8_wmma_prefill_2d_wide_kernel(
         const uint8_t* __restrict__ weight_codes,
         const float* __restrict__ weight_scales,
         const uint8_t* __restrict__ activation_codes,
@@ -548,7 +548,7 @@ __global__ void __launch_bounds__(k2dThreads)
                 const uint32_t r = r_base + static_cast<uint32_t>(j);
                 const float v = acc[t][nt][j];
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
-                if (output_dtype == static_cast<uint32_t>(Fp8GemmOutputDType::BF16)) {
+                if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
                     static_cast<::ps::bf16_t*>(output)[out_idx] =
                         ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
                 } else {
@@ -565,7 +565,7 @@ __global__ void __launch_bounds__(k2dThreads)
                         (rows + (MB) * kTileRow - 1u) / ((MB) * kTileRow), 1);  \
         const std::size_t shared_needed =                                       \
             sizeof(float) * 2u * (MB) * 8u;                                     \
-        gemm_fp8_w8a8_wmma_kernel<(MB)>                                         \
+        gemm_fp8_finegrained_w8a8_wmma_kernel<(MB)>                                         \
             <<<grid, kThreadsPerBlock, shared_needed, stream>>>(                \
                 weight_codes, weight_scales, acodes, activation_scales,         \
                 output, static_cast<uint32_t>(output_dtype), rows,              \
@@ -574,14 +574,14 @@ __global__ void __launch_bounds__(k2dThreads)
                 output_row_stride, w_scale_shift);                              \
         return hipGetLastError();                                               \
     } while (0)
-hipError_t launch_gemm_fp8_w8a8_wmma_impl(
-    const Fp8GemmConfig& config,
+hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
+    const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
     const float* weight_scales,
     const int8_t* activation_codes,
     const float* activation_scales,
     void* output,
-    Fp8GemmOutputDType output_dtype,
+    Fp8FinegrainedGemmOutputDType output_dtype,
     uint32_t rows,
     uint32_t out_features,
     uint32_t k_padded,
@@ -601,10 +601,10 @@ hipError_t launch_gemm_fp8_w8a8_wmma_impl(
     else return hipErrorNotSupported;
     const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
     (void)acodes;
-    if (config.id == Fp8GemmConfigId::Prefill2D) {
+    if (config.id == Fp8FinegrainedGemmConfigId::Prefill2D) {
         if ((rows % (16u * kTileRow)) != 0u ||
             (out_features % k2dOutBlock) != 0u ||
-            (k_padded % kFp8GemmPrefill2dKChunk) != 0u)
+            (k_padded % kFp8FinegrainedGemmPrefill2dKChunk) != 0u)
             return hipErrorNotSupported;
         if ((out_features % k2dOutBlockWide) == 0u) {
             const uint32_t gy2d = rows / (8u * kTileRow);
@@ -617,14 +617,14 @@ hipError_t launch_gemm_fp8_w8a8_wmma_impl(
             const uint32_t gs = (gy2d % swz_g == 0u) ? swz_g : 1u;
             const dim3 grid(out_features / k2dOutBlockWide, rows / (8u * kTileRow), 1);
             if (w_scale_shift == 2u) {
-                gemm_fp8_w8a8_wmma_prefill_2d_wide_kernel<true>
+                gemm_fp8_finegrained_w8a8_wmma_prefill_2d_wide_kernel<true>
                     <<<grid, k2dThreads, 0, stream>>>(
                         weight_codes, weight_scales, acodes, activation_scales, output,
                         static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
                         weight_scale_stride_bytes, activation_code_stride_bytes,
                         activation_scale_stride_bytes, output_row_stride, w_scale_shift, gs);
             } else {
-                gemm_fp8_w8a8_wmma_prefill_2d_wide_kernel<false>
+                gemm_fp8_finegrained_w8a8_wmma_prefill_2d_wide_kernel<false>
                     <<<grid, k2dThreads, 0, stream>>>(
                         weight_codes, weight_scales, acodes, activation_scales, output,
                         static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
@@ -635,7 +635,7 @@ hipError_t launch_gemm_fp8_w8a8_wmma_impl(
         }
         const dim3 grid(out_features / k2dOutBlock, rows / (16u * kTileRow), 1);
         constexpr std::size_t shared_needed = sizeof(float) * 512u;
-        gemm_fp8_w8a8_wmma_prefill_2d_kernel<false>
+        gemm_fp8_finegrained_w8a8_wmma_prefill_2d_kernel<false>
             <<<grid, k2dThreads, shared_needed, stream>>>(
                 weight_codes, weight_scales, acodes, activation_scales, output,
                 static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
@@ -644,13 +644,13 @@ hipError_t launch_gemm_fp8_w8a8_wmma_impl(
         return hipGetLastError();
     }
     switch (config.id) {
-    case Fp8GemmConfigId::RowBlock8:
+    case Fp8FinegrainedGemmConfigId::RowBlock8:
         FP8_MB_LAUNCH(8);
-    case Fp8GemmConfigId::RowBlock4:
+    case Fp8FinegrainedGemmConfigId::RowBlock4:
         FP8_MB_LAUNCH(4);
-    case Fp8GemmConfigId::RowBlock2:
+    case Fp8FinegrainedGemmConfigId::RowBlock2:
         FP8_MB_LAUNCH(2);
-    case Fp8GemmConfigId::RowBlock1:
+    case Fp8FinegrainedGemmConfigId::RowBlock1:
     default:
         FP8_MB_LAUNCH(1);
     }
@@ -660,14 +660,14 @@ hipError_t launch_gemm_fp8_w8a8_wmma_impl(
 
 }  // namespace
 
-hipError_t launch_gemm_fp8_w8a8_wmma(
-    const Fp8GemmConfig& config,
+hipError_t launch_gemm_fp8_finegrained_w8a8_wmma(
+    const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
     const float* weight_scales,
     const int8_t* activation_codes,
     const float* activation_scales,
     void* output,
-    Fp8GemmOutputDType output_dtype,
+    Fp8FinegrainedGemmOutputDType output_dtype,
     uint32_t rows,
     uint32_t out_features,
     uint32_t k_padded,
@@ -677,21 +677,21 @@ hipError_t launch_gemm_fp8_w8a8_wmma(
     uint32_t output_row_stride,
     hipStream_t stream,
     uint32_t weight_scale_group) {
-    return launch_gemm_fp8_w8a8_wmma_impl(
+    return launch_gemm_fp8_finegrained_w8a8_wmma_impl(
         config, weight_codes, weight_scales, activation_codes, activation_scales, output,
         output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,
         activation_code_stride_bytes, activation_scale_stride_bytes, output_row_stride,
         stream, weight_scale_group);
 }
 
-hipError_t launch_gemm_fp8_w8a8_wmma_auto(
-    const Fp8GemmConfig& config,
+hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+    const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
     const float* weight_scales,
     const int8_t* activation_codes,
     const float* activation_scales,
     void* output,
-    Fp8GemmOutputDType output_dtype,
+    Fp8FinegrainedGemmOutputDType output_dtype,
     uint32_t rows,
     uint32_t out_features,
     uint32_t k_padded,
@@ -701,7 +701,7 @@ hipError_t launch_gemm_fp8_w8a8_wmma_auto(
     uint32_t output_row_stride,
     hipStream_t stream,
     uint32_t weight_scale_group) {
-    return launch_gemm_fp8_w8a8_wmma(
+    return launch_gemm_fp8_finegrained_w8a8_wmma(
         config, weight_codes, weight_scales, activation_codes, activation_scales, output,
         output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,
         activation_code_stride_bytes, activation_scale_stride_bytes, output_row_stride,

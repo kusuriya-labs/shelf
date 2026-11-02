@@ -159,7 +159,7 @@ void check_case(const Layout& lay, bool& ok) {
                                                rows, kF, s)
         : ::ps::kernel::launch_mul_f32_f32_bf16(ctx_r, rs, gs_sr, rs, att_sr, rs,
                                                rows, kF, s);
-    const hipError_t e2 = ::ps::kernel::launch_activation_quantize_e4m3(
+    const hipError_t e2 = ::ps::kernel::launch_activation_quantize_fp8_finegrained(
         att_sr, cs_s, scales_s, rows, kF, kF, rs, aw.code_row_stride_bytes,
         aw.scale_row_stride_bytes, s, nullptr);
 

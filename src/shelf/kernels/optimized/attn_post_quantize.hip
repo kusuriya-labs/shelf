@@ -57,7 +57,7 @@ void fused_attn_post_quantize_kernel(
         }
     }
     __syncthreads();
-    detail::activation_quantize_e4m3_vec_row_body<K, K>(
+    detail::activation_quantize_fp8_finegrained_vec_row_body<K, K>(
         reinterpret_cast<const ::ps::bf16_t*>(g_base), codes, scales, row,
         gated_rs, code_rs, scale_rs);
 }

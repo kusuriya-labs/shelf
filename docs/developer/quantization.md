@@ -165,15 +165,15 @@ production の Program Builder は linear の activation 量子化方針を
 | weight encoding | compute_spec | linear kernel | activation | activation K padding | activation workspace |
 | --- | --- | --- | --- | --- | --- |
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
-| `Fp8` | `FP8_W8A8_F32_BF16` | `LINEAR_FP8` | E4M3 | 128 | あり |
+| `Fp8` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 
-- activation spec は `kE4m3ActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 0`、
+- activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 0`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。
 - activation K の padding は block-scaled weight の tile に合わせる。
   FP8 weight は weight tile が 128 幅のため activation も 128 単位で揃える。
-- 量子化 weight の activation quantize は `KernelId::ACTIVATION_QUANTIZE_W4A8`
-  を受け取る。名前は既存の fusion match 条件とテストが参照するため据え置きで、
-  production で意味する実体は E4M3 activation である。
+- 量子化 weight の activation quantize は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を
+  受け取る。codes は E4M3、scale は group-128 の F32 であり、activation quantize の
+  実装はこの 1 系統のみである。
 - `group_k = 0` は「row あたり scale が1本」を意味する。E4M3 quantize kernel は
   row 先頭に F32 scale を1本だけ書き、linear も同じ位置を読む。
   一方 `Int8ActivationWorkspaceLayout` の scale row stride は
@@ -186,19 +186,13 @@ production の Program Builder は linear の activation 量子化方針を
   `Int8ActivationWorkspaceLayout::make(k_padded, max_rows)` と同一の
   `codes_offset` / `scales_offset` / `total_bytes` / `k_padded` /
   `code_row_stride_bytes` / `scale_row_stride_bytes` を返し、
-  E4M3 以外（I8、group 指定、scale dtype 違反）は明示的に失敗する。
-  I8 の既存低レベル経路は従来どおり `Int8ActivationWorkspaceLayout` を直接使う。
+  E4M3 以外（codes dtype 違い、group 指定、scale dtype 違反）は明示的に失敗する。
 - activation workspace は入力 ValueId 単位で1つで、同一入力を使う複数 linear は
   1回の quantize と1つの workspace range を共有する。共有の検証は
   K / `k_padded` と activation spec の一致で行い、
   食い違う場合は構築時に失敗する。
-- 通常の Program Builder から到達できない経路として
-  `KernelId::ACTIVATION_QUANTIZE_FP8`（`PhysicalActivationQuantizeKind::I8Row` /
-  `launch_activation_quantize_i8_row`）がある。kernel / physical launch /
-  correctness の経路は実在するが、production の選択肢には入っていない。
-  「通常推論で未使用」であることと「未参照」であることを区別して扱う。
-  利用状況と採否の記録は
-  `rnd/quantization/activation_quant_contract_phase1.md` を参照。
+- activation quantize の kernel id は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` のみで、
+  Program Builder から到達できない代替経路は持たない。
 
 ## KV quantization
 

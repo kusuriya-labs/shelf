@@ -23,12 +23,12 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
     ResolvedLinearQuantContract contract;
     switch (static_cast<QuantizedEncoding>(weight_encoding)) {
         case QuantizedEncoding::Fp8:
-            if (compute_spec != static_cast<uint8_t>(ComputeSpecId::FP8_W8A8_F32_BF16))
+            if (compute_spec != static_cast<uint8_t>(ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16))
                 return Status::invalid_argument(
                     "fp8 linear weight requires fp8 compute spec", __FILE__, __LINE__);
-            contract.linear_kernel = KernelId::LINEAR_FP8;
+            contract.linear_kernel = KernelId::LINEAR_FP8_FINEGRAINED;
             contract.requires_activation_quant = true;
-            contract.activation = quantization::kE4m3ActivationQuantSpec;
+            contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
             contract.activation_k_alignment = 128u;
             return contract;
         case QuantizedEncoding::Bf16:
@@ -46,11 +46,12 @@ inline uint32_t activation_k_padded_for(uint32_t alignment, uint32_t k) noexcept
     return (k + alignment - 1u) & ~(alignment - 1u);
 }
 
-inline KernelId activation_quantize_kernel(
-    const quantization::ActivationQuantSpec& activation) noexcept {
-    return activation.codes_dtype == quantization::QuantScalarType::I8
-               ? KernelId::ACTIVATION_QUANTIZE_FP8
-               : KernelId::ACTIVATION_QUANTIZE_W4A8;
+inline Result<KernelId> activation_quantize_kernel(
+    const quantization::ActivationQuantSpec& activation) {
+    if (activation.codes_dtype != quantization::QuantScalarType::FP8E4M3)
+        return Status::unsupported(
+            "activation quantize requires FP8E4M3 codes", __FILE__, __LINE__);
+    return KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
 }
 
 inline bool activation_quant_matches(

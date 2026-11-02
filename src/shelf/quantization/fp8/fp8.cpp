@@ -9,7 +9,7 @@ namespace ps::quantization::fp8 {
 namespace {
 
 const QuantFormatDesc* fp8_desc() {
-    return quant_format_desc(QuantFormatId::Fp8);
+    return quant_format_desc(QuantFormatId::Fp8Finegrained);
 }
 
 uint64_t scale_n_for(uint64_t n) {

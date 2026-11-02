@@ -38,10 +38,6 @@ enum class PhysicalResolveStatus : uint8_t {
     Skipped = 2,
 };
 
-enum class PhysicalActivationQuantizeKind : uint8_t {
-    E4M3 = 0,
-    I8Row = 1,
-};
 
 enum class PhysicalRmsNormVariant : uint8_t {
     Bf16PfOnePlus = 0,
@@ -76,7 +72,6 @@ struct PhysicalRmsNormLaunch {
 };
 
 struct PhysicalActivationQuantizeLaunch {
-    PhysicalActivationQuantizeKind kind = PhysicalActivationQuantizeKind::E4M3;
     uint64_t input = 0;
     uint64_t codes = 0;
     uint64_t scales = 0;

@@ -28,7 +28,7 @@ void expect_identical(uint32_t k, uint32_t rows, const std::string& tag) {
         rt::Int8ActivationWorkspaceLayout::make(k, rows);
     rt::Int8ActivationWorkspaceLayout adapter;
     const ps::Status status =
-        rt::make_activation_workspace_layout(quant::kE4m3ActivationQuantSpec, k, rows, adapter);
+        rt::make_activation_workspace_layout(quant::kFp8FinegrainedActivationQuantSpec, k, rows, adapter);
     check(status.ok(), tag + ": adapter resolves");
     if (!status.ok()) return;
     check(adapter.codes_offset == legacy.codes_offset, tag + ": codes_offset");
@@ -65,35 +65,31 @@ int main() {
 
     {
         rt::Int8ActivationWorkspaceLayout i8_layout;
+        quant::ActivationQuantSpec i8_codes = quant::kFp8FinegrainedActivationQuantSpec;
+        i8_codes.codes_dtype = quant::QuantScalarType::I8;
         const ps::Status i8_status =
-            rt::make_activation_workspace_layout(quant::kI8ActivationQuantSpec, 2560u, 8u,
-                                                 i8_layout);
-        check(i8_status.ok(), "i8 group-128 spec: accepted");
-        if (i8_status.ok()) {
-            check(i8_layout.scale_row_stride_bytes ==
-                      rt::Int8ActivationWorkspaceLayout::make(2560u, 8u).scale_row_stride_bytes,
-                  "i8 group-128 spec: stride matches layout");
-        }
+            rt::make_activation_workspace_layout(i8_codes, 2560u, 8u, i8_layout);
+        check(!i8_status.ok(), "i8 codes spec: rejected");
     }
     {
-        quant::ActivationQuantSpec grouped = quant::kE4m3ActivationQuantSpec;
+        quant::ActivationQuantSpec grouped = quant::kFp8FinegrainedActivationQuantSpec;
         grouped.group_k = 64u;
         expect_unsupported(grouped, "group-64 e4m3 spec");
     }
     {
-        quant::ActivationQuantSpec bf16_scale = quant::kE4m3ActivationQuantSpec;
+        quant::ActivationQuantSpec bf16_scale = quant::kFp8FinegrainedActivationQuantSpec;
         bf16_scale.scale_dtype = quant::QuantScalarType::BF16;
         expect_unsupported(bf16_scale, "bf16 scale spec");
     }
     {
-        quant::ActivationQuantSpec bf16_codes = quant::kE4m3ActivationQuantSpec;
+        quant::ActivationQuantSpec bf16_codes = quant::kFp8FinegrainedActivationQuantSpec;
         bf16_codes.codes_dtype = quant::QuantScalarType::BF16;
         expect_unsupported(bf16_codes, "bf16 codes spec");
     }
     {
         rt::Int8ActivationWorkspaceLayout layout;
         const ps::Status status = rt::make_activation_workspace_layout(
-            quant::kE4m3ActivationQuantSpec, 2560u, 0u, layout);
+            quant::kFp8FinegrainedActivationQuantSpec, 2560u, 0u, layout);
         check(!status.ok(), "rows 0: rejected");
         check(status.code() == ps::Status::Code::invalid_argument,
               "rows 0: invalid argument status");

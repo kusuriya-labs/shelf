@@ -998,7 +998,7 @@ Status lm_head_validate(
     uint32_t rows) {
     const DFlash2Config& config = *executor.config;
     const bool bf16 = weight.encoding == ps::weights::MatrixEncoding::Bf16;
-    const bool fp8 = weight.encoding == ps::weights::MatrixEncoding::Fp8;
+    const bool fp8 = weight.encoding == ps::weights::MatrixEncoding::Fp8Finegrained;
     if (!bf16 && !fp8) {
         return Status::unsupported("dflash2 target lm_head encoding unsupported", __FILE__,
                                    __LINE__);
@@ -1014,7 +1014,7 @@ Status lm_head_validate(
         }
     } else if (fp8) {
         if (!weight.preshuffled ||
-            !quantization::weight_scale_group_is_default(weight.weight_scale_group, quantization::QuantKernelKind::LinearFp8) ||
+            !quantization::weight_scale_group_is_default(weight.weight_scale_group, quantization::QuantKernelKind::LinearFp8Finegrained) ||
             (weight.k_padded % 128u) != 0u || weight.codes.ndim() == 0 ||
             weight.scales.ndim() == 0) {
             return Status::invalid_argument("dflash2 target lm_head layout invalid", __FILE__,
@@ -1048,7 +1048,7 @@ Status lm_head_quantize(
         return Status::invalid_state("dflash2 activation workspace too small", __FILE__,
                                      __LINE__);
     }
-    const hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
+    const hipError_t err = ps::kernel::launch_activation_quantize_fp8_finegrained(
         hidden, reinterpret_cast<uint8_t*>(executor.activation_codes.data<int8_t>()),
         executor.activation_scales.data<float>(), rows, weight.cols, weight.k_padded,
         weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
@@ -1089,17 +1089,17 @@ Status lm_head_gemm(
         weight.k_padded, executor.max_rows);
     const int8_t* acodes = executor.activation_codes.data<int8_t>();
     const float* ascales = executor.activation_scales.data<float>();
-    if (weight.encoding == ps::weights::MatrixEncoding::Fp8) {
-        const ps::execution::Fp8GemmSelectorInput lin{
+    if (weight.encoding == ps::weights::MatrixEncoding::Fp8Finegrained) {
+        const ps::execution::Fp8FinegrainedGemmSelectorInput lin{
             rows, weight.rows, weight.cols, weight.k_padded};
-        const auto config = ps::execution::select_fp8_gemm_config(lin);
+        const auto config = ps::execution::select_fp8_finegrained_gemm_config(lin);
         if (!config) {
             return Status::unsupported("dflash2 target lm_head has no fp8 gemm geometry",
                                        __FILE__, __LINE__);
         }
-        const hipError_t err = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+        const hipError_t err = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             *config, weight.codes.data<uint8_t>(), weight.scales.data<float>(), acodes,
-            ascales, logits, ps::kernel::Fp8GemmOutputDType::F32, rows, weight.rows,
+            ascales, logits, ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, weight.rows,
             weight.k_padded, weight.storage_scale_stride_bytes,
             layout.code_row_stride_bytes, layout.scale_row_stride_bytes, logits_row_stride,
             stream);

@@ -19,12 +19,12 @@ void check(bool cond, const char* name) {
 
 using ps::kernel::Bf16GemmConfig;
 using ps::kernel::Bf16GemmConfigId;
-using ps::kernel::Fp8GemmConfig;
-using ps::kernel::Fp8GemmConfigId;
+using ps::kernel::Fp8FinegrainedGemmConfig;
+using ps::kernel::Fp8FinegrainedGemmConfigId;
 using ps::execution::Bf16GemmSelectorInput;
-using ps::execution::Fp8GemmSelectorInput;
+using ps::execution::Fp8FinegrainedGemmSelectorInput;
 using ps::execution::select_bf16_gemm_config;
-using ps::execution::select_fp8_gemm_config;
+using ps::execution::select_fp8_finegrained_gemm_config;
 
 std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uint32_t k,
                                        uint32_t stride, bool weight_aligned, bool input_aligned,
@@ -40,13 +40,13 @@ std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uin
     return select_bf16_gemm_config(in);
 }
 
-std::optional<Fp8GemmConfig> sel_fp8(uint32_t rows, uint32_t out_features, uint32_t k,
+std::optional<Fp8FinegrainedGemmConfig> sel_fp8(uint32_t rows, uint32_t out_features, uint32_t k,
                                              uint32_t k_padded) {
-    return select_fp8_gemm_config(
-        Fp8GemmSelectorInput{rows, out_features, k, k_padded});
+    return select_fp8_finegrained_gemm_config(
+        Fp8FinegrainedGemmSelectorInput{rows, out_features, k, k_padded});
 }
 
-bool is_fp8(const std::optional<Fp8GemmConfig>& c, Fp8GemmConfigId id) {
+bool is_fp8(const std::optional<Fp8FinegrainedGemmConfig>& c, Fp8FinegrainedGemmConfigId id) {
     return c.has_value() && c->id == id;
 }
 
@@ -112,23 +112,23 @@ void test_fp8() {
     check(!sel_fp8(1, 1024, 2560, 2561).has_value(),
           "fp8 k_padded not a multiple of 128 -> no config");
 
-    check(is_fp8(sel_fp8(1, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock1),
+    check(is_fp8(sel_fp8(1, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
           "fp8 rows=1 -> RowBlock1");
-    check(is_fp8(sel_fp8(16, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock1),
+    check(is_fp8(sel_fp8(16, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
           "fp8 rows=16 -> RowBlock1");
-    check(is_fp8(sel_fp8(17, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock2),
+    check(is_fp8(sel_fp8(17, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock2),
           "fp8 rows=17 -> RowBlock2");
-    check(is_fp8(sel_fp8(64, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock4),
+    check(is_fp8(sel_fp8(64, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
           "fp8 rows=64 -> RowBlock4");
-    check(is_fp8(sel_fp8(128, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock4),
+    check(is_fp8(sel_fp8(128, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
           "fp8 rows=128 -> RowBlock4");
-    check(is_fp8(sel_fp8(256, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock4),
+    check(is_fp8(sel_fp8(256, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
           "fp8 rows=256 -> RowBlock4");
-    check(is_fp8(sel_fp8(512, 1024, 2560, 2560), Fp8GemmConfigId::Prefill2D),
+    check(is_fp8(sel_fp8(512, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::Prefill2D),
           "fp8 2d rows=512 out=1024 -> Prefill2D");
-    check(is_fp8(sel_fp8(511, 1024, 2560, 2560), Fp8GemmConfigId::RowBlock4),
+    check(is_fp8(sel_fp8(511, 1024, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock4),
           "fp8 rows=511 < 2d threshold -> RowBlock4");
-    check(is_fp8(sel_fp8(512, 32, 2560, 2560), Fp8GemmConfigId::RowBlock1),
+    check(is_fp8(sel_fp8(512, 32, 2560, 2560), Fp8FinegrainedGemmConfigId::RowBlock1),
           "fp8 small out_features -> RowBlock1");
 }
 

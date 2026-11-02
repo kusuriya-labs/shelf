@@ -83,8 +83,8 @@ int main() {
 
     expect_quantized(
         enc(quant::manifest::QuantizedEncoding::Fp8),
-        spec(quant::ComputeSpecId::FP8_W8A8_F32_BF16),
-        rt::KernelId::LINEAR_FP8, 128u, "fp8");
+        spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
+        rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u, "fp8");
 
     expect_error(
         enc(quant::manifest::QuantizedEncoding::Fp8),
@@ -92,11 +92,11 @@ int main() {
         "fp8 linear weight requires fp8 compute spec", "fp8 bf16 spec");
     expect_error(
         enc(quant::manifest::QuantizedEncoding::Bf16),
-        spec(quant::ComputeSpecId::FP8_W8A8_F32_BF16),
+        spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         "bf16 linear weight requires bf16 compute spec", "bf16 fp8 spec");
 
     expect_error(
-        1u, spec(quant::ComputeSpecId::FP8_W8A8_F32_BF16),
+        1u, spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         "bf16 linear weight requires bf16 compute spec", "unknown encoding fp8 spec");
 
     {
@@ -115,23 +115,23 @@ int main() {
     check(rt::activation_k_padded_for(128u, 2560u) == 2560u, "pad 128: 2560 -> 2560");
     check(rt::activation_k_padded_for(32u, 0u) == 0u, "pad 32: 0 -> 0");
 
-    check(rt::activation_quantize_kernel(quant::kE4m3ActivationQuantSpec) ==
-              rt::KernelId::ACTIVATION_QUANTIZE_W4A8,
-          "e4m3 activation spec selects ACTIVATION_QUANTIZE_W4A8");
-    check(rt::activation_quantize_kernel(quant::kI8ActivationQuantSpec) ==
-              rt::KernelId::ACTIVATION_QUANTIZE_FP8,
-          "i8 activation spec selects ACTIVATION_QUANTIZE_FP8");
+    const auto fp8_finegrained_kernel = rt::activation_quantize_kernel(quant::kFp8FinegrainedActivationQuantSpec);
+    check(fp8_finegrained_kernel.ok() && fp8_finegrained_kernel.value() == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
+          "e4m3 activation spec selects ACTIVATION_QUANTIZE_FP8_FINEGRAINED");
+    {
+        quant::ActivationQuantSpec i8_codes = quant::kFp8FinegrainedActivationQuantSpec;
+        i8_codes.codes_dtype = quant::QuantScalarType::I8;
+        check(!rt::activation_quantize_kernel(i8_codes).ok(),
+              "i8 activation spec has no activation quantize kernel");
+    }
 
     check(rt::activation_quant_matches(
-              quant::kE4m3ActivationQuantSpec, quant::kE4m3ActivationQuantSpec),
+              quant::kFp8FinegrainedActivationQuantSpec, quant::kFp8FinegrainedActivationQuantSpec),
           "e4m3 spec matches itself");
-    check(!rt::activation_quant_matches(
-              quant::kE4m3ActivationQuantSpec, quant::kI8ActivationQuantSpec),
-          "e4m3 spec does not match the i8 spec");
     {
-        quant::ActivationQuantSpec grouped = quant::kE4m3ActivationQuantSpec;
+        quant::ActivationQuantSpec grouped = quant::kFp8FinegrainedActivationQuantSpec;
         grouped.group_k = 64u;
-        check(!rt::activation_quant_matches(quant::kE4m3ActivationQuantSpec, grouped),
+        check(!rt::activation_quant_matches(quant::kFp8FinegrainedActivationQuantSpec, grouped),
               "e4m3 spec does not match a differently grouped spec");
     }
 

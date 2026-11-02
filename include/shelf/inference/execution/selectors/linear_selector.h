@@ -8,7 +8,7 @@ namespace ps::execution {
 
 enum class LinearComputeFamily : uint8_t {
     Bf16,
-    Fp8W8A8,
+    Fp8FinegrainedW8A8,
 };
 
 struct Bf16GemmSelectorInput {
@@ -23,7 +23,7 @@ struct Bf16GemmSelectorInput {
     bool allow_dot2_rows = false;
 };
 
-struct Fp8GemmSelectorInput {
+struct Fp8FinegrainedGemmSelectorInput {
     uint32_t rows = 0;
     uint32_t out_features = 0;
     uint32_t k = 0;
@@ -38,7 +38,7 @@ bool linear_shape_supported(
 std::optional<ps::kernel::Bf16GemmConfig>
 select_bf16_gemm_config(const Bf16GemmSelectorInput& input);
 
-std::optional<ps::kernel::Fp8GemmConfig>
-select_fp8_gemm_config(const Fp8GemmSelectorInput& input);
+std::optional<ps::kernel::Fp8FinegrainedGemmConfig>
+select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input);
 
 }  // namespace ps::execution

@@ -560,14 +560,14 @@ static void test_standalone_quantized_reader(gpu::GpuArena& arena, hipStream_t s
         else {
             weights::MatrixWeight m = w.release();
             check_eq_u64(static_cast<uint32_t>(m.encoding),
-                         static_cast<uint32_t>(weights::MatrixEncoding::Fp8), "fp8 encoding");
+                         static_cast<uint32_t>(weights::MatrixEncoding::Fp8Finegrained), "fp8 encoding");
             check_eq_u64(m.rows, 130, "fp8 rows");
             check_eq_u64(m.cols, 200, "fp8 cols");
             check_eq_u64(m.k_padded, 256, "fp8 k_padded");
             check_eq_u64(m.weight_scale_group, 128, "fp8 wsg");
             check(m.preshuffled, "fp8 preshuffled");
-            check(m.quant_spec == QuantSpecId::FP8_E4M3_F32_V1, "fp8 quant_spec");
-            check(m.compute_spec == ComputeSpecId::FP8_W8A8_F32_BF16, "fp8 compute_spec");
+            check(m.quant_spec == QuantSpecId::FP8_FINEGRAINED_F32_V1, "fp8 quant_spec");
+            check(m.compute_spec == ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16, "fp8 compute_spec");
             const auto n = expect_native_fp8(m_fp8.codes, m_fp8.metadata1, 130, 256);
             check_matrix_bytes(m, n.codes_span(), as_bytes(n.scales_span()), "fp8");
         }
@@ -730,14 +730,14 @@ static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t s
     check(w.embed_tokens.encoding == weights::MatrixEncoding::Bf16, "quant embed encoding");
 
     check_eq_u64(static_cast<uint32_t>(w.layers[0].mlp_gate_proj.encoding),
-                 static_cast<uint32_t>(weights::MatrixEncoding::Fp8), "quant gate encoding");
+                 static_cast<uint32_t>(weights::MatrixEncoding::Fp8Finegrained), "quant gate encoding");
     check(w.layers[0].mlp_gate_proj.preshuffled, "quant gate preshuffled");
     check(w.layers[0].mlp_down_proj.compute_spec ==
-              quantization::ComputeSpecId::FP8_W8A8_F32_BF16,
+              quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16,
           "quant down compute_spec");
     check(w.layers[0].attn_in_proj_a.encoding == weights::MatrixEncoding::Bf16, "in_proj_a bf16 matrix");
     check_eq_u64(static_cast<uint32_t>(w.layers[1].attn_q_proj.encoding),
-                 static_cast<uint32_t>(weights::MatrixEncoding::Fp8), "quant q encoding");
+                 static_cast<uint32_t>(weights::MatrixEncoding::Fp8Finegrained), "quant q encoding");
     check(w.mtp.fc.encoding == weights::MatrixEncoding::Bf16, "mtp fc encoding bf16 (MTP not quantized)");
     check_eq_u64(w.mtp.fc.rows, 32, "mtp fc rows == H");
     check_eq_u64(w.mtp.fc.cols, 64, "mtp fc cols == 2H");
@@ -979,7 +979,7 @@ static bool build_hf_fp8_model(const fs::path& dir, HfFxpFixture& f) {
 static void check_fp8_hf_matrix(const weights::MatrixWeight& m, const HfFxpFixture& f,
                                 const std::string& logical, uint64_t rows, uint64_t k) {
     const uint64_t kp = (k + 127u) / 128u * 128u;
-    check(m.encoding == weights::MatrixEncoding::Fp8, logical + " fp8 encoding");
+    check(m.encoding == weights::MatrixEncoding::Fp8Finegrained, logical + " fp8 encoding");
     check(m.preshuffled, logical + " preshuffled");
     const auto n = expect_native_fp8(f.codes.at(logical), as_bytes(f.scales.at(logical)), rows, kp);
     check_matrix_bytes(m, n.codes_span(), as_bytes(n.scales_span()), logical + " native");
@@ -1024,7 +1024,7 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
     check(w.layers[0].attn_in_proj_a.encoding == weights::MatrixEncoding::Bf16, "hf fp8 in_proj_a bf16");
     check(w.layers[0].attn_conv1d_weight.ndim() == 3, "hf fp8 conv1d ndim");
     check(w.mtp.fc.encoding == weights::MatrixEncoding::Bf16, "hf fp8 mtp fc bf16");
-    check(w.mtp.layer.mlp_gate_proj.encoding == weights::MatrixEncoding::Fp8,
+    check(w.mtp.layer.mlp_gate_proj.encoding == weights::MatrixEncoding::Fp8Finegrained,
           "hf fp8 mtp layer fp8");
 }
 

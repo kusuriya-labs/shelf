@@ -99,9 +99,9 @@ int main() {
         weight.rows = 64;
         weight.cols = 64;
         weight.k_padded = 64;
-        weight.encoding = static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8);
+        weight.encoding = static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained);
         weight.compute_spec = static_cast<uint8_t>(
-            ps::quantization::ComputeSpecId::FP8_W8A8_F32_BF16);
+            ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16);
     }
 
     const rt::WeightTableView weight_view{weights.data(), weights.size()};
@@ -126,15 +126,15 @@ int main() {
     check(program.dispatches.size() == 5, "expected five physical dispatches");
 
     if (program.dispatches.size() == 5) {
-        check(program.dispatches[0].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_W4A8,
+        check(program.dispatches[0].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
               "dispatch 0 activation quantize");
-        check(program.dispatches[1].kernel_id == rt::KernelId::LINEAR_FP8,
+        check(program.dispatches[1].kernel_id == rt::KernelId::LINEAR_FP8_FINEGRAINED,
               "dispatch 1 first linear");
         check(program.dispatches[2].kernel_id == rt::KernelId::SILU,
               "dispatch 2 silu");
-        check(program.dispatches[3].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_W4A8,
+        check(program.dispatches[3].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
               "dispatch 3 activation quantize");
-        check(program.dispatches[4].kernel_id == rt::KernelId::LINEAR_FP8,
+        check(program.dispatches[4].kernel_id == rt::KernelId::LINEAR_FP8_FINEGRAINED,
               "dispatch 4 second linear");
     }
 

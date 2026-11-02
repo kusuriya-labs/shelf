@@ -22,10 +22,9 @@ enum class KernelId : uint32_t {
     GDN_RECURRENCE = 17,
     OUTPUT_GATHER = 18,
     SAMPLING = 19,
-    ACTIVATION_QUANTIZE_FP8 = 20,
-    ACTIVATION_QUANTIZE_W4A8 = 21,
+    ACTIVATION_QUANTIZE_FP8_FINEGRAINED = 20,
     CONCAT = 24,
-    LINEAR_FP8 = 25,
+    LINEAR_FP8_FINEGRAINED = 25,
     VERIFY_ACCEPT = 27,
     COUNT = 28,
 };
@@ -54,9 +53,8 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::GDN_RECURRENCE: return "GDN_RECURRENCE";
         case KernelId::OUTPUT_GATHER: return "OUTPUT_GATHER";
         case KernelId::SAMPLING: return "SAMPLING";
-        case KernelId::ACTIVATION_QUANTIZE_FP8: return "ACTIVATION_QUANTIZE_FP8";
-        case KernelId::ACTIVATION_QUANTIZE_W4A8: return "ACTIVATION_QUANTIZE_W4A8";
-        case KernelId::LINEAR_FP8: return "LINEAR_FP8";
+        case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED: return "ACTIVATION_QUANTIZE_FP8_FINEGRAINED";
+        case KernelId::LINEAR_FP8_FINEGRAINED: return "LINEAR_FP8_FINEGRAINED";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
         default: return "UNKNOWN";

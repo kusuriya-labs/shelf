@@ -100,7 +100,7 @@ struct QuantVecRow {
 };
 
 template <uint32_t K, uint32_t KP, uint32_t Threads = kQuantThreadsPerRow>
-__device__ __forceinline__ void activation_quantize_e4m3_vec_row_body(
+__device__ __forceinline__ void activation_quantize_fp8_finegrained_vec_row_body(
     const ::ps::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,

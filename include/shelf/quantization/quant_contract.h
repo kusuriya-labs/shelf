@@ -13,13 +13,13 @@ namespace ps::quantization {
 
 enum class QuantKernelKind : uint8_t {
     LinearBf16,
-    LinearFp8,
+    LinearFp8Finegrained,
 };
 
 inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel) {
     switch (kernel) {
         case QuantKernelKind::LinearBf16: return manifest::QuantizedEncoding::Bf16;
-        case QuantKernelKind::LinearFp8: return manifest::QuantizedEncoding::Fp8;
+        case QuantKernelKind::LinearFp8Finegrained: return manifest::QuantizedEncoding::Fp8;
     }
     return manifest::QuantizedEncoding::Bf16;
 }

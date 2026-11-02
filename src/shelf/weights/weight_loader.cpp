@@ -242,7 +242,7 @@ Result<MatrixWeight> load_quantized_view(
             return Status::invalid_argument(
                 ("fp8 block128 canonical payload invalid: " + name).c_str(), __FILE__, __LINE__);
         }
-        w.encoding = MatrixEncoding::Fp8;
+        w.encoding = MatrixEncoding::Fp8Finegrained;
         w.weight_scale_group = static_cast<uint32_t>(scale_block_k);
 
         if (!options.preshuffle) {

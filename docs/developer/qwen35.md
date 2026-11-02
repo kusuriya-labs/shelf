@@ -160,7 +160,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 | PrimitiveKind | KernelId | 備考 |
 |---|---|---|
 | `EMBEDDING_LOOKUP` | `EMBEDDING_LOOKUP` | weight_index 付き |
-| `LINEAR` | `LINEAR_BF16` / `LINEAR_FP8` | weight encoding で分岐（bf16=0, fp8=5） |
+| `LINEAR` | `LINEAR_BF16` / `LINEAR_FP8_FINEGRAINED` | weight encoding で分岐（bf16=0, fp8=5） |
 | `RMS_NORM` | `RMS_NORM` | eps / group_size / parameter_index |
 | `RESIDUAL_ADD` | `RESIDUAL_ADD` | 2入力 |
 | `SPLIT` | `SPLIT` | head_dim / layout flag |
@@ -178,7 +178,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 
 `LINEAR` が量子化 weight（fp8）の場合、weight encoding に伴い、入力値に対してアクティベーション量子化 dispatch を自動挿入する。
 
-- 挿入される KernelId: `ACTIVATION_QUANTIZE_W4A8`
+- 挿入される KernelId: `ACTIVATION_QUANTIZE_FP8_FINEGRAINED`
 - group_size = 32
 - `activation_kp` / `activation_max_rows` / `code_stride` / `scale_stride` を `Int8ActivationWorkspaceLayout::make(k_padded, max_rows)` で設定する。`k_padded` は `activation_k_padded(encoding, k)`（fp8 は 128）
 - 同一入力への複数 LINEAR が共通 workspace を使う場合（`activation_ws_by_input` で管理）は `k` / `k_padded` が一致するか検証
@@ -348,8 +348,8 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 
 1. `EMBEDDING_LOOKUP` → `try_launch_embedding`
 2. `SAMPLING` → `try_launch_sampling`
-3. `ACTIVATION_QUANTIZE_FP8` / `ACTIVATION_QUANTIZE_W4A8` → `try_launch_activation_quantize_a8`
-4. `LINEAR_FP8` → `try_launch_linear_fp8`
+3. `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` → `try_launch_activation_quantize`
+4. `LINEAR_FP8_FINEGRAINED` → `try_launch_linear_fp8`
 5. `LINEAR_BF16` → `try_launch_linear_bf16`
 6. `RMS_NORM` → `try_launch_rmsnorm`
 7. `ROPE` → `try_launch_rope`
@@ -369,7 +369,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 
 - **embedding**: `try_launch_embedding`
 - **sampling**: `try_launch_sampling`
-- **activation quant**: `try_launch_activation_quantize_a8`（a8 量子化）
+- **activation quant**: `try_launch_activation_quantize`（E4M3 量子化）
 - **linear**: `try_launch_linear_fp8` / `try_launch_linear_bf16`
 - **rmsnorm**: `try_launch_rmsnorm`
 - **l2_normalize**: `try_launch_l2_normalize`
@@ -409,10 +409,9 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 | 17 | `GDN_RECURRENCE` |
 | 18 | `OUTPUT_GATHER` |
 | 19 | `SAMPLING` |
-| 20 | `ACTIVATION_QUANTIZE_FP8` |
-| 21 | `ACTIVATION_QUANTIZE_W4A8` |
+| 20 | `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` |
 | 24 | `CONCAT` |
-| 25 | `LINEAR_FP8` |
+| 25 | `LINEAR_FP8_FINEGRAINED` |
 | 27 | `VERIFY_ACCEPT` |
 
 カウントの正本は `KernelId::COUNT`（`include/shelf/runtime/program/kernel_id.h`）である。
@@ -469,7 +468,7 @@ Qwen35 の top-level load path は partition plan を
 
 - `src/shelf/inference/execution/optimized_dispatch.hip`
   - `try_launch_optimized`
-  - `try_launch_embedding` / `try_launch_sampling` / `try_launch_activation_quantize_a8`
+  - `try_launch_embedding` / `try_launch_sampling` / `try_launch_activation_quantize`
   - `try_launch_linear_fp8` / `try_launch_linear_bf16`
   - `try_launch_rmsnorm` / `try_launch_l2_normalize` / `try_launch_elementwise` / `try_launch_rope`
   - `try_launch_kv_append` / `try_launch_paged_attention` / `try_launch_gdn_conv1d` /

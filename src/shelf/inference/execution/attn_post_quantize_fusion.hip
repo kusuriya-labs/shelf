@@ -74,7 +74,7 @@ Result<OptimizedLaunchResult> try_launch_fused_attn_post_quantize(
     const auto& d2 = program.dispatches[dispatch_index + 2u];
     if (d0.kernel_id != ::ps::runtime::KernelId::SIGMOID ||
         d1.kernel_id != ::ps::runtime::KernelId::MUL ||
-        d2.kernel_id != ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_W4A8) {
+        d2.kernel_id != ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED) {
         return kNone;
     }
     if (d0.input_count != 1u || d0.output_count != 1u || d1.input_count != 2u ||
@@ -120,11 +120,10 @@ Result<OptimizedLaunchResult> try_launch_fused_attn_post_quantize(
     const Result<PhysicalResolveStatus> r2 =
         resolve_activation_quantize_physical(program, d2, ctx, aq);
     if (!r2.ok() || r2.value() != PhysicalResolveStatus::Applicable) return kNone;
-    if (aq.kind != PhysicalActivationQuantizeKind::E4M3) return kNone;
     if (aq.k != sig.features || aq.k_padded != aq.k) return kNone;
     if (aq.rows != sig.rows) return kNone;
     if (aq.input != mul.out0 || aq.input_row_stride != mul.out0_stride) return kNone;
-    if (!::ps::kernel::activation_quantize_e4m3_vec_supported(
+    if (!::ps::kernel::activation_quantize_fp8_finegrained_vec_supported(
             reinterpret_cast<const ::ps::bf16_t*>(mul.out0),
             reinterpret_cast<const uint8_t*>(aq.codes), aq.k, aq.k_padded,
             aq.input_row_stride)) {

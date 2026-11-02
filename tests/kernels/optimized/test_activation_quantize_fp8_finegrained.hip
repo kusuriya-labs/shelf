@@ -201,10 +201,10 @@ bool run_kernel(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
     float* scales = reinterpret_cast<float*>(ws + layout.scales_offset);
     bool specialized = false;
     const hipError_t herr = generic
-        ? ps::kernel::launch_activation_quantize_e4m3_generic(
+        ? ps::kernel::launch_activation_quantize_fp8_finegrained_generic(
               in, codes, scales, rows, k, kp, k,
               layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream)
-        : ps::kernel::launch_activation_quantize_e4m3(
+        : ps::kernel::launch_activation_quantize_fp8_finegrained(
               in, codes, scales, rows, k, kp, k,
               layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream,
               &specialized);

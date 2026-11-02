@@ -137,10 +137,10 @@ byte order は同一ホスト内での比較を前提とする。
 ## activation-quantize
 
 ```text
---variant correctness|optimized   (default optimized)
+--variant correctness|e4m3-generic|e4m3-vec|e4m3-auto   (default e4m3-auto)
 ```
 
-A8 activation quantization (production correctness path vs optimized kernel)。
+FP8 E4M3 activation quantization (correctness 実装と optimized kernel の比較)。
 
 ## gemm
 

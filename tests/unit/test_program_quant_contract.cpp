@@ -114,8 +114,8 @@ void run_case(const Case& c) {
     const rt::DispatchBinding& quantize = program.dispatches[0];
     const rt::DispatchBinding& linear_dispatch = program.dispatches[1];
 
-    check(quantize.kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_W4A8,
-          std::string(c.tag) + ": ACTIVATION_QUANTIZE_W4A8");
+    check(quantize.kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
+          std::string(c.tag) + ": ACTIVATION_QUANTIZE_FP8_FINEGRAINED");
     check(quantize.group_size == 32u, std::string(c.tag) + ": quantize group 32");
     check(quantize.activation_kp == c.k_padded, std::string(c.tag) + ": quantize k_padded");
     check(quantize.activation_max_rows == max_rows, std::string(c.tag) + ": quantize rows");
@@ -194,8 +194,8 @@ void run_shared_input_case() {
     std::array<rt::WeightSlot, 2> slots{};
     for (rt::WeightSlot& slot : slots) {
         slot = make_slot(
-            static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8),
-            static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_W8A8_F32_BF16),
+            static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
+            static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
             k_out, k, k);
     }
     rt::WeightTableView table;
@@ -217,7 +217,7 @@ void run_shared_input_case() {
     uint32_t quantize_count = 0;
     uint32_t quantize_slot = rt::kNoWorkspace;
     for (const rt::DispatchBinding& dispatch : program.dispatches) {
-        if (dispatch.kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_W4A8) {
+        if (dispatch.kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED) {
             ++quantize_count;
             quantize_slot = dispatch.workspace_slot;
         }
@@ -227,7 +227,7 @@ void run_shared_input_case() {
     const rt::DispatchBinding* first_linear = nullptr;
     const rt::DispatchBinding* second_linear = nullptr;
     for (const rt::DispatchBinding& dispatch : program.dispatches) {
-        if (dispatch.kernel_id != rt::KernelId::LINEAR_FP8) continue;
+        if (dispatch.kernel_id != rt::KernelId::LINEAR_FP8_FINEGRAINED) continue;
         if (first_linear == nullptr) {
             first_linear = &dispatch;
         } else {
@@ -373,8 +373,8 @@ void run_error_cases() {
 
 int main() {
     run_case(Case{"bf16", 0u, 0u, rt::KernelId::LINEAR_BF16, false, 2560u, 2560u});
-    run_case(Case{"fp8", 5u, 1u, rt::KernelId::LINEAR_FP8, true, 2560u, 2560u});
-    run_case(Case{"fp8-k2500", 5u, 1u, rt::KernelId::LINEAR_FP8, true, 2500u, 2560u});
+    run_case(Case{"fp8", 5u, 1u, rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2560u, 2560u});
+    run_case(Case{"fp8-k2500", 5u, 1u, rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2500u, 2560u});
     run_shared_input_case();
     run_shared_input_mismatch_case();
     run_error_cases();

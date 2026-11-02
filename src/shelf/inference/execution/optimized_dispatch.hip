@@ -110,7 +110,7 @@ uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
 
 }  // namespace
 
-Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
+Result<OptimizedLaunchResult> try_launch_activation_quantize(
     const ::ps::runtime::Program& program,
     const ::ps::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
@@ -122,28 +122,19 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
         return resolved.status();
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
-    hipError_t herr = hipSuccess;
     bool specialized = false;
-    if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
-        herr = ::ps::kernel::launch_activation_quantize_e4m3(
-            reinterpret_cast<const ::ps::bf16_t*>(launch.input),
-            reinterpret_cast<uint8_t*>(launch.codes),
-            reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
-            launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-            launch.scale_row_stride, stream, &specialized);
-    else
-        herr = ::ps::kernel::launch_activation_quantize_i8_row(
-            reinterpret_cast<const ::ps::bf16_t*>(launch.input),
-            reinterpret_cast<int8_t*>(launch.codes),
-            reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
-            launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-            launch.scale_row_stride, stream);
+    const hipError_t herr = ::ps::kernel::launch_activation_quantize_fp8_finegrained(
+        reinterpret_cast<const ::ps::bf16_t*>(launch.input),
+        reinterpret_cast<uint8_t*>(launch.codes),
+        reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
+        launch.k_padded, launch.input_row_stride, launch.code_row_stride,
+        launch.scale_row_stride, stream, &specialized);
     if (herr != hipSuccess)
         return Status::hip_error("act-quant optimized launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
-    if (launch.kind == PhysicalActivationQuantizeKind::E4M3 && !specialized)
+    if (!specialized)
         record_correctness_fallback(b.kernel_id);
-    else if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
+    else
         g_activation_quantize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
@@ -244,7 +235,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     const uint32_t wkp = e.k_padded;
     if (wkp < e.cols || (wkp & 127u) != 0u)
         return Status::invalid_state("fp8 linear: weight k_padded invalid", __FILE__, __LINE__);
-    if (!quantization::weight_scale_group_matches(e.weight_scale_group, quantization::QuantKernelKind::LinearFp8))
+    if (!quantization::weight_scale_group_matches(e.weight_scale_group, quantization::QuantKernelKind::LinearFp8Finegrained))
         return Status::invalid_state("fp8 linear: weight_scale_group unsupported", __FILE__, __LINE__);
     const uint32_t sstride = e.storage_scale_stride_bytes;
     if (sstride != (wkp / e.weight_scale_group) * 4u)
@@ -283,8 +274,8 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
     if (rows > b.activation_max_rows)
         return Status::invalid_state("fp8 linear: rows out of range", __FILE__, __LINE__);
-    const Fp8GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
-    const auto config = select_fp8_gemm_config(lin);
+    const Fp8FinegrainedGemmSelectorInput lin{rows, e.rows, e.cols, wkp};
+    const auto config = select_fp8_finegrained_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp8, FallbackReason::SelectorRejected);
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
@@ -298,10 +289,10 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         reinterpret_cast<const uint8_t*>(range_base + layout.codes_offset);
     const float* ascales =
         reinterpret_cast<const float*>(range_base + layout.scales_offset);
-    const ::ps::kernel::Fp8GemmOutputDType odt =
-        out_bf16 ? ::ps::kernel::Fp8GemmOutputDType::BF16
-                 : ::ps::kernel::Fp8GemmOutputDType::F32;
-    hipError_t herr = ::ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+    const ::ps::kernel::Fp8FinegrainedGemmOutputDType odt =
+        out_bf16 ? ::ps::kernel::Fp8FinegrainedGemmOutputDType::BF16
+                 : ::ps::kernel::Fp8FinegrainedGemmOutputDType::F32;
+    hipError_t herr = ::ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             *config,
             static_cast<const uint8_t*>(e.codes),
             static_cast<const float*>(e.scales),
@@ -521,10 +512,9 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             g_sampling_optimized_count.fetch_add(1u, std::memory_order_relaxed);
         return sm;
     }
-    if (b.kernel_id == KernelId::ACTIVATION_QUANTIZE_FP8 ||
-        b.kernel_id == KernelId::ACTIVATION_QUANTIZE_W4A8)
-        return try_launch_activation_quantize_a8(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::LINEAR_FP8)
+    if (b.kernel_id == KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED)
+        return try_launch_activation_quantize(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::LINEAR_FP8_FINEGRAINED)
         return try_launch_linear_fp8(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_BF16)
         return try_launch_linear_bf16(program, b, ctx, stream);

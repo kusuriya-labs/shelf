@@ -300,8 +300,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     aw.last_command = cmd_idx;
                     c.activation_workspaces.push_back(aw);
                     c.activation_ws_by_input[act_ws_key] = ws_idx;
-                    DispatchBinding qb = base_binding(
-                        activation_quantize_kernel(contract.activation));
+                    const Result<KernelId> act_kernel =
+                        activation_quantize_kernel(contract.activation);
+                    if (!act_kernel.ok()) return act_kernel.status();
+                    DispatchBinding qb = base_binding(act_kernel.value());
                     qb.group_size = 32;
                     qb.activation_kp = kp;
                     qb.activation_max_rows = aw.max_rows;

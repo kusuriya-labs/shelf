@@ -47,12 +47,12 @@ struct QuantFormatDesc {
 enum class QuantFormatId : uint8_t {
     None = 0,
     Bf16 = 1,
-    Fp8 = 4,
+    Fp8Finegrained = 4,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
 static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
-static_assert(static_cast<uint8_t>(QuantFormatId::Fp8) == 4);
+static_assert(static_cast<uint8_t>(QuantFormatId::Fp8Finegrained) == 4);
 
 inline constexpr QuantFormatDesc kBf16FormatDesc = {
     16, 1, 32,
@@ -66,7 +66,7 @@ inline constexpr QuantFormatDesc kBf16FormatDesc = {
 
 // FP8 E4M3 codes are one byte per element; the FP32 scale tile is shared by
 // 128 output rows and 128 K elements.
-inline constexpr QuantFormatDesc kFp8FormatDesc = {
+inline constexpr QuantFormatDesc kFp8FinegrainedFormatDesc = {
     kFp8ScaleBlockK, 1, kFp8ScaleBlockK,
     {
         {4, MetaCountMode::MatrixBlock, MetaStorage::F32, kFp8ScaleBlockN, kFp8ScaleBlockK},
@@ -79,7 +79,7 @@ inline constexpr QuantFormatDesc kFp8FormatDesc = {
 inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
     switch (id) {
         case QuantFormatId::Bf16: return &kBf16FormatDesc;
-        case QuantFormatId::Fp8: return &kFp8FormatDesc;
+        case QuantFormatId::Fp8Finegrained: return &kFp8FinegrainedFormatDesc;
         default: return nullptr;
     }
 }

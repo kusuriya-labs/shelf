@@ -21,7 +21,7 @@ Result<QuantizedEncoding> parse_quantized_encoding(const std::string& name) {
 ps::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc) {
     switch (enc) {
         case QuantizedEncoding::Bf16: return ps::quantization::QuantFormatId::Bf16;
-        case QuantizedEncoding::Fp8: return ps::quantization::QuantFormatId::Fp8;
+        case QuantizedEncoding::Fp8: return ps::quantization::QuantFormatId::Fp8Finegrained;
     }
     return ps::quantization::QuantFormatId::None;
 }

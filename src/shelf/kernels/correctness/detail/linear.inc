@@ -152,82 +152,8 @@ __device__ __forceinline__ float act_load_f32(const void* row, uint32_t i, bool 
     return __bfloat162float(h);
 }
 
-__device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
-    ModelDispatchEnv& env, const DispatchBinding& b) {
-    ResolvedValue in{};
-    if (!resolve_value(env, b.input_slots[0], in))
-        return ProgramStatus::INVALID_BINDING;
-    if (in.dtype != ValueDType::BF16 && in.dtype != ValueDType::F32)
-        return ProgramStatus::INVALID_PROGRAM;
-    if (b.workspace_slot >= env.program->workspace_range_count)
-        return ProgramStatus::INVALID_PROGRAM;
-    if (in.features == 0u)
-        return ProgramStatus::INVALID_PROGRAM;
-    if (b.activation_kp < in.features || (b.activation_kp & 31u) != 0u ||
-        b.activation_max_rows == 0u)
-        return ProgramStatus::INVALID_PROGRAM;
-    const uint32_t rows = value_rows(env, in);
-    if (rows > b.activation_max_rows)
-        return ProgramStatus::INVALID_PROGRAM;
-    if (rows == 0u)
-        return ProgramStatus::COMPLETE;
-    const uint32_t k = in.features;
-    const uint32_t kp = b.activation_kp;
-    const uint32_t code_stride = b.activation_code_stride;
-    const uint32_t scale_stride = b.activation_scale_stride;
-    if (code_stride < kp || (code_stride & 15u) != 0u)
-        return ProgramStatus::INVALID_PROGRAM;
-    if (scale_stride < 4u || (scale_stride & 15u) != 0u)
-        return ProgramStatus::INVALID_PROGRAM;
-    const bool f32_in = in.dtype == ValueDType::F32;
-    const uint64_t ws_off = env.program->workspace_ranges[b.workspace_slot].offset;
-    int8_t* acodes = reinterpret_cast<int8_t*>(env.workspace_base + ws_off);
-    float* ascales = reinterpret_cast<float*>(env.workspace_base + ws_off +
-        a8_ws_scales_offset(code_stride, b.activation_max_rows));
-    const uint32_t stride = global_stride(env);
-    const void* xin = in.ptr;
-    const uint32_t groups = (kp + 127u) / 128u;
-    for (uint32_t m = global_tid(env); m < rows; m += stride) {
-        const void* xrow = static_cast<const uint8_t*>(xin) +
-            static_cast<size_t>(m) * in.row_stride;
-        int8_t* codes = acodes +
-            static_cast<size_t>(m >> 4) * (code_stride * 16u) +
-            static_cast<size_t>(m & 15u) * 16u;
-        float* row_scales = ascales + static_cast<size_t>(m) * (scale_stride / 4u);
-        for (uint32_t g = 0u; g < groups; ++g) {
-            const uint32_t i0 = g * 128u;
-            const uint32_t k_end = i0 + 128u < k ? i0 + 128u : k;
-            float peak = 0.f;
-            for (uint32_t i = i0; i < k_end; ++i) {
-                const float v = act_load_f32(xrow, i, f32_in);
-                if (std::isfinite(v) && std::fabs(v) > peak) peak = std::fabs(v);
-            }
-            const float scale = peak > 0.f ? peak / 127.0f : 0.f;
-            const float inv = scale > 0.f ? 1.0f / scale : 0.f;
-            row_scales[g] = scale;
-            const uint32_t kp_end = i0 + 128u < kp ? i0 + 128u : kp;
-            for (uint32_t i = i0; i < kp_end; ++i) {
-                float v = 0.f;
-                if (i < k) {
-                    const float x = act_load_f32(xrow, i, f32_in);
-                    v = std::isfinite(x) ? x : 0.f;
-                }
-                int8_t c = 0;
-                if (scale > 0.f) {
-                    float ci = std::nearbyint(v * inv);
-                    if (ci > 127.0f) ci = 127.0f;
-                    if (ci < -127.0f) ci = -127.0f;
-                    c = static_cast<int8_t>(ci);
-                }
-                codes[static_cast<size_t>(i >> 5) * 512u +
-                      static_cast<size_t>((i & 31u) >> 4) * 256u + (i & 15u)] = c;
-            }
-        }
-    }
-    return ProgramStatus::COMPLETE;
-}
 
-__device__ __forceinline__ ProgramStatus exec_activation_quantize_w4a8(
+__device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     ModelDispatchEnv& env, const DispatchBinding& b) {
     ResolvedValue in{};
     if (!resolve_value(env, b.input_slots[0], in))

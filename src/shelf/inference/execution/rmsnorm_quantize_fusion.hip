@@ -45,7 +45,7 @@ Result<OptimizedLaunchResult> try_launch_fused_rmsnorm_quantize(
     const auto& d0 = program.dispatches[dispatch_index];
     const auto& d1 = program.dispatches[dispatch_index + 1u];
     if (d0.kernel_id != ::ps::runtime::KernelId::RMS_NORM ||
-        d1.kernel_id != ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_W4A8) {
+        d1.kernel_id != ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED) {
         return kNone;
     }
     if (d0.input_count != 1u || d0.output_count != 1u || d1.input_count != 1u) {
@@ -65,11 +65,10 @@ Result<OptimizedLaunchResult> try_launch_fused_rmsnorm_quantize(
     const Result<PhysicalResolveStatus> r1 =
         resolve_activation_quantize_physical(program, d1, ctx, aq);
     if (!r1.ok() || r1.value() != PhysicalResolveStatus::Applicable) return kNone;
-    if (aq.kind != PhysicalActivationQuantizeKind::E4M3) return kNone;
     if (aq.k != kFusedNormQuantizeK || aq.k_padded != kFusedNormQuantizeK) return kNone;
     if (aq.rows != rn.rows) return kNone;
     if (aq.input != rn.output || aq.input_row_stride != rn.output_row_stride) return kNone;
-    if (!::ps::kernel::activation_quantize_e4m3_vec_supported(
+    if (!::ps::kernel::activation_quantize_fp8_finegrained_vec_supported(
             reinterpret_cast<const ::ps::bf16_t*>(rn.output),
             reinterpret_cast<const uint8_t*>(aq.codes), aq.k, aq.k_padded,
             aq.input_row_stride)) {

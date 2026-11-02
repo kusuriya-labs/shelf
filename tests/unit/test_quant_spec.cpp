@@ -129,18 +129,18 @@ int run() {
 
     {
         QuantizedTensorDescriptor d = make_desc(QuantizedEncoding::Fp8, 256, 256);
-        check(validate_kernel_capability(d, QuantKernelKind::LinearFp8).ok(),
+        check(validate_kernel_capability(d, QuantKernelKind::LinearFp8Finegrained).ok(),
               "fp8 kernel accepts fp8 spec");
         check(validate_kernel_capability(make_desc(QuantizedEncoding::Bf16, 256, 256),
                                          QuantKernelKind::LinearBf16).ok(),
               "bf16 kernel accepts bf16 spec");
-        check(validate_weight_scale_group(128, QuantKernelKind::LinearFp8).ok(),
+        check(validate_weight_scale_group(128, QuantKernelKind::LinearFp8Finegrained).ok(),
               "fp8 dispatch accepts group 128");
-        check(validate_weight_scale_group(64, QuantKernelKind::LinearFp8).ok(),
+        check(validate_weight_scale_group(64, QuantKernelKind::LinearFp8Finegrained).ok(),
               "fp8 dispatch accepts group 64");
-        check(!validate_weight_scale_group(32, QuantKernelKind::LinearFp8).ok(),
+        check(!validate_weight_scale_group(32, QuantKernelKind::LinearFp8Finegrained).ok(),
               "fp8 dispatch rejects group 32");
-        check(!validate_weight_scale_group(256, QuantKernelKind::LinearFp8).ok(),
+        check(!validate_weight_scale_group(256, QuantKernelKind::LinearFp8Finegrained).ok(),
               "fp8 dispatch rejects group 256");
     }
 
@@ -153,7 +153,7 @@ int run() {
         scale->shape = {2, 4};
         check(validate_quantized_tensor(d).ok(),
               "format validation accepts the fp8 group-64 block");
-        check(validate_kernel_capability(d, QuantKernelKind::LinearFp8).ok(),
+        check(validate_kernel_capability(d, QuantKernelKind::LinearFp8Finegrained).ok(),
               "runtime capability accepts the fp8 group-64 block");
 
         QuantizedTensorDescriptor bad_n = make_desc(QuantizedEncoding::Fp8, 256, 256);
@@ -162,7 +162,7 @@ int run() {
         const_cast<QuantPayloadRef*>(find_payload(bad_n, QuantPayloadRole::Scale))->shape = {4, 2};
         check(validate_quantized_tensor(bad_n).ok(),
               "format validation accepts a power-of-two block");
-        check(!validate_kernel_capability(bad_n, QuantKernelKind::LinearFp8).ok(),
+        check(!validate_kernel_capability(bad_n, QuantKernelKind::LinearFp8Finegrained).ok(),
               "runtime capability rejects the unsupported block_n");
 
         QuantizedTensorDescriptor bad_group = make_desc(QuantizedEncoding::Fp8, 256, 256);
@@ -172,27 +172,25 @@ int run() {
     }
 
     {
-        check(validate_activation_quant_spec(kE4m3ActivationQuantSpec).ok(),
+        check(validate_activation_quant_spec(kFp8FinegrainedActivationQuantSpec).ok(),
               "e4m3 activation spec is valid");
-        check(validate_activation_quant_spec(kI8ActivationQuantSpec).ok(),
-              "i8 activation spec is valid");
 
-        ActivationQuantSpec bad_codes = kE4m3ActivationQuantSpec;
+        ActivationQuantSpec bad_codes = kFp8FinegrainedActivationQuantSpec;
         bad_codes.codes_dtype = QuantScalarType::BF16;
         check(!validate_activation_quant_spec(bad_codes).ok(),
               "activation spec rejects BF16 codes");
 
-        ActivationQuantSpec bad_scale = kE4m3ActivationQuantSpec;
+        ActivationQuantSpec bad_scale = kFp8FinegrainedActivationQuantSpec;
         bad_scale.scale_dtype = QuantScalarType::BF16;
         check(!validate_activation_quant_spec(bad_scale).ok(),
               "activation spec rejects non-F32 scale");
 
-        ActivationQuantSpec bad_group = kE4m3ActivationQuantSpec;
+        ActivationQuantSpec bad_group = kFp8FinegrainedActivationQuantSpec;
         bad_group.group_k = 48;
         check(!validate_activation_quant_spec(bad_group).ok(),
               "activation spec rejects non-power-of-two group");
 
-        ActivationQuantSpec group128 = kE4m3ActivationQuantSpec;
+        ActivationQuantSpec group128 = kFp8FinegrainedActivationQuantSpec;
         group128.group_k = 128;
         check(validate_activation_quant_spec(group128).ok(),
               "activation spec accepts power-of-two group");

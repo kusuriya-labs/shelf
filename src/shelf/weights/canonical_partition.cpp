@@ -444,7 +444,7 @@ Status materialize_rank_local_canonical(
             st = materialize_bf16(partition, global, local_shape, k_axis, owned);
             break;
         case QuantizedEncoding::Fp8:
-            st = materialize_quant(QuantFormatId::Fp8, partition, global,
+            st = materialize_quant(QuantFormatId::Fp8Finegrained, partition, global,
                                    local_shape, k_axis, owned);
             break;
     }

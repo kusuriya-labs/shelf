@@ -107,7 +107,7 @@ bool expected_matrix_payload(
         return true;
     }
 
-    if (w.encoding == weights::MatrixEncoding::Fp8) {
+    if (w.encoding == weights::MatrixEncoding::Fp8Finegrained) {
         if (!w.preshuffled) {
             out_codes = source.codes;
             out_scales = source.metadata1;

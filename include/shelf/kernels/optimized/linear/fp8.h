@@ -7,7 +7,7 @@
 
 namespace ps::kernel {
 
-enum class Fp8GemmOutputDType : uint8_t {
+enum class Fp8FinegrainedGemmOutputDType : uint8_t {
     BF16,
     F32,
 };
@@ -17,14 +17,14 @@ enum class Fp8GemmOutputDType : uint8_t {
 // rows x 32 K chunk, half split), while the FP32 scales stay row-major
 // [ceil(N/128)][Kp/128]. The activation E4M3 codes and per-row FP32 scales use
 // the shared fragment-order activation layout.
-hipError_t launch_gemm_fp8_w8a8_wmma(
-    const Fp8GemmConfig& config,
+hipError_t launch_gemm_fp8_finegrained_w8a8_wmma(
+    const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
     const float* weight_scales,
     const int8_t* activation_codes,
     const float* activation_scales,
     void* output,
-    Fp8GemmOutputDType output_dtype,
+    Fp8FinegrainedGemmOutputDType output_dtype,
     uint32_t rows,
     uint32_t out_features,
     uint32_t k_padded,
@@ -35,14 +35,14 @@ hipError_t launch_gemm_fp8_w8a8_wmma(
     hipStream_t stream,
     uint32_t weight_scale_group = 128);
 
-hipError_t launch_gemm_fp8_w8a8_wmma_auto(
-    const Fp8GemmConfig& config,
+hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+    const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
     const float* weight_scales,
     const int8_t* activation_codes,
     const float* activation_scales,
     void* output,
-    Fp8GemmOutputDType output_dtype,
+    Fp8FinegrainedGemmOutputDType output_dtype,
     uint32_t rows,
     uint32_t out_features,
     uint32_t k_padded,

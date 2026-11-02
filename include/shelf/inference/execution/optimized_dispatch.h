@@ -33,7 +33,7 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
+Result<OptimizedLaunchResult> try_launch_activation_quantize(
     const ::ps::runtime::Program& program,
     const ::ps::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,

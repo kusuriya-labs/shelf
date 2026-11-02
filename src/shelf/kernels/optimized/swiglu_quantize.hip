@@ -32,7 +32,7 @@ void fused_swiglu_quantize_kernel(
         ob[c] = __float2bfloat16(detail::target_swiglu_f32(gv, uv));
     }
     __syncthreads();
-    detail::activation_quantize_e4m3_vec_row_body<K, KP>(
+    detail::activation_quantize_fp8_finegrained_vec_row_body<K, KP>(
         reinterpret_cast<const ::ps::bf16_t*>(output), codes, scales, row,
         output_row_stride, code_row_stride, scale_row_stride);
 }

@@ -162,8 +162,7 @@ shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS
 
 shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
 shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_activation_quantize_a8 SOURCE kernels/optimized/test_activation_quantize_a8.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_activation_quantize_e4m3 SOURCE kernels/optimized/test_activation_quantize_e4m3.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_activation_quantize_fp8_finegrained SOURCE kernels/optimized/test_activation_quantize_fp8_finegrained.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_activation_quantize_tp_split SOURCE kernels/optimized/test_activation_quantize_tp_split.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_fused_gdn_post SOURCE kernels/optimized/test_fused_gdn_post.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_fused_rmsnorm_quantize SOURCE kernels/optimized/test_fused_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
@@ -271,8 +270,7 @@ add_custom_target(
         test_correctness_primitives
         test_gemm_bf16_correctness
         test_gemm_bf16_exact_rows
-        test_activation_quantize_a8
-        test_activation_quantize_e4m3
+        test_activation_quantize_fp8_finegrained
         test_activation_quantize_tp_split
         test_fused_gdn_post
         test_fused_rmsnorm_quantize

@@ -216,7 +216,7 @@ static void test_fp8_manifest() {
 
     auto gate_spec = quantization::manifest::resolve_quant_spec(manifest, gate);
     check(gate_spec.ok() &&
-              gate_spec.value().spec_id == quantization::QuantSpecId::FP8_E4M3_F32_V1,
+              gate_spec.value().spec_id == quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1,
           "gate resolve_quant_spec fp8");
     const auto& layernorm = manifest.tensors.at(kLayernorm);
     auto layernorm_spec = quantization::manifest::resolve_quant_spec(manifest, layernorm);

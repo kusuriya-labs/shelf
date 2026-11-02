@@ -175,7 +175,7 @@ weight を掛ける。
   複製も所有もしない。
 - `lm_head` の encoding に応じて計算する。
   - BF16: `select_bf16_gemm_config` による bf16 GEMM を F32 で受け取る。
-  - FP8 K128N128: `launch_activation_quantize_e4m3`（活性は行ごとの
+  - FP8 K128N128: `launch_activation_quantize_fp8_finegrained`（活性は行ごとの
     `peak/448` scale、累算 F32）で activation を e4m3 へ量子化し、block-scaled
     W8A8 WMMA GEMM で F32 logits を作る。
 - proposal logits は **F32** で出す（bf16 へ落とさない。top-16 ordering が proposal に

@@ -13,7 +13,7 @@ namespace {
 // compute family can execute a geometry; Qwen model geometry validation is a
 // separate, model-load-time concern.
 constexpr uint8_t kFamilyBf16 = 1u << 0u;
-constexpr uint8_t kFamilyFp8 = 1u << 3u;
+constexpr uint8_t kFamilyFp8Finegrained = 1u << 3u;
 
 struct LinearShapeRule {
     uint32_t out_features;
@@ -22,41 +22,41 @@ struct LinearShapeRule {
 };
 
 constexpr LinearShapeRule kLinearShapeRules[] = {
-    { 32, 2560, kFamilyBf16 | kFamilyFp8 },
-    { 48, 5120, kFamilyBf16 | kFamilyFp8 },
-    { 1024, 2560, kFamilyBf16 | kFamilyFp8 },
-    { 1024, 5120, kFamilyBf16 | kFamilyFp8 },
+    { 32, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 48, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 1024, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 1024, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
     { 1280, 5120, kFamilyBf16 },
-    { 2560, 4096, kFamilyBf16 | kFamilyFp8 },
+    { 2560, 4096, kFamilyBf16 | kFamilyFp8Finegrained },
     { 2560, 5120, kFamilyBf16 },
-    { 2560, 9216, kFamilyBf16 | kFamilyFp8 },
-    { 4096, 2560, kFamilyBf16 | kFamilyFp8 },
+    { 2560, 9216, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 4096, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 4096, 5120, kFamilyBf16 },
     { 5120, 4096, kFamilyBf16 },
-    { 5120, 6144, kFamilyBf16 | kFamilyFp8 },
+    { 5120, 6144, kFamilyBf16 | kFamilyFp8Finegrained },
     { 5120, 10240, kFamilyBf16 },
     { 5120, 15360, kFamilyBf16 },
     { 5120, 16384, kFamilyBf16 },
     { 16384, 5120, kFamilyBf16 },
-    { 5120, 17408, kFamilyBf16 | kFamilyFp8 },
+    { 5120, 17408, kFamilyBf16 | kFamilyFp8Finegrained },
     { 5120, 25600, kFamilyBf16 },
-    { 6144, 5120, kFamilyBf16 | kFamilyFp8 },
-    { 8192, 2560, kFamilyBf16 | kFamilyFp8 },
-    { 9216, 2560, kFamilyBf16 | kFamilyFp8 },
+    { 6144, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 8192, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 9216, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 256, 5120, kFamilyBf16 },
-    { 10240, 5120, kFamilyBf16 | kFamilyFp8 },
-    { 12288, 5120, kFamilyBf16 | kFamilyFp8 },
+    { 10240, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 12288, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
     { 124160, 5120, kFamilyBf16 },
-    { 17408, 5120, kFamilyBf16 | kFamilyFp8 },
+    { 17408, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
     { 248320, 2560, kFamilyBf16 },
     { 248320, 5120, kFamilyBf16 },
-    { 24, 5120, kFamilyBf16 | kFamilyFp8 },
-    { 8704, 5120, kFamilyFp8 },
-    { 5120, 8704, kFamilyFp8 },
-    { 3072, 5120, kFamilyFp8 },
-    { 512, 5120, kFamilyFp8 },
-    { 5120, 3072, kFamilyFp8 },
-    { 5120, 5120, kFamilyBf16 | kFamilyFp8 },
+    { 24, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 8704, 5120, kFamilyFp8Finegrained },
+    { 5120, 8704, kFamilyFp8Finegrained },
+    { 3072, 5120, kFamilyFp8Finegrained },
+    { 512, 5120, kFamilyFp8Finegrained },
+    { 5120, 3072, kFamilyFp8Finegrained },
+    { 5120, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
     { 8192, 5120, kFamilyBf16 },
     { 5120, 8192, kFamilyBf16 },
     { 5120, 2560, kFamilyBf16 },
@@ -66,7 +66,7 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
 uint8_t family_bit(LinearComputeFamily family) {
     switch (family) {
         case LinearComputeFamily::Bf16: return kFamilyBf16;
-        case LinearComputeFamily::Fp8W8A8: return kFamilyFp8;
+        case LinearComputeFamily::Fp8FinegrainedW8A8: return kFamilyFp8Finegrained;
     }
     return 0u;
 }
@@ -83,15 +83,15 @@ void linear_debug_miss(LinearComputeFamily family, uint32_t out_features, uint32
     }
 }
 
-ps::kernel::Fp8GemmConfig fp8_row_block_config(uint32_t rows, uint32_t out_features) {
-    using Id = ps::kernel::Fp8GemmConfigId;
-    if (rows >= 4u * ps::kernel::kFp8GemmRowTile &&
+ps::kernel::Fp8FinegrainedGemmConfig fp8_finegrained_row_block_config(uint32_t rows, uint32_t out_features) {
+    using Id = ps::kernel::Fp8FinegrainedGemmConfigId;
+    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile &&
         out_features >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
-        return ps::kernel::Fp8GemmConfig{Id::RowBlock4};
-    if (rows > ps::kernel::kFp8GemmRowTile &&
+        return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock4};
+    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile &&
         out_features >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
-        return ps::kernel::Fp8GemmConfig{Id::RowBlock2};
-    return ps::kernel::Fp8GemmConfig{Id::RowBlock1};
+        return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock2};
+    return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock1};
 }
 
 }  // namespace
@@ -146,25 +146,25 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
     return ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
 }
 
-std::optional<ps::kernel::Fp8GemmConfig>
-select_fp8_gemm_config(const Fp8GemmSelectorInput& input) {
+std::optional<ps::kernel::Fp8FinegrainedGemmConfig>
+select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input) {
     if (input.rows == 0u)
         return std::nullopt;
     if ((input.k_padded & 127u) != 0u)
         return std::nullopt;
-    if (!linear_shape_supported(LinearComputeFamily::Fp8W8A8, input.out_features, input.k)) {
-        linear_debug_miss(LinearComputeFamily::Fp8W8A8, input.out_features, input.k, input.rows);
+    if (!linear_shape_supported(LinearComputeFamily::Fp8FinegrainedW8A8, input.out_features, input.k)) {
+        linear_debug_miss(LinearComputeFamily::Fp8FinegrainedW8A8, input.out_features, input.k, input.rows);
         return std::nullopt;
     }
     const bool use_2d =
-        (input.k_padded % ps::kernel::kFp8GemmPrefill2dKChunk) == 0u &&
+        (input.k_padded % ps::kernel::kFp8FinegrainedGemmPrefill2dKChunk) == 0u &&
         (input.rows % ps::kernel::kBlockScaledGemmPrefill2dRowsPerBlock) == 0u &&
-        (input.out_features % ps::kernel::kFp8GemmPrefill2dOutBlock) == 0u &&
+        (input.out_features % ps::kernel::kFp8FinegrainedGemmPrefill2dOutBlock) == 0u &&
         input.rows >= ps::kernel::kBlockScaledGemmPrefill2dMinRows &&
         input.out_features >= ps::kernel::kBlockScaledGemmPrefill2dMinOutFeatures;
     if (use_2d)
-        return ps::kernel::Fp8GemmConfig{ps::kernel::Fp8GemmConfigId::Prefill2D};
-    return fp8_row_block_config(input.rows, input.out_features);
+        return ps::kernel::Fp8FinegrainedGemmConfig{ps::kernel::Fp8FinegrainedGemmConfigId::Prefill2D};
+    return fp8_finegrained_row_block_config(input.rows, input.out_features);
 }
 
 }  // namespace ps::execution

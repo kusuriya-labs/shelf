@@ -11,7 +11,7 @@ kernels/
 │   │   ├── dispatch_env.h               # ModelDispatchEnv / ResolvedValue / resolve_* / load-store helper
 │   │   ├── elementwise.inc              # SILU / SIGMOID / SCALE / MUL / RESIDUAL_ADD / SWIGLU / SPLIT / CONCAT
 │   │   ├── normalization.inc            # RMS_NORM / L2_NORMALIZE
-│   │   ├── linear.inc                   # LINEAR_BF16 / LINEAR_FP8 / ACTIVATION_QUANTIZE_FP8 / W4A8
+│   │   ├── linear.inc                   # LINEAR_BF16 / LINEAR_FP8_FINEGRAINED / ACTIVATION_QUANTIZE_FP8_FINEGRAINED
 │   │   ├── attention.inc                # ROPE / KV_APPEND / PAGED_ATTENTION
 │   │   ├── gdn.inc                      # STATEFUL_CAUSAL_CONV1D / GDN_RECURRENCE
 │   │   ├── embedding.inc                # EMBEDDING_LOOKUP

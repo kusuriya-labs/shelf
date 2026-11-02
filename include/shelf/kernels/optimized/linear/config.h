@@ -38,11 +38,11 @@ inline constexpr uint32_t kBlockScaledGemmPrefill2dRowsPerBlock = 16u * kBlockSc
 inline constexpr uint32_t kBlockScaledGemmPrefill2dMinRows = 512u;
 inline constexpr uint32_t kBlockScaledGemmPrefill2dMinOutFeatures = 512u;
 
-inline constexpr uint32_t kFp8GemmRowTile = 16u;
-inline constexpr uint32_t kFp8GemmPrefill2dOutBlock = 64u;
-inline constexpr uint32_t kFp8GemmPrefill2dKChunk = 64u;
+inline constexpr uint32_t kFp8FinegrainedGemmRowTile = 16u;
+inline constexpr uint32_t kFp8FinegrainedGemmPrefill2dOutBlock = 64u;
+inline constexpr uint32_t kFp8FinegrainedGemmPrefill2dKChunk = 64u;
 
-enum class Fp8GemmConfigId : uint8_t {
+enum class Fp8FinegrainedGemmConfigId : uint8_t {
     RowBlock1,
     RowBlock2,
     RowBlock4,
@@ -50,8 +50,8 @@ enum class Fp8GemmConfigId : uint8_t {
     Prefill2D,
 };
 
-struct Fp8GemmConfig {
-    Fp8GemmConfigId id = Fp8GemmConfigId::RowBlock1;
+struct Fp8FinegrainedGemmConfig {
+    Fp8FinegrainedGemmConfigId id = Fp8FinegrainedGemmConfigId::RowBlock1;
 };
 
 }  // namespace ps::kernel

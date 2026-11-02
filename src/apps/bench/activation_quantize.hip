@@ -18,7 +18,7 @@
 namespace {
 
 struct Options {
-    std::string variant = "optimized";
+    std::string variant = "e4m3-auto";
     std::vector<uint32_t> rows = {1, 2, 4, 8, 16, 32, 64, 128};
     uint32_t k = 2560;
     int warmup = 100;
@@ -33,10 +33,10 @@ struct Options {
 void usage(FILE* f) {
     fprintf(f,
         "shelf-bench activation-quantize [options]\n"
-        "  --variant correctness|optimized|e4m3-generic|e4m3-vec|e4m3-auto\n"
-        "      correctness / optimized = a8 group-128 kernel\n"
-        "      e4m3-generic / e4m3-vec / e4m3-auto = W4A8 group-128 e4m3 kernel\n"
-        "                                          (production ACTIVATION_QUANTIZE_W4A8)\n"
+        "  --variant correctness|e4m3-generic|e4m3-vec|e4m3-auto\n"
+        "      correctness = model dispatch の reference 実装\n"
+        "      e4m3-generic / e4m3-vec / e4m3-auto = group-128 e4m3 kernel\n"
+        "                                          (production ACTIVATION_QUANTIZE_FP8_FINEGRAINED)\n"
         "  --rows 1,2,4,8,16,32,64,128       (default 1,2,4,8,16,32,64,128)\n"
         "  --k N                             (default 2560)\n"
         "  --warmup N                        (default 100)\n"
@@ -171,7 +171,7 @@ bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stre
     if (hipMalloc(&e.error_word, sizeof(uint32_t)) != hipSuccess) { teardown(e); return false; }
     if (hipMemset(e.error_word, 0, sizeof(uint32_t)) != hipSuccess) { teardown(e); return false; }
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_W4A8;
+    e.binding.kernel_id = ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
     e.binding.workspace_slot = 0;
     e.binding.group_size = 32;
     e.binding.activation_kp = e.kp;
@@ -194,23 +194,11 @@ hipError_t launch_correctness(const ActEnv& e, hipStream_t stream) {
     return hipGetLastError();
 }
 
-hipError_t launch_optimized(const ActEnv& e, hipStream_t stream) {
-    int8_t* codes = static_cast<int8_t*>(e.act_ws) + e.layout.codes_offset;
-    float* scales = reinterpret_cast<float*>(
-        reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.scales_offset);
-    return ps::kernel::launch_activation_quantize_a8(
-        static_cast<const ::ps::bf16_t*>(e.in_ptr),
-        codes, scales,
-        e.rows, e.k, e.kp,
-        e.k, e.layout.code_row_stride_bytes, e.layout.scale_row_stride_bytes,
-        stream);
-}
-
-hipError_t launch_e4m3_auto(const ActEnv& e, hipStream_t stream) {
+hipError_t launch_fp8_finegrained_auto(const ActEnv& e, hipStream_t stream) {
     uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
     float* scales = reinterpret_cast<float*>(
         reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.scales_offset);
-    return ps::kernel::launch_activation_quantize_e4m3(
+    return ps::kernel::launch_activation_quantize_fp8_finegrained(
         static_cast<const ::ps::bf16_t*>(e.in_ptr),
         codes, scales,
         e.rows, e.k, e.kp,
@@ -218,57 +206,16 @@ hipError_t launch_e4m3_auto(const ActEnv& e, hipStream_t stream) {
         stream);
 }
 
-hipError_t launch_e4m3_generic(const ActEnv& e, hipStream_t stream) {
+hipError_t launch_fp8_finegrained_generic(const ActEnv& e, hipStream_t stream) {
     uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
     float* scales = reinterpret_cast<float*>(
         reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.scales_offset);
-    return ps::kernel::launch_activation_quantize_e4m3_generic(
+    return ps::kernel::launch_activation_quantize_fp8_finegrained_generic(
         static_cast<const ::ps::bf16_t*>(e.in_ptr),
         codes, scales,
         e.rows, e.k, e.kp,
         e.k, e.layout.code_row_stride_bytes, e.layout.scale_row_stride_bytes,
         stream);
-}
-
-void cpu_reference(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
-                   uint32_t kp, uint32_t code_row_stride, uint32_t scale_row_stride,
-                   std::vector<int8_t>& codes, std::vector<float>& scales) {
-    const uint32_t groups = (kp + 127u) / 128u;
-    const uint32_t scale_row_floats = scale_row_stride / 4u;
-    const uint32_t rows_padded = (rows + 15u) & ~15u;
-    codes.assign((size_t)rows_padded * code_row_stride, 0);
-    scales.assign((size_t)rows * scale_row_floats, 0.f);
-    for (uint32_t m = 0; m < rows; ++m) {
-        for (uint32_t g = 0; g < groups; ++g) {
-            const uint32_t i0 = g * 128u;
-            float amax = 0.f;
-            float vals[128];
-            for (uint32_t i = 0; i < 128u; ++i) {
-                const uint32_t idx = i0 + i;
-                const float v = idx < k ? bf16_bits_to_f32(h_in[(size_t)m * k + idx]) : 0.f;
-                vals[i] = std::isfinite(v) ? v : 0.f;
-                const float av = std::fabs(vals[i]);
-                if (av > amax) amax = av;
-            }
-            const float scale = amax > 0.f ? amax / 127.0f : 0.f;
-            scales[(size_t)m * scale_row_floats + g] = scale;
-            const float inv = scale > 0.f ? 1.0f / scale : 0.f;
-            for (uint32_t i = 0; i < 128u; ++i) {
-                const uint32_t idx = i0 + i;
-                if (idx >= kp) break;
-                int c = 0;
-                if (scale > 0.f) {
-                    c = static_cast<int>(nearbyintf(vals[i] * inv));
-                    if (c > 127) c = 127;
-                    if (c < -127) c = -127;
-                }
-                codes[(size_t)(m >> 4) * (code_row_stride * 16u) +
-                      (size_t)(idx >> 5u) * 512u + (size_t)((idx & 31u) >> 4u) * 256u +
-                      (size_t)(m & 15u) * 16u + (size_t)(idx & 15u)] =
-                    static_cast<int8_t>(c);
-            }
-        }
-    }
 }
 
 }  // namespace
@@ -294,9 +241,9 @@ int run_activation_quantize(int argc, char** argv) {
         else if (a == "--help" || a == "-h") { usage(stdout); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); usage(stderr); return 2; }
     }
-    const bool e4m3_variant = (o.variant == "e4m3-generic" || o.variant == "e4m3-vec" ||
+    const bool fp8_finegrained_variant = (o.variant == "e4m3-generic" || o.variant == "e4m3-vec" ||
                                o.variant == "e4m3-auto");
-    if (o.variant != "correctness" && o.variant != "optimized" && !e4m3_variant) {
+    if (o.variant != "correctness" && !fp8_finegrained_variant) {
         fprintf(stderr, "bad --variant: %s\n", o.variant.c_str());
         return 2;
     }
@@ -324,19 +271,19 @@ int run_activation_quantize(int argc, char** argv) {
             fprintf(stderr, "setup failed rows=%u\n", rows);
             return 1;
         }
-        auto launch = (o.variant == "optimized")
-            ? std::bind(launch_optimized, std::ref(e), std::placeholders::_1)
-            : (o.variant == "e4m3-generic"
-                   ? std::bind(launch_e4m3_generic, std::ref(e), std::placeholders::_1)
-                   : (o.variant == "e4m3-vec"
-                          ? std::bind(launch_e4m3_auto, std::ref(e), std::placeholders::_1)
-                          : std::bind(launch_correctness, std::ref(e), std::placeholders::_1)));
+        auto launch = (o.variant == "e4m3-generic"
+                           ? std::bind(launch_fp8_finegrained_generic, std::ref(e), std::placeholders::_1)
+                           : (o.variant == "e4m3-vec"
+                                  ? std::bind(launch_fp8_finegrained_auto, std::ref(e), std::placeholders::_1)
+                                  : (o.variant == "e4m3-auto"
+                                         ? std::bind(launch_fp8_finegrained_auto, std::ref(e), std::placeholders::_1)
+                                         : std::bind(launch_correctness, std::ref(e), std::placeholders::_1))));
 
-        if (o.check && e4m3_variant) {
+        if (o.check && fp8_finegrained_variant) {
             const size_t total = e.layout.total_bytes;
             std::vector<uint8_t> got_vec(total);
             std::vector<uint8_t> got_gen(total);
-            if (launch_e4m3_generic(e, stream) != hipSuccess ||
+            if (launch_fp8_finegrained_generic(e, stream) != hipSuccess ||
                 hipStreamSynchronize(stream) != hipSuccess) {
                 fprintf(stderr, "check generic launch failed rows=%u\n", rows);
                 rc = 1;
@@ -346,7 +293,7 @@ int run_activation_quantize(int argc, char** argv) {
             if (hipMemcpy(got_gen.data(), e.act_ws, total, hipMemcpyDeviceToHost) != hipSuccess) {
                 rc = 1; teardown(e); continue;
             }
-            if (launch_e4m3_auto(e, stream) != hipSuccess ||
+            if (launch_fp8_finegrained_auto(e, stream) != hipSuccess ||
                 hipStreamSynchronize(stream) != hipSuccess) {
                 fprintf(stderr, "check vec launch failed rows=%u\n", rows);
                 rc = 1;
@@ -361,30 +308,6 @@ int run_activation_quantize(int argc, char** argv) {
             if (!same) rc = 1;
         }
 
-        if (o.check && !e4m3_variant) {
-            if (launch_optimized(e, stream) != hipSuccess) { fprintf(stderr, "check launch failed rows=%u\n", rows); rc = 1; teardown(e); continue; }
-            if (hipStreamSynchronize(stream) != hipSuccess) { rc = 1; teardown(e); continue; }
-            const uint32_t code_rs = e.layout.code_row_stride_bytes;
-            const uint32_t scale_rs = e.layout.scale_row_stride_bytes;
-            const uint32_t rows_padded = (rows + 15u) & ~15u;
-            std::vector<int8_t> got_codes((size_t)rows_padded * code_rs, 0);
-            std::vector<float> got_scales((size_t)rows * (scale_rs / 4u), 0.f);
-            if (hipMemcpy(got_codes.data(), e.act_ws, (size_t)rows_padded * code_rs, hipMemcpyDeviceToHost) != hipSuccess) {
-                fprintf(stderr, "check read codes failed rows=%u\n", rows); rc = 1; teardown(e); continue;
-            }
-            const uint8_t* scales_ptr = static_cast<const uint8_t*>(e.act_ws) + e.layout.scales_offset;
-            if (hipMemcpy(got_scales.data(), scales_ptr, got_scales.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) {
-                fprintf(stderr, "check read scales failed rows=%u\n", rows); rc = 1; teardown(e); continue;
-            }
-            std::vector<int8_t> ref_codes;
-            std::vector<float> ref_scales;
-            cpu_reference(e.h_in, rows, o.k, e.kp, code_rs, scale_rs, ref_codes, ref_scales);
-            bool codes_ok = (got_codes == ref_codes);
-            bool scales_ok = (got_scales == ref_scales);
-            std::printf("CHECK %s rows=%-4u k=%u codes_exact=%d scales_exact=%d\n",
-                        o.variant.c_str(), rows, o.k, codes_ok ? 1 : 0, scales_ok ? 1 : 0);
-            if (!codes_ok || !scales_ok) rc = 1;
-        }
 
         for (int i = 0; i < o.warmup; ++i)
             if (launch(stream) != hipSuccess) { fprintf(stderr, "launch failed rows=%u\n", rows); rc = 1; }
@@ -426,7 +349,7 @@ int run_activation_quantize(int argc, char** argv) {
         const char* path = "";
         if (o.variant == "e4m3-vec" || o.variant == "e4m3-auto") {
             uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
-            path = ps::kernel::activation_quantize_e4m3_vec_supported(
+            path = ps::kernel::activation_quantize_fp8_finegrained_vec_supported(
                        static_cast<const ::ps::bf16_t*>(e.in_ptr), codes, e.k, e.kp, e.k)
                        ? " [vec]"
                        : " [generic-fallback]";

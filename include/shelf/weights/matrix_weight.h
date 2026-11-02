@@ -9,7 +9,7 @@ namespace ps::weights {
 
 enum class MatrixEncoding : uint8_t {
     Bf16 = 0,
-    Fp8 = 5,
+    Fp8Finegrained = 5,
 };
 
 struct MatrixWeight {
@@ -36,7 +36,7 @@ struct MatrixWeight {
 inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noexcept {
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::QuantSpecId::BF16_V1;
-        case MatrixEncoding::Fp8: return quantization::QuantSpecId::FP8_E4M3_F32_V1;
+        case MatrixEncoding::Fp8Finegrained: return quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1;
     }
     return quantization::QuantSpecId::BF16_V1;
 }
@@ -44,7 +44,7 @@ inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noex
 inline quantization::ComputeSpecId encoding_to_compute_spec(MatrixEncoding enc) noexcept {
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::ComputeSpecId::BF16_F32_BF16;
-        case MatrixEncoding::Fp8: return quantization::ComputeSpecId::FP8_W8A8_F32_BF16;
+        case MatrixEncoding::Fp8Finegrained: return quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16;
     }
     return quantization::ComputeSpecId::BF16_F32_BF16;
 }
@@ -57,7 +57,7 @@ inline void apply_default_compute_spec(MatrixWeight& w) noexcept {
 inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexcept {
     switch (id) {
         case quantization::QuantSpecId::BF16_V1: return MatrixEncoding::Bf16;
-        case quantization::QuantSpecId::FP8_E4M3_F32_V1: return MatrixEncoding::Fp8;
+        case quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1: return MatrixEncoding::Fp8Finegrained;
         default: break;
     }
     return MatrixEncoding::Bf16;

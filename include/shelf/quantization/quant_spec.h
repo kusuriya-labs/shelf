@@ -136,20 +136,17 @@ struct KVQuantSpec {
     QuantScalarType scale_dtype = QuantScalarType::F32;
 };
 
-constexpr ActivationQuantSpec kE4m3ActivationQuantSpec{
+constexpr ActivationQuantSpec kFp8FinegrainedActivationQuantSpec{
     QuantScalarType::FP8E4M3, 128, QuantScalarType::F32};
 
-constexpr ActivationQuantSpec kI8ActivationQuantSpec{
-    QuantScalarType::I8, 128, QuantScalarType::F32};
 
 inline Status validate_activation_quant_spec(const ActivationQuantSpec& spec) {
     if (spec.scale_dtype != QuantScalarType::F32) {
         return Status::invalid_argument("activation scale must be F32", __FILE__, __LINE__);
     }
-    if (spec.codes_dtype != QuantScalarType::FP8E4M3 &&
-        spec.codes_dtype != QuantScalarType::I8) {
+    if (spec.codes_dtype != QuantScalarType::FP8E4M3) {
         return Status::invalid_argument(
-            "activation codes must be FP8E4M3 or I8", __FILE__, __LINE__);
+            "activation codes must be FP8E4M3", __FILE__, __LINE__);
     }
     if (spec.group_k != 0 &&
         (spec.group_k < kQuantBlockElements || (spec.group_k & (spec.group_k - 1u)) != 0u)) {

@@ -33,12 +33,12 @@ static void test_byte_counts() {
             const uint64_t kp = align128(k);
             const uint64_t sn = (n + 127u) / 128u;
             const uint64_t sk = kp / 128u;
-            check(quant_codes_bytes(n, kp, kFp8FormatDesc) == n * kp,
+            check(quant_codes_bytes(n, kp, kFp8FinegrainedFormatDesc) == n * kp,
                   "fp8 codes bytes n=" + std::to_string(n) + " k=" + std::to_string(k));
-            check(quant_metadata1_bytes(n, kp, kFp8FormatDesc) == sn * sk * 4u,
+            check(quant_metadata1_bytes(n, kp, kFp8FinegrainedFormatDesc) == sn * sk * 4u,
                   "fp8 scale bytes n=" + std::to_string(n) + " k=" + std::to_string(k));
             // Batch geometry must not collapse N into the batch dimension.
-            check(quant_metadata_bytes(3, n, kp, kFp8FormatDesc, 0) == 3u * sn * sk * 4u,
+            check(quant_metadata_bytes(3, n, kp, kFp8FinegrainedFormatDesc, 0) == 3u * sn * sk * 4u,
                   "fp8 batched scale bytes n=" + std::to_string(n));
         }
     }
@@ -162,13 +162,13 @@ static void test_manifest_contract() {
     auto resolved = resolve_quant_spec(m, m.tensors["w"]);
     check(resolved.ok(), "fp8 resolve");
     if (resolved.ok()) {
-        check(resolved.value().spec_id == QuantSpecId::FP8_E4M3_F32_V1, "fp8 spec id");
+        check(resolved.value().spec_id == QuantSpecId::FP8_FINEGRAINED_F32_V1, "fp8 spec id");
         check(resolved.value().descriptor.group_size == 128 &&
                   resolved.value().descriptor.block_size == 128, "fp8 group size");
         check(resolved.value().descriptor.scale_type == StorageDType::FP32, "fp8 scale dtype");
     }
-    check(preferred_gemm_compute_spec(QuantSpecId::FP8_E4M3_F32_V1).value() ==
-              ComputeSpecId::FP8_W8A8_F32_BF16, "fp8 compute spec");
+    check(preferred_gemm_compute_spec(QuantSpecId::FP8_FINEGRAINED_F32_V1).value() ==
+              ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16, "fp8 compute spec");
 
     QuantizedManifest bad_dtype = m;
     bad_dtype.tensors["w"].metadata1->dtype = "U8";

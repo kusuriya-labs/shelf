@@ -25,8 +25,8 @@
     } \
 } while (0)
 
-using ps::kernel::Fp8GemmConfig;
-using ps::kernel::Fp8GemmConfigId;
+using ps::kernel::Fp8FinegrainedGemmConfig;
+using ps::kernel::Fp8FinegrainedGemmConfigId;
 
 namespace {
 
@@ -50,25 +50,25 @@ float bf16_to_f32(ps::bf16_t b) {
     return f;
 }
 
-Fp8GemmConfig config_for(uint32_t rows) {
-    if (rows >= 8u * ps::kernel::kFp8GemmRowTile) return {Fp8GemmConfigId::RowBlock8};
-    if (rows >= 4u * ps::kernel::kFp8GemmRowTile) return {Fp8GemmConfigId::RowBlock4};
-    if (rows > ps::kernel::kFp8GemmRowTile) return {Fp8GemmConfigId::RowBlock2};
-    return {Fp8GemmConfigId::RowBlock1};
+Fp8FinegrainedGemmConfig config_for(uint32_t rows) {
+    if (rows >= 8u * ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock8};
+    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock4};
+    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock2};
+    return {Fp8FinegrainedGemmConfigId::RowBlock1};
 }
 
-const char* config_name(Fp8GemmConfigId id) {
+const char* config_name(Fp8FinegrainedGemmConfigId id) {
     switch (id) {
-        case Fp8GemmConfigId::RowBlock1: return "MB1";
-        case Fp8GemmConfigId::RowBlock2: return "MB2";
-        case Fp8GemmConfigId::RowBlock4: return "MB4";
-        case Fp8GemmConfigId::RowBlock8: return "MB8";
-        case Fp8GemmConfigId::Prefill2D: return "2D";
+        case Fp8FinegrainedGemmConfigId::RowBlock1: return "MB1";
+        case Fp8FinegrainedGemmConfigId::RowBlock2: return "MB2";
+        case Fp8FinegrainedGemmConfigId::RowBlock4: return "MB4";
+        case Fp8FinegrainedGemmConfigId::RowBlock8: return "MB8";
+        case Fp8FinegrainedGemmConfigId::Prefill2D: return "2D";
     }
     return "?";
 }
 
-bool run_case(ps::gpu::GpuArena& arena, Fp8GemmConfig config, uint32_t rows,
+bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_t rows,
               uint32_t n, uint32_t k, const char* label,
               uint32_t weight_scale_group = 128) {
     std::mt19937 rng(20260921u + rows * 31u + n * 7u + k);
@@ -156,15 +156,15 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8GemmConfig config, uint32_t rows,
     HIP_ASSERT(hipMemcpy(d_ws, native.scales.get(), native.scale_count * sizeof(float), hipMemcpyHostToDevice));
     HIP_ASSERT(hipMemcpy(d_x, hx.data(), hx.size() * sizeof(ps::bf16_t), hipMemcpyHostToDevice));
 
-    hipError_t aq = ps::kernel::launch_activation_quantize_e4m3(
+    hipError_t aq = ps::kernel::launch_activation_quantize_fp8_finegrained(
         d_x, d_ac, d_as, rows, k, kp, k, code_stride, as_bytes, 0);
     if (aq != hipSuccess) {
         std::printf("FAIL: %s activation quantize: %s\n", label, hipGetErrorString(aq));
         return false;
     }
-    hipError_t hk = ps::kernel::launch_gemm_fp8_w8a8_wmma(
+    hipError_t hk = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
         config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-        ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
+        ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
         weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
     if (hk != hipSuccess) {
         std::printf("FAIL: %s launch: %s\n", label, hipGetErrorString(hk));
@@ -176,9 +176,9 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8GemmConfig config, uint32_t rows,
     HIP_ASSERT(hipMemcpy(got.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
 
     if (rows == 1u) {
-        hipError_t ha = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+        hipError_t ha = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-            ps::kernel::Fp8GemmOutputDType::F32, rows, n, kp,
+            ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
             weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
         if (ha != hipSuccess) {
             std::printf("FAIL: %s auto F32 launch: %s\n", label, hipGetErrorString(ha));
@@ -195,9 +195,9 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8GemmConfig config, uint32_t rows,
 
         const std::size_t out_bf16_bytes = static_cast<std::size_t>(rows) * n * 2u;
         std::vector<uint8_t> gbf(out_bf16_bytes);
-        hipError_t hg = ps::kernel::launch_gemm_fp8_w8a8_wmma(
+        hipError_t hg = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
             config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-            ps::kernel::Fp8GemmOutputDType::BF16, rows, n, kp,
+            ps::kernel::Fp8FinegrainedGemmOutputDType::BF16, rows, n, kp,
             weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
         if (hg != hipSuccess) {
             std::printf("FAIL: %s generic BF16 launch: %s\n", label, hipGetErrorString(hg));
@@ -269,18 +269,18 @@ int main() {
     }
 
     for (uint32_t rows : {16u, 17u, 64u, 128u, 129u}) {
-        for (Fp8GemmConfigId id : {Fp8GemmConfigId::RowBlock1,
-                                           Fp8GemmConfigId::RowBlock2,
-                                           Fp8GemmConfigId::RowBlock4,
-                                           Fp8GemmConfigId::RowBlock8}) {
+        for (Fp8FinegrainedGemmConfigId id : {Fp8FinegrainedGemmConfigId::RowBlock1,
+                                           Fp8FinegrainedGemmConfigId::RowBlock2,
+                                           Fp8FinegrainedGemmConfigId::RowBlock4,
+                                           Fp8FinegrainedGemmConfigId::RowBlock8}) {
             std::snprintf(label, sizeof(label), "fp8b128-force-%s", config_name(id));
-            if (run_case(arena, Fp8GemmConfig{id}, rows, 130u, 256u, label)) ++g_pass; else ++g_fail;
+            if (run_case(arena, Fp8FinegrainedGemmConfig{id}, rows, 130u, 256u, label)) ++g_pass; else ++g_fail;
         }
     }
 
     for (uint32_t rows : {512u, 2048u}) {
         if (run_case(arena, config_for(rows), rows, 64u, 256u, "fp8b128-large")) ++g_pass; else ++g_fail;
-        if (run_case(arena, Fp8GemmConfig{Fp8GemmConfigId::RowBlock1},
+        if (run_case(arena, Fp8FinegrainedGemmConfig{Fp8FinegrainedGemmConfigId::RowBlock1},
                      rows, 64u, 256u, "fp8b128-large-mb1")) ++g_pass; else ++g_fail;
     }
 
@@ -298,7 +298,7 @@ int main() {
     }
     auto prod_arena = prod_arena_result.release();
     for (const auto& s : prod_shapes) {
-        if (run_case(prod_arena, Fp8GemmConfig{Fp8GemmConfigId::RowBlock1},
+        if (run_case(prod_arena, Fp8FinegrainedGemmConfig{Fp8FinegrainedGemmConfigId::RowBlock1},
                      1u, s[0], s[1], "fp8b128-rows1-prod"))
             ++g_pass;
         else
@@ -307,7 +307,7 @@ int main() {
 
     for (uint32_t rows : {256u, 512u}) {
         for (uint32_t n : {64u, 128u}) {
-            if (run_case(arena, Fp8GemmConfig{Fp8GemmConfigId::Prefill2D},
+            if (run_case(arena, Fp8FinegrainedGemmConfig{Fp8FinegrainedGemmConfigId::Prefill2D},
                          rows, n, 256u, "fp8b128-2d")) ++g_pass; else ++g_fail;
         }
     }
@@ -317,16 +317,16 @@ int main() {
         else ++g_fail;
     }
     for (uint32_t rows : {1u, 17u, 64u}) {
-        for (Fp8GemmConfigId id : {Fp8GemmConfigId::RowBlock1,
-                                   Fp8GemmConfigId::RowBlock4}) {
+        for (Fp8FinegrainedGemmConfigId id : {Fp8FinegrainedGemmConfigId::RowBlock1,
+                                   Fp8FinegrainedGemmConfigId::RowBlock4}) {
             std::snprintf(label, sizeof(label), "fp8g64-force-%s", config_name(id));
-            if (run_case(arena, Fp8GemmConfig{id}, rows, 130u, 256u, label, 64u)) ++g_pass;
+            if (run_case(arena, Fp8FinegrainedGemmConfig{id}, rows, 130u, 256u, label, 64u)) ++g_pass;
             else ++g_fail;
         }
     }
     for (uint32_t rows : {256u, 512u}) {
         for (uint32_t n : {64u, 128u}) {
-            if (run_case(arena, Fp8GemmConfig{Fp8GemmConfigId::Prefill2D},
+            if (run_case(arena, Fp8FinegrainedGemmConfig{Fp8FinegrainedGemmConfigId::Prefill2D},
                          rows, n, 256u, "fp8g64-2d", 64u)) ++g_pass;
             else ++g_fail;
         }

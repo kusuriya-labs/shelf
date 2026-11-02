@@ -84,7 +84,7 @@ bool run_local(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t full_k
     }
     uint8_t* codes = ws + layout.codes_offset;
     float* scales = reinterpret_cast<float*>(ws + layout.scales_offset);
-    const hipError_t herr = ps::kernel::launch_activation_quantize_e4m3(
+    const hipError_t herr = ps::kernel::launch_activation_quantize_fp8_finegrained(
         in + col_off, codes, scales, rows, k, k, full_k,
         layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream, nullptr);
     if (herr != hipSuccess) {

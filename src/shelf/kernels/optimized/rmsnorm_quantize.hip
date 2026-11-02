@@ -27,7 +27,7 @@ void fused_rmsnorm_quantize_kernel(
         input, weight, output, row, 0u, group_size, input_row_stride,
         output_row_stride, eps);
     __syncthreads();
-    detail::activation_quantize_e4m3_vec_row_body<K, K>(
+    detail::activation_quantize_fp8_finegrained_vec_row_body<K, K>(
         reinterpret_cast<const ::ps::bf16_t*>(output), codes, scales, row,
         output_row_stride, code_row_stride, scale_row_stride);
 }

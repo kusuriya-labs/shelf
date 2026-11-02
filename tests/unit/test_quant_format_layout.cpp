@@ -26,7 +26,7 @@ void check(bool cond, const char* msg) {
 int run() {
     check(quant_padded_k(1024, QuantFormatId::Bf16) == 1024, "bf16 k_padded==k");
     check(quant_padded_k(1000, QuantFormatId::Bf16) == 1000, "bf16 never pads");
-    check(quant_padded_k(1000, QuantFormatId::Fp8) == 1024, "fp8 k_padded aligns 128");
+    check(quant_padded_k(1000, QuantFormatId::Fp8Finegrained) == 1024, "fp8 k_padded aligns 128");
 
     check(quant_element_count({1024}) == 1024, "1d element_count");
     check(quant_row_count({1024}) == 1, "1d row_count==1");
@@ -34,7 +34,7 @@ int run() {
     check(quant_row_count({6144, 1, 4}) == 6144, "3d conv1d row_count");
     check(quant_element_count({6144, 1, 4}) == 6144 * 4, "3d conv1d element_count");
 
-    const QuantFormatDesc& fp8 = *quant_format_desc(QuantFormatId::Fp8);
+    const QuantFormatDesc& fp8 = *quant_format_desc(QuantFormatId::Fp8Finegrained);
     check(quant_codes_bytes(3, 1024, fp8) == 3 * 1024, "fp8 codes bytes");
     check(quant_metadata_count(1, 256, 256, fp8, 0) == 2 * 2, "fp8 scale grid 256x256");
     check(quant_metadata_bytes(1, 256, 256, fp8, 0) == 4 * 4, "fp8 scale bytes");
@@ -45,18 +45,18 @@ int run() {
     check(quant_codes_bytes(3, 1024, bf16) == 3 * 1024 * 2, "bf16 data bytes");
 
     check(quant_format_id(QuantizedEncoding::Bf16) == QuantFormatId::Bf16, "map bf16");
-    check(quant_format_id(QuantizedEncoding::Fp8) == QuantFormatId::Fp8, "map fp8");
+    check(quant_format_id(QuantizedEncoding::Fp8) == QuantFormatId::Fp8Finegrained, "map fp8");
 
     using ps::quantization::ComputeSpecId;
     using ps::quantization::QuantSpecId;
     using ps::quantization::is_gemm_compute_compatible;
     check(is_gemm_compute_compatible(QuantSpecId::BF16_V1, ComputeSpecId::BF16_F32_BF16),
           "bf16 storage maps to bf16 compute");
-    check(is_gemm_compute_compatible(QuantSpecId::FP8_E4M3_F32_V1, ComputeSpecId::FP8_W8A8_F32_BF16),
+    check(is_gemm_compute_compatible(QuantSpecId::FP8_FINEGRAINED_F32_V1, ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
           "fp8 storage maps to fp8 compute");
-    check(!is_gemm_compute_compatible(QuantSpecId::BF16_V1, ComputeSpecId::FP8_W8A8_F32_BF16),
+    check(!is_gemm_compute_compatible(QuantSpecId::BF16_V1, ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
           "bf16 storage rejects fp8 compute");
-    check(!is_gemm_compute_compatible(QuantSpecId::FP8_E4M3_F32_V1, ComputeSpecId::BF16_F32_BF16),
+    check(!is_gemm_compute_compatible(QuantSpecId::FP8_FINEGRAINED_F32_V1, ComputeSpecId::BF16_F32_BF16),
           "fp8 storage rejects bf16 compute");
     return 0;
 }

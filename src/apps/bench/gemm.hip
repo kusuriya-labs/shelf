@@ -291,15 +291,15 @@ ps::kernel::Bf16GemmConfig bf16_config_for(uint32_t rows, uint32_t n, uint32_t k
     return ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
 }
 
-ps::kernel::Fp8GemmConfig fp8_gemm_config_for(uint32_t rows, uint32_t n) {
-    using Id = ps::kernel::Fp8GemmConfigId;
-    if (rows >= 8u * ps::kernel::kFp8GemmRowTile &&
+ps::kernel::Fp8FinegrainedGemmConfig fp8_gemm_config_for(uint32_t rows, uint32_t n) {
+    using Id = ps::kernel::Fp8FinegrainedGemmConfigId;
+    if (rows >= 8u * ps::kernel::kFp8FinegrainedGemmRowTile &&
         n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock8};
-    if (rows >= 4u * ps::kernel::kFp8GemmRowTile &&
+    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile &&
         n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock4};
-    if (rows > ps::kernel::kFp8GemmRowTile &&
+    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile &&
         n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock2};
     return {Id::RowBlock1};
@@ -596,14 +596,14 @@ int run_gemm_fp8(Options& o) {
             ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
             ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
             if (!ok) { rc = 1; break; }
-            hipError_t af = ps::kernel::launch_activation_quantize_e4m3(
+            hipError_t af = ps::kernel::launch_activation_quantize_fp8_finegrained(
                 d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
                 static_cast<uint32_t>(act_scale_stride), stream);
             if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
             const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
-            const auto fp8_sel = ps::execution::select_fp8_gemm_config(
-                ps::execution::Fp8GemmSelectorInput{rows, n, shape.k, kp});
-            const ps::kernel::Fp8GemmConfig fp8_cfg =
+            const auto fp8_sel = ps::execution::select_fp8_finegrained_gemm_config(
+                ps::execution::Fp8FinegrainedGemmSelectorInput{rows, n, shape.k, kp});
+            const ps::kernel::Fp8FinegrainedGemmConfig fp8_cfg =
                 fp8_sel ? *fp8_sel : fp8_gemm_config_for(rows, n);
             const uint32_t split_parts = (o.split > 1u) ? o.split : 1u;
             const uint32_t split_sub = rows / split_parts;
@@ -616,10 +616,10 @@ int run_gemm_fp8(Options& o) {
                         static_cast<size_t>(s * split_sub) * (act_scale_stride / 4u);
                     void* out_off = reinterpret_cast<uint8_t*>(d_output) +
                         static_cast<size_t>(s * split_sub) * n * 2u;
-                    hipError_t e = ps::kernel::launch_gemm_fp8_w8a8_wmma_auto(
+                    hipError_t e = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
                         fp8_cfg, d_codes,
                         reinterpret_cast<const float*>(d_scales), a8_off, as_off, out_off,
-                        ps::kernel::Fp8GemmOutputDType::BF16, sub_rows, n, kp,
+                        ps::kernel::Fp8FinegrainedGemmOutputDType::BF16, sub_rows, n, kp,
                         (kp / 128u) * 4u, kp, static_cast<uint32_t>(act_scale_stride), n,
                         stream);
                     if (e != hipSuccess) return e;

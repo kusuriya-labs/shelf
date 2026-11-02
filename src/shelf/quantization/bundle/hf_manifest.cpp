@@ -250,7 +250,7 @@ Status synthesize_fp8_tensor(
     out.role = "weight";
     out.encoding = QuantizedEncoding::Fp8;
     out.logical_shape = {static_cast<int64_t>(n), static_cast<int64_t>(k)};
-    out.k_padded = quant_padded_k(k, quantization::QuantFormatId::Fp8);
+    out.k_padded = quant_padded_k(k, quantization::QuantFormatId::Fp8Finegrained);
     out.codes = make_ref(canonical, "U8", codes_data_result.value(), codes_src_bytes, with_crc);
     out.metadata1 =
         make_ref(scale_inv_name, "F32", staging.data(), staging.size() * sizeof(float), with_crc);

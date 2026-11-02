@@ -203,9 +203,6 @@ Result<PhysicalResolveStatus> resolve_activation_quantize_physical(
     const uint64_t range_off = program.workspace.ranges[b.workspace_slot].offset;
     uint8_t* range_base = ctx.workspace + range_off;
 
-    out.kind = b.kernel_id == KernelId::ACTIVATION_QUANTIZE_W4A8
-                   ? PhysicalActivationQuantizeKind::E4M3
-                   : PhysicalActivationQuantizeKind::I8Row;
     out.input = reinterpret_cast<uint64_t>(in.ptr);
     out.codes = reinterpret_cast<uint64_t>(range_base + layout.codes_offset);
     out.scales = reinterpret_cast<uint64_t>(range_base + layout.scales_offset);

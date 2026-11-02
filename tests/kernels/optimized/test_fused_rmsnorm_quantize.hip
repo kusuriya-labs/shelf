@@ -128,7 +128,7 @@ void check_case(const Layout& lay, bool& ok) {
         ::ps::kernel::RmsNormWeightMode::ONE_PLUS, out_sr,
         ::ps::kernel::RmsNormDataType::BF16, rows, kF, kF, lay.in_stride,
         lay.out_stride, kEps, s);
-    const hipError_t e1 = ::ps::kernel::launch_activation_quantize_e4m3(
+    const hipError_t e1 = ::ps::kernel::launch_activation_quantize_fp8_finegrained(
         out_sr, cs_s, scales_s, rows, kF, kF, lay.out_stride,
         aw.code_row_stride_bytes, aw.scale_row_stride_bytes, s, nullptr);
 

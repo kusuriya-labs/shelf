@@ -45,7 +45,7 @@ void fused_resid_rmsnorm_quantize_kernel(
                              RmsNormWeightMode::ONE_PLUS>(
         s_base, weight, n_base, row, 0u, group_size, residual_rs, normed_rs, eps);
     __syncthreads();
-    detail::activation_quantize_e4m3_vec_row_body<K, K>(
+    detail::activation_quantize_fp8_finegrained_vec_row_body<K, K>(
         reinterpret_cast<const ::ps::bf16_t*>(n_base), codes, scales, row,
         normed_rs, code_rs, scale_rs);
 }

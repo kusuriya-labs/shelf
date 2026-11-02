@@ -277,7 +277,7 @@ static void compare_chain(const std::string& tag, const ChainOut& got, const Cha
 
 static void check_fp8_geometry(const weights::MatrixWeight& w, std::uint32_t rows,
                                std::uint32_t k, const std::string& tag) {
-    check(w.encoding == weights::MatrixEncoding::Fp8, tag + " encoding");
+    check(w.encoding == weights::MatrixEncoding::Fp8Finegrained, tag + " encoding");
     check(w.rows == rows && w.cols == k && w.k_padded == k, tag + " geometry");
     check(w.weight_scale_group == kScaleBlockK, tag + " weight scale group");
     check(w.scales.ndim() == 2 && w.scales.dim(0) == rows / kScaleBlockN &&

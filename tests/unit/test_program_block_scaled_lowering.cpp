@@ -91,7 +91,7 @@ void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint
     check(lin.kernel_id == expect_kernel, std::string(tag) + ": linear kernel id");
     check(lin.compute_spec == compute_spec, std::string(tag) + ": compute spec");
     check(lin.activation_kp == expect_act_kp, std::string(tag) + ": activation k_padded");
-    check(p.dispatches[0].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_W4A8,
+    check(p.dispatches[0].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
           std::string(tag) + ": activation quantize kind");
 }
 
@@ -99,7 +99,7 @@ void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint
 
 int main() {
     run_case(5u, 1u, 128u, (2560u / 128u) * 4u, (2560u / 32u) * 512u,
-             rt::KernelId::LINEAR_FP8, 2560u, "fp8");
+             rt::KernelId::LINEAR_FP8_FINEGRAINED, 2560u, "fp8");
     // K that is not a multiple of 128 must still pad the FP8 activation to 128.
     {
         rt::PrimitiveGraph g = make_linear_graph(1024u, 2500u);

@@ -101,7 +101,7 @@ inline Result<ps::quantization::ResolvedQuantSpec> resolve_quant_spec(
         d.scale_type = StorageDType::FP32;
         d.weight_layout = QuantLayout::FP8_E4M3_BLOCK128_V1;
         d.scale_layout = QuantLayout::FP8_SCALE_F32_N128K128_V1;
-        resolved.spec_id = QuantSpecId::FP8_E4M3_F32_V1;
+        resolved.spec_id = QuantSpecId::FP8_FINEGRAINED_F32_V1;
         return resolved;
     }
 

@@ -91,7 +91,7 @@ void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
         const uint64_t r = m.rows;
         if (m.encoding == E::Bf16) {
             bf16_bytes += r * m.cols * 2u;
-        } else if (m.encoding == E::Fp8) {
+        } else if (m.encoding == E::Fp8Finegrained) {
             fp8_codes += r * m.k_padded;
             fp8_scales += ((r + 127u) / 128u) * (m.k_padded / 128u) * 4u;
         }
