@@ -3,7 +3,6 @@
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/weights/tensor_parallel_plan.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
-#include <shelf/quantization/bundle/psq5_manifest.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/weights/weight_loader.h>
 #include <algorithm>
@@ -568,12 +567,6 @@ Result<ps::quantization::bundle::QuantizedModelReader> open_quantized_reader(
     const fs::path dir(model_dir);
     if (fs::exists(dir / fqm::kQuantizedMetadataFile)) {
         return fqb::QuantizedModelReader::open(model_dir, verify_payload_crc);
-    }
-    if (fqb::is_psq5_model_dir(model_dir)) {
-        auto source = fqb::synthesize_psq5_quantized_source(
-            model_dir, hf_quantized_logical_names(config), verify_payload_crc);
-        if (!source.ok()) return source.status();
-        return fqb::QuantizedModelReader::open_hf_source(source.release(), verify_payload_crc);
     }
     if (!fqb::is_hf_quantized_model_dir(model_dir)) {
         return Status::invalid_argument(

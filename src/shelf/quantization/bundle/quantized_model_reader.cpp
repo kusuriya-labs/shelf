@@ -302,45 +302,6 @@ struct QuantizedModelReader::Impl {
                 continue;
             }
 
-            if (tensor.encoding == QuantizedEncoding::Psq5) {
-                if (!tensor.codes || !tensor.metadata1 || !tensor.metadata2) {
-                    return Status::invalid_argument(
-                        "psq5 tensor is missing a stream", __FILE__, __LINE__);
-                }
-                const uint64_t kp = tensor.k_padded;
-                if (kp < k || (kp % 32u) != 0) {
-                    return Status::invalid_argument("psq5 tensor k_padded invalid", __FILE__, __LINE__);
-                }
-                const uint64_t nb = kp / 32u;
-                std::vector<std::size_t> mag_shape;
-                std::vector<std::size_t> sign_shape;
-                std::vector<std::size_t> scale_shape;
-                mag_shape.reserve(tensor.logical_shape.size() + 1);
-                sign_shape.reserve(tensor.logical_shape.size() + 1);
-                scale_shape.reserve(tensor.logical_shape.size());
-                for (const int64_t dimension : tensor.logical_shape) {
-                    mag_shape.push_back(static_cast<std::size_t>(dimension));
-                    sign_shape.push_back(static_cast<std::size_t>(dimension));
-                    scale_shape.push_back(static_cast<std::size_t>(dimension));
-                }
-                mag_shape[mag_shape.size() - 1] = static_cast<std::size_t>(nb);
-                sign_shape[sign_shape.size() - 1] = static_cast<std::size_t>(nb);
-                scale_shape[scale_shape.size() - 1] = static_cast<std::size_t>(nb);
-                mag_shape.push_back(16u);
-                sign_shape.push_back(4u);
-                const uint64_t row_count = rows;
-                Status mag_status = validate_ref_exact(*tensor.codes, ps::io::SType::U8,
-                    mag_shape, row_count * nb * 16u);
-                if (!mag_status.ok()) return mag_status;
-                Status sign_status = validate_ref_exact(*tensor.metadata1, ps::io::SType::U8,
-                    sign_shape, row_count * nb * 4u);
-                if (!sign_status.ok()) return sign_status;
-                Status scale_status = validate_ref_exact(*tensor.metadata2, ps::io::SType::U8,
-                    scale_shape, row_count * nb);
-                if (!scale_status.ok()) return scale_status;
-                continue;
-            }
-
             const ps::quantization::QuantFormatDesc* desc =
                 ps::quantization::quant_format_desc(quant_format_id(tensor.encoding));
             if (desc == nullptr)

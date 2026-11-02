@@ -54,24 +54,4 @@ struct Fp8GemmConfig {
     Fp8GemmConfigId id = Fp8GemmConfigId::RowBlock1;
 };
 
-inline constexpr uint32_t kPsq5GemmRowTile = 16u;
-inline constexpr uint32_t kPsq5GemmPrefill2dOutBlock = 64u;
-inline constexpr uint32_t kPsq5GemmPrefill2dKChunk = 64u;
-inline constexpr uint32_t kPsq5GemmPrefill2dWideOutBlock = 128u;
-inline constexpr uint32_t kPsq5GemmPrefill2dWideRowsPerBlock = 128u;
-
-enum class Psq5GemmConfigId : uint8_t {
-    RowBlock1,
-    RowBlock2,
-    RowBlock4,
-    RowBlock8,
-    Prefill2D,
-    Prefill2DWide,
-    Prefill2DWStage,
-};
-
-struct Psq5GemmConfig {
-    Psq5GemmConfigId id = Psq5GemmConfigId::RowBlock1;
-};
-
 }  // namespace ps::kernel

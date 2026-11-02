@@ -350,7 +350,6 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
     switch (enc) {
         case QuantizedEncoding::Bf16: return "bf16";
         case QuantizedEncoding::Fp8: return kFp8V4EncodingName;
-        case QuantizedEncoding::Psq5: return kPsq5V4EncodingName;
     }
     return "unknown";
 }
@@ -358,7 +357,6 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
 Result<QuantizedEncoding> parse_v4_encoding(const std::string& name) {
     if (name == "bf16") return QuantizedEncoding::Bf16;
     if (name == kFp8V4EncodingName) return QuantizedEncoding::Fp8;
-    if (name == kPsq5V4EncodingName) return QuantizedEncoding::Psq5;
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 

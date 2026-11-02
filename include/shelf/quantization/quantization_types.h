@@ -34,13 +34,11 @@ struct QuantDescriptor {
 enum class QuantSpecId : uint8_t {
     BF16_V1,
     FP8_E4M3_F32_V1,
-    PSQ5_CB28_UE4M4_V1,
 };
 
 enum class ComputeSpecId : uint8_t {
     BF16_F32_BF16,
     FP8_W8A8_F32_BF16,
-    PSQ5_W8A8_F32_BF16,
 };
 
 struct ResolvedQuantSpec {
@@ -54,8 +52,6 @@ inline Result<ComputeSpecId> preferred_gemm_compute_spec(QuantSpecId quant_spec)
             return ComputeSpecId::BF16_F32_BF16;
         case QuantSpecId::FP8_E4M3_F32_V1:
             return ComputeSpecId::FP8_W8A8_F32_BF16;
-        case QuantSpecId::PSQ5_CB28_UE4M4_V1:
-            return ComputeSpecId::PSQ5_W8A8_F32_BF16;
     }
     return Status::invalid_argument("unknown quant spec id", __FILE__, __LINE__);
 }
@@ -68,8 +64,6 @@ inline bool is_gemm_compute_compatible(
             return compute_spec == ComputeSpecId::BF16_F32_BF16;
         case QuantSpecId::FP8_E4M3_F32_V1:
             return compute_spec == ComputeSpecId::FP8_W8A8_F32_BF16;
-        case QuantSpecId::PSQ5_CB28_UE4M4_V1:
-            return compute_spec == ComputeSpecId::PSQ5_W8A8_F32_BF16;
     }
     return false;
 }

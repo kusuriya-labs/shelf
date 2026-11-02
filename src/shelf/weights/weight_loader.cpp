@@ -2,10 +2,8 @@
 
 #include <shelf/core/memory/types.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
-#include <shelf/quantization/bundle/psq5_manifest.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/fp8/fp8_native.h>
-#include <shelf/quantization/psq5/psq5.h>
 #include <shelf/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
@@ -306,216 +304,8 @@ Result<MatrixWeight> load_quantized_view(
         return w;
     }
 
-    if (v.encoding == QuantizedEncoding::Psq5) {
-        if (v.data.data != nullptr) {
-            return Status::invalid_argument(
-                ("psq5 tensor must not carry bf16 data: " + name).c_str(), __FILE__, __LINE__);
-        }
-        if (v.metadata1.data == nullptr || v.metadata2.data == nullptr) {
-            return Status::invalid_argument(
-                ("psq5 tensor missing sign or scale stream: " + name).c_str(), __FILE__, __LINE__);
-        }
-        const uint64_t nb = kp / 32u;
-        auto st = expect_bytes(name + " magnitude", v.codes, m * nb * 16u);
-        if (!st.ok()) return st;
-        st = expect_bytes(name + " sign", v.metadata1, m * nb * 4u);
-        if (!st.ok()) return st;
-        st = expect_bytes(name + " scale", v.metadata2, m * nb);
-        if (!st.ok()) return st;
-
-        quantization::psq5::Psq5CanonicalView cv;
-        cv.n = m;
-        cv.logical_k = k;
-        cv.padded_k = kp;
-        cv.magnitude = static_cast<const uint8_t*>(v.codes.data);
-        cv.magnitude_bytes = v.codes.size;
-        cv.sign = static_cast<const uint8_t*>(v.metadata1.data);
-        cv.sign_bytes = v.metadata1.size;
-        cv.scale = static_cast<const uint8_t*>(v.metadata2.data);
-        cv.scale_bytes = v.metadata2.size;
-        if (!cv.validate()) {
-            return Status::invalid_argument(
-                ("psq5 canonical payload invalid: " + name).c_str(), __FILE__, __LINE__);
-        }
-        w.encoding = MatrixEncoding::Psq5;
-        w.weight_scale_group = 32u;
-
-        static quantization::psq5::Psq5NativeHost native;
-        if (!quantization::psq5::preshuffle_psq5_native(cv, native)) {
-            return Status::invalid_argument(
-                ("psq5 payload not supported for arch: " + name).c_str(), __FILE__, __LINE__);
-        }
-        const uint32_t mag_stride = native.magnitude_row_stride_bytes;
-        const uint32_t sign_stride = native.sign_row_stride_bytes;
-        std::vector<std::size_t> mshape = {native.rows / 16u, mag_stride};
-        std::vector<std::size_t> mstrides = {mag_stride, 1};
-        w.codes = alloc_bytes(native.magnitude_bytes, mshape, mstrides, arena);
-        if (w.codes.ndim() == 0) {
-            return Status::insufficient_memory(
-                ("psq5 magnitude allocation failed: " + name).c_str(), __FILE__, __LINE__);
-        }
-        st = copy_to_device(w.codes.data<void>(), native.magnitude.get(),
-                            native.magnitude_bytes, stream);
-        if (!st.ok()) return st;
-        std::vector<std::size_t> sshape = {native.rows / 16u, sign_stride};
-        std::vector<std::size_t> sstrides = {sign_stride, 1};
-        w.sign = alloc_bytes(native.sign_bytes, sshape, sstrides, arena);
-        if (w.sign.ndim() == 0) {
-            return Status::insufficient_memory(
-                ("psq5 sign allocation failed: " + name).c_str(), __FILE__, __LINE__);
-        }
-        st = copy_to_device(w.sign.data<void>(), native.sign.get(), native.sign_bytes, stream);
-        if (!st.ok()) return st;
-        std::vector<std::size_t> cshape = {native.rows / 16u,
-                                           static_cast<std::size_t>(nb) * 16u};
-        std::vector<std::size_t> cstrides = {static_cast<std::size_t>(nb) * 16u, 1};
-        w.scales = alloc_bytes(native.scale_bytes, cshape, cstrides, arena);
-        if (w.scales.ndim() == 0) {
-            return Status::insufficient_memory(
-                ("psq5 scale allocation failed: " + name).c_str(), __FILE__, __LINE__);
-        }
-        st = copy_to_device(w.scales.data<void>(), native.scale.get(), native.scale_bytes, stream);
-        if (!st.ok()) return st;
-        w.codes_row_stride_bytes = mag_stride;
-        w.sign_row_stride_bytes = sign_stride;
-        w.scale_row_stride_bytes = static_cast<uint32_t>(nb) * 16u;
-        w.storage_scale_stride_bytes = w.scale_row_stride_bytes;
-        w.preshuffled = true;
-        apply_default_compute_spec(w);
-        return w;
-    }
-
     return Status::invalid_argument(
         ("quantized matrix unknown encoding: " + name).c_str(), __FILE__, __LINE__);
-}
-
-Result<MatrixWeight> load_quantized_psq5_matrix_axis_slice_impl(
-    const QuantizedModelReader& reader,
-    const std::string& name,
-    std::uint64_t row_begin,
-    std::uint64_t row_count,
-    gpu::GpuArena& arena,
-    hipStream_t stream,
-    const WeightLoadOptions& options)
-{
-    auto view_result = reader.resolve(name);
-    if (!view_result.ok()) return view_result.status();
-    const QuantizedTensorView& v = view_result.value();
-
-    if (v.encoding != QuantizedEncoding::Psq5) {
-        return Status::unsupported(
-            ("psq5 axis slice requires a Psq5 tensor: " + name).c_str(), __FILE__, __LINE__);
-    }
-    if (v.logical_shape.size() != 2) {
-        return Status::invalid_argument(
-            ("psq5 axis slice requires a rank-2 logical shape: " + name).c_str(),
-            __FILE__, __LINE__);
-    }
-    const uint64_t m = static_cast<uint64_t>(v.logical_shape[0]);
-    const uint64_t k = static_cast<uint64_t>(v.logical_shape[1]);
-    if (row_count == 0u || row_begin > m || row_count > m - row_begin) {
-        return Status::invalid_argument(
-            ("psq5 axis slice range out of bounds: " + name).c_str(), __FILE__, __LINE__);
-    }
-    if ((row_begin % quantization::psq5::kTileRows) != 0u ||
-        (row_count % quantization::psq5::kTileRows) != 0u) {
-        return Status::invalid_argument(
-            ("psq5 axis slice must be aligned to the 16-row tile: " + name).c_str(),
-            __FILE__, __LINE__);
-    }
-    const uint64_t kp = static_cast<uint64_t>(v.k_padded);
-    if (kp < k || (kp % quantization::psq5::kBlockK) != 0u) {
-        return Status::invalid_argument(
-            ("psq5 axis slice k_padded invalid: " + name).c_str(), __FILE__, __LINE__);
-    }
-
-    const uint64_t nb = kp / quantization::psq5::kBlockK;
-    const uint64_t mag_row = nb * quantization::psq5::kMagnitudeBytesPerBlock;
-    const uint64_t sign_row = nb * quantization::psq5::kSignBytesPerBlock;
-    const uint64_t scale_row = nb * quantization::psq5::kScaleBytesPerBlock;
-
-    auto st = expect_bytes(name + " magnitude", v.codes, m * mag_row);
-    if (!st.ok()) return st;
-    st = expect_bytes(name + " sign", v.metadata1, m * sign_row);
-    if (!st.ok()) return st;
-    st = expect_bytes(name + " scale", v.metadata2, m * scale_row);
-    if (!st.ok()) return st;
-
-    const auto* mag_base = static_cast<const uint8_t*>(v.codes.data);
-    const auto* sign_base = static_cast<const uint8_t*>(v.metadata1.data);
-    const auto* scale_base = static_cast<const uint8_t*>(v.metadata2.data);
-
-    quantization::psq5::Psq5CanonicalView cv;
-    cv.n = row_count;
-    cv.logical_k = k;
-    cv.padded_k = kp;
-    cv.magnitude = mag_base + row_begin * mag_row;
-    cv.magnitude_bytes = row_count * mag_row;
-    cv.sign = sign_base + row_begin * sign_row;
-    cv.sign_bytes = row_count * sign_row;
-    cv.scale = scale_base + row_begin * scale_row;
-    cv.scale_bytes = row_count * scale_row;
-    if (!cv.validate()) {
-        return Status::invalid_argument(
-            ("psq5 axis slice payload invalid: " + name).c_str(), __FILE__, __LINE__);
-    }
-
-    static quantization::psq5::Psq5NativeHost native;
-    if (!quantization::psq5::preshuffle_psq5_native(cv, native)) {
-        return Status::invalid_argument(
-            ("psq5 axis slice preshuffle failed: " + name).c_str(), __FILE__, __LINE__);
-    }
-
-    MatrixWeight w;
-    w.rows = static_cast<uint32_t>(row_count);
-    w.cols = static_cast<uint32_t>(k);
-    w.k_padded = static_cast<uint32_t>(kp);
-    w.encoding = MatrixEncoding::Psq5;
-    w.weight_scale_group = 32u;
-
-    const uint32_t mag_stride = native.magnitude_row_stride_bytes;
-    const uint32_t sign_stride = native.sign_row_stride_bytes;
-    std::vector<std::size_t> mshape = {native.rows / 16u, mag_stride};
-    std::vector<std::size_t> mstrides = {mag_stride, 1};
-    w.codes = alloc_bytes(native.magnitude_bytes, mshape, mstrides, arena);
-    if (w.codes.ndim() == 0) {
-        return Status::insufficient_memory(
-            ("psq5 axis slice magnitude allocation failed: " + name).c_str(),
-            __FILE__, __LINE__);
-    }
-    st = copy_to_device(w.codes.data<void>(), native.magnitude.get(),
-                        native.magnitude_bytes, stream);
-    if (!st.ok()) return st;
-
-    std::vector<std::size_t> sshape = {native.rows / 16u, sign_stride};
-    std::vector<std::size_t> sstrides = {sign_stride, 1};
-    w.sign = alloc_bytes(native.sign_bytes, sshape, sstrides, arena);
-    if (w.sign.ndim() == 0) {
-        return Status::insufficient_memory(
-            ("psq5 axis slice sign allocation failed: " + name).c_str(), __FILE__, __LINE__);
-    }
-    st = copy_to_device(w.sign.data<void>(), native.sign.get(), native.sign_bytes, stream);
-    if (!st.ok()) return st;
-
-    std::vector<std::size_t> cshape = {native.rows / 16u,
-                                       static_cast<std::size_t>(nb) * 16u};
-    std::vector<std::size_t> cstrides = {static_cast<std::size_t>(nb) * 16u, 1};
-    w.scales = alloc_bytes(native.scale_bytes, cshape, cstrides, arena);
-    if (w.scales.ndim() == 0) {
-        return Status::insufficient_memory(
-            ("psq5 axis slice scale allocation failed: " + name).c_str(), __FILE__, __LINE__);
-    }
-    st = copy_to_device(w.scales.data<void>(), native.scale.get(), native.scale_bytes, stream);
-    if (!st.ok()) return st;
-
-    w.codes_row_stride_bytes = mag_stride;
-    w.sign_row_stride_bytes = sign_stride;
-    w.scale_row_stride_bytes = static_cast<uint32_t>(nb) * 16u;
-    w.storage_scale_stride_bytes = w.scale_row_stride_bytes;
-    w.preshuffled = true;
-    apply_default_compute_spec(w);
-    (void)options;
-    return w;
 }
 
 Result<MatrixWeight> load_quantized_matrix_impl(
@@ -722,8 +512,7 @@ bool is_quantized_model_dir(const std::string& model_dir) {
             }
         }
     }
-    return quantization::bundle::is_psq5_model_dir(model_dir) ||
-           quantization::bundle::is_hf_quantized_model_dir(model_dir);
+    return quantization::bundle::is_hf_quantized_model_dir(model_dir);
 }
 
 Status validate_quantized_model(const QuantizedModelReader& reader) {
@@ -909,19 +698,6 @@ Result<MatrixWeight> load_quantized_matrix(
     const WeightLoadOptions& options)
 {
     return load_quantized_matrix_impl(reader, name, arena, stream, options);
-}
-
-Result<MatrixWeight> load_quantized_psq5_matrix_axis_slice(
-    const QuantizedModelReader& reader,
-    const std::string& name,
-    std::uint64_t row_begin,
-    std::uint64_t row_count,
-    gpu::GpuArena& arena,
-    hipStream_t stream,
-    const WeightLoadOptions& options)
-{
-    return load_quantized_psq5_matrix_axis_slice_impl(
-        reader, name, row_begin, row_count, arena, stream, options);
 }
 
 Result<gpu::Tensor> load_quantized_small(

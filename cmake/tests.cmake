@@ -173,7 +173,6 @@ shelf_add_test(NAME test_fused_attn_post_quantize SOURCE kernels/optimized/test_
 shelf_add_test(NAME test_fused_gdn_conv_silu SOURCE kernels/optimized/test_fused_gdn_conv_silu.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_fused_gdn_qk_prepare SOURCE kernels/optimized/test_fused_gdn_qk_prepare.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gemm_fp8_optimized SOURCE kernels/linear/test_gemm_fp8_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_quant_reference shelf_gpu)
-shelf_add_test(NAME test_gemm_psq5_optimized SOURCE kernels/linear/test_gemm_psq5_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_gemm_bf16_wmma SOURCE kernels/optimized/test_gemm_bf16_wmma.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gemm_bf16_verify_exact SOURCE kernels/optimized/test_gemm_bf16_verify_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_argmax_f32_top2 SOURCE kernels/optimized/test_argmax_f32_top2.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
@@ -282,7 +281,6 @@ add_custom_target(
         test_fused_gdn_conv_silu
         test_fused_gdn_qk_prepare
         test_gemm_fp8_optimized
-        test_gemm_psq5_optimized
         test_gemm_bf16_wmma
         test_rmsnorm
         test_l2_normalize
@@ -419,13 +417,6 @@ set_tests_properties(test_compute_rope_cap_4x_over PROPERTIES
 add_test(NAME test_quality_gate_selftest
          COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/quality_gate.py" selftest)
 set_tests_properties(test_quality_gate_selftest PROPERTIES LABELS "cpu;required")
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/quark/quark/__init__.py")
-    add_test(NAME test_quark_psq5_plugin
-             COMMAND python3 -m pytest "${CMAKE_SOURCE_DIR}/tools/quark_psq5/tests" -q
-                 -p no:cacheprovider)
-    set_tests_properties(test_quark_psq5_plugin PROPERTIES LABELS "cpu;optional")
-endif()
 
 # ---------------------------------------------------------------------------
 # shelf-bench CLI help smoke (CPU-only: no GPU, no model).

@@ -105,38 +105,6 @@ inline Result<ps::quantization::ResolvedQuantSpec> resolve_quant_spec(
         return resolved;
     }
 
-    if (tensor.encoding == QuantizedEncoding::Psq5) {
-        if (!tensor.codes) {
-            return Status::invalid_argument("quantized tensor missing codes ref", __FILE__, __LINE__);
-        }
-        if (!tensor.metadata1 || !tensor.metadata2) {
-            return Status::invalid_argument(
-                "psq5 tensor missing sign or scale ref", __FILE__, __LINE__);
-        }
-        if (tensor.data) {
-            return Status::invalid_argument(
-                "quantized tensor must not carry data ref", __FILE__, __LINE__);
-        }
-        if (!tensor.layout.empty() && tensor.layout != kPsq5LayoutName) {
-            return Status::invalid_argument("psq5 layout mismatch", __FILE__, __LINE__);
-        }
-        if (tensor.codes->dtype != "U8" || tensor.metadata1->dtype != "U8" ||
-            tensor.metadata2->dtype != "U8") {
-            return Status::invalid_argument("psq5 streams must all be U8", __FILE__, __LINE__);
-        }
-        if (tensor.k_padded < logical_k || (tensor.k_padded % 32u) != 0) {
-            return Status::invalid_argument("quantized tensor k_padded invalid", __FILE__, __LINE__);
-        }
-        d.group_size = 32u;
-        d.block_size = 32u;
-        d.storage_type = StorageDType::U8;
-        d.scale_type = StorageDType::U8;
-        d.weight_layout = QuantLayout::BF16_V1;
-        d.scale_layout = QuantLayout::NONE;
-        resolved.spec_id = QuantSpecId::PSQ5_CB28_UE4M4_V1;
-        return resolved;
-    }
-
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 

@@ -158,25 +158,6 @@ Status validate_host_weight_slot(const ::ps::runtime::WeightSlot& s, size_t inde
         }
         return Status::make_ok();
     }
-    if (enc == 6u) {
-        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr ||
-            s.sign == nullptr) {
-            return Status::invalid_argument(
-                ("psq5 weight table slot needs magnitude+sign+scales: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        const uint32_t k_align = 127u;
-        if (s.k_padded < s.cols || (s.k_padded & k_align) != 0u) {
-            return Status::invalid_argument(
-                ("psq5 weight table slot k_padded invalid: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    }
     return Status::invalid_argument(
         ("unsupported weight table encoding: index " + std::to_string(index)).c_str(),
         __FILE__, __LINE__);
@@ -717,7 +698,6 @@ Status upload_host_weight_table(
         host[i].encoding = s.encoding;
         host[i].codes = s.codes;
         host[i].scales = s.scales;
-        host[i].sign = s.sign;
         host[i].storage_scale_stride_bytes = s.storage_scale_stride_bytes;
         host[i].compute_codes = s.compute_codes;
         host[i].compute_scales_bf16 = s.compute_scales_bf16;

@@ -15,8 +15,6 @@ constexpr uint32_t kQuantizedSafetensorsFormatVersion = 4;
 constexpr const char* kQuantizedMetadataFile = "shelf_quantization.json";
 constexpr const char* kFp8EncodingName = "fp8_e4m3_block128_f32";
 constexpr const char* kFp8LayoutName = "fp8_e4m3_row_major_block128_v1";
-constexpr const char* kPsq5EncodingName = "psq5_cb28_ue4m4_w32";
-constexpr const char* kPsq5LayoutName = "psq5_cb28_row_major_w32_v1";
 constexpr const char* kCodesSuffix = ".__shelf_codes";
 constexpr const char* kMetadata1Suffix = ".__shelf_metadata1";
 constexpr const char* kMetadata2Suffix = ".__shelf_metadata2";
@@ -26,7 +24,6 @@ constexpr const char* kMetadata4Suffix = ".__shelf_metadata4";
 enum class QuantizedEncoding : uint8_t {
     Bf16 = 0,
     Fp8 = 5,
-    Psq5 = 6,
 };
 
 struct QuantizedTensorRef {

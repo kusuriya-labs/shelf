@@ -1,7 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/kernels/correctness/standalone/gemm_bf16_correctness.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
-#include <shelf/kernels/optimized/linear/psq5.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/elementwise.h>
@@ -49,7 +48,7 @@ void usage(FILE* f) {
     fprintf(f,
         "shelf-bench gemm [options]\n"
         "\n"
-        "  --dtype bf16|fp8|psq5              (logical weight/compute family, default bf16)\n"
+        "  --dtype bf16|fp8              (logical weight/compute family, default bf16)\n"
         "  --variant correctness|gemm|auto\n"
         "      correctness: production correctness path (default auto)\n"
         "      gemm:        force Big-M GEMM compute kind\n"
@@ -683,183 +682,6 @@ int run_gemm_fp8(Options& o) {
     return rc;
 }
 
-int run_gemm_psq5(Options& o) {
-    std::vector<Shape> shapes;
-    if (o.actual_qwen_shapes) {
-        if (o.model_dir.empty()) {
-            std::fprintf(stderr, "--actual-qwen-shapes requires --model-dir\n");
-            return 2;
-        }
-        auto cfg_res = ps::qwen35::read_qwen35_text_config(o.model_dir);
-        if (!cfg_res.ok()) {
-            std::fprintf(stderr, "read_qwen35_text_config: %s\n", cfg_res.status().message().c_str());
-            return 2;
-        }
-        shapes = build_qwen_shapes(cfg_res.release());
-    } else {
-        shapes.push_back({"custom", o.n, o.k});
-    }
-    if (shapes.empty()) {
-        std::fprintf(stderr, "no shapes to benchmark\n");
-        return 2;
-    }
-    if (hipSetDevice(o.device) != hipSuccess) return 1;
-    hipStream_t stream = nullptr;
-    if (hipStreamCreate(&stream) != hipSuccess) return 1;
-
-    if (!o.out.empty()) {
-        FILE* f = std::fopen(o.out.c_str(), "a");
-        if (f) {
-            if (std::ftell(f) == 0)
-                std::fprintf(f, "dtype,requested_variant,selected_variant,shape_name,rows,n,k,warmup,samples,launches_per_sample,min_us,p50_us,p95_us,mean_us\n");
-            std::fclose(f);
-        }
-    }
-
-    int rc = 0;
-    for (const auto& shape : shapes) {
-        const uint32_t kp = (shape.k + 127u) & ~127u;
-        const uint32_t nb = kp >> 5;
-        const uint32_t n = shape.n;
-        const uint32_t n_tiled = (n + 15u) & ~15u;
-        const size_t tiles = (static_cast<size_t>(n_tiled) + 15u) / 16u;
-        const size_t mag_bytes = tiles * nb * 16u * 16u;
-        const size_t sign_bytes = tiles * nb * 16u * 4u;
-        const size_t scale_bytes = tiles * nb * 16u;
-        uint8_t* d_mag = nullptr;
-        uint8_t* d_sign = nullptr;
-        uint8_t* d_scale = nullptr;
-        if (hipMalloc((void**)&d_mag, mag_bytes) != hipSuccess ||
-            hipMalloc((void**)&d_sign, sign_bytes) != hipSuccess ||
-            hipMalloc((void**)&d_scale, scale_bytes) != hipSuccess) {
-            return 1;
-        }
-        {
-            std::mt19937 rng(o.seed + 33u);
-            std::vector<uint8_t> hm(mag_bytes);
-            for (auto& v : hm) v = static_cast<uint8_t>(rng() & 0xFFu);
-            std::vector<uint8_t> hs(sign_bytes);
-            for (auto& v : hs) v = static_cast<uint8_t>(rng() & 0xFFu);
-            std::vector<uint8_t> hc(scale_bytes);
-            for (auto& v : hc) v = static_cast<uint8_t>(rng() % 0xF0u);
-            if (hipMemcpy(d_mag, hm.data(), hm.size(), hipMemcpyHostToDevice) != hipSuccess ||
-                hipMemcpy(d_sign, hs.data(), hs.size(), hipMemcpyHostToDevice) != hipSuccess ||
-                hipMemcpy(d_scale, hc.data(), hc.size(), hipMemcpyHostToDevice) != hipSuccess) {
-                return 1;
-            }
-        }
-        for (uint32_t rows : o.rows) {
-            ps::bf16_t* d_input = nullptr;
-            ps::bf16_t* d_output = nullptr;
-            uint8_t* d_acodes = nullptr;
-            float* d_ascales = nullptr;
-            const size_t acodes_bytes = static_cast<size_t>((rows + 15u) / 16u) * kp * 16u;
-            const uint32_t act_groups = (kp + 127u) / 128u;
-            const size_t act_scale_stride =
-                ((static_cast<size_t>(act_groups) * 4u) + 15u) & ~15u;
-            const size_t ascales_bytes = static_cast<size_t>(rows) * act_scale_stride;
-            bool ok = gen_bf16_input(rows, shape.k, o.seed + 7777u, &d_input);
-            ok = ok && hipMalloc((void**)&d_acodes, acodes_bytes) == hipSuccess;
-            ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
-            ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
-            if (!ok) { rc = 1; break; }
-            hipError_t af = ps::kernel::launch_activation_quantize_e4m3(
-                d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
-                static_cast<uint32_t>(act_scale_stride), stream);
-            if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
-            const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
-            const auto psq5_sel = ps::execution::select_psq5_gemm_config(
-                ps::execution::Fp8GemmSelectorInput{rows, n, shape.k, kp});
-            ps::kernel::Psq5GemmConfig psq5_cfg =
-                psq5_sel ? *psq5_sel : ps::kernel::Psq5GemmConfig{ps::kernel::Psq5GemmConfigId::RowBlock1};
-            static const char* psq5_force = std::getenv("SHELF_PSQ5_GEMM_CONFIG");
-            if (psq5_force != nullptr && psq5_force[0] != '\0') {
-                using Id = ps::kernel::Psq5GemmConfigId;
-                if (std::strcmp(psq5_force, "rowblock1") == 0)
-                    psq5_cfg = ps::kernel::Psq5GemmConfig{Id::RowBlock1};
-                else if (std::strcmp(psq5_force, "rowblock2") == 0)
-                    psq5_cfg = ps::kernel::Psq5GemmConfig{Id::RowBlock2};
-                else if (std::strcmp(psq5_force, "rowblock4") == 0)
-                    psq5_cfg = ps::kernel::Psq5GemmConfig{Id::RowBlock4};
-                else if (std::strcmp(psq5_force, "rowblock8") == 0)
-                    psq5_cfg = ps::kernel::Psq5GemmConfig{Id::RowBlock8};
-                else if (std::strcmp(psq5_force, "prefill2d") == 0)
-                    psq5_cfg = ps::kernel::Psq5GemmConfig{Id::Prefill2D};
-            }
-            auto psq5_cfg_name = [](ps::kernel::Psq5GemmConfigId id) -> const char* {
-                switch (id) {
-                case ps::kernel::Psq5GemmConfigId::RowBlock1: return "rowblock1";
-                case ps::kernel::Psq5GemmConfigId::RowBlock2: return "rowblock2";
-                case ps::kernel::Psq5GemmConfigId::RowBlock4: return "rowblock4";
-                case ps::kernel::Psq5GemmConfigId::RowBlock8: return "rowblock8";
-                case ps::kernel::Psq5GemmConfigId::Prefill2D: return "prefill2d";
-                }
-                return "unknown";
-            };
-            auto launch_one = [&]() -> hipError_t {
-                return ps::kernel::launch_gemm_psq5_w8a8_wmma_auto(
-                    psq5_cfg, d_mag, d_sign, d_scale, a8, d_ascales, d_output,
-                    ps::kernel::Psq5GemmOutputDType::BF16, rows, n, kp,
-                    static_cast<uint32_t>(nb) * 16u, kp,
-                    static_cast<uint32_t>(act_scale_stride), n, stream);
-            };
-            for (int i = 0; i < o.warmup; ++i)
-                if (launch_one() != hipSuccess) { rc = 1; break; }
-            if (rc) break;
-            if (hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
-            hipEvent_t ev0 = nullptr, ev1 = nullptr;
-            if (hipEventCreate(&ev0) != hipSuccess || hipEventCreate(&ev1) != hipSuccess) { rc = 1; break; }
-            std::vector<double> per_launch_us;
-            per_launch_us.reserve(o.samples);
-            for (int s = 0; s < o.samples; ++s) {
-                if (hipEventRecord(ev0, stream) != hipSuccess) { rc = 1; break; }
-                for (int l = 0; l < o.launches; ++l)
-                    if (launch_one() != hipSuccess) { rc = 1; break; }
-                if (rc) break;
-                if (hipEventRecord(ev1, stream) != hipSuccess) { rc = 1; break; }
-                if (hipEventSynchronize(ev1) != hipSuccess) { rc = 1; break; }
-                float ms = 0.0f;
-                if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) { rc = 1; break; }
-                per_launch_us.push_back(ms * 1000.0 / (double)o.launches);
-            }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
-            ps::gpu::discard_cleanup_result(hipFree(d_input));
-            ps::gpu::discard_cleanup_result(hipFree(d_acodes));
-            ps::gpu::discard_cleanup_result(hipFree(d_ascales));
-            ps::gpu::discard_cleanup_result(hipFree(d_output));
-            if (rc) break;
-            if (!per_launch_us.empty()) {
-                const double mn = percentile(per_launch_us, 0.0);
-                const double p50 = percentile(per_launch_us, 0.5);
-                const double p95 = percentile(per_launch_us, 0.95);
-                double mean = 0.0;
-                for (double v : per_launch_us) mean += v;
-                mean /= (double)per_launch_us.size();
-                std::printf("psq5 %-12s rows=%-4u n=%-6u k=%-6u requested=%s selected=gemm(%s) min=%.3f p50=%.3f p95=%.3f mean=%.3f us\n",
-                            shape.name.c_str(), rows, shape.n, shape.k,
-                            o.variant.c_str(), psq5_cfg_name(psq5_cfg.id),
-                            mn, p50, p95, mean);
-                if (!o.out.empty()) {
-                    FILE* f = std::fopen(o.out.c_str(), "a");
-                    if (f) {
-                        std::fprintf(f, "psq5,%s,gemm,%s,%u,%u,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
-                                     o.variant.c_str(), shape.name.c_str(),
-                                     rows, shape.n, shape.k,
-                                     o.warmup, o.samples, o.launches, mn, p50, p95, mean);
-                        std::fclose(f);
-                    }
-                }
-            }
-        }
-        ps::gpu::discard_cleanup_result(hipFree(d_mag));
-        ps::gpu::discard_cleanup_result(hipFree(d_sign));
-        ps::gpu::discard_cleanup_result(hipFree(d_scale));
-        if (rc) break;
-    }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    return rc;
-}
 
 int run_gemm(int argc, char** argv) {
     Options o;
@@ -896,8 +718,8 @@ int run_gemm(int argc, char** argv) {
         fprintf(stderr, "bad --warmup/--samples/--launches\n");
         return 2;
     }
-    if (o.dtype != "bf16" && o.dtype != "fp8" && o.dtype != "psq5") {
-        fprintf(stderr, "valid --dtype: bf16|fp8|psq5 (got %s)\n", o.dtype.c_str());
+    if (o.dtype != "bf16" && o.dtype != "fp8") {
+        fprintf(stderr, "valid --dtype: bf16|fp8 (got %s)\n", o.dtype.c_str());
         return 2;
     }
     if (o.variant != "correctness" && o.variant != "gemm" && o.variant != "auto") {
@@ -905,6 +727,5 @@ int run_gemm(int argc, char** argv) {
         return 2;
     }
     if (o.dtype == "fp8") return run_gemm_fp8(o);
-    if (o.dtype == "psq5") return run_gemm_psq5(o);
     return run_gemm_bf16(o);
 }

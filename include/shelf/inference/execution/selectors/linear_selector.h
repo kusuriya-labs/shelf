@@ -9,7 +9,6 @@ namespace ps::execution {
 enum class LinearComputeFamily : uint8_t {
     Bf16,
     Fp8W8A8,
-    Psq5W8A8,
 };
 
 struct Bf16GemmSelectorInput {
@@ -41,8 +40,5 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input);
 
 std::optional<ps::kernel::Fp8GemmConfig>
 select_fp8_gemm_config(const Fp8GemmSelectorInput& input);
-
-std::optional<ps::kernel::Psq5GemmConfig>
-select_psq5_gemm_config(const Fp8GemmSelectorInput& input);
 
 }  // namespace ps::execution

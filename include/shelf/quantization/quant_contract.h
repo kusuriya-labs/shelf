@@ -14,14 +14,12 @@ namespace ps::quantization {
 enum class QuantKernelKind : uint8_t {
     LinearBf16,
     LinearFp8,
-    LinearPsq5,
 };
 
 inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel) {
     switch (kernel) {
         case QuantKernelKind::LinearBf16: return manifest::QuantizedEncoding::Bf16;
         case QuantKernelKind::LinearFp8: return manifest::QuantizedEncoding::Fp8;
-        case QuantKernelKind::LinearPsq5: return manifest::QuantizedEncoding::Psq5;
     }
     return manifest::QuantizedEncoding::Bf16;
 }
@@ -30,7 +28,6 @@ inline const char* canonical_layout_name(manifest::QuantizedEncoding enc) {
     switch (enc) {
         case manifest::QuantizedEncoding::Bf16: return "";
         case manifest::QuantizedEncoding::Fp8: return manifest::kFp8LayoutName;
-        case manifest::QuantizedEncoding::Psq5: return manifest::kPsq5LayoutName;
     }
     return "";
 }
@@ -212,8 +209,6 @@ inline bool weight_block_supported(
     switch (enc) {
         case manifest::QuantizedEncoding::Fp8:
             return block.k == kFp8ScaleBlockK || block.k == kFp8ScaleBlockK / 2u;
-        case manifest::QuantizedEncoding::Psq5:
-            return block.k == 32u;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }

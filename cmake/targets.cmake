@@ -86,7 +86,6 @@ shelf_set_hip_archs(shelf_kernels_correctness)
 set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
-    src/shelf/kernels/optimized/linear/psq5.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
     src/shelf/kernels/optimized/attention/rope.hip
@@ -316,7 +315,6 @@ target_compile_options(shelf_quant_format PRIVATE -Wall -Wextra -Wpedantic -Werr
 # Quantized bundle I/O (bundle reader / HF adapter) over the manifest contract.
 add_library(shelf_quant_bundle STATIC
     src/shelf/quantization/bundle/hf_manifest.cpp
-    src/shelf/quantization/bundle/psq5_manifest.cpp
     src/shelf/quantization/bundle/quantized_model_reader.cpp
 )
 target_compile_features(shelf_quant_bundle PRIVATE cxx_std_20)
@@ -332,12 +330,10 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/codec/ue4m3.cpp
     src/shelf/quantization/fp8/fp8.cpp
     src/shelf/quantization/fp8/fp8_native.cpp
-    src/shelf/quantization/psq5/psq5.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp
     src/shelf/quantization/fp8/fp8_native.cpp
-    src/shelf/quantization/psq5/psq5.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_compile_features(shelf_quant_reference PRIVATE cxx_std_20)
 target_include_directories(shelf_quant_reference PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

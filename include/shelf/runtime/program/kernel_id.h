@@ -26,7 +26,6 @@ enum class KernelId : uint32_t {
     ACTIVATION_QUANTIZE_W4A8 = 21,
     CONCAT = 24,
     LINEAR_FP8 = 25,
-    LINEAR_PSQ5 = 26,
     VERIFY_ACCEPT = 27,
     COUNT = 28,
 };
@@ -58,7 +57,6 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::ACTIVATION_QUANTIZE_FP8: return "ACTIVATION_QUANTIZE_FP8";
         case KernelId::ACTIVATION_QUANTIZE_W4A8: return "ACTIVATION_QUANTIZE_W4A8";
         case KernelId::LINEAR_FP8: return "LINEAR_FP8";
-        case KernelId::LINEAR_PSQ5: return "LINEAR_PSQ5";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
         default: return "UNKNOWN";

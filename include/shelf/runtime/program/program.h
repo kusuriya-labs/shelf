@@ -28,7 +28,6 @@ struct WeightSlot {
     uint8_t compute_spec = 0;
     const void* codes = nullptr;
     const void* scales = nullptr;
-    const void* sign = nullptr;
     uint32_t storage_scale_stride_bytes = 0;
     const void* compute_codes = nullptr;
     const void* compute_scales_bf16 = nullptr;

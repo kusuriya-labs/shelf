@@ -108,15 +108,6 @@ Result<MatrixWeight> load_bf16_matrix_axis_slice(
     gpu::GpuArena& arena,
     hipStream_t stream);
 
-Result<MatrixWeight> load_quantized_psq5_matrix_axis_slice(
-    const quantization::bundle::QuantizedModelReader& reader,
-    const std::string& name,
-    std::uint64_t row_begin,
-    std::uint64_t row_count,
-    gpu::GpuArena& arena,
-    hipStream_t stream,
-    const WeightLoadOptions& options = {});
-
 Result<MatrixWeight> load_fp8_matrix_axis_slice(
     const SafetensorsCollection& collection,
     const std::string& codes_name,

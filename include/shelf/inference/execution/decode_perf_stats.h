@@ -88,7 +88,7 @@ void semantic_timing_finish(hipStream_t stream, uint32_t seq, uint32_t kernel_id
                             uint32_t path, uint32_t logical_consumed);
 void semantic_timing_end(hipStream_t stream, const char* csv_path);
 
-enum class LinearFamilyRef : uint32_t { Fp8, Bf16, Psq5 };
+enum class LinearFamilyRef : uint32_t { Fp8, Bf16 };
 
 inline void linear_record_hit(LinearFamilyRef fam, uint32_t rows) {
     if (!perf_stats_enabled())

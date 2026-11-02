@@ -31,15 +31,6 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
             contract.activation = quantization::kE4m3ActivationQuantSpec;
             contract.activation_k_alignment = 128u;
             return contract;
-        case QuantizedEncoding::Psq5:
-            if (compute_spec != static_cast<uint8_t>(ComputeSpecId::PSQ5_W8A8_F32_BF16))
-                return Status::invalid_argument(
-                    "psq5 linear weight requires psq5 compute spec", __FILE__, __LINE__);
-            contract.linear_kernel = KernelId::LINEAR_PSQ5;
-            contract.requires_activation_quant = true;
-            contract.activation = quantization::kE4m3ActivationQuantSpec;
-            contract.activation_k_alignment = 128u;
-            return contract;
         case QuantizedEncoding::Bf16:
             break;
     }

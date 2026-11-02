@@ -10,7 +10,6 @@ namespace ps::weights {
 enum class MatrixEncoding : uint8_t {
     Bf16 = 0,
     Fp8 = 5,
-    Psq5 = 6,
 };
 
 struct MatrixWeight {
@@ -23,7 +22,6 @@ struct MatrixWeight {
     gpu::Tensor scales;
     gpu::Tensor compute_codes;
     gpu::Tensor compute_scales_bf16;
-    gpu::Tensor sign;
     uint32_t rows = 0;
     uint32_t cols = 0;
     uint32_t k_padded = 0;
@@ -31,7 +29,6 @@ struct MatrixWeight {
     uint32_t codes_row_stride_bytes = 0;
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;
-    uint32_t sign_row_stride_bytes = 0;
     bool preshuffled = false;
     std::optional<TensorPartitionDesc> partition;
 };
@@ -40,7 +37,6 @@ inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noex
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::QuantSpecId::BF16_V1;
         case MatrixEncoding::Fp8: return quantization::QuantSpecId::FP8_E4M3_F32_V1;
-        case MatrixEncoding::Psq5: return quantization::QuantSpecId::PSQ5_CB28_UE4M4_V1;
     }
     return quantization::QuantSpecId::BF16_V1;
 }
@@ -49,7 +45,6 @@ inline quantization::ComputeSpecId encoding_to_compute_spec(MatrixEncoding enc) 
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::ComputeSpecId::BF16_F32_BF16;
         case MatrixEncoding::Fp8: return quantization::ComputeSpecId::FP8_W8A8_F32_BF16;
-        case MatrixEncoding::Psq5: return quantization::ComputeSpecId::PSQ5_W8A8_F32_BF16;
     }
     return quantization::ComputeSpecId::BF16_F32_BF16;
 }
@@ -63,7 +58,6 @@ inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexc
     switch (id) {
         case quantization::QuantSpecId::BF16_V1: return MatrixEncoding::Bf16;
         case quantization::QuantSpecId::FP8_E4M3_F32_V1: return MatrixEncoding::Fp8;
-        case quantization::QuantSpecId::PSQ5_CB28_UE4M4_V1: return MatrixEncoding::Psq5;
         default: break;
     }
     return MatrixEncoding::Bf16;

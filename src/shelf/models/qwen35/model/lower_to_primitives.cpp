@@ -340,7 +340,6 @@ RT::WeightSlot make_weight_slot(const MW& w) {
         s.bytes = 0;
         s.codes = w.codes.ndim() != 0 ? w.codes.data<void>() : nullptr;
         s.scales = w.scales.ndim() != 0 ? w.scales.data<void>() : nullptr;
-        s.sign = w.sign.ndim() != 0 ? w.sign.data<void>() : nullptr;
         s.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
         s.compute_codes = w.compute_codes.ndim() != 0 ? w.compute_codes.data<void>() : nullptr;
         s.compute_scales_bf16 =

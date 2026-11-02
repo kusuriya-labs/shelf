@@ -48,13 +48,11 @@ enum class QuantFormatId : uint8_t {
     None = 0,
     Bf16 = 1,
     Fp8 = 4,
-    Psq5 = 5,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
 static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
 static_assert(static_cast<uint8_t>(QuantFormatId::Fp8) == 4);
-static_assert(static_cast<uint8_t>(QuantFormatId::Psq5) == 5);
 
 inline constexpr QuantFormatDesc kBf16FormatDesc = {
     16, 1, 32,
@@ -78,25 +76,10 @@ inline constexpr QuantFormatDesc kFp8FormatDesc = {
     },
 };
 
-// PSQ5-CB28 stores a 4-bit codebook index per weight (16 bytes per 32-K block),
-// a 1-bit sign per weight (4 bytes per block), and one ue4m4 scale per block.
-// The CB28 magnitudes map onto FP8 E4M3 bit patterns, so the scale folds the
-// 512x relation and the kernel decodes ue4m4 to F32 directly.
-inline constexpr QuantFormatDesc kPsq5FormatDesc = {
-    32, 1, 16,
-    {
-        {4, MetaCountMode::PerBlock, MetaStorage::U8},
-        {1, MetaCountMode::PerBlock, MetaStorage::U8},
-        {0, MetaCountMode::None, MetaStorage::U8},
-        {0, MetaCountMode::None, MetaStorage::U8},
-    },
-};
-
 inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
     switch (id) {
         case QuantFormatId::Bf16: return &kBf16FormatDesc;
         case QuantFormatId::Fp8: return &kFp8FormatDesc;
-        case QuantFormatId::Psq5: return &kPsq5FormatDesc;
         default: return nullptr;
     }
 }

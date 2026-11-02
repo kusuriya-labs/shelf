@@ -8,7 +8,6 @@ std::string quantized_encoding_name(QuantizedEncoding enc) {
     switch (enc) {
         case QuantizedEncoding::Bf16: return "bf16";
         case QuantizedEncoding::Fp8: return kFp8EncodingName;
-        case QuantizedEncoding::Psq5: return kPsq5EncodingName;
     }
     return "unknown";
 }
@@ -16,7 +15,6 @@ std::string quantized_encoding_name(QuantizedEncoding enc) {
 Result<QuantizedEncoding> parse_quantized_encoding(const std::string& name) {
     if (name == "bf16") return QuantizedEncoding::Bf16;
     if (name == kFp8EncodingName) return QuantizedEncoding::Fp8;
-    if (name == kPsq5EncodingName) return QuantizedEncoding::Psq5;
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 
@@ -24,7 +22,6 @@ ps::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc) {
     switch (enc) {
         case QuantizedEncoding::Bf16: return ps::quantization::QuantFormatId::Bf16;
         case QuantizedEncoding::Fp8: return ps::quantization::QuantFormatId::Fp8;
-        case QuantizedEncoding::Psq5: return ps::quantization::QuantFormatId::Psq5;
     }
     return ps::quantization::QuantFormatId::None;
 }
