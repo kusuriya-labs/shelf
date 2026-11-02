@@ -23,11 +23,12 @@ void check(bool cond, const char* msg) {
 }
 
 DeviceSamplingParams mk(uint8_t mode, float temperature, float top_p, uint32_t top_k,
-                        uint64_t seed, uint64_t index) {
+                        uint64_t seed, uint64_t index, float min_p = 0.0f) {
     DeviceSamplingParams p{};
     p.mode = mode;
     p.temperature = temperature;
     p.top_p = top_p;
+    p.min_p = min_p;
     p.top_k = top_k;
     p.seed = seed;
     p.sample_index = index;
@@ -99,10 +100,11 @@ bool run_batch(const std::vector<float>& logits, uint32_t vocab, uint32_t output
 
 bool sample_many(uint32_t vocab, const std::vector<float>& logits, float temperature,
                  float top_p, uint32_t top_k, uint64_t seed, uint32_t count,
-                 std::vector<int32_t>& tokens, std::vector<uint32_t>* attempts = nullptr) {
+                 std::vector<int32_t>& tokens, std::vector<uint32_t>* attempts = nullptr,
+                 float min_p = 0.0f) {
     std::vector<DeviceSamplingParams> params(count);
     for (uint32_t i = 0; i < count; ++i) {
-        params[i] = mk(2u, temperature, top_p, top_k, seed, i);
+        params[i] = mk(2u, temperature, top_p, top_k, seed, i, min_p);
     }
     std::vector<float> rows;
     rows.reserve(static_cast<size_t>(count) * vocab);
@@ -366,6 +368,29 @@ int main() {
         avg /= attempts.empty() ? 1.0 : static_cast<double>(attempts.size());
         std::printf("    average attempts = %.3f\n", avg);
         check(avg > 0.9 && avg < 2.0, "average attempts bounded");
+    }
+
+    {
+        std::printf("H2. min-p membership\n");
+        const uint32_t count = 512u;
+        std::vector<int32_t> tokens;
+        bool ok = sample_many(4u, four, 1.0f, 1.0f, 0u, 13u, count, tokens, nullptr, 0.5f);
+        bool only_max = true;
+        for (int32_t t : tokens)
+            if (t != 0) only_max = false;
+        check(ok && only_max, "min_p=0.5 -> argmax only");
+
+        ok = sample_many(4u, four, 1.0f, 1.0f, 0u, 13u, count, tokens, nullptr, 0.1f);
+        bool within_three = true;
+        for (int32_t t : tokens)
+            if (t < 0 || t > 2) within_three = false;
+        check(ok && within_three, "min_p=0.1 keeps weights >= 0.1");
+
+        ok = sample_many(4u, four, 1.0f, 1.0f, 2u, 13u, count, tokens, nullptr, 0.1f);
+        bool topk_and_minp = true;
+        for (int32_t t : tokens)
+            if (t != 0 && t != 1) topk_and_minp = false;
+        check(ok && topk_and_minp, "min_p intersects top_k");
     }
 
     {

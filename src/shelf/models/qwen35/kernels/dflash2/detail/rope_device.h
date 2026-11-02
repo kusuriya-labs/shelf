@@ -21,11 +21,12 @@ __device__ __forceinline__ void dflash2_rope_pair_body(
     const bf16* src, bf16* dst, uint32_t pair, uint32_t head_dim, uint32_t position,
     float theta) {
     const uint32_t half = head_dim / 2u;
-    const float exponent = -2.0f * static_cast<float>(pair) / static_cast<float>(head_dim);
-    const float inv_freq = powf(theta, exponent);
-    const float angle = static_cast<float>(position) * inv_freq;
-    const float c = dflash2_round_to_bf16_f32(cosf(angle));
-    const float s = dflash2_round_to_bf16_f32(sinf(angle));
+    const double exponent =
+        -2.0 * static_cast<double>(pair) / static_cast<double>(head_dim);
+    const double inv_freq = ::pow(static_cast<double>(theta), exponent);
+    const double angle = static_cast<double>(position) * inv_freq;
+    const float c = dflash2_round_to_bf16_f32(static_cast<float>(::cos(angle)));
+    const float s = dflash2_round_to_bf16_f32(static_cast<float>(::sin(angle)));
 
     const float x1 = __bfloat162float(src[pair]);
     const float x2 = __bfloat162float(src[pair + half]);

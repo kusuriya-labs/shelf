@@ -53,6 +53,7 @@ struct SamplingRowParams {
     uint32_t mode = kSamplingNoneMode;
     float temperature = 0.0f;
     float top_p = 1.0f;
+    float min_p = 0.0f;
     uint32_t top_k = 0u;
     uint64_t seed = 0u;
     uint64_t sample_index = 0u;
@@ -70,6 +71,7 @@ __host__ __device__ __forceinline__ SamplingRowParams sampling_row_params(
     r.mode = p.mode;
     r.temperature = p.temperature;
     r.top_p = p.top_p;
+    r.min_p = p.min_p;
     r.top_k = p.top_k;
     r.seed = p.seed;
     r.sample_index = p.sample_index;
@@ -95,6 +97,10 @@ constexpr float kNegInf = -3.4e38f;
 __device__ __forceinline__ bool argmax_better(
     float cv, uint32_t ct, float bv, uint32_t bt) {
     return cv > bv || (cv == bv && ct < bt);
+}
+
+__device__ __forceinline__ bool min_p_membership(float weight, float min_p) {
+    return min_p <= 0.0f || weight >= min_p;
 }
 
 __device__ __forceinline__ void block_argmax(
@@ -256,6 +262,8 @@ __device__ __forceinline__ void sampling_sample_row(
             continue;
         }
         const float candidate_logit = logits[candidate];
+        const float candidate_weight =
+            ::expf((candidate_logit - lmax) / temperature);
 
         uint32_t better_count = 0u;
         double better_mass = 0.0;
@@ -275,7 +283,8 @@ __device__ __forceinline__ void sampling_sample_row(
         const bool top_k_ok = (params.top_k == 0u) || (better_count < params.top_k);
         const bool top_p_ok =
             (params.top_p >= 1.0f) || (better_mass < top_p_mass);
-        if (top_k_ok && top_p_ok) {
+        const bool min_p_ok = min_p_membership(candidate_weight, params.min_p);
+        if (top_k_ok && top_p_ok && min_p_ok) {
             result = static_cast<int32_t>(candidate);
             break;
         }
@@ -376,16 +385,19 @@ __device__ __forceinline__ void sampling_topk_active_row(
     }
 
     const bool top_p_active = params.top_p < 1.0f;
+    const bool min_p_active = params.min_p > 0.0f;
     const double top_p_mass = top_p_active ? static_cast<double>(params.top_p) * z : 0.0;
     if (threadIdx.x == 0u) {
         double prefix = 0.0;
         uint32_t active = 0u;
         for (uint32_t i = 0u; i < count; ++i) {
-            const bool take = !top_p_active || prefix < top_p_mass;
+            const float weight = ::expf((topk.logits[i] - lmax) / temperature);
+            const bool take =
+                (!top_p_active || prefix < top_p_mass) &&
+                (!min_p_active || min_p_membership(weight, params.min_p));
             s_active[i] = take ? 1u : 0u;
             if (take) ++active;
-            prefix += static_cast<double>(
-                ::expf((topk.logits[i] - lmax) / temperature));
+            prefix += static_cast<double>(weight);
         }
         if (active_count_out != nullptr) *active_count_out = active;
     }

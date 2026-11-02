@@ -1,6 +1,6 @@
 # shelf-compute
 
-単一request推論アプリ。greedy / temperature / top-k / top-p デコード。BF16 modelと量子化model
+単一request推論アプリ。greedy / temperature / top-k / top-p / min-p デコード。BF16 modelと量子化model
 （`shelf_quantization.json` による自動検出）の両方に対応。
 
 ## options
@@ -27,6 +27,7 @@
 | `--tp-combine-f32 0\|1` | keep row-parallel combine output in f32 (default 0 = bf16 round as today; tp only) |
 | `--temperature F` | sampling temperature (default 0 = greedy) |
 | `--top-p F` | nucleus sampling threshold in (0, 1] (default 1) |
+| `--min-p F` | min-p threshold in [0, 1] (default 0 = disabled) |
 | `--top-k N` | keep the N highest logits (default 0 = disabled) |
 | `--seed N` | sampling seed (default 0) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
@@ -111,7 +112,7 @@ DFlash2 経路でも受け付ける。
 - 起動時に `ROPE profile:` 行を stderr へ出し、type / factor / theta / rotary_dim / 元の長さ / attention factor / 決定元（cli か config）を表示する。
 - KV 容量計画は factor と独立である。必要ページ数は `--max-seq-len` と `--kv-cache-capacity-tokens` だけで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。
-- speculative decoding（`--dflash2-model-dir`）との併用は未対応で、2x/4x 指定時は起動時に拒否する。
+- speculative decoding（`--dflash2-model-dir`）と併用できる。Drafter は target の factor を継承せず、自身の checkpoint の RoPE（通常は `default`）を使う。起動時に `DFLASH2 rope:` 行を stderr へ出す。
 - 2x の全長（524,288）は `--kv-cache-dtype fp8 --tp 2` で容量が成立する（FP8 KV の品質特性は別途評価が必要）。
 
 ### prefix cache
@@ -196,14 +197,15 @@ vocab の host sort も行わない。
 
 | 指定 | 挙動 |
 | --- | --- |
-| `--temperature 0` | deterministic greedy。`--top-p` / `--top-k` は無視 |
+| `--temperature 0` | deterministic greedy。`--top-p` / `--min-p` / `--top-k` は無視 |
 | `--temperature 0.7 --top-p 1` | temperature softmax からの categorical sample |
 | `--temperature 0.7 --top-p 0.9` | nucleus sampling |
-| `--temperature 0.7 --top-p 0.9 --top-k 50` | top-k と nucleus の積集合 |
+| `--temperature 0.7 --min-p 0.05` | 最大確率の 5% 未満を除外 |
+| `--temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50` | 3 条件の積集合 |
 | `--temperature 0.7 --top-p 1 --top-k 1` | 最上位 token のみ |
 
-`--top-k` は `0` で無効。`--top-k` を小さくする、または `--top-p` を小さくすると
-rejection の試行回数が増える。
+`--top-k` は `0` で無効、`--min-p` は `0` で無効。`--top-k` / `--top-p` /
+`--min-p` を厳しくすると rejection の試行回数が増える。
 
 同じ prompt・同じ `--seed`・同じ sampling 設定なら `GENERATED_IDS` は一致する。
 batch 構成には依存しない。
@@ -213,7 +215,7 @@ batch 構成には依存しない。
   --model-dir models/Qwen3.8-27B-FP8 \
   --input-ids-file prompt_ids.txt \
   --max-new-tokens 32 \
-  --temperature 0.7 --top-p 0.9 --top-k 50 --seed 42
+  --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42
 ```
 
 ## 出力契約

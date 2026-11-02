@@ -306,9 +306,12 @@ RMSNorm は公式の `weight * norm.to(bf16)` と同じく、norm を bf16 に�
 掛ける（`launch_dflash2_rmsnorm_direct_bf16`）。公式 forward の中間 tensor はすべて bf16、
 attention_mask は bool である。
 
-RoPE は **f32 の `inv_freq`** から `powf` で計算する。`Qwen3RotaryEmbedding` の `inv_freq`
-は checkpoint に含まれない非 persistent buffer であり、model 全体を bf16 化すると丸まる。
-角度は `position * inv_freq` なので、量子化誤差は position 倍で増幅する。
+RoPE の角度は `double(position) * inv_freq` で計算し、`inv_freq` も double の `pow` で求める。
+`float(position)` では 262,144 以上の位置で角度の量子化誤差が無視できなくなるためである。
+cos/sin は double で求めてから f32 へ丸め、以後の積と和は従来どおり bf16 に丸める。
+Drafter の RoPE は target の `--rope-factor` に追従せず、checkpoint の `rope_theta` と
+`rope_type=default` だけを使う。target が YaRN でも speculative verify は target の logits で
+判定するため、drafter の位置外挿が弱くても生成結果の正しさは変わらない。
 
 ### primitive dispatch
 

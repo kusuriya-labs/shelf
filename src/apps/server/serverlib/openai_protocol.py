@@ -63,6 +63,7 @@ class ChatRequest:
     max_new_tokens: int
     temperature: float
     top_p: float
+    min_p: float
     top_k: int
     seed: int
     include_usage: bool = False
@@ -361,6 +362,7 @@ def parse_chat_request(body: Any,
     top_p = _number(body, "top_p", 1.0, low=0.0, high=1.0)
     if top_p == 0.0:
         raise OpenAIProtocolError("top_p must be > 0", param="top_p")
+    min_p = _number(body, "min_p", 0.0, low=0.0, high=1.0)
     top_k = _integer(body, "top_k", 0, low=0)
     seed = _integer(body, "seed", 0)
     include_usage = _stream_options_include_usage(body)
@@ -383,6 +385,7 @@ def parse_chat_request(body: Any,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
+        min_p=min_p,
         top_k=top_k,
         seed=seed,
         include_usage=include_usage,

@@ -22,11 +22,12 @@ void check(bool cond, const char* msg) {
 }
 
 DeviceSamplingParams mk(uint8_t mode, float temperature, float top_p, uint32_t top_k,
-                        uint64_t seed, uint64_t index) {
+                        uint64_t seed, uint64_t index, float min_p = 0.0f) {
     DeviceSamplingParams p{};
     p.mode = mode;
     p.temperature = temperature;
     p.top_p = top_p;
+    p.min_p = min_p;
     p.top_k = top_k;
     p.seed = seed;
     p.sample_index = index;
@@ -180,10 +181,10 @@ bool run_reference(const std::vector<float>& logits, uint32_t vocab, uint32_t ou
 
 bool sample_topk(uint32_t vocab, const std::vector<float>& logits, float temperature,
                  float top_p, uint32_t top_k, uint64_t seed, uint32_t count,
-                 TopKResult& out) {
+                 TopKResult& out, float min_p = 0.0f) {
     std::vector<DeviceSamplingParams> params(count);
     for (uint32_t i = 0; i < count; ++i)
-        params[i] = mk(2u, temperature, top_p, top_k, seed, i);
+        params[i] = mk(2u, temperature, top_p, top_k, seed, i, min_p);
     std::vector<float> rows;
     rows.reserve(static_cast<std::size_t>(count) * vocab);
     for (uint32_t i = 0; i < count; ++i)
@@ -193,10 +194,10 @@ bool sample_topk(uint32_t vocab, const std::vector<float>& logits, float tempera
 
 bool sample_topk_reference(uint32_t vocab, const std::vector<float>& logits,
                            float temperature, float top_p, uint32_t top_k, uint64_t seed,
-                           uint32_t count, TopKResult& out) {
+                           uint32_t count, TopKResult& out, float min_p = 0.0f) {
     std::vector<DeviceSamplingParams> params(count);
     for (uint32_t i = 0; i < count; ++i)
-        params[i] = mk(2u, temperature, top_p, top_k, seed, i);
+        params[i] = mk(2u, temperature, top_p, top_k, seed, i, min_p);
     std::vector<float> rows;
     rows.reserve(static_cast<std::size_t>(count) * vocab);
     for (uint32_t i = 0; i < count; ++i)
@@ -225,9 +226,9 @@ std::vector<int32_t> cpu_topk_order(const std::vector<float>& row, uint32_t k) {
 }
 
 std::vector<int32_t> cpu_active_set(const std::vector<float>& row, float temperature,
-                                    float top_p, uint32_t top_k) {
+                                    float top_p, uint32_t top_k, float min_p = 0.0f) {
     const std::vector<int32_t> order = cpu_topk_order(row, top_k);
-    if (top_p >= 1.0f) return order;
+    if (top_p >= 1.0f && min_p <= 0.0f) return order;
     float lmax = -std::numeric_limits<float>::infinity();
     for (float v : row)
         if (std::isfinite(v) && v > lmax) lmax = v;
@@ -237,9 +238,13 @@ std::vector<int32_t> cpu_active_set(const std::vector<float>& row, float tempera
     double prefix = 0.0;
     const double threshold = static_cast<double>(top_p) * z;
     for (int32_t t : order) {
-        if (prefix < threshold) active.push_back(t);
-        prefix += static_cast<double>(
-            std::exp((row[static_cast<size_t>(t)] - lmax) / temperature));
+        const double weight =
+            std::exp((row[static_cast<size_t>(t)] - lmax) / temperature);
+        if ((top_p >= 1.0f || prefix < threshold) &&
+            (min_p <= 0.0f || weight >= static_cast<double>(min_p))) {
+            active.push_back(t);
+        }
+        prefix += weight;
     }
     return active;
 }
@@ -478,34 +483,40 @@ int main() {
         const std::vector<float> l = prob_logits({0.60f, 0.25f, 0.10f, 0.05f});
         struct Case {
             float top_p;
+            float min_p;
             uint32_t top_k;
         };
-        const Case cases[] = {{0.7f, 2u}, {0.7f, 3u}, {0.9f, 3u}, {1.0f, 2u},
-                              {0.95f, 4u}, {0.5f, 4u}};
+        const Case cases[] = {{0.7f, 0.0f, 2u}, {0.7f, 0.0f, 3u}, {0.9f, 0.0f, 3u},
+                              {1.0f, 0.0f, 2u}, {0.95f, 0.0f, 4u}, {0.5f, 0.0f, 4u},
+                              {1.0f, 0.25f, 4u}, {0.7f, 0.1f, 3u}};
         for (const Case& c : cases) {
             const std::vector<int32_t> want =
-                cpu_active_set(l, 1.0f, c.top_p, c.top_k);
+                cpu_active_set(l, 1.0f, c.top_p, c.top_k, c.min_p);
             std::vector<int32_t> seen;
             TopKResult r;
-            const bool ok = sample_topk(4u, l, 1.0f, c.top_p, c.top_k, 4242u, 8192u, r);
+            const bool ok = sample_topk(4u, l, 1.0f, c.top_p, c.top_k, 4242u, 8192u, r,
+                                        c.min_p);
             for (uint32_t i = 0; i < r.tokens.size(); ++i)
                 if (std::find(seen.begin(), seen.end(), r.tokens[i]) == seen.end())
                     seen.push_back(r.tokens[i]);
             std::sort(seen.begin(), seen.end());
             std::vector<int32_t> want_sorted = want;
             std::sort(want_sorted.begin(), want_sorted.end());
-            char label[80];
+            char label[96];
             std::snprintf(label, sizeof(label),
-                          "top_p=%.2f top_k=%u sampled set equals active set", c.top_p,
-                          c.top_k);
+                          "top_p=%.2f min_p=%.2f top_k=%u sampled set equals active set",
+                          c.top_p, c.min_p, c.top_k);
             check(ok && seen == want_sorted, label);
 
             TopKResult one;
-            const bool ok1 = run_radix(l, 4u, 1u, {mk(2u, 1.0f, c.top_p, c.top_k, 7u, 0u)},
-                                       c.top_k, one, true);
-            char label2[80];
-            std::snprintf(label2, sizeof(label2), "top_p=%.2f top_k=%u active_count=%u",
-                          c.top_p, c.top_k, one.active.empty() ? 0u : one.active[0]);
+            const bool ok1 =
+                run_radix(l, 4u, 1u,
+                          {mk(2u, 1.0f, c.top_p, c.top_k, 7u, 0u, c.min_p)}, c.top_k,
+                          one, true);
+            char label2[96];
+            std::snprintf(label2, sizeof(label2),
+                          "top_p=%.2f min_p=%.2f top_k=%u active_count=%u", c.top_p,
+                          c.min_p, c.top_k, one.active.empty() ? 0u : one.active[0]);
             std::printf("    %s (want %zu)\n", label2, want.size());
             check(ok1 && !one.active.empty() && one.active[0] == want.size(), label2);
         }

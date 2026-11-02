@@ -471,6 +471,7 @@ Result<PendingBatch> submit_co_batch(
             staging[i].sampling.mode = static_cast<uint8_t>(sampling.mode);
             staging[i].sampling.temperature = sampling.temperature;
             staging[i].sampling.top_p = sampling.top_p;
+            staging[i].sampling.min_p = sampling.min_p;
             staging[i].sampling.top_k = sampling.top_k;
             staging[i].sampling.seed = sampling.seed;
             staging[i].sampling.sample_index = sampling.sample_index;

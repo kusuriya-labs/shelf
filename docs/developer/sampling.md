@@ -5,9 +5,8 @@ MTP の sampling とは別物で、target LM の logits から次 token を決�
 
 ## 範囲
 
-- 対象: target logits → greedy / temperature / top-k / top-p → next token
-- 対象外: top-k 以外の truncation（min-p / typical-p）、penalty 系、beam search、
-  DFlash2 CandidateSelector
+- 対象: target logits → greedy / temperature / top-k / top-p / min-p → next token
+- 対象外: typical-p、penalty 系、beam search、DFlash2 CandidateSelector
 - DFlash2 verify は `SamplingConfig` と `sample_index` を `ScheduledRequest` に渡す。
   stochastic の verify は target の sample 結果と draft を比較する sample-and-compare
   で、round ごとに行消費 row 数だけ `sample_index` を進める
@@ -21,6 +20,7 @@ MTP の sampling とは別物で、target LM の logits から次 token を決�
 | --- | --- | --- |
 | `temperature` | `0.0f` | `0` は greedy。`> 0` で stochastic |
 | `top_p` | `1.0f` | nucleus の累積 mass 閾値。`(0, 1]` |
+| `min_p` | `0.0f` | 最大確率に対する相対下限。`[0, 1]`、`0` は無効 |
 | `top_k` | `0` | 上位 k token だけを残す。`0` は無効 |
 | `seed` | `0` | RNG seed |
 
@@ -28,9 +28,10 @@ validation:
 
 - `temperature` は finite かつ `>= 0`
 - `top_p` は finite かつ `> 0` かつ `<= 1`
+- `min_p` は finite かつ `>= 0` かつ `<= 1`
 - `top_k` は任意（`0` が無効。語彙数以上を指定しても `0` と同じ）
 
-`temperature == 0` のとき `top_p` と `top_k` は結果に影響しない。
+`temperature == 0` のとき `top_p` / `min_p` / `top_k` は結果に影響しない。
 
 ## mode 決定
 
@@ -121,6 +122,21 @@ accept する（積集合）。`top_k` だけなら通常の top-k sampling、`t
 **top-k の再正規化はしない。** `top_p` は常に full softmax の `Z` を基準に判定し、
 Top-K 集合内で確率を振り直してから nucleus を適用する HF 式の順序ではない。
 
+## min-p membership
+
+`w_i = exp((l_i - max_logit) / temperature)`、`p_i = w_i / Z`、`p_max = 1 / Z` とすると、
+min-p の条件 `p_i >= min_p * p_max` は `w_i >= min_p` に等しい。`Z` は不要である。
+
+```
+min_p_membership(c) = (min_p == 0) || (w_c >= min_p)
+```
+
+- `min_p = 0` は条件を無効化
+- `min_p = 1` は最大確率の token（同値の tie を含む）だけを残す
+- `top_p` / `top_k` / `min_p` はすべて full softmax 上で定義し、3 条件の積集合を accept する
+- min-p は `top_p` の prefix mass 順序に影響しない。rank 上位から積み上げる `prefix` は
+  min-p で除外された token の mass も含めて計算する
+
 ## active-set top-k path
 
 `top_k > 0` の stochastic row で、全 output row が次の条件を満たす batch は
@@ -139,16 +155,19 @@ correctness backend もこのフラグを見て同じ方式に切り替えるた
 ```
 exact F32 Radix Top-K           (score 降順、同値なら token id 昇順)
     ↓
-full-softmax prefix mass で active set を決定
+top_p prefix mass と min_p membership で active set を決定
     ↓
 active set 上で 1 回だけ Gumbel-Max   (attempt = 0)
 ```
 
-- `top_k` だけのときは `Z` を計算しない。`lmax` は row max の finite 検査と
-  NaN 検査に使い、full vocab の `exp` scan は行わない。
-- `top_k` と `top_p` を両方指定したときは full vocab の `Z` を 1 回だけ計算し、
+- `top_p` を指定しないときは `Z` を計算しない。`lmax` は row max の finite 検査と
+  NaN 検査に使い、full vocab の `exp` scan は行わない。min_p は `w_i` の比較だけで
+  判定できるため `Z` を必要としない。
+- `top_p` を指定したときは full vocab の `Z` を 1 回だけ計算し、
   Top-K 内の prefix が `top_p * Z` 未満の位置までを active set にする。
   prefix が 0 の token は常に active に入る。
+- `min_p` を指定したときは `w_i >= min_p` の token だけを active set に残す。
+  `top_p` との併用時は両方を満たす token だけが active になる。
 - active set の各 token の Gumbel score は
   `(logit - lmax) / temperature + gumbel(RNG(seed, sample_index, 0, token_id))`。
   score が同値なら token id が小さい方を選ぶ。
@@ -189,6 +208,7 @@ accept 確率は accept 集合の mass なので、top-p では `>= top_p`。期
 `<= 1 / top_p` 程度（`top_p = 0.9` で約 1.11）。`top_k` を小さくすると accept 確率は
 top-k 集合の mass まで下がるため、試行回数が増える。`top_k = 50` の random logits は
 これが顕著で、active-set path はこの rejection loop を無くすために使う。
+`min_p` も accept 集合を狭めるため、`min_p` を 1 に近づけると試行回数が増える。
 
 上限は `kMaxSamplingAttempts = 4096`。到達した場合は
 `ProgramStatus::DISPATCH_FAILED` を `error_word` に書き、token は `-1` にする
@@ -223,7 +243,7 @@ stochastic が 0 なら従来の greedy path を使う。
 
 ## Device contract
 
-- `DeviceSamplingParams`（32 byte）が `DeviceRequestDescriptor` に入る
+- `DeviceSamplingParams`（40 byte）が `DeviceRequestDescriptor` に入る
 - `DeviceBatchContext::output_sampling_params` に per-output の sampling params が並ぶ
 - `prepare_batch_descriptor_kernel` が `output_index + j` へ書き、multi-output では
   `sample_index + j` とする

@@ -278,14 +278,14 @@ TP=2 と FP8 KV を使う。
 model / messages / stream
 stream_options（include_usage のみ）
 max_tokens / max_completion_tokens（両方指定で値が異なる場合は reject）
-temperature / top_p / top_k / seed
+temperature / top_p / min_p / top_k / seed
 tools / tool_choice
 reasoning_effort（low / medium / xhigh）
 chat_template_kwargs（enable_thinking / preserve_thinking）
 ```
 
-`top_k` は Shelf extension である。指定がない値の既定は
-`temperature=0`（greedy）/ `top_p=1.0` / `top_k=0` / `seed=0` である。
+`top_k` / `min_p` は Shelf extension である。指定がない値の既定は
+`temperature=0`（greedy）/ `top_p=1.0` / `min_p=0.0` / `top_k=0` / `seed=0` である。
 
 ### reasoning（thinking）
 

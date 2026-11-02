@@ -55,15 +55,6 @@ int main(int argc, char** argv) {
                     rope_profile.original_max_position_embeddings);
             return 1;
         }
-        const bool yarn_active =
-            rope_profile.type == ps::qwen35::EffectiveRopeProfile::Type::Yarn;
-        if (yarn_active && ps::app::compute_dflash_enabled(opt)) {
-            fprintf(stderr,
-                    "static YaRN (--rope-factor %g) does not support speculative decoding "
-                    "yet; drop --dflash2-model-dir\n",
-                    rope_profile.factor);
-            return 1;
-        }
     }
 
     ps::app::Qwen35RuntimeConfig config;
@@ -111,6 +102,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         dflash_config = dflash_config_result.release();
+        fprintf(stderr, "DFLASH2 rope: type=default theta=%g source=checkpoint\n",
+                dflash_config.rope_theta);
         if (opt.dflash2_drafts > dflash_config.max_draft_tokens()) {
             fprintf(stderr, "--dflash2-drafts %lu exceeds block_size-1 %zu\n", opt.dflash2_drafts,
                     dflash_config.max_draft_tokens());

@@ -8,15 +8,14 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 
 ## 1. Gate 5 — Drafter（DFlash2）の長位置対応
 
-- Target が YaRN のとき、Drafter は自身の checkpoint の RoPE（`rope_theta` のみ、`rope_type=default`）に従う。
-  現状 2x/4x 起動時の speculative decoding は**起動時に拒否**しており、Drafter 側の YaRN 対応は未着手。
-- 必要な作業:
-  - Drafter の `rope_parameters` から独立に RoPE プロファイルを解決する（現状は非 `default` を拒否する実装）。
-  - `float(position) * inv_freq` で角度を計算している箇所（`dflash2/detail/rope_device.h`）の
-    高位置精度を評価し、必要なら double へ変更する。
-  - DFlash2 の Ring 位置が長位置で整合することを検証する。
-  - Target 1x/2x/4x との組合せで acceptance rate と tokens/s を測る。
-- 未対応の組合せは「使用不可」と明示し、静かに誤った補助推論をしない。
+- Target YaRN + DFlash2 の併用を許可した。Drafter は target の factor を継承せず、自身の
+  checkpoint の RoPE（`rope_theta`、`rope_type=default`）に従う。
+- `dflash2/detail/rope_device.h` の角度計算を `double(position) * inv_freq` へ変更し、
+  262,144 以上の位置でも cos/sin の精度を保つ。
+- 残作業:
+  - DFlash2 checkpoint 自体が `rope_type=yarn` を持つ場合のプロファイル解決
+    （現行 checkpoint は `default` のみ）。
+  - Target 1x/2x/4x との組合せで acceptance rate と tokens/s を実測する。
 
 ## 2. Gate 6 — 2x の長文 E2E（品質・性能）
 
@@ -114,8 +113,6 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * Verifyで使用するbatchは 最大並列数 * 8 にする
 * VerifyとPrefillをMixed可能にする
 * pipeline-parallelの実装
-* Samplingでmin_pの追加
-* yarnがDFlash2で効かないのを修正
 * preshuffleの有無を設定化
 * カーネルをpreshuffleの有無で分離
 * FP8カーネルでradianceとは違うところを修正する(ただし、Prefillのtok/sが下がってもよいからspillは0に抑える)

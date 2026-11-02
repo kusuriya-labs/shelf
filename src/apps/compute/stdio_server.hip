@@ -323,7 +323,7 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         const std::string& key = entry.key();
         if (key != "op" && key != "request_id" && key != "input_ids" &&
             key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
-            key != "top_k" && key != "seed" &&
+            key != "min_p" && key != "top_k" && key != "seed" &&
             key != "prefix_cache_checkpoint_position") {
             emit_error_with_code(request_id, "invalid_argument",
                                  "unknown request field: " + key);
@@ -394,6 +394,13 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
             return false;
         }
         sampling.top_p = request["top_p"].get<float>();
+    }
+    if (request.contains("min_p")) {
+        if (!request["min_p"].is_number()) {
+            emit_error(request_id, "min_p must be a number");
+            return false;
+        }
+        sampling.min_p = request["min_p"].get<float>();
     }
     if (request.contains("top_k")) {
         if (!request["top_k"].is_number_integer()) {

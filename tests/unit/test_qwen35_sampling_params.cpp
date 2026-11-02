@@ -32,7 +32,7 @@ static void expect_mode(const SamplingConfig& c, bool sample, uint64_t index,
     const auto r = make_sampling_request(c, sample, index);
     const bool ok = r.mode == want && r.sample_index == index &&
                     r.temperature == c.temperature && r.top_p == c.top_p &&
-                    r.top_k == c.top_k && r.seed == c.seed;
+                    r.min_p == c.min_p && r.top_k == c.top_k && r.seed == c.seed;
     if (!ok) ++g_fail;
     std::printf("  [%-28s] %s\n", msg, ok ? "PASS" : "FAIL");
 }
@@ -60,13 +60,31 @@ int main() {
         c.top_p = p;
         expect_ok(c, "top_p accepted");
     }
+    for (float p : {0.0f, 0.05f, 0.5f, 1.0f}) {
+        SamplingConfig c;
+        c.temperature = 0.7f;
+        c.min_p = p;
+        expect_ok(c, "min_p accepted");
+    }
     {
         SamplingConfig c;
         c.temperature = 0.7f;
         c.top_p = 0.9f;
+        c.min_p = 0.05f;
         c.top_k = 16u;
         c.seed = 42u;
-        expect_ok(c, "top_k + seed accepted");
+        expect_ok(c, "top_k + min_p + seed accepted");
+    }
+    {
+        SamplingConfig c;
+        c.temperature = 0.7f;
+        c.min_p = 0.1f;
+        if (sampling_config_is_default(c)) {
+            ++g_fail;
+            std::printf("  [min_p is not default]         FAIL\n");
+        } else {
+            std::printf("  [min_p is not default]         PASS\n");
+        }
     }
 
     {
@@ -104,6 +122,21 @@ int main() {
         c.top_p = std::numeric_limits<float>::quiet_NaN();
         expect_reject(c, "NaN top_p");
     }
+    {
+        SamplingConfig c;
+        c.min_p = -0.1f;
+        expect_reject(c, "negative min_p");
+    }
+    {
+        SamplingConfig c;
+        c.min_p = 1.0001f;
+        expect_reject(c, "min_p above one");
+    }
+    {
+        SamplingConfig c;
+        c.min_p = std::numeric_limits<float>::quiet_NaN();
+        expect_reject(c, "NaN min_p");
+    }
 
     std::printf("sampling request mapping\n");
     expect_mode(def, false, 0u, SamplingMode::None, "sample=false -> None");
@@ -113,6 +146,7 @@ int main() {
     SamplingConfig hot;
     hot.temperature = 0.7f;
     hot.top_p = 0.9f;
+    hot.min_p = 0.05f;
     hot.top_k = 16u;
     hot.seed = 123u;
     expect_mode(hot, false, 3u, SamplingMode::None, "hot but sample=false");

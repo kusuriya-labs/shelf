@@ -81,6 +81,7 @@ void compute_usage(const char* prog) {
     printf("                          bf16 round as today; tp only)\n");
     printf("  --temperature F        sampling temperature (default 0 = greedy)\n");
     printf("  --top-p F              nucleus sampling threshold in (0, 1] (default 1)\n");
+    printf("  --min-p F              min-p threshold in [0, 1] (default 0 = disabled)\n");
     printf("  --top-k N              keep the N highest logits (default 0 = disabled)\n");
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
@@ -249,6 +250,8 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
             if (!parse_float(argv[++i], sampling.temperature)) { fprintf(stderr, "bad --temperature\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
             if (!parse_float(argv[++i], sampling.top_p)) { fprintf(stderr, "bad --top-p\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--min-p") == 0 && i + 1 < argc) {
+            if (!parse_float(argv[++i], sampling.min_p)) { fprintf(stderr, "bad --min-p\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], top_k)) { fprintf(stderr, "bad --top-k\n"); return kComputeParseError; }
             sampling.top_k = static_cast<uint32_t>(top_k);

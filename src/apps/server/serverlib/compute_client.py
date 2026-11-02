@@ -302,6 +302,7 @@ class AsyncComputeClient:
         max_new_tokens: int,
         temperature: float,
         top_p: float,
+        min_p: float,
         top_k: int,
         seed: int,
         prefix_cache_checkpoint_position: int = 0,
@@ -313,6 +314,7 @@ class AsyncComputeClient:
             "max_new_tokens": int(max_new_tokens),
             "temperature": float(temperature),
             "top_p": float(top_p),
+            "min_p": float(min_p),
             "top_k": int(top_k),
             "seed": int(seed),
             "prefix_cache_checkpoint_position": int(prefix_cache_checkpoint_position),
@@ -345,6 +347,7 @@ class AsyncComputeClient:
         max_new_tokens: int,
         temperature: float = 0.0,
         top_p: float = 1.0,
+        min_p: float = 0.0,
         top_k: int = 0,
         seed: int = 0,
         prefix_cache_checkpoint_position: int = 0,
@@ -355,7 +358,7 @@ class AsyncComputeClient:
         try:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
-                top_p, top_k, seed, prefix_cache_checkpoint_position)
+                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position)
             sent = True
             while True:
                 event = await mailbox.get()
@@ -382,6 +385,7 @@ class AsyncComputeClient:
         max_new_tokens: int,
         temperature: float = 0.0,
         top_p: float = 1.0,
+        min_p: float = 0.0,
         top_k: int = 0,
         seed: int = 0,
         prefix_cache_checkpoint_position: int = 0,
@@ -400,7 +404,7 @@ class AsyncComputeClient:
         try:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
-                top_p, top_k, seed, prefix_cache_checkpoint_position)
+                top_p, min_p, top_k, seed, prefix_cache_checkpoint_position)
 
             sent = True
 

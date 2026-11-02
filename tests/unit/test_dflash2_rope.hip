@@ -88,11 +88,14 @@ static void reference_rope(
                 input.data() + static_cast<std::size_t>(r) * features + h * head_dim;
             bf16_t* dst = out.data() + static_cast<std::size_t>(r) * features + h * head_dim;
             for (uint32_t i = 0; i < half; ++i) {
-                const float exponent = -2.0f * static_cast<float>(i) / static_cast<float>(head_dim);
-                const float inv_freq = std::pow(theta, exponent);
-                const float angle = static_cast<float>(position_start + r) * inv_freq;
-                const float c = round_to_bf16_f32(std::cos(angle));
-                const float s = round_to_bf16_f32(std::sin(angle));
+                const double exponent =
+                    -2.0 * static_cast<double>(i) / static_cast<double>(head_dim);
+                const double inv_freq =
+                    std::pow(static_cast<double>(theta), exponent);
+                const double angle =
+                    static_cast<double>(position_start + r) * inv_freq;
+                const float c = round_to_bf16_f32(static_cast<float>(std::cos(angle)));
+                const float s = round_to_bf16_f32(static_cast<float>(std::sin(angle)));
                 const float x1 = bf16_to_f32(src[i]);
                 const float x2 = bf16_to_f32(src[i + half]);
                 const float p1 = round_to_bf16_f32(x1 * c);
@@ -255,6 +258,8 @@ int main() {
     run_case(arena, stream, 8u, 32u, 128u, 2047u, theta, 77u);
     run_case(arena, stream, 2u, 4u, 8u, 3u, theta, 88u);
     run_case(arena, stream, 3u, 8u, 64u, 1000u, theta, 99u);
+    run_case(arena, stream, 1u, 1u, 128u, 262144u, theta, 111u);
+    run_case(arena, stream, 1u, 1u, 128u, 524288u, theta, 122u);
     run_half_split_check(arena, stream);
 
     ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));

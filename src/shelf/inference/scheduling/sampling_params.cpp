@@ -19,6 +19,12 @@ Status validate_sampling_config(const SamplingConfig& config) {
     if (!(config.top_p > 0.0f) || config.top_p > 1.0f) {
         return Status::invalid_argument("sampling top_p must be in (0, 1]", __FILE__, __LINE__);
     }
+    if (!std::isfinite(config.min_p)) {
+        return Status::invalid_argument("sampling min_p must be finite", __FILE__, __LINE__);
+    }
+    if (config.min_p < 0.0f || config.min_p > 1.0f) {
+        return Status::invalid_argument("sampling min_p must be in [0, 1]", __FILE__, __LINE__);
+    }
     return Status::make_ok();
 }
 
@@ -29,6 +35,7 @@ SamplingRequest make_sampling_request(
     SamplingRequest request;
     request.temperature = config.temperature;
     request.top_p = config.top_p;
+    request.min_p = config.min_p;
     request.top_k = config.top_k;
     request.seed = config.seed;
     request.sample_index = sample_index;
