@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Prefix Cache の E2E 検査（T16）")
-    parser.add_argument("--engine", default="build/hip_rel/apps/shelf-compute")
+    parser.add_argument("--engine", default="build/hip-rel/apps/shelf-compute")
     parser.add_argument("--model", default="models/Qwen3.5-9B")
     parser.add_argument("--blocks", type=int, default=512, help="prefix cache の追加ブロック数")
     parser.add_argument("--prompt-tokens", type=int, default=200)

@@ -65,6 +65,27 @@ bool fp8_prefill2d_supported(std::uint32_t rows, std::uint32_t features,
 bool fp8_decode1_supported(std::uint32_t rows, std::uint32_t features,
                            std::uint32_t k_padded) noexcept;
 
+// N07: 2〜4 行の decode GEMV が使える形か（重みの読み出しを全行で共有する）。
+bool fp8_decode_n_supported(std::uint32_t rows, std::uint32_t features,
+                            std::uint32_t k_padded) noexcept;
+
+// 2〜4 行の GEMV。出力は「行ごとに Decode1 を呼んだ結果」とビット同一。
+// 活性化は行ごとに独立した断片順ブロックを `fp8_activation_bytes(1, k_padded)`
+// バイト間隔で並べる。
+hipError_t launch_gemm_fp8_w8a8_decode_n(
+    const std::uint8_t* weight_codes,
+    const float* weight_scales,
+    const std::uint8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Fp8GemmOutputDType output_dtype,
+    std::uint32_t rows,
+    std::uint32_t features,
+    std::uint32_t k_padded,
+    std::uint32_t output_row_stride,
+    const Fp8GemmScaleArgs& scales,
+    hipStream_t stream);
+
 // 1 ステップ分の断片順活性化バッファに必要なバイト数（codes）。
 std::size_t fp8_activation_bytes(std::uint32_t rows, std::uint32_t k_padded) noexcept;
 

@@ -61,8 +61,11 @@ __device__ __forceinline__ float mxfp4_e8m0_to_f32(std::uint8_t b) {
     return __uint_as_float(static_cast<std::uint32_t>(b) << 23u);
 }
 
+// 1 波ぶんの decode 本体。`lane` は波内のレーン番号（0..31）で、1 波 = 16 出力。
+// 複数波を 1 ブロックに入れて行ごとに波を割り当てるときも、そのまま使える（N07）。
 template <Mxfp4GemmOutputDType kOutputType>
-__global__ void __launch_bounds__(kThreads) gemv_mxfp4_w4a8_decode1_kernel(
+__device__ __forceinline__ void mxfp4_decode1_body(
+    const std::uint32_t lane,
     const std::uint8_t* __restrict__ weight_codes,
     const std::uint8_t* __restrict__ weight_scales,
     const std::uint8_t* __restrict__ activation_codes,
@@ -70,10 +73,9 @@ __global__ void __launch_bounds__(kThreads) gemv_mxfp4_w4a8_decode1_kernel(
     void* __restrict__ output,
     const std::uint32_t features,
     const std::uint32_t k_padded,
-    const Mxfp4GemmScaleArgs sc) {
-    const std::uint32_t tid = threadIdx.x;
-    const std::uint32_t m_lane = tid & 15u;   // 出力行（16 行タイル内）
-    const std::uint32_t k_group = tid >> 4u;  // 16 K 断片内の K 半（0/1）
+    const Mxfp4GemmScaleArgs& sc) {
+    const std::uint32_t m_lane = lane & 15u;   // 出力行（16 行タイル内）
+    const std::uint32_t k_group = lane >> 4u;  // 16 K 断片内の K 半（0/1）
 
     const std::uint32_t o_self = blockIdx.x * kTileOut + m_lane;
     const std::uint32_t nb = k_padded >> 5u;  // 32 K ブロック数
@@ -132,84 +134,123 @@ __global__ void __launch_bounds__(kThreads) gemv_mxfp4_w4a8_decode1_kernel(
     }
 }
 
-
-// ---- W4A4（A 側も MXFP4）--------------------------------------------------
-// モデルカードの指示どおり A 側も E2M1 + E8M0 にする。W と同じ断片順なので、
-// レーン (m, kg) は行 m の 8 B（= 32 ニブル）を読み、`mxfp4_low_high` で
-// E4M3 断片 2 個へ展開する。スケールは 2^(eW + eA) を 1 回掛けるだけ
-// （どちらも 2 の累乗なので積は厳密）。
 template <Mxfp4GemmOutputDType kOutputType>
-__global__ void __launch_bounds__(kThreads) gemv_mxfp4_w4a4_decode1_kernel(
+__global__ void __launch_bounds__(kThreads) gemv_mxfp4_w4a8_decode1_kernel(
     const std::uint8_t* __restrict__ weight_codes,
     const std::uint8_t* __restrict__ weight_scales,
     const std::uint8_t* __restrict__ activation_codes,
-    const std::uint8_t* __restrict__ activation_scales,
+    const float* __restrict__ activation_scales,
     void* __restrict__ output,
     const std::uint32_t features,
     const std::uint32_t k_padded,
     const Mxfp4GemmScaleArgs sc) {
-    const std::uint32_t tid = threadIdx.x;
-    const std::uint32_t m_lane = tid & 15u;
-    const std::uint32_t k_group = tid >> 4u;
+    mxfp4_decode1_body<kOutputType>(threadIdx.x, weight_codes, weight_scales, activation_codes,
+                                    activation_scales, output, features, k_padded, sc);
+}
 
-    const std::uint32_t o_self = blockIdx.x * kTileOut + m_lane;
-    const std::uint32_t nb = k_padded >> 5u;
+// N07: 2〜4 行の decode。1 波 = 1 行で、ブロック内の波に行を割り当てる。
+// 重みは 4 波が同じアドレスを読むので L2 に載り、DRAM の読み出しは 1 行ぶんに
+// なる。行ごとの本文は decode1 と同じ `mxfp4_decode1_body` なので、出力は
+// 行ごとの decode1 とビット同一。
+constexpr std::uint32_t kDecodeNRows = 4u;
 
-    const std::uint8_t* wrow = weight_codes +
-                               static_cast<std::size_t>(o_self >> 4u) *
-                                   (static_cast<std::size_t>(nb) * kBlockBytes) +
-                               static_cast<std::size_t>(o_self & 15u) * 16u +
-                               static_cast<std::size_t>(k_group) * 8u;
-    const std::uint8_t* wsrow = weight_scales +
-                                static_cast<std::size_t>(o_self) * sc.weight_scale_stride;
-    // 活性化: 行 m_lane の 16 B タイルのうち k_group の 8 B。
-    const std::uint8_t* arow = activation_codes +
-                               static_cast<std::size_t>(m_lane) * 16u +
-                               static_cast<std::size_t>(k_group) * 8u;
-    // スケールは行 0（rows=1）の E8M0。
-    const std::uint8_t* asrow = activation_scales;
+template <Mxfp4GemmOutputDType kOutputType>
+__global__ void __launch_bounds__(kDecodeNRows * 32u) gemv_mxfp4_w4a8_decode_n_kernel(
+    const std::uint8_t* __restrict__ weight_codes,
+    const std::uint8_t* __restrict__ weight_scales,
+    const std::uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const std::uint32_t features,
+    const std::uint32_t k_padded,
+    const std::uint32_t rows,
+    const std::uint32_t output_row_stride,
+    const Mxfp4GemmScaleArgs sc) {
+    const std::uint32_t warp = threadIdx.x >> 5u;
+    if (warp >= rows) return;
+    const std::size_t row_bytes = static_cast<std::size_t>(k_padded) * 16u;
+    const std::size_t out_off = static_cast<std::size_t>(warp) * output_row_stride;
+    void* out;
+    if constexpr (kOutputType == Mxfp4GemmOutputDType::BF16)
+        out = static_cast<void*>(static_cast<shelf::bf16_t*>(output) + out_off);
+    else
+        out = static_cast<void*>(static_cast<float*>(output) + out_off);
+    mxfp4_decode1_body<kOutputType>(
+        threadIdx.x & 31u, weight_codes, weight_scales,
+        activation_codes + static_cast<std::size_t>(warp) * row_bytes,
+        activation_scales + static_cast<std::size_t>(warp) * sc.activation_scale_stride, out,
+        features, k_padded, sc);
+}
 
-    float acc0 = 0.0f;
-    for (std::uint32_t ib = 0; ib < nb; ++ib) {
-        const std::uint64_t wp = *reinterpret_cast<const std::uint64_t*>(
-            wrow + static_cast<std::size_t>(ib) * kBlockBytes);
-        const int32x2_t wlo = mxfp4_low_high(static_cast<std::uint32_t>(wp));
-        const int32x2_t whi = mxfp4_low_high(static_cast<std::uint32_t>(wp >> 32u));
-        const int32x2_t w0 = int32x2_t{wlo[0], whi[0]};
-        const int32x2_t w1 = int32x2_t{wlo[1], whi[1]};
+// N09: 同一エキスパートへ複数行をまとめて流す rows 版。1 波 = 1 行で、
+// ブロック内の波に行を割り当てる（行数は 1 以上いくつでもよい）。
+// 行の割り当てはデバイス上の索引配列で行う（活性化の行と出力の行を別々に指定）。
+// 行ごとの本文は decode1 と同じなので、出力は行ごとの decode1 とビット同一。
+constexpr std::uint32_t kGroupWarps = 4u;
 
-        const std::uint64_t ap = *reinterpret_cast<const std::uint64_t*>(
-            arow + static_cast<std::size_t>(ib) * kBlockBytes);
-        const int32x2_t alo = mxfp4_low_high(static_cast<std::uint32_t>(ap));
-        const int32x2_t ahi = mxfp4_low_high(static_cast<std::uint32_t>(ap >> 32u));
-        const int32x2_t a0 = int32x2_t{alo[0], ahi[0]};
-        const int32x2_t a1 = int32x2_t{alo[1], ahi[1]};
-
-        float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
-        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-
-        if (k_group == 0u) {
-            // 2^(eW) * 2^(eA)。どちらも 2 の累乗なので積は厳密（丸めなし）。
-            const float s = mxfp4_e8m0_to_f32(wsrow[ib]) *
-                            mxfp4_e8m0_to_f32(asrow[ib]);
-            acc0 = __builtin_fmaf(c[0], s, acc0);
-        }
-    }
-
-    if (k_group == 0u) {
-        const std::uint32_t o = static_cast<std::uint32_t>(blockIdx.x) * kTileOut + m_lane;
-        if (o >= features) return;
-        if constexpr (kOutputType == Mxfp4GemmOutputDType::BF16) {
-            static_cast<shelf::bf16_t*>(output)[o] =
-                shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc0))};
-        } else {
-            static_cast<float*>(output)[o] = acc0;
-        }
-    }
+template <Mxfp4GemmOutputDType kOutputType>
+__global__ void __launch_bounds__(kGroupWarps * 32u) gemv_mxfp4_w4a8_decode_rows_kernel(
+    const std::uint8_t* __restrict__ weight_codes,
+    const std::uint8_t* __restrict__ weight_scales,
+    const std::uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    const std::uint32_t* __restrict__ act_rows,
+    const std::uint32_t* __restrict__ out_rows,
+    void* __restrict__ output,
+    const std::uint32_t features,
+    const std::uint32_t k_padded,
+    const std::uint32_t rows,
+    const std::uint32_t act_row_stride,
+    const std::uint32_t out_row_stride,
+    const Mxfp4GemmScaleArgs sc) {
+    const std::uint32_t warp = threadIdx.x >> 5u;
+    const std::uint32_t row = blockIdx.y * kGroupWarps + warp;
+    if (row >= rows) return;
+    const std::uint32_t src = act_rows != nullptr ? act_rows[row] : row;
+    const std::uint32_t dst = out_rows != nullptr ? out_rows[row] : row;
+    const std::size_t esz = kOutputType == Mxfp4GemmOutputDType::BF16 ? 2u : 4u;
+    mxfp4_decode1_body<kOutputType>(
+        threadIdx.x & 31u, weight_codes, weight_scales,
+        activation_codes + static_cast<std::size_t>(src) * act_row_stride,
+        activation_scales + static_cast<std::size_t>(src) * sc.activation_scale_stride,
+        static_cast<char*>(output) + static_cast<std::size_t>(dst) * out_row_stride * esz,
+        features, k_padded, sc);
 }
 
 }  // namespace
+
+bool mxfp4_decode_rows_supported(std::uint32_t rows, std::uint32_t features,
+                                 std::uint32_t k_padded) noexcept {
+    return rows >= 1u && features != 0u && (k_padded % 64u) == 0u;
+}
+
+hipError_t launch_gemm_mxfp4_w4a8_decode_rows(
+    const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
+    const std::uint8_t* activation_codes, const float* activation_scales,
+    const std::uint32_t* act_rows, const std::uint32_t* out_rows, void* output,
+    Mxfp4GemmOutputDType output_dtype, std::uint32_t rows, std::uint32_t features,
+    std::uint32_t k_padded, std::uint32_t act_row_stride, std::uint32_t out_row_stride,
+    const Mxfp4GemmScaleArgs& scales, hipStream_t stream) {
+    if (!mxfp4_decode_rows_supported(rows, features, k_padded)) return hipErrorInvalidValue;
+    const dim3 grid((features + kTileOut - 1u) / kTileOut,
+                    (rows + kGroupWarps - 1u) / kGroupWarps);
+    if (output_dtype == Mxfp4GemmOutputDType::BF16) {
+        gemv_mxfp4_w4a8_decode_rows_kernel<Mxfp4GemmOutputDType::BF16>
+            <<<grid, kGroupWarps * 32u, 0, stream>>>(weight_codes, weight_scales,
+                                                     activation_codes, activation_scales,
+                                                     act_rows, out_rows, output, features,
+                                                     k_padded, rows, act_row_stride,
+                                                     out_row_stride, scales);
+    } else {
+        gemv_mxfp4_w4a8_decode_rows_kernel<Mxfp4GemmOutputDType::F32>
+            <<<grid, kGroupWarps * 32u, 0, stream>>>(weight_codes, weight_scales,
+                                                     activation_codes, activation_scales,
+                                                     act_rows, out_rows, output, features,
+                                                     k_padded, rows, act_row_stride,
+                                                     out_row_stride, scales);
+    }
+    return hipGetLastError();
+}
 
 bool mxfp4_decode1_supported(std::uint32_t rows, std::uint32_t features,
                              std::uint32_t k_padded) noexcept {
@@ -247,29 +288,49 @@ hipError_t launch_gemm_mxfp4_w4a8_decode1(
     return hipGetLastError();
 }
 
+bool mxfp4_decode_n_supported(std::uint32_t rows, std::uint32_t features,
+                              std::uint32_t k_padded) noexcept {
+    // 1 行は decode1（既存の経路）に任せる。ここは 2〜4 行だけを扱う。
+    if (rows < 2u || rows > 4u || features == 0u) return false;
+    if (k_padded == 0u || (k_padded % kBlockK) != 0u) return false;
+    if ((k_padded % 64u) != 0u) return false;
+    return true;
+}
 
-hipError_t launch_gemm_mxfp4_w4a4_decode1(
+namespace {
+
+template <Mxfp4GemmOutputDType kOutputType>
+hipError_t mxfp4_decode_n_launch(
     const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
-    const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
-    void* output, Mxfp4GemmOutputDType output_dtype, std::uint32_t rows,
-    std::uint32_t features, std::uint32_t k_padded, std::uint32_t output_row_stride,
-    const Mxfp4GemmScaleArgs& scales, hipStream_t stream) {
-    (void)output_row_stride;
-    if (rows != 1u || features == 0u) return hipErrorInvalidValue;
-    if (k_padded == 0u || (k_padded % 64u) != 0u) return hipErrorInvalidValue;
+    const std::uint8_t* activation_codes, const float* activation_scales, void* output,
+    std::uint32_t rows, std::uint32_t features, std::uint32_t k_padded,
+    std::uint32_t output_row_stride, const Mxfp4GemmScaleArgs& scales, hipStream_t stream) {
     const dim3 grid((features + kTileOut - 1u) / kTileOut);
-    if (output_dtype == Mxfp4GemmOutputDType::BF16) {
-        gemv_mxfp4_w4a4_decode1_kernel<Mxfp4GemmOutputDType::BF16>
-            <<<grid, kThreads, 0, stream>>>(weight_codes, weight_scales, activation_codes,
-                                            activation_scales, output, features, k_padded,
-                                            scales);
-    } else {
-        gemv_mxfp4_w4a4_decode1_kernel<Mxfp4GemmOutputDType::F32>
-            <<<grid, kThreads, 0, stream>>>(weight_codes, weight_scales, activation_codes,
-                                            activation_scales, output, features, k_padded,
-                                            scales);
-    }
+    // 行数ぶんの波だけ起動する（rows = 2 で 4 波を出すと半分が空になる）。
+    gemv_mxfp4_w4a8_decode_n_kernel<kOutputType>
+        <<<grid, rows * 32u, 0, stream>>>(weight_codes, weight_scales,
+                                                  activation_codes, activation_scales, output,
+                                                  features, k_padded, rows, output_row_stride,
+                                                  scales);
     return hipGetLastError();
+}
+
+}  // namespace
+
+hipError_t launch_gemm_mxfp4_w4a8_decode_n(
+    const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
+    const std::uint8_t* activation_codes, const float* activation_scales, void* output,
+    Mxfp4GemmOutputDType output_dtype, std::uint32_t rows, std::uint32_t features,
+    std::uint32_t k_padded, std::uint32_t output_row_stride,
+    const Mxfp4GemmScaleArgs& scales, hipStream_t stream) {
+    if (!mxfp4_decode_n_supported(rows, features, k_padded)) return hipErrorInvalidValue;
+    if (output_dtype == Mxfp4GemmOutputDType::BF16)
+        return mxfp4_decode_n_launch<Mxfp4GemmOutputDType::BF16>(
+            weight_codes, weight_scales, activation_codes, activation_scales, output, rows,
+            features, k_padded, output_row_stride, scales, stream);
+    return mxfp4_decode_n_launch<Mxfp4GemmOutputDType::F32>(
+        weight_codes, weight_scales, activation_codes, activation_scales, output, rows,
+        features, k_padded, output_row_stride, scales, stream);
 }
 
 }  // namespace shelf::hipk

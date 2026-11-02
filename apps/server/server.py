@@ -719,12 +719,15 @@ async def _run(args: argparse.Namespace) -> int:
     client = EngineClient(
         [args.engine, "--model", args.model, "--gpu", str(args.gpu),
          "--pipeline-parallel", str(args.pipeline_parallel), "--prefill-rows",
-         str(args.prefill_rows), "--act-quant", args.act_quant,
+         str(args.prefill_rows),
          "--offload-weights-mib", str(args.offload_weights_mib),
          "--prefix-cache-blocks", str(args.prefix_cache_blocks),
          "--max-batch", str(args.max_batch)]
         + (["--kv-in-host"] if args.kv_in_host else [])
-        + (["--online-kv-pages", str(args.online_kv_pages)] if args.online_kv_pages else []),
+        + (["--online-kv-pages", str(args.online_kv_pages)] if args.online_kv_pages else [])
+        + (["--no-eos"] if args.no_eos else [])
+        + (["--decode1-max-rows", str(args.decode1_max_rows)] if args.decode1_max_rows >= 0
+           else []),
         max_inflight=args.max_inflight,
         log=lambda line: print(f"[engine] {line}", file=sys.stderr),
     )
@@ -789,8 +792,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="T15: 連続バッチングの最大スロット数（既定 4）")
     p.add_argument("--offload-weights-mib", type=int, default=0,
                    help="T14: 重みを pinned host へ落とす量（0 = なし）")
-    p.add_argument("--act-quant", default="auto", choices=["auto", "fp4", "fp8"],
-                   help="MXFP4 重みの活性化量子化（auto = checkpoint の宣言）")
+    p.add_argument("--no-eos", action="store_true",
+                   help="EOS で止めず max_tokens まで生成する（数値一致の検証用）")
+    p.add_argument("--decode1-max-rows", type=int, default=4,
+                   help="N01: この行数以下は行ごとに decode1 で回す（0 = 無効。既定 4）")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--trust-remote-code", action="store_true")

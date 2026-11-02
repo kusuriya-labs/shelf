@@ -26,6 +26,15 @@ hipError_t launch_f32_to_bf16(const float* in, shelf::bf16_t* out, uint32_t n,
 hipError_t launch_moe_router_logit(const shelf::bf16_t* x, const shelf::bf16_t* w,
                                    float* out, uint32_t experts, uint32_t hidden,
                                    hipStream_t stream);
+// N08: 複数行ぶんのルーター logits を 1 回で作る（行ごとの値は 1 行版とビット同一）。
+hipError_t launch_moe_router_logit_rows(const shelf::bf16_t* x, const shelf::bf16_t* w,
+                                        float* out, uint32_t rows, uint32_t experts,
+                                        uint32_t hidden, hipStream_t stream);
+// N09: エキスパート出力（bf16）を選択順に足し、共有エキスパートを最後に足す。
+hipError_t launch_moe_combine(const float* sel_w, const shelf::bf16_t* slots,
+                              const float* shared_w, const shelf::bf16_t* shared_out,
+                              shelf::bf16_t* out, uint32_t rows, uint32_t k, uint32_t hidden,
+                              hipStream_t stream);
 hipError_t launch_moe_accumulate(float* acc, const shelf::bf16_t* x, float scale,
                                  uint32_t n, hipStream_t stream);
 hipError_t launch_scaled_f32_to_bf16(const float* in, shelf::bf16_t* out, float scale,

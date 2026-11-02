@@ -31,7 +31,13 @@ bool PrefixCache::pick_victim(std::uint32_t* out) const {
 void PrefixCache::unregister(std::uint32_t block) {
     Block& b = blocks_[block];
     if (!b.in_map) return;
-    by_key_.erase(b.key);
+    // 同じ key の登録がこのブロックを指しているときだけ消す。重複キーの
+    // 再登録で正本が別ブロックへ移っている場合、無条件に erase すると
+    // **有効なエントリ**（別ブロック）を巻き込んで消してしまう。
+    const auto it = by_key_.find(b.key);
+    if (it != by_key_.end() && it->second.block == block &&
+        it->second.generation == b.generation)
+        by_key_.erase(it);
     b.in_map = false;
 }
 
@@ -95,6 +101,7 @@ Result<std::uint32_t> PrefixCache::allocate() {
         return Status::insufficient_memory("prefix cache: 空きブロックが無い", __FILE__,
                                            __LINE__);
     Block& b = blocks_[victim];
+    if (b.in_map) ++evictions_;   // キャッシュ済みブロックの退避（LRU が効いた）
     unregister(victim);
     b.refcount = 1;
     b.generation += 1;   // 再利用で古い key を無効化
@@ -121,6 +128,17 @@ Status PrefixCache::insert(std::uint32_t block, const std::vector<std::int32_t>&
     Block& blk = blocks_[block];
     blk.key = chain_block_key(parent, span, block_tokens_);
     blk.tokens.assign(span, span + block_tokens_);
+    // 同じ key が既に登録済みなら、正本を新しいブロックへ移す（並行要求が同じ
+    // prefix を別々に計算した場合）。旧ブロックは private にするだけで、その
+    // 参照（KV の利用者）はそのまま残す。**有効なエントリを消さない**ことが要点。
+    const auto existing = by_key_.find(blk.key);
+    if (existing != by_key_.end()) {
+        const std::uint32_t old_id = existing->second.block;
+        if (valid(old_id) && old_id != block && blocks_[old_id].in_map &&
+            blocks_[old_id].generation == existing->second.generation)
+            blocks_[old_id].in_map = false;
+        by_key_.erase(existing);
+    }
     blk.in_map = true;
     by_key_[blk.key] = Entry{block, blk.generation};
     touch(block);

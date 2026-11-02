@@ -46,7 +46,6 @@ def parse_config(text: str) -> dict:
         raise SystemExit("--config に model= が必要")
     cfg.setdefault("pp", "1")
     cfg.setdefault("prefill", "64")
-    cfg.setdefault("act", "auto")
     cfg.setdefault("offload", "0")
     cfg.setdefault("label", os.path.basename(cfg["model"].rstrip("/")))
     return cfg
@@ -145,9 +144,9 @@ async def main_async(args) -> int:
     for cfg in args.configs:
         argv = [args.engine, "--model", cfg["model"],
                 "--pipeline-parallel", cfg["pp"], "--prefill-rows", cfg["prefill"],
-                "--act-quant", cfg["act"], "--offload-weights-mib", cfg["offload"]]
+                "--offload-weights-mib", cfg["offload"]]
         label = (f"{cfg['label']}(pp={cfg['pp']},prefill={cfg['prefill']},"
-                 f"act={cfg['act']},offload={cfg['offload']}MiB)")
+                 f"offload={cfg['offload']}MiB)")
         print(f"\n== {label} を実行")
         outs, times = await run_once(argv, prompt_ids, args.max_new_tokens, args.repeats)
         runs.append({"label": label, "model": cfg["model"], "outs": outs})
@@ -190,7 +189,7 @@ async def main_async(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成の決定性・数値回帰ゲート（T08）")
-    parser.add_argument("--engine", default="build/hip_rel/apps/shelf-compute")
+    parser.add_argument("--engine", default="build/hip-rel/apps/shelf-compute")
     parser.add_argument("--config", action="append", default=[], required=True,
                         help="model=PATH[,pp=N][,prefill=N][,label=NAME]")
     parser.add_argument("--prompt", default="")

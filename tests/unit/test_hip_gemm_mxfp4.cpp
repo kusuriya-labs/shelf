@@ -16,7 +16,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
-#include <shelf/backend/hip/kernels/elementwise/activation_quantize_mxfp4.h>
 #include <shelf/backend/hip/kernels/gemm/linear_mxfp4.h>
 #include <shelf/quant/fp8_perchannel.hpp>
 #include <shelf/quant/mxfp4.hpp>
@@ -554,217 +553,6 @@ void real_model_case(const std::string& dir, const std::string& layer,
     hipFree(dt); hipFree(ds); hipFree(da); hipFree(dfa); hipFree(dout);
 }
 
-// W4A4（A 側も MXFP4）の GEMV。A は活性化量子化カーネルで作る。
-void run_w4a4_case(std::uint32_t features, std::uint32_t k, std::uint32_t seed) {
-    const std::uint32_t kp = quant::mxfp4::pad_k(k);
-    std::printf("  w4a4 case features=%u k=%u\n", features, k);
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
-
-    // 重み
-    std::vector<float> w(static_cast<std::size_t>(features) * k);
-    for (auto& v : w) v = dist(rng);
-    std::vector<std::uint8_t> wc_canon(quant::mxfp4::canonical_code_bytes(features, kp));
-    std::vector<std::uint8_t> ws(quant::mxfp4::scale_bytes(features, kp));
-    for (std::uint32_t n = 0; n < features; ++n) {
-        check(quant::mxfp4::quantize_row(w.data() + static_cast<std::size_t>(n) * k, k, kp,
-                                         wc_canon.data() + static_cast<std::size_t>(n) * (kp / 2u),
-                                         ws.data() + static_cast<std::size_t>(n) * (kp / 32u)).ok(),
-              "w4a4 quantize_row");
-    }
-    std::vector<std::uint8_t> wc(quant::mxfp4::tiled_bytes(features, kp));
-    check(quant::mxfp4::preshuffle_codes(wc_canon.data(), features, k, kp, wc.data()).ok(),
-          "w4a4 preshuffle");
-
-    // 活性化（bf16 入力 → 量子化カーネル）
-    std::vector<std::uint16_t> a16(k);
-    std::vector<float> a(k);
-    for (std::uint32_t i = 0; i < k; ++i) {
-        const float v = dist(rng);
-        a16[i] = __bfloat16_as_ushort(__float2bfloat16(v));
-        a[i] = __bfloat162float(*reinterpret_cast<const __hip_bfloat16*>(&a16[i]));
-    }
-    std::vector<std::uint8_t> ac(quant::mxfp4::tiled_bytes(1u, kp), 0u);
-    std::vector<std::uint8_t> as(quant::mxfp4::scale_bytes(1u, kp), 0u);
-
-    shelf::bf16_t* da = nullptr;
-    std::uint8_t* dwc = nullptr;
-    std::uint8_t* dws = nullptr;
-    std::uint8_t* dac = nullptr;
-    std::uint8_t* das = nullptr;
-    float* dout = nullptr;
-    check_hip(hipMalloc(&da, sizeof(std::uint16_t) * k), "w4a4 da");
-    check_hip(hipMalloc(&dwc, wc.size()), "w4a4 dwc");
-    check_hip(hipMalloc(&dws, ws.size()), "w4a4 dws");
-    check_hip(hipMalloc(&dac, ac.size()), "w4a4 dac");
-    check_hip(hipMalloc(&das, as.size()), "w4a4 das");
-    check_hip(hipMalloc(&dout, sizeof(float) * features), "w4a4 dout");
-    check_hip(hipMemcpy(da, a16.data(), sizeof(std::uint16_t) * k, hipMemcpyHostToDevice), "w4a4 ca");
-    check_hip(hipMemcpy(dwc, wc.data(), wc.size(), hipMemcpyHostToDevice), "w4a4 cwc");
-    check_hip(hipMemcpy(dws, ws.data(), ws.size(), hipMemcpyHostToDevice), "w4a4 cws");
-    check_hip(hipMemset(dac, 0, ac.size()), "w4a4 zac");
-    check_hip(hipMemset(das, 0, as.size()), "w4a4 zas");
-    check_hip(launch_activation_quantize_mxfp4(da, dac, das, 1u, k, kp, k, nullptr),
-              "w4a4 quantize launch");
-    check_hip(hipMemcpy(ac.data(), dac, ac.size(), hipMemcpyDeviceToHost), "w4a4 cac");
-    check_hip(hipMemcpy(as.data(), das, as.size(), hipMemcpyDeviceToHost), "w4a4 cas");
-
-    Mxfp4GemmScaleArgs sc;
-    sc.act_group = 0u;
-    sc.activation_scale_stride = kp / 32u;
-    sc.weight_scale_stride = kp / 32u;
-    check_hip(launch_gemm_mxfp4_w4a4_decode1(dwc, dws, dac, das, dout,
-                                             Mxfp4GemmOutputDType::F32, 1u, features, kp, 1u,
-                                             sc, nullptr),
-              "w4a4 decode1 launch");
-    std::vector<float> out(features, 0.0f);
-    check_hip(hipMemcpy(out.data(), dout, sizeof(float) * features, hipMemcpyDeviceToHost),
-              "w4a4 cout");
-    hipFree(da); hipFree(dwc); hipFree(dws); hipFree(dac); hipFree(das); hipFree(dout);
-
-    double worst = 0.0, mag = 0.0;
-    for (std::uint32_t n = 0; n < features; ++n) {
-        double ref = 0.0;
-        for (std::uint32_t c = 0; c < kp; ++c) {
-            const float wv = quant::mxfp4::read_element(wc.data(), ws.data(), n, c, kp);
-            const float av = quant::mxfp4::read_element(ac.data(), as.data(), 0u, c, kp);
-            ref += static_cast<double>(wv) * static_cast<double>(av);
-        }
-        mag = std::fmax(mag, std::fabs(ref));
-        worst = std::fmax(worst, std::fabs(ref - static_cast<double>(out[n])));
-    }
-    const double rel = mag > 0.0 ? worst / mag : 0.0;
-    std::printf("    相対誤差 = %.3e（|ref|max=%.3e）\n", rel, mag);
-    check(rel < 2.0e-5, "W4A4 が CPU 参照と一致（相対 2e-5 以内）");
-}
-
-// W4A4 の prefill（rows>1、A も MXFP4）。
-void run_w4a4_prefill_case(std::uint32_t rows, std::uint32_t features, std::uint32_t k,
-                           std::uint32_t seed) {
-    const std::uint32_t kp = quant::mxfp4::pad_k(k);
-    std::printf("  w4a4 prefill rows=%u features=%u k=%u\n", rows, features, k);
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
-
-    std::vector<float> w(static_cast<std::size_t>(features) * k);
-    for (auto& v : w) v = dist(rng);
-    std::vector<std::uint8_t> wc_canon(quant::mxfp4::canonical_code_bytes(features, kp));
-    std::vector<std::uint8_t> ws(quant::mxfp4::scale_bytes(features, kp));
-    for (std::uint32_t n = 0; n < features; ++n) {
-        check(quant::mxfp4::quantize_row(w.data() + static_cast<std::size_t>(n) * k, k, kp,
-                                         wc_canon.data() + static_cast<std::size_t>(n) * (kp / 2u),
-                                         ws.data() + static_cast<std::size_t>(n) * (kp / 32u)).ok(),
-              "w4a4p quantize_row");
-    }
-    std::vector<std::uint8_t> wc(quant::mxfp4::tiled_bytes(features, kp));
-    check(quant::mxfp4::preshuffle_codes(wc_canon.data(), features, k, kp, wc.data()).ok(),
-          "w4a4p preshuffle");
-
-    // 活性化: bf16 の行列 → 量子化カーネル
-    std::vector<std::uint16_t> a16(static_cast<std::size_t>(rows) * k);
-    std::vector<float> a(static_cast<std::size_t>(rows) * k);
-    for (std::size_t i = 0; i < a16.size(); ++i) {
-        a16[i] = __bfloat16_as_ushort(__float2bfloat16(dist(rng)));
-        a[i] = __bfloat162float(*reinterpret_cast<const __hip_bfloat16*>(&a16[i]));
-    }
-    const std::size_t acbytes = quant::mxfp4::tiled_bytes(rows, kp);
-    const std::size_t asbytes = quant::mxfp4::scale_bytes(rows, kp);
-    std::vector<std::uint8_t> ac(acbytes, 0u), as(asbytes, 0u);
-
-    shelf::bf16_t* da = nullptr;
-    std::uint8_t* dwc = nullptr;
-    std::uint8_t* dws = nullptr;
-    std::uint8_t* dac = nullptr;
-    std::uint8_t* das = nullptr;
-    float* dout = nullptr;
-    const std::size_t outn = static_cast<std::size_t>(rows) * features;
-    check_hip(hipMalloc(&da, sizeof(std::uint16_t) * a16.size()), "w4a4p da");
-    check_hip(hipMalloc(&dwc, wc.size()), "w4a4p dwc");
-    check_hip(hipMalloc(&dws, ws.size()), "w4a4p dws");
-    check_hip(hipMalloc(&dac, acbytes), "w4a4p dac");
-    check_hip(hipMalloc(&das, asbytes), "w4a4p das");
-    check_hip(hipMalloc(&dout, sizeof(float) * outn), "w4a4p dout");
-    check_hip(hipMemcpy(da, a16.data(), sizeof(std::uint16_t) * a16.size(), hipMemcpyHostToDevice), "w4a4p ca");
-    check_hip(hipMemcpy(dwc, wc.data(), wc.size(), hipMemcpyHostToDevice), "w4a4p cwc");
-    check_hip(hipMemcpy(dws, ws.data(), ws.size(), hipMemcpyHostToDevice), "w4a4p cws");
-    check_hip(hipMemset(dac, 0, acbytes), "w4a4p zac");
-    check_hip(hipMemset(das, 0, asbytes), "w4a4p zas");
-    check_hip(launch_activation_quantize_mxfp4(da, dac, das, rows, k, kp, k, nullptr),
-              "w4a4p quantize");
-    check_hip(hipMemcpy(ac.data(), dac, acbytes, hipMemcpyDeviceToHost), "w4a4p cac");
-    check_hip(hipMemcpy(as.data(), das, asbytes, hipMemcpyDeviceToHost), "w4a4p cas");
-
-    Mxfp4GemmScaleArgs sc;
-    sc.act_group = 0u;
-    sc.activation_scale_stride = kp / 32u;
-    sc.weight_scale_stride = kp / 32u;
-    check_hip(launch_gemm_mxfp4_w4a4_prefill(dwc, dws, dac, das, dout,
-                                             Mxfp4GemmOutputDType::F32, rows, features, kp,
-                                             features, sc, nullptr),
-              "w4a4p launch");
-    std::vector<float> out(outn, 0.0f);
-    check_hip(hipMemcpy(out.data(), dout, sizeof(float) * outn, hipMemcpyDeviceToHost), "w4a4p cout");
-    hipFree(da); hipFree(dwc); hipFree(dws); hipFree(dac); hipFree(das); hipFree(dout);
-
-    double worst = 0.0, mag = 0.0;
-    for (std::uint32_t m = 0; m < rows; ++m) {
-        for (std::uint32_t n = 0; n < 32u; ++n) {   // 先頭 32 出力で照合
-            double ref = 0.0;
-            for (std::uint32_t c = 0; c < kp; ++c) {
-                const float wv = quant::mxfp4::read_element(wc.data(), ws.data(), n, c, kp);
-                const float av = quant::mxfp4::read_element(ac.data(), as.data(), m, c, kp);
-                ref += static_cast<double>(wv) * static_cast<double>(av);
-            }
-            mag = std::fmax(mag, std::fabs(ref));
-            worst = std::fmax(worst, std::fabs(ref - static_cast<double>(out[static_cast<std::size_t>(m) * features + n])));
-        }
-    }
-    const double rel = mag > 0.0 ? worst / mag : 0.0;
-    std::printf("    相対誤差 = %.3e\n", rel);
-    check(rel < 2.0e-5, "W4A4 prefill が CPU 参照と一致");
-}
-
-// W4A4 の速度（合成データ、実形状）。W4A8 との比較用。
-void timed_w4a4(std::uint32_t rows, std::uint32_t features, std::uint32_t k) {
-    const std::uint32_t kp = quant::mxfp4::pad_k(k);
-    const std::size_t acb = quant::mxfp4::tiled_bytes(rows, kp);
-    const std::size_t asb = quant::mxfp4::scale_bytes(rows, kp);
-    std::vector<std::uint8_t> wc(quant::mxfp4::tiled_bytes(features, kp), 0u);
-    std::vector<std::uint8_t> ws(quant::mxfp4::scale_bytes(features, kp), 127u);
-    std::vector<std::uint8_t> ac(acb, 0u), as(asb, 127u);
-    std::uint8_t* dwc = nullptr; std::uint8_t* dws = nullptr;
-    std::uint8_t* dac = nullptr; std::uint8_t* das = nullptr; float* dout = nullptr;
-    hipMalloc(&dwc, wc.size()); hipMalloc(&dws, ws.size());
-    hipMalloc(&dac, acb); hipMalloc(&das, asb);
-    hipMalloc(&dout, sizeof(float) * static_cast<std::size_t>(rows) * features);
-    hipMemcpy(dwc, wc.data(), wc.size(), hipMemcpyHostToDevice);
-    hipMemcpy(dws, ws.data(), ws.size(), hipMemcpyHostToDevice);
-    hipMemcpy(dac, ac.data(), acb, hipMemcpyHostToDevice);
-    hipMemcpy(das, as.data(), asb, hipMemcpyHostToDevice);
-    Mxfp4GemmScaleArgs sc; sc.act_group = 0u;
-    sc.activation_scale_stride = kp / 32u; sc.weight_scale_stride = kp / 32u;
-    auto run = [&]() {
-        (void)launch_gemm_mxfp4_w4a4_prefill(dwc, dws, dac, das, dout,
-                                             Mxfp4GemmOutputDType::BF16, rows, features, kp,
-                                             features, sc, nullptr);
-    };
-    for (int i = 0; i < 5; ++i) run();
-    hipDeviceSynchronize();
-    std::vector<double> s;
-    for (int i = 0; i < 15; ++i) {
-        hipEvent_t a{}, b{}; hipEventCreate(&a); hipEventCreate(&b);
-        hipEventRecord(a); run(); hipEventRecord(b); hipEventSynchronize(b);
-        float ms = 0.0f; hipEventElapsedTime(&ms, a, b);
-        s.push_back(static_cast<double>(ms) * 1000.0);
-        hipEventDestroy(a); hipEventDestroy(b);
-    }
-    std::sort(s.begin(), s.end());
-    const double us = s[s.size() / 2];
-    std::printf("  w4a4 prefill rows=%u features=%u k=%u: %.2f us = %.1f TFLOP/s\n", rows,
-                features, k, us, 2.0 * rows * features * k / (us * 1e6));
-    hipFree(dwc); hipFree(dws); hipFree(dac); hipFree(das); hipFree(dout);
-}
-
 }  // namespace
 
 int main() {
@@ -790,20 +578,7 @@ int main() {
     run_prefill_case(32u, 128u, 256u, 24u);
     run_prefill_case(64u, 256u, 512u, 25u);
     run_prefill_case(96u, 128u, 512u, 26u);
-    run_w4a4_case(256u, 256u, 31u);
-    run_w4a4_case(128u, 512u, 32u);
     // 実機のエキスパート形（I=512, H=2048 と down の H=2048, I=512）
-    run_w4a4_case(512u, 2048u, 33u);
-    run_w4a4_case(2048u, 512u, 34u);
-    run_w4a4_prefill_case(128u, 128u, 256u, 41u);
-    run_w4a4_prefill_case(128u, 256u, 512u, 42u);
-    // 端数の行（128 の倍数でない）: 読み側の clamp が無いと HSA フォルトになる。
-    run_w4a4_prefill_case(32u, 128u, 256u, 43u);
-    run_w4a4_prefill_case(64u, 128u, 256u, 44u);
-    run_w4a4_prefill_case(96u, 256u, 512u, 45u);
-    // 端数の出力（features が 128 の倍数でない）: 重みの読みを clamp する。
-    run_w4a4_prefill_case(128u, 48u, 256u, 46u);
-    run_w4a4_prefill_case(64u, 48u, 512u, 47u);
     if (const char* md = std::getenv("SHELF_MXFP4_MODEL")) {
         real_model_case(md, "model.language_model.layers.0.mlp.gate_proj", 512u);
     }
@@ -813,8 +588,6 @@ int main() {
         timed_case(512u, 17408u, 5120u);
         timed_decode1(5120u, 5120u);
         timed_decode1(5120u, 17408u);
-        timed_w4a4(512u, 17408u, 5120u);
-        timed_w4a4(2048u, 5120u, 5120u);
     }
 
     if (failures == 0) {

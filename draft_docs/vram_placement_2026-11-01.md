@@ -2,7 +2,7 @@
 
 日付: 2026-11-01
 対象: `placement::place_fitting_budget` → 実行器の実確保 → 転送・再配置。
-環境: R9700 (gfx1201) / HIP 7.15 / `build/hip_rel` / 9B-FP8。
+環境: R9700 (gfx1201) / HIP 7.15 / `build/hip-rel` / 9B-FP8。
 
 ---
 

@@ -26,7 +26,7 @@
 ```bash
 # 計測用 = Release（prefill / decode の時間は必ずこれで取る）
 cmake --preset hip-rel          # 初回のみ（設定）
-cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-validate
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-validate
 
 # 動作確認・決定性確認用 = Debug
 cmake --preset hip

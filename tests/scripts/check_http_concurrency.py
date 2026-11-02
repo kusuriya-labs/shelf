@@ -8,7 +8,7 @@
 
 使い方:
   python3 tests/scripts/check_http_concurrency.py \
-      --model models/Qwen3.5-9B --engine build/hip_rel/apps/shelf-compute
+      --model models/Qwen3.5-9B --engine build/hip-rel/apps/shelf-compute
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="HTTP 同時要求（T15）の検証")
     parser.add_argument("--model", default="models/Qwen3.5-9B")
     parser.add_argument("--model-name", default="")
-    parser.add_argument("--engine", default="build/hip_rel/apps/shelf-compute")
+    parser.add_argument("--engine", default="build/hip-rel/apps/shelf-compute")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--prefill-rows", type=int, default=64)

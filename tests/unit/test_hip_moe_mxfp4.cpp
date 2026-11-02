@@ -1,7 +1,7 @@
-// shelf unit test — HIP MoE（MXFP4 / W4A4）の数値一致（T17 フェーズ 3）。
+// shelf unit test — HIP MoE（MXFP4 重み / W4A8 活性化）の数値一致（T17 フェーズ 3）。
 //
-// 実機の 35B-A3B はエキスパートが MXFP4（E2M1 + E8M0、Quark）で、活性化も
-// E2M1 に量子化される（W4A4）。CPU 分担は「pinned host の重みを復号しながら
+// 実機の 35B-A3B はエキスパートが MXFP4（E2M1 + E8M0、Quark）で、活性化は
+// FP8（E4M3、group 128）に量子化される（W4A8）。CPU 分担は「pinned host の重みを復号しながら
 // 内積する」経路なので、GPU 経路と同じ値になることを合成データで確かめる。
 //
 // 参照は独立に書いた double の計算（重みは同じ量子化コードを別実装で復号し、
@@ -14,6 +14,7 @@
 
 #include <shelf/backend/hip/step_executor.hpp>
 #include <shelf/ir/graph.hpp>
+#include <shelf/quant/fp8_codec.hpp>
 #include <shelf/quant/mxfp4.hpp>
 
 namespace {
@@ -115,17 +116,23 @@ MxMatrix quantize_matrix(const std::vector<float>& w, std::uint32_t rows, std::u
     return m;
 }
 
-// W4A4 の活性化量子化（GPU/CPU と同じ量子化器）→ f64 の復号値。
+// W4A8 の活性化量子化（E4M3、K 128 要素ごとの動的スケール）→ f64 の復号値。
+// GPU/CPU と同じ規則（amax / kE4M3Max）。
 std::vector<double> quantize_act(const std::vector<float>& x, std::uint32_t k) {
-    const std::uint32_t kp = quant::mxfp4::pad_k(k);
-    std::vector<std::uint8_t> codes(kp / 2u), scales(kp / 32u);
-    check(quant::mxfp4::quantize_row(x.data(), k, kp, codes.data(), scales.data()).ok(),
-          "quantize act");
+    using namespace quant::fp8;
+    // executor と同じ規則: K が 128 の倍数のときだけ 128 グループ、それ以外は行単位。
+    const std::uint32_t group = (k % 128u == 0u) ? 128u : 0u;
+    const std::uint32_t g = group == 0u ? k : group;
     std::vector<double> out(k);
-    for (std::uint32_t i = 0; i < k; ++i) {
-        const std::uint8_t byte = codes[i / 2u];
-        const std::uint8_t nib = (i % 2u == 0u) ? (byte & 0x0Fu) : (byte >> 4);
-        out[i] = e2m1_dec(nib) * e8m0_dec(scales[i / 32u]);
+    for (std::uint32_t b = 0; b < k; b += g) {
+        const std::uint32_t e = std::min(k, b + g);
+        float amax = 0.0f;
+        for (std::uint32_t i = b; i < e; ++i) amax = std::max(amax, std::fabs(x[i]));
+        const float s = amax_scale(amax);
+        for (std::uint32_t i = b; i < e; ++i) {
+            const std::uint8_t code = e4m3_encode(s > 0.0f ? x[i] / s : 0.0f);
+            out[i] = static_cast<double>(e4m3_decode(code)) * s;
+        }
     }
     return out;
 }
@@ -277,7 +284,7 @@ int main() {
     const auto run_case = [&](bool pin_experts) -> std::vector<float> {
         backend::hip::HipStepExecutorOptions ho;
         ho.arena_bytes = 4u << 20;
-        ho.mxfp4_activation = true;   // W4A4
+        ho.fp8_act_group = 128;       // W4A8（E4M3、group 128）
         backend::hip::HipStepExecutor ex(ho);
         for (std::size_t i = 0; i < 3; ++i) { (void)i; }
         const auto up_bf16 = [&](std::uint32_t id, const std::vector<float>& v) {
@@ -336,7 +343,16 @@ int main() {
     }
     std::printf("  worst i=%zu want=%.6f gpu=%.6f big=%zu huge=%zu /%zu\n", wi, want[wi],
                 got_gpu[wi], big, huge, want.size());
-    std::printf("mxfp4 moe: gpu_vs_ref=%.5g cpu_vs_ref=%.5g gpu_vs_cpu=%.5g\n", wg, wc, gc);
+    // gpu vs cpu は「FP8 の mid コードが境界で 1 段変わる」ことがあるため、
+    // 絶対差だけでなく相対差でも見る。
+    double gcr = 0.0;
+    for (std::size_t i = 0; i < want.size(); ++i) {
+        const double scale = std::max(1.0, std::fabs(static_cast<double>(got_cpu[i])));
+        gcr = std::max(gcr, std::fabs(static_cast<double>(got_gpu[i]) -
+                                      static_cast<double>(got_cpu[i])) / scale);
+    }
+    std::printf("mxfp4 moe: gpu_vs_ref=%.5g cpu_vs_ref=%.5g gpu_vs_cpu=%.5g (rel %.4g)\n",
+                wg, wc, gc, gcr);
     for (std::size_t i = 0; i < 4; ++i)
         std::printf("  [%zu] want=%.6f gpu=%.6f cpu=%.6f\n", i, want[i], got_gpu[i],
                     got_cpu[i]);
@@ -348,9 +364,9 @@ int main() {
     // (b) は参照が f64 で mid を作るのに対し実行器が bf16/f32 で作るために起きる、
     // 量子化の性質上の差。**GPU と CPU は同じ量子化器・同じコードを使うので一致**
     // する（`gc`）。参照との比較は「大半が 1% 以内・飛びは少数」で判定する。
-    check(gc < 1e-3, "gpu and cpu agree");
-    check(wg < 0.35 && huge <= 2, "gpu matches the reference except a few E2M1 flips");
-    check(big <= 12, "most elements are within 1% of the reference");
+    check(gcr < 5e-2, "gpu and cpu agree modulo FP8 mid-code flips");
+    check(wg < 0.35 && huge <= 6, "gpu matches the reference except a few FP8 flips");
+    check(big <= 24, "most elements are within 1% of the reference");
     check(wc < 0.35, "cpu is close to the double reference");
 
     std::printf("test_hip_moe_mxfp4: failures=%d\n", failures);

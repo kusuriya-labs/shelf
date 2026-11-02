@@ -185,7 +185,58 @@ void moe_router_logit(const shelf::bf16_t* __restrict__ x,
     if (threadIdx.x == 0u) out[e] = red[0];
 }
 
+// N08: 複数行のルーター logits を 1 回で作る。行ごとの内訳は
+// `moe_router_logit` と同一（同じスレッド分担・同じ加算順）なので、出力は
+// 行ごとに 1 回ずつ呼んだ結果とビット同一。
+extern "C" __global__ __launch_bounds__(256)
+void moe_router_logit_rows(const shelf::bf16_t* __restrict__ x,
+                           const shelf::bf16_t* __restrict__ w, float* __restrict__ out,
+                           uint32_t experts, uint32_t hidden) {
+    __shared__ float red[256];
+    const uint32_t e = blockIdx.x;
+    const uint32_t r = blockIdx.y;
+    const shelf::bf16_t* xrow = x + static_cast<size_t>(r) * hidden;
+    const shelf::bf16_t* row = w + static_cast<size_t>(e) * hidden;
+    float acc = 0.0f;
+    for (uint32_t h = threadIdx.x; h < hidden; h += blockDim.x) {
+        acc += __bfloat162float(__ushort_as_bfloat16(xrow[h].data)) *
+               __bfloat162float(__ushort_as_bfloat16(row[h].data));
+    }
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1) {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0u)
+        out[static_cast<size_t>(r) * experts + e] = red[0];
+}
+
 // acc[h] += scale * x[h]（f32 累積に bf16 のエキスパート出力を足す）。
+// N09: エキスパートごとの出力（bf16）を選択順に f32 で足し、共有エキスパートの
+// 寄与を最後に足して bf16 に落とす。1 行ずつの `moe_accumulate` +
+// `f32_to_bf16` と同じ順序・同じ丸め。
+extern "C" __global__ __launch_bounds__(256)
+void moe_combine(const float* __restrict__ sel_w,
+                 const shelf::bf16_t* __restrict__ slots,
+                 const float* __restrict__ shared_w,
+                 const shelf::bf16_t* __restrict__ shared_out, shelf::bf16_t* __restrict__ out,
+                 uint32_t rows, uint32_t k, uint32_t hidden) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows * hidden) return;
+    const uint32_t r = i / hidden;
+    const uint32_t h = i % hidden;
+    float acc = 0.0f;
+    for (uint32_t j = 0; j < k; ++j) {
+        const float v =
+            __bfloat162float(__ushort_as_bfloat16(slots[static_cast<size_t>(r * k + j) * hidden + h].data));
+        acc += sel_w[r * k + j] * v;
+    }
+    if (shared_out != nullptr)
+        acc += shared_w[r] * __bfloat162float(__ushort_as_bfloat16(shared_out[i].data));
+    out[i] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc))};
+}
+
 extern "C" __global__ __launch_bounds__(256)
 void moe_accumulate(float* __restrict__ acc, const shelf::bf16_t* __restrict__ x,
                     float scale, uint32_t n) {
@@ -208,6 +259,26 @@ hipError_t launch_moe_router_logit(const shelf::bf16_t* x, const shelf::bf16_t* 
                                    hipStream_t stream) {
     if (experts == 0u || hidden == 0u) return hipErrorInvalidValue;
     moe_router_logit<<<experts, 256, 0, stream>>>(x, w, out, hidden);
+    return hipGetLastError();
+}
+
+hipError_t launch_moe_router_logit_rows(const shelf::bf16_t* x, const shelf::bf16_t* w,
+                                        float* out, uint32_t rows, uint32_t experts,
+                                        uint32_t hidden, hipStream_t stream) {
+    if (rows == 0u || experts == 0u || hidden == 0u) return hipErrorInvalidValue;
+    const dim3 grid(experts, rows);
+    moe_router_logit_rows<<<grid, 256, 0, stream>>>(x, w, out, experts, hidden);
+    return hipGetLastError();
+}
+
+hipError_t launch_moe_combine(const float* sel_w, const shelf::bf16_t* slots,
+                              const float* shared_w, const shelf::bf16_t* shared_out,
+                              shelf::bf16_t* out, uint32_t rows, uint32_t k, uint32_t hidden,
+                              hipStream_t stream) {
+    if (rows == 0u || k == 0u || hidden == 0u) return hipErrorInvalidValue;
+    const uint32_t n = rows * hidden;
+    moe_combine<<<(n + 255u) / 256u, 256, 0, stream>>>(sel_w, slots, shared_w, shared_out, out,
+                                                       rows, k, hidden);
     return hipGetLastError();
 }
 

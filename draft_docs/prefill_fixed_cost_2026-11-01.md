@@ -1,7 +1,7 @@
 # Prefill の固定費プロファイル（T11）と launch 削減の判断（T12）
 
 日付: 2026-11-01
-環境: R9700 (gfx1201) ×4 / HIP 7.15 / `build/hip_rel`（Release）/ 9B-FP8。
+環境: R9700 (gfx1201) ×4 / HIP 7.15 / `build/hip-rel`（Release）/ 9B-FP8。
 計測器:
 * `shelf-bench pp --profile`（新設。`SHELF_HIP_STEP_PROFILE=1` 相当）
   — ステップの 3 点で `hipEvent` を取り、wall / GPU / カーネル列 / アップロード /
@@ -191,16 +191,16 @@ warmup 2・6 run の中央値）。
 
 ```bash
 # 内訳
-./build/hip_rel/apps/shelf-bench pp --model-dir models/Qwen3.5-9B-FP8 \
+./build/hip-rel/apps/shelf-bench pp --model-dir models/Qwen3.5-9B-FP8 \
     --prompt-tokens 256 --prefill-chunk 128 --runs 3 --warmup 1 --profile
 
 # decode の内訳
-./build/hip_rel/apps/shelf-bench tg --model-dir models/Qwen3.5-9B-FP8 \
+./build/hip-rel/apps/shelf-bench tg --model-dir models/Qwen3.5-9B-FP8 \
     --context 128 --tokens 16 --warmup 4 --profile
 
 # 発射回数（1 ステップ）
 rocprofv3 --kernel-trace -f csv -o /tmp/prof -- \
-    ./build/hip_rel/apps/shelf-bench pp --model-dir models/Qwen3.5-9B-FP8 \
+    ./build/hip-rel/apps/shelf-bench pp --model-dir models/Qwen3.5-9B-FP8 \
     --prompt-tokens 128 --prefill-chunk 128 --runs 1 --warmup 0
 # tr_kernel_trace.csv から __amd_rocclr_* と rope_inv_freq_init を除いて数える
 ```

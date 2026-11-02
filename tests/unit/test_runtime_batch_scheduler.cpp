@@ -70,6 +70,27 @@ void test_decode_batch() {
     check(s2.queued() == 1, "queued 数");
 }
 
+// prefill 由来の最初のトークンは「まだ入力していない」ので位置を進めない。
+// 進めてしまうと位置 N の KV が書かれず、prefix cache の再利用ブロックの残骸を
+// attention が読む（2026-11-01 に実機で発見した off-by-one）。
+void test_first_token_position() {
+    BatchScheduler s(1, 8);
+    s.submit(req("a", 3, 4));
+    s.prefill_progress(0, 3);
+    check(s.slot(0).position == 3, "prefill 完了で位置 3");
+    check(s.decode_result(0, 7, false, /*from_prefill=*/true) == SlotEnd::none,
+          "prefill 由来の最初のトークン");
+    check(s.slot(0).position == 3, "位置は進めない（N+1 にしない）");
+    DecodeAction d;
+    check(s.next_decode(&d) && d.rows[0].position == 3 && d.rows[0].token == 7,
+          "次は位置 3 で最初のトークンを処理する");
+    // decode 中にサンプルしたトークンは次の位置で処理する。
+    check(s.decode_result(0, 8, false) == SlotEnd::none, "decode 由来のトークン");
+    check(s.slot(0).position == 4, "decode 後は位置 4");
+    check(s.next_decode(&d) && d.rows[0].position == 4 && d.rows[0].token == 8,
+          "次は位置 4");
+}
+
 void test_stop_and_length() {
     BatchScheduler s(1, 8);
     s.submit(req("a", 2, 3));
@@ -157,6 +178,7 @@ void test_max_slots() {
 int main() {
     test_prefill_chunks();
     test_decode_batch();
+    test_first_token_position();
     test_stop_and_length();
     test_reuse_and_order();
     test_cancel();

@@ -114,10 +114,18 @@ if(SHELF_ENABLE_HIP)
     target_link_libraries(test_hip_gemm_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
     add_test(NAME unit.hip_gemm_mxfp4 COMMAND test_hip_gemm_mxfp4)
 
-    # 活性化の MXFP4 量子化（E2M1 + E8M0、断片順）
-    add_executable(test_hip_activation_mxfp4 unit/test_hip_activation_mxfp4.cpp)
-    target_link_libraries(test_hip_activation_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
-    add_test(NAME unit.hip_activation_mxfp4 COMMAND test_hip_activation_mxfp4)
+    # decode 1 ステップの実行間決定性（実モデルに近い形で 2 回実行してビット比較）
+    add_executable(test_hip_decode_determinism unit/test_hip_decode_determinism.cpp)
+    target_link_libraries(test_hip_decode_determinism PRIVATE
+        shelf::backend_hip
+        shelf::model_qwen35
+        shelf::compiler)
+    add_test(NAME unit.hip_decode_determinism COMMAND test_hip_decode_determinism)
+
+    # N01: decode1（GEMV）とバッチ GEMM の数値差（加算順の違いだけに収まること）
+    add_executable(test_hip_gemm_row_parity unit/test_hip_gemm_row_parity.cpp)
+    target_link_libraries(test_hip_gemm_row_parity PRIVATE shelf::backend_hip shelf::quant)
+    add_test(NAME unit.hip_gemm_row_parity COMMAND test_hip_gemm_row_parity)
 
     # pipeline-parallel（レイヤ分割）が数値を変えないこと（全ステージ同一 GPU で検証）
     add_executable(test_hip_pipeline unit/test_hip_pipeline.cpp)
@@ -161,6 +169,11 @@ if(SHELF_ENABLE_HIP)
     add_test(NAME unit.hip_moe COMMAND test_hip_moe)
 
     # T17: MXFP4（W4A4）エキスパートの GPU / CPU 分担が同じ値になること。
+    # N08: 複数行のルーター logits が 1 行版とビット一致すること
+    add_executable(test_hip_moe_router unit/test_hip_moe_router.cpp)
+    target_link_libraries(test_hip_moe_router PRIVATE shelf::backend_hip)
+    add_test(NAME unit.hip_moe_router COMMAND test_hip_moe_router)
+
     add_executable(test_hip_moe_mxfp4 unit/test_hip_moe_mxfp4.cpp)
     target_link_libraries(test_hip_moe_mxfp4 PRIVATE shelf::backend_hip shelf::quant)
     add_test(NAME unit.hip_moe_mxfp4 COMMAND test_hip_moe_mxfp4)

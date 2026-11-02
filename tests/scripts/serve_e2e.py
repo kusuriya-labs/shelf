@@ -12,7 +12,7 @@
 使い方（要 GPU・要 HIP ビルド）:
   python3 tests/scripts/serve_e2e.py \
       --model models/Qwen3.5-9B-FP8 \
-      --engine build/hip_rel/apps/shelf-compute
+      --engine build/hip-rel/apps/shelf-compute
 """
 
 from __future__ import annotations
@@ -211,7 +211,7 @@ async def main_async(args) -> int:
            "--engine", args.engine, "--model", args.model,
            "--model-name", args.model_name, "--port", str(args.port),
            "--gpu", str(args.gpu), "--pipeline-parallel", str(args.pp),
-           "--prefill-rows", str(args.prefill_rows), "--act-quant", args.act_quant]
+           "--prefill-rows", str(args.prefill_rows)]
     if args.offload_weights_mib:
         cmd += ["--offload-weights-mib", str(args.offload_weights_mib)]
     if args.kv_in_host:
@@ -248,11 +248,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OpenAI API の実 E2E 検証（T07）")
     parser.add_argument("--model", default="models/Qwen3.5-9B-FP8")
     parser.add_argument("--model-name", default="")
-    parser.add_argument("--engine", default="build/hip_rel/apps/shelf-compute")
+    parser.add_argument("--engine", default="build/hip-rel/apps/shelf-compute")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--prefill-rows", type=int, default=64)
-    parser.add_argument("--act-quant", default="auto", choices=["auto", "fp4", "fp8"])
     parser.add_argument("--offload-weights-mib", type=int, default=0)
     parser.add_argument("--kv-in-host", action="store_true")
     parser.add_argument("--online-kv-pages", type=int, default=0,

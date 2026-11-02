@@ -55,8 +55,8 @@ MoE を `moe_route` / `moe_merge` の 2 ノードに分けると、全エキス�
   * ルーター logits: `moe_router_logit`（1 ブロック = 1 エキスパート、H を
     スレッドで分担する決定的な縮約）
   * エキスパート: bf16 は `launch_gemm_bf16`（ExactRows, rows=1）、
-    MXFP4 は `launch_gemm_mxfp4_w4a8_decode1` / `..._w4a4_decode1`。
-    W4A4 か W4A8 かは checkpoint の宣言（`opts.mxfp4_activation`）に従う。
+    MXFP4 は `launch_gemm_mxfp4_w4a8_decode1`（活性化は E4M3、group 128）。
+    W4A4（活性化も E2M1 + E8M0）は削除した。
   * `silu(gate)*up` は `launch_swiglu_bf16`、重み付き加算は
     `moe_accumulate`（f32 累積）、最後に `f32_to_bf16`。
   * 共有エキスパートは bf16 の GEMV（checkpoint の除外宣言）。
@@ -73,8 +73,8 @@ MoE を `moe_route` / `moe_merge` の 2 ノードに分けると、全エキス�
 * CPU の計算:
   * MXFP4 重みは**復号しながら内積**を取る（E2M1 のニブル → 8 値 LUT、
     E8M0 → 2 の累乗）。重みを f32 に展開しないのでメモリは増えない。
-  * 活性化は GPU と同じ量子化を通す（W4A4 は E2M1 + E8M0 の 32 要素ブロック、
-    W4A8 は E4M3 + 動的スケール）。分担の有無で数値が動かない方向に揃える。
+  * 活性化は GPU と同じ量子化を通す（W4A8: E4M3 + 動的スケール、K 128 要素ごと）。
+    分担の有無で数値が動かない方向に揃える。
   * 入力 x の量子化は行で共通なので 1 回だけ。mid はエキスパートごと。
   * エキスパート単位でスレッド分割（既定 `hardware_concurrency`、上限 16。
     `SHELF_MOE_CPU_THREADS` で固定）。分割と足し順は固定なので同一構成では
@@ -131,7 +131,7 @@ MoE を `moe_route` / `moe_merge` の 2 ノードに分けると、全エキス�
 
 ### 2.2 実機（Qwen3.5-35B-A3B-MXFP4）
 
-`build/hip_rel/apps/shelf-run` で 4 GPU にレイヤ分割して実行。
+`build/hip-rel/apps/shelf-run` で 4 GPU にレイヤ分割して実行。
 
 ```
 shelf-run --model models/Qwen3.5-35B-A3B-MXFP4 --ids 100,200,300 \

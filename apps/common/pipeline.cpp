@@ -164,7 +164,7 @@ Result<Pipeline> make_pipeline(const model::qwen35::TextConfig& cfg, const Shard
         ho.arena_bytes = opts.arena_bytes;
         ho.arena_reuse = opts.arena_reuse;
         ho.fp8_act_group = opts.fp8_act_group;
-        ho.mxfp4_activation = opts.mxfp4_activation;
+        ho.decode1_max_rows = opts.decode1_max_rows;
         ho.max_sequences = std::max<std::size_t>(opts.max_sequences, 1u);
         ho.kv_blocks = opts.kv_blocks;
         // T17: `--allow-host-weights` は「収まらなければ host へ」の許可なので、

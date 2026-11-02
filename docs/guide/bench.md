@@ -25,7 +25,7 @@
 ```bash
 # 計測用 = Release（**数値は必ずこれで取る**）
 cmake --preset hip-rel          # 初回のみ（設定）
-cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-bench
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench
 
 # 動作確認用 = Debug（計測には使わない）
 cmake --preset hip

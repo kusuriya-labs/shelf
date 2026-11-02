@@ -27,7 +27,7 @@
 ## 2. ビルドと実行形態
 
 ```bash
-cmake --build --preset hip-rel  # → build/hip_rel/apps/shelf-bench（**計測はこれ**）
+cmake --build --preset hip-rel  # → build/hip-rel/apps/shelf-bench（**計測はこれ**）
 cmake --build --preset hip      # → build/hip/apps/shelf-bench（Debug・動作確認用）
 cmake --build --preset cpu      # → build/cpu/apps/shelf-bench（--help のみ）
 ```

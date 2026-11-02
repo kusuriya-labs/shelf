@@ -1,6 +1,7 @@
 // HIP executor: batched prefill step must equal sequential decode steps
 // (same kernels, same state updates) on a tiny synthetic Qwen35-family graph.
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <cstdio>
 #include <memory>
@@ -89,6 +90,38 @@ int main(int argc, char** argv) {
     CHECK_ST(st_decl.ok(), "declare states", st_decl);
 
     std::vector<std::int32_t> toks = {7, 111, 512, 900};
+
+    // ---- 同じ入力の prefill を 2 回（状態を戻して）回し、logits がビット一致すること ----
+    {
+        std::vector<float> first;
+        for (int rep = 0; rep < 2; ++rep) {
+            CHECK(ex.reset_states().ok(), "determinism reset");
+            const auto st = ex.run_step(pb.graph, toks.data(), toks.size(), 0);
+            CHECK_ST(st.ok(), "determinism prefill", st);
+            auto lg = ex.fetch_logits(pb.graph);
+            CHECK(lg.ok(), "determinism logits");
+            if (!lg.ok()) break;
+            if (rep == 0) {
+                first = lg.value();
+            } else {
+                const bool same = first.size() == lg.value().size() &&
+                                  std::memcmp(first.data(), lg.value().data(),
+                                              first.size() * sizeof(float)) == 0;
+                if (!same && first.size() == lg.value().size()) {
+                    double w = 0.0;
+                    std::size_t wi = 0;
+                    for (std::size_t i = 0; i < first.size(); ++i) {
+                        const double d = std::fabs(double(first[i]) - double(lg.value()[i]));
+                        if (d > w) { w = d; wi = i; }
+                    }
+                    std::printf("prefill determinism: worst|diff|=%.3e at %zu (%.6f vs %.6f)\n",
+                                w, wi, first[wi], lg.value()[wi]);
+                }
+                CHECK(same, "prefill は 2 回実行で logits がビット一致");
+            }
+        }
+    }
+    CHECK(ex.reset_states().ok(), "reset after determinism");
 
     // sequential
     for (std::size_t i = 0; i < toks.size(); ++i) {
@@ -445,6 +478,101 @@ int main(int argc, char** argv) {
                 for (std::size_t i = 1; i < V; ++i) { if (b[off + i] > b[off + bb]) bb = i; }
                 CHECK(ba == bb, "last-row argmax == batch argmax");
             }
+        }
+    }
+
+    // ---- rows=64 の prefill でも 2 回実行でビット一致するか ----
+    // エンジン（実モデル）で観測された「同じプロンプトの prefill が実行毎に
+    // わずかに変わる」現象の再現を狙う。小さい形で再現すれば切り分けが速い。
+    {
+        auto p64 = model::qwen35::build_step_graph(cfg, 128, 64);
+        CHECK(p64.ok(), "64-row graph");
+        if (p64.ok()) {
+            backend::hip::HipStepExecutorOptions ho64 = ho;
+            ho64.arena_bytes = 64u << 20;
+            backend::hip::HipStepExecutor ex64(ho64);
+            std::mt19937 rng64(7);
+            std::normal_distribution<float> nd64(0.f, 0.05f);
+            for (const auto& w : p64.value().weights) {
+                std::vector<float> f(numelof(w.shape));
+                for (auto& x : f) x = nd64(rng64);
+                CHECK(ex64.upload_weight(w.id, f).ok(), "64-row upload weight");
+            }
+            CHECK_ST(ex64.declare_states(p64.value().graph).ok(), "64-row declare",
+                     ex64.declare_states(p64.value().graph));
+            std::vector<std::int32_t> t64(64);
+            for (std::size_t i = 0; i < t64.size(); ++i)
+                t64[i] = static_cast<std::int32_t>((i * 37u) % cfg.vocab_size);
+            std::vector<float> first;
+            for (int rep = 0; rep < 2; ++rep) {
+                CHECK(ex64.reset_states().ok(), "64-row reset");
+                const auto st = ex64.run_step(p64.value().graph, t64.data(), t64.size(), 0);
+                CHECK_ST(st.ok(), "64-row prefill", st);
+                auto lg = ex64.fetch_logits(p64.value().graph);
+                CHECK(lg.ok(), "64-row logits");
+                if (!lg.ok()) break;
+                if (rep == 0) {
+                    first = lg.value();
+                } else {
+                    const bool same = first.size() == lg.value().size() &&
+                                      std::memcmp(first.data(), lg.value().data(),
+                                                  first.size() * sizeof(float)) == 0;
+                    if (!same && first.size() == lg.value().size()) {
+                        double w = 0.0;
+                        for (std::size_t i = 0; i < first.size(); ++i)
+                            w = std::max(w, std::fabs(double(first[i]) - double(lg.value()[i])));
+                        std::printf("64-row prefill determinism: worst|diff|=%.3e\n", w);
+                    }
+                    CHECK(same, "64-row prefill は 2 回実行でビット一致");
+                }
+            }
+        }
+    }
+
+    // ---- reset_slot(1) が slot0 の状態・KV を壊さない（所有権の分離） ----
+    {
+        auto p16 = model::qwen35::build_step_graph(cfg, 16, 16);
+        CHECK(p16.ok(), "ownership graph");
+        if (p16.ok()) {
+            backend::hip::HipStepExecutorOptions ho2;
+            ho2.rope_theta = cfg.rope_theta;
+            ho2.rope_rotary_dim = cfg.rotary_dim;
+            ho2.arena_bytes = 0;
+            ho2.max_sequences = 2;
+            ho2.kv_pinned_host = true;
+            ho2.online_kv_pages = 2;
+            backend::hip::HipStepExecutor ex2(ho2);
+            std::mt19937 rng2(21);
+            std::normal_distribution<float> nd2(0.f, 0.05f);
+            for (const auto& w : p16.value().weights) {
+                std::vector<float> f(numelof(w.shape));
+                for (auto& x : f) x = nd2(rng2);
+                CHECK(ex2.upload_weight(w.id, f).ok(), "ownership upload");
+            }
+            CHECK_ST(ex2.declare_states(p16.value().graph).ok(), "ownership declare",
+                     ex2.declare_states(p16.value().graph));
+            std::vector<std::int32_t> t16(16);
+            for (std::size_t i = 0; i < t16.size(); ++i)
+                t16[i] = static_cast<std::int32_t>((i * 29u) % cfg.vocab_size);
+            CHECK_ST(ex2.run_step(p16.value().graph, t16.data(), t16.size(), 0).ok(),
+                     "ownership prefill", ex2.run_step(p16.value().graph, t16.data(),
+                                                      t16.size(), 0));
+            auto st_a = ex2.export_gdn_state(0);
+            auto kv_a = ex2.debug_kv_hash(0, ex2.kv_pages_per_sequence());
+            CHECK_ST(ex2.reset_slot(1).ok(), "reset_slot(1)",
+                     ex2.reset_slot(1));
+            auto st_b = ex2.export_gdn_state(0);
+            auto kv_b = ex2.debug_kv_hash(0, ex2.kv_pages_per_sequence());
+            CHECK(st_a.ok() && st_b.ok() && st_a.value() == st_b.value(),
+                  "reset_slot(1) は slot0 の GDN 状態を変えない");
+            CHECK(kv_a.ok() && kv_b.ok() && kv_a.value() == kv_b.value(),
+                  "reset_slot(1) は slot0 の KV を変えない");
+            auto st_s1 = ex2.export_gdn_state(1);
+            bool zero = st_s1.ok();
+            if (st_s1.ok())
+                for (const float v : st_s1.value())
+                    if (v != 0.0f) zero = false;
+            CHECK(zero, "reset_slot(1) は slot1 の状態を 0 にする");
         }
     }
 

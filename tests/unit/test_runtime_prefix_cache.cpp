@@ -133,6 +133,46 @@ void test_partial_and_collision_guard() {
     check(span != nullptr && span[0] == 1 && span[3] == 4, "block_tokens が読める");
 }
 
+// 同一 key の再登録（並行要求が同じ prefix を別々に計算した場合）で、
+// 有効なエントリが消えないこと。旧実装は map を上書きし、後から旧ブロックを
+// 退避すると by_key_ の新しい対応まで erase していた。
+void test_duplicate_key_insert() {
+    // プールは 2 個。重複登録のあと旧ブロック（a）だけが参照 0 になるので、
+    // 次の allocate は必ず a を退避する（旧実装ではここで正本の map を消した）。
+    PrefixCache c(2, 2);
+    const std::vector<std::int32_t> toks = {21, 22, 23, 24};
+    auto a = c.allocate();
+    check(a.ok(), "1 本目を確保");
+    check(c.insert(a.value(), toks, 0).ok(), "1 本目を登録");
+    auto b = c.allocate();
+    check(b.ok(), "同じ key 用に別ブロックを確保");
+    check(c.insert(b.value(), toks, 0).ok(), "同一 key の再登録は受理する");
+    check(!c.registered(a.value()), "旧ブロックは private になる（参照は残る）");
+    check(c.registered(b.value()), "新しいブロックが正本になる");
+    auto hit = c.lookup(toks);
+    check(hit.blocks.size() == 1 && hit.blocks[0] == b.value(),
+          "検索は正本（新しいブロック）を返す");
+
+    // 旧ブロックを退避しても、正本の登録が残ること（ここが旧実装の破綻点）。
+    c.release(a.value());
+    auto fresh = c.allocate();
+    check(fresh.ok(), "旧ブロックを LRU で退避できる");
+    check(!c.registered(a.value()), "退避した旧ブロックは未登録");
+    check(c.registered(b.value()), "正本の登録は消えない");
+    auto hit2 = c.lookup(toks);
+    check(hit2.blocks.size() == 1 && hit2.blocks[0] == b.value(),
+          "退避後も正本で hit する");
+
+    // 参照カウントと LRU の整合: 参照中の正本は退避対象にならない。
+    check(c.refcount(b.value()) == 1, "正本は参照 1");
+    PrefixCache small(1, 2);
+    auto only = small.allocate();
+    check(only.ok() && small.insert(only.value(), toks, 0).ok(), "1 個だけのプール");
+    check(!small.allocate().ok(), "参照中の正本は退避できない");
+    small.release(only.value());
+    check(small.allocate().ok(), "release 後は退避できる");
+}
+
 void test_exhaustion() {
     PrefixCache c(1, 2);
     auto a = c.allocate();
@@ -150,6 +190,7 @@ int main() {
     test_lru_eviction();
     test_cow();
     test_partial_and_collision_guard();
+    test_duplicate_key_insert();
     test_exhaustion();
     if (failures == 0) {
         std::printf("all prefix cache tests passed\n");

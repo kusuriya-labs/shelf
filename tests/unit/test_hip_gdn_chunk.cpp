@@ -184,17 +184,24 @@ void diff(const std::vector<float>& a, const std::vector<float>& b, double* wors
 }
 
 int run_case(std::uint32_t rows, std::uint32_t nvh, std::uint32_t nkh) {
-    Case seq, chunk;
+    Case seq, chunk, chunk2;
     fill(&seq, rows, nvh, nkh);
     fill(&chunk, rows, nvh, nkh);
+    fill(&chunk2, rows, nvh, nkh);
     chunk.q = seq.q;
     chunk.k = seq.k;
     chunk.v = seq.v;
     chunk.a = seq.a;
     chunk.b = seq.b;
     chunk.state = seq.state;
+    chunk2.q = seq.q;
+    chunk2.k = seq.k;
+    chunk2.v = seq.v;
+    chunk2.a = seq.a;
+    chunk2.b = seq.b;
+    chunk2.state = seq.state;
 
-    if (!seq.upload() || !chunk.upload()) {
+    if (!seq.upload() || !chunk.upload() || !chunk2.upload()) {
         std::printf("FAIL: デバイスへの転送\n");
         return 1;
     }
@@ -221,6 +228,18 @@ int run_case(std::uint32_t rows, std::uint32_t nvh, std::uint32_t nkh) {
         }
         done += n;
     }
+    // ③ 同じ入力でもう一度チャンク版（実行間の決定性）
+    for (std::uint32_t done = 0; done < rows;) {
+        const std::uint32_t n = std::min<std::uint32_t>(shelf::hipk::kGdnChunk, rows - done);
+        if (!chunk2.set_request(done, n)) return 1;
+        const GdnRecurrenceArgs a = chunk2.args();
+        const hipError_t e = shelf::hipk::launch_gdn_chunk(a, done, n, nullptr);
+        if (e != hipSuccess) {
+            std::printf("FAIL: チャンクカーネル（2 回目）: %s\n", hipGetErrorString(e));
+            return 1;
+        }
+        done += n;
+    }
     {
         const hipError_t se = hipDeviceSynchronize();
         if (se != hipSuccess) {
@@ -230,6 +249,9 @@ int run_case(std::uint32_t rows, std::uint32_t nvh, std::uint32_t nkh) {
     }
     seq.download();
     chunk.download();
+    chunk2.download();
+    check(chunk.out == chunk2.out, "チャンク版は 2 回実行で出力がビット一致");
+    check(chunk.state == chunk2.state, "チャンク版は 2 回実行で状態がビット一致");
 
     double worst_out = 0.0, mag_out = 0.0, worst_st = 0.0, mag_st = 0.0;
     diff(seq.out, chunk.out, &worst_out, &mag_out);
@@ -248,19 +270,22 @@ int run_case(std::uint32_t rows, std::uint32_t nvh, std::uint32_t nkh) {
 // decode 専用 WMMA（1 行）を逐次 f32 版と比較する。
 // exact = f16 hi/lo の 4 回 WMMA、lossy = hi のみ 1 回。受理境界も見る。
 int run_decode1_case(std::uint32_t nvh, std::uint32_t nkh) {
-    Case seq, ex, ls;
+    Case seq, ex, ls, ex2;
     fill(&seq, 1u, nvh, nkh);
     fill(&ex, 1u, nvh, nkh);
     fill(&ls, 1u, nvh, nkh);
-    for (Case* c : {&ex, &ls}) {
+    fill(&ex2, 1u, nvh, nkh);
+    for (Case* c : {&ex, &ls, &ex2}) {
         c->q = seq.q; c->k = seq.k; c->v = seq.v; c->a = seq.a; c->b = seq.b;
         c->state = seq.state;
     }
-    if (!seq.upload() || !ex.upload() || !ls.upload()) {
+    if (!seq.upload() || !ex.upload() || !ls.upload() || !ex2.upload()) {
         std::printf("FAIL: decode1: デバイスへの転送\n");
         return 1;
     }
-    if (!seq.set_request(0u, 1u) || !ex.set_request(0u, 1u) || !ls.set_request(0u, 1u)) return 1;
+    if (!seq.set_request(0u, 1u) || !ex.set_request(0u, 1u) || !ls.set_request(0u, 1u) ||
+        !ex2.set_request(0u, 1u))
+        return 1;
     if (hipError_t e = launch_gdn_recurrence_f32(seq.args(), nullptr); e != hipSuccess) {
         std::printf("FAIL: decode1 逐次: %s\n", hipGetErrorString(e)); return 1;
     }
@@ -283,10 +308,17 @@ int run_decode1_case(std::uint32_t nvh, std::uint32_t nkh) {
         e != hipSuccess) {
         std::printf("FAIL: decode1 lossy: %s\n", hipGetErrorString(e)); return 1;
     }
+    // 同じ入力でもう一度 exact（実行間の決定性）
+    if (hipError_t e = shelf::hipk::launch_gdn_recurrence_wmma_decode1(ex2.args(), false, nullptr);
+        e != hipSuccess) {
+        std::printf("FAIL: decode1 exact（2 回目）: %s\n", hipGetErrorString(e)); return 1;
+    }
     if (hipError_t se = hipDeviceSynchronize(); se != hipSuccess) {
         std::printf("FAIL: decode1 同期: %s\n", hipGetErrorString(se)); return 1;
     }
-    seq.download(); ex.download(); ls.download();
+    seq.download(); ex.download(); ls.download(); ex2.download();
+    check(ex.out == ex2.out, "decode1 exact は 2 回実行で出力がビット一致");
+    check(ex.state == ex2.state, "decode1 exact は 2 回実行で状態がビット一致");
     double wo = 0.0, mo = 0.0, ws = 0.0, ms = 0.0, wo2 = 0.0, mo2 = 0.0, ws2 = 0.0, ms2 = 0.0;
     diff(seq.out, ex.out, &wo, &mo); diff(seq.state, ex.state, &ws, &ms);
     diff(seq.out, ls.out, &wo2, &mo2); diff(seq.state, ls.state, &ws2, &ms2);
@@ -314,8 +346,11 @@ int main() {
     if (run_case(20u, 2u, 1u) != 0) return 1;   // 端数チャンク（rows < kGdnChunk）
     if (run_case(128u, 4u, 2u) != 0) return 1;  // 4 チャンク（誤差の蓄積を見る）
     if (run_case(256u, 4u, 2u) != 0) return 1;  // 8 チャンク
+    if (run_case(64u, 48u, 16u) != 0) return 1;  // 27B 相当（nvh=48, nkh=16, repeat=3）
     if (run_decode1_case(4u, 2u) != 0) return 1;    // 1 行・head_v 128（WMMA 2 workgroup）
     if (run_decode1_case(2u, 2u) != 0) return 1;    // repeat=1
+    if (run_decode1_case(48u, 16u) != 0) return 1;  // 27B 相当（nvh=48, nkh=16, repeat=3）
+    if (run_decode1_case(32u, 16u) != 0) return 1;  // 9B 相当（nvh=32, nkh=16, repeat=2）
     std::printf("test_hip_gdn_chunk: failures=%d\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -53,7 +53,6 @@ int main(int argc, char** argv) {
     bool logits_all_rows = false;  // true = prefill の全行で logits を作る
     std::string dump_acts;    // 指定すると prefill 後の linear 入力（f32）を保存する
     int fp8_act_group = -1;   // FP8 活性化の量子化粒度。-1 = config.json の宣言に従う
-    int act_quant = 0;        // 0 = 宣言、1 = FP8（W4A8）、2 = MXFP4（W4A4）
     long long offload_mib = 0;   // T14: 重みを pinned host へ落とす量（0 = なし）
     bool allow_host_weights = false;  // 予算超過時に host へ落として続行
     long long promote_after = -1;     // T14: N ステップ後に host 重みを VRAM へ移す
@@ -92,13 +91,6 @@ int main(int argc, char** argv) {
         else if (a == "--allow-host-kv") allow_host_kv = true;
         else if (a == "--online-kv-pages")
             online_kv_pages = static_cast<std::size_t>(std::strtoull(next("N").c_str(), nullptr, 10));
-        else if (a == "--act-quant") {
-            const std::string v = next("auto|fp4|fp8");
-            if (v == "auto") act_quant = 0;
-            else if (v == "fp4") act_quant = 2;
-            else if (v == "fp8") act_quant = 1;
-            else return fail("--act-quant は auto / fp4 / fp8");
-        }
         else if (a == "--prefill-rows") prefill_rows = std::atoi(next("rows").c_str());
         else if (a == "--pipeline-parallel") pp = std::atoi(next("K").c_str());
         else if (a == "--temperature") temperature = std::atof(next("T").c_str());
@@ -109,7 +101,7 @@ int main(int argc, char** argv) {
         else return fail("usage: shelf-run --model DIR --ids 1,2,3 [--steps N] [--out DIR] "
                          "[--device cpu|hip] [--gpu N] [--arena-mib N] "
                          "[--dump-acts DIR] "
-                         "[--fp8-act-group auto|0|128] [--act-quant auto|fp4|fp8] "
+                         "[--fp8-act-group auto|0|128] "
                          "[--offload-weights-mib N] [--vram-budget-mib N] "
                          "[--allow-host-weights] [--promote-after N] "
                          "[--kv-in-host] [--allow-host-kv] [--online-kv-pages N] "
@@ -151,10 +143,6 @@ int main(int argc, char** argv) {
     if (!fmt_r.ok()) return fail(fmt_r.status().message());
     app::Fp8ModelFormat fmt = fmt_r.value();
     if (fp8_act_group >= 0) fmt.act_group = static_cast<std::uint32_t>(fp8_act_group);
-    if (act_quant == 1) fmt.mxfp4_activation = false;
-    if (act_quant == 2) fmt.mxfp4_activation = true;
-    if (fmt.mxfp4_activation && !fmt.mxfp4)
-        return fail("--act-quant fp4 は MXFP4 重みのときだけ使える");
 
     // 生成パラメータの seed を確定する（未指定ならエンジンが採番。§3.4）。
     sampling.seed = api::assign_seed(sampling.seed, 0);
@@ -230,7 +218,6 @@ int main(int argc, char** argv) {
         po.rope_theta = cfg.rope_theta;
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
-        po.mxfp4_activation = fmt.mxfp4_activation;
         po.offload_weights_bytes = static_cast<std::uint64_t>(offload_mib) << 20;
         po.allow_host_weights = allow_host_weights;
         if (budget_mib > 0) po.device_free_bytes = static_cast<std::uint64_t>(budget_mib) << 20;

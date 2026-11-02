@@ -151,6 +151,52 @@ int run_case(uint32_t rows, uint32_t n, uint32_t k,
             test_config(cfg, names[i], Bf16GemmOutputDType::BF16);
     }
 
+    // ---- 実行間の決定性: Prefill2D（rows=64 の束）を 2 回 ----
+    if (rows == 64u && shelf::hipk::bf16_prefill2d_supported(rows, n, k)) {
+        Bf16GemmConfig cfg{Bf16GemmConfigId::Prefill2D, 0u};
+        std::vector<float> a(out_float_elems, 0.0f), b(out_float_elems, 0.0f);
+        for (auto* dst : {&a, &b}) {
+            HIP_OK(hipMemset(dy, 0, out_float_elems * sizeof(float)));
+            HIP_OK(launch_gemm_bf16(cfg, static_cast<const shelf::bf16_t*>(dw),
+                                    static_cast<const shelf::bf16_t*>(dx), dy,
+                                    Bf16GemmOutputDType::F32, rows, n, k, istride, ostride, 0));
+            HIP_OK(hipMemcpy(dst->data(), dy, out_float_elems * sizeof(float),
+                             hipMemcpyDeviceToHost));
+        }
+        if (std::memcmp(a.data(), b.data(), out_float_elems * sizeof(float)) != 0) {
+            double w = 0.0;
+            for (std::size_t i = 0; i < a.size(); ++i)
+                w = std::max(w, std::fabs(double(a[i]) - double(b[i])));
+            std::printf("  !! Prefill2D n=%u k=%u が 2 回で不一致（最大 %.3e）\n", n, k, w);
+        }
+        check(std::memcmp(a.data(), b.data(), out_float_elems * sizeof(float)) == 0,
+              "Prefill2D は 2 回実行でビット一致");
+    }
+
+    // ---- 実行間の決定性: rows==1 の ExactRows（decode の経路）を 2 回 ----
+    if (rows == 1u) {
+        Bf16GemmConfig cfg{Bf16GemmConfigId::ExactRows, 1u};
+        auto run_once = [&](std::vector<float>* dst) {
+            HIP_OK(hipMemset(dy, 0, out_float_elems * sizeof(float)));
+            HIP_OK(launch_gemm_bf16(cfg, static_cast<const shelf::bf16_t*>(dw),
+                                    static_cast<const shelf::bf16_t*>(dx), dy,
+                                    Bf16GemmOutputDType::F32, rows, n, k, istride, ostride, 0));
+            HIP_OK(hipMemcpy(dst->data(), dy, out_float_elems * sizeof(float),
+                             hipMemcpyDeviceToHost));
+        };
+        std::vector<float> a(out_float_elems, 0.0f), b(out_float_elems, 0.0f);
+        run_once(&a);
+        run_once(&b);
+        if (std::memcmp(a.data(), b.data(), out_float_elems * sizeof(float)) != 0) {
+            double w = 0.0;
+            for (std::size_t i = 0; i < a.size(); ++i)
+                w = std::max(w, std::fabs(double(a[i]) - double(b[i])));
+            std::printf("  !! ExactRows rows=1 n=%u k=%u が 2 回で不一致（最大 %.3e）\n", n, k, w);
+        }
+        check(std::memcmp(a.data(), b.data(), out_float_elems * sizeof(float)) == 0,
+              "ExactRows rows=1 は 2 回実行でビット一致");
+    }
+
     // timing: rows=1 GEMV at real 4B shapes
     if (rows <= 64u) {
         Bf16GemmConfig cfg{Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows)};
@@ -183,6 +229,8 @@ int run_case(uint32_t rows, uint32_t n, uint32_t k,
 int main() {
     HIP_OK(hipSetDevice(0));
     if (run_case(1, 2560, 2560) != 0) return 1;   // q_proj-ish
+    if (run_case(1, 512, 4096) != 0) return 1;    // decode mlp（hidden 4096）
+    if (run_case(1, 1024, 4096) != 0) return 1;   // lm_head 相当
     if (run_case(1, 9216, 2560) != 0) return 1;   // gate/up_proj
     if (run_case(4, 512, 256) != 0) return 1;     // small multi-row (chunked path)
     // PR-0b boundary matrix (guide 2.3): rows 1..17 / 63..65, N/K 16-remainders
@@ -195,6 +243,7 @@ int main() {
     if (run_case(63, 16, 16) != 0) return 1;      // exact-rows chunked
     if (run_case(64, 32, 15) != 0) return 1;
     if (run_case(65, 64, 272) != 0) return 1;     // crosses kBf16GemmWideMinRows=65
+    if (run_case(64, 5120, 5120) != 0) return 1;  // 27B の Prefill2D 相当
     // non-trivial strides (istride multiple of 8 elems = 16B for vector paths)
     if (run_case(4, 512, 256, 264, 520) != 0) return 1;
     if (run_case(16, 33, 17, 24, 40) != 0) return 1;

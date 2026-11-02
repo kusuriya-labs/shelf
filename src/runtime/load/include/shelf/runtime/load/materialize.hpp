@@ -39,10 +39,6 @@ struct Fp8ModelFormat {
     // MXFP4（`quant_method: quark`・fp4 / group 32 / E8M0 スケール）。
     // `weight` / `act_group` は FP8 用なので、MXFP4 のときは `mxfp4` を見る。
     bool mxfp4 = false;
-    // 活性化も MXFP4（E2M1 + E8M0）で量子化するか。Quark の宣言
-    // `global_quant_config.input_tensors`（dtype fp4 / group 32 / e8m0）で決まる。
-    // false のときは既存の FP8（E4M3）活性化 = W4A8。
-    bool mxfp4_activation = false;
     std::uint32_t mxfp4_group = 32u;           // K 方向のブロック長
     shelf::quant::fp8::fine::WeightScaleGranularity weight =
         shelf::quant::fp8::fine::WeightScaleGranularity::PerChannel;

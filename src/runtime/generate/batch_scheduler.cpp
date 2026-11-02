@@ -121,7 +121,8 @@ bool BatchScheduler::next_decode(DecodeAction* out) {
     return !out->rows.empty();
 }
 
-SlotEnd BatchScheduler::decode_result(std::size_t slot, std::int32_t token, bool stop_hit) {
+SlotEnd BatchScheduler::decode_result(std::size_t slot, std::int32_t token, bool stop_hit,
+                                      bool from_prefill) {
     if (slot >= slots_.size()) return SlotEnd::error;
     Slot& s = slots_[slot];
     if (s.state != SlotState::decode) {
@@ -141,7 +142,7 @@ SlotEnd BatchScheduler::decode_result(std::size_t slot, std::int32_t token, bool
         return s.end;
     }
     s.feed = token;
-    ++s.position;
+    if (!from_prefill) ++s.position;
     return SlotEnd::none;
 }
 

@@ -17,7 +17,6 @@
 
 #include <shelf/backend/hip/kernels/elementwise/aux_ops.h>
 #include <shelf/backend/hip/kernels/elementwise/activation_quantize_fp8.h>
-#include <shelf/backend/hip/kernels/elementwise/activation_quantize_mxfp4.h>
 #include <shelf/backend/hip/kernels/elementwise/embedding.h>
 #include <shelf/backend/hip/kernels/elementwise/elementwise.h>
 #include <shelf/backend/hip/kernels/gdn/gdn_chunk.h>
@@ -127,24 +126,6 @@ float dot_mxfp4_row(const std::uint8_t* codes, const std::uint8_t* scales, std::
 }
 
 
-// GPU の活性化量子化と同じ契約で f32 ベクトルを作り直す（CPU 分担用）。
-// W4A4 は E2M1 + E8M0（32 要素ごと）、W4A8 は E4M3 + 動的スケール。
-void quantize_act_mxfp4_host(const float* x, std::uint32_t k, std::vector<float>& out) {
-    using namespace shelf::quant::mxfp4;
-    const std::uint32_t kp = pad_k(k);
-    std::vector<std::uint8_t> codes(static_cast<std::size_t>(kp) / 2u);
-    std::vector<std::uint8_t> scales(static_cast<std::size_t>(kp) / kBlockK);
-    if (!quantize_row(x, k, kp, codes.data(), scales.data()).ok()) {
-        out.assign(x, x + k);
-        return;
-    }
-    out.resize(k);
-    for (std::uint32_t i = 0; i < k; ++i) {
-        const std::uint8_t byte = codes[i / 2u];
-        const std::uint8_t nib = (i % 2u == 0u) ? (byte & 0x0Fu) : (byte >> 4);
-        out[i] = e2m1_lut(nib) * e8m0_lut(scales[i / kBlockK]);
-    }
-}
 
 void quantize_act_fp8_host(const float* x, std::uint32_t k, std::uint32_t group,
                            std::vector<float>& out) {
@@ -374,6 +355,8 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
         if (v == 16 || v == 32 || v == 64 || v == 128) opts_.kv_block_size = static_cast<std::size_t>(v);
     }
     (void)hipSetDevice(opts_.device);
+    // 非同期コピーの完了順に依存しないよう、制御データの転送は同期コピーで行う
+    // （下の run_impl 参照）。ストリーム自体は non-blocking のまま。
     hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
     // arena_bytes == 0 ならアリーナは declare_states のグラフから自動算出する。
     hipError_t e0 = hipSuccess;
@@ -387,11 +370,13 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     const hipError_t e4 = malloc_dev(&slot_zero_dev_, kMaxStepRows);
     const hipError_t e5 = malloc_dev(&errword_dev_, 1u);
     const hipError_t e6 = malloc_dev(&req_dev_, std::max<std::size_t>(max_sequences_, 1u));
+    const hipError_t e6r = malloc_dev(&row_req_dev_, kMaxStepRows);
     const hipError_t e8 = malloc_dev(&rowslot_dev_, kMaxStepRows);
     const hipError_t e9 = malloc_dev(&slot_window_dev_, max_sequences_);
     const hipError_t e7 = malloc_dev(&inv_freq_dev_,
                                       std::max<std::size_t>(2, opts_.rope_rotary_dim / 2));
-    (void)e0; (void)e1; (void)e2; (void)e3; (void)e4; (void)e5; (void)e6; (void)e7; (void)e8;
+    (void)e0; (void)e1; (void)e2; (void)e3; (void)e4; (void)e5; (void)e6; (void)e6r; (void)e7;
+    (void)e8;
     // 起動時 scratch は確保失敗を無視する（その値を使う時点でエラーになる）。
     // 予算 accounting には成功分だけを計上する。
     const auto charge = [&](void* p, std::size_t bytes) {
@@ -407,6 +392,7 @@ HipStepExecutor::HipStepExecutor(HipStepExecutorOptions opts) : opts_(opts) {
     charge(slot_zero_dev_, kMaxStepRows * sizeof(std::uint32_t));
     charge(errword_dev_, sizeof(std::uint32_t));
     charge(req_dev_, max_sequences_ * sizeof(hipk::GdnRequestDescriptor));
+    charge(row_req_dev_, kMaxStepRows * sizeof(hipk::GdnRequestDescriptor));
     charge(rowslot_dev_, kMaxStepRows * sizeof(std::uint32_t));
     charge(inv_freq_dev_, std::max<std::size_t>(2, opts_.rope_rotary_dim / 2) * sizeof(double));
     hipMemset(slot_zero_dev_, 0, kMaxStepRows * sizeof(std::uint32_t));
@@ -442,11 +428,10 @@ HipStepExecutor::~HipStepExecutor() {
     pinned_allocs_.clear();
     dev_release(fp8_codes_dev_);
     dev_release(fp8_scales_dev_);
-    dev_release(mxfp4_act_codes_dev_);
-    dev_release(mxfp4_act_scales_dev_);
     dev_release(moe_scratch_dev_);
     dev_release(moe_act_codes_dev_);
     dev_release(moe_act_scales_dev_);
+    dev_release(moe_logits_dev_);
     dev_release(arena_dev_);
     dev_release(token_dev_);
     dev_release(posrep_dev_);
@@ -454,6 +439,7 @@ HipStepExecutor::~HipStepExecutor() {
     dev_release(slot_zero_dev_);
     dev_release(errword_dev_);
     dev_release(req_dev_);
+    dev_release(row_req_dev_);
     dev_release(rowslot_dev_);
     dev_release(slot_window_dev_);
     dev_release(inv_freq_dev_);
@@ -610,30 +596,21 @@ Status HipStepExecutor::ensure_fp8_scratch(std::size_t code_bytes, std::size_t s
     return Status::make_ok();
 }
 
-Status HipStepExecutor::ensure_mxfp4_scratch(std::size_t code_bytes, std::size_t scale_bytes) {
-    if (code_bytes > mxfp4_act_codes_cap_) {
-        if (mxfp4_act_codes_dev_) dev_release(mxfp4_act_codes_dev_);
-        mxfp4_act_codes_dev_ = nullptr;
-        SHELF_RETURN_IF_ERROR(
-            dev_alloc(&mxfp4_act_codes_dev_, code_bytes, "malloc mxfp4 act codes"));
-        mxfp4_act_codes_cap_ = code_bytes;
-    }
-    if (scale_bytes > mxfp4_act_scales_cap_) {
-        if (mxfp4_act_scales_dev_) dev_release(mxfp4_act_scales_dev_);
-        mxfp4_act_scales_dev_ = nullptr;
-        SHELF_RETURN_IF_ERROR(
-            dev_alloc(&mxfp4_act_scales_dev_, scale_bytes, "malloc mxfp4 act scales"));
-        mxfp4_act_scales_cap_ = scale_bytes;
-    }
-    return Status::make_ok();
-}
-
 Status HipStepExecutor::ensure_moe_scratch(std::size_t bytes) {
     if (bytes <= moe_scratch_cap_) return Status::make_ok();
     if (moe_scratch_dev_) dev_release(moe_scratch_dev_);
     moe_scratch_dev_ = nullptr;
     SHELF_RETURN_IF_ERROR(dev_alloc(&moe_scratch_dev_, bytes, "malloc moe scratch"));
     moe_scratch_cap_ = bytes;
+    return Status::make_ok();
+}
+
+Status HipStepExecutor::ensure_moe_logits(std::size_t bytes) {
+    if (bytes <= moe_logits_cap_) return Status::make_ok();
+    if (moe_logits_dev_) dev_release(moe_logits_dev_);
+    moe_logits_dev_ = nullptr;
+    SHELF_RETURN_IF_ERROR(dev_alloc(&moe_logits_dev_, bytes, "malloc moe logits"));
+    moe_logits_cap_ = bytes;
     return Status::make_ok();
 }
 
@@ -661,7 +638,8 @@ Status HipStepExecutor::ensure_moe_act_scratch(std::size_t code_bytes,
 // GPU 側で分担を決める最適化は後段。判定は「この呼び出しの先頭」で固定する）。
 Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
                                     bf16_t* out_row, std::size_t H, std::size_t E,
-                                    std::size_t I, std::size_t Is, bool shared) {
+                                    std::size_t I, std::size_t Is, bool shared,
+                                    const float* logits_host, const bf16_t* x_host_in) {
     const std::size_t W = std::max(I, Is);
     // ---- 重みの形式（エキスパートは全員同じ形式。ルーターは bf16）----
     const auto dev_of = [&](std::size_t i) -> void* {
@@ -706,22 +684,37 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
     auto* logits_dev = reinterpret_cast<float*>(base + off_logits);
     auto* cpu_acc_dev = reinterpret_cast<float*>(base + off_cpu);
 
-    // ---- ルーター（1 行分の logits をデバイスで作ってホストで top-k）----
-    SHELF_RETURN_IF_ERROR(hipok(
-        launch_moe_router_logit(x_row, static_cast<const bf16_t*>(dev_of(0)), logits_dev,
-                                u32(E), u32(H), stream_),
-        "moe router logits"));
+    // ---- ルーター（logits をデバイスで作ってホストで top-k）----
+    // N08: 呼び手が 1 ステップ分をまとめて読んでいる場合は、この行の分岐と
+    // 同期を省く（`logits_host` / `x_host_in`）。
     std::vector<float> logits(E);
     std::vector<bf16_t> x_host(H);   // CPU 分担の入力（GPU と同じ bf16 の生ビット）
-    SHELF_RETURN_IF_ERROR(hipok(
-        hipMemcpyAsync(logits.data(), logits_dev, E * sizeof(float), hipMemcpyDeviceToHost,
-                       stream_),
-        "moe router readback"));
-    SHELF_RETURN_IF_ERROR(hipok(
-        hipMemcpyAsync(x_host.data(), x_row, H * sizeof(bf16_t), hipMemcpyDeviceToHost,
-                       stream_),
-        "moe cpu input readback"));
-    SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "moe router sync"));
+    if (logits_host == nullptr) {
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_moe_router_logit(x_row, static_cast<const bf16_t*>(dev_of(0)), logits_dev,
+                                    u32(E), u32(H), stream_),
+            "moe router logits"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            hipMemcpyAsync(logits.data(), logits_dev, E * sizeof(float),
+                           hipMemcpyDeviceToHost, stream_),
+            "moe router readback"));
+        // CPU 分担の候補が無い（pinned のままのエキスパートが無い）ときは
+        // 入力の D2H を省く。
+        const bool need_x = !host_weight_index_.empty();
+        if (need_x) {
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemcpyAsync(x_host.data(), x_row, H * sizeof(bf16_t),
+                               hipMemcpyDeviceToHost, stream_),
+                "moe cpu input readback"));
+        }
+        SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "moe router sync"));
+        ++moe_router_syncs_;
+        moe_router_copy_bytes_ += E * sizeof(float) + (need_x ? H * sizeof(bf16_t) : 0u);
+    } else {
+        std::copy(logits_host, logits_host + E, logits.begin());
+        if (x_host_in != nullptr)
+            std::copy(x_host_in, x_host_in + H, x_host.begin());
+    }
 
     const std::size_t k = static_cast<std::size_t>(p.attr.top_k);
     if (k == 0u || k > E)
@@ -757,8 +750,8 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
     SHELF_RETURN_IF_ERROR(hipok(
         hipMemsetAsync(acc_buf, 0, H * sizeof(float), stream_), "moe acc zero"));
 
-    // ---- MXFP4 の活性化 scratch（1 行分）。x は全エキスパートで共通。----
-    const bool w4a4 = opts_.mxfp4_activation;
+    // ---- MXFP4 の活性化 scratch（1 行分）。x は全エキスパートで共通。
+    // 活性化は W4A8（E4M3 + 動的スケール）。group は opts_.fp8_act_group。
     std::uint32_t x_kp = 0;
     std::uint32_t x_group = 0;
     if (expert_mx) {
@@ -766,27 +759,17 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
         x_kp = pad_k(u32(H));
         if (x_kp != u32(H))
             return Status::unsupported("moe_mlp: H が 32 の倍数でない", __FILE__, __LINE__);
-        if (w4a4) {
-            SHELF_RETURN_IF_ERROR(
-                ensure_mxfp4_scratch(tiled_bytes(1u, x_kp), scale_bytes(1u, x_kp)));
-            SHELF_RETURN_IF_ERROR(hipok(
-                launch_activation_quantize_mxfp4(x_row, mxfp4_act_codes_dev_,
-                                                 mxfp4_act_scales_dev_, 1u, u32(H), x_kp,
-                                                 u32(H), stream_),
-                "moe mxfp4 act quantize"));
-        } else {
-            x_group = (opts_.fp8_act_group != 0u &&
-                       (x_kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
-                          ? shelf::quant::fp8::fine::kActGroupK
-                          : 0u;
-            SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
-                shelf::quant::fp8::tiled_bytes(1u, x_kp),
-                shelf::quant::fp8::fine::activation_scale_count(1u, x_kp, x_group)));
-            SHELF_RETURN_IF_ERROR(hipok(
-                launch_activation_quantize_fp8(x_row, fp8_codes_dev_, fp8_scales_dev_, 1u,
-                                               u32(H), x_kp, u32(H), x_group, stream_),
-                "moe mxfp4 act quantize (fp8)"));
-        }
+        x_group = (opts_.fp8_act_group != 0u &&
+                   (x_kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                      ? shelf::quant::fp8::fine::kActGroupK
+                      : 0u;
+        SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
+            shelf::quant::fp8::tiled_bytes(1u, x_kp),
+            shelf::quant::fp8::fine::activation_scale_count(1u, x_kp, x_group)));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_activation_quantize_fp8(x_row, fp8_codes_dev_, fp8_scales_dev_, 1u,
+                                           u32(H), x_kp, u32(H), x_group, stream_),
+            "moe mxfp4 act quantize (fp8)"));
     }
 
     // エキスパート 1 個の MLP（gate/up → swiglu → down → 累積）。
@@ -801,40 +784,21 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
                                              __FILE__, __LINE__);
             Mxfp4GemmScaleArgs sa;
             sa.weight_scale_stride = kp / kBlockK;
-            if (w4a4) {
-                sa.act_group = 0u;
-                sa.activation_scale_stride = kp / kBlockK;
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a4_decode1(mx_g->codes, mx_g->scales,
-                                                   mxfp4_act_codes_dev_,
-                                                   mxfp4_act_scales_dev_, gate_buf,
-                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
-                                                   kp, u32(width), sa, stream_),
-                    "moe expert gate (w4a4)"));
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a4_decode1(mx_u->codes, mx_u->scales,
-                                                   mxfp4_act_codes_dev_,
-                                                   mxfp4_act_scales_dev_, up_buf,
-                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
-                                                   kp, u32(width), sa, stream_),
-                    "moe expert up (w4a4)"));
-            } else {
-                sa.act_group = x_group;
-                sa.activation_scale_stride =
-                    x_group == shelf::quant::fp8::fine::kActGroupK ? kp / x_group : 1u;
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a8_decode1(mx_g->codes, mx_g->scales, fp8_codes_dev_,
-                                                   fp8_scales_dev_, gate_buf,
-                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
-                                                   kp, u32(width), sa, stream_),
-                    "moe expert gate (w4a8)"));
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a8_decode1(mx_u->codes, mx_u->scales, fp8_codes_dev_,
-                                                   fp8_scales_dev_, up_buf,
-                                                   Mxfp4GemmOutputDType::BF16, 1u, u32(width),
-                                                   kp, u32(width), sa, stream_),
-                    "moe expert up (w4a8)"));
-            }
+            sa.act_group = x_group;
+            sa.activation_scale_stride =
+                x_group == shelf::quant::fp8::fine::kActGroupK ? kp / x_group : 1u;
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_mxfp4_w4a8_decode1(mx_g->codes, mx_g->scales, fp8_codes_dev_,
+                                               fp8_scales_dev_, gate_buf,
+                                               Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                               kp, u32(width), sa, stream_),
+                "moe expert gate (w4a8)"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_mxfp4_w4a8_decode1(mx_u->codes, mx_u->scales, fp8_codes_dev_,
+                                               fp8_scales_dev_, up_buf,
+                                               Mxfp4GemmOutputDType::BF16, 1u, u32(width),
+                                               kp, u32(width), sa, stream_),
+                "moe expert up (w4a8)"));
         } else {
             Bf16GemmConfig cfg;
             cfg.id = Bf16GemmConfigId::ExactRows;
@@ -864,48 +828,30 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
                                            __LINE__);
             Mxfp4GemmScaleArgs sa;
             sa.weight_scale_stride = kp / kBlockK;
-            if (w4a4) {
-                SHELF_RETURN_IF_ERROR(
-                    ensure_moe_act_scratch(tiled_bytes(1u, kp), scale_bytes(1u, kp)));
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_activation_quantize_mxfp4(mid_buf, moe_act_codes_dev_,
-                                                     moe_act_scales_dev_, 1u, u32(width), kp,
-                                                     u32(width), stream_),
-                    "moe expert down act quantize (w4a4)"));
-                sa.act_group = 0u;
-                sa.activation_scale_stride = kp / kBlockK;
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a4_decode1(mx_d->codes, mx_d->scales,
-                                                   moe_act_codes_dev_, moe_act_scales_dev_,
-                                                   eout_buf, Mxfp4GemmOutputDType::BF16, 1u,
-                                                   u32(H), kp, u32(H), sa, stream_),
-                    "moe expert down (w4a4)"));
-            } else {
-                const std::uint32_t group =
-                    (opts_.fp8_act_group != 0u &&
-                     (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
-                        ? shelf::quant::fp8::fine::kActGroupK
-                        : 0u;
-                SHELF_RETURN_IF_ERROR(ensure_moe_act_scratch(
-                    shelf::quant::fp8::tiled_bytes(1u, kp),
-                    shelf::quant::fp8::fine::activation_scale_count(1u, kp, group) *
-                        sizeof(float)));
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_activation_quantize_fp8(mid_buf, moe_act_codes_dev_,
-                                                   reinterpret_cast<float*>(moe_act_scales_dev_),
-                                                   1u, u32(width), kp, u32(width), group,
-                                                   stream_),
-                    "moe expert down act quantize"));
-                sa.act_group = group;
-                sa.activation_scale_stride =
-                    group == shelf::quant::fp8::fine::kActGroupK ? kp / group : 1u;
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_gemm_mxfp4_w4a8_decode1(
-                        mx_d->codes, mx_d->scales, moe_act_codes_dev_,
-                        reinterpret_cast<const float*>(moe_act_scales_dev_), eout_buf,
-                        Mxfp4GemmOutputDType::BF16, 1u, u32(H), kp, u32(H), sa, stream_),
-                    "moe expert down (w4a8)"));
-            }
+            const std::uint32_t group =
+                (opts_.fp8_act_group != 0u &&
+                 (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                    ? shelf::quant::fp8::fine::kActGroupK
+                    : 0u;
+            SHELF_RETURN_IF_ERROR(ensure_moe_act_scratch(
+                shelf::quant::fp8::tiled_bytes(1u, kp),
+                shelf::quant::fp8::fine::activation_scale_count(1u, kp, group) *
+                    sizeof(float)));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_activation_quantize_fp8(
+                    mid_buf, moe_act_codes_dev_,
+                    reinterpret_cast<float*>(moe_act_scales_dev_), 1u, u32(width), kp,
+                    u32(width), group, stream_),
+                "moe expert down act quantize"));
+            sa.act_group = group;
+            sa.activation_scale_stride =
+                group == shelf::quant::fp8::fine::kActGroupK ? kp / group : 1u;
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_mxfp4_w4a8_decode1(
+                    mx_d->codes, mx_d->scales, moe_act_codes_dev_,
+                    reinterpret_cast<const float*>(moe_act_scales_dev_), eout_buf,
+                    Mxfp4GemmOutputDType::BF16, 1u, u32(H), kp, u32(H), sa, stream_),
+                "moe expert down (w4a8)"));
         } else {
             Bf16GemmConfig cfg;
             cfg.id = Bf16GemmConfigId::ExactRows;
@@ -955,13 +901,7 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
         const auto it = host_weight_index_.find(p.weights[1u + 3u * sel[j]].value());
         if (it != host_weight_index_.end() && host_weights_[it->second].kind == 2) cpu_mx = true;
     }
-    if (cpu_mx) {
-        if (w4a4) {
-            quantize_act_mxfp4_host(xf.data(), u32(H), xq_row);
-        } else {
-            quantize_act_fp8_host(xf.data(), u32(H), x_group, xq_row);
-        }
-    }
+    if (cpu_mx) quantize_act_fp8_host(xf.data(), u32(H), x_group, xq_row);
     const auto cpu_expert = [&](std::size_t w_idx, std::size_t width, float weight,
                                 float* acc_out) -> Status {
         const auto host_of = [&](std::size_t i) -> const HostWeight* {
@@ -986,7 +926,7 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
             const auto* gc = static_cast<const std::uint8_t*>(g->host);
             const auto* uc = static_cast<const std::uint8_t*>(u->host);
             const auto* dc = static_cast<const std::uint8_t*>(d->host);
-            // GPU と同じ活性化量子化を通す（W4A4 / W4A8）。これで VRAM 予算の
+            // GPU と同じ活性化量子化（W4A8）を通す。これで VRAM 予算の
             // 違い（CPU 分担か GPU か）で数値が変わらない方向に揃う。
             // 入力 x は行で共通なので、量子化は `xq_row` を 1 回だけ作って使う。
             const float* act = xq_row.empty() ? xf.data() : xq_row.data();
@@ -1005,14 +945,10 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
                 mid[i] = bf16_round_host((gv / (1.0f + std::exp(-gv))) * uv);
             }
             std::vector<float> mq;
-            if (w4a4) {
-                quantize_act_mxfp4_host(mid.data(), u32(width), mq);
-            } else {
-                const bool g128 = opts_.fp8_act_group != 0u &&
-                                  (width % shelf::quant::fp8::fine::kActGroupK) == 0u;
-                quantize_act_fp8_host(mid.data(), u32(width),
-                                      g128 ? shelf::quant::fp8::fine::kActGroupK : 0u, mq);
-            }
+            const bool g128 = opts_.fp8_act_group != 0u &&
+                              (width % shelf::quant::fp8::fine::kActGroupK) == 0u;
+            quantize_act_fp8_host(mid.data(), u32(width),
+                                  g128 ? shelf::quant::fp8::fine::kActGroupK : 0u, mq);
             for (std::size_t h = 0; h < H; ++h)
                 out[h] = dot_mxfp4_row(dc, d->host_scales.data(), u32(h), mq.data(),
                                        u32(width), d->k_padded);
@@ -1139,6 +1075,270 @@ Status HipStepExecutor::run_moe_row(const ir::Primitive& p, const bf16_t* x_row,
     }
 
     return hipok(launch_f32_to_bf16(acc_buf, out_row, u32(H), stream_), "moe output");
+}
+
+Status HipStepExecutor::ensure_moe_rows_sel(std::size_t total, std::size_t rows) {
+    // act_rows / out_rows で 2*total、sel_w で rows*k だが、呼び手が同じ本数を使うので
+    // まとめて total*4 バイトを 3 本ぶん確保する（mapped pinned）。
+    const std::size_t need = total * sizeof(std::uint32_t) * 2u;
+    if (need > moe_rows_sel_cap_) {
+        void* dev = nullptr;
+        SHELF_RETURN_IF_ERROR(alloc_pinned_aux(&dev, need, nullptr, "moe rows sel"));
+        moe_rows_sel_dev_ = dev;
+        moe_rows_sel_cap_ = need;
+    }
+    const std::size_t wneed = (total + rows) * sizeof(float);
+    if (wneed > moe_rows_w_cap_) {
+        void* dev = nullptr;
+        SHELF_RETURN_IF_ERROR(alloc_pinned_aux(&dev, wneed, nullptr, "moe rows w"));
+        moe_rows_w_dev_ = dev;
+        moe_rows_w_cap_ = wneed;
+    }
+    return Status::make_ok();
+}
+
+// N09: 同一エキスパートへ複数行をまとめて流す。行ごとの計算（decode1 と同じ本文）を
+// 保つので、出力は per-row 経路とビット同一。
+Status HipStepExecutor::run_moe_grouped(const ir::Primitive& p, const bf16_t* xb,
+                                        bf16_t* ob, std::size_t rows, std::size_t H,
+                                        std::size_t E, std::size_t I, std::size_t Is,
+                                        bool shared, const float* logits,
+                                        const float* shared_logits) {
+    using namespace shelf::quant::mxfp4;
+    const std::size_t k = static_cast<std::size_t>(p.attr.top_k);
+    if (k == 0u || k > E)
+        return Status::invalid_state("moe grouped: top_k out of range", __FILE__, __LINE__);
+    const std::size_t W = std::max(I, Is);
+    const std::size_t total = rows * k;
+
+    // ---- top-k（run_moe_row と同じ手順・同じ同値規則）----
+    std::vector<std::uint32_t> sel(total, 0u);
+    std::vector<float> sel_w(total, 0.0f);
+    std::vector<char> used(E, 0);
+    std::vector<float> sm(E, 0.0f);
+    for (std::size_t r = 0; r < rows; ++r) {
+        const float* lg = logits + r * E;
+        float mx = -INFINITY;
+        for (std::size_t e = 0; e < E; ++e) mx = std::max(mx, lg[e]);
+        float sum = 0.0f;
+        for (std::size_t e = 0; e < E; ++e) {
+            sm[e] = std::exp(lg[e] - mx);
+            sum += sm[e];
+        }
+        for (std::size_t e = 0; e < E; ++e) sm[e] /= sum;
+        std::fill(used.begin(), used.end(), 0);
+        std::vector<float> keep_v(k, 0.0f);
+        float keep = 0.0f;
+        for (std::size_t j = 0; j < k; ++j) {
+            std::size_t best = E;
+            for (std::size_t e = 0; e < E; ++e) {
+                if (used[e]) continue;
+                if (best == E || sm[e] > sm[best]) best = e;
+            }
+            used[best] = 1;
+            sel[r * k + j] = static_cast<std::uint32_t>(best);
+            keep_v[j] = sm[best];
+            keep += sm[best];
+        }
+        if (keep <= 0.0f)
+            return Status::invalid_state("moe grouped: top-k weights are zero", __FILE__,
+                                         __LINE__);
+        for (std::size_t j = 0; j < k; ++j) sel_w[r * k + j] = keep_v[j] / keep;
+    }
+
+    // ---- エキスパートごとの行リスト（エキスパート昇順、行は昇順）----
+    std::vector<std::vector<std::uint32_t>> groups(E);
+    for (std::size_t i = 0; i < total; ++i) groups[sel[i]].push_back(static_cast<std::uint32_t>(i));
+    std::size_t max_m = 0;
+    for (const auto& g : groups) max_m = std::max(max_m, g.size());
+    if (max_m == 0u) max_m = 1u;
+
+    // mapped の索引領域（GPU から直接読む。コピー不要）。
+    SHELF_RETURN_IF_ERROR(ensure_moe_rows_sel(total, rows));
+    auto* act_rows = static_cast<std::uint32_t*>(moe_rows_sel_dev_);
+    auto* out_rows = act_rows + total;
+    auto* sel_w_dev = static_cast<float*>(moe_rows_w_dev_);
+    std::size_t pos = 0;
+    std::vector<std::size_t> start(E + 1u, 0u);
+    for (std::size_t e = 0; e < E; ++e) {
+        start[e] = pos;
+        for (std::uint32_t i : groups[e]) {
+            act_rows[pos] = i / k;      // 元の行
+            out_rows[pos] = i;          // スロット（r*k + j）
+            ++pos;
+        }
+    }
+    start[E] = pos;
+    std::memcpy(sel_w_dev, sel_w.data(), total * sizeof(float));
+
+    // ---- 作業領域 ----
+    const std::uint32_t kp_x = pad_k(u32(H));
+    const std::uint32_t x_group =
+        (opts_.fp8_act_group != 0u &&
+         (kp_x % shelf::quant::fp8::fine::kActGroupK) == 0u)
+            ? shelf::quant::fp8::fine::kActGroupK
+            : 0u;
+    const std::size_t x_row_bytes = shelf::quant::fp8::tiled_bytes(1u, kp_x);
+    const std::size_t x_scales =
+        shelf::quant::fp8::fine::activation_scale_count(1u, kp_x, x_group);
+    const std::uint32_t kp_d = pad_k(u32(I));
+    if (kp_d != u32(I))
+        return Status::unsupported("moe grouped: I が 32 の倍数でない", __FILE__, __LINE__);
+    const std::uint32_t d_group =
+        (opts_.fp8_act_group != 0u &&
+         (kp_d % shelf::quant::fp8::fine::kActGroupK) == 0u)
+            ? shelf::quant::fp8::fine::kActGroupK
+            : 0u;
+    const std::size_t d_row_bytes = shelf::quant::fp8::tiled_bytes(1u, kp_d);
+    const std::size_t d_scales =
+        shelf::quant::fp8::fine::activation_scale_count(1u, kp_d, d_group);
+
+    std::size_t off = 0;
+    const auto take = [&off](std::size_t bytes) {
+        off = (off + 15u) & ~std::size_t(15u);
+        const std::size_t at = off;
+        off += bytes;
+        return at;
+    };
+    const std::size_t off_slots = take(total * H * sizeof(bf16_t));
+    const std::size_t off_gate = take(max_m * W * sizeof(bf16_t));
+    const std::size_t off_up = take(max_m * W * sizeof(bf16_t));
+    const std::size_t off_mid = take(max_m * W * sizeof(bf16_t));
+    const std::size_t off_shared = take(shared ? rows * H * sizeof(bf16_t) : 0u);
+    SHELF_RETURN_IF_ERROR(ensure_moe_scratch(take(16u)));
+    auto* base = static_cast<std::uint8_t*>(moe_scratch_dev_);
+    auto* slots = reinterpret_cast<bf16_t*>(base + off_slots);
+    auto* gate_buf = reinterpret_cast<bf16_t*>(base + off_gate);
+    auto* up_buf = reinterpret_cast<bf16_t*>(base + off_up);
+    auto* mid_buf = reinterpret_cast<bf16_t*>(base + off_mid);
+    auto* shared_buf = reinterpret_cast<bf16_t*>(base + off_shared);
+
+    // 入力 x を 1 行ずつ断片順へ量子化する（エキスパートで共通）。
+    SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(x_row_bytes * rows, x_scales * rows));
+    for (std::size_t r = 0; r < rows; ++r)
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_activation_quantize_fp8(xb + r * H, fp8_codes_dev_ + r * x_row_bytes,
+                                           fp8_scales_dev_ + r * x_scales, 1u, u32(H), kp_x,
+                                           u32(H), x_group, stream_),
+            "moe grouped: act quantize"));
+
+    // ---- エキスパートごとの MLP ----
+    Mxfp4GemmScaleArgs sa_x;
+    sa_x.weight_scale_stride = kp_x / kBlockK;
+    sa_x.act_group = x_group;
+    sa_x.activation_scale_stride = static_cast<std::uint32_t>(x_scales);
+    Mxfp4GemmScaleArgs sa_d;
+    sa_d.weight_scale_stride = kp_d / kBlockK;
+    sa_d.act_group = d_group;
+    sa_d.activation_scale_stride = static_cast<std::uint32_t>(d_scales);
+
+    for (std::size_t e = 0; e < E; ++e) {
+        const std::size_t m = groups[e].size();
+        if (m == 0u) continue;
+        const Mxfp4Weight* g = nullptr;
+        const Mxfp4Weight* u = nullptr;
+        const Mxfp4Weight* d = nullptr;
+        {
+            const auto git = weight_mxfp4_.find(p.weights[1u + 3u * e].value());
+            const auto uit = weight_mxfp4_.find(p.weights[2u + 3u * e].value());
+            const auto dit = weight_mxfp4_.find(p.weights[3u + 3u * e].value());
+            if (git == weight_mxfp4_.end() || uit == weight_mxfp4_.end() ||
+                dit == weight_mxfp4_.end())
+                return Status::unsupported("moe grouped: expert weight kind", __FILE__,
+                                           __LINE__);
+            g = &git->second;
+            u = &uit->second;
+            d = &dit->second;
+        }
+        const std::uint32_t* g_act = act_rows + start[e];
+        const std::uint32_t* g_out = out_rows + start[e];
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_mxfp4_w4a8_decode_rows(
+                g->codes, g->scales, fp8_codes_dev_, fp8_scales_dev_, g_act, nullptr,
+                gate_buf, Mxfp4GemmOutputDType::BF16, u32(m), u32(I), kp_x,
+                u32(x_row_bytes), u32(I), sa_x, stream_),
+            "moe grouped: gate"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_mxfp4_w4a8_decode_rows(
+                u->codes, u->scales, fp8_codes_dev_, fp8_scales_dev_, g_act, nullptr,
+                up_buf, Mxfp4GemmOutputDType::BF16, u32(m), u32(I), kp_x, u32(x_row_bytes),
+                u32(I), sa_x, stream_),
+            "moe grouped: up"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_swiglu_bf16(gate_buf, u32(I), up_buf, u32(I), mid_buf, u32(I), u32(m),
+                               u32(I), stream_),
+            "moe grouped: swiglu"));
+        SHELF_RETURN_IF_ERROR(ensure_moe_act_scratch(d_row_bytes * max_m,
+                                                     d_scales * max_m * sizeof(float)));
+        // rows 版の down は行ごとに `d_row_bytes` 間隔で読む。まとめて量子化すると
+        // 1 タイル内の 32 B 間隔になるため、ここは 1 行ずつ書き分ける（値は同じ）。
+        for (std::size_t r = 0; r < m; ++r)
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_activation_quantize_fp8(
+                    mid_buf + r * I, moe_act_codes_dev_ + r * d_row_bytes,
+                    reinterpret_cast<float*>(moe_act_scales_dev_) + r * d_scales, 1u,
+                    u32(I), kp_d, u32(I), d_group, stream_),
+                "moe grouped: down act quantize"));
+        SHELF_RETURN_IF_ERROR(hipok(
+            launch_gemm_mxfp4_w4a8_decode_rows(
+                d->codes, d->scales, moe_act_codes_dev_,
+                reinterpret_cast<const float*>(moe_act_scales_dev_), nullptr, g_out, slots,
+                Mxfp4GemmOutputDType::BF16, u32(m), u32(H), kp_d, u32(d_row_bytes), u32(H),
+                sa_d, stream_),
+            "moe grouped: down"));
+    }
+
+    // ---- 共有エキスパート（bf16、行ごとに decode1 と同じ経路）----
+    // 行ごとのゲート値（sigmoid）は呼び手がルーターと同じ同期で読んでいる。
+    float* sg_dev = sel_w_dev + total;
+    const bool has_shared = shared && shared_logits != nullptr;
+    if (shared) {
+        // 共有エキスパートの重みは [gate, up, down, gate_logit] の順で
+        // エキスパート群の直後から並ぶ（run_moe_row の `1 + 3E` と同じ）。
+        const std::size_t sbase = 1u + 3u * E;
+        const auto sd = [&](std::size_t i) -> const bf16_t* {
+            const auto it = weight_dev_.find(p.weights[sbase + i].value());
+            return it == weight_dev_.end() ? nullptr : static_cast<const bf16_t*>(it->second);
+        };
+        const bf16_t* sg_w = sd(0u);
+        const bf16_t* su_w = sd(1u);
+        const bf16_t* sd_w = sd(2u);
+        if (sg_w == nullptr || su_w == nullptr || sd_w == nullptr)
+            return Status::unsupported("moe grouped: 共有エキスパートは bf16 のみ対応",
+                                       __FILE__, __LINE__);
+        Bf16GemmConfig cfg;
+        cfg.id = Bf16GemmConfigId::ExactRows;
+        cfg.exact_rows = 1u;
+        for (std::size_t r = 0; r < rows; ++r)
+            sg_dev[r] = 1.0f / (1.0f + std::exp(-shared_logits[r]));
+        for (std::size_t r = 0; r < rows; ++r) {
+            const bf16_t* x_row = xb + r * H;
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, sg_w, x_row, gate_buf, Bf16GemmOutputDType::BF16, 1u,
+                                 u32(Is), u32(H), u32(H), u32(Is), stream_),
+                "moe grouped: shared gate"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, su_w, x_row, up_buf, Bf16GemmOutputDType::BF16, 1u,
+                                 u32(Is), u32(H), u32(H), u32(Is), stream_),
+                "moe grouped: shared up"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_swiglu_bf16(gate_buf, u32(Is), up_buf, u32(Is), mid_buf, u32(Is), 1u,
+                                   u32(Is), stream_),
+                "moe grouped: shared swiglu"));
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_gemm_bf16(cfg, sd_w, mid_buf, shared_buf + r * H,
+                                 Bf16GemmOutputDType::BF16, 1u, u32(H), u32(Is), u32(Is),
+                                 u32(H), stream_),
+                "moe grouped: shared down"));
+        }
+    }
+
+    SHELF_RETURN_IF_ERROR(hipok(
+        launch_moe_combine(sel_w_dev, slots, has_shared ? sg_dev : nullptr,
+                           has_shared ? shared_buf : nullptr, ob, u32(rows), u32(k), u32(H),
+                           stream_),
+        "moe grouped: combine"));
+    return Status::make_ok();
 }
 
 Status HipStepExecutor::declare_states(const ir::Graph& g) {
@@ -1571,6 +1771,116 @@ Result<std::vector<float>> HipStepExecutor::export_gdn_state(std::size_t slot) c
     return out;
 }
 
+Result<std::uint64_t> HipStepExecutor::debug_kv_hash(std::size_t slot, std::size_t pages,
+                                                     std::size_t visible) const {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("debug_kv_hash: slot が範囲外", __FILE__, __LINE__);
+    (void)hipSetDevice(opts_.device);
+    (void)hipStreamSynchronize(stream_);
+    std::uint64_t h = 1469598103934665603ull;
+    const std::size_t bs = opts_.kv_block_size;
+    for (const auto id : state_ids_) {
+        const auto it = state_dev_.find(id.value());
+        if (it == state_dev_.end()) continue;
+        const StateLoc& loc = it->second;
+        if (loc.kind != ir::StateKind::kv_cache || loc.k_pool == nullptr) continue;
+        (void)bs;
+        const std::size_t bytes = loc.total_pages == 0
+                                      ? 0
+                                      : loc.pool_bytes / loc.total_pages;
+        std::vector<std::uint32_t> table(pages, 0u);
+        const hipError_t et = hipMemcpy(table.data(),
+                                        reinterpret_cast<const char*>(loc.table) +
+                                            slot * loc.pages * sizeof(std::uint32_t),
+                                        pages * sizeof(std::uint32_t),
+                                        hipMemcpyDeviceToHost);
+        if (et != hipSuccess) return Status::from(Status::Code::device_error,
+                                                  hipGetErrorString(et), __FILE__, __LINE__);
+        std::vector<char> buf(bytes);
+        for (std::size_t p = 0; p < pages; ++p) {
+            // visible > 0 のときは有効トークン分だけを比べる（ページ末尾の未書込み
+            // 領域はブロックの前の用途で異なるため）。
+            std::size_t tok_here = bs;
+            if (visible != 0u) {
+                const std::size_t start = p * bs;
+                if (visible <= start) break;
+                tok_here = std::min<std::size_t>(bs, visible - start);
+            }
+            const std::size_t chunk = tok_here * (bytes / bs);
+            for (const void* pool : {loc.k_pool, loc.v_pool}) {
+                const hipError_t e = hipMemcpy(
+                    buf.data(), static_cast<const char*>(pool) + table[p] * bytes, chunk,
+                    hipMemcpyDeviceToHost);
+                if (e != hipSuccess)
+                    return Status::from(Status::Code::device_error, hipGetErrorString(e),
+                                        __FILE__, __LINE__);
+                for (std::size_t b = 0; b < chunk; ++b) {
+                    h = (h ^ static_cast<unsigned char>(buf[b])) * 1099511628211ull;
+                }
+            }
+        }
+        // **全 KV 層**を混ぜる（一部レイヤだけ違う場合を取り逃さない）。
+        h = (h ^ static_cast<std::uint64_t>(id.value())) * 1099511628211ull;
+    }
+    return h;
+}
+
+Result<std::pair<std::uint64_t, std::uint64_t>> HipStepExecutor::debug_state_hashes(
+    std::size_t slot) const {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("debug_state_hashes: slot が範囲外", __FILE__,
+                                        __LINE__);
+    (void)hipSetDevice(opts_.device);
+    (void)hipStreamSynchronize(stream_);
+    std::uint64_t hc = 1469598103934665603ull, hr = 1469598103934665603ull;
+    for (const auto id : state_ids_) {
+        const auto it = state_dev_.find(id.value());
+        if (it == state_dev_.end()) continue;
+        const StateLoc& loc = it->second;
+        if (loc.kind == ir::StateKind::kv_cache || loc.dev == nullptr) continue;
+        const std::size_t per = loc.elems / std::max<std::size_t>(max_sequences_, 1u);
+        std::vector<float> buf(per);
+        const hipError_t e =
+            hipMemcpy(buf.data(), static_cast<const char*>(loc.dev) + slot * per * sizeof(float),
+                      per * sizeof(float), hipMemcpyDeviceToHost);
+        if (e != hipSuccess)
+            return Status::from(Status::Code::device_error, hipGetErrorString(e), __FILE__,
+                                __LINE__);
+        std::uint64_t& h = loc.kind == ir::StateKind::conv ? hc : hr;
+        for (const float v : buf) {
+            std::uint32_t b = 0;
+            std::memcpy(&b, &v, sizeof(b));
+            h = (h ^ b) * 1099511628211ull;
+        }
+    }
+    return std::make_pair(hc, hr);
+}
+
+Result<std::vector<std::uint32_t>> HipStepExecutor::debug_block_table(std::size_t slot,
+                                                                      std::size_t count) const {
+    if (slot >= max_sequences_)
+        return Status::invalid_argument("debug_block_table: slot が範囲外", __FILE__, __LINE__);
+    (void)hipSetDevice(opts_.device);
+    (void)hipStreamSynchronize(stream_);
+    for (const auto id : state_ids_) {
+        const auto it = state_dev_.find(id.value());
+        if (it == state_dev_.end()) continue;
+        const StateLoc& loc = it->second;
+        if (loc.kind != ir::StateKind::kv_cache || loc.table == nullptr) continue;
+        std::vector<std::uint32_t> t(std::min<std::size_t>(count, loc.pages), 0u);
+        const hipError_t e =
+            hipMemcpy(t.data(),
+                      static_cast<const char*>(static_cast<const void*>(loc.table)) +
+                          slot * loc.pages * sizeof(std::uint32_t),
+                      t.size() * sizeof(std::uint32_t), hipMemcpyDeviceToHost);
+        if (e != hipSuccess)
+            return Status::from(Status::Code::device_error, hipGetErrorString(e), __FILE__,
+                                __LINE__);
+        return t;   // 先頭レイヤの表を代表として返す（レイヤ間で表は同じ）
+    }
+    return Status::not_found("debug_block_table: kv state が無い", __FILE__, __LINE__);
+}
+
 Status HipStepExecutor::import_gdn_state(std::size_t slot, const std::vector<float>& data) {
     if (slot >= max_sequences_)
         return Status::invalid_argument("import_gdn_state: slot が範囲外", __FILE__,
@@ -1622,9 +1932,14 @@ Status HipStepExecutor::assign_kv_blocks(std::size_t slot, const std::uint32_t* 
     for (auto& [id, loc] : state_dev_) {
         if (loc.kind != ir::StateKind::kv_cache || loc.table == nullptr) continue;
         const std::size_t base = slot * loc.pages + offset;
+        // **同期コピー**。呼び手はスタックの一時配列（`&blk`）を渡すことがあり、
+        // ページャブルメモリからの非同期コピーは完了前にその領域が再利用され得る
+        // （実測: prefix hit 直後の 4 並列で、スロットごとに KV の参照先が変わり
+        //   logits が分かれた）。ページ表は小さく、更新も page 単位なので同期で払う。
+        (void)hipStreamSynchronize(stream_);
         SHELF_RETURN_IF_ERROR(hipok(
-            hipMemcpyAsync(loc.table + base, blocks, count * sizeof(std::uint32_t),
-                           hipMemcpyHostToDevice, stream_),
+            hipMemcpy(loc.table + base, blocks, count * sizeof(std::uint32_t),
+                      hipMemcpyHostToDevice),
             "assign kv blocks"));
         // T16 + T14: prefix で共有したページは kv_append を通らないため、
         // online ミラーへも複製しておく（窓内で読まれる可能性がある）。
@@ -1688,6 +2003,7 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
     // ここで広げる（縮めない。明示指定時は触らない）。
     // scratch の中身はステップ毎に失効する（行数も変わる）。
     fp8_owner_value_ = 0u;
+    fp8_owner_rowwise_ = false;
     const compiler::ArenaPlan& plan = plan_for(g);
     if (arena_cap_ < plan.peak_bytes) {
         if (opts_.arena_bytes > 0)
@@ -1708,6 +2024,13 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
         // 新しいアリーナはゼロ初期化されていない（hipMalloc は未定義）。最初の
         // ステップの scratch を読むカーネルのために、確保したら 0 で埋める。
         arena_zero_pending_ = true;
+    }
+    if (arena_zero_pending_ && arena_dev_ != nullptr && arena_cap_ != 0) {
+        // 確保直後の 1 回だけ。以後はステップ内で再利用する（前のステップの値が
+        // 残るのは意図どおり。要求境界では reset_states が全体を 0 に戻す）。
+        SHELF_RETURN_IF_ERROR(hipok(hipMemsetAsync(arena_dev_, 0, arena_cap_, stream_),
+                                    "zero arena (first use)"));
+        arena_zero_pending_ = false;
     }
     plan_ = &plan;
     value_dev_.clear();
@@ -1771,9 +2094,8 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
         w = std::max(w, pages);
     }
     SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(slot_window_dev_, slot_window_host_.data(),
-                             max_sequences_ * sizeof(std::uint32_t), hipMemcpyHostToDevice,
-                             stream_),
+        hipok(hipMemcpy(slot_window_dev_, slot_window_host_.data(),
+                        max_sequences_ * sizeof(std::uint32_t), hipMemcpyHostToDevice),
               "slot window upload")));
     // 複数スロットか（行は slot ごとに連続している前提）。
     rows_multi_slot_ = false;
@@ -1797,17 +2119,28 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
         descs[r].row_count = u32(end - begin);
     }
     SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(req_dev_, descs.data(),
-                             cur_requests_ * sizeof(hipk::GdnRequestDescriptor),
-                             hipMemcpyHostToDevice, stream_),
+        hipok(hipMemcpy(req_dev_, descs.data(),
+                        cur_requests_ * sizeof(hipk::GdnRequestDescriptor),
+                        hipMemcpyHostToDevice),
               "gdn req upload")));
+    // N01: 行ごとの decode1（1 行 = 1 リクエスト）用の記述子。少数並列のときだけ積む
+    // （prefill はチャンク版が requests 列を使わない）。
+    if (opts_.decode1_max_rows > 0u && n <= opts_.decode1_max_rows) {
+        row_req_host_.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+            row_req_host_[i] = hipk::GdnRequestDescriptor{rowslot_host_[i], u32(i), 1u};
+        SHELF_RETURN_IF_ERROR(sync_on_error(
+            hipok(hipMemcpy(row_req_dev_, row_req_host_.data(),
+                            n * sizeof(hipk::GdnRequestDescriptor), hipMemcpyHostToDevice),
+                  "gdn row req upload")));
+    }
     SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(rowpos_dev_, posrep_host_.data(),
-                             n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
+        hipok(hipMemcpy(rowpos_dev_, posrep_host_.data(), n * sizeof(std::uint32_t),
+                        hipMemcpyHostToDevice),
               "rowpos upload")));
     SHELF_RETURN_IF_ERROR(sync_on_error(
-        hipok(hipMemcpyAsync(rowslot_dev_, rowslot_host_.data(),
-                             n * sizeof(std::uint32_t), hipMemcpyHostToDevice, stream_),
+        hipok(hipMemcpy(rowslot_dev_, rowslot_host_.data(), n * sizeof(std::uint32_t),
+                        hipMemcpyHostToDevice),
               "rowslot upload")));
 
     // データ入力: i32 = トークン（先頭ステージ）、それ以外 = 前段の hidden（以降のステージ）。
@@ -1822,8 +2155,8 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
             return Status::invalid_argument("run_stage: このステージには tokens が必要",
                                             __FILE__, __LINE__);
         SHELF_RETURN_IF_ERROR(sync_on_error(
-            hipok(hipMemcpyAsync(token_dev_, tokens, n * sizeof(std::int32_t),
-                                 hipMemcpyHostToDevice, stream_),
+            hipok(hipMemcpy(token_dev_, tokens, n * sizeof(std::int32_t),
+                            hipMemcpyHostToDevice),
                   "token upload")));
         value_dev_[tokens_in->id.value()] = ValueLoc{token_dev_, false, n};
     }
@@ -1898,6 +2231,59 @@ Status HipStepExecutor::run_impl(const ir::Graph& g, const std::int32_t* tokens,
     }
     if (step_profile) (void)hipEventRecord(ev_sb, stream_);
     SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_), "step sync"));
+    // デバッグ: ステップ終端で各 primitive の出力を要約する（実行間で最初に変わる
+    // 箇所の特定用）。ステップは既に同期済みなので、計算には影響しない。
+    if (std::getenv("SHELF_DEBUG_STEP_HASH") != nullptr) {
+        std::size_t pi_dbg = 0;
+        for (const auto& pd : g.primitives()) {
+            const auto vit = value_dev_.find(pd.output.id.value());
+            if (vit != value_dev_.end() && vit->second.dev != nullptr) {
+                const ValueLoc& l = vit->second;
+                const std::size_t elem = l.f32 ? sizeof(float) : sizeof(bf16_t);
+                std::vector<char> buf(l.elems * elem);
+                if (hipMemcpy(buf.data(), l.dev, buf.size(), hipMemcpyDeviceToHost) ==
+                    hipSuccess) {
+                    std::uint64_t h = 1469598103934665603ull;
+                    for (const char byte : buf)
+                        h = (h ^ static_cast<unsigned char>(byte)) * 1099511628211ull;
+                    std::uint32_t nout = 0, kdim = 0;
+                    if (pd.output.shape.rank() > 0u)
+                        nout = static_cast<std::uint32_t>(
+                            pd.output.shape.dim(pd.output.shape.rank() - 1));
+                    if (!pd.inputs.empty() && step_rows_ > 0u) {
+                        const auto* iv = g.find_value(pd.inputs[0]);
+                        if (iv)
+                            kdim = static_cast<std::uint32_t>(numel(iv->shape) / step_rows_);
+                    }
+                    std::uint64_t h0 = 0, hn = 0;
+                    std::size_t per_row = 0;
+                    if (step_rows_ > 1u && l.elems % step_rows_ == 0u) {
+                        per_row = l.elems / step_rows_;
+                        const std::size_t rb = per_row * elem;
+                        auto rh = [&](std::size_t row) {
+                            std::uint64_t hh = 1469598103934665603ull;
+                            const char* base = buf.data() + row * rb;
+                            for (std::size_t i = 0; i < rb; ++i)
+                                hh = (hh ^ static_cast<unsigned char>(base[i])) *
+                                     1099511628211ull;
+                            return hh;
+                        };
+                        h0 = rh(0u);
+                        hn = rh(step_rows_ - 1u);
+                    }
+                    std::fprintf(stderr,
+                                 "[step] %4zu %-16s rows=%zu pos=%u n=%u k=%u hash=%016llx"
+                                 " h0=%016llx hn=%016llx\n",
+                                 pi_dbg, ir::kind_name(pd.kind), step_rows_, step_base_pos_,
+                                 nout, kdim,
+                                 static_cast<unsigned long long>(h),
+                                 static_cast<unsigned long long>(h0),
+                                 static_cast<unsigned long long>(hn));
+                }
+            }
+            ++pi_dbg;
+        }
+    }
     stats_.last_step_ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
     if (step_profile) {
@@ -2062,10 +2448,9 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
         // 重みが FP8（E4M3）で upload されていれば W8A8 経路。同じ層の中でも
         // linear_attn 側は bf16 のまま（checkpoint の ignore）なので、この分岐は
         // 重み単位で決まる。
-        // 重みが MXFP4（quark: E2M1 ＋ E8M0）のとき、活性化は checkpoint の
-        // 宣言で W4A4（A も E2M1+E8M0）と W4A8（A は既存の FP8）を選ぶ。
-        //   * W4A4: `global_quant_config.input_tensors.dtype == fp4`（T09）
-        //   * W4A8: それ以外（従来動作）
+        // 重みが MXFP4（quark: E2M1 ＋ E8M0）のとき、活性化は W4A8
+        // （E4M3 + 動的スケール。group は opts_.fp8_act_group、既定 128）。
+        // W4A4（A も E2M1 + E8M0）は削除した。
         const auto mx = p.weights.empty()
                             ? weight_mxfp4_.end()
                             : weight_mxfp4_.find(p.weights[0].value());
@@ -2077,7 +2462,7 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
                     "linear(mxfp4): K が 32 の倍数でない", __FILE__, __LINE__);
             // prefill 用カーネルは 128 行タイルだが、端数の行は読み込み側で clamp
             // 済み（`linear_mxfp4_prefill.hip`。単体テストで 16/32/64/96 行が誤差 0）。
-            // カーネルの前提は K が 128 の倍数であること（W4A4/W4A8 とも）。
+            // カーネルの前提は K が 128 の倍数であること。
             if ((kp % 128u) != 0u)
                 return Status::unsupported(
                     "linear(mxfp4): prefill は K が 128 の倍数のみ（k_padded " +
@@ -2086,42 +2471,59 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
             const auto dt = f32_out ? Mxfp4GemmOutputDType::F32 : Mxfp4GemmOutputDType::BF16;
             Mxfp4GemmScaleArgs sa;
             sa.weight_scale_stride = kp / kBlockK;
-            if (opts_.mxfp4_activation) {
-                // ---- W4A4: 活性化を E2M1 + E8M0 へ（断片順ニブル + E8M0）----
-                if (!activation_quantize_mxfp4_supported(u32(K), kp))
-                    return Status::unsupported(
-                        "linear(mxfp4/w4a4): 活性化の形が受理範囲外", __FILE__, __LINE__);
-                const std::size_t codes_n = tiled_bytes(u32(rows), kp);
-                const std::size_t scales_n = scale_bytes(u32(rows), kp);
-                SHELF_RETURN_IF_ERROR(ensure_mxfp4_scratch(codes_n, scales_n));
-                SHELF_RETURN_IF_ERROR(hipok(
-                    launch_activation_quantize_mxfp4(
-                        static_cast<const bf16_t*>(x->dev), mxfp4_act_codes_dev_,
-                        mxfp4_act_scales_dev_, u32(rows), u32(K), kp, u32(K), stream_),
-                    "mxfp4/w4a4 act quantize"));
-                sa.act_group = 0u;
-                sa.activation_scale_stride = kp / kBlockK;
-                if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
+            // ---- W4A8: 活性化は既存の FP8 量子化 ----
+            const std::uint32_t act_group =
+                (opts_.fp8_act_group != 0u &&
+                 (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
+                    ? shelf::quant::fp8::fine::kActGroupK
+                    : 0u;
+            sa.act_group = act_group;
+            const std::size_t scales_per_row =
+                shelf::quant::fp8::fine::activation_scale_count(1u, kp, act_group);
+            sa.activation_scale_stride = static_cast<std::uint32_t>(scales_per_row);
+            // N01: 少数並列（既定 4 行まで）は 1 行ずつ量子化 + decode1 で回す。
+            // バッチ GEMM と GEMV は同じ数学でも加算順が違い、greedy の列がそこで
+            // 分岐する。1 並列と **同じカーネル・同じ入力** に揃えて一致させる。
+            // 行数が多い prefill は従来どおりバッチ GEMM（`decode1_max_rows = 0` で
+            // 全行バッチ経路に戻せる。性能比較用）。
+            if (rows <= opts_.decode1_max_rows && mxfp4_decode1_supported(1u, u32(N), kp)) {
+                const std::size_t row_bytes = shelf::quant::fp8::tiled_bytes(1u, kp);
+                SHELF_RETURN_IF_ERROR(
+                    ensure_fp8_scratch(row_bytes * rows, scales_per_row * rows));
+                for (std::size_t r = 0; r < rows; ++r) {
                     SHELF_RETURN_IF_ERROR(hipok(
-                        launch_gemm_mxfp4_w4a4_decode1(
-                            mx->second.codes, mx->second.scales, mxfp4_act_codes_dev_,
-                            mxfp4_act_scales_dev_, o, dt, u32(rows), u32(N), kp, u32(N), sa,
-                            stream_),
-                        "gemm mxfp4 w4a4 decode1"));
-                else
+                        launch_activation_quantize_fp8(
+                            static_cast<const bf16_t*>(x->dev) + r * K,
+                            fp8_codes_dev_ + r * row_bytes,
+                            fp8_scales_dev_ + r * scales_per_row, 1u, u32(K), kp, u32(K),
+                            act_group, stream_),
+                        "mxfp4 act quantize (fp8/uint8, 1 row)"));
+                }
+                // N07: 2 行以上は重みの読み出しを共有する decode_n にまとめる。
+                // 行ごとの累加順は decode1 と同じなので結果はビット同一（単体テスト
+                // `test_hip_gemm_row_parity` の decode_n 節で確認）。
+                if (std::getenv("SHELF_NO_DECODE_N") == nullptr && rows >= 2u &&
+                    mxfp4_decode_n_supported(u32(rows), u32(N), kp)) {
                     SHELF_RETURN_IF_ERROR(hipok(
-                        launch_gemm_mxfp4_w4a4_prefill(
-                            mx->second.codes, mx->second.scales, mxfp4_act_codes_dev_,
-                            mxfp4_act_scales_dev_, o, dt, u32(rows), u32(N), kp, u32(N), sa,
+                        launch_gemm_mxfp4_w4a8_decode_n(
+                            mx->second.codes, mx->second.scales, fp8_codes_dev_,
+                            fp8_scales_dev_, o, dt, u32(rows), u32(N), kp, u32(N), sa,
                             stream_),
-                        "gemm mxfp4 w4a4 prefill"));
+                        "gemm mxfp4 w4a8 decode_n"));
+                } else {
+                    const std::size_t out_bytes = f32_out ? sizeof(float) : sizeof(bf16_t);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        SHELF_RETURN_IF_ERROR(hipok(
+                            launch_gemm_mxfp4_w4a8_decode1(
+                                mx->second.codes, mx->second.scales,
+                                fp8_codes_dev_ + r * row_bytes,
+                                fp8_scales_dev_ + r * scales_per_row,
+                                static_cast<char*>(o) + r * N * out_bytes, dt, 1u, u32(N),
+                                kp, u32(N), sa, stream_),
+                            "gemm mxfp4 w4a8 decode1"));
+                    }
+                }
             } else {
-                // ---- W4A8: 活性化は既存の FP8 量子化 ----
-                const std::uint32_t act_group =
-                    (opts_.fp8_act_group != 0u &&
-                     (kp % shelf::quant::fp8::fine::kActGroupK) == 0u)
-                        ? shelf::quant::fp8::fine::kActGroupK
-                        : 0u;
                 const std::size_t act_scales =
                     shelf::quant::fp8::fine::activation_scale_count(u32(rows), kp, act_group);
                 SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(
@@ -2131,21 +2533,11 @@ Status HipStepExecutor::run_primitive(const ir::Graph& g, const ir::Primitive& p
                                               fp8_codes_dev_, fp8_scales_dev_, u32(rows),
                                               u32(K), kp, u32(K), act_group, stream_),
                                           "mxfp4 act quantize (fp8/uint8)"));
-                sa.act_group = act_group;
-                sa.activation_scale_stride =
-                    static_cast<std::uint32_t>(act_scales / (rows == 0 ? 1 : rows));
-                if (rows == 1u && mxfp4_decode1_supported(u32(rows), u32(N), kp))
-                    SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_decode1(
-                                                  mx->second.codes, mx->second.scales,
-                                                  fp8_codes_dev_, fp8_scales_dev_, o, dt,
-                                                  u32(rows), u32(N), kp, u32(N), sa, stream_),
-                                              "gemm mxfp4 w4a8 decode1"));
-                else
-                    SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_prefill(
-                                                  mx->second.codes, mx->second.scales,
-                                                  fp8_codes_dev_, fp8_scales_dev_, o, dt,
-                                                  u32(rows), u32(N), kp, u32(N), sa, stream_),
-                                              "gemm mxfp4 w4a8 prefill"));
+                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_mxfp4_w4a8_prefill(
+                                              mx->second.codes, mx->second.scales,
+                                              fp8_codes_dev_, fp8_scales_dev_, o, dt,
+                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                          "gemm mxfp4 w4a8 prefill"));
             }
             if (f32_out) logits_dev_ = static_cast<float*>(o);
             return set_out(f32_out, o);
@@ -2174,31 +2566,91 @@ using namespace shelf::quant::fp8::fine;
             if (!fp8_scale_args_supported(sa, u32(rows), u32(N), kp))
                 return Status::unsupported("linear(fp8): スケール配置が不正", __FILE__,
                                            __LINE__);
-            // scratch がすでに入力と同じ (値, 行数, K 切り, 粒度) を持てば再量子化しない。
-            const bool reuse = p.inputs[0].value() == fp8_owner_value_ &&
-                               fp8_owner_rows_ == u32(rows) && fp8_owner_kp_ == kp &&
-                               fp8_owner_group_ == sa.act_group;
-            if (!reuse) {
-                SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
-                                                         activation_scale_count(u32(rows), kp,
-                                                                                sa.act_group)));
-                SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
-                                              static_cast<const bf16_t*>(x->dev), fp8_codes_dev_,
-                                              fp8_scales_dev_, u32(rows), u32(K), kp, u32(K),
-                                              sa.act_group, stream_),
-                                          "fp8 act quantize"));
-                fp8_owner_value_ = p.inputs[0].value();
-                fp8_owner_rows_ = u32(rows);
-                fp8_owner_kp_ = kp;
-                fp8_owner_group_ = sa.act_group;
+            // N01: 少数並列（既定 4 行まで）は 1 行ずつ量子化 + decode1 で回す。
+            // 1 並列の GEMV と同じカーネル・同じ入力に揃え、greedy の列を一致させる。
+            // 行数が多い prefill は従来どおりバッチ GEMM。
+            if (rows <= opts_.decode1_max_rows && fp8_decode1_supported(1u, u32(N), kp)) {
+                const std::size_t row_bytes = fp8_activation_bytes(1u, kp);
+                const std::size_t scales_per_row = act_scale_groups(kp, sa.act_group);
+                // swiglu 融合が **行ごとの並び** で置いていれば、そのまま使う
+                // （bf16 中間は存在しないので再量子化できない。ここを取り違えると
+                // 未初期化の arena を読んでしまう）。
+                const bool fused = p.inputs[0].value() == fp8_owner_value_ &&
+                                   fp8_owner_rows_ == u32(rows) && fp8_owner_kp_ == kp &&
+                                   fp8_owner_group_ == sa.act_group &&
+                                   fp8_owner_rowwise_;
+                if (!fused) {
+                    SHELF_RETURN_IF_ERROR(
+                        ensure_fp8_scratch(row_bytes * rows, scales_per_row * rows));
+                }
+                if (!fused) {
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        SHELF_RETURN_IF_ERROR(hipok(
+                            launch_activation_quantize_fp8(
+                                static_cast<const bf16_t*>(x->dev) + r * K,
+                                fp8_codes_dev_ + r * row_bytes,
+                                fp8_scales_dev_ + r * scales_per_row, 1u, u32(K), kp,
+                                u32(K), sa.act_group, stream_),
+                            "fp8 act quantize (1 row)"));
+                    }
+                }
+                // N07: 2 行以上は重みの読み出しを共有する decode_n にまとめる
+                // （行ごとの累加順は Decode1 と同じなので結果はビット同一）。
+                const auto out_dt =
+                    f32_out ? Fp8GemmOutputDType::F32 : Fp8GemmOutputDType::BF16;
+                if (std::getenv("SHELF_NO_DECODE_N") == nullptr && rows >= 2u &&
+                    fp8_decode_n_supported(u32(rows), u32(N), kp)) {
+                    SHELF_RETURN_IF_ERROR(hipok(
+                        launch_gemm_fp8_w8a8_decode_n(
+                            f8->second.codes, f8->second.scales, fp8_codes_dev_,
+                            fp8_scales_dev_, o, out_dt, u32(rows), u32(N), kp, u32(N), sa,
+                            stream_),
+                        "gemm fp8 decode_n"));
+                } else {
+                    const std::size_t out_bytes = f32_out ? sizeof(float) : sizeof(bf16_t);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        SHELF_RETURN_IF_ERROR(hipok(
+                            launch_gemm_fp8_w8a8(
+                                Fp8GemmConfig{Fp8GemmConfigId::Decode1}, f8->second.codes,
+                                f8->second.scales, fp8_codes_dev_ + r * row_bytes,
+                                fp8_scales_dev_ + r * scales_per_row,
+                                static_cast<char*>(o) + r * N * out_bytes, out_dt, 1u, u32(N),
+                                kp, u32(N), sa, stream_),
+                            "gemm fp8 decode1"));
+                    }
+                }
+                // 1 行分の scratch を上書きしたので、バッチ経路の reuse 判定を無効化する。
+                fp8_owner_value_ = 0u;
+                fp8_owner_rowwise_ = false;
+            } else {
+                // scratch がすでに入力と同じ (値, 行数, K 切り, 粒度) を持てば再量子化しない。
+                const bool reuse = p.inputs[0].value() == fp8_owner_value_ &&
+                                   fp8_owner_rows_ == u32(rows) && fp8_owner_kp_ == kp &&
+                                   fp8_owner_group_ == sa.act_group;
+                if (!reuse) {
+                    SHELF_RETURN_IF_ERROR(ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
+                                                             activation_scale_count(
+                                                                 u32(rows), kp, sa.act_group)));
+                    SHELF_RETURN_IF_ERROR(hipok(launch_activation_quantize_fp8(
+                                                  static_cast<const bf16_t*>(x->dev),
+                                                  fp8_codes_dev_, fp8_scales_dev_, u32(rows),
+                                                  u32(K), kp, u32(K), sa.act_group, stream_),
+                                              "fp8 act quantize"));
+                    fp8_owner_value_ = p.inputs[0].value();
+                    fp8_owner_rows_ = u32(rows);
+                    fp8_owner_kp_ = kp;
+                    fp8_owner_group_ = sa.act_group;
+                    fp8_owner_rowwise_ = false;
+                }
+                SHELF_RETURN_IF_ERROR(hipok(launch_gemm_fp8_w8a8(
+                                              Fp8GemmConfig{}, f8->second.codes,
+                                              f8->second.scales, fp8_codes_dev_,
+                                              fp8_scales_dev_, o,
+                                              f32_out ? Fp8GemmOutputDType::F32
+                                                      : Fp8GemmOutputDType::BF16,
+                                              u32(rows), u32(N), kp, u32(N), sa, stream_),
+                                          "gemm fp8"));
             }
-            SHELF_RETURN_IF_ERROR(hipok(launch_gemm_fp8_w8a8(
-                                          Fp8GemmConfig{}, f8->second.codes, f8->second.scales,
-                                          fp8_codes_dev_, fp8_scales_dev_, o,
-                                          f32_out ? Fp8GemmOutputDType::F32
-                                                  : Fp8GemmOutputDType::BF16,
-                                          u32(rows), u32(N), kp, u32(N), sa, stream_),
-                                      "gemm fp8"));
             if (f32_out) logits_dev_ = static_cast<float*>(o);
             return set_out(f32_out, o);
         }
@@ -2208,6 +2660,28 @@ using namespace shelf::quant::fp8::fine;
         // prefill（64 行の束）は 2 次元タイルで回す。ExactRows 系は 16 行ずつ 4 回に
         // 分かれるため行方向の再利用が無く、実効 71 GB/s（DRAM 境界の 1/8）だった。
         Bf16GemmConfig cfg;
+        if (rows <= opts_.decode1_max_rows && rows > 1u) {
+            // N01: 少数並列は **1 行ずつ** ExactRows で回す。ExactRows と
+            // ExactRowsDot2 は別カーネルで加算順が違い、fp8 に載らない bf16 の層
+            // （linear_attn の in_proj_a/b・out_proj、mlp.gate など）で数値が分岐する。
+            // 1 並列と同じカーネル・同じ行入力に揃える。
+            Bf16GemmConfig one;
+            one.id = Bf16GemmConfigId::ExactRows;
+            one.exact_rows = 1u;
+            const std::size_t out_bytes = f32_out ? sizeof(float) : sizeof(bf16_t);
+            for (std::size_t r = 0; r < rows; ++r) {
+                SHELF_RETURN_IF_ERROR(hipok(
+                    launch_gemm_bf16(
+                        one, static_cast<const bf16_t*>(wt(0)),
+                        static_cast<const bf16_t*>(x->dev) + r * K,
+                        static_cast<char*>(o) + r * N * out_bytes,
+                        f32_out ? Bf16GemmOutputDType::F32 : Bf16GemmOutputDType::BF16, 1u,
+                        u32(N), u32(K), u32(K), u32(N), stream_),
+                    "gemm bf16 decode1"));
+            }
+            if (f32_out) logits_dev_ = static_cast<float*>(o);
+            return set_out(f32_out, o);
+        }
         if (rows >= 64u && bf16_prefill2d_supported(u32(rows), u32(N), u32(K))) {
             cfg.id = Bf16GemmConfigId::Prefill2D;
             cfg.exact_rows = 0u;
@@ -2338,11 +2812,12 @@ using namespace shelf::quant::fp8::fine;
             posrep_host_.assign(cap, 0u);
             posrep_cap_ = cap;
         }
+        if (rope_pos_host_.size() < rows) rope_pos_host_.assign(rows, 0u);
         for (std::size_t r = 0; r < rows; ++r)
-            posrep_host_[r] = step_base_pos_ + static_cast<std::uint32_t>(r / per_tok);
-        SHELF_RETURN_IF_ERROR(hipok(hipMemcpyAsync(posrep_dev_, posrep_host_.data(),
-                                                   rows * sizeof(std::uint32_t),
-                                                   hipMemcpyHostToDevice, stream_),
+            rope_pos_host_[r] = step_base_pos_ + static_cast<std::uint32_t>(r / per_tok);
+        SHELF_RETURN_IF_ERROR(hipok(hipMemcpy(posrep_dev_, rope_pos_host_.data(),
+                                              rows * sizeof(std::uint32_t),
+                                              hipMemcpyHostToDevice),
                                     "rope pos upload"));
         SHELF_RETURN_IF_ERROR(hipok(launch_rope_f32_bf16(
             static_cast<const float*>(xf), u32(D), static_cast<bf16_t*>(o), u32(D),
@@ -2442,32 +2917,53 @@ using namespace shelf::quant::fp8::fine;
         // 融合: この値を使う fp8 GEMM がすぐ来るなら、bf16 中間材料を書かずに
         // コード/スケールだけ生成する（bf16 の往復 2 回分と発射 1 回を浮かせられる）。
         const auto& fuse = fuse_for(g);
-        // W4A4 のときは FP8 への融合をしない（次の linear が E2M1 で量子化し直すため）。
-        const bool fusable = !opts_.mxfp4_activation &&
-                             std::find(fuse.swiglu_out.begin(), fuse.swiglu_out.end(),
+        const bool fusable =
+            std::find(fuse.swiglu_out.begin(), fuse.swiglu_out.end(),
                                        p.output.id.value()) != fuse.swiglu_out.end() &&
                              F % shelf::quant::fp8::fine::kActGroupK == 0u;
         if (fusable) {
             using namespace shelf::quant::fp8;
 using namespace shelf::quant::fp8::fine;
             const std::uint32_t kp = u32(F);
-            if (ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
-                                   activation_scale_count(u32(rows), kp, kActGroupK)).ok()) {
-                const hipError_t ef = launch_swiglu_quantize_fp8(
-                    static_cast<const bf16_t*>(gt->dev), static_cast<const bf16_t*>(up->dev),
-                    nullptr,
-                    fp8_codes_dev_, fp8_scales_dev_, u32(rows), kp, kp, u32(F), u32(F),
-                    0u, kActGroupK, stream_);
+            // N01: 少数並列では **1 行ずつ** 発射して、行ごとの decode1 がそのまま
+            // 読める並び（行あたり tiled_bytes(1,kp)）で置く。1 行のときは従来と
+            // 同じ 1 発射・同じオフセットなので、数値も速度も変わらない。
+            const bool row_wise = rows <= opts_.decode1_max_rows;
+            const std::size_t row_bytes = fp8_activation_bytes(1u, kp);
+            const std::size_t scales_per_row = activation_scale_count(1u, kp, kActGroupK);
+            const bool scratch_ok =
+                row_wise ? ensure_fp8_scratch(row_bytes * rows, scales_per_row * rows).ok()
+                         : ensure_fp8_scratch(fp8_activation_bytes(u32(rows), kp),
+                                              activation_scale_count(u32(rows), kp, kActGroupK))
+                               .ok();
+            if (scratch_ok) {
+                hipError_t ef = hipSuccess;
+                if (row_wise) {
+                    for (std::size_t r = 0; r < rows && ef == hipSuccess; ++r)
+                        ef = launch_swiglu_quantize_fp8(
+                            static_cast<const bf16_t*>(gt->dev) + r * F,
+                            static_cast<const bf16_t*>(up->dev) + r * F, nullptr,
+                            fp8_codes_dev_ + r * row_bytes,
+                            fp8_scales_dev_ + r * scales_per_row, 1u, kp, kp, u32(F), u32(F),
+                            0u, kActGroupK, stream_);
+                } else {
+                    ef = launch_swiglu_quantize_fp8(
+                        static_cast<const bf16_t*>(gt->dev), static_cast<const bf16_t*>(up->dev),
+                        nullptr, fp8_codes_dev_, fp8_scales_dev_, u32(rows), kp, kp, u32(F),
+                        u32(F), 0u, kActGroupK, stream_);
+                }
                 if (ef == hipSuccess) {
                     fp8_owner_value_ = p.output.id.value();
                     fp8_owner_rows_ = u32(rows);
                     fp8_owner_kp_ = kp;
                     fp8_owner_group_ = kActGroupK;
+                    fp8_owner_rowwise_ = row_wise;
                     void* o = alloc(false);           // 使われないが offsets 表の枠は確保
                     SHELF_RETURN_IF_ERROR(arena_ok(o));
                     return set_out(false, o);
                 }
                 fp8_owner_value_ = 0u;                // NotSupported 等は従来経路へ
+                fp8_owner_rowwise_ = false;
             }
         }
         void* o = alloc(false);
@@ -2648,30 +3144,42 @@ using namespace shelf::quant::fp8::fine;
         // prefill（複数行）はチャンク版（FP16 WMMA）で回す。1 行の decode は
         // 逐次の方が速いので従来のカーネルのまま。
         // `SHELF_GDN_CHUNK=0` で従来経路に固定できる（数値の A/B 用）。
+        // N01: 少数並列（既定 4 行まで）は **1 行ずつ decode1** で回す。チャンク版は
+        // 入力の hi/lo 分割をしないため 1 行経路と数値が揃わず、greedy の列が分岐する。
+        // 1 並列と同じカーネル・同じ状態更新に揃えて一致させる。
         const char* chunk_env = std::getenv("SHELF_GDN_CHUNK");
-        const bool want_chunk =
-            step_rows_ > 1u && (chunk_env == nullptr || chunk_env[0] != '0') &&
-            hipk::gdn_chunk_supported(rec);
-        if (want_chunk) {
+        const char* d1 = std::getenv("SHELF_GDN_DECODE1");
+        const bool decode1_off = d1 && d1[0] == 'o';
+        const bool row_wise = opts_.decode1_max_rows > 0u &&
+                              step_rows_ <= opts_.decode1_max_rows;
+        const auto launch_decode1 = [&](const GdnRecurrenceArgs& a) -> Status {
+            // WMMA 版を試み、受理できなければスカラー f32 版に戻る。
+            // SHELF_GDN_DECODE1 = off（スカラー）| lossy（f16 一成分）| exact（hi/lo・既定）
+            if (!decode1_off && hipk::gdn_recurrence_wmma_decode1_supported(a)) {
+                const bool lossy = d1 && d1[0] == 'l';
+                return hipok(hipk::launch_gdn_recurrence_wmma_decode1(a, lossy, stream_),
+                             "gdn decode1 wmma");
+            }
+            return hipok(launch_gdn_recurrence_f32(a, stream_), "recurrence");
+        };
+        if (row_wise) {
+            for (std::size_t r = 0; r < step_rows_; ++r) {
+                // カーネルは行番号を `requests[0].row_begin` から引き、各テンソルを
+                // その絶対行で引く（ポインタを進めない）。記述子だけ 1 行ずつ渡す。
+                GdnRecurrenceArgs one = rec;
+                one.requests = row_req_dev_ + r;
+                one.num_requests = 1u;
+                one.actual_rows = u32(step_rows_);
+                SHELF_RETURN_IF_ERROR(launch_decode1(one));
+            }
+        } else if (step_rows_ > 1u && (chunk_env == nullptr || chunk_env[0] != '0') &&
+                   hipk::gdn_chunk_supported(rec)) {
             // 1 発射（チャンクはカーネル内ループ）。チャンク毎に発射すると
             // 2048 行で 64 回/層 = 3,072 dispatch になり、発射間 gap が実額で出る。
             SHELF_RETURN_IF_ERROR(
                 hipok(hipk::launch_gdn_rows(rec, 0u, u32(step_rows_), stream_), "gdn chunk"));
         } else {
-            // decode（1 行）。WMMA 版を試み、受理できなければスカラー f32 版に戻る。
-            // SHELF_GDN_DECODE1 = off（スカラー）| lossy（f16 一成分）| exact（hi/lo・既定）
-            const char* d1 = std::getenv("SHELF_GDN_DECODE1");
-            const bool use_wmma = !(d1 && d1[0] == 'o') &&
-                                  hipk::gdn_recurrence_wmma_decode1_supported(rec);
-            if (use_wmma) {
-                const bool lossy = d1 && d1[0] == 'l';
-                SHELF_RETURN_IF_ERROR(hipok(
-                    hipk::launch_gdn_recurrence_wmma_decode1(rec, lossy, stream_),
-                    "gdn decode1 wmma"));
-            } else {
-                SHELF_RETURN_IF_ERROR(
-                    hipok(launch_gdn_recurrence_f32(rec, stream_), "recurrence"));
-            }
+            SHELF_RETURN_IF_ERROR(launch_decode1(rec));
         }
         if (std::getenv("SHELF_DEBUG_GDN")) {
             hipStreamSynchronize(stream_);
@@ -2721,7 +3229,7 @@ using namespace shelf::quant::fp8::fine;
         const std::size_t feat_flat = step_rows_ != 0u ? out_n / step_rows_ : 0u;
         const auto& gfuse = fuse_for(g);
         // rows==1（decode）では 2 発射に負けた（54.19 → 54.36 ms/tok）ので prefill のみ。
-        if (!opts_.mxfp4_activation && feat_flat != 0u && step_rows_ > 1u &&
+        if (feat_flat != 0u && step_rows_ > 1u &&
             feat_flat % shelf::quant::fp8::fine::kActGroupK == 0u &&
             shelf::quant::fp8::pad_k(u32(feat_flat)) == u32(feat_flat) &&
             std::find(gfuse.gated_out.begin(), gfuse.gated_out.end(),
@@ -2806,6 +3314,43 @@ using namespace shelf::quant::fp8::fine;
                                         ap.common, ap.k_pool, ap.v_pool, stream_,
                                         ap.online_k, ap.online_v, ap.online_pages),
                                     "kv_append"));
+        if (std::getenv("SHELF_DEBUG_APPEND") != nullptr) {
+            (void)hipStreamSynchronize(stream_);
+            for (std::size_t row = 0; row < P; ++row) {
+                const std::uint32_t slot = rowslot_host_[row];
+                const std::uint32_t pos = posrep_host_[row];
+                const std::size_t page_idx = pos / bs;
+                std::uint32_t blk = 0;
+                (void)hipMemcpy(&blk,
+                                reinterpret_cast<const char*>(
+                                    static_cast<const void*>(st.table)) +
+                                    (slot * st.pages + page_idx) * sizeof(std::uint32_t),
+                                sizeof(blk), hipMemcpyDeviceToHost);
+                // 現在トークンの分だけ（ページ末尾の未書込み領域は除く）。
+                const std::size_t bytes = ept * sizeof(bf16_t);
+                const std::size_t tok_off = (pos % bs) * bytes;
+                std::vector<char> kb(bytes), vb(bytes);
+                std::uint64_t hk = 1469598103934665603ull, hv = 1469598103934665603ull;
+                if (blk < st.total_pages) {
+                    const char* kp = static_cast<const char*>(st.k_pool) +
+                                     static_cast<std::size_t>(blk) * epp * sizeof(bf16_t) +
+                                     tok_off;
+                    const char* vp = static_cast<const char*>(st.v_pool) +
+                                     static_cast<std::size_t>(blk) * epp * sizeof(bf16_t) +
+                                     tok_off;
+                    if (hipMemcpy(kb.data(), kp, bytes, hipMemcpyDeviceToHost) == hipSuccess)
+                        for (const char c : kb)
+                            hk = (hk ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+                    if (hipMemcpy(vb.data(), vp, bytes, hipMemcpyDeviceToHost) == hipSuccess)
+                        for (const char c : vb)
+                            hv = (hv ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+                }
+                std::fprintf(stderr,
+                             "[append] row=%zu slot=%u pos=%u blk=%u k=%016llx v=%016llx\n",
+                             row, slot, pos, blk, static_cast<unsigned long long>(hk),
+                             static_cast<unsigned long long>(hv));
+            }
+        }
         void* o = alloc(false);
         SHELF_RETURN_IF_ERROR(arena_ok(o));
         PagedAttentionCommonArgs at{};
@@ -2915,6 +3460,75 @@ using namespace shelf::quant::fp8::fine;
         SHELF_RETURN_IF_ERROR(arena_ok(o));
         auto* xb = static_cast<const bf16_t*>(x->dev);
         auto* ob = static_cast<bf16_t*>(o);
+        // N08: 行数ぶんのルーター logits を 1 回のカーネルで作り、D2H と同期も
+        // 1 回にまとめる。行ごとに同期するとステップ内で GPU が行数回止まり、
+        // CPU 分担（重みが pinned のエキスパート）との重なりも切れる。
+        const auto rit_dev = weight_dev_.find(p.weights[0].value());
+        // 比較用: `SHELF_NO_MOE_BATCH=1` で行ごとに同期する従来経路へ戻す。
+        // N09: 重みが全部 VRAM にある（pinned の分担が無い）ときは、同一エキスパートへ
+        // 複数行をまとめて流す集約経路を使う。
+        const bool mx_experts =
+            weight_mxfp4_.find(p.weights[1u].value()) != weight_mxfp4_.end();
+        const bool group_ok = mx_experts && host_weight_index_.empty() &&
+                              std::getenv("SHELF_NO_MOE_GROUP") == nullptr;
+        if (rit_dev != weight_dev_.end() &&
+            std::getenv("SHELF_NO_MOE_BATCH") == nullptr) {
+            const std::size_t extra = shared ? rows : 0u;
+            SHELF_RETURN_IF_ERROR(
+                ensure_moe_logits((rows * E + extra) * sizeof(float)));
+            auto* logits_dev = reinterpret_cast<float*>(moe_logits_dev_);
+            SHELF_RETURN_IF_ERROR(hipok(
+                launch_moe_router_logit_rows(
+                    xb, static_cast<const bf16_t*>(rit_dev->second), logits_dev, u32(rows),
+                    u32(E), u32(H), stream_),
+                "moe router logits (rows)"));
+            if (shared) {
+                // 共有エキスパートのゲートも同じ同期で読む（行ごとの同期を無くす）。
+                const auto sit = weight_dev_.find(p.weights[3u * E + 4u].value());
+                if (sit != weight_dev_.end())
+                    SHELF_RETURN_IF_ERROR(hipok(
+                        launch_moe_router_logit_rows(
+                            xb, static_cast<const bf16_t*>(sit->second),
+                            logits_dev + rows * E, u32(rows), 1u, u32(H), stream_),
+                        "moe shared gate logits (rows)"));
+            }
+            std::vector<float> logits(rows * E);
+            std::vector<float> shared_logits(shared ? rows : 0u);
+            const bool need_x = !host_weight_index_.empty();
+            std::vector<bf16_t> x_host(need_x ? rows * H : 0u);
+            SHELF_RETURN_IF_ERROR(hipok(
+                hipMemcpyAsync(logits.data(), logits_dev, rows * E * sizeof(float),
+                               hipMemcpyDeviceToHost, stream_),
+                "moe router readback (rows)"));
+            if (shared)
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemcpyAsync(shared_logits.data(), logits_dev + rows * E,
+                                   rows * sizeof(float), hipMemcpyDeviceToHost, stream_),
+                    "moe shared gate readback (rows)"));
+            if (need_x) {
+                SHELF_RETURN_IF_ERROR(hipok(
+                    hipMemcpyAsync(x_host.data(), xb, rows * H * sizeof(bf16_t),
+                                   hipMemcpyDeviceToHost, stream_),
+                    "moe cpu input readback (rows)"));
+            }
+            SHELF_RETURN_IF_ERROR(hipok(hipStreamSynchronize(stream_),
+                                        "moe router sync (rows)"));
+            ++moe_router_syncs_;
+            moe_router_copy_bytes_ +=
+                (rows * E + extra) * sizeof(float) +
+                (need_x ? rows * H * sizeof(bf16_t) : 0u);
+            if (group_ok) {
+                SHELF_RETURN_IF_ERROR(run_moe_grouped(
+                    p, xb, ob, rows, H, E, I, Is, shared, logits.data(),
+                    shared ? shared_logits.data() : nullptr));
+                return set_out(false, o);
+            }
+            for (std::size_t r = 0; r < rows; ++r)
+                SHELF_RETURN_IF_ERROR(run_moe_row(
+                    p, xb + r * H, ob + r * H, H, E, I, Is, shared, logits.data() + r * E,
+                    need_x ? x_host.data() + r * H : nullptr));
+            return set_out(false, o);
+        }
         for (std::size_t r = 0; r < rows; ++r)
             SHELF_RETURN_IF_ERROR(
                 run_moe_row(p, xb + r * H, ob + r * H, H, E, I, Is, shared));

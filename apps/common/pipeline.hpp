@@ -89,9 +89,8 @@ struct PipelineOptions {
     double rope_theta = 1.0e7;
     std::size_t rope_rotary_dim = 64;
     std::uint32_t fp8_act_group = 0;
-    // 重みが MXFP4 のとき、活性化も MXFP4 で量子化する（W4A4）。
-    // `Fp8ModelFormat::mxfp4_activation`（Quark の input_tensors 宣言）から来る。
-    bool mxfp4_activation = false;
+    // N01: この行数以下の decode は行ごとに decode1 で回す（0 = 常にバッチ経路）。
+    std::uint32_t decode1_max_rows = 4u;
     // T14: 重みの置き場を VRAM と pinned host に分ける。
     //   offload_weights_bytes > 0 : その分だけ明示的に host へ落とす（検証用）
     //   allow_host_weights        : 予算超過時に host へ落として起動を続ける

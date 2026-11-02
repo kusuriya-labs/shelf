@@ -150,7 +150,12 @@ __device__ __forceinline__ void mxfp4_prefill_wide_body(
             // `rr >= rows` で既にガード済み）。clamp しないと範囲外読みで HSA フォルト。
             // このブロックが担当する行群の上限（**kRows 基準**）。総行数で clamp すると
             // 33..47 行のブロック 1 で 2 クアッド目が 1 クアッド目に潰れ、入力が重複する。
-            const std::uint32_t grp_max = row_start / 16u + kRows / 16u - 1u;
+            // 上限は「このタイルが担当する行群」と「実在する行数（16 行へ切り上げ）」の
+            // 小さい方。後者が無いと rows が 16 の倍数でないとき、アリーナ上の
+            // 活性化（pad_rows(rows) 行しかない）を越えて読む（実測: 27B の 3 行
+            // prefill で HSA メモリフォルト）。
+            const std::uint32_t grp_max = min(row_start / 16u + kRows / 16u - 1u,
+                                              (rows + 15u) / 16u - 1u);
             const std::uint32_t grp = min(row_start / 16u + rg, grp_max);
             const std::uint8_t* src =
                 activation_codes +
@@ -232,6 +237,9 @@ __device__ __forceinline__ void mxfp4_prefill_wide_body(
 
         __syncthreads();
         if (hh == 1u) {
+            // 次の 128 K グループの行スケールへ差し替える。**差し替えた直後に
+            // バリアを置く**（置かないと、次の反復の compute が s_as を読む前に
+            // この書き込みが全スレッドへ可視にならず、実行毎に結果が変わる）。
             const std::uint32_t g2 = g + 1u;
             if (g2 < groups && tid < kRows) {
                 const std::uint32_t rr = min(row_start + tid, rows - 1u);
@@ -239,6 +247,7 @@ __device__ __forceinline__ void mxfp4_prefill_wide_body(
                                                   sc.activation_scale_stride +
                                               (sc.act_group ? g2 : 0u)];
             }
+            __syncthreads();
         }
     }
 

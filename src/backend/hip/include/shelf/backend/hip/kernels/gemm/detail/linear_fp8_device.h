@@ -587,8 +587,11 @@ __device__ __forceinline__ void fp8_prefill2d_wide_body(
 // ---------------------------------------------------------------------------
 // rows == 1（decode）。1 ブロック = 16 出力特征。K を 32 の組で足し積む。
 // ---------------------------------------------------------------------------
+// `lane` は波内のレーン番号（0..31）。1 波 = 16 出力なので、複数波を 1 ブロックに
+// 入れて行ごとに別の波へ割り当てるときも、この本文はそのまま使える（N07）。
 template <Fp8GemmOutputDType kOutputType, int kUnroll, bool kBlockWeightScale>
 __device__ __forceinline__ void fp8_decode1_body(
+    const std::uint32_t lane,
     const std::uint8_t* __restrict__ weight_codes,
     const float* __restrict__ weight_scales,
     const std::uint8_t* __restrict__ activation_codes,
@@ -597,9 +600,8 @@ __device__ __forceinline__ void fp8_decode1_body(
     const std::uint32_t features,
     const std::uint32_t k_padded,
     const Fp8GemmScaleArgs& sc) {
-    const std::uint32_t tid = threadIdx.x;
-    const std::uint32_t m_lane = tid & 15u;
-    const std::uint32_t k_group = tid >> 4u;
+    const std::uint32_t m_lane = lane & 15u;
+    const std::uint32_t k_group = lane >> 4u;
 
     const std::uint32_t o_self = blockIdx.x * kTileOut + m_lane;
     if (o_self >= features) return;

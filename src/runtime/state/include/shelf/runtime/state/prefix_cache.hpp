@@ -40,6 +40,9 @@ public:
     std::size_t cached_blocks() const noexcept;     // refcount 0 かつ key 登録済み
     std::size_t hits() const noexcept { return hits_; }
     std::size_t misses() const noexcept { return misses_; }
+    // キャッシュ済み（参照 0・登録済み）ブロックを退避した回数。未使用ブロックの
+    // 再利用は数えない（LRU が実際に効いたかどうかの指標）。
+    std::size_t evictions() const noexcept { return evictions_; }
 
     // 最長一致（参照は増やさない）。full block だけを返す。
     PrefixHit lookup(const std::vector<std::int32_t>& tokens) const;
@@ -53,6 +56,9 @@ public:
 
     // 計算済みブロックを key で登録する（`tokens` の先頭から
     // `block_index * block_tokens` までの prefix が必要）。
+    // 同じ key が既に登録済みなら（並行要求が同じ prefix を別々に計算した場合）、
+    // 正本をこのブロックへ移し、旧ブロックは private（未登録）にする。参照は
+    // どちらのブロックもそのまま残る。**有効なエントリを消さない**こと。
     Status insert(std::uint32_t block, const std::vector<std::int32_t>& tokens,
                   std::size_t block_index);
 
@@ -103,6 +109,7 @@ private:
     std::uint64_t clock_ = 0;
     mutable std::size_t hits_ = 0;
     mutable std::size_t misses_ = 0;
+    std::size_t evictions_ = 0;
 };
 
 }  // namespace shelf::runtime::state

@@ -29,7 +29,7 @@ ctest --test-dir build/cpu -R serve.python
 # 実エンジンに繋ぐ（要 GPU・HIP ビルド）
 cd apps/server
 python3 server.py \
-  --engine ../../build/hip_rel/apps/shelf-compute \
+  --engine ../../build/hip-rel/apps/shelf-compute \
   --model ../../models/Qwen3.5-9B-FP8 \
   --model-name qwen3.5-9b-fp8 --port 8099
 
@@ -77,7 +77,13 @@ BPE のトークン境界は文字境界と一致しない。SSE は**受け取�
 * 子プロセスが終了したら待っている要求を `state_error`（500）で起こす
 * 同時要求は `--max-inflight`（既定 4）。エンジン側も 4 スロットで連続バッチングする
   （`--max-batch`。JSONL には複数の `generate` が同時に流れる）
-* `--prefix-cache-blocks N` で Prefix Cache（T16）を有効化する（既定 0 = 無効）
+* `--prefix-cache-blocks N` で Prefix Cache（T16）を有効化する（既定 0 = 無効）。
+  hit の生成列一致は実行間の決定性に依存する（9B は一致、27B/35B は prefill の
+  非決定性が未解決。`draft_docs/n01_n03_2026-11-01.md` 参照）
+* `--decode1-max-rows N`（N01。既定 4）: この行数以下の decode は 1 行ずつ
+  decode1 で回し、1 並列と生成列を一致させる。`0` は全行バッチ（速度優先。
+  一致は保証しない）
+* `--no-eos`: EOS で止めず `max_tokens` まで生成する（数値一致の検証用）
 * `--kv-in-host` / `--online-kv-pages N`（T14）: KV を pinned host に置き、
   直近 N ページを VRAM にミラーする（`--online-kv-pages` はスロットごとに
   窓を持ち、連続バッチングの 4 スロットでも host のみと同一の出力）

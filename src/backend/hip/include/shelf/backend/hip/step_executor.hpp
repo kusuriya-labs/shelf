@@ -58,10 +58,11 @@ struct HipStepExecutorOptions {
     // 活性化の FP8 量子化粒度（K のブロック長）。apps 側が checkpoint の宣言
     // （quantization_config）から決めて渡す。0 = 行（= トークン）全体で 1 スケール。
     std::uint32_t fp8_act_group = 128u;
-    // MXFP4 重みのとき、活性化も MXFP4（E2M1 + E8M0）で量子化する = W4A4。
-    // Quark の `global_quant_config.input_tensors.dtype == fp4` で true になる。
-    // false のときは既存の FP8 活性化 = W4A8。
-    bool mxfp4_activation = false;
+    // N01: 行数がこの値以下の decode は **行ごとに decode1（GEMV）** で回す。
+    // バッチ GEMM と GEMV は同じ数学でも加算順が違い、greedy の生成列が分岐する。
+    // 1 行ずつ 1 並列と同じ経路に揃えることで、1〜N 並列の出力を一致させる。
+    // 0 = 常にバッチ経路（性能比較用）。prefill（行数が多い）は影響を受けない。
+    std::uint32_t decode1_max_rows = 4u;
     // T14: KV プールを pinned host（mapped）に置く。VRAM は使わないが、
     // attention は PCIe 越しに読む（低 VRAM 用の退避経路）。
     bool kv_pinned_host = false;
@@ -106,6 +107,9 @@ public:
     // 「pinned のままの重みは CPU、VRAM の重みは GPU」という分担の実測に使う。
     std::size_t moe_cpu_experts() const noexcept { return moe_cpu_experts_; }
     std::size_t moe_gpu_experts() const noexcept { return moe_gpu_experts_; }
+    // N08: ルーターの同期回数と D2H 転送バイト数（累計）。
+    std::size_t moe_router_syncs() const noexcept { return moe_router_syncs_; }
+    std::uint64_t moe_router_copy_bytes() const noexcept { return moe_router_copy_bytes_; }
     double moe_cpu_ms() const noexcept { return moe_cpu_ms_; }
 
     // pinned 正本の重みを VRAM へ移す（転送 + 再配置）。host 側は正本として残す。
@@ -149,6 +153,16 @@ public:
     // prefix の途中で KV ブロックを共有するには、その長さでの GDN 状態が要る。
     Result<std::vector<float>> export_gdn_state(std::size_t slot) const;
     Status import_gdn_state(std::size_t slot, const std::vector<float>& data);
+    // デバッグ用: スロットの KV（ブロック表の先頭 `pages` ページ）の内容を
+    // FNV-1a で要約する。prefix hit と scratch の KV が同じかを切り分ける。
+    Result<std::uint64_t> debug_kv_hash(std::size_t slot, std::size_t pages,
+                                        std::size_t visible = 0u) const;
+    // デバッグ用: conv 状態と recurrent 状態を別々に FNV で要約する。
+    Result<std::pair<std::uint64_t, std::uint64_t>> debug_state_hashes(
+        std::size_t slot) const;
+    // デバッグ用: スロットのブロック表（先頭 count ページ）を返す。
+    Result<std::vector<std::uint32_t>> debug_block_table(std::size_t slot,
+                                                         std::size_t count) const;
 
     // 1 ステップ分の行メタデータ（T15）。slots[i] は状態スロット、positions[i] は
     // その行の絶対位置（KV の書き込み先）。nullptr なら run_stage と同じ
@@ -287,9 +301,6 @@ private:
                             const char* what);
 
     Status ensure_fp8_scratch(std::size_t code_bytes, std::size_t scale_floats);
-    // W4A4 の活性化（断片順ニブル + E8M0 1 バイト）の scratch。
-    Status ensure_mxfp4_scratch(std::size_t code_bytes, std::size_t scale_bytes);
-
     // device 確保の計上（予算 enforcement）。`dev_reserve` は hipMalloc を試みる前に
     // 予算を見るので、超過の理由は「確保済み + 要求 > 予算」の数字で分かる。
     // 実測使用量ではなくこの実行器の合計である点に注意（コンテキストは入らない）。
@@ -356,6 +367,18 @@ private:
     // T17: CPU で計算した（pinned のままの）エキスパート数の累計。計測・検証用。
     std::size_t moe_cpu_experts_ = 0;
     std::size_t moe_gpu_experts_ = 0;
+    // N08: ルーターの D2H を 1 ステップ 1 回にまとめるための logits バッファと、
+    // 転送量・同期回数の実測カウンタ。
+    std::uint8_t* moe_logits_dev_ = nullptr;
+    std::size_t moe_logits_cap_ = 0;
+    std::size_t moe_router_syncs_ = 0;
+    std::uint64_t moe_router_copy_bytes_ = 0;
+    // N09: 行の索引と選択重みを GPU から直接読ませるための mapped 領域。
+    void* moe_rows_sel_dev_ = nullptr;   // act_rows[total] / out_rows[total]
+    void* moe_rows_w_dev_ = nullptr;     // sel_w[rows*k]
+    std::size_t moe_rows_sel_cap_ = 0;
+    std::size_t moe_rows_w_cap_ = 0;
+    Status ensure_moe_rows_sel(std::size_t total, std::size_t rows);
     double moe_cpu_ms_ = 0.0;   // CPU 分担の計算に使った時間（累計）
     std::size_t promoted_weight_bytes_ = 0;
     std::size_t host_kv_bytes_ = 0;
@@ -375,16 +398,11 @@ private:
     std::vector<std::uint32_t> rowpos_batch_host_;
     std::uint32_t cur_requests_ = 0;                             // GDN 記述子の数
     std::uint32_t cur_max_pos_ = 0;                              // バッチ内の最大位置 + 1
-    std::uint8_t* mxfp4_act_codes_dev_ = nullptr;                // W4A4: 断片順ニブル
-    std::uint8_t* mxfp4_act_scales_dev_ = nullptr;               // W4A4: E8M0（1 B/32K）
-    std::size_t mxfp4_act_codes_cap_ = 0;
-    std::size_t mxfp4_act_scales_cap_ = 0;
     // T17: MoE ブロックの一時領域（ルーター logits・専門家の gate/up/mid/out・
     // f32 累積）。幅は層で変わるので、必要量が増えたときだけ確保し直す。
     std::uint8_t* moe_scratch_dev_ = nullptr;
     std::size_t moe_scratch_cap_ = 0;
-    // MoE の down 用に中間（swiglu 出力）を量子化する scratch。
-    // W4A4 は E8M0 の U8、W4A8 は f32 のスケール。
+    // MoE の down 用に中間（swiglu 出力）を量子化する scratch（W4A8 の f32 スケール）。
     std::uint8_t* moe_act_codes_dev_ = nullptr;
     std::uint8_t* moe_act_scales_dev_ = nullptr;
     std::size_t moe_act_codes_cap_ = 0;
@@ -392,9 +410,19 @@ private:
     Status ensure_moe_scratch(std::size_t bytes);
     Status ensure_moe_act_scratch(std::size_t code_bytes, std::size_t scale_bytes);
     // MoE の 1 行を計算する（bf16 / MXFP4 の重み形式で分岐）。
+    // N08: ルーターの logits と入力のホスト側コピーを呼び手が用意すると、
+    // この行の D2H と同期を省く（1 ステップ分をまとめて読む）。
     Status run_moe_row(const ir::Primitive& p, const bf16_t* x_row, bf16_t* out_row,
                        std::size_t H, std::size_t E, std::size_t I, std::size_t Is,
-                       bool shared);
+                       bool shared, const float* logits_host = nullptr,
+                       const bf16_t* x_host_in = nullptr);
+    Status ensure_moe_logits(std::size_t bytes);
+    // N09: 同一エキスパートへ複数行をまとめて流す（重みが全部 VRAM にあるとき）。
+    // 行ごとの値は per-row 経路とビット同一。
+    Status run_moe_grouped(const ir::Primitive& p, const bf16_t* xb, bf16_t* ob,
+                           std::size_t rows, std::size_t H, std::size_t E, std::size_t I,
+                           std::size_t Is, bool shared, const float* logits,
+                           const float* shared_logits);
     std::size_t fp8_codes_cap_ = 0, fp8_scales_cap_ = 0;
     // ---- CP（コマンドプロセッサ）を起こしておく heartbeat -------------------
     // fp8 活性化 scratch に現在入っている値。同じ行・同じ K 切り・同じ粒度で
@@ -402,6 +430,10 @@ private:
     // および swiglu 融合で生成した場合）。
     std::uint32_t fp8_owner_value_ = 0u;
     std::uint32_t fp8_owner_rows_ = 0u, fp8_owner_kp_ = 0u, fp8_owner_group_ = 0u;
+    // 活性化 scratch が **1 行ずつ**（行あたり tiled_bytes(1,kp) バイト）で並んで
+    // いるか。swiglu 融合を少数並列で行ごとに発射したとき true。行ごとの decode1 は
+    // この並びをそのまま使える（false のバッチ並びとは互換でない）。
+    bool fp8_owner_rowwise_ = false;
     std::vector<ir::StateId> state_ids_;
     std::unordered_map<std::uint32_t, StateLoc> state_dev_;
     std::unordered_map<std::uint32_t, ValueLoc> value_dev_;
@@ -418,8 +450,17 @@ private:
     std::size_t step_rows_ = 1;
     std::uint32_t step_base_pos_ = 0;
     hipk::GdnRequestDescriptor* req_dev_ = nullptr;
+    // N01: 1 行 = 1 リクエストの記述子（行ごとの decode1 用。kMaxStepRows 個）。
+    hipk::GdnRequestDescriptor* row_req_dev_ = nullptr;
+    // row_req_dev_ のホスト側（非同期コピーの間、寿命を保つためメンバに置く。
+    // ブロックローカルの vector から非同期コピーすると、コピー完了前に解放され
+    // 内容が不定になる）。
+    std::vector<hipk::GdnRequestDescriptor> row_req_host_;
     float* logits_dev_ = nullptr;
     std::vector<std::uint32_t> posrep_host_;  // scratch positions (posrep_cap_)
+    // rope の「行 × ヘッド」位置。posrep_host_（ステップ先頭の rowpos アップロード元）
+    // を書き換えると、非同期コピーが完了前に上書きされて内容が不定になるため分ける。
+    std::vector<std::uint32_t> rope_pos_host_;
     std::size_t posrep_cap_ = kPosScratch;    // 現在の確保数（足りなければ伸ばす）
 
     bool states_declared_ = false;

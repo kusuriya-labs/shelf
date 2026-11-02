@@ -116,7 +116,13 @@ public:
     bool prime_prefill(std::size_t slot, std::size_t tokens);
 
     // Decode のサンプル結果。`stop_hit` のときは EOS なので出力に載せない。
-    SlotEnd decode_result(std::size_t slot, std::int32_t token, bool stop_hit);
+    // `from_prefill` は prefill の最後の logits からサンプルした最初のトークン用。
+    // このトークンはまだモデルに入力していないので、位置は進めない（次に流す
+    // decode は `prefilled` の位置でこのトークンを処理する）。進めてしまうと
+    // position 128 が飛び、prefix cache で再利用したブロックの残骸を attention が
+    // 読む（実測: hit 時にスロットごとに logits が分かれた）。
+    SlotEnd decode_result(std::size_t slot, std::int32_t token, bool stop_hit,
+                          bool from_prefill = false);
 
     // 終了したスロットを取り出す（取り出した時点で free に戻し、queued を詰める）。
     bool take_finished(Finished* out);

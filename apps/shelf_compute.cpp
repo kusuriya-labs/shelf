@@ -93,13 +93,13 @@ struct Server {
     app::Fp8ModelFormat fmt;
     app::Pipeline pipeline;
     bool stdin_eof = false;              // 入力が閉じた（生成は最後まで続ける）
+    bool last_prefill_step_ = false;     // N06: prefill/decode の交互実行
+    bool interleave = true;              // N06: 交互実行（--no-interleave で無効）
     std::uint64_t request_counter = 0;
     runtime::generate::StopTokens stops;          // 解決済みの停止 ID（T01）
     std::vector<std::int32_t> eos_override;       // --eos-token（config より優先）
     bool has_eos_override = false;
     bool ignore_eos = false;                      // --no-eos（max_new_tokens だけで止める）
-    // 活性化量子化の選択: 0 = checkpoint の宣言に従う、1 = FP8（W4A8）、2 = MXFP4（W4A4）
-    int act_quant = 0;
     // T14: 重みの置き場（pinned host）と VRAM 予算
     long long offload_mib = 0;
     long long vram_budget_mib = 0;
@@ -107,8 +107,9 @@ struct Server {
     bool kv_in_host = false;       // T14: KV プールを pinned host に置く
     bool allow_host_kv = false;    // 予算不足時に KV を host へ
     std::size_t online_kv_pages = 0;   // T14: 直近 N ページを VRAM にミラー
-    bool mxfp4_activation = false;
     std::size_t max_batch = 4;     // T15: 連続バッチングの最大スロット数
+    // N01: この行数以下の decode は行ごとに decode1 で回す（0 = 常にバッチ経路）。
+    std::uint32_t decode1_max_rows = 4;
     // T16: prefix cache（0 = 無効）
     long long prefix_cache_blocks = 0;
     std::size_t prefix_snapshot_tokens = 64;
@@ -277,7 +278,8 @@ struct Server {
     }
 
     // 1 行分の logits から 1 トークンを抽選し、token イベント / 終了へつなぐ。
-    void sample_row(std::size_t slot, const float* logits, std::uint32_t position) {
+    void sample_row(std::size_t slot, const float* logits, std::uint32_t position,
+                    bool from_prefill = false) {
         const auto& req = sched->request(slot);
         const bool dbg = std::getenv("SHELF_DEBUG_BATCH") != nullptr;
         const std::size_t vocab = cfg.vocab_size;
@@ -294,7 +296,7 @@ struct Server {
             std::fprintf(stderr, "[batch] sample slot=%zu rid=%s pos=%u tok=%d\n", slot,
                          req.request_id.c_str(), position, tok);
         const bool stop_hit = req.stop.contains(tok);
-        const auto end = sched->decode_result(slot, tok, stop_hit);
+        const auto end = sched->decode_result(slot, tok, stop_hit, from_prefill);
         if (end == runtime::generate::SlotEnd::error) {
             write_event(api::Event{api::EngineError{req.request_id, "state_error",
                                                     "decode: スロット状態が不正", ""}});
@@ -309,6 +311,9 @@ struct Server {
     // ---- T16: Prefix Cache の実処理 ----------------------------------------
     // 論理 page にグローバル block を 1 つ割り当てる（必要なら）。
     Status ensure_page(std::size_t slot, SlotPrefix& sp, std::size_t page) {
+        if (std::getenv("SHELF_DEBUG_PAGES") != nullptr)
+            std::fprintf(stderr, "[pages] slot=%zu want=%zu assigned=%zu\n", slot, page,
+                         sp.pages_assigned);
         while (sp.pages_assigned <= page) {
             auto b = prefix->allocate();
             if (!b.ok()) return b.status();
@@ -319,6 +324,9 @@ struct Server {
                 prefix->release(blk);
                 return st;
             }
+            if (std::getenv("SHELF_DEBUG_PAGES") != nullptr)
+                std::fprintf(stderr, "[pages] slot=%zu page=%zu -> block %u\n", slot,
+                             sp.pages_assigned, blk);
             sp.blocks.push_back(blk);
             sp.registered.push_back(0);
             ++sp.pages_assigned;
@@ -360,6 +368,10 @@ struct Server {
             if (auto st = app::pipeline_import_gdn(pipeline, slot, it->second.stages);
                 !st.ok())
                 return st;
+            if (std::getenv("SHELF_DEBUG_PREFIX") != nullptr)
+                std::fprintf(stderr, "[prefix] import tokens=%zu hash=%016llx\n",
+                             it->second.tokens,
+                             static_cast<unsigned long long>(state_hash(it->second.stages)));
             break;
         }
         if (chosen == 0) {
@@ -373,6 +385,7 @@ struct Server {
         sp.pages_assigned = chosen;
         sp.registered.assign(chosen, 0);
         sp.matched = chosen * B;
+        debug_kv("hit", slot, chosen);
         if (auto st = app::pipeline_assign_blocks(pipeline, slot, sp.blocks.data(), chosen, 0);
             !st.ok())
             return st;
@@ -381,6 +394,29 @@ struct Server {
         std::fprintf(stderr, "[prefix] hit rid=%s tokens=%zu prompt=%zu\n", rid.c_str(),
                      sp.matched, prompt.size());
         return Status::make_ok();
+    }
+
+    void debug_kv(const char* tag, std::size_t slot, std::size_t pages) const {
+        if (std::getenv("SHELF_DEBUG_PREFIX") == nullptr) return;
+        std::uint64_t h = 1469598103934665603ull;
+        for (auto& st : pipeline.stages) {
+            const auto r = st.exec->debug_kv_hash(slot, pages);
+            if (!r.ok()) return;
+            h = (h ^ r.value()) * 1099511628211ull;
+        }
+        std::fprintf(stderr, "[prefix] kv %s slot=%zu pages=%zu hash=%016llx\n", tag, slot,
+                     pages, static_cast<unsigned long long>(h));
+    }
+
+    static std::uint64_t state_hash(const std::vector<std::vector<float>>& parts) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (const auto& part : parts)
+            for (const float v : part) {
+                std::uint32_t b = 0;
+                std::memcpy(&b, &v, sizeof(b));
+                h = (h ^ b) * 1099511628211ull;
+            }
+        return h;
     }
 
     // prefill が snapshot_tokens の倍数に達したら GDN 状態を退避する。
@@ -401,6 +437,9 @@ struct Server {
         snap.tokens = L;
         snap.tick = ++prefix_clock;
         snap.stages = std::move(exp.value());
+        if (std::getenv("SHELF_DEBUG_PREFIX") != nullptr)
+            std::fprintf(stderr, "[prefix] store tokens=%zu hash=%016llx\n", snap.tokens,
+                         static_cast<unsigned long long>(state_hash(snap.stages)));
         snapshots[parent] = std::move(snap);
         while (snapshots.size() > prefix_snapshot_limit && !snapshots.empty()) {
             auto victim = snapshots.begin();
@@ -461,6 +500,12 @@ struct Server {
         const std::size_t vocab = cfg.vocab_size;
         const std::size_t chunk = std::max<std::size_t>(prefill_rows, 1);
         const std::string rid = sched->request(slot).request_id;
+        if (std::getenv("SHELF_DEBUG_PREFIX") != nullptr)
+            debug_kv("before", slot, pa.base_pos / std::max<std::size_t>(prefix_bs, 1u));
+        if (std::getenv("SHELF_DEBUG_PREFIX") != nullptr)
+            std::fprintf(stderr,
+                         "[prefix] prefill rid=%s slot=%zu begin=%zu rows=%zu base=%u\n",
+                         rid.c_str(), slot, pa.begin, pa.rows, pa.base_pos);
         std::vector<float> lg;
         Status st = Status::make_ok();
         if (prefix) {
@@ -495,6 +540,42 @@ struct Server {
             return;
         }
         sched->prefill_progress(slot, pa.rows);
+        if (std::getenv("SHELF_DEBUG_PREFIX") != nullptr) {
+            auto hx = app::pipeline_export_gdn(pipeline, slot);
+            if (hx.ok()) {
+                std::uint64_t h = 1469598103934665603ull;
+                for (const auto& part : hx.value())
+                    for (const float v : part) {
+                        std::uint32_t b = 0;
+                        std::memcpy(&b, &v, sizeof(b));
+                        h = (h ^ b) * 1099511628211ull;
+                    }
+                std::fprintf(stderr, "[prefix] state rid=%s prefilled=%zu hash=%016llx\n",
+                             rid.c_str(), sched->slot(slot).prefilled,
+                             static_cast<unsigned long long>(h));
+                std::uint64_t hc = 0, hr = 0;
+                for (auto& st : pipeline.stages) {
+                    const auto sh = st.exec->debug_state_hashes(slot);
+                    if (!sh.ok()) break;
+                    hc = (hc ^ sh.value().first) * 1099511628211ull;
+                    hr = (hr ^ sh.value().second) * 1099511628211ull;
+                }
+                if (const char* dump = std::getenv("SHELF_DEBUG_PREFIX_DUMP")) {
+                    std::string path = std::string(dump) + ".slot" + std::to_string(slot) +
+                                       "." + std::to_string(sched->slot(slot).prefilled);
+                    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                        for (const auto& part : hx.value())
+                            std::fwrite(part.data(), sizeof(float), part.size(), f);
+                        std::fclose(f);
+                    }
+                }
+                std::fprintf(stderr, "[prefix] kind conv=%016llx rec=%016llx\n",
+                             static_cast<unsigned long long>(hc),
+                             static_cast<unsigned long long>(hr));
+                debug_kv("after", slot, sched->slot(slot).prefilled / std::max<std::size_t>(
+                                                                    prefix_bs, 1u));
+            }
+        }
         maybe_store_snapshot(slot);
         if (sched->slot(slot).state == runtime::generate::SlotState::decode) {
             if (auto rs = register_prefix_blocks(slot, rid); !rs.ok()) {
@@ -512,7 +593,29 @@ struct Server {
             return;
         }
         // 最後の行の logits で最初の生成トークンを抽選する。
-        sample_row(slot, lg.data() + (lg.size() - vocab), sched->slot(slot).position);
+        if (std::getenv("SHELF_DEBUG_BATCH_LOGITS") != nullptr && !lg.empty()) {
+            const float* row = lg.data() + (lg.size() - vocab);
+            std::uint32_t t1 = 0, t2 = 0;
+            float v1 = -3.4e38f, v2 = -3.4e38f;
+            for (std::uint32_t v = 0; v < vocab; ++v) {
+                if (row[v] > v1) { t2 = t1; v2 = v1; t1 = v; v1 = row[v]; }
+                else if (row[v] > v2) { t2 = v; v2 = row[v]; }
+            }
+            std::uint64_t h = 1469598103934665603ull;
+            for (std::uint32_t v = 0; v < vocab; ++v) {
+                std::uint32_t b = 0;
+                std::memcpy(&b, &row[v], sizeof(b));
+                h = (h ^ b) * 1099511628211ull;
+            }
+            std::fprintf(stderr,
+                         "[batch-logits] prefill slot=%zu pos=%u top1=%u(%.6f) top2=%u(%.6f) "
+                         "margin=%.3e hash=%016llx\n",
+                         slot, sched->slot(slot).position, t1, v1, t2, v2,
+                         static_cast<double>(v1) - static_cast<double>(v2),
+                         static_cast<unsigned long long>(h));
+        }
+        sample_row(slot, lg.data() + (lg.size() - vocab), sched->slot(slot).position,
+                   /*from_prefill=*/true);
     }
 
     void run_decode(const runtime::generate::DecodeAction& da) {
@@ -533,6 +636,44 @@ struct Server {
                     fail_request(row.slot, es);
                     return;
                 }
+            }
+        }
+        if (std::getenv("SHELF_DEBUG_DECODE_SLOTS") != nullptr) {
+            for (const auto& row : da.rows) {
+                std::uint64_t hc = 0, hr = 0, hk = 0;
+                for (auto& st : pipeline.stages) {
+                    if (const auto sh = st.exec->debug_state_hashes(row.slot); sh.ok()) {
+                        hc = (hc ^ sh.value().first) * 1099511628211ull;
+                        hr = (hr ^ sh.value().second) * 1099511628211ull;
+                    }
+                    // 書込み済みのページだけを比べる（未書込みページは次の step で
+                    // 書くので、この時点では中身が不定）。
+                    const std::size_t pages = std::min<std::size_t>(
+                        row.position / std::max<std::size_t>(prefix_bs, 1u) + 1u,
+                        st.exec->kv_pages_per_sequence());
+                    if (const auto kv = st.exec->debug_kv_hash(
+                            row.slot, pages, static_cast<std::size_t>(row.position) + 1u);
+                        kv.ok())
+                        hk = (hk ^ kv.value()) * 1099511628211ull;
+                }
+                if (auto tb = pipeline.stages[0].exec->debug_block_table(row.slot, 12); tb.ok()) {
+                    std::fprintf(stderr, "[decode-slots] table slot=%zu:", row.slot);
+                    for (const auto b : tb.value()) std::fprintf(stderr, " %u", b);
+                    std::fprintf(stderr, "\n");
+                } else {
+                    std::fprintf(stderr, "[decode-slots] table slot=%zu: %s\n", row.slot,
+                                 tb.status().message().c_str());
+                }
+                std::fprintf(stderr, "[decode-slots] rid=%s slot=%zu pos=%u tok=%d\n",
+                             sched->request(row.slot).request_id.c_str(), row.slot,
+                             row.position, row.token);
+                std::fprintf(stderr,
+                             "[decode-slots] rid=%s slot=%zu pos=%u conv=%016llx rec=%016llx "
+                             "kv=%016llx\n",
+                             sched->request(row.slot).request_id.c_str(), row.slot,
+                             row.position, static_cast<unsigned long long>(hc),
+                             static_cast<unsigned long long>(hr),
+                             static_cast<unsigned long long>(hk));
             }
         }
         backend::StageExecutor::RowBatch rb{row_slots.data(), row_positions.data()};
@@ -573,11 +714,18 @@ struct Server {
                         t2 = v; v2 = row[v];
                     }
                 }
+                std::uint64_t h = 1469598103934665603ull;
+                for (std::uint32_t v = 0; v < vocab; ++v) {
+                    std::uint32_t b = 0;
+                    std::memcpy(&b, &row[v], sizeof(b));
+                    h = (h ^ b) * 1099511628211ull;
+                }
                 std::fprintf(stderr,
                              "[batch-logits] slot=%zu pos=%u top1=%u(%.6f) top2=%u(%.6f) "
-                             "margin=%.3e\n",
+                             "margin=%.3e hash=%016llx\n",
                              da.rows[i].slot, da.rows[i].position, t1, v1, t2, v2,
-                             static_cast<double>(v1) - static_cast<double>(v2));
+                             static_cast<double>(v1) - static_cast<double>(v2),
+                             static_cast<unsigned long long>(h));
             }
         }
         for (std::size_t i = 0; i < rows; ++i)
@@ -596,14 +744,33 @@ struct Server {
                 if (auto st = prepare_prefix(i, rid); !st.ok()) fail_request(i, st);
             }
         }
+        // N06: prefill と decode が両方あるときは **交互** に流す。従来は
+        // prefill を優先していたため、長い prefill が終わるまで既存の decode が
+        // 止まり、トークン間隔が数百 ms 開いた（実測: 1024 tok の prefill で
+        // 622 ms）。1 チャンク進めたら 1 回 decode を挟むことで、待ちをチャンク
+        // 1 個分に抑える。片方しか無いときはそのまま進める。
         runtime::generate::PrefillAction pa;
-        if (sched->next_prefill(&pa)) {
-            run_prefill(pa);
+        const bool prefill_ready = sched->next_prefill(&pa);
+        runtime::generate::DecodeAction da;
+        const bool decode_ready = sched->next_decode(&da);
+        if (interleave && prefill_ready && decode_ready) {
+            if (last_prefill_step_) {
+                run_decode(da);
+                last_prefill_step_ = false;
+            } else {
+                run_prefill(pa);
+                last_prefill_step_ = true;
+            }
             return true;
         }
-        runtime::generate::DecodeAction da;
-        if (sched->next_decode(&da)) {
+        if (prefill_ready) {
+            run_prefill(pa);
+            last_prefill_step_ = true;
+            return true;
+        }
+        if (decode_ready) {
             run_decode(da);
+            last_prefill_step_ = false;
             return true;
         }
         return false;
@@ -614,11 +781,12 @@ int usage() {
     std::fprintf(stderr,
                  "usage: shelf-compute [--model DIR] [--gpu N] [--pipeline-parallel K]\n"
                  "                   [--prefill-rows N] [--max-context N]\n"
-                 "                   [--eos-token ID]... [--no-eos] [--act-quant auto|fp4|fp8]\n"
+                 "                   [--eos-token ID]... [--no-eos] [--no-interleave]\n"
                  "                   [--offload-weights-mib N] [--vram-budget-mib N]\n"
                  "                   [--allow-host-weights] [--kv-in-host] [--allow-host-kv]\n"
                  "                   [--online-kv-pages N]\n"
                  "                   [--max-batch N]  （連続バッチングのスロット数。既定 4）\n"
+                 "                   [--decode1-max-rows N]  （この行数以下は行ごとに decode1。既定 4）\n"
                  "                   [--prefix-cache-blocks N] [--prefix-snapshot-tokens N]\n"
                  "                   [--prefix-snapshot-limit N]\n"
                  "  stdin/stdout: 1 行 1 オブジェクトの JSONL（engine_contract §1/§2）\n"
@@ -675,6 +843,8 @@ int main(int argc, char** argv) {
             srv.eos_override.push_back(
                 static_cast<std::int32_t>(std::atoll(next("ID").c_str())));
             srv.has_eos_override = true;
+        } else if (a == "--no-interleave") {
+            srv.interleave = false;
         } else if (a == "--no-eos") {
             srv.ignore_eos = true;
         } else if (a == "--offload-weights-mib") {
@@ -690,15 +860,14 @@ int main(int argc, char** argv) {
         } else if (a == "--online-kv-pages") {
             srv.online_kv_pages =
                 static_cast<std::size_t>(std::strtoull(next("N").c_str(), nullptr, 10));
-        } else if (a == "--act-quant") {
-            const std::string v = next("auto|fp4|fp8");
-            if (v == "auto") srv.act_quant = 0;
-            else if (v == "fp4") srv.act_quant = 2;
-            else if (v == "fp8") srv.act_quant = 1;
-            else { std::fprintf(stderr, "--act-quant は auto / fp4 / fp8\n"); return usage(); }
-        }
-
-        else if (a == "--help" || a == "-h") { usage(); return 0; }
+        } else if (a == "--decode1-max-rows") {
+            const long v = std::atol(next("N").c_str());
+            if (v < 0 || v > 64) {
+                std::fprintf(stderr, "--decode1-max-rows は 0..64\n");
+                return usage();
+            }
+            srv.decode1_max_rows = static_cast<std::uint32_t>(v);
+        } else if (a == "--help" || a == "-h") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); return usage(); }
     }
     if (!srv.has_model) {
@@ -740,17 +909,13 @@ int main(int argc, char** argv) {
         }
         srv.stops = stops_r.release();
 
-        // 活性化量子化（T09）: Quark の input_tensors 宣言で W4A4 / W4A8 を選ぶ。
-        srv.mxfp4_activation = srv.fmt.mxfp4_activation;
-        if (srv.act_quant == 1) srv.mxfp4_activation = false;
-        if (srv.act_quant == 2) srv.mxfp4_activation = true;
-        if (srv.mxfp4_activation && !srv.fmt.mxfp4) {
-            std::fprintf(stderr, "shelf-compute: --act-quant fp4 は MXFP4 重みのときだけ使える\n");
-            return 2;
-        }
-        std::fprintf(stderr, "shelf-compute: activation = %s（%s）\n",
-                     srv.mxfp4_activation ? "MXFP4 (W4A4)" : "FP8 (W4A8)",
-                     srv.fmt.declared.c_str());
+        // 活性化量子化（T09）: MXFP4 重みは W4A8（E4M3、group 128）で走る。
+        if (srv.fmt.mxfp4)
+            std::fprintf(stderr, "shelf-compute: activation = FP8 (W4A8 group=%u)（%s）\n",
+                         srv.fmt.act_group, srv.fmt.declared.c_str());
+        else if (srv.fmt.quantized)
+            std::fprintf(stderr, "shelf-compute: activation = FP8 W8A8（%s）\n",
+                         srv.fmt.declared.c_str());
 
         if (srv.has_eos_override) srv.stops.ids = srv.eos_override;
         if (srv.ignore_eos) srv.stops.ids.clear();
@@ -769,7 +934,9 @@ int main(int argc, char** argv) {
         if (breq.device_execution) breq.required.add(backend::Feature::device_execution);
         if (srv.pp > 1) breq.required.add(backend::Feature::pipeline_parallel);
         if (srv.fmt.quantized) breq.required.add(backend::Feature::fp8_w8a8);
-        const auto booted = app::boot(breq, /*print=*/true);
+        // stdout は JSONL 専用（engine 契約）。起動要約は stderr に出す。
+        const auto booted = app::boot(breq, /*print=*/false);
+        std::fprintf(stderr, "boot: %s\n", booted.summary.c_str());
         if (!booted.accepted) {
             std::fprintf(stderr, "shelf-compute: 起動条件: %s\n", booted.reason.c_str());
             return 1;
@@ -816,7 +983,7 @@ int main(int argc, char** argv) {
         po.rope_theta = srv.cfg.rope_theta;
         po.rope_rotary_dim = srv.cfg.rotary_dim;
         po.fp8_act_group = srv.fmt.act_group;
-        po.mxfp4_activation = srv.mxfp4_activation;
+        po.decode1_max_rows = srv.decode1_max_rows;
         po.offload_weights_bytes = static_cast<std::uint64_t>(srv.offload_mib) << 20;
         po.allow_host_weights = srv.allow_host_weights;
         po.kv_pinned_host = srv.kv_in_host;
@@ -825,6 +992,8 @@ int main(int argc, char** argv) {
         if (srv.vram_budget_mib > 0)
             po.device_free_bytes = static_cast<std::uint64_t>(srv.vram_budget_mib) << 20;
         po.verbose = false;
+        // デバッグ: アリーナの使い回しを止める（primitive ごとの値を正しく読むため）。
+        if (std::getenv("SHELF_ARENA_NO_REUSE") != nullptr) po.arena_reuse = false;
         auto pl = app::make_pipeline(srv.cfg, shards, cat.value(), srv.fmt, po);
         if (!pl.ok()) {
             std::fprintf(stderr, "shelf-compute: pipeline: %s\n", pl.status().message().c_str());
@@ -872,16 +1041,27 @@ int main(int argc, char** argv) {
     }
     // T17: MoE の分担（CPU / GPU）の実測。既定は黙る。
     if (std::getenv("SHELF_MOE_STATS") != nullptr && !srv.pipeline.stages.empty()) {
-        std::size_t cpu = 0, gpu = 0;
+        std::size_t cpu = 0, gpu = 0, syncs = 0;
         double cpu_ms = 0.0;
+        std::uint64_t copy_bytes = 0;
         for (auto& st : srv.pipeline.stages) {
             if (!st.exec) continue;
             cpu += st.exec->moe_cpu_experts();
             gpu += st.exec->moe_gpu_experts();
             cpu_ms += st.exec->moe_cpu_ms();
+            syncs += st.exec->moe_router_syncs();
+            copy_bytes += st.exec->moe_router_copy_bytes();
         }
-        std::fprintf(stderr, "[moe] cpu_experts=%zu gpu_experts=%zu cpu_ms=%.1f\n", cpu, gpu,
-                     cpu_ms);
+        std::fprintf(stderr,
+                     "[moe] cpu_experts=%zu gpu_experts=%zu cpu_ms=%.1f "
+                     "router_syncs=%zu router_copy_kib=%.1f\n",
+                     cpu, gpu, cpu_ms, syncs, static_cast<double>(copy_bytes) / 1024.0);
+    }
+    // T16/N03: prefix cache の実効性（hit / miss / LRU 退避）を 1 行で残す。
+    if (srv.prefix) {
+        std::fprintf(stderr, "[prefix] stats hits=%zu misses=%zu evictions=%zu blocks=%zu\n",
+                     srv.prefix->hits(), srv.prefix->misses(), srv.prefix->evictions(),
+                     srv.prefix->num_blocks());
     }
     write_event(api::Event{api::ShutdownEvent{}});
     return 0;

@@ -1,7 +1,7 @@
 # P0/P1 実装・検証の記録（2026-11-01）
 
 対象: 生成機能の完成（T01〜T05）、実モデルでの確定（T06〜T09）、テストと文書（T10）。
-環境: R9700 (gfx1201) ×4、HIP 7.15、`build/hip_rel`（Release）、Python 3.12 / transformers 5.20.2。
+環境: R9700 (gfx1201) ×4、HIP 7.15、`build/hip-rel`（Release）、Python 3.12 / transformers 5.20.2。
 
 ---
 
@@ -134,6 +134,11 @@ HTTP 切断後の cancel と後続要求。
 `tests/scripts/check_generation_parity.py` を追加（JSONL を直接駆動）。
 各実行を 1 プロセスで 2 回繰り返し、生成トークン列を比較する。
 
+> **2026-11-02 の修正で以下の生成列は変わる**: 最初の decode トークンの位置が
+> 1 つ進んでいた off-by-one を修正した（`draft_docs/n01_n03_2026-11-01.md` の原因 4）。
+> 「同一条件で一致する」という結論は不変だが、下の固定列は旧位置での記録であり、
+> 回帰の golden として使わないこと。
+
 ### 9B-FP8（prompt 192 tok、greedy 8 tok）
 
 `[45484, 99162, 182807, 97551, 14876, 5205, 15015, 220]`
@@ -158,55 +163,48 @@ HTTP 切断後の cancel と後続要求。
 
 ---
 
-## 5. T09 MXFP4 W4A4 の実行器統合
+## 5. T09 MXFP4 の実行器統合（W4A8 を既定）
 
-* 選択条件: Quark の `quantization_config.global_quant_config.input_tensors`
-  が `dtype=fp4` / `qscheme=per_group` / `group_size=32` / `scale_format=e8m0` のとき
-  **W4A4**。`e4m3` または宣言無しは従来の **W4A8**
-* `Fp8ModelFormat::mxfp4_activation` に解析結果を載せ、
-  `PipelineOptions::mxfp4_activation` → `HipStepExecutorOptions` へ渡す
-* 実行器: 活性化を `launch_activation_quantize_mxfp4`（断片順ニブル + E8M0）で量子化し、
-  `launch_gemm_mxfp4_w4a4_decode1` / `_prefill` を呼ぶ。
-  W4A4 のときは FP8 への swiglu 融合をしない（次の linear が E2M1 で量子化し直すため）
-* `shelf-compute --act-quant auto|fp4|fp8` で A/B できる（既定 auto）。
-  `server.py` と `serve_e2e.py` / `check_generation_parity.py` も同じ指定を通す
-* 起動ログに選択結果を出す:
-  `activation = MXFP4 (W4A4)（quark mxfp4 (fp4/group32/e8m0) + A=fp4 (W4A4)）`
+* MXFP4 重みの活性化は **W4A8（E4M3、K 128 要素ごとの動的スケール）を既定**にした。
+  checkpoint の `quantization_config.global_quant_config.input_tensors`
+  （`dtype=fp4` など）は参照しない。
+* `Fp8ModelFormat::act_group = 128` を解析時に固定し、
+  `PipelineOptions::fp8_act_group` → `HipStepExecutorOptions` へ渡す。
+  `--fp8-act-group 0` で per-token（行単位）に落とせる（実験用）。
+* 実行器: `launch_activation_quantize_fp8`（活性化）＋
+  `launch_gemm_mxfp4_w4a8_decode1` / `_prefill`。swiglu → FP8 の融合も有効。
+* **W4A4（A も E2M1 + E8M0）は削除した**。`activation_quantize_mxfp4`、
+  `gemm_mxfp4_w4a4_{decode1,prefill}`、`--act-quant`、
+  `Fp8ModelFormat::mxfp4_activation` を撤去。当時の W4A4 の測定値は
+  `mxfp4_port_2026-10-30.md` の段階 9・13 に記録として残っている。
+* 起動ログ: `activation = FP8 (W4A8 group=128)（quark mxfp4 …）`。
 
-### 見つけた欠陥と修正（W4A4 prefill の端数）
+### 見つけた欠陥と修正（W4A8 prefill の端数行）
 
-W4A4 prefill は単体テストが rows=128 / features=128 or 256 だけだったため、
-**端数で HSA のメモリフォルト**を起こしていた（E2E の 24 トークンは tail 経路＝
-decode1 なので通っていた。192 トークンの prefill で再現）。
+W4A8 prefill の行グループ clamp が「タイル内の行群」だけで上限を決めており、
+`rows` が 16 の倍数でないとき（実測: 27B・3 行 prefill）アリーナの
+`pad_rows(rows)` を越えて読み、**HSA メモリフォルト**を起こしていた。
 
-| 端数 | 原因 | 修正 |
-| --- | --- | --- |
-| `rows` が 128 の倍数でない | 活性化の行群を 128 行タイルのまま読んでいた（存在しない行群を読む） | 実際の行数 `(rows+15)/16-1` で行群を clamp（読み値は捨てる） |
-| `features` が 128 の倍数でない（例: 48） | 重みの出力行を clamp せずに読んでいた | `min(o, features-1)` で clamp（W4A8 と同じ） |
+* 修正: `grp_max = min(row_start/16 + kRows/16 - 1, (rows+15)/16 - 1)`。
+* 回帰: `unit.hip_gemm_mxfp4`（既存の端数ケース）と 27B の 3 行 prefill で確認。
 
-回帰テスト: `unit.hip_gemm_mxfp4` に rows=32/64/96、features=48、
-rows=64×features=48 の W4A4 prefill を追加（すべて相対誤差 0）。
-実測: 64 トークン入力の prefill が 210 ms（2 トークン decode 込み）で完走。
+### E2E 数値・速度（27B Quark MXFP4・prompt 192 tok・greedy）
 
-### E2E 数値・速度（27B Quark MXFP4・prompt 192 tok・greedy 8 tok）
+* 27B-MXFP4（W4A8 group128）と 27B-FP8 の生成列は **8/8 一致**
+  （`check_generation_parity.py`。同一プロセスの反復も一致）。
+* 35B-A3B-MXFP4 も既定の W4A8 で実行できる
+  （`100,200,300 → 220,200,200`、decode 約 42–56 ms/step、PP=4）。
 
-| 実行 | 生成列 | 時間（8 tok） | ms/tok |
+当時の W4A4 との比較（**W4A4 は削除済み**。記録）:
+
+| 実行 | 生成列（8 tok） | 時間 | ms/tok |
 | --- | --- | --- | --- |
-| 27B-MXFP4 **W4A4** | `[…, 332, 18]` | 855 ms | 106.8 |
-| 27B-MXFP4 W4A8 | `[…, 332, 12512]` | 631 ms | 78.9 |
+| 27B-MXFP4 W4A4（当時） | `[…, 332, 18]` | 855 ms | 106.8 |
+| 27B-MXFP4 W4A8（当時） | `[…, 332, 12512]` | 631 ms | 78.9 |
 | 27B-FP8（参考） | `[…, 332, 12512]` | 588〜600 ms | 73.5〜75.0 |
 
-* **数値**: 先頭 7 トークンは W4A4 / W4A8 / FP8 で一致し、8 個目で分岐
-  （`18` vs `12512`）。T0（各 2 回）は全実行で一致
-* **T2 判定**（`tests/scripts/compare_logits.py`、分岐位置の logits）:
-  * 差: max abs 4.446 / mean abs 0.492 / 相対 L2 0.313
-  * W4A4 の top1=18（17.506）、top2=12512 側は 17.235、**margin 0.271**
-  * W4A8 の top1=12512（17.228）、top2 は 16.465、margin 0.763
-  * margin（0.271）は量子化差の規模（max 4.446）より十分小さい
-    → **T2 の「量子化・丸め由来」に該当**（バグではなく W4A4 の A 側 4 bit 化の誤差）。
-    W4A4 は W4A8 より **約 1.35 倍遅い**（E2E。prefill の 0.57 倍を反映）
-* 分岐を 1 トークンでも遅らせたい用途では W4A8 を既定にする選択肢がある。
-  `--act-quant` で明示的に切り替えられる
+W4A4 は 8 個目で分岐し（margin 0.271、T2 の量子化由来）、W4A8 は FP8 と一致した。
+W4A4 は W4A8 より約 1.35 倍遅かった。既定を W4A8 にした理由はこの数値と一致。
 
 ---
 

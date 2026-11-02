@@ -522,7 +522,6 @@ int main(int argc, char** argv) {
         po.rope_theta = cfg.rope_theta;
         po.rope_rotary_dim = cfg.rotary_dim;
         po.fp8_act_group = fmt.act_group;
-        po.mxfp4_activation = fmt.mxfp4_activation;
         po.verbose = true;
         auto pl = app::make_pipeline(cfg, shards, cat_r.value(), fmt, po);
         if (!pl.ok()) return fail("pipeline: " + pl.status().message());
