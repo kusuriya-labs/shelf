@@ -465,49 +465,28 @@ Status execute_program_range(
         OpDumpTimer op_timer(binding.kernel_id);
         const bool sem_on = semantic_timing_enabled();
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
+        const uint32_t binding_as_kid = static_cast<uint32_t>(binding.kernel_id);
         if (mode == KernelMode::Auto) {
-            OptimizedLaunchResult opt_result{};
-            auto optimized = try_launch_optimized(program, i, ctx, stream);
+            const Result<OptimizedLaunchResult> optimized =
+                try_launch_optimized(program, i, ctx, stream);
             if (!optimized.ok()) return optimized.status();
-            opt_result = optimized.value();
-            const OptimizedLaunchKind opt_kind = opt_result.kind;
-            if (opt_kind == OptimizedLaunchKind::Skipped) {
-                const uint32_t consumed = opt_result.consumed_dispatches;
-                if (consumed == 0 || i + consumed > end)
-                    return Status::invalid_state(
-                        "invalid skipped dispatch consumption", __FILE__, __LINE__);
-                uint32_t covered_kids[4] = {0, 0, 0, 0};
-                for (uint32_t j = 0; j < consumed && j < 4u; ++j)
-                    covered_kids[j] = static_cast<uint32_t>(program.dispatches[i + j].kernel_id);
-                record_logical_covered(covered_kids, consumed < 4u ? consumed : 4u);
-                i += consumed;
-                continue;
-            }
-            if (opt_kind == OptimizedLaunchKind::Launched) {
-                const uint32_t consumed = opt_result.consumed_dispatches;
-                if (consumed == 0 || i + consumed > end)
-                    return Status::invalid_state(
-                        "invalid optimized dispatch consumption", __FILE__, __LINE__);
+            if (optimized.value().kind == OptimizedLaunchKind::Launched) {
                 if (sync_each_op) {
-                    herr = hipStreamSynchronize(stream);
+                    const hipError_t herr = hipStreamSynchronize(stream);
                     if (herr != hipSuccess)
                         return Status::hip_error(
                             "optimized dispatch sync", hipGetErrorString(herr),
                             __FILE__, __LINE__);
                 }
-                uint32_t covered_kids[4] = {0, 0, 0, 0};
-                for (uint32_t j = 0; j < consumed && j < 4u; ++j)
-                    covered_kids[j] = static_cast<uint32_t>(program.dispatches[i + j].kernel_id);
-                record_logical_covered(covered_kids, consumed < 4u ? consumed : 4u);
+                record_logical_covered(&binding_as_kid, 1);
                 if (sem_on)
-                    semantic_timing_finish(stream, sem_seq, static_cast<uint32_t>(binding.kernel_id),
-                                           static_cast<uint32_t>(SemPath::Optimized),
-                                           consumed);
+                    semantic_timing_finish(stream, sem_seq, binding_as_kid,
+                                           static_cast<uint32_t>(SemPath::Optimized), 1);
                 {
-                    Status tst = record_value_trace(program, i, consumed, ctx, stream);
+                    Status tst = record_value_trace(program, i, 1, ctx, stream);
                     if (!tst.ok()) return tst;
                 }
-                i += consumed;
+                ++i;
                 continue;
             }
         }
@@ -515,10 +494,9 @@ Status execute_program_range(
         if (!st.ok()) return st;
         record_correctness_fallback(binding.kernel_id);
         record_physical_launch(1);
-        const uint32_t single_kid = static_cast<uint32_t>(binding.kernel_id);
-        record_logical_covered(&single_kid, 1);
+        record_logical_covered(&binding_as_kid, 1);
         if (sem_on)
-            semantic_timing_finish(stream, sem_seq, single_kid,
+            semantic_timing_finish(stream, sem_seq, binding_as_kid,
                                    static_cast<uint32_t>(SemPath::Correctness), 1);
         {
             Status tst = record_value_trace(program, i, 1, ctx, stream);

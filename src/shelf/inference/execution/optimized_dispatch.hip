@@ -16,13 +16,6 @@
 #include <shelf/inference/execution/l2_normalize_dispatch.h>
 #include <shelf/inference/execution/gdn_conv_dispatch.h>
 #include <shelf/inference/execution/rope_dispatch.h>
-#include <shelf/inference/execution/gdn_post_fusion.h>
-#include <shelf/inference/execution/rmsnorm_quantize_fusion.h>
-#include <shelf/inference/execution/swiglu_quantize_fusion.h>
-#include <shelf/inference/execution/resid_rmsnorm_quantize_fusion.h>
-#include <shelf/inference/execution/attn_post_quantize_fusion.h>
-#include <shelf/inference/execution/gdn_conv_silu_fusion.h>
-#include <shelf/inference/execution/gdn_qk_prepare_fusion.h>
 #include <shelf/kernels/optimized/output_gather.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
@@ -121,7 +114,7 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
     if (!resolved.ok())
         return resolved.status();
     if (resolved.value() != PhysicalResolveStatus::Applicable)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     bool specialized = false;
     const hipError_t herr = ::ps::kernel::launch_activation_quantize_fp8_finegrained(
         reinterpret_cast<const ::ps::bf16_t*>(launch.input),
@@ -138,7 +131,7 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
         g_activation_quantize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 ::ps::kernel::RmsNormDataType rmsnorm_kd(ValueDType d);
@@ -153,9 +146,9 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
         resolve_rmsnorm_physical(program, b, ctx, launch);
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = ::ps::kernel::launch_rmsnorm(
         reinterpret_cast<const void*>(launch.input), launch.input_dtype,
         reinterpret_cast<const void*>(launch.weight), launch.weight_dtype,
@@ -169,7 +162,7 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
     g_rmsnorm_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 Result<OptimizedLaunchResult> try_launch_output_gather(
@@ -178,7 +171,7 @@ Result<OptimizedLaunchResult> try_launch_output_gather(
     HostExecutionContext& ctx,
     hipStream_t stream) {
     if (b.input_count != 1u || b.output_count != 1u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     auto in_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
@@ -187,20 +180,20 @@ Result<OptimizedLaunchResult> try_launch_output_gather(
     const HostResolvedValue out = out_res.value();
     if (in.dtype != out.dtype || in.feature_count != out.feature_count ||
         in.feature_count == 0u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (out.row_domain != ValueRowDomain::OUTPUT_ROWS)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (in.ptr == nullptr || out.ptr == nullptr)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (in.row_stride < in.feature_count || out.row_stride < out.feature_count)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (ctx.actual_outputs == 0u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (ctx.batch_context == nullptr)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (in.dtype != ValueDType::BF16 && in.dtype != ValueDType::F32 &&
         in.dtype != ValueDType::I32)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = ::ps::kernel::launch_output_gather(
         in.ptr, in.row_stride, out.ptr, out.row_stride, ctx.batch_context,
         ctx.actual_outputs, in.feature_count, in.dtype, stream);
@@ -209,7 +202,7 @@ Result<OptimizedLaunchResult> try_launch_output_gather(
                                  __FILE__, __LINE__);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 Result<OptimizedLaunchResult> try_launch_linear_fp8(
@@ -271,14 +264,14 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         return Status::invalid_state("fp8 linear: output dtype not BF16/F32", __FILE__, __LINE__);
     const uint32_t rows = rows_for(out, ctx);
     if (rows == 0)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (rows > b.activation_max_rows)
         return Status::invalid_state("fp8 linear: rows out of range", __FILE__, __LINE__);
     const Fp8FinegrainedGemmSelectorInput lin{rows, e.rows, e.cols, wkp};
     const auto config = select_fp8_finegrained_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp8, FallbackReason::SelectorRejected);
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }
     if (!e.preshuffled)
         return Status::invalid_state("fp8 linear: weight not preshuffled to native layout",
@@ -302,14 +295,14 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
             sstride, b.activation_code_stride, b.activation_scale_stride,
             out.row_stride, stream, e.weight_scale_group);
     if (herr == hipErrorNotSupported)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("fp8 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
     linear_record_hit(LinearFamilyRef::Fp8, rows);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 Result<PhysicalResolveStatus> resolve_bf16_physical(
@@ -439,9 +432,9 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     if (!resolved.ok())
         return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = ::ps::kernel::launch_gemm_bf16(
         launch.config, reinterpret_cast<const ::ps::bf16_t*>(launch.weight),
         reinterpret_cast<const ::ps::bf16_t*>(launch.input),
@@ -449,14 +442,14 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
         launch.rows, launch.out_features, launch.k, launch.input_row_stride,
         launch.output_row_stride, stream);
     if (herr == hipErrorNotSupported)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("bf16 gemm launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     linear_record_hit(LinearFamilyRef::Bf16, launch.rows);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 Result<KernelMode> read_kernel_mode() {
@@ -518,15 +511,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return try_launch_linear_fp8(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_BF16)
         return try_launch_linear_bf16(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::RMS_NORM) {
-        auto fp = try_launch_fused_gdn_post(program, dispatch_index, ctx, stream);
-        if (!fp.ok()) return fp.status();
-        if (fp.value().kind != OptimizedLaunchKind::NotApplicable) return fp;
-        auto fq = try_launch_fused_rmsnorm_quantize(program, dispatch_index, ctx, stream);
-        if (!fq.ok()) return fq.status();
-        if (fq.value().kind != OptimizedLaunchKind::NotApplicable) return fq;
+    if (b.kernel_id == KernelId::RMS_NORM)
         return try_launch_rmsnorm(program, b, ctx, stream);
-    }
     if (b.kernel_id == KernelId::ROPE)
         return try_launch_rope(program, dispatch_index, ctx, stream);
     if (b.kernel_id == KernelId::OUTPUT_GATHER) {
@@ -537,9 +523,6 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return og;
     }
     if (b.kernel_id == KernelId::L2_NORMALIZE) {
-        auto fqp = try_launch_fused_gdn_qk_prepare(program, dispatch_index, ctx, stream);
-        if (!fqp.ok()) return fqp.status();
-        if (fqp.value().kind != OptimizedLaunchKind::NotApplicable) return fqp;
         auto l2 = try_launch_l2_normalize(program, dispatch_index, ctx, stream);
         if (!l2.ok()) return l2.status();
         if (l2.value().kind == OptimizedLaunchKind::Launched)
@@ -566,9 +549,6 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return pa;
     }
     if (b.kernel_id == KernelId::STATEFUL_CAUSAL_CONV1D) {
-        auto fcs = try_launch_fused_gdn_conv_silu(program, dispatch_index, ctx, stream);
-        if (!fcs.ok()) return fcs.status();
-        if (fcs.value().kind != OptimizedLaunchKind::NotApplicable) return fcs;
         auto cv = try_launch_gdn_conv1d(program, dispatch_index, ctx, stream);
         if (!cv.ok()) return cv.status();
         if (cv.value().kind == OptimizedLaunchKind::Launched)
@@ -582,22 +562,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             g_gdn_recurrence_optimized_count.fetch_add(1u, std::memory_order_relaxed);
         return grd.value();
     }
-    if (b.kernel_id == KernelId::RESIDUAL_ADD) {
-        auto fr = try_launch_fused_resid_rmsnorm_quantize(program, dispatch_index, ctx,
-                                                          stream);
-        if (!fr.ok()) return fr.status();
-        if (fr.value().kind != OptimizedLaunchKind::NotApplicable) return fr;
-    }
-    if (b.kernel_id == KernelId::SIGMOID) {
-        auto fq = try_launch_fused_attn_post_quantize(program, dispatch_index, ctx,
-                                                      stream);
-        if (!fq.ok()) return fq.status();
-        if (fq.value().kind != OptimizedLaunchKind::NotApplicable) return fq;
-    }
     if (b.kernel_id == KernelId::SWIGLU) {
-        auto fq = try_launch_fused_swiglu_quantize(program, dispatch_index, ctx, stream);
-        if (!fq.ok()) return fq.status();
-        if (fq.value().kind != OptimizedLaunchKind::NotApplicable) return fq;
         auto q = try_launch_elementwise(program, dispatch_index, ctx, stream);
         if (!q.ok()) return q.status();
         if (q.value().kind == OptimizedLaunchKind::Launched)
@@ -614,7 +579,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             g_elementwise_optimized_count.fetch_add(1u, std::memory_order_relaxed);
         return q;
     }
-    return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+    return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
 }
 
 }

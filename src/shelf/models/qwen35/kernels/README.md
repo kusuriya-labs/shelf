@@ -36,7 +36,7 @@ linear の family-specific KernelConfig 型は
   `model_dispatch_correctness.hip` が `detail/*.inc` を include して単一 TU を構成する
   （RDC を要求せず、device helper の共有と KernelId switch の一箇所化を両立する）。
 - `common/` に operator 実装を逃がさない。共有部品だけを `optimized/detail/` に置く。
-- fused kernel は現状存在しないため `fused/` は作らない。
+- fused kernel・fusion matcher は置かない（現在 1 dispatch = 1 kernel）。
 
 ## KernelConfig
 

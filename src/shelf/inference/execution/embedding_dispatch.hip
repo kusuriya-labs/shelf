@@ -29,7 +29,7 @@ using ::ps::runtime::WeightSlot;
 using ::ps::runtime::ValueDType;
 using ::ps::runtime::ValueRowDomain;
 
-constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable, 0};
+constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 }  // namespace
 
@@ -135,7 +135,7 @@ Result<OptimizedLaunchResult> try_launch_embedding(
     }
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

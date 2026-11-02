@@ -20,12 +20,10 @@ Result<KernelMode> read_kernel_mode();
 enum class OptimizedLaunchKind : uint8_t {
     NotApplicable,
     Launched,
-    Skipped,
 };
 
 struct OptimizedLaunchResult {
     OptimizedLaunchKind kind = OptimizedLaunchKind::NotApplicable;
-    uint32_t consumed_dispatches = 0;
 };
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
     const ::ps::runtime::Program& program,

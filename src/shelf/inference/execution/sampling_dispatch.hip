@@ -27,7 +27,7 @@ namespace {
 using ::ps::runtime::ValueDType;
 using ::ps::runtime::ValueRowDomain;
 
-constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable, 0};
+constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 Result<OptimizedLaunchResult> resolve_sampling(
     const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
@@ -56,7 +56,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
 
     const uint32_t outputs = ctx.actual_outputs;
     if (outputs == 0u)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (ctx.output_sampling_params == nullptr) return kNone;
 
     const uint32_t sampled = ctx.actual_sampled_outputs;
@@ -111,7 +111,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
                                      hipGetErrorString(serr), __FILE__, __LINE__);
         record_physical_launch(2);
         record_optimized_op();
-        return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
     }
 
     if (choice.implementation == SamplingImplementation::StochasticSingleBlock) {
@@ -130,7 +130,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
                                      __FILE__, __LINE__);
         record_physical_launch(1);
         record_optimized_op();
-        return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
     }
 
     ::ps::kernel::ArgmaxF32Args args;
@@ -161,7 +161,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
                                ? 2
                                : 1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace

@@ -645,19 +645,19 @@ Result<OptimizedLaunchResult> try_launch_paged_attention(
                 "falling back to correctness path\n",
                 ctx.actual_rows, ctx.spec.max_visible_tokens);
         }
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = launch_paged_attention_physical(plan, stream);
     if (herr == hipErrorNotSupported)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("paged-attention optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     record_physical_launch(plan.physical_count != 0u ? plan.physical_count : 1u);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

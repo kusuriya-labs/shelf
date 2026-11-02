@@ -44,7 +44,6 @@ void perf_stats_reset();
 void perf_stats_dump(const char* path, uint32_t tokens);
 
 // Count a group of logically-consecutive dispatches as covered by one execution
-// (a fused launch consumes `covered` logical dispatches; a single op covers 1).
 inline void record_logical_covered(
     const uint32_t* covered_kernel_ids,
     uint32_t covered) {

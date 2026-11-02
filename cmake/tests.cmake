@@ -164,13 +164,6 @@ shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_b
 shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_activation_quantize_fp8_finegrained SOURCE kernels/optimized/test_activation_quantize_fp8_finegrained.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_activation_quantize_tp_split SOURCE kernels/optimized/test_activation_quantize_tp_split.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_gdn_post SOURCE kernels/optimized/test_fused_gdn_post.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_rmsnorm_quantize SOURCE kernels/optimized/test_fused_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_swiglu_quantize SOURCE kernels/optimized/test_fused_swiglu_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_resid_rmsnorm_quantize SOURCE kernels/optimized/test_fused_resid_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_attn_post_quantize SOURCE kernels/optimized/test_fused_attn_post_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_gdn_conv_silu SOURCE kernels/optimized/test_fused_gdn_conv_silu.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_fused_gdn_qk_prepare SOURCE kernels/optimized/test_fused_gdn_qk_prepare.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gemm_fp8_optimized SOURCE kernels/linear/test_gemm_fp8_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_gemm_bf16_wmma SOURCE kernels/optimized/test_gemm_bf16_wmma.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_gemm_bf16_verify_exact SOURCE kernels/optimized/test_gemm_bf16_verify_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
@@ -272,12 +265,6 @@ add_custom_target(
         test_gemm_bf16_exact_rows
         test_activation_quantize_fp8_finegrained
         test_activation_quantize_tp_split
-        test_fused_gdn_post
-        test_fused_rmsnorm_quantize
-        test_fused_resid_rmsnorm_quantize
-        test_fused_attn_post_quantize
-        test_fused_gdn_conv_silu
-        test_fused_gdn_qk_prepare
         test_gemm_fp8_optimized
         test_gemm_bf16_wmma
         test_rmsnorm

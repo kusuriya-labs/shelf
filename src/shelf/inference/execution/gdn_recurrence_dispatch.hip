@@ -301,17 +301,17 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     const ::ps::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size())
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const auto& b = program.dispatches[dispatch_index];
     if (b.kernel_id != KernelId::GDN_RECURRENCE)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
 
     PhysicalGdnRecurrenceLaunch launch{};
     const Result<PhysicalResolveStatus> resolved =
         resolve_gdn_recurrence_physical(program, b, ctx, launch);
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() != PhysicalResolveStatus::Applicable)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
 
     bool ran_f32 = launch.variant == PhysicalGdnRecurrenceVariant::F32;
     hipError_t herr = hipSuccess;
@@ -345,7 +345,7 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
         gdn_recurrence_optimized_hit();
     record_physical_launch(1u);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1u};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

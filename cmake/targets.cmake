@@ -95,16 +95,9 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/l2_normalize.hip
     src/shelf/kernels/optimized/output_gather.hip
     src/shelf/kernels/optimized/activation_quantize.hip
-    src/shelf/kernels/optimized/swiglu_quantize.hip
-    src/shelf/kernels/optimized/rmsnorm_quantize.hip
-    src/shelf/kernels/optimized/resid_rmsnorm_quantize.hip
-    src/shelf/kernels/optimized/attn_post_quantize.hip
     src/shelf/kernels/optimized/kv_append.hip
     src/shelf/kernels/optimized/gdn/recurrence.hip
     src/shelf/kernels/optimized/gdn/conv1d.hip
-    src/shelf/kernels/optimized/gdn/fused_gdn_post.hip
-    src/shelf/kernels/optimized/gdn/fused_gdn_conv_silu.hip
-    src/shelf/kernels/optimized/gdn/fused_gdn_qk_prepare.hip
     src/shelf/kernels/optimized/sampling.hip
     src/shelf/kernels/optimized/stochastic_sampling.hip
     src/shelf/kernels/optimized/radix_topn.hip
@@ -199,14 +192,10 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/selectors/elementwise_selector.cpp
     src/shelf/inference/execution/selectors/embedding_selector.cpp
     src/shelf/inference/execution/selectors/sampling_selector.cpp
-    src/shelf/inference/execution/attn_post_quantize_fusion.hip
     src/shelf/inference/execution/decode_perf_stats.cpp
     src/shelf/inference/execution/elementwise_dispatch.hip
     src/shelf/inference/execution/embedding_dispatch.hip
     src/shelf/inference/execution/gdn_conv_dispatch.hip
-    src/shelf/inference/execution/gdn_conv_silu_fusion.hip
-    src/shelf/inference/execution/gdn_post_fusion.hip
-    src/shelf/inference/execution/gdn_qk_prepare_fusion.hip
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
@@ -215,11 +204,8 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/paged_attention_dispatch.hip
     src/shelf/inference/execution/physical_launch.hip
     src/shelf/inference/execution/program_executor.hip
-    src/shelf/inference/execution/resid_rmsnorm_quantize_fusion.hip
-    src/shelf/inference/execution/rmsnorm_quantize_fusion.hip
     src/shelf/inference/execution/rope_dispatch.hip
     src/shelf/inference/execution/sampling_dispatch.hip
-    src/shelf/inference/execution/swiglu_quantize_fusion.hip
 )
 target_compile_features(shelf_inference_execution PRIVATE cxx_std_20)
 target_include_directories(shelf_inference_execution PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

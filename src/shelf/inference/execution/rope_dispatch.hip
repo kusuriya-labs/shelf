@@ -27,7 +27,7 @@ namespace {
 using ::ps::runtime::ValueDType;
 using ::ps::runtime::ValueRowDomain;
 
-constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable, 0};
+constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 uint32_t rope_rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
     if (v.row_domain == ValueRowDomain::OUTPUT_ROWS) return ctx.actual_outputs;
@@ -144,7 +144,7 @@ Result<OptimizedLaunchResult> try_launch_rope(
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable) return kNone;
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = launch_rope_physical(launch, stream);
     if (herr != hipSuccess)
         return Status::hip_error("rope optimized launch", hipGetErrorString(herr),
@@ -155,7 +155,7 @@ Result<OptimizedLaunchResult> try_launch_rope(
         rope_optimized_hit();
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

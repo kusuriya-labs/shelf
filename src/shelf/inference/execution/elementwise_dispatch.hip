@@ -27,7 +27,7 @@ using ::ps::kernel::ElementwiseSplitLayout;
 using ::ps::runtime::ValueDType;
 using ::ps::runtime::ValueRowDomain;
 
-constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable, 0};
+constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
     if (v.row_domain == ValueRowDomain::OUTPUT_ROWS) return ctx.actual_outputs;
@@ -519,7 +519,7 @@ Result<OptimizedLaunchResult> try_launch_elementwise(
                                  __FILE__, __LINE__);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

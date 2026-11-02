@@ -228,18 +228,18 @@ Result<OptimizedLaunchResult> try_launch_kv_append(
         resolve_kv_append_physical(program, dispatch_index, ctx, launch);
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
-        return OptimizedLaunchResult{OptimizedLaunchKind::Skipped, 1};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const hipError_t herr = launch_kv_append_physical(launch, stream);
     if (herr == hipErrorNotSupported)
-        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("kv-append optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     record_physical_launch(1);
     record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
 }  // namespace ps::execution

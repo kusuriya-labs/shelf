@@ -1,6 +1,6 @@
-# カーネル最適化と融合の手順
+# カーネル最適化の手順
 
-カーネル最適化・カーネル融合を扱うときの標準手順を定義する。
+カーネル最適化を扱うときの標準手順を定義する。
 対象は AMD RDNA4（gfx1201）/ ROCm / HIP のみ。
 性能値の正本は `docs/perf/`、計測原則は `docs/perf/methodology.md`、
 採否の R&D 記録は Git history にある。本ドキュメントは手順とルールの
@@ -20,7 +20,7 @@
 
 ```
 ① 現状計測と ISA 収集  →  選定表（share × 律速分類 × レバー可否）
-② レバー選択  →  個別改善ルール または 融合ルールで実装
+② レバー選択  →  個別改善ルールで実装
 ③ 検証ゲート  →  正しさ + 性能。不合格なら ① に戻る
 ```
 
@@ -83,7 +83,7 @@ kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条�
 - 候補の優先順位は「share 大 × ②③ × (occupancy / 命令昇格 / 同期消去) が
   成立する構造」。①と④を計算効率の主題に選ばない。
 
-## 3. ②a 個別改善ルール
+## 3. 個別改善ルール
 
 1. **冗長な命令を消す。** dead work の削除、代数簡約、計算の表参照化。
    命令数は ISA で数える。
@@ -115,78 +115,19 @@ kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条�
 9. **dispatch / launch を減らすのは prefill 主体で見積もる。**
    replay できる平坦な純 launch 列は HIP graph と併用を検討する。
 
-## 4. ②b 融合ルール
+## 4. 融合ルール（未実装）
 
-### 融合の価値源と成立条件
+現在、実装済みのカーネル融合は存在しない（`src/shelf/kernels/optimized/` に
+fused kernel を置かない）。融合を行う場合は次の手順を通す。
 
-融合は「複数の dispatch を 1 本にすること」自体に価値があるのではない。
-効果源は次の 4 つに分解して会計する。
-
-1. dispatch / launch 削減（pp でのみ実額）
-2. 消費側が行っていた**仕事そのものの消去**（再読・再エンコード等）
-3. 中間 materialize の削減（容量超過分のみ実額。L3 容量内の分は会計除外）
-4. 同期の消去・格下げ（kernel 境界 = grid-wide 同期の消去）
-
-素材カーネルが L3/pass 律速（分類 ②）で、計算が削れないなら
-**融合だけでは速くならない**（primitive が 1.00×）。まず選定表で
-素材の律速を確認する。
-
-### tier ゲート
-
-融合セルフアセスメントが tier を宣言し、主指標で下限を満たすことを要求する。
-
-| tier | 内容 | 下限（主指標） |
-| --- | --- | --- |
-| T0 | dispatch 結合のみ（kernel 本体不変） | ≥0.3% |
-| T1 | 新 fused kernel 1 本（body は template 直接呼び出し・single call site） | ≥0.7% |
-| T2 | matcher / topology の大掛かりな変更 | ≥1.5% |
-| T3 | 分岐の重い融合 | ≥2% |
-
-共通条件:
-
-- byte-exact（文書化した等価性で代替可）
-- occupancy 段階変化なし（資源対比表を報告）
-- L3 容量内の intermediate 消去は会計除外
-- 判定は interleaved A/B のペア別中央値
-
-### matcher / topology の役割分担
-
-- **matcher** は「適用してよいか」の証明器（安全装置）である。融合後パスの
-  前提（overlap なし、geometry 一致等）が真であることを検証してから
-  launch する。
-- **topology** は「融合後に計算パスをどう組み直すか」の設計である。
-  kernel 境界（grid-wide 同期＋materialize＋再読）を、own-slice 完結 /
-  LDS 経由 / materialize 維持のどれに置き換えるかを選び、レバーの成立
-  可否（特に同期消去）をここで決める。
-- **カーネル本体** はその中で式・命令クラス・resource を実装する。
-- **byte-exact は構造変更の自動結果ではない。** per-element の演算列・
-  順序・中間精度段階を保存するように設計したときにのみ成立する
-  （norm 数学の複製や縮約順・累加順の変化は数学的等価でも 1 ULP の差を生む）。
-  保存できない変更（WMMA への命令昇格、ロスの導入など）は byte-exact を
-  目指さず、数値規則（原則 4）へ分岐して tolerance・決定論・非ロスと
-  token ゲートの更新を承認条件にする。byte-exact は必ず focused test と
-  token ゲートで検証し、仮定しない。
-
-### matcher ルール
-
-- **applicability を完全証明してから launch する。** 階接・slot 連結・
-  geometry（dtype / k / rows / profile）・workspace レンジを検証する。
-  kernel 側の validation エラーが matcher をすり抜け、dispatch を
-  エラー終了させる経路を作らない。
-- **部分 overlap は reject。** 完全 identical のみ条件付き許容
-  （読む側が全スレッドで完了してから書く側に進む構造がある場合のみ）。
-- alias は topology 構造で保証できるなら range 検査の代わりに構造で
-  証明する（own-slice なら read-before-write が thread-local）。
-
-### topology ルール
-
-- single call site。chains は dispatch ブランチに直列に置く。
-- group-slice / own-slice 構造を優先する（phase 遷移の barrier を増やさない）。
-- **行数ガード**: row-wide な処理を含む融合は `rows == 1` で split を
-  維持する（grid が 1 CTA に直列化し split の方が速い）。
-- **共有 norm body は template 直接呼び出しのみ。** 数学の warp-local 複製は
-  禁止（縮約順序の 1 ULP 差が多層で蓄積しトークンが崩れる）。
-- occupancy 対比は resource 表で示す（計算には gfx1201 の定数を使う）。
+1. 素材 kernel の律速分類（§2）を計測で確定する。分類 ②（L3 / pass 律速）で
+   計算を削れないなら、融合だけでは速くならない。
+2. dispatch 削減だけでなく、消費側仕事の消去・中間 materialize 削減・
+   grid-wide 同期の消去のどれで稼ぐかを数値で見積もる。
+3. 成立条件（byte-exact または文書化した等価性、occupancy 段階変化なし、
+   launch 1 本）を focused test と interleaved A/B で検証する。
+4. 採用時に限り、融合 kernel と matcher を追加し、`cmake/tests.cmake` の
+   required に focused test を登録する。
 
 ## 5. ③ 検証ゲート
 

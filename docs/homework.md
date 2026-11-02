@@ -116,6 +116,9 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * docsの整理
 ## 機能
 * リクエストの最大並列数を 4 にし、リクエスト毎の最大推論予算を 32768 tok にする
+* Verifyで使用するbatchは 最大並列数 * 8 にする
+* VerifyとPrefillをMixed可能にする
+* pipeline-parallelの実装
 * Samplingでmin_pの追加
 * yarnがDFlash2で効かないのを修正
 * preshuffleの有無を設定化
@@ -123,3 +126,6 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * FP8カーネルでradianceとは違うところを修正する(ただし、Prefillのtok/sが下がってもよいからspillは0に抑える)
 * MTPの実装
 * exl3(mul1)の実装
+* MXFP4の実装
+* qwen35moe対応・最適化
+*

@@ -1,13 +1,9 @@
 #pragma once
 
-#include <shelf/inference/execution/attn_post_quantize_fusion.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/elementwise_dispatch.h>
 #include <shelf/inference/execution/embedding_dispatch.h>
 #include <shelf/inference/execution/gdn_conv_dispatch.h>
-#include <shelf/inference/execution/gdn_conv_silu_fusion.h>
-#include <shelf/inference/execution/gdn_post_fusion.h>
-#include <shelf/inference/execution/gdn_qk_prepare_fusion.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/kv_calib_dump.h>
@@ -16,12 +12,9 @@
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/program_executor.h>
-#include <shelf/inference/execution/resid_rmsnorm_quantize_fusion.h>
-#include <shelf/inference/execution/rmsnorm_quantize_fusion.h>
 #include <shelf/inference/execution/rope_dispatch.h>
 #include <shelf/inference/execution/sampling_dispatch.h>
 #include <shelf/inference/execution/spec_decode_context.h>
-#include <shelf/inference/execution/swiglu_quantize_fusion.h>
 
 namespace ps {
 namespace qwen35 {
@@ -121,13 +114,6 @@ using ::ps::execution::semantic_timing_start;
 using ::ps::execution::try_launch_activation_quantize;
 using ::ps::execution::try_launch_elementwise;
 using ::ps::execution::try_launch_embedding;
-using ::ps::execution::try_launch_fused_attn_post_quantize;
-using ::ps::execution::try_launch_fused_gdn_conv_silu;
-using ::ps::execution::try_launch_fused_gdn_post;
-using ::ps::execution::try_launch_fused_gdn_qk_prepare;
-using ::ps::execution::try_launch_fused_resid_rmsnorm_quantize;
-using ::ps::execution::try_launch_fused_rmsnorm_quantize;
-using ::ps::execution::try_launch_fused_swiglu_quantize;
 using ::ps::execution::try_launch_gdn_conv1d;
 using ::ps::execution::try_launch_gdn_recurrence;
 using ::ps::execution::try_launch_kv_append;
