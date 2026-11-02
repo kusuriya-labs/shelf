@@ -1,7 +1,7 @@
 #include <shelf/inference/state/paged_sequence_state.h>
 #include <hip/hip_runtime.h>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 Result<PagedSequenceState> create_paged_sequence_state(
@@ -27,7 +27,7 @@ Result<PagedSequenceState> create_paged_sequence_state(
     auto handle_result = seq_pool.allocate_handle();
     if (!handle_result.ok()) return handle_result.status();
 
-    const ::ps::runtime::RequestHandle handle = handle_result.value();
+    const ::shelf::runtime::RequestHandle handle = handle_result.value();
 
     auto clear_st = seq_pool.clear_slot(handle.slot, stream);
     if (!clear_st.ok()) {
@@ -84,7 +84,7 @@ Status release_paged_sequence_state(PagedSequenceState& seq, hipStream_t stream)
         return Status::hip_error("hipStreamSynchronize(stream)", hipGetErrorString(sync_error), __FILE__, __LINE__);
     }
 
-    const ::ps::runtime::RequestHandle handle = seq.request_handle();
+    const ::shelf::runtime::RequestHandle handle = seq.request_handle();
 
     auto release_pages = seq.kv_pool_->release_many(seq.block_table);
     if (!release_pages.ok()) return release_pages;
@@ -230,14 +230,14 @@ Status rollback_sequence_append(
 
 Status validate_sequence_append_commit(
     const PagedSequenceState& seq,
-    ::ps::runtime::RequestHandle expected_handle,
+    ::shelf::runtime::RequestHandle expected_handle,
     uint32_t committed_tokens) {
 
     if (!seq.is_usable()) {
         return Status::invalid_state("sequence state is not usable", __FILE__, __LINE__);
     }
 
-    if (!::ps::runtime::request_handle_equal(seq.request_handle(), expected_handle)) {
+    if (!::shelf::runtime::request_handle_equal(seq.request_handle(), expected_handle)) {
         return Status::invalid_state(
             "stale request handle during sequence commit", __FILE__, __LINE__);
     }
@@ -257,7 +257,7 @@ Status validate_sequence_append_commit(
 
 Status commit_sequence_append(
     PagedSequenceState& seq,
-    ::ps::runtime::RequestHandle expected_handle,
+    ::shelf::runtime::RequestHandle expected_handle,
     uint32_t committed_tokens) {
 
     auto st = validate_sequence_append_commit(seq, expected_handle, committed_tokens);

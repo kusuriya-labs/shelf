@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -68,4 +68,4 @@ hipError_t launch_l2_normalize_bf16_f32(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

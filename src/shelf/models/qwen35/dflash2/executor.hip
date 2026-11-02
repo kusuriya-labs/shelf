@@ -31,7 +31,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::qwen35::dflash2 {
+namespace shelf::qwen35::dflash2 {
 
 namespace {
 
@@ -71,8 +71,8 @@ Status allocate_contiguous_tensor(
     return Status::make_ok();
 }
 
-std::optional<ps::kernel::Bf16GemmConfig> select_bf16_gemm(
-    const ps::weights::MatrixWeight& weight,
+std::optional<shelf::kernel::Bf16GemmConfig> select_bf16_gemm(
+    const shelf::weights::MatrixWeight& weight,
     uint32_t rows,
     uint32_t input_row_stride,
     const void* weight_ptr,
@@ -107,12 +107,12 @@ bool attention_reference_enabled() {
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
-const ps::kernel::DFlash2TopKPlan& topk_plan() {
-    static const ps::kernel::DFlash2TopKPlan plan = ps::kernel::dflash2_topk_default_plan();
+const shelf::kernel::DFlash2TopKPlan& topk_plan() {
+    static const shelf::kernel::DFlash2TopKPlan plan = shelf::kernel::dflash2_topk_default_plan();
     return plan;
 }
 
-const ps::weights::MatrixWeight& conv_kernel_projection(
+const shelf::weights::MatrixWeight& conv_kernel_projection(
     const DFlash2LayerWeights& layer,
     bool attention_conv) {
     return attention_conv ? layer.attention_conv_kernel_projection
@@ -149,7 +149,7 @@ Status conv_apply_dynamic_conv(
     hipStream_t stream) {
     const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
     const gpu::Tensor& base = conv_base_kernel(layer, attention_conv);
-    const hipError_t err = ps::kernel::launch_dflash2_grouped_dynamic_conv_rows(
+    const hipError_t err = shelf::kernel::launch_dflash2_grouped_dynamic_conv_rows(
         conv_input, executor.conv_dynamic.data<bf16_t>(), base.data<bf16_t>(), output, rows,
         hidden_size, static_cast<uint32_t>(executor.config->conv_group_size), phase,
         row_has_prev, stream);
@@ -176,7 +176,7 @@ Status grouped_conv_prepare_rows(
     }
 
     const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
-    const ps::weights::MatrixWeight& projection = conv_kernel_projection(layer, attention_conv);
+    const shelf::weights::MatrixWeight& projection = conv_kernel_projection(layer, attention_conv);
 
     Status gemm_st = dflash2_linear(projection, hidden, hidden_size,
                                     executor.conv_dynamic.data<bf16_t>(),
@@ -205,7 +205,7 @@ Status grouped_conv_finish_rows(
 
     const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
     const gpu::Tensor& base = conv_base_kernel(layer, attention_conv);
-    const hipError_t err = ps::kernel::launch_dflash2_grouped_dynamic_conv_rows(
+    const hipError_t err = shelf::kernel::launch_dflash2_grouped_dynamic_conv_rows(
         hidden, executor.conv_dynamic.data<bf16_t>(), base.data<bf16_t>(), output, rows,
         hidden_size, static_cast<uint32_t>(executor.config->conv_group_size), 1u, row_has_prev,
         stream);
@@ -217,7 +217,7 @@ Status grouped_conv_finish_rows(
 }
 
 Status layer_gemm_bf16(
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* input,
     uint32_t input_row_stride,
     bf16_t* output,
@@ -233,9 +233,9 @@ Status layer_gemm_bf16(
             (std::string("dflash2 ") + tag + " has no optimized bf16 gemm geometry").c_str(),
             __FILE__, __LINE__);
     }
-    const hipError_t err = ps::kernel::launch_gemm_bf16(
+    const hipError_t err = shelf::kernel::launch_gemm_bf16(
         *config, weight.bf16.data<bf16_t>(), input, output,
-        ps::kernel::Bf16GemmOutputDType::BF16, rows, weight.rows, weight.cols,
+        shelf::kernel::Bf16GemmOutputDType::BF16, rows, weight.rows, weight.cols,
         input_row_stride, output_row_stride, stream);
     if (err != hipSuccess) {
         return Status::hip_error((std::string("dflash2 ") + tag + " launch").c_str(),
@@ -250,7 +250,7 @@ Status layer_gemm_bf16(
 }  // namespace
 
 Status dflash2_linear(
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* input,
     uint32_t input_row_stride,
     bf16_t* output,
@@ -259,7 +259,7 @@ Status dflash2_linear(
     const char* tag,
     hipStream_t stream,
     bool allow_exact_rows) {
-    if (weight.encoding != ps::weights::MatrixEncoding::Bf16) {
+    if (weight.encoding != shelf::weights::MatrixEncoding::Bf16) {
         return Status::unsupported(
             (std::string("dflash2 ") + tag + " weight encoding unsupported").c_str(),
             __FILE__, __LINE__);
@@ -282,10 +282,10 @@ Result<DFlash2Executor> create_dflash2_executor(
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument("dflash2 layer count mismatch", __FILE__, __LINE__);
     }
-    if (config.num_target_layer_ids != ps::kernel::kDFlash2TargetTaps) {
+    if (config.num_target_layer_ids != shelf::kernel::kDFlash2TargetTaps) {
         return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
     }
-    if (config.conv_kernel_size != ps::kernel::kDFlash2ConvKernelSize) {
+    if (config.conv_kernel_size != shelf::kernel::kDFlash2ConvKernelSize) {
         return Status::invalid_argument("dflash2 conv kernel size mismatch", __FILE__, __LINE__);
     }
 
@@ -400,10 +400,10 @@ Result<DFlash2Executor> create_dflash2_executor(
     st = allocate_contiguous_tensor<int32_t>(arena, {draft}, ex.proposal_tokens);
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<int32_t>(
-        arena, {draft, ps::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_ids);
+        arena, {draft, shelf::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_ids);
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<float>(
-        arena, {draft, ps::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_logits);
+        arena, {draft, shelf::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_logits);
     if (!st.ok()) return st;
 
     uint32_t act_k = static_cast<uint32_t>(hidden);
@@ -411,7 +411,7 @@ Result<DFlash2Executor> create_dflash2_executor(
         act_k = std::max(act_k, exec_config.target_lm_head->k_padded);
     }
     const auto act_layout =
-        ps::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
+        shelf::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
     st = allocate_contiguous_tensor<int8_t>(
         arena, {act_layout.codes_bytes()}, ex.activation_codes);
     if (!st.ok()) return st;
@@ -422,7 +422,7 @@ Result<DFlash2Executor> create_dflash2_executor(
     st = allocate_contiguous_tensor<uint32_t>(arena, {rows}, ex.conv_row_has_prev);
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<uint8_t>(
-        arena, {rows * sizeof(ps::kernel::DFlash2RequestDescriptor)}, ex.batch_descriptors);
+        arena, {rows * sizeof(shelf::kernel::DFlash2RequestDescriptor)}, ex.batch_descriptors);
     if (!st.ok()) return st;
 
     ex.target_embed_tokens = exec_config.target_embed_tokens;
@@ -511,7 +511,7 @@ Status dflash2_project_target_features(
     if (target_taps == nullptr) {
         return Status::invalid_argument("dflash2 target taps are null", __FILE__, __LINE__);
     }
-    if (tap_count != ps::kernel::kDFlash2TargetTaps) {
+    if (tap_count != shelf::kernel::kDFlash2TargetTaps) {
         return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
     }
     if (rows > executor.max_rows) {
@@ -529,7 +529,7 @@ Status dflash2_project_target_features(
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
     const uint32_t concat_stride = static_cast<uint32_t>(executor.target_concat.dim(1));
 
-    hipError_t err = ps::kernel::launch_dflash2_feature_concat(
+    hipError_t err = shelf::kernel::launch_dflash2_feature_concat(
         target_taps[0], target_taps[1], target_taps[2], target_taps[3], target_taps[4],
         hidden, rows, executor.target_concat.data<bf16_t>(), concat_stride, stream);
     if (err != hipSuccess) {
@@ -537,14 +537,14 @@ Status dflash2_project_target_features(
                                  __FILE__, __LINE__);
     }
 
-    const ps::weights::MatrixWeight& fc = executor.weights->fc;
+    const shelf::weights::MatrixWeight& fc = executor.weights->fc;
     Status st = dflash2_linear(fc, executor.target_concat.data<bf16_t>(),
                                concat_stride, executor.target_fc.data<bf16_t>(),
                                static_cast<uint32_t>(executor.target_fc.dim(1)), rows, "fc",
                                stream);
     if (!st.ok()) return st;
 
-    err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+    err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
         executor.target_fc.data<bf16_t>(), executor.weights->hidden_norm_weight.data<bf16_t>(),
         executor.target_feature.data<bf16_t>(), rows, hidden, hidden,
         executor.config->rms_norm_eps, stream);
@@ -591,7 +591,7 @@ Status layer_rmsnorm_direct(
     float eps,
     const char* tag,
     hipStream_t stream) {
-    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
         input, weight.data<bf16_t>(), output, rows, features, group_size, eps, stream);
     if (err != hipSuccess) {
         return Status::hip_error((std::string("dflash2 ") + tag + " launch").c_str(),
@@ -627,7 +627,7 @@ Status layer_attention_tail(
     if (!st.ok()) return st;
 
     hipError_t err = hipSuccess;
-    err = ps::kernel::launch_residual_add_bf16(
+    err = shelf::kernel::launch_residual_add_bf16(
         hidden_in, hidden, executor.attention_finished.data<bf16_t>(), hidden,
         executor.attention_residual.data<bf16_t>(), hidden, block_rows, hidden, stream);
     if (err != hipSuccess) {
@@ -658,7 +658,7 @@ Status layer_attention_tail(
         if (!st.ok()) return st;
     
 
-    err = ps::kernel::launch_dflash2_swiglu_bf16(
+    err = shelf::kernel::launch_dflash2_swiglu_bf16(
         executor.mlp_gate.data<bf16_t>(), intermediate, executor.mlp_up.data<bf16_t>(),
         intermediate, executor.mlp_swiglu.data<bf16_t>(), intermediate, block_rows,
         intermediate, stream);
@@ -676,7 +676,7 @@ Status layer_attention_tail(
                                   row_has_prev, stream);
     if (!st.ok()) return st;
 
-    err = ps::kernel::launch_residual_add_bf16(
+    err = shelf::kernel::launch_residual_add_bf16(
         executor.attention_residual.data<bf16_t>(), hidden,
         executor.mlp_finished.data<bf16_t>(), hidden, output, hidden, block_rows, hidden,
         stream);
@@ -761,7 +761,7 @@ Status dflash2_context_append(
             executor.k_ctx_norm.data<bf16_t>(), effective_rows, kv_features, head_dim,
             config.rms_norm_eps, "k_ctx_norm", stream);
         if (!st.ok()) return st;
-        const hipError_t err = ps::kernel::launch_dflash2_rope_bf16(
+        const hipError_t err = shelf::kernel::launch_dflash2_rope_bf16(
             executor.k_ctx_norm.data<bf16_t>(), kv_features,
             executor.k_ctx_rope.data<bf16_t>(), kv_features, effective_rows, kv_features,
             head_dim, effective_position, config.rope_theta, stream);
@@ -769,7 +769,7 @@ Status dflash2_context_append(
             return Status::hip_error("dflash2 k_ctx rope launch", hipGetErrorString(err),
                                      __FILE__, __LINE__);
         }
-        const hipError_t append_err = ps::kernel::launch_dflash2_kv_ring_append_bf16(
+        const hipError_t append_err = shelf::kernel::launch_dflash2_kv_ring_append_bf16(
             executor.k_ctx_rope.data<bf16_t>(), executor.v_ctx.data<bf16_t>(),
             k_ring + static_cast<std::size_t>(li) * layer_stride,
             v_ring + static_cast<std::size_t>(li) * layer_stride, effective_rows, kv_features,
@@ -884,7 +884,7 @@ Status dflash2_forward_layer_stateless(
                               head_dim, eps, "k_noise_norm", stream);
     if (!st.ok()) return st;
 
-    err = ps::kernel::launch_dflash2_rope_bf16(
+    err = shelf::kernel::launch_dflash2_rope_bf16(
         executor.q_norm.data<bf16_t>(), q_features, executor.q_rope.data<bf16_t>(),
         q_features, block_rows, q_features, head_dim, block_position_start,
         config.rope_theta, stream);
@@ -892,7 +892,7 @@ Status dflash2_forward_layer_stateless(
         return Status::hip_error("dflash2 q rope launch", hipGetErrorString(err), __FILE__,
                                  __LINE__);
     }
-    err = ps::kernel::launch_dflash2_rope_bf16(
+    err = shelf::kernel::launch_dflash2_rope_bf16(
         executor.k_ctx_norm.data<bf16_t>(), kv_features, executor.k_ctx_rope.data<bf16_t>(),
         kv_features, context_rows, kv_features, head_dim, context_position_start,
         config.rope_theta, stream);
@@ -900,7 +900,7 @@ Status dflash2_forward_layer_stateless(
         return Status::hip_error("dflash2 k_ctx rope launch", hipGetErrorString(err), __FILE__,
                                  __LINE__);
     }
-    err = ps::kernel::launch_dflash2_rope_bf16(
+    err = shelf::kernel::launch_dflash2_rope_bf16(
         executor.k_noise_norm.data<bf16_t>(), kv_features,
         executor.k_noise_rope.data<bf16_t>(), kv_features, block_rows, kv_features, head_dim,
         block_position_start, config.rope_theta, stream);
@@ -909,7 +909,7 @@ Status dflash2_forward_layer_stateless(
                                  __FILE__, __LINE__);
     }
 
-    err = ps::kernel::launch_dflash2_attention_bf16(
+    err = shelf::kernel::launch_dflash2_attention_bf16(
         executor.q_rope.data<bf16_t>(), q_features, executor.k_ctx_rope.data<bf16_t>(),
         executor.v_ctx.data<bf16_t>(), context_rows, kv_features,
         executor.k_noise_rope.data<bf16_t>(), executor.v_noise.data<bf16_t>(), block_rows,
@@ -980,7 +980,7 @@ Status dflash2_forward_backbone_stateless(
     }
 
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
-    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
         src, executor.weights->final_norm_weight.data<bf16_t>(), output, block_rows, hidden,
         hidden, executor.config->rms_norm_eps, stream);
     if (err != hipSuccess) {
@@ -994,11 +994,11 @@ namespace {
 
 Status lm_head_validate(
     const DFlash2Executor& executor,
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     uint32_t rows) {
     const DFlash2Config& config = *executor.config;
-    const bool bf16 = weight.encoding == ps::weights::MatrixEncoding::Bf16;
-    const bool fp8 = weight.encoding == ps::weights::MatrixEncoding::Fp8Finegrained;
+    const bool bf16 = weight.encoding == shelf::weights::MatrixEncoding::Bf16;
+    const bool fp8 = weight.encoding == shelf::weights::MatrixEncoding::Fp8Finegrained;
     if (!bf16 && !fp8) {
         return Status::unsupported("dflash2 target lm_head encoding unsupported", __FILE__,
                                    __LINE__);
@@ -1029,14 +1029,14 @@ Status lm_head_validate(
 
 Status lm_head_quantize(
     DFlash2Executor& executor,
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* hidden,
     uint32_t rows,
     hipStream_t stream) {
-    if (weight.encoding == ps::weights::MatrixEncoding::Bf16) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Bf16) {
         return Status::make_ok();
     }
-    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+    const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(
         weight.k_padded, executor.max_rows);
     if (layout.k_padded != weight.k_padded) {
         return Status::invalid_state("dflash2 lm_head activation k mismatch", __FILE__,
@@ -1048,7 +1048,7 @@ Status lm_head_quantize(
         return Status::invalid_state("dflash2 activation workspace too small", __FILE__,
                                      __LINE__);
     }
-    const hipError_t err = ps::kernel::launch_activation_quantize_fp8_finegrained(
+    const hipError_t err = shelf::kernel::launch_activation_quantize_fp8_finegrained(
         hidden, reinterpret_cast<uint8_t*>(executor.activation_codes.data<int8_t>()),
         executor.activation_scales.data<float>(), rows, weight.cols, weight.k_padded,
         weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
@@ -1061,13 +1061,13 @@ Status lm_head_quantize(
 
 Status lm_head_gemm(
     DFlash2Executor& executor,
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* hidden,
     uint32_t rows,
     float* logits,
     uint32_t logits_row_stride,
     hipStream_t stream) {
-    if (weight.encoding == ps::weights::MatrixEncoding::Bf16) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Bf16) {
         const auto config =
             select_bf16_gemm(weight, rows, weight.cols, weight.bf16.data<void>(), hidden,
                              true);
@@ -1075,9 +1075,9 @@ Status lm_head_gemm(
             return Status::unsupported("dflash2 target lm_head has no bf16 gemm geometry",
                                        __FILE__, __LINE__);
         }
-        const hipError_t err = ps::kernel::launch_gemm_bf16(
+        const hipError_t err = shelf::kernel::launch_gemm_bf16(
             *config, weight.bf16.data<bf16_t>(), hidden, logits,
-            ps::kernel::Bf16GemmOutputDType::F32, rows, weight.rows, weight.cols, weight.cols,
+            shelf::kernel::Bf16GemmOutputDType::F32, rows, weight.rows, weight.cols, weight.cols,
             logits_row_stride, stream);
         if (err != hipSuccess) {
             return Status::hip_error("dflash2 target lm_head bf16 gemm launch",
@@ -1085,21 +1085,21 @@ Status lm_head_gemm(
         }
         return Status::make_ok();
     }
-    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+    const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(
         weight.k_padded, executor.max_rows);
     const int8_t* acodes = executor.activation_codes.data<int8_t>();
     const float* ascales = executor.activation_scales.data<float>();
-    if (weight.encoding == ps::weights::MatrixEncoding::Fp8Finegrained) {
-        const ps::execution::Fp8FinegrainedGemmSelectorInput lin{
+    if (weight.encoding == shelf::weights::MatrixEncoding::Fp8Finegrained) {
+        const shelf::execution::Fp8FinegrainedGemmSelectorInput lin{
             rows, weight.rows, weight.cols, weight.k_padded};
-        const auto config = ps::execution::select_fp8_finegrained_gemm_config(lin);
+        const auto config = shelf::execution::select_fp8_finegrained_gemm_config(lin);
         if (!config) {
             return Status::unsupported("dflash2 target lm_head has no fp8 gemm geometry",
                                        __FILE__, __LINE__);
         }
-        const hipError_t err = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+        const hipError_t err = shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             *config, weight.codes.data<uint8_t>(), weight.scales.data<float>(), acodes,
-            ascales, logits, ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, weight.rows,
+            ascales, logits, shelf::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, weight.rows,
             weight.k_padded, weight.storage_scale_stride_bytes,
             layout.code_row_stride_bytes, layout.scale_row_stride_bytes, logits_row_stride,
             stream);
@@ -1118,7 +1118,7 @@ Status lm_head_gemm(
 
 Status lm_head_logits(
     DFlash2Executor& executor,
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* hidden,
     uint32_t rows,
     float* logits,
@@ -1185,7 +1185,7 @@ Status dflash2_run_candidate_selector(
         return Status::invalid_argument("dflash2 selector draft rows out of range", __FILE__,
                                         __LINE__);
     }
-    ps::kernel::DFlash2CandidateSelectorArgs args;
+    shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = hidden_proj;
     args.topk_ids = topk_ids;
     args.topk_logits = topk_logits;
@@ -1200,7 +1200,7 @@ Status dflash2_run_candidate_selector(
     args.top_k = executor.config->selector_top_k;
     args.vocab_size = executor.config->vocab_size;
     const hipError_t err =
-        ps::kernel::launch_dflash2_candidate_selector(args, stream);
+        shelf::kernel::launch_dflash2_candidate_selector(args, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 candidate selector launch",
                                  hipGetErrorString(err), __FILE__, __LINE__);
@@ -1236,12 +1236,12 @@ Status dflash2_select_draft_tokens(
     const uint32_t draft = block_rows - 1u;
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
     const uint32_t rank = executor.config->selector_rank;
-    const ps::weights::MatrixWeight& draft_head = *executor.target_lm_head;
+    const shelf::weights::MatrixWeight& draft_head = *executor.target_lm_head;
     const uint32_t vocab = executor.config->vocab_size;
     const uint32_t top_k = executor.config->selector_top_k;
     const bf16_t* draft_hidden = final_hidden + hidden;
 
-    const ps::weights::MatrixWeight& projection =
+    const shelf::weights::MatrixWeight& projection =
         executor.weights->selector.hidden_projection;
     const auto gemm = select_bf16_gemm(projection, draft, hidden,
                                          projection.bf16.data<void>(), draft_hidden);
@@ -1250,10 +1250,10 @@ Status dflash2_select_draft_tokens(
             "dflash2 selector hidden projection has no exact bf16 gemm geometry", __FILE__,
             __LINE__);
     }
-    hipError_t err = ps::kernel::launch_gemm_bf16(
+    hipError_t err = shelf::kernel::launch_gemm_bf16(
         *gemm, projection.bf16.data<bf16_t>(), draft_hidden,
         executor.selector_hidden_proj.data<bf16_t>(),
-        ps::kernel::Bf16GemmOutputDType::BF16, draft, projection.rows, projection.cols,
+        shelf::kernel::Bf16GemmOutputDType::BF16, draft, projection.rows, projection.cols,
         hidden, rank, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 selector hidden projection launch",
@@ -1265,16 +1265,16 @@ Status dflash2_select_draft_tokens(
     if (!st.ok()) return st;
 
     const bool use_reference =
-        topk_reference_enabled() || top_k != ps::kernel::kDflash2TopKMaxK;
+        topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
     if (use_reference) {
-        err = ps::kernel::launch_dflash2_topk_f32(
+        err = shelf::kernel::launch_dflash2_topk_f32(
             executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
             executor.proposal_topk_ids.data<int32_t>(),
             executor.proposal_topk_logits.data<float>(),
             executor.topk_scratch_ids.data<int32_t>(),
             executor.topk_scratch_logits.data<float>(), stream);
     } else {
-        err = ps::kernel::launch_dflash2_topk_f32_optimized(
+        err = shelf::kernel::launch_dflash2_topk_f32_optimized(
             executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
             executor.proposal_topk_ids.data<int32_t>(),
             executor.proposal_topk_logits.data<float>(),
@@ -1433,7 +1433,7 @@ Status dflash2_forward_layer_cached(
                               kv_features, head_dim, eps, "k_noise_norm", stream);
     if (!st.ok()) return st;
 
-    err = ps::kernel::launch_dflash2_rope_bf16(
+    err = shelf::kernel::launch_dflash2_rope_bf16(
         executor.q_norm.data<bf16_t>(), q_features, executor.q_rope.data<bf16_t>(),
         q_features, block_rows, q_features, head_dim, block_position_start,
         config.rope_theta, stream);
@@ -1441,7 +1441,7 @@ Status dflash2_forward_layer_cached(
         return Status::hip_error("dflash2 q rope launch", hipGetErrorString(err), __FILE__,
                                  __LINE__);
     }
-    err = ps::kernel::launch_dflash2_rope_bf16(
+    err = shelf::kernel::launch_dflash2_rope_bf16(
         executor.k_noise_norm.data<bf16_t>(), kv_features,
         executor.k_noise_rope.data<bf16_t>(), kv_features, block_rows, kv_features,
         head_dim, block_position_start, config.rope_theta, stream);
@@ -1451,7 +1451,7 @@ Status dflash2_forward_layer_cached(
     }
 
     if (!attention_reference_enabled()) {
-        err = ps::kernel::launch_dflash2_attention_ring_gqa_bf16(
+        err = shelf::kernel::launch_dflash2_attention_ring_gqa_bf16(
             executor.q_rope.data<bf16_t>(), q_features, k_ring, v_ring, context.capacity,
             context_rows, context_start, kv_features, executor.k_noise_rope.data<bf16_t>(),
             executor.v_noise.data<bf16_t>(), block_rows, kv_features,
@@ -1461,7 +1461,7 @@ Status dflash2_forward_layer_cached(
         err = hipErrorNotSupported;
     }
     if (err == hipErrorNotSupported) {
-        err = ps::kernel::launch_dflash2_attention_ring_bf16(
+        err = shelf::kernel::launch_dflash2_attention_ring_bf16(
             executor.q_rope.data<bf16_t>(), q_features, k_ring, v_ring, context.capacity,
             context_rows, context_start, kv_features, executor.k_noise_rope.data<bf16_t>(),
             executor.v_noise.data<bf16_t>(), block_rows, kv_features,
@@ -1509,7 +1509,7 @@ Status dflash2_forward_backbone_cached(
     }
 
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
-    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
         src, executor.weights->final_norm_weight.data<bf16_t>(), output, block_rows, hidden,
         hidden, executor.config->rms_norm_eps, stream);
     if (err != hipSuccess) {
@@ -1562,12 +1562,12 @@ Status dflash2_prepare_noise_embedding(
                                         __LINE__);
     }
 
-    const ps::weights::MatrixWeight& embed = *executor.target_embed_tokens;
+    const shelf::weights::MatrixWeight& embed = *executor.target_embed_tokens;
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
     const uint32_t vocab = static_cast<uint32_t>(executor.config->vocab_size);
     const int32_t mask_token = static_cast<int32_t>(executor.config->mask_token_id);
 
-    hipError_t err = ps::kernel::launch_dflash2_noise_token_ids(
+    hipError_t err = shelf::kernel::launch_dflash2_noise_token_ids(
         anchor_token, mask_token, executor.noise_token_ids.data<int32_t>(), block_rows, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 noise token launch", hipGetErrorString(err), __FILE__,
@@ -1576,8 +1576,8 @@ Status dflash2_prepare_noise_embedding(
 
     const int32_t* token_ids = executor.noise_token_ids.data<int32_t>();
     bf16_t* output = executor.noise_embedding.data<bf16_t>();
-    if (embed.encoding == ps::weights::MatrixEncoding::Bf16) {
-        err = ps::kernel::launch_embedding_bf16(
+    if (embed.encoding == shelf::weights::MatrixEncoding::Bf16) {
+        err = shelf::kernel::launch_embedding_bf16(
             embed.bf16.data<bf16_t>(), token_ids, output, block_rows, vocab, hidden, hidden,
             nullptr, stream);
     } else {
@@ -1631,7 +1631,7 @@ struct DFlash2BatchStage {
 
 Status dflash2_forward_layer_cached_batch(
     DFlash2Executor& executor,
-    const ps::kernel::DFlash2RequestDescriptor* requests,
+    const shelf::kernel::DFlash2RequestDescriptor* requests,
     const DFlash2BatchStage& stage,
     uint32_t layer_index,
     const bf16_t* hidden_in,
@@ -1688,7 +1688,7 @@ Status dflash2_forward_layer_cached_batch(
                               head_dim, eps, "k_noise_norm", stream);
     if (!st.ok()) return st;
 
-    hipError_t err = ps::kernel::launch_dflash2_rope_positions_bf16(
+    hipError_t err = shelf::kernel::launch_dflash2_rope_positions_bf16(
         executor.q_norm.data<bf16_t>(), q_features, executor.q_rope.data<bf16_t>(), q_features,
         requests, stage.request_count, stage.max_block_rows, q_features, head_dim,
         config.rope_theta, stream);
@@ -1696,7 +1696,7 @@ Status dflash2_forward_layer_cached_batch(
         return Status::hip_error("dflash2 q rope launch", hipGetErrorString(err), __FILE__,
                                  __LINE__);
     }
-    err = ps::kernel::launch_dflash2_rope_positions_bf16(
+    err = shelf::kernel::launch_dflash2_rope_positions_bf16(
         executor.k_noise_norm.data<bf16_t>(), kv_features,
         executor.k_noise_rope.data<bf16_t>(), kv_features, requests, stage.request_count,
         stage.max_block_rows, kv_features, head_dim, config.rope_theta, stream);
@@ -1706,7 +1706,7 @@ Status dflash2_forward_layer_cached_batch(
     }
 
     if (!attention_reference_enabled()) {
-        err = ps::kernel::launch_dflash2_attention_ring_gqa_requests_bf16(
+        err = shelf::kernel::launch_dflash2_attention_ring_gqa_requests_bf16(
             executor.q_rope.data<bf16_t>(), q_features, requests, stage.request_count,
             stage.max_block_rows, stage.max_keys, capacity, ring_layer_offset,
             executor.k_noise_rope.data<bf16_t>(), executor.v_noise.data<bf16_t>(),
@@ -1716,7 +1716,7 @@ Status dflash2_forward_layer_cached_batch(
         err = hipErrorNotSupported;
     }
     if (err == hipErrorNotSupported) {
-        err = ps::kernel::launch_dflash2_attention_ring_requests_bf16(
+        err = shelf::kernel::launch_dflash2_attention_ring_requests_bf16(
             executor.q_rope.data<bf16_t>(), q_features, requests, stage.request_count,
             stage.max_block_rows, stage.max_keys, capacity, ring_layer_offset,
             executor.k_noise_rope.data<bf16_t>(), executor.v_noise.data<bf16_t>(),
@@ -1734,7 +1734,7 @@ Status dflash2_forward_layer_cached_batch(
 
 Status dflash2_forward_backbone_cached_batch(
     DFlash2Executor& executor,
-    const ps::kernel::DFlash2RequestDescriptor* requests,
+    const shelf::kernel::DFlash2RequestDescriptor* requests,
     const DFlash2BatchStage& stage,
     const bf16_t* noise_embedding,
     bf16_t* output,
@@ -1757,7 +1757,7 @@ Status dflash2_forward_backbone_cached_batch(
     }
 
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
-    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
         src, executor.weights->final_norm_weight.data<bf16_t>(), output, stage.total_rows,
         hidden, hidden, executor.config->rms_norm_eps, stream);
     if (err != hipSuccess) {
@@ -1769,7 +1769,7 @@ Status dflash2_forward_backbone_cached_batch(
 
 Status dflash2_select_draft_tokens_batch(
     DFlash2Executor& executor,
-    const ps::kernel::DFlash2RequestDescriptor* requests,
+    const shelf::kernel::DFlash2RequestDescriptor* requests,
     const DFlash2BatchStage& stage,
     const bf16_t* final_hidden,
     hipStream_t stream) {
@@ -1779,7 +1779,7 @@ Status dflash2_select_draft_tokens_batch(
     const uint32_t rank = static_cast<uint32_t>(config.selector_rank);
     const uint32_t vocab = static_cast<uint32_t>(config.vocab_size);
     const uint32_t top_k = static_cast<uint32_t>(config.selector_top_k);
-    const ps::weights::MatrixWeight& projection = executor.weights->selector.hidden_projection;
+    const shelf::weights::MatrixWeight& projection = executor.weights->selector.hidden_projection;
 
     if (executor.target_lm_head == nullptr) {
         return Status::invalid_state("dflash2 executor has no target lm_head", __FILE__,
@@ -1793,9 +1793,9 @@ Status dflash2_select_draft_tokens_batch(
             "dflash2 selector hidden projection has no exact bf16 gemm geometry", __FILE__,
             __LINE__);
     }
-    hipError_t err = ps::kernel::launch_gemm_bf16(
+    hipError_t err = shelf::kernel::launch_gemm_bf16(
         *gemm, projection.bf16.data<bf16_t>(), final_hidden,
-        executor.selector_hidden_proj.data<bf16_t>(), ps::kernel::Bf16GemmOutputDType::BF16,
+        executor.selector_hidden_proj.data<bf16_t>(), shelf::kernel::Bf16GemmOutputDType::BF16,
         total_rows, projection.rows, projection.cols, hidden, rank, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 batch selector hidden projection launch",
@@ -1807,16 +1807,16 @@ Status dflash2_select_draft_tokens_batch(
     if (!st.ok()) return st;
 
     const bool use_reference =
-        topk_reference_enabled() || top_k != ps::kernel::kDflash2TopKMaxK;
+        topk_reference_enabled() || top_k != shelf::kernel::kDflash2TopKMaxK;
     if (use_reference) {
-        err = ps::kernel::launch_dflash2_topk_f32(
+        err = shelf::kernel::launch_dflash2_topk_f32(
             executor.proposal_logits.data<float>(), total_rows, vocab, vocab, top_k,
             executor.proposal_topk_ids.data<int32_t>(),
             executor.proposal_topk_logits.data<float>(),
             executor.topk_scratch_ids.data<int32_t>(),
             executor.topk_scratch_logits.data<float>(), stream);
     } else {
-        err = ps::kernel::launch_dflash2_topk_f32_optimized(
+        err = shelf::kernel::launch_dflash2_topk_f32_optimized(
             executor.proposal_logits.data<float>(), total_rows, vocab, vocab, top_k,
             executor.proposal_topk_ids.data<int32_t>(),
             executor.proposal_topk_logits.data<float>(),
@@ -1828,7 +1828,7 @@ Status dflash2_select_draft_tokens_batch(
                                  __FILE__, __LINE__);
     }
 
-    ps::kernel::DFlash2CandidateSelectorArgs args;
+    shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = executor.selector_hidden_proj.data<bf16_t>();
     args.topk_ids = executor.proposal_topk_ids.data<int32_t>();
     args.topk_logits = executor.proposal_topk_logits.data<float>();
@@ -1840,7 +1840,7 @@ Status dflash2_select_draft_tokens_batch(
     args.vocab_size = vocab;
     args.requests = requests;
     args.request_count = stage.request_count;
-    err = ps::kernel::launch_dflash2_candidate_selector(args, stream);
+    err = shelf::kernel::launch_dflash2_candidate_selector(args, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 batch candidate selector launch",
                                  hipGetErrorString(err), __FILE__, __LINE__);
@@ -1896,7 +1896,7 @@ Status dflash2_propose_batch(
                                         __FILE__, __LINE__);
     }
 
-    std::vector<ps::kernel::DFlash2RequestDescriptor> descriptors(request_count);
+    std::vector<shelf::kernel::DFlash2RequestDescriptor> descriptors(request_count);
     DFlash2BatchStage stage;
     stage.request_count = request_count;
     uint32_t row_cursor = 0u;
@@ -1926,7 +1926,7 @@ Status dflash2_propose_batch(
                                             __FILE__, __LINE__);
         }
         const uint32_t block_rows = requests[i].num_drafts + 1u;
-        ps::kernel::DFlash2RequestDescriptor& descriptor = descriptors[i];
+        shelf::kernel::DFlash2RequestDescriptor& descriptor = descriptors[i];
         descriptor.ring_k = context->k_ring.data<bf16_t>();
         descriptor.ring_v = context->v_ring.data<bf16_t>();
         descriptor.output_drafts = output_drafts[i];
@@ -1952,16 +1952,16 @@ Status dflash2_propose_batch(
     void* descriptor_device = executor.batch_descriptors.data<uint8_t>();
     const hipError_t copy_err = hipMemcpyAsync(
         descriptor_device, descriptors.data(),
-        static_cast<std::size_t>(request_count) * sizeof(ps::kernel::DFlash2RequestDescriptor),
+        static_cast<std::size_t>(request_count) * sizeof(shelf::kernel::DFlash2RequestDescriptor),
         hipMemcpyHostToDevice, stream);
     if (copy_err != hipSuccess) {
         return Status::hip_error("dflash2 batch descriptor upload", hipGetErrorString(copy_err),
                                  __FILE__, __LINE__);
     }
-    const ps::kernel::DFlash2RequestDescriptor* descriptor_ptr =
-        static_cast<const ps::kernel::DFlash2RequestDescriptor*>(descriptor_device);
+    const shelf::kernel::DFlash2RequestDescriptor* descriptor_ptr =
+        static_cast<const shelf::kernel::DFlash2RequestDescriptor*>(descriptor_device);
 
-    hipError_t err = ps::kernel::launch_dflash2_noise_token_ids_batch(
+    hipError_t err = shelf::kernel::launch_dflash2_noise_token_ids_batch(
         descriptor_ptr, request_count, max_block_rows, mask_token,
         executor.noise_token_ids.data<int32_t>(), executor.conv_row_has_prev.data<uint32_t>(),
         stream);
@@ -1970,12 +1970,12 @@ Status dflash2_propose_batch(
                                  __FILE__, __LINE__);
     }
 
-    const ps::weights::MatrixWeight& embed = *executor.target_embed_tokens;
-    if (embed.encoding != ps::weights::MatrixEncoding::Bf16) {
+    const shelf::weights::MatrixWeight& embed = *executor.target_embed_tokens;
+    if (embed.encoding != shelf::weights::MatrixEncoding::Bf16) {
         return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
                                    __FILE__, __LINE__);
     }
-    err = ps::kernel::launch_embedding_bf16(
+    err = shelf::kernel::launch_embedding_bf16(
         embed.bf16.data<bf16_t>(), executor.noise_token_ids.data<int32_t>(),
         executor.noise_embedding.data<bf16_t>(), stage.total_rows, vocab, hidden, hidden,
         nullptr, stream);
@@ -2011,7 +2011,7 @@ Status dflash2_append_target_taps(
     if (target_taps == nullptr) {
         return Status::invalid_argument("dflash2 target taps are null", __FILE__, __LINE__);
     }
-    if (tap_count != ps::kernel::kDFlash2TargetTaps) {
+    if (tap_count != shelf::kernel::kDFlash2TargetTaps) {
         return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
     }
     if (rows == 0u) {
@@ -2025,7 +2025,7 @@ Status dflash2_append_target_taps(
         return Status::invalid_state("dflash2 executor has no config", __FILE__, __LINE__);
     }
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> ptrs{};
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> ptrs{};
     uint32_t offset = 0u;
     while (offset < rows) {
         const uint32_t n = std::min(executor.max_rows, rows - offset);

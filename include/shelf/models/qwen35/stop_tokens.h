@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 // Generation stop tokens for one model.
@@ -29,4 +29,4 @@ inline int32_t primary_stop_token(const StopTokens& stop_tokens) {
 }
 
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

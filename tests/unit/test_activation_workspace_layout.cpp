@@ -6,8 +6,8 @@
 #include <cstdio>
 #include <string>
 
-namespace rt = ps::runtime;
-namespace quant = ps::quantization;
+namespace rt = shelf::runtime;
+namespace quant = shelf::quantization;
 
 namespace {
 
@@ -27,7 +27,7 @@ void expect_identical(uint32_t k, uint32_t rows, const std::string& tag) {
     const rt::Int8ActivationWorkspaceLayout legacy =
         rt::Int8ActivationWorkspaceLayout::make(k, rows);
     rt::Int8ActivationWorkspaceLayout adapter;
-    const ps::Status status =
+    const shelf::Status status =
         rt::make_activation_workspace_layout(quant::kFp8FinegrainedActivationQuantSpec, k, rows, adapter);
     check(status.ok(), tag + ": adapter resolves");
     if (!status.ok()) return;
@@ -46,11 +46,11 @@ void expect_identical(uint32_t k, uint32_t rows, const std::string& tag) {
 
 void expect_unsupported(const quant::ActivationQuantSpec& spec, const std::string& tag) {
     rt::Int8ActivationWorkspaceLayout layout;
-    const ps::Status status = rt::make_activation_workspace_layout(spec, 2560u, 128u, layout);
+    const shelf::Status status = rt::make_activation_workspace_layout(spec, 2560u, 128u, layout);
     check(!status.ok(), tag + ": rejected");
     if (status.ok()) return;
-    check(status.code() == ps::Status::Code::unsupported ||
-              status.code() == ps::Status::Code::invalid_argument,
+    check(status.code() == shelf::Status::Code::unsupported ||
+              status.code() == shelf::Status::Code::invalid_argument,
           tag + ": explicit failure status");
 }
 
@@ -67,7 +67,7 @@ int main() {
         rt::Int8ActivationWorkspaceLayout i8_layout;
         quant::ActivationQuantSpec i8_codes = quant::kFp8FinegrainedActivationQuantSpec;
         i8_codes.codes_dtype = quant::QuantScalarType::I8;
-        const ps::Status i8_status =
+        const shelf::Status i8_status =
             rt::make_activation_workspace_layout(i8_codes, 2560u, 8u, i8_layout);
         check(!i8_status.ok(), "i8 codes spec: rejected");
     }
@@ -88,10 +88,10 @@ int main() {
     }
     {
         rt::Int8ActivationWorkspaceLayout layout;
-        const ps::Status status = rt::make_activation_workspace_layout(
+        const shelf::Status status = rt::make_activation_workspace_layout(
             quant::kFp8FinegrainedActivationQuantSpec, 2560u, 0u, layout);
         check(!status.ok(), "rows 0: rejected");
-        check(status.code() == ps::Status::Code::invalid_argument,
+        check(status.code() == shelf::Status::Code::invalid_argument,
               "rows 0: invalid argument status");
     }
 

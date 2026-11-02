@@ -17,18 +17,18 @@
 static bool g_wmma12 = false;
 
 static hipError_t launch_paged_bf16(
-    const ps::kernel::PagedAttentionCommonArgs& c, const ps::bf16_t* k_pool,
-    const ps::bf16_t* v_pool, hipStream_t stream) {
+    const shelf::kernel::PagedAttentionCommonArgs& c, const shelf::bf16_t* k_pool,
+    const shelf::bf16_t* v_pool, hipStream_t stream) {
     if (g_wmma12)
-        return ps::kernel::launch_attention_paged_bf16(c, k_pool, v_pool, stream);
-    return ps::kernel::launch_attention_paged_bf16(c, k_pool, v_pool, stream);
+        return shelf::kernel::launch_attention_paged_bf16(c, k_pool, v_pool, stream);
+    return shelf::kernel::launch_attention_paged_bf16(c, k_pool, v_pool, stream);
 }
 
 namespace {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
-using bf16t = ps::bf16_t;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
+using bf16t = shelf::bf16_t;
 
 float e4m3_decode_host(uint8_t x) {
     const int sign = (x & 0x80u) ? -1 : 1;
@@ -62,7 +62,7 @@ uint32_t h32(uint64_t x) {
 }
 
 uint16_t bf16_bits(double x) {
-    return ps::f32_to_bf16_rne(static_cast<float>(x));
+    return shelf::f32_to_bf16_rne(static_cast<float>(x));
 }
 
 int32_t rng1k(uint64_t x) {
@@ -115,17 +115,17 @@ struct Dev {
 };
 
 void free_dev(Dev& d) {
-    if (d.q) ps::gpu::discard_cleanup_result(hipFree(d.q));
-    if (d.out) ps::gpu::discard_cleanup_result(hipFree(d.out));
-    if (d.row_seq) ps::gpu::discard_cleanup_result(hipFree(d.row_seq));
-    if (d.row_pos) ps::gpu::discard_cleanup_result(hipFree(d.row_pos));
-    if (d.anc_off) ps::gpu::discard_cleanup_result(hipFree(d.anc_off));
-    if (d.anc_pos) ps::gpu::discard_cleanup_result(hipFree(d.anc_pos));
-    if (d.block_tables) ps::gpu::discard_cleanup_result(hipFree(d.block_tables));
-    if (d.k_pool) ps::gpu::discard_cleanup_result(hipFree(d.k_pool));
-    if (d.v_pool) ps::gpu::discard_cleanup_result(hipFree(d.v_pool));
-    if (d.k_scale) ps::gpu::discard_cleanup_result(hipFree(d.k_scale));
-    if (d.v_scale) ps::gpu::discard_cleanup_result(hipFree(d.v_scale));
+    if (d.q) shelf::gpu::discard_cleanup_result(hipFree(d.q));
+    if (d.out) shelf::gpu::discard_cleanup_result(hipFree(d.out));
+    if (d.row_seq) shelf::gpu::discard_cleanup_result(hipFree(d.row_seq));
+    if (d.row_pos) shelf::gpu::discard_cleanup_result(hipFree(d.row_pos));
+    if (d.anc_off) shelf::gpu::discard_cleanup_result(hipFree(d.anc_off));
+    if (d.anc_pos) shelf::gpu::discard_cleanup_result(hipFree(d.anc_pos));
+    if (d.block_tables) shelf::gpu::discard_cleanup_result(hipFree(d.block_tables));
+    if (d.k_pool) shelf::gpu::discard_cleanup_result(hipFree(d.k_pool));
+    if (d.v_pool) shelf::gpu::discard_cleanup_result(hipFree(d.v_pool));
+    if (d.k_scale) shelf::gpu::discard_cleanup_result(hipFree(d.k_scale));
+    if (d.v_scale) shelf::gpu::discard_cleanup_result(hipFree(d.v_scale));
     d = Dev{};
 }
 
@@ -402,10 +402,10 @@ bool run_case(const Config& cfg, const char* label) {
     }
     if (!ok) { std::printf("FAIL: %s upload\n", label); free_dev(d); check(false, label); return false; }
 
-    ::ps::kernel::PagedAttentionCommonArgs c;
+    ::shelf::kernel::PagedAttentionCommonArgs c;
     c.q = static_cast<const bf16t*>(d.q);
     c.output = d.out;
-    c.output_dtype = ::ps::kernel::PagedAttentionOutputDType::F32;
+    c.output_dtype = ::shelf::kernel::PagedAttentionOutputDType::F32;
     c.q_row_stride = q_features;
     c.output_row_stride = q_features;
     c.row_sequence_slots = static_cast<const uint32_t*>(d.row_seq);
@@ -438,11 +438,11 @@ bool run_case(const Config& cfg, const char* label) {
             ++skipped_cases;
             return true;
         }
-        h = ::ps::kernel::launch_attention_paged_prefill_fp8_e4m3(
+        h = ::shelf::kernel::launch_attention_paged_prefill_fp8_e4m3(
             c, static_cast<const fp8*>(d.k_pool), static_cast<const fp8*>(d.v_pool),
             static_cast<const float*>(d.k_scale), static_cast<const float*>(d.v_scale), 0);
     } else if (cfg.prefill) {
-        h = ::ps::kernel::launch_attention_paged_prefill_bf16(
+        h = ::shelf::kernel::launch_attention_paged_prefill_bf16(
             c, static_cast<const bf16t*>(d.k_pool), static_cast<const bf16t*>(d.v_pool), 0);
     } else if (cfg.fp8) {
         if (!g_wmma12) {
@@ -450,7 +450,7 @@ bool run_case(const Config& cfg, const char* label) {
             ++skipped_cases;
             return true;
         }
-        h = ::ps::kernel::launch_attention_paged_fp8_e4m3(
+        h = ::shelf::kernel::launch_attention_paged_fp8_e4m3(
             c, static_cast<const fp8*>(d.k_pool), static_cast<const fp8*>(d.v_pool),
             static_cast<const float*>(d.k_scale), static_cast<const float*>(d.v_scale), 0);
     } else {

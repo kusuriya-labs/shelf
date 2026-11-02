@@ -6,7 +6,7 @@
 #include <variant>
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 enum class PrimitiveKind : uint16_t {
     EMBEDDING_LOOKUP = 0,

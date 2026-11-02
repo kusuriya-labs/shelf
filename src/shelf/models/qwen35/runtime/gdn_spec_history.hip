@@ -3,7 +3,7 @@
 
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 Result<GdnSpecHistory> create_gdn_spec_history(
     gpu::GpuArena& arena,
@@ -162,7 +162,7 @@ Status commit_gdn_compact_log(
     const GdnStatePool& pool,
     SequenceSlotId slot,
     const GdnCompactLogDeviceView& log,
-    const ::ps::runtime::DeviceRequestDescriptor* requests,
+    const ::shelf::runtime::DeviceRequestDescriptor* requests,
     uint32_t rows,
     uint32_t key_heads,
     hipStream_t stream,
@@ -189,7 +189,7 @@ Status commit_gdn_compact_log(
         return Status::invalid_state("commit_gdn_compact_log: pool not initialized", __FILE__,
                                      __LINE__);
     }
-    ::ps::kernel::GdnRecurrenceArgs a{};
+    ::shelf::kernel::GdnRecurrenceArgs a{};
     a.recurrent_state = view.recurrent_base;
     a.requests = requests;
     a.num_requests = 1u;
@@ -211,7 +211,7 @@ Status commit_gdn_compact_log(
     a.compact_rows = rows;
     a.compact_row_indices = row_indices;
     a.compact_row_capacity = log_row_capacity;
-    const hipError_t err = ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream);
+    const hipError_t err = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream);
     if (err != hipSuccess) {
         return Status::hip_error("commit_gdn_compact_log launch", hipGetErrorString(err),
                                  __FILE__, __LINE__);
@@ -219,4 +219,4 @@ Status commit_gdn_compact_log(
     return Status::make_ok();
 }
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

@@ -21,7 +21,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
 static int g_fail = 0;
 
@@ -558,7 +558,7 @@ int main() {
 
     fs::remove_all(g_root, ec);
     arena.shutdown();
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 
     std::printf("test_qwen35_mtp_weight_load: %s (fail=%d)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;

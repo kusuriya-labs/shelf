@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct ArgMaxPair {
     float value;
@@ -17,7 +17,7 @@ static_assert(sizeof(ArgMaxPair) == 8);
 
 struct ArgmaxF32Args {
     const float* logits = nullptr;
-    const ::ps::runtime::DeviceSamplingParams* sampling = nullptr;
+    const ::shelf::runtime::DeviceSamplingParams* sampling = nullptr;
     int32_t* sampled_tokens = nullptr;
     uint32_t outputs = 0;
     uint32_t vocab_size = 0;
@@ -45,11 +45,11 @@ struct ArgMaxTop2 {
 
 hipError_t launch_argmax_f32_top2(
     const float* logits,
-    const ::ps::runtime::DeviceSamplingParams* sampling,
+    const ::shelf::runtime::DeviceSamplingParams* sampling,
     ArgMaxTop2* out,
     uint32_t outputs,
     uint32_t vocab_size,
     uint32_t logits_row_stride,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

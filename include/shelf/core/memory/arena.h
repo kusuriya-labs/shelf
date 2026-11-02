@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 class GpuArena {
@@ -94,4 +94,4 @@ private:
 };
 
 } // namespace gpu
-} // namespace ps
+} // namespace shelf

@@ -7,12 +7,12 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 Status launch_model_dispatch_correctness(
-    const ::ps::runtime::DeviceProgramView& program,
-    const ::ps::runtime::DispatchBinding& binding,
-    ::ps::runtime::DeviceBatchContext* batch_context,
+    const ::shelf::runtime::DeviceProgramView& program,
+    const ::shelf::runtime::DispatchBinding& binding,
+    ::shelf::runtime::DeviceBatchContext* batch_context,
     const ModelDispatchStateView& state,
     float* scratch,
     uint32_t* error_word,

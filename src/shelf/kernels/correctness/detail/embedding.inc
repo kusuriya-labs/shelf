@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_embedding(
     ModelDispatchEnv& env, const DispatchBinding& b) {
@@ -33,4 +33,4 @@ __device__ __forceinline__ ProgramStatus exec_embedding(
     return ProgramStatus::INVALID_PROGRAM;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

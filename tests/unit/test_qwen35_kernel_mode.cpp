@@ -21,8 +21,8 @@ void check(bool cond, const char* name) {
 }  // namespace
 
 int main() {
-    using ps::qwen35::runtime::KernelMode;
-    using ps::qwen35::runtime::read_kernel_mode;
+    using shelf::qwen35::runtime::KernelMode;
+    using shelf::qwen35::runtime::read_kernel_mode;
 
     unsetenv("SHELF_QWEN35_KERNEL_MODE");
     auto r0 = read_kernel_mode();
@@ -38,7 +38,7 @@ int main() {
 
     setenv("SHELF_QWEN35_KERNEL_MODE", "bogus", 1);
     auto r3 = read_kernel_mode();
-    check(!r3.ok() && r3.status().code() == ps::Status::Code::invalid_argument,
+    check(!r3.ok() && r3.status().code() == shelf::Status::Code::invalid_argument,
           "invalid string -> invalid_argument");
 
     unsetenv("SHELF_QWEN35_KERNEL_MODE");

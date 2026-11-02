@@ -1,7 +1,7 @@
 #include <shelf/quantization/codec/ue4m3.h>
 #include <cmath>
 
-namespace ps::quantization::codec {
+namespace shelf::quantization::codec {
 
 namespace {
 
@@ -51,4 +51,4 @@ uint8_t ue4m3_nearest_scale(float target) {
                : static_cast<uint8_t>(lo);
 }
 
-}  // namespace ps::quantization::codec
+}  // namespace shelf::quantization::codec

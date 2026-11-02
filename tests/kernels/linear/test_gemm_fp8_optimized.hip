@@ -25,8 +25,8 @@
     } \
 } while (0)
 
-using ps::kernel::Fp8FinegrainedGemmConfig;
-using ps::kernel::Fp8FinegrainedGemmConfigId;
+using shelf::kernel::Fp8FinegrainedGemmConfig;
+using shelf::kernel::Fp8FinegrainedGemmConfigId;
 
 namespace {
 
@@ -36,14 +36,14 @@ double g_worst_rel = 0.0;
 float g_worst_abs = 0.0f;
 float g_worst_mag = 0.0f;
 
-ps::bf16_t f32_to_bf16(float f) {
+shelf::bf16_t f32_to_bf16(float f) {
     uint32_t ui = 0;
     std::memcpy(&ui, &f, sizeof(float));
     const uint16_t bf = static_cast<uint16_t>((ui + 0x8000u) >> 16);
-    return ps::bf16_t{bf};
+    return shelf::bf16_t{bf};
 }
 
-float bf16_to_f32(ps::bf16_t b) {
+float bf16_to_f32(shelf::bf16_t b) {
     const uint32_t ui = static_cast<uint32_t>(b.data) << 16;
     float f = 0.0f;
     std::memcpy(&f, &ui, sizeof(float));
@@ -51,8 +51,8 @@ float bf16_to_f32(ps::bf16_t b) {
 }
 
 Fp8FinegrainedGemmConfig config_for(uint32_t rows) {
-    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock4};
-    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock2};
+    if (rows >= 4u * shelf::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock4};
+    if (rows > shelf::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock2};
     return {Fp8FinegrainedGemmConfigId::RowBlock1};
 }
 
@@ -66,7 +66,7 @@ const char* config_name(Fp8FinegrainedGemmConfigId id) {
     return "?";
 }
 
-bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_t rows,
+bool run_case(shelf::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_t rows,
               uint32_t n, uint32_t k, const char* label,
               uint32_t weight_scale_group = 128) {
     std::mt19937 rng(20260921u + rows * 31u + n * 7u + k);
@@ -78,14 +78,14 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     for (auto& v : w) v = wdist(rng);
     for (auto& v : x) v = xdist(rng);
 
-    ps::quantization::fp8::Fp8BlockCanonicalStore store;
+    shelf::quantization::fp8::Fp8BlockCanonicalStore store;
     const uint32_t kp = static_cast<uint32_t>((k + 127u) & ~127u);
     store.scale_block_k = weight_scale_group;
     store.init(1, n, k, kp);
     store.quantize_matrix(0, w.data(), k);
 
-    ps::quantization::fp8::Fp8NativeHost native;
-    if (!ps::quantization::fp8::preshuffle_fp8_native(store.view(), native)) {
+    shelf::quantization::fp8::Fp8NativeHost native;
+    if (!shelf::quantization::fp8::preshuffle_fp8_native(store.view(), native)) {
         std::printf("FAIL: %s preshuffle\n", label);
         return false;
     }
@@ -96,7 +96,7 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     const uint32_t as_floats = (kp + 127u) / 128u;
     const uint32_t as_bytes = as_floats * 4u;
 
-    std::vector<ps::bf16_t> hx(static_cast<std::size_t>(rows) * k);
+    std::vector<shelf::bf16_t> hx(static_cast<std::size_t>(rows) * k);
     std::vector<float> xr(x.size());
     for (std::size_t i = 0; i < hx.size(); ++i) {
         hx[i] = f32_to_bf16(x[i]);
@@ -104,7 +104,7 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     }
 
     std::vector<float> wdec(static_cast<std::size_t>(n) * kp, 0.0f);
-    ps::quantization::fp8::dequantize_fp8_canonical_matrix(
+    shelf::quantization::fp8::dequantize_fp8_canonical_matrix(
         store.view(), 0, wdec.data(), kp);
     std::vector<float> adec(static_cast<std::size_t>(rows) * kp, 0.0f);
     const uint32_t act_groups = (kp + 127u) / 128u;
@@ -120,9 +120,9 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
             const uint32_t kp_end = i0 + 128u < kp ? i0 + 128u : kp;
             for (uint32_t i = i0; i < kp_end; ++i) {
                 const float v = (i < k) ? xr[static_cast<std::size_t>(m) * k + i] : 0.0f;
-                const uint8_t c = scale > 0.0f ? ps::quantization::codec::e4m3_encode_u8(v * inv) : 0u;
+                const uint8_t c = scale > 0.0f ? shelf::quantization::codec::e4m3_encode_u8(v * inv) : 0u;
                 adec[static_cast<std::size_t>(m) * kp + i] =
-                    ps::quantization::codec::e4m3_decode_f32(c) * scale;
+                    shelf::quantization::codec::e4m3_decode_f32(c) * scale;
             }
         }
     }
@@ -133,7 +133,7 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
 
     auto wc = arena.allocate_aligned(native.codes_bytes, 16);
     auto ws = arena.allocate_aligned(native.scale_count * sizeof(float), 16);
-    auto xa = arena.allocate_aligned(hx.size() * sizeof(ps::bf16_t), 16);
+    auto xa = arena.allocate_aligned(hx.size() * sizeof(shelf::bf16_t), 16);
     auto ac = arena.allocate_aligned(act_codes_bytes, 16);
     auto as = arena.allocate_aligned(act_scales_bytes, 16);
     auto ya = arena.allocate_aligned(out_f32_bytes, 16);
@@ -143,7 +143,7 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     }
     auto* d_wc = static_cast<uint8_t*>(wc.release().data());
     auto* d_ws = static_cast<float*>(ws.release().data());
-    auto* d_x = static_cast<ps::bf16_t*>(xa.release().data());
+    auto* d_x = static_cast<shelf::bf16_t*>(xa.release().data());
     auto* d_ac = static_cast<uint8_t*>(ac.release().data());
     auto* d_as = static_cast<float*>(as.release().data());
     auto* d_y = static_cast<float*>(ya.release().data());
@@ -152,17 +152,17 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     HIP_ASSERT(hipMemset(d_as, 0, act_scales_bytes));
     HIP_ASSERT(hipMemcpy(d_wc, native.codes.get(), native.codes_bytes, hipMemcpyHostToDevice));
     HIP_ASSERT(hipMemcpy(d_ws, native.scales.get(), native.scale_count * sizeof(float), hipMemcpyHostToDevice));
-    HIP_ASSERT(hipMemcpy(d_x, hx.data(), hx.size() * sizeof(ps::bf16_t), hipMemcpyHostToDevice));
+    HIP_ASSERT(hipMemcpy(d_x, hx.data(), hx.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice));
 
-    hipError_t aq = ps::kernel::launch_activation_quantize_fp8_finegrained(
+    hipError_t aq = shelf::kernel::launch_activation_quantize_fp8_finegrained(
         d_x, d_ac, d_as, rows, k, kp, k, code_stride, as_bytes, 0);
     if (aq != hipSuccess) {
         std::printf("FAIL: %s activation quantize: %s\n", label, hipGetErrorString(aq));
         return false;
     }
-    hipError_t hk = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
+    hipError_t hk = shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
         config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-        ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
+        shelf::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
         weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
     if (hk != hipSuccess) {
         std::printf("FAIL: %s launch: %s\n", label, hipGetErrorString(hk));
@@ -174,9 +174,9 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
     HIP_ASSERT(hipMemcpy(got.data(), d_y, out_f32_bytes, hipMemcpyDeviceToHost));
 
     if (rows == 1u) {
-        hipError_t ha = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+        hipError_t ha = shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-            ps::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
+            shelf::kernel::Fp8FinegrainedGemmOutputDType::F32, rows, n, kp,
             weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
         if (ha != hipSuccess) {
             std::printf("FAIL: %s auto F32 launch: %s\n", label, hipGetErrorString(ha));
@@ -193,9 +193,9 @@ bool run_case(ps::gpu::GpuArena& arena, Fp8FinegrainedGemmConfig config, uint32_
 
         const std::size_t out_bf16_bytes = static_cast<std::size_t>(rows) * n * 2u;
         std::vector<uint8_t> gbf(out_bf16_bytes);
-        hipError_t hg = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
+        hipError_t hg = shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma(
             config, d_wc, d_ws, reinterpret_cast<const int8_t*>(d_ac), d_as, d_y,
-            ps::kernel::Fp8FinegrainedGemmOutputDType::BF16, rows, n, kp,
+            shelf::kernel::Fp8FinegrainedGemmOutputDType::BF16, rows, n, kp,
             weight_scale_stride_bytes, code_stride, as_bytes, n, 0, weight_scale_group);
         if (hg != hipSuccess) {
             std::printf("FAIL: %s generic BF16 launch: %s\n", label, hipGetErrorString(hg));
@@ -245,7 +245,7 @@ int main() {
     }
     if (hipSetDevice(0) != hipSuccess) return 1;
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 1024ull * 1024 * 1024);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1024ull * 1024 * 1024);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
@@ -287,7 +287,7 @@ int main() {
         {8704u, 5120u}, {5120u, 8704u}, {3072u, 5120u},
         {512u, 5120u}, {5120u, 3072u}, {5120u, 5120u}, {24u, 5120u},
     };
-    auto prod_arena_result = ps::gpu::GpuArena::create(0, 768ull * 1024 * 1024);
+    auto prod_arena_result = shelf::gpu::GpuArena::create(0, 768ull * 1024 * 1024);
     if (!prod_arena_result.ok()) {
         std::printf("FAIL: prod arena create: %s\n",
                     prod_arena_result.status().message().c_str());

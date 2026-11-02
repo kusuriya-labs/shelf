@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 enum class QuantPayloadRole : uint8_t {
     Codes,

@@ -22,7 +22,7 @@ static void check(bool cond, const std::string& msg) {
     }
 }
 
-using ps::bf16_t;
+using shelf::bf16_t;
 
 static float f32_from_bf16(bf16_t x) {
     const uint32_t u = static_cast<uint32_t>(x.data) << 16;
@@ -41,7 +41,7 @@ static bf16_t bf16_from_f32(float f) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -53,14 +53,14 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
 }
 
 static bool alloc_f32(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(float), 128);
@@ -72,14 +72,14 @@ static bool alloc_f32(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<float>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<float>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
 }
 
 static bool alloc_i32(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(int32_t), 128);
@@ -91,7 +91,7 @@ static bool alloc_i32(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<int32_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<int32_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -150,16 +150,16 @@ static std::vector<int32_t> reference_selector(
 }
 
 static void run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const std::string& name,
     const SelectorFixture& fx) {
-    ps::gpu::Tensor hidden;
-    ps::gpu::Tensor ids;
-    ps::gpu::Tensor logits;
-    ps::gpu::Tensor predecessor;
-    ps::gpu::Tensor successor;
-    ps::gpu::Tensor out;
+    shelf::gpu::Tensor hidden;
+    shelf::gpu::Tensor ids;
+    shelf::gpu::Tensor logits;
+    shelf::gpu::Tensor predecessor;
+    shelf::gpu::Tensor successor;
+    shelf::gpu::Tensor out;
     const bool alloc_ok =
         alloc_bf16(arena, {fx.draft_rows, fx.rank}, hidden) &&
         alloc_i32(arena, {fx.draft_rows, fx.top_k}, ids) &&
@@ -169,7 +169,7 @@ static void run_case(
         alloc_i32(arena, {fx.draft_rows}, out);
     check(alloc_ok, name + " alloc");
     if (!alloc_ok) return;
-    const auto upload = [&](ps::gpu::Tensor& dst, const auto& src) {
+    const auto upload = [&](shelf::gpu::Tensor& dst, const auto& src) {
         return hipMemcpy(dst.template data<typename std::decay_t<decltype(src)>::value_type>(),
                          src.data(), src.size() * sizeof(typename std::decay_t<decltype(src)>::value_type),
                          hipMemcpyHostToDevice) == hipSuccess;
@@ -178,7 +178,7 @@ static void run_case(
               upload(predecessor, fx.predecessor) && upload(successor, fx.successor),
           name + " upload");
 
-    ps::kernel::DFlash2CandidateSelectorArgs args;
+    shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = hidden.data<bf16_t>();
     args.topk_ids = ids.data<int32_t>();
     args.topk_logits = logits.data<float>();
@@ -191,7 +191,7 @@ static void run_case(
     args.top_k = fx.top_k;
     args.vocab_size = fx.vocab;
 
-    const hipError_t err = ps::kernel::launch_dflash2_candidate_selector(args, stream);
+    const hipError_t err = shelf::kernel::launch_dflash2_candidate_selector(args, stream);
     check(err == hipSuccess, name + " launch");
     if (err != hipSuccess) return;
     check(hipStreamSynchronize(stream) == hipSuccess, name + " sync");
@@ -221,12 +221,12 @@ int main() {
         std::printf("SKIP: no GPU\n");
         return 77;
     }
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -314,8 +314,8 @@ int main() {
         run_case(arena, stream, "full_rank256_topk16", fx);
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown");
     std::printf("test_dflash2_candidate_selector: failed=%d\n", g_fail);
     return g_fail == 0 ? 0 : 1;

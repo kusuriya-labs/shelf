@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kBf16GemmExactRowsMax = 64u;
 inline constexpr uint32_t kBf16GemmExactRowsKernelMax = 16u;
@@ -53,4 +53,4 @@ struct Fp8FinegrainedGemmConfig {
     Fp8FinegrainedGemmConfigId id = Fp8FinegrainedGemmConfigId::RowBlock1;
 };
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

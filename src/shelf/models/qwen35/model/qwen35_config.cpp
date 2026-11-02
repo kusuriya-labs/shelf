@@ -2,7 +2,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 namespace {

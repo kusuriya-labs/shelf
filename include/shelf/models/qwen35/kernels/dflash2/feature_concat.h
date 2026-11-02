@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 constexpr uint32_t kDFlash2TargetTaps = 5u;
 

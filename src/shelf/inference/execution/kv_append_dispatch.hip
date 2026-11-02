@@ -22,15 +22,15 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::state::PagedKVPoolBF16View;
-using ::ps::state::PagedKVPoolFP8View;
-using ::ps::runtime::KernelId;
+using ::shelf::state::PagedKVPoolBF16View;
+using ::shelf::state::PagedKVPoolFP8View;
+using ::shelf::runtime::KernelId;
 
-const ::ps::runtime::StateBinding* find_state_binding_for_descriptor(
-    const ::ps::runtime::Program& program, uint32_t descriptor_slot) {
+const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
+    const ::shelf::runtime::Program& program, uint32_t descriptor_slot) {
     if (descriptor_slot == 0u) return nullptr;
     for (const auto& s : program.states) {
         if (s.slot + 1u == descriptor_slot) return &s;
@@ -41,7 +41,7 @@ const ::ps::runtime::StateBinding* find_state_binding_for_descriptor(
 }  // namespace
 
 Result<KvAppendResolvedArgs> resolve_kv_append_args(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     const HostExecutionContext& ctx) {
     if (dispatch_index >= program.dispatches.size())
         return Status::invalid_state("kv-append: dispatch_index out of range", __FILE__, __LINE__);
@@ -52,21 +52,21 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
         return Status::invalid_state("kv-append: io count != 2/0", __FILE__, __LINE__);
 
     const auto* sb = find_state_binding_for_descriptor(program, b.descriptor_slot);
-    if (sb == nullptr || sb->kind != ::ps::runtime::PrimitiveStateKind::KV_CACHE)
+    if (sb == nullptr || sb->kind != ::shelf::runtime::PrimitiveStateKind::KV_CACHE)
         return Status::invalid_state("kv-append: KV_CACHE state not found", __FILE__, __LINE__);
     const uint32_t layer = sb->state_index;
 
-    auto k_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto k_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!k_res.ok()) return k_res.status();
     const HostResolvedValue k_in = k_res.value();
-    auto v_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+    auto v_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
     if (!v_res.ok()) return v_res.status();
     const HostResolvedValue v_in = v_res.value();
 
-    if (k_in.dtype != ::ps::runtime::ValueDType::BF16 || v_in.dtype != ::ps::runtime::ValueDType::BF16)
+    if (k_in.dtype != ::shelf::runtime::ValueDType::BF16 || v_in.dtype != ::shelf::runtime::ValueDType::BF16)
         return Status::invalid_state("kv-append: input dtype != BF16", __FILE__, __LINE__);
-    if (k_in.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS ||
-        v_in.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS)
+    if (k_in.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS ||
+        v_in.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS)
         return Status::invalid_state("kv-append: input row_domain != TOKEN_ROWS", __FILE__, __LINE__);
     if (k_in.feature_count == 0 || v_in.feature_count == 0)
         return Status::invalid_state("kv-append: input feature_count == 0", __FILE__, __LINE__);
@@ -86,10 +86,10 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
         return Status::invalid_state("kv-append: block table invalid", __FILE__, __LINE__);
 
     const uint32_t dtype_raw = ctx.model_state.kv_dtype;
-    const ::ps::kernel::KVCacheDType kv_dtype =
-        dtype_raw == 1u ? ::ps::kernel::KVCacheDType::FP8_E4M3
-                        : ::ps::kernel::KVCacheDType::BF16;
-    const bool fp8 = kv_dtype == ::ps::kernel::KVCacheDType::FP8_E4M3;
+    const ::shelf::kernel::KVCacheDType kv_dtype =
+        dtype_raw == 1u ? ::shelf::kernel::KVCacheDType::FP8_E4M3
+                        : ::shelf::kernel::KVCacheDType::BF16;
+    const bool fp8 = kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3;
 
     KvAppendResolvedArgs out;
     out.kv_dtype = kv_dtype;
@@ -158,7 +158,7 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
 }
 
 Result<PhysicalResolveStatus> resolve_kv_append_physical(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     const HostExecutionContext& ctx, PhysicalKvAppendLaunch& out) {
     out = PhysicalKvAppendLaunch{};
     const auto resolved = resolve_kv_append_args(program, dispatch_index, ctx);
@@ -176,12 +176,12 @@ Result<PhysicalResolveStatus> resolve_kv_append_physical(
 
     out.common = a.common;
     switch (a.kv_dtype) {
-        case ::ps::kernel::KVCacheDType::BF16:
+        case ::shelf::kernel::KVCacheDType::BF16:
             out.variant = PhysicalKvAppendVariant::Bf16;
             out.k_pool = reinterpret_cast<uint64_t>(a.k_bf16_pool);
             out.v_pool = reinterpret_cast<uint64_t>(a.v_bf16_pool);
             break;
-        case ::ps::kernel::KVCacheDType::FP8_E4M3:
+        case ::shelf::kernel::KVCacheDType::FP8_E4M3:
             out.variant = PhysicalKvAppendVariant::Fp8E4M3;
             out.k_pool = reinterpret_cast<uint64_t>(a.k_fp8_pool);
             out.v_pool = reinterpret_cast<uint64_t>(a.v_fp8_pool);
@@ -205,14 +205,14 @@ hipError_t launch_kv_append_physical(const PhysicalKvAppendLaunch& d,
                                      hipStream_t stream) {
     switch (d.variant) {
         case PhysicalKvAppendVariant::Bf16:
-            return ::ps::kernel::launch_kv_append_bf16(
-                d.common, reinterpret_cast<::ps::bf16_t*>(d.k_pool),
-                reinterpret_cast<::ps::bf16_t*>(d.v_pool), stream);
+            return ::shelf::kernel::launch_kv_append_bf16(
+                d.common, reinterpret_cast<::shelf::bf16_t*>(d.k_pool),
+                reinterpret_cast<::shelf::bf16_t*>(d.v_pool), stream);
         case PhysicalKvAppendVariant::Fp8E4M3:
-            return ::ps::kernel::launch_kv_append_fp8_e4m3(
+            return ::shelf::kernel::launch_kv_append_fp8_e4m3(
                 d.common,
-                reinterpret_cast<::ps::kernel::fp8e4m3_storage_t*>(d.k_pool),
-                reinterpret_cast<::ps::kernel::fp8e4m3_storage_t*>(d.v_pool),
+                reinterpret_cast<::shelf::kernel::fp8e4m3_storage_t*>(d.k_pool),
+                reinterpret_cast<::shelf::kernel::fp8e4m3_storage_t*>(d.v_pool),
                 reinterpret_cast<float*>(d.k_scale_pool),
                 reinterpret_cast<float*>(d.v_scale_pool), stream);
         default:
@@ -221,7 +221,7 @@ hipError_t launch_kv_append_physical(const PhysicalKvAppendLaunch& d,
 }
 
 Result<OptimizedLaunchResult> try_launch_kv_append(
-    const ::ps::runtime::Program& program, size_t dispatch_index, HostExecutionContext& ctx,
+    const ::shelf::runtime::Program& program, size_t dispatch_index, HostExecutionContext& ctx,
     hipStream_t stream) {
     PhysicalKvAppendLaunch launch{};
     const Result<PhysicalResolveStatus> resolved =
@@ -242,4 +242,4 @@ Result<OptimizedLaunchResult> try_launch_kv_append(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

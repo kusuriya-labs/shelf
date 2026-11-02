@@ -43,14 +43,14 @@ struct Fixture {
 
 struct PlannedTensor {
     std::string name;
-    ps::io::SType dtype;
+    shelf::io::SType dtype;
     std::vector<std::size_t> shape;
     const std::uint8_t* data;
     std::size_t bytes;
 };
 
 inline std::uint16_t f32_to_bf16(float value) {
-    return ps::f32_to_bf16_rne(value);
+    return shelf::f32_to_bf16_rne(value);
 }
 
 inline float bf16_to_f32(std::uint16_t value) {
@@ -84,7 +84,7 @@ inline void append_fp8(std::vector<std::uint8_t>& codes_dst,
     const std::size_t scale_n = (static_cast<std::size_t>(rows) + kScaleBlockN - 1) / kScaleBlockN;
     const std::size_t scale_k = static_cast<std::size_t>(k) / kScaleBlockK;
     std::vector<float> scales(scale_n * scale_k);
-    ps::quantization::fp8::quantize_fp8_matrix(
+    shelf::quantization::fp8::quantize_fp8_matrix(
         src.data(), k, rows, k, k, codes_dst.data() + codes_at, scales.data());
     const std::size_t scales_at = scales_dst.size();
     scales_dst.resize(scales_at + scales.size());
@@ -136,9 +136,9 @@ inline Fixture make_fixture() {
 }
 
 inline bool write_model_file(const std::string& path, const std::vector<PlannedTensor>& tensors) {
-    auto writer_result = ps::io::SafetensorsWriter::create(path);
+    auto writer_result = shelf::io::SafetensorsWriter::create(path);
     if (!writer_result.ok()) return false;
-    ps::io::SafetensorsWriter writer = writer_result.release();
+    shelf::io::SafetensorsWriter writer = writer_result.release();
     for (const PlannedTensor& t : tensors) {
         if (!writer.plan_tensor(t.name, t.dtype, t.shape).ok()) return false;
     }
@@ -154,9 +154,9 @@ inline bool write_bf16_model_dir(const fs::path& dir, const Fixture& f) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     const std::vector<PlannedTensor> tensors = {
-        {kGateUpName, ps::io::SType::BF16, {kExperts, kGateUpRows, kHidden},
+        {kGateUpName, shelf::io::SType::BF16, {kExperts, kGateUpRows, kHidden},
          f.gate_up_bf16.data(), f.gate_up_bf16.size()},
-        {kDownName, ps::io::SType::BF16, {kExperts, kDownRows, kInter},
+        {kDownName, shelf::io::SType::BF16, {kExperts, kDownRows, kInter},
          f.down_bf16.data(), f.down_bf16.size()},
     };
     return write_model_file((dir / "model.safetensors").string(), tensors);
@@ -177,15 +177,15 @@ inline bool write_fp8_model_dir(const fs::path& dir, const Fixture& f) {
         config << fp8_config_json();
     }
     const std::vector<PlannedTensor> tensors = {
-        {kGateUpName, ps::io::SType::F8_E4M3, {kExperts, kGateUpRows, kHidden},
+        {kGateUpName, shelf::io::SType::F8_E4M3, {kExperts, kGateUpRows, kHidden},
          f.gate_up_codes.data(), f.gate_up_codes.size()},
-        {kGateUpScaleName, ps::io::SType::BF16,
+        {kGateUpScaleName, shelf::io::SType::BF16,
          {kExperts, (kGateUpRows + kScaleBlockN - 1) / kScaleBlockN, kHidden / kScaleBlockK},
          reinterpret_cast<const std::uint8_t*>(f.gate_up_scales.data()),
          f.gate_up_scales.size() * 2},
-        {kDownName, ps::io::SType::F8_E4M3, {kExperts, kDownRows, kInter},
+        {kDownName, shelf::io::SType::F8_E4M3, {kExperts, kDownRows, kInter},
          f.down_codes.data(), f.down_codes.size()},
-        {kDownScaleName, ps::io::SType::BF16,
+        {kDownScaleName, shelf::io::SType::BF16,
          {kExperts, (kDownRows + kScaleBlockN - 1) / kScaleBlockN, kInter / kScaleBlockK},
          reinterpret_cast<const std::uint8_t*>(f.down_scales.data()),
          f.down_scales.size() * 2},

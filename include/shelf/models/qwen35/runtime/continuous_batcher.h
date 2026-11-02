@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 struct Executor;

@@ -5,14 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kThreads = 256u;
 
 __global__ void stochastic_sampling_impl(
     const float* __restrict__ logits,
-    const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+    const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
     int32_t* __restrict__ sampled_tokens,
     uint32_t vocab_size,
     uint32_t logits_row_stride,
@@ -45,7 +45,7 @@ namespace {
 
 __global__ void stochastic_topk_sampling_impl(
     const float* __restrict__ logits,
-    const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+    const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
     int32_t* __restrict__ sampled_tokens,
     const int32_t* __restrict__ top_ids,
     const float* __restrict__ top_logits,
@@ -87,4 +87,4 @@ hipError_t launch_stochastic_topk_sampling_f32(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-namespace rt = ::ps::runtime;
-namespace gpu = ::ps::gpu;
+namespace rt = ::shelf::runtime;
+namespace gpu = ::shelf::gpu;
 
 namespace {
 
@@ -30,7 +30,7 @@ void check(bool cond, const std::string& msg) {
     }
 }
 
-::ps::Result<gpu::Tensor> alloc_bf16(gpu::GpuArena& arena,
+::shelf::Result<gpu::Tensor> alloc_bf16(gpu::GpuArena& arena,
                                      const std::vector<std::size_t>& shape) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
@@ -39,12 +39,12 @@ void check(bool cond, const std::string& msg) {
     std::vector<std::size_t> strides(shape.size(), 1);
     for (std::size_t i = 0; i + 1 < shape.size(); ++i)
         strides[i] = strides[i + 1] * shape[i + 1];
-    return gpu::Tensor::create<ps::bf16_t>(view.release(), shape, strides);
+    return gpu::Tensor::create<shelf::bf16_t>(view.release(), shape, strides);
 }
 
-ps::weights::MatrixWeight make_matrix(gpu::Tensor t, std::uint32_t rows,
+shelf::weights::MatrixWeight make_matrix(gpu::Tensor t, std::uint32_t rows,
                                       std::uint32_t cols) {
-    ps::weights::MatrixWeight w;
+    shelf::weights::MatrixWeight w;
     w.bf16 = std::move(t);
     w.rows = rows;
     w.cols = cols;
@@ -89,7 +89,7 @@ int main() {
         return r.release();
     };
 
-    ps::qwen35::Qwen35TextConfig cfg;
+    shelf::qwen35::Qwen35TextConfig cfg;
     cfg.vocab_size = kV;
     cfg.hidden_size = kH;
     cfg.intermediate_size = kI;
@@ -107,12 +107,12 @@ int main() {
     cfg.partial_rotary_factor = 0.25f;
     cfg.tie_word_embeddings = true;
 
-    ps::qwen35::Qwen35ModelWeights w;
+    shelf::qwen35::Qwen35ModelWeights w;
     w.lm_head_tied = true;
     w.embed_tokens = make_matrix(alloc({kV, kH}, "embed_tokens"), kV, kH);
     w.final_norm_weight = alloc({kH}, "final_norm");
 
-    ps::qwen35::Qwen35LayerWeights gdn;
+    shelf::qwen35::Qwen35LayerWeights gdn;
     gdn.is_gdn = true;
     gdn.input_layernorm_weight = alloc({kH}, "gdn input_layernorm");
     gdn.post_attention_layernorm_weight = alloc({kH}, "gdn post_attention_layernorm");
@@ -137,7 +137,7 @@ int main() {
         return 1;
     }
 
-    auto lower = ps::qwen35::lower_qwen35_to_primitives(cfg, w);
+    auto lower = shelf::qwen35::lower_qwen35_to_primitives(cfg, w);
     if (!lower.ok()) {
         std::printf("FAIL: main lowering: %s\n", lower.status().message().c_str());
         arena.shutdown();

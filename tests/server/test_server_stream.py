@@ -33,7 +33,7 @@ def main() -> int:
     if not model_dir().is_dir():
         print(f"model dir not found: {model_dir()}", file=sys.stderr)
         return 2
-    token_log = Path(tempfile.mkdtemp(prefix="ps-tokenlog-")) / "tokens.txt"
+    token_log = Path(tempfile.mkdtemp(prefix="shelf-tokenlog-")) / "tokens.txt"
 
     try:
         with ServerHarness(env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:

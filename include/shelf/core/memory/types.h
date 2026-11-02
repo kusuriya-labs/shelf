@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace ps {
+namespace shelf {
 
 struct alignas(2) bf16_t {
     uint16_t data;
@@ -32,4 +32,4 @@ inline uint16_t f32_to_bf16_rne(float f) {
     return static_cast<uint16_t>(u >> 16);
 }
 
-} // namespace ps
+} // namespace shelf

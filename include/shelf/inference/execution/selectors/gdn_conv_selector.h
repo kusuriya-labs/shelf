@@ -3,7 +3,7 @@
 #include <shelf/runtime/graph/value_type.h>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class GdnConvImplementation : uint8_t {
     Correctness,
@@ -11,8 +11,8 @@ enum class GdnConvImplementation : uint8_t {
 };
 
 struct GdnConvSelectorInput {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
     uint32_t conv_dim;
     uint32_t history;
     uint32_t rows;
@@ -23,4 +23,4 @@ struct GdnConvSelectorInput {
 GdnConvImplementation select_gdn_conv_implementation(
     const GdnConvSelectorInput& in);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

@@ -4,9 +4,9 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
-using namespace ::ps::kernel::detail;
+using namespace ::shelf::kernel::detail;
 
 constexpr uint32_t kKvRingThreads = 256u;
 
@@ -65,4 +65,4 @@ hipError_t launch_dflash2_kv_ring_append_bf16(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

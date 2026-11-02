@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 enum class ValueDType : uint8_t {
     BF16 = 0,

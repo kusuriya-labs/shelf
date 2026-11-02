@@ -8,7 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 struct SequenceBlockTableDeviceView {
@@ -28,11 +28,11 @@ class SequenceSlotPool {
 
     Status release_slot(SequenceSlotId slot);
 
-    Result<::ps::runtime::RequestHandle> allocate_handle();
+    Result<::shelf::runtime::RequestHandle> allocate_handle();
 
-    Status release_handle(::ps::runtime::RequestHandle handle);
+    Status release_handle(::shelf::runtime::RequestHandle handle);
 
-    bool is_current(::ps::runtime::RequestHandle handle) const noexcept;
+    bool is_current(::shelf::runtime::RequestHandle handle) const noexcept;
 
     gpu::Tensor device_block_table(SequenceSlotId slot) const;
 

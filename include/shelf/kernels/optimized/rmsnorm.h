@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 enum class RmsNormDataType : uint8_t {
     BF16,

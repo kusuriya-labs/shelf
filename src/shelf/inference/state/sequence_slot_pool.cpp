@@ -1,6 +1,6 @@
 #include <shelf/inference/state/sequence_slot_pool.h>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 Result<SequenceSlotPool> SequenceSlotPool::create(
@@ -63,7 +63,7 @@ Result<SequenceSlotPool> SequenceSlotPool::create(
     return pool;
 }
 
-Result<::ps::runtime::RequestHandle> SequenceSlotPool::allocate_handle() {
+Result<::shelf::runtime::RequestHandle> SequenceSlotPool::allocate_handle() {
     if (free_list_.empty()) {
         return Status::insufficient_memory("no free sequence slots", __FILE__, __LINE__);
     }
@@ -87,7 +87,7 @@ Result<::ps::runtime::RequestHandle> SequenceSlotPool::allocate_handle() {
     in_use_[slot] = true;
     ++used_count_;
 
-    return ::ps::runtime::RequestHandle{
+    return ::shelf::runtime::RequestHandle{
         .slot = slot,
         .generation = generation,
     };
@@ -101,8 +101,8 @@ Result<SequenceSlotId> SequenceSlotPool::allocate_slot() {
     return handle.value().slot;
 }
 
-bool SequenceSlotPool::is_current(::ps::runtime::RequestHandle handle) const noexcept {
-    if (!::ps::runtime::request_handle_valid(handle)) {
+bool SequenceSlotPool::is_current(::shelf::runtime::RequestHandle handle) const noexcept {
+    if (!::shelf::runtime::request_handle_valid(handle)) {
         return false;
     }
     if (handle.slot >= max_sequences_) {
@@ -111,7 +111,7 @@ bool SequenceSlotPool::is_current(::ps::runtime::RequestHandle handle) const noe
     return in_use_[handle.slot] && generations_[handle.slot] == handle.generation;
 }
 
-Status SequenceSlotPool::release_handle(::ps::runtime::RequestHandle handle) {
+Status SequenceSlotPool::release_handle(::shelf::runtime::RequestHandle handle) {
     if (!is_current(handle)) {
         return Status::invalid_state("stale or invalid request handle", __FILE__, __LINE__);
     }

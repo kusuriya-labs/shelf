@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 hipError_t launch_dflash2_swiglu_bf16(
     const bf16_t* gate,

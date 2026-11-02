@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -33,9 +33,9 @@ static float bf16_to_f32(bf16_t x) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     const std::vector<std::size_t>& shape,
-    ps::gpu::Tensor& out) {
+    shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -47,7 +47,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -59,7 +59,7 @@ static uint32_t lcg(uint32_t& s) {
 }
 
 static void run_geometry(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t out_features,
     uint32_t k,
@@ -92,9 +92,9 @@ static void run_geometry(
         }
     }
 
-    ps::gpu::Tensor dev_weight;
-    ps::gpu::Tensor dev_input;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_weight;
+    shelf::gpu::Tensor dev_input;
+    shelf::gpu::Tensor dev_out;
     check(alloc_bf16(arena, {out_features, k}, dev_weight), "weight alloc");
     check(alloc_bf16(arena, {rows, k}, dev_input), "input alloc");
     check(alloc_bf16(arena, {rows, out_features}, dev_out), "out alloc");
@@ -105,7 +105,7 @@ static void run_geometry(
                     host_input.size() * sizeof(bf16_t), hipMemcpyHostToDevice) == hipSuccess,
           "input upload");
 
-    ps::execution::Bf16GemmSelectorInput lin;
+    shelf::execution::Bf16GemmSelectorInput lin;
     lin.rows = rows;
     lin.out_features = out_features;
     lin.k = k;
@@ -114,14 +114,14 @@ static void run_geometry(
         (reinterpret_cast<uintptr_t>(dev_weight.data<void>()) & 15u) == 0u;
     lin.input_aligned16 = (reinterpret_cast<uintptr_t>(dev_input.data<void>()) & 15u) == 0u;
     lin.allow_dot2_rows = allow_dot2;
-    const auto config = ps::execution::select_bf16_gemm_config(lin);
+    const auto config = shelf::execution::select_bf16_gemm_config(lin);
     check(config.has_value(), "geometry " + std::to_string(out_features) + "x" +
                                   std::to_string(k) + " is in the bf16 allowlist");
     if (!config.has_value()) return;
 
-    const hipError_t err = ps::kernel::launch_gemm_bf16(
+    const hipError_t err = shelf::kernel::launch_gemm_bf16(
         *config, dev_weight.data<bf16_t>(), dev_input.data<bf16_t>(), dev_out.data<bf16_t>(),
-        ps::kernel::Bf16GemmOutputDType::BF16, rows, out_features, k, k, out_features,
+        shelf::kernel::Bf16GemmOutputDType::BF16, rows, out_features, k, k, out_features,
         stream);
     check(err == hipSuccess, "gemm launch");
     if (err != hipSuccess) return;
@@ -157,12 +157,12 @@ static void run_geometry(
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -183,8 +183,8 @@ int main() {
     run_geometry(arena, stream, 5120u, 25600u, 33u, 333u, true);
     run_geometry(arena, stream, 5120u, 25600u, 18u, 444u, true);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_bf16_geometry: failed=%d\n", g_fail);

@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -18,7 +18,7 @@ __global__ __launch_bounds__(kGatherThreads)
 void output_gather_kernel(
     const T* __restrict__ input, uint32_t input_row_stride,
     T* __restrict__ output, uint32_t output_row_stride,
-    const ::ps::runtime::DeviceBatchContext* __restrict__ ctx,
+    const ::shelf::runtime::DeviceBatchContext* __restrict__ ctx,
     uint32_t features) {
     const uint32_t i = blockIdx.y;
     const uint32_t src = ctx->output_rows[i];
@@ -35,9 +35,9 @@ void output_gather_kernel(
 hipError_t launch_output_gather(
     const void* input, uint32_t input_row_stride,
     void* output, uint32_t output_row_stride,
-    const ::ps::runtime::DeviceBatchContext* ctx,
+    const ::shelf::runtime::DeviceBatchContext* ctx,
     uint32_t num_outputs,
-    uint32_t features, ::ps::runtime::ValueDType dtype, hipStream_t stream) {
+    uint32_t features, ::shelf::runtime::ValueDType dtype, hipStream_t stream) {
     if (input == nullptr || output == nullptr || ctx == nullptr || features == 0u)
         return hipErrorInvalidValue;
     if (num_outputs == 0u)
@@ -45,17 +45,17 @@ hipError_t launch_output_gather(
     const uint32_t blocks_x = (features + kGatherThreads - 1u) / kGatherThreads;
     dim3 grid(blocks_x, num_outputs);
     switch (dtype) {
-        case ::ps::runtime::ValueDType::BF16:
+        case ::shelf::runtime::ValueDType::BF16:
             output_gather_kernel<bf16><<<grid, kGatherThreads, 0, stream>>>(
                 reinterpret_cast<const bf16*>(input), input_row_stride,
                 reinterpret_cast<bf16*>(output), output_row_stride, ctx, features);
             break;
-        case ::ps::runtime::ValueDType::F32:
+        case ::shelf::runtime::ValueDType::F32:
             output_gather_kernel<float><<<grid, kGatherThreads, 0, stream>>>(
                 reinterpret_cast<const float*>(input), input_row_stride,
                 reinterpret_cast<float*>(output), output_row_stride, ctx, features);
             break;
-        case ::ps::runtime::ValueDType::I32:
+        case ::shelf::runtime::ValueDType::I32:
             output_gather_kernel<int32_t><<<grid, kGatherThreads, 0, stream>>>(
                 reinterpret_cast<const int32_t*>(input), input_row_stride,
                 reinterpret_cast<int32_t*>(output), output_row_stride, ctx, features);
@@ -66,4 +66,4 @@ hipError_t launch_output_gather(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

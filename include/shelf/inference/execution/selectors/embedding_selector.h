@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class EmbeddingStorage : uint8_t {
     Bf16 = 0,
@@ -27,4 +27,4 @@ struct EmbeddingRule {
 
 EmbeddingImplementation select_embedding_implementation(const EmbeddingSelectorInput& in);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

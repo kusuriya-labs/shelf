@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class LinearComputeFamily : uint8_t {
     Bf16,
@@ -35,10 +35,10 @@ bool linear_shape_supported(
     uint32_t out_features,
     uint32_t k);
 
-std::optional<ps::kernel::Bf16GemmConfig>
+std::optional<shelf::kernel::Bf16GemmConfig>
 select_bf16_gemm_config(const Bf16GemmSelectorInput& input);
 
-std::optional<ps::kernel::Fp8FinegrainedGemmConfig>
+std::optional<shelf::kernel::Fp8FinegrainedGemmConfig>
 select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

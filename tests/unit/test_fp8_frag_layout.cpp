@@ -19,7 +19,7 @@ void check(bool ok, const char* what) {
     std::printf("FAIL: %s\n", what);
 }
 
-using namespace ps::quantization::fp8;
+using namespace shelf::quantization::fp8;
 
 void test_block_is_permutation() {
     std::vector<int> seen(kFragBlockBytes, 0);
@@ -84,9 +84,9 @@ void test_activation_padding_alignment() {
     bool ok = true;
     const uint32_t ks[] = {1u, 31u, 32u, 33u, 64u, 100u, 5000u, 5120u, 17408u};
     for (uint32_t k : ks) {
-        const uint32_t kp = ps::runtime::Int8ActivationWorkspaceLayout::k_padded_for(k);
+        const uint32_t kp = shelf::runtime::Int8ActivationWorkspaceLayout::k_padded_for(k);
         if ((kp % kFragBlockK) != 0u || kp < k) ok = false;
-        const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(k, 8u);
+        const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(k, 8u);
         if ((layout.code_row_stride_bytes % kFragBlockK) != 0u) ok = false;
         if (layout.codes_bytes() % kFragBlockBytes != 0u) ok = false;
     }

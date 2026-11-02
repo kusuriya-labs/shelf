@@ -17,9 +17,9 @@ void check(bool cond, const char* name) {
     }
 }
 
-::ps::runtime::DispatchBinding make_binding() {
-    ::ps::runtime::DispatchBinding b{};
-    b.kernel_id = ::ps::runtime::KernelId::LINEAR_BF16;
+::shelf::runtime::DispatchBinding make_binding() {
+    ::shelf::runtime::DispatchBinding b{};
+    b.kernel_id = ::shelf::runtime::KernelId::LINEAR_BF16;
     b.input_slots[0] = 0;
     b.input_slots[1] = 1;
     b.input_count = 2;
@@ -28,9 +28,9 @@ void check(bool cond, const char* name) {
     return b;
 }
 
-::ps::runtime::Program make_program(uint32_t n_dispatches, uint32_t n_ranges,
+::shelf::runtime::Program make_program(uint32_t n_dispatches, uint32_t n_ranges,
                                     uint32_t n_states) {
-    ::ps::runtime::Program p{};
+    ::shelf::runtime::Program p{};
     p.dispatches.reserve(n_dispatches);
     for (uint32_t i = 0; i < n_dispatches; ++i) p.dispatches.push_back(make_binding());
     p.workspace.ranges.resize(n_ranges);
@@ -47,33 +47,33 @@ void check(bool cond, const char* name) {
 int main() {
     printf("=== Dispatch Staging Size Contract ===\n");
 
-    const ::ps::runtime::Program a = make_program(10, 10, 2);
-    const ::ps::runtime::Program b = make_program(1000, 1000, 200);
-    const ::ps::runtime::DispatchBinding binding = make_binding();
+    const ::shelf::runtime::Program a = make_program(10, 10, 2);
+    const ::shelf::runtime::Program b = make_program(1000, 1000, 200);
+    const ::shelf::runtime::DispatchBinding binding = make_binding();
 
-    const uint64_t image = ::ps::runtime::staging_bytes_for(binding);
-    check(image == ::ps::runtime::staging_section_offsets(3).total,
+    const uint64_t image = ::shelf::runtime::staging_bytes_for(binding);
+    check(image == ::shelf::runtime::staging_section_offsets(3).total,
           "image size equals section layout");
     check(image < 512, "image is small (no embedded range list)");
 
     const uint64_t old_full_image =
-        16 + 3 * sizeof(::ps::runtime::DeviceValueBinding) +
-        1000ull * sizeof(::ps::runtime::DeviceWorkspaceRange);
+        16 + 3 * sizeof(::shelf::runtime::DeviceValueBinding) +
+        1000ull * sizeof(::shelf::runtime::DeviceWorkspaceRange);
     check(image < old_full_image / 4,
           "image does not scale with workspace range count");
 
-    check(::ps::runtime::max_host_staging_bytes(a) == image, "scratch A equals one image");
-    check(::ps::runtime::max_host_staging_bytes(a) == ::ps::runtime::max_host_staging_bytes(b),
+    check(::shelf::runtime::max_host_staging_bytes(a) == image, "scratch A equals one image");
+    check(::shelf::runtime::max_host_staging_bytes(a) == ::shelf::runtime::max_host_staging_bytes(b),
           "scratch independent of dispatch count");
 
-    const uint64_t meta_a = ::ps::runtime::program_staging_meta_bytes(10, 2);
-    const uint64_t meta_b = ::ps::runtime::program_staging_meta_bytes(1000, 200);
+    const uint64_t meta_a = ::shelf::runtime::program_staging_meta_bytes(10, 2);
+    const uint64_t meta_b = ::shelf::runtime::program_staging_meta_bytes(1000, 200);
     const uint64_t expect_a =
-        ((10ull * sizeof(::ps::runtime::DeviceWorkspaceRange) + 15) & ~15ull) +
-        ((2ull * sizeof(::ps::runtime::DeviceStateBinding) + 15) & ~15ull);
+        ((10ull * sizeof(::shelf::runtime::DeviceWorkspaceRange) + 15) & ~15ull) +
+        ((2ull * sizeof(::shelf::runtime::DeviceStateBinding) + 15) & ~15ull);
     const uint64_t expect_b =
-        ((1000ull * sizeof(::ps::runtime::DeviceWorkspaceRange) + 15) & ~15ull) +
-        ((200ull * sizeof(::ps::runtime::DeviceStateBinding) + 15) & ~15ull);
+        ((1000ull * sizeof(::shelf::runtime::DeviceWorkspaceRange) + 15) & ~15ull) +
+        ((200ull * sizeof(::shelf::runtime::DeviceStateBinding) + 15) & ~15ull);
     check(meta_a == expect_a, "meta A exact bytes");
     check(meta_b == expect_b, "meta B exact bytes");
     check(meta_b > meta_a, "meta scales only with static range/state count");

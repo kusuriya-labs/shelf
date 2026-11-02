@@ -8,7 +8,7 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
-namespace ps {
+namespace shelf {
 namespace io {
 
 namespace {

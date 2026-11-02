@@ -9,7 +9,7 @@
 #include <string>
 #include <unistd.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -239,7 +239,7 @@ Result<PrefixCache> PrefixCache::create(
             return Status::invalid_argument(
                 "prefix cache rank context is incomplete", __FILE__, __LINE__);
         }
-        auto scope = ps::gpu::ScopedDevice::create(ctx.device);
+        auto scope = shelf::gpu::ScopedDevice::create(ctx.device);
         if (!scope.ok()) return scope.status();
         auto shard_kv = PagedKVPool::create(
             *ctx.arena, hot_pages, page_tokens, ctx.active_kv->num_attention_layers(),
@@ -1086,7 +1086,7 @@ Status PrefixCache::fill_pages(
                     "prefix cache tp mirror sequence missing", __FILE__, __LINE__);
             }
             RankShard& shard = *rank_shards_[r];
-            auto scope = ps::gpu::ScopedDevice::create(shard.device);
+            auto scope = shelf::gpu::ScopedDevice::create(shard.device);
             if (!scope.ok()) return scope.status();
             for (uint32_t i = start; i < plan.page_count; ++i) {
                 const Status st = shard.shadow_kv.copy_page_from(
@@ -1290,7 +1290,7 @@ Status PrefixCache::capture_active_state(uint32_t dst_state_slot,
                 __LINE__);
         }
         RankShard& shard = *rank_shards_[r];
-        auto scope = ps::gpu::ScopedDevice::create(shard.device);
+        auto scope = shelf::gpu::ScopedDevice::create(shard.device);
         if (!scope.ok()) return scope.status();
         st = shard.shadow_state.copy_slot_from(dst_state_slot, *shard.active_state,
                                                mirror->slot, shard.stream);
@@ -1305,7 +1305,7 @@ Status PrefixCache::roll_state(uint32_t dst_state_slot, uint32_t src_state_slot,
                                              src_state_slot, stream);
     if (!st.ok()) return st;
     for (auto& shard : rank_shards_) {
-        auto scope = ps::gpu::ScopedDevice::create(shard->device);
+        auto scope = shelf::gpu::ScopedDevice::create(shard->device);
         if (!scope.ok()) return scope.status();
         st = shard->shadow_state.copy_slot_from(dst_state_slot, shard->shadow_state,
                                                 src_state_slot, shard->stream);
@@ -1509,7 +1509,7 @@ Status PrefixCache::restore(
                     __LINE__);
             }
             RankShard& shard = *rank_shards_[r];
-            auto scope = ps::gpu::ScopedDevice::create(shard.device);
+            auto scope = shelf::gpu::ScopedDevice::create(shard.device);
             if (!scope.ok()) {
                 rollback();
                 return scope.status();

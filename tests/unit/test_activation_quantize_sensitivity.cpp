@@ -7,8 +7,8 @@
 #include <random>
 #include <vector>
 
-using ps::quantization::codec::e4m3_decode_f32;
-using ps::quantization::codec::e4m3_encode_u8;
+using shelf::quantization::codec::e4m3_decode_f32;
+using shelf::quantization::codec::e4m3_encode_u8;
 
 namespace {
 

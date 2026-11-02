@@ -8,16 +8,16 @@
 #include <cstdint>
 #include <span>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 
 struct ScheduledRequest {
-    ::ps::state::PagedSequenceState* sequence = nullptr;
+    ::shelf::state::PagedSequenceState* sequence = nullptr;
 
-    ::ps::runtime::RequestHandle handle{};
+    ::shelf::runtime::RequestHandle handle{};
 
-    ::ps::runtime::ExecutionClass execution_class = ::ps::runtime::ExecutionClass::DECODE;
+    ::shelf::runtime::ExecutionClass execution_class = ::shelf::runtime::ExecutionClass::DECODE;
 
     uint32_t token_begin = 0;
     uint32_t num_tokens = 0;
@@ -27,7 +27,7 @@ struct ScheduledRequest {
     bool compute_logits = false;
     bool sample = false;
 
-    ::ps::scheduling::SamplingConfig sampling{};
+    ::shelf::scheduling::SamplingConfig sampling{};
     uint64_t sampling_index = 0;
 
     uint32_t num_output_rows = 1;

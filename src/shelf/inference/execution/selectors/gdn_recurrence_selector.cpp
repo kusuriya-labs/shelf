@@ -1,7 +1,7 @@
 #include "shelf/inference/execution/selectors/gdn_recurrence_selector.h"
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 struct Rule {
     uint32_t key_heads;
@@ -37,4 +37,4 @@ select_gdn_recurrence_implementation(const GdnRecurrenceSelectorInput& in) {
     return GdnRecurrenceImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

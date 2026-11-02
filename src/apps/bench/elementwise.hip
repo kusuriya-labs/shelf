@@ -17,10 +17,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using DT = ::shelf::runtime::ValueDType;
 
 struct Options {
     std::string variant = "optimized";
@@ -97,9 +97,9 @@ double percentile(std::vector<double> v, double p) {
 
 void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt) {
     v.logical_value = id;
-    v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     v.dtype = dt;
-    v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     v.slot = 0;
     v.feature_count = feat;
     v.row_stride = stride;
@@ -127,12 +127,12 @@ struct Env {
     ~Env() {
         void* bufs[] = {a, b, o0, o1, sig};
         for (auto* q : bufs)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
         for (auto* q : vals_dev)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
         void* misc[] = {ctx_dev, scratch, err};
         for (auto* q : misc)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
 };
 
@@ -168,7 +168,7 @@ bool build(Env& e, uint32_t seed) {
         if (!fill_f(e.b, in_elems, 2)) return false;
     }
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = e.rows;
     ctx.num_requests = 0;
     if (hipMalloc(&e.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
@@ -181,14 +181,14 @@ bool build(Env& e, uint32_t seed) {
         set_val(vals[1], 1, f, f, e.o0, DT::BF16);
         set_val(vals[2], 2, f, f, e.o1, DT::BF16);
         B& binding = e.binding[0];
-        binding.kernel_id = ::ps::runtime::KernelId::SPLIT;
+        binding.kernel_id = ::shelf::runtime::KernelId::SPLIT;
         binding.input_slots[0] = 0;
         binding.output_slots[0] = 1;
         binding.output_slots[1] = 2;
         binding.input_count = 1;
         binding.output_count = 2;
         binding.flags = (e.profile == "split-int")
-            ? static_cast<uint32_t>(::ps::runtime::SplitLayout::INTERLEAVED_HEADS) : 0u;
+            ? static_cast<uint32_t>(::shelf::runtime::SplitLayout::INTERLEAVED_HEADS) : 0u;
         binding.group_size = e.aux;
     } else if (e.profile == "residual" || e.profile == "swiglu" || e.profile == "mul") {
         DT a_dt = f32_a ? DT::F32 : DT::BF16;
@@ -203,9 +203,9 @@ bool build(Env& e, uint32_t seed) {
         binding.output_slots[0] = 2;
         binding.input_count = 2;
         binding.output_count = 1;
-        binding.kernel_id = (e.profile == "residual") ? ::ps::runtime::KernelId::RESIDUAL_ADD
-                            : (e.profile == "swiglu") ? ::ps::runtime::KernelId::SWIGLU
-                                                      : ::ps::runtime::KernelId::MUL;
+        binding.kernel_id = (e.profile == "residual") ? ::shelf::runtime::KernelId::RESIDUAL_ADD
+                            : (e.profile == "swiglu") ? ::shelf::runtime::KernelId::SWIGLU
+                                                      : ::shelf::runtime::KernelId::MUL;
     } else {
         DT a_dt = f32_a ? DT::F32 : DT::BF16;
         DT o_dt = (e.profile == "sigmoid" || e.profile == "scale" ||
@@ -219,11 +219,11 @@ bool build(Env& e, uint32_t seed) {
         binding.output_slots[0] = 1;
         binding.input_count = 1;
         binding.output_count = 1;
-        if (e.profile == "sigmoid") binding.kernel_id = ::ps::runtime::KernelId::SIGMOID;
+        if (e.profile == "sigmoid") binding.kernel_id = ::shelf::runtime::KernelId::SIGMOID;
         else if (e.profile == "silu-b2f" || e.profile == "silu-f2b")
-            binding.kernel_id = ::ps::runtime::KernelId::SILU;
+            binding.kernel_id = ::shelf::runtime::KernelId::SILU;
         else {
-            binding.kernel_id = ::ps::runtime::KernelId::SCALE;
+            binding.kernel_id = ::shelf::runtime::KernelId::SCALE;
             binding.scalar_a = 0.5f;
         }
     }
@@ -242,11 +242,11 @@ bool build(Env& e, uint32_t seed) {
 }
 
 hipError_t launch_correctness(const Env& e, hipStream_t s) {
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
-    ::ps::kernel::ModelDispatchStateView sv{};
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
+    ::shelf::kernel::ModelDispatchStateView sv{};
     for (uint32_t i = 0; i < e.n_corr; ++i) {
-        auto st = ps::kernel::launch_model_dispatch_correctness(
-            e.prog[i], e.binding[i], (::ps::runtime::DeviceBatchContext*)e.ctx_dev, sv,
+        auto st = shelf::kernel::launch_model_dispatch_correctness(
+            e.prog[i], e.binding[i], (::shelf::runtime::DeviceBatchContext*)e.ctx_dev, sv,
             (float*)e.scratch, (uint32_t*)e.err, s);
         if (!st.ok()) return hipErrorUnknown;
     }
@@ -257,34 +257,34 @@ hipError_t launch_optimized(const Env& e, hipStream_t s) {
     const uint32_t f = e.features;
     const uint32_t rows = e.rows;
     if (e.profile == "residual")
-        return ::ps::kernel::launch_residual_add_bf16((const ::ps::bf16_t*)e.a, f,
-            (const ::ps::bf16_t*)e.b, f, (::ps::bf16_t*)e.o0, f, rows, f, s);
+        return ::shelf::kernel::launch_residual_add_bf16((const ::shelf::bf16_t*)e.a, f,
+            (const ::shelf::bf16_t*)e.b, f, (::shelf::bf16_t*)e.o0, f, rows, f, s);
     if (e.profile == "swiglu")
-        return ::ps::kernel::launch_swiglu_bf16((const ::ps::bf16_t*)e.a, f,
-            (const ::ps::bf16_t*)e.b, f, (::ps::bf16_t*)e.o0, f, rows, f, s);
+        return ::shelf::kernel::launch_swiglu_bf16((const ::shelf::bf16_t*)e.a, f,
+            (const ::shelf::bf16_t*)e.b, f, (::shelf::bf16_t*)e.o0, f, rows, f, s);
     if (e.profile == "sigmoid")
-        return ::ps::kernel::launch_sigmoid_bf16_f32((const ::ps::bf16_t*)e.a, f,
+        return ::shelf::kernel::launch_sigmoid_bf16_f32((const ::shelf::bf16_t*)e.a, f,
             (float*)e.o0, f, rows, f, s);
     if (e.profile == "silu-b2f")
-        return ::ps::kernel::launch_silu_bf16_f32((const ::ps::bf16_t*)e.a, f,
+        return ::shelf::kernel::launch_silu_bf16_f32((const ::shelf::bf16_t*)e.a, f,
             (float*)e.o0, f, rows, f, s);
     if (e.profile == "silu-f2b")
-        return ::ps::kernel::launch_silu_f32_bf16((const float*)e.a, f,
-            (::ps::bf16_t*)e.o0, f, rows, f, s);
+        return ::shelf::kernel::launch_silu_f32_bf16((const float*)e.a, f,
+            (::shelf::bf16_t*)e.o0, f, rows, f, s);
     if (e.profile == "mul")
-        return ::ps::kernel::launch_mul_f32_f32_bf16((const float*)e.a, f,
-            (const float*)e.b, f, (::ps::bf16_t*)e.o0, f, rows, f, s);
+        return ::shelf::kernel::launch_mul_f32_f32_bf16((const float*)e.a, f,
+            (const float*)e.b, f, (::shelf::bf16_t*)e.o0, f, rows, f, s);
     if (e.profile == "scale")
-        return ::ps::kernel::launch_scale_f32((const float*)e.a, f, (float*)e.o0, f,
+        return ::shelf::kernel::launch_scale_f32((const float*)e.a, f, (float*)e.o0, f,
             rows, f, 0.5f, s);
     if (e.profile == "split-halves")
-        return ::ps::kernel::launch_split_bf16((const ::ps::bf16_t*)e.a, 2u * f,
-            (::ps::bf16_t*)e.o0, f, (::ps::bf16_t*)e.o1, f, rows, f,
-            ::ps::kernel::ElementwiseSplitLayout::Halves, 0u, s);
+        return ::shelf::kernel::launch_split_bf16((const ::shelf::bf16_t*)e.a, 2u * f,
+            (::shelf::bf16_t*)e.o0, f, (::shelf::bf16_t*)e.o1, f, rows, f,
+            ::shelf::kernel::ElementwiseSplitLayout::Halves, 0u, s);
     if (e.profile == "split-int")
-        return ::ps::kernel::launch_split_bf16((const ::ps::bf16_t*)e.a, 2u * f,
-            (::ps::bf16_t*)e.o0, f, (::ps::bf16_t*)e.o1, f, rows, f,
-            ::ps::kernel::ElementwiseSplitLayout::InterleavedHeads, e.aux, s);
+        return ::shelf::kernel::launch_split_bf16((const ::shelf::bf16_t*)e.a, 2u * f,
+            (::shelf::bf16_t*)e.o0, f, (::shelf::bf16_t*)e.o1, f, rows, f,
+            ::shelf::kernel::ElementwiseSplitLayout::InterleavedHeads, e.aux, s);
     return hipErrorInvalidValue;
 }
 
@@ -365,8 +365,8 @@ int run_elementwise(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per.empty()) { rc = 1; continue; }
         const double mn = percentile(per, 0.0);
         const double p50 = percentile(per, 0.5);
@@ -386,6 +386,6 @@ int run_elementwise(int argc, char** argv) {
         std::printf("%-11s %-12s f=%-5u aux=%-4u rows=%-5u p50=%.2fus mean=%.2fus\n",
                     o.variant.c_str(), o.profile.c_str(), e.features, e.aux, rows, p50, mean);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

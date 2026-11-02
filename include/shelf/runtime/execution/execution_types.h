@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 enum class ExecutionDomain : uint8_t {
     TARGET,

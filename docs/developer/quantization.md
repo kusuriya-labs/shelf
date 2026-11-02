@@ -41,7 +41,7 @@ self-contained quantized safetensors を直接ロードする。
 ```text
 Qwen35 model（tensor name -> Qwen35ModelWeights field の bindingのみ）
     ↓
-ps::weights loader
+shelf::weights loader
     safetensors / quantized safetensors の解決
     BF16 / FP8 の format解釈
     canonical payload validation / native preshuffle / GPU upload

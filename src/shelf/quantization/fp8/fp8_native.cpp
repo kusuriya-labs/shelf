@@ -11,7 +11,7 @@
 #include <immintrin.h>
 #endif
 
-namespace ps::quantization::fp8 {
+namespace shelf::quantization::fp8 {
 
 namespace {
 
@@ -164,4 +164,4 @@ bool preshuffle_fp8_native(const Fp8BlockCanonicalView& v,
     return true;
 }
 
-}  // namespace ps::quantization::fp8
+}  // namespace shelf::quantization::fp8

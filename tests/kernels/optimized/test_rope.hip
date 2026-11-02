@@ -14,10 +14,10 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 int passed = 0;
 int failed = 0;
@@ -74,13 +74,13 @@ bool run_case(const Case& c) {
         void* all[] = {din, dout_c, dout_o, dpos_rope, dpos_row, dctx, dvals, dscratch,
                        derr, dinv};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     };
     auto alloc = [&](void** dst, size_t bytes) { return hipMalloc(dst, bytes) == hipSuccess; };
     if (!alloc(&din, (size_t)rows * in_stride * 4) ||
         !alloc(&dout_c, (size_t)rows * out_stride * 2) ||
         !alloc(&dout_o, (size_t)rows * out_stride * 2) ||
-        !alloc(&dctx, sizeof(::ps::runtime::DeviceBatchContext)) ||
+        !alloc(&dctx, sizeof(::shelf::runtime::DeviceBatchContext)) ||
         !alloc(&dvals, 2 * sizeof(V)) ||
         !alloc(&dscratch, (size_t)256 * 4096 * sizeof(float)) ||
         !alloc(&derr, sizeof(uint32_t)) ||
@@ -88,7 +88,7 @@ bool run_case(const Case& c) {
         cleanup();
         return false;
     }
-    if (::ps::kernel::launch_rope_inv_freq_init((double*)dinv, 32, c.theta, nullptr)
+    if (::shelf::kernel::launch_rope_inv_freq_init((double*)dinv, 32, c.theta, nullptr)
         != hipSuccess) {
         cleanup();
         return false;
@@ -118,7 +118,7 @@ bool run_case(const Case& c) {
         positions = (const uint32_t*)dpos_rope;
     }
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = 0;
     ctx.rope_positions = (c.mode == PosMode::Rope) ? (const uint32_t*)dpos_rope : nullptr;
@@ -128,19 +128,19 @@ bool run_case(const Case& c) {
 
     V vals[2];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, c.features, in_stride, din, ::ps::runtime::ValueDType::F32);
-    setv(vals[1], 1, c.features, out_stride, dout_c, ::ps::runtime::ValueDType::BF16);
+    setv(vals[0], 0, c.features, in_stride, din, ::shelf::runtime::ValueDType::F32);
+    setv(vals[1], 1, c.features, out_stride, dout_c, ::shelf::runtime::ValueDType::BF16);
     if (hipMemcpy(dvals, vals, 2 * sizeof(V), hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
     P prog{};
@@ -149,7 +149,7 @@ bool run_case(const Case& c) {
     prog.workspace_base = 0;
 
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::ROPE;
+    binding.kernel_id = ::shelf::runtime::KernelId::ROPE;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
     binding.input_count = 1;
@@ -158,20 +158,20 @@ bool run_case(const Case& c) {
     binding.rotary_dim = c.rotary;
     binding.scalar_b = c.theta;
 
-    ps::gpu::discard_cleanup_result(hipMemset(derr, 0, sizeof(uint32_t)));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto stc = ::ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)dctx, sv, (float*)dscratch,
+    shelf::gpu::discard_cleanup_result(hipMemset(derr, 0, sizeof(uint32_t)));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto stc = ::shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)dctx, sv, (float*)dscratch,
         (uint32_t*)derr, nullptr);
     if (!stc.ok()) { std::printf("  [%s] correctness launch failed\n", c.name); cleanup(); return false; }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
-    hipError_t he = ::ps::kernel::launch_rope_f32_bf16(
+    hipError_t he = ::shelf::kernel::launch_rope_f32_bf16(
         (const float*)din, in_stride, (bf16t*)dout_o, out_stride, positions,
         rows, c.features, c.head_dim, c.rotary, c.theta, (const double*)dinv, 1.0f,
         nullptr);
     if (he != hipSuccess) { std::printf("  [%s] opt launch failed: %s\n", c.name, hipGetErrorString(he)); cleanup(); return false; }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
     std::vector<uint16_t> rc((size_t)rows * out_stride), ro((size_t)rows * out_stride);
     if (hipMemcpy(rc.data(), dout_c, rc.size() * 2, hipMemcpyDeviceToHost) != hipSuccess) { cleanup(); return false; }
@@ -214,7 +214,7 @@ bool run_bitexact_case(uint32_t rows, uint32_t features,
     auto cleanup = [&]() {
         void* all[] = {din, dgen, dpair, dpos, dinv};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     };
     if (hipMalloc(&din, (size_t)rows * features * 4) != hipSuccess ||
         hipMalloc(&dgen, (size_t)rows * features * 2) != hipSuccess ||
@@ -224,7 +224,7 @@ bool run_bitexact_case(uint32_t rows, uint32_t features,
         cleanup();
         return false;
     }
-    if (::ps::kernel::launch_rope_inv_freq_init((double*)dinv, 32, theta, nullptr)
+    if (::shelf::kernel::launch_rope_inv_freq_init((double*)dinv, 32, theta, nullptr)
         != hipSuccess) {
         cleanup();
         return false;
@@ -236,10 +236,10 @@ bool run_bitexact_case(uint32_t rows, uint32_t features,
     if (hipMemcpy(din, h_in.data(), h_in.size() * 4, hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
     if (hipMemcpy(dpos, h_pos.data(), h_pos.size() * 4, hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
-    hipError_t e1 = ::ps::kernel::launch_rope_f32_bf16_generic(
+    hipError_t e1 = ::shelf::kernel::launch_rope_f32_bf16_generic(
         (const float*)din, features, (bf16t*)dgen, features, (const uint32_t*)dpos,
         rows, features, head_dim, rotary, theta, nullptr, 1.0f, nullptr);
-    hipError_t e2 = ::ps::kernel::launch_rope_f32_bf16_pair(
+    hipError_t e2 = ::shelf::kernel::launch_rope_f32_bf16_pair(
         (const float*)din, features, (bf16t*)dpair, features, (const uint32_t*)dpos,
         rows, features, head_dim, rotary, theta, (const double*)dinv, 1.0f, nullptr);
     if (e1 != hipSuccess || e2 != hipSuccess) {
@@ -290,15 +290,15 @@ bool run_freq_identity_case(float theta) {
     void* dtable = nullptr;
     void* dmm = nullptr;
     auto cleanup = [&]() {
-        if (dtable) ps::gpu::discard_cleanup_result(hipFree(dtable));
-        if (dmm) ps::gpu::discard_cleanup_result(hipFree(dmm));
+        if (dtable) shelf::gpu::discard_cleanup_result(hipFree(dtable));
+        if (dmm) shelf::gpu::discard_cleanup_result(hipFree(dmm));
     };
     if (hipMalloc(&dtable, 32 * sizeof(double)) != hipSuccess ||
         hipMalloc(&dmm, sizeof(uint32_t)) != hipSuccess) {
         cleanup();
         return false;
     }
-    if (::ps::kernel::launch_rope_inv_freq_init((double*)dtable, 32, theta, nullptr)
+    if (::shelf::kernel::launch_rope_inv_freq_init((double*)dtable, 32, theta, nullptr)
         != hipSuccess) {
         cleanup();
         return false;

@@ -7,19 +7,19 @@
 
 #include <cstdint>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
-static_assert(ps::quantization::kQuantBlockElements == 32);
+static_assert(shelf::quantization::kQuantBlockElements == 32);
 
-inline Result<ps::quantization::ResolvedQuantSpec> resolve_quant_spec(
+inline Result<shelf::quantization::ResolvedQuantSpec> resolve_quant_spec(
     const QuantizedManifest& manifest,
     const QuantizedTensorMetadata& tensor)
 {
-    using ps::quantization::QuantDescriptor;
-    using ps::quantization::QuantLayout;
-    using ps::quantization::QuantSpecId;
-    using ps::quantization::ResolvedQuantSpec;
-    using ps::quantization::StorageDType;
+    using shelf::quantization::QuantDescriptor;
+    using shelf::quantization::QuantLayout;
+    using shelf::quantization::QuantSpecId;
+    using shelf::quantization::ResolvedQuantSpec;
+    using shelf::quantization::StorageDType;
 
     if (manifest.format != kQuantizedSafetensorsFormat) {
         return Status::invalid_argument("quantized manifest format mismatch", __FILE__, __LINE__);
@@ -92,11 +92,11 @@ inline Result<ps::quantization::ResolvedQuantSpec> resolve_quant_spec(
                 "fp8 block128 scales dtype is not F32", __FILE__, __LINE__);
         }
         if (tensor.k_padded < logical_k ||
-            (tensor.k_padded % ps::quantization::kFp8ScaleBlockK) != 0) {
+            (tensor.k_padded % shelf::quantization::kFp8ScaleBlockK) != 0) {
             return Status::invalid_argument("quantized tensor k_padded invalid", __FILE__, __LINE__);
         }
-        d.group_size = ps::quantization::kFp8ScaleBlockK;
-        d.block_size = ps::quantization::kFp8ScaleBlockK;
+        d.group_size = shelf::quantization::kFp8ScaleBlockK;
+        d.block_size = shelf::quantization::kFp8ScaleBlockK;
         d.storage_type = StorageDType::U8;
         d.scale_type = StorageDType::FP32;
         d.weight_layout = QuantLayout::FP8_E4M3_BLOCK128_V1;
@@ -128,4 +128,4 @@ inline Status validate_quantized_manifest_contract(const QuantizedManifest& mani
     return Status::make_ok();
 }
 
-} // namespace ps::quantization::manifest
+} // namespace shelf::quantization::manifest

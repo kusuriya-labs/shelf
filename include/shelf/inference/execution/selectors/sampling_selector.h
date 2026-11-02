@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class SamplingBatchMode : uint8_t {
     NoSampling = 0,
@@ -45,4 +45,4 @@ struct SamplingRule {
 
 SamplingChoice select_sampling_implementation(const SamplingSelectorInput& in);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

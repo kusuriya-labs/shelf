@@ -26,7 +26,7 @@ void check(bool cond, const char* name) {
     }
 }
 
-ps::gpu::DeviceAllocationView must_alloc(ps::gpu::GpuArena& arena, std::size_t bytes, std::size_t align, const char* name) {
+shelf::gpu::DeviceAllocationView must_alloc(shelf::gpu::GpuArena& arena, std::size_t bytes, std::size_t align, const char* name) {
     auto r = arena.allocate_aligned(bytes, align);
     if (!r.ok()) {
         check(false, name);
@@ -65,7 +65,7 @@ int main() {
     }
 
     {
-        auto arena_result = ps::gpu::GpuArena::create(0, GiB);
+        auto arena_result = shelf::gpu::GpuArena::create(0, GiB);
         check(arena_result.ok(), "arena create ok");
         if (!arena_result.ok()) {
             printf("create failed: %s\n", arena_result.status().message().c_str());
@@ -123,7 +123,7 @@ int main() {
     }
 
     {
-        auto c_result = ps::gpu::GpuArena::create(0, GiB);
+        auto c_result = shelf::gpu::GpuArena::create(0, GiB);
         check(c_result.ok(), "move ctor arena create ok");
         if (!c_result.ok()) {
             printf("\nResults: %d passed, %d failed\n", passed, failed);
@@ -132,7 +132,7 @@ int main() {
         auto c = c_result.release();
         auto a = must_alloc(c, MiB, 256, "move ctor alloc ok");
 
-        ps::gpu::GpuArena moved = std::move(c);
+        shelf::gpu::GpuArena moved = std::move(c);
         check(moved.used() >= MiB, "moved has allocation");
         HIP_ASSERT(hipMemset(a.data(), 0x77, a.bytes()));
         uint8_t mv = 0;
@@ -145,7 +145,7 @@ int main() {
     }
 
     {
-        auto old_result = ps::gpu::GpuArena::create(0, GiB);
+        auto old_result = shelf::gpu::GpuArena::create(0, GiB);
         check(old_result.ok(), "move assign old create ok");
         if (!old_result.ok()) {
             printf("\nResults: %d passed, %d failed\n", passed, failed);
@@ -154,7 +154,7 @@ int main() {
         auto old = old_result.release();
         must_alloc(old, MiB, 256, "move assign old alloc ok");
 
-        auto src_result = ps::gpu::GpuArena::create(0, GiB);
+        auto src_result = shelf::gpu::GpuArena::create(0, GiB);
         check(src_result.ok(), "move assign src create ok");
         if (!src_result.ok()) {
             printf("\nResults: %d passed, %d failed\n", passed, failed);
@@ -174,7 +174,7 @@ int main() {
     }
 
     {
-        auto d_result = ps::gpu::GpuArena::create(0, GiB);
+        auto d_result = shelf::gpu::GpuArena::create(0, GiB);
         check(d_result.ok(), "shutdown arena create ok");
         if (!d_result.ok()) {
             printf("\nResults: %d passed, %d failed\n", passed, failed);

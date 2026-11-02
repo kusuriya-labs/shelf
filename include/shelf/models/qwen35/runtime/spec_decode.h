@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 enum class SpecPhase : uint8_t {
     IDLE = 0u,
@@ -63,4 +63,4 @@ Status spec_gdn_restore(
     std::size_t recurrent_bytes,
     hipStream_t stream);
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

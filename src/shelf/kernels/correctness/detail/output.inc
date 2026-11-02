@@ -2,7 +2,7 @@
 
 #include <shelf/kernels/optimized/sampling_common.h>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
     ModelDispatchEnv& env, const DispatchBinding& b, KernelId kind) {
@@ -74,4 +74,4 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

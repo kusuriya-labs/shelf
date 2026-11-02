@@ -60,9 +60,9 @@ struct Buf {
     uint16_t* b = nullptr;
     uint16_t* dt_bias = nullptr;
     uint16_t* a_log = nullptr;
-    ps::fp16_t* state = nullptr;
+    shelf::fp16_t* state = nullptr;
     float* out = nullptr;
-    ps::fp16_t* hist = nullptr;
+    shelf::fp16_t* hist = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
@@ -71,23 +71,23 @@ struct Buf {
         void* bufs[] = {q, k, v, a, b, dt_bias, a_log, state, out, hist,
                         compact_delta, compact_k, compact_a, requests};
         for (void* p : bufs)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
-bool read_state_f16(const ps::fp16_t* src, std::vector<float>& dst, size_t n) {
-    std::vector<ps::fp16_t> tmp(n);
-    if (hipMemcpy(tmp.data(), src, n * sizeof(ps::fp16_t), hipMemcpyDeviceToHost) != hipSuccess)
+bool read_state_f16(const shelf::fp16_t* src, std::vector<float>& dst, size_t n) {
+    std::vector<shelf::fp16_t> tmp(n);
+    if (hipMemcpy(tmp.data(), src, n * sizeof(shelf::fp16_t), hipMemcpyDeviceToHost) != hipSuccess)
         return false;
     dst.resize(n);
-    for (size_t i = 0; i < n; ++i) dst[i] = ps::fp16_to_f32(tmp[i]);
+    for (size_t i = 0; i < n; ++i) dst[i] = shelf::fp16_to_f32(tmp[i]);
     return true;
 }
 
-bool write_state_f16(ps::fp16_t* dst, const std::vector<float>& src, size_t n) {
-    std::vector<ps::fp16_t> tmp(n);
-    for (size_t i = 0; i < n; ++i) tmp[i] = ps::f32_to_fp16(src[i]);
-    return hipMemcpy(dst, tmp.data(), n * sizeof(ps::fp16_t), hipMemcpyHostToDevice) == hipSuccess;
+bool write_state_f16(shelf::fp16_t* dst, const std::vector<float>& src, size_t n) {
+    std::vector<shelf::fp16_t> tmp(n);
+    for (size_t i = 0; i < n; ++i) tmp[i] = shelf::f32_to_fp16(src[i]);
+    return hipMemcpy(dst, tmp.data(), n * sizeof(shelf::fp16_t), hipMemcpyHostToDevice) == hipSuccess;
 }
 
 bool setup(Buf& d, uint32_t seed) {
@@ -101,7 +101,7 @@ bool setup(Buf& d, uint32_t seed) {
     if (hipMalloc(&d.b, g_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.dt_bias, kHeads * 2u) != hipSuccess) return false;
     if (hipMalloc(&d.a_log, kHeads * 2u) != hipSuccess) return false;
-    if (hipMalloc(&d.state, kStates * kSlotStride * sizeof(ps::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state, kStates * kSlotStride * sizeof(shelf::fp16_t)) != hipSuccess)
         return false;
     if (hipMalloc(&d.out, (size_t)kRows * kVdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.compact_delta, (size_t)kStates * kRows * kVdim * 4u) != hipSuccess)
@@ -110,12 +110,12 @@ bool setup(Buf& d, uint32_t seed) {
         return false;
     if (hipMalloc(&d.compact_a, (size_t)kStates * kRows * kHeads * 4u) != hipSuccess)
         return false;
-    if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * sizeof(ps::fp16_t)) !=
+    if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * sizeof(shelf::fp16_t)) !=
             hipSuccess)
         return false;
-    ps::gpu::discard_cleanup_result(
-        hipMemset(d.hist, 0, (size_t)kRows * kStates * kSlotStride * sizeof(ps::fp16_t)));
-    if (hipMalloc(&d.requests, sizeof(::ps::runtime::DeviceRequestDescriptor)) != hipSuccess)
+    shelf::gpu::discard_cleanup_result(
+        hipMemset(d.hist, 0, (size_t)kRows * kStates * kSlotStride * sizeof(shelf::fp16_t)));
+    if (hipMalloc(&d.requests, sizeof(::shelf::runtime::DeviceRequestDescriptor)) != hipSuccess)
         return false;
 
     uint32_t s = seed;
@@ -142,25 +142,25 @@ bool setup(Buf& d, uint32_t seed) {
         !write_state_f16(d.state, hs, hs.size()))
         return false;
 
-    ::ps::runtime::DeviceRequestDescriptor req{};
+    ::shelf::runtime::DeviceRequestDescriptor req{};
     req.request_handle.slot = 0u;
     req.row_begin = 0u;
     req.row_count = kRows;
     return hipMemcpy(d.requests, &req, sizeof(req), hipMemcpyHostToDevice) == hipSuccess;
 }
 
-::ps::kernel::GdnRecurrenceArgs make_args(const Buf& d) {
-    ::ps::kernel::GdnRecurrenceArgs a;
+::shelf::kernel::GdnRecurrenceArgs make_args(const Buf& d) {
+    ::shelf::kernel::GdnRecurrenceArgs a;
     a.q = d.q;
     a.k = d.k;
-    a.v = reinterpret_cast<const ps::bf16_t*>(d.v);
-    a.a = reinterpret_cast<const ps::bf16_t*>(d.a);
-    a.b = reinterpret_cast<const ps::bf16_t*>(d.b);
-    a.dt_bias = reinterpret_cast<const ps::bf16_t*>(d.dt_bias);
-    a.a_log = reinterpret_cast<const ps::bf16_t*>(d.a_log);
+    a.v = reinterpret_cast<const shelf::bf16_t*>(d.v);
+    a.a = reinterpret_cast<const shelf::bf16_t*>(d.a);
+    a.b = reinterpret_cast<const shelf::bf16_t*>(d.b);
+    a.dt_bias = reinterpret_cast<const shelf::bf16_t*>(d.dt_bias);
+    a.a_log = reinterpret_cast<const shelf::bf16_t*>(d.a_log);
     a.recurrent_state = d.state;
     a.output = d.out;
-    a.requests = reinterpret_cast<const ::ps::runtime::DeviceRequestDescriptor*>(d.requests);
+    a.requests = reinterpret_cast<const ::shelf::runtime::DeviceRequestDescriptor*>(d.requests);
     a.num_requests = 1u;
     a.actual_rows = kRows;
     a.q_row_stride = kQk;
@@ -218,7 +218,7 @@ int main() {
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 
-    if (!::ps::kernel::gdn_recurrence_lossy_enabled()) {
+    if (!::shelf::kernel::gdn_recurrence_lossy_enabled()) {
         std::printf("FAIL: lossy mode expected for wmma commit path\n");
         return 1;
     }
@@ -242,10 +242,10 @@ int main() {
 
     for (uint32_t r = 0u; r < kRows && ok; ++r) {
         for (uint32_t li = 0u; li < kStates && ok; ++li) {
-            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
             a.row_override = static_cast<int32_t>(r);
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess)
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess)
                 ok = false;
         }
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
@@ -275,9 +275,9 @@ int main() {
     bool all_commit_ok = true;
     for (uint32_t m = 1u; m <= kRows; ++m) {
         write_state_f16(d.state, s0, state_n);
-        ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+        ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
         c.compact_rows = m;
-        if (::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) != hipSuccess) {
+        if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) != hipSuccess) {
             all_commit_ok = false;
             break;
         }
@@ -304,9 +304,9 @@ int main() {
         write_state_f16(d.state, s0, state_n);
         bool sok = true;
         for (uint32_t li = 0u; li < kStates && sok; ++li) {
-            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(a, stream) !=
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(a, stream) !=
                 hipSuccess)
                 sok = false;
         }
@@ -321,10 +321,10 @@ int main() {
 
     {
         write_state_f16(d.state, s0, state_n);
-        ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+        ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
         c.compact_rows = kRows;
         bool cok =
-            ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
+            ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
         if (cok && hipStreamSynchronize(stream) != hipSuccess) cok = false;
         std::vector<float> got(state_n);
         if (cok)
@@ -349,11 +349,11 @@ int main() {
         }
         for (uint32_t m = 1u; p_ok && m <= kRows; ++m) {
             write_state_f16(d.state, s0, state_n);
-            ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
             c.compact_rows = m;
             c.compact_row_indices = idx_dev;
             c.compact_row_capacity = kRows;
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) !=
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) !=
                 hipSuccess) {
                 p_ok = false;
                 break;
@@ -376,7 +376,7 @@ int main() {
             }
         }
         check(p_ok, "commit with prefix row indices matches sequential wmma");
-        if (idx_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(idx_dev));
+        if (idx_dev != nullptr) shelf::gpu::discard_cleanup_result(hipFree(idx_dev));
     }
 
     {
@@ -435,23 +435,23 @@ int main() {
         std::vector<float> got_temp(state_n);
         if (g_ok) {
             write_state_f16(d.state, s0, state_n);
-            ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
             c.compact_rows = 2u;
             c.compact_row_indices = gap_dev;
             c.compact_row_capacity = kRows;
-            g_ok = ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) ==
+            g_ok = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) ==
                    hipSuccess;
             g_ok = g_ok && hipStreamSynchronize(stream) == hipSuccess;
             g_ok = g_ok && read_state_f16(d.state, got_gap, state_n);
         }
         if (g_ok) {
             write_state_f16(d.state, s0, state_n);
-            ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
             c.compact_rows = 2u;
             c.compact_delta = td_dev;
             c.compact_k = tk_dev;
             c.compact_a = ta_dev;
-            g_ok = ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) ==
+            g_ok = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) ==
                    hipSuccess;
             g_ok = g_ok && hipStreamSynchronize(stream) == hipSuccess;
             g_ok = g_ok && read_state_f16(d.state, got_temp, state_n);
@@ -463,10 +463,10 @@ int main() {
                         (double)got_gap[first], (double)got_temp[first]);
         }
         check(eq, "commit with gap row indices matches reordered log prefix");
-        if (td_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(td_dev));
-        if (tk_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(tk_dev));
-        if (ta_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(ta_dev));
-        if (gap_dev != nullptr) ps::gpu::discard_cleanup_result(hipFree(gap_dev));
+        if (td_dev != nullptr) shelf::gpu::discard_cleanup_result(hipFree(td_dev));
+        if (tk_dev != nullptr) shelf::gpu::discard_cleanup_result(hipFree(tk_dev));
+        if (ta_dev != nullptr) shelf::gpu::discard_cleanup_result(hipFree(ta_dev));
+        if (gap_dev != nullptr) shelf::gpu::discard_cleanup_result(hipFree(gap_dev));
     }
 
     constexpr uint32_t kRowsExact = 8u;
@@ -475,10 +475,10 @@ int main() {
         write_state_f16(d.state, s0, state_n);
         bool sok = true;
         for (uint32_t li = 0u; li < kStates && sok; ++li) {
-            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            ::shelf::kernel::GdnRecurrenceArgs a = make_args(d);
             a.state_index = li;
             a.actual_rows = kRowsExact;
-            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(a, stream) !=
+            if (::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(a, stream) !=
                 hipSuccess)
                 sok = false;
         }
@@ -510,10 +510,10 @@ int main() {
 
     {
         write_state_f16(d.state, s0, state_n);
-        ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+        ::shelf::kernel::GdnRecurrenceArgs c = make_args(d);
         c.compact_rows = kRowsExact;
         bool cok =
-            ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
+            ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
         if (cok && hipStreamSynchronize(stream) != hipSuccess) cok = false;
         std::vector<float> got(state_n);
         if (cok)
@@ -528,7 +528,7 @@ int main() {
     }
 
     d.free_all();
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

@@ -26,15 +26,15 @@
 
 namespace {
 
-using VD = ::ps::runtime::ValueDType;
-// use ::ps::kernel:: prefix
+using VD = ::shelf::runtime::ValueDType;
+// use ::shelf::kernel:: prefix
 
 struct Profile {
     VD input_dtype = VD::BF16;
     VD output_dtype = VD::BF16;
     VD weight_dtype = VD::BF16;
-    ::ps::execution::RmsNormSelectorWeightLayout weight_layout =
-        ::ps::execution::RmsNormSelectorWeightLayout::None;
+    ::shelf::execution::RmsNormSelectorWeightLayout weight_layout =
+        ::shelf::execution::RmsNormSelectorWeightLayout::None;
     uint32_t weight_mode = 0;  // 0 ONE_PLUS, 1 DIRECT
     uint32_t features = 0;
     uint32_t group_size = 0;
@@ -126,8 +126,8 @@ bool parse_dtype(const std::string& s, VD& out) {
     return false;
 }
 
-bool parse_layout(const std::string& s, ::ps::execution::RmsNormSelectorWeightLayout& out) {
-    using L = ::ps::execution::RmsNormSelectorWeightLayout;
+bool parse_layout(const std::string& s, ::shelf::execution::RmsNormSelectorWeightLayout& out) {
+    using L = ::shelf::execution::RmsNormSelectorWeightLayout;
     if (s == "per_feature") { out = L::PerFeature; return true; }
     if (s == "per_group") { out = L::PerGroup; return true; }
     if (s == "none") { out = L::None; return true; }
@@ -137,25 +137,25 @@ bool parse_layout(const std::string& s, ::ps::execution::RmsNormSelectorWeightLa
 const char* vd_name(VD v) {
     return v == VD::BF16 ? "bf16" : (v == VD::F32 ? "f32" : "i32");
 }
-const char* layout_name(::ps::execution::RmsNormSelectorWeightLayout l) {
-    using L = ::ps::execution::RmsNormSelectorWeightLayout;
+const char* layout_name(::shelf::execution::RmsNormSelectorWeightLayout l) {
+    using L = ::shelf::execution::RmsNormSelectorWeightLayout;
     return l == L::PerFeature ? "per_feature" : (l == L::PerGroup ? "per_group" : "none");
 }
 const char* mode_name(uint32_t m) { return m == 0 ? "one_plus" : "direct"; }
 
-::ps::kernel::RmsNormDataType to_kd(VD v) { return v == VD::F32 ? ::ps::kernel::RmsNormDataType::F32 : ::ps::kernel::RmsNormDataType::BF16; }
-::ps::kernel::RmsNormWeightLayout to_kl(::ps::execution::RmsNormSelectorWeightLayout l) {
-    using L = ::ps::execution::RmsNormSelectorWeightLayout;
-    if (l == L::PerFeature) return ::ps::kernel::RmsNormWeightLayout::PER_FEATURE;
-    if (l == L::PerGroup) return ::ps::kernel::RmsNormWeightLayout::PER_GROUP;
-    return ::ps::kernel::RmsNormWeightLayout::NONE;
+::shelf::kernel::RmsNormDataType to_kd(VD v) { return v == VD::F32 ? ::shelf::kernel::RmsNormDataType::F32 : ::shelf::kernel::RmsNormDataType::BF16; }
+::shelf::kernel::RmsNormWeightLayout to_kl(::shelf::execution::RmsNormSelectorWeightLayout l) {
+    using L = ::shelf::execution::RmsNormSelectorWeightLayout;
+    if (l == L::PerFeature) return ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE;
+    if (l == L::PerGroup) return ::shelf::kernel::RmsNormWeightLayout::PER_GROUP;
+    return ::shelf::kernel::RmsNormWeightLayout::NONE;
 }
-::ps::kernel::RmsNormWeightMode to_km(uint32_t m) {
-    return m == 0 ? ::ps::kernel::RmsNormWeightMode::ONE_PLUS : ::ps::kernel::RmsNormWeightMode::DIRECT;
+::shelf::kernel::RmsNormWeightMode to_km(uint32_t m) {
+    return m == 0 ? ::shelf::kernel::RmsNormWeightMode::ONE_PLUS : ::shelf::kernel::RmsNormWeightMode::DIRECT;
 }
 uint32_t weight_elements(const Profile& p) {
-    if (p.weight_layout == ::ps::execution::RmsNormSelectorWeightLayout::PerFeature) return p.features;
-    if (p.weight_layout == ::ps::execution::RmsNormSelectorWeightLayout::PerGroup) return p.group_size;
+    if (p.weight_layout == ::shelf::execution::RmsNormSelectorWeightLayout::PerFeature) return p.features;
+    if (p.weight_layout == ::shelf::execution::RmsNormSelectorWeightLayout::PerGroup) return p.group_size;
     return 0;
 }
 uint32_t dtype_bytes(VD v) { return v == VD::F32 ? 4u : 2u; }
@@ -163,21 +163,21 @@ uint32_t dtype_bytes(VD v) { return v == VD::F32 ? 4u : 2u; }
 std::vector<Profile> extract_actual_profiles(const std::string& model_dir, double arena_gib,
                                              int device, hipStream_t stream) {
     std::size_t arena_bytes = (std::size_t)(arena_gib * 1024.0 * 1024.0 * 1024.0);
-    auto arena_res = ps::gpu::GpuArena::create(device, arena_bytes);
+    auto arena_res = shelf::gpu::GpuArena::create(device, arena_bytes);
     if (!arena_res.ok()) return {};
     auto arena = arena_res.release();
-    ps::qwen35::Qwen35LoadOptions lo;
-    auto model_res = ps::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream, lo);
+    shelf::qwen35::Qwen35LoadOptions lo;
+    auto model_res = shelf::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream, lo);
     if (!model_res.ok()) return {};
     auto model = model_res.release();
-    auto lp = ps::qwen35::lower_qwen35_to_primitives(model.text_config(), model.weights());
+    auto lp = shelf::qwen35::lower_qwen35_to_primitives(model.text_config(), model.weights());
     if (!lp.ok()) return {};
     auto lowered = lp.release();
     const auto& g = lowered.graph;
     std::set<std::string> seen;
     std::vector<Profile> out;
     for (const auto& gn : g.nodes) {
-        auto* rn = std::get_if<ps::runtime::RmsNormNode>(&gn.node);
+        auto* rn = std::get_if<shelf::runtime::RmsNormNode>(&gn.node);
         if (!rn) continue;
         Profile p;
         p.input_dtype = g.value_dtype(gn.inputs[0]);
@@ -185,7 +185,7 @@ std::vector<Profile> extract_actual_profiles(const std::string& model_dir, doubl
         p.features = g.value_features(gn.inputs[0]);
         uint32_t grp = rn->group_size;
         p.group_size = (grp != 0 && grp <= p.features) ? grp : p.features;
-        p.weight_mode = (rn->weight_mode == ps::runtime::RmsNormWeightMode::ONE_PLUS) ? 0u : 1u;
+        p.weight_mode = (rn->weight_mode == shelf::runtime::RmsNormWeightMode::ONE_PLUS) ? 0u : 1u;
         p.weight_dtype = VD::BF16;
         uint32_t w_elems = 0;
         if (rn->parameter_index != UINT32_MAX && rn->parameter_index < lowered.parameters.size()) {
@@ -193,13 +193,13 @@ std::vector<Profile> extract_actual_profiles(const std::string& model_dir, doubl
             p.weight_dtype = lowered.parameters[rn->parameter_index].dtype;
         }
         if (rn->parameter_index == UINT32_MAX) {
-            p.weight_layout = ::ps::execution::RmsNormSelectorWeightLayout::None;
+            p.weight_layout = ::shelf::execution::RmsNormSelectorWeightLayout::None;
         } else if (w_elems == p.features) {
-            p.weight_layout = ::ps::execution::RmsNormSelectorWeightLayout::PerFeature;
+            p.weight_layout = ::shelf::execution::RmsNormSelectorWeightLayout::PerFeature;
         } else if (w_elems == p.group_size) {
-            p.weight_layout = ::ps::execution::RmsNormSelectorWeightLayout::PerGroup;
+            p.weight_layout = ::shelf::execution::RmsNormSelectorWeightLayout::PerGroup;
         } else {
-            p.weight_layout = ::ps::execution::RmsNormSelectorWeightLayout::None;
+            p.weight_layout = ::shelf::execution::RmsNormSelectorWeightLayout::None;
         }
         char key[128];
         std::snprintf(key, sizeof key, "%d|%d|%d|%s|%u|%u|%u", (int)p.input_dtype, (int)p.output_dtype,
@@ -221,21 +221,21 @@ struct RmsEnv {
     void* ctx_dev = nullptr;
     float* scratch = nullptr;
     uint32_t* error_word = nullptr;
-    ::ps::runtime::DeviceProgramView prog{};
-    ::ps::runtime::DispatchBinding binding{};
+    ::shelf::runtime::DeviceProgramView prog{};
+    ::shelf::runtime::DispatchBinding binding{};
     std::vector<double> h_in;
     std::vector<double> h_wt;
 
     ~RmsEnv() { teardown(); }
     void teardown() {
-        ps::gpu::discard_cleanup_result(hipFree(in_dev)); in_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(out_dev)); out_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(wt_dev)); wt_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(values_dev)); values_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(params_dev)); params_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(ctx_dev)); ctx_dev = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(scratch)); scratch = nullptr;
-        ps::gpu::discard_cleanup_result(hipFree(error_word)); error_word = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(in_dev)); in_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(out_dev)); out_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(wt_dev)); wt_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(values_dev)); values_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(params_dev)); params_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(ctx_dev)); ctx_dev = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(scratch)); scratch = nullptr;
+        shelf::gpu::discard_cleanup_result(hipFree(error_word)); error_word = nullptr;
     }
 };
 
@@ -263,7 +263,7 @@ bool upload(RmsEnv& e) {
     const size_t n = (size_t)e.rows * F;
     const uint32_t in_b = dtype_bytes(e.p.input_dtype);
     const uint32_t out_b = dtype_bytes(e.p.output_dtype);
-    const uint32_t wt_b = e.p.weight_layout == ::ps::execution::RmsNormSelectorWeightLayout::None
+    const uint32_t wt_b = e.p.weight_layout == ::shelf::execution::RmsNormSelectorWeightLayout::None
                               ? 0 : dtype_bytes(e.p.weight_dtype);
     const uint32_t w = weight_elements(e.p);
     if (hipMalloc(&e.in_dev, n * in_b) != hipSuccess) return false;
@@ -276,7 +276,7 @@ bool upload(RmsEnv& e) {
             float v = (float)e.h_in[i];
             std::memcpy(&hbuf[i * 4], &v, 4);
         } else {
-            uint16_t b = ps::f32_to_bf16_rne((float)e.h_in[i]);
+            uint16_t b = shelf::f32_to_bf16_rne((float)e.h_in[i]);
             std::memcpy(&hbuf[i * 2], &b, 2);
         }
     }
@@ -287,7 +287,7 @@ bool upload(RmsEnv& e) {
             float v = (float)e.h_wt[i];
             std::memcpy(&wbuf[(size_t)i * 4], &v, 4);
         } else {
-            uint16_t b = ps::f32_to_bf16_rne((float)e.h_wt[i]);
+            uint16_t b = shelf::f32_to_bf16_rne((float)e.h_wt[i]);
             std::memcpy(&wbuf[(size_t)i * 2], &b, 2);
         }
     }
@@ -300,13 +300,13 @@ bool upload(RmsEnv& e) {
 bool build_correctness(RmsEnv& e) {
     const uint32_t F = e.p.features;
     const uint32_t grp = e.p.group_size;
-    const bool has_w = e.p.weight_layout != ::ps::execution::RmsNormSelectorWeightLayout::None;
-    ::ps::runtime::DeviceValueBinding values[2];
+    const bool has_w = e.p.weight_layout != ::shelf::execution::RmsNormSelectorWeightLayout::None;
+    ::shelf::runtime::DeviceValueBinding values[2];
     values[0] = {};
     values[0].logical_value = 0;
-    values[0].storage = ::ps::runtime::ValueStorage::EXTERNAL_INPUT;
+    values[0].storage = ::shelf::runtime::ValueStorage::EXTERNAL_INPUT;
     values[0].dtype = e.p.input_dtype;
-    values[0].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     values[0].slot = 0;
     values[0].feature_count = F;
     values[0].row_stride = F;
@@ -314,9 +314,9 @@ bool build_correctness(RmsEnv& e) {
     values[0].bytes = (size_t)e.rows * F * dtype_bytes(e.p.input_dtype);
     values[1] = {};
     values[1].logical_value = 1;
-    values[1].storage = ::ps::runtime::ValueStorage::EXTERNAL_OUTPUT;
+    values[1].storage = ::shelf::runtime::ValueStorage::EXTERNAL_OUTPUT;
     values[1].dtype = e.p.output_dtype;
-    values[1].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[1].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     values[1].slot = 0;
     values[1].feature_count = F;
     values[1].row_stride = F;
@@ -324,7 +324,7 @@ bool build_correctness(RmsEnv& e) {
     values[1].bytes = (size_t)e.rows * F * dtype_bytes(e.p.output_dtype);
     if (hipMalloc(&e.values_dev, sizeof(values)) != hipSuccess) return false;
     if (hipMemcpy(e.values_dev, values, sizeof(values), hipMemcpyHostToDevice) != hipSuccess) return false;
-    ::ps::runtime::StaticParameterSlot param{};
+    ::shelf::runtime::StaticParameterSlot param{};
     param.device_ptr = e.wt_dev;
     param.elements = weight_elements(e.p);
     param.dtype = e.p.weight_dtype;
@@ -332,7 +332,7 @@ bool build_correctness(RmsEnv& e) {
         if (hipMalloc(&e.params_dev, sizeof(param)) != hipSuccess) return false;
         if (hipMemcpy(e.params_dev, &param, sizeof(param), hipMemcpyHostToDevice) != hipSuccess) return false;
     }
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = e.rows;
     ctx.num_outputs = 0;
     if (hipMalloc(&e.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
@@ -342,18 +342,18 @@ bool build_correctness(RmsEnv& e) {
     if (hipMalloc(&e.scratch, (size_t)kBlocks * kCap * sizeof(float)) != hipSuccess) return false;
     if (hipMalloc(&e.error_word, sizeof(uint32_t)) != hipSuccess) return false;
     e.prog = {};
-    e.prog.values = static_cast<const ::ps::runtime::DeviceValueBinding*>(e.values_dev);
+    e.prog.values = static_cast<const ::shelf::runtime::DeviceValueBinding*>(e.values_dev);
     e.prog.value_count = 2;
     e.prog.parameter_table = has_w ? e.params_dev : nullptr;
     e.prog.parameter_slot_count = has_w ? 1u : 0u;
     e.prog.workspace_base = 0;
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::RMS_NORM;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::RMS_NORM;
     e.binding.input_slots[0] = 0;
     e.binding.input_count = 1;
     e.binding.output_slots[0] = 1;
     e.binding.output_count = 1;
-    e.binding.parameter_index0 = has_w ? 0u : ::ps::runtime::kNoParameter;
+    e.binding.parameter_index0 = has_w ? 0u : ::shelf::runtime::kNoParameter;
     e.binding.group_size = grp;
     e.binding.flags = e.p.weight_mode;
     e.binding.scalar_a = 1e-6f;
@@ -362,16 +362,16 @@ bool build_correctness(RmsEnv& e) {
 
 hipError_t launch_correctness(const RmsEnv& e, hipStream_t stream) {
     if (hipMemsetAsync(e.error_word, 0, sizeof(uint32_t), stream) != hipSuccess) return hipGetLastError();
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.prog, e.binding, static_cast<::ps::runtime::DeviceBatchContext*>(e.ctx_dev),
-        ps::kernel::ModelDispatchStateView{}, e.scratch, e.error_word, stream);
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.prog, e.binding, static_cast<::shelf::runtime::DeviceBatchContext*>(e.ctx_dev),
+        shelf::kernel::ModelDispatchStateView{}, e.scratch, e.error_word, stream);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
 }
 
 hipError_t launch_optimized(const RmsEnv& e, hipStream_t stream) {
     const uint32_t F = e.p.features;
-    return ps::kernel::launch_rmsnorm(
+    return shelf::kernel::launch_rmsnorm(
         e.in_dev, to_kd(e.p.input_dtype),
         e.wt_dev, to_kd(e.p.weight_dtype),
         to_kl(e.p.weight_layout), to_km(e.p.weight_mode),
@@ -380,7 +380,7 @@ hipError_t launch_optimized(const RmsEnv& e, hipStream_t stream) {
 }
 
 float bf16_rne_f32(float v) {
-    uint32_t r = ps::f32_to_bf16_rne(v);
+    uint32_t r = shelf::f32_to_bf16_rne(v);
     uint32_t u = ((uint32_t)r) << 16;
     float o; std::memcpy(&o, &u, 4);
     return o;
@@ -403,9 +403,9 @@ double ref_value(const RmsEnv& e, uint32_t m, uint32_t g0, uint32_t h) {
     double x = xat(m, g0 + h);
     double y = x * inv;
     if (e.p.input_dtype == VD::F32) y = (double)bf16_rne_f32((float)y);
-    if (e.p.weight_layout != ::ps::execution::RmsNormSelectorWeightLayout::None) {
+    if (e.p.weight_layout != ::shelf::execution::RmsNormSelectorWeightLayout::None) {
         uint32_t widx =
-            (e.p.weight_layout == ::ps::execution::RmsNormSelectorWeightLayout::PerFeature) ? (g0 + h) : h;
+            (e.p.weight_layout == ::shelf::execution::RmsNormSelectorWeightLayout::PerFeature) ? (g0 + h) : h;
         double w = (double)bf16_rne_f32((float)e.h_wt[widx]);
         y *= (e.p.weight_mode == 0) ? (1.0 + w) : w;
     }
@@ -492,7 +492,7 @@ int run_rmsnorm(int argc, char** argv) {
             fprintf(stderr, "bad input/output dtype\n"); return 2;
         }
         if (o.weight_dtype == "none") {
-            p.weight_layout = ::ps::execution::RmsNormSelectorWeightLayout::None;
+            p.weight_layout = ::shelf::execution::RmsNormSelectorWeightLayout::None;
             p.weight_dtype = VD::BF16;
         } else if (!parse_dtype(o.weight_dtype, p.weight_dtype)) {
             fprintf(stderr, "bad weight dtype\n"); return 2;
@@ -529,7 +529,7 @@ int run_rmsnorm(int argc, char** argv) {
             // auto: decide path once
             bool auto_opt = true;
             if (o.variant == "auto") {
-                ::ps::execution::RmsNormSelectorInput si;
+                ::shelf::execution::RmsNormSelectorInput si;
                 si.input_dtype = prof.input_dtype;
                 si.output_dtype = prof.output_dtype;
                 si.weight_dtype = prof.weight_dtype;
@@ -538,8 +538,8 @@ int run_rmsnorm(int argc, char** argv) {
                 si.features = prof.features;
                 si.group_size = prof.group_size;
                 si.rows = rows;
-                auto impl = ::ps::execution::select_rmsnorm_implementation(si);
-                auto_opt = (impl == ::ps::execution::RmsNormImplementation::Optimized);
+                auto impl = ::shelf::execution::select_rmsnorm_implementation(si);
+                auto_opt = (impl == ::shelf::execution::RmsNormImplementation::Optimized);
             }
             bool use_opt = (o.variant == "optimized") || (o.variant == "auto" && auto_opt);
 
@@ -574,8 +574,8 @@ int run_rmsnorm(int argc, char** argv) {
                 if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
                 per.push_back(ms * 1000.0 / (double)o.launches);
             }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
             if (per.empty()) { rc = 1; e.teardown(); continue; }
             const double mn = percentile(per, 0.0);
             const double p50 = percentile(per, 0.5);
@@ -600,6 +600,6 @@ int run_rmsnorm(int argc, char** argv) {
             e.teardown();
         }
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

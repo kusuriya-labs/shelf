@@ -12,7 +12,7 @@
 #include <span>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 enum class TpBarrierKind : uint8_t {
     None = 0,
@@ -90,4 +90,4 @@ public:
     }
 };
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

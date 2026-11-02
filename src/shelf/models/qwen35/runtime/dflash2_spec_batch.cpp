@@ -4,7 +4,7 @@
 
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     const std::vector<DFlash2GdnRankBinding>& bindings,
@@ -21,7 +21,7 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     ctx.compact.resize(bindings.size());
     {
         gpu::GpuArena& leader_arena = *bindings.front().arena;
-        auto scope = ps::gpu::ScopedDevice::create(bindings.front().device);
+        auto scope = shelf::gpu::ScopedDevice::create(bindings.front().device);
         if (!scope.ok()) return scope.status();
         auto verify_alloc = leader_arena.allocate_aligned(
             static_cast<std::size_t>(max_rows) * sizeof(int32_t), 256u);
@@ -37,7 +37,7 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     for (std::size_t r = 0; r < bindings.size(); ++r) {
         gpu::GpuArena& arena = *bindings[r].arena;
         GdnStatePool& pool = *bindings[r].pool;
-        auto scope = ps::gpu::ScopedDevice::create(bindings[r].device);
+        auto scope = shelf::gpu::ScopedDevice::create(bindings[r].device);
         if (!scope.ok()) return scope.status();
 
         auto history = create_gdn_spec_history(arena, pool, max_rows, false);
@@ -89,4 +89,4 @@ Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noe
     return first_error;
 }
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

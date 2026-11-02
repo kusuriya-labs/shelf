@@ -5,7 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kDflash2SelectorThreads = 256u;
 inline constexpr uint32_t kDflash2SelectorMaxTopK = 16u;
@@ -31,4 +31,4 @@ hipError_t launch_dflash2_candidate_selector(
     const DFlash2CandidateSelectorArgs& args,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

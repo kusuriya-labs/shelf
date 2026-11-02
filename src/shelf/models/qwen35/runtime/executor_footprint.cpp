@@ -8,7 +8,7 @@
 
 #include <algorithm>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 namespace runtime {
 
 namespace {
@@ -27,9 +27,9 @@ std::size_t align_up(std::size_t bytes) noexcept {
 
 std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
     std::size_t rows = max_batch_rows;
-    auto bucket = ::ps::runtime::resolve_row_bucket(max_batch_rows);
+    auto bucket = ::shelf::runtime::resolve_row_bucket(max_batch_rows);
     if (bucket.ok()) {
-        const std::uint32_t limit = ::ps::runtime::row_bucket_limit(bucket.value());
+        const std::uint32_t limit = ::shelf::runtime::row_bucket_limit(bucket.value());
         if (limit > rows) {
             rows = limit;
         }
@@ -66,18 +66,18 @@ std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
         std::max<std::size_t>(1u, kProgramValuesPerFullRow * rank_span / full_span);
     total += align_up(values_per_row * rows * hidden * sizeof(bf16_t));
     total += align_up(kScratchFloats * sizeof(float));
-    total += align_up(::ps::execution::kDecodeAttnPartialBytes);
+    total += align_up(::shelf::execution::kDecodeAttnPartialBytes);
 
     total += align_up(rows * sizeof(int32_t));
     total += align_up(output_rows * hidden * sizeof(bf16_t));
     total += align_up(output_rows * vocab * sizeof(float));
     total += align_up(output_rows * sizeof(int32_t));
 
-    total += align_up(output_rows * ::ps::kernel::kSamplingMaxTopK * sizeof(int32_t));
-    total += align_up(output_rows * ::ps::kernel::kSamplingMaxTopK * sizeof(float));
-    total += align_up(::ps::kernel::dflash2_radix_topn_scratch_bytes(
+    total += align_up(output_rows * ::shelf::kernel::kSamplingMaxTopK * sizeof(int32_t));
+    total += align_up(output_rows * ::shelf::kernel::kSamplingMaxTopK * sizeof(float));
+    total += align_up(::shelf::kernel::dflash2_radix_topn_scratch_bytes(
         static_cast<std::uint32_t>(output_rows),
-        ::ps::kernel::dflash2_radix_default_partitions(static_cast<std::uint32_t>(vocab)),
+        ::shelf::kernel::dflash2_radix_default_partitions(static_cast<std::uint32_t>(vocab)),
         static_cast<std::uint32_t>(vocab)));
     total += align_up(output_rows * sizeof(std::uint32_t));
 
@@ -86,10 +86,10 @@ std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
 
     const std::size_t out_cap = std::max(requests, rows);
     total += align_up(3u * rows * sizeof(std::uint32_t));
-    total += align_up(requests * sizeof(::ps::runtime::DeviceRequestDescriptor));
+    total += align_up(requests * sizeof(::shelf::runtime::DeviceRequestDescriptor));
     total += align_up(out_cap * sizeof(std::uint32_t));
-    total += align_up(out_cap * sizeof(::ps::runtime::DeviceSamplingParams));
-    total += align_up(sizeof(::ps::runtime::DeviceBatchContext));
+    total += align_up(out_cap * sizeof(::shelf::runtime::DeviceSamplingParams));
+    total += align_up(sizeof(::shelf::runtime::DeviceBatchContext));
 
     total += align_up(sizeof(std::uint32_t));
     total += align_up(32u * sizeof(double));
@@ -97,4 +97,4 @@ std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
 }
 
 }  // namespace runtime
-}  // namespace ps::qwen35
+}  // namespace shelf::qwen35

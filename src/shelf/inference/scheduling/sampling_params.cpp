@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-namespace ps::scheduling {
+namespace shelf::scheduling {
 
 Status validate_sampling_config(const SamplingConfig& config) {
     if (!std::isfinite(config.temperature)) {
@@ -49,4 +49,4 @@ SamplingRequest make_sampling_request(
     return request;
 }
 
-}  // namespace ps::scheduling
+}  // namespace shelf::scheduling

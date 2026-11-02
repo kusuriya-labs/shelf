@@ -16,18 +16,18 @@ static void check(bool cond, const char* msg) {
 }
 
 static std::string temp_path(const char* name) {
-    return std::string("/tmp/ps_writer_") + name + "_" + std::to_string(getpid()) + ".safetensors";
+    return std::string("/tmp/shelf_writer_") + name + "_" + std::to_string(getpid()) + ".safetensors";
 }
 
 static void remove_file(const std::string& p) {
     std::remove(p.c_str());
 }
 
-static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
+static void roundtrip_dtype(shelf::io::SType dt, const char* dtname) {
     const std::string path = temp_path(dtname);
     remove_file(path);
 
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     check(w.ok(), (std::string("create ") + dtname).c_str());
     if (!w.ok()) return;
 
@@ -39,7 +39,7 @@ static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
     check(base.ok(), (std::string("write_header ") + dtname).c_str());
     if (!base.ok()) return;
 
-    std::size_t esz = (dt == ps::io::SType::F32) ? 4 : (dt == ps::io::SType::BF16 || dt == ps::io::SType::F16) ? 2 : 1;
+    std::size_t esz = (dt == shelf::io::SType::F32) ? 4 : (dt == shelf::io::SType::BF16 || dt == shelf::io::SType::F16) ? 2 : 1;
     std::size_t nbytes = 8 * esz;
     std::vector<std::uint8_t> payload(nbytes);
     for (std::size_t i = 0; i < nbytes; ++i) payload[i] = static_cast<std::uint8_t>((i * 7 + 3) & 0xFF);
@@ -47,7 +47,7 @@ static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
     auto fin = w.value().finish();
     check(fin.ok(), (std::string("finish ") + dtname).c_str());
 
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), (std::string("reopen ") + dtname).c_str());
     if (!r.ok()) return;
 
@@ -77,9 +77,9 @@ static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
 static void test_size_mismatch_rejected() {
     const std::string path = temp_path("mismatch");
     remove_file(path);
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
-    check(w.value().plan_tensor("t", ps::io::SType::U8, {4}).ok(), "plan size mismatch");
+    check(w.value().plan_tensor("t", shelf::io::SType::U8, {4}).ok(), "plan size mismatch");
     auto base = w.value().write_header();
     if (!base.ok()) return;
     std::vector<std::uint8_t> wrong(3);
@@ -90,28 +90,28 @@ static void test_size_mismatch_rejected() {
 static void test_duplicate_rejected() {
     const std::string path = temp_path("dup");
     remove_file(path);
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
-    check(w.value().plan_tensor("t", ps::io::SType::U8, {4}).ok(), "plan dup first");
-    check(!w.value().plan_tensor("t", ps::io::SType::U8, {4}).ok(), "plan dup rejected");
+    check(w.value().plan_tensor("t", shelf::io::SType::U8, {4}).ok(), "plan dup first");
+    check(!w.value().plan_tensor("t", shelf::io::SType::U8, {4}).ok(), "plan dup rejected");
     remove_file(path);
 }
 
 static void test_reserved_name_rejected() {
     const std::string path = temp_path("reserved");
     remove_file(path);
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
-    check(!w.value().plan_tensor("__metadata__", ps::io::SType::U8, {4}).ok(), "reserved name rejected");
+    check(!w.value().plan_tensor("__metadata__", shelf::io::SType::U8, {4}).ok(), "reserved name rejected");
     remove_file(path);
 }
 
 static void test_zero_dim_rejected() {
     const std::string path = temp_path("zerodim");
     remove_file(path);
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
-    check(!w.value().plan_tensor("t", ps::io::SType::U8, {0}).ok(), "zero dim rejected");
+    check(!w.value().plan_tensor("t", shelf::io::SType::U8, {0}).ok(), "zero dim rejected");
     remove_file(path);
 }
 
@@ -126,7 +126,7 @@ static void test_malformed_reader_rejection() {
         std::fwrite("{\"t\"", 1, 5, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(!r.ok(), "malformed header rejected");
     remove_file(path);
 }
@@ -143,7 +143,7 @@ static void test_offset_validation() {
         std::fwrite("\x01\x02\x03\x04", 1, 4, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), "valid minimal safetensors opens");
     if (r.ok()) {
         check(r.value().metadata().at("k") == "v", "metadata parsed");
@@ -166,18 +166,18 @@ static void test_out_of_file_rejected() {
         std::fwrite("\x01\x02\x03\x04", 1, 4, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(!r.ok(), "out-of-file offsets rejected");
     remove_file(path);
 }
 
 int main() {
     printf("=== SafetensorsWriter Roundtrip / Validation ===\n");
-    roundtrip_dtype(ps::io::SType::BF16, "bf16");
-    roundtrip_dtype(ps::io::SType::F16, "f16");
-    roundtrip_dtype(ps::io::SType::F32, "f32");
-    roundtrip_dtype(ps::io::SType::I8, "i8");
-    roundtrip_dtype(ps::io::SType::U8, "u8");
+    roundtrip_dtype(shelf::io::SType::BF16, "bf16");
+    roundtrip_dtype(shelf::io::SType::F16, "f16");
+    roundtrip_dtype(shelf::io::SType::F32, "f32");
+    roundtrip_dtype(shelf::io::SType::I8, "i8");
+    roundtrip_dtype(shelf::io::SType::U8, "u8");
     test_size_mismatch_rejected();
     test_duplicate_rejected();
     test_reserved_name_rejected();

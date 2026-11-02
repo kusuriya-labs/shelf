@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class ElementwiseProfile : uint8_t {
     ResidualBf16 = 0,
@@ -31,4 +31,4 @@ struct ElementwiseSelectorInput {
 ElementwiseImplementation select_elementwise_implementation(
     const ElementwiseSelectorInput& in);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

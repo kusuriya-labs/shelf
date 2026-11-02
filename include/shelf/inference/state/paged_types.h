@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 using PageId = uint32_t;

@@ -12,7 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 struct PagedSequenceState {
@@ -46,8 +46,8 @@ struct PagedSequenceState {
 
     std::vector<PageId> block_table;
 
-    ::ps::runtime::RequestHandle request_handle() const noexcept {
-        return ::ps::runtime::RequestHandle{
+    ::shelf::runtime::RequestHandle request_handle() const noexcept {
+        return ::shelf::runtime::RequestHandle{
             .slot = slot,
             .generation = generation,
         };
@@ -93,12 +93,12 @@ struct PagedSequenceState {
 
     friend Status commit_sequence_append(
         PagedSequenceState& seq,
-        ::ps::runtime::RequestHandle expected_handle,
+        ::shelf::runtime::RequestHandle expected_handle,
         uint32_t committed_tokens);
 
     friend Status validate_sequence_append_commit(
         const PagedSequenceState& seq,
-        ::ps::runtime::RequestHandle expected_handle,
+        ::shelf::runtime::RequestHandle expected_handle,
         uint32_t committed_tokens);
 
     friend void runtime_install_sequence_state(
@@ -127,12 +127,12 @@ Status rollback_sequence_append(
 
 Status commit_sequence_append(
     PagedSequenceState& seq,
-    ::ps::runtime::RequestHandle expected_handle,
+    ::shelf::runtime::RequestHandle expected_handle,
     uint32_t committed_tokens);
 
 Status validate_sequence_append_commit(
     const PagedSequenceState& seq,
-    ::ps::runtime::RequestHandle expected_handle,
+    ::shelf::runtime::RequestHandle expected_handle,
     uint32_t committed_tokens);
 
 void runtime_install_sequence_state(

@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 enum class StorageDType : uint8_t {
     NONE,
@@ -68,4 +68,4 @@ inline bool is_gemm_compute_compatible(
     return false;
 }
 
-} // namespace ps::quantization
+} // namespace shelf::quantization

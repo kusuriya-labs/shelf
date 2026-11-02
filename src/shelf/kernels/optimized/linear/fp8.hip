@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdlib>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -16,7 +16,7 @@ using int32x2_t = int32_t __attribute__((ext_vector_type(2)));
 using int32x4_t = int32_t __attribute__((ext_vector_type(4)));
 using float8_t = float __attribute__((ext_vector_type(8)));
 
-using namespace ps::quantization::fp8;
+using namespace shelf::quantization::fp8;
 
 constexpr uint32_t kTileOut = 16u;
 constexpr uint32_t kTileRow = kFp8FinegrainedGemmRowTile;
@@ -166,8 +166,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
             const float v = acc[t][j];
             const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
             if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
-                static_cast<::ps::bf16_t*>(output)[out_idx] =
-                    ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+                static_cast<::shelf::bf16_t*>(output)[out_idx] =
+                    ::shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
             } else {
                 static_cast<float*>(output)[out_idx] = v;
             }
@@ -315,8 +315,8 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_pre
                 const float v = acc[t][nt][j];
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
                 if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
-                    static_cast<::ps::bf16_t*>(output)[out_idx] =
-                        ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+                    static_cast<::shelf::bf16_t*>(output)[out_idx] =
+                        ::shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
                 } else {
                     static_cast<float*>(output)[out_idx] = v;
                 }
@@ -494,8 +494,8 @@ __global__ void __launch_bounds__(k2dThreads)
                 const float v = acc[t][nt][j];
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
                 if (output_dtype == static_cast<uint32_t>(Fp8FinegrainedGemmOutputDType::BF16)) {
-                    static_cast<::ps::bf16_t*>(output)[out_idx] =
-                        ::ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+                    static_cast<::shelf::bf16_t*>(output)[out_idx] =
+                        ::shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
                 } else {
                     static_cast<float*>(output)[out_idx] = v;
                 }
@@ -654,4 +654,4 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_auto(
         stream, weight_scale_group);
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

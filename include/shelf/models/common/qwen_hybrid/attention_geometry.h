@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace qwen_hybrid {
 
 struct GatedAttentionGeometry {
@@ -16,10 +16,10 @@ struct GatedAttentionGeometry {
 };
 
 struct GatedAttentionWeightView {
-    const ::ps::weights::MatrixWeight* q_proj = nullptr;
-    const ::ps::weights::MatrixWeight* k_proj = nullptr;
-    const ::ps::weights::MatrixWeight* v_proj = nullptr;
-    const ::ps::weights::MatrixWeight* o_proj = nullptr;
+    const ::shelf::weights::MatrixWeight* q_proj = nullptr;
+    const ::shelf::weights::MatrixWeight* k_proj = nullptr;
+    const ::shelf::weights::MatrixWeight* v_proj = nullptr;
+    const ::shelf::weights::MatrixWeight* o_proj = nullptr;
 };
 
 struct GatedAttentionFeatureSizes {

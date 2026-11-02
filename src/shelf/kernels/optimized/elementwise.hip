@@ -10,9 +10,9 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
-using namespace ::ps::kernel::detail;
+using namespace ::shelf::kernel::detail;
 constexpr uint32_t kThreads = 256u;
 static_assert(kThreads == kElementwiseBlock);
 static_assert(kVec == kElementwiseVec);
@@ -455,4 +455,4 @@ hipError_t launch_swiglu_bf16(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

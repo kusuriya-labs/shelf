@@ -37,12 +37,12 @@
 #include <cstdlib>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
-using ::ps::runtime::KernelId;
-using ::ps::runtime::Int8ActivationWorkspaceLayout;
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::KernelId;
+using ::shelf::runtime::Int8ActivationWorkspaceLayout;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 namespace {
 
@@ -58,7 +58,7 @@ namespace {
  std::atomic<uint32_t> g_rope_optimized_count{0};
  std::atomic<uint32_t> g_output_gather_optimized_count{0};
  std::atomic<uint32_t> g_activation_quantize_optimized_count{0};
- std::atomic<uint32_t> g_fallback_counts[::ps::runtime::kernel_id_count()];
+ std::atomic<uint32_t> g_fallback_counts[::shelf::runtime::kernel_id_count()];
 
  bool kernel_trace_enabled() {
     static const bool enabled = [] {
@@ -82,11 +82,11 @@ namespace {
                      g_rope_optimized_count.load(std::memory_order_relaxed),
                      g_output_gather_optimized_count.load(std::memory_order_relaxed),
                      g_activation_quantize_optimized_count.load(std::memory_order_relaxed));
-                for (uint32_t k = 0u; k < ::ps::runtime::kernel_id_count(); ++k) {
+                for (uint32_t k = 0u; k < ::shelf::runtime::kernel_id_count(); ++k) {
                     const uint32_t c = g_fallback_counts[k].load(std::memory_order_relaxed);
                     if (c != 0u)
                         std::printf("KERNEL_TRACE_FALLBACK %s %u\n",
-                                    ::ps::runtime::kernel_to_name(static_cast<KernelId>(k)), c);
+                                    ::shelf::runtime::kernel_to_name(static_cast<KernelId>(k)), c);
                 }
              });
             registered = true;
@@ -104,8 +104,8 @@ uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
 }  // namespace
 
 Result<OptimizedLaunchResult> try_launch_activation_quantize(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     PhysicalActivationQuantizeLaunch launch{};
@@ -116,8 +116,8 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     bool specialized = false;
-    const hipError_t herr = ::ps::kernel::launch_activation_quantize_fp8_finegrained(
-        reinterpret_cast<const ::ps::bf16_t*>(launch.input),
+    const hipError_t herr = ::shelf::kernel::launch_activation_quantize_fp8_finegrained(
+        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
         reinterpret_cast<uint8_t*>(launch.codes),
         reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
         launch.k_padded, launch.input_row_stride, launch.code_row_stride,
@@ -134,11 +134,11 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-::ps::kernel::RmsNormDataType rmsnorm_kd(ValueDType d);
+::shelf::kernel::RmsNormDataType rmsnorm_kd(ValueDType d);
 
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     PhysicalRmsNormLaunch launch{};
@@ -149,7 +149,7 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::ps::kernel::launch_rmsnorm(
+    const hipError_t herr = ::shelf::kernel::launch_rmsnorm(
         reinterpret_cast<const void*>(launch.input), launch.input_dtype,
         reinterpret_cast<const void*>(launch.weight), launch.weight_dtype,
         launch.weight_layout, launch.weight_mode,
@@ -166,16 +166,16 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
 }
 
 Result<OptimizedLaunchResult> try_launch_output_gather(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     if (b.input_count != 1u || b.output_count != 1u)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    auto in_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
-    auto out_res = resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue out = out_res.value();
     if (in.dtype != out.dtype || in.feature_count != out.feature_count ||
@@ -194,7 +194,7 @@ Result<OptimizedLaunchResult> try_launch_output_gather(
     if (in.dtype != ValueDType::BF16 && in.dtype != ValueDType::F32 &&
         in.dtype != ValueDType::I32)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::ps::kernel::launch_output_gather(
+    const hipError_t herr = ::shelf::kernel::launch_output_gather(
         in.ptr, in.row_stride, out.ptr, out.row_stride, ctx.batch_context,
         ctx.actual_outputs, in.feature_count, in.dtype, stream);
     if (herr != hipSuccess)
@@ -206,8 +206,8 @@ Result<OptimizedLaunchResult> try_launch_output_gather(
 }
 
 Result<OptimizedLaunchResult> try_launch_linear_fp8(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     if (b.output_count != 1 || b.input_count != 0)
@@ -218,7 +218,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         return Status::invalid_state("fp8 linear: weight_index invalid", __FILE__, __LINE__);
     if (b.workspace_slot >= program.workspace.ranges.size())
         return Status::invalid_state("fp8 linear: workspace_slot invalid", __FILE__, __LINE__);
-    const ::ps::runtime::WeightSlot e = ctx.weights[b.weight_index];
+    const ::shelf::runtime::WeightSlot e = ctx.weights[b.weight_index];
     if (e.encoding != 1u)
         return Status::invalid_state("fp8 linear: encoding != Fp8", __FILE__, __LINE__);
     if (e.codes == nullptr || e.scales == nullptr)
@@ -251,7 +251,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         layout.scale_row_stride_bytes != b.activation_scale_stride)
         return Status::invalid_state("fp8 linear: workspace layout mismatch", __FILE__, __LINE__);
     const uint32_t out_vid = b.output_slots[0];
-    auto out_res = resolve_host_value(program, ::ps::runtime::ValueId{out_vid}, ctx);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{out_vid}, ctx);
     if (!out_res.ok())
         return out_res.status();
     const HostResolvedValue out = out_res.value();
@@ -282,10 +282,10 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
         reinterpret_cast<const uint8_t*>(range_base + layout.codes_offset);
     const float* ascales =
         reinterpret_cast<const float*>(range_base + layout.scales_offset);
-    const ::ps::kernel::Fp8FinegrainedGemmOutputDType odt =
-        out_bf16 ? ::ps::kernel::Fp8FinegrainedGemmOutputDType::BF16
-                 : ::ps::kernel::Fp8FinegrainedGemmOutputDType::F32;
-    hipError_t herr = ::ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+    const ::shelf::kernel::Fp8FinegrainedGemmOutputDType odt =
+        out_bf16 ? ::shelf::kernel::Fp8FinegrainedGemmOutputDType::BF16
+                 : ::shelf::kernel::Fp8FinegrainedGemmOutputDType::F32;
+    hipError_t herr = ::shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
             *config,
             static_cast<const uint8_t*>(e.codes),
             static_cast<const float*>(e.scales),
@@ -306,8 +306,8 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
 }
 
 Result<PhysicalResolveStatus> resolve_bf16_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalBf16Launch& out) {
     out = PhysicalBf16Launch{};
@@ -315,14 +315,14 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
         return Status::invalid_state("bf16 linear: bad io count", __FILE__, __LINE__);
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
         return Status::invalid_state("bf16 gemv: weight_index invalid", __FILE__, __LINE__);
-    const ::ps::runtime::WeightSlot e = ctx.weights[b.weight_index];
+    const ::shelf::runtime::WeightSlot e = ctx.weights[b.weight_index];
     if (e.encoding != 0u)
         return Status::invalid_state("bf16 gemv: encoding != 0", __FILE__, __LINE__);
     if (e.device_ptr == nullptr || e.codes != nullptr || e.scales != nullptr)
         return Status::invalid_state("bf16 gemv: bad weight slot", __FILE__, __LINE__);
     if (e.rows == 0 || e.cols == 0)
         return Status::invalid_state("bf16 gemv: weight dims == 0", __FILE__, __LINE__);
-    auto in_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok())
         return in_res.status();
     const HostResolvedValue in = in_res.value();
@@ -330,7 +330,7 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
         return PhysicalResolveStatus::NotApplicable;
     if (in.feature_count != e.cols)
         return Status::invalid_state("bf16 gemv: input features != weight cols", __FILE__, __LINE__);
-    auto out_res = resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok())
         return out_res.status();
     const HostResolvedValue dst = out_res.value();
@@ -352,8 +352,8 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     const uint32_t rows = rows_for(dst, ctx);
     if (rows == 0)
         return PhysicalResolveStatus::Skipped;
-    const ::ps::bf16_t* weight = static_cast<const ::ps::bf16_t*>(e.device_ptr);
-    const ::ps::bf16_t* input = static_cast<const ::ps::bf16_t*>(in.ptr);
+    const ::shelf::bf16_t* weight = static_cast<const ::shelf::bf16_t*>(e.device_ptr);
+    const ::shelf::bf16_t* input = static_cast<const ::shelf::bf16_t*>(in.ptr);
     const uint64_t output_offset_bytes =
         static_cast<uint64_t>(e.output_col_offset) * value_dtype_bytes(dst.dtype);
     Bf16GemmSelectorInput lin;
@@ -365,7 +365,7 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
         (reinterpret_cast<uintptr_t>(weight) & 15u) == 0u;
     lin.input_aligned16 =
         (reinterpret_cast<uintptr_t>(input) & 15u) == 0u;
-    lin.verify_exact = ctx.role == ::ps::runtime::ExecutionRole::Verify;
+    lin.verify_exact = ctx.role == ::shelf::runtime::ExecutionRole::Verify;
     const auto config = select_bf16_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Bf16, FallbackReason::SelectorRejected);
@@ -380,50 +380,50 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     out.k = e.cols;
     out.input_row_stride = in.row_stride;
     out.output_row_stride = dst.row_stride;
-    out.output_dtype = out_bf16 ? ::ps::kernel::Bf16GemmOutputDType::BF16
-                                : ::ps::kernel::Bf16GemmOutputDType::F32;
+    out.output_dtype = out_bf16 ? ::shelf::kernel::Bf16GemmOutputDType::BF16
+                                : ::shelf::kernel::Bf16GemmOutputDType::F32;
     out.config = *config;
     out.output_rows_domain =
         dst.row_domain == ValueRowDomain::OUTPUT_ROWS;
     switch (config->id) {
-        case ::ps::kernel::Bf16GemmConfigId::ExactRows:
+        case ::shelf::kernel::Bf16GemmConfigId::ExactRows:
             out.variant = PhysicalBf16Variant::ExactRows;
-            out.grid_x = ::ps::kernel::bf16_exact_rows_grid_x(e.rows);
+            out.grid_x = ::shelf::kernel::bf16_exact_rows_grid_x(e.rows);
             out.grid_y = 1u;
-            out.workgroup = ::ps::kernel::kBf16GemmExactRowsThreads;
+            out.workgroup = ::shelf::kernel::kBf16GemmExactRowsThreads;
             break;
-        case ::ps::kernel::Bf16GemmConfigId::ExactRowsDot2:
+        case ::shelf::kernel::Bf16GemmConfigId::ExactRowsDot2:
             out.variant = PhysicalBf16Variant::ExactRowsDot2;
-            out.grid_x = ::ps::kernel::bf16_exact_rows_grid_x(e.rows);
+            out.grid_x = ::shelf::kernel::bf16_exact_rows_grid_x(e.rows);
             out.grid_y = 1u;
-            out.workgroup = ::ps::kernel::kBf16GemmExactRowsThreads;
+            out.workgroup = ::shelf::kernel::kBf16GemmExactRowsThreads;
             break;
-        case ::ps::kernel::Bf16GemmConfigId::WmmaKPartition:
+        case ::shelf::kernel::Bf16GemmConfigId::WmmaKPartition:
             out.variant = PhysicalBf16Variant::WmmaKPartition;
-            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
-            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(rows, 1u);
-            out.workgroup = ::ps::kernel::kBf16SplitKWmmaThreads;
+            out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::shelf::kernel::bf16_wmma_grid_y(rows, 1u);
+            out.workgroup = ::shelf::kernel::kBf16SplitKWmmaThreads;
             break;
-        case ::ps::kernel::Bf16GemmConfigId::WmmaWide:
+        case ::shelf::kernel::Bf16GemmConfigId::WmmaWide:
             out.variant = PhysicalBf16Variant::WmmaWide;
-            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
-            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(
-                rows, ::ps::kernel::kBf16WmmaWideRowTiles);
-            out.workgroup = ::ps::kernel::kBf16WmmaThreads;
+            out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::shelf::kernel::bf16_wmma_grid_y(
+                rows, ::shelf::kernel::kBf16WmmaWideRowTiles);
+            out.workgroup = ::shelf::kernel::kBf16WmmaThreads;
             break;
-        case ::ps::kernel::Bf16GemmConfigId::Wmma:
+        case ::shelf::kernel::Bf16GemmConfigId::Wmma:
             out.variant = PhysicalBf16Variant::Wmma;
-            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
-            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(rows, 1u);
-            out.workgroup = ::ps::kernel::kBf16WmmaThreads;
+            out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::shelf::kernel::bf16_wmma_grid_y(rows, 1u);
+            out.workgroup = ::shelf::kernel::kBf16WmmaThreads;
             break;
     }
     return PhysicalResolveStatus::Applicable;
 }
 
 Result<OptimizedLaunchResult> try_launch_linear_bf16(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     PhysicalBf16Launch launch{};
@@ -435,9 +435,9 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::ps::kernel::launch_gemm_bf16(
-        launch.config, reinterpret_cast<const ::ps::bf16_t*>(launch.weight),
-        reinterpret_cast<const ::ps::bf16_t*>(launch.input),
+    const hipError_t herr = ::shelf::kernel::launch_gemm_bf16(
+        launch.config, reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
+        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
         reinterpret_cast<void*>(launch.output), launch.output_dtype,
         launch.rows, launch.out_features, launch.k, launch.input_row_stride,
         launch.output_row_stride, stream);
@@ -463,10 +463,10 @@ Result<KernelMode> read_kernel_mode() {
     return Status::invalid_argument("invalid SHELF_QWEN35_KERNEL_MODE", __FILE__, __LINE__);
 }
 
-void record_correctness_fallback(::ps::runtime::KernelId id) {
+void record_correctness_fallback(::shelf::runtime::KernelId id) {
     (void)kernel_trace_enabled();
     const uint32_t k = static_cast<uint32_t>(id);
-    if (k < ::ps::runtime::kernel_id_count())
+    if (k < ::shelf::runtime::kernel_id_count())
         g_fallback_counts[k].fetch_add(1u, std::memory_order_relaxed);
 }
 
@@ -483,7 +483,7 @@ uint32_t embedding_optimized_count() noexcept {
 }
 
 Result<OptimizedLaunchResult> try_launch_optimized(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream) {

@@ -14,14 +14,14 @@
 #include <string>
 #include <vector>
 
-using ps::Status;
-using ps::runtime::HipPeerTpTransport;
-using ps::runtime::HostMediatedTpTransport;
-using ps::runtime::TpSumInvocation;
-using ps::runtime::TpSumTarget;
-using ps::runtime::TpTransport;
-using ps::runtime::ValueDType;
-using ps::runtime::create_tp_transport;
+using shelf::Status;
+using shelf::runtime::HipPeerTpTransport;
+using shelf::runtime::HostMediatedTpTransport;
+using shelf::runtime::TpSumInvocation;
+using shelf::runtime::TpSumTarget;
+using shelf::runtime::TpTransport;
+using shelf::runtime::ValueDType;
+using shelf::runtime::create_tp_transport;
 
 namespace {
 
@@ -78,7 +78,7 @@ struct BenchPair {
 
 bool allocate_pair(BenchPair& pair, std::size_t bytes) {
     for (int device = 0; device < 2; ++device) {
-        auto scope = ps::gpu::ScopedDevice::create(device);
+        auto scope = shelf::gpu::ScopedDevice::create(device);
         if (!scope.ok()) return false;
         void** buffer = device == 0 ? &pair.buffer_a : &pair.buffer_b;
         hipStream_t* stream = device == 0 ? &pair.stream_a : &pair.stream_b;
@@ -92,20 +92,20 @@ bool allocate_pair(BenchPair& pair, std::size_t bytes) {
 
 void free_pair(BenchPair& pair) {
     for (int device = 0; device < 2; ++device) {
-        auto scope = ps::gpu::ScopedDevice::create(device);
+        auto scope = shelf::gpu::ScopedDevice::create(device);
         if (!scope.ok()) continue;
         void** buffer = device == 0 ? &pair.buffer_a : &pair.buffer_b;
         hipStream_t* stream = device == 0 ? &pair.stream_a : &pair.stream_b;
         hipEvent_t* ready = device == 0 ? &pair.ready_a : &pair.ready_b;
-        if (*buffer != nullptr) ps::gpu::discard_cleanup_result(hipFree(*buffer));
-        if (*ready != nullptr) ps::gpu::discard_cleanup_result(hipEventDestroy(*ready));
-        if (*stream != nullptr) ps::gpu::discard_cleanup_result(hipStreamDestroy(*stream));
+        if (*buffer != nullptr) shelf::gpu::discard_cleanup_result(hipFree(*buffer));
+        if (*ready != nullptr) shelf::gpu::discard_cleanup_result(hipEventDestroy(*ready));
+        if (*stream != nullptr) shelf::gpu::discard_cleanup_result(hipStreamDestroy(*stream));
     }
 }
 
 Status upload(int device, void* buffer, const std::vector<std::uint8_t>& host,
               hipStream_t stream) {
-    auto scope = ps::gpu::ScopedDevice::create(device);
+    auto scope = shelf::gpu::ScopedDevice::create(device);
     if (!scope.ok()) return scope.status();
     if (hipMemcpyAsync(buffer, host.data(), host.size(), hipMemcpyHostToDevice, stream) !=
         hipSuccess) {

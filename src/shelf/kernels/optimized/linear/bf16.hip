@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 extern "C" __global__ __launch_bounds__(256)
 void shelf_gemm_bf16_exact_rows_1(Bf16GemmExactRowsArgs args);
@@ -34,8 +34,8 @@ static_assert(kThreadsPerBlock == kBf16WmmaThreads);
 static_assert(kSplitThreadsPerBlock == kBf16SplitKWmmaThreads);
 
 __device__ __forceinline__ uint64_t load_bf16x4_masked(
-    const ps::bf16_t* base, uint32_t start_k, uint32_t logical_k) {
-    const ps::bf16_t* p = base + start_k;
+    const shelf::bf16_t* base, uint32_t start_k, uint32_t logical_k) {
+    const shelf::bf16_t* p = base + start_k;
     if (start_k + 3u < logical_k && (reinterpret_cast<uintptr_t>(p) & 7u) == 0u) {
         return *reinterpret_cast<const uint64_t*>(p);
     }
@@ -67,7 +67,7 @@ __device__ __forceinline__ float bf16_f32(short s) {
 }
 
 __device__ __forceinline__ short8_t wide_load_a(
-    const ps::bf16_t* wrow, uint32_t ks, bool out_valid, uint32_t k, uint32_t k_half) {
+    const shelf::bf16_t* wrow, uint32_t ks, bool out_valid, uint32_t k, uint32_t k_half) {
     uint64_t a0 = 0, a1 = 0;
     if (out_valid) {
         a0 = load_bf16x4_masked(wrow, ks + k_half * 4u, k);
@@ -77,7 +77,7 @@ __device__ __forceinline__ short8_t wide_load_a(
 }
 
 __device__ __forceinline__ void wide_tile(
-    uint32_t ks, const short8_t& a, const ps::bf16_t* xrow, bool row_valid,
+    uint32_t ks, const short8_t& a, const shelf::bf16_t* xrow, bool row_valid,
     float8_t& acc, uint32_t k, uint32_t k_half) {
     uint64_t b0 = 0, b1 = 0;
     if (row_valid) {
@@ -89,8 +89,8 @@ __device__ __forceinline__ void wide_tile(
 
 template <uint32_t kRowTiles>
 __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
-    const ps::bf16_t* wrow,
-    const ps::bf16_t* const* xrow,
+    const shelf::bf16_t* wrow,
+    const shelf::bf16_t* const* xrow,
     const bool* row_valid,
     float8_t* acc,
     uint32_t k_tiles,
@@ -108,8 +108,8 @@ __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
 
 template <uint32_t kRowTiles>
 __device__ __forceinline__ void bf16_wmma_body(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t rows,
@@ -132,14 +132,14 @@ __device__ __forceinline__ void bf16_wmma_body(
     const uint32_t a_row = out_start + lane_low4;
     const bool out_valid = a_row < out_features;
 
-    const ps::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
+    const shelf::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
 
     float8_t acc[kRowTiles];
     #pragma unroll
     for (uint32_t rt = 0; rt < kRowTiles; ++rt)
         acc[rt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
-    const ps::bf16_t* xrow[kRowTiles];
+    const shelf::bf16_t* xrow[kRowTiles];
     bool row_valid[kRowTiles];
     #pragma unroll
     for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
@@ -183,8 +183,8 @@ __device__ __forceinline__ void bf16_wmma_body(
                         continue;
                     const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
                     if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
-                        static_cast<ps::bf16_t*>(output)[out_idx] =
-                            ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[rt][j]))};
+                        static_cast<shelf::bf16_t*>(output)[out_idx] =
+                            shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[rt][j]))};
                     } else {
                         static_cast<float*>(output)[out_idx] = acc[rt][j];
                     }
@@ -196,8 +196,8 @@ __device__ __forceinline__ void bf16_wmma_body(
 
 template <uint32_t kRowTiles>
 __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t rows,
@@ -211,8 +211,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
 }
 
 __device__ __forceinline__ void bf16_splitk_wmma_body(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t rows,
@@ -236,8 +236,8 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
     const bool out_valid = a_row < out_features;
     const bool row_valid = b_col < rows;
 
-    const ps::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
-    const ps::bf16_t* xrow = input + static_cast<size_t>(b_col) * input_row_stride;
+    const shelf::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
+    const shelf::bf16_t* xrow = input + static_cast<size_t>(b_col) * input_row_stride;
 
     float8_t acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -283,8 +283,8 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
                     continue;
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
                 if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
-                    static_cast<ps::bf16_t*>(output)[out_idx] =
-                        ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(s[j]))};
+                    static_cast<shelf::bf16_t*>(output)[out_idx] =
+                        shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(s[j]))};
                 } else {
                     static_cast<float*>(output)[out_idx] = s[j];
                 }
@@ -294,8 +294,8 @@ __device__ __forceinline__ void bf16_splitk_wmma_body(
 }
 
 __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_kernel(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t rows,
@@ -309,8 +309,8 @@ __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_k
 
 template <uint32_t kRows, bool kDot2 = false>
 __device__ __forceinline__ void gemm_bf16_exact_rows_body(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t n,
@@ -322,7 +322,7 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
     const uint32_t r = blockIdx.x * 8u + wave;
     if (r >= n)
         return;
-    const ps::bf16_t* wrow = weight + static_cast<size_t>(r) * k;
+    const shelf::bf16_t* wrow = weight + static_cast<size_t>(r) * k;
     float acc[kRows];
     #pragma unroll
     for (uint32_t m = 0; m < kRows; ++m)
@@ -363,7 +363,7 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
         const uint32_t base = iters << 8;
         #pragma unroll
         for (uint32_t m = 0; m < kRows; ++m) {
-            const ps::bf16_t* xrow = input + static_cast<size_t>(m) * input_row_stride;
+            const shelf::bf16_t* xrow = input + static_cast<size_t>(m) * input_row_stride;
             for (uint32_t j = lane; j < tail; j += 32u)
                 acc[m] += bf16_f32(static_cast<short>(wrow[base + j].data))
                         * bf16_f32(static_cast<short>(xrow[base + j].data));
@@ -378,8 +378,8 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
         if (lane == 0u) {
             const size_t oidx = static_cast<size_t>(m) * output_row_stride + r;
             if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16))
-                static_cast<ps::bf16_t*>(output)[oidx] =
-                    ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(a))};
+                static_cast<shelf::bf16_t*>(output)[oidx] =
+                    shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(a))};
             else
                 static_cast<float*>(output)[oidx] = a;
         }
@@ -388,8 +388,8 @@ __device__ __forceinline__ void gemm_bf16_exact_rows_body(
 
 template <uint32_t kRows>
 __global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_exact_rows_kernel(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t n,
@@ -403,8 +403,8 @@ __global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_exact_rows_kernel
 
 template <uint32_t kRows>
 __global__ void __launch_bounds__(kExactRowsThreads) gemm_bf16_exact_rows_dot2_kernel(
-    const ps::bf16_t* __restrict__ weight,
-    const ps::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    const shelf::bf16_t* __restrict__ input,
     void* __restrict__ output,
     const uint32_t output_dtype,
     const uint32_t n,
@@ -449,7 +449,7 @@ hipError_t launch_gemm_bf16_exact_rows(
     const uint32_t grid = bf16_exact_rows_grid_x(out_features);
     if (rows > kBf16GemmExactRowsKernelMax) {
         const size_t output_elem =
-            output_dtype == Bf16GemmOutputDType::BF16 ? sizeof(ps::bf16_t) : sizeof(float);
+            output_dtype == Bf16GemmOutputDType::BF16 ? sizeof(shelf::bf16_t) : sizeof(float);
         for (uint32_t base = 0u; base < rows; base += kBf16GemmExactRowsKernelMax) {
             const uint32_t chunk =
                 (rows - base) < kBf16GemmExactRowsKernelMax ? (rows - base)
@@ -521,7 +521,7 @@ hipError_t launch_gemm_bf16_exact_rows_dot2(
     const uint32_t grid = bf16_exact_rows_grid_x(out_features);
     if (rows > kBf16GemmExactRowsKernelMax) {
         const size_t output_elem =
-            output_dtype == Bf16GemmOutputDType::BF16 ? sizeof(ps::bf16_t) : sizeof(float);
+            output_dtype == Bf16GemmOutputDType::BF16 ? sizeof(shelf::bf16_t) : sizeof(float);
         for (uint32_t base = 0u; base < rows; base += kBf16GemmExactRowsKernelMax) {
             const uint32_t chunk =
                 (rows - base) < kBf16GemmExactRowsKernelMax ? (rows - base)
@@ -612,8 +612,8 @@ PS_BF16_EXACT_ROWS_ENTRY(16)
 extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
 void shelf_gemm_bf16_wmma(Bf16GemmWmmaArgs args) {
     bf16_wmma_body<1u>(
-        static_cast<const ps::bf16_t*>(args.weight),
-        static_cast<const ps::bf16_t*>(args.input), args.output,
+        static_cast<const shelf::bf16_t*>(args.weight),
+        static_cast<const shelf::bf16_t*>(args.input), args.output,
         args.output_dtype, args.rows, args.out_features, args.k,
         args.input_row_stride, args.output_row_stride);
 }
@@ -621,8 +621,8 @@ void shelf_gemm_bf16_wmma(Bf16GemmWmmaArgs args) {
 extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
 void shelf_gemm_bf16_wmma_wide(Bf16GemmWmmaArgs args) {
     bf16_wmma_body<kWideRowTiles>(
-        static_cast<const ps::bf16_t*>(args.weight),
-        static_cast<const ps::bf16_t*>(args.input), args.output,
+        static_cast<const shelf::bf16_t*>(args.weight),
+        static_cast<const shelf::bf16_t*>(args.input), args.output,
         args.output_dtype, args.rows, args.out_features, args.k,
         args.input_row_stride, args.output_row_stride);
 }
@@ -630,8 +630,8 @@ void shelf_gemm_bf16_wmma_wide(Bf16GemmWmmaArgs args) {
 extern "C" __global__ __launch_bounds__(kSplitThreadsPerBlock)
 void shelf_gemm_bf16_splitk_wmma(Bf16GemmWmmaArgs args) {
     bf16_splitk_wmma_body(
-        static_cast<const ps::bf16_t*>(args.weight),
-        static_cast<const ps::bf16_t*>(args.input), args.output,
+        static_cast<const shelf::bf16_t*>(args.weight),
+        static_cast<const shelf::bf16_t*>(args.input), args.output,
         args.output_dtype, args.rows, args.out_features, args.k,
         args.input_row_stride, args.output_row_stride);
 }
@@ -698,4 +698,4 @@ hipError_t launch_gemm_bf16(
     }
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

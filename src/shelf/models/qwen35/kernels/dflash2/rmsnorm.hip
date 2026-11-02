@@ -4,9 +4,9 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
-using namespace ::ps::kernel::detail;
+using namespace ::shelf::kernel::detail;
 
 namespace {
 
@@ -54,4 +54,4 @@ hipError_t launch_dflash2_rmsnorm_direct_bf16(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

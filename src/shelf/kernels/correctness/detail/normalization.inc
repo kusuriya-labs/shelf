@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_row_norm_like(
     ModelDispatchEnv& env, const DispatchBinding& b, bool l2_mode) {
@@ -16,7 +16,7 @@ __device__ __forceinline__ ProgramStatus exec_row_norm_like(
     ValueDType weight_dtype = ValueDType::BF16;
     const void* weight_raw =
         resolve_parameter(env, b.parameter_index0, &weight_elements, &weight_dtype);
-    const bool want_weight = !l2_mode && b.parameter_index0 != ::ps::runtime::kNoParameter;
+    const bool want_weight = !l2_mode && b.parameter_index0 != ::shelf::runtime::kNoParameter;
     if (want_weight && weight_raw == nullptr) return ProgramStatus::INVALID_BINDING;
     const bool weight_per_row = want_weight && weight_elements == f;
     const bool weight_per_group = want_weight && weight_elements == group;
@@ -61,4 +61,4 @@ __device__ __forceinline__ ProgramStatus exec_row_norm_like(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

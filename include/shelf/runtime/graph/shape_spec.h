@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 template<std::uint32_t OutputFeatures, std::uint32_t InputFeatures>
 struct MatrixwiseShapeSpec {

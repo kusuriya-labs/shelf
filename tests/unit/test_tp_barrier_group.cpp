@@ -9,11 +9,11 @@
 #include <string>
 #include <thread>
 
-using ps::Status;
-using ps::runtime::TpBarrierGroup;
-using ps::runtime::TpSumInvocation;
-using ps::runtime::TpSumTarget;
-using ps::runtime::TpTransport;
+using shelf::Status;
+using shelf::runtime::TpBarrierGroup;
+using shelf::runtime::TpSumInvocation;
+using shelf::runtime::TpSumTarget;
+using shelf::runtime::TpTransport;
 
 static int g_fail = 0;
 
@@ -37,7 +37,7 @@ public:
     Status sum_hidden(const TpSumInvocation& invocation) override {
         calls.fetch_add(1);
         std::size_t bytes = 0;
-        return ps::runtime::validate_tp_sum_invocation(
+        return shelf::runtime::validate_tp_sum_invocation(
             invocation, static_cast<std::size_t>(invocation.targets.size()), bytes);
     }
 
@@ -52,7 +52,7 @@ static TpSumTarget filled_target(void* ptr) {
     target.rows = 1;
     target.row_stride = 16;
     target.feature_count = 4;
-    target.dtype = ps::runtime::ValueDType::F32;
+    target.dtype = shelf::runtime::ValueDType::F32;
     return target;
 }
 

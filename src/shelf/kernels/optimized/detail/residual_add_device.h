@@ -1,7 +1,7 @@
 #pragma once
 #include "vector_io.h"
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ void residual_add_bf16_body(
     const bf16* a_row, const bf16* b_row, bf16* out_row,
@@ -28,4 +28,4 @@ __device__ __forceinline__ void residual_add_bf16_body(
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

@@ -12,7 +12,7 @@
 #include <memory>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 namespace runtime {

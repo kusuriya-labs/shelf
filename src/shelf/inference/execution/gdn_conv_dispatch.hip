@@ -20,17 +20,17 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::KernelId;
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::KernelId;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
-const ::ps::runtime::StateBinding* find_conv_state_binding(
-    const ::ps::runtime::Program& program, uint32_t descriptor_slot) {
+const ::shelf::runtime::StateBinding* find_conv_state_binding(
+    const ::shelf::runtime::Program& program, uint32_t descriptor_slot) {
     if (descriptor_slot == 0u) return nullptr;
     for (const auto& s : program.states)
         if (s.slot + 1u == descriptor_slot) return &s;
@@ -40,8 +40,8 @@ const ::ps::runtime::StateBinding* find_conv_state_binding(
 }  // namespace
 
 Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalGdnConv1dLaunch& out) {
     out = PhysicalGdnConv1dLaunch{};
@@ -50,11 +50,11 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
 
     const auto* sb = find_conv_state_binding(program, b.descriptor_slot);
     if (sb == nullptr ||
-        sb->kind != ::ps::runtime::PrimitiveStateKind::GDN_CONV_STATE)
+        sb->kind != ::shelf::runtime::PrimitiveStateKind::GDN_CONV_STATE)
         return PhysicalResolveStatus::NotApplicable;
     const uint32_t state_index = sb->state_index;
 
-    const ::ps::state::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
+    const ::shelf::state::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
     if (gdn.conv_base == nullptr || gdn.num_gdn_states == 0u ||
         gdn.max_sequences == 0u || gdn.conv_dim == 0u || gdn.conv_history != 3u)
         return PhysicalResolveStatus::NotApplicable;
@@ -65,11 +65,11 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
         return PhysicalResolveStatus::NotApplicable;
 
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue dst = out_res.value();
 
@@ -84,7 +84,7 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     if (in.row_stride < gdn.conv_dim || dst.row_stride < gdn.conv_dim)
         return PhysicalResolveStatus::NotApplicable;
 
-    if (b.parameter_index0 == ::ps::runtime::kNoParameter ||
+    if (b.parameter_index0 == ::shelf::runtime::kNoParameter ||
         ctx.host_parameters == nullptr ||
         b.parameter_index0 >= ctx.host_parameter_count)
         return PhysicalResolveStatus::NotApplicable;
@@ -94,7 +94,7 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
         w_slot.elements < need_w)
         return PhysicalResolveStatus::NotApplicable;
 
-    const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
+    const ::shelf::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
     const uint32_t num_requests = ctx.staged_request_count;
     const uint32_t verify_requests = ctx.staged_verify_request_count;
     const bool all_verify_requests =
@@ -121,10 +121,10 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     if (select_gdn_conv_implementation(si) != GdnConvImplementation::Optimized)
         return PhysicalResolveStatus::NotApplicable;
 
-    ::ps::kernel::GdnConv1dArgs args;
-    args.input = static_cast<const ::ps::bf16_t*>(in.ptr);
+    ::shelf::kernel::GdnConv1dArgs args;
+    args.input = static_cast<const ::shelf::bf16_t*>(in.ptr);
     args.output = static_cast<float*>(dst.ptr);
-    args.conv_weight = static_cast<const ::ps::bf16_t*>(w_slot.device_ptr);
+    args.conv_weight = static_cast<const ::shelf::bf16_t*>(w_slot.device_ptr);
     args.conv_state = gdn.conv_base;
     if (ctx.device_requests == nullptr)
         return PhysicalResolveStatus::NotApplicable;
@@ -143,7 +143,7 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     args.conv_history_stride = gdn.conv_history_stride;
     const GdnSpecHistoryDeviceView& hist = ctx.spec.gdn_spec_history;
     const bool mixed_verify = verify_requests != 0u && !all_verify_requests;
-    if ((ctx.role == ::ps::runtime::ExecutionRole::Verify || mixed_verify) &&
+    if ((ctx.role == ::shelf::runtime::ExecutionRole::Verify || mixed_verify) &&
         hist.conv_history != nullptr && hist.capture_rows != 0u) {
         args.conv_history_store = hist.conv_history;
         args.conv_history_row_stride = hist.conv_row_stride;
@@ -163,19 +163,19 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     }
 
     out.args = args;
-    out.row_tile = ::ps::kernel::gdn_conv1d_row_tile();
+    out.row_tile = ::shelf::kernel::gdn_conv1d_row_tile();
     const uint32_t tiled_rows =
         max_request_rows != 0u ? max_request_rows : actual_rows;
-    out.tiles = ::ps::kernel::gdn_conv1d_tiles(out.row_tile, tiled_rows);
-    out.grid_x = ::ps::kernel::gdn_conv1d_blocks_x(gdn.conv_dim);
+    out.tiles = ::shelf::kernel::gdn_conv1d_tiles(out.row_tile, tiled_rows);
+    out.grid_x = ::shelf::kernel::gdn_conv1d_blocks_x(gdn.conv_dim);
     out.grid_y = num_requests;
     out.grid_z = out.tiles;
-    out.workgroup = ::ps::kernel::kGdnConv1dThreads;
+    out.workgroup = ::shelf::kernel::kGdnConv1dThreads;
     return PhysicalResolveStatus::Applicable;
 }
 
 Result<OptimizedLaunchResult> try_launch_gdn_conv1d(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size()) return kNone;
     const auto& b = program.dispatches[dispatch_index];
@@ -188,7 +188,7 @@ Result<OptimizedLaunchResult> try_launch_gdn_conv1d(
     if (resolved.value() != PhysicalResolveStatus::Applicable) return kNone;
 
     const hipError_t herr =
-        ::ps::kernel::launch_gdn_conv1d_bf16_f32(launch.args, stream);
+        ::shelf::kernel::launch_gdn_conv1d_bf16_f32(launch.args, stream);
     if (herr != hipSuccess)
         return Status::hip_error("gdn-conv1d optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
@@ -197,4 +197,4 @@ Result<OptimizedLaunchResult> try_launch_gdn_conv1d(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

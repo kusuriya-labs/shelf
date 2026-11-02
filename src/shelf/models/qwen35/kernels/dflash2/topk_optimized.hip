@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -279,4 +279,4 @@ hipError_t launch_dflash2_topk_f32_optimized(
     }
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -1,12 +1,12 @@
 #include <shelf/inference/execution/selectors/gdn_conv_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct GdnConvRule {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
     uint32_t conv_dim;
     uint32_t history;
     uint32_t min_rows;
@@ -19,11 +19,11 @@ constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 constexpr uint32_t kMeasuredMaxRequests = kOptimizedMaxRows;
 
 constexpr GdnConvRule kRules[] = {
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       8192u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       10240u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       5120u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
 };
 
@@ -45,4 +45,4 @@ GdnConvImplementation select_gdn_conv_implementation(const GdnConvSelectorInput&
     return GdnConvImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

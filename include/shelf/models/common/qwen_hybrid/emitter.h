@@ -6,10 +6,10 @@
 
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen_hybrid {
 
-namespace RT = ::ps::runtime;
+namespace RT = ::shelf::runtime;
 
 struct Emitter {
     RT::PrimitiveGraph& pg;
@@ -33,7 +33,7 @@ struct Emitter {
         gn.keep_alive = std::move(keep_alive);
     }
 
-    RT::ValueId linear(const ::ps::weights::MatrixWeight& w,
+    RT::ValueId linear(const ::shelf::weights::MatrixWeight& w,
                        uint32_t weight_index, RT::ValueId x,
                        RT::ValueDType out_dtype = RT::ValueDType::BF16) {
         RT::LinearNode n;

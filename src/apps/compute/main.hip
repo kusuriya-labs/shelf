@@ -15,30 +15,30 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    ps::app::ComputeOptions opt;
-    const int parse_rc = ps::app::parse_compute_options(argc, argv, opt);
-    if (parse_rc == ps::app::kComputeParseHelp) {
+    shelf::app::ComputeOptions opt;
+    const int parse_rc = shelf::app::parse_compute_options(argc, argv, opt);
+    if (parse_rc == shelf::app::kComputeParseHelp) {
         return 0;
     }
-    if (parse_rc != ps::app::kComputeParseOk) return parse_rc;
-    const int validate_rc = ps::app::validate_compute_options(opt);
-    if (validate_rc != ps::app::kComputeParseOk) return validate_rc;
+    if (parse_rc != shelf::app::kComputeParseOk) return parse_rc;
+    const int validate_rc = shelf::app::validate_compute_options(opt);
+    if (validate_rc != shelf::app::kComputeParseOk) return validate_rc;
 
-    ps::qwen35::EffectiveRopeProfile rope_profile;
+    shelf::qwen35::EffectiveRopeProfile rope_profile;
     {
-        auto selection_result = ps::qwen35::parse_rope_factor_selection(opt.rope_factor);
+        auto selection_result = shelf::qwen35::parse_rope_factor_selection(opt.rope_factor);
         if (!selection_result.ok()) {
             fprintf(stderr, "rope factor resolve failed: %s\n",
                     selection_result.status().message().c_str());
             return 1;
         }
-        auto params_result = ps::qwen35::read_qwen35_rope_parameters(opt.model_dir);
+        auto params_result = shelf::qwen35::read_qwen35_rope_parameters(opt.model_dir);
         if (!params_result.ok()) {
             fprintf(stderr, "rope config read failed: %s\n",
                     params_result.status().message().c_str());
             return 1;
         }
-        auto profile_result = ps::qwen35::resolve_effective_rope_profile(
+        auto profile_result = shelf::qwen35::resolve_effective_rope_profile(
             params_result.value(), selection_result.value());
         if (!profile_result.ok()) {
             fprintf(stderr, "rope profile resolve failed: %s\n",
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         rope_profile = profile_result.release();
-        const uint32_t rope_cap = ps::qwen35::rope_max_seq_len_cap(rope_profile);
+        const uint32_t rope_cap = shelf::qwen35::rope_max_seq_len_cap(rope_profile);
         if (rope_cap != 0 && opt.max_seq_len > rope_cap) {
             fprintf(stderr,
                     "--max-seq-len %lu exceeds the rope factor limit %u "
@@ -57,9 +57,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    ps::app::Qwen35RuntimeConfig config;
+    shelf::app::Qwen35RuntimeConfig config;
     config.model_dir = opt.model_dir;
-    config.dflash2_model_dir = ps::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
+    config.dflash2_model_dir = shelf::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
     config.arena_bytes = opt.arena_gib_auto
@@ -69,8 +69,8 @@ int main(int argc, char** argv) {
     config.devices = opt.devices;
     config.tp = static_cast<uint32_t>(opt.tp);
     config.kv_cache_dtype = opt.kv_cache_dtype == "fp8"
-        ? ps::kernel::KVCacheDType::FP8_E4M3
-        : ps::kernel::KVCacheDType::BF16;
+        ? shelf::kernel::KVCacheDType::FP8_E4M3
+        : shelf::kernel::KVCacheDType::BF16;
     config.verify_weights = opt.verify_weights != 0;
     config.tp_combine_f32 = static_cast<uint32_t>(opt.tp_combine_f32);
     config.decode_backend = opt.decode_backend;
@@ -86,15 +86,15 @@ int main(int argc, char** argv) {
     fprintf(stderr, "ROPE profile: type=%s factor=%g theta=%g rotary_dim=%u "
                     "original_max_position_embeddings=%u attention_factor=%.9f "
                     "beta_fast=%g beta_slow=%g truncate=%d source=%s\n",
-            rope_profile.type == ps::qwen35::EffectiveRopeProfile::Type::Yarn ? "yarn" : "default",
+            rope_profile.type == shelf::qwen35::EffectiveRopeProfile::Type::Yarn ? "yarn" : "default",
             rope_profile.factor, rope_profile.theta, rope_profile.rotary_dim,
             rope_profile.original_max_position_embeddings, rope_profile.attention_factor,
             rope_profile.beta_fast, rope_profile.beta_slow, rope_profile.truncate ? 1 : 0,
             rope_profile.from_cli ? "cli" : "config");
-    ps::qwen35::dflash2::DFlash2Config dflash_config;
-    if (ps::app::compute_dflash_enabled(opt)) {
+    shelf::qwen35::dflash2::DFlash2Config dflash_config;
+    if (shelf::app::compute_dflash_enabled(opt)) {
         auto dflash_config_result =
-            ps::qwen35::dflash2::read_dflash2_config(opt.dflash2_model_dir);
+            shelf::qwen35::dflash2::read_dflash2_config(opt.dflash2_model_dir);
         if (!dflash_config_result.ok()) {
             fprintf(stderr, "dflash2 config read failed: %s\n",
                     dflash_config_result.status().message().c_str());
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
         }
         config.prefix_cache_spec_ring_bytes =
             static_cast<uint32_t>(dflash_config.context_ring_bytes());
-        config.draft_bytes = ps::app::safetensors_dir_bytes(opt.dflash2_model_dir);
+        config.draft_bytes = shelf::app::safetensors_dir_bytes(opt.dflash2_model_dir);
         config.draft_config = dflash_config;
         config.draft_config_ready = true;
         config.dflash2_drafts = static_cast<uint32_t>(opt.dflash2_drafts);
@@ -126,16 +126,16 @@ int main(int argc, char** argv) {
         if (config.max_num_batched_tokens < config.max_concurrent_requests) {
             config.max_num_batched_tokens = config.max_concurrent_requests;
         }
-        if (ps::app::compute_dflash_enabled(opt)) {
+        if (shelf::app::compute_dflash_enabled(opt)) {
             const uint32_t batch_rows = config.max_concurrent_requests *
                 static_cast<uint32_t>(dflash_config.block_size);
             if (config.max_num_batched_tokens < batch_rows) {
                 config.max_num_batched_tokens = batch_rows;
             }
             config.max_scheduled_output_rows =
-                batch_rows < ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows
+                batch_rows < shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows
                     ? batch_rows
-                    : ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows;
+                    : shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows;
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
             for (std::size_t t = 0; t < dflash_config.num_target_layer_ids; ++t) {
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
         }
     } else {
         if (!opt.input_ids_file.empty()) {
-            prompt_ids = ps::app::read_input_ids(opt.input_ids_file);
+            prompt_ids = shelf::app::read_input_ids(opt.input_ids_file);
             if (prompt_ids.empty()) {
                 fprintf(stderr, "no prompt ids read from %s\n", opt.input_ids_file.c_str());
                 return 1;
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "prompt + generation exceeds max_seq_len %lu\n", opt.max_seq_len);
             return 2;
         }
-        if (ps::app::compute_dflash_enabled(opt)) {
+        if (shelf::app::compute_dflash_enabled(opt)) {
             const unsigned long dflash_rows =
                 static_cast<unsigned long>(dflash_config.block_size);
             unsigned long dflash_tokens =
@@ -185,9 +185,9 @@ int main(int argc, char** argv) {
             const std::string tok = opt.hidden_taps.substr(
                 pos, comma == std::string::npos ? std::string::npos : comma - pos);
             if (!tok.empty()) {
-                if (config.target_hidden_tap_count >= ps::qwen35::kMaxTargetHiddenTaps) {
+                if (config.target_hidden_tap_count >= shelf::qwen35::kMaxTargetHiddenTaps) {
                     fprintf(stderr, "--hidden-taps exceeds %u entries\n",
-                            ps::qwen35::kMaxTargetHiddenTaps);
+                            shelf::qwen35::kMaxTargetHiddenTaps);
                     return 2;
                 }
                 char* end = nullptr;
@@ -204,13 +204,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto runtime_result = ps::app::Qwen35ComputeRuntime::create(config);
+    auto runtime_result = shelf::app::Qwen35ComputeRuntime::create(config);
     if (!runtime_result.ok()) {
         fprintf(stderr, "runtime create failed: %s\n",
                 runtime_result.status().message().c_str());
         return 1;
     }
-    std::unique_ptr<ps::app::Qwen35ComputeRuntime> runtime = runtime_result.release();
+    std::unique_ptr<shelf::app::Qwen35ComputeRuntime> runtime = runtime_result.release();
 
     if (config.prefix_cache && !runtime->prefix_cache_active()) {
         fprintf(opt.serve_stdio ? stderr : stdout,
@@ -218,8 +218,8 @@ int main(int argc, char** argv) {
                 runtime->prefix_cache_error().c_str());
     }
 
-    ps::app::DFlashServeContext dflash_serve;
-    if (ps::app::compute_dflash_enabled(opt)) {
+    shelf::app::DFlashServeContext dflash_serve;
+    if (shelf::app::compute_dflash_enabled(opt)) {
         dflash_serve.enabled = true;
         dflash_serve.config = dflash_config;
         dflash_serve.model_dir = opt.dflash2_model_dir;
@@ -227,17 +227,17 @@ int main(int argc, char** argv) {
     }
 
     if (opt.serve_stdio) {
-        return ps::app::run_serve_stdio(*runtime, dflash_serve);
+        return shelf::app::run_serve_stdio(*runtime, dflash_serve);
     }
     printf("DECODE_BACKEND=%s\n",
-           ps::qwen35::runtime::decode_backend_name(
+           shelf::qwen35::runtime::decode_backend_name(
                runtime->config().decode_backend));
-    if (ps::app::compute_dflash_enabled(opt)) {
-        return ps::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
+    if (shelf::app::compute_dflash_enabled(opt)) {
+        return shelf::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
                                 opt.dflash2_model_dir, opt.dflash2_drafts, opt.dflash2_stats,
                                 opt.kv_cache_dtype, opt.sampling);
     }
-    return ps::app::run_single_shot(*runtime, prompt_ids, opt.max_new_tokens,
+    return shelf::app::run_single_shot(*runtime, prompt_ids, opt.max_new_tokens,
                                     opt.sampling, opt.kv_cache_dtype,
                                     opt.dump_logits_path);
 }

@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct KvAppendCommonArgs {
     const bf16_t* k_input = nullptr;
@@ -88,12 +88,12 @@ hipError_t
 launch_kv_append_fp8_e4m3(
     const KvAppendCommonArgs& common,
 
-    ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    ::shelf::kernel::fp8e4m3_storage_t* v_pool,
 
     float* k_scale_pool,
     float* v_scale_pool,
 
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -7,7 +7,7 @@
 #include <cstring>
 #include <iostream>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 namespace {
@@ -456,4 +456,4 @@ Result<DeviceAllocationView> GpuArena::used_prefix_view() const {
 }
 
 } // namespace gpu
-} // namespace ps
+} // namespace shelf

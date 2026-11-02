@@ -3,7 +3,7 @@
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 
-namespace ps::gpu {
+namespace shelf::gpu {
 
 class ScopedDevice {
 public:
@@ -30,4 +30,4 @@ private:
     bool restore_required_ = false;
 };
 
-} // namespace ps::gpu
+} // namespace shelf::gpu

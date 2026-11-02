@@ -13,22 +13,22 @@
 
 namespace {
 
-using ps::bf16_t;
-using ps::state::GdnStatePool;
-using ps::state::GdnStatePoolLayout;
-using ps::kernel::KVCacheDType;
-using ps::state::PageId;
-using ps::state::PagedKVPool;
-using ps::state::PagedSequenceState;
-using ps::state::SequenceSlotPool;
-using ps::state::commit_sequence_append;
-using ps::state::create_paged_sequence_state;
-using ps::state::release_paged_sequence_state;
-using ps::state::reserve_sequence_append;
-using ps::qwen35::runtime::PrefixCache;
-using ps::qwen35::runtime::PrefixCacheConfig;
-using ps::qwen35::runtime::PrefixCacheStats;
-using ps::qwen35::runtime::PrefixHit;
+using shelf::bf16_t;
+using shelf::state::GdnStatePool;
+using shelf::state::GdnStatePoolLayout;
+using shelf::kernel::KVCacheDType;
+using shelf::state::PageId;
+using shelf::state::PagedKVPool;
+using shelf::state::PagedSequenceState;
+using shelf::state::SequenceSlotPool;
+using shelf::state::commit_sequence_append;
+using shelf::state::create_paged_sequence_state;
+using shelf::state::release_paged_sequence_state;
+using shelf::state::reserve_sequence_append;
+using shelf::qwen35::runtime::PrefixCache;
+using shelf::qwen35::runtime::PrefixCacheConfig;
+using shelf::qwen35::runtime::PrefixCacheStats;
+using shelf::qwen35::runtime::PrefixHit;
 
 int g_pass = 0;
 int g_fail = 0;
@@ -50,7 +50,7 @@ constexpr uint32_t kAttnLayers = 2;
 constexpr uint32_t kMaxSeqLen = 64;
 
 struct Env {
-    ps::gpu::GpuArena* arena = nullptr;
+    shelf::gpu::GpuArena* arena = nullptr;
     PagedKVPool* kv_bf16 = nullptr;
     PagedKVPool* kv_fp8 = nullptr;
     GdnStatePool* gdn = nullptr;
@@ -83,7 +83,7 @@ std::optional<PrefixCache> make_cache(
 }
 
 bool append_tokens(PagedSequenceState& seq, uint32_t count, hipStream_t stream) {
-    const ps::Status reserve_st = reserve_sequence_append(seq, count, stream);
+    const shelf::Status reserve_st = reserve_sequence_append(seq, count, stream);
     if (!reserve_st.ok()) return false;
     return commit_sequence_append(seq, seq.request_handle(), count).ok();
 }
@@ -237,7 +237,7 @@ bool verify_kv(
 
 bool seed_state(
     GdnStatePool& pool,
-    ps::state::SequenceSlotId slot,
+    shelf::state::SequenceSlotId slot,
     uint32_t tag,
     hipStream_t stream) {
     if (hipStreamSynchronize(stream) != hipSuccess) return false;
@@ -255,11 +255,11 @@ bool seed_state(
         }
         const std::size_t rec_count = static_cast<std::size_t>(pool.num_v_heads())
             * pool.head_k() * pool.head_v();
-        std::vector<uint8_t> rec_bytes(rec_count * sizeof(ps::fp16_t));
+        std::vector<uint8_t> rec_bytes(rec_count * sizeof(shelf::fp16_t));
         for (std::size_t i = 0; i < rec_bytes.size(); ++i) {
             rec_bytes[i] = state_byte(tag, s, 1, i);
         }
-        if (hipMemcpy(state.recurrent_state.data<ps::fp16_t>(), rec_bytes.data(),
+        if (hipMemcpy(state.recurrent_state.data<shelf::fp16_t>(), rec_bytes.data(),
                       rec_bytes.size(), hipMemcpyHostToDevice) != hipSuccess) {
             return false;
         }
@@ -269,7 +269,7 @@ bool seed_state(
 
 bool verify_state(
     GdnStatePool& pool,
-    ps::state::SequenceSlotId slot,
+    shelf::state::SequenceSlotId slot,
     uint32_t tag,
     hipStream_t stream) {
     if (hipStreamSynchronize(stream) != hipSuccess) return false;
@@ -287,8 +287,8 @@ bool verify_state(
         }
         const std::size_t rec_count = static_cast<std::size_t>(pool.num_v_heads())
             * pool.head_k() * pool.head_v();
-        std::vector<uint8_t> rec_bytes(rec_count * sizeof(ps::fp16_t));
-        if (hipMemcpy(rec_bytes.data(), state.recurrent_state.data<ps::fp16_t>(),
+        std::vector<uint8_t> rec_bytes(rec_count * sizeof(shelf::fp16_t));
+        if (hipMemcpy(rec_bytes.data(), state.recurrent_state.data<shelf::fp16_t>(),
                       rec_bytes.size(), hipMemcpyDeviceToHost) != hipSuccess) {
             return false;
         }
@@ -301,7 +301,7 @@ bool verify_state(
 
 void free_seq(std::optional<PagedSequenceState>& seq, hipStream_t stream) {
     if (seq.has_value()) {
-        const ps::Status st = release_paged_sequence_state(*seq, stream);
+        const shelf::Status st = release_paged_sequence_state(*seq, stream);
         if (!st.ok()) {
             std::printf("release_paged_sequence_state failed: %s\n",
                         st.message().c_str());
@@ -631,10 +631,10 @@ void test_capture(Env& env) {
     if (!seq.has_value()) return;
 
     const auto capture = cache.begin_capture(*seq);
-    check(capture.ok() && capture.value() != ps::qwen35::runtime::kInvalidCapture,
+    check(capture.ok() && capture.value() != shelf::qwen35::runtime::kInvalidCapture,
           "capture begin");
     if (!capture.ok()) return;
-    const ps::qwen35::runtime::CaptureId capture_id = capture.value();
+    const shelf::qwen35::runtime::CaptureId capture_id = capture.value();
 
     const struct {
         uint32_t delta;
@@ -654,7 +654,7 @@ void test_capture(Env& env) {
             check(false, "capture seed state");
             return;
         }
-        const ps::Status st = cache.capture_boundary(capture_id, *seq, env.stream);
+        const shelf::Status st = cache.capture_boundary(capture_id, *seq, env.stream);
         if (!st.ok()) {
             check(false, "capture boundary");
             return;
@@ -687,8 +687,8 @@ void test_capture(Env& env) {
     check(verify_kv(*env.kv_bf16, *dst, 50, env.stream), "capture restore kv bytes");
     free_seq(dst, env.stream);
 
-    const ps::Status stale_st = cache.cancel_capture(capture_id);
-    check(stale_st.code() == ps::Status::Code::invalid_argument,
+    const shelf::Status stale_st = cache.cancel_capture(capture_id);
+    check(stale_st.code() == shelf::Status::Code::invalid_argument,
           "capture cancel after save rejected");
 
     const auto capture_h1 = cache.begin_capture(*seq);
@@ -703,8 +703,8 @@ void test_capture(Env& env) {
     const auto capture_h4 = cache.begin_capture(*seq);
     check(capture_h4.ok(), "capture begin after cancel");
     if (capture_h1.ok()) {
-        const ps::Status again_st = cache.cancel_capture(capture_h1.value());
-        check(again_st.code() == ps::Status::Code::invalid_argument,
+        const shelf::Status again_st = cache.cancel_capture(capture_h1.value());
+        check(again_st.code() == shelf::Status::Code::invalid_argument,
               "capture cancel stale rejected");
     }
     if (capture_h2.ok()) {
@@ -752,17 +752,17 @@ void test_capture(Env& env) {
           "capture floor kv bytes");
     free_seq(dst_floor, env.stream);
 
-    const ps::Status bad_input = cache.save_input_boundary(
+    const shelf::Status bad_input = cache.save_input_boundary(
         *seq, tokens_floor, 17, env.stream);
-    check(bad_input.code() == ps::Status::Code::invalid_argument,
+    check(bad_input.code() == shelf::Status::Code::invalid_argument,
           "save position mismatch rejected");
 
     const auto capture_bad = cache.begin_capture(*seq_floor);
     check(capture_bad.ok(), "capture bad handle begin");
     if (capture_bad.ok()) {
-        const ps::Status bad_tail = cache.save_output_tail(
+        const shelf::Status bad_tail = cache.save_output_tail(
             capture_bad.value(), *seq_floor, tokens_floor, 17, env.stream);
-        check(bad_tail.code() == ps::Status::Code::invalid_argument,
+        check(bad_tail.code() == shelf::Status::Code::invalid_argument,
               "output tail position mismatch rejected");
         check(cache.cancel_capture(capture_bad.value()).ok(),
               "capture cancel after rejected save");
@@ -908,11 +908,11 @@ void test_eviction(Env& env) {
           "eviction blocked seed state 6");
 
     const uint32_t active_before = env.kv_bf16->num_used_pages();
-    const ps::Status blocked_st =
+    const shelf::Status blocked_st =
         blocked_cache.save_input_boundary(*seq6, tokens6, 8, env.stream);
     const uint32_t active_after = env.kv_bf16->num_used_pages();
 
-    check(blocked_st.code() == ps::Status::Code::insufficient_memory,
+    check(blocked_st.code() == shelf::Status::Code::insufficient_memory,
           "eviction reports skipped too large");
     const PrefixCacheStats stats = blocked_cache.stats();
     check(stats.skipped_too_large == 1, "eviction too large counted");
@@ -1195,7 +1195,7 @@ void test_spec_ring(Env& env) {
     check(seed_kv(*env.kv_bf16, *seq, 90, env.stream), "spec ring seed kv");
     check(seed_state(*env.gdn, seq->slot, 90, env.stream), "spec ring seed state");
 
-    ps::qwen35::runtime::SpecRingRef ring_ref;
+    shelf::qwen35::runtime::SpecRingRef ring_ref;
     ring_ref.k = ring_k;
     ring_ref.v = ring_v;
     ring_ref.length = 8;
@@ -1215,7 +1215,7 @@ void test_spec_ring(Env& env) {
         hipFree(ring_v);
         return;
     }
-    ps::qwen35::runtime::SpecRingOut ring_out;
+    shelf::qwen35::runtime::SpecRingOut ring_out;
     ring_out.k = out_k;
     ring_out.v = out_v;
 
@@ -1290,11 +1290,11 @@ void test_tier_fail_closed(Env& env) {
     check(seed_state(*env.gdn, seq_d->slot, 88, env.stream), "fail closed seed state d");
 
     const uint32_t active_before = env.kv_bf16->num_used_pages();
-    const ps::Status st =
+    const shelf::Status st =
         cache.save_input_boundary(*seq_d, tokens_d, 8, env.stream);
     const uint32_t active_after = env.kv_bf16->num_used_pages();
 
-    check(st.code() == ps::Status::Code::insufficient_memory,
+    check(st.code() == shelf::Status::Code::insufficient_memory,
           "fail closed reports insufficient memory");
     const PrefixCacheStats stats = cache.stats();
     check(stats.skipped_too_large == 1, "fail closed too large counted");
@@ -1322,12 +1322,12 @@ int main() {
         return 77;
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 128ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 128ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
@@ -1378,7 +1378,7 @@ int main() {
     test_spec_ring(env);
     test_tier_fail_closed(env);
 
-    const ps::Status arena_release = arena.shutdown();
+    const shelf::Status arena_release = arena.shutdown();
     check(arena_release.ok(), "arena shutdown");
 
     if (hipStreamDestroy(stream) != hipSuccess) {

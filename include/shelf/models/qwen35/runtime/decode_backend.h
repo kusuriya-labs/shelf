@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -16,4 +16,4 @@ bool parse_decode_backend(const char* text, DecodeBackend* out);
 
 }  // namespace runtime
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

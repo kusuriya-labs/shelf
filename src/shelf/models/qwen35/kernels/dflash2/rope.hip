@@ -6,9 +6,9 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
-using namespace ::ps::kernel::detail;
+using namespace ::shelf::kernel::detail;
 
 namespace {
 

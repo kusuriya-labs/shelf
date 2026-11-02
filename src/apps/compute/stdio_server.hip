@@ -26,7 +26,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace ps::app {
+namespace shelf::app {
 namespace {
 
 void emit_json(const nlohmann::json& value) {
@@ -55,11 +55,11 @@ void emit_error_with_code(
     emit_json(ev);
 }
 
-const char* status_error_code(ps::Status::Code code) {
+const char* status_error_code(shelf::Status::Code code) {
     switch (code) {
-        case ps::Status::Code::invalid_argument:
-        case ps::Status::Code::out_of_range:
-        case ps::Status::Code::unsupported:
+        case shelf::Status::Code::invalid_argument:
+        case shelf::Status::Code::out_of_range:
+        case shelf::Status::Code::unsupported:
             return "invalid_argument";
         default:
             return "internal";
@@ -122,7 +122,7 @@ bool jsonl_take_line(JsonlInput& input, std::string& line) {
     return true;
 }
 
-void serve_emit_tokens(ps::app::Qwen35ComputeRuntime& runtime,
+void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
                        ServeGeneration& generation) {
     const auto* request = runtime.request(generation.internal_request_id);
     if (request == nullptr) return;
@@ -146,7 +146,7 @@ bool serve_is_recent_terminal(const ServeState& state, int64_t external_request_
                      external_request_id) != state.recent_terminal_ids.end();
 }
 
-void serve_emit_done(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+void serve_emit_done(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                      const ServeGeneration& generation) {
     const auto* request = runtime.request(generation.internal_request_id);
     nlohmann::json done;
@@ -171,7 +171,7 @@ void serve_emit_done(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
     serve_push_terminal(state, generation.external_request_id);
 }
 
-void serve_retire(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+void serve_retire(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                   ServeGeneration& generation) {
     auto retire_status = runtime.retire(generation.internal_request_id);
     if (!retire_status.ok()) {
@@ -182,7 +182,7 @@ void serve_retire(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
     state.inflight.erase(generation.external_request_id);
 }
 
-void serve_fail_all(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+void serve_fail_all(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                     const std::string& message) {
     auto cleanup = runtime.cancel_all();
     if (!cleanup.ok()) {
@@ -210,7 +210,7 @@ void serve_fail_all(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
     }
 }
 
-void serve_cancel_all_inflight(ps::app::Qwen35ComputeRuntime& runtime,
+void serve_cancel_all_inflight(shelf::app::Qwen35ComputeRuntime& runtime,
                                ServeState& state) {
     auto cancel_status = runtime.cancel_all();
     if (!cancel_status.ok()) {
@@ -231,7 +231,7 @@ void serve_cancel_all_inflight(ps::app::Qwen35ComputeRuntime& runtime,
     }
 }
 
-void serve_step(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
+void serve_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
     if (state.inflight.empty()) return;
     auto step_result = runtime.step();
     if (!step_result.ok()) {
@@ -243,7 +243,7 @@ void serve_step(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
         for (const auto& entry : state.inflight) {
             const auto* request = runtime.request(entry.second.internal_request_id);
             if (request == nullptr) continue;
-            if (request->state == ps::qwen35::runtime::RequestState::Finished) {
+            if (request->state == shelf::qwen35::runtime::RequestState::Finished) {
                 if (!request->error_message.empty()) {
                     detail = request->error_message;
                     break;
@@ -266,7 +266,7 @@ void serve_step(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
         serve_emit_tokens(runtime, entry.second);
         const auto* request = runtime.request(entry.second.internal_request_id);
         if (request != nullptr &&
-            request->state == ps::qwen35::runtime::RequestState::Finished) {
+            request->state == shelf::qwen35::runtime::RequestState::Finished) {
             finished.push_back(entry.first);
         }
     }
@@ -278,12 +278,12 @@ void serve_step(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
     }
 }
 
-bool serve_cancel_one(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+bool serve_cancel_one(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                       int64_t external_request_id) {
     auto it = state.inflight.find(external_request_id);
     if (it == state.inflight.end()) return false;
     ServeGeneration& generation = it->second;
-    const ps::Status cancel_status = runtime.cancel(generation.internal_request_id);
+    const shelf::Status cancel_status = runtime.cancel(generation.internal_request_id);
     if (!cancel_status.ok()) {
         serve_fail_all(runtime, state, cancel_status.message());
         return true;
@@ -291,7 +291,7 @@ bool serve_cancel_one(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
     serve_emit_tokens(runtime, generation);
     const auto* request = runtime.request(generation.internal_request_id);
     if (request == nullptr ||
-        request->state != ps::qwen35::runtime::RequestState::Finished) {
+        request->state != shelf::qwen35::runtime::RequestState::Finished) {
         serve_fail_all(runtime, state, "cancel did not finish the request");
         return true;
     }
@@ -300,7 +300,7 @@ bool serve_cancel_one(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
     return true;
 }
 
-bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                           DFlashServeContext& dflash,
                           const nlohmann::json& request) {
     if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
@@ -381,7 +381,7 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         return false;
     }
 
-    ps::qwen35::runtime::SamplingConfig sampling;
+    shelf::qwen35::runtime::SamplingConfig sampling;
     if (request.contains("temperature")) {
         if (!request["temperature"].is_number()) {
             emit_error(request_id, "temperature must be a number");
@@ -417,13 +417,13 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         }
         sampling.seed = static_cast<uint64_t>(request["seed"].get<long long>());
     }
-    const ps::Status sampling_status = ps::qwen35::runtime::validate_sampling_config(sampling);
+    const shelf::Status sampling_status = shelf::qwen35::runtime::validate_sampling_config(sampling);
     if (!sampling_status.ok()) {
         emit_error(request_id, sampling_status.message());
         return false;
     }
 
-    ps::qwen35::runtime::ThinkingBudget thinking;
+    shelf::qwen35::runtime::ThinkingBudget thinking;
     if (request.contains("reasoning_budget_tokens")) {
         if (!request["reasoning_budget_tokens"].is_number_integer() ||
             request["reasoning_budget_tokens"].get<long long>() < 0) {
@@ -460,7 +460,7 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
     generation.emitted_tokens = 0;
     generation.max_new_tokens = max_new_tokens;
 
-    ps::Result<uint64_t> submit_result =
+    shelf::Result<uint64_t> submit_result =
         runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
     if (!submit_result.ok()) {
         emit_error_with_code(request_id,
@@ -473,7 +473,7 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
     return true;
 }
 
-void serve_handle_command(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
                           DFlashServeContext& dflash, const std::string& line) {
     nlohmann::json request;
     try {
@@ -552,29 +552,29 @@ void serve_handle_command(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
 
 }  // namespace
 
-std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> build_serve_rank_bindings(
-    ps::app::Qwen35ComputeRuntime& runtime) {
-    std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> bindings;
-    ps::qwen35::runtime::TpCoordinator* tp = runtime.tp_coordinator();
+std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> build_serve_rank_bindings(
+    shelf::app::Qwen35ComputeRuntime& runtime) {
+    std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> bindings;
+    shelf::qwen35::runtime::TpCoordinator* tp = runtime.tp_coordinator();
     if (tp == nullptr) return bindings;
     bindings.reserve(static_cast<std::size_t>(tp->tp_size()));
     for (int r = 0; r < tp->tp_size(); ++r) {
         auto& rank = tp->rank(static_cast<std::size_t>(r));
-        bindings.push_back(ps::qwen35::runtime::DFlash2GdnRankBinding{
+        bindings.push_back(shelf::qwen35::runtime::DFlash2GdnRankBinding{
             &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id(),
             &rank.executor().host_model_state, &rank.executor()});
     }
     return bindings;
 }
 
-int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
+int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                     DFlashServeContext& dflash) {
-    const std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> serve_rank_bindings =
+    const std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> serve_rank_bindings =
         build_serve_rank_bindings(runtime);
-    const std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding>* serve_rank_ptr =
+    const std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding>* serve_rank_ptr =
         serve_rank_bindings.empty() ? nullptr : &serve_rank_bindings;
-    ps::weights::MatrixWeight* private_lm_head = nullptr;
-    ps::weights::MatrixWeight* private_embed = nullptr;
+    shelf::weights::MatrixWeight* private_lm_head = nullptr;
+    shelf::weights::MatrixWeight* private_embed = nullptr;
     if (runtime.config().tp > 1) {
         auto* tp = runtime.tp_coordinator();
         if (tp != nullptr && tp->tp_size() > 0) {
@@ -585,13 +585,13 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     }
     if (dflash.enabled) {
         if (runtime.config().max_concurrent_requests >
-            ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows /
+            shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows /
                 static_cast<uint32_t>(dflash.config.block_size)) {
             fprintf(stderr,
                     "dflash2 serve: max_concurrent_requests %u exceeds verify row cap %u "
                     "for block_size %zu\n",
                     runtime.config().max_concurrent_requests,
-                    ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows,
+                    shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows,
                     dflash.config.block_size);
             return 1;
         }
@@ -610,9 +610,9 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         const uint32_t batch_max_rows = std::min<uint32_t>(
             runtime.config().max_concurrent_requests *
                 static_cast<uint32_t>(dflash.config.block_size),
-            ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
+            shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
         const bool serve_tp_sharded = runtime.config().tp > 1;
-        ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+        shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_batch_rows = batch_max_rows;
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
@@ -621,7 +621,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         draft_config.target_embed_tokens =
             serve_tp_sharded ? private_embed
                              : &runtime.model().weights().embed_tokens;
-        auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
+        auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {
             fprintf(stderr, "dflash2 executor create failed: %s\n",
@@ -631,11 +631,11 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         dflash.executor = draft_result.release();
         dflash.executor_ready = true;
         {
-            std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> bindings;
+            std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> bindings;
             if (serve_rank_ptr != nullptr) {
                 bindings = serve_rank_bindings;
             } else {
-                ps::qwen35::runtime::DFlash2GdnRankBinding binding;
+                shelf::qwen35::runtime::DFlash2GdnRankBinding binding;
                 binding.pool = &runtime.gdn_pool();
                 binding.arena = &runtime.arena();
                 binding.stream = runtime.stream();
@@ -643,7 +643,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
                 bindings.push_back(binding);
             }
             auto batch_result =
-                ps::qwen35::runtime::create_dflash2_spec_batch_context(
+                shelf::qwen35::runtime::create_dflash2_spec_batch_context(
                     bindings, batch_max_rows);
             if (!batch_result.ok()) {
                 fprintf(stderr, "dflash2 batch context create failed: %s\n",
@@ -654,10 +654,10 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
             dflash.batch_ready = true;
         }
         {
-            ps::qwen35::runtime::DFlash2SpecDecoderConfig session_config;
+            shelf::qwen35::runtime::DFlash2SpecDecoderConfig session_config;
             session_config.num_drafts = dflash.drafts;
             session_config.eos_tokens = text_config.stop_tokens;
-            auto sessions_result = ps::qwen35::runtime::DFlash2SessionPool::create(
+            auto sessions_result = shelf::qwen35::runtime::DFlash2SessionPool::create(
                 runtime.executor(), &dflash.executor, runtime.gdn_pool(),
                 runtime.arena(), session_config,
                 runtime.config().max_concurrent_requests, runtime.stream(), serve_rank_ptr);
@@ -669,7 +669,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
             dflash.sessions = sessions_result.release();
             dflash.sessions_ready = true;
         }
-        ps::qwen35::runtime::DFlash2BatcherBinding batcher_binding;
+        shelf::qwen35::runtime::DFlash2BatcherBinding batcher_binding;
         batcher_binding.config = &dflash.config;
         batcher_binding.executor = &dflash.executor;
         batcher_binding.batch = &dflash.batch;
@@ -678,7 +678,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.num_drafts = dflash.drafts;
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
-        const ps::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);
+        const shelf::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);
         if (!bind_st.ok()) {
             fprintf(stderr, "dflash2 batcher binding failed: %s\n",
                     bind_st.message().c_str());
@@ -723,7 +723,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     if (dflash.enabled &&
         serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
         serve_stats_env[0] != '0') {
-        const ps::qwen35::runtime::DFlash2BatcherStats& t = dflash.stats;
+        const shelf::qwen35::runtime::DFlash2BatcherStats& t = dflash.stats;
         const float rounds = static_cast<float>(t.rounds);
         const float mean =
             t.rounds > 0u ? static_cast<float>(t.accepted_drafts) / rounds : 0.0f;
@@ -761,11 +761,11 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
             fprintf(stderr, "DFLASH2_VERIFY_ROWS_PER_ROUND=%.3f\n",
                     static_cast<double>(t.verify_rows) / rounds);
         }
-        for (uint32_t b = 0; b < ps::qwen35::runtime::kDFlash2PositionBuckets; ++b) {
-            const ps::qwen35::runtime::DFlash2PositionStats& p = t.position[b];
-            const uint32_t lo = b * ps::qwen35::runtime::kDFlash2PositionBucketTokens;
+        for (uint32_t b = 0; b < shelf::qwen35::runtime::kDFlash2PositionBuckets; ++b) {
+            const shelf::qwen35::runtime::DFlash2PositionStats& p = t.position[b];
+            const uint32_t lo = b * shelf::qwen35::runtime::kDFlash2PositionBucketTokens;
             const uint32_t hi =
-                (b + 1u) * ps::qwen35::runtime::kDFlash2PositionBucketTokens;
+                (b + 1u) * shelf::qwen35::runtime::kDFlash2PositionBucketTokens;
             const float bucket_rounds = static_cast<float>(p.rounds);
             const float bucket_mean =
                 p.rounds > 0u ? static_cast<float>(p.accepted_drafts) / bucket_rounds
@@ -785,7 +785,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     }
 
     if (dflash.sessions_ready) {
-        const ps::Status sessions_st = dflash.sessions.shutdown();
+        const shelf::Status sessions_st = dflash.sessions.shutdown();
         dflash.sessions_ready = false;
         if (!sessions_st.ok()) {
             fprintf(stderr, "dflash2 session pool shutdown failed: %s\n",
@@ -794,8 +794,8 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     }
 
     if (dflash.batch_ready) {
-        const ps::Status batch_st =
-            ps::qwen35::runtime::shutdown_dflash2_spec_batch_context(dflash.batch);
+        const shelf::Status batch_st =
+            shelf::qwen35::runtime::shutdown_dflash2_spec_batch_context(dflash.batch);
         dflash.batch_ready = false;
         if (!batch_st.ok()) {
             fprintf(stderr, "dflash2 batch context shutdown failed: %s\n",
@@ -804,8 +804,8 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     }
 
     if (dflash.executor_ready) {
-        const ps::Status draft_st =
-            ps::qwen35::dflash2::dflash2_executor_shutdown(dflash.executor);
+        const shelf::Status draft_st =
+            shelf::qwen35::dflash2::dflash2_executor_shutdown(dflash.executor);
         dflash.executor_ready = false;
         if (!draft_st.ok()) {
             fprintf(stderr, "dflash2 executor shutdown failed: %s\n",
@@ -821,4 +821,4 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     return 0;
 }
 
-}  // namespace ps::app
+}  // namespace shelf::app

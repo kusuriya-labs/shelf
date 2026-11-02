@@ -2,7 +2,7 @@
 
 #include <atomic>
 
-namespace ps {
+namespace shelf {
 namespace runtime {
 
 namespace {
@@ -157,4 +157,4 @@ uint32_t stream_signal_load(const StreamSignal& memory) noexcept {
 }
 
 }  // namespace runtime
-}  // namespace ps
+}  // namespace shelf

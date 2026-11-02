@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -52,4 +52,4 @@ resolve_paged_token(
 
 }  // namespace
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

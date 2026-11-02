@@ -1,14 +1,14 @@
 #include <shelf/inference/execution/selectors/rmsnorm_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 namespace {
 
 struct RmsNormRule {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
-    ::ps::runtime::ValueDType weight_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType weight_dtype;
     RmsNormSelectorWeightLayout weight_layout;
     uint32_t weight_mode;
     uint32_t features;
@@ -20,35 +20,35 @@ struct RmsNormRule {
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 
 constexpr RmsNormRule kRmsNormRules[] = {
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::BF16,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
       0, 2560, 2560, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::BF16,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
       0, 5120, 5120, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 1024, 256, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 4096, 256, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       1, 4096, 128, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       1, 6144, 128, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 6144, 256, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       1, 3072, 128, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 512, 256, 1, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
-      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 3072, 256, 1, kMeasuredMaxRows },
 };
 

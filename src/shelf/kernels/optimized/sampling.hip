@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kThreads = 256u;
@@ -54,7 +54,7 @@ void argmax_reduce_block(float& best_value, uint32_t& best_token) {
 
 __device__ __forceinline__ void argmax_single_body(
                                    const float* __restrict__ logits,
-                                   const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+                                   const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    int32_t* __restrict__ sampled_tokens,
                                    uint32_t vocab_size,
                                    uint32_t logits_row_stride,
@@ -81,7 +81,7 @@ __device__ __forceinline__ void argmax_single_body(
 }
 
 __global__ void argmax_single_impl(const float* __restrict__ logits,
-                                   const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+                                   const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    int32_t* __restrict__ sampled_tokens,
                                    uint32_t vocab_size,
                                    uint32_t logits_row_stride) {
@@ -90,7 +90,7 @@ __global__ void argmax_single_impl(const float* __restrict__ logits,
 }
 
 __global__ void argmax_stage1_impl(const float* __restrict__ logits,
-                                   const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+                                   const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    ArgMaxPair* __restrict__ partials,
                                    uint32_t vocab_size, uint32_t partitions,
                                    uint32_t logits_row_stride) {
@@ -114,7 +114,7 @@ __global__ void argmax_stage1_impl(const float* __restrict__ logits,
             ArgMaxPair{best_value, best_token};
 }
 
-__global__ void argmax_stage2_impl(const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+__global__ void argmax_stage2_impl(const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    int32_t* __restrict__ sampled_tokens,
                                    const ArgMaxPair* __restrict__ partials,
                                    uint32_t partitions) {
@@ -175,7 +175,7 @@ void top2_merge(float& v1, uint32_t& t1, float& v2, uint32_t& t2,
 }
 
 __global__ void argmax_top2_impl(const float* __restrict__ logits,
-                                 const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
+                                 const ::shelf::runtime::DeviceSamplingParams* __restrict__ sampling,
                                  ArgMaxTop2* __restrict__ out,
                                  uint32_t vocab_size,
                                  uint32_t logits_row_stride) {
@@ -219,7 +219,7 @@ __global__ void argmax_top2_impl(const float* __restrict__ logits,
 
 hipError_t launch_argmax_f32_top2(
     const float* logits,
-    const ::ps::runtime::DeviceSamplingParams* sampling,
+    const ::shelf::runtime::DeviceSamplingParams* sampling,
     ArgMaxTop2* out,
     uint32_t outputs,
     uint32_t vocab_size,
@@ -265,4 +265,4 @@ hipError_t launch_argmax_f32_partitioned(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

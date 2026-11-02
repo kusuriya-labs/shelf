@@ -11,7 +11,7 @@
 
 #include <algorithm>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 namespace runtime {
 
 namespace {
@@ -36,7 +36,7 @@ std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) no
 }
 
 std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
-                                         const ::ps::state::GdnStatePool& pool) noexcept {
+                                         const ::shelf::state::GdnStatePool& pool) noexcept {
     const std::size_t verify_rows = kDFlash2SpecMaxVerifyRows;
     std::size_t total = align_up(verify_rows * sizeof(int32_t)) +
                         align_up(2u * verify_rows * sizeof(int32_t));
@@ -45,7 +45,7 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
     const std::size_t rec_bytes = spec_gdn_recurrent_bytes(pool);
     total += align_up(conv_bytes) + align_up(rec_bytes);
 
-    const ::ps::state::GdnStatePoolDeviceView view = pool.device_view();
+    const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
     const uint32_t history_rows = config.num_drafts == 0u ? 1u : config.num_drafts;
     total += align_up(static_cast<std::size_t>(history_rows) * view.conv_slot_stride *
                       sizeof(bf16_t));
@@ -58,13 +58,13 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
     const std::size_t kper = log_rows * static_cast<std::size_t>(view.num_v_heads) * view.head_k;
     const std::size_t aper = log_rows * static_cast<std::size_t>(view.num_v_heads);
     total += align_up(states * (dper + kper + aper) * sizeof(float));
-    total += align_up(sizeof(::ps::runtime::DeviceRequestDescriptor));
+    total += align_up(sizeof(::shelf::runtime::DeviceRequestDescriptor));
     return total;
 }
 
-std::size_t dflash2_spec_batch_context_bytes(const ::ps::state::GdnStatePool& pool,
+std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,
                                              std::size_t max_rows) noexcept {
-    const ::ps::state::GdnStatePoolDeviceView view = pool.device_view();
+    const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
     std::size_t total = align_up(max_rows * sizeof(int32_t)) +
                         align_up(2u * max_rows * sizeof(int32_t));
     total += align_up(max_rows * view.conv_slot_stride * sizeof(bf16_t));
@@ -100,23 +100,23 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
 
     total += align_up(draft * config.vocab_size * sizeof(float));
     total += align_up(draft * config.selector_top_k * (sizeof(int32_t) + sizeof(float)));
-    total += align_up(draft * (1u + 2u * ::ps::kernel::kDflash2TopKScratchPerRow) *
+    total += align_up(draft * (1u + 2u * ::shelf::kernel::kDflash2TopKScratchPerRow) *
                       sizeof(int32_t));
 
     const uint32_t act_k = static_cast<uint32_t>(
         std::max<std::size_t>(hidden, std::max<std::size_t>(lm_head_k, 1u)));
     const auto act_layout =
-        ::ps::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
+        ::shelf::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
     total += align_up(act_layout.codes_bytes()) + align_up(act_layout.scales_bytes());
 
     total += align_up(rows * (sizeof(uint32_t) + sizeof(int32_t) +
-                              sizeof(::ps::kernel::DFlash2RequestDescriptor)));
+                              sizeof(::shelf::kernel::DFlash2RequestDescriptor)));
     return total;
 }
 
 DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    const DFlash2SpecDecoderConfig& spec_config,
-                                   const ::ps::state::GdnStatePool& pool,
+                                   const ::shelf::state::GdnStatePool& pool,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
                                    uint32_t sessions) noexcept {
@@ -135,4 +135,4 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
 }
 
 }  // namespace runtime
-}  // namespace ps::qwen35
+}  // namespace shelf::qwen35

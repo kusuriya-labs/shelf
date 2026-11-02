@@ -5,7 +5,7 @@
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/state/state_types.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 

@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class GdnRecurrenceImplementation : uint8_t {
     Correctness,
@@ -21,4 +21,4 @@ struct GdnRecurrenceSelectorInput {
 GdnRecurrenceImplementation
 select_gdn_recurrence_implementation(const GdnRecurrenceSelectorInput& input);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

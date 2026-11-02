@@ -20,12 +20,12 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::kernel::ElementwiseSplitLayout;
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::kernel::ElementwiseSplitLayout;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
@@ -69,9 +69,9 @@ bool same_shape(const HostResolvedValue& x, const HostResolvedValue& y) {
 }
 
 void fill_geometry(PhysicalElementwiseLaunch& d) {
-    d.grid_x = ::ps::kernel::elementwise_grid_x(d.features);
+    d.grid_x = ::shelf::kernel::elementwise_grid_x(d.features);
     d.grid_y = d.rows;
-    d.workgroup = ::ps::kernel::kElementwiseBlock;
+    d.workgroup = ::shelf::kernel::kElementwiseBlock;
 }
 
 PhysicalResolveStatus select_profile(const PhysicalElementwiseLaunch& d) {
@@ -87,15 +87,15 @@ PhysicalResolveStatus select_profile(const PhysicalElementwiseLaunch& d) {
 }
 
 Result<PhysicalResolveStatus> resolve_unary_bf16_to_f32(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, ElementwiseProfile profile,
     PhysicalElementwiseLaunch& out) {
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (in.dtype != ValueDType::BF16 || dst.dtype != ValueDType::F32)
@@ -121,14 +121,14 @@ Result<PhysicalResolveStatus> resolve_unary_bf16_to_f32(
 }
 
 Result<PhysicalResolveStatus> resolve_unary_f32_to_bf16(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (in.dtype != ValueDType::F32 || dst.dtype != ValueDType::BF16)
@@ -154,14 +154,14 @@ Result<PhysicalResolveStatus> resolve_unary_f32_to_bf16(
 }
 
 Result<PhysicalResolveStatus> resolve_unary_f32_scale(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (in.dtype != ValueDType::F32 || dst.dtype != ValueDType::F32)
@@ -188,17 +188,17 @@ Result<PhysicalResolveStatus> resolve_unary_f32_scale(
 }
 
 Result<PhysicalResolveStatus> resolve_binary_bf16(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, ElementwiseProfile profile,
     PhysicalElementwiseLaunch& out) {
-    auto a_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto a_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!a_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue a = a_res.value();
-    auto b_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+    auto b_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
     if (!b_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue bb = b_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (a.dtype != ValueDType::BF16 || bb.dtype != ValueDType::BF16 ||
@@ -230,16 +230,16 @@ Result<PhysicalResolveStatus> resolve_binary_bf16(
 }
 
 Result<PhysicalResolveStatus> resolve_binary_f32_to_bf16(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
-    auto a_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto a_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!a_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue a = a_res.value();
-    auto b_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+    auto b_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
     if (!b_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue bb = b_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (a.dtype != ValueDType::F32 || bb.dtype != ValueDType::F32 ||
@@ -271,19 +271,19 @@ Result<PhysicalResolveStatus> resolve_binary_f32_to_bf16(
 }
 
 Result<PhysicalResolveStatus> resolve_split_desc(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
     if (b.input_count != 1u || b.output_count != 2u)
         return PhysicalResolveStatus::NotApplicable;
-    auto in_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto o0_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!o0_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue o0 = o0_res.value();
     auto o1_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[1]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[1]}, ctx);
     if (!o1_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue o1 = o1_res.value();
     if (in.dtype != ValueDType::BF16 || o0.dtype != ValueDType::BF16 ||
@@ -300,7 +300,7 @@ Result<PhysicalResolveStatus> resolve_split_desc(
     if (in.row_stride < in.feature_count || o0.row_stride < f0 || o1.row_stride < f0)
         return PhysicalResolveStatus::NotApplicable;
     const bool interleaved =
-        (b.flags == static_cast<uint32_t>(::ps::runtime::SplitLayout::INTERLEAVED_HEADS));
+        (b.flags == static_cast<uint32_t>(::shelf::runtime::SplitLayout::INTERLEAVED_HEADS));
     const uint32_t head_dim = b.group_size;
     if (interleaved) {
         if (head_dim == 0u || f0 % head_dim != 0u)
@@ -327,14 +327,14 @@ Result<PhysicalResolveStatus> resolve_split_desc(
 }
 
 Result<PhysicalResolveStatus> resolve_silu_desc(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::F32)
@@ -346,18 +346,18 @@ Result<PhysicalResolveStatus> resolve_silu_desc(
 }
 
 Result<PhysicalResolveStatus> resolve_concat_desc(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
     if (b.input_count != 2u || b.output_count != 1u)
         return PhysicalResolveStatus::NotApplicable;
-    auto a_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto a_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!a_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue a = a_res.value();
-    auto b_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+    auto b_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
     if (!b_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue bb = b_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
     if (a.dtype != ValueDType::BF16 || bb.dtype != ValueDType::BF16 ||
@@ -388,7 +388,7 @@ Result<PhysicalResolveStatus> resolve_concat_desc(
     out.features = fa;
     out.features_b = fb;
     fill_geometry(out);
-    out.grid_x = ::ps::kernel::elementwise_grid_x(fa + fb);
+    out.grid_x = ::shelf::kernel::elementwise_grid_x(fa + fb);
     return PhysicalResolveStatus::Applicable;
 }
 
@@ -396,59 +396,59 @@ hipError_t launch_elementwise_physical(const PhysicalElementwiseLaunch& d,
                                        hipStream_t stream) {
     switch (d.profile) {
         case ElementwiseProfile::ResidualBf16:
-            return ::ps::kernel::launch_residual_add_bf16(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
-                reinterpret_cast<const ::ps::bf16_t*>(d.in1), d.in1_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride, d.rows,
+            return ::shelf::kernel::launch_residual_add_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in1), d.in1_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, stream);
         case ElementwiseProfile::SwigluBf16:
-            return ::ps::kernel::launch_swiglu_bf16(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
-                reinterpret_cast<const ::ps::bf16_t*>(d.in1), d.in1_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride, d.rows,
+            return ::shelf::kernel::launch_swiglu_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in1), d.in1_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, stream);
         case ElementwiseProfile::SigmoidBf16ToF32:
-            return ::ps::kernel::launch_sigmoid_bf16_f32(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
+            return ::shelf::kernel::launch_sigmoid_bf16_f32(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
                 reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
                 stream);
         case ElementwiseProfile::SiluBf16ToF32:
-            return ::ps::kernel::launch_silu_bf16_f32(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
+            return ::shelf::kernel::launch_silu_bf16_f32(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
                 reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
                 stream);
         case ElementwiseProfile::SiluF32ToBf16:
-            return ::ps::kernel::launch_silu_f32_bf16(
+            return ::shelf::kernel::launch_silu_f32_bf16(
                 reinterpret_cast<const float*>(d.in0), d.in0_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride, d.rows,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, stream);
         case ElementwiseProfile::MulF32F32ToBf16:
-            return ::ps::kernel::launch_mul_f32_f32_bf16(
+            return ::shelf::kernel::launch_mul_f32_f32_bf16(
                 reinterpret_cast<const float*>(d.in0), d.in0_stride,
                 reinterpret_cast<const float*>(d.in1), d.in1_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride, d.rows,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, stream);
         case ElementwiseProfile::ScaleF32:
-            return ::ps::kernel::launch_scale_f32(
+            return ::shelf::kernel::launch_scale_f32(
                 reinterpret_cast<const float*>(d.in0), d.in0_stride,
                 reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
                 d.scalar_a, stream);
         case ElementwiseProfile::SplitBf16Halves:
         case ElementwiseProfile::SplitBf16InterleavedHeads:
-            return ::ps::kernel::launch_split_bf16(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out1), d.out1_stride, d.rows,
+            return ::shelf::kernel::launch_split_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out1), d.out1_stride, d.rows,
                 d.features,
                 d.profile == ElementwiseProfile::SplitBf16InterleavedHeads
                     ? ElementwiseSplitLayout::InterleavedHeads
                     : ElementwiseSplitLayout::Halves,
                 d.aux, stream);
         case ElementwiseProfile::Count:
-            return ::ps::kernel::launch_concat_bf16(
-                reinterpret_cast<const ::ps::bf16_t*>(d.in0), d.in0_stride,
-                reinterpret_cast<const ::ps::bf16_t*>(d.in1), d.in1_stride,
-                reinterpret_cast<::ps::bf16_t*>(d.out0), d.out0_stride, d.rows,
+            return ::shelf::kernel::launch_concat_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in1), d.in1_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, d.features_b, stream);
         default:
             return hipErrorNotSupported;
@@ -458,42 +458,42 @@ hipError_t launch_elementwise_physical(const PhysicalElementwiseLaunch& d,
 }  // namespace
 
 Result<PhysicalResolveStatus> resolve_elementwise_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalElementwiseLaunch& out) {
     out = PhysicalElementwiseLaunch{};
     switch (b.kernel_id) {
-        case ::ps::runtime::KernelId::RESIDUAL_ADD:
+        case ::shelf::runtime::KernelId::RESIDUAL_ADD:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_binary_bf16(program, b, ctx,
                                        ElementwiseProfile::ResidualBf16, out);
-        case ::ps::runtime::KernelId::SWIGLU:
+        case ::shelf::runtime::KernelId::SWIGLU:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_binary_bf16(program, b, ctx,
                                        ElementwiseProfile::SwigluBf16, out);
-        case ::ps::runtime::KernelId::SIGMOID:
+        case ::shelf::runtime::KernelId::SIGMOID:
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_unary_bf16_to_f32(
                 program, b, ctx, ElementwiseProfile::SigmoidBf16ToF32, out);
-        case ::ps::runtime::KernelId::SILU:
+        case ::shelf::runtime::KernelId::SILU:
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_silu_desc(program, b, ctx, out);
-        case ::ps::runtime::KernelId::MUL:
+        case ::shelf::runtime::KernelId::MUL:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_binary_f32_to_bf16(program, b, ctx, out);
-        case ::ps::runtime::KernelId::SCALE:
+        case ::shelf::runtime::KernelId::SCALE:
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_unary_f32_scale(program, b, ctx, out);
-        case ::ps::runtime::KernelId::SPLIT:
+        case ::shelf::runtime::KernelId::SPLIT:
             return resolve_split_desc(program, b, ctx, out);
-        case ::ps::runtime::KernelId::CONCAT:
+        case ::shelf::runtime::KernelId::CONCAT:
             return resolve_concat_desc(program, b, ctx, out);
         default:
             return PhysicalResolveStatus::NotApplicable;
@@ -501,7 +501,7 @@ Result<PhysicalResolveStatus> resolve_elementwise_physical(
 }
 
 Result<OptimizedLaunchResult> try_launch_elementwise(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream) {
@@ -522,4 +522,4 @@ Result<OptimizedLaunchResult> try_launch_elementwise(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

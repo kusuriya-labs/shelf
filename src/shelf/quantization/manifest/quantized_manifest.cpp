@@ -2,7 +2,7 @@
 #include <shelf/quantization/manifest/manifest_v4.h>
 #include <nlohmann/json.hpp>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 std::string quantized_encoding_name(QuantizedEncoding enc) {
     switch (enc) {
@@ -18,12 +18,12 @@ Result<QuantizedEncoding> parse_quantized_encoding(const std::string& name) {
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 
-ps::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc) {
+shelf::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc) {
     switch (enc) {
-        case QuantizedEncoding::Bf16: return ps::quantization::QuantFormatId::Bf16;
-        case QuantizedEncoding::Fp8: return ps::quantization::QuantFormatId::Fp8Finegrained;
+        case QuantizedEncoding::Bf16: return shelf::quantization::QuantFormatId::Bf16;
+        case QuantizedEncoding::Fp8: return shelf::quantization::QuantFormatId::Fp8Finegrained;
     }
-    return ps::quantization::QuantFormatId::None;
+    return shelf::quantization::QuantFormatId::None;
 }
 
 namespace {

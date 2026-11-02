@@ -10,7 +10,7 @@
 #include <limits>
 #include <unordered_map>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 namespace {
 
@@ -137,7 +137,7 @@ struct Ctx {
         if (row_stride != 0) {
             b.row_stride = row_stride;
         } else if (storage == ValueStorage::WORKSPACE) {
-            b.row_stride = ::ps::gpu::aligned_row_stride(sp.features, value_dtype_bytes(sp.dtype));
+            b.row_stride = ::shelf::gpu::aligned_row_stride(sp.features, value_dtype_bytes(sp.dtype));
         } else {
             b.row_stride = sp.features;
         }
@@ -210,7 +210,7 @@ const T& node_as(const PrimitiveGraphNode& n) {
 }
 
 Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
-    using namespace ps::runtime;
+    using namespace shelf::runtime;
     auto kind = primitive_kind_of(node.node);
     for (auto in : node.inputs) {
         auto st = c.require_input(in);

@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ float dflash2_round_to_bf16_f32(float x) {
     uint32_t u = __float_as_uint(x);
@@ -38,4 +38,4 @@ __device__ __forceinline__ void dflash2_rope_pair_body(
     dst[pair + half] = __float2bfloat16(p3 + p4);
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

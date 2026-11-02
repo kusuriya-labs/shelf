@@ -20,11 +20,11 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
@@ -36,8 +36,8 @@ uint32_t l2_rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx
 }  // namespace
 
 Result<PhysicalResolveStatus> resolve_l2_normalize_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalL2NormalizeLaunch& out) {
     out = PhysicalL2NormalizeLaunch{};
@@ -45,11 +45,11 @@ Result<PhysicalResolveStatus> resolve_l2_normalize_physical(
         return PhysicalResolveStatus::NotApplicable;
 
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue in = in_res.value();
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
     const HostResolvedValue dst = out_res.value();
 
@@ -85,26 +85,26 @@ Result<PhysicalResolveStatus> resolve_l2_normalize_physical(
     out.features = F;
     out.group_size = G;
     out.eps = b.scalar_a;
-    out.grid_x = ::ps::kernel::l2_normalize_groups(F, G);
+    out.grid_x = ::shelf::kernel::l2_normalize_groups(F, G);
     out.grid_y = rows;
-    out.workgroup = ::ps::kernel::kL2NormalizeThreads;
+    out.workgroup = ::shelf::kernel::kL2NormalizeThreads;
     return PhysicalResolveStatus::Applicable;
 }
 
 Result<OptimizedLaunchResult> try_launch_l2_normalize(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size()) return kNone;
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id != ::ps::runtime::KernelId::L2_NORMALIZE) return kNone;
+    if (b.kernel_id != ::shelf::runtime::KernelId::L2_NORMALIZE) return kNone;
     PhysicalL2NormalizeLaunch launch{};
     const Result<PhysicalResolveStatus> resolved =
         resolve_l2_normalize_physical(program, b, ctx, launch);
     if (!resolved.ok()) return resolved.status();
     if (resolved.value() != PhysicalResolveStatus::Applicable) return kNone;
 
-    const hipError_t herr = ::ps::kernel::launch_l2_normalize_bf16_f32(
-        reinterpret_cast<const ::ps::bf16_t*>(launch.input),
+    const hipError_t herr = ::shelf::kernel::launch_l2_normalize_bf16_f32(
+        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
         launch.input_row_stride, reinterpret_cast<float*>(launch.output),
         launch.output_row_stride, launch.rows, launch.features, launch.group_size,
         launch.eps, stream);
@@ -116,4 +116,4 @@ Result<OptimizedLaunchResult> try_launch_l2_normalize(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

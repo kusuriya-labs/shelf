@@ -16,8 +16,8 @@
 
 namespace fs = std::filesystem;
 using namespace expert_slice_fixture;
-using ps::io::SType;
-using ps::io::StAxisSpan;
+using shelf::io::SType;
+using shelf::io::StAxisSpan;
 
 static int g_fail = 0;
 
@@ -36,7 +36,7 @@ static void check_span(const StAxisSpan& span, std::uint64_t unit_bytes,
     check(span.byte_length == byte_length, msg + " byte_length");
 }
 
-static void test_bf16_spans(const ps::weights::SafetensorsCollection& col) {
+static void test_bf16_spans(const shelf::weights::SafetensorsCollection& col) {
     auto gate_spec = col.tensor_spec(kGateUpName);
     check(gate_spec.ok(), "bf16 gate_up spec");
     if (gate_spec.ok()) {
@@ -81,18 +81,18 @@ static void test_bf16_spans(const ps::weights::SafetensorsCollection& col) {
 }
 
 static void test_fp8_manifest_contract(const fs::path& dir) {
-    check(ps::quantization::bundle::is_hf_quantized_model_dir(dir.string()),
+    check(shelf::quantization::bundle::is_hf_quantized_model_dir(dir.string()),
           "fp8 dir recognized as hf quantized");
-    auto method = ps::quantization::bundle::detect_hf_quant_method(dir.string());
+    auto method = shelf::quantization::bundle::detect_hf_quant_method(dir.string());
     check(method.ok() &&
-              method.value() == ps::quantization::bundle::HfQuantMethod::Fp8,
+              method.value() == shelf::quantization::bundle::HfQuantMethod::Fp8,
           "fp8 config accepted by detect_hf_quant_method");
 
-    auto source = ps::quantization::bundle::synthesize_hf_quantized_source(
+    auto source = shelf::quantization::bundle::synthesize_hf_quantized_source(
         dir.string(), {kGateUpName}, false);
     check(!source.ok(), "rank-3 fp8 expert rejected by hf manifest");
     if (!source.ok()) {
-        check(source.status().code() == ps::Status::Code::unsupported,
+        check(source.status().code() == shelf::Status::Code::unsupported,
               "rank-3 fp8 expert rejection is unsupported");
     }
 
@@ -105,11 +105,11 @@ static void test_fp8_manifest_contract(const fs::path& dir) {
         config << "{\"quantization_config\":{\"quant_method\":\"fp8\","
                   "\"weight_block_size\":[128,128]}}";
     }
-    check(!ps::quantization::bundle::detect_hf_quant_method(bad_dir.string()).ok(),
+    check(!shelf::quantization::bundle::detect_hf_quant_method(bad_dir.string()).ok(),
           "fp8 config without fmt e4m3 rejected");
 }
 
-static void test_fp8_spans(const ps::weights::SafetensorsCollection& col) {
+static void test_fp8_spans(const shelf::weights::SafetensorsCollection& col) {
     auto codes_spec = col.tensor_spec(kGateUpName);
     check(codes_spec.ok() && codes_spec.value().dtype == SType::F8_E4M3,
           "fp8 gate_up codes dtype");
@@ -152,9 +152,9 @@ static void test_fp8_spans(const ps::weights::SafetensorsCollection& col) {
 }
 
 static void test_preshuffle_contract(const Fixture& f) {
-    using ps::quantization::fp8::Fp8BlockCanonicalView;
-    using ps::quantization::fp8::Fp8BlockCanonicalStore;
-    using ps::quantization::fp8::Fp8NativeHost;
+    using shelf::quantization::fp8::Fp8BlockCanonicalView;
+    using shelf::quantization::fp8::Fp8BlockCanonicalStore;
+    using shelf::quantization::fp8::Fp8NativeHost;
 
     const std::uint64_t codes_per = gate_up_expert_elements();
     const std::uint64_t scales_per = gate_up_scale_elements();
@@ -177,7 +177,7 @@ static void test_preshuffle_contract(const Fixture& f) {
         check(cv.validate(), "expert canonical view validates e=" + std::to_string(e));
 
         Fp8NativeHost native;
-        const bool ok = ps::quantization::fp8::preshuffle_fp8_native(cv, native);
+        const bool ok = shelf::quantization::fp8::preshuffle_fp8_native(cv, native);
         check(ok, "expert preshuffle accepts one expert e=" + std::to_string(e));
         if (!ok) continue;
         check(native.n == kGateUpRows, "preshuffled rows");
@@ -203,7 +203,7 @@ static void test_preshuffle_contract(const Fixture& f) {
     whole.scale_k = kHidden / kScaleBlockK;
     whole.scale_block_k = kScaleBlockK;
     Fp8NativeHost native;
-    check(!ps::quantization::fp8::preshuffle_fp8_native(whole, native),
+    check(!shelf::quantization::fp8::preshuffle_fp8_native(whole, native),
           "fused rank-3 payload rejected by preshuffle");
 }
 
@@ -211,7 +211,7 @@ int main() {
     std::printf("=== Expert axis-slice fixture (CPU) ===\n");
     std::error_code ec;
     const fs::path root =
-        fs::temp_directory_path(ec) / ("ps_expert_slice_cpu_" + std::to_string(::getpid()));
+        fs::temp_directory_path(ec) / ("shelf_expert_slice_cpu_" + std::to_string(::getpid()));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
 
@@ -221,11 +221,11 @@ int main() {
     check(write_bf16_model_dir(bf16_dir, f), "bf16 fixture written");
     check(write_fp8_model_dir(fp8_dir, f), "fp8 fixture written");
 
-    auto bf16_col = ps::weights::SafetensorsCollection::open(bf16_dir.string());
+    auto bf16_col = shelf::weights::SafetensorsCollection::open(bf16_dir.string());
     check(bf16_col.ok(), "bf16 collection open");
     if (bf16_col.ok()) test_bf16_spans(bf16_col.value());
 
-    auto fp8_col = ps::weights::SafetensorsCollection::open(fp8_dir.string());
+    auto fp8_col = shelf::weights::SafetensorsCollection::open(fp8_dir.string());
     check(fp8_col.ok(), "fp8 collection open");
     if (fp8_col.ok()) test_fp8_spans(fp8_col.value());
 

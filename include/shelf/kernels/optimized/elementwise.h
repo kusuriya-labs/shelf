@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 enum class ElementwiseSplitLayout : uint8_t { Halves, InterleavedHeads };
 
@@ -121,4 +121,4 @@ hipError_t launch_concat_bf16(
     bf16_t* output, uint32_t output_row_stride,
     uint32_t rows, uint32_t features_a, uint32_t features_b, hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

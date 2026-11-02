@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 const char* spec_phase_name(SpecPhase phase) noexcept {
     switch (phase) {
@@ -145,4 +145,4 @@ Status spec_gdn_restore(
     return Status::make_ok();
 }
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

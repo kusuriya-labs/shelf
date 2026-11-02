@@ -37,8 +37,8 @@ bool run_rows(
     uint32_t in_stride,
     uint32_t out_stride,
     uint32_t seed,
-    ps::kernel::Bf16GemmOutputDType odt,
-    ps::gpu::GpuArena& arena,
+    shelf::kernel::Bf16GemmOutputDType odt,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const char* label) {
     std::mt19937 rng(seed);
@@ -51,7 +51,7 @@ bool run_rows(
         for (uint32_t c = 0; c < K; ++c)
             x[static_cast<size_t>(m) * in_stride + c] = f32_bf16(xd(rng));
 
-    const std::size_t elem = odt == ps::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
+    const std::size_t elem = odt == shelf::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
     const std::size_t out_bytes = static_cast<std::size_t>(rows) * out_stride * elem;
     auto wr = arena.allocate_aligned(w.size() * 2u, 256);
     auto xr = arena.allocate_aligned(x.size() * 2u, 256);
@@ -70,22 +70,22 @@ bool run_rows(
         check(false, label);
         return false;
     }
-    const ::ps::bf16_t* dw = reinterpret_cast<const ::ps::bf16_t*>(d_w);
-    const ::ps::bf16_t* dx = reinterpret_cast<const ::ps::bf16_t*>(d_x);
+    const ::shelf::bf16_t* dw = reinterpret_cast<const ::shelf::bf16_t*>(d_w);
+    const ::shelf::bf16_t* dx = reinterpret_cast<const ::shelf::bf16_t*>(d_x);
 
-    const ps::kernel::Bf16GemmConfig exact_cfg{
-        ps::kernel::Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows)};
-    if (::ps::kernel::launch_gemm_bf16(
+    const shelf::kernel::Bf16GemmConfig exact_cfg{
+        shelf::kernel::Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows)};
+    if (::shelf::kernel::launch_gemm_bf16(
             exact_cfg, dw, dx, d_exact, odt, rows, N, K, in_stride, out_stride, stream) !=
         hipSuccess) {
         check(false, label);
         return false;
     }
-    const ps::kernel::Bf16GemmConfig row_cfg{
-        ps::kernel::Bf16GemmConfigId::ExactRows, 1u};
+    const shelf::kernel::Bf16GemmConfig row_cfg{
+        shelf::kernel::Bf16GemmConfigId::ExactRows, 1u};
     for (uint32_t m = 0; m < rows; ++m) {
         void* dst = static_cast<uint8_t*>(d_ref) + static_cast<std::size_t>(m) * out_stride * elem;
-        if (::ps::kernel::launch_gemm_bf16(
+        if (::shelf::kernel::launch_gemm_bf16(
                 row_cfg, dw, dx + static_cast<std::size_t>(m) * in_stride, dst, odt, 1u, N, K,
                 in_stride, out_stride, stream) != hipSuccess) {
             check(false, label);
@@ -130,12 +130,12 @@ int main() {
     if (hipSetDevice(0) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
-    auto arena_result = ps::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena\n");
         return 1;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
     const uint32_t row_list[] = {2u, 3u, 5u, 6u, 9u, 16u};
     for (uint32_t rows : row_list) {
@@ -143,34 +143,34 @@ int main() {
         const uint32_t K = 256u;
         const uint32_t N = 256u;
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv f32 rows=%u N=%u K=%u", rows, N, K);
-        run_rows(rows, N, K, K, N, 0x1234u + rows, ps::kernel::Bf16GemmOutputDType::F32, arena,
+        run_rows(rows, N, K, K, N, 0x1234u + rows, shelf::kernel::Bf16GemmOutputDType::F32, arena,
                  stream, label);
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv bf16 rows=%u N=%u K=%u", rows, N, K);
-        run_rows(rows, N, K, K, N, 0x5678u + rows, ps::kernel::Bf16GemmOutputDType::BF16, arena,
+        run_rows(rows, N, K, K, N, 0x5678u + rows, shelf::kernel::Bf16GemmOutputDType::BF16, arena,
                  stream, label);
     }
 
     {
         char label[160];
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv f32 rows=9 N=2560 K=2560");
-        run_rows(9u, 2560u, 2560u, 2560u, 2560u, 0xA000u, ps::kernel::Bf16GemmOutputDType::F32,
+        run_rows(9u, 2560u, 2560u, 2560u, 2560u, 0xA000u, shelf::kernel::Bf16GemmOutputDType::F32,
                  arena, stream, label);
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv bf16 rows=9 N=5120 K=10240");
-        run_rows(9u, 5120u, 10240u, 10240u, 5120u, 0xA001u, ps::kernel::Bf16GemmOutputDType::BF16,
+        run_rows(9u, 5120u, 10240u, 10240u, 5120u, 0xA001u, shelf::kernel::Bf16GemmOutputDType::BF16,
                  arena, stream, label);
     }
 
     {
         char label[160];
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv f32 rows=5 K tail=520");
-        run_rows(5u, 512u, 520u, 520u, 512u, 0xB000u, ps::kernel::Bf16GemmOutputDType::F32, arena,
+        run_rows(5u, 512u, 520u, 520u, 512u, 0xB000u, shelf::kernel::Bf16GemmOutputDType::F32, arena,
                  stream, label);
         std::snprintf(label, sizeof(label), "exact vs M=1 gemv bf16 rows=9 in_stride=4096>K=3072");
-        run_rows(9u, 1024u, 3072u, 4096u, 1024u, 0xB001u, ps::kernel::Bf16GemmOutputDType::BF16,
+        run_rows(9u, 1024u, 3072u, 4096u, 1024u, 0xB001u, shelf::kernel::Bf16GemmOutputDType::BF16,
                  arena, stream, label);
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("VERIFY_EXACT_GEMM: %s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL",
                 passed, failed);
     return failed > 0 ? 1 : 0;

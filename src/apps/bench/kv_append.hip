@@ -27,7 +27,7 @@
 namespace {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
 constexpr float kFp8E4M3Max = 448.0f;
 
 struct Profile {
@@ -125,7 +125,7 @@ float f32_from_bf16(uint16_t bits) {
 }
 
 uint16_t bf16_bits(double x) {
-    return ps::f32_to_bf16_rne((float)x);
+    return shelf::f32_to_bf16_rne((float)x);
 }
 
 struct Frag {
@@ -134,15 +134,15 @@ struct Frag {
     void* ctx_dev = nullptr;
     void* scratch = nullptr;
     void* error_word = nullptr;
-    ::ps::runtime::DeviceProgramView prog{};
-    ::ps::runtime::DispatchBinding binding{};
+    ::shelf::runtime::DeviceProgramView prog{};
+    ::shelf::runtime::DispatchBinding binding{};
     ~Frag() { teardown(); }
     void teardown() {
-        if (values_dev) ps::gpu::discard_cleanup_result(hipFree(values_dev));
-        if (states_dev) ps::gpu::discard_cleanup_result(hipFree(states_dev));
-        if (ctx_dev) ps::gpu::discard_cleanup_result(hipFree(ctx_dev));
-        if (scratch) ps::gpu::discard_cleanup_result(hipFree(scratch));
-        if (error_word) ps::gpu::discard_cleanup_result(hipFree(error_word));
+        if (values_dev) shelf::gpu::discard_cleanup_result(hipFree(values_dev));
+        if (states_dev) shelf::gpu::discard_cleanup_result(hipFree(states_dev));
+        if (ctx_dev) shelf::gpu::discard_cleanup_result(hipFree(ctx_dev));
+        if (scratch) shelf::gpu::discard_cleanup_result(hipFree(scratch));
+        if (error_word) shelf::gpu::discard_cleanup_result(hipFree(error_word));
         values_dev = states_dev = ctx_dev = scratch = error_word = nullptr;
         prog = {};
     }
@@ -162,8 +162,8 @@ struct Env {
     void* k_scale = nullptr;
     void* v_scale = nullptr;
     Frag frag;
-    ::ps::kernel::ModelDispatchStateView state{};
-    ::ps::kernel::KvAppendCommonArgs common{};
+    ::shelf::kernel::ModelDispatchStateView state{};
+    ::shelf::kernel::KvAppendCommonArgs common{};
     std::vector<uint16_t> h_kin, h_vin;
     std::vector<uint32_t> h_row_seq, h_row_pos, h_bt;
     ~Env() { teardown(); }
@@ -171,7 +171,7 @@ struct Env {
         void** bufs[9] = {&k_in, &v_in, &row_seq, &row_pos, &block_tables, &k_pool, &v_pool,
                           &k_scale, &v_scale};
         for (auto b : bufs)
-            if (*b) ps::gpu::discard_cleanup_result(hipFree(*b)), *b = nullptr;
+            if (*b) shelf::gpu::discard_cleanup_result(hipFree(*b)), *b = nullptr;
     }
 };
 
@@ -232,11 +232,11 @@ bool build_correctness(Env& e) {
     const uint32_t ept = e.ept;
     const uint32_t epp = e.p.page_tokens * ept;
     const uint32_t epl = e.p.num_pages * epp;
-    ::ps::runtime::DeviceValueBinding vals[2];
+    ::shelf::runtime::DeviceValueBinding vals[2];
     vals[0].logical_value = 0;
-    vals[0].storage = ::ps::runtime::ValueStorage::EXTERNAL_INPUT;
-    vals[0].dtype = ::ps::runtime::ValueDType::BF16;
-    vals[0].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    vals[0].storage = ::shelf::runtime::ValueStorage::EXTERNAL_INPUT;
+    vals[0].dtype = ::shelf::runtime::ValueDType::BF16;
+    vals[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     vals[0].slot = 0;
     vals[0].feature_count = ept;
     vals[0].row_stride = ept;
@@ -245,18 +245,18 @@ bool build_correctness(Env& e) {
     vals[1] = vals[0];
     vals[1].logical_value = 1;
     vals[1].offset = (uint64_t)(uintptr_t)e.v_in;
-    if (hipMalloc(&e.frag.values_dev, 2 * sizeof(::ps::runtime::DeviceValueBinding)) != hipSuccess)
+    if (hipMalloc(&e.frag.values_dev, 2 * sizeof(::shelf::runtime::DeviceValueBinding)) != hipSuccess)
         return false;
-    std::memcpy(e.frag.values_dev, vals, 2 * sizeof(::ps::runtime::DeviceValueBinding));
+    std::memcpy(e.frag.values_dev, vals, 2 * sizeof(::shelf::runtime::DeviceValueBinding));
 
-    ::ps::runtime::DeviceStateBinding st;
+    ::shelf::runtime::DeviceStateBinding st;
     st.slot = 0;
-    st.kind = (uint8_t)::ps::runtime::PrimitiveStateKind::KV_CACHE;
+    st.kind = (uint8_t)::shelf::runtime::PrimitiveStateKind::KV_CACHE;
     st.state_index = e.p.layer;
     if (hipMalloc(&e.frag.states_dev, sizeof(st)) != hipSuccess) return false;
     std::memcpy(e.frag.states_dev, &st, sizeof(st));
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = e.rows;
     ctx.row_sequence_slots = (uint32_t*)e.row_seq;
     ctx.row_positions = (uint32_t*)e.row_pos;
@@ -267,13 +267,13 @@ bool build_correctness(Env& e) {
     if (hipMalloc(&e.frag.error_word, sizeof(uint32_t)) != hipSuccess) return false;
 
     e.frag.prog = {};
-    e.frag.prog.values = (const ::ps::runtime::DeviceValueBinding*)e.frag.values_dev;
+    e.frag.prog.values = (const ::shelf::runtime::DeviceValueBinding*)e.frag.values_dev;
     e.frag.prog.value_count = 2;
-    e.frag.prog.states = (const ::ps::runtime::DeviceStateBinding*)e.frag.states_dev;
+    e.frag.prog.states = (const ::shelf::runtime::DeviceStateBinding*)e.frag.states_dev;
     e.frag.prog.state_count = 1;
     e.frag.prog.workspace_base = 0;
     e.frag.binding = {};
-    e.frag.binding.kernel_id = ::ps::runtime::KernelId::KV_APPEND;
+    e.frag.binding.kernel_id = ::shelf::runtime::KernelId::KV_APPEND;
     e.frag.binding.descriptor_slot = 1;
     e.frag.binding.input_slots[0] = 0;
     e.frag.binding.input_slots[1] = 1;
@@ -300,8 +300,8 @@ bool build_correctness(Env& e) {
         e.state.kv_fp8.elems_per_page = epp;
         e.state.kv_fp8.elems_per_layer = epl;
     } else {
-        e.state.kv_bf16.k_pool = (ps::bf16_t*)e.k_pool;
-        e.state.kv_bf16.v_pool = (ps::bf16_t*)e.v_pool;
+        e.state.kv_bf16.k_pool = (shelf::bf16_t*)e.k_pool;
+        e.state.kv_bf16.v_pool = (shelf::bf16_t*)e.v_pool;
         e.state.kv_bf16.page_tokens = e.p.page_tokens;
         e.state.kv_bf16.num_pages = e.p.num_pages;
         e.state.kv_bf16.num_attention_layers = e.p.num_layers;
@@ -313,8 +313,8 @@ bool build_correctness(Env& e) {
     }
 
     e.common = {};
-    e.common.k_input = (const ps::bf16_t*)e.k_in;
-    e.common.v_input = (const ps::bf16_t*)e.v_in;
+    e.common.k_input = (const shelf::bf16_t*)e.k_in;
+    e.common.v_input = (const shelf::bf16_t*)e.v_in;
     e.common.k_row_stride = ept;
     e.common.v_row_stride = ept;
     e.common.row_sequence_slots = (const uint32_t*)e.row_seq;
@@ -338,8 +338,8 @@ bool build_correctness(Env& e) {
 hipError_t launch_correctness(const Env& e, hipStream_t s) {
     if (hipMemsetAsync(e.frag.error_word, 0, sizeof(uint32_t), s) != hipSuccess)
         return hipGetLastError();
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.frag.prog, e.frag.binding, (::ps::runtime::DeviceBatchContext*)e.frag.ctx_dev,
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.frag.prog, e.frag.binding, (::shelf::runtime::DeviceBatchContext*)e.frag.ctx_dev,
         e.state, (float*)e.frag.scratch, (uint32_t*)e.frag.error_word, s);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
@@ -347,11 +347,11 @@ hipError_t launch_correctness(const Env& e, hipStream_t s) {
 
 hipError_t launch_optimized(const Env& e, hipStream_t s) {
     if (e.p.fp8)
-        return ::ps::kernel::launch_kv_append_fp8_e4m3(
+        return ::shelf::kernel::launch_kv_append_fp8_e4m3(
                    e.common, (fp8*)e.k_pool, (fp8*)e.v_pool, (float*)e.k_scale,
                    (float*)e.v_scale, s);
-    return ::ps::kernel::launch_kv_append_bf16(e.common, (ps::bf16_t*)e.k_pool,
-                                                       (ps::bf16_t*)e.v_pool, s);
+    return ::shelf::kernel::launch_kv_append_bf16(e.common, (shelf::bf16_t*)e.k_pool,
+                                                       (shelf::bf16_t*)e.v_pool, s);
 }
 
 bool check_output(const Env& e) {
@@ -435,35 +435,35 @@ bool check_output(const Env& e) {
 std::vector<Profile> extract_actual_profiles(const std::string& model_dir, double arena_gib,
                                              int device, hipStream_t stream) {
     std::size_t arena_bytes = (std::size_t)(arena_gib * 1024.0 * 1024.0 * 1024.0);
-    auto arena_res = ps::gpu::GpuArena::create(device, arena_bytes);
+    auto arena_res = shelf::gpu::GpuArena::create(device, arena_bytes);
     if (!arena_res.ok()) return {};
     auto arena = arena_res.release();
-    ps::qwen35::Qwen35LoadOptions lo;
-    auto model_res = ps::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream, lo);
+    shelf::qwen35::Qwen35LoadOptions lo;
+    auto model_res = shelf::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream, lo);
     if (!model_res.ok()) return {};
     auto model = model_res.release();
-    auto lp = ps::qwen35::lower_qwen35_to_primitives(model.text_config(), model.weights());
+    auto lp = shelf::qwen35::lower_qwen35_to_primitives(model.text_config(), model.weights());
     if (!lp.ok()) return {};
     auto lowered = lp.release();
-    std::vector<::ps::runtime::WeightSlot> ws = std::move(lowered.weights);
-    std::vector<::ps::runtime::StaticParameterSlot> ps = std::move(lowered.parameters);
-    ::ps::runtime::WeightTableView wv{nullptr, 0};
+    std::vector<::shelf::runtime::WeightSlot> ws = std::move(lowered.weights);
+    std::vector<::shelf::runtime::StaticParameterSlot> shelf = std::move(lowered.parameters);
+    ::shelf::runtime::WeightTableView wv{nullptr, 0};
     wv.slots = ws.data();
     wv.count = ws.size();
-    ::ps::runtime::ProgramBuildOptions opts;
+    ::shelf::runtime::ProgramBuildOptions opts;
     opts.validate_workspace = false;
-    auto prog_res = ::ps::runtime::build_program(lowered.graph, wv, ::ps::runtime::RowBucket::R16,
-                                                 ::ps::runtime::ExecutionClass::DECODE, opts);
+    auto prog_res = ::shelf::runtime::build_program(lowered.graph, wv, ::shelf::runtime::RowBucket::R16,
+                                                 ::shelf::runtime::ExecutionClass::DECODE, opts);
     if (!prog_res.ok()) return {};
     auto prog = prog_res.release();
     std::set<std::string> seen;
     std::vector<Profile> out;
     for (size_t i = 0; i < prog.dispatches.size(); ++i) {
-        if (prog.dispatches[i].kernel_id != ::ps::runtime::KernelId::KV_APPEND) continue;
+        if (prog.dispatches[i].kernel_id != ::shelf::runtime::KernelId::KV_APPEND) continue;
         const auto& b = prog.dispatches[i];
         const uint32_t hd = b.group_size;
         if (hd == 0 || b.input_count != 2) continue;
-        auto kin = prog.find_value(::ps::runtime::ValueId{b.input_slots[0]});
+        auto kin = prog.find_value(::shelf::runtime::ValueId{b.input_slots[0]});
         if (!kin) continue;
         if (kin->feature_count % hd != 0) continue;
         Profile p;
@@ -609,15 +609,15 @@ int run_kv_append(int argc, char** argv) {
             }
             bool auto_opt = true;
             if (o.variant == "auto") {
-                ::ps::execution::KvAppendSelectorInput si;
-                si.kv_dtype = prof.fp8 ? ::ps::kernel::KVCacheDType::FP8_E4M3
-                                       : ::ps::kernel::KVCacheDType::BF16;
+                ::shelf::execution::KvAppendSelectorInput si;
+                si.kv_dtype = prof.fp8 ? ::shelf::kernel::KVCacheDType::FP8_E4M3
+                                       : ::shelf::kernel::KVCacheDType::BF16;
                 si.rows = rows;
                 si.kv_heads = prof.kv_heads;
                 si.head_dim = prof.head_dim;
                 si.page_tokens = prof.page_tokens;
-                auto_opt = ::ps::execution::select_kv_append_implementation(si) ==
-                           ::ps::execution::KvAppendImplementation::Optimized;
+                auto_opt = ::shelf::execution::select_kv_append_implementation(si) ==
+                           ::shelf::execution::KvAppendImplementation::Optimized;
             }
             const bool use_opt = (o.variant == "optimized") || (o.variant == "auto" && auto_opt);
             auto launch = [&, use_opt](hipStream_t s) -> hipError_t {
@@ -657,8 +657,8 @@ int run_kv_append(int argc, char** argv) {
                 if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
                 per.push_back(ms * 1000.0 / (double)o.launches);
             }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
             if (per.empty()) {
                 rc = 1;
                 continue;
@@ -685,6 +685,6 @@ int run_kv_append(int argc, char** argv) {
                         prof.page_tokens, rows, mn, p50, p95, mean);
         }
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

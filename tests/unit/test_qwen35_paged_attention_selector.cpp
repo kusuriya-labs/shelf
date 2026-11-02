@@ -16,10 +16,10 @@ void check(bool cond, const char* name) {
     }
 }
 
-using ps::kernel::KVCacheDType;
-using ps::execution::PagedAttentionImplementation;
-using ps::execution::PagedAttentionSelectorInput;
-using ps::runtime::ValueDType;
+using shelf::kernel::KVCacheDType;
+using shelf::execution::PagedAttentionImplementation;
+using shelf::execution::PagedAttentionSelectorInput;
+using shelf::runtime::ValueDType;
 
 PagedAttentionImplementation
 sel(KVCacheDType dt, ValueDType out, uint32_t qh, uint32_t kvh, uint32_t hd,
@@ -33,7 +33,7 @@ sel(KVCacheDType dt, ValueDType out, uint32_t qh, uint32_t kvh, uint32_t hd,
     si.page_tokens = pt;
     si.rows = rows;
     si.max_visible_tokens = vis;
-    return ps::execution::select_paged_attention_implementation(si);
+    return shelf::execution::select_paged_attention_implementation(si);
 }
 
 }  // namespace

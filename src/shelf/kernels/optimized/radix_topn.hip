@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -439,4 +439,4 @@ hipError_t launch_dflash2_radix_topn(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

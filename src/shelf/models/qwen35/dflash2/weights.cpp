@@ -9,7 +9,7 @@ namespace {
 constexpr const char* kDFlash2QuantizedArchitecture = "dflash2_draft";
 }
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace dflash2 {
 
@@ -37,25 +37,25 @@ std::string shape_to_string(const std::vector<std::size_t>& shape) {
 }
 
 Status load_matrix(
-    const ps::weights::SafetensorsCollection& collection,
+    const shelf::weights::SafetensorsCollection& collection,
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const ps::weights::WeightLoadOptions& options,
-    ps::weights::MatrixWeight& dst) {
-    auto m = ps::weights::load_bf16_matrix(collection, name, arena, stream, options);
+    const shelf::weights::WeightLoadOptions& options,
+    shelf::weights::MatrixWeight& dst) {
+    auto m = shelf::weights::load_bf16_matrix(collection, name, arena, stream, options);
     if (!m.ok()) return m.status();
     dst = m.release();
     return Status::make_ok();
 }
 
 Status load_vector(
-    const ps::weights::SafetensorsCollection& collection,
+    const shelf::weights::SafetensorsCollection& collection,
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
     gpu::Tensor& dst) {
-    auto t = ps::weights::load_bf16_tensor(collection, name, arena, stream);
+    auto t = shelf::weights::load_bf16_tensor(collection, name, arena, stream);
     if (!t.ok()) return t.status();
     dst = t.release();
     return Status::make_ok();
@@ -63,17 +63,17 @@ Status load_vector(
 
 struct WeightSource {
     bool quantized = false;
-    const ps::weights::SafetensorsCollection* collection = nullptr;
-    const ps::quantization::bundle::QuantizedModelReader* reader = nullptr;
+    const shelf::weights::SafetensorsCollection* collection = nullptr;
+    const shelf::quantization::bundle::QuantizedModelReader* reader = nullptr;
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
-    ps::weights::WeightLoadOptions options;
+    shelf::weights::WeightLoadOptions options;
 };
 
 Status source_load_matrix(
-    const WeightSource& src, const std::string& name, ps::weights::MatrixWeight& dst) {
+    const WeightSource& src, const std::string& name, shelf::weights::MatrixWeight& dst) {
     if (src.quantized) {
-        auto m = ps::weights::load_quantized_matrix(*src.reader, name, *src.arena, src.stream,
+        auto m = shelf::weights::load_quantized_matrix(*src.reader, name, *src.arena, src.stream,
                                                     src.options);
         if (!m.ok()) return m.status();
         dst = m.release();
@@ -84,7 +84,7 @@ Status source_load_matrix(
 
 Status source_load_vector(const WeightSource& src, const std::string& name, gpu::Tensor& dst) {
     if (src.quantized) {
-        auto t = ps::weights::load_quantized_small(*src.reader, name, *src.arena, src.stream);
+        auto t = shelf::weights::load_quantized_small(*src.reader, name, *src.arena, src.stream);
         if (!t.ok()) return t.status();
         dst = t.release();
         return Status::make_ok();
@@ -93,11 +93,11 @@ Status source_load_vector(const WeightSource& src, const std::string& name, gpu:
 }
 
 Status validate_quantized_contract(
-    const ps::quantization::bundle::QuantizedModelReader& reader,
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
     const DFlash2Config& config) {
-    using ps::quantization::manifest::QuantizedEncoding;
+    using shelf::quantization::manifest::QuantizedEncoding;
 
-    Status model_st = ps::weights::validate_quantized_model(reader);
+    Status model_st = shelf::weights::validate_quantized_model(reader);
     if (!model_st.ok()) return model_st;
 
     const auto& manifest = reader.manifest();
@@ -225,9 +225,9 @@ Status load_dflash2_weights_from(
 }
 
 Status validate_quantized_loaded(DFlash2Weights& weights) {
-    auto check_bf16 = [](const ps::weights::MatrixWeight& w,
+    auto check_bf16 = [](const shelf::weights::MatrixWeight& w,
                          const std::string& name) -> Status {
-        if (w.encoding != ps::weights::MatrixEncoding::Bf16) {
+        if (w.encoding != shelf::weights::MatrixEncoding::Bf16) {
             return Status::invalid_argument(
                 ("DFlash2 backbone matrix not BF16: " + name).c_str(), __FILE__, __LINE__);
         }
@@ -241,7 +241,7 @@ Status validate_quantized_loaded(DFlash2Weights& weights) {
     if (!st.ok()) return st;
     for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
         DFlash2LayerWeights& lw = weights.layers[layer];
-        ps::weights::MatrixWeight* matrices[] = {
+        shelf::weights::MatrixWeight* matrices[] = {
             &lw.attn_q_proj, &lw.attn_k_proj, &lw.attn_v_proj, &lw.attn_o_proj,
             &lw.mlp_gate_proj, &lw.mlp_up_proj, &lw.mlp_down_proj,
             &lw.attention_conv_kernel_projection, &lw.mlp_conv_kernel_projection,
@@ -258,7 +258,7 @@ Status validate_quantized_loaded(DFlash2Weights& weights) {
             if (!st.ok()) return st;
         }
     }
-    if (weights.selector.hidden_projection.encoding != ps::weights::MatrixEncoding::Bf16) {
+    if (weights.selector.hidden_projection.encoding != shelf::weights::MatrixEncoding::Bf16) {
         return Status::invalid_argument(
             "DFlash2 selector hidden_projection must remain BF16", __FILE__, __LINE__);
     }
@@ -313,16 +313,16 @@ std::vector<DFlash2ExpectedTensor> dflash2_expected_tensors(const DFlash2Config&
 Status validate_dflash2_tensor_contract(
     const std::string& model_dir,
     const DFlash2Config& config) {
-    if (ps::weights::is_quantized_model_dir(model_dir)) {
-        auto reader_result = ps::quantization::bundle::QuantizedModelReader::open(model_dir, false);
+    if (shelf::weights::is_quantized_model_dir(model_dir)) {
+        auto reader_result = shelf::quantization::bundle::QuantizedModelReader::open(model_dir, false);
         if (!reader_result.ok()) return reader_result.status();
-        ps::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+        shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
         return validate_quantized_contract(reader, config);
     }
 
-    auto collection_result = ps::weights::SafetensorsCollection::open(model_dir);
+    auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
     if (!collection_result.ok()) return collection_result.status();
-    ps::weights::SafetensorsCollection collection = collection_result.release();
+    shelf::weights::SafetensorsCollection collection = collection_result.release();
 
     auto names_result = collection.tensor_names();
     if (!names_result.ok()) return names_result.status();
@@ -362,8 +362,8 @@ Status validate_dflash2_tensor_contract(
     for (const DFlash2ExpectedTensor& e : expected) {
         auto spec_result = collection.tensor_spec(e.name);
         if (!spec_result.ok()) return spec_result.status();
-        const ps::io::StTensorSpec& spec = spec_result.value();
-        if (spec.dtype != ps::io::SType::BF16) {
+        const shelf::io::StTensorSpec& spec = spec_result.value();
+        if (spec.dtype != shelf::io::SType::BF16) {
             return Status::invalid_argument(
                 ("DFlash2 tensor '" + e.name + "' must be BF16").c_str(),
                 __FILE__, __LINE__);
@@ -384,14 +384,14 @@ Result<DFlash2Weights> load_dflash2_weights(
     const DFlash2Config& config,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const ps::weights::WeightLoadOptions& options) {
+    const shelf::weights::WeightLoadOptions& options) {
     DFlash2Weights weights;
 
-    if (ps::weights::is_quantized_model_dir(model_dir)) {
+    if (shelf::weights::is_quantized_model_dir(model_dir)) {
         auto reader_result =
-            ps::quantization::bundle::QuantizedModelReader::open(model_dir, true);
+            shelf::quantization::bundle::QuantizedModelReader::open(model_dir, true);
         if (!reader_result.ok()) return reader_result.status();
-        ps::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+        shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
 
         Status contract = validate_quantized_contract(reader, config);
         if (!contract.ok()) return contract;
@@ -411,9 +411,9 @@ Result<DFlash2Weights> load_dflash2_weights(
         Status contract = validate_dflash2_tensor_contract(model_dir, config);
         if (!contract.ok()) return contract;
 
-        auto collection_result = ps::weights::SafetensorsCollection::open(model_dir);
+        auto collection_result = shelf::weights::SafetensorsCollection::open(model_dir);
         if (!collection_result.ok()) return collection_result.status();
-        ps::weights::SafetensorsCollection collection = collection_result.release();
+        shelf::weights::SafetensorsCollection collection = collection_result.release();
 
         WeightSource src;
         src.quantized = false;
@@ -439,4 +439,4 @@ Result<DFlash2Weights> load_dflash2_weights(
 
 }  // namespace dflash2
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

@@ -10,7 +10,7 @@
 #include <mutex>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 namespace {
 
@@ -132,14 +132,14 @@ HipPeerTpTransport::HipPeerTpTransport(std::vector<int> devices)
 HipPeerTpTransport::~HipPeerTpTransport() {
     const std::size_t rank_count = devices_.size();
     for (std::size_t r = 0; r < rank_count; ++r) {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!scope.ok()) continue;
         if (r < inbox_.size()) {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
                 for (void*& slot : inbox_[r][q]) {
                     if (slot != nullptr) {
-                        ps::gpu::discard_cleanup_result(hipFree(slot));
+                        shelf::gpu::discard_cleanup_result(hipFree(slot));
                         slot = nullptr;
                     }
                 }
@@ -148,7 +148,7 @@ HipPeerTpTransport::~HipPeerTpTransport() {
         if (r < inbox_ptrs_dev_.size()) {
             for (void*& ptrs : inbox_ptrs_dev_[r]) {
                 if (ptrs != nullptr) {
-                    ps::gpu::discard_cleanup_result(hipFree(ptrs));
+                    shelf::gpu::discard_cleanup_result(hipFree(ptrs));
                     ptrs = nullptr;
                 }
             }
@@ -157,21 +157,21 @@ HipPeerTpTransport::~HipPeerTpTransport() {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
                 if (sent_[r][q] != nullptr) {
-                    ps::gpu::discard_cleanup_result(hipEventDestroy(sent_[r][q]));
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(sent_[r][q]));
                     sent_[r][q] = nullptr;
                 }
             }
         }
         if (r < probe_buffers_.size() && probe_buffers_[r] != nullptr) {
-            ps::gpu::discard_cleanup_result(hipFree(probe_buffers_[r]));
+            shelf::gpu::discard_cleanup_result(hipFree(probe_buffers_[r]));
             probe_buffers_[r] = nullptr;
         }
         if (r < probe_streams_.size() && probe_streams_[r] != nullptr) {
-            ps::gpu::discard_cleanup_result(hipStreamDestroy(probe_streams_[r]));
+            shelf::gpu::discard_cleanup_result(hipStreamDestroy(probe_streams_[r]));
             probe_streams_[r] = nullptr;
         }
         if (r < probe_ready_.size() && probe_ready_[r] != nullptr) {
-            ps::gpu::discard_cleanup_result(hipEventDestroy(probe_ready_[r]));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(probe_ready_[r]));
             probe_ready_[r] = nullptr;
         }
     }
@@ -201,7 +201,7 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
     transport->probe_ready_.assign(rank_count, nullptr);
 
     for (std::size_t r = 0; r < rank_count; ++r) {
-        auto scope = ps::gpu::ScopedDevice::create(devices[r]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices[r]);
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
@@ -234,7 +234,7 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
 Status HipPeerTpTransport::enable_peer_access() {
     if (peer_access_enabled_) return Status::make_ok();
     for (std::size_t i = 0; i < devices_.size(); ++i) {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[i]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[i]);
         if (!scope.ok()) return scope.status();
         for (std::size_t j = 0; j < devices_.size(); ++j) {
             if (i == j) continue;
@@ -243,7 +243,7 @@ Status HipPeerTpTransport::enable_peer_access() {
                 return Status::hip_error("hipDeviceEnablePeerAccess", hipGetErrorString(e),
                                          __FILE__, __LINE__);
             }
-            ps::gpu::discard_cleanup_result(hipGetLastError());
+            shelf::gpu::discard_cleanup_result(hipGetLastError());
         }
     }
     peer_access_enabled_ = true;
@@ -254,13 +254,13 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
     if (inbox_bytes_ >= bytes && inbox_.size() == rank_count) return Status::make_ok();
     const std::size_t peer_count = rank_count - 1;
     for (std::size_t r = 0; r < rank_count; ++r) {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
             for (void*& slot : inbox_[r][q]) {
                 if (slot != nullptr) {
-                    ps::gpu::discard_cleanup_result(hipFree(slot));
+                    shelf::gpu::discard_cleanup_result(hipFree(slot));
                     slot = nullptr;
                 }
                 if (hipMalloc(&slot, bytes) != hipSuccess) {
@@ -272,7 +272,7 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
         }
         for (void*& ptrs : inbox_ptrs_dev_[r]) {
             if (ptrs != nullptr) {
-                ps::gpu::discard_cleanup_result(hipFree(ptrs));
+                shelf::gpu::discard_cleanup_result(hipFree(ptrs));
                 ptrs = nullptr;
             }
             if (hipMalloc(&ptrs, peer_count * sizeof(void*)) != hipSuccess) {
@@ -314,7 +314,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
 
     if (!invocation.peer_write_complete) {
         for (std::size_t r = 0; r < rank_count; ++r) {
-            auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
@@ -330,7 +330,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         }
     } else {
         for (std::size_t r = 0; r < rank_count; ++r) {
-            auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
             if (!scope.ok()) return scope.status();
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
@@ -343,7 +343,7 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
         }
     }
     for (std::size_t r = 0; r < rank_count; ++r) {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!scope.ok()) return scope.status();
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
@@ -406,7 +406,7 @@ Status HipPeerTpTransport::verify() {
             for (std::size_t r = 0; r < rank_count; ++r) {
                 acc += tp_bf16_bits_to_f32(host_in[r][i]);
             }
-            want[i] = ps::f32_to_bf16_rne(acc);
+            want[i] = shelf::f32_to_bf16_rne(acc);
         }
 
         std::vector<TpSumTarget> targets(rank_count);
@@ -425,7 +425,7 @@ Status HipPeerTpTransport::verify() {
 
         for (int round = 0; round < kProbeRounds; ++round) {
             for (std::size_t r = 0; r < rank_count; ++r) {
-                auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+                auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
                 if (!scope.ok()) return scope.status();
                 if (hipMemcpy(probe_buffers_[r], host_in[r].data(), probe_size,
                               hipMemcpyHostToDevice) != hipSuccess) {
@@ -442,7 +442,7 @@ Status HipPeerTpTransport::verify() {
             st = enqueue_sum(invocation);
             if (!st.ok()) return st;
             for (std::size_t r = 0; r < rank_count; ++r) {
-                auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+                auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
                 if (!scope.ok()) return scope.status();
                 if (hipStreamSynchronize(probe_streams_[r]) != hipSuccess) {
                     return Status::hip_error("tp probe sync",
@@ -453,7 +453,7 @@ Status HipPeerTpTransport::verify() {
             std::vector<std::uint16_t> got(count);
             bool round_ok = true;
             for (std::size_t r = 0; r < rank_count && round_ok; ++r) {
-                auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+                auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
                 if (!scope.ok()) return scope.status();
                 if (hipMemcpy(got.data(), probe_buffers_[r], probe_size,
                               hipMemcpyDeviceToHost) != hipSuccess) {
@@ -492,4 +492,4 @@ Status HipPeerTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     return enqueue_sum(invocation);
 }
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

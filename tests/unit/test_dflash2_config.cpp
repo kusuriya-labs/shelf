@@ -8,8 +8,8 @@
 
 namespace fs = std::filesystem;
 
-using ps::qwen35::dflash2::DFlash2Config;
-using ps::qwen35::dflash2::read_dflash2_config;
+using shelf::qwen35::dflash2::DFlash2Config;
+using shelf::qwen35::dflash2::read_dflash2_config;
 
 static int g_fail = 0;
 

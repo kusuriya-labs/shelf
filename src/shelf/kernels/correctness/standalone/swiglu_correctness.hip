@@ -3,20 +3,20 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
-__device__ __forceinline__ ps::bf16_t bf16_pack(float f) {
-    return ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
+__device__ __forceinline__ shelf::bf16_t bf16_pack(float f) {
+    return shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
 }
 
-__device__ __forceinline__ float bf16_unpack(const ps::bf16_t& x) {
+__device__ __forceinline__ float bf16_unpack(const shelf::bf16_t& x) {
     return __bfloat162float(__ushort_as_bfloat16(x.data));
 }
 __global__ void swiglu_kernel(
-    const ps::bf16_t* __restrict__ gate,
-    const ps::bf16_t* __restrict__ up,
-    ps::bf16_t* __restrict__ output,
+    const shelf::bf16_t* __restrict__ gate,
+    const shelf::bf16_t* __restrict__ up,
+    shelf::bf16_t* __restrict__ output,
     std::size_t n)
 {
     std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -50,9 +50,9 @@ Status swiglu(
     const std::size_t blocks = (total + threads_per_block - 1) / threads_per_block;
 
     swiglu_kernel<<<static_cast<unsigned>(blocks), threads_per_block, 0, stream>>>(
-        gate.data<ps::bf16_t>(),
-        up.data<ps::bf16_t>(),
-        output.data<ps::bf16_t>(),
+        gate.data<shelf::bf16_t>(),
+        up.data<shelf::bf16_t>(),
+        output.data<shelf::bf16_t>(),
         total);
 
     hipError_t err = hipGetLastError();
@@ -64,4 +64,4 @@ Status swiglu(
 }
 
 } // namespace kernel
-} // namespace ps
+} // namespace shelf

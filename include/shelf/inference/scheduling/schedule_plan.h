@@ -8,7 +8,7 @@
 #include <span>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 struct SchedulePlan {
@@ -24,12 +24,12 @@ struct SchedulePlan {
     }
 
     Status append_decode(
-        ::ps::state::PagedSequenceState* sequence,
+        ::shelf::state::PagedSequenceState* sequence,
         int32_t token,
         uint32_t prefix_tokens,
         bool compute_logits,
         bool sample,
-        const ::ps::scheduling::SamplingConfig& sampling,
+        const ::shelf::scheduling::SamplingConfig& sampling,
         uint64_t sampling_index) {
 
         if (sequence == nullptr) {
@@ -51,7 +51,7 @@ struct SchedulePlan {
         ScheduledRequest scheduled;
         scheduled.sequence = sequence;
         scheduled.handle = sequence->request_handle();
-        scheduled.execution_class = ::ps::runtime::ExecutionClass::DECODE;
+        scheduled.execution_class = ::shelf::runtime::ExecutionClass::DECODE;
         scheduled.token_begin = token_begin;
         scheduled.num_tokens = 1;
         scheduled.prefix_tokens = prefix_tokens;
@@ -68,12 +68,12 @@ struct SchedulePlan {
     }
 
     Status append_prefill(
-        ::ps::state::PagedSequenceState* sequence,
+        ::shelf::state::PagedSequenceState* sequence,
         std::span<const int32_t> tokens,
         uint32_t prefix_tokens,
         bool compute_logits,
         bool sample,
-        const ::ps::scheduling::SamplingConfig& sampling,
+        const ::shelf::scheduling::SamplingConfig& sampling,
         uint64_t sampling_index) {
 
         if (sequence == nullptr) {
@@ -95,7 +95,7 @@ struct SchedulePlan {
         ScheduledRequest scheduled;
         scheduled.sequence = sequence;
         scheduled.handle = sequence->request_handle();
-        scheduled.execution_class = ::ps::runtime::ExecutionClass::PREFILL;
+        scheduled.execution_class = ::shelf::runtime::ExecutionClass::PREFILL;
         scheduled.token_begin = token_begin;
         scheduled.num_tokens = static_cast<uint32_t>(tokens.size());
         scheduled.prefix_tokens = prefix_tokens;
@@ -112,11 +112,11 @@ struct SchedulePlan {
     }
 
     Status append_verify(
-        ::ps::state::PagedSequenceState* sequence,
+        ::shelf::state::PagedSequenceState* sequence,
         std::span<const int32_t> tokens,
         uint32_t prefix_tokens,
         uint32_t num_output_rows,
-        const ::ps::scheduling::SamplingConfig& sampling,
+        const ::shelf::scheduling::SamplingConfig& sampling,
         uint64_t sampling_index) {
 
         if (sequence == nullptr) {
@@ -145,7 +145,7 @@ struct SchedulePlan {
         ScheduledRequest scheduled;
         scheduled.sequence = sequence;
         scheduled.handle = sequence->request_handle();
-        scheduled.execution_class = ::ps::runtime::ExecutionClass::SPEC_VERIFY;
+        scheduled.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
         scheduled.token_begin = token_begin;
         scheduled.num_tokens = static_cast<uint32_t>(tokens.size());
         scheduled.prefix_tokens = prefix_tokens;

@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 hipError_t launch_dflash2_kv_ring_append_bf16(
     const bf16_t* k_src,
@@ -17,4 +17,4 @@ hipError_t launch_dflash2_kv_ring_append_bf16(
     uint32_t position_start,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

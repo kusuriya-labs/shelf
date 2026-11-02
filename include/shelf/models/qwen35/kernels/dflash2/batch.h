@@ -3,7 +3,7 @@
 #include <shelf/core/memory/types.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct DFlash2RequestDescriptor {
     const bf16_t* ring_k;

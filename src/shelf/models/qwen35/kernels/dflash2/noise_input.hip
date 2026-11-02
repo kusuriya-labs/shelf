@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 constexpr uint32_t kNoiseInputThreads = 256u;
 
@@ -73,4 +73,4 @@ hipError_t launch_dflash2_noise_token_ids_batch(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

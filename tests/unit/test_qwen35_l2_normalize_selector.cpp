@@ -2,9 +2,9 @@
 
 #include <cstdio>
 
-using ps::execution::L2NormalizeImplementation;
-using ps::execution::L2NormalizeSelectorInput;
-using DT = ::ps::runtime::ValueDType;
+using shelf::execution::L2NormalizeImplementation;
+using shelf::execution::L2NormalizeSelectorInput;
+using DT = ::shelf::runtime::ValueDType;
 
 namespace {
 
@@ -28,7 +28,7 @@ L2NormalizeImplementation sel(DT in, DT out, uint32_t features, uint32_t group,
     si.features = features;
     si.group_size = group;
     si.rows = rows;
-    return ps::execution::select_l2_normalize_implementation(si);
+    return shelf::execution::select_l2_normalize_implementation(si);
 }
 
 }  // namespace

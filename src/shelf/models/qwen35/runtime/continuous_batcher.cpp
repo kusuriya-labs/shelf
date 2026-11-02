@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <thread>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -600,17 +600,17 @@ Result<StepResult> ContinuousBatcher::step() {
             continue;
         }
         const auto handle = request.sequence.request_handle();
-        by_handle[::ps::runtime::request_handle_key(handle)] = &request;
+        by_handle[::shelf::runtime::request_handle_key(handle)] = &request;
     }
 
     auto resolve = [&](const ScheduledRequest& scheduled) -> RuntimeRequest* {
-        const uint64_t key = ::ps::runtime::request_handle_key(scheduled.handle);
+        const uint64_t key = ::shelf::runtime::request_handle_key(scheduled.handle);
         auto it = by_handle.find(key);
         if (it == by_handle.end()) {
             return nullptr;
         }
         RuntimeRequest* request = it->second;
-        if (!::ps::runtime::request_handle_equal(
+        if (!::shelf::runtime::request_handle_equal(
                 request->sequence.request_handle(), scheduled.handle)) {
             return nullptr;
         }
@@ -676,11 +676,11 @@ Result<StepResult> ContinuousBatcher::step() {
         }
         {
             const bool final_prefill =
-                scheduled.execution_class == ::ps::runtime::ExecutionClass::PREFILL &&
+                scheduled.execution_class == ::shelf::runtime::ExecutionClass::PREFILL &&
                 scheduled.prefix_tokens + scheduled.num_tokens ==
                     static_cast<uint32_t>(request.input_tokens.size());
             if (prefix_cache_ != nullptr &&
-                scheduled.execution_class == ::ps::runtime::ExecutionClass::PREFILL) {
+                scheduled.execution_class == ::shelf::runtime::ExecutionClass::PREFILL) {
                 prefix_save_prefill(request);
                 if (final_prefill) {
                     prefix_begin_capture(request);

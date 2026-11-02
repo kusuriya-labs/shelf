@@ -9,15 +9,15 @@
 #include "detail/embedding.inc"
 #include "detail/output.inc"
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
-using ::ps::runtime::KernelId;
-using ::ps::runtime::ProgramStatus;
+using ::shelf::runtime::KernelId;
+using ::shelf::runtime::ProgramStatus;
 
 __device__ ProgramStatus host_execute_binding(
-    detail::ModelDispatchEnv& env, const ::ps::runtime::DispatchBinding& b) {
+    detail::ModelDispatchEnv& env, const ::shelf::runtime::DispatchBinding& b) {
     switch (b.kernel_id) {
         case KernelId::EMBEDDING_LOOKUP: return detail::exec_embedding(env, b);
         case KernelId::LINEAR_BF16: return detail::exec_linear_weight(env, b);
@@ -52,9 +52,9 @@ __device__ ProgramStatus host_execute_binding(
 constexpr uint32_t kDispatchBlocks = 64;
 
 __global__ void model_dispatch_kernel(
-    ::ps::runtime::DeviceProgramView prog,
-    ::ps::runtime::DispatchBinding binding,
-    ::ps::runtime::DeviceBatchContext* ctx,
+    ::shelf::runtime::DeviceProgramView prog,
+    ::shelf::runtime::DispatchBinding binding,
+    ::shelf::runtime::DeviceBatchContext* ctx,
     ModelDispatchStateView state,
     float* scratch,
     uint32_t num_blocks,
@@ -65,9 +65,9 @@ __global__ void model_dispatch_kernel(
 }
 
 Status launch_model_dispatch_correctness(
-    const ::ps::runtime::DeviceProgramView& program,
-    const ::ps::runtime::DispatchBinding& binding,
-    ::ps::runtime::DeviceBatchContext* batch_context,
+    const ::shelf::runtime::DeviceProgramView& program,
+    const ::shelf::runtime::DispatchBinding& binding,
+    ::shelf::runtime::DeviceBatchContext* batch_context,
     const ModelDispatchStateView& state,
     float* scratch,
     uint32_t* error_word,
@@ -81,4 +81,4 @@ Status launch_model_dispatch_correctness(
     return Status::make_ok();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

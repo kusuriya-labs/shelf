@@ -143,11 +143,11 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
               uint32_t partitions_override, const char* tag) {
     const uint32_t radix_partitions = partitions_override != 0u
                                           ? partitions_override
-                                          : ps::kernel::dflash2_radix_default_partitions(vocab);
+                                          : shelf::kernel::dflash2_radix_default_partitions(vocab);
     const std::size_t out_elems = static_cast<std::size_t>(rows) * pool;
 
     const std::size_t radix_scratch_bytes =
-        ps::kernel::dflash2_radix_topn_scratch_bytes(rows, radix_partitions, vocab);
+        shelf::kernel::dflash2_radix_topn_scratch_bytes(rows, radix_partitions, vocab);
 
     Rng rng;
     rng.state = seed;
@@ -172,7 +172,7 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
     (void)hipMemset(dev.values, 0, out_elems * sizeof(float));
     (void)hipMemset(dev.radix_scratch, 0, radix_scratch_bytes);
 
-    hipError_t radix_err = ps::kernel::launch_dflash2_radix_topn(
+    hipError_t radix_err = shelf::kernel::launch_dflash2_radix_topn(
         dev.logits, rows, vocab, vocab, pool, dev.ids, dev.values, radix_partitions,
         dev.radix_scratch, radix_scratch_bytes, nullptr);
     hipError_t sync_err = hipDeviceSynchronize();
@@ -228,7 +228,7 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
 
     (void)hipMemset(dev.ids, 0, out_elems * sizeof(int32_t));
     (void)hipMemset(dev.values, 0, out_elems * sizeof(float));
-    hipError_t rerun = ps::kernel::launch_dflash2_radix_topn(
+    hipError_t rerun = shelf::kernel::launch_dflash2_radix_topn(
         dev.logits, rows, vocab, vocab, pool, dev.ids, dev.values, radix_partitions,
         dev.radix_scratch, radix_scratch_bytes, nullptr);
     (void)hipDeviceSynchronize();

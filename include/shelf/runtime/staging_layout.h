@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace runtime {
 
 struct StagingProgramRefs {

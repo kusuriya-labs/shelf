@@ -27,9 +27,9 @@ __global__ void rng_kernel(const RngKey* __restrict__ keys, RngOut* __restrict__
     if (i >= n) return;
     const RngKey k = keys[i];
     out[i].bits =
-        ps::kernel::sampling_rng_bits(k.seed, k.sample_index, k.attempt, k.token);
+        shelf::kernel::sampling_rng_bits(k.seed, k.sample_index, k.attempt, k.token);
     out[i].uniform =
-        ps::kernel::sampling_uniform(k.seed, k.sample_index, k.attempt, k.token);
+        shelf::kernel::sampling_uniform(k.seed, k.sample_index, k.attempt, k.token);
 }
 
 int g_fail = 0;
@@ -92,9 +92,9 @@ int main() {
     for (uint32_t i = 0; i < n; ++i) {
         const RngKey& k = keys[i];
         const uint64_t host_bits =
-            ps::kernel::sampling_rng_bits(k.seed, k.sample_index, k.attempt, k.token);
+            shelf::kernel::sampling_rng_bits(k.seed, k.sample_index, k.attempt, k.token);
         const float host_u =
-            ps::kernel::sampling_uniform(k.seed, k.sample_index, k.attempt, k.token);
+            shelf::kernel::sampling_uniform(k.seed, k.sample_index, k.attempt, k.token);
         if (host_bits != got[i].bits) ++bits_mismatch;
         if (std::memcmp(&host_u, &got[i].uniform, sizeof(float)) != 0) ++uniform_mismatch;
         if (!(got[i].uniform > 0.0f && got[i].uniform < 1.0f)) ++range_bad;
@@ -104,21 +104,21 @@ int main() {
     check(range_bad == 0, "uniform in (0,1)");
 
     const uint64_t base =
-        ps::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1234ull);
-    check(ps::kernel::sampling_rng_bits(8ull, 11ull, 3ull, 1234ull) != base,
+        shelf::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1234ull);
+    check(shelf::kernel::sampling_rng_bits(8ull, 11ull, 3ull, 1234ull) != base,
           "seed changes stream");
-    check(ps::kernel::sampling_rng_bits(7ull, 12ull, 3ull, 1234ull) != base,
+    check(shelf::kernel::sampling_rng_bits(7ull, 12ull, 3ull, 1234ull) != base,
           "sample_index changes stream");
-    check(ps::kernel::sampling_rng_bits(7ull, 11ull, 4ull, 1234ull) != base,
+    check(shelf::kernel::sampling_rng_bits(7ull, 11ull, 4ull, 1234ull) != base,
           "attempt changes stream");
-    check(ps::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1235ull) != base,
+    check(shelf::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1235ull) != base,
           "token changes stream");
 
-    check(ps::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1234ull) == base,
+    check(shelf::kernel::sampling_rng_bits(7ull, 11ull, 3ull, 1234ull) == base,
           "same key reproduces bits");
 
-    ps::gpu::discard_cleanup_result(hipFree(d_keys));
-    ps::gpu::discard_cleanup_result(hipFree(d_out));
+    shelf::gpu::discard_cleanup_result(hipFree(d_keys));
+    shelf::gpu::discard_cleanup_result(hipFree(d_out));
 
     std::printf("%s: %d failures\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;

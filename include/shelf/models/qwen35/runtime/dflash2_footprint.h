@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 namespace runtime {
 
 struct DFlash2Footprint {
@@ -25,21 +25,21 @@ struct DFlash2Footprint {
 std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) noexcept;
 
 std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
-                                         const ::ps::state::GdnStatePool& pool) noexcept;
+                                         const ::shelf::state::GdnStatePool& pool) noexcept;
 
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,
                                         std::size_t lm_head_k) noexcept;
 
-std::size_t dflash2_spec_batch_context_bytes(const ::ps::state::GdnStatePool& pool,
+std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,
                                              std::size_t max_rows) noexcept;
 
 DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    const DFlash2SpecDecoderConfig& spec_config,
-                                   const ::ps::state::GdnStatePool& pool,
+                                   const ::shelf::state::GdnStatePool& pool,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
                                    uint32_t sessions) noexcept;
 
 }  // namespace runtime
-}  // namespace ps::qwen35
+}  // namespace shelf::qwen35

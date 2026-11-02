@@ -8,41 +8,41 @@
 #include <shelf/inference/state/paged_sequence_state.h>
 #include <shelf/kernels/kv_types.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
-using ::ps::state::PageId;
-using ::ps::state::SequenceSlotId;
-using ::ps::state::kInvalidPageId;
-using ::ps::state::kInvalidSlot;
+using ::shelf::state::PageId;
+using ::shelf::state::SequenceSlotId;
+using ::shelf::state::kInvalidPageId;
+using ::shelf::state::kInvalidSlot;
 
-using ::ps::state::SequenceBlockTableDeviceView;
-using ::ps::state::SequenceSlotPool;
+using ::shelf::state::SequenceBlockTableDeviceView;
+using ::shelf::state::SequenceSlotPool;
 
-using ::ps::state::PagedKVBatchDeviceView;
-using ::ps::state::PagedKVBatchFP8DeviceView;
-using ::ps::state::PagedKVPoolBF16View;
-using ::ps::state::PagedKVPoolFP8View;
-using ::ps::state::PagedKVPool;
-using ::ps::state::make_paged_kv_bf16_view;
-using ::ps::state::make_paged_kv_fp8_view;
+using ::shelf::state::PagedKVBatchDeviceView;
+using ::shelf::state::PagedKVBatchFP8DeviceView;
+using ::shelf::state::PagedKVPoolBF16View;
+using ::shelf::state::PagedKVPoolFP8View;
+using ::shelf::state::PagedKVPool;
+using ::shelf::state::make_paged_kv_bf16_view;
+using ::shelf::state::make_paged_kv_fp8_view;
 
-using ::ps::state::GDNState;
-using ::ps::state::GdnStatePoolDeviceView;
-using ::ps::state::GdnStatePoolLayout;
-using ::ps::state::GdnStatePool;
+using ::shelf::state::GDNState;
+using ::shelf::state::GdnStatePoolDeviceView;
+using ::shelf::state::GdnStatePoolLayout;
+using ::shelf::state::GdnStatePool;
 
-using ::ps::state::PagedSequenceState;
-using ::ps::state::create_paged_sequence_state;
-using ::ps::state::release_paged_sequence_state;
-using ::ps::state::reserve_sequence_append;
-using ::ps::state::rollback_sequence_append;
-using ::ps::state::commit_sequence_append;
-using ::ps::state::validate_sequence_append_commit;
-using ::ps::state::runtime_install_sequence_state;
+using ::shelf::state::PagedSequenceState;
+using ::shelf::state::create_paged_sequence_state;
+using ::shelf::state::release_paged_sequence_state;
+using ::shelf::state::reserve_sequence_append;
+using ::shelf::state::rollback_sequence_append;
+using ::shelf::state::commit_sequence_append;
+using ::shelf::state::validate_sequence_append_commit;
+using ::shelf::state::runtime_install_sequence_state;
 
-using ::ps::kernel::KVCacheDType;
-using ::ps::kernel::fp8e4m3_storage_t;
+using ::shelf::kernel::KVCacheDType;
+using ::shelf::kernel::fp8e4m3_storage_t;
 
 }
 }

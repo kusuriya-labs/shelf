@@ -3,20 +3,20 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
-__device__ __forceinline__ ps::bf16_t bf16_pack(float f) {
-    return ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
+__device__ __forceinline__ shelf::bf16_t bf16_pack(float f) {
+    return shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
 }
 
-__device__ __forceinline__ float bf16_unpack(const ps::bf16_t& x) {
+__device__ __forceinline__ float bf16_unpack(const shelf::bf16_t& x) {
     return __bfloat162float(__ushort_as_bfloat16(x.data));
 }
 __global__ void rmsnorm_kernel(
-    const ps::bf16_t* __restrict__ input,
-    const ps::bf16_t* __restrict__ weight,
-    ps::bf16_t* __restrict__ output,
+    const shelf::bf16_t* __restrict__ input,
+    const shelf::bf16_t* __restrict__ weight,
+    shelf::bf16_t* __restrict__ output,
     std::size_t seq_len,
     std::size_t hidden,
     double eps)
@@ -24,9 +24,9 @@ __global__ void rmsnorm_kernel(
     std::size_t row = static_cast<std::size_t>(blockIdx.x);
     if (row >= seq_len) return;
 
-    const ps::bf16_t* __restrict__ inp = input + row * hidden;
-    const ps::bf16_t* __restrict__ wgt = weight;
-    ps::bf16_t* __restrict__ out = output + row * hidden;
+    const shelf::bf16_t* __restrict__ inp = input + row * hidden;
+    const shelf::bf16_t* __restrict__ wgt = weight;
+    shelf::bf16_t* __restrict__ out = output + row * hidden;
 
     extern __shared__ float shared_mem[];
 
@@ -89,9 +89,9 @@ Status rmsnorm(
     const std::size_t shared_mem_size = (hidden + 1) * sizeof(float);
 
     rmsnorm_kernel<<<static_cast<unsigned>(seq_len), threads_per_block, shared_mem_size, stream>>>(
-        input.data<ps::bf16_t>(),
-        weight.data<ps::bf16_t>(),
-        output.data<ps::bf16_t>(),
+        input.data<shelf::bf16_t>(),
+        weight.data<shelf::bf16_t>(),
+        output.data<shelf::bf16_t>(),
         seq_len,
         hidden,
         eps);
@@ -105,4 +105,4 @@ Status rmsnorm(
 }
 
 } // namespace kernel
-} // namespace ps
+} // namespace shelf

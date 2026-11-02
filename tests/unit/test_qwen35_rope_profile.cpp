@@ -9,13 +9,13 @@
 
 namespace fs = std::filesystem;
 
-using ps::qwen35::EffectiveRopeProfile;
-using ps::qwen35::Qwen35RopeParameters;
-using ps::qwen35::RopeFactorSelection;
-using ps::qwen35::parse_rope_factor_selection;
-using ps::qwen35::read_qwen35_rope_parameters;
-using ps::qwen35::resolve_effective_rope_profile;
-using ps::qwen35::rope_max_seq_len_cap;
+using shelf::qwen35::EffectiveRopeProfile;
+using shelf::qwen35::Qwen35RopeParameters;
+using shelf::qwen35::RopeFactorSelection;
+using shelf::qwen35::parse_rope_factor_selection;
+using shelf::qwen35::read_qwen35_rope_parameters;
+using shelf::qwen35::resolve_effective_rope_profile;
+using shelf::qwen35::rope_max_seq_len_cap;
 
 static int g_fail = 0;
 

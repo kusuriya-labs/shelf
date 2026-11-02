@@ -5,7 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ void gdn_mul_f32_bf16_body(
     const float* a_row, const float* b_row, bf16* out_row, uint32_t col0,
@@ -30,4 +30,4 @@ __device__ __forceinline__ void gdn_mul_f32_bf16_body(
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

@@ -185,13 +185,13 @@ int main() {
     h_dtb[0] = rndf(seed) * 0.5f;
     h_alog[0] = rndf(seed) * 0.5f;
 
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_s0, h_s0.data(), kState * 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_k, h_k.data(), nf * 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_v, h_v.data(), nf * 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_a, h_a.data(), rows * 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_b, h_b.data(), rows * 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_dtb, h_dtb.data(), 4u, hipMemcpyHostToDevice));
-    ps::gpu::discard_cleanup_result(hipMemcpy(d_alog, h_alog.data(), 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_s0, h_s0.data(), kState * 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_k, h_k.data(), nf * 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_v, h_v.data(), nf * 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_a, h_a.data(), rows * 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_b, h_b.data(), rows * 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_dtb, h_dtb.data(), 4u, hipMemcpyHostToDevice));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(d_alog, h_alog.data(), 4u, hipMemcpyHostToDevice));
 
     poc_seq<<<1u, kDim>>>(d_s0, d_k, d_v, d_a, d_b, d_dtb, d_alog, rows, d_traj, d_spa, d_spd);
     if (hipDeviceSynchronize() != hipSuccess) {
@@ -200,9 +200,9 @@ int main() {
     }
 
     std::vector<float> h_traj(ntraj), h_spa(rows), h_spd(nf);
-    ps::gpu::discard_cleanup_result(hipMemcpy(h_traj.data(), d_traj, ntraj * 4u, hipMemcpyDeviceToHost));
-    ps::gpu::discard_cleanup_result(hipMemcpy(h_spa.data(), d_spa, rows * 4u, hipMemcpyDeviceToHost));
-    ps::gpu::discard_cleanup_result(hipMemcpy(h_spd.data(), d_spd, nf * 4u, hipMemcpyDeviceToHost));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(h_traj.data(), d_traj, ntraj * 4u, hipMemcpyDeviceToHost));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(h_spa.data(), d_spa, rows * 4u, hipMemcpyDeviceToHost));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(h_spd.data(), d_spd, nf * 4u, hipMemcpyDeviceToHost));
 
     std::vector<float> h_ref(kState), h_out(kState), h_coef(rows);
     double worst_seq = 0.0;
@@ -212,7 +212,7 @@ int main() {
                   h_traj.begin() + static_cast<size_t>(m + 1u) * kState, h_ref.begin());
 
         poc_recon_seq<<<1u, kDim>>>(d_s0, d_k, d_spa, d_spd, m, d_out);
-        ps::gpu::discard_cleanup_result(hipMemcpy(h_out.data(), d_out, kState * 4u, hipMemcpyDeviceToHost));
+        shelf::gpu::discard_cleanup_result(hipMemcpy(h_out.data(), d_out, kState * 4u, hipMemcpyDeviceToHost));
         const Diff ds = compare(h_ref, h_out);
 
         double am = 1.0;
@@ -223,10 +223,10 @@ int main() {
             for (uint32_t j = i + 1u; j < m; ++j) c *= static_cast<double>(h_spa[j]);
             h_coef[i] = static_cast<float>(c);
         }
-        ps::gpu::discard_cleanup_result(hipMemcpy(d_coef, h_coef.data(), m * 4u, hipMemcpyHostToDevice));
-        ps::gpu::discard_cleanup_result(hipMemcpy(d_am, &amf, 4u, hipMemcpyHostToDevice));
+        shelf::gpu::discard_cleanup_result(hipMemcpy(d_coef, h_coef.data(), m * 4u, hipMemcpyHostToDevice));
+        shelf::gpu::discard_cleanup_result(hipMemcpy(d_am, &amf, 4u, hipMemcpyHostToDevice));
         poc_recon_gemm<<<1u, kDim>>>(d_s0, d_k, d_spd, d_coef, d_am, m, d_out);
-        ps::gpu::discard_cleanup_result(hipMemcpy(h_out.data(), d_out, kState * 4u, hipMemcpyDeviceToHost));
+        shelf::gpu::discard_cleanup_result(hipMemcpy(h_out.data(), d_out, kState * 4u, hipMemcpyDeviceToHost));
         const Diff dg = compare(h_ref, h_out);
 
         std::printf("m=%2u  seq: max_abs=%.3e max_rel=%.3e exact=%s  |  gemm: max_abs=%.3e "
@@ -243,7 +243,7 @@ int main() {
     void* frees[] = {d_s0, d_k, d_v, d_a, d_b, d_dtb, d_alog, d_traj,
                      d_spa, d_spd, d_out, d_coef, d_am};
     for (void* p : frees)
-        if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+        if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

@@ -15,10 +15,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using DT = ::shelf::runtime::ValueDType;
 
 int passed = 0;
 int failed = 0;
@@ -45,7 +45,7 @@ uint16_t bf16_bits(float f) {
 struct Buf {
     void* dev = nullptr;
     size_t bytes = 0;
-    ~Buf() { if (dev) ps::gpu::discard_cleanup_result(hipFree(dev)); }
+    ~Buf() { if (dev) shelf::gpu::discard_cleanup_result(hipFree(dev)); }
     bool alloc(size_t b) { bytes = b; return hipMalloc(&dev, b) == hipSuccess; }
     bool fill_u16(const std::vector<uint16_t>& h) {
         return hipMemcpy(dev, h.data(), h.size() * 2, hipMemcpyHostToDevice) == hipSuccess;
@@ -58,9 +58,9 @@ struct Buf {
 
 void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt) {
     v.logical_value = id;
-    v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     v.dtype = dt;
-    v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     v.slot = 0;
     v.feature_count = feat;
     v.row_stride = stride;
@@ -69,7 +69,7 @@ void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt
 }
 
 struct Ctx {
-    ::ps::runtime::DeviceBatchContext h{};
+    ::shelf::runtime::DeviceBatchContext h{};
     void* dev = nullptr;
     void* scratch = nullptr;
     void* err = nullptr;
@@ -77,7 +77,7 @@ struct Ctx {
     ~Ctx() {
         void* b[] = {dev, scratch, err, vals_dev};
         for (auto* q : b)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
     bool init(uint32_t rows) {
         h = {};
@@ -97,10 +97,10 @@ struct Ctx {
         p.values = (const V*)vals_dev;
         p.value_count = 2;
         p.workspace_base = 0;
-        ps::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), s));
-        ::ps::kernel::ModelDispatchStateView sv{};
-        auto st = ::ps::kernel::launch_model_dispatch_correctness(
-            p, b, (::ps::runtime::DeviceBatchContext*)dev, sv, (float*)scratch,
+        shelf::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), s));
+        ::shelf::kernel::ModelDispatchStateView sv{};
+        auto st = ::shelf::kernel::launch_model_dispatch_correctness(
+            p, b, (::shelf::runtime::DeviceBatchContext*)dev, sv, (float*)scratch,
             (uint32_t*)err, s);
         if (!st.ok()) return false;
         if (hipStreamSynchronize(s) != hipSuccess) return false;
@@ -156,7 +156,7 @@ bool run_case(const Case& c, hipStream_t stream) {
     set_val(vals[0], 0, c.f, c.in_stride, in.dev, DT::BF16);
     set_val(vals[1], 1, c.f, c.out_stride, opt.dev, DT::F32);
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::L2_NORMALIZE;
+    binding.kernel_id = ::shelf::runtime::KernelId::L2_NORMALIZE;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
     binding.input_count = 1;
@@ -168,8 +168,8 @@ bool run_case(const Case& c, hipStream_t stream) {
     if (!ctx.run(vals, binding, stream)) { std::printf("FAIL [%s] correctness\n", c.name); return false; }
 
     set_val(vals[1], 1, c.f, c.out_stride, opt.dev, DT::F32);
-    hipError_t h_err = ::ps::kernel::launch_l2_normalize_bf16_f32(
-        (const ::ps::bf16_t*)in.dev, c.in_stride, (float*)opt.dev, c.out_stride,
+    hipError_t h_err = ::shelf::kernel::launch_l2_normalize_bf16_f32(
+        (const ::shelf::bf16_t*)in.dev, c.in_stride, (float*)opt.dev, c.out_stride,
         c.rows, c.f, c.g, c.eps, stream);
     if (h_err != hipSuccess) { std::printf("FAIL [%s] opt launch\n", c.name); return false; }
     if (hipStreamSynchronize(stream) != hipSuccess) { std::printf("FAIL [%s] sync\n", c.name); return false; }
@@ -232,6 +232,6 @@ int main() {
     }
 
     std::printf("\n=== %d passed, %d failed ===\n", passed, failed);
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return failed == 0 ? 0 : 1;
 }

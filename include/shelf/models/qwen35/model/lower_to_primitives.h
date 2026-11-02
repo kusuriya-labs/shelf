@@ -11,13 +11,13 @@
 #include <cstdint>
 #include <span>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 
 struct Qwen35LoweredPrimitives {
-    ps::runtime::PrimitiveGraph graph;
-    std::vector<ps::runtime::WeightSlot> weights;
-    std::vector<ps::runtime::StaticParameterSlot> parameters;
-    std::vector<std::pair<std::uint32_t, ps::runtime::ValueId>> layer_input_values;
+    shelf::runtime::PrimitiveGraph graph;
+    std::vector<shelf::runtime::WeightSlot> weights;
+    std::vector<shelf::runtime::StaticParameterSlot> parameters;
+    std::vector<std::pair<std::uint32_t, shelf::runtime::ValueId>> layer_input_values;
 };
 
 struct Qwen35LowerOptions {

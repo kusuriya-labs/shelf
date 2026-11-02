@@ -14,7 +14,7 @@
 #include <unistd.h>
 #include <nlohmann/json.hpp>
 
-namespace ps {
+namespace shelf {
 namespace io {
 
 std::size_t stype_elem_size(SType dtype) noexcept {

@@ -3,8 +3,8 @@
 #include <cstdio>
 #include <string>
 
-using namespace ps;
-using namespace ps::quantization::manifest;
+using namespace shelf;
+using namespace shelf::quantization::manifest;
 
 namespace {
 int g_passed = 0;

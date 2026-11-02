@@ -13,9 +13,9 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 int passed = 0;
 int failed = 0;
@@ -56,7 +56,7 @@ bool run_case(const Case& c) {
     auto cleanup = [&]() {
         void* all[] = {din, dout_c, dout_o, drow, dctx, dvals, dscratch, derr};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     };
     auto alloc = [&](void** dst, size_t bytes) { return hipMalloc(dst, bytes) == hipSuccess; };
     const uint32_t in_elem = c.f32 ? 4u : 2u;
@@ -65,7 +65,7 @@ bool run_case(const Case& c) {
         !alloc(&dout_c, (size_t)c.outputs * out_stride * out_elem) ||
         !alloc(&dout_o, (size_t)c.outputs * out_stride * out_elem) ||
         !alloc(&drow, c.outputs * 4) ||
-        !alloc(&dctx, sizeof(::ps::runtime::DeviceBatchContext)) ||
+        !alloc(&dctx, sizeof(::shelf::runtime::DeviceBatchContext)) ||
         !alloc(&dvals, 2 * sizeof(V)) ||
         !alloc(&dscratch, (size_t)256 * 4096 * sizeof(float)) ||
         !alloc(&derr, sizeof(uint32_t))) {
@@ -94,18 +94,18 @@ bool run_case(const Case& c) {
         h_row[i] = (c.rows == 0u) ? 0u : ((i * 7u + 3u) % c.rows);
     if (hipMemcpy(drow, h_row.data(), c.outputs * 4, hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = c.rows;
     ctx.num_outputs = c.outputs;
     ctx.output_rows = (uint32_t*)drow;
     if (hipMemcpy(dctx, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
-    const auto dt = c.f32 ? ::ps::runtime::ValueDType::F32 : ::ps::runtime::ValueDType::BF16;
+    const auto dt = c.f32 ? ::shelf::runtime::ValueDType::F32 : ::shelf::runtime::ValueDType::BF16;
     V vals[2];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType d, ::ps::runtime::ValueRowDomain dom) {
+                    ::shelf::runtime::ValueDType d, ::shelf::runtime::ValueRowDomain dom) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = d;
         v.row_domain = dom;
         v.slot = 0;
@@ -114,8 +114,8 @@ bool run_case(const Case& c) {
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, c.features, in_stride, din, dt, ::ps::runtime::ValueRowDomain::TOKEN_ROWS);
-    setv(vals[1], 1, c.features, out_stride, dout_c, dt, ::ps::runtime::ValueRowDomain::OUTPUT_ROWS);
+    setv(vals[0], 0, c.features, in_stride, din, dt, ::shelf::runtime::ValueRowDomain::TOKEN_ROWS);
+    setv(vals[1], 1, c.features, out_stride, dout_c, dt, ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS);
     if (hipMemcpy(dvals, vals, 2 * sizeof(V), hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
     P prog{};
@@ -124,26 +124,26 @@ bool run_case(const Case& c) {
     prog.workspace_base = 0;
 
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::OUTPUT_GATHER;
+    binding.kernel_id = ::shelf::runtime::KernelId::OUTPUT_GATHER;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
     binding.input_count = 1;
     binding.output_count = 1;
 
-    ps::gpu::discard_cleanup_result(hipMemset(derr, 0, sizeof(uint32_t)));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto stc = ::ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)dctx, sv, (float*)dscratch,
+    shelf::gpu::discard_cleanup_result(hipMemset(derr, 0, sizeof(uint32_t)));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto stc = ::shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)dctx, sv, (float*)dscratch,
         (uint32_t*)derr, nullptr);
     if (!stc.ok()) { std::printf("  [%s] correctness launch failed\n", c.name); cleanup(); return false; }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
-    setv(vals[1], 1, c.features, out_stride, dout_o, dt, ::ps::runtime::ValueRowDomain::OUTPUT_ROWS);
-    hipError_t he = ::ps::kernel::launch_output_gather(
-        din, in_stride, dout_o, out_stride, (const ::ps::runtime::DeviceBatchContext*)dctx,
+    setv(vals[1], 1, c.features, out_stride, dout_o, dt, ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS);
+    hipError_t he = ::shelf::kernel::launch_output_gather(
+        din, in_stride, dout_o, out_stride, (const ::shelf::runtime::DeviceBatchContext*)dctx,
         c.outputs, c.features, dt, nullptr);
     if (he != hipSuccess) { std::printf("  [%s] opt launch failed: %s\n", c.name, hipGetErrorString(he)); cleanup(); return false; }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
     std::vector<uint8_t> rr((size_t)c.outputs * out_stride * out_elem);
     std::vector<uint8_t> ro(rr.size());

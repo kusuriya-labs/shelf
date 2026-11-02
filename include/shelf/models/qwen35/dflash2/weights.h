@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace dflash2 {
 
@@ -17,25 +17,25 @@ struct DFlash2LayerWeights {
     gpu::Tensor input_layernorm_weight;
     gpu::Tensor post_attention_layernorm_weight;
 
-    ps::weights::MatrixWeight attn_q_proj;
-    ps::weights::MatrixWeight attn_k_proj;
-    ps::weights::MatrixWeight attn_v_proj;
-    ps::weights::MatrixWeight attn_o_proj;
+    shelf::weights::MatrixWeight attn_q_proj;
+    shelf::weights::MatrixWeight attn_k_proj;
+    shelf::weights::MatrixWeight attn_v_proj;
+    shelf::weights::MatrixWeight attn_o_proj;
     gpu::Tensor attn_q_norm_weight;
     gpu::Tensor attn_k_norm_weight;
 
-    ps::weights::MatrixWeight mlp_gate_proj;
-    ps::weights::MatrixWeight mlp_up_proj;
-    ps::weights::MatrixWeight mlp_down_proj;
+    shelf::weights::MatrixWeight mlp_gate_proj;
+    shelf::weights::MatrixWeight mlp_up_proj;
+    shelf::weights::MatrixWeight mlp_down_proj;
 
     gpu::Tensor attention_conv_base_kernel;
-    ps::weights::MatrixWeight attention_conv_kernel_projection;
+    shelf::weights::MatrixWeight attention_conv_kernel_projection;
     gpu::Tensor mlp_conv_base_kernel;
-    ps::weights::MatrixWeight mlp_conv_kernel_projection;
+    shelf::weights::MatrixWeight mlp_conv_kernel_projection;
 };
 
 struct DFlash2SelectorWeights {
-    ps::weights::MatrixWeight hidden_projection;
+    shelf::weights::MatrixWeight hidden_projection;
     gpu::Tensor predecessor_codebook;
     gpu::Tensor successor_codebook;
 };
@@ -46,7 +46,7 @@ struct DFlash2Weights {
     gpu::Tensor hidden_norm_weight;
     gpu::Tensor final_norm_weight;
 
-    ps::weights::MatrixWeight fc;
+    shelf::weights::MatrixWeight fc;
     DFlash2SelectorWeights selector;
     std::vector<DFlash2LayerWeights> layers;
 };
@@ -67,8 +67,8 @@ Result<DFlash2Weights> load_dflash2_weights(
     const DFlash2Config& config,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const ps::weights::WeightLoadOptions& options = {});
+    const shelf::weights::WeightLoadOptions& options = {});
 
 }  // namespace dflash2
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

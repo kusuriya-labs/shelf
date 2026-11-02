@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace ps::quantization::fp8 {
+namespace shelf::quantization::fp8 {
 
 namespace {
 
@@ -166,4 +166,4 @@ void dequantize_fp8_canonical(const Fp8BlockCanonicalView& v, std::vector<float>
     }
 }
 
-}  // namespace ps::quantization::fp8
+}  // namespace shelf::quantization::fp8

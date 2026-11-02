@@ -189,7 +189,7 @@ bf16 linear（非量子化）はアクティベーション量子化を挟まず
 
 `KV_APPEND` / `PAGED_ATTENTION` / `STATEFUL_CAUSAL_CONV1D` / `GDN_RECURRENCE` は `register_state` で state を Program に登録し、`descriptor_slot = slot + 1` として binding に入れる。
 
-GDN の conv state は bf16、recurrent state は fp16（`ps::fp16_t`）で保持する。
+GDN の conv state は bf16、recurrent state は fp16（`shelf::fp16_t`）で保持する。
 recurrence の matrix 演算は fp16 WMMA
 （`__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`）で行い、`kLossy=true` は
 hi 項 1 回、`kLossy=false` は hi/lo の 4 項で積む。recurrent state の動的範囲は

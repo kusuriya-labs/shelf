@@ -2,7 +2,7 @@
 
 #include <limits>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 Status validate_tensor_partition(const TensorPartitionDesc& partition) {
     if (partition.count < 2) {
@@ -124,4 +124,4 @@ Status validate_tensor_partition_plan(const TensorPartitionPlan& plan) {
     return Status::make_ok();
 }
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

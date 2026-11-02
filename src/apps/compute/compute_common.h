@@ -5,9 +5,9 @@
 
 #include <cstdint>
 
-namespace ps::app {
+namespace shelf::app {
 
-inline uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+inline uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt == 1) ++n;
@@ -15,8 +15,8 @@ inline uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
     return n;
 }
 
-inline const char* finish_reason_name(ps::qwen35::runtime::FinishReason reason) {
-    using ps::qwen35::runtime::FinishReason;
+inline const char* finish_reason_name(shelf::qwen35::runtime::FinishReason reason) {
+    using shelf::qwen35::runtime::FinishReason;
     switch (reason) {
         case FinishReason::Eos: return "stop";
         case FinishReason::MaxNewTokens: return "length";
@@ -27,4 +27,4 @@ inline const char* finish_reason_name(ps::qwen35::runtime::FinishReason reason) 
     return "none";
 }
 
-}  // namespace ps::app
+}  // namespace shelf::app

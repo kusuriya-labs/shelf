@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::app {
+namespace shelf::app {
 
 struct ComputeOptions {
     std::string model_dir;
@@ -24,14 +24,14 @@ struct ComputeOptions {
     std::vector<int> devices = {0};
     unsigned long tp = 1;
     std::string kv_cache_dtype = "bf16";
-    ps::qwen35::runtime::DecodeBackend decode_backend =
-        ps::qwen35::runtime::DecodeBackend::Hip;
+    shelf::qwen35::runtime::DecodeBackend decode_backend =
+        shelf::qwen35::runtime::DecodeBackend::Hip;
     int verify_weights = 0;
     std::string dump_logits_path;
     std::string hidden_taps;
     int tp_combine_f32 = 0;
     bool serve_stdio = false;
-    ps::qwen35::runtime::SamplingConfig sampling;
+    shelf::qwen35::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
     int dflash2_stats = 1;
@@ -62,4 +62,4 @@ std::vector<int32_t> read_input_ids(const std::string& path);
 
 std::size_t safetensors_dir_bytes(const std::string& dir);
 
-}  // namespace ps::app
+}  // namespace shelf::app

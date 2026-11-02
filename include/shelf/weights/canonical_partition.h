@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 struct OwnedCanonicalTensor {
     std::vector<int64_t> logical_shape;
@@ -25,4 +25,4 @@ Status materialize_rank_local_canonical(
     OwnedCanonicalTensor& owned,
     quantization::bundle::QuantizedTensorView& local);
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

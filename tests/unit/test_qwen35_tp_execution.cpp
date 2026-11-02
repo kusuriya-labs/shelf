@@ -30,29 +30,29 @@
 #include "support/qwen35_tp_fixture.h"
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
-using ps::state::GdnStatePool;
-using ps::state::GdnStatePoolLayout;
-using ps::state::PagedKVPool;
-using ps::qwen35::Qwen35LayerWeights;
-using ps::qwen35::Qwen35LoadOptions;
-using ps::qwen35::Qwen35Model;
-using ps::qwen35::Qwen35ModelWeights;
-using ps::qwen35::Qwen35TextConfig;
-using ps::state::SequenceSlotPool;
-using ps::qwen35::Executor;
-using ps::qwen35::ExecutorConfig;
-using ps::qwen35::create_model_executor;
-using ps::qwen35::executor_shutdown;
-using ps::kernel::KVCacheDType;
-using ps::qwen35::runtime::ContinuousBatcher;
-using ps::qwen35::runtime::ContinuousBatcherConfig;
-using ps::qwen35::runtime::RuntimeRequest;
-using ps::qwen35::runtime::TpCoordinator;
-using ps::qwen35::runtime::TpCoordinatorConfig;
-using ps::qwen35::runtime::TpRankRuntime;
-using ps::qwen35::runtime::ValueTraceSink;
+using shelf::state::GdnStatePool;
+using shelf::state::GdnStatePoolLayout;
+using shelf::state::PagedKVPool;
+using shelf::qwen35::Qwen35LayerWeights;
+using shelf::qwen35::Qwen35LoadOptions;
+using shelf::qwen35::Qwen35Model;
+using shelf::qwen35::Qwen35ModelWeights;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::state::SequenceSlotPool;
+using shelf::qwen35::Executor;
+using shelf::qwen35::ExecutorConfig;
+using shelf::qwen35::create_model_executor;
+using shelf::qwen35::executor_shutdown;
+using shelf::kernel::KVCacheDType;
+using shelf::qwen35::runtime::ContinuousBatcher;
+using shelf::qwen35::runtime::ContinuousBatcherConfig;
+using shelf::qwen35::runtime::RuntimeRequest;
+using shelf::qwen35::runtime::TpCoordinator;
+using shelf::qwen35::runtime::TpCoordinatorConfig;
+using shelf::qwen35::runtime::TpRankRuntime;
+using shelf::qwen35::runtime::ValueTraceSink;
 
 static int g_fail = 0;
 

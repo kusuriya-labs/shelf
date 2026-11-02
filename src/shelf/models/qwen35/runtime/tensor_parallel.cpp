@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <sstream>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -49,8 +49,8 @@ std::uint64_t tensor_bytes(const gpu::Tensor& t) {
     return bytes;
 }
 
-void add_matrix_bytes(std::uint64_t& total, const ps::weights::MatrixWeight& w) {
-    if (w.encoding == ps::weights::MatrixEncoding::Bf16) {
+void add_matrix_bytes(std::uint64_t& total, const shelf::weights::MatrixWeight& w) {
+    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
         total += static_cast<std::uint64_t>(w.rows) * w.cols * 2u;
         return;
     }
@@ -64,11 +64,11 @@ void add_matrix_bytes(std::uint64_t& total, const ps::weights::MatrixWeight& w) 
 
 TpRankRuntime::~TpRankRuntime() noexcept {
     if (executor_ready_) {
-        ps::qwen35::executor_shutdown(executor_);
+        shelf::qwen35::executor_shutdown(executor_);
         executor_ready_ = false;
     }
     if (stream_ != nullptr) {
-        ps::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
         stream_ = nullptr;
     }
 }
@@ -86,7 +86,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             "max_scheduled_requests and max_seq_len must be > 0", __FILE__, __LINE__);
     }
 
-    auto scope = ps::gpu::ScopedDevice::create(config.device_id);
+    auto scope = shelf::gpu::ScopedDevice::create(config.device_id);
     if (!scope.ok()) return scope.status();
 
     std::unique_ptr<TpRankRuntime> rank(new TpRankRuntime());
@@ -278,7 +278,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     std::uint32_t exec_tokens = config.max_batch_rows;
     if (exec_tokens == 0) exec_tokens = config.max_seq_len;
     const std::uint32_t row_bucket_max =
-        ps::runtime::row_bucket_limit(ps::runtime::RowBucket::R8192);
+        shelf::runtime::row_bucket_limit(shelf::runtime::RowBucket::R8192);
     if (exec_tokens > row_bucket_max) exec_tokens = row_bucket_max;
     if (exec_tokens == 0) exec_tokens = 1;
 
@@ -386,7 +386,7 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
 
-    auto transport_result = ::ps::runtime::create_tp_transport(devices_);
+    auto transport_result = ::shelf::runtime::create_tp_transport(devices_);
     if (!transport_result.ok()) return transport_result.status();
     transport_ = std::move(transport_result.value().transport);
 
@@ -432,10 +432,10 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
                      "[tp] transport %s failed verification (%s); falling back to "
                      "host-mediated reference transport\n",
                      transport_->name(), verify_status.message().c_str());
-        transport_ = std::make_unique<::ps::runtime::HostMediatedTpTransport>(devices_);
+        transport_ = std::make_unique<::shelf::runtime::HostMediatedTpTransport>(devices_);
     }
 
-    barrier_group_ = std::make_unique<::ps::runtime::TpBarrierGroup>(
+    barrier_group_ = std::make_unique<::shelf::runtime::TpBarrierGroup>(
         static_cast<int>(devices_.size()), devices_, transport_.get());
     Status barrier_status = barrier_group_->initialize();
     if (!barrier_status.ok()) return barrier_status;
@@ -480,7 +480,7 @@ void TpCoordinator::abort(const Status& reason) noexcept {
 }
 
 Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
-    const std::uint64_t key = ::ps::runtime::request_handle_key(source.request_handle());
+    const std::uint64_t key = ::shelf::runtime::request_handle_key(source.request_handle());
     if (mirrors_.find(key) != mirrors_.end()) {
         return Status::invalid_state("tp mirror sequence already exists", __FILE__,
                                      __LINE__);
@@ -489,7 +489,7 @@ Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
     mirror.states.reserve(ranks_.size() - 1);
     for (std::size_t r = 1; r < ranks_.size(); ++r) {
         TpRankRuntime& rank = *ranks_[r];
-        auto scope = ps::gpu::ScopedDevice::create(rank.device_id());
+        auto scope = shelf::gpu::ScopedDevice::create(rank.device_id());
         if (!scope.ok()) {
             mirror.states.clear();
             return scope.status();
@@ -502,7 +502,7 @@ Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
             return created.status();
         }
         PagedSequenceState state = created.release();
-        if (::ps::runtime::request_handle_key(state.request_handle()) != key) {
+        if (::shelf::runtime::request_handle_key(state.request_handle()) != key) {
             mirror.states.clear();
             return Status::invalid_state(
                 "tp mirror sequence slot diverged from rank0", __FILE__, __LINE__);
@@ -520,7 +520,7 @@ uint32_t TpCoordinator::on_prefix_rank_count() {
 PagedSequenceState* TpCoordinator::on_prefix_rank_sequence(
     const PagedSequenceState& source, uint32_t rank) {
     if (rank == 0u) return const_cast<PagedSequenceState*>(&source);
-    const std::uint64_t key = ::ps::runtime::request_handle_key(source.request_handle());
+    const std::uint64_t key = ::shelf::runtime::request_handle_key(source.request_handle());
     auto it = mirrors_.find(key);
     if (it == mirrors_.end()) return nullptr;
     if (static_cast<std::size_t>(rank - 1u) >= it->second.states.size()) return nullptr;
@@ -528,7 +528,7 @@ PagedSequenceState* TpCoordinator::on_prefix_rank_sequence(
 }
 
 Status TpCoordinator::on_sequence_released(const PagedSequenceState& source) {
-    const std::uint64_t key = ::ps::runtime::request_handle_key(source.request_handle());
+    const std::uint64_t key = ::shelf::runtime::request_handle_key(source.request_handle());
     auto it = mirrors_.find(key);
     if (it == mirrors_.end()) {
         return Status::invalid_state("tp mirror sequence not found", __FILE__, __LINE__);
@@ -536,7 +536,7 @@ Status TpCoordinator::on_sequence_released(const PagedSequenceState& source) {
     Status first_error = Status::make_ok();
     for (std::size_t r = 1; r < ranks_.size(); ++r) {
         TpRankRuntime& rank = *ranks_[r];
-        auto scope = ps::gpu::ScopedDevice::create(rank.device_id());
+        auto scope = shelf::gpu::ScopedDevice::create(rank.device_id());
         if (!scope.ok()) {
             if (first_error.ok()) first_error = scope.status();
             continue;
@@ -552,7 +552,7 @@ Status TpCoordinator::on_sequence_released(const PagedSequenceState& source) {
 Status TpCoordinator::sync_mirror_state(const ScheduledBatch& batch) {
     for (const ScheduledRequest& req : batch.requests) {
         if (req.sequence == nullptr) continue;
-        const std::uint64_t key = ::ps::runtime::request_handle_key(req.handle);
+        const std::uint64_t key = ::shelf::runtime::request_handle_key(req.handle);
         auto it = mirrors_.find(key);
         if (it == mirrors_.end()) continue;
         const std::size_t want_blocks = req.sequence->block_table.size();
@@ -560,7 +560,7 @@ Status TpCoordinator::sync_mirror_state(const ScheduledBatch& batch) {
             PagedSequenceState& mirror = it->second.states[i];
             TpRankRuntime& rank = *ranks_[i + 1];
             if (mirror.block_table.size() > want_blocks) {
-                auto scope = ps::gpu::ScopedDevice::create(rank.device_id());
+                auto scope = shelf::gpu::ScopedDevice::create(rank.device_id());
                 if (!scope.ok()) return scope.status();
                 Status st = rollback_sequence_append(
                     mirror, static_cast<std::uint32_t>(want_blocks), rank.stream());
@@ -606,7 +606,7 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
         if (r > 0) {
             for (ScheduledRequest& request : request_storage[r]) {
                 const std::uint64_t key =
-                    ::ps::runtime::request_handle_key(request.handle);
+                    ::shelf::runtime::request_handle_key(request.handle);
                 auto it = mirrors_.find(key);
                 if (it == mirrors_.end()) {
                     return Status::invalid_state(
@@ -655,7 +655,7 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
     return rank0_output;
 }
 
-Status TpCoordinator::draft_sum(const ps::runtime::TpSumTarget& target,
+Status TpCoordinator::draft_sum(const shelf::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
     if (barrier_group_ == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);
@@ -665,7 +665,7 @@ Status TpCoordinator::draft_sum(const ps::runtime::TpSumTarget& target,
 
 void TpCoordinator::worker_loop(std::size_t rank) {
     Worker* worker = workers_[rank].get();
-    auto scope = ps::gpu::ScopedDevice::create(ranks_[rank]->device_id());
+    auto scope = shelf::gpu::ScopedDevice::create(ranks_[rank]->device_id());
     if (!scope.ok()) {
         std::lock_guard<std::mutex> lock(worker->mutex);
         worker->status = scope.status();

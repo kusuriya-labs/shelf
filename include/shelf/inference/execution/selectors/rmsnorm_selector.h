@@ -3,7 +3,7 @@
 #include <shelf/runtime/graph/value_type.h>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class RmsNormImplementation : uint8_t {
     Correctness,
@@ -17,9 +17,9 @@ enum class RmsNormSelectorWeightLayout : uint8_t {
 };
 
 struct RmsNormSelectorInput {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
-    ::ps::runtime::ValueDType weight_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType weight_dtype;
     RmsNormSelectorWeightLayout weight_layout;
     uint32_t weight_mode;
     uint32_t features;

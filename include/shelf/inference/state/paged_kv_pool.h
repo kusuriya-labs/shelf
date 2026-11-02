@@ -9,11 +9,11 @@
 #include <hip/hip_runtime.h>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
-using ::ps::kernel::KVCacheDType;
-using ::ps::kernel::fp8e4m3_storage_t;
+using ::shelf::kernel::KVCacheDType;
+using ::shelf::kernel::fp8e4m3_storage_t;
 
 struct PagedKVBatchDeviceView {
     bf16_t* k_pool = nullptr;

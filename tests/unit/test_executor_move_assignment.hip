@@ -17,17 +17,17 @@ void check(bool cond, const char* name) {
     }
 }
 
-void seed_host_state(::ps::qwen35::Executor& ex) {
+void seed_host_state(::shelf::qwen35::Executor& ex) {
     ex.stochastic_topk_partitions = 5u;
     ex.stochastic_topk_scratch_bytes = 4096u;
 }
 
-void check_moved_host_state(const ::ps::qwen35::Executor& ex, const char* tag) {
+void check_moved_host_state(const ::shelf::qwen35::Executor& ex, const char* tag) {
     check(ex.stochastic_topk_partitions == 5u, tag);
     check(ex.stochastic_topk_scratch_bytes == 4096u, tag);
 }
 
-void check_cleared_host_state(const ::ps::qwen35::Executor& ex, const char* tag) {
+void check_cleared_host_state(const ::shelf::qwen35::Executor& ex, const char* tag) {
     check(ex.stochastic_topk_partitions == 0u, tag);
     check(ex.stochastic_topk_scratch_bytes == 0u, tag);
 }
@@ -40,17 +40,17 @@ int main() {
         return 77;
     }
 
-    auto signal = ::ps::runtime::stream_signal_alloc(64u);
+    auto signal = ::shelf::runtime::stream_signal_alloc(64u);
     if (!signal.ok()) {
         std::printf("signal alloc failed: %s\n", signal.status().message().c_str());
         return 1;
     }
 
     {
-        ::ps::qwen35::Executor src;
+        ::shelf::qwen35::Executor src;
         src.completion_signal = signal.release();
         seed_host_state(src);
-        ::ps::qwen35::Executor dst;
+        ::shelf::qwen35::Executor dst;
         dst = std::move(src);
 
         check(dst.completion_signal.device_ptr != nullptr,
@@ -64,31 +64,31 @@ int main() {
         check_moved_host_state(dst, "move assignment carries host state");
         check_cleared_host_state(src, "move assignment clears source host state");
 
-        const ::ps::Status dst_st = ::ps::qwen35::executor_shutdown(dst);
+        const ::shelf::Status dst_st = ::shelf::qwen35::executor_shutdown(dst);
         check(dst_st.ok(), "destination shutdown");
-        const ::ps::Status src_st = ::ps::qwen35::executor_shutdown(src);
+        const ::shelf::Status src_st = ::shelf::qwen35::executor_shutdown(src);
         check(src_st.ok(), "source shutdown");
     }
 
     {
-        auto signal2 = ::ps::runtime::stream_signal_alloc(64u);
+        auto signal2 = ::shelf::runtime::stream_signal_alloc(64u);
         if (!signal2.ok()) {
             std::printf("signal2 alloc failed: %s\n", signal2.status().message().c_str());
             return 1;
         }
-        ::ps::qwen35::Executor src;
+        ::shelf::qwen35::Executor src;
         src.completion_signal = signal2.release();
         seed_host_state(src);
-        ::ps::qwen35::Executor dst(std::move(src));
+        ::shelf::qwen35::Executor dst(std::move(src));
 
         check(dst.completion_signal.bytes == 64u,
               "move constructor keeps signal bytes");
         check_moved_host_state(dst, "move constructor carries host state");
         check_cleared_host_state(src, "move constructor clears source host state");
 
-        const ::ps::Status dst_st = ::ps::qwen35::executor_shutdown(dst);
+        const ::shelf::Status dst_st = ::shelf::qwen35::executor_shutdown(dst);
         check(dst_st.ok(), "ctor destination shutdown");
-        const ::ps::Status src_st = ::ps::qwen35::executor_shutdown(src);
+        const ::shelf::Status src_st = ::shelf::qwen35::executor_shutdown(src);
         check(src_st.ok(), "ctor source shutdown");
     }
 

@@ -7,7 +7,7 @@
 #include <mutex>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 class TpBarrierGroup final : public TpBarrierHook {
 public:
@@ -43,4 +43,4 @@ private:
     Status abort_status_;
 };
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

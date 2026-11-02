@@ -7,15 +7,15 @@
 #include <string>
 #include <vector>
 
-using ps::Result;
-using ps::Status;
-using ps::weights::TensorPartitionDesc;
-using ps::weights::TensorPartitionPlan;
-using ps::weights::TensorPartitionRange;
-using ps::weights::validate_tensor_partition;
-using ps::weights::validate_tensor_partition_plan;
-using ps::qwen35::Qwen35TextConfig;
-using ps::qwen35::build_qwen35_tensor_partition_plan;
+using shelf::Result;
+using shelf::Status;
+using shelf::weights::TensorPartitionDesc;
+using shelf::weights::TensorPartitionPlan;
+using shelf::weights::TensorPartitionRange;
+using shelf::weights::validate_tensor_partition;
+using shelf::weights::validate_tensor_partition_plan;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::qwen35::build_qwen35_tensor_partition_plan;
 
 static int g_fail = 0;
 

@@ -201,7 +201,7 @@ def main() -> int:
         print(f"model dir not found: {model_dir()}", file=sys.stderr)
         return 2
 
-    token_log = Path(tempfile.mkdtemp(prefix="ps-reasoning-stream-")) / "tokens.txt"
+    token_log = Path(tempfile.mkdtemp(prefix="shelf-reasoning-stream-")) / "tokens.txt"
     try:
         processor = load_processor()
         with ServerHarness(max_seq_len=1024, max_concurrent_requests=2,

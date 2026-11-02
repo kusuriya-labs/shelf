@@ -1,7 +1,7 @@
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/core/memory/size_format.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -132,4 +132,4 @@ Status DFlash2SessionPool::shutdown() noexcept {
 
 }  // namespace runtime
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

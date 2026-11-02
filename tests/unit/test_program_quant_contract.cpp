@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <string>
 
-namespace rt = ::ps::runtime;
+namespace rt = ::shelf::runtime;
 
 namespace {
 
@@ -194,8 +194,8 @@ void run_shared_input_case() {
     std::array<rt::WeightSlot, 2> slots{};
     for (rt::WeightSlot& slot : slots) {
         slot = make_slot(
-            static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
-            static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
+            static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
+            static_cast<uint8_t>(shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
             k_out, k, k);
     }
     rt::WeightTableView table;
@@ -294,8 +294,8 @@ void run_shared_input_mismatch_case() {
     graph.register_weight(rt::MatrixwiseShapeKey{k_out, k_other});
 
     std::array<rt::WeightSlot, 2> slots{};
-    slots[0] = make_slot(1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k, k);
-    slots[1] = make_slot(1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k_other, k_other);
+    slots[0] = make_slot(1u, static_cast<uint8_t>(shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k, k);
+    slots[1] = make_slot(1u, static_cast<uint8_t>(shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k_other, k_other);
     rt::WeightTableView table;
     table.slots = slots.data();
     table.count = slots.size();
@@ -312,7 +312,7 @@ void run_shared_input_mismatch_case() {
           "shared input mismatch: message keeps the K mismatch contract");
 }
 
-ps::Result<rt::Program> build_single_linear(
+shelf::Result<rt::Program> build_single_linear(
     uint8_t encoding, uint8_t compute_spec, uint32_t k, uint64_t bytes) {
     const uint32_t k_out = 1024;
 
@@ -373,8 +373,8 @@ void run_error_cases() {
 
 int main() {
     run_case(Case{"bf16", 0u, 0u, rt::KernelId::LINEAR_BF16, false, 2560u, 2560u});
-    run_case(Case{"fp8", 1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2560u, 2560u});
-    run_case(Case{"fp8-k2500", 1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2500u, 2560u});
+    run_case(Case{"fp8", 1u, static_cast<uint8_t>(shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2560u, 2560u});
+    run_case(Case{"fp8-k2500", 1u, static_cast<uint8_t>(shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2500u, 2560u});
     run_shared_input_case();
     run_shared_input_mismatch_case();
     run_error_cases();

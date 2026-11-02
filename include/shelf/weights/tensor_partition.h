@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 struct TensorPartitionRange {
     uint64_t global_offset = 0;
@@ -41,4 +41,4 @@ Status validate_tensor_partition_block_alignment(
 
 Status validate_tensor_partition_plan(const TensorPartitionPlan& plan);
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

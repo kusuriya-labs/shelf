@@ -12,10 +12,10 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
-using ::ps::execution::GdnSpecHistoryDeviceView;
-using ::ps::execution::GdnCompactLogDeviceView;
+using ::shelf::execution::GdnSpecHistoryDeviceView;
+using ::shelf::execution::GdnCompactLogDeviceView;
 
 struct GdnSpecHistory {
     gpu::Tensor conv;
@@ -57,11 +57,11 @@ Status commit_gdn_compact_log(
     const GdnStatePool& pool,
     SequenceSlotId slot,
     const GdnCompactLogDeviceView& log,
-    const ::ps::runtime::DeviceRequestDescriptor* requests,
+    const ::shelf::runtime::DeviceRequestDescriptor* requests,
     uint32_t rows,
     uint32_t key_heads,
     hipStream_t stream,
     const int32_t* row_indices = nullptr,
     uint32_t log_row_capacity = 0u);
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

@@ -4,7 +4,7 @@
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
 Status rmsnorm(

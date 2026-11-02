@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kMaxSamplingAttempts = 4096u;
 inline constexpr uint32_t kSamplingNoneMode = 0u;
@@ -66,7 +66,7 @@ struct SamplingTopKView {
 };
 
 __host__ __device__ __forceinline__ SamplingRowParams sampling_row_params(
-    const ::ps::runtime::DeviceSamplingParams& p) {
+    const ::shelf::runtime::DeviceSamplingParams& p) {
     SamplingRowParams r;
     r.mode = p.mode;
     r.temperature = p.temperature;
@@ -79,14 +79,14 @@ __host__ __device__ __forceinline__ SamplingRowParams sampling_row_params(
 }
 
 __host__ __device__ __forceinline__ bool sampling_topk_path_enabled(
-    const ::ps::runtime::DeviceSamplingParams& p) {
+    const ::shelf::runtime::DeviceSamplingParams& p) {
     return (p.reserved[0] & kSamplingTopKPathFlag) != 0u;
 }
 
 __device__ __forceinline__ void sampling_report_error(uint32_t* error_word) {
     if (error_word == nullptr) return;
     atomicCAS(error_word, 0u,
-              static_cast<uint32_t>(::ps::runtime::ProgramStatus::DISPATCH_FAILED));
+              static_cast<uint32_t>(::shelf::runtime::ProgramStatus::DISPATCH_FAILED));
 }
 
 namespace sampling_detail {
@@ -476,4 +476,4 @@ __device__ __forceinline__ void sampling_topk_select_reference(
     }
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

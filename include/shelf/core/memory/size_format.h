@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <string>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 inline std::string format_gib(std::size_t bytes) {
@@ -15,4 +15,4 @@ inline std::string format_gib(std::size_t bytes) {
 }
 
 }  // namespace gpu
-}  // namespace ps
+}  // namespace shelf

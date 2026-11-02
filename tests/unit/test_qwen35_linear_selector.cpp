@@ -17,14 +17,14 @@ void check(bool cond, const char* name) {
     }
 }
 
-using ps::kernel::Bf16GemmConfig;
-using ps::kernel::Bf16GemmConfigId;
-using ps::kernel::Fp8FinegrainedGemmConfig;
-using ps::kernel::Fp8FinegrainedGemmConfigId;
-using ps::execution::Bf16GemmSelectorInput;
-using ps::execution::Fp8FinegrainedGemmSelectorInput;
-using ps::execution::select_bf16_gemm_config;
-using ps::execution::select_fp8_finegrained_gemm_config;
+using shelf::kernel::Bf16GemmConfig;
+using shelf::kernel::Bf16GemmConfigId;
+using shelf::kernel::Fp8FinegrainedGemmConfig;
+using shelf::kernel::Fp8FinegrainedGemmConfigId;
+using shelf::execution::Bf16GemmSelectorInput;
+using shelf::execution::Fp8FinegrainedGemmSelectorInput;
+using shelf::execution::select_bf16_gemm_config;
+using shelf::execution::select_fp8_finegrained_gemm_config;
 
 std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uint32_t k,
                                        uint32_t stride, bool weight_aligned, bool input_aligned,
@@ -70,7 +70,7 @@ void test_bf16() {
           "bf16 rows=1 weight unaligned -> Wmma");
 
     bool exact_ok = true;
-    for (uint32_t rows = 2u; rows <= ps::kernel::kBf16GemmExactRowsMax; ++rows) {
+    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsMax; ++rows) {
         exact_ok = exact_ok &&
                    is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true),
                            Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows));

@@ -17,7 +17,7 @@ Executor (create_model_executor)
         ↓
 program_executor (private: src/shelf/models/qwen35/runtime/)
         ↓
-model_dispatch_correctness (ps::kernel, single launcher)
+model_dispatch_correctness (shelf::kernel, single launcher)
 ```
 
 - `lower_qwen35_to_primitives(config, weights)` は
@@ -53,11 +53,11 @@ enum class DecodeBackend { Hip = 0 };
 ## Public API
 
 ```cpp
-ps::qwen35::create_model_executor(model, slot_pool, gdn_pool, kv_pool, arena, config)
-ps::qwen35::executor_shutdown(executor)
-ps::qwen35::submit_batch(executor, batch, stream)
-ps::qwen35::complete_batch(executor, submission, stream)
-ps::qwen35::execute_batch(executor, batch, stream)
+shelf::qwen35::create_model_executor(model, slot_pool, gdn_pool, kv_pool, arena, config)
+shelf::qwen35::executor_shutdown(executor)
+shelf::qwen35::submit_batch(executor, batch, stream)
+shelf::qwen35::complete_batch(executor, submission, stream)
+shelf::qwen35::execute_batch(executor, batch, stream)
 ```
 
 ## State ownership

@@ -5,7 +5,7 @@
 #include <iterator>
 #include <string>
 
-namespace ps::quantization::bundle {
+namespace shelf::quantization::bundle {
 
 inline Status read_file_text(const std::string& path, std::string& out) {
     std::ifstream f(path, std::ios::binary);

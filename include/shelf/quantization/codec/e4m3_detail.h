@@ -3,7 +3,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 
-namespace ps::quantization::codec::device {
+namespace shelf::quantization::codec::device {
 
 __device__ __forceinline__ float e4m3_decode_f32(uint8_t x) {
     const __half_raw hr = __hip_cvt_fp8_to_halfraw(static_cast<__hip_fp8_storage_t>(x), __HIP_E4M3);
@@ -14,4 +14,4 @@ __device__ __forceinline__ uint8_t e4m3_encode_u8(float x) {
     return static_cast<uint8_t>(__hip_cvt_float_to_fp8(x, __HIP_SATFINITE, __HIP_E4M3));
 }
 
-}  // namespace ps::quantization::codec::device
+}  // namespace shelf::quantization::codec::device

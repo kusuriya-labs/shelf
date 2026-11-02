@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-namespace ps {
+namespace shelf {
 
 class Status {
 public:
@@ -210,4 +210,4 @@ inline Status checked_align_offset_from_base(
     return Status::make_ok();
 }
 
-} // namespace ps
+} // namespace shelf

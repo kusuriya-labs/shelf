@@ -46,8 +46,8 @@ struct BenchOptions {
     std::string perf_stats_output;
     std::string tokens_file;
     int tokens_offset = 0;
-    ps::qwen35::runtime::DecodeBackend decode_backend =
-        ps::qwen35::runtime::DecodeBackend::Hip;
+    shelf::qwen35::runtime::DecodeBackend decode_backend =
+        shelf::qwen35::runtime::DecodeBackend::Hip;
 };
 
 void print_usage(FILE* out) {
@@ -186,7 +186,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 opts.arena_auto = false;
             }
         } else if (key == "--decode-backend") {
-            if (!ps::qwen35::runtime::parse_decode_backend(
+            if (!shelf::qwen35::runtime::parse_decode_backend(
                     need_value().c_str(), &opts.decode_backend)) {
                 fprintf(stderr, "invalid --decode-backend\n");
                 return false;
@@ -261,7 +261,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt != 0) ++n;
@@ -332,14 +332,14 @@ int run_tg(int argc, char** argv) {
         arena_bytes = static_cast<std::size_t>(opts.arena_gib * 1024.0 * 1024.0 * 1024.0);
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(opts.device, arena_bytes);
+    auto arena_result = shelf::gpu::GpuArena::create(opts.device, arena_bytes);
     if (!arena_result.ok()) {
         fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
         return 1;
     }
     auto arena = arena_result.release();
 
-    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+    auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
         opts.model_dir, arena, stream, {});
     if (!model_result.ok()) {
         fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
@@ -369,7 +369,7 @@ int run_tg(int argc, char** argv) {
     const uint32_t num_pages = ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
 
     auto seq_pool_result =
-        ps::state::SequenceSlotPool::create(arena, 1, num_pages);
+        shelf::state::SequenceSlotPool::create(arena, 1, num_pages);
     if (!seq_pool_result.ok()) {
         fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
             seq_pool_result.status().message().c_str());
@@ -377,8 +377,8 @@ int run_tg(int argc, char** argv) {
     }
     auto seq_pool = seq_pool_result.release();
 
-    auto rec_pool_result = ps::state::GdnStatePool::create(
-        arena, 1, ps::qwen35::make_qwen35_gdn_state_layout(model.text_config()));
+    auto rec_pool_result = shelf::state::GdnStatePool::create(
+        arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(model.text_config()));
     if (!rec_pool_result.ok()) {
         fprintf(stderr, "GdnStatePool::create failed: %s\n",
             rec_pool_result.status().message().c_str());
@@ -386,9 +386,9 @@ int run_tg(int argc, char** argv) {
     }
     auto rec_pool = rec_pool_result.release();
 
-    auto kv_pool_result = ps::state::PagedKVPool::create(
+    auto kv_pool_result = shelf::state::PagedKVPool::create(
         arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-        num_attn_layers, kv_heads, head_dim, ps::kernel::KVCacheDType::BF16);
+        num_attn_layers, kv_heads, head_dim, shelf::kernel::KVCacheDType::BF16);
     if (!kv_pool_result.ok()) {
         fprintf(stderr, "PagedKVPool::create failed: %s\n",
             kv_pool_result.status().message().c_str());
@@ -396,13 +396,13 @@ int run_tg(int argc, char** argv) {
     }
     auto kv_pool = kv_pool_result.release();
 
-    ps::qwen35::ExecutorConfig exec_config;
+    shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows =
         std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
     exec_config.backend = opts.decode_backend;
 
-    auto exec_result = ps::qwen35::create_model_executor(
+    auto exec_result = shelf::qwen35::create_model_executor(
         model, seq_pool, rec_pool, kv_pool, arena, exec_config);
     if (!exec_result.ok()) {
         fprintf(stderr, "create_model_executor failed: %s\n",
@@ -412,13 +412,13 @@ int run_tg(int argc, char** argv) {
     auto executor = exec_result.release();
 
 
-    auto seq_result = ps::state::create_paged_sequence_state(
+    auto seq_result = shelf::state::create_paged_sequence_state(
         seq_pool, rec_pool, kv_pool, required_seq_len, stream);
     if (!seq_result.ok()) {
         fprintf(stderr, "create_paged_sequence_state failed: %s\n", seq_result.status().message().c_str());
         return 1;
     }
-    ps::state::PagedSequenceState seq = seq_result.release();
+    shelf::state::PagedSequenceState seq = seq_result.release();
 
     int32_t token_id = 1;
     if (token_id < 0 || static_cast<std::size_t>(token_id) >= vocab_size) {
@@ -463,16 +463,16 @@ int run_tg(int argc, char** argv) {
         uint32_t processed = 0;
         while (processed < static_cast<uint32_t>(opts.context)) {
             const uint32_t chunk_len = std::min(chunk, static_cast<uint32_t>(opts.context) - processed);
-            ps::qwen35::ScheduledRequest req;
+            shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
-            req.execution_class = ps::runtime::ExecutionClass::PREFILL;
+            req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
             req.token_begin = 0;
             req.num_tokens = chunk_len;
             req.prefix_tokens = seq.position;
             req.compute_logits = false;
             req.sample = false;
-            std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-            ps::qwen35::ScheduledBatch batch;
+            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+            shelf::qwen35::ScheduledBatch batch;
             batch.token_ids = context_tokens.data() + processed;
             batch.requests = reqs;
             batch.num_tokens = chunk_len;
@@ -480,7 +480,7 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 0;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 1;
-            auto st = ps::qwen35::execute_batch(executor, batch, stream);
+            auto st = shelf::qwen35::execute_batch(executor, batch, stream);
             if (!st.ok()) {
                 fprintf(stderr, "context population failed at %u: %s\n", processed, st.status().message().c_str());
                 return 1;
@@ -495,18 +495,18 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
 
-    auto run_decode_step = [&](bool compute_logits, bool sample) -> ps::Status {
+    auto run_decode_step = [&](bool compute_logits, bool sample) -> shelf::Status {
         std::vector<int32_t> token_ids = {token_id};
-        ps::qwen35::ScheduledRequest req;
+        shelf::qwen35::ScheduledRequest req;
         req.sequence = &seq; req.handle = seq.request_handle();
-        req.execution_class = ps::runtime::ExecutionClass::DECODE;
+        req.execution_class = shelf::runtime::ExecutionClass::DECODE;
         req.token_begin = 0;
         req.num_tokens = 1;
         req.prefix_tokens = seq.position;
         req.compute_logits = compute_logits;
         req.sample = sample;
-        std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-        ps::qwen35::ScheduledBatch batch;
+        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+        shelf::qwen35::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
         batch.num_tokens = 1;
@@ -514,10 +514,10 @@ int run_tg(int argc, char** argv) {
         batch.num_decode_requests = 1;
         batch.num_verify_requests = 0;
         batch.num_prefill_requests = 0;
-        auto res = ps::qwen35::execute_batch(executor, batch, stream);
+        auto res = shelf::qwen35::execute_batch(executor, batch, stream);
         if (!res.ok()) return res.status();
         (void)res.release();
-        return ps::Status::make_ok();
+        return shelf::Status::make_ok();
     };
 
     for (int i = 0; i < opts.warmup; ++i) {
@@ -549,9 +549,9 @@ int run_tg(int argc, char** argv) {
 
     roctx_resume();
 
-    ps::qwen35::runtime::perf_stats_reset();
-    if (ps::qwen35::runtime::semantic_timing_enabled())
-        ps::qwen35::runtime::semantic_timing_begin(stream, 8192);
+    shelf::qwen35::runtime::perf_stats_reset();
+    if (shelf::qwen35::runtime::semantic_timing_enabled())
+        shelf::qwen35::runtime::semantic_timing_begin(stream, 8192);
     roctx_range_push("SHELF_TG_MEASURED_DECODE");
 
     std::atomic<bool> keepalive_stop{false};
@@ -589,19 +589,19 @@ int run_tg(int argc, char** argv) {
     }
 
     if (opts.mode == "forward") {
-        ps::qwen35::BatchExecutionOutput last_out;
+        shelf::qwen35::BatchExecutionOutput last_out;
         for (int i = 0; i < opts.tokens; ++i) {
             std::vector<int32_t> token_ids = {token_id};
-            ps::qwen35::ScheduledRequest req;
+            shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
-            req.execution_class = ps::runtime::ExecutionClass::DECODE;
+            req.execution_class = shelf::runtime::ExecutionClass::DECODE;
             req.token_begin = 0;
             req.num_tokens = 1;
             req.prefix_tokens = seq.position;
             req.compute_logits = opts.compute_logits;
             req.sample = false;
-            std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-            ps::qwen35::ScheduledBatch batch;
+            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+            shelf::qwen35::ScheduledBatch batch;
             batch.token_ids = token_ids.data();
             batch.requests = reqs;
             batch.num_tokens = 1;
@@ -609,7 +609,7 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 1;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 0;
-            auto res = ps::qwen35::execute_batch(executor, batch, stream);
+            auto res = shelf::qwen35::execute_batch(executor, batch, stream);
             if (!res.ok()) {
                 fprintf(stderr, "forward failed at %d: %s\n", i, res.status().message().c_str());
                 return 1;
@@ -654,16 +654,16 @@ int run_tg(int argc, char** argv) {
         sampled_tokens.reserve(opts.tokens);
         for (int i = 0; i < opts.tokens; ++i) {
             std::vector<int32_t> token_ids = {token_id};
-            ps::qwen35::ScheduledRequest req;
+            shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
-            req.execution_class = ps::runtime::ExecutionClass::DECODE;
+            req.execution_class = shelf::runtime::ExecutionClass::DECODE;
             req.token_begin = 0;
             req.num_tokens = 1;
             req.prefix_tokens = seq.position;
             req.compute_logits = true;
             req.sample = true;
-            std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-            ps::qwen35::ScheduledBatch batch;
+            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+            shelf::qwen35::ScheduledBatch batch;
             batch.token_ids = token_ids.data();
             batch.requests = reqs;
             batch.num_tokens = 1;
@@ -671,12 +671,12 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 1;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 0;
-            auto res = ps::qwen35::execute_batch(executor, batch, stream);
+            auto res = shelf::qwen35::execute_batch(executor, batch, stream);
             if (!res.ok()) {
                 fprintf(stderr, "greedy forward failed at %d: %s\n", i, res.status().message().c_str());
                 return 1;
             }
-            ps::qwen35::BatchExecutionOutput out = std::move(res.release());
+            shelf::qwen35::BatchExecutionOutput out = std::move(res.release());
             if (out.num_outputs != 1) {
                 fprintf(stderr, "greedy: expected 1 output, got %u\n", out.num_outputs);
                 return 1;
@@ -719,14 +719,14 @@ int run_tg(int argc, char** argv) {
     auto wall_stop = std::chrono::high_resolution_clock::now();
 
     if (!opts.perf_stats_output.empty())
-        ps::qwen35::runtime::perf_stats_dump(opts.perf_stats_output.c_str(),
+        shelf::qwen35::runtime::perf_stats_dump(opts.perf_stats_output.c_str(),
                                              static_cast<uint32_t>(opts.tokens));
-    if (ps::qwen35::runtime::semantic_timing_enabled()) {
+    if (shelf::qwen35::runtime::semantic_timing_enabled()) {
         std::string sem_path = opts.perf_stats_output;
         const std::string::size_type slash = sem_path.find_last_of('/');
         sem_path = (slash != std::string::npos) ? sem_path.substr(0, slash + 1) + "semantic_timing.csv"
                                                  : "semantic_timing.csv";
-        ps::qwen35::runtime::semantic_timing_end(stream, sem_path.c_str());
+        shelf::qwen35::runtime::semantic_timing_end(stream, sem_path.c_str());
     }
     if (opts.gap_keepalive > 0) {
         keepalive_stop.store(true, std::memory_order_relaxed);
@@ -837,7 +837,7 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
 
-    auto release_st = ps::state::release_paged_sequence_state(seq, stream);
+    auto release_st = shelf::state::release_paged_sequence_state(seq, stream);
     if (!release_st.ok()) {
         fprintf(stderr, "release_paged_sequence_state failed: %s\n", release_st.message().c_str());
         return 1;

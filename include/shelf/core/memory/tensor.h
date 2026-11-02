@@ -7,7 +7,7 @@
 #include <initializer_list>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 constexpr std::size_t kMaxTensorDims = 8;
@@ -172,4 +172,4 @@ Result<Tensor> Tensor::create(
 }
 
 } // namespace gpu
-} // namespace ps
+} // namespace shelf

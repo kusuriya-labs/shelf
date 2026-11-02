@@ -6,29 +6,29 @@
 #include <string>
 #include <vector>
 
-using ps::Result;
-using ps::Status;
-using ps::qwen35::Qwen35TextConfig;
-using ps::qwen35::Qwen35TensorParallelContext;
-using ps::qwen35::make_qwen35_tensor_parallel_context;
-using ps::runtime::ExecutionClass;
-using ps::runtime::LinearNode;
-using ps::runtime::MatrixwiseShapeKey;
-using ps::runtime::PrimitiveGraph;
-using ps::runtime::PrimitiveGraphNode;
-using ps::runtime::Program;
-using ps::runtime::ProgramBuildOptions;
-using ps::runtime::RowBucket;
-using ps::runtime::TpBarrierKind;
-using ps::runtime::ValueBinding;
-using ps::runtime::ValueDType;
-using ps::runtime::ValueId;
-using ps::runtime::ValueRowDomain;
-using ps::runtime::ValueStorage;
-using ps::runtime::WeightSlot;
-using ps::runtime::WeightTableView;
-using ps::runtime::build_program;
-using ps::runtime::build_tp_execution_schedule;
+using shelf::Result;
+using shelf::Status;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::qwen35::Qwen35TensorParallelContext;
+using shelf::qwen35::make_qwen35_tensor_parallel_context;
+using shelf::runtime::ExecutionClass;
+using shelf::runtime::LinearNode;
+using shelf::runtime::MatrixwiseShapeKey;
+using shelf::runtime::PrimitiveGraph;
+using shelf::runtime::PrimitiveGraphNode;
+using shelf::runtime::Program;
+using shelf::runtime::ProgramBuildOptions;
+using shelf::runtime::RowBucket;
+using shelf::runtime::TpBarrierKind;
+using shelf::runtime::ValueBinding;
+using shelf::runtime::ValueDType;
+using shelf::runtime::ValueId;
+using shelf::runtime::ValueRowDomain;
+using shelf::runtime::ValueStorage;
+using shelf::runtime::WeightSlot;
+using shelf::runtime::WeightTableView;
+using shelf::runtime::build_program;
+using shelf::runtime::build_tp_execution_schedule;
 
 static int g_fail = 0;
 
@@ -293,7 +293,7 @@ static void test_vocab_parallel_program() {
     WeightSlot slot{};
     slot.rows = kLocalVocab;
     slot.cols = kHidden;
-    slot.encoding = static_cast<std::uint8_t>(ps::weights::MatrixEncoding::Bf16);
+    slot.encoding = static_cast<std::uint8_t>(shelf::weights::MatrixEncoding::Bf16);
     slot.bytes = static_cast<std::uint64_t>(kLocalVocab) * kHidden * 2u;
     slot.output_col_offset = kLocalVocab;
     slot.output_col_total = kGlobalVocab;

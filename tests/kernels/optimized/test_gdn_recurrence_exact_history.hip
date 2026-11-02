@@ -57,12 +57,12 @@ struct Buf {
     uint16_t* b = nullptr;
     uint16_t* dt_bias = nullptr;
     uint16_t* a_log = nullptr;
-    ps::fp16_t* state_ref = nullptr;
-    ps::fp16_t* state_cand = nullptr;
+    shelf::fp16_t* state_ref = nullptr;
+    shelf::fp16_t* state_cand = nullptr;
     float* out_ref = nullptr;
     float* out_cand = nullptr;
-    ps::fp16_t* hist_ref = nullptr;
-    ps::fp16_t* hist_cand = nullptr;
+    shelf::fp16_t* hist_ref = nullptr;
+    shelf::fp16_t* hist_cand = nullptr;
     void* requests = nullptr;
     uint32_t rows = 0;
     uint32_t qk = 0;
@@ -75,7 +75,7 @@ struct Buf {
                         state_ref, state_cand, out_ref, out_cand, hist_ref, hist_cand,
                         requests};
         for (void* p : bufs)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -91,7 +91,7 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     const size_t gate_bytes = (size_t)rows * sh.num_v_heads * 2u;
     const size_t st_bytes = (size_t)rows * d.slot_stride * 4u;
     const size_t hist_bytes =
-        (size_t)capture_rows * d.slot_stride * sizeof(ps::fp16_t);
+        (size_t)capture_rows * d.slot_stride * sizeof(shelf::fp16_t);
 
     if (hipMalloc(&d.q, qk_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.k, qk_bytes) != hipSuccess) return false;
@@ -100,15 +100,15 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     if (hipMalloc(&d.b, gate_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.dt_bias, (size_t)sh.num_v_heads * 2u) != hipSuccess) return false;
     if (hipMalloc(&d.a_log, (size_t)sh.num_v_heads * 2u) != hipSuccess) return false;
-    if (hipMalloc(&d.state_ref, (size_t)d.slot_stride * sizeof(ps::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state_ref, (size_t)d.slot_stride * sizeof(shelf::fp16_t)) != hipSuccess)
         return false;
-    if (hipMalloc(&d.state_cand, (size_t)d.slot_stride * sizeof(ps::fp16_t)) != hipSuccess)
+    if (hipMalloc(&d.state_cand, (size_t)d.slot_stride * sizeof(shelf::fp16_t)) != hipSuccess)
         return false;
     if (hipMalloc(&d.out_ref, (size_t)rows * d.vdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.out_cand, (size_t)rows * d.vdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.hist_ref, hist_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.hist_cand, hist_bytes) != hipSuccess) return false;
-    if (hipMalloc(&d.requests, sizeof(::ps::runtime::DeviceRequestDescriptor)) != hipSuccess)
+    if (hipMalloc(&d.requests, sizeof(::shelf::runtime::DeviceRequestDescriptor)) != hipSuccess)
         return false;
 
     std::vector<uint16_t> h_dt(sh.num_v_heads), h_al(sh.num_v_heads);
@@ -140,34 +140,34 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
     std::vector<float> hs((size_t)d.slot_stride);
     uint32_t ss = seed * 31u + 5u;
     for (size_t i = 0; i < hs.size(); ++i) hs[i] = rndf(ss, 0.25f);
-    std::vector<ps::fp16_t> hs16(hs.size());
-    for (size_t i = 0; i < hs.size(); ++i) hs16[i] = ps::f32_to_fp16(hs[i]);
-    if (hipMemcpy(d.state_ref, hs16.data(), hs16.size() * sizeof(ps::fp16_t),
+    std::vector<shelf::fp16_t> hs16(hs.size());
+    for (size_t i = 0; i < hs.size(); ++i) hs16[i] = shelf::f32_to_fp16(hs[i]);
+    if (hipMemcpy(d.state_ref, hs16.data(), hs16.size() * sizeof(shelf::fp16_t),
                   hipMemcpyHostToDevice) != hipSuccess ||
-        hipMemcpy(d.state_cand, hs16.data(), hs16.size() * sizeof(ps::fp16_t),
+        hipMemcpy(d.state_cand, hs16.data(), hs16.size() * sizeof(shelf::fp16_t),
                   hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    std::vector<ps::fp16_t> hh(hist_bytes / sizeof(ps::fp16_t),
-                               ps::f32_to_fp16(-12345.0f));
+    std::vector<shelf::fp16_t> hh(hist_bytes / sizeof(shelf::fp16_t),
+                               shelf::f32_to_fp16(-12345.0f));
     if (hipMemcpy(d.hist_ref, hh.data(), hist_bytes, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(d.hist_cand, hh.data(), hist_bytes, hipMemcpyHostToDevice) != hipSuccess)
         return false;
     return true;
 }
 
-::ps::kernel::GdnRecurrenceArgs make_args(const Buf& d, const Shapes& sh) {
-    ::ps::kernel::GdnRecurrenceArgs a;
+::shelf::kernel::GdnRecurrenceArgs make_args(const Buf& d, const Shapes& sh) {
+    ::shelf::kernel::GdnRecurrenceArgs a;
     a.q = d.q;
     a.k = d.k;
-    a.v = reinterpret_cast<const ps::bf16_t*>(d.v);
-    a.a = reinterpret_cast<const ps::bf16_t*>(d.a);
-    a.b = reinterpret_cast<const ps::bf16_t*>(d.b);
-    a.dt_bias = reinterpret_cast<const ps::bf16_t*>(d.dt_bias);
-    a.a_log = reinterpret_cast<const ps::bf16_t*>(d.a_log);
+    a.v = reinterpret_cast<const shelf::bf16_t*>(d.v);
+    a.a = reinterpret_cast<const shelf::bf16_t*>(d.a);
+    a.b = reinterpret_cast<const shelf::bf16_t*>(d.b);
+    a.dt_bias = reinterpret_cast<const shelf::bf16_t*>(d.dt_bias);
+    a.a_log = reinterpret_cast<const shelf::bf16_t*>(d.a_log);
     a.recurrent_state = d.state_ref;
     a.output = d.out_ref;
-    a.requests = reinterpret_cast<const ::ps::runtime::DeviceRequestDescriptor*>(d.requests);
+    a.requests = reinterpret_cast<const ::shelf::runtime::DeviceRequestDescriptor*>(d.requests);
     a.num_requests = 1u;
     a.actual_rows = d.rows;
     a.q_row_stride = d.qk;
@@ -189,7 +189,7 @@ bool setup(Buf& d, const Shapes& sh, uint32_t rows, uint32_t capture_rows, uint3
 }
 
 bool upload_req(const Buf& d, uint32_t row_begin, uint32_t row_count) {
-    ::ps::runtime::DeviceRequestDescriptor req{};
+    ::shelf::runtime::DeviceRequestDescriptor req{};
     req.request_handle.slot = 0u;
     req.row_begin = row_begin;
     req.row_count = row_count;
@@ -207,24 +207,24 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
     bool ok = true;
     for (uint32_t r = 0u; r < rows && ok; ++r) {
         if (!upload_req(d, r, 1u)) ok = false;
-        ::ps::kernel::GdnRecurrenceArgs a = make_args(d, sh);
+        ::shelf::kernel::GdnRecurrenceArgs a = make_args(d, sh);
         a.actual_rows = rows;
-        if (ok && ::ps::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess) ok = false;
+        if (ok && ::shelf::kernel::launch_gdn_recurrence_f32_wmma(a, stream) != hipSuccess) ok = false;
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
         if (ok && r < capture_rows)
             ok = hipMemcpy(d.hist_ref + (size_t)r * d.slot_stride, d.state_ref,
-                           (size_t)d.slot_stride * sizeof(ps::fp16_t),
+                           (size_t)d.slot_stride * sizeof(shelf::fp16_t),
                            hipMemcpyDeviceToDevice) == hipSuccess;
     }
 
     if (ok && !upload_req(d, 0u, rows)) ok = false;
-    ::ps::kernel::GdnRecurrenceArgs cand = make_args(d, sh);
+    ::shelf::kernel::GdnRecurrenceArgs cand = make_args(d, sh);
     cand.recurrent_state = d.state_cand;
     cand.output = d.out_cand;
     cand.recurrent_history = d.hist_cand;
     cand.recurrent_history_row_stride = d.slot_stride;
     cand.capture_rows = capture_rows;
-    if (ok && ::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(cand, stream) != hipSuccess)
+    if (ok && ::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(cand, stream) != hipSuccess)
         ok = false;
     if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
 
@@ -232,40 +232,40 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
     bool out_ok = ok;
     bool hist_ok = ok;
     if (ok) {
-        std::vector<ps::fp16_t> s_ref(d.slot_stride), s_cand(d.slot_stride);
-        ps::gpu::discard_cleanup_result(
-            hipMemcpy(s_ref.data(), d.state_ref, s_ref.size() * sizeof(ps::fp16_t),
+        std::vector<shelf::fp16_t> s_ref(d.slot_stride), s_cand(d.slot_stride);
+        shelf::gpu::discard_cleanup_result(
+            hipMemcpy(s_ref.data(), d.state_ref, s_ref.size() * sizeof(shelf::fp16_t),
                       hipMemcpyDeviceToHost));
-        ps::gpu::discard_cleanup_result(
-            hipMemcpy(s_cand.data(), d.state_cand, s_cand.size() * sizeof(ps::fp16_t),
+        shelf::gpu::discard_cleanup_result(
+            hipMemcpy(s_cand.data(), d.state_cand, s_cand.size() * sizeof(shelf::fp16_t),
                       hipMemcpyDeviceToHost));
         state_ok = std::memcmp(s_ref.data(), s_cand.data(),
-                               s_ref.size() * sizeof(ps::fp16_t)) == 0;
+                               s_ref.size() * sizeof(shelf::fp16_t)) == 0;
 
         std::vector<float> o_ref((size_t)rows * d.vdim), o_cand((size_t)rows * d.vdim);
-        ps::gpu::discard_cleanup_result(
+        shelf::gpu::discard_cleanup_result(
             hipMemcpy(o_ref.data(), d.out_ref, o_ref.size() * 4u, hipMemcpyDeviceToHost));
-        ps::gpu::discard_cleanup_result(
+        shelf::gpu::discard_cleanup_result(
             hipMemcpy(o_cand.data(), d.out_cand, o_cand.size() * 4u, hipMemcpyDeviceToHost));
         out_ok = std::memcmp(o_ref.data(), o_cand.data(), o_ref.size() * 4u) == 0;
 
         const size_t hn = (size_t)capture_rows * d.slot_stride;
-        std::vector<ps::fp16_t> h_ref(hn), h_cand(hn);
-        ps::gpu::discard_cleanup_result(
-            hipMemcpy(h_ref.data(), d.hist_ref, hn * sizeof(ps::fp16_t),
+        std::vector<shelf::fp16_t> h_ref(hn), h_cand(hn);
+        shelf::gpu::discard_cleanup_result(
+            hipMemcpy(h_ref.data(), d.hist_ref, hn * sizeof(shelf::fp16_t),
                       hipMemcpyDeviceToHost));
-        ps::gpu::discard_cleanup_result(
-            hipMemcpy(h_cand.data(), d.hist_cand, hn * sizeof(ps::fp16_t),
+        shelf::gpu::discard_cleanup_result(
+            hipMemcpy(h_cand.data(), d.hist_cand, hn * sizeof(shelf::fp16_t),
                       hipMemcpyDeviceToHost));
-        hist_ok = std::memcmp(h_ref.data(), h_cand.data(), hn * sizeof(ps::fp16_t)) == 0;
+        hist_ok = std::memcmp(h_ref.data(), h_cand.data(), hn * sizeof(shelf::fp16_t)) == 0;
         if (!hist_ok) {
             size_t hi = 0;
-            while (hi < hn && std::memcmp(&h_ref[hi], &h_cand[hi], sizeof(ps::fp16_t)) == 0)
+            while (hi < hn && std::memcmp(&h_ref[hi], &h_cand[hi], sizeof(shelf::fp16_t)) == 0)
                 ++hi;
             std::printf("  [hist] rows=%u cap=%u first_bad=%zu (row=%zu off=%zu) ref=%.6g cand=%.6g\n",
                         rows, capture_rows, hi, hi / d.slot_stride, hi % d.slot_stride,
-                        (double)ps::fp16_to_f32(h_ref[hi]),
-                        (double)ps::fp16_to_f32(h_cand[hi]));
+                        (double)shelf::fp16_to_f32(h_ref[hi]),
+                        (double)shelf::fp16_to_f32(h_cand[hi]));
         }
     }
 
@@ -294,9 +294,9 @@ int main() {
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 
-    if (::ps::kernel::gdn_recurrence_lossy_enabled()) {
+    if (::shelf::kernel::gdn_recurrence_lossy_enabled()) {
         std::printf("FAIL: exact mode not active\n");
-        ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
         return 1;
     }
 
@@ -305,7 +305,7 @@ int main() {
     for (uint32_t rows : row_counts) run_case(sh, rows, rows, stream);
     run_case(sh, 8u, 3u, stream);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

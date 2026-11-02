@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 inline constexpr uint32_t kOptimizedMaxRows = 8192u;
 

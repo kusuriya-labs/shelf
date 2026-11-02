@@ -22,19 +22,19 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::WeightSlot;
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::WeightSlot;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 }  // namespace
 
 Result<PhysicalResolveStatus> resolve_embedding_physical(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalEmbeddingLaunch& out) {
     out = PhysicalEmbeddingLaunch{};
     if (b.input_count != 1u || b.output_count != 1u)
@@ -44,7 +44,7 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
     const WeightSlot we = ctx.weights[b.weight_index];
 
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue outv = out_res.value();
     if (outv.dtype != ValueDType::BF16)
@@ -56,7 +56,7 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
         return PhysicalResolveStatus::NotApplicable;
 
     auto tok_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!tok_res.ok()) return tok_res.status();
     const HostResolvedValue tok = tok_res.value();
     if (tok.dtype != ValueDType::I32)
@@ -72,7 +72,7 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
 
     EmbeddingStorage storage;
-    const ::ps::bf16_t* bf16_table = nullptr;
+    const ::shelf::bf16_t* bf16_table = nullptr;
     const uint8_t* codes = nullptr;
     const uint8_t* scales = nullptr;
     uint32_t k_padded = 0;
@@ -83,7 +83,7 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
         if (we.device_ptr == nullptr || we.codes != nullptr || we.scales != nullptr)
             return PhysicalResolveStatus::NotApplicable;
         storage = EmbeddingStorage::Bf16;
-        bf16_table = static_cast<const ::ps::bf16_t*>(we.device_ptr);
+        bf16_table = static_cast<const ::shelf::bf16_t*>(we.device_ptr);
     } else {        return PhysicalResolveStatus::NotApplicable;
     }
 
@@ -111,11 +111,11 @@ Result<PhysicalResolveStatus> resolve_embedding_physical(
 }
 
 Result<OptimizedLaunchResult> try_launch_embedding(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size()) return kNone;
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id != ::ps::runtime::KernelId::EMBEDDING_LOOKUP) return kNone;
+    if (b.kernel_id != ::shelf::runtime::KernelId::EMBEDDING_LOOKUP) return kNone;
 
     PhysicalEmbeddingLaunch phys{};
     const auto resolved = resolve_embedding_physical(program, b, ctx, phys);
@@ -123,10 +123,10 @@ Result<OptimizedLaunchResult> try_launch_embedding(
     if (resolved.value() != PhysicalResolveStatus::Applicable) return kNone;
 
     if (phys.storage == EmbeddingStorage::Bf16) {
-        const hipError_t herr = ::ps::kernel::launch_embedding_bf16(
-            reinterpret_cast<const ::ps::bf16_t*>(phys.table),
+        const hipError_t herr = ::shelf::kernel::launch_embedding_bf16(
+            reinterpret_cast<const ::shelf::bf16_t*>(phys.table),
             reinterpret_cast<const int32_t*>(phys.token_ids),
-            reinterpret_cast<::ps::bf16_t*>(phys.output), phys.rows,
+            reinterpret_cast<::shelf::bf16_t*>(phys.output), phys.rows,
             phys.vocab_size, phys.hidden_size, phys.output_row_stride,
             ctx.error_word, stream);
         if (herr != hipSuccess)
@@ -138,4 +138,4 @@ Result<OptimizedLaunchResult> try_launch_embedding(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

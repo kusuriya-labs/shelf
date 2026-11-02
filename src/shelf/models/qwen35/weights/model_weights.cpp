@@ -15,12 +15,12 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace {
 
-using ps::weights::MatrixWeight;
-using ps::weights::SafetensorsCollection;
+using shelf::weights::MatrixWeight;
+using shelf::weights::SafetensorsCollection;
 using Tensor = gpu::Tensor;
 
 std::string layer_prefix(std::size_t layer) {
@@ -107,10 +107,10 @@ Status load_matrix(
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const ps::weights::WeightLoadOptions& weight_options,
+    const shelf::weights::WeightLoadOptions& weight_options,
     MatrixWeight& dst)
 {
-    auto m = ps::weights::load_bf16_matrix(collection, name, arena, stream, weight_options);
+    auto m = shelf::weights::load_bf16_matrix(collection, name, arena, stream, weight_options);
     if (!m.ok()) return m.status();
     dst = m.release();
     return Status::make_ok();
@@ -123,7 +123,7 @@ Status load_vector(
     hipStream_t stream,
     Tensor& dst)
 {
-    auto t = ps::weights::load_bf16_tensor(collection, name, arena, stream);
+    auto t = shelf::weights::load_bf16_tensor(collection, name, arena, stream);
     if (!t.ok()) return t.status();
     dst = t.release();
     return Status::make_ok();
@@ -136,35 +136,35 @@ Status load_norm_vector(
     hipStream_t stream,
     Tensor& dst)
 {
-    auto t = ps::weights::load_bf16_or_f32_tensor(collection, name, arena, stream);
+    auto t = shelf::weights::load_bf16_or_f32_tensor(collection, name, arena, stream);
     if (!t.ok()) return t.status();
     dst = t.release();
     return Status::make_ok();
 }
 
 Status load_q_matrix(
-    const ps::quantization::bundle::QuantizedModelReader& reader,
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const ps::weights::WeightLoadOptions& weight_options,
+    const shelf::weights::WeightLoadOptions& weight_options,
     MatrixWeight& dst)
 {
-    auto m = ps::weights::load_quantized_matrix(reader, name, arena, stream, weight_options);
+    auto m = shelf::weights::load_quantized_matrix(reader, name, arena, stream, weight_options);
     if (!m.ok()) return m.status();
     dst = m.release();
     return Status::make_ok();
 }
 
 Status load_q_vector(
-    const ps::quantization::bundle::QuantizedModelReader& reader,
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
     Tensor& dst,
-    const ps::weights::WeightLoadOptions& weight_options = {})
+    const shelf::weights::WeightLoadOptions& weight_options = {})
 {
-    auto t = ps::weights::load_quantized_small(reader, name, arena, stream, weight_options);
+    auto t = shelf::weights::load_quantized_small(reader, name, arena, stream, weight_options);
     if (!t.ok()) return t.status();
     dst = t.release();
     return Status::make_ok();
@@ -316,11 +316,11 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
-    ps::weights::WeightLoadOptions embed_load;
+    shelf::weights::WeightLoadOptions embed_load;
     embed_load.preshuffle = false;
 
     {
-        auto m = ps::weights::load_bf16_matrix(
+        auto m = shelf::weights::load_bf16_matrix(
             collection, "model.language_model.embed_tokens.weight", arena, stream, embed_load);
         if (!m.ok()) return m.status();
         weights.embed_tokens = m.release();
@@ -330,7 +330,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
     } else {
-        auto m = ps::weights::load_bf16_matrix(
+        auto m = shelf::weights::load_bf16_matrix(
             collection, "model.language_model.lm_head.weight", arena, stream, embed_load);
         if (!m.ok()) return m.status();
         weights.lm_head = m.release();
@@ -338,7 +338,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     }
 
     {
-        auto t = ps::weights::load_bf16_tensor(
+        auto t = shelf::weights::load_bf16_tensor(
             collection, "model.language_model.norm.weight", arena, stream);
         if (!t.ok()) return t.status();
         weights.final_norm_weight = t.release();
@@ -366,9 +366,9 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
 
 Status load_layer_quantized(
     gpu::GpuArena& arena, hipStream_t stream,
-    const ps::quantization::bundle::QuantizedModelReader& reader, std::size_t layer,
+    const shelf::quantization::bundle::QuantizedModelReader& reader, std::size_t layer,
     bool is_gdn,
-    const ps::weights::WeightLoadOptions& weight_options,
+    const shelf::weights::WeightLoadOptions& weight_options,
     Qwen35LayerWeights& w)
 {
     const std::string prefix = layer_prefix(layer);
@@ -426,8 +426,8 @@ Status load_layer_quantized(
 
 Status load_mtp_quantized(
     gpu::GpuArena& arena, hipStream_t stream,
-    const ps::quantization::bundle::QuantizedModelReader& reader,
-    const ps::weights::WeightLoadOptions& weight_options,
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
+    const shelf::weights::WeightLoadOptions& weight_options,
     Qwen35ModelWeights& weights)
 {
     if (reader.manifest().tensors.count("mtp.fc.weight") == 0u) {
@@ -497,7 +497,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
             "qwen35 single-GPU weight load path does not accept a tensor partition plan",
             __FILE__, __LINE__);
     }
-    if (ps::weights::is_quantized_model_dir(model_dir)) {
+    if (shelf::weights::is_quantized_model_dir(model_dir)) {
         return load_qwen35_weights_from_quantized_safetensors(model_dir, arena, stream, options);
     }
     return load_qwen35_weights_bf16(model_dir, arena, stream, options);
@@ -561,14 +561,14 @@ std::vector<std::string> hf_quantized_logical_names(
     return names;
 }
 
-Result<ps::quantization::bundle::QuantizedModelReader> open_quantized_reader(
+Result<shelf::quantization::bundle::QuantizedModelReader> open_quantized_reader(
     const std::string& model_dir,
     const Qwen35TextConfig& config,
     bool verify_payload_crc,
     bool load_mtp_layers)
 {
-    namespace fqb = ps::quantization::bundle;
-    namespace fqm = ps::quantization::manifest;
+    namespace fqb = shelf::quantization::bundle;
+    namespace fqm = shelf::quantization::manifest;
     const fs::path dir(model_dir);
     if (fs::exists(dir / fqm::kQuantizedMetadataFile)) {
         return fqb::QuantizedModelReader::open(model_dir, verify_payload_crc);
@@ -602,9 +602,9 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
         options.verify_quantized_payload_crc,
         options.load_mtp_layers);
     if (!reader_result.ok()) return reader_result.status();
-    ps::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+    shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
 
-    Status contract = ps::weights::validate_quantized_model(reader);
+    Status contract = shelf::weights::validate_quantized_model(reader);
     if (!contract.ok()) {
         return contract;
     }
@@ -631,7 +631,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     weights.layers.resize(config.num_hidden_layers);
 
     {
-        auto m = ps::weights::load_quantized_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
+        auto m = shelf::weights::load_quantized_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
         if (!m.ok()) return m.status();
         weights.embed_tokens = m.release();
     }
@@ -640,9 +640,9 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
     } else {
-        Result<MatrixWeight> m = ps::weights::load_quantized_matrix(reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+        Result<MatrixWeight> m = shelf::weights::load_quantized_matrix(reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
         if (!m.ok()) {
-            m = ps::weights::load_quantized_matrix(reader, "lm_head.weight", arena, stream, options.weights);
+            m = shelf::weights::load_quantized_matrix(reader, "lm_head.weight", arena, stream, options.weights);
             if (!m.ok()) return m.status();
         }
         weights.lm_head = m.release();
@@ -650,7 +650,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     }
 
     {
-        auto t = ps::weights::load_quantized_small(reader, "model.language_model.norm.weight", arena, stream);
+        auto t = shelf::weights::load_quantized_small(reader, "model.language_model.norm.weight", arena, stream);
         if (!t.ok()) return t.status();
         weights.final_norm_weight = t.release();
     }
@@ -695,8 +695,8 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
 namespace {
 
 bool quantized_lm_head_is_bf16(const std::string& model_dir) {
-    namespace fqb = ps::quantization::bundle;
-    namespace fqm = ps::quantization::manifest;
+    namespace fqb = shelf::quantization::bundle;
+    namespace fqm = shelf::quantization::manifest;
     if (!fs::exists(fs::path(model_dir) / fqm::kQuantizedMetadataFile)) {
         auto source_result = fqb::synthesize_hf_quantized_source(
             model_dir, {"model.language_model.lm_head.weight"}, true);
@@ -735,7 +735,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_tensor_parallel_rank(
             "tensor parallel rank load builds its own partition plan",
             __FILE__, __LINE__);
     }
-    if (!ps::weights::is_quantized_model_dir(model_dir)) {
+    if (!shelf::weights::is_quantized_model_dir(model_dir)) {
         return Status::unsupported(
             "tensor parallel rank load requires a Shelf quantized model directory",
             __FILE__, __LINE__);

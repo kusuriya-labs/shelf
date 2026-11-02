@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 namespace detail {
 
@@ -30,28 +30,28 @@ struct BlockScaledWeightView {
 // K tile, matching the intended optimized data path. Output is BF16.
 hipError_t launch_gemm_block_scaled_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     uint32_t rows,
     hipStream_t stream);
 
 hipError_t launch_gemv_block_scaled_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     hipStream_t stream);
 
 hipError_t launch_gemm_fp8_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     uint32_t rows,
     hipStream_t stream);
 
 hipError_t launch_gemv_fp8_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     hipStream_t stream);
 }
 }

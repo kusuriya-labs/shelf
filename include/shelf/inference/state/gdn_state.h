@@ -2,7 +2,7 @@
 
 #include <shelf/core/memory/tensor.h>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 struct GDNState {

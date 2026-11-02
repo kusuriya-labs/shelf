@@ -134,7 +134,7 @@ load 側を 2 byte / lane に変えずに convert だけ差し替えると負け
 
 ### F8A-7 `__hip_cvt_fp8_to_halfraw` を production で使わない（確認）
 
-`ps::quantization::codec::device::e4m3_decode_f32` は gfx1201 では software 変換で、
+`shelf::quantization::codec::device::e4m3_decode_f32` は gfx1201 では software 変換で、
 分岐込み 20 命令前後だった。hardware 版（`v_cvt_pk_f32_fp8_e32`）は 1 命令。
 LUT 初期化と reference path にしか使われていないので、production path には影響ない。
 reference path の速度改善候補として残す。

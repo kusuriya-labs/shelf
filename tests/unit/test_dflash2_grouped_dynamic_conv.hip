@@ -12,8 +12,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -46,9 +46,9 @@ static float round_to_bf16_f32(float x) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     const std::vector<std::size_t>& shape,
-    ps::gpu::Tensor& out) {
+    shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -60,7 +60,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -167,7 +167,7 @@ static void compare(
 }
 
 static void run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t rows,
     uint32_t hidden,
@@ -197,10 +197,10 @@ static void run_case(
 
     reference_conv(h.input, h.dynamic, h.base, rows, hidden, group_size, phase, h.reference);
 
-    ps::gpu::Tensor dev_input;
-    ps::gpu::Tensor dev_dynamic;
-    ps::gpu::Tensor dev_base;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_input;
+    shelf::gpu::Tensor dev_dynamic;
+    shelf::gpu::Tensor dev_base;
+    shelf::gpu::Tensor dev_out;
     check(alloc_bf16(arena, {rows, hidden}, dev_input), "input alloc");
     check(alloc_bf16(arena, {rows, 4u * groups}, dev_dynamic), "dynamic alloc");
     check(alloc_bf16(arena, {2u, 2u, hidden}, dev_base), "base alloc");
@@ -215,7 +215,7 @@ static void run_case(
                     hipMemcpyHostToDevice) == hipSuccess,
           "base upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_grouped_dynamic_conv(
+    const hipError_t err = shelf::kernel::launch_dflash2_grouped_dynamic_conv(
         dev_input.data<bf16_t>(), dev_dynamic.data<bf16_t>(), dev_base.data<bf16_t>(),
         dev_out.data<bf16_t>(), rows, hidden, group_size, phase, stream);
     check(err == hipSuccess, "conv launch");
@@ -233,7 +233,7 @@ static void run_case(
     compare(got, h.reference, tag, exact_values, 2.0e-3, 0.9999);
 }
 
-static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) {
+static void run_structural_checks(shelf::gpu::GpuArena& arena, hipStream_t stream) {
     const uint32_t hidden = 16u;
     const uint32_t group_size = 4u;
     const uint32_t groups = hidden / group_size;
@@ -257,10 +257,10 @@ static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) 
         }
     }
 
-    ps::gpu::Tensor dev_input;
-    ps::gpu::Tensor dev_dynamic;
-    ps::gpu::Tensor dev_base;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_input;
+    shelf::gpu::Tensor dev_dynamic;
+    shelf::gpu::Tensor dev_base;
+    shelf::gpu::Tensor dev_out;
     check(alloc_bf16(arena, {2u, hidden}, dev_input), "struct input alloc");
     check(alloc_bf16(arena, {2u, 4u * groups}, dev_dynamic), "struct dynamic alloc");
     check(alloc_bf16(arena, {2u, 2u, hidden}, dev_base), "struct base alloc");
@@ -275,7 +275,7 @@ static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) 
                     hipMemcpyHostToDevice) == hipSuccess,
           "struct base upload");
 
-    check(ps::kernel::launch_dflash2_grouped_dynamic_conv(
+    check(shelf::kernel::launch_dflash2_grouped_dynamic_conv(
               dev_input.data<bf16_t>(), dev_dynamic.data<bf16_t>(), dev_base.data<bf16_t>(),
               dev_out.data<bf16_t>(), 2u, hidden, group_size, 0u, stream) == hipSuccess,
           "struct launch");
@@ -301,7 +301,7 @@ static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) 
     check(hipMemcpy(single.data(), dev_out.data<bf16_t>(), single.size() * sizeof(bf16_t),
                     hipMemcpyDeviceToHost) == hipSuccess,
           "row0 readback");
-    check(ps::kernel::launch_dflash2_grouped_dynamic_conv(
+    check(shelf::kernel::launch_dflash2_grouped_dynamic_conv(
               dev_input.data<bf16_t>(), dev_dynamic.data<bf16_t>(), dev_base.data<bf16_t>(),
               dev_out.data<bf16_t>(), 1u, hidden, group_size, 0u, stream) == hipSuccess,
           "rows1 launch");
@@ -327,7 +327,7 @@ static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) 
     check(hipMemcpy(dev_dynamic.data<bf16_t>(), h2.dynamic.data(),
                     h2.dynamic.size() * sizeof(bf16_t), hipMemcpyHostToDevice) == hipSuccess,
           "group dynamic upload");
-    check(ps::kernel::launch_dflash2_grouped_dynamic_conv(
+    check(shelf::kernel::launch_dflash2_grouped_dynamic_conv(
               dev_input.data<bf16_t>(), dev_dynamic.data<bf16_t>(), dev_base.data<bf16_t>(),
               dev_out.data<bf16_t>(), 2u, hidden, group_size, 0u, stream) == hipSuccess,
           "group launch");
@@ -346,12 +346,12 @@ static void run_structural_checks(ps::gpu::GpuArena& arena, hipStream_t stream) 
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -374,8 +374,8 @@ int main() {
     }
     run_structural_checks(arena, stream);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_grouped_dynamic_conv: failed=%d\n", g_fail);

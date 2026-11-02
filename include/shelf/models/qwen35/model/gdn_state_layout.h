@@ -4,7 +4,7 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/status.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(

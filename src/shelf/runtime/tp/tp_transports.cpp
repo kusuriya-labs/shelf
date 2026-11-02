@@ -12,27 +12,27 @@
 #include <string>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 HostMediatedTpTransport::HostMediatedTpTransport(std::vector<int> devices)
     : devices_(std::move(devices)) {}
 
 HostMediatedTpTransport::~HostMediatedTpTransport() {
     for (void* buffer : staging_) {
-        if (buffer != nullptr) ps::gpu::discard_cleanup_result(hipHostFree(buffer));
+        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
     }
 }
 
 Status HostMediatedTpTransport::ensure_staging(std::size_t bytes, std::size_t count) {
     if (staging_bytes_ >= bytes && staging_.size() == devices_.size()) return Status::make_ok();
     for (void* buffer : staging_) {
-        if (buffer != nullptr) ps::gpu::discard_cleanup_result(hipHostFree(buffer));
+        if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipHostFree(buffer));
     }
     staging_.assign(devices_.size(), nullptr);
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         void* buffer = nullptr;
         if (hipHostMalloc(&buffer, bytes, hipHostMallocDefault) != hipSuccess) {
-            ps::gpu::discard_cleanup_result(hipGetLastError());
+            shelf::gpu::discard_cleanup_result(hipGetLastError());
             if (hipMallocHost(&buffer, bytes) != hipSuccess) {
                 return Status::hip_error("host transport staging alloc",
                                          hipGetErrorString(hipGetLastError()), __FILE__,
@@ -58,7 +58,7 @@ Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     if (!st.ok()) return st;
 
     for (std::size_t r = 0; r < devices_.size(); ++r) {
-        auto device = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto device = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!device.ok()) return device.status();
         const hipError_t copy = hipMemcpyAsync(staging_[r], invocation.targets[r].ptr,
                                                bytes, hipMemcpyDeviceToHost,
@@ -69,7 +69,7 @@ Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
         }
     }
     for (std::size_t r = 0; r < devices_.size(); ++r) {
-        auto device = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto device = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!device.ok()) return device.status();
         if (hipStreamSynchronize(invocation.streams[r]) != hipSuccess) {
             return Status::hip_error("host transport D2H sync",
@@ -83,7 +83,7 @@ Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
     tp_reduce_f32_accumulate(srcs, count, dtype, staging_[0]);
 
     for (std::size_t r = 0; r < devices_.size(); ++r) {
-        auto device = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto device = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!device.ok()) return device.status();
         const hipError_t copy = hipMemcpyAsync(invocation.targets[r].ptr, staging_[0],
                                                bytes, hipMemcpyHostToDevice,
@@ -94,7 +94,7 @@ Status HostMediatedTpTransport::sum_hidden(const TpSumInvocation& invocation) {
         }
     }
     for (std::size_t r = 0; r < devices_.size(); ++r) {
-        auto device = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto device = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!device.ok()) return device.status();
         if (hipStreamSynchronize(invocation.streams[r]) != hipSuccess) {
             return Status::hip_error("host transport H2D sync",
@@ -143,4 +143,4 @@ Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices
     return selection;
 }
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

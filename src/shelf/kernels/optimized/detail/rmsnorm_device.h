@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 using bf16 = __hip_bfloat16;
 
@@ -64,9 +64,9 @@ __device__ __forceinline__ float rms_wave_reduce_sum(float v) {
     return v;
 }
 
-using ::ps::kernel::RmsNormDataType;
-using ::ps::kernel::RmsNormWeightLayout;
-using ::ps::kernel::RmsNormWeightMode;
+using ::shelf::kernel::RmsNormDataType;
+using ::shelf::kernel::RmsNormWeightLayout;
+using ::shelf::kernel::RmsNormWeightMode;
 
 template <RmsNormDataType InT, RmsNormDataType OutT, RmsNormDataType Wt,
           RmsNormWeightLayout WLayout, RmsNormWeightMode WMode>
@@ -277,4 +277,4 @@ __device__ __forceinline__ void rmsnorm_row_body(
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

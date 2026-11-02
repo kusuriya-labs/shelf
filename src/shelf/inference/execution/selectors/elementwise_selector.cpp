@@ -1,7 +1,7 @@
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct Rule {
@@ -51,4 +51,4 @@ ElementwiseImplementation select_elementwise_implementation(
     return ElementwiseImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

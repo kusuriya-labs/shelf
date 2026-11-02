@@ -4,10 +4,10 @@
 #include <cstdio>
 #include <string>
 
-using ps::qwen35::Qwen35TextConfig;
-using ps::qwen35::ExecutorConfig;
-using ps::qwen35::runtime::qwen35_executor_reserve_bytes;
-using ps::qwen35::runtime::qwen35_padded_row_count;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::qwen35::ExecutorConfig;
+using shelf::qwen35::runtime::qwen35_executor_reserve_bytes;
+using shelf::qwen35::runtime::qwen35_padded_row_count;
 
 static int g_fail = 0;
 
@@ -60,7 +60,7 @@ int main() {
     check(rows4096 < 2048ull * kMiB, "reserve stays within 15 percent of the measurement");
 
     const std::size_t taps = qwen35_executor_reserve_bytes(text, exec_config(4096u, 4u, 0u, 5u), 1u);
-    const std::size_t tap_bytes = 5ull * 4096ull * text.hidden_size * sizeof(ps::bf16_t);
+    const std::size_t tap_bytes = 5ull * 4096ull * text.hidden_size * sizeof(shelf::bf16_t);
     check(taps >= rows4096 + tap_bytes, "reserve covers the target hidden tap buffers");
 
     const std::size_t wide = qwen35_executor_reserve_bytes(text, exec_config(4096u, 4u, 1024u), 1u);

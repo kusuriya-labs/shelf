@@ -5,7 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 enum class Fp8FinegrainedGemmOutputDType : uint8_t {
     BF16,
@@ -54,4 +54,4 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_auto(
     hipStream_t stream,
     uint32_t weight_scale_group = 128);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

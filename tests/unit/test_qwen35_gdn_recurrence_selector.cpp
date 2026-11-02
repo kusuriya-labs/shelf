@@ -4,8 +4,8 @@
 
 #include "shelf/inference/execution/selectors/gdn_recurrence_selector.h"
 
-using ps::execution::GdnRecurrenceImplementation;
-using ps::execution::GdnRecurrenceSelectorInput;
+using shelf::execution::GdnRecurrenceImplementation;
+using shelf::execution::GdnRecurrenceSelectorInput;
 
 namespace {
 int g_checks = 0;
@@ -23,7 +23,7 @@ GdnRecurrenceImplementation sel(uint32_t rows, uint32_t num_requests,
     si.num_v_heads = num_v_heads;
     si.head_k = head_k;
     si.head_v = head_v;
-    return ps::execution::select_gdn_recurrence_implementation(si);
+    return shelf::execution::select_gdn_recurrence_implementation(si);
 }
 
 bool check(const char* name, bool ok) {

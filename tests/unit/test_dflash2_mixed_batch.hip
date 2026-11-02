@@ -19,14 +19,14 @@
 #include <string>
 #include <vector>
 
-using ps::qwen35::dflash2::DFlash2Config;
-using ps::qwen35::dflash2::DFlash2ContextState;
-using ps::qwen35::dflash2::DFlash2Executor;
-using ps::qwen35::dflash2::DFlash2ExecutorConfig;
-using ps::qwen35::dflash2::DFlash2Weights;
-using ps::qwen35::SchedulePlan;
-using ps::qwen35::ScheduledBatch;
-using ps::qwen35::runtime::DFlash2SpecBatchContext;
+using shelf::qwen35::dflash2::DFlash2Config;
+using shelf::qwen35::dflash2::DFlash2ContextState;
+using shelf::qwen35::dflash2::DFlash2Executor;
+using shelf::qwen35::dflash2::DFlash2ExecutorConfig;
+using shelf::qwen35::dflash2::DFlash2Weights;
+using shelf::qwen35::SchedulePlan;
+using shelf::qwen35::ScheduledBatch;
+using shelf::qwen35::runtime::DFlash2SpecBatchContext;
 
 static int g_fail = 0;
 
@@ -39,7 +39,7 @@ static void check(bool cond, const std::string& msg) {
 
 static uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1u) / b; }
 
-static uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+static uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt != 0) ++n;
@@ -48,51 +48,51 @@ static uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
 }
 
 struct Bundle {
-    std::unique_ptr<ps::state::PagedSequenceState> seq;
+    std::unique_ptr<shelf::state::PagedSequenceState> seq;
     std::unique_ptr<DFlash2ContextState> context;
-    std::unique_ptr<ps::qwen35::runtime::DFlash2SpecDecoder> decoder;
+    std::unique_ptr<shelf::qwen35::runtime::DFlash2SpecDecoder> decoder;
     bool ok = false;
 };
 
 static bool make_bundle(
-    ps::qwen35::Executor& ex,
+    shelf::qwen35::Executor& ex,
     DFlash2Executor& draft,
     const DFlash2Config& config,
-    ps::state::SequenceSlotPool& seq_pool,
-    ps::state::GdnStatePool& gdn_pool,
-    ps::state::PagedKVPool& kv_pool,
-    ps::gpu::GpuArena& arena,
+    shelf::state::SequenceSlotPool& seq_pool,
+    shelf::state::GdnStatePool& gdn_pool,
+    shelf::state::PagedKVPool& kv_pool,
+    shelf::gpu::GpuArena& arena,
     uint32_t seq_len,
     uint32_t num_drafts,
     hipStream_t stream,
     Bundle& out) {
-    auto seq = ps::state::create_paged_sequence_state(
+    auto seq = shelf::state::create_paged_sequence_state(
         seq_pool, gdn_pool, kv_pool, seq_len, stream);
     if (!seq.ok()) return false;
-    out.seq = std::make_unique<ps::state::PagedSequenceState>(seq.release());
-    auto ctx = ps::qwen35::dflash2::create_dflash2_context_state(config, arena, 0u);
+    out.seq = std::make_unique<shelf::state::PagedSequenceState>(seq.release());
+    auto ctx = shelf::qwen35::dflash2::create_dflash2_context_state(config, arena, 0u);
     if (!ctx.ok()) return false;
     out.context = std::make_unique<DFlash2ContextState>(ctx.release());
-    ps::qwen35::runtime::DFlash2SpecDecoderConfig dcfg;
+    shelf::qwen35::runtime::DFlash2SpecDecoderConfig dcfg;
     dcfg.num_drafts = num_drafts;
-    auto dec = ps::qwen35::runtime::create_dflash2_spec_decoder(
+    auto dec = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         ex, draft, *out.context, *out.seq, gdn_pool, arena, dcfg, stream);
     if (!dec.ok()) return false;
     out.decoder =
-        std::make_unique<ps::qwen35::runtime::DFlash2SpecDecoder>(dec.release());
+        std::make_unique<shelf::qwen35::runtime::DFlash2SpecDecoder>(dec.release());
     out.ok = true;
     return true;
 }
 
 struct Prefilled {
     int32_t anchor = -1;
-    std::array<int32_t, ps::qwen35::dflash2::kMaxBlockSize - 1u> drafts{};
+    std::array<int32_t, shelf::qwen35::dflash2::kMaxBlockSize - 1u> drafts{};
     uint32_t draft_count = 0;
 };
 
 static bool prefill_bundle(Bundle& b, const std::vector<int32_t>& prompt, uint32_t k,
                            hipStream_t stream, Prefilled& out) {
-    auto prefill = ps::qwen35::runtime::dflash2_spec_prefill(
+    auto prefill = shelf::qwen35::runtime::dflash2_spec_prefill(
         *b.decoder, prompt.data(), static_cast<uint32_t>(prompt.size()));
     if (!prefill.ok()) {
         std::printf("FAIL prefill: %s\n", prefill.status().message().c_str());
@@ -100,7 +100,7 @@ static bool prefill_bundle(Bundle& b, const std::vector<int32_t>& prompt, uint32
     }
     out.anchor = prefill.value().pending_token;
     int32_t* proposal_device = b.decoder->draft->proposal_tokens.data<int32_t>();
-    const ps::Status st = ps::qwen35::dflash2::dflash2_propose_cached(
+    const shelf::Status st = shelf::qwen35::dflash2::dflash2_propose_cached(
         *b.decoder->draft, *b.decoder->context, out.anchor, k, proposal_device, stream);
     if (!st.ok()) {
         std::printf("FAIL propose: %s\n", st.message().c_str());
@@ -114,31 +114,31 @@ static bool prefill_bundle(Bundle& b, const std::vector<int32_t>& prompt, uint32
     return true;
 }
 
-static bool run_plan(ps::qwen35::Executor& ex, SchedulePlan& plan,
+static bool run_plan(shelf::qwen35::Executor& ex, SchedulePlan& plan,
                      const DFlash2SpecBatchContext& ctx, uint32_t capture_rows,
                      hipStream_t stream, std::vector<int32_t>& sampled,
                      uint32_t& num_outputs) {
     plan.finalize();
-    const ps::Status valid = ps::qwen35::validate_scheduled_batch(plan.batch, 0u, 0u);
+    const shelf::Status valid = shelf::qwen35::validate_scheduled_batch(plan.batch, 0u, 0u);
     if (!valid.ok()) {
         std::printf("FAIL validate: %s\n", valid.message().c_str());
         return false;
     }
-    ps::qwen35::ExecuteBatchOptions options;
+    shelf::qwen35::ExecuteBatchOptions options;
     options.gdn_spec_history =
-        ps::qwen35::runtime::gdn_spec_history_view(ctx.history[0], capture_rows);
+        shelf::qwen35::runtime::gdn_spec_history_view(ctx.history[0], capture_rows);
     options.gdn_compact.delta = ctx.compact[0].delta;
     options.gdn_compact.k = ctx.compact[0].k;
     options.gdn_compact.a = ctx.compact[0].a;
     options.gdn_compact.delta_layer_stride = ctx.compact[0].delta_layer_stride;
     options.gdn_compact.k_layer_stride = ctx.compact[0].k_layer_stride;
     options.gdn_compact.a_layer_stride = ctx.compact[0].a_layer_stride;
-    auto executed = ps::qwen35::execute_batch(ex, plan.batch, stream, options);
+    auto executed = shelf::qwen35::execute_batch(ex, plan.batch, stream, options);
     if (!executed.ok()) {
         std::printf("FAIL execute: %s\n", executed.status().message().c_str());
         return false;
     }
-    ps::qwen35::BatchExecutionOutput output = executed.release();
+    shelf::qwen35::BatchExecutionOutput output = executed.release();
     num_outputs = output.num_outputs;
     sampled.assign(output.num_outputs, -1);
     if (output.num_outputs == 0u) return true;
@@ -162,7 +162,7 @@ int main() {
         return 77;
     }
 
-    auto config_result = ps::qwen35::dflash2::read_dflash2_config(model_dir);
+    auto config_result = shelf::qwen35::dflash2::read_dflash2_config(model_dir);
     check(config_result.ok(), "dflash config");
     if (!config_result.ok()) return 1;
     const DFlash2Config config = config_result.value();
@@ -170,26 +170,26 @@ int main() {
     const uint32_t block_rows = static_cast<uint32_t>(config.block_size);
     const uint32_t k = block_rows - 1u;
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 30ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 30ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
         return 1;
     }
 
-    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(target_dir, arena,
+    auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(target_dir, arena,
                                                                        stream);
     check(model_result.ok(), "target model load");
     if (!model_result.ok()) return 1;
-    ps::qwen35::Qwen35Model model = model_result.release();
-    const ps::qwen35::Qwen35TextConfig& tc = model.text_config();
+    shelf::qwen35::Qwen35Model model = model_result.release();
+    const shelf::qwen35::Qwen35TextConfig& tc = model.text_config();
 
-    auto weights_result = ps::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena,
+    auto weights_result = shelf::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena,
                                                                     stream);
     check(weights_result.ok(), "dflash weight load");
     if (!weights_result.ok()) return 1;
@@ -205,34 +205,34 @@ int main() {
     const uint32_t max_requests = 2u;
     const uint32_t max_rows = max_requests * block_rows;
 
-    auto seq_pool_result = ps::state::SequenceSlotPool::create(arena, 8u, num_pages + 8u);
-    auto gdn_pool_result = ps::state::GdnStatePool::create(
-        arena, 8u, ps::qwen35::make_qwen35_gdn_state_layout(tc));
-    auto kv_pool_result = ps::state::PagedKVPool::create(
+    auto seq_pool_result = shelf::state::SequenceSlotPool::create(arena, 8u, num_pages + 8u);
+    auto gdn_pool_result = shelf::state::GdnStatePool::create(
+        arena, 8u, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
+    auto kv_pool_result = shelf::state::PagedKVPool::create(
         arena, num_pages, page_tokens, num_attn_layers, kv_heads, head_dim,
-        ps::kernel::KVCacheDType::BF16);
+        shelf::kernel::KVCacheDType::BF16);
     check(seq_pool_result.ok() && gdn_pool_result.ok() && kv_pool_result.ok(), "pool create");
     if (!seq_pool_result.ok() || !gdn_pool_result.ok() || !kv_pool_result.ok()) return 1;
-    ps::state::SequenceSlotPool seq_pool = seq_pool_result.release();
-    ps::state::GdnStatePool gdn_pool = gdn_pool_result.release();
-    ps::state::PagedKVPool kv_pool = kv_pool_result.release();
+    shelf::state::SequenceSlotPool seq_pool = seq_pool_result.release();
+    shelf::state::GdnStatePool gdn_pool = gdn_pool_result.release();
+    shelf::state::PagedKVPool kv_pool = kv_pool_result.release();
 
-    std::array<uint32_t, ps::qwen35::kMaxTargetHiddenTaps> taps{};
+    std::array<uint32_t, shelf::qwen35::kMaxTargetHiddenTaps> taps{};
     for (uint32_t t = 0; t < tap_count; ++t) {
         taps[t] = static_cast<uint32_t>(config.target_layer_ids[t]);
     }
 
-    ps::qwen35::ExecutorConfig ec;
+    shelf::qwen35::ExecutorConfig ec;
     ec.max_batch_rows = 2048u;
     ec.max_scheduled_requests = max_requests;
     ec.max_scheduled_output_rows = max_rows;
     ec.target_hidden_taps = taps;
     ec.target_hidden_tap_count = tap_count;
     auto exec_result =
-        ps::qwen35::create_model_executor(model, seq_pool, gdn_pool, kv_pool, arena, ec);
+        shelf::qwen35::create_model_executor(model, seq_pool, gdn_pool, kv_pool, arena, ec);
     check(exec_result.ok(), "target executor create");
     if (!exec_result.ok()) return 1;
-    ps::qwen35::Executor ex = exec_result.release();
+    shelf::qwen35::Executor ex = exec_result.release();
 
     DFlash2ExecutorConfig draft_cfg;
     draft_cfg.max_rows = block_rows;
@@ -240,19 +240,19 @@ int main() {
     draft_cfg.target_lm_head = &model.weights().lm_head;
     draft_cfg.target_embed_tokens = &model.weights().embed_tokens;
     auto draft_result =
-        ps::qwen35::dflash2::create_dflash2_executor(config, weights, arena, draft_cfg);
+        shelf::qwen35::dflash2::create_dflash2_executor(config, weights, arena, draft_cfg);
     check(draft_result.ok(), "draft executor create");
     if (!draft_result.ok()) return 1;
     DFlash2Executor draft = draft_result.release();
 
-    std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> bindings;
-    ps::qwen35::runtime::DFlash2GdnRankBinding binding;
+    std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> bindings;
+    shelf::qwen35::runtime::DFlash2GdnRankBinding binding;
     binding.pool = &gdn_pool;
     binding.arena = &arena;
     binding.stream = stream;
     binding.device = 0;
     bindings.push_back(binding);
-    auto batch_result = ps::qwen35::runtime::create_dflash2_spec_batch_context(
+    auto batch_result = shelf::qwen35::runtime::create_dflash2_spec_batch_context(
         bindings, max_rows);
     check(batch_result.ok(), "batch context create");
     if (!batch_result.ok()) return 1;
@@ -302,12 +302,12 @@ int main() {
     std::vector<int32_t> decode_only_tokens{mixed_tokens[0]};
 
     SchedulePlan mixed;
-    ps::Status st = mixed.append_decode(bundles[0].seq.get(), mixed_decode_token[0],
+    shelf::Status st = mixed.append_decode(bundles[0].seq.get(), mixed_decode_token[0],
                                         bundles[0].seq->position, true, true,
-                                        ps::qwen35::runtime::SamplingConfig{}, 0u);
+                                        shelf::qwen35::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "mixed append decode");
     st = mixed.append_verify(bundles[1].seq.get(), tokens_for(1), bundles[1].seq->position,
-                             k + 1u, ps::qwen35::runtime::SamplingConfig{}, 0u);
+                             k + 1u, shelf::qwen35::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "mixed append verify");
     mixed.finalize();
     check(mixed.batch.num_decode_requests == 1u, "mixed decode count");
@@ -318,12 +318,12 @@ int main() {
 
     SchedulePlan ordering;
     st = ordering.append_verify(bundles[2].seq.get(), tokens_for(2), bundles[2].seq->position,
-                                k + 1u, ps::qwen35::runtime::SamplingConfig{}, 0u);
+                                k + 1u, shelf::qwen35::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "ordering append verify");
     st = ordering.append_decode(bundles[3].seq.get(), pre[3].anchor,
                                 bundles[3].seq->position, true, true,
-                                ps::qwen35::runtime::SamplingConfig{}, 0u);
-    check(!st.ok() && st.code() == ps::Status::Code::invalid_state,
+                                shelf::qwen35::runtime::SamplingConfig{}, 0u);
+    check(!st.ok() && st.code() == shelf::Status::Code::invalid_state,
           "decode after verify rejected");
 
     std::vector<int32_t> mixed_sampled;
@@ -337,7 +337,7 @@ int main() {
     SchedulePlan verify_only;
     st = verify_only.append_verify(bundles[3].seq.get(), tokens_for(3),
                                    bundles[3].seq->position, k + 1u,
-                                   ps::qwen35::runtime::SamplingConfig{}, 0u);
+                                   shelf::qwen35::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "verify only append");
     std::vector<int32_t> verify_only_sampled;
     uint32_t verify_only_outputs = 0u;
@@ -348,7 +348,7 @@ int main() {
     SchedulePlan decode_only;
     st = decode_only.append_decode(bundles[2].seq.get(), decode_only_tokens[0],
                                    bundles[2].seq->position, true, true,
-                                   ps::qwen35::runtime::SamplingConfig{}, 0u);
+                                   shelf::qwen35::runtime::SamplingConfig{}, 0u);
     check(st.ok(), "decode only append");
     std::vector<int32_t> decode_only_sampled;
     uint32_t decode_only_outputs = 0u;
@@ -376,12 +376,12 @@ int main() {
                 mixed_outputs, verify_only_outputs, decode_only_outputs);
 
     for (std::size_t i = 0; i < bundles.size(); ++i) {
-        check(ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*bundles[i].decoder).ok(),
+        check(shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(*bundles[i].decoder).ok(),
               std::string("decoder shutdown ") + names[i]);
-        (void)ps::qwen35::dflash2::dflash2_context_shutdown(*bundles[i].context);
-        (void)ps::state::release_paged_sequence_state(*bundles[i].seq, stream);
+        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(*bundles[i].context);
+        (void)shelf::state::release_paged_sequence_state(*bundles[i].seq, stream);
     }
-    check(ps::qwen35::runtime::shutdown_dflash2_spec_batch_context(batch_ctx).ok(),
+    check(shelf::qwen35::runtime::shutdown_dflash2_spec_batch_context(batch_ctx).ok(),
           "batch context shutdown");
 
     std::printf("test_dflash2_mixed_batch: failed=%d\n", g_fail);

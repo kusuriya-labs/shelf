@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 namespace {
 
@@ -41,8 +41,8 @@ ScheduledBatch make_prefill_batch(
     ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
-    req.execution_class = num_tokens == 1u ? ::ps::runtime::ExecutionClass::DECODE
-                                           : ::ps::runtime::ExecutionClass::PREFILL;
+    req.execution_class = num_tokens == 1u ? ::shelf::runtime::ExecutionClass::DECODE
+                                           : ::shelf::runtime::ExecutionClass::PREFILL;
     req.token_begin = 0u;
     req.num_tokens = num_tokens;
     req.prefix_tokens = prefix_tokens;
@@ -101,7 +101,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
 
     const dflash2::DFlash2Config& dcfg = *draft.config;
     const Qwen35TextConfig& tc = target.model->text_config();
-    const ps::weights::MatrixWeight& embed = target.model->weights().embed_tokens;
+    const shelf::weights::MatrixWeight& embed = target.model->weights().embed_tokens;
 
     if (embed.cols != dcfg.hidden_size) {
         return Status::invalid_argument(
@@ -215,7 +215,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
 
     {
         gpu::GpuArena& leader_arena = *bindings.front().arena;
-        auto leader_scope = ps::gpu::ScopedDevice::create(bindings.front().device);
+        auto leader_scope = shelf::gpu::ScopedDevice::create(bindings.front().device);
         if (!leader_scope.ok()) return leader_scope.status();
         auto verify_alloc = leader_arena.allocate_aligned(
             kDFlash2SpecMaxVerifyRows * sizeof(int32_t), 256u);
@@ -235,7 +235,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
             hipError_t err = hipEventCreateWithFlags(&events[i], hipEventDefault);
             if (err != hipSuccess) {
                 for (int j = 0; j < i; ++j) {
-                    ps::gpu::discard_cleanup_result(hipEventDestroy(events[j]));
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(events[j]));
                 }
                 return Status::hip_error("create_dflash2_spec_workspace hipEventCreate",
                                          hipGetErrorString(err), __FILE__, __LINE__);
@@ -256,7 +256,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
         DFlash2GdnRankState& g = workspace.gdn_ranks[r];
         gpu::GpuArena& rank_arena = *bindings[r].arena;
         GdnStatePool& rank_pool = *bindings[r].pool;
-        auto dev_scope = ps::gpu::ScopedDevice::create(g.device);
+        auto dev_scope = shelf::gpu::ScopedDevice::create(g.device);
         if (!dev_scope.ok()) {
             (void)shutdown_dflash2_spec_workspace(workspace);
             return dev_scope.status();
@@ -324,13 +324,13 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
         workspace.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
 
         auto req_alloc = rank_arena.allocate_aligned(
-            sizeof(::ps::runtime::DeviceRequestDescriptor), 256u);
+            sizeof(::shelf::runtime::DeviceRequestDescriptor), 256u);
         if (!req_alloc.ok()) {
             (void)shutdown_dflash2_spec_workspace(workspace);
             return req_alloc.status();
         }
         g.commit_request =
-            static_cast<::ps::runtime::DeviceRequestDescriptor*>(req_alloc.release().data());
+            static_cast<::shelf::runtime::DeviceRequestDescriptor*>(req_alloc.release().data());
     }
 
     workspace.initialized = true;
@@ -391,9 +391,9 @@ Status bind_dflash2_spec_workspace(
 
     for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
         if (g.commit_request == nullptr) continue;
-        auto scope = ps::gpu::ScopedDevice::create(g.device);
+        auto scope = shelf::gpu::ScopedDevice::create(g.device);
         if (!scope.ok()) return scope.status();
-        ::ps::runtime::DeviceRequestDescriptor req{};
+        ::shelf::runtime::DeviceRequestDescriptor req{};
         req.request_handle.slot = decoder.sequence->slot;
         req.row_begin = 0u;
         req.row_count = 0u;
@@ -552,7 +552,7 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     }
     const uint32_t tap_count =
         static_cast<uint32_t>(decoder.draft->config->num_target_layer_ids);
-    if (tap_count == 0u || tap_count != ps::kernel::kDFlash2TargetTaps) {
+    if (tap_count == 0u || tap_count != shelf::kernel::kDFlash2TargetTaps) {
         return Status::invalid_state("dflash2_spec_prefill: draft tap count mismatch", __FILE__,
                                      __LINE__);
     }
@@ -571,7 +571,7 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         if (!executed.ok()) return executed.status();
         BatchExecutionOutput output = executed.release();
 
-        std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
+        std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps{};
         for (uint32_t t = 0; t < tap_count; ++t) {
             taps[t] = decoder.target->dflash_target_hidden[t].data<bf16_t>();
         }
@@ -647,9 +647,9 @@ ScheduledBatch make_verify_batch(
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
     req.execution_class = num_tokens == 1u
-        ? ::ps::runtime::ExecutionClass::DECODE
-        : (speculative_verify ? ::ps::runtime::ExecutionClass::SPEC_VERIFY
-                              : ::ps::runtime::ExecutionClass::PREFILL);
+        ? ::shelf::runtime::ExecutionClass::DECODE
+        : (speculative_verify ? ::shelf::runtime::ExecutionClass::SPEC_VERIFY
+                              : ::shelf::runtime::ExecutionClass::PREFILL);
     req.token_begin = 0u;
     req.num_tokens = num_tokens;
     req.prefix_tokens = prefix_tokens;
@@ -680,8 +680,8 @@ ScheduledBatch make_verify_batch(
 
 void collect_target_taps(
     const Executor& target,
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps>& taps) {
-    for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps>& taps) {
+    for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
         taps[t] = target.dflash_target_hidden[t].data<bf16_t>();
     }
 }
@@ -690,10 +690,10 @@ Status append_committed(
     DFlash2SpecDecoder& decoder,
     uint32_t position,
     uint32_t rows) {
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps{};
     collect_target_taps(*decoder.target, taps);
     return dflash2::dflash2_append_target_taps(
-        *decoder.draft, *decoder.context, taps.data(), ps::kernel::kDFlash2TargetTaps,
+        *decoder.draft, *decoder.context, taps.data(), shelf::kernel::kDFlash2TargetTaps,
         rows, position, decoder.stream);
 }
 
@@ -725,10 +725,10 @@ Status run_single_target(
         return Status::invalid_state("sampled token is invalid", __FILE__, __LINE__);
     }
     decoder.sample_index += 1u;
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps{};
     collect_target_taps(*decoder.target, taps);
     Status st = dflash2::dflash2_append_target_taps(
-        *decoder.draft, *decoder.context, taps.data(), ps::kernel::kDFlash2TargetTaps, 1u,
+        *decoder.draft, *decoder.context, taps.data(), shelf::kernel::kDFlash2TargetTaps, 1u,
         position, decoder.stream);
     if (!st.ok()) return st;
     out.emitted[0] = forced_token >= 0 ? forced_token : sampled;
@@ -870,7 +870,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     {
         ScopedTimer t(tm != nullptr ? &tm->gdn_snapshot_ms : nullptr);
         for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-            auto scope = ps::gpu::ScopedDevice::create(g.device);
+            auto scope = shelf::gpu::ScopedDevice::create(g.device);
             if (!scope.ok()) return scope.status();
             Status st = spec_gdn_snapshot(*g.pool, decoder.sequence->slot,
                                           g.conv_snapshot, g.rec_snapshot, g.conv_bytes,
@@ -1067,7 +1067,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         {
             ScopedTimer t(tm != nullptr ? &tm->gdn_restore_ms : nullptr);
             for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-                auto scope = ps::gpu::ScopedDevice::create(g.device);
+                auto scope = shelf::gpu::ScopedDevice::create(g.device);
                 if (!scope.ok()) return scope.status();
                 Status st = spec_gdn_restore(*g.pool, decoder.sequence->slot,
                                              g.conv_snapshot, g.rec_snapshot, g.conv_bytes,
@@ -1081,7 +1081,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         {
             ScopedTimer t(tm != nullptr ? &tm->rerun_ms : nullptr);
             for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-                auto scope = ps::gpu::ScopedDevice::create(g.device);
+                auto scope = shelf::gpu::ScopedDevice::create(g.device);
                 if (!scope.ok()) return scope.status();
                 GdnCompactLogDeviceView compact{};
                 compact.delta = g.compact_delta;
@@ -1153,21 +1153,21 @@ std::vector<ExecuteBatchOptions> build_batch_gdn_options(
     return options;
 }
 
-std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> collect_batch_target_taps(
+std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> collect_batch_target_taps(
     const DFlash2SpecDecoder& decoder) {
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
-    for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps{};
+    for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
         taps[t] = decoder.target->dflash_target_hidden[t].data<bf16_t>();
     }
     return taps;
 }
 
-std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> batch_target_taps(
+std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> batch_target_taps(
     const DFlash2SpecDecoder& decoder,
     uint32_t row_begin) {
-    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps =
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps =
         collect_batch_target_taps(decoder);
-    for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+    for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
         taps[t] += static_cast<std::size_t>(row_begin) * decoder.hidden_size;
     }
     return taps;
@@ -1350,14 +1350,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         if (!plan.batched) continue;
         DFlash2SpecDecoder& decoder = *plan.decoder;
         for (DFlash2GdnRankState& state : decoder.gdn_ranks) {
-            auto scope = ps::gpu::ScopedDevice::create(state.device);
+            auto scope = shelf::gpu::ScopedDevice::create(state.device);
             if (!scope.ok()) return scope.status();
             const Status st = spec_gdn_snapshot(
                 *state.pool, decoder.sequence->slot, state.conv_snapshot,
                 state.rec_snapshot, state.conv_bytes, state.rec_bytes, state.stream);
             if (!st.ok()) return st;
             if (state.commit_request != nullptr) {
-                ::ps::runtime::DeviceRequestDescriptor req{};
+                ::shelf::runtime::DeviceRequestDescriptor req{};
                 req.request_handle.slot = decoder.sequence->slot;
                 req.row_begin = plan.row_begin;
                 req.row_count = 0u;
@@ -1389,7 +1389,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         ScheduledRequest req;
         req.sequence = decoder.sequence;
         req.handle = decoder.sequence->request_handle();
-        req.execution_class = ::ps::runtime::ExecutionClass::SPEC_VERIFY;
+        req.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
         ++verify_request_count;
         req.token_begin = plan.row_begin;
         req.num_tokens = plan.total_rows;
@@ -1583,7 +1583,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             const auto taps = batch_target_taps(decoder, plan.row_begin);
             Status st = dflash2::dflash2_append_target_taps(
                 *decoder.draft, *decoder.context, taps.data(),
-                ps::kernel::kDFlash2TargetTaps, plan.total_rows, plan.position,
+                shelf::kernel::kDFlash2TargetTaps, plan.total_rows, plan.position,
                 decoder.stream);
             if (!st.ok()) return st;
             const uint32_t required =
@@ -1593,7 +1593,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         } else {
             for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
                 DFlash2GdnRankState& state = decoder.gdn_ranks[r];
-                auto scope = ps::gpu::ScopedDevice::create(state.device);
+                auto scope = shelf::gpu::ScopedDevice::create(state.device);
                 if (!scope.ok()) return scope.status();
                 Status st = spec_gdn_restore(
                     *state.pool, decoder.sequence->slot, state.conv_snapshot,
@@ -1620,7 +1620,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             const auto taps = batch_target_taps(decoder, plan.row_begin);
             Status st = dflash2::dflash2_append_target_taps(
                 *decoder.draft, *decoder.context, taps.data(),
-                ps::kernel::kDFlash2TargetTaps, accepted + 1u, plan.position,
+                shelf::kernel::kDFlash2TargetTaps, accepted + 1u, plan.position,
                 decoder.stream);
             if (!st.ok()) return st;
             const uint32_t required =
@@ -1665,4 +1665,4 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     return out;
 }
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

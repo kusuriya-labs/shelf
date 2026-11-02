@@ -2,7 +2,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace dflash2 {
 
@@ -254,4 +254,4 @@ Result<DFlash2Config> read_dflash2_config(const std::string& model_dir) {
 
 }  // namespace dflash2
 }  // namespace qwen35
-}  // namespace ps
+}  // namespace shelf

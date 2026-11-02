@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kDflash2TopKThreads = 256u;
 inline constexpr uint32_t kDflash2TopKMaxK = 16u;
@@ -44,4 +44,4 @@ hipError_t launch_dflash2_topk_f32_optimized(
     const DFlash2TopKPlan& plan,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

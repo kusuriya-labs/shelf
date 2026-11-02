@@ -17,13 +17,13 @@
 
 namespace fs = std::filesystem;
 
-using ps::io::SType;
-using ps::qwen35::dflash2::DFlash2Config;
-using ps::qwen35::dflash2::DFlash2Weights;
-using ps::qwen35::dflash2::dflash2_expected_tensors;
-using ps::qwen35::dflash2::load_dflash2_weights;
-using ps::qwen35::dflash2::read_dflash2_config;
-using ps::qwen35::dflash2::validate_dflash2_tensor_contract;
+using shelf::io::SType;
+using shelf::qwen35::dflash2::DFlash2Config;
+using shelf::qwen35::dflash2::DFlash2Weights;
+using shelf::qwen35::dflash2::dflash2_expected_tensors;
+using shelf::qwen35::dflash2::load_dflash2_weights;
+using shelf::qwen35::dflash2::read_dflash2_config;
+using shelf::qwen35::dflash2::validate_dflash2_tensor_contract;
 
 static int g_fail = 0;
 
@@ -96,12 +96,12 @@ static std::vector<TensorPlan> expected_checkpoint(const DFlash2Config& config) 
 }
 
 static bool write_shard(const fs::path& path, std::vector<TensorPlan>& tensors) {
-    auto w = ps::io::SafetensorsWriter::create(path.string());
+    auto w = shelf::io::SafetensorsWriter::create(path.string());
     if (!w.ok()) {
         check(false, "writer create: " + w.status().message());
         return false;
     }
-    ps::io::SafetensorsWriter writer = w.release();
+    shelf::io::SafetensorsWriter writer = w.release();
     for (TensorPlan& t : tensors) {
         if (!writer.plan_tensor(t.name, t.dtype, t.shape).ok()) {
             check(false, "plan " + t.name);
@@ -207,12 +207,12 @@ int main() {
         check(config.tap_feature_size() == 16u, "tap_feature_size 16");
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -380,9 +380,9 @@ int main() {
         check(!r.ok(), "config missing hidden_size must fail");
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     {
-        const ps::Status shutdown = arena.shutdown();
+        const shelf::Status shutdown = arena.shutdown();
         check(shutdown.ok(), "arena shutdown: " + shutdown.message());
         check(arena.is_shutdown(), "arena reports shutdown");
     }

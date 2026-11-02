@@ -4,7 +4,7 @@
 #include <limits>
 #include <cstdio>
 
-using namespace ps::qwen35;
+using namespace shelf::qwen35;
 
 int main() {
     const PageId page = 42;

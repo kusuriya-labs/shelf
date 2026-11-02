@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 struct DFlash2SessionSlot {
     dflash2::DFlash2ContextState context;
@@ -64,4 +64,4 @@ class DFlash2SessionPool {
     std::size_t reserved_bytes_ = 0u;
 };
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::quantization::fp8 {
+namespace shelf::quantization::fp8 {
 
 // FP8 E4M3 weights with FP32 scales on a 128 (N) x 128 (K) tile.
 inline constexpr uint32_t kBlockN = 128;
@@ -74,4 +74,4 @@ void dequantize_fp8_canonical(const Fp8BlockCanonicalView& v, std::vector<float>
 void dequantize_fp8_canonical_matrix(
     const Fp8BlockCanonicalView& v, uint64_t matrix_index, float* dst, uint64_t dst_stride);
 
-}  // namespace ps::quantization::fp8
+}  // namespace shelf::quantization::fp8

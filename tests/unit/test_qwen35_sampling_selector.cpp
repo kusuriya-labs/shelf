@@ -2,10 +2,10 @@
 
 #include <cstdio>
 
-using ::ps::execution::SamplingChoice;
-using ::ps::execution::SamplingImplementation;
-using ::ps::execution::SamplingSelectorInput;
-using ::ps::execution::select_sampling_implementation;
+using ::shelf::execution::SamplingChoice;
+using ::shelf::execution::SamplingImplementation;
+using ::shelf::execution::SamplingSelectorInput;
+using ::shelf::execution::select_sampling_implementation;
 
 static int g_fail = 0;
 

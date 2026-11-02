@@ -5,7 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 namespace detail {
 
@@ -25,7 +25,7 @@ hipError_t launch_gemm_bf16_baseline_graph_ready(
     uint32_t output_features,
     uint32_t bucket_rows,
     uint32_t k,
-    const ps::runtime::DeviceBatchContext* ctx,
+    const shelf::runtime::DeviceBatchContext* ctx,
     hipStream_t stream);
 
 }

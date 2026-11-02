@@ -26,11 +26,11 @@
 
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 struct HostExecutionContext;
 
-::ps::kernel::RmsNormDataType rmsnorm_kd(::ps::runtime::ValueDType d);
+::shelf::kernel::RmsNormDataType rmsnorm_kd(::shelf::runtime::ValueDType d);
 
 enum class PhysicalResolveStatus : uint8_t {
     Applicable = 0,
@@ -56,16 +56,16 @@ struct PhysicalRmsNormLaunch {
     uint32_t input_row_stride = 0;
     uint32_t output_row_stride = 0;
     float eps = 0.0f;
-    ::ps::kernel::RmsNormDataType input_dtype =
-        ::ps::kernel::RmsNormDataType::BF16;
-    ::ps::kernel::RmsNormDataType weight_dtype =
-        ::ps::kernel::RmsNormDataType::BF16;
-    ::ps::kernel::RmsNormDataType output_dtype =
-        ::ps::kernel::RmsNormDataType::BF16;
-    ::ps::kernel::RmsNormWeightLayout weight_layout =
-        ::ps::kernel::RmsNormWeightLayout::NONE;
-    ::ps::kernel::RmsNormWeightMode weight_mode =
-        ::ps::kernel::RmsNormWeightMode::ONE_PLUS;
+    ::shelf::kernel::RmsNormDataType input_dtype =
+        ::shelf::kernel::RmsNormDataType::BF16;
+    ::shelf::kernel::RmsNormDataType weight_dtype =
+        ::shelf::kernel::RmsNormDataType::BF16;
+    ::shelf::kernel::RmsNormDataType output_dtype =
+        ::shelf::kernel::RmsNormDataType::BF16;
+    ::shelf::kernel::RmsNormWeightLayout weight_layout =
+        ::shelf::kernel::RmsNormWeightLayout::NONE;
+    ::shelf::kernel::RmsNormWeightMode weight_mode =
+        ::shelf::kernel::RmsNormWeightMode::ONE_PLUS;
     PhysicalRmsNormVariant variant = PhysicalRmsNormVariant::Unsupported;
     uint32_t grid = 0;
     uint32_t workgroup = 0;
@@ -124,9 +124,9 @@ struct PhysicalBf16Launch {
     uint32_t k = 0;
     uint32_t input_row_stride = 0;
     uint32_t output_row_stride = 0;
-    ::ps::kernel::Bf16GemmOutputDType output_dtype =
-        ::ps::kernel::Bf16GemmOutputDType::BF16;
-    ::ps::kernel::Bf16GemmConfig config{};
+    ::shelf::kernel::Bf16GemmOutputDType output_dtype =
+        ::shelf::kernel::Bf16GemmOutputDType::BF16;
+    ::shelf::kernel::Bf16GemmConfig config{};
     PhysicalBf16Variant variant = PhysicalBf16Variant::Unsupported;
     uint32_t grid_x = 0;
     uint32_t grid_y = 1;
@@ -158,7 +158,7 @@ enum class PhysicalGdnRecurrenceVariant : uint8_t {
 };
 
 struct PhysicalGdnConv1dLaunch {
-    ::ps::kernel::GdnConv1dArgs args{};
+    ::shelf::kernel::GdnConv1dArgs args{};
     uint32_t row_tile = 0;
     uint32_t tiles = 1;
     uint32_t grid_x = 0;
@@ -168,7 +168,7 @@ struct PhysicalGdnConv1dLaunch {
 };
 
 struct PhysicalGdnRecurrenceLaunch {
-    ::ps::kernel::GdnRecurrenceArgs kernel{};
+    ::shelf::kernel::GdnRecurrenceArgs kernel{};
     bool lossy = false;
     uint32_t rows = 0;
     uint32_t num_requests = 0;
@@ -197,50 +197,50 @@ struct PhysicalEmbeddingLaunch {
 };
 
 Result<PhysicalResolveStatus> resolve_embedding_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalEmbeddingLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalRmsNormLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_activation_quantize_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalActivationQuantizeLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_elementwise_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalElementwiseLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_bf16_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalBf16Launch& out);
 
 Result<PhysicalResolveStatus> resolve_l2_normalize_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalL2NormalizeLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalGdnConv1dLaunch& out);
 
 Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalGdnRecurrenceLaunch& out);
 
@@ -269,8 +269,8 @@ struct PhysicalRopeLaunch {
 };
 
 Result<PhysicalResolveStatus> resolve_rope_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalRopeLaunch& out);
 
@@ -284,7 +284,7 @@ enum class PhysicalKvAppendVariant : uint8_t {
 
 struct PhysicalKvAppendLaunch {
     PhysicalKvAppendVariant variant = PhysicalKvAppendVariant::Unsupported;
-    ::ps::kernel::KvAppendCommonArgs common{};
+    ::shelf::kernel::KvAppendCommonArgs common{};
     uint64_t k_pool = 0;
     uint64_t v_pool = 0;
     uint64_t k_scale_pool = 0;
@@ -297,7 +297,7 @@ struct PhysicalKvAppendLaunch {
 };
 
 Result<PhysicalResolveStatus> resolve_kv_append_physical(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx,
     PhysicalKvAppendLaunch& out);
@@ -324,7 +324,7 @@ enum class PhysicalPagedAttentionVariant : uint8_t {
 
 struct PhysicalPagedAttentionKernel {
     PhysicalPagedAttentionVariant variant = PhysicalPagedAttentionVariant::Unsupported;
-    ::ps::kernel::PagedAttentionCommonArgs common{};
+    ::shelf::kernel::PagedAttentionCommonArgs common{};
     uint64_t k_pool = 0;
     uint64_t v_pool = 0;
     uint64_t k_scale_pool = 0;
@@ -349,26 +349,26 @@ inline constexpr uint32_t kPhysicalPagedAttentionMaxKernels =
 struct PhysicalPagedAttentionPlan {
     bool optimized = false;
     bool use_prefill = false;
-    ::ps::kernel::KVCacheDType kv_dtype = ::ps::kernel::KVCacheDType::BF16;
+    ::shelf::kernel::KVCacheDType kv_dtype = ::shelf::kernel::KVCacheDType::BF16;
     uint32_t splits = 1u;
     uint32_t physical_count = 0u;
     PhysicalPagedAttentionKernel kernels[kPhysicalPagedAttentionMaxKernels];
 };
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx,
     PhysicalPagedAttentionPlan& out);
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx,
     PhysicalPagedAttentionPlan& out);
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_prefill(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx,
     PhysicalPagedAttentionPlan& out);
@@ -376,4 +376,4 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_prefill(
 hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& plan,
                                            hipStream_t stream);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

@@ -1,12 +1,12 @@
 #include <shelf/inference/execution/selectors/paged_attention_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct PagedAttentionRule {
-    ::ps::kernel::KVCacheDType kv_dtype;
-    ::ps::runtime::ValueDType output_dtype;
+    ::shelf::kernel::KVCacheDType kv_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
     uint32_t q_heads;
     uint32_t kv_heads;
     uint32_t head_dim;
@@ -22,17 +22,17 @@ constexpr uint32_t kMeasuredMaxVisible = 32768;
 constexpr uint32_t kMeasuredMaxVisible24 = 262144;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
-    { ::ps::kernel::KVCacheDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
       16, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible },
-    { ::ps::kernel::KVCacheDType::FP8_E4M3, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       16, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible },
-    { ::ps::kernel::KVCacheDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
       24, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
-    { ::ps::kernel::KVCacheDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
       12, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
-    { ::ps::kernel::KVCacheDType::FP8_E4M3, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       24, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
-    { ::ps::kernel::KVCacheDType::FP8_E4M3, ::ps::runtime::ValueDType::F32,
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       12, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
 };
 
@@ -63,4 +63,4 @@ select_paged_attention_implementation(const PagedAttentionSelectorInput& input) 
     return PagedAttentionImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

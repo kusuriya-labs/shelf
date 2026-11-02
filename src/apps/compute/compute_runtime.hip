@@ -14,7 +14,7 @@
 #include <iterator>
 #include <utility>
 
-namespace ps {
+namespace shelf {
 namespace app {
 
 namespace {
@@ -161,8 +161,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (exec_max_tokens_ == 0) {
         exec_max_tokens_ = config_.max_seq_len;
     }
-    const uint32_t row_bucket_max = ps::runtime::row_bucket_limit(
-        ps::runtime::RowBucket::R8192);
+    const uint32_t row_bucket_max = shelf::runtime::row_bucket_limit(
+        shelf::runtime::RowBucket::R8192);
     if (exec_max_tokens_ > row_bucket_max) {
         exec_max_tokens_ = row_bucket_max;
     }
@@ -194,7 +194,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 gpu::format_gib(config_.arena_bytes).c_str());
         fflush(stderr);
     }
-    auto arena_result = ps::gpu::GpuArena::create(config_.devices[0], config_.arena_bytes);
+    auto arena_result = shelf::gpu::GpuArena::create(config_.devices[0], config_.arena_bytes);
     if (!arena_result.ok()) {
         return arena_result.status();
     }
@@ -482,7 +482,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 }
 
 std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
-    const ::ps::state::GdnStatePool& pool) const {
+    const ::shelf::state::GdnStatePool& pool) const {
     if (!config_.draft_config_ready) {
         return 0u;
     }
@@ -752,7 +752,7 @@ Status Qwen35ComputeRuntime::retire(uint64_t id) {
 
 Result<qwen35::dflash2::DFlash2Weights> Qwen35ComputeRuntime::load_dflash2_weights(
     const qwen35::dflash2::DFlash2Config& config,
-    const ps::weights::WeightLoadOptions& options) {
+    const shelf::weights::WeightLoadOptions& options) {
     if (config_.dflash2_model_dir.empty()) {
         return Status::invalid_state("dflash2 model dir missing", __FILE__, __LINE__);
     }
@@ -814,4 +814,4 @@ Status Qwen35ComputeRuntime::shutdown() {
 }
 
 }  // namespace app
-}  // namespace ps
+}  // namespace shelf

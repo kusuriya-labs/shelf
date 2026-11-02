@@ -24,7 +24,7 @@
 
 namespace fs = std::filesystem;
 using namespace expert_slice_fixture;
-using namespace ps;
+using namespace shelf;
 
 static int g_fail = 0;
 
@@ -462,7 +462,7 @@ int main() {
 
     std::error_code ec;
     const fs::path root =
-        fs::temp_directory_path(ec) / ("ps_expert_slice_gpu_" + std::to_string(::getpid()));
+        fs::temp_directory_path(ec) / ("shelf_expert_slice_gpu_" + std::to_string(::getpid()));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
 

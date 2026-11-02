@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cstdint>
 
-using ps::runtime::Int8ActivationWorkspaceLayout;
+using shelf::runtime::Int8ActivationWorkspaceLayout;
 
 namespace {
 int g_passed = 0;
@@ -17,16 +17,16 @@ void check(bool cond, const char* msg) {
 }
 
 int run() {
-    check(ps::gpu::align_up_16(0) == 0, "align16(0)==0");
-    check(ps::gpu::align_up_16(1) == 16, "align16(1)==16");
-    check(ps::gpu::align_up_16(16) == 16, "align16(16)==16");
-    check(ps::gpu::align_up_16(17) == 32, "align16(17)==32");
-    check(ps::gpu::aligned_row_stride(7, 2) == 8, "bf16 stride 7->8");
-    check(ps::gpu::aligned_row_stride(9, 2) == 16, "bf16 stride 9->16");
-    check(ps::gpu::aligned_row_stride(3, 4) == 4, "fp32 stride 3->4");
-    check(ps::gpu::aligned_row_stride(5, 4) == 8, "fp32 stride 5->8");
-    check(ps::gpu::aligned_row_stride(15, 1) == 16, "int8 stride 15->16");
-    check(ps::gpu::aligned_row_stride(17, 1) == 32, "int8 stride 17->32");
+    check(shelf::gpu::align_up_16(0) == 0, "align16(0)==0");
+    check(shelf::gpu::align_up_16(1) == 16, "align16(1)==16");
+    check(shelf::gpu::align_up_16(16) == 16, "align16(16)==16");
+    check(shelf::gpu::align_up_16(17) == 32, "align16(17)==32");
+    check(shelf::gpu::aligned_row_stride(7, 2) == 8, "bf16 stride 7->8");
+    check(shelf::gpu::aligned_row_stride(9, 2) == 16, "bf16 stride 9->16");
+    check(shelf::gpu::aligned_row_stride(3, 4) == 4, "fp32 stride 3->4");
+    check(shelf::gpu::aligned_row_stride(5, 4) == 8, "fp32 stride 5->8");
+    check(shelf::gpu::aligned_row_stride(15, 1) == 16, "int8 stride 15->16");
+    check(shelf::gpu::aligned_row_stride(17, 1) == 32, "int8 stride 17->32");
 
     {
         const auto l = Int8ActivationWorkspaceLayout::make(5120, 4);
@@ -54,16 +54,16 @@ int run() {
     }
 
     {
-        static_assert(alignof(ps::quantization::QuantizedComputeView) >= 16);
-        static_assert(sizeof(ps::quantization::QuantizedComputeView) % 16 == 0);
-        check(sizeof(ps::quantization::QuantizedComputeView) % 16 == 0, "view size 16B");
+        static_assert(alignof(shelf::quantization::QuantizedComputeView) >= 16);
+        static_assert(sizeof(shelf::quantization::QuantizedComputeView) % 16 == 0);
+        check(sizeof(shelf::quantization::QuantizedComputeView) % 16 == 0, "view size 16B");
     }
 
     {
         for (uint32_t e = 0; e < 256; ++e) {
-            const float f = ps::quantization::codec::ue4m3_to_fp32(
+            const float f = shelf::quantization::codec::ue4m3_to_fp32(
                 static_cast<uint8_t>(e));
-            const uint16_t bits = ps::f32_to_bf16_rne(f);
+            const uint16_t bits = shelf::f32_to_bf16_rne(f);
             float back = 0.0f;
             uint32_t u = static_cast<uint32_t>(bits) << 16;
             __builtin_memcpy(&back, &u, sizeof(back));

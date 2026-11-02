@@ -1,7 +1,7 @@
 #include <shelf/inference/scheduling/kv_capacity_manager.h>
 #include <climits>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 Result<uint32_t> compute_max_kv_tokens(

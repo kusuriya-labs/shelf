@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 extern "C" __global__ __launch_bounds__(256)
 void shelf_rmsnorm_bf16_pf_oneplus(RmsNormBf16PfOnePlusArgs args);

@@ -5,28 +5,28 @@
 #include <shelf/quantization/quant_spec.h>
 #include <nlohmann/json.hpp>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 namespace {
 
-using ps::quantization::QuantDomain;
-using ps::quantization::QuantPayloadRef;
-using ps::quantization::QuantPayloadRole;
-using ps::quantization::QuantScalarType;
-using ps::quantization::QuantizedTensorDescriptor;
-using ps::quantization::QuantizedTensorLayout;
-using ps::quantization::ScaleApplication;
-using ps::quantization::ScaleGranularity;
-using ps::quantization::ScaleGrid;
-using ps::quantization::TensorStorageOrder;
-using ps::quantization::WeightBlockShape;
-using ps::quantization::WeightQuantSpec;
-using ps::quantization::WeightScaleSpec;
-using ps::quantization::canonical_layout_name;
-using ps::quantization::default_weight_block;
-using ps::quantization::default_weight_scale_spec;
-using ps::quantization::derive_scale_grid;
-using ps::quantization::quant_padded_k;
+using shelf::quantization::QuantDomain;
+using shelf::quantization::QuantPayloadRef;
+using shelf::quantization::QuantPayloadRole;
+using shelf::quantization::QuantScalarType;
+using shelf::quantization::QuantizedTensorDescriptor;
+using shelf::quantization::QuantizedTensorLayout;
+using shelf::quantization::ScaleApplication;
+using shelf::quantization::ScaleGranularity;
+using shelf::quantization::ScaleGrid;
+using shelf::quantization::TensorStorageOrder;
+using shelf::quantization::WeightBlockShape;
+using shelf::quantization::WeightQuantSpec;
+using shelf::quantization::WeightScaleSpec;
+using shelf::quantization::canonical_layout_name;
+using shelf::quantization::default_weight_block;
+using shelf::quantization::default_weight_scale_spec;
+using shelf::quantization::derive_scale_grid;
+using shelf::quantization::quant_padded_k;
 
 const char* scalar_type_name(QuantScalarType dtype) {
     switch (dtype) {
@@ -253,12 +253,12 @@ Status normalize_descriptor(
         out.scale_block_k = desc.quant.scale->block.k;
     }
     if (desc.quant.encoding == QuantizedEncoding::Bf16) {
-        const QuantPayloadRef* data = ps::quantization::find_payload(desc, QuantPayloadRole::Data);
+        const QuantPayloadRef* data = shelf::quantization::find_payload(desc, QuantPayloadRole::Data);
         out.data = QuantizedTensorRef{data->tensor, "BF16", data->crc32};
         return Status::make_ok();
     }
-    const QuantPayloadRef* codes = ps::quantization::find_payload(desc, QuantPayloadRole::Codes);
-    const QuantPayloadRef* scale = ps::quantization::find_payload(desc, QuantPayloadRole::Scale);
+    const QuantPayloadRef* codes = shelf::quantization::find_payload(desc, QuantPayloadRole::Codes);
+    const QuantPayloadRef* scale = shelf::quantization::find_payload(desc, QuantPayloadRole::Scale);
     out.codes = QuantizedTensorRef{codes->tensor, "U8", codes->crc32};
     out.metadata1 = QuantizedTensorRef{
         scale->tensor, internal_scale_tag(scale_semantic_dtype(desc.quant.encoding)), scale->crc32};
@@ -414,7 +414,7 @@ Result<QuantizedManifest> parse_quantized_manifest_v4(const std::string& json) {
     for (auto it = j["tensors"].begin(); it != j["tensors"].end(); ++it) {
         Result<QuantizedTensorDescriptor> desc = descriptor_from_v4(it.value());
         if (!desc.ok()) return desc.status();
-        Status contract = ps::quantization::validate_quantized_tensor(desc.value());
+        Status contract = shelf::quantization::validate_quantized_tensor(desc.value());
         if (!contract.ok()) return contract;
         QuantizedTensorMetadata meta;
         Status normalized = normalize_descriptor(desc.value(), meta);

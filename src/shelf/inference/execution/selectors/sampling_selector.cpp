@@ -1,7 +1,7 @@
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/kernels/optimized/sampling_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 SamplingBatchMode derive_mode(const SamplingSelectorInput& in) {
@@ -28,7 +28,7 @@ SamplingChoice select_sampling_implementation(const SamplingSelectorInput& in) {
                                 in.stochastic_outputs == in.outputs &&
                                 in.sampled_outputs == in.outputs &&
                                 in.stochastic_top_k > 0u &&
-                                in.stochastic_top_k <= ::ps::kernel::kSamplingMaxTopK &&
+                                in.stochastic_top_k <= ::shelf::kernel::kSamplingMaxTopK &&
                                 in.stochastic_topk_workspace;
         if (topk_ready) return {SamplingImplementation::StochasticRadixTopK, 0};
     }
@@ -47,4 +47,4 @@ SamplingChoice select_sampling_implementation(const SamplingSelectorInput& in) {
     return {SamplingImplementation::Correctness, 0};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

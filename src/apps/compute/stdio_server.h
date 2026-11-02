@@ -13,23 +13,23 @@
 #include <vector>
 #include <string>
 
-namespace ps::app {
+namespace shelf::app {
 
 struct DFlashServeContext {
     bool enabled = false;
-    ps::qwen35::dflash2::DFlash2Config config{};
+    shelf::qwen35::dflash2::DFlash2Config config{};
     std::string model_dir;
     uint32_t drafts = 7u;
-    ps::qwen35::dflash2::DFlash2Weights weights{};
-    ps::qwen35::dflash2::DFlash2Executor executor{};
+    shelf::qwen35::dflash2::DFlash2Weights weights{};
+    shelf::qwen35::dflash2::DFlash2Executor executor{};
     bool executor_ready = false;
-    ps::qwen35::runtime::DFlash2SpecBatchContext batch{};
+    shelf::qwen35::runtime::DFlash2SpecBatchContext batch{};
     bool batch_ready = false;
-    ps::qwen35::runtime::DFlash2SessionPool sessions{};
+    shelf::qwen35::runtime::DFlash2SessionPool sessions{};
     bool sessions_ready = false;
-    ps::qwen35::runtime::DFlash2BatcherStats stats{};
+    shelf::qwen35::runtime::DFlash2BatcherStats stats{};
 };
 
 int run_serve_stdio(Qwen35ComputeRuntime& runtime, DFlashServeContext& dflash);
 
-}  // namespace ps::app
+}  // namespace shelf::app

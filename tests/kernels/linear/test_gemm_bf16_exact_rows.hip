@@ -30,20 +30,20 @@ void check(bool cond, const char* name) {
     }
 }
 
-__host__ __device__ ps::bf16_t f32_to_bf16(float f) {
+__host__ __device__ shelf::bf16_t f32_to_bf16(float f) {
     uint32_t ui;
     __builtin_memcpy(&ui, &f, sizeof(float));
-    return ps::bf16_t{static_cast<uint16_t>((ui + 0x8000u) >> 16)};
+    return shelf::bf16_t{static_cast<uint16_t>((ui + 0x8000u) >> 16)};
 }
 
-float bf16_to_f32(ps::bf16_t b) {
+float bf16_to_f32(shelf::bf16_t b) {
     uint32_t ui = static_cast<uint32_t>(b.data) << 16;
     float f;
     std::memcpy(&f, &ui, sizeof(float));
     return f;
 }
 
-__global__ void fill_weight_row_parity(ps::bf16_t* weight, uint32_t rows, uint32_t k) {
+__global__ void fill_weight_row_parity(shelf::bf16_t* weight, uint32_t rows, uint32_t k) {
     const uint64_t count = static_cast<uint64_t>(rows) * k;
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
@@ -60,7 +60,7 @@ struct CaseSpec {
     uint32_t n;
     uint32_t k;
     uint32_t rows;
-    ps::kernel::Bf16GemmOutputDType out_dtype;
+    shelf::kernel::Bf16GemmOutputDType out_dtype;
     float rtol;
     float atol;
     uint32_t subset;
@@ -74,14 +74,14 @@ int run_case(const CaseSpec& s) {
                   s.name, s.n, s.k, s.rows, s.subset);
     printf("%s", title);
 
-    const size_t w_bytes = static_cast<size_t>(s.n) * s.k * sizeof(ps::bf16_t);
-    const size_t x_bytes = static_cast<size_t>(s.rows) * s.k * sizeof(ps::bf16_t);
+    const size_t w_bytes = static_cast<size_t>(s.n) * s.k * sizeof(shelf::bf16_t);
+    const size_t x_bytes = static_cast<size_t>(s.rows) * s.k * sizeof(shelf::bf16_t);
     const uint32_t out_elem =
-        s.out_dtype == ps::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
+        s.out_dtype == shelf::kernel::Bf16GemmOutputDType::BF16 ? 2u : 4u;
     const size_t y_bytes = static_cast<size_t>(s.rows) * s.n * out_elem;
 
-    ps::bf16_t* w = nullptr;
-    ps::bf16_t* x = nullptr;
+    shelf::bf16_t* w = nullptr;
+    shelf::bf16_t* x = nullptr;
     void* y_exact = nullptr;
     void* y_wmma = nullptr;
     void* y_dot2 = nullptr;
@@ -99,9 +99,9 @@ int run_case(const CaseSpec& s) {
 
     std::mt19937 rng(20261017u + s.n + s.k);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    std::vector<ps::bf16_t> h_x(static_cast<size_t>(s.rows) * s.k);
+    std::vector<shelf::bf16_t> h_x(static_cast<size_t>(s.rows) * s.k);
     for (auto& v : h_x) v = f32_to_bf16(dist(rng));
-    HIP_ASSERT(hipMemcpy(x, h_x.data(), h_x.size() * sizeof(ps::bf16_t),
+    HIP_ASSERT(hipMemcpy(x, h_x.data(), h_x.size() * sizeof(shelf::bf16_t),
                          hipMemcpyHostToDevice));
 
     std::vector<float> rowsum(s.rows, 0.0f);
@@ -113,23 +113,23 @@ int run_case(const CaseSpec& s) {
         rowsum[t] = acc;
     }
 
-    ps::kernel::Bf16GemmConfig exact_cfg{ps::kernel::Bf16GemmConfigId::ExactRows,
+    shelf::kernel::Bf16GemmConfig exact_cfg{shelf::kernel::Bf16GemmConfigId::ExactRows,
                                          static_cast<uint8_t>(s.rows)};
-    ps::kernel::Bf16GemmConfig wmma_cfg{ps::kernel::Bf16GemmConfigId::Wmma, 0u};
-    ps::kernel::Bf16GemmConfig dot2_cfg{ps::kernel::Bf16GemmConfigId::ExactRowsDot2,
+    shelf::kernel::Bf16GemmConfig wmma_cfg{shelf::kernel::Bf16GemmConfigId::Wmma, 0u};
+    shelf::kernel::Bf16GemmConfig dot2_cfg{shelf::kernel::Bf16GemmConfigId::ExactRowsDot2,
                                         static_cast<uint8_t>(s.rows)};
 
-    hipError_t err = ps::kernel::launch_gemm_bf16(
+    hipError_t err = shelf::kernel::launch_gemm_bf16(
         exact_cfg, w, x, y_exact, s.out_dtype, s.rows, s.n, s.k, s.k, s.n, 0);
     check(err == hipSuccess, "exact launch");
-    err = ps::kernel::launch_gemm_bf16(
+    err = shelf::kernel::launch_gemm_bf16(
         wmma_cfg, w, x, y_wmma, s.out_dtype, s.rows, s.n, s.k, s.k, s.n, 0);
     check(err == hipSuccess, "wmma launch");
     HIP_ASSERT(hipStreamSynchronize(0));
-    err = ps::kernel::launch_gemm_bf16(
+    err = shelf::kernel::launch_gemm_bf16(
         dot2_cfg, w, x, y_dot2, s.out_dtype, s.rows, s.n, s.k, s.k, s.n, 0);
     check(err == hipSuccess, "dot2 launch");
-    err = ps::kernel::launch_gemm_bf16(
+    err = shelf::kernel::launch_gemm_bf16(
         dot2_cfg, w, x, y_dot2_repeat, s.out_dtype, s.rows, s.n, s.k, s.k, s.n, 0);
     check(err == hipSuccess, "dot2 repeat launch");
     HIP_ASSERT(hipStreamSynchronize(0));
@@ -172,8 +172,8 @@ int run_case(const CaseSpec& s) {
         for (uint32_t t = 0; t < s.rows; ++t) {
             const float ref = wr * rowsum[t];
             float got = 0.0f;
-            if (s.out_dtype == ps::kernel::Bf16GemmOutputDType::BF16) {
-                const auto* p = static_cast<const ps::bf16_t*>(
+            if (s.out_dtype == shelf::kernel::Bf16GemmOutputDType::BF16) {
+                const auto* p = static_cast<const shelf::bf16_t*>(
                     static_cast<const void*>(h_exact.data()));
                 got = bf16_to_f32(p[static_cast<size_t>(t) * s.n + m]);
             } else {
@@ -224,8 +224,8 @@ int run_case(const CaseSpec& s) {
         for (uint32_t t = 0; t < s.rows; ++t) {
             const float ref = wr * rowsum[t];
             float got = 0.0f;
-            if (s.out_dtype == ps::kernel::Bf16GemmOutputDType::BF16) {
-                const auto* p = static_cast<const ps::bf16_t*>(
+            if (s.out_dtype == shelf::kernel::Bf16GemmOutputDType::BF16) {
+                const auto* p = static_cast<const shelf::bf16_t*>(
                     static_cast<const void*>(h_dot2.data()));
                 got = bf16_to_f32(p[static_cast<size_t>(t) * s.n + m]);
             } else {
@@ -299,17 +299,17 @@ int main() {
     HIP_ASSERT(hipSetDevice(0));
 
     const CaseSpec cases[] = {
-        {64u, 65u, 7u, ps::kernel::Bf16GemmOutputDType::F32, 1.0e-3f, 1.0e-2f, 0u,
+        {64u, 65u, 7u, shelf::kernel::Bf16GemmOutputDType::F32, 1.0e-3f, 1.0e-2f, 0u,
          "tail k=65"},
-        {1024u, 5120u, 7u, ps::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
+        {1024u, 5120u, 7u, shelf::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
          "k/v proj"},
-        {4096u, 5120u, 7u, ps::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
+        {4096u, 5120u, 7u, shelf::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
          "q/o proj"},
-        {17408u, 5120u, 7u, ps::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
+        {17408u, 5120u, 7u, shelf::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
          "gate/up"},
-        {5120u, 17408u, 7u, ps::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
+        {5120u, 17408u, 7u, shelf::kernel::Bf16GemmOutputDType::BF16, 8.0e-3f, 5.0e-2f, 0u,
          "down"},
-        {248320u, 5120u, 7u, ps::kernel::Bf16GemmOutputDType::F32, 1.0e-3f, 1.0e-2f,
+        {248320u, 5120u, 7u, shelf::kernel::Bf16GemmOutputDType::F32, 1.0e-3f, 1.0e-2f,
          2048u, "proposal lm_head"},
     };
 

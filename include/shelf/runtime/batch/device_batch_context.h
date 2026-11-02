@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <type_traits>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct DeviceSamplingParams {
     uint64_t seed = 0;

@@ -3,7 +3,7 @@
 
 #include <array>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 const std::array<EmbeddingRule, 2> kRules = {{
@@ -23,4 +23,4 @@ EmbeddingImplementation select_embedding_implementation(const EmbeddingSelectorI
     return EmbeddingImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

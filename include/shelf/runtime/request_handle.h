@@ -4,7 +4,7 @@
 #include <limits>
 #include <type_traits>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 inline constexpr uint32_t kInvalidRequestSlot =
     std::numeric_limits<uint32_t>::max();
@@ -40,4 +40,4 @@ static_assert(alignof(RequestHandle) == 8);
 static_assert(std::is_standard_layout_v<RequestHandle>);
 static_assert(std::is_trivially_copyable_v<RequestHandle>);
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

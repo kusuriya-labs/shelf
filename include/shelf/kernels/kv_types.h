@@ -2,7 +2,7 @@
 #include <hip/hip_fp8.h>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
 using fp8e4m3_storage_t = __hip_fp8_storage_t;

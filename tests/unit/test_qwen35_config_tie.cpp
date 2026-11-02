@@ -8,8 +8,8 @@
 
 namespace fs = std::filesystem;
 
-using ps::qwen35::read_qwen35_text_config;
-using ps::qwen35::read_qwen35_tie_word_embeddings;
+using shelf::qwen35::read_qwen35_text_config;
+using shelf::qwen35::read_qwen35_tie_word_embeddings;
 
 static int g_fail = 0;
 

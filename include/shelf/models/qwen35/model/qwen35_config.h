@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 struct Qwen35TextConfig {

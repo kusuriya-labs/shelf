@@ -7,12 +7,12 @@
 
 #include <cstddef>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 Result<OptimizedLaunchResult> try_launch_sampling(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

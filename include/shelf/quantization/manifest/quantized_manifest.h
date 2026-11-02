@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 constexpr const char* kQuantizedSafetensorsFormat = "shelf-fpx-safetensors";
 constexpr uint32_t kQuantizedSafetensorsMinFormatVersion = 3;
@@ -78,7 +78,7 @@ struct QuantizedManifest {
 
 std::string quantized_encoding_name(QuantizedEncoding enc);
 Result<QuantizedEncoding> parse_quantized_encoding(const std::string& name);
-ps::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc);
+shelf::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc);
 
 Result<QuantizedManifest> parse_quantized_manifest(const std::string& json);
 Result<std::string> serialize_quantized_manifest(const QuantizedManifest& manifest);

@@ -12,8 +12,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -32,9 +32,9 @@ static float bf16_to_f32(bf16_t x) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     const std::vector<std::size_t>& shape,
-    ps::gpu::Tensor& out) {
+    shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -46,7 +46,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -142,7 +142,7 @@ static void compare(
 }
 
 static void run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t rows,
     uint32_t heads,
@@ -160,15 +160,15 @@ static void run_case(
     std::vector<bf16_t> want;
     reference_rope(input, rows, features, head_dim, position_start, theta, want);
 
-    ps::gpu::Tensor dev_in;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_in;
+    shelf::gpu::Tensor dev_out;
     check(alloc_bf16(arena, {rows, features}, dev_in), "input alloc");
     check(alloc_bf16(arena, {rows, features}, dev_out), "out alloc");
     check(hipMemcpy(dev_in.data<bf16_t>(), input.data(), input.size() * sizeof(bf16_t),
                     hipMemcpyHostToDevice) == hipSuccess,
           "input upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_rope_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_rope_bf16(
         dev_in.data<bf16_t>(), features, dev_out.data<bf16_t>(), features, rows, features,
         head_dim, position_start, theta, stream);
     check(err == hipSuccess, "rope launch");
@@ -185,20 +185,20 @@ static void run_case(
                 " pos=" + std::to_string(position_start));
 }
 
-static void run_half_split_check(ps::gpu::GpuArena& arena, hipStream_t stream) {
+static void run_half_split_check(shelf::gpu::GpuArena& arena, hipStream_t stream) {
     const uint32_t head_dim = 8u;
     const uint32_t half = head_dim / 2u;
     std::vector<bf16_t> input(head_dim, bf16_t{0});
     input[0] = bf16_t{f32_to_bf16_rne(1.0f)};
 
-    ps::gpu::Tensor dev_in;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_in;
+    shelf::gpu::Tensor dev_out;
     check(alloc_bf16(arena, {1u, head_dim}, dev_in), "half input alloc");
     check(alloc_bf16(arena, {1u, head_dim}, dev_out), "half out alloc");
     check(hipMemcpy(dev_in.data<bf16_t>(), input.data(), input.size() * sizeof(bf16_t),
                     hipMemcpyHostToDevice) == hipSuccess,
           "half input upload");
-    check(ps::kernel::launch_dflash2_rope_bf16(
+    check(shelf::kernel::launch_dflash2_rope_bf16(
               dev_in.data<bf16_t>(), head_dim, dev_out.data<bf16_t>(), head_dim, 1u, head_dim,
               head_dim, 3u, 10000000.0f, stream) == hipSuccess,
           "half launch");
@@ -220,7 +220,7 @@ static void run_half_split_check(ps::gpu::GpuArena& arena, hipStream_t stream) {
     check(hipMemcpy(identity.data(), dev_in.data<bf16_t>(), identity.size() * sizeof(bf16_t),
                     hipMemcpyDeviceToHost) == hipSuccess,
           "identity readback");
-    check(ps::kernel::launch_dflash2_rope_bf16(
+    check(shelf::kernel::launch_dflash2_rope_bf16(
               dev_in.data<bf16_t>(), head_dim, dev_out.data<bf16_t>(), head_dim, 1u, head_dim,
               head_dim, 0u, 10000000.0f, stream) == hipSuccess,
           "position0 launch");
@@ -236,12 +236,12 @@ static void run_half_split_check(ps::gpu::GpuArena& arena, hipStream_t stream) {
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -262,8 +262,8 @@ int main() {
     run_case(arena, stream, 1u, 1u, 128u, 524288u, theta, 122u);
     run_half_split_check(arena, stream);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_rope: failed=%d\n", g_fail);

@@ -5,14 +5,14 @@
 #include <string>
 #include <vector>
 
-using ps::Status;
-using ps::weights::TensorPartitionDesc;
-using ps::weights::TensorPartitionPlan;
-using ps::weights::TensorPartitionRange;
-using ps::weights::tensor_partition_local_shape;
-using ps::weights::validate_tensor_partition;
-using ps::weights::validate_tensor_partition_block_alignment;
-using ps::weights::validate_tensor_partition_plan;
+using shelf::Status;
+using shelf::weights::TensorPartitionDesc;
+using shelf::weights::TensorPartitionPlan;
+using shelf::weights::TensorPartitionRange;
+using shelf::weights::tensor_partition_local_shape;
+using shelf::weights::validate_tensor_partition;
+using shelf::weights::validate_tensor_partition_block_alignment;
+using shelf::weights::validate_tensor_partition_plan;
 
 static int g_fail = 0;
 

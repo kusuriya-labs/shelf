@@ -10,12 +10,12 @@
 #include <string>
 #include <vector>
 
-using ps::qwen35::dflash2::DFlash2Config;
-using ps::qwen35::dflash2::DFlash2Weights;
-using ps::qwen35::dflash2::dflash2_expected_tensors;
-using ps::qwen35::dflash2::load_dflash2_weights;
-using ps::qwen35::dflash2::read_dflash2_config;
-using ps::qwen35::dflash2::validate_dflash2_tensor_contract;
+using shelf::qwen35::dflash2::DFlash2Config;
+using shelf::qwen35::dflash2::DFlash2Weights;
+using shelf::qwen35::dflash2::dflash2_expected_tensors;
+using shelf::qwen35::dflash2::load_dflash2_weights;
+using shelf::qwen35::dflash2::read_dflash2_config;
+using shelf::qwen35::dflash2::validate_dflash2_tensor_contract;
 
 static int g_fail = 0;
 
@@ -93,12 +93,12 @@ int main() {
         check(st.ok(), "tensor contract: " + (st.ok() ? "" : st.message()));
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 8ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 8ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -158,9 +158,9 @@ int main() {
         }
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     {
-        const ps::Status shutdown = arena.shutdown();
+        const shelf::Status shutdown = arena.shutdown();
         check(shutdown.ok(), "arena shutdown: " + shutdown.message());
         check(arena.is_shutdown(), "arena reports shutdown");
     }

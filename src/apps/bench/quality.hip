@@ -33,7 +33,7 @@ struct QualityOptions {
     int tp = 1;
     double arena_gib = 0.0;
     bool arena_auto = true;
-    ps::kernel::KVCacheDType kv_dtype = ps::kernel::KVCacheDType::BF16;
+    shelf::kernel::KVCacheDType kv_dtype = shelf::kernel::KVCacheDType::BF16;
     std::string dump_path;
     std::string compare_path;
 };
@@ -146,9 +146,9 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
         } else if (key == "--kv-cache-dtype") {
             const std::string dtype = need_value();
             if (dtype == "bf16") {
-                opts.kv_dtype = ps::kernel::KVCacheDType::BF16;
+                opts.kv_dtype = shelf::kernel::KVCacheDType::BF16;
             } else if (dtype == "fp8") {
-                opts.kv_dtype = ps::kernel::KVCacheDType::FP8_E4M3;
+                opts.kv_dtype = shelf::kernel::KVCacheDType::FP8_E4M3;
             } else {
                 fprintf(stderr, "invalid --kv-cache-dtype: %s\n", dtype.c_str());
                 return false;
@@ -220,7 +220,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1u) / b;
 }
 
-uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt != 0) ++n;
@@ -247,10 +247,10 @@ std::vector<int32_t> read_token_corpus(const std::string& path) {
     return tokens;
 }
 
-ps::bench::quality::KvDtype to_quality_dtype(ps::kernel::KVCacheDType dtype) {
-    return dtype == ps::kernel::KVCacheDType::FP8_E4M3
-               ? ps::bench::quality::KvDtype::Fp8E4M3
-               : ps::bench::quality::KvDtype::Bf16;
+shelf::bench::quality::KvDtype to_quality_dtype(shelf::kernel::KVCacheDType dtype) {
+    return dtype == shelf::kernel::KVCacheDType::FP8_E4M3
+               ? shelf::bench::quality::KvDtype::Fp8E4M3
+               : shelf::bench::quality::KvDtype::Bf16;
 }
 
 }
@@ -330,41 +330,41 @@ int run_quality(int argc, char** argv) {
     const uint32_t num_pages =
         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1u;
 
-    ps::qwen35::ExecutorConfig exec_config;
+    shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows = static_cast<uint32_t>(
         std::max(opts.prefill_chunk, 2));
     exec_config.max_scheduled_requests = 1u;
     exec_config.max_scheduled_output_rows = 1u;
 
-    std::unique_ptr<ps::qwen35::runtime::TpCoordinator> tp_coord;
-    std::unique_ptr<ps::gpu::GpuArena> tp1_arena;
-    std::unique_ptr<ps::qwen35::Qwen35Model> tp1_model;
-    std::unique_ptr<ps::state::SequenceSlotPool> tp1_seq_pool;
-    std::unique_ptr<ps::state::GdnStatePool> tp1_gdn_pool;
-    std::unique_ptr<ps::state::PagedKVPool> tp1_kv_pool;
-    std::unique_ptr<ps::qwen35::Executor> tp1_executor;
-    const ps::qwen35::Qwen35Model* model = nullptr;
-    ps::state::SequenceSlotPool* seq_pool = nullptr;
-    ps::state::GdnStatePool* gdn_pool = nullptr;
-    ps::state::PagedKVPool* kv_pool = nullptr;
-    ps::qwen35::Executor* executor = nullptr;
+    std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
+    std::unique_ptr<shelf::gpu::GpuArena> tp1_arena;
+    std::unique_ptr<shelf::qwen35::Qwen35Model> tp1_model;
+    std::unique_ptr<shelf::state::SequenceSlotPool> tp1_seq_pool;
+    std::unique_ptr<shelf::state::GdnStatePool> tp1_gdn_pool;
+    std::unique_ptr<shelf::state::PagedKVPool> tp1_kv_pool;
+    std::unique_ptr<shelf::qwen35::Executor> tp1_executor;
+    const shelf::qwen35::Qwen35Model* model = nullptr;
+    shelf::state::SequenceSlotPool* seq_pool = nullptr;
+    shelf::state::GdnStatePool* gdn_pool = nullptr;
+    shelf::state::PagedKVPool* kv_pool = nullptr;
+    shelf::qwen35::Executor* executor = nullptr;
 
     if (opts.tp == 1) {
-        auto arena_result = ps::gpu::GpuArena::create(opts.devices[0], arena_bytes);
+        auto arena_result = shelf::gpu::GpuArena::create(opts.devices[0], arena_bytes);
         if (!arena_result.ok()) {
             fprintf(stderr, "GpuArena::create failed: %s\n",
                     arena_result.status().message().c_str());
             return 1;
         }
-        tp1_arena = std::make_unique<ps::gpu::GpuArena>(arena_result.release());
+        tp1_arena = std::make_unique<shelf::gpu::GpuArena>(arena_result.release());
 
-        auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+        auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
             opts.model_dir, *tp1_arena, stream, {});
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
             return 1;
         }
-        tp1_model = std::make_unique<ps::qwen35::Qwen35Model>(model_result.release());
+        tp1_model = std::make_unique<shelf::qwen35::Qwen35Model>(model_result.release());
         model = tp1_model.get();
 
         hip_err = hipStreamSynchronize(stream);
@@ -373,7 +373,7 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
     } else {
-        ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
+        shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
         tp_cfg.max_batch_rows = exec_config.max_batch_rows;
@@ -384,7 +384,7 @@ int run_quality(int argc, char** argv) {
         tp_cfg.kv_cache_dtype = opts.kv_dtype;
         tp_cfg.arena_bytes = arena_bytes;
         tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
-        auto coord_result = ps::qwen35::runtime::TpCoordinator::create(tp_cfg);
+        auto coord_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!coord_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
                     coord_result.status().message().c_str());
@@ -414,26 +414,26 @@ int run_quality(int argc, char** argv) {
     }
 
     if (opts.tp == 1) {
-        auto seq_pool_result = ps::state::SequenceSlotPool::create(*tp1_arena, 1u, num_pages);
+        auto seq_pool_result = shelf::state::SequenceSlotPool::create(*tp1_arena, 1u, num_pages);
         if (!seq_pool_result.ok()) {
             fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
                     seq_pool_result.status().message().c_str());
             return 1;
         }
-        tp1_seq_pool = std::make_unique<ps::state::SequenceSlotPool>(seq_pool_result.release());
+        tp1_seq_pool = std::make_unique<shelf::state::SequenceSlotPool>(seq_pool_result.release());
         seq_pool = tp1_seq_pool.get();
 
-        auto gdn_pool_result = ps::state::GdnStatePool::create(
-            *tp1_arena, 1u, ps::qwen35::make_qwen35_gdn_state_layout(tc));
+        auto gdn_pool_result = shelf::state::GdnStatePool::create(
+            *tp1_arena, 1u, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
         if (!gdn_pool_result.ok()) {
             fprintf(stderr, "GdnStatePool::create failed: %s\n",
                     gdn_pool_result.status().message().c_str());
             return 1;
         }
-        tp1_gdn_pool = std::make_unique<ps::state::GdnStatePool>(gdn_pool_result.release());
+        tp1_gdn_pool = std::make_unique<shelf::state::GdnStatePool>(gdn_pool_result.release());
         gdn_pool = tp1_gdn_pool.get();
 
-        auto kv_pool_result = ps::state::PagedKVPool::create(
+        auto kv_pool_result = shelf::state::PagedKVPool::create(
             *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens), num_attn_layers,
             kv_heads, head_dim, opts.kv_dtype);
         if (!kv_pool_result.ok()) {
@@ -441,30 +441,30 @@ int run_quality(int argc, char** argv) {
                     kv_pool_result.status().message().c_str());
             return 1;
         }
-        tp1_kv_pool = std::make_unique<ps::state::PagedKVPool>(kv_pool_result.release());
+        tp1_kv_pool = std::make_unique<shelf::state::PagedKVPool>(kv_pool_result.release());
         kv_pool = tp1_kv_pool.get();
 
-        auto exec_result = ps::qwen35::create_model_executor(
+        auto exec_result = shelf::qwen35::create_model_executor(
             *model, *seq_pool, *gdn_pool, *kv_pool, *tp1_arena, exec_config);
         if (!exec_result.ok()) {
             fprintf(stderr, "create_model_executor failed: %s\n",
                     exec_result.status().message().c_str());
             return 1;
         }
-        tp1_executor = std::make_unique<ps::qwen35::Executor>(exec_result.release());
+        tp1_executor = std::make_unique<shelf::qwen35::Executor>(exec_result.release());
         executor = tp1_executor.get();
     }
 
-    auto seq_result = ps::state::create_paged_sequence_state(
+    auto seq_result = shelf::state::create_paged_sequence_state(
         *seq_pool, *gdn_pool, *kv_pool, required_seq_len, stream);
     if (!seq_result.ok()) {
         fprintf(stderr, "create_paged_sequence_state failed: %s\n",
                 seq_result.status().message().c_str());
         return 1;
     }
-    ps::state::PagedSequenceState seq = seq_result.release();
+    shelf::state::PagedSequenceState seq = seq_result.release();
     if (tp_coord != nullptr) {
-        ps::Status mirror_status = tp_coord->on_sequence_created(seq);
+        shelf::Status mirror_status = tp_coord->on_sequence_created(seq);
         if (!mirror_status.ok()) {
             fprintf(stderr, "tp sequence mirror failed: %s\n",
                     mirror_status.message().c_str());
@@ -477,17 +477,17 @@ int run_quality(int argc, char** argv) {
     uint32_t processed = 0u;
     while (processed < context) {
         const uint32_t chunk_len = std::min(chunk, context - processed);
-        ps::qwen35::ScheduledRequest req;
+        shelf::qwen35::ScheduledRequest req;
         req.sequence = &seq;
         req.handle = seq.request_handle();
-        req.execution_class = ps::runtime::ExecutionClass::PREFILL;
+        req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
         req.token_begin = 0;
         req.num_tokens = chunk_len;
         req.prefix_tokens = seq.position;
         req.compute_logits = tp_coord != nullptr;
         req.sample = false;
-        std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-        ps::qwen35::ScheduledBatch batch;
+        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+        shelf::qwen35::ScheduledBatch batch;
         batch.token_ids = corpus.data() + processed;
         batch.requests = reqs;
         batch.num_tokens = chunk_len;
@@ -495,12 +495,12 @@ int run_quality(int argc, char** argv) {
         batch.num_decode_requests = 0u;
         batch.num_verify_requests = 0u;
         batch.num_prefill_requests = 1u;
-        ps::Result<ps::qwen35::BatchExecutionOutput> exec_out{ps::Status::invalid_state(
+        shelf::Result<shelf::qwen35::BatchExecutionOutput> exec_out{shelf::Status::invalid_state(
             "unbound batch execution", __FILE__, __LINE__)};
         if (tp_coord != nullptr) {
             exec_out = tp_coord->on_execute(batch);
         } else {
-            exec_out = ps::qwen35::execute_batch(*executor, batch, stream);
+            exec_out = shelf::qwen35::execute_batch(*executor, batch, stream);
         }
         if (!exec_out.ok()) {
             fprintf(stderr, "context prefill failed at %u: %s\n", processed,
@@ -523,9 +523,9 @@ int run_quality(int argc, char** argv) {
         }
     }
 
-    ps::bench::quality::DumpWriter writer;
-    ps::bench::quality::DumpReader reader;
-    ps::bench::quality::Metrics metrics;
+    shelf::bench::quality::DumpWriter writer;
+    shelf::bench::quality::DumpReader reader;
+    shelf::bench::quality::Metrics metrics;
     if (!opts.dump_path.empty()) {
         if (!writer.open(opts.dump_path, vocab, to_quality_dtype(opts.kv_dtype), score_start)) {
             fprintf(stderr, "cannot open --dump path: %s\n", opts.dump_path.c_str());
@@ -569,17 +569,17 @@ int run_quality(int argc, char** argv) {
         const int32_t feed_token = corpus[feed_index];
         const int32_t target = corpus[feed_index + 1u];
         std::vector<int32_t> token_ids = {feed_token};
-        ps::qwen35::ScheduledRequest req;
+        shelf::qwen35::ScheduledRequest req;
         req.sequence = &seq;
         req.handle = seq.request_handle();
-        req.execution_class = ps::runtime::ExecutionClass::DECODE;
+        req.execution_class = shelf::runtime::ExecutionClass::DECODE;
         req.token_begin = 0;
         req.num_tokens = 1u;
         req.prefix_tokens = seq.position;
         req.compute_logits = true;
         req.sample = false;
-        std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-        ps::qwen35::ScheduledBatch batch;
+        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+        shelf::qwen35::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
         batch.num_tokens = 1u;
@@ -587,19 +587,19 @@ int run_quality(int argc, char** argv) {
         batch.num_decode_requests = 1u;
         batch.num_verify_requests = 0u;
         batch.num_prefill_requests = 0u;
-        ps::Result<ps::qwen35::BatchExecutionOutput> result{ps::Status::invalid_state(
+        shelf::Result<shelf::qwen35::BatchExecutionOutput> result{shelf::Status::invalid_state(
             "unbound batch execution", __FILE__, __LINE__)};
         if (tp_coord != nullptr) {
             result = tp_coord->on_execute(batch);
         } else {
-            result = ps::qwen35::execute_batch(*executor, batch, stream);
+            result = shelf::qwen35::execute_batch(*executor, batch, stream);
         }
         if (!result.ok()) {
             fprintf(stderr, "teacher-forced step %u failed: %s\n", feed_index,
                     result.status().message().c_str());
             return 1;
         }
-        ps::qwen35::BatchExecutionOutput out = std::move(result.release());
+        shelf::qwen35::BatchExecutionOutput out = std::move(result.release());
         if (out.num_outputs != 1u) {
             fprintf(stderr, "teacher-forced step %u produced %u outputs\n", feed_index,
                     out.num_outputs);
@@ -655,7 +655,7 @@ int run_quality(int argc, char** argv) {
                         feed_index, baseline_target, target, baseline_position, position);
                 return 1;
             }
-            ps::bench::quality::accumulate_row(
+            shelf::bench::quality::accumulate_row(
                 baseline_logits.data(), host_logits.data(), vocab, target, metrics);
         }
     }
@@ -674,16 +674,16 @@ int run_quality(int argc, char** argv) {
     printf("QUALITY_SCORE_START=%u\n", score_start);
     printf("QUALITY_VOCAB=%u\n", vocab);
     printf("QUALITY_KV_DTYPE=%s\n",
-           opts.kv_dtype == ps::kernel::KVCacheDType::FP8_E4M3 ? "fp8" : "bf16");
+           opts.kv_dtype == shelf::kernel::KVCacheDType::FP8_E4M3 ? "fp8" : "bf16");
     if (!opts.dump_path.empty()) {
         printf("QUALITY_DUMP=%s\n", opts.dump_path.c_str());
         printf("QUALITY_DUMP_POSITIONS=%llu\n",
                static_cast<unsigned long long>(writer.positions()));
     }
     if (!opts.compare_path.empty()) {
-        const double base_ppl = ps::bench::quality::perplexity(
+        const double base_ppl = shelf::bench::quality::perplexity(
             metrics.nll_base, metrics.positions);
-        const double candidate_ppl = ps::bench::quality::perplexity(
+        const double candidate_ppl = shelf::bench::quality::perplexity(
             metrics.nll_candidate, metrics.positions);
         const double delta_pct = base_ppl == 0.0
             ? 0.0
@@ -696,11 +696,11 @@ int run_quality(int argc, char** argv) {
                metrics.positions == 0u ? 0.0
                    : (metrics.nll_candidate - metrics.nll_base) /
                          static_cast<double>(metrics.positions));
-        printf("QUALITY_KL_MEAN=%.9g\n", ps::bench::quality::mean_kl(metrics));
+        printf("QUALITY_KL_MEAN=%.9g\n", shelf::bench::quality::mean_kl(metrics));
         printf("QUALITY_TOP1_AGREEMENT=%.9g\n",
-               ps::bench::quality::top1_agreement(metrics));
+               shelf::bench::quality::top1_agreement(metrics));
         printf("QUALITY_TOP5_OVERLAP=%.9g\n",
-               ps::bench::quality::top5_overlap(metrics));
+               shelf::bench::quality::top5_overlap(metrics));
         printf("QUALITY_LOGIT_MAX_ABS_DELTA=%.9g\n", metrics.max_abs_delta);
     }
     fflush(stdout);

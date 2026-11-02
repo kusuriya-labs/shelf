@@ -15,11 +15,11 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using S = ::ps::runtime::DeviceStateBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using S = ::shelf::runtime::DeviceStateBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 uint32_t h32(uint64_t x) {
     x ^= x >> 33;
@@ -77,7 +77,7 @@ struct Bufs {
         void* all[] = {weight, input, out_correct, out_opt, state_correct, state_opt, requests,
                        vals_dev, state_dev, param_dev, ctx_dev, scratch, error_word};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -101,7 +101,7 @@ bool run_case(const Case& c) {
     if (!m(&buf.out_opt, (size_t)rows * out_stride * 4)) return false;
     if (!m(&buf.state_correct, state_total * 2)) return false;
     if (!m(&buf.state_opt, state_total * 2)) return false;
-    if (!m(&buf.requests, (size_t)nreq * sizeof(::ps::runtime::DeviceRequestDescriptor))) return false;
+    if (!m(&buf.requests, (size_t)nreq * sizeof(::shelf::runtime::DeviceRequestDescriptor))) return false;
 
     std::vector<uint16_t> h_w((size_t)conv_dim * 4u);
     std::vector<uint16_t> h_in((size_t)rows * in_stride);
@@ -119,7 +119,7 @@ bool run_case(const Case& c) {
     if (hipMemset(buf.out_correct, 0, (size_t)rows * out_stride * 4) != hipSuccess) return false;
     if (hipMemset(buf.out_opt, 0, (size_t)rows * out_stride * 4) != hipSuccess) return false;
 
-    std::vector<::ps::runtime::DeviceRequestDescriptor> h_req(nreq);
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> h_req(nreq);
     for (uint32_t r = 0; r < nreq; ++r) {
         std::memset(&h_req[r], 0, sizeof(h_req[r]));
         h_req[r].request_handle.slot = c.reqs[r].slot;
@@ -130,40 +130,40 @@ bool run_case(const Case& c) {
 
     V vals[2];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, conv_dim, in_stride, buf.input, ::ps::runtime::ValueDType::BF16);
-    setv(vals[1], 1, conv_dim, out_stride, buf.out_correct, ::ps::runtime::ValueDType::F32);
+    setv(vals[0], 0, conv_dim, in_stride, buf.input, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[1], 1, conv_dim, out_stride, buf.out_correct, ::shelf::runtime::ValueDType::F32);
     if (hipMalloc(&buf.vals_dev, 2 * sizeof(V)) != hipSuccess) return false;
     std::memcpy(buf.vals_dev, vals, 2 * sizeof(V));
 
     S st;
     st.slot = 0;
-    st.kind = (uint8_t)::ps::runtime::PrimitiveStateKind::GDN_CONV_STATE;
+    st.kind = (uint8_t)::shelf::runtime::PrimitiveStateKind::GDN_CONV_STATE;
     st.state_index = c.state_index;
     if (hipMalloc(&buf.state_dev, sizeof(S)) != hipSuccess) return false;
     std::memcpy(buf.state_dev, &st, sizeof(S));
 
-    ::ps::runtime::StaticParameterSlot param;
+    ::shelf::runtime::StaticParameterSlot param;
     param.device_ptr = buf.weight;
     param.elements = conv_dim * 4u;
-    param.dtype = ::ps::runtime::ValueDType::BF16;
+    param.dtype = ::shelf::runtime::ValueDType::BF16;
     if (hipMalloc(&buf.param_dev, sizeof(param)) != hipSuccess) return false;
     std::memcpy(buf.param_dev, &param, sizeof(param));
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = nreq;
-    ctx.requests = (const ::ps::runtime::DeviceRequestDescriptor*)buf.requests;
+    ctx.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)buf.requests;
     if (hipMalloc(&buf.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
     if (hipMemcpy(buf.ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMalloc(&buf.scratch, (size_t)1024 * 4096 * sizeof(float)) != hipSuccess) return false;
@@ -175,11 +175,11 @@ bool run_case(const Case& c) {
     prog.states = (const S*)buf.state_dev;
     prog.state_count = 1;
     prog.workspace_base = 0;
-    prog.parameter_table = (const ::ps::runtime::StaticParameterSlot*)buf.param_dev;
+    prog.parameter_table = (const ::shelf::runtime::StaticParameterSlot*)buf.param_dev;
     prog.parameter_slot_count = 1;
 
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::STATEFUL_CAUSAL_CONV1D;
+    binding.kernel_id = ::shelf::runtime::KernelId::STATEFUL_CAUSAL_CONV1D;
     binding.descriptor_slot = 1;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
@@ -187,7 +187,7 @@ bool run_case(const Case& c) {
     binding.output_count = 1;
     binding.parameter_index0 = 0;
 
-    ::ps::kernel::ModelDispatchStateView state_view{};
+    ::shelf::kernel::ModelDispatchStateView state_view{};
     state_view.gdn.conv_base = (bf16t*)buf.state_correct;
     state_view.gdn.num_gdn_states = c.num_gdn_states;
     state_view.gdn.max_sequences = c.max_sequences;
@@ -197,22 +197,22 @@ bool run_case(const Case& c) {
     state_view.gdn.conv_dim = conv_dim;
     state_view.gdn.conv_history = history;
 
-    ps::gpu::discard_cleanup_result(hipMemset(buf.error_word, 0, sizeof(uint32_t)));
-    auto stc = ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)buf.ctx_dev, state_view,
+    shelf::gpu::discard_cleanup_result(hipMemset(buf.error_word, 0, sizeof(uint32_t)));
+    auto stc = shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)buf.ctx_dev, state_view,
         (float*)buf.scratch, (uint32_t*)buf.error_word, nullptr);
     if (!stc.ok()) {
         std::printf("  [%s] correctness launch failed\n", c.name);
         return false;
     }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
-    ::ps::kernel::GdnConv1dArgs ka{};
+    ::shelf::kernel::GdnConv1dArgs ka{};
     ka.input = (const bf16t*)buf.input;
     ka.output = (float*)buf.out_opt;
     ka.conv_weight = (const bf16t*)buf.weight;
     ka.conv_state = (bf16t*)buf.state_opt;
-    ka.requests = (const ::ps::runtime::DeviceRequestDescriptor*)buf.requests;
+    ka.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)buf.requests;
     ka.num_requests = nreq;
     ka.actual_rows = rows;
     ka.input_row_stride = in_stride;
@@ -224,15 +224,15 @@ bool run_case(const Case& c) {
     ka.conv_slot_stride = slot_stride;
     ka.conv_layer_stride = layer_stride;
     ka.conv_history_stride = hist_stride;
-    hipError_t he = ::ps::kernel::launch_gdn_conv1d_bf16_f32(ka, nullptr);
+    hipError_t he = ::shelf::kernel::launch_gdn_conv1d_bf16_f32(ka, nullptr);
     if (he != hipSuccess) {
         std::printf("  [%s] optimized launch failed: %s\n", c.name, hipGetErrorString(he));
         return false;
     }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
     uint32_t ew = 0;
-    ps::gpu::discard_cleanup_result(hipMemcpy(&ew, buf.error_word, sizeof(ew), hipMemcpyDeviceToHost));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(&ew, buf.error_word, sizeof(ew), hipMemcpyDeviceToHost));
     std::vector<float> oc((size_t)rows * out_stride), oo((size_t)rows * out_stride);
     std::vector<uint16_t> sc(state_total), so(state_total);
     if (hipMemcpy(oc.data(), buf.out_correct, oc.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) return false;

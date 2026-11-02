@@ -15,12 +15,12 @@
 #include <string>
 #include <vector>
 
-namespace ps::weights {
+namespace shelf::weights {
 namespace {
 
-using ps::quantization::manifest::QuantizedEncoding;
-using ps::quantization::bundle::QuantizedModelReader;
-using ps::quantization::bundle::QuantizedTensorView;
+using shelf::quantization::manifest::QuantizedEncoding;
+using shelf::quantization::bundle::QuantizedModelReader;
+using shelf::quantization::bundle::QuantizedTensorView;
 using Tensor = gpu::Tensor;
 namespace fs = std::filesystem;
 
@@ -616,7 +616,7 @@ Result<MatrixWeight> load_bf16_matrix(
     if (it == options.partition_plan->tensors.end()) {
         return load_bf16_matrix_raw(collection, name, arena, stream);
     }
-    const ps::weights::TensorPartitionDesc& partition = it->second;
+    const shelf::weights::TensorPartitionDesc& partition = it->second;
     auto spec_result = collection.tensor_spec(name);
     if (!spec_result.ok()) return spec_result.status();
     const io::StTensorSpec& spec = spec_result.value();
@@ -624,7 +624,7 @@ Result<MatrixWeight> load_bf16_matrix(
         return Status::invalid_argument(
             ("partitioned matrix weight must be 2D: " + name).c_str(), __FILE__, __LINE__);
     }
-    auto local_result = ps::weights::tensor_partition_local_shape(partition);
+    auto local_result = shelf::weights::tensor_partition_local_shape(partition);
     if (!local_result.ok()) return local_result.status();
     const std::vector<int64_t>& local = local_result.value();
 
@@ -662,7 +662,7 @@ Result<MatrixWeight> load_bf16_matrix(
     const auto* src_base = static_cast<const char*>(src);
     if (partition.axis == 0) {
         std::size_t dst_row = 0;
-        for (const ps::weights::TensorPartitionRange& range : partition.ranges) {
+        for (const shelf::weights::TensorPartitionRange& range : partition.ranges) {
             const char* row_src = src_base + range.global_offset * cols * kElem;
             const std::size_t copy_bytes = range.extent * cols * kElem;
             const hipError_t err = hipMemcpyAsync(
@@ -677,7 +677,7 @@ Result<MatrixWeight> load_bf16_matrix(
     } else if (partition.axis == 1) {
         std::size_t dst_col = 0;
         const std::size_t dst_pitch = static_cast<std::size_t>(local[1]) * kElem;
-        for (const ps::weights::TensorPartitionRange& range : partition.ranges) {
+        for (const shelf::weights::TensorPartitionRange& range : partition.ranges) {
             const char* col_src = src_base + range.global_offset * kElem;
             const hipError_t err = hipMemcpy2DAsync(
                 dst + dst_col * kElem, dst_pitch, col_src, cols * kElem,
@@ -953,4 +953,4 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
     return loaded;
 }
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

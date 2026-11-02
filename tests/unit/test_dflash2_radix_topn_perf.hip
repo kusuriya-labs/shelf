@@ -78,9 +78,9 @@ Sample measure(const std::vector<hipEvent_t>& events, Launch&& launch) {
 
 void run_matrix(const std::vector<hipEvent_t>& events, bool tie_heavy) {
     const uint32_t vocab = 248320u;
-    const uint32_t radix_partitions = ps::kernel::dflash2_radix_default_partitions(vocab);
+    const uint32_t radix_partitions = shelf::kernel::dflash2_radix_default_partitions(vocab);
     const std::size_t radix_scratch_bytes =
-        ps::kernel::dflash2_radix_topn_scratch_bytes(8u, radix_partitions, vocab);
+        shelf::kernel::dflash2_radix_topn_scratch_bytes(8u, radix_partitions, vocab);
 
     std::printf("input=%s vocab=%u radix_partitions=%u "
                 "radix_scratch=%zuB radix_launches=%u warmup=%u "
@@ -110,7 +110,7 @@ void run_matrix(const std::vector<hipEvent_t>& events, bool tie_heavy) {
 
         for (uint32_t pool : {16u, 24u, 32u, 48u, 64u, 96u, 128u}) {
             const Sample radix = measure(events, [&] {
-                (void)ps::kernel::launch_dflash2_radix_topn(
+                (void)shelf::kernel::launch_dflash2_radix_topn(
                     r.logits, rows, vocab, vocab, pool, r.radix_ids, r.radix_values,
                     radix_partitions, r.radix_scratch, radix_scratch_bytes, nullptr);
             });

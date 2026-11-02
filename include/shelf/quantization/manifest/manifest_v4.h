@@ -5,7 +5,7 @@
 
 #include <string>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 constexpr const char* kFp8V4EncodingName = "fp8_e4m3";
 

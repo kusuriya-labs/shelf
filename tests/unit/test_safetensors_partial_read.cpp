@@ -13,8 +13,8 @@
 #include <unistd.h>
 
 namespace fs = std::filesystem;
-using ps::io::SType;
-using ps::io::StAxisSpan;
+using shelf::io::SType;
+using shelf::io::StAxisSpan;
 
 static int passed = 0;
 static int failed = 0;
@@ -30,7 +30,7 @@ static void check(bool cond, const char* msg) {
 }
 
 static std::string temp_path(const char* name) {
-    return "/tmp/ps_partial_" + std::string(name) + "_" +
+    return "/tmp/shelf_partial_" + std::string(name) + "_" +
            std::to_string(getpid()) + ".safetensors";
 }
 
@@ -57,7 +57,7 @@ static void test_i64_roundtrip() {
     remove_file(path);
 
     const std::vector<std::int64_t> multipliers = {1234567, -987654321, 42};
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     check(w.ok(), "i64: create writer");
     if (!w.ok()) return;
     check(w.value().plan_tensor("m", SType::I64, {3}).ok(), "i64: plan I64");
@@ -71,7 +71,7 @@ static void test_i64_roundtrip() {
           "i64: write payload");
     check(w.value().finish().ok(), "i64: finish");
 
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), "i64: reopen");
     if (!r.ok()) {
         remove_file(path);
@@ -84,8 +84,8 @@ static void test_i64_roundtrip() {
         check(spec.value().shape == std::vector<std::size_t>{3}, "i64: shape [3]");
         check(spec.value().data_end - spec.value().data_begin == 24, "i64: 24 bytes");
     }
-    check(ps::io::stype_elem_size(SType::I64) == 8, "i64: elem size 8");
-    check(std::string(ps::io::stype_name(SType::I64)) == "I64", "i64: name I64");
+    check(shelf::io::stype_elem_size(SType::I64) == 8, "i64: elem size 8");
+    check(std::string(shelf::io::stype_name(SType::I64)) == "I64", "i64: name I64");
 
     std::int64_t got[3] = {0, 0, 0};
     check(r.value().read_tensor("m", got, sizeof(got)).ok(), "i64: read back");
@@ -114,7 +114,7 @@ static void test_i64_unsupported_dtype_still_rejected() {
         std::fwrite("abcd", 1, 4, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(!r.ok(), "unknown dtype still rejected");
     remove_file(path);
 }
@@ -127,7 +127,7 @@ static void test_rank2_row_spans() {
     constexpr std::size_t kCols = 5;
     const auto payload = pattern(kRows * kCols * 2, 0x11);
 
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     check(w.ok(), "rows: create writer");
     if (!w.ok()) return;
     check(w.value().plan_tensor("w", SType::BF16, {kRows, kCols}).ok(),
@@ -138,7 +138,7 @@ static void test_rank2_row_spans() {
           "rows: write payload");
     check(w.value().finish().ok(), "rows: finish");
 
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), "rows: reopen");
     if (!r.ok()) {
         remove_file(path);
@@ -190,7 +190,7 @@ static void test_rank3_expert_spans() {
     constexpr std::size_t kCols = 2;
     const auto payload = pattern(kExperts * kRows * kCols * 2, 0x5A);
 
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     check(w.ok(), "expert: create writer");
     if (!w.ok()) return;
     check(w.value().plan_tensor("e", SType::BF16, {kExperts, kRows, kCols}).ok(),
@@ -201,7 +201,7 @@ static void test_rank3_expert_spans() {
           "expert: write payload");
     check(w.value().finish().ok(), "expert: finish");
 
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), "expert: reopen");
     if (!r.ok()) {
         remove_file(path);
@@ -253,7 +253,7 @@ static void test_rank0_rejected() {
         std::fwrite("x", 1, 1, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(r.ok(), "rank0: opens as scalar tensor");
     if (r.ok()) {
         check(!r.value().axis_span("s", 0, 1).ok(), "rank0: axis_span rejected");
@@ -274,7 +274,7 @@ static void test_truncated_and_overflow() {
         std::fwrite("short", 1, 5, f);
         std::fclose(f);
     }
-    auto r = ps::io::SafetensorsReader::open(path);
+    auto r = shelf::io::SafetensorsReader::open(path);
     check(!r.ok(), "truncated payload rejected at open");
     remove_file(path);
 
@@ -290,7 +290,7 @@ static void test_truncated_and_overflow() {
         std::fwrite("12345678", 1, 8, f);
         std::fclose(f);
     }
-    auto r2 = ps::io::SafetensorsReader::open(path2);
+    auto r2 = shelf::io::SafetensorsReader::open(path2);
     check(!r2.ok(), "shape overflow rejected");
     remove_file(path2);
 }
@@ -298,7 +298,7 @@ static void test_truncated_and_overflow() {
 static void write_shard(const std::string& path, const std::string& name,
                         SType dtype, const std::vector<std::size_t>& shape,
                         const std::vector<std::uint8_t>& bytes) {
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
     if (!w.value().plan_tensor(name, dtype, shape).ok()) return;
     if (!w.value().write_header().ok()) return;
@@ -307,7 +307,7 @@ static void write_shard(const std::string& path, const std::string& name,
 }
 
 static void test_collection_multi_shard() {
-    const std::string dir = "/tmp/ps_partial_col_" + std::to_string(getpid());
+    const std::string dir = "/tmp/shelf_partial_col_" + std::to_string(getpid());
     fs::remove_all(dir);
     fs::create_directories(dir);
 
@@ -324,7 +324,7 @@ static void test_collection_multi_shard() {
             << R"("beta":"model-00002-of-00002.safetensors"}})";
     }
 
-    auto col = ps::weights::SafetensorsCollection::open(dir);
+    auto col = shelf::weights::SafetensorsCollection::open(dir);
     check(col.ok(), "collection: open");
     if (!col.ok()) {
         fs::remove_all(dir);
@@ -374,14 +374,14 @@ static void test_python_safetensors_compatibility() {
     remove_file(path);
 
     const std::vector<std::int64_t> vals = {11, 22, 33, 44};
-    auto w = ps::io::SafetensorsWriter::create(path);
+    auto w = shelf::io::SafetensorsWriter::create(path);
     if (!w.ok()) return;
     if (!w.value().plan_tensor("t", SType::I64, {4}).ok()) return;
     if (!w.value().write_header().ok()) return;
     if (!w.value().write_tensor("t", vals.data(), vals.size() * 8).ok()) return;
     if (!w.value().finish().ok()) return;
 
-    const std::string py_path = "/tmp/ps_partial_check_" + std::to_string(getpid()) + ".py";
+    const std::string py_path = "/tmp/shelf_partial_check_" + std::to_string(getpid()) + ".py";
     {
         std::ofstream pf(py_path, std::ios::trunc);
         pf << "import json,struct,sys\n"

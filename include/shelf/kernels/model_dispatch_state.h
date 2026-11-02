@@ -5,14 +5,14 @@
 #include <shelf/inference/state/sequence_slot_pool.h>
 #include <shelf/inference/state/gdn_state_pool.h>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
 struct ModelDispatchStateView {
-    ::ps::state::SequenceBlockTableDeviceView block_table{};
-    ::ps::state::GdnStatePoolDeviceView gdn{};
-    ::ps::state::PagedKVPoolBF16View kv_bf16{};
-    ::ps::state::PagedKVPoolFP8View kv_fp8{};
+    ::shelf::state::SequenceBlockTableDeviceView block_table{};
+    ::shelf::state::GdnStatePoolDeviceView gdn{};
+    ::shelf::state::PagedKVPoolBF16View kv_bf16{};
+    ::shelf::state::PagedKVPoolFP8View kv_fp8{};
     uint32_t kv_dtype = 0;
 };
 

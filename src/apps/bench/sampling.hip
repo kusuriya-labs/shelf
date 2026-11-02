@@ -19,10 +19,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using DT = ::shelf::runtime::ValueDType;
 
 struct Options {
     std::string variant = "partitioned";
@@ -107,7 +107,7 @@ struct Env {
     ~Env() {
         for (auto* q : {logits, sampling, out, bc, vals, scratch, err, partials, attempts,
                         top_ids, top_vals, topk_scratch, active})
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
 };
 
@@ -134,12 +134,12 @@ bool build_env(Env& e, const Options& o) {
     e.outputs = o.outputs;
     const size_t n = (size_t)o.outputs * o.vocab;
     if (hipMalloc(&e.logits, n * 4) != hipSuccess) return false;
-    if (hipMalloc(&e.sampling, sizeof(::ps::runtime::DeviceSamplingParams) * o.outputs) !=
+    if (hipMalloc(&e.sampling, sizeof(::shelf::runtime::DeviceSamplingParams) * o.outputs) !=
         hipSuccess)
         return false;
     if (hipMalloc(&e.attempts, sizeof(uint32_t) * o.outputs) != hipSuccess) return false;
     if (hipMalloc(&e.out, (size_t)o.outputs * 4) != hipSuccess) return false;
-    if (hipMalloc(&e.bc, sizeof(::ps::runtime::DeviceBatchContext)) != hipSuccess)
+    if (hipMalloc(&e.bc, sizeof(::shelf::runtime::DeviceBatchContext)) != hipSuccess)
         return false;
     if (hipMalloc(&e.vals, sizeof(V) * 2) != hipSuccess) return false;
     if (hipMalloc(&e.scratch, (size_t)2048 * 4) != hipSuccess) return false;
@@ -149,15 +149,15 @@ bool build_env(Env& e, const Options& o) {
     const bool radix_variant = o.variant == "stochastic-radix";
     if (radix_variant) {
         const uint32_t top_k =
-            o.top_k > 0u && o.top_k <= ::ps::kernel::kSamplingMaxTopK
+            o.top_k > 0u && o.top_k <= ::shelf::kernel::kSamplingMaxTopK
                 ? o.top_k
-                : ::ps::kernel::kSamplingMaxTopK;
+                : ::shelf::kernel::kSamplingMaxTopK;
         if (hipMalloc(&e.top_ids, (size_t)o.outputs * top_k * 4) != hipSuccess) return false;
         if (hipMalloc(&e.top_vals, (size_t)o.outputs * top_k * 4) != hipSuccess)
             return false;
-        const uint32_t partitions = ::ps::kernel::dflash2_radix_default_partitions(o.vocab);
+        const uint32_t partitions = ::shelf::kernel::dflash2_radix_default_partitions(o.vocab);
         const size_t radix_bytes =
-            ::ps::kernel::dflash2_radix_topn_scratch_bytes(o.outputs, partitions, o.vocab);
+            ::shelf::kernel::dflash2_radix_topn_scratch_bytes(o.outputs, partitions, o.vocab);
         if (hipMalloc(&e.topk_scratch, radix_bytes) != hipSuccess) return false;
         if (hipMalloc(&e.active, (size_t)o.outputs * 4) != hipSuccess) return false;
     }
@@ -167,7 +167,7 @@ bool build_env(Env& e, const Options& o) {
     if (hipMemcpy(e.logits, l.data(), n * 4, hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    std::vector<::ps::runtime::DeviceSamplingParams> sp(o.outputs);
+    std::vector<::shelf::runtime::DeviceSamplingParams> sp(o.outputs);
     const bool stochastic_variant =
         o.variant == "stochastic" || o.variant == "stochastic-rejection" ||
         o.variant == "stochastic-radix" || (o.variant == "correctness" && o.temperature > 0.0f);
@@ -176,7 +176,7 @@ bool build_env(Env& e, const Options& o) {
         uint8_t mode = sample_mode;
         if (o.flags == "none") mode = 0;
         else if (o.flags == "mixed") mode = (m % 2) ? 0 : sample_mode;
-        sp[m] = ::ps::runtime::DeviceSamplingParams{};
+        sp[m] = ::shelf::runtime::DeviceSamplingParams{};
         sp[m].seed = o.seed;
         sp[m].sample_index = o.sample_index + m;
         sp[m].temperature = o.temperature;
@@ -185,33 +185,33 @@ bool build_env(Env& e, const Options& o) {
         sp[m].mode = mode;
     }
     if (hipMemcpy(e.sampling, sp.data(),
-                  sizeof(::ps::runtime::DeviceSamplingParams) * o.outputs,
+                  sizeof(::shelf::runtime::DeviceSamplingParams) * o.outputs,
                   hipMemcpyHostToDevice) != hipSuccess)
         return false;
-    ps::gpu::discard_cleanup_result(hipMemset(e.attempts, 0, sizeof(uint32_t) * o.outputs));
+    shelf::gpu::discard_cleanup_result(hipMemset(e.attempts, 0, sizeof(uint32_t) * o.outputs));
 
-    ::ps::runtime::DeviceBatchContext hbc{};
+    ::shelf::runtime::DeviceBatchContext hbc{};
     hbc.actual_rows = o.outputs;
     hbc.num_requests = o.outputs;
     hbc.num_outputs = o.outputs;
-    hbc.output_sampling_params = (::ps::runtime::DeviceSamplingParams*)e.sampling;
+    hbc.output_sampling_params = (::shelf::runtime::DeviceSamplingParams*)e.sampling;
     if (hipMemcpy(e.bc, &hbc, sizeof(hbc), hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
     auto* vals = (V*)e.vals;
     vals[0] = V{};
     vals[0].logical_value = 1;
-    vals[0].storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    vals[0].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     vals[0].dtype = DT::F32;
-    vals[0].row_domain = ::ps::runtime::ValueRowDomain::OUTPUT_ROWS;
+    vals[0].row_domain = ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS;
     vals[0].feature_count = o.vocab;
     vals[0].row_stride = o.vocab;
     vals[0].offset = (uint64_t)(uintptr_t)e.logits;
     vals[1] = V{};
     vals[1].logical_value = 2;
-    vals[1].storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    vals[1].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     vals[1].dtype = DT::I32;
-    vals[1].row_domain = ::ps::runtime::ValueRowDomain::OUTPUT_ROWS;
+    vals[1].row_domain = ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS;
     vals[1].feature_count = 1;
     vals[1].row_stride = 4;
     vals[1].offset = (uint64_t)(uintptr_t)e.out;
@@ -223,7 +223,7 @@ bool build_env(Env& e, const Options& o) {
     e.prog.weight_table = nullptr;
     e.prog.weight_slot_count = 0;
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::SAMPLING;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::SAMPLING;
     e.binding.input_slots[0] = 1;
     e.binding.output_slots[0] = 2;
     e.binding.input_count = 1;
@@ -233,49 +233,49 @@ bool build_env(Env& e, const Options& o) {
 }
 
 hipError_t launch_correctness(const Env& e, hipStream_t s) {
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.prog, e.binding, (::ps::runtime::DeviceBatchContext*)e.bc, sv,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.prog, e.binding, (::shelf::runtime::DeviceBatchContext*)e.bc, sv,
         (float*)e.scratch, (uint32_t*)e.err, s);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
 }
 
 hipError_t launch_single(const Env& e, hipStream_t s) {
-    ::ps::kernel::ArgmaxF32Args a;
+    ::shelf::kernel::ArgmaxF32Args a;
     a.logits = (const float*)e.logits;
-    a.sampling = (const ::ps::runtime::DeviceSamplingParams*)e.sampling;
+    a.sampling = (const ::shelf::runtime::DeviceSamplingParams*)e.sampling;
     a.sampled_tokens = (int32_t*)e.out;
     a.outputs = e.outputs;
     a.vocab_size = e.vocab;
     a.logits_row_stride = e.vocab;
-    return ::ps::kernel::launch_argmax_f32_single(a, s);
+    return ::shelf::kernel::launch_argmax_f32_single(a, s);
 }
 
 hipError_t launch_stochastic(const Env& e, hipStream_t s) {
-    ::ps::kernel::StochasticSamplingF32Args a;
+    ::shelf::kernel::StochasticSamplingF32Args a;
     a.logits = (const float*)e.logits;
-    a.sampling = (const ::ps::runtime::DeviceSamplingParams*)e.sampling;
+    a.sampling = (const ::shelf::runtime::DeviceSamplingParams*)e.sampling;
     a.sampled_tokens = (int32_t*)e.out;
     a.outputs = e.outputs;
     a.vocab_size = e.vocab;
     a.logits_row_stride = e.vocab;
     a.error_word = (uint32_t*)e.err;
     a.attempts_out = (uint32_t*)e.attempts;
-    return ::ps::kernel::launch_stochastic_sampling_f32_singleblock(a, s);
+    return ::shelf::kernel::launch_stochastic_sampling_f32_singleblock(a, s);
 }
 
 hipError_t launch_partitioned(const Env& e, uint32_t partitions, hipStream_t s) {
-    ::ps::kernel::ArgmaxF32Args a;
+    ::shelf::kernel::ArgmaxF32Args a;
     a.logits = (const float*)e.logits;
-    a.sampling = (const ::ps::runtime::DeviceSamplingParams*)e.sampling;
+    a.sampling = (const ::shelf::runtime::DeviceSamplingParams*)e.sampling;
     a.sampled_tokens = (int32_t*)e.out;
     a.outputs = e.outputs;
     a.vocab_size = e.vocab;
     a.logits_row_stride = e.vocab;
-    return ::ps::kernel::launch_argmax_f32_partitioned(
-        a, (::ps::kernel::ArgMaxPair*)e.partials, e.outputs * partitions, partitions, s);
+    return ::shelf::kernel::launch_argmax_f32_partitioned(
+        a, (::shelf::kernel::ArgMaxPair*)e.partials, e.outputs * partitions, partitions, s);
 }
 
 hipError_t launch_stochastic_radix(const Env& e, const Options& o, hipStream_t s) {
@@ -283,19 +283,19 @@ hipError_t launch_stochastic_radix(const Env& e, const Options& o, hipStream_t s
         e.active == nullptr)
         return hipErrorInvalidValue;
     const uint32_t top_k =
-        o.top_k > 0u && o.top_k <= ::ps::kernel::kSamplingMaxTopK
+        o.top_k > 0u && o.top_k <= ::shelf::kernel::kSamplingMaxTopK
             ? o.top_k
-            : ::ps::kernel::kSamplingMaxTopK;
-    const uint32_t partitions = ::ps::kernel::dflash2_radix_default_partitions(e.vocab);
+            : ::shelf::kernel::kSamplingMaxTopK;
+    const uint32_t partitions = ::shelf::kernel::dflash2_radix_default_partitions(e.vocab);
     const size_t radix_bytes =
-        ::ps::kernel::dflash2_radix_topn_scratch_bytes(e.outputs, partitions, e.vocab);
-    hipError_t err = ::ps::kernel::launch_dflash2_radix_topn(
+        ::shelf::kernel::dflash2_radix_topn_scratch_bytes(e.outputs, partitions, e.vocab);
+    hipError_t err = ::shelf::kernel::launch_dflash2_radix_topn(
         (const float*)e.logits, e.outputs, e.vocab, e.vocab, top_k, (int32_t*)e.top_ids,
         (float*)e.top_vals, partitions, e.topk_scratch, radix_bytes, s);
     if (err != hipSuccess) return err;
-    ::ps::kernel::StochasticTopKSamplingArgs a;
+    ::shelf::kernel::StochasticTopKSamplingArgs a;
     a.logits = (const float*)e.logits;
-    a.sampling = (const ::ps::runtime::DeviceSamplingParams*)e.sampling;
+    a.sampling = (const ::shelf::runtime::DeviceSamplingParams*)e.sampling;
     a.sampled_tokens = (int32_t*)e.out;
     a.top_ids = (const int32_t*)e.top_ids;
     a.top_logits = (const float*)e.top_vals;
@@ -305,7 +305,7 @@ hipError_t launch_stochastic_radix(const Env& e, const Options& o, hipStream_t s
     a.top_k = top_k;
     a.error_word = (uint32_t*)e.err;
     a.active_count_out = (uint32_t*)e.active;
-    return ::ps::kernel::launch_stochastic_topk_sampling_f32(a, s);
+    return ::shelf::kernel::launch_stochastic_topk_sampling_f32(a, s);
 }
 
 }  // namespace
@@ -396,8 +396,8 @@ int run_sampling(int argc, char** argv) {
         if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
         per.push_back(ms * 1000.0 / (double)o.launches);
     }
-    ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-    ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+    shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+    shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
     if (per.empty()) return 1;
     const double mn = percentile(per, 0.0);
     const double p50 = percentile(per, 0.5);
@@ -451,6 +451,6 @@ int run_sampling(int argc, char** argv) {
             o.logit_pattern.c_str(), o.temperature, o.top_p, o.top_k, p50, p95, mean,
             avg_attempts);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return 0;
 }

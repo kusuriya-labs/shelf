@@ -5,7 +5,7 @@
 
 #include "tp_transport_internal.h"
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 TpBarrierGroup::TpBarrierGroup(int rank_count, std::vector<int> devices,
                                TpTransport* transport)
@@ -36,7 +36,7 @@ Status TpBarrierGroup::initialize() {
                                         __LINE__);
     }
     for (int r = 0; r < rank_count_; ++r) {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[static_cast<std::size_t>(r)]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[static_cast<std::size_t>(r)]);
         if (!scope.ok()) return scope.status();
         hipEvent_t event = nullptr;
         const hipError_t e = hipEventCreate(&event);
@@ -52,9 +52,9 @@ Status TpBarrierGroup::initialize() {
 void TpBarrierGroup::shutdown() noexcept {
     for (std::size_t r = 0; r < ready_.size(); ++r) {
         if (ready_[r] == nullptr) continue;
-        auto scope = ps::gpu::ScopedDevice::create(devices_[r]);
+        auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (scope.ok()) {
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ready_[r]));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ready_[r]));
         }
         ready_[r] = nullptr;
     }
@@ -148,4 +148,4 @@ Status TpBarrierGroup::peer_write_target(int rank, std::size_t bytes, void*& pee
     return transport_->peer_write_target(rank, bytes, peer_out);
 }
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

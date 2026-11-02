@@ -1,12 +1,12 @@
 #include <shelf/inference/execution/selectors/rope_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct RopeRule {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
     uint32_t features;
     uint32_t head_dim;
     uint32_t rotary_dim;
@@ -17,15 +17,15 @@ struct RopeRule {
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 
 constexpr RopeRule kRules[] = {
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       1024u, 256u, 64u, 1u, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       4096u, 256u, 64u, 1u, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       6144u, 256u, 64u, 1u, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       3072u, 256u, 64u, 1u, kMeasuredMaxRows },
-    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       512u, 256u, 64u, 1u, kMeasuredMaxRows },
 };
 
@@ -47,4 +47,4 @@ RopeImplementation select_rope_implementation(const RopeSelectorInput& in) {
     return RopeImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

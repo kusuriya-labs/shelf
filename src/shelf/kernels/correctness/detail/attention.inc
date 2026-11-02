@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_rope(
     ModelDispatchEnv& env, const DispatchBinding& b) {
@@ -64,7 +64,7 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
         return ProgramStatus::INVALID_PROGRAM;
     const auto* sb = find_state(env, b.descriptor_slot);
     if (sb == nullptr ||
-        sb->kind != static_cast<uint8_t>(ps::runtime::PrimitiveStateKind::KV_CACHE))
+        sb->kind != static_cast<uint8_t>(shelf::runtime::PrimitiveStateKind::KV_CACHE))
         return ProgramStatus::INVALID_BINDING;
     const uint32_t layer = sb->state_index;
     const auto& bt = env.qwen_state->block_table;
@@ -175,7 +175,7 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
         return ProgramStatus::INVALID_PROGRAM;
     const auto* sb = find_state(env, b.descriptor_slot);
     if (sb == nullptr ||
-        sb->kind != static_cast<uint8_t>(ps::runtime::PrimitiveStateKind::KV_CACHE))
+        sb->kind != static_cast<uint8_t>(shelf::runtime::PrimitiveStateKind::KV_CACHE))
         return ProgramStatus::INVALID_BINDING;
     const uint32_t layer = sb->state_index;
     const auto& bt = env.qwen_state->block_table;
@@ -284,7 +284,7 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
                     const float v_scale = kv.v_scale_pool[si];
                     float sc = 0.f;
                     for (uint32_t i = 0; i < head_dim; ++i)
-                        sc += qv[i] * ps::quantization::codec::device::e4m3_decode_f32(
+                        sc += qv[i] * shelf::quantization::codec::device::e4m3_decode_f32(
                                           kv.k_pool[kb + i]);
                     sc *= k_scale * scale;
                     if (pass == 0) {
@@ -294,7 +294,7 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
                         sum_exp += pv;
                         const float w = pv * v_scale;
                         for (uint32_t i = 0; i < head_dim; ++i)
-                            acc[i] += w * ps::quantization::codec::device::e4m3_decode_f32(
+                            acc[i] += w * shelf::quantization::codec::device::e4m3_decode_f32(
                                               kv.v_pool[kb + i]);
                     }
                 }
@@ -308,4 +308,4 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

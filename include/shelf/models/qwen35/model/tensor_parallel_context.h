@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 
 struct Qwen35TensorParallelContext {
     std::uint32_t tp_size = 1;

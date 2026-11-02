@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::qwen35::dflash2 {
+namespace shelf::qwen35::dflash2 {
 
 struct DFlash2ContextState;
 
@@ -21,8 +21,8 @@ struct DFlash2ExecutorConfig {
     uint32_t max_rows = 0;
     uint32_t max_batch_rows = 0;
     uint32_t max_context_rows = 0;
-    const ps::weights::MatrixWeight* target_lm_head = nullptr;
-    const ps::weights::MatrixWeight* target_embed_tokens = nullptr;
+    const shelf::weights::MatrixWeight* target_lm_head = nullptr;
+    const shelf::weights::MatrixWeight* target_embed_tokens = nullptr;
 };
 
 struct DFlash2Executor {
@@ -68,8 +68,8 @@ struct DFlash2Executor {
     gpu::Tensor backbone_hidden_b;
     gpu::Tensor backbone_output;
 
-    const ps::weights::MatrixWeight* target_lm_head = nullptr;
-    const ps::weights::MatrixWeight* target_embed_tokens = nullptr;
+    const shelf::weights::MatrixWeight* target_lm_head = nullptr;
+    const shelf::weights::MatrixWeight* target_embed_tokens = nullptr;
     uint32_t draft_rows = 0;
 
     gpu::Tensor noise_token_ids;
@@ -100,7 +100,7 @@ Result<DFlash2Executor> create_dflash2_executor(
 Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept;
 
 Status dflash2_linear(
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     const bf16_t* input,
     uint32_t input_row_stride,
     bf16_t* output,

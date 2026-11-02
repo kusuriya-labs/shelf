@@ -107,7 +107,7 @@ def main() -> int:
         print(f"model dir not found: {model_dir()}", file=sys.stderr)
         return 2
 
-    base = Path(tempfile.mkdtemp(prefix="ps-opencode-"))
+    base = Path(tempfile.mkdtemp(prefix="shelf-opencode-"))
     request_log = base / "requests.txt"
     token_log = base / "tokens.txt"
     compute_log = base / "compute.log"

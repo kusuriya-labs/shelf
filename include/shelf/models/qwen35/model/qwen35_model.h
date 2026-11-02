@@ -8,7 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <string>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 
 class Qwen35Model final {
 public:
@@ -59,4 +59,4 @@ private:
     Qwen35TextConfig text_config_;
 };
 
-} // namespace ps::qwen35
+} // namespace shelf::qwen35

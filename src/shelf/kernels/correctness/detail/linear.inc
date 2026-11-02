@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_linear_weight(
     ModelDispatchEnv& env, const DispatchBinding& b) {
@@ -126,13 +126,13 @@ __device__ __forceinline__ ProgramStatus exec_linear_block_scaled(
             for (uint32_t j = 0; j < 32u; ++j) {
                 const uint32_t kc = ib * 32u + j;
                 const size_t off = static_cast<size_t>(kc >> 6) *
-                                       ::ps::quantization::fp8::kFragBlockBytes +
-                                   ::ps::quantization::fp8::fp8_frag_offset(o_slot, kc & 63u);
+                                       ::shelf::quantization::fp8::kFragBlockBytes +
+                                   ::shelf::quantization::fp8::fp8_frag_offset(o_slot, kc & 63u);
                 const size_t aoff = static_cast<size_t>(kc >> 6) *
-                                        ::ps::quantization::fp8::kFragBlockBytes +
-                                    ::ps::quantization::fp8::fp8_frag_offset(m_slot, kc & 63u);
-                p += ::ps::quantization::codec::device::e4m3_decode_f32(wtile[off]) *
-                     ::ps::quantization::codec::device::e4m3_decode_f32(atile[aoff]);
+                                        ::shelf::quantization::fp8::kFragBlockBytes +
+                                    ::shelf::quantization::fp8::fp8_frag_offset(m_slot, kc & 63u);
+                p += ::shelf::quantization::codec::device::e4m3_decode_f32(wtile[off]) *
+                     ::shelf::quantization::codec::device::e4m3_decode_f32(atile[aoff]);
             }
             acc += p * ws * as;
         }
@@ -191,7 +191,7 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     const uint32_t groups = (kp + 127u) / 128u;
     const size_t row_bytes =
         static_cast<size_t>(in.row_stride) *
-        ::ps::runtime::value_dtype_bytes(in.dtype);
+        ::shelf::runtime::value_dtype_bytes(in.dtype);
     for (uint32_t m = global_tid(env); m < rows; m += stride) {
         const void* xrow = static_cast<const uint8_t*>(xin) +
             static_cast<size_t>(m) * row_bytes;
@@ -219,10 +219,10 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
                     v = std::isfinite(x) ? x : 0.f;
                 }
                 codes[static_cast<size_t>(i >> 6) *
-                          ::ps::quantization::fp8::kFragBlockBytes +
-                      ::ps::quantization::fp8::fp8_frag_offset(m_slot, i & 63u)] =
+                          ::shelf::quantization::fp8::kFragBlockBytes +
+                      ::shelf::quantization::fp8::fp8_frag_offset(m_slot, i & 63u)] =
                     scale > 0.f
-                        ? ::ps::quantization::codec::device::e4m3_encode_u8(v * inv)
+                        ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
                         : 0u;
             }
         }
@@ -230,4 +230,4 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

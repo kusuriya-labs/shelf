@@ -27,11 +27,11 @@ void check(bool cond, const char* name) {
     }
 }
 
-ps::bf16_t f32_to_bf16(float f) {
+shelf::bf16_t f32_to_bf16(float f) {
     uint32_t ui;
     std::memcpy(&ui, &f, 4);
     uint16_t bf = static_cast<uint16_t>((ui + 0x8000U) >> 16);
-    return ps::bf16_t{bf};
+    return shelf::bf16_t{bf};
 }
 
 std::vector<uint16_t> make_input(uint32_t rows, uint32_t full_k, uint32_t pattern) {
@@ -64,17 +64,17 @@ struct DeviceOut {
 };
 
 bool run_local(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t full_k,
-               uint32_t k, uint32_t col_off, ps::gpu::GpuArena& arena, hipStream_t stream,
+               uint32_t k, uint32_t col_off, shelf::gpu::GpuArena& arena, hipStream_t stream,
                DeviceOut& out, std::string& err) {
-    const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
+    const auto layout = ::shelf::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     auto ws_res = arena.allocate_aligned(layout.total_bytes, 256);
-    auto in_res = arena.allocate_aligned(h_in.size() * sizeof(ps::bf16_t), 256);
+    auto in_res = arena.allocate_aligned(h_in.size() * sizeof(shelf::bf16_t), 256);
     if (!ws_res.ok() || !in_res.ok()) {
         err = "alloc";
         return false;
     }
     uint8_t* ws = static_cast<uint8_t*>(ws_res.release().data());
-    ps::bf16_t* in = static_cast<ps::bf16_t*>(in_res.release().data());
+    shelf::bf16_t* in = static_cast<shelf::bf16_t*>(in_res.release().data());
     if (hipMemcpy(in, h_in.data(), h_in.size() * 2, hipMemcpyHostToDevice) != hipSuccess) {
         err = "h2d";
         return false;
@@ -85,7 +85,7 @@ bool run_local(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t full_k
     }
     uint8_t* codes = ws + layout.codes_offset;
     float* scales = reinterpret_cast<float*>(ws + layout.scales_offset);
-    const hipError_t herr = ps::kernel::launch_activation_quantize_fp8_finegrained(
+    const hipError_t herr = shelf::kernel::launch_activation_quantize_fp8_finegrained(
         in + col_off, codes, scales, rows, k, k, full_k,
         layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream, nullptr);
     if (herr != hipSuccess) {
@@ -110,12 +110,12 @@ bool run_local(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t full_k
 
 const size_t code_pos(uint32_t code_stride, uint32_t m, uint32_t i) {
     return static_cast<size_t>(m >> 4) * static_cast<size_t>(code_stride) * 16u
-        + static_cast<size_t>(i >> 6) * ps::quantization::fp8::kFragBlockBytes
-        + ps::quantization::fp8::fp8_frag_offset(m & 15u, i & 63u);
+        + static_cast<size_t>(i >> 6) * shelf::quantization::fp8::kFragBlockBytes
+        + shelf::quantization::fp8::fp8_frag_offset(m & 15u, i & 63u);
 }
 
 bool compare_split(uint32_t rows, uint32_t full_k, uint32_t pattern,
-                   ps::gpu::GpuArena& arena, hipStream_t stream) {
+                   shelf::gpu::GpuArena& arena, hipStream_t stream) {
     const uint32_t local_k = full_k / 2u;
     const uint32_t groups_total = full_k / 128u;
     const uint32_t groups_local = local_k / 128u;
@@ -141,8 +141,8 @@ bool compare_split(uint32_t rows, uint32_t full_k, uint32_t pattern,
         return false;
     }
 
-    const auto layout1 = ::ps::runtime::Int8ActivationWorkspaceLayout::make(full_k, rows);
-    const auto layout2 = ::ps::runtime::Int8ActivationWorkspaceLayout::make(local_k, rows);
+    const auto layout1 = ::shelf::runtime::Int8ActivationWorkspaceLayout::make(full_k, rows);
+    const auto layout2 = ::shelf::runtime::Int8ActivationWorkspaceLayout::make(local_k, rows);
 
     bool scales_ok = true;
     for (uint32_t m = 0; m < rows && scales_ok; ++m) {
@@ -228,12 +228,12 @@ int main() {
     if (hipSetDevice(0) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
-    auto arena_result = ps::gpu::GpuArena::create(0, 1536u * 1024u * 1024u);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1536u * 1024u * 1024u);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
     const uint32_t pair_k[] = {17408u, 6144u};
     const uint32_t row_list[] = {1u, 16u, 32u};
@@ -247,7 +247,7 @@ int main() {
         }
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("Results: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

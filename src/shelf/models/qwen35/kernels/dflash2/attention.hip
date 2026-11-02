@@ -5,9 +5,9 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
-using namespace ::ps::kernel::detail;
+using namespace ::shelf::kernel::detail;
 
 constexpr uint32_t kAttentionThreads = 128u;
 constexpr uint32_t kAttentionSharedBytesLimit = 32u * 1024u;

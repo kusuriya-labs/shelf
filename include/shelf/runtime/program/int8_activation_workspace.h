@@ -2,7 +2,7 @@
 #include <shelf/core/memory/alignment.h>
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct Int8ActivationWorkspaceLayout {
     uint64_t codes_offset = 0;
@@ -30,16 +30,16 @@ struct Int8ActivationWorkspaceLayout {
         l.k_padded = k_padded_for(k);
         l.max_rows = rows;
         l.code_row_stride_bytes = static_cast<uint32_t>(
-            ps::gpu::align_up_16(l.k_padded));
+            shelf::gpu::align_up_16(l.k_padded));
         const uint32_t groups = (l.k_padded + scale_group() - 1u) / scale_group();
         l.scale_row_stride_bytes = static_cast<uint32_t>(
-            ps::gpu::align_up_16(
+            shelf::gpu::align_up_16(
                 static_cast<uint64_t>(groups) * scale_element_bytes()));
         l.codes_offset = 0;
         const uint64_t rows_padded =
             (static_cast<uint64_t>(l.max_rows) + 15ull) & ~15ull;
         const uint64_t codes_bytes = rows_padded * l.code_row_stride_bytes;
-        l.scales_offset = ps::gpu::align_up_16(codes_bytes);
+        l.scales_offset = shelf::gpu::align_up_16(codes_bytes);
         l.total_bytes = l.scales_offset +
             static_cast<uint64_t>(l.max_rows) * l.scale_row_stride_bytes;
         return l;

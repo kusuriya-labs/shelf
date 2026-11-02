@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace ps::gpu {
+namespace shelf::gpu {
 
 // Shelf targets gfx1201 (AMD Radeon AI PRO R9700) exclusively. The
 // architecture is a build/startup contract: it is validated once when the
@@ -16,4 +16,4 @@ inline bool is_gfx1201(uint32_t device = 0) {
     return std::strcmp(p.gcnArchName, "gfx1201") == 0;
 }
 
-}  // namespace ps::gpu
+}  // namespace shelf::gpu

@@ -1,12 +1,12 @@
 #include <shelf/inference/execution/selectors/l2_normalize_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct L2NormalizeRule {
-    ::ps::runtime::ValueDType input_dtype;
-    ::ps::runtime::ValueDType output_dtype;
+    ::shelf::runtime::ValueDType input_dtype;
+    ::shelf::runtime::ValueDType output_dtype;
     uint32_t features;
     uint32_t group_size;
     uint32_t min_rows;
@@ -14,9 +14,9 @@ struct L2NormalizeRule {
 };
 
 constexpr L2NormalizeRule kRules[] = {
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       2048u, 128u, 1u, kOptimizedMaxRows },
-    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       1024u, 128u, 1u, kOptimizedMaxRows },
 };
 
@@ -38,4 +38,4 @@ L2NormalizeImplementation select_l2_normalize_implementation(
     return L2NormalizeImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct GdnRecurrenceArgs {
     const float* q = nullptr;
@@ -21,7 +21,7 @@ struct GdnRecurrenceArgs {
     fp16_t* recurrent_state = nullptr;
     float* output = nullptr;
 
-    const ::ps::runtime::DeviceRequestDescriptor* requests = nullptr;
+    const ::shelf::runtime::DeviceRequestDescriptor* requests = nullptr;
 
     uint32_t num_requests = 0;
     uint32_t actual_rows = 0;
@@ -125,4 +125,4 @@ launch_gdn_recurrence_f32_wmma_commit(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

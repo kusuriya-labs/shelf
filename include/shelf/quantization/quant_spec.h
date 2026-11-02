@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 enum class QuantDomain : uint8_t {
     Weight,

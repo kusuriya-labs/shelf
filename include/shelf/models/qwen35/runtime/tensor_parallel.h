@@ -24,7 +24,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
@@ -44,7 +44,7 @@ struct TpRankRuntimeConfig {
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     std::size_t working_set_reserve_bytes = 0;
-    const ::ps::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
+    const ::shelf::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
     std::size_t drafter_weights_bytes = 0;
     std::uint32_t drafter_drafts = 0;
     std::uint32_t drafter_sessions = 0;
@@ -118,7 +118,7 @@ struct TpCoordinatorConfig {
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     std::size_t working_set_reserve_bytes = 0;
-    const ::ps::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
+    const ::shelf::qwen35::dflash2::DFlash2Config* drafter_config = nullptr;
     std::size_t drafter_weights_bytes = 0;
     std::uint32_t drafter_drafts = 0;
     std::uint32_t drafter_sessions = 0;
@@ -159,7 +159,7 @@ public:
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch,
                                             const ExecuteBatchOptions* per_rank) override;
 
-    Status draft_sum(const ps::runtime::TpSumTarget& target, hipStream_t stream, int rank);
+    Status draft_sum(const shelf::runtime::TpSumTarget& target, hipStream_t stream, int rank);
 
     void abort(const Status& reason) noexcept;
     std::string debug_report() const;
@@ -195,8 +195,8 @@ private:
 
     std::vector<int> devices_;
     std::vector<std::unique_ptr<TpRankRuntime>> ranks_;
-    std::unique_ptr<::ps::runtime::TpTransport> transport_;
-    std::unique_ptr<::ps::runtime::TpBarrierGroup> barrier_group_;
+    std::unique_ptr<::shelf::runtime::TpTransport> transport_;
+    std::unique_ptr<::shelf::runtime::TpBarrierGroup> barrier_group_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;
 };

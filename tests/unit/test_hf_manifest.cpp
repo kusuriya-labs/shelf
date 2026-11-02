@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
 static int passed = 0;
 static int failed = 0;
@@ -52,7 +52,7 @@ static std::vector<uint8_t> pattern_bytes(uint64_t n, uint32_t seed) {
 static std::vector<uint8_t> bf16_bytes(const std::vector<float>& values) {
     std::vector<uint8_t> out(values.size() * 2u);
     for (std::size_t i = 0; i < values.size(); ++i) {
-        const uint16_t h = ps::f32_to_bf16_rne(values[i]);
+        const uint16_t h = shelf::f32_to_bf16_rne(values[i]);
         std::memcpy(out.data() + i * 2, &h, 2);
     }
     return out;

@@ -1,6 +1,6 @@
 #include <shelf/inference/state/gdn_state_pool.h>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 Result<GdnStatePool> GdnStatePool::create(

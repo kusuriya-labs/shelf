@@ -6,14 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 struct HostExecutionContext;
 
 Result<OptimizedLaunchResult> try_launch_elementwise(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

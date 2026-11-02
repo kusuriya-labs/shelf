@@ -27,48 +27,48 @@ bool one_case(uint32_t outputs, uint32_t V, uint32_t seed, const char* label) {
 
     float* d_logits = nullptr;
     int32_t* d_tokens = nullptr;
-    ps::kernel::ArgMaxTop2* d_top2 = nullptr;
+    shelf::kernel::ArgMaxTop2* d_top2 = nullptr;
     if (hipMalloc(&d_logits, logits.size() * sizeof(float)) != hipSuccess) return false;
     if (hipMalloc(&d_tokens, outputs * sizeof(int32_t)) != hipSuccess) return false;
-    if (hipMalloc(&d_top2, outputs * sizeof(ps::kernel::ArgMaxTop2)) != hipSuccess) return false;
+    if (hipMalloc(&d_top2, outputs * sizeof(shelf::kernel::ArgMaxTop2)) != hipSuccess) return false;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return false;
     if (hipMemcpy(d_logits, logits.data(), logits.size() * sizeof(float),
                   hipMemcpyHostToDevice) != hipSuccess) {
         return false;
     }
-    std::vector<::ps::runtime::DeviceSamplingParams> sampling(outputs);
+    std::vector<::shelf::runtime::DeviceSamplingParams> sampling(outputs);
     for (auto& sp : sampling) {
-        sp = ::ps::runtime::DeviceSamplingParams{};
+        sp = ::shelf::runtime::DeviceSamplingParams{};
         sp.mode = 1u;
     }
-    ::ps::runtime::DeviceSamplingParams* d_flags = nullptr;
-    if (hipMalloc(&d_flags, sizeof(::ps::runtime::DeviceSamplingParams) * outputs) != hipSuccess)
+    ::shelf::runtime::DeviceSamplingParams* d_flags = nullptr;
+    if (hipMalloc(&d_flags, sizeof(::shelf::runtime::DeviceSamplingParams) * outputs) != hipSuccess)
         return false;
     if (hipMemcpy(d_flags, sampling.data(),
-                  sizeof(::ps::runtime::DeviceSamplingParams) * outputs,
+                  sizeof(::shelf::runtime::DeviceSamplingParams) * outputs,
                   hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    ps::kernel::ArgmaxF32Args args{};
+    shelf::kernel::ArgmaxF32Args args{};
     args.logits = d_logits;
     args.sampling = d_flags;
     args.sampled_tokens = d_tokens;
     args.outputs = outputs;
     args.vocab_size = V;
     args.logits_row_stride = V;
-    if (ps::kernel::launch_argmax_f32_single(args, stream) != hipSuccess) return false;
-    if (ps::kernel::launch_argmax_f32_top2(d_logits, d_flags, d_top2, outputs, V, V, stream) !=
+    if (shelf::kernel::launch_argmax_f32_single(args, stream) != hipSuccess) return false;
+    if (shelf::kernel::launch_argmax_f32_top2(d_logits, d_flags, d_top2, outputs, V, V, stream) !=
         hipSuccess) {
         return false;
     }
     if (hipStreamSynchronize(stream) != hipSuccess) return false;
 
     std::vector<int32_t> got_tokens(outputs);
-    std::vector<ps::kernel::ArgMaxTop2> got_top2(outputs);
+    std::vector<shelf::kernel::ArgMaxTop2> got_top2(outputs);
     if (hipMemcpy(got_tokens.data(), d_tokens, outputs * sizeof(int32_t),
                   hipMemcpyDeviceToHost) != hipSuccess) return false;
-    if (hipMemcpy(got_top2.data(), d_top2, outputs * sizeof(ps::kernel::ArgMaxTop2),
+    if (hipMemcpy(got_top2.data(), d_top2, outputs * sizeof(shelf::kernel::ArgMaxTop2),
                   hipMemcpyDeviceToHost) != hipSuccess) return false;
 
     bool ok = true;
@@ -124,21 +124,21 @@ bool near_tie_case(const char* label) {
     logits[700] = 3.0f;  // exact tie with token 700 > 500 -> top1 = 500
     logits[123] = 2.9999998f;
     float* d_logits = nullptr;
-    ps::kernel::ArgMaxTop2* d_top2 = nullptr;
+    shelf::kernel::ArgMaxTop2* d_top2 = nullptr;
     if (hipMalloc(&d_logits, V * sizeof(float)) != hipSuccess) return false;
-    if (hipMalloc(&d_top2, sizeof(ps::kernel::ArgMaxTop2)) != hipSuccess) return false;
+    if (hipMalloc(&d_top2, sizeof(shelf::kernel::ArgMaxTop2)) != hipSuccess) return false;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return false;
     if (hipMemcpy(d_logits, logits.data(), V * sizeof(float), hipMemcpyHostToDevice) !=
         hipSuccess) {
         return false;
     }
-    if (ps::kernel::launch_argmax_f32_top2(d_logits, nullptr, d_top2, 1u, V, V, stream) !=
+    if (shelf::kernel::launch_argmax_f32_top2(d_logits, nullptr, d_top2, 1u, V, V, stream) !=
         hipSuccess) {
         return false;
     }
     if (hipStreamSynchronize(stream) != hipSuccess) return false;
-    ps::kernel::ArgMaxTop2 got{};
+    shelf::kernel::ArgMaxTop2 got{};
     (void)hipMemcpy(&got, d_top2, sizeof(got), hipMemcpyDeviceToHost);
     bool ok = got.t1 == 500u && got.v1 == 3.0f && got.v2 == 3.0f;
     if (!ok) std::printf("  tie: t1=%u v1=%.8g v2=%.8g\n", got.t1, got.v1, got.v2);

@@ -23,7 +23,7 @@ void check(bool cond, const char* label) {
     }
 }
 
-constexpr uint32_t kHeadLimit = ps::kernel::kPagedAttentionHeadLimit;
+constexpr uint32_t kHeadLimit = shelf::kernel::kPagedAttentionHeadLimit;
 
 uint32_t rng_state = 0x1234567u;
 
@@ -83,8 +83,8 @@ void run_case(const Case& c, std::vector<float>& partials_host, std::vector<uint
                     hipMemcpyHostToDevice);
     (void)hipMemcpy(slots_dev, slots_host.data(), c.rows * sizeof(uint32_t), hipMemcpyHostToDevice);
 
-    ps::kernel::PagedAttentionCommonArgs args{};
-    args.output_dtype = ps::kernel::PagedAttentionOutputDType::F32;
+    shelf::kernel::PagedAttentionCommonArgs args{};
+    args.output_dtype = shelf::kernel::PagedAttentionOutputDType::F32;
     args.output_row_stride = output_row_stride;
     args.row_sequence_slots = slots_dev;
     args.row_positions = positions_dev;
@@ -102,7 +102,7 @@ void run_case(const Case& c, std::vector<float>& partials_host, std::vector<uint
     char label[160];
     set_qh(c.q_per_kv);
     args.output = out_a;
-    hipError_t err = ps::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev,
+    hipError_t err = shelf::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev,
                                                                         c.splits, nullptr);
     if (err != hipSuccess) {
         std::printf("FAIL: launch incumbent rows=%u splits=%u\n", c.rows, c.splits);
@@ -115,7 +115,7 @@ void run_case(const Case& c, std::vector<float>& partials_host, std::vector<uint
         if (c.q_per_kv % qh != 0u) continue;
         set_qh(qh);
         args.output = out_b;
-        err = ps::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev, c.splits,
+        err = shelf::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev, c.splits,
                                                                    nullptr);
         if (err != hipSuccess) {
             std::snprintf(label, sizeof(label), "launch qh=%u rows=%u splits=%u", qh, c.rows,
@@ -176,8 +176,8 @@ void run_zero_sum_case(uint32_t rows, uint32_t kv_heads, uint32_t q_per_kv, uint
     std::vector<float> host(static_cast<size_t>(rows) * output_row_stride, sentinel);
     (void)hipMemcpy(out_a, host.data(), host.size() * sizeof(float), hipMemcpyHostToDevice);
 
-    ps::kernel::PagedAttentionCommonArgs args{};
-    args.output_dtype = ps::kernel::PagedAttentionOutputDType::F32;
+    shelf::kernel::PagedAttentionCommonArgs args{};
+    args.output_dtype = shelf::kernel::PagedAttentionOutputDType::F32;
     args.output_row_stride = static_cast<uint32_t>(output_row_stride);
     args.output = out_a;
     args.row_sequence_slots = slots_dev;
@@ -189,7 +189,7 @@ void run_zero_sum_case(uint32_t rows, uint32_t kv_heads, uint32_t q_per_kv, uint
     args.max_sequences = 1u;
 
     set_qh(q_per_kv);
-    hipError_t err = ps::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev, splits,
+    hipError_t err = shelf::kernel::launch_attention_paged_bf16_split_reduce(args, partials_dev, splits,
                                                                         nullptr);
     char label[160];
     std::snprintf(label, sizeof(label), "zero-sum launch rows=%u splits=%u hd=%u", rows, splits,

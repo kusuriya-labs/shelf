@@ -18,11 +18,11 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using S = ::ps::runtime::DeviceStateBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using S = ::shelf::runtime::DeviceStateBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 struct Profile {
     uint32_t key_heads = 16;
@@ -110,23 +110,23 @@ double percentile(std::vector<double> v, double p) {
 }
 
 bool upload_state(void* dst, const std::vector<float>& src, size_t n) {
-    std::vector<ps::fp16_t> tmp(n);
-    for (size_t i = 0; i < n; ++i) tmp[i] = ps::f32_to_fp16(src[i]);
-    return hipMemcpy(dst, tmp.data(), n * sizeof(ps::fp16_t), hipMemcpyHostToDevice) == hipSuccess;
+    std::vector<shelf::fp16_t> tmp(n);
+    for (size_t i = 0; i < n; ++i) tmp[i] = shelf::f32_to_fp16(src[i]);
+    return hipMemcpy(dst, tmp.data(), n * sizeof(shelf::fp16_t), hipMemcpyHostToDevice) == hipSuccess;
 }
 
 hipError_t upload_state_cleanup(void* dst, const std::vector<float>& src, size_t n) {
-    std::vector<ps::fp16_t> tmp(n);
-    for (size_t i = 0; i < n; ++i) tmp[i] = ps::f32_to_fp16(src[i]);
-    return hipMemcpy(dst, tmp.data(), n * sizeof(ps::fp16_t), hipMemcpyHostToDevice);
+    std::vector<shelf::fp16_t> tmp(n);
+    for (size_t i = 0; i < n; ++i) tmp[i] = shelf::f32_to_fp16(src[i]);
+    return hipMemcpy(dst, tmp.data(), n * sizeof(shelf::fp16_t), hipMemcpyHostToDevice);
 }
 
 bool download_state(const void* src, std::vector<float>& dst, size_t n) {
-    std::vector<ps::fp16_t> tmp(n);
-    if (hipMemcpy(tmp.data(), src, n * sizeof(ps::fp16_t), hipMemcpyDeviceToHost) != hipSuccess)
+    std::vector<shelf::fp16_t> tmp(n);
+    if (hipMemcpy(tmp.data(), src, n * sizeof(shelf::fp16_t), hipMemcpyDeviceToHost) != hipSuccess)
         return false;
     dst.resize(n);
-    for (size_t i = 0; i < n; ++i) dst[i] = ps::fp16_to_f32(tmp[i]);
+    for (size_t i = 0; i < n; ++i) dst[i] = shelf::fp16_to_f32(tmp[i]);
     return true;
 }
 
@@ -156,16 +156,16 @@ struct Env {
     void* hist = nullptr;
     P prog{};
     B binding{};
-    ::ps::kernel::ModelDispatchStateView state_view{};
-    ::ps::kernel::GdnRecurrenceArgs ka{};
-    std::vector<::ps::runtime::DeviceRequestDescriptor> h_req;
+    ::shelf::kernel::ModelDispatchStateView state_view{};
+    ::shelf::kernel::GdnRecurrenceArgs ka{};
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> h_req;
     ~Env() {
         void** all = nullptr;
         (void)all;
         void* bufs[] = {q, k, v, a, b, dt_bias, a_log, state, requests, out, vals_dev, state_dev,
                         param_dev, ctx_dev, scratch, error_word, hist};
         for (auto* p : bufs)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -185,9 +185,9 @@ bool build(Env& e, uint32_t seed) {
                      &e.out, &e.vals_dev, &e.state_dev, &e.param_dev, &e.ctx_dev};
     size_t szs[] = {(size_t)rows * e.qk * 4, (size_t)rows * e.qk * 4, (size_t)rows * e.vdim * 2,
                     (size_t)rows * nvh * 2, (size_t)rows * nvh * 2, (size_t)nvh * 2, (size_t)nvh * 2,
-                    state_total * sizeof(ps::fp16_t), (size_t)nr * sizeof(::ps::runtime::DeviceRequestDescriptor),
+                    state_total * sizeof(shelf::fp16_t), (size_t)nr * sizeof(::shelf::runtime::DeviceRequestDescriptor),
                     (size_t)rows * e.vdim * 4, 6 * sizeof(V), sizeof(S),
-                    2 * sizeof(::ps::runtime::StaticParameterSlot), sizeof(::ps::runtime::DeviceBatchContext)};
+                    2 * sizeof(::shelf::runtime::StaticParameterSlot), sizeof(::shelf::runtime::DeviceBatchContext)};
     for (size_t i = 0; i < 14; ++i)
         if (hipMalloc(bufs[i], szs[i]) != hipSuccess) return false;
     if (hipMalloc(&e.scratch, (size_t)256 * 4096 * sizeof(float)) != hipSuccess) return false;
@@ -246,44 +246,44 @@ bool build(Env& e, uint32_t seed) {
 
     V vals[6];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, e.qk, e.qk, e.q, ::ps::runtime::ValueDType::F32);
-    setv(vals[1], 1, e.qk, e.qk, e.k, ::ps::runtime::ValueDType::F32);
-    setv(vals[2], 2, e.vdim, e.vdim, e.v, ::ps::runtime::ValueDType::BF16);
-    setv(vals[3], 3, nvh, nvh, e.a, ::ps::runtime::ValueDType::BF16);
-    setv(vals[4], 4, nvh, nvh, e.b, ::ps::runtime::ValueDType::BF16);
-    setv(vals[5], 5, e.vdim, e.vdim, e.out, ::ps::runtime::ValueDType::F32);
+    setv(vals[0], 0, e.qk, e.qk, e.q, ::shelf::runtime::ValueDType::F32);
+    setv(vals[1], 1, e.qk, e.qk, e.k, ::shelf::runtime::ValueDType::F32);
+    setv(vals[2], 2, e.vdim, e.vdim, e.v, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[3], 3, nvh, nvh, e.a, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[4], 4, nvh, nvh, e.b, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[5], 5, e.vdim, e.vdim, e.out, ::shelf::runtime::ValueDType::F32);
     std::memcpy(e.vals_dev, vals, 6 * sizeof(V));
 
     S st;
     st.slot = 0;
-    st.kind = (uint8_t)::ps::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE;
+    st.kind = (uint8_t)::shelf::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE;
     st.state_index = 0;
     std::memcpy(e.state_dev, &st, sizeof(S));
 
-    ::ps::runtime::StaticParameterSlot params[2];
+    ::shelf::runtime::StaticParameterSlot params[2];
     params[0].device_ptr = e.dt_bias;
     params[0].elements = nvh;
-    params[0].dtype = ::ps::runtime::ValueDType::BF16;
+    params[0].dtype = ::shelf::runtime::ValueDType::BF16;
     params[1].device_ptr = e.a_log;
     params[1].elements = nvh;
-    params[1].dtype = ::ps::runtime::ValueDType::BF16;
-    std::memcpy(e.param_dev, params, 2 * sizeof(::ps::runtime::StaticParameterSlot));
+    params[1].dtype = ::shelf::runtime::ValueDType::BF16;
+    std::memcpy(e.param_dev, params, 2 * sizeof(::shelf::runtime::StaticParameterSlot));
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = nr;
-    ctx.requests = (const ::ps::runtime::DeviceRequestDescriptor*)e.requests;
+    ctx.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)e.requests;
     std::memcpy(e.ctx_dev, &ctx, sizeof(ctx));
 
     e.prog = {};
@@ -292,11 +292,11 @@ bool build(Env& e, uint32_t seed) {
     e.prog.states = (const S*)e.state_dev;
     e.prog.state_count = 1;
     e.prog.workspace_base = 0;
-    e.prog.parameter_table = (const ::ps::runtime::StaticParameterSlot*)e.param_dev;
+    e.prog.parameter_table = (const ::shelf::runtime::StaticParameterSlot*)e.param_dev;
     e.prog.parameter_slot_count = 2;
 
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::GDN_RECURRENCE;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::GDN_RECURRENCE;
     e.binding.descriptor_slot = 1;
     e.binding.input_slots[0] = 0;
     e.binding.input_slots[1] = 1;
@@ -310,7 +310,7 @@ bool build(Env& e, uint32_t seed) {
     e.binding.parameter_index1 = 1;
 
     e.state_view = {};
-    e.state_view.gdn.recurrent_base = (ps::fp16_t*)e.state;
+    e.state_view.gdn.recurrent_base = (shelf::fp16_t*)e.state;
     e.state_view.gdn.num_gdn_states = 1;
     e.state_view.gdn.max_sequences = max_seq;
     e.state_view.gdn.recurrent_slot_stride = slot_stride;
@@ -327,9 +327,9 @@ bool build(Env& e, uint32_t seed) {
     e.ka.b = (const bf16t*)e.b;
     e.ka.dt_bias = (const bf16t*)e.dt_bias;
     e.ka.a_log = (const bf16t*)e.a_log;
-    e.ka.recurrent_state = (ps::fp16_t*)e.state;
+    e.ka.recurrent_state = (shelf::fp16_t*)e.state;
     e.ka.output = (float*)e.out;
-    e.ka.requests = (const ::ps::runtime::DeviceRequestDescriptor*)e.requests;
+    e.ka.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)e.requests;
     e.ka.num_requests = nr;
     e.ka.actual_rows = rows;
     e.ka.q_row_stride = e.qk;
@@ -356,15 +356,15 @@ void reset_state(const Env& e, uint32_t seed) {
     const uint64_t state_total = (uint64_t)e.num_requests * layer_stride;
     std::vector<float> h_state(state_total);
     for (size_t i = 0; i < h_state.size(); ++i) h_state[i] = rng1k(seed * 23u + i) / 512.0f;
-    ps::gpu::discard_cleanup_result(
+    shelf::gpu::discard_cleanup_result(
         upload_state_cleanup(e.state, h_state, h_state.size()));
-    ps::gpu::discard_cleanup_result(hipMemset(e.out, 0, (size_t)e.rows * e.vdim * 4));
+    shelf::gpu::discard_cleanup_result(hipMemset(e.out, 0, (size_t)e.rows * e.vdim * 4));
 }
 
 hipError_t launch_correctness(const Env& e, hipStream_t s) {
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(e.error_word, 0, sizeof(uint32_t), s));
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.prog, e.binding, (::ps::runtime::DeviceBatchContext*)e.ctx_dev, e.state_view,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(e.error_word, 0, sizeof(uint32_t), s));
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.prog, e.binding, (::shelf::runtime::DeviceBatchContext*)e.ctx_dev, e.state_view,
         (float*)e.scratch, (uint32_t*)e.error_word, s);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
@@ -372,13 +372,13 @@ hipError_t launch_correctness(const Env& e, hipStream_t s) {
 
 hipError_t launch_optimized(const Env& e, hipStream_t s) {
     if (e.ka.head_k == 128u && e.ka.head_v % 64u == 0u)
-        return ::ps::kernel::launch_gdn_recurrence_f32_wmma(e.ka, s);
-    return ::ps::kernel::launch_gdn_recurrence_f32(e.ka, s);
+        return ::shelf::kernel::launch_gdn_recurrence_f32_wmma(e.ka, s);
+    return ::shelf::kernel::launch_gdn_recurrence_f32(e.ka, s);
 }
 
 hipError_t launch_optimized_multirow(const Env& e, hipStream_t s) {
-    if (::ps::kernel::gdn_recurrence_decode_rows_supported(e.ka))
-        return ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(e.ka, s);
+    if (::shelf::kernel::gdn_recurrence_decode_rows_supported(e.ka))
+        return ::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(e.ka, s);
     return launch_optimized(e, s);
 }
 
@@ -442,12 +442,12 @@ int run_gdn_recurrence(int argc, char** argv) {
                 const uint64_t slot_stride =
                     (uint64_t)e.p.num_v_heads * e.p.head_k * e.p.head_v;
                 const uint32_t capture = rows - 1u;
-                if (hipMalloc(&e.hist, (size_t)capture * slot_stride * sizeof(ps::fp16_t)) !=
+                if (hipMalloc(&e.hist, (size_t)capture * slot_stride * sizeof(shelf::fp16_t)) !=
                     hipSuccess) {
                     rc = 1;
                     continue;
                 }
-                e.ka.recurrent_history = (ps::fp16_t*)e.hist;
+                e.ka.recurrent_history = (shelf::fp16_t*)e.hist;
                 e.ka.recurrent_history_row_stride = slot_stride;
                 e.ka.capture_rows = capture;
             }
@@ -531,8 +531,8 @@ int run_gdn_recurrence(int argc, char** argv) {
                 if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
                 per.push_back(ms * 1000.0 / (double)o.launches);
             }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
             if (per.empty()) { rc = 1; continue; }
             const double mn = percentile(per, 0.0);
             const double p10 = percentile(per, 0.1);
@@ -558,6 +558,6 @@ int run_gdn_recurrence(int argc, char** argv) {
                         o.profile.head_v, rows, nr, e.max_request_rows, p10, p50, p90, mean);
         }
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 hipError_t launch_dflash2_noise_token_ids(
     int32_t anchor_token,
@@ -22,4 +22,4 @@ hipError_t launch_dflash2_noise_token_ids_batch(
     uint32_t* row_has_prev,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

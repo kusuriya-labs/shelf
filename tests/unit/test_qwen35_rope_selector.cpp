@@ -2,9 +2,9 @@
 
 #include <cstdio>
 
-using ps::execution::RopeImplementation;
-using ps::execution::RopeSelectorInput;
-using DT = ::ps::runtime::ValueDType;
+using shelf::execution::RopeImplementation;
+using shelf::execution::RopeSelectorInput;
+using DT = ::shelf::runtime::ValueDType;
 
 namespace {
 
@@ -29,7 +29,7 @@ RopeImplementation sel(DT in, DT out, uint32_t features, uint32_t head_dim,
     si.head_dim = head_dim;
     si.rotary_dim = rotary;
     si.rows = rows;
-    return ps::execution::select_rope_implementation(si);
+    return shelf::execution::select_rope_implementation(si);
 }
 
 }  // namespace

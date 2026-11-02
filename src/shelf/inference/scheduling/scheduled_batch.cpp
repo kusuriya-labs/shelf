@@ -1,7 +1,7 @@
 #include <shelf/inference/scheduling/scheduled_batch.h>
 #include <shelf/inference/state/paged_sequence_state.h>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 namespace {
@@ -66,10 +66,10 @@ Status validate_scheduled_batch(
         if (!req.sequence->is_usable()) {
             return Status::invalid_argument("request sequence is not usable", __FILE__, __LINE__);
         }
-        if (!::ps::runtime::request_handle_valid(req.handle)) {
+        if (!::shelf::runtime::request_handle_valid(req.handle)) {
             return Status::invalid_argument("request handle is invalid", __FILE__, __LINE__);
         }
-        if (!::ps::runtime::request_handle_equal(req.handle, req.sequence->request_handle())) {
+        if (!::shelf::runtime::request_handle_equal(req.handle, req.sequence->request_handle())) {
             return Status::invalid_argument(
                 "scheduled request handle is stale", __FILE__, __LINE__);
         }
@@ -99,7 +99,7 @@ Status validate_scheduled_batch(
         }
 
         switch (req.execution_class) {
-            case ::ps::runtime::ExecutionClass::DECODE:
+            case ::shelf::runtime::ExecutionClass::DECODE:
                 if (req.num_tokens != 1) {
                     return Status::invalid_argument(
                         "DECODE request must have num_tokens == 1", __FILE__, __LINE__);
@@ -110,7 +110,7 @@ Status validate_scheduled_batch(
                 }
                 ++decode_count;
                 break;
-            case ::ps::runtime::ExecutionClass::SPEC_VERIFY:
+            case ::shelf::runtime::ExecutionClass::SPEC_VERIFY:
                 if (region == BatchRegion::Prefill) {
                     return Status::invalid_argument(
                         "SPEC_VERIFY after PREFILL violates target batch order",
@@ -135,11 +135,11 @@ Status validate_scheduled_batch(
                 region = BatchRegion::Verify;
                 ++verify_count;
                 break;
-            case ::ps::runtime::ExecutionClass::PREFILL:
+            case ::shelf::runtime::ExecutionClass::PREFILL:
                 region = BatchRegion::Prefill;
                 ++prefill_count;
                 break;
-            case ::ps::runtime::ExecutionClass::SPEC_DRAFT:
+            case ::shelf::runtime::ExecutionClass::SPEC_DRAFT:
                 return Status::invalid_argument(
                     "SPEC_DRAFT must not appear in Target ScheduledBatch",
                     __FILE__,
@@ -151,7 +151,7 @@ Status validate_scheduled_batch(
                 "sample requires compute_logits", __FILE__, __LINE__);
         }
         if (req.sample) {
-            const Status sampling_status = ::ps::scheduling::validate_sampling_config(
+            const Status sampling_status = ::shelf::scheduling::validate_sampling_config(
                 req.sampling);
             if (!sampling_status.ok()) return sampling_status;
         }

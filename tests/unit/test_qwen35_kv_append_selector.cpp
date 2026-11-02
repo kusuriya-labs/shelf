@@ -16,11 +16,11 @@ void check(bool cond, const char* name) {
     }
 }
 
-using ps::kernel::KVCacheDType;
-using ps::execution::KvAppendImplementation;
-using ps::execution::KvAppendSelectorInput;
+using shelf::kernel::KVCacheDType;
+using shelf::execution::KvAppendImplementation;
+using shelf::execution::KvAppendSelectorInput;
 
-ps::execution::KvAppendImplementation
+shelf::execution::KvAppendImplementation
 sel(KVCacheDType dt, uint32_t kvh, uint32_t hd, uint32_t pt, uint32_t rows) {
     KvAppendSelectorInput si;
     si.kv_dtype = dt;
@@ -28,7 +28,7 @@ sel(KVCacheDType dt, uint32_t kvh, uint32_t hd, uint32_t pt, uint32_t rows) {
     si.kv_heads = kvh;
     si.head_dim = hd;
     si.page_tokens = pt;
-    return ps::execution::select_kv_append_implementation(si);
+    return shelf::execution::select_kv_append_implementation(si);
 }
 
 }  // namespace

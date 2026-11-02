@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cfloat>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 namespace op_kv_append_bf16 {
@@ -94,7 +94,7 @@ __device__ __forceinline__ void kv_append_bf16_body(const KvAppendCommonArgs& a,
 }  // namespace
 
 extern "C" __global__ __launch_bounds__(256)
-void shelf_kv_append_bf16(::ps::kernel::KvAppendBf16Args args) {
+void shelf_kv_append_bf16(::shelf::kernel::KvAppendBf16Args args) {
     op_kv_append_bf16::kv_append_bf16_body(
         args.common, reinterpret_cast<op_kv_append_bf16::bf16*>(args.k_pool),
         reinterpret_cast<op_kv_append_bf16::bf16*>(args.v_pool));
@@ -126,7 +126,7 @@ namespace {
 namespace op_kv_append_fp8 {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
 
 constexpr float kFp8E4M3Max = 448.0f;
 
@@ -275,7 +275,7 @@ void impl(const KvAppendCommonArgs a, fp8* k_pool, fp8* v_pool, float* k_scale_p
 }  // namespace
 
 hipError_t launch_kv_append_fp8_e4m3(const KvAppendCommonArgs& common,
-    ::ps::kernel::fp8e4m3_storage_t* k_pool, ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    ::shelf::kernel::fp8e4m3_storage_t* k_pool, ::shelf::kernel::fp8e4m3_storage_t* v_pool,
     float* k_scale_pool, float* v_scale_pool, hipStream_t stream) {
     if (common.rows == 0u || common.head_dim == 0u || common.kv_heads == 0u)
         return hipErrorInvalidValue;
@@ -300,4 +300,4 @@ hipError_t launch_kv_append_fp8_e4m3(const KvAppendCommonArgs& common,
 }
 
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 constexpr uint32_t kQuantThreadsPerRow = 256u;
 constexpr uint32_t kQuantActGroup = 128u;
@@ -27,7 +27,7 @@ struct QuantVecRow {
     static constexpr uint32_t kGroups = (KP + kQuantActGroup - 1u) / kQuantActGroup;
     static constexpr uint32_t kElemsPerLane = kQuantActGroup / 32u;
 
-    __device__ __forceinline__ static void run(const ::ps::bf16_t* __restrict__ xrow,
+    __device__ __forceinline__ static void run(const ::shelf::bf16_t* __restrict__ xrow,
                                                uint8_t* __restrict__ codes,
                                                float* __restrict__ scales, uint32_t m,
                                                uint32_t code_row_stride,
@@ -87,13 +87,13 @@ struct QuantVecRow {
                     }
                 }
                 const uint8_t c = scale > 0.0f
-                    ? ::ps::quantization::codec::device::e4m3_encode_u8(v * inv)
+                    ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
                     : 0u;
                 packed |= static_cast<uint32_t>(c) << (8u * l);
             }
             if (i0 + kElemsPerLane <= KP) {
-                const uint32_t off = (i0 >> 6u) * ::ps::quantization::fp8::kFragBlockBytes +
-                                     ::ps::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
+                const uint32_t off = (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
+                                     ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
                 *reinterpret_cast<uint32_t*>(crow + off) = packed;
             }
         }
@@ -102,7 +102,7 @@ struct QuantVecRow {
 
 template <uint32_t K, uint32_t KP, uint32_t Threads = kQuantThreadsPerRow>
 __device__ __forceinline__ void activation_quantize_fp8_finegrained_vec_row_body(
-    const ::ps::bf16_t* __restrict__ input,
+    const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,
     uint32_t m,
@@ -113,4 +113,4 @@ __device__ __forceinline__ void activation_quantize_fp8_finegrained_vec_row_body
                                      codes, scales, m, code_row_stride, scale_row_stride);
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

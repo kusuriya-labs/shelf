@@ -1,6 +1,6 @@
 #include <shelf/runtime/tp/tp_execution.h>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 Result<TpExecutionSchedule> build_tp_execution_schedule(
     const PrimitiveGraph& graph,
@@ -56,4 +56,4 @@ Result<TpExecutionSchedule> build_tp_execution_schedule(
     return schedule;
 }
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

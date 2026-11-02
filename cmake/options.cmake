@@ -16,8 +16,8 @@ if(NOT SHELF_ROCM_ROOT)
     )
 endif()
 
-string(REGEX REPLACE "/+$" "" _ps_llvm_root "${SHELF_ROCM_ROOT}")
-set(_ps_llvm_prefix "${_ps_llvm_root}/lib/llvm/")
+string(REGEX REPLACE "/+$" "" _shelf_llvm_root "${SHELF_ROCM_ROOT}")
+set(_shelf_llvm_prefix "${_shelf_llvm_root}/lib/llvm/")
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     message(
@@ -34,20 +34,20 @@ if(DEFINED CMAKE_HIP_COMPILER_ID AND NOT CMAKE_HIP_COMPILER_ID STREQUAL "Clang")
     )
 endif()
 
-string(FIND "${CMAKE_CXX_COMPILER}" "${_ps_llvm_prefix}" _ps_cxx_prefix_pos)
-if(NOT _ps_cxx_prefix_pos EQUAL 0)
+string(FIND "${CMAKE_CXX_COMPILER}" "${_shelf_llvm_prefix}" _shelf_cxx_prefix_pos)
+if(NOT _shelf_cxx_prefix_pos EQUAL 0)
     message(
         FATAL_ERROR
-        "The C++ compiler must come from the ROCm toolchain ${_ps_llvm_prefix} "
+        "The C++ compiler must come from the ROCm toolchain ${_shelf_llvm_prefix} "
         "(got: ${CMAKE_CXX_COMPILER})."
     )
 endif()
 
-string(FIND "${CMAKE_HIP_COMPILER}" "${_ps_llvm_prefix}" _ps_hip_prefix_pos)
-if(NOT _ps_hip_prefix_pos EQUAL 0)
+string(FIND "${CMAKE_HIP_COMPILER}" "${_shelf_llvm_prefix}" _shelf_hip_prefix_pos)
+if(NOT _shelf_hip_prefix_pos EQUAL 0)
     message(
         FATAL_ERROR
-        "The HIP compiler must come from the ROCm toolchain ${_ps_llvm_prefix} "
+        "The HIP compiler must come from the ROCm toolchain ${_shelf_llvm_prefix} "
         "(got: ${CMAKE_HIP_COMPILER})."
     )
 endif()

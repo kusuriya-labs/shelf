@@ -13,31 +13,31 @@
 #include <cstddef>
 #include <cmath>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 using bf16 = __hip_bfloat16;
 
-using ::ps::runtime::DispatchBinding;
-using ::ps::runtime::DeviceProgramView;
-using ::ps::runtime::DeviceValueBinding;
-using ::ps::runtime::DeviceWorkspaceRange;
-using ::ps::runtime::DeviceStateBinding;
-using ::ps::runtime::ProgramStatus;
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
-using ::ps::runtime::ValueStorage;
-using ::ps::runtime::KernelId;
-using ::ps::runtime::WeightSlot;
-using ::ps::runtime::StaticParameterSlot;
-using ::ps::runtime::kNoParameter;
+using ::shelf::runtime::DispatchBinding;
+using ::shelf::runtime::DeviceProgramView;
+using ::shelf::runtime::DeviceValueBinding;
+using ::shelf::runtime::DeviceWorkspaceRange;
+using ::shelf::runtime::DeviceStateBinding;
+using ::shelf::runtime::ProgramStatus;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
+using ::shelf::runtime::ValueStorage;
+using ::shelf::runtime::KernelId;
+using ::shelf::runtime::WeightSlot;
+using ::shelf::runtime::StaticParameterSlot;
+using ::shelf::runtime::kNoParameter;
 
 constexpr uint32_t kThreadsPerBlock = 256;
 constexpr uint32_t kScratchRowCapacity = 2048;
 constexpr uint32_t kDispatchBlocks = 64;
 
 struct ModelDispatchEnv {
-    const ::ps::runtime::DeviceProgramView* program;
-    ::ps::runtime::DeviceBatchContext* context;
+    const ::shelf::runtime::DeviceProgramView* program;
+    ::shelf::runtime::DeviceBatchContext* context;
     float* scratch;
     const ModelDispatchStateView* qwen_state;
     uint64_t workspace_base;
@@ -71,8 +71,8 @@ __device__ __forceinline__ bool resolve_value(
         out.row_domain = v.row_domain;
         out.features = v.feature_count;
         out.row_stride = v.row_stride;
-        if (v.storage == ::ps::runtime::ValueStorage::WORKSPACE ||
-            v.storage == ::ps::runtime::ValueStorage::WORKSPACE_VIEW) {
+        if (v.storage == ::shelf::runtime::ValueStorage::WORKSPACE ||
+            v.storage == ::shelf::runtime::ValueStorage::WORKSPACE_VIEW) {
             out.ptr = reinterpret_cast<void*>(env.workspace_base + v.offset);
             return out.ptr != nullptr || v.bytes == 0;
         }
@@ -120,7 +120,7 @@ __device__ __forceinline__ void store_elem(const ResolvedValue& v, size_t idx, f
 __device__ __forceinline__ const void* resolve_parameter(
     const ModelDispatchEnv& env, uint32_t index, uint32_t* elements, ValueDType* dtype) {
     const auto* p = env.program;
-    if (index == ::ps::runtime::kNoParameter) return nullptr;
+    if (index == ::shelf::runtime::kNoParameter) return nullptr;
     if (p->parameter_table == nullptr || index >= p->parameter_slot_count) return nullptr;
     const auto* table = static_cast<const StaticParameterSlot*>(p->parameter_table);
     if (elements != nullptr) *elements = table[index].elements;
@@ -151,7 +151,7 @@ __device__ __forceinline__ float gdn_softplus(float x) {
     return __logf(1.0f + __expf(x));
 }
 
-__device__ __forceinline__ const ::ps::runtime::DeviceStateBinding* find_state(
+__device__ __forceinline__ const ::shelf::runtime::DeviceStateBinding* find_state(
     const ModelDispatchEnv& env, uint32_t descriptor_slot) {
     if (descriptor_slot == 0u || env.program->states == nullptr) return nullptr;
     for (uint32_t i = 0; i < env.program->state_count; ++i) {
@@ -163,7 +163,7 @@ __device__ __forceinline__ const ::ps::runtime::DeviceStateBinding* find_state(
 
 __device__ __forceinline__ ModelDispatchEnv make_env(
     const DeviceProgramView& program,
-    ::ps::runtime::DeviceBatchContext* context,
+    ::shelf::runtime::DeviceBatchContext* context,
     const ModelDispatchStateView& state,
     float* scratch,
     uint32_t num_blocks,
@@ -187,4 +187,4 @@ __device__ __forceinline__ void record_status(uint32_t* error_word, ProgramStatu
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_unary(
     ModelDispatchEnv& env, KernelId kind, const DispatchBinding& b) {
@@ -95,7 +95,7 @@ __device__ __forceinline__ ProgramStatus exec_split(
     const uint32_t f0 = o0.features;
     const uint32_t stride = global_stride(env);
     const size_t total = static_cast<size_t>(rows) * f0;
-    if (b.flags == static_cast<uint32_t>(ps::runtime::SplitLayout::INTERLEAVED_HEADS)) {
+    if (b.flags == static_cast<uint32_t>(shelf::runtime::SplitLayout::INTERLEAVED_HEADS)) {
         const uint32_t hd = b.group_size;
         if (hd == 0u || f0 % hd != 0u || in.features < 2u * hd)
             return ProgramStatus::INVALID_BINDING;
@@ -119,4 +119,4 @@ __device__ __forceinline__ ProgramStatus exec_split(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

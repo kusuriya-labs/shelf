@@ -3,19 +3,19 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 
-__device__ __forceinline__ ps::bf16_t bf16_pack(float f) {
-    return ps::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
+__device__ __forceinline__ shelf::bf16_t bf16_pack(float f) {
+    return shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(f))};
 }
 
-__device__ __forceinline__ float bf16_unpack(const ps::bf16_t& x) {
+__device__ __forceinline__ float bf16_unpack(const shelf::bf16_t& x) {
     return __bfloat162float(__ushort_as_bfloat16(x.data));
 }
 __global__ void silu_kernel(
-    const ps::bf16_t* __restrict__ input,
-    ps::bf16_t* __restrict__ output,
+    const shelf::bf16_t* __restrict__ input,
+    shelf::bf16_t* __restrict__ output,
     std::size_t n)
 {
     std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -43,8 +43,8 @@ Status silu(
     const std::size_t blocks = (total + threads_per_block - 1) / threads_per_block;
 
     silu_kernel<<<static_cast<unsigned>(blocks), threads_per_block, 0, stream>>>(
-        input.data<ps::bf16_t>(),
-        output.data<ps::bf16_t>(),
+        input.data<shelf::bf16_t>(),
+        output.data<shelf::bf16_t>(),
         total);
 
     hipError_t err = hipGetLastError();
@@ -56,4 +56,4 @@ Status silu(
 }
 
 } // namespace kernel
-} // namespace ps
+} // namespace shelf

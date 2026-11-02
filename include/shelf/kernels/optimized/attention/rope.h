@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kRopePairBlock = 128u;
 inline constexpr uint32_t kRopePairHeadDim = 256u;
@@ -75,4 +75,4 @@ hipError_t launch_rope_f32_bf16(
     float theta, const double* inv_freq, float attention_factor,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

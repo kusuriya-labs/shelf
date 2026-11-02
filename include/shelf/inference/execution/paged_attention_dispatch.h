@@ -8,25 +8,25 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 struct HostExecutionContext;
 
 struct PagedAttentionResolvedArgs {
-    ::ps::kernel::KVCacheDType kv_dtype = ::ps::kernel::KVCacheDType::BF16;
-    ::ps::runtime::ValueDType output_dtype = ::ps::runtime::ValueDType::BF16;
-    ::ps::kernel::PagedAttentionCommonArgs common;
+    ::shelf::kernel::KVCacheDType kv_dtype = ::shelf::kernel::KVCacheDType::BF16;
+    ::shelf::runtime::ValueDType output_dtype = ::shelf::runtime::ValueDType::BF16;
+    ::shelf::kernel::PagedAttentionCommonArgs common;
     const bf16_t* k_bf16_pool = nullptr;
     const bf16_t* v_bf16_pool = nullptr;
-    const ::ps::kernel::fp8e4m3_storage_t* k_fp8_pool = nullptr;
-    const ::ps::kernel::fp8e4m3_storage_t* v_fp8_pool = nullptr;
+    const ::shelf::kernel::fp8e4m3_storage_t* k_fp8_pool = nullptr;
+    const ::shelf::kernel::fp8e4m3_storage_t* v_fp8_pool = nullptr;
     const float* k_scale_pool = nullptr;
     const float* v_scale_pool = nullptr;
 };
 
 Result<PagedAttentionResolvedArgs>
 resolve_paged_attention_args(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx);
 
@@ -47,16 +47,16 @@ PagedAttentionPlan plan_paged_attention(
     bool use_prefill);
 
 Result<uint32_t> paged_attention_plan_signature(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     bool use_prefill);
 
 Result<OptimizedLaunchResult>
 try_launch_paged_attention(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

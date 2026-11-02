@@ -17,27 +17,27 @@
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 
-using ::ps::runtime::DispatchBinding;
-using ::ps::runtime::Int8ActivationWorkspaceLayout;
-using ::ps::runtime::KernelId;
-using ::ps::runtime::Program;
-using ::ps::runtime::ValueDType;
+using ::shelf::runtime::DispatchBinding;
+using ::shelf::runtime::Int8ActivationWorkspaceLayout;
+using ::shelf::runtime::KernelId;
+using ::shelf::runtime::Program;
+using ::shelf::runtime::ValueDType;
 
 namespace {
 
 uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
-    if (v.row_domain == ::ps::runtime::ValueRowDomain::OUTPUT_ROWS)
+    if (v.row_domain == ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS)
         return ctx.actual_outputs;
     return ctx.actual_rows != 0 ? ctx.actual_rows : 1u;
 }
 
 }  // namespace
 
-::ps::kernel::RmsNormDataType rmsnorm_kd(ValueDType d) {
-    return d == ValueDType::F32 ? ::ps::kernel::RmsNormDataType::F32
-                                : ::ps::kernel::RmsNormDataType::BF16;
+::shelf::kernel::RmsNormDataType rmsnorm_kd(ValueDType d) {
+    return d == ValueDType::F32 ? ::shelf::kernel::RmsNormDataType::F32
+                                : ::shelf::kernel::RmsNormDataType::BF16;
 }
 
 Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
@@ -50,11 +50,11 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
         return Status::invalid_state("rmsnorm optimized: io count != 1", __FILE__,
                                      __LINE__);
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
     auto out_res = resolve_host_value(program,
-                                      ::ps::runtime::ValueId{b.output_slots[0]},
+                                      ::shelf::runtime::ValueId{b.output_slots[0]},
                                       ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue dst = out_res.value();
@@ -70,11 +70,11 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
         return PhysicalResolveStatus::NotApplicable;
     if (dst.dtype != ValueDType::BF16 && dst.dtype != ValueDType::F32)
         return PhysicalResolveStatus::NotApplicable;
-    ::ps::kernel::RmsNormWeightLayout wlayout =
-        ::ps::kernel::RmsNormWeightLayout::NONE;
+    ::shelf::kernel::RmsNormWeightLayout wlayout =
+        ::shelf::kernel::RmsNormWeightLayout::NONE;
     const void* wptr = nullptr;
     ValueDType wdt = ValueDType::BF16;
-    if (b.parameter_index0 != ::ps::runtime::kNoParameter) {
+    if (b.parameter_index0 != ::shelf::runtime::kNoParameter) {
         if (ctx.host_parameters == nullptr ||
             b.parameter_index0 >= ctx.host_parameter_count)
             return PhysicalResolveStatus::NotApplicable;
@@ -84,9 +84,9 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
         wptr = slot.device_ptr;
         wdt = slot.dtype;
         if (slot.elements == F)
-            wlayout = ::ps::kernel::RmsNormWeightLayout::PER_FEATURE;
+            wlayout = ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE;
         else if (slot.elements == G)
-            wlayout = ::ps::kernel::RmsNormWeightLayout::PER_GROUP;
+            wlayout = ::shelf::kernel::RmsNormWeightLayout::PER_GROUP;
         else
             return PhysicalResolveStatus::NotApplicable;
     }
@@ -96,9 +96,9 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
     si.input_dtype = in.dtype;
     si.output_dtype = dst.dtype;
     si.weight_dtype = wdt;
-    si.weight_layout = wlayout == ::ps::kernel::RmsNormWeightLayout::PER_FEATURE
+    si.weight_layout = wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE
                            ? RmsNormSelectorWeightLayout::PerFeature
-                       : wlayout == ::ps::kernel::RmsNormWeightLayout::PER_GROUP
+                       : wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP
                            ? RmsNormSelectorWeightLayout::PerGroup
                            : RmsNormSelectorWeightLayout::None;
     si.weight_mode = b.flags;
@@ -122,23 +122,23 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
     out.output_dtype = rmsnorm_kd(dst.dtype);
     out.weight_layout = wlayout;
     out.weight_mode = b.flags == 0u
-                          ? ::ps::kernel::RmsNormWeightMode::ONE_PLUS
-                          : ::ps::kernel::RmsNormWeightMode::DIRECT;
+                          ? ::shelf::kernel::RmsNormWeightMode::ONE_PLUS
+                          : ::shelf::kernel::RmsNormWeightMode::DIRECT;
     const bool bf16_pf_one_plus =
         in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::BF16 &&
         wdt == ValueDType::BF16 &&
-        wlayout == ::ps::kernel::RmsNormWeightLayout::PER_FEATURE &&
-        out.weight_mode == ::ps::kernel::RmsNormWeightMode::ONE_PLUS;
+        wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE &&
+        out.weight_mode == ::shelf::kernel::RmsNormWeightMode::ONE_PLUS;
     const bool f32_pg_direct =
         in.dtype == ValueDType::F32 && dst.dtype == ValueDType::F32 &&
         wdt == ValueDType::BF16 &&
-        wlayout == ::ps::kernel::RmsNormWeightLayout::PER_GROUP &&
-        out.weight_mode == ::ps::kernel::RmsNormWeightMode::DIRECT;
+        wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP &&
+        out.weight_mode == ::shelf::kernel::RmsNormWeightMode::DIRECT;
     const bool bf16_f32_pg_one_plus =
         in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::F32 &&
         wdt == ValueDType::BF16 &&
-        wlayout == ::ps::kernel::RmsNormWeightLayout::PER_GROUP &&
-        out.weight_mode == ::ps::kernel::RmsNormWeightMode::ONE_PLUS;
+        wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP &&
+        out.weight_mode == ::shelf::kernel::RmsNormWeightMode::ONE_PLUS;
     out.variant = bf16_pf_one_plus
                       ? PhysicalRmsNormVariant::Bf16PfOnePlus
                       : (f32_pg_direct
@@ -147,8 +147,8 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
                                     ? PhysicalRmsNormVariant::Bf16F32PgOnePlus
                                     : PhysicalRmsNormVariant::Unsupported));
     if (out.variant != PhysicalRmsNormVariant::Unsupported) {
-        out.grid = ::ps::kernel::rmsnorm_bf16_pf_oneplus_grid(rows, F, G);
-        out.workgroup = ::ps::kernel::rmsnorm_bf16_pf_oneplus_block_size(G);
+        out.grid = ::shelf::kernel::rmsnorm_bf16_pf_oneplus_grid(rows, F, G);
+        out.workgroup = ::shelf::kernel::rmsnorm_bf16_pf_oneplus_block_size(G);
     }
     return PhysicalResolveStatus::Applicable;
 }
@@ -172,7 +172,7 @@ Result<PhysicalResolveStatus> resolve_activation_quantize_physical(
         return Status::invalid_state("act-quant optimized: activation_max_rows == 0",
                                      __FILE__, __LINE__);
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
     if (in.dtype != ValueDType::BF16)
@@ -217,4 +217,4 @@ Result<PhysicalResolveStatus> resolve_activation_quantize_physical(
     return PhysicalResolveStatus::Applicable;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

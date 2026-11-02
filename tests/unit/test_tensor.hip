@@ -44,7 +44,7 @@ int main() {
 
     HIP_ASSERT(hipSetDevice(0));
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 1024 * 1024);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1024 * 1024);
     if (!arena_result.ok()) {
         printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
@@ -65,7 +65,7 @@ int main() {
     }
     auto backing2 = alloc_result2.release();
 
-    auto t_result = ps::gpu::Tensor::create<float>(
+    auto t_result = shelf::gpu::Tensor::create<float>(
         backing, std::vector<std::size_t>{2, 3, 4}, std::vector<std::size_t>{12, 4, 1});
     check(t_result.ok(), "tensor create ok");
     if (!t_result.ok()) {
@@ -84,7 +84,7 @@ int main() {
 
     {
         std::vector<float> tiny(3, 0.0f);
-        auto small_backing = ps::gpu::Tensor::create<float>(
+        auto small_backing = shelf::gpu::Tensor::create<float>(
             backing, std::vector<std::size_t>{2, 3, 4}, std::vector<std::size_t>{12, 4, 1});
         check(small_backing.ok(), "create with sufficient backing succeeds");
     }
@@ -122,19 +122,19 @@ int main() {
     }
 
     {
-        auto shape_mismatch = ps::gpu::Tensor::create<float>(
+        auto shape_mismatch = shelf::gpu::Tensor::create<float>(
             backing, std::vector<std::size_t>{2, 3, 4}, std::vector<std::size_t>{12, 4});
         check(!shape_mismatch.ok(), "shape/stride mismatch fails");
     }
 
     {
-        auto strides_mismatch = ps::gpu::Tensor::create<float>(
+        auto strides_mismatch = shelf::gpu::Tensor::create<float>(
             backing, std::vector<std::size_t>{2, 3}, std::vector<std::size_t>{12, 4, 1});
         check(!strides_mismatch.ok(), "stride/shape mismatch fails");
     }
 
     {
-        auto initializer_list_mismatch = ps::gpu::Tensor::create<float>(
+        auto initializer_list_mismatch = shelf::gpu::Tensor::create<float>(
             backing, {2, 3}, {3});
         check(!initializer_list_mismatch.ok(), "initializer-list shape/stride mismatch fails");
     }
@@ -142,17 +142,17 @@ int main() {
     {
         const std::size_t shape[] = {2, 3};
         const std::size_t strides[] = {3, 1};
-        auto null_shape = ps::gpu::Tensor::create<float>(
+        auto null_shape = shelf::gpu::Tensor::create<float>(
             backing, static_cast<const std::size_t*>(nullptr), 2, strides);
-        auto null_strides = ps::gpu::Tensor::create<float>(
+        auto null_strides = shelf::gpu::Tensor::create<float>(
             backing, shape, 2, static_cast<const std::size_t*>(nullptr));
         check(!null_shape.ok(), "null shape pointer fails");
         check(!null_strides.ok(), "null strides pointer fails");
     }
 
     {
-        auto same_shape_result = ps::gpu::Tensor::create<float>(backing, {2, 3, 4}, {12, 4, 1});
-        auto different_shape_result = ps::gpu::Tensor::create<float>(backing, {2, 4, 3}, {12, 3, 1});
+        auto same_shape_result = shelf::gpu::Tensor::create<float>(backing, {2, 3, 4}, {12, 4, 1});
+        auto different_shape_result = shelf::gpu::Tensor::create<float>(backing, {2, 4, 3}, {12, 3, 1});
         check(same_shape_result.ok(), "same-shape tensor create succeeds");
         check(different_shape_result.ok(), "different-shape tensor create succeeds");
         if (same_shape_result.ok() && different_shape_result.ok()) {
@@ -225,7 +225,7 @@ int main() {
     }
 
     {
-        auto bad_stride = ps::gpu::Tensor::create<float>(
+        auto bad_stride = shelf::gpu::Tensor::create<float>(
             backing, std::vector<std::size_t>{2}, std::vector<std::size_t>{std::numeric_limits<std::size_t>::max()});
         check(!bad_stride.ok(), "shape={2}, stride={SIZE_MAX} rejected");
     }
@@ -233,7 +233,7 @@ int main() {
     {
         std::vector<std::size_t> huge_shape = {std::numeric_limits<std::size_t>::max()};
         std::vector<std::size_t> huge_strides = {1};
-        auto huge = ps::gpu::Tensor::create<float>(
+        auto huge = shelf::gpu::Tensor::create<float>(
             backing, huge_shape, huge_strides);
         check(!huge.ok(), "max_offset exactly SIZE_MAX rejected");
     }
@@ -242,7 +242,7 @@ int main() {
         std::size_t huge_val = std::numeric_limits<std::size_t>::max() - 3;
         std::vector<std::size_t> shape = {2};
         std::vector<std::size_t> strides = {huge_val};
-        auto overflow_plus1 = ps::gpu::Tensor::create<float>(
+        auto overflow_plus1 = shelf::gpu::Tensor::create<float>(
             backing, shape, strides);
         check(!overflow_plus1.ok(), "max_offset + 1 overflow rejected");
     }
@@ -251,7 +251,7 @@ int main() {
         std::size_t big_offset = std::numeric_limits<std::size_t>::max() / sizeof(float);
         std::vector<std::size_t> shape = {2};
         std::vector<std::size_t> strides = {big_offset};
-        auto mul_overflow = ps::gpu::Tensor::create<float>(
+        auto mul_overflow = shelf::gpu::Tensor::create<float>(
             backing, shape, strides);
         check(!mul_overflow.ok(), "required byte multiplication overflow rejected");
     }
@@ -276,7 +276,7 @@ int main() {
         check(alloc_exact.ok(), "96 byte alloc ok");
         if (alloc_exact.ok()) {
             auto vb = alloc_exact.release();
-            auto exact = ps::gpu::Tensor::create<float>(
+            auto exact = shelf::gpu::Tensor::create<float>(
                 vb, std::vector<std::size_t>{24}, std::vector<std::size_t>{1});
             check(exact.ok(), "96 byte alloc can create 96 byte Tensor");
         }
@@ -285,14 +285,14 @@ int main() {
         check(alloc_small.ok(), "96 byte alloc2 ok");
         if (alloc_small.ok()) {
             auto vb = alloc_small.release();
-            auto too_big = ps::gpu::Tensor::create<float>(
+            auto too_big = shelf::gpu::Tensor::create<float>(
                 vb, std::vector<std::size_t>{25}, std::vector<std::size_t>{1});
             check(!too_big.ok(), "96 byte alloc cannot create 100 byte Tensor");
         }
     }
 
     {
-        auto t2 = ps::gpu::Tensor::create<float>(
+        auto t2 = shelf::gpu::Tensor::create<float>(
             backing2, std::vector<std::size_t>{10}, std::vector<std::size_t>{1});
         check(t2.ok(), "t2 from backing2");
         if (t2.ok()) {
@@ -320,23 +320,23 @@ int main() {
 
     {
         const std::size_t H = 64;
-        auto backing_bf16 = arena.allocate_aligned(3 * H * sizeof(ps::bf16_t), 16);
+        auto backing_bf16 = arena.allocate_aligned(3 * H * sizeof(shelf::bf16_t), 16);
         check(backing_bf16.ok(), "bf16 backing alloc ok");
         if (backing_bf16.ok()) {
             auto b = backing_bf16.release();
-            auto t_bf16 = ps::gpu::Tensor::create<ps::bf16_t>(
+            auto t_bf16 = shelf::gpu::Tensor::create<shelf::bf16_t>(
                 b, std::vector<std::size_t>{3, H}, std::vector<std::size_t>{H, 1});
             check(t_bf16.ok(), "bf16 [3,H] create ok");
             if (t_bf16.ok()) {
                 auto tv = t_bf16.release();
-                check(tv.element_size() == sizeof(ps::bf16_t), "bf16 element_size is 2");
+                check(tv.element_size() == sizeof(shelf::bf16_t), "bf16 element_size is 2");
                 auto row1 = tv.slice(0, 1, 1);
                 auto row2 = tv.slice(0, 2, 1);
                 check(row1.ok() && row2.ok(), "bf16 row slices ok");
                 if (row1.ok() && row2.ok()) {
-                    check(row1.release().view_offset_bytes() == H * sizeof(ps::bf16_t),
+                    check(row1.release().view_offset_bytes() == H * sizeof(shelf::bf16_t),
                           "bf16 row1 slice offset == H * sizeof(bf16)");
-                    check(row2.release().view_offset_bytes() == 2 * H * sizeof(ps::bf16_t),
+                    check(row2.release().view_offset_bytes() == 2 * H * sizeof(shelf::bf16_t),
                           "bf16 row2 slice offset == 2 * H * sizeof(bf16)");
                 }
             }
@@ -349,7 +349,7 @@ int main() {
         check(backing_f32.ok(), "f32 backing alloc ok");
         if (backing_f32.ok()) {
             auto b = backing_f32.release();
-            auto t_f32 = ps::gpu::Tensor::create<float>(
+            auto t_f32 = shelf::gpu::Tensor::create<float>(
                 b, std::vector<std::size_t>{3, V}, std::vector<std::size_t>{V, 1});
             check(t_f32.ok(), "f32 [3,V] create ok");
             if (t_f32.ok()) {
@@ -373,7 +373,7 @@ int main() {
         check(backing_u32.ok(), "u32 backing alloc ok");
         if (backing_u32.ok()) {
             auto b = backing_u32.release();
-            auto t_u32 = ps::gpu::Tensor::create<uint32_t>(
+            auto t_u32 = shelf::gpu::Tensor::create<uint32_t>(
                 b, std::vector<std::size_t>{4}, std::vector<std::size_t>{1});
             check(t_u32.ok(), "u32 [4] create ok");
             if (t_u32.ok()) {

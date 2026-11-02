@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 enum class MatrixEncoding : uint8_t {
     Bf16 = 0,

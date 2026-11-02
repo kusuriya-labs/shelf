@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 namespace detail {
 
@@ -64,7 +64,7 @@ __global__ void gemm_bf16_baseline_graph_ready_kernel(
     uint32_t output_features,
     uint32_t bucket_rows,
     uint32_t k,
-    const ps::runtime::DeviceBatchContext* __restrict__ ctx)
+    const shelf::runtime::DeviceBatchContext* __restrict__ ctx)
 {
     uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t t = blockIdx.y * blockDim.y + threadIdx.y;
@@ -88,7 +88,7 @@ hipError_t launch_gemm_bf16_baseline_graph_ready(
     uint32_t output_features,
     uint32_t bucket_rows,
     uint32_t k,
-    const ps::runtime::DeviceBatchContext* ctx,
+    const shelf::runtime::DeviceBatchContext* ctx,
     hipStream_t stream)
 {
     dim3 block(16, 16);

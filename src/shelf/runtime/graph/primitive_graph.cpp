@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 namespace {
 
 struct Arity {

@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct ValueId {
     uint32_t id = 0;

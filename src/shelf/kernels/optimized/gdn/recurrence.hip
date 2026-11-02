@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -48,7 +48,7 @@ __global__ void gdn_recurrence_f32_impl(const GdnRecurrenceArgs a) {
     const bool vcol_valid = vcol < head_v;
 
     if (request_index >= a.num_requests) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     const uint32_t row_begin = req.row_begin;
@@ -233,7 +233,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const uint32_t v_head = (blockIdx.x / vgroups) % a.num_v_heads;
     const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
     if (request_index >= a.num_requests) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     const uint32_t row_begin = req.row_begin;
@@ -486,7 +486,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         if constexpr (kSerialRows) {
             if (a.recurrent_history != nullptr && ci < a.capture_rows &&
                 (a.capture_verify_only == 0u ||
-                 req.execution_class == ::ps::runtime::ExecutionClass::SPEC_VERIFY)) {
+                 req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
                 fp16_t* hist_head = a.recurrent_history
                     + static_cast<uint64_t>(ci) * a.recurrent_history_row_stride
                     + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
@@ -619,7 +619,7 @@ void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
     const uint32_t v_head = (blockIdx.x / vgroups) % a.num_v_heads;
     const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
     if (request_index >= a.num_requests) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     if (a.compact_delta == nullptr || a.compact_k == nullptr || a.compact_a == nullptr)
@@ -752,7 +752,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
     const uint32_t v_head = (blockIdx.x / vgroups) % a.num_v_heads;
     const uint32_t request_index = blockIdx.x / (vgroups * a.num_v_heads);
     if (request_index >= a.num_requests) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = a.requests[request_index];
+    const ::shelf::runtime::DeviceRequestDescriptor req = a.requests[request_index];
     const uint32_t slot = req.request_handle.slot;
     if (slot >= a.max_sequences) return;
     const uint32_t row_begin = req.row_begin;
@@ -854,7 +854,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
         if (a.recurrent_history != nullptr && r < a.capture_rows &&
             (a.capture_verify_only == 0u ||
              req.execution_class ==
-                 ::ps::runtime::ExecutionClass::SPEC_VERIFY)) {
+                 ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
             hist_head = a.recurrent_history
                 + static_cast<uint64_t>(r) * a.recurrent_history_row_stride
                 + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
@@ -1186,4 +1186,4 @@ hipError_t launch_gdn_recurrence_f32_wmma_commit(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

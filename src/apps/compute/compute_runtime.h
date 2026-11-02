@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace app {
 
 struct Qwen35RuntimeConfig {
@@ -130,7 +130,7 @@ class Qwen35ComputeRuntime {
 
     Result<qwen35::dflash2::DFlash2Weights> load_dflash2_weights(
         const qwen35::dflash2::DFlash2Config& config,
-        const ps::weights::WeightLoadOptions& options = {});
+        const shelf::weights::WeightLoadOptions& options = {});
 
     Status set_dflash2_batcher(const qwen35::runtime::DFlash2BatcherBinding& binding);
 
@@ -163,7 +163,7 @@ class Qwen35ComputeRuntime {
 
     Status initialize_tensor_parallel();
 
-    std::size_t drafter_reserve_bytes(const ::ps::state::GdnStatePool& pool) const;
+    std::size_t drafter_reserve_bytes(const ::shelf::state::GdnStatePool& pool) const;
 
     void apply_auto_working_set_reserve();
 
@@ -196,4 +196,4 @@ class Qwen35ComputeRuntime {
 };
 
 }  // namespace app
-}  // namespace ps
+}  // namespace shelf

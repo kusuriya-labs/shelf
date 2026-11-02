@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -34,7 +34,7 @@ void shelf_gdn_conv1d_bf16_f32(
     float* __restrict__ output,
     const bf16* __restrict__ conv_weight,
     bf16* __restrict__ conv_state,
-    const ::ps::runtime::DeviceRequestDescriptor* __restrict__ requests,
+    const ::shelf::runtime::DeviceRequestDescriptor* __restrict__ requests,
     uint32_t actual_rows,
     uint32_t input_row_stride,
     uint32_t output_row_stride,
@@ -52,7 +52,7 @@ void shelf_gdn_conv1d_bf16_f32(
     const int32_t* __restrict__ row_parent) {
     const uint32_t ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= conv_dim) return;
-    const ::ps::runtime::DeviceRequestDescriptor req = requests[blockIdx.y];
+    const ::shelf::runtime::DeviceRequestDescriptor req = requests[blockIdx.y];
     const uint32_t slot = req.request_handle.slot;
     if (slot >= max_sequences) return;
 
@@ -128,7 +128,7 @@ void shelf_gdn_conv1d_bf16_f32(
         if (conv_history_store != nullptr && hist_row < capture_rows &&
             (!verify_only ||
              req.execution_class ==
-                 ::ps::runtime::ExecutionClass::SPEC_VERIFY)) {
+                 ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
             bf16* hp = conv_history_store
                      + static_cast<size_t>(hist_row) * conv_history_row_stride
                      + static_cast<size_t>(state_index) * conv_layer_stride;
@@ -176,4 +176,4 @@ hipError_t launch_gdn_conv1d_bf16_f32(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace qwen_hybrid {
 
 struct GdnGeometry {
@@ -17,11 +17,11 @@ struct GdnGeometry {
 };
 
 struct GdnWeightView {
-    const ::ps::weights::MatrixWeight* qkv = nullptr;
-    const ::ps::weights::MatrixWeight* z = nullptr;
-    const ::ps::weights::MatrixWeight* b = nullptr;
-    const ::ps::weights::MatrixWeight* a = nullptr;
-    const ::ps::weights::MatrixWeight* out = nullptr;
+    const ::shelf::weights::MatrixWeight* qkv = nullptr;
+    const ::shelf::weights::MatrixWeight* z = nullptr;
+    const ::shelf::weights::MatrixWeight* b = nullptr;
+    const ::shelf::weights::MatrixWeight* a = nullptr;
+    const ::shelf::weights::MatrixWeight* out = nullptr;
 };
 
 struct GdnFeatureSizes {

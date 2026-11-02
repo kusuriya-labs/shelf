@@ -7,7 +7,7 @@
 #include <cstring>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 inline uint64_t tp_target_bytes(const TpSumTarget& target) {
     return target.rows * static_cast<uint64_t>(target.row_stride) *
@@ -117,4 +117,4 @@ inline Status validate_tp_sum_invocation(const TpSumInvocation& invocation,
     return Status::make_ok();
 }
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

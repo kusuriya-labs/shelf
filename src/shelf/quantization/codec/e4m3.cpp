@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ps::quantization::codec {
+namespace shelf::quantization::codec {
 
 namespace {
 
@@ -98,4 +98,4 @@ uint8_t e4m3_encode_u8(float x) {
     return static_cast<uint8_t>(code | sign);
 }
 
-}  // namespace ps::quantization::codec
+}  // namespace shelf::quantization::codec

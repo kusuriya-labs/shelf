@@ -4,7 +4,7 @@
 #include <iterator>
 #include <utility>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 namespace {
 
 Status validate_qwen35_weights(
@@ -157,4 +157,4 @@ Qwen35Model::Qwen35Model(
 {
 }
 
-} // namespace ps::qwen35
+} // namespace shelf::qwen35

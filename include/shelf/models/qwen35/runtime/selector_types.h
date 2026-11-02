@@ -13,55 +13,55 @@
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 namespace runtime {
 
-using ::ps::execution::Bf16GemmSelectorInput;
-using ::ps::execution::ElementwiseImplementation;
-using ::ps::execution::ElementwiseProfile;
-using ::ps::execution::ElementwiseSelectorInput;
-using ::ps::execution::EmbeddingImplementation;
-using ::ps::execution::EmbeddingRule;
-using ::ps::execution::EmbeddingSelectorInput;
-using ::ps::execution::EmbeddingStorage;
-using ::ps::execution::Fp8FinegrainedGemmSelectorInput;
-using ::ps::execution::GdnConvImplementation;
-using ::ps::execution::GdnConvSelectorInput;
-using ::ps::execution::GdnRecurrenceImplementation;
-using ::ps::execution::GdnRecurrenceSelectorInput;
-using ::ps::execution::KvAppendImplementation;
-using ::ps::execution::KvAppendSelectorInput;
-using ::ps::execution::L2NormalizeImplementation;
-using ::ps::execution::L2NormalizeSelectorInput;
-using ::ps::execution::LinearComputeFamily;
-using ::ps::execution::linear_shape_supported;
-using ::ps::execution::PagedAttentionImplementation;
-using ::ps::execution::PagedAttentionSelectorInput;
-using ::ps::execution::RmsNormImplementation;
-using ::ps::execution::RmsNormSelectorInput;
-using ::ps::execution::RmsNormSelectorWeightLayout;
-using ::ps::execution::RopeImplementation;
-using ::ps::execution::RopeSelectorInput;
-using ::ps::execution::SamplingBatchMode;
-using ::ps::execution::SamplingChoice;
-using ::ps::execution::SamplingImplementation;
-using ::ps::execution::SamplingRule;
-using ::ps::execution::SamplingSelectorInput;
-using ::ps::execution::kOptimizedMaxRows;
-using ::ps::execution::select_bf16_gemm_config;
-using ::ps::execution::select_elementwise_implementation;
-using ::ps::execution::select_embedding_implementation;
-using ::ps::execution::select_fp8_finegrained_gemm_config;
-using ::ps::execution::select_gdn_conv_implementation;
-using ::ps::execution::select_gdn_recurrence_implementation;
-using ::ps::execution::select_kv_append_implementation;
-using ::ps::execution::select_l2_normalize_implementation;
-using ::ps::execution::select_paged_attention_implementation;
-using ::ps::execution::select_rmsnorm_implementation;
-using ::ps::execution::select_rope_implementation;
-using ::ps::execution::select_sampling_implementation;
+using ::shelf::execution::Bf16GemmSelectorInput;
+using ::shelf::execution::ElementwiseImplementation;
+using ::shelf::execution::ElementwiseProfile;
+using ::shelf::execution::ElementwiseSelectorInput;
+using ::shelf::execution::EmbeddingImplementation;
+using ::shelf::execution::EmbeddingRule;
+using ::shelf::execution::EmbeddingSelectorInput;
+using ::shelf::execution::EmbeddingStorage;
+using ::shelf::execution::Fp8FinegrainedGemmSelectorInput;
+using ::shelf::execution::GdnConvImplementation;
+using ::shelf::execution::GdnConvSelectorInput;
+using ::shelf::execution::GdnRecurrenceImplementation;
+using ::shelf::execution::GdnRecurrenceSelectorInput;
+using ::shelf::execution::KvAppendImplementation;
+using ::shelf::execution::KvAppendSelectorInput;
+using ::shelf::execution::L2NormalizeImplementation;
+using ::shelf::execution::L2NormalizeSelectorInput;
+using ::shelf::execution::LinearComputeFamily;
+using ::shelf::execution::linear_shape_supported;
+using ::shelf::execution::PagedAttentionImplementation;
+using ::shelf::execution::PagedAttentionSelectorInput;
+using ::shelf::execution::RmsNormImplementation;
+using ::shelf::execution::RmsNormSelectorInput;
+using ::shelf::execution::RmsNormSelectorWeightLayout;
+using ::shelf::execution::RopeImplementation;
+using ::shelf::execution::RopeSelectorInput;
+using ::shelf::execution::SamplingBatchMode;
+using ::shelf::execution::SamplingChoice;
+using ::shelf::execution::SamplingImplementation;
+using ::shelf::execution::SamplingRule;
+using ::shelf::execution::SamplingSelectorInput;
+using ::shelf::execution::kOptimizedMaxRows;
+using ::shelf::execution::select_bf16_gemm_config;
+using ::shelf::execution::select_elementwise_implementation;
+using ::shelf::execution::select_embedding_implementation;
+using ::shelf::execution::select_fp8_finegrained_gemm_config;
+using ::shelf::execution::select_gdn_conv_implementation;
+using ::shelf::execution::select_gdn_recurrence_implementation;
+using ::shelf::execution::select_kv_append_implementation;
+using ::shelf::execution::select_l2_normalize_implementation;
+using ::shelf::execution::select_paged_attention_implementation;
+using ::shelf::execution::select_rmsnorm_implementation;
+using ::shelf::execution::select_rope_implementation;
+using ::shelf::execution::select_sampling_implementation;
 
 }
 

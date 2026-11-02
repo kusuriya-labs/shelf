@@ -3,17 +3,17 @@
 #include <shelf/quantization/quantization_types.h>
 #include <cstdio>
 
-using ps::quantization::QuantFormatDesc;
-using ps::quantization::QuantFormatId;
-using ps::quantization::quant_codes_bytes;
-using ps::quantization::quant_element_count;
-using ps::quantization::quant_format_desc;
-using ps::quantization::quant_metadata_bytes;
-using ps::quantization::quant_metadata_count;
-using ps::quantization::quant_padded_k;
-using ps::quantization::quant_row_count;
-using ps::quantization::manifest::QuantizedEncoding;
-using ps::quantization::manifest::quant_format_id;
+using shelf::quantization::QuantFormatDesc;
+using shelf::quantization::QuantFormatId;
+using shelf::quantization::quant_codes_bytes;
+using shelf::quantization::quant_element_count;
+using shelf::quantization::quant_format_desc;
+using shelf::quantization::quant_metadata_bytes;
+using shelf::quantization::quant_metadata_count;
+using shelf::quantization::quant_padded_k;
+using shelf::quantization::quant_row_count;
+using shelf::quantization::manifest::QuantizedEncoding;
+using shelf::quantization::manifest::quant_format_id;
 
 namespace {
 int g_passed = 0;
@@ -47,9 +47,9 @@ int run() {
     check(quant_format_id(QuantizedEncoding::Bf16) == QuantFormatId::Bf16, "map bf16");
     check(quant_format_id(QuantizedEncoding::Fp8) == QuantFormatId::Fp8Finegrained, "map fp8");
 
-    using ps::quantization::ComputeSpecId;
-    using ps::quantization::QuantSpecId;
-    using ps::quantization::is_gemm_compute_compatible;
+    using shelf::quantization::ComputeSpecId;
+    using shelf::quantization::QuantSpecId;
+    using shelf::quantization::is_gemm_compute_compatible;
     check(is_gemm_compute_compatible(QuantSpecId::BF16_V1, ComputeSpecId::BF16_F32_BF16),
           "bf16 storage maps to bf16 compute");
     check(is_gemm_compute_compatible(QuantSpecId::FP8_FINEGRAINED_F32_V1, ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),

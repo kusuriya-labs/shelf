@@ -17,12 +17,12 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using fp16t = ps::fp16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using S = ::ps::runtime::DeviceStateBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using fp16t = shelf::fp16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using S = ::shelf::runtime::DeviceStateBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 uint32_t h32(uint64_t x) {
     x ^= x >> 33;
@@ -95,7 +95,7 @@ struct Bufs {
                        out_opt, requests, vals_dev, state_dev, param_dev, ctx_dev, scratch,
                        error_word};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -126,7 +126,7 @@ bool run_case(const Case& c) {
     if (!m(&buf.state_opt, state_total * sizeof(fp16t))) return false;
     if (!m(&buf.out_correct, (size_t)rows * vdim * 4)) return false;
     if (!m(&buf.out_opt, (size_t)rows * vdim * 4)) return false;
-    if (!m(&buf.requests, (size_t)nreq * sizeof(::ps::runtime::DeviceRequestDescriptor))) return false;
+    if (!m(&buf.requests, (size_t)nreq * sizeof(::shelf::runtime::DeviceRequestDescriptor))) return false;
 
     std::vector<float> h_q((size_t)rows * qk), h_k((size_t)rows * qk);
     std::vector<uint16_t> h_v((size_t)rows * vdim), h_a((size_t)rows * nvh), h_b((size_t)rows * nvh);
@@ -166,13 +166,13 @@ bool run_case(const Case& c) {
     if (hipMemcpy(buf.dt_bias, h_dt.data(), h_dt.size() * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemcpy(buf.a_log, h_al.data(), h_al.size() * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
     std::vector<fp16t> h_state16(h_state.size());
-    for (size_t i = 0; i < h_state.size(); ++i) h_state16[i] = ps::f32_to_fp16(h_state[i]);
+    for (size_t i = 0; i < h_state.size(); ++i) h_state16[i] = shelf::f32_to_fp16(h_state[i]);
     if (hipMemcpy(buf.state_correct, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemcpy(buf.state_opt, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemset(buf.out_correct, 0, (size_t)rows * vdim * 4) != hipSuccess) return false;
     if (hipMemset(buf.out_opt, 0, (size_t)rows * vdim * 4) != hipSuccess) return false;
 
-    std::vector<::ps::runtime::DeviceRequestDescriptor> h_req(nreq);
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> h_req(nreq);
     for (uint32_t r = 0; r < nreq; ++r) {
         std::memset(&h_req[r], 0, sizeof(h_req[r]));
         h_req[r].request_handle.slot = c.reqs[r].slot;
@@ -183,47 +183,47 @@ bool run_case(const Case& c) {
 
     V vals[6];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, qk, qk, buf.q, ::ps::runtime::ValueDType::F32);
-    setv(vals[1], 1, qk, qk, buf.k, ::ps::runtime::ValueDType::F32);
-    setv(vals[2], 2, vdim, vdim, buf.v, ::ps::runtime::ValueDType::BF16);
-    setv(vals[3], 3, nvh, nvh, buf.a, ::ps::runtime::ValueDType::BF16);
-    setv(vals[4], 4, nvh, nvh, buf.b, ::ps::runtime::ValueDType::BF16);
-    setv(vals[5], 5, vdim, vdim, buf.out_correct, ::ps::runtime::ValueDType::F32);
+    setv(vals[0], 0, qk, qk, buf.q, ::shelf::runtime::ValueDType::F32);
+    setv(vals[1], 1, qk, qk, buf.k, ::shelf::runtime::ValueDType::F32);
+    setv(vals[2], 2, vdim, vdim, buf.v, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[3], 3, nvh, nvh, buf.a, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[4], 4, nvh, nvh, buf.b, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[5], 5, vdim, vdim, buf.out_correct, ::shelf::runtime::ValueDType::F32);
     if (hipMalloc(&buf.vals_dev, 6 * sizeof(V)) != hipSuccess) return false;
     std::memcpy(buf.vals_dev, vals, 6 * sizeof(V));
 
     S st;
     st.slot = 0;
-    st.kind = (uint8_t)::ps::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE;
+    st.kind = (uint8_t)::shelf::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE;
     st.state_index = c.state_index;
     if (hipMalloc(&buf.state_dev, sizeof(S)) != hipSuccess) return false;
     std::memcpy(buf.state_dev, &st, sizeof(S));
 
-    ::ps::runtime::StaticParameterSlot params[2];
+    ::shelf::runtime::StaticParameterSlot params[2];
     params[0].device_ptr = buf.dt_bias;
     params[0].elements = nvh;
-    params[0].dtype = ::ps::runtime::ValueDType::BF16;
+    params[0].dtype = ::shelf::runtime::ValueDType::BF16;
     params[1].device_ptr = buf.a_log;
     params[1].elements = nvh;
-    params[1].dtype = ::ps::runtime::ValueDType::BF16;
-    if (hipMalloc(&buf.param_dev, 2 * sizeof(::ps::runtime::StaticParameterSlot)) != hipSuccess) return false;
-    std::memcpy(buf.param_dev, params, 2 * sizeof(::ps::runtime::StaticParameterSlot));
+    params[1].dtype = ::shelf::runtime::ValueDType::BF16;
+    if (hipMalloc(&buf.param_dev, 2 * sizeof(::shelf::runtime::StaticParameterSlot)) != hipSuccess) return false;
+    std::memcpy(buf.param_dev, params, 2 * sizeof(::shelf::runtime::StaticParameterSlot));
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = nreq;
-    ctx.requests = (const ::ps::runtime::DeviceRequestDescriptor*)buf.requests;
+    ctx.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)buf.requests;
     if (hipMalloc(&buf.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
     if (hipMemcpy(buf.ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMalloc(&buf.scratch, (size_t)1024 * 4096 * sizeof(float)) != hipSuccess) return false;
@@ -235,11 +235,11 @@ bool run_case(const Case& c) {
     prog.states = (const S*)buf.state_dev;
     prog.state_count = 1;
     prog.workspace_base = 0;
-    prog.parameter_table = (const ::ps::runtime::StaticParameterSlot*)buf.param_dev;
+    prog.parameter_table = (const ::shelf::runtime::StaticParameterSlot*)buf.param_dev;
     prog.parameter_slot_count = 2;
 
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::GDN_RECURRENCE;
+    binding.kernel_id = ::shelf::runtime::KernelId::GDN_RECURRENCE;
     binding.descriptor_slot = 1;
     binding.input_slots[0] = 0;
     binding.input_slots[1] = 1;
@@ -252,7 +252,7 @@ bool run_case(const Case& c) {
     binding.parameter_index0 = 0;
     binding.parameter_index1 = 1;
 
-    ::ps::kernel::ModelDispatchStateView state_view{};
+    ::shelf::kernel::ModelDispatchStateView state_view{};
     state_view.gdn.recurrent_base = (fp16t*)buf.state_correct;
     state_view.gdn.num_gdn_states = c.num_gdn_states;
     state_view.gdn.max_sequences = c.max_sequences;
@@ -262,17 +262,17 @@ bool run_case(const Case& c) {
     state_view.gdn.head_k = c.head_k;
     state_view.gdn.head_v = c.head_v;
 
-    ps::gpu::discard_cleanup_result(hipMemset(buf.error_word, 0, sizeof(uint32_t)));
-    auto stc = ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)buf.ctx_dev, state_view,
+    shelf::gpu::discard_cleanup_result(hipMemset(buf.error_word, 0, sizeof(uint32_t)));
+    auto stc = shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)buf.ctx_dev, state_view,
         (float*)buf.scratch, (uint32_t*)buf.error_word, nullptr);
     if (!stc.ok()) {
         std::printf("  [%s] correctness launch failed\n", c.name);
         return false;
     }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
-    ::ps::kernel::GdnRecurrenceArgs ka{};
+    ::shelf::kernel::GdnRecurrenceArgs ka{};
     ka.q = (const float*)buf.q;
     ka.k = (const float*)buf.k;
     ka.v = (const bf16t*)buf.v;
@@ -282,7 +282,7 @@ bool run_case(const Case& c) {
     ka.a_log = (const bf16t*)buf.a_log;
     ka.recurrent_state = (fp16t*)buf.state_opt;
     ka.output = (float*)buf.out_opt;
-    ka.requests = (const ::ps::runtime::DeviceRequestDescriptor*)buf.requests;
+    ka.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)buf.requests;
     ka.num_requests = nreq;
     ka.actual_rows = rows;
     ka.q_row_stride = qk;
@@ -302,18 +302,18 @@ bool run_case(const Case& c) {
     ka.recurrent_layer_stride = layer_stride;
     hipError_t he = hipSuccess;
     if (c.head_k == 128u && (c.head_v % 64u) == 0u) {
-        he = ::ps::kernel::launch_gdn_recurrence_f32_wmma(ka, nullptr);
+        he = ::shelf::kernel::launch_gdn_recurrence_f32_wmma(ka, nullptr);
     } else {
-        he = ::ps::kernel::launch_gdn_recurrence_f32(ka, nullptr);
+        he = ::shelf::kernel::launch_gdn_recurrence_f32(ka, nullptr);
     }
     if (he != hipSuccess) {
         std::printf("  [%s] optimized launch failed: %s\n", c.name, hipGetErrorString(he));
         return false;
     }
-    ps::gpu::discard_cleanup_result(hipGetLastError());
+    shelf::gpu::discard_cleanup_result(hipGetLastError());
 
     uint32_t ew = 0;
-    ps::gpu::discard_cleanup_result(hipMemcpy(&ew, buf.error_word, sizeof(ew), hipMemcpyDeviceToHost));
+    shelf::gpu::discard_cleanup_result(hipMemcpy(&ew, buf.error_word, sizeof(ew), hipMemcpyDeviceToHost));
     std::vector<float> oc((size_t)rows * vdim), oo((size_t)rows * vdim);
     std::vector<fp16t> sc16(state_total), so16(state_total);
     if (hipMemcpy(oc.data(), buf.out_correct, oc.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) return false;
@@ -322,8 +322,8 @@ bool run_case(const Case& c) {
     if (hipMemcpy(so16.data(), buf.state_opt, so16.size() * sizeof(fp16t), hipMemcpyDeviceToHost) != hipSuccess) return false;
     std::vector<float> sc(state_total), so(state_total);
     for (size_t i = 0; i < state_total; ++i) {
-        sc[i] = ps::fp16_to_f32(sc16[i]);
-        so[i] = ps::fp16_to_f32(so16[i]);
+        sc[i] = shelf::fp16_to_f32(sc16[i]);
+        so[i] = shelf::fp16_to_f32(so16[i]);
     }
 
     const auto out_hit = [&](size_t i) {

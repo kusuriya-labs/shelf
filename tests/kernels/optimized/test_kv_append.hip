@@ -15,8 +15,8 @@
 namespace {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
-using bf16t = ps::bf16_t;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
+using bf16t = shelf::bf16_t;
 
 int passed = 0;
 int failed = 0;
@@ -39,7 +39,7 @@ uint32_t h32(uint64_t x) {
 }
 
 uint16_t bf16_bits(double x) {
-    return ps::f32_to_bf16_rne(static_cast<float>(x));
+    return shelf::f32_to_bf16_rne(static_cast<float>(x));
 }
 
 float f32_from_bf16(uint16_t bits) {
@@ -79,15 +79,15 @@ struct Dev {
 };
 
 void free_dev(Dev& d) {
-    if (d.k_in) ps::gpu::discard_cleanup_result(hipFree(d.k_in));
-    if (d.v_in) ps::gpu::discard_cleanup_result(hipFree(d.v_in));
-    if (d.row_seq) ps::gpu::discard_cleanup_result(hipFree(d.row_seq));
-    if (d.row_pos) ps::gpu::discard_cleanup_result(hipFree(d.row_pos));
-    if (d.block_tables) ps::gpu::discard_cleanup_result(hipFree(d.block_tables));
-    if (d.k_pool) ps::gpu::discard_cleanup_result(hipFree(d.k_pool));
-    if (d.v_pool) ps::gpu::discard_cleanup_result(hipFree(d.v_pool));
-    if (d.k_scale) ps::gpu::discard_cleanup_result(hipFree(d.k_scale));
-    if (d.v_scale) ps::gpu::discard_cleanup_result(hipFree(d.v_scale));
+    if (d.k_in) shelf::gpu::discard_cleanup_result(hipFree(d.k_in));
+    if (d.v_in) shelf::gpu::discard_cleanup_result(hipFree(d.v_in));
+    if (d.row_seq) shelf::gpu::discard_cleanup_result(hipFree(d.row_seq));
+    if (d.row_pos) shelf::gpu::discard_cleanup_result(hipFree(d.row_pos));
+    if (d.block_tables) shelf::gpu::discard_cleanup_result(hipFree(d.block_tables));
+    if (d.k_pool) shelf::gpu::discard_cleanup_result(hipFree(d.k_pool));
+    if (d.v_pool) shelf::gpu::discard_cleanup_result(hipFree(d.v_pool));
+    if (d.k_scale) shelf::gpu::discard_cleanup_result(hipFree(d.k_scale));
+    if (d.v_scale) shelf::gpu::discard_cleanup_result(hipFree(d.v_scale));
     d = Dev{};
 }
 
@@ -218,7 +218,7 @@ bool run_case(const Config& cfg, const char* label) {
     }
     if (!ok) { std::printf("FAIL: %s upload\n", label); free_dev(d); check(false, label); return false; }
 
-    ::ps::kernel::KvAppendCommonArgs c;
+    ::shelf::kernel::KvAppendCommonArgs c;
     c.k_input = static_cast<const bf16t*>(d.k_in);
     c.v_input = static_cast<const bf16t*>(d.v_in);
     c.k_row_stride = ept;
@@ -241,11 +241,11 @@ bool run_case(const Config& cfg, const char* label) {
 
     hipError_t h = hipSuccess;
     if (cfg.fp8) {
-        h = ::ps::kernel::launch_kv_append_fp8_e4m3(
+        h = ::shelf::kernel::launch_kv_append_fp8_e4m3(
             c, static_cast<fp8*>(d.k_pool), static_cast<fp8*>(d.v_pool),
             static_cast<float*>(d.k_scale), static_cast<float*>(d.v_scale), 0);
     } else {
-        h = ::ps::kernel::launch_kv_append_bf16(
+        h = ::shelf::kernel::launch_kv_append_bf16(
             c, static_cast<bf16t*>(d.k_pool), static_cast<bf16t*>(d.v_pool), 0);
     }
     ok = (h == hipSuccess) && (hipStreamSynchronize(0) == hipSuccess);

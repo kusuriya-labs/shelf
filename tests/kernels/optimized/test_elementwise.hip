@@ -15,10 +15,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using DT = ::shelf::runtime::ValueDType;
 
 uint32_t h32(uint64_t x) {
     x ^= x >> 33;
@@ -43,7 +43,7 @@ struct Buf {
     void* dev = nullptr;
     size_t bytes = 0;
     ~Buf() {
-        if (dev) ps::gpu::discard_cleanup_result(hipFree(dev));
+        if (dev) shelf::gpu::discard_cleanup_result(hipFree(dev));
     }
     bool alloc(size_t b) {
         bytes = b;
@@ -67,9 +67,9 @@ struct Buf {
 
 void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt) {
     v.logical_value = id;
-    v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     v.dtype = dt;
-    v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     v.slot = 0;
     v.feature_count = feat;
     v.row_stride = stride;
@@ -79,7 +79,7 @@ void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt
 
 struct Ctx {
     static constexpr uint32_t kMaxVals = 4;
-    ::ps::runtime::DeviceBatchContext h{};
+    ::shelf::runtime::DeviceBatchContext h{};
     void* dev = nullptr;
     void* scratch = nullptr;
     void* err = nullptr;
@@ -87,7 +87,7 @@ struct Ctx {
     ~Ctx() {
         void* b[] = {dev, scratch, err, vals_dev};
         for (auto* q : b)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
     bool init(uint32_t rows) {
         h = {};
@@ -110,10 +110,10 @@ struct Ctx {
         p.values = (const V*)vals_dev;
         p.value_count = vcount;
         p.workspace_base = 0;
-        ps::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), nullptr));
-        ::ps::kernel::ModelDispatchStateView sv{};
-        auto st = ps::kernel::launch_model_dispatch_correctness(
-            p, b, (::ps::runtime::DeviceBatchContext*)dev, sv, (float*)scratch,
+        shelf::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), nullptr));
+        ::shelf::kernel::ModelDispatchStateView sv{};
+        auto st = shelf::kernel::launch_model_dispatch_correctness(
+            p, b, (::shelf::runtime::DeviceBatchContext*)dev, sv, (float*)scratch,
             (uint32_t*)err, nullptr);
         if (!st.ok()) return false;
         uint32_t e = 0;
@@ -247,14 +247,14 @@ bool run_case(const Case& c, size_t* mm_out) {
             set_val(vals[1], 1, f, c.out_stride, o0.dev, DT::BF16);
             set_val(vals[2], 2, f, c.out_stride, o1.dev, DT::BF16);
             B binding{};
-            binding.kernel_id = ::ps::runtime::KernelId::SPLIT;
+            binding.kernel_id = ::shelf::runtime::KernelId::SPLIT;
             binding.input_slots[0] = 0;
             binding.output_slots[0] = 1;
             binding.output_slots[1] = 2;
             binding.input_count = 1;
             binding.output_count = 2;
             binding.flags = (c.op == Op::SplitInterleaved)
-                ? static_cast<uint32_t>(::ps::runtime::SplitLayout::INTERLEAVED_HEADS) : 0u;
+                ? static_cast<uint32_t>(::shelf::runtime::SplitLayout::INTERLEAVED_HEADS) : 0u;
             binding.group_size = c.head_dim;
             if (!ctx.run(vals, 3, binding)) { std::printf("  [%s] CORR-SPLIT FAIL\n", c.name); *mm_out = 1; return false; }
         } else if (c.op == Op::Residual || c.op == Op::Swiglu || c.op == Op::Mul) {
@@ -270,9 +270,9 @@ bool run_case(const Case& c, size_t* mm_out) {
             binding.output_slots[0] = 2;
             binding.input_count = 2;
             binding.output_count = 1;
-            binding.kernel_id = (c.op == Op::Residual) ? ::ps::runtime::KernelId::RESIDUAL_ADD
-                               : (c.op == Op::Swiglu) ? ::ps::runtime::KernelId::SWIGLU
-                                                      : ::ps::runtime::KernelId::MUL;
+            binding.kernel_id = (c.op == Op::Residual) ? ::shelf::runtime::KernelId::RESIDUAL_ADD
+                               : (c.op == Op::Swiglu) ? ::shelf::runtime::KernelId::SWIGLU
+                                                      : ::shelf::runtime::KernelId::MUL;
             if (!ctx.run(vals, 3, binding)) { std::printf("  [%s] CORR-BIN FAIL\n", c.name); *mm_out = 1; return false; }
         } else {
             DT a_dt = f32_a ? DT::F32 : DT::BF16;
@@ -284,11 +284,11 @@ bool run_case(const Case& c, size_t* mm_out) {
             binding.output_slots[0] = 1;
             binding.input_count = 1;
             binding.output_count = 1;
-            if (c.op == Op::Sigmoid) binding.kernel_id = ::ps::runtime::KernelId::SIGMOID;
+            if (c.op == Op::Sigmoid) binding.kernel_id = ::shelf::runtime::KernelId::SIGMOID;
             else if (c.op == Op::SiluB2F || c.op == Op::SiluF2B)
-                binding.kernel_id = ::ps::runtime::KernelId::SILU;
+                binding.kernel_id = ::shelf::runtime::KernelId::SILU;
             else {
-                binding.kernel_id = ::ps::runtime::KernelId::SCALE;
+                binding.kernel_id = ::shelf::runtime::KernelId::SCALE;
                 binding.scalar_a = c.scale;
             }
             if (!ctx.run(vals, 2, binding)) { std::printf("  [%s] CORR-UNARY FAIL\n", c.name); *mm_out = 1; return false; }
@@ -311,44 +311,44 @@ bool run_case(const Case& c, size_t* mm_out) {
         bool ok = false;
         switch (c.op) {
             case Op::Residual:
-                ok = ::ps::kernel::launch_residual_add_bf16((const ::ps::bf16_t*)a.dev,
-                    c.in_stride, (const ::ps::bf16_t*)b.dev, c.in_stride, (::ps::bf16_t*)o0.dev,
+                ok = ::shelf::kernel::launch_residual_add_bf16((const ::shelf::bf16_t*)a.dev,
+                    c.in_stride, (const ::shelf::bf16_t*)b.dev, c.in_stride, (::shelf::bf16_t*)o0.dev,
                     c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::Swiglu:
-                ok = ::ps::kernel::launch_swiglu_bf16((const ::ps::bf16_t*)a.dev,
-                    c.in_stride, (const ::ps::bf16_t*)b.dev, c.in_stride, (::ps::bf16_t*)o0.dev,
+                ok = ::shelf::kernel::launch_swiglu_bf16((const ::shelf::bf16_t*)a.dev,
+                    c.in_stride, (const ::shelf::bf16_t*)b.dev, c.in_stride, (::shelf::bf16_t*)o0.dev,
                     c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::Sigmoid:
-                ok = ::ps::kernel::launch_sigmoid_bf16_f32((const ::ps::bf16_t*)a.dev,
+                ok = ::shelf::kernel::launch_sigmoid_bf16_f32((const ::shelf::bf16_t*)a.dev,
                     c.in_stride, (float*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::SiluB2F:
-                ok = ::ps::kernel::launch_silu_bf16_f32((const ::ps::bf16_t*)a.dev,
+                ok = ::shelf::kernel::launch_silu_bf16_f32((const ::shelf::bf16_t*)a.dev,
                     c.in_stride, (float*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::SiluF2B:
-                ok = ::ps::kernel::launch_silu_f32_bf16((const float*)a.dev, c.in_stride,
-                    (::ps::bf16_t*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
+                ok = ::shelf::kernel::launch_silu_f32_bf16((const float*)a.dev, c.in_stride,
+                    (::shelf::bf16_t*)o0.dev, c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::Mul:
-                ok = ::ps::kernel::launch_mul_f32_f32_bf16((const float*)a.dev,
-                    c.in_stride, (const float*)b.dev, c.in_stride, (::ps::bf16_t*)o0.dev,
+                ok = ::shelf::kernel::launch_mul_f32_f32_bf16((const float*)a.dev,
+                    c.in_stride, (const float*)b.dev, c.in_stride, (::shelf::bf16_t*)o0.dev,
                     c.out_stride, rows, f, nullptr) == hipSuccess;
                 break;
             case Op::Scale:
-                ok = ::ps::kernel::launch_scale_f32((const float*)a.dev, c.in_stride,
+                ok = ::shelf::kernel::launch_scale_f32((const float*)a.dev, c.in_stride,
                     (float*)o0.dev, c.out_stride, rows, f, c.scale, nullptr) == hipSuccess;
                 break;
             case Op::SplitHalves:
             case Op::SplitInterleaved:
-                ok = ::ps::kernel::launch_split_bf16((const ::ps::bf16_t*)a.dev,
-                    c.in_stride, (::ps::bf16_t*)o0.dev, c.out_stride, (::ps::bf16_t*)o1.dev,
+                ok = ::shelf::kernel::launch_split_bf16((const ::shelf::bf16_t*)a.dev,
+                    c.in_stride, (::shelf::bf16_t*)o0.dev, c.out_stride, (::shelf::bf16_t*)o1.dev,
                     c.out_stride, rows, f,
                     c.op == Op::SplitInterleaved
-                        ? ::ps::kernel::ElementwiseSplitLayout::InterleavedHeads
-                        : ::ps::kernel::ElementwiseSplitLayout::Halves,
+                        ? ::shelf::kernel::ElementwiseSplitLayout::InterleavedHeads
+                        : ::shelf::kernel::ElementwiseSplitLayout::Halves,
                     c.head_dim, nullptr) == hipSuccess;
                 break;
         }

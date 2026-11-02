@@ -7,11 +7,11 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct StochasticSamplingF32Args {
     const float* logits = nullptr;
-    const ::ps::runtime::DeviceSamplingParams* sampling = nullptr;
+    const ::shelf::runtime::DeviceSamplingParams* sampling = nullptr;
     int32_t* sampled_tokens = nullptr;
     uint32_t outputs = 0;
     uint32_t vocab_size = 0;
@@ -22,7 +22,7 @@ struct StochasticSamplingF32Args {
 
 struct StochasticTopKSamplingArgs {
     const float* logits = nullptr;
-    const ::ps::runtime::DeviceSamplingParams* sampling = nullptr;
+    const ::shelf::runtime::DeviceSamplingParams* sampling = nullptr;
     int32_t* sampled_tokens = nullptr;
     const int32_t* top_ids = nullptr;
     const float* top_logits = nullptr;
@@ -43,4 +43,4 @@ hipError_t launch_stochastic_topk_sampling_f32(
     const StochasticTopKSamplingArgs& args,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -3,7 +3,7 @@
 #include <shelf/kernels/kv_types.h>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 enum class PagedAttentionImplementation : uint8_t {
     Correctness,
@@ -11,8 +11,8 @@ enum class PagedAttentionImplementation : uint8_t {
 };
 
 struct PagedAttentionSelectorInput {
-    ::ps::kernel::KVCacheDType kv_dtype = ::ps::kernel::KVCacheDType::BF16;
-    ::ps::runtime::ValueDType output_dtype = ::ps::runtime::ValueDType::BF16;
+    ::shelf::kernel::KVCacheDType kv_dtype = ::shelf::kernel::KVCacheDType::BF16;
+    ::shelf::runtime::ValueDType output_dtype = ::shelf::runtime::ValueDType::BF16;
     uint32_t rows = 0;
     uint32_t q_heads = 0;
     uint32_t kv_heads = 0;
@@ -24,4 +24,4 @@ struct PagedAttentionSelectorInput {
 PagedAttentionImplementation
 select_paged_attention_implementation(const PagedAttentionSelectorInput& input);
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

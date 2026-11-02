@@ -9,16 +9,16 @@
 #include <string>
 #include <vector>
 
-using ps::Status;
-using ps::weights::materialize_rank_local_canonical;
-using ps::weights::OwnedCanonicalTensor;
-using ps::weights::TensorPartitionDesc;
-using ps::weights::TensorPartitionRange;
-using ps::weights::tensor_partition_local_shape;
-using ps::weights::validate_tensor_partition;
-using namespace ps::quantization;
-using namespace ps::quantization::manifest;
-using namespace ps::quantization::bundle;
+using shelf::Status;
+using shelf::weights::materialize_rank_local_canonical;
+using shelf::weights::OwnedCanonicalTensor;
+using shelf::weights::TensorPartitionDesc;
+using shelf::weights::TensorPartitionRange;
+using shelf::weights::tensor_partition_local_shape;
+using shelf::weights::validate_tensor_partition;
+using namespace shelf::quantization;
+using namespace shelf::quantization::manifest;
+using namespace shelf::quantization::bundle;
 
 static int g_fail = 0;
 

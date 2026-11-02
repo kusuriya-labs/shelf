@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::gpu {
+namespace shelf::gpu {
 
 constexpr uint64_t align_up_16(uint64_t bytes) noexcept {
     return (bytes + 15ull) & ~15ull;

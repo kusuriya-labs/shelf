@@ -6,8 +6,8 @@
 #include <cstdio>
 #include <string>
 
-namespace rt = ps::runtime;
-namespace quant = ps::quantization;
+namespace rt = shelf::runtime;
+namespace quant = shelf::quantization;
 
 namespace {
 
@@ -62,7 +62,7 @@ void expect_error(
     auto resolved = rt::resolve_linear_quant_contract(weight_encoding, compute_spec);
     check(!resolved.ok(), tag + ": rejected");
     if (resolved.ok()) return;
-    check(resolved.status().code() == ps::Status::Code::invalid_argument,
+    check(resolved.status().code() == shelf::Status::Code::invalid_argument,
           tag + ": invalid argument status");
     check(resolved.status().message().find(text) != std::string::npos,
           tag + ": message keeps '" + text + "'");
@@ -82,12 +82,12 @@ int main() {
     }
 
     expect_quantized(
-        static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u, "fp8");
 
     expect_error(
-        static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::BF16_F32_BF16),
         "fp8 linear weight requires fp8 compute spec", "fp8 bf16 spec");
     expect_error(

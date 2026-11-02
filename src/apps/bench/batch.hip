@@ -19,7 +19,7 @@ namespace {
 
 uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1u) / b; }
 
-uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt == 1) ++n;
@@ -103,11 +103,11 @@ struct RunResult {
     bool ok = false;
 };
 
-RunResult run_pass(ps::qwen35::Executor& executor,
-                   ps::state::SequenceSlotPool& seq_pool,
-                   ps::state::GdnStatePool& gdn_pool,
-                   ps::state::PagedKVPool& kv_pool,
-                   ps::qwen35::runtime::ContinuousBatcher& batcher,
+RunResult run_pass(shelf::qwen35::Executor& executor,
+                   shelf::state::SequenceSlotPool& seq_pool,
+                   shelf::state::GdnStatePool& gdn_pool,
+                   shelf::state::PagedKVPool& kv_pool,
+                   shelf::qwen35::runtime::ContinuousBatcher& batcher,
                    const BatchOptions& opts,
                    hipStream_t stream) {
     RunResult out;
@@ -204,15 +204,15 @@ int run_batch(int argc, char** argv) {
         arena_bytes = static_cast<std::size_t>(opts.arena_gib * 1024.0 * 1024.0 * 1024.0);
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(opts.device, arena_bytes);
+    auto arena_result = shelf::gpu::GpuArena::create(opts.device, arena_bytes);
     if (!arena_result.ok()) {
         std::fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
         return 1;
     }
     auto arena = arena_result.release();
 
-    ps::qwen35::Qwen35LoadOptions load_options;
-    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+    shelf::qwen35::Qwen35LoadOptions load_options;
+    auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
         opts.model_dir, arena, stream, load_options);
     if (!model_result.ok()) {
         std::fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
@@ -230,18 +230,18 @@ int run_batch(int argc, char** argv) {
                                                    opts.max_new_tokens + 8);
     const uint32_t num_pages = ceil_div(seq_len, static_cast<uint32_t>(opts.page_tokens)) + 2;
 
-    auto seq_pool_result = ps::state::SequenceSlotPool::create(arena, 2, num_pages);
+    auto seq_pool_result = shelf::state::SequenceSlotPool::create(arena, 2, num_pages);
     if (!seq_pool_result.ok()) return 1;
     auto seq_pool = seq_pool_result.release();
 
-    auto gdn_pool_result = ps::state::GdnStatePool::create(
-        arena, 2, ps::qwen35::make_qwen35_gdn_state_layout(tc));
+    auto gdn_pool_result = shelf::state::GdnStatePool::create(
+        arena, 2, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
     if (!gdn_pool_result.ok()) return 1;
     auto gdn_pool = gdn_pool_result.release();
 
-    auto kv_pool_result = ps::state::PagedKVPool::create(
+    auto kv_pool_result = shelf::state::PagedKVPool::create(
         arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-        num_attn_layers, kv_heads, head_dim, ps::kernel::KVCacheDType::BF16);
+        num_attn_layers, kv_heads, head_dim, shelf::kernel::KVCacheDType::BF16);
     if (!kv_pool_result.ok()) return 1;
     auto kv_pool = kv_pool_result.release();
 
@@ -254,11 +254,11 @@ int run_batch(int argc, char** argv) {
     const uint32_t sched_tokens = opts.max_sched_tokens > 0
         ? static_cast<uint32_t>(opts.max_sched_tokens)
         : static_cast<uint32_t>(opts.prefix_tokens);
-    ps::qwen35::ExecutorConfig exec_config;
+    shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows = sched_tokens;
     exec_config.max_scheduled_requests = 1;
 
-    auto exec_result = ps::qwen35::create_model_executor(
+    auto exec_result = shelf::qwen35::create_model_executor(
         model, seq_pool, gdn_pool, kv_pool, arena, exec_config);
     if (!exec_result.ok()) {
         std::fprintf(stderr, "create_model_executor failed: %s\n", exec_result.status().message().c_str());
@@ -266,7 +266,7 @@ int run_batch(int argc, char** argv) {
     }
     auto executor = exec_result.release();
 
-    ps::qwen35::runtime::ContinuousBatcherConfig cfg;
+    shelf::qwen35::runtime::ContinuousBatcherConfig cfg;
     cfg.max_num_batched_tokens = sched_tokens;
     cfg.max_scheduled_requests = 1;
     cfg.max_seq_len = seq_len;
@@ -274,8 +274,8 @@ int run_batch(int argc, char** argv) {
     cfg.eos_token_ids = tc.stop_tokens;
 
     auto run_one = [&]() -> RunResult {
-        ps::qwen35::runtime::ContinuousBatcherConfig c = cfg;
-        ps::qwen35::runtime::ContinuousBatcher batcher(
+        shelf::qwen35::runtime::ContinuousBatcherConfig c = cfg;
+        shelf::qwen35::runtime::ContinuousBatcher batcher(
             executor, seq_pool, gdn_pool, kv_pool, c, stream);
         return run_pass(executor, seq_pool, gdn_pool, kv_pool, batcher, opts, stream);
     };

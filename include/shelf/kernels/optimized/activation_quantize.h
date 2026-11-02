@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 
 inline constexpr const char* kActivationQuantizeFp8FinegrainedK5120Symbol =
@@ -41,7 +41,7 @@ static_assert(offsetof(ActivationQuantizeFp8FinegrainedKArgs, code_row_stride) =
 static_assert(offsetof(ActivationQuantizeFp8FinegrainedKArgs, scale_row_stride) == 32);
 
 bool activation_quantize_fp8_finegrained_vec_supported(
-    const ::ps::bf16_t* input,
+    const ::shelf::bf16_t* input,
     const uint8_t* codes,
     uint32_t k,
     uint32_t k_padded,
@@ -49,7 +49,7 @@ bool activation_quantize_fp8_finegrained_vec_supported(
 
 
 hipError_t launch_activation_quantize_fp8_finegrained(
-    const ::ps::bf16_t* input,
+    const ::shelf::bf16_t* input,
     uint8_t* codes,
     float* scales,
     uint32_t rows,
@@ -62,7 +62,7 @@ hipError_t launch_activation_quantize_fp8_finegrained(
     bool* specialized = nullptr);
 
 hipError_t launch_activation_quantize_fp8_finegrained_generic(
-    const ::ps::bf16_t* input,
+    const ::shelf::bf16_t* input,
     uint8_t* codes,
     float* scales,
     uint32_t rows,

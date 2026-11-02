@@ -1,7 +1,7 @@
 #include <shelf/quantization/manifest/crc32.h>
 #include <array>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 namespace {
 

@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr const char* kBf16ExactRowsSymbol =
     "shelf_gemm_bf16_exact_rows_1";
@@ -116,4 +116,4 @@ hipError_t launch_gemm_bf16(
     uint32_t output_row_stride,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

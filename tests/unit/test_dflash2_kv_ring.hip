@@ -13,8 +13,8 @@
 
 #include <algorithm>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -26,7 +26,7 @@ static void check(bool cond, const std::string& msg) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -38,7 +38,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -67,8 +67,8 @@ static std::vector<bf16_t> make_src(
 }
 
 struct Ring {
-    ps::gpu::Tensor k;
-    ps::gpu::Tensor v;
+    shelf::gpu::Tensor k;
+    shelf::gpu::Tensor v;
     std::vector<bf16_t> host_k;
     std::vector<bf16_t> host_v;
     uint32_t capacity = 0;
@@ -81,7 +81,7 @@ struct Ring {
 
 static void append(
     Ring& ring,
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const std::vector<bf16_t>& k_src,
     const std::vector<bf16_t>& v_src,
@@ -92,8 +92,8 @@ static void append(
     const uint32_t effective_rows = rows > capacity ? capacity : rows;
     const uint32_t effective_position = position_start + skip;
 
-    ps::gpu::Tensor dk;
-    ps::gpu::Tensor dv;
+    shelf::gpu::Tensor dk;
+    shelf::gpu::Tensor dv;
     check(alloc_bf16(arena, {rows, ring.kv_features}, dk), "src k alloc");
     check(alloc_bf16(arena, {rows, ring.kv_features}, dv), "src v alloc");
     check(hipMemcpy(dk.data<bf16_t>(), k_src.data(), k_src.size() * sizeof(bf16_t),
@@ -103,7 +103,7 @@ static void append(
                     hipMemcpyHostToDevice) == hipSuccess,
           "v upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_kv_ring_append_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_kv_ring_append_bf16(
         dk.data<bf16_t>() + static_cast<std::size_t>(skip) * ring.kv_features,
         dv.data<bf16_t>() + static_cast<std::size_t>(skip) * ring.kv_features,
         ring.k.data<bf16_t>(), ring.v.data<bf16_t>(), effective_rows, ring.kv_features,
@@ -143,7 +143,7 @@ static void verify_retained(const Ring& ring, const std::string& tag) {
 }
 
 static void run_suite(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t capacity,
     uint32_t kv_features) {
@@ -207,12 +207,12 @@ static void run_suite(
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 256ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 256ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -223,8 +223,8 @@ int main() {
     run_suite(arena, stream, 3u, 4u);
     run_suite(arena, stream, 2048u, 8u);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_kv_ring: failed=%d\n", g_fail);

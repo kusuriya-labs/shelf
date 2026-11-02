@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 constexpr uint32_t kQuantBlockElements = 32;
 constexpr uint32_t kFp8ScaleBlockN = 128;
@@ -180,4 +180,4 @@ inline uint64_t quant_row_count(const std::vector<int64_t>& shape) {
     return rows;
 }
 
-}  // namespace ps::quantization
+}  // namespace shelf::quantization

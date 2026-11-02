@@ -24,10 +24,10 @@ static void check(bool cond, const std::string& msg) {
     }
 }
 
-using ps::bf16_t;
+using shelf::bf16_t;
 
 static bool alloc_f32(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(float), 128);
@@ -39,14 +39,14 @@ static bool alloc_f32(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<float>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<float>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
 }
 
 static bool alloc_i32(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(int32_t), 128);
@@ -58,7 +58,7 @@ static bool alloc_i32(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<int32_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<int32_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -95,31 +95,31 @@ static Reference reference_topk(
 }
 
 static void run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const std::string& name,
     const std::vector<float>& host_logits,
     uint32_t rows,
     uint32_t vocab,
     uint32_t k) {
-    ps::gpu::Tensor logits;
-    ps::gpu::Tensor out_ids;
-    ps::gpu::Tensor out_logits;
-    ps::gpu::Tensor scratch_ids;
-    ps::gpu::Tensor scratch_logits;
+    shelf::gpu::Tensor logits;
+    shelf::gpu::Tensor out_ids;
+    shelf::gpu::Tensor out_logits;
+    shelf::gpu::Tensor scratch_ids;
+    shelf::gpu::Tensor scratch_logits;
     const bool alloc_ok =
         alloc_f32(arena, {rows, vocab}, logits) &&
         alloc_i32(arena, {rows, k}, out_ids) &&
         alloc_f32(arena, {rows, k}, out_logits) &&
-        alloc_i32(arena, {rows, ps::kernel::kDflash2TopKScratchPerRow}, scratch_ids) &&
-        alloc_f32(arena, {rows, ps::kernel::kDflash2TopKScratchPerRow}, scratch_logits);
+        alloc_i32(arena, {rows, shelf::kernel::kDflash2TopKScratchPerRow}, scratch_ids) &&
+        alloc_f32(arena, {rows, shelf::kernel::kDflash2TopKScratchPerRow}, scratch_logits);
     check(alloc_ok, name + " alloc");
     if (!alloc_ok) return;
     check(hipMemcpy(logits.data<float>(), host_logits.data(),
                     host_logits.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess,
           name + " upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_topk_f32(
+    const hipError_t err = shelf::kernel::launch_dflash2_topk_f32(
         logits.data<float>(), rows, vocab, vocab, k, out_ids.data<int32_t>(),
         out_logits.data<float>(), scratch_ids.data<int32_t>(),
         scratch_logits.data<float>(), stream);
@@ -155,12 +155,12 @@ int main() {
         std::printf("SKIP: no GPU\n");
         return 77;
     }
-    auto arena_result = ps::gpu::GpuArena::create(0, 1ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -212,7 +212,7 @@ int main() {
 
     {
         const uint32_t rows = 2u;
-        const uint32_t vocab = ps::kernel::kDflash2TopKThreads * 16u * 4u + 33u;
+        const uint32_t vocab = shelf::kernel::kDflash2TopKThreads * 16u * 4u + 33u;
         std::vector<float> logits(static_cast<std::size_t>(rows) * vocab);
         for (std::size_t i = 0; i < logits.size(); ++i) {
             logits[i] = static_cast<float>((i * 2654435761u) % 4093u);
@@ -235,8 +235,8 @@ int main() {
         run_case(arena, stream, "ties_mixed", logits, rows, vocab, k);
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown");
     std::printf("test_dflash2_topk: failed=%d\n", g_fail);
     return g_fail == 0 ? 0 : 1;

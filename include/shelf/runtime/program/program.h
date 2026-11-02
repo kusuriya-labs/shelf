@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 constexpr uint32_t kMaxIoSlots = 6;
 constexpr uint32_t kNoWeight = 0xFFFFFFFFu;

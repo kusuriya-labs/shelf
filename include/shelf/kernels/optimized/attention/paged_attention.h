@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 constexpr uint32_t kPagedAttentionHeadLimit = 256u;
 inline constexpr uint32_t kPagedAttentionBlock = 256u;
@@ -147,8 +147,8 @@ static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 152);
 
 struct PagedAttentionFp8SplitArgs {
     PagedAttentionCommonArgs common{};
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool = nullptr;
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool = nullptr;
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool = nullptr;
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool = nullptr;
     const float* k_scale_pool = nullptr;
     const float* v_scale_pool = nullptr;
     float* partials = nullptr;
@@ -186,8 +186,8 @@ hipError_t
 launch_attention_paged_prefill_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
 
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
 
     const float* k_scale_pool,
     const float* v_scale_pool,
@@ -198,8 +198,8 @@ hipError_t
 launch_attention_paged_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
 
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
 
     const float* k_scale_pool,
     const float* v_scale_pool,
@@ -231,8 +231,8 @@ hipError_t
 launch_attention_paged_fp8_split(
     const PagedAttentionCommonArgs& common,
 
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
 
     const float* k_scale_pool,
     const float* v_scale_pool,
@@ -242,4 +242,4 @@ launch_attention_paged_fp8_split(
 
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

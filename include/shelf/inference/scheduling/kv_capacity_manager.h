@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <unordered_map>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 enum class KVAdmissionPolicy : uint8_t {

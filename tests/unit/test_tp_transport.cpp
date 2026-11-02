@@ -11,13 +11,13 @@
 #include <string>
 #include <vector>
 
-using ps::Status;
-using ps::runtime::HostMediatedTpTransport;
-using ps::runtime::TpSumInvocation;
-using ps::runtime::TpSumTarget;
-using ps::runtime::TpTransport;
-using ps::runtime::ValueDType;
-using ps::runtime::create_tp_transport;
+using shelf::Status;
+using shelf::runtime::HostMediatedTpTransport;
+using shelf::runtime::TpSumInvocation;
+using shelf::runtime::TpSumTarget;
+using shelf::runtime::TpTransport;
+using shelf::runtime::ValueDType;
+using shelf::runtime::create_tp_transport;
 
 static int g_fail = 0;
 
@@ -51,14 +51,14 @@ static std::vector<std::uint8_t> make_reference(const std::vector<std::uint8_t>&
         const std::uint32_t ub = static_cast<std::uint32_t>(pb[i]) << 16;
         std::memcpy(&fa, &ua, sizeof(fa));
         std::memcpy(&fb, &ub, sizeof(fb));
-        d[i] = ps::f32_to_bf16_rne(fa + fb);
+        d[i] = shelf::f32_to_bf16_rne(fa + fb);
     }
     return out;
 }
 
 static bool make_pair(int device, void*& buffer, hipStream_t& stream, hipEvent_t& ready,
                       std::size_t bytes) {
-    auto scope = ps::gpu::ScopedDevice::create(device);
+    auto scope = shelf::gpu::ScopedDevice::create(device);
     if (!scope.ok()) {
         fail("device scope " + std::to_string(device));
         return false;
@@ -80,11 +80,11 @@ static bool make_pair(int device, void*& buffer, hipStream_t& stream, hipEvent_t
 
 static void destroy_pair(int device, void*& buffer, hipStream_t& stream,
                          hipEvent_t& ready) {
-    auto scope = ps::gpu::ScopedDevice::create(device);
+    auto scope = shelf::gpu::ScopedDevice::create(device);
     if (!scope.ok()) return;
-    if (buffer != nullptr) ps::gpu::discard_cleanup_result(hipFree(buffer));
-    if (ready != nullptr) ps::gpu::discard_cleanup_result(hipEventDestroy(ready));
-    if (stream != nullptr) ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    if (buffer != nullptr) shelf::gpu::discard_cleanup_result(hipFree(buffer));
+    if (ready != nullptr) shelf::gpu::discard_cleanup_result(hipEventDestroy(ready));
+    if (stream != nullptr) shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     buffer = nullptr;
     ready = nullptr;
     stream = nullptr;
@@ -115,13 +115,13 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
                 static_cast<float>((i * 37u + 11u) % 1009u) * (1.0f / 64.0f) - 8.0f;
             const float vb =
                 static_cast<float>((i * 53u + 7u) % 997u) * (1.0f / 64.0f) - 8.0f;
-            ba[i] = ps::f32_to_bf16_rne(va);
-            bb[i] = ps::f32_to_bf16_rne(vb);
+            ba[i] = shelf::f32_to_bf16_rne(va);
+            bb[i] = shelf::f32_to_bf16_rne(vb);
         }
     }
 
     {
-        auto scope = ps::gpu::ScopedDevice::create(0);
+        auto scope = shelf::gpu::ScopedDevice::create(0);
         if (!scope.ok()) { fail("upload scope 0"); return; }
         if (hipMemcpy(buffer_a, host_a.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
             fail("upload a");
@@ -130,7 +130,7 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
         if (hipEventRecord(ready_a, stream_a) != hipSuccess) fail("record ready a");
     }
     {
-        auto scope = ps::gpu::ScopedDevice::create(1);
+        auto scope = shelf::gpu::ScopedDevice::create(1);
         if (!scope.ok()) { fail("upload scope 1"); return; }
         if (hipMemcpy(buffer_b, host_b.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
             fail("upload b");
@@ -161,11 +161,11 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
     if (!st.ok()) return;
 
     {
-        auto scope = ps::gpu::ScopedDevice::create(0);
+        auto scope = shelf::gpu::ScopedDevice::create(0);
         if (scope.ok() && hipStreamSynchronize(stream_a) != hipSuccess) fail("sync a");
     }
     {
-        auto scope = ps::gpu::ScopedDevice::create(1);
+        auto scope = shelf::gpu::ScopedDevice::create(1);
         if (scope.ok() && hipStreamSynchronize(stream_b) != hipSuccess) fail("sync b");
     }
 
@@ -173,13 +173,13 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
     std::vector<std::uint8_t> got_a(bytes);
     std::vector<std::uint8_t> got_b(bytes);
     {
-        auto scope = ps::gpu::ScopedDevice::create(0);
+        auto scope = shelf::gpu::ScopedDevice::create(0);
         if (scope.ok() && hipMemcpy(got_a.data(), buffer_a, bytes,
                                     hipMemcpyDeviceToHost) != hipSuccess)
             fail("download a");
     }
     {
-        auto scope = ps::gpu::ScopedDevice::create(1);
+        auto scope = shelf::gpu::ScopedDevice::create(1);
         if (scope.ok() && hipMemcpy(got_b.data(), buffer_b, bytes,
                                     hipMemcpyDeviceToHost) != hipSuccess)
             fail("download b");

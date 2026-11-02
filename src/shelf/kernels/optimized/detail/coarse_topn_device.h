@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ bool topn_better(float va, int32_t ia, float vb, int32_t ib) {
     if (va > vb)
@@ -157,4 +157,4 @@ __device__ __forceinline__ void topn_insert_key(
     ids[pos] = id;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

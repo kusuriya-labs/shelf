@@ -40,14 +40,14 @@ float f32_from_bf16(uint16_t bits) {
 }
 
 float bf16_rne_f32(float x) {
-    return f32_from_bf16(ps::f32_to_bf16_rne(x));
+    return f32_from_bf16(shelf::f32_to_bf16_rne(x));
 }
 
 struct Config {
     bool in_f32;
     bool out_f32;
-    ps::kernel::RmsNormWeightLayout layout;
-    ps::kernel::RmsNormWeightMode mode;
+    shelf::kernel::RmsNormWeightLayout layout;
+    shelf::kernel::RmsNormWeightMode mode;
     uint32_t weight_elements;
 };
 
@@ -74,7 +74,7 @@ void cpu_ref(const Config& cfg, const std::vector<double>& in_vals,
             for (uint32_t h = 0; h < G; ++h) {
                 const double x = cfg.in_f32
                     ? static_cast<double>(static_cast<float>(in_vals[static_cast<size_t>(m) * in_stride + g0 + h]))
-                    : static_cast<double>(f32_from_bf16(ps::f32_to_bf16_rne(
+                    : static_cast<double>(f32_from_bf16(shelf::f32_to_bf16_rne(
                         static_cast<float>(in_vals[static_cast<size_t>(m) * in_stride + g0 + h]))));
                 sum += x * x;
             }
@@ -84,17 +84,17 @@ void cpu_ref(const Config& cfg, const std::vector<double>& in_vals,
                 if (cfg.in_f32) {
                     x = static_cast<double>(static_cast<float>(in_vals[static_cast<size_t>(m) * in_stride + g0 + h]));
                 } else {
-                    x = static_cast<double>(f32_from_bf16(ps::f32_to_bf16_rne(
+                    x = static_cast<double>(f32_from_bf16(shelf::f32_to_bf16_rne(
                         static_cast<float>(in_vals[static_cast<size_t>(m) * in_stride + g0 + h]))));
                 }
                 double y = x * inv;
                 if (cfg.in_f32) y = bf16_rne_f32(static_cast<float>(y));
-                if (cfg.layout != ps::kernel::RmsNormWeightLayout::NONE) {
+                if (cfg.layout != shelf::kernel::RmsNormWeightLayout::NONE) {
                     const uint32_t widx =
-                        (cfg.layout == ps::kernel::RmsNormWeightLayout::PER_FEATURE) ? (g0 + h) : h;
+                        (cfg.layout == shelf::kernel::RmsNormWeightLayout::PER_FEATURE) ? (g0 + h) : h;
                     const double w = f32_from_bf16(
-                        ps::f32_to_bf16_rne(static_cast<float>(wt_vals[widx])));
-                    if (cfg.mode == ps::kernel::RmsNormWeightMode::ONE_PLUS) y *= 1.0 + w;
+                        shelf::f32_to_bf16_rne(static_cast<float>(wt_vals[widx])));
+                    if (cfg.mode == shelf::kernel::RmsNormWeightMode::ONE_PLUS) y *= 1.0 + w;
                     else y *= w;
                 }
                 out_vals[static_cast<size_t>(m) * out_stride + g0 + h] = y;
@@ -109,7 +109,7 @@ struct UploadResult {
     void* out_dev;
 };
 
-bool upload(ps::gpu::GpuArena& arena, const Config& cfg,
+bool upload(shelf::gpu::GpuArena& arena, const Config& cfg,
             const std::vector<double>& in_vals, uint32_t in_stride,
             const std::vector<double>& wt_vals,
             uint32_t rows, uint32_t out_stride, UploadResult& res,
@@ -132,7 +132,7 @@ bool upload(ps::gpu::GpuArena& arena, const Config& cfg,
             std::vector<float> snt(static_cast<size_t>(rows) * out_stride, 9999.0f);
             if (hipMemcpy(res.out_dev, snt.data(), out_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
         } else {
-            std::vector<uint16_t> snt(static_cast<size_t>(rows) * out_stride, ps::f32_to_bf16_rne(9999.0f));
+            std::vector<uint16_t> snt(static_cast<size_t>(rows) * out_stride, shelf::f32_to_bf16_rne(9999.0f));
             if (hipMemcpy(res.out_dev, snt.data(), out_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
         }
     }
@@ -142,12 +142,12 @@ bool upload(ps::gpu::GpuArena& arena, const Config& cfg,
         if (hipMemcpy(res.in_dev, tmp.data(), in_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
     } else {
         std::vector<uint16_t> tmp(in_vals.size());
-        for (size_t i = 0; i < in_vals.size(); ++i) tmp[i] = ps::f32_to_bf16_rne(static_cast<float>(in_vals[i]));
+        for (size_t i = 0; i < in_vals.size(); ++i) tmp[i] = shelf::f32_to_bf16_rne(static_cast<float>(in_vals[i]));
         if (hipMemcpy(res.in_dev, tmp.data(), in_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
     }
     if (!wt_vals.empty()) {
         std::vector<uint16_t> tmp(wt_vals.size());
-        for (size_t i = 0; i < wt_vals.size(); ++i) tmp[i] = ps::f32_to_bf16_rne(static_cast<float>(wt_vals[i]));
+        for (size_t i = 0; i < wt_vals.size(); ++i) tmp[i] = shelf::f32_to_bf16_rne(static_cast<float>(wt_vals[i]));
         if (hipMemcpy(res.wt_dev, tmp.data(), wt_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
     }
     return true;
@@ -155,7 +155,7 @@ bool upload(ps::gpu::GpuArena& arena, const Config& cfg,
 
 bool run_case(const Config& cfg, uint32_t rows, uint32_t F, uint32_t G,
               uint32_t in_stride, uint32_t out_stride, double eps,
-              uint32_t seed, ps::gpu::GpuArena& arena, hipStream_t stream,
+              uint32_t seed, shelf::gpu::GpuArena& arena, hipStream_t stream,
               const char* label, bool sentinel) {
     if (F % G != 0u) return true;
     std::vector<double> in_vals;
@@ -168,7 +168,7 @@ bool run_case(const Config& cfg, uint32_t rows, uint32_t F, uint32_t G,
         }
     }
     std::vector<double> wt_vals;
-    if (cfg.layout != ps::kernel::RmsNormWeightLayout::NONE) {
+    if (cfg.layout != shelf::kernel::RmsNormWeightLayout::NONE) {
         wt_vals.assign(cfg.weight_elements, 0.0);
         for (uint32_t i = 0; i < cfg.weight_elements; ++i) {
             wt_vals[i] = (static_cast<double>(h32(static_cast<uint64_t>(i) * 6151u + seed + 1u) % 1001u) - 500.0) / 1000.0;
@@ -184,12 +184,12 @@ bool run_case(const Config& cfg, uint32_t rows, uint32_t F, uint32_t G,
         return false;
     }
 
-    const ps::kernel::RmsNormDataType in_t = cfg.in_f32 ? ps::kernel::RmsNormDataType::F32 : ps::kernel::RmsNormDataType::BF16;
-    const ps::kernel::RmsNormDataType out_t = cfg.out_f32 ? ps::kernel::RmsNormDataType::F32 : ps::kernel::RmsNormDataType::BF16;
-    const ps::kernel::RmsNormDataType wt_t = ps::kernel::RmsNormDataType::BF16;
-    hipError_t h = ps::kernel::launch_rmsnorm(
+    const shelf::kernel::RmsNormDataType in_t = cfg.in_f32 ? shelf::kernel::RmsNormDataType::F32 : shelf::kernel::RmsNormDataType::BF16;
+    const shelf::kernel::RmsNormDataType out_t = cfg.out_f32 ? shelf::kernel::RmsNormDataType::F32 : shelf::kernel::RmsNormDataType::BF16;
+    const shelf::kernel::RmsNormDataType wt_t = shelf::kernel::RmsNormDataType::BF16;
+    hipError_t h = shelf::kernel::launch_rmsnorm(
         up.in_dev, in_t,
-        cfg.layout == ps::kernel::RmsNormWeightLayout::NONE ? nullptr : up.wt_dev, wt_t,
+        cfg.layout == shelf::kernel::RmsNormWeightLayout::NONE ? nullptr : up.wt_dev, wt_t,
         cfg.layout, cfg.mode,
         up.out_dev, out_t,
         rows, F, G, in_stride, out_stride, static_cast<float>(eps), stream);
@@ -264,15 +264,15 @@ int main() {
     if (hipSetDevice(0) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
-    auto arena_result = ps::gpu::GpuArena::create(0, 512 * 1024 * 1024);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512 * 1024 * 1024);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
-    using L = ps::kernel::RmsNormWeightLayout;
-    using M = ps::kernel::RmsNormWeightMode;
+    using L = shelf::kernel::RmsNormWeightLayout;
+    using M = shelf::kernel::RmsNormWeightMode;
 
     const Config bf16_bf16_pf_op { false, false, L::PER_FEATURE, M::ONE_PLUS, 0 };
     const Config bf16_bf16_pf_d  { false, false, L::PER_FEATURE, M::DIRECT, 0 };
@@ -388,10 +388,10 @@ int main() {
         UploadResult up;
         if (!upload(arena, rc, in_vals, F, wt_vals, rows, F, up, false)) { check(false, "f32round alloc"); }
         else {
-            hipError_t h = ps::kernel::launch_rmsnorm(
-                up.in_dev, ps::kernel::RmsNormDataType::F32, up.wt_dev,
-                ps::kernel::RmsNormDataType::BF16, L::PER_GROUP, M::DIRECT,
-                up.out_dev, ps::kernel::RmsNormDataType::F32, rows, F, G, F, F, 1e-6f, stream);
+            hipError_t h = shelf::kernel::launch_rmsnorm(
+                up.in_dev, shelf::kernel::RmsNormDataType::F32, up.wt_dev,
+                shelf::kernel::RmsNormDataType::BF16, L::PER_GROUP, M::DIRECT,
+                up.out_dev, shelf::kernel::RmsNormDataType::F32, rows, F, G, F, F, 1e-6f, stream);
             (void)hipStreamSynchronize(stream);
             float got = 0.f;
             (void)hipMemcpy(&got, up.out_dev, 4, hipMemcpyDeviceToHost);

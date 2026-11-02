@@ -2,10 +2,10 @@
 
 #include <cstdio>
 
-using ::ps::execution::EmbeddingImplementation;
-using ::ps::execution::EmbeddingSelectorInput;
-using ::ps::execution::EmbeddingStorage;
-using ::ps::execution::select_embedding_implementation;
+using ::shelf::execution::EmbeddingImplementation;
+using ::shelf::execution::EmbeddingSelectorInput;
+using ::shelf::execution::EmbeddingStorage;
+using ::shelf::execution::select_embedding_implementation;
 
 static int g_fail = 0;
 

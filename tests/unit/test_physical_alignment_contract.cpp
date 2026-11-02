@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstdint>
 
-namespace rt = ps::runtime;
+namespace rt = shelf::runtime;
 
 namespace {
 int passed = 0, failed = 0;
@@ -20,11 +20,11 @@ int main() {
             char msg[96];
             std::snprintf(
                 msg, sizeof(msg), "aligned stride features=%u bytes=%u", features, bytes);
-            check(ps::gpu::aligned_row_stride(features, bytes) * bytes % 16 == 0, msg);
+            check(shelf::gpu::aligned_row_stride(features, bytes) * bytes % 16 == 0, msg);
         }
-        check(ps::gpu::aligned_row_stride(5120, 2) == 5120, "bf16 5120 tight");
-        check(ps::gpu::aligned_row_stride(17408, 2) == 17408, "bf16 17408 tight");
-        check(ps::gpu::aligned_row_stride(248320, 4) % 4 == 0, "fp32 vocab stride");
+        check(shelf::gpu::aligned_row_stride(5120, 2) == 5120, "bf16 5120 tight");
+        check(shelf::gpu::aligned_row_stride(17408, 2) == 17408, "bf16 17408 tight");
+        check(shelf::gpu::aligned_row_stride(248320, 4) % 4 == 0, "fp32 vocab stride");
     }
     {
         const auto l = rt::Int8ActivationWorkspaceLayout::make(7, 5);
@@ -33,11 +33,11 @@ int main() {
         check(l.scales_offset % 16 == 0, "a8 odd scales off 16B");
     }
     {
-        auto odd = ps::state::GdnStatePoolLayout::make(2, 100, 3, 4, 32, 32);
+        auto odd = shelf::state::GdnStatePoolLayout::make(2, 100, 3, 4, 32, 32);
         check(odd.conv_dim_padded == 104, "gdn odd padded 100->104");
         check(odd.conv_history_stride == 104, "gdn odd hist stride");
         check((uint64_t)odd.conv_history_stride * 2 % 16 == 0, "gdn odd plane 16B");
-        auto prod = ps::state::GdnStatePoolLayout::make(48, 10240, 3, 48, 128, 128);
+        auto prod = shelf::state::GdnStatePoolLayout::make(48, 10240, 3, 48, 128, 128);
         check((uint64_t)prod.conv_history_stride * 2 % 16 == 0, "gdn prod plane 16B");
         const uint64_t layer_elems =
             (uint64_t)prod.conv_history * prod.conv_history_stride;

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::bench::quality {
+namespace shelf::bench::quality {
 
 inline constexpr char kDumpMagic[8] = {'P', 'S', 'Q', 'U', 'A', 'L', '0', '1'};
 inline constexpr uint32_t kDumpVersion = 1u;

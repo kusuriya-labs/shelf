@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace kernel {
 namespace detail {
 
@@ -71,7 +71,7 @@ __global__ void gemm_block_scaled_reference_kernel(
             v = isfinite(x) ? x : 0.0f;
         }
         a_codes[i] = ascale > 0.0f
-            ? ::ps::quantization::codec::device::e4m3_encode_u8(v / ascale)
+            ? ::shelf::quantization::codec::device::e4m3_encode_u8(v / ascale)
             : 0u;
     }
     __syncthreads();
@@ -87,8 +87,8 @@ __global__ void gemm_block_scaled_reference_kernel(
                 const uint32_t base = kb * 128u;
                 float p = 0.0f;
                 for (uint32_t j = 0; j < 128u; ++j) {
-                    p = fmaf(::ps::quantization::codec::device::e4m3_decode_f32(wrow[base + j]),
-                             ::ps::quantization::codec::device::e4m3_decode_f32(a_codes[base + j]),
+                    p = fmaf(::shelf::quantization::codec::device::e4m3_decode_f32(wrow[base + j]),
+                             ::shelf::quantization::codec::device::e4m3_decode_f32(a_codes[base + j]),
                              p);
                 }
                 acc += p * srow[kb];
@@ -122,8 +122,8 @@ Status bs_validate(const BlockScaledWeightView& w, const bf16_t* input,
 
 hipError_t launch_gemm_block_scaled_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     uint32_t rows,
     hipStream_t stream) {
     Status status = bs_validate(weight, input, output, rows);
@@ -145,16 +145,16 @@ hipError_t launch_gemm_block_scaled_reference(
 
 hipError_t launch_gemv_block_scaled_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     hipStream_t stream) {
     return launch_gemm_block_scaled_reference(weight, input, output, 1u, stream);
 }
 
 hipError_t launch_gemm_fp8_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     uint32_t rows,
     hipStream_t stream) {
     BlockScaledWeightView w = weight;
@@ -164,8 +164,8 @@ hipError_t launch_gemm_fp8_reference(
 
 hipError_t launch_gemv_fp8_reference(
     const BlockScaledWeightView& weight,
-    const ::ps::bf16_t* input,
-    ::ps::bf16_t* output,
+    const ::shelf::bf16_t* input,
+    ::shelf::bf16_t* output,
     hipStream_t stream) {
     BlockScaledWeightView w = weight;
     w.kind = BlockScaledKind::Fp8;

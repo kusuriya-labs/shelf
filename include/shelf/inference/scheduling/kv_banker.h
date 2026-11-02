@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 struct KVBankerProcess {

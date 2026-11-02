@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 namespace op_embedding_bf16 {
@@ -36,8 +36,8 @@ __device__ __forceinline__ void body(const EmbeddingBf16Args& args) {
         }
         if (threadIdx.x == 0u && args.error_word != nullptr) {
             atomicCAS(args.error_word,
-                      static_cast<uint32_t>(::ps::runtime::ProgramStatus::COMPLETE),
-                      static_cast<uint32_t>(::ps::runtime::ProgramStatus::INVALID_BINDING));
+                      static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE),
+                      static_cast<uint32_t>(::shelf::runtime::ProgramStatus::INVALID_BINDING));
         }
         return;
     }
@@ -95,4 +95,4 @@ hipError_t launch_embedding_bf16(
 namespace {
 }  // namespace
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

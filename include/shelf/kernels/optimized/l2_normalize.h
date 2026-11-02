@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr const char* kL2NormalizeBf16F32Symbol =
     "shelf_l2_normalize_bf16_f32";
@@ -42,4 +42,4 @@ hipError_t launch_l2_normalize_bf16_f32(
     uint32_t rows, uint32_t features, uint32_t group_size,
     float eps, hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

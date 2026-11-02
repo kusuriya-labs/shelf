@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 
 struct HostExecutionContext;
@@ -26,24 +26,24 @@ struct OptimizedLaunchResult {
     OptimizedLaunchKind kind = OptimizedLaunchKind::NotApplicable;
 };
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
 Result<OptimizedLaunchResult> try_launch_activation_quantize(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream);
 Result<OptimizedLaunchResult> try_launch_optimized(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
 
-void record_correctness_fallback(::ps::runtime::KernelId id);
+void record_correctness_fallback(::shelf::runtime::KernelId id);
 
 void rope_optimized_hit();
 void gdn_recurrence_optimized_hit();

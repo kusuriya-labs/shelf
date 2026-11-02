@@ -2,7 +2,7 @@
 #include <shelf/runtime/program/program.h>
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct DeviceValueBinding {
     uint32_t logical_value = 0;

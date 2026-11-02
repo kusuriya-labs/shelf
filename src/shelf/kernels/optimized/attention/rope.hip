@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
@@ -158,7 +158,7 @@ __device__ __forceinline__ void rope_f32_bf16_pair_body(
 }  // namespace
 
 extern "C" __global__ __launch_bounds__(kPairThreads)
-void shelf_rope_f32_bf16_pair(::ps::kernel::RopeF32Bf16PairArgs args) {
+void shelf_rope_f32_bf16_pair(::shelf::kernel::RopeF32Bf16PairArgs args) {
     rope_f32_bf16_pair_body(
         args.input, args.input_row_stride, reinterpret_cast<bf16*>(args.output),
         args.output_row_stride, args.positions, args.inv_freq, args.features,
@@ -323,4 +323,4 @@ hipError_t launch_rope_f32_bf16(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

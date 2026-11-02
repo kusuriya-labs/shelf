@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct CalibDumpState {
@@ -64,7 +64,7 @@ void initialize(CalibDumpState& s) {
 }  // namespace
 
 void kv_calib_dump_maybe(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     std::size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream) {
@@ -72,7 +72,7 @@ void kv_calib_dump_maybe(
     if (!s.initialized) initialize(s);
     if (!s.enabled) return;
     if (dispatch_index >= program.dispatches.size()) return;
-    if (program.dispatches[dispatch_index].kernel_id != ::ps::runtime::KernelId::KV_APPEND)
+    if (program.dispatches[dispatch_index].kernel_id != ::shelf::runtime::KernelId::KV_APPEND)
         return;
 
     auto resolved = resolve_kv_append_args(program, dispatch_index, ctx);

@@ -19,7 +19,7 @@
 #include <span>
 #include <vector>
 
-namespace ps::qwen35::runtime {
+namespace shelf::qwen35::runtime {
 
 constexpr uint32_t kDFlash2SpecMaxVerifyRows = 512u;
 constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
@@ -39,7 +39,7 @@ struct DFlash2GdnRankBinding {
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = -1;
-    const ::ps::kernel::ModelDispatchStateView* model_state = nullptr;
+    const ::shelf::kernel::ModelDispatchStateView* model_state = nullptr;
     Executor* executor = nullptr;
 };
 
@@ -58,8 +58,8 @@ struct DFlash2GdnRankState {
     uint64_t compact_delta_layer_stride = 0u;
     uint64_t compact_k_layer_stride = 0u;
     uint64_t compact_a_layer_stride = 0u;
-    ::ps::runtime::DeviceRequestDescriptor* commit_request = nullptr;
-    const ::ps::kernel::ModelDispatchStateView* model_state = nullptr;
+    ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
+    const ::shelf::kernel::ModelDispatchStateView* model_state = nullptr;
 };
 
 struct DFlash2SpecWorkspace {
@@ -257,4 +257,4 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,
     std::span<const DFlash2SpecBatchSlot> slots);
 
-}  // namespace ps::qwen35::runtime
+}  // namespace shelf::qwen35::runtime

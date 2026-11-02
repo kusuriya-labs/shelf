@@ -15,10 +15,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using W = ::ps::runtime::WeightSlot;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using W = ::shelf::runtime::WeightSlot;
 
 uint16_t bf16_bits(float f) {
     uint32_t u;
@@ -40,7 +40,7 @@ struct Buf {
     void* dev = nullptr;
     size_t bytes = 0;
     ~Buf() {
-        if (dev) ps::gpu::discard_cleanup_result(hipFree(dev));
+        if (dev) shelf::gpu::discard_cleanup_result(hipFree(dev));
     }
     bool alloc(size_t b) {
         bytes = b;
@@ -92,16 +92,16 @@ bool read_bytes(const Buf& b, size_t n, std::vector<uint8_t>& out) {
 
 bool run_correctness(const W& ws, const Buf& toks, const std::vector<int32_t>& htok,
                      const Buf& out, uint32_t rows, uint32_t hidden, uint32_t out_stride,
-                     P& p, V* vals_dev, Buf& vals_buf, ::ps::runtime::DeviceBatchContext* bc_dev,
+                     P& p, V* vals_dev, Buf& vals_buf, ::shelf::runtime::DeviceBatchContext* bc_dev,
                      W* wslot_dev, float* scratch, uint32_t* err) {
     W w = ws;
     if (hipMemcpy(wslot_dev, &w, sizeof(W), hipMemcpyHostToDevice) != hipSuccess) return false;
     V vals[1];
     vals[0] = {};
     vals[0].logical_value = 1;
-    vals[0].storage = ::ps::runtime::ValueStorage::WORKSPACE;
-    vals[0].dtype = ::ps::runtime::ValueDType::BF16;
-    vals[0].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    vals[0].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
+    vals[0].dtype = ::shelf::runtime::ValueDType::BF16;
+    vals[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     vals[0].slot = 0;
     vals[0].feature_count = hidden;
     vals[0].row_stride = out_stride;
@@ -117,7 +117,7 @@ bool run_correctness(const W& ws, const Buf& toks, const std::vector<int32_t>& h
     p.weight_table = wslot_dev;
     p.weight_slot_count = 1;
     B b{};
-    b.kernel_id = ::ps::runtime::KernelId::EMBEDDING_LOOKUP;
+    b.kernel_id = ::shelf::runtime::KernelId::EMBEDDING_LOOKUP;
     b.input_slots[0] = 0;
     b.output_slots[0] = 1;
     b.input_count = 1;
@@ -125,9 +125,9 @@ bool run_correctness(const W& ws, const Buf& toks, const std::vector<int32_t>& h
     b.weight_index = 0;
     (void)toks;
     (void)htok;
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), nullptr));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto st = ps::kernel::launch_model_dispatch_correctness(
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), nullptr));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
         p, b, bc_dev, sv, scratch, err, nullptr);
     if (!st.ok()) return false;
     uint32_t e = 0;
@@ -135,9 +135,9 @@ bool run_correctness(const W& ws, const Buf& toks, const std::vector<int32_t>& h
     return e == 0u;
 }
 
-bool build_batchctx(::ps::runtime::DeviceBatchContext* bc_dev, uint32_t rows,
+bool build_batchctx(::shelf::runtime::DeviceBatchContext* bc_dev, uint32_t rows,
                     const void* tokens_dev) {
-    ::ps::runtime::DeviceBatchContext h{};
+    ::shelf::runtime::DeviceBatchContext h{};
     h.actual_rows = rows;
     h.num_requests = 0;
     h.token_ids = (const int32_t*)tokens_dev;
@@ -153,7 +153,7 @@ bool run_case(const Case& c, size_t* mm_out) {
     Buf toks, table, out, bc, wslot, scratch, err, vals_buf;
     if (!toks.alloc((size_t)rows * 4) ||
         !out.alloc((size_t)rows * os * 2) ||
-        !bc.alloc(sizeof(::ps::runtime::DeviceBatchContext)) ||
+        !bc.alloc(sizeof(::shelf::runtime::DeviceBatchContext)) ||
         !wslot.alloc(sizeof(W)) ||
         !scratch.alloc((size_t)256 * 4096 * 4) ||
         !err.alloc(4) ||
@@ -167,13 +167,13 @@ bool run_case(const Case& c, size_t* mm_out) {
         *mm_out = 1;
         return false;
     }
-    if (!build_batchctx((::ps::runtime::DeviceBatchContext*)bc.dev, rows, toks.dev)) {
+    if (!build_batchctx((::shelf::runtime::DeviceBatchContext*)bc.dev, rows, toks.dev)) {
         std::printf("  [%s] COPY FAIL\n", c.name);
         *mm_out = 1;
         return false;
     }
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(out.dev, 0xAB, out.bytes, nullptr));
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(err.dev, 0, 4, nullptr));
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(out.dev, 0xAB, out.bytes, nullptr));
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(err.dev, 0, 4, nullptr));
 
     // ---- weight data + CPU reference (packed: rows*hidden) ----
     std::vector<uint16_t> ref((size_t)rows * hidden);
@@ -214,20 +214,20 @@ bool run_case(const Case& c, size_t* mm_out) {
         P p{};
         if (!run_correctness(ws, toks, c.tokens, out, rows, hidden, os, p,
                              (V*)vals_buf.dev, vals_buf,
-                             (::ps::runtime::DeviceBatchContext*)bc.dev, (W*)wslot.dev,
+                             (::shelf::runtime::DeviceBatchContext*)bc.dev, (W*)wslot.dev,
                              (float*)scratch.dev, (uint32_t*)err.dev)) {
             std::printf("  [%s] CORR RUN FAIL\n", c.name);
             *mm_out = 1;
             return false;
         }
         corr = gather_u16(out, rows, hidden, os);
-        ps::gpu::discard_cleanup_result(hipMemsetAsync(out.dev, 0xAB, out.bytes, nullptr));
+        shelf::gpu::discard_cleanup_result(hipMemsetAsync(out.dev, 0xAB, out.bytes, nullptr));
     }
 
     // ---- optimized GPU ----
-    bool ok = ::ps::kernel::launch_embedding_bf16(
-                  (::ps::bf16_t*)table.dev, (const int32_t*)toks.dev,
-                  (::ps::bf16_t*)out.dev, rows, c.vocab, hidden, os,
+    bool ok = ::shelf::kernel::launch_embedding_bf16(
+                  (::shelf::bf16_t*)table.dev, (const int32_t*)toks.dev,
+                  (::shelf::bf16_t*)out.dev, rows, c.vocab, hidden, os,
                   (uint32_t*)err.dev, nullptr) == hipSuccess;
     if (!ok) {
         std::printf("  [%s] OPT LAUNCH FAIL\n", c.name);

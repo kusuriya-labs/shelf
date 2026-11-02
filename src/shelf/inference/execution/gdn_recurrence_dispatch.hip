@@ -21,10 +21,10 @@
 #include <cstddef>
 #include <cstdlib>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::KernelId;
+using ::shelf::runtime::KernelId;
 
 bool gdn_recurrence_multirow_enabled() {
     static const bool enabled = []() {
@@ -35,8 +35,8 @@ bool gdn_recurrence_multirow_enabled() {
     return enabled;
 }
 
-const ::ps::runtime::StateBinding* find_state_binding_for_descriptor(
-    const ::ps::runtime::Program& program, uint32_t descriptor_slot) {
+const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
+    const ::shelf::runtime::Program& program, uint32_t descriptor_slot) {
     if (descriptor_slot == 0u) return nullptr;
     for (const auto& s : program.states)
         if (s.slot + 1u == descriptor_slot) return &s;
@@ -46,7 +46,7 @@ const ::ps::runtime::StateBinding* find_state_binding_for_descriptor(
 }  // namespace
 
 Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx) {
     if (b.kernel_id != KernelId::GDN_RECURRENCE)
         return Status::invalid_state("gdn-recurrence: not a recurrence dispatch", __FILE__, __LINE__);
@@ -54,30 +54,30 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         return Status::invalid_state("gdn-recurrence: io count", __FILE__, __LINE__);
 
     const auto* sb = find_state_binding_for_descriptor(program, b.descriptor_slot);
-    if (sb == nullptr || sb->kind != ::ps::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE)
+    if (sb == nullptr || sb->kind != ::shelf::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE)
         return Status::invalid_state("gdn-recurrence: recurrence state not found", __FILE__, __LINE__);
     const uint32_t state_index = sb->state_index;
 
-    auto q_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto q_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!q_res.ok()) return q_res.status();
     const HostResolvedValue q = q_res.value();
-    auto k_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+    auto k_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
     if (!k_res.ok()) return k_res.status();
     const HostResolvedValue k = k_res.value();
-    auto v_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[2]}, ctx);
+    auto v_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[2]}, ctx);
     if (!v_res.ok()) return v_res.status();
     const HostResolvedValue v = v_res.value();
-    auto a_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[3]}, ctx);
+    auto a_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[3]}, ctx);
     if (!a_res.ok()) return a_res.status();
     const HostResolvedValue a = a_res.value();
-    auto bin_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[4]}, ctx);
+    auto bin_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[4]}, ctx);
     if (!bin_res.ok()) return bin_res.status();
     const HostResolvedValue bin = bin_res.value();
-    auto out_res = resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue out = out_res.value();
 
-    const ::ps::state::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
+    const ::shelf::state::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
     if (gdn.recurrent_base == nullptr)
         return Status::invalid_state("gdn-recurrence: recurrent_base null", __FILE__, __LINE__);
     if (state_index >= gdn.num_gdn_states)
@@ -92,24 +92,24 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     if (gdn.recurrent_slot_stride == 0u || gdn.recurrent_layer_stride == 0u)
         return Status::invalid_state("gdn-recurrence: gdn stride zero", __FILE__, __LINE__);
 
-    if (q.dtype != ::ps::runtime::ValueDType::F32 ||
-        q.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS ||
+    if (q.dtype != ::shelf::runtime::ValueDType::F32 ||
+        q.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS ||
         q.feature_count == 0u || q.row_stride < q.feature_count)
         return Status::invalid_state("gdn-recurrence: Q invalid", __FILE__, __LINE__);
-    if (k.dtype != ::ps::runtime::ValueDType::F32 || k.feature_count != q.feature_count ||
+    if (k.dtype != ::shelf::runtime::ValueDType::F32 || k.feature_count != q.feature_count ||
         k.row_domain != q.row_domain || k.row_stride < k.feature_count)
         return Status::invalid_state("gdn-recurrence: K invalid", __FILE__, __LINE__);
-    if (v.dtype != ::ps::runtime::ValueDType::BF16 ||
-        v.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS)
+    if (v.dtype != ::shelf::runtime::ValueDType::BF16 ||
+        v.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS)
         return Status::invalid_state("gdn-recurrence: V dtype/domain", __FILE__, __LINE__);
-    if (a.dtype != ::ps::runtime::ValueDType::BF16 ||
-        a.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS)
+    if (a.dtype != ::shelf::runtime::ValueDType::BF16 ||
+        a.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS)
         return Status::invalid_state("gdn-recurrence: A dtype/domain", __FILE__, __LINE__);
-    if (bin.dtype != ::ps::runtime::ValueDType::BF16 ||
-        bin.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS)
+    if (bin.dtype != ::shelf::runtime::ValueDType::BF16 ||
+        bin.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS)
         return Status::invalid_state("gdn-recurrence: B dtype/domain", __FILE__, __LINE__);
-    if (out.dtype != ::ps::runtime::ValueDType::F32 ||
-        out.row_domain != ::ps::runtime::ValueRowDomain::TOKEN_ROWS || out.row_stride < out.feature_count)
+    if (out.dtype != ::shelf::runtime::ValueDType::F32 ||
+        out.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS || out.row_stride < out.feature_count)
         return Status::invalid_state("gdn-recurrence: output invalid", __FILE__, __LINE__);
 
     const uint32_t qk_dim = q.feature_count;
@@ -128,22 +128,22 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     if (gdn.recurrent_layer_stride < expected_layer)
         return Status::invalid_state("gdn-recurrence: recurrent_layer_stride", __FILE__, __LINE__);
 
-    if (b.parameter_index0 == ::ps::runtime::kNoParameter || ctx.host_parameters == nullptr ||
+    if (b.parameter_index0 == ::shelf::runtime::kNoParameter || ctx.host_parameters == nullptr ||
         b.parameter_index0 >= ctx.host_parameter_count)
         return Status::invalid_state("gdn-recurrence: dt_bias parameter missing", __FILE__, __LINE__);
     const auto& dt_slot = ctx.host_parameters[b.parameter_index0];
-    if (dt_slot.device_ptr == nullptr || dt_slot.dtype != ::ps::runtime::ValueDType::BF16 ||
+    if (dt_slot.device_ptr == nullptr || dt_slot.dtype != ::shelf::runtime::ValueDType::BF16 ||
         dt_slot.elements < num_v_heads)
         return Status::invalid_state("gdn-recurrence: dt_bias invalid", __FILE__, __LINE__);
-    if (b.parameter_index1 == ::ps::runtime::kNoParameter ||
+    if (b.parameter_index1 == ::shelf::runtime::kNoParameter ||
         b.parameter_index1 >= ctx.host_parameter_count)
         return Status::invalid_state("gdn-recurrence: a_log parameter missing", __FILE__, __LINE__);
     const auto& al_slot = ctx.host_parameters[b.parameter_index1];
-    if (al_slot.device_ptr == nullptr || al_slot.dtype != ::ps::runtime::ValueDType::BF16 ||
+    if (al_slot.device_ptr == nullptr || al_slot.dtype != ::shelf::runtime::ValueDType::BF16 ||
         al_slot.elements < num_v_heads)
         return Status::invalid_state("gdn-recurrence: a_log invalid", __FILE__, __LINE__);
 
-    const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
+    const ::shelf::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
     const uint32_t num_requests = ctx.staged_request_count;
     const uint32_t verify_requests = ctx.staged_verify_request_count;
     const bool all_verify_requests =
@@ -163,7 +163,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     ra.rows = actual_rows;
     ra.num_requests = num_requests;
     ra.max_request_rows = max_request_rows;
-    ::ps::kernel::GdnRecurrenceArgs& c = ra.kernel;
+    ::shelf::kernel::GdnRecurrenceArgs& c = ra.kernel;
     c.q = static_cast<const float*>(q.ptr);
     c.k = static_cast<const float*>(k.ptr);
     c.v = static_cast<const bf16_t*>(v.ptr);
@@ -196,7 +196,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.recurrent_layer_stride = gdn.recurrent_layer_stride;
     const GdnSpecHistoryDeviceView& hist = ctx.spec.gdn_spec_history;
     const bool mixed_verify = verify_requests != 0u && !all_verify_requests;
-    if ((ctx.role == ::ps::runtime::ExecutionRole::Verify || mixed_verify) &&
+    if ((ctx.role == ::shelf::runtime::ExecutionRole::Verify || mixed_verify) &&
         hist.recurrent_history != nullptr && hist.capture_rows != 0u) {
         c.recurrent_history = hist.recurrent_history;
         c.recurrent_history_row_stride = hist.recurrent_row_stride;
@@ -227,8 +227,8 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
 }
 
 Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
-    const ::ps::runtime::Program& program,
-    const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
     PhysicalGdnRecurrenceLaunch& out) {
     out = PhysicalGdnRecurrenceLaunch{};
@@ -253,16 +253,16 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
         ra.kernel.head_k == 0u || ra.kernel.head_v == 0u)
         return PhysicalResolveStatus::NotApplicable;
 
-    const bool geo_ok = ra.kernel.head_k == ::ps::kernel::kGdnRecurrenceWmmaK &&
+    const bool geo_ok = ra.kernel.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
                         ra.kernel.head_v %
-                                ::ps::kernel::kGdnRecurrenceWmmaVGroup ==
+                                ::shelf::kernel::kGdnRecurrenceWmmaVGroup ==
                             0u;
 
     PhysicalGdnRecurrenceVariant variant = PhysicalGdnRecurrenceVariant::F32;
-    if (geo_ok && ctx.role == ::ps::runtime::ExecutionRole::Verify) {
+    if (geo_ok && ctx.role == ::shelf::runtime::ExecutionRole::Verify) {
         const bool multirow = gdn_recurrence_multirow_enabled();
         if (multirow &&
-            ::ps::kernel::gdn_recurrence_decode_rows_supported(ra.kernel)) {
+            ::shelf::kernel::gdn_recurrence_decode_rows_supported(ra.kernel)) {
             variant = PhysicalGdnRecurrenceVariant::DecodeRowsExact;
         } else {
             variant = PhysicalGdnRecurrenceVariant::WmmaSerial;
@@ -278,15 +278,15 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
     out.num_requests = ra.num_requests;
     out.max_request_rows = ra.max_request_rows;
     out.variant = variant;
-    out.lossy = ::ps::kernel::gdn_recurrence_lossy_enabled();
+    out.lossy = ::shelf::kernel::gdn_recurrence_lossy_enabled();
     if (variant == PhysicalGdnRecurrenceVariant::Wmma ||
         variant == PhysicalGdnRecurrenceVariant::DecodeRowsExact ||
         variant == PhysicalGdnRecurrenceVariant::WmmaSerial) {
-        out.grid_x = ::ps::kernel::gdn_recurrence_wmma_grid_x(
+        out.grid_x = ::shelf::kernel::gdn_recurrence_wmma_grid_x(
             ra.num_requests, ra.kernel.num_v_heads, ra.kernel.head_v);
         out.grid_y = 1u;
         out.grid_z = 1u;
-        out.workgroup = ::ps::kernel::kGdnRecurrenceWmmaThreads;
+        out.workgroup = ::shelf::kernel::kGdnRecurrenceWmmaThreads;
         if (out.grid_x == 0u)
             return PhysicalResolveStatus::NotApplicable;
         if ((variant == PhysicalGdnRecurrenceVariant::Wmma ||
@@ -298,7 +298,7 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
 }
 
 Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size())
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
@@ -317,23 +317,23 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     hipError_t herr = hipSuccess;
     switch (launch.variant) {
         case PhysicalGdnRecurrenceVariant::DecodeRowsExact:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(
+            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(
                 launch.kernel, stream);
             break;
         case PhysicalGdnRecurrenceVariant::WmmaSerial:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(
+            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(
                 launch.kernel, stream);
             break;
         case PhysicalGdnRecurrenceVariant::Wmma:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32_wmma(launch.kernel, stream);
+            herr = ::shelf::kernel::launch_gdn_recurrence_f32_wmma(launch.kernel, stream);
             break;
         default:
-            herr = ::ps::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
+            herr = ::shelf::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
             ran_f32 = true;
             break;
     }
     if (herr == hipErrorNotSupported) {
-        herr = ::ps::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
+        herr = ::shelf::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
         ran_f32 = true;
     }
     if (herr != hipSuccess)
@@ -348,4 +348,4 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

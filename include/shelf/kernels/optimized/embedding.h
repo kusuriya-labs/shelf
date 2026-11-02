@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr const char* kEmbeddingBf16Symbol =
     "shelf_embedding_bf16";
@@ -50,4 +50,4 @@ hipError_t launch_embedding_bf16(
     hipStream_t stream,
     uint32_t vocab_offset = 0u,
     uint32_t partial_vocab = 0u);
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 constexpr uint32_t kGdnL2ElemsPerLane = 4u;
 constexpr uint32_t kGdnL2Threads = 32u;
@@ -69,4 +69,4 @@ __device__ __forceinline__ void gdn_l2_normalize_head_body(
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

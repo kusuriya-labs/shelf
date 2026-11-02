@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 struct Qwen35LayerWeights {
@@ -17,23 +17,23 @@ struct Qwen35LayerWeights {
     gpu::Tensor input_layernorm_weight;
     gpu::Tensor post_attention_layernorm_weight;
 
-    ps::weights::MatrixWeight mlp_gate_proj;
-    ps::weights::MatrixWeight mlp_up_proj;
-    ps::weights::MatrixWeight mlp_down_proj;
+    shelf::weights::MatrixWeight mlp_gate_proj;
+    shelf::weights::MatrixWeight mlp_up_proj;
+    shelf::weights::MatrixWeight mlp_down_proj;
 
-    ps::weights::MatrixWeight attn_q_proj;
-    ps::weights::MatrixWeight attn_k_proj;
-    ps::weights::MatrixWeight attn_v_proj;
-    ps::weights::MatrixWeight attn_o_proj;
+    shelf::weights::MatrixWeight attn_q_proj;
+    shelf::weights::MatrixWeight attn_k_proj;
+    shelf::weights::MatrixWeight attn_v_proj;
+    shelf::weights::MatrixWeight attn_o_proj;
     gpu::Tensor attn_q_norm_weight;
     gpu::Tensor attn_k_norm_weight;
 
-    ps::weights::MatrixWeight attn_in_proj_a;
-    ps::weights::MatrixWeight attn_in_proj_b;
-    ps::weights::MatrixWeight attn_in_proj_qkv;
-    ps::weights::MatrixWeight attn_in_proj_z;
+    shelf::weights::MatrixWeight attn_in_proj_a;
+    shelf::weights::MatrixWeight attn_in_proj_b;
+    shelf::weights::MatrixWeight attn_in_proj_qkv;
+    shelf::weights::MatrixWeight attn_in_proj_z;
     gpu::Tensor attn_conv1d_weight;
-    ps::weights::MatrixWeight attn_out_proj;
+    shelf::weights::MatrixWeight attn_out_proj;
     gpu::Tensor attn_norm_weight;
     gpu::Tensor attn_dt_bias;
     gpu::Tensor attn_A_log;
@@ -46,17 +46,17 @@ struct Qwen35MtpWeights {
     gpu::Tensor pre_fc_norm_hidden_weight;
     gpu::Tensor final_norm_weight;
 
-    ps::weights::MatrixWeight fc;
+    shelf::weights::MatrixWeight fc;
     Qwen35LayerWeights layer;
 };
 
 struct Qwen35ModelWeights {
     using Tensor = gpu::Tensor;
 
-    ps::weights::MatrixWeight embed_tokens;
+    shelf::weights::MatrixWeight embed_tokens;
     Tensor final_norm_weight;
 
-    ps::weights::MatrixWeight lm_head;
+    shelf::weights::MatrixWeight lm_head;
     bool lm_head_tied = true;
 
     std::vector<Qwen35LayerWeights> layers;
@@ -68,7 +68,7 @@ struct Qwen35LoadOptions {
     bool verify_quantized_payload_crc = false;
     bool load_mtp_layers = false;
     bool vocab_parallel_lm_head = true;
-    ps::weights::WeightLoadOptions weights;
+    shelf::weights::WeightLoadOptions weights;
 };
 
 Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(

@@ -3,7 +3,7 @@
 #include <limits>
 #include <vector>
 
-namespace ps::qwen35::dflash2 {
+namespace shelf::qwen35::dflash2 {
 
 namespace {
 
@@ -91,4 +91,4 @@ Status dflash2_context_shutdown(DFlash2ContextState& state) noexcept {
     return Status::make_ok();
 }
 
-}  // namespace ps::qwen35::dflash2
+}  // namespace shelf::qwen35::dflash2

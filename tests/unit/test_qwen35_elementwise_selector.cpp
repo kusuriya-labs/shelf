@@ -2,10 +2,10 @@
 
 #include <cstdio>
 
-using ::ps::execution::ElementwiseImplementation;
-using ::ps::execution::ElementwiseProfile;
-using ::ps::execution::ElementwiseSelectorInput;
-using ::ps::execution::select_elementwise_implementation;
+using ::shelf::execution::ElementwiseImplementation;
+using ::shelf::execution::ElementwiseProfile;
+using ::shelf::execution::ElementwiseSelectorInput;
+using ::shelf::execution::select_elementwise_implementation;
 
 static int g_fail = 0;
 

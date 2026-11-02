@@ -17,15 +17,15 @@ void check(bool cond, const char* name) {
     }
 }
 
-using ps::execution::RmsNormImplementation;
-using ps::execution::RmsNormSelectorWeightLayout;
-using ps::execution::RmsNormSelectorInput;
-using DT = ::ps::runtime::ValueDType;
+using shelf::execution::RmsNormImplementation;
+using shelf::execution::RmsNormSelectorWeightLayout;
+using shelf::execution::RmsNormSelectorInput;
+using DT = ::shelf::runtime::ValueDType;
 
-ps::execution::RmsNormImplementation
+shelf::execution::RmsNormImplementation
 sel(DT in, DT out, DT wt, RmsNormSelectorWeightLayout layout, uint32_t mode,
     uint32_t features, uint32_t group, uint32_t rows) {
-    return ps::execution::select_rmsnorm_implementation(
+    return shelf::execution::select_rmsnorm_implementation(
         {in, out, wt, layout, mode, features, group, rows});
 }
 

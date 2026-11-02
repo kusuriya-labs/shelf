@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 // Diagnostic-only decode counters. Default OFF (SHELF_QWEN35_PERF_STATS).
 // Not part of the production dispatch contract; only observed by the bench.
@@ -29,7 +29,7 @@ struct DecodePerfStats {
     uint64_t correctness_fallbacks = 0;
     uint64_t physical_kernel_launches = 0;
 
-    uint64_t kernel_id_calls[static_cast<size_t>(::ps::runtime::KernelId::COUNT)] = {};
+    uint64_t kernel_id_calls[static_cast<size_t>(::shelf::runtime::KernelId::COUNT)] = {};
 
     uint64_t fp8_gemm_hits = 0, fp8_fallbacks = 0;
     uint64_t bf16_gemm_hits = 0, bf16_fallbacks = 0;
@@ -52,7 +52,7 @@ inline void record_logical_covered(
     DecodePerfStats& s = perf_stats_instance();
     for (uint32_t j = 0; j < covered; ++j) {
         const uint32_t kid = covered_kernel_ids[j];
-        if (kid < static_cast<uint32_t>(::ps::runtime::KernelId::COUNT))
+        if (kid < static_cast<uint32_t>(::shelf::runtime::KernelId::COUNT))
             s.kernel_id_calls[kid]++;
     }
     s.logical_dispatches += covered;
@@ -122,4 +122,4 @@ inline void linear_record_fallback(LinearFamilyRef fam, FallbackReason reason) {
     record_correctness_fallback(reason);
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

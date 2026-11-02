@@ -9,7 +9,7 @@
 #include <optional>
 #include <vector>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 enum class QuantKernelKind : uint8_t {
     LinearBf16,

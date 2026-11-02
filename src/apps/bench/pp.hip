@@ -45,8 +45,8 @@ struct BenchOptions {
     int runs = 3;
     int warmup = 0;
     std::string output;
-    ps::qwen35::runtime::DecodeBackend decode_backend =
-        ps::qwen35::runtime::DecodeBackend::Hip;
+    shelf::qwen35::runtime::DecodeBackend decode_backend =
+        shelf::qwen35::runtime::DecodeBackend::Hip;
 };
 
 void print_usage(FILE* out) {
@@ -174,7 +174,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 return false;
             }
         } else if (key == "--decode-backend") {
-            if (!ps::qwen35::runtime::parse_decode_backend(
+            if (!shelf::qwen35::runtime::parse_decode_backend(
                     need_value().c_str(), &opts.decode_backend)) {
                 fprintf(stderr, "invalid --decode-backend\n");
                 return false;
@@ -256,7 +256,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
     uint32_t n = 0;
     for (int lt : tc.layer_types) {
         if (lt != 0) ++n;
@@ -317,7 +317,7 @@ int run_pp(int argc, char** argv) {
     const uint32_t required_seq_len =
         static_cast<uint32_t>(opts.prompt_tokens) + 16;
     const uint32_t prefill_row_limit =
-        ps::runtime::row_bucket_limit(ps::runtime::RowBucket::R8192);
+        shelf::runtime::row_bucket_limit(shelf::runtime::RowBucket::R8192);
     const uint32_t prompt_tokens = static_cast<uint32_t>(opts.prompt_tokens);
     const uint32_t exec_max_tokens =
         std::min(std::max(prompt_tokens, 16u), prefill_row_limit);
@@ -326,13 +326,13 @@ int run_pp(int argc, char** argv) {
     }
 
     hipStream_t stream = nullptr;
-    std::unique_ptr<ps::qwen35::runtime::TpCoordinator> tp_coordinator;
-    std::optional<ps::gpu::GpuArena> tp1_arena;
-    std::optional<ps::qwen35::Qwen35Model> tp1_model;
-    std::optional<ps::state::SequenceSlotPool> tp1_seq_pool;
-    std::optional<ps::state::GdnStatePool> tp1_rec_pool;
-    std::optional<ps::state::PagedKVPool> tp1_kv_pool;
-    std::optional<ps::qwen35::Executor> tp1_executor;
+    std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coordinator;
+    std::optional<shelf::gpu::GpuArena> tp1_arena;
+    std::optional<shelf::qwen35::Qwen35Model> tp1_model;
+    std::optional<shelf::state::SequenceSlotPool> tp1_seq_pool;
+    std::optional<shelf::state::GdnStatePool> tp1_rec_pool;
+    std::optional<shelf::state::PagedKVPool> tp1_kv_pool;
+    std::optional<shelf::qwen35::Executor> tp1_executor;
 
     if (opts.tp == 1) {
         hip_err = hipStreamCreate(&stream);
@@ -341,14 +341,14 @@ int run_pp(int argc, char** argv) {
             return 1;
         }
 
-        auto arena_result = ps::gpu::GpuArena::create(opts.devices[0], arena_bytes);
+        auto arena_result = shelf::gpu::GpuArena::create(opts.devices[0], arena_bytes);
         if (!arena_result.ok()) {
             fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
             return 1;
         }
         tp1_arena.emplace(arena_result.release());
 
-        auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+        auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
             opts.model_dir, *tp1_arena, stream, {});
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
@@ -370,7 +370,7 @@ int run_pp(int argc, char** argv) {
         const uint32_t num_pages = ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
 
         auto seq_pool_result =
-            ps::state::SequenceSlotPool::create(*tp1_arena, 1, num_pages);
+            shelf::state::SequenceSlotPool::create(*tp1_arena, 1, num_pages);
         if (!seq_pool_result.ok()) {
             fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
                 seq_pool_result.status().message().c_str());
@@ -378,8 +378,8 @@ int run_pp(int argc, char** argv) {
         }
         tp1_seq_pool.emplace(seq_pool_result.release());
 
-        auto rec_pool_result = ps::state::GdnStatePool::create(
-            *tp1_arena, 1, ps::qwen35::make_qwen35_gdn_state_layout(cfg));
+        auto rec_pool_result = shelf::state::GdnStatePool::create(
+            *tp1_arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(cfg));
         if (!rec_pool_result.ok()) {
             fprintf(stderr, "GdnStatePool::create failed: %s\n",
                 rec_pool_result.status().message().c_str());
@@ -387,11 +387,11 @@ int run_pp(int argc, char** argv) {
         }
         tp1_rec_pool.emplace(rec_pool_result.release());
 
-        auto kv_pool_result = ps::state::PagedKVPool::create(
+        auto kv_pool_result = shelf::state::PagedKVPool::create(
             *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
             num_attn_layers, kv_heads, head_dim,
-            opts.kv_cache_dtype == "fp8" ? ps::kernel::KVCacheDType::FP8_E4M3
-                                         : ps::kernel::KVCacheDType::BF16);
+            opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                         : shelf::kernel::KVCacheDType::BF16);
         if (!kv_pool_result.ok()) {
             fprintf(stderr, "PagedKVPool::create failed: %s\n",
                 kv_pool_result.status().message().c_str());
@@ -399,12 +399,12 @@ int run_pp(int argc, char** argv) {
         }
         tp1_kv_pool.emplace(kv_pool_result.release());
 
-        ps::qwen35::ExecutorConfig exec_config;
+        shelf::qwen35::ExecutorConfig exec_config;
         exec_config.max_batch_rows = exec_max_tokens;
         exec_config.max_scheduled_requests = 1;
         exec_config.backend = opts.decode_backend;
 
-        auto exec_result = ps::qwen35::create_model_executor(
+        auto exec_result = shelf::qwen35::create_model_executor(
             *tp1_model, *tp1_seq_pool, *tp1_rec_pool, *tp1_kv_pool, *tp1_arena, exec_config);
         if (!exec_result.ok()) {
             fprintf(stderr, "create_model_executor failed: %s\n", exec_result.status().message().c_str());
@@ -412,7 +412,7 @@ int run_pp(int argc, char** argv) {
         }
         tp1_executor.emplace(exec_result.release());
     } else {
-        ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
+        shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
         tp_cfg.max_batch_rows = exec_max_tokens;
@@ -420,11 +420,11 @@ int run_pp(int argc, char** argv) {
         tp_cfg.max_seq_len = required_seq_len;
         tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
         tp_cfg.kv_cache_dtype = opts.kv_cache_dtype == "fp8"
-                                    ? ps::kernel::KVCacheDType::FP8_E4M3
-                                    : ps::kernel::KVCacheDType::BF16;
+                                    ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                    : shelf::kernel::KVCacheDType::BF16;
         tp_cfg.arena_bytes = arena_bytes;
         tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
-        auto tp_result = ps::qwen35::runtime::TpCoordinator::create(tp_cfg);
+        auto tp_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!tp_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
                 tp_result.status().message().c_str());
@@ -477,13 +477,13 @@ int run_pp(int argc, char** argv) {
     wall_times_ms.reserve(static_cast<size_t>(opts.runs));
 
     auto run_once = [&](int run, bool measured) -> int {
-        auto seq_result = ps::state::create_paged_sequence_state(
+        auto seq_result = shelf::state::create_paged_sequence_state(
             seq_pool, rec_pool, kv_pool, required_seq_len, stream);
         if (!seq_result.ok()) {
             fprintf(stderr, "run %d create_paged_sequence_state failed: %s\n", run, seq_result.status().message().c_str());
             return 1;
         }
-        ps::state::PagedSequenceState seq = seq_result.release();
+        shelf::state::PagedSequenceState seq = seq_result.release();
 
         if (tp_coordinator != nullptr) {
             auto mirror_st = tp_coordinator->on_sequence_created(seq);
@@ -517,17 +517,17 @@ int run_pp(int argc, char** argv) {
         for (uint32_t processed = 0; processed < total_tokens;) {
             const uint32_t chunk_len = std::min(chunk, total_tokens - processed);
             const bool last = processed + chunk_len == total_tokens;
-            ps::qwen35::ScheduledRequest req;
+            shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
-            req.execution_class = ps::runtime::ExecutionClass::PREFILL;
+            req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
             req.token_begin = 0;
             req.num_tokens = chunk_len;
             req.prefix_tokens = seq.position;
             req.compute_logits = last &&
                 (opts.mode == "greedy" || tp_coordinator != nullptr);
             req.sample = last && opts.mode == "greedy";
-            std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-            ps::qwen35::ScheduledBatch batch;
+            std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+            shelf::qwen35::ScheduledBatch batch;
             batch.token_ids = prompt_tokens_host + processed;
             batch.requests = reqs;
             batch.num_tokens = chunk_len;
@@ -537,13 +537,13 @@ int run_pp(int argc, char** argv) {
             batch.num_prefill_requests = 1;
             auto st = tp_coordinator != nullptr
                           ? tp_coordinator->on_execute(batch)
-                          : ps::qwen35::execute_batch(executor, batch, stream);
+                          : shelf::qwen35::execute_batch(executor, batch, stream);
             if (!st.ok()) {
                 fprintf(stderr, "execute_batch failed at %u: %s\n", processed,
                         st.status().message().c_str());
                 return 1;
             }
-            ps::qwen35::BatchExecutionOutput out = std::move(st.release());
+            shelf::qwen35::BatchExecutionOutput out = std::move(st.release());
             (void)out;
             processed += chunk_len;
         }
@@ -585,7 +585,7 @@ int run_pp(int argc, char** argv) {
                 return 1;
             }
         }
-        auto release_st = ps::state::release_paged_sequence_state(seq, stream);
+        auto release_st = shelf::state::release_paged_sequence_state(seq, stream);
         if (!release_st.ok()) {
             fprintf(stderr, "run %d release_paged_sequence_state failed: %s\n", run, release_st.message().c_str());
             return 1;

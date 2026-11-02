@@ -5,7 +5,7 @@
 #include <array>
 #include <cstdio>
 
-namespace rt = ps::runtime;
+namespace rt = shelf::runtime;
 
 namespace {
 
@@ -99,9 +99,9 @@ int main() {
         weight.rows = 64;
         weight.cols = 64;
         weight.k_padded = 64;
-        weight.encoding = static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained);
+        weight.encoding = static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained);
         weight.compute_spec = static_cast<uint8_t>(
-            ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16);
+            shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16);
     }
 
     const rt::WeightTableView weight_view{weights.data(), weights.size()};

@@ -8,7 +8,7 @@
 #include <mutex>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 class HipPeerTpTransport final : public TpTransport {
 public:
@@ -66,4 +66,4 @@ struct TpTransportSelection {
 
 Result<TpTransportSelection> create_tp_transport(const std::vector<int>& devices);
 
-}  // namespace ps::runtime
+}  // namespace shelf::runtime

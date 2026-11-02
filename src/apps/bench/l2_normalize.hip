@@ -17,10 +17,10 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using DT = ::shelf::runtime::ValueDType;
 
 struct Options {
     std::string variant = "optimized";
@@ -99,9 +99,9 @@ double percentile(std::vector<double> v, double p) {
 
 void set_val(V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr, DT dt) {
     v.logical_value = id;
-    v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     v.dtype = dt;
-    v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     v.slot = 0;
     v.feature_count = feat;
     v.row_stride = stride;
@@ -125,7 +125,7 @@ struct Env {
     ~Env() {
         void* bufs[] = {in, out, ctx_dev, scratch, err, vals_dev};
         for (auto* q : bufs)
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
 };
 
@@ -141,7 +141,7 @@ bool build(Env& e, uint32_t seed, float eps) {
         h[i] = bf16_bits(rng1k(seed * 13u + 1u + i) / 1000.0f);
     if (hipMemcpy(e.in, h.data(), elems * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = e.rows;
     ctx.num_requests = 0;
     if (hipMalloc(&e.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
@@ -150,7 +150,7 @@ bool build(Env& e, uint32_t seed, float eps) {
     set_val(e.vals[0], 0, e.features, e.features, e.in, DT::BF16);
     set_val(e.vals[1], 1, e.features, e.features, e.out, DT::F32);
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::L2_NORMALIZE;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::L2_NORMALIZE;
     e.binding.input_slots[0] = 0;
     e.binding.output_slots[0] = 1;
     e.binding.input_count = 1;
@@ -169,13 +169,13 @@ bool build(Env& e, uint32_t seed, float eps) {
 
 hipError_t launch_env(const Env& e, bool optimized, hipStream_t s) {
     if (optimized)
-        return ::ps::kernel::launch_l2_normalize_bf16_f32(
-            (const ::ps::bf16_t*)e.in, e.features, (float*)e.out, e.features,
+        return ::shelf::kernel::launch_l2_normalize_bf16_f32(
+            (const ::shelf::bf16_t*)e.in, e.features, (float*)e.out, e.features,
             e.rows, e.features, e.group, e.binding.scalar_a, s);
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto st = ::ps::kernel::launch_model_dispatch_correctness(
-        e.prog, e.binding, (::ps::runtime::DeviceBatchContext*)e.ctx_dev, sv,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto st = ::shelf::kernel::launch_model_dispatch_correctness(
+        e.prog, e.binding, (::shelf::runtime::DeviceBatchContext*)e.ctx_dev, sv,
         (float*)e.scratch, (uint32_t*)e.err, s);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
@@ -278,8 +278,8 @@ int run_l2_normalize(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per.empty()) { rc = 1; continue; }
         const double mn = percentile(per, 0.0);
         const double p50 = percentile(per, 0.5);
@@ -299,6 +299,6 @@ int run_l2_normalize(int argc, char** argv) {
         std::printf("%-11s l2 f=%-5u g=%-4u rows=%-5u p50=%.2fus mean=%.2fus\n",
                     o.variant.c_str(), e.features, e.group, rows, p50, mean);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

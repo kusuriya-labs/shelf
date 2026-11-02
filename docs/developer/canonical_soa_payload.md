@@ -453,7 +453,7 @@ native payload を disk contract にしない現在の方針を維持する。
 
 ## 14. Loader contract
 
-この contract の実装は generic weights layer（`ps::weights::load_quantized_matrix` /
+この contract の実装は generic weights layer（`shelf::weights::load_quantized_matrix` /
 `load_bf16_matrix`、`include/shelf/weights/weight_loader.h`、target `shelf_weights`）。
 model 側（例: Qwen35）は tensor name → model field の binding のみを行い、
 encoding の分岐を持たない。
@@ -468,7 +468,7 @@ loader は以下を順番に行う。
 6. native SoA（canonical の場合は canonical SoA）を GPU へ配置する
 7. kernel には native view のみ渡す
 
-preshuffle のスイッチは generic layer（`ps::weights::WeightLoadOptions`、
+preshuffle のスイッチは generic layer（`shelf::weights::WeightLoadOptions`、
 `load_bf16_matrix` / `load_quantized_matrix`）に属する。model 側（Qwen35 等）は
 これを自 LoadOptions に組み込むだけで、独自に preshuffle フラグを持たない。
 

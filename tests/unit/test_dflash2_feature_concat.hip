@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -31,9 +31,9 @@ static float bf16_to_f32(bf16_t x) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     const std::vector<std::size_t>& shape,
-    ps::gpu::Tensor& out) {
+    shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -45,7 +45,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -56,8 +56,8 @@ static void fill_taps(
     uint32_t rows,
     uint32_t features,
     uint32_t seed) {
-    taps.assign(ps::kernel::kDFlash2TargetTaps, {});
-    for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+    taps.assign(shelf::kernel::kDFlash2TargetTaps, {});
+    for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
         taps[t].resize(static_cast<std::size_t>(rows) * features);
         for (uint32_t r = 0; r < rows; ++r) {
             for (uint32_t f = 0; f < features; ++f) {
@@ -71,17 +71,17 @@ static void fill_taps(
 }
 
 static int run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t rows,
     uint32_t features,
     uint32_t output_row_stride) {
-    const uint32_t out_features = ps::kernel::kDFlash2TargetTaps * features;
+    const uint32_t out_features = shelf::kernel::kDFlash2TargetTaps * features;
     std::vector<std::vector<bf16_t>> host_taps;
     fill_taps(host_taps, rows, features, rows * 17u + features);
 
-    ps::gpu::Tensor dev_taps[ps::kernel::kDFlash2TargetTaps];
-    for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+    shelf::gpu::Tensor dev_taps[shelf::kernel::kDFlash2TargetTaps];
+    for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
         if (!alloc_bf16(arena, {rows, features}, dev_taps[t])) {
             check(false, "tap alloc");
             return 1;
@@ -92,7 +92,7 @@ static int run_case(
         check(e == hipSuccess, "tap upload");
     }
 
-    ps::gpu::Tensor out;
+    shelf::gpu::Tensor out;
     if (!alloc_bf16(arena, {rows, output_row_stride}, out)) {
         check(false, "out alloc");
         return 1;
@@ -103,7 +103,7 @@ static int run_case(
                     out_zero.size() * sizeof(bf16_t), hipMemcpyHostToDevice) == hipSuccess,
           "out init");
 
-    const hipError_t err = ps::kernel::launch_dflash2_feature_concat(
+    const hipError_t err = shelf::kernel::launch_dflash2_feature_concat(
         dev_taps[0].data<bf16_t>(), dev_taps[1].data<bf16_t>(), dev_taps[2].data<bf16_t>(),
         dev_taps[3].data<bf16_t>(), dev_taps[4].data<bf16_t>(), features, rows,
         out.data<bf16_t>(), output_row_stride, stream);
@@ -117,7 +117,7 @@ static int run_case(
           "out readback");
 
     for (uint32_t r = 0; r < rows; ++r) {
-        for (uint32_t t = 0; t < ps::kernel::kDFlash2TargetTaps; ++t) {
+        for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
             for (uint32_t f = 0; f < features; ++f) {
                 const bf16_t got =
                     host_out[static_cast<std::size_t>(r) * output_row_stride +
@@ -145,12 +145,12 @@ static int run_case(
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 256ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 256ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -165,8 +165,8 @@ int main() {
     run_case(arena, stream, 3u, 12u, 60u);
     run_case(arena, stream, 8u, 4u, 20u);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_feature_concat: failed=%d\n", g_fail);

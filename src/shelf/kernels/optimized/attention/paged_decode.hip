@@ -13,7 +13,7 @@
 #include <cmath>
 #include <cfloat>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace { namespace v_decode_bf16 {
 
@@ -290,7 +290,7 @@ void attention_paged_bf16_impl(
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionBlock)
 void shelf_attention_paged_bf16(
-    ::ps::kernel::PagedAttentionBf16Args args) {
+    ::shelf::kernel::PagedAttentionBf16Args args) {
     v_decode_bf16::attention_paged_bf16_body<true>(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
         reinterpret_cast<const bf16*>(args.v_pool), args.common.output);
@@ -815,7 +815,7 @@ uint32_t paged_attention_split_reduce_qh_per_wg() {
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_split_q4_full(
-    ::ps::kernel::PagedAttentionSplitArgs args) {
+    ::shelf::kernel::PagedAttentionSplitArgs args) {
     v_decode_bf16_split::attention_paged_split_bf16_body<4u, true>(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
         reinterpret_cast<const bf16*>(args.v_pool), args.partials, args.splits);
@@ -823,28 +823,28 @@ void shelf_attention_paged_bf16_split_q4_full(
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_reduce_q4_full_qh1(
-    ::ps::kernel::PagedAttentionSplitReduceArgs args) {
+    ::shelf::kernel::PagedAttentionSplitReduceArgs args) {
     v_decode_bf16_split_qh::attention_paged_split_reduce_qh_bf16_body<4u, true, 1u>(
         args.common, args.partials, args.splits, args.common.output);
 }
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_reduce_q4_full_qh2(
-    ::ps::kernel::PagedAttentionSplitReduceArgs args) {
+    ::shelf::kernel::PagedAttentionSplitReduceArgs args) {
     v_decode_bf16_split_qh::attention_paged_split_reduce_qh_bf16_body<4u, true, 2u>(
         args.common, args.partials, args.splits, args.common.output);
 }
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_reduce_q4_full_base(
-    ::ps::kernel::PagedAttentionSplitReduceArgs args) {
+    ::shelf::kernel::PagedAttentionSplitReduceArgs args) {
     v_decode_bf16_split::attention_paged_split_reduce_bf16_body<4u, true>(
         args.common, args.partials, args.splits, args.common.output);
 }
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_split_other(
-    ::ps::kernel::PagedAttentionSplitArgs args) {
+    ::shelf::kernel::PagedAttentionSplitArgs args) {
     v_decode_bf16_split::attention_paged_split_bf16_body<6u, true>(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
         reinterpret_cast<const bf16*>(args.v_pool), args.partials, args.splits);
@@ -852,7 +852,7 @@ void shelf_attention_paged_bf16_split_other(
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_bf16_reduce_other(
-    ::ps::kernel::PagedAttentionSplitReduceArgs args) {
+    ::shelf::kernel::PagedAttentionSplitReduceArgs args) {
     v_decode_bf16_split::attention_paged_split_reduce_bf16_body<6u, true>(
         args.common, args.partials, args.splits, args.common.output);
 }
@@ -1014,8 +1014,8 @@ hipError_t launch_attention_paged_bf16_split_reduce(
 namespace { namespace v_decode_fp8 {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
-using ::ps::quantization::codec::device::e4m3_decode_f32;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
+using ::shelf::quantization::codec::device::e4m3_decode_f32;
 
 constexpr uint32_t kWaves = 8u;
 constexpr uint32_t kThreads = kWaves * 32u;
@@ -1308,8 +1308,8 @@ void attention_paged_fp8_impl(
 
 hipError_t launch_attention_paged_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
     const float* k_scale_pool,
     const float* v_scale_pool,
     hipStream_t stream) {
@@ -1587,28 +1587,28 @@ void attention_paged_split_fp8_impl(
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_fp8_split_q4_full(
-    ::ps::kernel::PagedAttentionFp8SplitArgs args) {
+    ::shelf::kernel::PagedAttentionFp8SplitArgs args) {
     v_decode_fp8_split::attention_paged_split_fp8_body<4u, true>(
         args.common,
-        reinterpret_cast<const ::ps::kernel::fp8e4m3_storage_t*>(args.k_pool),
-        reinterpret_cast<const ::ps::kernel::fp8e4m3_storage_t*>(args.v_pool),
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.k_pool),
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.v_pool),
         args.k_scale_pool, args.v_scale_pool, args.partials, args.splits);
 }
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_fp8_split_other(
-    ::ps::kernel::PagedAttentionFp8SplitArgs args) {
+    ::shelf::kernel::PagedAttentionFp8SplitArgs args) {
     v_decode_fp8_split::attention_paged_split_fp8_body<6u, true>(
         args.common,
-        reinterpret_cast<const ::ps::kernel::fp8e4m3_storage_t*>(args.k_pool),
-        reinterpret_cast<const ::ps::kernel::fp8e4m3_storage_t*>(args.v_pool),
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.k_pool),
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.v_pool),
         args.k_scale_pool, args.v_scale_pool, args.partials, args.splits);
 }
 
 hipError_t launch_attention_paged_fp8_split(
     const PagedAttentionCommonArgs& common,
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
     const float* k_scale_pool,
     const float* v_scale_pool,
     float* partials,
@@ -1676,4 +1676,4 @@ hipError_t launch_attention_paged_fp8_split(
 }
 
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

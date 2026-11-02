@@ -1,11 +1,11 @@
 #include <shelf/inference/execution/selectors/kv_append_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
 struct KvAppendRule {
-    ::ps::kernel::KVCacheDType kv_dtype;
+    ::shelf::kernel::KVCacheDType kv_dtype;
     uint32_t kv_heads;
     uint32_t head_dim;
     uint32_t page_tokens;
@@ -16,9 +16,9 @@ struct KvAppendRule {
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 
 constexpr KvAppendRule kKvAppendRules[] = {
-    { ::ps::kernel::KVCacheDType::BF16, 4, 256, 16, 1, kMeasuredMaxRows },
-    { ::ps::kernel::KVCacheDType::FP8_E4M3, 4, 256, 16, 1, kMeasuredMaxRows },
-    { ::ps::kernel::KVCacheDType::BF16, 2, 256, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::BF16, 4, 256, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, 4, 256, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::BF16, 2, 256, 16, 1, kMeasuredMaxRows },
 };
 
 }  // namespace
@@ -43,4 +43,4 @@ KvAppendImplementation select_kv_append_implementation(const KvAppendSelectorInp
     return KvAppendImplementation::Correctness;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

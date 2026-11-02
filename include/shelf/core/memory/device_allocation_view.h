@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 class Tensor;
@@ -39,4 +39,4 @@ class DeviceAllocationView {
 };
 
 } // namespace gpu
-} // namespace ps
+} // namespace shelf

@@ -6,7 +6,7 @@
 #include <cstring>
 #include <limits>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 namespace {
 
@@ -463,4 +463,4 @@ Status materialize_rank_local_canonical(
     return Status::make_ok();
 }
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

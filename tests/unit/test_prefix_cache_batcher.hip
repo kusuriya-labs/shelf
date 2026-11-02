@@ -18,26 +18,26 @@
 #include "support/qwen35_tp_fixture.h"
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
-using ps::qwen35::Executor;
-using ps::qwen35::ExecutorConfig;
-using ps::state::GdnStatePool;
-using ps::state::GdnStatePoolLayout;
-using ps::kernel::KVCacheDType;
-using ps::state::PagedKVPool;
-using ps::qwen35::Qwen35LoadOptions;
-using ps::qwen35::Qwen35Model;
-using ps::qwen35::Qwen35TextConfig;
-using ps::state::SequenceSlotPool;
-using ps::qwen35::create_model_executor;
-using ps::qwen35::executor_shutdown;
-using ps::qwen35::runtime::ContinuousBatcher;
-using ps::qwen35::runtime::ContinuousBatcherConfig;
-using ps::qwen35::runtime::PrefixCache;
-using ps::qwen35::runtime::PrefixCacheConfig;
-using ps::qwen35::runtime::PrefixCacheStats;
-using ps::qwen35::runtime::RuntimeRequest;
+using shelf::qwen35::Executor;
+using shelf::qwen35::ExecutorConfig;
+using shelf::state::GdnStatePool;
+using shelf::state::GdnStatePoolLayout;
+using shelf::kernel::KVCacheDType;
+using shelf::state::PagedKVPool;
+using shelf::qwen35::Qwen35LoadOptions;
+using shelf::qwen35::Qwen35Model;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::state::SequenceSlotPool;
+using shelf::qwen35::create_model_executor;
+using shelf::qwen35::executor_shutdown;
+using shelf::qwen35::runtime::ContinuousBatcher;
+using shelf::qwen35::runtime::ContinuousBatcherConfig;
+using shelf::qwen35::runtime::PrefixCache;
+using shelf::qwen35::runtime::PrefixCacheConfig;
+using shelf::qwen35::runtime::PrefixCacheStats;
+using shelf::qwen35::runtime::RuntimeRequest;
 
 static int g_fail = 0;
 
@@ -307,7 +307,7 @@ int main() {
     executor_shutdown(executor);
     const Status cache_shutdown = cache.shutdown();
     check(cache_shutdown.ok(), "prefix cache shutdown");
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     (void)arena.shutdown();
     fs::remove_all(dir, ec);
 

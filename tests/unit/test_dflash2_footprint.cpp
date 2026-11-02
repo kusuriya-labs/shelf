@@ -4,10 +4,10 @@
 #include <cstdio>
 #include <string>
 
-using ps::qwen35::dflash2::DFlash2Config;
-using ps::qwen35::runtime::DFlash2Footprint;
-using ps::qwen35::runtime::dflash2_context_state_bytes;
-using ps::qwen35::runtime::dflash2_draft_scratch_bytes;
+using shelf::qwen35::dflash2::DFlash2Config;
+using shelf::qwen35::runtime::DFlash2Footprint;
+using shelf::qwen35::runtime::dflash2_context_state_bytes;
+using shelf::qwen35::runtime::dflash2_draft_scratch_bytes;
 
 static int g_fail = 0;
 
@@ -44,7 +44,7 @@ int main() {
     const DFlash2Config config = dflash2_reference_config();
 
     const std::size_t context = dflash2_context_state_bytes(config);
-    check(context == 2u * 5u * 2048u * (8u * 128u) * sizeof(ps::bf16_t),
+    check(context == 2u * 5u * 2048u * (8u * 128u) * sizeof(shelf::bf16_t),
           "context state bytes match the ring geometry");
     check(config.context_ring_bytes() == context,
           "context state bytes stay aligned to the config accessor");

@@ -7,7 +7,7 @@
 #include <cstring>
 #include <vector>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 bool perf_stats_enabled() {
     static const bool enabled = [] {
@@ -101,13 +101,13 @@ void perf_stats_dump(const char* path, uint32_t tokens) {
     std::fprintf(f, "},\n");
     std::fprintf(f, "  \"kernel_ids\": {");
     first = true;
-    for (uint32_t i = 0; i < static_cast<uint32_t>(::ps::runtime::KernelId::COUNT); ++i) {
+    for (uint32_t i = 0; i < static_cast<uint32_t>(::shelf::runtime::KernelId::COUNT); ++i) {
         if (s.kernel_id_calls[i] == 0)
             continue;
         if (!first)
             std::fprintf(f, ", ");
         std::fprintf(f, "\"%s\": %llu",
-                     ::ps::runtime::kernel_to_name(static_cast<::ps::runtime::KernelId>(i)),
+                     ::shelf::runtime::kernel_to_name(static_cast<::shelf::runtime::KernelId>(i)),
                      (unsigned long long)s.kernel_id_calls[i]);
         first = false;
     }
@@ -179,8 +179,8 @@ void semantic_timing_end(hipStream_t stream, const char* csv_path) {
             float ms = 0.0f;
             (void)hipEventElapsedTime(&ms, g_sem.events[2u * r.seq], g_sem.events[2u * r.seq + 1u]);
             const double us = static_cast<double>(ms) * 1000.0;
-            const char* kid = ::ps::runtime::kernel_to_name(
-                static_cast<::ps::runtime::KernelId>(r.kernel_id));
+            const char* kid = ::shelf::runtime::kernel_to_name(
+                static_cast<::shelf::runtime::KernelId>(r.kernel_id));
             const char* path =
                 r.path == static_cast<uint32_t>(SemPath::Correctness) ? "correctness"
                                                                       : "optimized";
@@ -198,4 +198,4 @@ void semantic_timing_end(hipStream_t stream, const char* csv_path) {
     g_sem.begun = false;
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

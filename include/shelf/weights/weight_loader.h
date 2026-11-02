@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::weights {
+namespace shelf::weights {
 
 class SafetensorsCollection {
 public:
@@ -118,4 +118,4 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
     hipStream_t stream,
     const WeightLoadOptions& options = {});
 
-}  // namespace ps::weights
+}  // namespace shelf::weights

@@ -25,29 +25,29 @@
 
 namespace tp_harness {
 
-namespace gpu = ps::gpu;
+namespace gpu = shelf::gpu;
 
-using ps::qwen35::Executor;
-using ps::qwen35::ExecutorConfig;
-using ps::state::GdnStatePool;
-using ps::state::GdnStatePoolLayout;
-using ps::kernel::KVCacheDType;
-using ps::state::PagedKVPool;
-using ps::qwen35::Qwen35LoadOptions;
-using ps::qwen35::Qwen35Model;
-using ps::qwen35::Qwen35ModelWeights;
-using ps::qwen35::Qwen35TextConfig;
-using ps::state::SequenceSlotPool;
-using ps::qwen35::create_model_executor;
-using ps::qwen35::executor_shutdown;
-using ps::qwen35::runtime::ContinuousBatcher;
-using ps::qwen35::runtime::ContinuousBatcherConfig;
-using ps::qwen35::runtime::RuntimeRequest;
-using ps::qwen35::runtime::TpCoordinator;
-using ps::qwen35::runtime::TpCoordinatorConfig;
-using ps::qwen35::runtime::TpRankRuntime;
-using ps::qwen35::kMaxTargetHiddenTaps;
-using ps::qwen35::runtime::ValueTraceSink;
+using shelf::qwen35::Executor;
+using shelf::qwen35::ExecutorConfig;
+using shelf::state::GdnStatePool;
+using shelf::state::GdnStatePoolLayout;
+using shelf::kernel::KVCacheDType;
+using shelf::state::PagedKVPool;
+using shelf::qwen35::Qwen35LoadOptions;
+using shelf::qwen35::Qwen35Model;
+using shelf::qwen35::Qwen35ModelWeights;
+using shelf::qwen35::Qwen35TextConfig;
+using shelf::state::SequenceSlotPool;
+using shelf::qwen35::create_model_executor;
+using shelf::qwen35::executor_shutdown;
+using shelf::qwen35::runtime::ContinuousBatcher;
+using shelf::qwen35::runtime::ContinuousBatcherConfig;
+using shelf::qwen35::runtime::RuntimeRequest;
+using shelf::qwen35::runtime::TpCoordinator;
+using shelf::qwen35::runtime::TpCoordinatorConfig;
+using shelf::qwen35::runtime::TpRankRuntime;
+using shelf::qwen35::kMaxTargetHiddenTaps;
+using shelf::qwen35::runtime::ValueTraceSink;
 
 inline std::vector<int> tp_devices_from_env() {
     if (const char* env = std::getenv("SHELF_TP_DEVICES")) {
@@ -95,7 +95,7 @@ inline bool download_row0(const gpu::Tensor& tensor, int device,
     if (span == 0) return false;
     std::vector<std::uint8_t> raw(span);
     {
-        auto scope = ps::gpu::ScopedDevice::create(device);
+        auto scope = shelf::gpu::ScopedDevice::create(device);
         if (!scope.ok()) return false;
         if (hipMemcpy(raw.data(), tensor.data<void>(), span, hipMemcpyDeviceToHost) !=
             hipSuccess) {
@@ -133,15 +133,15 @@ struct TraceCapture {
     void bind() {
         sink.on_value = [this](std::uint32_t value_id, const void* device_ptr,
                                std::uint32_t row_stride, std::uint32_t feature_count,
-                               ps::runtime::ValueDType dtype, std::uint32_t rows,
+                               shelf::runtime::ValueDType dtype, std::uint32_t rows,
                                hipStream_t stream) {
             (void)row_stride;
             if (rows == 0 || feature_count == 0) return;
-            const std::size_t elem = ps::runtime::value_dtype_bytes(dtype);
+            const std::size_t elem = shelf::runtime::value_dtype_bytes(dtype);
             if (elem == 0 || elem > 4) return;
             const std::size_t n = static_cast<std::size_t>(feature_count);
             std::vector<std::uint8_t> host(n * elem);
-            auto scope = ps::gpu::ScopedDevice::create(this->device);
+            auto scope = shelf::gpu::ScopedDevice::create(this->device);
             if (!scope.ok()) return;
             if (hipMemcpyAsync(host.data(), device_ptr, n * elem,
                                hipMemcpyDeviceToHost, stream) != hipSuccess) {
@@ -311,7 +311,7 @@ inline RunResult run_tp1(const RunOptions& opts) {
     }
     SequenceSlotPool seq_pool = seq_result.release();
 
-    auto gdn_layout = ps::qwen35::make_qwen35_gdn_state_layout(model.text_config());
+    auto gdn_layout = shelf::qwen35::make_qwen35_gdn_state_layout(model.text_config());
     auto gdn_result =
         GdnStatePool::create(arena, opts.max_scheduled_requests, gdn_layout);
     if (!gdn_result.ok()) {
@@ -399,7 +399,7 @@ inline RunResult run_tp1(const RunOptions& opts) {
 
     (void)batcher.cancel_all();
     executor_shutdown(executor);
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     arena.shutdown();
 
     result.ok = true;

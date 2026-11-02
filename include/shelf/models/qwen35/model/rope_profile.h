@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 struct Qwen35RopeParameters {

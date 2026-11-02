@@ -1,6 +1,6 @@
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 
 namespace {
 

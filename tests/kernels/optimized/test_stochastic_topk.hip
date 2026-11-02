@@ -12,7 +12,7 @@
 
 namespace {
 
-using ::ps::runtime::DeviceSamplingParams;
+using ::shelf::runtime::DeviceSamplingParams;
 
 int g_fail = 0;
 
@@ -31,7 +31,7 @@ DeviceSamplingParams mk(uint8_t mode, float temperature, float top_p, uint32_t t
     p.top_k = top_k;
     p.seed = seed;
     p.sample_index = index;
-    p.reserved[0] = ::ps::kernel::kSamplingTopKPathFlag;
+    p.reserved[0] = ::shelf::kernel::kSamplingTopKPathFlag;
     return p;
 }
 
@@ -51,16 +51,16 @@ __global__ void topk_reference_kernel(
     uint32_t* __restrict__ error_word) {
     const uint32_t row = blockIdx.x;
     const float* row_logits = logits + static_cast<std::size_t>(row) * row_stride;
-    const ::ps::kernel::SamplingRowParams params =
-        ::ps::kernel::sampling_row_params(sampling[row]);
-    __shared__ int32_t ids[::ps::kernel::kSamplingMaxTopK];
-    __shared__ float values[::ps::kernel::kSamplingMaxTopK];
-    ::ps::kernel::sampling_topk_select_reference(row_logits, vocab, top_k, ids, values);
-    ::ps::kernel::SamplingTopKView view;
+    const ::shelf::kernel::SamplingRowParams params =
+        ::shelf::kernel::sampling_row_params(sampling[row]);
+    __shared__ int32_t ids[::shelf::kernel::kSamplingMaxTopK];
+    __shared__ float values[::shelf::kernel::kSamplingMaxTopK];
+    ::shelf::kernel::sampling_topk_select_reference(row_logits, vocab, top_k, ids, values);
+    ::shelf::kernel::SamplingTopKView view;
     view.ids = ids;
     view.logits = values;
     view.count = top_k;
-    ::ps::kernel::sampling_topk_active_row(row_logits, vocab, params, view,
+    ::shelf::kernel::sampling_topk_active_row(row_logits, vocab, params, view,
                                            tokens + row, error_word);
 }
 
@@ -69,11 +69,11 @@ bool run_radix(const std::vector<float>& logits, uint32_t vocab, uint32_t output
                TopKResult& out, bool want_active) {
     if (params.size() != outputs) return false;
     if (logits.size() != static_cast<std::size_t>(outputs) * vocab) return false;
-    if (top_k == 0u || top_k > ::ps::kernel::kSamplingMaxTopK) return false;
+    if (top_k == 0u || top_k > ::shelf::kernel::kSamplingMaxTopK) return false;
 
-    const uint32_t partitions = ::ps::kernel::dflash2_radix_default_partitions(vocab);
+    const uint32_t partitions = ::shelf::kernel::dflash2_radix_default_partitions(vocab);
     const std::size_t scratch_bytes =
-        ::ps::kernel::dflash2_radix_topn_scratch_bytes(outputs, partitions, vocab);
+        ::shelf::kernel::dflash2_radix_topn_scratch_bytes(outputs, partitions, vocab);
 
     float* d_logits = nullptr;
     DeviceSamplingParams* d_params = nullptr;
@@ -98,13 +98,13 @@ bool run_radix(const std::vector<float>& logits, uint32_t vocab, uint32_t output
                        hipMemcpyHostToDevice) == hipSuccess;
     }
     if (ok) {
-        ps::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
-        ok = ::ps::kernel::launch_dflash2_radix_topn(
+        shelf::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
+        ok = ::shelf::kernel::launch_dflash2_radix_topn(
                  d_logits, outputs, vocab, vocab, top_k, d_ids, d_vals, partitions,
                  d_scratch, scratch_bytes, nullptr) == hipSuccess;
     }
     if (ok) {
-        ::ps::kernel::StochasticTopKSamplingArgs args;
+        ::shelf::kernel::StochasticTopKSamplingArgs args;
         args.logits = d_logits;
         args.sampling = d_params;
         args.sampled_tokens = d_tokens;
@@ -116,7 +116,7 @@ bool run_radix(const std::vector<float>& logits, uint32_t vocab, uint32_t output
         args.top_k = top_k;
         args.error_word = d_err;
         args.active_count_out = d_active;
-        ok = ::ps::kernel::launch_stochastic_topk_sampling_f32(args, nullptr) == hipSuccess &&
+        ok = ::shelf::kernel::launch_stochastic_topk_sampling_f32(args, nullptr) == hipSuccess &&
              hipDeviceSynchronize() == hipSuccess;
     }
     if (ok) {
@@ -133,7 +133,7 @@ bool run_radix(const std::vector<float>& logits, uint32_t vocab, uint32_t output
                     reinterpret_cast<void*>(d_tokens), reinterpret_cast<void*>(d_err),
                     reinterpret_cast<void*>(d_ids), reinterpret_cast<void*>(d_vals),
                     d_scratch, reinterpret_cast<void*>(d_active)}) {
-        if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+        if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
     (void)want_active;
     return ok;
@@ -159,7 +159,7 @@ bool run_reference(const std::vector<float>& logits, uint32_t vocab, uint32_t ou
                        hipMemcpyHostToDevice) == hipSuccess;
     }
     if (ok) {
-        ps::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
+        shelf::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
         topk_reference_kernel<<<outputs, 256, 0, nullptr>>>(
             d_logits, d_params, d_tokens, vocab, vocab, top_k, d_err);
         ok = hipGetLastError() == hipSuccess && hipDeviceSynchronize() == hipSuccess;
@@ -174,7 +174,7 @@ bool run_reference(const std::vector<float>& logits, uint32_t vocab, uint32_t ou
     }
     for (void* p : {reinterpret_cast<void*>(d_logits), reinterpret_cast<void*>(d_params),
                     reinterpret_cast<void*>(d_tokens), reinterpret_cast<void*>(d_err)}) {
-        if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+        if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
     return ok;
 }

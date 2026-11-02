@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::quantization::manifest {
+namespace shelf::quantization::manifest {
 
 class Crc32Accumulator {
 public:

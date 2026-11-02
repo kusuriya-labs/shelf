@@ -10,19 +10,19 @@
 #include <shelf/models/common/qwen_hybrid/gdn_lowering.h>
 #include <shelf/models/common/qwen_hybrid/attention_lowering.h>
 
-namespace ps::qwen35 {
+namespace shelf::qwen35 {
 
 namespace {
 
-namespace RT = ::ps::runtime;
+namespace RT = ::shelf::runtime;
 
-namespace QH = ::ps::qwen_hybrid;
+namespace QH = ::shelf::qwen_hybrid;
 using QH::checked_u32;
 using QH::checked_product;
 using QH::checked_double;
 using QH::validate_matrix;
 using QH::Emitter;
-using MW = ::ps::weights::MatrixWeight;
+using MW = ::shelf::weights::MatrixWeight;
 
 std::size_t tensor_element_count(const gpu::Tensor& t) {
     std::size_t n = 1;
@@ -33,7 +33,7 @@ std::size_t tensor_element_count(const gpu::Tensor& t) {
 }
 
 Status validate_mtp_matrix(
-    const ps::weights::MatrixWeight& weight,
+    const shelf::weights::MatrixWeight& weight,
     std::uint32_t expected_rows,
     std::uint32_t expected_cols,
     const char* tensor_name) {
@@ -330,7 +330,7 @@ RT::WeightSlot make_weight_slot(const MW& w) {
     s.k_padded = w.k_padded;
     s.encoding = static_cast<uint8_t>(w.encoding);
     s.compute_spec = static_cast<uint8_t>(w.compute_spec);
-    if (w.encoding == ps::weights::MatrixEncoding::Bf16) {
+    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
         s.device_ptr = w.bf16.data<void>();
         s.bytes = static_cast<uint64_t>(w.rows) * w.cols * sizeof(uint16_t);
         s.codes = nullptr;
@@ -694,7 +694,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         uint32_t lm_head_col_offset = 0;
         if (!lm_tied && options.tp != nullptr &&
             options.tp->vocab_parallel_lm_head &&
-            lmw->encoding == ps::weights::MatrixEncoding::Bf16 &&
+            lmw->encoding == shelf::weights::MatrixEncoding::Bf16 &&
             lmw->partition.has_value()) {
             const auto& part = lmw->partition.value();
             vocab_parallel = part.axis == 0 && part.count == options.tp->tp_size &&

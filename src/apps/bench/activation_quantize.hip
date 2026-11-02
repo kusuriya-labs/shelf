@@ -95,30 +95,30 @@ struct ActEnv {
     void* ctx_dev = nullptr;
     float* scratch = nullptr;
     uint32_t* error_word = nullptr;
-    ::ps::runtime::DeviceProgramView program{};
-    ::ps::runtime::DispatchBinding binding{};
+    ::shelf::runtime::DeviceProgramView program{};
+    ::shelf::runtime::DispatchBinding binding{};
     std::vector<uint16_t> h_in;
     uint32_t rows = 0;
     uint32_t k = 0;
     uint32_t kp = 0;
-    ::ps::runtime::Int8ActivationWorkspaceLayout layout{};
+    ::shelf::runtime::Int8ActivationWorkspaceLayout layout{};
 };
 
 void teardown(ActEnv& e) {
-    ps::gpu::discard_cleanup_result(hipFree(e.act_ws));
-    ps::gpu::discard_cleanup_result(hipFree(e.in_ptr));
-    ps::gpu::discard_cleanup_result(hipFree(e.values_dev));
-    ps::gpu::discard_cleanup_result(hipFree(e.ranges_dev));
-    ps::gpu::discard_cleanup_result(hipFree(e.ctx_dev));
-    ps::gpu::discard_cleanup_result(hipFree(e.scratch));
-    ps::gpu::discard_cleanup_result(hipFree(e.error_word));
+    shelf::gpu::discard_cleanup_result(hipFree(e.act_ws));
+    shelf::gpu::discard_cleanup_result(hipFree(e.in_ptr));
+    shelf::gpu::discard_cleanup_result(hipFree(e.values_dev));
+    shelf::gpu::discard_cleanup_result(hipFree(e.ranges_dev));
+    shelf::gpu::discard_cleanup_result(hipFree(e.ctx_dev));
+    shelf::gpu::discard_cleanup_result(hipFree(e.scratch));
+    shelf::gpu::discard_cleanup_result(hipFree(e.error_word));
 }
 
 bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stream) {
     e.rows = rows;
     e.k = k;
     e.kp = (k + 31u) & ~31u;
-    e.layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
+    e.layout = ::shelf::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> xd(-1.0f, 1.0f);
     e.h_in.resize((size_t)rows * k);
@@ -133,18 +133,18 @@ bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stre
     if (hipMemcpy(e.in_ptr, e.h_in.data(), e.h_in.size() * 2, hipMemcpyHostToDevice) != hipSuccess) {
         teardown(e); return false;
     }
-    ::ps::runtime::DeviceValueBinding values[1];
+    ::shelf::runtime::DeviceValueBinding values[1];
     values[0] = {};
     values[0].logical_value = 0;
-    values[0].storage = ::ps::runtime::ValueStorage::EXTERNAL_INPUT;
-    values[0].dtype = ::ps::runtime::ValueDType::BF16;
-    values[0].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[0].storage = ::shelf::runtime::ValueStorage::EXTERNAL_INPUT;
+    values[0].dtype = ::shelf::runtime::ValueDType::BF16;
+    values[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     values[0].slot = 0;
     values[0].feature_count = k;
     values[0].row_stride = k;
     values[0].offset = reinterpret_cast<uint64_t>(e.in_ptr);
     values[0].bytes = (size_t)rows * k * 2;
-    ::ps::runtime::DeviceWorkspaceRange range{};
+    ::shelf::runtime::DeviceWorkspaceRange range{};
     range.offset = 0;
     range.bytes = e.layout.total_bytes;
     if (hipMalloc(&e.values_dev, sizeof(values)) != hipSuccess) { teardown(e); return false; }
@@ -155,13 +155,13 @@ bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stre
     if (hipMemcpy(e.ranges_dev, &range, sizeof(range), hipMemcpyHostToDevice) != hipSuccess) {
         teardown(e); return false;
     }
-    e.program.values = static_cast<const ::ps::runtime::DeviceValueBinding*>(e.values_dev);
+    e.program.values = static_cast<const ::shelf::runtime::DeviceValueBinding*>(e.values_dev);
     e.program.value_count = 1;
     e.program.workspace_ranges =
-        static_cast<const ::ps::runtime::DeviceWorkspaceRange*>(e.ranges_dev);
+        static_cast<const ::shelf::runtime::DeviceWorkspaceRange*>(e.ranges_dev);
     e.program.workspace_range_count = 1;
     e.program.workspace_base = reinterpret_cast<uint64_t>(e.act_ws);
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_outputs = 0;
     if (hipMalloc(&e.ctx_dev, sizeof(ctx)) != hipSuccess) { teardown(e); return false; }
@@ -172,7 +172,7 @@ bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stre
     if (hipMalloc(&e.error_word, sizeof(uint32_t)) != hipSuccess) { teardown(e); return false; }
     if (hipMemset(e.error_word, 0, sizeof(uint32_t)) != hipSuccess) { teardown(e); return false; }
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
     e.binding.workspace_slot = 0;
     e.binding.group_size = 32;
     e.binding.activation_kp = e.kp;
@@ -188,9 +188,9 @@ bool setup(ActEnv& e, uint32_t rows, uint32_t k, uint32_t seed, hipStream_t stre
 hipError_t launch_correctness(const ActEnv& e, hipStream_t stream) {
     if (hipMemsetAsync(e.error_word, 0, sizeof(uint32_t), stream) != hipSuccess)
         return hipGetLastError();
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.program, e.binding, static_cast<::ps::runtime::DeviceBatchContext*>(e.ctx_dev),
-        ps::kernel::ModelDispatchStateView{}, e.scratch, e.error_word, stream);
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.program, e.binding, static_cast<::shelf::runtime::DeviceBatchContext*>(e.ctx_dev),
+        shelf::kernel::ModelDispatchStateView{}, e.scratch, e.error_word, stream);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
 }
@@ -199,8 +199,8 @@ hipError_t launch_fp8_finegrained_auto(const ActEnv& e, hipStream_t stream) {
     uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
     float* scales = reinterpret_cast<float*>(
         reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.scales_offset);
-    return ps::kernel::launch_activation_quantize_fp8_finegrained(
-        static_cast<const ::ps::bf16_t*>(e.in_ptr),
+    return shelf::kernel::launch_activation_quantize_fp8_finegrained(
+        static_cast<const ::shelf::bf16_t*>(e.in_ptr),
         codes, scales,
         e.rows, e.k, e.kp,
         e.k, e.layout.code_row_stride_bytes, e.layout.scale_row_stride_bytes,
@@ -211,8 +211,8 @@ hipError_t launch_fp8_finegrained_generic(const ActEnv& e, hipStream_t stream) {
     uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
     float* scales = reinterpret_cast<float*>(
         reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.scales_offset);
-    return ps::kernel::launch_activation_quantize_fp8_finegrained_generic(
-        static_cast<const ::ps::bf16_t*>(e.in_ptr),
+    return shelf::kernel::launch_activation_quantize_fp8_finegrained_generic(
+        static_cast<const ::shelf::bf16_t*>(e.in_ptr),
         codes, scales,
         e.rows, e.k, e.kp,
         e.k, e.layout.code_row_stride_bytes, e.layout.scale_row_stride_bytes,
@@ -371,8 +371,8 @@ int run_activation_quantize(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per_launch_us.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per_launch_us.empty()) { rc = 1; teardown(e); continue; }
         const double mn = percentile(per_launch_us, 0.0);
         const double p10 = percentile(per_launch_us, 0.1);
@@ -394,8 +394,8 @@ int run_activation_quantize(int argc, char** argv) {
         const char* path = "";
         if (o.variant == "e4m3-vec" || o.variant == "e4m3-auto") {
             uint8_t* codes = reinterpret_cast<uint8_t*>(e.act_ws) + e.layout.codes_offset;
-            path = ps::kernel::activation_quantize_fp8_finegrained_vec_supported(
-                       static_cast<const ::ps::bf16_t*>(e.in_ptr), codes, e.k, e.kp, e.k)
+            path = shelf::kernel::activation_quantize_fp8_finegrained_vec_supported(
+                       static_cast<const ::shelf::bf16_t*>(e.in_ptr), codes, e.k, e.kp, e.k)
                        ? " [vec]"
                        : " [generic-fallback]";
         }
@@ -403,6 +403,6 @@ int run_activation_quantize(int argc, char** argv) {
                     o.variant.c_str(), rows, o.k, p10, p50, p90, mean, path);
         teardown(e);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 __device__ __forceinline__ ProgramStatus exec_gdn_conv1d(
     ModelDispatchEnv& env, const DispatchBinding& b) {
@@ -8,7 +8,7 @@ __device__ __forceinline__ ProgramStatus exec_gdn_conv1d(
         return ProgramStatus::INVALID_PROGRAM;
     const auto* sb = find_state(env, b.descriptor_slot);
     if (sb == nullptr ||
-        sb->kind != static_cast<uint8_t>(ps::runtime::PrimitiveStateKind::GDN_CONV_STATE))
+        sb->kind != static_cast<uint8_t>(shelf::runtime::PrimitiveStateKind::GDN_CONV_STATE))
         return ProgramStatus::INVALID_BINDING;
     const auto& gdn = env.qwen_state->gdn;
     if (gdn.conv_base == nullptr || sb->state_index >= gdn.num_gdn_states ||
@@ -82,7 +82,7 @@ __device__ __forceinline__ ProgramStatus exec_gdn_recurrence(
         return ProgramStatus::INVALID_PROGRAM;
     const auto* sb = find_state(env, b.descriptor_slot);
     if (sb == nullptr ||
-        sb->kind != static_cast<uint8_t>(ps::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE))
+        sb->kind != static_cast<uint8_t>(shelf::runtime::PrimitiveStateKind::GDN_RECURRENCE_STATE))
         return ProgramStatus::INVALID_BINDING;
     const auto& gdn = env.qwen_state->gdn;
     if (gdn.recurrent_base == nullptr || sb->state_index >= gdn.num_gdn_states ||
@@ -174,4 +174,4 @@ __device__ __forceinline__ ProgramStatus exec_gdn_recurrence(
     return ProgramStatus::COMPLETE;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

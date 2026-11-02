@@ -1,6 +1,6 @@
 #include <shelf/inference/state/paged_kv_pool.h>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 std::size_t PagedKVPool::page_bytes(

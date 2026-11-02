@@ -15,22 +15,22 @@
 #include <filesystem>
 #include <nlohmann/json.hpp>
 
-namespace ps::quantization::bundle {
+namespace shelf::quantization::bundle {
 
 namespace fs = std::filesystem;
 
-using ps::quantization::manifest::QuantizedEncoding;
-using ps::quantization::manifest::QuantizedManifest;
-using ps::quantization::manifest::QuantizedTensorMetadata;
-using ps::quantization::manifest::QuantizedTensorRef;
-using ps::quantization::manifest::crc32_iso_hdlc;
-using ps::quantization::manifest::kQuantizedMetadataFile;
-using ps::quantization::manifest::kQuantizedSafetensorsFormat;
-using ps::quantization::manifest::kQuantizedSafetensorsFormatVersion;
-using ps::quantization::manifest::kQuantizedSafetensorsMinFormatVersion;
-using ps::quantization::manifest::parse_quantized_manifest;
-using ps::quantization::manifest::quant_format_id;
-using ps::quantization::manifest::validate_quantized_manifest_contract;
+using shelf::quantization::manifest::QuantizedEncoding;
+using shelf::quantization::manifest::QuantizedManifest;
+using shelf::quantization::manifest::QuantizedTensorMetadata;
+using shelf::quantization::manifest::QuantizedTensorRef;
+using shelf::quantization::manifest::crc32_iso_hdlc;
+using shelf::quantization::manifest::kQuantizedMetadataFile;
+using shelf::quantization::manifest::kQuantizedSafetensorsFormat;
+using shelf::quantization::manifest::kQuantizedSafetensorsFormatVersion;
+using shelf::quantization::manifest::kQuantizedSafetensorsMinFormatVersion;
+using shelf::quantization::manifest::parse_quantized_manifest;
+using shelf::quantization::manifest::quant_format_id;
+using shelf::quantization::manifest::validate_quantized_manifest_contract;
 
 namespace {
 
@@ -91,7 +91,7 @@ struct QuantizedModelReader::Impl {
     std::map<std::string, std::vector<float>> fp32_scale_staging;
 
     mutable std::mutex shard_mutex;
-    mutable std::map<std::string, std::unique_ptr<ps::io::SafetensorsReader>> shard_readers;
+    mutable std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> shard_readers;
 
     Result<fs::path> resolve_shard_path(const std::string& shard) const {
         Status path_status = validate_shard_path(shard);
@@ -111,12 +111,12 @@ struct QuantizedModelReader::Impl {
         std::lock_guard<std::mutex> lk(shard_mutex);
         auto it = shard_readers.find(shard);
         if (it == shard_readers.end()) {
-            auto r = ps::io::SafetensorsReader::open(full.string());
+            auto r = shelf::io::SafetensorsReader::open(full.string());
             if (!r.ok()) {
                 return r.status();
             }
             it = shard_readers.emplace(
-                shard, std::make_unique<ps::io::SafetensorsReader>(r.release())).first;
+                shard, std::make_unique<shelf::io::SafetensorsReader>(r.release())).first;
         }
 
         const auto& md = it->second->metadata();
@@ -144,7 +144,7 @@ struct QuantizedModelReader::Impl {
         return Status::make_ok();
     }
 
-    Result<const ps::io::SafetensorsReader*> shard_reader(const std::string& physical) const {
+    Result<const shelf::io::SafetensorsReader*> shard_reader(const std::string& physical) const {
         auto sit = shard_for_tensor.find(physical);
         if (sit == shard_for_tensor.end()) {
             return Status::invalid_argument("physical tensor not in weight_map", __FILE__, __LINE__);
@@ -157,27 +157,27 @@ struct QuantizedModelReader::Impl {
         std::lock_guard<std::mutex> lk(shard_mutex);
         auto it = shard_readers.find(shard);
         if (it == shard_readers.end()) {
-            auto r = ps::io::SafetensorsReader::open(full.string());
+            auto r = shelf::io::SafetensorsReader::open(full.string());
             if (!r.ok()) {
                 return r.status();
             }
-            auto inserted = shard_readers.emplace(shard, std::make_unique<ps::io::SafetensorsReader>(r.release()));
+            auto inserted = shard_readers.emplace(shard, std::make_unique<shelf::io::SafetensorsReader>(r.release()));
             it = inserted.first;
         }
         return it->second.get();
     }
 
     Status validate_physical_tensor(const QuantizedTensorRef& reference,
-                                    const ps::io::SafetensorsReader& reader,
-                                    ps::io::SType expected_dtype,
+                                    const shelf::io::SafetensorsReader& reader,
+                                    shelf::io::SType expected_dtype,
                                     const std::vector<std::size_t>& expected_shape,
                                     uint64_t expected_bytes,
                                     bool verify_crc) const {
         auto spec_result = reader.tensor_spec(reference.tensor);
         if (!spec_result.ok()) return spec_result.status();
-        const ps::io::StTensorSpec& spec = spec_result.value();
+        const shelf::io::StTensorSpec& spec = spec_result.value();
         const bool dtype_ok = spec.dtype == expected_dtype ||
-            (expected_dtype == ps::io::SType::U8 && spec.dtype == ps::io::SType::F8_E4M3);
+            (expected_dtype == shelf::io::SType::U8 && spec.dtype == shelf::io::SType::F8_E4M3);
         if (!dtype_ok || spec.shape != expected_shape) {
             return Status::invalid_argument(
                 ("quantized physical tensor dtype or shape mismatch: " + reference.tensor).c_str(),
@@ -212,13 +212,13 @@ struct QuantizedModelReader::Impl {
     }
 
     Status validate_ref_bytes(const QuantizedTensorRef& reference,
-                              ps::io::SType dtype,
+                              shelf::io::SType dtype,
                               const std::vector<std::size_t>& shape,
                               uint64_t expected_bytes,
                               bool verify_crc) const {
         auto staged_it = fp32_scale_staging.find(reference.tensor);
         if (staged_it != fp32_scale_staging.end()) {
-            if (dtype != ps::io::SType::F32) {
+            if (dtype != shelf::io::SType::F32) {
                 return Status::invalid_argument(
                     ("staged scale stream is not F32: " + reference.tensor).c_str(),
                     __FILE__, __LINE__);
@@ -266,7 +266,7 @@ struct QuantizedModelReader::Impl {
             const uint64_t k = static_cast<uint64_t>(logical_k);
 
             auto validate_ref = [&](const QuantizedTensorRef& reference,
-                                    ps::io::SType dtype,
+                                    shelf::io::SType dtype,
                                     uint64_t physical_k,
                                     uint64_t element_size) -> Status {
                 std::vector<std::size_t> shape;
@@ -290,20 +290,20 @@ struct QuantizedModelReader::Impl {
             };
 
             auto validate_ref_exact = [&](const QuantizedTensorRef& reference,
-                                          ps::io::SType dtype,
+                                          shelf::io::SType dtype,
                                           const std::vector<std::size_t>& shape,
                                           uint64_t expected_bytes) -> Status {
                 return validate_ref_bytes(reference, dtype, shape, expected_bytes, verify_crc);
             };
 
             if (tensor.encoding == QuantizedEncoding::Bf16) {
-                Status ref_status = validate_ref(*tensor.data, ps::io::SType::BF16, k, sizeof(uint16_t));
+                Status ref_status = validate_ref(*tensor.data, shelf::io::SType::BF16, k, sizeof(uint16_t));
                 if (!ref_status.ok()) return ref_status;
                 continue;
             }
 
-            const ps::quantization::QuantFormatDesc* desc =
-                ps::quantization::quant_format_desc(quant_format_id(tensor.encoding));
+            const shelf::quantization::QuantFormatDesc* desc =
+                shelf::quantization::quant_format_desc(quant_format_id(tensor.encoding));
             if (desc == nullptr)
                 return Status::invalid_argument("unknown quantized encoding", __FILE__, __LINE__);
             if (!tensor.codes)
@@ -312,23 +312,23 @@ struct QuantizedModelReader::Impl {
             if (kp < k || (kp % desc->block_elements) != 0) {
                 return Status::invalid_argument("quantized tensor k_padded invalid", __FILE__, __LINE__);
             }
-            const Status code_status = validate_ref(*tensor.codes, ps::io::SType::U8,
-                ps::quantization::quant_codes_bytes(1, kp, *desc), 1);
+            const Status code_status = validate_ref(*tensor.codes, shelf::io::SType::U8,
+                shelf::quantization::quant_codes_bytes(1, kp, *desc), 1);
             if (!code_status.ok()) return code_status;
 
             const std::optional<QuantizedTensorRef>* meta_ref[4] = {
                 &tensor.metadata1, &tensor.metadata2, &tensor.metadata3, &tensor.metadata4};
             for (uint32_t s = 0; s < 4; ++s) {
-                const ps::quantization::QuantMetaDesc& meta_desc = desc->meta[s];
-                if (meta_desc.count_mode == ps::quantization::MetaCountMode::None)
+                const shelf::quantization::QuantMetaDesc& meta_desc = desc->meta[s];
+                if (meta_desc.count_mode == shelf::quantization::MetaCountMode::None)
                     continue;
                 if (!(*meta_ref[s]))
                     return Status::invalid_argument("quantized tensor is missing a required metadata stream", __FILE__, __LINE__);
-                const ps::io::SType scale_dtype =
-                    meta_desc.storage == ps::quantization::MetaStorage::F32
-                        ? ps::io::SType::F32
-                        : ps::io::SType::U8;
-                if (meta_desc.count_mode == ps::quantization::MetaCountMode::MatrixBlock) {
+                const shelf::io::SType scale_dtype =
+                    meta_desc.storage == shelf::quantization::MetaStorage::F32
+                        ? shelf::io::SType::F32
+                        : shelf::io::SType::U8;
+                if (meta_desc.count_mode == shelf::quantization::MetaCountMode::MatrixBlock) {
                     std::vector<std::size_t> logical;
                     logical.reserve(tensor.logical_shape.size());
                     for (const int64_t dimension : tensor.logical_shape) {
@@ -363,7 +363,7 @@ struct QuantizedModelReader::Impl {
                     if (!st.ok()) return st;
                 } else {
                     const Status st = validate_ref(**meta_ref[s], scale_dtype,
-                        ps::quantization::quant_metadata_bytes(1, kp, *desc, s), 1);
+                        shelf::quantization::quant_metadata_bytes(1, kp, *desc, s), 1);
                     if (!st.ok()) return st;
                 }
             }
@@ -577,7 +577,7 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
         }
         auto rres = pimpl_->shard_reader(physical);
         if (!rres.ok()) return rres.status();
-        const ps::io::SafetensorsReader* reader = rres.value();
+        const shelf::io::SafetensorsReader* reader = rres.value();
         auto sres = reader->tensor_data(physical, out_bytes);
         if (!sres.ok()) return sres.status();
         return sres.value();

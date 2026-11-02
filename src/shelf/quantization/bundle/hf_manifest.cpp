@@ -10,15 +10,15 @@
 #include <set>
 #include <nlohmann/json.hpp>
 
-namespace ps::quantization::bundle {
+namespace shelf::quantization::bundle {
 
 namespace fs = std::filesystem;
 
-using ps::quantization::manifest::QuantizedEncoding;
-using ps::quantization::manifest::QuantizedTensorMetadata;
-using ps::quantization::manifest::QuantizedTensorRef;
-using ps::quantization::manifest::crc32_iso_hdlc;
-using ps::quantization::manifest::validate_quantized_manifest_contract;
+using shelf::quantization::manifest::QuantizedEncoding;
+using shelf::quantization::manifest::QuantizedTensorMetadata;
+using shelf::quantization::manifest::QuantizedTensorRef;
+using shelf::quantization::manifest::crc32_iso_hdlc;
+using shelf::quantization::manifest::validate_quantized_manifest_contract;
 
 namespace {
 
@@ -79,7 +79,7 @@ uint64_t element_count(const std::vector<std::size_t>& shape) {
     return n;
 }
 
-Status spec_bytes(const ps::io::StTensorSpec& spec, std::size_t elem_size, uint64_t& out) {
+Status spec_bytes(const shelf::io::StTensorSpec& spec, std::size_t elem_size, uint64_t& out) {
     uint64_t bytes = element_count(spec.shape);
     if (elem_size != 0 && bytes > UINT64_MAX / elem_size) {
         return Status::overflow("hf tensor byte count overflow", __FILE__, __LINE__);
@@ -108,17 +108,17 @@ float bf16_bits_to_f32(uint16_t h) {
 struct HfShardSet {
     std::string model_dir;
     std::map<std::string, std::string> shard_for_tensor;
-    std::map<std::string, std::unique_ptr<ps::io::SafetensorsReader>> readers;
+    std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> readers;
 
-    Result<const ps::io::SafetensorsReader*> reader_for_shard(const std::string& shard) {
+    Result<const shelf::io::SafetensorsReader*> reader_for_shard(const std::string& shard) {
         auto it = readers.find(shard);
         if (it != readers.end()) return it->second.get();
         Status path_status = validate_shard_path(shard);
         if (!path_status.ok()) return path_status;
-        auto opened = ps::io::SafetensorsReader::open((fs::path(model_dir) / shard).string());
+        auto opened = shelf::io::SafetensorsReader::open((fs::path(model_dir) / shard).string());
         if (!opened.ok()) return opened.status();
         auto inserted = readers.emplace(
-            shard, std::make_unique<ps::io::SafetensorsReader>(opened.release()));
+            shard, std::make_unique<shelf::io::SafetensorsReader>(opened.release()));
         return inserted.first->second.get();
     }
 };
@@ -184,7 +184,7 @@ QuantizedTensorRef make_ref(const std::string& physical, const std::string& dtyp
 }
 
 Status synthesize_fp8_tensor(
-    const ps::io::SafetensorsReader* reader,
+    const shelf::io::SafetensorsReader* reader,
     HfQuantizedSource& source,
     const std::string& canonical,
     const std::string& scale_inv_name,
@@ -194,8 +194,8 @@ Status synthesize_fp8_tensor(
     bool with_crc) {
     auto spec_result = reader->tensor_spec(canonical);
     if (!spec_result.ok()) return spec_result.status();
-    const ps::io::StTensorSpec& codes_spec = spec_result.value();
-    if ((codes_spec.dtype != ps::io::SType::F8_E4M3 && codes_spec.dtype != ps::io::SType::U8) ||
+    const shelf::io::StTensorSpec& codes_spec = spec_result.value();
+    if ((codes_spec.dtype != shelf::io::SType::F8_E4M3 && codes_spec.dtype != shelf::io::SType::U8) ||
         codes_spec.shape.size() != 2) {
         return Status::unsupported(
             ("hf fp8 weight payload must be a rank-2 F8_E4M3 matrix: " + canonical).c_str(),
@@ -214,8 +214,8 @@ Status synthesize_fp8_tensor(
 
     auto scale_spec_result = reader->tensor_spec(scale_inv_name);
     if (!scale_spec_result.ok()) return scale_spec_result.status();
-    const ps::io::StTensorSpec& scale_spec = scale_spec_result.value();
-    if (scale_spec.dtype != ps::io::SType::BF16 || scale_spec.shape.size() != 2 ||
+    const shelf::io::StTensorSpec& scale_spec = scale_spec_result.value();
+    if (scale_spec.dtype != shelf::io::SType::BF16 || scale_spec.shape.size() != 2 ||
         scale_spec.shape[0] !=
             (n + quantization::kFp8ScaleBlockN - 1u) / quantization::kFp8ScaleBlockN ||
         scale_spec.shape[1] != k / quantization::kFp8ScaleBlockK) {
@@ -260,7 +260,7 @@ Status synthesize_fp8_tensor(
 }
 
 Status synthesize_bf16_tensor(
-    const ps::io::SafetensorsReader* reader,
+    const shelf::io::SafetensorsReader* reader,
     HfQuantizedSource& source,
     const std::string& canonical,
     const std::string& codes_shard,
@@ -268,8 +268,8 @@ Status synthesize_bf16_tensor(
     bool with_crc) {
     auto spec_result = reader->tensor_spec(canonical);
     if (!spec_result.ok()) return spec_result.status();
-    const ps::io::StTensorSpec& spec = spec_result.value();
-    if (spec.dtype != ps::io::SType::BF16) {
+    const shelf::io::StTensorSpec& spec = spec_result.value();
+    if (spec.dtype != shelf::io::SType::BF16) {
         return Status::unsupported(
             ("hf bf16 tensor has a non-BF16 dtype: " + canonical).c_str(),
             __FILE__, __LINE__);
@@ -385,7 +385,7 @@ Result<HfQuantizedSource> synthesize_hf_quantized_source(
 
         auto reader_result = shard_set->reader_for_shard(*codes_shard);
         if (!reader_result.ok()) return reader_result.status();
-        const ps::io::SafetensorsReader* reader = reader_result.value();
+        const shelf::io::SafetensorsReader* reader = reader_result.value();
 
         if (scale_inv_shard != nullptr && scale_shard != nullptr) {
             return Status::invalid_argument(

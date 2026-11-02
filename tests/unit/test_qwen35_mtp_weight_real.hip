@@ -21,7 +21,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
 namespace {
 
@@ -176,7 +176,7 @@ int main() {
     if (!ar.ok()) {
         std::printf("FAIL: arena: %s\n", ar.status().message().c_str());
         std::printf("MTP_WEIGHT_CONTRACT: FAIL\n");
-        ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
         return 1;
     }
     gpu::GpuArena arena = ar.release();
@@ -491,6 +491,6 @@ int main() {
     std::printf("\nMTP_WEIGHT_CONTRACT: %s\n", failures.empty() ? "PASS" : "FAIL");
 
     arena.shutdown();
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return failures.empty() ? 0 : 1;
 }

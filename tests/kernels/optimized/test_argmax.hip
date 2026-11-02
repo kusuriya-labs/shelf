@@ -10,8 +10,8 @@
 
 namespace {
 
-using ps::kernel::ArgMaxPair;
-using ps::kernel::ArgmaxF32Args;
+using shelf::kernel::ArgMaxPair;
+using shelf::kernel::ArgmaxF32Args;
 
 int32_t cpu_argmax(const float* logits, uint32_t vocab) {
     float bv = -3.4e38f;
@@ -48,7 +48,7 @@ struct Buf {
         return hipMalloc(&dev, b) == hipSuccess;
     }
     ~Buf() {
-        if (dev) ps::gpu::discard_cleanup_result(hipFree(dev));
+        if (dev) shelf::gpu::discard_cleanup_result(hipFree(dev));
     }
 };
 
@@ -70,9 +70,9 @@ void run_case(const Cfg& c, uint32_t partitions) {
     if (c.fill) c.fill(logits);
     std::vector<uint8_t> flags = c.flags;
     if (flags.empty()) flags.assign(c.outputs, 1);
-    std::vector<::ps::runtime::DeviceSamplingParams> sampling(c.outputs);
+    std::vector<::shelf::runtime::DeviceSamplingParams> sampling(c.outputs);
     for (uint32_t m = 0; m < c.outputs; ++m) {
-        sampling[m] = ::ps::runtime::DeviceSamplingParams{};
+        sampling[m] = ::shelf::runtime::DeviceSamplingParams{};
         sampling[m].mode = flags[m] ? 1u : 0u;
     }
 
@@ -84,7 +84,7 @@ void run_case(const Cfg& c, uint32_t partitions) {
 
     Buf bl, bf, bo, bp;
     if (!bl.alloc(n * 4) ||
-        !bf.alloc(c.outputs * sizeof(::ps::runtime::DeviceSamplingParams)) ||
+        !bf.alloc(c.outputs * sizeof(::shelf::runtime::DeviceSamplingParams)) ||
         !bo.alloc(c.outputs * 4)) {
         std::printf("  [%s] ALLOC FAIL\n", c.name);
         ++g_fail;
@@ -98,7 +98,7 @@ void run_case(const Cfg& c, uint32_t partitions) {
         }
     if (hipMemcpy(bl.dev, logits.data(), n * 4, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(bf.dev, sampling.data(),
-                  c.outputs * sizeof(::ps::runtime::DeviceSamplingParams),
+                  c.outputs * sizeof(::shelf::runtime::DeviceSamplingParams),
                   hipMemcpyHostToDevice) != hipSuccess) {
         std::printf("  [%s] COPY FAIL\n", c.name);
         ++g_fail;
@@ -116,18 +116,18 @@ void run_case(const Cfg& c, uint32_t partitions) {
         }
         ArgmaxF32Args args;
         args.logits = static_cast<const float*>(bl.dev);
-        args.sampling = static_cast<const ::ps::runtime::DeviceSamplingParams*>(bf.dev);
+        args.sampling = static_cast<const ::shelf::runtime::DeviceSamplingParams*>(bf.dev);
         args.sampled_tokens = static_cast<int32_t*>(bo.dev);
         args.outputs = c.outputs;
         args.vocab_size = c.vocab;
         args.logits_row_stride = rs;
         hipError_t st;
         if (part)
-            st = ps::kernel::launch_argmax_f32_partitioned(
+            st = shelf::kernel::launch_argmax_f32_partitioned(
                 args, static_cast<ArgMaxPair*>(bp.dev),
                 static_cast<uint32_t>(c.outputs) * partitions, partitions, nullptr);
         else
-            st = ps::kernel::launch_argmax_f32_single(args, nullptr);
+            st = shelf::kernel::launch_argmax_f32_single(args, nullptr);
         if (st != hipSuccess || hipDeviceSynchronize() != hipSuccess) {
             mm += 1000;
             continue;
@@ -252,7 +252,7 @@ int main(int, char**) {
         if (ok)
             ok = hipMemcpy(bo.dev, four.data(), 16, hipMemcpyHostToDevice) == hipSuccess;
         args.sampled_tokens = static_cast<int32_t*>(bo.dev);
-        const hipError_t st = ps::kernel::launch_argmax_f32_single(args, nullptr);
+        const hipError_t st = shelf::kernel::launch_argmax_f32_single(args, nullptr);
         std::vector<int32_t> got(4);
         if (ok && st == hipSuccess)
             ok = hipMemcpy(got.data(), bo.dev, 16, hipMemcpyDeviceToHost) == hipSuccess;

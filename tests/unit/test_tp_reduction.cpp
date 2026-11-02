@@ -8,10 +8,10 @@
 #include <string>
 #include <vector>
 
-using ps::f32_to_bf16_rne;
-using ps::runtime::ValueDType;
-using ps::runtime::tp_bf16_bits_to_f32;
-using ps::runtime::tp_reduce_f32_accumulate;
+using shelf::f32_to_bf16_rne;
+using shelf::runtime::ValueDType;
+using shelf::runtime::tp_bf16_bits_to_f32;
+using shelf::runtime::tp_reduce_f32_accumulate;
 
 static int g_fail = 0;
 

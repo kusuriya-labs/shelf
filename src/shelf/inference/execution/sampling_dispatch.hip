@@ -21,21 +21,21 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
 Result<OptimizedLaunchResult> resolve_sampling(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (b.input_count != 1u || b.output_count != 1u) return kNone;
 
     auto in_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return kNone;
     const HostResolvedValue in = in_res.value();
     if (in.dtype != ValueDType::F32) return kNone;
@@ -44,7 +44,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
     if (in.row_stride != in.feature_count) return kNone;
 
     auto out_res =
-        resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return kNone;
     const HostResolvedValue out = out_res.value();
     if (out.dtype != ValueDType::I32) return kNone;
@@ -84,7 +84,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
             ctx.stochastic_topk_scratch_bytes == 0u ||
             ctx.stochastic_topk_partitions == 0u || ctx.stochastic_top_k == 0u)
             return kNone;
-        const hipError_t rerr = ::ps::kernel::launch_dflash2_radix_topn(
+        const hipError_t rerr = ::shelf::kernel::launch_dflash2_radix_topn(
             static_cast<const float*>(in.ptr), outputs, vocab, in.row_stride,
             ctx.stochastic_top_k, ctx.stochastic_topk_ids, ctx.stochastic_topk_logits,
             ctx.stochastic_topk_partitions, ctx.stochastic_topk_scratch,
@@ -92,7 +92,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
         if (rerr != hipSuccess)
             return Status::hip_error("stochastic topk radix launch", hipGetErrorString(rerr),
                                      __FILE__, __LINE__);
-        ::ps::kernel::StochasticTopKSamplingArgs targs;
+        ::shelf::kernel::StochasticTopKSamplingArgs targs;
         targs.logits = static_cast<const float*>(in.ptr);
         targs.sampling = ctx.output_sampling_params;
         targs.sampled_tokens = static_cast<int32_t*>(out.ptr);
@@ -105,7 +105,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
         targs.error_word = ctx.error_word;
         targs.active_count_out = ctx.stochastic_topk_active_counts;
         const hipError_t serr =
-            ::ps::kernel::launch_stochastic_topk_sampling_f32(targs, stream);
+            ::shelf::kernel::launch_stochastic_topk_sampling_f32(targs, stream);
         if (serr != hipSuccess)
             return Status::hip_error("stochastic topk sampling launch",
                                      hipGetErrorString(serr), __FILE__, __LINE__);
@@ -115,7 +115,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
     }
 
     if (choice.implementation == SamplingImplementation::StochasticSingleBlock) {
-        ::ps::kernel::StochasticSamplingF32Args sargs;
+        ::shelf::kernel::StochasticSamplingF32Args sargs;
         sargs.logits = static_cast<const float*>(in.ptr);
         sargs.sampling = ctx.output_sampling_params;
         sargs.sampled_tokens = static_cast<int32_t*>(out.ptr);
@@ -124,7 +124,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
         sargs.logits_row_stride = in.row_stride;
         sargs.error_word = ctx.error_word;
         const hipError_t serr =
-            ::ps::kernel::launch_stochastic_sampling_f32_singleblock(sargs, stream);
+            ::shelf::kernel::launch_stochastic_sampling_f32_singleblock(sargs, stream);
         if (serr != hipSuccess)
             return Status::hip_error("stochastic sampling launch", hipGetErrorString(serr),
                                      __FILE__, __LINE__);
@@ -133,7 +133,7 @@ Result<OptimizedLaunchResult> resolve_sampling(
         return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
     }
 
-    ::ps::kernel::ArgmaxF32Args args;
+    ::shelf::kernel::ArgmaxF32Args args;
     args.logits = static_cast<const float*>(in.ptr);
     args.sampling = ctx.output_sampling_params;
     args.sampled_tokens = static_cast<int32_t*>(out.ptr);
@@ -143,15 +143,15 @@ Result<OptimizedLaunchResult> resolve_sampling(
 
     hipError_t herr = hipSuccess;
     if (choice.implementation == SamplingImplementation::SingleBlock) {
-        herr = ::ps::kernel::launch_argmax_f32_single(args, stream);
+        herr = ::shelf::kernel::launch_argmax_f32_single(args, stream);
     } else {
         if (ctx.scratch == nullptr ||
             (reinterpret_cast<uintptr_t>(ctx.scratch) &
-             (alignof(::ps::kernel::ArgMaxPair) - 1u)) != 0u)
+             (alignof(::shelf::kernel::ArgMaxPair) - 1u)) != 0u)
             return kNone;
-        auto* partials = reinterpret_cast<::ps::kernel::ArgMaxPair*>(ctx.scratch);
+        auto* partials = reinterpret_cast<::shelf::kernel::ArgMaxPair*>(ctx.scratch);
         const uint32_t capacity = ctx.scratch_floats / 2u;
-        herr = ::ps::kernel::launch_argmax_f32_partitioned(
+        herr = ::shelf::kernel::launch_argmax_f32_partitioned(
             args, partials, capacity, choice.partitions, stream);
     }
     if (herr != hipSuccess)
@@ -167,12 +167,12 @@ Result<OptimizedLaunchResult> resolve_sampling(
 }  // namespace
 
 Result<OptimizedLaunchResult> try_launch_sampling(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size()) return kNone;
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id != ::ps::runtime::KernelId::SAMPLING) return kNone;
+    if (b.kernel_id != ::shelf::runtime::KernelId::SAMPLING) return kNone;
     return resolve_sampling(program, b, ctx, stream);
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

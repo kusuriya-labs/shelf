@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace ps::quantization {
+namespace shelf::quantization {
 
 struct alignas(16) QuantizedComputeView {
     const void* codes = nullptr;

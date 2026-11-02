@@ -5,7 +5,7 @@
 #include <memory>
 #include <span>
 
-namespace ps::quantization::fp8 {
+namespace shelf::quantization::fp8 {
 
 // GPU-native (WMMA fragment-order) payload for a single FP8 K128N128
 // weight matrix. Codes are tiled in the exact 16-output x 64-K fragment-block
@@ -51,4 +51,4 @@ struct Fp8NativeHost {
 bool preshuffle_fp8_native(const Fp8BlockCanonicalView& v,
                                     Fp8NativeHost& out);
 
-}  // namespace ps::quantization::fp8
+}  // namespace shelf::quantization::fp8

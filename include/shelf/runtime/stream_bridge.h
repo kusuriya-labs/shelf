@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps {
+namespace shelf {
 namespace runtime {
 
 enum class StreamSignalKind : uint8_t {
@@ -44,4 +44,4 @@ Status stream_wait_value32(hipStream_t stream,
 uint32_t stream_signal_load(const StreamSignal& memory) noexcept;
 
 }  // namespace runtime
-}  // namespace ps
+}  // namespace shelf

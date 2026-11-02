@@ -19,8 +19,8 @@ void check(bool cond, const std::string& msg) {
     }
 }
 
-using ps::qwen35::runtime::SpecPhase;
-using ps::qwen35::runtime::SpecVerifyResult;
+using shelf::qwen35::runtime::SpecPhase;
+using shelf::qwen35::runtime::SpecVerifyResult;
 
 bool tokens_equal(const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
     return a == b;
@@ -42,14 +42,14 @@ void expect_result(
     const char* expected_name) {
 
     SpecVerifyResult out;
-    auto st = ps::qwen35::runtime::spec_greedy_accept(
+    auto st = shelf::qwen35::runtime::spec_greedy_accept(
         drafts.empty() ? nullptr : drafts.data(),
         static_cast<uint32_t>(drafts.size()),
         target_tokens.data(),
         bonus_enabled,
         out);
     check(st.ok(), std::string(name) + ": accept ok");
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE",
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE",
           std::string(name) + ": phase name IDLE");
     (void)expected_name;
     check(out.num_drafts == drafts.size(), std::string(name) + ": num_drafts");
@@ -71,11 +71,11 @@ void expect_result(
 }  // namespace
 
 int main() {
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE", "phase IDLE");
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::DRAFTING)) == "DRAFTING", "phase DRAFTING");
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::VERIFYING)) == "VERIFYING", "phase VERIFYING");
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::COMMITTING)) == "COMMITTING", "phase COMMITTING");
-    check(std::string(ps::qwen35::runtime::spec_phase_name(SpecPhase::ROLLING_BACK)) == "ROLLING_BACK", "phase ROLLING_BACK");
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::IDLE)) == "IDLE", "phase IDLE");
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::DRAFTING)) == "DRAFTING", "phase DRAFTING");
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::VERIFYING)) == "VERIFYING", "phase VERIFYING");
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::COMMITTING)) == "COMMITTING", "phase COMMITTING");
+    check(std::string(shelf::qwen35::runtime::spec_phase_name(SpecPhase::ROLLING_BACK)) == "ROLLING_BACK", "phase ROLLING_BACK");
 
     expect_result(
         "all_accept_bonus",
@@ -143,18 +143,18 @@ int main() {
 
     {
         SpecVerifyResult out;
-        auto st = ps::qwen35::runtime::spec_greedy_accept(nullptr, 0u, nullptr, true, out);
+        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 0u, nullptr, true, out);
         check(!st.ok(), "null target_tokens rejected");
     }
     {
         SpecVerifyResult out;
-        auto st = ps::qwen35::runtime::spec_greedy_accept(nullptr, 2u, nullptr, true, out);
+        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 2u, nullptr, true, out);
         check(!st.ok(), "null target_tokens with drafts rejected");
     }
     {
         const int32_t target[2] = {1, 2};
         SpecVerifyResult out;
-        auto st = ps::qwen35::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
+        auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
         check(!st.ok(), "null drafts with num_drafts>0 rejected");
     }
 

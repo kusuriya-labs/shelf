@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <span>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 

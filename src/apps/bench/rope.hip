@@ -17,10 +17,10 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 struct Options {
     std::string variant = "optimized";
@@ -111,7 +111,7 @@ struct Setup {
         void* all[] = {in, out_c, out_o, pos_row, pos_rope, ctx, vals, scratch, err,
                        inv_freq};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -124,12 +124,12 @@ bool build(Setup& s, const Options& o, uint32_t rows, B& binding) {
     if (!alloc(&s.in, (size_t)rows * in_stride * 4)) return false;
     if (!alloc(&s.out_c, (size_t)rows * out_stride * 2)) return false;
     if (!alloc(&s.out_o, (size_t)rows * out_stride * 2)) return false;
-    if (!alloc(&s.ctx, sizeof(::ps::runtime::DeviceBatchContext))) return false;
+    if (!alloc(&s.ctx, sizeof(::shelf::runtime::DeviceBatchContext))) return false;
     if (!alloc(&s.vals, 2 * sizeof(V))) return false;
     if (!alloc(&s.scratch, (size_t)256 * 4096 * sizeof(float))) return false;
     if (!alloc(&s.err, sizeof(uint32_t))) return false;
     if (!alloc(&s.inv_freq, 32 * sizeof(double))) return false;
-    if (::ps::kernel::launch_rope_inv_freq_init((double*)s.inv_freq, 32, o.theta, nullptr)
+    if (::shelf::kernel::launch_rope_inv_freq_init((double*)s.inv_freq, 32, o.theta, nullptr)
         != hipSuccess)
         return false;
 
@@ -152,7 +152,7 @@ bool build(Setup& s, const Options& o, uint32_t rows, B& binding) {
         s.positions = (const uint32_t*)s.pos_rope;
     }
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = 0;
     ctx.rope_positions = (o.pos_mode == "rope") ? (const uint32_t*)s.pos_rope : nullptr;
@@ -161,23 +161,23 @@ bool build(Setup& s, const Options& o, uint32_t rows, B& binding) {
 
     V vals[2];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, o.features, in_stride, s.in, ::ps::runtime::ValueDType::F32);
-    setv(vals[1], 1, o.features, out_stride, s.out_c, ::ps::runtime::ValueDType::BF16);
+    setv(vals[0], 0, o.features, in_stride, s.in, ::shelf::runtime::ValueDType::F32);
+    setv(vals[1], 1, o.features, out_stride, s.out_c, ::shelf::runtime::ValueDType::BF16);
     if (hipMemcpy(s.vals, vals, 2 * sizeof(V), hipMemcpyHostToDevice) != hipSuccess) return false;
 
     binding = {};
-    binding.kernel_id = ::ps::runtime::KernelId::ROPE;
+    binding.kernel_id = ::shelf::runtime::KernelId::ROPE;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
     binding.input_count = 1;
@@ -193,10 +193,10 @@ hipError_t launch_correctness(const Setup& s, const B& binding, hipStream_t stre
     prog.values = (const V*)s.vals;
     prog.value_count = 2;
     prog.workspace_base = 0;
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(s.err, 0, sizeof(uint32_t), stream));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto st = ::ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)s.ctx, sv, (float*)s.scratch,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(s.err, 0, sizeof(uint32_t), stream));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto st = ::shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)s.ctx, sv, (float*)s.scratch,
         (uint32_t*)s.err, stream);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
@@ -204,12 +204,12 @@ hipError_t launch_correctness(const Setup& s, const B& binding, hipStream_t stre
 
 hipError_t launch_optimized(const Setup& s, const Options& o, hipStream_t stream) {
     if (o.variant == "optimized-pair") {
-        return ::ps::kernel::launch_rope_f32_bf16_pair(
+        return ::shelf::kernel::launch_rope_f32_bf16_pair(
             (const float*)s.in, s.features, (bf16t*)s.out_o, s.features, s.positions,
             s.rows, o.features, o.head_dim, o.rotary, o.theta,
             (const double*)s.inv_freq, 1.0f, stream);
     }
-    return ::ps::kernel::launch_rope_f32_bf16_generic(
+    return ::shelf::kernel::launch_rope_f32_bf16_generic(
         (const float*)s.in, s.features, (bf16t*)s.out_o, s.features, s.positions,
         s.rows, o.features, o.head_dim, o.rotary, o.theta,
         (const double*)s.inv_freq, 1.0f, stream);
@@ -313,8 +313,8 @@ int run_rope(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per.empty()) { rc = 1; continue; }
         const double mn = percentile(per, 0.0);
         const double p10 = percentile(per, 0.1);
@@ -336,6 +336,6 @@ int run_rope(int argc, char** argv) {
         std::printf("%-15s rope f=%-5u hd=%u rot=%u rows=%-5u p10=%.2fus p50=%.2fus p90=%.2fus mean=%.2fus\n",
                     o.variant.c_str(), o.features, o.head_dim, o.rotary, rows, p10, p50, p90, mean);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

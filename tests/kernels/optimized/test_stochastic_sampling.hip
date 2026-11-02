@@ -13,7 +13,7 @@
 
 namespace {
 
-using ::ps::runtime::DeviceSamplingParams;
+using ::shelf::runtime::DeviceSamplingParams;
 
 int g_fail = 0;
 
@@ -64,8 +64,8 @@ bool run_batch(const std::vector<float>& logits, uint32_t vocab, uint32_t output
                        hipMemcpyHostToDevice) == hipSuccess;
     }
     if (ok) {
-        ps::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
-        ::ps::kernel::StochasticSamplingF32Args args;
+        shelf::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
+        ::shelf::kernel::StochasticSamplingF32Args args;
         args.logits = d_logits;
         args.sampling = d_params;
         args.sampled_tokens = d_tokens;
@@ -74,7 +74,7 @@ bool run_batch(const std::vector<float>& logits, uint32_t vocab, uint32_t output
         args.logits_row_stride = vocab;
         args.error_word = d_err;
         args.attempts_out = want_attempts ? d_attempts : nullptr;
-        ok = ::ps::kernel::launch_stochastic_sampling_f32_singleblock(args, nullptr) ==
+        ok = ::shelf::kernel::launch_stochastic_sampling_f32_singleblock(args, nullptr) ==
                  hipSuccess &&
              hipDeviceSynchronize() == hipSuccess;
     }
@@ -90,11 +90,11 @@ bool run_batch(const std::vector<float>& logits, uint32_t vocab, uint32_t output
                            hipMemcpyDeviceToHost) == hipSuccess;
         }
     }
-    if (d_logits) ps::gpu::discard_cleanup_result(hipFree(d_logits));
-    if (d_params) ps::gpu::discard_cleanup_result(hipFree(d_params));
-    if (d_tokens) ps::gpu::discard_cleanup_result(hipFree(d_tokens));
-    if (d_err) ps::gpu::discard_cleanup_result(hipFree(d_err));
-    if (d_attempts) ps::gpu::discard_cleanup_result(hipFree(d_attempts));
+    if (d_logits) shelf::gpu::discard_cleanup_result(hipFree(d_logits));
+    if (d_params) shelf::gpu::discard_cleanup_result(hipFree(d_params));
+    if (d_tokens) shelf::gpu::discard_cleanup_result(hipFree(d_tokens));
+    if (d_err) shelf::gpu::discard_cleanup_result(hipFree(d_err));
+    if (d_attempts) shelf::gpu::discard_cleanup_result(hipFree(d_attempts));
     return ok;
 }
 
@@ -152,10 +152,10 @@ std::vector<float> prob_logits(const std::vector<float>& p) {
 bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t outputs,
                      const std::vector<DeviceSamplingParams>& params,
                      std::vector<int32_t>& tokens, uint32_t& error_word) {
-    using V = ::ps::runtime::DeviceValueBinding;
-    using P = ::ps::runtime::DeviceProgramView;
-    using B = ::ps::runtime::DispatchBinding;
-    using DT = ::ps::runtime::ValueDType;
+    using V = ::shelf::runtime::DeviceValueBinding;
+    using P = ::shelf::runtime::DeviceProgramView;
+    using B = ::shelf::runtime::DispatchBinding;
+    using DT = ::shelf::runtime::ValueDType;
 
     float* d_logits = nullptr;
     DeviceSamplingParams* d_params = nullptr;
@@ -163,7 +163,7 @@ bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t 
     uint32_t* d_err = nullptr;
     float* d_scratch = nullptr;
     V* d_vals = nullptr;
-    ::ps::runtime::DeviceBatchContext* d_ctx = nullptr;
+    ::shelf::runtime::DeviceBatchContext* d_ctx = nullptr;
 
     constexpr uint32_t kBlocks = 64;
     bool ok = hipMalloc(&d_logits, sizeof(float) * logits.size()) == hipSuccess &&
@@ -172,7 +172,7 @@ bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t 
               hipMalloc(&d_err, sizeof(uint32_t)) == hipSuccess &&
               hipMalloc(&d_scratch, sizeof(float) * 2048u * kBlocks) == hipSuccess &&
               hipMalloc(&d_vals, sizeof(V) * 2u) == hipSuccess &&
-              hipMalloc(&d_ctx, sizeof(::ps::runtime::DeviceBatchContext)) == hipSuccess;
+              hipMalloc(&d_ctx, sizeof(::shelf::runtime::DeviceBatchContext)) == hipSuccess;
     if (ok) {
         ok = hipMemcpy(d_logits, logits.data(), sizeof(float) * logits.size(),
                        hipMemcpyHostToDevice) == hipSuccess &&
@@ -180,30 +180,30 @@ bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t 
                        hipMemcpyHostToDevice) == hipSuccess;
     }
     if (!ok) {
-        if (d_logits) ps::gpu::discard_cleanup_result(hipFree(d_logits));
-        if (d_params) ps::gpu::discard_cleanup_result(hipFree(d_params));
-        if (d_tokens) ps::gpu::discard_cleanup_result(hipFree(d_tokens));
-        if (d_err) ps::gpu::discard_cleanup_result(hipFree(d_err));
-        if (d_scratch) ps::gpu::discard_cleanup_result(hipFree(d_scratch));
-        if (d_vals) ps::gpu::discard_cleanup_result(hipFree(d_vals));
-        if (d_ctx) ps::gpu::discard_cleanup_result(hipFree(d_ctx));
+        if (d_logits) shelf::gpu::discard_cleanup_result(hipFree(d_logits));
+        if (d_params) shelf::gpu::discard_cleanup_result(hipFree(d_params));
+        if (d_tokens) shelf::gpu::discard_cleanup_result(hipFree(d_tokens));
+        if (d_err) shelf::gpu::discard_cleanup_result(hipFree(d_err));
+        if (d_scratch) shelf::gpu::discard_cleanup_result(hipFree(d_scratch));
+        if (d_vals) shelf::gpu::discard_cleanup_result(hipFree(d_vals));
+        if (d_ctx) shelf::gpu::discard_cleanup_result(hipFree(d_ctx));
         return false;
     }
 
     V* vals = new V[2]();
     vals[0] = V{};
     vals[0].logical_value = 1;
-    vals[0].storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    vals[0].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     vals[0].dtype = DT::F32;
-    vals[0].row_domain = ::ps::runtime::ValueRowDomain::OUTPUT_ROWS;
+    vals[0].row_domain = ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS;
     vals[0].feature_count = vocab;
     vals[0].row_stride = vocab;
     vals[0].offset = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(d_logits));
     vals[1] = V{};
     vals[1].logical_value = 2;
-    vals[1].storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    vals[1].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     vals[1].dtype = DT::I32;
-    vals[1].row_domain = ::ps::runtime::ValueRowDomain::OUTPUT_ROWS;
+    vals[1].row_domain = ::shelf::runtime::ValueRowDomain::OUTPUT_ROWS;
     vals[1].feature_count = 1;
     vals[1].row_stride = 4;
     vals[1].offset = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(d_tokens));
@@ -215,23 +215,23 @@ bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t 
     prog.value_count = 2;
     prog.workspace_base = 0;
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::SAMPLING;
+    binding.kernel_id = ::shelf::runtime::KernelId::SAMPLING;
     binding.input_slots[0] = 1;
     binding.output_slots[0] = 2;
     binding.input_count = 1;
     binding.output_count = 1;
     binding.rotary_dim = vocab;
 
-    ::ps::runtime::DeviceBatchContext hctx{};
+    ::shelf::runtime::DeviceBatchContext hctx{};
     hctx.actual_rows = outputs;
     hctx.num_requests = outputs;
     hctx.num_outputs = outputs;
     hctx.output_sampling_params = d_params;
     ok = ok && hipMemcpy(d_ctx, &hctx, sizeof(hctx), hipMemcpyHostToDevice) == hipSuccess;
     if (ok) {
-        ps::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
-        ::ps::kernel::ModelDispatchStateView sv{};
-        const ps::Status st = ::ps::kernel::launch_model_dispatch_correctness(
+        shelf::gpu::discard_cleanup_result(hipMemset(d_err, 0, sizeof(uint32_t)));
+        ::shelf::kernel::ModelDispatchStateView sv{};
+        const shelf::Status st = ::shelf::kernel::launch_model_dispatch_correctness(
             prog, binding, d_ctx, sv, d_scratch, d_err, nullptr);
         ok = st.ok() && hipDeviceSynchronize() == hipSuccess;
     }
@@ -242,13 +242,13 @@ bool run_correctness(const std::vector<float>& logits, uint32_t vocab, uint32_t 
              hipMemcpy(&error_word, d_err, sizeof(uint32_t), hipMemcpyDeviceToHost) ==
                  hipSuccess;
     }
-    ps::gpu::discard_cleanup_result(hipFree(d_logits));
-    ps::gpu::discard_cleanup_result(hipFree(d_params));
-    ps::gpu::discard_cleanup_result(hipFree(d_tokens));
-    ps::gpu::discard_cleanup_result(hipFree(d_err));
-    ps::gpu::discard_cleanup_result(hipFree(d_scratch));
-    ps::gpu::discard_cleanup_result(hipFree(d_vals));
-    ps::gpu::discard_cleanup_result(hipFree(d_ctx));
+    shelf::gpu::discard_cleanup_result(hipFree(d_logits));
+    shelf::gpu::discard_cleanup_result(hipFree(d_params));
+    shelf::gpu::discard_cleanup_result(hipFree(d_tokens));
+    shelf::gpu::discard_cleanup_result(hipFree(d_err));
+    shelf::gpu::discard_cleanup_result(hipFree(d_scratch));
+    shelf::gpu::discard_cleanup_result(hipFree(d_vals));
+    shelf::gpu::discard_cleanup_result(hipFree(d_ctx));
     return ok;
 }
 

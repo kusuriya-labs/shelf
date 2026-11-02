@@ -3,7 +3,7 @@
 #include <hip/hip_runtime.h>
 #include <vector>
 #include <cstdint>
-namespace ps::runtime {
+namespace shelf::runtime {
 namespace {
 template <typename T>
 Result<gpu::Tensor> allocate_tensor(gpu::GpuArena& arena, std::size_t count) {

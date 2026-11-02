@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace ps {
+namespace shelf {
 namespace gpu {
 
 Status Tensor::compute_required_span_bytes(
@@ -99,4 +99,4 @@ Result<Tensor> Tensor::slice(std::size_t dim, std::size_t start, std::size_t cou
 }
 
 } // namespace gpu
-} // namespace ps
+} // namespace shelf

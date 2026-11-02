@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -33,9 +33,9 @@ static float bf16_to_f32(bf16_t x) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     const std::vector<std::size_t>& shape,
-    ps::gpu::Tensor& out) {
+    shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -47,7 +47,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -139,7 +139,7 @@ static void reference_attention(const AttentionCase& c, std::vector<bf16_t>& out
 }
 
 static bool run_kernel(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const AttentionCase& c,
     std::vector<bf16_t>& got) {
@@ -149,12 +149,12 @@ static bool run_kernel(
         static_cast<std::size_t>(c.block_rows) * c.kv_heads * c.head_dim;
     const std::size_t q_elems = static_cast<std::size_t>(c.block_rows) * c.q_heads * c.head_dim;
 
-    ps::gpu::Tensor dev_q;
-    ps::gpu::Tensor dev_k_ctx;
-    ps::gpu::Tensor dev_v_ctx;
-    ps::gpu::Tensor dev_k_noise;
-    ps::gpu::Tensor dev_v_noise;
-    ps::gpu::Tensor dev_out;
+    shelf::gpu::Tensor dev_q;
+    shelf::gpu::Tensor dev_k_ctx;
+    shelf::gpu::Tensor dev_v_ctx;
+    shelf::gpu::Tensor dev_k_noise;
+    shelf::gpu::Tensor dev_v_noise;
+    shelf::gpu::Tensor dev_out;
     if (!alloc_bf16(arena, {c.block_rows, c.q_heads * c.head_dim}, dev_q) ||
         !alloc_bf16(arena, {c.context_rows, c.kv_heads * c.head_dim}, dev_k_ctx) ||
         !alloc_bf16(arena, {c.context_rows, c.kv_heads * c.head_dim}, dev_v_ctx) ||
@@ -164,7 +164,7 @@ static bool run_kernel(
         check(false, "attention alloc");
         return false;
     }
-    const auto upload = [&](ps::gpu::Tensor& dst, const std::vector<bf16_t>& src,
+    const auto upload = [&](shelf::gpu::Tensor& dst, const std::vector<bf16_t>& src,
                             std::size_t elems, const char* tag) {
         return hipMemcpy(dst.data<bf16_t>(), src.data(), elems * sizeof(bf16_t),
                          hipMemcpyHostToDevice) == hipSuccess;
@@ -175,7 +175,7 @@ static bool run_kernel(
     check(upload(dev_k_noise, c.k_noise, noise_elems, "k_noise"), "k_noise upload");
     check(upload(dev_v_noise, c.v_noise, noise_elems, "v_noise"), "v_noise upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_attention_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_attention_bf16(
         dev_q.data<bf16_t>(), c.q_heads * c.head_dim,
         dev_k_ctx.data<bf16_t>(), dev_v_ctx.data<bf16_t>(), c.context_rows,
         c.kv_heads * c.head_dim,
@@ -220,7 +220,7 @@ static AttentionCase base_case(uint32_t q_heads, uint32_t kv_heads, uint32_t hea
 }
 
 static void run_marker_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const AttentionCase& c,
     bool marker_is_context,
@@ -244,7 +244,7 @@ static void run_marker_case(
           tag + (expect_visible ? " must be visible" : " must be masked"));
 }
 
-static void run_random_case(ps::gpu::GpuArena& arena, hipStream_t stream, uint32_t seed) {
+static void run_random_case(shelf::gpu::GpuArena& arena, hipStream_t stream, uint32_t seed) {
     AttentionCase c = base_case(4u, 2u, 8u, 8u, 4u, 100u, 108u, 16u);
     uint32_t s = seed;
     for (bf16_t& v : c.q) {
@@ -300,7 +300,7 @@ static void run_random_case(ps::gpu::GpuArena& arena, hipStream_t stream, uint32
     check(cosine >= 0.9999, "random cosine " + std::to_string(cosine));
 }
 
-static void run_gqa_check(ps::gpu::GpuArena& arena, hipStream_t stream) {
+static void run_gqa_check(shelf::gpu::GpuArena& arena, hipStream_t stream) {
     AttentionCase c = base_case(4u, 2u, 8u, 2u, 2u, 0u, 2u, 16u);
     const uint32_t kv_features = c.kv_heads * c.head_dim;
     for (uint32_t row = 0; row < c.context_rows; ++row) {
@@ -338,12 +338,12 @@ static void run_gqa_check(ps::gpu::GpuArena& arena, hipStream_t stream) {
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -373,8 +373,8 @@ int main() {
     run_random_case(arena, stream, 1234u);
     run_random_case(arena, stream, 4321u);
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_attention: failed=%d\n", g_fail);

@@ -7,10 +7,10 @@
 #include <cstdint>
 #include <limits>
 
-namespace ps {
+namespace shelf {
 namespace qwen_hybrid {
 
-using ::ps::runtime::MatrixwiseShapeKey;
+using ::shelf::runtime::MatrixwiseShapeKey;
 
 inline Status checked_u32(std::size_t value, const char* name, std::uint32_t& out) {
     if (value == 0) {
@@ -52,7 +52,7 @@ inline Status checked_double(
 }
 
 inline Status validate_matrix(
-    const ::ps::weights::MatrixWeight& weight,
+    const ::shelf::weights::MatrixWeight& weight,
     MatrixwiseShapeKey expected,
     const char* name) {
 

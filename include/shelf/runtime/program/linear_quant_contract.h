@@ -7,7 +7,7 @@
 
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct ResolvedLinearQuantContract {
     KernelId linear_kernel = KernelId::LINEAR_BF16;
@@ -18,7 +18,7 @@ struct ResolvedLinearQuantContract {
 
 inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
     uint8_t weight_encoding, uint8_t compute_spec) {
-    using ps::weights::MatrixEncoding;
+    using shelf::weights::MatrixEncoding;
     using quantization::ComputeSpecId;
 
     ResolvedLinearQuantContract contract;

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace ps {
+namespace shelf {
 namespace scheduling {
 
 Status validate_banker_state(const KVBankerState& state) {

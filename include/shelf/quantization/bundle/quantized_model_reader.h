@@ -7,10 +7,10 @@
 #include <string>
 #include <vector>
 
-namespace ps::quantization::bundle {
+namespace shelf::quantization::bundle {
 
-using ps::quantization::manifest::QuantizedEncoding;
-using ps::quantization::manifest::QuantizedManifest;
+using shelf::quantization::manifest::QuantizedEncoding;
+using shelf::quantization::manifest::QuantizedManifest;
 
 struct HfQuantizedSource;
 

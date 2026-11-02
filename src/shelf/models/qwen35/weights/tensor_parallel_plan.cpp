@@ -5,16 +5,16 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 namespace {
 
-using ps::weights::TensorPartitionDesc;
-using ps::weights::TensorPartitionPlan;
-using ps::weights::TensorPartitionRange;
-using ps::weights::validate_tensor_partition;
-using ps::weights::validate_tensor_partition_plan;
+using shelf::weights::TensorPartitionDesc;
+using shelf::weights::TensorPartitionPlan;
+using shelf::weights::TensorPartitionRange;
+using shelf::weights::validate_tensor_partition;
+using shelf::weights::validate_tensor_partition_plan;
 
 std::string layer_prefix(std::size_t layer) {
     char buf[32];

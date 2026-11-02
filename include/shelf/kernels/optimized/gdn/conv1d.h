@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 struct GdnConv1dArgs {
     const bf16_t* input = nullptr;
@@ -14,7 +14,7 @@ struct GdnConv1dArgs {
     const bf16_t* conv_weight = nullptr;
     bf16_t* conv_state = nullptr;
 
-    const ::ps::runtime::DeviceRequestDescriptor* requests = nullptr;
+    const ::shelf::runtime::DeviceRequestDescriptor* requests = nullptr;
 
     uint32_t num_requests = 0;
     uint32_t actual_rows = 0;
@@ -107,4 +107,4 @@ hipError_t launch_gdn_conv1d_bf16_f32(
     const GdnConv1dArgs& args,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

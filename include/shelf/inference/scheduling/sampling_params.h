@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace ps::scheduling {
+namespace shelf::scheduling {
 
 struct SamplingConfig {
     float temperature = 0.0f;
@@ -42,4 +42,4 @@ inline bool sampling_config_is_default(const SamplingConfig& config) noexcept {
            config.min_p == 0.0f && config.top_k == 0u && config.seed == 0u;
 }
 
-}  // namespace ps::scheduling
+}  // namespace shelf::scheduling

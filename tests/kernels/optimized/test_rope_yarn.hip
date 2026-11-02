@@ -79,9 +79,9 @@ int main() {
         const float factor = pass == 0 ? 1.0f : (pass == 1 ? 2.0f : 4.0f);
         hipError_t err;
         if (pass == 0) {
-            err = ::ps::kernel::launch_rope_inv_freq_init(d_table, kHalf, kTheta, nullptr);
+            err = ::shelf::kernel::launch_rope_inv_freq_init(d_table, kHalf, kTheta, nullptr);
         } else {
-            err = ::ps::kernel::launch_rope_inv_freq_yarn_init(
+            err = ::shelf::kernel::launch_rope_inv_freq_yarn_init(
                 d_table, kHalf, kTheta, factor, kOriginalLen, 32.0f, 1.0f, true,
                 nullptr);
         }
@@ -122,7 +122,7 @@ int main() {
         check(finite, "table entries are finite and positive");
     }
 
-    ps::gpu::discard_cleanup_result(hipFree(d_table));
+    shelf::gpu::discard_cleanup_result(hipFree(d_table));
     if (g_fail != 0) {
         std::printf("%d FAIL\n", g_fail);
         return 1;

@@ -3,12 +3,12 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 struct HostExecutionContext;
 
 void kv_calib_dump_maybe(
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     std::size_t dispatch_index,
     HostExecutionContext& ctx,
     hipStream_t stream);

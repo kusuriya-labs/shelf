@@ -10,37 +10,37 @@
 #include <string>
 #include <vector>
 
-namespace ps::app {
+namespace shelf::app {
 
 inline Status load_private_target_weights(const std::string& model_dir,
                                           gpu::GpuArena& arena,
                                           hipStream_t stream,
-                                          ps::weights::MatrixWeight& lm_head,
-                                          ps::weights::MatrixWeight& embed_tokens,
+                                          shelf::weights::MatrixWeight& lm_head,
+                                          shelf::weights::MatrixWeight& embed_tokens,
                                           bool load_lm_head,
                                           bool load_embed_tokens) {
     std::vector<std::string> names;
     if (load_lm_head) names.push_back("model.language_model.lm_head.weight");
     if (load_embed_tokens) names.push_back("model.language_model.embed_tokens.weight");
     if (names.empty()) return Status::make_ok();
-    auto hf_source = ps::quantization::bundle::synthesize_hf_quantized_source(
+    auto hf_source = shelf::quantization::bundle::synthesize_hf_quantized_source(
         model_dir,
         names,
         false);
     if (!hf_source.ok()) return hf_source.status();
-    auto reader_result = ps::quantization::bundle::QuantizedModelReader::open_hf_source(
+    auto reader_result = shelf::quantization::bundle::QuantizedModelReader::open_hf_source(
         hf_source.release(), false);
     if (!reader_result.ok()) return reader_result.status();
-    ps::quantization::bundle::QuantizedModelReader reader = reader_result.release();
-    ps::weights::WeightLoadOptions options;
+    shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
+    shelf::weights::WeightLoadOptions options;
     if (load_lm_head) {
-        auto lm = ps::weights::load_quantized_matrix(
+        auto lm = shelf::weights::load_quantized_matrix(
             reader, "model.language_model.lm_head.weight", arena, stream, options);
         if (!lm.ok()) return lm.status();
         lm_head = lm.release();
     }
     if (load_embed_tokens) {
-        auto embed = ps::weights::load_quantized_matrix(
+        auto embed = shelf::weights::load_quantized_matrix(
             reader, "model.language_model.embed_tokens.weight", arena, stream, options);
         if (!embed.ok()) return embed.status();
         embed_tokens = embed.release();
@@ -48,4 +48,4 @@ inline Status load_private_target_weights(const std::string& model_dir,
     return Status::make_ok();
 }
 
-}  // namespace ps::app
+}  // namespace shelf::app

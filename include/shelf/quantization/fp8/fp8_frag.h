@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::quantization::fp8 {
+namespace shelf::quantization::fp8 {
 
 // gfx1201 FP8 WMMA fragment order for E4M3 codes (weight and activation).
 // One block is 16 rows x 64 K and is stored as 32 lane slots of 32 bytes, so a
@@ -31,4 +31,4 @@ constexpr uint32_t fp8_frag_offset(uint32_t row, uint32_t k) noexcept {
     return lane * kFragLaneBytes + (k >> 4u) * 8u + (k & 7u);
 }
 
-}  // namespace ps::quantization::fp8
+}  // namespace shelf::quantization::fp8

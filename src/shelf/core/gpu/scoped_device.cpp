@@ -3,7 +3,7 @@
 
 #include <string>
 
-namespace ps::gpu {
+namespace shelf::gpu {
 
 Result<ScopedDevice> ScopedDevice::create(int target_device) {
     int device_count = 0;
@@ -80,4 +80,4 @@ ScopedDevice::~ScopedDevice() {
     }
 }
 
-} // namespace ps::gpu
+} // namespace shelf::gpu

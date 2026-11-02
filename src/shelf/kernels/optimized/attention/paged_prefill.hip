@@ -13,7 +13,7 @@
 #include <cfloat>
 #include <type_traits>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace { namespace v_prefill_bf16 {
 
@@ -381,7 +381,7 @@ void attention_paged_prefill_bf16_impl(
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionPrefillBlock)
 void shelf_attention_paged_prefill_bf16(
-    ::ps::kernel::PagedAttentionBf16Args args) {
+    ::shelf::kernel::PagedAttentionBf16Args args) {
     using namespace v_prefill_bf16;
     attention_paged_prefill_bf16_body<0u>(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
@@ -417,8 +417,8 @@ hipError_t launch_attention_paged_prefill_bf16(
 namespace { namespace v_prefill_fp8 {
 
 using bf16 = __hip_bfloat16;
-using fp8 = ::ps::kernel::fp8e4m3_storage_t;
-using ::ps::quantization::codec::device::e4m3_encode_u8;
+using fp8 = ::shelf::kernel::fp8e4m3_storage_t;
+using ::shelf::quantization::codec::device::e4m3_encode_u8;
 
 
 using wf8_t = float __attribute__((ext_vector_type(8)));
@@ -782,8 +782,8 @@ void attention_paged_prefill_fp8_impl(
 
 hipError_t launch_attention_paged_prefill_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
-    const ::ps::kernel::fp8e4m3_storage_t* k_pool,
-    const ::ps::kernel::fp8e4m3_storage_t* v_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* k_pool,
+    const ::shelf::kernel::fp8e4m3_storage_t* v_pool,
     const float* k_scale_pool,
     const float* v_scale_pool,
     hipStream_t stream) {
@@ -805,4 +805,4 @@ hipError_t launch_attention_paged_prefill_fp8_e4m3(
     return hipGetLastError();
 }
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

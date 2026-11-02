@@ -19,11 +19,11 @@
 
 namespace {
 
-using V = ::ps::runtime::DeviceValueBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
-using W = ::ps::runtime::WeightSlot;
-using DT = ::ps::runtime::ValueDType;
+using V = ::shelf::runtime::DeviceValueBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
+using W = ::shelf::runtime::WeightSlot;
+using DT = ::shelf::runtime::ValueDType;
 
 struct Options {
     std::string variant = "optimized";
@@ -101,7 +101,7 @@ double percentile(std::vector<double> v, double p) {
 struct Table {
     void* bf16 = nullptr;
     ~Table() {
-        if (bf16) ps::gpu::discard_cleanup_result(hipFree(bf16));
+        if (bf16) shelf::gpu::discard_cleanup_result(hipFree(bf16));
     }
     bool alloc_fill(uint32_t vocab, uint32_t hidden, uint32_t seed) {
         if (hipMalloc(&bf16, (size_t)vocab * hidden * 2) != hipSuccess) return false;
@@ -130,7 +130,7 @@ struct Env {
     B binding{};
     ~Env() {
         for (auto* q : {toks, out, bc, wslot, scratch, err, vals})
-            if (q) ps::gpu::discard_cleanup_result(hipFree(q));
+            if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
 };
 
@@ -140,7 +140,7 @@ bool build_env(Env& e, const Table& t, const std::string& pattern, uint32_t rows
     e.table_dev = t.bf16;
     if (hipMalloc(&e.toks, (size_t)rows * 4) != hipSuccess) return false;
     if (hipMalloc(&e.out, (size_t)rows * e.hidden * 2) != hipSuccess) return false;
-    if (hipMalloc(&e.bc, sizeof(::ps::runtime::DeviceBatchContext)) != hipSuccess) return false;
+    if (hipMalloc(&e.bc, sizeof(::shelf::runtime::DeviceBatchContext)) != hipSuccess) return false;
     if (hipMalloc(&e.wslot, sizeof(W)) != hipSuccess) return false;
     if (hipMalloc(&e.scratch, (size_t)256 * 4096 * sizeof(float)) != hipSuccess) return false;
     if (hipMalloc(&e.err, sizeof(uint32_t)) != hipSuccess) return false;
@@ -155,7 +155,7 @@ bool build_env(Env& e, const Table& t, const std::string& pattern, uint32_t rows
     if (hipMemcpy(e.toks, toks.data(), (size_t)rows * 4, hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    ::ps::runtime::DeviceBatchContext hbc{};
+    ::shelf::runtime::DeviceBatchContext hbc{};
     hbc.actual_rows = rows;
     hbc.num_requests = 0;
     hbc.token_ids = (const int32_t*)e.toks;
@@ -170,9 +170,9 @@ bool build_env(Env& e, const Table& t, const std::string& pattern, uint32_t rows
 
     V v{};
     v.logical_value = 1;
-    v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+    v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
     v.dtype = DT::BF16;
-    v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     v.slot = 0;
     v.feature_count = e.hidden;
     v.row_stride = e.hidden;
@@ -187,7 +187,7 @@ bool build_env(Env& e, const Table& t, const std::string& pattern, uint32_t rows
     e.prog.weight_table = (const W*)e.wslot;
     e.prog.weight_slot_count = 1;
     e.binding = {};
-    e.binding.kernel_id = ::ps::runtime::KernelId::EMBEDDING_LOOKUP;
+    e.binding.kernel_id = ::shelf::runtime::KernelId::EMBEDDING_LOOKUP;
     e.binding.input_slots[0] = 0;
     e.binding.output_slots[0] = 1;
     e.binding.input_count = 1;
@@ -197,18 +197,18 @@ bool build_env(Env& e, const Table& t, const std::string& pattern, uint32_t rows
 }
 
 hipError_t launch_correctness(const Env& e, hipStream_t s) {
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
-    ::ps::kernel::ModelDispatchStateView sv{};
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        e.prog, e.binding, (::ps::runtime::DeviceBatchContext*)e.bc, sv, (float*)e.scratch,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(e.err, 0, sizeof(uint32_t), s));
+    ::shelf::kernel::ModelDispatchStateView sv{};
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        e.prog, e.binding, (::shelf::runtime::DeviceBatchContext*)e.bc, sv, (float*)e.scratch,
         (uint32_t*)e.err, s);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
 }
 
 hipError_t launch_optimized(const Env& e, hipStream_t s) {
-    return ::ps::kernel::launch_embedding_bf16(
-        (::ps::bf16_t*)e.table_dev, (const int32_t*)e.toks, (::ps::bf16_t*)e.out, e.rows,
+    return ::shelf::kernel::launch_embedding_bf16(
+        (::shelf::bf16_t*)e.table_dev, (const int32_t*)e.toks, (::shelf::bf16_t*)e.out, e.rows,
         e.vocab, e.hidden, e.hidden, (uint32_t*)e.err, s);
 }
 
@@ -301,8 +301,8 @@ int run_embedding(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per.empty()) { rc = 1; continue; }
         const double mn = percentile(per, 0.0);
         const double p50 = percentile(per, 0.5);
@@ -324,6 +324,6 @@ int run_embedding(int argc, char** argv) {
                     o.variant.c_str(), o.storage.c_str(), o.vocab, hidden, rows,
                     o.token_pattern.c_str(), p50, mean);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

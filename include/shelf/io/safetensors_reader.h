@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace io {
 
 enum class SType {

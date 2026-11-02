@@ -4,16 +4,16 @@
 #include <cstdio>
 #include <limits>
 
-using ps::qwen35::runtime::SamplingConfig;
-using ps::qwen35::runtime::SamplingMode;
-using ps::qwen35::runtime::make_sampling_request;
-using ps::qwen35::runtime::sampling_config_is_default;
-using ps::qwen35::runtime::validate_sampling_config;
+using shelf::qwen35::runtime::SamplingConfig;
+using shelf::qwen35::runtime::SamplingMode;
+using shelf::qwen35::runtime::make_sampling_request;
+using shelf::qwen35::runtime::sampling_config_is_default;
+using shelf::qwen35::runtime::validate_sampling_config;
 
 static int g_fail = 0;
 
 static void expect_ok(const SamplingConfig& c, const char* msg) {
-    const ps::Status st = validate_sampling_config(c);
+    const shelf::Status st = validate_sampling_config(c);
     const bool ok = st.ok();
     if (!ok) ++g_fail;
     std::printf("  [%-28s] %s %s\n", msg, ok ? "PASS" : "FAIL",
@@ -21,7 +21,7 @@ static void expect_ok(const SamplingConfig& c, const char* msg) {
 }
 
 static void expect_reject(const SamplingConfig& c, const char* msg) {
-    const ps::Status st = validate_sampling_config(c);
+    const shelf::Status st = validate_sampling_config(c);
     const bool ok = !st.ok();
     if (!ok) ++g_fail;
     std::printf("  [%-28s] %s\n", msg, ok ? "PASS" : "FAIL");

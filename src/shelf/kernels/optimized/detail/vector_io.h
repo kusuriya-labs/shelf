@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 using bf16 = __hip_bfloat16;
 
@@ -70,4 +70,4 @@ __device__ __forceinline__ void store_f32x4(float* p, const F4& r) {
     *reinterpret_cast<float4*>(p) = t;
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

@@ -27,7 +27,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace ps;
+using namespace shelf;
 
 static int g_fail = 0;
 
@@ -787,7 +787,7 @@ struct HfFxpFixture {
 static std::vector<uint8_t> bf16_bytes_from_f32(const std::vector<float>& values) {
     std::vector<uint8_t> out(values.size() * 2u);
     for (std::size_t i = 0; i < values.size(); ++i) {
-        const uint16_t h = ps::f32_to_bf16_rne(values[i]);
+        const uint16_t h = shelf::f32_to_bf16_rne(values[i]);
         std::memcpy(out.data() + i * 2, &h, 2);
     }
     return out;
@@ -805,7 +805,7 @@ static std::vector<float> bf16_rounded_scales(uint64_t count, uint32_t seed) {
     std::uniform_real_distribution<float> dist(0.01f, 0.5f);
     std::vector<float> out(count);
     for (uint64_t i = 0; i < count; ++i) {
-        out[i] = bf16_bits_to_f32(ps::f32_to_bf16_rne(dist(rng)));
+        out[i] = bf16_bits_to_f32(shelf::f32_to_bf16_rne(dist(rng)));
     }
     return out;
 }
@@ -1087,7 +1087,7 @@ int main() {
 
     fs::remove_all(g_root, ec);
     arena.shutdown();
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
 
     std::printf("test_weight_load: %s (fail=%d)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;

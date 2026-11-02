@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 inline Status make_activation_workspace_layout(
     const quantization::ActivationQuantSpec& activation,

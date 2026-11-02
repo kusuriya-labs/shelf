@@ -2,7 +2,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::quantization::codec::device {
+namespace shelf::quantization::codec::device {
 
 __device__ __forceinline__ float ue4m3_decode_f32(uint8_t e) {
     const uint32_t expf = e >> 3;
@@ -17,4 +17,4 @@ __device__ __forceinline__ float ue4m3_decode_f32(uint8_t e) {
     return __uint_as_float(((117u + msb) << 23) | ((man - (1u << msb)) << (23u - msb)));
 }
 
-}  // namespace ps::quantization::codec::device
+}  // namespace shelf::quantization::codec::device

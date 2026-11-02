@@ -8,9 +8,9 @@
 #include <string>
 #include <vector>
 
-using namespace ps::quantization;
-using namespace ps::quantization::fp8;
-using namespace ps::quantization::manifest;
+using namespace shelf::quantization;
+using namespace shelf::quantization::fp8;
+using namespace shelf::quantization::manifest;
 
 static int g_fail = 0;
 

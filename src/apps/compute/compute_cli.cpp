@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace ps::app {
+namespace shelf::app {
 namespace {
 
 bool parse_uint(const char* s, unsigned long& out) {
@@ -150,13 +150,13 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
     auto& kv_cache_dtype = opt.kv_cache_dtype;
-    ps::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     auto& verify_weights = opt.verify_weights;
     auto& dump_logits_path = opt.dump_logits_path;
     auto& hidden_taps = opt.hidden_taps;
     auto& tp_combine_f32 = opt.tp_combine_f32;
     auto& serve_stdio = opt.serve_stdio;
-    ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    shelf::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_stats = opt.dflash2_stats;
@@ -228,7 +228,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
             const char* backend_text = argv[++i];
-            if (!ps::qwen35::runtime::parse_decode_backend(backend_text,
+            if (!shelf::qwen35::runtime::parse_decode_backend(backend_text,
                                                           &decode_backend)) {
                 fprintf(stderr, "bad --decode-backend: %s (expected hip)\n",
                         backend_text);
@@ -331,11 +331,11 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& devices = opt.devices;
     const auto& tp = opt.tp;
     const auto& kv_cache_dtype = opt.kv_cache_dtype;
-    const ps::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    const shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     const auto& verify_weights = opt.verify_weights;
     const auto& dump_logits_path = opt.dump_logits_path;
     const auto& serve_stdio = opt.serve_stdio;
-    const ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    const shelf::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     const auto& dflash2_model_dir = opt.dflash2_model_dir;
     const auto& dflash2_drafts = opt.dflash2_drafts;
     const auto& dflash2_stats = opt.dflash2_stats;
@@ -378,8 +378,8 @@ int validate_compute_options(const ComputeOptions& opt) {
 
 
     {
-        const ps::Status sampling_status =
-            ps::qwen35::runtime::validate_sampling_config(sampling);
+        const shelf::Status sampling_status =
+            shelf::qwen35::runtime::validate_sampling_config(sampling);
         if (!sampling_status.ok()) {
             fprintf(stderr, "invalid sampling option: %s\n",
                     sampling_status.message().c_str());
@@ -395,4 +395,4 @@ int validate_compute_options(const ComputeOptions& opt) {
     return kComputeParseOk;
 }
 
-}  // namespace ps::app
+}  // namespace shelf::app

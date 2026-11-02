@@ -12,8 +12,8 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::f32_to_bf16_rne;
+using shelf::bf16_t;
+using shelf::f32_to_bf16_rne;
 
 static int g_fail = 0;
 
@@ -25,7 +25,7 @@ static void check(bool cond, const std::string& msg) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 128);
@@ -37,7 +37,7 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -103,19 +103,19 @@ static void build_case(RingAttentionCase& c) {
 }
 
 static bool run_case(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const RingAttentionCase& c,
     std::vector<bf16_t>& contiguous_out) {
     const uint32_t kv_features = c.kv_heads * c.head_dim;
     const uint32_t q_features = c.q_heads * c.head_dim;
 
-    ps::gpu::Tensor dq;
-    ps::gpu::Tensor dkc;
-    ps::gpu::Tensor dvc;
-    ps::gpu::Tensor dkn;
-    ps::gpu::Tensor dvn;
-    ps::gpu::Tensor dout;
+    shelf::gpu::Tensor dq;
+    shelf::gpu::Tensor dkc;
+    shelf::gpu::Tensor dvc;
+    shelf::gpu::Tensor dkn;
+    shelf::gpu::Tensor dvn;
+    shelf::gpu::Tensor dout;
     if (!alloc_bf16(arena, {c.block_rows, q_features}, dq) ||
         !alloc_bf16(arena, {c.context_rows, kv_features}, dkc) ||
         !alloc_bf16(arena, {c.context_rows, kv_features}, dvc) ||
@@ -125,7 +125,7 @@ static bool run_case(
         check(false, "attention ring alloc");
         return false;
     }
-    const auto upload = [](ps::gpu::Tensor& dst, const std::vector<bf16_t>& src) {
+    const auto upload = [](shelf::gpu::Tensor& dst, const std::vector<bf16_t>& src) {
         return hipMemcpy(dst.data<bf16_t>(), src.data(), src.size() * sizeof(bf16_t),
                          hipMemcpyHostToDevice) == hipSuccess;
     };
@@ -135,7 +135,7 @@ static bool run_case(
     check(upload(dkn, c.k_noise), "kn upload");
     check(upload(dvn, c.v_noise), "vn upload");
 
-    hipError_t err = ps::kernel::launch_dflash2_attention_bf16(
+    hipError_t err = shelf::kernel::launch_dflash2_attention_bf16(
         dq.data<bf16_t>(), q_features, dkc.data<bf16_t>(), dvc.data<bf16_t>(), c.context_rows,
         kv_features, dkn.data<bf16_t>(), dvn.data<bf16_t>(), c.block_rows, kv_features,
         dout.data<bf16_t>(), q_features, c.q_heads, c.kv_heads, c.head_dim, c.context_start,
@@ -150,7 +150,7 @@ static bool run_case(
 }
 
 static void compare_ring(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     const RingAttentionCase& c,
     const std::vector<bf16_t>& want,
@@ -172,12 +172,12 @@ static void compare_ring(
         }
     }
 
-    ps::gpu::Tensor dq;
-    ps::gpu::Tensor dkr;
-    ps::gpu::Tensor dvr;
-    ps::gpu::Tensor dkn;
-    ps::gpu::Tensor dvn;
-    ps::gpu::Tensor dout;
+    shelf::gpu::Tensor dq;
+    shelf::gpu::Tensor dkr;
+    shelf::gpu::Tensor dvr;
+    shelf::gpu::Tensor dkn;
+    shelf::gpu::Tensor dvn;
+    shelf::gpu::Tensor dout;
     check(alloc_bf16(arena, {c.block_rows, q_features}, dq), tag + " q alloc");
     check(alloc_bf16(arena, {c.capacity, kv_features}, dkr), tag + " kr alloc");
     check(alloc_bf16(arena, {c.capacity, kv_features}, dvr), tag + " vr alloc");
@@ -200,7 +200,7 @@ static void compare_ring(
                     c.v_noise.size() * sizeof(bf16_t), hipMemcpyHostToDevice) == hipSuccess,
           tag + " vn upload");
 
-    const hipError_t err = ps::kernel::launch_dflash2_attention_ring_bf16(
+    const hipError_t err = shelf::kernel::launch_dflash2_attention_ring_bf16(
         dq.data<bf16_t>(), q_features, dkr.data<bf16_t>(), dvr.data<bf16_t>(), c.capacity,
         c.context_rows, c.context_start, kv_features, dkn.data<bf16_t>(), dvn.data<bf16_t>(),
         c.block_rows, kv_features, dout.data<bf16_t>(), q_features, c.q_heads, c.kv_heads,
@@ -221,7 +221,7 @@ static void compare_ring(
     check(mismatch == 0, tag + " ring vs contiguous bit exact");
 
     if (c.q_heads == 4u * c.kv_heads && c.head_dim == 128u) {
-        const hipError_t gerr = ps::kernel::launch_dflash2_attention_ring_gqa_bf16(
+        const hipError_t gerr = shelf::kernel::launch_dflash2_attention_ring_gqa_bf16(
             dq.data<bf16_t>(), q_features, dkr.data<bf16_t>(), dvr.data<bf16_t>(), c.capacity,
             c.context_rows, c.context_start, kv_features, dkn.data<bf16_t>(), dvn.data<bf16_t>(),
             c.block_rows, kv_features, dout.data<bf16_t>(), q_features, c.q_heads, c.kv_heads,
@@ -243,7 +243,7 @@ static void compare_ring(
 }
 
 static void run_compare(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     RingAttentionCase c,
     const std::string& tag) {
@@ -254,7 +254,7 @@ static void run_compare(
 }
 
 static void run_boundary_marker(
-    ps::gpu::GpuArena& arena,
+    shelf::gpu::GpuArena& arena,
     hipStream_t stream,
     uint32_t context_rows,
     uint32_t context_start,
@@ -293,12 +293,12 @@ static void run_boundary_marker(
 }
 
 int main() {
-    auto arena_result = ps::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 512ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -464,8 +464,8 @@ int main() {
                         "future noise row +3 (window 8)");
 
     check(hipStreamSynchronize(stream) == hipSuccess, "final sync");
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
-    const ps::Status shutdown = arena.shutdown();
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    const shelf::Status shutdown = arena.shutdown();
     check(shutdown.ok(), "arena shutdown: " + shutdown.message());
 
     std::printf("test_dflash2_attention_ring: failed=%d\n", g_fail);

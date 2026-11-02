@@ -29,13 +29,34 @@ native preshuffle
     ↓
 GPU upload
      ↓                    ↓
-Generic state (ps::state) ─────────────┤
+Generic state (shelf::state) ────────────┤
      ↓                    ↓
 Quantization / FPX format
      ↓
 Runtime core
     PrimitiveGraph / Program / ProgramSet / DeviceBatchContext / workspace layouts
 ```
+
+## Namespace
+
+root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレクトリは
+次の対応で、public header の `shelf/` prefix include 規則と同じ階層になる。
+
+| directory | namespace |
+| --- | --- |
+| `shelf/core/**`（Status / 数値型） | `shelf` |
+| `shelf/core/memory/**` / `shelf/core/gpu/**` | `shelf::gpu` |
+| `shelf/io/**` | `shelf` |
+| `shelf/quantization/**` | `shelf::quantization`（下位: `manifest` / `bundle` / `codec` / `fp8`） |
+| `shelf/weights/**` | `shelf::weights` |
+| `shelf/runtime/**` | `shelf::runtime` |
+| `shelf/kernels/**` | `shelf::kernel` |
+| `shelf/inference/state/**` | `shelf::state` |
+| `shelf/inference/scheduling/**` | `shelf::scheduling` |
+| `shelf/inference/execution/**` | `shelf::execution` |
+| `shelf/models/common/**` | `shelf::qwen_hybrid` |
+| `shelf/models/qwen35/**` | `shelf::qwen35`（下位: `runtime` / `dflash2`） |
+| `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
 generic 層（`shelf/kernels` / `shelf/inference` /
 `models/common`）は `models/qwen35` / `Qwen35` を参照できない。

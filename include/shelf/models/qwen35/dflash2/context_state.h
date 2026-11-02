@@ -10,7 +10,7 @@
 
 #include <cstdint>
 
-namespace ps::qwen35::dflash2 {
+namespace shelf::qwen35::dflash2 {
 
 struct DFlash2ContextState {
     gpu::Tensor k_ring;
@@ -45,4 +45,4 @@ Status dflash2_context_append(
     uint32_t position_start,
     hipStream_t stream);
 
-}  // namespace ps::qwen35::dflash2
+}  // namespace shelf::qwen35::dflash2

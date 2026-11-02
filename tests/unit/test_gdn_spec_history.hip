@@ -16,16 +16,16 @@
 #include <string>
 #include <vector>
 
-using ps::bf16_t;
-using ps::fp16_t;
-using ps::state::GdnStatePool;
-using ps::state::GdnStatePoolDeviceView;
-using ps::state::GdnStatePoolLayout;
-using ps::qwen35::runtime::GdnSpecHistory;
-using ps::qwen35::runtime::create_gdn_spec_history;
-using ps::qwen35::runtime::gdn_spec_history_view;
-using ps::qwen35::runtime::restore_gdn_spec_history;
-using ps::qwen35::runtime::shutdown_gdn_spec_history;
+using shelf::bf16_t;
+using shelf::fp16_t;
+using shelf::state::GdnStatePool;
+using shelf::state::GdnStatePoolDeviceView;
+using shelf::state::GdnStatePoolLayout;
+using shelf::qwen35::runtime::GdnSpecHistory;
+using shelf::qwen35::runtime::create_gdn_spec_history;
+using shelf::qwen35::runtime::gdn_spec_history_view;
+using shelf::qwen35::runtime::restore_gdn_spec_history;
+using shelf::qwen35::runtime::shutdown_gdn_spec_history;
 
 static int g_fail = 0;
 
@@ -37,7 +37,7 @@ static void check(bool cond, const std::string& msg) {
 }
 
 static bool alloc_bf16(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(bf16_t), 256);
@@ -49,14 +49,14 @@ static bool alloc_bf16(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<bf16_t>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<bf16_t>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
 }
 
 static bool alloc_f32(
-    ps::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, const std::vector<std::size_t>& shape, shelf::gpu::Tensor& out) {
     std::size_t count = 1;
     for (std::size_t d : shape) count *= d;
     auto view = arena.allocate_aligned(count * sizeof(float), 256);
@@ -68,18 +68,18 @@ static bool alloc_f32(
         strides[i] = stride;
         stride *= shape[i];
     }
-    auto t = ps::gpu::Tensor::create<float>(backing, shape, strides);
+    auto t = shelf::gpu::Tensor::create<float>(backing, shape, strides);
     if (!t.ok()) return false;
     out = t.release();
     return true;
 }
 
 static bool alloc_u8(
-    ps::gpu::GpuArena& arena, std::size_t bytes, ps::gpu::Tensor& out) {
+    shelf::gpu::GpuArena& arena, std::size_t bytes, shelf::gpu::Tensor& out) {
     auto view = arena.allocate_aligned(bytes, 256);
     if (!view.ok()) return false;
     auto backing = view.release();
-    auto t = ps::gpu::Tensor::create<uint8_t>(backing, {bytes}, {1u});
+    auto t = shelf::gpu::Tensor::create<uint8_t>(backing, {bytes}, {1u});
     if (!t.ok()) return false;
     out = t.release();
     return true;
@@ -94,13 +94,13 @@ static float randf(uint32_t& s) {
     return (static_cast<float>(s >> 8) / static_cast<float>(1u << 24)) * 2.0f - 1.0f;
 }
 
-static ps::bf16_t randb(uint32_t& s) {
-    return ps::bf16_t{ps::f32_to_bf16_rne(randf(s) * 0.5f)};
+static shelf::bf16_t randb(uint32_t& s) {
+    return shelf::bf16_t{shelf::f32_to_bf16_rne(randf(s) * 0.5f)};
 }
 
 struct RequestBuf {
-    ps::gpu::Tensor t;
-    ::ps::runtime::DeviceRequestDescriptor* ptr = nullptr;
+    shelf::gpu::Tensor t;
+    ::shelf::runtime::DeviceRequestDescriptor* ptr = nullptr;
 };
 
 int main() {
@@ -108,12 +108,12 @@ int main() {
         std::printf("SKIP: no GPU\n");
         return 77;
     }
-    auto arena_result = ps::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 2ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
         std::printf("FAIL hipStreamCreate\n");
@@ -160,18 +160,18 @@ int main() {
               "history view rejects overflow rows");
     }
 
-    ps::gpu::Tensor q;
-    ps::gpu::Tensor kk;
-    ps::gpu::Tensor v;
-    ps::gpu::Tensor a;
-    ps::gpu::Tensor b;
-    ps::gpu::Tensor dt;
-    ps::gpu::Tensor al;
-    ps::gpu::Tensor out;
-    ps::gpu::Tensor conv_in;
-    ps::gpu::Tensor conv_w;
-    ps::gpu::Tensor conv_out;
-    ps::gpu::Tensor req_mem;
+    shelf::gpu::Tensor q;
+    shelf::gpu::Tensor kk;
+    shelf::gpu::Tensor v;
+    shelf::gpu::Tensor a;
+    shelf::gpu::Tensor b;
+    shelf::gpu::Tensor dt;
+    shelf::gpu::Tensor al;
+    shelf::gpu::Tensor out;
+    shelf::gpu::Tensor conv_in;
+    shelf::gpu::Tensor conv_w;
+    shelf::gpu::Tensor conv_out;
+    shelf::gpu::Tensor req_mem;
     const bool alloc_ok =
         alloc_f32(arena, {kRows, q_feat}, q) && alloc_f32(arena, {kRows, q_feat}, kk) &&
         alloc_bf16(arena, {kRows, v_feat}, v) && alloc_bf16(arena, {kRows, kNumVHeads}, a) &&
@@ -180,7 +180,7 @@ int main() {
         alloc_bf16(arena, {kRows, conv_dim}, conv_in) &&
         alloc_bf16(arena, {conv_dim * 4u}, conv_w) &&
         alloc_f32(arena, {kRows, conv_dim}, conv_out) &&
-        alloc_u8(arena, sizeof(::ps::runtime::DeviceRequestDescriptor), req_mem);
+        alloc_u8(arena, sizeof(::shelf::runtime::DeviceRequestDescriptor), req_mem);
     check(alloc_ok, "buffer alloc");
     if (!alloc_ok) return 1;
 
@@ -233,10 +233,10 @@ int main() {
               "conv weight upload");
     }
 
-    auto* req = reinterpret_cast<::ps::runtime::DeviceRequestDescriptor*>(
+    auto* req = reinterpret_cast<::shelf::runtime::DeviceRequestDescriptor*>(
         req_mem.data<uint8_t>());
     {
-        ::ps::runtime::DeviceRequestDescriptor hreq{};
+        ::shelf::runtime::DeviceRequestDescriptor hreq{};
         hreq.request_handle.slot = 0u;
         hreq.request_handle.generation = 1u;
         hreq.row_begin = 0u;
@@ -251,7 +251,7 @@ int main() {
     std::vector<std::vector<bf16_t>> clean_conv(kRows + 1u);
 
     auto make_rec_args = [&](uint32_t actual_rows) {
-        ::ps::kernel::GdnRecurrenceArgs r{};
+        ::shelf::kernel::GdnRecurrenceArgs r{};
         r.q = q.data<float>();
         r.k = kk.data<float>();
         r.v = v.data<bf16_t>();
@@ -283,7 +283,7 @@ int main() {
     };
 
     auto make_conv_args = [&](uint32_t actual_rows) {
-        ::ps::kernel::GdnConv1dArgs c{};
+        ::shelf::kernel::GdnConv1dArgs c{};
         c.input = conv_in.data<bf16_t>();
         c.output = conv_out.data<float>();
         c.conv_weight = conv_w.data<bf16_t>();
@@ -307,11 +307,11 @@ int main() {
     for (uint32_t n = 1u; n <= kCapture; ++n) {
         check(pool.reset(0u, stream).ok(), "clean reset");
         auto ra = make_rec_args(n);
-        check(::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
                   hipSuccess,
               "clean recurrence launch");
         auto ca = make_conv_args(n);
-        check(::ps::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
+        check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "clean conv launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "clean sync");
         clean_rec[n].resize(rec_slot_bytes / sizeof(fp16_t));
@@ -330,14 +330,14 @@ int main() {
         ra.recurrent_history = history.recurrent.data<fp16_t>();
         ra.recurrent_history_row_stride = static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
-        check(::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
                   hipSuccess,
               "capture recurrence launch");
         auto ca = make_conv_args(kCapture);
         ca.conv_history_store = history.conv.data<bf16_t>();
         ca.conv_history_row_stride = static_cast<uint64_t>(history.conv.dim(1));
         ca.capture_rows = kCapture;
-        check(::ps::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
+        check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "capture conv launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "capture sync");
     }
@@ -389,7 +389,7 @@ int main() {
     }
 
     auto set_req_rows = [&](uint32_t rows) {
-        ::ps::runtime::DeviceRequestDescriptor hreq{};
+        ::shelf::runtime::DeviceRequestDescriptor hreq{};
         hreq.request_handle.slot = 0u;
         hreq.request_handle.generation = 1u;
         hreq.row_begin = 0u;
@@ -397,7 +397,7 @@ int main() {
         (void)hipMemcpy(req, &hreq, sizeof(hreq), hipMemcpyHostToDevice);
     };
 
-    ps::gpu::Tensor parents_dev;
+    shelf::gpu::Tensor parents_dev;
     check(alloc_u8(arena, 4u * sizeof(int32_t), parents_dev), "parents alloc");
     {
         std::vector<int32_t> parents(kCapture);
@@ -417,7 +417,7 @@ int main() {
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
         ra.row_parent = parents_dev_ptr;
-        check(::ps::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_serial(ra, stream) ==
                   hipSuccess,
               "tree chain recurrence launch");
         auto ca = make_conv_args(kCapture);
@@ -425,7 +425,7 @@ int main() {
         ca.conv_history_row_stride = static_cast<uint64_t>(history.conv.dim(1));
         ca.capture_rows = kCapture;
         ca.row_parent = parents_dev_ptr;
-        check(::ps::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
+        check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "tree chain conv launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "tree chain sync");
         std::vector<fp16_t> trec(rec_slot_bytes / sizeof(fp16_t));
@@ -457,7 +457,7 @@ int main() {
             static_cast<uint64_t>(history.recurrent.dim(1));
         ra.capture_rows = kCapture;
         ra.row_parent = parents_a_dev;
-        check(::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(ra, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(ra, stream) ==
                   hipSuccess,
               "tree branch recurrence launch A");
         auto ca = make_conv_args(4u);
@@ -465,7 +465,7 @@ int main() {
         ca.conv_history_row_stride = static_cast<uint64_t>(history.conv.dim(1));
         ca.capture_rows = kCapture;
         ca.row_parent = parents_a_dev;
-        check(::ps::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
+        check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(ca, stream) == hipSuccess,
               "tree branch conv launch A");
         check(hipStreamSynchronize(stream) == hipSuccess, "tree branch sync A");
         std::vector<float> rec_a(v_feat);
@@ -499,11 +499,11 @@ int main() {
         set_req_rows(4u);
         check(pool.reset(0u, stream).ok(), "tree branch reset B");
         auto rb = make_rec_args(4u);
-        check(::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(rb, stream) ==
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(rb, stream) ==
                   hipSuccess,
               "tree branch recurrence launch B");
         auto cb = make_conv_args(4u);
-        check(::ps::kernel::launch_gdn_conv1d_bf16_f32(cb, stream) == hipSuccess,
+        check(::shelf::kernel::launch_gdn_conv1d_bf16_f32(cb, stream) == hipSuccess,
               "tree branch conv launch B");
         check(hipStreamSynchronize(stream) == hipSuccess, "tree branch sync B");
         std::vector<float> rec_b(v_feat);
@@ -521,7 +521,7 @@ int main() {
     }
 
     check(shutdown_gdn_spec_history(history).ok(), "history shutdown");
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     check(arena.shutdown().ok(), "arena shutdown");
     std::printf("test_gdn_spec_history: failed=%d\n", g_fail);
     return g_fail == 0 ? 0 : 1;

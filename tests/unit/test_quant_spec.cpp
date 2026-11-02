@@ -3,8 +3,8 @@
 #include <shelf/quantization/quant_spec.h>
 #include <cstdio>
 
-using namespace ps::quantization;
-using ps::quantization::manifest::QuantizedEncoding;
+using namespace shelf::quantization;
+using shelf::quantization::manifest::QuantizedEncoding;
 
 namespace {
 int g_passed = 0;

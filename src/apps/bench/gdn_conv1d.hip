@@ -17,11 +17,11 @@
 
 namespace {
 
-using bf16t = ps::bf16_t;
-using V = ::ps::runtime::DeviceValueBinding;
-using S = ::ps::runtime::DeviceStateBinding;
-using P = ::ps::runtime::DeviceProgramView;
-using B = ::ps::runtime::DispatchBinding;
+using bf16t = shelf::bf16_t;
+using V = ::shelf::runtime::DeviceValueBinding;
+using S = ::shelf::runtime::DeviceStateBinding;
+using P = ::shelf::runtime::DeviceProgramView;
+using B = ::shelf::runtime::DispatchBinding;
 
 struct Options {
     std::string variant = "optimized";
@@ -115,7 +115,7 @@ struct Bufs {
         void* all[] = {weight, input, out_correct, out_opt, state_correct, state_opt, requests,
                        vals_dev, state_dev, param_dev, ctx_dev, scratch, error_word};
         for (auto* p : all)
-            if (p) ps::gpu::discard_cleanup_result(hipFree(p));
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
     }
 };
 
@@ -154,7 +154,7 @@ bool build(Setup& s, const Options& o, uint32_t rows) {
     if (!m(&s.buf.out_opt, (size_t)rows * s.out_stride * 4)) return false;
     if (!m(&s.buf.state_correct, s.state_total * 2)) return false;
     if (!m(&s.buf.state_opt, s.state_total * 2)) return false;
-    if (!m(&s.buf.requests, (size_t)s.nreq * sizeof(::ps::runtime::DeviceRequestDescriptor))) return false;
+    if (!m(&s.buf.requests, (size_t)s.nreq * sizeof(::shelf::runtime::DeviceRequestDescriptor))) return false;
 
     std::vector<uint16_t> h_w((size_t)conv_dim * 4u);
     std::vector<uint16_t> h_in((size_t)rows * s.in_stride);
@@ -170,7 +170,7 @@ bool build(Setup& s, const Options& o, uint32_t rows) {
     if (hipMemset(s.buf.out_correct, 0, (size_t)rows * s.out_stride * 4) != hipSuccess) return false;
     if (hipMemset(s.buf.out_opt, 0, (size_t)rows * s.out_stride * 4) != hipSuccess) return false;
 
-    std::vector<::ps::runtime::DeviceRequestDescriptor> h_req(s.nreq);
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> h_req(s.nreq);
     uint32_t begin = 0;
     for (uint32_t r = 0; r < s.nreq; ++r) {
         const uint32_t remaining = rows - begin;
@@ -185,40 +185,40 @@ bool build(Setup& s, const Options& o, uint32_t rows) {
 
     V vals[2];
     auto setv = [&](V& v, uint32_t id, uint32_t feat, uint32_t stride, void* ptr,
-                    ::ps::runtime::ValueDType dt) {
+                    ::shelf::runtime::ValueDType dt) {
         v.logical_value = id;
-        v.storage = ::ps::runtime::ValueStorage::WORKSPACE;
+        v.storage = ::shelf::runtime::ValueStorage::WORKSPACE;
         v.dtype = dt;
-        v.row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+        v.row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
         v.slot = 0;
         v.feature_count = feat;
         v.row_stride = stride;
         v.offset = (uint64_t)(uintptr_t)ptr;
         v.bytes = 0;
     };
-    setv(vals[0], 0, conv_dim, s.in_stride, s.buf.input, ::ps::runtime::ValueDType::BF16);
-    setv(vals[1], 1, conv_dim, s.out_stride, s.buf.out_correct, ::ps::runtime::ValueDType::F32);
+    setv(vals[0], 0, conv_dim, s.in_stride, s.buf.input, ::shelf::runtime::ValueDType::BF16);
+    setv(vals[1], 1, conv_dim, s.out_stride, s.buf.out_correct, ::shelf::runtime::ValueDType::F32);
     if (hipMalloc(&s.buf.vals_dev, 2 * sizeof(V)) != hipSuccess) return false;
     std::memcpy(s.buf.vals_dev, vals, 2 * sizeof(V));
 
     S st;
     st.slot = 0;
-    st.kind = (uint8_t)::ps::runtime::PrimitiveStateKind::GDN_CONV_STATE;
+    st.kind = (uint8_t)::shelf::runtime::PrimitiveStateKind::GDN_CONV_STATE;
     st.state_index = o.state_index;
     if (hipMalloc(&s.buf.state_dev, sizeof(S)) != hipSuccess) return false;
     std::memcpy(s.buf.state_dev, &st, sizeof(S));
 
-    ::ps::runtime::StaticParameterSlot param;
+    ::shelf::runtime::StaticParameterSlot param;
     param.device_ptr = s.buf.weight;
     param.elements = conv_dim * 4u;
-    param.dtype = ::ps::runtime::ValueDType::BF16;
+    param.dtype = ::shelf::runtime::ValueDType::BF16;
     if (hipMalloc(&s.buf.param_dev, sizeof(param)) != hipSuccess) return false;
     std::memcpy(s.buf.param_dev, &param, sizeof(param));
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_requests = s.nreq;
-    ctx.requests = (const ::ps::runtime::DeviceRequestDescriptor*)s.buf.requests;
+    ctx.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)s.buf.requests;
     if (hipMalloc(&s.buf.ctx_dev, sizeof(ctx)) != hipSuccess) return false;
     if (hipMemcpy(s.buf.ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMalloc(&s.buf.scratch, (size_t)1024 * 4096 * sizeof(float)) != hipSuccess) return false;
@@ -233,11 +233,11 @@ hipError_t launch_correctness(const Setup& s, const Options& o, hipStream_t stre
     prog.states = (const S*)s.buf.state_dev;
     prog.state_count = 1;
     prog.workspace_base = 0;
-    prog.parameter_table = (const ::ps::runtime::StaticParameterSlot*)s.buf.param_dev;
+    prog.parameter_table = (const ::shelf::runtime::StaticParameterSlot*)s.buf.param_dev;
     prog.parameter_slot_count = 1;
 
     B binding{};
-    binding.kernel_id = ::ps::runtime::KernelId::STATEFUL_CAUSAL_CONV1D;
+    binding.kernel_id = ::shelf::runtime::KernelId::STATEFUL_CAUSAL_CONV1D;
     binding.descriptor_slot = 1;
     binding.input_slots[0] = 0;
     binding.output_slots[0] = 1;
@@ -245,7 +245,7 @@ hipError_t launch_correctness(const Setup& s, const Options& o, hipStream_t stre
     binding.output_count = 1;
     binding.parameter_index0 = 0;
 
-    ::ps::kernel::ModelDispatchStateView state_view{};
+    ::shelf::kernel::ModelDispatchStateView state_view{};
     state_view.gdn.conv_base = (bf16t*)s.buf.state_correct;
     state_view.gdn.num_gdn_states = o.num_gdn_states;
     state_view.gdn.max_sequences = o.max_sequences;
@@ -255,21 +255,21 @@ hipError_t launch_correctness(const Setup& s, const Options& o, hipStream_t stre
     state_view.gdn.conv_dim = s.conv_dim;
     state_view.gdn.conv_history = 3u;
 
-    ps::gpu::discard_cleanup_result(hipMemsetAsync(s.buf.error_word, 0, sizeof(uint32_t), stream));
-    auto st = ps::kernel::launch_model_dispatch_correctness(
-        prog, binding, (::ps::runtime::DeviceBatchContext*)s.buf.ctx_dev, state_view,
+    shelf::gpu::discard_cleanup_result(hipMemsetAsync(s.buf.error_word, 0, sizeof(uint32_t), stream));
+    auto st = shelf::kernel::launch_model_dispatch_correctness(
+        prog, binding, (::shelf::runtime::DeviceBatchContext*)s.buf.ctx_dev, state_view,
         (float*)s.buf.scratch, (uint32_t*)s.buf.error_word, stream);
     if (!st.ok()) return hipErrorUnknown;
     return hipGetLastError();
 }
 
 hipError_t launch_optimized(const Setup& s, const Options& o, hipStream_t stream) {
-    ::ps::kernel::GdnConv1dArgs ka{};
+    ::shelf::kernel::GdnConv1dArgs ka{};
     ka.input = (const bf16t*)s.buf.input;
     ka.output = (float*)s.buf.out_opt;
     ka.conv_weight = (const bf16t*)s.buf.weight;
     ka.conv_state = (bf16t*)s.buf.state_opt;
-    ka.requests = (const ::ps::runtime::DeviceRequestDescriptor*)s.buf.requests;
+    ka.requests = (const ::shelf::runtime::DeviceRequestDescriptor*)s.buf.requests;
     ka.num_requests = s.nreq;
     ka.actual_rows = s.rows;
     ka.max_request_rows = (s.rows + s.nreq - 1u) / s.nreq;
@@ -282,7 +282,7 @@ hipError_t launch_optimized(const Setup& s, const Options& o, hipStream_t stream
     ka.conv_slot_stride = s.slot_stride;
     ka.conv_layer_stride = s.layer_stride;
     ka.conv_history_stride = s.hist_stride;
-    return ::ps::kernel::launch_gdn_conv1d_bf16_f32(ka, stream);
+    return ::shelf::kernel::launch_gdn_conv1d_bf16_f32(ka, stream);
 }
 
 }  // namespace
@@ -387,8 +387,8 @@ int run_gdn_conv1d(int argc, char** argv) {
             if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) break;
             per.push_back(ms * 1000.0 / (double)o.launches);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-        ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
         if (per.empty()) { rc = 1; continue; }
         const double mn = percentile(per, 0.0);
         const double p50 = percentile(per, 0.5);
@@ -408,6 +408,6 @@ int run_gdn_conv1d(int argc, char** argv) {
         std::printf("%-11s conv f=%-5u rows=%-5u nreq=%-3u p50=%.2fus mean=%.2fus\n",
                     o.variant.c_str(), s.conv_dim, rows, s.nreq, p50, mean);
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }

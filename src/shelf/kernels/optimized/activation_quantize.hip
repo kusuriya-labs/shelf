@@ -7,14 +7,14 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 namespace {
 
 constexpr uint32_t kThreadsPerRow = 256u;
 
 __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegrained_kernel(
-    const ::ps::bf16_t* __restrict__ input,
+    const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,
     const uint32_t k,
@@ -82,13 +82,13 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
                 }
             }
             const uint8_t c = s > 0.0f
-                ? ::ps::quantization::codec::device::e4m3_encode_u8(v * inv)
+                ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
                 : 0u;
             packed |= static_cast<uint32_t>(c) << (8u * l);
         }
         if (i0 + kElemsPerLane <= k_padded) {
-            const uint32_t off = (i0 >> 6u) * ::ps::quantization::fp8::kFragBlockBytes +
-                                 ::ps::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
+            const uint32_t off = (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
+                                 ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
             *reinterpret_cast<uint32_t*>(crow + off) = packed;
         }
     }
@@ -97,7 +97,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
 template <uint32_t K, uint32_t KP>
 __global__ void __launch_bounds__(kThreadsPerRow)
 activation_quantize_fp8_finegrained_vec_kernel(
-    const ::ps::bf16_t* __restrict__ input,
+    const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
     float* __restrict__ scales,
     const uint32_t input_row_stride,
@@ -111,7 +111,7 @@ activation_quantize_fp8_finegrained_vec_kernel(
 }  // namespace
 
 bool activation_quantize_fp8_finegrained_vec_supported(
-    const ::ps::bf16_t* input, const uint8_t* codes,
+    const ::shelf::bf16_t* input, const uint8_t* codes,
     uint32_t k, uint32_t k_padded, uint32_t input_row_stride) {
     if (k != k_padded || (k & 7u) != 0u)
         return false;
@@ -127,7 +127,7 @@ bool activation_quantize_fp8_finegrained_vec_supported(
 }
 
 hipError_t launch_activation_quantize_fp8_finegrained_generic(
-    const ::ps::bf16_t* input,
+    const ::shelf::bf16_t* input,
     uint8_t* codes,
     float* scales,
     uint32_t rows,
@@ -139,8 +139,8 @@ hipError_t launch_activation_quantize_fp8_finegrained_generic(
     hipStream_t stream) {
     if (rows == 0 || k_padded == 0)
         return hipSuccess;
-    if ((k_padded % ::ps::quantization::fp8::kFragBlockK) != 0u ||
-        (code_row_stride_bytes % ::ps::quantization::fp8::kFragBlockK) != 0u)
+    if ((k_padded % ::shelf::quantization::fp8::kFragBlockK) != 0u ||
+        (code_row_stride_bytes % ::shelf::quantization::fp8::kFragBlockK) != 0u)
         return hipErrorNotSupported;
     activation_quantize_fp8_finegrained_kernel<<<rows, kThreadsPerRow, 0, stream>>>(
         input, codes, scales, k, k_padded,
@@ -153,7 +153,7 @@ void shelf_activation_quantize_fp8_finegrained_k5120(
     ActivationQuantizeFp8FinegrainedK5120Args args);
 
 hipError_t launch_activation_quantize_fp8_finegrained(
-    const ::ps::bf16_t* input,
+    const ::shelf::bf16_t* input,
     uint8_t* codes,
     float* scales,
     uint32_t rows,
@@ -167,8 +167,8 @@ hipError_t launch_activation_quantize_fp8_finegrained(
     if (specialized != nullptr) *specialized = false;
     if (rows == 0 || k_padded == 0)
         return hipSuccess;
-    if ((k_padded % ::ps::quantization::fp8::kFragBlockK) != 0u ||
-        (code_row_stride_bytes % ::ps::quantization::fp8::kFragBlockK) != 0u)
+    if ((k_padded % ::shelf::quantization::fp8::kFragBlockK) != 0u ||
+        (code_row_stride_bytes % ::shelf::quantization::fp8::kFragBlockK) != 0u)
         return hipErrorNotSupported;
     if (activation_quantize_fp8_finegrained_vec_supported(input, codes, k, k_padded, input_row_stride)) {
         switch (k) {
@@ -226,7 +226,7 @@ extern "C" __global__ __launch_bounds__(256)
 void shelf_activation_quantize_fp8_finegrained_k5120(
     ActivationQuantizeFp8FinegrainedK5120Args args) {
     detail::activation_quantize_fp8_finegrained_vec_row_body<5120u, 5120u>(
-        reinterpret_cast<const ::ps::bf16_t*>(args.input),
+        reinterpret_cast<const ::shelf::bf16_t*>(args.input),
         reinterpret_cast<uint8_t*>(args.codes),
         reinterpret_cast<float*>(args.scales), blockIdx.x, args.input_row_stride,
         args.code_row_stride, args.scale_row_stride);
@@ -236,7 +236,7 @@ extern "C" __global__ __launch_bounds__(256)
 void shelf_activation_quantize_fp8_finegrained_k6144(
     ActivationQuantizeFp8FinegrainedKArgs args) {
     detail::activation_quantize_fp8_finegrained_vec_row_body<6144u, 6144u>(
-        reinterpret_cast<const ::ps::bf16_t*>(args.input),
+        reinterpret_cast<const ::shelf::bf16_t*>(args.input),
         reinterpret_cast<uint8_t*>(args.codes),
         reinterpret_cast<float*>(args.scales), blockIdx.x, args.input_row_stride,
         args.code_row_stride, args.scale_row_stride);
@@ -246,7 +246,7 @@ extern "C" __global__ __launch_bounds__(256)
 void shelf_activation_quantize_fp8_finegrained_k17408(
     ActivationQuantizeFp8FinegrainedKArgs args) {
     detail::activation_quantize_fp8_finegrained_vec_row_body<17408u, 17408u>(
-        reinterpret_cast<const ::ps::bf16_t*>(args.input),
+        reinterpret_cast<const ::shelf::bf16_t*>(args.input),
         reinterpret_cast<uint8_t*>(args.codes),
         reinterpret_cast<float*>(args.scales), blockIdx.x, args.input_row_stride,
         args.code_row_stride, args.scale_row_stride);

@@ -22,7 +22,7 @@
 #include <memory>
 #include <vector>
 
-namespace ps::app {
+namespace shelf::app {
 namespace {
 
 
@@ -52,13 +52,13 @@ std::size_t safetensors_dir_bytes(const std::string& dir) {
 
 
 
-void print_model_geometry(const ps::qwen35::Qwen35Model& model) {
+void print_model_geometry(const shelf::qwen35::Qwen35Model& model) {
     const auto& text_config = model.text_config();
     const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(text_config.attention_head_dim);
     const uint32_t num_attn_layers = count_attention_layers(text_config);
     const auto gdn_layout =
-        ps::qwen35::make_qwen35_gdn_state_layout(text_config);
+        shelf::qwen35::make_qwen35_gdn_state_layout(text_config);
 
     printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
     printf("MODEL_INTERMEDIATE_SIZE=%zu\n", text_config.intermediate_size);
@@ -77,7 +77,7 @@ void print_model_geometry(const ps::qwen35::Qwen35Model& model) {
     fflush(stdout);
 }
 
-void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
+void dump_mem_debug(shelf::app::Qwen35ComputeRuntime& runtime) {
     const auto& model = runtime.model();
     auto& executor = runtime.executor();
     const auto& gdn_pool = runtime.gdn_pool();
@@ -85,8 +85,8 @@ void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
     uint64_t bf16_bytes = 0, fp8_codes = 0, fp8_scales = 0;
     uint64_t w4_codes = 0, w4_sscales = 0, w4_cscales = 0;
     uint64_t w8_codes = 0, w8_sscales = 0, w8_cscales = 0;
-    auto add_matrix = [&](const ps::weights::MatrixWeight& m) {
-        using E = ps::weights::MatrixEncoding;
+    auto add_matrix = [&](const shelf::weights::MatrixWeight& m) {
+        using E = shelf::weights::MatrixEncoding;
         if (m.rows == 0) return;
         const uint64_t r = m.rows;
         if (m.encoding == E::Bf16) {
@@ -118,7 +118,7 @@ void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
     uint64_t staging_dispatch_count = 0;
     uint64_t staging_max_image_bytes = 0;
     uint64_t staging_shared_program_bytes = 0;
-    for (size_t b = 0; b < ps::runtime::ProgramSet::kRowBucketCount; ++b) {
+    for (size_t b = 0; b < shelf::runtime::ProgramSet::kRowBucketCount; ++b) {
         const auto& p = executor.program_set.programs[b];
         printf("ROWBUCKET_%zu_WORKSPACE_BYTES=%zu\n", b, p.workspace.total_bytes);
         staging_dispatch_count += p.dispatches.size();
@@ -169,7 +169,7 @@ struct LogitsDumper {
         return file != nullptr;
     }
 
-    bool step(ps::qwen35::Executor& executor) {
+    bool step(shelf::qwen35::Executor& executor) {
         if (file == nullptr) return true;
         const auto& lg = executor.logits;
         if (lg.ndim() != 2 || lg.dim(1) != vocab || lg.element_size() != sizeof(float)) {
@@ -212,7 +212,7 @@ struct LogitsDumper {
     }
 };
 
-void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
+void dump_hidden_debug(shelf::qwen35::Executor& executor, const char* tag) {
     const char* h = std::getenv("SHELF_DEBUG_HIDDEN");
     if (h == nullptr || h[0] == '\0') return;
     for (int t = 0; t < 2; ++t) {
@@ -260,7 +260,7 @@ void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
     }
 }
 
-void dump_tap_hidden(ps::qwen35::Executor& executor, const char* tag, std::size_t rows) {
+void dump_tap_hidden(shelf::qwen35::Executor& executor, const char* tag, std::size_t rows) {
     const uint32_t taps = executor.config.target_hidden_tap_count;
     if (taps == 0) return;
     const char* dbg_file = std::getenv("SHELF_DEBUG_HIDDEN_FILE");
@@ -308,10 +308,10 @@ void dump_tap_hidden(ps::qwen35::Executor& executor, const char* tag, std::size_
     }
 }
 
-int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
+int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                     const std::vector<int32_t>& prompt_ids,
                     unsigned long max_new_tokens,
-                    const ps::qwen35::runtime::SamplingConfig& sampling,
+                    const shelf::qwen35::runtime::SamplingConfig& sampling,
                     const std::string& kv_cache_dtype,
                     const std::string& dump_logits_path) {
     auto& executor = runtime.executor();
@@ -415,7 +415,7 @@ int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
 
     const auto* request = runtime.request(request_id);
     if (request == nullptr ||
-        request->state != ps::qwen35::runtime::RequestState::Finished) {
+        request->state != shelf::qwen35::runtime::RequestState::Finished) {
         fprintf(stderr, "request did not finish\n");
         return 1;
     }
@@ -467,15 +467,15 @@ int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
     return 0;
 }
 
-int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
+int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,
-                     const ps::qwen35::dflash2::DFlash2Config& dflash_config,
+                     const shelf::qwen35::dflash2::DFlash2Config& dflash_config,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
                      const std::string& kv_cache_dtype,
-                     const ps::qwen35::runtime::SamplingConfig& sampling) {
+                     const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
     const auto& model = runtime.model();
     auto& slot_pool = runtime.slot_pool();
@@ -484,13 +484,13 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     auto& arena = runtime.arena();
     const hipStream_t stream = runtime.stream();
     const auto& text_config = model.text_config();
-    ps::qwen35::runtime::TpCoordinator* tp_coord = runtime.tp_coordinator();
-    std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> rank_bindings;
+    shelf::qwen35::runtime::TpCoordinator* tp_coord = runtime.tp_coordinator();
+    std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> rank_bindings;
     if (tp_coord != nullptr) {
         rank_bindings.reserve(static_cast<std::size_t>(tp_coord->tp_size()));
         for (int r = 0; r < tp_coord->tp_size(); ++r) {
             auto& rank = tp_coord->rank(static_cast<std::size_t>(r));
-            rank_bindings.push_back(ps::qwen35::runtime::DFlash2GdnRankBinding{
+            rank_bindings.push_back(shelf::qwen35::runtime::DFlash2GdnRankBinding{
                 &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id(),
                 &rank.executor().host_model_state, &rank.executor()});
         }
@@ -506,12 +506,12 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
                 dflash_weights_result.status().message().c_str());
         return 1;
     }
-    ps::qwen35::dflash2::DFlash2Weights dflash_weights = dflash_weights_result.release();
+    shelf::qwen35::dflash2::DFlash2Weights dflash_weights = dflash_weights_result.release();
 
     const uint32_t max_seq = runtime.config().max_seq_len;
 
-    ps::weights::MatrixWeight* private_lm_head = nullptr;
-    ps::weights::MatrixWeight* private_embed = nullptr;
+    shelf::weights::MatrixWeight* private_lm_head = nullptr;
+    shelf::weights::MatrixWeight* private_embed = nullptr;
     const bool tp_sharded = runtime.config().tp > 1;
     if (tp_sharded) {
         auto* tp = runtime.tp_coordinator();
@@ -523,91 +523,91 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         private_lm_head = &rank0.private_lm_head();
         private_embed = &rank0.private_embed_tokens();
     }
-    ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+    shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head =
         tp_sharded ? private_lm_head : &model.weights().lm_head;
     draft_config.target_embed_tokens =
         tp_sharded ? private_embed : &model.weights().embed_tokens;
-    auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
+    auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
         fprintf(stderr, "dflash2 executor create failed: %s\n",
                 draft_result.status().message().c_str());
         return 1;
     }
-    ps::qwen35::dflash2::DFlash2Executor draft = draft_result.release();
+    shelf::qwen35::dflash2::DFlash2Executor draft = draft_result.release();
 
-    auto sequence_result = ps::state::create_paged_sequence_state(
+    auto sequence_result = shelf::state::create_paged_sequence_state(
         slot_pool, gdn_pool, kv_pool, max_seq, stream);
     if (!sequence_result.ok()) {
         fprintf(stderr, "dflash2 sequence create failed: %s\n",
                 sequence_result.status().message().c_str());
-        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
-    ps::state::PagedSequenceState sequence = sequence_result.release();
+    shelf::state::PagedSequenceState sequence = sequence_result.release();
     auto release_sequence = [&]() {
         if (tp_coord != nullptr) {
             (void)tp_coord->on_sequence_released(sequence);
         }
-        (void)ps::state::release_paged_sequence_state(sequence, stream);
+        (void)shelf::state::release_paged_sequence_state(sequence, stream);
     };
     if (tp_coord != nullptr) {
-        const ps::Status mirror_st = tp_coord->on_sequence_created(sequence);
+        const shelf::Status mirror_st = tp_coord->on_sequence_created(sequence);
         if (!mirror_st.ok()) {
             fprintf(stderr, "dflash2 tp mirror create failed: %s\n",
                     mirror_st.message().c_str());
             release_sequence();
-            (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
             return 1;
         }
     }
 
     auto context_result =
-        ps::qwen35::dflash2::create_dflash2_context_state(dflash_config, arena, 0u);
+        shelf::qwen35::dflash2::create_dflash2_context_state(dflash_config, arena, 0u);
     if (!context_result.ok()) {
         fprintf(stderr, "dflash2 context create failed: %s\n",
                 context_result.status().message().c_str());
         release_sequence();
-        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
-    ps::qwen35::dflash2::DFlash2ContextState context = context_result.release();
+    shelf::qwen35::dflash2::DFlash2ContextState context = context_result.release();
 
-    ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
+    shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
     decoder_config.eos_tokens = text_config.stop_tokens;
-    auto decoder_result = ps::qwen35::runtime::create_dflash2_spec_decoder(
+    auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
         rank_bindings.empty() ? nullptr : &rank_bindings, tp_coord);
     if (!decoder_result.ok()) {
         fprintf(stderr, "dflash2 spec decoder create failed: %s\n",
                 decoder_result.status().message().c_str());
-        (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
         release_sequence();
-        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
-    ps::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
-    ps::qwen35::runtime::DFlash2SpecTiming timing;
+    shelf::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
+    shelf::qwen35::runtime::DFlash2SpecTiming timing;
     decoder.timing = &timing;
-    ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(decoder, sampling);
+    shelf::qwen35::runtime::dflash2_spec_decoder_set_sampling(decoder, sampling);
 
     std::vector<int32_t> generated;
     uint32_t decode_tokens = 0u;
 
     const auto t_prefill_start = std::chrono::steady_clock::now();
-    auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
+    auto prefill_result = shelf::qwen35::runtime::dflash2_spec_prefill(
         decoder, prompt_ids.data(), static_cast<uint32_t>(prompt_ids.size()));
     if (!prefill_result.ok()) {
         fprintf(stderr, "dflash2 prefill failed: %s\n",
                 prefill_result.status().message().c_str());
-        (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-        (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+        (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+        (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
         release_sequence();
-        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
         return 1;
     }
     int32_t pending = prefill_result.value().pending_token;
@@ -615,19 +615,19 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
-    bool finished = ps::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
+    bool finished = shelf::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
         auto step_result =
-            ps::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+            shelf::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
         if (!step_result.ok()) {
             fprintf(stderr, "dflash2 step failed: %s\n",
                     step_result.status().message().c_str());
-            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-            (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+            (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+            (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
             release_sequence();
-            (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
             return 1;
         }
         auto step = step_result.release();
@@ -689,10 +689,10 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         fflush(stdout);
     }
 
-    (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
-    (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+    (void)shelf::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+    (void)shelf::qwen35::dflash2::dflash2_context_shutdown(context);
     release_sequence();
-    (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+    (void)shelf::qwen35::dflash2::dflash2_executor_shutdown(draft);
 
     const auto prefill_ms =
         std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
@@ -739,4 +739,4 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     return 0;
 }
 
-}  // namespace ps::app
+}  // namespace shelf::app

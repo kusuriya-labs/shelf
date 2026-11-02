@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <string>
 
-namespace ps::execution {
+namespace shelf::execution {
 
 namespace {
 
@@ -83,15 +83,15 @@ void linear_debug_miss(LinearComputeFamily family, uint32_t out_features, uint32
     }
 }
 
-ps::kernel::Fp8FinegrainedGemmConfig fp8_finegrained_row_block_config(uint32_t rows, uint32_t out_features) {
-    using Id = ps::kernel::Fp8FinegrainedGemmConfigId;
-    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile &&
-        out_features >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
-        return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock4};
-    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile &&
-        out_features >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
-        return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock2};
-    return ps::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock1};
+shelf::kernel::Fp8FinegrainedGemmConfig fp8_finegrained_row_block_config(uint32_t rows, uint32_t out_features) {
+    using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
+    if (rows >= 4u * shelf::kernel::kFp8FinegrainedGemmRowTile &&
+        out_features >= shelf::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
+        return shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock4};
+    if (rows > shelf::kernel::kFp8FinegrainedGemmRowTile &&
+        out_features >= shelf::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
+        return shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock2};
+    return shelf::kernel::Fp8FinegrainedGemmConfig{Id::RowBlock1};
 }
 
 }  // namespace
@@ -111,9 +111,9 @@ bool linear_shape_supported(
     return false;
 }
 
-std::optional<ps::kernel::Bf16GemmConfig>
+std::optional<shelf::kernel::Bf16GemmConfig>
 select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
-    using Id = ps::kernel::Bf16GemmConfigId;
+    using Id = shelf::kernel::Bf16GemmConfigId;
     if (input.rows == 0u)
         return std::nullopt;
     if (!linear_shape_supported(LinearComputeFamily::Bf16, input.out_features, input.k)) {
@@ -121,32 +121,32 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
         return std::nullopt;
     }
 
-    const bool k_aligned = (input.k & (ps::kernel::kBf16GemmExactKAlignment - 1u)) == 0u;
+    const bool k_aligned = (input.k & (shelf::kernel::kBf16GemmExactKAlignment - 1u)) == 0u;
     if (input.allow_exact_rows && input.rows == 1u && k_aligned && input.weight_aligned16 &&
         input.input_aligned16)
-        return ps::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
+        return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
 
     if (input.allow_exact_rows && input.verify_exact
         && input.rows >= 2u
-        && input.rows <= ps::kernel::kBf16GemmExactRowsMax
+        && input.rows <= shelf::kernel::kBf16GemmExactRowsMax
         && k_aligned
         && input.weight_aligned16
         && input.input_aligned16
-        && (input.input_row_stride & (ps::kernel::kBf16GemmExactRowStrideAlignment - 1u)) == 0u) {
+        && (input.input_row_stride & (shelf::kernel::kBf16GemmExactRowStrideAlignment - 1u)) == 0u) {
         if (input.allow_dot2_rows)
-            return ps::kernel::Bf16GemmConfig{Id::ExactRowsDot2,
+            return shelf::kernel::Bf16GemmConfig{Id::ExactRowsDot2,
                                               static_cast<uint8_t>(input.rows)};
-        return ps::kernel::Bf16GemmConfig{Id::ExactRows, static_cast<uint8_t>(input.rows)};
+        return shelf::kernel::Bf16GemmConfig{Id::ExactRows, static_cast<uint8_t>(input.rows)};
     }
 
-    if (input.out_features <= ps::kernel::kBf16GemmSplitKMaxOutFeatures)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
-    if (input.rows >= ps::kernel::kBf16GemmWideMinRows)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
-    return ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
+    if (input.out_features <= shelf::kernel::kBf16GemmSplitKMaxOutFeatures)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+    if (input.rows >= shelf::kernel::kBf16GemmWideMinRows)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
+    return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
 }
 
-std::optional<ps::kernel::Fp8FinegrainedGemmConfig>
+std::optional<shelf::kernel::Fp8FinegrainedGemmConfig>
 select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input) {
     if (input.rows == 0u)
         return std::nullopt;
@@ -157,14 +157,14 @@ select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input)
         return std::nullopt;
     }
     const bool use_2d =
-        (input.k_padded % ps::kernel::kFp8FinegrainedGemmPrefill2dKChunk) == 0u &&
-        (input.rows % ps::kernel::kBlockScaledGemmPrefill2dRowsPerBlock) == 0u &&
-        (input.out_features % ps::kernel::kFp8FinegrainedGemmPrefill2dOutBlock) == 0u &&
-        input.rows >= ps::kernel::kBlockScaledGemmPrefill2dMinRows &&
-        input.out_features >= ps::kernel::kBlockScaledGemmPrefill2dMinOutFeatures;
+        (input.k_padded % shelf::kernel::kFp8FinegrainedGemmPrefill2dKChunk) == 0u &&
+        (input.rows % shelf::kernel::kBlockScaledGemmPrefill2dRowsPerBlock) == 0u &&
+        (input.out_features % shelf::kernel::kFp8FinegrainedGemmPrefill2dOutBlock) == 0u &&
+        input.rows >= shelf::kernel::kBlockScaledGemmPrefill2dMinRows &&
+        input.out_features >= shelf::kernel::kBlockScaledGemmPrefill2dMinOutFeatures;
     if (use_2d)
-        return ps::kernel::Fp8FinegrainedGemmConfig{ps::kernel::Fp8FinegrainedGemmConfigId::Prefill2D};
+        return shelf::kernel::Fp8FinegrainedGemmConfig{shelf::kernel::Fp8FinegrainedGemmConfigId::Prefill2D};
     return fp8_finegrained_row_block_config(input.rows, input.out_features);
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

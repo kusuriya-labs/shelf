@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 struct WorkspaceRange {
     std::size_t offset = 0;

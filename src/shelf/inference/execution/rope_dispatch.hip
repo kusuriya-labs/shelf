@@ -21,11 +21,11 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::execution {
+namespace shelf::execution {
 namespace {
 
-using ::ps::runtime::ValueDType;
-using ::ps::runtime::ValueRowDomain;
+using ::shelf::runtime::ValueDType;
+using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
@@ -37,16 +37,16 @@ uint32_t rope_rows_for(const HostResolvedValue& v, const HostExecutionContext& c
 }  // namespace
 
 Result<PhysicalResolveStatus> resolve_rope_physical(
-    const ::ps::runtime::Program& program, const ::ps::runtime::DispatchBinding& b,
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalRopeLaunch& out) {
     out = PhysicalRopeLaunch{};
     if (b.input_count != 1u || b.output_count != 1u)
         return PhysicalResolveStatus::NotApplicable;
 
-    auto in_res = resolve_host_value(program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
     if (!in_res.ok()) return in_res.status();
     const HostResolvedValue in = in_res.value();
-    auto out_res = resolve_host_value(program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue dst = out_res.value();
 
@@ -86,9 +86,9 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
         ctx.rope_positions != nullptr ? ctx.rope_positions : ctx.row_positions;
     const bool pair =
         ctx.rope_inv_freq != nullptr &&
-        ::ps::kernel::rope_pair_shape_supported(
+        ::shelf::kernel::rope_pair_shape_supported(
             static_cast<const float*>(in.ptr),
-            static_cast<::ps::bf16_t*>(dst.ptr), in.row_stride, dst.row_stride, F,
+            static_cast<::shelf::bf16_t*>(dst.ptr), in.row_stride, dst.row_stride, F,
             head_dim, rotary);
 
     out.variant = pair ? PhysicalRopeVariant::F32Bf16Pair
@@ -107,24 +107,24 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     out.attention_factor = b.scalar_a > 0.0f ? b.scalar_a : 1.0f;
     if (pair) {
         out.grid = rows;
-        out.workgroup = ::ps::kernel::kRopePairBlock;
+        out.workgroup = ::shelf::kernel::kRopePairBlock;
     }
     return PhysicalResolveStatus::Applicable;
 }
 
 hipError_t launch_rope_physical(const PhysicalRopeLaunch& d, hipStream_t stream) {
     if (d.variant == PhysicalRopeVariant::F32Bf16Pair) {
-        return ::ps::kernel::launch_rope_f32_bf16_pair(
+        return ::shelf::kernel::launch_rope_f32_bf16_pair(
             reinterpret_cast<const float*>(d.input), d.input_row_stride,
-            reinterpret_cast<::ps::bf16_t*>(d.output), d.output_row_stride,
+            reinterpret_cast<::shelf::bf16_t*>(d.output), d.output_row_stride,
             reinterpret_cast<const uint32_t*>(d.positions), d.rows, d.features,
             d.head_dim, d.rotary_dim, d.theta,
             reinterpret_cast<const double*>(d.inv_freq), d.attention_factor, stream);
     }
     if (d.variant == PhysicalRopeVariant::F32Bf16Generic) {
-        return ::ps::kernel::launch_rope_f32_bf16_generic(
+        return ::shelf::kernel::launch_rope_f32_bf16_generic(
             reinterpret_cast<const float*>(d.input), d.input_row_stride,
-            reinterpret_cast<::ps::bf16_t*>(d.output), d.output_row_stride,
+            reinterpret_cast<::shelf::bf16_t*>(d.output), d.output_row_stride,
             reinterpret_cast<const uint32_t*>(d.positions), d.rows, d.features,
             d.head_dim, d.rotary_dim, d.theta,
             reinterpret_cast<const double*>(d.inv_freq), d.attention_factor, stream);
@@ -133,11 +133,11 @@ hipError_t launch_rope_physical(const PhysicalRopeLaunch& d, hipStream_t stream)
 }
 
 Result<OptimizedLaunchResult> try_launch_rope(
-    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const ::shelf::runtime::Program& program, size_t dispatch_index,
     HostExecutionContext& ctx, hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size()) return kNone;
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id != ::ps::runtime::KernelId::ROPE) return kNone;
+    if (b.kernel_id != ::shelf::runtime::KernelId::ROPE) return kNone;
     PhysicalRopeLaunch launch{};
     const Result<PhysicalResolveStatus> resolved =
         resolve_rope_physical(program, b, ctx, launch);
@@ -158,4 +158,4 @@ Result<OptimizedLaunchResult> try_launch_rope(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-}  // namespace ps::execution
+}  // namespace shelf::execution

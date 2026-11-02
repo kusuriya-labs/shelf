@@ -1,7 +1,7 @@
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/state/state_types.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 

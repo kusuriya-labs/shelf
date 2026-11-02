@@ -2,7 +2,7 @@
 #include <shelf/core/status.h>
 #include <cstdint>
 
-namespace ps::runtime {
+namespace shelf::runtime {
 
 enum class RowBucket : std::uint16_t {
     R16 = 16,

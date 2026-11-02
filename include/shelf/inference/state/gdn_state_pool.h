@@ -9,7 +9,7 @@
 #include <hip/hip_runtime.h>
 #include <vector>
 
-namespace ps {
+namespace shelf {
 namespace state {
 
 struct GdnStatePoolDeviceView {

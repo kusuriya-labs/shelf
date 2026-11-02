@@ -15,10 +15,10 @@
 #
 # Included via tests/CMakeLists.txt (thin wrapper).
 
-set(_PS_TESTS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+set(_SHELF_TESTS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(shelf-gpu-test-runner
-    "${_PS_TESTS_ROOT}/support/gpu_test_runner/main.cpp"
+    "${_SHELF_TESTS_ROOT}/support/gpu_test_runner/main.cpp"
 )
 target_compile_features(shelf-gpu-test-runner PRIVATE cxx_std_20)
 
@@ -41,48 +41,48 @@ target_compile_features(shelf-gpu-test-runner PRIVATE cxx_std_20)
 # reported as CTest SKIP, but required acceptance still counts it as a failure.
 function(shelf_add_test)
     cmake_parse_arguments(
-        PS_TEST
+        SHELF_TEST
         ""
         "NAME;SOURCE;TIMEOUT;GPU_COUNT;GPU_COST_GB"
         "LIBRARIES;LABELS;DEFS;DEPENDS"
         ${ARGN}
     )
-    add_executable(${PS_TEST_NAME} "${_PS_TESTS_ROOT}/${PS_TEST_SOURCE}")
-    shelf_set_rocm_rpath(${PS_TEST_NAME})
-    shelf_set_hip_archs(${PS_TEST_NAME})
-    target_compile_features(${PS_TEST_NAME} PRIVATE cxx_std_20)
-    target_include_directories(${PS_TEST_NAME} PRIVATE "${_PS_TESTS_ROOT}")
-    target_link_libraries(${PS_TEST_NAME} PRIVATE ${PS_TEST_LIBRARIES})
-    if(PS_TEST_DEFS)
-        target_compile_definitions(${PS_TEST_NAME} PRIVATE ${PS_TEST_DEFS})
+    add_executable(${SHELF_TEST_NAME} "${_SHELF_TESTS_ROOT}/${SHELF_TEST_SOURCE}")
+    shelf_set_rocm_rpath(${SHELF_TEST_NAME})
+    shelf_set_hip_archs(${SHELF_TEST_NAME})
+    target_compile_features(${SHELF_TEST_NAME} PRIVATE cxx_std_20)
+    target_include_directories(${SHELF_TEST_NAME} PRIVATE "${_SHELF_TESTS_ROOT}")
+    target_link_libraries(${SHELF_TEST_NAME} PRIVATE ${SHELF_TEST_LIBRARIES})
+    if(SHELF_TEST_DEFS)
+        target_compile_definitions(${SHELF_TEST_NAME} PRIVATE ${SHELF_TEST_DEFS})
     endif()
-    if(PS_TEST_DEPENDS)
-        add_dependencies(${PS_TEST_NAME} ${PS_TEST_DEPENDS})
+    if(SHELF_TEST_DEPENDS)
+        add_dependencies(${SHELF_TEST_NAME} ${SHELF_TEST_DEPENDS})
     endif()
-    if(PS_TEST_GPU_COUNT GREATER 0)
-        if(NOT PS_TEST_TIMEOUT)
-            set(PS_TEST_TIMEOUT 120)
+    if(SHELF_TEST_GPU_COUNT GREATER 0)
+        if(NOT SHELF_TEST_TIMEOUT)
+            set(SHELF_TEST_TIMEOUT 120)
         endif()
-        if(NOT PS_TEST_GPU_COST_GB)
-            set(PS_TEST_GPU_COST_GB 1)
+        if(NOT SHELF_TEST_GPU_COST_GB)
+            set(SHELF_TEST_GPU_COST_GB 1)
         endif()
-        math(EXPR PS_TEST_BACKSTOP "${PS_TEST_TIMEOUT} + 960")
-        add_test(NAME ${PS_TEST_NAME} COMMAND shelf-gpu-test-runner
-            --gpu-count ${PS_TEST_GPU_COUNT}
-            --cost-gb ${PS_TEST_GPU_COST_GB}
-            --timeout ${PS_TEST_TIMEOUT}
+        math(EXPR SHELF_TEST_BACKSTOP "${SHELF_TEST_TIMEOUT} + 960")
+        add_test(NAME ${SHELF_TEST_NAME} COMMAND shelf-gpu-test-runner
+            --gpu-count ${SHELF_TEST_GPU_COUNT}
+            --cost-gb ${SHELF_TEST_GPU_COST_GB}
+            --timeout ${SHELF_TEST_TIMEOUT}
             --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
-            -- $<TARGET_FILE:${PS_TEST_NAME}>)
-        add_dependencies(${PS_TEST_NAME} shelf-gpu-test-runner)
-        set_tests_properties(${PS_TEST_NAME} PROPERTIES TIMEOUT ${PS_TEST_BACKSTOP})
+            -- $<TARGET_FILE:${SHELF_TEST_NAME}>)
+        add_dependencies(${SHELF_TEST_NAME} shelf-gpu-test-runner)
+        set_tests_properties(${SHELF_TEST_NAME} PROPERTIES TIMEOUT ${SHELF_TEST_BACKSTOP})
     else()
-        add_test(NAME ${PS_TEST_NAME} COMMAND ${PS_TEST_NAME})
-        if(PS_TEST_TIMEOUT)
-            set_tests_properties(${PS_TEST_NAME} PROPERTIES TIMEOUT ${PS_TEST_TIMEOUT})
+        add_test(NAME ${SHELF_TEST_NAME} COMMAND ${SHELF_TEST_NAME})
+        if(SHELF_TEST_TIMEOUT)
+            set_tests_properties(${SHELF_TEST_NAME} PROPERTIES TIMEOUT ${SHELF_TEST_TIMEOUT})
         endif()
     endif()
-    set_tests_properties(${PS_TEST_NAME} PROPERTIES
-        LABELS "${PS_TEST_LABELS}"
+    set_tests_properties(${SHELF_TEST_NAME} PROPERTIES
+        LABELS "${SHELF_TEST_LABELS}"
         SKIP_RETURN_CODE 77)
 endfunction()
 
@@ -383,24 +383,24 @@ set_tests_properties(test_compute_rope_factor_reject_yarn_word PROPERTIES
 # --rope-factor caps --max-seq-len at min(original_len * factor, 1000000).
 # Rejection happens before any GPU query / model load.
 # ---------------------------------------------------------------------------
-set(_ps_rope_fixture "${CMAKE_SOURCE_DIR}/tests/fixtures/rope_cap")
+set(_shelf_rope_fixture "${CMAKE_SOURCE_DIR}/tests/fixtures/rope_cap")
 add_test(NAME test_compute_rope_cap_native_over
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir "${_ps_rope_fixture}" --rope-factor 1 --max-seq-len 262145)
+             --model-dir "${_shelf_rope_fixture}" --rope-factor 1 --max-seq-len 262145)
 set_tests_properties(test_compute_rope_cap_native_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 262144")
 
 add_test(NAME test_compute_rope_cap_2x_over
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir "${_ps_rope_fixture}" --rope-factor 2 --max-seq-len 524289)
+             --model-dir "${_shelf_rope_fixture}" --rope-factor 2 --max-seq-len 524289)
 set_tests_properties(test_compute_rope_cap_2x_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 524288")
 
 add_test(NAME test_compute_rope_cap_4x_over
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir "${_ps_rope_fixture}" --rope-factor 4 --max-seq-len 1000001)
+             --model-dir "${_shelf_rope_fixture}" --rope-factor 4 --max-seq-len 1000001)
 set_tests_properties(test_compute_rope_cap_4x_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 1000000")

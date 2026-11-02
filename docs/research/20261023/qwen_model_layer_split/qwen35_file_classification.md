@@ -15,7 +15,7 @@
 ## Phase 1: kernels（A）
 
 移動元 `models/qwen35/kernels/optimized/` → 移動先 `shelf/kernels/optimized/`。
-namespace は既に `ps::kernel` であり `qwen35` 依存がない。そのまま移す。
+namespace は既に `shelf::kernel` であり `qwen35` 依存がない。そのまま移す。
 
 | ファイル | 分類 | 備考 |
 | --- | --- | --- |
@@ -52,9 +52,9 @@ namespace は既に `ps::kernel` であり `qwen35` 依存がない。そのま�
 ### qwen35 状態型への依存（Phase 1 で除去）
 
 `paged_attention.h` / `kv_append.h` / `kv_relocate.h` および対応 `.hip` は
-`models/qwen35/state/kv_cache_types.h` を include し、`ps::qwen35::fp8e4m3_storage_t` と
-`ps::qwen35::KVCacheDType` を参照する。kernel 層から qwen35 への依存であり、
-`shelf/kernels/kv_types.h` へ型を移して `ps::kernel` namespace に置く。
+`models/qwen35/state/kv_cache_types.h` を include し、`shelf::qwen35::fp8e4m3_storage_t` と
+`shelf::qwen35::KVCacheDType` を参照する。kernel 層から qwen35 への依存であり、
+`shelf/kernels/kv_types.h` へ型を移して `shelf::kernel` namespace に置く。
 
 ## Phase 2: state（A/B）
 
@@ -84,13 +84,13 @@ StateBundle の interface は作らない。
 config 依存の除去（`GdnStatePoolLayout::from_text_config` の削除と
 `make_qwen35_gdn_state_layout` / `make_qwen35_gdn_state_layout_tp` への移設、
 model 依存デフォルトの 2 引数 `GdnStatePool::create` 削除）と
-namespace の `ps::state` への分離は完了した。
+namespace の `shelf::state` への分離は完了した。
 
 `PagedSequenceState` の `GdnStatePool` 保持については、
 保持する方針に変更した。根拠は次のとおりである。
 
 - `PagedSequenceState` / `PagedKVPool` / `GdnStatePool` は
-  いずれも `ps::state`（generic 層）であり model 境界に抵触しない。
+  いずれも `shelf::state`（generic 層）であり model 境界に抵触しない。
 - GDN は Qwen35 / Qwen4Exp が同一 FP16 実装を共有するため、
   Qwen4Exp も同じ `GdnStatePool` を使う。
 - 真に model 固有なのは QSA indexer key state / PLE state であり、
@@ -145,7 +145,7 @@ common context と Qwen35 extension（`GdnSpecHistory` / `tree_anc_*` / DFlash2�
 `runtime/*_selector.h/.cpp` 11 種は `HostExecutionContext` に依存せず、
 唯一の共通定数 `kQwen35OptimizedMaxRows` だけを参照していた。
 これらは `shelf/inference/execution/selectors/` へ移動済み
-（namespace `ps::execution`、定数は `selector_limits.h` の `kOptimizedMaxRows`）。
+（namespace `shelf::execution`、定数は `selector_limits.h` の `kOptimizedMaxRows`）。
 qwen35 側の残存利用は `models/qwen35/runtime/selector_types.h` の using 宣言で集約する。
 
 `HostExecutionContext`（`program_executor.h`）は 63 フィールドを持ち、
@@ -170,7 +170,7 @@ common 化の手順は次の順で行った（すべて完了）。
 2. `program_executor` / `optimized_dispatch` / `physical_launch` /
    9 種の dispatch / 7 種の fusion / `kv_calib_dump` / `decode_perf_stats` を
    `shelf/inference/execution/` へ移動し、namespace を
-   `ps::execution` へ統一した（42 ファイル）。
+   `shelf::execution` へ統一した（42 ファイル）。
    qwen35 側の利用は `models/qwen35/runtime/execution_types.h` の
    using 宣言（113 識別子）で集約した。
 3. correctness 参照実装（`model_dispatch_correctness` + `detail/*.inc` +
@@ -261,7 +261,7 @@ model-specific state snapshot は model 側に残す。virtual callback は入�
 
 重要な発見は、`PrefixCache` が直接依存する
 `PagedKVPool` / `GdnStatePool` / `PagedSequenceState` は
-Phase 2 で `ps::state`（generic 層）へ移動済みだということである。
+Phase 2 で `shelf::state`（generic 層）へ移動済みだということである。
 つまり KV page と GDN state の snapshot は Qwen35 / Qwen4Exp で共有でき、
 現状の `PrefixCache` を Qwen4Exp がほぼそのまま使える。
 真の model 固有は spec ring（`SpecRingRef` / `SpecRingOut` /

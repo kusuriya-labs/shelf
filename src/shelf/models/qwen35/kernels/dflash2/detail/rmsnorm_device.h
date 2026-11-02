@@ -4,7 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
-namespace ps::kernel::detail {
+namespace shelf::kernel::detail {
 
 constexpr uint32_t kDflash2NormThreads = 128u;
 
@@ -45,4 +45,4 @@ __device__ __forceinline__ void dflash2_rmsnorm_group_body(
     }
 }
 
-}  // namespace ps::kernel::detail
+}  // namespace shelf::kernel::detail

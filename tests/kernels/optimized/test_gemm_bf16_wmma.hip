@@ -12,23 +12,23 @@
 #include <vector>
 #include <random>
 
-static ps::kernel::Bf16GemmConfig bf16_config_for(
+static shelf::kernel::Bf16GemmConfig bf16_config_for(
     uint32_t rows, uint32_t out_features, uint32_t k) {
-    using Id = ps::kernel::Bf16GemmConfigId;
+    using Id = shelf::kernel::Bf16GemmConfigId;
     if (rows == 1u && (k & 7u) == 0u)
-        return ps::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
-    if (out_features <= ps::kernel::kBf16GemmSplitKMaxOutFeatures)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
-    if (rows >= ps::kernel::kBf16GemmWideMinRows)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
-    return ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
+        return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
+    if (out_features <= shelf::kernel::kBf16GemmSplitKMaxOutFeatures)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+    if (rows >= shelf::kernel::kBf16GemmWideMinRows)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
+    return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
 }
 
 static hipError_t launch_bf16_wmma(
-    const ps::bf16_t* weight, const ps::bf16_t* input, void* output,
-    ps::kernel::Bf16GemmOutputDType output_dtype, uint32_t rows, uint32_t out_features,
+    const shelf::bf16_t* weight, const shelf::bf16_t* input, void* output,
+    shelf::kernel::Bf16GemmOutputDType output_dtype, uint32_t rows, uint32_t out_features,
     uint32_t k, uint32_t input_row_stride, uint32_t output_row_stride, hipStream_t stream) {
-    return ps::kernel::launch_gemm_bf16(
+    return shelf::kernel::launch_gemm_bf16(
         bf16_config_for(rows, out_features, k),
         weight, input, output, output_dtype, rows, out_features, k,
         input_row_stride, output_row_stride, stream);
@@ -83,7 +83,7 @@ void cpu_ref(const std::vector<uint16_t>& w, uint32_t N, uint32_t K,
 }
 
 bool run_case(uint32_t rows, uint32_t N, uint32_t K, uint32_t in_stride, uint32_t out_stride,
-              uint32_t seed, ps::gpu::GpuArena& arena, hipStream_t stream, const char* label) {
+              uint32_t seed, shelf::gpu::GpuArena& arena, hipStream_t stream, const char* label) {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> wd(-0.2f, 0.2f);
     std::uniform_real_distribution<float> xd(-1.0f, 1.0f);
@@ -110,7 +110,7 @@ bool run_case(uint32_t rows, uint32_t N, uint32_t K, uint32_t in_stride, uint32_
     uint16_t* d_w = static_cast<uint16_t*>(wr.release().data());
     uint16_t* d_x = static_cast<uint16_t*>(xr.release().data());
     float* d_of32 = static_cast<float*>(of32r.release().data());
-    ::ps::bf16_t* d_obf16 = static_cast<::ps::bf16_t*>(obf16r.release().data());
+    ::shelf::bf16_t* d_obf16 = static_cast<::shelf::bf16_t*>(obf16r.release().data());
     if (hipMemcpy(d_w, w.data(), w_bytes, hipMemcpyHostToDevice) != hipSuccess ||
         hipMemcpy(d_x, x.data(), x_bytes, hipMemcpyHostToDevice) != hipSuccess) {
         check(false, label);
@@ -120,13 +120,13 @@ bool run_case(uint32_t rows, uint32_t N, uint32_t K, uint32_t in_stride, uint32_
     std::vector<double> cond;
     cpu_ref(w, N, K, x, in_stride, rows, ref, cond);
 
-    const ::ps::bf16_t* dw = reinterpret_cast<const ::ps::bf16_t*>(d_w);
-    const ::ps::bf16_t* dx = reinterpret_cast<const ::ps::bf16_t*>(d_x);
+    const ::shelf::bf16_t* dw = reinterpret_cast<const ::shelf::bf16_t*>(d_w);
+    const ::shelf::bf16_t* dx = reinterpret_cast<const ::shelf::bf16_t*>(d_x);
     hipError_t hf = launch_bf16_wmma(
-        dw, dx, d_of32, ps::kernel::Bf16GemmOutputDType::F32,
+        dw, dx, d_of32, shelf::kernel::Bf16GemmOutputDType::F32,
         rows, N, K, in_stride, out_stride, stream);
     hipError_t hb = launch_bf16_wmma(
-        dw, dx, d_obf16, ps::kernel::Bf16GemmOutputDType::BF16,
+        dw, dx, d_obf16, shelf::kernel::Bf16GemmOutputDType::BF16,
         rows, N, K, in_stride, out_stride, stream);
     if (hf != hipSuccess || hb != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) {
         check(false, label);
@@ -167,7 +167,7 @@ bool run_case(uint32_t rows, uint32_t N, uint32_t K, uint32_t in_stride, uint32_
 }
 
 // 16x16x16 F32 with a non-symmetric integer pattern (mapping sanity / isolation).
-bool run_mapping_sanity(ps::gpu::GpuArena& arena, hipStream_t stream) {
+bool run_mapping_sanity(shelf::gpu::GpuArena& arena, hipStream_t stream) {
     const uint32_t rows = 16, N = 16, K = 16;
     std::vector<uint16_t> w(static_cast<size_t>(N) * K);
     std::vector<uint16_t> x(static_cast<size_t>(rows) * K);
@@ -193,10 +193,10 @@ bool run_mapping_sanity(ps::gpu::GpuArena& arena, hipStream_t stream) {
     std::vector<float> ref;
     std::vector<double> cond;
     cpu_ref(w, N, K, x, K, rows, ref, cond);
-    const ::ps::bf16_t* dw = reinterpret_cast<const ::ps::bf16_t*>(d_w);
-    const ::ps::bf16_t* dx = reinterpret_cast<const ::ps::bf16_t*>(d_x);
+    const ::shelf::bf16_t* dw = reinterpret_cast<const ::shelf::bf16_t*>(d_w);
+    const ::shelf::bf16_t* dx = reinterpret_cast<const ::shelf::bf16_t*>(d_x);
     if (launch_bf16_wmma(
-            dw, dx, d_out, ps::kernel::Bf16GemmOutputDType::F32, rows, N, K, K, N, stream) != hipSuccess ||
+            dw, dx, d_out, shelf::kernel::Bf16GemmOutputDType::F32, rows, N, K, K, N, stream) != hipSuccess ||
         hipStreamSynchronize(stream) != hipSuccess) {
         check(false, "mapping_sanity 16x16x16");
         return false;
@@ -216,7 +216,7 @@ bool run_mapping_sanity(ps::gpu::GpuArena& arena, hipStream_t stream) {
 }
 
 // 16x16x32: K16#0 and K16#1 with distinct patterns to catch acc reset / K offset bug.
-bool run_k32_accum(ps::gpu::GpuArena& arena, hipStream_t stream) {
+bool run_k32_accum(shelf::gpu::GpuArena& arena, hipStream_t stream) {
     const uint32_t rows = 16, N = 16, K = 32;
     std::vector<uint16_t> w(static_cast<size_t>(N) * K);
     std::vector<uint16_t> x(static_cast<size_t>(rows) * K);
@@ -249,10 +249,10 @@ bool run_k32_accum(ps::gpu::GpuArena& arena, hipStream_t stream) {
     std::vector<float> ref;
     std::vector<double> cond;
     cpu_ref(w, N, K, x, K, rows, ref, cond);
-    const ::ps::bf16_t* dw = reinterpret_cast<const ::ps::bf16_t*>(d_w);
-    const ::ps::bf16_t* dx = reinterpret_cast<const ::ps::bf16_t*>(d_x);
+    const ::shelf::bf16_t* dw = reinterpret_cast<const ::shelf::bf16_t*>(d_w);
+    const ::shelf::bf16_t* dx = reinterpret_cast<const ::shelf::bf16_t*>(d_x);
     if (launch_bf16_wmma(
-            dw, dx, d_out, ps::kernel::Bf16GemmOutputDType::F32, rows, N, K, K, N, stream) != hipSuccess ||
+            dw, dx, d_out, shelf::kernel::Bf16GemmOutputDType::F32, rows, N, K, K, N, stream) != hipSuccess ||
         hipStreamSynchronize(stream) != hipSuccess) {
         check(false, "k32_accum 16x16x32");
         return false;
@@ -285,12 +285,12 @@ int main() {
     if (hipSetDevice(0) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
-    auto arena_result = ps::gpu::GpuArena::create(0, 1024 * 1024 * 1024);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1024 * 1024 * 1024);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
     run_mapping_sanity(arena, stream);
     run_k32_accum(arena, stream);
@@ -340,7 +340,7 @@ int main() {
                  "tp2 rows=1 N=24 K=5120");
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

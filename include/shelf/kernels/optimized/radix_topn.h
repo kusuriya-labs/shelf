@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ps::kernel {
+namespace shelf::kernel {
 
 inline constexpr uint32_t kDflash2RadixTopnThreads = 256u;
 inline constexpr uint32_t kDflash2RadixSortThreads = 128u;
@@ -44,4 +44,4 @@ hipError_t launch_dflash2_radix_topn(
     std::size_t scratch_bytes,
     hipStream_t stream);
 
-}  // namespace ps::kernel
+}  // namespace shelf::kernel

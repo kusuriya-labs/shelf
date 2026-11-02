@@ -117,7 +117,7 @@ struct Shape {
     uint32_t k = 0;
 };
 
-std::vector<Shape> build_qwen_shapes(const ps::qwen35::Qwen35TextConfig& c) {
+std::vector<Shape> build_qwen_shapes(const shelf::qwen35::Qwen35TextConfig& c) {
     const uint32_t hidden = (uint32_t)c.hidden_size;
     const uint32_t inter = (uint32_t)c.intermediate_size;
     const uint32_t qa = (uint32_t)c.num_attention_heads * (uint32_t)c.attention_head_dim;
@@ -157,27 +157,27 @@ struct CorrectnessEnv {
     void* ctx_dev = nullptr;
     float* scratch = nullptr;
     uint32_t* error_word = nullptr;
-    ::ps::runtime::DeviceProgramView program;
+    ::shelf::runtime::DeviceProgramView program;
     ~CorrectnessEnv() {
-        ps::gpu::discard_cleanup_result(hipFree(weight_slot_dev));
-        ps::gpu::discard_cleanup_result(hipFree(values_dev));
-        ps::gpu::discard_cleanup_result(hipFree(ranges_dev));
-        ps::gpu::discard_cleanup_result(hipFree(ctx_dev));
-        ps::gpu::discard_cleanup_result(hipFree(scratch));
-        ps::gpu::discard_cleanup_result(hipFree(error_word));
+        shelf::gpu::discard_cleanup_result(hipFree(weight_slot_dev));
+        shelf::gpu::discard_cleanup_result(hipFree(values_dev));
+        shelf::gpu::discard_cleanup_result(hipFree(ranges_dev));
+        shelf::gpu::discard_cleanup_result(hipFree(ctx_dev));
+        shelf::gpu::discard_cleanup_result(hipFree(scratch));
+        shelf::gpu::discard_cleanup_result(hipFree(error_word));
     }
 };
 
-bool gen_bf16_input(uint32_t rows, uint32_t k, uint32_t seed, ps::bf16_t** d_input) {
+bool gen_bf16_input(uint32_t rows, uint32_t k, uint32_t seed, shelf::bf16_t** d_input) {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    std::vector<ps::bf16_t> h((size_t)rows * k);
+    std::vector<shelf::bf16_t> h((size_t)rows * k);
     for (auto& v : h) {
         const float fv = dist(rng);
         uint32_t ui;
         std::memcpy(&ui, &fv, 4);
         ui = (ui + 0x8000u) & 0xFFFF0000u;
-        v = ps::bf16_t{(uint16_t)(ui >> 16)};
+        v = shelf::bf16_t{(uint16_t)(ui >> 16)};
     }
     if (hipMalloc((void**)d_input, (size_t)rows * k * 2) != hipSuccess) return false;
     if (hipMemcpy(*d_input, h.data(), (size_t)rows * k * 2, hipMemcpyHostToDevice) != hipSuccess) return false;
@@ -185,9 +185,9 @@ bool gen_bf16_input(uint32_t rows, uint32_t k, uint32_t seed, ps::bf16_t** d_inp
 }
 
 struct Bf16Weights {
-    ps::bf16_t* d_weight = nullptr;
+    shelf::bf16_t* d_weight = nullptr;
     ~Bf16Weights() {
-        ps::gpu::discard_cleanup_result(hipFree(d_weight));
+        shelf::gpu::discard_cleanup_result(hipFree(d_weight));
     }
 };
 
@@ -207,9 +207,9 @@ bool gen_bf16_weights(uint32_t n, uint32_t k, uint32_t seed, Bf16Weights& w) {
     return true;
 }
 
-bool setup_correctness_bf16(const Bf16Weights& w, const ps::bf16_t* d_input, ps::bf16_t* d_output,
+bool setup_correctness_bf16(const Bf16Weights& w, const shelf::bf16_t* d_input, shelf::bf16_t* d_output,
                             uint32_t rows, uint32_t n, uint32_t k, CorrectnessEnv& env) {
-    ::ps::runtime::WeightSlot slot{};
+    ::shelf::runtime::WeightSlot slot{};
     slot.rows = n;
     slot.cols = k;
     slot.k_padded = k;
@@ -217,47 +217,47 @@ bool setup_correctness_bf16(const Bf16Weights& w, const ps::bf16_t* d_input, ps:
     slot.encoding = 0u;
     slot.compute_spec = 0u;
 
-    if (hipMalloc(&env.weight_slot_dev, sizeof(::ps::runtime::WeightSlot)) != hipSuccess) return false;
-    if (hipMemcpy(env.weight_slot_dev, &slot, sizeof(::ps::runtime::WeightSlot), hipMemcpyHostToDevice) != hipSuccess)
+    if (hipMalloc(&env.weight_slot_dev, sizeof(::shelf::runtime::WeightSlot)) != hipSuccess) return false;
+    if (hipMemcpy(env.weight_slot_dev, &slot, sizeof(::shelf::runtime::WeightSlot), hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
-    ::ps::runtime::DeviceValueBinding values[2];
+    ::shelf::runtime::DeviceValueBinding values[2];
     values[0] = {};
     values[0].logical_value = 0;
-    values[0].storage = ::ps::runtime::ValueStorage::EXTERNAL_INPUT;
-    values[0].dtype = ::ps::runtime::ValueDType::BF16;
-    values[0].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[0].storage = ::shelf::runtime::ValueStorage::EXTERNAL_INPUT;
+    values[0].dtype = ::shelf::runtime::ValueDType::BF16;
+    values[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     values[0].slot = 0;
     values[0].feature_count = k;
     values[0].row_stride = k;
     values[0].offset = reinterpret_cast<uint64_t>(d_input);
-    values[0].bytes = (uint64_t)rows * k * sizeof(ps::bf16_t);
+    values[0].bytes = (uint64_t)rows * k * sizeof(shelf::bf16_t);
     values[1] = {};
     values[1].logical_value = 1;
-    values[1].storage = ::ps::runtime::ValueStorage::EXTERNAL_OUTPUT;
-    values[1].dtype = ::ps::runtime::ValueDType::BF16;
-    values[1].row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[1].storage = ::shelf::runtime::ValueStorage::EXTERNAL_OUTPUT;
+    values[1].dtype = ::shelf::runtime::ValueDType::BF16;
+    values[1].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
     values[1].slot = 0;
     values[1].feature_count = n;
     values[1].row_stride = n;
     values[1].offset = reinterpret_cast<uint64_t>(d_output);
-    values[1].bytes = (uint64_t)rows * n * sizeof(ps::bf16_t);
+    values[1].bytes = (uint64_t)rows * n * sizeof(shelf::bf16_t);
 
-    if (hipMalloc(&env.values_dev, 2 * sizeof(::ps::runtime::DeviceValueBinding)) != hipSuccess) return false;
-    if (hipMemcpy(env.values_dev, values, 2 * sizeof(::ps::runtime::DeviceValueBinding), hipMemcpyHostToDevice) != hipSuccess)
+    if (hipMalloc(&env.values_dev, 2 * sizeof(::shelf::runtime::DeviceValueBinding)) != hipSuccess) return false;
+    if (hipMemcpy(env.values_dev, values, 2 * sizeof(::shelf::runtime::DeviceValueBinding), hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
     env.program = {};
-    env.program.values = static_cast<const ::ps::runtime::DeviceValueBinding*>(env.values_dev);
+    env.program.values = static_cast<const ::shelf::runtime::DeviceValueBinding*>(env.values_dev);
     env.program.value_count = 2;
     env.program.weight_table = env.weight_slot_dev;
     env.program.weight_slot_count = 1;
 
-    ::ps::runtime::DeviceBatchContext ctx{};
+    ::shelf::runtime::DeviceBatchContext ctx{};
     ctx.actual_rows = rows;
     ctx.num_outputs = 0;
-    if (hipMalloc(&env.ctx_dev, sizeof(::ps::runtime::DeviceBatchContext)) != hipSuccess) return false;
-    if (hipMemcpy(env.ctx_dev, &ctx, sizeof(::ps::runtime::DeviceBatchContext), hipMemcpyHostToDevice) != hipSuccess)
+    if (hipMalloc(&env.ctx_dev, sizeof(::shelf::runtime::DeviceBatchContext)) != hipSuccess) return false;
+    if (hipMemcpy(env.ctx_dev, &ctx, sizeof(::shelf::runtime::DeviceBatchContext), hipMemcpyHostToDevice) != hipSuccess)
         return false;
 
     if (hipMalloc(&env.scratch, (size_t)64 * 2048 * sizeof(float)) != hipSuccess) return false;
@@ -266,38 +266,38 @@ bool setup_correctness_bf16(const Bf16Weights& w, const ps::bf16_t* d_input, ps:
     return true;
 }
 
-ps::Status launch_correctness_linear_bf16(const CorrectnessEnv& env, uint32_t rows, hipStream_t stream) {
-    ::ps::runtime::DispatchBinding lbind{};
-    lbind.kernel_id = ::ps::runtime::KernelId::LINEAR_BF16;
+shelf::Status launch_correctness_linear_bf16(const CorrectnessEnv& env, uint32_t rows, hipStream_t stream) {
+    ::shelf::runtime::DispatchBinding lbind{};
+    lbind.kernel_id = ::shelf::runtime::KernelId::LINEAR_BF16;
     lbind.weight_index = 0;
     lbind.input_slots[0] = 0;
     lbind.input_count = 1;
     lbind.output_slots[0] = 1;
     lbind.output_count = 1;
-    ps::gpu::discard_cleanup_result(hipMemset(env.error_word, 0, sizeof(uint32_t)));
-    return ps::kernel::launch_model_dispatch_correctness(
-        env.program, lbind, static_cast<::ps::runtime::DeviceBatchContext*>(env.ctx_dev),
-        ps::kernel::ModelDispatchStateView{}, env.scratch, env.error_word, stream);
+    shelf::gpu::discard_cleanup_result(hipMemset(env.error_word, 0, sizeof(uint32_t)));
+    return shelf::kernel::launch_model_dispatch_correctness(
+        env.program, lbind, static_cast<::shelf::runtime::DeviceBatchContext*>(env.ctx_dev),
+        shelf::kernel::ModelDispatchStateView{}, env.scratch, env.error_word, stream);
 }
 
-ps::kernel::Bf16GemmConfig bf16_config_for(uint32_t rows, uint32_t n, uint32_t k) {
-    using Id = ps::kernel::Bf16GemmConfigId;
+shelf::kernel::Bf16GemmConfig bf16_config_for(uint32_t rows, uint32_t n, uint32_t k) {
+    using Id = shelf::kernel::Bf16GemmConfigId;
     if (rows == 1u && (k & 7u) == 0u)
-        return ps::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
-    if (n <= ps::kernel::kBf16GemmSplitKMaxOutFeatures)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
-    if (rows >= ps::kernel::kBf16GemmWideMinRows)
-        return ps::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
-    return ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
+        return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
+    if (n <= shelf::kernel::kBf16GemmSplitKMaxOutFeatures)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+    if (rows >= shelf::kernel::kBf16GemmWideMinRows)
+        return shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
+    return shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
 }
 
-ps::kernel::Fp8FinegrainedGemmConfig fp8_gemm_config_for(uint32_t rows, uint32_t n) {
-    using Id = ps::kernel::Fp8FinegrainedGemmConfigId;
-    if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile &&
-        n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
+shelf::kernel::Fp8FinegrainedGemmConfig fp8_gemm_config_for(uint32_t rows, uint32_t n) {
+    using Id = shelf::kernel::Fp8FinegrainedGemmConfigId;
+    if (rows >= 4u * shelf::kernel::kFp8FinegrainedGemmRowTile &&
+        n >= shelf::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock4};
-    if (rows > ps::kernel::kFp8FinegrainedGemmRowTile &&
-        n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
+    if (rows > shelf::kernel::kFp8FinegrainedGemmRowTile &&
+        n >= shelf::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock2};
     return {Id::RowBlock1};
 }
@@ -344,7 +344,7 @@ int run_gemm_bf16(Options& o) {
             std::fprintf(stderr, "--actual-qwen-shapes requires --model-dir\n");
             return 2;
         }
-        auto cfg_res = ps::qwen35::read_qwen35_text_config(o.model_dir);
+        auto cfg_res = shelf::qwen35::read_qwen35_text_config(o.model_dir);
         if (!cfg_res.ok()) {
             std::fprintf(stderr, "read_qwen35_text_config: %s\n", cfg_res.status().message().c_str());
             return 2;
@@ -383,8 +383,8 @@ int run_gemm_bf16(Options& o) {
             break;
         }
         for (uint32_t rows : o.rows) {
-            ps::bf16_t* d_input = nullptr;
-            ps::bf16_t* d_output = nullptr;
+            shelf::bf16_t* d_input = nullptr;
+            shelf::bf16_t* d_output = nullptr;
             bool ok = gen_bf16_input(rows, shape.k, o.seed + 7777u, &d_input);
             ok = ok && hipMalloc((void**)&d_output, (size_t)rows * shape.n * 2) == hipSuccess;
             if (!ok) {
@@ -399,37 +399,37 @@ int run_gemm_bf16(Options& o) {
                 break;
             }
             std::string eff = o.variant;
-            ps::kernel::Bf16GemmConfig bf16_cfg = bf16_config_for(rows, shape.n, shape.k);
+            shelf::kernel::Bf16GemmConfig bf16_cfg = bf16_config_for(rows, shape.n, shape.k);
             if (o.impl != "auto") {
-                using Id = ps::kernel::Bf16GemmConfigId;
+                using Id = shelf::kernel::Bf16GemmConfigId;
                 if (o.impl == "wmma")
-                    bf16_cfg = ps::kernel::Bf16GemmConfig{Id::Wmma, 0u};
+                    bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
                 else if (o.impl == "wide")
-                    bf16_cfg = ps::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
+                    bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::WmmaWide, 0u};
                 else if (o.impl == "splitk")
-                    bf16_cfg = ps::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
+                    bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::WmmaKPartition, 0u};
                 else
-                    bf16_cfg = ps::kernel::Bf16GemmConfig{Id::ExactRows,
+                    bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::ExactRows,
                                                           static_cast<uint8_t>(rows)};
                 eff = "gemm";
             } else if (eff == "auto") {
-                const bool supported = ps::execution::linear_shape_supported(
-                    ps::execution::LinearComputeFamily::Bf16, shape.n, shape.k);
+                const bool supported = shelf::execution::linear_shape_supported(
+                    shelf::execution::LinearComputeFamily::Bf16, shape.n, shape.k);
                 eff = supported ? "gemm" : "correctness";
             }
             auto launch_one = [&]() -> hipError_t {
                 if (eff == "gemm")
-                    return ps::kernel::launch_gemm_bf16(
+                    return shelf::kernel::launch_gemm_bf16(
                         bf16_cfg, w.d_weight, d_input, d_output,
-                        ps::kernel::Bf16GemmOutputDType::BF16, rows, shape.n, shape.k,
+                        shelf::kernel::Bf16GemmOutputDType::BF16, rows, shape.n, shape.k,
                         shape.k, shape.n, stream);
-                ps::Status st = launch_correctness_linear_bf16(env, rows, stream);
+                shelf::Status st = launch_correctness_linear_bf16(env, rows, stream);
                 return st.ok() ? hipSuccess : hipErrorUnknown;
             };
             if (o.check) {
                 const size_t outn = (size_t)rows * shape.n;
                 std::vector<uint16_t> h_c(outn), h_g(outn);
-                ps::Status stc = launch_correctness_linear_bf16(env, rows, stream);
+                shelf::Status stc = launch_correctness_linear_bf16(env, rows, stream);
                 uint32_t ew = 0;
                 if (!stc.ok() || hipStreamSynchronize(stream) != hipSuccess ||
                     hipMemcpy(&ew, env.error_word, sizeof(ew), hipMemcpyDeviceToHost) != hipSuccess || ew != 0) {
@@ -437,13 +437,13 @@ int run_gemm_bf16(Options& o) {
                     rc = 1;
                     break;
                 }
-                ps::gpu::discard_cleanup_result(hipMemcpy(h_c.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                shelf::gpu::discard_cleanup_result(hipMemcpy(h_c.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
                 if (launch_one() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) {
                     std::fprintf(stderr, "CHECK FAIL %s rows=%u %s launch\n", shape.name.c_str(), rows, o.variant.c_str());
                     rc = 1;
                     break;
                 }
-                ps::gpu::discard_cleanup_result(hipMemcpy(h_g.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                shelf::gpu::discard_cleanup_result(hipMemcpy(h_g.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
                 uint64_t mismatch = 0, nan = 0, inf = 0;
                 float max_rel = 0.f;
                 for (size_t i = 0; i < outn; ++i) {
@@ -486,8 +486,8 @@ int run_gemm_bf16(Options& o) {
                 if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) { rc = 1; break; }
                 per_launch_us.push_back(ms * 1000.0 / (double)o.launches);
             }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
             if (rc) break;
             if (!per_launch_us.empty()) {
                 const double mn = percentile(per_launch_us, 0.0);
@@ -509,12 +509,12 @@ int run_gemm_bf16(Options& o) {
                     }
                 }
             }
-            ps::gpu::discard_cleanup_result(hipFree(d_input));
-            ps::gpu::discard_cleanup_result(hipFree(d_output));
+            shelf::gpu::discard_cleanup_result(hipFree(d_input));
+            shelf::gpu::discard_cleanup_result(hipFree(d_output));
             if (rc) break;
         }
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }
 
@@ -525,7 +525,7 @@ int run_gemm_fp8(Options& o) {
             std::fprintf(stderr, "--actual-qwen-shapes requires --model-dir\n");
             return 2;
         }
-        auto cfg_res = ps::qwen35::read_qwen35_text_config(o.model_dir);
+        auto cfg_res = shelf::qwen35::read_qwen35_text_config(o.model_dir);
         if (!cfg_res.ok()) {
             std::fprintf(stderr, "read_qwen35_text_config: %s\n", cfg_res.status().message().c_str());
             return 2;
@@ -579,8 +579,8 @@ int run_gemm_fp8(Options& o) {
             }
         }
         for (uint32_t rows : o.rows) {
-            ps::bf16_t* d_input = nullptr;
-            ps::bf16_t* d_output = nullptr;
+            shelf::bf16_t* d_input = nullptr;
+            shelf::bf16_t* d_output = nullptr;
             uint8_t* d_acodes = nullptr;
             float* d_ascales = nullptr;
             const size_t acodes_bytes = static_cast<size_t>((rows + 15u) / 16u) * kp * 16u;
@@ -593,14 +593,14 @@ int run_gemm_fp8(Options& o) {
             ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
             ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
             if (!ok) { rc = 1; break; }
-            hipError_t af = ps::kernel::launch_activation_quantize_fp8_finegrained(
+            hipError_t af = shelf::kernel::launch_activation_quantize_fp8_finegrained(
                 d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
                 static_cast<uint32_t>(act_scale_stride), stream);
             if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
             const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
-            const auto fp8_sel = ps::execution::select_fp8_finegrained_gemm_config(
-                ps::execution::Fp8FinegrainedGemmSelectorInput{rows, n, shape.k, kp});
-            const ps::kernel::Fp8FinegrainedGemmConfig fp8_cfg =
+            const auto fp8_sel = shelf::execution::select_fp8_finegrained_gemm_config(
+                shelf::execution::Fp8FinegrainedGemmSelectorInput{rows, n, shape.k, kp});
+            const shelf::kernel::Fp8FinegrainedGemmConfig fp8_cfg =
                 fp8_sel ? *fp8_sel : fp8_gemm_config_for(rows, n);
             const uint32_t split_parts = (o.split > 1u) ? o.split : 1u;
             const uint32_t split_sub = rows / split_parts;
@@ -613,10 +613,10 @@ int run_gemm_fp8(Options& o) {
                         static_cast<size_t>(s * split_sub) * (act_scale_stride / 4u);
                     void* out_off = reinterpret_cast<uint8_t*>(d_output) +
                         static_cast<size_t>(s * split_sub) * n * 2u;
-                    hipError_t e = ps::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
+                    hipError_t e = shelf::kernel::launch_gemm_fp8_finegrained_w8a8_wmma_auto(
                         fp8_cfg, d_codes,
                         reinterpret_cast<const float*>(d_scales), a8_off, as_off, out_off,
-                        ps::kernel::Fp8FinegrainedGemmOutputDType::BF16, sub_rows, n, kp,
+                        shelf::kernel::Fp8FinegrainedGemmOutputDType::BF16, sub_rows, n, kp,
                         (kp / 128u) * 4u, kp, static_cast<uint32_t>(act_scale_stride), n,
                         stream);
                     if (e != hipSuccess) return e;
@@ -642,12 +642,12 @@ int run_gemm_fp8(Options& o) {
                 if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) { rc = 1; break; }
                 per_launch_us.push_back(ms * 1000.0 / (double)o.launches);
             }
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev0));
-            ps::gpu::discard_cleanup_result(hipEventDestroy(ev1));
-            ps::gpu::discard_cleanup_result(hipFree(d_input));
-            ps::gpu::discard_cleanup_result(hipFree(d_acodes));
-            ps::gpu::discard_cleanup_result(hipFree(d_ascales));
-            ps::gpu::discard_cleanup_result(hipFree(d_output));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipFree(d_input));
+            shelf::gpu::discard_cleanup_result(hipFree(d_acodes));
+            shelf::gpu::discard_cleanup_result(hipFree(d_ascales));
+            shelf::gpu::discard_cleanup_result(hipFree(d_output));
             if (rc) break;
             if (!per_launch_us.empty()) {
                 const double mn = percentile(per_launch_us, 0.0);
@@ -671,11 +671,11 @@ int run_gemm_fp8(Options& o) {
                 }
             }
         }
-        ps::gpu::discard_cleanup_result(hipFree(d_codes));
-        ps::gpu::discard_cleanup_result(hipFree(d_scales));
+        shelf::gpu::discard_cleanup_result(hipFree(d_codes));
+        shelf::gpu::discard_cleanup_result(hipFree(d_scales));
         if (rc) break;
     }
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return rc;
 }
 

@@ -2,9 +2,9 @@
 
 #include <cstdio>
 
-using ps::execution::GdnConvImplementation;
-using ps::execution::GdnConvSelectorInput;
-using DT = ::ps::runtime::ValueDType;
+using shelf::execution::GdnConvImplementation;
+using shelf::execution::GdnConvSelectorInput;
+using DT = ::shelf::runtime::ValueDType;
 
 namespace {
 
@@ -30,7 +30,7 @@ GdnConvImplementation sel(DT in, DT out, uint32_t dim, uint32_t history, uint32_
     si.rows = rows;
     si.num_requests = nreq;
     si.max_request_rows = max_rows;
-    return ps::execution::select_gdn_conv_implementation(si);
+    return shelf::execution::select_gdn_conv_implementation(si);
 }
 
 }  // namespace

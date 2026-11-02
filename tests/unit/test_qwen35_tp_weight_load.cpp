@@ -24,15 +24,15 @@ static void check(bool cond, const std::string& msg) {
     if (!cond) fail(msg);
 }
 
-static void check_partition(const ps::weights::MatrixWeight& w, std::uint32_t axis,
+static void check_partition(const shelf::weights::MatrixWeight& w, std::uint32_t axis,
                             std::uint32_t index, std::vector<int64_t> global_shape,
-                            std::vector<ps::weights::TensorPartitionRange> ranges,
+                            std::vector<shelf::weights::TensorPartitionRange> ranges,
                             const std::string& tag) {
     if (!w.partition.has_value()) {
         fail(tag + " missing partition");
         return;
     }
-    const ps::weights::TensorPartitionDesc& d = *w.partition;
+    const shelf::weights::TensorPartitionDesc& d = *w.partition;
     check(d.axis == static_cast<int32_t>(axis), tag + " axis");
     check(d.index == index, tag + " index");
     check(d.count == 2, tag + " count");
@@ -55,7 +55,7 @@ int main() {
     const fs::path dir =
         fs::temp_directory_path(ec) / ("qwen35_tp_weight_load_" + std::to_string(::getpid()));
     fs::remove_all(dir, ec);
-    ps::Status fixture = tp_fixture::build_fixture(dir);
+    shelf::Status fixture = tp_fixture::build_fixture(dir);
     if (!fixture.ok()) {
         fail("fixture: " + fixture.message());
         fs::remove_all(dir, ec);
@@ -68,30 +68,30 @@ int main() {
         fail("stream create");
         return 1;
     }
-    auto arena_result = ps::gpu::GpuArena::create(0, 1024ull * 1024ull * 1024ull);
+    auto arena_result = shelf::gpu::GpuArena::create(0, 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         fail("arena");
         return 1;
     }
-    ps::gpu::GpuArena arena = arena_result.release();
+    shelf::gpu::GpuArena arena = arena_result.release();
 
-    ps::qwen35::Qwen35LoadOptions options;
+    shelf::qwen35::Qwen35LoadOptions options;
     options.verify_quantized_payload_crc = true;
 
-    auto rank0_result = ps::qwen35::load_qwen35_weights_tensor_parallel_rank(
+    auto rank0_result = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
         dir.string(), 2, 0, arena, stream, options);
     if (!rank0_result.ok()) {
         fail("rank0 load: " + rank0_result.status().message());
     }
-    auto rank1_result = ps::qwen35::load_qwen35_weights_tensor_parallel_rank(
+    auto rank1_result = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
         dir.string(), 2, 1, arena, stream, options);
     if (!rank1_result.ok()) {
         fail("rank1 load: " + rank1_result.status().message());
     }
 
     if (rank0_result.ok() && rank1_result.ok()) {
-        const ps::qwen35::Qwen35ModelWeights& r0 = rank0_result.value();
-        const ps::qwen35::Qwen35ModelWeights& r1 = rank1_result.value();
+        const shelf::qwen35::Qwen35ModelWeights& r0 = rank0_result.value();
+        const shelf::qwen35::Qwen35ModelWeights& r1 = rank1_result.value();
         check(r0.layers.size() == 4 && r1.layers.size() == 4, "layer count");
 
         check(r0.layers[0].mlp_gate_proj.rows == 64, "rank0 gate rows local");
@@ -140,15 +140,15 @@ int main() {
     }
 
     {
-        ps::qwen35::Qwen35LoadOptions bad;
-        bad.weights.partition_plan = new ps::weights::TensorPartitionPlan();
-        auto rejected = ps::qwen35::load_qwen35_weights_tensor_parallel_rank(
+        shelf::qwen35::Qwen35LoadOptions bad;
+        bad.weights.partition_plan = new shelf::weights::TensorPartitionPlan();
+        auto rejected = shelf::qwen35::load_qwen35_weights_tensor_parallel_rank(
             dir.string(), 2, 0, arena, stream, bad);
         delete bad.weights.partition_plan;
         check(!rejected.ok(), "explicit partition plan is rejected");
     }
 
-    ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     arena.shutdown();
     fs::remove_all(dir, ec);
 

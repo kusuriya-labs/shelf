@@ -31,7 +31,7 @@
 #include <shelf/kernels/optimized/sampling_common.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 namespace {
 
@@ -47,17 +47,17 @@ struct PreparedBatch {
 
 struct ReservationEntry {
     PagedSequenceState* seq = nullptr;
-    ::ps::runtime::RequestHandle handle{};
+    ::shelf::runtime::RequestHandle handle{};
     uint32_t old_block_size = 0;
 };
 
 void poison_if_current(
     PagedSequenceState* sequence,
-    ::ps::runtime::RequestHandle handle) noexcept {
+    ::shelf::runtime::RequestHandle handle) noexcept {
     if (sequence == nullptr) {
         return;
     }
-    if (!::ps::runtime::request_handle_equal(
+    if (!::shelf::runtime::request_handle_equal(
             sequence->request_handle(), handle)) {
         return;
     }
@@ -72,7 +72,7 @@ static_assert(kHostExternalCapacity <= runtime::kHostExternalValueCapacity,
 
 Status build_host_execution_context(
     Executor& executor,
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     uint32_t* status_ptr,
     uint32_t actual_rows,
     uint32_t actual_outputs,
@@ -81,7 +81,7 @@ Status build_host_execution_context(
     uint32_t request_count,
     uint32_t min_visible_tokens,
     uint32_t max_visible_tokens,
-    ::ps::runtime::ExecutionRole role,
+    ::shelf::runtime::ExecutionRole role,
     const ExecuteBatchOptions& options,
     bool stochastic_topk_eligible,
     uint32_t stochastic_top_k,
@@ -200,7 +200,7 @@ Status build_host_execution_context(
          oi < sizeof(ctx.layer_override_storage) / sizeof(ctx.layer_override_storage[0]);
          ++oi) {
         ctx.layer_override_storage[oi] = runtime::LayerInputOverride{
-            ::ps::runtime::ValueId{executor.layer_override_value_ids[oi]},
+            ::shelf::runtime::ValueId{executor.layer_override_value_ids[oi]},
             executor.layer_override_host[oi].data(),
             executor.layer_override_rows[oi],
             executor.layer_override_hidden[oi]};
@@ -212,13 +212,13 @@ Status build_host_execution_context(
     ctx.actual_sampled_outputs = actual_sampled_outputs;
     ctx.actual_stochastic_outputs = actual_stochastic_outputs;
     ctx.staged_requests = static_cast<
-        const ::ps::runtime::DeviceRequestDescriptor*>(executor.host_request_staging);
+        const ::shelf::runtime::DeviceRequestDescriptor*>(executor.host_request_staging);
     ctx.staged_request_count = request_count;
     uint32_t staged_verify = 0u;
     if (ctx.staged_requests != nullptr) {
         for (uint32_t i = 0u; i < request_count; ++i) {
             if (ctx.staged_requests[i].execution_class ==
-                ::ps::runtime::ExecutionClass::SPEC_VERIFY) {
+                ::shelf::runtime::ExecutionClass::SPEC_VERIFY) {
                 ++staged_verify;
             }
         }
@@ -228,9 +228,9 @@ Status build_host_execution_context(
     ctx.staged_verify_request_count = staged_verify;
     ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
-            .data<::ps::runtime::DeviceSamplingParams>();
+            .data<::shelf::runtime::DeviceSamplingParams>();
     ctx.device_requests = executor.batch_context_storage.requests
-                              .data<::ps::runtime::DeviceRequestDescriptor>();
+                              .data<::shelf::runtime::DeviceRequestDescriptor>();
     ctx.device_output_rows =
         executor.batch_context_storage.output_rows.data<uint32_t>();
     ctx.stochastic_topk_eligible = stochastic_topk_eligible;
@@ -250,7 +250,7 @@ Status build_host_execution_context(
 
 Status launch_host_backend_range(
     Executor& executor,
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     runtime::HostExecutionContext& ctx,
     hipStream_t stream,
     uint32_t begin,
@@ -304,18 +304,18 @@ Status allocate_contiguous_tensor(
 }
 
 #ifdef SHELF_HIP_GRAPH
-static int graph_slot_index(::ps::runtime::RowBucket bucket) {
+static int graph_slot_index(::shelf::runtime::RowBucket bucket) {
     switch (bucket) {
-        case ::ps::runtime::RowBucket::R16: return 0;
-        case ::ps::runtime::RowBucket::R32: return 1;
-        case ::ps::runtime::RowBucket::R64: return 2;
-        case ::ps::runtime::RowBucket::R128: return 3;
-        case ::ps::runtime::RowBucket::R256: return 4;
-        case ::ps::runtime::RowBucket::R512: return 5;
-        case ::ps::runtime::RowBucket::R1024: return 6;
-        case ::ps::runtime::RowBucket::R2048: return 7;
-        case ::ps::runtime::RowBucket::R4096: return 8;
-        case ::ps::runtime::RowBucket::R8192: return 9;
+        case ::shelf::runtime::RowBucket::R16: return 0;
+        case ::shelf::runtime::RowBucket::R32: return 1;
+        case ::shelf::runtime::RowBucket::R64: return 2;
+        case ::shelf::runtime::RowBucket::R128: return 3;
+        case ::shelf::runtime::RowBucket::R256: return 4;
+        case ::shelf::runtime::RowBucket::R512: return 5;
+        case ::shelf::runtime::RowBucket::R1024: return 6;
+        case ::shelf::runtime::RowBucket::R2048: return 7;
+        case ::shelf::runtime::RowBucket::R4096: return 8;
+        case ::shelf::runtime::RowBucket::R8192: return 9;
     }
     return -1;
 }
@@ -326,7 +326,7 @@ static bool graph_debug_enabled() {
 }
 
 static bool graph_debug_first(uint32_t bucket_index) {
-    static std::array<uint8_t, ::ps::runtime::ProgramSet::kRowBucketCount> seen{};
+    static std::array<uint8_t, ::shelf::runtime::ProgramSet::kRowBucketCount> seen{};
     if (!graph_debug_enabled() || bucket_index >= seen.size())
         return false;
     if (seen[bucket_index] != 0)
@@ -337,7 +337,7 @@ static bool graph_debug_first(uint32_t bucket_index) {
 
 static bool program_pool_warm(
     const Executor& executor,
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     uint32_t bidx) {
     if (executor.staging_pool.device == nullptr || executor.staging_pool.max_bindings == 0)
         return false;
@@ -361,14 +361,14 @@ static bool program_pool_warm(
 
 static bool attention_plan_key_for(
     Executor& executor,
-    const ::ps::runtime::Program& program,
+    const ::shelf::runtime::Program& program,
     uint32_t actual_rows,
     uint32_t max_visible_tokens,
     bool use_prefill,
     uint32_t& out_key) {
     size_t attention_index = program.dispatches.size();
     for (size_t i = 0; i < program.dispatches.size(); ++i) {
-        if (program.dispatches[i].kernel_id == ::ps::runtime::KernelId::PAGED_ATTENTION) {
+        if (program.dispatches[i].kernel_id == ::shelf::runtime::KernelId::PAGED_ATTENTION) {
             attention_index = i;
             break;
         }
@@ -443,7 +443,7 @@ Result<PendingBatch> submit_co_batch(
     prep.num_requests = R;
 
     auto* input_ids = executor.input_ids.data<int32_t>();
-    auto* staging = reinterpret_cast<::ps::runtime::DeviceRequestDescriptor*>(executor.host_request_staging);
+    auto* staging = reinterpret_cast<::shelf::runtime::DeviceRequestDescriptor*>(executor.host_request_staging);
     auto* pending_commits = static_cast<PendingRequestCommit*>(executor.host_pending_staging);
     uint32_t output_count = 0;
     uint32_t sampled_count = 0;
@@ -464,7 +464,7 @@ Result<PendingBatch> submit_co_batch(
         staging[i].sequence_length = req.prefix_tokens + req.num_tokens;
         staging[i].execution_class = req.execution_class;
         staging[i].compute_logits = req.compute_logits ? 1 : 0;
-        staging[i].sampling = ::ps::runtime::DeviceSamplingParams{};
+        staging[i].sampling = ::shelf::runtime::DeviceSamplingParams{};
         if (req.compute_logits) {
             const runtime::SamplingRequest sampling = runtime::make_sampling_request(
                 req.sampling, req.sample, req.sampling_index);
@@ -486,9 +486,9 @@ Result<PendingBatch> submit_co_batch(
             staging[i].output_count = 0u;
             staging[i].output_index = 0xFFFFFFFFu;
         }
-        if (req.execution_class == ::ps::runtime::ExecutionClass::DECODE) ++num_decode;
-        else if (req.execution_class == ::ps::runtime::ExecutionClass::SPEC_VERIFY) ++num_verify;
-        else if (req.execution_class == ::ps::runtime::ExecutionClass::PREFILL) ++num_prefill;
+        if (req.execution_class == ::shelf::runtime::ExecutionClass::DECODE) ++num_decode;
+        else if (req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY) ++num_verify;
+        else if (req.execution_class == ::shelf::runtime::ExecutionClass::PREFILL) ++num_prefill;
         row_offset += req.num_tokens;
     }
     if (output_count > executor.config.max_scheduled_output_rows) {
@@ -525,7 +525,7 @@ Result<PendingBatch> submit_co_batch(
                 break;
             }
             const uint32_t k = staging[i].sampling.top_k;
-            if (k == 0u || k > ps::kernel::kSamplingMaxTopK) {
+            if (k == 0u || k > shelf::kernel::kSamplingMaxTopK) {
                 ok = false;
                 break;
             }
@@ -541,7 +541,7 @@ Result<PendingBatch> submit_co_batch(
     if (stochastic_topk_eligible) {
         for (uint32_t i = 0u; i < R; ++i) {
             if (staging[i].output_count == 0u) continue;
-            staging[i].sampling.reserved[0] |= ps::kernel::kSamplingTopKPathFlag;
+            staging[i].sampling.reserved[0] |= shelf::kernel::kSamplingTopKPathFlag;
         }
     }
     prep.stochastic_topk_eligible = stochastic_topk_eligible;
@@ -582,7 +582,7 @@ Result<PendingBatch> submit_co_batch(
     auto rollback_reservations_array = [&](uint32_t count, hipStream_t s) -> Status {
         for (uint32_t r = 0; r < count; ++r) {
             if (!reservations[r].seq) continue;
-            if (!::ps::runtime::request_handle_equal(
+            if (!::shelf::runtime::request_handle_equal(
                     reservations[r].seq->request_handle(), reservations[r].handle)) {
                 return Status::invalid_state(
                     "stale request handle during reservation rollback", __FILE__, __LINE__);
@@ -613,8 +613,8 @@ Result<PendingBatch> submit_co_batch(
         ++reservation_count;
     }
     auto* bctx_token_ids = executor.batch_context_storage.token_ids.data<int32_t>();
-    auto* bctx_requests = executor.batch_context_storage.requests.data<::ps::runtime::DeviceRequestDescriptor>();
-    ::ps::runtime::DeviceBatchContext host_ctx{};
+    auto* bctx_requests = executor.batch_context_storage.requests.data<::shelf::runtime::DeviceRequestDescriptor>();
+    ::shelf::runtime::DeviceBatchContext host_ctx{};
     host_ctx.actual_rows = N;
     host_ctx.num_requests = R;
     host_ctx.num_outputs = output_count;
@@ -628,16 +628,16 @@ Result<PendingBatch> submit_co_batch(
     host_ctx.output_rows = executor.batch_context_storage.output_rows.data<uint32_t>();
     host_ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
-            .data<::ps::runtime::DeviceSamplingParams>();
+            .data<::shelf::runtime::DeviceSamplingParams>();
     host_ctx.rope_inv_freq = executor.rope_inv_freq.data<double>();
     host_ctx.device_ptr = executor.batch_context;
 
     bool gpu_started = false;
-    const ::ps::runtime::ExecutionRole exec_role =
+    const ::shelf::runtime::ExecutionRole exec_role =
         (batch.speculative_verify || num_verify != 0u)
-            ? ::ps::runtime::ExecutionRole::Verify
-            : (num_prefill == 0u ? ::ps::runtime::ExecutionRole::Decode
-                                 : ::ps::runtime::ExecutionRole::Prefill);
+            ? ::shelf::runtime::ExecutionRole::Verify
+            : (num_prefill == 0u ? ::shelf::runtime::ExecutionRole::Decode
+                                 : ::shelf::runtime::ExecutionRole::Prefill);
     auto on_error = [&](const Status& s) -> Status {
         if (gpu_started) {
             for (uint32_t i = 0; i < R; ++i) {
@@ -650,9 +650,9 @@ Result<PendingBatch> submit_co_batch(
     if (!executor.program_set_ready) {
         return on_error(Status::invalid_state("program set not ready", __FILE__, __LINE__));
     }
-    ::ps::runtime::RowBucket bucket = ::ps::runtime::RowBucket::R16;
+    ::shelf::runtime::RowBucket bucket = ::shelf::runtime::RowBucket::R16;
     if (N != 0) {
-        auto br = ::ps::runtime::resolve_row_bucket(N);
+        auto br = ::shelf::runtime::resolve_row_bucket(N);
         if (!br.ok()) return on_error(br.status());
         bucket = br.value();
     }
@@ -734,7 +734,7 @@ Result<PendingBatch> submit_co_batch(
         executor.value_trace == nullptr &&
         !spec_verify_without_history &&
         !tree_batch &&
-        exec_role == ::ps::runtime::ExecutionRole::Decode;
+        exec_role == ::shelf::runtime::ExecutionRole::Decode;
     auto stage_graph_inputs = [&]() {
         if (!token_ids_on_device) {
             std::memcpy(executor.host_token_graph_staging, batch.token_ids,
@@ -748,7 +748,7 @@ Result<PendingBatch> submit_co_batch(
     bool graph_active = graph_eligible;
     if (graph_active) {
         const bool attn_use_prefill =
-            exec_role == ::ps::runtime::ExecutionRole::Prefill && R == 1u &&
+            exec_role == ::shelf::runtime::ExecutionRole::Prefill && R == 1u &&
             N >= runtime::kPagedAttentionPrefillMinRows;
         if (!attention_plan_key_for(
                 executor, *program, N, max_visible_tokens, attn_use_prefill,
@@ -767,7 +767,7 @@ Result<PendingBatch> submit_co_batch(
         if (!stq.ok()) return stq;
         stq = upload_tokens(bctx_token_ids, token_src);
         if (!stq.ok()) return stq;
-        stq = upload(bctx_requests, staging, R * sizeof(::ps::runtime::DeviceRequestDescriptor));
+        stq = upload(bctx_requests, staging, R * sizeof(::shelf::runtime::DeviceRequestDescriptor));
         if (!stq.ok()) return stq;
         if (ctx_src == &host_ctx) {
             hipError_t ctx_err = hipMemcpyWithStream(
@@ -780,7 +780,7 @@ Result<PendingBatch> submit_co_batch(
             stq = upload(executor.batch_context, ctx_src, sizeof(host_ctx));
             if (!stq.ok()) return stq;
         }
-        stq = ::ps::runtime::launch_prepare_batch_descriptor(
+        stq = ::shelf::runtime::launch_prepare_batch_descriptor(
             executor.batch_context, executor.config.max_scheduled_requests, stream);
         if (!stq.ok()) return stq;
 
@@ -863,7 +863,7 @@ Result<PendingBatch> submit_co_batch(
                              gslot_idx, N, program->dispatches.size());
             if (graph_warm) {
                 if (gslot->valid) {
-                    ps::gpu::discard_cleanup_result(hipGraphExecDestroy(gslot->exec));
+                    shelf::gpu::discard_cleanup_result(hipGraphExecDestroy(gslot->exec));
                     *gslot = GraphCacheSlot{};
                 }
                 stage_graph_inputs();
@@ -874,7 +874,7 @@ Result<PendingBatch> submit_co_batch(
                     if (cap_st.ok() && ec == hipSuccess && graph != nullptr) {
                         hipGraphExec_t ge = nullptr;
                         hipError_t ic = hipGraphInstantiate(&ge, graph, nullptr, nullptr, 0);
-                        ps::gpu::discard_cleanup_result(hipGraphDestroy(graph));
+                        shelf::gpu::discard_cleanup_result(hipGraphDestroy(graph));
                         if (ic == hipSuccess && ge != nullptr) {
                             gslot->exec = ge;
                             gslot->token_count = N;
@@ -927,7 +927,7 @@ Result<PendingBatch> submit_co_batch(
     if (!enqueued) {
         Status plain_st = enqueue_batch();
         if (!plain_st.ok()) {
-            ps::gpu::discard_cleanup_result(hipEventDestroy(done));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
             return on_error(plain_st);
         }
     }
@@ -936,29 +936,29 @@ Result<PendingBatch> submit_co_batch(
     gpu_started = true;
 
     const Status completion_publish =
-        ::ps::runtime::stream_write_value32(
+        ::shelf::runtime::stream_write_value32(
             stream, executor.completion_signal,
             static_cast<uint32_t>(submission_id));
     if (!completion_publish.ok()) {
-        ps::gpu::discard_cleanup_result(hipStreamSynchronize(stream));
+        shelf::gpu::discard_cleanup_result(hipStreamSynchronize(stream));
         for (uint32_t i = 0; i < R; ++i) {
             poison_if_current(pending_commits[i].sequence,
                               pending_commits[i].handle);
         }
         executor.active_submission_id = 0u;
-        ps::gpu::discard_cleanup_result(hipEventDestroy(done));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
         return completion_publish;
     }
     pending.generation = submission_id;
 
     hipError_t re = hipEventRecord(done, stream);
     if (re != hipSuccess) {
-        ps::gpu::discard_cleanup_result(hipStreamSynchronize(stream));
+        shelf::gpu::discard_cleanup_result(hipStreamSynchronize(stream));
         for (uint32_t i = 0; i < R; ++i) {
             poison_if_current(pending_commits[i].sequence, pending_commits[i].handle);
         }
         executor.active_submission_id = 0u;
-        ps::gpu::discard_cleanup_result(hipEventDestroy(done));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
         return Status::hip_error("hipEventRecord", hipGetErrorString(re), __FILE__, __LINE__);
     }
 
@@ -993,7 +993,7 @@ KeepAlive* keepalive_start() {
         return nullptr;
     }
     if (hipEventCreateWithFlags(&ka->event, hipEventDisableSystemFence) != hipSuccess) {
-        ps::gpu::discard_cleanup_result(hipStreamDestroy(ka->stream));
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(ka->stream));
         delete ka;
         return nullptr;
     }
@@ -1099,7 +1099,7 @@ Executor::Executor(Executor&& other) noexcept
       layer_override_host(std::move(other.layer_override_host)),
       keepalive(other.keepalive) {
     if (batch_context_storage.device_struct.allocation_base() != nullptr) {
-        batch_context = batch_context_storage.device_struct.data<::ps::runtime::DeviceBatchContext>();
+        batch_context = batch_context_storage.device_struct.data<::shelf::runtime::DeviceBatchContext>();
     } else {
         batch_context = nullptr;
     }
@@ -1111,14 +1111,14 @@ Executor::Executor(Executor&& other) noexcept
     other.host_sampled_staging = nullptr;
     other.host_sampled_staging_bytes = 0;
     other.host_status_staging = nullptr;
-    other.completion_signal = ::ps::runtime::StreamSignal{};
+    other.completion_signal = ::shelf::runtime::StreamSignal{};
     other.next_submission_id = 0;
     other.active_submission_id = 0;
-    other.program_set = ::ps::runtime::ProgramSet{};
+    other.program_set = ::shelf::runtime::ProgramSet{};
     other.program_set_ready = false;
     other.host_weight_table = nullptr;
     other.host_parameter_table = nullptr;
-    other.host_model_state = ::ps::kernel::ModelDispatchStateView{};
+    other.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     other.dispatch_staging = nullptr;
     other.dispatch_staging_bytes = 0;
     other.host_dispatch_staging = nullptr;
@@ -1135,7 +1135,7 @@ Executor::Executor(Executor&& other) noexcept
     other.sequence_pool = nullptr;
     other.gdn_state_pool = nullptr;
     other.kv_pool = nullptr;
-    other.batch_context_storage = ::ps::runtime::DeviceBatchContextStorage{};
+    other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
     other.input_ids = gpu::Tensor{};
     other.rope_inv_freq = gpu::Tensor{};
     other.output_hidden = gpu::Tensor{};
@@ -1163,7 +1163,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
-            batch_context = batch_context_storage.device_struct.data<::ps::runtime::DeviceBatchContext>();
+            batch_context = batch_context_storage.device_struct.data<::shelf::runtime::DeviceBatchContext>();
         } else {
             batch_context = nullptr;
         }
@@ -1182,7 +1182,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         host_status_staging = other.host_status_staging;
         other.host_status_staging = nullptr;
         completion_signal = other.completion_signal;
-        other.completion_signal = ::ps::runtime::StreamSignal{};
+        other.completion_signal = ::shelf::runtime::StreamSignal{};
         next_submission_id = other.next_submission_id;
         active_submission_id = other.active_submission_id;
         program_set = std::move(other.program_set);
@@ -1240,11 +1240,11 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.host_pending_staging_bytes = 0;
         other.next_submission_id = 0;
         other.active_submission_id = 0;
-        other.program_set = ::ps::runtime::ProgramSet{};
+        other.program_set = ::shelf::runtime::ProgramSet{};
         other.program_set_ready = false;
         other.host_weight_table = nullptr;
         other.host_parameter_table = nullptr;
-        other.host_model_state = ::ps::kernel::ModelDispatchStateView{};
+        other.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
         other.dispatch_staging = nullptr;
         other.dispatch_staging_bytes = 0;
         other.host_dispatch_staging = nullptr;
@@ -1259,7 +1259,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.sequence_pool = nullptr;
         other.gdn_state_pool = nullptr;
         other.kv_pool = nullptr;
-        other.batch_context_storage = ::ps::runtime::DeviceBatchContextStorage{};
+        other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.rope_inv_freq = gpu::Tensor{};
         other.output_hidden = gpu::Tensor{};
@@ -1305,9 +1305,9 @@ Status executor_shutdown(Executor& ex) noexcept {
     }
     {
         const Status sig_st =
-            ::ps::runtime::stream_signal_free(ex.completion_signal);
+            ::shelf::runtime::stream_signal_free(ex.completion_signal);
         if (!sig_st.ok() && first_error.ok()) first_error = sig_st;
-        ex.completion_signal = ::ps::runtime::StreamSignal{};
+        ex.completion_signal = ::shelf::runtime::StreamSignal{};
     }
     if (ex.host_status_staging != nullptr) {
         const hipError_t err = hipHostFree(ex.host_status_staging);
@@ -1425,7 +1425,7 @@ Status executor_shutdown(Executor& ex) noexcept {
         ex.host_pending_staging_bytes = 0;
     }
     {
-        Status st = ::ps::runtime::destroy_device_batch_context(ex.batch_context_storage);
+        Status st = ::shelf::runtime::destroy_device_batch_context(ex.batch_context_storage);
         if (first_error.ok() && !st.ok()) {
             first_error = st;
         }
@@ -1442,7 +1442,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.sequence_pool = nullptr;
     ex.gdn_state_pool = nullptr;
     ex.kv_pool = nullptr;
-    ex.host_model_state = ::ps::kernel::ModelDispatchStateView{};
+    ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};
     return first_error;
@@ -1485,11 +1485,11 @@ PendingBatch& PendingBatch::operator=(PendingBatch&& other) noexcept {
 
 void PendingBatch::destroy() noexcept {
     if (done != nullptr) {
-        ps::gpu::discard_cleanup_result(hipEventSynchronize(done));
+        shelf::gpu::discard_cleanup_result(hipEventSynchronize(done));
         for (uint32_t i = 0; i < commit_count; ++i) {
             poison_if_current(commits[i].sequence, commits[i].handle);
         }
-        ps::gpu::discard_cleanup_result(hipEventDestroy(done));
+        shelf::gpu::discard_cleanup_result(hipEventDestroy(done));
     }
     done = nullptr;
     commits = nullptr;
@@ -1603,9 +1603,9 @@ Result<Executor> create_model_executor(
     const uint32_t R = config.max_scheduled_requests;
     uint32_t Npad = N;
     {
-        auto br = ::ps::runtime::resolve_row_bucket(N);
+        auto br = ::shelf::runtime::resolve_row_bucket(N);
         if (br.ok()) {
-            const uint32_t lim = ::ps::runtime::row_bucket_limit(br.value());
+            const uint32_t lim = ::shelf::runtime::row_bucket_limit(br.value());
             if (lim > Npad) Npad = lim;
         }
     }
@@ -1638,15 +1638,15 @@ Result<Executor> create_model_executor(
     st = allocate_contiguous_tensor<int32_t>(arena, {MO}, ex.sampled_tokens);
     if (!st.ok()) return st;
     if (V > 0u && MO > 0u) {
-        ex.stochastic_topk_partitions = ps::kernel::dflash2_radix_default_partitions(V);
-        const std::size_t radix_bytes = ps::kernel::dflash2_radix_topn_scratch_bytes(
+        ex.stochastic_topk_partitions = shelf::kernel::dflash2_radix_default_partitions(V);
+        const std::size_t radix_bytes = shelf::kernel::dflash2_radix_topn_scratch_bytes(
             MO, ex.stochastic_topk_partitions, V);
         if (radix_bytes > 0u) {
             st = allocate_contiguous_tensor<int32_t>(
-                arena, {MO, ps::kernel::kSamplingMaxTopK}, ex.stochastic_topk_ids);
+                arena, {MO, shelf::kernel::kSamplingMaxTopK}, ex.stochastic_topk_ids);
             if (!st.ok()) return st;
             st = allocate_contiguous_tensor<float>(
-                arena, {MO, ps::kernel::kSamplingMaxTopK}, ex.stochastic_topk_logits);
+                arena, {MO, shelf::kernel::kSamplingMaxTopK}, ex.stochastic_topk_logits);
             if (!st.ok()) return st;
             st = allocate_contiguous_tensor<uint8_t>(
                 arena, {static_cast<uint32_t>(radix_bytes)}, ex.stochastic_topk_scratch);
@@ -1666,12 +1666,12 @@ Result<Executor> create_model_executor(
     }
 
 
-    auto bctx_res = ::ps::runtime::create_device_batch_context(arena, R, Npad);
+    auto bctx_res = ::shelf::runtime::create_device_batch_context(arena, R, Npad);
     if (!bctx_res.ok()) return bctx_res.status();
     ex.batch_context_storage = bctx_res.release();
-    ex.batch_context = ex.batch_context_storage.device_struct.data<::ps::runtime::DeviceBatchContext>();
+    ex.batch_context = ex.batch_context_storage.device_struct.data<::shelf::runtime::DeviceBatchContext>();
 
-    std::size_t staging_bytes = static_cast<std::size_t>(R) * sizeof(::ps::runtime::DeviceRequestDescriptor);
+    std::size_t staging_bytes = static_cast<std::size_t>(R) * sizeof(::shelf::runtime::DeviceRequestDescriptor);
     void* host_ptr = nullptr;
     hipError_t herr = hipHostMalloc(&host_ptr, staging_bytes);
     if (herr != hipSuccess) {
@@ -1713,7 +1713,7 @@ Result<Executor> create_model_executor(
         ex.host_status_staging = status_host;
     }
     {
-        auto completion = ::ps::runtime::stream_signal_alloc(64u);
+        auto completion = ::shelf::runtime::stream_signal_alloc(64u);
         if (!completion.ok()) return completion.status();
         ex.completion_signal = completion.value();
     }
@@ -1734,18 +1734,18 @@ Result<Executor> create_model_executor(
     {
         void* ctx_graph_host = nullptr;
         hipError_t cgrerr = hipHostMalloc(&ctx_graph_host,
-            sizeof(::ps::runtime::DeviceBatchContext));
+            sizeof(::shelf::runtime::DeviceBatchContext));
         if (cgrerr != hipSuccess) {
             return Status::hip_error("hipHostMalloc host_ctx_graph_staging",
                                        hipGetErrorString(cgrerr), __FILE__, __LINE__);
         }
         ex.host_ctx_graph_staging =
-            static_cast<::ps::runtime::DeviceBatchContext*>(ctx_graph_host);
+            static_cast<::shelf::runtime::DeviceBatchContext*>(ctx_graph_host);
     }
 #endif
 
     {
-        ::ps::kernel::ModelDispatchStateView ms{};
+        ::shelf::kernel::ModelDispatchStateView ms{};
         ms.block_table = sequence_pool.device_view();
         ms.gdn = gdn_state_pool.device_view();
         if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
@@ -1773,7 +1773,7 @@ Result<Executor> create_model_executor(
         if (herr2 != hipSuccess) {
             return Status::hip_error("hipStreamCreate program upload", hipGetErrorString(herr2), __FILE__, __LINE__);
         }
-        ::ps::runtime::ProgramSet built_set;
+        ::shelf::runtime::ProgramSet built_set;
         std::array<uint32_t, kMaxTargetHiddenTaps> override_ids{};
         uint32_t override_count = 0;
         std::vector<std::vector<std::uint16_t>> override_host;
@@ -1838,7 +1838,7 @@ Result<Executor> create_model_executor(
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {
-            ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+            shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
             return lower_res.status();
         }
         auto lowered = lower_res.release();
@@ -1853,46 +1853,46 @@ Result<Executor> create_model_executor(
                 }
             }
         }
-        std::vector<::ps::runtime::WeightSlot> weight_slots =
+        std::vector<::shelf::runtime::WeightSlot> weight_slots =
             std::move(lowered.weights);
-        std::vector<::ps::runtime::StaticParameterSlot> param_slots =
+        std::vector<::shelf::runtime::StaticParameterSlot> param_slots =
             std::move(lowered.parameters);
         ex.host_parameter_slots = param_slots;
-        ::ps::runtime::PrimitiveGraph lowered_graph = std::move(lowered.graph);
-        ::ps::runtime::WeightTableView weight_view{nullptr, 0};
+        ::shelf::runtime::PrimitiveGraph lowered_graph = std::move(lowered.graph);
+        ::shelf::runtime::WeightTableView weight_view{nullptr, 0};
         weight_view.slots = weight_slots.data();
         weight_view.count = weight_slots.size();
         {
-            ::ps::runtime::ProgramBuildOptions opts;
+            ::shelf::runtime::ProgramBuildOptions opts;
             opts.validate_workspace = true;
             opts.max_token_rows = Npad;
             opts.max_output_rows = MO;
             if (const char* nwr = std::getenv("PSQ_NO_WORKSPACE_REUSE")) {
                 if (nwr[0] != '\0') opts.no_workspace_reuse = true;
             }
-            ::ps::runtime::StaticParameterTableView pview;
+            ::shelf::runtime::StaticParameterTableView pview;
             pview.slots = param_slots.data();
             pview.count = param_slots.size();
-            auto set_res = ::ps::runtime::build_program_set(
+            auto set_res = ::shelf::runtime::build_program_set(
                 lowered_graph, weight_view, pview,
-                ::ps::runtime::ExecutionClass::DECODE, opts);
+                ::shelf::runtime::ExecutionClass::DECODE, opts);
             if (!set_res.ok()) {
-                ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                 return set_res.status();
             }
             built_set = set_res.release();
 
             if (config.tp != nullptr && config.tp->tp_size > 1) {
-                ex.tp_schedules.reserve(::ps::runtime::ProgramSet::kRowBucketCount);
+                ex.tp_schedules.reserve(::shelf::runtime::ProgramSet::kRowBucketCount);
                 for (const auto& prog : built_set.programs) {
                     auto schedule_res =
-                        ::ps::runtime::build_tp_execution_schedule(lowered_graph, prog);
+                        ::shelf::runtime::build_tp_execution_schedule(lowered_graph, prog);
                     if (!schedule_res.ok()) {
-                        ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                         return schedule_res.status();
                     }
                     if (!schedule_res.value().active()) {
-                        ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                         return Status::invalid_argument(
                             "tp execution schedule has no segments", __FILE__, __LINE__);
                     }
@@ -1907,7 +1907,7 @@ Result<Executor> create_model_executor(
                 max_workspace_bytes =
                     std::max(max_workspace_bytes, prog.workspace.total_bytes);
                 max_staging_bytes =
-                    std::max(max_staging_bytes, ::ps::runtime::max_host_staging_bytes(prog));
+                    std::max(max_staging_bytes, ::shelf::runtime::max_host_staging_bytes(prog));
             }
             constexpr std::size_t kScratchBytes = 8192 * sizeof(float);
             const std::size_t exec_workspace_bytes =
@@ -1916,13 +1916,13 @@ Result<Executor> create_model_executor(
                 st = allocate_contiguous_tensor<uint8_t>(
                     arena, {exec_workspace_bytes}, ex.execution_workspace);
                 if (!st.ok()) {
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return st;
                 }
                 hipError_t werr = hipMemsetAsync(
                     ex.execution_workspace.data<uint8_t>(), 0, exec_workspace_bytes, upload_stream);
                 if (werr != hipSuccess) {
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return Status::hip_error("hipMemsetAsync execution_workspace",
                                              hipGetErrorString(werr), __FILE__, __LINE__);
                 }
@@ -1930,7 +1930,7 @@ Result<Executor> create_model_executor(
 
             st = allocate_contiguous_tensor<double>(arena, {32}, ex.rope_inv_freq);
             if (!st.ok()) {
-                ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                 return st;
             }
             {
@@ -1938,7 +1938,7 @@ Result<Executor> create_model_executor(
                 if (rope_theta <= 0.0f) rope_theta = 10000000.0f;
                 hipError_t rerr = hipSuccess;
                 if (ex.config.rope_profile.type == EffectiveRopeProfile::Type::Yarn) {
-                    rerr = ::ps::kernel::launch_rope_inv_freq_yarn_init(
+                    rerr = ::shelf::kernel::launch_rope_inv_freq_yarn_init(
                         ex.rope_inv_freq.data<double>(), 32, rope_theta,
                         static_cast<float>(ex.config.rope_profile.factor),
                         ex.config.rope_profile.original_max_position_embeddings,
@@ -1946,11 +1946,11 @@ Result<Executor> create_model_executor(
                         static_cast<float>(ex.config.rope_profile.beta_slow),
                         ex.config.rope_profile.truncate, upload_stream);
                 } else {
-                    rerr = ::ps::kernel::launch_rope_inv_freq_init(
+                    rerr = ::shelf::kernel::launch_rope_inv_freq_init(
                         ex.rope_inv_freq.data<double>(), 32, rope_theta, upload_stream);
                 }
                 if (rerr != hipSuccess) {
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return Status::hip_error("rope inv_freq init launch",
                                               hipGetErrorString(rerr), __FILE__, __LINE__);
                 }
@@ -1959,7 +1959,7 @@ Result<Executor> create_model_executor(
             auto wtable_res = runtime::upload_host_weight_table(
                 weight_view, &ex.host_weight_table, upload_stream);
             if (!wtable_res.ok()) {
-                ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                 return wtable_res;
             }
 
@@ -1968,17 +1968,17 @@ Result<Executor> create_model_executor(
                     pview, &ex.host_parameter_table, upload_stream);
                 if (!pres.ok()) {
                     if (ex.host_weight_table != nullptr) {
-                        ps::gpu::discard_cleanup_result(hipFree(ex.host_weight_table));
+                        shelf::gpu::discard_cleanup_result(hipFree(ex.host_weight_table));
                         ex.host_weight_table = nullptr;
                     }
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return pres;
                 }
             }
 
             {
                 constexpr size_t kMetaBucketCount =
-                    ::ps::runtime::ProgramSet::kRowBucketCount;
+                    ::shelf::runtime::ProgramSet::kRowBucketCount;
                 ex.program_staging_meta.resize(kMetaBucketCount);
                 bool meta_upload_ok = true;
                 for (size_t b = 0; b < kMetaBucketCount && meta_upload_ok; ++b) {
@@ -1986,7 +1986,7 @@ Result<Executor> create_model_executor(
                     const uint64_t rc = prog.workspace.ranges.size();
                     const uint64_t sc = prog.states.size();
                     const uint64_t mbytes =
-                        ::ps::runtime::program_staging_meta_bytes(
+                        ::shelf::runtime::program_staging_meta_bytes(
                             static_cast<uint32_t>(rc), static_cast<uint32_t>(sc));
                     auto& meta = ex.program_staging_meta[b];
                     meta.range_count = static_cast<uint32_t>(rc);
@@ -2000,39 +2000,39 @@ Result<Executor> create_model_executor(
                     }
                     uint8_t* p = static_cast<uint8_t*>(mb);
                     if (rc > 0) {
-                        std::vector<::ps::runtime::DeviceWorkspaceRange> hr(rc);
+                        std::vector<::shelf::runtime::DeviceWorkspaceRange> hr(rc);
                         for (uint64_t i = 0; i < rc; ++i) {
                             hr[i].offset = prog.workspace.ranges[i].offset;
                             hr[i].bytes = prog.workspace.ranges[i].bytes;
                         }
                         merr = hipMemcpy(p, hr.data(),
-                                         rc * sizeof(::ps::runtime::DeviceWorkspaceRange),
+                                         rc * sizeof(::shelf::runtime::DeviceWorkspaceRange),
                                          hipMemcpyHostToDevice);
                         if (merr != hipSuccess) {
-                            ps::gpu::discard_cleanup_result(hipFree(mb));
+                            shelf::gpu::discard_cleanup_result(hipFree(mb));
                             meta_upload_ok = false;
                             break;
                         }
-                        p += (rc * sizeof(::ps::runtime::DeviceWorkspaceRange) + 15ull) & ~15ull;
+                        p += (rc * sizeof(::shelf::runtime::DeviceWorkspaceRange) + 15ull) & ~15ull;
                     }
                     if (sc > 0) {
-                        std::vector<::ps::runtime::DeviceStateBinding> hs(sc);
+                        std::vector<::shelf::runtime::DeviceStateBinding> hs(sc);
                         for (uint64_t i = 0; i < sc; ++i) {
                             hs[i].slot = prog.states[i].slot;
                             hs[i].kind = static_cast<uint8_t>(prog.states[i].kind);
                             hs[i].state_index = prog.states[i].state_index;
                         }
                         merr = hipMemcpy(p, hs.data(),
-                                         sc * sizeof(::ps::runtime::DeviceStateBinding),
+                                         sc * sizeof(::shelf::runtime::DeviceStateBinding),
                                          hipMemcpyHostToDevice);
                         if (merr != hipSuccess) {
-                            ps::gpu::discard_cleanup_result(hipFree(mb));
+                            shelf::gpu::discard_cleanup_result(hipFree(mb));
                             meta_upload_ok = false;
                             break;
                         }
                     }
                     const uint64_t ranges_bytes =
-                        (rc * sizeof(::ps::runtime::DeviceWorkspaceRange) + 15ull) & ~15ull;
+                        (rc * sizeof(::shelf::runtime::DeviceWorkspaceRange) + 15ull) & ~15ull;
                     meta.ranges = (rc > 0) ? mb : nullptr;
                     meta.states = (rc > 0)
                         ? (static_cast<uint8_t*>(mb) + ranges_bytes)
@@ -2042,20 +2042,20 @@ Result<Executor> create_model_executor(
                 if (!meta_upload_ok) {
                     for (auto& meta : ex.program_staging_meta) {
                         if (meta.device_bytes > 0) {
-                            ps::gpu::discard_cleanup_result(hipFree(meta.ranges != nullptr ? meta.ranges : meta.states));
+                            shelf::gpu::discard_cleanup_result(hipFree(meta.ranges != nullptr ? meta.ranges : meta.states));
                             meta = ProgramStagingMeta{};
                         }
                     }
                     ex.program_staging_meta.clear();
                     if (ex.host_parameter_table != nullptr) {
-                        ps::gpu::discard_cleanup_result(hipFree(ex.host_parameter_table));
+                        shelf::gpu::discard_cleanup_result(hipFree(ex.host_parameter_table));
                         ex.host_parameter_table = nullptr;
                     }
                     if (ex.host_weight_table != nullptr) {
-                        ps::gpu::discard_cleanup_result(hipFree(ex.host_weight_table));
+                        shelf::gpu::discard_cleanup_result(hipFree(ex.host_weight_table));
                         ex.host_weight_table = nullptr;
                     }
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return Status::hip_error("program staging meta upload",
                                               hipGetErrorString(hipGetLastError()),
                                               __FILE__, __LINE__);
@@ -2065,7 +2065,7 @@ Result<Executor> create_model_executor(
             if (max_staging_bytes > 0) {
                 hipError_t serr2 = hipMalloc(&ex.dispatch_staging, max_staging_bytes);
                 if (serr2 != hipSuccess) {
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return Status::hip_error("hipMalloc dispatch_staging",
                                              hipGetErrorString(serr2), __FILE__, __LINE__);
                 }
@@ -2073,10 +2073,10 @@ Result<Executor> create_model_executor(
                 void* host_stage = nullptr;
                 hipError_t herr3 = hipHostMalloc(&host_stage, max_staging_bytes);
                 if (herr3 != hipSuccess) {
-                    ps::gpu::discard_cleanup_result(hipFree(ex.dispatch_staging));
+                    shelf::gpu::discard_cleanup_result(hipFree(ex.dispatch_staging));
                     ex.dispatch_staging = nullptr;
                     ex.dispatch_staging_bytes = 0;
-                    ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                     return Status::hip_error("hipHostMalloc host_dispatch_staging",
                                              hipGetErrorString(herr3), __FILE__, __LINE__);
                 }
@@ -2085,7 +2085,7 @@ Result<Executor> create_model_executor(
 
             {
                 constexpr size_t kBucketCount =
-                    ::ps::runtime::ProgramSet::kRowBucketCount;
+                    ::shelf::runtime::ProgramSet::kRowBucketCount;
                 uint32_t max_bindings = 0;
                 for (size_t b = 0; b < kBucketCount; ++b) {
                     max_bindings = std::max<uint32_t>(
@@ -2105,7 +2105,7 @@ Result<Executor> create_model_executor(
                         auto& prog = built_set.programs[b];
                         for (size_t i = 0; i < prog.dispatches.size(); ++i) {
                             const uint64_t need =
-                                ::ps::runtime::staging_bytes_for(prog.dispatches[i]);
+                                ::shelf::runtime::staging_bytes_for(prog.dispatches[i]);
                             const uint64_t slot =
                                 ex.staging_pool.slot(static_cast<uint32_t>(b),
                                                      static_cast<uint32_t>(i));
@@ -2118,15 +2118,15 @@ Result<Executor> create_model_executor(
                         hipError_t perr = hipMalloc(&ex.staging_pool.device, cur);
                         if (perr != hipSuccess) {
                             if (ex.dispatch_staging != nullptr) {
-                                ps::gpu::discard_cleanup_result(hipFree(ex.dispatch_staging));
+                                shelf::gpu::discard_cleanup_result(hipFree(ex.dispatch_staging));
                                 ex.dispatch_staging = nullptr;
                                 ex.dispatch_staging_bytes = 0;
                             }
                             if (ex.host_dispatch_staging != nullptr) {
-                                ps::gpu::discard_cleanup_result(hipHostFree(ex.host_dispatch_staging));
+                                shelf::gpu::discard_cleanup_result(hipHostFree(ex.host_dispatch_staging));
                                 ex.host_dispatch_staging = nullptr;
                             }
-                            ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                            shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                             return Status::hip_error("hipMalloc staging_pool",
                                                      hipGetErrorString(perr), __FILE__, __LINE__);
                         }
@@ -2141,11 +2141,11 @@ Result<Executor> create_model_executor(
 
         hipError_t serr = hipStreamSynchronize(upload_stream);
         if (serr != hipSuccess) {
-            ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+            shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
             return Status::hip_error("hipStreamSynchronize program upload",
                                       hipGetErrorString(serr), __FILE__, __LINE__);
         }
-        ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
     }
 
     ex.keepalive = keepalive_start();
@@ -2197,7 +2197,7 @@ Result<BatchExecutionOutput> complete_batch(
                                      __LINE__);
     }
     const uint32_t status = *host_status;
-    if (status != static_cast<uint32_t>(::ps::runtime::ProgramStatus::COMPLETE)) {
+    if (status != static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE)) {
         poison_pending();
         executor.active_submission_id = 0u;
         std::string message = "host program execution failed: status=";
@@ -2279,7 +2279,7 @@ Result<BatchExecutionOutput> execute_batch(
 
 DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept {
     if (generation == 0u) return DecodeStatus::Pending;
-    const uint32_t published = ::ps::runtime::stream_signal_load(
+    const uint32_t published = ::shelf::runtime::stream_signal_load(
         executor.completion_signal);
     if (published != static_cast<uint32_t>(generation)) {
         return DecodeStatus::Pending;
@@ -2288,7 +2288,7 @@ DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept
         static_cast<const uint32_t*>(executor.host_status_staging);
     if (host_status == nullptr) return DecodeStatus::Error;
     return *host_status ==
-                   static_cast<uint32_t>(::ps::runtime::ProgramStatus::COMPLETE)
+                   static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE)
                ? DecodeStatus::Complete
                : DecodeStatus::Error;
 }

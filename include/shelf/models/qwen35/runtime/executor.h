@@ -23,7 +23,7 @@
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/runtime/stream_bridge.h>
 
-namespace ps {
+namespace shelf {
 namespace qwen35 {
 
 
@@ -47,8 +47,8 @@ struct ExecutorConfig {
     EffectiveRopeProfile rope_profile;
 };
 
-using ::ps::runtime::DispatchStagingPool;
-using ::ps::runtime::ProgramStagingMeta;
+using ::shelf::runtime::DispatchStagingPool;
+using ::shelf::runtime::ProgramStagingMeta;
 
 struct GraphCacheSlot {
     hipGraphExec_t exec = nullptr;
@@ -82,8 +82,8 @@ struct Executor {
 
     ExecutorConfig config;
 
-    ::ps::runtime::DeviceBatchContextStorage batch_context_storage;
-    ::ps::runtime::DeviceBatchContext* batch_context = nullptr;
+    ::shelf::runtime::DeviceBatchContextStorage batch_context_storage;
+    ::shelf::runtime::DeviceBatchContext* batch_context = nullptr;
     runtime::ValueTraceSink* value_trace = nullptr;
     void* host_request_staging = nullptr;
     size_t host_staging_bytes = 0;
@@ -95,26 +95,26 @@ struct Executor {
     uint64_t next_submission_id = 0;
     uint64_t active_submission_id = 0;
 
-    ::ps::runtime::ProgramSet program_set;
+    ::shelf::runtime::ProgramSet program_set;
     bool program_set_ready = false;
-    std::vector<::ps::runtime::TpExecutionSchedule> tp_schedules;
-    ::ps::runtime::TpBarrierHook* tp_barrier = nullptr;
+    std::vector<::shelf::runtime::TpExecutionSchedule> tp_schedules;
+    ::shelf::runtime::TpBarrierHook* tp_barrier = nullptr;
     int tp_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
-    ::ps::runtime::WeightSlot* host_weight_table = nullptr;
-    ::ps::runtime::StaticParameterSlot* host_parameter_table = nullptr;
-    std::vector<::ps::runtime::StaticParameterSlot> host_parameter_slots;
-    ::ps::kernel::ModelDispatchStateView host_model_state{};
+    ::shelf::runtime::WeightSlot* host_weight_table = nullptr;
+    ::shelf::runtime::StaticParameterSlot* host_parameter_table = nullptr;
+    std::vector<::shelf::runtime::StaticParameterSlot> host_parameter_slots;
+    ::shelf::kernel::ModelDispatchStateView host_model_state{};
     void* dispatch_staging = nullptr;
     uint64_t dispatch_staging_bytes = 0;
     void* host_dispatch_staging = nullptr;
     DispatchStagingPool staging_pool;
     std::vector<ProgramStagingMeta> program_staging_meta;
-    std::array<GraphCacheSlot, ::ps::runtime::ProgramSet::kRowBucketCount> graph_cache{};
+    std::array<GraphCacheSlot, ::shelf::runtime::ProgramSet::kRowBucketCount> graph_cache{};
     void* host_token_graph_staging = nullptr;
     size_t host_token_graph_staging_bytes = 0;
-    ::ps::runtime::DeviceBatchContext* host_ctx_graph_staging = nullptr;
+    ::shelf::runtime::DeviceBatchContext* host_ctx_graph_staging = nullptr;
     bool graph_failed = false;
 
     gpu::Tensor input_ids;
@@ -140,7 +140,7 @@ struct Executor {
 
     void* keepalive = nullptr;
 
-    ::ps::runtime::StreamSignal completion_signal{};
+    ::shelf::runtime::StreamSignal completion_signal{};
 };
 
 Result<Executor> create_model_executor(
@@ -166,7 +166,7 @@ struct BatchExecutionOutput {
 
 struct PendingRequestCommit {
     PagedSequenceState* sequence = nullptr;
-    ::ps::runtime::RequestHandle handle{};
+    ::shelf::runtime::RequestHandle handle{};
     uint32_t committed_tokens = 0;
 };
 
