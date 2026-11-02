@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/runtime/program/program.h>
+#include <shelf/runtime/program/activation_workspace_layout.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
@@ -155,6 +156,7 @@ struct CorrectnessEnv {
     void* values_dev = nullptr;
     void* ranges_dev = nullptr;
     void* ctx_dev = nullptr;
+    void* workspace = nullptr;
     float* scratch = nullptr;
     uint32_t* error_word = nullptr;
     ::shelf::runtime::DeviceProgramView program;
@@ -163,6 +165,7 @@ struct CorrectnessEnv {
         shelf::gpu::discard_cleanup_result(hipFree(values_dev));
         shelf::gpu::discard_cleanup_result(hipFree(ranges_dev));
         shelf::gpu::discard_cleanup_result(hipFree(ctx_dev));
+        shelf::gpu::discard_cleanup_result(hipFree(workspace));
         shelf::gpu::discard_cleanup_result(hipFree(scratch));
         shelf::gpu::discard_cleanup_result(hipFree(error_word));
     }
@@ -275,6 +278,127 @@ shelf::Status launch_correctness_linear_bf16(const CorrectnessEnv& env, uint32_t
     lbind.output_slots[0] = 1;
     lbind.output_count = 1;
     shelf::gpu::discard_cleanup_result(hipMemset(env.error_word, 0, sizeof(uint32_t)));
+    return shelf::kernel::launch_model_dispatch_correctness(
+        env.program, lbind, static_cast<::shelf::runtime::DeviceBatchContext*>(env.ctx_dev),
+        shelf::kernel::ModelDispatchStateView{}, env.scratch, env.error_word, stream);
+}
+
+bool setup_correctness_fp8(const void* d_codes, const void* d_scales,
+                           const shelf::bf16_t* d_input, shelf::bf16_t* d_output,
+                           uint32_t rows, uint32_t n, uint32_t k, uint32_t kp,
+                           CorrectnessEnv& env) {
+    ::shelf::runtime::WeightSlot slot{};
+    slot.rows = n;
+    slot.cols = k;
+    slot.k_padded = kp;
+    slot.encoding = 1u;
+    slot.compute_spec = 0u;
+    slot.codes = d_codes;
+    slot.scales = d_scales;
+    slot.storage_scale_stride_bytes = (kp / 128u) * 4u;
+    slot.weight_scale_group = 128u;
+
+    if (hipMalloc(&env.weight_slot_dev, sizeof(::shelf::runtime::WeightSlot)) != hipSuccess) return false;
+    if (hipMemcpy(env.weight_slot_dev, &slot, sizeof(::shelf::runtime::WeightSlot), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+
+    ::shelf::runtime::Int8ActivationWorkspaceLayout layout;
+    const shelf::Status layout_st = ::shelf::runtime::make_activation_workspace_layout(
+        ::shelf::quantization::kFp8FinegrainedActivationQuantSpec, kp, rows, layout);
+    if (!layout_st.ok() || layout.total_bytes == 0u) return false;
+    if (hipMalloc(&env.workspace, layout.total_bytes) != hipSuccess) return false;
+    ::shelf::runtime::DeviceWorkspaceRange range{};
+    range.offset = 0u;
+    range.bytes = layout.total_bytes;
+    if (hipMalloc(&env.ranges_dev, sizeof(::shelf::runtime::DeviceWorkspaceRange)) != hipSuccess) return false;
+    if (hipMemcpy(env.ranges_dev, &range, sizeof(range), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+
+    ::shelf::runtime::DeviceValueBinding values[2];
+    values[0] = {};
+    values[0].logical_value = 0;
+    values[0].storage = ::shelf::runtime::ValueStorage::EXTERNAL_INPUT;
+    values[0].dtype = ::shelf::runtime::ValueDType::BF16;
+    values[0].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[0].slot = 0;
+    values[0].feature_count = k;
+    values[0].row_stride = k;
+    values[0].offset = reinterpret_cast<uint64_t>(d_input);
+    values[0].bytes = (uint64_t)rows * k * sizeof(shelf::bf16_t);
+    values[1] = {};
+    values[1].logical_value = 1;
+    values[1].storage = ::shelf::runtime::ValueStorage::EXTERNAL_OUTPUT;
+    values[1].dtype = ::shelf::runtime::ValueDType::BF16;
+    values[1].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
+    values[1].slot = 0;
+    values[1].feature_count = n;
+    values[1].row_stride = n;
+    values[1].offset = reinterpret_cast<uint64_t>(d_output);
+    values[1].bytes = (uint64_t)rows * n * sizeof(shelf::bf16_t);
+
+    if (hipMalloc(&env.values_dev, 2 * sizeof(::shelf::runtime::DeviceValueBinding)) != hipSuccess) return false;
+    if (hipMemcpy(env.values_dev, values, 2 * sizeof(::shelf::runtime::DeviceValueBinding), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+
+    env.program = {};
+    env.program.values = static_cast<const ::shelf::runtime::DeviceValueBinding*>(env.values_dev);
+    env.program.value_count = 2;
+    env.program.weight_table = env.weight_slot_dev;
+    env.program.weight_slot_count = 1;
+    env.program.workspace_ranges =
+        static_cast<const ::shelf::runtime::DeviceWorkspaceRange*>(env.ranges_dev);
+    env.program.workspace_range_count = 1;
+    env.program.workspace_base = reinterpret_cast<uint64_t>(env.workspace);
+
+    ::shelf::runtime::DeviceBatchContext ctx{};
+    ctx.actual_rows = rows;
+    ctx.num_outputs = 0;
+    if (hipMalloc(&env.ctx_dev, sizeof(::shelf::runtime::DeviceBatchContext)) != hipSuccess) return false;
+    if (hipMemcpy(env.ctx_dev, &ctx, sizeof(::shelf::runtime::DeviceBatchContext), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+
+    if (hipMalloc(&env.scratch, (size_t)64 * 2048 * sizeof(float)) != hipSuccess) return false;
+    if (hipMalloc(&env.error_word, sizeof(uint32_t)) != hipSuccess) return false;
+    if (hipMemset(env.error_word, 0, sizeof(uint32_t)) != hipSuccess) return false;
+    return true;
+}
+
+shelf::Status launch_correctness_linear_fp8(const CorrectnessEnv& env, uint32_t rows,
+                                         uint32_t kp, hipStream_t stream) {
+    ::shelf::runtime::Int8ActivationWorkspaceLayout layout;
+    const shelf::Status status = ::shelf::runtime::make_activation_workspace_layout(
+        ::shelf::quantization::kFp8FinegrainedActivationQuantSpec, kp, rows, layout);
+    if (!status.ok()) return status;
+
+    ::shelf::runtime::DispatchBinding qbind{};
+    qbind.kernel_id = ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
+    qbind.workspace_slot = 0u;
+    qbind.group_size = 32u;
+    qbind.activation_kp = kp;
+    qbind.activation_max_rows = rows;
+    qbind.activation_code_stride = layout.code_row_stride_bytes;
+    qbind.activation_scale_stride = layout.scale_row_stride_bytes;
+    qbind.input_slots[0] = 0;
+    qbind.input_count = 1;
+    qbind.output_count = 0;
+
+    ::shelf::runtime::DispatchBinding lbind{};
+    lbind.kernel_id = ::shelf::runtime::KernelId::LINEAR_FP8_FINEGRAINED;
+    lbind.workspace_slot = 0u;
+    lbind.weight_index = 0;
+    lbind.activation_kp = kp;
+    lbind.activation_max_rows = rows;
+    lbind.activation_code_stride = layout.code_row_stride_bytes;
+    lbind.activation_scale_stride = layout.scale_row_stride_bytes;
+    lbind.input_count = 0;
+    lbind.output_slots[0] = 1;
+    lbind.output_count = 1;
+
+    shelf::gpu::discard_cleanup_result(hipMemset(env.error_word, 0, sizeof(uint32_t)));
+    shelf::Status st = shelf::kernel::launch_model_dispatch_correctness(
+        env.program, qbind, static_cast<::shelf::runtime::DeviceBatchContext*>(env.ctx_dev),
+        shelf::kernel::ModelDispatchStateView{}, env.scratch, env.error_word, stream);
+    if (!st.ok()) return st;
     return shelf::kernel::launch_model_dispatch_correctness(
         env.program, lbind, static_cast<::shelf::runtime::DeviceBatchContext*>(env.ctx_dev),
         shelf::kernel::ModelDispatchStateView{}, env.scratch, env.error_word, stream);
@@ -568,7 +692,11 @@ int run_gemm_fp8(Options& o) {
         {
             std::mt19937 rng(o.seed + 33u);
             std::vector<uint8_t> hc(codes_bytes);
-            for (auto& v : hc) v = static_cast<uint8_t>(rng() & 0xFFu);
+            for (auto& v : hc) {
+                uint8_t c = static_cast<uint8_t>(rng() & 0xFFu);
+                if ((c & 0x7Fu) == 0x7Fu) c &= 0xFEu;
+                v = c;
+            }
             std::vector<uint8_t> hs(scales_bytes, 0);
             float* hsf = reinterpret_cast<float*>(hs.data());
             for (size_t i = 0; i < hs.size() / 4u; ++i)
@@ -593,6 +721,14 @@ int run_gemm_fp8(Options& o) {
             ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
             ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
             if (!ok) { rc = 1; break; }
+            CorrectnessEnv cenv;
+            if (o.check && !setup_correctness_fp8(
+                    d_codes, d_scales, d_input, d_output, rows, n, shape.k, kp, cenv)) {
+                std::fprintf(stderr, "CHECK FAIL %s rows=%u correctness setup\n",
+                             shape.name.c_str(), rows);
+                rc = 1;
+                break;
+            }
             hipError_t af = shelf::kernel::launch_activation_quantize_fp8_finegrained(
                 d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
                 static_cast<uint32_t>(act_scale_stride), stream);
@@ -623,6 +759,50 @@ int run_gemm_fp8(Options& o) {
                 }
                 return hipSuccess;
             };
+            if (o.check) {
+                const size_t outn = (size_t)rows * n;
+                std::vector<uint16_t> h_c(outn), h_g(outn);
+                shelf::Status stc = launch_correctness_linear_fp8(cenv, rows, kp, stream);
+                uint32_t ew = 0;
+                if (!stc.ok() || hipStreamSynchronize(stream) != hipSuccess ||
+                    hipMemcpy(&ew, cenv.error_word, sizeof(ew), hipMemcpyDeviceToHost) != hipSuccess || ew != 0) {
+                    std::fprintf(stderr, "CHECK FAIL %s rows=%u correctness (err=%u)\n",
+                                 shape.name.c_str(), rows, ew);
+                    rc = 1;
+                    break;
+                }
+                shelf::gpu::discard_cleanup_result(
+                    hipMemcpy(h_c.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                if (launch_one() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) {
+                    std::fprintf(stderr, "CHECK FAIL %s rows=%u optimized launch\n",
+                                 shape.name.c_str(), rows);
+                    rc = 1;
+                    break;
+                }
+                shelf::gpu::discard_cleanup_result(
+                    hipMemcpy(h_g.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                uint64_t mismatch = 0, nan = 0, inf = 0, nan_c = 0, nan_g = 0;
+                float max_rel = 0.f;
+                for (size_t i = 0; i < outn; ++i) {
+                    if (h_c[i] != h_g[i]) ++mismatch;
+                    const float fc = bf16_bits_to_f32(h_c[i]);
+                    const float fg = bf16_bits_to_f32(h_g[i]);
+                    if (std::isnan(fc)) ++nan_c;
+                    if (std::isnan(fg)) ++nan_g;
+                    if (std::isnan(fc) || std::isnan(fg)) ++nan;
+                    if (std::isinf(fc) || std::isinf(fg)) ++inf;
+                    const float rel = std::fabs(fc - fg) / std::max(1.0f, std::fabs(fc));
+                    if (rel > max_rel) max_rel = rel;
+                }
+                const bool okc = nan == 0 && inf == 0 && max_rel <= 2e-2f;
+                std::printf("CHECK fp8 %-12s rows=%-4u n=%-6u k=%-6u mismatch=%llu max_rel=%.4g nan=%llu inf=%llu nan_c=%llu nan_g=%llu %s\n",
+                            shape.name.c_str(), rows, shape.n, shape.k,
+                            (unsigned long long)mismatch, max_rel,
+                            (unsigned long long)nan, (unsigned long long)inf,
+                            (unsigned long long)nan_c, (unsigned long long)nan_g,
+                            okc ? "OK" : "FAIL");
+                if (!okc) rc = 1;
+            }
             for (int i = 0; i < o.warmup; ++i)
                 if (launch_one() != hipSuccess) { rc = 1; break; }
             if (rc) break;
