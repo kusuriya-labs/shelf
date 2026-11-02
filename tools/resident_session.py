@@ -1,7 +1,7 @@
 """Resident model host session helpers shared by the GPU test runner and the
 server regression runner.
 
-The wire protocol is the test-only PhaseShift resident protocol:
+The wire protocol is the test-only Shelf resident protocol:
 24-byte little-endian header (magic, version, command, status, payload_size)
 followed by the payload.
 """
@@ -34,16 +34,16 @@ STATUS_UNHEALTHY = 3
 
 HEADER = struct.Struct("<IIIIQ")
 
-SOCKET_ENV = "PHASESHIFT_MODEL_HOST_SOCKET"
-DISABLE_ENV = "PHASESHIFT_DISABLE_RESIDENT_MODEL"
+SOCKET_ENV = "SHELF_MODEL_HOST_SOCKET"
+DISABLE_ENV = "SHELF_DISABLE_RESIDENT_MODEL"
 
 
 def default_host_binary(build_dir: Path) -> Path:
-    for path in (build_dir / "phaseshift-model-host",
-                 build_dir / "tests" / "phaseshift-model-host"):
+    for path in (build_dir / "shelf-model-host",
+                 build_dir / "tests" / "shelf-model-host"):
         if path.is_file():
             return path
-    return build_dir / "phaseshift-model-host"
+    return build_dir / "shelf-model-host"
 
 
 def existing_dir(*values: Optional[str]) -> List[str]:
@@ -60,7 +60,7 @@ def existing_dir(*values: Optional[str]) -> List[str]:
 
 
 def dflash2_dirs_from_env() -> List[str]:
-    return existing_dir(os.environ.get("PHASESHIFT_MODEL_DIR_DFLASH2"))
+    return existing_dir(os.environ.get("SHELF_MODEL_DIR_DFLASH2"))
 
 
 class ResidentProtocolError(RuntimeError):
@@ -177,14 +177,14 @@ class ResidentSession:
         self.build_dir = Path(build_dir)
         self.device = device
         self.staging_gib = staging_gib
-        self.socket_path = socket_path or f"/tmp/phaseshift-resident-{os.getpid()}-{device}.sock"
+        self.socket_path = socket_path or f"/tmp/shelf-resident-{os.getpid()}-{device}.sock"
         self.warmup_model_dirs = list(warmup_model_dirs or [])
         self.warmup_dflash2_dirs = list(warmup_dflash2_dirs or [])
         self.allow_any_dir = allow_any_dir
         self.health_timeout_ms = health_timeout_ms
         self.ready_timeout = ready_timeout
         self.proc: Optional[subprocess.Popen] = None
-        self.log_path = Path(f"/tmp/phaseshift-resident-host-{os.getpid()}.log")
+        self.log_path = Path(f"/tmp/shelf-resident-host-{os.getpid()}.log")
 
     def start(self) -> None:
         host = default_host_binary(self.build_dir)
@@ -205,7 +205,7 @@ class ResidentSession:
             argv.extend(["--warmup-dflash2", dflash_dir])
 
         env = dict(os.environ)
-        env.setdefault("PHASESHIFT_ARENA_VMM", "1")
+        env.setdefault("SHELF_ARENA_VMM", "1")
         log = open(self.log_path, "w")
         self.proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
         deadline = time.time() + self.ready_timeout

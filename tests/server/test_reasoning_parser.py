@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src" / "apps" / "common"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from phaseshift_chat import reasoning  # noqa: E402
+from shelf_chat import reasoning  # noqa: E402
 from support import Checker  # noqa: E402
 
 CLOSE = 1001

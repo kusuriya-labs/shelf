@@ -1,6 +1,6 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
 
 #include <hip/hip_runtime.h>
 

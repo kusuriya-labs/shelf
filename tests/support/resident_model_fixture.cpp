@@ -1,6 +1,6 @@
 #include "resident_model_fixture.h"
 
-#include <phaseshift/resident/resident_protocol.h>
+#include <shelf/resident/resident_protocol.h>
 
 #include <cstdio>
 

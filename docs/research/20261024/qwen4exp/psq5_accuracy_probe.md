@@ -79,7 +79,7 @@ B の PPL が A より 36% 低い。PSQ5 の重み誤差は A の約 2 倍（0.0
 python3 tools/psq5_fake_quant.py --model-dir models/Qwen3.8-27B \
   --output-dir models/Qwen3.8-27B-FP8-b --storage fp8 \
   --quantized-from models/Qwen3.8-27B-FP8
-./build/phaseshift-bench quality --model-dir models/Qwen3.8-27B-FP8-b \
+./build/shelf-bench quality --model-dir models/Qwen3.8-27B-FP8-b \
   --tokens-file /tmp/bb_corpus.psktok --device 0 --tp 1 \
   --kv-cache-dtype bf16 --compare /tmp/a.psq
 ```

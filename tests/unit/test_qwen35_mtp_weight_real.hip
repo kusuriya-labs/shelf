@@ -1,14 +1,14 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/gfx_arch.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/quantization/fp8/fp8_native.h>
-#include <phaseshift/weights/matrix_weight.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/gfx_arch.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/weights/matrix_weight.h>
+#include <shelf/weights/weight_loader.h>
 #include <openssl/sha.h>
 #include <hip/hip_runtime.h>
 
@@ -144,12 +144,12 @@ bool expected_matrix_payload(
 }  // namespace
 
 int main() {
-    const char* model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR_MTP");
+    const char* model_dir_env = std::getenv("SHELF_MODEL_DIR_MTP");
     if (model_dir_env == nullptr || model_dir_env[0] == '\0') {
-        model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR");
+        model_dir_env = std::getenv("SHELF_MODEL_DIR");
     }
     if (model_dir_env == nullptr || model_dir_env[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR to a "
+        std::printf("SKIP: set SHELF_MODEL_DIR_MTP or SHELF_MODEL_DIR to a "
                     "Qwen3.5 model directory\n");
         return 77;
     }
@@ -186,7 +186,7 @@ int main() {
     const bool quantized = weights::is_quantized_model_dir(model_dir);
     std::printf("=== MTP weight contract: real checkpoint ===\n");
     std::printf("model_dir: %s\n", model_dir.c_str());
-    std::printf("format: %s\n", quantized ? "quantized (phaseshift)" : "plain safetensors (bf16)");
+    std::printf("format: %s\n", quantized ? "quantized (shelf)" : "plain safetensors (bf16)");
 
     qwen35::Qwen35LoadOptions options;
     options.load_mtp_layers = true;

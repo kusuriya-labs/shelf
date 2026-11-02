@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import Checker, ServerHarness, http_json, model_dir  # noqa: E402
 
-ROUNDS = int(os.environ.get("PHASESHIFT_TOOL_REGRESSION_ROUNDS", "100"))
+ROUNDS = int(os.environ.get("SHELF_TOOL_REGRESSION_ROUNDS", "100"))
 
 WEATHER = {
     "type": "function",
@@ -66,7 +66,7 @@ def main() -> int:
                 prompt = PROMPTS[index % len(PROMPTS)]
                 try:
                     result = http_json(url, {
-                        "model": "phaseshift",
+                        "model": "shelf",
                         "messages": [{"role": "user", "content": prompt}],
                         "tools": [WEATHER],
                         "tool_choice": "auto",
@@ -114,7 +114,7 @@ def main() -> int:
                 roundtrip_attempted += 1
 
                 round_trip = http_json(url, {
-                    "model": "phaseshift",
+                    "model": "shelf",
                     "messages": [
                         {"role": "user", "content": prompt},
                         {"role": "assistant", "content": None, "tool_calls": [call]},

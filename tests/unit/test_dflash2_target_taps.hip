@@ -1,13 +1,13 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/inference/execution/program_executor.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/inference/execution/program_executor.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include "support/resident_model_fixture.h"
@@ -81,9 +81,9 @@ struct Captured {
 };
 
 int main() {
-    const char* target_dir = std::getenv("PHASESHIFT_MODEL_DIR_DFLASH2_TARGET");
+    const char* target_dir = std::getenv("SHELF_MODEL_DIR_DFLASH2_TARGET");
     if (target_dir == nullptr || target_dir[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_DFLASH2_TARGET\n");
+        std::printf("SKIP: set SHELF_MODEL_DIR_DFLASH2_TARGET\n");
         return 77;
     }
     if (hipSetDevice(0) != hipSuccess) {
@@ -94,7 +94,7 @@ int main() {
     std::array<uint32_t, ps::qwen35::kMaxTargetHiddenTaps> taps{};
     uint32_t tap_count = 0;
     {
-        const char* dflash_dir = std::getenv("PHASESHIFT_MODEL_DIR_DFLASH2");
+        const char* dflash_dir = std::getenv("SHELF_MODEL_DIR_DFLASH2");
         if (dflash_dir != nullptr && dflash_dir[0] != '\0') {
             auto cfg = ps::qwen35::dflash2::read_dflash2_config(dflash_dir);
             if (cfg.ok() && cfg.value().num_target_layer_ids <= taps.size()) {

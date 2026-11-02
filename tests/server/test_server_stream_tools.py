@@ -70,7 +70,7 @@ def main() -> int:
         with ServerHarness() as server:
             url = f"{server.base_url}/chat/completions"
             chunks = list(http_sse(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "tools": [WEATHER_TOOL], "tool_choice": "auto",
                 "stream": True, "temperature": 0, "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": False}}))
             calls, finish, raw = reconstruct_tool_calls(chunks)
@@ -93,7 +93,7 @@ def main() -> int:
                           raw[:300])
 
             non = http_json(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "tools": [WEATHER_TOOL], "tool_choice": "auto",
                 "temperature": 0, "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": False}})
             non_calls = non["choices"][0]["message"].get("tool_calls") or []
@@ -113,7 +113,7 @@ def main() -> int:
                           f"{pids_before} -> {pids_after}")
 
             repeat = list(http_sse(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "tools": [WEATHER_TOOL], "tool_choice": "auto",
                 "stream": True, "temperature": 0, "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": False}}))
             repeat_calls, _, _ = reconstruct_tool_calls(repeat)
@@ -126,13 +126,13 @@ def main() -> int:
 
             # Case 9: the Gate 2 no-tools streaming path is unchanged.
             plain_chunks = list(http_sse(url, {
-                "model": "phaseshift", "messages": [{"role": "user", "content": "Hello"}],
+                "model": "shelf", "messages": [{"role": "user", "content": "Hello"}],
                 "stream": True, "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False}}))
             plain_text = "".join(
                 (c.get("choices", [{}])[0].get("delta", {}) or {}).get("content") or ""
                 for c in plain_chunks)
             plain = http_json(url, {
-                "model": "phaseshift", "messages": [{"role": "user", "content": "Hello"}],
+                "model": "shelf", "messages": [{"role": "user", "content": "Hello"}],
                 "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False}})
             checker.check("case9-plain-stream-parity",
                           plain_text == plain["choices"][0]["message"]["content"],
@@ -144,7 +144,7 @@ def main() -> int:
 
                 client = OpenAI(base_url=server.base_url, api_key="unused")
                 stream = client.chat.completions.create(
-                    model="phaseshift", messages=MESSAGES, tools=[WEATHER_TOOL],
+                    model="shelf", messages=MESSAGES, tools=[WEATHER_TOOL],
                     tool_choice="auto", temperature=0, max_tokens=128, stream=True,
                     extra_body={"chat_template_kwargs": {"enable_thinking": False}})
                 acc: dict[int, dict] = {}

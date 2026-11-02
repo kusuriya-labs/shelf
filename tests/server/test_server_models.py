@@ -28,10 +28,10 @@ def main() -> int:
             models = http_get_json(f"{server.base_url}/models")
             checker.check("object-list", models.get("object") == "list", repr(models))
             checker.check("model-listed",
-                          any(m.get("id") == "phaseshift" for m in models.get("data", [])),
+                          any(m.get("id") == "shelf" for m in models.get("data", [])),
                           repr(models))
             checker.check("model-owned-by",
-                          all(m.get("owned_by") == "phaseshift"
+                          all(m.get("owned_by") == "shelf"
                               for m in models.get("data", [])), repr(models))
             checker.check("model-context-length",
                           all(m.get("context_length") == server.max_seq_len
@@ -46,12 +46,12 @@ def main() -> int:
 
             status, body = http_post_status(
                 f"{server.base_url}/responses",
-                {"model": "phaseshift", "input": "hello"})
+                {"model": "shelf", "input": "hello"})
             checker.check("responses-404", status == 404, f"{status} {body[:300]}")
 
             status, body = http_post_status(
                 f"{server.base_url}/completions",
-                {"model": "phaseshift", "prompt": "hello", "max_tokens": 8})
+                {"model": "shelf", "prompt": "hello", "max_tokens": 8})
             checker.check("completions-404", status == 404, f"{status} {body[:300]}")
     except Exception as exc:  # noqa: BLE001
         checker.check("exception", False, repr(exc))

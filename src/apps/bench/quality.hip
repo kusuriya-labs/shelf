@@ -1,14 +1,14 @@
 #include "quality_core.h"
 
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
-#include <phaseshift/models/qwen35/runtime/tensor_parallel.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
-#include <phaseshift/models/model_source.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/model_source.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -42,7 +42,7 @@ struct QualityOptions {
 
 void print_usage(FILE* out) {
     fprintf(out,
-        "Usage: phaseshift-bench quality [options]\n"
+        "Usage: shelf-bench quality [options]\n"
         "  --model-dir PATH             (required)\n"
         "  --model-host SPEC            resident model host socket spec\n"
         "  --tokens-file PATH           PSKLDTOK corpus (required)\n"

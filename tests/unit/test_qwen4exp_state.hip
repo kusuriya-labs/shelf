@@ -1,8 +1,8 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/kernels/optimized/attention/qsa_indexer.h>
-#include <phaseshift/models/qwen4exp/ple/ngram_hash.h>
-#include <phaseshift/models/qwen4exp/ple/ple_conv.h>
-#include <phaseshift/models/qwen4exp/runtime/qwen4exp_state.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/kernels/optimized/attention/qsa_indexer.h>
+#include <shelf/models/qwen4exp/ple/ngram_hash.h>
+#include <shelf/models/qwen4exp/ple/ple_conv.h>
+#include <shelf/models/qwen4exp/runtime/qwen4exp_state.h>
 
 #include <hip/hip_runtime.h>
 

@@ -1,14 +1,14 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/runtime/execution/row_bucket.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
-#include <phaseshift/models/qwen35/runtime/tensor_parallel.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/model_source.h>
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/model_source.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
@@ -24,7 +24,7 @@
 #include <optional>
 #include <thread>
 
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
 #include <rocprofiler-sdk-roctx/roctx.h>
 #endif
 
@@ -53,7 +53,7 @@ struct BenchOptions {
 
 void print_usage(FILE* out) {
     fprintf(out,
-        "Usage: phaseshift-bench pp [options]\n"
+        "Usage: shelf-bench pp [options]\n"
         "  --prompt-tokens N            (default 128)\n"
         "  --prefill-chunk N            (default 0 = whole prompt in one batch)\n"
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
@@ -238,7 +238,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
 }
 
 bool roctx_available() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     return true;
 #else
     return false;
@@ -246,13 +246,13 @@ bool roctx_available() {
 }
 
 void roctx_resume() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxProfilerResume(0);
 #endif
 }
 
 void roctx_pause() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxProfilerPause(0);
 #endif
 }
@@ -718,7 +718,7 @@ int run_pp(int argc, char** argv) {
 
     const int roctx_enabled = roctx_available() ? 1 : 0;
 
-    printf("PhaseShift Prefill Benchmark\n");
+    printf("Shelf Prefill Benchmark\n");
     printf("\n");
     {
         std::string device_list;

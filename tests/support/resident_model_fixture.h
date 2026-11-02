@@ -1,11 +1,11 @@
 #pragma once
 
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/resident/resident_client.h>
-#include <phaseshift/resident/resident_model_key.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/resident/resident_client.h>
+#include <shelf/resident/resident_model_key.h>
 
 #include <cstddef>
 #include <cstdint>

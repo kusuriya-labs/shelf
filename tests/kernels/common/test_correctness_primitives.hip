@@ -1,7 +1,7 @@
-#include <phaseshift/kernels/correctness/standalone/primitives_correctness.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/core/memory/tensor.h>
+#include <shelf/kernels/correctness/standalone/primitives_correctness.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/core/memory/tensor.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <vector>

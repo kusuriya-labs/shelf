@@ -1,13 +1,13 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/io/safetensors_reader.h>
-#include <phaseshift/kernels/correctness/standalone/gemm_bf16_correctness.h>
-#include <phaseshift/kernels/correctness/standalone/gemm_block_scaled_correctness.h>
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/quantization/codec/e4m3.h>
-#include <phaseshift/quantization/fp8/fp8_native.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/kernels/correctness/standalone/gemm_bf16_correctness.h>
+#include <shelf/kernels/correctness/standalone/gemm_block_scaled_correctness.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/quantization/codec/e4m3.h>
+#include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
 
 #include "expert_slice_fixture.h"

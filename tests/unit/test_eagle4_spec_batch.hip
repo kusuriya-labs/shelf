@@ -1,15 +1,15 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/context_state.h>
-#include <phaseshift/models/qwen35/eagle4/executor.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/prefix_cache.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/context_state.h>
+#include <shelf/models/qwen35/eagle4/executor.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/prefix_cache.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <hip/hip_runtime.h>
 

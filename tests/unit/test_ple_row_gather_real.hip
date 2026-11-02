@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen4exp/ple/ple_row_gather.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/models/qwen4exp/ple/ple_row_gather.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 

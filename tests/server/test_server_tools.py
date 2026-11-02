@@ -37,7 +37,7 @@ def main() -> int:
             # Case 1: no tools.
             plain = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift",
+                {"model": "shelf",
                  "messages": [{"role": "user", "content": "Hello"}],
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}})
             plain_content = plain["choices"][0]["message"]["content"]
@@ -51,7 +51,7 @@ def main() -> int:
             # Case 2: tools present, no tool needed.
             no_call = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift",
+                {"model": "shelf",
                  "messages": [{"role": "user", "content": "Reply with the single word: hello"},
                               ],
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False},
@@ -65,7 +65,7 @@ def main() -> int:
             # Case 3/4: single tool call.
             tool_result = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift",
+                {"model": "shelf",
                  "messages": [{"role": "user",
                                "content": "大阪の現在の気温をget_weatherを使って確認して"}],
                  "temperature": 0, "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": False},
@@ -96,7 +96,7 @@ def main() -> int:
                 # Case 5: tool result round-trip.
                 round_trip = http_json(
                     f"{server.base_url}/chat/completions",
-                    {"model": "phaseshift",
+                    {"model": "shelf",
                      "messages": [
                          {"role": "user",
                           "content": "大阪の現在の気温をget_weatherを使って確認して"},
@@ -124,7 +124,7 @@ def main() -> int:
             try:
                 http_json(
                     f"{server.base_url}/chat/completions",
-                    {"model": "phaseshift",
+                    {"model": "shelf",
                      "messages": [
                          {"role": "user", "content": "hi"},
                          {"role": "assistant", "content": "",
@@ -146,7 +146,7 @@ def main() -> int:
 
             recovered = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift",
+                {"model": "shelf",
                  "messages": [{"role": "user", "content": "Hello"}],
                  "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False}})
             checker.check("case6-server-recovers",
@@ -159,7 +159,7 @@ def main() -> int:
 
                 client = OpenAI(base_url=server.base_url, api_key="unused")
                 completion = client.chat.completions.create(
-                    model="phaseshift",
+                    model="shelf",
                     messages=[{"role": "user",
                                "content": "大阪の現在の気温をget_weatherを使って確認して"}],
                     tools=[WEATHER_TOOL],

@@ -15,7 +15,7 @@ MTP の sampling とは別物で、target LM の logits から次 token を決�
 
 ## SamplingConfig
 
-`include/phaseshift/inference/scheduling/sampling_params.h`
+`include/shelf/inference/scheduling/sampling_params.h`
 
 | field | default | 意味 |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ validation:
 
 ## RNG contract
 
-`include/phaseshift/kernels/optimized/sampling_common.h`
+`include/shelf/kernels/optimized/sampling_common.h`
 
 counter-based hash（SplitMix64 系）で、key は
 
@@ -159,7 +159,7 @@ top-k path が使われない batch（`top_k = 0`、`top_k > 128`、
 使う。
 
 `kSamplingMaxTopK = 128` は
-`include/phaseshift/kernels/optimized/sampling_limits.h` にある。
+`include/shelf/kernels/optimized/sampling_limits.h` にある。
 
 ### seed と生成列の互換性
 
@@ -241,9 +241,9 @@ device 上の params を D2H して eligibility を判断することはない�
 
 | 役割 | ファイル |
 | --- | --- |
-| public contract | `include/phaseshift/inference/scheduling/sampling_params.h` |
-| device helper / row sampler | `include/phaseshift/kernels/optimized/sampling_common.h` |
-| top-k path の定数 | `include/phaseshift/kernels/optimized/sampling_limits.h` |
+| public contract | `include/shelf/inference/scheduling/sampling_params.h` |
+| device helper / row sampler | `include/shelf/kernels/optimized/sampling_common.h` |
+| top-k path の定数 | `include/shelf/kernels/optimized/sampling_limits.h` |
 | optimized kernel | `include|src/.../kernels/optimized/stochastic_sampling.{h,hip}` |
 | greedy kernel | `include|src/.../kernels/optimized/sampling.{h,hip}` |
 | Top-K selection | `src/.../kernels/optimized/radix_topn.hip` |

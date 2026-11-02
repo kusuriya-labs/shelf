@@ -1,4 +1,4 @@
-# PhaseShift build options and platform detection.
+# Shelf build options and platform detection.
 #
 # Included from root CMakeLists.txt.
 
@@ -8,15 +8,15 @@
 # with the libc++ standard library (see overview.md "Toolchain").
 # ---------------------------------------------------------------------------
 
-if(NOT PHASESHIFT_ROCM_ROOT)
+if(NOT SHELF_ROCM_ROOT)
     message(
         FATAL_ERROR
-        "PHASESHIFT_ROCM_ROOT is empty. Set -DPHASESHIFT_ROCM_ROOT=<path>, "
+        "SHELF_ROCM_ROOT is empty. Set -DSHELF_ROCM_ROOT=<path>, "
         "the ROCM_PATH environment variable, or provide the rocm-sdk CLI."
     )
 endif()
 
-string(REGEX REPLACE "/+$" "" _ps_llvm_root "${PHASESHIFT_ROCM_ROOT}")
+string(REGEX REPLACE "/+$" "" _ps_llvm_root "${SHELF_ROCM_ROOT}")
 set(_ps_llvm_prefix "${_ps_llvm_root}/lib/llvm/")
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -53,25 +53,25 @@ if(NOT _ps_hip_prefix_pos EQUAL 0)
 endif()
 
 set(
-    PHASESHIFT_LIBCXX_LLVM_ROOT
+    SHELF_LIBCXX_LLVM_ROOT
     "/usr/lib/llvm-23"
     CACHE PATH
     "System LLVM root providing the host libc++ (libc++-23-dev / libc++abi-23-dev)"
 )
 
-if(NOT EXISTS "${PHASESHIFT_LIBCXX_LLVM_ROOT}/include/c++/v1")
+if(NOT EXISTS "${SHELF_LIBCXX_LLVM_ROOT}/include/c++/v1")
     message(
         FATAL_ERROR
-        "host libc++ headers were not found under ${PHASESHIFT_LIBCXX_LLVM_ROOT}. "
+        "host libc++ headers were not found under ${SHELF_LIBCXX_LLVM_ROOT}. "
         "Install libc++-23-dev and libc++abi-23-dev (e.g. ./llvm.sh 23 all), "
-        "or point PHASESHIFT_LIBCXX_LLVM_ROOT at a valid LLVM root."
+        "or point SHELF_LIBCXX_LLVM_ROOT at a valid LLVM root."
     )
 endif()
 
-if(NOT EXISTS "${PHASESHIFT_LIBCXX_LLVM_ROOT}/lib/libc++.so")
+if(NOT EXISTS "${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++.so")
     message(
         FATAL_ERROR
-        "host libc++ library was not found under ${PHASESHIFT_LIBCXX_LLVM_ROOT}. "
+        "host libc++ library was not found under ${SHELF_LIBCXX_LLVM_ROOT}. "
         "Install libc++-23-dev and libc++abi-23-dev."
     )
 endif()
@@ -83,7 +83,7 @@ endif()
 add_compile_options(
     -stdlib=libc++
     -stdlib++-isystem
-    "${PHASESHIFT_LIBCXX_LLVM_ROOT}/include/c++/v1"
+    "${SHELF_LIBCXX_LLVM_ROOT}/include/c++/v1"
     -Wno-unused-command-line-argument
 )
 
@@ -96,8 +96,8 @@ add_compile_options(
 # every std::__* symbol undefined. Linking the pinned libraries directly,
 # with no -lc++ on the line, makes resolution independent of -l search.
 add_link_options(
-    "${PHASESHIFT_LIBCXX_LLVM_ROOT}/lib/libc++abi.so"
-    "${PHASESHIFT_LIBCXX_LLVM_ROOT}/lib/libc++.so"
+    "${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++abi.so"
+    "${SHELF_LIBCXX_LLVM_ROOT}/lib/libc++.so"
 )
 
 # ---------------------------------------------------------------------------
@@ -109,22 +109,22 @@ add_link_options(
 if(NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1201")
     message(
         FATAL_ERROR
-        "PhaseShift targets gfx1201 (AMD Radeon AI PRO R9700) only. "
+        "Shelf targets gfx1201 (AMD Radeon AI PRO R9700) only. "
         "Got CMAKE_HIP_ARCHITECTURES='${CMAKE_HIP_ARCHITECTURES}'."
     )
 endif()
 
-message(STATUS "PhaseShift GPU architecture: ${CMAKE_HIP_ARCHITECTURES}")
+message(STATUS "Shelf GPU architecture: ${CMAKE_HIP_ARCHITECTURES}")
 
-list(PREPEND CMAKE_PREFIX_PATH "${PHASESHIFT_ROCM_ROOT}")
+list(PREPEND CMAKE_PREFIX_PATH "${SHELF_ROCM_ROOT}")
 
-function(phaseshift_set_rocm_rpath target)
-    if(TARGET "${target}" AND NOT "${PHASESHIFT_ROCM_ROOT}" STREQUAL "")
+function(shelf_set_rocm_rpath target)
+    if(TARGET "${target}" AND NOT "${SHELF_ROCM_ROOT}" STREQUAL "")
         set_target_properties(
             "${target}"
             PROPERTIES
-                BUILD_RPATH "${PHASESHIFT_ROCM_ROOT}/lib"
-                INSTALL_RPATH "${PHASESHIFT_ROCM_ROOT}/lib"
+                BUILD_RPATH "${SHELF_ROCM_ROOT}/lib"
+                INSTALL_RPATH "${SHELF_ROCM_ROOT}/lib"
         )
     endif()
 endfunction()
@@ -179,7 +179,7 @@ endif()
 # add_compile_options flags (-stdlib=libc++), which would compile HIP
 # translation units with the default libstdc++ and break the link
 # against the libc++-compiled C++ objects.
-function(phaseshift_set_hip_archs target)
+function(shelf_set_hip_archs target)
     target_compile_options("${target}" PRIVATE "--offload-arch=${CMAKE_HIP_ARCHITECTURES}")
 endfunction()
 
@@ -187,13 +187,13 @@ endfunction()
 find_library(
     ROCTX_LIBRARY
     NAMES rocprofiler-sdk-roctx
-    PATHS "${PHASESHIFT_ROCM_ROOT}/lib"
+    PATHS "${SHELF_ROCM_ROOT}/lib"
     NO_DEFAULT_PATH
 )
 find_path(
     ROCTX_INCLUDE_DIR
     NAMES rocprofiler-sdk-roctx/roctx.h
-    PATHS "${PHASESHIFT_ROCM_ROOT}/include"
+    PATHS "${SHELF_ROCM_ROOT}/include"
     NO_DEFAULT_PATH
 )
 if(ROCTX_LIBRARY AND ROCTX_INCLUDE_DIR)
@@ -204,16 +204,16 @@ endif()
 message(STATUS "ROCTx detection: ${ROCTX_FOUND}")
 
 # Test suite toggle. Preserves existing CLI compatibility:
-#   -DPHASESHIFT_BUILD_TESTS=ON
-option(PHASESHIFT_BUILD_TESTS "Build PhaseShift tests" ON)
+#   -DSHELF_BUILD_TESTS=ON
+option(SHELF_BUILD_TESTS "Build Shelf tests" ON)
 
 # Optional / external / heavy tests. OFF by default: optional test
 # executables are not even created at configure time.
-option(PHASESHIFT_BUILD_OPTIONAL_TESTS "Build optional / external / heavy tests" OFF)
+option(SHELF_BUILD_OPTIONAL_TESTS "Build optional / external / heavy tests" OFF)
 
-option(PHASESHIFT_BUILD_BENCHMARKS "Build PhaseShift benchmark executables" ON)
+option(SHELF_BUILD_BENCHMARKS "Build Shelf benchmark executables" ON)
 
 # HIP graph execution mode for the Qwen3.5 runtime (capture/replay of the
 # per-submission kernel sequence). Experimental.
-option(PHASESHIFT_HIP_GRAPH "Enable HIP graph execution mode" OFF)
+option(SHELF_HIP_GRAPH "Enable HIP graph execution mode" OFF)
 

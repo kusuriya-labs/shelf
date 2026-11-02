@@ -4,8 +4,8 @@
 **native preshuffle contract** を定義する。
 
 量子化アルゴリズムそのもの（codebook、scale 探索、丸め、誤差関数）は本仕様の対象外。
-実装の正本は `include/phaseshift/quantization/**`、`src/phaseshift/quantization/**`、
-`include/phaseshift/weights/**`、`src/phaseshift/weights/**` である。
+実装の正本は `include/shelf/quantization/**`、`src/shelf/quantization/**`、
+`include/shelf/weights/**`、`src/shelf/weights/**` である。
 
 対象 format は BF16 / FP8 K128N128 の 2 つ。
 
@@ -217,7 +217,7 @@ batch 次元を持つ場合は `ceil(rows / 128)` を batch ごとに計算す�
 format は固定数の Meta stream を持たない。
 必要な stream だけを descriptor / manifest で参照する。
 
-実装の descriptor（`phaseshift/quantization/quant_format.h`）:
+実装の descriptor（`shelf/quantization/quant_format.h`）:
 
 ```cpp
 enum class QuantFormatId : uint8_t {
@@ -259,7 +259,7 @@ FP8
 ```
 
 numeric value は in-memory の identifier のみで、file / manifest には保存しない。
-on-disk の encoding は `phaseshift_quantization.json` の文字列名で管理される。
+on-disk の encoding は `shelf_quantization.json` の文字列名で管理される。
 
 ```text
 bf16                  / Bf16
@@ -447,7 +447,7 @@ native payload を disk contract にしない現在の方針を維持する。
 ## 14. Loader contract
 
 この contract の実装は generic weights layer（`ps::weights::load_quantized_matrix` /
-`load_bf16_matrix`、`include/phaseshift/weights/weight_loader.h`、target `phaseshift_weights`）。
+`load_bf16_matrix`、`include/shelf/weights/weight_loader.h`、target `shelf_weights`）。
 model 側（例: Qwen35）は tensor name → model field の binding のみを行い、
 encoding の分岐を持たない。
 
@@ -479,7 +479,7 @@ kernel dispatch 時に native layout であることを validate する。
 manifest は canonical と同一の stream size formula / scale dtype（FP8 は F32）を持ち、
 loader は self-contained dir と同じ
 shape / size / CRC32 validation と native preshuffle を合成 manifest に対して実行する。
-差異は shard の `__metadata__`（`phaseshift.format` 等）を検証しないことと、
+差異は shard の `__metadata__`（`shelf.format` 等）を検証しないことと、
 FP8 の BF16 scale を F32 へ widen した staging を metadata1 のソースにすることのみである。
 
 ---

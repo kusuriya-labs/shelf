@@ -42,20 +42,20 @@
 | worktree | `.worktrees/qwen4exp` |
 | branch | `investigation/qwen4exp-main` |
 | HEAD | `9825d10896fea4f4d9736f918617c41322ae53b2` |
-| ベースライン required acceptance | **全件 PASS**（`PHASESHIFT_TEST_GPUS=2,3` 指定。GPU0/1 は他プロセスが VRAM 約 33.6GB 使用中のため runner の予約台帳に載らず OOM になる） |
+| ベースライン required acceptance | **全件 PASS**（`SHELF_TEST_GPUS=2,3` 指定。GPU0/1 は他プロセスが VRAM 約 33.6GB 使用中のため runner の予約台帳に載らず OOM になる） |
 | ベースライン出力 | `build/required-acceptance.txt` |
 | 注意 | 件数は build 構成で変わるため固定しない（`docs/developer/testing.md`） |
 
 ベースライン取得の経緯:
 
-1. 初回は `phaseshift-bench` / `phaseshift-compute` 未ビルドで bench smoke / CLI sync が Not Run。
+1. 初回は `shelf-bench` / `shelf-compute` 未ビルドで bench smoke / CLI sync が Not Run。
 2. 全ターゲット build 後も GPU0/1 の外部使用により `hipMalloc failed: out of memory` が多発。
-3. `PHASESHIFT_TEST_GPUS=2,3` で空き GPU に限定して全件 PASS を確認。
+3. `SHELF_TEST_GPUS=2,3` で空き GPU に限定して全件 PASS を確認。
 
 以後の判定はすべてこのベースラインとの差分で行う。
 
 G1〜G3 と G5 の一部が揃った時点での中間スナップショット
-（`PHASESHIFT_TEST_GPUS=2,3 ctest --test-dir build -L required`）:
+（`SHELF_TEST_GPUS=2,3 ctest --test-dir build -L required`）:
 **149 件すべて PASS**（ベースライン 143 + 本 Gate 群で追加した 6 件）。
 追加された 6 件は `test_safetensors_partial_read` / `test_ple_row_gather` /
 `test_qwen4exp_config` / `test_qwen4exp_weights` / `test_expert_slice_fixture` /
@@ -123,15 +123,15 @@ G1〜G3 と G5 の一部が揃った時点での中間スナップショット
 （`git diff` の hunk 単位では複数機能が混在するため、HEAD からの段階復元で分離）。
 
 上記 6 コミット時点の required acceptance: **152 件すべて PASS**
-（`PHASESHIFT_TEST_GPUS=2,3`。ベースライン 143 に本 Gate 群の追加 9 件）。
+（`SHELF_TEST_GPUS=2,3`。ベースライン 143 に本 Gate 群の追加 9 件）。
 G4b 追加後は 155 件、G4c + G5a 追加後は 159 件、
 G5d 追加後は 160 件、G5c 追加後は 161 件、**G5b 追加後は 163 件すべて PASS**
-（いずれも `PHASESHIFT_TEST_GPUS=2,3`。最終 163 件は 2 回連続で確認）。
+（いずれも `SHELF_TEST_GPUS=2,3`。最終 163 件は 2 回連続で確認）。
 
 **一時的失敗の記録**: 途中の1回で `99% tests passed, 1 tests failed out of 152`
 を観測したが、直後の再実行で 152/152 PASS。
 原因は同時刻に他エージェントが同一 GPU 群をテストで使用した競合と考えられる
-（`phaseshift-gpu-test-runner` の予約台帳は自プロセスのみを追跡し、
+（`shelf-gpu-test-runner` の予約台帳は自プロセスのみを追跡し、
 他プロセスの VRAM 使用は反映されない。ベースライン取得時の GPU0/1 でも同じ現象を観測）。
 恒常的な FAIL ではないため、判定には影響しない。
 
@@ -175,13 +175,13 @@ G5d 追加後は 160 件、G5c 追加後は 161 件、**G5b 追加後は 163 件
 
 | ファイル | 変更 |
 | --- | --- |
-| `include/phaseshift/io/safetensors_reader.h` | `SType::I64` 追加、`stype_elem_size` / `stype_name`、`StAxisSpan`、`tensor_span` / `axis_span` / `file_size` の宣言 |
-| `src/phaseshift/io/safetensors_reader.cpp` | `I64` の dtype 解析と elem_size 8、span 計算（64-bit overflow / tensor 境界 / ファイル境界の検査） |
-| `src/phaseshift/io/safetensors_writer.cpp` | `dtype_name` / `elem_size` を `stype_name` / `stype_elem_size` へ統合（I64 対応） |
-| `include/phaseshift/weights/weight_loader.h` | `SafetensorsCollection` に `tensor_shard` / `tensor_span` / `axis_span` / `shard_file_size` を追加 |
-| `src/phaseshift/weights/weight_loader.cpp` | 上記の実装、shard 名の path traversal 検査 |
+| `include/shelf/io/safetensors_reader.h` | `SType::I64` 追加、`stype_elem_size` / `stype_name`、`StAxisSpan`、`tensor_span` / `axis_span` / `file_size` の宣言 |
+| `src/shelf/io/safetensors_reader.cpp` | `I64` の dtype 解析と elem_size 8、span 計算（64-bit overflow / tensor 境界 / ファイル境界の検査） |
+| `src/shelf/io/safetensors_writer.cpp` | `dtype_name` / `elem_size` を `stype_name` / `stype_elem_size` へ統合（I64 対応） |
+| `include/shelf/weights/weight_loader.h` | `SafetensorsCollection` に `tensor_shard` / `tensor_span` / `axis_span` / `shard_file_size` を追加 |
+| `src/shelf/weights/weight_loader.cpp` | 上記の実装、shard 名の path traversal 検査 |
 | `tests/unit/test_safetensors_partial_read.cpp` | 新規テスト |
-| `cmake/tests.cmake` | テスト登録と `phaseshift-required-tests` DEPENDS へ追加 |
+| `cmake/tests.cmake` | テスト登録と `shelf-required-tests` DEPENDS へ追加 |
 
 ### 設計判断
 
@@ -266,11 +266,11 @@ PLE row は 320 B・非整列なので、手順書 §7.2 の式どおり
 
 | ファイル | 責務 |
 | --- | --- |
-| `include/phaseshift/io/row_reader.h` / `src/phaseshift/io/row_reader.cpp` | 汎用の整列読み出し計画（`probe_odirect_alignment` / `plan_row_reads` / `read_blocks_buffered` / `read_blocks_direct` / `read_rows_buffered`）。PLE 非依存 |
-| `include/phaseshift/io/hipfile_reader.h` / `src/phaseshift/io/hipfile_reader.cpp` | hipFile の RAII ラッパ（driver refcount、handle/buffer 登録、`read`、明示 `shutdown`）。hipFile 非搭載 build では POSIX fallback。`SsdReadPath` で経路を観測可能 |
-| `include/phaseshift/kernels/optimized/row_gather.h` / `src/phaseshift/kernels/optimized/row_gather.hip` | GPU row gather カーネル（src offset / dst offset / byte length のリストから行を連結） |
-| `include/phaseshift/models/qwen4exp/ple/ple_row_gather.h` / `src/phaseshift/models/qwen4exp/ple/ple_row_gather.cpp` | PLE 固有（shard 名、global row → shard/row 解決、3 経路の gather、統計）。汎用 I/O 層は PLE 非依存 |
-| `cmake/options.cmake` / `cmake/targets.cmake` | `find_package(hipfile)`（任意）、`phaseshift_qwen4exp` ターゲット |
+| `include/shelf/io/row_reader.h` / `src/shelf/io/row_reader.cpp` | 汎用の整列読み出し計画（`probe_odirect_alignment` / `plan_row_reads` / `read_blocks_buffered` / `read_blocks_direct` / `read_rows_buffered`）。PLE 非依存 |
+| `include/shelf/io/hipfile_reader.h` / `src/shelf/io/hipfile_reader.cpp` | hipFile の RAII ラッパ（driver refcount、handle/buffer 登録、`read`、明示 `shutdown`）。hipFile 非搭載 build では POSIX fallback。`SsdReadPath` で経路を観測可能 |
+| `include/shelf/kernels/optimized/row_gather.h` / `src/shelf/kernels/optimized/row_gather.hip` | GPU row gather カーネル（src offset / dst offset / byte length のリストから行を連結） |
+| `include/shelf/models/qwen4exp/ple/ple_row_gather.h` / `src/shelf/models/qwen4exp/ple/ple_row_gather.cpp` | PLE 固有（shard 名、global row → shard/row 解決、3 経路の gather、統計）。汎用 I/O 層は PLE 非依存 |
+| `cmake/options.cmake` / `cmake/targets.cmake` | `find_package(hipfile)`（任意）、`shelf_qwen4exp` ターゲット |
 | `tests/unit/test_ple_row_gather.hip` | `gpu1;required` |
 
 設計判断:
@@ -360,8 +360,8 @@ Fallback Read Unaligned Count: 0
 
 | ファイル | 変更 |
 | --- | --- |
-| `include/phaseshift/weights/weight_loader.h` | `load_bf16_matrix_axis_slice` / `load_fp8_matrix_axis_slice` の宣言追加（既存 API 不変） |
-| `src/phaseshift/weights/weight_loader.cpp` | `load_quantized_matrix_impl` を「resolve+partition の wrapper」と `load_quantized_view`（rank-2 canonical → preshuffle → upload 本体）へ**抽出分割**（挙動不変）。新規は axis-slice ローダ 2 関数のみ |
+| `include/shelf/weights/weight_loader.h` | `load_bf16_matrix_axis_slice` / `load_fp8_matrix_axis_slice` の宣言追加（既存 API 不変） |
+| `src/shelf/weights/weight_loader.cpp` | `load_quantized_matrix_impl` を「resolve+partition の wrapper」と `load_quantized_view`（rank-2 canonical → preshuffle → upload 本体）へ**抽出分割**（挙動不変）。新規は axis-slice ローダ 2 関数のみ |
 | `tests/unit/expert_slice_fixture.h` | synthetic fixture（BF16 rank-3 + FP8 codes rank-3 + BF16 scale rank-3 + config の `quantization_config`）。実 checkpoint 非依存 |
 | `tests/unit/test_expert_slice_fixture.cpp` | CPU required |
 | `tests/unit/test_expert_slice_load.hip` | GPU required |
@@ -386,7 +386,7 @@ Fallback Read Unaligned Count: 0
 
 ### 検証結果
 
-新規（いずれも `PHASESHIFT_TEST_GPUS=2,3`）:
+新規（いずれも `SHELF_TEST_GPUS=2,3`）:
 
 | テスト | 結果 |
 | --- | --- |
@@ -444,7 +444,7 @@ FP8 の非ゼロ誤差は E4M3 encode の host 表 vs device intrinsic の丸め
 | PLE conv state | `GDN_CONV_STATE` の `state_index` で表現可能（docs §13） | `GdnStatePoolLayout` は `conv_history` を pool 全体単一値（=4）で保持し、PLE の 9 を保持不可 | **model-local `PleConvState`**、共通 `GdnStatePool` は非変更 |
 | splitmix64 | 既存の有無を確認 | `sampling_splitmix64`（`sampling_common.h`）は算法は同一だが **HIP device 前提**で host 経路に include 不適 | PLE 側に独立配置 |
 
-**検証結果**（いずれも `PHASESHIFT_TEST_GPUS=2,3`）:
+**検証結果**（いずれも `SHELF_TEST_GPUS=2,3`）:
 
 | テスト | 結果 | 誤差指標 |
 | --- | --- | --- |
@@ -696,7 +696,7 @@ conv（境界でも無損）/ recurrent（fp16 丸めも同一）/ KV append 継
 
 なお本 Gate の範囲は「小型 fixture での検証」であり、以下は**引き継ぐ残課題**（G5 の
 PASS 条件には含まれない）:
-- entrypoint（`phaseshift-compute` / `phaseshift-bench`）からの起動経路、
+- entrypoint（`shelf-compute` / `shelf-bench`）からの起動経路、
   `ContinuousBatcher` / `PrefixCache` との統合（state の保存・復元構造は
   `source_audit.md` 付録 G に記録済み）
 - optimized dispatch 接続（GR / MoE / QSA は現状 correctness fallback。
@@ -882,7 +882,7 @@ graph を分割する必要がある（手順書 §0 に従い §2 と lowering 
 
 **回帰**: `test_qwen4exp_lowering_contract` / `test_qwen4exp_forward_fixture` /
 `test_qwen4exp_weights` / `test_ple_row_gather` / `test_architecture_boundaries` の
-**5/5 PASS**（`PHASESHIFT_TEST_GPUS=2,3`）。
+**5/5 PASS**（`SHELF_TEST_GPUS=2,3`）。
 
 ### round 3 の分担（G5 の残り）
 
@@ -905,7 +905,7 @@ cancel / EOS / 状態破棄）は G5d が state owner レベルで、forward fix
 したがって **`Executor` / `ContinuousBatcher` 経由の mini runtime は §10 の PASS 条件を
 満たすために必須ではない**と判断する。ただし次の点は後続課題として記録する:
 
-- `phaseshift-compute` / `phaseshift-bench` から qwen4exp を起動する経路（entrypoint 接続）
+- `shelf-compute` / `shelf-bench` から qwen4exp を起動する経路（entrypoint 接続）
 - `ContinuousBatcher` との統合、`PrefixCache` への新 state の保存・復元
   （構造と owner は `source_audit.md` 付録 G に記録済み）
 - optimized 経路（correctness fallback で動いている GR / MoE / QSA の optimized 接続）
@@ -917,7 +917,7 @@ round 3 までに G5 の PASS 条件は全項目が充足した（下の表）�
 
 | 項目 | 状態 | 引き継ぎ先 |
 | --- | --- | --- |
-| entrypoint（`phaseshift-compute` / `phaseshift-bench`）からの起動経路 | 未着手 | 後続（mini runtime） |
+| entrypoint（`shelf-compute` / `shelf-bench`）からの起動経路 | 未着手 | 後続（mini runtime） |
 | `ContinuousBatcher` / `PrefixCache` との統合（新 state の保存・復元） | 構造と owner を `source_audit.md` 付録 G に記録済み、実装は未 | 後続 |
 | optimized dispatch 接続（GR / MoE / QSA は現状 correctness fallback） | 未着手。`kernels/optimized/moe_ops.hip` は router 出力が row_stride 契約に未対応 | 後続 |
 | `PrimitiveStateKind::INDEXER_KEY_CACHE` の登録 | 未着手（G5c との衝突回避で保留。pool は `IndexerKeyPool` として実装済み） | 後続 |

@@ -1,5 +1,5 @@
-#include <phaseshift/quantization/fp8/fp8.h>
-#include <phaseshift/quantization/manifest/runtime_resolution.h>
+#include <shelf/quantization/fp8/fp8.h>
+#include <shelf/quantization/manifest/runtime_resolution.h>
 
 #include <algorithm>
 #include <cmath>
@@ -150,8 +150,8 @@ static QuantizedTensorMetadata fp8_tensor() {
     t.layout = kFp8LayoutName;
     t.logical_shape = {8, 128};
     t.k_padded = 128;
-    t.codes = QuantizedTensorRef{"w.__phaseshift_codes", "U8", "0x00000000"};
-    t.metadata1 = QuantizedTensorRef{"w.__phaseshift_metadata1", "F32", "0x00000000"};
+    t.codes = QuantizedTensorRef{"w.__shelf_codes", "U8", "0x00000000"};
+    t.metadata1 = QuantizedTensorRef{"w.__shelf_metadata1", "F32", "0x00000000"};
     return t;
 }
 

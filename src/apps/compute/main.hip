@@ -2,11 +2,11 @@
 #include "single_request.h"
 #include "stdio_server.h"
 
-#include <phaseshift/models/model_source.h>
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/model/rope_profile.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/model_source.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/model/rope_profile.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
 
 #include <algorithm>
 #include <cstdio>

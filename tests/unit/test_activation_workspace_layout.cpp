@@ -1,6 +1,6 @@
-#include <phaseshift/quantization/quant_spec.h>
-#include <phaseshift/runtime/program/activation_workspace_layout.h>
-#include <phaseshift/runtime/program/int8_activation_workspace.h>
+#include <shelf/quantization/quant_spec.h>
+#include <shelf/runtime/program/activation_workspace_layout.h>
+#include <shelf/runtime/program/int8_activation_workspace.h>
 
 #include <cstdint>
 #include <cstdio>

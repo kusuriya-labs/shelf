@@ -1,4 +1,4 @@
-#include <phaseshift/inference/execution/selectors/embedding_selector.h>
+#include <shelf/inference/execution/selectors/embedding_selector.h>
 
 #include <cstdio>
 

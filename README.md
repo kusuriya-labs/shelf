@@ -1,4 +1,4 @@
-# PhaseShift
+# Shelf
 
 AMD RDNA4 GPU向けの単一ハードウェア推論ランタイムの研究プロジェクト。
 
@@ -11,7 +11,7 @@ AMD RDNA4 GPU向けの単一ハードウェア推論ランタイムの研究プ�
 ## Current scope
 
 - ハードウェア: AMD RDNA4（gfx1201、R9700）/ ROCm / HIP / Linux
-- Runtime family: Qwen3.5 系 runtime（コード上は `src/phaseshift/models/qwen35/`）
+- Runtime family: Qwen3.5 系 runtime（コード上は `src/shelf/models/qwen35/`）
 - 主要 performance target: **Qwen3.8-27B の HF FP8（`models/Qwen3.8-27B-FP8`）と BF16**
 - Speculative decode: **DFlash2** drafter（Qwen3.8-27B target + DFlash2）
 - KVキャッシュ: paged KV、BF16 / FP8_E4M3
@@ -36,7 +36,7 @@ performance target に Qwen3.8-27B の HF FP8 / BF16 model を使っている。
 
 ## Server
 
-`phaseshift-server` は aiohttp による OpenAI Chat Completions adapter である。
+`shelf-server` は aiohttp による OpenAI Chat Completions adapter である。
 利用方法は [docs/user/server.md](docs/user/server.md)、Server の責務境界は
 [docs/developer/architecture.md](docs/developer/architecture.md)、developer 向け入口は
 [docs/developer/server_status.md](docs/developer/server_status.md) を参照。prefix cache の
@@ -46,10 +46,10 @@ protocol contract は [docs/developer/prefix_cache.md](docs/developer/prefix_cac
 
 | 名 | 用途 |
 |---|---|
-| `phaseshift-compute` | 単一request推論（BF16 / 量子化model、greedy、DFlash2 speculative decode） |
-| `phaseshift-launcher` | resident model host の統括（Python） |
-| `phaseshift-server` | OpenAI互換chat serving（[docs/user/server.md](docs/user/server.md)） |
-| `phaseshift-bench` | prefill/decode E2E + kernel/operator micro-benchmarks（[docs/user/bench.md](docs/user/bench.md)） |
+| `shelf-compute` | 単一request推論（BF16 / 量子化model、greedy、DFlash2 speculative decode） |
+| `shelf-launcher` | resident model host の統括（Python） |
+| `shelf-server` | OpenAI互換chat serving（[docs/user/server.md](docs/user/server.md)） |
+| `shelf-bench` | prefill/decode E2E + kernel/operator micro-benchmarks（[docs/user/bench.md](docs/user/bench.md)） |
 
 ## Build
 
@@ -57,7 +57,7 @@ protocol contract は [docs/developer/prefix_cache.md](docs/developer/prefix_cac
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DPHASESHIFT_ROCM_ROOT="$(rocm-sdk path --root)" \
+  -DSHELF_ROCM_ROOT="$(rocm-sdk path --root)" \
   -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" \
   -DCMAKE_HIP_COMPILER_ROCM_ROOT="$(rocm-sdk path --root)" \
   -DCMAKE_HIP_ARCHITECTURES=gfx1201
@@ -67,7 +67,7 @@ cmake --build build --parallel
 HIP graph execution mode を使う場合は別 option で指定する。
 
 ```bash
-cmake -S . -B build -DPHASESHIFT_HIP_GRAPH=ON
+cmake -S . -B build -DSHELF_HIP_GRAPH=ON
 ```
 
 要件・option 一覧: [docs/user/build.md](docs/user/build.md)。
@@ -83,7 +83,7 @@ ctest --test-dir build -L required --output-on-failure
 ```
 
 optional: external model を要する heavy test（DFlash2 gate /
-TP / MTP weight contract / FP8 KV quality gate）。`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON`
+TP / MTP weight contract / FP8 KV quality gate）。`SHELF_BUILD_OPTIONAL_TESTS=ON`
 で build。品質 gate は `ctest --test-dir build -L quality` で実行する。
 詳細: [docs/developer/testing.md](docs/developer/testing.md)。
 

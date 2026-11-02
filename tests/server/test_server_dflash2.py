@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DFlash2 構成に対する phaseshift-server の E2E 検証.
+"""DFlash2 構成に対する shelf-server の E2E 検証.
 
 通常の DFlash2 生成（chat / stream / tools / stochastic sampling）が成立し、
 削除した structured output / Responses API が fail-closed であることを確認する.
@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (Checker, ServerHarness, http_get_json,  # noqa: E402
                      http_json, http_post_status, model_dir)
 
-DFLASH2_MODEL_DIR = os.environ.get("PHASESHIFT_DFLASH2_MODEL_DIR")
-KV_DTYPE = os.environ.get("PHASESHIFT_TEST_KV_DTYPE", "fp8")
+DFLASH2_MODEL_DIR = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
+KV_DTYPE = os.environ.get("SHELF_TEST_KV_DTYPE", "fp8")
 
 
 def arena_used_values(log_text: str) -> list[int]:
@@ -54,7 +54,7 @@ def main() -> int:
                             max_concurrent_requests=1,
                             kv_cache_dtype=KV_DTYPE,
                             dflash2_model_dir=DFLASH2_MODEL_DIR,
-                            env={"PHASESHIFT_BATCH_TRACE": "1"},
+                            env={"SHELF_BATCH_TRACE": "1"},
                             startup_timeout=420.0)
     try:
         harness.start()
@@ -80,10 +80,10 @@ def main() -> int:
 
         models = http_get_json(f"{harness.base_url}/models")
         checker.check("model listed",
-                      any(m.get("id") == "phaseshift" for m in models.get("data", [])))
+                      any(m.get("id") == "shelf" for m in models.get("data", [])))
 
         chat = http_json(f"{harness.base_url}/chat/completions", {
-            "model": "phaseshift",
+            "model": "shelf",
             "messages": [{"role": "user", "content": "Say exactly: hello"}],
             "temperature": 0,
             "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False},
@@ -95,7 +95,7 @@ def main() -> int:
                       str(chat["choices"][0]["finish_reason"]))
 
         stochastic = http_json(f"{harness.base_url}/chat/completions", {
-            "model": "phaseshift",
+            "model": "shelf",
             "messages": [{"role": "user", "content": "Say exactly: hello"}],
             "temperature": 0.7, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False},
         })
@@ -105,7 +105,7 @@ def main() -> int:
 
         status, body = http_post_status(
             f"{harness.base_url}/chat/completions",
-            {"model": "phaseshift",
+            {"model": "shelf",
              "messages": [{"role": "user", "content": "Produce the JSON value."}],
              "temperature": 0, "max_tokens": 256, "chat_template_kwargs": {"enable_thinking": False},
              "response_format": {"type": "json_object"}})
@@ -116,7 +116,7 @@ def main() -> int:
                           body[:300])
 
         tools = http_json(f"{harness.base_url}/chat/completions", {
-            "model": "phaseshift",
+            "model": "shelf",
             "messages": [{"role": "user",
                           "content": "大阪の現在の気温をget_weatherで確認して"}],
             "temperature": 0, "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": False}, "tools": TOOLS,
@@ -137,14 +137,14 @@ def main() -> int:
 
         status, body = http_post_status(
             f"{harness.base_url}/responses",
-            {"model": "phaseshift", "input": "Say exactly: ok",
+            {"model": "shelf", "input": "Say exactly: ok",
              "temperature": 0, "max_output_tokens": 16})
         checker.check("responses unsupported", status == 404, f"{status} {body[:300]}")
 
         request = urllib.request.Request(
             f"{harness.base_url}/chat/completions",
             data=json.dumps({
-                "model": "phaseshift",
+                "model": "shelf",
                 "messages": [{"role": "user", "content": "stream test"}],
                 "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False}, "stream": True,
             }).encode("utf-8"),
@@ -182,7 +182,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     if not DFLASH2_MODEL_DIR:
-        print("SKIP: PHASESHIFT_DFLASH2_MODEL_DIR is not set")
+        print("SKIP: SHELF_DFLASH2_MODEL_DIR is not set")
         raise SystemExit(77)
     if not model_dir().is_dir():
         print(f"SKIP: model dir not found: {model_dir()}")

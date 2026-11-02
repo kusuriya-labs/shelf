@@ -1,7 +1,7 @@
 #pragma once
 
-#include <phaseshift/models/qwen35/runtime/runtime_request.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
 
 #include <cstdint>
 

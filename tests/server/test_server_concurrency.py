@@ -36,7 +36,7 @@ WEATHER_TOOL = {
 
 
 def chat_payload(content, max_tokens=16, tools=None, stream=False):
-    payload = {"model": "phaseshift",
+    payload = {"model": "shelf",
                "messages": [{"role": "user", "content": content}],
                "temperature": 0, "max_tokens": max_tokens,
                "chat_template_kwargs": {"enable_thinking": False}}

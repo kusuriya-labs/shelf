@@ -33,14 +33,14 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 - `docs/perf/current.md` の記録（2026-10-20）では FP8 KV は品質ゲート FAIL
   （HF FP8: ppl +28.12% @ctx128 / +29.96% @ctx1600）。
 - 現行ビルドで再測し、YaRN 2x と組み合わせたときの劣化量を分離して記録する。
-- 再測には `phaseshift-bench quality` / `tools/quality_gate.py` を使う。
+- 再測には `shelf-bench quality` / `tools/quality_gate.py` を使う。
 
 ## 4. 未接続・未検証の実装事項
 
 | 項目 | 内容 |
 | --- | --- |
 | correctness の tree positions | `DeviceBatchContext::rope_positions` は書き込み経路が無く、correctness の `exec_rope` は常に `row_positions` にフォールバックする。spec verify で optimized が外れた場合に位置が食い違う可能性がある。inv_freq table と attention factor は Gate 3 で一致済み |
-| HIP Graph | `PHASESHIFT_HIP_GRAPH` は既定 OFF。`graph_eligible` が `tp_schedules.empty()` を要求するため、検証は TP=1 でのみ意味を持つ。capture/replay と GPU ポインタ寿命の確認が未実施 |
+| HIP Graph | `SHELF_HIP_GRAPH` は既定 OFF。`graph_eligible` が `tp_schedules.empty()` を要求するため、検証は TP=1 でのみ意味を持つ。capture/replay と GPU ポインタ寿命の確認が未実施 |
 | MTP | `lower_qwen35_mtp_to_primitives` は profile を受け取るようになったが production 経路に未接続（tests のみ）。「MTP 経路も整合する」完了定義は lowering テストの範囲に限定して扱う |
 | prefix cache のキー | キーはトークン列のみで rope 識別子を含まない。factor はプロセス起動時に固定・キャッシュはプロセスローカルなので現状は安全。factor を実行中に変える機構や永続化を入れる場合はキーへの追加が必要 |
 | uint32 の上限 | 100 万トークン域の `max_seq_len + 1` / `row_positions` の加算順序とオーバーフロー境界の検証（単体テスト）が未実施 |
@@ -64,7 +64,7 @@ serve 経路の TP2 + EAGLE-4 は動作する。契約は
 | --- | --- |
 | シャード後の性能値 | `67886ff` の commit message にある TTFT 2.953 s（3 run の中央値）/ decode 65.5 tok/s（1 run）は `docs/perf/current.md` に未記録。同文書の EAGLE-4 行（62.36 tok/s）はシャード前の measurement revision `c745c31` の値である。5-run で再測し、条件とともに `docs/perf/` へ記録する |
 | 27B の TP2 E2E | 27B の TP2 + EAGLE-4 は serve 経路の手動実測のみで、自動テストが無い。`test_eagle4_tp_forward` は小さい checkpoint の stage 比較であり、実 checkpoint の E2E は `test_dflash2_tp_e2e` 相当の test が無い |
-| serve の tree 経路 | `phaseshift-server` が `--eagle4-tree-width` を露出していないため、TP2 では chain のみ到達可能である。tree は単一 rank でのみ検証済み |
+| serve の tree 経路 | `shelf-server` が `--eagle4-tree-width` を露出していないため、TP2 では chain のみ到達可能である。tree は単一 rank でのみ検証済み |
 | `eagle_ranks` の束縛失敗 | `continuous_batcher.cpp` は executor / context / stream / device のサイズが揃わないと `eagle_ranks` を空のまま渡し、single-rank の draft に静かに落ちる。起動時または job 構築時に error / log を出す |
 
 candidate head の pool は rank ごとの local top-k の和のため、TP2 の候補集合は TP1 と
@@ -115,9 +115,9 @@ candidate head の pool は rank ごとの local top-k の和のため、TP2 の
 
 | 項目 | 結果 |
 | --- | --- |
-| `limit.context` の不整合 | compute に `{"op":"stats"}` と `kv_capacity_snapshot()` を追加し、`/v1/meta` に `kv_cache` を載せた。クライアント用 server を TP2 / FP8 KV / `--max-seq-len 131072` で起動し、`GET /v1/meta` の `max_seq_len=131072` と KV 容量 131104 token（8194 page）、`GET /v1/models` の `context_length=131072`、stream usage の `prompt_tokens=15` / `completion_tokens=3` / `cached_tokens=0` を実測した。`/opt/zen/work/opencode.json` の `limit.context: 131072` はこの値と一致していたため変更なし。DeepSeek Harness は `/opt/zen/.dsh/profiles/web/cordis.patch.yml` の `phaseshift` provider に `contextWindow: 131072` / `maxTokens: 8192` を追加した。起動例と照合手順は [user/server.md](user/server.md) の「client の context 設定」に記載した |
+| `limit.context` の不整合 | compute に `{"op":"stats"}` と `kv_capacity_snapshot()` を追加し、`/v1/meta` に `kv_cache` を載せた。クライアント用 server を TP2 / FP8 KV / `--max-seq-len 131072` で起動し、`GET /v1/meta` の `max_seq_len=131072` と KV 容量 131104 token（8194 page）、`GET /v1/models` の `context_length=131072`、stream usage の `prompt_tokens=15` / `completion_tokens=3` / `cached_tokens=0` を実測した。`/opt/zen/work/opencode.json` の `limit.context: 131072` はこの値と一致していたため変更なし。DeepSeek Harness は `/opt/zen/.dsh/profiles/web/cordis.patch.yml` の `shelf` provider に `contextWindow: 131072` / `maxTokens: 8192` を追加した。起動例と照合手順は [user/server.md](user/server.md) の「client の context 設定」に記載した |
 | 実機での表示確認 | **未実施**。usage チャンクと model 広告の wire は TP2 server で実測済みだが、OpenCode のフッターと DeepSeek Harness の `ContextMeter` / `UsagePill` は UI 操作が必要なため視覚確認は未実施。server は port 8123 で起動したままにしてある |
-| 既存テスト失敗の解消 | harness に `PHASESHIFT_TEST_ARENA_GIB` / `PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB` を追加し、対応 model の 27B-FP8 で server regression を実行した。core 9/9（DFlash2 の 2 件は環境変数不足で skip）、tools 3/3、unsupported 2/2、concurrency-cancel 4/4（`test_server_context_boundary.py` を除く）が PASS。`stream-multiple-chunks` / `single-compute-process` / `content-nonempty` / `finish-reason` も 27B で PASS した。`compute_pids()` は `PHASESHIFT_TEST_OWNER` で自テストが起動した分だけを拾うようにし、`test_compute_pids_scope.py` で固定した。CLI parity は server 終了後に実行するよう変更した。required acceptance は 139/139 PASS（skip 0）|
+| 既存テスト失敗の解消 | harness に `SHELF_TEST_ARENA_GIB` / `SHELF_TEST_WORKING_SET_RESERVE_GIB` を追加し、対応 model の 27B-FP8 で server regression を実行した。core 9/9（DFlash2 の 2 件は環境変数不足で skip）、tools 3/3、unsupported 2/2、concurrency-cancel 4/4（`test_server_context_boundary.py` を除く）が PASS。`stream-multiple-chunks` / `single-compute-process` / `content-nonempty` / `finish-reason` も 27B で PASS した。`compute_pids()` は `SHELF_TEST_OWNER` で自テストが起動した分だけを拾うようにし、`test_compute_pids_scope.py` で固定した。CLI parity は server 終了後に実行するよう変更した。required acceptance は 139/139 PASS（skip 0）|
 | `/v1/meta` に KV 空きが無い | `{"op":"stats"}` を追加し、`ContinuousBatcher::kv_capacity_snapshot()`（物理 page、active、`banker_safe`、`overcommit_pages`）と `queued_count()` を返す。`/v1/meta` の `kv_cache` に page / token 換算と `queued_requests` を載せ、`test_compute_service.py` と `test_server_meta.py` で固定した。5 秒で取得できない場合は `kv_cache: null` を返す |
 | push・worktree | main に commit して `origin/main` へ push した。`feature-server-metadata` worktree は main にマージ済みのため削除した |
 
@@ -149,7 +149,7 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 
 | 項目 | 内容 |
 | --- | --- |
-| entrypoint 接続 | `phaseshift-compute` / `phaseshift-bench` から qwen4exp を起動する経路が未実装。`qwen35::create_model_executor` は `Qwen35Model` と `lower_qwen35_to_primitives` に密結合しており、qwen4exp へは流用できない |
+| entrypoint 接続 | `shelf-compute` / `shelf-bench` から qwen4exp を起動する経路が未実装。`qwen35::create_model_executor` は `Qwen35Model` と `lower_qwen35_to_primitives` に密結合しており、qwen4exp へは流用できない |
 | mini runtime | `models/qwen4exp/runtime/` は state owner のみ。手順書 §10 の PASS 条件は小型 fixture（`lowering → build_program → correctness dispatch` 経由）で充足したが、`ContinuousBatcher` / `Executor` と統合した prefill → decode は未着手 |
 | `PrefixCache` 統合 | 新 state（indexer key / PLE conv / PLE n-gram context）の保存・復元構造と owner は `source_audit.md` 付録 G に記録済み、実装は未。`PrefixCache` へは KV page と GDN state しか渡せていない |
 | optimized dispatch | GR / MoE / QSA は現状 **correctness fallback** で動いている。`optimized_dispatch.hip` への `try_launch_*` の追加が未着手。**`kernels/optimized/moe_ops.hip` は router 出力が row_stride 契約（16B パディング）に未対応**（`kernels/correctness/detail/moe.inc` は修正済み）。接続時はまず row_stride 契約へ揃える |

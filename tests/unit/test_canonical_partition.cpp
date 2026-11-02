@@ -1,7 +1,7 @@
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/quantization/fp8/fp8.h>
-#include <phaseshift/weights/canonical_partition.h>
-#include <phaseshift/weights/tensor_partition.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/fp8/fp8.h>
+#include <shelf/weights/canonical_partition.h>
+#include <shelf/weights/tensor_partition.h>
 
 #include <cstdio>
 #include <cstring>

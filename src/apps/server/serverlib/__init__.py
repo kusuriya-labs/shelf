@@ -1,1 +1,1 @@
-"""PhaseShift server library: OpenAI protocol adapter and compute transport."""
+"""Shelf server library: OpenAI protocol adapter and compute transport."""

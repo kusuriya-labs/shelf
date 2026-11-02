@@ -1,8 +1,8 @@
-#include <phaseshift/models/qwen4exp/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_config.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_weights.h>
-#include <phaseshift/runtime/execution/row_bucket.h>
-#include <phaseshift/runtime/program/program.h>
+#include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_weights.h>
+#include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/runtime/program/program.h>
 
 #include <hip/hip_runtime.h>
 

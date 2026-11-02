@@ -1,6 +1,6 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/models/qwen35/eagle4/tensor_parallel_plan.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/eagle4/tensor_parallel_plan.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
 
 #include "support/eagle4_checkpoint.h"
 

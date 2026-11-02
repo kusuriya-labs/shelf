@@ -1,4 +1,4 @@
-"""Async JSONL client for ``phaseshift-compute --serve-stdio``.
+"""Async JSONL client for ``shelf-compute --serve-stdio``.
 
 One compute process is started per server instance and held for its lifetime.
 The protocol is one JSON object per line. A single stdout reader task routes
@@ -178,7 +178,7 @@ class AsyncComputeClient:
     async def _read_stderr(self) -> None:
         assert self._proc is not None
         assert self._proc.stderr is not None
-        trace_path = os.environ.get("PHASESHIFT_COMPUTE_LOG")
+        trace_path = os.environ.get("SHELF_COMPUTE_LOG")
         try:
             while True:
                 line = await self._proc.stderr.readline()

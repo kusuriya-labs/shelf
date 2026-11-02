@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/optimized/gdn/recurrence.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <cstdint>

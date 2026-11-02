@@ -1,15 +1,15 @@
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/kernels/optimized/rmsnorm.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/graph/primitive_node.h>
-#include <phaseshift/models/qwen35/runtime/selector_types.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/kernels/optimized/rmsnorm.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/graph/primitive_node.h>
+#include <shelf/models/qwen35/runtime/selector_types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdio>
@@ -65,7 +65,7 @@ struct Options {
 
 void usage(FILE* f) {
     fprintf(f,
-        "phaseshift-bench rmsnorm [options]\n"
+        "shelf-bench rmsnorm [options]\n"
         "  --variant correctness|optimized|auto   (default optimized)\n"
         "  --rows 1,2,4,...                       (default 1..2048)\n"
         "  --input-dtype bf16|f32\n"

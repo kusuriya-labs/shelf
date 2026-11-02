@@ -2,7 +2,7 @@
 
 - ID: EAGLE4-PHASE-D-GATE
 - 実施日: 2026-10-23
-- 環境: TP2（device 2/3、`PHASESHIFT_MODEL_HOST_SOCKET` の2台 host、
+- 環境: TP2（device 2/3、`SHELF_MODEL_HOST_SOCKET` の2台 host、
   Qwen3.8-27B-FP8 + Qwen3.8-27B-EAGLE4 / Qwen3.8-27B-DFlash2）
 - 方法: `tools/dgate.py`（single-shot の参照取得 + `--serve-stdio` の
   N 並列 generate、5-run 交互 p50。測定原則は docs/perf/methodology.md に従う）

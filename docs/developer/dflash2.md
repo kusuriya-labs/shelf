@@ -27,10 +27,10 @@ verify し、一致した prefix だけを commit する。
   block-parallel 構成である。提案 block 内は非 causal。
 - target 層数・tap 位置などは drafter の config が宣言し、target の層数と shape に
   突き合わせる。27B の既定は target 64 層、tap `[5, 19, 33, 47, 61]`。
-- runtime 統合は `phaseshift-compute` の `run_dflash2_shot()` にある。executor / pool /
+- runtime 統合は `shelf-compute` の `run_dflash2_shot()` にある。executor / pool /
   arena / stream は `Qwen35ComputeRuntime` の accessor から取得する。
 - `--serve-stdio` は `DFlashServeContext` 経由で同じ decoder 設定を作る。
-  `phaseshift-server` も `--dflash2-model-dir` / `--dflash2-drafts` のみ転送する。
+  `shelf-server` も `--dflash2-model-dir` / `--dflash2-drafts` のみ転送する。
 - serve mode は複数 request の target verify を 1 batch に統合する（batched verify）。
   scheduler の in-flight request をまとめて 1 round 実行し、draft も 1 回の batched
   drafter forward（`dflash2_propose_batch`）で生成する。
@@ -205,7 +205,7 @@ weight を掛ける。
 - `create_dflash2_spec_decoder` の `workspace` 引数が非 null なら decoder はその
   workspace を**借りる**（`owns_workspace = false`、`dflash2_spec_decoder_shutdown` は
   hipEvent を破棄しない）。null なら従来どおり arena から確保して所有する
-  （`phaseshift-compute` の単発経路と unit test がこの経路）。
+  （`shelf-compute` の単発経路と unit test がこの経路）。
 
 ---
 
@@ -292,7 +292,7 @@ argument として渡す。
 - GQA kernel の制限（不成立時は `hipErrorNotSupported`）: `q_heads == 4 * kv_heads`、
   `head_dim == 128`、strides の 8 要素倍数、dynamic LDS ≤ 60KB。executor は既定で GQA を
   使い、NotSupported のとき ring 参照実装へフォールバックする。
-  `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE=1` で参照実装を固定できる。
+  `SHELF_DFLASH2_ATTENTION_REFERENCE=1` で参照実装を固定できる。
 
 ### final normalization / dtype contract
 
@@ -500,7 +500,7 @@ production は `launch_dflash2_topk_f32_optimized`（hierarchical reduction）�
   kDflash2TopKMaxK = 256 * 16 = 4096`）を再利用する。
 - plan は `DFlash2TopKPlan`。production default は partitions=32 / threads=256。
 - `dflash2_select_draft_tokens` は optimized を呼ぶ。`top_k != 16` または
-  `PHASESHIFT_DFLASH2_TOPK_REFERENCE=1` のときは reference に切り替える。
+  `SHELF_DFLASH2_TOPK_REFERENCE=1` のときは reference に切り替える。
 - 契約は不変: logit descending、exact tie は token id ascending、NaN は既存 comparator を
   維持、出力 IDs は exact。
 
@@ -649,7 +649,7 @@ release は `shutdown_dflash2_spec_batch_context()`。
 
 ### device token bridge（batch）
 
-`PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE`（既定 1）が有効で、全 slot の decoder が
+`SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE`（既定 1）が有効で、全 slot の decoder が
 device bridge を許可しているとき、batch 経路は draft を host へ戻さない。
 
 1. slot ごとに anchor を `verify_token_ids_device[row_begin]` へ H2D する
@@ -751,7 +751,7 @@ target verify の GDN recurrence 本体:
 - verify（`role == Verify`）は exact 系 variant を固定選択する
   （`DecodeRowsExact` / `Decode1Serial` / `WmmaSerial`、非対応は `F32`）。
 - `DecodeRowsExact` は 27B geometry（`head_k == 128` かつ `head_v % 64 == 0`）∧
-  `decode_rows_supported` ∧ `PHASESHIFT_GDN_RECURRENCE_MULTIROW`（既定 1）で選ぶ。
+  `decode_rows_supported` ∧ `SHELF_GDN_RECURRENCE_MULTIROW`（既定 1）で選ぶ。
   それ以外は `num_requests == 1` ∧ `decode1_supported` なら `Decode1Serial`、
   `geo_ok` なら `WmmaSerial` に落ちる。
 - decode / prefill は `WmmaDecode1` / `Wmma` / `F32` の通常選択のままである
@@ -785,7 +785,7 @@ DFlash proposal を Host へ戻さず、そのまま target verify の入力に�
 
 ### env
 
-`PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE`（既定 1）。
+`SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE`（既定 1）。
 
 - `1`: candidate device-resident bridge。
 - `0`: legacy Host bridge（A/B と regression 調査用）。
@@ -851,7 +851,7 @@ samples を別途 D2H する。
 
 ## Runtime configuration
 
-### CLI（`phaseshift-compute`）
+### CLI（`shelf-compute`）
 
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
@@ -859,14 +859,14 @@ samples を別途 D2H する。
 
 DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path である。
 
-`phaseshift-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
-`phaseshift-compute` へ転送する（= compute の既定をそのまま使う）。
-`phaseshift-launcher` も drafter の option を child に透過する。
+`shelf-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
+`shelf-compute` へ転送する（= compute の既定をそのまま使う）。
+`shelf-launcher` も drafter の option を child に透過する。
 
 ### constrained lm_head（DFlash2 有効時）
 
 DFlash2 有効時も constrained LM head の候補展開最適化
-（`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT`）は既定 0（無効）である。
+（`SHELF_CONSTRAINT_LM_HEAD_EXACT`）は既定 0（無効）である。
 target verify も通常の forward 経路と同じ kernel を使うため、数値契約は
 [../developer/qwen35.md](qwen35.md) §7.1 に従う。
 
@@ -908,7 +908,7 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 
 - `target_hidden_taps = dflash_config.target_layer_ids`、順序も config 通り
 - `target_hidden_tap_count = dflash_config.num_target_layer_ids`
-- `max_scheduled_output_rows = block_size`（`phaseshift-compute` の単一 request 経路）。
+- `max_scheduled_output_rows = block_size`（`shelf-compute` の単一 request 経路）。
   serve mode では `min(max_concurrent_requests × block_size, kDFlash2SpecMaxVerifyRows)`
   であり、1 round の batch verify 行合計の上限になる。
 - `max_scheduled_tokens = min(2048, max(prompt_tokens, block_size))`
@@ -936,13 +936,13 @@ serve の既定（`max_concurrent_requests × block_size`）ではこの値が�
 
 | env | 既定 | 意味 |
 | --- | --- | --- |
-| `PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE` | 1 | 0 で legacy Host bridge（単一 / batch 経路の両方） |
-| `PHASESHIFT_DFLASH2_HOST_PROPOSAL_D2H` | 0 | 1 で proposal を host へ戻して可視化（timing 用） |
-| `PHASESHIFT_DFLASH2_SERVE_STATS` | 0 | 1 で serve 終了時に `DFLASH2_*` を stderr へ出す |
-| `PHASESHIFT_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
-| `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
-| `PHASESHIFT_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
-| `PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT` | 0（無効） | constrained LM head 候補展開の opt-in |
+| `SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE` | 1 | 0 で legacy Host bridge（単一 / batch 経路の両方） |
+| `SHELF_DFLASH2_HOST_PROPOSAL_D2H` | 0 | 1 で proposal を host へ戻して可視化（timing 用） |
+| `SHELF_DFLASH2_SERVE_STATS` | 0 | 1 で serve 終了時に `DFLASH2_*` を stderr へ出す |
+| `SHELF_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
+| `SHELF_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
+| `SHELF_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
+| `SHELF_CONSTRAINT_LM_HEAD_EXACT` | 0（無効） | constrained LM head 候補展開の opt-in |
 
 ### resource lifecycle
 
@@ -1025,13 +1025,13 @@ DFLASH2_ROUND_MS
 
 ### drafter
 
-- `include/phaseshift/models/qwen35/dflash2/{config.h,weights.h,executor.h,context_state.h}`
-- `src/phaseshift/models/qwen35/dflash2/{config.cpp,weights.cpp,executor.hip,context_state.hip}`
+- `include/shelf/models/qwen35/dflash2/{config.h,weights.h,executor.h,context_state.h}`
+- `src/shelf/models/qwen35/dflash2/{config.cpp,weights.cpp,executor.hip,context_state.hip}`
 
 ### kernels
 
-- `include/phaseshift/models/qwen35/kernels/dflash2/` と
-  `src/phaseshift/models/qwen35/kernels/dflash2/`
+- `include/shelf/models/qwen35/kernels/dflash2/` と
+  `src/shelf/models/qwen35/kernels/dflash2/`
   - `feature_concat` / `grouped_dynamic_conv` / `rmsnorm` / `rope` /
     `swiglu` / `attention` / `kv_ring` / `noise_input`
   - `candidate_selector` / `topk` / `topk_optimized`
@@ -1041,12 +1041,12 @@ DFLASH2_ROUND_MS
 
 ### runtime
 
-- `include/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h`
-- `src/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.cpp`
-- `src/phaseshift/models/qwen35/runtime/gdn_spec_history.hip` と
-  `include/phaseshift/models/qwen35/runtime/gdn_spec_history.h`
-- `src/phaseshift/models/qwen35/runtime/spec_decode.{h,cpp}`
-- `include/phaseshift/inference/scheduling/scheduled_batch.h`
+- `include/shelf/models/qwen35/runtime/dflash2_spec_decoder.h`
+- `src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp`
+- `src/shelf/models/qwen35/runtime/gdn_spec_history.hip` と
+  `include/shelf/models/qwen35/runtime/gdn_spec_history.h`
+- `src/shelf/models/qwen35/runtime/spec_decode.{h,cpp}`
+- `include/shelf/inference/scheduling/scheduled_batch.h`
 
 ### apps
 

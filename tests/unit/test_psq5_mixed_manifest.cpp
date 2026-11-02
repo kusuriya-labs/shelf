@@ -1,5 +1,5 @@
-#include <phaseshift/quantization/bundle/psq5_manifest.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/bundle/psq5_manifest.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
 
 #include <cstdio>
 #include <string>

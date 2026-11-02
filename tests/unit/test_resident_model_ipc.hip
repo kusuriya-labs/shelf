@@ -1,10 +1,10 @@
 #include "support/resident_model_fixture.h"
 
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/io/safetensors_reader.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/resident/resident_client.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/resident/resident_client.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 
@@ -28,8 +28,8 @@ void check(bool cond, const std::string& message) {
 }
 
 std::string model_dir_from_env() {
-    const char* names[] = {"PHASESHIFT_MODEL_DIR",
-                           "PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"};
+    const char* names[] = {"SHELF_MODEL_DIR",
+                           "SHELF_MODEL_DIR_DFLASH2_TARGET"};
     for (const char* name : names) {
         const char* value = std::getenv(name);
         if (value != nullptr && value[0] != '\0') {
@@ -63,7 +63,7 @@ int main() {
     }
     const std::string model_dir = model_dir_from_env();
     if (model_dir.empty()) {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR\n");
+        std::printf("SKIP: set SHELF_MODEL_DIR\n");
         return 77;
     }
     if (!std::filesystem::exists(model_dir)) {

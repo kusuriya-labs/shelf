@@ -3,16 +3,16 @@
 - 実施日: 2026-10-23
 - モデル: `models/Qwen3.8-27B-FP8`
 - GPU: AMD Radeon AI PRO R9700 1 枚（device 0）
-- 環境: `PHASESHIFT_TEST_DEVICE=0 PHASESHIFT_TEST_ARENA_GIB=31
-  PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB=1`、`--max-seq-len 1024`（reasoning 系 E2E）
+- 環境: `SHELF_TEST_DEVICE=0 SHELF_TEST_ARENA_GIB=31
+  SHELF_TEST_WORKING_SET_RESERVE_GIB=1`、`--max-seq-len 1024`（reasoning 系 E2E）
 
 ## 1. 実行コマンド
 
 ```bash
-export PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-FP8
-export PHASESHIFT_TEST_DEVICE=0
-export PHASESHIFT_TEST_ARENA_GIB=31
-export PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB=1
+export SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8
+export SHELF_TEST_DEVICE=0
+export SHELF_TEST_ARENA_GIB=31
+export SHELF_TEST_WORKING_SET_RESERVE_GIB=1
 python3 tests/server/run_server_regression.py --group reasoning --group core \
     --group tools --group unsupported --group concurrency-cancel
 ```
@@ -73,7 +73,7 @@ python3 tests/server/run_server_regression.py --group reasoning --group core \
 | concurrency-cancel | `test_server_stream_cancel.py` | PASS 6 |
 
 `core` の `test_compute_dflash2.py` / `test_server_dflash2.py` は
-`PHASESHIFT_DFLASH2_MODEL_DIR` 未設定のため SKIP（従来どおり）。
+`SHELF_DFLASH2_MODEL_DIR` 未設定のため SKIP（従来どおり）。
 
 ## 5. 初回回帰で検出した 2 件
 
@@ -82,9 +82,9 @@ python3 tests/server/run_server_regression.py --group reasoning --group core \
 初回は `cli_generated_ids()` が固定で device 1 を使うため、device 1 が別 workload に
 占有されているホストで `hipMalloc failed` になった。server 側の 8 checks は全て PASS。
 
-CLI parity は server 終了後に実行されるため、`PHASESHIFT_TEST_DEVICE`（server が使った
+CLI parity は server 終了後に実行されるため、`SHELF_TEST_DEVICE`（server が使った
 device）で実行すれば十分である。`cli_generated_ids()` の device 既定を
-`PHASESHIFT_TEST_DEVICE` に従わせ、再実行で 10/10 PASS を確認した。
+`SHELF_TEST_DEVICE` に従わせ、再実行で 10/10 PASS を確認した。
 
 ### 5.2 `test_server_context_boundary.py`（環境制約。本変更と無関係）
 
@@ -102,7 +102,7 @@ prefix cache 1.58 GiB / required 35.03 GiB / available 31.00 GiB
 
 | 項目 | 理由 |
 | --- | --- |
-| DFlash2（E13） | drafter 3.6 GB + target 27.45 GiB + prefix cache 1.58 GiB が 31 GiB arena に収まらない。`PHASESHIFT_DFLASH2_MODEL_DIR` を設定した回帰は 1 枚 32 GiB では起動できない |
+| DFlash2（E13） | drafter 3.6 GB + target 27.45 GiB + prefix cache 1.58 GiB が 31 GiB arena に収まらない。`SHELF_DFLASH2_MODEL_DIR` を設定した回帰は 1 枚 32 GiB では起動できない |
 | EAGLE4（E14） | drafter 5.8 GB。同上。加えて TP2 向け EAGLE4 の変更は revert 済みで、単一 GPU の EAGLE4 回帰は本作業の対象外 |
 | OpenCode agent（E18） | `MODEL_CONTEXT=32768` 固定のため起動時に `fits 14640 KV tokens but max_seq_len 32768 needs 32769` で失敗する（§5.2 と同じ制約）。E17 の OpenAI Python SDK 経由で `reasoning_content` の受信は確認した |
 | 品質ベンチマーク（`tests/data/quality/reasoning.json` 等） | Thinking ON の新ベースラインは未採取。旧 baseline は `enable_thinking=false` で採点しており、比較条件が異なる |
@@ -110,8 +110,8 @@ prefix cache 1.58 GiB / required 35.03 GiB / available 31.00 GiB
 
 ## 7. 備考
 
-- E2E の実行には、リポジトリ外の `/tmp` wrapper（`phaseshift_server.py` を直接起動する
-  シェルスクリプト）を使った。worktree には build 成果物を置かず、`phaseshift-compute` は
+- E2E の実行には、リポジトリ外の `/tmp` wrapper（`shelf_server.py` を直接起動する
+  シェルスクリプト）を使った。worktree には build 成果物を置かず、`shelf-compute` は
   メインの build を使用している。リポジトリへの追加物はない。
 - 単体試験と E2E の PASS は別物として扱った。境界判定の正しさの正本は
   `test_reasoning_parser.py` と `test_reasoning_request.py` の固定 Token 列であり、

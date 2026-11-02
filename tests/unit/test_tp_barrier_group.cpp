@@ -1,6 +1,6 @@
-#include <phaseshift/runtime/tp/tp_barrier_group.h>
+#include <shelf/runtime/tp/tp_barrier_group.h>
 
-#include "phaseshift/runtime/tp/tp_transport_internal.h"
+#include "shelf/runtime/tp/tp_transport_internal.h"
 
 #include <hip/hip_runtime.h>
 

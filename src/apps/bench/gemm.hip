@@ -1,17 +1,17 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/kernels/correctness/standalone/gemm_bf16_correctness.h>
-#include <phaseshift/kernels/optimized/linear/fp8.h>
-#include <phaseshift/kernels/optimized/linear/psq5.h>
-#include <phaseshift/kernels/optimized/linear/bf16.h>
-#include <phaseshift/kernels/optimized/activation_quantize.h>
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/swiglu.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/qwen35/runtime/selector_types.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/kernels/correctness/standalone/gemm_bf16_correctness.h>
+#include <shelf/kernels/optimized/linear/fp8.h>
+#include <shelf/kernels/optimized/linear/psq5.h>
+#include <shelf/kernels/optimized/linear/bf16.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/qwen35/runtime/selector_types.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -49,7 +49,7 @@ struct Options {
 
 void usage(FILE* f) {
     fprintf(f,
-        "phaseshift-bench gemm [options]\n"
+        "shelf-bench gemm [options]\n"
         "\n"
         "  --dtype bf16|fp8|psq5              (logical weight/compute family, default bf16)\n"
         "  --variant correctness|gemm|auto\n"
@@ -785,7 +785,7 @@ int run_gemm_psq5(Options& o) {
                 ps::execution::Fp8GemmSelectorInput{rows, n, shape.k, kp});
             ps::kernel::Psq5GemmConfig psq5_cfg =
                 psq5_sel ? *psq5_sel : ps::kernel::Psq5GemmConfig{ps::kernel::Psq5GemmConfigId::RowBlock1};
-            static const char* psq5_force = std::getenv("PHASESHIFT_PSQ5_GEMM_CONFIG");
+            static const char* psq5_force = std::getenv("SHELF_PSQ5_GEMM_CONFIG");
             if (psq5_force != nullptr && psq5_force[0] != '\0') {
                 using Id = ps::kernel::Psq5GemmConfigId;
                 if (std::strcmp(psq5_force, "rowblock1") == 0)

@@ -40,7 +40,7 @@ def main() -> int:
     try:
         with ServerHarness(max_concurrent_requests=1) as server:
             meta = http_get_json(f"{server.base_url}/meta")
-            checker.check("model", meta.get("model") == "phaseshift", repr(meta))
+            checker.check("model", meta.get("model") == "shelf", repr(meta))
             checker.check("max-seq-len",
                           meta.get("max_seq_len") == server.max_seq_len, repr(meta))
             checker.check("max-concurrent-requests",
@@ -87,7 +87,7 @@ def main() -> int:
             long_run = threading.Thread(
                 target=lambda: list(http_sse(
                     f"{server.base_url}/chat/completions",
-                    {"model": "phaseshift", "messages": MESSAGES, "stream": True,
+                    {"model": "shelf", "messages": MESSAGES, "stream": True,
                      "temperature": 0, "max_tokens": 384, "chat_template_kwargs": {"enable_thinking": False}})),
                 daemon=True)
             long_run.start()
@@ -102,7 +102,7 @@ def main() -> int:
             waiter = threading.Thread(
                 target=lambda: list(http_sse(
                     f"{server.base_url}/chat/completions",
-                    {"model": "phaseshift", "messages": MESSAGES, "stream": True,
+                    {"model": "shelf", "messages": MESSAGES, "stream": True,
                      "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False}})),
                 daemon=True)
             waiter.start()

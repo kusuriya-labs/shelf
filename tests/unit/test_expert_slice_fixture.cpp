@@ -1,8 +1,8 @@
-#include <phaseshift/io/safetensors_reader.h>
-#include <phaseshift/quantization/bundle/hf_manifest.h>
-#include <phaseshift/quantization/fp8/fp8.h>
-#include <phaseshift/quantization/fp8/fp8_native.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/fp8/fp8.h>
+#include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/weights/weight_loader.h>
 
 #include "expert_slice_fixture.h"
 

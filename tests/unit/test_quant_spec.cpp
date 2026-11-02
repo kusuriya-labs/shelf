@@ -1,6 +1,6 @@
-#include <phaseshift/quantization/payload_descriptor.h>
-#include <phaseshift/quantization/quant_contract.h>
-#include <phaseshift/quantization/quant_spec.h>
+#include <shelf/quantization/payload_descriptor.h>
+#include <shelf/quantization/quant_contract.h>
+#include <shelf/quantization/quant_spec.h>
 #include <cstdio>
 
 using namespace ps::quantization;

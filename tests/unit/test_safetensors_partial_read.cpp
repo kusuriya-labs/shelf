@@ -1,6 +1,6 @@
-#include <phaseshift/io/safetensors_reader.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <cstdint>
 #include <cstdio>

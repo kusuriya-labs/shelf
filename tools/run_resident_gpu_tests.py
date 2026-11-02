@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Resident model session runner for the heavy GPU test executables.
 
-Starts one phaseshift-model-host per session, then launches each
+Starts one shelf-model-host per session, then launches each
 selected test as its own worker process with the resident socket in the
 environment.  The host owns the compact resident weight block; workers own
 only ephemeral state and are killed as a process group on deadline.
@@ -101,9 +101,9 @@ def dirs_for_profile(profile: str) -> Tuple[List[str], List[str]]:
     from resident_session import existing_dir
 
     target = existing_dir(
-        os.environ.get("PHASESHIFT_SERVER_MODEL_DIR"),
-        os.environ.get("PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"),
-        os.environ.get("PHASESHIFT_MODEL_DIR"),
+        os.environ.get("SHELF_SERVER_MODEL_DIR"),
+        os.environ.get("SHELF_MODEL_DIR_DFLASH2_TARGET"),
+        os.environ.get("SHELF_MODEL_DIR"),
     )
     drafts = dflash2_dirs_from_env()
     if profile == PROFILE_DRAFT:
@@ -261,10 +261,10 @@ def main() -> int:
 
     env = dict(os.environ)
     env[SOCKET_ENV] = socket_mapping()
-    env["PHASESHIFT_TEST_STATS_SOCKET"] = sessions[0].socket_path
+    env["SHELF_TEST_STATS_SOCKET"] = sessions[0].socket_path
     if args.disable_resident:
         env[DISABLE_ENV] = "1"
-    env.setdefault("PHASESHIFT_TEST_DEVICE", str(devices[0]))
+    env.setdefault("SHELF_TEST_DEVICE", str(devices[0]))
 
     results: List[Tuple[str, int, float, bool]] = []
     abort = False
@@ -275,7 +275,7 @@ def main() -> int:
         if (build_dir / "tests" / worker).is_file():
             print(f"----- fault injection: {worker} deadline={args.fault_timeout}s")
             fault_env = dict(env)
-            fault_env["PHASESHIFT_TEST_SLEEP_SEC"] = "3600"
+            fault_env["SHELF_TEST_SLEEP_SEC"] = "3600"
             loads_before = total_loads()
             rc, elapsed, timed_out, output = run_worker(
                 build_dir, worker, fault_env, args.fault_timeout)

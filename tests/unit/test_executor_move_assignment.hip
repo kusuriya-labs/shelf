@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/runtime/stream_bridge.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/runtime/stream_bridge.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdio>

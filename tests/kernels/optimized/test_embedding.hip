@@ -1,10 +1,10 @@
-#include <phaseshift/kernels/optimized/embedding.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/runtime/batch/device_batch_context.h>
+#include <shelf/kernels/optimized/embedding.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/runtime/batch/device_batch_context.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

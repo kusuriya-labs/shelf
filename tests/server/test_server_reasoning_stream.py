@@ -80,12 +80,12 @@ def stream(server, payload):
 def check_stream_parity(checker, server, processor, token_log):
     non = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": QUESTION}],
          "temperature": 0, "max_completion_tokens": 768})
 
     result = stream(server, {
-        "model": "phaseshift",
+        "model": "shelf",
         "messages": [{"role": "user", "content": QUESTION}],
         "temperature": 0, "max_completion_tokens": 768, "stream": True,
         "stream_options": {"include_usage": True}})
@@ -127,7 +127,7 @@ def check_stream_parity(checker, server, processor, token_log):
                       result["content"] == split.answer, "")
 
     repeat = stream(server, {
-        "model": "phaseshift",
+        "model": "shelf",
         "messages": [{"role": "user", "content": QUESTION}],
         "temperature": 0, "max_completion_tokens": 768, "stream": True})
     checker.check("e02-repeat-deterministic",
@@ -138,12 +138,12 @@ def check_stream_parity(checker, server, processor, token_log):
 def check_stream_without_thinking(checker, server):
     non = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": PLAIN_QUESTION}],
          "temperature": 0, "max_completion_tokens": 64,
          "chat_template_kwargs": {"enable_thinking": False}})
     result = stream(server, {
-        "model": "phaseshift",
+        "model": "shelf",
         "messages": [{"role": "user", "content": PLAIN_QUESTION}],
         "temperature": 0, "max_completion_tokens": 64, "stream": True,
         "chat_template_kwargs": {"enable_thinking": False}})
@@ -161,11 +161,11 @@ def check_concurrent_mixed(checker, server):
         results[name] = stream(server, payload)
 
     thinking = {
-        "model": "phaseshift",
+        "model": "shelf",
         "messages": [{"role": "user", "content": QUESTION}],
         "temperature": 0, "max_completion_tokens": 384, "stream": True}
     plain = {
-        "model": "phaseshift",
+        "model": "shelf",
         "messages": [{"role": "user", "content": PLAIN_QUESTION}],
         "temperature": 0, "max_completion_tokens": 64, "stream": True,
         "chat_template_kwargs": {"enable_thinking": False}}
@@ -205,7 +205,7 @@ def main() -> int:
     try:
         processor = load_processor()
         with ServerHarness(max_seq_len=1024, max_concurrent_requests=2,
-                           env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
+                           env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:
             check_stream_parity(checker, server, processor, token_log)
             check_stream_without_thinking(checker, server)
             check_concurrent_mixed(checker, server)

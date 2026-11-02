@@ -55,7 +55,7 @@ python3 docs/research/20261023/scale_eval.py \
 | 候補 | 判定 | 根拠 |
 |---|---|---|
 | **ue4m4** | **ACCEPT（既定）** | 1byte のまま scale 誤差が最小（下限比 0.9995、平均 1.10%）。5.25bpw を維持 |
-| ue4m3 | ACCEPT（切替可能として実装） | PhaseShift 既存 codec をそのまま使える（下限比 1.0175） |
+| ue4m3 | ACCEPT（切替可能として実装） | Shelf 既存 codec をそのまま使える（下限比 1.0175） |
 | fp16 / bf16 | REJECT（既定にしない） | 下限比は 1.0000 / 1.0003 と最良だが bpw が 5.25 → 5.50（+4.8%）となり、仕様の 8bit scale 目標に反する。`scale_format` として実装は維持 |
 | e8m0 | **REJECT** | 下限比 1.8773。対数軸の丸めのため fold しても改善しない（fold / unfold が同値） |
 | ue4m3_unfold | **REJECT** | 下限比 1.7501、max 3162.8。subnormal の絶対刻みに落ちる |
@@ -104,7 +104,7 @@ python3 tools/quantize_psq5.py \
 - **AWQ 前処理は未適用**。manifest の `pre_quant_optimization = none`。
   理由: DFlash2 は HF 互換の Python モデルクラスを持たず、calibration forward を要する
   Quark の AWQ algorithm を実行できないため。ディレクトリ名は指示の表記に従った。
-- PhaseShift runtime は **読込不可**（対応 format は BF16 / FP8 E4M3 のみ）。
+- Shelf runtime は **読込不可**（対応 format は BF16 / FP8 E4M3 のみ）。
 - 判定: **ACCEPT**（artifact として成立。runtime 接続は範囲外）
 
 ## 再現条件
@@ -123,7 +123,7 @@ git clone --depth 1 --branch release/0.13 https://github.com/amd/quark vendor/qu
 - 非改変の確認: `git -C vendor/quark status --porcelain` と `git diff --stat` がともに空
   （追加は `quark/torch/kernel/hw_emulation/lib/libhw_emulation_gpu.so` のみ、upstream の
   `.gitignore` 対象）
-- 本体（PhaseShift）側に patch は入れていない
+- 本体（Shelf）側に patch は入れていない
 - 補足: 親リポジトリから見れば nested `.git` なので `git add vendor/quark` は
   gitlink 扱いになる。取り扱い（submodule 化 / ignore）は未決定。
 
@@ -154,8 +154,8 @@ python3 docs/research/20261023/scale_eval.py --model-dir <dir> --cache-dir <dir>
 
 ## 未実施事項
 
-- PhaseShift 本体の読込対応（manifest の encoding、codec、kernel）
-- `ue4m4` の PhaseShift 側 codec（host / device）。既存は `ue4m3` のみで、
+- Shelf 本体の読込対応（manifest の encoding、codec、kernel）
+- `ue4m4` の Shelf 側 codec（host / device）。既存は `ue4m3` のみで、
   `ue4m3` はバイアス 8、`ue4m4` はバイアス 7 という指数オフセット差がある
   （相対精度への影響はない）
 - タスク精度の測定（KLD / Top1）と GPU decode の実測（subnormal flush の可否を含む）

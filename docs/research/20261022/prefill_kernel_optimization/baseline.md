@@ -26,37 +26,37 @@
 - commit: `54bc68e`（bench(pp): --tp 1|2 対応を追加）
 - モデル: `models/Qwen3.8-27B-FP8`（HF FP8 配布物）。revision = `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`（`.cache/huggingface/download/*.metadata` 由来）
 - FP8 設定: weight は 128×128 ブロック scale、activation は per-token-group 128（動的）。KV は計測時 BF16（pp 既定）
-- TP: `TpCoordinator`（tp_size=2 の正式サポート）、transport は `PHASESHIFT_TP_TRANSPORT` 未設定のため自動選択。`hipDeviceCanAccessPeer` は全 GPU 対で 1 → **HipPeer (p2p)** が選ばれる
+- TP: `TpCoordinator`（tp_size=2 の正式サポート）、transport は `SHELF_TP_TRANSPORT` 未設定のため自動選択。`hipDeviceCanAccessPeer` は全 GPU 対で 1 → **HipPeer (p2p)** が選ばれる
 - モデル寸法（config.json）: hidden 5120 / intermediate 17408 / layers 64（うち attention 16 層・GDN 48 層）/ heads 24 / kv heads 4 / head_dim 256 / vocab 248320
 
 ### 測定コマンド全文
 
 ```sh
 # 基準値（ゴールの 663ms に相当する経路）
-./build/phaseshift-compute --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 0 \
+./build/shelf-compute --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 0 \
   --prefix-cache 0 --input-ids-file /tmp/pp2048.txt --max-new-tokens 1 --max-seq-len 2304
 
 # 主指標（5-run p50）
-./build/phaseshift-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 2048 \
+./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 2048 \
   --tp 2 --device 0 --arena-gib 16 --warmup 1 --runs 5
 
 # trace
 rocprofv3 --kernel-trace --output-format csv -d /tmp/roc_e2e -- \
-  ./phaseshift-bench pp ... --runs 1 --warmup 0
+  ./shelf-bench pp ... --runs 1 --warmup 0
 ```
 
 - `/tmp/pp2048.txt` = tokenizer.json で固定生成した 2048 トークンの ID 列（以後の比較で不変）
 - warmup: pp は `--warmup 1`（初回 clock ramp の除外）。compute は初回 run を基準から除外しないが 2 回取得
 - **PREFILL_MS の区間**: prefill step の開始から同期完了まで（モデルロード・デコードは除外。`single_request.hip`）
 - **pp の区間**: prefill チャンク実行ループの hipEvent（GPU 時間）と wall clock（setup・モデルロードは含まない）
-- `PHASESHIFT_OP_DUMP=1` は不使用
+- `SHELF_OP_DUMP=1` は不使用
 
 ### 指標の決定
 
-ゴールの「663 ms / 3,089 tok/s」は `phaseshift-compute --tp 2` の PREFILL_MS（2048/663ms=3089 tok/s）に一致する。
+ゴールの「663 ms / 3,089 tok/s」は `shelf-compute --tp 2` の PREFILL_MS（2048/663ms=3089 tok/s）に一致する。
 
-- **主指標**: `phaseshift-bench pp` の `wall_ms_median`（5-run p50、methodology の 5-run p50 に合致、モデルロードを含まない反復が速い）
-- **突合指標**: `phaseshift-compute` の PREFILL_MS（ゴール基準の再現確認に毎回は使わないが、節目に確認する）
+- **主指標**: `shelf-bench pp` の `wall_ms_median`（5-run p50、methodology の 5-run p50 に合致、モデルロードを含まない反復が速い）
+- **突合指標**: `shelf-compute` の PREFILL_MS（ゴール基準の再現確認に毎回は使わないが、節目に確認する）
 - 両者は約 1% の系統差（pp がやや低い）。比較は必ず同一指標内で行う
 
 ## 2. 基準値（A-2 再現）
@@ -73,7 +73,7 @@ rocprofv3 --kernel-trace --output-format csv -d /tmp/roc_e2e -- \
 
 ### GPU 汚染記録
 
-- 09:34–09:49 頃、PID 1423963 `phaseshift-compute --device 1 --tp 2 --eagle4-…`（timeout 900s、VRAM 66.3 GB = GPU1+2）を検出。GPU1/2 を使う測定は実施せず、KFD プロセスが空（`No KFD PIDs currently running`）を確認してから計測した
+- 09:34–09:49 頃、PID 1423963 `shelf-compute --device 1 --tp 2 --eagle4-…`（timeout 900s、VRAM 66.3 GB = GPU1+2）を検出。GPU1/2 を使う測定は実施せず、KFD プロセスが空（`No KFD PIDs currently running`）を確認してから計測した
 - 以後も E-1 に従い各測定ペア直前に KFD プロセスを確認し、占有があれば除外・記録する
 
 ## 3. Trace（A-3）

@@ -1,26 +1,26 @@
 # Server
 
-PhaseShift Server (`phaseshift-server`) の開発者向け入口である。server の対応 surface と、
+Shelf Server (`shelf-server`) の開発者向け入口である。server の対応 surface と、
 詳細 contract を持つ current doc へのリンクを示す。個別仕様は各 doc を正とする。
 
 ## Scope
 
 OpenAI 互換の serving product であり、inference engine ではない。
-`phaseshift-server` 自身が aiohttp で OpenAI Chat Completions の subset を提供し、
-`phaseshift-compute --serve-stdio` へ直接 JSONL stdio で接続する。
+`shelf-server` 自身が aiohttp で OpenAI Chat Completions の subset を提供し、
+`shelf-compute --serve-stdio` へ直接 JSONL stdio で接続する。
 
 ```text
 OpenAI client
     │ HTTP / SSE
     ▼
-phaseshift-server
+shelf-server
     ├── aiohttp
     ├── openai_protocol.py   request validation / wire encoding
     ├── chat_service.py      HF messages -> chat template -> compute -> response parser
     └── compute_client.py    asyncio native JSONL client
     │ persistent JSONL stdio
     ▼
-phaseshift-compute --serve-stdio   (token IDs in / token IDs out)
+shelf-compute --serve-stdio   (token IDs in / token IDs out)
 ```
 
 起動順は model processor load → compute subprocess 起動 → `ping` → capability 取得 →

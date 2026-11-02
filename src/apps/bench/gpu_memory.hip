@@ -18,7 +18,7 @@ struct Options {
 
 void usage(FILE* f) {
     std::fprintf(f,
-                 "usage: phaseshift-bench gpu-memory [options]\n"
+                 "usage: shelf-bench gpu-memory [options]\n"
                  "  --warmup N\n"
                  "  --iterations N\n"
                  "  --iters N        inner loop iterations (LDS probes)\n"

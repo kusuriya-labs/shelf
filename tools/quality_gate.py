@@ -255,7 +255,7 @@ def corpus_sha256(path: Path) -> str:
 def compute_argv(build_dir: Path, model_dir: str, device: int, max_seq_len: int,
                  kv_dtype: str) -> list[str]:
     return [
-        str(build_dir / "phaseshift-compute"),
+        str(build_dir / "shelf-compute"),
         "--model-dir", model_dir,
         "--serve-stdio",
         "--max-seq-len", str(max_seq_len),
@@ -307,7 +307,7 @@ def run_quality_dump(build_dir: Path, model_dir: str, device: int, corpus: Path,
                      context: int, positions: int, kv_dtype: str,
                      dump: Path, compare: Path | None) -> dict:
     argv = [
-        str(build_dir / "phaseshift-bench"),
+        str(build_dir / "shelf-bench"),
         "quality",
         "--model-dir", model_dir,
         "--tokens-file", str(corpus),
@@ -323,7 +323,7 @@ def run_quality_dump(build_dir: Path, model_dir: str, device: int, corpus: Path,
         argv += ["--compare", str(compare)]
     result = subprocess.run(argv, stdout=subprocess.PIPE, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"phaseshift-bench quality failed (exit {result.returncode})")
+        raise RuntimeError(f"shelf-bench quality failed (exit {result.returncode})")
     return parse_kv_output(result.stdout)
 
 
@@ -417,7 +417,7 @@ def cmd_run(parser: argparse.Namespace) -> int:
     cases_path = Path(parser.cases).resolve()
     tokenizer = None
 
-    for binary in ("phaseshift-bench", "phaseshift-compute"):
+    for binary in ("shelf-bench", "shelf-compute"):
         if not (build_dir / binary).is_file():
             print(f"ERROR: {binary} not found in {build_dir}", file=sys.stderr)
             return 2

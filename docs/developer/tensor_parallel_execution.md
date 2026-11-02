@@ -33,8 +33,8 @@ ContinuousBatcher (global, 1個)
 - 各 worker thread は起動時に `ScopedDevice` で自分の rank device を select する。
   current device の暗黙依存を持たない。
 - `TpRankRuntime` / `TpCoordinator` は
-  `include/phaseshift/models/qwen35/runtime/tensor_parallel.h`（qwen35 runtime 層）。
-  transport は model 非依存の runtime core（`phaseshift/runtime/tp/**`）、
+  `include/shelf/models/qwen35/runtime/tensor_parallel.h`（qwen35 runtime 層）。
+  transport は model 非依存の runtime core（`shelf/runtime/tp/**`）、
   partition descriptor は weights 層、境界は維持している。
 
 - `TpCoordinator::debug_report()` が rank ごとの quantized weight bytes /
@@ -198,7 +198,7 @@ class TpTransport {
   `TpCoordinator::initialize` は rank runtime 作成後に `verify()` を呼び、
   失敗時は stderr に明示してから `HostMediatedTpTransport` へ切り替える
   （silent fallback ではない）。
-- `PHASESHIFT_TP_TRANSPORT=auto|p2p|host` で backend を強制できる（既定 auto）。
+- `SHELF_TP_TRANSPORT=auto|p2p|host` で backend を強制できる（既定 auto）。
 - RCCL は必須 dependency にしていない。将来 `RcclTpTransport` を追加できる。
 
 ### R9700 における peer read の制約
@@ -218,7 +218,7 @@ write）は安定し、PULL（destination device stream = remote read）は壊�
 ### transport microbenchmark
 
 ```sh
-phaseshift-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters N]
+shelf-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters N]
                            [--backend auto|p2p|host] [--check]
 ```
 
@@ -311,14 +311,14 @@ greedy token 列は、上位2値が近い token で丸め差により分岐し�
 （実測: margin の小さい natural prompt では7 token 目で分岐した例がある）。
 `tests/unit/test_qwen35_tp_e2e.cpp` の acceptance prompt は margin が確保
 できる prompt を選び、greedy16 token の一致を assert する。
-prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
+prompt は `SHELF_TP_PROMPT` で差し替えられる。
 
 ## 11. 現在の対応範囲
 
 - execution の正式サポートは **tp_size = 2**（`TpCoordinator` は3枚以上を
   `unsupported` で拒否する）。descriptor / plan builder は任意の tp_size を
   表現できるが、execution runtime まで tp_size=4 対応済みとは表現しない。
-- execution は `phaseshift-compute --tp 1|2` から利用できる
+- execution は `shelf-compute --tp 1|2` から利用できる
   （`--device` に rank ごとの GPU をカンマ区切りで指定、例 `--device 0,2`。
   個数が `--tp` と一致しない場合は明示エラー）。
   単一 request 経路と `--serve-stdio` の両方が同じ runtime の TP 経路を使う。
@@ -327,10 +327,10 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
   EAGLE4 の drafter は `--serve-stdio` の serve 経路で TP 分割する）。
   prefix cache も `--tp 2` で有効である
   （TP rank shard 付きの hot overflow と state demotion は unsupported エラー）。
-  `phaseshift-bench` は pp / quality で `--tp 1|2` を露出する（tg / batch は未露出）。
+  `shelf-bench` は pp / quality で `--tp 1|2` を露出する（tg / batch は未露出）。
   pp の TP 実行は `TpBatchHook::on_execute` 経由で、最終 chunk の
   `compute_logits` は TP 時に強制される（combine 出力行が必要なため）。
-  `phaseshift-server` の CLI は `--tp` を露出しない
+  `shelf-server` の CLI は `--tp` を露出しない
   （server が compute へ渡す argv にも `--tp` は無い）。
 - TP=2 の local geometry は optimized selector の validated allowlist に含める。
   現在の対象は Linear / Paged Attention / GDN Recurrence / Rope / KV Append /
@@ -339,7 +339,7 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
   個別に追加し、未知 shape を自動許可しない。現在の rule は
   `kLinearShapeRules` と selector / gemm テストが正本である。
 - DFlash2 は **drafter を非分割・target verify のみ TP2** で動作する。
-  `phaseshift-compute --tp 2 --dflash2-model-dir ...` から利用できる
+  `shelf-compute --tp 2 --dflash2-model-dir ...` から利用できる
   （drafter は compute process が local load）。
   `test_dflash2_tp_e2e` が backend ごとに「speculative ≡ target-only greedy」を
   48 token 全域で assert し、TP2 では partial reject 大半（18 rounds）の
@@ -359,7 +359,7 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
 Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAll）、
 通信と計算の本格的な overlap（各 barrier 内の send / add は並列だが、segment の
 計算との overlap は未対応）、
-graph capture との併用（`PHASESHIFT_HIP_GRAPH` は TP schedule と非併用）、
+graph capture との併用（`SHELF_HIP_GRAPH` は TP schedule と非併用）、
 MTP 分散実行、vocab parallel、distributed sampling、
 structured generation / server 統合、Expert Parallel / MoE、
 pipeline parallel、TP=4 production support。
@@ -376,7 +376,7 @@ pipeline parallel、TP=4 production support。
 | `test_qwen35_tp_weight_load` | gpu1;required | rank-local weight load（BF16 local rows / segmented ranges / replicated） |
 | `test_tp_transport` | gpu2;optional | `sum_hidden` の CPU reference oracle（実装 backend 全体） |
 | `test_qwen35_tp_execution` | gpu2;optional | tiny model: Stage A/B + full forward + prefill/decode + greedy 一致 + rank0/rank1 identical + layer別 drift |
-| `test_qwen35_tp_e2e` | gpu2;optional;external_files | Qwen3.8-27B 実モデル TP=1 vs TP=2 greedy（`PHASESHIFT_TP_MODEL_DIR`） |
+| `test_qwen35_tp_e2e` | gpu2;optional;external_files | Qwen3.8-27B 実モデル TP=1 vs TP=2 greedy（`SHELF_TP_MODEL_DIR`） |
 
 GPU2 テストは `ctest -L gpu2` で実行する。GPU 不足時は runner が exit 77 で
 skip し、required acceptance（`-L required`）には含まれない。

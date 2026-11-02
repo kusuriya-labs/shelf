@@ -3,13 +3,13 @@
 #include "support/tp_run_harness.h"
 #include "support/resident_model_fixture.h"
 
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/dflash2/context_state.h>
-#include <phaseshift/models/qwen35/dflash2/executor.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/models/qwen35/dflash2/executor.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <algorithm>
 #include <chrono>

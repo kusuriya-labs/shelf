@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/optimized/rmsnorm.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/rmsnorm.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdio>

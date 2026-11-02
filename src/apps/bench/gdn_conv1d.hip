@@ -1,8 +1,8 @@
-#include <phaseshift/kernels/optimized/gdn/conv1d.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/program/device_program.h>
+#include <shelf/kernels/optimized/gdn/conv1d.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/program/device_program.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
@@ -42,7 +42,7 @@ struct Options {
 
 void usage(FILE* f) {
     std::fprintf(f,
-                 "usage: phaseshift-bench gdn-conv1d [options]\n"
+                 "usage: shelf-bench gdn-conv1d [options]\n"
                  "  --variant correctness|optimized\n"
                  "  --conv-dim N\n"
                  "  --rows 1,2,...\n"

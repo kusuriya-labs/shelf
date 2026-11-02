@@ -17,25 +17,25 @@
 | 部分読込機能 | 「既存の部分読込機能」を確認 | `read_tensor` は完全コピー必須。row / Expert span API は**不在** | **あり** | `read_tensor` / `tensor_data` 契約 | 新設（読み取り専用 span API） | mmap 経路の互換性を壊さない | 先頭・末尾 row、任意 Expert ID、無効 ID | reader 実装 |
 | mmap 経路 | 未記載 | `mmap(PROT_READ, MAP_PRIVATE)` + RAII | なし | — | 再利用 | なし | — | `MappedFile` |
 | 検証群（overflow / 境界） | 検査を求める | shape 積・要素数・byte count・ファイル境界・offsets 順序・重複名を検査済み | なし（概ね充実） | — | 再利用 + 新 API 側へ追加 | なし | truncated / overflow case | reader 実装 |
-| shard 解決（index.json） | 確認する | `SafetensorsCollection`（`weight_loader.cpp`）が解決。`src/phaseshift/io/` には reader/writer のみ | なし | `hf_manifest.cpp` / `quantized_model_reader.cpp`（index 読取が 3 系統） | 再利用（統合はしない） | index 解決の重複には触れない | 複数 shard fixture | `weight_loader.cpp:333-434` |
+| shard 解決（index.json） | 確認する | `SafetensorsCollection`（`weight_loader.cpp`）が解決。`src/shelf/io/` には reader/writer のみ | なし | `hf_manifest.cpp` / `quantized_model_reader.cpp`（index 読取が 3 系統） | 再利用（統合はしない） | index 解決の重複には触れない | 複数 shard fixture | `weight_loader.cpp:333-434` |
 | path traversal 検査 | 必要 | Collection は `model_dir_ + "/" + shard` で**未検査**（`bundle_util.h` の `validate_shard_path` は quantization 側にのみ存在） | **あり** | `bundle_util.h` | 最小修正（Collection へ検査追加） | 検査追加のみ、既存パスは通る | `../` / 絶対パス拒否 | `weight_loader.cpp:404` |
 | HF FP8 受理条件 | `fmt == "e4m3"` 必須、rank-2 行前提 | `quant_method=fp8` / `fmt=e4m3` / `weight_block_size=[128,128]` 必須、codes は rank-2 F8_E4M3/U8、scale は BF16 rank-2 | **なし（一致）** | `detect_hf_quant_method` / `synthesize_fp8_tensor` | 再利用。**任意 FP8 の無条件受理はしない** | FP8 既存ロード | 既存 `test_hf_manifest` | `hf_manifest.cpp:198-225, 308-334` |
 | `activation_scheme` 検査 | 検査を求める | **未検査**（ソースに出現しない） | **あり（仕様差）** | `detect_hf_quant_method` 全体 | **保留**：FP8 checkpoint 不在のため実値が不明。推測での検査追加はしない | なし | FP8 checkpoint 取得後に判定 | 手順書 §2.2 の revision 固定義務との衝突 |
 | rank-3 fused expert | 確認する | FP8 は rank-2 必須で拒否。BF16 は manifest に受理されるが `load_bf16_matrix` が rank-2 必須でロード時に落ちる（非対称） | **あり** | `canonical_partition.cpp` / `load_quantized_small` | G3 で扱う（G1 は byte span 特定まで） | 既存 TP partition | G3 の Expert slice テスト | `hf_manifest.cpp:199-203`、`weight_loader.cpp:136-139,187-190,559-562` |
 | `output_gate_silu` 切替 | sigmoid 経路の有無を確認 | **実装済み**。`gdn_lowering.h:140-145` が `SiLUNode`/`SigmoidNode` を分岐、config は `output_gate_type` を解析、HIP kernel まで到達（`KernelId::SIGMOID` → `launch_sigmoid_bf16_f32`） | **あり（docs 側が stale）** | `qwen35_config.cpp` / `lower_to_primitives.cpp` / dispatch / elementwise kernel | **再利用・再実装禁止** | Qwen35 の既定挙動を変えない | GDN 適合試験で sigmoid 出力を検証 | `gdn_lowering.h`、`lower_to_primitives.cpp:574` |
 | paged attention selector の新 QSA geometry | 高速経路の有無を確認 | ルールは `(16,4,256)` / `(24,4,256)` / `(12,2,256)` のみ。**(24,2,256) は不在** → QSA は常に correctness fallback。fallback 自体は存在 | **あり** | selector / dispatch / 既存 selector テスト | fallback は再利用。optimized ルール追加は G4/QSA 側 | 既存 Qwen35 の選択結果を変えない | G4 QSA で correctness 経路の数値を検証 | `paged_attention_selector.cpp:24-63` |
-| `models/qwen4exp` の有無 | 見当たらない | **不在**（`src/phaseshift/models/` は `qwen35` のみ） | なし（一致） | `models/qwen35` 全体 / `models/common/qwen_hybrid` | 新設（G5） | architecture boundary | `test_architecture_boundaries` | ディレクトリ一覧 |
+| `models/qwen4exp` の有無 | 見当たらない | **不在**（`src/shelf/models/` は `qwen35` のみ） | なし（一致） | `models/qwen35` 全体 / `models/common/qwen_hybrid` | 新設（G5） | architecture boundary | `test_architecture_boundaries` | ディレクトリ一覧 |
 | hipFile 連携 | 見当たらない | **不在**（`src` / `include` / `tests` / `cmake` / `docs` に 0 件）。ただし **libhipfile.so.0.4.0 とヘッダ・CMake config は環境に実在** | なし（一致） | `hipfile.h` API 一覧 | 新設（G2）。PLE 固有処理は入れない | I/O 層の汎用性をPLE依存にしない | G2 の bitwise / fastpath 試験 | `hipfile_qualification.md` |
 | `docs/developer/qwen4exp.md` | 仕様書あり。gap と `rnd/qwen4exp/gate0.md` 参照が古い可能性 | 仕様書は実 checkpoint と一致。**`rnd/qwen4exp/gate0.md` は不在**（`rnd/` 無し）、gap #7 は stale | **あり（docs stale）** | `docs/research/README.md` / `docs/developer/README.md` | docs 更新（research へ経緯、developer へ現行 contract） | docs だけ | レビュー | 参照先不存在の実測 |
 | `tools/inspect_qwen4exp.py` | 見当たらない | **不在**。`tools/` に同等の inventory 機構もない | なし（一致） | `tools/` 一覧 | **新設しない**（単発 Gate 後に残す script は残さない規約）。inventory は `docs/research/` の記録で代替 | なし | — | `AGENTS.md` tools ルール |
 | `tensor_partition.md` §10（Qwen4Exp EP 例） | FP8 N-D 未対応の制約に注意 | 実装と一致。BF16 rank-3 は descriptor + materialization 対応、**FP8 rank-3 は unsupported**（拒否テストあり） | なし | `canonical_partition.cpp` / `test_canonical_partition.cpp` | 制約を維持する | 既存 TP partition | 既存 `test_canonical_partition` | doc §5/§10 と実装の突合 |
-| required acceptance の運用 | ベースラインを保存 | 正本は `tests/run_required_acceptance.py`。required は **LABELS と `phaseshift-required-tests` DEPENDS の 2 箇所**が正本 | **あり（既存のずれ 3 件 / 1 件）** | `cmake/tests.cmake` 全体 / `testing.md` | 新規テストは両方へ追加。既存のずれは本 Gate の範囲外として記録のみ | テスト build漏れ | ベースライン 143/143 PASS を取得済み | `build/required-acceptance.txt` |
+| required acceptance の運用 | ベースラインを保存 | 正本は `tests/run_required_acceptance.py`。required は **LABELS と `shelf-required-tests` DEPENDS の 2 箇所**が正本 | **あり（既存のずれ 3 件 / 1 件）** | `cmake/tests.cmake` 全体 / `testing.md` | 新規テストは両方へ追加。既存のずれは本 Gate の範囲外として記録のみ | テスト build漏れ | ベースライン 143/143 PASS を取得済み | `build/required-acceptance.txt` |
 
 ## 2. 参照 revision の固定
 
 | 対象 | revision / 値 | 状態 |
 | --- | --- | --- |
-| PhaseShift HEAD | `9825d10896fea4f4d9736f918617c41322ae53b2` | 固定 |
+| Shelf HEAD | `9825d10896fea4f4d9736f918617c41322ae53b2` | 固定 |
 | Qwen3.8-Flash-Next (BF16) | HF `de4b8e4d43b917e7706784d8bb445c9af86a3540` | 固定 |
 | Qwen3.8-Flash-Next-FP8 | — | **不在（未固定）** |
 | Transformers `qwen4_exp` | — | **未固定**（インストール済み `transformers 5.14.1` に `models/qwen4_exp` なし） |
@@ -72,7 +72,7 @@
 | PASS 条件 | 状態 |
 | --- | --- |
 | 未解決の重要なソース差分がない | **達成**（上表のうち重要なものはすべて扱いを決めた。保留は #4 のみで、これは実データ不在による仕様未確定でありソース差分ではない） |
-| 参照 revision を固定した | **部分達成**（PhaseShift / BF16 checkpoint / 環境は固定。FP8 checkpoint と Transformers 参照 commit は未取得） |
+| 参照 revision を固定した | **部分達成**（Shelf / BF16 checkpoint / 環境は固定。FP8 checkpoint と Transformers 参照 commit は未取得） |
 | 独立テストに使う fixture の構成が決まっている | **達成**（自己完結の synthetic safetensors fixture を `tests/unit/test_safetensors_partial_read.cpp` で確定。実 checkpoint 参照は optional） |
 
 **G0 = PASS（条件付き）**。未取得の FP8 checkpoint と Transformers 参照 commit は
@@ -85,8 +85,8 @@ G3 / G6 の開始条件であり、G1〜G5 の synthetic fixture には不要で
 
 G0 の追加調査として、`models/qwen4exp/` の lowering が既存 Primitive で
 どこまで表現できるかを整理した。判定根拠は
-`include/phaseshift/runtime/graph/primitive_node.h`（`PrimitiveNode` variant 全 19 種）と
-`include/phaseshift/runtime/program/kernel_id.h`（`KernelId` 全 28 値）の実測。
+`include/shelf/runtime/graph/primitive_node.h`（`PrimitiveNode` variant 全 19 種）と
+`include/shelf/runtime/program/kernel_id.h`（`KernelId` 全 28 値）の実測。
 
 ## 既存 Primitive の一覧（実測）
 
@@ -110,7 +110,7 @@ G0 の追加調査として、`models/qwen4exp/` の lowering が既存 Primitiv
 | shared expert | gate/up/down + sigmoid gate | `LINEAR` + `SILU` + `SIGMOID` + `MUL` | **再利用可** |
 | Gated Residual read / write | grouped RMSNorm + down/up + sigmoid + **4-stream mean** | RMSNorm / LINEAR / SIGMOID / MUL は可。**stream 方向 mean の reduce が無い** | **新規必要**（G4a） |
 | final HyperConnection mixer | 同上 | 同上 | **新規必要**（G4a） |
-| PLE row gather（SSD / RAM / VRAM） | byte span gather | `row_gather` カーネル + `phaseshift_io` | **G2 で実装済み**（Primitive 化は未定） |
+| PLE row gather（SSD / RAM / VRAM） | byte span gather | `row_gather` カーネル + `shelf_io` | **G2 で実装済み**（Primitive 化は未定） |
 | PLE projection / gate / conv（dilation=3） | grouped RMSNorm / linear / sigmoid / depthwise conv | `STATEFUL_CAUSAL_CONV1D` は **GDN geometry 固定**（`GdnShapeKey` 必須）。dilation 対応と PLE 固有の gate 演算は未確認 | **要調査**（G4a） |
 
 ## 結論（現時点）
@@ -139,7 +139,7 @@ G0 の追加調査として、`models/qwen4exp/` の lowering が既存 Primitiv
 
 ### 追記（G5 調査）: state pool と PLE conv の適合
 
-`GdnStatePoolLayout`（`include/phaseshift/inference/state/gdn_state_pool.h`）は
+`GdnStatePoolLayout`（`include/shelf/inference/state/gdn_state_pool.h`）は
 `conv_dim` / `conv_history` を **pool 全体で単一の値**として持ち、
 `GdnStatePoolLayout::make(gdn_layers, conv_dim, conv_history, ...)` で生成する。
 
@@ -169,22 +169,22 @@ G0 の追加調査として、`models/qwen4exp/` の lowering が既存 Primitiv
 
 | 手順書 §13 の例 | 現状 | 備考 |
 | --- | --- | --- |
-| `include/phaseshift/io/...` / `src/phaseshift/io/hipfile_reader.cpp` | **採用**（`row_reader.{h,cpp}` / `hipfile_reader.{h,cpp}`） | PLE 固有処理は入れていない（汎用 I/O 層） |
-| `include/phaseshift/weights/...` / `src/phaseshift/weights/`（metadata / tensor slice / Expert slice） | **採用**（`SafetensorsCollection` の span API、`load_*_matrix_axis_slice`） | — |
-| `include/phaseshift/models/qwen4exp/...` / `src/phaseshift/models/qwen4exp/model/`（config / weights / lowering） | **採用**（config / weights は実装済み。lowering は未着手） | — |
+| `include/shelf/io/...` / `src/shelf/io/hipfile_reader.cpp` | **採用**（`row_reader.{h,cpp}` / `hipfile_reader.{h,cpp}`） | PLE 固有処理は入れていない（汎用 I/O 層） |
+| `include/shelf/weights/...` / `src/shelf/weights/`（metadata / tensor slice / Expert slice） | **採用**（`SafetensorsCollection` の span API、`load_*_matrix_axis_slice`） | — |
+| `include/shelf/models/qwen4exp/...` / `src/shelf/models/qwen4exp/model/`（config / weights / lowering） | **採用**（config / weights は実装済み。lowering は未着手） | — |
 | 同 `ple/`（N-gram hash / shard mapping / PLE 演算） | **採用**（`ple_row_gather` / `ngram_hash` / `ple_conv`） | shard mapping は `ple_row_gather` に同居 |
 | 同 `runtime/`（executor / state / batch） | **未作成** | G5 の残課題 |
-| `src/phaseshift/kernels/optimized/`（GR / MoE / QSA） | GR は `models/qwen4exp/hyper/` に model-local、QSA は `kernels/optimized/attention/` に配置 | GR は host 実装のため model-local。QSA の配置は G4c の判断 |
+| `src/shelf/kernels/optimized/`（GR / MoE / QSA） | GR は `models/qwen4exp/hyper/` に model-local、QSA は `kernels/optimized/attention/` に配置 | GR は host 実装のため model-local。QSA の配置は G4c の判断 |
 | `tests/unit/` / `tests/kernels/` / `tests/fixtures/` | **採用**（fixture は `tests/data/qwen4exp_moe/`、`tests/fixtures/qsa/` を追加） | — |
-| `cmake/targets.cmake` / `cmake/tests.cmake` | **採用**（機能ごとに追記） | required は LABELS と `phaseshift-required-tests` DEPENDS の 2 箇所に追加 |
+| `cmake/targets.cmake` / `cmake/tests.cmake` | **採用**（機能ごとに追記） | required は LABELS と `shelf-required-tests` DEPENDS の 2 箇所に追加 |
 | `docs/research/<YYYYMMDD>/` | **採用**（`docs/research/20261024/qwen4exp/`） | 配置規約（`docs/research/README.md`）に適合 |
 | `docs/developer/qwen4exp.md`（成立した contract のみ更新） | **採用**（実 checkpoint と食い違っていた記述を修正、gap の更新） | 経緯は `docs/research/` に分離 |
 | `tools/inspect_qwen4exp.py` | **新設しない** | `AGENTS.md` の tools ルール（単発 Gate 後の script は残さない）に従い `docs/research/` の記録で代替。G4b の oracle 生成 script は `tools/gen_qwen4exp_moe_oracle.py`（fixture 再生成に使用） |
 
 追加されたディレクトリ（§13 に無い例）:
 
-- `src/phaseshift/models/qwen4exp/hyper/` — Gated Residual（model-local host 実装）
-- `src/phaseshift/kernels/optimized/attention/qsa_*.{h,hip}` — QSA indexer / sparse attention
+- `src/shelf/models/qwen4exp/hyper/` — Gated Residual（model-local host 実装）
+- `src/shelf/kernels/optimized/attention/qsa_*.{h,hip}` — QSA indexer / sparse attention
 - `tests/data/qwen4exp_moe/` — MoE oracle fixture（各 20 KB 程度の小ファイル）
 - `tests/fixtures/qsa/` — QSA fixture
 
@@ -192,7 +192,7 @@ G0 の追加調査として、`models/qwen4exp/` の lowering が既存 Primitiv
 
 # 付録: G5 lowering のための新 Primitive 設計メモ（暫定）
 
-`DispatchBinding`（`include/phaseshift/runtime/program/program.h`）の制約を実測した:
+`DispatchBinding`（`include/shelf/runtime/program/program.h`）の制約を実測した:
 
 - `kMaxIoSlots = 6`（`input_slots` / `output_slots` は各 6 まで）
 - `parameter_index0` / `parameter_index1` の **2 個だけ**、`weight_index` は 1 個
@@ -310,7 +310,7 @@ grouped RMSNorm（`RmsNormNode.group_size` + `ONE_PLUS`）/ `LINEAR` / `SILU` /
 **必要 tensor・必要 Expert だけを読み込み**」という方針と整合し、
 G3 の `load_bf16_matrix_axis_slice` / `load_fp8_matrix_axis_slice` がまさにその手段である。
 
-一方 `WeightSlot`（`include/phaseshift/runtime/program/program.h:21`）は
+一方 `WeightSlot`（`include/shelf/runtime/program/program.h:21`）は
 `rows` / `cols`（**rank-2 1 枚**）と `codes` / `scales` を各1つしか持たない:
 
 1. **fused rank-3 tensor をそのまま `WeightSlot` に載せられない**（rank 拘束）
@@ -364,7 +364,7 @@ x4 (10240)
 
 ## 追記（G5 lowering 調査）: QSA の selector 経路
 
-`select_paged_attention_implementation`（`src/phaseshift/inference/execution/selectors/paged_attention_selector.cpp`）
+`select_paged_attention_implementation`（`src/shelf/inference/execution/selectors/paged_attention_selector.cpp`）
 の登録ルールは `(16,4,256)` / `(24,4,256)` / `(12,2,256)` のみ。
 qwen4exp の QSA main attention は **24 query / 2 kv / head_dim 256** であり、
 **optimized ルールが無い**。geometry 不一致は `paged_attention_selector.cpp:63` の
@@ -408,7 +408,7 @@ Qwen35 の `lower_qwen35_to_primitives`（`models/qwen35/model/lower_to_primitiv
 再調査する」。差を生やさない）:
 
 ```cpp
-// include/phaseshift/models/qwen4exp/model/lower_to_primitives.h
+// include/shelf/models/qwen4exp/model/lower_to_primitives.h
 namespace ps::qwen4exp {
 
 struct Qwen4ExpLoweredPrimitives {
@@ -643,7 +643,7 @@ owner を記録する」（Drafter 固有情報を PrefixCache へ持ち込ま�
 | ZIP 時点の想定 | 付録 F が2案を提示（案 1: 外部入力を embed 値まで広げ gate / conv を graph 外、案 2: 新規 Node 2〜3 種を graph 内に追加）。いずれも PLE 加算位置の `x4` を「`emb.repeat` の値」として記述 |
 | 現行実装 | `docs/developer/qwen4exp.md` §2 は PLE を**層ループ先頭**に置く（`if ple: x4 = x4 + ple(x4, input_ids)`）。したがって加算位置の `x4` は **layer 0（GDN + GR + MoE）の出力**であり `emb.repeat` ではない。`ple(x4, ...)` の `query = norm_query(hidden_states)` も layer 0 出力を消費する |
 | 食い違い | **あり**。round 2 の付録 C / 付録 F の pseudo-code を「PLE 層の入力は emb.repeat」と誤読した（手順書 §0 の「実ソースと違ったら調査をやり直す」に該当）。§2 と `lower_to_primitives.cpp` の層ループを追加読解して再判定した |
-| 追加で読んだ箇所 | `docs/developer/qwen4exp.md` §2 / §9 / §13、`src/phaseshift/models/qwen4exp/model/lower_to_primitives.cpp`（層ループ）、`src/phaseshift/runtime/graph/primitive_graph.cpp`（`validate_primitive_graph` / external input 契約）、`src/phaseshift/runtime/program/program.cpp`（`EXTERNAL_INPUT` の binding）、`src/phaseshift/kernels/correctness/detail/elementwise.inc`（`RESIDUAL_ADD` の dtype 契約: F32 出力、BF16 入力は F32 へ変換）、`src/phaseshift/models/qwen35/runtime/executor.hip:1844`（`layer_input_values` の用途 = MTP の layer 入力上書きであり中間値の取り出しではない）、`src/phaseshift/models/qwen4exp/ple/*`（G2 / G4a の部品）、`src/phaseshift/models/qwen4exp/runtime/qwen4exp_state.*`（G5d）、`include/phaseshift/inference/state/{paged_sequence_state,gdn_state_pool}.*` |
+| 追加で読んだ箇所 | `docs/developer/qwen4exp.md` §2 / §9 / §13、`src/shelf/models/qwen4exp/model/lower_to_primitives.cpp`（層ループ）、`src/shelf/runtime/graph/primitive_graph.cpp`（`validate_primitive_graph` / external input 契約）、`src/shelf/runtime/program/program.cpp`（`EXTERNAL_INPUT` の binding）、`src/shelf/kernels/correctness/detail/elementwise.inc`（`RESIDUAL_ADD` の dtype 契約: F32 出力、BF16 入力は F32 へ変換）、`src/shelf/models/qwen35/runtime/executor.hip:1844`（`layer_input_values` の用途 = MTP の layer 入力上書きであり中間値の取り出しではない）、`src/shelf/models/qwen4exp/ple/*`（G2 / G4a の部品）、`src/shelf/models/qwen4exp/runtime/qwen4exp_state.*`（G5d）、`include/shelf/inference/state/{paged_sequence_state,gdn_state_pool}.*` |
 | 採用判断 | **案 1 を graph 分割付きで採用**（下記）。案 2 は新規 `PrimitiveStateKind` と `ModelDispatchStateView` の追加が不可避で G5d で固定した「PLE conv state は model-local owner」（§13 の owner 表）と矛盾するため不採用 |
 | 回帰リスク | `connect_ple=false`（既定）の経路は node 列・weight slot・parameter slot・external_inputs 数が不変。Qwen35 / 既存FP8 / GDN / KV / Scheduler への影響なし（`test_architecture_boundaries` も PASS） |
 | 検証計画 | 新規 `test_qwen4exp_ple_graph`（prefill chunk 境界 / decode 続続 / cancel / EOS / Request 再利用 + 仕様 oracle 比較）と既存5件の回帰 |

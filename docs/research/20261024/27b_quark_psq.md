@@ -128,5 +128,5 @@ python3 tools/quantize_psq5.py \
 - PSQ5 の CBR は実測で 5% 程度（FP8 の約 1.9 倍）。AWQ 適用前後で
   rel weight error はほぼ同じ（0.049644 / 0.049611）で、AWQ は
   重みのスケーリングであるため PSQ5 の誤差率を大きく変えていない。
-- PhaseShift runtime は PSQ5 をロードできない
+- Shelf runtime は PSQ5 をロードできない
   （対応 format は BF16 / FP8 E4M3 のみ）。runtime 接続は範囲外。

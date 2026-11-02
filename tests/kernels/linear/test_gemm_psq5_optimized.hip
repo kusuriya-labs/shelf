@@ -1,9 +1,9 @@
-#include <phaseshift/kernels/optimized/linear/psq5.h>
-#include <phaseshift/kernels/optimized/activation_quantize.h>
-#include <phaseshift/quantization/psq5/psq5.h>
-#include <phaseshift/quantization/codec/e4m3.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/linear/psq5.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/quantization/psq5/psq5.h>
+#include <shelf/quantization/codec/e4m3.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

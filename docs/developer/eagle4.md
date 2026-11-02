@@ -5,12 +5,12 @@ chain（`--eagle4-tree-width 0|1`）と tree（`--eagle4-tree-width 2..16`）の
 経緯は Git history と `docs/research/20261023/` の Gate 記録を参照する。
 
 - drafter: `models/Qwen3.8-27B-EAGLE4`（BF16、1 層、sliding window 4096）
-- 対象: `phaseshift-compute` の単一 request 経路（`--eagle4-model-dir`）
-- 実装: `include/phaseshift/models/qwen35/eagle4/`、
-  `src/phaseshift/models/qwen35/eagle4/`、
-  `src/phaseshift/models/qwen35/kernels/eagle4/`
+- 対象: `shelf-compute` の単一 request 経路（`--eagle4-model-dir`）
+- 実装: `include/shelf/models/qwen35/eagle4/`、
+  `src/shelf/models/qwen35/eagle4/`、
+  `src/shelf/models/qwen35/kernels/eagle4/`
 
-DFlash2 と同じ `DFlash2SpecDecoder`（`src/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.cpp`）
+DFlash2 と同じ `DFlash2SpecDecoder`（`src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp`）
 を使い、drafter の呼び出しだけを差し替える。target verify / accept / GDN state の契約は
 [DFlash2](dflash2.md) と同一である。
 
@@ -246,7 +246,7 @@ verify の行数は `K + 1`、`eagle_candidate_topk` は 1 である。draft の
 
 ## CLI
 
-`phaseshift-compute` の option。
+`shelf-compute` の option。
 
 | option | 意味 |
 | --- | --- |
@@ -263,9 +263,9 @@ verify の行数は `K + 1`、`eagle_candidate_topk` は 1 である。draft の
 - `--prefix-cache 1` は `--serve-stdio` なしでは不可
 - `temperature != 0`（greedy のみ）
 
-`phaseshift-launcher` は EAGLE-4 の option を child に透過する。
-`phaseshift-server` も `--eagle4-model-dir` / `--eagle4-drafts` / `--eagle4-lm-head` を
-`phaseshift-compute` へ転送する。
+`shelf-launcher` は EAGLE-4 の option を child に透過する。
+`shelf-server` も `--eagle4-model-dir` / `--eagle4-drafts` / `--eagle4-lm-head` を
+`shelf-compute` へ転送する。
 
 `draft_bytes`（memory plan の draft weights）は checkpoint の実ファイルサイズから
 共有する embed / lm_head の分を除いた値である。
@@ -275,7 +275,7 @@ verify の行数は `K + 1`、`eagle_candidate_topk` は 1 である。draft の
 ## tensor parallel
 
 `--tp 2` で動作する。serve 経路（`--serve-stdio`）は drafter も target と同じ TP 形状で
-**rank ごとに 1 基** 置く。`phaseshift-compute` の direct 経路は drafter を rank0 に 1 基だけ
+**rank ごとに 1 基** 置く。`shelf-compute` の direct 経路は drafter を rank0 に 1 基だけ
 置き、target のみ TP2 で実行する。
 
 - draft 重みは `build_eagle4_tensor_partition_plan` で分割する。q/k/v/gate/up は出力行、
@@ -338,6 +338,6 @@ verify の行数は `K + 1`、`eagle_candidate_topk` は 1 である。draft の
   embedding partial + sum / attention row-parallel / MLP row-parallel / final normed を
   stage ごとに比較して最初に発散した stage を報告する。候補 id は「両 rank の候補 logits を
   merge した結果」と比較し、TP2 の最良候補が TP1 より悪化しないことを確認する。
-- `test_eagle4_candidate_paths`（`PHASESHIFT_EAGLE4_MODEL_DIR` 必須）: 実 checkpoint で
+- `test_eagle4_candidate_paths`（`SHELF_EAGLE4_MODEL_DIR` 必須）: 実 checkpoint で
   `lowrank` の候補再評価が full-vocab GEMV の logits と一致すること、および argmax の一致数を
   報告する。

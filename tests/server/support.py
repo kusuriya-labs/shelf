@@ -1,7 +1,7 @@
-"""Shared helpers for the PhaseShift Server acceptance scripts.
+"""Shared helpers for the Shelf Server acceptance scripts.
 
-These scripts drive real processes (phaseshift-compute, phaseshift-server).
-They never import the PhaseShift C++ API.
+These scripts drive real processes (shelf-compute, shelf-server).
+They never import the Shelf C++ API.
 """
 
 from __future__ import annotations
@@ -18,32 +18,32 @@ import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SERVER_SCRIPT = REPO_ROOT / "src" / "apps" / "server" / "phaseshift_server.py"
+SERVER_SCRIPT = REPO_ROOT / "src" / "apps" / "server" / "shelf_server.py"
 COMMON_DIR = REPO_ROOT / "src" / "apps" / "common"
 
 
 def build_dir() -> Path:
-    return Path(os.environ.get("PHASESHIFT_BUILD_DIR", REPO_ROOT / "build"))
+    return Path(os.environ.get("SHELF_BUILD_DIR", REPO_ROOT / "build"))
 
 
 def compute_binary() -> Path:
-    env = os.environ.get("PHASESHIFT_COMPUTE")
+    env = os.environ.get("SHELF_COMPUTE")
     if env:
         return Path(env)
-    return build_dir() / "phaseshift-compute"
+    return build_dir() / "shelf-compute"
 
 
 def server_binary() -> Path:
-    env = os.environ.get("PHASESHIFT_SERVER")
+    env = os.environ.get("SHELF_SERVER")
     if env:
         return Path(env)
-    return build_dir() / "phaseshift-server"
+    return build_dir() / "shelf-server"
 
 
 def model_dir() -> Path:
     env = (
-        os.environ.get("PHASESHIFT_SERVER_MODEL_DIR")
-        or os.environ.get("PHASESHIFT_MODEL_DIR")
+        os.environ.get("SHELF_SERVER_MODEL_DIR")
+        or os.environ.get("SHELF_MODEL_DIR")
     )
     if env:
         return Path(env)
@@ -57,7 +57,7 @@ def load_processor():
     if "processor" not in _PROCESSOR_CACHE:
         if str(COMMON_DIR) not in sys.path:
             sys.path.insert(0, str(COMMON_DIR))
-        from phaseshift_chat import codec
+        from shelf_chat import codec
 
         _PROCESSOR_CACHE["processor"] = codec.load_processor(str(model_dir()))
     return _PROCESSOR_CACHE["processor"]
@@ -65,7 +65,7 @@ def load_processor():
 
 def prompt_ids(text: str) -> list[int]:
     processor = load_processor()
-    from phaseshift_chat import codec
+    from shelf_chat import codec
 
     return codec.prompt_ids(
         processor, [{"role": "user", "content": text}], enable_thinking=False)
@@ -73,7 +73,7 @@ def prompt_ids(text: str) -> list[int]:
 
 def decode_ids(generated_ids) -> str:
     processor = load_processor()
-    from phaseshift_chat import codec
+    from shelf_chat import codec
 
     return codec.decode_generated(processor, generated_ids)
 
@@ -147,7 +147,7 @@ def free_port() -> int:
 def ensure_chat_import():
     if str(COMMON_DIR) not in sys.path:
         sys.path.insert(0, str(COMMON_DIR))
-    from phaseshift_chat import codec  # noqa: E402
+    from shelf_chat import codec  # noqa: E402
 
     return codec
 
@@ -226,7 +226,7 @@ def http_sse(url: str, payload: dict, timeout: float = 600.0):
 
 
 class ComputeHarness:
-    """Spawns phaseshift-compute --serve-stdio and speaks the JSONL protocol."""
+    """Spawns shelf-compute --serve-stdio and speaks the JSONL protocol."""
 
     def __init__(self, log_path: Path | None = None, arena_gib: int = 24,
                  max_seq_len: int = 256, device: int = 0,
@@ -259,7 +259,7 @@ class ComputeHarness:
     def start(self) -> None:
         binary = compute_binary()
         if not binary.is_file():
-            raise Failure(f"phaseshift-compute not found: {binary}")
+            raise Failure(f"shelf-compute not found: {binary}")
         arena_gib = test_arena_gib(self.arena_gib)
         self.arena_gib = arena_gib
         argv = [
@@ -281,9 +281,9 @@ class ComputeHarness:
                      "--dflash2-drafts", str(self.dflash2_drafts)]
         env = dict(os.environ)
         if self.batch_trace:
-            env["PHASESHIFT_BATCH_TRACE"] = "1"
+            env["SHELF_BATCH_TRACE"] = "1"
         if self.graph_debug:
-            env["PHASESHIFT_GRAPH_DEBUG"] = "1"
+            env["SHELF_GRAPH_DEBUG"] = "1"
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
@@ -301,7 +301,7 @@ class ComputeHarness:
     def wait_ready(self, timeout: float = 300.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if "PHASESHIFT_SERVE_READY" in self.stderr_lines:
+            if "SHELF_SERVE_READY" in self.stderr_lines:
                 return
             if self.proc is not None and self.proc.poll() is not None:
                 raise Failure(
@@ -345,12 +345,12 @@ class ComputeHarness:
         return json.loads(line)
 
     def count_load_events(self) -> int:
-        return sum(1 for line in self.stderr_lines if "PHASESHIFT_SERVE_READY" in line)
+        return sum(1 for line in self.stderr_lines if "SHELF_SERVE_READY" in line)
 
     def batch_steps(self) -> list[tuple[int, int]]:
         steps = []
         for line in self.stderr_lines:
-            if not line.startswith("PHASESHIFT_BATCH_STEP"):
+            if not line.startswith("SHELF_BATCH_STEP"):
                 continue
             parts = dict(
                 token.split("=") for token in line.split()[1:] if "=" in token)
@@ -393,17 +393,17 @@ def _env_int(name: str) -> int | None:
 
 
 def _test_working_set_reserve_gib(configured: int | None):
-    override = _env_int("PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB")
+    override = _env_int("SHELF_TEST_WORKING_SET_RESERVE_GIB")
     return configured if override is None else override
 
 
 def _test_device(default: int) -> int:
     """Resolve the GPU device for a harness.
 
-    A shared multi-GPU host can have device 0 busy; ``PHASESHIFT_TEST_DEVICE``
+    A shared multi-GPU host can have device 0 busy; ``SHELF_TEST_DEVICE``
     lets a run pin the suite to a free device without editing every test.
     """
-    raw = os.environ.get("PHASESHIFT_TEST_DEVICE")
+    raw = os.environ.get("SHELF_TEST_DEVICE")
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
@@ -415,16 +415,16 @@ def test_arena_gib(default: int = 31) -> int:
     ``--arena-gib`` sizes the single GPU pool that also holds the weights, so the
     server default (16) cannot load the 27B target. Tests that exercise the
     production default profile still size the arena for the host via
-    ``PHASESHIFT_TEST_ARENA_GIB``.
+    ``SHELF_TEST_ARENA_GIB``.
     """
-    raw = os.environ.get("PHASESHIFT_TEST_ARENA_GIB")
+    raw = os.environ.get("SHELF_TEST_ARENA_GIB")
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
 
 
 class ServerHarness:
-    """Starts the phaseshift-server launcher and waits for readiness."""
+    """Starts the shelf-server launcher and waits for readiness."""
 
     def __init__(self, log_path: Path | None = None, env: dict | None = None,
                  startup_timeout: float = 240.0, max_seq_len: int = 512,
@@ -437,7 +437,7 @@ class ServerHarness:
                  dflash2_drafts: int = 7,
                  arena_override: int | None = None,
                  working_set_reserve_gib: int | None = None):
-        self.log_path = log_path or (Path("/tmp") / f"phaseshift-server-{os.getpid()}.log")
+        self.log_path = log_path or (Path("/tmp") / f"shelf-server-{os.getpid()}.log")
         self.env = dict(os.environ)
         if env:
             self.env.update(env)
@@ -460,7 +460,7 @@ class ServerHarness:
     def start(self) -> None:
         binary = server_binary()
         if not binary.is_file():
-            raise Failure(f"phaseshift-server not found: {binary}")
+            raise Failure(f"shelf-server not found: {binary}")
         argv = [
             str(binary),
             "--model-dir", str(model_dir()),
@@ -498,7 +498,7 @@ class ServerHarness:
                 raise Failure(f"server exited rc={self.proc.returncode}")
             try:
                 payload = http_get_json(f"{self.base_url}/models")
-                if any(m.get("id") == "phaseshift" for m in payload.get("data", [])):
+                if any(m.get("id") == "shelf" for m in payload.get("data", [])):
                     return
             except (urllib.error.URLError, OSError, ValueError):
                 pass
@@ -529,7 +529,7 @@ class ServerHarness:
         return False
 
 
-OWNER_ENV = "PHASESHIFT_TEST_OWNER"
+OWNER_ENV = "SHELF_TEST_OWNER"
 os.environ[OWNER_ENV] = str(os.getpid())
 
 
@@ -543,7 +543,7 @@ def _owned_compute(entry: Path) -> bool:
 
 
 def compute_pids() -> list[int]:
-    """PIDs of live phaseshift-compute --serve-stdio processes this test owns.
+    """PIDs of live shelf-compute --serve-stdio processes this test owns.
 
     A shared GPU host can run a resident compute for someone else. Every compute
     process started through this module inherits ``OWNER_ENV`` from the test
@@ -558,7 +558,7 @@ def compute_pids() -> list[int]:
             cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode()
         except OSError:
             continue
-        if "phaseshift-compute" not in cmdline or "--serve-stdio" not in cmdline:
+        if "shelf-compute" not in cmdline or "--serve-stdio" not in cmdline:
             continue
         if not _owned_compute(entry):
             continue
@@ -571,7 +571,7 @@ def cli_generated_ids(messages: list[dict], max_new_tokens: int,
                       enable_thinking: bool = False) -> list[int]:
     """Tokenize with the chat codec and run compute for parity checks.
 
-    ``device`` defaults to ``PHASESHIFT_TEST_DEVICE`` when set; the parity run
+    ``device`` defaults to ``SHELF_TEST_DEVICE`` when set; the parity run
     happens after the server under test has exited, so the test device is free.
     """
     codec = ensure_chat_import()

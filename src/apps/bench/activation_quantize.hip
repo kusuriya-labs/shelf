@@ -1,9 +1,9 @@
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/kernels/optimized/activation_quantize.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/runtime/program/int8_activation_workspace.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/core/gpu/cleanup.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/runtime/program/int8_activation_workspace.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -32,7 +32,7 @@ struct Options {
 
 void usage(FILE* f) {
     fprintf(f,
-        "phaseshift-bench activation-quantize [options]\n"
+        "shelf-bench activation-quantize [options]\n"
         "  --variant correctness|optimized|e4m3-generic|e4m3-vec|e4m3-auto\n"
         "      correctness / optimized = a8 group-128 kernel\n"
         "      e4m3-generic / e4m3-vec / e4m3-auto = W4A8 group-128 e4m3 kernel\n"

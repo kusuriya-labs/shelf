@@ -1,7 +1,7 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/tp/tp_transports.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/tp/tp_transports.h>
 
 #include <hip/hip_runtime.h>
 

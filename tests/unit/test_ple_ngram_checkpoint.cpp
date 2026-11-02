@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen4exp/ple/ngram_hash.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/models/qwen4exp/ple/ngram_hash.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -89,7 +89,7 @@ static void print_values(const char* name, const std::vector<std::int64_t>& v) {
 
 int main() {
     printf("=== PLE n-gram hash vs real checkpoint I64 tensors ===\n");
-    const char* env = std::getenv("PHASESHIFT_QWEN4EXP_MODEL_DIR");
+    const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR");
     const std::string dir = (env != nullptr && env[0] != '\0')
                                 ? env
                                 : "/opt/zen/work/models/Qwen3.8-Flash-Next";

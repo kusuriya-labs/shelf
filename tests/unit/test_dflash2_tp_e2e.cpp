@@ -1,4 +1,4 @@
-#include <phaseshift/core/gpu/scoped_device.h>
+#include <shelf/core/gpu/scoped_device.h>
 
 #include <hip/hip_runtime.h>
 
@@ -31,21 +31,21 @@ static void print_tokens(const char* tag, const std::vector<int32_t>& tokens) {
 }
 
 int main() {
-    const char* model_env = std::getenv("PHASESHIFT_TP_MODEL_DIR");
-    const char* dflash_env = std::getenv("PHASESHIFT_DFLASH2_MODEL_DIR");
+    const char* model_env = std::getenv("SHELF_TP_MODEL_DIR");
+    const char* dflash_env = std::getenv("SHELF_DFLASH2_MODEL_DIR");
     if (model_env == nullptr || model_env[0] == '\0' || dflash_env == nullptr ||
         dflash_env[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_TP_MODEL_DIR and PHASESHIFT_DFLASH2_MODEL_DIR\n");
+        std::printf("SKIP: set SHELF_TP_MODEL_DIR and SHELF_DFLASH2_MODEL_DIR\n");
         return 77;
     }
     const std::string model_dir = model_env;
     const std::string dflash2_dir = dflash_env;
     if (!fs::exists(fs::path(model_dir) / "config.json")) {
-        std::printf("SKIP: PHASESHIFT_TP_MODEL_DIR has no config.json\n");
+        std::printf("SKIP: SHELF_TP_MODEL_DIR has no config.json\n");
         return 77;
     }
     if (!fs::exists(fs::path(dflash2_dir) / "config.json")) {
-        std::printf("SKIP: PHASESHIFT_DFLASH2_MODEL_DIR has no config.json\n");
+        std::printf("SKIP: SHELF_DFLASH2_MODEL_DIR has no config.json\n");
         return 77;
     }
 
@@ -85,10 +85,10 @@ int main() {
     }
 
     bool custom_prompt = false;
-    if (const char* pf = std::getenv("PHASESHIFT_DFLASH2_PROMPT_FILE")) {
+    if (const char* pf = std::getenv("SHELF_DFLASH2_PROMPT_FILE")) {
         FILE* fp = std::fopen(pf, "r");
         if (fp == nullptr) {
-            std::printf("FAIL: cannot open PHASESHIFT_DFLASH2_PROMPT_FILE %s\n", pf);
+            std::printf("FAIL: cannot open SHELF_DFLASH2_PROMPT_FILE %s\n", pf);
             return 1;
         }
         o.prompt.clear();
@@ -107,7 +107,7 @@ int main() {
         }
         custom_prompt = true;
     }
-    if (const char* prompt_env = std::getenv("PHASESHIFT_TP_PROMPT")) {
+    if (const char* prompt_env = std::getenv("SHELF_TP_PROMPT")) {
         o.prompt.clear();
         const char* p = prompt_env;
         while (*p != '\0') {
@@ -121,7 +121,7 @@ int main() {
         if (o.prompt.empty()) o.prompt = {304, 17, 283, 2454, 304};
         custom_prompt = true;
     }
-    if (const char* tok_env = std::getenv("PHASESHIFT_DFLASH2_TOKENS")) {
+    if (const char* tok_env = std::getenv("SHELF_DFLASH2_TOKENS")) {
         const long t = std::strtol(tok_env, nullptr, 10);
         if (t > 0) o.max_new_tokens = static_cast<std::uint32_t>(t);
     }

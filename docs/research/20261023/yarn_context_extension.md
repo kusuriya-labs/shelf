@@ -110,7 +110,7 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
 | 現状の VRAM 使用 | GPU0-3 とも約 60 MB（アイドル、13:10 時点） |
 | ROCm ツール | `rocm-smi` / `hipcc` あり（`/opt/zen/.venv/bin`） |
 | Python | transformers 5.14.1、torch 2.13.0+rocm10.0.0 |
-| build | `build/`（Release、`CMAKE_HIP_ARCHITECTURES=gfx1201`、`PHASESHIFT_HIP_GRAPH=OFF`） |
+| build | `build/`（Release、`CMAKE_HIP_ARCHITECTURES=gfx1201`、`SHELF_HIP_GRAPH=OFF`） |
 
 > 手順書は「R9700 32GiB 一枚」を前提にしているが、この環境は **32 GiB × 4 枚**である。
 > TP=2/4 とカード分割による KV 分割の可否は Gate 4 以降で再確認する。
@@ -126,12 +126,12 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
 | Correctness | **theta から `pow` 直接計算**（テーブル参照なし） | double | 要素ごと pow |
 
 - 逆周波数テーブル: `launch_rope_inv_freq_init`
-  （`src/phaseshift/kernels/optimized/attention/rope.hip`）。GPU kernel で
+  （`src/shelf/kernels/optimized/attention/rope.hip`）。GPU kernel で
   `inv_freq[i] = 1.0 / pow((double)theta, i/half)` を **double 精度**で生成。
   `half ≤ 32` 制約あり → **常に 32 double / 256 バイト固定**（rotary_dim=64 前提の
   暗黙結合）。
 - 生成タイミング: `create_model_executor`
-  （`src/phaseshift/models/qwen35/runtime/executor.hip`）。`host_model_state`
+  （`src/shelf/models/qwen35/runtime/executor.hip`）。`host_model_state`
   構築（block_table / gdn / kv_* の設定）**より後**、`create` の1回のみ。
   `rope_theta ≤ 0` なら 1e7 にフォールバック。
 - 伝播経路: GPU ポインタは `ModelDispatchStateView` ではなく
@@ -142,7 +142,7 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
   `env.qwen_state` を参照せず、binding（rotary_dim/group_size/scalar_b）と
   positions と workspace のみで動く。
 - pair と generic の分岐: `resolve_rope_physical`
-  （`src/phaseshift/inference/execution/rope_dispatch.hip`）。条件は
+  （`src/shelf/inference/execution/rope_dispatch.hip`）。条件は
   `rope_inv_freq != nullptr && rope_pair_shape_supported(...)`。
   `rope_pair_shape_supported` は head_dim==256 / rotary==64 / features%256==0 /
   stride 偶数 / ptr アラインを要求。
@@ -170,7 +170,7 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
 - MTP: `lower_qwen35_mtp_to_primitives` に同じ theta/partial/rotary 計算と
   Q/K の RoPENode があるが、**呼び出しは tests のみで production 経路に接続されて
   いない**（現状 MTP program は実行されない）。
-- HIP Graph: `PHASESHIFT_HIP_GRAPH` は cmake デフォルト OFF、現ビルドも OFF。
+- HIP Graph: `SHELF_HIP_GRAPH` は cmake デフォルト OFF、現ビルドも OFF。
   さらに `graph_eligible` は **`tp_schedules.empty()` を要求** → **TP 設定時は
   graph が使われない**。inv_freq は create で確定し capture より前、input/output は
   workspace or 固定テンソル、`ctx.row_positions` は arena 固定テンソル。
@@ -190,7 +190,7 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
    Q=3072/K=512 で登録値に一致する。
 2. **Correctness 経路の positions が tree 位置を参照できない**:
    `DeviceBatchContext::rope_positions`
-   （`include/phaseshift/runtime/batch/device_batch_context.h:62`、定義のみで
+   （`include/shelf/runtime/batch/device_batch_context.h:62`、定義のみで
    初期値 nullptr）は、**src/ 全体で代入箇所が存在しない**ことを grep で確認した
    （書かれているのは `HostExecutionContext.rope_positions`
    （`program_executor.h:51`）と DFlash2 の tree 位置生成のみ）。
@@ -211,12 +211,12 @@ Transformers 5.14.1 が出力した float32 の inv_freq（32要素、抜粋）:
 
 ### 4.3 設定・起動オプションの伝播経路（2026-10-23 コード確認）
 
-**entrypoint の構成**: ユーザー向け entrypoint は `phaseshift-compute` /
-`phaseshift-launcher` / `phaseshift-server` / `phaseshift-bench` の4つ。
-`phaseshift-launcher`（Python）は `--model-dir` / `--model-host` / `--device` /
+**entrypoint の構成**: ユーザー向け entrypoint は `shelf-compute` /
+`shelf-launcher` / `shelf-server` / `shelf-bench` の4つ。
+`shelf-launcher`（Python）は `--model-dir` / `--model-host` / `--device` /
 `--tp`（choices 1|2）を独占（`RESERVED_FLAGS`）し、他は `parse_known_args` で
 子へ透過転送する。**compute のオプション定義は `compute_cli.{h,cpp}` に残存**。
-`phaseshift-model-host` は launcher が rank 数だけ起動する非 user-facing プロセス。
+`shelf-model-host` は launcher が rank 数だけ起動する非 user-facing プロセス。
 
 **モデル設定の読み取り**:
 
@@ -304,8 +304,8 @@ stdio レイヤの二重防御。YaRN factor オプションは server / launche
 ## 5. KV 予算の事前計算（実装確認）
 
 計算の正本は `PagedKVPool::page_bytes()`
-（`include/phaseshift/inference/state/paged_kv_pool.h`、
-`src/phaseshift/inference/state/paged_kv_pool.cpp`）:
+（`include/shelf/inference/state/paged_kv_pool.h`、
+`src/shelf/inference/state/paged_kv_pool.cpp`）:
 
 - `layer_page = page_tokens × kv_heads × head_dim`
 - `body = 2（K/V）× num_attention_layers × layer_page`
@@ -350,7 +350,7 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
   明示 capacity 時は `capacity < max_seq_len+1` を invalid_argument、
   ページ不足は GiB 換算付き `insufficient_memory`（`compute_runtime.hip`）。
 - **TP 経路には単一 GPU 経路那样的 KV 予算の事前チェックがない**
-  （`src/phaseshift/models/qwen35/runtime/tensor_parallel.cpp` の
+  （`src/shelf/models/qwen35/runtime/tensor_parallel.cpp` の
   `TpRankRuntime::create`）。arena 割り当て失敗がそのまま伝播する。
   → TP での容量拒否メッセージは Gate 4 の対象。
 - TP の KV head 分割は実装済み: `local_kv_heads = num_key_value_heads / tp_size`
@@ -368,9 +368,9 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
 ## 6. テスト基盤・対象テスト一覧（実装確認）
 
 - required の正本: `cmake/tests.cmake` の `required` label と
-  `phaseshift-required-tests` カスタムターゲット。現行 build で
+  `shelf-required-tests` カスタムターゲット。現行 build で
   `ctest -L required -N` = **133 件**、`ctest -L cpu -N` = **73 件**。
-- `phaseshift_add_test` は `SKIP_RETURN_CODE 77`。`tests/run_required_acceptance.py`
+- `shelf_add_test` は `SKIP_RETURN_CODE 77`。`tests/run_required_acceptance.py`
   は JUnit の `<skipped>` を検出すると **exit 1（失敗扱い）**。
   AGENTS.md のテスト受入ルールと一致。
 - RoPE 関連 CTest:
@@ -392,10 +392,10 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
     `test_qwen35_tp_e2e` / `test_dflash2_tp_e2e`（gpu2;optional;external_files）。
   - prefix: `test_prefix_cache` / `test_prefix_cache_batcher`（gpu1;required）。
     server 側は `tests/server/test_compute_prefix_contract.py`
-    （`run_server_regression.py` 経由、PHASESHIFT_MODEL_DIR 必須）。
+    （`run_server_regression.py` 経由、SHELF_MODEL_DIR 必須）。
   - resident: `test_resident_model_ipc` / `test_resident_timeout_worker`
     （optional;external_files;resident、実行中 model-host が必要）。
-  - optional 一式は `PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` のときのみ build。
+  - optional 一式は `SHELF_BUILD_OPTIONAL_TESTS=ON` のときのみ build。
     **現行 build は OFF**。
 - RoPE 専用 golden は `tests/data/` / `tests/fixtures/` に**存在しない**
   （現状は相互比較と CPU 参照）。YaRN の Transformers golden は新規用意が必要。
@@ -510,25 +510,25 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
 
 | パス | 変更 |
 | --- | --- |
-| `include/phaseshift/models/qwen35/model/rope_profile.h`（新規） | `Qwen35RopeParameters` / `EffectiveRopeProfile` / 解決関数 / 上限関数 |
-| `src/phaseshift/models/qwen35/model/rope_profile.cpp`（新規） | `config.json` の検証付き読み取りと profile 解決 |
+| `include/shelf/models/qwen35/model/rope_profile.h`（新規） | `Qwen35RopeParameters` / `EffectiveRopeProfile` / 解決関数 / 上限関数 |
+| `src/shelf/models/qwen35/model/rope_profile.cpp`（新規） | `config.json` の検証付き読み取りと profile 解決 |
 | `src/apps/compute/compute_cli.{h,cpp}` | `--rope-factor auto\|1\|2\|4` の解析と help |
 | `src/apps/compute/main.hip` | 起動時の解決・`--max-seq-len` 上限拒否・speculative 拒否・ROPE profile ログ |
 | `src/apps/compute/compute_runtime.{h,hip}` | `EffectiveRopeProfile` の保持と executor / TP への伝播 |
-| `src/apps/server/phaseshift_server.py` | `--rope-factor` の argparse と compute への転送 |
-| `include/phaseshift/runtime/graph/primitive_node.h` | `RoPENode.attention_factor` |
-| `src/phaseshift/runtime/program/program.cpp` | `attention_factor` → `DispatchBinding.scalar_a` |
-| `include/phaseshift/models/common/qwen_hybrid/attention_lowering.h` | geometry の `rope_attention_factor` を Q/K 両方へ |
-| `src/phaseshift/models/qwen35/model/lower_to_primitives.cpp` | profile を geometry / MTP RoPENode へ伝播 |
-| `include/phaseshift/kernels/optimized/attention/rope.h` | `attention_factor`（offset 52、sizeof 56 維持）、`launch_rope_inv_freq_yarn_init`、generic/pair の引数追加、`kRopeInvFreqTable` |
-| `src/phaseshift/kernels/optimized/attention/rope.hip` | YaRN table 生成 kernel、generic の table 参照、pair/generic の cos/sin 係数適用 |
-| `src/phaseshift/inference/execution/rope_dispatch.hip` | `attention_factor` を `scalar_a` から取得して両 variant へ |
-| `include/phaseshift/inference/execution/physical_launch.h` | `PhysicalRopeLaunch.attention_factor` |
-| `include/phaseshift/runtime/batch/device_batch_context.h` / `src/.../device_batch_context.hip` | `DeviceBatchContext.rope_inv_freq` |
-| `src/phaseshift/models/qwen35/runtime/executor.hip` | YaRN 時の table 初期化、lowering への profile 伝播、batch context への table 設定 |
-| `src/phaseshift/kernels/correctness/detail/attention.inc` | correctness の RoPE を table + `scalar_a` 参照へ（pow 直計算は table 未設定時のみ） |
-| `include/phaseshift/models/qwen35/runtime/executor.h` | `ExecutorConfig.rope_profile` |
-| `include/phaseshift/models/qwen35/runtime/tensor_parallel.h` / `src/.../tensor_parallel.cpp` | TP の coordinator / rank 設定へ profile |
+| `src/apps/server/shelf_server.py` | `--rope-factor` の argparse と compute への転送 |
+| `include/shelf/runtime/graph/primitive_node.h` | `RoPENode.attention_factor` |
+| `src/shelf/runtime/program/program.cpp` | `attention_factor` → `DispatchBinding.scalar_a` |
+| `include/shelf/models/common/qwen_hybrid/attention_lowering.h` | geometry の `rope_attention_factor` を Q/K 両方へ |
+| `src/shelf/models/qwen35/model/lower_to_primitives.cpp` | profile を geometry / MTP RoPENode へ伝播 |
+| `include/shelf/kernels/optimized/attention/rope.h` | `attention_factor`（offset 52、sizeof 56 維持）、`launch_rope_inv_freq_yarn_init`、generic/pair の引数追加、`kRopeInvFreqTable` |
+| `src/shelf/kernels/optimized/attention/rope.hip` | YaRN table 生成 kernel、generic の table 参照、pair/generic の cos/sin 係数適用 |
+| `src/shelf/inference/execution/rope_dispatch.hip` | `attention_factor` を `scalar_a` から取得して両 variant へ |
+| `include/shelf/inference/execution/physical_launch.h` | `PhysicalRopeLaunch.attention_factor` |
+| `include/shelf/runtime/batch/device_batch_context.h` / `src/.../device_batch_context.hip` | `DeviceBatchContext.rope_inv_freq` |
+| `src/shelf/models/qwen35/runtime/executor.hip` | YaRN 時の table 初期化、lowering への profile 伝播、batch context への table 設定 |
+| `src/shelf/kernels/correctness/detail/attention.inc` | correctness の RoPE を table + `scalar_a` 参照へ（pow 直計算は table 未設定時のみ） |
+| `include/shelf/models/qwen35/runtime/executor.h` | `ExecutorConfig.rope_profile` |
+| `include/shelf/models/qwen35/runtime/tensor_parallel.h` / `src/.../tensor_parallel.cpp` | TP の coordinator / rank 設定へ profile |
 | `tests/unit/test_qwen35_rope_profile.cpp`（新規） | 解決優先順位・異常系の CPU テスト |
 | `tests/kernels/optimized/test_rope_yarn.hip`（新規） | GPU の 32 周波数を Transformers golden と照合 |
 | `cmake/tests.cmake` | 上記テスト登録、CLI 契約テスト 3 件 |
@@ -554,7 +554,7 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
 - 実機確認は `--max-seq-len 256` の短文のみ。524,288 / 1,000,000 の長文 E2E は未実施（Gate 6。4x は方針により実施しない）。
 - `test_rope` の full-rotary（rot=256）ケースでは table を使わず theta から計算する（table 長 32 の前提）。rotary_dim=64 の本番 geometry では影響しない。
 - correctness 側の `rope_positions`（spec tree 位置）は依然として未接続。optimized と correctness で tree 位置が食い違う既存問題は未解消（今回の変更で table/係数は一致）。
-- gate 3 の「Graph OFF/ON」検証は未実施（build は `PHASESHIFT_HIP_GRAPH=OFF`、かつ TP 時は graph 無効）。
+- gate 3 の「Graph OFF/ON」検証は未実施（build は `SHELF_HIP_GRAPH=OFF`、かつ TP 時は graph 無効）。
 - MTP lowering は profile を受ける引数を追加したが、production 経路に接続されていない点は変わらない（lowering テストのみ）。
 
 ### 8.4 採否
@@ -586,7 +586,7 @@ ACCEPT。Target text 経路の Native / YaRN 2x / YaRN 4x が同一の table と
 | TP 経路の容量拒否 | TP2 + BF16 + 1,000,000 → `tp rank arena is too small: free 15.73 GiB, KV 30.52 GiB` で拒否（事前チェックあり） |
 | Resident / local 同一性 | launcher + model-host 経由と local load で **ROPE profile 行が完全一致**、同一プロンプトの生成 ID が**完全一致** |
 | PrefixCache（2x） | 保存は「prefill 位置が page_tokens の倍数」のときのみ発生。復元は「キャッシュより長いプロンプト」で発生。miss（restored=0）と hit（restored=320）で**生成 ID が完全一致** |
-| Server 伝播 | `phaseshift-server --rope-factor 2` の子 compute ログに `ROPE profile: type=yarn factor=2 ... source=cli` を確認 |
+| Server 伝播 | `shelf-server --rope-factor 2` の子 compute ログに `ROPE profile: type=yarn factor=2 ... source=cli` を確認 |
 
 ### 9.3 判明した仕様（docs へ反映する契約）
 

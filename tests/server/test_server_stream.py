@@ -36,17 +36,17 @@ def main() -> int:
     token_log = Path(tempfile.mkdtemp(prefix="ps-tokenlog-")) / "tokens.txt"
 
     try:
-        with ServerHarness(env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
+        with ServerHarness(env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:
             non_stream = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES,
+                {"model": "shelf", "messages": MESSAGES,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}})
             non_text = non_stream["choices"][0]["message"]["content"]
 
             pids_before = compute_pids()
             chunks = list(http_sse(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES, "stream": True,
+                {"model": "shelf", "messages": MESSAGES, "stream": True,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}}))
             content_parts = []
             for chunk in chunks:
@@ -71,7 +71,7 @@ def main() -> int:
 
             repeat = list(http_sse(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES, "stream": True,
+                {"model": "shelf", "messages": MESSAGES, "stream": True,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}}))
             repeat_text = "".join(
                 (chunk.get("choices", [{}])[0].get("delta", {}) or {}).get("content") or ""
@@ -87,7 +87,7 @@ def main() -> int:
 
             usage_chunks = list(http_sse(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES, "stream": True,
+                {"model": "shelf", "messages": MESSAGES, "stream": True,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False},
                  "stream_options": {"include_usage": True}}))
             checker.check("usage-chunk-count",

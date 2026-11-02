@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 include(cmake/rocm_root.cmake)
 
 project(
-    PhaseShift
+    Shelf
     VERSION 0.1.0
     LANGUAGES CXX HIP
 )
@@ -25,7 +25,7 @@ include(cmake/apps.cmake)
 include(cmake/model_host.cmake)
 
 # Test suite.
-if(PHASESHIFT_BUILD_TESTS)
+if(SHELF_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()

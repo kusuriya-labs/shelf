@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate 6A: OpenCode agent E2E through PhaseShift Server (Chat Completions)."""
+"""Gate 6A: OpenCode agent E2E through Shelf Server (Chat Completions)."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ from support import Checker, ServerHarness, model_dir  # noqa: E402
 
 PROVIDER_CONFIG = """{{
   "$schema": "https://opencode.ai/config.json",
-  "model": "phaseshift/phaseshift",
+  "model": "shelf/shelf",
   "providers": {{
-    "phaseshift": {{
-      "name": "PhaseShift",
-      "env": ["PHASESHIFT_API_KEY"],
+    "shelf": {{
+      "name": "Shelf",
+      "env": ["SHELF_API_KEY"],
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {{"baseURL": "{base_url}"}},
-      "models": {{"phaseshift": {{"name": "PhaseShift",
+      "models": {{"shelf": {{"name": "Shelf",
         "limit": {{"context": {context}, "output": {output}}}}}}}
     }}
   }}
@@ -51,7 +51,7 @@ def run_opencode(workspace: Path, message: str, base_url: str, env: dict,
     child_env["PWD"] = str(workspace)
     return subprocess.run(
         ["opencode", "run", "--standalone", "--auto",
-         "-m", "phaseshift/phaseshift", message],
+         "-m", "shelf/shelf", message],
         cwd=str(workspace), env=child_env, capture_output=True, text=True,
         timeout=timeout)
 
@@ -74,7 +74,7 @@ def agent_env(base: Path, server_env: dict) -> dict:
     env["XDG_CONFIG_HOME"] = str(base / "xdg-config")
     env["XDG_DATA_HOME"] = str(base / "xdg-data")
     env["XDG_CACHE_HOME"] = str(base / "xdg-cache")
-    env["PHASESHIFT_API_KEY"] = "dummy"
+    env["SHELF_API_KEY"] = "dummy"
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     for key in ("xdg-config", "xdg-data", "xdg-cache"):
         (base / key).mkdir(parents=True, exist_ok=True)
@@ -114,10 +114,10 @@ def main() -> int:
     try:
         with ServerHarness(
                 max_seq_len=MODEL_CONTEXT, arena_gib=24,
-                device=int(os.environ.get("PHASESHIFT_TEST_DEVICE", "0")),
-                env={"PHASESHIFT_SERVER_REQUEST_LOG": str(request_log),
-                     "PHASESHIFT_SERVER_TOKEN_LOG": str(token_log),
-                     "PHASESHIFT_COMPUTE_LOG": str(compute_log)}) as server:
+                device=int(os.environ.get("SHELF_TEST_DEVICE", "0")),
+                env={"SHELF_SERVER_REQUEST_LOG": str(request_log),
+                     "SHELF_SERVER_TOKEN_LOG": str(token_log),
+                     "SHELF_COMPUTE_LOG": str(compute_log)}) as server:
             env = agent_env(base, server.env)
 
             # Acceptance 1: read + arithmetic + write.
@@ -133,11 +133,11 @@ def main() -> int:
 
             # Acceptance 2: read + write transform.
             ok2, proc2, output2 = run_task(
-                base, "task2", "source.txt", "PhaseShift\n",
+                base, "task2", "source.txt", "Shelf\n",
                 "source.txt を読み、同じ内容の末尾に \" Server\" を付けて "
                 "output.txt を作ってください。"
                 "作業が完了したらtoolを呼ぶのをやめ、最後に通常の文章で完了を報告してください。",
-                "output.txt", "PhaseShift Server", server, env)
+                "output.txt", "Shelf Server", server, env)
             checker.check("acceptance2-output", ok2,
                           f"rc={getattr(proc2, 'returncode', None)} "
                           f"value={output2.read_text().strip() if output2 and output2.is_file() else None}")

@@ -1,6 +1,6 @@
 # Roadmap
 
-PhaseShift の現在の作業対象と、今後予定している作業の一覧である。
+Shelf の現在の作業対象と、今後予定している作業の一覧である。
 完了済み項目は載せない。過去の経緯は Git history を参照。
 
 現行のゴールと性能目標は `docs/developer/objective.md`、現在の性能は
@@ -65,6 +65,6 @@ drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）で ALU 
 
 ## Server
 
-`phaseshift-server` は Feature Complete として維持する。API 機能追加は現在の
+`shelf-server` は Feature Complete として維持する。API 機能追加は現在の
 roadmap の主対象ではない。Server の現在の surface と詳細 contract は
 [server_status.md](server_status.md) を入口に各 doc を参照。

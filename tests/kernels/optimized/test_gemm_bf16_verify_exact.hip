@@ -1,8 +1,8 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/gfx_arch.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/kernels/optimized/linear/bf16.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/gfx_arch.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/kernels/optimized/linear/bf16.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>

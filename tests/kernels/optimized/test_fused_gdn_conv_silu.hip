@@ -1,8 +1,8 @@
-#include <phaseshift/kernels/optimized/gdn/conv1d.h>
-#include <phaseshift/kernels/optimized/gdn/fused_gdn_conv_silu.h>
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/gdn/conv1d.h>
+#include <shelf/kernels/optimized/gdn/fused_gdn_conv_silu.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

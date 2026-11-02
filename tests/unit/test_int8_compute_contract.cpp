@@ -1,8 +1,8 @@
-#include <phaseshift/runtime/program/int8_activation_workspace.h>
-#include <phaseshift/quantization/quantized_compute_view.h>
-#include <phaseshift/quantization/codec/ue4m3.h>
-#include <phaseshift/core/memory/alignment.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/runtime/program/int8_activation_workspace.h>
+#include <shelf/quantization/quantized_compute_view.h>
+#include <shelf/quantization/codec/ue4m3.h>
+#include <shelf/core/memory/alignment.h>
+#include <shelf/core/memory/types.h>
 #include <cstdio>
 #include <cstdint>
 

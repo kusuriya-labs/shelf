@@ -1,5 +1,5 @@
-#include <phaseshift/kernels/optimized/attention/rope.h>
-#include <phaseshift/core/gpu/cleanup.h>
+#include <shelf/kernels/optimized/attention/rope.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <hip/hip_runtime.h>
 #include <cmath>
 #include <cstdint>

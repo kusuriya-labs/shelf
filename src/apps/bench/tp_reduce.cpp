@@ -1,6 +1,6 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/runtime/tp/tp_transports.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/runtime/tp/tp_transports.h>
 
 #include <hip/hip_runtime.h>
 
@@ -42,7 +42,7 @@ BenchTarget target_for(const std::string& backend) {
 }
 
 void usage() {
-    std::printf("usage: phaseshift-bench tp-reduce [--rows 1,2,...] [--features N] "
+    std::printf("usage: shelf-bench tp-reduce [--rows 1,2,...] [--features N] "
                 "[--iters N] [--backend auto|p2p|host] [--check]\n");
     std::printf("  measures tp sum_hidden latency for the implemented transports\n");
     std::printf("  default rows: 1,2,4,8,16,32,64,128,256,512,1024,2048\n");
@@ -299,7 +299,7 @@ int run_tp_reduce(int argc, char** argv) {
     if (backend == "auto" || backend == "p2p") {
         std::unique_ptr<TpTransport> peer;
         if (backend == "p2p") {
-            ::setenv("PHASESHIFT_TP_TRANSPORT", "p2p", 1);
+            ::setenv("SHELF_TP_TRANSPORT", "p2p", 1);
         }
         auto selection = create_tp_transport(devices);
         if (selection.ok() && std::string(selection.value().transport->name()) == "hip-p2p") {

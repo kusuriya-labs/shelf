@@ -41,7 +41,7 @@ def collect(harness, target_ids, timeout_each=300.0):
 
 def main() -> int:
     checker = Checker("compute-concurrency")
-    device = int(os.environ.get("PHASESHIFT_TEST_DEVICE", "0"))
+    device = int(os.environ.get("SHELF_TEST_DEVICE", "0"))
     harness = ComputeHarness(max_concurrent_requests=4, batch_trace=True, device=device)
     try:
         harness.start()

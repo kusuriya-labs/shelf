@@ -1,9 +1,9 @@
 #pragma once
 
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/quantization/bundle/hf_manifest.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 

@@ -14,7 +14,7 @@ Bottleneck class: ② pass / 同期（毎 g2 に __syncthreads → s_barrier + g
 Hypothesis: as を activation_scales から直接読み、LDS ステージとバリアごと消せば、
   バリアコスト＋L1 無効化＋ロード pipeline の途断が取り除ける（レジスタ中立を想定）
 Expected E2E saving: −10〜−30 ms
-Modified files: src/phaseshift/kernels/optimized/linear/fp8.hip
+Modified files: src/shelf/kernels/optimized/linear/fp8.hip
 ISA before/after（静的）:
   base: global_inv 1 / s_barrier 2 / ds 17 / wmma 64 / wait_alu 425 / 17,516 B
   C1a:  global_inv 0 / s_barrier 0 / ds 0  / wmma 64 / wait_alu 476 / 19,428 B
@@ -82,7 +82,7 @@ Bottleneck class: ② 計算/pass（GEMM share 61%）+ ③ latency（occupancy/�
 Hypothesis: 参照の 128×128 ブロック + act を kPWW=4 wave 共有 + LDS ping-pong で
   130→160 TFLOP/s 相当へ（参照実証 160 TFLOP/s, M300–4096）
 Expected E2E saving: 中央 −55 ms
-Modified files: src/phaseshift/kernels/optimized/linear/fp8.hip
+Modified files: src/shelf/kernels/optimized/linear/fp8.hip
 Correctness: 全変種 288/0。C2-b は E2E トークンゲート GENERATED_IDS=47410 一致
 Resources: base vgpr184/lds1024/scr0 | C2-a attr8 vgpr176/lds25600/scr0 |
            C2-b vgpr184/lds512/scr0
@@ -178,7 +178,7 @@ de-permute（bank 解消を先に証明）、(b) gdn_recurrence、(c) GEMM 微�
 **実装前分析。以下は未変更（コード無変更・基準値のみ計測）。**
 
 ```text
-Target kernel: phaseshift_qwen35_gdn_recurrence_wmma_lossy
+Target kernel: shelf_qwen35_gdn_recurrence_wmma_lossy
   → gdn_recurrence_wmma_body<true, false>（recurrence.hip L222–）
 Bottleneck class（暫定）: ② 同期/pass 支配 + ③ 埋め込みレイテンシ
   （occupancy は capacity 比で半分、時間の大半は同期・逐次レイテンシと推定）
@@ -213,7 +213,7 @@ capacity:  VGPR224→alloc240→6/SIMD→24/WGP→reg 3blk
 ### 基準値（マイクロ、本番 shape）
 
 ```sh
-phaseshift-bench gdn-recurrence --variant optimized --rows 2048 --nreq 1 \
+shelf-bench gdn-recurrence --variant optimized --rows 2048 --nreq 1 \
   --key-heads 8 --value-heads 24 --head-k 128 --head-v 128 --warmup 2 --samples 5
 # p10 808.60 / p50 811.95 / p90 903.90 µs（grid=48 相当）
 ```
@@ -275,11 +275,11 @@ decode1 は `g::kWv`(64) と static_assert のまま = 触らない。
 ```text
 Experiment ID: EXP-G1-a
 Commit: 未コミット（差分 = /tmp/g1a_kWvP.patch 保管、revert 済み。基準 499a89a）
-Target kernel: phaseshift_qwen35_gdn_recurrence_wmma_lossy
+Target kernel: shelf_qwen35_gdn_recurrence_wmma_lossy
 Bottleneck class: ③（grid 平均 3/SIMD → 6/SIMD 化の仮説）
 Hypothesis: v サライス半減で grid 96、occupancy 24→32 waves/WGP に到達し −10〜14%
 Expected E2E saving: −6〜8 ms
-Modified files: src/phaseshift/kernels/optimized/gdn/recurrence.hip
+Modified files: src/shelf/kernels/optimized/gdn/recurrence.hip
   （kWvP=32 局所定数 + マスク8箇所 + solve/compact の tid<kWvP + 両 launch。
    decode1 / kWv / static_assert / LdsSmem 次元は無変更 — サブエージェントがデコード表を作成）
 ISA/Resources: grid 48→96（Grid_Size 24576=96×256 を rocprof で確認）、LDS 35840 変化なし、
@@ -309,7 +309,7 @@ Hypothesis: weight/activation scale が K=128 で一定なら、K 全域で raw 
   積んで scale を K128 ごとに1回 fold（fma/mul を K32 ごと→K128 へ 1/4 に）
   数式等価（Σ の結合・分配）・BF16 出力・tolerance 内 → 原則4 の事前承認範囲
 Expected E2E saving: −20〜40 ms
-Modified files: src/phaseshift/kernels/optimized/linear/fp8.hip
+Modified files: src/shelf/kernels/optimized/linear/fp8.hip
   （wide kernel を template<bool kDeferScale> 化。w_scale_shift==2（本番 group128）のみ
    defer 経路、shift==1（fp8g64 テスト）は旧経路を if constexpr で維持。
    (t,nt) 外側に K ループを回して c[8] を K128 間保持、ws を g2 先頭で hoist）
@@ -480,7 +480,7 @@ Hypothesis: 現行は x(out) 最速走査で act タイルが1ブロック分し
   act 2.6MB（G=4）が全 N スイープで L2 に残り、weight も G ブロック連続で当たる。
   リニア id L = bx + GX*by（x 最速前提）から
     bx = (L%(G*GX))/G, by = (L/(G*GX))*G + (L%(G*GX))%G  で逆写像（G=1 は恒等）。
-  G は env `PHASESHIFT_GEMM2D_GROUP`（既定 4、gy2d % G != 0 は 1 へフォールバック）。
+  G は env `SHELF_GEMM2D_GROUP`（既定 4、gy2d % G != 0 は 1 へフォールバック）。
 Modified files: linear/fp8.hip（シグネチャ + prologue + launcher env + <cstdlib>）
 Resources: VGPR/LDS/Scr 変化なし（swizzle はブロック毎の除算2回のみ）
 Correctness: test_gemm_fp8_optimized 288/0（GY=4 ケースで swizzle 実行を網羅）、
@@ -606,7 +606,7 @@ Reason: 事前前発行が効かなかった = チャンク頭ロード待ちは
 
 ```text
 Experiment ID: EXP-G1-b / Commit: 未コミット（差分 = /tmp/g1b_syncAC.patch 保管、revert 済み。基準 5b7d78f）
-Target kernel: phaseshift_qwen35_gdn_recurrence_wmma_lossy（プリフィル本体のみ）
+Target kernel: shelf_qwen35_gdn_recurrence_wmma_lossy（プリフィル本体のみ）
 Hypothesis: bt/oe/de の LDS 公開を消費側ローカル再計算に置換し、syncA/syncC を除去
   （チャンク毎 sync 6→4、動的 384→256）。予想 −2〜6%
 Modified files: recurrence.hip のみ（+14/−19、18 参照を全分類）
@@ -659,7 +659,7 @@ Decision: ACCEPT（ユーザー判定基準の変更による）
 ```text
 Experiment ID: EXP-A1 / Commit: 未コミット（差分 = /tmp/a1_overlay.patch 保管、revert 済み。基準 aa655a4）
 Target: HipPeerTpTransport::enqueue_sum（集合点の送信コピー/wait/add を comm stream へ分離、
-  producer→comm / comm→compute をイベントで接続。env `PHASESHIFT_TP_OVERLAY`、既定 OFF）
+  producer→comm / comm→compute をイベントで接続。env `SHELF_TP_OVERLAY`、既定 OFF）
 Hypothesis: overlap_study 案 A1。単一 stream での通信・計算直列を分離し、停滞 ~50ms の
   大半を計算に重ねる（残り 51ms への対抗として500ms到達の本命経路）
 Correctness: token gate GENERATED_IDS=47410 一致、required 121/121（overlay ON）
@@ -694,7 +694,7 @@ Experiment ID: EXP-A1b / Commit: 未コミット（差分 = /tmp/a1b_overlay_ref
 計測1（①の真実率）: `peer_write_complete` は **pw_true=0 / pw_false=128 = 常時 false**
   → 強制コピー変更は本経路では意味を持たない（①は原因でない）
 修正: overlay = kOverlay && !peer_write_complete（ユーザー案どおり）＋
-  comm stream を hipStreamNonBlocking 作成（legacy ゲート PHASESHIFT_TP_OVL_LEGACY で比較）
+  comm stream を hipStreamNonBlocking 作成（legacy ゲート SHELF_TP_OVL_LEGACY で比較）
 計測2（E2E interleaved、pp wall、GPU0/1、KFD 0）:
   A（OFF）          544.59 / 544.70 / 545.68（中央 544.70）
   C（ON・修正済み・NonBlocking） 572.96 / 575.35 / 573.63（中央 573.63）→ +28.93ms

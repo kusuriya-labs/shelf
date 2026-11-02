@@ -1,6 +1,6 @@
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
-#include <phaseshift/quantization/quant_format.h>
-#include <phaseshift/quantization/quantization_types.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/quant_format.h>
+#include <shelf/quantization/quantization_types.h>
 #include <cstdio>
 
 using ps::quantization::QuantFormatDesc;

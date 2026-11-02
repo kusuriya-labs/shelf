@@ -1,5 +1,5 @@
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/io/safetensors_reader.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/io/safetensors_reader.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -33,7 +33,7 @@ static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
 
     std::vector<std::size_t> shape = {2, 4};
     check(w.value().plan_tensor("t", dt, shape).ok(), (std::string("plan ") + dtname).c_str());
-    check(w.value().set_metadata("phaseshift.format", "phaseshift-fpx-safetensors").ok(), (std::string("metadata ") + dtname).c_str());
+    check(w.value().set_metadata("shelf.format", "shelf-fpx-safetensors").ok(), (std::string("metadata ") + dtname).c_str());
 
     auto base = w.value().write_header();
     check(base.ok(), (std::string("write_header ") + dtname).c_str());
@@ -63,7 +63,7 @@ static void roundtrip_dtype(ps::io::SType dt, const char* dtname) {
         if (n == "__metadata__") metadata_excluded = false;
     }
     check(metadata_excluded, (std::string("__metadata__ not a tensor ") + dtname).c_str());
-    check(r.value().metadata().at("phaseshift.format") == "phaseshift-fpx-safetensors",
+    check(r.value().metadata().at("shelf.format") == "shelf-fpx-safetensors",
           (std::string("metadata readable ") + dtname).c_str());
 
     std::vector<std::uint8_t> buf(payload.size());

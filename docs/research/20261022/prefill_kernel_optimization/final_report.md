@@ -10,13 +10,13 @@ HIP Graph・TP 方式変更・量子化変更は一切不使用。
 - 構成: R9700（gfx1201）×4 のうち GPU0+1 を TP2 使用、PEX89048 Gen5 スイッチ +
   各カード upstream **Gen5 x8**、HipPeer(p2p)、HIP 7.15.26333 / clang 23、
   model revision `017b9c7a…`、FP8 E4M3（weight 128×128 ブロック、act トークン毎128）
-- 663ms の再現（A-1）: `phaseshift-compute --tp 2 … /tmp/pp2048.txt …`
+- 663ms の再現（A-1）: `shelf-compute --tp 2 … /tmp/pp2048.txt …`
   → **PREFILL_MS = 663.4 / 669.9**（ゴール値と一致）、`GENERATED_IDS=47410`（全実験で一致）
-- 主指標（A/B 判定）: `phaseshift-bench pp --tp 2 --prompt-tokens 2048
+- 主指標（A/B 判定）: `shelf-bench pp --tp 2 --prompt-tokens 2048
   --arena-gib 16 --warmup 1 --runs 5` の `wall_ms_median`
   → 初期基準 **657.75 ms**（ばらつき 0.3%）。以後は interleaved ペア差で判定。
 - 区間: PREFILL_MS = prefill step 開始〜同期完了（ロード・decode 除外）。
-  `PHASESHIFT_OP_DUMP=1` の実行時間は不使用。
+  `SHELF_OP_DUMP=1` の実行時間は不使用。
 
 ## 2. Kernel breakdown（最新 trace: G9 適用後、rocprofv3 kernel trace・4306 dispatch・両 GPU）
 

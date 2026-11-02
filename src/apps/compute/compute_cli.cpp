@@ -53,10 +53,10 @@ bool parse_devices(const char* s, std::vector<int>& out) {
 
 void compute_usage(const char* prog) {
     printf("usage: %s [options]\n", prog);
-    printf("\nPhaseShift inference runtime for Qwen 3.5 Dense on AMD RDNA4\n");
+    printf("\nShelf inference runtime for Qwen 3.5 Dense on AMD RDNA4\n");
     printf("options:\n");
     printf("  --model-dir PATH       BF16 or quantized model directory (auto-detected via\n");
-    printf("                         phaseshift_quantization.json) (required)\n");
+    printf("                         shelf_quantization.json) (required)\n");
     printf("  --input-ids-file PATH  whitespace separated prompt token ids\n");
     printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
     printf("  --max-seq-len N        max sequence length (default 512)\n");
@@ -76,7 +76,7 @@ void compute_usage(const char* prog) {
     printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
     printf("  --hidden-taps LIST      comma separated layer ids (max 8) for intermediate\n");
-    printf("                          hidden capture; dump to PHASESHIFT_DEBUG_HIDDEN_FILE\n");
+    printf("                          hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE\n");
     printf("  --tp-combine-f32 0|1    keep row-parallel combine output in f32 (default 0 =\n");
     printf("                          bf16 round as today; tp only)\n");
     printf("  --temperature F        sampling temperature (default 0 = greedy)\n");
@@ -108,7 +108,7 @@ void compute_usage(const char* prog) {
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
     printf("  --prefix-cache-cold-state-slots N  cold GDN state slots (default 0 = auto)\n");
     printf("  --model-host PATH      attach model weights from a resident model host\n");
-    printf("                          (default: PHASESHIFT_MODEL_HOST_SOCKET, empty = local load)\n");
+    printf("                          (default: SHELF_MODEL_HOST_SOCKET, empty = local load)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }

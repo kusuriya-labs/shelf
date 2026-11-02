@@ -1,5 +1,5 @@
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/kernels/optimized/attention/qsa_indexer.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/kernels/optimized/attention/qsa_indexer.h>
 
 #include <hip/hip_runtime.h>
 
@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-#ifndef PHASESHIFT_SOURCE_ROOT
-#error "PHASESHIFT_SOURCE_ROOT must be defined"
+#ifndef SHELF_SOURCE_ROOT
+#error "SHELF_SOURCE_ROOT must be defined"
 #endif
 
 namespace {
@@ -555,7 +555,7 @@ void compare_rows(const GpuResult& gpu, const IndexerOracle& oracle, uint32_t be
 }
 
 std::string golden_path(const char* name) {
-    return std::string(PHASESHIFT_SOURCE_ROOT) + "/tests/fixtures/qsa/" + name;
+    return std::string(SHELF_SOURCE_ROOT) + "/tests/fixtures/qsa/" + name;
 }
 
 }

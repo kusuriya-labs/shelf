@@ -1,11 +1,11 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/context_state.h>
-#include <phaseshift/models/qwen35/eagle4/executor.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/context_state.h>
+#include <shelf/models/qwen35/eagle4/executor.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

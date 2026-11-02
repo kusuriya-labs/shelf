@@ -1,4 +1,4 @@
-#include <phaseshift/inference/execution/selectors/rmsnorm_selector.h>
+#include <shelf/inference/execution/selectors/rmsnorm_selector.h>
 
 #include <climits>
 #include <cstdio>

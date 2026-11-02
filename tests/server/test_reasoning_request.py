@@ -194,7 +194,7 @@ def check_capability(checker, processor):
 
 
 def check_validation(checker):
-    base = {"model": "phaseshift", "messages": MESSAGES}
+    base = {"model": "shelf", "messages": MESSAGES}
 
     request = parse_chat_request(base)
     checker.check("u01-default-enable-thinking", request.enable_thinking is True, "")

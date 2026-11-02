@@ -1,8 +1,8 @@
-#include <phaseshift/kernels/optimized/rmsnorm.h>
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/kernels/optimized/gdn/fused_gdn_post.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/rmsnorm.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/optimized/gdn/fused_gdn_post.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

@@ -1,10 +1,10 @@
 #pragma once
 
-#include <phaseshift/core/memory/types.h>
+#include <shelf/core/memory/types.h>
 
-#include <phaseshift/io/safetensors_writer.h>
+#include <shelf/io/safetensors_writer.h>
 
-#include <phaseshift/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/config.h>
 
 
 #include <array>

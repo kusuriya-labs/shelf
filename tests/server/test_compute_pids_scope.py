@@ -27,11 +27,11 @@ def main() -> int:
     checker = Checker("compute-pids-scope")
     procs = []
     try:
-        owned = spawn(["phaseshift-compute", "--serve-stdio"], owned=True)
+        owned = spawn(["shelf-compute", "--serve-stdio"], owned=True)
         procs.append(owned)
-        foreign = spawn(["phaseshift-compute", "--serve-stdio"], owned=False)
+        foreign = spawn(["shelf-compute", "--serve-stdio"], owned=False)
         procs.append(foreign)
-        wrong_op = spawn(["phaseshift-compute", "--serve-once"], owned=True)
+        wrong_op = spawn(["shelf-compute", "--serve-once"], owned=True)
         procs.append(wrong_op)
 
         deadline = time.monotonic() + 10.0

@@ -55,7 +55,7 @@ Resident Model Infrastructure
 │    └─ ResidentModelSource     … host から attach
 │
 ├─ Runtime Client
-│    ├─ phaseshift-compute
+│    ├─ shelf-compute
 │    ├─ host backend executable
 │    └─ TpRankRuntime
 │
@@ -67,23 +67,23 @@ Resident Model Infrastructure
      └─ disk-load-count assertion
 ```
 
-### phaseshift-model-host
+### shelf-model-host
 
-`phaseshift-model-host` は internal runtime component の executable である。
-`cmake/apps.cmake` の 4 user-facing entrypoint（`phaseshift-compute` /
-`phaseshift-launcher` / `phaseshift-server` / `phaseshift-bench`）には含めない。
-`phaseshift-launcher` と session runner が起動し、`phaseshift-server` と
-`phaseshift-compute` が起動することはない。
+`shelf-model-host` は internal runtime component の executable である。
+`cmake/apps.cmake` の 4 user-facing entrypoint（`shelf-compute` /
+`shelf-launcher` / `shelf-server` / `shelf-bench`）には含めない。
+`shelf-launcher` と session runner が起動し、`shelf-server` と
+`shelf-compute` が起動することはない。
 
 必須ではなく、従来経路のまま選択できる。
 
 ```
-従来:   phaseshift-compute  → 自分で safetensors load
-resident: phaseshift-model-host → HIP IPC → phaseshift-compute
+従来:   shelf-compute  → 自分で safetensors load
+resident: shelf-model-host → HIP IPC → shelf-compute
 ```
 
-`phaseshift-launcher` → `phaseshift-model-host` と
-`phaseshift-launcher` → `phaseshift-server` → `phaseshift-compute` という関係であり、
+`shelf-launcher` → `shelf-model-host` と
+`shelf-launcher` → `shelf-server` → `shelf-compute` という関係であり、
 server / compute に model 管理機能は戻さない。
 
 ```
@@ -123,9 +123,9 @@ resident 不可の場合は compute process が local load して保持する。
 
 ### launcher
 
-`phaseshift-launcher` が host lifetime の owner である。launcher は rank ごとに
+`shelf-launcher` が host lifetime の owner である。launcher は rank ごとに
 host を起動し、すべての host が protocol ping に応答した後に child
-（`phaseshift-compute` / `phaseshift-server` / `phaseshift-bench`）を
+（`shelf-compute` / `shelf-server` / `shelf-bench`）を
 `--model-host` 付きで起動する。child の終了時に全 host を shutdown する。
 
 ターゲットモデルは必ず host 経由でロードされる。EAGLE4 drafter は rank 0 の host に
@@ -134,22 +134,22 @@ host を起動し、すべての host が protocol ping に応答した後に ch
 
 ### compute
 
-`phaseshift-compute` は host の socket を `--model-host` で直接指定できる。
-`--model-host` を指定しなければ `PHASESHIFT_MODEL_HOST_SOCKET` を見る。
+`shelf-compute` は host の socket を `--model-host` で直接指定できる。
+`--model-host` を指定しなければ `SHELF_MODEL_HOST_SOCKET` を見る。
 どちらも無ければ従来どおり自分で safetensors を load する。
 
 ### server
 
-`phaseshift-server` は `--model-host` と `--tp` を受け取り、
-`phaseshift-compute` へ透過する。launcher 経由で使うのが通常である。
+`shelf-server` は `--model-host` と `--tp` を受け取り、
+`shelf-compute` へ透過する。launcher 経由で使うのが通常である。
 
 ### environment
 
 | 変数 | 役割 |
 |---|---|
-| `PHASESHIFT_MODEL_HOST_SOCKET` | model host の socket。単一 path か `0=<path>,1=<path>` の index map |
-| `PHASESHIFT_DISABLE_RESIDENT_MODEL` | 設定すると resident を無効化し常に local load |
-| `PHASESHIFT_TEST_STATS_SOCKET` | test 検証専用。worker が STATS を読む先 |
+| `SHELF_MODEL_HOST_SOCKET` | model host の socket。単一 path か `0=<path>,1=<path>` の index map |
+| `SHELF_DISABLE_RESIDENT_MODEL` | 設定すると resident を無効化し常に local load |
+| `SHELF_TEST_STATS_SOCKET` | test 検証専用。worker が STATS を読む先 |
 
 index は `tp_size > 1` なら `tp_rank`、それ以外は worker の device index である。
 `HIP_VISIBLE_DEVICES` の remap を考慮し、worker は host の physical device 番号を
@@ -275,7 +275,7 @@ Resident Model Infrastructure を実装し、test session runner が使う。
 
 ### Phase 2
 
-`phaseshift-compute --model-host ...` による任意利用。
+`shelf-compute --model-host ...` による任意利用。
 従来の local load 経路はそのまま残すため互換性がある。
 
 ### Phase 3
@@ -290,7 +290,7 @@ resident fast path の対象は「同じ正しい重みを何度も読み直し�
 
 - host backend の runtime / E2E / perf external test
 - DFlash2 gate 系、target taps、TP E2E
-- `phaseshift-compute`（`--serve-stdio`、single-shot、server 経由）
+- `shelf-compute`（`--serve-stdio`、single-shot、server 経由）
 
 対象外:
 
@@ -298,9 +298,9 @@ resident fast path の対象は「同じ正しい重みを何度も読み直し�
   `test_qwen35_mtp_weight_load`、`test_qwen35_mtp_weight_real`、
   `test_dflash2_weight_real`、`test_dflash2_weight_contract`）
   load path 自体が検証対象なので従来どおり safetensors を読ませる。
-  これらは `PHASESHIFT_DISABLE_RESIDENT_MODEL=1` でも強制できる。
+  これらは `SHELF_DISABLE_RESIDENT_MODEL=1` でも強制できる。
 - model を読まない CPU contract / small kernel / substrate test
-  `phaseshift-required-tests` は resident 非依存のまま自己完結を保つ。
+  `shelf-required-tests` は resident 非依存のまま自己完結を保つ。
 
 ## 関連
 

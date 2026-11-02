@@ -22,16 +22,16 @@ class Source:
 
 
 def sources(build_dir: Path) -> list[Source]:
-    compute = str(build_dir / "phaseshift-compute")
-    bench = str(build_dir / "phaseshift-bench")
+    compute = str(build_dir / "shelf-compute")
+    bench = str(build_dir / "shelf-bench")
     return [
         Source("compute", REPO_ROOT / "docs/user/compute.md", (compute, "--help"), False),
         Source("launcher", REPO_ROOT / "docs/user/launcher.md",
                (sys.executable,
-                str(REPO_ROOT / "src/apps/launcher/phaseshift_launcher.py"), "--help"),
+                str(REPO_ROOT / "src/apps/launcher/shelf_launcher.py"), "--help"),
                True),
         Source("server", REPO_ROOT / "docs/user/server.md",
-               (sys.executable, str(REPO_ROOT / "src/apps/server/phaseshift_server.py"),
+               (sys.executable, str(REPO_ROOT / "src/apps/server/shelf_server.py"),
                 "--help"), True),
         Source("bench-pp", REPO_ROOT / "docs/user/bench.md", (bench, "pp", "--help"), False),
         Source("bench-tg", REPO_ROOT / "docs/user/bench.md", (bench, "tg", "--help"), False),
@@ -51,7 +51,7 @@ def parse_help(text: str) -> list[tuple[str, str]]:
         if re.match(r"^[A-Za-z0-9][A-Za-z0-9 _/()|-]*:$", stripped):
             current = None
             continue
-        if stripped.startswith(("usage:", "Usage:", "run 'phaseshift-bench")):
+        if stripped.startswith(("usage:", "Usage:", "run 'shelf-bench")):
             current = None
             continue
         if stripped.startswith("--") or re.match(r"^-h\b", stripped):

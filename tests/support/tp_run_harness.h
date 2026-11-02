@@ -2,14 +2,14 @@
 
 #include "support/resident_model_fixture.h"
 
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
-#include <phaseshift/inference/execution/program_executor.h>
-#include <phaseshift/models/qwen35/runtime/tensor_parallel.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/inference/execution/program_executor.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <hip/hip_runtime.h>
 
@@ -51,7 +51,7 @@ using ps::qwen35::kMaxTargetHiddenTaps;
 using ps::qwen35::runtime::ValueTraceSink;
 
 inline std::vector<int> tp_devices_from_env() {
-    if (const char* env = std::getenv("PHASESHIFT_TP_DEVICES")) {
+    if (const char* env = std::getenv("SHELF_TP_DEVICES")) {
         std::vector<int> out;
         const char* p = env;
         while (*p != '\0' && out.size() < 2u) {

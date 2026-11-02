@@ -1,11 +1,11 @@
-#include <phaseshift/kernels/optimized/linear/fp8.h>
-#include <phaseshift/kernels/optimized/activation_quantize.h>
-#include <phaseshift/kernels/correctness/standalone/gemm_block_scaled_correctness.h>
-#include <phaseshift/quantization/fp8/fp8.h>
-#include <phaseshift/quantization/fp8/fp8_native.h>
-#include <phaseshift/quantization/codec/e4m3.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/linear/fp8.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/kernels/correctness/standalone/gemm_block_scaled_correctness.h>
+#include <shelf/quantization/fp8/fp8.h>
+#include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/quantization/codec/e4m3.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

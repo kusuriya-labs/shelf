@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen35/model/tensor_parallel_context.h>
-#include <phaseshift/runtime/tp/tp_execution.h>
+#include <shelf/models/qwen35/model/tensor_parallel_context.h>
+#include <shelf/runtime/tp/tp_execution.h>
 
 #include <cstdint>
 #include <cstdio>

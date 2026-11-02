@@ -1,8 +1,8 @@
-#include <phaseshift/io/row_reader.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen4exp/ple/ngram_hash.h>
-#include <phaseshift/models/qwen4exp/ple/ple_row_gather.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/io/row_reader.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen4exp/ple/ngram_hash.h>
+#include <shelf/models/qwen4exp/ple/ple_row_gather.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 

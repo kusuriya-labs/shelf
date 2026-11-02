@@ -1,7 +1,7 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_weights.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_weights.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 

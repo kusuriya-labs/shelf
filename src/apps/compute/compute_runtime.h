@@ -1,18 +1,18 @@
 #pragma once
 
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/model/rope_profile.h>
-#include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/prefix_cache.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
-#include <phaseshift/models/qwen35/runtime/tensor_parallel.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/model_source.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/model/rope_profile.h>
+#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/prefix_cache.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/status.h>
+#include <shelf/models/model_source.h>
 #include <hip/hip_runtime.h>
 
 #include <array>

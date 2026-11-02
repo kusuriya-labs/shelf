@@ -1,9 +1,9 @@
-#include <phaseshift/kernels/optimized/attention/paged_attention.h>
-#include <phaseshift/core/gpu/gfx_arch.h>
-#include <phaseshift/kernels/kv_types.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/quantization/codec/e4m3_detail.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
+#include <shelf/core/gpu/gfx_arch.h>
+#include <shelf/kernels/kv_types.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/quantization/codec/e4m3_detail.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>

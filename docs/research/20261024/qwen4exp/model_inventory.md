@@ -129,7 +129,7 @@
 
 | 成果物 | 値 |
 | --- | --- |
-| PhaseShift HEAD（作業開始時） | `9825d10896fea4f4d9736f918617c41322ae53b2` |
+| Shelf HEAD（作業開始時） | `9825d10896fea4f4d9736f918617c41322ae53b2` |
 | `config.json` SHA256 | `889658f2508e8c61d409b02e70e0d78d8d4452ec65aaafbe129805d213d2e74b` |
 | `model.safetensors.index.json` SHA256 | `99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de` |
 | `generation_config.json` SHA256 | `e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e` |

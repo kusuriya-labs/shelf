@@ -1,6 +1,6 @@
-#include <phaseshift/quantization/quant_spec.h>
-#include <phaseshift/quantization/quantization_types.h>
-#include <phaseshift/runtime/program/linear_quant_contract.h>
+#include <shelf/quantization/quant_spec.h>
+#include <shelf/quantization/quantization_types.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 
 #include <cstdint>
 #include <cstdio>

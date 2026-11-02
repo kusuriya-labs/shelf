@@ -1,14 +1,14 @@
-# phaseshift-compute
+# shelf-compute
 
 単一request推論アプリ。greedy / temperature / top-k / top-p デコード。BF16 modelと量子化model
-（`phaseshift_quantization.json` による自動検出）の両方に対応。
+（`shelf_quantization.json` による自動検出）の両方に対応。
 
 ## options
 
 <!-- cli:compute -->
 | option | 説明 |
 | --- | --- |
-| `--model-dir PATH` | BF16 or quantized model directory (auto-detected via phaseshift_quantization.json) (required) |
+| `--model-dir PATH` | BF16 or quantized model directory (auto-detected via shelf_quantization.json) (required) |
 | `--input-ids-file PATH` | whitespace separated prompt token ids |
 | `--max-new-tokens N` | max tokens to generate (default 32) |
 | `--max-seq-len N` | max sequence length (default 512) |
@@ -23,7 +23,7 @@
 | `--decode-backend TYPE` | host (default) |
 | `--verify-weights 0\|1` | verify quantized payload CRC32 on load (default 0) |
 | `--dump-logits PATH` | append per-step sampled logits rows (raw f32) to PATH row k aligns with GENERATED_IDS[k] (prefill row first) |
-| `--hidden-taps LIST` | comma separated layer ids (max 8) for intermediate hidden capture; dump to PHASESHIFT_DEBUG_HIDDEN_FILE |
+| `--hidden-taps LIST` | comma separated layer ids (max 8) for intermediate hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE |
 | `--tp-combine-f32 0\|1` | keep row-parallel combine output in f32 (default 0 = bf16 round as today; tp only) |
 | `--temperature F` | sampling temperature (default 0 = greedy) |
 | `--top-p F` | nucleus sampling threshold in (0, 1] (default 1) |
@@ -45,7 +45,7 @@
 | `--prefix-cache-cold-tokens N` | prefix cache cold tier capacity in tokens (default 65536) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
 | `--prefix-cache-cold-state-slots N` | cold GDN state slots (default 0 = auto) |
-| `--model-host PATH` | attach model weights from a resident model host (default: PHASESHIFT_MODEL_HOST_SOCKET, empty = local load) |
+| `--model-host PATH` | attach model weights from a resident model host (default: SHELF_MODEL_HOST_SOCKET, empty = local load) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
@@ -81,8 +81,8 @@ physical KV capacity、`prefix cache` は hot tier の実サイズである。
 `--model-dir` は必須。`--input-ids-file` なしでは既定prompt
 （`248041, 77091`）を使用。
 
-`--model-dir` には BF16 model dir、PhaseShift 量子化 model dir
-（`phaseshift_quantization.json` で自動検出）、および HF 由来の
+`--model-dir` には BF16 model dir、Shelf 量子化 model dir
+（`shelf_quantization.json` で自動検出）、および HF 由来の
 real-quantized fp8 model dir（`quantization_config` の `quant_method: fp8` から
 自動検出）のいずれも指定できる。
 
@@ -98,13 +98,13 @@ GPU-MCU backend はこの build に含まれない。実装と R&D 記録は
 
 ### resident model host
 
-`--model-host`（または `PHASESHIFT_MODEL_HOST_SOCKET`）を指定すると、model weight は
-`phaseshift-model-host` が GPU 上に保持しており、compute process は HIP IPC で
+`--model-host`（または `SHELF_MODEL_HOST_SOCKET`）を指定すると、model weight は
+`shelf-model-host` が GPU 上に保持しており、compute process は HIP IPC で
 attach する。compute が crash / timeout / hang しても weight は残り、
 次 の compute process は attach で即座に再開できる。
 
 指定が無ければ従来どおり自分で safetensors を load する。
-`PHASESHIFT_DISABLE_RESIDENT_MODEL=1` で environment 経由の指定を無効化できる。
+`SHELF_DISABLE_RESIDENT_MODEL=1` で environment 経由の指定を無効化できる。
 
 ### DFlash2 speculative decoding
 
@@ -230,7 +230,7 @@ rejection の試行回数が増える。
 batch 構成には依存しない。
 
 ```bash
-./build/phaseshift-compute \
+./build/shelf-compute \
   --model-dir models/Qwen3.8-27B-FP8 \
   --input-ids-file prompt_ids.txt \
   --max-new-tokens 32 \
@@ -265,7 +265,7 @@ logitsはraw f32、1行 = 1 token step（prefill行が先頭）。
 ## 例
 
 ```bash
-./build/phaseshift-compute \
+./build/shelf-compute \
   --model-dir models/Qwen3.8-27B-FP8 \
   --input-ids-file prompt_ids.txt \
   --max-new-tokens 32 \

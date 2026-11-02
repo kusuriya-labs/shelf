@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen35/weights/tensor_parallel_plan.h>
-#include <phaseshift/weights/tensor_partition.h>
+#include <shelf/models/qwen35/weights/tensor_parallel_plan.h>
+#include <shelf/weights/tensor_partition.h>
 
 #include <algorithm>
 #include <cstdint>

@@ -1,11 +1,11 @@
-#include <phaseshift/kernels/optimized/sampling.h>
-#include <phaseshift/kernels/optimized/stochastic_sampling.h>
-#include <phaseshift/kernels/optimized/radix_topn.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/runtime/batch/device_batch_context.h>
+#include <shelf/kernels/optimized/sampling.h>
+#include <shelf/kernels/optimized/stochastic_sampling.h>
+#include <shelf/kernels/optimized/radix_topn.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/runtime/batch/device_batch_context.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -46,7 +46,7 @@ struct Options {
 
 void usage(FILE* f) {
     std::fprintf(f,
-                 "usage: phaseshift-bench sampling [options]\n"
+                 "usage: shelf-bench sampling [options]\n"
                  "  --variant correctness|single|partitioned|stochastic|"
                  "stochastic-rejection|stochastic-radix\n"
                  "  --vocab N\n"

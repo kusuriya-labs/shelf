@@ -82,7 +82,7 @@ export LIBRARY_PATH=/opt/zen/.venv/lib/python3.12/site-packages/_rocm_sdk_devel/
 
 ## 制約
 
-出力 artifact は PhaseShift の runtime がロードできない（対応 format は
+出力 artifact は Shelf の runtime がロードできない（対応 format は
 BF16 / FP8 E4M3 のみ）。本体側への接続は未実施。
 
 ## scale 符号化
@@ -92,7 +92,7 @@ BF16 / FP8 E4M3 のみ）。本体側への接続は未実施。
 | `scale_format` | 定義 | byte | bpw |
 |---|---|---:|---:|
 | `ue4m4`（既定） | 符号なし 指数4bit / 尾数4bit、バイアス 7、有効 `0x00..0xEF`、subnormal `man×2^-10`、最大 248 | 1 | 5.25 |
-| `ue4m3` | PhaseShift 既存 codec（バイアス 8、有効 `0x00..0x7E`、最大 224） | 1 | 5.25 |
+| `ue4m3` | Shelf 既存 codec（バイアス 8、有効 `0x00..0x7E`、最大 224） | 1 | 5.25 |
 | `fp16` | IEEE half | 2 | 5.50 |
 | `bf16` | bfloat16 | 2 | 5.50 |
 

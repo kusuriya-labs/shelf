@@ -1,7 +1,7 @@
 #include "support/resident_model_fixture.h"
 
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/resident/resident_client.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/resident/resident_client.h>
 
 #include <hip/hip_runtime.h>
 
@@ -16,8 +16,8 @@
 namespace {
 
 std::string model_dir_from_env() {
-    const char* names[] = {"PHASESHIFT_MODEL_DIR",
-                           "PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"};
+    const char* names[] = {"SHELF_MODEL_DIR",
+                           "SHELF_MODEL_DIR_DFLASH2_TARGET"};
     for (const char* name : names) {
         const char* value = std::getenv(name);
         if (value != nullptr && value[0] != '\0') {
@@ -44,7 +44,7 @@ int main() {
         return 77;
     }
 
-    const char* stats_env = std::getenv("PHASESHIFT_TEST_STATS_SOCKET");
+    const char* stats_env = std::getenv("SHELF_TEST_STATS_SOCKET");
     std::uint64_t loads_before = 0;
     if (stats_env != nullptr && stats_env[0] != '\0') {
         auto stats = ps::resident::resident_host_stats(stats_env);
@@ -117,7 +117,7 @@ int main() {
                 model.text_config().num_hidden_layers);
     std::fflush(stdout);
 
-    const char* sleep_env = std::getenv("PHASESHIFT_TEST_SLEEP_SEC");
+    const char* sleep_env = std::getenv("SHELF_TEST_SLEEP_SEC");
     const long seconds =
         sleep_env != nullptr && sleep_env[0] != '\0' ? std::strtol(sleep_env, nullptr, 10)
                                                      : 3600;

@@ -3,8 +3,8 @@
 目的: `models/qwen35/` を肥大化させずに `models/qwen4exp/` を追加できるように、
 既存 qwen35 の実装を 3 分類する。本ドキュメントは分類と移動予定の正本である。
 
-- A: 完全 model 非依存。`include/phaseshift/kernels/` および
-  `src/phaseshift/kernels/` へ移す。
+- A: 完全 model 非依存。`include/shelf/kernels/` および
+  `src/shelf/kernels/` へ移す。
 - B: Qwen35/Qwen4Exp の family 共通。geometry / small POD builder として
   `models/common/qwen_hybrid/` へ移す。
 - C: Qwen35 固有。`models/qwen35/` に残す。
@@ -14,7 +14,7 @@
 
 ## Phase 1: kernels（A）
 
-移動元 `models/qwen35/kernels/optimized/` → 移動先 `phaseshift/kernels/optimized/`。
+移動元 `models/qwen35/kernels/optimized/` → 移動先 `shelf/kernels/optimized/`。
 namespace は既に `ps::kernel` であり `qwen35` 依存がない。そのまま移す。
 
 | ファイル | 分類 | 備考 |
@@ -54,19 +54,19 @@ namespace は既に `ps::kernel` であり `qwen35` 依存がない。そのま�
 `paged_attention.h` / `kv_append.h` / `kv_relocate.h` および対応 `.hip` は
 `models/qwen35/state/kv_cache_types.h` を include し、`ps::qwen35::fp8e4m3_storage_t` と
 `ps::qwen35::KVCacheDType` を参照する。kernel 層から qwen35 への依存であり、
-`phaseshift/kernels/kv_types.h` へ型を移して `ps::kernel` namespace に置く。
+`shelf/kernels/kv_types.h` へ型を移して `ps::kernel` namespace に置く。
 
 ## Phase 2: state（A/B）
 
 | ファイル | 分類 | 移動先 |
 | --- | --- | --- |
-| `state/paged_types.h` | A | `phaseshift/inference/state/paged_types.h` |
-| `state/kv_cache_types.h` | A | `phaseshift/kernels/kv_types.h`（Phase 1） |
-| `state/paged_kv_pool.h` `.cpp` | A | `phaseshift/inference/state/` |
-| `state/sequence_slot_pool.h` `.cpp` | A | `phaseshift/inference/state/` |
-| `state/paged_sequence_state.h` `.cpp` | A | `phaseshift/inference/state/` |
-| `state/gdn_state.h` | A | `phaseshift/inference/state/` |
-| `state/gdn_state_pool.h` `.cpp` | A | `phaseshift/inference/state/` |
+| `state/paged_types.h` | A | `shelf/inference/state/paged_types.h` |
+| `state/kv_cache_types.h` | A | `shelf/kernels/kv_types.h`（Phase 1） |
+| `state/paged_kv_pool.h` `.cpp` | A | `shelf/inference/state/` |
+| `state/sequence_slot_pool.h` `.cpp` | A | `shelf/inference/state/` |
+| `state/paged_sequence_state.h` `.cpp` | A | `shelf/inference/state/` |
+| `state/gdn_state.h` | A | `shelf/inference/state/` |
+| `state/gdn_state_pool.h` `.cpp` | A | `shelf/inference/state/` |
 
 `GdnStatePoolLayout::from_text_config(Qwen35TextConfig)` は state 層から Qwen35 への
 依存であり除去する。state 層は `GdnStatePoolLayout` のみを受け取る。
@@ -115,18 +115,18 @@ head 数 / head_dim / conv kernel の geometry 差のみで吸収する。
 
 | ファイル | 分類 | 移動先 |
 | --- | --- | --- |
-| `runtime/sampling_params.h` `.cpp` | A | `phaseshift/inference/scheduling/` |
-| `runtime/scheduled_batch.h` `.cpp` | A | `phaseshift/inference/scheduling/` |
-| `runtime/schedule_plan.h` | A | `phaseshift/inference/scheduling/` |
-| `runtime/kv_capacity_manager.h` `.cpp` | A | `phaseshift/inference/scheduling/` |
-| `runtime/kv_banker.h` `.cpp` | A | `phaseshift/inference/scheduling/` |
-| `runtime/token_budget_scheduler.h` `.cpp` | A | `phaseshift/inference/scheduling/` |
-| `runtime/program_executor.h` `.hip` | A（common 部分） | `phaseshift/inference/execution/` |
-| `runtime/optimized_dispatch.hip` | A（common 部分） | `phaseshift/inference/execution/` |
-| `runtime/physical_launch.h` `.hip` | A（common 部分） | `phaseshift/inference/execution/` |
-| `runtime/*_selector.cpp` | A | `phaseshift/inference/execution/selectors/` |
-| `runtime/*_dispatch.hip` | A | `phaseshift/inference/execution/` |
-| `runtime/*_fusion.hip` | A | `phaseshift/inference/execution/` |
+| `runtime/sampling_params.h` `.cpp` | A | `shelf/inference/scheduling/` |
+| `runtime/scheduled_batch.h` `.cpp` | A | `shelf/inference/scheduling/` |
+| `runtime/schedule_plan.h` | A | `shelf/inference/scheduling/` |
+| `runtime/kv_capacity_manager.h` `.cpp` | A | `shelf/inference/scheduling/` |
+| `runtime/kv_banker.h` `.cpp` | A | `shelf/inference/scheduling/` |
+| `runtime/token_budget_scheduler.h` `.cpp` | A | `shelf/inference/scheduling/` |
+| `runtime/program_executor.h` `.hip` | A（common 部分） | `shelf/inference/execution/` |
+| `runtime/optimized_dispatch.hip` | A（common 部分） | `shelf/inference/execution/` |
+| `runtime/physical_launch.h` `.hip` | A（common 部分） | `shelf/inference/execution/` |
+| `runtime/*_selector.cpp` | A | `shelf/inference/execution/selectors/` |
+| `runtime/*_dispatch.hip` | A | `shelf/inference/execution/` |
+| `runtime/*_fusion.hip` | A | `shelf/inference/execution/` |
 | `runtime/executor.h` `.hip` | C | qwen35 に残す |
 | `runtime/dflash2_*` | C | spec decode |
 | `runtime/eagle4_*` | C | spec decode |
@@ -135,7 +135,7 @@ head 数 / head_dim / conv kernel の geometry 差のみで吸収する。
 | `runtime/prefix_cache.*` | B（metadata 部分のみ抽出） | Phase 5 |
 | `runtime/continuous_batcher.*` | C | qwen35 に残す |
 | `runtime/tensor_parallel.*` | C | qwen35 に残す |
-| `runtime/decode_perf_stats.*` | A | `phaseshift/inference/execution/`（model 非依存のため移動済み） |
+| `runtime/decode_perf_stats.*` | A | `shelf/inference/execution/`（model 非依存のため移動済み） |
 
 `HostExecutionContext` は common 化せず巨大な全 model union にしない。
 common context と Qwen35 extension（`GdnSpecHistory` / `tree_anc_*` / DFlash2）を分離する。
@@ -144,7 +144,7 @@ common context と Qwen35 extension（`GdnSpecHistory` / `tree_anc_*` / DFlash2�
 
 `runtime/*_selector.h/.cpp` 11 種は `HostExecutionContext` に依存せず、
 唯一の共通定数 `kQwen35OptimizedMaxRows` だけを参照していた。
-これらは `phaseshift/inference/execution/selectors/` へ移動済み
+これらは `shelf/inference/execution/selectors/` へ移動済み
 （namespace `ps::execution`、定数は `selector_limits.h` の `kOptimizedMaxRows`）。
 qwen35 側の残存利用は `models/qwen35/runtime/selector_types.h` の using 宣言で集約する。
 
@@ -165,26 +165,26 @@ Qwen35 extension として分離すべき候補は以下である。
 common 化の手順は次の順で行った（すべて完了）。
 
 1. spec 専用 9 フィールドを `SpecDecodeContext`
-   （`phaseshift/inference/execution/spec_decode_context.h`）へ分離した。
+   （`shelf/inference/execution/spec_decode_context.h`）へ分離した。
    参照は `ctx.<field>` から `ctx.spec.<field>` へ統一した。
 2. `program_executor` / `optimized_dispatch` / `physical_launch` /
    9 種の dispatch / 7 種の fusion / `kv_calib_dump` / `decode_perf_stats` を
-   `phaseshift/inference/execution/` へ移動し、namespace を
+   `shelf/inference/execution/` へ移動し、namespace を
    `ps::execution` へ統一した（42 ファイル）。
    qwen35 側の利用は `models/qwen35/runtime/execution_types.h` の
    using 宣言（113 識別子）で集約した。
 3. correctness 参照実装（`model_dispatch_correctness` + `detail/*.inc` +
-   `standalone/`）は `phaseshift/kernels/correctness` へ移動した。
+   `standalone/`）は `shelf/kernels/correctness` へ移動した。
    依存していた `ModelDispatchStateView` / `DispatchStagingPool` /
    `ProgramStagingMeta` も generic 層へ移設済み。
 4. `Qwen35KernelMode` / `read_qwen35_kernel_mode` は汎用機能のため
    `KernelMode` / `read_kernel_mode` へ改名した。
-   環境変数 `PHASESHIFT_QWEN35_KERNEL_MODE` は公開インターフェース
+   環境変数 `SHELF_QWEN35_KERNEL_MODE` は公開インターフェース
    （`docs/perf/current.md` の測定条件を含む）のため不変とした。
    `execute_program*` 本体は common として移動し、
    Qwen35 に残るのは `executor.hip`（Executor 本体と spec decode 統合）のみ。
 
-移動後、`phaseshift/inference` / `phaseshift/kernels` から
+移動後、`shelf/inference` / `shelf/kernels` から
 `models/qwen35` / `qwen35` 文字列を参照しないことを
 境界テストが静的に検証している。
 

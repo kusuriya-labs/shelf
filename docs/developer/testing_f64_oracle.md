@@ -22,7 +22,7 @@ git clone --depth 1 https://github.com/mjsabby/qwen35-f64-oracle /root/qwen35-f6
 cd /root/qwen35-f64-oracle && make
 ```
 
-## 使い方（PhaseShift 側 wrapper）
+## 使い方（Shelf 側 wrapper）
 
 `tools/qwen35_oracle_tokens.py` が入力 token ids / prompt / chat prompt から
 greedy トークンを f64 oracle で計算し、bench の `GREEDY_FIRST_TOKENS` と同形式で出力する。
@@ -51,7 +51,7 @@ greedy トークンを f64 oracle で計算し、bench の `GREEDY_FIRST_TOKENS`
 
 ## 確認結果（2026-09-17 / Qwen3.5-4B bf16）
 
-| case | f64 oracle | Phaseshift auto (tile+新GDN) | Phaseshift correctness(修正後) |
+| case | f64 oracle | Shelf auto (tile+新GDN) | Shelf correctness(修正後) |
 | --- | --- | --- | --- |
 | `ids = 1 x 256`, 3 step | 248046,198,248045 | 248046,198,248045 | 248046,198,248045 |
 | chat turn2 (36 ids), 2 step | 27775,383 = "Based on" | 7525,383 = "Your favorite"(KNOWN-LOSSY) | 27775,383 = "Based on" |

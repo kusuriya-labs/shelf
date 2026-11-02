@@ -1,6 +1,6 @@
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/weights/matrix_weight.h>
-#include <phaseshift/quantization/quantization_types.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/weights/matrix_weight.h>
+#include <shelf/quantization/quantization_types.h>
 
 #include <array>
 #include <cstdio>

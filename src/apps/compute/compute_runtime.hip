@@ -1,9 +1,9 @@
 #include "compute_runtime.h"
 #include "private_target_weights.h"
 
-#include <phaseshift/core/memory/size_format.h>
-#include <phaseshift/runtime/execution/row_bucket.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/memory/size_format.h>
+#include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 
 #include <algorithm>
 #include <chrono>
@@ -494,10 +494,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         }
     }
 
-    if (std::getenv("PHASESHIFT_BATCH_TRACE") != nullptr) {
+    if (std::getenv("SHELF_BATCH_TRACE") != nullptr) {
         const std::size_t left = arena_->capacity() - arena_->used();
         fprintf(stderr,
-                "PHASESHIFT_ARENA_PLAN capacity=%zu weights=%zu pools=%zu kv=%zu "
+                "SHELF_ARENA_PLAN capacity=%zu weights=%zu pools=%zu kv=%zu "
                 "kv_tokens=%u prefix_est=%zu rest=%zu left=%zu reserve=%zu\n",
                 arena_->capacity(), used_after_weights,
                 used_after_pools - used_after_weights, used_after_kv - used_after_pools,

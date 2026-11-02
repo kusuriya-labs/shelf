@@ -1,5 +1,5 @@
-#include <phaseshift/models/qwen35/runtime/eagle4_tree.h>
-#include <phaseshift/models/qwen35/runtime/spec_decode.h>
+#include <shelf/models/qwen35/runtime/eagle4_tree.h>
+#include <shelf/models/qwen35/runtime/spec_decode.h>
 
 #include <cstdio>
 #include <random>

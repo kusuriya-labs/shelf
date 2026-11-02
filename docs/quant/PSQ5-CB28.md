@@ -1,6 +1,6 @@
 # PSQ5-CB28 — 5bit Codebook量子化仕様
 
-**対象:** PhaseShift / 独自MXFP5の検討用  
+**対象:** Shelf / 独自MXFP5の検討用  
 **状態:** 会話で再確認したCB28数列とFP8変換規則を記録した設計メモ。性能・精度は未実測。  
 **目的:** 5bit固定長のまま、W32単位の8bit scaleを使用し、FP8 E4M3への展開をLUTなしで実現する。
 

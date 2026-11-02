@@ -1,8 +1,8 @@
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/program/device_program.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/program/device_program.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
@@ -38,7 +38,7 @@ struct Options {
 
 void usage(FILE* f) {
     std::fprintf(f,
-                 "usage: phaseshift-bench elementwise [options]\n"
+                 "usage: shelf-bench elementwise [options]\n"
                  "  --variant correctness|optimized\n"
                  "  --profile residual|swiglu|sigmoid|mul|scale|silu-b2f|silu-f2b|split-halves|split-int\n"
                  "  --features N\n"

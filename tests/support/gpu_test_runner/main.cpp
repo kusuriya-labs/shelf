@@ -188,7 +188,7 @@ void release() {
 
 std::vector<int> candidate_gpus() {
     std::vector<int> out;
-    const char* src = std::getenv("PHASESHIFT_TEST_GPUS");
+    const char* src = std::getenv("SHELF_TEST_GPUS");
     if (!src || !*src) src = std::getenv("HIP_VISIBLE_DEVICES");
     if (src && *src) {
         std::string s(src);
@@ -301,8 +301,8 @@ int main(int argc, char** argv) {
     }
     if (g_cfg.cmd.empty()) fail("no command");
     if (g_cfg.state_dir.empty()) fail("missing --state-dir");
-    g_cfg.budget_gb = env_long("PHASESHIFT_TEST_GPU_BUDGET_GB", g_cfg.budget_gb);
-    g_cfg.reserve_timeout_sec = env_long("PHASESHIFT_TEST_GPU_RESERVE_TIMEOUT", g_cfg.reserve_timeout_sec);
+    g_cfg.budget_gb = env_long("SHELF_TEST_GPU_BUDGET_GB", g_cfg.budget_gb);
+    g_cfg.reserve_timeout_sec = env_long("SHELF_TEST_GPU_RESERVE_TIMEOUT", g_cfg.reserve_timeout_sec);
 
     std::error_code ec;
     fs::create_directories(g_cfg.state_dir, ec);

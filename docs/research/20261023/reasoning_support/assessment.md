@@ -1,8 +1,8 @@
 # Reasoning 対応の事前調査（ZIP との差分・実テンプレート・境界 Token）
 
 - 実施日: 2026-10-23
-- 対象: PhaseShift Server / Qwen3.8-27B-FP8
-- 指示書: `PhaseShift_Reasoning.md`（ZIP 基準 commit `3157cf2`）
+- 対象: Shelf Server / Qwen3.8-27B-FP8
+- 指示書: `Shelf_Reasoning.md`（ZIP 基準 commit `3157cf2`）
 
 ## 1. 環境
 
@@ -16,7 +16,7 @@
 | model | `models/Qwen3.8-27B-FP8`（HF fp8） |
 | chat template | `models/Qwen3.8-27B-FP8/chat_template.jinja` |
 | tokenizer | `Qwen2Tokenizer`（byte-level BPE、`clean_up_tokenization_spaces=false`） |
-| compute | `build/phaseshift-compute`（既存ビルド、変更なし） |
+| compute | `build/shelf-compute`（既存ビルド、変更なし） |
 
 ## 2. ZIP との差分（重複実装の回避）
 

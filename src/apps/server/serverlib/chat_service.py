@@ -1,4 +1,4 @@
-"""OpenAI ChatRequest to PhaseShift compute and back.
+"""OpenAI ChatRequest to Shelf compute and back.
 
 ChatService owns the transformation chain and nothing else:
 
@@ -12,7 +12,7 @@ ChatService owns the transformation chain and nothing else:
           -> Qwen response parser (answer only)
           -> internal assistant response
 
-HTTP concerns live in ``phaseshift_server.py``; wire encoding lives in
+HTTP concerns live in ``shelf_server.py``; wire encoding lives in
 ``openai_protocol.py``.
 """
 
@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
-from phaseshift_chat import codec, reasoning
+from shelf_chat import codec, reasoning
 
 from .compute_client import ComputeCancelled, ComputeError, ComputeInvalidArgument
 from .openai_protocol import (
@@ -105,7 +105,7 @@ def map_finish_reason(raw: str, *, has_tool_calls: bool) -> str:
 
 
 def log_tokens(generated_ids) -> None:
-    path = os.environ.get("PHASESHIFT_SERVER_TOKEN_LOG")
+    path = os.environ.get("SHELF_SERVER_TOKEN_LOG")
     if not path:
         return
     try:

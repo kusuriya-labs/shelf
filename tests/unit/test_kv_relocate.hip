@@ -1,5 +1,5 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/kernels/optimized/kv_relocate.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/kernels/optimized/kv_relocate.h>
 
 #include <hip/hip_runtime.h>
 

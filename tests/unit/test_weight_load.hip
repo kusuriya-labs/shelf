@@ -1,15 +1,15 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/quantization/manifest/crc32.h>
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/quantization/fp8/fp8.h>
-#include <phaseshift/quantization/fp8/fp8_native.h>
-#include <phaseshift/weights/matrix_weight.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/quantization/manifest/crc32.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/fp8/fp8.h>
+#include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/weights/matrix_weight.h>
+#include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -189,7 +189,7 @@ static QMatrixPlan make_matrix(quantization::manifest::QuantizedEncoding enc, ui
     if (enc == manifest::QuantizedEncoding::Bf16) {
         plan.meta.k_padded = k;
         QTensor data;
-        data.physical = logical + ".__phaseshift_data";
+        data.physical = logical + ".__shelf_data";
         data.dtype = io::SType::BF16;
         data.shape = {static_cast<size_t>(rows), static_cast<size_t>(k)};
         data.bytes = bf16_bytes(rows * k, static_cast<uint32_t>(rows * 7 + k));
@@ -218,7 +218,7 @@ static QMatrixPlan make_matrix(quantization::manifest::QuantizedEncoding enc, ui
         plan.metadata1 = as_bytes(fstore.scales);
 
         QTensor ct;
-        ct.physical = logical + ".__phaseshift_codes";
+        ct.physical = logical + ".__shelf_codes";
         ct.dtype = io::SType::U8;
         ct.shape = {static_cast<std::size_t>(rows), static_cast<std::size_t>(fkp)};
         ct.bytes = fstore.codes;
@@ -230,7 +230,7 @@ static QMatrixPlan make_matrix(quantization::manifest::QuantizedEncoding enc, ui
         plan.physical.push_back(std::move(ct));
 
         QTensor st;
-        st.physical = logical + ".__phaseshift_metadata1";
+        st.physical = logical + ".__shelf_metadata1";
         st.dtype = io::SType::F32;
         st.shape = {static_cast<std::size_t>((rows + 127u) / 128u),
                     static_cast<std::size_t>(fkp / 128u)};
@@ -268,7 +268,7 @@ static quantization::fp8::Fp8NativeHost expect_native_fp8(
 
 static QTensor make_small(uint64_t n, const std::string& logical, std::vector<std::size_t> shape) {
     QTensor t;
-    t.physical = logical + ".__phaseshift_data";
+    t.physical = logical + ".__shelf_data";
     t.dtype = io::SType::BF16;
     t.shape = std::move(shape);
     t.bytes = bf16_bytes(n, static_cast<uint32_t>(n * 3 + 11));
@@ -531,9 +531,9 @@ static void test_standalone_quantized_reader(gpu::GpuArena& arena, hipStream_t s
     auto ms = manifest::serialize_quantized_manifest(manifest);
     if (!ms.ok()) { fail("serialize manifest"); return; }
     if (!write_shard((dir / "model.safetensors").string(), shard,
-                     {{"phaseshift.format", manifest::kQuantizedSafetensorsFormat},
-                      {"phaseshift.format_version", std::to_string(manifest::kQuantizedSafetensorsFormatVersion)},
-                      {"phaseshift.quantization_metadata", manifest::kQuantizedMetadataFile}})) {
+                     {{"shelf.format", manifest::kQuantizedSafetensorsFormat},
+                      {"shelf.format_version", std::to_string(manifest::kQuantizedSafetensorsFormatVersion)},
+                      {"shelf.quantization_metadata", manifest::kQuantizedMetadataFile}})) {
         return;
     }
     write_text((dir / manifest::kQuantizedMetadataFile).string(), ms.value());
@@ -702,9 +702,9 @@ static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t s
     auto ms = manifest::serialize_quantized_manifest(manifest);
     if (!ms.ok()) { fail("serialize model manifest"); return; }
     if (!write_shard((dir / "model.safetensors").string(), shard,
-                     {{"phaseshift.format", manifest::kQuantizedSafetensorsFormat},
-                      {"phaseshift.format_version", std::to_string(manifest::kQuantizedSafetensorsFormatVersion)},
-                      {"phaseshift.quantization_metadata", manifest::kQuantizedMetadataFile}})) {
+                     {{"shelf.format", manifest::kQuantizedSafetensorsFormat},
+                      {"shelf.format_version", std::to_string(manifest::kQuantizedSafetensorsFormatVersion)},
+                      {"shelf.quantization_metadata", manifest::kQuantizedMetadataFile}})) {
         return;
     }
     write_text((dir / manifest::kQuantizedMetadataFile).string(), ms.value());
@@ -1044,7 +1044,7 @@ int main() {
     gpu::GpuArena arena = ar.release();
 
     std::error_code ec;
-    g_root = fs::temp_directory_path(ec) / ("phaseshift_weight_load_" + std::to_string(::getpid()));
+    g_root = fs::temp_directory_path(ec) / ("shelf_weight_load_" + std::to_string(::getpid()));
     fs::create_directories(g_root, ec);
 
     test_bf16_matrix_load(arena, stream);

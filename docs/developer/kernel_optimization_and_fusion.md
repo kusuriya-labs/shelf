@@ -209,7 +209,7 @@ kernel 家族ごとに「share、実効 GB/s、資源値、occupancy 拘束条�
 
 ### 時間計測の禁則
 
-- `PHASESHIFT_OP_DUMP=1` の付いた run の時間は使わない（per-op 同期が入る）。
+- `SHELF_OP_DUMP=1` の付いた run の時間は使わない（per-op 同期が入る）。
   時間は kernel trace と E2E が正。
 - standalone の小ベンチだけで E2E を予測しない（L3 再利用で順位が反転する）。
 - 採否に必要な数値は E2E interleaved で確定する。

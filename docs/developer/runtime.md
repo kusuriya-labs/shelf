@@ -15,7 +15,7 @@ ProgramSet
         ↓
 Executor (create_model_executor)
         ↓
-program_executor (private: src/phaseshift/models/qwen35/runtime/)
+program_executor (private: src/shelf/models/qwen35/runtime/)
         ↓
 model_dispatch_correctness (ps::kernel, single launcher)
 ```
@@ -177,7 +177,7 @@ cancel granularityは `runtime.step()` の境界である。実行中のGPU kern
 device reset / `hipStreamDestroy` / signalをcancel目的に使用しない。cancel latencyは
 最大で現在実行中の1 step。
 
-`phaseshift-compute --serve-stdio` の service loopはGPU runtime ownerである単一thread上で、
+`shelf-compute --serve-stdio` の service loopはGPU runtime ownerである単一thread上で、
 `poll(2)` によりstdinを non-blockingに監視する。idle時はblocking poll、in-flight request中は
 timeout 0 pollと1 stepを交互に行い、各stepの前後で `ping` / `cancel` / `shutdown` を
 処理できる。stdout writerも同一threadで、mutexを持たない。
@@ -204,7 +204,7 @@ Queued requestをadmissionする。`max_concurrent_requests > 1` でも全reques
 複数requestは同一`ContinuousBatcher`へ`submit`され、1回の`step()`で
 `ScheduledBatch`としてco-batchされる。requestごとにHIP streamやExecutorを作らない。
 `StepResult::num_requests` が1 stepでco-batchされたrequest数である。debug時は
-`PHASESHIFT_BATCH_TRACE=1` でstderrへ `PHASESHIFT_BATCH_STEP requests=R tokens=T` を出す。
+`SHELF_BATCH_TRACE=1` でstderrへ `SHELF_BATCH_STEP requests=R tokens=T` を出す。
 
 注意: 通常decodeのlinear kernelはbatch行数に応じてGEMV / GEMM configを選択する
 （`inference/execution/selectors/linear_selector.cpp`）。このためco-batchされたrequestのgreedy tokenは、
@@ -279,7 +279,7 @@ host-side request objectは解放しない。
 ## Prefix cache
 
 prefix cache は compute アプリが所有する `PrefixCache`
-（`phaseshift/models/qwen35/runtime/prefix_cache.h`）である。radix tree 上の
+（`shelf/models/qwen35/runtime/prefix_cache.h`）である。radix tree 上の
 page 単位 prefix KV / GDN state を VRAM（hot）と pinned DRAM（cold）に保持し、
 `ContinuousBatcher` が request admission 時に lookup・restore、
 prefill 完了時・decode 境界通過時・出力末尾で save を行う。

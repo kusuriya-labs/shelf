@@ -1,11 +1,11 @@
-#include <phaseshift/models/common/qwen_hybrid/hyper_lowering.h>
-#include <phaseshift/models/qwen4exp/hyper/gated_residual.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/quantization/quantization_types.h>
-#include <phaseshift/weights/matrix_weight.h>
+#include <shelf/models/common/qwen_hybrid/hyper_lowering.h>
+#include <shelf/models/qwen4exp/hyper/gated_residual.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/quantization/quantization_types.h>
+#include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

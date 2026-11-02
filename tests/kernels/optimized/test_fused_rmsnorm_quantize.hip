@@ -1,9 +1,9 @@
-#include <phaseshift/kernels/optimized/rmsnorm.h>
-#include <phaseshift/kernels/optimized/activation_quantize.h>
-#include <phaseshift/kernels/optimized/rmsnorm_quantize.h>
-#include <phaseshift/runtime/program/int8_activation_workspace.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/rmsnorm.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/kernels/optimized/rmsnorm_quantize.h>
+#include <shelf/runtime/program/int8_activation_workspace.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 

@@ -1,6 +1,6 @@
 """OpenAI Chat Completions subset: request validation and wire encoding.
 
-PhaseShift implements an explicit subset of the OpenAI Chat Completions API.
+Shelf implements an explicit subset of the OpenAI Chat Completions API.
 Every parameter that belongs to a removed feature (Structured Output, strict
 tools, constrained decoding, the ``reasoning`` transport object) is rejected
 with HTTP 400 instead of being ignored.
@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from phaseshift_chat.codec import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
+from shelf_chat.codec import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
 
 CHAT_TEMPLATE_KWARGS = ("enable_thinking", "preserve_thinking")
 
@@ -419,7 +419,7 @@ def content_to_text(content: Any) -> str:
 def _assistant_reasoning(message: dict) -> str | None:
     """Normalize an assistant history reasoning field.
 
-    ``reasoning_content`` is the PhaseShift wire name. The ``reasoning`` alias
+    ``reasoning_content`` is the Shelf wire name. The ``reasoning`` alias
     some clients echo is accepted when both are absent or agree; a conflicting
     pair is rejected instead of silently preferring one.
     """

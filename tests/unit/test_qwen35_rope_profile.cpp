@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/model/rope_profile.h>
+#include <shelf/models/qwen35/model/rope_profile.h>
 
 #include <cmath>
 #include <cstdio>

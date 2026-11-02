@@ -4,12 +4,12 @@
 
 | ファイル | 変更 |
 | --- | --- |
-| `src/apps/common/phaseshift_chat/reasoning.py` | 新規。tokenizer 非依存の `GenerationRegionParser`（REASONING / ANSWER の状態機械）と `split_regions()` |
-| `src/apps/common/phaseshift_chat/codec.py` | `prompt_ids()` に reasoning 引数、`reasoning_close_ids()` / `new_region_parser()` / `split_generation()` / `parse_answer()` / `probe_reasoning()` を追加。tool parser を `prefix=""` に変更 |
-| `src/apps/common/phaseshift_chat/__init__.py` | 公開 API の更新 |
+| `src/apps/common/shelf_chat/reasoning.py` | 新規。tokenizer 非依存の `GenerationRegionParser`（REASONING / ANSWER の状態機械）と `split_regions()` |
+| `src/apps/common/shelf_chat/codec.py` | `prompt_ids()` に reasoning 引数、`reasoning_close_ids()` / `new_region_parser()` / `split_generation()` / `parse_answer()` / `probe_reasoning()` を追加。tool parser を `prefix=""` に変更 |
+| `src/apps/common/shelf_chat/__init__.py` | 公開 API の更新 |
 | `src/apps/server/serverlib/openai_protocol.py` | `ChatRequest` に reasoning 設定、`parse_reasoning_effort()` / `parse_chat_template_kwargs()`、履歴 `reasoning_content`、`reasoning_content` の wire 出力 |
 | `src/apps/server/serverlib/chat_service.py` | region parser による分割、`ReasoningDelta`、`AssistantResult.reasoning_content`、stream / 非 stream の共通化 |
-| `src/apps/server/phaseshift_server.py` | 起動時 template probe、起動ログ、`/v1/meta` の `reasoning`、request log |
+| `src/apps/server/shelf_server.py` | 起動時 template probe、起動ログ、`/v1/meta` の `reasoning`、request log |
 | `cmake/apps.cmake` | `reasoning.py` を server staging の依存へ追加 |
 | `tests/server/test_reasoning_parser.py` | 新規。GPU / model 不要の Parser 単体試験 |
 | `tests/server/test_reasoning_request.py` | 新規。Prompt 行列・入力検証・履歴・tool 解析（model のみ、GPU 不要） |

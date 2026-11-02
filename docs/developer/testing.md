@@ -4,10 +4,10 @@
 
 自己完結: repository + ROCm + 1 GPUのみ。外部ファイル不要。
 canonical source は `tests/run_required_acceptance.py` である。runner は
-`phaseshift-required-tests` target を build し、`required` label の CTest を実行する。
+`shelf-required-tests` target を build し、`required` label の CTest を実行する。
 
 required の集合は `cmake/tests.cmake` の `required` label と
-`phaseshift-required-tests` target が正本である。件数は build 構成
+`shelf-required-tests` target が正本である。件数は build 構成
 （benchmark build の有無）で変わるため、ここに固定しない。
 
 一覧の取得:
@@ -54,7 +54,7 @@ R&D Gate / 診断用 test は旧 `tests/rnd` に置いていたが削除済み�
 正本は `tools/quality_gate.py` である。BF16 KV と FP8 KV を同一 corpus・同一位置で
 比較し、次を出す。
 
-- teacher-forced perplexity（`phaseshift-bench quality --compare`）
+- teacher-forced perplexity（`shelf-bench quality --compare`）
 - mean KL（BF16 の分布を p、FP8 を q とする）
 - top-1 一致率 / top-5 overlap
 - greedy 生成 token の prefix 一致率
@@ -72,13 +72,13 @@ R&D Gate / 診断用 test は旧 `tests/rnd` に置いていたが削除済み�
 実行:
 
 ```bash
-PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-FP8 \
+SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 \
   python3 tests/quality/run_quality_gate.py
 
 ctest --test-dir build -L quality
 ```
 
-`PHASESHIFT_MODEL_DIR` が無い場合は exit 77 で skip する。GPU 30 GiB を予約し、
+`SHELF_MODEL_DIR` が無い場合は exit 77 で skip する。GPU 30 GiB を予約し、
 `test_quality_fp8_kv` として実行する。
 
 report には corpus の token 数・SHA256・source を残す。BetterBench corpus と
@@ -109,7 +109,7 @@ fixture の回答照合と parse は `test_quality_gate_selftest`（required）�
 飛ばさない）。
 
 ```bash
-./build/phaseshift-bench quality \
+./build/shelf-bench quality \
   --model-dir models/Qwen3.8-27B-FP8 --tokens-file "$CORPUS" \
   --context 1600 --score-start-position 1601 --positions 448 \
   --kv-cache-dtype fp8 --dump /tmp/fp8.psq --compare /tmp/bf16.psq
@@ -151,16 +151,16 @@ python3 tools/gen_cli_docs.py --build-dir build
 
 ## GPU 予約
 
-`GPU_COUNT > 0` のテストは `phaseshift-gpu-test-runner` で wrap され、
+`GPU_COUNT > 0` のテストは `shelf-gpu-test-runner` で wrap され、
 GPU を論理 VRAM で予約してから実行する。予約できないままで
-`PHASESHIFT_TEST_GPU_RESERVE_TIMEOUT`（既定 900 秒）を経過すると失敗する。
+`SHELF_TEST_GPU_RESERVE_TIMEOUT`（既定 900 秒）を経過すると失敗する。
 
 - 予約量は `GPU_COST_GB`（既定 1 GiB）。上限は各 GPU の実 VRAM
   （`/sys/class/drm/<node>/device/mem_info_vram_total`）から求める。
-  明示指定は `--budget-gb` と `PHASESHIFT_TEST_GPU_BUDGET_GB`。
+  明示指定は `--budget-gb` と `SHELF_TEST_GPU_BUDGET_GB`。
 - iGPU は候補から外す。判定は `/sys/class/drm/<node>/device/firmware_node` の有無で、
   iGPU のみの環境では外した後の空リストを避けて iGPU を候補にする。
-- `PHASESHIFT_TEST_GPUS` / `HIP_VISIBLE_DEVICES` が指定されている場合は
+- `SHELF_TEST_GPUS` / `HIP_VISIBLE_DEVICES` が指定されている場合は
   明示指定として扱い、iGPU 除外を適用しない。
 
 ### GPU 負荷をかけている間の監視制約
@@ -214,14 +214,14 @@ journalctl -k -b -1 > amdgpu-kernel-prev-boot.log
 
 ## optional tests
 
-`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で external model を要する heavy test
+`SHELF_BUILD_OPTIONAL_TESTS=ON` で external model を要する heavy test
 （DFlash2 gate、TP、MTP weight contract 等）が build される。
 manifest は `cmake/tests.cmake` が正本であり、件数は固定しない。
 
 external test の model directory はすべて環境変数で指定する。
-`PHASESHIFT_MODEL_DIR`（Qwen3.5 系の既定）、`PHASESHIFT_MODEL_DIR_MTP`、
-`PHASESHIFT_MODEL_DIR_DFLASH2`、`PHASESHIFT_MODEL_DIR_DFLASH2_TARGET`、
-`PHASESHIFT_TP_MODEL_DIR`。cmake option に model directory は持たない。
+`SHELF_MODEL_DIR`（Qwen3.5 系の既定）、`SHELF_MODEL_DIR_MTP`、
+`SHELF_MODEL_DIR_DFLASH2`、`SHELF_MODEL_DIR_DFLASH2_TARGET`、
+`SHELF_TP_MODEL_DIR`。cmake option に model directory は持たない。
 
 Qwen3.5-4B full application E2E は削除済みである。外部 model が無い環境で
 skip を垂れ流さないため、実行できない suite は repository に残さない。
@@ -231,26 +231,26 @@ skip を垂れ流さないため、実行できない suite は repository に�
 ## server regression
 
 server / compute E2E は `tests/server/` の Python suite で検証する。
-`phaseshift-server` は `phaseshift-compute` を subprocess として起動するため、
-追加の frontend は要らない。model directory は `PHASESHIFT_MODEL_DIR` で指定する。
+`shelf-server` は `shelf-compute` を subprocess として起動するため、
+追加の frontend は要らない。model directory は `SHELF_MODEL_DIR` で指定する。
 
 canonical runner は `tests/server/run_server_regression.py` である。glob ではなく明示 manifest を
 持ち、group 単位で subprocess として順次実行する。non-zero return は失敗として扱い、
 skip で通さない（自己判定した skip は exit 77 で報告される）。
 
 ```bash
-PHASESHIFT_MODEL_DIR=$PWD/models/Qwen3.8-27B-FP8 \
-PHASESHIFT_TEST_DEVICE=1 \
-PHASESHIFT_TEST_ARENA_GIB=31 \
-PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB=1 \
+SHELF_MODEL_DIR=$PWD/models/Qwen3.8-27B-FP8 \
+SHELF_TEST_DEVICE=1 \
+SHELF_TEST_ARENA_GIB=31 \
+SHELF_TEST_WORKING_SET_RESERVE_GIB=1 \
   python3 tests/server/run_server_regression.py --all
 python3 tests/server/run_server_regression.py --group tools --group agent
 python3 tests/server/run_server_regression.py --list
 ```
 
-`PHASESHIFT_MODEL_DIR` は runner が test を別 directory で起動するため絶対 path で渡す。
+`SHELF_MODEL_DIR` は runner が test を別 directory で起動するため絶対 path で渡す。
 既定の harness は 24 GiB arena・4 GiB working set を前提にするため、27B の FP8 重みを
-載せるホストでは `PHASESHIFT_TEST_ARENA_GIB` / `PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB` で
+載せるホストでは `SHELF_TEST_ARENA_GIB` / `SHELF_TEST_WORKING_SET_RESERVE_GIB` で
 容量を合わせる。値を変えたら起動 log の `MEMORY_PLAN` で実際の割当を確認する。
 
 group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` が正本である。
@@ -269,7 +269,7 @@ prefix cache の JSONL contract は
 GPU テストの session runner:
 
 ```bash
-PHASESHIFT_MODEL_DIR_DFLASH2_TARGET=models/Qwen3.8-27B-FP8 \
+SHELF_MODEL_DIR_DFLASH2_TARGET=models/Qwen3.8-27B-FP8 \
   python3 tools/run_resident_gpu_tests.py --list
 python3 tools/run_resident_gpu_tests.py --group host --devices 0
 python3 tools/run_resident_gpu_tests.py --group tp --devices 0,1
@@ -278,7 +278,7 @@ python3 tools/run_resident_gpu_tests.py --group tp --devices 0,1
 server regression の resident mode:
 
 ```bash
-PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-FP8 \
+SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 \
   python3 tests/server/run_server_regression.py --group core --resident-model
 ```
 
@@ -290,7 +290,7 @@ session runner は worker の deadline 超過時に process group を kill し�
 kill の後に model host の health check を行う。healthy なら次の worker を起動し、
 unhealthy なら session を fail-closed で終了する。
 
-loader correctness test は `PHASESHIFT_DISABLE_RESIDENT_MODEL=1` で
+loader correctness test は `SHELF_DISABLE_RESIDENT_MODEL=1` で
 resident path を無効化できる。environment が無ければ従来 loader path が使われる。
 
 ## 実行層

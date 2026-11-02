@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical PhaseShift server regression runner.
+"""Canonical Shelf server regression runner.
 
 The manifest is explicit, not a glob. `support.py` must not be pulled into the
 default regression run by accident, so every participating test is named here.
@@ -14,11 +14,11 @@ failure, including a missing prerequisite; nothing is silently treated as a
 skip (a test that exits 77 reports itself as skipped and is not a failure).
 
 Environment (inherited by every test):
-    PHASESHIFT_BUILD_DIR       default: <repo>/build
-    PHASESHIFT_MODEL_DIR       model directory used by every server test
-    PHASESHIFT_TEST_DEVICE     GPU device index override
-    PHASESHIFT_TEST_ARENA_GIB  arena capacity override for harness tests
-    PHASESHIFT_TEST_WORKING_SET_RESERVE_GIB
+    SHELF_BUILD_DIR       default: <repo>/build
+    SHELF_MODEL_DIR       model directory used by every server test
+    SHELF_TEST_DEVICE     GPU device index override
+    SHELF_TEST_ARENA_GIB  arena capacity override for harness tests
+    SHELF_TEST_WORKING_SET_RESERVE_GIB
                                working-set reserve override for harness tests
 """
 
@@ -109,7 +109,7 @@ def selected(args):
 
 def test_env(extra=None):
     env = dict(os.environ)
-    env.setdefault("PHASESHIFT_BUILD_DIR", str(REPO_ROOT / "build"))
+    env.setdefault("SHELF_BUILD_DIR", str(REPO_ROOT / "build"))
     env.setdefault("PYTHONUNBUFFERED", "1")
     if extra:
         env.update(extra)
@@ -133,9 +133,9 @@ class ResidentHosts:
         from resident_session import ResidentSession
 
         self.sessions = []
-        target = existing_dirs("PHASESHIFT_SERVER_MODEL_DIR", "PHASESHIFT_MODEL_DIR")
-        drafts = existing_dirs("PHASESHIFT_DFLASH2_MODEL_DIR",
-                               "PHASESHIFT_MODEL_DIR_DFLASH2")
+        target = existing_dirs("SHELF_SERVER_MODEL_DIR", "SHELF_MODEL_DIR")
+        drafts = existing_dirs("SHELF_DFLASH2_MODEL_DIR",
+                               "SHELF_MODEL_DIR_DFLASH2")
         for device in devices:
             session = ResidentSession(
                 build_dir=build_dir,
@@ -206,13 +206,13 @@ def main(argv=None) -> int:
     env = test_env()
     hosts = None
     if args.resident_model:
-        if os.environ.get("PHASESHIFT_DISABLE_RESIDENT_MODEL"):
+        if os.environ.get("SHELF_DISABLE_RESIDENT_MODEL"):
             print("resident model session skipped: "
-                  "PHASESHIFT_DISABLE_RESIDENT_MODEL is set")
+                  "SHELF_DISABLE_RESIDENT_MODEL is set")
         else:
             devices = [int(part) for part in args.resident_devices.split(",")
                        if part.strip()]
-            build_dir = Path(env["PHASESHIFT_BUILD_DIR"])
+            build_dir = Path(env["SHELF_BUILD_DIR"])
             hosts = ResidentHosts(devices, args.resident_staging_gib, build_dir)
             env = test_env(hosts.socket_env)
             print(f"resident session: devices={','.join(map(str, devices))} "

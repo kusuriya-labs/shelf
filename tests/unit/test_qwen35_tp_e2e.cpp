@@ -1,4 +1,4 @@
-#include <phaseshift/core/gpu/scoped_device.h>
+#include <shelf/core/gpu/scoped_device.h>
 
 #include <hip/hip_runtime.h>
 
@@ -34,7 +34,7 @@ static void print_tokens(const char* tag, const std::vector<int32_t>& tokens) {
 
 static std::uint64_t arena_bytes_from_env(std::uint64_t fallback_gib) {
     std::uint64_t gib = fallback_gib;
-    if (const char* arena_env = std::getenv("PHASESHIFT_TP_ARENA_GIB")) {
+    if (const char* arena_env = std::getenv("SHELF_TP_ARENA_GIB")) {
         char* end = nullptr;
         const unsigned long long parsed = std::strtoull(arena_env, &end, 10);
         if (end != arena_env && parsed > 0) gib = static_cast<std::uint64_t>(parsed);
@@ -43,14 +43,14 @@ static std::uint64_t arena_bytes_from_env(std::uint64_t fallback_gib) {
 }
 
 int main() {
-    const char* model_env = std::getenv("PHASESHIFT_TP_MODEL_DIR");
+    const char* model_env = std::getenv("SHELF_TP_MODEL_DIR");
     if (model_env == nullptr || model_env[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_TP_MODEL_DIR to run the Qwen3.8-27B TP E2E\n");
+        std::printf("SKIP: set SHELF_TP_MODEL_DIR to run the Qwen3.8-27B TP E2E\n");
         return 77;
     }
     const std::string model_dir = model_env;
     if (!fs::exists(fs::path(model_dir) / "config.json")) {
-        std::printf("SKIP: PHASESHIFT_TP_MODEL_DIR has no config.json\n");
+        std::printf("SKIP: SHELF_TP_MODEL_DIR has no config.json\n");
         return 77;
     }
 
@@ -73,7 +73,7 @@ int main() {
                        20, 220, 21, 220, 22, 220, 23};
     tp1_opts.max_new_tokens = 16;
 
-    if (const char* prompt_env = std::getenv("PHASESHIFT_TP_PROMPT")) {
+    if (const char* prompt_env = std::getenv("SHELF_TP_PROMPT")) {
         tp1_opts.prompt.clear();
         const char* p = prompt_env;
         while (*p != '\0') {

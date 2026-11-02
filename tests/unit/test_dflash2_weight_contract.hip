@@ -1,9 +1,9 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -359,7 +359,7 @@ int main() {
         std::vector<TensorPlan> tensors = expected_checkpoint(config);
         check(write_model("quantized", kSmallConfig, tensors), "write quantized checkpoint");
         {
-            std::ofstream f(g_root / "quantized" / "phaseshift_quantization.json",
+            std::ofstream f(g_root / "quantized" / "shelf_quantization.json",
                             std::ios::binary | std::ios::trunc);
             f << "{\"format\":\"bogus\"}\n";
         }

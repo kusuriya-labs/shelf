@@ -127,7 +127,7 @@ manifest の各セクション:
 
 ## 5. 未実施・制約
 
-- PhaseShift runtime はこの artifact をロードできない。現行 encoder は BF16 / FP8
+- Shelf runtime はこの artifact をロードできない。現行 encoder は BF16 / FP8
   K128N128 のみで、PSQ5、FP8 行単位 scale、3D fused expert のいずれも未対応である。
 - タスク精度（KLD / Top1）と GPU decode の subnormal 取り扱いは未測定。
 - PLE の CPU オフロード実装（1 token あたり 16 row gather）は runtime 側の未実装項目。

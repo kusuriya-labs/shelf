@@ -1,6 +1,6 @@
 # Reasoning（Thinking）contract
 
-PhaseShift Server の Chat Completions は、Qwen3.8 系 chat template の thinking を
+Shelf Server の Chat Completions は、Qwen3.8 系 chat template の thinking を
 既定で有効にし、思考と回答を別の field で返す。この文書が reasoning の current contract の
 正本である。API 例は [../user/server.md](../user/server.md) に置く。
 
@@ -78,7 +78,7 @@ Token 列を正本にする。
   `join(delta.reasoning_content) == message.reasoning_content`、
   `join(delta.content) == message.content` が成立する。
 
-実装は `src/apps/common/phaseshift_chat/reasoning.py`（tokenizer 非依存の状態機械）と
+実装は `src/apps/common/shelf_chat/reasoning.py`（tokenizer 非依存の状態機械）と
 `codec.new_region_parser()` / `codec.split_generation()` にある。
 
 ## Tool calling

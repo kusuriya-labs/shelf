@@ -37,20 +37,20 @@ Runtime core
     PrimitiveGraph / Program / ProgramSet / DeviceBatchContext / workspace layouts
 ```
 
-generic 層（`phaseshift/kernels` / `phaseshift/inference` /
+generic 層（`shelf/kernels` / `shelf/inference` /
 `models/common`）は `models/qwen35` / `Qwen35` を参照できない。
 これを `tests/unit/test_architecture_boundaries.cpp` が静的に検証する。
 
 ターゲットの対応:
 
-- `phaseshift_kernels_optimized` / `phaseshift_kernels_correctness` /
-  `phaseshift_inference_state` / `phaseshift_inference_scheduling` /
-  `phaseshift_inference_execution` は model 非依存層
-- `phaseshift_qwen35` / `phaseshift_qwen35_runtime` /
-  `phaseshift_qwen35_kernels_optimized`（dflash2 / eagle4）は Qwen35 固有層
+- `shelf_kernels_optimized` / `shelf_kernels_correctness` /
+  `shelf_inference_state` / `shelf_inference_scheduling` /
+  `shelf_inference_execution` は model 非依存層
+- `shelf_qwen35` / `shelf_qwen35_runtime` /
+  `shelf_qwen35_kernels_optimized`（dflash2 / eagle4）は Qwen35 固有層
 
-`phaseshift_kernels_correctness` は `phaseshift_runtime` にlinkする一方、
-`phaseshift_runtime` は `phaseshift_core` / `phaseshift_gpu` だけを使う。
+`shelf_kernels_correctness` は `shelf_runtime` にlinkする一方、
+`shelf_runtime` は `shelf_core` / `shelf_gpu` だけを使う。
 
 Tensor Parallel を使う場合の scheduler / rank runtime の関係（TP-Exec-1）:
 
@@ -66,11 +66,11 @@ Executor Executor
 
 詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
 
-weights loader（`phaseshift_weights`）の依存は下方向のみ:
+weights loader（`shelf_weights`）の依存は下方向のみ:
 
 ```text
-phaseshift_weights -> phaseshift_quant_format / phaseshift_quant_bundle / phaseshift_quant_reference / phaseshift_io / phaseshift_core / phaseshift_gpu
-phaseshift_qwen35  -> phaseshift_weights
+shelf_weights -> shelf_quant_format / shelf_quant_bundle / shelf_quant_reference / shelf_io / shelf_core / shelf_gpu
+shelf_qwen35  -> shelf_weights
 ```
 
 weight の canonical → partition → preshuffle → upload の順序 contract は
@@ -93,13 +93,13 @@ Qwen35 model -> Qwen35 runtime    : forbidden
 Qwen35 kernels -> Qwen35 runtime  : forbidden
 ```
 
-- `include/phaseshift/runtime/**` と `src/phaseshift/runtime/**` は
-  Qwen35を一切参照しない（`qwen35` / `Qwen35` / `phaseshift/models/` が存在しない）。
-- `include/phaseshift/weights/**` と `src/phaseshift/weights/**` も同様に
+- `include/shelf/runtime/**` と `src/shelf/runtime/**` は
+  Qwen35を一切参照しない（`qwen35` / `Qwen35` / `shelf/models/` が存在しない）。
+- `include/shelf/weights/**` と `src/shelf/weights/**` も同様に
   Qwen35を一切参照しない（model非依存のweight loader）。
 - `quantization/manifest/**` / `quantization/bundle/**` / `quantization/codec/**` /
   `core/**` / `io/**` は
-  `phaseshift/models/` をincludeしない。
+  `shelf/models/` をincludeしない。
   （manifest schema上の architecture 文字列は format契約でありコード依存ではない）
 - model layerはweights binding / config / primitive loweringのみ。
   weights loaderのformat分岐（BF16 / FP8）はmodel側に持たない。
@@ -110,48 +110,48 @@ Qwen35 kernels -> Qwen35 runtime  : forbidden
 ## New model rule
 
 新モデルが既存Primitiveで表現可能なら、
-`include/phaseshift/runtime/**` と `src/phaseshift/runtime/**` を変更しない。
+`include/shelf/runtime/**` と `src/shelf/runtime/**` を変更しない。
 
 新model向けの汎用抽象（IModel / Backend / Registry / Factory / Plugin interface）は
 作成しない。必要になった実装はmodel-local
-（`include/phaseshift/models/<model>/**`）に置く。
+（`include/shelf/models/<model>/**`）に置く。
 
 ## Server layer
 
-`phaseshift-server` はserving productであり、inference engineではない。
+`shelf-server` はserving productであり、inference engineではない。
 aiohttp で OpenAI Chat Completions の subset を提供し、
-`phaseshift-compute --serve-stdio` へ直接 JSONL stdio で接続する。
+`shelf-compute --serve-stdio` へ直接 JSONL stdio で接続する。
 
 ```text
 OpenAI client
      │ HTTP / SSE
      ▼
-phaseshift-server
+shelf-server
      ├── aiohttp
      ├── openai_protocol.py   (request validation / wire encoding)
      ├── chat_service.py      (HF messages -> chat template -> compute -> response parser)
      └── compute_client.py    (asyncio native JSONL client)
      │ persistent JSONL stdio
      ▼
-phaseshift-compute --serve-stdio   (token IDs in / token IDs out)
+shelf-compute --serve-stdio   (token IDs in / token IDs out)
 ```
 
 境界:
 
-- `phaseshift-compute` はtoken IDのin/outのみ。HTTP・OpenAI schema・messages・
+- `shelf-compute` はtoken IDのin/outのみ。HTTP・OpenAI schema・messages・
   roles・tools・JSON Schema・tool parser・chat template・tokenizerを持たない。
 - server側（`src/apps/server/**`）だけがOpenAI schema・tokenizer・chat template・
   tool parserに依存する。
-- `src/phaseshift/**` と `include/phaseshift/**` はserving固有の技術
+- `src/shelf/**` と `include/shelf/**` はserving固有の技術
   （HTTP / OpenAI schema / protobuf / gRPC / xgrammar）を参照しない。
   `test_architecture_boundaries` の `check_no_server_deps` がこれを静的に検査する。
 - tokenizerとQwen chat templateの唯一のsource of truthはmodel directoryの
-  Hugging Face processorである。server codecは `src/apps/common/phaseshift_chat/`
+  Hugging Face processorである。server codecは `src/apps/common/shelf_chat/`
   に置き、serverが使う。
 
 ### compute control plane
 
-`phaseshift-compute --serve-stdio` はGPU runtime ownerである単一thread上で、
+`shelf-compute --serve-stdio` はGPU runtime ownerである単一thread上で、
 `poll(2)` によりstdinを non-blockingに読む。generation中でも `ping` / `cancel` /
 `shutdown` を処理でき、1 stepごとにcontrol commandを確認する。
 `{"op":"cancel","request_id":N}` は対象requestを `finish_reason="cancelled"` で終了させ、

@@ -1,11 +1,11 @@
-#include <phaseshift/io/safetensors_reader.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/quantization/bundle/hf_manifest.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/quantization/manifest/runtime_resolution.h>
-#include <phaseshift/quantization/quantization_types.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/io/safetensors_reader.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/manifest/runtime_resolution.h>
+#include <shelf/quantization/quantization_types.h>
+#include <shelf/weights/weight_loader.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -317,7 +317,7 @@ static void test_unsupported_configs() {
 int main() {
     std::error_code ec;
     g_root = fs::temp_directory_path(ec) /
-        ("phaseshift_hf_manifest_" + std::to_string(::getpid()));
+        ("shelf_hf_manifest_" + std::to_string(::getpid()));
     fs::create_directories(g_root, ec);
 
     test_fp8_manifest();

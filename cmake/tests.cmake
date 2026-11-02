@@ -1,15 +1,15 @@
-# PhaseShift test targets.
+# Shelf test targets.
 #
 # Test policy:
 #   - required: self-contained contract / correctness tests.
 #     Repository + ROCm + 1 GPU only. No external files.
 #   - optional: external-model / heavy tests. Built only when
-#     PHASESHIFT_BUILD_OPTIONAL_TESTS=ON.
+#     SHELF_BUILD_OPTIONAL_TESTS=ON.
 #
 # File layout follows the same taxonomy, in this order:
-#   1. test helper (phaseshift-gpu-test-runner, shared fixtures)
+#   1. test helper (shelf-gpu-test-runner, shared fixtures)
 #   2. required — self-contained contract / correctness
-#   3. benchmarks-only smoke (PHASESHIFT_BUILD_BENCHMARKS)
+#   3. benchmarks-only smoke (SHELF_BUILD_BENCHMARKS)
 #   4. optional — current regression / infrastructure acceptance
 #
 #
@@ -17,23 +17,23 @@
 
 set(_PS_TESTS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
-add_executable(phaseshift-gpu-test-runner
+add_executable(shelf-gpu-test-runner
     "${_PS_TESTS_ROOT}/support/gpu_test_runner/main.cpp"
 )
-target_compile_features(phaseshift-gpu-test-runner PRIVATE cxx_std_20)
+target_compile_features(shelf-gpu-test-runner PRIVATE cxx_std_20)
 
 # Shared resident fixture used by native host backend test binaries.
-add_library(phaseshift-resident-fixture STATIC
+add_library(shelf-resident-fixture STATIC
     "${_PS_TESTS_ROOT}/support/resident_model_fixture.cpp"
 )
-phaseshift_set_rocm_rpath(phaseshift-resident-fixture)
-target_compile_features(phaseshift-resident-fixture PRIVATE cxx_std_20)
-target_include_directories(phaseshift-resident-fixture PUBLIC "${_PS_TESTS_ROOT}")
-target_link_libraries(phaseshift-resident-fixture PUBLIC phaseshift_resident)
-target_compile_options(phaseshift-resident-fixture PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-phaseshift_set_hip_archs(phaseshift-resident-fixture)
+shelf_set_rocm_rpath(shelf-resident-fixture)
+target_compile_features(shelf-resident-fixture PRIVATE cxx_std_20)
+target_include_directories(shelf-resident-fixture PUBLIC "${_PS_TESTS_ROOT}")
+target_link_libraries(shelf-resident-fixture PUBLIC shelf_resident)
+target_compile_options(shelf-resident-fixture PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf-resident-fixture)
 
-# phaseshift_add_test(
+# shelf_add_test(
 #   NAME <test>
 #   SOURCE <relpath from tests/>
 #   [LABELS <label...>]
@@ -43,14 +43,14 @@ phaseshift_set_hip_archs(phaseshift-resident-fixture)
 #   [GPU_COST_GB <gb>]
 # )
 #
-# Links exactly the listed libraries (never the phaseshift aggregate).
-# GPU_COUNT > 0 wraps the test in phaseshift-gpu-test-runner:
+# Links exactly the listed libraries (never the shelf aggregate).
+# GPU_COUNT > 0 wraps the test in shelf-gpu-test-runner:
 # integrated GPUs are dropped from the candidate list, VRAM budget reservation
 # (per-GPU budget derived from the device's own VRAM, forced by --budget-gb /
-# env PHASESHIFT_TEST_GPU_BUDGET_GB), GPU assignment via HIP_VISIBLE_DEVICES,
+# env SHELF_TEST_GPU_BUDGET_GB), GPU assignment via HIP_VISIBLE_DEVICES,
 # hard deadline (SIGKILL on timeout), exit code normalization. Exit 77 is
 # reported as CTest SKIP, but required acceptance still counts it as a failure.
-function(phaseshift_add_test)
+function(shelf_add_test)
     cmake_parse_arguments(
         PS_TEST
         ""
@@ -59,8 +59,8 @@ function(phaseshift_add_test)
         ${ARGN}
     )
     add_executable(${PS_TEST_NAME} "${_PS_TESTS_ROOT}/${PS_TEST_SOURCE}")
-    phaseshift_set_rocm_rpath(${PS_TEST_NAME})
-    phaseshift_set_hip_archs(${PS_TEST_NAME})
+    shelf_set_rocm_rpath(${PS_TEST_NAME})
+    shelf_set_hip_archs(${PS_TEST_NAME})
     target_compile_features(${PS_TEST_NAME} PRIVATE cxx_std_20)
     target_include_directories(${PS_TEST_NAME} PRIVATE "${_PS_TESTS_ROOT}")
     target_link_libraries(${PS_TEST_NAME} PRIVATE ${PS_TEST_LIBRARIES})
@@ -78,13 +78,13 @@ function(phaseshift_add_test)
             set(PS_TEST_GPU_COST_GB 1)
         endif()
         math(EXPR PS_TEST_BACKSTOP "${PS_TEST_TIMEOUT} + 960")
-        add_test(NAME ${PS_TEST_NAME} COMMAND phaseshift-gpu-test-runner
+        add_test(NAME ${PS_TEST_NAME} COMMAND shelf-gpu-test-runner
             --gpu-count ${PS_TEST_GPU_COUNT}
             --cost-gb ${PS_TEST_GPU_COST_GB}
             --timeout ${PS_TEST_TIMEOUT}
             --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
             -- $<TARGET_FILE:${PS_TEST_NAME}>)
-        add_dependencies(${PS_TEST_NAME} phaseshift-gpu-test-runner)
+        add_dependencies(${PS_TEST_NAME} shelf-gpu-test-runner)
         set_tests_properties(${PS_TEST_NAME} PROPERTIES TIMEOUT ${PS_TEST_BACKSTOP})
     else()
         add_test(NAME ${PS_TEST_NAME} COMMAND ${PS_TEST_NAME})
@@ -101,182 +101,182 @@ endfunction()
 # required — self-contained contract / correctness tests
 # ---------------------------------------------------------------------------
 
-phaseshift_add_test(NAME test_safetensors_writer SOURCE unit/test_safetensors_writer.cpp LABELS "cpu;required" LIBRARIES phaseshift_io)
-phaseshift_add_test(NAME test_expert_slice_fixture SOURCE unit/test_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES phaseshift_weights phaseshift_io)
-phaseshift_add_test(NAME test_expert_slice_load SOURCE unit/test_expert_slice_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_ple_row_gather SOURCE unit/test_ple_row_gather.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_io phaseshift_gpu)
-phaseshift_add_test(NAME test_ple_row_gather_real SOURCE unit/test_ple_row_gather_real.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_io phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_pp_stage SOURCE unit/test_qwen4exp_pp_stage.hip LABELS "gpu4;required" TIMEOUT 900 GPU_COUNT 4 GPU_COST_GB 24 LIBRARIES phaseshift_qwen4exp phaseshift_runtime phaseshift_weights phaseshift_io phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_host_oracle SOURCE unit/test_qwen4exp_host_oracle.hip LABELS "cpu;required" TIMEOUT 300 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_quant_bundle phaseshift_io)
-phaseshift_add_test(NAME test_qsa_indexer SOURCE unit/test_qsa_indexer.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_optimized DEFS PHASESHIFT_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-phaseshift_add_test(NAME test_qsa_sparse_attention SOURCE unit/test_qsa_sparse_attention.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_inference_execution phaseshift_kernels_optimized DEFS PHASESHIFT_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-phaseshift_add_test(NAME test_group_ops SOURCE kernels/optimized/test_group_ops.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_hyper_lowering SOURCE unit/test_qwen4exp_hyper_lowering.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_kernels_correctness phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_moe_ops SOURCE unit/test_moe_ops.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_moe_experts_psq5 SOURCE unit/test_moe_experts_psq5.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_runtime phaseshift_gpu phaseshift_quant_reference)
-phaseshift_add_test(NAME test_safetensors_partial_read SOURCE unit/test_safetensors_partial_read.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_io phaseshift_weights)
-phaseshift_add_test(NAME test_quant_format_layout SOURCE unit/test_quant_format_layout.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_format)
-phaseshift_add_test(NAME test_quant_spec SOURCE unit/test_quant_spec.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_format)
-phaseshift_add_test(NAME test_psq5_mixed_manifest SOURCE unit/test_psq5_mixed_manifest.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_bundle)
-phaseshift_add_test(NAME test_manifest_v4 SOURCE unit/test_manifest_v4.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_format)
-phaseshift_add_test(NAME test_int8_compute_contract SOURCE unit/test_int8_compute_contract.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_reference)
-phaseshift_add_test(NAME test_physical_alignment_contract SOURCE unit/test_physical_alignment_contract.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_core phaseshift_inference_state)
-phaseshift_add_test(NAME test_ocp_e4m3_codec SOURCE unit/test_ocp_e4m3_codec.cpp LABELS "cpu;required" LIBRARIES phaseshift_quant_reference)
-phaseshift_add_test(NAME test_activation_quantize_sensitivity SOURCE unit/test_activation_quantize_sensitivity.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_quant_reference)
-phaseshift_add_test(NAME test_fp8_payload SOURCE unit/test_fp8_payload.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_quant_reference phaseshift_quant_format)
-phaseshift_add_test(NAME test_hf_manifest SOURCE unit/test_hf_manifest.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_weights phaseshift_quant_bundle phaseshift_io)
-phaseshift_add_test(NAME test_tensor_partition SOURCE unit/test_tensor_partition.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_weights)
-phaseshift_add_test(NAME test_canonical_partition SOURCE unit/test_canonical_partition.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_weights phaseshift_quant_reference)
-phaseshift_add_test(NAME test_qwen35_tensor_parallel_plan SOURCE unit/test_qwen35_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_context.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
+shelf_add_test(NAME test_safetensors_writer SOURCE unit/test_safetensors_writer.cpp LABELS "cpu;required" LIBRARIES shelf_io)
+shelf_add_test(NAME test_expert_slice_fixture SOURCE unit/test_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_weights shelf_io)
+shelf_add_test(NAME test_expert_slice_load SOURCE unit/test_expert_slice_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_kernels_correctness shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_ple_row_gather SOURCE unit/test_ple_row_gather.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_weights shelf_io shelf_gpu)
+shelf_add_test(NAME test_ple_row_gather_real SOURCE unit/test_ple_row_gather_real.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen4exp shelf_weights shelf_io shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_pp_stage SOURCE unit/test_qwen4exp_pp_stage.hip LABELS "gpu4;required" TIMEOUT 900 GPU_COUNT 4 GPU_COST_GB 24 LIBRARIES shelf_qwen4exp shelf_runtime shelf_weights shelf_io shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_host_oracle SOURCE unit/test_qwen4exp_host_oracle.hip LABELS "cpu;required" TIMEOUT 300 LIBRARIES shelf_qwen4exp shelf_weights shelf_quant_bundle shelf_io)
+shelf_add_test(NAME test_qsa_indexer SOURCE unit/test_qsa_indexer.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized DEFS SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+shelf_add_test(NAME test_qsa_sparse_attention SOURCE unit/test_qsa_sparse_attention.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized DEFS SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+shelf_add_test(NAME test_group_ops SOURCE kernels/optimized/test_group_ops.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_hyper_lowering SOURCE unit/test_qwen4exp_hyper_lowering.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_kernels_correctness shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_moe_ops SOURCE unit/test_moe_ops.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_moe_experts_psq5 SOURCE unit/test_moe_experts_psq5.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_runtime shelf_gpu shelf_quant_reference)
+shelf_add_test(NAME test_safetensors_partial_read SOURCE unit/test_safetensors_partial_read.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_io shelf_weights)
+shelf_add_test(NAME test_quant_format_layout SOURCE unit/test_quant_format_layout.cpp LABELS "cpu;required" LIBRARIES shelf_quant_format)
+shelf_add_test(NAME test_quant_spec SOURCE unit/test_quant_spec.cpp LABELS "cpu;required" LIBRARIES shelf_quant_format)
+shelf_add_test(NAME test_psq5_mixed_manifest SOURCE unit/test_psq5_mixed_manifest.cpp LABELS "cpu;required" LIBRARIES shelf_quant_bundle)
+shelf_add_test(NAME test_manifest_v4 SOURCE unit/test_manifest_v4.cpp LABELS "cpu;required" LIBRARIES shelf_quant_format)
+shelf_add_test(NAME test_int8_compute_contract SOURCE unit/test_int8_compute_contract.cpp LABELS "cpu;required" LIBRARIES shelf_quant_reference)
+shelf_add_test(NAME test_physical_alignment_contract SOURCE unit/test_physical_alignment_contract.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_core shelf_inference_state)
+shelf_add_test(NAME test_ocp_e4m3_codec SOURCE unit/test_ocp_e4m3_codec.cpp LABELS "cpu;required" LIBRARIES shelf_quant_reference)
+shelf_add_test(NAME test_activation_quantize_sensitivity SOURCE unit/test_activation_quantize_sensitivity.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
+shelf_add_test(NAME test_fp8_payload SOURCE unit/test_fp8_payload.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference shelf_quant_format)
+shelf_add_test(NAME test_hf_manifest SOURCE unit/test_hf_manifest.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_bundle shelf_io)
+shelf_add_test(NAME test_tensor_partition SOURCE unit/test_tensor_partition.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_weights)
+shelf_add_test(NAME test_canonical_partition SOURCE unit/test_canonical_partition.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_reference)
+shelf_add_test(NAME test_qwen35_tensor_parallel_plan SOURCE unit/test_qwen35_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_context.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
+shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_barrier_group PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES phaseshift-resident-fixture phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES shelf-resident-fixture shelf_qwen35_runtime)
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift-resident-fixture phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35)
+shelf_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf-resident-fixture shelf_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35)
 target_include_directories(test_qwen35_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
 # DFlash2 + TP: drafter は非分割、verify のみ TP2 で回す経路の E2E。
-phaseshift_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 target_include_directories(test_dflash2_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
-phaseshift_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_eagle4_kernels SOURCE unit/test_eagle4_kernels.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_eagle4_config SOURCE unit/test_eagle4_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_eagle4_forward SOURCE unit/test_eagle4_forward.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_eagle4_candidate_paths SOURCE unit/test_eagle4_candidate_paths.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 12 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_eagle4_weight_contract SOURCE unit/test_eagle4_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
-phaseshift_add_test(NAME test_eagle4_tp_weight_load SOURCE unit/test_eagle4_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
-phaseshift_add_test(NAME test_eagle4_tree SOURCE unit/test_eagle4_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_eagle4_cost SOURCE unit/test_eagle4_cost.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_eagle4_tree_draft SOURCE unit/test_eagle4_tree_draft.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_eagle4_spec_batch SOURCE unit/test_eagle4_spec_batch.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35)
-phaseshift_add_test(NAME test_eagle4_tp_forward SOURCE unit/test_eagle4_tp_forward.hip LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_core)
+shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
+shelf_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
+shelf_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_eagle4_kernels SOURCE unit/test_eagle4_kernels.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_eagle4_config SOURCE unit/test_eagle4_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_eagle4_forward SOURCE unit/test_eagle4_forward.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_eagle4_candidate_paths SOURCE unit/test_eagle4_candidate_paths.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 12 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_eagle4_weight_contract SOURCE unit/test_eagle4_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
+shelf_add_test(NAME test_eagle4_tp_weight_load SOURCE unit/test_eagle4_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
+shelf_add_test(NAME test_eagle4_tree SOURCE unit/test_eagle4_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_eagle4_cost SOURCE unit/test_eagle4_cost.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_eagle4_tree_draft SOURCE unit/test_eagle4_tree_draft.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_eagle4_spec_batch SOURCE unit/test_eagle4_spec_batch.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime shelf_qwen35)
+shelf_add_test(NAME test_eagle4_tp_forward SOURCE unit/test_eagle4_tp_forward.hip LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src/apps/bench")
-phaseshift_add_test(NAME test_ple_ngram_hash SOURCE unit/test_ple_ngram_hash.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen4exp)
-phaseshift_add_test(NAME test_gated_residual SOURCE unit/test_gated_residual.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES phaseshift_qwen4exp)
-phaseshift_add_test(NAME test_ple_conv SOURCE unit/test_ple_conv.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen4exp)
-phaseshift_add_test(NAME test_ple_ngram_checkpoint SOURCE unit/test_ple_ngram_checkpoint.cpp LABELS "cpu;optional;external_files" TIMEOUT 120 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_io)
-phaseshift_add_test(NAME test_qwen4exp_gdn_fit SOURCE unit/test_qwen4exp_gdn_fit.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen4exp phaseshift_qwen35 phaseshift_inference_execution)
-phaseshift_add_test(NAME test_qwen4exp_moe SOURCE unit/test_qwen4exp_moe.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES phaseshift_core DEFS PHASESHIFT_MOE_ORACLE_DIR="${CMAKE_SOURCE_DIR}/tests/data/qwen4exp_moe")
-phaseshift_add_test(NAME test_qwen4exp_gdn_fit_gpu SOURCE kernels/optimized/test_qwen4exp_gdn_fit.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_optimized phaseshift_gpu phaseshift_runtime phaseshift_inference_state phaseshift_qwen35 phaseshift_weights phaseshift_io)
-phaseshift_add_test(NAME test_qwen4exp_config SOURCE unit/test_qwen4exp_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen4exp)
-phaseshift_add_test(NAME test_qwen4exp_weights SOURCE unit/test_qwen4exp_weights.cpp LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_io phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_state SOURCE unit/test_qwen4exp_state.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen4exp phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_moe_graph SOURCE unit/test_qwen4exp_moe_graph.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_kernels_correctness phaseshift_inference_state phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_ple_graph SOURCE unit/test_qwen4exp_ple_graph.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_kernels_correctness phaseshift_inference_state phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_lowering_contract SOURCE unit/test_qwen4exp_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen4exp phaseshift_inference_execution phaseshift_kernels_correctness phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_forward_fixture SOURCE unit/test_qwen4exp_forward_fixture.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen4exp phaseshift_kernels_correctness phaseshift_inference_state phaseshift_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen4exp_quantized_load SOURCE unit/test_qwen4exp_quantized_load.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 20 LIBRARIES phaseshift_qwen4exp phaseshift_weights phaseshift_quant_bundle phaseshift_io phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
-phaseshift_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_grouped_dynamic_conv SOURCE unit/test_dflash2_grouped_dynamic_conv.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_bf16_geometry SOURCE unit/test_dflash2_bf16_geometry.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_ple_ngram_hash SOURCE unit/test_ple_ngram_hash.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen4exp)
+shelf_add_test(NAME test_gated_residual SOURCE unit/test_gated_residual.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen4exp)
+shelf_add_test(NAME test_ple_conv SOURCE unit/test_ple_conv.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen4exp)
+shelf_add_test(NAME test_ple_ngram_checkpoint SOURCE unit/test_ple_ngram_checkpoint.cpp LABELS "cpu;optional;external_files" TIMEOUT 120 LIBRARIES shelf_qwen4exp shelf_weights shelf_io)
+shelf_add_test(NAME test_qwen4exp_gdn_fit SOURCE unit/test_qwen4exp_gdn_fit.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen4exp shelf_qwen35 shelf_inference_execution)
+shelf_add_test(NAME test_qwen4exp_moe SOURCE unit/test_qwen4exp_moe.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_core DEFS SHELF_MOE_ORACLE_DIR="${CMAKE_SOURCE_DIR}/tests/data/qwen4exp_moe")
+shelf_add_test(NAME test_qwen4exp_gdn_fit_gpu SOURCE kernels/optimized/test_qwen4exp_gdn_fit.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_gpu shelf_runtime shelf_inference_state shelf_qwen35 shelf_weights shelf_io)
+shelf_add_test(NAME test_qwen4exp_config SOURCE unit/test_qwen4exp_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen4exp)
+shelf_add_test(NAME test_qwen4exp_weights SOURCE unit/test_qwen4exp_weights.cpp LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_weights shelf_io shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_state SOURCE unit/test_qwen4exp_state.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen4exp shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_moe_graph SOURCE unit/test_qwen4exp_moe_graph.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_kernels_correctness shelf_inference_state shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_ple_graph SOURCE unit/test_qwen4exp_ple_graph.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_kernels_correctness shelf_inference_state shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_lowering_contract SOURCE unit/test_qwen4exp_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen4exp shelf_inference_execution shelf_kernels_correctness shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_forward_fixture SOURCE unit/test_qwen4exp_forward_fixture.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen4exp shelf_kernels_correctness shelf_inference_state shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_qwen4exp_quantized_load SOURCE unit/test_qwen4exp_quantized_load.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 20 LIBRARIES shelf_qwen4exp shelf_weights shelf_quant_bundle shelf_io shelf_gpu)
+shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
+shelf_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_grouped_dynamic_conv SOURCE unit/test_dflash2_grouped_dynamic_conv.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_bf16_geometry SOURCE unit/test_dflash2_bf16_geometry.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_dflash2_bf16_geometry PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_dflash2_rope SOURCE unit/test_dflash2_rope.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_attention SOURCE unit/test_dflash2_attention.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_topk SOURCE unit/test_dflash2_topk.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_gdn_spec_history SOURCE unit/test_gdn_spec_history.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_prefix_cache SOURCE unit/test_prefix_cache.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_prefix_cache_batcher SOURCE unit/test_prefix_cache_batcher.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35)
-phaseshift_add_test(NAME test_executor_move_assignment SOURCE unit/test_executor_move_assignment.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_runtime phaseshift_gpu)
-phaseshift_add_test(NAME test_dflash2_candidate_selector SOURCE unit/test_dflash2_candidate_selector.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_kv_ring SOURCE unit/test_dflash2_kv_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_attention_ring SOURCE unit/test_dflash2_attention_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_inference_state)
-phaseshift_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 LIBRARIES phaseshift_gpu)
-phaseshift_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_kernels_correctness)
-phaseshift_add_test(NAME test_architecture_boundaries SOURCE unit/test_architecture_boundaries.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_core DEFS PHASESHIFT_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-phaseshift_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_program_workspace_lifetime.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_activation_workspace_layout SOURCE unit/test_activation_workspace_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_program_quant_contract SOURCE unit/test_program_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_dispatch_staging_size SOURCE unit/test_dispatch_staging_size.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu)
+shelf_add_test(NAME test_dflash2_rope SOURCE unit/test_dflash2_rope.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_attention SOURCE unit/test_dflash2_attention.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_topk SOURCE unit/test_dflash2_topk.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_gdn_spec_history SOURCE unit/test_gdn_spec_history.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_kernels_optimized shelf_qwen35_runtime)
+shelf_add_test(NAME test_prefix_cache SOURCE unit/test_prefix_cache.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_prefix_cache_batcher SOURCE unit/test_prefix_cache_batcher.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime shelf_qwen35)
+shelf_add_test(NAME test_executor_move_assignment SOURCE unit/test_executor_move_assignment.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime shelf_gpu)
+shelf_add_test(NAME test_dflash2_candidate_selector SOURCE unit/test_dflash2_candidate_selector.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_kv_ring SOURCE unit/test_dflash2_kv_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_attention_ring SOURCE unit/test_dflash2_attention_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES shelf_inference_state)
+shelf_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 LIBRARIES shelf_gpu)
+shelf_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
+shelf_add_test(NAME test_architecture_boundaries SOURCE unit/test_architecture_boundaries.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_core DEFS SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+shelf_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_program_workspace_lifetime.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_activation_workspace_layout SOURCE unit/test_activation_workspace_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_program_quant_contract SOURCE unit/test_program_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_dispatch_staging_size SOURCE unit/test_dispatch_staging_size.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 
-phaseshift_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_kernels_correctness)
-phaseshift_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_activation_quantize_a8 SOURCE kernels/optimized/test_activation_quantize_a8.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_activation_quantize_e4m3 SOURCE kernels/optimized/test_activation_quantize_e4m3.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_activation_quantize_tp_split SOURCE kernels/optimized/test_activation_quantize_tp_split.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_gdn_post SOURCE kernels/optimized/test_fused_gdn_post.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_rmsnorm_quantize SOURCE kernels/optimized/test_fused_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_swiglu_quantize SOURCE kernels/optimized/test_fused_swiglu_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_resid_rmsnorm_quantize SOURCE kernels/optimized/test_fused_resid_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_attn_post_quantize SOURCE kernels/optimized/test_fused_attn_post_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_gdn_conv_silu SOURCE kernels/optimized/test_fused_gdn_conv_silu.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_fused_gdn_qk_prepare SOURCE kernels/optimized/test_fused_gdn_qk_prepare.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gemm_fp8_optimized SOURCE kernels/linear/test_gemm_fp8_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_quant_reference phaseshift_gpu)
-phaseshift_add_test(NAME test_gemm_psq5_optimized SOURCE kernels/linear/test_gemm_psq5_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_quant_reference phaseshift_gpu)
-phaseshift_add_test(NAME test_gemm_bf16_wmma SOURCE kernels/optimized/test_gemm_bf16_wmma.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gemm_bf16_verify_exact SOURCE kernels/optimized/test_gemm_bf16_verify_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_argmax_f32_top2 SOURCE kernels/optimized/test_argmax_f32_top2.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_rmsnorm SOURCE kernels/optimized/test_rmsnorm.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_l2_normalize SOURCE kernels/optimized/test_l2_normalize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_output_gather SOURCE kernels/optimized/test_output_gather.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_kv_append SOURCE kernels/optimized/test_kv_append.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_kv_relocate SOURCE unit/test_kv_relocate.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_paged_attention SOURCE kernels/optimized/test_paged_attention.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_rope SOURCE kernels/optimized/test_rope.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_rope_yarn SOURCE kernels/optimized/test_rope_yarn.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_recurrence SOURCE kernels/optimized/test_gdn_recurrence.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_recurrence_decode1 SOURCE kernels/optimized/test_gdn_recurrence_decode1.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_recurrence_exact_history SOURCE kernels/optimized/test_gdn_recurrence_exact_history.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_compact_log_commit SOURCE kernels/optimized/test_gdn_compact_log_commit.hip LABELS "gpu1;optional" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_compact_commit_poc SOURCE unit/test_gdn_compact_commit_poc.hip LABELS "gpu1;optional" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu)
-phaseshift_add_test(NAME test_gdn_conv1d SOURCE kernels/optimized/test_gdn_conv1d.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_elementwise SOURCE kernels/optimized/test_elementwise.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_embedding SOURCE kernels/optimized/test_embedding.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_argmax SOURCE kernels/optimized/test_argmax.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen35_kernel_mode SOURCE unit/test_qwen35_kernel_mode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_gemm_bf16_correctness SOURCE kernels/linear/test_gemm_bf16_correctness.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
+shelf_add_test(NAME test_gemm_bf16_exact_rows SOURCE kernels/linear/test_gemm_bf16_exact_rows.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_activation_quantize_a8 SOURCE kernels/optimized/test_activation_quantize_a8.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_activation_quantize_e4m3 SOURCE kernels/optimized/test_activation_quantize_e4m3.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_activation_quantize_tp_split SOURCE kernels/optimized/test_activation_quantize_tp_split.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_gdn_post SOURCE kernels/optimized/test_fused_gdn_post.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_rmsnorm_quantize SOURCE kernels/optimized/test_fused_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_swiglu_quantize SOURCE kernels/optimized/test_fused_swiglu_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_resid_rmsnorm_quantize SOURCE kernels/optimized/test_fused_resid_rmsnorm_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_attn_post_quantize SOURCE kernels/optimized/test_fused_attn_post_quantize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_gdn_conv_silu SOURCE kernels/optimized/test_fused_gdn_conv_silu.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_fused_gdn_qk_prepare SOURCE kernels/optimized/test_fused_gdn_qk_prepare.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gemm_fp8_optimized SOURCE kernels/linear/test_gemm_fp8_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_gemm_psq5_optimized SOURCE kernels/linear/test_gemm_psq5_optimized.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_gemm_bf16_wmma SOURCE kernels/optimized/test_gemm_bf16_wmma.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gemm_bf16_verify_exact SOURCE kernels/optimized/test_gemm_bf16_verify_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_argmax_f32_top2 SOURCE kernels/optimized/test_argmax_f32_top2.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_rmsnorm SOURCE kernels/optimized/test_rmsnorm.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_l2_normalize SOURCE kernels/optimized/test_l2_normalize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_output_gather SOURCE kernels/optimized/test_output_gather.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_kv_append SOURCE kernels/optimized/test_kv_append.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_kv_relocate SOURCE unit/test_kv_relocate.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_paged_attention SOURCE kernels/optimized/test_paged_attention.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_rope SOURCE kernels/optimized/test_rope.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_rope_yarn SOURCE kernels/optimized/test_rope_yarn.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gdn_recurrence SOURCE kernels/optimized/test_gdn_recurrence.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gdn_recurrence_decode1 SOURCE kernels/optimized/test_gdn_recurrence_decode1.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gdn_recurrence_exact_history SOURCE kernels/optimized/test_gdn_recurrence_exact_history.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gdn_compact_log_commit SOURCE kernels/optimized/test_gdn_compact_log_commit.hip LABELS "gpu1;optional" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_gdn_compact_commit_poc SOURCE unit/test_gdn_compact_commit_poc.hip LABELS "gpu1;optional" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
+shelf_add_test(NAME test_gdn_conv1d SOURCE kernels/optimized/test_gdn_conv1d.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_elementwise SOURCE kernels/optimized/test_elementwise.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_embedding SOURCE kernels/optimized/test_embedding.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_argmax SOURCE kernels/optimized/test_argmax.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_qwen35_kernel_mode SOURCE unit/test_qwen35_kernel_mode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_kernel_mode PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_linear_selector SOURCE unit/test_qwen35_linear_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_linear_selector SOURCE unit/test_qwen35_linear_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_linear_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_rmsnorm_selector SOURCE unit/test_qwen35_rmsnorm_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_rmsnorm_selector SOURCE unit/test_qwen35_rmsnorm_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_rmsnorm_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_l2_normalize_selector SOURCE unit/test_qwen35_l2_normalize_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_l2_normalize_selector SOURCE unit/test_qwen35_l2_normalize_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_l2_normalize_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_kv_append_selector SOURCE unit/test_qwen35_kv_append_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_kv_append_selector SOURCE unit/test_qwen35_kv_append_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_kv_append_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_rope_selector SOURCE unit/test_qwen35_rope_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_rope_selector SOURCE unit/test_qwen35_rope_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_rope_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_rope_profile SOURCE unit/test_qwen35_rope_profile.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_paged_attention_selector SOURCE unit/test_qwen35_paged_attention_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_rope_profile SOURCE unit/test_qwen35_rope_profile.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_paged_attention_selector SOURCE unit/test_qwen35_paged_attention_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_paged_attention_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_paged_attention_split_reduce_exact SOURCE unit/test_paged_attention_split_reduce_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
-phaseshift_add_test(NAME test_qwen35_gdn_recurrence_selector SOURCE unit/test_qwen35_gdn_recurrence_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_paged_attention_split_reduce_exact SOURCE unit/test_paged_attention_split_reduce_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
+shelf_add_test(NAME test_qwen35_gdn_recurrence_selector SOURCE unit/test_qwen35_gdn_recurrence_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_gdn_recurrence_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_gdn_conv_selector SOURCE unit/test_qwen35_gdn_conv_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_gdn_conv_selector SOURCE unit/test_qwen35_gdn_conv_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_gdn_conv_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_elementwise_selector SOURCE unit/test_qwen35_elementwise_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_elementwise_selector SOURCE unit/test_qwen35_elementwise_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_elementwise_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_embedding_selector SOURCE unit/test_qwen35_embedding_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_embedding_selector SOURCE unit/test_qwen35_embedding_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_embedding_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_sampling_selector SOURCE unit/test_qwen35_sampling_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_sampling_selector SOURCE unit/test_qwen35_sampling_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_sampling_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_sampling_params SOURCE unit/test_qwen35_sampling_params.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_sampling_params SOURCE unit/test_qwen35_sampling_params.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_sampling_params PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampling_rng.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
-phaseshift_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_kernels_correctness phaseshift_qwen35_kernels_optimized phaseshift_gpu)
+shelf_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampling_rng.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 
 # Default required build unit. Required acceptance builds only this target.
 add_custom_target(
-    phaseshift-required-tests
+    shelf-required-tests
     DEPENDS
         test_safetensors_writer
         test_expert_slice_fixture
@@ -417,19 +417,19 @@ add_custom_target(
 )
 
 # ---------------------------------------------------------------------------
-# phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
+# shelf-compute decode backend contract (CPU-only: no GPU, no model).
 # --decode-backend must be decided before any model load: `host` alone is
 # accepted and every other value is rejected with an explicit error.
 # ---------------------------------------------------------------------------
 add_test(NAME test_compute_decode_backend_host
-         COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend host)
+         COMMAND $<TARGET_FILE:shelf-compute> --decode-backend host)
 set_tests_properties(test_compute_decode_backend_host PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "model-dir required"
                      FAIL_REGULAR_EXPRESSION "bad --decode-backend")
 
 add_test(NAME test_compute_decode_backend_reject_non_host
-         COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend gpu-mcu)
+         COMMAND $<TARGET_FILE:shelf-compute> --decode-backend gpu-mcu)
 set_tests_properties(test_compute_decode_backend_reject_non_host PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --decode-backend"
@@ -440,14 +440,14 @@ set_tests_properties(test_compute_decode_backend_reject_non_host PROPERTIES
 # GPU query / model load.
 # ---------------------------------------------------------------------------
 add_test(NAME test_compute_arena_gib_auto
-         COMMAND $<TARGET_FILE:phaseshift-compute> --arena-gib auto)
+         COMMAND $<TARGET_FILE:shelf-compute> --arena-gib auto)
 set_tests_properties(test_compute_arena_gib_auto PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "model-dir required"
                      FAIL_REGULAR_EXPRESSION "bad --arena-gib")
 
 add_test(NAME test_compute_arena_gib_reject_zero
-         COMMAND $<TARGET_FILE:phaseshift-compute> --arena-gib 0)
+         COMMAND $<TARGET_FILE:shelf-compute> --arena-gib 0)
 set_tests_properties(test_compute_arena_gib_reject_zero PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --arena-gib")
@@ -457,20 +457,20 @@ set_tests_properties(test_compute_arena_gib_reject_zero PROPERTIES
 # GPU query / model load.
 # ---------------------------------------------------------------------------
 add_test(NAME test_compute_rope_factor_accepts_modes
-         COMMAND $<TARGET_FILE:phaseshift-compute> --rope-factor 2)
+         COMMAND $<TARGET_FILE:shelf-compute> --rope-factor 2)
 set_tests_properties(test_compute_rope_factor_accepts_modes PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "model-dir required"
                      FAIL_REGULAR_EXPRESSION "bad --rope-factor")
 
 add_test(NAME test_compute_rope_factor_reject_three
-         COMMAND $<TARGET_FILE:phaseshift-compute> --rope-factor 3)
+         COMMAND $<TARGET_FILE:shelf-compute> --rope-factor 3)
 set_tests_properties(test_compute_rope_factor_reject_three PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --rope-factor")
 
 add_test(NAME test_compute_rope_factor_reject_yarn_word
-         COMMAND $<TARGET_FILE:phaseshift-compute> --rope-factor yarn)
+         COMMAND $<TARGET_FILE:shelf-compute> --rope-factor yarn)
 set_tests_properties(test_compute_rope_factor_reject_yarn_word PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --rope-factor")
@@ -481,21 +481,21 @@ set_tests_properties(test_compute_rope_factor_reject_yarn_word PROPERTIES
 # ---------------------------------------------------------------------------
 set(_ps_rope_fixture "${CMAKE_SOURCE_DIR}/tests/fixtures/rope_cap")
 add_test(NAME test_compute_rope_cap_native_over
-         COMMAND $<TARGET_FILE:phaseshift-compute>
+         COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_ps_rope_fixture}" --rope-factor 1 --max-seq-len 262145)
 set_tests_properties(test_compute_rope_cap_native_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 262144")
 
 add_test(NAME test_compute_rope_cap_2x_over
-         COMMAND $<TARGET_FILE:phaseshift-compute>
+         COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_ps_rope_fixture}" --rope-factor 2 --max-seq-len 524289)
 set_tests_properties(test_compute_rope_cap_2x_over PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "exceeds the rope factor limit 524288")
 
 add_test(NAME test_compute_rope_cap_4x_over
-         COMMAND $<TARGET_FILE:phaseshift-compute>
+         COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_ps_rope_fixture}" --rope-factor 4 --max-seq-len 1000001)
 set_tests_properties(test_compute_rope_cap_4x_over PROPERTIES
                      LABELS "cpu;required"
@@ -514,11 +514,11 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/quark/quark/__init__.py")
 endif()
 
 # ---------------------------------------------------------------------------
-# phaseshift-bench CLI help smoke (CPU-only: no GPU, no model).
+# shelf-bench CLI help smoke (CPU-only: no GPU, no model).
 # --help must exit 0 before any hipSetDevice / model load / file load.
 # ---------------------------------------------------------------------------
-if(PHASESHIFT_BUILD_BENCHMARKS)
-    add_test(NAME test_bench_help COMMAND $<TARGET_FILE:phaseshift-bench> --help)
+if(SHELF_BUILD_BENCHMARKS)
+    add_test(NAME test_bench_help COMMAND $<TARGET_FILE:shelf-bench> --help)
     set_tests_properties(test_bench_help PROPERTIES LABELS "cpu;required")
 
     foreach(_cmd
@@ -542,13 +542,13 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
             gpu-memory)
         string(REPLACE "-" "_" _bench_name ${_cmd})
         add_test(NAME test_bench_help_${_bench_name}
-                 COMMAND $<TARGET_FILE:phaseshift-bench> ${_cmd} --help)
+                 COMMAND $<TARGET_FILE:shelf-bench> ${_cmd} --help)
         set_tests_properties(test_bench_help_${_bench_name} PROPERTIES LABELS "cpu;required")
     endforeach()
 
     foreach(_bad wmma direct all)
         add_test(NAME test_bench_gemm_reject_${_bad}
-                 COMMAND $<TARGET_FILE:phaseshift-bench> gemm --variant ${_bad})
+                 COMMAND $<TARGET_FILE:shelf-bench> gemm --variant ${_bad})
         set_tests_properties(test_bench_gemm_reject_${_bad} PROPERTIES
                              LABELS "cpu;required" WILL_FAIL TRUE)
     endforeach()
@@ -564,35 +564,35 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
     set_tests_properties(test_cli_docs_sync_python PROPERTIES LABELS "cpu;optional")
 endif()
 
-if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
+if(SHELF_BUILD_OPTIONAL_TESTS)
     # -----------------------------------------------------------------------
     # optional: current regression / infrastructure acceptance（external model）
     # -----------------------------------------------------------------------
 
     # Resident model IPC acceptance: worker attaches the compact resident block
-    # owned by phaseshift-model-host and verifies weight bytes.
-    # Needs a running phaseshift-model-host (PHASESHIFT_MODEL_HOST_SOCKET)
+    # owned by shelf-model-host and verifies weight bytes.
+    # Needs a running shelf-model-host (SHELF_MODEL_HOST_SOCKET)
     # plus a real model dir.
-    phaseshift_add_test(NAME test_resident_model_ipc SOURCE unit/test_resident_model_ipc.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift-resident-fixture phaseshift_resident phaseshift_weights phaseshift_qwen35)
+    shelf_add_test(NAME test_resident_model_ipc SOURCE unit/test_resident_model_ipc.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf-resident-fixture shelf_resident shelf_weights shelf_qwen35)
 
     # Resident fault-injection worker: attaches, then sleeps until the session
     # runner kills its process group on deadline.
-    phaseshift_add_test(NAME test_resident_timeout_worker SOURCE unit/test_resident_timeout_worker.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift-resident-fixture phaseshift_resident phaseshift_weights phaseshift_qwen35)
+    shelf_add_test(NAME test_resident_timeout_worker SOURCE unit/test_resident_timeout_worker.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf-resident-fixture shelf_resident shelf_weights shelf_qwen35)
 
     # MTP weight contract against a real model directory.
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP (preferred) or PHASESHIFT_MODEL_DIR.
+    # Model dir via SHELF_MODEL_DIR_MTP (preferred) or SHELF_MODEL_DIR.
     # Skips (exit 77) when none is set.
-    phaseshift_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 OpenSSL::Crypto)
+    shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES shelf_weights shelf_qwen35 OpenSSL::Crypto)
 
     # DFlash2 drafter weight contract against a real model directory.
-    # Model dir via PHASESHIFT_MODEL_DIR_DFLASH2. Skips (exit 77) when unset.
-    phaseshift_add_test(NAME test_dflash2_weight_real SOURCE unit/test_dflash2_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35)
+    # Model dir via SHELF_MODEL_DIR_DFLASH2. Skips (exit 77) when unset.
+    shelf_add_test(NAME test_dflash2_weight_real SOURCE unit/test_dflash2_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES shelf_weights shelf_qwen35)
 
     # FP8 KV quality regression: BF16 KV vs FP8 KV on a fixed corpus
     # (perplexity / KL / top-1 / generation agreement / fixed end-task).
-    # Model dir via PHASESHIFT_MODEL_DIR. Skips (exit 77) when unset.
+    # Model dir via SHELF_MODEL_DIR. Skips (exit 77) when unset.
     add_test(NAME test_quality_fp8_kv
-             COMMAND $<TARGET_FILE:phaseshift-gpu-test-runner>
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
                  --gpu-count 1 --cost-gb 30 --timeout 3600
                  --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
                  -- python3 "${CMAKE_SOURCE_DIR}/tests/quality/run_quality_gate.py")
@@ -603,19 +603,19 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
 
     # DFlash2 batched target verify: 2 requests in one verify batch must match the
     # per-request single path exactly.
-    phaseshift_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 batched target verify throughput scaling (perf, not correctness).
-    phaseshift_add_test(NAME test_dflash2_batch_perf SOURCE unit/test_dflash2_batch_perf.hip LABELS "gpu1;perf;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_batch_perf SOURCE unit/test_dflash2_batch_perf.hip LABELS "gpu1;perf;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 mixed batch: decode region + verify region in one ScheduledBatch must
     # match the per-region single-class batches exactly.
-    phaseshift_add_test(NAME test_dflash2_mixed_batch SOURCE unit/test_dflash2_mixed_batch.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_mixed_batch SOURCE unit/test_dflash2_mixed_batch.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 target hidden taps: external tap == internal layer output.
-    # Target model dir via PHASESHIFT_MODEL_DIR_DFLASH2_TARGET (skips when unset);
-    # tap layer ids come from PHASESHIFT_MODEL_DIR_DFLASH2 when available.
-    phaseshift_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    # Target model dir via SHELF_MODEL_DIR_DFLASH2_TARGET (skips when unset);
+    # tap layer ids come from SHELF_MODEL_DIR_DFLASH2 when available.
+    shelf_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
     target_include_directories(test_dflash2_target_taps PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: real hidden probe (num_output_rows large).
@@ -626,7 +626,7 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
 
 
 
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR.
+    # Model dir via SHELF_MODEL_DIR_MTP or SHELF_MODEL_DIR.
 
 
 endif()

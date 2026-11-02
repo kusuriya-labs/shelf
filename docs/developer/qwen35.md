@@ -5,14 +5,14 @@ Qwen3.5 の推論を実際に走らせる、ホスト側ランタイムから GP
 
 コード:
 
-- `src/phaseshift/models/qwen35/runtime/executor.hip`
-- `src/phaseshift/inference/execution/program_executor.hip`
-- `src/phaseshift/inference/execution/optimized_dispatch.hip`
-- `src/phaseshift/kernels/correctness/model_dispatch_correctness.hip`
-- `src/phaseshift/models/qwen35/model/lower_to_primitives.cpp`
-- `src/phaseshift/runtime/program/program.cpp`
-- `include/phaseshift/runtime/program/program.h`
-- `include/phaseshift/runtime/program/kernel_id.h`
+- `src/shelf/models/qwen35/runtime/executor.hip`
+- `src/shelf/inference/execution/program_executor.hip`
+- `src/shelf/inference/execution/optimized_dispatch.hip`
+- `src/shelf/kernels/correctness/model_dispatch_correctness.hip`
+- `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
+- `src/shelf/runtime/program/program.cpp`
+- `include/shelf/runtime/program/program.h`
+- `include/shelf/runtime/program/kernel_id.h`
 
 ---
 
@@ -23,7 +23,7 @@ Qwen3.5 の推論を実際に走らせる、ホスト側ランタイムから GP
 - **Correctness** : 1 dispatch ごとに単一カーネル `model_dispatch_kernel` を1回 launch し、デバイス内で `host_execute_binding` の switch によって op 分岐する。実装は `correctness/detail/*.inc` に分割し、単一 TU に include する。
 - **Optimized(Auto)** : 各 dispatch を op ごとの専用 launcher で実行する。単体 launcher は 1 dispatch を消費する。
 
-モードは環境変数 `PHASESHIFT_QWEN35_KERNEL_MODE` で決まる。
+モードは環境変数 `SHELF_QWEN35_KERNEL_MODE` で決まる。
 
 - 未設定 / `auto` → `Auto`（optimized 優位、失敗時は correctness にフォールバック）
 - `correctness` → 常に correctness
@@ -40,7 +40,7 @@ submit_batch
        ├─ KV・GDN reservation (reserve → commit/rollback/poison)
        ├─ DeviceBatchContext build + upload
        ├─ row bucket 解決 + program resolve
-       ├─ (PHASESHIFT_HIP_GRAPH) graph capture/launch
+       ├─ (SHELF_HIP_GRAPH) graph capture/launch
        └─ launch_host_backend
             └─ execute_program      (program_executor.hip)
                  ├─ [Auto] try_launch_optimized   (optimized_dispatch.hip)
@@ -131,7 +131,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 
 ### 2.5 Static YaRN（`EffectiveRopeProfile`）
 
-`--rope-factor auto | 1 | 2 | 4` は `EffectiveRopeProfile`（`include/phaseshift/models/qwen35/model/rope_profile.h`）に解決され、`ExecutorConfig.rope_profile` → `Qwen35LowerOptions.rope_profile` → `RoPENode` → `DispatchBinding.scalar_a`（attention factor）として実行経路に伝わる。解決は起動時に 1 回だけ行い、以後不変とする。
+`--rope-factor auto | 1 | 2 | 4` は `EffectiveRopeProfile`（`include/shelf/models/qwen35/model/rope_profile.h`）に解決され、`ExecutorConfig.rope_profile` → `Qwen35LowerOptions.rope_profile` → `RoPENode` → `DispatchBinding.scalar_a`（attention factor）として実行経路に伝わる。解決は起動時に 1 回だけ行い、以後不変とする。
 
 - 解決の入力は `<model_dir>/config.json` の `text_config.rope_parameters` と CLI。`rope_type` は `default` / `yarn` のみ受理し、それ以外は起動失敗する。
 - `auto` は checkpoint の `rope_type` に従う（`yarn` なら config の factor、`default` なら Native）。CLI の `1 | 2 | 4` は checkpoint の指定より優先する。
@@ -143,7 +143,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 
 解決結果の同一性は経路ごとに次の契約で保証する。
 
-- **local load / resident load**: profile は compute プロセスが `<model_dir>/config.json` から独立に解決する（Resident archive には rope メタデータを追加しない）。`phaseshift-launcher`（model-host 経由）と local load で同じ `ROPE profile:` 行と同一の生成結果になることを確認済み。
+- **local load / resident load**: profile は compute プロセスが `<model_dir>/config.json` から独立に解決する（Resident archive には rope メタデータを追加しない）。`shelf-launcher`（model-host 経由）と local load で同じ `ROPE profile:` 行と同一の生成結果になることを確認済み。
 - **TP**: 1 プロセスで単一の profile を解決し、`TpCoordinatorConfig` → `TpRankRuntimeConfig` → `ExecutorConfig` へ複製する。したがって rank 間で profile がずれる経路は存在しない。TP の KV 予算チェックは rank 単位で行い、不足時は `tp rank arena is too small` で起動を拒否する。
 - **KV 容量計画**: `--rope-factor` は `required_pages` / `kv_page_bytes` に寄与しない。KV 容量は `--max-seq-len` と `--kv-cache-capacity-tokens` のみで決まる。
 - **PrefixCache**: キーはトークン列のみで rope 識別子を含まないが、factor はプロセス起動時に固定され、キャッシュはプロセスローカルであるため、異なる factor 間で KV を流用する経路は存在しない。prefix の保存は prefill 位置が `page_tokens` の倍数のときに限られ、復元は保存済み prefix より長いプロンプトに限る。
@@ -235,7 +235,7 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 7. `program_set.resolve(bucket)` で Program を取得
 8. `BatchExecutionOutput`（output_hidden / logits / sampled_tokens の slice）
 9. `hipEventCreateWithFlags`（`hipEventDisableTiming`）で done イベント確保
-10. `PHASESHIFT_HIP_GRAPH` 有効時、`graph_cache` がある bucket に対しては capture / launch を試行
+10. `SHELF_HIP_GRAPH` 有効時、`graph_cache` がある bucket に対しては capture / launch を試行
     - 既存 graph があるなら `hipGraphLaunch`
     - 無いなら `hipStreamBeginCapture` → `enqueue_batch` → `hipStreamEndCapture` → `hipGraphInstantiate` → `hipGraphLaunch`
     - 失敗時は `graph_failed = true` にして fallback
@@ -269,8 +269,8 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 1. `error_word` を `hipMemsetAsync` で 0 に初期化
 2. `read_kernel_mode()` でモード取得
 3. `for i in 0..program.dispatches.size()`:
-   - `OpDumpTimer`（`PHASESHIFT_OP_DUMP` 有効時）
-   - `semantic_timing_start`（`PHASESHIFT_OP_SYNC` 有効時）
+   - `OpDumpTimer`（`SHELF_OP_DUMP` 有効時）
+   - `semantic_timing_start`（`SHELF_OP_SYNC` 有効時）
    - **Auto モード**（単体 launcher を試す）:
      - `try_launch_optimized(program, i, ctx, stream)`
      - `Launched` / `Skipped` なら `consumed_dispatches` を検証し、`i += consumed` でループ継続
@@ -289,7 +289,7 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 
 1. `batch_context` / `scratch` / `error_word` の存在確認
 2. `staging_section_offsets(nval)` で staging 内の offset を取得
-3. **staging pool 経路**（`PHASESHIFT_HIP_GRAPH` 有効時、staging pool が device にアップロード済み）:
+3. **staging pool 経路**（`SHELF_HIP_GRAPH` 有効時、staging pool が device にアップロード済み）:
    - `ctx.staging_pool->slot(bidx, bindx)` で slot を取得
    - `uploaded[slot] == 0` なら `fill_staging_image` で host staging に書き、`hipMemcpyAsync` で device に up、`hipStreamSynchronize`、`uploaded[slot] = 1`
    - `stream_capturing` 中は pool upload を禁止
@@ -415,7 +415,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 | 25 | `LINEAR_FP8` |
 | 27 | `VERIFY_ACCEPT` |
 
-カウントの正本は `KernelId::COUNT`（`include/phaseshift/runtime/program/kernel_id.h`）である。
+カウントの正本は `KernelId::COUNT`（`include/shelf/runtime/program/kernel_id.h`）である。
 
 ---
 
@@ -433,10 +433,10 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 
 Tensor Parallel の rank-local weight と execution は
 [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照
-（plan builder は `include/phaseshift/models/qwen35/weights/tensor_parallel_plan.h`）。
+（plan builder は `include/shelf/models/qwen35/weights/tensor_parallel_plan.h`）。
 
 weight の load 時 logical TP partition（`WeightLoadOptions.partition_plan`）は
-model 層の plan builder（`include/phaseshift/models/qwen35/weights/tensor_parallel_plan.h`）
+model 層の plan builder（`include/shelf/models/qwen35/weights/tensor_parallel_plan.h`）
 が生成し、generic weights layer が
 `global canonical → partition → preshuffle` の順で適用する。
 現行 single-GPU lowering は global geometry を前提とするため、
@@ -450,7 +450,7 @@ Qwen35 の top-level load path は partition plan を
 
 ### 初期化 / バッチ
 
-- `src/phaseshift/models/qwen35/runtime/executor.hip`
+- `src/shelf/models/qwen35/runtime/executor.hip`
   - `create_model_executor`
   - `submit_co_batch`
   - `complete_batch`
@@ -458,7 +458,7 @@ Qwen35 の top-level load path は partition plan を
 
 ### 実行
 
-- `src/phaseshift/inference/execution/program_executor.hip`
+- `src/shelf/inference/execution/program_executor.hip`
   - `execute_program`
   - `launch_host_binding`
   - `fill_staging_image`
@@ -467,7 +467,7 @@ Qwen35 の top-level load path は partition plan を
 
 ### Optimized
 
-- `src/phaseshift/inference/execution/optimized_dispatch.hip`
+- `src/shelf/inference/execution/optimized_dispatch.hip`
   - `try_launch_optimized`
   - `try_launch_embedding` / `try_launch_sampling` / `try_launch_activation_quantize_a8`
   - `try_launch_linear_fp8` / `try_launch_linear_bf16`
@@ -478,26 +478,26 @@ Qwen35 の top-level load path は partition plan を
 
 ### Correctness
 
-- `src/phaseshift/kernels/correctness/model_dispatch_correctness.hip`
+- `src/shelf/kernels/correctness/model_dispatch_correctness.hip`
   - `model_dispatch_kernel`（唯一の `__global__`）
   - `host_execute_binding`（デバイス switch）
   - `launch_model_dispatch_correctness`
-- `src/phaseshift/kernels/correctness/detail/`
+- `src/shelf/kernels/correctness/detail/`
   - `dispatch_env.h`（`ModelDispatchEnv` / `ResolvedValue` / 共通 helper）
   - `elementwise.inc` / `normalization.inc` / `linear.inc` / `attention.inc` /
     `gdn.inc` / `embedding.inc` / `output.inc`（実装 family 単位の fragment）
-- `src/phaseshift/kernels/correctness/standalone/`
+- `src/shelf/kernels/correctness/standalone/`
   - kernel 単体テスト用の参照実装
 
 ### Lowering / Program
 
-- `src/phaseshift/models/qwen35/model/lower_to_primitives.cpp`
+- `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
   - `lower_qwen35_to_primitives`
-- `include/phaseshift/models/common/qwen_hybrid/`（Qwen-family 共通 builder）
+- `include/shelf/models/common/qwen_hybrid/`（Qwen-family 共通 builder）
   - `geometry_check.h` / `gdn_geometry.h` / `attention_geometry.h`
   - `emitter.h` / `gdn_lowering.h`（`emit_gdn`） /
     `attention_lowering.h`（`emit_gated_attention`）
-- `src/phaseshift/runtime/program/program.cpp`
+- `src/shelf/runtime/program/program.cpp`
   - `build_program`
   - `build_program_set`
   - `emit_node`
@@ -505,21 +505,21 @@ Qwen35 の top-level load path は partition plan を
 
 ### 定義
 
-- `include/phaseshift/runtime/program/program.h`
+- `include/shelf/runtime/program/program.h`
   - `Program` / `ProgramSet` / `DispatchBinding` / `WeightSlot`
-- `include/phaseshift/runtime/program/kernel_id.h`
+- `include/shelf/runtime/program/kernel_id.h`
   - `KernelId` enum
 
 ### Selector
 
-- `include/phaseshift/inference/execution/selectors/elementwise_selector.h`
-- `include/phaseshift/inference/execution/selectors/embedding_selector.h`
-- `include/phaseshift/inference/execution/selectors/gdn_conv_selector.h`
-- `include/phaseshift/inference/execution/selectors/gdn_recurrence_selector.h`
-- `include/phaseshift/inference/execution/selectors/kv_append_selector.h`
-- `include/phaseshift/inference/execution/selectors/l2_normalize_selector.h`
-- `include/phaseshift/inference/execution/selectors/linear_selector.h`
-- `include/phaseshift/inference/execution/selectors/paged_attention_selector.h`
-- `include/phaseshift/inference/execution/selectors/rmsnorm_selector.h`
-- `include/phaseshift/inference/execution/selectors/rope_selector.h`
-- `include/phaseshift/inference/execution/selectors/sampling_selector.h`
+- `include/shelf/inference/execution/selectors/elementwise_selector.h`
+- `include/shelf/inference/execution/selectors/embedding_selector.h`
+- `include/shelf/inference/execution/selectors/gdn_conv_selector.h`
+- `include/shelf/inference/execution/selectors/gdn_recurrence_selector.h`
+- `include/shelf/inference/execution/selectors/kv_append_selector.h`
+- `include/shelf/inference/execution/selectors/l2_normalize_selector.h`
+- `include/shelf/inference/execution/selectors/linear_selector.h`
+- `include/shelf/inference/execution/selectors/paged_attention_selector.h`
+- `include/shelf/inference/execution/selectors/rmsnorm_selector.h`
+- `include/shelf/inference/execution/selectors/rope_selector.h`
+- `include/shelf/inference/execution/selectors/sampling_selector.h`

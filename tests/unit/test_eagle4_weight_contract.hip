@@ -1,8 +1,8 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -171,7 +171,7 @@ int main() {
         std::printf("FAIL hipStreamCreate\n");
         return 1;
     }
-    const char* real_dir = std::getenv("PHASESHIFT_EAGLE4_MODEL_DIR");
+    const char* real_dir = std::getenv("SHELF_EAGLE4_MODEL_DIR");
     const bool check_real = real_dir != nullptr && real_dir[0] != '\0';
     auto arena_result = ps::gpu::GpuArena::create(
         0, check_real ? 12ull * 1024ull * 1024ull * 1024ull : 256ull * 1024ull * 1024ull);

@@ -1,13 +1,13 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
-#include <phaseshift/models/qwen35/runtime/tensor_parallel.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/quantization/manifest/crc32.h>
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
-#include <phaseshift/inference/execution/program_executor.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/quantization/manifest/crc32.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/inference/execution/program_executor.h>
 
 #include <hip/hip_runtime.h>
 

@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
 
 #include <cstdio>
 #include <filesystem>

@@ -1,8 +1,8 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/attention.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/qwen35/kernels/dflash2/attention.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

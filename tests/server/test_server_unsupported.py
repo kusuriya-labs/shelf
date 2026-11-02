@@ -83,7 +83,7 @@ def main() -> int:
             url = f"{server.base_url}/chat/completions"
 
             for label, extra, param in REJECTED:
-                payload = {"model": "phaseshift", "messages": MESSAGES,
+                payload = {"model": "shelf", "messages": MESSAGES,
                            "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False}}
                 payload.update(extra)
                 status, body = http_post_status(url, payload)
@@ -98,39 +98,39 @@ def main() -> int:
                                   repr(error))
 
             status, body = http_post_status(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False}, "max_completion_tokens": 16})
             checker.check("conflicting-max-tokens-400", status == 400,
                           f"status={status} body={body[:300]}")
 
             status, body = http_post_status(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 0, "chat_template_kwargs": {"enable_thinking": False}})
             checker.check("zero-max-tokens-400", status == 400,
                           f"status={status} body={body[:300]}")
 
             status, body = http_post_status(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False}, "n": 2})
             checker.check("n-gt-one-400", status == 400,
                           f"status={status} body={body[:300]}")
 
             status, body = http_post_status(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False},
                 "stream_options": "yes"})
             checker.check("stream-options-not-object-400", status == 400,
                           f"status={status} body={body[:300]}")
 
             status, body = http_post_status(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False},
                 "stream_options": {"include_usage": "yes"}})
             checker.check("stream-options-bad-flag-400", status == 400,
                           f"status={status} body={body[:300]}")
 
             result = http_json(url, {
-                "model": "phaseshift", "messages": MESSAGES,
+                "model": "shelf", "messages": MESSAGES,
                 "temperature": 0, "max_tokens": 8, "chat_template_kwargs": {"enable_thinking": False},
                 "tools": [PLAIN_TOOL], "tool_choice": "auto"})
             checker.check("accepted-baseline", result["choices"][0]["finish_reason"]

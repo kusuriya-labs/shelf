@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""phaseshift-compute --serve-stdio と DFlash2 speculative decoding の結合検証.
+"""shelf-compute --serve-stdio と DFlash2 speculative decoding の結合検証.
 
 serve 経路で DFlash2 が動作すること、target-only greedy と完全一致すること、
 通常の stochastic sampling が成立すること、および constraint 相当の
@@ -20,7 +20,7 @@ from support import (Checker, ComputeHarness, compute_binary,  # noqa: E402
                      model_dir, prompt_ids)
 
 PROMPT = [248041, 77091]
-DFLASH2_MODEL_DIR = os.environ.get("PHASESHIFT_DFLASH2_MODEL_DIR")
+DFLASH2_MODEL_DIR = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
 MAX_NEW_TOKENS = 64
 PREFIX_PROMPT_TOKENS = 64
 PREFIX_SEED_TOKENS = 16
@@ -275,7 +275,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     if not DFLASH2_MODEL_DIR:
-        print("SKIP: PHASESHIFT_DFLASH2_MODEL_DIR is not set")
+        print("SKIP: SHELF_DFLASH2_MODEL_DIR is not set")
         raise SystemExit(77)
     if not model_dir().is_dir():
         print(f"SKIP: model dir not found: {model_dir()}")

@@ -45,7 +45,7 @@ def main() -> int:
         with ServerHarness() as server:
             # Warm up (loads the model once).
             warm = http_json(f"{server.base_url}/chat/completions", {
-                "model": "phaseshift",
+                "model": "shelf",
                 "messages": [{"role": "user", "content": "Hello"}],
                 "temperature": 0, "max_tokens": 8,
                  "chat_template_kwargs": {"enable_thinking": False}})
@@ -55,14 +55,14 @@ def main() -> int:
             # Chat Completions streaming disconnect.
             first = open_stream_and_disconnect(
                 server.port, "/v1/chat/completions", {
-                    "model": "phaseshift", "messages": [LONG_MESSAGE],
+                    "model": "shelf", "messages": [LONG_MESSAGE],
                     "stream": True, "temperature": 0, "max_tokens": STREAM_BUDGET,
                     "chat_template_kwargs": {"enable_thinking": False}})
             checker.check("chat-disconnect-started", "data:" in first, repr(first[:120]))
 
             started = time.monotonic()
             recovered = http_json(f"{server.base_url}/chat/completions", {
-                "model": "phaseshift",
+                "model": "shelf",
                 "messages": [{"role": "user", "content": "Hello"}],
                 "temperature": 0, "max_tokens": 16,
                  "chat_template_kwargs": {"enable_thinking": False}})
@@ -77,7 +77,7 @@ def main() -> int:
             # Responses API must stay absent; a disconnect test there is meaningless.
             status, body = http_post_status(
                 f"http://127.0.0.1:{server.port}/v1/responses",
-                {"model": "phaseshift", "input": "hello"})
+                {"model": "shelf", "input": "hello"})
             checker.check("responses-unsupported", status == 404, f"{status} {body[:200]}")
 
             checker.check("compute-pid-stable", compute_pids() == pids_before,

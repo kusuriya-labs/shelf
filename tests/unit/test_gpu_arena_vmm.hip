@@ -1,4 +1,4 @@
-#include <phaseshift/core/memory/arena.h>
+#include <shelf/core/memory/arena.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -41,7 +41,7 @@ ps::gpu::DeviceAllocationView must_alloc(ps::gpu::GpuArena& arena, std::size_t b
 int main() {
     printf("=== GpuArena VMM Tests ===\n");
 
-    setenv("PHASESHIFT_ARENA_VMM", "1", 1);
+    setenv("SHELF_ARENA_VMM", "1", 1);
 
     int device_count = 0;
     HIP_ASSERT(hipGetDeviceCount(&device_count));

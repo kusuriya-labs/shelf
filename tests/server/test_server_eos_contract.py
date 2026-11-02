@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate 8R: generation stop token (EOS) contract.
 
-Confirms that PhaseShift uses every token listed by the model
+Confirms that Shelf uses every token listed by the model
 ``generation_config.eos_token_id`` (for Qwen3.5/3.8: ``<|im_end|>`` and
 ``<|endoftext|>``), so an assistant turn terminates on ``<|im_end|>``.
 """

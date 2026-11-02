@@ -1,9 +1,9 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/kernels/optimized/linear/bf16.h>
-#include <phaseshift/inference/execution/selectors/linear_selector.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/kernels/optimized/linear/bf16.h>
+#include <shelf/inference/execution/selectors/linear_selector.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

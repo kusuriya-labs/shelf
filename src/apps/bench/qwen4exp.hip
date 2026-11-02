@@ -1,20 +1,20 @@
-#include <phaseshift/inference/state/gdn_state_pool.h>
-#include <phaseshift/inference/state/paged_kv_pool.h>
-#include <phaseshift/inference/state/paged_sequence_state.h>
-#include <phaseshift/inference/state/sequence_slot_pool.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/models/qwen4exp/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_config.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_weights.h>
-#include <phaseshift/models/qwen4exp/ple/ple_forward.h>
-#include <phaseshift/models/qwen4exp/ple/ple_row_gather.h>
-#include <phaseshift/models/qwen4exp/runtime/qwen4exp_state.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/execution/row_bucket.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/inference/state/gdn_state_pool.h>
+#include <shelf/inference/state/paged_kv_pool.h>
+#include <shelf/inference/state/paged_sequence_state.h>
+#include <shelf/inference/state/sequence_slot_pool.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/runtime/batch/device_batch_context.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_weights.h>
+#include <shelf/models/qwen4exp/ple/ple_forward.h>
+#include <shelf/models/qwen4exp/ple/ple_row_gather.h>
+#include <shelf/models/qwen4exp/runtime/qwen4exp_state.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <hip/hip_runtime.h>
 
@@ -143,7 +143,7 @@ struct Options {
 };
 
 void usage() {
-    std::printf("usage: phaseshift-bench qwen4exp [options]\n");
+    std::printf("usage: shelf-bench qwen4exp [options]\n");
     std::printf("  --model-dir PATH       model directory (required)\n");
     std::printf("  --device N             device index (default 0)\n");
     std::printf("  --arena-gib N          arena capacity in GiB (default 30)\n");
@@ -372,7 +372,7 @@ bool dispatch_plan(const rt::Program& plan, const rt::DeviceProgramView& view,
                    const ::ps::kernel::ModelDispatchStateView& state_view, void* scratch,
                    void* err, hipStream_t stream, const char* tag) {
     for (std::size_t di = 0; di < plan.dispatches.size(); ++di) {
-        if (std::getenv("PHASESHIFT_Q4E_TRACE") != nullptr) {
+        if (std::getenv("SHELF_Q4E_TRACE") != nullptr) {
             std::printf("    %s dispatch %zu %s\n", tag, di,
                         rt::kernel_to_name(plan.dispatches[di].kernel_id));
         }
@@ -537,7 +537,7 @@ int run_qwen4exp_stage(const Options& opts, const q4e::Qwen4ExpTextConfig& cfg,
                        const std::vector<std::int32_t>* tokens_in,
                        std::int32_t* sampled_out) {
     const int device =
-        std::getenv("PHASESHIFT_Q4E_SINGLE_DEVICE") != nullptr
+        std::getenv("SHELF_Q4E_SINGLE_DEVICE") != nullptr
             ? opts.device
             : (opts.pp == 1u ? opts.device
                              : static_cast<int>(stage_begin /
@@ -1156,7 +1156,7 @@ int run_qwen4exp(int argc, char** argv) {
                 static_cast<std::uint32_t>(cfg.vocab_size));
 
     const std::uint32_t per_stage = total / opts.pp;
-    const bool single = std::getenv("PHASESHIFT_Q4E_SINGLE_DEVICE") != nullptr;
+    const bool single = std::getenv("SHELF_Q4E_SINGLE_DEVICE") != nullptr;
     const auto stage_device = [&](std::uint32_t begin) {
         if (single || opts.pp == 1u) return opts.device;
         return static_cast<int>(begin / (total / opts.pp));

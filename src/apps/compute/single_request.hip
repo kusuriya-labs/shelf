@@ -2,21 +2,21 @@
 
 #include "compute_common.h"
 
-#include <phaseshift/core/gpu/scoped_device.h>
-#include <phaseshift/models/qwen35/dflash2/context_state.h>
-#include <phaseshift/models/qwen35/dflash2/executor.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
+#include <shelf/core/gpu/scoped_device.h>
+#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/models/qwen35/dflash2/executor.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
 #include "private_target_weights.h"
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/context_state.h>
-#include <phaseshift/models/qwen35/eagle4/executor.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_session_pool.h>
-#include <phaseshift/models/qwen35/runtime/runtime_request.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/context_state.h>
+#include <shelf/models/qwen35/eagle4/executor.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
+#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -217,7 +217,7 @@ struct LogitsDumper {
 };
 
 void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
-    const char* h = std::getenv("PHASESHIFT_DEBUG_HIDDEN");
+    const char* h = std::getenv("SHELF_DEBUG_HIDDEN");
     if (h == nullptr || h[0] == '\0') return;
     for (int t = 0; t < 2; ++t) {
         const auto& ten = (t == 0) ? executor.output_hidden : executor.token_hidden;
@@ -246,7 +246,7 @@ void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
         }
         fprintf(stderr, "HIDDENDBG %s t=%d rows=%zu cols=%zu max=%.6e nonzero=%zu\n",
                 tag, t, rows, cols, mx, nz);
-        const char* dbg_file = std::getenv("PHASESHIFT_DEBUG_HIDDEN_FILE");
+        const char* dbg_file = std::getenv("SHELF_DEBUG_HIDDEN_FILE");
         if (dbg_file != nullptr && dbg_file[0] != '\0') {
             char path[512];
             std::snprintf(path, sizeof(path), "%s/%s_t%d.bin", dbg_file, tag, t);
@@ -267,7 +267,7 @@ void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
 void dump_tap_hidden(ps::qwen35::Executor& executor, const char* tag, std::size_t rows) {
     const uint32_t taps = executor.config.target_hidden_tap_count;
     if (taps == 0) return;
-    const char* dbg_file = std::getenv("PHASESHIFT_DEBUG_HIDDEN_FILE");
+    const char* dbg_file = std::getenv("SHELF_DEBUG_HIDDEN_FILE");
     for (uint32_t t = 0; t < taps; ++t) {
         const auto& ten = executor.dflash_target_hidden[t];
         const std::size_t layer = executor.config.target_hidden_taps[t];
@@ -321,7 +321,7 @@ int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
     auto& executor = runtime.executor();
     auto& kv_pool = runtime.kv_pool();
     print_model_geometry(runtime.model());
-    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+    if (std::getenv("SHELF_MEM_DEBUG") != nullptr) {
         dump_mem_debug(runtime);
     }
 
@@ -396,7 +396,7 @@ int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
             }
             if (!dumper.step(executor)) return 1;
         }
-        if (std::getenv("PHASESHIFT_DEBUG_HIDDEN") != nullptr ||
+        if (std::getenv("SHELF_DEBUG_HIDDEN") != nullptr ||
             executor.config.target_hidden_tap_count > 0) {
             herr = hipStreamSynchronize(runtime.stream());
             if (herr != hipSuccess) {
@@ -500,7 +500,7 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         }
     }
     print_model_geometry(model);
-    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+    if (std::getenv("SHELF_MEM_DEBUG") != nullptr) {
         dump_mem_debug(runtime);
     }
 
@@ -781,7 +781,7 @@ int run_eagle4_shot(ps::app::Qwen35ComputeRuntime& runtime,
         return 1;
     }
     print_model_geometry(model);
-    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+    if (std::getenv("SHELF_MEM_DEBUG") != nullptr) {
         dump_mem_debug(runtime);
     }
 

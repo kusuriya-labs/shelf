@@ -1,5 +1,5 @@
 {
-  "format": "phaseshift-qwen35-4b-e2e-oracle-v1",
+  "format": "shelf-qwen35-4b-e2e-oracle-v1",
   "model": {
     "name": "Qwen3.5-4B",
     "geometry": {

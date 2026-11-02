@@ -1,5 +1,5 @@
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/common/qwen_hybrid/moe_math.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/common/qwen_hybrid/moe_math.h>
 
 #include <cmath>
 #include <cstdint>
@@ -130,10 +130,10 @@ bool read_bin(const std::string& dir, const std::string& name, void* dst,
 }
 
 std::string find_dir() {
-#ifdef PHASESHIFT_MOE_ORACLE_DIR
+#ifdef SHELF_MOE_ORACLE_DIR
     {
-        std::ifstream f(std::string(PHASESHIFT_MOE_ORACLE_DIR) + "/MANIFEST.txt");
-        if (f.good()) return PHASESHIFT_MOE_ORACLE_DIR;
+        std::ifstream f(std::string(SHELF_MOE_ORACLE_DIR) + "/MANIFEST.txt");
+        if (f.good()) return SHELF_MOE_ORACLE_DIR;
     }
 #endif
     const char* cands[] = {
@@ -180,7 +180,7 @@ void gen_router(float* wr) {
 int main() {
     const std::string dir = find_dir();
     if (dir.empty()) {
-        std::printf("FAIL: oracle fixture dir not found (set PHASESHIFT_MOE_ORACLE_DIR)\n");
+        std::printf("FAIL: oracle fixture dir not found (set SHELF_MOE_ORACLE_DIR)\n");
         return 1;
     }
 

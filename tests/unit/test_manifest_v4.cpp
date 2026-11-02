@@ -1,5 +1,5 @@
-#include <phaseshift/quantization/manifest/manifest_v4.h>
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/manifest/manifest_v4.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
 #include <cstdio>
 #include <string>
 
@@ -31,9 +31,9 @@ QuantizedTensorMetadata make_quantized(QuantizedEncoding enc, int64_t n, int64_t
     t.logical_shape = {n, k};
     t.k_padded = static_cast<uint64_t>(k);
     const std::string name = std::string("w_") + std::to_string(static_cast<int>(enc));
-    t.codes = QuantizedTensorRef{name + ".__phaseshift_codes", "U8", "0x11111111"};
+    t.codes = QuantizedTensorRef{name + ".__shelf_codes", "U8", "0x11111111"};
     t.metadata1 = QuantizedTensorRef{
-        name + ".__phaseshift_metadata1",
+        name + ".__shelf_metadata1",
         enc == QuantizedEncoding::Fp8 ? "F32" : "U8",
         "0x22222222"};
     return t;
@@ -75,13 +75,13 @@ int run() {
     const QuantizedTensorMetadata& fp8 = m2.tensors.at("w_fp8");
     check(fp8.encoding == QuantizedEncoding::Fp8, "roundtrip fp8 encoding");
     check(fp8.k_padded == 256, "roundtrip fp8 k_padded");
-    check(fp8.codes->tensor == "w_5.__phaseshift_codes", "roundtrip fp8 codes name");
+    check(fp8.codes->tensor == "w_5.__shelf_codes", "roundtrip fp8 codes name");
     check(fp8.codes->dtype == "U8", "roundtrip fp8 codes dtype tag");
     check(fp8.metadata1->dtype == "F32", "roundtrip fp8 scale dtype tag");
     check(fp8.layout == "fp8_e4m3_row_major_block128_v1", "roundtrip fp8 canonical layout");
 
     const char* v3_json = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 3,
   "architecture": "qwen35_dense",
   "tensors": {
@@ -91,8 +91,8 @@ int run() {
       "layout": "fp8_e4m3_row_major_block128_v1",
       "logical_shape": [256, 256],
       "k_padded": 256,
-      "codes": {"tensor": "w.__phaseshift_codes", "dtype": "U8", "crc32": "0x00000000"},
-      "metadata1": {"tensor": "w.__phaseshift_metadata1", "dtype": "F32", "crc32": "0x00000000"}
+      "codes": {"tensor": "w.__shelf_codes", "dtype": "U8", "crc32": "0x00000000"},
+      "metadata1": {"tensor": "w.__shelf_metadata1", "dtype": "F32", "crc32": "0x00000000"}
     }
   }
 })";
@@ -104,13 +104,13 @@ int run() {
               "v3 encoding names still resolve");
     }
 
-    const char* v2_json = R"({"format": "phaseshift-fpx-safetensors", "format_version": 2, "tensors": {}})";
+    const char* v2_json = R"({"format": "shelf-fpx-safetensors", "format_version": 2, "tensors": {}})";
     check(!parse_quantized_manifest(v2_json).ok(), "rejects version 2");
-    const char* v5_json = R"({"format": "phaseshift-fpx-safetensors", "format_version": 5, "tensors": {}})";
+    const char* v5_json = R"({"format": "shelf-fpx-safetensors", "format_version": 5, "tensors": {}})";
     check(!parse_quantized_manifest(v5_json).ok(), "rejects version 5");
 
     const char* bad_block = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 4,
   "tensors": {
     "w": {
@@ -122,8 +122,8 @@ int run() {
       },
       "layout": {"layout_id": "fp8_e4m3_row_major_block128_v1", "storage_order": "row_major", "physical_shape": [256, 256], "k_padded": 256},
       "payloads": [
-        {"role": "codes", "tensor": "w.__phaseshift_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
-        {"role": "scale", "tensor": "w.__phaseshift_scale", "dtype": "F32", "shape": [2, 4], "crc32": "0x00000000"}
+        {"role": "codes", "tensor": "w.__shelf_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
+        {"role": "scale", "tensor": "w.__shelf_scale", "dtype": "F32", "shape": [2, 4], "crc32": "0x00000000"}
       ]
     }
   }
@@ -138,7 +138,7 @@ int run() {
     }
 
     const char* invalid_block = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 4,
   "tensors": {
     "w": {
@@ -150,8 +150,8 @@ int run() {
       },
       "layout": {"layout_id": "fp8_e4m3_row_major_block128_v1", "storage_order": "row_major", "physical_shape": [256, 256], "k_padded": 256},
       "payloads": [
-        {"role": "codes", "tensor": "w.__phaseshift_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
-        {"role": "scale", "tensor": "w.__phaseshift_scale", "dtype": "F32", "shape": [2, 16], "crc32": "0x00000000"}
+        {"role": "codes", "tensor": "w.__shelf_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
+        {"role": "scale", "tensor": "w.__shelf_scale", "dtype": "F32", "shape": [2, 16], "crc32": "0x00000000"}
       ]
     }
   }
@@ -160,7 +160,7 @@ int run() {
           "v4 rejects a scale block below 32");
 
     const char* missing_scale = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 4,
   "tensors": {
     "w": {
@@ -169,7 +169,7 @@ int run() {
       "quant": {"encoding": "fp8_e4m3", "scale": {"granularity": "matrix_block", "block_shape": {"n": 128, "k": 128}, "dtype": "F32", "application": "multiply"}},
       "layout": {"layout_id": "fp8_e4m3_row_major_block128_v1", "storage_order": "row_major", "physical_shape": [256, 256], "k_padded": 256},
       "payloads": [
-        {"role": "codes", "tensor": "w.__phaseshift_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"}
+        {"role": "codes", "tensor": "w.__shelf_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"}
       ]
     }
   }
@@ -177,7 +177,7 @@ int run() {
     check(!parse_quantized_manifest(missing_scale).ok(), "v4 rejects missing scale payload");
 
     const char* bad_scale_dtype = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 4,
   "tensors": {
     "w": {
@@ -186,8 +186,8 @@ int run() {
       "quant": {"encoding": "fp8_e4m3", "scale": {"granularity": "matrix_block", "block_shape": {"n": 128, "k": 128}, "dtype": "BF16", "application": "multiply"}},
       "layout": {"layout_id": "fp8_e4m3_row_major_block128_v1", "storage_order": "row_major", "physical_shape": [256, 256], "k_padded": 256},
       "payloads": [
-        {"role": "codes", "tensor": "w.__phaseshift_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
-        {"role": "scale", "tensor": "w.__phaseshift_scale", "dtype": "BF16", "shape": [2, 2], "crc32": "0x00000000"}
+        {"role": "codes", "tensor": "w.__shelf_codes", "dtype": "U8", "shape": [256, 256], "crc32": "0x00000000"},
+        {"role": "scale", "tensor": "w.__shelf_scale", "dtype": "BF16", "shape": [2, 2], "crc32": "0x00000000"}
       ]
     }
   }
@@ -195,7 +195,7 @@ int run() {
     check(!parse_quantized_manifest(bad_scale_dtype).ok(), "v4 rejects fp8 scale dtype mismatch");
 
     const char* kv_domain = R"({
-  "format": "phaseshift-fpx-safetensors",
+  "format": "shelf-fpx-safetensors",
   "format_version": 4,
   "tensors": {
     "w": {

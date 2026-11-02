@@ -47,7 +47,7 @@ def message_of(result: dict) -> dict:
 def check_default_thinking(checker, server, processor, token_log):
     result = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": QUESTION}],
          "temperature": 0, "max_completion_tokens": 768})
     choice = result["choices"][0]
@@ -90,7 +90,7 @@ def check_default_thinking(checker, server, processor, token_log):
 def check_disable_thinking(checker, server):
     result = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": QUESTION}],
          "temperature": 0, "max_completion_tokens": 256,
          "chat_template_kwargs": {"enable_thinking": False}})
@@ -106,7 +106,7 @@ def check_disable_thinking(checker, server):
 def check_budget_exhausted_in_thinking(checker, server):
     result = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": QUESTION}],
          "temperature": 0, "max_completion_tokens": 16})
     choice = result["choices"][0]
@@ -123,7 +123,7 @@ def check_budget_exhausted_in_thinking(checker, server):
 def check_reasoning_history(checker, server):
     first = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [{"role": "user", "content": QUESTION}],
          "temperature": 0, "max_completion_tokens": 768})
     first_message = message_of(first)
@@ -132,7 +132,7 @@ def check_reasoning_history(checker, server):
 
     second = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [
              {"role": "user", "content": QUESTION},
              {"role": "assistant", "reasoning_content": reasoning,
@@ -153,7 +153,7 @@ def check_reasoning_history(checker, server):
 
     dropped = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": [
              {"role": "user", "content": QUESTION},
              {"role": "assistant", "reasoning_content": reasoning,
@@ -173,7 +173,7 @@ def check_openai_client(checker, server):
 
         client = OpenAI(base_url=server.base_url, api_key="unused")
         completion = client.chat.completions.create(
-            model="phaseshift",
+            model="shelf",
             messages=[{"role": "user", "content": QUESTION}],
             temperature=0,
             max_completion_tokens=768,
@@ -214,7 +214,7 @@ def main() -> int:
     try:
         processor = load_processor()
         with ServerHarness(max_seq_len=1024,
-                           env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
+                           env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:
             check_meta(checker, server)
             check_default_thinking(checker, server, processor, token_log)
             check_disable_thinking(checker, server)

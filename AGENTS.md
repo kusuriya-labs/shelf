@@ -73,7 +73,7 @@
 
 # サポート対象モデル
 
-コード上の runtime family は Qwen3.5 系（`src/phaseshift/models/qwen35/`）である。
+コード上の runtime family は Qwen3.5 系（`src/shelf/models/qwen35/`）である。
 これを基盤として、現在の主要 performance target は `models/Qwen3.8-27B-FP8`
 （HF fp8）と Qwen3.8-27B の BF16 で、
 speculative decode の drafter は DFlash2 を使う。
@@ -308,5 +308,5 @@ AMD RDNA4 GPU上での高速推論。
 - ドキュメントは日本語で書く
 - コードにはコメントを書かない
 - 編集前に既存ファイルを読む
-- entrypointは `phaseshift-compute` / `phaseshift-launcher` / `phaseshift-server` / `phaseshift-bench` の4つのみ（cmake/apps.cmake）
-- publicヘッダのincludeは必ず `phaseshift/` プレフィックスを使う。相対includeや `src/...` パスは使用しない。
+- entrypointは `shelf-compute` / `shelf-launcher` / `shelf-server` / `shelf-bench` の4つのみ（cmake/apps.cmake）
+- publicヘッダのincludeは必ず `shelf/` プレフィックスを使う。相対includeや `src/...` パスは使用しない。

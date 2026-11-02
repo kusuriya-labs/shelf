@@ -1,11 +1,11 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/graph/primitive_node.h>
-#include <phaseshift/weights/matrix_weight.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/graph/primitive_node.h>
+#include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

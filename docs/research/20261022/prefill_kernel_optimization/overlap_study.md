@@ -102,7 +102,7 @@ rank0 gap 分解（peer 待ち 15.1 + 両者アイドル 37.6）と整合。
 - **1 カーネルの PUSH モデル**: 各 rank が自値を peer の IPC scratch へ書き込み、
   **ブロック毎の flag ハンドシェイク**（release 書込み + spin acquire、system scope）を
   経て、自値＋peer の scratch を同じカーネル内で reduce → out。
-  → PhaseShift の「copy + イベント + add（2 dispatch）」に対し参照は **1 dispatch + device 内 spin**。
+  → Shelf の「copy + イベント + add（2 dispatch）」に対し参照は **1 dispatch + device 内 spin**。
 - scratch は **fine-grained（uncached、system スコープ公開で L2 writeback 不要、
   `s_wait_storecnt` drain）＋ seq&1 の二重バッファ**、seq はデバイス側 per-block カウンタ
  （graph / SPMD 安全）。multi-block で PCIe（push）と HBM（reduce）をそれぞれ飽和させる設計。

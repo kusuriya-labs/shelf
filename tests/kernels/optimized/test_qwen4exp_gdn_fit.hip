@@ -1,10 +1,10 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/kernels/optimized/elementwise.h>
-#include <phaseshift/kernels/optimized/gdn/conv1d.h>
-#include <phaseshift/kernels/optimized/gdn/fused_gdn_qk_prepare.h>
-#include <phaseshift/kernels/optimized/gdn/recurrence.h>
-#include <phaseshift/runtime/batch/device_batch_context.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/optimized/gdn/conv1d.h>
+#include <shelf/kernels/optimized/gdn/fused_gdn_qk_prepare.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/runtime/batch/device_batch_context.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

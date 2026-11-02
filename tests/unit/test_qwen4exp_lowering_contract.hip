@@ -1,13 +1,13 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/inference/execution/selectors/paged_attention_selector.h>
-#include <phaseshift/models/qwen4exp/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_config.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_weights.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/graph/primitive_node.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/weights/matrix_weight.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/inference/execution/selectors/paged_attention_selector.h>
+#include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_weights.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/graph/primitive_node.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

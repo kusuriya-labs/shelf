@@ -1,8 +1,8 @@
 #pragma once
 
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
 
 #include <cstddef>
 #include <cstdint>

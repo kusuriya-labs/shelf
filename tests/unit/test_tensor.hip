@@ -1,7 +1,7 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/device_allocation_view.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/device_allocation_view.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/core/memory/types.h>
 #include <cstdio>
 #include <vector>
 #include <limits>

@@ -1,6 +1,6 @@
 # Current performance baseline
 
-この文書は PhaseShift の最新の qualified performance baseline を記録する。
+この文書は Shelf の最新の qualified performance baseline を記録する。
 ここに載る値は下記 measurement revision での計測結果であり、それ以後に追加された
 未計測の変更に対する性能を保証しない。
 
@@ -19,7 +19,7 @@
 
 ## HF FP8 E2E Prefill（TP2 / pp2048、2026-10-22 再計測）
 
-`phaseshift-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 2048
+`shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 2048
 --tp 2 --device 2,3 --arena-gib 16 --warmup 1 --runs 5` の `wall_ms_median`。
 GPU2/3 ペア（計測時 GPU0 に第三者プロセス稼働のため回避）、外部プロセス非影響を
 KFD 監視で確認。model revision `017b9c7a`、measurement revision = R&D 記録の
@@ -31,7 +31,7 @@ prefill-cta-swizzle 最終コミット、build Release / gfx1201、HIP graph 既
 | 2 | 538.31 | 3805.7 |
 | **中央値** | **538.67** | **3803** |
 
-run 間のばらつきは 0.13%。アンカー計測（`phaseshift-compute --tp 2 … max-new-tokens 1`）:
+run 間のばらつきは 0.13%。アンカー計測（`shelf-compute --tp 2 … max-new-tokens 1`）:
 `PREFILL_MS=548.8`、`GENERATED_IDS=47410`（既存トークン gate と一致）。
 同条件の A/B シリーズ（GPU0/1 ペア）では 545〜551ms 帯（GPU 個体差 ±2%）。
 この断面は C2-b 幾何・G3 scale fold・G4/G5/G7/G10 棄却・G6 ping-pong・G8 4行同時・
@@ -41,7 +41,7 @@ G9 CTA swizzle（G=4）採用後の状態（swiglu+quantize 融合は別分岐�
 ## HF FP8 decode（TP=1 / TP=2、2026-10-23 再計測）
 
 `models/Qwen3.8-27B-FP8` の single-request greedy decode。
-`phaseshift-compute` の `DECODE_TOKENS_PER_SEC`（生成128 token / decode 区間）、
+`shelf-compute` の `DECODE_TOKENS_PER_SEC`（生成128 token / decode 区間）、
 5 run 中央値。prompt は 1697 token（計測用 id 列）。
 
 TP=2 は GPU2/3 ペア + resident model host 2 台（target のみを保持、
@@ -87,12 +87,12 @@ OOM するため、TP=1 は非投機のみである。
 
 ```sh
 # TP=1 非投機
-./build/phaseshift-compute --model-dir models/Qwen3.8-27B-FP8 \
+./build/shelf-compute --model-dir models/Qwen3.8-27B-FP8 \
   --input-ids-file build/tp2-bench-prompt-1920.txt --max-new-tokens 128 \
   --max-seq-len 2048 --arena-gib auto --device 0 --prefix-cache 0 --temperature 0
 
 # TP=2（非投機 / +DFlash2 / +EAGLE-4 は drafter option のみが異なる）
-./build/phaseshift-compute --model-dir models/Qwen3.8-27B-FP8 \
+./build/shelf-compute --model-dir models/Qwen3.8-27B-FP8 \
   --model-host "0=/tmp/g1.sock,1=/tmp/g2.sock" \
   --input-ids-file build/tp2-bench-prompt-1920.txt --max-new-tokens 128 \
   --max-seq-len 2048 --arena-gib auto --device 2,3 --tp 2 --prefix-cache 0 --temperature 0 \
@@ -103,9 +103,9 @@ OOM するため、TP=1 は非投機のみである。
 resident model host は次のように起動する（target のみ warmup）。
 
 ```sh
-./build/phaseshift-model-host --device 2 --socket /tmp/g1.sock \
+./build/shelf-model-host --device 2 --socket /tmp/g1.sock \
   --warmup-qwen35 models/Qwen3.8-27B-FP8 --warmup-tp-size 2 --warmup-tp-rank 0
-./build/phaseshift-model-host --device 3 --socket /tmp/g2.sock \
+./build/shelf-model-host --device 3 --socket /tmp/g2.sock \
   --warmup-qwen35 models/Qwen3.8-27B-FP8 --warmup-tp-size 2 --warmup-tp-rank 1
 ```
 
@@ -115,19 +115,19 @@ resident model host は次のように起動する（target のみ warmup）。
 | --- | --- |
 | model | `models/Qwen3.8-27B-Quark-AWQ-MXFP4`（計測当時の main performance target、HF 直接ロード。現在は非対応） |
 | draft model | `models/Qwen3.8-27B-DFlash2` |
-| model dir | `/opt/zen/work/PhaseShift/models`（worktree 配下には `models/` が無いため、計測時は絶対パスで指定する） |
+| model dir | `/opt/zen/work/shelf/models`（worktree 配下には `models/` が無いため、計測時は絶対パスで指定する） |
 | GPU | AMD Radeon AI PRO R9700 (gfx1201) / ROCm / HIP / Linux |
 | measurement revision | commit `cc718024` |
 | date | 2026-10-17 |
 | build | Release / gfx1201 / benchmarks ON / optional tests OFF |
 | build directory | `build` |
-| HIP graph | OFF（`PHASESHIFT_HIP_GRAPH` 既定） |
+| HIP graph | OFF（`SHELF_HIP_GRAPH` 既定） |
 | arena | bench 24 GiB / compute 26 GiB |
 | page-tokens | 16 |
-| keep-alive | 有効（executor 既定。`PHASESHIFT_KEEPALIVE=0` で無効化） |
+| keep-alive | 有効（executor 既定。`SHELF_KEEPALIVE=0` で無効化） |
 | device | 1 |
 
-build condition で変わるのは `PHASESHIFT_HIP_GRAPH` の ON/OFF のみである。
+build condition で変わるのは `SHELF_HIP_GRAPH` の ON/OFF のみである。
 Fusion / DeepFusion は一時的に build option が撤去されている。
 本 baseline は既定値である HIP graph OFF で計測する。
 
@@ -175,16 +175,16 @@ GPU-MCU backend はこの branch に含まれない。計測値・正しさ契�
 
 ## TP=2 decode（`test_qwen35_tp_e2e`）
 
-TP は `phaseshift-compute --tp 2 --device 0,1` から利用できる（単一 request と
+TP は `shelf-compute --tp 2 --device 0,1` から利用できる（単一 request と
 `--serve-stdio`）。
-`phaseshift-bench` は pp / quality のみ `--tp` を露出し、`phaseshift-server` の CLI は
+`shelf-bench` は pp / quality のみ `--tp` を露出し、`shelf-server` の CLI は
 露出しない（[../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md) §10）。
 下表の計測口は `build/tests/test_qwen35_tp_e2e` である。compute 経由
 （HF FP8）の TP2 性能は上記「HF FP8 decode」節を参照。
 
 この表は上記「計測断面」の measurement revision とは異なる revision の値である。
 
-`PHASESHIFT_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ` を設定して 5 回走らせ、
+`SHELF_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ` を設定して 5 回走らせ、
 decode の p50 を採る（PSQ model は現在の runtime では非対応）。
 
 | 指標 | TP=1 | TP=2 |
@@ -214,8 +214,8 @@ TP2 の 5 run は 370.305 / 370.703 / 370.994 ms と 378.825 / 379.765 ms の
 | page_tokens | 16 |
 | arena | TP=1 24 GiB、TP=2 は rank あたり 20 GiB |
 | device | TP=1 HIP 0、TP=2 HIP 0+1 |
-| transport | `PHASESHIFT_TP_TRANSPORT` 未設定（report の `transport=hip-p2p`） |
-| HIP graph | OFF（`PHASESHIFT_HIP_GRAPH`） |
+| transport | `SHELF_TP_TRANSPORT` 未設定（report の `transport=hip-p2p`） |
+| HIP graph | OFF（`SHELF_HIP_GRAPH`） |
 | value_trace | decode 区間は無効（prefill 直後に解除） |
 
 ### 指標の定義
@@ -244,7 +244,7 @@ TP2 の 5 run は 370.305 / 370.703 / 370.994 ms と 378.825 / 379.765 ms の
 ### 計測コマンド
 
 ```sh
-PHASESHIFT_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ ./build/tests/test_qwen35_tp_e2e
+SHELF_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ ./build/tests/test_qwen35_tp_e2e
 ```
 
 既存の Gate 記録（`rnd/quantization/tp2_resource_regime.md`
@@ -357,7 +357,7 @@ n=4 で wall −8.7%、tok/s +9.5%、draft GPU −18.6%、draft share 30.4% → 
 | K / context / new tokens | 7 / 64 / 128 |
 | arena | 30 GiB |
 | device | 0 |
-| HIP graph | OFF（`PHASESHIFT_HIP_GRAPH` 既定） |
+| HIP graph | OFF（`SHELF_HIP_GRAPH` 既定） |
 | reps | 3（中央値） |
 
 ## BetterBench によるカテゴリ別比較（参照実装 vllm-mxfp4 の一カード）
@@ -405,7 +405,7 @@ reasoning 59.7-66.7、prose 42.7-46.2、summarization 80.8、chat 97.4）で、
   修正前（134.8 / 116.4 / 134.4 ms）から **−38..−44%**。参照 eager の conc-1 TTFT p50
   93.8 ms より速い。decode t/s は同一（code 110.9→113.3、prose 46.2→42.9、
   reasoning は CV 35% の run 間ばらつき内）。
-- **prefill スループット**（`phaseshift-bench pp --mode forward`、prompt は 8192 行ずつ
+- **prefill スループット**（`shelf-bench pp --mode forward`、prompt は 8192 行ずつ
   chunk、**KV bf16**）: 2k 2973 / 4k 2908 / 8k 2753 / 16k 2452 / 32k 2006 / 64k 1472 PP t/s。
   参照は 2k 2738 / 8k 2721 / 16k 2795 / 32k 2666 / 64k 2494（fp8 KV）。
   **2-8k は同等以上、16k 以降で差が開く**。
@@ -452,7 +452,7 @@ reasoning 59.7-66.7、prose 42.7-46.2、summarization 80.8、chat 97.4）で、
 - **chunk サイズの効果**（64k prompt、同一 binary）: chunk 2048 = 1457 / 4096 = 1465 /
   8192 = 1472 PP t/s。**chunk を倍にしても +0.4-0.6%** で、64k のコストは chunk 数ではなく
   attention 側（O(n²) と leg）が支配している。参照の CHUNK も 8192 である。
-- 診断は `PHASESHIFT_DFLASH2_SERVE_STATS=1` の `DFLASH2_STAGE`
+- 診断は `SHELF_DFLASH2_SERVE_STATS=1` の `DFLASH2_STAGE`
   （round / draft_gpu / verify_gpu / …）と `DFLASH2_POSITION=`（256 トークン刻みの
   位置バケット: rounds / 受理 / round_ms）で取る。
 
@@ -467,7 +467,7 @@ fp8 WMMA（e4m3）へ置き換えた。以降の fp8 KV の生成結果は、そ
 - ゲート: `test_paged_attention` の `fp8 PREFILL` ケース（同一の量子化 KV に対する
   attention 出力）。判定は行単位の相対 L2 と非有限値の有無で行う
   （[../developer/testing.md](../developer/testing.md) の「fp8 paged attention の単体テスト判定」）。
-- 品質ゲート: `tools/quality_gate.py` と `phaseshift-bench quality` が、`vendor/BetterBench/corpus/v1`
+- 品質ゲート: `tools/quality_gate.py` と `shelf-bench quality` が、`vendor/BetterBench/corpus/v1`
   を chat template で token 化した corpus 上で BF16 KV と FP8 KV の perplexity / mean KL /
   top-1 一致率 / 生成 token 一致率 / 固定 end-task（reasoning + GSM8K）を測る
   （[../developer/testing.md](../developer/testing.md) の「quality regression」）。
@@ -493,23 +493,23 @@ fp8 WMMA（e4m3）へ置き換えた。以降の fp8 KV の生成結果は、そ
   [../research/20261023/fp8_kv_prefill_quality_audit.md](../research/20261023/fp8_kv_prefill_quality_audit.md)
   を参照する。
 - したがって **2026-10-19 以前に fp8 KV で取った生成品質・生成 ID の記録は、
-  現在の build の数値とは別物**として扱う。bf16 KV（`phaseshift-bench tg` の既定）は
+  現在の build の数値とは別物**として扱う。bf16 KV（`shelf-bench tg` の既定）は
   影響を受けない。
 
 ## 正しさ契約
 
 速度の数値は生成結果が一致している rep からのみ採用する。
 
-- `phaseshift-bench tg` — `GREEDY_TOKEN_SUM=2818069` が全 rep で一致する。
+- `shelf-bench tg` — `GREEDY_TOKEN_SUM=2818069` が全 rep で一致する。
   これは計測当時の fold 経由の系列であり、prompt ≥ 512 トークンでは fold 以前の
   ビルドと一致しないことがある（fold の経緯は
   `rnd/quantization/kernel_optimization_history.md` §7.95。一致した数値経路が要る場合は
-  `PHASESHIFT_QWEN35_KERNEL_MODE=correctness`）。
-- `phaseshift-compute`（DFlash2）— `GENERATED_IDS` の sha1 先頭 12 桁
+  `SHELF_QWEN35_KERNEL_MODE=correctness`）。
+- `shelf-compute`（DFlash2）— `GENERATED_IDS` の sha1 先頭 12 桁
   `87dd2adfa49f`、`DFLASH2_ROUNDS=46`、`DFLASH2_ACCEPTED_DRAFTS=209` が全 rep で一致。
   この sha は prompt `[760]`（"The" の1トークン）での軌道である
   （「DFlash2 speculative decode」節の計測条件の注記を参照）。
-- `phaseshift-bench pp` — `--mode forward` のため生成結果を持たない。
+- `shelf-bench pp` — `--mode forward` のため生成結果を持たない。
 - `test_qwen35_tp_e2e` — TP 節の measurement revision での値。現行 revision では未計測。
 
 `GENERATED_IDS` の sha1 は `GENERATED_IDS=` 行の値部分（行末改行を含む）に対する
@@ -528,18 +528,18 @@ grep '^GENERATED_IDS=' <output> | sed 's/^GENERATED_IDS=//' | sha1sum
 
 ```sh
 # pp2048
-./build/phaseshift-bench pp --model-dir /opt/zen/work/PhaseShift/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
+./build/shelf-bench pp --model-dir /opt/zen/work/shelf/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
   --prompt-tokens 2048 --mode forward --page-tokens 16 --arena-gib 24 \
   --runs 3 --warmup 1 --device 1
 
 # tg128
-./build/phaseshift-bench tg --model-dir /opt/zen/work/PhaseShift/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
+./build/shelf-bench tg --model-dir /opt/zen/work/shelf/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
   --mode greedy --context 2048 --tokens 128 --prefill-chunk 2048 --compute-logits 1 \
   --page-tokens 16 --arena-gib 24 --warmup 2 --device 1
 
 # DFlash2 prose K7 256（prompt は当時に生成済みのものを使う）
-./build/phaseshift-compute --model-dir /opt/zen/work/PhaseShift/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
-  --dflash2-model-dir /opt/zen/work/PhaseShift/models/Qwen3.8-27B-DFlash2 \
+./build/shelf-compute --model-dir /opt/zen/work/shelf/models/Qwen3.8-27B-Quark-AWQ-MXFP4 \
+  --dflash2-model-dir /opt/zen/work/shelf/models/Qwen3.8-27B-DFlash2 \
   --dflash2-drafts 7 --input-ids-file build/dflash2-gate51/real/real_prose/prompt.txt \
   --max-new-tokens 256 --max-seq-len 4096 --arena-gib 26 --temperature 0 \
   --dflash2-stats 1 --device 1
@@ -550,7 +550,7 @@ grep '^GENERATED_IDS=' <output> | sed 's/^GENERATED_IDS=//' | sha1sum
 Git history を参照）の `--mode prompts` で生成したものである。
 **カンマ区切り**の token id 列である（当時の `tests/rnd/dflash2`（削除済み）の
 `read_prompt` と同じ）。
-`phaseshift-compute` direct mode の `read_input_ids` はカンマ区切りを読めない
+`shelf-compute` direct mode の `read_input_ids` はカンマ区切りを読めない
 （上記「DFlash2 speculative decode」節の注記を参照）。
 exporter の既定の `--language-dir models/Qwen3.8-27B` はホストに存在しないため、
 当時は tokenizer を持つ model dir を指定した（計測当時の MXFP4 dir。

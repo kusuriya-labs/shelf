@@ -1,7 +1,7 @@
-# phaseshift-launcher
+# shelf-launcher
 
-resident model host の起動と child(`phaseshift-compute` / `phaseshift-server` /
-`phaseshift-bench`)の起動を統括する process supervisor。Python実装で、GPU演算は
+resident model host の起動と child(`shelf-compute` / `shelf-server` /
+`shelf-bench`)の起動を統括する process supervisor。Python実装で、GPU演算は
 行わない。
 
 launcher は model host を tensor parallel rank ごとに起動し、すべての host が
@@ -32,7 +32,7 @@ child の argument に書くとエラーになる。
 | `--host-timeout-s HOST_TIMEOUT_S` | host ready timeout in seconds (default 600) |
 | `--socket-dir SOCKET_DIR` | directory for the host sockets (default /tmp) |
 | `--log-dir LOG_DIR` | directory for the host logs (default /tmp) |
-| `--host-bin HOST_BIN` | phaseshift-model-host path |
+| `--host-bin HOST_BIN` | shelf-model-host path |
 | `--allow-any-dir` | let the hosts acquire models outside --model-dir |
 <!-- /cli:launcher -->
 
@@ -41,7 +41,7 @@ child の argument に書くとエラーになる。
 compute(single-shot):
 
 ```bash
-./build/phaseshift-launcher compute \
+./build/shelf-launcher compute \
   --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 2,3 \
   --input-ids-file build/prompt.ids --max-new-tokens 128
 ```
@@ -49,7 +49,7 @@ compute(single-shot):
 speculative decode を有効にするには、drafter を child に透過する。
 
 ```bash
-./build/phaseshift-launcher compute \
+./build/shelf-launcher compute \
   --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 2,3 \
   --dflash2-model-dir models/Qwen3.8-27B-DFlash2 \
   --input-ids-file build/prompt.ids --max-new-tokens 128
@@ -58,17 +58,17 @@ speculative decode を有効にするには、drafter を child に透過する�
 serve(OpenAI互換API):
 
 ```bash
-./build/phaseshift-launcher server \
+./build/shelf-launcher server \
   --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 2,3 --port 8123
 ```
 
-serve 経由の chat は `phaseshift-server` の OpenAI互換APIを使う。
+serve 経由の chat は `shelf-server` の OpenAI互換APIを使う。
 [server.md](server.md) を参照。
 
 bench:
 
 ```bash
-./build/phaseshift-launcher bench pp \
+./build/shelf-launcher bench pp \
   --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 2,3 \
   --prompt-tokens 2048 --runs 3
 ```
@@ -81,7 +81,7 @@ bench:
 
 host は launcher の子プロセスとして起動され、child の終了とともに shutdown する。
 host の stderr は `--log-dir`(既定 `/tmp`)の
-`phaseshift-launcher-host-<pid>-<rank>.log` に出力される。ready 待ちが失敗した
+`shelf-launcher-host-<pid>-<rank>.log` に出力される。ready 待ちが失敗した
 場合はこのファイルを確認する。
 
 socket は `--socket-dir`(既定 `/tmp`)の `rank<N>.sock` に配置される。再実行時は

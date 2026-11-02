@@ -1,7 +1,7 @@
-#include <phaseshift/kernels/optimized/kv_append.h>
-#include <phaseshift/kernels/kv_types.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/kv_append.h>
+#include <shelf/kernels/kv_types.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>

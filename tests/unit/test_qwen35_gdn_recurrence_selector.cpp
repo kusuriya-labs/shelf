@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "phaseshift/inference/execution/selectors/gdn_recurrence_selector.h"
+#include "shelf/inference/execution/selectors/gdn_recurrence_selector.h"
 
 using ps::execution::GdnRecurrenceImplementation;
 using ps::execution::GdnRecurrenceSelectorInput;

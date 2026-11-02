@@ -81,8 +81,8 @@ vllm-mxfp4（`references/vllm_mxfp4.md`） と対になる計測器）を OpenAI
 ```sh
 pip install -e vendor/BetterBench
 # server を起動（DFlash2 を有効化、KV fp8）
-./build/phaseshift-server --model-dir models/Qwen3.8-27B-FP8 \
-    --model Qwen3.8-27B-FP8 --port 8123 --compute ./build/phaseshift-compute \
+./build/shelf-server --model-dir models/Qwen3.8-27B-FP8 \
+    --model Qwen3.8-27B-FP8 --port 8123 --compute ./build/shelf-compute \
     --max-seq-len 8192 --arena-gib 30 --device 1 --kv-cache-dtype fp8 \
     --max-concurrent-requests 8 \
     --dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7
@@ -96,7 +96,7 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
   prefix cache は cold。
 - 参照側の表（`references/vllm_mxfp4.md`）と比較するときは harness の版
   （`betterbench --version`）と corpus 版、`--max-seq-len`、pass 数を併記する。
-- **update 粒度の差**: こちらは `phaseshift-compute` がトークン 1 個ごとに SSE を出すため
+- **update 粒度の差**: こちらは `shelf-compute` がトークン 1 個ごとに SSE を出すため
   BetterBench は "one token per update" と判定し、update gap の代わりに ITL を報告する。
   `tok/update` は比較に使えない。**decode t/s・TTFT・prefill は粒度に依らず比較できる**。
 - **リクエスト数の上限**: per-request state は起動時に `max_concurrent_requests` 分
@@ -105,11 +105,11 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
   `--max-seq-len 65536` でもカテゴリをまたいで連続計測できる。
   KV 容量は arena 予算から導出される（§5.4）。カテゴリ毎の server 再起動は
   依然として行うが、理由は process 間で状態を持ち越さないためである。
-- **DFlash2 の内訳診断**: `PHASESHIFT_DFLASH2_SERVE_STATS=1` で server 終了時に
+- **DFlash2 の内訳診断**: `SHELF_DFLASH2_SERVE_STATS=1` で server 終了時に
   `DFLASH2_STAGE`（1 round 平均の round / draft_gpu / verify_gpu / …）、
   `DFLASH2_POSITION=`（256 トークン刻みの位置バケット: rounds / 受理 / round_ms）、
   `DFLASH2_VERIFY_ROWS_PER_ROUND` が出る。カテゴリ別 decode t/s の差が
   「受理（tok/round）」と「round 時間」のどちらで説明できるかをこれで切り分ける。
-  `PHASESHIFT_BATCH_TRACE=1` は step ごとの `arena_used` を出し、
+  `SHELF_BATCH_TRACE=1` は step ごとの `arena_used` を出し、
   per-request の増加がないこと（資源規律の回帰）を確認する。
 

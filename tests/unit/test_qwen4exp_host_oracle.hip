@@ -1,9 +1,9 @@
-#include <phaseshift/models/qwen4exp/model/qwen4exp_config.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_weights.h>
-#include <phaseshift/quantization/bundle/psq5_manifest.h>
-#include <phaseshift/quantization/bundle/quantized_model_reader.h>
-#include <phaseshift/quantization/psq5/psq5.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_weights.h>
+#include <shelf/quantization/bundle/psq5_manifest.h>
+#include <shelf/quantization/bundle/quantized_model_reader.h>
+#include <shelf/quantization/psq5/psq5.h>
+#include <shelf/weights/weight_loader.h>
 
 #include <cmath>
 #include <cstdio>

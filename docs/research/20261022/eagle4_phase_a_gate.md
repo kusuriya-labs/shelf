@@ -26,7 +26,7 @@ draft 自前 lm_head と同居できないため）、比較対象は vanilla �
 
 **測定構成**（`docs/perf/methodology.md` 準拠）:
 
-- `phaseshift-compute --model-dir models/Qwen3.8-27B-FP8
+- `shelf-compute --model-dir models/Qwen3.8-27B-FP8
   --eagle4-model-dir models/Qwen3.8-27B-EAGLE4 --eagle4-drafts 7
   --eagle4-lm-head draft --device 1 --tp 2 --prefix-cache 0 --max-seq-len 256`、greedy。
 - GPU1/2（隔離。GPU4 の他 workload と非共有）、warmup 2 run 後に baseline/candidate を

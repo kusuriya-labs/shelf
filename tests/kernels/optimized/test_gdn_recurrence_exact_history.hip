@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/optimized/gdn/recurrence.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <cstdint>
@@ -282,8 +282,8 @@ bool run_case(const Shapes& sh, uint32_t rows, uint32_t capture_rows, hipStream_
 
 int main() {
     std::printf("=== GDN recurrence exact serial history capture ===\n");
-    unsetenv("PHASESHIFT_GDN_RECURRENCE_LOSSY");
-    setenv("PHASESHIFT_GDN_RECURRENCE_EXACT", "1", 1);
+    unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
+    setenv("SHELF_GDN_RECURRENCE_EXACT", "1", 1);
 
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {

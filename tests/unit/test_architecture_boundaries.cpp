@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#ifndef PHASESHIFT_SOURCE_ROOT
-#error "PHASESHIFT_SOURCE_ROOT must be defined"
+#ifndef SHELF_SOURCE_ROOT
+#error "SHELF_SOURCE_ROOT must be defined"
 #endif
 
 namespace fs = std::filesystem;
@@ -77,10 +77,10 @@ void check_correctness_location(const fs::path& root) {
         fs::path allowed;
     };
     const std::vector<RootPair> roots = {
-        {root / "src/phaseshift/models/qwen35",
-         root / "src/phaseshift/kernels/correctness"},
-        {root / "include/phaseshift/models/qwen35",
-         root / "include/phaseshift/kernels/correctness"},
+        {root / "src/shelf/models/qwen35",
+         root / "src/shelf/kernels/correctness"},
+        {root / "include/shelf/models/qwen35",
+         root / "include/shelf/kernels/correctness"},
     };
     for (const auto& rp : roots) {
         for (const auto& file : scan(rp.search)) {
@@ -98,7 +98,7 @@ void check_correctness_location(const fs::path& root) {
 }
 
 void check_correctness_layout(const fs::path& root) {
-    const fs::path src = root / "src/phaseshift/kernels/correctness";
+    const fs::path src = root / "src/shelf/kernels/correctness";
     const std::string dispatch = "model_dispatch_correctness.hip";
     for (const auto& file : scan(src)) {
         if (file.extension() != ".hip") continue;
@@ -118,79 +118,79 @@ void check_no_server_deps(const fs::path& root) {
         "gRPC", "grpc", "OpenAI", "openai",
         "xgrammar", "XGrammar",
     };
-    scan_clean(root / "src/phaseshift", forbidden);
-    scan_clean(root / "include/phaseshift", forbidden);
+    scan_clean(root / "src/shelf", forbidden);
+    scan_clean(root / "include/shelf", forbidden);
 }
 
 }
 
 int main() {
-    const fs::path root(PHASESHIFT_SOURCE_ROOT);
+    const fs::path root(SHELF_SOURCE_ROOT);
 
     const std::vector<fs::path> core_dirs = {
-        root / "include/phaseshift/runtime",
-        root / "src/phaseshift/runtime",
+        root / "include/shelf/runtime",
+        root / "src/shelf/runtime",
     };
     for (const auto& dir : core_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35", "phaseshift/models/"});
+        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/"});
     }
 
     const std::vector<fs::path> generic_dirs = {
-        root / "include/phaseshift/kernels",
-        root / "src/phaseshift/kernels",
-        root / "include/phaseshift/inference",
-        root / "src/phaseshift/inference",
-        root / "include/phaseshift/models/common",
-        root / "src/phaseshift/models/common",
+        root / "include/shelf/kernels",
+        root / "src/shelf/kernels",
+        root / "include/shelf/inference",
+        root / "src/shelf/inference",
+        root / "include/shelf/models/common",
+        root / "src/shelf/models/common",
     };
     for (const auto& dir : generic_dirs) {
         scan_clean(dir, {"qwen35", "Qwen35", "qwen4exp", "Qwen4Exp",
-                         "phaseshift/models/qwen"});
+                         "shelf/models/qwen"});
     }
 
     const std::vector<fs::path> weights_dirs = {
-        root / "include/phaseshift/weights",
-        root / "src/phaseshift/weights",
+        root / "include/shelf/weights",
+        root / "src/shelf/weights",
     };
     for (const auto& dir : weights_dirs) {
-        scan_clean(dir, {"qwen35", "Qwen35", "phaseshift/models/"});
+        scan_clean(dir, {"qwen35", "Qwen35", "shelf/models/"});
     }
 
     const std::vector<fs::path> format_dirs = {
-        root / "include/phaseshift/quantization/manifest",
-        root / "include/phaseshift/quantization/bundle",
-        root / "include/phaseshift/quantization/codec",
-        root / "src/phaseshift/quantization/manifest",
-        root / "src/phaseshift/quantization/bundle",
-        root / "src/phaseshift/quantization/codec",
-        root / "include/phaseshift/quantization/quant_format.h",
-        root / "include/phaseshift/quantization/quant_spec.h",
-        root / "include/phaseshift/quantization/payload_descriptor.h",
-        root / "include/phaseshift/quantization/quant_contract.h",
-        root / "include/phaseshift/quantization/quantization_types.h",
-        root / "include/phaseshift/quantization/quantized_compute_view.h",
-        root / "include/phaseshift/core",
-        root / "src/phaseshift/core",
-        root / "include/phaseshift/io",
-        root / "src/phaseshift/io",
+        root / "include/shelf/quantization/manifest",
+        root / "include/shelf/quantization/bundle",
+        root / "include/shelf/quantization/codec",
+        root / "src/shelf/quantization/manifest",
+        root / "src/shelf/quantization/bundle",
+        root / "src/shelf/quantization/codec",
+        root / "include/shelf/quantization/quant_format.h",
+        root / "include/shelf/quantization/quant_spec.h",
+        root / "include/shelf/quantization/payload_descriptor.h",
+        root / "include/shelf/quantization/quant_contract.h",
+        root / "include/shelf/quantization/quantization_types.h",
+        root / "include/shelf/quantization/quantized_compute_view.h",
+        root / "include/shelf/core",
+        root / "src/shelf/core",
+        root / "include/shelf/io",
+        root / "src/shelf/io",
     };
     for (const auto& dir : format_dirs) {
-        scan_clean(dir, {"phaseshift/models/"});
+        scan_clean(dir, {"shelf/models/"});
     }
 
     const std::vector<fs::path> model_dirs = {
-        root / "include/phaseshift/models/qwen35/model",
-        root / "src/phaseshift/models/qwen35/model",
-        root / "include/phaseshift/models/qwen35/weights",
-        root / "src/phaseshift/models/qwen35/weights",
+        root / "include/shelf/models/qwen35/model",
+        root / "src/shelf/models/qwen35/model",
+        root / "include/shelf/models/qwen35/weights",
+        root / "src/shelf/models/qwen35/weights",
     };
     for (const auto& dir : model_dirs) {
         scan_clean(dir, {"models/qwen35/runtime", "Executor", "ContinuousBatcher"});
     }
 
     const std::vector<fs::path> kernel_dirs = {
-        root / "include/phaseshift/models/qwen35/kernels",
-        root / "src/phaseshift/models/qwen35/kernels",
+        root / "include/shelf/models/qwen35/kernels",
+        root / "src/shelf/models/qwen35/kernels",
     };
     for (const auto& dir : kernel_dirs) {
         scan_clean(dir,

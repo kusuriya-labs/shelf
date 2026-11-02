@@ -1,4 +1,4 @@
-# phaseshift-bench
+# shelf-bench
 
 ベンチマークアプリ。サブコマンドはカテゴリごと:
 
@@ -43,7 +43,7 @@ Quality:
 GEMV/GEMM are compute kinds. WMMA is an internal GEMM implementation
 detail and is not a `--variant` value.
 
-各サブコマンドの全 option は `phaseshift-bench <sub> --help` を参照。
+各サブコマンドの全 option は `shelf-bench <sub> --help` を参照。
 
 ## pp
 
@@ -105,7 +105,7 @@ greedy mode は `--compute-logits 1` が必要。
 固定 token corpus を teacher forcing し、位置ごとの full-vocab logits を raw f32 で
 dump する。`--compare` で baseline dump と突き合わせ、perplexity / mean KL /
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
-`phaseshift-bench pp/tg` の数値とは混ぜない。
+`shelf-bench pp/tg` の数値とは混ぜない。
 
 corpus は `vendor/BetterBench/corpus/v1` から生成する（token corpus は commit しない）。
 
@@ -114,12 +114,12 @@ python3 tools/quality_gate.py corpus \
   --model-dir models/Qwen3.8-27B-FP8 --out /tmp/bb_corpus.psktok
 
 # BF16 KV baseline
-./build/phaseshift-bench quality --model-dir models/Qwen3.8-27B-FP8 \
+./build/shelf-bench quality --model-dir models/Qwen3.8-27B-FP8 \
   --tokens-file /tmp/bb_corpus.psktok \
   --kv-cache-dtype bf16 --dump /tmp/bf16.psq
 
 # FP8 KV candidate
-./build/phaseshift-bench quality --model-dir models/Qwen3.8-27B-FP8 \
+./build/shelf-bench quality --model-dir models/Qwen3.8-27B-FP8 \
   --tokens-file /tmp/bb_corpus.psktok \
   --kv-cache-dtype fp8 --dump /tmp/fp8.psq --compare /tmp/bf16.psq
 ```
@@ -231,8 +231,8 @@ greedy argmax sampling。
 ## 例
 
 ```bash
-./build/phaseshift-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 512 --tp 2 --device 0,1 --arena-gib 16
-./build/phaseshift-bench tg --model-dir models/Qwen3.8-27B-FP8 --mode greedy --compute-logits 1
-./build/phaseshift-bench gemm --check --rows 1,16,128
-./build/phaseshift-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv
+./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 512 --tp 2 --device 0,1 --arena-gib 16
+./build/shelf-bench tg --model-dir models/Qwen3.8-27B-FP8 --mode greedy --compute-logits 1
+./build/shelf-bench gemm --check --rows 1,16,128
+./build/shelf-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv
 ```

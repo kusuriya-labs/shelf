@@ -1,10 +1,10 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/context_state.h>
-#include <phaseshift/models/qwen35/eagle4/executor.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/context_state.h>
+#include <shelf/models/qwen35/eagle4/executor.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -43,9 +43,9 @@ static bf16_t random_bf16(uint32_t& state) {
 }
 
 int main() {
-    const char* model_dir = std::getenv("PHASESHIFT_EAGLE4_MODEL_DIR");
+    const char* model_dir = std::getenv("SHELF_EAGLE4_MODEL_DIR");
     if (model_dir == nullptr || model_dir[0] == '\0') {
-        std::printf("SKIP: PHASESHIFT_EAGLE4_MODEL_DIR is not set\n");
+        std::printf("SKIP: SHELF_EAGLE4_MODEL_DIR is not set\n");
         return 77;
     }
     auto config_result = ps::qwen35::eagle4::read_eagle4_config(model_dir);

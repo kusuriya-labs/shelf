@@ -1,13 +1,13 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
-#include <phaseshift/inference/execution/decode_perf_stats.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/model_source.h>
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/model_source.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
@@ -23,7 +23,7 @@
 #include <cmath>
 #include <thread>
 
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
 #include <rocprofiler-sdk-roctx/roctx.h>
 #endif
 
@@ -54,7 +54,7 @@ struct BenchOptions {
 
 void print_usage(FILE* out) {
     fprintf(out,
-        "Usage: phaseshift-bench tg [options]\n"
+        "Usage: shelf-bench tg [options]\n"
         "  --mode forward|greedy        (default forward)\n"
         "  --context N                  (default 128)\n"
         "  --tokens N                   (default 8)\n"
@@ -231,7 +231,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
 }
 
 bool roctx_available() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     return true;
 #else
     return false;
@@ -239,25 +239,25 @@ bool roctx_available() {
 }
 
 void roctx_resume() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxProfilerResume(0);
 #endif
 }
 
 void roctx_pause() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxProfilerPause(0);
 #endif
 }
 
 void roctx_range_push(const char* name) {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxRangePush(name);
 #endif
 }
 
 void roctx_range_pop() {
-#ifdef PHASESHIFT_HAS_ROCTX
+#ifdef SHELF_HAS_ROCTX
     roctxRangePop();
 #endif
 }
@@ -575,7 +575,7 @@ int run_tg(int argc, char** argv) {
     ps::qwen35::runtime::perf_stats_reset();
     if (ps::qwen35::runtime::semantic_timing_enabled())
         ps::qwen35::runtime::semantic_timing_begin(stream, 8192);
-    roctx_range_push("PHASESHIFT_TG_MEASURED_DECODE");
+    roctx_range_push("SHELF_TG_MEASURED_DECODE");
 
     std::atomic<bool> keepalive_stop{false};
     hipStream_t keepalive_stream = nullptr;
@@ -789,10 +789,10 @@ int run_tg(int argc, char** argv) {
 
     const int roctx_enabled = roctx_available() ? 1 : 0;
 
-    printf("PhaseShift Decode Benchmark\n");
+    printf("Shelf Decode Benchmark\n");
     printf("\n");
-#ifdef PHASESHIFT_GIT_SHA
-    printf("git_sha=%s\n", PHASESHIFT_GIT_SHA);
+#ifdef SHELF_GIT_SHA
+    printf("git_sha=%s\n", SHELF_GIT_SHA);
 #endif
     printf("device=%d\n", opts.device);
     printf("mode=%s\n", mode_label);

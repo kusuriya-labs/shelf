@@ -32,7 +32,7 @@ def make_argv() -> list[str]:
         "--max-seq-len", "512",
         "--arena-gib", "auto",
         "--page-tokens", "16",
-        "--device", os.environ.get("PHASESHIFT_TEST_DEVICE", "0"),
+        "--device", os.environ.get("SHELF_TEST_DEVICE", "0"),
         "--kv-cache-dtype", "bf16",
     ]
 

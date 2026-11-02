@@ -2,7 +2,7 @@
 
 - ID: QWEN4EXP-G0-HIPFILE
 - 実施日: 2026-10-24
-- 対象: PhaseShift worktree `.worktrees/qwen4exp`、R9700 (gfx1201) ×4
+- 対象: Shelf worktree `.worktrees/qwen4exp`、R9700 (gfx1201) ×4
 
 ## 1. バージョン（固定できたもの）
 
@@ -89,11 +89,11 @@ AIS support:
 調査時点で **GPU[0] / GPU[1] は他プロセスが VRAM 約 33.6 GB（98%）使用中**。
 GPU[2] / GPU[3] は空き（63 MB 使用）。
 
-`phaseshift-gpu-test-runner` の予約台帳（ロックファイル）は自プロセスの予約のみを
+`shelf-gpu-test-runner` の予約台帳（ロックファイル）は自プロセスの予約のみを
 追跡するため、外部プロセスの使用は反映されない。その結果、
 GPU0/1 へ割り当てられたテストは `hipMalloc failed: out of memory` で失敗する。
 
-**ベースライン取得時の対応**: `PHASESHIFT_TEST_GPUS=2,3` を指定して空き GPU に限定した。
+**ベースライン取得時の対応**: `SHELF_TEST_GPUS=2,3` を指定して空き GPU に限定した。
 この指定下で required acceptance は 143/143 PASS（`gates.md` 参照）。
 
 `docs/developer/testing.md` の制約「GPU 負荷中は rocm-smi / amd-smi / gpu_metrics を

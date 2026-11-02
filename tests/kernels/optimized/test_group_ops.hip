@@ -1,7 +1,7 @@
-#include <phaseshift/kernels/optimized/group_ops.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/runtime/program/device_program.h>
+#include <shelf/kernels/optimized/group_ops.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/runtime/program/device_program.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

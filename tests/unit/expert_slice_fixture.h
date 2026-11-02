@@ -1,8 +1,8 @@
 #pragma once
 
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/quantization/fp8/fp8.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/quantization/fp8/fp8.h>
 
 #include <cstdint>
 #include <cstring>

@@ -1,13 +1,13 @@
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/inference/execution/selectors/elementwise_selector.h>
-#include <phaseshift/inference/execution/selectors/gdn_conv_selector.h>
-#include <phaseshift/inference/execution/selectors/gdn_recurrence_selector.h>
-#include <phaseshift/inference/execution/selectors/l2_normalize_selector.h>
-#include <phaseshift/models/qwen4exp/model/qwen4exp_config.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/graph/primitive_node.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/inference/execution/selectors/elementwise_selector.h>
+#include <shelf/inference/execution/selectors/gdn_conv_selector.h>
+#include <shelf/inference/execution/selectors/gdn_recurrence_selector.h>
+#include <shelf/inference/execution/selectors/l2_normalize_selector.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/graph/primitive_node.h>
 
 #include <cstdio>
 #include <filesystem>

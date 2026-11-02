@@ -1,8 +1,8 @@
 #pragma once
 
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/quantization/manifest/crc32.h>
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/quantization/manifest/crc32.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -69,7 +69,7 @@ TensorPlan make_bf16_matrix(uint64_t rows, uint64_t k, const std::string& logica
     plan.meta.logical_shape = {static_cast<int64_t>(rows), static_cast<int64_t>(k)};
     plan.meta.k_padded = k;
     PhysicalTensor data;
-    data.name = logical + ".__phaseshift_data";
+    data.name = logical + ".__shelf_data";
     data.dtype = io::SType::BF16;
     data.shape = {static_cast<std::size_t>(rows), static_cast<std::size_t>(k)};
     data.bytes = bytes;
@@ -93,7 +93,7 @@ TensorPlan make_bf16_small(const std::vector<std::size_t>& shape,
     for (std::size_t d : shape) plan.meta.logical_shape.push_back(static_cast<int64_t>(d));
     plan.meta.k_padded = static_cast<uint64_t>(shape.back());
     PhysicalTensor data;
-    data.name = logical + ".__phaseshift_data";
+    data.name = logical + ".__shelf_data";
     data.dtype = io::SType::BF16;
     data.shape = shape;
     data.bytes = bytes;
@@ -223,13 +223,13 @@ Status build_fixture(const fs::path& dir) {
     }
     Status st = writer.set_metadata("format", "pt");
     if (!st.ok()) return st;
-    st = writer.set_metadata("phaseshift.format", quantization::manifest::kQuantizedSafetensorsFormat);
+    st = writer.set_metadata("shelf.format", quantization::manifest::kQuantizedSafetensorsFormat);
     if (!st.ok()) return st;
     st = writer.set_metadata(
-        "phaseshift.format_version",
+        "shelf.format_version",
         std::to_string(quantization::manifest::kQuantizedSafetensorsFormatVersion));
     if (!st.ok()) return st;
-    st = writer.set_metadata("phaseshift.quantization_metadata",
+    st = writer.set_metadata("shelf.quantization_metadata",
                              quantization::manifest::kQuantizedMetadataFile);
     if (!st.ok()) return st;
     auto header_result = writer.write_header();

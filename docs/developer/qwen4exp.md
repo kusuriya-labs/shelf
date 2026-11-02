@@ -65,7 +65,7 @@ Qwen3.8-Flash-Next を `Qwen35TextConfig` の差分として押し込まない�
 | `indexer_head_dim` | 128 |
 | `indexer_budget` | 2048 |
 | `indexer_compress_ratio` | 4 |
-| `mamba_ssm_dtype` | `float32`（参照実装の値。PhaseShift の実装は GDN を FP16 とする、5.0 参照） |
+| `mamba_ssm_dtype` | `float32`（参照実装の値。Shelf の実装は GDN を FP16 とする、5.0 参照） |
 
 `indexer_*` が 5 つとも設定されている時だけ QSA が有効になる。
 `indexer_kv_heads` は 1 でなければならない。
@@ -165,7 +165,7 @@ y = (1 + weight) * (x_f32 * rsqrt(mean(x_f32^2) + eps))
 ```
 
 weight は 0 初期化であり、`(1 + weight)` の 1-centered 表現である。
-PhaseShift の `RmsNormWeightMode::ONE_PLUS` に対応する。
+Shelf の `RmsNormWeightMode::ONE_PLUS` に対応する。
 
 `group_size` が指定された場合、最終次元を `(-1, group_size)` に reshape し、
 `group_size` 単位で RMS を取る (stream ごとの norm)。
@@ -193,7 +193,7 @@ weight は 1 初期化である。
 
 Qwen4Exp の GDN は **FP16 ベース**で実装し、lossy な計算を明示的に許容する。
 recurrent state も FP16 を基本とする。config の `mamba_ssm_dtype: float32`
-（上記 text_config）は参照実装の値であり、PhaseShift の実装方針との差分である。
+（上記 text_config）は参照実装の値であり、Shelf の実装方針との差分である。
 
 差分の理由と根拠:
 
@@ -701,7 +701,7 @@ shape / shard / dtype の全列挙は実 checkpoint の safetensors ヘッダか
 
 ---
 
-## 14. gap (current PhaseShift)
+## 14. gap (current Shelf)
 
 | # | gap | 影響範囲 |
 | --- | --- | --- |
@@ -711,7 +711,7 @@ shape / shard / dtype の全列挙は実 checkpoint の safetensors ヘッダか
 | 4 | QSA indexer / sparse attention の kernel と qwen4exp-local の `IndexerKeyPool`（`models/qwen4exp/runtime/`）は実装済み。**`PrimitiveStateKind` への indexer key 登録と lowering 接続が未** | QSA runtime |
 | 5 | Gated Residual は host 参照実装に加え、**PrimitiveGraph へ載る経路が実装済み**（`GROUP_MEAN` / `GROUP_BROADCAST_MUL` の2種 + 既存ノードへの分解、`models/common/qwen_hybrid/hyper_lowering.h` の emit）。**層構造への接続は下記 8** | HC runtime |
 | 6 | PLE の SSD row gather（`ple/ple_row_gather`）、n-gram hash（`ple/ngram_hash`）、dilated conv（`ple/ple_conv`）、graph 接続（`ple/ple_forward` + `connect_ple` による prefix graph 分割、新規 Node なし）は実装済み。**projection / gate / conv の GPU 実行経路は未**（現状 host F32）。実モデル 95.4 GiB table の SSD 経路 E2E は G6 | PLE runtime |
-| 8 | qwen4exp の config / weights 読み込み、qwen4exp-local の state pool、`lower_qwen4exp_to_primitives`（層結線、`connect_moe` / `connect_ple` は既定 false）、PLE の graph 接続（prefix graph 分割）はいずれも実装済み。**entrypoint（`phaseshift-compute` / `phaseshift-bench`）からの起動経路、`ContinuousBatcher` / `PrefixCache` 統合、optimized dispatch 接続が未** | qwen4exp runtime |
+| 8 | qwen4exp の config / weights 読み込み、qwen4exp-local の state pool、`lower_qwen4exp_to_primitives`（層結線、`connect_moe` / `connect_ple` は既定 false）、PLE の graph 接続（prefix graph 分割）はいずれも実装済み。**entrypoint（`shelf-compute` / `shelf-bench`）からの起動経路、`ContinuousBatcher` / `PrefixCache` 統合、optimized dispatch 接続が未** | qwen4exp runtime |
 | 9 | MTP の正本 forward が存在しない | Gate 10 |
 | 10 | vision tower 未対応 | Gate 11 |
 

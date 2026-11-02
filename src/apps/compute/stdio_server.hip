@@ -3,11 +3,11 @@
 
 #include "compute_common.h"
 
-#include <phaseshift/models/qwen35/dflash2/context_state.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/runtime_request.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/core/memory/size_format.h>
+#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/core/memory/size_format.h>
 #include <nlohmann/json.hpp>
 #include <hip/hip_runtime.h>
 
@@ -256,8 +256,8 @@ void serve_step(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
         serve_fail_all(runtime, state, detail);
         return;
     }
-    if (std::getenv("PHASESHIFT_BATCH_TRACE") != nullptr) {
-        fprintf(stderr, "PHASESHIFT_BATCH_STEP requests=%u tokens=%u arena_used=%zu\n",
+    if (std::getenv("SHELF_BATCH_TRACE") != nullptr) {
+        fprintf(stderr, "SHELF_BATCH_STEP requests=%u tokens=%u arena_used=%zu\n",
                 step_result.value().num_requests, step_result.value().num_tokens,
                 runtime.arena().used());
     }
@@ -852,7 +852,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         fprintf(stderr, "EAGLE4_SERVE_SESSION_POOL_SLOTS=%u\n",
                 dflash.sessions.capacity());
     }
-    fprintf(stderr, "PHASESHIFT_SERVE_READY\n");
+    fprintf(stderr, "SHELF_SERVE_READY\n");
     fflush(stderr);
     JsonlInput input;
     ServeState state;
@@ -880,7 +880,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         serve_cancel_all_inflight(runtime, state);
     }
 
-    const char* serve_stats_env = std::getenv("PHASESHIFT_DFLASH2_SERVE_STATS");
+    const char* serve_stats_env = std::getenv("SHELF_DFLASH2_SERVE_STATS");
     if ((dflash.enabled || dflash.eagle4_enabled) &&
         serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
         serve_stats_env[0] != '0') {

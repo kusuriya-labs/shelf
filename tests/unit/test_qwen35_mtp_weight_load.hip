@@ -1,13 +1,13 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/gpu/gfx_arch.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/io/safetensors_writer.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_config.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/weights/matrix_weight.h>
-#include <phaseshift/weights/weight_loader.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/gpu/gfx_arch.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/weights/matrix_weight.h>
+#include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -544,7 +544,7 @@ int main() {
     gpu::GpuArena arena = ar.release();
 
     std::error_code ec;
-    g_root = fs::temp_directory_path(ec) / ("phaseshift_mtp_weight_load_" + std::to_string(::getpid()));
+    g_root = fs::temp_directory_path(ec) / ("shelf_mtp_weight_load_" + std::to_string(::getpid()));
     fs::create_directories(g_root, ec);
 
     test_mtp_bf16_contract(arena, stream);

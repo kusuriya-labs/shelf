@@ -1,11 +1,11 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/tensor.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/models/qwen35/kernels/eagle4/attention.h>
-#include <phaseshift/models/qwen35/kernels/eagle4/candidate_ops.h>
-#include <phaseshift/models/qwen35/kernels/eagle4/ops.h>
-#include <phaseshift/kernels/optimized/radix_topn.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/tensor.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/models/qwen35/kernels/eagle4/attention.h>
+#include <shelf/models/qwen35/kernels/eagle4/candidate_ops.h>
+#include <shelf/models/qwen35/kernels/eagle4/ops.h>
+#include <shelf/kernels/optimized/radix_topn.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

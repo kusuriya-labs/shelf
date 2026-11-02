@@ -84,7 +84,7 @@ def boundary_cases(checker, processor, url):
                   f"rendered={rendered} max_tokens={max_tokens}")
 
     status, body = post(url, {
-        "model": "phaseshift", "temperature": 0, "max_tokens": max_tokens,
+        "model": "shelf", "temperature": 0, "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "user", "content": FILLER * reps + TAIL}]})
     checker.check("near-limit-200", status == 200, f"{status} {repr(body)[:200]}")
@@ -93,7 +93,7 @@ def boundary_cases(checker, processor, url):
 
     over = max_tokens + 256
     status, body = post(url, {
-        "model": "phaseshift", "temperature": 0, "max_tokens": over,
+        "model": "shelf", "temperature": 0, "max_tokens": over,
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "user", "content": FILLER * reps + TAIL}]})
     checker.check("over-limit-clamped", status == 200, f"{status} {repr(body)[:200]}")
@@ -103,7 +103,7 @@ def boundary_cases(checker, processor, url):
                   f"completion={completion} remaining={remaining}")
 
     status, body = post(url, {
-        "model": "phaseshift", "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False},
+        "model": "shelf", "temperature": 0, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "user", "content": "What is 2+2? Answer with only the number."}]})
     checker.check("post-over-healthy", status == 200, f"{status} {repr(body)[:200]}")
     checker.check("post-over-answer",
@@ -122,7 +122,7 @@ def concurrency_batch(checker, processor, harness):
     # staggered HTTP arrivals overlap in the scheduler; a short answer would let
     # the first request finish before the others are admitted.
     content = FILLER * per_request + CONTINUE
-    payload = {"model": "phaseshift", "temperature": 0, "max_tokens": 96, "chat_template_kwargs": {"enable_thinking": False},
+    payload = {"model": "shelf", "temperature": 0, "max_tokens": 96, "chat_template_kwargs": {"enable_thinking": False},
                       "messages": [{"role": "user", "content": content}]}
 
     results = {}
@@ -143,7 +143,7 @@ def concurrency_batch(checker, processor, harness):
                       for i in range(4)),
                   repr({i: message(results[i][1]).get("content") for i in range(4)}))
 
-    status, body = post(url, {"model": "phaseshift", "temperature": 0,
+    status, body = post(url, {"model": "shelf", "temperature": 0,
                               "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": False},
                               "messages": [{"role": "user",
                                             "content": "What is 2+2? Answer with only the number."}]})
@@ -158,8 +158,8 @@ def main() -> int:
         print(f"model dir not found: {model_dir()}", file=sys.stderr)
         return 2
 
-    boundary_log = Path("/tmp/phaseshift-g11c-boundary-compute.log")
-    concurrency_log = Path("/tmp/phaseshift-g11c-concurrency-compute.log")
+    boundary_log = Path("/tmp/shelf-g11c-boundary-compute.log")
+    concurrency_log = Path("/tmp/shelf-g11c-concurrency-compute.log")
     for path in (boundary_log, concurrency_log):
         path.unlink(missing_ok=True)
     try:
@@ -167,7 +167,7 @@ def main() -> int:
         # Boundary uses the production default profile.
         with ServerHarness(use_defaults=True, startup_timeout=360.0,
                            arena_override=test_arena_gib(),
-                           env={"PHASESHIFT_COMPUTE_LOG": str(boundary_log)}) as h1:
+                           env={"SHELF_COMPUTE_LOG": str(boundary_log)}) as h1:
             boundary_cases(checker, processor, f"{h1.base_url}/chat/completions")
 
         # Concurrency uses a fresh default server: the near-limit request above
@@ -175,13 +175,13 @@ def main() -> int:
         # to a generation-prompt tail, hiding the scheduler batching.
         with ServerHarness(use_defaults=True, startup_timeout=360.0,
                            arena_override=test_arena_gib(),
-                           env={"PHASESHIFT_BATCH_TRACE": "1",
-                                "PHASESHIFT_COMPUTE_LOG": str(concurrency_log)}) as h2:
+                           env={"SHELF_BATCH_TRACE": "1",
+                                "SHELF_COMPUTE_LOG": str(concurrency_log)}) as h2:
             concurrency_batch(checker, processor, h2)
 
         text = concurrency_log.read_text(errors="replace") \
             if concurrency_log.exists() else ""
-        steps = [int(m) for m in re.findall(r"PHASESHIFT_BATCH_STEP requests=(\d+)", text)]
+        steps = [int(m) for m in re.findall(r"SHELF_BATCH_STEP requests=(\d+)", text)]
         checker.check("batch-trace-present", bool(steps), f"steps={len(steps)}")
         checker.check("multi-request-step", bool(steps) and max(steps) >= 2,
                       f"max_requests={max(steps) if steps else 0} sample={steps[:10]}")

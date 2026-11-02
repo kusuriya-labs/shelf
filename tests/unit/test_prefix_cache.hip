@@ -1,8 +1,8 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/status.h>
-#include <phaseshift/models/qwen35/runtime/prefix_cache.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/kernels/kv_types.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35/runtime/prefix_cache.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
 
 #include <cstddef>

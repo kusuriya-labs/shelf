@@ -9,16 +9,16 @@
 ## 症状
 
 TP2 + EAGLE4 の prefill（`extend_rows rows=256 position=0`）で、GPU1 の
-`phaseshift_embedding_bf16` dispatch が
+`shelf_embedding_bf16` dispatch が
 `HSA_STATUS_ERROR_INVALID_PACKET_FORMAT`（AQL packet malformed）で落ちる。
 `grid=[65536]` は work-item 表記（256 block × 256 thread）であり launch 形状は正常。
 
 ## 切り分け（実測）
 
-`PHASESHIFT_EAGLE4_DEVICE_TRACE=1` / `PHASESHIFT_EAGLE4_SYNC_TRACE=1` /
-`PHASESHIFT_EAGLE4_ARG_TRACE=1` を追加して serve 経路を実行した。
+`SHELF_EAGLE4_DEVICE_TRACE=1` / `SHELF_EAGLE4_SYNC_TRACE=1` /
+`SHELF_EAGLE4_ARG_TRACE=1` を追加して serve 経路を実行した。
 
-- `PHASESHIFT_EAGLE4_SYNC_TRACE` により、`tap_norm_concat` → `fc` → `embedding` の
+- `SHELF_EAGLE4_SYNC_TRACE` により、`tap_norm_concat` → `fc` → `embedding` の
   どこで最初に失敗するかを stage 名で観測できるようにした。packet error は
   `embedding` の直前に観測され、先行 stage の async failure を embedding の launch が
   拾う形になり得ることが確認できた。
@@ -58,7 +58,7 @@ TP2 + EAGLE4 の prefill（`extend_rows rows=256 position=0`）で、GPU1 の
      （2 chunk 目以降で先頭 256 行を再利用していた）のも同時に修正した。
 3. candidate merge は rank ごとの stream を sync してから D2H するようにした。
    rank1 の stream 完了を待たずに読む競合があった。
-4. `PHASESHIFT_EAGLE4_DEVICE_TRACE` / `PHASESHIFT_EAGLE4_SYNC_TRACE` を追加した。
+4. `SHELF_EAGLE4_DEVICE_TRACE` / `SHELF_EAGLE4_SYNC_TRACE` を追加した。
    未設定時は HIP 呼び出しも同期も増えない。
 
 ## 検証（実測）
@@ -69,7 +69,7 @@ TP2 + EAGLE4 の prefill（`extend_rows rows=256 position=0`）で、GPU1 の
   `tap_norm_concat` / `fc` / `embedding` / `embedding_tp_sum` / `layer_input_norm` /
   `q_proj` / `k_proj` / `v_proj` は両 rank で sync PASS（412 行）、
   `HSA_STATUS_ERROR_INVALID_PACKET_FORMAT` は再現しない。
-- 単一 rank の tree 経路（`phaseshift-compute --eagle4-tree-width 4`）で
+- 単一 rank の tree 経路（`shelf-compute --eagle4-tree-width 4`）で
   tree metadata staging と tap gather を含む commit 経路が動作することを確認した。
 - 新規 test `test_eagle4_tp_forward`（2 GPU、小さな checkpoint）で
   embedding partial + sum / attention row-parallel / MLP row-parallel / final normed が

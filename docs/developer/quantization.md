@@ -1,8 +1,8 @@
 # Quantization
 
-source of truth: `include/phaseshift/quantization/**`,
-`src/phaseshift/quantization/**`, `include/phaseshift/weights/**`,
-`src/phaseshift/weights/**`, `src/phaseshift/io/**`。
+source of truth: `include/shelf/quantization/**`,
+`src/shelf/quantization/**`, `include/shelf/weights/**`,
+`src/shelf/weights/**`, `src/shelf/io/**`。
 
 canonical payload の stream / metadata / size formula / native preshuffle は
 [canonical_soa_payload.md](canonical_soa_payload.md) を正本とする。
@@ -17,13 +17,13 @@ self-contained quantized safetensors を直接ロードする。
 - `QuantSpecId` / `ComputeSpecId` — 量子化仕様ID（`quantization/quantization_types.h`）。
 - `QuantFormatId` — weight storage / compute formatのID（`quantization/quant_format.h`）。
   numeric valueはin-memory専用で、file / manifestには保存しない。
-  on-diskのencodingは `phaseshift_quantization.json` の文字列名で管理する。
+  on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
 - 対応 encoding: BF16 / FP8 K128N128。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
-- self-contained quantized safetensors — `phaseshift_quantization.json` manifest 付きの
-  quantized safetensors。`phaseshift-compute` が直接ロード可能。
+- self-contained quantized safetensors — `shelf_quantization.json` manifest 付きの
+  quantized safetensors。`shelf-compute` が直接ロード可能。
   各tensorに `QuantSpecId` / `ComputeSpecId` / CRC32 payloadを保持する。
   manifest は V4（`format_version = 4`）で、tensors[x] は
   `domain` / `logical_shape` / `quant`（encoding + scale の `block_shape`）/
@@ -32,11 +32,11 @@ self-contained quantized safetensors を直接ロードする。
   互換 parser で読み込める。scale の block は既定（FP8 = 128x128）以外でも
   format 受理し、非対応 group は
   runtime の kernel capability で拒否する。
-- codec（e4m3 / ue4m3）の reference math は `phaseshift_quant_reference`（pure CPU）。
+- codec（e4m3 / ue4m3）の reference math は `shelf_quant_reference`（pure CPU）。
 
 ## Weight loading（generic layer）
 
-重みロードは model非依存の `phaseshift_weights`（`weights/weight_loader.h`）が担当する。
+重みロードは model非依存の `shelf_weights`（`weights/weight_loader.h`）が担当する。
 
 ```text
 Qwen35 model（tensor name -> Qwen35ModelWeights field の bindingのみ）
@@ -73,7 +73,7 @@ partition plan を受け付けない（multi-GPU lowering 未対応のため
 `Status::unsupported` で停止する）。
 - `tie_word_embeddings` は config.json の root → `text_config` の順に読み、
   どちらにも無ければ false とする（`read_qwen35_tie_word_embeddings` /
-  `include/phaseshift/models/qwen35/model/qwen35_config.h`）。
+  `include/shelf/models/qwen35/model/qwen35_config.h`）。
   tie のとき `Qwen35ModelWeights.lm_head_tied` が true になり、`lm_head` は
   `embed_tokens` を参照する。
 - BF16もquantized model内のweight formatの一種として同一経路でロードする
@@ -84,8 +84,8 @@ partition plan を受け付けない（multi-GPU lowering 未対応のため
 
 ### HF 由来 real-quantized safetensors の直接ロード
 
-`phaseshift_quantization.json` を持たない model dir のうち、`config.json` の
-`quantization_config` が次の条件を満たす場合、PhaseShift は HF 由来の
+`shelf_quantization.json` を持たない model dir のうち、`config.json` の
+`quantization_config` が次の条件を満たす場合、Shelf は HF 由来の
 real-quantized safetensors を manifest 非依存で直接ロードできる。
 
 - `quant_method == "fp8"` — `fmt == "e4m3"` かつ `weight_block_size == [128,128]`
@@ -230,5 +230,5 @@ QK^T と PV を fp8 WMMA（e4m3）で計算する。契約は次のとおり。
   page の最大値が `kPQuantMinScale`（1e-30）未満のときは寄与 0 として扱う。
   逆数が inf になると `0 * inf` が NaN になるため、この下限が必要である。
 - Softmax の指数和は量子化せず、そのまま最終正規化に使う。
-- 診断は `phaseshift-bench quality` の `--score-start-position` で採点位置を固定して行う
+- 診断は `shelf-bench quality` の `--score-start-position` で採点位置を固定して行う
   （[testing.md](testing.md)）。

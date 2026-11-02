@@ -1,9 +1,9 @@
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/inference/execution/selectors/paged_attention_selector.h>
-#include <phaseshift/kernels/optimized/attention/paged_attention.h>
-#include <phaseshift/kernels/optimized/attention/qsa_sparse_attention.h>
-#include <phaseshift/kernels/optimized/attention/rope.h>
-#include <phaseshift/kernels/optimized/rmsnorm.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/inference/execution/selectors/paged_attention_selector.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
+#include <shelf/kernels/optimized/attention/qsa_sparse_attention.h>
+#include <shelf/kernels/optimized/attention/rope.h>
+#include <shelf/kernels/optimized/rmsnorm.h>
 
 #include <hip/hip_runtime.h>
 
@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#ifndef PHASESHIFT_SOURCE_ROOT
-#error "PHASESHIFT_SOURCE_ROOT must be defined"
+#ifndef SHELF_SOURCE_ROOT
+#error "SHELF_SOURCE_ROOT must be defined"
 #endif
 
 namespace {
@@ -460,7 +460,7 @@ int main() {
 
     Golden golden;
     const bool has_golden = load_golden(
-        std::string(PHASESHIFT_SOURCE_ROOT) + "/tests/fixtures/qsa/qsa_sparse_attention_golden.bin",
+        std::string(SHELF_SOURCE_ROOT) + "/tests/fixtures/qsa/qsa_sparse_attention_golden.bin",
         golden);
     check(has_golden, "golden load");
     if (has_golden) check(golden.crc == input_crc, "golden input checksum");

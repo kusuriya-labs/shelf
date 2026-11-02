@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/optimized/radix_topn.h>
-#include <phaseshift/kernels/optimized/stochastic_sampling.h>
-#include <phaseshift/core/gpu/cleanup.h>
+#include <shelf/kernels/optimized/radix_topn.h>
+#include <shelf/kernels/optimized/stochastic_sampling.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

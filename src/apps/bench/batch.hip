@@ -1,10 +1,10 @@
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
-#include <phaseshift/models/qwen35/weights/model_weights.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/model_source.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/model_source.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
@@ -30,7 +30,7 @@ uint32_t count_attention_layers(const ps::qwen35::Qwen35TextConfig& tc) {
 
 void usage(FILE* f) {
     std::fprintf(f,
-        "Usage: phaseshift-bench batch [options]\n"
+        "Usage: shelf-bench batch [options]\n"
         "  --model-dir PATH       (required)\n"
         "  --model-host SPEC      resident model host socket spec\n"
         "  --device N             (default 0)\n"

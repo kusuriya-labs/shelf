@@ -1,6 +1,6 @@
 # Prefix Cache
 
-prefix cache は `phaseshift-compute` の runtime が所有する GPU-resident cache である。
+prefix cache は `shelf-compute` の runtime が所有する GPU-resident cache である。
 radix tree 上の page 単位で prefix の paged KV と GDN state を保持し、
 `ContinuousBatcher` が request の admission / prefill / decode / 出力末尾で
 lookup・restore・save を行う。共有 prefix への extension と multi-turn の会話で

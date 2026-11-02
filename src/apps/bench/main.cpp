@@ -26,7 +26,7 @@ namespace {
 
 void usage() {
     std::printf("usage:\n");
-    std::printf("  phaseshift-bench <subcommand> [options]\n");
+    std::printf("  shelf-bench <subcommand> [options]\n");
     std::printf("\n");
     std::printf("E2E:\n");
     std::printf("  pp                 prefill benchmark\n");
@@ -63,7 +63,7 @@ void usage() {
     std::printf("Quality:\n");
     std::printf("  quality            teacher-forced logits dump / quality comparison\n");
     std::printf("\n");
-    std::printf("run 'phaseshift-bench <subcommand> --help' for options\n");
+    std::printf("run 'shelf-bench <subcommand> --help' for options\n");
 }
 
 }  // namespace

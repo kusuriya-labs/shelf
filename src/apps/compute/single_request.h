@@ -2,8 +2,8 @@
 
 #include "compute_runtime.h"
 
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/runtime/scheduling_types.h>
 
 #include <cstdint>
 #include <string>

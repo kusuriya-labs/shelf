@@ -1,4 +1,4 @@
-#include <phaseshift/weights/tensor_partition.h>
+#include <shelf/weights/tensor_partition.h>
 
 #include <cstdint>
 #include <cstdio>

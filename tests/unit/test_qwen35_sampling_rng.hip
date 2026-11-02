@@ -1,5 +1,5 @@
-#include <phaseshift/kernels/optimized/sampling_common.h>
-#include <phaseshift/core/gpu/cleanup.h>
+#include <shelf/kernels/optimized/sampling_common.h>
+#include <shelf/core/gpu/cleanup.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>

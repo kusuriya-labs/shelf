@@ -1,12 +1,12 @@
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/dflash2/context_state.h>
-#include <phaseshift/models/qwen35/dflash2/executor.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/models/qwen35/runtime/executor.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/context_state.h>
+#include <shelf/models/qwen35/dflash2/executor.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
 #include "support/resident_model_fixture.h"
@@ -160,11 +160,11 @@ static bool run_batch(
 }
 
 int main() {
-    const char* model_dir = std::getenv("PHASESHIFT_MODEL_DIR_DFLASH2");
-    const char* target_dir = std::getenv("PHASESHIFT_MODEL_DIR_DFLASH2_TARGET");
+    const char* model_dir = std::getenv("SHELF_MODEL_DIR_DFLASH2");
+    const char* target_dir = std::getenv("SHELF_MODEL_DIR_DFLASH2_TARGET");
     if (model_dir == nullptr || model_dir[0] == '\0' || target_dir == nullptr ||
         target_dir[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_DFLASH2 and _TARGET\n");
+        std::printf("SKIP: set SHELF_MODEL_DIR_DFLASH2 and _TARGET\n");
         return 77;
     }
     if (hipSetDevice(0) != hipSuccess) {

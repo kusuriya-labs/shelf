@@ -1,7 +1,7 @@
 """PSQ5-CB28 の W32 scale 符号化候補の比較評価 (8bit / 16bit)。
 
 候補:
-  ue4m3_fold / ue4m3_unfold   PhaseShift ue4m3 codec (有効 0x00..0x7E, 2^-10..224, 1 byte)
+  ue4m3_fold / ue4m3_unfold   Shelf ue4m3 codec (有効 0x00..0x7E, 2^-10..224, 1 byte)
   e8m0_fold  / e8m0_unfold    最寄り 2 的乗 (Quark to_e8m0_uint8 相当, 1 byte)
   ue4m4_fold                   独自: 符号なし E4M4 (bias 7, exp=15 予約, 1 byte)
   u5m3_fold                   独自: 符号なし E5M3 (bias 15, exp=31 予約, 1 byte)

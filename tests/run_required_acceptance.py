@@ -166,12 +166,12 @@ def main() -> int:
         cmake_cmd = [
             "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir), "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
-            "-DPHASESHIFT_ROCM_ROOT=/opt/rocm",
+            "-DSHELF_ROCM_ROOT=/opt/rocm",
             "-DCMAKE_PREFIX_PATH=/opt/rocm",
             "-DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm",
             f"-DCMAKE_HIP_ARCHITECTURES={arch}",
-            "-DPHASESHIFT_BUILD_TESTS=ON",
-            "-DPHASESHIFT_BUILD_OPTIONAL_TESTS=OFF",
+            "-DSHELF_BUILD_TESTS=ON",
+            "-DSHELF_BUILD_OPTIONAL_TESTS=OFF",
         ]
         result = subprocess.run(cmake_cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -184,7 +184,7 @@ def main() -> int:
         result = subprocess.run(
             [
                 "cmake", "--build", str(build_dir),
-                "--target", "phaseshift-required-tests",
+                "--target", "shelf-required-tests",
                 "--parallel",
             ],
             capture_output=True, text=True)

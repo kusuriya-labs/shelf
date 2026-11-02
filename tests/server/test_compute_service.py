@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""phaseshift-compute --serve-stdio protocol acceptance.
+"""shelf-compute --serve-stdio protocol acceptance.
 
 Covers the Gate 1 JSONL contract and the Gate 7A asynchronous control plane:
 generate-time ping / cancel / shutdown, request-specific cancellation, and

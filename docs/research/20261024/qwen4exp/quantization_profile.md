@@ -120,7 +120,7 @@ FP8 にする構成もあるが、本 repository では未検証であり、長�
 | GDN Control | BF16 | `in_proj_a`、`in_proj_b`、`conv1d`、Norm、`A_log`、`dt_bias` |
 
 GDN のリカレント状態は量子化対象外とする。参照実装の config は
-`mamba_ssm_dtype = float32` だが、PhaseShift の実装方針は FP16 である
+`mamba_ssm_dtype = float32` だが、Shelf の実装方針は FP16 である
 （[qwen4exp.md](../../../developer/qwen4exp.md) §5.0）。いずれも重み量子化とは別の話であり、
 このプロファイルでは state の dtype を変更しない。
 
@@ -182,5 +182,5 @@ AWQ はオフラインリカバリとして計画したが、本環境では適�
   [psq5_accuracy_probe.md](psq5_accuracy_probe.md) に記録している
   （重量誤差は 5.0%、同 bpw の一様 INT5 より 1.4〜6% 大きい。タスク精度は未確立）。
 - PLE 行単位 FP8 の精度影響（テーブル行の振幅分布に対する実測）。
-- runtime 接続。現行 PhaseShift は PSQ5、FP8 行単位 scale、3D fused expert の
+- runtime 接続。現行 Shelf は PSQ5、FP8 行単位 scale、3D fused expert の
   encoder を持たない（[quantization.md](../../../developer/quantization.md)）。

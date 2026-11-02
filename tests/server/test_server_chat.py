@@ -39,20 +39,20 @@ def main() -> int:
         return 2
 
     try:
-        with ServerHarness(env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
+        with ServerHarness(env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:
             models = http_get_json(f"{server.base_url}/models")
             checker.check(
                 "models-listed",
-                any(m.get("id") == "phaseshift" for m in models.get("data", [])),
+                any(m.get("id") == "shelf" for m in models.get("data", [])),
                 repr(models))
 
             result = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES,
+                {"model": "shelf", "messages": MESSAGES,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}})
             choice = result["choices"][0]
             content = choice["message"]["content"]
-            checker.check("response-id", result.get("model") == "phaseshift", repr(result))
+            checker.check("response-id", result.get("model") == "shelf", repr(result))
             checker.check("finish-reason", choice.get("finish_reason") == "stop",
                           repr(choice))
             checker.check("content-nonempty", bool(content.strip()), repr(content))
@@ -60,7 +60,7 @@ def main() -> int:
             pids_before = compute_pids()
             result2 = http_json(
                 f"{server.base_url}/chat/completions",
-                {"model": "phaseshift", "messages": MESSAGES,
+                {"model": "shelf", "messages": MESSAGES,
                  "temperature": 0, "max_tokens": 32, "chat_template_kwargs": {"enable_thinking": False}})
             content2 = result2["choices"][0]["message"]["content"]
             checker.check("second-request-consistent", content == content2,

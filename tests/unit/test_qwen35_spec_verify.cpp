@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/runtime/spec_decode.h>
+#include <shelf/models/qwen35/runtime/spec_decode.h>
 
 #include <cstdint>
 #include <cstdio>

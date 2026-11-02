@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/config.h>
 
 #include <cstdio>
 #include <filesystem>

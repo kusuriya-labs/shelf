@@ -1,5 +1,5 @@
 #!/bin/bash
-./build/phaseshift-launcher server \
+./build/shelf-launcher server \
     --model-dir models/Qwen3.8-27B-FP8 \
     --eagle4-model-dir models/Qwen3.8-27B-EAGLE4 --eagle4-drafts 7 --eagle4-lm-head draft \
     --device 0,1 \

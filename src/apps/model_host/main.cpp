@@ -1,6 +1,6 @@
-#include <phaseshift/resident/resident_client.h>
-#include <phaseshift/resident/resident_host.h>
-#include <phaseshift/resident/resident_protocol.h>
+#include <shelf/resident/resident_client.h>
+#include <shelf/resident/resident_host.h>
+#include <shelf/resident/resident_protocol.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -24,12 +24,12 @@ using r::StatusCode;
 
 void usage() {
     std::fprintf(stderr,
-        "usage: phaseshift-model-host --socket PATH [--device N] "
+        "usage: shelf-model-host --socket PATH [--device N] "
         "[--staging-gib G] [--warmup-qwen35 DIR]... [--warmup-dflash2 DIR]... "
         "[--warmup-eagle4 DIR]... "
         "[--warmup-tp-size N] [--warmup-tp-rank N] "
         "[--model-dir DIR]... [--allow-any-dir] [--health-timeout-ms N] [--no-vmm]\n"
-        "       phaseshift-model-host --socket PATH --ctl "
+        "       shelf-model-host --socket PATH --ctl "
         "{ping|health|stats|shutdown|release KEY}\n");
 }
 
@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
         options.staging_bytes = 30ull * 1024ull * 1024ull * 1024ull;
     }
     if (vmm) {
-        ::setenv("PHASESHIFT_ARENA_VMM", "1", 0);
+        ::setenv("SHELF_ARENA_VMM", "1", 0);
     }
 
     auto host_result = ResidentModelHost::create(options);
@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     const auto stats = host.stats();
-    std::fprintf(stderr, "PHASESHIFT_RESIDENT_HOST_READY socket=%s device=%d "
+    std::fprintf(stderr, "SHELF_RESIDENT_HOST_READY socket=%s device=%d "
                  "entries=%zu resident_bytes=%zu disk_load_count=%llu\n",
                  options.socket_path.c_str(), options.device, stats.entries,
                  stats.resident_bytes,

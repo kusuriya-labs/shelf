@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/optimized/gdn/recurrence.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <cstdint>
@@ -206,8 +206,8 @@ bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, si
 
 int main() {
     std::printf("=== GDN compact-log commit bit-exactness ===\n");
-    unsetenv("PHASESHIFT_GDN_RECURRENCE_EXACT");
-    unsetenv("PHASESHIFT_GDN_RECURRENCE_LOSSY");
+    unsetenv("SHELF_GDN_RECURRENCE_EXACT");
+    unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
 
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {

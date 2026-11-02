@@ -92,7 +92,7 @@ def reconstruct_tool_calls(chunks):
 def check_thinking_tool_call(checker, server, processor, token_log):
     result = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift", "messages": MESSAGES,
+        {"model": "shelf", "messages": MESSAGES,
          "tools": [WEATHER_TOOL], "tool_choice": "auto",
          "temperature": 0, "max_completion_tokens": 768})
     choice = result["choices"][0]
@@ -133,7 +133,7 @@ def check_thinking_tool_call(checker, server, processor, token_log):
 
     round_trip = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift",
+        {"model": "shelf",
          "messages": MESSAGES + [
              {"role": "assistant", "content": None, "reasoning_content": reasoning,
               "tool_calls": [
@@ -160,7 +160,7 @@ def check_thinking_tool_call(checker, server, processor, token_log):
 
 def check_streaming_tool_call(checker, server, expected_reasoning):
     chunks = list(http_sse(f"{server.base_url}/chat/completions", {
-        "model": "phaseshift", "messages": MESSAGES,
+        "model": "shelf", "messages": MESSAGES,
         "tools": [WEATHER_TOOL], "tool_choice": "auto",
         "stream": True, "temperature": 0, "max_completion_tokens": 768}))
     result = reconstruct_tool_calls(chunks)
@@ -194,7 +194,7 @@ def check_streaming_tool_call(checker, server, expected_reasoning):
 def check_tools_without_thinking(checker, server):
     result = http_json(
         f"{server.base_url}/chat/completions",
-        {"model": "phaseshift", "messages": MESSAGES,
+        {"model": "shelf", "messages": MESSAGES,
          "tools": [WEATHER_TOOL], "tool_choice": "auto",
          "temperature": 0, "max_completion_tokens": 256,
          "chat_template_kwargs": {"enable_thinking": False}})
@@ -215,7 +215,7 @@ def main() -> int:
     try:
         processor = load_processor()
         with ServerHarness(max_seq_len=1024,
-                           env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
+                           env={"SHELF_SERVER_TOKEN_LOG": str(token_log)}) as server:
             reasoning = check_thinking_tool_call(
                 checker, server, processor, token_log)
             check_streaming_tool_call(checker, server, reasoning)

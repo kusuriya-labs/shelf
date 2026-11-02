@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen4exp/hyper/gated_residual.h>
+#include <shelf/models/qwen4exp/hyper/gated_residual.h>
 
 #include <algorithm>
 #include <cmath>

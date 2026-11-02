@@ -1,4 +1,4 @@
-#include <phaseshift/kernels/optimized/attention/paged_attention.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
 
 #include <hip/hip_runtime.h>
 
@@ -36,7 +36,7 @@ float next_float() {
 void set_qh(uint32_t qh) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%u", qh);
-    (void)setenv("PHASESHIFT_PAGED_ATTENTION_SPLIT_REDUCE_QH", buf, 1);
+    (void)setenv("SHELF_PAGED_ATTENTION_SPLIT_REDUCE_QH", buf, 1);
 }
 
 struct Case {

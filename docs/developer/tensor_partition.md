@@ -2,10 +2,10 @@
 
 logical tensor の tensor parallel (TP) partition と、それを weight へ適用する
 materialization contract の source of truth である。
-該当コードは `include/phaseshift/weights/tensor_partition.h` /
-`src/phaseshift/weights/tensor_partition.cpp` /
-`include/phaseshift/weights/canonical_partition.h` /
-`src/phaseshift/weights/canonical_partition.cpp`。
+該当コードは `include/shelf/weights/tensor_partition.h` /
+`src/shelf/weights/tensor_partition.cpp` /
+`include/shelf/weights/canonical_partition.h` /
+`src/shelf/weights/canonical_partition.cpp`。
 
 ## 1. 正式な materialization 順序
 
@@ -269,7 +269,7 @@ rank1: {1024,1024} {3072,1024}  {7168,3072}
 ```
 
 model-specific な plan は `build_qwen35_tensor_partition_plan`
-（`include/phaseshift/models/qwen35/weights/tensor_parallel_plan.h`）が生成する。
+（`include/shelf/models/qwen35/weights/tensor_parallel_plan.h`）が生成する。
 `TensorPartitionDesc` へ `head_dim` / `num_heads` / GDN / expert / model family
 などの model 情報は入れない。
 

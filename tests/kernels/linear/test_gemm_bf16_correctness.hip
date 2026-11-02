@@ -1,6 +1,6 @@
-#include <phaseshift/kernels/correctness/standalone/gemm_bf16_correctness.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
+#include <shelf/kernels/correctness/standalone/gemm_bf16_correctness.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <cstdio>
 #include <vector>

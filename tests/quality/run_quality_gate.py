@@ -12,12 +12,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> int:
-    model_dir = os.environ.get("PHASESHIFT_MODEL_DIR")
+    model_dir = os.environ.get("SHELF_MODEL_DIR")
     if not model_dir:
-        print("PHASESHIFT_MODEL_DIR is not set", file=sys.stderr)
+        print("SHELF_MODEL_DIR is not set", file=sys.stderr)
         return 77
-    build_dir = Path(os.environ.get("PHASESHIFT_BUILD_DIR", REPO_ROOT / "build"))
-    device = os.environ.get("PHASESHIFT_QUALITY_DEVICE", "0")
+    build_dir = Path(os.environ.get("SHELF_BUILD_DIR", REPO_ROOT / "build"))
+    device = os.environ.get("SHELF_QUALITY_DEVICE", "0")
     command = [
         sys.executable,
         str(REPO_ROOT / "tools" / "quality_gate.py"),

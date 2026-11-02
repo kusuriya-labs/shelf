@@ -1,10 +1,10 @@
-# phaseshift-server
+# shelf-server
 
 OpenAI互換のchat servingアプリ。model directoryを指定して起動すると、
 `/v1` 配下でOpenAI Chat Completions APIのsubsetを提供する。
 
 ```bash
-./build/phaseshift-server \
+./build/shelf-server \
     --model-dir /path/to/Qwen3.8-27B-FP8 \
     --port 8123
 ```
@@ -29,20 +29,20 @@ LocalAI・gRPC・protobuf・XGrammar は要らない。
 ## 起動
 
 ```bash
-./build/phaseshift-server \
+./build/shelf-server \
     --model-dir /path/to/Qwen3.8-27B-FP8
 ```
 
-起動順は model processor load → `phaseshift-compute` subprocess 起動 → `ping` →
+起動順は model processor load → `shelf-compute` subprocess 起動 → `ping` →
 capability 取得 → HTTP listen である。model load は server lifetime 中に 1 回だけ行われ、
 request ごとに compute process を起動しない。server が ready になるまで port は accept しない。
 
 起動完了時、stderr に以下が表示される。
 
 ```text
-PhaseShift Server
+Shelf Server
 
-Model:        phaseshift (Qwen3.8-27B-FP8)
+Model:        shelf (Qwen3.8-27B-FP8)
 Endpoint:     http://127.0.0.1:8000/v1
 Context:      32768
 Concurrency:  4
@@ -70,7 +70,7 @@ Ready.
 | `--model MODEL` | model name reported by the API |
 | `--host HOST` | listen address (default 127.0.0.1) |
 | `--port PORT` | listen port (default 8000) |
-| `--compute COMPUTE` | phaseshift-compute path |
+| `--compute COMPUTE` | shelf-compute path |
 | `--max-seq-len MAX_SEQ_LEN` | max sequence length (default 32768) |
 | `--max-concurrent-requests MAX_CONCURRENT_REQUESTS` | max in-flight requests (default 4) |
 | `--arena-gib N\|auto` | GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto) |
@@ -109,7 +109,7 @@ Ready.
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
 
 ```bash
-./build/phaseshift-server \
+./build/shelf-server \
     --model-dir models/Qwen3.8-27B-FP8 \
     --dflash2-model-dir models/Qwen3.8-27B-DFlash2 \
     --port 8123 \
@@ -127,7 +127,7 @@ Ready.
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "phaseshift",
+    "model": "shelf",
     "messages": [
       {"role": "user", "content": "Hello"}
     ],
@@ -142,7 +142,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 curl -N http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "phaseshift",
+    "model": "shelf",
     "messages": [
       {"role": "user", "content": "Hello"}
     ],
@@ -168,7 +168,7 @@ usage チャンクの例:
   "id": "chatcmpl-...",
   "object": "chat.completion.chunk",
   "created": 1780000000,
-  "model": "phaseshift",
+  "model": "shelf",
   "choices": [],
   "usage": {
     "prompt_tokens": 12,
@@ -191,7 +191,7 @@ curl http://127.0.0.1:8000/v1/meta
 
 ```json
 {
-  "model": "phaseshift",
+  "model": "shelf",
   "max_seq_len": 32768,
   "max_concurrent_requests": 4,
   "default_max_output_tokens": 65536,
@@ -257,15 +257,15 @@ curl http://127.0.0.1:8000/v1/meta
 
 `/v1/meta` の `max_seq_len` が正本である。クライアント側の context 上限を次の 2 箇所で揃える。
 
-- OpenCode: `opencode.json` の `providers.phaseshift.models.phaseshift.limit.context`
-- DeepSeek Harness: `cordis.patch.yml` の `llm-pi-ai` にある `phaseshift` provider の
+- OpenCode: `opencode.json` の `providers.shelf.models.shelf.limit.context`
+- DeepSeek Harness: `cordis.patch.yml` の `llm-pi-ai` にある `shelf` provider の
   model entry の `contextWindow`（出力上限は `maxTokens`。OpenCode の `limit.output` と揃える）
 
 32 GiB の GPU 1 枚では 27B の FP8 重みに KV を足せないため、131072 token を配るときは
 TP=2 と FP8 KV を使う。
 
 ```bash
-./build/phaseshift-server \
+./build/shelf-server \
     --model-dir models/Qwen3.8-27B-FP8 \
     --tp 2 --device 2,3 --port 8123 \
     --kv-cache-dtype fp8 --max-seq-len 131072
@@ -288,7 +288,7 @@ reasoning_effort（low / medium / xhigh）
 chat_template_kwargs（enable_thinking / preserve_thinking）
 ```
 
-`top_k` は PhaseShift extension である。指定がない値の既定は
+`top_k` は Shelf extension である。指定がない値の既定は
 `temperature=0`（greedy）/ `top_p=1.0` / `top_k=0` / `seed=0` である。
 
 ### reasoning（thinking）
@@ -301,7 +301,7 @@ Qwen3.8 の thinking は**既定で有効**である。生成した思考は
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "phaseshift",
+    "model": "shelf",
     "messages": [{"role": "user", "content": "12と19を足すと？"}],
     "reasoning_effort": "xhigh",
     "temperature": 0,
@@ -354,7 +354,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "phaseshift",
+    "model": "shelf",
     "messages": [
       {"role": "user", "content": "大阪の現在の気温をget_weatherを使って確認して"}
     ],
@@ -405,8 +405,8 @@ JSON string である。
 }
 ```
 
-PhaseShift Server は tool を実行しない。実際の tool 実行は client 側（OpenCode 等）が行う。
-client が tool 結果を `role: "tool"` message として返すと、PhaseShift はそれを読んで次の
+Shelf Server は tool を実行しない。実際の tool 実行は client 側（OpenCode 等）が行う。
+client が tool 結果を `role: "tool"` message として返すと、Shelf はそれを読んで次の
 assistant 応答を生成する。
 
 `tool_choice` は `auto` / `none` のみ受け付ける。`none` は tool 定義を model へ渡さない。
@@ -473,7 +473,7 @@ page 単位で保持し、共有 prefix への extension や multi-turn の会�
 ## エージェントからの利用
 
 agent frontend は OpenAI 互換 client として接続する。ユーザーが起動するのは
-`phaseshift-server` だけである。
+`shelf-server` だけである。
 
 ### OpenCode
 
@@ -482,15 +482,15 @@ OpenCode の project config（`opencode.jsonc`）に OpenAI-compatible provider 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "phaseshift/phaseshift",
+  "model": "shelf/shelf",
   "providers": {
-    "phaseshift": {
-      "name": "PhaseShift",
-      "env": ["PHASESHIFT_API_KEY"],
+    "shelf": {
+      "name": "Shelf",
+      "env": ["SHELF_API_KEY"],
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {"baseURL": "http://127.0.0.1:8000/v1"},
-      "models": {"phaseshift": {
-        "name": "PhaseShift",
+      "models": {"shelf": {
+        "name": "Shelf",
         "limit": {"context": 32768, "output": 8192}
       }}
     }
@@ -509,8 +509,8 @@ budget を要求するが、server は明示 `max_tokens` を残り context wind
 `stream_options.include_usage` を OpenCode が既定で送るため、server 側の
 stream 応答に usage チャンクが載っていればそのまま表示される。
 
-`PHASESHIFT_API_KEY` は任意の dummy 値でよい（PhaseShift は認証を行わない）。
-model は `phaseshift/phaseshift` を選ぶ。
+`SHELF_API_KEY` は任意の dummy 値でよい（Shelf は認証を行わない）。
+model は `shelf/shelf` を選ぶ。
 
 Codex CLI は Responses API を使うため対象外である。
 
@@ -524,12 +524,12 @@ route を追加する。
 - id: llm-pi-ai
   config:
     providers:
-      phaseshift:
-        apiKeyEnv: PHASESHIFT_API_KEY
+      shelf:
+        apiKeyEnv: SHELF_API_KEY
         api: openai-completions
         baseURL: http://127.0.0.1:8000/v1
         models:
-          - id: phaseshift
+          - id: shelf
             contextWindow: 32768
 ```
 
@@ -548,11 +548,11 @@ pip install 'aiohttp' 'transformers==5.14.1'
 
 server / compute の責務境界は
 [../developer/architecture.md](../developer/architecture.md) を参照する。
-ユーザーは `phaseshift-compute` を個別に起動する必要はない。
+ユーザーは `shelf-compute` を個別に起動する必要はない。
 
 ## エラー挙動
 
-- 起動: 不正な option 値、model directory 不在、`phaseshift-compute` 不在は、
+- 起動: 不正な option 値、model directory 不在、`shelf-compute` 不在は、
   stderr へ理由を表示して non-zero で終了する。
 - request: unsupported な parameter、不正な message role、不正な tool arguments、
   未知の model name は HTTP 400（model は 404）であり、生成を開始しない。
@@ -564,10 +564,10 @@ server / compute の責務境界は
 ## テスト
 
 server / compute の E2E は `tests/server/` の Python suite で検証する。model directory は
-`PHASESHIFT_MODEL_DIR` で指定する。
+`SHELF_MODEL_DIR` で指定する。
 
 ```bash
-PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-FP8 \
+SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 \
 python3 tests/server/run_server_regression.py --all
 ```
 

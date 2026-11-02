@@ -1,9 +1,9 @@
-#include <phaseshift/kernels/optimized/gdn/recurrence.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/models/qwen35/state/state_types.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/program/device_program.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/program/device_program.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 
@@ -358,9 +358,9 @@ bool run_case(const Case& c) {
         if (out_nan_hit == 0u || state_nan_hit == 0u) ++out_bigdiff;
     }
     const bool lossy = []() {
-        const char* x = std::getenv("PHASESHIFT_GDN_RECURRENCE_EXACT");
+        const char* x = std::getenv("SHELF_GDN_RECURRENCE_EXACT");
         if (x != nullptr && x[0] != '\0' && x[0] != '0') return false;
-        const char* l = std::getenv("PHASESHIFT_GDN_RECURRENCE_LOSSY");
+        const char* l = std::getenv("SHELF_GDN_RECURRENCE_LOSSY");
         if (l != nullptr && l[0] == '0') return false;
         return true;
     }();

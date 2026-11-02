@@ -1,7 +1,7 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -27,9 +27,9 @@ static void check(bool cond, const std::string& msg) {
 }
 
 int main() {
-    const char* dir = std::getenv("PHASESHIFT_MODEL_DIR_DFLASH2");
+    const char* dir = std::getenv("SHELF_MODEL_DIR_DFLASH2");
     if (dir == nullptr || dir[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_DFLASH2\n");
+        std::printf("SKIP: set SHELF_MODEL_DIR_DFLASH2\n");
         return 77;
     }
     if (hipSetDevice(0) != hipSuccess) {

@@ -2,15 +2,15 @@
 
 #include "compute_runtime.h"
 
-#include <phaseshift/models/qwen35/dflash2/config.h>
-#include <phaseshift/models/qwen35/eagle4/config.h>
-#include <phaseshift/models/qwen35/eagle4/executor.h>
-#include <phaseshift/models/qwen35/eagle4/weights.h>
-#include <phaseshift/models/qwen35/dflash2/executor.h>
-#include <phaseshift/models/qwen35/dflash2/weights.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_session_pool.h>
-#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/resident/resident_client.h>
+#include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/qwen35/eagle4/config.h>
+#include <shelf/models/qwen35/eagle4/executor.h>
+#include <shelf/models/qwen35/eagle4/weights.h>
+#include <shelf/models/qwen35/dflash2/executor.h>
+#include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/resident/resident_client.h>
 
 #include <cstdint>
 #include <optional>

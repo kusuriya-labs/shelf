@@ -1,15 +1,15 @@
-#include <phaseshift/kernels/optimized/kv_append.h>
-#include <phaseshift/kernels/kv_types.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
-#include <phaseshift/models/qwen35/model/qwen35_model.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/arena.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/runtime/execution/row_bucket.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/runtime/program/program.h>
-#include <phaseshift/models/qwen35/runtime/selector_types.h>
+#include <shelf/kernels/optimized/kv_append.h>
+#include <shelf/kernels/kv_types.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/runtime/program/program.h>
+#include <shelf/models/qwen35/runtime/selector_types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>
 #include <hip/hip_runtime.h>
@@ -65,7 +65,7 @@ struct Options {
 
 void usage(FILE* f) {
     std::fprintf(f,
-                 "usage: phaseshift-bench kv-append [options]\n"
+                 "usage: shelf-bench kv-append [options]\n"
                  "  --variant correctness|optimized|auto\n"
                  "  --rows 1,2,4,...\n"
                  "  --kv-dtype bf16|fp8\n"

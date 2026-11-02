@@ -1,8 +1,8 @@
-#include <phaseshift/kernels/optimized/stochastic_sampling.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/program/device_program.h>
+#include <shelf/kernels/optimized/stochastic_sampling.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/runtime/batch/device_batch_context.h>
+#include <shelf/runtime/program/device_program.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

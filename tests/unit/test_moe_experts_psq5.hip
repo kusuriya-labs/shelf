@@ -1,13 +1,13 @@
-#include <phaseshift/core/gpu/cleanup.h>
-#include <phaseshift/core/memory/types.h>
-#include <phaseshift/kernels/correctness/model_dispatch_correctness.h>
-#include <phaseshift/models/common/qwen_hybrid/moe_math.h>
-#include <phaseshift/quantization/manifest/quantized_manifest.h>
-#include <phaseshift/quantization/psq5/psq5.h>
-#include <phaseshift/quantization/quantization_types.h>
-#include <phaseshift/runtime/graph/primitive_graph.h>
-#include <phaseshift/runtime/program/device_program.h>
-#include <phaseshift/runtime/program/program.h>
+#include <shelf/core/gpu/cleanup.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/models/common/qwen_hybrid/moe_math.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/psq5/psq5.h>
+#include <shelf/quantization/quantization_types.h>
+#include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/program/device_program.h>
+#include <shelf/runtime/program/program.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>

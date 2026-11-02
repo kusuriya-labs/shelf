@@ -1,7 +1,7 @@
 # FP8 KV 品質劣化の原因特定と修正（fp8 paged prefill）
 
 - 実施日: 2026-10-23
-- 対象: `src/phaseshift/kernels/optimized/attention/paged_prefill.hip` の fp8 経路
+- 対象: `src/shelf/kernels/optimized/attention/paged_prefill.hip` の fp8 経路
 - 対象 model: `models/Qwen3.8-27B-FP8`（HF FP8）
 - GPU: Radeon PRO R9700（gfx1201）× 1（`--device 1`）
 - 環境: Git `990e42ce7dd6ff6edc303af3e0b6fd6265e6fdf0`、HIP 7.15.26333、AMD clang 23.0.0git
@@ -28,7 +28,7 @@ D1 と D2 は独立に致命的で、D2 は NaN または無相関な値を生�
 ## 計測方法
 
 - 比較はすべて同一 GPU（`--device 1`）で、BF16 KV と FP8 KV を同一 corpus・
-  同一採点位置で行った。`phaseshift-bench quality` の `--compare` を使う。
+  同一採点位置で行った。`shelf-bench quality` の `--compare` を使う。
 - `ctx` は prefill する token 数、採点は既定で `ctx+1` 以降。
   `ctx128` と `ctx1600` の数値をそのまま並べると採点範囲が違うため、
   追加した `--score-start-position 1601` で採点開始位置を固定した比較も行った。
@@ -133,7 +133,7 @@ page 最大重みが 1e-30 未満のときだけ作用し、ピーク 256 では
 
 ## E8: 性能影響（V staging の転置）
 
-`phaseshift-bench pp --prompt-tokens 2048 --kv-cache-dtype fp8 --runs 1 --warmup 1` を
+`shelf-bench pp --prompt-tokens 2048 --kv-cache-dtype fp8 --runs 1 --warmup 1` を
 同一 GPU で交互に 5 回（gpu_tokens_per_sec、p50）。
 
 | build | p50 tok/s | 5 回の範囲 |
