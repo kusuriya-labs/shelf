@@ -270,19 +270,12 @@ rank1: {1024,1024} {3072,1024}  {7168,3072}
 
 model-specific な plan は `build_qwen35_tensor_partition_plan`
 （`include/shelf/models/qwen35/weights/tensor_parallel_plan.h`）が生成する。
-`TensorPartitionDesc` へ `head_dim` / `num_heads` / GDN / expert / model family
+`TensorPartitionDesc` へ `head_dim` / `num_heads` / GDN / unit / model family
 などの model 情報は入れない。
 
-## 10. fused expert tensor (EP) の例
+## 10. rank-3 tensor の例
 
-routed expert の fused tensor:
-
-```text
-gate_up_proj: [512, 1280, 2560]
-down_proj:    [512, 2560, 640]
-```
-
-EP=2 で axis=0 の single-range partition で表現できる
+`[E, N, K]` の 3D tensor は axis=0 の single-range partition で表現できる
 （`TensorPartitionDesc` の基本 case）:
 
 ```text
@@ -329,6 +322,6 @@ host mediated / topology-specific transport）は将来の Gate で選ぶ。
 | test | 内容 |
 | --- | --- |
 | `test_tensor_partition` | descriptor validation / local shape / block alignment / plan（pure CPU） |
-| `test_canonical_partition` | BF16 1D/2D/3D・segmented、segmented GDN / 3D expert / N-K partition、FP8、reject（pure CPU） |
+| `test_canonical_partition` | BF16 1D/2D/3D・segmented、segmented GDN / 3D unit / N-K partition、FP8、reject（pure CPU） |
 | `test_qwen35_tensor_parallel_plan` | Qwen35 Dense plan builder（mini + Qwen3.8-27B geometry、q_proj head pair、GDN qkv coverage、replicated tensor）（pure CPU） |
 | `test_weight_load` | BF16 / FP8 の quantized GPU load、preshuffle on/off、Qwen35 guard（GPU） |

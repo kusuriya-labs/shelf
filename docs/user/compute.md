@@ -20,7 +20,7 @@
 | `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
-| `--decode-backend TYPE` | host (default) |
+| `--decode-backend TYPE` | hip (default) |
 | `--verify-weights 0\|1` | verify quantized payload CRC32 on load (default 0) |
 | `--dump-logits PATH` | append per-step sampled logits rows (raw f32) to PATH row k aligns with GENERATED_IDS[k] (prefill row first) |
 | `--hidden-taps LIST` | comma separated layer ids (max 8) for intermediate hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE |
@@ -80,13 +80,10 @@ real-quantized fp8 model dir（`quantization_config` の `quant_method: fp8` か
 
 ### decode backend
 
-`--decode-backend` の既定値は `host` で、現時点で受理する値は `host` のみである。
-`ContinuousBatcher` と Host 実行経路を使う既定の構成である。選択結果は
-`DECODE_BACKEND=host` として stdout に出力する
+`--decode-backend` の既定値は `hip` で、現時点で受理する値は `hip` のみである。
+gfx1201 の HIP kernel で decode を実行する既定構成である。選択結果は
+`DECODE_BACKEND=hip` として stdout に出力する
 （`--serve-stdio` の JSON Lines protocol には混ぜない）。
-
-GPU-MCU backend はこの build に含まれない。実装と R&D 記録は
-`exp/gpu-mcu` ブランチへ退避している。
 
 ### DFlash2 speculative decoding
 

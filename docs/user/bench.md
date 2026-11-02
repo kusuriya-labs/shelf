@@ -63,7 +63,7 @@ detail and is not a `--variant` value.
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
 | `--runs N` | (default 3) |
 | `--warmup N` | (default 0) |
-| `--decode-backend TYPE` | host (default) |
+| `--decode-backend TYPE` | hip (default) |
 | `--output PATH` | (default none) |
 <!-- /cli:bench-pp -->
 
@@ -93,7 +93,7 @@ rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらない�
 | `--perf-stats-output PATH` | (default none, diagnostic decode counters) |
 | `--tokens-file PATH` | PSKLDTOK corpus file used as the context |
 | `--tokens-offset N` | corpus position to start the context (default 0) |
-| `--decode-backend TYPE` | host (default) |
+| `--decode-backend TYPE` | hip (default) |
 <!-- /cli:bench-tg -->
 
 greedy mode は `--compute-logits 1` が必要。

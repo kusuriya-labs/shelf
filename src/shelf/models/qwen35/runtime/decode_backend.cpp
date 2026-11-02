@@ -9,7 +9,7 @@ namespace runtime {
 const char* decode_backend_name(DecodeBackend backend) {
     switch (backend) {
         case DecodeBackend::Hip:
-            return "Hip";
+            return "hip";
     }
     return "unknown";
 }
@@ -18,7 +18,7 @@ bool parse_decode_backend(const char* text, DecodeBackend* out) {
     if (text == nullptr || out == nullptr) {
         return false;
     }
-    if (strcasecmp(text, "host") == 0) {
+    if (strcasecmp(text, "hip") == 0) {
         *out = DecodeBackend::Hip;
         return true;
     }

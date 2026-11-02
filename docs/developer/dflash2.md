@@ -11,7 +11,6 @@ verify し、一致した prefix だけを commit する。
 - `--dflash2-model-dir` を指定したときだけ DFlash2 経路に入る。未指定時は既存の
   `ContinuousBatcher` 経路を変更しない。
 
-経緯・benchmark・採用判断は DFlash2 実装記録（`rnd/dflash2/dflash2.md`） を参照。
 現在の性能値は [current performance](../perf/current.md) を参照。
 
 ---
@@ -114,7 +113,7 @@ drafter の backbone は BF16 のみを受け付ける。
 ### hidden taps
 
 DFlash2 drafter は target の途中層の出力を入力に使う。tap は
-`Qwen35LowerOptions::hidden_taps` で明示指定し、**自動推測しない**。
+`Qwen35LowerOptions::hidden_taps`（executor 側は `ExecutorConfig::target_hidden_taps`）で明示指定し、**自動推測しない**。
 
 値の定義:
 
@@ -693,7 +692,7 @@ partial reject 時に full target rerun を不要にするため、verify の各
 その場で記録する。**compact log path のみ**である。
 
 - **recurrent** は `{a_i, k_i, δ_i}` の compact log を保存し、accept prefix を逐次 replay で
-  再構成する（`rnd/gdn/compact_commit_poc.md`）。
+  再構成する。
 - **conv** は `GdnSpecHistory` の conv のみを保持する（shift register であり、受け入れ済み
   token から再計算できないため）。`create_gdn_spec_history` は `with_recurrent=false` で
   呼び、rec buffer を作らない。

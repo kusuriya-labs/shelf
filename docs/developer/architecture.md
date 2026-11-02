@@ -78,12 +78,6 @@ weight の canonical → partition → preshuffle → upload の順序 contract 
 
 CMake targetの一覧は `cmake/targets.cmake` を参照。
 
-## GPU-MCU
-
-GPU-MCU backend はこの branch に含まれない。実装と contract は
-`exp/gpu-mcu` ブランチへ退避している。
-
-
 ## 依存ルール（enforced by `test_architecture_boundaries`）
 
 ```text

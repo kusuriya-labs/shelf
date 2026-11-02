@@ -70,7 +70,7 @@ void print_usage(FILE* out) {
         "  --perf-stats-output PATH     (default none, diagnostic decode counters)\n"
         "  --tokens-file PATH           PSKLDTOK corpus file used as the context\n"
         "  --tokens-offset N            corpus position to start the context (default 0)\n"
-        "  --decode-backend TYPE        host (default)\n");
+        "  --decode-backend TYPE        hip (default)\n");
 }
 
 bool parse_bool(const std::string& value, bool& out) {

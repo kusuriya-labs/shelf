@@ -58,5 +58,4 @@ greedy トークンを f64 oracle で計算し、bench の `GREEDY_FIRST_TOKENS`
 
 turn2 の margin: top1 26.004508 vs top2 23.703756（HF oracle fixture の
 26.0045166015625 / 23.703771591186523 と一致）。interactive multi-turn のみ
-optimized 側が flip する（`docs/rnd/gdn/optimization_history.md` §7.43 /
-`docs/rnd/quantization/kernel_optimization_history.md` §7.44 参照）。
+optimized 側が flip する。

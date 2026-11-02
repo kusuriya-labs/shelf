@@ -25,9 +25,7 @@ scheduler / executor は decode region と verify region を 1 つの `Scheduled
 verify token staging）と commit（accept + GDN restore + ring append）へ分割し、
 batcher が decode region を前置した `ScheduledBatch` を組んで 1 回だけ `execute_batch`
 する。実装上の制約（mixed batch に載せられる verify request は 1 つまで、
-`capture_rows` と row index の扱い）は
-`rnd/dflash2/phase2_phase3_plan.md` の
-「3B mixed batch の実装制約」を参照。
+`capture_rows` と row index の扱い）がある。
 
 drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）で ALU 律速を
 下げたが、draft GPU 時間は依然 request 数に対して増える
@@ -35,8 +33,6 @@ drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）で ALU 
 
 ## 4. リファレンス実装（vllm-mxfp4）との差分から採用するもの
 
-外部事実は `references/vllm_mxfp4.md`、
-こちらの現状と評価は `rnd/reference_gap_analysis.md`。
 優先順は次のとおり。
 
 1. **small-M split-K decode GEMM（M≤64）** と **kernel trace 内訳に基づく launch 削減**
@@ -48,7 +44,7 @@ drafter の batched proposal は `v_dot2c_f32_bf16`（`ExactRowsDot2`）で ALU 
 ## 5. serving の改善対象（BetterBench で測定）
 
 `vendor/BetterBench` によるカテゴリ別比較の経緯と実測は
-`rnd/reference_gap_analysis.md` §5、外部参照は `references/radiance_stack.md`。
+[../perf/current.md](../perf/current.md)。
 当時の計測は MXFP4 model 構成で行い、この構成は現在の runtime では非対応である
 （BF16 / FP8 構成での再計測は未実施）。
 

@@ -213,7 +213,7 @@ D2D copy を経由しても壊れるため、L2 writeback ではなく PCIe remo
 write）は安定し、PULL（destination device stream = remote read）は壊れる。
 一方 **kernel からの peer store は 4 KiB〜1 MiB / 両方向 / 1000 回で再現性を
 もって正常**である。本 transport は peer store のみで構成している。
-切り分けの記録は `rnd/tp_exec2_p2p.md`。
+切り分けは P2P transport の有無で行う。
 
 ### transport microbenchmark
 
@@ -226,7 +226,7 @@ shelf-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters N]
 （hip-p2p: 大 payload で >= 20.0 GB/s かつ rows=1 で <= 150 us、
 host-mediated: 大 payload で >= 1.2 GB/s かつ rows=1 で <= 400 us）を判定する。
 実測値と再現条件は R&D record
-`rnd/tp_exec2_p2p.md` を参照する。
+P2P transport の選択で切り分ける。
 
 対称 push 型は leader 直列型より小 payload の latency と大 payload の帯域の
 両方で優る。小 payload（rows=1）でも host 経由を上回るため、decode の
@@ -340,7 +340,7 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   `test_dflash2_tp_e2e` が backend ごとに「speculative ≡ target-only greedy」を
   48 token 全域で assert し、TP2 では partial reject 大半（18 rounds）の
   GDN capture / compact commit / restore を通る。
-  契約と実装経緯は `rnd/spec_decode/tp2_verify_only.md`。
+  契約は drafter を分割せず verify のみを TP2 で実行する。
 - device 不足は明示エラー（bench / compute）または skip（test runner 77）。
 - 異種 GPU は未サポート（同一 RDNA4 を前提。異なる場合は unsupported 方針）。
 

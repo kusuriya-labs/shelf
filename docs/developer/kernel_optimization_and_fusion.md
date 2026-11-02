@@ -52,7 +52,6 @@
     `budget_waves = min(4 × floor(47104 / (32 × vgpr_r)), 64)`、
     `blocks = min(budget_waves / (wg/32), 131072 / LDS, 64 / (wg/32))`。
     §7.88 の実測表を全行再現する。単一の正は
-    `docs/rnd/kernel_baseline_2026-10.md` §occupancy
   - 拘束条件 = min(register, LDS, wave 上限, grid)。**先にどれが拘束かを判定してから
     レジスタ圧レバーを語る。**
 - 実効転送速度の判別目安（streaming read 実測 636GB/s との比較）:
@@ -173,4 +172,4 @@ fused kernel を置かない）。融合を行う場合は次の手順を通す�
 - 現在の性能値: `docs/perf/current.md`
 - カーネル配置・分割: `docs/developer/kernels.md`
 - テスト: `docs/developer/testing.md`
-- 過去の融合候補調査・採否・総括的知見（当時は `docs/rnd/` に配置）: Git history
+- 過去の融合候補調査・採否・総括的知見: Git history

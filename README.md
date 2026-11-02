@@ -17,9 +17,6 @@ AMD RDNA4 GPU向けの単一ハードウェア推論ランタイムの研究プ�
 - KVキャッシュ: paged KV、BF16 / FP8_E4M3
 - 対応 dtype: BF16 / FP8 E4M3 のみ（weight・KV ともにこの 2 つ）
 
-GPU-MCU backend の実装は `exp/gpu-mcu` ブランチへ退避しており、この branch には
-含まれない。
-
 runtime の namespace は `qwen35` のままである。Qwen3.8-27B を「別 family へ rename
 済み」ではない。コード上の Qwen3.5 runtime family を基盤として、現在の主要
 performance target に Qwen3.8-27B の HF FP8 / BF16 model を使っている。

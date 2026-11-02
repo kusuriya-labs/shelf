@@ -106,12 +106,11 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
   `is_quantized_model_dir` がこの経路を検出し、
   `load_qwen35_weights_from_quantized_safetensors` が合成 manifest 経路へ入る。
 
-### Fused rank-3 expert tensor の axis-slice ロード
+### axis-slice ロード
 
-`[E, N, K]` の fused expert tensor（例: `mlp.experts.gate_up_proj`
-`[512, 1280, 2560]`）から任意の Expert 範囲 `[unit_begin, unit_begin + unit_count)`
-だけを取り出して rank-2 の `MatrixWeight` としてロードできる。
-モデル全体を VRAM に載せず、指定 Expert 分の byte span だけを GPU へ転送する。
+`[E, N, K]` の rank-3 tensor から任意の unit 範囲 `[unit_begin, unit_begin + unit_count)`
+だけを取り出して rank-2 の `MatrixWeight` としてロードできる。全体を VRAM に載せない
+部分ロードのための API で、unit は tensor の最上位 axis である。
 
 ```cpp
 Result<MatrixWeight> load_bf16_matrix_axis_slice(
@@ -125,21 +124,19 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
     gpu::GpuArena& arena, hipStream_t stream, const WeightLoadOptions& options = {});
 ```
 
-- BF16 は rank-3 BF16 tensor のみ受け付ける。結果の `rows = unit_count * N`、
-  `cols = K`、`k_padded = K`。
+- BF16 は rank-3 BF16 tensor のみ受け付ける。結果は `rows = unit_count * N` /
+  `cols = K` / `k_padded = K`。
 - FP8 は codes が rank-3 の F8_E4M3 / U8、scale が BF16 rank-3
   `[E, ceil(N/128), K/128]`（`<codes_name>_scale_inv` naming）であることを要求する。
-  K が 128 の倍数でなければ拒否する。
-- span 解決は `SafetensorsCollection::axis_span`（G1 の読み取り専用 API）を使い、
-  mmap payload への直接ポインタから slice を HIP へ転送する。
-- FP8 は slice 後に既存の rank-2 canonical 経路（`Fp8BlockCanonicalView` validation →
-  `preshuffle_fp8_native` → upload）をそのまま使う。`options.preshuffle == false` では
-  canonical codes + F32 scale のまま GPU へ載せる。
-- **FP8 の rank-3 (N-D) canonical partition / materialization は unsupported のまま**
-  （[tensor_partition.md](tensor_partition.md) §5）。この経路は partition を使わず、
-  axis-0 単位の slice を rank-2 として扱う。
-- HF manifest 合成経路（`synthesize_hf_quantized_source`）は rank-2 codes のみ受理する
-  制約を変更しない。rank-3 fused expert はこの loader で直接扱う。
+- span 解決は `SafetensorsCollection::axis_span` が行う。
+- FP8 は slice 後の rank-2 canonical 経路（validation → preshuffle → upload）をそのまま使う。
+- **FP8 の rank-3 (N-D) canonical partition / materialization は unsupported**
+  （[tensor_partition.md](tensor_partition.md) §5）。
+- HF manifest 合成経路（`synthesize_hf_quantized_source`）は rank-2 codes のみ受理する。
+  rank-3 tensor はこの loader を直接使う。
+
+現在の production model（Qwen3.8-27B Dense）は rank-3 weight を持たないため、
+この経路は generic weights layer の API としてのみ存在し、model 側からの呼び出し元は無い。
 
 ## Runtime contract
 

@@ -67,7 +67,7 @@ void print_usage(FILE* out) {
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
-        "  --decode-backend TYPE        host (default)\n"
+        "  --decode-backend TYPE        hip (default)\n"
         "  --output PATH                (default none)\n");
 }
 

@@ -43,14 +43,12 @@ model_dispatch_correctness (ps::kernel, single launcher)
 backend で分けない。
 
 ```cpp
-enum class DecodeBackend { Host = 0 };
+enum class DecodeBackend { Hip = 0 };
 ```
 
 - `Executor::config.backend` の既定は `DecodeBackend::Hip`。
-- `--decode-backend` が受理する値は `host` のみで、それ以外は model load 前に
+- `--decode-backend` が受理する値は `hip` のみで、それ以外は model load 前に
   exit 2 で拒否される。
-- GPU-MCU backend はこの branch に含まれない。実装と contract は
-  `exp/gpu-mcu` ブランチへ退避している。
 
 ## Public API
 
@@ -183,8 +181,8 @@ timeout 0 pollと1 stepを交互に行い、各stepの前後で `ping` / `cancel
 
 `Qwen35RuntimeConfig::max_concurrent_requests`（compute CLI `--max-concurrent-requests`）は
 最大in-flight request数であり、`SequenceSlotPool` / `GdnStatePool` /
-`ExecutorConfig::max_scheduled_requests` / `ContinuousBatcher::max_scheduled_requests` に
-同一値として伝播する。defaultは1で、single-shotとsingle-request parityを変えない。
+`SequenceSlotPool` / `GdnStatePool` の slot 数と
+`ContinuousBatcher` の 1 step あたり上限に同一値として伝播する。defaultは1で、single-shotとsingle-request parityを変えない。
 
 論理concurrencyとphysical KV budgetは別契約である。
 
@@ -200,7 +198,7 @@ Queued requestをadmissionする。`max_concurrent_requests > 1` でも全reques
 
 複数requestは同一`ContinuousBatcher`へ`submit`され、1回の`step()`で
 `ScheduledBatch`としてco-batchされる。requestごとにHIP streamやExecutorを作らない。
-`StepResult::num_requests` が1 stepでco-batchされたrequest数である。debug時は
+`DeviceBatchContext::num_requests` が1 stepでco-batchされたrequest数である。debug時は
 `SHELF_BATCH_TRACE=1` でstderrへ `SHELF_BATCH_STEP requests=R tokens=T` を出す。
 
 注意: 通常decodeのlinear kernelはbatch行数に応じてGEMV / GEMM configを選択する

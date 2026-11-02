@@ -315,19 +315,19 @@ add_custom_target(
 
 # ---------------------------------------------------------------------------
 # shelf-compute decode backend contract (CPU-only: no GPU, no model).
-# --decode-backend must be decided before any model load: `host` alone is
+# --decode-backend must be decided before any model load: `hip` alone is
 # accepted and every other value is rejected with an explicit error.
 # ---------------------------------------------------------------------------
-add_test(NAME test_compute_decode_backend_host
-         COMMAND $<TARGET_FILE:shelf-compute> --decode-backend host)
-set_tests_properties(test_compute_decode_backend_host PROPERTIES
+add_test(NAME test_compute_decode_backend_hip
+         COMMAND $<TARGET_FILE:shelf-compute> --decode-backend hip)
+set_tests_properties(test_compute_decode_backend_hip PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "model-dir required"
                      FAIL_REGULAR_EXPRESSION "bad --decode-backend")
 
-add_test(NAME test_compute_decode_backend_reject_non_host
+add_test(NAME test_compute_decode_backend_reject_non_hip
          COMMAND $<TARGET_FILE:shelf-compute> --decode-backend gpu-mcu)
-set_tests_properties(test_compute_decode_backend_reject_non_host PROPERTIES
+set_tests_properties(test_compute_decode_backend_reject_non_hip PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --decode-backend"
                      FAIL_REGULAR_EXPRESSION "model-dir required")

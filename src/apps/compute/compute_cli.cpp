@@ -71,7 +71,7 @@ void compute_usage(const char* prog) {
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
     printf("                         (default auto = model config: native unless the\n");
     printf("                         checkpoint requests yarn)\n");
-    printf("  --decode-backend TYPE  host (default)\n");
+    printf("  --decode-backend TYPE  hip (default)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
     printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
@@ -225,7 +225,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
             const char* backend_text = argv[++i];
             if (!ps::qwen35::runtime::parse_decode_backend(backend_text,
                                                           &decode_backend)) {
-                fprintf(stderr, "bad --decode-backend: %s (expected host)\n",
+                fprintf(stderr, "bad --decode-backend: %s (expected hip)\n",
                         backend_text);
                 return kComputeParseError;
             }

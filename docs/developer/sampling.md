@@ -233,8 +233,7 @@ stochastic が 0 なら従来の greedy path を使う。
 `SamplingSelectorInput::stochastic_outputs` は host 側で数えた値を使う。selector の
 判断のために sampling params を D2H しない。
 
-`stochastic_topk_eligible` / `stochastic_top_k` も host 側（`submit_co_batch` の
-`ScheduledRequest::sampling`）で計算し、`HostExecutionContext` を通して渡す。
+`stochastic_topk_eligible` / `stochastic_top_k` も host 側（`submit_co_batch` が持つ `RuntimeRequest::sampling`）で計算し、`HostExecutionContext` を通して渡す。
 device 上の params を D2H して eligibility を判断することはない。
 
 ## 実装の配置

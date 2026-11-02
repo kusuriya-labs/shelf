@@ -3,9 +3,6 @@
 request の停止（termination）と、実行単位の有無（zero-work）は**別の概念**である。
 この文書が意味論の正本である。実装の所在は層ごとに異なるが、意味論は同一でなければならない。
 
-GPU-MCU backend はこの branch に含まれない。実装と両 backend の対応表は
-`exp/gpu-mcu` ブランチへ退避している。
-
 ## 概念の分離
 
 | 概念 | 意味 | 所有者 |
@@ -22,7 +19,7 @@ GPU-MCU backend はこの branch に含まれない。実装と両 backend の�
 
 executor・resolver・launcher は
 **request の生成意味論に基づく停止条件**
-（EOS / stop token / `max_new_tokens` / `max_sequence_length`）を判断しない。
+（EOS / stop token / `max_new_tokens` / `max_seq_len`）を判断しない。
 これらが判断するのは execution 上の「今回仕事があるか」だけである。
 
 execution failure は、その failure を検出した実行層から lifecycle に
@@ -38,7 +35,7 @@ token commit 時の semantic precedence は次の3つだけである。
 
 1. EOS / stop token
 2. `max_new_tokens`
-3. `max_sequence_length`（defensive）
+3. `max_seq_len`（defensive）
 
 同一 token が複数条件を満たす場合は**先のものが勝つ**。
 例えば「`max_new_tokens` の最後の token が EOS」なら `eos` である。
@@ -92,7 +89,7 @@ terminal → 他の terminal     （禁止）
 
 ### admission contract
 
-`max_sequence_length` は正常系の停止理由ではなく **admission constraint** である。
+`max_seq_len` は正常系の停止理由ではなく **admission constraint** である。
 Host の `ContinuousBatcher::submit()` は
 
 ```text
@@ -104,7 +101,7 @@ input_tokens.size() + max_new_tokens <= max_seq_len
 
 ```cpp
 static_cast<uint64_t>(prompt_length) +
-    static_cast<uint64_t>(max_new_tokens) <= max_sequence_length
+    static_cast<uint64_t>(max_new_tokens) <= config_.max_seq_len
 ```
 
 `max_seq_len` の terminal reason は残すが、
@@ -198,34 +195,29 @@ Model generation_config
 
 ## speculative decode の commit
 
-verify で受理した token 数（`accepted_count`）と、
-semantic に commit する token 数（`effective_commit_count`）は分離する。
-
-```text
-effective_commit_count =
-    accepted_count
-    ∩ remaining_generation_budget
-    ∩ remaining_sequence_capacity
-    ∩ (first_stop_token_position + 1)
-```
+verify で受理した draft 数（`SpecVerifyResult::num_accepted_drafts`）と、
+semantic に commit する token 数（`SpecVerifyResult::num_committed_target_tokens`）は分離する。
+commit 数は受理 draft に target の bonus token 1 を加えたものから、生成 budget
+（`max_new_tokens - generated_tokens`）と sequence 残り容量（`max_seq_len - position`）と
+terminal token 位置で上限を切る。
 
 **terminal token より後ろの token は、output だけでなく semantic state にも commit しない。**
 
-`effective_commit_count` と terminal reason は、
+`num_committed_target_tokens` と terminal reason は、
 resource / KV / output への副作用**より先に**決定する。
 
-`remaining_generation_budget` は `max_new_tokens - generated_tokens` であり、
+生成 budget の残りは `max_new_tokens - generated_tokens` であり、
 `generated_tokens >= max_new_tokens` のときは 0 である。
-`remaining_sequence_capacity` は `max_sequence_length - prefix_length` であり、
+sequence の残り容量は `max_seq_len - position` であり、
 prefix が既に limit 以上のときは 0 である。
-`max_sequence_length == 0` は limit なしを表す。
+`max_seq_len == 0` は limit なしを表す。
 
 ```text
 sampled / accepted tokens
         ↓
 stop-condition scan
         ↓
-effective_commit_count と terminal reason の決定
+commit 数の確定（num_committed_target_tokens）
         ↓
 resource / KV commit（effective 分のみ）
         ↓
@@ -236,10 +228,10 @@ generated_tokens の更新
 terminal reason の latch
 ```
 
-例えば accepted が `A B EOS C D`（`accepted_count = 5`）であれば
+例えば accepted が `A B EOS C D`（`num_accepted_drafts = 5`）であれば
 
 ```text
-effective_commit_count = 3
+commit 数 = 3
 terminal_reason = eos
 ```
 
@@ -258,6 +250,6 @@ remaining budget = 2、tokens = A B EOS
     （budget の外側に EOS があるということは EOS は発生していない）
 ```
 
-`effective_commit_count` は resource commit より**先に**確定する。
+`commit 数` は resource commit より**先に**確定する。
 resource commit を先に行うと accepted 全数が resource へ
 入り、terminal token より後ろの token が state に残ってしまう。

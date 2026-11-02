@@ -89,7 +89,7 @@ Qwen3.8-27B は `swish` である。
 - `config.max_scheduled_tokens` / `max_scheduled_requests` が > 0
 - `kv_pool.dtype()` が `BF16` か `FP8_E4M3`
 - FP8 時は body/scale の要素数と device 一致
-- GDN state pool 幾何（`GdnStatePoolLayout::from_text_config`）と一致
+- GDN state pool 幾何（`GdnStatePoolLayout`）と一致
 - KV pool 幾何（attention 層数 / kv_heads / head_dim）と一致
 
 ### 2.2 アロケーション
@@ -222,15 +222,15 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 2. `validate_scheduled_batch(batch, max_scheduled_tokens, max_scheduled_requests)`
 3. 各 request について:
    - `PendingRequestCommit`（sequence / handle / committed_tokens）
-   - `DeviceRequestDescriptor` staging（request_handle / row_begin / row_count / prefix_length / sequence_length / execution_class / compute_logits / sample_greedy / output_index）
-   - `compute_logits` なら `output_index` を採番し `sample_greedy` なら sampled_count を増分
+   - `DeviceRequestDescriptor` staging（request_handle / row_begin / row_count / prefix_length / sequence_length / execution_class / compute_logits / output_index）
+   - `compute_logits` なら `output_index` を採番し、sampling する request 数は sampled count として保持
    - `DECODE` / `SPEC_VERIFY` / `PREFILL` ごとに count
 4. 各 request の `reserve_sequence_append`（失敗時は rollback）
 5. `DeviceBatchContext` を構築:
    - `actual_rows` = N
    - `num_requests` = R
    - `num_outputs` / `num_decode_requests` / `num_verify_requests` / `num_prefill_requests`
-   - `token_ids` / `requests` / `row_sequence_slots` / `row_positions` / `output_rows` / `output_sample_flags`
+   - `token_ids` / `requests` / `row_sequence_slots` / `row_positions` / `output_rows`
 6. row bucket 解決: `resolve_row_bucket(N)` → `bucket_m = row_bucket_limit(bucket)`
 7. `program_set.resolve(bucket)` で Program を取得
 8. `BatchExecutionOutput`（output_hidden / logits / sampled_tokens の slice）
@@ -273,7 +273,7 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
    - `semantic_timing_start`（`SHELF_OP_SYNC` 有効時）
    - **Auto モード**（単体 launcher を試す）:
      - `try_launch_optimized(program, i, ctx, stream)`
-     - `Launched` / `Skipped` なら `consumed_dispatches` を検証し、`i += consumed` でループ継続
+     - `Launched` なら 1 dispatch 消費して `++i` で継続
      - `NotApplicable` なら fallthrough
    - **fallback**:
      - `launch_host_binding(binding, program, ctx, stream)`
@@ -363,7 +363,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 15. `SIGMOID` / `RESIDUAL_ADD` / `SWIGLU` / `SILU` / `MUL` / `SCALE` / `CONCAT` → `try_launch_elementwise`
 16. 他 → `NotApplicable`
 
-`OptimizedLaunchResult.kind` は `Launched`（`consumed_dispatches` 付き）、`Skipped`（zero-row の作業なし dispatch を消費）、または `NotApplicable`。
+`OptimizedLaunchResult.kind` は `Launched`（1 dispatch を消費して launch した）または `NotApplicable`（単体 launch 不成立、fallthrough）。
 
 ### 7.3 単体カーネル
 
