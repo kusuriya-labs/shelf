@@ -77,6 +77,8 @@ save は page 揃え位置でのみ発生する。
   drafter context から保存する。
 - decode: 最終 prefill の完了時に capture を開始し、各 step 後に position が
   page 境界を新しく通過するたびに GDN state を rolling slot へ capture する。
+  DFlash2 では次の page 境界までの残りトークン数に draft 数を制限し、境界を
+  飛び越えずに capture できる位置で step を止める。
 - 出力末尾: EOS / `max_new_tokens` で終了し、capture 位置が最終 page 境界と一致するとき、
   input と生成列から成る position 長の token 列を `save_output_tail` で entry 化する。
   cancel などで境界が一致しない場合は capture を解放して保存しない。

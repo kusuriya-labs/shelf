@@ -865,6 +865,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         slot.anchor_token = request->dflash->pending_token;
         slot.num_drafts = dflash_.num_drafts;
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
+        slot.page_tokens =
+            request->prefix_capture != 0u ? config_.page_tokens : 0u;
         slot.thinking_allowance = thinking_allowance(*request);
         slot.thinking_close_token = request->thinking.close_token;
         slots.push_back(slot);

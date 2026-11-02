@@ -243,6 +243,7 @@ struct DFlash2SpecBatchSlot {
     int32_t anchor_token = 0;
     uint32_t num_drafts = 0u;
     uint32_t remaining_tokens = 0u;
+    uint32_t page_tokens = 0u;
     uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
     int32_t thinking_close_token = -1;
 };

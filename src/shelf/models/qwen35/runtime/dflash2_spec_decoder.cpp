@@ -1237,7 +1237,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             slot.thinking_allowance != kDFlash2NoThinkingAllowance
                 ? std::min(slot.num_drafts, slot.thinking_allowance)
                 : slot.num_drafts;
-        const uint32_t drafts = std::min(drafts_limit, room_max);
+        uint32_t drafts = std::min(drafts_limit, room_max);
+        if (slot.page_tokens != 0u && drafts > 0u) {
+            const uint32_t to_boundary =
+                slot.page_tokens - (position % slot.page_tokens);
+            if (drafts + 1u > to_boundary) {
+                drafts = to_boundary - 1u;
+            }
+        }
         SlotPlan plan;
         plan.decoder = decoder;
         plan.anchor = slot.anchor_token;
