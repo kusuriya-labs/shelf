@@ -101,9 +101,12 @@ int main() {
     check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 8193, 64) ==
               PagedAttentionImplementation::Correctness,
           "27b tp2 rows=8193 above measured -> Correctness");
-    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 262145) ==
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 524288) ==
+              PagedAttentionImplementation::Optimized,
+          "27b tp2 vis=524288 (measured max) -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 524289) ==
               PagedAttentionImplementation::Correctness,
-          "27b tp2 vis=262145 above measured -> Correctness");
+          "27b tp2 vis=524289 above measured -> Correctness");
 
     check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 1, 64) ==
               PagedAttentionImplementation::Optimized,
@@ -114,15 +117,28 @@ int main() {
     check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 64, 64) ==
               PagedAttentionImplementation::Optimized,
           "27b tp2 fp8 prefill rows=64 vis=64 -> Optimized");
-    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 1, 262144) ==
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 1, 524288) ==
               PagedAttentionImplementation::Optimized,
-          "27b tp2 fp8 vis=262144 (measured max) -> Optimized");
+          "27b tp2 fp8 vis=524288 (measured max) -> Optimized");
     check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 8193, 64) ==
               PagedAttentionImplementation::Correctness,
           "27b tp2 fp8 rows=8193 above measured -> Correctness");
-    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 1, 262145) ==
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 12, 2, 256, 16, 1, 524289) ==
               PagedAttentionImplementation::Correctness,
-          "27b tp2 fp8 vis=262145 above measured -> Correctness");
+          "27b tp2 fp8 vis=524289 above measured -> Correctness");
+
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 24, 4, 256, 16, 1, 524288) ==
+              PagedAttentionImplementation::Optimized,
+          "27b vis=524288 (measured max) -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 24, 4, 256, 16, 1, 524289) ==
+              PagedAttentionImplementation::Correctness,
+          "27b vis=524289 above measured -> Correctness");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 24, 4, 256, 16, 1, 524288) ==
+              PagedAttentionImplementation::Optimized,
+          "27b fp8 vis=524288 (measured max) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 24, 4, 256, 16, 1, 524289) ==
+              PagedAttentionImplementation::Correctness,
+          "27b fp8 vis=524289 above measured -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

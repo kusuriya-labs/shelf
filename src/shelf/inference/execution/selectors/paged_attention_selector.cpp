@@ -19,7 +19,7 @@ struct PagedAttentionRule {
 
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 constexpr uint32_t kMeasuredMaxVisible = 32768;
-constexpr uint32_t kMeasuredMaxVisible24 = 262144;
+constexpr uint32_t kMeasuredMaxVisible24 = 524288;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,

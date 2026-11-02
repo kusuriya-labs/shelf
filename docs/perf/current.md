@@ -8,7 +8,7 @@
 
 ## 現在の状態
 
-**現在の build に対する計測結果は持たない。**
+**現在の build に対する qualified baseline は、2026-11-03 の long-context prefill 1 断面のみである。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -42,6 +42,26 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | TP=2 scaling | `test_qwen35_tp_e2e` | decode tok/s p50 |
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
+
+## 2026-11-03 long-context prefill
+
+Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
+（`max_visible <= 262144`）で計測した。warmup 1 + 5 run の p50。
+
+| 条件 | 値 |
+| --- | ---: |
+| prompt tokens | 262,128（要求 seq len 262,144） |
+| prefill chunk | 2048 |
+| gpu_ms p50 | 272468.22 |
+| gpu_tokens_per_sec p50 | 962.05 |
+| run 間 p10 / p90 | 272200.69 / 272688.71 ms |
+
+- measurement revision: `bb2e56e` + 計測用 harness 変更
+- GPU: Radeon AI PRO R9700 × 2（device 0,1）
+- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 0,1 --kv-cache-dtype fp8 --prompt-tokens 262128 --prefill-chunk 2048 --runs 5 --warmup 1`
+- 524,288 は production の値が未取得（`kMeasuredMaxVisible24 = 524288` を採用済みだが、
+  warmup + 5 run の production 計測は未実施。1 run の参考値のみ research 記録にあり）。詳細は
+  [../research/20261103/gate6_long_context.md](../research/20261103/gate6_long_context.md)。
 
 ## 記録規則
 
