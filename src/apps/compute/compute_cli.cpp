@@ -1,0 +1,472 @@
+#include "compute_cli.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace ps::app {
+namespace {
+
+bool parse_uint(const char* s, unsigned long& out) {
+    if (s == nullptr || *s == '\0') return false;
+    char* end = nullptr;
+    out = std::strtoul(s, &end, 10);
+    return end != s && *end == '\0';
+}
+
+bool parse_float(const char* s, float& out) {
+    if (s == nullptr || *s == '\0') return false;
+    char* end = nullptr;
+    out = std::strtof(s, &end);
+    return end != s && *end == '\0';
+}
+
+bool parse_u64(const char* s, uint64_t& out) {
+    if (s == nullptr || *s == '\0') return false;
+    char* end = nullptr;
+    out = std::strtoull(s, &end, 10);
+    return end != s && *end == '\0';
+}
+
+bool parse_devices(const char* s, std::vector<int>& out) {
+    if (s == nullptr || *s == '\0') return false;
+    out.clear();
+    const char* p = s;
+    while (*p != '\0') {
+        const char* comma = std::strchr(p, ',');
+        const std::string token(p, comma == nullptr ? std::string::size_type(std::strlen(p))
+                                                    : static_cast<std::string::size_type>(comma - p));
+        unsigned long value = 0;
+        if (!parse_uint(token.c_str(), value) || value > 65535ul) return false;
+        out.push_back(static_cast<int>(value));
+        if (comma == nullptr) break;
+        p = comma + 1;
+    }
+    return !out.empty();
+}
+
+}  // namespace
+
+void compute_usage(const char* prog) {
+    printf("usage: %s [options]\n", prog);
+    printf("\nPhaseShift inference runtime for Qwen 3.5 Dense on AMD RDNA4\n");
+    printf("options:\n");
+    printf("  --model-dir PATH       BF16 or quantized model directory (auto-detected via\n");
+    printf("                         phaseshift_quantization.json) (required)\n");
+    printf("  --input-ids-file PATH  whitespace separated prompt token ids\n");
+    printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
+    printf("  --max-seq-len N        max sequence length (default 512)\n");
+    printf("  --arena-gib N|auto     arena capacity in GiB; auto uses free VRAM minus 1 GiB\n");
+    printf("                         (default auto)\n");
+    printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
+    printf("  --max-concurrent-requests N  max in-flight requests (default 1)\n");
+    printf("  --kv-cache-capacity-tokens N  physical KV token capacity (0 = one context)\n");
+    printf("  --device N|N,M         GPU device(s); count must match --tp (default 0)\n");
+    printf("  --tp N                 tensor parallel degree 1 | 2 (default 1)\n");
+    printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
+    printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
+    printf("                         (default auto = model config: native unless the\n");
+    printf("                         checkpoint requests yarn)\n");
+    printf("  --decode-backend TYPE  host (default)\n");
+    printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
+    printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
+    printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
+    printf("  --hidden-taps LIST      comma separated layer ids (max 8) for intermediate\n");
+    printf("                          hidden capture; dump to PHASESHIFT_DEBUG_HIDDEN_FILE\n");
+    printf("  --tp-combine-f32 0|1    keep row-parallel combine output in f32 (default 0 =\n");
+    printf("                          bf16 round as today; tp only)\n");
+    printf("  --temperature F        sampling temperature (default 0 = greedy)\n");
+    printf("  --top-p F              nucleus sampling threshold in (0, 1] (default 1)\n");
+    printf("  --top-k N              keep the N highest logits (default 0 = disabled)\n");
+    printf("  --seed N               sampling seed (default 0)\n");
+    printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
+    printf("                            speculative decoding (greedy / stochastic)\n");
+    printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
+    printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
+    printf("  --eagle4-model-dir PATH  EAGLE-4 draft model directory; enables\n");
+    printf("                         EAGLE-4 speculative decoding\n");
+    printf("  --eagle4-drafts N      EAGLE-4 speculative draft tokens per round (default 7)\n");
+    printf("  --eagle4-tree-width N  EAGLE-4 tree verify width; 0 or 1 = chain (default 0)\n");    printf("  --eagle4-tree-dynamic 0|1  EAGLE-4 決定的 tree sizing（Cost table、"
+           "default 0)\n");
+    printf("  --eagle4-candidate-head lowrank|gemv\n");
+    printf("                         EAGLE-4 candidate head path (default lowrank)\n");
+    printf("  --eagle4-lm-head draft|target\n");
+    printf("                         EAGLE-4 candidate head LM head source (default target)\n");
+    printf("  --eagle4-stats 0|1     print EAGLE-4 speculative decode statistics (default 1)\n");
+    printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
+    printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
+    printf("                                 (default 16384)\n");
+    printf("  --working-set-reserve-gib N    arena headroom kept free for the working set\n");
+    printf("                                 (executor workspace, DFlash2 session pool,\n");
+    printf("                                 default 4)\n");
+    printf("  --prefix-cache-cold-tokens N   prefix cache cold tier capacity in tokens\n");
+    printf("                                 (default 65536)\n");
+    printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
+    printf("  --prefix-cache-cold-state-slots N  cold GDN state slots (default 0 = auto)\n");
+    printf("  --model-host PATH      attach model weights from a resident model host\n");
+    printf("                          (default: PHASESHIFT_MODEL_HOST_SOCKET, empty = local load)\n");
+    printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
+    printf("  --help                 show this help\n");
+}
+
+std::vector<int32_t> read_input_ids(const std::string& path) {
+    std::vector<int32_t> ids;
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (f == nullptr) return ids;
+    long v = 0;
+    while (std::fscanf(f, "%ld", &v) == 1) {
+        ids.push_back(static_cast<int32_t>(v));
+    }
+    std::fclose(f);
+    return ids;
+}
+
+std::size_t safetensors_dir_bytes(const std::string& dir) {
+    std::size_t total = 0;
+    std::error_code ec;
+    const std::filesystem::path root(dir);
+    if (!std::filesystem::is_directory(root, ec)) {
+        return 0;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        constexpr std::size_t kSuffix = 12;
+        if (name.size() <= kSuffix ||
+            name.compare(name.size() - kSuffix, kSuffix, ".safetensors") != 0) {
+            continue;
+        }
+        total += static_cast<std::size_t>(entry.file_size(ec));
+    }
+    return total;
+}
+
+int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
+    auto& model_dir = opt.model_dir;
+    auto& input_ids_file = opt.input_ids_file;
+    auto& max_new_tokens = opt.max_new_tokens;
+    auto& max_seq_len = opt.max_seq_len;
+    auto& arena_gib = opt.arena_gib;
+    auto& arena_gib_auto = opt.arena_gib_auto;
+    auto& page_tokens = opt.page_tokens;
+    auto& max_concurrent_requests = opt.max_concurrent_requests;
+    auto& kv_cache_capacity_tokens = opt.kv_cache_capacity_tokens;
+    auto& devices = opt.devices;
+    auto& tp = opt.tp;
+    auto& kv_cache_dtype = opt.kv_cache_dtype;
+    ps::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    auto& verify_weights = opt.verify_weights;
+    auto& dump_logits_path = opt.dump_logits_path;
+    auto& hidden_taps = opt.hidden_taps;
+    auto& tp_combine_f32 = opt.tp_combine_f32;
+    auto& serve_stdio = opt.serve_stdio;
+    ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    auto& dflash2_model_dir = opt.dflash2_model_dir;
+    auto& eagle4_model_dir = opt.eagle4_model_dir;
+    auto& model_host = opt.model_host;
+    auto& dflash2_drafts = opt.dflash2_drafts;
+    auto& dflash2_stats = opt.dflash2_stats;
+    auto& eagle4_drafts = opt.eagle4_drafts;
+    auto& eagle4_tree_width = opt.eagle4_tree_width;
+    auto& eagle4_tree_dynamic = opt.eagle4_tree_dynamic;
+    auto& eagle4_stats = opt.eagle4_stats;
+    auto& eagle4_candidate_head = opt.eagle4_candidate_head;
+    auto& eagle4_lm_head = opt.eagle4_lm_head;
+    auto& prefix_cache_enabled = opt.prefix_cache_enabled;
+    auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
+    auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
+    auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
+    auto& prefix_cache_cold_state_slots = opt.prefix_cache_cold_state_slots;
+    auto& working_set_reserve_gib = opt.working_set_reserve_gib;
+    auto& rope_factor = opt.rope_factor;
+    unsigned long top_k = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--help") == 0 ||
+            (argv[i][0] == '-' && argv[i][1] == 'h' && argv[i][2] == '\0')) {
+            compute_usage(argv[0]);
+            return kComputeParseHelp;
+        } else if (std::strcmp(argv[i], "--model-host") == 0 && i + 1 < argc) {
+            model_host = argv[++i];
+        } else if (std::strcmp(argv[i], "--model-dir") == 0 && i + 1 < argc) {
+            model_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--input-ids-file") == 0 && i + 1 < argc) {
+            input_ids_file = argv[++i];
+        } else if (std::strcmp(argv[i], "--max-new-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], max_new_tokens)) { fprintf(stderr, "bad --max-new-tokens\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--max-seq-len") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], max_seq_len)) { fprintf(stderr, "bad --max-seq-len\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--arena-gib") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "auto") == 0) {
+                arena_gib_auto = true;
+            } else if (!parse_uint(value, arena_gib) || arena_gib == 0) {
+                fprintf(stderr, "bad --arena-gib (expected N or auto)\n");
+                return kComputeParseError;
+            } else {
+                arena_gib_auto = false;
+            }
+        } else if (std::strcmp(argv[i], "--page-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], page_tokens) || page_tokens == 0) { fprintf(stderr, "bad --page-tokens\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--max-concurrent-requests") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], max_concurrent_requests) || max_concurrent_requests == 0) {
+                fprintf(stderr, "bad --max-concurrent-requests\n"); return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--kv-cache-capacity-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], kv_cache_capacity_tokens)) {
+                fprintf(stderr, "bad --kv-cache-capacity-tokens\n"); return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
+            if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2)) {
+                fprintf(stderr, "bad --tp (expected 1 or 2)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--kv-cache-dtype") == 0 && i + 1 < argc) {
+            kv_cache_dtype = argv[++i];
+            if (kv_cache_dtype != "bf16" && kv_cache_dtype != "fp8") {
+                fprintf(stderr, "bad --kv-cache-dtype: %s (expected bf16 | fp8)\n", kv_cache_dtype.c_str());
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--rope-factor") == 0 && i + 1 < argc) {
+            rope_factor = argv[++i];
+            if (rope_factor != "auto" && rope_factor != "1" && rope_factor != "2" &&
+                rope_factor != "4") {
+                fprintf(stderr,
+                        "bad --rope-factor: %s (expected auto | 1 | 2 | 4)\n",
+                        rope_factor.c_str());
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
+            const char* backend_text = argv[++i];
+            if (!ps::qwen35::runtime::parse_decode_backend(backend_text,
+                                                          &decode_backend)) {
+                fprintf(stderr, "bad --decode-backend: %s (expected host)\n",
+                        backend_text);
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--verify-weights") == 0 && i + 1 < argc) {
+            verify_weights = std::atoi(argv[++i]);
+            if (verify_weights != 0 && verify_weights != 1) {
+                fprintf(stderr, "bad --verify-weights (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--dump-logits") == 0 && i + 1 < argc) {
+            dump_logits_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--hidden-taps") == 0 && i + 1 < argc) {
+            hidden_taps = argv[++i];
+        } else if (std::strcmp(argv[i], "--tp-combine-f32") == 0 && i + 1 < argc) {
+            tp_combine_f32 = std::atoi(argv[++i]);
+            if (tp_combine_f32 != 0 && tp_combine_f32 != 1) {
+                fprintf(stderr, "bad --tp-combine-f32 (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--temperature") == 0 && i + 1 < argc) {
+            if (!parse_float(argv[++i], sampling.temperature)) { fprintf(stderr, "bad --temperature\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
+            if (!parse_float(argv[++i], sampling.top_p)) { fprintf(stderr, "bad --top-p\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], top_k)) { fprintf(stderr, "bad --top-k\n"); return kComputeParseError; }
+            sampling.top_k = static_cast<uint32_t>(top_k);
+        } else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            if (!parse_u64(argv[++i], sampling.seed)) { fprintf(stderr, "bad --seed\n"); return kComputeParseError; }
+        } else if (std::strcmp(argv[i], "--dflash2-model-dir") == 0 && i + 1 < argc) {
+            dflash2_model_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--dflash2-drafts") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0) {
+                fprintf(stderr, "bad --dflash2-drafts\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-model-dir") == 0 && i + 1 < argc) {
+            eagle4_model_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--eagle4-drafts") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], eagle4_drafts) || eagle4_drafts == 0) {
+                fprintf(stderr, "bad --eagle4-drafts\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-tree-dynamic") == 0 && i + 1 < argc) {
+            eagle4_tree_dynamic = std::atoi(argv[++i]);
+            if (eagle4_tree_dynamic != 0 && eagle4_tree_dynamic != 1) {
+                fprintf(stderr, "bad --eagle4-tree-dynamic (expected 0 or 1)\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-tree-width") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], eagle4_tree_width) || eagle4_tree_width > 16u) {
+                fprintf(stderr, "bad --eagle4-tree-width (expected 0..16)\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-candidate-head") == 0 && i + 1 < argc) {
+            eagle4_candidate_head = argv[++i];
+            if (eagle4_candidate_head != "lowrank" && eagle4_candidate_head != "gemv") {
+                fprintf(stderr, "bad --eagle4-candidate-head (expected lowrank or gemv)\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-lm-head") == 0 && i + 1 < argc) {
+            eagle4_lm_head = argv[++i];
+            if (eagle4_lm_head != "draft" && eagle4_lm_head != "target") {
+                fprintf(stderr, "bad --eagle4-lm-head (expected draft or target)\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--eagle4-stats") == 0 && i + 1 < argc) {
+            eagle4_stats = std::atoi(argv[++i]);
+            if (eagle4_stats != 0 && eagle4_stats != 1) {
+                fprintf(stderr, "bad --eagle4-stats (expected 0 or 1)\n");
+                return ps::app::kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--dflash2-stats") == 0 && i + 1 < argc) {
+            dflash2_stats = std::atoi(argv[++i]);
+            if (dflash2_stats != 0 && dflash2_stats != 1) {
+                fprintf(stderr, "bad --dflash2-stats (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache") == 0 && i + 1 < argc) {
+            prefix_cache_enabled = std::atoi(argv[++i]);
+            if (prefix_cache_enabled != 0 && prefix_cache_enabled != 1) {
+                fprintf(stderr, "bad --prefix-cache (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-hot-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_hot_tokens) ||
+                prefix_cache_hot_tokens == 0) {
+                fprintf(stderr, "bad --prefix-cache-hot-tokens\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--working-set-reserve-gib") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], working_set_reserve_gib) ||
+                working_set_reserve_gib == 0) {
+                fprintf(stderr, "bad --working-set-reserve-gib\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-cold-tokens") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_cold_tokens) ||
+                prefix_cache_cold_tokens == 0) {
+                fprintf(stderr, "bad --prefix-cache-cold-tokens\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-concurrency") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_concurrency) ||
+                prefix_cache_concurrency == 0 || prefix_cache_concurrency > 65535) {
+                fprintf(stderr, "bad --prefix-cache-concurrency (expected 1..65535)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-cold-state-slots") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], prefix_cache_cold_state_slots)) {
+                fprintf(stderr, "bad --prefix-cache-cold-state-slots\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--serve-stdio") == 0) {
+            serve_stdio = true;
+        } else {
+            fprintf(stderr, "unknown argument: %s\n", argv[i]);
+            compute_usage(argv[0]);
+            return kComputeParseError;
+        }
+    }
+
+    return kComputeParseOk;
+}
+
+int validate_compute_options(const ComputeOptions& opt) {
+    const auto& model_dir = opt.model_dir;
+    const auto& input_ids_file = opt.input_ids_file;
+    const auto& max_new_tokens = opt.max_new_tokens;
+    const auto& max_seq_len = opt.max_seq_len;
+    const auto& arena_gib = opt.arena_gib;
+    const auto& page_tokens = opt.page_tokens;
+    const auto& max_concurrent_requests = opt.max_concurrent_requests;
+    const auto& kv_cache_capacity_tokens = opt.kv_cache_capacity_tokens;
+    const auto& devices = opt.devices;
+    const auto& tp = opt.tp;
+    const auto& kv_cache_dtype = opt.kv_cache_dtype;
+    const ps::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
+    const auto& verify_weights = opt.verify_weights;
+    const auto& dump_logits_path = opt.dump_logits_path;
+    const auto& serve_stdio = opt.serve_stdio;
+    const ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
+    const auto& dflash2_model_dir = opt.dflash2_model_dir;
+    const auto& eagle4_model_dir = opt.eagle4_model_dir;
+    const auto& dflash2_drafts = opt.dflash2_drafts;
+    const auto& dflash2_stats = opt.dflash2_stats;
+    const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
+    const auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
+    const auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
+    const auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
+    const auto& prefix_cache_cold_state_slots = opt.prefix_cache_cold_state_slots;
+    const auto& working_set_reserve_gib = opt.working_set_reserve_gib;
+    if (model_dir.empty()) {
+        fprintf(stderr, "model-dir required\n");
+        return kComputeParseError;
+    }
+    if (tp != 1 && tp != 2) {
+        fprintf(stderr, "--tp must be 1 or 2\n");
+        return kComputeParseError;
+    }
+    if (devices.size() != tp) {
+        fprintf(stderr, "--device expects %lu entries for --tp %lu, got %zu\n",
+                tp, tp, devices.size());
+        return kComputeParseError;
+    }
+    {
+        std::vector<int> unique_devices = devices;
+        std::sort(unique_devices.begin(), unique_devices.end());
+        if (std::adjacent_find(unique_devices.begin(), unique_devices.end()) !=
+            unique_devices.end()) {
+            fprintf(stderr, "--device entries must be unique\n");
+            return kComputeParseError;
+        }
+    }
+
+    const bool dflash_enabled = !dflash2_model_dir.empty();
+    if (!eagle4_model_dir.empty()) {
+        if (dflash_enabled) {
+            fprintf(stderr, "--eagle4-model-dir and --dflash2-model-dir are exclusive\n");
+            return kComputeParseError;
+        }
+        if (!dump_logits_path.empty()) {
+            fprintf(stderr, "eagle4 speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+        if (prefix_cache_enabled != 0 && serve_stdio == 0) {
+            fprintf(stderr,
+                    "--eagle4-model-dir supports --prefix-cache only with "
+                    "--serve-stdio\n");
+            return kComputeParseError;
+        }
+        if (sampling.temperature != 0.0f) {
+            fprintf(stderr, "--eagle4-model-dir supports only greedy decoding\n");
+            return kComputeParseError;
+        }
+    }
+    if (dflash_enabled) {
+        if (!dump_logits_path.empty()) {
+            fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+    }
+
+
+    {
+        const ps::Status sampling_status =
+            ps::qwen35::runtime::validate_sampling_config(sampling);
+        if (!sampling_status.ok()) {
+            fprintf(stderr, "invalid sampling option: %s\n",
+                    sampling_status.message().c_str());
+            return kComputeParseError;
+        }
+    }
+
+    if (prefix_cache_hot_tokens < page_tokens) {
+        fprintf(stderr, "--prefix-cache-hot-tokens must be >= page-tokens\n");
+        return kComputeParseError;
+    }
+
+    return kComputeParseOk;
+}
+
+}  // namespace ps::app

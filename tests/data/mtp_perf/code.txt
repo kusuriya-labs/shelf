@@ -1,0 +1,61 @@
+class PagedKvPool:
+    def __init__(self, num_pages, page_tokens, layers, heads, head_dim, dtype):
+        self.num_pages = int(num_pages)
+        self.page_tokens = int(page_tokens)
+        self.layers = int(layers)
+        self.heads = int(heads)
+        self.head_dim = int(head_dim)
+        self.dtype = dtype
+        self.free = list(range(self.num_pages))
+        self.in_use = [False] * self.num_pages
+        self.elems_per_token = self.heads * self.head_dim
+        self.elems_per_page = self.page_tokens * self.elems_per_token
+        self.elems_per_layer = self.num_pages * self.elems_per_page
+
+    def allocate(self):
+        if not self.free:
+            raise RuntimeError("out of pages")
+        page = self.free.pop()
+        if self.in_use[page]:
+            raise RuntimeError("double allocate")
+        self.in_use[page] = True
+        return page
+
+    def release(self, page):
+        if page < 0 or page >= self.num_pages:
+            raise ValueError("page out of range")
+        if not self.in_use[page]:
+            raise RuntimeError("double free")
+        self.in_use[page] = False
+        self.free.append(page)
+
+    def release_many(self, pages):
+        for page in pages:
+            self.release(page)
+
+    def slot_of(self, page, offset_in_page):
+        if offset_in_page >= self.page_tokens:
+            raise ValueError("offset beyond page")
+        base = page * self.elems_per_page
+        return base + offset_in_page * self.elems_per_token
+
+
+def reserve_append(sequence, token_count, page_tokens):
+    end_position = sequence.position + token_count
+    required_blocks = (end_position + page_tokens - 1) // page_tokens
+    current_blocks = len(sequence.block_table)
+    if required_blocks <= current_blocks:
+        return 0
+    new_blocks = required_blocks - current_blocks
+    allocated = []
+    try:
+        for _ in range(new_blocks):
+            page = sequence.pool.allocate()
+            sequence.block_table.append(page)
+            allocated.append(page)
+    except Exception:
+        for page in allocated:
+            sequence.pool.release(page)
+        del sequence.block_table[current_blocks:]
+        raise
+    return new_blocks

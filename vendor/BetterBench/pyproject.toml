@@ -1,0 +1,34 @@
+[project]
+name = "betterbench"
+dynamic = ["version"]
+description = "A real-world, percentile-based LLM inference benchmark for any OpenAI-compatible endpoint."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "BetterBench contributors" }]
+keywords = ["llm", "benchmark", "inference", "vllm", "latency", "throughput", "openai"]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+report = []                  # HTML report needs no extra deps; kept so [report] still resolves
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+betterbench = "betterbench.cli:main"
+
+# Single source of truth: betterbench/__init__.py.
+[tool.hatch.version]
+path = "betterbench/__init__.py"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterbench"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"corpus" = "betterbench/corpus"
+"config" = "betterbench/config"

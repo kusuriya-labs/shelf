@@ -1,0 +1,1025 @@
+#include "single_request.h"
+
+#include "compute_common.h"
+
+#include <phaseshift/core/gpu/scoped_device.h>
+#include <phaseshift/models/qwen35/dflash2/context_state.h>
+#include <phaseshift/models/qwen35/dflash2/executor.h>
+#include <phaseshift/models/qwen35/dflash2/weights.h>
+#include "private_target_weights.h"
+#include <phaseshift/models/qwen35/eagle4/config.h>
+#include <phaseshift/models/qwen35/eagle4/context_state.h>
+#include <phaseshift/models/qwen35/eagle4/executor.h>
+#include <phaseshift/models/qwen35/eagle4/weights.h>
+#include <phaseshift/models/qwen35/runtime/decode_backend.h>
+#include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <phaseshift/models/qwen35/runtime/dflash2_session_pool.h>
+#include <phaseshift/models/qwen35/runtime/runtime_request.h>
+#include <phaseshift/models/qwen35/state/state_types.h>
+#include <phaseshift/models/qwen35/model/gdn_state_layout.h>
+#include <hip/hip_runtime.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <cstring>
+#include <memory>
+#include <vector>
+
+namespace ps::app {
+namespace {
+
+
+
+std::size_t safetensors_dir_bytes(const std::string& dir) {
+    std::size_t total = 0;
+    std::error_code ec;
+    const std::filesystem::path root(dir);
+    if (!std::filesystem::is_directory(root, ec)) {
+        return 0;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        constexpr std::size_t kSuffix = 12;
+        if (name.size() <= kSuffix ||
+            name.compare(name.size() - kSuffix, kSuffix, ".safetensors") != 0) {
+            continue;
+        }
+        total += static_cast<std::size_t>(entry.file_size(ec));
+    }
+    return total;
+}
+
+}  // namespace
+
+
+
+void print_model_geometry(const ps::qwen35::Qwen35Model& model) {
+    const auto& text_config = model.text_config();
+    const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
+    const uint32_t head_dim = static_cast<uint32_t>(text_config.attention_head_dim);
+    const uint32_t num_attn_layers = count_attention_layers(text_config);
+    const auto gdn_layout =
+        ps::qwen35::make_qwen35_gdn_state_layout(text_config);
+
+    printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
+    printf("MODEL_INTERMEDIATE_SIZE=%zu\n", text_config.intermediate_size);
+    printf("MODEL_LAYERS=%zu\n", text_config.num_hidden_layers);
+    printf("MODEL_GDN_LAYERS=%u\n", gdn_layout.num_gdn_states);
+    printf("MODEL_ATTENTION_LAYERS=%u\n", num_attn_layers);
+    printf("MODEL_Q_HEADS=%zu\n", text_config.num_attention_heads);
+    printf("MODEL_KV_HEADS=%u\n", kv_heads);
+    printf("MODEL_HEAD_DIM=%u\n", head_dim);
+    printf("MODEL_GDN_KEY_HEADS=%zu\n", text_config.linear_num_key_heads);
+    printf("MODEL_GDN_VALUE_HEADS=%u\n", gdn_layout.num_v_heads);
+    printf("MODEL_GDN_KEY_HEAD_DIM=%u\n", gdn_layout.head_k);
+    printf("MODEL_GDN_VALUE_HEAD_DIM=%u\n", gdn_layout.head_v);
+    printf("MODEL_GDN_CONV_DIM=%u\n", gdn_layout.conv_dim);
+    printf("MODEL_GDN_CONV_HISTORY=%u\n", gdn_layout.conv_history);
+    fflush(stdout);
+}
+
+void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
+    const auto& model = runtime.model();
+    auto& executor = runtime.executor();
+    const auto& gdn_pool = runtime.gdn_pool();
+    const auto& wts = model.weights();
+    uint64_t bf16_bytes = 0, fp8_codes = 0, fp8_scales = 0;
+    uint64_t w4_codes = 0, w4_sscales = 0, w4_cscales = 0;
+    uint64_t w8_codes = 0, w8_sscales = 0, w8_cscales = 0;
+    auto add_matrix = [&](const ps::weights::MatrixWeight& m) {
+        using E = ps::weights::MatrixEncoding;
+        if (m.rows == 0) return;
+        const uint64_t r = m.rows;
+        if (m.encoding == E::Bf16) {
+            bf16_bytes += r * m.cols * 2u;
+        } else if (m.encoding == E::Fp8) {
+            fp8_codes += r * m.k_padded;
+            fp8_scales += ((r + 127u) / 128u) * (m.k_padded / 128u) * 4u;
+        }
+    };
+    add_matrix(wts.embed_tokens);
+    if (!wts.lm_head_tied) add_matrix(wts.lm_head);
+    for (const auto& l : wts.layers) {
+        add_matrix(l.mlp_gate_proj);
+        add_matrix(l.mlp_up_proj);
+        add_matrix(l.mlp_down_proj);
+        if (l.is_gdn) {
+            add_matrix(l.attn_in_proj_a);
+            add_matrix(l.attn_in_proj_b);
+            add_matrix(l.attn_in_proj_qkv);
+            add_matrix(l.attn_in_proj_z);
+            add_matrix(l.attn_out_proj);
+        } else {
+            add_matrix(l.attn_q_proj);
+            add_matrix(l.attn_k_proj);
+            add_matrix(l.attn_v_proj);
+            add_matrix(l.attn_o_proj);
+        }
+    }
+    uint64_t staging_dispatch_count = 0;
+    uint64_t staging_max_image_bytes = 0;
+    uint64_t staging_shared_program_bytes = 0;
+    for (size_t b = 0; b < ps::runtime::ProgramSet::kRowBucketCount; ++b) {
+        const auto& p = executor.program_set.programs[b];
+        printf("ROWBUCKET_%zu_WORKSPACE_BYTES=%zu\n", b, p.workspace.total_bytes);
+        staging_dispatch_count += p.dispatches.size();
+        const uint64_t slot_base = executor.staging_pool.slot(static_cast<uint32_t>(b), 0);
+        for (size_t i = 0; i < p.dispatches.size(); ++i) {
+            const uint64_t slot = slot_base + i;
+            if (slot < executor.staging_pool.bytes.size()) {
+                const uint64_t image = executor.staging_pool.bytes[slot];
+                if (image > staging_max_image_bytes) staging_max_image_bytes = image;
+            }
+        }
+        if (b < executor.program_staging_meta.size()) {
+            staging_shared_program_bytes += executor.program_staging_meta[b].device_bytes;
+        }
+    }
+    printf("WEIGHTS_BF16_BYTES=%llu\n", (unsigned long long)bf16_bytes);
+    printf("WEIGHTS_W4_CODES_BYTES=%llu\n", (unsigned long long)w4_codes);
+    printf("WEIGHTS_W4_STORAGE_SCALE_BYTES=%llu\n", (unsigned long long)w4_sscales);
+    printf("WEIGHTS_W4_COMPUTE_SCALE_BYTES=%llu\n", (unsigned long long)w4_cscales);
+    printf("WEIGHTS_W8_CODES_BYTES=%llu\n", (unsigned long long)w8_codes);
+    printf("WEIGHTS_W8_STORAGE_SCALE_BYTES=%llu\n", (unsigned long long)w8_sscales);
+    printf("WEIGHTS_W8_COMPUTE_SCALE_BYTES=%llu\n", (unsigned long long)w8_cscales);
+    printf("WEIGHTS_FP8_CODES_BYTES=%llu\n", (unsigned long long)fp8_codes);
+    printf("WEIGHTS_FP8_SCALE_BYTES=%llu\n", (unsigned long long)fp8_scales);
+    printf("DISPATCH_STAGING_DEVICE_BYTES=%llu\n",
+           (unsigned long long)executor.staging_pool.pool_bytes);
+    printf("DISPATCH_STAGING_HOST_BYTES=%llu\n",
+           (unsigned long long)executor.dispatch_staging_bytes);
+    printf("STAGING_DISPATCH_COUNT=%llu\n", (unsigned long long)staging_dispatch_count);
+    printf("STAGING_MAX_IMAGE_BYTES=%llu\n", (unsigned long long)staging_max_image_bytes);
+    printf("STAGING_SHARED_PROGRAM_BYTES=%llu\n", (unsigned long long)staging_shared_program_bytes);
+    printf("EXECUTION_WORKSPACE_BYTES=%zu\n", executor.execution_workspace.allocation_bytes());
+    printf("GDN_STATE_BYTES=%zu\n", gdn_pool.reserved_bytes());
+    printf("ARENA_USED_BYTES=%zu\n", runtime.arena().used());
+    printf("ARENA_CAPACITY_BYTES=%zu\n", runtime.arena().capacity());
+    printf("ARENA_COMMITTED_BYTES=%zu\n", runtime.arena().committed());
+    printf("ARENA_VMM=%d\n", runtime.arena().is_vmm() ? 1 : 0);
+}
+
+struct LogitsDumper {
+    FILE* file = nullptr;
+    std::size_t vocab = 0;
+    std::vector<std::size_t> step_rows;
+
+    bool open(const std::string& path, std::size_t vocab_size) {
+        vocab = vocab_size;
+        file = std::fopen(path.c_str(), "wb");
+        return file != nullptr;
+    }
+
+    bool step(ps::qwen35::Executor& executor) {
+        if (file == nullptr) return true;
+        const auto& lg = executor.logits;
+        if (lg.ndim() != 2 || lg.dim(1) != vocab || lg.element_size() != sizeof(float)) {
+            fprintf(stderr,
+                    "dump-logits: unexpected logits shape ndim=%zu dim0=%zu dim1=%zu elem=%zu (vocab=%zu)\n",
+                    lg.ndim(), lg.ndim() > 0 ? lg.dim(0) : 0,
+                    lg.ndim() > 1 ? lg.dim(1) : 0, lg.element_size(), vocab);
+            return false;
+        }
+        const std::size_t rows = lg.dim(0);
+        std::vector<float> host(rows * vocab);
+        hipError_t herr = hipMemcpy(host.data(), lg.data<float>(),
+                                    rows * vocab * sizeof(float), hipMemcpyDeviceToHost);
+        if (herr != hipSuccess) {
+            fprintf(stderr, "dump-logits copy failed: %s\n", hipGetErrorString(herr));
+            return false;
+        }
+        if (std::fwrite(host.data(), sizeof(float), rows * vocab, file) != rows * vocab) {
+            fprintf(stderr, "dump-logits write failed\n");
+            return false;
+        }
+        step_rows.push_back(rows);
+        return true;
+    }
+
+    void finish() {
+        if (file == nullptr) return;
+        std::fclose(file);
+        file = nullptr;
+        std::size_t total_rows = 0;
+        printf("LOGITS_VOCAB=%zu\n", vocab);
+        printf("LOGITS_STEP_ROWS=");
+        for (std::size_t i = 0; i < step_rows.size(); ++i) {
+            if (i > 0) printf(",");
+            printf("%zu", step_rows[i]);
+            total_rows += step_rows[i];
+        }
+        printf("\n");
+        printf("LOGITS_TOTAL_ROWS=%zu\n", total_rows);
+    }
+};
+
+void dump_hidden_debug(ps::qwen35::Executor& executor, const char* tag) {
+    const char* h = std::getenv("PHASESHIFT_DEBUG_HIDDEN");
+    if (h == nullptr || h[0] == '\0') return;
+    for (int t = 0; t < 2; ++t) {
+        const auto& ten = (t == 0) ? executor.output_hidden : executor.token_hidden;
+        if (ten.ndim() != 2 || ten.element_size() != sizeof(std::uint16_t)) {
+            fprintf(stderr, "HIDDENDBG %s t=%d bad shape ndim=%zu\n", tag, t, ten.ndim());
+            continue;
+        }
+        const std::size_t rows = ten.dim(0);
+        const std::size_t cols = ten.dim(1);
+        std::vector<std::uint16_t> raw(rows * cols);
+        hipError_t he = hipMemcpy(raw.data(), ten.data<void>(),
+                                rows * cols * sizeof(std::uint16_t), hipMemcpyDeviceToHost);
+        if (he != hipSuccess) {
+            fprintf(stderr, "HIDDENDBG %s t=%d copy failed: %s\n", tag, t, hipGetErrorString(he));
+            continue;
+        }
+        double mx = 0.0;
+        std::size_t nz = 0;
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            const std::uint32_t u = static_cast<std::uint32_t>(raw[i]) << 16;
+            float fv;
+            std::memcpy(&fv, &u, sizeof(fv));
+            const double a = std::abs(fv);
+            if (a > mx) mx = a;
+            if (u != 0) ++nz;
+        }
+        fprintf(stderr, "HIDDENDBG %s t=%d rows=%zu cols=%zu max=%.6e nonzero=%zu\n",
+                tag, t, rows, cols, mx, nz);
+        const char* dbg_file = std::getenv("PHASESHIFT_DEBUG_HIDDEN_FILE");
+        if (dbg_file != nullptr && dbg_file[0] != '\0') {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/%s_t%d.bin", dbg_file, tag, t);
+            FILE* hf = std::fopen(path, "wb");
+            if (hf != nullptr) {
+                std::vector<float> fv(rows * cols);
+                for (std::size_t i = 0; i < raw.size(); ++i) {
+                    const std::uint32_t u = static_cast<std::uint32_t>(raw[i]) << 16;
+                    std::memcpy(&fv[i], &u, sizeof(float));
+                }
+                std::fwrite(fv.data(), sizeof(float), fv.size(), hf);
+                std::fclose(hf);
+            }
+        }
+    }
+}
+
+void dump_tap_hidden(ps::qwen35::Executor& executor, const char* tag, std::size_t rows) {
+    const uint32_t taps = executor.config.target_hidden_tap_count;
+    if (taps == 0) return;
+    const char* dbg_file = std::getenv("PHASESHIFT_DEBUG_HIDDEN_FILE");
+    for (uint32_t t = 0; t < taps; ++t) {
+        const auto& ten = executor.dflash_target_hidden[t];
+        const std::size_t layer = executor.config.target_hidden_taps[t];
+        if (ten.ndim() != 2 || ten.element_size() != sizeof(std::uint16_t)) {
+            fprintf(stderr, "TAPDBG %s layer=%zu bad shape ndim=%zu\n", tag, layer, ten.ndim());
+            continue;
+        }
+        std::size_t use_rows = rows < ten.dim(0) ? rows : ten.dim(0);
+        const std::size_t cols = ten.dim(1);
+        std::vector<std::uint16_t> raw(use_rows * cols);
+        hipError_t he = hipMemcpy(raw.data(), ten.data<void>(),
+                                   raw.size() * sizeof(std::uint16_t), hipMemcpyDeviceToHost);
+        if (he != hipSuccess) {
+            fprintf(stderr, "TAPDBG %s layer=%zu copy failed: %s\n",
+                    tag, layer, hipGetErrorString(he));
+            continue;
+        }
+        double mx = 0.0;
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            const std::uint32_t u = static_cast<std::uint32_t>(raw[i]) << 16;
+            float fv;
+            std::memcpy(&fv, &u, sizeof(fv));
+            const double a = std::abs(fv);
+            if (a > mx) mx = a;
+        }
+        fprintf(stderr, "TAPDBG %s layer=%zu rows=%zu cols=%zu max=%.6e\n",
+                tag, layer, use_rows, cols, mx);
+        if (dbg_file != nullptr && dbg_file[0] != '\0') {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/%s_L%zu.bin", dbg_file, tag, layer);
+            FILE* hf = std::fopen(path, "wb");
+            if (hf != nullptr) {
+                std::vector<float> fv(raw.size());
+                for (std::size_t i = 0; i < raw.size(); ++i) {
+                    const std::uint32_t u = static_cast<std::uint32_t>(raw[i]) << 16;
+                    std::memcpy(&fv[i], &u, sizeof(float));
+                }
+                std::fwrite(fv.data(), sizeof(float), fv.size(), hf);
+                std::fclose(hf);
+            }
+        }
+    }
+}
+
+int run_single_shot(ps::app::Qwen35ComputeRuntime& runtime,
+                    const std::vector<int32_t>& prompt_ids,
+                    unsigned long max_new_tokens,
+                    const ps::qwen35::runtime::SamplingConfig& sampling,
+                    const std::string& kv_cache_dtype,
+                    const std::string& dump_logits_path) {
+    auto& executor = runtime.executor();
+    auto& kv_pool = runtime.kv_pool();
+    print_model_geometry(runtime.model());
+    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+        dump_mem_debug(runtime);
+    }
+
+    LogitsDumper dumper;
+    if (!dump_logits_path.empty()) {
+        if (!dumper.open(dump_logits_path, runtime.model().text_config().vocab_size)) {
+            fprintf(stderr, "cannot open --dump-logits path %s\n", dump_logits_path.c_str());
+            return 1;
+        }
+    }
+
+    auto submit_result = runtime.submit(prompt_ids, static_cast<uint32_t>(max_new_tokens), sampling);
+    if (!submit_result.ok()) {
+        fprintf(stderr, "submit failed: %s\n", submit_result.status().message().c_str());
+        return 1;
+    }
+    const uint64_t request_id = submit_result.release();
+
+    auto t_prefill_start = std::chrono::steady_clock::now();
+    auto first_step = runtime.step();
+    if (!first_step.ok()) {
+        fprintf(stderr, "prefill step failed: %s\n", first_step.status().message().c_str());
+        auto cleanup_st = runtime.cancel_all();
+        if (!cleanup_st.ok()) {
+            fprintf(stderr, "cleanup after prefill failure: %s\n", cleanup_st.message().c_str());
+        }
+        return 1;
+    }
+    if (!first_step.value().executed) {
+        fprintf(stderr, "prefill step did not execute\n");
+        auto cleanup_st = runtime.cancel_all();
+        if (!cleanup_st.ok()) {
+            fprintf(stderr, "cleanup after prefill failure: %s\n", cleanup_st.message().c_str());
+        }
+        return 1;
+    }
+    hipError_t herr = hipStreamSynchronize(runtime.stream());
+    if (herr != hipSuccess) {
+        fprintf(stderr, "prefill sync failed: %s\n", hipGetErrorString(herr));
+        return 1;
+    }
+    if (!dumper.step(executor)) return 1;
+    dump_hidden_debug(executor, "prefill");
+    dump_tap_hidden(executor, "prefill", prompt_ids.size());
+    auto t_prefill_end = std::chrono::steady_clock::now();
+
+    auto t_decode_start = std::chrono::steady_clock::now();
+    uint32_t decode_tokens = 0;
+    while (runtime.has_pending()) {
+        auto step_result = runtime.step();
+        if (!step_result.ok()) {
+            fprintf(stderr, "decode step failed: %s\n", step_result.status().message().c_str());
+            auto cleanup_st = runtime.cancel_all();
+            if (!cleanup_st.ok()) {
+                fprintf(stderr, "cleanup after decode failure: %s\n", cleanup_st.message().c_str());
+            }
+            return 1;
+        }
+        if (!step_result.value().executed) {
+            fprintf(stderr, "decode stuck: pending request remains but step did not execute\n");
+            auto cleanup_st = runtime.cancel_all();
+            if (!cleanup_st.ok()) {
+                fprintf(stderr, "cleanup after stuck decode: %s\n", cleanup_st.message().c_str());
+            }
+            return 1;
+        }
+        if (dumper.file != nullptr) {
+            herr = hipStreamSynchronize(runtime.stream());
+            if (herr != hipSuccess) {
+                fprintf(stderr, "decode sync failed: %s\n", hipGetErrorString(herr));
+                return 1;
+            }
+            if (!dumper.step(executor)) return 1;
+        }
+        if (std::getenv("PHASESHIFT_DEBUG_HIDDEN") != nullptr ||
+            executor.config.target_hidden_tap_count > 0) {
+            herr = hipStreamSynchronize(runtime.stream());
+            if (herr != hipSuccess) {
+                fprintf(stderr, "decode sync failed: %s\n", hipGetErrorString(herr));
+                return 1;
+            }
+            char tag[32];
+            std::snprintf(tag, sizeof(tag), "decode%d", static_cast<int>(decode_tokens));
+            dump_hidden_debug(executor, tag);
+            dump_tap_hidden(executor, tag, step_result.value().num_tokens);
+        }
+        decode_tokens += step_result.value().num_tokens;
+    }
+    herr = hipStreamSynchronize(runtime.stream());
+    if (herr != hipSuccess) {
+        fprintf(stderr, "decode sync failed: %s\n", hipGetErrorString(herr));
+        return 1;
+    }
+    auto t_decode_end = std::chrono::steady_clock::now();
+
+    const auto* request = runtime.request(request_id);
+    if (request == nullptr ||
+        request->state != ps::qwen35::runtime::RequestState::Finished) {
+        fprintf(stderr, "request did not finish\n");
+        return 1;
+    }
+    std::vector<int32_t> generated(request->generated);
+
+    const auto prefill_ms =
+        std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+    const auto decode_ms =
+        std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+    const double decode_tps = decode_ms > 0.0 ? decode_tokens * 1000.0 / decode_ms : 0.0;
+
+    printf("MODEL_LAYERS=%zu\n", runtime.model().text_config().num_hidden_layers);
+    printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
+    printf("GENERATED_TOKENS=%zu\n", generated.size());
+    printf("ARENA_USED_GB=%.3f\n", static_cast<double>(runtime.arena().used()) / (1024.0 * 1024.0 * 1024.0));
+    printf("ARENA_COMMITTED_GB=%.3f\n",
+           static_cast<double>(runtime.arena().committed()) / (1024.0 * 1024.0 * 1024.0));
+    printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());
+    printf("PREFILL_MS=%.1f\n", prefill_ms);
+    printf("DECODE_MS=%.1f\n", decode_ms);
+    printf("DECODE_TOKENS=%u\n", decode_tokens);
+    printf("DECODE_TOKENS_PER_SEC=%.2f\n", decode_tps);
+    printf("KV_CACHE_DTYPE=%s\n", kv_cache_dtype.c_str());
+    printf("KV_POOL_RESERVED_BYTES=%zu\n", kv_pool.reserved_bytes());
+
+    printf("GENERATED_IDS=");
+    for (std::size_t i = 0; i < generated.size(); ++i) {
+        if (i > 0) printf(",");
+        printf("%d", generated[i]);
+    }
+    printf("\n");
+    dumper.finish();
+    fflush(stdout);
+
+    const uint32_t used_kv_pages = kv_pool.num_used_pages();
+    const uint32_t used_seq_slots = runtime.slot_pool().num_used_slots();
+    const uint32_t used_gdn_slots = runtime.gdn_pool().num_used_slots();
+    if (used_kv_pages != 0 || used_seq_slots != 0 || used_gdn_slots != 0) {
+        fprintf(stderr,
+                "pool leak after generation: kv_pages=%u seq_slots=%u gdn_slots=%u\n",
+                used_kv_pages, used_seq_slots, used_gdn_slots);
+        return 1;
+    }
+    auto shutdown_st = runtime.shutdown();
+    if (!shutdown_st.ok()) {
+        fprintf(stderr, "runtime shutdown failed: %s\n", shutdown_st.message().c_str());
+        return 1;
+    }
+    return 0;
+}
+
+int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
+                     const std::vector<int32_t>& prompt_ids,
+                     unsigned long max_new_tokens,
+                     const ps::qwen35::dflash2::DFlash2Config& dflash_config,
+                     const std::string& dflash2_model_dir,
+                     unsigned long dflash2_drafts,
+                     int dflash2_stats,
+                     const std::string& kv_cache_dtype,
+                     const ps::qwen35::runtime::SamplingConfig& sampling) {
+    auto& executor = runtime.executor();
+    const auto& model = runtime.model();
+    auto& slot_pool = runtime.slot_pool();
+    auto& gdn_pool = runtime.gdn_pool();
+    auto& kv_pool = runtime.kv_pool();
+    auto& arena = runtime.arena();
+    const hipStream_t stream = runtime.stream();
+    const auto& text_config = model.text_config();
+    ps::qwen35::runtime::TpCoordinator* tp_coord = runtime.tp_coordinator();
+    std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> rank_bindings;
+    if (tp_coord != nullptr) {
+        rank_bindings.reserve(static_cast<std::size_t>(tp_coord->tp_size()));
+        for (int r = 0; r < tp_coord->tp_size(); ++r) {
+            auto& rank = tp_coord->rank(static_cast<std::size_t>(r));
+            rank_bindings.push_back(ps::qwen35::runtime::DFlash2GdnRankBinding{
+                &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id(),
+                &rank.executor().host_model_state, &rank.executor()});
+        }
+    }
+    print_model_geometry(model);
+    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+        dump_mem_debug(runtime);
+    }
+
+    auto dflash_weights_result = runtime.load_dflash2_weights(dflash_config);
+    if (!dflash_weights_result.ok()) {
+        fprintf(stderr, "dflash2 weight load failed: %s\n",
+                dflash_weights_result.status().message().c_str());
+        return 1;
+    }
+    ps::qwen35::dflash2::DFlash2Weights dflash_weights = dflash_weights_result.release();
+
+    const uint32_t max_seq = runtime.config().max_seq_len;
+
+    ps::weights::MatrixWeight* private_lm_head = nullptr;
+    ps::weights::MatrixWeight* private_embed = nullptr;
+    const bool tp_sharded = runtime.config().tp > 1;
+    if (tp_sharded) {
+        auto* tp = runtime.tp_coordinator();
+        if (tp == nullptr || tp->tp_size() == 0) {
+            fprintf(stderr, "private target weights unavailable\n");
+            return 1;
+        }
+        auto& rank0 = tp->rank(0);
+        private_lm_head = &rank0.private_lm_head();
+        private_embed = &rank0.private_embed_tokens();
+    }
+    ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
+    draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
+    draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
+    draft_config.target_lm_head =
+        tp_sharded ? private_lm_head : &model.weights().lm_head;
+    draft_config.target_embed_tokens =
+        tp_sharded ? private_embed : &model.weights().embed_tokens;
+    auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
+        dflash_config, dflash_weights, arena, draft_config);
+    if (!draft_result.ok()) {
+        fprintf(stderr, "dflash2 executor create failed: %s\n",
+                draft_result.status().message().c_str());
+        return 1;
+    }
+    ps::qwen35::dflash2::DFlash2Executor draft = draft_result.release();
+
+    auto sequence_result = ps::state::create_paged_sequence_state(
+        slot_pool, gdn_pool, kv_pool, max_seq, stream);
+    if (!sequence_result.ok()) {
+        fprintf(stderr, "dflash2 sequence create failed: %s\n",
+                sequence_result.status().message().c_str());
+        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        return 1;
+    }
+    ps::state::PagedSequenceState sequence = sequence_result.release();
+    auto release_sequence = [&]() {
+        if (tp_coord != nullptr) {
+            (void)tp_coord->on_sequence_released(sequence);
+        }
+        (void)ps::state::release_paged_sequence_state(sequence, stream);
+    };
+    if (tp_coord != nullptr) {
+        const ps::Status mirror_st = tp_coord->on_sequence_created(sequence);
+        if (!mirror_st.ok()) {
+            fprintf(stderr, "dflash2 tp mirror create failed: %s\n",
+                    mirror_st.message().c_str());
+            release_sequence();
+            (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            return 1;
+        }
+    }
+
+    auto context_result =
+        ps::qwen35::dflash2::create_dflash2_context_state(dflash_config, arena, 0u);
+    if (!context_result.ok()) {
+        fprintf(stderr, "dflash2 context create failed: %s\n",
+                context_result.status().message().c_str());
+        release_sequence();
+        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        return 1;
+    }
+    ps::qwen35::dflash2::DFlash2ContextState context = context_result.release();
+
+    ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
+    decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
+    decoder_config.eos_tokens = text_config.stop_tokens;
+    auto decoder_result = ps::qwen35::runtime::create_dflash2_spec_decoder(
+        executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
+        rank_bindings.empty() ? nullptr : &rank_bindings, tp_coord);
+    if (!decoder_result.ok()) {
+        fprintf(stderr, "dflash2 spec decoder create failed: %s\n",
+                decoder_result.status().message().c_str());
+        (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+        release_sequence();
+        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        return 1;
+    }
+    ps::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
+    ps::qwen35::runtime::DFlash2SpecTiming timing;
+    decoder.timing = &timing;
+    ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(decoder, sampling);
+
+    std::vector<int32_t> generated;
+    uint32_t decode_tokens = 0u;
+
+    const auto t_prefill_start = std::chrono::steady_clock::now();
+    auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
+        decoder, prompt_ids.data(), static_cast<uint32_t>(prompt_ids.size()));
+    if (!prefill_result.ok()) {
+        fprintf(stderr, "dflash2 prefill failed: %s\n",
+                prefill_result.status().message().c_str());
+        (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+        (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+        release_sequence();
+        (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+        return 1;
+    }
+    int32_t pending = prefill_result.value().pending_token;
+    generated.push_back(pending);
+    const auto t_prefill_end = std::chrono::steady_clock::now();
+
+    const auto t_decode_start = std::chrono::steady_clock::now();
+    bool finished = ps::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
+    while (!finished && generated.size() < max_new_tokens) {
+        const uint32_t remaining =
+            static_cast<uint32_t>(max_new_tokens - generated.size());
+        auto step_result =
+            ps::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+        if (!step_result.ok()) {
+            fprintf(stderr, "dflash2 step failed: %s\n",
+                    step_result.status().message().c_str());
+            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+            (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+            release_sequence();
+            (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+            return 1;
+        }
+        auto step = step_result.release();
+        for (uint32_t i = 0; i < step.emitted_count; ++i) {
+            generated.push_back(step.emitted[i]);
+            ++decode_tokens;
+        }
+        pending = step.pending_token;
+        finished = step.finished;
+    }
+    hipError_t herr = hipStreamSynchronize(stream);
+    if (herr != hipSuccess) {
+        fprintf(stderr, "dflash2 sync failed: %s\n", hipGetErrorString(herr));
+        return 1;
+    }
+    const auto t_decode_end = std::chrono::steady_clock::now();
+
+    if (dflash2_stats != 0) {
+        const float mean_accepted = timing.rounds > 0u
+            ? static_cast<float>(timing.accepted_drafts) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float full_rate = timing.rounds > 0u
+            ? static_cast<float>(timing.full_accepts) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float emitted_per_round = timing.rounds > 0u
+            ? static_cast<float>(timing.generated_tokens) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        printf("DFLASH2_DRAFTS=%u\n", decoder_config.num_drafts);
+        printf("DFLASH2_BLOCK_SIZE=%zu\n", dflash_config.block_size);
+        printf("DFLASH2_ROUNDS=%u\n", timing.rounds);
+        printf("DFLASH2_FULL_ACCEPTS=%u\n", timing.full_accepts);
+        printf("DFLASH2_PARTIAL_ACCEPTS=%u\n", timing.partial_accepts);
+        printf("DFLASH2_GDN_HISTORY_BYTES=%llu\n",
+               static_cast<unsigned long long>(timing.gdn_history_bytes));
+        printf("DFLASH2_GDN_SNAPSHOT_BYTES=%llu\n",
+               static_cast<unsigned long long>(decoder.gdn_snapshot_bytes));
+        printf("DFLASH2_GDN_COMPACT_BYTES=%llu\n",
+               static_cast<unsigned long long>(decoder.gdn_compact_bytes));
+        printf("DFLASH2_GDN_MODE=compact\n");
+        printf("DFLASH2_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
+        printf("DFLASH2_MEAN_ACCEPTED=%.3f\n", mean_accepted);
+        printf("DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
+        printf("DFLASH2_EMITTED_PER_ROUND=%.3f\n", emitted_per_round);
+        printf("DFLASH2_DRAFT_MS=%.2f\n", timing.draft_ms);
+        printf("DFLASH2_D2H_MS=%.2f\n", timing.draft_d2h_ms);
+        printf("DFLASH2_DRAFT_GPU_MS=%.2f\n", timing.draft_gpu_ms);
+        printf("DFLASH2_PROPOSAL_WAIT_MS=%.2f\n", timing.proposal_wait_ms);
+        printf("DFLASH2_PROPOSAL_COPY_MS=%.2f\n", timing.proposal_copy_ms);
+        printf("DFLASH2_VERIFY_MS=%.2f\n", timing.verify_ms);
+        printf("DFLASH2_VERIFY_GPU_MS=%.2f\n", timing.verify_gpu_ms);
+        printf("DFLASH2_DECISION_WAIT_MS=%.2f\n", timing.decision_wait_ms);
+        printf("DFLASH2_DECISION_D2H_MS=%.2f\n", timing.decision_copy_ms);
+        printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge ? 1 : 0);
+        printf("DFLASH2_RERUN_MS=%.2f\n", timing.rerun_ms);
+        printf("DFLASH2_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
+        printf("DFLASH2_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
+        printf("DFLASH2_COMMIT_MS=%.2f\n", timing.dflash_commit_ms);
+        printf("DFLASH2_ROUND_MS=%.2f\n", timing.round_ms);
+        fflush(stdout);
+    }
+
+    (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+    (void)ps::qwen35::dflash2::dflash2_context_shutdown(context);
+    release_sequence();
+    (void)ps::qwen35::dflash2::dflash2_executor_shutdown(draft);
+
+    const auto prefill_ms =
+        std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+    const auto decode_ms =
+        std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+    const double decode_tps = decode_ms > 0.0 ? decode_tokens * 1000.0 / decode_ms : 0.0;
+
+    printf("MODEL_LAYERS=%zu\n", text_config.num_hidden_layers);
+    printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
+    printf("GENERATED_TOKENS=%zu\n", generated.size());
+    printf("ARENA_USED_GB=%.3f\n", static_cast<double>(arena.used()) / (1024.0 * 1024.0 * 1024.0));
+    printf("ARENA_COMMITTED_GB=%.3f\n",
+           static_cast<double>(arena.committed()) / (1024.0 * 1024.0 * 1024.0));
+    printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());
+    printf("PREFILL_MS=%.1f\n", prefill_ms);
+    printf("DECODE_MS=%.1f\n", decode_ms);
+    printf("DECODE_TOKENS=%u\n", decode_tokens);
+    printf("DECODE_TOKENS_PER_SEC=%.2f\n", decode_tps);
+    printf("KV_CACHE_DTYPE=%s\n", kv_cache_dtype.c_str());
+    printf("KV_POOL_RESERVED_BYTES=%zu\n", kv_pool.reserved_bytes());
+
+    printf("GENERATED_IDS=");
+    for (std::size_t i = 0; i < generated.size(); ++i) {
+        if (i > 0) printf(",");
+        printf("%d", generated[i]);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    const uint32_t used_kv_pages = kv_pool.num_used_pages();
+    const uint32_t used_seq_slots = slot_pool.num_used_slots();
+    const uint32_t used_gdn_slots = gdn_pool.num_used_slots();
+    if (used_kv_pages != 0 || used_seq_slots != 0 || used_gdn_slots != 0) {
+        fprintf(stderr,
+                "pool leak after generation: kv_pages=%u seq_slots=%u gdn_slots=%u\n",
+                used_kv_pages, used_seq_slots, used_gdn_slots);
+        return 1;
+    }
+    auto shutdown_st = runtime.shutdown();
+    if (!shutdown_st.ok()) {
+        fprintf(stderr, "runtime shutdown failed: %s\n", shutdown_st.message().c_str());
+        return 1;
+    }
+    return 0;
+}
+
+
+int run_eagle4_shot(ps::app::Qwen35ComputeRuntime& runtime,
+                    const std::vector<int32_t>& prompt_ids,
+                    unsigned long max_new_tokens,
+                    const std::string& model_dir,
+                    unsigned long drafts,
+                    unsigned long tree_width,
+                    unsigned long tree_dynamic,
+                    const std::string& candidate_head,
+                    const std::string& lm_head_source,
+                    int stats,
+                    const std::string& kv_cache_dtype) {
+    auto& executor = runtime.executor();
+    const auto& model = runtime.model();
+    auto& slot_pool = runtime.slot_pool();
+    auto& gdn_pool = runtime.gdn_pool();
+    auto& kv_pool = runtime.kv_pool();
+    auto& arena = runtime.arena();
+    const hipStream_t stream = runtime.stream();
+    const auto& text_config = model.text_config();
+    ps::qwen35::runtime::TpCoordinator* tp_coord = runtime.tp_coordinator();
+    std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> rank_bindings;
+    if (tp_coord != nullptr) {
+        rank_bindings.reserve(static_cast<std::size_t>(tp_coord->tp_size()));
+        for (int r = 0; r < tp_coord->tp_size(); ++r) {
+            auto& rank = tp_coord->rank(static_cast<std::size_t>(r));
+            rank_bindings.push_back(ps::qwen35::runtime::DFlash2GdnRankBinding{
+                &rank.gdn_pool(), &rank.arena(), rank.stream(), rank.device_id(),
+                &rank.executor().host_model_state, &rank.executor()});
+        }
+    }
+    auto dev_scope = ps::gpu::ScopedDevice::create(runtime.config().devices[0]);
+    if (!dev_scope.ok()) {
+        fprintf(stderr, "eagle4 device scope failed: %s\n",
+                dev_scope.status().message().c_str());
+        return 1;
+    }
+    print_model_geometry(model);
+    if (std::getenv("PHASESHIFT_MEM_DEBUG") != nullptr) {
+        dump_mem_debug(runtime);
+    }
+
+    auto eagle_config_result = ps::qwen35::eagle4::read_eagle4_config(model_dir);
+    if (!eagle_config_result.ok()) {
+        fprintf(stderr, "eagle4 config read failed: %s\n",
+                eagle_config_result.status().message().c_str());
+        return 1;
+    }
+    ps::qwen35::eagle4::Eagle4Config eagle_config = eagle_config_result.release();
+    if (drafts > 15u) {
+        fprintf(stderr, "--eagle4-drafts %lu exceeds the supported bound\n", drafts);
+        return 1;
+    }
+
+    const bool share_lm_head = lm_head_source == "target";
+    ps::qwen35::eagle4::Eagle4WeightLoadOptions load_options;
+    load_options.load_embed_tokens = false;
+    load_options.load_lm_head = !share_lm_head;
+    auto weights_result = ps::qwen35::eagle4::load_eagle4_weights(
+        model_dir, eagle_config, arena, stream, load_options);
+    if (!weights_result.ok()) {
+        fprintf(stderr, "eagle4 weight load failed: %s\n",
+                weights_result.status().message().c_str());
+        return 1;
+    }
+    ps::qwen35::eagle4::Eagle4Weights eagle_weights = weights_result.release();
+
+    if (share_lm_head &&
+        model.weights().lm_head.rows != static_cast<uint32_t>(eagle_config.vocab_size)) {
+        fprintf(stderr,
+                "target lm_head is vocab-sharded under tp>1; pass "
+                "--eagle4-lm-head draft\n");
+        return 1;
+    }
+
+    ps::qwen35::eagle4::Eagle4ExecutorConfig draft_config;
+    draft_config.max_rows = ps::qwen35::eagle4::kEagle4ExtendRowsMax;
+    draft_config.num_candidates = static_cast<uint32_t>(eagle_config.num_candidates);
+    draft_config.target_embed_tokens = &model.weights().embed_tokens;
+    if (share_lm_head) draft_config.target_lm_head = &model.weights().lm_head;
+    draft_config.use_lowrank_candidate_head = candidate_head != "gemv";
+    auto draft_result = ps::qwen35::eagle4::create_eagle4_executor(
+        eagle_config, eagle_weights, arena, draft_config);
+    if (!draft_result.ok()) {
+        fprintf(stderr, "eagle4 executor create failed: %s\n",
+                draft_result.status().message().c_str());
+        return 1;
+    }
+    ps::qwen35::eagle4::Eagle4Executor draft = draft_result.release();
+
+    auto sequence_result = ps::state::create_paged_sequence_state(
+        slot_pool, gdn_pool, kv_pool, runtime.config().max_seq_len, stream);
+    if (!sequence_result.ok()) {
+        fprintf(stderr, "eagle4 sequence create failed: %s\n",
+                sequence_result.status().message().c_str());
+        (void)ps::qwen35::eagle4::eagle4_executor_shutdown(draft);
+        return 1;
+    }
+    ps::state::PagedSequenceState sequence = sequence_result.release();
+    if (tp_coord != nullptr) {
+        const ps::Status mirror_st = tp_coord->on_sequence_created(sequence);
+        if (!mirror_st.ok()) {
+            fprintf(stderr, "eagle4 tp mirror create failed: %s\n",
+                    mirror_st.message().c_str());
+            (void)ps::state::release_paged_sequence_state(sequence, stream);
+            (void)ps::qwen35::eagle4::eagle4_executor_shutdown(draft);
+            return 1;
+        }
+    }
+    auto release_sequence = [&]() {
+        if (tp_coord != nullptr) {
+            (void)tp_coord->on_sequence_released(sequence);
+        }
+        (void)ps::state::release_paged_sequence_state(sequence, stream);
+    };
+
+    auto context_result =
+        ps::qwen35::eagle4::create_eagle4_context_state(eagle_config, arena, 0u);
+    if (!context_result.ok()) {
+        fprintf(stderr, "eagle4 context create failed: %s\n",
+                context_result.status().message().c_str());
+        release_sequence();
+        (void)ps::qwen35::eagle4::eagle4_executor_shutdown(draft);
+        return 1;
+    }
+    ps::qwen35::eagle4::Eagle4ContextState context = context_result.release();
+
+    ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
+    decoder_config.num_drafts = static_cast<uint32_t>(drafts);
+    decoder_config.eagle4_tree_width = static_cast<uint32_t>(tree_width);
+    decoder_config.eagle4_tree_dynamic = static_cast<uint32_t>(tree_dynamic);
+    decoder_config.eos_tokens = text_config.stop_tokens;
+    auto decoder_result = ps::qwen35::runtime::create_eagle4_spec_decoder(
+        executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
+        rank_bindings.empty() ? nullptr : &rank_bindings, tp_coord);
+    if (!decoder_result.ok()) {
+        fprintf(stderr, "eagle4 spec decoder create failed: %s\n",
+                decoder_result.status().message().c_str());
+        (void)ps::qwen35::eagle4::eagle4_context_shutdown(context);
+        release_sequence();
+        (void)ps::qwen35::eagle4::eagle4_executor_shutdown(draft);
+        return 1;
+    }
+    ps::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
+    ps::qwen35::runtime::DFlash2SpecTiming timing;
+    decoder.timing = &timing;
+
+    auto cleanup = [&]() {
+        (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(decoder);
+        (void)ps::qwen35::eagle4::eagle4_context_shutdown(context);
+        release_sequence();
+        (void)ps::qwen35::eagle4::eagle4_executor_shutdown(draft);
+    };
+
+    std::vector<int32_t> generated;
+    uint32_t decode_tokens = 0u;
+
+    const auto t_prefill_start = std::chrono::steady_clock::now();
+    auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
+        decoder, prompt_ids.data(), static_cast<uint32_t>(prompt_ids.size()));
+    if (!prefill_result.ok()) {
+        fprintf(stderr, "eagle4 prefill failed: %s\n",
+                prefill_result.status().message().c_str());
+        cleanup();
+        return 1;
+    }
+    int32_t pending = prefill_result.value().pending_token;
+    generated.push_back(pending);
+    const auto t_prefill_end = std::chrono::steady_clock::now();
+
+    const auto t_decode_start = std::chrono::steady_clock::now();
+    bool finished = ps::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
+    while (!finished && generated.size() < max_new_tokens) {
+        const uint32_t remaining =
+            static_cast<uint32_t>(max_new_tokens - generated.size());
+        auto step_result =
+            ps::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+        if (!step_result.ok()) {
+            fprintf(stderr, "eagle4 step failed: %s\n",
+                    step_result.status().message().c_str());
+            cleanup();
+            return 1;
+        }
+        auto step = step_result.release();
+        for (uint32_t i = 0; i < step.emitted_count; ++i) {
+            generated.push_back(step.emitted[i]);
+            ++decode_tokens;
+        }
+        pending = step.pending_token;
+        finished = step.finished;
+    }
+    {
+        const hipError_t herr = hipStreamSynchronize(stream);
+        if (herr != hipSuccess) {
+            fprintf(stderr, "eagle4 sync failed: %s\n", hipGetErrorString(herr));
+            cleanup();
+            return 1;
+        }
+    }
+    const auto t_decode_end = std::chrono::steady_clock::now();
+
+    if (stats != 0) {
+        const float mean_accepted = timing.rounds > 0u
+            ? static_cast<float>(timing.accepted_drafts) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float full_rate = timing.rounds > 0u
+            ? static_cast<float>(timing.full_accepts) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float emitted_per_round = timing.rounds > 0u
+            ? static_cast<float>(timing.generated_tokens) / static_cast<float>(timing.rounds)
+            : 0.0f;
+        printf("EAGLE4_DRAFTS=%u\n", decoder_config.num_drafts);
+        printf("EAGLE4_CANDIDATE_HEAD=%s\n", candidate_head.c_str());
+        printf("EAGLE4_LM_HEAD=%s\n", lm_head_source.c_str());
+        printf("EAGLE4_ROUNDS=%u\n", timing.rounds);
+        printf("EAGLE4_FULL_ACCEPTS=%u\n", timing.full_accepts);
+        printf("EAGLE4_PARTIAL_ACCEPTS=%u\n", timing.partial_accepts);
+        printf("EAGLE4_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
+        printf("EAGLE4_MEAN_ACCEPTED=%.3f\n", mean_accepted);
+        printf("EAGLE4_FULL_ACCEPT_RATE=%.3f\n", full_rate);
+        printf("EAGLE4_EMITTED_PER_ROUND=%.3f\n", emitted_per_round);
+        printf("EAGLE4_DRAFT_MS=%.2f\n", timing.draft_ms);
+        printf("EAGLE4_DRAFT_GPU_MS=%.2f\n", timing.draft_gpu_ms);
+        printf("EAGLE4_VERIFY_MS=%.2f\n", timing.verify_ms);
+        printf("EAGLE4_VERIFY_GPU_MS=%.2f\n", timing.verify_gpu_ms);
+        printf("EAGLE4_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
+        printf("EAGLE4_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
+        printf("EAGLE4_COMMIT_MS=%.2f\n", timing.dflash_commit_ms);
+        printf("EAGLE4_ROUND_MS=%.2f\n", timing.round_ms);
+        fflush(stdout);
+    }
+
+    cleanup();
+
+    const auto prefill_ms =
+        std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+    const auto decode_ms =
+        std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+    const double decode_tps = decode_ms > 0.0 ? decode_tokens * 1000.0 / decode_ms : 0.0;
+
+    printf("MODEL_LAYERS=%zu\n", text_config.num_hidden_layers);
+    printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
+    printf("GENERATED_TOKENS=%zu\n", generated.size());
+    printf("ARENA_USED_GB=%.3f\n", static_cast<double>(arena.used()) / (1024.0 * 1024.0 * 1024.0));
+    printf("ARENA_COMMITTED_GB=%.3f\n",
+           static_cast<double>(arena.committed()) / (1024.0 * 1024.0 * 1024.0));
+    printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());
+    printf("PREFILL_MS=%.1f\n", prefill_ms);
+    printf("DECODE_MS=%.1f\n", decode_ms);
+    printf("DECODE_TOKENS=%u\n", decode_tokens);
+    printf("DECODE_TOKENS_PER_SEC=%.2f\n", decode_tps);
+    printf("KV_CACHE_DTYPE=%s\n", kv_cache_dtype.c_str());
+    printf("KV_POOL_RESERVED_BYTES=%zu\n", kv_pool.reserved_bytes());
+
+    printf("GENERATED_IDS=");
+    for (std::size_t i = 0; i < generated.size(); ++i) {
+        if (i > 0) printf(",");
+        printf("%d", generated[i]);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    const uint32_t used_kv_pages = kv_pool.num_used_pages();
+    const uint32_t used_seq_slots = slot_pool.num_used_slots();
+    const uint32_t used_gdn_slots = gdn_pool.num_used_slots();
+    if (used_kv_pages != 0 || used_seq_slots != 0 || used_gdn_slots != 0) {
+        fprintf(stderr, "pool leak after generation: kv_pages=%u seq_slots=%u gdn_slots=%u\n",
+                used_kv_pages, used_seq_slots, used_gdn_slots);
+        return 1;
+    }
+    auto shutdown_st = runtime.shutdown();
+    if (!shutdown_st.ok()) {
+        fprintf(stderr, "runtime shutdown failed: %s\n",
+                shutdown_st.message().c_str());
+        return 1;
+    }
+    return 0;
+}
+
+}  // namespace ps::app

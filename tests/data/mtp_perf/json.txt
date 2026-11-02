@@ -1,0 +1,54 @@
+{
+  "schema_version": "2.1.0",
+  "cluster": {
+    "name": "rdna4-inference",
+    "nodes": [
+      {"id": "node-0", "gpu": "gfx1201", "hbm_gb": 32, "role": "primary"},
+      {"id": "node-1", "gpu": "gfx1201", "hbm_gb": 32, "role": "standby"}
+    ],
+    "interconnect": {"type": "pcie5", "bandwidth_gbps": 128}
+  },
+  "models": [
+    {
+      "name": "Qwen3.5-4B",
+      "quantization": "bf16",
+      "hidden_size": 2560,
+      "num_layers": 32,
+      "num_attention_heads": 16,
+      "num_key_value_heads": 4,
+      "head_dim": 256,
+      "vocab_size": 248320,
+      "mtp": {"present": true, "num_layers": 1, "tie_embeddings": true}
+    },
+    {
+      "name": "Qwen3.5-27B",
+      "quantization": "fp8",
+      "hidden_size": 5120,
+      "num_layers": 64,
+      "num_attention_heads": 40,
+      "num_key_value_heads": 8,
+      "head_dim": 128,
+      "vocab_size": 248320,
+      "mtp": {"present": true, "num_layers": 1, "tie_embeddings": true}
+    }
+  ],
+  "runtime": {
+    "page_tokens": 16,
+    "max_batch_size": 8,
+    "max_model_len": 32768,
+    "kernel_mode": "optimized",
+    "speculative": {
+      "method": "mtp",
+      "num_drafts": 4,
+      "bonus_token": true,
+      "draft_dtype": "bf16",
+      "acceptance_policy": "greedy_longest_prefix"
+    }
+  },
+  "telemetry": {
+    "enabled": true,
+    "interval_ms": 250,
+    "fields": ["gpu_util", "hbm_used_mb", "power_w", "temperature_c", "clock_mhz"]
+  },
+  "limits": {"max_concurrent_requests": 64, "request_timeout_s": 120, "retry_policy": {"attempts": 3, "backoff_ms": [50, 200, 800]}}
+}

@@ -1,0 +1,30 @@
+The history of computing is, in large part, a history of abstraction. Each generation of
+engineers has discovered that a problem which once seemed irreducible could be decomposed
+into smaller pieces, and that those pieces could be recombined in ways the original
+designers never anticipated. The stored-program computer replaced the plugboard, the
+compiler replaced the hand-written instruction sequence, and the operating system replaced
+the careful orchestration of jobs by a human operator. None of these transitions was
+instantaneous, and none was uncontested. There were always practitioners who argued that the
+new layer of indirection cost more than it saved, that the machine was fast enough as it
+was, and that the abstraction would leak in precisely the cases that mattered. They were
+sometimes right in the short term and almost always wrong in the long term, because
+abstraction lowers the cost of the next experiment.
+
+Consider the memory hierarchy. A processor that can only read from a single flat address
+space is simple to reason about, but it cannot sustain the throughput that modern workloads
+demand. The cache, the TLB, the prefetcher, and the memory controller each add a layer of
+policy that the programmer cannot see and cannot directly control. The result is a system
+whose average behavior is excellent and whose worst-case behavior is difficult to predict.
+Performance engineering in such a world is less about issuing the theoretically optimal
+instruction sequence and more about arranging the work so that the hardware's heuristics
+have an easy job. This is why data layout, access order, and working-set size dominate so
+many optimization discussions, and why a change that looks trivial in the source can move
+throughput by a factor of two.
+
+The same tension appears in machine learning systems. A model is a mathematical object, but
+an inference engine is a physical one. The mathematically equivalent formulation that
+materializes fewer intermediate tensors, touches memory in a more predictable order, or
+keeps the arithmetic units busier will win, often by a wide margin. This is not a failure of
+theory; it is a reminder that theory describes the computation while the machine determines
+the cost. Good systems work keeps both pictures in view at once and refuses to let either
+one become a comfortable fiction.

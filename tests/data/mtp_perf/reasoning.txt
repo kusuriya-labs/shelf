@@ -1,0 +1,34 @@
+We want to decide whether speculative decoding can pay for itself on a memory-bound decode
+workload. The argument is easiest to make in terms of bytes moved per accepted token. A
+target-only decode step reads every weight of the model exactly once and produces one token.
+Its cost is therefore dominated by weight traffic divided by achievable bandwidth. A
+speculative iteration reads the MTP draft weights K times, reads the target weights once over
+K+1 positions, and produces between one and K+1 tokens depending on how many drafts the
+target accepts.
+
+Suppose the target weight traffic is T bytes and the MTP draft weight traffic is D bytes per
+draft step. If the draft accepts a fraction p of its proposals on average, then a K-draft
+iteration produces approximately 1 + p*K tokens and moves T + K*D bytes plus the verification
+overhead. The target-only baseline moves T bytes per token. Speculation wins exactly when
+
+    (T + K*D) / (1 + p*K) < T,
+
+which rearranges to
+
+    D < T * p.
+
+In other words, the draft must be strictly cheaper per proposed token than the target times the
+acceptance rate. This is a clean necessary condition and it explains why a large draft model is
+usually a losing proposition: if D is comparable to T, only a very high acceptance rate can
+save you. A single-layer MTP head is attractive precisely because D is small relative to T, but
+it is not free: the language-model head alone reads the full embedding matrix, and if that
+matrix dominates the draft cost then D is not small at all.
+
+The second observation is that verification is not free either. Even a perfect draft must be
+checked, and the check runs the target over K+1 positions. That is more work than a single
+target step, though much of it is parallel and therefore bandwidth-limited rather than
+latency-limited. The break-even analysis above assumes verification costs the same as a normal
+target step per position, which is optimistic in the small-batch regime where fixed overheads
+matter. A careful engineer measures the cost side and the acceptance side separately, because a
+change that improves one can silently worsen the other, and only the product of the two
+determines the outcome.

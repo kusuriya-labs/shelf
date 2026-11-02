@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "instruction": "Answer with the final number only.",
+  "cases": [
+    {"id": "arithmetic_change", "category": "reasoning", "expected": "29",
+     "prompt": "A shop sells pencils at 3 dollars each. I buy 7 pencils and pay with a 50 dollar bill. How much change do I get? Answer with the final number only."},
+    {"id": "arithmetic_product", "category": "reasoning", "expected": "391",
+     "prompt": "What is 17 * 23? Answer with the final number only."},
+    {"id": "arithmetic_distance", "category": "reasoning", "expected": "150",
+     "prompt": "A train travels at 60 km/h for 2.5 hours. How far does it travel in km? Answer with the final number only."},
+    {"id": "sequence_next", "category": "reasoning", "expected": "42",
+     "prompt": "What is the next number in the sequence 2, 6, 12, 20, 30? Answer with the final number only."},
+    {"id": "primes_between", "category": "reasoning", "expected": "4",
+     "prompt": "How many prime numbers are there between 20 and 40, excluding 20 and 40? Answer with the final number only."},
+    {"id": "code_list_comprehension", "category": "code", "expected": "5",
+     "prompt": "What does this Python expression evaluate to: len([x for x in range(10) if x % 2 == 0])? Answer with the final number only."},
+    {"id": "code_slice_sum", "category": "code", "expected": "6",
+     "prompt": "What does this Python function return for f([1, 2, 3, 4])? def f(xs): return sum(xs[1::2]). Answer with the final number only."},
+    {"id": "geometry_area", "category": "reasoning", "expected": "63",
+     "prompt": "A rectangle has width 7 and height 9. What is its area? Answer with the final number only."},
+    {"id": "power_minus", "category": "reasoning", "expected": "1000",
+     "prompt": "What is 2**10 minus 24? Answer with the final number only."},
+    {"id": "arithmetic_total", "category": "reasoning", "expected": "48",
+     "prompt": "Alice has 3 times as many apples as Bob. Bob has 12 apples. How many apples do they have in total? Answer with the final number only."}
+  ]
+}

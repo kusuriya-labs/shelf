@@ -1,0 +1,200 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace ps::quantization {
+
+constexpr uint32_t kQuantBlockElements = 32;
+constexpr uint32_t kFp8ScaleBlockN = 128;
+constexpr uint32_t kFp8ScaleBlockK = 128;
+
+// Metadata placement relative to the codes matrix.
+//
+//   PerBlock        one element per (row, K block)
+//   PerSuperBlock   one element per (row, superblock)
+//   MatrixBlock     one element per (N block, K block) tile, shared by every
+//                   row inside the tile. `block_n` / `block_k` describe the
+//                   tile geometry; `block_k == 0` means "format block".
+enum class MetaCountMode : uint8_t {
+    None = 0,
+    PerBlock = 1,
+    PerSuperBlock = 2,
+    MatrixBlock = 3,
+};
+
+enum class MetaStorage : uint8_t {
+    U8 = 0,
+    F32 = 1,
+};
+
+struct QuantMetaDesc {
+    uint32_t element_bytes = 0;
+    MetaCountMode count_mode = MetaCountMode::None;
+    MetaStorage storage = MetaStorage::U8;
+    uint32_t block_n = 1;
+    uint32_t block_k = 0;
+};
+
+struct QuantFormatDesc {
+    uint32_t block_elements = 0;
+    uint32_t blocks_per_superblock = 1;
+    uint32_t code_bytes_per_block = 0;
+    QuantMetaDesc meta[4];
+};
+
+enum class QuantFormatId : uint8_t {
+    None = 0,
+    Bf16 = 1,
+    Fp8 = 4,
+    Psq5 = 5,
+};
+
+static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
+static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
+static_assert(static_cast<uint8_t>(QuantFormatId::Fp8) == 4);
+static_assert(static_cast<uint8_t>(QuantFormatId::Psq5) == 5);
+
+inline constexpr QuantFormatDesc kBf16FormatDesc = {
+    16, 1, 32,
+    {
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
+// FP8 E4M3 codes are one byte per element; the FP32 scale tile is shared by
+// 128 output rows and 128 K elements.
+inline constexpr QuantFormatDesc kFp8FormatDesc = {
+    kFp8ScaleBlockK, 1, kFp8ScaleBlockK,
+    {
+        {4, MetaCountMode::MatrixBlock, MetaStorage::F32, kFp8ScaleBlockN, kFp8ScaleBlockK},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
+// PSQ5-CB28 stores a 4-bit codebook index per weight (16 bytes per 32-K block),
+// a 1-bit sign per weight (4 bytes per block), and one ue4m4 scale per block.
+// The CB28 magnitudes map onto FP8 E4M3 bit patterns, so the scale folds the
+// 512x relation and the kernel decodes ue4m4 to F32 directly.
+inline constexpr QuantFormatDesc kPsq5FormatDesc = {
+    32, 1, 16,
+    {
+        {4, MetaCountMode::PerBlock, MetaStorage::U8},
+        {1, MetaCountMode::PerBlock, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
+inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
+    switch (id) {
+        case QuantFormatId::Bf16: return &kBf16FormatDesc;
+        case QuantFormatId::Fp8: return &kFp8FormatDesc;
+        case QuantFormatId::Psq5: return &kPsq5FormatDesc;
+        default: return nullptr;
+    }
+}
+
+inline uint64_t quant_num_blocks(uint64_t padded_k, const QuantFormatDesc& f) {
+    return padded_k / f.block_elements;
+}
+
+inline uint64_t quant_num_superblocks(uint64_t padded_k, const QuantFormatDesc& f) {
+    const uint64_t nb = quant_num_blocks(padded_k, f);
+    return (nb + f.blocks_per_superblock - 1u) / f.blocks_per_superblock;
+}
+
+inline uint64_t quant_codes_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return rows * quant_num_blocks(padded_k, f) * f.code_bytes_per_block;
+}
+
+// Number of metadata elements for a matrix batch of `batch` matrices, each with
+// `rows` output rows and `padded_k` K elements.
+inline uint64_t quant_metadata_count(
+    uint64_t batch, uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f, uint32_t idx) {
+    const QuantMetaDesc& m = f.meta[idx];
+    switch (m.count_mode) {
+        case MetaCountMode::None:
+            return 0;
+        case MetaCountMode::PerBlock:
+            return batch * rows * quant_num_blocks(padded_k, f);
+        case MetaCountMode::PerSuperBlock:
+            return batch * rows * quant_num_superblocks(padded_k, f);
+        case MetaCountMode::MatrixBlock: {
+            const uint64_t bn = m.block_n != 0 ? m.block_n : 1;
+            const uint64_t bk = m.block_k != 0 ? m.block_k : f.block_elements;
+            return batch * ((rows + bn - 1u) / bn) * ((padded_k + bk - 1u) / bk);
+        }
+    }
+    return 0;
+}
+
+inline uint64_t quant_metadata_bytes(
+    uint64_t batch, uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f, uint32_t idx) {
+    const QuantMetaDesc& m = f.meta[idx];
+    if (m.count_mode == MetaCountMode::None || m.element_bytes == 0) return 0;
+    return quant_metadata_count(batch, rows, padded_k, f, idx) * m.element_bytes;
+}
+
+inline uint64_t quant_metadata_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f, uint32_t idx) {
+    return quant_metadata_bytes(1, rows, padded_k, f, idx);
+}
+
+inline uint64_t quant_metadata1_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_metadata_bytes(rows, padded_k, f, 0);
+}
+inline uint64_t quant_metadata2_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_metadata_bytes(rows, padded_k, f, 1);
+}
+inline uint64_t quant_metadata3_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_metadata_bytes(rows, padded_k, f, 2);
+}
+inline uint64_t quant_metadata4_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_metadata_bytes(rows, padded_k, f, 3);
+}
+
+inline uint64_t quant_payload_bytes(
+    uint64_t batch, uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_codes_bytes(batch * rows, padded_k, f) +
+           quant_metadata_bytes(batch, rows, padded_k, f, 0) +
+           quant_metadata_bytes(batch, rows, padded_k, f, 1) +
+           quant_metadata_bytes(batch, rows, padded_k, f, 2) +
+           quant_metadata_bytes(batch, rows, padded_k, f, 3);
+}
+
+inline uint64_t quant_payload_bytes(uint64_t rows, uint64_t padded_k, const QuantFormatDesc& f) {
+    return quant_payload_bytes(1, rows, padded_k, f);
+}
+
+inline uint64_t quant_padded_k(uint64_t k, QuantFormatId id) {
+    const QuantFormatDesc* f = quant_format_desc(id);
+    if (f == nullptr || id == QuantFormatId::Bf16) return k;
+    return ((k + f->block_elements - 1u) / f->block_elements) * f->block_elements;
+}
+
+inline uint64_t quant_element_count(const std::vector<int64_t>& shape) {
+    uint64_t n = 1;
+    for (int64_t d : shape) {
+        n *= static_cast<uint64_t>(d);
+    }
+    return n;
+}
+
+inline uint64_t quant_row_count(const std::vector<int64_t>& shape) {
+    if (shape.empty()) {
+        return 1;
+    }
+    uint64_t rows = 1;
+    for (size_t i = 0; i + 1 < shape.size(); ++i) {
+        rows *= static_cast<uint64_t>(shape[i]);
+    }
+    return rows;
+}
+
+}  // namespace ps::quantization

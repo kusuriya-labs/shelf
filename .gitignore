@@ -1,0 +1,34 @@
+# Extensions
+*.log
+*.o
+*.so
+
+# IDE / OS
+/.cache/
+/.vscode/
+/.superpowers/
+
+# Build Artifacts
+/build*/
+/Testing/
+/.worktrees/
+
+# Models (bare names also cover worktree symlinks)
+/models*
+
+# AGENTS
+opencode.json
+opencode.jsonc
+AGENTS.local.md
+
+# Python
+__pycache__/
+/perf/
+
+# Raw measurement artifacts
+/artifacts/
+/environment/
+/.rocprofv3/
+
+# Vendored external clone (keeps its own git history)
+/vendor/quark/

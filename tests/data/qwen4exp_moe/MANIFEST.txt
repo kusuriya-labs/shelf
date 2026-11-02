@@ -1,0 +1,13 @@
+generator: tools/gen_qwen4exp_moe_oracle.py
+git_revision: 10dceffad56a49f2b4d9dc0ba07cdf004db4f608
+seed: 20261024 (splitmix64, position-indexed: state = seed + (p+1)*GAMMA)
+uniform: f32((v>>40)*(1/2^23)-1), scale: f32(1/sqrt(dim))
+weight dtype: bf16 (stored bits -> widened f32 in both oracle and test)
+x dtype: bf16 stored; oracle widens to f32 then computes in float64
+shapes: H=2560 I=640 E=512 topk=10
+router softmax: float32 (spec), topk tie-break: stable index ascending
+norm_topk_prob: true except *_norenorm
+cases: random_t3(mode=random,T=3,xseed=101,renorm=True), zero_t2(mode=zero,T=2,xseed=202,renorm=True), tie_t2(mode=tie,T=2,xseed=303,renorm=True), extreme_t2(mode=extreme,T=2,xseed=404,renorm=True), same_t4(mode=same,T=4,xseed=505,renorm=True), random_t3_norenorm(mode=random,T=3,xseed=606,renorm=False)
+layout: wr p=0, gate_up p=1310720, down p=1679032320, sg p=2517893120, su p=2519531520, sd p=2521169920, sw p=2522808320
+torch: not used (numpy oracle)
+python: 3.12.3, numpy: 2.5.2

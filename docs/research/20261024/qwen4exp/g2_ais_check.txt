@@ -1,0 +1,12 @@
+Mounted volumes:
+MOUNTPOINT                                       FSTYPE          DEVICE     BACKING  O_DIRECT    HIPFILE   
+/                                                ext4 (ordered)  nvme1n1p5  nvme     unverified  unverified
+/opt                                             ext4 (ordered)  nvme0n1p1  nvme     unverified  unverified
+/boot/efi                                        vfat            nvme1n1p1  nvme     unverified  no        
+/media/zen/a2a3d36d-b50d-4300-80fe-c037036ce400  ext4 (ordered)  sda3       scsi     yes         no        
+
+AIS support in:
+	Kernel P2PDMA support   : True
+	HIP runtime             : True
+	amdgpu                  : True
+	hipFile-capable volume  : False

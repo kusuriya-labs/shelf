@@ -1,0 +1,107 @@
+AIS-STATS Version: 1
+HipFile Stats Level: 1
+File Handle Registrations: 300
+Buffer Registrations: 300
+Fastpath Rejections: 0
+
+Total Fastpath Read Size (B): 11059200
+Average Fastpath Read Bandwidth (GiB/s): 0.186917
+Average Fastpath Read Latency (us): 183.677
+Total Fastpath Read Errors: 0
+Total Fastpath Read Unaligned: 0
+
+Total Fastpath Write Size (B): 0
+Average Fastpath Write Bandwidth (GiB/s): 0
+Average Fastpath Write Latency (us): 0
+Total Fastpath Write Errors: 0
+Total Fastpath Write Unaligned: 0
+
+Total Fallback Read Size (B): 0
+Average Fallback Read Bandwidth (GiB/s): 0
+Average Fallback Read Latency (us): 0
+Total Fallback Read Errors: 0
+Total Fallback Read Unaligned: 0
+
+Total Fallback Write Size (B): 0
+Average Fallback Write Bandwidth (GiB/s): 0
+Average Fallback Write Latency (us): 0
+Total Fallback Write Errors: 0
+Total Fallback Write Unaligned: 0
+
+GPU 0:
+IO Size Histogram
+IO Size (KiB)               Fastpath Read Size (B)           Fastpath Write Size (B)            Fallback Read Size (B)           Fallback Write Size (B)
+0-4                                              0                                 0                                 0                                 0
+4-8                                              0                                 0                                 0                                 0
+8-16                                             0                                 0                                 0                                 0
+16-32                                            0                                 0                                 0                                 0
+32-64                                     11059200                                 0                                 0                                 0
+64-128                                           0                                 0                                 0                                 0
+128-256                                          0                                 0                                 0                                 0
+256-512                                          0                                 0                                 0                                 0
+512-1024                                         0                                 0                                 0                                 0
+1024-2048                                        0                                 0                                 0                                 0
+2048-4096                                        0                                 0                                 0                                 0
+4096-8192                                        0                                 0                                 0                                 0
+8192-16384                                       0                                 0                                 0                                 0
+16384-32768                                      0                                 0                                 0                                 0
+32768-65536                                      0                                 0                                 0                                 0
+65536-...                                        0                                 0                                 0                                 0
+IO Bandwidth Histogram
+IO Size (KiB)      Fastpath Read Bandwidth (GiB/s)  Fastpath Write Bandwidth (GiB/s)   Fallback Read Bandwidth (GiB/s)  Fallback Write Bandwidth (GiB/s)
+0-4                                              0                                 0                                 0                                 0
+4-8                                              0                                 0                                 0                                 0
+8-16                                             0                                 0                                 0                                 0
+16-32                                            0                                 0                                 0                                 0
+32-64                                     0.186917                                 0                                 0                                 0
+64-128                                           0                                 0                                 0                                 0
+128-256                                          0                                 0                                 0                                 0
+256-512                                          0                                 0                                 0                                 0
+512-1024                                         0                                 0                                 0                                 0
+1024-2048                                        0                                 0                                 0                                 0
+2048-4096                                        0                                 0                                 0                                 0
+4096-8192                                        0                                 0                                 0                                 0
+8192-16384                                       0                                 0                                 0                                 0
+16384-32768                                      0                                 0                                 0                                 0
+32768-65536                                      0                                 0                                 0                                 0
+65536-...                                        0                                 0                                 0                                 0
+IO Latency Histogram
+IO Size (KiB)           Fastpath Read Latency (us)       Fastpath Write Latency (us)        Fallback Read Latency (us)       Fallback Write Latency (us)
+0-4                                              0                                 0                                 0                                 0
+4-8                                              0                                 0                                 0                                 0
+8-16                                             0                                 0                                 0                                 0
+16-32                                            0                                 0                                 0                                 0
+32-64                                      183.677                                 0                                 0                                 0
+64-128                                           0                                 0                                 0                                 0
+128-256                                          0                                 0                                 0                                 0
+256-512                                          0                                 0                                 0                                 0
+512-1024                                         0                                 0                                 0                                 0
+1024-2048                                        0                                 0                                 0                                 0
+2048-4096                                        0                                 0                                 0                                 0
+4096-8192                                        0                                 0                                 0                                 0
+8192-16384                                       0                                 0                                 0                                 0
+16384-32768                                      0                                 0                                 0                                 0
+32768-65536                                      0                                 0                                 0                                 0
+65536-...                                        0                                 0                                 0                                 0
+IO Errors Histogram
+IO Size (KiB)            Fastpath Read Error Count        Fastpath Write Error Count         Fallback Read Error Count        Fallback Write Error Count
+0-4                                              0                                 0                                 0                                 0
+4-8                                              0                                 0                                 0                                 0
+8-16                                             0                                 0                                 0                                 0
+16-32                                            0                                 0                                 0                                 0
+32-64                                            0                                 0                                 0                                 0
+64-128                                           0                                 0                                 0                                 0
+128-256                                          0                                 0                                 0                                 0
+256-512                                          0                                 0                                 0                                 0
+512-1024                                         0                                 0                                 0                                 0
+1024-2048                                        0                                 0                                 0                                 0
+2048-4096                                        0                                 0                                 0                                 0
+4096-8192                                        0                                 0                                 0                                 0
+8192-16384                                       0                                 0                                 0                                 0
+16384-32768                                      0                                 0                                 0                                 0
+32768-65536                                      0                                 0                                 0                                 0
+65536-...                                        0                                 0                                 0                                 0
+Fastpath Read Unaligned Count: 0
+Fastpath Write Unaligned Count: 0
+Fallback Read Unaligned Count: 0
+Fallback Write Unaligned Count: 0
