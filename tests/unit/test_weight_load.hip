@@ -957,7 +957,8 @@ static void hf_add_mtp(HfFxpFixture& f, std::vector<Planned>& shard) {
     hf_add_bf16(f, shard, "mtp.layers.0.self_attn.k_norm.weight", {32}, 85);
 }
 
-static bool build_hf_fp8_model(const fs::path& dir, HfFxpFixture& f) {
+static bool build_hf_fp8_model(const fs::path& dir, HfFxpFixture& f,
+                               bool invalid_mtp = false) {
     std::vector<Planned> a;
     std::vector<Planned> b;
     hf_add_bf16(f, a, "model.language_model.embed_tokens.weight", {40, 128}, 5);
@@ -965,7 +966,16 @@ static bool build_hf_fp8_model(const fs::path& dir, HfFxpFixture& f) {
     hf_add_bf16(f, b, "lm_head.weight", {40, 128}, 7);
     hf_add_gdn_layer(f, a, 0);
     hf_add_attn_layer(f, b, 1);
-    hf_add_mtp(f, b);
+    if (invalid_mtp) {
+        Planned p;
+        p.name = "mtp.fc.weight";
+        p.dtype = io::SType::F32;
+        p.shape = {128, 256};
+        p.bytes.assign(128u * 256u * 4u, 0u);
+        b.push_back(std::move(p));
+    } else {
+        hf_add_mtp(f, b);
+    }
 
     const std::string shard_a = "model-00001-of-00002.safetensors";
     const std::string shard_b = "model-00002-of-00002.safetensors";
@@ -1028,6 +1038,27 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
           "hf fp8 mtp layer fp8");
 }
 
+static void test_qwen35_hf_fp8_model_load_without_mtp(
+    gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("hf_fp8_model_no_mtp");
+    HfFxpFixture f;
+    if (!build_hf_fp8_model(dir, f, true)) return;
+
+    qwen35::Qwen35LoadOptions options;
+    options.verify_quantized_payload_crc = true;
+    auto rr = qwen35::load_qwen35_weights_from_safetensors(dir.string(), arena, stream, options);
+    if (!rr.ok()) {
+        fail("hf fp8 model load without mtp: " + rr.status().message());
+        return;
+    }
+    qwen35::Qwen35ModelWeights w = rr.release();
+
+    check_eq_u64(w.layers.size(), 2, "hf fp8 no mtp layers");
+    check(!w.mtp.present, "hf fp8 no mtp present");
+    check_eq_u64(w.mtp.fc.rows, 0, "hf fp8 no mtp fc rows");
+    check_eq_u64(w.mtp.layer.mlp_gate_proj.rows, 0, "hf fp8 no mtp layer rows");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -1052,6 +1083,7 @@ int main() {
     test_standalone_quantized_reader(arena, stream);
     test_qwen35_quantized_model_load(arena, stream);
     test_qwen35_hf_fp8_model_load(arena, stream);
+    test_qwen35_hf_fp8_model_load_without_mtp(arena, stream);
 
     fs::remove_all(g_root, ec);
     arena.shutdown();

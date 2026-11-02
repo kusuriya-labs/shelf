@@ -326,5 +326,3 @@ target_include_directories(shelf_quant_reference PUBLIC "${CMAKE_CURRENT_SOURCE_
 target_link_libraries(shelf_quant_reference PUBLIC shelf_core)
 target_compile_options(shelf_quant_reference PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
-find_package(OpenSSL REQUIRED)
-

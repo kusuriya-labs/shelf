@@ -517,7 +517,9 @@ bool layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer) {
     return layer % config.full_attention_interval < config.full_attention_interval - 1;
 }
 
-std::vector<std::string> hf_quantized_logical_names(const Qwen35TextConfig& config) {
+std::vector<std::string> hf_quantized_logical_names(
+    const Qwen35TextConfig& config,
+    bool include_mtp) {
     std::vector<std::string> names = {
         "model.language_model.embed_tokens.weight",
         "model.language_model.lm_head.weight",
@@ -551,8 +553,10 @@ std::vector<std::string> hf_quantized_logical_names(const Qwen35TextConfig& conf
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
         add_layer(layer_prefix(l), layer_is_gdn(config, l));
     }
-    for (const std::string& name : mtp_required_tensors()) {
-        names.push_back(name);
+    if (include_mtp) {
+        for (const std::string& name : mtp_required_tensors()) {
+            names.push_back(name);
+        }
     }
     return names;
 }
@@ -560,7 +564,8 @@ std::vector<std::string> hf_quantized_logical_names(const Qwen35TextConfig& conf
 Result<ps::quantization::bundle::QuantizedModelReader> open_quantized_reader(
     const std::string& model_dir,
     const Qwen35TextConfig& config,
-    bool verify_payload_crc)
+    bool verify_payload_crc,
+    bool load_mtp_layers)
 {
     namespace fqb = ps::quantization::bundle;
     namespace fqm = ps::quantization::manifest;
@@ -574,7 +579,9 @@ Result<ps::quantization::bundle::QuantizedModelReader> open_quantized_reader(
             __FILE__, __LINE__);
     }
     auto source = fqb::synthesize_hf_quantized_source(
-        model_dir, hf_quantized_logical_names(config), verify_payload_crc);
+        model_dir,
+        hf_quantized_logical_names(config, load_mtp_layers),
+        verify_payload_crc);
     if (!source.ok()) return source.status();
     return fqb::QuantizedModelReader::open_hf_source(source.release(), verify_payload_crc);
 }
@@ -590,7 +597,10 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     Qwen35TextConfig config = config_result.release();
 
     auto reader_result = open_quantized_reader(
-        model_dir, config, options.verify_quantized_payload_crc);
+        model_dir,
+        config,
+        options.verify_quantized_payload_crc,
+        options.load_mtp_layers);
     if (!reader_result.ok()) return reader_result.status();
     ps::quantization::bundle::QuantizedModelReader reader = reader_result.release();
 

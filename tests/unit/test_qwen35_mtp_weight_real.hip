@@ -7,9 +7,9 @@
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/quantization/manifest/crc32.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/weight_loader.h>
-#include <openssl/sha.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -37,7 +37,7 @@ struct MtpSource {
     std::vector<uint8_t> codes;
     std::vector<uint8_t> metadata1;
     std::vector<uint8_t> metadata2;
-    std::string source_sha256;
+    std::string source_crc32;
     std::uint64_t k_padded = 0;
 
     std::vector<uint8_t> concat_payload() const {
@@ -70,13 +70,11 @@ const char* kVectorNames[] = {
     "mtp.layers.0.self_attn.k_norm.weight",
 };
 
-std::string sha256_hex(const void* data, std::size_t size) {
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    SHA256(static_cast<const unsigned char*>(data), size, digest);
-    char hex[2 * SHA256_DIGEST_LENGTH + 1];
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-        std::snprintf(hex + 2 * i, 3, "%02x", digest[i]);
-    }
+std::string crc32_hex(const void* data, std::size_t size) {
+    char hex[11];
+    std::snprintf(
+        hex, sizeof(hex), "0x%08x",
+        quantization::manifest::crc32_iso_hdlc(data, size));
     return hex;
 }
 
@@ -219,7 +217,7 @@ int main() {
 
                 std::printf(
                     "%-44s %-10s %-18s %-64s %s\n",
-                    "tensor", "src fmt", "src shape", "source_sha256", "device payload");
+                    "tensor", "src fmt", "src shape", "source_crc32", "device payload");
 
                 if (quantized) {
                     auto rr = quantization::bundle::QuantizedModelReader::open(model_dir, false);
@@ -281,7 +279,7 @@ int main() {
                                 }
                             }
                             const auto payload = src.concat_payload();
-                            src.source_sha256 = sha256_hex(payload.data(), payload.size());
+                            src.source_crc32 = crc32_hex(payload.data(), payload.size());
                             return true;
                         };
 
@@ -336,7 +334,7 @@ int main() {
                             if (!match) fail_tensor(name, detail);
                             std::printf("%-44s %-10s %-18s %-64s %s\n",
                                         name.c_str(), src.format.c_str(), shape_str.c_str(),
-                                        src.source_sha256.c_str(), match ? "MATCH" : "MISMATCH");
+                                        src.source_crc32.c_str(), match ? "MATCH" : "MISMATCH");
                         }
 
                         for (int i = 0; i < 7; ++i) {
@@ -363,7 +361,7 @@ int main() {
                             for (auto d : src.shape) shape_str += std::to_string(d) + " ";
                             std::printf("%-44s %-10s %-18s %-64s %s\n",
                                         name.c_str(), src.format.c_str(), shape_str.c_str(),
-                                        src.source_sha256.c_str(), match ? "MATCH" : "MISMATCH");
+                                        src.source_crc32.c_str(), match ? "MATCH" : "MISMATCH");
                         }
                     }
                 } else {
@@ -409,7 +407,7 @@ int main() {
                             }
                             src.data.assign(static_cast<const uint8_t*>(data.value()),
                                             static_cast<const uint8_t*>(data.value()) + bytes);
-                            src.source_sha256 = sha256_hex(src.data.data(), src.data.size());
+                            src.source_crc32 = crc32_hex(src.data.data(), src.data.size());
                             return true;
                         };
 
@@ -449,7 +447,7 @@ int main() {
                             if (!match) fail_tensor(name, detail);
                             std::printf("%-44s %-10s %-18s %-64s %s\n",
                                         name.c_str(), src.format.c_str(), shape_str.c_str(),
-                                        src.source_sha256.c_str(), match ? "MATCH" : "MISMATCH");
+                                        src.source_crc32.c_str(), match ? "MATCH" : "MISMATCH");
                         }
 
                         for (int i = 0; i < 7; ++i) {
@@ -476,7 +474,7 @@ int main() {
                             for (auto d : src.shape) shape_str += std::to_string(d) + " ";
                             std::printf("%-44s %-10s %-18s %-64s %s\n",
                                         name.c_str(), src.format.c_str(), shape_str.c_str(),
-                                        src.source_sha256.c_str(), match ? "MATCH" : "MISMATCH");
+                                        src.source_crc32.c_str(), match ? "MATCH" : "MISMATCH");
                         }
                     }
                 }
