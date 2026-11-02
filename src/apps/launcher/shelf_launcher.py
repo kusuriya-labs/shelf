@@ -7,9 +7,8 @@ Starts one shelf-model-host per tensor parallel rank, waits until every
 host answers a protocol ping, then runs the requested child with --model-host
 pointing at those hosts.  Every host is shut down when the child exits.
 
-Invariant: the target model is always loaded through the model hosts. When the
-child requests an EAGLE4 draft with --eagle4-model-dir, every host loads its
-tensor-parallel slice; other draft weights stay local to the child.
+Invariant: the target model is always loaded through the model hosts. Other
+draft weights stay local to the child.
 """
 
 from __future__ import annotations
@@ -265,9 +264,6 @@ def main(argv: list[str] | None = None) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     sockets = [socket_dir / f"rank{rank}.sock" for rank in range(opts.tp)]
-    eagle4_dir = child_flag(rest, "--eagle4-model-dir")
-    eagle4_warmup = (str(Path(eagle4_dir).expanduser().resolve())
-                     if eagle4_dir else None)
     hosts: list[ModelHost] = []
     for rank, socket in enumerate(sockets):
         try:
@@ -275,8 +271,6 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError:
             pass
         warmup = [("qwen35", str(model_dir))]
-        if eagle4_warmup:
-            warmup.append(("eagle4", eagle4_warmup))
         host = ModelHost(
             binary=host_binary,
             socket=socket,

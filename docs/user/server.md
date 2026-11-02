@@ -85,9 +85,6 @@ Ready.
 | `--default-max-output-tokens DEFAULT_MAX_OUTPUT_TOKENS` | default max_new_tokens when the request omits it (default 65536) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
-| `--eagle4-model-dir EAGLE4_MODEL_DIR` | EAGLE4 drafter directory (enables speculative decoding) |
-| `--eagle4-drafts EAGLE4_DRAFTS` | EAGLE4 draft tokens per round (default 7) |
-| `--eagle4-lm-head {target,draft}` | EAGLE4 draft LM head source (TP2 requires 'draft') |
 | `--verify-weights` | verify quantized payload CRC32 on load |
 <!-- /cli:server -->
 

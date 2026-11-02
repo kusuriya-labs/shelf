@@ -33,8 +33,6 @@ enum class FinishReason : uint8_t {
 
 struct DFlash2RequestSession {
     dflash2::DFlash2ContextState* context = nullptr;
-    ::ps::qwen35::eagle4::Eagle4ContextState* eagle4_context = nullptr;
-    std::vector<::ps::qwen35::eagle4::Eagle4ContextState*> eagle4_contexts;
     std::unique_ptr<DFlash2SpecDecoder> decoder;
     uint32_t pool_index = kDFlash2NoSessionSlot;
     DFlash2SpecTiming timing{};

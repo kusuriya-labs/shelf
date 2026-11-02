@@ -10,7 +10,7 @@ Qwen35 model / runtime              Inference common
     model/lower_to_primitives           inference/scheduling      GdnStatePool / ScheduledBatch /
     runtime/Executor / prefix cache     inference/execution       SamplingConfig / program_executor /
     runtime/ContinuousBatcher             selectors / dispatch     dispatch / fusion / physical_launch)
-    dflash2 / eagle4 (spec decode)
+    dflash2 (spec decode)
      ↓                    ↓                ↓
 Qwen-family common     Generic kernels
     models/common/qwen_hybrid           kernels/optimized  (family per file)
@@ -47,7 +47,7 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   `shelf_inference_state` / `shelf_inference_scheduling` /
   `shelf_inference_execution` は model 非依存層
 - `shelf_qwen35` / `shelf_qwen35_runtime` /
-  `shelf_qwen35_kernels_optimized`（dflash2 / eagle4）は Qwen35 固有層
+  `shelf_qwen35_kernels_optimized`（dflash2）は Qwen35 固有層
 
 `shelf_kernels_correctness` は `shelf_runtime` にlinkする一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` だけを使う。

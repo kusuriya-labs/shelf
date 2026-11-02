@@ -3,8 +3,6 @@
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
-#include <shelf/models/qwen35/eagle4/config.h>
-#include <shelf/models/qwen35/eagle4/weights.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/resident/resident_format.h>
 #include <shelf/resident/resident_model_key.h>
@@ -52,8 +50,6 @@ class ResidentModelAttachment {
     Result<qwen35::Qwen35Model> take_qwen35() const;
     Result<qwen35::dflash2::DFlash2Weights> take_dflash2(
         qwen35::dflash2::DFlash2Config* config_out) const;
-    Result<qwen35::eagle4::Eagle4Weights> take_eagle4(
-        qwen35::eagle4::Eagle4Config* config_out) const;
 
  private:
     friend Result<ResidentModelAttachment> acquire_resident_model(

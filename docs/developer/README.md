@@ -20,7 +20,6 @@
 ## speculative decode
 
 - [dflash2.md](dflash2.md) — DFlash2 speculative decoding の現在の設計仕様
-- [eagle4.md](eagle4.md) — EAGLE-4 drafter（chain speculative decode）の現在の設計仕様
 
 ## server
 

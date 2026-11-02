@@ -2,7 +2,7 @@
 
 model 非依存の最適化済み kernel は `src/shelf/kernels/optimized/`（public は
 `include/shelf/kernels/optimized/`）に置く。Qwen35 と Qwen4Exp が共有する。
-Qwen35 固有 kernel（correctness / dflash2 / eagle4）は
+Qwen35 固有 kernel（correctness / dflash2）は
 `src/shelf/models/qwen35/kernels/` に置く。
 配置と分割の詳細は `src/shelf/models/qwen35/kernels/README.md` を参照。
 
@@ -11,8 +11,7 @@ shelf/
 ├── kernels/optimized/          # model 非依存の gfx1201 向け高速実装
 └── models/qwen35/kernels/
     ├── correctness/            # 遅いが正確な参照実装（E2E token exactness の基準）
-    ├── dflash2/                # DFlash2 固有 kernel
-    └── eagle4/                 # EAGLE4 固有 kernel
+    └── dflash2/                # DFlash2 固有 kernel
 ```
 
 ## 分割ルール

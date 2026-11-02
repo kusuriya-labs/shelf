@@ -33,16 +33,9 @@ struct ComputeOptions {
     bool serve_stdio = false;
     ps::qwen35::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
-    std::string eagle4_model_dir;
     std::string model_host;
     unsigned long dflash2_drafts = 7;
     int dflash2_stats = 1;
-    unsigned long eagle4_drafts = 7;
-    unsigned long eagle4_tree_width = 0;
-    unsigned long eagle4_tree_dynamic = 0;
-    int eagle4_stats = 1;
-    std::string eagle4_candidate_head = "lowrank";
-    std::string eagle4_lm_head = "target";
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_hot_tokens = 16384;
     unsigned long prefix_cache_cold_tokens = 65536;
@@ -58,10 +51,6 @@ inline constexpr int kComputeParseError = 2;
 
 inline bool compute_dflash_enabled(const ComputeOptions& opt) {
     return !opt.dflash2_model_dir.empty();
-}
-
-inline bool compute_eagle4_enabled(const ComputeOptions& opt) {
-    return !opt.eagle4_model_dir.empty();
 }
 
 void compute_usage(const char* prog);

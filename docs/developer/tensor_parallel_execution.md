@@ -262,13 +262,10 @@ TP=2 の rank ごとに、ephemeral arena の確保順序は次のとおりで�
 3. PagedKVPool（rank-local kv_heads、max_seq_len + 1 tokens）
 4. Executor workspace
 5. prefix cache（残余。収まらない場合は hot tokens を縮小し、0 なら無効化）
-6. drafter executor / batch context / session pool（EAGLE4 / DFlash2）
+6. drafter executor / batch context / session pool（DFlash2）
 ```
 
 private target weights は `TpRankRuntime::create()` が KV より前に確保する。
-`--eagle4-lm-head draft` では target の lm_head を必要とせず、embed_tokens のみ
-確保する。EAGLE4 の checkpoint は model host が保持するため
-`persistent_bytes` として扱われ、ephemeral arena を消費しない。
 
 prefix cache は必須ではない。`prefix_cache_bytes()` で hot 分の arena 消費を
 見積もり、`arena_free - draft 予約` を超える場合は page 単位で hot tokens を
@@ -322,9 +319,8 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   （`--device` に rank ごとの GPU をカンマ区切りで指定、例 `--device 0,2`。
   個数が `--tp` と一致しない場合は明示エラー）。
   単一 request 経路と `--serve-stdio` の両方が同じ runtime の TP 経路を使う。
-  `--dflash2-model-dir` / `--eagle4-model-dir` と併用できる
-  （drafter は compute が local load する。DFlash2 の drafter は非分割、
-  EAGLE4 の drafter は `--serve-stdio` の serve 経路で TP 分割する）。
+  `--dflash2-model-dir` と併用できる
+  （drafter は compute が local load する。DFlash2 の drafter は非分割）。
   prefix cache も `--tp 2` で有効である
   （TP rank shard 付きの hot overflow と state demotion は unsupported エラー）。
   `shelf-bench` は pp / quality で `--tp 1|2` を露出する（tg / batch は未露出）。
@@ -345,12 +341,6 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   48 token 全域で assert し、TP2 では partial reject 大半（18 rounds）の
   GDN capture / compact commit / restore を通る。
   契約と実装経緯は `rnd/spec_decode/tp2_verify_only.md`。
-- EAGLE4 は **drafter も TP 分割**する。draft 行列は target と同じ rank 形状で分割し、
-  rank ごとに executor / context / token staging を持つ。各 rank の kernel には
-  その rank が所有する device pointer だけを渡す。
-  `--eagle4-lm-head draft` が必須で、`--serve-stdio` 系の serve 経路が正本である。
-  `test_eagle4_tp_forward` が TP1 と TP2 の stage 別一致を検証する。
-  契約は [eagle4.md](eagle4.md) の tensor parallel 節を正本とする。
 - device 不足は明示エラー（bench / compute）または skip（test runner 77）。
 - 異種 GPU は未サポート（同一 RDNA4 を前提。異なる場合は unsupported 方針）。
 

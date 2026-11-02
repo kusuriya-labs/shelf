@@ -32,13 +32,6 @@
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
-| `--eagle4-model-dir PATH` | EAGLE-4 draft model directory; enables EAGLE-4 speculative decoding |
-| `--eagle4-drafts N` | EAGLE-4 speculative draft tokens per round (default 7) |
-| `--eagle4-tree-width N` | EAGLE-4 tree verify width; 0 or 1 = chain (default 0) |
-| `--eagle4-tree-dynamic 0\|1` | EAGLE-4 決定的 tree sizing（Cost table、default 0) |
-| `--eagle4-candidate-head lowrank\|gemv` | EAGLE-4 candidate head path (default lowrank) |
-| `--eagle4-lm-head draft\|target` | EAGLE-4 candidate head LM head source (default target) |
-| `--eagle4-stats 0\|1` | print EAGLE-4 speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--prefix-cache-hot-tokens N` | prefix cache hot tier capacity in tokens (default 16384) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace, DFlash2 session pool, default 4) |
@@ -132,7 +125,7 @@ DFlash2 経路でも受け付ける。
 - 起動時に `ROPE profile:` 行を stderr へ出し、type / factor / theta / rotary_dim / 元の長さ / attention factor / 決定元（cli か config）を表示する。
 - KV 容量計画は factor と独立である。必要ページ数は `--max-seq-len` と `--kv-cache-capacity-tokens` だけで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。
-- speculative decoding（`--dflash2-model-dir` / `--eagle4-model-dir`）との併用は未対応で、2x/4x 指定時は起動時に拒否する。
+- speculative decoding（`--dflash2-model-dir`）との併用は未対応で、2x/4x 指定時は起動時に拒否する。
 - 2x の全長（524,288）は `--kv-cache-dtype fp8 --tp 2` で容量が成立する（FP8 KV の品質特性は別途評価が必要）。
 
 ### prefix cache

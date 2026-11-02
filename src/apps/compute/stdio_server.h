@@ -3,9 +3,6 @@
 #include "compute_runtime.h"
 
 #include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/eagle4/config.h>
-#include <shelf/models/qwen35/eagle4/executor.h>
-#include <shelf/models/qwen35/eagle4/weights.h>
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
@@ -32,21 +29,6 @@ struct DFlashServeContext {
     ps::qwen35::runtime::DFlash2SessionPool sessions{};
     bool sessions_ready = false;
     ps::qwen35::runtime::DFlash2BatcherStats stats{};
-
-    bool eagle4_enabled = false;
-    std::string eagle4_model_dir;
-    uint32_t eagle4_drafts = 7u;
-    std::string eagle4_candidate_head = "lowrank";
-    std::string eagle4_lm_head = "target";
-    ps::qwen35::eagle4::Eagle4Config eagle4_config{};
-
-    struct Eagle4RankSlot {
-        std::optional<ps::resident::ResidentModelAttachment> resident;
-        ps::qwen35::eagle4::Eagle4Weights weights{};
-        ps::qwen35::eagle4::Eagle4Executor executor{};
-        bool ready = false;
-    };
-    std::vector<Eagle4RankSlot> eagle4_ranks;
 };
 
 int run_serve_stdio(Qwen35ComputeRuntime& runtime, DFlashServeContext& dflash);

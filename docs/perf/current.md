@@ -52,18 +52,16 @@ drafter は compute が local load）。TP=1 は GPU0 の local load。
 | TP=1 非投機 | 19.10 | 0.26% | — | — |
 | TP=2 非投機 | 31.15 | 0.19% | — | — |
 | TP=2 + DFlash2（drafts 7） | **67.16** | 0.21% | 36 | 2.528 |
-| TP=2 + EAGLE-4（drafts 7、chain、`--eagle4-lm-head draft`） | **62.36** | 1.5% | 37 | 2.432 |
 
 - TP=2 非投機は TP=1 の **1.63×**（効率 81.6%）。
   TP=1 と TP=2 は GPU 個体が異なる（GPU0 対 GPU2/3）ため、この比には
   cross-GPU 差が含まれうる（±2% 想定）。
-- DFlash2 は非投機 TP=2 の **2.16×**、EAGLE-4 は **2.00×**。
-  DFlash2 が EAGLE-4 を **+7.7%** 上回る（mean accepted 2.528 対 2.432）。
+- DFlash2 は非投機 TP=2 の **2.16×**。
 - prefill（1697 token、`PREFILL_MS` 中央値）: TP=1 1376.0 / TP=2 666.6。
 
 ### 正しさ
 
-全 20 run（TP=1 非投機 / TP=2 非投機 / +DFlash2 / +EAGLE-4）で
+全 15 run（TP=1 非投機 / TP=2 非投機 / +DFlash2）で
 greedy 128 token の生成列が完全一致した。
 `GENERATED_IDS` の sha1 `cb1bae73ebc56dac846a48f952967d9a3045a325`。
 
@@ -73,12 +71,11 @@ greedy 128 token の生成列が完全一致した。
 | --- | --- |
 | measurement revision | commit `c745c31`（計測時 working tree = この commit と同一。`c778ff5` + 未コミット変更として実施し commit した） |
 | date | 2026-10-23 |
-| model / drafter | `models/Qwen3.8-27B-FP8` / `models/Qwen3.8-27B-DFlash2`（3.6 GB）、`models/Qwen3.8-27B-EAGLE4`（5.8 GB） |
+| model / drafter | `models/Qwen3.8-27B-FP8` / `models/Qwen3.8-27B-DFlash2`（3.6 GB） |
 | build | Release / gfx1201 / HIP graph OFF（既定） |
 | GPU | TP=1: HIP 0。TP=2: HIP 2+3（resident host が target rank weights を各 16.3 GB 保持） |
 | options | `--max-new-tokens 128 --max-seq-len 2048 --arena-gib auto --prefix-cache 0 --temperature 0` |
 | TP=2 attach | `--model-host "0=/tmp/g1.sock,1=/tmp/g2.sock"`（ephemeral arena 15.58 GiB、drafter は local load） |
-| EAGLE-4 | `--eagle4-lm-head draft`（TP=2 で target lm_head が vocab 分割されるため必須） |
 
 TP=1 + FP8 + drafter は単カード 31.86 GB に target / drafter / KV が同居せず
 OOM するため、TP=1 は非投機のみである。
@@ -91,13 +88,12 @@ OOM するため、TP=1 は非投機のみである。
   --input-ids-file build/tp2-bench-prompt-1920.txt --max-new-tokens 128 \
   --max-seq-len 2048 --arena-gib auto --device 0 --prefix-cache 0 --temperature 0
 
-# TP=2（非投機 / +DFlash2 / +EAGLE-4 は drafter option のみが異なる）
+# TP=2（非投機 / +DFlash2 は drafter option のみが異なる）
 ./build/shelf-compute --model-dir models/Qwen3.8-27B-FP8 \
   --model-host "0=/tmp/g1.sock,1=/tmp/g2.sock" \
   --input-ids-file build/tp2-bench-prompt-1920.txt --max-new-tokens 128 \
   --max-seq-len 2048 --arena-gib auto --device 2,3 --tp 2 --prefix-cache 0 --temperature 0 \
-  # [--dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7 | \
-  #  --eagle4-model-dir models/Qwen3.8-27B-EAGLE4 --eagle4-drafts 7 --eagle4-lm-head draft]
+  # --dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7
 ```
 
 resident model host は次のように起動する（target のみ warmup）。

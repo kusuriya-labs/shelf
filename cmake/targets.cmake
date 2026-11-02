@@ -125,8 +125,8 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/attention/qsa_sparse_attention.hip
 )
 
-# Qwen35 speculative-decode kernels (DFlash2 / EAGLE4). Model-specific drafter
-# kernels stay under models/qwen35 until a second model needs them.
+# Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
+# stay under models/qwen35 until a second model needs them.
 set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
     src/shelf/models/qwen35/kernels/dflash2/candidate_selector.hip
     src/shelf/models/qwen35/kernels/dflash2/feature_concat.hip
@@ -139,9 +139,6 @@ set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
     src/shelf/models/qwen35/kernels/dflash2/attention.hip
     src/shelf/models/qwen35/kernels/dflash2/kv_ring.hip
     src/shelf/models/qwen35/kernels/dflash2/noise_input.hip
-    src/shelf/models/qwen35/kernels/eagle4/attention.hip
-    src/shelf/models/qwen35/kernels/eagle4/candidate_ops.hip
-    src/shelf/models/qwen35/kernels/eagle4/ops.hip
 )
 
 add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
@@ -257,10 +254,6 @@ set(
     src/shelf/models/qwen35/dflash2/config.cpp
     src/shelf/models/qwen35/dflash2/weights.cpp
     src/shelf/models/qwen35/dflash2/context_state.hip
-    src/shelf/models/qwen35/eagle4/config.cpp
-    src/shelf/models/qwen35/eagle4/weights.cpp
-    src/shelf/models/qwen35/eagle4/tensor_parallel_plan.cpp
-    src/shelf/models/qwen35/eagle4/context_state.hip
 )
 
 add_library(shelf_qwen35 STATIC ${SHELF_QWEN35_SOURCES})
@@ -303,15 +296,12 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/tensor_parallel.cpp
     src/shelf/models/qwen35/runtime/executor.hip
     src/shelf/models/qwen35/runtime/spec_decode.cpp
-    src/shelf/models/qwen35/runtime/eagle4_tree.cpp
-    src/shelf/models/qwen35/runtime/eagle4_cost.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
     src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp
     src/shelf/models/qwen35/runtime/gdn_spec_history.hip
     src/shelf/models/qwen35/runtime/decode_backend.cpp
     src/shelf/models/qwen35/dflash2/executor.hip
-    src/shelf/models/qwen35/eagle4/executor.hip
 )
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

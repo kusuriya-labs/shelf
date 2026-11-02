@@ -4,7 +4,6 @@
 
 #include <shelf/models/model_source.h>
 #include <shelf/models/qwen35/dflash2/config.h>
-#include <shelf/models/qwen35/eagle4/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 
@@ -59,11 +58,10 @@ int main(int argc, char** argv) {
         }
         const bool yarn_active =
             rope_profile.type == ps::qwen35::EffectiveRopeProfile::Type::Yarn;
-        if (yarn_active && (ps::app::compute_dflash_enabled(opt) ||
-                            ps::app::compute_eagle4_enabled(opt))) {
+        if (yarn_active && ps::app::compute_dflash_enabled(opt)) {
             fprintf(stderr,
                     "static YaRN (--rope-factor %g) does not support speculative decoding "
-                    "yet; drop --dflash2-model-dir / --eagle4-model-dir\n",
+                    "yet; drop --dflash2-model-dir\n",
                     rope_profile.factor);
             return 1;
         }
@@ -131,32 +129,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    ps::qwen35::eagle4::Eagle4Config eagle_config;
-    if (ps::app::compute_eagle4_enabled(opt)) {
-        auto eagle_config_result =
-            ps::qwen35::eagle4::read_eagle4_config(opt.eagle4_model_dir);
-        if (!eagle_config_result.ok()) {
-            fprintf(stderr, "eagle4 config read failed: %s\n",
-                    eagle_config_result.status().message().c_str());
-            return 1;
-        }
-        eagle_config = eagle_config_result.release();
-        config.prefix_cache_spec_ring_bytes =
-            static_cast<uint32_t>(eagle_config.context_ring_bytes());
-        const std::size_t dir_bytes = ps::app::safetensors_dir_bytes(opt.eagle4_model_dir);
-        std::size_t shared_bytes =
-            eagle_config.vocab_size * eagle_config.hidden_size * sizeof(uint16_t);
-        if (opt.eagle4_lm_head == "target") {
-            shared_bytes +=
-                eagle_config.vocab_size * eagle_config.hidden_size * sizeof(uint16_t);
-        }
-        config.draft_bytes = dir_bytes > shared_bytes ? dir_bytes - shared_bytes : 0u;
-        if (opt.tp > 1) {
-            config.private_target_weights = true;
-            config.private_target_lm_head = opt.eagle4_lm_head == "target";
-        }
-    }
-
     std::vector<int32_t> prompt_ids;
     if (opt.serve_stdio) {
         config.max_scheduled_tokens = config.max_seq_len;
@@ -174,23 +146,6 @@ int main(int argc, char** argv) {
                 config.target_hidden_taps[t] =
                     static_cast<uint32_t>(dflash_config.target_layer_ids[t]);
             }
-        } else if (ps::app::compute_eagle4_enabled(opt)) {
-            config.max_scheduled_tokens = config.max_seq_len;
-            const unsigned long eagle4_block = std::max<unsigned long>(
-                opt.eagle4_drafts + 1UL, opt.eagle4_tree_width);
-            const uint32_t batch_rows =
-                config.max_concurrent_requests *
-                static_cast<uint32_t>(eagle4_block);
-            config.max_scheduled_output_rows =
-                batch_rows < ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows
-                    ? batch_rows
-                    : ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows;
-            config.target_hidden_tap_count =
-                static_cast<uint32_t>(eagle_config.num_aux_layers);
-            for (std::size_t t = 0; t < eagle_config.num_aux_layers; ++t) {
-                config.target_hidden_taps[t] =
-                    static_cast<uint32_t>(eagle_config.aux_layer_ids[t]);
-            }
         }
     } else {
         if (!opt.input_ids_file.empty()) {
@@ -206,21 +161,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "prompt + generation exceeds max_seq_len %lu\n", opt.max_seq_len);
             return 2;
         }
-        if (ps::app::compute_eagle4_enabled(opt)) {
-            config.max_scheduled_tokens = static_cast<uint32_t>(
-                std::min<unsigned long>(prompt_ids.size(), 2048UL));
-            if (config.max_scheduled_tokens < 16u) config.max_scheduled_tokens = 16u;
-            const unsigned long eagle4_tree_rows =
-                std::max<unsigned long>(opt.eagle4_drafts + 1UL, opt.eagle4_tree_width);
-            config.max_scheduled_output_rows =
-                static_cast<uint32_t>(std::min<unsigned long>(eagle4_tree_rows, 16UL));
-            config.target_hidden_tap_count =
-                static_cast<uint32_t>(eagle_config.num_aux_layers);
-            for (std::size_t t = 0; t < eagle_config.num_aux_layers; ++t) {
-                config.target_hidden_taps[t] =
-                    static_cast<uint32_t>(eagle_config.aux_layer_ids[t]);
-            }
-        } else if (ps::app::compute_dflash_enabled(opt)) {
+        if (ps::app::compute_dflash_enabled(opt)) {
             const unsigned long dflash_rows =
                 static_cast<unsigned long>(dflash_config.block_size);
             unsigned long dflash_tokens =
@@ -287,13 +228,6 @@ int main(int argc, char** argv) {
         dflash_serve.config = dflash_config;
         dflash_serve.model_dir = opt.dflash2_model_dir;
         dflash_serve.drafts = static_cast<uint32_t>(opt.dflash2_drafts);
-    } else if (ps::app::compute_eagle4_enabled(opt)) {
-        dflash_serve.eagle4_enabled = true;
-        dflash_serve.eagle4_model_dir = opt.eagle4_model_dir;
-        dflash_serve.eagle4_drafts = static_cast<uint32_t>(opt.eagle4_drafts);
-        dflash_serve.eagle4_candidate_head = opt.eagle4_candidate_head;
-        dflash_serve.eagle4_lm_head = opt.eagle4_lm_head;
-        dflash_serve.eagle4_config = eagle_config;
     }
 
     if (opt.serve_stdio) {
@@ -302,13 +236,6 @@ int main(int argc, char** argv) {
     printf("DECODE_BACKEND=%s\n",
            ps::qwen35::runtime::decode_backend_name(
                runtime->config().decode_backend));
-    if (ps::app::compute_eagle4_enabled(opt)) {
-        return ps::app::run_eagle4_shot(*runtime, prompt_ids, opt.max_new_tokens,
-                                        opt.eagle4_model_dir, opt.eagle4_drafts,
-                                        opt.eagle4_tree_width, opt.eagle4_tree_dynamic,
-                                        opt.eagle4_candidate_head, opt.eagle4_lm_head,
-                                        opt.eagle4_stats, opt.kv_cache_dtype);
-    }
     if (ps::app::compute_dflash_enabled(opt)) {
         return ps::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
                                 opt.dflash2_model_dir, opt.dflash2_drafts, opt.dflash2_stats,

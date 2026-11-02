@@ -18,18 +18,6 @@ int run_single_shot(Qwen35ComputeRuntime& runtime,
                     const std::string& kv_cache_dtype,
                     const std::string& dump_logits_path);
 
-int run_eagle4_shot(Qwen35ComputeRuntime& runtime,
-                    const std::vector<int32_t>& prompt_ids,
-                    unsigned long max_new_tokens,
-                    const std::string& model_dir,
-                    unsigned long drafts,
-                    unsigned long tree_width,
-                    unsigned long tree_dynamic,
-                    const std::string& candidate_head,
-                    const std::string& lm_head_source,
-                    int stats,
-                    const std::string& kv_cache_dtype);
-
 int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,

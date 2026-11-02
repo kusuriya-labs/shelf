@@ -90,32 +90,17 @@ Result<uint64_t> ContinuousBatcher::submit(
 }
 
 Status ContinuousBatcher::set_dflash2(const DFlash2BatcherBinding& binding) {
-    if (binding.eagle4) {
-        if (binding.batch == nullptr || binding.arena == nullptr ||
-            binding.sessions == nullptr || binding.eagle4_executor == nullptr ||
-            binding.eagle4_config == nullptr) {
-            return Status::invalid_argument(
-                "eagle4 binding requires batch / arena / sessions / eagle4 executor / "
-                "eagle4 config",
-                __FILE__, __LINE__);
-        }
-        if (binding.num_drafts == 0u) {
-            return Status::invalid_argument("eagle4 binding num_drafts must be positive",
-                                            __FILE__, __LINE__);
-        }
-    } else {
-        if (binding.config == nullptr || binding.executor == nullptr ||
-            binding.batch == nullptr || binding.arena == nullptr ||
-            binding.sessions == nullptr) {
-            return Status::invalid_argument(
-                "dflash2 binding requires config / executor / batch / arena / sessions",
-                __FILE__, __LINE__);
-        }
-        if (binding.num_drafts == 0u ||
-            binding.num_drafts > binding.config->max_draft_tokens()) {
-            return Status::invalid_argument("dflash2 binding num_drafts out of range",
-                                            __FILE__, __LINE__);
-        }
+    if (binding.config == nullptr || binding.executor == nullptr ||
+        binding.batch == nullptr || binding.arena == nullptr ||
+        binding.sessions == nullptr) {
+        return Status::invalid_argument(
+            "dflash2 binding requires config / executor / batch / arena / sessions",
+            __FILE__, __LINE__);
+    }
+    if (binding.num_drafts == 0u ||
+        binding.num_drafts > binding.config->max_draft_tokens()) {
+        return Status::invalid_argument("dflash2 binding num_drafts out of range",
+                                        __FILE__, __LINE__);
     }
     if (binding.sessions->capacity() < config_.max_scheduled_requests) {
         return Status::invalid_argument(
@@ -273,14 +258,6 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
         ring.length = request.dflash->context->length;
         ring.next_position = request.dflash->context->next_position;
         ring_ptr = &ring;
-    } else if (request.dflash != nullptr && request.dflash->ready &&
-               request.dflash->eagle4_context != nullptr) {
-        const auto* eagle4_ctx = request.dflash->eagle4_context;
-        ring.k = eagle4_ctx->k_ring.data<bf16_t>();
-        ring.v = eagle4_ctx->v_ring.data<bf16_t>();
-        ring.length = std::min<uint32_t>(eagle4_ctx->next_position, eagle4_ctx->capacity);
-        ring.next_position = eagle4_ctx->next_position;
-        ring_ptr = &ring;
     }
     const Status save_st = prefix_cache_->save_input_boundary(
         request.sequence, tokens, position, stream_, ring_ptr);
@@ -361,14 +338,6 @@ void ContinuousBatcher::prefix_finish_capture(RuntimeRequest& request, FinishRea
         ring.v = request.dflash->context->v_ring.data<bf16_t>();
         ring.length = request.dflash->context->length;
         ring.next_position = request.dflash->context->next_position;
-        ring_ptr = &ring;
-    } else if (request.dflash != nullptr && request.dflash->ready &&
-               request.dflash->eagle4_context != nullptr) {
-        const auto* eagle4_ctx = request.dflash->eagle4_context;
-        ring.k = eagle4_ctx->k_ring.data<bf16_t>();
-        ring.v = eagle4_ctx->v_ring.data<bf16_t>();
-        ring.length = std::min<uint32_t>(eagle4_ctx->next_position, eagle4_ctx->capacity);
-        ring.next_position = eagle4_ctx->next_position;
         ring_ptr = &ring;
     }
     bool saved = false;
@@ -506,11 +475,6 @@ Result<StepResult> ContinuousBatcher::step() {
                     ring_out.k = request.dflash->context->k_ring.data<bf16_t>();
                     ring_out.v = request.dflash->context->v_ring.data<bf16_t>();
                     ring_out_ptr = &ring_out;
-                } else if (request.dflash != nullptr &&
-                           request.dflash->eagle4_context != nullptr) {
-                    ring_out.k = request.dflash->eagle4_context->k_ring.data<bf16_t>();
-                    ring_out.v = request.dflash->eagle4_context->v_ring.data<bf16_t>();
-                    ring_out_ptr = &ring_out;
                 }
                 const Status restore_st = prefix_cache_->restore(
                     hit.entry_id, request.sequence, stream_, ring_out_ptr);
@@ -529,9 +493,6 @@ Result<StepResult> ContinuousBatcher::step() {
                         request.dflash->context->initialized) {
                         request.dflash->context->length = ring_out.length;
                         request.dflash->context->next_position = ring_out.next_position;
-                    } else if (request.dflash->eagle4_context != nullptr) {
-                        request.dflash->eagle4_context->next_position =
-                            ring_out.next_position;
                     }
                 }
                 request.restored_tokens = hit.state_position;
@@ -772,14 +733,6 @@ Status ContinuousBatcher::open_dflash2_context(RuntimeRequest& request) {
     DFlash2SessionPool& pool = *dflash_.sessions;
     auto session = std::make_unique<DFlash2RequestSession>();
     session->context = &pool.slot(index).context;
-    if (dflash_.eagle4) {
-        session->eagle4_contexts.clear();
-        for (eagle4::Eagle4ContextState& ctx : pool.slot(index).eagle4_contexts) {
-            session->eagle4_contexts.push_back(&ctx);
-        }
-        session->eagle4_context =
-            session->eagle4_contexts.empty() ? nullptr : session->eagle4_contexts[0];
-    }
     session->pool_index = index;
     request.dflash = std::move(session);
     return Status::make_ok();
@@ -793,7 +746,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         return Status::invalid_state("dflash2 session requires a session", __FILE__,
                                      __LINE__);
     }
-    if (request.dflash->context == nullptr && !dflash_.eagle4) {
+    if (request.dflash->context == nullptr) {
         return Status::invalid_state("dflash2 session requires a context", __FILE__,
                                      __LINE__);
     }
@@ -809,35 +762,11 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     if (dflash_.sessions != nullptr) {
         workspace = &dflash_.sessions->slot(session.pool_index).workspace;
     }
-    if (dflash_.eagle4 && session.eagle4_context == nullptr) {
-        return Status::invalid_state("eagle4 session requires an eagle4 context", __FILE__,
-                                     __LINE__);
-    }
-    std::vector<eagle4::Eagle4RankDraft> eagle_ranks;
-    if (dflash_.eagle4) {
-        const std::size_t rank_count = dflash_.eagle4_executors.size();
-        if (rank_count > 0 && session.eagle4_contexts.size() == rank_count &&
-            dflash_.eagle4_streams.size() == rank_count &&
-            dflash_.eagle4_devices.size() == rank_count) {
-            eagle_ranks.resize(rank_count);
-            for (std::size_t r = 0; r < rank_count; ++r) {
-                eagle_ranks[r].executor = dflash_.eagle4_executors[r];
-                eagle_ranks[r].context = session.eagle4_contexts[r];
-                eagle_ranks[r].stream = dflash_.eagle4_streams[r];
-                eagle_ranks[r].device = dflash_.eagle4_devices[r];
-            }
-        }
-    }
-    auto decoder_result = dflash_.eagle4
-        ? create_eagle4_spec_decoder(executor_, *dflash_.eagle4_executor,
-                                     *session.eagle4_context, request.sequence,
-                                     gdn_pool_, *dflash_.arena, decoder_config, stream_,
-                                     dflash_.rank_bindings, tp_batch_hook_, workspace,
-                                     eagle_ranks.empty() ? nullptr : &eagle_ranks)
-        : create_dflash2_spec_decoder(executor_, *dflash_.executor, *session.context,
-                                      request.sequence, gdn_pool_, *dflash_.arena,
-                                      decoder_config, stream_, dflash_.rank_bindings,
-                                      tp_batch_hook_, workspace);
+    auto decoder_result = create_dflash2_spec_decoder(
+        executor_, *dflash_.executor, *session.context,
+        request.sequence, gdn_pool_, *dflash_.arena,
+        decoder_config, stream_, dflash_.rank_bindings,
+        tp_batch_hook_, workspace);
     if (!decoder_result.ok()) {
         return decoder_result.status();
     }
@@ -934,9 +863,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                 timing_before.push_back(request->dflash->timing);
             }
         }
-        auto batch_result = dflash_.eagle4
-            ? eagle4_spec_step_batch(*dflash_.batch, slots)
-            : dflash2_spec_step_batch(*dflash_.batch, slots);
+        auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots);
         if (!batch_result.ok()) {
             for (RuntimeRequest* request : slot_requests) {
                 const Status st = finish_request(*request, FinishReason::Error, stream_);

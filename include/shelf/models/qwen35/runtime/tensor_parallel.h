@@ -139,7 +139,6 @@ public:
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) override;
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch,
                                             const ExecuteBatchOptions* per_rank) override;
-    Status on_eagle4_draft(const eagle4::Eagle4DraftJob& job) override;
 
     Status draft_sum(const ps::runtime::TpSumTarget& target, hipStream_t stream, int rank);
 
@@ -152,7 +151,6 @@ private:
         std::condition_variable cv;
         const ScheduledBatch* job = nullptr;
         const ExecuteBatchOptions* options = nullptr;
-        const eagle4::Eagle4DraftJob* draft_job = nullptr;
         bool job_pending = false;
         bool stop = false;
         bool done = true;
@@ -175,7 +173,6 @@ private:
     Status run_rank_step(std::size_t rank, const ScheduledBatch& batch,
                          BatchExecutionOutput& output,
                          const ExecuteBatchOptions* options);
-    Status run_rank_eagle4_draft(std::size_t rank, const eagle4::Eagle4DraftJob& job);
 
     std::vector<int> devices_;
     std::vector<std::unique_ptr<TpRankRuntime>> ranks_;

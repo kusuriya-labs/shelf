@@ -617,8 +617,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
             auto sessions_result = ps::qwen35::runtime::DFlash2SessionPool::create(
                 runtime.executor(), &dflash.executor, runtime.gdn_pool(),
                 runtime.arena(), session_config,
-                runtime.config().max_concurrent_requests, runtime.stream(), nullptr,
-                nullptr, serve_rank_ptr);
+                runtime.config().max_concurrent_requests, runtime.stream(), serve_rank_ptr);
             if (!sessions_result.ok()) {
                 fprintf(stderr, "dflash2 session pool create failed: %s\n",
                         sessions_result.status().message().c_str());
@@ -648,209 +647,6 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         fprintf(stderr, "DFLASH2_SESSION_POOL_SLOTS=%u\n", dflash.sessions.capacity());
         fprintf(stderr, "DFLASH2_SESSION_POOL_BYTES=%llu\n",
                 static_cast<unsigned long long>(dflash.sessions.reserved_bytes()));
-    } else if (dflash.eagle4_enabled) {
-        const uint32_t eagle_block = dflash.eagle4_drafts + 1u;
-        if (runtime.config().max_concurrent_requests >
-            ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows / eagle_block) {
-            fprintf(stderr,
-                    "eagle4 serve: max_concurrent_requests %u exceeds verify row cap %u "
-                    "for block %u\n",
-                    runtime.config().max_concurrent_requests,
-                    ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows, eagle_block);
-            return 1;
-        }
-        const bool share_lm_head = dflash.eagle4_lm_head == "target";
-        const auto& host_socket = runtime.config().model_host_socket;
-        const bool resident_available =
-            host_socket.has_value() && !host_socket->empty();
-        const uint32_t eagle4_tp = runtime.config().tp > 1u ? runtime.config().tp : 1u;
-        auto* tp_coord = runtime.tp_coordinator();
-        dflash.eagle4_ranks.resize(eagle4_tp);
-
-        auto rank_device = [&](uint32_t r) -> int {
-            if (tp_coord != nullptr && tp_coord->tp_size() > static_cast<int>(r)) {
-                return tp_coord->rank(r).device_id();
-            }
-            return runtime.config().devices.size() > r ? runtime.config().devices[r] : 0;
-        };
-        auto rank_arena = [&](uint32_t r) -> gpu::GpuArena& {
-            if (tp_coord != nullptr && tp_coord->tp_size() > static_cast<int>(r)) {
-                return tp_coord->rank(r).arena();
-            }
-            return runtime.arena();
-        };
-        auto rank_stream = [&](uint32_t r) -> hipStream_t {
-            if (tp_coord != nullptr && tp_coord->tp_size() > static_cast<int>(r)) {
-                return tp_coord->rank(r).stream();
-            }
-            return runtime.stream();
-        };
-
-        for (uint32_t r = 0; r < eagle4_tp; ++r) {
-            auto& slot = dflash.eagle4_ranks[r];
-            const int device = rank_device(r);
-            auto rank_scope = ps::gpu::ScopedDevice::create(device);
-            if (!rank_scope.ok()) {
-                fprintf(stderr, "eagle4 rank%u device scope failed: %s\n", r,
-                        rank_scope.status().message().c_str());
-                return 1;
-            }
-            if (resident_available) {
-                auto key = ps::resident::ResidentModelKey::make(
-                    dflash.eagle4_model_dir, ps::resident::ModelKind::Eagle4Draft,
-                    ps::resident::kLoadFlagPreshuffle, eagle4_tp, r, device);
-                auto attach =
-                    ps::resident::acquire_resident_model(key, device, *host_socket);
-                if (!attach.ok()) {
-                    fprintf(stderr, "eagle4 resident attach failed: %s\n",
-                            attach.status().message().c_str());
-                    return 1;
-                }
-                auto weights = attach.value().take_eagle4(&dflash.eagle4_config);
-                if (!weights.ok()) {
-                    fprintf(stderr, "eagle4 resident take failed: %s\n",
-                            weights.status().message().c_str());
-                    return 1;
-                }
-                slot.weights = weights.release();
-                slot.resident = attach.release();
-            } else {
-                ps::qwen35::eagle4::Eagle4WeightLoadOptions load_options;
-                load_options.tp_size = eagle4_tp;
-                load_options.tp_rank = r;
-                auto weights_result = ps::qwen35::eagle4::load_eagle4_weights(
-                    dflash.eagle4_model_dir, dflash.eagle4_config, rank_arena(r),
-                    rank_stream(r), load_options);
-                if (!weights_result.ok()) {
-                    fprintf(stderr, "eagle4 weight load failed: %s\n",
-                            weights_result.status().message().c_str());
-                    return 1;
-                }
-                slot.weights = weights_result.release();
-            }
-        }
-
-        const uint32_t batch_max_rows = std::min<uint32_t>(
-            runtime.config().max_concurrent_requests * eagle_block,
-            ps::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
-        ps::qwen35::eagle4::Eagle4ExecutorConfig draft_config;
-        draft_config.max_rows = ps::qwen35::eagle4::kEagle4ExtendRowsMax;
-        draft_config.num_candidates =
-            static_cast<uint32_t>(dflash.eagle4_config.num_candidates);
-        draft_config.use_lowrank_candidate_head =
-            dflash.eagle4_candidate_head != "gemv";
-        draft_config.tp_size = eagle4_tp;
-        if (eagle4_tp > 1u && tp_coord != nullptr) {
-            draft_config.tp_sum = [tp_coord](const ps::runtime::TpSumTarget& target,
-                                             hipStream_t target_stream,
-                                             std::uint32_t rank) {
-                return tp_coord->draft_sum(target, target_stream,
-                                           static_cast<int>(rank));
-            };
-        }
-        for (uint32_t r = 0; r < eagle4_tp; ++r) {
-            auto& slot = dflash.eagle4_ranks[r];
-            draft_config.tp_rank = r;
-            draft_config.target_embed_tokens = nullptr;
-            draft_config.target_lm_head = nullptr;
-            if (share_lm_head) {
-                const auto& rank_model =
-                    tp_coord != nullptr && tp_coord->tp_size() > static_cast<int>(r)
-                        ? tp_coord->rank(r).model()
-                        : runtime.model();
-                draft_config.target_lm_head = &rank_model.weights().lm_head;
-            }
-            auto rank_scope = ps::gpu::ScopedDevice::create(rank_device(r));
-            if (!rank_scope.ok()) {
-                fprintf(stderr, "eagle4 rank%u device scope failed: %s\n", r,
-                        rank_scope.status().message().c_str());
-                return 1;
-            }
-            auto draft_result = ps::qwen35::eagle4::create_eagle4_executor(
-                dflash.eagle4_config, slot.weights, rank_arena(r), draft_config);
-            if (!draft_result.ok()) {
-                fprintf(stderr, "eagle4 rank%u executor create failed: %s\n", r,
-                        draft_result.status().message().c_str());
-                return 1;
-            }
-            slot.executor = draft_result.release();
-            slot.ready = true;
-            if (eagle4_tp > 1u && tp_coord != nullptr) {
-                slot.executor.tp_hook = tp_coord;
-            }
-        }
-        {
-            std::vector<ps::qwen35::runtime::DFlash2GdnRankBinding> bindings;
-            if (serve_rank_ptr != nullptr) {
-                bindings = serve_rank_bindings;
-            } else {
-                ps::qwen35::runtime::DFlash2GdnRankBinding binding;
-                binding.pool = &runtime.gdn_pool();
-                binding.arena = &runtime.arena();
-                binding.stream = runtime.stream();
-                binding.device = runtime.config().devices[0];
-                bindings.push_back(binding);
-            }
-            auto batch_result =
-                ps::qwen35::runtime::create_dflash2_spec_batch_context(
-                    bindings, batch_max_rows);
-            if (!batch_result.ok()) {
-                fprintf(stderr, "eagle4 batch context create failed: %s\n",
-                        batch_result.status().message().c_str());
-                return 1;
-            }
-            dflash.batch = batch_result.release();
-            dflash.batch_ready = true;
-        }
-        {
-            ps::qwen35::runtime::DFlash2SpecDecoderConfig session_config;
-            session_config.num_drafts = dflash.eagle4_drafts;
-            session_config.eos_tokens = runtime.model().text_config().stop_tokens;
-            auto sessions_result = ps::qwen35::runtime::DFlash2SessionPool::create(
-                runtime.executor(), nullptr, runtime.gdn_pool(), runtime.arena(),
-                session_config, runtime.config().max_concurrent_requests,
-                runtime.stream(), &dflash.eagle4_ranks[0].executor,
-                &dflash.eagle4_config,
-                serve_rank_ptr);
-            if (!sessions_result.ok()) {
-                fprintf(stderr, "eagle4 session pool create failed: %s\n",
-                        sessions_result.status().message().c_str());
-                return 1;
-            }
-            dflash.sessions = sessions_result.release();
-            dflash.sessions_ready = true;
-        }
-        ps::qwen35::runtime::DFlash2BatcherBinding batcher_binding;
-        batcher_binding.config = nullptr;
-        batcher_binding.executor = nullptr;
-        batcher_binding.batch = &dflash.batch;
-        batcher_binding.arena = &runtime.arena();
-        batcher_binding.sessions = &dflash.sessions;
-        batcher_binding.num_drafts = dflash.eagle4_drafts;
-        batcher_binding.stats = &dflash.stats;
-        batcher_binding.rank_bindings = serve_rank_ptr;
-        batcher_binding.eagle4 = true;
-        batcher_binding.eagle4_executor = &dflash.eagle4_ranks[0].executor;
-        batcher_binding.eagle4_executors.clear();
-        batcher_binding.eagle4_streams.clear();
-        batcher_binding.eagle4_devices.clear();
-        for (uint32_t r = 0; r < eagle4_tp; ++r) {
-            batcher_binding.eagle4_executors.push_back(
-                &dflash.eagle4_ranks[r].executor);
-            batcher_binding.eagle4_streams.push_back(rank_stream(r));
-            batcher_binding.eagle4_devices.push_back(rank_device(r));
-        }
-        batcher_binding.eagle4_config = &dflash.eagle4_config;
-        const ps::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);
-        if (!bind_st.ok()) {
-            fprintf(stderr, "eagle4 batcher binding failed: %s\n",
-                    bind_st.message().c_str());
-            return 1;
-        }
-        fprintf(stderr, "EAGLE4_SERVE_ENABLED=1\n");
-        fprintf(stderr, "EAGLE4_SERVE_DRAFTS=%u\n", dflash.eagle4_drafts);
-        fprintf(stderr, "EAGLE4_SERVE_SESSION_POOL_SLOTS=%u\n",
-                dflash.sessions.capacity());
     }
     fprintf(stderr, "SHELF_SERVE_READY\n");
     fflush(stderr);
@@ -881,7 +677,7 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
     }
 
     const char* serve_stats_env = std::getenv("SHELF_DFLASH2_SERVE_STATS");
-    if ((dflash.enabled || dflash.eagle4_enabled) &&
+    if (dflash.enabled &&
         serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
         serve_stats_env[0] != '0') {
         const ps::qwen35::runtime::DFlash2BatcherStats& t = dflash.stats;

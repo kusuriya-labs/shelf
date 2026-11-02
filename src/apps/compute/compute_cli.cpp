@@ -87,16 +87,6 @@ void compute_usage(const char* prog) {
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
-    printf("  --eagle4-model-dir PATH  EAGLE-4 draft model directory; enables\n");
-    printf("                         EAGLE-4 speculative decoding\n");
-    printf("  --eagle4-drafts N      EAGLE-4 speculative draft tokens per round (default 7)\n");
-    printf("  --eagle4-tree-width N  EAGLE-4 tree verify width; 0 or 1 = chain (default 0)\n");    printf("  --eagle4-tree-dynamic 0|1  EAGLE-4 決定的 tree sizing（Cost table、"
-           "default 0)\n");
-    printf("  --eagle4-candidate-head lowrank|gemv\n");
-    printf("                         EAGLE-4 candidate head path (default lowrank)\n");
-    printf("  --eagle4-lm-head draft|target\n");
-    printf("                         EAGLE-4 candidate head LM head source (default target)\n");
-    printf("  --eagle4-stats 0|1     print EAGLE-4 speculative decode statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
     printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
     printf("                                 (default 16384)\n");
@@ -167,16 +157,9 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
     auto& serve_stdio = opt.serve_stdio;
     ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
-    auto& eagle4_model_dir = opt.eagle4_model_dir;
     auto& model_host = opt.model_host;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_stats = opt.dflash2_stats;
-    auto& eagle4_drafts = opt.eagle4_drafts;
-    auto& eagle4_tree_width = opt.eagle4_tree_width;
-    auto& eagle4_tree_dynamic = opt.eagle4_tree_dynamic;
-    auto& eagle4_stats = opt.eagle4_stats;
-    auto& eagle4_candidate_head = opt.eagle4_candidate_head;
-    auto& eagle4_lm_head = opt.eagle4_lm_head;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
     auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
@@ -283,42 +266,6 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
                 return kComputeParseError;
             }
-        } else if (std::strcmp(argv[i], "--eagle4-model-dir") == 0 && i + 1 < argc) {
-            eagle4_model_dir = argv[++i];
-        } else if (std::strcmp(argv[i], "--eagle4-drafts") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], eagle4_drafts) || eagle4_drafts == 0) {
-                fprintf(stderr, "bad --eagle4-drafts\n");
-                return ps::app::kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--eagle4-tree-dynamic") == 0 && i + 1 < argc) {
-            eagle4_tree_dynamic = std::atoi(argv[++i]);
-            if (eagle4_tree_dynamic != 0 && eagle4_tree_dynamic != 1) {
-                fprintf(stderr, "bad --eagle4-tree-dynamic (expected 0 or 1)\n");
-                return ps::app::kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--eagle4-tree-width") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], eagle4_tree_width) || eagle4_tree_width > 16u) {
-                fprintf(stderr, "bad --eagle4-tree-width (expected 0..16)\n");
-                return ps::app::kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--eagle4-candidate-head") == 0 && i + 1 < argc) {
-            eagle4_candidate_head = argv[++i];
-            if (eagle4_candidate_head != "lowrank" && eagle4_candidate_head != "gemv") {
-                fprintf(stderr, "bad --eagle4-candidate-head (expected lowrank or gemv)\n");
-                return ps::app::kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--eagle4-lm-head") == 0 && i + 1 < argc) {
-            eagle4_lm_head = argv[++i];
-            if (eagle4_lm_head != "draft" && eagle4_lm_head != "target") {
-                fprintf(stderr, "bad --eagle4-lm-head (expected draft or target)\n");
-                return ps::app::kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--eagle4-stats") == 0 && i + 1 < argc) {
-            eagle4_stats = std::atoi(argv[++i]);
-            if (eagle4_stats != 0 && eagle4_stats != 1) {
-                fprintf(stderr, "bad --eagle4-stats (expected 0 or 1)\n");
-                return ps::app::kComputeParseError;
-            }
         } else if (std::strcmp(argv[i], "--dflash2-stats") == 0 && i + 1 < argc) {
             dflash2_stats = std::atoi(argv[++i]);
             if (dflash2_stats != 0 && dflash2_stats != 1) {
@@ -390,7 +337,6 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& serve_stdio = opt.serve_stdio;
     const ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     const auto& dflash2_model_dir = opt.dflash2_model_dir;
-    const auto& eagle4_model_dir = opt.eagle4_model_dir;
     const auto& dflash2_drafts = opt.dflash2_drafts;
     const auto& dflash2_stats = opt.dflash2_stats;
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
@@ -423,26 +369,6 @@ int validate_compute_options(const ComputeOptions& opt) {
     }
 
     const bool dflash_enabled = !dflash2_model_dir.empty();
-    if (!eagle4_model_dir.empty()) {
-        if (dflash_enabled) {
-            fprintf(stderr, "--eagle4-model-dir and --dflash2-model-dir are exclusive\n");
-            return kComputeParseError;
-        }
-        if (!dump_logits_path.empty()) {
-            fprintf(stderr, "eagle4 speculative decoding does not support --dump-logits\n");
-            return kComputeParseError;
-        }
-        if (prefix_cache_enabled != 0 && serve_stdio == 0) {
-            fprintf(stderr,
-                    "--eagle4-model-dir supports --prefix-cache only with "
-                    "--serve-stdio\n");
-            return kComputeParseError;
-        }
-        if (sampling.temperature != 0.0f) {
-            fprintf(stderr, "--eagle4-model-dir supports only greedy decoding\n");
-            return kComputeParseError;
-        }
-    }
     if (dflash_enabled) {
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");

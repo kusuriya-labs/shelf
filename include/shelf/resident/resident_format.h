@@ -4,8 +4,6 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
-#include <shelf/models/qwen35/eagle4/config.h>
-#include <shelf/models/qwen35/eagle4/weights.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/weights/matrix_weight.h>
 
@@ -147,21 +145,6 @@ Status read_dflash2_archive(
     int device,
     qwen35::dflash2::DFlash2Config& config_out,
     qwen35::dflash2::DFlash2Weights& weights_out);
-
-Status write_eagle4_archive(
-    const qwen35::eagle4::Eagle4Config& config,
-    const qwen35::eagle4::Eagle4Weights& weights,
-    const void* base,
-    std::vector<std::byte>& out);
-
-Status read_eagle4_archive(
-    const std::byte* data,
-    std::size_t size,
-    void* block,
-    std::size_t block_bytes,
-    int device,
-    qwen35::eagle4::Eagle4Config& config_out,
-    qwen35::eagle4::Eagle4Weights& weights_out);
 
 }
 }

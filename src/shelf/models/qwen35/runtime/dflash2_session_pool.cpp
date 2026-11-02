@@ -13,28 +13,17 @@ Result<DFlash2SessionPool> DFlash2SessionPool::create(
     const DFlash2SpecDecoderConfig& config,
     uint32_t max_sessions,
     hipStream_t stream,
-    eagle4::Eagle4Executor* eagle4_draft,
-    const eagle4::Eagle4Config* eagle4_config,
     const std::vector<DFlash2GdnRankBinding>* rank_bindings) {
     if (max_sessions == 0u) {
         return Status::invalid_argument("dflash2 session pool needs a positive slot count",
                                         __FILE__, __LINE__);
     }
-    if (draft == nullptr && eagle4_draft == nullptr) {
-        return Status::invalid_state(
-            "dflash2 session pool requires a draft or eagle4 draft", __FILE__, __LINE__);
+    if (draft == nullptr) {
+        return Status::invalid_state("dflash2 session pool requires a draft", __FILE__,
+                                     __LINE__);
     }
-    if (draft != nullptr && (!draft->initialized || draft->config == nullptr)) {
+    if (!draft->initialized || draft->config == nullptr) {
         return Status::invalid_state("dflash2 session pool requires an initialized draft",
-                                     __FILE__, __LINE__);
-    }
-    if ((eagle4_draft == nullptr) != (eagle4_config == nullptr)) {
-        return Status::invalid_argument(
-            "dflash2 session pool: eagle4 draft and config must be provided together",
-            __FILE__, __LINE__);
-    }
-    if (eagle4_draft != nullptr && (!eagle4_draft->initialized || eagle4_config == nullptr)) {
-        return Status::invalid_state("dflash2 session pool: eagle4 draft not initialized",
                                      __FILE__, __LINE__);
     }
     const std::size_t start_bytes = arena.used();
@@ -52,30 +41,8 @@ Result<DFlash2SessionPool> DFlash2SessionPool::create(
             slot.context = context_result.release();
         }
 
-        if (eagle4_config != nullptr) {
-            const std::uint32_t tp_size =
-                rank_bindings != nullptr && !rank_bindings->empty()
-                    ? static_cast<std::uint32_t>(rank_bindings->size())
-                    : 1u;
-            slot.eagle4_contexts.resize(tp_size);
-            for (std::uint32_t r = 0; r < tp_size; ++r) {
-                gpu::GpuArena& ctx_arena =
-                    rank_bindings != nullptr && (*rank_bindings)[r].arena != nullptr
-                        ? *(*rank_bindings)[r].arena
-                        : arena;
-                auto eagle4_result = eagle4::create_eagle4_context_state(
-                    *eagle4_config, ctx_arena, 0u, tp_size);
-                if (!eagle4_result.ok()) {
-                    (void)pool.shutdown();
-                    return eagle4_result.status();
-                }
-                slot.eagle4_contexts[r] = eagle4_result.release();
-            }
-        }
-
-        const uint32_t ws_draft_cap = draft != nullptr
-            ? static_cast<uint32_t>(draft->config->max_draft_tokens())
-            : static_cast<uint32_t>(config.num_drafts);
+        const uint32_t ws_draft_cap =
+            static_cast<uint32_t>(draft->config->max_draft_tokens());
         auto workspace_result = create_dflash2_spec_workspace_for_drafts(
             target, ws_draft_cap, gdn_pool, arena, config, stream, rank_bindings);
         if (!workspace_result.ok()) {
@@ -122,14 +89,6 @@ Result<uint32_t> DFlash2SessionPool::acquire() {
             return reset_st;
         }
     }
-    for (eagle4::Eagle4ContextState& ctx : target.eagle4_contexts) {
-        if (!ctx.initialized) continue;
-        const Status eagle4_reset = eagle4::eagle4_context_reset(ctx, 0u);
-        if (!eagle4_reset.ok()) {
-            free_list_.push_back(index);
-            return eagle4_reset;
-        }
-    }
     target.in_use = true;
     ++used_;
     return index;
@@ -147,11 +106,6 @@ Status DFlash2SessionPool::release(uint32_t index) {
     if (target.context.initialized) {
         reset_st = dflash2::dflash2_context_reset(target.context, 0u);
     }
-    for (eagle4::Eagle4ContextState& ctx : target.eagle4_contexts) {
-        if (!ctx.initialized) continue;
-        const Status eagle4_reset = eagle4::eagle4_context_reset(ctx, 0u);
-        if (reset_st.ok() && !eagle4_reset.ok()) return eagle4_reset;
-    }
     target.in_use = false;
     free_list_.push_back(index);
     --used_;
@@ -166,11 +120,6 @@ Status DFlash2SessionPool::shutdown() noexcept {
         if (slot.context.initialized) {
             const Status context_st = dflash2::dflash2_context_shutdown(slot.context);
             if (!context_st.ok() && first_error.ok()) first_error = context_st;
-        }
-        for (eagle4::Eagle4ContextState& ctx : slot.eagle4_contexts) {
-            if (!ctx.initialized) continue;
-            const Status eagle4_st = eagle4::eagle4_context_shutdown(ctx);
-            if (!eagle4_st.ok() && first_error.ok()) first_error = eagle4_st;
         }
         slot.in_use = false;
     }

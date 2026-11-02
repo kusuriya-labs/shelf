@@ -11,7 +11,6 @@ namespace resident {
 enum class ModelKind : std::uint32_t {
     Qwen35Target = 1,
     DFlash2Draft = 2,
-    Eagle4Draft = 3,
 };
 
 constexpr std::uint32_t kLoadFlagVerifyCrc = 1u << 0;

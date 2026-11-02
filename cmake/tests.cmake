@@ -147,17 +147,6 @@ target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}
 shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
-shelf_add_test(NAME test_eagle4_kernels SOURCE unit/test_eagle4_kernels.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
-shelf_add_test(NAME test_eagle4_config SOURCE unit/test_eagle4_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
-shelf_add_test(NAME test_eagle4_forward SOURCE unit/test_eagle4_forward.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
-shelf_add_test(NAME test_eagle4_candidate_paths SOURCE unit/test_eagle4_candidate_paths.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 12 LIBRARIES shelf_qwen35_runtime)
-shelf_add_test(NAME test_eagle4_weight_contract SOURCE unit/test_eagle4_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
-shelf_add_test(NAME test_eagle4_tp_weight_load SOURCE unit/test_eagle4_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
-shelf_add_test(NAME test_eagle4_tree SOURCE unit/test_eagle4_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
-shelf_add_test(NAME test_eagle4_cost SOURCE unit/test_eagle4_cost.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
-shelf_add_test(NAME test_eagle4_tree_draft SOURCE unit/test_eagle4_tree_draft.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime)
-shelf_add_test(NAME test_eagle4_spec_batch SOURCE unit/test_eagle4_spec_batch.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime shelf_qwen35)
-shelf_add_test(NAME test_eagle4_tp_forward SOURCE unit/test_eagle4_tp_forward.hip LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src/apps/bench")
 shelf_add_test(NAME test_ple_ngram_hash SOURCE unit/test_ple_ngram_hash.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen4exp)
@@ -305,15 +294,6 @@ add_custom_target(
         test_qwen35_tp_weight_load
         test_qwen35_mtp_weight_load
         test_dflash2_config
-        test_eagle4_kernels
-        test_eagle4_config
-        test_eagle4_forward
-        test_eagle4_candidate_paths
-        test_eagle4_weight_contract
-        test_eagle4_tree
-        test_eagle4_cost
-        test_eagle4_tree_draft
-        test_eagle4_spec_batch
         test_quality_metrics
         test_qwen35_config_tie
         test_qwen4exp_config

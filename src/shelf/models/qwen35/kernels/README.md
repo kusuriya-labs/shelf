@@ -1,6 +1,6 @@
 # Qwen3.5 kernels
 
-Qwen35 固有 kernel（correctness / dflash2 / eagle4）の配置と分割の規約。
+Qwen35 固有 kernel（correctness / dflash2）の配置と分割の規約。
 model 非依存の optimized kernel は `src/shelf/kernels/optimized/` を正本とする。
 
 ```text

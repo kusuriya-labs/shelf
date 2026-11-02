@@ -2,8 +2,6 @@
 
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/eagle4/config.h>
-#include <shelf/models/qwen35/eagle4/executor.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/models/qwen35/runtime/token_budget_scheduler.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -80,12 +78,6 @@ struct DFlash2BatcherBinding {
     DFlash2SessionPool* sessions = nullptr;
     uint32_t num_drafts = 7u;
     DFlash2BatcherStats* stats = nullptr;
-    bool eagle4 = false;
-    eagle4::Eagle4Executor* eagle4_executor = nullptr;
-    std::vector<eagle4::Eagle4Executor*> eagle4_executors;
-    std::vector<hipStream_t> eagle4_streams;
-    std::vector<int> eagle4_devices;
-    const eagle4::Eagle4Config* eagle4_config = nullptr;
     const std::vector<DFlash2GdnRankBinding>* rank_bindings = nullptr;
 };
 

@@ -163,14 +163,14 @@ void test_tp2_shapes() {
     check(sel_fp8(1, 24, 5120, 5120).has_value(), "tp2 fp8 24x5120 rows=1 -> config");
     check(!sel_fp8(1, 24, 5120, 5184).has_value(), "fp8 k_padded misaligned rejected");
 
-    const uint32_t tp2_bf16_eagle4[][2] = {
+    const uint32_t tp2_bf16_drafter[][2] = {
         {8192u, 5120u}, {5120u, 8192u}, {5120u, 2560u}, {2560u, 10240u},
     };
-    for (const auto& s : tp2_bf16_eagle4) {
-        std::snprintf(name, sizeof(name), "tp2 bf16 eagle4 %ux%u rows=1 -> config",
+    for (const auto& s : tp2_bf16_drafter) {
+        std::snprintf(name, sizeof(name), "tp2 bf16 drafter %ux%u rows=1 -> config",
                       s[0], s[1]);
         check(sel_bf16(1, s[0], s[1], s[1], true, true, false).has_value(), name);
-        std::snprintf(name, sizeof(name), "tp2 bf16 eagle4 %ux%u rows=256 -> config",
+        std::snprintf(name, sizeof(name), "tp2 bf16 drafter %ux%u rows=256 -> config",
                       s[0], s[1]);
         check(sel_bf16(256, s[0], s[1], s[1], true, true, false).has_value(), name);
     }

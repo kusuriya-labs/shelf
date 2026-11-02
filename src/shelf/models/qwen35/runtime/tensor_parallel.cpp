@@ -5,7 +5,6 @@
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/request_handle.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/qwen35/eagle4/executor.h>
 
 #include <cstdio>
 #include <sstream>
@@ -576,61 +575,12 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
     return rank0_output;
 }
 
-Status TpCoordinator::on_eagle4_draft(const eagle4::Eagle4DraftJob& job) {
-    if (ranks_.size() < 2) {
-        return Status::invalid_state("tp coordinator has no ranks", __FILE__, __LINE__);
-    }
-    if (job.ranks.size() != workers_.size()) {
-        return Status::invalid_argument("tp eagle4 draft job rank mismatch", __FILE__,
-                                        __LINE__);
-    }
-    if (barrier_group_->aborted()) {
-        const Status reason = barrier_group_->abort_status();
-        if (!reason.ok()) return reason;
-        return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
-    }
-
-    for (std::size_t r = 0; r < workers_.size(); ++r) {
-        Worker* worker = workers_[r].get();
-        {
-            std::lock_guard<std::mutex> lock(worker->mutex);
-            worker->job = nullptr;
-            worker->options = nullptr;
-            worker->draft_job = &job;
-            worker->job_pending = true;
-            worker->done = false;
-            worker->status = Status::make_ok();
-        }
-        worker->cv.notify_all();
-    }
-
-    Status first_error = Status::make_ok();
-    for (std::size_t r = 0; r < workers_.size(); ++r) {
-        Worker* worker = workers_[r].get();
-        std::unique_lock<std::mutex> lock(worker->mutex);
-        worker->cv.wait(lock, [&] { return worker->done; });
-        if (!worker->status.ok() && first_error.ok()) {
-            first_error = worker->status;
-        }
-    }
-    if (!first_error.ok()) {
-        abort(first_error);
-        return first_error;
-    }
-    return Status::make_ok();
-}
-
 Status TpCoordinator::draft_sum(const ps::runtime::TpSumTarget& target,
                                 hipStream_t stream, int rank) {
     if (barrier_group_ == nullptr) {
         return Status::invalid_state("tp barrier group missing", __FILE__, __LINE__);
     }
     return barrier_group_->arrive(rank, target, stream, false);
-}
-
-Status TpCoordinator::run_rank_eagle4_draft(std::size_t rank,
-                                            const eagle4::Eagle4DraftJob& job) {
-    return eagle4::run_eagle4_rank_job(job, rank);
 }
 
 void TpCoordinator::worker_loop(std::size_t rank) {
@@ -646,7 +596,6 @@ void TpCoordinator::worker_loop(std::size_t rank) {
     while (true) {
         const ScheduledBatch* job = nullptr;
         const ExecuteBatchOptions* options = nullptr;
-        const eagle4::Eagle4DraftJob* draft_job = nullptr;
         {
             std::unique_lock<std::mutex> lock(worker->mutex);
             worker->cv.wait(lock, [&] { return worker->job_pending || worker->stop; });
@@ -654,15 +603,11 @@ void TpCoordinator::worker_loop(std::size_t rank) {
             worker->job_pending = false;
             job = worker->job;
             options = worker->options;
-            draft_job = worker->draft_job;
-            worker->draft_job = nullptr;
         }
         BatchExecutionOutput output;
         Status st = Status::make_ok();
         if (job != nullptr) {
             st = run_rank_step(rank, *job, output, options);
-        } else if (draft_job != nullptr) {
-            st = run_rank_eagle4_draft(rank, *draft_job);
         }
         if (!st.ok()) abort(st);
         {

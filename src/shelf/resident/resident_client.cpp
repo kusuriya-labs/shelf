@@ -188,30 +188,6 @@ Result<qwen35::dflash2::DFlash2Weights> ResidentModelAttachment::take_dflash2(
     return weights;
 }
 
-Result<qwen35::eagle4::Eagle4Weights> ResidentModelAttachment::take_eagle4(
-    qwen35::eagle4::Eagle4Config* config_out) const {
-    if (block_ == nullptr) {
-        return Status::invalid_state("resident model not attached", __FILE__, __LINE__);
-    }
-    if (header_.kind != static_cast<std::uint32_t>(ModelKind::Eagle4Draft)) {
-        return Status::invalid_argument("resident model kind mismatch", __FILE__, __LINE__);
-    }
-    if (archive_.size() != header_.archive_bytes) {
-        return Status::invalid_state("resident model archive size", __FILE__, __LINE__);
-    }
-    qwen35::eagle4::Eagle4Config config;
-    qwen35::eagle4::Eagle4Weights weights;
-    Status st = read_eagle4_archive(archive_.data(), archive_.size(), block_,
-                                    block_bytes_, device_, config, weights);
-    if (!st.ok()) {
-        return st;
-    }
-    if (config_out != nullptr) {
-        *config_out = std::move(config);
-    }
-    return weights;
-}
-
 Result<ResidentModelAttachment> acquire_resident_model(
     const ResidentModelKey& key, int device, const std::string& socket_spec) {
     if (env_flag(kDisableEnv)) {

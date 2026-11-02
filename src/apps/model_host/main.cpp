@@ -26,7 +26,6 @@ void usage() {
     std::fprintf(stderr,
         "usage: shelf-model-host --socket PATH [--device N] "
         "[--staging-gib G] [--warmup-qwen35 DIR]... [--warmup-dflash2 DIR]... "
-        "[--warmup-eagle4 DIR]... "
         "[--warmup-tp-size N] [--warmup-tp-rank N] "
         "[--model-dir DIR]... [--allow-any-dir] [--health-timeout-ms N] [--no-vmm]\n"
         "       shelf-model-host --socket PATH --ctl "
@@ -147,8 +146,6 @@ int main(int argc, char** argv) {
             options.warmup.emplace_back(value, ModelKind::Qwen35Target);
         } else if (take_arg(argc, argv, &i, "--warmup-dflash2", &value)) {
             options.warmup.emplace_back(value, ModelKind::DFlash2Draft);
-        } else if (take_arg(argc, argv, &i, "--warmup-eagle4", &value)) {
-            options.warmup.emplace_back(value, ModelKind::Eagle4Draft);
         } else if (take_arg(argc, argv, &i, "--warmup-tp-size", &value)) {
             options.warmup_tp_size =
                 static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10));

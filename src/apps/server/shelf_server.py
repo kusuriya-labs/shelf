@@ -94,13 +94,6 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
-    if opts.eagle4_model_dir:
-        argv += [
-            "--eagle4-model-dir", opts.eagle4_model_dir,
-            "--eagle4-drafts", str(opts.eagle4_drafts),
-        ]
-        if opts.eagle4_lm_head:
-            argv += ["--eagle4-lm-head", opts.eagle4_lm_head]
     if opts.tp > 1:
         argv += ["--tp", str(opts.tp)]
     if opts.model_host:
@@ -411,13 +404,6 @@ def parse_args(argv=None):
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
 
-    parser.add_argument("--eagle4-model-dir", default=None,
-                        help="EAGLE4 drafter directory (enables speculative decoding)")
-    parser.add_argument("--eagle4-drafts", type=int, default=7,
-                        help="EAGLE4 draft tokens per round (default 7)")
-    parser.add_argument("--eagle4-lm-head", default=None, choices=("target", "draft"),
-                        help="EAGLE4 draft LM head source (TP2 requires 'draft')")
-
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
     opts = parser.parse_args(argv)
@@ -442,8 +428,6 @@ def parse_args(argv=None):
         parser.error("--page-tokens must be >= 1")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
-    if opts.eagle4_drafts < 1:
-        parser.error("--eagle4-drafts must be >= 1")
     return opts
 
 
@@ -458,12 +442,6 @@ def _validate_model_dirs(opts) -> None:
         if not dflash2_dir.is_dir():
             raise SystemExit(f"dflash2 model directory not found: {dflash2_dir}")
         opts.dflash2_model_dir = str(dflash2_dir)
-
-    if opts.eagle4_model_dir:
-        eagle4_dir = Path(opts.eagle4_model_dir).resolve()
-        if not eagle4_dir.is_dir():
-            raise SystemExit(f"eagle4 model directory not found: {eagle4_dir}")
-        opts.eagle4_model_dir = str(eagle4_dir)
 
 
 async def _serve(opts) -> int:
@@ -493,8 +471,6 @@ async def _serve(opts) -> int:
 
     if opts.dflash2_model_dir:
         speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}
-    elif opts.eagle4_model_dir:
-        speculative = {"method": "eagle4", "drafts": opts.eagle4_drafts}
     else:
         speculative = None
 

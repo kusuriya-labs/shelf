@@ -270,35 +270,6 @@ Status ResidentModelHost::load_entry_once(const ResidentModelKey& key, Entry& ou
             gpu::discard_cleanup_result(hipStreamDestroy(stream));
             return write_status;
         }
-    } else if (key.kind == ModelKind::Eagle4Draft) {
-        auto config_result = qwen35::eagle4::read_eagle4_config(key.model_dir);
-        if (!config_result.ok()) {
-            gpu::discard_cleanup_result(hipStreamDestroy(stream));
-            return config_result.status();
-        }
-        qwen35::eagle4::Eagle4Config config = config_result.release();
-        qwen35::eagle4::Eagle4WeightLoadOptions options;
-        options.preshuffle = (key.load_flags & kLoadFlagPreshuffle) != 0;
-        options.tp_size = key.tp_size;
-        options.tp_rank = key.tp_rank;
-        auto weights_result = qwen35::eagle4::load_eagle4_weights(
-            key.model_dir, config, staging, stream, options);
-        if (!weights_result.ok()) {
-            gpu::discard_cleanup_result(hipStreamDestroy(stream));
-            return weights_result.status();
-        }
-        auto prefix = staging.used_prefix_view();
-        if (!prefix.ok()) {
-            gpu::discard_cleanup_result(hipStreamDestroy(stream));
-            return prefix.status();
-        }
-        qwen35::eagle4::Eagle4Weights weights = weights_result.release();
-        Status write_status = write_eagle4_archive(
-            config, weights, prefix.value().data(), archive);
-        if (!write_status.ok()) {
-            gpu::discard_cleanup_result(hipStreamDestroy(stream));
-            return write_status;
-        }
     } else {
         gpu::discard_cleanup_result(hipStreamDestroy(stream));
         return Status::unsupported("resident model kind is not supported", __FILE__,
@@ -373,15 +344,6 @@ Status ResidentModelHost::load_entry_once(const ResidentModelKey& key, Entry& ou
                                              weights);
         if (verify_status.ok()) {
             verify_status = write_dflash2_archive(config, weights, block, rebuilt_archive);
-        }
-    } else if (key.kind == ModelKind::Eagle4Draft) {
-        qwen35::eagle4::Eagle4Config config;
-        qwen35::eagle4::Eagle4Weights weights;
-        verify_status = read_eagle4_archive(archive.data(), archive.size(), block,
-                                            block_bytes, options_.device, config,
-                                            weights);
-        if (verify_status.ok()) {
-            verify_status = write_eagle4_archive(config, weights, block, rebuilt_archive);
         }
     } else {
         verify_status = Status::unsupported("resident model kind is not supported",

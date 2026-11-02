@@ -3,9 +3,6 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/dflash2/context_state.h>
-#include <shelf/models/qwen35/eagle4/config.h>
-#include <shelf/models/qwen35/eagle4/context_state.h>
-#include <shelf/models/qwen35/eagle4/executor.h>
 #include <shelf/models/qwen35/dflash2/executor.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -20,7 +17,6 @@ namespace ps::qwen35::runtime {
 
 struct DFlash2SessionSlot {
     dflash2::DFlash2ContextState context;
-    std::vector<eagle4::Eagle4ContextState> eagle4_contexts;
     DFlash2SpecWorkspace workspace;
     bool in_use = false;
 };
@@ -37,8 +33,6 @@ class DFlash2SessionPool {
         const DFlash2SpecDecoderConfig& config,
         uint32_t max_sessions,
         hipStream_t stream,
-        eagle4::Eagle4Executor* eagle4_draft = nullptr,
-        const eagle4::Eagle4Config* eagle4_config = nullptr,
         const std::vector<DFlash2GdnRankBinding>* rank_bindings = nullptr);
 
     Result<uint32_t> acquire();

@@ -4,10 +4,7 @@
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/dflash2/context_state.h>
 #include <shelf/models/qwen35/dflash2/executor.h>
-#include <shelf/models/qwen35/eagle4/context_state.h>
-#include <shelf/models/qwen35/eagle4/executor.h>
 #include <shelf/models/qwen35/runtime/executor.h>
-#include <shelf/models/qwen35/runtime/eagle4_cost.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -30,8 +27,6 @@ constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
-    uint32_t eagle4_tree_width = 0u;
-    uint32_t eagle4_tree_dynamic = 0u;
     StopTokens eos_tokens;
 };
 
@@ -63,13 +58,6 @@ struct DFlash2GdnRankState {
     uint64_t compact_a_layer_stride = 0u;
     ::ps::runtime::DeviceRequestDescriptor* commit_request = nullptr;
     const ::ps::kernel::ModelDispatchStateView* model_state = nullptr;
-    std::uint32_t* tree_rope_positions = nullptr;
-    int32_t* tree_row_parent = nullptr;
-    int32_t* tree_anc_offsets = nullptr;
-    std::uint32_t* tree_anc_positions = nullptr;
-    int32_t* tree_commit_rows = nullptr;
-    std::uint32_t* tree_kv_src = nullptr;
-    std::uint32_t* tree_kv_dst = nullptr;
 };
 
 struct DFlash2SpecWorkspace {
@@ -90,14 +78,6 @@ struct DFlash2SpecDecoder {
     Executor* target = nullptr;
     dflash2::DFlash2Executor* draft = nullptr;
     dflash2::DFlash2ContextState* context = nullptr;
-    eagle4::Eagle4Executor* eagle = nullptr;
-    eagle4::Eagle4ContextState* eagle_context = nullptr;
-    std::vector<eagle4::Eagle4RankDraft> eagle_ranks;
-    int32_t* eagle_draft_tokens_device = nullptr;
-    ::ps::qwen35::runtime::Eagle4CostTable tree_cost{};
-    uint32_t eagle_num_candidates = 0u;
-    uint32_t eagle_candidate_topk = 1u;
-    bool eagle_root_ready = false;
     PagedSequenceState* sequence = nullptr;
     hipStream_t stream = nullptr;
     DFlash2SpecDecoderConfig config;
@@ -164,20 +144,6 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     const std::vector<DFlash2GdnRankBinding>* tp_ranks = nullptr,
     TpBatchHook* tp_hook = nullptr,
     DFlash2SpecWorkspace* workspace = nullptr);
-
-Result<DFlash2SpecDecoder> create_eagle4_spec_decoder(
-    Executor& target,
-    eagle4::Eagle4Executor& draft,
-    eagle4::Eagle4ContextState& context,
-    PagedSequenceState& sequence,
-    GdnStatePool& gdn_pool,
-    gpu::GpuArena& arena,
-    const DFlash2SpecDecoderConfig& config,
-    hipStream_t stream,
-    const std::vector<DFlash2GdnRankBinding>* tp_ranks = nullptr,
-    TpBatchHook* tp_hook = nullptr,
-    DFlash2SpecWorkspace* workspace = nullptr,
-    const std::vector<eagle4::Eagle4RankDraft>* eagle_ranks = nullptr);
 
 Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept;
 
@@ -259,16 +225,6 @@ struct DFlash2SpecBatchContext {
     bool initialized = false;
     int32_t* verify_token_ids_device = nullptr;
     int32_t* decision_staging_device = nullptr;
-    std::vector<uint32_t*> tree_rope_positions_device;
-    std::vector<int32_t*> tree_row_parent_device;
-    std::vector<int32_t*> tree_anc_offsets_device;
-    std::vector<uint32_t*> tree_anc_positions_device;
-    std::vector<uint32_t*> tree_committed_end_rows_device;
-    std::vector<uint32_t> tree_rope_positions_host;
-    std::vector<int32_t> tree_row_parent_host;
-    std::vector<int32_t> tree_anc_offsets_host;
-    std::vector<uint32_t> tree_anc_positions_host;
-    std::vector<uint32_t> tree_committed_end_host;
 };
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
@@ -292,18 +248,6 @@ struct DFlash2SpecBatchOutput {
     double draft_gpu_ms = 0.0;
     double verify_gpu_ms = 0.0;
 };
-
-using Eagle4SpecBatchSlot = DFlash2SpecBatchSlot;
-using Eagle4SpecBatchContext = DFlash2SpecBatchContext;
-using Eagle4SpecBatchOutput = DFlash2SpecBatchOutput;
-
-Result<DFlash2SpecBatchOutput> eagle4_tree_spec_step_batch(
-    DFlash2SpecBatchContext& context,
-    std::span<const DFlash2SpecBatchSlot> slots);
-
-Result<DFlash2SpecBatchOutput> eagle4_spec_step_batch(
-    DFlash2SpecBatchContext& context,
-    std::span<const DFlash2SpecBatchSlot> slots);
 
 Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,

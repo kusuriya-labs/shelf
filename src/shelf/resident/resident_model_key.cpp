@@ -105,7 +105,6 @@ const char* model_kind_name(ModelKind kind) {
     switch (kind) {
         case ModelKind::Qwen35Target: return "qwen35";
         case ModelKind::DFlash2Draft: return "dflash2";
-        case ModelKind::Eagle4Draft: return "eagle4";
     }
     return "unknown";
 }

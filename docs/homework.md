@@ -6,15 +6,15 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 [user/compute.md](user/compute.md)、経緯と実測は
 [research/20261023/yarn_context_extension.md](research/20261023/yarn_context_extension.md) を正本とする。
 
-## 1. Gate 5 — Drafter（DFlash2 / EAGLE4）の長位置対応
+## 1. Gate 5 — Drafter（DFlash2）の長位置対応
 
 - Target が YaRN のとき、Drafter は自身の checkpoint の RoPE（`rope_theta` のみ、`rope_type=default`）に従う。
   現状 2x/4x 起動時の speculative decoding は**起動時に拒否**しており、Drafter 側の YaRN 対応は未着手。
 - 必要な作業:
   - Drafter の `rope_parameters` から独立に RoPE プロファイルを解決する（現状は非 `default` を拒否する実装）。
-  - `float(position) * inv_freq` で角度を計算している箇所（`dflash2/detail/rope_device.h`、`eagle4/ops.hip`）の
+  - `float(position) * inv_freq` で角度を計算している箇所（`dflash2/detail/rope_device.h`）の
     高位置精度を評価し、必要なら double へ変更する。
-  - DFlash2 の Ring 位置・EAGLE4 の Tree 位置が長位置で整合することを検証する。
+  - DFlash2 の Ring 位置が長位置で整合することを検証する。
   - Target 1x/2x/4x との組合せで acceptance rate と tokens/s を測る。
 - 未対応の組合せは「使用不可」と明示し、静かに誤った補助推論をしない。
 
@@ -52,26 +52,7 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 - TP・Resident・PrefixCache・server の profile 同一性契約は [developer/qwen35.md](developer/qwen35.md) §2.5 に記載済み。
 - Gate 5/6 の結果が出た時点で、現在形の契約は `docs/developer/`、性能値は `docs/perf/`、経緯は `docs/research/` に分離して更新する。
 
-## 6. EAGLE4 の Tensor Parallel シャード
-
-TP2 のシャード実装（重み分割・collective・rank ごとの drafter）は main に取り込み済みで、
-serve 経路の TP2 + EAGLE-4 は動作する。契約は
-[developer/eagle4.md](developer/eagle4.md) の tensor parallel 節、経緯と切り分けは
-[research/20261024/eagle4_tp2_shard_crash.md](research/20261024/eagle4_tp2_shard_crash.md)
-を正本とする。ここには残る作業だけを残す。
-
-| 項目 | 内容 |
-| --- | --- |
-| シャード後の性能値 | `67886ff` の commit message にある TTFT 2.953 s（3 run の中央値）/ decode 65.5 tok/s（1 run）は `docs/perf/current.md` に未記録。同文書の EAGLE-4 行（62.36 tok/s）はシャード前の measurement revision `c745c31` の値である。5-run で再測し、条件とともに `docs/perf/` へ記録する |
-| 27B の TP2 E2E | 27B の TP2 + EAGLE-4 は serve 経路の手動実測のみで、自動テストが無い。`test_eagle4_tp_forward` は小さい checkpoint の stage 比較であり、実 checkpoint の E2E は `test_dflash2_tp_e2e` 相当の test が無い |
-| serve の tree 経路 | `shelf-server` が `--eagle4-tree-width` を露出していないため、TP2 では chain のみ到達可能である。tree は単一 rank でのみ検証済み |
-| `eagle_ranks` の束縛失敗 | `continuous_batcher.cpp` は executor / context / stream / device のサイズが揃わないと `eagle_ranks` を空のまま渡し、single-rank の draft に静かに落ちる。起動時または job 構築時に error / log を出す |
-
-candidate head の pool は rank ごとの local top-k の和のため、TP2 の候補集合は TP1 と
-一致しない。`test_eagle4_tp_forward` は merge 結果の整合と「TP2 が TP1 より悪化しないこと」
-だけを検証しており、既知の制約として許容している。
-
-## 7. server の usage / メタ情報配信（Phase A〜C）
+## 6. server の usage / メタ情報配信（Phase A〜C）
 
 ### 経緯（2026-10-23）
 

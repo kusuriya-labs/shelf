@@ -13,8 +13,7 @@ protocol ping に応答することを確認してから child を起動する�
 - 指定されたターゲットモデルは必ず model host 経由でロードされる。launcher は
   child に `--model-host` と `--tp` を注入する。
 - ドラフトモデルは child(compute / server)が local load する。launcher は
-  `--dflash2-model-dir` / `--eagle4-model-dir` を child に透過するのみで、host には
-  warmup させない。
+  `--dflash2-model-dir` を child に透過するのみで、host には warmup させない。
 
 `--model-dir` / `--device` / `--tp` / `--model-host` は launcher が所有する。
 child の argument に書くとエラーになる。

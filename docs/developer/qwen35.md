@@ -138,7 +138,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 - YaRN の `original_max_position_embeddings` は `rope_parameters` の値、無ければ `text_config.max_position_embeddings` を使う。
 - `attention_factor` は config の明示値、無ければ `1 + 0.1 * ln(factor)`。`beta_fast` / `beta_slow` / `truncate` の既定は 32 / 1 / true。
 - `--max-seq-len` の上限は `min(original_len * factor, 1000000)`。Native は `original_len`。
-- YaRN 選択中の speculative decoding（`--dflash2-model-dir` / `--eagle4-model-dir`）は起動時に拒否する。
+- YaRN 選択中の speculative decoding（`--dflash2-model-dir`）は起動時に拒否する。
 - 逆周波数 table は YaRN 時に `launch_rope_inv_freq_yarn_init`、Native 時に `launch_rope_inv_freq_init` で 32 要素の double を生成する。
 
 解決結果の同一性は経路ごとに次の契約で保証する。
