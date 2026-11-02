@@ -47,7 +47,7 @@ def model_dir() -> Path:
     )
     if env:
         return Path(env)
-    return REPO_ROOT / "models" / "Qwen3.5-4B"
+    return REPO_ROOT / "models" / "Qwen3.8-27B-FP8"
 
 
 _PROCESSOR_CACHE: dict[str, object] = {}
@@ -118,15 +118,6 @@ def generation_stop_probe() -> dict:
         except Exception:  # noqa: BLE001 - diagnostic only
             return None
 
-    oracle_terminal = None
-    oracle_path = REPO_ROOT / "tests" / "fixtures" / "qwen35_4b_oracle.json"
-    if oracle_path.is_file():
-        oracle = json.loads(oracle_path.read_text())
-        for case in oracle.get("cases", []):
-            if case.get("name") == "chat_single":
-                ids = case.get("generated_ids") or []
-                if ids:
-                    oracle_terminal = ids[-1]
     return {
         "model_config_eos": model_eos,
         "tokenizer_eos_metadata": tokenizer_eos,
@@ -134,7 +125,6 @@ def generation_stop_probe() -> dict:
         "tokenizer_eos_token": token_repr(tokenizer_eos),
         "generation_stop_tokens": stop_tokens,
         "generation_stop_token_names": [token_repr(t) for t in stop_tokens],
-        "oracle_terminal_token": oracle_terminal,
     }
 
 

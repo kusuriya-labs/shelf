@@ -8,10 +8,10 @@ adjudicates token-level disagreements between GPU implementations and any
 "correctness" path, so a broken reference cannot masquerade as truth.
 
 usage:
-  tools/qwen35_oracle_tokens.py --model-dir models/Qwen3.5-4B \
+  tools/qwen35_oracle_tokens.py --model-dir <bf16-model-dir> \
       --ids "248045,846" [--chat] [--max-new-tokens 4] [--dtype f64]
 
-  tools/qwen35_oracle_tokens.py --model-dir models/Qwen3.5-4B \
+  tools/qwen35_oracle_tokens.py --model-dir <bf16-model-dir> \
       --prompt "What is my favorite color?" --chat --max-new-tokens 2
 
 prints: ORACLE_FIRST_TOKENS=<ids> (parse like the bench's GREEDY_FIRST_TOKENS)

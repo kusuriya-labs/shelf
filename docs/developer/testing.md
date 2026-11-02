@@ -229,8 +229,9 @@ external test の model directory はすべて環境変数で指定する。
 
 Qwen3.5-4B full application E2E は削除済みである。外部 model が無い環境で
 skip を垂れ流さないため、実行できない suite は repository に残さない。
-`tests/fixtures/qwen35_4b_oracle.json` は generation stop token contract
-（`test_server_eos_contract.py`）の入力として残している。
+generation stop token contract（`test_server_eos_contract.py`）は model の
+`generation_config` / tokenizer と実際の generation だけを使い、model 固有の
+oracle fixture に依存しない。
 
 ## server regression
 

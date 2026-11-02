@@ -30,12 +30,15 @@ greedy トークンを f64 oracle で計算し、bench の `GREEDY_FIRST_TOKENS`
 ```sh
 # token ids 直接（E2E fixture の input_ids を指定）
 /root/.venv/bin/python3 tools/qwen35_oracle_tokens.py \
-  --model-dir models/Qwen3.5-4B --ids-file ids.txt --max-new-tokens 2
+  --model-dir <bf16-model-dir> --ids-file ids.txt --max-new-tokens 2
 
 # chat prompt から（transformers tokenizer で encode）
 /root/.venv/bin/python3 tools/qwen35_oracle_tokens.py \
-  --model-dir models/Qwen3.5-4B --prompt "What is my favorite color?" --chat
+  --model-dir <bf16-model-dir> --prompt "What is my favorite color?" --chat
 ```
+
+FP8 checkpoint は oracle が直接読めないため、Qwen3.8-27B-FP8 では
+`tools/qwen38_fp8_cpu_fixture.py` を使う（後述）。
 
 - `ORACLE_FIRST_TOKENS=<ids>` が greedy 生成の第一トークン列
 - 監査に使えるモード: `--dtype bf16|f16`（低精度 storage 語義）、
@@ -59,3 +62,50 @@ greedy トークンを f64 oracle で計算し、bench の `GREEDY_FIRST_TOKENS`
 turn2 の margin: top1 26.004508 vs top2 23.703756（HF oracle fixture の
 26.0045166015625 / 23.703771591186523 と一致）。interactive multi-turn のみ
 optimized 側が flip する。
+
+## Qwen3.8-27B-FP8 の CPU fixture
+
+Qwen3.8-27B-FP8 の HF checkpoint は FP8 E4M3 weight と BF16 block scale
+（128x128）を持つ。oracle はこの形式を直接読まないため、fixture 生成時に
+`weight = f64(fp8_code) * f64(scale)` で F32 へ dequantize する。この積は F32 で
+厳密に表現できるので、F32 化による追加の丸めはない。F32 model を oracle の
+`--model` に渡し、forward は従来どおり f64 で実行する。
+
+生成器は `tools/qwen38_fp8_cpu_fixture.py` である。dequantize 済み model は
+`.cache/` に置き、repository には commit しない。
+
+```sh
+tools/qwen38_fp8_cpu_fixture.py \
+  --model-dir models/Qwen3.8-27B-FP8 \
+  --oracle-dir ../references/qwen35-f64-oracle \
+  --ids 814,20139,303,799,13901,3069,279,12515,7701,6105,2261,279,1834,321,2438,506,41564,13 \
+  --max-new-tokens 64 --hidden-tokens 16 --hidden-scope both \
+  --out-json tests/fixtures/qwen38_27b_fp8_cpu_oracle.json \
+  --out-hidden tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden.safetensors \
+  --out-hidden-generated tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden_generated.safetensors
+```
+
+出力:
+
+- JSON: input ids、greedy 生成 64 token、各 step の top5 logits と margin。
+- `..._hidden.safetensors`: 入力 prefill の先頭 16 position の
+  `hidden_00..hidden_64`（F32）。`hidden_00` は embedding、
+  `hidden_01..hidden_63` は decoder layer 0..62 の残差出力
+  （= 次の layer の入力）、`hidden_64` は final norm 出力である。
+- `..._hidden_generated.safetensors`: 生成 token 1..16 の位置の
+  `hidden_00..hidden_64`（F32）。`input_ids + generated_ids[:16]` の
+  34 token prefill から position 18..33 を取り出す。causal なので
+  incremental decode の同じ位置と一致する。
+
+`hidden_XX` の並びは oracle の dump format に対応する。oracle は final norm を
+`hidden_64` に書くため、layer 63 の残差出力は個別 key を持たない。
+layer 0..63 の入力は `hidden_00..hidden_63` で揃う。
+
+fixture の 64 token は、F32 dequant 版 oracle と、FP8 を f64 forward 内で
+直接読む patch 版 oracle で一致することを確認している。hidden は両者で
+bit 一致し、16 token prefill と 18 token prefill の先頭 16 position も
+bit 一致する。
+
+GPU の correctness path と比較するときは、同じ input ids を prefill し、
+各 layer の残差出力をこの safetensors の同名 key と比較する。token は
+`generated_ids` の 64 個をそのまま照合する。
