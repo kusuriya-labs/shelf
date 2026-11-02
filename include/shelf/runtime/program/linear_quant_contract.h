@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/weights/matrix_weight.h>
 #include <shelf/quantization/quant_spec.h>
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/runtime/program/kernel_id.h>
@@ -17,22 +18,19 @@ struct ResolvedLinearQuantContract {
 
 inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
     uint8_t weight_encoding, uint8_t compute_spec) {
+    using ps::weights::MatrixEncoding;
     using quantization::ComputeSpecId;
-    using ps::quantization::manifest::QuantizedEncoding;
 
     ResolvedLinearQuantContract contract;
-    switch (static_cast<QuantizedEncoding>(weight_encoding)) {
-        case QuantizedEncoding::Fp8:
-            if (compute_spec != static_cast<uint8_t>(ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16))
-                return Status::invalid_argument(
-                    "fp8 linear weight requires fp8 compute spec", __FILE__, __LINE__);
-            contract.linear_kernel = KernelId::LINEAR_FP8_FINEGRAINED;
-            contract.requires_activation_quant = true;
-            contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
-            contract.activation_k_alignment = 128u;
-            return contract;
-        case QuantizedEncoding::Bf16:
-            break;
+    if (static_cast<MatrixEncoding>(weight_encoding) == MatrixEncoding::Fp8Finegrained) {
+        if (compute_spec != static_cast<uint8_t>(ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16))
+            return Status::invalid_argument(
+                "fp8 linear weight requires fp8 compute spec", __FILE__, __LINE__);
+        contract.linear_kernel = KernelId::LINEAR_FP8_FINEGRAINED;
+        contract.requires_activation_quant = true;
+        contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
+        contract.activation_k_alignment = 128u;
+        return contract;
     }
     if (compute_spec != static_cast<uint8_t>(ComputeSpecId::BF16_F32_BF16))
         return Status::invalid_argument(

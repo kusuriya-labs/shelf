@@ -82,12 +82,12 @@ int main() {
     }
 
     expect_quantized(
-        enc(quant::manifest::QuantizedEncoding::Fp8),
+        static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u, "fp8");
 
     expect_error(
-        enc(quant::manifest::QuantizedEncoding::Fp8),
+        static_cast<uint8_t>(ps::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::BF16_F32_BF16),
         "fp8 linear weight requires fp8 compute spec", "fp8 bf16 spec");
     expect_error(
@@ -96,7 +96,7 @@ int main() {
         "bf16 linear weight requires bf16 compute spec", "bf16 fp8 spec");
 
     expect_error(
-        1u, spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
+        7u, spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         "bf16 linear weight requires bf16 compute spec", "unknown encoding fp8 spec");
 
     {

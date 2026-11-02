@@ -98,12 +98,12 @@ void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint
 }  // namespace
 
 int main() {
-    run_case(5u, 1u, 128u, (2560u / 128u) * 4u, (2560u / 32u) * 512u,
+    run_case(1u, static_cast<uint8_t>(::ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), 128u, (2560u / 128u) * 4u, (2560u / 32u) * 512u,
              rt::KernelId::LINEAR_FP8_FINEGRAINED, 2560u, "fp8");
     // K that is not a multiple of 128 must still pad the FP8 activation to 128.
     {
         rt::PrimitiveGraph g = make_linear_graph(1024u, 2500u);
-        rt::WeightSlot slot = make_slot(5u, 1u, 1024u, 2500u, 2560u, 128u,
+        rt::WeightSlot slot = make_slot(1u, static_cast<uint8_t>(::ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), 1024u, 2500u, 2560u, 128u,
                                          (2560u / 128u) * 4u, (2560u / 32u) * 512u);
         rt::WeightTableView table;
         table.slots = &slot;

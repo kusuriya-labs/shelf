@@ -294,8 +294,8 @@ void run_shared_input_mismatch_case() {
     graph.register_weight(rt::MatrixwiseShapeKey{k_out, k_other});
 
     std::array<rt::WeightSlot, 2> slots{};
-    slots[0] = make_slot(5u, 1u, k_out, k, k);
-    slots[1] = make_slot(5u, 1u, k_out, k_other, k_other);
+    slots[0] = make_slot(1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k, k);
+    slots[1] = make_slot(1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), k_out, k_other, k_other);
     rt::WeightTableView table;
     table.slots = slots.data();
     table.count = slots.size();
@@ -361,9 +361,9 @@ void expect_build_failure(
 
 void run_error_cases() {
     expect_build_failure(
-        5u, 0u, 0u, "fp8 linear weight requires fp8 compute spec", "fp8 bf16 spec");
+        1u, 0u, 0u, "fp8 linear weight requires fp8 compute spec", "fp8 bf16 spec");
     expect_build_failure(
-        0u, 1u, 0u, "bf16 linear weight requires bf16 compute spec", "bf16 fp8 spec");
+        0u, 2u, 0u, "bf16 linear weight requires bf16 compute spec", "bf16 fp8 spec");
     expect_build_failure(
         0u, 0u, 1024u * 2560u * 2u + 1u,
         "non bf16 linear weights are outside baseline physical coverage", "bf16 byte mismatch");
@@ -373,8 +373,8 @@ void run_error_cases() {
 
 int main() {
     run_case(Case{"bf16", 0u, 0u, rt::KernelId::LINEAR_BF16, false, 2560u, 2560u});
-    run_case(Case{"fp8", 5u, 1u, rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2560u, 2560u});
-    run_case(Case{"fp8-k2500", 5u, 1u, rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2500u, 2560u});
+    run_case(Case{"fp8", 1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2560u, 2560u});
+    run_case(Case{"fp8-k2500", 1u, static_cast<uint8_t>(ps::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), rt::KernelId::LINEAR_FP8_FINEGRAINED, true, 2500u, 2560u});
     run_shared_input_case();
     run_shared_input_mismatch_case();
     run_error_cases();

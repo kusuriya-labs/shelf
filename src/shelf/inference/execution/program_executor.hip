@@ -140,7 +140,7 @@ Status validate_host_weight_slot(const ::ps::runtime::WeightSlot& s, size_t inde
         }
         return Status::make_ok();
     }
-    if (enc == 5u) {
+    if (enc == 1u) {
         if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
             return Status::invalid_argument(
                 ("block scaled weight table slot needs codes+scales and no device_ptr: index " +

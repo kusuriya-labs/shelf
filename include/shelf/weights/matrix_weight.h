@@ -9,7 +9,7 @@ namespace ps::weights {
 
 enum class MatrixEncoding : uint8_t {
     Bf16 = 0,
-    Fp8Finegrained = 5,
+    Fp8Finegrained = 1,
 };
 
 struct MatrixWeight {

@@ -64,7 +64,7 @@ __device__ __forceinline__ ProgramStatus exec_linear_block_scaled(
         return ProgramStatus::INVALID_PROGRAM;
     const auto* wtable = static_cast<const WeightSlot*>(env.program->weight_table);
     const WeightSlot e = wtable[b.weight_index];
-    if (e.encoding != 5u)
+    if (e.encoding != 1u)
         return ProgramStatus::INVALID_PROGRAM;
     if (e.codes == nullptr || e.scales == nullptr)
         return ProgramStatus::INVALID_PROGRAM;

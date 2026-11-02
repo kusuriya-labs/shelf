@@ -160,7 +160,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 | PrimitiveKind | KernelId | 備考 |
 |---|---|---|
 | `EMBEDDING_LOOKUP` | `EMBEDDING_LOOKUP` | weight_index 付き |
-| `LINEAR` | `LINEAR_BF16` / `LINEAR_FP8_FINEGRAINED` | weight encoding で分岐（bf16=0, fp8=5） |
+| `LINEAR` | `LINEAR_BF16` / `LINEAR_FP8_FINEGRAINED` | `MatrixEncoding` で分岐（bf16=0, fp8 fine-grained=1） |
 | `RMS_NORM` | `RMS_NORM` | eps / group_size / parameter_index |
 | `RESIDUAL_ADD` | `RESIDUAL_ADD` | 2入力 |
 | `SPLIT` | `SPLIT` | head_dim / layout flag |
@@ -393,26 +393,26 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 |---|---|
 | 0 | `EMBEDDING_LOOKUP` |
 | 1 | `LINEAR_BF16` |
-| 4 | `RMS_NORM` |
-| 5 | `RESIDUAL_ADD` |
-| 6 | `SPLIT` |
-| 7 | `SILU` |
-| 8 | `SIGMOID` |
-| 9 | `MUL` |
-| 10 | `SWIGLU` |
-| 11 | `ROPE` |
-| 12 | `L2_NORMALIZE` |
-| 13 | `SCALE` |
-| 14 | `KV_APPEND` |
-| 15 | `PAGED_ATTENTION` |
-| 16 | `STATEFUL_CAUSAL_CONV1D` |
-| 17 | `GDN_RECURRENCE` |
-| 18 | `OUTPUT_GATHER` |
-| 19 | `SAMPLING` |
-| 20 | `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` |
-| 24 | `CONCAT` |
-| 25 | `LINEAR_FP8_FINEGRAINED` |
-| 27 | `VERIFY_ACCEPT` |
+| 2 | `RMS_NORM` |
+| 3 | `RESIDUAL_ADD` |
+| 4 | `SPLIT` |
+| 5 | `SILU` |
+| 6 | `SIGMOID` |
+| 7 | `MUL` |
+| 8 | `SWIGLU` |
+| 9 | `ROPE` |
+| 10 | `L2_NORMALIZE` |
+| 11 | `SCALE` |
+| 12 | `KV_APPEND` |
+| 13 | `PAGED_ATTENTION` |
+| 14 | `STATEFUL_CAUSAL_CONV1D` |
+| 15 | `GDN_RECURRENCE` |
+| 16 | `OUTPUT_GATHER` |
+| 17 | `SAMPLING` |
+| 18 | `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` |
+| 19 | `CONCAT` |
+| 20 | `LINEAR_FP8_FINEGRAINED` |
+| 21 | `VERIFY_ACCEPT` |
 
 カウントの正本は `KernelId::COUNT`（`include/shelf/runtime/program/kernel_id.h`）である。
 
@@ -425,8 +425,7 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 | 値 | 意味 | 条件 |
 |---|---|---|
 | 0 | BF16 | `device_ptr` あり、`codes` / `scales` なし |
-| 2 | ROCm FP8 | `codes` + `scales` あり、`device_ptr` なし、`k_padded % 32 == 0` |
-| 5 | Fp8 | `codes` + `scales` あり、`device_ptr` なし、`k_padded % 128 == 0` |
+| 1 | FP8 fine-grained（E4M3 codes + block 128x128 F32 scale） | `codes` + `scales` あり、`device_ptr` なし、`k_padded % 128 == 0` |
 
 `validate_host_weight_slot` がこの制約を検証する。
 

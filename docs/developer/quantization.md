@@ -165,7 +165,7 @@ production の Program Builder は linear の activation 量子化方針を
 | weight encoding | compute_spec | linear kernel | activation | activation K padding | activation workspace |
 | --- | --- | --- | --- | --- | --- |
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
-| `Fp8` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
+| `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 0`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。

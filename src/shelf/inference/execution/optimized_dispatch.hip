@@ -219,7 +219,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     if (b.workspace_slot >= program.workspace.ranges.size())
         return Status::invalid_state("fp8 linear: workspace_slot invalid", __FILE__, __LINE__);
     const ::ps::runtime::WeightSlot e = ctx.weights[b.weight_index];
-    if (e.encoding != 5u)
+    if (e.encoding != 1u)
         return Status::invalid_state("fp8 linear: encoding != Fp8", __FILE__, __LINE__);
     if (e.codes == nullptr || e.scales == nullptr)
         return Status::invalid_state("fp8 linear: weight view missing", __FILE__, __LINE__);
