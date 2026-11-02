@@ -859,13 +859,6 @@ DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path �
 `shelf-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
 `shelf-compute` へ転送する（= compute の既定をそのまま使う）。
 
-### constrained lm_head（DFlash2 有効時）
-
-DFlash2 有効時も constrained LM head の候補展開最適化
-（`SHELF_CONSTRAINT_LM_HEAD_EXACT`）は既定 0（無効）である。
-target verify も通常の forward 経路と同じ kernel を使うため、数値契約は
-[../developer/qwen35.md](qwen35.md) §7.1 に従う。
-
 ### invalid combinations（model load 前に exit 2）
 
 - `--dump-logits`
@@ -938,7 +931,6 @@ serve の既定（`max_concurrent_requests × block_size`）ではこの値が�
 | `SHELF_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
 | `SHELF_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
 | `SHELF_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
-| `SHELF_CONSTRAINT_LM_HEAD_EXACT` | 0（無効） | constrained LM head 候補展開の opt-in |
 
 ### resource lifecycle
 

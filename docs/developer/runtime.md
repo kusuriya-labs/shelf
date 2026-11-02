@@ -117,7 +117,7 @@ MEMORY_PLAN mode=auto
 ```
 
 `draft weights` は arena からの予約であり、serve 時に drafter を load する
-（single request 経路では `run_single_request` が load する）。
+（single request 経路でも serve 時に load する）。
 
 auto で `required` が `available` を超えるときは次の順で縮小する。
 
