@@ -276,7 +276,6 @@ Result<MatrixWeight> load_quantized_view(
             return Status::invalid_argument(
                 ("fp8 block128 payload not supported for arch: " + name).c_str(), __FILE__, __LINE__);
         }
-        const uint64_t nb = kp / 32u;
         std::vector<std::size_t> cshape = {native.rows / 16u, native.codes_row_stride_bytes};
         std::vector<std::size_t> cstrides = {native.codes_row_stride_bytes, 1};
         w.codes = alloc_bytes(native.codes_bytes, cshape, cstrides, arena);
@@ -297,7 +296,7 @@ Result<MatrixWeight> load_quantized_view(
                             native.scale_count * sizeof(float), stream);
         if (!st.ok()) return st;
         w.storage_scale_stride_bytes = static_cast<uint32_t>(native.scale_k * sizeof(float));
-        w.codes_row_stride_bytes = static_cast<uint32_t>(nb * 512u);
+        w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
         w.scale_row_stride_bytes = static_cast<uint32_t>(native.scale_k * sizeof(float));
         w.preshuffled = true;
         apply_default_compute_spec(w);

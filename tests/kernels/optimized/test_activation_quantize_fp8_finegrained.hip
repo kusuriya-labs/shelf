@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
@@ -57,8 +58,8 @@ void cpu_reference(const std::vector<uint16_t>& in, uint32_t rows, uint32_t k, u
     float* scale_out = reinterpret_cast<float*>(scale_bytes.data());
     for (uint32_t m = 0; m < rows; ++m) {
         uint8_t* crow = codes.data() +
-            (size_t)(m >> 4) * (size_t)(code_row_stride * 16u) +
-            (size_t)(m & 15u) * 16u;
+            (size_t)(m >> 4) * (size_t)(code_row_stride * 16u);
+        const uint32_t m_slot = m & 15u;
         float* row_scales = scale_out + (size_t)m * (scale_row_stride / 4u);
         const uint32_t groups = (kp + 127u) / 128u;
         for (uint32_t g = 0; g < groups; ++g) {
@@ -86,7 +87,8 @@ void cpu_reference(const std::vector<uint16_t>& in, uint32_t rows, uint32_t k, u
                         __hip_cvt_float_to_fp8(sv, __HIP_SATFINITE, __HIP_E4M3);
                     c = static_cast<uint8_t>(enc);
                 }
-                crow[(size_t)(i >> 5) * 512u + (size_t)((i & 31u) >> 4) * 256u + (size_t)(i & 15u)] = c;
+                crow[(size_t)(i >> 6) * ps::quantization::fp8::kFragBlockBytes +
+                      ps::quantization::fp8::fp8_frag_offset(m_slot, i & 63u)] = c;
             }
         }
     }
@@ -238,7 +240,7 @@ bool run_kernel(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
 
 bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuArena& arena,
                    hipStream_t stream) {
-    const uint32_t kp = (k + 31u) & ~31u;
+    const uint32_t kp = (k + 63u) & ~63u;
     const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     const auto h_in = make_input(rows, k, pattern);
 
@@ -296,7 +298,7 @@ bool compare_cases(uint32_t rows, uint32_t k, uint32_t pattern, ps::gpu::GpuAren
 
 bool check_padding_generic(uint32_t rows, uint32_t k, ps::gpu::GpuArena& arena,
                            hipStream_t stream) {
-    const uint32_t kp = (k + 31u) & ~31u;
+    const uint32_t kp = (k + 63u) & ~63u;
     const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     const auto h_in = make_input(rows, k, kMixedAll);
     Result gen;
@@ -321,7 +323,7 @@ bool check_padding_generic(uint32_t rows, uint32_t k, ps::gpu::GpuArena& arena,
 
 bool check_fallback_shape(uint32_t rows, uint32_t k, ps::gpu::GpuArena& arena,
                           hipStream_t stream) {
-    const uint32_t kp = (k + 31u) & ~31u;
+    const uint32_t kp = (k + 63u) & ~63u;
     const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     const auto h_in = make_input(rows, k, kRandom);
     Result gen;

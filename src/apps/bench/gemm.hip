@@ -293,9 +293,6 @@ ps::kernel::Bf16GemmConfig bf16_config_for(uint32_t rows, uint32_t n, uint32_t k
 
 ps::kernel::Fp8FinegrainedGemmConfig fp8_gemm_config_for(uint32_t rows, uint32_t n) {
     using Id = ps::kernel::Fp8FinegrainedGemmConfigId;
-    if (rows >= 8u * ps::kernel::kFp8FinegrainedGemmRowTile &&
-        n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
-        return {Id::RowBlock8};
     if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile &&
         n >= ps::kernel::kBlockScaledGemmRowBlockMinOutFeatures)
         return {Id::RowBlock4};

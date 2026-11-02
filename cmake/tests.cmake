@@ -105,6 +105,7 @@ shelf_add_test(NAME test_fp8_payload SOURCE unit/test_fp8_payload.cpp LABELS "cp
 shelf_add_test(NAME test_hf_manifest SOURCE unit/test_hf_manifest.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_bundle shelf_io)
 shelf_add_test(NAME test_tensor_partition SOURCE unit/test_tensor_partition.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_weights)
 shelf_add_test(NAME test_canonical_partition SOURCE unit/test_canonical_partition.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_reference)
+shelf_add_test(NAME test_fp8_frag_layout SOURCE unit/test_fp8_frag_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_format)
 shelf_add_test(NAME test_qwen35_tensor_parallel_plan SOURCE unit/test_qwen35_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_context.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
@@ -447,6 +448,13 @@ if(SHELF_BUILD_BENCHMARKS)
              COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/gen_cli_docs.py"
                  --check --sources cpp --build-dir "${CMAKE_BINARY_DIR}")
     set_tests_properties(test_cli_docs_sync PROPERTIES LABELS "cpu;required")
+
+    # FP8 kernel ISA 資源契約: VGPR / SGPR spill と local memory 使用を 0 に保つ。
+    add_test(NAME test_fp8_kernel_spill_contract
+             COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/check_kernel_spills.py"
+                 --build-dir "${CMAKE_BINARY_DIR}")
+    set_tests_properties(test_fp8_kernel_spill_contract
+                         PROPERTIES LABELS "cpu;required" TIMEOUT 900)
 
     add_test(NAME test_cli_docs_sync_python
              COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/gen_cli_docs.py"

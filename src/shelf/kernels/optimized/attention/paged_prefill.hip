@@ -417,7 +417,6 @@ namespace { namespace v_prefill_fp8 {
 
 using bf16 = __hip_bfloat16;
 using fp8 = ::ps::kernel::fp8e4m3_storage_t;
-using ::ps::quantization::codec::device::e4m3_decode_f32;
 using ::ps::quantization::codec::device::e4m3_encode_u8;
 
 

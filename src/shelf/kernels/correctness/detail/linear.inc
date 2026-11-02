@@ -87,7 +87,7 @@ __device__ __forceinline__ ProgramStatus exec_linear_block_scaled(
     const uint32_t nb = wkp >> 5;
     const uint32_t code_stride = b.activation_code_stride;
     const uint32_t scale_stride = b.activation_scale_stride;
-    if (code_stride < akp || (code_stride & 15u) != 0u)
+    if (code_stride < akp || (code_stride & 63u) != 0u)
         return ProgramStatus::INVALID_PROGRAM;
     if (scale_stride < 4u || (scale_stride & 15u) != 0u)
         return ProgramStatus::INVALID_PROGRAM;
@@ -103,35 +103,36 @@ __device__ __forceinline__ ProgramStatus exec_linear_block_scaled(
     const uint8_t* wcodes = static_cast<const uint8_t*>(e.codes);
     const uint8_t* wscales = static_cast<const uint8_t*>(e.scales);
     const uint32_t out_features = e.rows;
-    const uint32_t tile_code_bytes = nb * 512u;
-    const uint32_t block_code_bytes = 512u;
     const size_t total = static_cast<size_t>(rows) * out_features;
     const uint32_t stride = global_stride(env);
     for (size_t idx = global_tid(env); idx < total; idx += stride) {
         const uint32_t m = static_cast<uint32_t>(idx / out_features);
         const uint32_t o = static_cast<uint32_t>(idx % out_features);
-        const uint8_t* wrow = wcodes +
-            static_cast<size_t>(o >> 4) * tile_code_bytes +
-            static_cast<size_t>(o & 15u) * 16u;
+        const uint8_t* wtile = wcodes +
+            static_cast<size_t>(o >> 4) * (static_cast<size_t>(wkp) * 16u);
         const float* wsrow_fp8 = reinterpret_cast<const float*>(wscales) +
             static_cast<size_t>(o >> 7) * (wkp >> 7);
-        const uint8_t* arow = acodes +
-            static_cast<size_t>(m >> 4) * (static_cast<size_t>(code_stride) * 16u) +
-            static_cast<size_t>(m & 15u) * 16u;
+        const uint8_t* atile = acodes +
+            static_cast<size_t>(m >> 4) * (static_cast<size_t>(code_stride) * 16u);
         const float* asrow = reinterpret_cast<const float*>(
             asbase + static_cast<size_t>(m) * scale_stride);
+        const uint32_t o_slot = o & 15u;
+        const uint32_t m_slot = m & 15u;
         float acc = 0.f;
         for (uint32_t ib = 0; ib < nb; ++ib) {
             const float ws = wsrow_fp8[ib >> 2];
             const float as = asrow[ib >> 2];
-            const uint8_t* wp = wrow + static_cast<size_t>(ib) * block_code_bytes;
-            const uint8_t* ap = arow + static_cast<size_t>(ib) * 512u;
             float p = 0.f;
-            for (uint32_t j = 0; j < 16u; ++j) {
-                const float w0 = ::ps::quantization::codec::device::e4m3_decode_f32(wp[j]);
-                const float w1 = ::ps::quantization::codec::device::e4m3_decode_f32(wp[256u + j]);
-                p += w0 * ::ps::quantization::codec::device::e4m3_decode_f32(ap[j]);
-                p += w1 * ::ps::quantization::codec::device::e4m3_decode_f32(ap[256u + j]);
+            for (uint32_t j = 0; j < 32u; ++j) {
+                const uint32_t kc = ib * 32u + j;
+                const size_t off = static_cast<size_t>(kc >> 6) *
+                                       ::ps::quantization::fp8::kFragBlockBytes +
+                                   ::ps::quantization::fp8::fp8_frag_offset(o_slot, kc & 63u);
+                const size_t aoff = static_cast<size_t>(kc >> 6) *
+                                        ::ps::quantization::fp8::kFragBlockBytes +
+                                    ::ps::quantization::fp8::fp8_frag_offset(m_slot, kc & 63u);
+                p += ::ps::quantization::codec::device::e4m3_decode_f32(wtile[off]) *
+                     ::ps::quantization::codec::device::e4m3_decode_f32(atile[aoff]);
             }
             acc += p * ws * as;
         }
@@ -176,7 +177,7 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     const uint32_t kp = b.activation_kp;
     const uint32_t code_stride = b.activation_code_stride;
     const uint32_t scale_stride = b.activation_scale_stride;
-    if (code_stride < kp || (code_stride & 15u) != 0u)
+    if (code_stride < kp || (code_stride & 63u) != 0u)
         return ProgramStatus::INVALID_PROGRAM;
     if (scale_stride < 4u || (scale_stride & 15u) != 0u)
         return ProgramStatus::INVALID_PROGRAM;
@@ -192,8 +193,8 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
         const void* xrow = static_cast<const uint8_t*>(xin) +
             static_cast<size_t>(m) * in.row_stride;
         uint8_t* codes = acodes +
-            static_cast<size_t>(m >> 4) * (code_stride * 16u) +
-            static_cast<size_t>(m & 15u) * 16u;
+            static_cast<size_t>(m >> 4) * (code_stride * 16u);
+        const uint32_t m_slot = m & 15u;
         float* row_scales =
             reinterpret_cast<float*>(ascales + static_cast<size_t>(m) * scale_stride);
         for (uint32_t g = 0u; g < groups; ++g) {
@@ -214,8 +215,9 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
                     const float x = act_load_f32(xrow, i, f32_in);
                     v = std::isfinite(x) ? x : 0.f;
                 }
-                codes[static_cast<size_t>(i >> 5) * 512u +
-                      static_cast<size_t>((i & 31u) >> 4) * 256u + (i & 15u)] =
+                codes[static_cast<size_t>(i >> 6) *
+                          ::ps::quantization::fp8::kFragBlockBytes +
+                      ::ps::quantization::fp8::fp8_frag_offset(m_slot, i & 63u)] =
                     scale > 0.f
                         ? ::ps::quantization::codec::device::e4m3_encode_u8(v * inv)
                         : 0u;

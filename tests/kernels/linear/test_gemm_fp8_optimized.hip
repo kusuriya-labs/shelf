@@ -51,7 +51,6 @@ float bf16_to_f32(ps::bf16_t b) {
 }
 
 Fp8FinegrainedGemmConfig config_for(uint32_t rows) {
-    if (rows >= 8u * ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock8};
     if (rows >= 4u * ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock4};
     if (rows > ps::kernel::kFp8FinegrainedGemmRowTile) return {Fp8FinegrainedGemmConfigId::RowBlock2};
     return {Fp8FinegrainedGemmConfigId::RowBlock1};
@@ -62,7 +61,6 @@ const char* config_name(Fp8FinegrainedGemmConfigId id) {
         case Fp8FinegrainedGemmConfigId::RowBlock1: return "MB1";
         case Fp8FinegrainedGemmConfigId::RowBlock2: return "MB2";
         case Fp8FinegrainedGemmConfigId::RowBlock4: return "MB4";
-        case Fp8FinegrainedGemmConfigId::RowBlock8: return "MB8";
         case Fp8FinegrainedGemmConfigId::Prefill2D: return "2D";
     }
     return "?";
@@ -271,8 +269,7 @@ int main() {
     for (uint32_t rows : {16u, 17u, 64u, 128u, 129u}) {
         for (Fp8FinegrainedGemmConfigId id : {Fp8FinegrainedGemmConfigId::RowBlock1,
                                            Fp8FinegrainedGemmConfigId::RowBlock2,
-                                           Fp8FinegrainedGemmConfigId::RowBlock4,
-                                           Fp8FinegrainedGemmConfigId::RowBlock8}) {
+                                           Fp8FinegrainedGemmConfigId::RowBlock4}) {
             std::snprintf(label, sizeof(label), "fp8b128-force-%s", config_name(id));
             if (run_case(arena, Fp8FinegrainedGemmConfig{id}, rows, 130u, 256u, label)) ++g_pass; else ++g_fail;
         }

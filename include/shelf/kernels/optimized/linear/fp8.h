@@ -14,9 +14,10 @@ enum class Fp8FinegrainedGemmOutputDType : uint8_t {
 
 // FP8 E4M3 W8A8 WMMA GEMM for weights with a 128 (N) x 128 (K) FP32 scale tile.
 // Weight codes are consumed in the gfx1201 FP8 WMMA fragment order (16 output
-// rows x 32 K chunk, half split), while the FP32 scales stay row-major
+// rows x 64-K block, one contiguous 1 KiB block per wave, 32 bytes per lane;
+// see shelf/quantization/fp8/fp8_frag.h), while the FP32 scales stay row-major
 // [ceil(N/128)][Kp/128]. The activation E4M3 codes and per-row FP32 scales use
-// the shared fragment-order activation layout.
+// the same fragment-order layout.
 hipError_t launch_gemm_fp8_finegrained_w8a8_wmma(
     const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,

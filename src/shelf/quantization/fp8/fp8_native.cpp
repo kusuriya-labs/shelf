@@ -1,5 +1,7 @@
 #include <shelf/quantization/fp8/fp8_native.h>
 
+#include <shelf/quantization/fp8/fp8_frag.h>
+
 #include <algorithm>
 #include <cstring>
 #include <thread>
@@ -22,29 +24,29 @@ bool cpu_has_avx512() {
     return value;
 }
 
-__attribute__((target("avx512f"))) void store_4rows_avx512(uint8_t* dst, const uint8_t* src,
-                                                            uint64_t row_stride) {
-    const __m128i r0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 0u * row_stride));
-    const __m128i r1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 1u * row_stride));
-    const __m128i r2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 2u * row_stride));
-    const __m128i r3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 3u * row_stride));
-    const __m256i lo = _mm256_inserti128_si256(_mm256_castsi128_si256(r0), r1, 1);
-    const __m256i hi = _mm256_inserti128_si256(_mm256_castsi128_si256(r2), r3, 1);
-    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst),
-                        _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1));
+__attribute__((target("avx512f"))) void store_lane_pair_avx512(uint8_t* dst_kg0,
+                                                               uint8_t* dst_kg1,
+                                                               const uint8_t* src) {
+    const __m512i v = _mm512_loadu_si512(reinterpret_cast<const void*>(src));
+    const __m512i even = _mm512_set_epi64(0, 0, 0, 0, 6, 4, 2, 0);
+    const __m512i odd = _mm512_set_epi64(0, 0, 0, 0, 7, 5, 3, 1);
+    const __m256i lo = _mm512_castsi512_si256(_mm512_permutexvar_epi64(even, v));
+    const __m256i hi = _mm512_castsi512_si256(_mm512_permutexvar_epi64(odd, v));
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst_kg0), lo);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst_kg1), hi);
 }
 #endif
 
-void store_4rows(uint8_t* dst, const uint8_t* src, uint64_t row_stride) {
+void store_lane_pair(uint8_t* dst_kg0, uint8_t* dst_kg1, const uint8_t* src) {
 #if defined(__x86_64__) || defined(__i386__)
     if (cpu_has_avx512()) {
-        store_4rows_avx512(dst, src, row_stride);
+        store_lane_pair_avx512(dst_kg0, dst_kg1, src);
         return;
     }
 #endif
-    for (uint32_t i = 0; i < 4u; ++i) {
-        std::memcpy(dst + static_cast<std::size_t>(i) * 16u,
-                    src + i * row_stride, 16u);
+    for (uint32_t f = 0u; f < 4u; ++f) {
+        std::memcpy(dst_kg0 + f * 8u, src + f * 16u, 8u);
+        std::memcpy(dst_kg1 + f * 8u, src + f * 16u + 8u, 8u);
     }
 }
 
@@ -65,28 +67,21 @@ void ensure_scales(Fp8NativeHost& out, uint64_t count) {
 }
 
 void shuffle_range(const Fp8BlockCanonicalView& v, uint8_t* codes, uint64_t n, uint64_t kp,
-                   uint64_t nb, uint64_t t_begin, uint64_t t_end) {
+                   uint64_t nblk, uint64_t t_begin, uint64_t t_end) {
     for (uint64_t t = t_begin; t < t_end; ++t) {
         const uint8_t* const src_tile = v.codes + t * 16u * kp;
-        for (uint64_t ib = 0; ib < nb; ++ib) {
-            uint8_t* const block = codes + (t * nb + ib) * 512u;
-            for (uint64_t half = 0; half < 2u; ++half) {
-                uint8_t* const dst = block + half * 256u;
-                const uint8_t* const src = src_tile + ib * 32u + half * 16u;
-                for (uint64_t g = 0; g < 16u; g += 4u) {
-                    const uint64_t o = t * 16u + g;
-                    if (o + 4u <= n) {
-                        store_4rows(dst + g * 16u, src + g * kp, kp);
-                        continue;
-                    }
-                    for (uint64_t l = 0; l < 4u; ++l) {
-                        uint8_t* d = dst + (g + l) * 16u;
-                        if (o + l < n) {
-                            std::memcpy(d, src + (g + l) * kp, 16u);
-                        } else {
-                            std::memset(d, 0, 16u);
-                        }
-                    }
+        uint8_t* const dst_tile = codes + t * nblk * kFragBlockBytes;
+        for (uint64_t r = 0; r < 16u; ++r) {
+            const bool live = t * 16u + r < n;
+            const uint8_t* const src = src_tile + r * kp;
+            for (uint64_t b = 0; b < nblk; ++b) {
+                uint8_t* const lane0 = dst_tile + b * kFragBlockBytes + r * kFragLaneBytes;
+                uint8_t* const lane1 = lane0 + 16u * kFragLaneBytes;
+                if (live) {
+                    store_lane_pair(lane0, lane1, src + b * kFragBlockK);
+                } else {
+                    std::memset(lane0, 0, kFragLaneBytes);
+                    std::memset(lane1, 0, kFragLaneBytes);
                 }
             }
         }
@@ -94,13 +89,13 @@ void shuffle_range(const Fp8BlockCanonicalView& v, uint8_t* codes, uint64_t n, u
 }
 
 void shuffle_all(const Fp8BlockCanonicalView& v, uint8_t* codes, uint64_t n, uint64_t kp,
-                 uint64_t nb, uint64_t tiles) {
-    const uint64_t total = tiles * nb * 512u;
+                 uint64_t nblk, uint64_t tiles) {
+    const uint64_t total = tiles * nblk * kFragBlockBytes;
     unsigned threads = std::thread::hardware_concurrency();
     if (threads == 0u) threads = 1u;
     if (threads > kMaxThreads) threads = kMaxThreads;
     if (total < kParallelThresholdBytes || threads <= 1u || tiles < 2u) {
-        shuffle_range(v, codes, n, kp, nb, 0, tiles);
+        shuffle_range(v, codes, n, kp, nblk, 0, tiles);
         return;
     }
     const uint64_t per = (tiles + threads - 1u) / threads;
@@ -110,8 +105,8 @@ void shuffle_all(const Fp8BlockCanonicalView& v, uint8_t* codes, uint64_t n, uin
         const uint64_t b = static_cast<uint64_t>(i) * per;
         if (b >= tiles) break;
         const uint64_t e = std::min(tiles, b + per);
-        pool.emplace_back([&v, codes, n, kp, nb, b, e] {
-            shuffle_range(v, codes, n, kp, nb, b, e);
+        pool.emplace_back([&v, codes, n, kp, nblk, b, e] {
+            shuffle_range(v, codes, n, kp, nblk, b, e);
         });
     }
     for (auto& th : pool) {
@@ -150,21 +145,22 @@ bool preshuffle_fp8_native(const Fp8BlockCanonicalView& v,
     if (v.batch != 1) return false;
     const uint64_t n = v.n;
     const uint64_t kp = v.padded_k;
-    if ((kp % 32u) != 0u) return false;
-    const uint64_t nb = kp / 32u;
+    if ((kp % kFragBlockK) != 0u) return false;
+    const uint64_t nblk = kp / kFragBlockK;
     const uint64_t tiles = (n + 15u) / 16u;
 
     out.n = n;
     out.padded_k = kp;
     out.rows = tiles * 16u;
-    out.codes_row_stride_bytes = nb * 512u;
+    out.codes_row_stride_bytes = static_cast<uint32_t>(nblk * kFragBlockBytes);
     out.scale_n = v.scale_n;
     out.scale_k = v.scale_k;
-    ensure_codes(out, tiles * nb * 512u);
+    ensure_codes(out, fp8_frag_codes_bytes(static_cast<uint32_t>(tiles),
+                                           static_cast<uint32_t>(kp)));
     ensure_scales(out, v.scale_n * v.scale_k);
     std::memcpy(out.scales.get(), v.scales, out.scale_count * sizeof(float));
 
-    shuffle_all(v, out.codes.get(), n, kp, nb, tiles);
+    shuffle_all(v, out.codes.get(), n, kp, nblk, tiles);
     return true;
 }
 

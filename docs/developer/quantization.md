@@ -164,19 +164,19 @@ production の Program Builder は linear の activation 量子化方針を
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 
-- activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 0`、
+- activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。
 - activation K の padding は block-scaled weight の tile に合わせる。
   FP8 weight は weight tile が 128 幅のため activation も 128 単位で揃える。
+  codes の物理配置は WMMA fragment block 順で、block 幅は 64 K である
+  （[canonical_soa_payload.md](canonical_soa_payload.md) §11）。
 - 量子化 weight の activation quantize は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を
   受け取る。codes は E4M3、scale は group-128 の F32 であり、activation quantize の
   実装はこの 1 系統のみである。
-- `group_k = 0` は「row あたり scale が1本」を意味する。E4M3 quantize kernel は
-  row 先頭に F32 scale を1本だけ書き、linear も同じ位置を読む。
-  一方 `Int8ActivationWorkspaceLayout` の scale row stride は
-  `align16((k_padded / 32) * 4)` であり、I8 経路と共有するレイアウト上の
-  予約量である（E4M3 は先頭1本のみを使う）。
-  そのため workspace のバイト数・stride は `ActivationQuantSpec` から導出せず、
+- scale は group 128 幅あたり 1 本（`ceil(k_padded / 128)` 本）を row-major に書き、
+  linear も同じ位置を読む。`Int8ActivationWorkspaceLayout` の scale row stride は
+  `align16(ceil(k_padded / 128) * 4)` である。
+  workspace のバイト数・stride は `ActivationQuantSpec` から導出せず、
   `runtime/program/activation_workspace_layout.h` の
   `make_activation_workspace_layout` が返す layout を正本とする。
   この adapter は production の E4M3 spec に対して

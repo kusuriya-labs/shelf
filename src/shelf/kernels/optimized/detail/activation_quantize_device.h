@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cmath>
@@ -34,8 +35,8 @@ struct QuantVecRow {
         const uint32_t wave = threadIdx.x >> 5u;
         const uint32_t lane = threadIdx.x & 31u;
         uint8_t* crow = codes +
-            static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u) +
-            static_cast<size_t>(m & 15u) * 16u;
+            static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u);
+        const uint32_t m_tile = m & 15u;
         float* row_scales = scales + static_cast<size_t>(m) * (scale_row_stride / 4u);
         const __hip_bfloat16* xb = reinterpret_cast<const __hip_bfloat16*>(xrow);
 
@@ -91,8 +92,8 @@ struct QuantVecRow {
                 packed |= static_cast<uint32_t>(c) << (8u * l);
             }
             if (i0 + kElemsPerLane <= KP) {
-                const uint32_t off = (i0 >> 5u) * 512u +
-                                     ((i0 & 31u) >> 4u) * 256u + (i0 & 15u);
+                const uint32_t off = (i0 >> 6u) * ::ps::quantization::fp8::kFragBlockBytes +
+                                     ::ps::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
                 *reinterpret_cast<uint32_t*>(crow + off) = packed;
             }
         }

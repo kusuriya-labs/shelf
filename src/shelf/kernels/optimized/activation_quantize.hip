@@ -31,8 +31,8 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
     const __hip_bfloat16* xb = reinterpret_cast<const __hip_bfloat16*>(input) +
         static_cast<size_t>(m) * input_row_stride;
     uint8_t* crow = codes +
-        static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u) +
-        static_cast<size_t>(m & 15u) * 16u;
+        static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u);
+    const uint32_t m_tile = m & 15u;
     float* row_scales = scales + static_cast<size_t>(m) * (scale_row_stride / 4u);
     const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
 
@@ -87,8 +87,8 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
             packed |= static_cast<uint32_t>(c) << (8u * l);
         }
         if (i0 + kElemsPerLane <= k_padded) {
-            const uint32_t off = (i0 >> 5u) * 512u +
-                                 ((i0 & 31u) >> 4u) * 256u + (i0 & 15u);
+            const uint32_t off = (i0 >> 6u) * ::ps::quantization::fp8::kFragBlockBytes +
+                                 ::ps::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
             *reinterpret_cast<uint32_t*>(crow + off) = packed;
         }
     }
@@ -139,6 +139,9 @@ hipError_t launch_activation_quantize_fp8_finegrained_generic(
     hipStream_t stream) {
     if (rows == 0 || k_padded == 0)
         return hipSuccess;
+    if ((k_padded % ::ps::quantization::fp8::kFragBlockK) != 0u ||
+        (code_row_stride_bytes % ::ps::quantization::fp8::kFragBlockK) != 0u)
+        return hipErrorNotSupported;
     activation_quantize_fp8_finegrained_kernel<<<rows, kThreadsPerRow, 0, stream>>>(
         input, codes, scales, k, k_padded,
         input_row_stride, code_row_stride_bytes, scale_row_stride_bytes);
@@ -164,6 +167,9 @@ hipError_t launch_activation_quantize_fp8_finegrained(
     if (specialized != nullptr) *specialized = false;
     if (rows == 0 || k_padded == 0)
         return hipSuccess;
+    if ((k_padded % ::ps::quantization::fp8::kFragBlockK) != 0u ||
+        (code_row_stride_bytes % ::ps::quantization::fp8::kFragBlockK) != 0u)
+        return hipErrorNotSupported;
     if (activation_quantize_fp8_finegrained_vec_supported(input, codes, k, k_padded, input_row_stride)) {
         switch (k) {
             case 5120u: {

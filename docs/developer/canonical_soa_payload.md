@@ -353,13 +353,20 @@ native preshuffle は 16 出力 row を 1 tile とする。
 ### FP8 native
 
 ```text
-codes     : 16 outputs x 32 K の chunk 順
-            codes_row_stride_bytes = nb * 512   (nb = padded_k / 32)
+codes     : 16 outputs x 64 K の fragment block 順
+            block 内は lane slot 32 byte 每 (lane が 4 つの 16 K fragment を
+            連続 byte で読める。wave 1 本で 1 KiB 連続要求になる)
+            codes_row_stride_bytes = nblk * 1024 = padded_k * 16  (nblk = padded_k / 64)
 metadata1 : row-major [ceil(rows / 128)][padded_k / 128] の FP32
 ```
 
-canonical の codes は row-major だが、native では WMMA consumer の chunk 順へ並べ替える。
-pad row は 0 埋めする。
+canonical の codes は row-major だが、native では WMMA consumer の fragment 順へ並べ替える。
+byte 順の定義は `include/shelf/quantization/fp8/fp8_frag.h` に置き、host builder と
+kernel が同じ式を使う。pad row は 0 埋めする。
+
+activation codes (FP8 W8A8 の入力) も同じ fragment block 順を使う。
+`padded_k` は 64 の倍数でなければならない（`Int8ActivationWorkspaceLayout::k_padded_for`
+が 64 へ align する）。
 
 ---
 

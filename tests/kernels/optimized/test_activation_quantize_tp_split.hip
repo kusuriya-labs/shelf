@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
@@ -109,10 +110,8 @@ bool run_local(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t full_k
 
 const size_t code_pos(uint32_t code_stride, uint32_t m, uint32_t i) {
     return static_cast<size_t>(m >> 4) * static_cast<size_t>(code_stride) * 16u
-        + static_cast<size_t>(m & 15u) * 16u
-        + static_cast<size_t>(i >> 5) * 512u
-        + static_cast<size_t>((i & 31u) >> 4) * 256u
-        + static_cast<size_t>(i & 15u);
+        + static_cast<size_t>(i >> 6) * ps::quantization::fp8::kFragBlockBytes
+        + ps::quantization::fp8::fp8_frag_offset(m & 15u, i & 63u);
 }
 
 bool compare_split(uint32_t rows, uint32_t full_k, uint32_t pattern,

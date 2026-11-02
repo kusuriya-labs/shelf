@@ -8,10 +8,10 @@
 namespace ps::quantization::fp8 {
 
 // GPU-native (WMMA fragment-order) payload for a single FP8 K128N128
-// weight matrix. Codes are tiled in the exact 16-output x 32-K chunk order the
-// gfx1201 FP8 WMMA consumer reads; the FP32 scales stay row-major
-// [ceil(N/128)][Kp/128]. Padded output rows are zero-filled so the guarded
-// consumer can load full 16-row tiles.
+// weight matrix. Codes are tiled in the exact 16-output x 64-K fragment-block
+// order the gfx1201 FP8 WMMA consumer reads (see fp8_frag.h); the FP32 scales
+// stay row-major [ceil(N/128)][Kp/128]. Padded output rows are zero-filled so
+// the guarded consumer can load full 16-row tiles.
 struct Fp8NativeView {
     uint64_t rows = 0;
     uint64_t n = 0;

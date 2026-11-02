@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
@@ -11,16 +12,34 @@ namespace ps::kernel {
 namespace {
 
 using int32x2_t = int32_t __attribute__((ext_vector_type(2)));
+using int32x4_t = int32_t __attribute__((ext_vector_type(4)));
 using float8_t = float __attribute__((ext_vector_type(8)));
+
+using namespace ps::quantization::fp8;
 
 constexpr uint32_t kTileOut = 16u;
 constexpr uint32_t kTileRow = kFp8FinegrainedGemmRowTile;
 constexpr uint32_t kThreadsPerBlock = 32u;
 
-__device__ __forceinline__ size_t fp8_act_off(uint32_t r, uint32_t code_stride) {
-    return static_cast<size_t>(r >> 4) * (static_cast<size_t>(code_stride) * 16u) +
-           static_cast<size_t>(r & 15u) * 16u;
-}
+#define FP8_ZERO8 {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}
+
+#define FP8_LOAD4(p, lo, hi)                                                   \
+    do {                                                                        \
+        lo = *reinterpret_cast<const int32x4_t*>(p);                            \
+        hi = *reinterpret_cast<const int32x4_t*>((p) + 16u);                    \
+    } while (0)
+
+#define FP8_WMM4(c, al, ah, wl, wh)                                            \
+    do {                                                                        \
+        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(               \
+            int32x2_t{(al)[0], (al)[1]}, int32x2_t{(wl)[0], (wl)[1]}, c);       \
+        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(               \
+            int32x2_t{(al)[2], (al)[3]}, int32x2_t{(wl)[2], (wl)[3]}, c);       \
+        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(               \
+            int32x2_t{(ah)[0], (ah)[1]}, int32x2_t{(wh)[0], (wh)[1]}, c);       \
+        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(               \
+            int32x2_t{(ah)[2], (ah)[3]}, int32x2_t{(wh)[2], (wh)[3]}, c);       \
+    } while (0)
 
 template <int MB>
 __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wmma_kernel(
@@ -38,7 +57,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
     const uint32_t activation_scale_stride,
     const uint32_t output_row_stride,
     const uint32_t w_scale_shift) {
-    const uint32_t nb = k_padded >> 5;
     const uint32_t tid = threadIdx.x;
 
     const uint32_t m_lane = tid & 15u;
@@ -56,28 +74,31 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
     const uint32_t o_self = out_start + m_lane;
 
     const uint8_t* wrow = weight_codes +
-        static_cast<size_t>(o_self >> 4) * (static_cast<size_t>(k_padded) * 16u) +
-        static_cast<size_t>(o_self & 15u) * 16u + k_group * 8u;
+        static_cast<size_t>(out_start >> 4) * (static_cast<size_t>(k_padded) * 16u) +
+        tid * kFragLaneBytes;
     const float* wsrow = weight_scales +
         static_cast<size_t>(o_self >> 7) * (weight_scale_stride / 4u);
 
     const uint8_t* arow[MB];
     #pragma unroll
     for (int t = 0; t < MB; ++t) {
-        const uint32_t r = row_start + static_cast<uint32_t>(t) * kTileRow + m_lane;
-        arow[t] = activation_codes + fp8_act_off(r, activation_code_stride) + k_group * 8u;
+        arow[t] = activation_codes +
+            (static_cast<size_t>(row_start >> 4) + static_cast<size_t>(t)) *
+                (static_cast<size_t>(activation_code_stride) * 16u) +
+            tid * kFragLaneBytes;
     }
 
     float8_t acc[MB];
     #pragma unroll
     for (int t = 0; t < MB; ++t)
-        acc[t] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        acc[t] = float8_t FP8_ZERO8;
 
     const bool full_tile = (out_start + kTileOut <= out_features);
 
     auto run_k_loop = [&]<bool kGuarded>() {
-        const uint32_t groups = nb >> 2u;
+        const uint32_t groups = k_padded >> 7;
         const uint32_t as_row_floats = activation_scale_stride >> 2u;
+        const uint32_t scale_col_shift = w_scale_shift - 1u;
         for (uint32_t ag = 0; ag < groups; ++ag) {
             for (uint32_t s = tid; s < 2u * MB * 8u; s += kThreadsPerBlock) {
                 const uint32_t kg = s / (MB * 8u);
@@ -89,48 +110,34 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
                               : 0.0f;
             }
             __syncthreads();
-            const uint32_t ib0 = ag * 4u;
-            #pragma unroll 2
-            for (uint32_t ibl = 0; ibl < 4u; ++ibl) {
-                const uint32_t ib = ib0 + ibl;
-                int32x2_t w0 = {};
-                int32x2_t w1 = {};
+            const uint32_t blk0 = ag * 2u;
+            #pragma unroll
+            for (uint32_t bj = 0; bj < 2u; ++bj) {
+                const uint32_t blk = blk0 + bj;
+                const uint8_t* wp = wrow + static_cast<size_t>(blk) * kFragBlockBytes;
+                int32x4_t wl = {0, 0, 0, 0};
+                int32x4_t wh = {0, 0, 0, 0};
                 float ws = 0.0f;
-                if constexpr (kGuarded) {
-                    if (out_valid) {
-                        const uint8_t* wp = wrow + static_cast<size_t>(ib) * 512u;
-                        w0 = *reinterpret_cast<const int32x2_t*>(wp);
-                        w1 = *reinterpret_cast<const int32x2_t*>(wp + 256u);
-                        ws = wsrow[ib >> w_scale_shift];
-                    }
-                } else {
-                    const uint8_t* wp = wrow + static_cast<size_t>(ib) * 512u;
-                    w0 = *reinterpret_cast<const int32x2_t*>(wp);
-                    w1 = *reinterpret_cast<const int32x2_t*>(wp + 256u);
-                    ws = wsrow[ib >> w_scale_shift];
+                if constexpr (!kGuarded) {
+                    FP8_LOAD4(wp, wl, wh);
+                    ws = wsrow[(blk >> scale_col_shift)];
+                } else if (out_valid) {
+                    FP8_LOAD4(wp, wl, wh);
+                    ws = wsrow[(blk >> scale_col_shift)];
                 }
                 #pragma unroll
                 for (int t = 0; t < MB; ++t) {
-                    int32x2_t a0 = {};
-                    int32x2_t a1 = {};
-                    if constexpr (kGuarded) {
-                        const bool rv =
-                            (row_start + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows;
-                        if (rv) {
-                            const uint8_t* ap = arow[t] + static_cast<size_t>(ib) * 512u;
-                            a0 = *reinterpret_cast<const int32x2_t*>(ap);
-                            a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
-                        }
-                    } else {
-                        const uint8_t* ap = arow[t] + static_cast<size_t>(ib) * 512u;
-                        a0 = *reinterpret_cast<const int32x2_t*>(ap);
-                        a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
+                    int32x4_t al = {0, 0, 0, 0};
+                    int32x4_t ah = {0, 0, 0, 0};
+                    const uint8_t* ap = arow[t] + static_cast<size_t>(blk) * kFragBlockBytes;
+                    if constexpr (!kGuarded) {
+                        FP8_LOAD4(ap, al, ah);
+                    } else if ((row_start + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows) {
+                        FP8_LOAD4(ap, al, ah);
                     }
-                    float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                    c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
-                    c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-                    const uint32_t as_slot =
-                        (k_group * MB + static_cast<uint32_t>(t)) * 8u;
+                    float8_t c = float8_t FP8_ZERO8;
+                    FP8_WMM4(c, al, ah, wl, wh);
+                    const uint32_t as_slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
                     #pragma unroll
                     for (int j = 0; j < 8; ++j)
                         acc[t][j] = __builtin_fmaf(
@@ -167,15 +174,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_fp8_finegrained_w8a8_wm
     }
 }
 
-using u8v8_t = uint8_t __attribute__((ext_vector_type(8)));
-
 constexpr uint32_t k2dThreads = 256u;
 constexpr uint32_t k2dOutBlock = kFp8FinegrainedGemmPrefill2dOutBlock;
 
 // Prefill path: one block computes a 256 (rows) x 64 (outputs) tile with 8
-// waves. Each wave stages one 16-output x 64-K weight tile into shared memory
-// so the weight is read once and reused across 16 rows. The FP8 128x128 scale
-// is uniform across a 16-output tile.
+// waves. Each wave reads one 16-output x 64-K weight fragment block per step,
+// so the weight request per wave is one contiguous 1 KiB block. The FP8
+// 128x128 scale is uniform across a 16-output tile.
 template <bool kGuarded>
 __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_prefill_2d_kernel(
     const uint8_t* __restrict__ weight_codes,
@@ -192,7 +197,6 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_pre
     const uint32_t activation_scale_stride,
     const uint32_t output_row_stride,
     const uint32_t w_scale_shift) {
-    const uint32_t nb2 = k_padded >> 6;
     const uint32_t tid = threadIdx.x;
     const uint32_t wave = tid >> 5;
     const uint32_t lane = tid & 31u;
@@ -213,8 +217,10 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_pre
     const uint8_t* arow[4];
     #pragma unroll
     for (int t = 0; t < 4; ++t) {
-        const uint32_t r = row_base + static_cast<uint32_t>(t) * kTileRow + m_lane;
-        arow[t] = activation_codes + fp8_act_off(r, activation_code_stride) + k_group * 8u;
+        arow[t] = activation_codes +
+            (static_cast<size_t>(row_base >> 4) + static_cast<size_t>(t)) *
+                (static_cast<size_t>(activation_code_stride) * 16u) +
+            lane * kFragLaneBytes;
     }
 
     float8_t acc[4][2];
@@ -222,90 +228,70 @@ __global__ void __launch_bounds__(k2dThreads) gemm_fp8_finegrained_w8a8_wmma_pre
     for (int t = 0; t < 4; ++t)
         #pragma unroll
         for (int nt = 0; nt < 2; ++nt)
-            acc[t][nt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            acc[t][nt] = float8_t FP8_ZERO8;
 
     const uint32_t as_row_floats = activation_scale_stride >> 2u;
-    const uint32_t g2_total = nb2 >> 1u;
-    for (uint32_t g2 = 0; g2 < g2_total; ++g2) {
+    const uint32_t groups = k_padded >> 7;
+    const uint32_t scale_col_shift = w_scale_shift - 1u;
+    for (uint32_t ag = 0; ag < groups; ++ag) {
         {
-            {
-                const uint32_t wm = tid >> 6u;
-                const uint32_t rem = tid & 63u;
-                const uint32_t kg = rem >> 5u;
-                const uint32_t t = (rem >> 3u) & 3u;
-                const uint32_t j = rem & 7u;
-                const uint32_t rr =
-                    row_start + wm * 4u * kTileRow + t * kTileRow + 8u * kg + j;
-                smem[(g2 & 1u) * 256u + tid] = (rr < rows)
-                                ? activation_scales[static_cast<size_t>(rr) * as_row_floats + g2]
-                                : 0.0f;
-            }
+            const uint32_t wm = tid >> 6u;
+            const uint32_t rem = tid & 63u;
+            const uint32_t kg = rem >> 5u;
+            const uint32_t t = (rem >> 3u) & 3u;
+            const uint32_t j = rem & 7u;
+            const uint32_t rr =
+                row_start + wm * 4u * kTileRow + t * kTileRow + 8u * kg + j;
+            smem[(ag & 1u) * 256u + tid] = (rr < rows)
+                            ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
+                            : 0.0f;
         }
         __syncthreads();
-        for (uint32_t inner = 0; inner < 2u; ++inner) {
-            const uint32_t ib2 = g2 * 2u + inner;
-            int32x2_t w0c[2][2];
-            int32x2_t w1c[2][2];
-            float wsc[2][2];
-            #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
-                const uint32_t o_nt = out_block_start +
-                    (wave_n * 2u + static_cast<uint32_t>(nt)) * kTileOut + m_lane;
-                if (kGuarded && o_nt >= out_features) {
-                    #pragma unroll
-                    for (int il = 0; il < 2; ++il) {
-                        w0c[nt][il] = int32x2_t{};
-                        w1c[nt][il] = int32x2_t{};
-                        wsc[nt][il] = 0.0f;
-                    }
-                    continue;
-                }
-                const uint8_t* wbase = weight_codes +
-                    static_cast<size_t>(o_nt >> 4) * (static_cast<size_t>(k_padded) * 16u) +
-                    static_cast<size_t>(o_nt & 15u) * 16u + k_group * 8u;
-                const float* wsbase = weight_scales +
-                    static_cast<size_t>(o_nt >> 7) * (weight_scale_stride / 4u);
-                #pragma unroll
-                for (int il = 0; il < 2; ++il) {
-                    const uint32_t ib_glob = ib2 * 2u + static_cast<uint32_t>(il);
-                    const uint8_t* wpn = wbase + static_cast<size_t>(ib_glob) * 512u;
-                    w0c[nt][il] = *reinterpret_cast<const int32x2_t*>(wpn);
-                    w1c[nt][il] = *reinterpret_cast<const int32x2_t*>(wpn + 256u);
-                    wsc[nt][il] = wsbase[ib_glob >> w_scale_shift];
-                }
+        const uint32_t blk0 = ag * 2u;
+        #pragma unroll
+        for (uint32_t bj = 0; bj < 2u; ++bj) {
+            const uint32_t blk = blk0 + bj;
+            const uint32_t o_nt0 = out_block_start + wave_n * 2u * kTileOut + m_lane;
+            const uint32_t o_nt1 = o_nt0 + kTileOut;
+            int32x4_t wl0 = {0, 0, 0, 0};
+            int32x4_t wh0 = {0, 0, 0, 0};
+            int32x4_t wl1 = {0, 0, 0, 0};
+            int32x4_t wh1 = {0, 0, 0, 0};
+            float ws0 = 0.0f;
+            float ws1 = 0.0f;
+            if (!kGuarded || o_nt0 < out_features) {
+                const uint8_t* wb = weight_codes +
+                    static_cast<size_t>(o_nt0 >> 4) * (static_cast<size_t>(k_padded) * 16u) +
+                    lane * kFragLaneBytes + static_cast<size_t>(blk) * kFragBlockBytes;
+                FP8_LOAD4(wb, wl0, wh0);
+                ws0 = weight_scales[static_cast<size_t>(o_nt0 >> 7) *
+                                        (weight_scale_stride / 4u) +
+                                    (blk >> scale_col_shift)];
             }
-            #pragma unroll 2
-            for (uint32_t ib_local = 0; ib_local < 2; ++ib_local) {
-                int32x2_t w0[2];
-                int32x2_t w1[2];
-                float ws[2];
-                const uint32_t ib_glob = ib2 * 2u + ib_local;
+            if (!kGuarded || o_nt1 < out_features) {
+                const uint8_t* wb = weight_codes +
+                    static_cast<size_t>(o_nt1 >> 4) * (static_cast<size_t>(k_padded) * 16u) +
+                    lane * kFragLaneBytes + static_cast<size_t>(blk) * kFragBlockBytes;
+                FP8_LOAD4(wb, wl1, wh1);
+                ws1 = weight_scales[static_cast<size_t>(o_nt1 >> 7) *
+                                        (weight_scale_stride / 4u) +
+                                    (blk >> scale_col_shift)];
+            }
+            #pragma unroll
+            for (int t = 0; t < 4; ++t) {
+                int32x4_t al, ah;
+                FP8_LOAD4(arow[t] + static_cast<size_t>(blk) * kFragBlockBytes, al, ah);
+                const uint32_t as_slot = ((wave_m * 2u + k_group) * 4u + static_cast<uint32_t>(t)) * 8u;
+                float8_t c0 = float8_t FP8_ZERO8;
+                float8_t c1 = float8_t FP8_ZERO8;
+                FP8_WMM4(c0, al, ah, wl0, wh0);
+                FP8_WMM4(c1, al, ah, wl1, wh1);
                 #pragma unroll
-                for (int nt = 0; nt < 2; ++nt) {
-                    w0[nt] = w0c[nt][ib_local];
-                    w1[nt] = w1c[nt][ib_local];
-                    ws[nt] = wsc[nt][ib_local];
-                }
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    const uint8_t* ap = arow[t] + static_cast<size_t>(ib_glob) * 512u;
-                    const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
-                    const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
-                    const uint32_t as_slot =
-                        ((wave_m * 2u + k_group) * 4u + static_cast<uint32_t>(t)) * 8u;
-                    #pragma unroll
-                    for (int nt = 0; nt < 2; ++nt) {
-                        float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0[nt], c);
-                        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1[nt], c);
-                        #pragma unroll
-                        for (int j = 0; j < 8; ++j)
-                            acc[t][nt][j] = __builtin_fmaf(
-                                c[j],
-                                ws[nt] * smem[(g2 & 1u) * 256u + as_slot +
-                                              static_cast<uint32_t>(j)],
-                                acc[t][nt][j]);
-                    }
+                for (int j = 0; j < 8; ++j) {
+                    acc[t][0][j] = __builtin_fmaf(
+                        c0[j], ws0 * smem[(ag & 1u) * 256u + as_slot + j], acc[t][0][j]);
+                    acc[t][1][j] = __builtin_fmaf(
+                        c1[j], ws1 * smem[(ag & 1u) * 256u + as_slot + j], acc[t][1][j]);
                 }
             }
         }
@@ -358,7 +344,6 @@ __global__ void __launch_bounds__(k2dThreads)
         const uint32_t output_row_stride,
         const uint32_t w_scale_shift,
     const uint32_t swizzle_g) {
-    const uint32_t nb2 = k_padded >> 6;
     const uint32_t tid = threadIdx.x;
     const uint32_t wave = tid >> 5;
     const uint32_t lane = tid & 31u;
@@ -390,158 +375,117 @@ __global__ void __launch_bounds__(k2dThreads)
     for (int t = 0; t < 4; ++t)
         #pragma unroll
         for (int nt = 0; nt < 2; ++nt)
-            acc[t][nt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            acc[t][nt] = float8_t FP8_ZERO8;
 
     const uint32_t as_row_floats = activation_scale_stride >> 2u;
-    const uint32_t g2_total = nb2 >> 1u;
+    const uint32_t groups = k_padded >> 7;
+    const uint32_t scale_col_shift = w_scale_shift - 1u;
 
     const uint8_t* arow[4];
     #pragma unroll
     for (int t = 0; t < 4; ++t) {
-        const uint32_t r = row_base + static_cast<uint32_t>(t) * kTileRow + m_lane;
-        arow[t] = activation_codes + fp8_act_off(r, activation_code_stride) + k_group * 8u;
+        arow[t] = activation_codes +
+            (static_cast<size_t>(row_base >> 4) + static_cast<size_t>(t)) *
+                (static_cast<size_t>(activation_code_stride) * 16u) +
+            lane * kFragLaneBytes;
     }
 
-    for (uint32_t g2 = 0; g2 < g2_total; ++g2) {
+    const uint32_t o_nt0 = out_block_start + ww * 2u * kTileOut + m_lane;
+    const uint32_t o_nt1 = o_nt0 + kTileOut;
+    const uint8_t* wb0 = weight_codes +
+        static_cast<size_t>(o_nt0 >> 4u) * (static_cast<size_t>(k_padded) * 16u) +
+        lane * kFragLaneBytes;
+    const uint8_t* wb1 = weight_codes +
+        static_cast<size_t>(o_nt1 >> 4u) * (static_cast<size_t>(k_padded) * 16u) +
+        lane * kFragLaneBytes;
+    const float* ws0row = weight_scales +
+        static_cast<size_t>(o_nt0 >> 7u) * (weight_scale_stride / 4u);
+    const float* ws1row = weight_scales +
+        static_cast<size_t>(o_nt1 >> 7u) * (weight_scale_stride / 4u);
+
+    for (uint32_t ag = 0; ag < groups; ++ag) {
         if (tid < 128u)
-            s_as[g2 & 1u][tid] = activation_scales[static_cast<size_t>(row_start + tid) *
+            s_as[ag & 1u][tid] = activation_scales[static_cast<size_t>(row_start + tid) *
                                                        as_row_floats +
-                                                   g2];
+                                                   ag];
         __syncthreads();
+        const uint32_t blk0 = ag * 2u;
         if constexpr (kDeferScale) {
-            float ws_g2[2];
+            const float ws_g0 = ws0row[ag];
+            const float ws_g1 = ws1row[ag];
+            float8_t c0[4];
+            float8_t c1[4];
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
-                const uint32_t o_nt = out_block_start +
-                    (ww * 2u + static_cast<uint32_t>(nt)) * kTileOut + m_lane;
-                ws_g2[nt] = weight_scales[static_cast<size_t>(o_nt >> 7u) *
-                                              (weight_scale_stride / 4u) +
-                                          g2];
+            for (int t = 0; t < 4; ++t) {
+                c0[t] = float8_t FP8_ZERO8;
+                c1[t] = float8_t FP8_ZERO8;
             }
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
-                const uint32_t o_nt = out_block_start +
-                    (ww * 2u + static_cast<uint32_t>(nt)) * kTileOut + m_lane;
-                const uint8_t* wb = weight_codes +
-                    static_cast<size_t>(o_nt >> 4u) *
-                        (static_cast<size_t>(k_padded) * 16u) +
-                    static_cast<size_t>(o_nt & 15u) * 16u + k_group * 8u;
-                float8_t c[4];
-                #pragma unroll
-                for (int tt = 0; tt < 4; ++tt)
-                    c[tt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                #pragma unroll
-                for (uint32_t inner = 0; inner < 2u; ++inner) {
-                    const uint32_t ib2 = g2 * 2u + inner;
-                    #pragma unroll
-                    for (uint32_t il = 0; il < 2u; ++il) {
-                        const uint32_t ib_glob = ib2 * 2u + il;
-                        const size_t koff = static_cast<size_t>(ib_glob) * 512u;
-                        const uint8_t* wpn = wb + koff;
-                        const int32x2_t w0 = *reinterpret_cast<const int32x2_t*>(wpn);
-                        const int32x2_t w1 = *reinterpret_cast<const int32x2_t*>(wpn + 256u);
-                        const uint8_t* ap0 = arow[0] + koff;
-                        const uint8_t* ap1 = arow[1] + koff;
-                        const uint8_t* ap2 = arow[2] + koff;
-                        const uint8_t* ap3 = arow[3] + koff;
-                        const int32x2_t b00 = *reinterpret_cast<const int32x2_t*>(ap0);
-                        const int32x2_t b01 = *reinterpret_cast<const int32x2_t*>(ap0 + 256u);
-                        const int32x2_t b10 = *reinterpret_cast<const int32x2_t*>(ap1);
-                        const int32x2_t b11 = *reinterpret_cast<const int32x2_t*>(ap1 + 256u);
-                        const int32x2_t b20 = *reinterpret_cast<const int32x2_t*>(ap2);
-                        const int32x2_t b21 = *reinterpret_cast<const int32x2_t*>(ap2 + 256u);
-                        const int32x2_t b30 = *reinterpret_cast<const int32x2_t*>(ap3);
-                        const int32x2_t b31 = *reinterpret_cast<const int32x2_t*>(ap3 + 256u);
-                        c[0] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b00, w0, c[0]);
-                        c[1] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b10, w0, c[1]);
-                        c[2] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b20, w0, c[2]);
-                        c[3] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b30, w0, c[3]);
-                        c[0] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b01, w1, c[0]);
-                        c[1] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b11, w1, c[1]);
-                        c[2] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b21, w1, c[2]);
-                        c[3] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(b31, w1, c[3]);
-                    }
-                }
+            for (uint32_t bj = 0; bj < 2u; ++bj) {
+                const uint32_t blk = blk0 + bj;
+                int32x4_t wl0, wh0, wl1, wh1;
+                FP8_LOAD4(wb0 + static_cast<size_t>(blk) * kFragBlockBytes, wl0, wh0);
+                FP8_LOAD4(wb1 + static_cast<size_t>(blk) * kFragBlockBytes, wl1, wh1);
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
-                    const uint32_t as_base =
-                        wa * 64u + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
-                    #pragma unroll
-                    for (int j = 0; j < 8; ++j)
-                        acc[t][nt][j] = __builtin_fmaf(
-                            c[t][j],
-                            ws_g2[nt] * s_as[g2 & 1u][as_base +
-                                              static_cast<uint32_t>(j)],
-                            acc[t][nt][j]);
+                    int32x4_t al, ah;
+                    FP8_LOAD4(arow[t] + static_cast<size_t>(blk) * kFragBlockBytes, al, ah);
+                    FP8_WMM4(c0[t], al, ah, wl0, wh0);
+                    FP8_WMM4(c1[t], al, ah, wl1, wh1);
+                }
+            }
+            #pragma unroll
+            for (int t = 0; t < 4; ++t) {
+                const uint32_t as_base =
+                    wa * 64u + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
+                #pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    acc[t][0][j] = __builtin_fmaf(
+                        c0[t][j], ws_g0 * s_as[ag & 1u][as_base + static_cast<uint32_t>(j)],
+                        acc[t][0][j]);
+                    acc[t][1][j] = __builtin_fmaf(
+                        c1[t][j], ws_g1 * s_as[ag & 1u][as_base + static_cast<uint32_t>(j)],
+                        acc[t][1][j]);
                 }
             }
         } else {
-        for (uint32_t inner = 0; inner < 2u; ++inner) {
-            const uint32_t ib2 = g2 * 2u + inner;
-            int32x2_t w0c[2][2];
-            int32x2_t w1c[2][2];
-            float wsc[2][2];
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
-                const uint32_t o_nt = out_block_start +
-                    (ww * 2u + static_cast<uint32_t>(nt)) * kTileOut + m_lane;
-                const uint8_t* wbase = weight_codes +
-                    static_cast<size_t>(o_nt >> 4u) * (static_cast<size_t>(k_padded) * 16u) +
-                    static_cast<size_t>(o_nt & 15u) * 16u + k_group * 8u;
-                const float* wsbase = weight_scales +
-                    static_cast<size_t>(o_nt >> 7u) * (weight_scale_stride / 4u);
-                #pragma unroll
-                for (int il = 0; il < 2; ++il) {
-                    const uint32_t ib_glob = ib2 * 2u + static_cast<uint32_t>(il);
-                    const uint8_t* wpn = wbase + static_cast<size_t>(ib_glob) * 512u;
-                    w0c[nt][il] = *reinterpret_cast<const int32x2_t*>(wpn);
-                    w1c[nt][il] = *reinterpret_cast<const int32x2_t*>(wpn + 256u);
-                    wsc[nt][il] = wsbase[ib_glob >> w_scale_shift];
-                }
-            }
-            #pragma unroll 2
-            for (uint32_t ib_local = 0; ib_local < 2; ++ib_local) {
-                int32x2_t w0[2];
-                int32x2_t w1[2];
-                float ws[2];
-                const uint32_t ib_glob = ib2 * 2u + ib_local;
-                #pragma unroll
-                for (int nt = 0; nt < 2; ++nt) {
-                    w0[nt] = w0c[nt][ib_local];
-                    w1[nt] = w1c[nt][ib_local];
-                    ws[nt] = wsc[nt][ib_local];
-                }
+            for (uint32_t bj = 0; bj < 2u; ++bj) {
+                const uint32_t blk = blk0 + bj;
+                int32x4_t wl0, wh0, wl1, wh1;
+                FP8_LOAD4(wb0 + static_cast<size_t>(blk) * kFragBlockBytes, wl0, wh0);
+                FP8_LOAD4(wb1 + static_cast<size_t>(blk) * kFragBlockBytes, wl1, wh1);
+                const float ws_b0 = ws0row[(blk >> scale_col_shift)];
+                const float ws_b1 = ws1row[(blk >> scale_col_shift)];
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
-                    const uint8_t* ap = arow[t] + static_cast<size_t>(ib_glob) * 512u;
-                    const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
-                    const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 256u);
-                    const uint32_t as_base = wa * 64u + static_cast<uint32_t>(t) * kTileRow +
-                                             8u * k_group;
+                    int32x4_t al, ah;
+                    FP8_LOAD4(arow[t] + static_cast<size_t>(blk) * kFragBlockBytes, al, ah);
+                    const uint32_t as_base =
+                        wa * 64u + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
+                    float8_t c0 = float8_t FP8_ZERO8;
+                    float8_t c1 = float8_t FP8_ZERO8;
+                    FP8_WMM4(c0, al, ah, wl0, wh0);
+                    FP8_WMM4(c1, al, ah, wl1, wh1);
                     #pragma unroll
-                    for (int nt = 0; nt < 2; ++nt) {
-                        float8_t c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0[nt], c);
-                        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1[nt], c);
-                        #pragma unroll
-                        for (int j = 0; j < 8; ++j)
-                            acc[t][nt][j] = __builtin_fmaf(
-                                c[j],
-                                ws[nt] * s_as[g2 & 1u][as_base + static_cast<uint32_t>(j)],
-                                acc[t][nt][j]);
+                    for (int j = 0; j < 8; ++j) {
+                        acc[t][0][j] = __builtin_fmaf(
+                            c0[j], ws_b0 * s_as[ag & 1u][as_base + static_cast<uint32_t>(j)],
+                            acc[t][0][j]);
+                        acc[t][1][j] = __builtin_fmaf(
+                            c1[j], ws_b1 * s_as[ag & 1u][as_base + static_cast<uint32_t>(j)],
+                            acc[t][1][j]);
                     }
                 }
             }
         }
     }
-        }
 
     #pragma unroll
     for (int t = 0; t < 4; ++t) {
         #pragma unroll
         for (int nt = 0; nt < 2; ++nt) {
-            const uint32_t o_self = out_block_start +
-                                    (ww * 2u + static_cast<uint32_t>(nt)) * kTileOut + m_lane;
+            const uint32_t o_self = (nt == 0) ? o_nt0 : o_nt1;
             const uint32_t r_base = row_base + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
             #pragma unroll
             for (int j = 0; j < 8; ++j) {
@@ -565,15 +509,16 @@ __global__ void __launch_bounds__(k2dThreads)
                         (rows + (MB) * kTileRow - 1u) / ((MB) * kTileRow), 1);  \
         const std::size_t shared_needed =                                       \
             sizeof(float) * 2u * (MB) * 8u;                                     \
-        gemm_fp8_finegrained_w8a8_wmma_kernel<(MB)>                                         \
-            <<<grid, kThreadsPerBlock, shared_needed, stream>>>(                \
-                weight_codes, weight_scales, acodes, activation_scales,         \
-                output, static_cast<uint32_t>(output_dtype), rows,              \
+        gemm_fp8_finegrained_w8a8_wmma_kernel<(MB)>                             \
+            <<<grid, kThreadsPerBlock, shared_needed, stream>>>(                 \
+                weight_codes, weight_scales, acodes, activation_scales,          \
+                output, static_cast<uint32_t>(output_dtype), rows,               \
                 out_features, k_padded, weight_scale_stride_bytes,              \
-                activation_code_stride_bytes, activation_scale_stride_bytes,    \
+                activation_code_stride_bytes, activation_scale_stride_bytes,     \
                 output_row_stride, w_scale_shift);                              \
         return hipGetLastError();                                               \
     } while (0)
+
 hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
     const Fp8FinegrainedGemmConfig& config,
     const uint8_t* weight_codes,
@@ -600,7 +545,6 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
     else if (weight_scale_group == 64u) w_scale_shift = 1u;
     else return hipErrorNotSupported;
     const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
-    (void)acodes;
     if (config.id == Fp8FinegrainedGemmConfigId::Prefill2D) {
         if ((rows % (16u * kTileRow)) != 0u ||
             (out_features % k2dOutBlock) != 0u ||
@@ -644,8 +588,6 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
         return hipGetLastError();
     }
     switch (config.id) {
-    case Fp8FinegrainedGemmConfigId::RowBlock8:
-        FP8_MB_LAUNCH(8);
     case Fp8FinegrainedGemmConfigId::RowBlock4:
         FP8_MB_LAUNCH(4);
     case Fp8FinegrainedGemmConfigId::RowBlock2:
@@ -657,6 +599,9 @@ hipError_t launch_gemm_fp8_finegrained_w8a8_wmma_impl(
 }
 
 #undef FP8_MB_LAUNCH
+#undef FP8_WMM4
+#undef FP8_LOAD4
+#undef FP8_ZERO8
 
 }  // namespace
 

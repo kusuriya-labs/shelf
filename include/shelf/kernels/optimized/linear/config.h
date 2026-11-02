@@ -46,7 +46,6 @@ enum class Fp8FinegrainedGemmConfigId : uint8_t {
     RowBlock1,
     RowBlock2,
     RowBlock4,
-    RowBlock8,
     Prefill2D,
 };
 

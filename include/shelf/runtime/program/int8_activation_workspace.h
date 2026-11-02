@@ -22,7 +22,7 @@ struct Int8ActivationWorkspaceLayout {
     }
 
     static uint32_t k_padded_for(uint32_t k) noexcept {
-        return (k + 31u) & ~31u;
+        return (k + 63u) & ~63u;
     }
 
     static Int8ActivationWorkspaceLayout make(uint32_t k, uint32_t rows) noexcept {

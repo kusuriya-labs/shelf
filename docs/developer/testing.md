@@ -28,6 +28,10 @@ test binary が exit 77 を返した場合も required acceptance では失敗�
 required は CPU contract test（safetensors writer、FPX layout、量子化 payload /
 codec、selector、architecture boundary 等）と、gfx1201 限定の GPU kernel /
 runtime test、bench `--help` smoke からなる。
+FP8 kernel には ISA 資源契約があり、`tools/check_kernel_spills.py` が
+build の compile flags で kernel を assembly へコンパイルし、VGPR / SGPR spill と
+private segment（local memory）使用が 0 であることを検証する
+（`test_fp8_kernel_spill_contract`、label `cpu;required`）。
 arch 非適合の kernel test は非適合 arch では CTest レベルで DISABLED にし、
 external model 不在・GPU 不足などによる exit 77 は `SKIP_RETURN_CODE 77` で
 CTest の Skipped として扱って、plain `ctest` が誤った FAIL を出さないようにしている。
