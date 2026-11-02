@@ -43,15 +43,15 @@
 - PMC カウンタは 0 を返すため**ハードウェア直読は不可**。すべて導出する。
 - driver の occupancy API はソフトウェアモデルなので参考値扱いとし、
   次の定数から静的に算定する:
-  - 実効 VGPR file = 47,104 dwords/SIMD（= 188,416 dwords/WGP）。§7.88 の
-    co-residency 実測境界から逆算した値。compiler が仮定する 196,608 dwords/WGP は
-    実機とずれており、`launch_bounds` の min-blocks が効かない原因になる
+  - 実効 VGPR file = 47,104 dwords/SIMD（= 188,416 dwords/WGP）。co-residency の
+    実測境界から逆算した値。compiler が仮定する 196,608 dwords/WGP は実機と
+    ずれており、`launch_bounds` の min-blocks が効かない原因になる
   - wave 上限 = 32 wf/SIMD、wave32、32 WGP × 2 CU = 64 CU（driver の
     `multiProcessorCount` は WGP 数）
   - 算定式: `vgpr_r = ceil(VGPR/8)×8`、
     `budget_waves = min(4 × floor(47104 / (32 × vgpr_r)), 64)`、
     `blocks = min(budget_waves / (wg/32), 131072 / LDS, 64 / (wg/32))`。
-    §7.88 の実測表を全行再現する。単一の正は
+    この算定式は co-residency 実測の全行を再現する。
   - 拘束条件 = min(register, LDS, wave 上限, grid)。**先にどれが拘束かを判定してから
     レジスタ圧レバーを語る。**
 - 実効転送速度の判別目安（streaming read 実測 636GB/s との比較）:

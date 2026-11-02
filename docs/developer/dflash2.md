@@ -129,7 +129,7 @@ DFlash2 drafter は target の途中層の出力を入力に使う。tap は
 - tap buffer は `Executor` が所有する `dflash_target_hidden[k]`（`[Npad, hidden]` BF16。
   `Npad` は executor の padded token-row capacity）で、`token_hidden` とは別 buffer に
   明示的に bind する（alias させない）。
-- host backend の external I/O 静的 capacity は `kHostExternalCapacity = 16`。
+- executor の host 側 external I/O 静的 capacity は `kHostExternalCapacity = 16`。
 - tap は layer の row 数分（token rows）を保持する。
 - `kMaxTargetHiddenTaps = 8`。`target_hidden_tap_count` がこれを超える場合は executor
   create が error。
@@ -287,7 +287,7 @@ argument として渡す。
     参照実装。mask / GQA / softmax は stateless と同一。
   - `launch_dflash2_attention_ring_gqa_bf16`: production。1 WG = 1 block row × 1 KV head
     で 4 q head を処理し、K/V を LDS tile へ uint4 coalesced load して 4 head で共有する。
-    数学は参照実装と **bit-exact**（online softmax には移行していない）。
+    数学は参照実装と **bit-exact**。
 - GQA kernel の制限（不成立時は `hipErrorNotSupported`）: `q_heads == 4 * kv_heads`、
   `head_dim == 128`、strides の 8 要素倍数、dynamic LDS ≤ 60KB。executor は既定で GQA を
   使い、NotSupported のとき ring 参照実装へフォールバックする。
@@ -295,8 +295,8 @@ argument として渡す。
 
 ### final normalization / dtype contract
 
-公式実装は bf16 tensor 同士の演算で各 op ごとに丸める。PhaseNonShift は次の 3 か所で
-同じ丸め列を再現する（`round_to_bf16_f32`）。
+公式実装は bf16 tensor 同士の演算で各 op ごとに丸める。Shelf は次の 3 か所で同じ
+丸め列を再現する（`round_to_bf16_f32`）。
 
 - GroupedDynamicCausalConv: `round(kernel * values)` → `round(out + ...)` → `addcmul`
 - RoPE: cos/sin を bf16 に丸め、積と和も bf16 に丸める
@@ -316,7 +316,7 @@ DFlash2 executor は layer 内の各 logical primitive をすべて独立した 
 実行する。対象は layer input/post-attention RMSNorm、Q/K の RMSNorm と RoPE、
 q/k/v projection GEMM、attention、Gate GEMM、Up GEMM、SwiGLU、Down GEMM、
 grouped dynamic conv と residual である。
-複数の logical primitive を 1 physical kernel へ結合する fusion は production には存在しない。
+1 logical primitive = 1 kernel launch であり、primitive 間の結合は行わない。
 
 ### drafter linear kernel（bf16）
 
@@ -643,8 +643,7 @@ release は `shutdown_dflash2_spec_batch_context()`。
   `verify_token_ids_device + row_begin + 1` を渡し、proposal の結果を D2D relay せずに
   verify の入力にする。
 - proposal の kernel は単一 request 経路と共通の device body を持ち、同一入力・同一
-  config で同一の draft 列になる（`test_dflash2_batch_perf` の `mean_accepted` /
-  `rounds` が単一 request 経路と一致することで確認する）。
+  config で同一の draft 列になる。
 
 ### device token bridge（batch）
 
@@ -718,8 +717,8 @@ decoder あたりの GDN 消費（27B geometry、K=7）:
   decoder create を FAIL する（FP16 化等で逃げない）。27B geometry
   （146.8 MiB/row）では rows ≤ 15 が上限である。
 - `DFlash2SpecDecoderConfig::num_drafts` は `1..max_draft_tokens()` でなければ error。
-- `kDFlash2SpecMaxVerifyRows` は compact log 行数とは独立で、Phase 1 の
-  batch verify 行合計 `Σ(Kᵢ+1)` の上限に使う。per-request の draft 上限は
+- `kDFlash2SpecMaxVerifyRows` は compact log 行数とは独立で、batch verify 行合計
+  `Σ(Kᵢ+1)` の上限に使う。per-request の draft 上限は
   `dflash2::kMaxBlockSize - 1`（`max_draft_tokens()` の compile-time 上限）。
 
 batch context（`DFlash2SpecBatchContext`）は binding ごとに conv history（`max_rows`
@@ -784,8 +783,8 @@ DFlash proposal を Host へ戻さず、そのまま target verify の入力に�
 
 `SHELF_DFLASH2_DEVICE_TOKEN_BRIDGE`（既定 1）。
 
-- `1`: candidate device-resident bridge。
-- `0`: legacy Host bridge（A/B と regression 調査用）。
+- `1`: device-resident bridge。
+- `0`: legacy Host bridge。
 
 ### ScheduledBatch の token source
 
@@ -1005,7 +1004,7 @@ DFLASH2_ROUND_MS
   `max_concurrent_requests × block_size <= 512` を要求する。
 - batched proposal は drafter の weight traffic が request 数に比例して増える。draft の
   batching は launch 数と host stall を削減するが、weight 再読込は drafter の GEMM
-  config に依存する（`docs/perf/current.md` の round 内訳を参照）。
+  config に依存する。
 
 ---
 
@@ -1050,12 +1049,10 @@ DFLASH2_ROUND_MS
   `test_dflash2_grouped_dynamic_conv` / `test_dflash2_bf16_geometry` /
   `test_dflash2_rope` / `test_dflash2_attention` / `test_dflash2_topk` /
   `test_dflash2_candidate_selector` / `test_dflash2_kv_ring` /
-  `test_dflash2_attention_ring` /
-  `test_dflash2_radix_topn` /
+  `test_dflash2_attention_ring` / `test_dflash2_radix_topn` /
   `test_gdn_spec_history`
 - perf（label `gpu1;perf`、正しさテストと分離）: `test_dflash2_radix_topn_perf` /
   `test_dflash2_batch_perf`
-- optional / external: `test_dflash2_weight_real` / `test_dflash2_gate*_real` /
-  `test_dflash2_gate*_perf` / `test_dflash2_gate8_live` / `test_dflash2_gate9_e2e` /
-  `test_dflash2_batch_e2e` /
-  `test_dflash2_gate10_cli` / `test_dflash2_gate11*`
+- optional / external files（model dir が必要）: `test_dflash2_weight_real` /
+  `test_dflash2_target_taps` / `test_dflash2_mixed_batch` /
+  `test_dflash2_batch_e2e` / `test_dflash2_tp_e2e`（label `gpu2`）

@@ -12,7 +12,7 @@
 ## リポジトリに含めない理由
 
 - ライセンスが自repoの配布と整合しないため、**本リポジトリへ vendor しない**。
-  PhaseNonShift のした以外の場所（例: `/root/qwen35-f64-oracle`）に clone して利用する。
+  本リポジトリの worktree 以外の場所（例: `/root/qwen35-f64-oracle`）に clone して利用する。
   依存として build に連結しない。あくまで独立の referee tool である。
 
 ## 取得と build
