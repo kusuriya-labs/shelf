@@ -38,7 +38,6 @@
 | `--prefix-cache-cold-tokens N` | prefix cache cold tier capacity in tokens (default 65536) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
 | `--prefix-cache-cold-state-slots N` | cold GDN state slots (default 0 = auto) |
-| `--model-host PATH` | attach model weights from a resident model host (default: SHELF_MODEL_HOST_SOCKET, empty = local load) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
@@ -88,16 +87,6 @@ real-quantized fp8 model dir（`quantization_config` の `quant_method: fp8` か
 
 GPU-MCU backend はこの build に含まれない。実装と R&D 記録は
 `exp/gpu-mcu` ブランチへ退避している。
-
-### resident model host
-
-`--model-host`（または `SHELF_MODEL_HOST_SOCKET`）を指定すると、model weight は
-`shelf-model-host` が GPU 上に保持しており、compute process は HIP IPC で
-attach する。compute が crash / timeout / hang しても weight は残り、
-次 の compute process は attach で即座に再開できる。
-
-指定が無ければ従来どおり自分で safetensors を load する。
-`SHELF_DISABLE_RESIDENT_MODEL=1` で environment 経由の指定を無効化できる。
 
 ### DFlash2 speculative decoding
 

@@ -10,9 +10,8 @@
 - CMake >= 3.24
 - Ninja
 - OpenSSL（libcrypto）
-- Python 3（`shelf-launcher`、`shelf-server`、E2E）
+- Python 3（`shelf-server`、E2E）
   - `shelf-server`: `aiohttp`、`transformers==5.14.1`
-  - `shelf-launcher`: 標準ライブラリのみ
   - server test: `openai`（OpenAI Python client E2E）
 
 `shelf-compute` 単体は Python 非依存。
@@ -74,11 +73,9 @@ cmake -S . -B build -DSHELF_HIP_GRAPH=ON
 
 ```text
 build/shelf-compute
-build/shelf-launcher
 build/shelf-server
 build/shelf-server-lib/
 build/shelf-bench
-build/shelf-model-host
 ```
 
 `shelf-server` は Python 製の HTTP server である。起動時に model processor を load し、

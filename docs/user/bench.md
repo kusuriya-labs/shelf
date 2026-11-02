@@ -58,7 +58,6 @@ detail and is not a `--variant` value.
 | `--device LIST` | comma separated GPUs, one per --tp rank (default 0; e.g. --device 0,2) |
 | `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
 | `--model-dir PATH` | (required) |
-| `--model-host SPEC` | resident model host socket spec |
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8` | (default bf16) |
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
@@ -86,7 +85,6 @@ rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらない�
 | `--compute-logits 0\|1` | (default 1) |
 | `--device N` | (default 0) |
 | `--model-dir PATH` | (required) |
-| `--model-host SPEC` | resident model host socket spec |
 | `--page-tokens N` | (default 16) |
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
 | `--output PATH` | (default none) |

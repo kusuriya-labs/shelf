@@ -1,6 +1,5 @@
 #pragma once
 
-#include "support/resident_model_fixture.h"
 
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
@@ -284,29 +283,15 @@ inline RunResult run_tp1(const RunOptions& opts) {
     Qwen35LoadOptions load_options;
     load_options.verify_quantized_payload_crc = opts.verify_crc;
 
-    ::ps::resident::ResidentTestRequest resident_request;
-    resident_request.qwen_model_dir = opts.model_dir;
-    resident_request.qwen_options = load_options;
-    resident_request.device = tp1_device;
-    resident_request.arena_bytes = opts.arena_bytes;
-    auto resident_result = ::ps::resident::ResidentModelFixture::acquire(resident_request);
-    if (!resident_result.ok()) {
-        result.error = "tp1 resident acquire: " + resident_result.status().message();
-        return result;
-    }
-    ::ps::resident::ResidentModelFixture resident = resident_result.release();
-    resident.set_release_on_destroy(true);
-
-    auto arena_result = gpu::GpuArena::create(tp1_device, resident.arena_bytes());
+    auto arena_result = gpu::GpuArena::create(tp1_device, opts.arena_bytes);
     if (!arena_result.ok()) {
         result.error = "tp1 arena: " + arena_result.status().message();
         return result;
     }
     gpu::GpuArena arena = arena_result.release();
 
-    auto model_result = resident.enabled()
-        ? resident.take_qwen35()
-        : Qwen35Model::load_from_safetensors(opts.model_dir, arena, stream, load_options);
+    auto model_result = Qwen35Model::load_from_safetensors(opts.model_dir, arena, stream,
+                                                           load_options);
     if (!model_result.ok()) {
         result.error = "tp1 model load: " + model_result.status().message();
         return result;
@@ -425,7 +410,6 @@ inline RunResult run_tp2(const RunOptions& opts) {
     RunResult result;
     TpCoordinatorConfig config;
     config.model_dir = opts.model_dir;
-    config.model_host_socket = ::ps::models::model_host_socket_from_env();
     config.devices = tp_devices_from_env();
     config.max_scheduled_tokens = opts.max_scheduled_tokens;
     config.max_scheduled_requests = opts.max_scheduled_requests;

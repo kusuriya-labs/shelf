@@ -100,11 +100,8 @@ allocationのlifetimeを追跡しないため）。
 ### arena budget
 
 `Qwen35RuntimeConfig::arena_bytes == 0` は auto である。compute は `hipMemGetInfo`
-を model load 前に 1 回呼び、空き VRAM から 1 GiB を引いた値を ephemeral の容量に
-する。resident model host では resident 分がすでに GPU 上にあるため、
-`arena capacity = resident_bytes + (空き VRAM - 1 GiB)` として
-`ephemeral = capacity - resident_bytes` を確保する。TP=2 は rank ごとに自分の device の
-空き VRAM から同じ式で capacity を決める。
+を model load 前に 1 回呼び、空き VRAM から 1 GiB を引いた値を arena の容量に
+する。TP=2 は rank ごとに自分の device の空き VRAM から同じ式で capacity を決める。
 
 起動時 plan は stderr にだけ出す（`--serve-stdio` の stdout を汚さない）。
 

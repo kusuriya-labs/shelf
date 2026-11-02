@@ -3,7 +3,6 @@
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/state/state_types.h>
-#include <shelf/models/model_source.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
@@ -32,7 +31,6 @@ void usage(FILE* f) {
     std::fprintf(f,
         "Usage: shelf-bench batch [options]\n"
         "  --model-dir PATH       (required)\n"
-        "  --model-host SPEC      resident model host socket spec\n"
         "  --device N             (default 0)\n"
         "  --page-tokens N        (default 16)\n"
         "  --arena-gib N          (default auto = free VRAM minus 1 GiB)\n"
@@ -47,7 +45,6 @@ void usage(FILE* f) {
 
 struct BatchOptions {
     std::string model_dir;
-    std::optional<std::string> model_host_socket;
     int device = 0;
     int page_tokens = 16;
     double arena_gib = 0.0;
@@ -81,7 +78,6 @@ bool parse_args(int argc, char** argv, BatchOptions& o) {
             return argv[++i];
         };
         if (a == "--model-dir") { const char* v = next("--model-dir"); if (!v) return false; o.model_dir = v; }
-        else if (a == "--model-host") { const char* v = next("--model-host"); if (!v) return false; o.model_host_socket = v; }
         else if (a == "--device") { const char* v = next("--device"); if (!v || !parse_int(v, o.device)) return false; }
         else if (a == "--page-tokens") { const char* v = next("--page-tokens"); if (!v || !parse_int(v, o.page_tokens)) return false; }
         else if (a == "--arena-gib") { const char* v = next("--arena-gib"); if (!v) return false; if (std::strcmp(v, "auto") == 0) { o.arena_auto = true; } else { o.arena_gib = std::strtod(v, nullptr); if (o.arena_gib <= 0.0) return false; o.arena_auto = false; } }
@@ -208,26 +204,7 @@ int run_batch(int argc, char** argv) {
         arena_bytes = static_cast<std::size_t>(opts.arena_gib * 1024.0 * 1024.0 * 1024.0);
     }
 
-    ps::models::ModelLoadContext source_context;
-    source_context.qwen_model_dir = opts.model_dir;
-    source_context.device = opts.device;
-    source_context.model_host_socket = opts.model_host_socket;
-    auto source_result = ps::models::ModelSource::create(source_context);
-    if (!source_result.ok()) {
-        std::fprintf(stderr, "ModelSource::create failed: %s\n",
-            source_result.status().message().c_str());
-        return 1;
-    }
-    std::unique_ptr<ps::models::ModelSource> source(source_result.release());
-
-    const std::size_t resident = source->persistent_bytes();
-    if (resident > 0 && arena_bytes <= resident) {
-        std::fprintf(stderr, "resident model weights exceed the --arena-gib budget\n");
-        return 1;
-    }
-
-    auto arena_result = ps::gpu::GpuArena::create(
-        opts.device, source->ephemeral_bytes(arena_bytes));
+    auto arena_result = ps::gpu::GpuArena::create(opts.device, arena_bytes);
     if (!arena_result.ok()) {
         std::fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
         return 1;
@@ -235,7 +212,8 @@ int run_batch(int argc, char** argv) {
     auto arena = arena_result.release();
 
     ps::qwen35::Qwen35LoadOptions load_options;
-    auto model_result = source->load_qwen35(arena, stream, load_options);
+    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+        opts.model_dir, arena, stream, load_options);
     if (!model_result.ok()) {
         std::fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
         return 1;

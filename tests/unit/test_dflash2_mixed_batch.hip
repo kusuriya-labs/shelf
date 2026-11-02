@@ -10,7 +10,6 @@
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
 
-#include "support/resident_model_fixture.h"
 
 #include <array>
 #include <cstdint>
@@ -171,20 +170,7 @@ int main() {
     const uint32_t block_rows = static_cast<uint32_t>(config.block_size);
     const uint32_t k = block_rows - 1u;
 
-    ps::resident::ResidentTestRequest resident_request;
-    resident_request.qwen_model_dir = target_dir;
-    resident_request.dflash2_model_dir = model_dir;
-    resident_request.device = 0;
-    resident_request.arena_bytes = 30ull * 1024ull * 1024ull * 1024ull;
-    auto resident_result = ps::resident::ResidentModelFixture::acquire(resident_request);
-    if (!resident_result.ok()) {
-        std::printf("FAIL resident acquire: %s\n",
-                    resident_result.status().message().c_str());
-        return 1;
-    }
-    ps::resident::ResidentModelFixture resident = resident_result.release();
-
-    auto arena_result = ps::gpu::GpuArena::create(0, resident.arena_bytes());
+    auto arena_result = ps::gpu::GpuArena::create(0, 30ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
@@ -196,17 +182,15 @@ int main() {
         return 1;
     }
 
-    auto model_result = resident.enabled()
-        ? resident.take_qwen35()
-        : ps::qwen35::Qwen35Model::load_from_safetensors(target_dir, arena, stream);
+    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(target_dir, arena,
+                                                                       stream);
     check(model_result.ok(), "target model load");
     if (!model_result.ok()) return 1;
     ps::qwen35::Qwen35Model model = model_result.release();
     const ps::qwen35::Qwen35TextConfig& tc = model.text_config();
 
-    auto weights_result = resident.enabled()
-        ? resident.take_dflash2(nullptr)
-        : ps::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena, stream);
+    auto weights_result = ps::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena,
+                                                                    stream);
     check(weights_result.ok(), "dflash weight load");
     if (!weights_result.ok()) return 1;
     DFlash2Weights weights = weights_result.release();

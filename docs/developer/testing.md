@@ -261,38 +261,6 @@ group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` �
 prefix cache の JSONL contract は
 `tests/server/test_compute_prefix_contract.py` が固定する。
 
-## resident model session
-
-実モデルを読む重い GPU テストは、resident model host 経由で重みを session 中共有できる。
-仕様の正本は [resident_model.md](resident_model.md) である。
-
-GPU テストの session runner:
-
-```bash
-SHELF_MODEL_DIR_DFLASH2_TARGET=models/Qwen3.8-27B-FP8 \
-  python3 tools/run_resident_gpu_tests.py --list
-python3 tools/run_resident_gpu_tests.py --group host --devices 0
-python3 tools/run_resident_gpu_tests.py --group tp --devices 0,1
-```
-
-server regression の resident mode:
-
-```bash
-SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 \
-  python3 tests/server/run_server_regression.py --group core --resident-model
-```
-
-通常 mode（`--resident-model` なし）は従来挙動のままである。resident mode は
-test script の process isolation、`ServerHarness` / `ComputeHarness` の lifecycle、
-timeout / failure isolation を変更しない。変わるのは weight の lifetime のみである。
-
-session runner は worker の deadline 超過時に process group を kill し、
-kill の後に model host の health check を行う。healthy なら次の worker を起動し、
-unhealthy なら session を fail-closed で終了する。
-
-loader correctness test は `SHELF_DISABLE_RESIDENT_MODEL=1` で
-resident path を無効化できる。environment が無ければ従来 loader path が使われる。
-
 ## 実行層
 
 2 層を混同しない。

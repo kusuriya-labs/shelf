@@ -308,5 +308,5 @@ AMD RDNA4 GPU上での高速推論。
 - ドキュメントは日本語で書く
 - コードにはコメントを書かない
 - 編集前に既存ファイルを読む
-- entrypointは `shelf-compute` / `shelf-launcher` / `shelf-server` / `shelf-bench` の4つのみ（cmake/apps.cmake）
+- entrypointは `shelf-compute` / `shelf-server` / `shelf-bench` の3つのみ（cmake/apps.cmake）
 - publicヘッダのincludeは必ず `shelf/` プレフィックスを使う。相対includeや `src/...` パスは使用しない。

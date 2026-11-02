@@ -143,7 +143,7 @@ build_program_set(graph, weights, params, DECODE, opts)
 
 解決結果の同一性は経路ごとに次の契約で保証する。
 
-- **local load / resident load**: profile は compute プロセスが `<model_dir>/config.json` から独立に解決する（Resident archive には rope メタデータを追加しない）。`shelf-launcher`（model-host 経由）と local load で同じ `ROPE profile:` 行と同一の生成結果になることを確認済み。
+- **local load**: profile は compute プロセスが `<model_dir>/config.json` から独立に解決する。local load と TP load で同じ `ROPE profile:` 行と同一の生成結果になることを確認済み。
 - **TP**: 1 プロセスで単一の profile を解決し、`TpCoordinatorConfig` → `TpRankRuntimeConfig` → `ExecutorConfig` へ複製する。したがって rank 間で profile がずれる経路は存在しない。TP の KV 予算チェックは rank 単位で行い、不足時は `tp rank arena is too small` で起動を拒否する。
 - **KV 容量計画**: `--rope-factor` は `required_pages` / `kv_page_bytes` に寄与しない。KV 容量は `--max-seq-len` と `--kv-cache-capacity-tokens` のみで決まる。
 - **PrefixCache**: キーはトークン列のみで rope 識別子を含まないが、factor はプロセス起動時に固定され、キャッシュはプロセスローカルであるため、異なる factor 間で KV を流用する経路は存在しない。prefix の保存は prefill 位置が `page_tokens` の倍数のときに限られ、復元は保存済み prefix より長いプロンプトに限る。

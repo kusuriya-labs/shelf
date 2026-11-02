@@ -94,18 +94,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     }
 
     Qwen35LoadOptions load_options = config.load_options;
-    ps::models::ModelLoadContext source_context;
-    source_context.qwen_model_dir = config.model_dir;
-    source_context.qwen_options = load_options;
-    source_context.device = config.device_id;
-    source_context.tp_size = config.tp_size;
-    source_context.tp_rank = config.tp_rank;
-    source_context.model_host_socket = config.model_host_socket;
-    auto source_result = ps::models::ModelSource::create(source_context);
-    if (!source_result.ok()) return source_result.status();
-    rank->source_ = source_result.release();
 
-    const std::size_t persistent = rank->source_->persistent_bytes();
     std::size_t arena_budget = config.arena_bytes;
     if (arena_budget == 0) {
         std::size_t free_bytes = 0;
@@ -123,29 +112,20 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             return Status::insufficient_memory(
                 "no VRAM available for the tp rank arena", __FILE__, __LINE__);
         }
-        arena_budget = persistent + available;
+        arena_budget = available;
         std::fprintf(stderr,
-                     "ARENA auto: tp_rank=%u free=%s resident=%s capacity=%s\n",
+                     "ARENA auto: tp_rank=%u free=%s capacity=%s\n",
                      config.tp_rank, gpu::format_gib(free_bytes).c_str(),
-                     gpu::format_gib(persistent).c_str(),
                      gpu::format_gib(arena_budget).c_str());
     }
-    if (persistent > 0 && arena_budget <= persistent) {
-        return Status::insufficient_memory(
-            "resident tp rank weights exceed the arena budget", __FILE__, __LINE__);
-    }
-    if (persistent > 0) {
-        std::fprintf(stderr, "model source: resident rank_bytes=%zu arena_bytes=%zu\n",
-                     persistent, arena_budget - persistent);
-    }
 
-    auto arena_result = gpu::GpuArena::create(
-        config.device_id, rank->source_->ephemeral_bytes(arena_budget));
+    auto arena_result = gpu::GpuArena::create(config.device_id, arena_budget);
     if (!arena_result.ok()) return arena_result.status();
     rank->arena_.emplace(arena_result.release());
 
-    auto model_result = rank->source_->load_qwen35(
-        rank->arena_.value(), rank->stream_, load_options);
+    auto model_result = Qwen35Model::load_tensor_parallel_from_safetensors(
+        config.model_dir, config.tp_size, config.tp_rank, rank->arena_.value(),
+        rank->stream_, load_options);
     if (!model_result.ok()) return model_result.status();
     rank->model_.emplace(model_result.release());
 
@@ -340,7 +320,6 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.tp_combine_f32 = config.tp_combine_f32;
         rank_config.rope_profile = config.rope_profile;
         rank_config.load_options = config.load_options;
-        rank_config.model_host_socket = config.model_host_socket;
         auto rank_result = TpRankRuntime::create(rank_config);
         if (!rank_result.ok()) return rank_result.status();
         ranks_.push_back(rank_result.release());

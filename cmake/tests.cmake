@@ -22,17 +22,6 @@ add_executable(shelf-gpu-test-runner
 )
 target_compile_features(shelf-gpu-test-runner PRIVATE cxx_std_20)
 
-# Shared resident fixture used by native host backend test binaries.
-add_library(shelf-resident-fixture STATIC
-    "${_PS_TESTS_ROOT}/support/resident_model_fixture.cpp"
-)
-shelf_set_rocm_rpath(shelf-resident-fixture)
-target_compile_features(shelf-resident-fixture PRIVATE cxx_std_20)
-target_include_directories(shelf-resident-fixture PUBLIC "${_PS_TESTS_ROOT}")
-target_link_libraries(shelf-resident-fixture PUBLIC shelf_resident)
-target_compile_options(shelf-resident-fixture PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-shelf_set_hip_archs(shelf-resident-fixture)
-
 # shelf_add_test(
 #   NAME <test>
 #   SOURCE <relpath from tests/>
@@ -134,14 +123,14 @@ target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_barrier_group PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES shelf_runtime)
-shelf_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES shelf-resident-fixture shelf_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
-shelf_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf-resident-fixture shelf_qwen35_runtime)
+shelf_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35)
 target_include_directories(test_qwen35_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
 # DFlash2 + TP: drafter は非分割、verify のみ TP2 で回す経路の E2E。
-shelf_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+shelf_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 target_include_directories(test_dflash2_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
@@ -549,16 +538,6 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # optional: current regression / infrastructure acceptance（external model）
     # -----------------------------------------------------------------------
 
-    # Resident model IPC acceptance: worker attaches the compact resident block
-    # owned by shelf-model-host and verifies weight bytes.
-    # Needs a running shelf-model-host (SHELF_MODEL_HOST_SOCKET)
-    # plus a real model dir.
-    shelf_add_test(NAME test_resident_model_ipc SOURCE unit/test_resident_model_ipc.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf-resident-fixture shelf_resident shelf_weights shelf_qwen35)
-
-    # Resident fault-injection worker: attaches, then sleeps until the session
-    # runner kills its process group on deadline.
-    shelf_add_test(NAME test_resident_timeout_worker SOURCE unit/test_resident_timeout_worker.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES shelf-resident-fixture shelf_resident shelf_weights shelf_qwen35)
-
     # MTP weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_MTP (preferred) or SHELF_MODEL_DIR.
     # Skips (exit 77) when none is set.
@@ -583,19 +562,19 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
 
     # DFlash2 batched target verify: 2 requests in one verify batch must match the
     # per-request single path exactly.
-    shelf_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 batched target verify throughput scaling (perf, not correctness).
-    shelf_add_test(NAME test_dflash2_batch_perf SOURCE unit/test_dflash2_batch_perf.hip LABELS "gpu1;perf;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_batch_perf SOURCE unit/test_dflash2_batch_perf.hip LABELS "gpu1;perf;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 mixed batch: decode region + verify region in one ScheduledBatch must
     # match the per-region single-class batches exactly.
-    shelf_add_test(NAME test_dflash2_mixed_batch SOURCE unit/test_dflash2_mixed_batch.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_mixed_batch SOURCE unit/test_dflash2_mixed_batch.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 target hidden taps: external tap == internal layer output.
     # Target model dir via SHELF_MODEL_DIR_DFLASH2_TARGET (skips when unset);
     # tap layer ids come from SHELF_MODEL_DIR_DFLASH2 when available.
-    shelf_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES shelf-resident-fixture shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
     target_include_directories(test_dflash2_target_taps PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: real hidden probe (num_output_rows large).

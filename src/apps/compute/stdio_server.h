@@ -7,7 +7,6 @@
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <shelf/resident/resident_client.h>
 
 #include <cstdint>
 #include <optional>

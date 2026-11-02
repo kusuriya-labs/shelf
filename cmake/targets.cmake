@@ -306,7 +306,7 @@ add_library(shelf_qwen35_runtime STATIC
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu shelf_resident shelf_model_source)
+target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
 target_compile_options(shelf_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)
@@ -315,41 +315,6 @@ if(SHELF_HIP_GRAPH)
         src/shelf/models/qwen35/runtime/executor.hip
         PROPERTIES COMPILE_DEFINITIONS "SHELF_HIP_GRAPH")
 endif()
-
-# Resident model client: attaches GPU model weights owned by the internal
-# shelf-model-host component (see cmake/model_host.cmake). Used by
-# shelf-compute and by test workers. Enabled per process by
-# --model-host / SHELF_MODEL_HOST_SOCKET; not a user-facing entrypoint.
-# Contract: docs/developer/resident_model.md
-add_library(shelf_resident STATIC
-    src/shelf/resident/resident_model_key.cpp
-    src/shelf/resident/resident_format.cpp
-    src/shelf/resident/resident_protocol.cpp
-    src/shelf/resident/resident_client.cpp
-    src/shelf/resident/resident_host.cpp
-)
-target_compile_features(shelf_resident PRIVATE cxx_std_20)
-target_include_directories(shelf_resident PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(shelf_resident PUBLIC
-    shelf_core
-    shelf_gpu
-    shelf_weights
-    shelf_qwen35
-)
-target_compile_options(shelf_resident PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
-
-# Model source selection: local safetensors load or resident model host attach.
-# Startup path only; the choice is resolved once per process.
-add_library(shelf_model_source STATIC
-    src/shelf/models/model_source.cpp
-)
-target_compile_features(shelf_model_source PRIVATE cxx_std_20)
-target_include_directories(shelf_model_source PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(shelf_model_source PUBLIC
-    shelf_qwen35
-    shelf_resident
-)
-target_compile_options(shelf_model_source PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Aggregate INTERFACE target. Tests and benchmarks link against this.
 add_library(shelf INTERFACE)
@@ -369,7 +334,6 @@ target_link_libraries(
         shelf_qwen35
         shelf_qwen35_runtime
         shelf_qwen4exp
-        shelf_resident
         shelf_quant_format
         shelf_quant_bundle
 )

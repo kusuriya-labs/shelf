@@ -39,5 +39,4 @@
 ## testing
 
 - [testing.md](testing.md) — required acceptance / optional E2E / quality regression / server regression group
-- [resident_model.md](resident_model.md) — Resident Model Infrastructure（model weight の lifetime 分離、ModelSource、protocol、budget、health check）
 - [testing_f64_oracle.md](testing_f64_oracle.md) — f64 oracle による token 監査

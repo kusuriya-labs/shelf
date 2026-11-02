@@ -1,8 +1,7 @@
 # Shelf application entrypoints.
 #
-# The four user-facing executables:
+# The three user-facing executables:
 #   shelf-compute   raw token ID in/out inference engine
-#   shelf-launcher  resident model host orchestrator (Python)
 #   shelf-server    OpenAI-compatible serving product (aiohttp adapter)
 #   shelf-bench     E2E benchmark (pp / tg) + GEMM kernel micro-benchmark
 
@@ -21,19 +20,7 @@ target_include_directories(shelf-compute PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(shelf-compute PRIVATE shelf)
 shelf_set_hip_archs(shelf-compute)
 
-# Launcher: Python script copied into the build directory.
-set(SHELF_LAUNCHER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/launcher/shelf_launcher.py")
-set(SHELF_LAUNCHER_TARGET "${CMAKE_CURRENT_BINARY_DIR}/shelf-launcher")
-add_custom_command(
-    OUTPUT "${SHELF_LAUNCHER_TARGET}"
-    COMMAND ${CMAKE_COMMAND} -E copy "${SHELF_LAUNCHER_SCRIPT}" "${SHELF_LAUNCHER_TARGET}"
-    COMMAND /bin/sh -c "chmod +x '${SHELF_LAUNCHER_TARGET}'"
-    DEPENDS "${SHELF_LAUNCHER_SCRIPT}"
-    COMMENT "Staging shelf-launcher"
-)
-add_custom_target(shelf-launcher-stage ALL DEPENDS "${SHELF_LAUNCHER_TARGET}")
-
-# Server product: Python launcher plus the OpenAI protocol adapter, the async
+# Server product: Python entrypoint plus the OpenAI protocol adapter, the async
 # compute client and the shared chat codec. Everything the server needs lives
 # under build/shelf-server-lib/; nothing is imported from the source tree
 # at runtime.

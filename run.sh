@@ -1,5 +1,5 @@
 #!/bin/bash
-./build/shelf-launcher server \
+./build/shelf-server \
     --model-dir models/Qwen3.8-27B-FP8 \
     --dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7 \
     --device 0,1 \

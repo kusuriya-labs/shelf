@@ -33,7 +33,6 @@ struct ComputeOptions {
     bool serve_stdio = false;
     ps::qwen35::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
-    std::string model_host;
     unsigned long dflash2_drafts = 7;
     int dflash2_stats = 1;
     int prefix_cache_enabled = 1;

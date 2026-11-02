@@ -174,18 +174,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::hip_error("hipStreamCreate", hipGetErrorString(herr), __FILE__, __LINE__);
     }
 
-    ps::models::ModelLoadContext source_context;
-    source_context.qwen_model_dir = config_.model_dir;
-    source_context.qwen_options.verify_quantized_payload_crc = config_.verify_weights;
-    source_context.device = config_.devices[0];
-    source_context.model_host_socket = config_.model_host_socket;
-    auto source_result = ps::models::ModelSource::create(source_context);
-    if (!source_result.ok()) {
-        return source_result.status();
-    }
-    source_ = source_result.release();
-
-    const std::size_t resident = resident_bytes();
     if (auto_arena_) {
         const std::size_t free_bytes = startup_available_bytes_;
         const std::size_t available = free_bytes > kAutoArenaMarginBytes
@@ -195,19 +183,13 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             return Status::insufficient_memory(
                 "no VRAM available for the arena", __FILE__, __LINE__);
         }
-        config_.arena_bytes = resident + available;
-        fprintf(stderr, "ARENA auto: free=%s resident=%s capacity=%s\n",
+        config_.arena_bytes = available;
+        fprintf(stderr, "ARENA auto: free=%s capacity=%s\n",
                 gpu::format_gib(free_bytes).c_str(),
-                gpu::format_gib(resident).c_str(),
                 gpu::format_gib(config_.arena_bytes).c_str());
         fflush(stderr);
     }
-    if (resident > 0 && config_.arena_bytes <= resident) {
-        return Status::insufficient_memory(
-            "resident model weights exceed the --arena-gib budget", __FILE__, __LINE__);
-    }
-    auto arena_result = ps::gpu::GpuArena::create(
-        config_.devices[0], source_->ephemeral_bytes(config_.arena_bytes));
+    auto arena_result = ps::gpu::GpuArena::create(config_.devices[0], config_.arena_bytes);
     if (!arena_result.ok()) {
         return arena_result.status();
     }
@@ -217,7 +199,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     options.verify_quantized_payload_crc = config_.verify_weights;
 
     const auto t_load_start = std::chrono::steady_clock::now();
-    auto model_result = source_->load_qwen35(*arena_, stream_, options);
+    auto model_result = qwen35::Qwen35Model::load_from_safetensors(
+        config_.model_dir, *arena_, stream_, options);
     if (!model_result.ok()) {
         return model_result.status();
     }
@@ -510,16 +493,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 }
 
 Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
-    ps::models::ModelLoadContext source_context;
-    source_context.qwen_model_dir = config_.model_dir;
-    source_context.qwen_options.verify_quantized_payload_crc = config_.verify_weights;
-    source_context.device = config_.devices[0];
-    auto source_result = ps::models::ModelSource::create(source_context);
-    if (!source_result.ok()) {
-        return source_result.status();
-    }
-    source_ = source_result.release();
-
     qwen35::runtime::TpCoordinatorConfig tp_config;
     tp_config.model_dir = config_.model_dir;
     tp_config.devices = config_.devices;
@@ -549,7 +522,6 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         tp_config.rope_profile = *config_.rope_profile;
     }
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
-    tp_config.model_host_socket = config_.model_host_socket;
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto coordinator_result = qwen35::runtime::TpCoordinator::create(tp_config);

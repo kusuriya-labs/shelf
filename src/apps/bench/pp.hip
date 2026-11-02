@@ -6,7 +6,6 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/state/state_types.h>
-#include <shelf/models/model_source.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
@@ -39,7 +38,6 @@ struct BenchOptions {
     std::vector<int> devices = {0};
     int tp = 1;
     std::string model_dir;
-    std::optional<std::string> model_host_socket;
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
     double arena_gib = 0.0;
@@ -64,7 +62,6 @@ void print_usage(FILE* out) {
         "                                (default 0; e.g. --device 0,2)\n"
         "  --tp N                       tensor parallel degree 1 | 2 (default 1)\n"
         "  --model-dir PATH             (required)\n"
-        "  --model-host SPEC            resident model host socket spec\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
@@ -165,8 +162,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--model-dir") {
             opts.model_dir = need_value();
-        } else if (key == "--model-host") {
-            opts.model_host_socket = need_value();
         } else if (key == "--kv-cache-dtype") {
             opts.kv_cache_dtype = need_value();
             if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8") {
@@ -346,33 +341,15 @@ int run_pp(int argc, char** argv) {
             return 1;
         }
 
-        ps::models::ModelLoadContext source_context;
-        source_context.qwen_model_dir = opts.model_dir;
-        source_context.device = opts.devices[0];
-        source_context.model_host_socket = opts.model_host_socket;
-        auto source_result = ps::models::ModelSource::create(source_context);
-        if (!source_result.ok()) {
-            fprintf(stderr, "ModelSource::create failed: %s\n",
-                source_result.status().message().c_str());
-            return 1;
-        }
-        std::unique_ptr<ps::models::ModelSource> source(source_result.release());
-
-        const std::size_t resident = source->persistent_bytes();
-        if (resident > 0 && arena_bytes <= resident) {
-            fprintf(stderr, "resident model weights exceed the --arena-gib budget\n");
-            return 1;
-        }
-
-        auto arena_result = ps::gpu::GpuArena::create(
-            opts.devices[0], source->ephemeral_bytes(arena_bytes));
+        auto arena_result = ps::gpu::GpuArena::create(opts.devices[0], arena_bytes);
         if (!arena_result.ok()) {
             fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
             return 1;
         }
         tp1_arena.emplace(arena_result.release());
 
-        auto model_result = source->load_qwen35(*tp1_arena, stream, {});
+        auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+            opts.model_dir, *tp1_arena, stream, {});
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
             return 1;
@@ -437,7 +414,6 @@ int run_pp(int argc, char** argv) {
     } else {
         ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
-        tp_cfg.model_host_socket = opts.model_host_socket;
         tp_cfg.devices = opts.devices;
         tp_cfg.max_scheduled_tokens = exec_max_tokens;
         tp_cfg.max_scheduled_requests = 1;

@@ -96,8 +96,6 @@ def build_compute_argv(opts) -> list[str]:
         ]
     if opts.tp > 1:
         argv += ["--tp", str(opts.tp)]
-    if opts.model_host:
-        argv += ["--model-host", opts.model_host]
     if opts.verify_weights:
         argv += ["--verify-weights", "1"]
     return argv
@@ -382,8 +380,6 @@ def parse_args(argv=None):
                              "count must match --tp (default 0)")
     parser.add_argument("--tp", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
-    parser.add_argument("--model-host", default=None,
-                        help="resident model host socket spec forwarded to compute")
     parser.add_argument("--kv-cache-dtype", default="bf16",
                         choices=("bf16", "fp8"),
                         help="KV cache dtype (default bf16)")

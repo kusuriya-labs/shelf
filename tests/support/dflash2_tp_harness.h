@@ -1,7 +1,6 @@
 #pragma once
 
 #include "support/tp_run_harness.h"
-#include "support/resident_model_fixture.h"
 
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/context_state.h>
@@ -95,31 +94,15 @@ inline RunResult run_dflash2_tp1(const DFlash2Options& opts) {
     Qwen35LoadOptions load_options;
     load_options.verify_quantized_payload_crc = o.verify_crc;
 
-    ::ps::resident::ResidentTestRequest resident_request;
-    resident_request.qwen_model_dir = o.model_dir;
-    resident_request.qwen_options = load_options;
-    resident_request.dflash2_model_dir = opts.dflash2_model_dir;
-    resident_request.device = tp1_device;
-    resident_request.arena_bytes = o.arena_bytes;
-    auto resident_result = ::ps::resident::ResidentModelFixture::acquire(resident_request);
-    if (!resident_result.ok()) {
-        result.error = "dflash2 tp1 resident acquire: " +
-                       resident_result.status().message();
-        return result;
-    }
-    ::ps::resident::ResidentModelFixture resident = resident_result.release();
-    resident.set_release_on_destroy(true);
-
-    auto arena_result = gpu::GpuArena::create(tp1_device, resident.arena_bytes());
+    auto arena_result = gpu::GpuArena::create(tp1_device, o.arena_bytes);
     if (!arena_result.ok()) {
         result.error = "dflash2 tp1 arena: " + arena_result.status().message();
         return result;
     }
     gpu::GpuArena arena = arena_result.release();
 
-    auto model_result = resident.enabled()
-        ? resident.take_qwen35()
-        : Qwen35Model::load_from_safetensors(o.model_dir, arena, stream, load_options);
+    auto model_result = Qwen35Model::load_from_safetensors(o.model_dir, arena, stream,
+                                                           load_options);
     if (!model_result.ok()) {
         result.error = "dflash2 tp1 model: " + model_result.status().message();
         return result;
@@ -266,22 +249,8 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     }
     const auto dflash_config = dflash_config_result.release();
 
-    ::ps::resident::ResidentTestRequest draft_request;
-    draft_request.dflash2_model_dir = opts.dflash2_model_dir;
-    draft_request.device = tp_harness::tp_devices_from_env()[0];
-    auto draft_resident_result =
-        ::ps::resident::ResidentModelFixture::acquire(draft_request);
-    if (!draft_resident_result.ok()) {
-        result.error = "dflash2 tp2 resident acquire: " +
-                       draft_resident_result.status().message();
-        return result;
-    }
-    ::ps::resident::ResidentModelFixture draft_resident =
-        draft_resident_result.release();
-
     TpCoordinatorConfig config;
     config.model_dir = o.model_dir;
-    config.model_host_socket = ::ps::models::model_host_socket_from_env();
     config.devices = tp_harness::tp_devices_from_env();
     config.max_scheduled_tokens =
         std::max(o.max_scheduled_tokens,
@@ -312,10 +281,8 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     const hipStream_t stream = rank0.stream();
     gpu::GpuArena& arena = rank0.arena();
 
-    auto weights_result = draft_resident.enabled()
-        ? draft_resident.take_dflash2(nullptr)
-        : ::ps::qwen35::dflash2::load_dflash2_weights(
-              opts.dflash2_model_dir, dflash_config, arena, stream);
+    auto weights_result = ::ps::qwen35::dflash2::load_dflash2_weights(
+        opts.dflash2_model_dir, dflash_config, arena, stream);
     if (!weights_result.ok()) {
         result.error = "dflash2 weights: " + weights_result.status().message();
         return result;

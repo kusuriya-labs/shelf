@@ -87,12 +87,6 @@ def parse_args(argv):
     parser.add_argument("--list", action="store_true", help="list groups and exit")
     parser.add_argument("--tail", type=int, default=40,
                         help="output lines to show for a failing test")
-    parser.add_argument("--resident-model", action="store_true",
-                        help="run inside a resident model host session")
-    parser.add_argument("--resident-devices", default="0,1",
-                        help="comma separated GPU indices for resident hosts")
-    parser.add_argument("--resident-staging-gib", type=int, default=30,
-                        help="staging arena capacity of each resident host")
     return parser.parse_args(argv)
 
 
@@ -114,56 +108,6 @@ def test_env(extra=None):
     if extra:
         env.update(extra)
     return env
-
-
-def existing_dirs(*names):
-    out = []
-    for name in names:
-        value = os.environ.get(name)
-        if value and Path(value).is_dir():
-            resolved = str(Path(value).resolve())
-            if resolved not in out:
-                out.append(resolved)
-    return out
-
-
-class ResidentHosts:
-    def __init__(self, devices, staging_gib, build_dir):
-        sys.path.insert(0, str(REPO_ROOT / "tools"))
-        from resident_session import ResidentSession
-
-        self.sessions = []
-        target = existing_dirs("SHELF_SERVER_MODEL_DIR", "SHELF_MODEL_DIR")
-        drafts = existing_dirs("SHELF_DFLASH2_MODEL_DIR",
-                               "SHELF_MODEL_DIR_DFLASH2")
-        for device in devices:
-            session = ResidentSession(
-                build_dir=build_dir,
-                device=device,
-                staging_gib=staging_gib,
-                warmup_model_dirs=target,
-                warmup_dflash2_dirs=drafts,
-            )
-            session.start()
-            self.sessions.append(session)
-
-    @property
-    def socket_env(self):
-        from resident_session import SOCKET_ENV
-        return {SOCKET_ENV: ",".join(f"{s.device}={s.socket_path}"
-                                     for s in self.sessions)}
-
-    def health(self):
-        return all(session.health() for session in self.sessions)
-
-    def report(self):
-        for session in self.sessions:
-            print(f"  device={session.device} disk_load_count={session.disk_load_count()} "
-                  f"attach_count={session.attach_count()}")
-
-    def shutdown(self):
-        for session in self.sessions:
-            session.shutdown()
 
 
 def run_test(name, env, tail):
@@ -204,51 +148,24 @@ def main(argv=None) -> int:
 
     groups = selected(args)
     env = test_env()
-    hosts = None
-    if args.resident_model:
-        if os.environ.get("SHELF_DISABLE_RESIDENT_MODEL"):
-            print("resident model session skipped: "
-                  "SHELF_DISABLE_RESIDENT_MODEL is set")
-        else:
-            devices = [int(part) for part in args.resident_devices.split(",")
-                       if part.strip()]
-            build_dir = Path(env["SHELF_BUILD_DIR"])
-            hosts = ResidentHosts(devices, args.resident_staging_gib, build_dir)
-            env = test_env(hosts.socket_env)
-            print(f"resident session: devices={','.join(map(str, devices))} "
-                  f"build_dir={build_dir}")
 
     failures = []
     passed = 0
-    aborted = False
     print(f"server regression: groups={','.join(groups)}")
-    try:
-        for group in groups:
-            print(f"===== group {group} =====")
-            for test in GROUPS[group]:
-                if run_test(test, env, args.tail):
-                    passed += 1
-                else:
-                    failures.append(test)
-                if hosts is not None and not hosts.health():
-                    print("[ABORT] resident host unhealthy; stopping the session")
-                    aborted = True
-                    break
-            if aborted:
-                break
-    finally:
-        if hosts is not None:
-            print("===== resident session stats")
-            hosts.report()
-            hosts.shutdown()
+    for group in groups:
+        print(f"===== group {group} =====")
+        for test in GROUPS[group]:
+            if run_test(test, env, args.tail):
+                passed += 1
+            else:
+                failures.append(test)
 
-    print(f"===== SUMMARY passed={passed} failed={len(failures)}"
-          f"{' aborted=1' if aborted else ''}")
+    print(f"===== SUMMARY passed={passed} failed={len(failures)}")
     if failures:
         for test in failures:
             print(f"  FAIL {test}")
         return 1
-    return 1 if aborted else 0
+    return 0
 
 
 if __name__ == "__main__":

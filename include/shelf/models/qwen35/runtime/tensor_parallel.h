@@ -8,7 +8,6 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/tp/tp_barrier_group.h>
 #include <shelf/runtime/tp/tp_transports.h>
-#include <shelf/models/model_source.h>
 
 #include <hip/hip_runtime.h>
 
@@ -50,7 +49,6 @@ struct TpRankRuntimeConfig {
     std::uint32_t tp_combine_f32 = 0;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
-    std::optional<std::string> model_host_socket;
 };
 
 class TpRankRuntime {
@@ -86,7 +84,6 @@ private:
     int device_id_ = -1;
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
-    std::unique_ptr<ps::models::ModelSource> source_;
     std::optional<Qwen35Model> model_;
     std::optional<Qwen35TensorParallelContext> context_;
     std::optional<SequenceSlotPool> seq_pool_;
@@ -115,7 +112,6 @@ struct TpCoordinatorConfig {
     std::uint32_t tp_combine_f32 = 0;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
-    std::optional<std::string> model_host_socket;
 };
 
 class TpCoordinator final : public TpBatchHook {

@@ -861,7 +861,6 @@ DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path �
 
 `shelf-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
 `shelf-compute` へ転送する（= compute の既定をそのまま使う）。
-`shelf-launcher` も drafter の option を child に透過する。
 
 ### constrained lm_head（DFlash2 有効時）
 

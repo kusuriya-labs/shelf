@@ -12,7 +12,6 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
-#include <shelf/models/model_source.h>
 #include <hip/hip_runtime.h>
 
 #include <array>
@@ -28,7 +27,6 @@ namespace app {
 struct Qwen35RuntimeConfig {
     std::string model_dir;
     std::string dflash2_model_dir;
-    std::optional<std::string> model_host_socket;
     uint32_t max_seq_len = 512;
     uint32_t max_scheduled_tokens = 0;
     uint32_t max_concurrent_requests = 1;
@@ -121,16 +119,6 @@ class Qwen35ComputeRuntime {
 
     double model_load_ms() const noexcept { return model_load_ms_; }
 
-    bool resident_model() const noexcept
-    {
-        return source_ != nullptr && source_->resident();
-    }
-
-    std::size_t resident_bytes() const noexcept
-    {
-        return source_ == nullptr ? 0 : source_->persistent_bytes();
-    }
-
     Result<qwen35::dflash2::DFlash2Weights> load_dflash2_weights(
         const qwen35::dflash2::DFlash2Config& config,
         const ps::weights::WeightLoadOptions& options = {});
@@ -184,7 +172,6 @@ class Qwen35ComputeRuntime {
 
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
-    std::unique_ptr<ps::models::ModelSource> source_;
     std::unique_ptr<qwen35::Qwen35Model> model_;
     std::optional<state::SequenceSlotPool> slot_pool_;
     std::optional<state::GdnStatePool> gdn_pool_;

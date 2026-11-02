@@ -76,7 +76,6 @@ Ready.
 | `--arena-gib N\|auto` | GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tp (default 0) |
 | `--tp {1,2}` | tensor parallel size forwarded to compute (default 1) |
-| `--model-host MODEL_HOST` | resident model host socket spec forwarded to compute |
 | `--kv-cache-dtype {bf16,fp8}` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--kv-cache-capacity-tokens KV_CACHE_CAPACITY_TOKENS` | physical KV token capacity (0 = derive from the arena budget) |

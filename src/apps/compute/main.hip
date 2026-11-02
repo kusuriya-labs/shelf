@@ -2,7 +2,6 @@
 #include "single_request.h"
 #include "stdio_server.h"
 
-#include <shelf/models/model_source.h>
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
@@ -70,9 +69,6 @@ int main(int argc, char** argv) {
     ps::app::Qwen35RuntimeConfig config;
     config.model_dir = opt.model_dir;
     config.dflash2_model_dir = ps::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
-    config.model_host_socket = opt.model_host.empty()
-        ? ps::models::model_host_socket_from_env()
-        : std::optional<std::string>(opt.model_host);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
     config.kv_cache_capacity_tokens = static_cast<uint32_t>(opt.kv_cache_capacity_tokens);

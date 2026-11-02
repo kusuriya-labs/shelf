@@ -44,12 +44,11 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 | MTP | `lower_qwen35_mtp_to_primitives` は profile を受け取るようになったが production 経路に未接続（tests のみ）。「MTP 経路も整合する」完了定義は lowering テストの範囲に限定して扱う |
 | prefix cache のキー | キーはトークン列のみで rope 識別子を含まない。factor はプロセス起動時に固定・キャッシュはプロセスローカルなので現状は安全。factor を実行中に変える機構や永続化を入れる場合はキーへの追加が必要 |
 | uint32 の上限 | 100 万トークン域の `max_seq_len + 1` / `row_positions` の加算順序とオーバーフロー境界の検証（単体テスト）が未実施 |
-| host の取得キャッシュ | model-host の Acquire キャッシュ fingerprint は `config.json` の内容を含まない。長時間稼働する host で設定変更が検出できない（launcher は毎回新規起動のため現状の実害は限定的） |
 | server 回帰の前提 | `tests/server/test_server_context_boundary.py` は FP8 重み 27 GiB + 32K BF16 KV + workspace が 32 GiB のカードに収まらず、この環境では起動できない（arena に 3.26 GiB しか残らない）。テスト側の容量前提を見直すか、FP8 KV / 小さい `--working-set-reserve-gib` で実行する経路を用意する |
 
 ## 5. ドキュメント
 
-- TP・Resident・PrefixCache・server の profile 同一性契約は [developer/qwen35.md](developer/qwen35.md) §2.5 に記載済み。
+- TP・PrefixCache・server の profile 同一性契約は [developer/qwen35.md](developer/qwen35.md) §2.5 に記載済み。
 - Gate 5/6 の結果が出た時点で、現在形の契約は `docs/developer/`、性能値は `docs/perf/`、経緯は `docs/research/` に分離して更新する。
 
 ## 6. server の usage / メタ情報配信（Phase A〜C）

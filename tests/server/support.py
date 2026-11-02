@@ -424,7 +424,7 @@ def test_arena_gib(default: int = 31) -> int:
 
 
 class ServerHarness:
-    """Starts the shelf-server launcher and waits for readiness."""
+    """Starts the shelf-server process and waits for readiness."""
 
     def __init__(self, log_path: Path | None = None, env: dict | None = None,
                  startup_timeout: float = 240.0, max_seq_len: int = 512,

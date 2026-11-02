@@ -21,9 +21,6 @@ include(cmake/targets.cmake)
 # User-facing application entrypoints.
 include(cmake/apps.cmake)
 
-# Resident model host (internal runtime component).
-include(cmake/model_host.cmake)
-
 # Test suite.
 if(SHELF_BUILD_TESTS)
     enable_testing()

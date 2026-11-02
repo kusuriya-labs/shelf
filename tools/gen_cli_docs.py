@@ -26,10 +26,6 @@ def sources(build_dir: Path) -> list[Source]:
     bench = str(build_dir / "shelf-bench")
     return [
         Source("compute", REPO_ROOT / "docs/user/compute.md", (compute, "--help"), False),
-        Source("launcher", REPO_ROOT / "docs/user/launcher.md",
-               (sys.executable,
-                str(REPO_ROOT / "src/apps/launcher/shelf_launcher.py"), "--help"),
-               True),
         Source("server", REPO_ROOT / "docs/user/server.md",
                (sys.executable, str(REPO_ROOT / "src/apps/server/shelf_server.py"),
                 "--help"), True),

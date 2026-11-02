@@ -8,7 +8,6 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/model_source.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -24,7 +23,6 @@ namespace {
 
 struct QualityOptions {
     std::string model_dir;
-    std::optional<std::string> model_host_socket;
     std::string tokens_file;
     int context = 128;
     int score_start = 0;
@@ -44,7 +42,6 @@ void print_usage(FILE* out) {
     fprintf(out,
         "Usage: shelf-bench quality [options]\n"
         "  --model-dir PATH             (required)\n"
-        "  --model-host SPEC            resident model host socket spec\n"
         "  --tokens-file PATH           PSKLDTOK corpus (required)\n"
         "  --context N                  tokens pre-filled before scoring (default 128)\n"
         "  --score-start-position N     first scored token position, 1-based absolute\n"
@@ -119,8 +116,6 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
         };
         if (key == "--model-dir") {
             opts.model_dir = need_value();
-        } else if (key == "--model-host") {
-            opts.model_host_socket = need_value();
         } else if (key == "--tokens-file") {
             opts.tokens_file = need_value();
         } else if (key == "--context") {
@@ -355,26 +350,7 @@ int run_quality(int argc, char** argv) {
     ps::qwen35::Executor* executor = nullptr;
 
     if (opts.tp == 1) {
-        ps::models::ModelLoadContext source_context;
-        source_context.qwen_model_dir = opts.model_dir;
-        source_context.device = opts.devices[0];
-        source_context.model_host_socket = opts.model_host_socket;
-        auto source_result = ps::models::ModelSource::create(source_context);
-        if (!source_result.ok()) {
-            fprintf(stderr, "ModelSource::create failed: %s\n",
-                    source_result.status().message().c_str());
-            return 1;
-        }
-        std::unique_ptr<ps::models::ModelSource> source(source_result.release());
-
-        const std::size_t resident = source->persistent_bytes();
-        if (resident > 0 && arena_bytes <= resident) {
-            fprintf(stderr, "resident model weights exceed the --arena-gib budget\n");
-            return 1;
-        }
-
-        auto arena_result = ps::gpu::GpuArena::create(
-            opts.devices[0], source->ephemeral_bytes(arena_bytes));
+        auto arena_result = ps::gpu::GpuArena::create(opts.devices[0], arena_bytes);
         if (!arena_result.ok()) {
             fprintf(stderr, "GpuArena::create failed: %s\n",
                     arena_result.status().message().c_str());
@@ -382,7 +358,8 @@ int run_quality(int argc, char** argv) {
         }
         tp1_arena = std::make_unique<ps::gpu::GpuArena>(arena_result.release());
 
-        auto model_result = source->load_qwen35(*tp1_arena, stream, {});
+        auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+            opts.model_dir, *tp1_arena, stream, {});
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
             return 1;
@@ -398,7 +375,6 @@ int run_quality(int argc, char** argv) {
     } else {
         ps::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
-        tp_cfg.model_host_socket = opts.model_host_socket;
         tp_cfg.devices = opts.devices;
         tp_cfg.max_scheduled_tokens = exec_config.max_scheduled_tokens;
         tp_cfg.max_scheduled_requests = exec_config.max_scheduled_requests;

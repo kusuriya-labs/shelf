@@ -97,8 +97,6 @@ void compute_usage(const char* prog) {
     printf("                                 (default 65536)\n");
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
     printf("  --prefix-cache-cold-state-slots N  cold GDN state slots (default 0 = auto)\n");
-    printf("  --model-host PATH      attach model weights from a resident model host\n");
-    printf("                          (default: SHELF_MODEL_HOST_SOCKET, empty = local load)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }
@@ -157,7 +155,6 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
     auto& serve_stdio = opt.serve_stdio;
     ps::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
-    auto& model_host = opt.model_host;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_stats = opt.dflash2_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
@@ -174,8 +171,6 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
             (argv[i][0] == '-' && argv[i][1] == 'h' && argv[i][2] == '\0')) {
             compute_usage(argv[0]);
             return kComputeParseHelp;
-        } else if (std::strcmp(argv[i], "--model-host") == 0 && i + 1 < argc) {
-            model_host = argv[++i];
         } else if (std::strcmp(argv[i], "--model-dir") == 0 && i + 1 < argc) {
             model_dir = argv[++i];
         } else if (std::strcmp(argv[i], "--input-ids-file") == 0 && i + 1 < argc) {

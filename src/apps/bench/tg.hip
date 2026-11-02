@@ -5,7 +5,6 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/state/state_types.h>
-#include <shelf/models/model_source.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <hip/hip_runtime.h>
@@ -37,7 +36,6 @@ struct BenchOptions {
     bool compute_logits = true;
     int device = 0;
     std::string model_dir;
-    std::optional<std::string> model_host_socket;
     int page_tokens = 16;
     double arena_gib = 0.0;
     bool arena_auto = true;
@@ -63,7 +61,6 @@ void print_usage(FILE* out) {
         "  --compute-logits 0|1         (default 1)\n"
         "  --device N                   (default 0)\n"
         "  --model-dir PATH             (required)\n"
-        "  --model-host SPEC            resident model host socket spec\n"
         "  --page-tokens N              (default 16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
         "  --output PATH                (default none)\n"
@@ -173,8 +170,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--model-dir") {
             opts.model_dir = need_value();
-        } else if (key == "--model-host") {
-            opts.model_host_socket = need_value();
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
                 fprintf(stderr, "invalid --page-tokens\n");
@@ -337,33 +332,15 @@ int run_tg(int argc, char** argv) {
         arena_bytes = static_cast<std::size_t>(opts.arena_gib * 1024.0 * 1024.0 * 1024.0);
     }
 
-    ps::models::ModelLoadContext source_context;
-    source_context.qwen_model_dir = opts.model_dir;
-    source_context.device = opts.device;
-    source_context.model_host_socket = opts.model_host_socket;
-    auto source_result = ps::models::ModelSource::create(source_context);
-    if (!source_result.ok()) {
-        fprintf(stderr, "ModelSource::create failed: %s\n",
-            source_result.status().message().c_str());
-        return 1;
-    }
-    std::unique_ptr<ps::models::ModelSource> source(source_result.release());
-
-    const std::size_t resident = source->persistent_bytes();
-    if (resident > 0 && arena_bytes <= resident) {
-        fprintf(stderr, "resident model weights exceed the --arena-gib budget\n");
-        return 1;
-    }
-
-    auto arena_result = ps::gpu::GpuArena::create(
-        opts.device, source->ephemeral_bytes(arena_bytes));
+    auto arena_result = ps::gpu::GpuArena::create(opts.device, arena_bytes);
     if (!arena_result.ok()) {
         fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
         return 1;
     }
     auto arena = arena_result.release();
 
-    auto model_result = source->load_qwen35(arena, stream, {});
+    auto model_result = ps::qwen35::Qwen35Model::load_from_safetensors(
+        opts.model_dir, arena, stream, {});
     if (!model_result.ok()) {
         fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
         return 1;

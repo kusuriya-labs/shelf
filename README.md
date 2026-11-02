@@ -47,7 +47,6 @@ protocol contract は [docs/developer/prefix_cache.md](docs/developer/prefix_cac
 | 名 | 用途 |
 |---|---|
 | `shelf-compute` | 単一request推論（BF16 / 量子化model、greedy、DFlash2 speculative decode） |
-| `shelf-launcher` | resident model host の統括（Python） |
 | `shelf-server` | OpenAI互換chat serving（[docs/user/server.md](docs/user/server.md)） |
 | `shelf-bench` | prefill/decode E2E + kernel/operator micro-benchmarks（[docs/user/bench.md](docs/user/bench.md)） |
 
