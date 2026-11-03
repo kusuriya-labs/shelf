@@ -1,5 +1,6 @@
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include "detail/dispatch_env.h"
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
 #include "detail/elementwise.inc"
 #include "detail/normalization.inc"

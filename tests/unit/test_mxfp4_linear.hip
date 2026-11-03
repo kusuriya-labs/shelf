@@ -1,6 +1,8 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
+#include <shelf/kernels/optimized/activation_quantize.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/quantization/codec/e4m3.h>
 #include <shelf/quantization/fp8/fp8_frag.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
@@ -123,7 +125,7 @@ static Fixture make_fixture() {
 static std::vector<double> expected_output(
     const Fixture& f, const std::vector<uint8_t>& ws_codes,
     const std::vector<float>& ws_scales,
-    const rt::Int8ActivationWorkspaceLayout& layout) {
+    const rt::Int8ActivationWorkspaceLayout& layout, bool row_ref_act = false) {
     std::vector<double> out(static_cast<std::size_t>(kTokens) * kRows, 0.0);
     const uint32_t groups = kCols / quant::kMxfp4ScaleBlockK;
     for (uint32_t m = 0; m < kTokens; ++m) {
@@ -135,7 +137,8 @@ static std::vector<double> expected_output(
                 const double ws =
                     quant::mxfp4::e8m0_decode_f32(f.scales[o * groups + ib]);
                 const double as = ws_scales[static_cast<std::size_t>(m) *
-                        (layout.scale_row_stride_bytes / sizeof(float)) + (ib >> 2)];
+                        (layout.scale_row_stride_bytes / sizeof(float)) +
+                        (row_ref_act ? 0u : (ib >> 2))];
                 double p = 0.0;
                 for (uint32_t j = 0; j < quant::kMxfp4ScaleBlockK; ++j) {
                     const uint32_t kc = ib * quant::kMxfp4ScaleBlockK + j;
@@ -527,6 +530,59 @@ int main() {
               3u, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, kRows,
               stream) == hipErrorNotSupported,
           "the wmma launcher refuses k_padded that is not 128-aligned");
+
+    // --- activation in the row-reference folded form (the MXFP4 W4A8 candidate).
+    // The reference path keeps its own accumulation; only the scale source changes,
+    // and the acceptance condition is the dtype tolerance, not bit identity with the
+    // optimized variants. Design: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
+    {
+        rt::DeviceBatchContext ctx{};
+        ctx.actual_rows = kTokens;
+        hip_ok(hipMemcpy(d.ctx, &ctx, sizeof(ctx), hipMemcpyHostToDevice), "h2d rowref ctx");
+        const hipError_t qerr = shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+            d.in, d.ws + layout.codes_offset,
+            reinterpret_cast<float*>(d.ws + layout.scales_offset), kTokens, kCols,
+            layout.k_padded, kCols, layout.code_row_stride_bytes,
+            layout.scale_row_stride_bytes, stream);
+        if (hip_ok(qerr, "rowref activation quantize")) {
+            rt::DispatchBinding lin_rowref = linear;
+            lin_rowref.flags = rt::kActFlagRowRefFolded;
+            check(run_dispatch(d, lin_rowref, stream) == 0u,
+                  "mxfp4 linear reads the folded activation plane");
+            std::vector<uint8_t> workspace(layout.total_bytes, 0u);
+            hip_ok(hipMemcpy(workspace.data(), d.ws, workspace.size(), hipMemcpyDeviceToHost),
+                   "d2h rowref workspace");
+            std::vector<uint8_t> rowref_codes(workspace.begin(),
+                workspace.begin() + static_cast<std::ptrdiff_t>(layout.codes_bytes()));
+            std::vector<float> rowref_scales(kTokens * (layout.scale_row_stride_bytes / 4u), 0.0f);
+            std::memcpy(rowref_scales.data(), workspace.data() + layout.scales_offset,
+                        rowref_scales.size() * sizeof(float));
+            const std::vector<double> want =
+                expected_output(f, rowref_codes, rowref_scales, layout, true);
+            std::vector<shelf::bf16_t> got(static_cast<std::size_t>(kTokens) * kRows,
+                                           shelf::bf16_t{0});
+            hip_ok(hipMemcpy(got.data(), d.out, got.size() * sizeof(shelf::bf16_t),
+                             hipMemcpyDeviceToHost), "d2h rowref out");
+            std::size_t exact = 0;
+            double l2_want = 0.0;
+            double l2_diff = 0.0;
+            for (std::size_t i = 0; i < got.size(); ++i) {
+                if (got[i].data == shelf::f32_to_bf16_rne(static_cast<float>(want[i])))
+                    ++exact;
+                const double a = want[i];
+                const double b = bf16_to_f32(got[i]);
+                l2_want += a * a;
+                l2_diff += (b - a) * (b - a);
+            }
+            const double rel = std::sqrt(l2_diff) / std::max(std::sqrt(l2_want), 1e-9);
+            std::printf("mxfp4 rowref activation: bf16-exact %zu / %zu rel_l2=%.3e "
+                        "row scale[0]=%.6g\n",
+                        exact, got.size(), rel, rowref_scales[0]);
+            check(exact * 1000u >= got.size() * 999u,
+                  "rowref activation stays bf16-exact on >= 99.9% against the double model");
+            check(rel < 2.0e-3, "rowref activation stays inside the bf16 output rounding");
+        }
+    }
 
     release(d);
     (void)hipStreamDestroy(stream);
