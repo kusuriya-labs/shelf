@@ -555,3 +555,24 @@ GEMM に対する負担は rows=512 k=17408 の最悪値で 9.5%、rows=2048 で
   釣り合うが rows==1 系では損）の 3 案がある。
 - どの案でも A 側変更は bf16 bit 一致を壊す（反転率 88〜92%）。E2E の受け入れは
   logit 変動基準に切り替える必要がある（§12）。
+
+## 14. WMMA の e4m3 subnormal 入力挙動（案 D の前提確認: 問題なし）
+
+A 側 fold は operand を subnormal 域へ移す（subnormal code 率 0.15% → 3.07%）ため、
+tensor core が subnormal 入力を flush するかを確認した。`tests/unit/test_fp8_wmma_subnormal.hip`
+は 1 wave で FP8 WMMA 16x16x16 を 1 回、operand byte を全部同一値に埋めて実行する
+（operand が一様なら 16 個の積がすべて等しく、期待値が fragment の lane 対応に
+依存しないので、layout を assumption にせずにフォーマットだけを試せる）。
+
+| a | b | 期待 accumulator | 結果 |
+| --- | --- | ---: | --- |
+| 0x01 (2^-9) | 0x01 | 6.10351562e-05 | 256/256 一致 |
+| 0x07 (7·2^-9) | 0x07 | 2.99072266e-03 | 一致 |
+| 0x01 | 0x07 | 4.27246094e-04 | 一致 |
+| 0x08 (2^-6, 最小 normal) | 0x07 | 3.41796875e-03 | 一致 |
+| 0x38 (1.0) | 0x38 | 16 | 一致 |
+| 0x7E (448) | 0x01 | 14 | 一致 |
+
+gfx1201 の FP8 WMMA は E4M3 subnormal を flush せず、積も累加も厳密（2^-9 × 2^-9 = 2^-18
+まで bit 一致）。よって A 側 operand fold はハードウェア側で安全で、残る損は §13.2 で
+測った平面側の丸めだけ（5 桁目）である。
