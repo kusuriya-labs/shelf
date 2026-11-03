@@ -388,10 +388,9 @@ format 別の builder:
 
 - FP8 : `quantization::fp8::preshuffle_fp8_native`
 - BF16 : preshuffle なし（row-major BF16 のまま）
-- MXFP4 : byte 変換を持たない。MXFP4 の native layout は canonical と同一の
-  row-major 4-bit codes + row-major E8M0 scale である（§11）。
-  kernel access pattern に合わせた fragment 順を導入する場合は layout id を更新し、
-  canonical と区別する。
+- MXFP4 : `quantization::mxfp4::preshuffle_mxfp4_native`。
+  canonical の row-major 4-bit codes を WMMA fragment 順へ組み替える（§11）。
+  E8M0 scale は byte 順を変えない。
 
 Kernel API は canonical view を受け取れない構造にすることを推奨する。
 
@@ -456,19 +455,36 @@ activation codes (FP8 W8A8 の入力) も同じ fragment block 順を使う。
 
 ### MXFP4 native
 
+WMMA consumer が E2M1 を直接食うための layout。16 output x 32 K を 1 block とし、
+block 内で output row が 16 byte を連続して持つ。byte b は code[k = b] を下位
+nibble、code[k = 16 + b] を上位 nibble に格納する。この (k, k + 16) 対は
+FP8 fragment の 1 lane が 16 K 命令で消費する 8 byte と一致するため、
+E2M1 -> E4M3 展開は byte 再配置なしに operand register へ書ける。
+
 ```text
-codes     : [rows][padded_k / 2] row-major 4-bit
-            codes_row_stride_bytes = padded_k / 2
-metadata1 : [rows][padded_k / 32] row-major E8M0
-            scale_row_stride_bytes = padded_k / 32
-padded_k  : 64 の倍数（activation の 64 K fragment block と揃える）
-rows      : 16 の倍数（pad は作らない。満たさない tensor は load 時に unsupported）
+block            = 16 outputs x 32 K = 256 bytes
+codes            : [tiles][blocks][256]，tiles = rows / 16
+                   codes_row_stride_bytes = (padded_k / 32) * 256   (1 tile あたり)
+                   同一 tile 内の行 ol の 16 byte は offset ol * 16
+                   byte b = code[k = b] | (code[k = 16 + b] << 4)
+metadata1        : [rows][padded_k / 32] row-major E8M0（byte 順は canonical と同じ）
+                   scale_row_stride_bytes = padded_k / 32
+padded_k         : 64 の倍数（activation の 64 K fragment block と揃える）
+rows             : 16 の倍数（pad は作らない。満たさない tensor は load 時に unsupported）
+resident size    : 0.5 byte / weight + 1 byte / 32 weight（canonical と同一）
 ```
+
+`preshuffled` flag は native layout の成立条件であり、native の codes を canonical
+stride で提示しても、canonical の codes を native stride で提示しても load / dispatch
+側の contract 検証で失敗する。
 
 codes を E4M3 へ展開した layout を常駐させてはならない。resident size が
 0.5 byte / weight から 1 byte / weight へ倍増し、§12 の VRAM 条項に反する。
-E2M1 code と E8M0 exponent の積を FP8 fragment として使う変換は
-register / LDS 内で行い、metadata1（E8M0）は常に保持する。
+E2M1 code から E4M3 operand への展開、および E8M0 exponent の適用は
+register 内で行い、metadata1（E8M0）は常に保持する。
+E8M0 を E4M3 operand 側へ fold すると per-block の rescale 命令は消えるが、
+加算の再結合順序が変わり bit 一致が失われるため本リポジトリでは採用しない
+（実測と判断は [../../research/20261103/mxfp4_gate_a_prime.md](../../research/20261103/mxfp4_gate_a_prime.md)）。
 
 ---
 

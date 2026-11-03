@@ -10,6 +10,7 @@
 #include <shelf/quantization/fp8/fp8.h>
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
@@ -1128,14 +1129,25 @@ static void test_hf_mxfp4_matrix_load(gpu::GpuArena& arena, hipStream_t stream) 
     check_eq_u64(m.cols, 128, "mxfp4 matrix cols");
     check_eq_u64(m.k_padded, 128, "mxfp4 matrix k_padded");
     check_eq_u64(m.weight_scale_group, 32, "mxfp4 matrix weight scale group");
-    check_eq_u64(m.codes_row_stride_bytes, 64, "mxfp4 codes row stride is packed K");
+    check_eq_u64(m.codes_row_stride_bytes, 1024, "mxfp4 codes row stride is the native tile stride");
     check_eq_u64(m.scale_row_stride_bytes, 4, "mxfp4 scale row stride is group count");
     check_eq_u64(m.storage_scale_stride_bytes, 4, "mxfp4 storage scale stride");
     check(m.preshuffled, "mxfp4 matrix is native layout");
     check(m.quant_spec == quantization::QuantSpecId::MXFP4_E8M0_G32_V1, "mxfp4 quant spec");
     check(m.compute_spec == quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16, "mxfp4 compute spec");
-    check(d2h(m.codes.data<void>(), good.codes.size()) == good.codes,
-          "mxfp4 codes bytes reach the GPU unchanged");
+    quantization::mxfp4::Mxfp4CanonicalView cv;
+    cv.batch = 1;
+    cv.n = good.rows;
+    cv.padded_k = good.k;
+    cv.codes = good.codes.data();
+    cv.codes_bytes = good.codes.size();
+    cv.scales = good.scales.data();
+    cv.scales_bytes = good.scales.size();
+    quantization::mxfp4::Mxfp4NativeHost native;
+    check(quantization::mxfp4::preshuffle_mxfp4_native(cv, native),
+          "mxfp4 native preshuffle of the loaded payload");
+    check(d2h(m.codes.data<void>(), native.codes.size()) == native.codes,
+          "mxfp4 codes reach the GPU in the native fragment order");
     check(d2h(m.scales.data<void>(), good.scales.size()) == good.scales,
           "mxfp4 scale bytes reach the GPU unchanged");
 

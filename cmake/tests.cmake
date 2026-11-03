@@ -104,7 +104,7 @@ shelf_add_test(NAME test_activation_quantize_sensitivity SOURCE unit/test_activa
 shelf_add_test(NAME test_fp8_payload SOURCE unit/test_fp8_payload.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference shelf_quant_format)
 shelf_add_test(NAME test_mxfp4_codec SOURCE unit/test_mxfp4_codec.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_mxfp4_canonical_payload SOURCE unit/test_mxfp4_canonical_payload.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference shelf_quant_bundle shelf_weights)
-shelf_add_test(NAME test_mxfp4_linear SOURCE unit/test_mxfp4_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_quant_reference shelf_runtime shelf_gpu)
+shelf_add_test(NAME test_mxfp4_linear SOURCE unit/test_mxfp4_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_kernels_optimized shelf_quant_reference shelf_runtime shelf_gpu)
 shelf_add_test(NAME test_hf_manifest SOURCE unit/test_hf_manifest.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_bundle shelf_io)
 shelf_add_test(NAME test_tensor_partition SOURCE unit/test_tensor_partition.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_weights)
 shelf_add_test(NAME test_canonical_partition SOURCE unit/test_canonical_partition.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_weights shelf_quant_reference)

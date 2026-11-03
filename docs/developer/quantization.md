@@ -186,8 +186,16 @@ production の Program Builder は linear の activation 量子化方針を
   partial sum に `weight_scale * activation_scale` を掛けて合算し、
   activation scale は group 128 を `ib >> 2` で選ぶ。
   weight scale group が 32 でない weight は kernel capability で拒否する。
-- `LINEAR_MXFP4_W4A8` の optimized launcher は持たない。`try_launch_optimized` は
-  この kernel id を NotApplicable とし、correctness path で実行する。
+- `LINEAR_MXFP4_W4A8` は optimized kernel 群で実行する。weight は native layout
+  （[canonical_soa_payload.md](canonical_soa_payload.md) §11）で常駐し、correctness path
+  も同じ native layout を読む。E2M1 -> E4M3 展開と E8M0 rescale は register 内で行う。
+  variant 選択は `selectors/linear_selector.cpp` が hold し、geometry は allowlist 制
+  （`(out_features, k)` ごとに実測値を伴って追加する）。production が使う variant は
+  `Decode1`（rows == 1）、`SplitK`（rows <= 32 かつ out <= 2560）、
+  `RowBlock1 / 2 / 4`（それ以外）であり、Prefill 向けの 2D staging variant は未実装。
+- `WeightSlot` の native contract: `codes_row_stride_bytes == (k_padded / 32) * 256`、
+  `scale_row_stride_bytes == storage_scale_stride_bytes == k_padded / 32`、
+  `preshuffled == true`。満たさない slot は dispatch 側で失敗する。
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。

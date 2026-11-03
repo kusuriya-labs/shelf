@@ -1,5 +1,7 @@
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/manifest/manifest_v4.h>
+#include <shelf/quantization/mxfp4/mxfp4.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/payload_descriptor.h>
@@ -9,6 +11,7 @@
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/weights/matrix_weight.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -299,6 +302,103 @@ static void test_hf_method_enum() {
           "HF method none stays zero");
 }
 
+
+static uint8_t canonical_nibble(const std::vector<uint8_t>& codes, uint64_t row, uint64_t k,
+                                uint64_t packed_k) {
+    const uint8_t byte = codes[static_cast<std::size_t>(row) * packed_k + (k >> 1)];
+    return (k & 1u) ? static_cast<uint8_t>(byte >> 4) : static_cast<uint8_t>(byte & 0x0Fu);
+}
+
+static void test_native_preshuffle() {
+    namespace mx = quant::mxfp4;
+    const uint64_t n = 17;
+    const uint64_t kp = 64;
+    const uint64_t nb = kp / quant::kMxfp4ScaleBlockK;
+    const uint64_t packed_k = kp / quant::kMxfp4WeightsPerCode;
+    std::vector<uint8_t> codes(static_cast<std::size_t>(n) * packed_k, 0u);
+    for (uint64_t r = 0; r < n; ++r)
+        for (uint64_t b = 0; b < packed_k; ++b)
+            codes[static_cast<std::size_t>(r) * packed_k + b] =
+                static_cast<uint8_t>(((r * 7u + b * 3u) & 0xFu) |
+                                     (((r + b * 5u) & 0xFu) << 4));
+    std::vector<uint8_t> scales(static_cast<std::size_t>(n) * nb, 0u);
+    for (uint64_t i = 0; i < scales.size(); ++i) scales[i] = static_cast<uint8_t>(119u + i);
+
+    mx::Mxfp4CanonicalView cv;
+    cv.batch = 1;
+    cv.n = n;
+    cv.padded_k = kp;
+    cv.codes = codes.data();
+    cv.codes_bytes = codes.size();
+    cv.scales = scales.data();
+    cv.scales_bytes = scales.size();
+    check(cv.validate(), "canonical mxfp4 view of the preshuffle input");
+
+    mx::Mxfp4NativeHost host;
+    check(mx::preshuffle_mxfp4_native(cv, host), "mxfp4 native preshuffle succeeds");
+    check(host.rows == 32 && host.blocks == nb, "native rows are padded to 16-row tiles");
+    check(host.codes_row_stride_bytes == nb * 256u, "native code stride is one tile per block run");
+    check(host.scale_row_stride_bytes == nb, "native scale stride stays per row");
+    check(host.codes.size() == 2 * nb * 256u, "native codes bytes are 16 x 32 blocks of 256 B");
+    check(host.scales == scales, "native E8M0 scales are copied unchanged");
+    check(host.view().validate(), "native view satisfies its own contract");
+
+    bool pairing = true;
+    bool padded_zero = true;
+    for (uint64_t t = 0; t < 2; ++t) {
+        for (uint64_t ib = 0; ib < nb; ++ib) {
+            for (uint32_t ol = 0; ol < 16; ++ol) {
+                const uint64_t row = t * 16 + ol;
+                for (uint32_t b = 0; b < 16; ++b) {
+                    const uint8_t got = host.codes[(t * nb + ib) * 256 + ol * 16 + b];
+                    if (row >= n) {
+                        if (got != 0u) padded_zero = false;
+                        continue;
+                    }
+                    const uint8_t lo = canonical_nibble(codes, row, ib * 32 + b, packed_k);
+                    const uint8_t hi = canonical_nibble(codes, row, ib * 32 + 16 + b, packed_k);
+                    if (got != static_cast<uint8_t>(lo | (hi << 4))) pairing = false;
+                }
+            }
+        }
+    }
+    check(pairing, "native byte holds code[k] in the low nibble and code[k+16] in the high nibble");
+    check(padded_zero, "native padding rows are zero filled");
+
+    mx::Mxfp4CanonicalView two = cv;
+    two.batch = 2;
+    two.codes_bytes = 2 * codes.size();
+    two.scales_bytes = 2 * scales.size();
+    std::vector<uint8_t> big_codes(two.codes_bytes);
+    for (uint64_t b = 0; b < 2; ++b)
+        std::copy(codes.begin(), codes.end(),
+                  big_codes.begin() + static_cast<std::ptrdiff_t>(b * codes.size()));
+    std::vector<uint8_t> big_scales(two.scales_bytes);
+    for (uint64_t b = 0; b < 2; ++b)
+        std::copy(scales.begin(), scales.end(),
+                  big_scales.begin() + static_cast<std::ptrdiff_t>(b * scales.size()));
+    two.codes = big_codes.data();
+    two.scales = big_scales.data();
+    check(two.validate(), "batched canonical mxfp4 view is accepted");
+    mx::Mxfp4NativeHost batched;
+    check(mx::preshuffle_mxfp4_native(two, batched), "batched native preshuffle succeeds");
+    check(batched.codes.size() == 2 * host.codes.size(), "batched native payload stacks matrices");
+    bool batch_match = true;
+    for (std::size_t i = 0; i < host.codes.size(); ++i) {
+        if (batched.codes[i] != host.codes[i] ||
+            batched.codes[i + host.codes.size()] != host.codes[i])
+            batch_match = false;
+    }
+    check(batch_match, "each batch entry is preshuffled independently and identically");
+
+    mx::Mxfp4NativeView bad = host.view();
+    bad.codes_row_stride_bytes = packed_k;
+    check(!bad.validate(), "a canonical code stride is rejected by the native layout contract");
+    bad = host.view();
+    bad.scale_row_stride_bytes = 0u;
+    check(!bad.validate(), "a zero native scale stride is rejected");
+}
+
 int main() {
     test_encoding_names();
     test_weight_scale_spec();
@@ -307,6 +407,7 @@ int main() {
     test_compute_spec_pairing();
     test_manifest_resolution();
     test_hf_method_enum();
+    test_native_preshuffle();
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

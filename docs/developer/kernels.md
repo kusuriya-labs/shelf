@@ -64,9 +64,11 @@ correctness path は production と同じ W8A8 contract で動く。activation q
 generic kernel と codes / scales まで一致することを固定する。
 
 `LINEAR_MXFP4_W4A8` の correctness path も同じ activation layout を使い、weight 側は
-native layout（canonical と同一の row-major 4-bit codes + row-major E8M0 scale）を読む。
+native layout（16 output x 32 K block、byte b = code[k=b] | code[k+16]<<4、
+E8M0 scale は row-major）を読む。
 `test_mxfp4_linear`（`gpu1;required`）は、E2M1 / E8M0 の decode と 32 K 刻みの rescale が
-double 参照に対して bf16 出力で bit 一致すること、および weight scale group・
+double 参照に対して bf16 出力で bit 一致すること、optimized kernel の全 variant が
+同じ payload で correctness path と bf16 bit 一致すること、および weight scale group・
 codes stride・k_padded の contract 違反が dispatch 側で `INVALID_PROGRAM` になることを
 固定する。
 
@@ -82,6 +84,27 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - WMMA kernelはgfx12 builtin（`_gfx12`）を使う。
 - small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` のexact-rows
   経路が担う。MTP verifyはこの順序に依存する。
+
+### linear / MXFP4 W4A8
+
+`src/shelf/kernels/optimized/linear/mxfp4.hip` は gfx1201 の FP8 WMMA
+（`__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12`）を E2M1 weight で使う。
+
+- weight は native layout（[canonical_soa_payload.md](canonical_soa_payload.md) §11）。
+  `mxfp4_expand` は `v_perm_b32` だけで E2M1 -> E4M3 と sign を展開する。
+  sign は selector の bit3 で negative table を選ぶため、shift / or が不要である。
+  native layout の (k, k+16) 対が WMMA operand の 8 byte と一致するので、
+  展開は byte 再配置なしに operand register へ書ける。
+- 32 K block ごとに `acc = fma(c, weight_scale * activation_scale, acc)` を適用する。
+  activation scale は group 128 なので 128 K（4 block）を 1 組として LDS へ stage する。
+  weight scale を E4M3 operand 側へ fold しない（fold は加算再結合を変え、
+  bit 一致が失われるため）。
+- variant は `Decode1`（rows == 1、1 wave = 16 output）、
+  `SplitK`（rows 2..32 かつ out_features <= 2560、wave で K を分割し LDS で reduce）、
+  `RowBlock1 / 2 / 4`（activation 行 tile の数）。variant 選択と geometry allowlist は
+  `selectors/linear_selector.cpp` が hold する。
+- activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
+  （64 K fragment block、group 128 F32 scale）をそのまま読む。
 
 ## workgroup barrier のスコープ
 
