@@ -31,6 +31,8 @@ struct Options {
     uint32_t mxfp4_unroll = 0u;
     uint32_t mxfp4_fold = 1u;
     uint32_t mxfp4_ablate_act = 0u;
+    uint32_t mxfp4_a_fold = 0u;
+
     uint32_t mxfp4_spread = 24u;
     std::string variant = "auto";
     std::vector<uint32_t> rows;
@@ -70,6 +72,8 @@ void usage(FILE* f) {
         "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
         "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
         "  --mxfp4-ablate-act 0|1          prefill2d without the A group scale (timing bound)\n"
+        "  --mxfp4-a-fold 0|1              time the A-plane E8M0 fold pass (arm C/D cost)\n"
+        "  --mxfp4-a-fold uses one E8M0 byte per 32 K (arm C plane; arm D replicates)\n"
 
 
         "  --model-dir PATH               (with --actual-qwen-shapes: read Qwen config)\n"
@@ -690,6 +694,56 @@ const char* mxfp4_config_name(const shelf::kernel::Mxfp4GemmConfig& cfg) {
     return "rowblock1";
 }
 
+
+// ---------------------------------------------------------------------------
+// Experiment only (docs/research/20261103/mxfp4_gate_a_prime.md sec.11): the cost
+// of folding the activation E8M0 scale into the FP8 A codes as a plane pass, which
+// is what would let arms C and D run the GEMM without any A-side rescale.
+// The A plane is the fragment-order FP8 workspace (1 byte per code). Within one
+// 64 K fragment block, lane slot L holds 32 bytes: the 16-byte half u<4 is the
+// even 32 K block and u>=4 the odd one, matching the GEMM's (ib >> 1) / (ib & 1)
+// addressing. The row owning those bytes is (L & 15) of the 16-row tile.
+// ---------------------------------------------------------------------------
+__global__ void a_row_ref_kernel(const uint8_t* __restrict__ e8, uint8_t* __restrict__ ref,
+                                 const uint32_t nb) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t m = 0u;
+    const uint8_t* p = e8 + static_cast<size_t>(row) * nb;
+    for (uint32_t i = 0; i < nb; ++i)
+        m = m > p[i] ? m : p[i];
+    ref[row] = static_cast<uint8_t>(m);
+}
+
+__global__ void a_plane_fold_kernel(const uint8_t* __restrict__ codes,
+                                    const uint8_t* __restrict__ e8,
+                                    const uint8_t* __restrict__ ref,
+                                    uint8_t* __restrict__ out,
+                                    const uint32_t nb) {
+    const uint32_t f = blockIdx.x;                       // 64 K fragment block
+    const uint32_t tile = blockIdx.y;                    // 16-row tile
+    const uint32_t tid = threadIdx.x;                    // 256 threads = 32 lanes x 8 dwords
+    const uint32_t lane = tid >> 3u;
+    const uint32_t u = tid & 7u;
+    const uint32_t ib = (f << 1u) + (u >> 2u);
+    if (ib >= nb)
+        return;
+    const uint32_t row = tile * 16u + (lane & 15u);
+    const uint32_t d = ref[row] - e8[static_cast<size_t>(row) * nb + ib];
+    const uint32_t sh = (d > 15u) ? 15u << 3u : d << 3u;
+    const size_t off = (static_cast<size_t>(tile) * (static_cast<size_t>(gridDim.x) << 10u)) +
+                       (static_cast<size_t>(f) << 10u) + static_cast<size_t>(lane) * 32u +
+                       (u << 2u);
+    const uint32_t x = *reinterpret_cast<const uint32_t*>(codes + off);
+    uint32_t res = 0u;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const uint32_t b = (x >> (8u * j)) & 0x7Fu;
+        const uint32_t o = (b > sh) ? (b - sh) : 0u;   // subnormals collapse to zero
+        res |= o << (8u * j);
+    }
+    *reinterpret_cast<uint32_t*>(out + off) = res | (x & 0x80808080u);
+}
+
 int run_gemm_mxfp4(Options& o) {
     std::vector<Shape> shapes;
     if (o.actual_qwen_shapes) {
@@ -885,7 +939,78 @@ int run_gemm_mxfp4(Options& o) {
             }
             shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
             shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
-            shelf::gpu::discard_cleanup_result(hipFree(d_input));
+            if (o.mxfp4_a_fold && !rc) {
+                const uint32_t nb32 = kp >> 5;
+                const uint32_t rows_pad = (rows + 15u) & ~15u;
+                const size_t aplane = (size_t)(rows_pad >> 4) * (size_t)(kp >> 6) * 1024u;
+                uint8_t* d_folded = nullptr;
+                uint8_t* d_e8 = nullptr;
+                uint8_t* d_ref = nullptr;
+                bool okf = hipMalloc((void**)&d_folded, aplane) == hipSuccess &&
+                           hipMalloc((void**)&d_e8, (size_t)rows_pad * nb32) == hipSuccess &&
+                           hipMalloc((void**)&d_ref, rows_pad) == hipSuccess;
+                if (okf) {
+                    const uint32_t as_row_floats = (uint32_t)(act_scale_stride / 4u);
+                    std::vector<float> hs((size_t)rows * as_row_floats, 0.0f);
+                    okf = hipMemcpy(hs.data(), d_ascales, hs.size() * sizeof(float),
+                                    hipMemcpyDeviceToHost) == hipSuccess;
+                    std::vector<uint8_t> he((size_t)rows_pad * nb32, 0u);
+                    for (uint32_t r = 0; r < rows && okf; ++r) {
+                        for (uint32_t ib = 0; ib < nb32; ++ib) {
+                            const uint32_t g = std::min(ib >> 2, act_groups - 1u);
+                            const float sc = hs[(size_t)r * as_row_floats + g];
+                            const int ex = (sc > 0.0f && std::isfinite(sc))
+                                               ? (int)std::ceil(std::log2(sc)) : 0;
+                            he[(size_t)r * nb32 + ib] = (uint8_t)(ex + 127);
+                        }
+                    }
+                    okf = hipMemcpy(d_e8, he.data(), he.size(), hipMemcpyHostToDevice) == hipSuccess;
+                }
+                if (okf) {
+                    auto fold_launch = [&]() -> hipError_t {
+                        a_row_ref_kernel<<<rows_pad / 64u, 64u, 0, stream>>>(d_e8, d_ref, nb32);
+                        a_plane_fold_kernel<<<dim3(kp >> 6, rows_pad >> 4, 1), 256, 0, stream>>>(
+                            d_acodes, d_e8, d_ref, d_folded, nb32);
+                        return hipGetLastError();
+                    };
+                    for (int i = 0; i < o.warmup; ++i)
+                        if (fold_launch() != hipSuccess) { rc = 1; break; }
+                    if (hipStreamSynchronize(stream) != hipSuccess) rc = 1;
+                    hipEvent_t f0 = nullptr, f1 = nullptr;
+                    if (hipEventCreate(&f0) != hipSuccess || hipEventCreate(&f1) != hipSuccess)
+                        rc = 1;
+                    std::vector<double> fold_us;
+                    if (!rc) {
+                        fold_us.reserve(o.samples);
+                        for (int s = 0; s < o.samples && !rc; ++s) {
+                            if (hipEventRecord(f0, stream) != hipSuccess) { rc = 1; break; }
+                            for (int l = 0; l < o.launches; ++l)
+                                if (fold_launch() != hipSuccess) { rc = 1; break; }
+                            if (rc) break;
+                            if (hipEventRecord(f1, stream) != hipSuccess) { rc = 1; break; }
+                            if (hipEventSynchronize(f1) != hipSuccess) { rc = 1; break; }
+                            float ms = 0.0f;
+                            if (hipEventElapsedTime(&ms, f0, f1) != hipSuccess) { rc = 1; break; }
+                            fold_us.push_back(ms * 1000.0 / (double)o.launches);
+                        }
+                    }
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(f0));
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(f1));
+                    if (!fold_us.empty()) {
+                        const double mn = percentile(fold_us, 0.0);
+                        const double p50 = percentile(fold_us, 0.5);
+                        const double p95 = percentile(fold_us, 0.95);
+                        const double traffic = (double)aplane * 2.0 + (double)rows_pad * nb32;
+                        std::printf("mxfp4 %-12s rows=%-4u n=%-6u k=%-6u requested=a_fold selected=a_fold      min=%.3f p50=%.3f p95=%.3f us  %.0f GB/s (A plane %.1f MiB)\n",
+                                    shape.name.c_str(), rows, shape.n, shape.k, mn, p50, p95,
+                                    traffic / (p50 * 1e-6) / 1e9, (double)aplane / 1048576.0);
+                    }
+                }
+                shelf::gpu::discard_cleanup_result(hipFree(d_folded));
+                shelf::gpu::discard_cleanup_result(hipFree(d_e8));
+                shelf::gpu::discard_cleanup_result(hipFree(d_ref));
+            }
+            shelf::gpu::discard_cleanup_result(hipFree(d_input));            shelf::gpu::discard_cleanup_result(hipFree(d_input));
             shelf::gpu::discard_cleanup_result(hipFree(d_acodes));
             shelf::gpu::discard_cleanup_result(hipFree(d_ascales));
             shelf::gpu::discard_cleanup_result(hipFree(d_output));
@@ -1172,6 +1297,8 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--mxfp4-fold") o.mxfp4_fold = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-spread") o.mxfp4_spread = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-ablate-act") o.mxfp4_ablate_act = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-a-fold") o.mxfp4_a_fold = static_cast<uint32_t>(std::stoi(next()));
+
         else if (a == "--check") o.check = true;
         else if (a == "--model-dir") o.model_dir = next();
         else if (a == "--actual-qwen-shapes") o.actual_qwen_shapes = true;

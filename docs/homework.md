@@ -123,8 +123,9 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
   `row_ref_exact` が true の payload では correctness path と bf16 bit 一致のまま）
 * MXFP4 linear の A 側量子化の比較は測った（group128-F32 / per-token-F32 /
   group32-E8M0 / group128-E8M0、実 activation での精度と Prefill2D の速度上限。
-  docs/research/20261103/mxfp4_gate_a_prime.md §11）。残っているのは採用判断と、
-  案 B（行 1 個 scale）または案 C（E8M0 を A operand へ fold）の本実装
+  docs/research/20261103/mxfp4_gate_a_prime.md §11〜§13。案 C/D は平面 fold で
+  -28〜-40%、精度は現行の 1.34 倍（fold 自体の損は測定分解能外）。残っているのは
+  採用判断（logit 変動ゲートへ切り替える可否）と本実装
 * qwen35moe対応・最適化
 * pipeline-parallelの実装
 * expert-parallelの実装

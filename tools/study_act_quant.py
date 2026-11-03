@@ -47,13 +47,19 @@ def scale_e8m0_group(a, gs):
 
 
 def quant(a, kind):
-    """Returns the dequantized A (f64) plus per-row diagnostics."""
+    """Returns the dequantized A (f64) plus per-row diagnostics.
+
+    C2 / D2 are C / D with the plane fold applied: each group's E8M0 is folded into
+    the e4m3 code relative to the row's maximum exponent, which is what lets the
+    GEMM drop the rescale from the K loop entirely."""
     rows, k = a.shape
-    if kind == "B":
+    fold = kind in ("C2", "D2")
+    base = kind[0] if fold else kind
+    if base == "B":
         gs = k
     else:
-        gs = {"A": 128, "C": 32, "D": 128}[kind]
-    if kind in ("A", "B"):
+        gs = {"A": 128, "C": 32, "D": 128}[base]
+    if base in ("A", "B"):
         s, ng = scale_f32_group(a, gs)
     else:
         s, ng = scale_e8m0_group(a, gs)
@@ -61,8 +67,20 @@ def quant(a, kind):
     ap = np.zeros((rows, pad), dtype=np.float64)
     ap[:, :k] = a
     codes = e4m3_round(ap / np.repeat(s, gs, axis=1))
-    deq = codes * np.repeat(s, gs, axis=1)
-    deq = deq[:, :k]
+    if fold:
+        ex = np.round(np.log2(s)).astype(np.int64)
+        ref = ex.max(axis=1)
+        d = ref[:, None] - ex
+        folded = e4m3_round(codes * np.repeat(np.ldexp(np.ones_like(d), -d.astype(np.int32)), gs, axis=1))
+        inexact = int(((folded * np.repeat(np.ldexp(np.ones_like(d), d.astype(np.int32)), gs, axis=1)) != codes).sum())
+        row_factor = np.ldexp(np.ones((rows, 1), dtype=np.float64),
+                              ref.reshape(rows, 1).astype(np.int32))
+        deq = (folded * row_factor)[:, :k]
+        codes = folded
+    else:
+        inexact = 0
+        deq = codes * np.repeat(s, gs, axis=1)
+        deq = deq[:, :k]
     nz = a != 0
     sub = np.zeros(rows, dtype=np.int64)
     zeroed = np.zeros(rows, dtype=np.int64)
@@ -84,7 +102,7 @@ def quant(a, kind):
         fold_d = (ex.max(axis=1) - ex.min(axis=1)).astype(np.int64)
     else:
         fold_d = np.zeros(rows, dtype=np.int64)
-    return deq, dict(subnormal=int(sub.sum()), zeroed=int(zeroed.sum()),
+    return deq, dict(subnormal=int(sub.sum()), zeroed=int(zeroed.sum()), fold_inexact=inexact,
                      nz=int(nz.sum()), span_p50=int(np.median(span)),
                      span_p99=int(np.percentile(span, 99)), span_max=int(span.max()),
                      fold_d_max=int(fold_d.max()), fold_d_bad=int((fold_d > 8).sum()))
@@ -178,7 +196,7 @@ def main():
         W = W[:, :k]
         y_ref = a @ W.T
         line = []
-        for kind in "ABCD":
+        for kind in ("A", "B", "C", "D", "C2", "D2"):
             deq, st = quant(a, kind)
             st["a_recon"] = float(np.linalg.norm(deq - a) / max(np.linalg.norm(a), 1e-12))
             y = deq @ W.T
@@ -197,8 +215,9 @@ def main():
     print("\n=== aggregate by scheme (all captures) ===")
     print(f"{'scheme':6} {'rel_l2 mean':>12} {'rel_l2 max':>12} {'bf16 flip mean':>15} "
           f"{'out max rel':>12} {'subnormal codes':>16} {'zeroed codes':>13} {'row span p99':>13} {'fold d>8 rows':>14}")
-    label = {"A": "A g128-f32", "B": "B tok-f32", "C": "C g32-E8M0", "D": "D g128-E8M0"}
-    for kind in "ABCD":
+    label = {"A": "A g128-f32", "B": "B tok-f32", "C": "C g32-E8M0", "D": "D g128-E8M0",
+             "C2": "C2 +fold", "D2": "D2 +fold"}
+    for kind in ("A", "B", "C", "D", "C2", "D2"):
         rows = [v for key, v in agg.items() if key[0] == kind for v in v]
         rel = np.array([r[0] for r in rows])
         flip = np.array([r[1] for r in rows])
@@ -212,7 +231,7 @@ def main():
         aerr = np.array([r[3]["a_recon"] for r in rows])
         print(f"{label[kind]:6} {rel.mean():12.3e} {rel.max():12.3e} {flip.mean()*100:14.2f}% "
               f"{mx.max():12.3e} {sub/nz*100:15.2f}% {zer/nz*100:12.2f}% {span:13d} {fbad:14d}"
-              f"   a_recon mean={aerr.mean():.3e} max={aerr.max():.3e}")
+              f"   a_recon mean={aerr.mean():.3e} max={aerr.max():.3e} fold_inexact={sum(r[3]['fold_inexact'] for r in rows)}")
 
 
 if __name__ == "__main__":
