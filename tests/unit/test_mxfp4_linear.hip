@@ -604,6 +604,34 @@ int main() {
         std::vector<float> rowref_scales(kTokens * (layout.scale_row_stride_bytes / 4u), 0.0f);
         std::memcpy(rowref_scales.data(), workspace.data() + layout.scales_offset,
                     rowref_scales.size() * sizeof(float));
+        // The reference (correctness mode) producer of the same plane must agree with
+        // the optimized quantizer bit for bit: the two implementations are independent,
+        // and the contract is the plane, not the code path.
+        rt::DispatchBinding qrowref = quantize;
+        qrowref.kernel_id = rt::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF;
+        if (run_dispatch(d, qrowref, stream) == 0u) {
+            std::vector<uint8_t> ref_ws(layout.total_bytes, 0u);
+            hip_ok(hipMemcpy(ref_ws.data(), d.ws, ref_ws.size(), hipMemcpyDeviceToHost),
+                   "d2h reference rowref plane");
+            std::size_t code_diff = 0;
+            for (std::size_t i = 0; i < rowref_codes.size(); ++i)
+                if (ref_ws[i] != rowref_codes[i])
+                    ++code_diff;
+            const float* ref_sc =
+                reinterpret_cast<const float*>(ref_ws.data() + layout.scales_offset);
+            std::size_t scale_diff = 0;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(kTokens) *
+                                       (layout.scale_row_stride_bytes / 4u); ++i)
+                if (std::memcmp(&ref_sc[i], &rowref_scales[i], sizeof(float)) != 0)
+                    ++scale_diff;
+            std::printf("mxfp4 rowref producer: codes identical %zu/%zu, scale diffs %zu\n",
+                        rowref_codes.size() - code_diff, rowref_codes.size(), scale_diff);
+            check(code_diff == 0u && scale_diff == 0u,
+                  "the reference rowref quantizer produces the same plane as the optimized one");
+        } else {
+            check(false, "reference rowref quantize dispatch completes");
+        }
+
         const uint32_t scale_cols = layout.scale_row_stride_bytes / 4u;
         std::printf("mxfp4 rowref: scale[0]=%.6g scale[%u]=%.6g scale[last]=%.6g\n",
                     rowref_scales[0], scale_cols / 2u, rowref_scales[scale_cols / 2u],
