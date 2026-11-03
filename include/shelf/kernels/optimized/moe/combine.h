@@ -15,15 +15,17 @@ namespace shelf::kernel {
 // table is built expert ascending. The kernel therefore sorts each token's slot rows and
 // accumulates in f32, rounding to bf16 once.
 //
-// When shared_output is non-null, shared_output[row] scaled by sigmoid(shared_gate[row])
-// is added last, after the routed sum.
+// When shared_output is non-null, shared_output[row] * shared_gate_weight[row] is added
+// last, after the routed sum. shared_gate_weight holds the already activated gate (the
+// existing bf16 -> f32 sigmoid elementwise kernel produces it), so this kernel does no
+// transcendental math of its own.
 hipError_t launch_moe_combine(
     shelf::bf16_t* output,
     const shelf::bf16_t* expert_output,
     const float* sel_weight,
     const int32_t* slot_row_of,
     const shelf::bf16_t* shared_output,
-    const float* shared_gate,
+    const float* shared_gate_weight,
     uint32_t rows,
     uint32_t top_k,
     uint32_t features,

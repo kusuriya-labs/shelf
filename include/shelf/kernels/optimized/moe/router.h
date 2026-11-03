@@ -39,7 +39,8 @@ namespace shelf::kernel {
 //   slot_row_of[t * top_k + j]  group row of token t's j-th selection
 //   sel_weight[t * top_k + j]   renormalized weight of that selection
 // and tells the activation producer which token owns each group row:
-//   row_token[r]                token of group row r, -1 for a padding row
+//   row_token[r]                token of group row r, -1 for a row no group claims
+//     (the padding tail of a group and every row past group_count)
 // Because group rows increase with expert index, a consumer that walks a token's
 // selections in group row order accumulates expert ascending.
 //

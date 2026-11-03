@@ -187,8 +187,9 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
     }
     __syncthreads();
 
-    const uint32_t groups = group_count[0];
-    const uint32_t rows_here = groups * kGroupRows;
+    // The activation producer launches over the host capacity, so every row that no group
+    // claims has to say so, not just the tail past the last active group.
+    const uint32_t rows_here = group_capacity * kGroupRows;
     for (uint32_t r = tid; r < rows_here; r += kScanThreads)
         row_token[r] = -1;
 }

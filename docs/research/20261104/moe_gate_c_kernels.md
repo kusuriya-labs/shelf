@@ -17,7 +17,8 @@ weights 集約は [moe_gate_b_weights.md](moe_gate_b_weights.md)。
 | `launch_activation_quantize_mxfp4_rowref` | `row_index` 間接参照を追加（group row 順の activation 平面生成、padding 行は zero） |
 
 受け入れ test（`gpu1;required` に登録）: `test_moe_router` / `test_moe_grouped_linear` /
-`test_moe_combine`。required acceptance は **144/144 PASS**（cpu 88 / gpu1 56）。
+`test_moe_combine` / `test_moe_layer_e2e`（§6）。required acceptance は
+**145/145 PASS**（cpu 88 / gpu1 57）。
 
 ## 2. 採否: group row 番号でアドレスする（採用）
 
@@ -129,11 +130,98 @@ expert の複数 group）を両方含める。
   routing と plan は device 側のみが contract を満たす（決定論・atomic の順序非依存）
   ため **`gpu1;required`** にした。
 
-## 6. 次の Gate で残るもの
+## 6. Gate C 仕上げ: 1 layer E2E（`test_moe_layer_e2e`）
+
+referee は **HF transformers を float64 で直接**実行したものにした（外部 oracle は
+層出力を返さずトークンしか返さないので、層単位の照合には使えない）。
+`transformers 5.20.2` の `Qwen3_5MoeSparseMoeBlock` / `Qwen3_5MoeTopKRouter` /
+`Qwen3_5MoeExperts` が本 repo の contract と同じ順序を持っている:
+
+```text
+softmax(dtype=float32) -> topk -> top-k 合計で除算 -> expert loop は hit した expert
+の昇順 -> index_add_（token 昇順）-> 最後に sigmoid(shared_expert_gate) * shared
+```
+
+fixture は `tools/moe_layer_oracle_fixture.py` が生成し、`tests/fixtures/qwen35moe_tiny/`
+に commit した（config.json 1.4 KB / model.safetensors 316 KB / oracle.safetensors 128 KB、
+torch 抜きで読める）。geometry は hidden 128 / moe_inter 128 / shared 128 /
+experts 8 / top_k 2 / tokens 16（`hidden` と `moe_intermediate_size` は grouped launcher が
+要求する `k_padded % 128 == 0` を満たす最小の値）。
+
+生成側の要点:
+
+- expert 重みは **Shelf の MXFP4 codec と同一 bit 操作**（E8M0 = 最近べき乗 2/4、
+  E2M1 = RNE）で量子化し、**量子化後の値**を HF に入れて参照を作る。だから MXFP4 量子化
+  誤差は参照側に残らない。テスト側は `reference_bf16.experts.0.*` から Shelf の codec で
+  payload を再構成し、fixture と **bit 一致**することを確認する。
+- `block(x)` の出力と op-by-op 分解が bit 一致することを生成時に検証している
+  （HF  semantics からの漂移をここで止める）。
+- `shared_expert_gate` は活性化前（bf16）と活性化後（f32）の両方を保存する。テストは
+  活性化前を `launch_sigmoid_bf16_f32` に通して combine に渡す＝production と同じ 2 段。
+
+実測（`experts 8 / top_k 2 / tokens 16`、group 8・group row 128）:
+
+| 段 | 結果 |
+| --- | --- |
+| device router の選択 expert | HF f64 と**完全一致**、renormalize 重み相対 < 1e-5 |
+| w13（grouped） | bf16 exact **1.0000** / rel_l2 1.66e-3（GPU operand の double 参照） |
+| w13 vs 量子化しない bf16 activation | rel_l2 **2.57e-2**（E4M3 activation class そのもの） |
+| w2（grouped） | bf16 exact **1.0000** / rel_l2 1.68e-3 |
+| combine | 出力は device 値の f64 連鎖と **bit 一致** |
+| routed 単体 vs HF f64 | rel_l2 **5.06e-2** |
+| 層合計 vs HF f64 | rel_l2 **3.68e-2**、max_abs 1.52e-2 |
+
+routed の 5.06e-2 は、同じ pipeline を numpy f64 で模した値（5.05e-2）と一致する。
+つまり GPU 側の誤差は **activation を E4M3 group 128 にする数値 class の差**で説明がつき、
+配線の狂いは無い（設計案 §5 の「A4 にしない」判断と同じ位置づけ）。層合計が routed より
+小さいのは shared expert 項が signal を足すためで、relative 値は項の大きさで動く。
+**层合計の gate は回帰検知としては弱く、段ごと gate（bf16 exact 1.0000）が正本**である。
+
+受け入れは `routed rel_l2 < 8e-2` / `層合計 rel_l2 < 8e-2`（実測 5.1e-2 / 3.7e-2）。
+
+途中で捕えた contract の穴: fixture が**活性化後**の gate を combine に渡していた
+（= sigmoid を 2 回適用）。combine が `sigmoid` を内部で計算する形にしていたため気づかず、
+層合計が 1.9e-1 に膨らんだ。combine から超越関数を削って
+`launch_sigmoid_bf16_f32`（bf16 → f32、既存 elementwise）に活性化を任せる形に変え、
+fixture も活性化前 bf16 値を渡すようにした。これで層合計は 3.7e-2 に落ち、
+lowering したときと同じ 2 段がテストされる。
+
+## 7. 実測: router / plan の launch コストと radix top-n の適用域
+
+「router の選択を radix top-n にすると速いか」という質問への回答として測った。
+`test_moe_router` に一時計測を入れて p50（50 warmup、20 launch 連続 / 20）を取った
+（数値だけ残し、計測 code は test から除去済み）。experts 256 / top_k 8:
+
+| rows | router 単体 | router + scan + scatter（3 launch） |
+| ---: | ---: | ---: |
+| 1 | 30.20 µs | 65.82 µs |
+| 16 | 30.09 µs | 70.48 µs |
+| 64 | 30.07 µs | 80.36 µs |
+| 256 | 30.54 µs | 112.74 µs |
+| 512 | 31.20 µs | 156.72 µs |
+
+- **router 単体は rows 1 でも 512 でも 30〜31 µs でほぼ一定**。1 workgroup = 1 token、
+  256 expert を 64 thread で linear scan し top-8 を 8 回 max-reduce する仕事量は
+  この時間に対して小さく、**launch の固定費が支配的**である。したがって選択アルゴリズムを
+  差し替えても出せる頭は無いか、極めて小さい。
+- 3 launch（router / scan / scatter）で 66 µs（rows=1）〜157 µs（rows=512）。MoE 40 層なら
+  rows=1 で **約 2.6 ms / token**。改善の筋は選択アルゴリズムではなく **launch 数を減らす
+  こと**（scan と scatter の統合、router 内 histogram から直接 group table を作る等）。
+- repo の radix top-n（`kernels/optimized/radix_topn.h`）の適用域は
+  `kDflash2RadixTopnCrossoverPool = 64`、`kBins = 256`、`kPasses = 4`、vocab を
+  512×16 で partition する形（`kDflash2RadixTopnPerPartition`）で、**vocab 248K・pool
+  64..128** 向けに tune されている。MoE router は候補 N = 256・k = 8 で **N/k = 32**。
+  radix が線形 scan に勝つのは N/k が大きく、winnowing で候補を絞る利点が効くときなので、
+  N/k = 32 では絞れる領域が浅い（4 pass の histogram を 256 要素に振る方が高い）。
+  design 案 §8 の rows=1 実測（WMMA 32 µs / correctness 163 µs）とも整合的に、
+  **MoE router では radix化の利得は計測できない**と判断する。Gate D で配線した後に
+  层合計で再測定して確定させる。
+
+## 8. 次の Gate で残るもの
+
 
 `shelf-compute` はまだ MoE を通さない。配線一覧は `docs/developer/qwen35moe.md` §7 に
 現在形で書いた（WeightSlot の experts 化、`KernelId` 3 個、selector allowlist の
 MoE geometry、workspace の group row 容量、correctness path の grouped 不在、
-`shelf-bench` の計測口）。1 layer を oracle と照合する `test_moe_layer_e2e` は
-oracle 側（`../references/radiance` の `tiny_moe`、8 experts / top-2 / shared 24）を
-使う `external_files` として未実装。
+`shelf-bench` の計測口）。1 layer の正しさは §6 の
+`test_moe_layer_e2e`（合成 fixture + HF f64 referee、commit 済み）で固定済み。

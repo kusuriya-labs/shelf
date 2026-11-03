@@ -23,7 +23,7 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
     const float* __restrict__ sel_weight,
     const int32_t* __restrict__ slot_row_of,
     const shelf::bf16_t* __restrict__ shared_output,
-    const float* __restrict__ shared_gate,
+    const float* __restrict__ shared_gate_weight,
     uint32_t rows,
     uint32_t top_k,
     uint32_t features,
@@ -61,7 +61,7 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
 
     float gate = 0.0f;
     if (shared_output != nullptr)
-        gate = 1.0f / (1.0f + expf(-shared_gate[t]));
+        gate = shared_gate_weight[t];
 
     const size_t out_base = static_cast<size_t>(t) * features;
     const size_t shared_base = static_cast<size_t>(t) * shared_row_stride;
@@ -91,7 +91,7 @@ hipError_t launch_moe_combine(
     const float* sel_weight,
     const int32_t* slot_row_of,
     const shelf::bf16_t* shared_output,
-    const float* shared_gate,
+    const float* shared_gate_weight,
     uint32_t rows,
     uint32_t top_k,
     uint32_t features,
@@ -101,7 +101,7 @@ hipError_t launch_moe_combine(
     if (output == nullptr || expert_output == nullptr || sel_weight == nullptr ||
         slot_row_of == nullptr)
         return hipErrorInvalidValue;
-    if ((shared_output == nullptr) != (shared_gate == nullptr))
+    if ((shared_output == nullptr) != (shared_gate_weight == nullptr))
         return hipErrorInvalidValue;
     if (rows == 0u || features == 0u)
         return hipErrorInvalidValue;
@@ -112,7 +112,7 @@ hipError_t launch_moe_combine(
     if (shared_output != nullptr && shared_row_stride < features)
         return hipErrorInvalidValue;
     moe_combine_kernel<<<rows, kCombineThreads, 0, stream>>>(
-        output, expert_output, sel_weight, slot_row_of, shared_output, shared_gate, rows, top_k,
+        output, expert_output, sel_weight, slot_row_of, shared_output, shared_gate_weight, rows, top_k,
         features, expert_row_stride, shared_row_stride);
     return hipGetLastError();
 }

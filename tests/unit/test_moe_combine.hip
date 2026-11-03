@@ -136,9 +136,11 @@ Case make_case(uint32_t rows, uint32_t top_k, bool shared) {
     c.shared_payload.assign(static_cast<std::size_t>(kMaxRows) * kFeatures, shelf::bf16_t{0});
     for (auto& v : c.shared_payload)
         v = shelf::bf16_t{shelf::f32_to_bf16_rne(rnd())};
+    // The kernel receives the gate already activated, so the fixture stores sigmoid
+    // values directly and the reference uses the same numbers.
     c.gate.assign(kMaxRows, 0.0f);
     for (uint32_t t = 0; t < kMaxRows; ++t)
-        c.gate[t] = rnd();
+        c.gate[t] = 1.0f / (1.0f + std::exp(-rnd()));
     return c;
 }
 
@@ -161,7 +163,7 @@ std::vector<shelf::bf16_t> reference_combine(const Case& c, bool expert_ascendin
                       [](const std::pair<int32_t, float>& a, const std::pair<int32_t, float>& b) {
                           return a.first > b.first;
                       });
-        const float gate = 1.0f / (1.0f + std::exp(-c.gate[t]));
+        const float gate = c.gate[t];
         for (uint32_t f = 0; f < kFeatures; ++f) {
             float acc = 0.0f;
             for (const auto& slot : slots)

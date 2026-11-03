@@ -169,7 +169,7 @@ GEMM 出力・w2 入力・combine の読む行はすべて group row 番号
 | `expert_row_begin[experts + 1]` | expert 別 slot 範囲（最後は slot 総数） |
 | `expert_group_begin[experts + 1]` | expert 別 group 範囲 |
 | `group_expert[g]` / `group_rows[g]` / `group_count[0]` | group table |
-| `row_token[r]` | group row r の token。padding 行は -1 |
+| `row_token[r]` | group row r の token。group の padding 行と `group_count` 以降の全行は -1 |
 | `slot_row_of[t * top_k + j]` | token t の j 番目の選択の group row |
 
 group row 数が expert 昇順なので、**token の選択を group row 昇順に並べることは expert
@@ -217,8 +217,11 @@ launch_moe_combine(output, expert_output, sel_weight, slot_row_of,
 1 workgroup = 1 token。token の `top_k` 個の group row を **昇順（= expert 昇順）** に
 並べ替え、`out[f] = Σ_j weight_j * expert_output[row_j][f]` を **f32 で蓄積**して最後に
 1 回 bf16 へ丸める。`shared_output` を渡した場合は
-`sigmoid(shared_gate[t]) * shared[t]` を routed 合計の**後**に足す。
-`shared_output` と `shared_gate` は対で渡す（片方だけなら拒否）。
+`shared_gate_weight[t] * shared[t]` を routed 合計の**後**に足す。
+`shared_gate_weight` は**活性化済みの gate 値**で、生成は既存の
+`launch_sigmoid_bf16_f32`（`shared_expert_gate` の [1,H] linear 出力が bf16 なのでその
+形）が担う。combine 自身は超越関数を使わない。
+`shared_output` と `shared_gate_weight` は対で渡す（片方だけなら拒否）。
 
 ### 数値の受け入れ
 
@@ -230,10 +233,18 @@ reference（correctness path）ではなく **double 参照に対する dtype �
 | grouped linear | bf16 exact ≥ 99.9%（GPU が実際に使った operand の double 参照）、rel_l2 < 4e-3 |
 | combine | expert 昇順 f32 参照と **bit 一致** |
 | router / plan | 選択 expert index は double 参照と完全一致、renormalize 重みは相対 1e-5、実行間 bit 一致 |
+| 1 layer E2E | 段ごとは上の gate（GPU operand の double 参照）。**HF f64 に対する相対誤差はクラス誤差として別 gate**: routed rel_l2 < 8e-2、layer 合計 rel_l2 < 8e-2 |
 
 grouped linear の rel_l2 を 4e-3 にしたのは、bf16 の出力丸め自体が相対 2^-9 ≈ 2e-3 で、
 rows=1 / top_k=2 のように書かれる行が 2 行しかない断面では正しい丸めの RMS が 2e-3 を
 超えるためである（primary gate は bf16 exact 比）。
+
+1 layer E2E で HF f64 への gate を 8e-2 にしたのは、activation を E4M3 group 128 にする
+数値 class の差が支配的だからである（design 案 §5 の「A4 にしない」と同じ扱い）。段ごとの
+gate（GPU の使った operand の double 参照）はクラス誤差を含まないので 4e-3 で固定できるが、
+HF への gate は含む。層合計の relative 値は shared expert 項の大きさで動くため回帰検知としては
+弱く、**段ごと gate が正本**である。クラス誤差の実測値と内訳は
+[../research/20261104/moe_gate_c_kernels.md](../research/20261104/moe_gate_c_kernels.md) §6。
 
 ## 6. test contract
 
@@ -245,7 +256,20 @@ rows=1 / top_k=2 のように書かれる行が 2 行しかない断面では正
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件 |
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
-| `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の sigmoid gate を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
+| `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
+| `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
+
+`test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe_tiny/`（commit 済み、
+torch 不要で読むだけ）で、再生成は
+
+```sh
+python3 tools/moe_layer_oracle_fixture.py --out-dir tests/fixtures/qwen35moe_tiny
+```
+
+referee は HF transformers の `Qwen3_5MoeSparseMoeBlock` を float64 で実行したものである
+（生成時に op-by-op 参照と module forward の bit 一致を検証している）。expert 重みは
+Shelf の MXFP4 codec と同一規則で量子化した**あと**の値を HF に入れているため、
+量子化誤差は参照側に含まれない。
 
 GPU 不足による skip は required では失敗として扱う（テスト受入ルール）。
 

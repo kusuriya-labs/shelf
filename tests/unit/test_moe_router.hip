@@ -323,7 +323,12 @@ void compare_plan(const Plan& p, uint32_t rows, uint32_t experts, uint32_t top_k
                 rows_ok = false;
         }
     }
+    bool beyond_capacity_rows = true;
+    for (uint32_t r = p.group_count * kMxfp4GemmRowTile; r < p.row_token.size(); ++r)
+        if (p.row_token[r] != -1)
+            beyond_capacity_rows = false;
     check(rows_ok, tag + ": every group row is a token that selected that expert, padding is -1");
+    check(beyond_capacity_rows, tag + ": rows past the active groups are -1 as well");
     check(token_ascending, tag + ": rows inside one expert are token ascending");
 
     bool row_map_ok = true;
