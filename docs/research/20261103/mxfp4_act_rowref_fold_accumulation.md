@@ -1,8 +1,20 @@
-# 案 D で「correctness と optimized が同一値」を守るための accumulation 設計
+# activation 行基準 fold の accumulation 形と一致条件（訂正版）
 
-[mxfp4_act_rowref_fold_plan.md](mxfp4_act_rowref_fold_plan.md) §2 / §3 の 2 段目
-（correctness path を fold 意味へ合わせる）を実装する前に詰めた、bit 一致の条件。
-**これは実測ではなく設計上の導出**であり、実装時にテストで固定する。
+[mxfp4_act_rowref_fold_plan.md](mxfp4_act_rowref_fold_plan.md) §2 / §3 の 2 段目を
+詰めたメモ。**初版は「correctness path も同じ accumulator 構造へ合わせる」と書いたが、
+それは reference を optimized に合わせ込むので却下**。訂正の要点:
+
+- reference（`exec_linear_mxfp4` など correctness path）は**独立した自然な accumulation
+  のまま変えない**。
+- optimized kernel の受け入れ条件は、他の GEMM と同じ**dtype 誤差内**（double 参照に
+  対する tolerance）に統一する。`test_mxfp4_linear` の既存条件は
+  `bf16 exact >= 99.9% / rel_l2 < 2e-3` で、これが repo の慣習側の基準。
+  optimized variant と correctness path の bf16 bit 一致は**診断情報としては有用な
+  が契約ではない**（初版で私が課した自作条件）。
+- 結果として chain 形（K 全体を 1 accumulator へ）は reference を触らずに採用できる。
+  一致条件は variant 間の bf16 一致率 / rel_l2 を**実測値で置いて**固定する。
+
+以下は初版からの観測記録（設計導出として有効な部分と、実測事実を残す）。
 
 ## 1. 現行が bit 一致している理由（実測で分かっていること）
 
@@ -73,7 +85,7 @@ store acc * scale
 検証は `test_mxfp4_linear` の row-act セクションで固定する（新しい contract 上で
 全 variant を走らせ、上の群分けで一致を確認）。
 
-## 5. 二段目を実装する際の分岐点（safe form を先に推す）
+## 5. 二段目の実装形（訂正: chain 形を第一候補にする）
 
 §3 の chain 形は「同一値」を保証するのが難しい。一方、**per-block rescale を残したまま
 A 側だけを loop から外す形**なら、既に成立している bit 一致の論理をそのまま使える。
@@ -109,5 +121,11 @@ block 内の 16 積については、現行の correctness（K index 順に交�
 reference は「K 全体へ continuation する scalar ループ」で bit 一致を取れるが、
 それは §4 の検証をパスしてから採用する。
 
-よって実装順は **safe form を先に production へ入れ（bit 一致ゲートで守る）、
-chain 形はその後別ゲート（tolerance + logit 変動）で検討**するのが安全。
+訂正後の実装順: **chain 形（案 D + K 全体 chain）を第一候補**とし、一致条件は
+variant 間の bf16 一致率と rel_l2 を実測して置く（reference は変更しない）。
+safe form は、chain 形が E2E の logit ゲートで落とされた場合のフォールバックとして
+残す（reference との bit 一致は得るが、消せる命令が少ない）。
+
+案 B（per-token F32）は**採用対象から外す**。行基準が 2 冪でないため per-block 適用と
+epilogue 適用のビットが揃わないこと、および §11.1 で現行の 1.71 倍の誤差（C/D は
+1.39 倍）で優位性がないことが理由。

@@ -25,7 +25,7 @@ fold 自体の損は 5 桁目（§13.2）、WMMA は E4M3 subnormal を flush �
 | quantization | 新 spec `FP8_E4M3_ROWREF_FOLDED_V1`（codes = FP8E4M3、group 128 の E8M0 を行基準へ fold、付随 = 行 1 個の F32 基準）。`QuantSpecId` に追加 |
 | activation kernel | `launch_activation_quantize_mxfp4_rowref(...)`。行ごとに (1) 128 K group の amax → `e_g = ceil(log2(amax/448))`、(2) `ref = max_g e_g`、(3) codes = `e4m3_rne(e4m3_rne(a / 2^e_g) * 2^-(ref-e_g))`、(4) `scales[row*stride + 0] = 2^ref`。**group 毎の 2 段丸めをそのまま再現する**（§13.2 の実測はこの形） |
 | KernelId | `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を MXFP4 消費側だけ新 id へ（`linear_quant_contract.h` の family → spec 対応で決まる）。graph lowering は linear の activation spec を見て emit するだけ |
-| correctness path | `exec_linear_mxfp4` が fold 後の平面を読む（per-block の activation scale を掛けない / 行基準を epilogue で掛ける）。**reference 側の accumulation も同じ意味に揃える**ことで、correctness と optimized の関係は現状と同じ「同一値」に戻る |
+| correctness path | `exec_linear_mxfp4` は fold 後の平面を読む形を**独立実装で追加**する（per-block の activation scale を掛けない / 行基準を epilogue で掛ける）。accumulation 構造は変えず、optimized との一致は dtype 誤差内で見る |
 | optimized kernels | Prefill2D は `kActRescale=false` 形が既に実装済み（bench 専用 entry）。production の launcher として promote し、RowBlock / SplitK にも同じ形を入れる（rows==1 での速度は未測。decode は DRAM 律速なので利得は小さい見込み、実測して決める） |
 | workspace | 追加平面は不要（`Int8ActivationWorkspaceLayout` の F32 scale 平面の column 0 を行う。他の column は未使用）。resident size 不変 |
 | selector / dispatch | activation spec を手がかりに launcher を選択。`WeightSlot` は不変 |
@@ -38,12 +38,19 @@ fold 自体の損は 5 桁目（§13.2）、WMMA は E4M3 subnormal を flush �
    fixture で codes 16384 / scales を bit 一致、fold で 3548 code が変わり 561 code が
    ゼロへ潰れる帯域を実際に踏んでいる）。残る is「E2E prefill の実 activation で codes
    平面の差分率を §13.2 の予測（0.007〜1.5%、subnormal 化 3.07%）と突き合わせる」こと。
-2. correctness path を fold 意味へ合わせ、`test_mxfp4_linear` の全 variant 比較を新的な contract（fold 後の平面）で通す。ここで「correctness と optimized が再び同一値」であることを gate にする。
+2. correctness path に fold 後の平面を読む形を追加し、`test_mxfp4_linear` の全 variant 比較を新しい contract（fold 後の平面）で通す。一致条件は dtype 誤差内（variant 間の一致率と rel_l2 は実測値で置く）。reference の accumulation は変更しない。
 3. Prefill2D の production 接続（`kActRescale=false` を選択系へ）+ micro 再計測（§13.1 の数が production 経路でも出るか）。selector の閾値は計測値で更新する。
 4. RowBlock / SplitK への展開（rows==1 実測して採用/不採用を決める）。
 5. E2E ゲート（次節）→ `docs/developer/` の contract 更新 → 現在形で書き、このメモは削除。
 
-## 4. 受け入れゲート（A 側変更は bf16 bit 一致ゲートを使えない）
+## 4. 受け入れゲート（reference は変えない。条件は dtype 誤差内）
+
+一致条件の基準は `test_mxfp4_linear` が元々持っていた「double 参照に対する
+bf16 exact >= 99.9% / rel_l2 < 2e-3」で統一する。optimized variant 間・variant と
+correctness path の bf16 bit 一致は契約にしない（reference を optimized へ
+合わせ込む形は採用しない）。chain 形を採る場合は variant 間の一致率と rel_l2 を
+実測してしきい値を置く。
+
 
 §11.1 で現行 A 側量子化だけで出力 rel_l2 5.5e-3、bf16 反転率 85%。よって
 `GENERATED_IDS` 一致は **pass 不能**（§12 で logit rel_l2 ~1e-2 级で 54/512 token 分岐を実測）。
