@@ -142,7 +142,7 @@ softmax(dtype=float32) -> topk -> top-k 合計で除算 -> expert loop は hit �
 の昇順 -> index_add_（token 昇順）-> 最後に sigmoid(shared_expert_gate) * shared
 ```
 
-fixture は `tools/moe_layer_oracle_fixture.py` が生成し、`tests/fixtures/qwen35moe_tiny/`
+fixture は `tools/moe_layer_oracle_fixture.py` が生成し、`tests/fixtures/qwen35moe/`
 に commit した（config.json 1.4 KB / model.safetensors 316 KB / oracle.safetensors 128 KB、
 torch 抜きで読める）。geometry は hidden 128 / moe_inter 128 / shared 128 /
 experts 8 / top_k 2 / tokens 16（`hidden` と `moe_intermediate_size` は grouped launcher が

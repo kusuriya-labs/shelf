@@ -259,11 +259,11 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
-`test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe_tiny/`（commit 済み、
+`test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
 torch 不要で読むだけ）で、再生成は
 
 ```sh
-python3 tools/moe_layer_oracle_fixture.py --out-dir tests/fixtures/qwen35moe_tiny
+python3 tools/moe_layer_oracle_fixture.py --out-dir tests/fixtures/qwen35moe
 ```
 
 referee は HF transformers の `Qwen3_5MoeSparseMoeBlock` を float64 で実行したものである

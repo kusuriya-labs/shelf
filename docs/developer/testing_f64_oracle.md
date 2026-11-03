@@ -80,9 +80,9 @@ tools/qwen38_fp8_cpu_fixture.py \
   --oracle-dir ../references/qwen35-f64-oracle \
   --ids 814,20139,303,799,13901,3069,279,12515,7701,6105,2261,279,1834,321,2438,506,41564,13 \
   --max-new-tokens 64 --hidden-tokens 16 --hidden-scope both \
-  --out-json tests/fixtures/qwen38_27b_fp8_cpu_oracle.json \
-  --out-hidden tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden.safetensors \
-  --out-hidden-generated tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden_generated.safetensors
+  --out-json tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle.json \
+  --out-hidden tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle_hidden.safetensors \
+  --out-hidden-generated tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle_hidden_generated.safetensors
 ```
 
 出力:

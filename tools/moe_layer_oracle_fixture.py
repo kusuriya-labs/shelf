@@ -14,7 +14,7 @@ E2M1 は round-nearest-even) で量子化し、**量子化後の値**を HF に�
 
 例:
   python3 tools/moe_layer_oracle_fixture.py \
-      --out-dir tests/fixtures/qwen35moe_tiny
+      --out-dir tests/fixtures/qwen35moe
 """
 
 import argparse
@@ -163,7 +163,7 @@ def build_config_json(hidden: int, inter: int, shared_inter: int, experts: int, 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out-dir", default="tests/fixtures/qwen35moe_tiny")
+    ap.add_argument("--out-dir", default="tests/fixtures/qwen35moe")
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--inter", type=int, default=128)
     ap.add_argument("--shared-inter", dest="shared_inter", type=int, default=128)

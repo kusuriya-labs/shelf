@@ -12,9 +12,9 @@ oracle は本 repository に vendor しない。docs/developer/testing_f64_oracl
       --oracle-dir ../references/qwen35-f64-oracle \
       --ids 814,20139,303,799,13901,3069,279,12515,7701,6105,2261,279,1834,321,2438,506,41564,13 \
       --max-new-tokens 64 --hidden-tokens 16 \
-      --out-json tests/fixtures/qwen38_27b_fp8_cpu_oracle.json \
-      --out-hidden tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden.safetensors \
-      --out-hidden-generated tests/fixtures/qwen38_27b_fp8_cpu_oracle_hidden_generated.safetensors
+      --out-json tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle.json \
+      --out-hidden tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle_hidden.safetensors \
+      --out-hidden-generated tests/fixtures/qwen35/qwen38_27b_fp8_cpu_oracle_hidden_generated.safetensors
 """
 
 import argparse
@@ -253,7 +253,9 @@ def main():
         },
         "hidden_states": hidden_states,
     }
-    Path(a.out_json).write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n")
+    out_json = Path(a.out_json)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {a.out_json}, {a.out_hidden}"
           + (f", {a.out_hidden_generated}" if a.out_hidden_generated else ""))
 

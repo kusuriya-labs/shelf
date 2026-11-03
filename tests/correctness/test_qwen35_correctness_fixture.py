@@ -27,8 +27,9 @@ import numpy as np
 from safetensors.numpy import load_file
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_JSON = REPO_ROOT / "tests" / "fixtures" / "qwen38_27b_fp8_cpu_oracle.json"
-FIXTURE_HIDDEN = REPO_ROOT / "tests" / "fixtures" / "qwen38_27b_fp8_cpu_oracle_hidden.safetensors"
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "qwen35"
+FIXTURE_JSON = FIXTURE_DIR / "qwen38_27b_fp8_cpu_oracle.json"
+FIXTURE_HIDDEN = FIXTURE_DIR / "qwen38_27b_fp8_cpu_oracle_hidden.safetensors"
 TAP_COUNT = 8
 TOKEN_CHECK = 64
 REL_TOL = 2e-2

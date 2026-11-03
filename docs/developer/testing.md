@@ -61,6 +61,10 @@ Skipped は開発者ローカル向けの表示にすぎず、required acceptanc
   `SHELF_MODEL_DIR` を要求する optional test である。
 - `tests/quality` — quality regression の runner。`quality` label のみで、
   external model を要求する。性能 test とは分離する。
+- `tests/fixtures/` — commit する合成 fixture。fixture ごとに 1 directory を作り
+  （`rope_cap` / `qwen35` / `qwen35moe`）、JSON の `file` のような directory 内相対参照は
+  basename で解決できる同一 directory に揃える。生成器は `tools/` に置き、再生成コマンドは
+  その fixture の contract doc に書く。`*.safetensors` は LFS（`.gitattributes`）。
 
 R&D Gate / 診断用 test は旧 `tests/rnd` に置いていたが削除済みである。
 経緯は Git history を参照する。
