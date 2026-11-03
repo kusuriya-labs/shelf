@@ -191,6 +191,73 @@ codes は 1 byte / weight。scale は 128 x 128 tile あたり 4 bytes を tile 
 
 ---
 
+## 6bis. MXFP4 E2M1 / E8M0 group 32 canonical format
+
+OCP Microscaling FP4（Quark `mxfp4` の real-quantized export）を使う。
+
+### 6bis.1 Parameters
+
+```text
+block_elements (K)    = 32
+code format           = OCP E2M1（2 weight を 1 byte に packed）
+codes bytes/block     = 16    (32 weight * 0.5 byte)
+metadata              = metadata1, E8M0, PerBlock（row と K block の組ごと）
+block_n               = 1
+block_k               = 32（固定）
+```
+
+E2M1 code 値は `0, 0.5, 1, 1.5, 2, 3, 4, 6`（bit3 = sign）。
+
+### 6bis.2 codes stream
+
+```text
+codes[row][j] = low nibble  = weight[row][2 * j]
+                high nibble = weight[row][2 * j + 1]
+packed width  = padded_k / 2
+padded_k      = align_up(logical_k, 32)
+```
+
+nibble 順は生成元 packer（`evens | (odds << 4)`）と一致する。逆に packed た
+artifact は受理しない。
+
+### 6bis.3 metadata1 stream
+
+metadata1 は **E8M0**（1 byte の肩付き指数）で、`PerBlock`（`block_n = 1`、
+`block_k = 32`）を使う。FP8 のような N 方向 tile 共有は無い。
+
+```text
+scale_count = rows * (padded_k / 32)
+1 byte / scale
+scale value = 2^(byte - 127)
+```
+
+- byte 0 は 2^-127、byte 255 は MX spec の NaN であり **受理しない**。
+- 復元:
+
+```text
+w[row][k] ~= e2m1_decode(nibble(codes[row][k / 2], k % 2)) * 2^(scales[row][k / 32] - 127)
+```
+
+### 6bis.4 Payload density
+
+codes は 0.5 byte / weight、scale は 1 byte / 32 weight。
+raw で weight あたり 17/32 byte（FP8 の 17/16 byte の半分）。
+
+### 6bis.5 Scale の生成規則（reference math）
+
+artifact の生成側（テスト fixture 生成にも使う）は次で確定する。
+
+```text
+scale_byte(amax) = biased_exp(round_to_1_mantissa_bit(amax)) - 2   // clamp [-127, 127]
+amax == 0        -> byte 1（2^-126）
+```
+
+code 側は 0.5 ulp 未満へ丸める **half-away-from-zero** である（MX の
+round-half-to-even ではない）。0.25 / 1.25 / 2.5 / 5 の境界で code が変わるため、
+生成元 packer との bit 一致をテストで固定する。
+
+---
+
 ## 7. Stream size formulas
 
 `rows` を row 数、`blocks = rows * (padded_k / block_elements)` とする。
@@ -210,6 +277,15 @@ metadata1 bytes = ceil(rows / 128) * (padded_k / 128) * 4
 
 batch 次元を持つ場合は `ceil(rows / 128)` を batch ごとに計算する。
 
+### MXFP4
+
+```text
+codes bytes     = rows * padded_k / 2
+metadata1 bytes = rows * padded_k / 32
+```
+
+scale は row を共有しないため、batch / rank-3 では各行列分を積み上げる。
+
 ---
 
 ## 8. File stream naming / descriptor contract
@@ -221,12 +297,13 @@ format は固定数の Meta stream を持たない。
 
 ```cpp
 enum class QuantFormatId : uint8_t {
-    None = 0, Bf16 = 1, Fp8 = 4,
+    None = 0, Bf16 = 1, Fp8Finegrained = 2, Mxfp4Finegrained = 3,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
 static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
-static_assert(static_cast<uint8_t>(QuantFormatId::Fp8) == 4);
+static_assert(static_cast<uint8_t>(QuantFormatId::Fp8Finegrained) == 2);
+static_assert(static_cast<uint8_t>(QuantFormatId::Mxfp4Finegrained) == 3);
 
 enum class MetaCountMode : uint8_t {
     None = 0, PerBlock = 1, PerSuperBlock = 2, MatrixBlock = 3,
@@ -256,18 +333,23 @@ BF16
 FP8
   block_elements = 128, code_bytes_per_block = 128
   metadata1 : element_bytes = 4, MatrixBlock, block_n = 128, block_k = 128
+
+MXFP4
+  block_elements = 32, code_bytes_per_block = 16
+  metadata1 : element_bytes = 1, PerBlock, U8 (E8M0)
 ```
 
 numeric value は in-memory の identifier のみで、file / manifest には保存しない。
 on-disk の encoding は `shelf_quantization.json` の文字列名で管理される。
 
 ```text
-bf16                  / Bf16
-fp8_e4m3_block128_f32 / Fp8
+bf16                    / Bf16
+fp8_e4m3_block128_f32   / Fp8
+mxfp4_e2m1_e8m0_g32     / Mxfp4
 ```
 
 `QuantizedEncoding`（`manifest/quantized_manifest.h`）が唯一の on-disk encoding enum である。
-その番号体系（BF16 = 0, FP8 = 5）は既存 artifact と対応する。
+その番号体系（BF16 = 0, FP8 = 5, MXFP4 = 7）は既存 artifact と対応する。
 
 既存 manifest / tensor reference を拡張する場合も、`scales` という 1 本の opaque stream に
 複数の意味を埋め込む設計には戻さない。
@@ -306,6 +388,10 @@ format 別の builder:
 
 - FP8 : `quantization::fp8::preshuffle_fp8_native`
 - BF16 : preshuffle なし（row-major BF16 のまま）
+- MXFP4 : byte 変換を持たない。MXFP4 の native layout は canonical と同一の
+  row-major 4-bit codes + row-major E8M0 scale である（§11）。
+  kernel access pattern に合わせた fragment 順を導入する場合は layout id を更新し、
+  canonical と区別する。
 
 Kernel API は canonical view を受け取れない構造にすることを推奨する。
 
@@ -367,6 +453,22 @@ kernel が同じ式を使う。pad row は 0 埋めする。
 activation codes (FP8 W8A8 の入力) も同じ fragment block 順を使う。
 `padded_k` は 64 の倍数でなければならない（`Int8ActivationWorkspaceLayout::k_padded_for`
 が 64 へ align する）。
+
+### MXFP4 native
+
+```text
+codes     : [rows][padded_k / 2] row-major 4-bit
+            codes_row_stride_bytes = padded_k / 2
+metadata1 : [rows][padded_k / 32] row-major E8M0
+            scale_row_stride_bytes = padded_k / 32
+padded_k  : 64 の倍数（activation の 64 K fragment block と揃える）
+rows      : 16 の倍数（pad は作らない。満たさない tensor は load 時に unsupported）
+```
+
+codes を E4M3 へ展開した layout を常駐させてはならない。resident size が
+0.5 byte / weight から 1 byte / weight へ倍増し、§12 の VRAM 条項に反する。
+E2M1 code と E8M0 exponent の積を FP8 fragment として使う変換は
+register / LDS 内で行い、metadata1（E8M0）は常に保持する。
 
 ---
 
@@ -544,6 +646,8 @@ format 別の追加条件:
 
 ```text
 FP8: k_padded % 128 == 0, metadata1 は FP32 で ceil(rows / 128) * (padded_k / 128) 個
+MXFP4 : k_padded % 32 == 0, metadata1 は U8 で rows * (padded_k / 32) 個、
+        E8M0 byte 255 を含まない
 BF16        : k_padded == logical_k, codes / metadata を持たない
 ```
 
@@ -602,6 +706,7 @@ raw payload の基準値:
 
 ```text
 FP8 = 1 byte / weight + FP32 scale per 128 x 128 tile
+MXFP4 = 0.5 byte / weight + E8M0 scale per 32 weight block
 BF16      = 2 bytes / weight
 ```
 
@@ -615,6 +720,14 @@ FP8
 codes     : 1 byte / weight, E4M3
 metadata1 : 4 bytes / 128 x 128 tile, FP32 scale
 Raw       : 1 byte / weight + scale tile
+```
+
+```text
+MXFP4
+-----------------------------------------------
+codes     : 0.5 byte / weight, E2M1, 2 codes / byte along K
+metadata1 : 1 byte / 32 weight, E8M0 scale, per row
+Raw       : 0.5 byte / weight + scale byte per 32 weight
 ```
 
 ```text

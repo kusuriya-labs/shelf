@@ -63,6 +63,13 @@ correctness path は production と同じ W8A8 contract で動く。activation q
 全入力 pattern で `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` の correctness path が
 generic kernel と codes / scales まで一致することを固定する。
 
+`LINEAR_MXFP4_W4A8` の correctness path も同じ activation layout を使い、weight 側は
+native layout（canonical と同一の row-major 4-bit codes + row-major E8M0 scale）を読む。
+`test_mxfp4_linear`（`gpu1;required`）は、E2M1 / E8M0 の decode と 32 K 刻みの rescale が
+double 参照に対して bf16 出力で bit 一致すること、および weight scale group・
+codes stride・k_padded の contract 違反が dispatch 側で `INVALID_PROGRAM` になることを
+固定する。
+
 ## Optimized
 
 optimized variantは `src/shelf/kernels/optimized/` に実装する。

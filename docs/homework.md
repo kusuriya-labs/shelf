@@ -118,7 +118,7 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * Decode(投機ONの場合、SpecとVerify)とPrefillを同じバッチ内で同時実行可能にして、pp=row2048が動作している場合でも、Decode出力を止めない
 * MTPの実装
 * exl3(mul1)の実装
-* MXFP4の実装
+* MXFP4のoptimized kernel（W4A8 GEMM）と native fragment layout。format / load / correctness path は実装済み
 * qwen35moe対応・最適化
 * pipeline-parallelの実装
 * expert-parallelの実装

@@ -86,6 +86,22 @@ int main() {
         spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
         rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u, "fp8");
 
+    // MXFP4 keeps the FP8 E4M3 activation contract (W4A8); only the weight
+    // storage and the K alignment of the weight tile differ.
+    expect_quantized(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::MXFP4_W4A8_F32_BF16),
+        rt::KernelId::LINEAR_MXFP4_W4A8, 64u, "mxfp4");
+
+    expect_error(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
+        "mxfp4 linear weight requires mxfp4 w4a8 compute spec", "mxfp4 fp8 spec");
+    expect_error(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::BF16_F32_BF16),
+        "mxfp4 linear weight requires mxfp4 w4a8 compute spec", "mxfp4 bf16 spec");
+
     expect_error(
         static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::BF16_F32_BF16),

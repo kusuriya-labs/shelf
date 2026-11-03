@@ -18,7 +18,7 @@ self-contained quantized safetensors を直接ロードする。
 - `QuantFormatId` — weight storage / compute formatのID（`quantization/quant_format.h`）。
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
-- 対応 encoding: BF16 / FP8 K128N128。
+- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -89,15 +89,27 @@ partition plan を受け付けない（multi-GPU lowering 未対応のため
 real-quantized safetensors を manifest 非依存で直接ロードできる。
 
 - `quant_method == "fp8"` — `fmt == "e4m3"` かつ `weight_block_size == [128,128]`
+- `quant_method == "quark"` — `global_quant_config.weight` が
+  `dtype == "fp4"` / `qscheme == "per_group"` / `group_size == 32` /
+  `scale_format == "e8m0"` / `is_dynamic == false` かつ
+  `export.weight_format == "real_quantized"`。
+  これ以外（group ≠ 32、`scale_format` が e8m0 以外、fake quant export）は
+  `Status::unsupported` で拒否する。
 
 合成は `quantization/bundle/hf_manifest.{h,cpp}` が行う。HF の tensor naming
-（codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16））から
+（codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16）、
+MXFP4 scales = `<name>.weight_scale`（U8 E8M0））から
 `QuantizedManifest` を合成し、
 [canonical_soa_payload.md](canonical_soa_payload.md) §6 と同じ
 canonical payload contract へ流し込む。payload の bit 列は canonical 定義と一致するため、
 preshuffle / runtime 経路は self-contained 量子化 model と同一である。
 
 - FP8 の BF16 scale はロード時に F32 へ widen される（metadata1 は F32 contract のまま）。
+- MXFP4 の scale は変換せず U8 E8M0 のまま metadata1 へ入れる（staging しない）。
+  E8M0 byte 255（MX spec の NaN）を含む tensor は load 時に拒否する。
+- MXFP4 の logical K は codes の 2 倍として復元する。K が 32 の倍数でない、または
+  64 の倍数でない tensor（activation の 64 K fragment に載らない）は拒否する。
+  同様に native の 16 行 tile に載らない rows は拒否する。
 - 量子化されていない tensor（norm / embed / lm_head / dt_bias / A_log /
   conv1d.weight など）は BF16 entry として同一経路でロードされる。
 - HF payload の K が block size（FP8: 128）の倍数でない場合、
@@ -163,6 +175,19 @@ production の Program Builder は linear の activation 量子化方針を
 | --- | --- | --- | --- | --- | --- |
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
+| `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3 | 64 | あり |
+
+- MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
+  checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
+  そのまま共有する（W4A8）。A4 を採用しないことは数値 class の差であり、
+  品質比較では [testing_f64_oracle.md](testing_f64_oracle.md) の FP8 と同じ
+  扱いで tolerance に反映する。
+- MXFP4 weight の scale は 32 K ごとに付く。accumulation は 32 K ごとの
+  partial sum に `weight_scale * activation_scale` を掛けて合算し、
+  activation scale は group 128 を `ib >> 2` で選ぶ。
+  weight scale group が 32 でない weight は kernel capability で拒否する。
+- `LINEAR_MXFP4_W4A8` の optimized launcher は持たない。`try_launch_optimized` は
+  この kernel id を NotApplicable とし、correctness path で実行する。
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。
