@@ -103,7 +103,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
 // reference 2^ref goes to scales[row * scale_stride_floats + 0]; the group codes are
 // staged in LDS between the two sweeps, so global traffic stays one BF16 read and
 // one code write per element, the same as the group quantizer. Design and
-// measurements: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
+// measurements: docs/research/20261103/mxfp4_gate_a_prime.md sec.15-17.
 __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowref_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,

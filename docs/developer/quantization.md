@@ -175,7 +175,7 @@ production の Program Builder は linear の activation 量子化方針を
 | --- | --- | --- | --- | --- | --- |
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
-| `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3 | 64 | あり |
+| `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3（group E8M0 を行基準へ fold） | 64 | あり |
 
 - MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
   checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
@@ -183,8 +183,8 @@ production の Program Builder は linear の activation 量子化方針を
   品質比較では [testing_f64_oracle.md](testing_f64_oracle.md) の FP8 と同じ
   扱いで tolerance に反映する。
 - MXFP4 weight の scale は 32 K ごとに付く。accumulation は 32 K ごとの
-  partial sum に `weight_scale * activation_scale` を掛けて合算し、
-  activation scale は group 128 を `ib >> 2` で選ぶ。
+  partial sum に weight scale を掛けて合算し、activation scale は K ループで
+  適用しない（下の行基準 fold 形のため）。
   weight scale group が 32 でない weight は kernel capability で拒否する。
 - `LINEAR_MXFP4_W4A8` は optimized kernel 群で実行する。weight は native layout
   （[canonical_soa_payload.md](canonical_soa_payload.md) §11）で常駐し、correctness path
@@ -203,17 +203,36 @@ production の Program Builder は linear の activation 量子化方針を
   per-block rescale 側へ戻る。
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
-  scale = `F32`）に固定され、CLI / config による切替は存在しない。
+  scale = `F32`）に固定され、CLI / config による切替は存在しない。平面の**形**は
+  family で決まり、spec の切替ではない。
 - activation K の padding は block-scaled weight の tile に合わせる。
   FP8 weight は weight tile が 128 幅のため activation も 128 単位で揃える。
   codes の物理配置は WMMA fragment block 順で、block 幅は 64 K である
   （[canonical_soa_payload.md](canonical_soa_payload.md) §11）。
-- 量子化 weight の activation quantize は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を
-  受け取る。codes は E4M3、scale は group-128 の F32 であり、activation quantize の
-  実装はこの 1 系統のみである。
-- scale は group 128 幅あたり 1 本（`ceil(k_padded / 128)` 本）を row-major に書き、
-  linear も同じ位置を読む。`Int8ActivationWorkspaceLayout` の scale row stride は
-  `align16(ceil(k_padded / 128) * 4)` である。
+- activation quantize の kernel id は family ごとに 1 つで、Program Builder から
+  到達できない代替経路は持たない。
+  `Fp8Finegrained` weight は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED`、
+  `Mxfp4` weight は `KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF` を受け取る。
+  両者の codes は E4M3、scale 平面の dtype と layout は同一である。
+- MXFP4 の activation 平面は**行基準 fold 形**で、`launch_activation_quantize_mxfp4_rowref`
+  （correctness path は `exec_activation_quantize_mxfp4_rowref`）が作る。group 128 の
+  scale は E8M0（`448 * 2^e >= group peak` を満たす最小の e）で、その指数を行の最大
+  指数 `ref` 基準へ codes 側へ畳む。
+
+  ```text
+  codes[i]   = e4m3_rne( e4m3_rne(a[i] / 2^e_g) * 2^-(ref - e_g) )
+  scales[row][0] = 2^ref        # scale 平面の column 0 だけを使う
+  ```
+
+  GEMM は K ループで activation scale を一切適用せず、epilogue で `2^ref` を 1 回掛ける。
+  fold は 2 段丸め（group 量子化してから行基準へ掛け直す）をそのまま再現するのが契約で、
+  reference 実装と optimized kernel の作る平面は bit 一致する
+  （`test_mxfp4_linear` の producer 比較）。設計と実測は
+  [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md) §13-§16。
+- FP8 family の scale は group 128 幅あたり 1 本（`ceil(k_padded / 128)` 本）を row-major に
+  書き、linear も同じ位置を読む。MXFP4 の行基準形では column 0 だけを使い、他 column は
+  0 で埋める。`Int8ActivationWorkspaceLayout` の scale row stride は
+  `align16(ceil(k_padded / 128) * 4)` で、両 family 共通である。
   workspace のバイト数・stride は `ActivationQuantSpec` から導出せず、
   `runtime/program/activation_workspace_layout.h` の
   `make_activation_workspace_layout` が返す layout を正本とする。
@@ -224,10 +243,8 @@ production の Program Builder は linear の activation 量子化方針を
   E4M3 以外（codes dtype 違い、group 指定、scale dtype 違反）は明示的に失敗する。
 - activation workspace は入力 ValueId 単位で1つで、同一入力を使う複数 linear は
   1回の quantize と1つの workspace range を共有する。共有の検証は
-  K / `k_padded` と activation spec の一致で行い、
+  K / `k_padded`、activation spec、および producer kernel id（平面の形）の一致で行い、
   食い違う場合は構築時に失敗する。
-- activation quantize の kernel id は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` のみで、
-  Program Builder から到達できない代替経路は持たない。
 
 ## KV quantization
 

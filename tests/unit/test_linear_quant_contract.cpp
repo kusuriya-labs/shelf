@@ -137,8 +137,6 @@ int main() {
     check(rt::activation_k_padded_for(128u, 2560u) == 2560u, "pad 128: 2560 -> 2560");
     check(rt::activation_k_padded_for(32u, 0u) == 0u, "pad 32: 0 -> 0");
 
-    check(rt::kActFlagRowRefFolded != 0u && (rt::kActFlagRowRefFolded & 1u) == 0u,
-          "the activation plane form flag does not use the linear output dtype bit");
 
     check(rt::activation_quant_matches(
               quant::kFp8FinegrainedActivationQuantSpec, quant::kFp8FinegrainedActivationQuantSpec),

@@ -275,8 +275,6 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.weight_index = n.weight_index;
             b.compute_spec = w.compute_spec;
             b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
-            if (contract.activation_kernel == KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
-                b.flags |= kActFlagRowRefFolded;
             if (need_act_ws) {
                 const uint32_t kdim = w.cols;
                 const uint32_t kp =

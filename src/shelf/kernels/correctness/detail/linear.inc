@@ -208,12 +208,11 @@ __device__ __forceinline__ ProgramStatus exec_linear_mxfp4(
             static_cast<size_t>(m >> 4) * (static_cast<size_t>(code_stride) * 16u);
         const float* asrow = reinterpret_cast<const float*>(
             asbase + static_cast<size_t>(m) * scale_stride);
-        const bool row_ref_act = (b.flags & ::shelf::runtime::kActFlagRowRefFolded) != 0u;
         const uint32_t m_slot = m & 15u;
         float acc = 0.f;
         for (uint32_t ib = 0; ib < nb; ++ib) {
             const float ws = ::shelf::quantization::codec::device::e8m0_decode_f32(wsrow[ib]);
-            const float as = row_ref_act ? asrow[0] : asrow[ib >> 2];
+            const float as = asrow[0];
             float p = 0.f;
             const uint8_t* brow = wrow + static_cast<size_t>(ib) * 256u;
             for (uint32_t j = 0; j < 16u; ++j) {

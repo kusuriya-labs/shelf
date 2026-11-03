@@ -750,3 +750,56 @@ base の 22 番目以降に `271,760,...,12515,7701,6105,2261,279,1834,321,2438,
 （プロンプト自体が反復文）。offset 最適化で一致率 16%、末尾は EOS。
 文として破綻は無いが、**1 番目の token から分岐する**ので、生成列一致を性能変更の
 ゲートに使う方針はこの変更では成立しない（§12 の校正と整合）。
+
+## 17. 契約集約（行基準形を MXFP4 の唯一の activation 形にする）と decode 再測
+
+graph 配線（§16）で MXFP4 の producer は `ACTIVATION_QUANTIZE_MXFP4_ROWREF` 1 系統に
+なったので、group 平面を読む形（`Mxfp4ActivationForm::GroupF32`、
+`DispatchBinding::flags` の `kActFlagRowRefFolded`、kernel の `kActRowRef` template）は
+production から到達不能になる。リポジトリ規則に従い削除した。
+
+- GEMM の実体化は 22 → 10（RowBlock1/2/4 × fold、SplitK × 3 分割 × fold、
+  Prefill2D × guarded × fold）。
+- RowBlock の未使用 LDS array（`smem[2*MB*8]`）削除。
+- bench から §13 の実験 kernel（`a_row_ref_kernel` / `a_plane_fold_kernel`）と
+  `--mxfp4-a-fold` / `--mxfp4-a-rowref` を削除。production 形の quantize 計測は残した。
+- `test_mxfp4_linear` の受け入れを **double 参照に対する dtype tolerance**
+  （bf16 exact >= 99.9%、rel_l2 < 2e-3）に統一。correctness path との bf16 一致率は
+  print のみ（gross divergence だけ 2e-2 で守る）。producer 相互一致
+  （reference quantize と optimized quantize の平面 bit 一致、codes 131072/131072、
+  scale diff 0）と contract 違反の `INVALID_PROGRAM` はそのまま固定。
+- contract の現在形は `docs/developer/quantization.md`（activation quantization contract）
+  と `docs/developer/kernels.md` へ移し、設計メモ `mxfp4_act_rowref_fold_plan.md` は削除。
+
+### 17.1 micro 再確認（p50 µs、`--impl auto`、集約前後）
+
+| shape (n:k) | rows | quantize 前/後 | GEMM 前/後 |
+| --- | ---: | ---: | ---: |
+| 17408:5120 | 1 | 9.00 / 9.11 | 34.2 / 34.3 |
+| 17408:5120 | 512 | 30.3 / 30.8 | 420.7 / 423.4 |
+| 17408:5120 | 2048 | 76.9 / 77.6 | 2071.0 / 2032.3 |
+| 5120:17408 | 1 | 20.8 / 20.6 | 41.9 / 41.8 |
+| 5120:17408 | 512 | 64.5 / 65.4 | 425.4 / 439.0 |
+| 5120:17408 | 2048 | 247.2 / 247.7 | 2064.3 / 1975.0 |
+
+差はノイズ帯。§15 の performance 判断は集約後もそのまま成立する。
+
+### 17.2 E2E 3 状態（prompt 1024 tokens、greedy、`--max-seq-len 2048`）
+
+| 状態 | PREFILL_MS | DECODE_MS / tokens | ms / step |
+| --- | ---: | ---: | ---: |
+| pre-wiring（group A 平面） | 554.4 | 19714.4 / 511 | 38.4 |
+| 配線直後（2 形共存） | 421.7 | 15545.6 / 349 | 44.5 |
+| 集約後（行基準 1 形） | 409.0 / 415.1 / 417.2 | 13364.5 / 13377.0 / 13401.5（349 tokens） | **38.3** |
+
+集約後は **decode が pre-wiring と同等（38.4 → 38.3 ms/step）、prefill は +34%**。
+ GENERATED_IDS は配線直後の実行と完全一致（集約は意味論的に中立）。
+
+配線直後に観測した decode +16%（44.5 ms/step）は、集約後は 3 回とも 38.3 ms/step で
+再現しない。原因は特定していない。候補は (a) 実体化 22 → 10 によるコード配置 /
+ICache の差、(b) RowBlock の未使用 LDS array、(c) 計測環境。配線直後のコードへ戻して
+の再現は行っていない（記録のみ残す）。decode の per-launch 利得
+（rows=1 で GEMM −5.6 / −18.1 µs、quantize +2.7 / +8.7 µs）が E2E で net に現れない
+点は未分解で、decode 側の内訳（attention / GDN を含む 1 step の launch 構成）を
+分解しないと結論は出ない（推定: 1 step あたり 256 quantize + 数百 launch の内、
+MXFP4 linear 由来の差は ±2 ms 級で、step 38 ms に対して観測分解能際に立たない）。

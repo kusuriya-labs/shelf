@@ -9,13 +9,6 @@
 
 namespace shelf::runtime {
 
-// DispatchBinding::flags bit 1 (bit 0 is the linear output dtype flag set by the
-// lowering): the activation plane for this linear was produced in the row-reference
-// form - E4M3 codes with the group E8M0 folded into them, and one f32 row reference
-// at scales[row * scale_stride_floats + 0]. Producers and consumers must agree; the
-// accumulation order of each path is its own.
-inline constexpr uint32_t kActFlagRowRefFolded = 1u << 1;
-
 struct ResolvedLinearQuantContract {
     KernelId linear_kernel = KernelId::LINEAR_BF16;
     bool requires_activation_quant = false;

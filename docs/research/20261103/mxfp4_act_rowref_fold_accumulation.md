@@ -1,7 +1,7 @@
 # activation 行基準 fold の accumulation 形と一致条件（訂正版）
 
-[mxfp4_act_rowref_fold_plan.md](mxfp4_act_rowref_fold_plan.md) §2 / §3 の 2 段目を
-詰めたメモ。**初版は「correctness path も同じ accumulator 構造へ合わせる」と書いたが、
+MXFP4 activation を行基準 fold へ切り替えるとき、accumulation の形がどう変わるかを
+詰めたメモ（§1-§6 は実装前の導出、§7 が実測での決着）。**初版は「correctness path も同じ accumulator 構造へ合わせる」と書いたが、
 それは reference を optimized に合わせ込むので却下**。訂正の要点:
 
 - reference（`exec_linear_mxfp4` など correctness path）は**独立した自然な accumulation
