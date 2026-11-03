@@ -19,4 +19,9 @@ struct Qwen35MoeTextConfig : shelf::qwen35::Qwen35TextConfig {
 
 Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model_dir);
 
+// num_experts as config.json declares it, without validating any other MoE field. Zero
+// means the model is dense. This is the probe a loader above both families uses to pick
+// a path; it fails only when config.json cannot be read at all.
+Result<std::size_t> read_declared_num_experts(const std::string& model_dir);
+
 }  // namespace shelf::qwen35moe

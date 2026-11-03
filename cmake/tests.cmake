@@ -144,6 +144,7 @@ shelf_add_test(NAME test_moe_expert_load SOURCE unit/test_moe_expert_load.hip LA
 shelf_add_test(NAME test_moe_router SOURCE unit/test_moe_router.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_moe_grouped_linear SOURCE unit/test_moe_grouped_linear.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_moe_combine SOURCE unit/test_moe_combine.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_qwen35moe_model_load SOURCE unit/test_qwen35moe_model_load.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_moe_layer_e2e SOURCE unit/test_moe_layer_e2e.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 2 DEFS SHELF_MOE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/qwen35moe" LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_io shelf_gpu)
 shelf_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
@@ -276,6 +277,7 @@ add_custom_target(
         test_moe_grouped_linear
         test_moe_combine
         test_moe_layer_e2e
+        test_qwen35moe_model_load
         test_dflash2_weight_contract
         test_dflash2_feature_concat
         test_dflash2_grouped_dynamic_conv
@@ -523,6 +525,8 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
 
     # CPU f64 fixture と correctness path の layer hidden / greedy token を比較する。
     # Model dir via SHELF_MODEL_DIR. Skips (exit 77) when unset.
+    shelf_add_test(NAME test_qwen35moe_model_load_real SOURCE unit/test_qwen35moe_model_load_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_quant_bundle shelf_gpu)
+
     add_test(NAME test_qwen35_correctness_fixture
              COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
                  --gpu-count 1 --cost-gb 30 --timeout 1800

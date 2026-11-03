@@ -39,10 +39,14 @@ std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config) {
     return config.num_hidden_layers * config.num_experts * 3u * 2u;
 }
 
+std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix) {
+    return layer_prefix(layer) + "mlp." + suffix;
+}
+
 std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
                                    const char* projection, bool scale) {
-    return layer_prefix(layer) + "mlp.experts." + std::to_string(expert) + "." + projection +
-           ".weight" + (scale ? "_scale" : "");
+    return moe_mlp_tensor_name(layer, "experts." + std::to_string(expert) + "." + projection +
+                                      ".weight" + (scale ? "_scale" : ""));
 }
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,

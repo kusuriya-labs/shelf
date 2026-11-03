@@ -7,6 +7,8 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/io/safetensors_writer.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
+#include <shelf/models/qwen35moe/weights/moe_expert_load.h>
+#include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 
 #include <cstdint>
@@ -20,6 +22,7 @@ namespace moe_expert_fixture {
 
 namespace fs = std::filesystem;
 
+inline constexpr std::size_t kVocab = 1024;
 inline constexpr std::uint32_t kExperts = 4;
 inline constexpr std::uint32_t kHidden = 256;
 inline constexpr std::uint32_t kInter = 128;
@@ -56,6 +59,10 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config() {
     c.num_attention_heads = 4;
     c.num_key_value_heads = 2;
     c.attention_head_dim = 64;
+    // Matches the config_json layer_types order (layer 0 linear_attention, layer 1
+    // full_attention) the way the model-level topology check derives it.
+    c.full_attention_interval = 2;
+    c.layer_types = {0, 1};
     return c;
 }
 
@@ -72,7 +79,7 @@ inline std::string config_json() {
     json += R"json(,"shared_expert_intermediate_size":)json";
     json += std::to_string(kInter);
     json += R"json(,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":64,)json";
-    json += R"json("layer_types":["linear_attention","full_attention"]},)json";
+    json += R"json("full_attention_interval":2,"layer_types":["linear_attention","full_attention"]},)json";
     json += R"json("quantization_config":{"quant_method":"quark","version":"0.13",)json";
     json += R"json("global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group",)json";
     json += R"json("group_size":32,"is_dynamic":false,"scale_format":"e8m0","ch_axis":-1},)json";
@@ -133,21 +140,74 @@ inline bool poisons_plane(const char* projection, std::uint32_t expert) {
     return std::string(projection) == "gate_proj" && expert == kPoisonExpert;
 }
 
+struct PlannedTensor {
+    std::string name;
+    shelf::io::SType dtype;
+    std::vector<std::size_t> shape;
+    std::vector<std::uint8_t> bytes;
+};
+
+// Adds the tensors a full model load asks for: embed / lm_head / final norm and, per
+// layer, the attention body. Shapes follow the synthetic config (4 heads, 2 kv heads,
+// head_dim 64) and the layer_types order (layer 0 is GDN).
+inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
+                                    std::size_t layer) {
+    const std::string prefix = "model.language_model.layers." + std::to_string(layer) + ".";
+    planned.push_back({prefix + "input_layernorm.weight", shelf::io::SType::BF16, {kHidden},
+                       make_bf16(kHidden, 31u + static_cast<std::uint32_t>(layer))});
+    planned.push_back({prefix + "post_attention_layernorm.weight", shelf::io::SType::BF16,
+                       {kHidden}, make_bf16(kHidden, 37u + static_cast<std::uint32_t>(layer))});
+    const auto matrix = [&](const std::string& name, std::size_t rows, std::size_t cols,
+                            std::uint32_t seed) {
+        planned.push_back({prefix + name, shelf::io::SType::BF16, {rows, cols},
+                           make_bf16(rows * cols, seed)});
+    };
+    if (layer % 2u == 0u) {
+        matrix("linear_attn.in_proj_a.weight", 64, kHidden, 41u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_b.weight", 64, kHidden, 43u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_qkv.weight", 3 * 64, kHidden, 47u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_z.weight", 64, kHidden, 53u + static_cast<std::uint32_t>(layer));
+        planned.push_back({prefix + "linear_attn.conv1d.weight", shelf::io::SType::BF16,
+                           {64, 1, 4}, make_bf16(64 * 4, 59u + static_cast<std::uint32_t>(layer))});
+        matrix("linear_attn.out_proj.weight", kHidden, kHidden, 61u + static_cast<std::uint32_t>(layer));
+        planned.push_back({prefix + "linear_attn.norm.weight", shelf::io::SType::BF16, {kHidden},
+                           make_bf16(kHidden, 67u + static_cast<std::uint32_t>(layer))});
+        planned.push_back({prefix + "linear_attn.dt_bias", shelf::io::SType::BF16, {64},
+                           make_bf16(64, 71u + static_cast<std::uint32_t>(layer))});
+        planned.push_back({prefix + "linear_attn.A_log", shelf::io::SType::BF16, {64},
+                           make_bf16(64, 73u + static_cast<std::uint32_t>(layer))});
+    } else {
+        matrix("self_attn.q_proj.weight", 4 * 64, kHidden, 79u + static_cast<std::uint32_t>(layer));
+        matrix("self_attn.k_proj.weight", 2 * 64, kHidden, 83u + static_cast<std::uint32_t>(layer));
+        matrix("self_attn.v_proj.weight", 2 * 64, kHidden, 89u + static_cast<std::uint32_t>(layer));
+        matrix("self_attn.o_proj.weight", kHidden, 4 * 64, 97u + static_cast<std::uint32_t>(layer));
+        planned.push_back({prefix + "self_attn.q_norm.weight", shelf::io::SType::BF16, {64},
+                           make_bf16(64, 101u + static_cast<std::uint32_t>(layer))});
+        planned.push_back({prefix + "self_attn.k_norm.weight", shelf::io::SType::BF16, {64},
+                           make_bf16(64, 103u + static_cast<std::uint32_t>(layer))});
+    }
+}
+
 // Writes one safetensors shard plus config.json. Tensors are emitted in checkpoint
-// file order (expert-major, then name order: down_proj, gate_proj, up_proj).
-inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false) {
+// file order (expert-major, then name order: down_proj, gate_proj, up_proj). With
+// model_level the shard also carries the model-level and attention tensors, so the
+// directory can go through a full model load.
+inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
+                          bool model_level = false) {
     f.dir = dir;
     f.config = text_config();
     std::error_code ec;
     fs::create_directories(dir, ec);
 
-    struct PlannedTensor {
-        std::string name;
-        shelf::io::SType dtype;
-        std::vector<std::size_t> shape;
-        std::vector<std::uint8_t> bytes;
-    };
     std::vector<PlannedTensor> planned;
+    if (model_level) {
+        planned.push_back({"model.language_model.embed_tokens.weight", shelf::io::SType::BF16,
+                           {kVocab, kHidden}, make_bf16(kVocab * kHidden, 3u)});
+        planned.push_back({"model.language_model.lm_head.weight", shelf::io::SType::BF16,
+                           {kVocab, kHidden}, make_bf16(kVocab * kHidden, 5u)});
+        planned.push_back({"model.language_model.norm.weight", shelf::io::SType::BF16, {kHidden},
+                           make_bf16(kHidden, 11u)});
+    }
 
     for (std::size_t layer = 0; layer < kLayers; ++layer) {
         for (std::uint32_t e = 0; e < kExperts; ++e) {
@@ -183,6 +243,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
                            {kInter, kHidden}, make_bf16(kInter * kHidden, 19u)});
         planned.push_back({prefix + "shared_expert.down_proj.weight", shelf::io::SType::BF16,
                            {kHidden, kInter}, make_bf16(kHidden * kInter, 23u)});
+        if (model_level) add_model_level_tensors(planned, layer);
     }
 
     auto writer = shelf::io::SafetensorsWriter::create((dir / "model.safetensors").string());
@@ -220,11 +281,7 @@ inline std::vector<std::string> expert_names(std::size_t layer) {
 
 // Logical names of one layer's non-expert mlp tensors.
 inline std::vector<std::string> mlp_aux_names(std::size_t layer) {
-    const std::string prefix =
-        "model.language_model.layers." + std::to_string(layer) + ".mlp.";
-    return {prefix + "gate.weight", prefix + "shared_expert_gate.weight",
-            prefix + "shared_expert.gate_proj.weight", prefix + "shared_expert.up_proj.weight",
-            prefix + "shared_expert.down_proj.weight"};
+    return shelf::qwen35moe::moe_aux_tensor_names(layer);
 }
 
 }  // namespace moe_expert_fixture

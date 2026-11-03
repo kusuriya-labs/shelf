@@ -21,7 +21,8 @@ MoE の分岐を増やさない。
 routing / grouped linear / combine の GPU kernel（standalone launcher）である。
 **graph 配線（`PrimitiveKind` / `KernelId` / `WeightSlot` の experts 化 / selector /
 lowering）は未実装**なので、`shelf-compute` は MoE checkpoint を production path では
-実行できない。kernel 契約は §5、配線未実装の範囲は §7 に書く。
+実行できない。model load 配線は §5、kernel 契約は §6、テスト契約は §7、未実装の範囲は
+§8 に書く。
 
 ## 2. config 契約
 
@@ -131,14 +132,96 @@ MXFP4 の rank-3 (N-D) canonical partition / TP materialization は unsupported 
 | routed expert tensor 数 | 61,440（1 layer 1,536 本） |
 | 1 layer の expert payload | 427,819,008 B（shard 内で連続） |
 | 全 expert payload | 17,112,760,320 B |
+| GPU 常駐 expert 平面（codes + scales + row_ref） | 17,144,217,600 B = `moe_expert_group_bytes` の 40 層合計 |
 
 shared expert は BF16 rank-2、router は `mlp.gate.weight` `[num_experts, hidden_size]`、
 `mlp.shared_expert_gate.weight` `[1, hidden_size]`。
 
-## 5. GPU kernel 契約（routing / grouped linear / combine）
+## 5. model load 配線（dense / MoE の入口）
+
+MoE checkpoint の weight load は `shelf::models` の factory が選ぶ。判定は config.json の
+`num_experts` だけで、`model_type` 文字列は使わない（§2 と同じ正本）。
+
+```cpp
+// shelf/models/model_weights_factory.h
+enum class ModelFamily { Dense, Moe };
+struct LoadedModelWeights {
+    ModelFamily family;
+    shelf::qwen35::Qwen35ModelWeights dense;   // family == Dense
+    shelf::qwen35moe::MoeModelWeights moe;     // family == Moe
+    const shelf::qwen35::Qwen35ModelWeights& body() const;   // 両家に共通の形
+};
+Result<ModelFamily> probe_model_dir(const std::string& model_dir);
+Result<LoadedModelWeights> load_model_weights(model_dir, arena, stream, options);
+```
+
+- `shelf_models` は `shelf_qwen35` と `shelf_qwen35moe` を link する唯一のターゲット。
+  `shelf_qwen35` は `qwen35moe` を参照しない（`test_architecture_boundaries` が静的に検証）。
+- **MoE FFN は `shelf::qwen35moe` の型で保持する**。`Qwen35LayerWeights` に expert 字段は
+  増やさない（§1 の module 境界）。
+
+```cpp
+// shelf/models/qwen35moe/weights/qwen35moe_model_load.h
+struct MoeLayerWeights {          // 1 layer の MoE FFN（GPU 常駐）
+    MatrixWeight router;          // [experts, hidden]
+    MatrixWeight expert_w13;      // rank-3 native SoA、gate 行が先
+    MatrixWeight expert_w2;       // rank-3 native SoA
+    MatrixWeight shared_gate;     // [1, hidden]
+    MatrixWeight shared_gate_proj, shared_up_proj, shared_down_proj;
+};
+struct MoeModelWeights {
+    shelf::qwen35::Qwen35ModelWeights body;   // embed / lm_head / norm / 层 layernorm + attn
+    std::vector<MoeLayerWeights> layers;      // body.layers と index が揃う
+};
+std::vector<std::string> moe_aux_tensor_names(layer);   // router / shared 5 本
+std::vector<std::string> moe_layer_logical_names(plan); // aux + experts（plan 順）
+uint64_t moe_expert_group_bytes(plan);                  // 常駐平面 byte の单一源
+Status moe_layer_weights_match_plan(w, plan);
+Result<MoeModelWeights> load_qwen35moe_weights(model_dir, arena, stream, options);
+```
+
+`body` の dense FFN 字段（`mlp_gate_proj` / `mlp_up_proj` / `mlp_down_proj`）は空のまま
+（checkpoint に存在しない）。`moe_layer_logical_names` は logical 名だけを返す。
+物理 `<name>_scale` は要求しない（§3）。
+
+### dense 側が公開する部品
+
+FFN の形に依存しない部分だけを `shelf/models/qwen35/weights/quantized_model_body.h`
+で公開する。FFN は各 loader が自分の名前を読むので、dense 用フラグは存在しない。
+
+```cpp
+qwen35_layer_is_gdn(config, layer)
+qwen35_hf_quantized_body_names(config)   // embed / lm_head / norm + 层 layernorm / attn
+qwen35_open_quantized_reader(model_dir, logical_names, verify_crc)
+qwen35_load_model_level_quantized(reader, config, arena, stream, options, weights)
+qwen35_load_layer_body_quantized(arena, stream, reader, layer, is_gdn, weight_options, w)
+```
+
+`validate_qwen35_weights(weights, config)`（`qwen35_model.h`）は embed / lm_head の
+vocab、hidden 幅、final norm、layer 数、gdn / full_attention topology の
+model-level invariant で、FFN は検査しない。factory は dense / MoE の両方に同じものを
+適用する。
+
+### 受理条件
+
+| 条件 | 結果 |
+| --- | --- |
+| `options.weights.partition_plan != nullptr` | `Status::unsupported`（rank-3 の TP partition は contract 外。§3） |
+| `options.load_mtp_layers == true` | `Status::unsupported`（MoE は MTP 层を load しない。speculative decode は DFlash2 drafter） |
+| Shelf quantized bundle（`shelf_quantization.json` がある dir） | `Status::unsupported`（MoE は HF real-quantized dir のみを読む） |
+| dense config（`num_experts == 0`） | `read_qwen35_moe_text_config` の `Status::invalid_argument` |
+| loaded 平面が plan の幾何 / stride / row_ref / router・shared 形状と不一致 | `moe_layer_weights_match_plan` が `Status::invalid_argument` |
+
+dense loader は MoE checkpoint を従来どおり拒否する（dense FFN 名が解決できず
+`logical tensor not found`）。この拒否と上の表は `test_qwen35moe_model_load` が固定する。
+
+load 時間 / host RSS / 実 checkpoint の `row_ref_exact` 平面数など、この段階の実測は
+[../research/20261104/moe_gate_d_load_wiring.md](../research/20261104/moe_gate_d_load_wiring.md)。
+
+## 6. GPU kernel 契約（routing / grouped linear / combine）
 
 3 つの kernel family は standalone launcher で、`KernelId` も selector も持たない
-（§7）。source は `src/shelf/kernels/optimized/moe/` と
+（§8）。source は `src/shelf/kernels/optimized/moe/` と
 `src/shelf/kernels/optimized/linear/mxfp4.hip` の grouped 形。
 
 ### routing / group plan
@@ -246,7 +329,7 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 弱く、**段ごと gate が正本**である。クラス誤差の実測値と内訳は
 [../research/20261104/moe_gate_c_kernels.md](../research/20261104/moe_gate_c_kernels.md) §6。
 
-## 6. test contract
+## 7. test contract
 
 | test | label | 固定する内容 |
 | --- | --- | --- |
@@ -257,6 +340,7 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
+| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: factory の family 判定、`body`（embed / lm_head / norm / attention）と `layers`（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、dense FFN は空のまま、dense loader による MoE 拒否、MTP / partition plan / Shelf bundle の拒否、`moe_layer_weights_match_plan` の tamper 検知 |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
@@ -271,25 +355,30 @@ referee は HF transformers の `Qwen3_5MoeSparseMoeBlock` を float64 で実行
 Shelf の MXFP4 codec と同一規則で量子化した**あと**の値を HF に入れているため、
 量子化誤差は参照側に含まれない。
 
+`test_qwen35moe_model_load_real`（`gpu1;optional;external_files`）は実 checkpoint を
+factory 経由で load し、`moe_layer_weights_match_plan` の一致と常駐 byte・load 時間・
+peak RSS・`row_ref_exact` の平面数を表示する（`SHELF_MODEL_DIR_MOE`）。
+
 GPU 不足による skip は required では失敗として扱う（テスト受入ルール）。
 
-## 7. 配線が未実装な範囲
+## 8. 配線が未実装な範囲
 
-kernel と loader は存在するが、production の model load / lowering はまだ MoE を通さない。
-`shelf-compute --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4` は
-`quantized_model_reader.cpp` の logical tensor 解決で失敗する。残っているのは
+model load は §5 で配線済み（`shelf-compute` はまだ dense 入口を使っており、MoE を
+選ぶのは apps 側を factory に切り替えてから）。residual は **graph / kernel 配線**である。
 
-- `model_weights.cpp` の logical tensor 名列挙に expert 名を載せる（`hf_quantized_logical_names`
-  は dense FFN 名のみ。`architecture != "qwen35_dense"` の拒否もそのまま）
-- `Qwen35LayerWeights` への expert weight 保持と `load_moe_expert_group` の呼び出し元
-- `PrimitiveKind` / `PrimitiveNode` への MoE node、`emit_node` の case、
-  `KernelId::MOE_ROUTER` / `LINEAR_MXFP4_GROUPED` / `MOE_COMBINE` と
-  `try_launch_optimized` / `host_execute_binding` の分岐
+- `PrimitiveKind` / `PrimitiveNode` への MoE node、`lower_to_primitives` の emit、
+  `emit_node` の case、`KernelId::MOE_ROUTER` / `LINEAR_MXFP4_GROUPED` / `MOE_COMBINE` と
+  `try_launch_optimized` の分岐
+- `MoeModelWeights` を受け取る lowering。qwen35 側の `lower_to_primitives.cpp` は
+  dense FFN（`intermediate_size`）を前提にしており、MoE 几何では必ず失敗する。
+  MoE の emit は `shelf::qwen35moe` 側に置く（§1）
 - `WeightSlot` の `experts` / batch stride 字段と `make_weight_slot` /
   `upload_host_weight_table` / `validate_host_weight_slot` の追従
 - linear selector の allowlist に MoE geometry（`1024:2048` = w13、`2048:512` = w2、
   `256:2048` = router）と grouped 形の選択
 - program workspace の group row 容量（`rows * top_k` ではなく
-  `moe_group_row_capacity` から決まる行数）
+  `moe_group_row_capacity` から決まる行数）と `qwen35_executor_reserve_bytes` の MoE 項
 - correctness path には grouped linear も router も無い（fallback は成立しない）
 - `shelf-bench` に MoE の計測口が無い（性能主張は配線と計測口の両方が揃うまでしない）
+- `shelf-compute` / `shelf-server` / `shelf-bench` の load 入口を `shelf::models` の
+  factory へ切り替える（§5）。TP + MoE は §5 の受理条件で `unsupported`

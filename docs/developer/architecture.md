@@ -56,6 +56,8 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/inference/execution/**` | `shelf::execution` |
 | `shelf/models/common/**` | `shelf::qwen_hybrid` |
 | `shelf/models/qwen35/**` | `shelf::qwen35`（下位: `runtime` / `dflash2`） |
+| `shelf/models/qwen35moe/**` | `shelf::qwen35moe` |
+| `shelf/models/model_weights_factory.h` / `src/shelf/models/model_weights_factory.cpp` | `shelf::models` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
 generic 層（`shelf/kernels` / `shelf/inference` /
@@ -69,6 +71,10 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   `shelf_inference_execution` は model 非依存層
 - `shelf_qwen35` / `shelf_qwen35_runtime` /
   `shelf_qwen35_kernels_optimized`（dflash2）は Qwen35 固有層
+- `shelf_qwen35moe` は Qwen35 MoE（config 契約・expert plan・rank-3 expert loader・
+  MoE FFN の weight 保持）。`shelf_qwen35` に依存する逆方向の依存は持たない
+- `shelf_models` は dense / MoE の weight load を `num_experts` で選ぶ入口
+  （`shelf::models::load_model_weights`）。両 loader を link する唯一のターゲット
 
 `shelf_kernels_correctness` は `shelf_runtime` にlinkする一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` だけを使う。
@@ -91,8 +97,15 @@ weights loader（`shelf_weights`）の依存は下方向のみ:
 
 ```text
 shelf_weights -> shelf_quant_format / shelf_quant_bundle / shelf_quant_reference / shelf_io / shelf_core / shelf_gpu
-shelf_qwen35  -> shelf_weights
+shelf_qwen35    -> shelf_weights
+shelf_qwen35moe -> shelf_qwen35
+shelf_models    -> shelf_qwen35 + shelf_qwen35moe
 ```
+
+`shelf_qwen35` は `qwen35moe` を参照しない（`test_architecture_boundaries` が静的に検証）。
+dense 側の layer load 部品は FFN を含まない「body」部分だけを
+`shelf/models/qwen35/weights/quantized_model_body.h` で公開し、FFN は各 loader が自分の
+名前で読む。
 
 weight の canonical → partition → preshuffle → upload の順序 contract は
 [tensor_partition.md](tensor_partition.md) を参照。
@@ -103,6 +116,7 @@ CMake targetの一覧は `cmake/targets.cmake` を参照。
 
 ```text
 runtime core -> Qwen35            : forbidden
+Qwen35 -> Qwen35 MoE             : forbidden（qwen35moe -> qwen35 の一方向のみ）
 weights / quantization -> Qwen35  : forbidden（models/ の include 不可）
 Qwen35 model -> Qwen35 runtime    : forbidden
 Qwen35 kernels -> Qwen35 runtime  : forbidden

@@ -188,6 +188,17 @@ int main() {
         scan_clean(dir, {"models/qwen35/runtime", "Executor", "ContinuousBatcher"});
     }
 
+    // Qwen3.5 MoE sits above the dense qwen35 layer: qwen35moe names qwen35, never the
+    // other way round. The choice between the two loaders lives in
+    // models/model_weights_factory, which is the only target that links both.
+    const std::vector<fs::path> qwen35_dirs = {
+        root / "include/shelf/models/qwen35",
+        root / "src/shelf/models/qwen35",
+    };
+    for (const auto& dir : qwen35_dirs) {
+        scan_clean(dir, {"qwen35moe", "Qwen35Moe", "MoE", "moe"});
+    }
+
     const std::vector<fs::path> kernel_dirs = {
         root / "include/shelf/models/qwen35/kernels",
         root / "src/shelf/models/qwen35/kernels",

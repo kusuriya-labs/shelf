@@ -5,29 +5,49 @@
 
 namespace shelf::qwen35moe {
 
-Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model_dir) {
-    auto base = shelf::qwen35::read_qwen35_text_config(model_dir);
-    if (!base.ok())
-        return base.status();
+namespace {
 
+Result<nlohmann::json> read_config_root(const std::string& model_dir, const char* who) {
     std::ifstream f(model_dir + "/config.json");
     if (!f.is_open()) {
         return Status::invalid_argument(
-            "read_qwen35_moe_text_config: cannot open config.json", __FILE__, __LINE__);
+            (std::string(who) + ": cannot open config.json").c_str(), __FILE__, __LINE__);
     }
     nlohmann::json root;
     try {
         f >> root;
     } catch (const nlohmann::json::exception& e) {
         return Status::invalid_argument(
-            ("read_qwen35_moe_text_config: bad config.json: " + std::string(e.what())).c_str(),
+            (std::string(who) + ": bad config.json: " + std::string(e.what())).c_str(),
             __FILE__, __LINE__);
     }
-    if (!root.is_object() || !root.contains("text_config")) {
+    if (!root.is_object() || !root.contains("text_config") || !root["text_config"].is_object()) {
         return Status::invalid_argument(
-            "read_qwen35_moe_text_config: config.json missing text_config", __FILE__, __LINE__);
+            (std::string(who) + ": config.json missing text_config").c_str(), __FILE__,
+            __LINE__);
     }
-    const nlohmann::json& t = root["text_config"];
+    return root;
+}
+
+}  // namespace
+
+Result<std::size_t> read_declared_num_experts(const std::string& model_dir) {
+    auto root = read_config_root(model_dir, "read_declared_num_experts");
+    if (!root.ok()) return root.status();
+    const nlohmann::json& t = root.value()["text_config"];
+    if (t.contains("num_experts") && t["num_experts"].is_number())
+        return t["num_experts"].get<std::size_t>();
+    return std::size_t{0};
+}
+
+Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model_dir) {
+    auto base = shelf::qwen35::read_qwen35_text_config(model_dir);
+    if (!base.ok())
+        return base.status();
+
+    auto root = read_config_root(model_dir, "read_qwen35_moe_text_config");
+    if (!root.ok()) return root.status();
+    const nlohmann::json& t = root.value()["text_config"];
 
     Qwen35MoeTextConfig cfg;
     static_cast<shelf::qwen35::Qwen35TextConfig&>(cfg) = base.value();

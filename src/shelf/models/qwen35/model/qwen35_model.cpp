@@ -5,7 +5,6 @@
 #include <utility>
 
 namespace shelf::qwen35 {
-namespace {
 
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
@@ -79,8 +78,6 @@ Status validate_qwen35_weights(
 
     return Status::make_ok();
 }
-
-} // namespace
 
 Result<Qwen35Model> Qwen35Model::load_from_safetensors(
     const std::string& model_dir,

@@ -70,6 +70,10 @@ struct MoeExpertGroupPlan {
 // Routed expert tensor count of the whole model: layers x experts x 3 projections x 2 planes.
 std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config);
 
+// Checkpoint name of one layer's mlp tensor: "model.language_model.layers.<l>.mlp."
+// followed by suffix, e.g. "gate.weight" or "shared_expert.down_proj.weight".
+std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix);
+
 std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
                                    const char* projection, bool scale);
 

@@ -1,5 +1,6 @@
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/weights/quantized_model_body.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/weights/tensor_parallel_plan.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
@@ -17,6 +18,7 @@
 
 namespace shelf {
 namespace qwen35 {
+namespace fs = std::filesystem;
 namespace {
 
 using shelf::weights::MatrixWeight;
@@ -364,63 +366,25 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     return weights;
 }
 
-Status load_layer_quantized(
+std::vector<std::string> dense_ffn_names(std::size_t layer) {
+    const std::string prefix = layer_prefix(layer);
+    return {prefix + "mlp.gate_proj.weight", prefix + "mlp.up_proj.weight",
+            prefix + "mlp.down_proj.weight"};
+}
+
+Status load_dense_ffn_quantized(
     gpu::GpuArena& arena, hipStream_t stream,
     const shelf::quantization::bundle::QuantizedModelReader& reader, std::size_t layer,
-    bool is_gdn,
     const shelf::weights::WeightLoadOptions& weight_options,
     Qwen35LayerWeights& w)
 {
     const std::string prefix = layer_prefix(layer);
-    w.is_gdn = is_gdn;
-
-    Status st = load_q_vector(reader, prefix + "input_layernorm.weight", arena, stream,
-                              w.input_layernorm_weight);
-    if (!st.ok()) return st;
-    st = load_q_vector(reader, prefix + "post_attention_layernorm.weight", arena, stream,
-                       w.post_attention_layernorm_weight);
-    if (!st.ok()) return st;
-    st = load_q_matrix(reader, prefix + "mlp.gate_proj.weight", arena, stream, weight_options, w.mlp_gate_proj);
+    Status st = load_q_matrix(reader, prefix + "mlp.gate_proj.weight", arena, stream, weight_options, w.mlp_gate_proj);
     if (!st.ok()) return st;
     st = load_q_matrix(reader, prefix + "mlp.up_proj.weight", arena, stream, weight_options, w.mlp_up_proj);
     if (!st.ok()) return st;
     st = load_q_matrix(reader, prefix + "mlp.down_proj.weight", arena, stream, weight_options, w.mlp_down_proj);
     if (!st.ok()) return st;
-
-    if (is_gdn) {
-        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_a.weight", arena, stream, weight_options, w.attn_in_proj_a);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_b.weight", arena, stream, weight_options, w.attn_in_proj_b);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_qkv.weight", arena, stream, weight_options, w.attn_in_proj_qkv);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_z.weight", arena, stream, weight_options, w.attn_in_proj_z);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight, weight_options);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "linear_attn.out_proj.weight", arena, stream, weight_options, w.attn_out_proj);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.norm.weight", arena, stream, w.attn_norm_weight);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.dt_bias", arena, stream, w.attn_dt_bias, weight_options);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log, weight_options);
-        if (!st.ok()) return st;
-    } else {
-        st = load_q_matrix(reader, prefix + "self_attn.q_proj.weight", arena, stream, weight_options, w.attn_q_proj);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "self_attn.k_proj.weight", arena, stream, weight_options, w.attn_k_proj);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "self_attn.v_proj.weight", arena, stream, weight_options, w.attn_v_proj);
-        if (!st.ok()) return st;
-        st = load_q_matrix(reader, prefix + "self_attn.o_proj.weight", arena, stream, weight_options, w.attn_o_proj);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "self_attn.q_norm.weight", arena, stream, w.attn_q_norm_weight);
-        if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "self_attn.k_norm.weight", arena, stream, w.attn_k_norm_weight);
-        if (!st.ok()) return st;
-    }
-
     return Status::make_ok();
 }
 
@@ -503,11 +467,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
     return load_qwen35_weights_bf16(model_dir, arena, stream, options);
 }
 
-namespace {
-
-namespace fs = std::filesystem;
-
-bool layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer) {
+bool qwen35_layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer) {
     if (config.layer_types.size() == config.num_hidden_layers) {
         return config.layer_types[layer] == 0;
     }
@@ -517,20 +477,15 @@ bool layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer) {
     return layer % config.full_attention_interval < config.full_attention_interval - 1;
 }
 
-std::vector<std::string> hf_quantized_logical_names(
-    const Qwen35TextConfig& config,
-    bool include_mtp) {
+std::vector<std::string> qwen35_hf_quantized_body_names(const Qwen35TextConfig& config) {
     std::vector<std::string> names = {
         "model.language_model.embed_tokens.weight",
         "model.language_model.lm_head.weight",
         "model.language_model.norm.weight",
     };
-    const auto add_layer = [&names](const std::string& prefix, bool gdn) {
+    const auto add_layer = [&](const std::string& prefix, bool gdn) {
         names.push_back(prefix + "input_layernorm.weight");
         names.push_back(prefix + "post_attention_layernorm.weight");
-        names.push_back(prefix + "mlp.gate_proj.weight");
-        names.push_back(prefix + "mlp.up_proj.weight");
-        names.push_back(prefix + "mlp.down_proj.weight");
         if (gdn) {
             names.push_back(prefix + "linear_attn.in_proj_a.weight");
             names.push_back(prefix + "linear_attn.in_proj_b.weight");
@@ -551,21 +506,15 @@ std::vector<std::string> hf_quantized_logical_names(
         }
     };
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-        add_layer(layer_prefix(l), layer_is_gdn(config, l));
-    }
-    if (include_mtp) {
-        for (const std::string& name : mtp_required_tensors()) {
-            names.push_back(name);
-        }
+        add_layer(layer_prefix(l), qwen35_layer_is_gdn(config, l));
     }
     return names;
 }
 
-Result<shelf::quantization::bundle::QuantizedModelReader> open_quantized_reader(
+Result<shelf::quantization::bundle::QuantizedModelReader> qwen35_open_quantized_reader(
     const std::string& model_dir,
-    const Qwen35TextConfig& config,
-    bool verify_payload_crc,
-    bool load_mtp_layers)
+    const std::vector<std::string>& logical_names,
+    bool verify_payload_crc)
 {
     namespace fqb = shelf::quantization::bundle;
     namespace fqm = shelf::quantization::manifest;
@@ -575,16 +524,104 @@ Result<shelf::quantization::bundle::QuantizedModelReader> open_quantized_reader(
     }
     if (!fqb::is_hf_quantized_model_dir(model_dir)) {
         return Status::invalid_argument(
-            "model dir is neither a Shelf quantized dir nor an HF real-quantized dir",
+            "model dir is neither a Shelf quantized model dir nor an HF real-quantized dir",
             __FILE__, __LINE__);
     }
-    auto source = fqb::synthesize_hf_quantized_source(
-        model_dir,
-        hf_quantized_logical_names(config, load_mtp_layers),
-        verify_payload_crc);
+    auto source = fqb::synthesize_hf_quantized_source(model_dir, logical_names, verify_payload_crc);
     if (!source.ok()) return source.status();
     return fqb::QuantizedModelReader::open_hf_source(source.release(), verify_payload_crc);
 }
+
+Status qwen35_load_model_level_quantized(
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
+    const Qwen35TextConfig& config,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35LoadOptions& options,
+    Qwen35ModelWeights& weights)
+{
+    auto embed = shelf::weights::load_quantized_matrix(
+        reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
+    if (!embed.ok()) return embed.status();
+    weights.embed_tokens = embed.release();
+
+    if (config.tie_word_embeddings) {
+        weights.lm_head = weights.embed_tokens;
+        weights.lm_head_tied = true;
+        return Status::make_ok();
+    }
+    auto head = shelf::weights::load_quantized_matrix(
+        reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+    if (!head.ok()) {
+        head = shelf::weights::load_quantized_matrix(
+            reader, "lm_head.weight", arena, stream, options.weights);
+        if (!head.ok()) return head.status();
+    }
+    weights.lm_head = head.release();
+    weights.lm_head_tied = false;
+
+    auto norm = shelf::weights::load_quantized_small(
+        reader, "model.language_model.norm.weight", arena, stream);
+    if (!norm.ok()) return norm.status();
+    weights.final_norm_weight = norm.release();
+    return Status::make_ok();
+}
+
+Status qwen35_load_layer_body_quantized(
+    gpu::GpuArena& arena, hipStream_t stream,
+    const shelf::quantization::bundle::QuantizedModelReader& reader, std::size_t layer,
+    bool is_gdn,
+    const shelf::weights::WeightLoadOptions& weight_options,
+    Qwen35LayerWeights& w)
+{
+    const std::string prefix = layer_prefix(layer);
+    w.is_gdn = is_gdn;
+
+    Status st = load_q_vector(reader, prefix + "input_layernorm.weight", arena, stream,
+                              w.input_layernorm_weight);
+    if (!st.ok()) return st;
+    st = load_q_vector(reader, prefix + "post_attention_layernorm.weight", arena, stream,
+                       w.post_attention_layernorm_weight);
+    if (!st.ok()) return st;
+
+    if (is_gdn) {
+        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_a.weight", arena, stream, weight_options, w.attn_in_proj_a);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_b.weight", arena, stream, weight_options, w.attn_in_proj_b);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_qkv.weight", arena, stream, weight_options, w.attn_in_proj_qkv);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "linear_attn.in_proj_z.weight", arena, stream, weight_options, w.attn_in_proj_z);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight, weight_options);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "linear_attn.out_proj.weight", arena, stream, weight_options, w.attn_out_proj);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "linear_attn.norm.weight", arena, stream, w.attn_norm_weight);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "linear_attn.dt_bias", arena, stream, w.attn_dt_bias, weight_options);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log, weight_options);
+        if (!st.ok()) return st;
+    } else {
+        st = load_q_matrix(reader, prefix + "self_attn.q_proj.weight", arena, stream, weight_options, w.attn_q_proj);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "self_attn.k_proj.weight", arena, stream, weight_options, w.attn_k_proj);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "self_attn.v_proj.weight", arena, stream, weight_options, w.attn_v_proj);
+        if (!st.ok()) return st;
+        st = load_q_matrix(reader, prefix + "self_attn.o_proj.weight", arena, stream, weight_options, w.attn_o_proj);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "self_attn.q_norm.weight", arena, stream, w.attn_q_norm_weight);
+        if (!st.ok()) return st;
+        st = load_q_vector(reader, prefix + "self_attn.k_norm.weight", arena, stream, w.attn_k_norm_weight);
+        if (!st.ok()) return st;
+    }
+
+    return Status::make_ok();
+}
+
+namespace {
 
 Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     const std::string& model_dir,
@@ -596,11 +633,17 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     if (!config_result.ok()) return config_result.status();
     Qwen35TextConfig config = config_result.release();
 
-    auto reader_result = open_quantized_reader(
-        model_dir,
-        config,
-        options.verify_quantized_payload_crc,
-        options.load_mtp_layers);
+    std::vector<std::string> requested = qwen35_hf_quantized_body_names(config);
+    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+        const std::vector<std::string> ffn = dense_ffn_names(l);
+        requested.insert(requested.end(), ffn.begin(), ffn.end());
+    }
+    if (options.load_mtp_layers) {
+        const auto& mtp_names = mtp_required_tensors();
+        requested.insert(requested.end(), mtp_names.begin(), mtp_names.end());
+    }
+    auto reader_result = qwen35_open_quantized_reader(
+        model_dir, requested, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();
     shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
 
@@ -630,34 +673,15 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
-    {
-        auto m = shelf::weights::load_quantized_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
-        if (!m.ok()) return m.status();
-        weights.embed_tokens = m.release();
-    }
-
-    if (config.tie_word_embeddings) {
-        weights.lm_head = weights.embed_tokens;
-        weights.lm_head_tied = true;
-    } else {
-        Result<MatrixWeight> m = shelf::weights::load_quantized_matrix(reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
-        if (!m.ok()) {
-            m = shelf::weights::load_quantized_matrix(reader, "lm_head.weight", arena, stream, options.weights);
-            if (!m.ok()) return m.status();
-        }
-        weights.lm_head = m.release();
-        weights.lm_head_tied = false;
-    }
-
-    {
-        auto t = shelf::weights::load_quantized_small(reader, "model.language_model.norm.weight", arena, stream);
-        if (!t.ok()) return t.status();
-        weights.final_norm_weight = t.release();
-    }
+    Status model_level =
+        qwen35_load_model_level_quantized(reader, config, arena, stream, options, weights);
+    if (!model_level.ok()) return model_level;
 
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-        Status st = load_layer_quantized(arena, stream, reader, l,
-                                         layer_types[l] == 0, options.weights, weights.layers[l]);
+        Status st = qwen35_load_layer_body_quantized(
+            arena, stream, reader, l, layer_types[l] == 0, options.weights, weights.layers[l]);
+        if (!st.ok()) return st;
+        st = load_dense_ffn_quantized(arena, stream, reader, l, options.weights, weights.layers[l]);
         if (!st.ok()) return st;
     }
 

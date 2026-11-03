@@ -10,6 +10,13 @@
 
 namespace shelf::qwen35 {
 
+// Model-level invariants of a loaded weight set: embed / lm_head vocab, hidden width,
+// final norm rank and width, layer count, and the gdn / full_attention topology the
+// config implies. The FFN of a layer is not part of these invariants.
+Status validate_qwen35_weights(
+    const Qwen35ModelWeights& weights,
+    const Qwen35TextConfig& config);
+
 class Qwen35Model final {
 public:
     Qwen35Model(const Qwen35Model&) = delete;

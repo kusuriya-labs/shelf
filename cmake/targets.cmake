@@ -245,6 +245,7 @@ set(
     src/shelf/models/qwen35moe/model/qwen35moe_config.cpp
     src/shelf/models/qwen35moe/weights/moe_weight_plan.cpp
     src/shelf/models/qwen35moe/weights/moe_expert_load.cpp
+    src/shelf/models/qwen35moe/weights/qwen35moe_model_load.cpp
 )
 
 add_library(shelf_qwen35moe STATIC ${SHELF_QWEN35MOE_SOURCES})
@@ -256,6 +257,15 @@ target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen35 shelf_weights shelf_io
 target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Qwen3.5 continuous batching runtime.
+# Model weight loading entry for the qwen35 family: the one place that links both the
+# dense and the MoE loaders and picks between them.
+add_library(shelf_models STATIC src/shelf/models/model_weights_factory.cpp)
+target_compile_features(shelf_models PRIVATE cxx_std_20)
+target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35moe shelf_gpu)
+target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/runtime_request.cpp
     src/shelf/models/qwen35/runtime/token_budget_scheduler.cpp
