@@ -109,7 +109,7 @@ int main() {
 
     const hipError_t herr = shelf::kernel::launch_activation_quantize_mxfp4_rowref(
         reinterpret_cast<const shelf::bf16_t*>(d_in), d_codes, d_scales, kRows, kK, kK,
-        kK, kK, kScaleStride, stream);
+        kK, kK, kScaleStride, nullptr, stream);
     if (!hip_ok(herr, "rowref quantize launch"))
         return 1;
     if (!hip_ok(hipStreamSynchronize(stream), "rowref quantize sync"))

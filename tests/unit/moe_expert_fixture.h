@@ -25,7 +25,10 @@ inline constexpr std::uint32_t kHidden = 256;
 inline constexpr std::uint32_t kInter = 128;
 inline constexpr std::size_t kLayers = 2;
 inline constexpr std::uint8_t kE8m0DeadByte = 1u;
-inline constexpr std::uint8_t kE8m0HighByte = 254u;
+// High enough to leave the exact fold band (row spread 11 > 8) while staying within
+// three powers of two of the other blocks, so the same payload serves the load test and
+// the grouped GEMM numerics without making the f32 accumulation ill-conditioned.
+inline constexpr std::uint8_t kE8m0HighByte = 123u;
 inline constexpr std::uint8_t kE8m0NanByte = 255u;
 inline constexpr std::uint8_t kE8m0Base = 112u;
 inline constexpr std::uint8_t kE8m0Spread = 8u;

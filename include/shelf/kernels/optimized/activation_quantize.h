@@ -64,6 +64,10 @@ hipError_t launch_activation_quantize_fp8_finegrained(
 // MXFP4 W4A8 activation plane: E8M0 group scales folded into the E4M3 codes against
 // the row's maximum group exponent, plus one f32 row reference in scales column 0.
 // Contract: docs/developer/quantization.md (activation quantization contract).
+// row_index, when non-null, names the input row each output row quantizes: output row m
+// reads input row row_index[m], and a row_index[m] < 0 writes an all-zero row (scale 1.0)
+// instead. Used by the MoE group plan, whose activation rows are group rows that repeat
+// a token per selected expert and pad the tail of each group.
 hipError_t launch_activation_quantize_mxfp4_rowref(
     const ::shelf::bf16_t* input,
     uint8_t* codes,
@@ -74,6 +78,7 @@ hipError_t launch_activation_quantize_mxfp4_rowref(
     uint32_t input_row_stride,
     uint32_t code_row_stride,
     uint32_t scale_row_stride,
+    const int32_t* row_index,
     hipStream_t stream);
 
 hipError_t launch_activation_quantize_fp8_finegrained_generic(

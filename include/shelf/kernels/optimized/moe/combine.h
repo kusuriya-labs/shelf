@@ -1,0 +1,34 @@
+#pragma once
+
+#include <shelf/core/memory/types.h>
+
+#include <hip/hip_runtime.h>
+
+#include <cstdint>
+
+namespace shelf::kernel {
+
+// MoE combine: folds a token's top_k expert outputs back into one row.
+//
+// Accumulation order contract (MoE combine): a token's slots are added
+// in expert index ascending order, which is group row ascending order because the group
+// table is built expert ascending. The kernel therefore sorts each token's slot rows and
+// accumulates in f32, rounding to bf16 once.
+//
+// When shared_output is non-null, shared_output[row] scaled by sigmoid(shared_gate[row])
+// is added last, after the routed sum.
+hipError_t launch_moe_combine(
+    shelf::bf16_t* output,
+    const shelf::bf16_t* expert_output,
+    const float* sel_weight,
+    const int32_t* slot_row_of,
+    const shelf::bf16_t* shared_output,
+    const float* shared_gate,
+    uint32_t rows,
+    uint32_t top_k,
+    uint32_t features,
+    uint32_t expert_row_stride,
+    uint32_t shared_row_stride,
+    hipStream_t stream);
+
+}  // namespace shelf::kernel

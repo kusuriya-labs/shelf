@@ -124,7 +124,7 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
                   reinterpret_cast<uint8_t*>(launch.codes),
                   reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
                   launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-                  launch.scale_row_stride, stream)
+                  launch.scale_row_stride, nullptr, stream)
             : ::shelf::kernel::launch_activation_quantize_fp8_finegrained(
                   reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
                   reinterpret_cast<uint8_t*>(launch.codes),

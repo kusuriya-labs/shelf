@@ -103,4 +103,34 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
     uint32_t output_row_stride,
     hipStream_t stream);
 
+// MoE grouped W4A8 linear over rank-3 expert planes. The group table (expert index,
+// row count) comes from the routing plan; see kernels/optimized/moe/router.h. Group g
+// owns activation and output rows [g * kMxfp4GemmRowTile, (g + 1) * kMxfp4GemmRowTile),
+// so group_capacity bounds the launched groups and rows past group_rows[g] are not
+// stored. weight_rows / k_padded and the row strides describe one expert, and the
+// batch strides must be the rank-3 native layout strides. weight_ref selects the
+// folded accumulation exactly as in the dense launchers.
+hipError_t launch_gemm_mxfp4_w4a8_grouped(
+    const uint8_t* weight_codes,
+    const uint8_t* weight_scales,
+    const uint8_t* weight_ref,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Mxfp4GemmOutputDType output_dtype,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_rows,
+    uint64_t weight_codes_batch_stride_bytes,
+    uint64_t weight_scales_batch_stride_bytes,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    uint32_t group_capacity,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

@@ -112,20 +112,39 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
     const uint32_t k_padded,
     const uint32_t input_row_stride,
     const uint32_t code_row_stride,
-    const uint32_t scale_row_stride) {
+    const uint32_t scale_row_stride,
+    const int32_t* __restrict__ row_index) {
     constexpr uint32_t kGroup = 128u;
     constexpr uint32_t kWaves = kThreadsPerRow / 32u;
     constexpr uint32_t kElemsPerLane = kGroup / 32u;
     const uint32_t m = blockIdx.x;
+    const int32_t src_row = row_index != nullptr ? row_index[m] : static_cast<int32_t>(m);
     const uint32_t wave = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
     const __hip_bfloat16* xb = reinterpret_cast<const __hip_bfloat16*>(input) +
-        static_cast<size_t>(m) * input_row_stride;
+        static_cast<size_t>(src_row > 0 ? src_row : 0) * input_row_stride;
     uint8_t* crow = codes +
         static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u);
     const uint32_t m_tile = m & 15u;
     float* row_scales = scales + static_cast<size_t>(m) * (scale_row_stride / 4u);
+
+    if (src_row < 0) {
+        for (uint32_t g = wave; g < groups; g += kWaves) {
+            const uint32_t i0 = g * kGroup + lane * kElemsPerLane;
+            if (i0 < k_padded) {
+                const uint32_t off = (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
+                                     ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
+                *reinterpret_cast<uint32_t*>(crow + off) = 0u;
+            }
+        }
+        if (threadIdx.x == 0u) {
+            row_scales[0] = 1.0f;
+            for (uint32_t g = 1u; g < groups; ++g)
+                row_scales[g] = 0.0f;
+        }
+        return;
+    }
 
     // One packed dword per (group, lane): the four E4M3 codes that lane owns.
     extern __shared__ uint32_t lds[];
@@ -258,6 +277,7 @@ hipError_t launch_activation_quantize_mxfp4_rowref(
     uint32_t input_row_stride,
     uint32_t code_row_stride,
     uint32_t scale_row_stride,
+    const int32_t* row_index,
     hipStream_t stream) {
     if (rows == 0u || k == 0u || k_padded < k)
         return hipErrorInvalidValue;
@@ -269,7 +289,7 @@ hipError_t launch_activation_quantize_mxfp4_rowref(
     const uint32_t lds_bytes = groups * 128u + groups * 4u + 8u * 4u;
     activation_quantize_mxfp4_rowref_kernel<<<rows, kThreadsPerRow, lds_bytes, stream>>>(
         input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
-        scale_row_stride);
+        scale_row_stride, row_index);
     return hipGetLastError();
 }
 

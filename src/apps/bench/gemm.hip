@@ -790,7 +790,7 @@ int run_gemm_mxfp4(Options& o) {
             }
             hipError_t af = shelf::kernel::launch_activation_quantize_mxfp4_rowref(
                 d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
-                static_cast<uint32_t>(act_scale_stride), stream);
+                static_cast<uint32_t>(act_scale_stride), nullptr, stream);
             if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
             const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
 
@@ -836,7 +836,7 @@ int run_gemm_mxfp4(Options& o) {
                 time_launch("rowref", [&]() {
                     return shelf::kernel::launch_activation_quantize_mxfp4_rowref(
                         d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
-                        static_cast<uint32_t>(act_scale_stride), stream);
+                        static_cast<uint32_t>(act_scale_stride), nullptr, stream);
                 });
                 if (hipGetLastError() != hipSuccess) { rc = 1; }
             }

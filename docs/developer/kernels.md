@@ -127,6 +127,37 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   ため値そのものが変わる。実測（Qwen3.8-27B MXFP4 の 3,904,000 行のうち幅 > 8 は
   5 行、2 tensor）と判断は
   [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md)。
+- **grouped 形** `launch_gemm_mxfp4_w4a8_grouped`（同ファイル）は rank-3 expert 平面を
+  group table（expert index と行数）で読む。1 workgroup = 16 output column × 1 group
+  （最大 `kMxfp4GemmRowTile` 行）で、expert base を codes / scales / row_ref の batch
+  stride だけずらして使う。activation 平面と出力は **group row** 番号でアドレスする
+  （group g は行 [g*16, g*16+16) を占有）。MoE の geometry は out_features が 16 の倍数
+  なので column guard は持たず、`group_rows[g]` を超える行は計算するが store しない。
+  fold の可否は dense と同じ規則（`weight_ref` を渡すかどうか）で、呼び出し側が
+  `row_ref_exact` から決める。contract と test は
+  [qwen35moe.md](qwen35moe.md) / `test_moe_grouped_linear`。
+
+### moe / routing・combine
+
+`src/shelf/kernels/optimized/moe/router.hip` と `combine.hip` は standalone launcher で、
+まだ `KernelId` も selector も持たない（graph 配線は未実装。
+[qwen35moe.md](qwen35moe.md) を参照）。
+
+- `launch_moe_router`: 1 workgroup = 1 token。f32 softmax → top-k（確率降順、同値は小
+  index）→ top-k 合計で renormalize。expert 別件数を token tile 単位の histogram へ
+  atomicAdd する（値は順序に依存しない）。
+- `launch_moe_slot_scan` / `launch_moe_slot_scatter`: tile histogram から expert 別 slot
+  範囲・group table・tile 別 base を決め、slot を expert 昇順 / token 昇順で group row
+  へ写す。atomic は LDS の per-expert cursor だけで、block ごとに token 昇順を保持する
+  ため結果は決定的である。
+- group は `kMxfp4GemmRowTile`(=16) slot までで、expert をまたがない。host 側の容量は
+  `moe_group_count_upper_bound` / `moe_group_row_capacity` が单一の源。
+- `launch_moe_combine`: 1 workgroup = 1 token。top_k 個の group row を **group row 昇順
+  （= expert 昇順）** に並べ替えて f32 で蓄積し、最後に 1 回 bf16 へ丸める。shared expert
+  を渡すと `sigmoid(gate) * shared` を routed 合計の後に足す。
+- activation 平面の生成は `launch_activation_quantize_mxfp4_rowref` の `row_index`
+  間接参照を使う（`row_index[m] < 0` の行は zero operand + scale 1.0 になる）。
+  これにより grouped GEMM は常に fragment order の 16 行 tile を連続で読む。
 
 ## workgroup barrier のスコープ
 

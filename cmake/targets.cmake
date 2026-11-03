@@ -87,6 +87,8 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
+    src/shelf/kernels/optimized/moe/router.hip
+    src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
     src/shelf/kernels/optimized/attention/rope.hip

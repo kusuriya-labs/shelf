@@ -487,7 +487,7 @@ int main() {
             d.in, d.ws + layout.codes_offset,
             reinterpret_cast<float*>(d.ws + layout.scales_offset), rows, kCols,
             layout.k_padded, kCols, layout.code_row_stride_bytes,
-            layout.scale_row_stride_bytes, stream);
+            layout.scale_row_stride_bytes, nullptr, stream);
     };
 
     // The row-reference folded plane is the only activation form of this family, so

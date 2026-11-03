@@ -622,6 +622,132 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     }
 }
 
+// MoE grouped W4A8 linear: one workgroup per (16-output tile, group). A group is up to
+// kMxfp4GemmRowTile activation rows that all belong to one expert, named by the group
+// table the routing plan writes (kernels/optimized/moe/router.h), so the expert index,
+// the activation row tile and the output row tile are all decided by the group index g:
+// group g owns plane rows [g * kTileRow, g * kTileRow + kTileRow) and the same rows of
+// the output. The weight planes are rank-3: expert e starts at weight_codes +
+// e * codes_batch_stride, weight_scales + e * scales_batch_stride and weight_ref +
+// e * weight_rows, while rows / cols / k_padded still describe one expert.
+// out_features is a multiple of kTileOut for MoE geometries, so there is no column guard.
+// Rows past group_rows[g] are computed but not stored.
+template <bool kFold>
+__global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_grouped_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ weight_ref,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint64_t codes_batch_stride,
+    const uint64_t scales_batch_stride,
+    const uint32_t weight_rows,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride,
+    const uint32_t* __restrict__ group_expert,
+    const uint32_t* __restrict__ group_rows,
+    const uint32_t* __restrict__ group_count) {
+    const uint32_t g = blockIdx.y;
+    if (g >= group_count[0])
+        return;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t m_lane = tid & 15u;
+    const uint32_t k_group = tid >> 4u;
+    const uint32_t rows_here = group_rows[g];
+    const uint32_t expert = group_expert[g];
+
+    const uint32_t nb = k_padded >> 5;
+    const uint32_t ng = k_padded >> 7;
+    const uint32_t as_row_floats = activation_scale_stride >> 2u;
+
+    const uint32_t out_start = blockIdx.x * kTileOut;
+    const uint32_t o_self = out_start + m_lane;
+
+    const uint8_t* wrow = weight_codes +
+        static_cast<size_t>(expert) * static_cast<size_t>(codes_batch_stride) +
+        static_cast<size_t>(o_self >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
+        static_cast<size_t>(o_self & 15u) * 16u + k_group * 8u;
+    const uint8_t* wsrow = weight_scales +
+        static_cast<size_t>(expert) * static_cast<size_t>(scales_batch_stride) +
+        static_cast<size_t>(o_self) * weight_scale_stride;
+    const uint8_t* arow = activation_codes +
+        static_cast<size_t>(g) * (static_cast<size_t>(activation_code_stride) * 16u) +
+        static_cast<size_t>(tid) * kFragLaneBytes;
+
+    __shared__ uint2 mag_lds[16];
+    int ref = 0;
+    float epi = 1.0f;
+    if constexpr (kFold) {
+        mxfp4_mag_lds(mag_lds, tid);
+        ref = static_cast<int>(
+            weight_ref[static_cast<size_t>(expert) * weight_rows + o_self]);
+        epi = mxfp4_e8m0_f32(static_cast<uint8_t>(ref));
+        detail::lds_barrier();
+    }
+
+    float8_t acc = float8_t MXFP4_ZERO8;
+    #pragma unroll 4
+    for (uint32_t ag = 0; ag < ng; ++ag) {
+        #pragma unroll
+        for (uint32_t u = 0; u < 4u; ++u) {
+            const uint32_t ib = ag * 4u + u;
+            uint32_t t0 = kFoldMag[0][0];
+            uint32_t t1 = kFoldMag[0][1];
+            float ws = 0.0f;
+            if constexpr (kFold) {
+                const uint2 mg = mag_lds[mxfp4_fold_d(ref, wsrow[ib])];
+                t0 = mg.x;
+                t1 = mg.y;
+            } else {
+                ws = mxfp4_e8m0_f32(wsrow[ib]);
+            }
+            int32x2_t w0 = {};
+            int32x2_t w1 = {};
+            mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes, t0, t1, w0, w1);
+            const uint32_t aoff = (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
+            const uint8_t* ap = arow + aoff;
+            const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
+            const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
+            if constexpr (kFold) {
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, acc);
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, acc);
+            } else {
+                float8_t c = float8_t MXFP4_ZERO8;
+                c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
+                c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
+                #pragma unroll
+                for (int j = 0; j < 8; ++j)
+                    acc[j] = __builtin_fmaf(c[j], ws, acc[j]);
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const uint32_t inside = 8u * k_group + static_cast<uint32_t>(j);
+        if (inside >= rows_here)
+            continue;
+        const uint32_t r = g * kTileRow + inside;
+        float v = acc[j];
+        if constexpr (kFold)
+            v *= epi;
+        v *= activation_scales[static_cast<size_t>(r) * as_row_floats];
+        const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
+        if (output_dtype == static_cast<uint32_t>(Mxfp4GemmOutputDType::BF16)) {
+            static_cast<shelf::bf16_t*>(output)[out_idx] =
+                shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+        } else {
+            static_cast<float*>(output)[out_idx] = v;
+        }
+    }
+}
+
 // Launch parameters shared by the three kernel families.
 struct LaunchArgs {
     const uint8_t* weight_codes;
@@ -810,6 +936,71 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
         output, output_dtype, rows, out_features, k_padded,
         weight_scale_stride_bytes, activation_code_stride_bytes, activation_scale_stride_bytes,
         output_row_stride, stream);
+}
+
+hipError_t launch_gemm_mxfp4_w4a8_grouped(
+    const uint8_t* weight_codes,
+    const uint8_t* weight_scales,
+    const uint8_t* weight_ref,
+    const int8_t* activation_codes,
+    const float* activation_scales,
+    void* output,
+    Mxfp4GemmOutputDType output_dtype,
+    uint32_t out_features,
+    uint32_t k_padded,
+    uint32_t weight_rows,
+    uint64_t weight_codes_batch_stride_bytes,
+    uint64_t weight_scales_batch_stride_bytes,
+    uint32_t weight_scale_stride_bytes,
+    uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
+    uint32_t output_row_stride,
+    const uint32_t* group_expert,
+    const uint32_t* group_rows,
+    const uint32_t* group_count,
+    uint32_t group_capacity,
+    hipStream_t stream) {
+    if (weight_codes == nullptr || weight_scales == nullptr || activation_codes == nullptr ||
+        activation_scales == nullptr || output == nullptr || group_expert == nullptr ||
+        group_rows == nullptr || group_count == nullptr)
+        return hipErrorInvalidValue;
+    if (out_features == 0u || (out_features & 15u) != 0u)
+        return hipErrorInvalidValue;
+    if ((k_padded & 127u) != 0u || weight_rows == 0u || (weight_rows & 15u) != 0u)
+        return hipErrorInvalidValue;
+    const uint32_t nb = k_padded >> 5;
+    if (weight_scale_stride_bytes != nb)
+        return hipErrorInvalidValue;
+    if (weight_codes_batch_stride_bytes !=
+        static_cast<uint64_t>(weight_rows >> 4) * nb * kWeightBlockBytes)
+        return hipErrorInvalidValue;
+    if (weight_scales_batch_stride_bytes != static_cast<uint64_t>(weight_rows) * nb)
+        return hipErrorInvalidValue;
+    if (activation_code_stride_bytes < k_padded || (activation_code_stride_bytes & 15u) != 0u)
+        return hipErrorInvalidValue;
+    if (activation_scale_stride_bytes < 4u || (activation_scale_stride_bytes & 15u) != 0u)
+        return hipErrorInvalidValue;
+    if (output_row_stride < out_features)
+        return hipErrorInvalidValue;
+    if (group_capacity == 0u || group_capacity > 65535u)
+        return hipErrorInvalidValue;
+    const dim3 grid(out_features / kTileOut, group_capacity, 1);
+    #define MXFP4_GROUPED_ARGS                                                        \
+        weight_codes, weight_scales, weight_ref,                                       \
+            reinterpret_cast<const uint8_t*>(activation_codes), activation_scales,      \
+            output, static_cast<uint32_t>(output_dtype), out_features, k_padded,        \
+            weight_codes_batch_stride_bytes, weight_scales_batch_stride_bytes,          \
+            weight_rows, weight_scale_stride_bytes, activation_code_stride_bytes,       \
+            activation_scale_stride_bytes, output_row_stride, group_expert, group_rows, \
+            group_count
+    if (weight_ref != nullptr)
+        gemm_mxfp4_w4a8_grouped_kernel<true>
+            <<<grid, kThreadsPerBlock, 0, stream>>>(MXFP4_GROUPED_ARGS);
+    else
+        gemm_mxfp4_w4a8_grouped_kernel<false>
+            <<<grid, kThreadsPerBlock, 0, stream>>>(MXFP4_GROUPED_ARGS);
+    #undef MXFP4_GROUPED_ARGS
+    return hipGetLastError();
 }
 
 #undef MXFP4_ARGS
