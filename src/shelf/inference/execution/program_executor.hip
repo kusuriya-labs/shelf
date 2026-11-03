@@ -3,6 +3,7 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_calib_dump.h>
+#include <shelf/inference/execution/linear_input_dump.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -484,6 +485,7 @@ Status execute_program_range(
             }
         }
         kv_calib_dump_maybe(program, i, ctx, stream);
+        linear_input_dump_maybe(program, i, ctx, stream);
         OpDumpTimer op_timer(binding.kernel_id);
         const bool sem_on = semantic_timing_enabled();
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
@@ -698,6 +700,8 @@ Status upload_host_weight_table(
         host[i].encoding = s.encoding;
         host[i].codes = s.codes;
         host[i].scales = s.scales;
+        host[i].row_ref = s.row_ref;
+        host[i].row_ref_exact = s.row_ref_exact;
         host[i].storage_scale_stride_bytes = s.storage_scale_stride_bytes;
         host[i].compute_codes = s.compute_codes;
         host[i].compute_scales_bf16 = s.compute_scales_bf16;

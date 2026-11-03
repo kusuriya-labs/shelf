@@ -108,9 +108,18 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
 - activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
   （64 K fragment block、group 128 F32 scale）をそのまま読む。
-- **E8M0 を operand 側へ fold しない**。fold（行基準の `d = ref - e8m0` で E2M1 仮数を
-  2^-d だけ下げる）は inner loop の per-block rescale を消せるが、加算の再結合が変わり
-  correctness path と bit 一致しなくなる。実 checkpoint での d 分布実測と判断は
+- **E8M0 の行基準 fold**（`d = ref[row] - e8m0[row][blk]` で E2M1 仮数を 2^-d 下げて
+  E4M3 operand に畳み、`2^(ref-127)` を epilogue で 1 回適用する）は **Prefill2D のみ**
+  で使う。RowBlock / SplitK は rows == 1 で遅くなった（表参照コストが per-block rescale
+  の削減を上回る）ため unfold のまま。variant 別の判定は
+  `mxfp4_gemm_folds_row_ref(config.id)`。
+- fold は `d <= 8` で E2M1 仮数を厳密に表現する（`d >= 9` は E4M3 subnormal の
+  1.5 刻みを丸める）。payload は行単位の E8M0 最大値平面 `row_ref` と、全行の
+  E8M0 幅が `kMxfp4FoldExactMaxDistance`(=8) 以内であることを示す `row_ref_exact` を
+  持つ。**dispatch は `row_ref_exact` が false の payload で fold しない**
+  （`optimized_dispatch.hip`）。これにより optimized kernel は payload が厳密帯域に
+  収まる限り correctness path と bf16 bit 一致を保つ。実測（Qwen3.8-27B MXFP4 の
+  3,904,000 行のうち幅 > 8 は 5 行、2 tensor）と判断は
   [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md)。
 
 ## workgroup barrier のスコープ

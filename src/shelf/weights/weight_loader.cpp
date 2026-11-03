@@ -385,10 +385,22 @@ Result<MatrixWeight> load_quantized_view(
                                 native.scales.size(), stream);
             if (!st.ok()) return st;
 
+            std::vector<std::size_t> rshape = {m, 1};
+            std::vector<std::size_t> rstrides = {1, 1};
+            w.row_ref = alloc_bytes(native.row_ref.size(), rshape, rstrides, arena);
+            if (w.row_ref.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 row reference allocation failed: " + name).c_str(), __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.row_ref.data<void>(), native.row_ref.data(),
+                                native.row_ref.size(), stream);
+            if (!st.ok()) return st;
+
             w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
             w.scale_row_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
             w.storage_scale_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
             w.preshuffled = true;
+            w.row_ref_exact = native.row_ref_exact;
             apply_default_compute_spec(w);
             return w;
         }

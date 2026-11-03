@@ -36,6 +36,9 @@ Mxfp4NativeView Mxfp4NativeHost::view() const {
     v.codes_bytes = codes.size();
     v.scales = scales.data();
     v.scales_bytes = scales.size();
+    v.row_ref_exact = row_ref_exact;
+    v.row_ref = row_ref.data();
+    v.row_ref_bytes = row_ref.size();
     return v;
 }
 
@@ -58,6 +61,8 @@ bool preshuffle_mxfp4_native(const Mxfp4CanonicalView& v, Mxfp4NativeHost& out) 
     out.scale_row_stride_bytes = nb;
     out.codes.assign(out.batch * tiles * nb * mxfp4_native_block_bytes, 0u);
     out.scales.assign(v.scales, v.scales + v.scales_bytes);
+    out.row_ref.assign(out.batch * out.n, 0u);
+    out.row_ref_exact = true;
 
     const uint64_t canonical_row_bytes = kp / kMxfp4WeightsPerCode;
     for (uint64_t b = 0; b < out.batch; ++b) {
@@ -84,7 +89,21 @@ bool preshuffle_mxfp4_native(const Mxfp4CanonicalView& v, Mxfp4NativeHost& out) 
                 }
             }
         }
-        (void)src_scales;
+        for (uint64_t r = 0; r < n; ++r) {
+            uint8_t ref = 0u;
+            uint8_t low = 255u;
+            for (uint64_t ib = 0; ib < nb; ++ib) {
+                const uint8_t value = src_scales[r * nb + ib];
+                if (value > ref)
+                    ref = value;
+                if (value < low)
+                    low = value;
+            }
+            out.row_ref[b * n + r] = ref;
+            if (static_cast<uint32_t>(ref) - static_cast<uint32_t>(low) >
+                kMxfp4FoldExactMaxDistance)
+                out.row_ref_exact = false;
+        }
     }
     return out.view().validate();
 }

@@ -324,6 +324,7 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
         return Status::invalid_state("mxfp4 linear: encoding != Mxfp4", __FILE__, __LINE__);
     if (e.codes == nullptr || e.scales == nullptr)
         return Status::invalid_state("mxfp4 linear: weight view missing", __FILE__, __LINE__);
+
     if (e.rows == 0 || e.cols == 0)
         return Status::invalid_state("mxfp4 linear: weight dims == 0", __FILE__, __LINE__);
     if (!e.preshuffled)
@@ -397,6 +398,9 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
         *config,
         static_cast<const uint8_t*>(e.codes),
         static_cast<const uint8_t*>(e.scales),
+        shelf::kernel::mxfp4_gemm_folds_row_ref(config->id) && e.row_ref_exact &&
+                e.row_ref != nullptr
+            ? static_cast<const uint8_t*>(e.row_ref) : nullptr,
         reinterpret_cast<const int8_t*>(acodes), ascales,
         out.ptr, odt,
         rows, e.rows, wkp,

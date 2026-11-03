@@ -469,6 +469,8 @@ codes            : [tiles][blocks][256]，tiles = rows / 16
                    byte b = code[k = b] | (code[k = 16 + b] << 4)
 metadata1        : [rows][padded_k / 32] row-major E8M0（byte 順は canonical と同じ）
                    scale_row_stride_bytes = padded_k / 32
+row_ref          : [rows] 行単位の E8M0 最大値 byte（1 byte / output row）と
+                   row_ref_exact flag（全行の E8M0 幅 <= kMxfp4FoldExactMaxDistance = 8）
 padded_k         : 64 の倍数（activation の 64 K fragment block と揃える）
 rows             : 16 の倍数（pad は作らない。満たさない tensor は load 時に unsupported）
 resident size    : 0.5 byte / weight + 1 byte / 32 weight（canonical と同一）
@@ -482,9 +484,19 @@ codes を E4M3 へ展開した layout を常駐させてはならない。reside
 0.5 byte / weight から 1 byte / weight へ倍増し、§12 の VRAM 条項に反する。
 E2M1 code から E4M3 operand への展開、および E8M0 exponent の適用は
 register 内で行い、metadata1（E8M0）は常に保持する。
-E8M0 を E4M3 operand 側へ fold すると per-block の rescale 命令は消えるが、
-加算の再結合順序が変わり bit 一致が失われるため本リポジトリでは採用しない
-（実測と判断は [../../research/20261103/mxfp4_gate_a_prime.md](../../research/20261103/mxfp4_gate_a_prime.md)）。
+
+E8M0 の operand 側 fold（`d = row_ref[row] - e8m0[row][blk]` を E4M3 仮数へ畳み、
+`2^(row_ref-127)` を epilogue で 1 回適用する）は per-block rescale 命令を消す。
+`d <= 8` の間は E2M1 仮数（有意 2 bit）は E4M3 で厳密なので**量子化値も加算順序も
+変わらない**（correctness path と bf16 bit 一致）。`d >= 9` では E4M3 subnormal の
+1.5 刻みを丸めるため値が変わるので、loader は行単位の E8M0 幅を検査して
+`row_ref_exact` を立て、dispatch はその flag が true の payload でのみ fold を使う。
+fold を使う variant は Prefill2D のみ（rows >= 512）。実測と判断は
+[../../research/20261103/mxfp4_gate_a_prime.md](../../research/20261103/mxfp4_gate_a_prime.md)。
+
+row_ref は 1 byte / output row であり、1 byte / weight でも 1 byte / block でもない。
+例: out=17408, k=5120 の MXFP4 weight で codes + E8M0 が約 45 MB に対し row_ref は
+17 KB（+0.04%）。per-weight でないため §12 の resident size 条項に反しない。
 
 ---
 

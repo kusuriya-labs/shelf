@@ -18,7 +18,16 @@ namespace shelf::quantization::mxfp4 {
 //
 // The E8M0 scales stay row-major [rows][padded_k / 32], one byte per scale.
 // Padded output rows are zero-filled.
+// Row reference exponent: max E8M0 byte of the row. The optimized kernels fold
+// every E2M1 magnitude in the row by 2^(e8m0 - ref) into the E4M3 operand and
+// apply 2^(ref - 127) once in the epilogue, which removes the per-32-K-block
+// rescale from the inner loop. See kernels/optimized/linear/mxfp4.hip.
+// Largest E8M0 exponent distance a row may span for the folded E4M3 operand to
+// stay exact. Beyond it, 1.5 * 2^-d falls between two E4M3 subnormals.
+constexpr uint32_t kMxfp4FoldExactMaxDistance = 8u;
+
 struct Mxfp4NativeView {
+    bool row_ref_exact = false;
     uint64_t batch = 1;
     uint64_t rows = 0;
     uint64_t n = 0;
@@ -30,6 +39,8 @@ struct Mxfp4NativeView {
     uint64_t codes_bytes = 0;
     const uint8_t* scales = nullptr;
     uint64_t scales_bytes = 0;
+    const uint8_t* row_ref = nullptr;
+    uint64_t row_ref_bytes = 0;
 
     bool validate() const;
 };
@@ -44,6 +55,11 @@ struct Mxfp4NativeHost {
     uint64_t scale_row_stride_bytes = 0;
     std::vector<uint8_t> codes;
     std::vector<uint8_t> scales;
+    std::vector<uint8_t> row_ref;
+    // True when every row's E8M0 spread fits the exact fold table (max - min <= 8).
+    // Outside that range the folded E4M3 operand rounds, so the kernels that fold
+    // the reference must not be used for that payload.
+    bool row_ref_exact = false;
 
     Mxfp4NativeView view() const;
 };

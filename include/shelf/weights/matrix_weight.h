@@ -21,6 +21,10 @@ struct MatrixWeight {
     gpu::Tensor data;
     gpu::Tensor codes;
     gpu::Tensor scales;
+    // MXFP4 native only: one E8M0 reference byte per output row (the row's maximum
+    // scale exponent). 0 when the payload is canonical or the plane is absent.
+    gpu::Tensor row_ref;
+    bool row_ref_exact = false;
     gpu::Tensor compute_codes;
     gpu::Tensor compute_scales_bf16;
     uint32_t rows = 0;

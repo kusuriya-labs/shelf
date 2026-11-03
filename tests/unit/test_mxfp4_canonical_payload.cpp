@@ -343,6 +343,37 @@ static void test_native_preshuffle() {
     check(host.scales == scales, "native E8M0 scales are copied unchanged");
     check(host.view().validate(), "native view satisfies its own contract");
 
+    bool ref_ok = host.row_ref.size() == n;
+    bool expected_exact = true;
+    for (uint64_t r = 0; r < n && ref_ok; ++r) {
+        uint8_t hi = 0u, lo = 255u;
+        for (uint64_t ib = 0; ib < nb; ++ib) {
+            const uint8_t value = scales[r * nb + ib];
+            hi = std::max(hi, value);
+            lo = std::min(lo, value);
+        }
+        if (host.row_ref[r] != hi) ref_ok = false;
+        if (static_cast<uint32_t>(hi) - static_cast<uint32_t>(lo) >
+            mx::kMxfp4FoldExactMaxDistance)
+            expected_exact = false;
+    }
+    check(ref_ok, "row_ref holds each row's maximum E8M0 byte");
+    check(host.row_ref_exact == expected_exact,
+          "row_ref_exact reports whether every row fits the exact fold table");
+    check(host.view().row_ref_exact == host.row_ref_exact,
+          "the native view carries the fold exactness flag");
+
+    std::vector<uint8_t> wide = scales;
+    wide[0] = 100u;                  // row 0, block 0
+    wide[nb - 1u] = 120u;            // row 0, last block: spread 20
+    mx::Mxfp4CanonicalView wide_cv = cv;
+    wide_cv.scales = wide.data();
+    mx::Mxfp4NativeHost wide_host;
+    check(mx::preshuffle_mxfp4_native(wide_cv, wide_host),
+          "a wide E8M0 row is still a valid payload");
+    check(!wide_host.row_ref_exact,
+          "a row spanning more than the exact fold distance clears row_ref_exact");
+
     bool pairing = true;
     bool padded_zero = true;
     for (uint64_t t = 0; t < 2; ++t) {
@@ -390,6 +421,11 @@ static void test_native_preshuffle() {
             batch_match = false;
     }
     check(batch_match, "each batch entry is preshuffled independently and identically");
+    check(batched.row_ref.size() == 2 * host.row_ref.size() &&
+          std::equal(host.row_ref.begin(), host.row_ref.end(), batched.row_ref.begin()) &&
+          std::equal(host.row_ref.begin(), host.row_ref.end(),
+                     batched.row_ref.begin() + static_cast<std::ptrdiff_t>(host.row_ref.size())),
+          "batched row_ref stacks one reference plane per matrix");
 
     mx::Mxfp4NativeView bad = host.view();
     bad.codes_row_stride_bytes = packed_k;

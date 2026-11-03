@@ -1150,6 +1150,12 @@ static void test_hf_mxfp4_matrix_load(gpu::GpuArena& arena, hipStream_t stream) 
           "mxfp4 codes reach the GPU in the native fragment order");
     check(d2h(m.scales.data<void>(), good.scales.size()) == good.scales,
           "mxfp4 scale bytes reach the GPU unchanged");
+    check(m.row_ref.ndim() != 0 && m.row_ref.data<void>() != nullptr,
+          "mxfp4 native payload carries the row reference plane");
+    check(d2h(m.row_ref.data<void>(), native.row_ref.size()) == native.row_ref,
+          "mxfp4 row reference bytes reach the GPU");
+    check(m.row_ref_exact == native.row_ref_exact,
+          "mxfp4 fold exactness flag travels with the payload");
 
     weights::WeightLoadOptions canonical;
     canonical.preshuffle = false;
@@ -1164,6 +1170,7 @@ static void test_hf_mxfp4_matrix_load(gpu::GpuArena& arena, hipStream_t stream) 
               "mxfp4 canonical codes bytes");
         check(d2h(cm.scales.data<void>(), good.scales.size()) == good.scales,
               "mxfp4 canonical scale bytes");
+        check(cm.row_ref.ndim() == 0, "mxfp4 canonical payload has no row reference plane");
     }
 
     auto bad = weights::load_quantized_matrix(

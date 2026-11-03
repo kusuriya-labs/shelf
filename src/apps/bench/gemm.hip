@@ -29,6 +29,9 @@ struct Options {
     std::string dtype = "bf16";
     uint32_t mxfp4_split = 4u;
     uint32_t mxfp4_unroll = 0u;
+    uint32_t mxfp4_fold = 1u;
+    uint32_t mxfp4_ablate_act = 0u;
+    uint32_t mxfp4_spread = 24u;
     std::string variant = "auto";
     std::vector<uint32_t> rows;
     uint32_t n = 5120;
@@ -64,6 +67,9 @@ void usage(FILE* f) {
         "  --impl auto|wmma|wide|splitk|exact   (bf16 forced implementation)\n"
         "  --impl auto|splitk|rowblock1|2|4      (mxfp4 forced implementation)\n"
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
+        "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
+        "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
+        "  --mxfp4-ablate-act 0|1          prefill2d without the A group scale (timing bound)\n"
 
 
         "  --model-dir PATH               (with --actual-qwen-shapes: read Qwen config)\n"
@@ -731,8 +737,10 @@ int run_gemm_mxfp4(Options& o) {
         const size_t scales_bytes = static_cast<size_t>(n_tiled) * nb;
         uint8_t* d_codes = nullptr;
         uint8_t* d_scales = nullptr;
+        uint8_t* d_ref = nullptr;
         if (hipMalloc((void**)&d_codes, codes_bytes) != hipSuccess ||
-            hipMalloc((void**)&d_scales, scales_bytes) != hipSuccess) {
+            hipMalloc((void**)&d_scales, scales_bytes) != hipSuccess ||
+            hipMalloc((void**)&d_ref, scales_bytes / nb) != hipSuccess) {
             return 1;
         }
         {
@@ -740,9 +748,17 @@ int run_gemm_mxfp4(Options& o) {
             std::vector<uint8_t> hc(codes_bytes);
             for (auto& v : hc) v = static_cast<uint8_t>(rng() & 0xFFu);
             std::vector<uint8_t> hs(scales_bytes);
-            for (auto& v : hs) v = static_cast<uint8_t>(112u + (rng() % 24u));
+            for (auto& v : hs) v = static_cast<uint8_t>(112u + (rng() % o.mxfp4_spread));
+            std::vector<uint8_t> hr(scales_bytes / nb, 0u);
+            for (uint32_t r = 0; r < n_tiled; ++r) {
+                uint8_t ref = 0u;
+                for (uint32_t ib = 0; ib < nb; ++ib)
+                    ref = std::max(ref, hs[static_cast<size_t>(r) * nb + ib]);
+                hr[r] = ref;
+            }
             if (hipMemcpy(d_codes, hc.data(), hc.size(), hipMemcpyHostToDevice) != hipSuccess ||
-                hipMemcpy(d_scales, hs.data(), hs.size(), hipMemcpyHostToDevice) != hipSuccess) {
+                hipMemcpy(d_scales, hs.data(), hs.size(), hipMemcpyHostToDevice) != hipSuccess ||
+                hipMemcpy(d_ref, hr.data(), hr.size(), hipMemcpyHostToDevice) != hipSuccess) {
                 return 1;
             }
         }
@@ -791,12 +807,19 @@ int run_gemm_mxfp4(Options& o) {
             }
 
             auto launch_one = [&]() -> hipError_t {
+                if (o.mxfp4_ablate_act && selected == "prefill2d") {
+                    return shelf::kernel::launch_gemm_mxfp4_w4a8_ablated_noactrescale(
+                        d_codes, d_scales, d_ref, a8, d_ascales, d_output,
+                        shelf::kernel::Mxfp4GemmOutputDType::BF16, rows, n, kp, nb, kp,
+                        static_cast<uint32_t>(act_scale_stride), n, stream);
+                }
                 if (selected == "correctness") {
                     shelf::Status st = launch_correctness_linear_fp8(cenv, rows, kp, stream, true);
                     return st.ok() ? hipSuccess : hipErrorUnknown;
                 }
                 return shelf::kernel::launch_gemm_mxfp4_w4a8_auto(
-                    cfg, d_codes, d_scales, a8, d_ascales, d_output,
+                    cfg, d_codes, d_scales, o.mxfp4_fold ? d_ref : nullptr,
+                    a8, d_ascales, d_output,
                     shelf::kernel::Mxfp4GemmOutputDType::BF16, rows, n, kp, nb, kp,
                     static_cast<uint32_t>(act_scale_stride), n, stream);
             };
@@ -1146,6 +1169,9 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--split") o.split = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-split") o.mxfp4_split = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-unroll") o.mxfp4_unroll = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-fold") o.mxfp4_fold = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-spread") o.mxfp4_spread = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-ablate-act") o.mxfp4_ablate_act = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--check") o.check = true;
         else if (a == "--model-dir") o.model_dir = next();
         else if (a == "--actual-qwen-shapes") o.actual_qwen_shapes = true;

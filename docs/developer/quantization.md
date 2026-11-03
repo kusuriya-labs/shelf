@@ -197,6 +197,10 @@ production の Program Builder は linear の activation 量子化方針を
 - `WeightSlot` の native contract: `codes_row_stride_bytes == (k_padded / 32) * 256`、
   `scale_row_stride_bytes == storage_scale_stride_bytes == k_padded / 32`、
   `preshuffled == true`。満たさない slot は dispatch 側で失敗する。
+  native payload は付随平面として `row_ref`（行単位の E8M0 最大値、`rows` byte）と
+  フラグ `row_ref_exact`（全行の E8M0 幅が 8 以内 = operand fold が厳密）を持つ。
+  Prefill2D は `row_ref_exact` が true の payload でのみ fold を使い、false の場合は
+  per-block rescale 側へ戻る。
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
   scale = `F32`）に固定され、CLI / config による切替は存在しない。

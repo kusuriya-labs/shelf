@@ -79,6 +79,19 @@ inline constexpr uint32_t kMxfp4GemmPrefill2dMinRows = 512u;
 inline constexpr uint64_t kMxfp4GemmPrefill2dMinWeights = 40000000ull;
 inline constexpr uint32_t kMxfp4GemmPrefill2dRowsPerBlock = 16u * kMxfp4GemmRowTile;
 
+// Fold each 32-K block's E8M0 exponent into the E4M3 weight operand relative to
+// the output row's reference exponent, and apply 2^ref once per output. For a
+// fold distance <= 8 the folded operand is exact, so the result stays bit
+// identical to the unfolded form (d > 8 is the E4M3 subnormal tail).
+//
+// Only the prefill 2D variant folds: it measured -22% to -36% on rows >= 512.
+// The row-block and split-K variants measured a loss at rows == 1 (the table
+// lookup per K block costs more than the rescale it removes), so they keep the
+// unfolded form. Measured in docs/research/20261103/mxfp4_gate_a_prime.md.
+inline constexpr bool mxfp4_gemm_folds_row_ref(Mxfp4GemmConfigId id) {
+    return id == Mxfp4GemmConfigId::Prefill2D;
+}
+
 struct Fp8FinegrainedGemmConfig {
     Fp8FinegrainedGemmConfigId id = Fp8FinegrainedGemmConfigId::RowBlock1;
 };
