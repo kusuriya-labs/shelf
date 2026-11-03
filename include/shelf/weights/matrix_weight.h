@@ -27,6 +27,13 @@ struct MatrixWeight {
     bool row_ref_exact = false;
     gpu::Tensor compute_codes;
     gpu::Tensor compute_scales_bf16;
+    // Rank-3 expert groups. experts == 1 is the 2D path. When experts > 1, rows /
+    // cols / k_padded and the row strides describe ONE expert, and the batch strides
+    // separate experts inside the single arena allocation. row_ref is then a batched
+    // [experts][rows] byte plane with row stride 1.
+    uint32_t experts = 1;
+    uint64_t codes_batch_stride_bytes = 0;
+    uint64_t scales_batch_stride_bytes = 0;
     uint32_t rows = 0;
     uint32_t cols = 0;
     uint32_t k_padded = 0;

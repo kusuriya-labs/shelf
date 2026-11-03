@@ -1,7 +1,11 @@
 # Qwen3.6-35B-A3B MoE / MXFP4 contract 設計案
 
 構造実測は [qwen36_35b_a3b_moe_structure.md](qwen36_35b_a3b_moe_structure.md) を正本。
-ここに置くのは **MoE 側の contract 設計案と決定記録** であり、MoE 側の実装は未着手。
+ここに置くのは **MoE 側の contract 設計案と決定記録** であり、実装の現在形は
+`docs/developer/qwen35moe.md`。Gate B（config と weights 集約）は実装済みで、
+設計案からの差分（`shelf::qwen35moe` module へ分離、plan の source は projection 単位）は
+[20261104/moe_gate_b_weights.md](../20261104/moe_gate_b_weights.md) を参照。
+Gate C 以降（router / grouped linear / combine / 40 層 E2E）は未実装。
 
 Gate A（Quark MXFP4 format の受理）は実装済みで、現在形の contract は
 `docs/developer/canonical_soa_payload.md` §6bis と `docs/developer/quantization.md` へ移した。

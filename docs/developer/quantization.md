@@ -150,6 +150,10 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
 現在の production model（Qwen3.8-27B Dense）は rank-3 weight を持たないため、
 この経路は generic weights layer の API としてのみ存在し、model 側からの呼び出し元は無い。
 
+MoE routed experts を layer あたり rank-3 の MXFP4 native SoA へ集約するロード経路
+（`shelf::qwen35moe`、`MatrixWeight` の `experts` / batch stride 字段を含む）は
+[qwen35moe.md](qwen35moe.md) を参照。
+
 ## Runtime contract
 
 runtime は weight を `MatrixEncoding`（`weights/matrix_weight.h`）として扱い、

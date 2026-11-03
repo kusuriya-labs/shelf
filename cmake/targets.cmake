@@ -237,6 +237,22 @@ target_include_directories(shelf_qwen35 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vend
 target_link_libraries(shelf_qwen35 PUBLIC shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
 target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+# Qwen3.5 MoE (model_type qwen3_5_moe): routed expert weights and config.
+set(
+    SHELF_QWEN35MOE_SOURCES
+    src/shelf/models/qwen35moe/model/qwen35moe_config.cpp
+    src/shelf/models/qwen35moe/weights/moe_weight_plan.cpp
+    src/shelf/models/qwen35moe/weights/moe_expert_load.cpp
+)
+
+add_library(shelf_qwen35moe STATIC ${SHELF_QWEN35MOE_SOURCES})
+target_compile_features(shelf_qwen35moe PRIVATE cxx_std_20)
+target_include_directories(shelf_qwen35moe PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_qwen35moe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_qwen35moe SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen35 shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 # Qwen3.5 continuous batching runtime.
 add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/runtime_request.cpp

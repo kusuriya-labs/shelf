@@ -1,4 +1,5 @@
 #include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 
 #include <cstdio>
 #include <filesystem>
@@ -6,8 +7,9 @@
 #include <string>
 
 namespace fs = std::filesystem;
-using shelf::qwen35::Qwen35TextConfig;
 using shelf::qwen35::read_qwen35_text_config;
+using shelf::qwen35moe::Qwen35MoeTextConfig;
+using shelf::qwen35moe::read_qwen35_moe_text_config;
 
 namespace {
 
@@ -30,22 +32,23 @@ void write_config(const std::string& name, const std::string& text) {
 }
 
 std::string with_text_config(const std::string& text_body) {
-    return R"json({"model_type":"qwen3_5","text_config":{)json" + text_body + R"json(}})json";
+    return R"json({"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text",)json" +
+           text_body + R"json(}})json";
 }
 
-Qwen35TextConfig expect_ok(const std::string& name, const std::string& text) {
+Qwen35MoeTextConfig expect_moe_ok(const std::string& name, const std::string& text) {
     write_config(name, text);
-    auto cfg = read_qwen35_text_config((g_root / name).string());
-    check(cfg.ok(), name + ": parse: " + (cfg.ok() ? "" : cfg.status().message()));
+    auto cfg = read_qwen35_moe_text_config((g_root / name).string());
+    check(cfg.ok(), name + ": moe config parse: " + (cfg.ok() ? "" : cfg.status().message()));
     if (!cfg.ok())
-        return Qwen35TextConfig{};
+        return Qwen35MoeTextConfig{};
     return cfg.value();
 }
 
-void expect_error(const std::string& name, const std::string& text) {
+void expect_moe_error(const std::string& name, const std::string& text) {
     write_config(name, text);
-    auto cfg = read_qwen35_text_config((g_root / name).string());
-    check(!cfg.ok(), name + ": config must be rejected");
+    auto cfg = read_qwen35_moe_text_config((g_root / name).string());
+    check(!cfg.ok(), name + ": moe config must be rejected");
 }
 
 // Measured values of models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 text_config.
@@ -63,8 +66,7 @@ int main() {
     fs::create_directories(g_root);
 
     {
-        const auto cfg = expect_ok("moe", with_text_config(kMoeBase));
-        check(cfg.is_moe(), "moe: num_experts > 0 selects the MoE contract");
+        const auto cfg = expect_moe_ok("moe", with_text_config(kMoeBase));
         check(cfg.num_experts == 256u, "moe: num_experts");
         check(cfg.num_experts_per_tok == 8u, "moe: num_experts_per_tok");
         check(cfg.moe_intermediate_size == 512u, "moe: moe_intermediate_size");
@@ -72,40 +74,72 @@ int main() {
               "moe: shared_expert_intermediate_size");
         check(cfg.intermediate_size == 0u, "moe: no dense FFN field");
         check(cfg.output_gate_silu, "moe: a missing output_gate_type defaults to silu");
-        check(cfg.hidden_size == 2048u && cfg.num_hidden_layers == 40u, "moe: geometry kept");
+        check(cfg.hidden_size == 2048u && cfg.num_hidden_layers == 40u, "moe: base geometry kept");
+        check(cfg.vocab_size == 248320u, "moe: base vocab kept");
     }
 
     {
-        const auto cfg = expect_ok("dense", with_text_config(
-            std::string(kDenseBase) + R"json(,"output_gate_type":"swish")json"));
-        check(!cfg.is_moe(), "dense: num_experts absent is not MoE");
-        check(cfg.intermediate_size == 17408u, "dense: intermediate_size");
-        check(cfg.output_gate_silu, "dense: swish gate");
+        const auto cfg = expect_moe_ok("moe_sigmoid", with_text_config(
+            std::string(kMoeBase) + R"json(,"output_gate_type":"sigmoid")json"));
+        check(!cfg.output_gate_silu, "moe: an explicit sigmoid gate is honoured");
     }
 
     {
-        const auto cfg = expect_ok("dense_sigmoid", with_text_config(
-            std::string(kDenseBase) + R"json(,"output_gate_type":"sigmoid")json"));
-        check(!cfg.output_gate_silu, "dense: explicit sigmoid is honoured");
+        const auto cfg = expect_moe_ok("moe_swish", with_text_config(
+            std::string(kMoeBase) + R"json(,"output_gate_type":"swish")json"));
+        check(cfg.output_gate_silu, "moe: explicit swish gate");
+    }
+
+    // The MoE reader owns the expert geometry; the shared Qwen35 reader must not grow
+    // MoE fields, so a dense config stays dense and a MoE config is refused there.
+    {
+        write_config("dense", with_text_config(std::string(kDenseBase) +
+                                               R"json(,"output_gate_type":"swish")json"));
+        auto dense = read_qwen35_text_config((g_root / "dense").string());
+        check(dense.ok(), "dense: base reader accepts");
+        if (dense.ok()) {
+            check(dense.value().intermediate_size == 17408u, "dense: intermediate_size");
+            check(dense.value().output_gate_silu, "dense: swish gate");
+        }
+        check(!read_qwen35_moe_text_config((g_root / "dense").string()).ok(),
+              "a dense config is not a MoE config");
     }
 
     {
-        const auto cfg = expect_ok("dense_missing_gate", with_text_config(kDenseBase));
-        check(cfg.output_gate_silu, "a missing output_gate_type defaults to silu");
+        write_config("dense_missing_gate", with_text_config(kDenseBase));
+        auto dense = read_qwen35_text_config((g_root / "dense_missing_gate").string());
+        check(dense.ok() && !dense.value().output_gate_silu,
+              "the base reader keeps its own gate default");
     }
 
-    expect_error("bad_gate", with_text_config(
-        std::string(kDenseBase) + R"json(,"output_gate_type":"gelu")json"));
-    expect_error("moe_topk_too_large",
-                 with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":257,"moe_intermediate_size":512,"shared_expert_intermediate_size":512)json"));
-    expect_error("moe_topk_zero",
-                 with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":0,"moe_intermediate_size":512,"shared_expert_intermediate_size":512)json"));
-    expect_error("moe_no_moe_intermediate",
-                 with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":8,"shared_expert_intermediate_size":512)json"));
-    expect_error("moe_no_shared_expert_size",
-                 with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":8,"moe_intermediate_size":512)json"));
-    expect_error("moe_with_dense_ffn", with_text_config(
+    // Expert keys in a config the base reader accepts are ignored there: num_experts is
+    // only meaningful through the MoE config type.
+    {
+        write_config("dense_with_experts", with_text_config(
+            std::string(kDenseBase) + R"json(,"num_experts":256,"num_experts_per_tok":8)json"));
+        auto dense = read_qwen35_text_config((g_root / "dense_with_experts").string());
+        check(dense.ok(), "the base reader does not reject expert keys");
+    }
+
+    expect_moe_error("moe_topk_too_large",
+                     with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":257,"moe_intermediate_size":512,"shared_expert_intermediate_size":512)json"));
+    expect_moe_error("moe_topk_zero",
+                     with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":0,"moe_intermediate_size":512,"shared_expert_intermediate_size":512)json"));
+    expect_moe_error("moe_no_num_experts",
+                     with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts_per_tok":8,"moe_intermediate_size":512,"shared_expert_intermediate_size":512)json"));
+    expect_moe_error("moe_no_moe_intermediate",
+                     with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":8,"shared_expert_intermediate_size":512)json"));
+    expect_moe_error("moe_no_shared_expert_size",
+                     with_text_config(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":8,"moe_intermediate_size":512)json"));
+    expect_moe_error("moe_with_dense_ffn", with_text_config(
         std::string(kMoeBase) + R"json(,"intermediate_size":512)json"));
+
+    {
+        write_config("bad_gate", with_text_config(
+            std::string(kMoeBase) + R"json(,"output_gate_type":"gelu")json"));
+        check(!read_qwen35_moe_text_config((g_root / "bad_gate").string()).ok(),
+              "an unsupported output_gate_type is rejected");
+    }
 
     fs::remove_all(g_root);
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);

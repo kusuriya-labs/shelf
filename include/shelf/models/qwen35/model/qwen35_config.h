@@ -26,14 +26,6 @@ struct Qwen35TextConfig {
     std::size_t num_key_value_heads = 0;
     std::size_t attention_head_dim = 0;
 
-    // MoE. num_experts is the authority for "this model is MoE": model_type
-    // strings are never used to branch. A MoE config carries no intermediate_size,
-    // because it does not have a dense FFN.
-    std::size_t num_experts = 0;
-    std::size_t num_experts_per_tok = 0;
-    std::size_t moe_intermediate_size = 0;
-    std::size_t shared_expert_intermediate_size = 0;
-
     StopTokens stop_tokens;
 
     float rms_norm_eps = 1.0e-6f;
@@ -42,8 +34,6 @@ struct Qwen35TextConfig {
 
     bool tie_word_embeddings = false;
     bool output_gate_silu = false;
-
-    bool is_moe() const noexcept { return num_experts != 0; }
 
     std::vector<int> layer_types;
 };

@@ -76,7 +76,9 @@ GDN 層の recurrence 出力は `gdn_norm` 後に `qkv_proj` の gate 部分と�
 | `swish` / `silu` | SiLU | |
 
 未対応の値は model load 時の error とする（暗黙に sigmoid へ落とさない）。
-Qwen3.8-27B は `swish` である。
+Qwen3.8-27B は `swish` である。Qwen3.5 MoE checkpoint はこの key を持たず、参照実装は
+常に silu を適用するため、MoE 側は key 省略時に silu となる。MoE の contract は
+[qwen35moe.md](qwen35moe.md) を参照。
 
 ---
 
