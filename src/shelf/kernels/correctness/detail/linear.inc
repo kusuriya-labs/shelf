@@ -141,6 +141,95 @@ __device__ __forceinline__ ProgramStatus exec_linear_block_scaled(
     return ProgramStatus::COMPLETE;
 }
 
+__device__ __forceinline__ ProgramStatus exec_linear_mxfp4(
+    ModelDispatchEnv& env, const DispatchBinding& b) {
+    ResolvedValue out{};
+    if (!resolve_value(env, b.output_slots[0], out))
+        return ProgramStatus::INVALID_BINDING;
+    if (b.weight_index >= env.program->weight_slot_count ||
+        env.program->weight_table == nullptr)
+        return ProgramStatus::INVALID_BINDING;
+    if (b.workspace_slot >= env.program->workspace_range_count)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (b.activation_kp < 64u || (b.activation_kp & 63u) != 0u ||
+        b.activation_max_rows == 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    const auto* wtable = static_cast<const WeightSlot*>(env.program->weight_table);
+    const WeightSlot e = wtable[b.weight_index];
+    if (e.encoding != 3u)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (e.codes == nullptr || e.scales == nullptr)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (e.weight_scale_group != 32u)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (e.rows != out.features)
+        return ProgramStatus::INVALID_BINDING;
+    if (out.dtype != ValueDType::BF16 && out.dtype != ValueDType::F32)
+        return ProgramStatus::INVALID_BINDING;
+    const uint32_t kdim = e.cols;
+    const uint32_t wkp = e.k_padded;
+    if (wkp < kdim || (wkp & 63u) != 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    const uint32_t akp = b.activation_kp;
+    if (akp != wkp)
+        return ProgramStatus::INVALID_PROGRAM;
+    const uint32_t wcode_stride = wkp >> 1;
+    const uint32_t wscale_stride = wkp >> 5;
+    if (e.codes_row_stride_bytes != wcode_stride || e.scale_row_stride_bytes != wscale_stride)
+        return ProgramStatus::INVALID_PROGRAM;
+    const uint32_t nb = wkp >> 5;
+    const uint32_t code_stride = b.activation_code_stride;
+    const uint32_t scale_stride = b.activation_scale_stride;
+    if (code_stride < akp || (code_stride & 63u) != 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (scale_stride < 4u || (scale_stride & 15u) != 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    const uint64_t ws_off = env.program->workspace_ranges[b.workspace_slot].offset;
+    const uint8_t* acodes = reinterpret_cast<const uint8_t*>(env.workspace_base + ws_off);
+    const uint8_t* asbase = reinterpret_cast<const uint8_t*>(env.workspace_base + ws_off +
+        a8_ws_scales_offset(code_stride, b.activation_max_rows));
+    const uint32_t rows = value_rows(env, out);
+    if (rows > b.activation_max_rows)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (rows == 0u)
+        return ProgramStatus::COMPLETE;
+    const uint8_t* wcodes = static_cast<const uint8_t*>(e.codes);
+    const uint8_t* wscales = static_cast<const uint8_t*>(e.scales);
+    const uint32_t out_features = e.rows;
+    const size_t total = static_cast<size_t>(rows) * out_features;
+    const uint32_t stride = global_stride(env);
+    for (size_t idx = global_tid(env); idx < total; idx += stride) {
+        const uint32_t m = static_cast<uint32_t>(idx / out_features);
+        const uint32_t o = static_cast<uint32_t>(idx % out_features);
+        const uint8_t* wrow = wcodes + static_cast<size_t>(o) * wcode_stride;
+        const uint8_t* wsrow = wscales + static_cast<size_t>(o) * wscale_stride;
+        const uint8_t* atile = acodes +
+            static_cast<size_t>(m >> 4) * (static_cast<size_t>(code_stride) * 16u);
+        const float* asrow = reinterpret_cast<const float*>(
+            asbase + static_cast<size_t>(m) * scale_stride);
+        const uint32_t m_slot = m & 15u;
+        float acc = 0.f;
+        for (uint32_t ib = 0; ib < nb; ++ib) {
+            const float ws = ::shelf::quantization::codec::device::e8m0_decode_f32(wsrow[ib]);
+            const float as = asrow[ib >> 2];
+            float p = 0.f;
+            for (uint32_t j = 0; j < 32u; ++j) {
+                const uint32_t kc = ib * 32u + j;
+                const uint8_t packed = wrow[kc >> 1];
+                const uint8_t code = (kc & 1u) == 0u ? (packed & 0x0Fu) : (packed >> 4);
+                const size_t aoff = static_cast<size_t>(kc >> 6) *
+                                        ::shelf::quantization::fp8::kFragBlockBytes +
+                                    ::shelf::quantization::fp8::fp8_frag_offset(m_slot, kc & 63u);
+                p += ::shelf::quantization::codec::device::e2m1_decode_f32(code) *
+                     ::shelf::quantization::codec::device::e4m3_decode_f32(atile[aoff]);
+            }
+            acc += p * ws * as;
+        }
+        store_elem(out, idx, acc);
+    }
+    return ProgramStatus::COMPLETE;
+}
+
 __device__ __forceinline__ float act_load_f32(const void* row, uint32_t i, bool f32_in) {
     const uint8_t* base = static_cast<const uint8_t*>(row);
     if (f32_in) {

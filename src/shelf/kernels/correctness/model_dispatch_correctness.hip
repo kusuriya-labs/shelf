@@ -22,6 +22,7 @@ __device__ ProgramStatus host_execute_binding(
         case KernelId::EMBEDDING_LOOKUP: return detail::exec_embedding(env, b);
         case KernelId::LINEAR_BF16: return detail::exec_linear_weight(env, b);
         case KernelId::LINEAR_FP8_FINEGRAINED: return detail::exec_linear_block_scaled(env, b);
+        case KernelId::LINEAR_MXFP4_W4A8: return detail::exec_linear_mxfp4(env, b);
         case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED: return detail::exec_activation_quantize_fp8(env, b);
         case KernelId::RMS_NORM: return detail::exec_row_norm_like(env, b, false);
         case KernelId::L2_NORMALIZE: return detail::exec_row_norm_like(env, b, true);

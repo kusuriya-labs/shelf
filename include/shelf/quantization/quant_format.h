@@ -9,6 +9,8 @@ namespace shelf::quantization {
 constexpr uint32_t kQuantBlockElements = 32;
 constexpr uint32_t kFp8ScaleBlockN = 128;
 constexpr uint32_t kFp8ScaleBlockK = 128;
+constexpr uint32_t kMxfp4ScaleBlockK = 32;
+constexpr uint32_t kMxfp4WeightsPerCode = 2;
 
 // Metadata placement relative to the codes matrix.
 //
@@ -48,11 +50,13 @@ enum class QuantFormatId : uint8_t {
     None = 0,
     Bf16 = 1,
     Fp8Finegrained = 2,
+    Mxfp4Finegrained = 3,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
 static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
 static_assert(static_cast<uint8_t>(QuantFormatId::Fp8Finegrained) == 2);
+static_assert(static_cast<uint8_t>(QuantFormatId::Mxfp4Finegrained) == 3);
 
 inline constexpr QuantFormatDesc kBf16FormatDesc = {
     16, 1, 32,
@@ -76,10 +80,25 @@ inline constexpr QuantFormatDesc kFp8FinegrainedFormatDesc = {
     },
 };
 
+// OCP MX FP4: two E2M1 codes share one byte along K, and every output row owns
+// one E8M0 scale per 32-element block.
+inline constexpr QuantFormatDesc kMxfp4FinegrainedFormatDesc = {
+    kMxfp4ScaleBlockK,
+    1,
+    kMxfp4ScaleBlockK / kMxfp4WeightsPerCode,
+    {
+        {1, MetaCountMode::PerBlock, MetaStorage::U8, 1, kMxfp4ScaleBlockK},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
 inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
     switch (id) {
         case QuantFormatId::Bf16: return &kBf16FormatDesc;
         case QuantFormatId::Fp8Finegrained: return &kFp8FinegrainedFormatDesc;
+        case QuantFormatId::Mxfp4Finegrained: return &kMxfp4FinegrainedFormatDesc;
         default: return nullptr;
     }
 }

@@ -14,12 +14,14 @@ namespace shelf::quantization {
 enum class QuantKernelKind : uint8_t {
     LinearBf16,
     LinearFp8Finegrained,
+    LinearMxfp4Finegrained,
 };
 
 inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel) {
     switch (kernel) {
         case QuantKernelKind::LinearBf16: return manifest::QuantizedEncoding::Bf16;
         case QuantKernelKind::LinearFp8Finegrained: return manifest::QuantizedEncoding::Fp8;
+        case QuantKernelKind::LinearMxfp4Finegrained: return manifest::QuantizedEncoding::Mxfp4;
     }
     return manifest::QuantizedEncoding::Bf16;
 }
@@ -28,6 +30,7 @@ inline const char* canonical_layout_name(manifest::QuantizedEncoding enc) {
     switch (enc) {
         case manifest::QuantizedEncoding::Bf16: return "";
         case manifest::QuantizedEncoding::Fp8: return manifest::kFp8LayoutName;
+        case manifest::QuantizedEncoding::Mxfp4: return manifest::kMxfp4LayoutName;
     }
     return "";
 }
@@ -209,6 +212,8 @@ inline bool weight_block_supported(
     switch (enc) {
         case manifest::QuantizedEncoding::Fp8:
             return block.k == kFp8ScaleBlockK || block.k == kFp8ScaleBlockK / 2u;
+        case manifest::QuantizedEncoding::Mxfp4:
+            return block.k == kMxfp4ScaleBlockK;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }

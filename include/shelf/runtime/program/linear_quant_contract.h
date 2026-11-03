@@ -32,6 +32,16 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
         contract.activation_k_alignment = 128u;
         return contract;
     }
+    if (static_cast<MatrixEncoding>(weight_encoding) == MatrixEncoding::Mxfp4) {
+        if (compute_spec != static_cast<uint8_t>(ComputeSpecId::MXFP4_W4A8_F32_BF16))
+            return Status::invalid_argument(
+                "mxfp4 linear weight requires mxfp4 w4a8 compute spec", __FILE__, __LINE__);
+        contract.linear_kernel = KernelId::LINEAR_MXFP4_W4A8;
+        contract.requires_activation_quant = true;
+        contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
+        contract.activation_k_alignment = 64u;
+        return contract;
+    }
     if (compute_spec != static_cast<uint8_t>(ComputeSpecId::BF16_F32_BF16))
         return Status::invalid_argument(
             "bf16 linear weight requires bf16 compute spec", __FILE__, __LINE__);

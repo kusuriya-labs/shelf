@@ -58,7 +58,7 @@ bool supported_hf_quant_method_name(const nlohmann::json* qc) {
     auto it = qc->find("quant_method");
     if (it == qc->end() || !it->is_string()) return false;
     const std::string method = it->get<std::string>();
-    return method == "fp8";
+    return method == "fp8" || method == "quark";
 }
 
 bool json_int_equals(const nlohmann::json& value, int64_t expected) {
@@ -71,6 +71,54 @@ bool json_int_equals(const nlohmann::json& value, int64_t expected) {
 bool block_size_is(const nlohmann::json& value, int64_t rows, int64_t cols) {
     return value.is_array() && value.size() == 2 &&
            json_int_equals(value[0], rows) && json_int_equals(value[1], cols);
+}
+
+bool json_string_equals(const nlohmann::json& object, const char* key, const char* expected) {
+    auto it = object.find(key);
+    return it != object.end() && it->is_string() && it->get<std::string>() == expected;
+}
+
+// Quark `mxfp4` is accepted only as real-quantized OCP MX FP4 weights:
+// fp4 codes, per-group of 32, static, E8M0 scales.
+Status validate_quark_mxfp4_scheme(const nlohmann::json& qc) {
+    auto global = qc.find("global_quant_config");
+    if (global == qc.end() || !global->is_object()) {
+        return Status::unsupported(
+            "HF quark quantization requires global_quant_config", __FILE__, __LINE__);
+    }
+    auto weight = global->find("weight");
+    if (weight == global->end() || !weight->is_object()) {
+        return Status::unsupported(
+            "HF quark quantization requires a weight quant config", __FILE__, __LINE__);
+    }
+    if (!json_string_equals(*weight, "dtype", "fp4")) {
+        return Status::unsupported("HF quark weight dtype must be fp4", __FILE__, __LINE__);
+    }
+    if (!json_string_equals(*weight, "qscheme", "per_group")) {
+        return Status::unsupported("HF quark weight qscheme must be per_group", __FILE__, __LINE__);
+    }
+    auto group = weight->find("group_size");
+    if (group == weight->end() ||
+        !json_int_equals(*group, quantization::kMxfp4ScaleBlockK)) {
+        return Status::unsupported("HF quark mxfp4 requires group_size 32", __FILE__, __LINE__);
+    }
+    if (!json_string_equals(*weight, "scale_format", "e8m0")) {
+        return Status::unsupported("HF quark mxfp4 requires scale_format e8m0", __FILE__, __LINE__);
+    }
+    auto dynamic = weight->find("is_dynamic");
+    if (dynamic != weight->end() && dynamic->is_boolean() && dynamic->get<bool>()) {
+        return Status::unsupported("HF quark mxfp4 weights must be static", __FILE__, __LINE__);
+    }
+    auto export_config = qc.find("export");
+    if (export_config != qc.end() && export_config->is_object()) {
+        auto format = export_config->find("weight_format");
+        if (format != export_config->end() && format->is_string() &&
+            format->get<std::string>() != "real_quantized") {
+            return Status::unsupported(
+                "HF quark mxfp4 requires weight_format real_quantized", __FILE__, __LINE__);
+        }
+    }
+    return Status::make_ok();
 }
 
 uint64_t element_count(const std::vector<std::size_t>& shape) {
@@ -259,6 +307,76 @@ Status synthesize_fp8_tensor(
     return Status::make_ok();
 }
 
+Status synthesize_mxfp4_tensor(
+    const shelf::io::SafetensorsReader* reader,
+    HfQuantizedSource& source,
+    const std::string& canonical,
+    const std::string& scale_name,
+    const std::string& codes_shard,
+    const std::string& scale_shard,
+    QuantizedTensorMetadata& out,
+    bool with_crc) {
+    auto spec_result = reader->tensor_spec(canonical);
+    if (!spec_result.ok()) return spec_result.status();
+    const shelf::io::StTensorSpec& codes_spec = spec_result.value();
+    if (codes_spec.dtype != shelf::io::SType::U8 || codes_spec.shape.size() != 2) {
+        return Status::unsupported(
+            ("hf mxfp4 weight payload must be a rank-2 U8 matrix: " + canonical).c_str(),
+            __FILE__, __LINE__);
+    }
+    const uint64_t n = codes_spec.shape[0];
+    const uint64_t packed_k = codes_spec.shape[1];
+    const uint64_t k = packed_k * quantization::kMxfp4WeightsPerCode;
+    uint64_t codes_bytes = 0;
+    Status bytes_status = spec_bytes(codes_spec, 1, codes_bytes);
+    if (!bytes_status.ok()) return bytes_status;
+    if ((k % quantization::kMxfp4ScaleBlockK) != 0u) {
+        return Status::unsupported(
+            ("hf mxfp4 weight logical K is not a multiple of 32: " + canonical).c_str(),
+            __FILE__, __LINE__);
+    }
+    const uint64_t scale_k = k / quantization::kMxfp4ScaleBlockK;
+
+    auto scale_spec_result = reader->tensor_spec(scale_name);
+    if (!scale_spec_result.ok()) return scale_spec_result.status();
+    const shelf::io::StTensorSpec& scale_spec = scale_spec_result.value();
+    if (scale_spec.dtype != shelf::io::SType::U8 || scale_spec.shape.size() != 2 ||
+        scale_spec.shape[0] != n || scale_spec.shape[1] != scale_k) {
+        return Status::unsupported(
+            ("hf mxfp4 scale tensor shape or dtype mismatch: " + scale_name).c_str(),
+            __FILE__, __LINE__);
+    }
+    std::size_t scale_src_bytes = 0;
+    auto scale_data_result = reader->tensor_data(scale_name, scale_src_bytes);
+    if (!scale_data_result.ok()) return scale_data_result.status();
+    if (scale_src_bytes != n * scale_k) {
+        return Status::invalid_argument(
+            ("hf mxfp4 scale tensor byte count mismatch: " + scale_name).c_str(),
+            __FILE__, __LINE__);
+    }
+
+    std::size_t codes_src_bytes = 0;
+    auto codes_data_result = reader->tensor_data(canonical, codes_src_bytes);
+    if (!codes_data_result.ok()) return codes_data_result.status();
+    if (codes_src_bytes != codes_bytes) {
+        return Status::invalid_argument(
+            ("hf mxfp4 weight byte count mismatch: " + canonical).c_str(), __FILE__, __LINE__);
+    }
+
+    out.role = "weight";
+    out.encoding = QuantizedEncoding::Mxfp4;
+    out.logical_shape = {static_cast<int64_t>(n), static_cast<int64_t>(k)};
+    out.k_padded = quant_padded_k(k, quantization::QuantFormatId::Mxfp4Finegrained);
+    out.scale_block_n = 1u;
+    out.scale_block_k = quantization::kMxfp4ScaleBlockK;
+    out.codes = make_ref(canonical, "U8", codes_data_result.value(), codes_src_bytes, with_crc);
+    out.metadata1 =
+        make_ref(scale_name, "E8M0", scale_data_result.value(), scale_src_bytes, with_crc);
+    source.shard_for_physical[canonical] = codes_shard;
+    source.shard_for_physical[scale_name] = scale_shard;
+    return Status::make_ok();
+}
+
 Status synthesize_bf16_tensor(
     const shelf::io::SafetensorsReader* reader,
     HfQuantizedSource& source,
@@ -328,6 +446,12 @@ Result<HfQuantMethod> detect_hf_quant_method(const std::string& model_dir) {
             return Status::unsupported("HF fp8 quantization requires weight_block_size [128,128]", __FILE__, __LINE__);
         }
         return HfQuantMethod::Fp8;
+    }
+
+    if (method == "quark") {
+        Status scheme = validate_quark_mxfp4_scheme(*qc);
+        if (!scheme.ok()) return scheme;
+        return HfQuantMethod::QuarkMxfp4;
     }
 
     return Status::unsupported("unsupported HF quant_method", __FILE__, __LINE__);
@@ -405,9 +529,14 @@ Result<HfQuantizedSource> synthesize_hf_quantized_source(
                 with_crc);
             if (!adapter.ok()) return adapter;
         } else if (scale_shard != nullptr) {
-            return Status::unsupported(
-                ("hf tensor carries an unsupported weight_scale payload: " + canonical).c_str(),
-                __FILE__, __LINE__);
+            if (method != HfQuantMethod::QuarkMxfp4) {
+                return Status::unsupported(
+                    ("hf tensor carries weight_scale in a non-mxfp4 model: " + canonical).c_str(),
+                    __FILE__, __LINE__);
+            }
+            Status adapter = synthesize_mxfp4_tensor(
+                reader, source, canonical, scale_name, *codes_shard, *scale_shard, meta, with_crc);
+            if (!adapter.ok()) return adapter;
         } else {
             Status adapter =
                 synthesize_bf16_tensor(reader, source, canonical, *codes_shard, meta, with_crc);

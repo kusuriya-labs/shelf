@@ -318,6 +318,7 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/codec/ue4m3.cpp
     src/shelf/quantization/fp8/fp8.cpp
     src/shelf/quantization/fp8/fp8_native.cpp
+    src/shelf/quantization/mxfp4/mxfp4.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

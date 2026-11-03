@@ -158,6 +158,28 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
         }
         return Status::make_ok();
     }
+    if (enc == 3u) {
+        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot needs codes+scales and no device_ptr: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.k_padded < s.cols || (s.k_padded & 63u) != 0u) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot k_padded invalid: index " + std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.weight_scale_group != 32u) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot scale group must be 32: index " + std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     return Status::invalid_argument(
         ("unsupported weight table encoding: index " + std::to_string(index)).c_str(),
         __FILE__, __LINE__);
