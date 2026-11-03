@@ -6,6 +6,7 @@
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
@@ -351,6 +352,46 @@ Result<MatrixWeight> load_quantized_view(
 
         w.encoding = MatrixEncoding::Mxfp4;
         w.weight_scale_group = quantization::kMxfp4ScaleBlockK;
+
+        if (options.preshuffle) {
+            static quantization::mxfp4::Mxfp4NativeHost native;
+            if (!quantization::mxfp4::preshuffle_mxfp4_native(cv, native)) {
+                return Status::invalid_argument(
+                    ("mxfp4 native payload not supported for arch: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            const uint64_t tiles = native.rows / 16u;
+            std::vector<std::size_t> cshape = {tiles, native.codes_row_stride_bytes};
+            std::vector<std::size_t> cstrides = {native.codes_row_stride_bytes, 1};
+            w.codes = alloc_bytes(native.codes.size(), cshape, cstrides, arena);
+            if (w.codes.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 native codes allocation failed: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.codes.data<void>(), native.codes.data(),
+                                native.codes.size(), stream);
+            if (!st.ok()) return st;
+
+            std::vector<std::size_t> sshape = {m, scale_k};
+            std::vector<std::size_t> sstrides = {scale_k, 1};
+            w.scales = alloc_bytes(native.scales.size(), sshape, sstrides, arena);
+            if (w.scales.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 native scales allocation failed: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.scales.data<void>(), native.scales.data(),
+                                native.scales.size(), stream);
+            if (!st.ok()) return st;
+
+            w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
+            w.scale_row_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
+            w.storage_scale_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
+            w.preshuffled = true;
+            apply_default_compute_spec(w);
+            return w;
+        }
 
         std::vector<std::size_t> cshape = {m, packed_k};
         std::vector<std::size_t> cstrides = {packed_k, 1};

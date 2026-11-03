@@ -173,11 +173,11 @@ __device__ __forceinline__ ProgramStatus exec_linear_mxfp4(
     const uint32_t akp = b.activation_kp;
     if (akp != wkp)
         return ProgramStatus::INVALID_PROGRAM;
-    const uint32_t wcode_stride = wkp >> 1;
-    const uint32_t wscale_stride = wkp >> 5;
-    if (e.codes_row_stride_bytes != wcode_stride || e.scale_row_stride_bytes != wscale_stride)
-        return ProgramStatus::INVALID_PROGRAM;
     const uint32_t nb = wkp >> 5;
+    const uint32_t wtile_stride = nb * 256u;
+    const uint32_t wscale_stride = nb;
+    if (e.codes_row_stride_bytes != wtile_stride || e.scale_row_stride_bytes != wscale_stride)
+        return ProgramStatus::INVALID_PROGRAM;
     const uint32_t code_stride = b.activation_code_stride;
     const uint32_t scale_stride = b.activation_scale_stride;
     if (code_stride < akp || (code_stride & 63u) != 0u)
@@ -201,7 +201,8 @@ __device__ __forceinline__ ProgramStatus exec_linear_mxfp4(
     for (size_t idx = global_tid(env); idx < total; idx += stride) {
         const uint32_t m = static_cast<uint32_t>(idx / out_features);
         const uint32_t o = static_cast<uint32_t>(idx % out_features);
-        const uint8_t* wrow = wcodes + static_cast<size_t>(o) * wcode_stride;
+        const uint8_t* wrow = wcodes + static_cast<size_t>(o >> 4) * wtile_stride +
+            static_cast<size_t>(o & 15u) * 16u;
         const uint8_t* wsrow = wscales + static_cast<size_t>(o) * wscale_stride;
         const uint8_t* atile = acodes +
             static_cast<size_t>(m >> 4) * (static_cast<size_t>(code_stride) * 16u);
@@ -213,15 +214,23 @@ __device__ __forceinline__ ProgramStatus exec_linear_mxfp4(
             const float ws = ::shelf::quantization::codec::device::e8m0_decode_f32(wsrow[ib]);
             const float as = asrow[ib >> 2];
             float p = 0.f;
-            for (uint32_t j = 0; j < 32u; ++j) {
-                const uint32_t kc = ib * 32u + j;
-                const uint8_t packed = wrow[kc >> 1];
-                const uint8_t code = (kc & 1u) == 0u ? (packed & 0x0Fu) : (packed >> 4);
-                const size_t aoff = static_cast<size_t>(kc >> 6) *
-                                        ::shelf::quantization::fp8::kFragBlockBytes +
-                                    ::shelf::quantization::fp8::fp8_frag_offset(m_slot, kc & 63u);
-                p += ::shelf::quantization::codec::device::e2m1_decode_f32(code) *
-                     ::shelf::quantization::codec::device::e4m3_decode_f32(atile[aoff]);
+            const uint8_t* brow = wrow + static_cast<size_t>(ib) * 256u;
+            for (uint32_t j = 0; j < 16u; ++j) {
+                const uint8_t packed = brow[j];
+                const uint32_t k_lo = ib * 32u + j;
+                const uint32_t k_hi = k_lo + 16u;
+                const size_t off_lo = static_cast<size_t>(k_lo >> 6) *
+                                          ::shelf::quantization::fp8::kFragBlockBytes +
+                                      ::shelf::quantization::fp8::fp8_frag_offset(
+                                          m_slot, k_lo & 63u);
+                const size_t off_hi = static_cast<size_t>(k_hi >> 6) *
+                                          ::shelf::quantization::fp8::kFragBlockBytes +
+                                      ::shelf::quantization::fp8::fp8_frag_offset(
+                                          m_slot, k_hi & 63u);
+                p += ::shelf::quantization::codec::device::e2m1_decode_f32(packed & 0x0Fu) *
+                     ::shelf::quantization::codec::device::e4m3_decode_f32(atile[off_lo]);
+                p += ::shelf::quantization::codec::device::e2m1_decode_f32(packed >> 4u) *
+                     ::shelf::quantization::codec::device::e4m3_decode_f32(atile[off_hi]);
             }
             acc += p * ws * as;
         }

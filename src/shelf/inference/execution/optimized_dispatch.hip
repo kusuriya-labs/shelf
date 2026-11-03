@@ -5,6 +5,7 @@
 #include <shelf/kernels/optimized/rmsnorm.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
+#include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
@@ -305,6 +306,113 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.output_count != 1 || b.input_count != 0)
+        return Status::invalid_state("mxfp4 linear: bad io count", __FILE__, __LINE__);
+    if (b.compute_spec != 2u)
+        return Status::invalid_state("mxfp4 linear: compute_spec != MXFP4_W4A8", __FILE__, __LINE__);
+    if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
+        return Status::invalid_state("mxfp4 linear: weight_index invalid", __FILE__, __LINE__);
+    if (b.workspace_slot >= program.workspace.ranges.size())
+        return Status::invalid_state("mxfp4 linear: workspace_slot invalid", __FILE__, __LINE__);
+    const ::shelf::runtime::WeightSlot e = ctx.weights[b.weight_index];
+    if (e.encoding != 3u)
+        return Status::invalid_state("mxfp4 linear: encoding != Mxfp4", __FILE__, __LINE__);
+    if (e.codes == nullptr || e.scales == nullptr)
+        return Status::invalid_state("mxfp4 linear: weight view missing", __FILE__, __LINE__);
+    if (e.rows == 0 || e.cols == 0)
+        return Status::invalid_state("mxfp4 linear: weight dims == 0", __FILE__, __LINE__);
+    if (!e.preshuffled)
+        return Status::invalid_state("mxfp4 linear: weight not preshuffled to native layout",
+                                     __FILE__, __LINE__);
+    const uint32_t wkp = e.k_padded;
+    if (wkp < e.cols || (wkp & 127u) != 0u)
+        return Status::invalid_state("mxfp4 linear: weight k_padded invalid", __FILE__, __LINE__);
+    if (e.weight_scale_group != 32u)
+        return Status::invalid_state("mxfp4 linear: weight_scale_group must be 32",
+                                     __FILE__, __LINE__);
+    const uint32_t nb = wkp >> 5;
+    if (e.codes_row_stride_bytes != nb * 256u || e.scale_row_stride_bytes != nb ||
+        e.storage_scale_stride_bytes != nb) {
+        return Status::invalid_state("mxfp4 linear: weight strides are not the native layout",
+                                     __FILE__, __LINE__);
+    }
+    const uint32_t akp = b.activation_kp;
+    if (akp != wkp)
+        return Status::invalid_state("mxfp4 linear: activation_kp != weight k_padded",
+                                     __FILE__, __LINE__);
+    if (b.activation_code_stride < akp || (b.activation_code_stride & 15u) != 0u)
+        return Status::invalid_state("mxfp4 linear: activation_code_stride invalid",
+                                     __FILE__, __LINE__);
+    if (b.activation_scale_stride < 4u || (b.activation_scale_stride & 15u) != 0u)
+        return Status::invalid_state("mxfp4 linear: activation_scale_stride invalid",
+                                     __FILE__, __LINE__);
+    if (b.activation_max_rows == 0)
+        return Status::invalid_state("mxfp4 linear: activation_max_rows == 0", __FILE__, __LINE__);
+    if (ctx.workspace == nullptr)
+        return Status::invalid_state("mxfp4 linear: workspace not bound", __FILE__, __LINE__);
+    const Int8ActivationWorkspaceLayout layout =
+        Int8ActivationWorkspaceLayout::make(akp, b.activation_max_rows);
+    if (layout.k_padded != akp ||
+        layout.code_row_stride_bytes != b.activation_code_stride ||
+        layout.scale_row_stride_bytes != b.activation_scale_stride)
+        return Status::invalid_state("mxfp4 linear: workspace layout mismatch", __FILE__, __LINE__);
+    const uint32_t out_vid = b.output_slots[0];
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{out_vid}, ctx);
+    if (!out_res.ok())
+        return out_res.status();
+    const HostResolvedValue out = out_res.value();
+    if (out.feature_count != e.rows)
+        return Status::invalid_state(
+            "mxfp4 linear: output features != weight rows", __FILE__, __LINE__);
+    const bool out_bf16 = out.dtype == ValueDType::BF16;
+    const bool out_f32 = out.dtype == ValueDType::F32;
+    if (!out_bf16 && !out_f32)
+        return Status::invalid_state("mxfp4 linear: output dtype not BF16/F32", __FILE__, __LINE__);
+    const uint32_t rows = rows_for(out, ctx);
+    if (rows == 0)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (rows > b.activation_max_rows)
+        return Status::invalid_state("mxfp4 linear: rows out of range", __FILE__, __LINE__);
+    const Mxfp4GemmSelectorInput sel{rows, e.rows, e.cols, wkp};
+    const auto config = select_mxfp4_gemm_config(sel);
+    if (!config) {
+        linear_record_fallback(LinearFamilyRef::Mxfp4, FallbackReason::SelectorRejected);
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    }
+    const uint64_t range_off = program.workspace.ranges[b.workspace_slot].offset;
+    uint8_t* range_base = ctx.workspace + range_off;
+    const uint8_t* acodes =
+        reinterpret_cast<const uint8_t*>(range_base + layout.codes_offset);
+    const float* ascales =
+        reinterpret_cast<const float*>(range_base + layout.scales_offset);
+    const ::shelf::kernel::Mxfp4GemmOutputDType odt =
+        out_bf16 ? ::shelf::kernel::Mxfp4GemmOutputDType::BF16
+                 : ::shelf::kernel::Mxfp4GemmOutputDType::F32;
+    hipError_t herr = ::shelf::kernel::launch_gemm_mxfp4_w4a8_auto(
+        *config,
+        static_cast<const uint8_t*>(e.codes),
+        static_cast<const uint8_t*>(e.scales),
+        reinterpret_cast<const int8_t*>(acodes), ascales,
+        out.ptr, odt,
+        rows, e.rows, wkp,
+        e.scale_row_stride_bytes, b.activation_code_stride, b.activation_scale_stride,
+        out.row_stride, stream);
+    if (herr == hipErrorNotSupported)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (herr != hipSuccess)
+        return Status::hip_error("mxfp4 gemm launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    linear_record_hit(LinearFamilyRef::Mxfp4, rows);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
 Result<PhysicalResolveStatus> resolve_bf16_physical(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
@@ -509,6 +617,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return try_launch_activation_quantize(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_FP8_FINEGRAINED)
         return try_launch_linear_fp8(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::LINEAR_MXFP4_W4A8)
+        return try_launch_linear_mxfp4(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_BF16)
         return try_launch_linear_bf16(program, b, ctx, stream);
     if (b.kernel_id == KernelId::RMS_NORM)

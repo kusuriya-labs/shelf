@@ -49,6 +49,32 @@ enum class Fp8FinegrainedGemmConfigId : uint8_t {
     Prefill2D,
 };
 
+// MXFP4 W4A8 covers decode / verify row counts (Decode1, SplitK, RowBlock) with
+// one wave per 16 outputs. Prefill row counts need the 2D staged variant, which
+// is not implemented yet.
+inline constexpr uint32_t kMxfp4GemmRowTile = 16u;
+// Measured on R9700 with shelf-bench gemm --dtype mxfp4 (docs/research).
+inline constexpr uint32_t kMxfp4GemmDecode1Unroll = 2u;
+inline constexpr uint32_t kMxfp4GemmSplitKMaxRows = 32u;
+inline constexpr uint32_t kMxfp4GemmSplitKMaxOutFeatures = 2560u;
+inline constexpr uint32_t kMxfp4GemmSplitKWays = 8u;
+inline constexpr uint32_t kMxfp4GemmRowBlock1MaxRows = 16u;
+inline constexpr uint32_t kMxfp4GemmRowBlock2MaxRows = 192u;
+
+enum class Mxfp4GemmConfigId : uint8_t {
+    Decode1,
+    SplitK,
+    RowBlock1,
+    RowBlock2,
+    RowBlock4,
+};
+
+struct Mxfp4GemmConfig {
+    Mxfp4GemmConfigId id = Mxfp4GemmConfigId::Decode1;
+    uint8_t split_k = 4u;
+    uint8_t unroll = 0u;
+};
+
 struct Fp8FinegrainedGemmConfig {
     Fp8FinegrainedGemmConfigId id = Fp8FinegrainedGemmConfigId::RowBlock1;
 };
