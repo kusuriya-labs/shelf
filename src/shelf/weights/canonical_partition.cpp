@@ -447,6 +447,11 @@ Status materialize_rank_local_canonical(
             st = materialize_quant(QuantFormatId::Fp8Finegrained, partition, global,
                                    local_shape, k_axis, owned);
             break;
+        case QuantizedEncoding::Mxfp4:
+            st = Status::unsupported(
+                "tp partition of mxfp4 weights is not supported",
+                __FILE__, __LINE__);
+            break;
     }
     if (!st.ok()) return st;
 

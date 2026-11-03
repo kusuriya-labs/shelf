@@ -86,6 +86,7 @@ shelf_set_hip_archs(shelf_kernels_correctness)
 set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
+    src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
     src/shelf/kernels/optimized/attention/rope.hip
@@ -199,6 +200,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
+    src/shelf/inference/execution/linear_input_dump.cpp
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
@@ -318,6 +320,8 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/codec/ue4m3.cpp
     src/shelf/quantization/fp8/fp8.cpp
     src/shelf/quantization/fp8/fp8_native.cpp
+    src/shelf/quantization/mxfp4/mxfp4.cpp
+    src/shelf/quantization/mxfp4/mxfp4_native.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

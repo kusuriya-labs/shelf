@@ -10,6 +10,7 @@ namespace shelf::weights {
 enum class MatrixEncoding : uint8_t {
     Bf16 = 0,
     Fp8Finegrained = 1,
+    Mxfp4 = 3,
 };
 
 struct MatrixWeight {
@@ -20,6 +21,10 @@ struct MatrixWeight {
     gpu::Tensor data;
     gpu::Tensor codes;
     gpu::Tensor scales;
+    // MXFP4 native only: one E8M0 reference byte per output row (the row's maximum
+    // scale exponent). 0 when the payload is canonical or the plane is absent.
+    gpu::Tensor row_ref;
+    bool row_ref_exact = false;
     gpu::Tensor compute_codes;
     gpu::Tensor compute_scales_bf16;
     uint32_t rows = 0;
@@ -37,6 +42,7 @@ inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noex
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::QuantSpecId::BF16_V1;
         case MatrixEncoding::Fp8Finegrained: return quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1;
+        case MatrixEncoding::Mxfp4: return quantization::QuantSpecId::MXFP4_E8M0_G32_V1;
     }
     return quantization::QuantSpecId::BF16_V1;
 }
@@ -45,6 +51,7 @@ inline quantization::ComputeSpecId encoding_to_compute_spec(MatrixEncoding enc) 
     switch (enc) {
         case MatrixEncoding::Bf16: return quantization::ComputeSpecId::BF16_F32_BF16;
         case MatrixEncoding::Fp8Finegrained: return quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16;
+        case MatrixEncoding::Mxfp4: return quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16;
     }
     return quantization::ComputeSpecId::BF16_F32_BF16;
 }
@@ -58,6 +65,7 @@ inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexc
     switch (id) {
         case quantization::QuantSpecId::BF16_V1: return MatrixEncoding::Bf16;
         case quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1: return MatrixEncoding::Fp8Finegrained;
+        case quantization::QuantSpecId::MXFP4_E8M0_G32_V1: return MatrixEncoding::Mxfp4;
         default: break;
     }
     return MatrixEncoding::Bf16;

@@ -105,6 +105,44 @@ inline Result<shelf::quantization::ResolvedQuantSpec> resolve_quant_spec(
         return resolved;
     }
 
+    if (tensor.encoding == QuantizedEncoding::Mxfp4) {
+        if (!tensor.codes) {
+            return Status::invalid_argument("mxfp4 quantized tensor missing codes ref", __FILE__, __LINE__);
+        }
+        if (!tensor.metadata1) {
+            return Status::invalid_argument(
+                "mxfp4 quantized tensor missing scale ref", __FILE__, __LINE__);
+        }
+        if (tensor.data) {
+            return Status::invalid_argument(
+                "mxfp4 quantized tensor must not carry data ref", __FILE__, __LINE__);
+        }
+        if (!tensor.layout.empty() && tensor.layout != kMxfp4LayoutName) {
+            return Status::invalid_argument("mxfp4 layout mismatch", __FILE__, __LINE__);
+        }
+        if (tensor.codes->dtype != "U8") {
+            return Status::invalid_argument(
+                "mxfp4 quantized tensor codes dtype mismatch", __FILE__, __LINE__);
+        }
+        if (tensor.metadata1->dtype != "E8M0") {
+            return Status::invalid_argument(
+                "mxfp4 quantized tensor scales dtype is not E8M0", __FILE__, __LINE__);
+        }
+        if (tensor.k_padded < logical_k ||
+            (tensor.k_padded % shelf::quantization::kMxfp4ScaleBlockK) != 0) {
+            return Status::invalid_argument(
+                "mxfp4 quantized tensor k_padded invalid", __FILE__, __LINE__);
+        }
+        d.group_size = shelf::quantization::kMxfp4ScaleBlockK;
+        d.block_size = shelf::quantization::kMxfp4ScaleBlockK;
+        d.storage_type = StorageDType::U8;
+        d.scale_type = StorageDType::U8;
+        d.weight_layout = QuantLayout::MXFP4_E2M1_BLOCK32_V1;
+        d.scale_layout = QuantLayout::MXFP4_SCALE_E8M0_PER_ROW_BLOCK32_V1;
+        resolved.spec_id = QuantSpecId::MXFP4_E8M0_G32_V1;
+        return resolved;
+    }
+
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 

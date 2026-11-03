@@ -74,6 +74,8 @@ constexpr WeightBlockShape default_weight_block(manifest::QuantizedEncoding enc)
     switch (enc) {
         case manifest::QuantizedEncoding::Fp8:
             return WeightBlockShape{kFp8ScaleBlockN, kFp8ScaleBlockK};
+        case manifest::QuantizedEncoding::Mxfp4:
+            return WeightBlockShape{1u, kMxfp4ScaleBlockK};
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -98,6 +100,12 @@ inline std::optional<WeightScaleSpec> default_weight_scale_spec(
                 ScaleGranularity::MatrixBlock,
                 default_weight_block(enc),
                 QuantScalarType::F32,
+                ScaleApplication::Multiply};
+        case manifest::QuantizedEncoding::Mxfp4:
+            return WeightScaleSpec{
+                ScaleGranularity::MatrixBlock,
+                default_weight_block(enc),
+                QuantScalarType::E8M0,
                 ScaleApplication::Multiply};
     }
     return std::nullopt;
@@ -166,6 +174,8 @@ inline KVQuantSpec kv_quant_spec(manifest::QuantizedEncoding enc, uint32_t head_
             spec.group_k = 0;
             spec.scale_dtype = QuantScalarType::F32;
             break;
+        case manifest::QuantizedEncoding::Mxfp4:
+            break;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -199,6 +209,8 @@ inline Status validate_kv_quant_spec(const KVQuantSpec& spec) {
                 return Status::invalid_argument("fp8 kv scale must be full head F32", __FILE__, __LINE__);
             }
             return Status::make_ok();
+        case manifest::QuantizedEncoding::Mxfp4:
+            break;
     }
     return Status::unsupported("unsupported kv cache encoding", __FILE__, __LINE__);
 }

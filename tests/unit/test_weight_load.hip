@@ -5,9 +5,12 @@
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/fp8/fp8.h>
 #include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/quantization/mxfp4/mxfp4.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
@@ -1038,6 +1041,150 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
           "hf fp8 mtp layer fp8");
 }
 
+static std::string hf_quark_mxfp4_quant_config() {
+    return std::string("{\"quant_method\":\"quark\",\"global_quant_config\":{\"weight\":{") +
+        "\"dtype\":\"fp4\",\"qscheme\":\"per_group\",\"group_size\":32,\"is_dynamic\":false," +
+        "\"scale_format\":\"e8m0\"},\"input_tensors\":{\"dtype\":\"fp4\",\"qscheme\":\"per_group\"," +
+        "\"group_size\":32,\"is_dynamic\":true,\"scale_format\":\"e8m0\"}}," +
+        "\"export\":{\"weight_format\":\"real_quantized\"}}";
+}
+
+struct MxMatrix {
+    uint64_t rows = 0;
+    uint64_t k = 0;
+    std::vector<uint8_t> codes;
+    std::vector<uint8_t> scales;
+};
+
+static MxMatrix make_mxfp4_matrix(uint64_t rows, uint64_t k, uint32_t seed,
+                                  uint8_t forced_scale_byte = 0u) {
+    MxMatrix m;
+    m.rows = rows;
+    m.k = k;
+    std::vector<float> w(static_cast<std::size_t>(rows) * k, 0.0f);
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> dist(0.0f, 0.05f);
+    for (float& value : w) value = dist(rng);
+    m.codes.assign(static_cast<std::size_t>(rows) * (k / 2u), 0u);
+    m.scales.assign(static_cast<std::size_t>(rows) * (k / 32u), 0u);
+    quantization::mxfp4::quantize_mxfp4_matrix(
+        w.data(), k, rows, k, k, m.codes.data(), m.scales.data());
+    if (forced_scale_byte != 0u) m.scales[0] = forced_scale_byte;
+    return m;
+}
+
+static void test_hf_mxfp4_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("hf_mxfp4");
+    const MxMatrix good = make_mxfp4_matrix(32u, 128u, 91u);
+    const MxMatrix nan_scale = make_mxfp4_matrix(32u, 128u, 93u, 255u);
+    const MxMatrix narrow_rows = make_mxfp4_matrix(24u, 128u, 95u);
+
+    std::vector<Planned> shard;
+    const auto add = [&](const std::string& base, const MxMatrix& m) {
+        Planned c;
+        c.name = base + ".weight";
+        c.dtype = io::SType::U8;
+        c.shape = {static_cast<std::size_t>(m.rows), static_cast<std::size_t>(m.k / 2u)};
+        c.bytes = m.codes;
+        shard.push_back(std::move(c));
+        Planned s;
+        s.name = base + ".weight_scale";
+        s.dtype = io::SType::U8;
+        s.shape = {static_cast<std::size_t>(m.rows), static_cast<std::size_t>(m.k / 32u)};
+        s.bytes = m.scales;
+        shard.push_back(std::move(s));
+    };
+    add("gate", good);
+    add("badscale", nan_scale);
+    add("narrow", narrow_rows);
+    if (!write_shard((dir / "model.safetensors").string(), shard, {})) return;
+    write_text((dir / "config.json").string(),
+               std::string("{\"model_type\":\"qwen3_5\",\"quantization_config\":") +
+                   hf_quark_mxfp4_quant_config() + "}");
+
+    check(weights::is_quantized_model_dir(dir.string()), "hf quark mxfp4 dir is quantized");
+    auto source = quantization::bundle::synthesize_hf_quantized_source(
+        dir.string(), {"gate.weight", "badscale.weight", "narrow.weight"}, true);
+    if (!source.ok()) {
+        fail("mxfp4 hf source: " + source.status().message());
+        return;
+    }
+    auto reader_result = quantization::bundle::QuantizedModelReader::open_hf_source(
+        source.release(), true);
+    if (!reader_result.ok()) {
+        fail("mxfp4 reader: " + reader_result.status().message());
+        return;
+    }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+
+    auto loaded = weights::load_quantized_matrix(
+        reader, "gate.weight", arena, stream, weights::WeightLoadOptions{});
+    if (!loaded.ok()) {
+        fail("load mxfp4 matrix: " + loaded.status().message());
+        return;
+    }
+    weights::MatrixWeight m = loaded.release();
+    check(m.encoding == weights::MatrixEncoding::Mxfp4, "mxfp4 matrix encoding");
+    check_eq_u64(m.rows, 32, "mxfp4 matrix rows");
+    check_eq_u64(m.cols, 128, "mxfp4 matrix cols");
+    check_eq_u64(m.k_padded, 128, "mxfp4 matrix k_padded");
+    check_eq_u64(m.weight_scale_group, 32, "mxfp4 matrix weight scale group");
+    check_eq_u64(m.codes_row_stride_bytes, 1024, "mxfp4 codes row stride is the native tile stride");
+    check_eq_u64(m.scale_row_stride_bytes, 4, "mxfp4 scale row stride is group count");
+    check_eq_u64(m.storage_scale_stride_bytes, 4, "mxfp4 storage scale stride");
+    check(m.preshuffled, "mxfp4 matrix is native layout");
+    check(m.quant_spec == quantization::QuantSpecId::MXFP4_E8M0_G32_V1, "mxfp4 quant spec");
+    check(m.compute_spec == quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16, "mxfp4 compute spec");
+    quantization::mxfp4::Mxfp4CanonicalView cv;
+    cv.batch = 1;
+    cv.n = good.rows;
+    cv.padded_k = good.k;
+    cv.codes = good.codes.data();
+    cv.codes_bytes = good.codes.size();
+    cv.scales = good.scales.data();
+    cv.scales_bytes = good.scales.size();
+    quantization::mxfp4::Mxfp4NativeHost native;
+    check(quantization::mxfp4::preshuffle_mxfp4_native(cv, native),
+          "mxfp4 native preshuffle of the loaded payload");
+    check(d2h(m.codes.data<void>(), native.codes.size()) == native.codes,
+          "mxfp4 codes reach the GPU in the native fragment order");
+    check(d2h(m.scales.data<void>(), good.scales.size()) == good.scales,
+          "mxfp4 scale bytes reach the GPU unchanged");
+    check(m.row_ref.ndim() != 0 && m.row_ref.data<void>() != nullptr,
+          "mxfp4 native payload carries the row reference plane");
+    check(d2h(m.row_ref.data<void>(), native.row_ref.size()) == native.row_ref,
+          "mxfp4 row reference bytes reach the GPU");
+    check(m.row_ref_exact == native.row_ref_exact,
+          "mxfp4 fold exactness flag travels with the payload");
+
+    weights::WeightLoadOptions canonical;
+    canonical.preshuffle = false;
+    auto canonical_load = weights::load_quantized_matrix(
+        reader, "gate.weight", arena, stream, canonical);
+    if (!canonical_load.ok()) {
+        fail("load mxfp4 canonical: " + canonical_load.status().message());
+    } else {
+        const weights::MatrixWeight& cm = canonical_load.value();
+        check(!cm.preshuffled, "mxfp4 canonical load keeps preshuffled false");
+        check(d2h(cm.codes.data<void>(), good.codes.size()) == good.codes,
+              "mxfp4 canonical codes bytes");
+        check(d2h(cm.scales.data<void>(), good.scales.size()) == good.scales,
+              "mxfp4 canonical scale bytes");
+        check(cm.row_ref.ndim() == 0, "mxfp4 canonical payload has no row reference plane");
+    }
+
+    auto bad = weights::load_quantized_matrix(
+        reader, "badscale.weight", arena, stream, weights::WeightLoadOptions{});
+    check(!bad.ok(), "mxfp4 E8M0 NaN scale byte rejected at load");
+    if (!bad.ok())
+        check(std::string(bad.status().message()).find("E8M0") != std::string::npos,
+              "mxfp4 NaN scale rejection message names E8M0");
+
+    auto narrow = weights::load_quantized_matrix(
+        reader, "narrow.weight", arena, stream, weights::WeightLoadOptions{});
+    check(!narrow.ok(), "mxfp4 rows that are not a 16-row tile rejected at load");
+}
+
 static void test_qwen35_hf_fp8_model_load_without_mtp(
     gpu::GpuArena& arena, hipStream_t stream) {
     const fs::path dir = make_case_dir("hf_fp8_model_no_mtp");
@@ -1084,6 +1231,7 @@ int main() {
     test_qwen35_quantized_model_load(arena, stream);
     test_qwen35_hf_fp8_model_load(arena, stream);
     test_qwen35_hf_fp8_model_load_without_mtp(arena, stream);
+    test_hf_mxfp4_matrix_load(arena, stream);
 
     fs::remove_all(g_root, ec);
     arena.shutdown();

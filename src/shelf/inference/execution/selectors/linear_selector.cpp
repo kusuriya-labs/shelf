@@ -14,6 +14,7 @@ namespace {
 // separate, model-load-time concern.
 constexpr uint8_t kFamilyBf16 = 1u << 0u;
 constexpr uint8_t kFamilyFp8Finegrained = 1u << 3u;
+constexpr uint8_t kFamilyMxfp4 = 1u << 4u;
 
 struct LinearShapeRule {
     uint32_t out_features;
@@ -23,9 +24,9 @@ struct LinearShapeRule {
 
 constexpr LinearShapeRule kLinearShapeRules[] = {
     { 32, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
-    { 48, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 48, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 1024, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
-    { 1024, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 1024, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 1280, 5120, kFamilyBf16 },
     { 2560, 4096, kFamilyBf16 | kFamilyFp8Finegrained },
     { 2560, 5120, kFamilyBf16 },
@@ -33,21 +34,21 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 4096, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 4096, 5120, kFamilyBf16 },
     { 5120, 4096, kFamilyBf16 },
-    { 5120, 6144, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 5120, 6144, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 5120, 10240, kFamilyBf16 },
     { 5120, 15360, kFamilyBf16 },
     { 5120, 16384, kFamilyBf16 },
     { 16384, 5120, kFamilyBf16 },
-    { 5120, 17408, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 5120, 17408, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 5120, 25600, kFamilyBf16 },
-    { 6144, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 6144, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 8192, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 9216, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 256, 5120, kFamilyBf16 },
-    { 10240, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
-    { 12288, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 10240, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
+    { 12288, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 124160, 5120, kFamilyBf16 },
-    { 17408, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
+    { 17408, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 248320, 2560, kFamilyBf16 },
     { 248320, 5120, kFamilyBf16 },
     { 24, 5120, kFamilyBf16 | kFamilyFp8Finegrained },
@@ -67,6 +68,7 @@ uint8_t family_bit(LinearComputeFamily family) {
     switch (family) {
         case LinearComputeFamily::Bf16: return kFamilyBf16;
         case LinearComputeFamily::Fp8FinegrainedW8A8: return kFamilyFp8Finegrained;
+        case LinearComputeFamily::Mxfp4W4A8: return kFamilyMxfp4;
     }
     return 0u;
 }
@@ -165,6 +167,44 @@ select_fp8_finegrained_gemm_config(const Fp8FinegrainedGemmSelectorInput& input)
     if (use_2d)
         return shelf::kernel::Fp8FinegrainedGemmConfig{shelf::kernel::Fp8FinegrainedGemmConfigId::Prefill2D};
     return fp8_finegrained_row_block_config(input.rows, input.out_features);
+}
+
+std::optional<shelf::kernel::Mxfp4GemmConfig>
+select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
+    using Id = shelf::kernel::Mxfp4GemmConfigId;
+    if (input.rows == 0u)
+        return std::nullopt;
+    if ((input.k_padded & 127u) != 0u)
+        return std::nullopt;
+    if (!linear_shape_supported(LinearComputeFamily::Mxfp4W4A8, input.out_features, input.k)) {
+        linear_debug_miss(LinearComputeFamily::Mxfp4W4A8, input.out_features, input.k, input.rows);
+        return std::nullopt;
+    }
+    const bool tile_aligned = (input.out_features & 15u) == 0u;
+    // Split-K wins only while the 16-output blocks cannot fill the device; the
+    // measured crossover on R9700 is between 2560 and 5120 output features.
+    // The 2D staged kernel pays off once the weight tile is reused across enough
+    // row blocks; measured crossover on R9700 (docs/research/20261103).
+    const bool prefill2d =
+        input.rows >= shelf::kernel::kMxfp4GemmPrefill2dMinRows &&
+        (input.rows % shelf::kernel::kMxfp4GemmPrefill2dRowsPerBlock) == 0u &&
+        (input.k_padded % shelf::kernel::kMxfp4GemmPrefill2dKChunk) == 0u &&
+        input.out_features >= 64u;
+    if (prefill2d && (input.rows >= 1024u ||
+                      static_cast<uint64_t>(input.out_features) * input.k_padded >=
+                          shelf::kernel::kMxfp4GemmPrefill2dMinWeights)) {
+        return shelf::kernel::Mxfp4GemmConfig{Id::Prefill2D, 0u};
+    }
+    if (input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows && tile_aligned &&
+        input.out_features <= shelf::kernel::kMxfp4GemmSplitKMaxOutFeatures) {
+        return shelf::kernel::Mxfp4GemmConfig{
+            Id::SplitK, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmSplitKWays)};
+    }
+    if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock1MaxRows)
+        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock1, 0u};
+    if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock2MaxRows)
+        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock2, 0u};
+    return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock4, 0u};
 }
 
 }  // namespace shelf::execution

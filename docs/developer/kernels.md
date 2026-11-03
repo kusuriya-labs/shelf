@@ -63,6 +63,18 @@ correctness path は production と同じ W8A8 contract で動く。activation q
 全入力 pattern で `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` の correctness path が
 generic kernel と codes / scales まで一致することを固定する。
 
+`LINEAR_MXFP4_W4A8` の correctness path も同じ activation layout を使い、weight 側は
+native layout（16 output x 32 K block、byte b = code[k=b] | code[k+16]<<4、
+E8M0 scale は row-major）を読む。activation 平面は行基準 fold 形で、quantize / linear
+とも [quantization.md](quantization.md) の activation contract に従う。
+`test_mxfp4_linear`（`gpu1;required`）は、correctness path と optimized kernel の全 variant
+が double 参照に対して bf16 出力の tolerance 内（bf16 exact >= 99.9%、rel_l2 < 2e-3）に
+収まることを固定する。correctness path との bf16 一致率は診断情報として print するだけで
+契約にはしない（reference 経路を optimized 側へ合わせ込む形を取らない）。
+あわせて reference 側の rowref quantize と optimized 側の quantize が作る平面の bit 一致、
+および weight scale group・codes stride・k_padded の contract 違反が dispatch 側で
+`INVALID_PROGRAM` になることを固定する。
+
 ## Optimized
 
 optimized variantは `src/shelf/kernels/optimized/` に実装する。
@@ -75,6 +87,46 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
 - WMMA kernelはgfx12 builtin（`_gfx12`）を使う。
 - small-M（M=1..16）のbatch-invariant順序は `linear/bf16.hip` のexact-rows
   経路が担う。MTP verifyはこの順序に依存する。
+
+### linear / MXFP4 W4A8
+
+`src/shelf/kernels/optimized/linear/mxfp4.hip` は gfx1201 の FP8 WMMA
+（`__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12`）を E2M1 weight で使う。
+
+- weight は native layout（[canonical_soa_payload.md](canonical_soa_payload.md) §11）。
+  `mxfp4_expand` は `v_perm_b32` だけで E2M1 -> E4M3 と sign を展開する。
+  sign は selector の bit3 で negative table を選ぶため、shift / or が不要である。
+  native layout の (k, k+16) 対が WMMA operand の 8 byte と一致するので、
+  展開は byte 再配置なしに operand register へ書ける。
+- activation 平面は行基準 fold 形（[quantization.md](quantization.md)）なので、K ループに
+  activation scale は現れない。行基準 `2^ref` は epilogue で 1 回掛ける。
+- weight scale を E4M3 operand 側へ fold すると 32 K block の rescale も消え、WMMA
+  fragment が K 全体を 1 本の accumulator へ chain する。fold しないときは 32 K block
+  ごとに `acc = fma(c, weight_scale, acc)` を適用する。
+- variant は `SplitK`（rows <= 32 かつ out_features <= 2560、wave で K を分割し LDS で
+  reduce）、`RowBlock1 / 2 / 4`（activation 行 tile の数）、
+  `Prefill2D`（rows >= 512 の prefill。1 block が 256 行 x 64 output、8 wave。
+  128 K chunk ごとに weight fragment を展開して LDS へ stage し、4 行 tile で再利用する）。
+  `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除した方針に従う。
+  rows == 1 は SplitK または RowBlock1 が担当し、DRAM 律速 shape では 590 GB/s 出る）。
+  variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
+- activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
+  （64 K fragment block、scale row stride `align16(ceil(k_padded/128)*4)`）を読むが、
+  scale 平面は column 0 の行基準だけを使う。
+- **E8M0 の行基準 fold**（`d = ref[row] - e8m0[row][blk]` で E2M1 仮数を 2^-d 下げて
+  E4M3 operand に畳み、`2^(ref-127)` を epilogue で 1 回適用する）は **Prefill2D のみ**
+  で使う。RowBlock / SplitK は rows == 1 で遅くなった（表参照コストが per-block rescale
+  の削減を上回る）ため unfold のまま。variant 別の判定は
+  `mxfp4_gemm_folds_row_ref(config.id)`。rows == 1 では fold の損得はほぼゼロに変わった
+  （group 平面で観測した fold 損は行基準形では消える）が、採用は Prefill2D のまま据え置く。
+- fold は `d <= 8` で E2M1 仮数を厳密に表現する（`d >= 9` は E4M3 subnormal の
+  1.5 刻みを丸める）。payload は行単位の E8M0 最大値平面 `row_ref` と、全行の
+  E8M0 幅が `kMxfp4FoldExactMaxDistance`(=8) 以内であることを示す `row_ref_exact` を
+  持つ。**dispatch は `row_ref_exact` が false の payload で fold しない**
+  （`optimized_dispatch.hip`）。厳密帯域の外では fold が E4M3 subnormal の下位を丸める
+  ため値そのものが変わる。実測（Qwen3.8-27B MXFP4 の 3,904,000 行のうち幅 > 8 は
+  5 行、2 tensor）と判断は
+  [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md)。
 
 ## workgroup barrier のスコープ
 

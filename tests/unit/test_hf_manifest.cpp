@@ -120,6 +120,25 @@ static std::string plain_config_json() {
          + "\"text_config\":{\"model_type\":\"qwen3_5_text\",\"num_hidden_layers\":2}}";
 }
 
+static std::string quark_config_json(int64_t group_size = 32,
+                                     const char* scale_format = "e8m0",
+                                     const char* weight_dtype = "fp4",
+                                     const char* qscheme = "per_group",
+                                     const char* weight_format = "real_quantized") {
+    std::string json = std::string("{\"model_type\":\"qwen3_5_moe\",\"tie_word_embeddings\":false,")
+        + "\"text_config\":{\"model_type\":\"qwen3_5_moe_text\",\"num_hidden_layers\":2,"
+        + "\"num_experts\":256,\"moe_intermediate_size\":512},"
+        + "\"quantization_config\":{\"quant_method\":\"quark\",\"version\":\"0.13\","
+        + "\"global_quant_config\":{\"weight\":{"
+        + "\"dtype\":\"" + weight_dtype + "\",\"qscheme\":\"" + qscheme + "\","
+        + "\"group_size\":" + std::to_string(group_size) + ",\"is_dynamic\":false,"
+        + "\"scale_format\":\"" + scale_format + "\",\"ch_axis\":-1},"
+        + "\"input_tensors\":{\"dtype\":\"fp4\",\"qscheme\":\"per_group\",\"group_size\":32,"
+        + "\"is_dynamic\":true,\"scale_format\":\"e8m0\"}},"
+        + "\"export\":{\"weight_format\":\"" + weight_format + "\",\"pack_method\":\"reorder\"}}}";
+    return json;
+}
+
 static fs::path g_root;
 
 static fs::path make_case_dir(const std::string& name) {
@@ -314,6 +333,208 @@ static void test_unsupported_configs() {
     check(!none.ok(), "bf16 dir synthesis rejected");
 }
 
+static const std::string kMxGate = "layers.0.mlp.gate_proj.weight";
+static const std::string kMxGateScale = kMxGate + "_scale";
+static const std::string kMxUp = "layers.1.mlp.up_proj.weight";
+static const std::string kMxUpScale = kMxUp + "_scale";
+
+static std::vector<uint8_t> g_mx_gate_codes;
+static std::vector<uint8_t> g_mx_gate_scales;
+static std::vector<uint8_t> g_mx_up_codes;
+static std::vector<uint8_t> g_mx_up_scales;
+
+// Shapes mirror the measured Quark checkpoints: codes are [N, K/2] U8 and
+// scales are [N, K/32] U8 E8M0, with the tensor name suffix `.weight_scale`.
+static bool build_mxfp4_dir(const fs::path& dir,
+                            std::size_t gate_packed_k = 128u,
+                            std::size_t gate_scale_cols = 8u,
+                            bool gate_codes_bf16 = false,
+                            uint8_t scale_fill = 119u,
+                            bool with_scale_tensor = true) {
+    const uint64_t gate_n = 130u;
+    const uint64_t up_n = 256u;
+    g_mx_gate_codes = pattern_bytes(gate_n * gate_packed_k, 5u);
+    g_mx_gate_scales = std::vector<uint8_t>(gate_n * gate_scale_cols, scale_fill);
+    g_mx_up_codes = pattern_bytes(up_n * 256u, 13u);
+    g_mx_up_scales = std::vector<uint8_t>(up_n * 16u, 123u);
+    const std::vector<uint8_t> layernorm =
+        bf16_bytes({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
+    const std::vector<uint8_t> lm_head = pattern_bytes(4u * 8u * 2u, 37u);
+
+    std::vector<Planned> tensors;
+    if (gate_codes_bf16) {
+        // Same byte count, wrong dtype: the payload must be rejected because the
+        // codes stream is not U8.
+        tensors.push_back({kMxGate, io::SType::BF16, {gate_n, gate_packed_k / 2u}, g_mx_gate_codes});
+    } else {
+        tensors.push_back({kMxGate, io::SType::U8, {gate_n, gate_packed_k}, g_mx_gate_codes});
+    }
+    if (with_scale_tensor)
+        tensors.push_back({kMxGateScale, io::SType::U8, {gate_n, gate_scale_cols}, g_mx_gate_scales});
+    tensors.push_back({kMxUp, io::SType::U8, {up_n, 256u}, g_mx_up_codes});
+    tensors.push_back({kMxUpScale, io::SType::U8, {up_n, 16u}, g_mx_up_scales});
+    tensors.push_back({kLayernorm, io::SType::BF16, {8}, layernorm});
+    tensors.push_back({kBareLmHead, io::SType::BF16, {4, 8}, lm_head});
+
+    if (!write_shard((dir / "model.safetensors").string(), tensors)) return false;
+    write_text((dir / "config.json").string(), quark_config_json());
+    return true;
+}
+
+static void test_mxfp4_manifest() {
+    const fs::path dir = make_case_dir("mxfp4");
+    if (!build_mxfp4_dir(dir)) return;
+
+    check(weights::is_quantized_model_dir(dir.string()), "mxfp4 dir is quantized");
+    auto method = quantization::bundle::detect_hf_quant_method(dir.string());
+    check(method.ok() &&
+              method.value() == quantization::bundle::HfQuantMethod::QuarkMxfp4,
+          "quark mxfp4 method detected");
+
+    const std::vector<std::string> names = {
+        kMxGate, kMxUp, kLayernorm, kPrefixedLmHead, "layers.9.missing.weight"};
+    auto source_result = quantization::bundle::synthesize_hf_quantized_source(
+        dir.string(), names, true);
+    if (!source_result.ok()) {
+        check(false, "mxfp4 synthesize: " + source_result.status().message());
+        return;
+    }
+    quantization::bundle::HfQuantizedSource source = source_result.release();
+    const quantization::manifest::QuantizedManifest& manifest = source.manifest;
+
+    check_eq_u64(manifest.tensors.size(), 4, "mxfp4 manifest tensor count");
+    check(quantization::manifest::validate_quantized_manifest_contract(manifest).ok(),
+          "mxfp4 manifest contract");
+
+    const auto& gate = manifest.tensors.at(kMxGate);
+    check(gate.encoding == quantization::manifest::QuantizedEncoding::Mxfp4, "gate encoding mxfp4");
+    check(gate.logical_shape == std::vector<int64_t>({130, 256}),
+          "mxfp4 logical K is the unpacked width");
+    check_eq_u64(gate.k_padded, 256, "mxfp4 k_padded");
+    check_eq_u64(gate.scale_block_n, 1, "mxfp4 scale block n is per row");
+    check_eq_u64(gate.scale_block_k, 32, "mxfp4 scale block k is 32");
+    check(gate.codes && gate.codes->dtype == "U8", "mxfp4 codes dtype U8");
+    check(gate.metadata1 && gate.metadata1->dtype == "E8M0", "mxfp4 scale dtype E8M0");
+    check(!gate.data.has_value(), "mxfp4 tensor carries no data stream");
+
+    auto gate_spec = quantization::manifest::resolve_quant_spec(manifest, gate);
+    check(gate_spec.ok() &&
+              gate_spec.value().spec_id == quantization::QuantSpecId::MXFP4_E8M0_G32_V1,
+          "gate resolve_quant_spec mxfp4");
+    if (gate_spec.ok()) {
+        const auto& descriptor = gate_spec.value().descriptor;
+        check_eq_u64(descriptor.group_size, 32, "mxfp4 descriptor group size");
+        check(descriptor.scale_type == quantization::StorageDType::U8, "mxfp4 scale storage U8");
+        check(descriptor.weight_layout == quantization::QuantLayout::MXFP4_E2M1_BLOCK32_V1,
+              "mxfp4 weight layout");
+    }
+
+    const auto& up = manifest.tensors.at(kMxUp);
+    check_eq_u64(up.k_padded, 512, "mxfp4 up k_padded is the unpacked width");
+
+    auto reader_result = quantization::bundle::QuantizedModelReader::open_hf_source(
+        std::move(source), true);
+    if (!reader_result.ok()) {
+        check(false, "mxfp4 open_hf_source: " + reader_result.status().message());
+        return;
+    }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+
+    auto gate_view_result = reader.resolve(kMxGate);
+    if (!gate_view_result.ok()) {
+        check(false, "resolve mxfp4 gate");
+        return;
+    }
+    const auto& gate_view = gate_view_result.value();
+    check_eq_u64(gate_view.codes.size, 130u * 128u, "mxfp4 codes bytes == m * K/2");
+    check_eq_u64(gate_view.metadata1.size, 130u * 8u, "mxfp4 scale bytes == m * K/32");
+    check_eq_u64(static_cast<uint64_t>(gate_view.k_padded), 256, "mxfp4 view k_padded");
+    check_eq_u64(gate_view.scale_block_k, 32, "mxfp4 view scale block k");
+    check(std::memcmp(gate_view.codes.data, g_mx_gate_codes.data(), g_mx_gate_codes.size()) == 0,
+          "mxfp4 codes bytes match file");
+    check(std::memcmp(gate_view.metadata1.data, g_mx_gate_scales.data(), g_mx_gate_scales.size()) == 0,
+          "mxfp4 scale bytes match file without staging");
+    check(reader.resolve(kMxUp).ok(), "mxfp4 up resolves");
+}
+
+static void test_mxfp4_rejections() {
+    const std::vector<std::string> names = {kMxGate};
+
+    const fs::path group_dir = make_case_dir("mxfp4_group128");
+    write_text((group_dir / "config.json").string(), quark_config_json(128));
+    auto group_method = quantization::bundle::detect_hf_quant_method(group_dir.string());
+    check(!group_method.ok() && group_method.status().code() == Status::Code::unsupported,
+          "quark group_size 128 unsupported");
+
+    const fs::path scale_fmt_dir = make_case_dir("mxfp4_scale_e4m3");
+    write_text((scale_fmt_dir / "config.json").string(), quark_config_json(32, "e4m3"));
+    check(!quantization::bundle::detect_hf_quant_method(scale_fmt_dir.string()).ok(),
+          "quark scale_format e4m3 unsupported");
+
+    const fs::path dtype_dir = make_case_dir("mxfp4_dtype_fp8");
+    write_text((dtype_dir / "config.json").string(), quark_config_json(32, "e8m0", "fp8"));
+    check(!quantization::bundle::detect_hf_quant_method(dtype_dir.string()).ok(),
+          "quark weight dtype fp8 unsupported");
+
+    const fs::path qscheme_dir = make_case_dir("mxfp4_per_tensor");
+    write_text((qscheme_dir / "config.json").string(),
+               quark_config_json(32, "e8m0", "fp4", "per_tensor"));
+    check(!quantization::bundle::detect_hf_quant_method(qscheme_dir.string()).ok(),
+          "quark qscheme per_tensor unsupported");
+
+    const fs::path format_dir = make_case_dir("mxfp4_fake_quant");
+    write_text((format_dir / "config.json").string(),
+               quark_config_json(32, "e8m0", "fp4", "per_group", "fake_quant"));
+    check(!quantization::bundle::detect_hf_quant_method(format_dir.string()).ok(),
+          "quark weight_format fake_quant unsupported");
+
+    const fs::path no_global_dir = make_case_dir("mxfp4_no_global_config");
+    write_text((no_global_dir / "config.json").string(),
+               std::string("{\"quantization_config\":{\"quant_method\":\"quark\"}}"));
+    check(!quantization::bundle::detect_hf_quant_method(no_global_dir.string()).ok(),
+          "quark without global_quant_config unsupported");
+
+    const fs::path unaligned_dir = make_case_dir("mxfp4_unaligned_k");
+    if (build_mxfp4_dir(unaligned_dir, 100u, 8u)) {
+        auto result = quantization::bundle::synthesize_hf_quantized_source(
+            unaligned_dir.string(), names, false);
+        check(!result.ok() && result.status().code() == Status::Code::unsupported,
+              "mxfp4 K that is not a multiple of 32 rejected");
+    }
+
+    const fs::path scale_shape_dir = make_case_dir("mxfp4_scale_shape");
+    if (build_mxfp4_dir(scale_shape_dir, 128u, 4u)) {
+        auto result = quantization::bundle::synthesize_hf_quantized_source(
+            scale_shape_dir.string(), names, false);
+        check(!result.ok() && result.status().code() == Status::Code::unsupported,
+              "mxfp4 scale grid mismatch rejected");
+    }
+
+    const fs::path codes_dtype_dir = make_case_dir("mxfp4_codes_bf16");
+    if (build_mxfp4_dir(codes_dtype_dir, 128u, 8u, true)) {
+        auto result = quantization::bundle::synthesize_hf_quantized_source(
+            codes_dtype_dir.string(), names, false);
+        check(!result.ok() && result.status().code() == Status::Code::unsupported,
+              "mxfp4 codes stored as BF16 rejected");
+    }
+
+    const fs::path fp8_scale_dir = make_case_dir("fp8_with_weight_scale");
+    {
+        std::vector<Planned> tensors;
+        std::vector<uint8_t> codes = pattern_bytes(128u * 256u, 3u);
+        std::vector<uint8_t> scales(128u * 8u, 119u);
+        tensors.push_back({kMxGate, io::SType::F8_E4M3, {128, 256}, codes});
+        tensors.push_back({kMxGateScale, io::SType::U8, {128, 8}, scales});
+        write_shard((fp8_scale_dir / "model.safetensors").string(), tensors);
+        write_text((fp8_scale_dir / "config.json").string(), fp8_config_json());
+    }
+    auto fp8_scale_result = quantization::bundle::synthesize_hf_quantized_source(
+        fp8_scale_dir.string(), names, false);
+    check(!fp8_scale_result.ok() &&
+              fp8_scale_result.status().code() == Status::Code::unsupported,
+          "weight_scale in an fp8-method model rejected");
+}
+
 int main() {
     std::error_code ec;
     g_root = fs::temp_directory_path(ec) /
@@ -322,6 +543,8 @@ int main() {
 
     test_fp8_manifest();
     test_fp8_unaligned_k();
+    test_mxfp4_manifest();
+    test_mxfp4_rejections();
     test_unsupported_configs();
 
     fs::remove_all(g_root, ec);

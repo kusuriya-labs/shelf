@@ -33,6 +33,7 @@ struct DecodePerfStats {
 
     uint64_t fp8_gemm_hits = 0, fp8_fallbacks = 0;
     uint64_t bf16_gemm_hits = 0, bf16_fallbacks = 0;
+    uint64_t mxfp4_gemm_hits = 0, mxfp4_fallbacks = 0;
 
     uint64_t fallback_reasons[static_cast<size_t>(FallbackReason::COUNT)] = {};
     uint64_t m_bucket[6] = {};
@@ -87,7 +88,7 @@ void semantic_timing_finish(hipStream_t stream, uint32_t seq, uint32_t kernel_id
                             uint32_t path, uint32_t logical_consumed);
 void semantic_timing_end(hipStream_t stream, const char* csv_path);
 
-enum class LinearFamilyRef : uint32_t { Fp8, Bf16 };
+enum class LinearFamilyRef : uint32_t { Fp8, Bf16, Mxfp4 };
 
 inline void linear_record_hit(LinearFamilyRef fam, uint32_t rows) {
     if (!perf_stats_enabled())
@@ -107,6 +108,8 @@ inline void linear_record_hit(LinearFamilyRef fam, uint32_t rows) {
         s.m_bucket[5]++;
     if (fam == LinearFamilyRef::Fp8)
         s.fp8_gemm_hits++;
+    else if (fam == LinearFamilyRef::Mxfp4)
+        s.mxfp4_gemm_hits++;
     else
         s.bf16_gemm_hits++;
 }
@@ -117,6 +120,8 @@ inline void linear_record_fallback(LinearFamilyRef fam, FallbackReason reason) {
     DecodePerfStats& s = perf_stats_instance();
     if (fam == LinearFamilyRef::Fp8)
         s.fp8_fallbacks++;
+    else if (fam == LinearFamilyRef::Mxfp4)
+        s.mxfp4_fallbacks++;
     else
         s.bf16_fallbacks++;
     record_correctness_fallback(reason);

@@ -1,12 +1,14 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/kernels/correctness/standalone/gemm_bf16_correctness.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
+#include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/runtime/program/program.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/runtime/program/activation_workspace_layout.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/core/memory/arena.h>
@@ -26,6 +28,11 @@ namespace {
 
 struct Options {
     std::string dtype = "bf16";
+    uint32_t mxfp4_split = 4u;
+    uint32_t mxfp4_unroll = 0u;
+    uint32_t mxfp4_fold = 1u;
+
+    uint32_t mxfp4_spread = 24u;
     std::string variant = "auto";
     std::vector<uint32_t> rows;
     uint32_t n = 5120;
@@ -59,6 +66,12 @@ void usage(FILE* f) {
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
         "  --impl auto|wmma|wide|splitk|exact   (bf16 forced implementation)\n"
+        "  --impl auto|splitk|rowblock1|2|4      (mxfp4 forced implementation)\n"
+        "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
+        "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
+        "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
+
+
         "  --model-dir PATH               (with --actual-qwen-shapes: read Qwen config)\n"
         "  --actual-qwen-shapes           (benchmark all deduped Qwen linear shapes)\n"
         "  --warmup N                     (default 100)\n"
@@ -286,7 +299,7 @@ shelf::Status launch_correctness_linear_bf16(const CorrectnessEnv& env, uint32_t
 bool setup_correctness_fp8(const void* d_codes, const void* d_scales,
                            const shelf::bf16_t* d_input, shelf::bf16_t* d_output,
                            uint32_t rows, uint32_t n, uint32_t k, uint32_t kp,
-                           CorrectnessEnv& env) {
+                           CorrectnessEnv& env, bool mxfp4 = false) {
     ::shelf::runtime::WeightSlot slot{};
     slot.rows = n;
     slot.cols = k;
@@ -297,6 +310,15 @@ bool setup_correctness_fp8(const void* d_codes, const void* d_scales,
     slot.scales = d_scales;
     slot.storage_scale_stride_bytes = (kp / 128u) * 4u;
     slot.weight_scale_group = 128u;
+    if (mxfp4) {
+        slot.encoding = 3u;
+        slot.compute_spec = 2u;
+        slot.weight_scale_group = 32u;
+        slot.codes_row_stride_bytes = (kp >> 5) * 256u;
+        slot.scale_row_stride_bytes = kp >> 5;
+        slot.storage_scale_stride_bytes = kp >> 5;
+        slot.preshuffled = true;
+    }
 
     if (hipMalloc(&env.weight_slot_dev, sizeof(::shelf::runtime::WeightSlot)) != hipSuccess) return false;
     if (hipMemcpy(env.weight_slot_dev, &slot, sizeof(::shelf::runtime::WeightSlot), hipMemcpyHostToDevice) != hipSuccess)
@@ -364,14 +386,16 @@ bool setup_correctness_fp8(const void* d_codes, const void* d_scales,
 }
 
 shelf::Status launch_correctness_linear_fp8(const CorrectnessEnv& env, uint32_t rows,
-                                         uint32_t kp, hipStream_t stream) {
+                                         uint32_t kp, hipStream_t stream, bool mxfp4 = false) {
     ::shelf::runtime::Int8ActivationWorkspaceLayout layout;
     const shelf::Status status = ::shelf::runtime::make_activation_workspace_layout(
         ::shelf::quantization::kFp8FinegrainedActivationQuantSpec, kp, rows, layout);
     if (!status.ok()) return status;
 
     ::shelf::runtime::DispatchBinding qbind{};
-    qbind.kernel_id = ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
+    qbind.kernel_id = mxfp4
+                          ? ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF
+                          : ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
     qbind.workspace_slot = 0u;
     qbind.group_size = 32u;
     qbind.activation_kp = kp;
@@ -383,7 +407,8 @@ shelf::Status launch_correctness_linear_fp8(const CorrectnessEnv& env, uint32_t 
     qbind.output_count = 0;
 
     ::shelf::runtime::DispatchBinding lbind{};
-    lbind.kernel_id = ::shelf::runtime::KernelId::LINEAR_FP8_FINEGRAINED;
+    lbind.kernel_id = mxfp4 ? ::shelf::runtime::KernelId::LINEAR_MXFP4_W4A8
+                            : ::shelf::runtime::KernelId::LINEAR_FP8_FINEGRAINED;
     lbind.workspace_slot = 0u;
     lbind.weight_index = 0;
     lbind.activation_kp = kp;
@@ -642,6 +667,307 @@ int run_gemm_bf16(Options& o) {
     return rc;
 }
 
+
+
+shelf::kernel::Mxfp4GemmConfig mxfp4_config_for(const std::string& impl, uint32_t split,
+                                                uint32_t unroll) {
+    using Id = shelf::kernel::Mxfp4GemmConfigId;
+    Id id = Id::RowBlock1;
+    if (impl == "splitk") id = Id::SplitK;
+    else if (impl == "prefill2d") id = Id::Prefill2D;
+    else if (impl == "rowblock2") id = Id::RowBlock2;
+    else if (impl == "rowblock4") id = Id::RowBlock4;
+    (void)unroll;
+    return shelf::kernel::Mxfp4GemmConfig{id, static_cast<uint8_t>(split)};
+}
+
+const char* mxfp4_config_name(const shelf::kernel::Mxfp4GemmConfig& cfg) {
+    switch (cfg.id) {
+    case shelf::kernel::Mxfp4GemmConfigId::SplitK: return "splitk";
+    case shelf::kernel::Mxfp4GemmConfigId::Prefill2D: return "prefill2d";
+    case shelf::kernel::Mxfp4GemmConfigId::RowBlock1: return "rowblock1";
+    case shelf::kernel::Mxfp4GemmConfigId::RowBlock2: return "rowblock2";
+    case shelf::kernel::Mxfp4GemmConfigId::RowBlock4: return "rowblock4";
+    }
+    return "rowblock1";
+}
+
+
+int run_gemm_mxfp4(Options& o) {
+    std::vector<Shape> shapes;
+    if (o.actual_qwen_shapes) {
+        if (o.model_dir.empty()) {
+            std::fprintf(stderr, "--actual-qwen-shapes requires --model-dir\n");
+            return 2;
+        }
+        auto cfg_res = shelf::qwen35::read_qwen35_text_config(o.model_dir);
+        if (!cfg_res.ok()) {
+            std::fprintf(stderr, "read_qwen35_text_config: %s\n", cfg_res.status().message().c_str());
+            return 2;
+        }
+        shapes = build_qwen_shapes(cfg_res.release());
+    } else {
+        shapes.push_back({"custom", o.n, o.k});
+    }
+    if (!o.shapes_spec.empty() && !o.actual_qwen_shapes) {
+        shapes.clear();
+        if (parse_shapes_spec(o.shapes_spec, shapes) != 0) return 2;
+    }
+    if (shapes.empty()) {
+        std::fprintf(stderr, "no shapes to benchmark\n");
+        return 2;
+    }
+    if (hipSetDevice(o.device) != hipSuccess) return 1;
+    hipStream_t stream = nullptr;
+    if (hipStreamCreate(&stream) != hipSuccess) return 1;
+
+    if (!o.out.empty()) {
+        FILE* f = std::fopen(o.out.c_str(), "a");
+        if (f) {
+            if (std::ftell(f) == 0)
+                std::fprintf(f, "dtype,requested_variant,selected_variant,shape_name,rows,n,k,warmup,samples,launches_per_sample,min_us,p50_us,p95_us,mean_us\n");
+            std::fclose(f);
+        }
+    }
+
+    int rc = 0;
+    for (const auto& shape : shapes) {
+        const uint32_t kp = (shape.k + 127u) & ~127u;
+        const uint32_t nb = kp >> 5;
+        const uint32_t n = shape.n;
+        const uint32_t n_tiled = (n + 15u) & ~15u;
+        const size_t codes_bytes = static_cast<size_t>(n_tiled / 16u) * nb * 256u;
+        const size_t scales_bytes = static_cast<size_t>(n_tiled) * nb;
+        uint8_t* d_codes = nullptr;
+        uint8_t* d_scales = nullptr;
+        uint8_t* d_ref = nullptr;
+        if (hipMalloc((void**)&d_codes, codes_bytes) != hipSuccess ||
+            hipMalloc((void**)&d_scales, scales_bytes) != hipSuccess ||
+            hipMalloc((void**)&d_ref, scales_bytes / nb) != hipSuccess) {
+            return 1;
+        }
+        {
+            std::mt19937 rng(o.seed + 41u);
+            std::vector<uint8_t> hc(codes_bytes);
+            for (auto& v : hc) v = static_cast<uint8_t>(rng() & 0xFFu);
+            std::vector<uint8_t> hs(scales_bytes);
+            for (auto& v : hs) v = static_cast<uint8_t>(112u + (rng() % o.mxfp4_spread));
+            std::vector<uint8_t> hr(scales_bytes / nb, 0u);
+            for (uint32_t r = 0; r < n_tiled; ++r) {
+                uint8_t ref = 0u;
+                for (uint32_t ib = 0; ib < nb; ++ib)
+                    ref = std::max(ref, hs[static_cast<size_t>(r) * nb + ib]);
+                hr[r] = ref;
+            }
+            if (hipMemcpy(d_codes, hc.data(), hc.size(), hipMemcpyHostToDevice) != hipSuccess ||
+                hipMemcpy(d_scales, hs.data(), hs.size(), hipMemcpyHostToDevice) != hipSuccess ||
+                hipMemcpy(d_ref, hr.data(), hr.size(), hipMemcpyHostToDevice) != hipSuccess) {
+                return 1;
+            }
+        }
+        for (uint32_t rows : o.rows) {
+            shelf::bf16_t* d_input = nullptr;
+            shelf::bf16_t* d_output = nullptr;
+            uint8_t* d_acodes = nullptr;
+            float* d_ascales = nullptr;
+            const size_t acodes_bytes = static_cast<size_t>((rows + 15u) / 16u) * kp * 16u;
+            const uint32_t act_groups = (kp + 127u) / 128u;
+            const size_t act_scale_stride =
+                ((static_cast<size_t>(act_groups) * 4u) + 15u) & ~15u;
+            const size_t ascales_bytes = static_cast<size_t>(rows) * act_scale_stride;
+            bool ok = gen_bf16_input(rows, shape.k, o.seed + 7777u, &d_input);
+            ok = ok && hipMalloc((void**)&d_acodes, acodes_bytes) == hipSuccess;
+            ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
+            ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
+            if (!ok) { rc = 1; break; }
+            CorrectnessEnv cenv;
+            if (o.check && !setup_correctness_fp8(
+                    d_codes, d_scales, d_input, d_output, rows, n, shape.k, kp, cenv, true)) {
+                std::fprintf(stderr, "CHECK FAIL mxfp4 %-12s rows=%u correctness setup\n",
+                             shape.name.c_str(), rows);
+                rc = 1;
+                break;
+            }
+            hipError_t af = shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+                d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                static_cast<uint32_t>(act_scale_stride), stream);
+            if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
+            const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
+
+            {
+                auto time_launch = [&](const char* name, auto&& one) {
+                    for (int i0 = 0; i0 < o.warmup; ++i0)
+                        if (one() != hipSuccess)
+                            return;
+                    if (hipStreamSynchronize(stream) != hipSuccess)
+                        return;
+                    hipEvent_t q0 = nullptr, q1 = nullptr;
+                    if (hipEventCreate(&q0) != hipSuccess || hipEventCreate(&q1) != hipSuccess)
+                        return;
+                    std::vector<double> us;
+                    for (int sample = 0; sample < o.samples; ++sample) {
+                        if (hipEventRecord(q0, stream) != hipSuccess)
+                            break;
+                        for (int l = 0; l < o.launches; ++l)
+                            if (one() != hipSuccess)
+                                break;
+                        if (hipEventRecord(q1, stream) != hipSuccess)
+                            break;
+                        if (hipEventSynchronize(q1) != hipSuccess)
+                            break;
+                        float ms = 0.0f;
+                        if (hipEventElapsedTime(&ms, q0, q1) != hipSuccess)
+                            break;
+                        us.push_back(ms * 1000.0 / (double)o.launches);
+                    }
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(q0));
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(q1));
+                    if (us.empty())
+                        return;
+                    std::sort(us.begin(), us.end());
+                    const double p50 = us[us.size() / 2];
+                    const double traffic = (double)rows * shape.k * 2.0 + (double)acodes_bytes +
+                                           (double)ascales_bytes;
+                    std::printf("mxfp4 %-12s rows=%-4u n=%-6u k=%-6u requested=quantize"
+                                " selected=%-8s      p50=%.3f us  %.0f GB/s\n",
+                                shape.name.c_str(), rows, shape.n, shape.k, name, p50,
+                                traffic / (p50 * 1e-6) / 1e9);
+                };
+                time_launch("rowref", [&]() {
+                    return shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+                        d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                        static_cast<uint32_t>(act_scale_stride), stream);
+                });
+                if (hipGetLastError() != hipSuccess) { rc = 1; }
+            }
+
+            const auto sel = shelf::execution::select_mxfp4_gemm_config(
+                shelf::execution::Mxfp4GemmSelectorInput{rows, n, shape.k, kp});
+            std::string selected = "gemm";
+            shelf::kernel::Mxfp4GemmConfig cfg{shelf::kernel::Mxfp4GemmConfigId::RowBlock1,
+                                               static_cast<uint8_t>(o.mxfp4_split)};
+            if (o.variant == "correctness") {
+                selected = "correctness";
+            } else if (o.impl == "auto") {
+                if (sel) cfg = *sel;
+                selected = sel ? mxfp4_config_name(cfg) : "rowblock1";
+            } else {
+                cfg = mxfp4_config_for(o.impl, o.mxfp4_split, o.mxfp4_unroll);
+                selected = mxfp4_config_name(cfg);
+            }
+
+            auto launch_one = [&]() -> hipError_t {
+                if (selected == "correctness") {
+                    shelf::Status st = launch_correctness_linear_fp8(
+                        cenv, rows, kp, stream, true);
+                    return st.ok() ? hipSuccess : hipErrorUnknown;
+                }
+                return shelf::kernel::launch_gemm_mxfp4_w4a8_auto(
+                    cfg, d_codes, d_scales, o.mxfp4_fold ? d_ref : nullptr,
+                    a8, d_ascales, d_output,
+                    shelf::kernel::Mxfp4GemmOutputDType::BF16, rows, n, kp, nb, kp,
+                    static_cast<uint32_t>(act_scale_stride), n, stream);
+            };
+            if (o.check) {
+                const size_t outn = (size_t)rows * n;
+                std::vector<uint16_t> h_c(outn), h_g(outn);
+                shelf::Status stc = launch_correctness_linear_fp8(
+                    cenv, rows, kp, stream, true);
+                uint32_t ew = 0;
+                if (!stc.ok() || hipStreamSynchronize(stream) != hipSuccess ||
+                    hipMemcpy(&ew, cenv.error_word, sizeof(ew), hipMemcpyDeviceToHost) != hipSuccess || ew != 0) {
+                    std::fprintf(stderr, "CHECK FAIL mxfp4 %-12s rows=%u correctness (err=%u)\n",
+                                 shape.name.c_str(), rows, ew);
+                    rc = 1;
+                    break;
+                }
+                shelf::gpu::discard_cleanup_result(
+                    hipMemcpy(h_c.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                if (launch_one() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) {
+                    std::fprintf(stderr, "CHECK FAIL mxfp4 %-12s rows=%u optimized launch\n",
+                                 shape.name.c_str(), rows);
+                    rc = 1;
+                    break;
+                }
+                shelf::gpu::discard_cleanup_result(
+                    hipMemcpy(h_g.data(), d_output, outn * 2, hipMemcpyDeviceToHost));
+                uint64_t mismatch = 0, nan = 0, inf = 0;
+                float max_rel = 0.f;
+                for (size_t i = 0; i < outn; ++i) {
+                    if (h_c[i] != h_g[i]) ++mismatch;
+                    const float fc = bf16_bits_to_f32(h_c[i]);
+                    const float fg = bf16_bits_to_f32(h_g[i]);
+                    if (std::isnan(fc) || std::isnan(fg)) ++nan;
+                    if (std::isinf(fc) || std::isinf(fg)) ++inf;
+                    const float rel = std::fabs(fc - fg) / std::max(1.0f, std::fabs(fc));
+                    if (rel > max_rel) max_rel = rel;
+                }
+                const bool okc = nan == 0 && inf == 0 && max_rel <= 2e-2f;
+                std::printf("CHECK mxfp4 %-12s rows=%-4u n=%-6u k=%-6u selected=%s mismatch=%llu max_rel=%.4g nan=%llu inf=%llu %s\n",
+                            shape.name.c_str(), rows, shape.n, shape.k, selected.c_str(),
+                            (unsigned long long)mismatch, max_rel,
+                            (unsigned long long)nan, (unsigned long long)inf,
+                            okc ? "OK" : "FAIL");
+                if (!okc) rc = 1;
+            }
+            for (int i = 0; i < o.warmup; ++i)
+                if (launch_one() != hipSuccess) { rc = 1; break; }
+            if (rc) break;
+            if (hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
+            hipEvent_t ev0 = nullptr, ev1 = nullptr;
+            if (hipEventCreate(&ev0) != hipSuccess || hipEventCreate(&ev1) != hipSuccess) { rc = 1; break; }
+            std::vector<double> per_launch_us;
+            per_launch_us.reserve(o.samples);
+            for (int s = 0; s < o.samples; ++s) {
+                if (hipEventRecord(ev0, stream) != hipSuccess) { rc = 1; break; }
+                for (int l = 0; l < o.launches; ++l)
+                    if (launch_one() != hipSuccess) { rc = 1; break; }
+                if (rc) break;
+                if (hipEventRecord(ev1, stream) != hipSuccess) { rc = 1; break; }
+                if (hipEventSynchronize(ev1) != hipSuccess) { rc = 1; break; }
+                float ms = 0.0f;
+                if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess) { rc = 1; break; }
+                per_launch_us.push_back(ms * 1000.0 / (double)o.launches);
+            }
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev0));
+            shelf::gpu::discard_cleanup_result(hipEventDestroy(ev1));
+            shelf::gpu::discard_cleanup_result(hipFree(d_input));
+            shelf::gpu::discard_cleanup_result(hipFree(d_acodes));
+            shelf::gpu::discard_cleanup_result(hipFree(d_ascales));
+            shelf::gpu::discard_cleanup_result(hipFree(d_output));
+            if (rc) break;
+            if (!per_launch_us.empty()) {
+                const double mn = percentile(per_launch_us, 0.0);
+                const double p50 = percentile(per_launch_us, 0.5);
+                const double p95 = percentile(per_launch_us, 0.95);
+                double mean = 0.0;
+                for (double v : per_launch_us) mean += v;
+                mean /= (double)per_launch_us.size();
+                const double weight_mib = (double)codes_bytes / (1024.0 * 1024.0);
+                std::printf("mxfp4 %-12s rows=%-4u n=%-6u k=%-6u requested=%s selected=%-10s min=%.3f p50=%.3f p95=%.3f mean=%.3f us  %.0f GB/s\n",
+                            shape.name.c_str(), rows, shape.n, shape.k, o.impl.c_str(),
+                            selected.c_str(), mn, p50, p95, mean,
+                            weight_mib * 1048576.0 / (p50 * 1e-6) / 1e9);
+                if (!o.out.empty()) {
+                    FILE* f = std::fopen(o.out.c_str(), "a");
+                    if (f) {
+                        std::fprintf(f, "mxfp4,%s,%s,%s,%u,%u,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
+                                     o.impl.c_str(), selected.c_str(), shape.name.c_str(),
+                                     rows, shape.n, shape.k,
+                                     o.warmup, o.samples, o.launches, mn, p50, p95, mean);
+                        std::fclose(f);
+                    }
+                }
+            }
+        }
+        shelf::gpu::discard_cleanup_result(hipFree(d_codes));
+        shelf::gpu::discard_cleanup_result(hipFree(d_scales));
+        if (rc) break;
+    }
+    shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+    return rc;
+}
+
 int run_gemm_fp8(Options& o) {
     std::vector<Shape> shapes;
     if (o.actual_qwen_shapes) {
@@ -657,6 +983,10 @@ int run_gemm_fp8(Options& o) {
         shapes = build_qwen_shapes(cfg_res.release());
     } else {
         shapes.push_back({"custom", o.n, o.k});
+    }
+    if (!o.shapes_spec.empty() && !o.actual_qwen_shapes) {
+        shapes.clear();
+        if (parse_shapes_spec(o.shapes_spec, shapes) != 0) return 2;
     }
     if (shapes.empty()) {
         std::fprintf(stderr, "no shapes to benchmark\n");
@@ -883,6 +1213,11 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--out") o.out = next();
         else if (a == "--verify-small-m") o.verify_small_m = true;
         else if (a == "--split") o.split = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-split") o.mxfp4_split = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-unroll") o.mxfp4_unroll = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-fold") o.mxfp4_fold = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-spread") o.mxfp4_spread = static_cast<uint32_t>(std::stoi(next()));
+
         else if (a == "--check") o.check = true;
         else if (a == "--model-dir") o.model_dir = next();
         else if (a == "--actual-qwen-shapes") o.actual_qwen_shapes = true;
@@ -895,8 +1230,8 @@ int run_gemm(int argc, char** argv) {
         fprintf(stderr, "bad --warmup/--samples/--launches\n");
         return 2;
     }
-    if (o.dtype != "bf16" && o.dtype != "fp8") {
-        fprintf(stderr, "valid --dtype: bf16|fp8 (got %s)\n", o.dtype.c_str());
+    if (o.dtype != "bf16" && o.dtype != "fp8" && o.dtype != "mxfp4") {
+        fprintf(stderr, "valid --dtype: bf16|fp8|mxfp4 (got %s)\n", o.dtype.c_str());
         return 2;
     }
     if (o.variant != "correctness" && o.variant != "gemm" && o.variant != "auto") {
@@ -904,5 +1239,6 @@ int run_gemm(int argc, char** argv) {
         return 2;
     }
     if (o.dtype == "fp8") return run_gemm_fp8(o);
+    if (o.dtype == "mxfp4") return run_gemm_mxfp4(o);
     return run_gemm_bf16(o);
 }

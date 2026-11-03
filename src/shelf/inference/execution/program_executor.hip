@@ -3,6 +3,7 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_calib_dump.h>
+#include <shelf/inference/execution/linear_input_dump.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -153,6 +154,28 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
             return Status::invalid_argument(
                 ("block scaled weight table slot k_padded invalid: index " +
                  std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+    if (enc == 3u) {
+        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot needs codes+scales and no device_ptr: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.k_padded < s.cols || (s.k_padded & 63u) != 0u) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot k_padded invalid: index " + std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.weight_scale_group != 32u) {
+            return Status::invalid_argument(
+                ("mxfp4 weight table slot scale group must be 32: index " + std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);
         }
@@ -462,6 +485,7 @@ Status execute_program_range(
             }
         }
         kv_calib_dump_maybe(program, i, ctx, stream);
+        linear_input_dump_maybe(program, i, ctx, stream);
         OpDumpTimer op_timer(binding.kernel_id);
         const bool sem_on = semantic_timing_enabled();
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
@@ -676,6 +700,8 @@ Status upload_host_weight_table(
         host[i].encoding = s.encoding;
         host[i].codes = s.codes;
         host[i].scales = s.scales;
+        host[i].row_ref = s.row_ref;
+        host[i].row_ref_exact = s.row_ref_exact;
         host[i].storage_scale_stride_bytes = s.storage_scale_stride_bytes;
         host[i].compute_codes = s.compute_codes;
         host[i].compute_scales_bf16 = s.compute_scales_bf16;

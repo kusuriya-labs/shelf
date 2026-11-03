@@ -36,6 +36,7 @@ void expect_quantized(
     uint8_t compute_spec,
     rt::KernelId expected_kernel,
     uint32_t expected_alignment,
+    rt::KernelId expected_activation_kernel,
     const std::string& tag) {
     auto resolved = rt::resolve_linear_quant_contract(weight_encoding, compute_spec);
     check(resolved.ok(), tag + ": contract resolves");
@@ -52,6 +53,8 @@ void expect_quantized(
     check(c.activation_k_alignment == expected_alignment, tag + ": activation k alignment");
     check(quant::validate_activation_quant_spec(c.activation).ok(),
           tag + ": activation spec validates");
+    check(c.activation_kernel == expected_activation_kernel,
+          tag + ": activation plane producer");
 }
 
 void expect_error(
@@ -84,7 +87,26 @@ int main() {
     expect_quantized(
         static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
         spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
-        rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u, "fp8");
+        rt::KernelId::LINEAR_FP8_FINEGRAINED, 128u,
+        rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED, "fp8");
+
+    // MXFP4 keeps the FP8 E4M3 activation codes and the same plane layout, but the
+    // plane is produced in the row-reference folded form: the group E8M0 is folded
+    // into the codes and the scale column holds one row reference.
+    expect_quantized(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::MXFP4_W4A8_F32_BF16),
+        rt::KernelId::LINEAR_MXFP4_W4A8, 64u,
+        rt::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF, "mxfp4");
+
+    expect_error(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16),
+        "mxfp4 linear weight requires mxfp4 w4a8 compute spec", "mxfp4 fp8 spec");
+    expect_error(
+        static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
+        spec(quant::ComputeSpecId::BF16_F32_BF16),
+        "mxfp4 linear weight requires mxfp4 w4a8 compute spec", "mxfp4 bf16 spec");
 
     expect_error(
         static_cast<uint8_t>(shelf::weights::MatrixEncoding::Fp8Finegrained),
@@ -115,15 +137,6 @@ int main() {
     check(rt::activation_k_padded_for(128u, 2560u) == 2560u, "pad 128: 2560 -> 2560");
     check(rt::activation_k_padded_for(32u, 0u) == 0u, "pad 32: 0 -> 0");
 
-    const auto fp8_finegrained_kernel = rt::activation_quantize_kernel(quant::kFp8FinegrainedActivationQuantSpec);
-    check(fp8_finegrained_kernel.ok() && fp8_finegrained_kernel.value() == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
-          "e4m3 activation spec selects ACTIVATION_QUANTIZE_FP8_FINEGRAINED");
-    {
-        quant::ActivationQuantSpec i8_codes = quant::kFp8FinegrainedActivationQuantSpec;
-        i8_codes.codes_dtype = quant::QuantScalarType::I8;
-        check(!rt::activation_quantize_kernel(i8_codes).ok(),
-              "i8 activation spec has no activation quantize kernel");
-    }
 
     check(rt::activation_quant_matches(
               quant::kFp8FinegrainedActivationQuantSpec, quant::kFp8FinegrainedActivationQuantSpec),

@@ -18,7 +18,7 @@ self-contained quantized safetensors を直接ロードする。
 - `QuantFormatId` — weight storage / compute formatのID（`quantization/quant_format.h`）。
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
-- 対応 encoding: BF16 / FP8 K128N128。
+- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -89,15 +89,27 @@ partition plan を受け付けない（multi-GPU lowering 未対応のため
 real-quantized safetensors を manifest 非依存で直接ロードできる。
 
 - `quant_method == "fp8"` — `fmt == "e4m3"` かつ `weight_block_size == [128,128]`
+- `quant_method == "quark"` — `global_quant_config.weight` が
+  `dtype == "fp4"` / `qscheme == "per_group"` / `group_size == 32` /
+  `scale_format == "e8m0"` / `is_dynamic == false` かつ
+  `export.weight_format == "real_quantized"`。
+  これ以外（group ≠ 32、`scale_format` が e8m0 以外、fake quant export）は
+  `Status::unsupported` で拒否する。
 
 合成は `quantization/bundle/hf_manifest.{h,cpp}` が行う。HF の tensor naming
-（codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16））から
+（codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16）、
+MXFP4 scales = `<name>.weight_scale`（U8 E8M0））から
 `QuantizedManifest` を合成し、
 [canonical_soa_payload.md](canonical_soa_payload.md) §6 と同じ
 canonical payload contract へ流し込む。payload の bit 列は canonical 定義と一致するため、
 preshuffle / runtime 経路は self-contained 量子化 model と同一である。
 
 - FP8 の BF16 scale はロード時に F32 へ widen される（metadata1 は F32 contract のまま）。
+- MXFP4 の scale は変換せず U8 E8M0 のまま metadata1 へ入れる（staging しない）。
+  E8M0 byte 255（MX spec の NaN）を含む tensor は load 時に拒否する。
+- MXFP4 の logical K は codes の 2 倍として復元する。K が 32 の倍数でない、または
+  64 の倍数でない tensor（activation の 64 K fragment に載らない）は拒否する。
+  同様に native の 16 行 tile に載らない rows は拒否する。
 - 量子化されていない tensor（norm / embed / lm_head / dt_bias / A_log /
   conv1d.weight など）は BF16 entry として同一経路でロードされる。
 - HF payload の K が block size（FP8: 128）の倍数でない場合、
@@ -163,19 +175,64 @@ production の Program Builder は linear の activation 量子化方針を
 | --- | --- | --- | --- | --- | --- |
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
+| `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3（group E8M0 を行基準へ fold） | 64 | あり |
+
+- MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
+  checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
+  そのまま共有する（W4A8）。A4 を採用しないことは数値 class の差であり、
+  品質比較では [testing_f64_oracle.md](testing_f64_oracle.md) の FP8 と同じ
+  扱いで tolerance に反映する。
+- MXFP4 weight の scale は 32 K ごとに付く。accumulation は 32 K ごとの
+  partial sum に weight scale を掛けて合算し、activation scale は K ループで
+  適用しない（下の行基準 fold 形のため）。
+  weight scale group が 32 でない weight は kernel capability で拒否する。
+- `LINEAR_MXFP4_W4A8` は optimized kernel 群で実行する。weight は native layout
+  （[canonical_soa_payload.md](canonical_soa_payload.md) §11）で常駐し、correctness path
+  も同じ native layout を読む。E2M1 -> E4M3 展開と E8M0 rescale は register 内で行う。
+  variant 選択は `selectors/linear_selector.cpp` が hold し、geometry は allowlist 制
+  （`(out_features, k)` ごとに実測値を伴って追加する）。production が使う variant は
+  `SplitK`（rows <= 32 かつ out_features <= 2560）、`Prefill2D`（rows >= 512 で
+  weight tile の再利用が見合う形状）、`RowBlock1 / 2 / 4`（それ以外）。
+  `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除済み）。
+- `WeightSlot` の native contract: `codes_row_stride_bytes == (k_padded / 32) * 256`、
+  `scale_row_stride_bytes == storage_scale_stride_bytes == k_padded / 32`、
+  `preshuffled == true`。満たさない slot は dispatch 側で失敗する。
+  native payload は付随平面として `row_ref`（行単位の E8M0 最大値、`rows` byte）と
+  フラグ `row_ref_exact`（全行の E8M0 幅が 8 以内 = operand fold が厳密）を持つ。
+  Prefill2D は `row_ref_exact` が true の payload でのみ fold を使い、false の場合は
+  per-block rescale 側へ戻る。
 
 - activation spec は `kFp8FinegrainedActivationQuantSpec`（codes = `FP8E4M3`、`group_k = 128`、
-  scale = `F32`）に固定され、CLI / config による切替は存在しない。
+  scale = `F32`）に固定され、CLI / config による切替は存在しない。平面の**形**は
+  family で決まり、spec の切替ではない。
 - activation K の padding は block-scaled weight の tile に合わせる。
   FP8 weight は weight tile が 128 幅のため activation も 128 単位で揃える。
   codes の物理配置は WMMA fragment block 順で、block 幅は 64 K である
   （[canonical_soa_payload.md](canonical_soa_payload.md) §11）。
-- 量子化 weight の activation quantize は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を
-  受け取る。codes は E4M3、scale は group-128 の F32 であり、activation quantize の
-  実装はこの 1 系統のみである。
-- scale は group 128 幅あたり 1 本（`ceil(k_padded / 128)` 本）を row-major に書き、
-  linear も同じ位置を読む。`Int8ActivationWorkspaceLayout` の scale row stride は
-  `align16(ceil(k_padded / 128) * 4)` である。
+- activation quantize の kernel id は family ごとに 1 つで、Program Builder から
+  到達できない代替経路は持たない。
+  `Fp8Finegrained` weight は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED`、
+  `Mxfp4` weight は `KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF` を受け取る。
+  両者の codes は E4M3、scale 平面の dtype と layout は同一である。
+- MXFP4 の activation 平面は**行基準 fold 形**で、`launch_activation_quantize_mxfp4_rowref`
+  （correctness path は `exec_activation_quantize_mxfp4_rowref`）が作る。group 128 の
+  scale は E8M0（`448 * 2^e >= group peak` を満たす最小の e）で、その指数を行の最大
+  指数 `ref` 基準へ codes 側へ畳む。
+
+  ```text
+  codes[i]   = e4m3_rne( e4m3_rne(a[i] / 2^e_g) * 2^-(ref - e_g) )
+  scales[row][0] = 2^ref        # scale 平面の column 0 だけを使う
+  ```
+
+  GEMM は K ループで activation scale を一切適用せず、epilogue で `2^ref` を 1 回掛ける。
+  fold は 2 段丸め（group 量子化してから行基準へ掛け直す）をそのまま再現するのが契約で、
+  reference 実装と optimized kernel の作る平面は bit 一致する
+  （`test_mxfp4_linear` の producer 比較）。設計と実測は
+  [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md) §13-§16。
+- FP8 family の scale は group 128 幅あたり 1 本（`ceil(k_padded / 128)` 本）を row-major に
+  書き、linear も同じ位置を読む。MXFP4 の行基準形では column 0 だけを使い、他 column は
+  0 で埋める。`Int8ActivationWorkspaceLayout` の scale row stride は
+  `align16(ceil(k_padded / 128) * 4)` で、両 family 共通である。
   workspace のバイト数・stride は `ActivationQuantSpec` から導出せず、
   `runtime/program/activation_workspace_layout.h` の
   `make_activation_workspace_layout` が返す layout を正本とする。
@@ -186,10 +243,8 @@ production の Program Builder は linear の activation 量子化方針を
   E4M3 以外（codes dtype 違い、group 指定、scale dtype 違反）は明示的に失敗する。
 - activation workspace は入力 ValueId 単位で1つで、同一入力を使う複数 linear は
   1回の quantize と1つの workspace range を共有する。共有の検証は
-  K / `k_padded` と activation spec の一致で行い、
+  K / `k_padded`、activation spec、および producer kernel id（平面の形）の一致で行い、
   食い違う場合は構築時に失敗する。
-- activation quantize の kernel id は `KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED` のみで、
-  Program Builder から到達できない代替経路は持たない。
 
 ## KV quantization
 

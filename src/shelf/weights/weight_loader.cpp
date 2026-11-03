@@ -5,6 +5,8 @@
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/fp8/fp8_native.h>
+#include <shelf/quantization/mxfp4/mxfp4.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
@@ -305,6 +307,128 @@ Result<MatrixWeight> load_quantized_view(
         w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
         w.scale_row_stride_bytes = static_cast<uint32_t>(native.scale_k * sizeof(float));
         w.preshuffled = true;
+        apply_default_compute_spec(w);
+        return w;
+    }
+
+    if (v.encoding == QuantizedEncoding::Mxfp4) {
+        if ((kp % 64u) != 0u) {
+            return Status::unsupported(
+                ("mxfp4 matrix weight k_padded must be a multiple of 64: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        if ((m % 16u) != 0u) {
+            return Status::unsupported(
+                ("mxfp4 matrix weight rows must be a multiple of 16: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        const uint64_t packed_k = kp / quantization::kMxfp4WeightsPerCode;
+        const uint64_t scale_k = kp / quantization::kMxfp4ScaleBlockK;
+        auto st = expect_bytes(name + " codes", v.codes, m * packed_k);
+        if (!st.ok()) return st;
+        st = expect_bytes(name + " scales", v.metadata1, m * scale_k);
+        if (!st.ok()) return st;
+
+        quantization::mxfp4::Mxfp4CanonicalView cv;
+        cv.batch = 1;
+        cv.n = m;
+        cv.padded_k = kp;
+        cv.codes = static_cast<const uint8_t*>(v.codes.data);
+        cv.codes_bytes = v.codes.size;
+        cv.scales = static_cast<const uint8_t*>(v.metadata1.data);
+        cv.scales_bytes = v.metadata1.size;
+        if (!cv.validate()) {
+            return Status::invalid_argument(
+                ("mxfp4 canonical payload invalid: " + name).c_str(), __FILE__, __LINE__);
+        }
+        const uint64_t scale_count = m * scale_k;
+        for (uint64_t i = 0; i < scale_count; ++i) {
+            if (cv.scales[i] == quantization::mxfp4::kE8m0NanByte) {
+                return Status::invalid_argument(
+                    ("mxfp4 scale stream carries an E8M0 NaN byte: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+        }
+
+        w.encoding = MatrixEncoding::Mxfp4;
+        w.weight_scale_group = quantization::kMxfp4ScaleBlockK;
+
+        if (options.preshuffle) {
+            static quantization::mxfp4::Mxfp4NativeHost native;
+            if (!quantization::mxfp4::preshuffle_mxfp4_native(cv, native)) {
+                return Status::invalid_argument(
+                    ("mxfp4 native payload not supported for arch: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            const uint64_t tiles = native.rows / 16u;
+            std::vector<std::size_t> cshape = {tiles, native.codes_row_stride_bytes};
+            std::vector<std::size_t> cstrides = {native.codes_row_stride_bytes, 1};
+            w.codes = alloc_bytes(native.codes.size(), cshape, cstrides, arena);
+            if (w.codes.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 native codes allocation failed: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.codes.data<void>(), native.codes.data(),
+                                native.codes.size(), stream);
+            if (!st.ok()) return st;
+
+            std::vector<std::size_t> sshape = {m, scale_k};
+            std::vector<std::size_t> sstrides = {scale_k, 1};
+            w.scales = alloc_bytes(native.scales.size(), sshape, sstrides, arena);
+            if (w.scales.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 native scales allocation failed: " + name).c_str(),
+                    __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.scales.data<void>(), native.scales.data(),
+                                native.scales.size(), stream);
+            if (!st.ok()) return st;
+
+            std::vector<std::size_t> rshape = {m, 1};
+            std::vector<std::size_t> rstrides = {1, 1};
+            w.row_ref = alloc_bytes(native.row_ref.size(), rshape, rstrides, arena);
+            if (w.row_ref.ndim() == 0) {
+                return Status::insufficient_memory(
+                    ("mxfp4 row reference allocation failed: " + name).c_str(), __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.row_ref.data<void>(), native.row_ref.data(),
+                                native.row_ref.size(), stream);
+            if (!st.ok()) return st;
+
+            w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
+            w.scale_row_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
+            w.storage_scale_stride_bytes = static_cast<uint32_t>(native.scale_row_stride_bytes);
+            w.preshuffled = true;
+            w.row_ref_exact = native.row_ref_exact;
+            apply_default_compute_spec(w);
+            return w;
+        }
+
+        std::vector<std::size_t> cshape = {m, packed_k};
+        std::vector<std::size_t> cstrides = {packed_k, 1};
+        w.codes = alloc_bytes(v.codes.size, cshape, cstrides, arena);
+        if (w.codes.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("mxfp4 codes allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.codes.data<void>(), v.codes.data, v.codes.size, stream);
+        if (!st.ok()) return st;
+
+        std::vector<std::size_t> sshape = {m, scale_k};
+        std::vector<std::size_t> sstrides = {scale_k, 1};
+        w.scales = alloc_bytes(v.metadata1.size, sshape, sstrides, arena);
+        if (w.scales.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("mxfp4 scales allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.scales.data<void>(), v.metadata1.data, v.metadata1.size, stream);
+        if (!st.ok()) return st;
+
+        w.codes_row_stride_bytes = static_cast<uint32_t>(packed_k);
+        w.scale_row_stride_bytes = static_cast<uint32_t>(scale_k);
+        w.storage_scale_stride_bytes = static_cast<uint32_t>(scale_k);
+        w.preshuffled = options.preshuffle;
         apply_default_compute_spec(w);
         return w;
     }

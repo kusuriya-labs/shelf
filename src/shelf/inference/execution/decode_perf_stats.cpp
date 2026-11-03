@@ -76,9 +76,12 @@ void perf_stats_dump(const char* path, uint32_t tokens) {
     std::fprintf(f, "    \"fp8\": {\"gemm\": %llu, \"fallback\": %llu},\n",
                  (unsigned long long)s.fp8_gemm_hits,
                  (unsigned long long)s.fp8_fallbacks);
-    std::fprintf(f, "    \"bf16\": {\"gemm\": %llu, \"fallback\": %llu}\n",
+    std::fprintf(f, "    \"bf16\": {\"gemm\": %llu, \"fallback\": %llu},\n",
                  (unsigned long long)s.bf16_gemm_hits,
                  (unsigned long long)s.bf16_fallbacks);
+    std::fprintf(f, "    \"mxfp4\": {\"gemm\": %llu, \"fallback\": %llu}\n",
+                 (unsigned long long)s.mxfp4_gemm_hits,
+                 (unsigned long long)s.mxfp4_fallbacks);
     std::fprintf(f, "  },\n");
     std::fprintf(f, "  \"m_bucket\": [");
     for (int i = 0; i < 6; ++i) {

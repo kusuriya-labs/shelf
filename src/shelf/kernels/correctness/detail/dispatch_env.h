@@ -5,6 +5,7 @@
 #include <shelf/runtime/program/device_program.h>
 #include <shelf/runtime/program/program.h>
 #include <shelf/quantization/codec/e4m3_detail.h>
+#include <shelf/quantization/codec/e2m1_detail.h>
 #include <shelf/quantization/codec/ue4m3_detail.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>

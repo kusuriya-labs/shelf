@@ -119,7 +119,12 @@ Result<TensorStorageOrder> parse_storage_order(const std::string& name) {
 }
 
 std::string internal_scale_tag(QuantScalarType dtype) {
-    return dtype == QuantScalarType::F32 ? "F32" : "U8";
+    switch (dtype) {
+        case QuantScalarType::F32: return "F32";
+        case QuantScalarType::E8M0: return "E8M0";
+        default: break;
+    }
+    return "U8";
 }
 
 QuantScalarType scale_semantic_dtype(QuantizedEncoding enc) {
@@ -350,6 +355,7 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
     switch (enc) {
         case QuantizedEncoding::Bf16: return "bf16";
         case QuantizedEncoding::Fp8: return kFp8V4EncodingName;
+        case QuantizedEncoding::Mxfp4: return kMxfp4V4EncodingName;
     }
     return "unknown";
 }
@@ -357,6 +363,7 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
 Result<QuantizedEncoding> parse_v4_encoding(const std::string& name) {
     if (name == "bf16") return QuantizedEncoding::Bf16;
     if (name == kFp8V4EncodingName) return QuantizedEncoding::Fp8;
+    if (name == kMxfp4V4EncodingName) return QuantizedEncoding::Mxfp4;
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 

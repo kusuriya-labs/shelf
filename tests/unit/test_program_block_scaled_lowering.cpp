@@ -1,5 +1,6 @@
 #include <shelf/runtime/program/program.h>
 #include <shelf/runtime/program/kernel_id.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/runtime/graph/primitive_graph.h>
 #include <shelf/runtime/graph/primitive_node.h>
 #include <shelf/runtime/graph/shape_spec.h>
@@ -64,7 +65,7 @@ rt::WeightSlot make_slot(uint8_t encoding, uint8_t compute_spec, uint32_t rows, 
 
 void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint32_t scale_stride,
               uint32_t codes_stride, rt::KernelId expect_kernel, uint32_t expect_act_kp,
-              const char* tag) {
+              rt::KernelId expect_act_kernel, const char* tag) {
     constexpr uint32_t kOut = 1024;
     constexpr uint32_t kK = 2560;
     const uint32_t kp = kK;
@@ -91,7 +92,7 @@ void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint
     check(lin.kernel_id == expect_kernel, std::string(tag) + ": linear kernel id");
     check(lin.compute_spec == compute_spec, std::string(tag) + ": compute spec");
     check(lin.activation_kp == expect_act_kp, std::string(tag) + ": activation k_padded");
-    check(p.dispatches[0].kernel_id == rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED,
+    check(p.dispatches[0].kernel_id == expect_act_kernel,
           std::string(tag) + ": activation quantize kind");
 }
 
@@ -99,7 +100,13 @@ void run_case(uint8_t encoding, uint8_t compute_spec, uint32_t scale_group, uint
 
 int main() {
     run_case(1u, static_cast<uint8_t>(::shelf::quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16), 128u, (2560u / 128u) * 4u, (2560u / 32u) * 512u,
-             rt::KernelId::LINEAR_FP8_FINEGRAINED, 2560u, "fp8");
+             rt::KernelId::LINEAR_FP8_FINEGRAINED, 2560u,
+             rt::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED, "fp8");
+    // MXFP4 W4A8 produces the activation plane in the row-reference folded form and
+    // the linear consumer must be told, through the binding flag, to read it that way.
+    run_case(3u, static_cast<uint8_t>(::shelf::quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16), 32u, (2560u / 32u), (2560u / 2u),
+             rt::KernelId::LINEAR_MXFP4_W4A8, 2560u,
+             rt::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF, "mxfp4");
     // K that is not a multiple of 128 must still pad the FP8 activation to 128.
     {
         rt::PrimitiveGraph g = make_linear_graph(1024u, 2500u);
