@@ -137,6 +137,7 @@ shelf_add_test(NAME test_executor_footprint SOURCE unit/test_executor_footprint.
 shelf_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src/apps/bench")
 shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_moe_config SOURCE unit/test_moe_config.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_dflash2_grouped_dynamic_conv SOURCE unit/test_dflash2_grouped_dynamic_conv.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
@@ -260,6 +261,7 @@ add_custom_target(
         test_executor_footprint
         test_quality_metrics
         test_qwen35_config_tie
+        test_moe_config
         test_dflash2_weight_contract
         test_dflash2_feature_concat
         test_dflash2_grouped_dynamic_conv

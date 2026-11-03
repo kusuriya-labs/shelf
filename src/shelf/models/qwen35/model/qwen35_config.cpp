@@ -98,6 +98,11 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
     read_size("num_key_value_heads", cfg.num_key_value_heads);
     read_size("head_dim", cfg.attention_head_dim);
 
+    read_size("num_experts", cfg.num_experts);
+    read_size("num_experts_per_tok", cfg.num_experts_per_tok);
+    read_size("moe_intermediate_size", cfg.moe_intermediate_size);
+    read_size("shared_expert_intermediate_size", cfg.shared_expert_intermediate_size);
+
     // Generation stop tokens come from generation_config.json, which may list
     // several (Qwen3.5/3.8 use <|im_end|> and <|endoftext|>). Fall back to the
     // single text_config.eos_token_id when no generation config is present.
@@ -145,7 +150,12 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
 
     cfg.tie_word_embeddings = tie_word_embeddings_from_json(root);
 
+    // A missing output_gate_type means silu: the f64 oracle never reads the key and
+    // always gates the attention output with silu. Only an explicit "sigmoid"
+    // selects the other form.
+    bool gate_key_present = false;
     if (t.contains("output_gate_type") && t["output_gate_type"].is_string()) {
+        gate_key_present = true;
         const std::string gate_type = t["output_gate_type"].get<std::string>();
         if (gate_type == "swish" || gate_type == "silu") {
             cfg.output_gate_silu = true;
@@ -156,6 +166,8 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
                 __FILE__, __LINE__);
         }
     }
+    if (!gate_key_present)
+        cfg.output_gate_silu = true;
 
     if (t.contains("layer_types") && t["layer_types"].is_array()) {
         cfg.layer_types.reserve(t["layer_types"].size());
@@ -175,6 +187,25 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
     if (cfg.vocab_size == 0 || cfg.hidden_size == 0 || cfg.num_hidden_layers == 0) {
         return Status::invalid_argument(
             "read_qwen35_text_config: required dimensions missing", __FILE__, __LINE__);
+    }
+
+    if (cfg.is_moe()) {
+        if (cfg.num_experts_per_tok == 0 || cfg.num_experts_per_tok > cfg.num_experts) {
+            return Status::invalid_argument(
+                "read_qwen35_text_config: num_experts_per_tok must be in [1, num_experts]",
+                __FILE__, __LINE__);
+        }
+        if (cfg.moe_intermediate_size == 0 || cfg.shared_expert_intermediate_size == 0) {
+            return Status::invalid_argument(
+                "read_qwen35_text_config: moe config requires moe_intermediate_size and "
+                "shared_expert_intermediate_size",
+                __FILE__, __LINE__);
+        }
+        if (cfg.intermediate_size != 0) {
+            return Status::invalid_argument(
+                "read_qwen35_text_config: moe config must not declare intermediate_size",
+                __FILE__, __LINE__);
+        }
     }
 
     return cfg;
