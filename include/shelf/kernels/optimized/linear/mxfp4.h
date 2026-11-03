@@ -40,28 +40,6 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
     uint32_t output_row_stride,
     hipStream_t stream);
 
-// Single-token decode specialization (rows == 1, out_features % 16 == 0,
-// k_padded % 128 == 0), BF16 output only. unroll == 0 selects the measured
-// default.
-bool mxfp4_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded);
-
-uint32_t mxfp4_decode1_unroll(uint32_t out_features, uint32_t k_padded);
-
-hipError_t launch_gemm_mxfp4_w4a8_decode1(
-    const uint8_t* weight_codes,
-    const uint8_t* weight_scales,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    shelf::bf16_t* output,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t unroll,
-    hipStream_t stream);
-
 // Small-M (2 <= rows <= 128) split-K variant with an in-block LDS reduction.
 bool mxfp4_splitk_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded);
 

@@ -118,8 +118,8 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * Decode(投機ONの場合、SpecとVerify)とPrefillを同じバッチ内で同時実行可能にして、pp=row2048が動作している場合でも、Decode出力を止めない
 * MTPの実装
 * exl3(mul1)の実装
-* MXFP4 optimized kernel（W4A8 WMMA・decode1 / splitk / rowblock）と native fragment layout は実装済み
-* MXFP4 prefill の 2D staging variant（rows >= 256 の weight 再利用）
+* MXFP4 optimized kernel（W4A8 WMMA・splitk / rowblock / prefill2d）と native fragment layout は実装済み
+* MXFP4 の行基準 E8M0 fold（inner loop の per-block rescale を消す。bit 一致は失われる）
 * qwen35moe対応・最適化
 * pipeline-parallelの実装
 * expert-parallelの実装

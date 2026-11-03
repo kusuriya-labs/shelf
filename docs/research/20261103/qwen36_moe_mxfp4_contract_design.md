@@ -164,7 +164,7 @@ std::size_t shared_expert_intermediate_size = 0;
   （`rmsnorm_gated_rows`）。key 欠落を false 扱いにした現状は MoE で誤り。
 - `attn_output_gate` は読まない。Qwen3.5 / 3.6 系は gate 無し path が無い
   （oracle も `attn_output_gate == false` を unsupported で弾く）。
-  校验は `q_proj` の rows が `2 * num_attention_heads * head_dim` であることで行う
+  検証は `q_proj` の rows が `2 * num_attention_heads * head_dim` であることで行う
   （`gated_attention_feature_sizes` が既に検証している）。
 - `layer_types` と safetensors の tensor 構成の一致（linear 層は
   `linear_attn.*`、full 層は `self_attn.*` を持つ）を load 時検証に加える。

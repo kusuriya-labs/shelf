@@ -99,12 +99,19 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   activation scale は group 128 なので 128 K（4 block）を 1 組として LDS へ stage する。
   weight scale を E4M3 operand 側へ fold しない（fold は加算再結合を変え、
   bit 一致が失われるため）。
-- variant は `Decode1`（rows == 1、1 wave = 16 output）、
-  `SplitK`（rows 2..32 かつ out_features <= 2560、wave で K を分割し LDS で reduce）、
-  `RowBlock1 / 2 / 4`（activation 行 tile の数）。variant 選択と geometry allowlist は
-  `selectors/linear_selector.cpp` が hold する。
+- variant は `SplitK`（rows <= 32 かつ out_features <= 2560、wave で K を分割し LDS で
+  reduce）、`RowBlock1 / 2 / 4`（activation 行 tile の数）、
+  `Prefill2D`（rows >= 512 の prefill。1 block が 256 行 x 64 output、8 wave。
+  128 K chunk ごとに weight fragment を展開して LDS へ stage し、4 行 tile で再利用する）。
+  `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除した方針に従う。
+  rows == 1 は SplitK または RowBlock1 が担当し、DRAM 律速 shape では 590 GB/s 出る）。
+  variant 選択と geometry allowlist は `selectors/linear_selector.cpp` が hold する。
 - activation codes / scales は FP8 W8A8 と同一の `Int8ActivationWorkspaceLayout`
   （64 K fragment block、group 128 F32 scale）をそのまま読む。
+- **E8M0 を operand 側へ fold しない**。fold（行基準の `d = ref - e8m0` で E2M1 仮数を
+  2^-d だけ下げる）は inner loop の per-block rescale を消せるが、加算の再結合が変わり
+  correctness path と bit 一致しなくなる。実 checkpoint での d 分布実測と判断は
+  [../research/20261103/mxfp4_gate_a_prime.md](../research/20261103/mxfp4_gate_a_prime.md)。
 
 ## workgroup barrier のスコープ
 

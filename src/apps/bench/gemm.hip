@@ -62,9 +62,10 @@ void usage(FILE* f) {
         "  --k N                          (default 5120)\n"
         "  --shapes N:K,N:K,...           (explicit shape list)\n"
         "  --impl auto|wmma|wide|splitk|exact   (bf16 forced implementation)\n"
-        "  --impl auto|decode1|splitk|rowblock1|2|4   (mxfp4 forced implementation)\n"
-        "  --mxfp4-split N                  mxfp4 split-K ways (default 4)\n"
-        "  --mxfp4-unroll N                 mxfp4 decode1 unroll (default measured)\n"
+        "  --impl auto|splitk|rowblock1|2|4      (mxfp4 forced implementation)\n"
+        "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
+
+
         "  --model-dir PATH               (with --actual-qwen-shapes: read Qwen config)\n"
         "  --actual-qwen-shapes           (benchmark all deduped Qwen linear shapes)\n"
         "  --warmup N                     (default 100)\n"
@@ -664,18 +665,18 @@ shelf::kernel::Mxfp4GemmConfig mxfp4_config_for(const std::string& impl, uint32_
                                                 uint32_t unroll) {
     using Id = shelf::kernel::Mxfp4GemmConfigId;
     Id id = Id::RowBlock1;
-    if (impl == "decode1") id = Id::Decode1;
-    else if (impl == "splitk") id = Id::SplitK;
+    if (impl == "splitk") id = Id::SplitK;
+    else if (impl == "prefill2d") id = Id::Prefill2D;
     else if (impl == "rowblock2") id = Id::RowBlock2;
     else if (impl == "rowblock4") id = Id::RowBlock4;
-    return shelf::kernel::Mxfp4GemmConfig{id, static_cast<uint8_t>(split),
-                                          static_cast<uint8_t>(unroll)};
+    (void)unroll;
+    return shelf::kernel::Mxfp4GemmConfig{id, static_cast<uint8_t>(split)};
 }
 
 const char* mxfp4_config_name(const shelf::kernel::Mxfp4GemmConfig& cfg) {
     switch (cfg.id) {
-    case shelf::kernel::Mxfp4GemmConfigId::Decode1: return "decode1";
     case shelf::kernel::Mxfp4GemmConfigId::SplitK: return "splitk";
+    case shelf::kernel::Mxfp4GemmConfigId::Prefill2D: return "prefill2d";
     case shelf::kernel::Mxfp4GemmConfigId::RowBlock1: return "rowblock1";
     case shelf::kernel::Mxfp4GemmConfigId::RowBlock2: return "rowblock2";
     case shelf::kernel::Mxfp4GemmConfigId::RowBlock4: return "rowblock4";
@@ -778,8 +779,7 @@ int run_gemm_mxfp4(Options& o) {
                 shelf::execution::Mxfp4GemmSelectorInput{rows, n, shape.k, kp});
             std::string selected = "gemm";
             shelf::kernel::Mxfp4GemmConfig cfg{shelf::kernel::Mxfp4GemmConfigId::RowBlock1,
-                                               static_cast<uint8_t>(o.mxfp4_split),
-                                               static_cast<uint8_t>(o.mxfp4_unroll)};
+                                               static_cast<uint8_t>(o.mxfp4_split)};
             if (o.variant == "correctness") {
                 selected = "correctness";
             } else if (o.impl == "auto") {

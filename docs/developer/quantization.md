@@ -191,8 +191,9 @@ production の Program Builder は linear の activation 量子化方針を
   も同じ native layout を読む。E2M1 -> E4M3 展開と E8M0 rescale は register 内で行う。
   variant 選択は `selectors/linear_selector.cpp` が hold し、geometry は allowlist 制
   （`(out_features, k)` ごとに実測値を伴って追加する）。production が使う variant は
-  `Decode1`（rows == 1）、`SplitK`（rows <= 32 かつ out <= 2560）、
-  `RowBlock1 / 2 / 4`（それ以外）であり、Prefill 向けの 2D staging variant は未実装。
+  `SplitK`（rows <= 32 かつ out_features <= 2560）、`Prefill2D`（rows >= 512 で
+  weight tile の再利用が見合う形状）、`RowBlock1 / 2 / 4`（それ以外）。
+  `rows == 1` の専用 variant は持たない（FP8 linear で decode1 経路を削除済み）。
 - `WeightSlot` の native contract: `codes_row_stride_bytes == (k_padded / 32) * 256`、
   `scale_row_stride_bytes == storage_scale_stride_bytes == k_padded / 32`、
   `preshuffled == true`。満たさない slot は dispatch 側で失敗する。

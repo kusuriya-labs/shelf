@@ -20,6 +20,7 @@ constexpr uint32_t kThreadsPerBlock = 32u;
 // One native weight block is 16 outputs x 32 K, packed 4-bit: 256 bytes where
 // output row ol owns 16 contiguous bytes and byte b holds code[k = b] in the
 // low nibble and code[k = 16 + b] in the high nibble.
+constexpr uint32_t kGroupElements = 32u;
 constexpr uint32_t kWeightBlockBytes = 256u;
 constexpr uint32_t kFragBlockBytes = 1024u;
 constexpr uint32_t kFragLaneBytes = 32u;
@@ -121,7 +122,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
 
     const bool full_tile = (out_start + kTileOut <= out_features);
 
-    auto run_k_loop = [&]<bool kGuarded>() {
+    auto run_k_loop = [&]<bool kGuarded, int kUnroll>() {
+        #pragma unroll kUnroll
         for (uint32_t ag = 0; ag < ng; ++ag) {
             for (uint32_t s = tid; s < 2u * MB * 8u; s += kThreadsPerBlock) {
                 const uint32_t kg = s / (MB * 8u);
@@ -133,6 +135,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
                     : 0.0f;
             }
             detail::lds_barrier();
+
+            float asv[MB][8];
+            #pragma unroll
+            for (int t = 0; t < MB; ++t) {
+                const uint32_t slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
+                #pragma unroll
+                for (int j = 0; j < 8; ++j)
+                    asv[t][j] = smem[slot + static_cast<uint32_t>(j)];
+            }
 
             #pragma unroll
             for (uint32_t u = 0; u < 4u; ++u) {
@@ -166,20 +177,19 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
                     float8_t c = float8_t MXFP4_ZERO8;
                     c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
                     c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-                    const uint32_t slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
                     #pragma unroll
                     for (int j = 0; j < 8; ++j)
-                        acc[t][j] = __builtin_fmaf(
-                            c[j], ws * smem[slot + static_cast<uint32_t>(j)], acc[t][j]);
+                        acc[t][j] = __builtin_fmaf(c[j], ws * asv[t][j], acc[t][j]);
                 }
             }
             detail::lds_barrier();
         }
     };
+    constexpr int kUnroll = (MB >= 4) ? 2 : 4;
     if (full_tile)
-        run_k_loop.template operator()<false>();
+        run_k_loop.template operator()<false, kUnroll>();
     else
-        run_k_loop.template operator()<true>();
+        run_k_loop.template operator()<true, kUnroll>();
 
     #pragma unroll
     for (int t = 0; t < MB; ++t) {
@@ -201,58 +211,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
             }
         }
     }
-}
-
-// Single-token decode: one wave evaluates 16 outputs over the whole K. Only
-// activation row 0 exists, so the epilogue keeps one accumulator per lane and
-// the row guard, the rs shuffle and the dtype branch all disappear.
-template <int kUnroll>
-__global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_decode1_kernel(
-    const uint8_t* __restrict__ weight_codes,
-    const uint8_t* __restrict__ weight_scales,
-    const uint8_t* __restrict__ activation_codes,
-    const float* __restrict__ activation_scales,
-    bf16_t* __restrict__ output,
-    const uint32_t k_padded,
-    const uint32_t weight_scale_stride) {
-    const uint32_t tid = threadIdx.x;
-    const uint32_t m_lane = tid & 15u;
-    const uint32_t k_group = tid >> 4u;
-    const uint32_t o_self = blockIdx.x * kTileOut + m_lane;
-
-    const uint32_t nb = k_padded >> 5;
-    const uint32_t ng = k_padded >> 7;
-
-    const uint8_t* wrow = weight_codes +
-        static_cast<size_t>(o_self >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
-        static_cast<size_t>(o_self & 15u) * 16u + k_group * 8u;
-    const uint8_t* wsrow = weight_scales + static_cast<size_t>(o_self) * weight_scale_stride;
-    const uint8_t* arow = activation_codes + static_cast<size_t>(tid) * kFragLaneBytes;
-
-    float acc = 0.0f;
-    #pragma unroll kUnroll
-    for (uint32_t ag = 0; ag < ng; ++ag) {
-        const float as = activation_scales[ag];
-        #pragma unroll
-        for (uint32_t u = 0; u < 4u; ++u) {
-            const uint32_t ib = ag * 4u + u;
-            int32x2_t w0 = {};
-            int32x2_t w1 = {};
-            mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes, w0, w1);
-            const float ws = mxfp4_e8m0_f32(wsrow[ib]) * as;
-            const uint8_t* ap = arow + (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
-            const int32x2_t a0 = *reinterpret_cast<const int32x2_t*>(ap);
-            const int32x2_t a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
-            float8_t c = float8_t MXFP4_ZERO8;
-            c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
-            c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
-            acc = __builtin_fmaf(c[0], ws, acc);
-        }
-    }
-
-    if (k_group != 0u)
-        return;
-    output[o_self] = bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc))};
 }
 
 template <int MB, int kSplit>
@@ -398,6 +356,183 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
     }
 }
 
+
+constexpr uint32_t k2dThreads = 256u;
+constexpr uint32_t k2dRowsPerBlock = kMxfp4GemmPrefill2dRowsPerBlock;
+constexpr uint32_t k2dKChunk = 128u;
+
+// Prefill: one block evaluates 256 activation rows x kBn outputs with 8 waves.
+// Each wave expands its share of the 16-output x 32-K weight blocks into LDS
+// once per 128-K chunk and reuses them across 4 activation row tiles, so the
+// E2M1 -> E4M3 expansion (the dominant ALU cost of this format) is paid once
+// per weight fragment instead of once per row tile. E8M0 scales are staged as
+// bytes and applied per 32-K block, exactly like the row-block kernels, so the
+// accumulation order and the result are unchanged.
+template <uint32_t kBn, bool kGuarded>
+__global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride) {
+    constexpr uint32_t kNtTotal = kBn / kTileOut;
+    constexpr uint32_t kKb = k2dKChunk / kGroupElements;
+    constexpr uint32_t kNtPerWave = kNtTotal / 2u;
+    constexpr uint32_t kSlotsPerWave = (kNtTotal * kKb) / 8u;
+    static_assert(kBn == 64u || kBn == 128u, "prefill 2D output block");
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t lane = tid & 31u;
+    const uint32_t m_lane = lane & 15u;
+    const uint32_t k_group = lane >> 4u;
+    const uint32_t wave_m = wave & 3u;
+    const uint32_t wave_n = wave >> 2u;
+
+    const uint32_t out_block_start = blockIdx.x * kBn;
+    const uint32_t row_start = blockIdx.y * k2dRowsPerBlock;
+    if (out_block_start >= out_features || row_start >= rows)
+        return;
+
+    const uint32_t nb = k_padded >> 5;
+    const uint32_t as_row_floats = activation_scale_stride >> 2u;
+    const uint32_t row_base = row_start + wave_m * 4u * kTileRow;
+
+    // The activation fragment block is addressed by lane slot, exactly as in the
+    // row-block kernels: lane L carries the L&15 output row of the tile and the
+    // L>>4 half of each 16-K fragment.
+    const uint8_t* arow[4];
+    #pragma unroll
+    for (int t = 0; t < 4; ++t) {
+        arow[t] = activation_codes +
+            (static_cast<size_t>(row_base >> 4) + static_cast<size_t>(t)) *
+                (static_cast<size_t>(activation_code_stride) * 16u) +
+            static_cast<size_t>(lane) * kFragLaneBytes;
+    }
+
+    __shared__ int32x2_t w0f_lds[kNtTotal][kKb][32];
+    __shared__ int32x2_t w1f_lds[kNtTotal][kKb][32];
+    __shared__ uint8_t ws_lds[kNtTotal][kKb][16];
+
+    float8_t acc[4][kNtPerWave];
+    #pragma unroll
+    for (int t = 0; t < 4; ++t)
+        #pragma unroll
+        for (uint32_t nt = 0; nt < kNtPerWave; ++nt)
+            acc[t][nt] = float8_t MXFP4_ZERO8;
+
+    for (uint32_t cb = 0; cb < k_padded / k2dKChunk; ++cb) {
+        #pragma unroll
+        for (uint32_t s = 0; s < kSlotsPerWave; ++s) {
+            const uint32_t slot = wave + s * 8u;
+            const uint32_t nt = slot % kNtTotal;
+            const uint32_t kb = slot / kNtTotal;
+            const uint32_t o_stage = out_block_start + nt * kTileOut + m_lane;
+            const bool stage_valid = !kGuarded || (o_stage < out_features);
+            if (stage_valid) {
+                const uint32_t ib = cb * kKb + kb;
+                const uint8_t* wrow = weight_codes +
+                    static_cast<size_t>(o_stage >> 4) * (static_cast<size_t>(nb) * kWeightBlockBytes) +
+                    static_cast<size_t>(o_stage & 15u) * 16u + k_group * 8u;
+                int32x2_t w0 = {};
+                int32x2_t w1 = {};
+                mxfp4_weight_pair(wrow + static_cast<size_t>(ib) * kWeightBlockBytes, w0, w1);
+                w0f_lds[nt][kb][lane] = w0;
+                w1f_lds[nt][kb][lane] = w1;
+                if (k_group == 0u) {
+                    ws_lds[nt][kb][m_lane] = weight_scales[
+                        static_cast<size_t>(o_stage) * weight_scale_stride + ib];
+                }
+            }
+        }
+        detail::lds_barrier();
+
+        float asv[4][8];
+        #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const uint32_t rr = row_base + static_cast<uint32_t>(t) * kTileRow +
+                                    8u * k_group + static_cast<uint32_t>(j);
+                asv[t][j] = (!kGuarded || rr < rows)
+                    ? activation_scales[static_cast<size_t>(rr) * as_row_floats + cb]
+                    : 0.0f;
+            }
+        }
+
+        #pragma unroll
+        for (uint32_t kb = 0; kb < kKb; ++kb) {
+            int32x2_t wf0[kNtPerWave];
+            int32x2_t wf1[kNtPerWave];
+            float wsv[kNtPerWave];
+            #pragma unroll
+            for (uint32_t nt = 0; nt < kNtPerWave; ++nt) {
+                const uint32_t nt_glob = wave_n * kNtPerWave + nt;
+                wf0[nt] = w0f_lds[nt_glob][kb][lane];
+                wf1[nt] = w1f_lds[nt_glob][kb][lane];
+                wsv[nt] = mxfp4_e8m0_f32(ws_lds[nt_glob][kb][m_lane]);
+            }
+            const uint32_t ib = cb * kKb + kb;
+            const uint32_t aoff = (ib >> 1) * kFragBlockBytes + (ib & 1u) * 16u;
+            #pragma unroll
+            for (int t = 0; t < 4; ++t) {
+                int32x2_t a0 = {};
+                int32x2_t a1 = {};
+                if (!kGuarded ||
+                    (row_base + static_cast<uint32_t>(t) * kTileRow + m_lane) < rows) {
+                    const uint8_t* ap = arow[t] + aoff;
+                    a0 = *reinterpret_cast<const int32x2_t*>(ap);
+                    a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
+                }
+                #pragma unroll
+                for (uint32_t nt = 0; nt < kNtPerWave; ++nt) {
+                    float8_t c = float8_t MXFP4_ZERO8;
+                    c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, wf0[nt], c);
+                    c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, wf1[nt], c);
+                    #pragma unroll
+                    for (int j = 0; j < 8; ++j)
+                        acc[t][nt][j] = __builtin_fmaf(
+                            c[j], wsv[nt] * asv[t][j], acc[t][nt][j]);
+                }
+            }
+        }
+        detail::lds_barrier();
+    }
+
+    #pragma unroll
+    for (uint32_t nt = 0; nt < kNtPerWave; ++nt) {
+        const uint32_t o_self = out_block_start + (wave_n * kNtPerWave + nt) * kTileOut + m_lane;
+        if (kGuarded && o_self >= out_features)
+            continue;
+        #pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const uint32_t r_base = row_base + static_cast<uint32_t>(t) * kTileRow + 8u * k_group;
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const uint32_t r = r_base + static_cast<uint32_t>(j);
+                if (r >= rows)
+                    continue;
+                const float v = acc[t][nt][j];
+                const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
+                if (output_dtype == static_cast<uint32_t>(Mxfp4GemmOutputDType::BF16)) {
+                    static_cast<shelf::bf16_t*>(output)[out_idx] =
+                        shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(v))};
+                } else {
+                    static_cast<float*>(output)[out_idx] = v;
+                }
+            }
+        }
+    }
+}
+
 #define MXFP4_MB_LAUNCH(MB)                                                      \
     do {                                                                         \
         const dim3 grid((out_features + kTileOut - 1u) / kTileOut,               \
@@ -428,19 +563,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
 
 }  // namespace
 
-bool mxfp4_decode1_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded) {
-    return rows == 1u && out_features != 0u && (out_features & 15u) == 0u &&
-           (k_padded & 127u) == 0u;
-}
-
-uint32_t mxfp4_decode1_unroll(uint32_t out_features, uint32_t k_padded) {
-    (void)out_features;
-    (void)k_padded;
-    return 2u;
-}
-
 bool mxfp4_splitk_supported(uint32_t rows, uint32_t out_features, uint32_t k_padded) {
-    return rows >= 2u && rows <= kMxfp4GemmSplitKMaxRows && out_features != 0u &&
+    return rows >= 1u && rows <= kMxfp4GemmSplitKMaxRows && out_features != 0u &&
            (out_features & 15u) == 0u && (k_padded & 127u) == 0u;
 }
 
@@ -465,6 +589,30 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
     if ((k_padded & 127u) != 0u)
         return hipErrorNotSupported;
     const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
+    if (config.id == Mxfp4GemmConfigId::Prefill2D) {
+        // BN 128 was measured and rejected: the non-folded per-K32 rescale needs
+        // 16 float8 accumulators per wave and the kernel loses 1.8x to BN 64.
+        constexpr uint32_t k2dOutBlock = 64u;
+        if ((k_padded % k2dKChunk) != 0u || (rows % k2dRowsPerBlock) != 0u ||
+            out_features < k2dOutBlock)
+            return hipErrorNotSupported;
+        const dim3 grid2d((out_features + k2dOutBlock - 1u) / k2dOutBlock,
+                          rows / k2dRowsPerBlock, 1);
+        if ((out_features % k2dOutBlock) != 0u) {
+            gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, true><<<grid2d, k2dThreads, 0, stream>>>(
+                weight_codes, weight_scales, acodes, activation_scales, output,
+                static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
+                weight_scale_stride_bytes, activation_code_stride_bytes,
+                activation_scale_stride_bytes, output_row_stride);
+        } else {
+            gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, false><<<grid2d, k2dThreads, 0, stream>>>(
+                weight_codes, weight_scales, acodes, activation_scales, output,
+                static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
+                weight_scale_stride_bytes, activation_code_stride_bytes,
+                activation_scale_stride_bytes, output_row_stride);
+        }
+        return hipGetLastError();
+    }
     switch (config.id) {
     case Mxfp4GemmConfigId::RowBlock4:
         MXFP4_MB_LAUNCH(4);
@@ -474,58 +622,6 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
     default:
         MXFP4_MB_LAUNCH(1);
     }
-}
-
-hipError_t launch_gemm_mxfp4_w4a8_decode1(
-    const uint8_t* weight_codes,
-    const uint8_t* weight_scales,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    shelf::bf16_t* output,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t unroll,
-    hipStream_t stream) {
-    (void)activation_code_stride_bytes;
-    (void)activation_scale_stride_bytes;
-    if (!mxfp4_decode1_supported(rows, out_features, k_padded))
-        return hipErrorNotSupported;
-    if (unroll == 0u)
-        unroll = mxfp4_decode1_unroll(out_features, k_padded);
-    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
-    const dim3 grid(out_features >> 4u);
-    switch (unroll) {
-    case 1u:
-        gemm_mxfp4_w4a8_decode1_kernel<1><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, acodes, activation_scales, output, k_padded,
-            weight_scale_stride_bytes);
-        break;
-    case 2u:
-        gemm_mxfp4_w4a8_decode1_kernel<2><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, acodes, activation_scales, output, k_padded,
-            weight_scale_stride_bytes);
-        break;
-    case 8u:
-        gemm_mxfp4_w4a8_decode1_kernel<8><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, acodes, activation_scales, output, k_padded,
-            weight_scale_stride_bytes);
-        break;
-    case 16u:
-        gemm_mxfp4_w4a8_decode1_kernel<16><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, acodes, activation_scales, output, k_padded,
-            weight_scale_stride_bytes);
-        break;
-    default:
-        gemm_mxfp4_w4a8_decode1_kernel<4><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight_codes, weight_scales, acodes, activation_scales, output, k_padded,
-            weight_scale_stride_bytes);
-        break;
-    }
-    return hipGetLastError();
 }
 
 hipError_t launch_gemm_mxfp4_w4a8_splitk(
@@ -582,15 +678,6 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
     hipStream_t stream) {
-    if (config.id == Mxfp4GemmConfigId::Decode1 &&
-        mxfp4_decode1_supported(rows, out_features, k_padded) &&
-        output_dtype == Mxfp4GemmOutputDType::BF16) {
-        return launch_gemm_mxfp4_w4a8_decode1(
-            weight_codes, weight_scales, activation_codes, activation_scales,
-            static_cast<shelf::bf16_t*>(output), rows, out_features, k_padded,
-            weight_scale_stride_bytes, activation_code_stride_bytes,
-            activation_scale_stride_bytes, config.unroll, stream);
-    }
     if (config.id == Mxfp4GemmConfigId::SplitK) {
         return launch_gemm_mxfp4_w4a8_splitk(
             config.split_k, weight_codes, weight_scales, activation_codes,

@@ -180,23 +180,31 @@ select_mxfp4_gemm_config(const Mxfp4GemmSelectorInput& input) {
         linear_debug_miss(LinearComputeFamily::Mxfp4W4A8, input.out_features, input.k, input.rows);
         return std::nullopt;
     }
-    if (input.rows == 1u && (input.out_features & 15u) == 0u) {
-        return shelf::kernel::Mxfp4GemmConfig{
-            Id::Decode1, 0u, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmDecode1Unroll)};
-    }
+    const bool tile_aligned = (input.out_features & 15u) == 0u;
     // Split-K wins only while the 16-output blocks cannot fill the device; the
     // measured crossover on R9700 is between 2560 and 5120 output features.
-    if (input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows &&
-        (input.out_features & 15u) == 0u &&
+    // The 2D staged kernel pays off once the weight tile is reused across enough
+    // row blocks; measured crossover on R9700 (docs/research/20261103).
+    const bool prefill2d =
+        input.rows >= shelf::kernel::kMxfp4GemmPrefill2dMinRows &&
+        (input.rows % shelf::kernel::kMxfp4GemmPrefill2dRowsPerBlock) == 0u &&
+        (input.k_padded % shelf::kernel::kMxfp4GemmPrefill2dKChunk) == 0u &&
+        input.out_features >= 64u;
+    if (prefill2d && (input.rows >= 1024u ||
+                      static_cast<uint64_t>(input.out_features) * input.k_padded >=
+                          shelf::kernel::kMxfp4GemmPrefill2dMinWeights)) {
+        return shelf::kernel::Mxfp4GemmConfig{Id::Prefill2D, 0u};
+    }
+    if (input.rows <= shelf::kernel::kMxfp4GemmSplitKMaxRows && tile_aligned &&
         input.out_features <= shelf::kernel::kMxfp4GemmSplitKMaxOutFeatures) {
         return shelf::kernel::Mxfp4GemmConfig{
-            Id::SplitK, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmSplitKWays), 0u};
+            Id::SplitK, static_cast<uint8_t>(shelf::kernel::kMxfp4GemmSplitKWays)};
     }
     if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock1MaxRows)
-        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock1, 0u, 0u};
+        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock1, 0u};
     if (input.rows <= shelf::kernel::kMxfp4GemmRowBlock2MaxRows)
-        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock2, 0u, 0u};
-    return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock4, 0u, 0u};
+        return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock2, 0u};
+    return shelf::kernel::Mxfp4GemmConfig{Id::RowBlock4, 0u};
 }
 
 }  // namespace shelf::execution

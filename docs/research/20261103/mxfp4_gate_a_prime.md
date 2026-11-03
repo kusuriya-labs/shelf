@@ -9,7 +9,7 @@ Gate A（format / load / correctness path）は [mxfp4_gate_a.md](mxfp4_gate_a.m
 （`src/phaseshift/models/qwen35/kernels/optimized/linear/mxfp4.hip`、
 `include/phaseshift/quantization/mxfp4/mxfp4_native.h`）を確認した上で、
 同系統の構造を shelf の contract（activation group 128、64 K fragment block、
-`WeightSlot` stride 検証）へ合わせ込みた実装である。
+`WeightSlot` stride 検証）へ合わせ込んだ実装である。
 
 ## 1. 決定: native layout を導入し、canonical と分離した
 
@@ -38,7 +38,7 @@ E2M1 → E4M3 展開が byte 再配置なしに operand register へ書ける。
 
 E2M1 → E4M3 は `v_perm_b32` 6 本（magnitude table 2 本 + negative table 2 本 +
 sign を selector bit3 として選ぶ最終 perm 2 本）で、shift / or を含まない。
-sign を `((n & 8) << 4)` で OR する 6 op 版は試作段階で弃て、
+sign を `((n & 8) << 4)` で OR する 6 op 版は試作段階で棄て、
 permutexa 形式（`0x03020100 | ((n & 0x08080808) >> 1)`）へ寄せた。
 
 副次的に確認した事実: **gfx1201 には `v_dot4_f32_fp8_fp8` がある**
@@ -147,3 +147,119 @@ MB8 は全条件で劣るので **variant 自体を削除**した（到達不能
 - bench 側: `--shapes` は bf16 runner でしか効いておらず、fp8 runner は常に
   `--n/--k` の 1 shape で計測していた。fp8 / mxfp4 で解消したので、
   fp8 の shape 別数値は `--shapes` 付きで取り直した（34816:5120 rows=1 = 294.08 µs）。
+
+---
+
+## 6. 更新（同日）: Decode1 は削除した
+
+上記 §3 の decode1 採用は**取り消し**。`d209b1b カーネルの Decode1 経路を削除` で
+FP8 / PSQ5 の rows==1 GEMV 経路（`decode1_supported` / `decode1_unroll` /
+`launch_*_decode1`）を落としており、「decode / prefill の linear は wmma 経路のみ」が
+現行方針である。参照実装（phaseshift-mxfp4）に decode1 が残っていたのでそのまま
+移植したのは誤りだった。
+
+削除後の実測（同一条件の再計測、p50 µs）:
+
+| shape | rows=1 rowblock1 | rows=1 splitk8 | 削除前 decode1 |
+| --- | ---: | ---: | ---: |
+| 256:5120 | 17.02 | **11.01** | 10.33 |
+| 1024:5120 | 17.10 | **11.25** | 10.57 |
+| 5120:5120 | 21.32 | 21.55 | 15.79 |
+| 17408:5120 | **46.34** | 59.00 | 35.74 |
+| 34816:5120 | **150.91** | 157.26 | 146.58 |
+
+- rows==1 は SplitK（out <= 2560）または RowBlock1 が担う。SplitK は rows>=1 を
+  受理するよう gate を広げた（rows=1 で 17.0 → 11.0 µs の実測利得）。
+- **E2E への影響は 3.8% のみ**（tg ctx128 tokens32: 28.38 → 27.29 tok/s）。
+  27B クラスの decode は DRAM 律速で、rowblock1 が 34816:5120 rows=1 で
+  590 GB/s（天井 636 の 93%）を出しているため、L3 内 shape の差は打ち消される。
+- RowBlock の activation scale を 128 K chunk で LDS から register へ hoist した
+  （4 block 分使い回し）。bit 一致は維持、µs 単位の差は上記表に織り込み済み。
+
+## 7. 更新（同日）: prefill 2D staging variant を移植した
+
+`gemm_mxfp4_w4a8_prefill_2d_kernel<64>`: 1 block = 256 行 x 64 output、8 wave。
+128 K chunk ごとに weight fragment を展開して LDS へ stage（`w0f_lds/w1f_lds`）し、
+4 行 tile で再利用する。E8M0 は byte のまま `ws_lds` に stage し、32 K block ごとに
+`fma(c, ws * as, acc)` で適用する（fold しないので **correctness path と bit 一致**、
+`test_mxfp4_linear` の `prefill2d` / `2d-guard` ケースで固定）。
+
+micro 実測（p50 µs、`--check` で全 shape mismatch=0）:
+
+| shape | rows | prefill2d(BN64) | rowblock2 | rowblock4 |
+| --- | ---: | ---: | ---: | ---: |
+| 5120:5120 | 256 | 175.8 | **149.9** | 187.1 |
+| 5120:5120 | 512 | 331.0 | **298.3** | 358.5 |
+| 5120:5120 | 1024 | **539.0** | 698.5 | — |
+| 5120:5120 | 2048 | **1357.7** | 1569.5 | 1856.1 |
+| 10240:5120 | 512 | **549.9** | 603.5 | — |
+| 10240:5120 | 2048 | **2511.0** | 3011.3 | — |
+| 17408:5120 | 256 | 496.3 | 498.8 | 623.7 |
+| 17408:5120 | 512 | **927.2** | 1244.6 | 1605.8 |
+| 17408:5120 | 2048 | **4132.1** | 5022.1 | 5853.1 |
+| 5120:17408 | 512 | **1310.2** | 1389.0 | — |
+| 5120:17408 | 2048 | **4214.0** | 5258.1 | — |
+
+selector の規則（実測の crossover）: `rows >= 1024`、または
+`rows >= 512 かつ out_features * k_padded >= 4.0e7` で Prefill2D。
+**BN=128 は計測却下**（BN=64 に対して 1.8〜2.3 倍遅い。fold しない形では
+per-block rescale の accumulator が 16 本に膨らみ VGPR が溢れる）。
+参照実装が 128x128 を採用できているのは fold で rescale を消しているから、
+fold なしの本実装では 64 が正解だった。
+
+E2E prefill A/B（`shelf-bench pp --prompt-tokens 2048 --prefill-chunk 2048`、
+同一ビルドで selector 規則のみ切替、4 runs）:
+
+| 条件 | tok/s | ms |
+| --- | ---: | ---: |
+| Prefill2D 無効（RowBlock のみ） | 1131.0 | 1810 |
+| Prefill2D 有効 | **1520.4** | 1343 |
+
+**+34.7%（時間 -25.8%）**。decode は影響なし（chunk 128 は rows < 512 で非該当）。
+
+## 8. 参照: `../references/radiance`（libr4d）から取れる手
+
+`libr4d/r4d_mxfp4.h` / `r4d_gemm_mxfp4a8_decode.hip` / `r4d_gemm_mxfp4a8_gemv.hip`。
+phaseshift の fold（E8M0 の絶対値を E4M3 へ畳む、下位桁こぼれ 10.75%）と違い、
+**行基準の fold** を使っている。
+
+```text
+ref[n]  = 行 n の E8M0 byte の最大値
+d       = ref[n] - e8m0[n][blk]        （d >= 0、16 行の定数テーブル kMxfp4Mag[d][2]）
+operand = e2m1 仮数 × 2^-d を E4M3 byte として v_perm で展開（d <= 8 で厳密）
+epilogue: acc * 2^(ref[n] - 127) を 1 回
+```
+
+実 checkpoint `models/Qwen3.8-27B-Quark-AWQ-MXFP4` の全 496 tensor
+（760,954,880 scale block）で d を実測した:
+
+| 帯域 | block 数 | 比率 |
+| --- | ---: | ---: |
+| d <= 8（fold が厳密） | 760,954,598 | **99.99996%** |
+| d 9..12（RNE で丸める） | 282 | 0.00004% |
+| d >= 13（ゼロ） | 0 | 0% |
+
+d の最頻値は 1、最大 10。つまり radiance の fold はこの checkpoint では
+**量子化誤差を変えない**（丸め直数が変わるだけ）。phaseshift の fold が
+10.75% の block で下位桁を落として E2E のトークン列を変えたのと同じ土俵ではない。
+
+inner loop から消せるもの: 32 K block ごとの `mul + fma` x8（RowBlock では
+128 K あたり 64 VALU、Prefill2D では 1024 VALU / wave）。activation scale は
+128 K chunk ごとの適用のままなので、rescale 命令は 1/4 に減る。
+
+他に確認した設計:
+- rows 1〜8 の GEMV を **LDS に weight を載せない形**（lane が自分の B fragment word を
+  fragment 順の weight から直接読み、8 wave で K を分割、末尾で 1 回 LDS reduce）に分ける。
+  動機は「decode は純粋な weight stream。WMMA タイルの LDS staging + barrier 2 回で
+  narrow projection が DRAM の 1/3〜2/3 しか出ない」— shelf の `attn_kv 1024:5120`
+  rows=1 = 237 GB/s、`gdn_ba 48:5120` = 11 µs 床と符合する。
+- form 選択を **K だけで決める**（M に依存しない）。verify step の 1 行目が
+  素の decode と bit 一致するための契約になっている。
+- K % 128 == 0 は WMMA form、K % 64 は dot form（`v_dot4_f32_fp8_fp8`、16 B = 4 列 x 8 codes）。
+  shelf でも dot4 命令は gfx1201 で確認済み（§2）。
+
+次の一手（未実装）: 行基準 fold を Prefill2D と RowBlock へ入れる。
+per-row の `ref` を native payload の付随平面（N byte もしくは N f32、
+5120 行で 20 KB 程度）として preshuffle 時に作り、
+`d` をテーブル index にする。量子化誤差は不変で、変わる加算の再結合順序だけなので、
+判断ゲートは tolerance ではなく **E2E の GENERATED_IDS 一致**で置く。
