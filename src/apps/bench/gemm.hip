@@ -70,9 +70,6 @@ void usage(FILE* f) {
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
         "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
         "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
-        "  --mxfp4-a-rowref 0|1            A plane in the row-ref folded form (MXFP4 W4A8)\n"
-        "  --mxfp4-a-fold 0|1              time the A-plane E8M0 fold pass (arm C/D cost)\n"
-        "  --mxfp4-a-fold uses one E8M0 byte per 32 K (arm C plane; arm D replicates)\n"
 
 
         "  --model-dir PATH               (with --actual-qwen-shapes: read Qwen config)\n"
