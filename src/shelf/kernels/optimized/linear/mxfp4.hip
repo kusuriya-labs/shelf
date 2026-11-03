@@ -448,10 +448,12 @@ constexpr uint32_t k2dOutBlockFixed = 64u;
 // per weight fragment instead of once per row tile. E8M0 scales are staged as
 // bytes and applied per 32-K block, exactly like the row-block kernels, so the
 // accumulation order and the result are unchanged.
-// kActRescale == false is the measurement ablation of the A-side scale: the
-// activation group scale is not applied in the K loop at all and the WMMA
-// fragments chain straight into the accumulator. It is numerically wrong and is
-// only instantiated by launch_gemm_mxfp4_w4a8_ablated_noactrescale.
+// kActRescale == false is the per-token (arm B) shape of the A-side scale: the K
+// loop carries no activation scale at all and the WMMA fragments chain straight
+// into the accumulator, which is then multiplied by one scale per activation row.
+// The scale plane keeps the FP8 workspace stride but only column 0 is read, so it
+// is only numerically meaningful when the quantizer was run with one group per
+// row. Instantiated by launch_gemm_mxfp4_w4a8_ablated_noactrescale.
 template <uint32_t kBn, bool kGuarded, bool kFold, bool kActRescale = true>
 __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     const uint8_t* __restrict__ weight_codes,
@@ -507,6 +509,15 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     __shared__ int32x2_t w1f_lds[kNtTotal][kKb][32];
     __shared__ uint8_t ws_lds[kNtTotal][kKb][16];
     __shared__ uint2 mag_lds[16];
+    __shared__ float smem_as[k2dRowsPerBlock];
+    if constexpr (!kActRescale) {
+        for (uint32_t r = tid; r < k2dRowsPerBlock; r += k2dThreads) {
+            const uint32_t rr = row_start + r;
+            smem_as[r] = (!kGuarded || rr < rows)
+                ? activation_scales[static_cast<size_t>(rr) * as_row_floats]
+                : 0.0f;
+        }
+    }
     uint8_t ref_lds[kNtTotal];
     if constexpr (kFold) {
         if (wave == 0u)
@@ -639,6 +650,9 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
                 if (r >= rows)
                     continue;
                 float v = acc[t][nt][j];
+                if constexpr (!kActRescale)
+                    v *= smem_as[row_start + static_cast<uint32_t>(t) * kTileRow +
+                                 8u * k_group + static_cast<uint32_t>(j)];
                 if constexpr (kFold)
                     v *= mxfp4_e8m0_f32(ref_lds[wave_n * kNtPerWave + nt]);
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;

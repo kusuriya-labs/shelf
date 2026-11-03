@@ -121,9 +121,10 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * MXFP4 optimized kernel（W4A8 WMMA・splitk / rowblock / prefill2d）と native fragment layout は実装済み
 * MXFP4 の行基準 E8M0 fold は Prefill2D で実装済み（inner loop の per-block rescale を消す。
   `row_ref_exact` が true の payload では correctness path と bf16 bit 一致のまま）
-* MXFP4 linear の A 側量子化の比較（group 128 F32 / per-token F32 / MXFP8 group 32 E8M0 /
-  group 128 E8M0）。A scale を K ループから外すと Prefill2D で 27〜41% の上限が
-  空く（ablation 実測）ので、精度を測って採用する
+* MXFP4 linear の A 側量子化の比較は測った（group128-F32 / per-token-F32 /
+  group32-E8M0 / group128-E8M0、実 activation での精度と Prefill2D の速度上限。
+  docs/research/20261103/mxfp4_gate_a_prime.md §11）。残っているのは採用判断と、
+  案 B（行 1 個 scale）または案 C（E8M0 を A operand へ fold）の本実装
 * qwen35moe対応・最適化
 * pipeline-parallelの実装
 * expert-parallelの実装

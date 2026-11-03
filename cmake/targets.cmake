@@ -200,6 +200,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
+    src/shelf/inference/execution/linear_input_dump.cpp
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
