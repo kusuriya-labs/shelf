@@ -94,7 +94,8 @@ void linear_input_dump_maybe(
     if (s.tensors_written >= s.max_tensors) return;
     if (dispatch_index >= program.dispatches.size()) return;
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id != ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED)
+    if (b.kernel_id != ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED &&
+        b.kernel_id != ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
         return;
 
     PhysicalActivationQuantizeLaunch launch{};

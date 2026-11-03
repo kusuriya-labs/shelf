@@ -8,6 +8,7 @@
 #include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/runtime/program/program.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/runtime/program/activation_workspace_layout.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/core/memory/arena.h>
@@ -390,14 +391,17 @@ bool setup_correctness_fp8(const void* d_codes, const void* d_scales,
 }
 
 shelf::Status launch_correctness_linear_fp8(const CorrectnessEnv& env, uint32_t rows,
-                                         uint32_t kp, hipStream_t stream, bool mxfp4 = false) {
+                                         uint32_t kp, hipStream_t stream, bool mxfp4 = false,
+                                         bool act_rowref = false) {
     ::shelf::runtime::Int8ActivationWorkspaceLayout layout;
     const shelf::Status status = ::shelf::runtime::make_activation_workspace_layout(
         ::shelf::quantization::kFp8FinegrainedActivationQuantSpec, kp, rows, layout);
     if (!status.ok()) return status;
 
     ::shelf::runtime::DispatchBinding qbind{};
-    qbind.kernel_id = ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
+    qbind.kernel_id = act_rowref
+                          ? ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF
+                          : ::shelf::runtime::KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
     qbind.workspace_slot = 0u;
     qbind.group_size = 32u;
     qbind.activation_kp = kp;
@@ -420,6 +424,7 @@ shelf::Status launch_correctness_linear_fp8(const CorrectnessEnv& env, uint32_t 
     lbind.input_count = 0;
     lbind.output_slots[0] = 1;
     lbind.output_count = 1;
+    if (act_rowref) lbind.flags = ::shelf::runtime::kActFlagRowRefFolded;
 
     shelf::gpu::discard_cleanup_result(hipMemset(env.error_word, 0, sizeof(uint32_t)));
     shelf::Status st = shelf::kernel::launch_model_dispatch_correctness(
@@ -831,13 +836,6 @@ int run_gemm_mxfp4(Options& o) {
             ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
             ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
             if (!ok) { rc = 1; break; }
-            if (o.mxfp4_a_rowref && o.check) {
-                std::fprintf(stderr,
-                             "--check with --mxfp4-a-rowref needs the correctness-side rowref "
-                             "producer; run --check without it\n");
-                rc = 2;
-                break;
-            }
             CorrectnessEnv cenv;
             if (o.check && !setup_correctness_fp8(
                     d_codes, d_scales, d_input, d_output, rows, n, shape.k, kp, cenv, true)) {
@@ -927,7 +925,8 @@ int run_gemm_mxfp4(Options& o) {
 
             auto launch_one = [&]() -> hipError_t {
                 if (selected == "correctness") {
-                    shelf::Status st = launch_correctness_linear_fp8(cenv, rows, kp, stream, true);
+                    shelf::Status st = launch_correctness_linear_fp8(
+                        cenv, rows, kp, stream, true, o.mxfp4_a_rowref != 0u);
                     return st.ok() ? hipSuccess : hipErrorUnknown;
                 }
                 return shelf::kernel::launch_gemm_mxfp4_w4a8_auto(
@@ -942,7 +941,8 @@ int run_gemm_mxfp4(Options& o) {
             if (o.check) {
                 const size_t outn = (size_t)rows * n;
                 std::vector<uint16_t> h_c(outn), h_g(outn);
-                shelf::Status stc = launch_correctness_linear_fp8(cenv, rows, kp, stream, true);
+                shelf::Status stc = launch_correctness_linear_fp8(
+                    cenv, rows, kp, stream, true, o.mxfp4_a_rowref != 0u);
                 uint32_t ew = 0;
                 if (!stc.ok() || hipStreamSynchronize(stream) != hipSuccess ||
                     hipMemcpy(&ew, cenv.error_word, sizeof(ew), hipMemcpyDeviceToHost) != hipSuccess || ew != 0) {

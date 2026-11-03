@@ -73,6 +73,7 @@ struct ActivationWorkspace {
     uint32_t last_command = 0;
     uint32_t range_slot = kNoWorkspace;
     quantization::ActivationQuantSpec activation{};
+    KernelId activation_kernel = KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
     std::vector<uint32_t> binding_refs;
 };
 
@@ -274,6 +275,8 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.weight_index = n.weight_index;
             b.compute_spec = w.compute_spec;
             b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
+            if (contract.activation_kernel == KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
+                b.flags |= kActFlagRowRefFolded;
             if (need_act_ws) {
                 const uint32_t kdim = w.cols;
                 const uint32_t kp =
@@ -295,15 +298,13 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                         contract.activation, kp, aw.max_rows, a8l);
                     if (!layout_status.ok()) return layout_status;
                     aw.activation = contract.activation;
+                    aw.activation_kernel = contract.activation_kernel;
                     aw.total_bytes = a8l.total_bytes;
                     aw.first_command = cmd_idx;
                     aw.last_command = cmd_idx;
                     c.activation_workspaces.push_back(aw);
                     c.activation_ws_by_input[act_ws_key] = ws_idx;
-                    const Result<KernelId> act_kernel =
-                        activation_quantize_kernel(contract.activation);
-                    if (!act_kernel.ok()) return act_kernel.status();
-                    DispatchBinding qb = base_binding(act_kernel.value());
+                    DispatchBinding qb = base_binding(contract.activation_kernel);
                     qb.group_size = 32;
                     qb.activation_kp = kp;
                     qb.activation_max_rows = aw.max_rows;
@@ -323,6 +324,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     if (!activation_quant_matches(aw.activation, contract.activation))
                         return fail(
                             "activation workspace quant spec mismatch for shared input");
+                    if (aw.activation_kernel != contract.activation_kernel)
+                        return fail(
+                            "activation workspace plane form mismatch for shared input");
                     aw.last_command = static_cast<uint32_t>(c.plan->dispatches.size());
                 }
                 auto& aw = c.activation_workspaces[c.activation_ws_by_input[act_ws_key]];

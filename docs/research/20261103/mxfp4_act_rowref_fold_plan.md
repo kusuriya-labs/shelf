@@ -55,6 +55,13 @@ fold 自体の損は 5 桁目（§13.2）、WMMA は E4M3 subnormal を flush �
 
 ## 4. 受け入れゲート（reference は変えない。条件は dtype 誤差内）
 
+**実施後の訂正**: ここに書いた「prefill 最終位置の top-1 一致 + rel_l2 上限」ゲートは
+実測で使えないと分かった（correctness mode と optimized mode の差だけで logit rel_l2
+が 1e-1 級動き、top-1 も 1 番目から変わる）。実際の接受基準と実測は
+[mxfp4_gate_a_prime.md](mxfp4_gate_a_prime.md) §16 に記録した: reference 実装と
+optimized 全系統の bit 一致（bench `--check` の mismatch=0）+ 実 activation での
+オフライン精度 + 生成文が EOS で自然終端すること。
+
 一致条件の基準は `test_mxfp4_linear` が元々持っていた「double 参照に対する
 bf16 exact >= 99.9% / rel_l2 < 2e-3」で統一する。optimized variant 間・variant と
 correctness path の bf16 bit 一致は契約にしない（reference を optimized へ

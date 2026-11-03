@@ -329,4 +329,98 @@ __device__ __forceinline__ ProgramStatus exec_activation_quantize_fp8(
     return ProgramStatus::COMPLETE;
 }
 
+// MXFP4 W4A8 activation plane: E8M0 group scales folded into the E4M3 codes against
+// the row's maximum group exponent, plus the row reference in scales column 0. The
+// group peak is scanned twice (the reference path keeps the rule readable); the
+// fold is the same two-step rounding as the optimized kernel, using the shared
+// exponent rule in quantization/codec/e2m1_detail.h.
+__device__ __forceinline__ ProgramStatus exec_activation_quantize_mxfp4_rowref(
+    ModelDispatchEnv& env, const DispatchBinding& b) {
+    namespace codec = ::shelf::quantization::codec;
+    ResolvedValue in{};
+    if (!resolve_value(env, b.input_slots[0], in))
+        return ProgramStatus::INVALID_BINDING;
+    if (in.dtype != ValueDType::BF16 && in.dtype != ValueDType::F32)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (b.workspace_slot >= env.program->workspace_range_count)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (in.features == 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (b.activation_kp < in.features || (b.activation_kp & 31u) != 0u ||
+        b.activation_max_rows == 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    const uint32_t rows = value_rows(env, in);
+    if (rows > b.activation_max_rows)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (rows == 0u)
+        return ProgramStatus::COMPLETE;
+    const uint32_t k = in.features;
+    const uint32_t kp = b.activation_kp;
+    const uint32_t code_stride = b.activation_code_stride;
+    const uint32_t scale_stride = b.activation_scale_stride;
+    if (code_stride < kp || (code_stride & 63u) != 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    if (scale_stride < 4u || (scale_stride & 15u) != 0u)
+        return ProgramStatus::INVALID_PROGRAM;
+    const bool f32_in = in.dtype == ValueDType::F32;
+    const uint64_t ws_off = env.program->workspace_ranges[b.workspace_slot].offset;
+    uint8_t* acodes = reinterpret_cast<uint8_t*>(env.workspace_base + ws_off);
+    uint8_t* ascales = reinterpret_cast<uint8_t*>(env.workspace_base + ws_off +
+        a8_ws_scales_offset(code_stride, b.activation_max_rows));
+    const uint32_t stride = global_stride(env);
+    const void* xin = in.ptr;
+    const uint32_t groups = (kp + 127u) / 128u;
+    const size_t row_bytes =
+        static_cast<size_t>(in.row_stride) *
+        ::shelf::runtime::value_dtype_bytes(in.dtype);
+    auto group_peak = [&](const void* xrow, uint32_t g) {
+        const uint32_t i0 = g * 128u;
+        const uint32_t k_end = i0 + 128u < k ? i0 + 128u : k;
+        float peak = 0.f;
+        for (uint32_t i = i0; i < k_end; ++i) {
+            const float v = act_load_f32(xrow, i, f32_in);
+            if (std::isfinite(v) && std::fabs(v) > peak) peak = std::fabs(v);
+        }
+        return codec::device::e8m0_exponent_for_peak(peak);
+    };
+    for (uint32_t m = global_tid(env); m < rows; m += stride) {
+        const void* xrow = static_cast<const uint8_t*>(xin) +
+            static_cast<size_t>(m) * row_bytes;
+        uint8_t* codes = acodes +
+            static_cast<size_t>(m >> 4) * (code_stride * 16u);
+        const uint32_t m_slot = m & 15u;
+        float* row_scales =
+            reinterpret_cast<float*>(ascales + static_cast<size_t>(m) * scale_stride);
+        int32_t ref = -127;
+        for (uint32_t g = 0u; g < groups; ++g) {
+            const int32_t e = group_peak(xrow, g);
+            if (e > ref) ref = e;
+        }
+        row_scales[0] = codec::device::pow2_f32(ref);
+        for (uint32_t g = 1u; g < groups; ++g) row_scales[g] = 0.f;
+        for (uint32_t g = 0u; g < groups; ++g) {
+            const uint32_t i0 = g * 128u;
+            const int32_t e = group_peak(xrow, g);
+            const int32_t d = ref - e;
+            const float inv = codec::device::pow2_f32(-e);
+            const float fold = d > 120 ? 0.f : codec::device::pow2_f32(-d);
+            const uint32_t kp_end = i0 + 128u < kp ? i0 + 128u : kp;
+            for (uint32_t i = i0; i < kp_end; ++i) {
+                float v = 0.f;
+                if (i < k) {
+                    const float x = act_load_f32(xrow, i, f32_in);
+                    v = std::isfinite(x) ? x : 0.f;
+                }
+                const uint8_t c = codec::device::e4m3_encode_u8(v * inv);
+                const float folded = codec::device::e4m3_decode_f32(c) * fold;
+                codes[static_cast<size_t>(i >> 6) *
+                          ::shelf::quantization::fp8::kFragBlockBytes +
+                      ::shelf::quantization::fp8::fp8_frag_offset(m_slot, i & 63u)] =
+                    codec::device::e4m3_encode_u8(folded);
+            }
+        }
+    }
+    return ProgramStatus::COMPLETE;
+}
+
 }  // namespace shelf::kernel::detail

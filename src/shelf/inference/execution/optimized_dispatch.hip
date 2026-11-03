@@ -117,13 +117,21 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
         return resolved.status();
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    bool specialized = false;
-    const hipError_t herr = ::shelf::kernel::launch_activation_quantize_fp8_finegrained(
-        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
-        reinterpret_cast<uint8_t*>(launch.codes),
-        reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
-        launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-        launch.scale_row_stride, stream, &specialized);
+    bool specialized = true;
+    const hipError_t herr =
+        b.kernel_id == KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF
+            ? ::shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+                  reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+                  reinterpret_cast<uint8_t*>(launch.codes),
+                  reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
+                  launch.k_padded, launch.input_row_stride, launch.code_row_stride,
+                  launch.scale_row_stride, stream)
+            : ::shelf::kernel::launch_activation_quantize_fp8_finegrained(
+                  reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+                  reinterpret_cast<uint8_t*>(launch.codes),
+                  reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
+                  launch.k_padded, launch.input_row_stride, launch.code_row_stride,
+                  launch.scale_row_stride, stream, &specialized);
     if (herr != hipSuccess)
         return Status::hip_error("act-quant optimized launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
@@ -621,7 +629,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             g_sampling_optimized_count.fetch_add(1u, std::memory_order_relaxed);
         return sm;
     }
-    if (b.kernel_id == KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED)
+    if (b.kernel_id == KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
+        b.kernel_id == KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
         return try_launch_activation_quantize(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_FP8_FINEGRAINED)
         return try_launch_linear_fp8(program, b, ctx, stream);

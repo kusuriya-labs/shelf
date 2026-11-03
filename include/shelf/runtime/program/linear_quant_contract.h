@@ -9,17 +9,23 @@
 
 namespace shelf::runtime {
 
-// DispatchBinding::flags bit 0: the activation plane for this linear was produced in
-// the row-reference form (E4M3 codes with the group E8M0 folded into them, and one
-// f32 row reference at scales[row * scale_stride_floats + 0]). Producers and
-// consumers must agree; the accumulation order of each path is its own.
-inline constexpr uint32_t kActFlagRowRefFolded = 1u << 0;
+// DispatchBinding::flags bit 1 (bit 0 is the linear output dtype flag set by the
+// lowering): the activation plane for this linear was produced in the row-reference
+// form - E4M3 codes with the group E8M0 folded into them, and one f32 row reference
+// at scales[row * scale_stride_floats + 0]. Producers and consumers must agree; the
+// accumulation order of each path is its own.
+inline constexpr uint32_t kActFlagRowRefFolded = 1u << 1;
 
 struct ResolvedLinearQuantContract {
     KernelId linear_kernel = KernelId::LINEAR_BF16;
     bool requires_activation_quant = false;
     quantization::ActivationQuantSpec activation{};
     uint32_t activation_k_alignment = 32u;
+    // Producer kernel for the activation plane. The FP8 W8A8 and MXFP4 W4A8 families
+    // share the codes/scale plane layout but not its meaning: MXFP4 folds the group
+    // E8M0 into the codes against a row reference and applies no activation scale in
+    // the K loop.
+    KernelId activation_kernel = KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
 };
 
 inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
@@ -46,6 +52,7 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
         contract.requires_activation_quant = true;
         contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
         contract.activation_k_alignment = 64u;
+        contract.activation_kernel = KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF;
         return contract;
     }
     if (compute_spec != static_cast<uint8_t>(ComputeSpecId::BF16_F32_BF16))
@@ -58,14 +65,6 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
 
 inline uint32_t activation_k_padded_for(uint32_t alignment, uint32_t k) noexcept {
     return (k + alignment - 1u) & ~(alignment - 1u);
-}
-
-inline Result<KernelId> activation_quantize_kernel(
-    const quantization::ActivationQuantSpec& activation) {
-    if (activation.codes_dtype != quantization::QuantScalarType::FP8E4M3)
-        return Status::unsupported(
-            "activation quantize requires FP8E4M3 codes", __FILE__, __LINE__);
-    return KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED;
 }
 
 inline bool activation_quant_matches(

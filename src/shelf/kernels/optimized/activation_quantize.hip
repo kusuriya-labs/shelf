@@ -1,6 +1,7 @@
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include "detail/activation_quantize_device.h"
 #include <shelf/quantization/codec/e4m3_detail.h>
+#include <shelf/quantization/codec/e2m1_detail.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cmath>
@@ -103,25 +104,6 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
 // staged in LDS between the two sweeps, so global traffic stays one BF16 read and
 // one code write per element, the same as the group quantizer. Design and
 // measurements: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
-__device__ __forceinline__ int32_t mxfp4_act_group_exponent(float peak) {
-    const uint32_t bits = __float_as_uint(peak);
-    if (!(peak > 0.0f) || bits < 0x00800000u)
-        return -127;  // zero peak, subnormal peak, NaN or inf
-    const int32_t e_field = static_cast<int32_t>((bits >> 23) & 0xffu) - 127;
-    const float unit = __int_as_float(static_cast<uint32_t>(e_field + 127) << 23);
-    // Smallest e with 448 * 2^e >= peak, for peak = m * 2^e_field with m in [1, 2).
-    if (peak <= 0.875f * unit)
-        return e_field - 9;
-    if (peak <= 1.75f * unit)
-        return e_field - 8;
-    return e_field - 7;
-}
-
-__device__ __forceinline__ float mxfp4_act_pow2(int32_t e) {
-    const uint32_t bits = static_cast<uint32_t>(e + 127) << 23;
-    return __uint_as_float(bits != 0u ? bits : 0x00400000u);
-}
-
 __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowref_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
@@ -173,8 +155,8 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
         for (uint32_t off = 16u; off > 0u; off >>= 1u)
             peak = fmaxf(peak, __shfl_xor_sync(0xffffffffULL, peak, off));
         peak = __shfl_sync(0xffffffffULL, peak, 0u);
-        const int32_t e = mxfp4_act_group_exponent(peak);
-        const float inv = mxfp4_act_pow2(-e);
+        const int32_t e = ::shelf::quantization::codec::device::e8m0_exponent_for_peak(peak);
+        const float inv = ::shelf::quantization::codec::device::pow2_f32(-e);
         uint32_t packed = 0u;
         #pragma unroll
         for (uint32_t l = 0u; l < kElemsPerLane; ++l)
@@ -206,7 +188,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
             ref = s_wmax[w];
 
     if (threadIdx.x == 0u) {
-        row_scales[0] = mxfp4_act_pow2(ref);
+        row_scales[0] = ::shelf::quantization::codec::device::pow2_f32(ref);
         for (uint32_t g = 1u; g < groups; ++g)
             row_scales[g] = 0.0f;
     }
@@ -217,7 +199,7 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
         const int32_t d = ref - s_exp[g];
         uint32_t out = 0u;
         if (d <= 120) {
-            const float fold = mxfp4_act_pow2(-d);
+            const float fold = ::shelf::quantization::codec::device::pow2_f32(-d);
             #pragma unroll
             for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
                 const uint8_t c = static_cast<uint8_t>((packed >> (8u * l)) & 0xffu);

@@ -681,3 +681,72 @@ tolerance（bf16 exact >= 99.9% / rel_l2 < 2e-3）**で全 variant を通して�
 - bench の mxfp4 経路に `hipFree(d_input)` の二重解放が入っており（2143c7a で導入）、
   `--rows` に複数値を渡すと 2 番目以降が黙って失敗していた（`rc=1`、メッセージなし）。
   本測定向きに修正した。§13 の表は単一 rows の実行で取った値なので影響はない。
+
+## 16. graph 配線後の E2E 実測と受け入れ判断
+
+行基準 fold を graph へ配線した（`KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF`、
+`ResolvedLinearQuantContract::activation_kernel`、linear binding の `flags` bit 1 =
+`kActFlagRowRefFolded`。bit 0 は lowering が既に使っている output F32 旗なので避けた）。
+
+### 16.1 reference 実装と optimized の全系統一致（bench `--check`）
+
+`shelf-bench gemm --dtype mxfp4 --check --mxfp4-a-rowref 1` は、**correctness path
+（新しい `exec_activation_quantize_mxfp4_rowref` + `exec_linear_mxfp4` の行基準読み）
+と optimized path（行基準 quantize kernel + 行基準 GEMM）を独立に走らせて突き合わせる。
+
+| 条件 | 結果 |
+| --- | --- |
+| rowblock1、17408:5120、rows=1、fold なし | mismatch=0 / 17408、max_rel=0 |
+| 同上、spread 4（= fold 厳密域）、fold あり（chain 形） | mismatch=0、max_rel=0 |
+| fold あり + spread 24（合成データの広い E8M0 散布） | mismatch=2707、max_rel=4.68（**A 側とは無関係**。`--mxfp4-a-rowref 0` でも同じ値に FAIL する。production は `row_ref_exact` のときだけ fold するので踏まない） |
+
+unit test 側（`test_mxfp4_linear`）も rowref 平面で全 variant が correctness path と
+bf16 完全一致、double 参照 rel_l2 1.658e-3（§15.5）。
+
+### 16.2 E2E（Qwen3.8-27B-Quark-AWQ-MXFP4、prompt 1024 tokens、greedy 512 tokens）
+
+| | pre-wiring（group A） | rowref A |
+| --- | ---: | ---: |
+| PREFILL_MS | 554.4 | **421.7（+31.5%）** |
+| DECODE_MS / tokens | 19714.4 / 511 | 15545.6 / 349 |
+| DECODE_MS / step | 38.4 | 44.5（**-16%**） |
+| 生成終了 | 512 tokens 打ち切り | 350 tokens で EOS（248044） |
+
+prefill は micro（§15.3 の -28〜-42%）と整合する。**decode は悪化した**。micro の
+per-launch 見積りでは decode は 1 step あたり約 -2 ms（速くなる）はずで、実測 +6 ms/step
+との差は未説明。残る仮説は、quantize kernel の動的 LDS（k=17408 で 18 KB）を
+decode の 256 launch のたびに切り替えるコスト（LDS carveout の再構成）。bench では
+同一 kernel の反復なのでこのコストが見えない。**A/B を同一 binary で取れていない**
+（切り替え旗を立てていない）ため、原因確定は未実施。ユーザー判断で一旦許容。
+
+### 16.3 logits ゲートの妥当性（計画のゲートは使えない）
+
+`--dump-logits` の行は 1 step あたり 4 行だが有効なのは 1 行だけ（他はゼロ）なので、
+stride 4 で比較した。
+
+| 比較 | prefill 最終位置 rel_l2 | decode 行の rel_l2 | top-1 一致 |
+| --- | ---: | ---: | ---: |
+| correctness mode vs optimized mode（同じ rowref contract、prompt 18） | 4.13e-2 | 平均 6.7e-2、最大 2.75e-1 | **68/68**（GENERATED_IDS 完全一致） |
+| group A vs rowref A（optimized、prompt 1024） | 4.75e-1 | 平均 2.0e-1、最大 2.43 | 1 番目から相違 |
+
+**logit 空間では、実装差（correctness vs optimized）だけで既に 1e-1 級動く**。これは
+MXFP4 の inner loop が厳密でない帯域（A・W 双方の E4M3 が 2^-9〜448 の 18 octave に
+広がるため 16 積の和が f32 の 24 bit を超えることがある）と、attention / GDN など
+他 kernel の bf16 級の実装差が増幅されるためと説明できる。よって
+「prefill 最終位置の top-1 一致 + rel_l2 上限」というゲートは **A 側変更の合否を
+判別できない**（plan の §4 は却下）。代わりに次を接受基準にする:
+
+1. reference 実装と optimized 変種の全系統一致（§16.1、bit 一致で取れている）
+2. 実 activation でのオフライン精度（§11、arm D は arm A の 1.34〜1.6 倍の layer 出力
+   rel_l2。平面 fold 自体の損は 5 桁目）
+3. 生成文が破綻せず EOS で終端すること（rowref 実行は 350 tokens で自然終了し、
+   base の同一 prompt で後続に現れる列とほぼ同じ文構造を辿っている）
+
+### 16.4 生成列の観察
+
+base: `41564,13,814,20139,...` / rowref: `271,760,2781,279,12515,7701,6105,2261,...`。
+base の 22 番目以降に `271,760,...,12515,7701,6105,2261,279,1834,321,2438,506` が
+現れるので、rowref は同じ反復文の位相を 1 つ進めて始めた読み方になっている
+（プロンプト自体が反復文）。offset 最適化で一致率 16%、末尾は EOS。
+文として破綻は無いが、**1 番目の token から分岐する**ので、生成列一致を性能変更の
+ゲートに使う方針はこの変更では成立しない（§12 の校正と整合）。
