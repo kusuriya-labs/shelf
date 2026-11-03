@@ -1,6 +1,7 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
+#include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/rmsnorm.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
@@ -402,6 +403,9 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
                 e.row_ref != nullptr
             ? static_cast<const uint8_t*>(e.row_ref) : nullptr,
         reinterpret_cast<const int8_t*>(acodes), ascales,
+        (b.flags & ::shelf::runtime::kActFlagRowRefFolded) != 0u
+            ? ::shelf::kernel::Mxfp4ActivationForm::RowRefFolded
+            : ::shelf::kernel::Mxfp4ActivationForm::GroupF32,
         out.ptr, odt,
         rows, e.rows, wkp,
         e.scale_row_stride_bytes, b.activation_code_stride, b.activation_scale_stride,

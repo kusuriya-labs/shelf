@@ -30,7 +30,7 @@ struct Options {
     uint32_t mxfp4_split = 4u;
     uint32_t mxfp4_unroll = 0u;
     uint32_t mxfp4_fold = 1u;
-    uint32_t mxfp4_ablate_act = 0u;
+    uint32_t mxfp4_a_rowref = 0u;
     uint32_t mxfp4_a_fold = 0u;
 
     uint32_t mxfp4_spread = 24u;
@@ -71,7 +71,7 @@ void usage(FILE* f) {
         "  --mxfp4-split N                  mxfp4 split-K ways (default 8)\n"
         "  --mxfp4-fold 0|1                fold the row E8M0 reference into the operand\n"
         "  --mxfp4-spread N                mxfp4 synthetic E8M0 exponent spread (default 24)\n"
-        "  --mxfp4-ablate-act 0|1          prefill2d without the A group scale (timing bound)\n"
+        "  --mxfp4-a-rowref 0|1            A plane in the row-ref folded form (MXFP4 W4A8)\n"
         "  --mxfp4-a-fold 0|1              time the A-plane E8M0 fold pass (arm C/D cost)\n"
         "  --mxfp4-a-fold uses one E8M0 byte per 32 K (arm C plane; arm D replicates)\n"
 
@@ -831,6 +831,13 @@ int run_gemm_mxfp4(Options& o) {
             ok = ok && hipMalloc((void**)&d_ascales, ascales_bytes) == hipSuccess;
             ok = ok && hipMalloc((void**)&d_output, static_cast<size_t>(rows) * n * 2) == hipSuccess;
             if (!ok) { rc = 1; break; }
+            if (o.mxfp4_a_rowref && o.check) {
+                std::fprintf(stderr,
+                             "--check with --mxfp4-a-rowref needs the correctness-side rowref "
+                             "producer; run --check without it\n");
+                rc = 2;
+                break;
+            }
             CorrectnessEnv cenv;
             if (o.check && !setup_correctness_fp8(
                     d_codes, d_scales, d_input, d_output, rows, n, shape.k, kp, cenv, true)) {
@@ -839,11 +846,69 @@ int run_gemm_mxfp4(Options& o) {
                 rc = 1;
                 break;
             }
-            hipError_t af = shelf::kernel::launch_activation_quantize_fp8_finegrained(
-                d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
-                static_cast<uint32_t>(act_scale_stride), stream);
+            hipError_t af = o.mxfp4_a_rowref
+                ? shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+                      d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                      static_cast<uint32_t>(act_scale_stride), stream)
+                : shelf::kernel::launch_activation_quantize_fp8_finegrained(
+                      d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                      static_cast<uint32_t>(act_scale_stride), stream);
             if (af != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) { rc = 1; break; }
             const int8_t* a8 = reinterpret_cast<const int8_t*>(d_acodes);
+
+            if (o.mxfp4_a_rowref) {
+                auto time_launch = [&](const char* name, auto&& one) {
+                    for (int i = 0; i < o.warmup; ++i)
+                        if (one() != hipSuccess)
+                            return;
+                    if (hipStreamSynchronize(stream) != hipSuccess)
+                        return;
+                    hipEvent_t q0 = nullptr, q1 = nullptr;
+                    if (hipEventCreate(&q0) != hipSuccess || hipEventCreate(&q1) != hipSuccess)
+                        return;
+                    std::vector<double> us;
+                    for (int sample = 0; sample < o.samples; ++sample) {
+                        if (hipEventRecord(q0, stream) != hipSuccess)
+                            break;
+                        for (int l = 0; l < o.launches; ++l)
+                            if (one() != hipSuccess)
+                                break;
+                        if (hipEventRecord(q1, stream) != hipSuccess)
+                            break;
+                        if (hipEventSynchronize(q1) != hipSuccess)
+                            break;
+                        float ms = 0.0f;
+                        if (hipEventElapsedTime(&ms, q0, q1) != hipSuccess)
+                            break;
+                        us.push_back(ms * 1000.0 / (double)o.launches);
+                    }
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(q0));
+                    shelf::gpu::discard_cleanup_result(hipEventDestroy(q1));
+                    if (us.empty())
+                        return;
+                    std::sort(us.begin(), us.end());
+                    const double p50 = us[us.size() / 2];
+                    const double traffic = (double)rows * shape.k * 2.0 + (double)acodes_bytes +
+                                           (double)ascales_bytes;
+                    std::printf("mxfp4 %-12s rows=%-4u n=%-6u k=%-6u requested=quantize"
+                                " selected=%-8s      p50=%.3f us  %.0f GB/s\n",
+                                shape.name.c_str(), rows, shape.n, shape.k, name, p50,
+                                traffic / (p50 * 1e-6) / 1e9);
+                };
+                time_launch("group", [&]() {
+                    return shelf::kernel::launch_activation_quantize_fp8_finegrained(
+                        d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                        static_cast<uint32_t>(act_scale_stride), stream);
+                });
+                time_launch("rowref", [&]() {
+                    return shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+                        d_input, d_acodes, d_ascales, rows, shape.k, kp, shape.k, kp,
+                        static_cast<uint32_t>(act_scale_stride), stream);
+                });
+                if (hipGetLastError() != hipSuccess) { rc = 1; break; }
+                if (o.mxfp4_a_rowref == 2u)
+                    break;
+            }
 
             const auto sel = shelf::execution::select_mxfp4_gemm_config(
                 shelf::execution::Mxfp4GemmSelectorInput{rows, n, shape.k, kp});
@@ -861,19 +926,16 @@ int run_gemm_mxfp4(Options& o) {
             }
 
             auto launch_one = [&]() -> hipError_t {
-                if (o.mxfp4_ablate_act && selected == "prefill2d") {
-                    return shelf::kernel::launch_gemm_mxfp4_w4a8_ablated_noactrescale(
-                        d_codes, d_scales, d_ref, a8, d_ascales, d_output,
-                        shelf::kernel::Mxfp4GemmOutputDType::BF16, rows, n, kp, nb, kp,
-                        static_cast<uint32_t>(act_scale_stride), n, stream);
-                }
                 if (selected == "correctness") {
                     shelf::Status st = launch_correctness_linear_fp8(cenv, rows, kp, stream, true);
                     return st.ok() ? hipSuccess : hipErrorUnknown;
                 }
                 return shelf::kernel::launch_gemm_mxfp4_w4a8_auto(
                     cfg, d_codes, d_scales, o.mxfp4_fold ? d_ref : nullptr,
-                    a8, d_ascales, d_output,
+                    a8, d_ascales,
+                    o.mxfp4_a_rowref ? shelf::kernel::Mxfp4ActivationForm::RowRefFolded
+                                     : shelf::kernel::Mxfp4ActivationForm::GroupF32,
+                    d_output,
                     shelf::kernel::Mxfp4GemmOutputDType::BF16, rows, n, kp, nb, kp,
                     static_cast<uint32_t>(act_scale_stride), n, stream);
             };
@@ -1010,7 +1072,7 @@ int run_gemm_mxfp4(Options& o) {
                 shelf::gpu::discard_cleanup_result(hipFree(d_e8));
                 shelf::gpu::discard_cleanup_result(hipFree(d_ref));
             }
-            shelf::gpu::discard_cleanup_result(hipFree(d_input));            shelf::gpu::discard_cleanup_result(hipFree(d_input));
+            shelf::gpu::discard_cleanup_result(hipFree(d_input));
             shelf::gpu::discard_cleanup_result(hipFree(d_acodes));
             shelf::gpu::discard_cleanup_result(hipFree(d_ascales));
             shelf::gpu::discard_cleanup_result(hipFree(d_output));
@@ -1296,7 +1358,7 @@ int run_gemm(int argc, char** argv) {
         else if (a == "--mxfp4-unroll") o.mxfp4_unroll = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-fold") o.mxfp4_fold = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-spread") o.mxfp4_spread = static_cast<uint32_t>(std::stoi(next()));
-        else if (a == "--mxfp4-ablate-act") o.mxfp4_ablate_act = static_cast<uint32_t>(std::stoi(next()));
+        else if (a == "--mxfp4-a-rowref") o.mxfp4_a_rowref = static_cast<uint32_t>(std::stoi(next()));
         else if (a == "--mxfp4-a-fold") o.mxfp4_a_fold = static_cast<uint32_t>(std::stoi(next()));
 
         else if (a == "--check") o.check = true;

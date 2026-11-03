@@ -462,14 +462,59 @@ int main() {
         }
     };
 
+    auto compare_model = [&](uint32_t rows, uint32_t n_out,
+                             const std::vector<shelf::bf16_t>& got,
+                             const std::vector<double>& want, const char* tag) {
+        std::size_t exact = 0;
+        std::size_t total = 0;
+        double l2_want = 0.0;
+        double l2_diff = 0.0;
+        for (uint32_t m = 0; m < rows; ++m) {
+            for (uint32_t o = 0; o < n_out; ++o) {
+                const std::size_t i = static_cast<std::size_t>(m) * kRows + o;
+                ++total;
+                if (got[i].data == shelf::f32_to_bf16_rne(static_cast<float>(want[i])))
+                    ++exact;
+                const double a = want[i];
+                const double b = bf16_to_f32(got[i]);
+                l2_want += a * a;
+                l2_diff += (b - a) * (b - a);
+            }
+        }
+        const double rel = std::sqrt(l2_diff) / std::max(std::sqrt(l2_want), 1e-9);
+        std::printf("mxfp4 model %-10s rows=%-3u out=%-4u bf16-exact %zu/%zu rel_l2=%.3e\n",
+                    tag, rows, n_out, exact, total, rel);
+        check(exact * 1000u >= total * 999u,
+              std::string(tag) + ": bf16-exact on >= 99.9% against the double model");
+        check(rel < 2.0e-3, std::string(tag) + ": relative L2 within the bf16 output rounding");
+    };
+    rt::DispatchBinding lin_rowref = linear;
+    lin_rowref.flags = rt::kActFlagRowRefFolded;
+    auto make_rowref_plane = [&](uint32_t rows) {
+        return shelf::kernel::launch_activation_quantize_mxfp4_rowref(
+            d.in, d.ws + layout.codes_offset,
+            reinterpret_cast<float*>(d.ws + layout.scales_offset), rows, kCols,
+            layout.k_padded, kCols, layout.code_row_stride_bytes,
+            layout.scale_row_stride_bytes, stream);
+    };
+
     auto run_optimized = [&](opt::Mxfp4GemmConfig cfg, uint32_t rows, const char* tag,
-                             uint32_t n_out, bool fold, bool bit_exact) {
+                             uint32_t n_out, bool fold, bool bit_exact,
+                             opt::Mxfp4ActivationForm form = opt::Mxfp4ActivationForm::GroupF32,
+                             const std::vector<double>* model = nullptr) {
         rt::DeviceBatchContext ctx{};
         ctx.actual_rows = rows;
         if (!hip_ok(hipMemcpy(d.ctx, &ctx, sizeof(ctx), hipMemcpyHostToDevice), "h2d ctx"))
             return;
-        check(run_dispatch(d, quantize, stream) == 0u, "activation quantize for optimized rows");
-        check(run_dispatch(d, linear, stream) == 0u, "correctness linear for optimized rows");
+        if (form == opt::Mxfp4ActivationForm::RowRefFolded) {
+            check(hip_ok(make_rowref_plane(rows), "rowref activation quantize"),
+                  "rowref activation quantize for optimized rows");
+            check(run_dispatch(d, lin_rowref, stream) == 0u,
+                  "correctness linear reads the folded activation plane");
+        } else {
+            check(run_dispatch(d, quantize, stream) == 0u, "activation quantize for optimized rows");
+            check(run_dispatch(d, linear, stream) == 0u, "correctness linear for optimized rows");
+        }
         const std::size_t count = static_cast<std::size_t>(rows) * kRows;
         std::vector<shelf::bf16_t> ref(count, shelf::bf16_t{0});
         std::vector<shelf::bf16_t> got(count, shelf::bf16_t{0});
@@ -482,7 +527,7 @@ int main() {
             cfg, d.codes, d.scales, fold ? d.row_ref : nullptr,
             reinterpret_cast<const int8_t*>(d.ws + layout.codes_offset),
             reinterpret_cast<const float*>(d.ws + layout.scales_offset),
-            d.out_opt, opt::Mxfp4GemmOutputDType::BF16, rows, n_out, kCols,
+            form, d.out_opt, opt::Mxfp4GemmOutputDType::BF16, rows, n_out, kCols,
             f.native_scale_stride, layout.code_row_stride_bytes,
             layout.scale_row_stride_bytes, kRows, stream);
         check(err == hipSuccess, std::string(tag) + ": launcher accepts the geometry");
@@ -494,7 +539,10 @@ int main() {
                               hipMemcpyDeviceToHost), "d2h optimized"))
             return;
         compare_paths(rows, n_out, got, ref, tag, bit_exact);
+        if (model != nullptr)
+            compare_model(rows, n_out, got, *model, tag);
     };
+
 
     const bool ex = true;
     run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u, "rowblock1", kRows, false, ex);
@@ -514,7 +562,8 @@ int main() {
               d.codes, d.scales, d.row_ref,
               reinterpret_cast<const int8_t*>(d.ws + layout.codes_offset),
               reinterpret_cast<const float*>(d.ws + layout.scales_offset),
-              d.out_opt, opt::Mxfp4GemmOutputDType::BF16, 200u, kRows, kCols,
+              opt::Mxfp4ActivationForm::GroupF32, d.out_opt,
+              opt::Mxfp4GemmOutputDType::BF16, 200u, kRows, kCols,
               f.native_scale_stride, layout.code_row_stride_bytes,
               layout.scale_row_stride_bytes, kRows, stream) == hipErrorNotSupported,
           "prefill2d refuses a row count that is not a 256-row block");
@@ -526,62 +575,67 @@ int main() {
               d.codes, d.scales, nullptr,
               reinterpret_cast<const int8_t*>(d.ws + layout.codes_offset),
               reinterpret_cast<const float*>(d.ws + layout.scales_offset),
-              d.out_opt, opt::Mxfp4GemmOutputDType::BF16, 1u, kRows, 96u,
+              opt::Mxfp4ActivationForm::GroupF32, d.out_opt,
+              opt::Mxfp4GemmOutputDType::BF16, 1u, kRows, 96u,
               3u, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, kRows,
               stream) == hipErrorNotSupported,
           "the wmma launcher refuses k_padded that is not 128-aligned");
 
-    // --- activation in the row-reference folded form (the MXFP4 W4A8 candidate).
-    // The reference path keeps its own accumulation; only the scale source changes,
-    // and the acceptance condition is the dtype tolerance, not bit identity with the
-    // optimized variants. Design: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
+    // --- the row-reference folded activation plane (the MXFP4 W4A8 candidate).
+    // Every variant is accepted on the dtype tolerance against the double model;
+    // bit identity with the correctness path is reported, not required, because the
+    // chain shape of the folded form has its own accumulation order.
+    // Design: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
     {
         rt::DeviceBatchContext ctx{};
         ctx.actual_rows = kTokens;
         hip_ok(hipMemcpy(d.ctx, &ctx, sizeof(ctx), hipMemcpyHostToDevice), "h2d rowref ctx");
-        const hipError_t qerr = shelf::kernel::launch_activation_quantize_mxfp4_rowref(
-            d.in, d.ws + layout.codes_offset,
-            reinterpret_cast<float*>(d.ws + layout.scales_offset), kTokens, kCols,
-            layout.k_padded, kCols, layout.code_row_stride_bytes,
-            layout.scale_row_stride_bytes, stream);
-        if (hip_ok(qerr, "rowref activation quantize")) {
-            rt::DispatchBinding lin_rowref = linear;
-            lin_rowref.flags = rt::kActFlagRowRefFolded;
-            check(run_dispatch(d, lin_rowref, stream) == 0u,
-                  "mxfp4 linear reads the folded activation plane");
-            std::vector<uint8_t> workspace(layout.total_bytes, 0u);
-            hip_ok(hipMemcpy(workspace.data(), d.ws, workspace.size(), hipMemcpyDeviceToHost),
-                   "d2h rowref workspace");
-            std::vector<uint8_t> rowref_codes(workspace.begin(),
-                workspace.begin() + static_cast<std::ptrdiff_t>(layout.codes_bytes()));
-            std::vector<float> rowref_scales(kTokens * (layout.scale_row_stride_bytes / 4u), 0.0f);
-            std::memcpy(rowref_scales.data(), workspace.data() + layout.scales_offset,
-                        rowref_scales.size() * sizeof(float));
-            const std::vector<double> want =
-                expected_output(f, rowref_codes, rowref_scales, layout, true);
-            std::vector<shelf::bf16_t> got(static_cast<std::size_t>(kTokens) * kRows,
-                                           shelf::bf16_t{0});
-            hip_ok(hipMemcpy(got.data(), d.out, got.size() * sizeof(shelf::bf16_t),
-                             hipMemcpyDeviceToHost), "d2h rowref out");
-            std::size_t exact = 0;
-            double l2_want = 0.0;
-            double l2_diff = 0.0;
-            for (std::size_t i = 0; i < got.size(); ++i) {
-                if (got[i].data == shelf::f32_to_bf16_rne(static_cast<float>(want[i])))
-                    ++exact;
-                const double a = want[i];
-                const double b = bf16_to_f32(got[i]);
-                l2_want += a * a;
-                l2_diff += (b - a) * (b - a);
-            }
-            const double rel = std::sqrt(l2_diff) / std::max(std::sqrt(l2_want), 1e-9);
-            std::printf("mxfp4 rowref activation: bf16-exact %zu / %zu rel_l2=%.3e "
-                        "row scale[0]=%.6g\n",
-                        exact, got.size(), rel, rowref_scales[0]);
-            check(exact * 1000u >= got.size() * 999u,
-                  "rowref activation stays bf16-exact on >= 99.9% against the double model");
-            check(rel < 2.0e-3, "rowref activation stays inside the bf16 output rounding");
-        }
+        check(hip_ok(make_rowref_plane(kTokens), "rowref quantize"),
+              "rowref activation quantize fills the plane");
+        check(run_dispatch(d, lin_rowref, stream) == 0u,
+              "mxfp4 linear reads the folded activation plane");
+        std::vector<uint8_t> workspace(layout.total_bytes, 0u);
+        if (!hip_ok(hipMemcpy(workspace.data(), d.ws, workspace.size(), hipMemcpyDeviceToHost),
+                    "d2h rowref workspace"))
+            return 1;
+        std::vector<uint8_t> rowref_codes(
+            workspace.begin(),
+            workspace.begin() + static_cast<std::ptrdiff_t>(layout.codes_bytes()));
+        std::vector<float> rowref_scales(kTokens * (layout.scale_row_stride_bytes / 4u), 0.0f);
+        std::memcpy(rowref_scales.data(), workspace.data() + layout.scales_offset,
+                    rowref_scales.size() * sizeof(float));
+        const uint32_t scale_cols = layout.scale_row_stride_bytes / 4u;
+        std::printf("mxfp4 rowref: scale[0]=%.6g scale[%u]=%.6g scale[last]=%.6g\n",
+                    rowref_scales[0], scale_cols / 2u, rowref_scales[scale_cols / 2u],
+                    rowref_scales[scale_cols - 1u]);
+        const std::vector<double> want =
+            expected_output(f, rowref_codes, rowref_scales, layout, true);
+        const std::size_t count = static_cast<std::size_t>(kTokens) * kRows;
+        std::vector<shelf::bf16_t> ref(count, shelf::bf16_t{0});
+        if (!hip_ok(hipMemcpy(ref.data(), d.out, count * sizeof(shelf::bf16_t),
+                              hipMemcpyDeviceToHost), "d2h rowref correctness out"))
+            return 1;
+        compare_model(kTokens, kRows, ref, want, "correct");
+
+        const auto rr = opt::Mxfp4ActivationForm::RowRefFolded;
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens,
+                      "1d-rr", kRows, false, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, kTokens,
+                      "1d-rr-fold", kRows, true, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock4, 0u}, kTokens,
+                      "4d-rr-fold", kRows, true, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 4u}, kTokens,
+                      "sk4-rr-fold", kRows, true, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::SplitK, 8u}, 1u,
+                      "sk8-rr-fold", kRows, true, false, rr);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::RowBlock1, 0u}, 1u,
+                      "1d-rr-fold-r1", kRows, true, false, rr);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u,
+                      "2d-rr", kRows, false, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u,
+                      "2d-rr-fold", kRows, true, false, rr, &want);
+        run_optimized(opt::Mxfp4GemmConfig{opt::Mxfp4GemmConfigId::Prefill2D, 0u}, 256u,
+                      "2d-rr-guard", 100u, true, false, rr, &want);
     }
 
     release(d);

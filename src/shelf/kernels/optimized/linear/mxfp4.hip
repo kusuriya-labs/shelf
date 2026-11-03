@@ -97,7 +97,12 @@ __device__ __forceinline__ uint32_t mxfp4_fold_d(int ref, int e8m0) {
 // share one accumulator and the group scale is applied once; with kFold false the
 // block scale is applied per 32 K block, which is the accumulation order the
 // correctness path uses.
-template <int MB, bool kFold>
+// With kActRowRef the activation plane is the row-reference folded form: the group
+// E8M0 is already inside the E4M3 codes and activation_scales[row * stride + 0] is
+// 2^ref, so the K loop carries no activation scale and the epilogue multiplies the
+// row reference once. With kFold that also removes the per-block weight rescale and
+// the WMMA fragments chain through K; without it each block keeps its own rescale.
+template <int MB, bool kFold, bool kActRowRef>
 __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
@@ -164,24 +169,26 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
     auto run_k_loop = [&]<bool kGuarded, int kUnroll>() {
         #pragma unroll kUnroll
         for (uint32_t ag = 0; ag < ng; ++ag) {
-            for (uint32_t s = tid; s < 2u * MB * 8u; s += kThreadsPerBlock) {
-                const uint32_t kg = s / (MB * 8u);
-                const uint32_t t = (s >> 3u) % MB;
-                const uint32_t j = s & 7u;
-                const uint32_t rr = row_start + t * kTileRow + 8u * kg + j;
-                smem[s] = (rr < rows)
-                    ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
-                    : 0.0f;
-            }
-            detail::lds_barrier();
-
             float asv[MB][8];
-            #pragma unroll
-            for (int t = 0; t < MB; ++t) {
-                const uint32_t slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
+            if constexpr (!kActRowRef) {
+                for (uint32_t s = tid; s < 2u * MB * 8u; s += kThreadsPerBlock) {
+                    const uint32_t kg = s / (MB * 8u);
+                    const uint32_t t = (s >> 3u) % MB;
+                    const uint32_t j = s & 7u;
+                    const uint32_t rr = row_start + t * kTileRow + 8u * kg + j;
+                    smem[s] = (rr < rows)
+                        ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
+                        : 0.0f;
+                }
+                detail::lds_barrier();
+
                 #pragma unroll
-                for (int j = 0; j < 8; ++j)
-                    asv[t][j] = smem[slot + static_cast<uint32_t>(j)];
+                for (int t = 0; t < MB; ++t) {
+                    const uint32_t slot = (k_group * MB + static_cast<uint32_t>(t)) * 8u;
+                    #pragma unroll
+                    for (int j = 0; j < 8; ++j)
+                        asv[t][j] = smem[slot + static_cast<uint32_t>(j)];
+                }
             }
 
             #pragma unroll
@@ -221,19 +228,28 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
                         a0 = *reinterpret_cast<const int32x2_t*>(ap);
                         a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
                     }
+                    if constexpr (kFold && kActRowRef) {
+                        float8_t c = acc[t];
+                        c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
+                        acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
+                        continue;
+                    }
                     float8_t c = float8_t MXFP4_ZERO8;
                     c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
                     c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
                     #pragma unroll
                     for (int j = 0; j < 8; ++j) {
-                        if constexpr (kFold)
+                        if constexpr (kActRowRef)
+                            acc[t][j] = __builtin_fmaf(c[j], ws, acc[t][j]);
+                        else if constexpr (kFold)
                             acc[t][j] = __builtin_fmaf(c[j], asv[t][j], acc[t][j]);
                         else
                             acc[t][j] = __builtin_fmaf(c[j], ws * asv[t][j], acc[t][j]);
                     }
                 }
             }
-            detail::lds_barrier();
+            if constexpr (!kActRowRef)
+                detail::lds_barrier();
         }
     };
     constexpr int kUnroll = (MB >= 4) ? 2 : 4;
@@ -255,6 +271,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
             float v = acc[t][j];
             if constexpr (kFold)
                 v *= epi;
+            if constexpr (kActRowRef)
+                v *= activation_scales[static_cast<size_t>(r) * as_row_floats];
             const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
             if (output_dtype == static_cast<uint32_t>(Mxfp4GemmOutputDType::BF16)) {
                 static_cast<shelf::bf16_t*>(output)[out_idx] =
@@ -266,7 +284,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_mxfp4_w4a8_wmma_kernel(
     }
 }
 
-template <int MB, int kSplit, bool kFold>
+template <int MB, int kSplit, bool kFold, bool kActRowRef>
 __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_splitk_kernel(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
@@ -333,15 +351,17 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
 
     for (uint32_t ag = ag_start; ag < ag_stop; ++ag) {
         float asv[MB][8];
-        #pragma unroll
-        for (int t = 0; t < MB; ++t) {
+        if constexpr (!kActRowRef) {
             #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const uint32_t rr = row_start + static_cast<uint32_t>(t) * kTileRow +
-                                    8u * k_group + static_cast<uint32_t>(j);
-                asv[t][j] = (rr < rows)
-                    ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
-                    : 0.0f;
+            for (int t = 0; t < MB; ++t) {
+                #pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const uint32_t rr = row_start + static_cast<uint32_t>(t) * kTileRow +
+                                        8u * k_group + static_cast<uint32_t>(j);
+                    asv[t][j] = (rr < rows)
+                        ? activation_scales[static_cast<size_t>(rr) * as_row_floats + ag]
+                        : 0.0f;
+                }
             }
         }
         #pragma unroll
@@ -376,12 +396,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
                     a0 = *reinterpret_cast<const int32x2_t*>(ap);
                     a1 = *reinterpret_cast<const int32x2_t*>(ap + 8u);
                 }
+                if constexpr (kFold && kActRowRef) {
+                    float8_t c = acc[t];
+                    c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
+                    acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
+                    continue;
+                }
                 float8_t c = float8_t MXFP4_ZERO8;
                 c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, w0, c);
                 c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, w1, c);
                 #pragma unroll
                 for (int j = 0; j < 8; ++j) {
-                    if constexpr (kFold)
+                    if constexpr (kActRowRef)
+                        acc[t][j] = __builtin_fmaf(c[j], ws, acc[t][j]);
+                    else if constexpr (kFold)
                         acc[t][j] = __builtin_fmaf(c[j], asv[t][j], acc[t][j]);
                     else
                         acc[t][j] = __builtin_fmaf(c[j], ws * asv[t][j], acc[t][j]);
@@ -425,6 +453,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock * kSplit) gemm_mxfp4_w4a8_spl
             float v = s[j];
             if constexpr (kFold)
                 v *= epi;
+            if constexpr (kActRowRef)
+                v *= activation_scales[static_cast<size_t>(r) * as_row_floats];
             const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
             if (output_dtype == static_cast<uint32_t>(Mxfp4GemmOutputDType::BF16)) {
                 static_cast<shelf::bf16_t*>(output)[out_idx] =
@@ -448,13 +478,12 @@ constexpr uint32_t k2dOutBlockFixed = 64u;
 // per weight fragment instead of once per row tile. E8M0 scales are staged as
 // bytes and applied per 32-K block, exactly like the row-block kernels, so the
 // accumulation order and the result are unchanged.
-// kActRescale == false is the per-token (arm B) shape of the A-side scale: the K
-// loop carries no activation scale at all and the WMMA fragments chain straight
-// into the accumulator, which is then multiplied by one scale per activation row.
-// The scale plane keeps the FP8 workspace stride but only column 0 is read, so it
-// is only numerically meaningful when the quantizer was run with one group per
-// row. Instantiated by launch_gemm_mxfp4_w4a8_ablated_noactrescale.
-template <uint32_t kBn, bool kGuarded, bool kFold, bool kActRescale = true>
+// kActRowRef == true is the row-reference folded activation form: the group E8M0 is
+// already inside the E4M3 activation codes and activation_scales[row * stride + 0]
+// holds 2^ref, so the K loop carries no activation scale and the epilogue applies
+// the row reference once. With kFold the WMMA fragments chain straight through K;
+// without it each 32 K block keeps its own weight E8M0 rescale.
+template <uint32_t kBn, bool kGuarded, bool kFold, bool kActRowRef = false>
 __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
@@ -510,7 +539,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     __shared__ uint8_t ws_lds[kNtTotal][kKb][16];
     __shared__ uint2 mag_lds[16];
     __shared__ float smem_as[k2dRowsPerBlock];
-    if constexpr (!kActRescale) {
+    if constexpr (kActRowRef) {
         for (uint32_t r = tid; r < k2dRowsPerBlock; r += k2dThreads) {
             const uint32_t rr = row_start + r;
             smem_as[r] = (!kGuarded || rr < rows)
@@ -574,15 +603,17 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
         detail::lds_barrier();
 
         float asv[4][8];
-        #pragma unroll
-        for (int t = 0; t < 4; ++t) {
+        if constexpr (!kActRowRef) {
             #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const uint32_t rr = row_base + static_cast<uint32_t>(t) * kTileRow +
-                                    8u * k_group + static_cast<uint32_t>(j);
-                asv[t][j] = (!kGuarded || rr < rows)
-                    ? activation_scales[static_cast<size_t>(rr) * as_row_floats + cb]
-                    : 0.0f;
+            for (int t = 0; t < 4; ++t) {
+                #pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const uint32_t rr = row_base + static_cast<uint32_t>(t) * kTileRow +
+                                        8u * k_group + static_cast<uint32_t>(j);
+                    asv[t][j] = (!kGuarded || rr < rows)
+                        ? activation_scales[static_cast<size_t>(rr) * as_row_floats + cb]
+                        : 0.0f;
+                }
             }
         }
 
@@ -612,7 +643,7 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
                 }
                 #pragma unroll
                 for (uint32_t nt = 0; nt < kNtPerWave; ++nt) {
-                    if constexpr (!kActRescale) {
+                    if constexpr (kFold && kActRowRef) {
                         float8_t c = acc[t][nt];
                         c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a0, wf0[nt], c);
                         acc[t][nt] =
@@ -624,7 +655,9 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
                     c = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a1, wf1[nt], c);
                     #pragma unroll
                     for (int j = 0; j < 8; ++j) {
-                        if constexpr (kFold)
+                        if constexpr (kActRowRef)
+                            acc[t][nt][j] = __builtin_fmaf(c[j], wsv[nt], acc[t][nt][j]);
+                        else if constexpr (kFold)
                             acc[t][nt][j] = __builtin_fmaf(c[j], asv[t][j], acc[t][nt][j]);
                         else
                             acc[t][nt][j] = __builtin_fmaf(
@@ -650,9 +683,8 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
                 if (r >= rows)
                     continue;
                 float v = acc[t][nt][j];
-                if constexpr (!kActRescale)
-                    v *= smem_as[row_start + static_cast<uint32_t>(t) * kTileRow +
-                                 8u * k_group + static_cast<uint32_t>(j)];
+                if constexpr (kActRowRef)
+                    v *= smem_as[r - row_start];
                 if constexpr (kFold)
                     v *= mxfp4_e8m0_f32(ref_lds[wave_n * kNtPerWave + nt]);
                 const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o_self;
@@ -667,55 +699,90 @@ __global__ void __launch_bounds__(k2dThreads) gemm_mxfp4_w4a8_prefill_2d_kernel(
     }
 }
 
-#define MXFP4_MB_LAUNCH(MB)                                                      \
-    do {                                                                         \
-        const dim3 grid((out_features + kTileOut - 1u) / kTileOut,               \
-                        (rows + (MB) * kTileRow - 1u) / ((MB) * kTileRow), 1);   \
-        if (weight_ref != nullptr) {                                             \
-            gemm_mxfp4_w4a8_wmma_kernel<(MB), true>                              \
-                <<<grid, kThreadsPerBlock, 0, stream>>>(                         \
-                    weight_codes, weight_scales, weight_ref, acodes,             \
-                    activation_scales, output,                                   \
-                    static_cast<uint32_t>(output_dtype), rows, out_features,     \
-                    k_padded, weight_scale_stride_bytes,                         \
-                    activation_code_stride_bytes, activation_scale_stride_bytes, \
-                    output_row_stride);                                          \
-        } else {                                                                 \
-        gemm_mxfp4_w4a8_wmma_kernel<(MB), false>                                 \
-            <<<grid, kThreadsPerBlock, 0, stream>>>(                             \
-                weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,  \
-                static_cast<uint32_t>(output_dtype), rows, out_features,         \
-                k_padded, weight_scale_stride_bytes,                             \
-                activation_code_stride_bytes, activation_scale_stride_bytes,     \
-                output_row_stride);                                              \
-        }                                                                        \
-        return hipGetLastError();                                                \
-    } while (0)
+// Launch parameters shared by the three kernel families. The activation form is part
+// of the launch, not of the weight slot: it says how the activation scale plane must
+// be read (see Mxfp4ActivationForm).
+struct LaunchArgs {
+    const uint8_t* weight_codes;
+    const uint8_t* weight_scales;
+    const uint8_t* weight_ref;
+    const uint8_t* activation_codes;
+    const float* activation_scales;
+    void* output;
+    uint32_t output_dtype;
+    uint32_t rows;
+    uint32_t out_features;
+    uint32_t k_padded;
+    uint32_t weight_scale_stride;
+    uint32_t activation_code_stride;
+    uint32_t activation_scale_stride;
+    uint32_t output_row_stride;
+    Mxfp4ActivationForm activation_form;
+};
 
-#define MXFP4_SPLITK_LAUNCH(MB, SPLIT)                                           \
-    do {                                                                         \
-        const dim3 grid((out_features + kTileOut - 1u) / kTileOut,               \
-                        (rows + (MB) * kTileRow - 1u) / ((MB) * kTileRow), 1);   \
-        if (weight_ref != nullptr) {                                             \
-            gemm_mxfp4_w4a8_splitk_kernel<(MB), (SPLIT), true>                   \
-                <<<grid, kThreadsPerBlock * (SPLIT), 0, stream>>>(               \
-                    weight_codes, weight_scales, weight_ref, acodes,             \
-                    activation_scales, output,                                   \
-                    static_cast<uint32_t>(output_dtype), rows, out_features,     \
-                    k_padded, weight_scale_stride_bytes,                         \
-                    activation_code_stride_bytes, activation_scale_stride_bytes, \
-                    output_row_stride);                                          \
-        } else {                                                                 \
-        gemm_mxfp4_w4a8_splitk_kernel<(MB), (SPLIT), false>                      \
-            <<<grid, kThreadsPerBlock * (SPLIT), 0, stream>>>(                   \
-                weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,  \
-                static_cast<uint32_t>(output_dtype), rows, out_features,         \
-                k_padded, weight_scale_stride_bytes,                             \
-                activation_code_stride_bytes, activation_scale_stride_bytes,     \
-                output_row_stride);                                              \
-        }                                                                        \
-        return hipGetLastError();                                                \
-    } while (0)
+#define MXFP4_ARGS(a)                                                             \
+    a.weight_codes, a.weight_scales, a.weight_ref, a.activation_codes,             \
+        a.activation_scales, a.output, a.output_dtype, a.rows, a.out_features,      \
+        a.k_padded, a.weight_scale_stride, a.activation_code_stride,                \
+        a.activation_scale_stride, a.output_row_stride
+
+// Four shapes per geometry: the weight E8M0 folded into the operand or applied per
+// 32 K block, and the activation group scale in the K loop or hoisted to the
+// epilogue as the row reference.
+template <int MB>
+hipError_t launch_rowblock(const LaunchArgs& a, hipStream_t stream) {
+    const dim3 grid((a.out_features + kTileOut - 1u) / kTileOut,
+                    (a.rows + MB * kTileRow - 1u) / (MB * kTileRow), 1);
+    const bool row_ref_act = a.activation_form == Mxfp4ActivationForm::RowRefFolded;
+    if (a.weight_ref != nullptr) {
+        if (row_ref_act)
+            gemm_mxfp4_w4a8_wmma_kernel<MB, true, true><<<grid, kThreadsPerBlock, 0, stream>>>(
+                MXFP4_ARGS(a));
+        else
+            gemm_mxfp4_w4a8_wmma_kernel<MB, true, false><<<grid, kThreadsPerBlock, 0, stream>>>(
+                MXFP4_ARGS(a));
+    } else {
+        if (row_ref_act)
+            gemm_mxfp4_w4a8_wmma_kernel<MB, false, true><<<grid, kThreadsPerBlock, 0, stream>>>(
+                MXFP4_ARGS(a));
+        else
+            gemm_mxfp4_w4a8_wmma_kernel<MB, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(
+                MXFP4_ARGS(a));
+    }
+    return hipGetLastError();
+}
+
+template <int MB, int SPLIT>
+hipError_t launch_splitk(const LaunchArgs& a, hipStream_t stream) {
+    const dim3 grid((a.out_features + kTileOut - 1u) / kTileOut,
+                    (a.rows + MB * kTileRow - 1u) / (MB * kTileRow), 1);
+    const bool row_ref_act = a.activation_form == Mxfp4ActivationForm::RowRefFolded;
+    if (a.weight_ref != nullptr) {
+        if (row_ref_act)
+            gemm_mxfp4_w4a8_splitk_kernel<MB, SPLIT, true, true>
+                <<<grid, kThreadsPerBlock * SPLIT, 0, stream>>>(MXFP4_ARGS(a));
+        else
+            gemm_mxfp4_w4a8_splitk_kernel<MB, SPLIT, true, false>
+                <<<grid, kThreadsPerBlock * SPLIT, 0, stream>>>(MXFP4_ARGS(a));
+    } else {
+        if (row_ref_act)
+            gemm_mxfp4_w4a8_splitk_kernel<MB, SPLIT, false, true>
+                <<<grid, kThreadsPerBlock * SPLIT, 0, stream>>>(MXFP4_ARGS(a));
+        else
+            gemm_mxfp4_w4a8_splitk_kernel<MB, SPLIT, false, false>
+                <<<grid, kThreadsPerBlock * SPLIT, 0, stream>>>(MXFP4_ARGS(a));
+    }
+    return hipGetLastError();
+}
+
+template <bool kGuarded, bool kFold, bool kActRowRef>
+hipError_t launch_prefill_2d(const LaunchArgs& a, hipStream_t stream) {
+    const dim3 grid2d((a.out_features + k2dOutBlockFixed - 1u) / k2dOutBlockFixed,
+                      a.rows / k2dRowsPerBlock, 1);
+    gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlockFixed, kGuarded, kFold, kActRowRef>
+        <<<grid2d, k2dThreads, 0, stream>>>(MXFP4_ARGS(a));
+    return hipGetLastError();
+}
 
 }  // namespace
 
@@ -731,6 +798,7 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
     const uint8_t* weight_ref,
     const int8_t* activation_codes,
     const float* activation_scales,
+    Mxfp4ActivationForm activation_form,
     void* output,
     Mxfp4GemmOutputDType output_dtype,
     uint32_t rows,
@@ -745,57 +813,41 @@ hipError_t launch_gemm_mxfp4_w4a8_wmma(
         return hipSuccess;
     if ((k_padded & 127u) != 0u)
         return hipErrorNotSupported;
-    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
+    const LaunchArgs a{weight_codes, weight_scales, weight_ref,
+                       reinterpret_cast<const uint8_t*>(activation_codes), activation_scales,
+                       output, static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
+                       weight_scale_stride_bytes, activation_code_stride_bytes,
+                       activation_scale_stride_bytes, output_row_stride, activation_form};
     if (config.id == Mxfp4GemmConfigId::Prefill2D) {
         // BN 128 was measured and rejected: the non-folded per-K32 rescale needs
         // 16 float8 accumulators per wave and the kernel loses 1.8x to BN 64.
-        constexpr uint32_t k2dOutBlock = k2dOutBlockFixed;
         if ((k_padded % k2dKChunk) != 0u || (rows % k2dRowsPerBlock) != 0u ||
-            out_features < k2dOutBlock)
+            out_features < k2dOutBlockFixed)
             return hipErrorNotSupported;
-        const dim3 grid2d((out_features + k2dOutBlock - 1u) / k2dOutBlock,
-                          rows / k2dRowsPerBlock, 1);
-        const bool guarded = (out_features % k2dOutBlock) != 0u;
+        const bool guarded = (out_features % k2dOutBlockFixed) != 0u;
         const bool fold = weight_ref != nullptr;
+        const bool row_ref_act = activation_form == Mxfp4ActivationForm::RowRefFolded;
         if (guarded) {
-            if (fold) {
-                gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, true, true><<<grid2d, k2dThreads, 0, stream>>>(
-                    weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,
-                    static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-                    weight_scale_stride_bytes, activation_code_stride_bytes,
-                    activation_scale_stride_bytes, output_row_stride);
-            } else {
-                gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, true, false><<<grid2d, k2dThreads, 0, stream>>>(
-                    weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,
-                    static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-                    weight_scale_stride_bytes, activation_code_stride_bytes,
-                    activation_scale_stride_bytes, output_row_stride);
-            }
-        } else {
-            if (fold) {
-                gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, false, true><<<grid2d, k2dThreads, 0, stream>>>(
-                    weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,
-                    static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-                    weight_scale_stride_bytes, activation_code_stride_bytes,
-                    activation_scale_stride_bytes, output_row_stride);
-            } else {
-                gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlock, false, false><<<grid2d, k2dThreads, 0, stream>>>(
-                    weight_codes, weight_scales, weight_ref, acodes, activation_scales, output,
-                    static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-                    weight_scale_stride_bytes, activation_code_stride_bytes,
-                    activation_scale_stride_bytes, output_row_stride);
-            }
+            if (fold)
+                return row_ref_act ? launch_prefill_2d<true, true, true>(a, stream)
+                                   : launch_prefill_2d<true, true, false>(a, stream);
+            return row_ref_act ? launch_prefill_2d<true, false, true>(a, stream)
+                               : launch_prefill_2d<true, false, false>(a, stream);
         }
-        return hipGetLastError();
+        if (fold)
+            return row_ref_act ? launch_prefill_2d<false, true, true>(a, stream)
+                               : launch_prefill_2d<false, true, false>(a, stream);
+        return row_ref_act ? launch_prefill_2d<false, false, true>(a, stream)
+                           : launch_prefill_2d<false, false, false>(a, stream);
     }
     switch (config.id) {
     case Mxfp4GemmConfigId::RowBlock4:
-        MXFP4_MB_LAUNCH(4);
+        return launch_rowblock<4>(a, stream);
     case Mxfp4GemmConfigId::RowBlock2:
-        MXFP4_MB_LAUNCH(2);
+        return launch_rowblock<2>(a, stream);
     case Mxfp4GemmConfigId::RowBlock1:
     default:
-        MXFP4_MB_LAUNCH(1);
+        return launch_rowblock<1>(a, stream);
     }
 }
 
@@ -806,6 +858,7 @@ hipError_t launch_gemm_mxfp4_w4a8_splitk(
     const uint8_t* weight_ref,
     const int8_t* activation_codes,
     const float* activation_scales,
+    Mxfp4ActivationForm activation_form,
     void* output,
     Mxfp4GemmOutputDType output_dtype,
     uint32_t rows,
@@ -820,52 +873,24 @@ hipError_t launch_gemm_mxfp4_w4a8_splitk(
         return hipSuccess;
     if ((k_padded & 127u) != 0u || (out_features & 15u) != 0u)
         return hipErrorNotSupported;
-    const auto* acodes = reinterpret_cast<const uint8_t*>(activation_codes);
+    const LaunchArgs a{weight_codes, weight_scales, weight_ref,
+                       reinterpret_cast<const uint8_t*>(activation_codes), activation_scales,
+                       output, static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
+                       weight_scale_stride_bytes, activation_code_stride_bytes,
+                       activation_scale_stride_bytes, output_row_stride, activation_form};
     const uint32_t mb = rows <= 16u ? 1u : 2u;
     if (mb == 1u) {
-        if (split_k == 2u) {
-            MXFP4_SPLITK_LAUNCH(1, 2);
-        } else if (split_k == 8u) {
-            MXFP4_SPLITK_LAUNCH(1, 8);
-        }
-        MXFP4_SPLITK_LAUNCH(1, 4);
+        if (split_k == 2u)
+            return launch_splitk<1, 2>(a, stream);
+        if (split_k == 8u)
+            return launch_splitk<1, 8>(a, stream);
+        return launch_splitk<1, 4>(a, stream);
     }
-    if (split_k == 2u) {
-        MXFP4_SPLITK_LAUNCH(2, 2);
-    } else if (split_k == 4u) {
-        MXFP4_SPLITK_LAUNCH(2, 4);
-    }
-    MXFP4_SPLITK_LAUNCH(2, 8);
-}
-
-hipError_t launch_gemm_mxfp4_w4a8_ablated_noactrescale(
-    const uint8_t* weight_codes,
-    const uint8_t* weight_scales,
-    const uint8_t* weight_ref,
-    const int8_t* activation_codes,
-    const float* activation_scales,
-    void* output,
-    Mxfp4GemmOutputDType output_dtype,
-    uint32_t rows,
-    uint32_t out_features,
-    uint32_t k_padded,
-    uint32_t weight_scale_stride_bytes,
-    uint32_t activation_code_stride_bytes,
-    uint32_t activation_scale_stride_bytes,
-    uint32_t output_row_stride,
-    hipStream_t stream) {
-    if (!weight_ref || (k_padded % k2dKChunk) != 0u || (rows % k2dRowsPerBlock) != 0u ||
-        (out_features % k2dOutBlockFixed) != 0u)
-        return hipErrorNotSupported;
-    const dim3 grid2d(out_features / k2dOutBlockFixed, rows / k2dRowsPerBlock, 1);
-    gemm_mxfp4_w4a8_prefill_2d_kernel<k2dOutBlockFixed, false, true, false>
-        <<<grid2d, k2dThreads, 0, stream>>>(
-            weight_codes, weight_scales, weight_ref,
-            reinterpret_cast<const uint8_t*>(activation_codes), activation_scales, output,
-            static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-            weight_scale_stride_bytes, activation_code_stride_bytes,
-            activation_scale_stride_bytes, output_row_stride);
-    return hipGetLastError();
+    if (split_k == 2u)
+        return launch_splitk<2, 2>(a, stream);
+    if (split_k == 4u)
+        return launch_splitk<2, 4>(a, stream);
+    return launch_splitk<2, 8>(a, stream);
 }
 
 hipError_t launch_gemm_mxfp4_w4a8_auto(
@@ -875,6 +900,7 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
     const uint8_t* weight_ref,
     const int8_t* activation_codes,
     const float* activation_scales,
+    Mxfp4ActivationForm activation_form,
     void* output,
     Mxfp4GemmOutputDType output_dtype,
     uint32_t rows,
@@ -888,19 +914,18 @@ hipError_t launch_gemm_mxfp4_w4a8_auto(
     if (config.id == Mxfp4GemmConfigId::SplitK) {
         return launch_gemm_mxfp4_w4a8_splitk(
             config.split_k, weight_codes, weight_scales, weight_ref, activation_codes,
-            activation_scales, output, output_dtype, rows, out_features, k_padded,
-            weight_scale_stride_bytes, activation_code_stride_bytes,
+            activation_scales, activation_form, output, output_dtype, rows, out_features,
+            k_padded, weight_scale_stride_bytes, activation_code_stride_bytes,
             activation_scale_stride_bytes, output_row_stride, stream);
     }
     return launch_gemm_mxfp4_w4a8_wmma(
         config, weight_codes, weight_scales, weight_ref, activation_codes, activation_scales,
-        output, output_dtype, rows, out_features, k_padded, weight_scale_stride_bytes,
-        activation_code_stride_bytes, activation_scale_stride_bytes, output_row_stride,
-        stream);
+        activation_form, output, output_dtype, rows, out_features, k_padded,
+        weight_scale_stride_bytes, activation_code_stride_bytes, activation_scale_stride_bytes,
+        output_row_stride, stream);
 }
 
-#undef MXFP4_MB_LAUNCH
-#undef MXFP4_SPLITK_LAUNCH
+#undef MXFP4_ARGS
 #undef MXFP4_ZERO8
 
 }  // namespace shelf::kernel
