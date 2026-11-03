@@ -94,6 +94,121 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
     }
 }
 
+
+// Activation form for the MXFP4 W4A8 family: every 128 K group is quantized with an
+// E8M0 scale (2^ceil(log2(amax / 448))), then that exponent is folded into the E4M3
+// code relative to the row's maximum group exponent. The GEMM therefore applies no
+// activation scale inside the K loop; it multiplies the accumulator once by the row
+// reference (written to scales[row * scale_stride_floats + 0]) and by the weight
+// row reference. Design and measurements:
+// docs/research/20261103/mxfp4_act_rowref_fold_plan.md and mxfp4_gate_a_prime.md sec.13-14.
+__global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowref_kernel(
+    const ::shelf::bf16_t* __restrict__ input,
+    uint8_t* __restrict__ codes,
+    float* __restrict__ scales,
+    const uint32_t k,
+    const uint32_t k_padded,
+    const uint32_t input_row_stride,
+    const uint32_t code_row_stride,
+    const uint32_t scale_row_stride) {
+    constexpr uint32_t kGroup = 128u;
+    constexpr uint32_t kWaves = kThreadsPerRow / 32u;
+    constexpr uint32_t kElemsPerLane = kGroup / 32u;
+    constexpr uint32_t kMaxGroups = 256u;
+    const uint32_t m = blockIdx.x;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const __hip_bfloat16* xb = reinterpret_cast<const __hip_bfloat16*>(input) +
+        static_cast<size_t>(m) * input_row_stride;
+    uint8_t* crow = codes +
+        static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u);
+    const uint32_t m_tile = m & 15u;
+    float* row_scales = scales + static_cast<size_t>(m) * (scale_row_stride / 4u);
+    const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
+
+    __shared__ int32_t s_exp[kMaxGroups];
+    __shared__ int32_t s_ref;
+
+    for (uint32_t g = wave; g < groups; g += kWaves) {
+        const uint32_t base = g * kGroup;
+        const uint32_t i0 = base + lane * kElemsPerLane;
+        float peak = 0.0f;
+        #pragma unroll
+        for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
+            if (i0 + l < k) {
+                const float x = __bfloat162float(xb[i0 + l]);
+                if (isfinite(x)) {
+                    const float av = std::fabs(x);
+                    if (av > peak)
+                        peak = av;
+                }
+            }
+        }
+        #pragma unroll
+        for (uint32_t off = 16u; off > 0u; off >>= 1)
+            peak = fmaxf(peak, __shfl_xor_sync(0xffffffffULL, peak, off));
+        if (lane == 0u) {
+            int32_t e = -127;
+            if (peak > 0.0f && isfinite(peak)) {
+                e = static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(peak) / 448.0)));
+                while (std::ldexp(static_cast<double>(448.0), e) < static_cast<double>(peak))
+                    ++e;
+                while (e > -127 &&
+                       std::ldexp(static_cast<double>(448.0), e - 1) >= static_cast<double>(peak))
+                    --e;
+            }
+            s_exp[g] = e;
+        }
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0u) {
+        int32_t ref = -127;
+        for (uint32_t g = 0u; g < groups; ++g)
+            if (s_exp[g] > ref)
+                ref = s_exp[g];
+        s_ref = ref;
+    }
+    __syncthreads();
+
+    const int32_t ref = s_ref;
+    if (threadIdx.x < groups) {
+        if (threadIdx.x == 0u)
+            row_scales[0] = std::ldexp(1.0f, ref);
+        else
+            row_scales[threadIdx.x] = 0.0f;
+    }
+
+    for (uint32_t g = wave; g < groups; g += kWaves) {
+        const uint32_t base = g * kGroup;
+        const uint32_t i0 = base + lane * kElemsPerLane;
+        const int32_t e = s_exp[g];
+        const int32_t d = ref - e;
+        const float inv = e > -127 ? std::ldexp(1.0f, -e) : 0.0f;
+        const float fold = std::ldexp(1.0f, -d);
+        uint32_t packed = 0u;
+        #pragma unroll
+        for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
+            float v = 0.0f;
+            if (i0 + l < k) {
+                const float x = __bfloat162float(xb[i0 + l]);
+                v = isfinite(x) ? x : 0.0f;
+            }
+            const uint8_t c = inv > 0.0f
+                ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
+                : 0u;
+            const float folded = ::shelf::quantization::codec::device::e4m3_decode_f32(c) * fold;
+            const uint8_t cf = ::shelf::quantization::codec::device::e4m3_encode_u8(folded);
+            packed |= static_cast<uint32_t>(cf) << (8u * l);
+        }
+        if (i0 + kElemsPerLane <= k_padded) {
+            const uint32_t off = (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
+                                 ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
+            *reinterpret_cast<uint32_t*>(crow + off) = packed;
+        }
+    }
+}
+
 template <uint32_t K, uint32_t KP>
 __global__ void __launch_bounds__(kThreadsPerRow)
 activation_quantize_fp8_finegrained_vec_kernel(
@@ -124,6 +239,30 @@ bool activation_quantize_fp8_finegrained_vec_supported(
     if ((input_row_stride & 7u) != 0u)
         return false;
     return true;
+}
+
+hipError_t launch_activation_quantize_mxfp4_rowref(
+    const ::shelf::bf16_t* input,
+    uint8_t* codes,
+    float* scales,
+    uint32_t rows,
+    uint32_t k,
+    uint32_t k_padded,
+    uint32_t input_row_stride,
+    uint32_t code_row_stride,
+    uint32_t scale_row_stride,
+    hipStream_t stream) {
+    if (rows == 0u || k == 0u || k_padded < k)
+        return hipErrorInvalidValue;
+    if ((scale_row_stride % 4u) != 0u)
+        return hipErrorInvalidValue;
+    const uint32_t groups = (k_padded + 127u) / 128u;
+    if (groups > 256u)
+        return hipErrorNotSupported;
+    activation_quantize_mxfp4_rowref_kernel<<<rows, kThreadsPerRow, 0, stream>>>(
+        input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
+        scale_row_stride);
+    return hipGetLastError();
 }
 
 hipError_t launch_activation_quantize_fp8_finegrained_generic(

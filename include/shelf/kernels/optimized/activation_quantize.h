@@ -61,6 +61,21 @@ hipError_t launch_activation_quantize_fp8_finegrained(
     hipStream_t stream,
     bool* specialized = nullptr);
 
+// MXFP4 W4A8 activation form: E8M0 group scales folded into the E4M3 codes against
+// the row's maximum group exponent, plus one f32 row reference in scales column 0.
+// Not yet reachable from the graph; see docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
+hipError_t launch_activation_quantize_mxfp4_rowref(
+    const ::shelf::bf16_t* input,
+    uint8_t* codes,
+    float* scales,
+    uint32_t rows,
+    uint32_t k,
+    uint32_t k_padded,
+    uint32_t input_row_stride,
+    uint32_t code_row_stride,
+    uint32_t scale_row_stride,
+    hipStream_t stream);
+
 hipError_t launch_activation_quantize_fp8_finegrained_generic(
     const ::shelf::bf16_t* input,
     uint8_t* codes,
