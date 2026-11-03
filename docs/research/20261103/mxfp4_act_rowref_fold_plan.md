@@ -1,0 +1,64 @@
+# 案 D（activation E8M0 行基準 fold）本実装の設計メモ
+
+実測根拠は [mxfp4_gate_a_prime.md](mxfp4_gate_a_prime.md) §10〜§14。
+このメモは**まだ実装していない contract 変更の設計**であり、`docs/developer/` の
+現在形 contract ではない。実装完了時に現在形だけへ移す。
+
+## 1. 狙い
+
+MXFP4 W4A8 の activation を
+
+- codes: E4M3（現状と同じ fragment order の平面、1 code = 1 byte）
+- scale: 128 K ごとの **E8M0** を、行単位の基準指数へ fold して codes に畳む
+- 付随: 行あたり 1 個の基準値（`2^ref` を F32 で既存 scale 平面の column 0 に置く）
+
+へ置き換え、GEMM の K ループから activation rescale 命令を**完全に消す**。
+実測で Prefill2D が -28%〜-40%（§13.1）、精度は現行 A 側の 1.39 倍の誤差で
+fold 自体の損は 5 桁目（§13.2）、WMMA は E4M3 subnormal を flush しない（§14）。
+
+## 2. 変更点（blast radius）
+
+| 層 | 変更 |
+| --- | --- |
+| quantization | 新 spec `FP8_E4M3_ROWREF_FOLDED_V1`（codes = FP8E4M3、group 128 の E8M0 を行基準へ fold、付随 = 行 1 個の F32 基準）。`QuantSpecId` に追加 |
+| activation kernel | `launch_activation_quantize_mxfp4_rowref(...)`。行ごとに (1) 128 K group の amax → `e_g = ceil(log2(amax/448))`、(2) `ref = max_g e_g`、(3) codes = `e4m3_rne(e4m3_rne(a / 2^e_g) * 2^-(ref-e_g))`、(4) `scales[row*stride + 0] = 2^ref`。**group 毎の 2 段丸めをそのまま再現する**（§13.2 の実測はこの形） |
+| KernelId | `ACTIVATION_QUANTIZE_FP8_FINEGRAINED` を MXFP4 消費側だけ新 id へ（`linear_quant_contract.h` の family → spec 対応で決まる）。graph lowering は linear の activation spec を見て emit するだけ |
+| correctness path | `exec_linear_mxfp4` が fold 後の平面を読む（per-block の activation scale を掛けない / 行基準を epilogue で掛ける）。**reference 側の accumulation も同じ意味に揃える**ことで、correctness と optimized の関係は現状と同じ「同一値」に戻る |
+| optimized kernels | Prefill2D は `kActRescale=false` 形が既に実装済み（bench 専用 entry）。production の launcher として promote し、RowBlock / SplitK にも同じ形を入れる（rows==1 での速度は未測。decode は DRAM 律速なので利得は小さい見込み、実測して決める） |
+| workspace | 追加平面は不要（`Int8ActivationWorkspaceLayout` の F32 scale 平面の column 0 を行う。他の column は未使用）。resident size 不変 |
+| selector / dispatch | activation spec を手がかりに launcher を選択。`WeightSlot` は不変 |
+| TP | MXFP4 の partition は未実装のまま（変更しない） |
+
+## 3. 実装順（各段で計測し、壊れたらそこで止める）
+
+1. activation kernel（新 entry）+ CPU 参照との一致テスト（`test_activation_quantize_*` 系に fold のケースを追加）。E2E の prefill で codes 平面の差分率を計測し、§13.2 の予測（0.007〜1.5% の code が変わる、うち subnormal 化 3.07%）と合うことを確認。
+2. correctness path を fold 意味へ合わせ、`test_mxfp4_linear` の全 variant 比較を新的な contract（fold 後の平面）で通す。ここで「correctness と optimized が再び同一値」であることを gate にする。
+3. Prefill2D の production 接続（`kActRescale=false` を選択系へ）+ micro 再計測（§13.1 の数が production 経路でも出るか）。selector の閾値は計測値で更新する。
+4. RowBlock / SplitK への展開（rows==1 実測して採用/不採用を決める）。
+5. E2E ゲート（次節）→ `docs/developer/` の contract 更新 → 現在形で書き、このメモは削除。
+
+## 4. 受け入れゲート（A 側変更は bf16 bit 一致ゲートを使えない）
+
+§11.1 で現行 A 側量子化だけで出力 rel_l2 5.5e-3、bf16 反転率 85%。よって
+`GENERATED_IDS` 一致は **pass 不能**（§12 で logit rel_l2 ~1e-2 级で 54/512 token 分岐を実測）。
+
+採用判断のゲート:
+
+1. **prefill 最終位置の logit**: `shelf-compute --dump-logits` で top-1 一致（100%）、
+   rel_l2 が事前予測値（案 D の layer 積算から出す上限）以内。
+2. **生成文の妥当性**: 同一 prompt 512 token で分岐点は出る前提で、分岐後の文が
+   破綻していないことを確認（現行 optimized と案 D の生成列を並べて見る）。
+   参考系列として FP8 W8A8 版の生成列も併記する。
+3. micro / E2E の性能値は §13.1 以上であることを `--perf-stats` で確認（fallback 0）。
+
+`docs/perf/current.md` へ MXFP4 の数値を書くかは、このゲート通過後（qualified
+baseline になってから）の判断。
+
+## 5. 未解決として残っている点
+
+- weight 側 fold の tail 5 行が logit rel_l2 1.05e-2 を出した理由（A 側の fold 損は
+  出力に出ない）が説明できていない。A 側の本実装には影響しないが、MXFP4 の
+  精度議論としてのこる（§13.2 note）。
+- 案 D の E8M0 scale は 2 冪なので、activation の outlier 分布では group 内 amax と
+  基準指数の開きが大きくなる。行内幅が 22 octave あっても fold 損は無視できたが、
+  MoE（Gate B 以降）では expert 間の activation 分布が異なるため再計測が必要。
