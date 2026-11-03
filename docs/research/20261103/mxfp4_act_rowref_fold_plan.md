@@ -2,9 +2,11 @@
 
 実測根拠は [mxfp4_gate_a_prime.md](mxfp4_gate_a_prime.md) §10〜§14。
 このメモは**進行中の contract 変更の設計**であり、`docs/developer/` の現在形
-contract ではない。実装完了時に現在形だけへ移す。§3 の 1 段目（activation kernel と
-host モデル一致テスト）は実装済み（`launch_activation_quantize_mxfp4_rowref`、
-`tests/unit/test_activation_rowref_fold.hip`）。まだ graph から到達できない。
+contract ではない。実装完了時に現在形だけへ移す。§3 の 1〜3 段目（quantize kernel、
+correctness path の読み取り、optimized 3 系統の行基準形）は実装済みで、実測は
+[mxfp4_gate_a_prime.md](mxfp4_gate_a_prime.md) §15 にまとめた（linear 1 回で prefill
+-28〜-42%、decode -13〜-29%）。**まだ graph から到達できない**（4 段目の配線と
+E2E ゲートが未実施）。
 
 ## 1. 狙い
 
@@ -38,9 +40,17 @@ fold 自体の損は 5 桁目（§13.2）、WMMA は E4M3 subnormal を flush �
    fixture で codes 16384 / scales を bit 一致、fold で 3548 code が変わり 561 code が
    ゼロへ潰れる帯域を実際に踏んでいる）。残る is「E2E prefill の実 activation で codes
    平面の差分率を §13.2 の予測（0.007〜1.5%、subnormal 化 3.07%）と突き合わせる」こと。
-2. correctness path に fold 後の平面を読む形を追加し、`test_mxfp4_linear` の全 variant 比較を新しい contract（fold 後の平面）で通す。一致条件は dtype 誤差内（variant 間の一致率と rel_l2 は実測値で置く）。reference の accumulation は変更しない。
-3. Prefill2D の production 接続（`kActRescale=false` を選択系へ）+ micro 再計測（§13.1 の数が production 経路でも出るか）。selector の閾値は計測値で更新する。
-4. RowBlock / SplitK への展開（rows==1 実測して採用/不採用を決める）。
+2. correctness path に fold 後の平面を読む形を追加（`DispatchBinding::flags` bit 0 =
+   `kActFlagRowRefFolded`、読み元だけ分岐し accumulation は不変）。**実装済み**。
+3. optimized 3 系統（RowBlock / SplitK / Prefill2D）に行基準形を入れ、
+   `Mxfp4ActivationForm` で launcher が選択。**実装済み・実測済み**（§15.1、§15.4）。
+   chain 形は reference と bf16 完全一致（§15.5）。selector の variant 選択は
+   §15.4 の限り現行のままでも最適（rows=1/8 -> rowblock1、256 -> rowblock4、
+   512 以上 -> prefill2d）。残るは rowref quantizer の small-rows 増分
+   （rows=1 k=17408 で +8.9 µs、§15.6 の却下記録）。
+4. rowref 平面での weight fold 適否: rows==1 で fold あり/なしがほぼ同等
+   （§15.4）。group 平面で観測した rows==1 の fold 損は消えているが、decode の
+   gating は現状（Prefill2D のみ fold）のまま据え置く。
 5. E2E ゲート（次節）→ `docs/developer/` の contract 更新 → 現在形で書き、このメモは削除。
 
 ## 4. 受け入れゲート（reference は変えない。条件は dtype 誤差内）

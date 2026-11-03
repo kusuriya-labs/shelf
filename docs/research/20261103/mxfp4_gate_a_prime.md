@@ -576,3 +576,108 @@ tensor core が subnormal 入力を flush するかを確認した。`tests/unit
 gfx1201 の FP8 WMMA は E4M3 subnormal を flush せず、積も累加も厳密（2^-9 × 2^-9 = 2^-18
 まで bit 一致）。よって A 側 operand fold はハードウェア側で安全で、残る損は §13.2 で
 測った平面側の丸めだけ（5 桁目）である。
+
+## 15. 行基準 fold の production 形（optimized 3 系統 + quantizer）実測
+
+案 D の本実装（`launch_activation_quantize_mxfp4_rowref` + GEMM の `kActRowRef` 形、
+`Mxfp4ActivationForm::RowRefFolded`）を bench の production 経路
+（`--mxfp4-a-rowref 1`、`--impl prefill2d` / `auto`）で測った。p50 µs、R9700 dev0。
+
+### 15.1 GEMM 本体（weight 側 fold あり、A 側だけ差し替え）
+
+| shape (n:k) | rows | group 形 | rowref 形 | Δ |
+| --- | ---: | ---: | ---: | ---: |
+| 5120:5120 | 512 | 238.9 | 135.1 | **-43%** |
+| 5120:5120 | 2048 | 786.8 | 498.4 | -37% |
+| 17408:5120 | 512 | 679.6 | 420.7 | -38% |
+| 17408:5120 | 2048 | 3033.3 | 2071.0 | -32% |
+| 5120:17408 | 512 | 814.1 | 425.4 | **-48%** |
+| 5120:17408 | 2048 | 3039.7 | 2064.3 | -32% |
+| 10240:5120 | 512 | 389.7 | 249.0 | -36% |
+| 10240:5120 | 2048 | 1706.8 | 1135.8 | -33% |
+
+§13.1 の loop-free ablation（-28〜-40%）と同等以上。**production 経路で再現された**。
+
+### 15.2 quantize 本体（rowref は行基準を決めるため 1 行を 2 スイープする）
+
+| shape (n:k) | rows | group 形 | rowref 形 | 増分 |
+| --- | ---: | ---: | ---: | ---: |
+| 17408:5120 | 1 | 6.4 | 9.0 | +2.6 |
+| 5120:17408 | 1 | 11.9 | 20.8 | +8.9 |
+| 5120:5120 | 512 | 26.2 | 30.2 | +4.0 |
+| 5120:5120 | 2048 | 34.5 | 76.5 | +42.0 |
+| 17408:5120 | 2048 | 34.6 | 76.9 | +42.3 |
+| 5120:17408 | 512 | 36.9 | 64.5 | +27.6 |
+| 5120:17408 | 2048 | 189.4 | 247.2 | +57.8 |
+
+初版（group amax を double の `ceil(log2(...))` と `ldexp` で求め、thread 0 が
+groups 個を serial に最大.reduce し、input を 2 回 scalar load する形）は
+**6.4〜11 倍遅かった**（rows=512 k=5120 で 177 µs、rows=2048 で 680 µs、45 GB/s）。
+上の値は (a) 指数を整数ビット演算化（`448·2^e >= peak` を 3 分岐で求める）、
+(b) 1 スイープ目の codes を LDS に staging して global の再 read をなくす、
+(c) input load を 64 bit vector（lane あたり 4 要素）にした後の値で、
+host モデルとの bit 一致（`tests/unit/test_activation_rowref_fold.hip`）は保持している。
+
+### 15.3 linear 1 回の合計（quantize + GEMM）
+
+| shape (n:k) | rows | group 形 | rowref 形 | Δ |
+| --- | ---: | ---: | ---: | ---: |
+| 5120:5120 | 512 | 265.1 | 165.3 | -38% |
+| 5120:5120 | 2048 | 821.3 | 574.9 | -30% |
+| 17408:5120 | 512 | 705.3 | 451.0 | -36% |
+| 17408:5120 | 2048 | 3067.9 | 2147.9 | -30% |
+| 5120:17408 | 512 | 851.0 | 489.9 | -42% |
+| 5120:17408 | 2048 | 3229.1 | 2311.5 | -28% |
+| 10240:5120 | 512 | 415.6 | 279.4 | -33% |
+| 10240:5120 | 2048 | 1741.3 | 1212.5 | -30% |
+
+### 15.4 decode（rows==1 / 8、selector は rowblock1 を選択）
+
+| shape (n:k) | rows | group 形 GEMM | rowref 形 GEMM | quantize 増分 | 合計 Δ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 17408:5120 | 1 | 39.7 | 33.9 | +2.6 | -21% |
+| 5120:17408 | 1 | 59.9 | 41.9 | +8.9 | -29% |
+| 17408:5120 | 8 | 40.4 | 35.2 | +2.7 | -13% |
+| 5120:17408 | 8 | 60.8 | 43.4 | +8.6 | -22% |
+
+weight 側 fold は rows==1 で損（§10.2）なので decode は fold なしのままで、A 側
+rescale が消える分だけ利いている。rowref 平面で fold あり/なしを rowblock1 で測ると
+rows=1 で 34.7 / 34.2、rows=64 で 115.0 / 118.9（5120:17408）と**ほぼ同等**で、
+group 平面で観測した rows==1 の fold 損は消えている（採用判断は据え置き、decode は
+fold なしのまま）。
+
+### 15.5 variant 間の一致（`tests/unit/test_mxfp4_linear.hip`、fixture k=512 / out=128）
+
+rowref 平面で correctness path（`flags = kActFlagRowRefFolded`）と全 optimized variant
+を比べた。bf16 一致率 / double 参照に対する rel_l2:
+
+| variant | correctness との bf16 一致 | double 参照 rel_l2 |
+| --- | ---: | ---: |
+| rowblock1 / rowblock1+fold / rowblock4+fold | 32768/32768 | 1.658e-3 |
+| splitk4+fold | 32768/32768 | 1.658e-3 |
+| splitk8+fold (rows=1) / rowblock1+fold (rows=1) | 128/128 | - |
+| prefill2d / prefill2d+fold / prefill2d+fold guarded | 32768/32768 / 25600/25600 | 1.658e-3 |
+
+chain 形（WMMA を K 全体へ continuation）でも correctness path と**完全一致**した。
+理由は MXFP4 の inner loop の積がすべて f32 で厳密なためと説明できる:
+E4M3(4 bit) × E4M3(4 bit) の積は有効桁 ≤ 8 bit、16 個の和は ≤ 12 bit で f32 の
+24 bit に収まり、2 冪の rescale は厳密（正規域）。よって K の加算順を保つ限り
+丸めの差が出ない。group 形で splitk が 2〜3 要素ずれるのは、F32 の group scale が
+2 冪でないために summand 自体が丸められ、かつ LDS reduce で加算順が変わるから
+（§1 の観測と整合）。**reference は変更せず、acceptance は double 参照に対する
+tolerance（bf16 exact >= 99.9% / rel_l2 < 2e-3）**で全 variant を通している。
+
+### 15.6 採否と分かったこと
+
+- 案 D（A 側行基準 E8M0 fold）は GEMM 側で §13.1 の予測以上の利得があり、
+  quantize の増分を差し引いても linear 全体で prefill -28〜-42%、decode -13〜-29%。
+  **採用候補として成立**（E2E の logit ゲートは未実施）。
+- rowref quantizer の threads を増やす試行（rows<=256 で 1024 threads、groups に応じ
+  512/1024 へ可変、`__launch_bounds__(1024)`）は**却下**: rows=64 で 9.4 -> 20.2 µs、
+  rows=256 で 19.9 -> 40.7 µ と遅くなり、かつ `test_activation_rowref_fold` の bit 一致が
+  落ちた（行基準がゴミ値になる。threads 可変側の不整合、未調査）。workgroup 数の
+  方が row 内並列より効くので、small-rows の +2.6〜+8.9 µs は別の形で攻める
+  （例: 複数行を 1 workgroup で扱う、または 2 kernel 化）。
+- bench の mxfp4 経路に `hipFree(d_input)` の二重解放が入っており（2143c7a で導入）、
+  `--rows` に複数値を渡すと 2 番目以降が黙って失敗していた（`rc=1`、メッセージなし）。
+  本測定向きに修正した。§13 の表は単一 rows の実行で取った値なので影響はない。

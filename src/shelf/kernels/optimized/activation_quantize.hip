@@ -23,8 +23,8 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
     const uint32_t code_row_stride,
     const uint32_t scale_row_stride) {
     constexpr uint32_t kGroup = 128u;
-    constexpr uint32_t kWaves = kThreadsPerRow / 32u;
     constexpr uint32_t kElemsPerLane = kGroup / 32u;
+    const uint32_t kWaves = blockDim.x >> 5u;
     const uint32_t m = blockIdx.x;
     const uint32_t wave = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
@@ -96,12 +96,32 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_fp8_finegr
 
 
 // Activation form for the MXFP4 W4A8 family: every 128 K group is quantized with an
-// E8M0 scale (2^ceil(log2(amax / 448))), then that exponent is folded into the E4M3
-// code relative to the row's maximum group exponent. The GEMM therefore applies no
-// activation scale inside the K loop; it multiplies the accumulator once by the row
-// reference (written to scales[row * scale_stride_floats + 0]) and by the weight
-// row reference. Design and measurements:
-// docs/research/20261103/mxfp4_act_rowref_fold_plan.md and mxfp4_gate_a_prime.md sec.13-14.
+// E8M0 scale (2^e, the smallest one whose 448 ceiling covers the group peak), then
+// that exponent is folded into the E4M3 code relative to the row's maximum group
+// exponent, so the GEMM applies no activation scale inside the K loop. The row
+// reference 2^ref goes to scales[row * scale_stride_floats + 0]; the group codes are
+// staged in LDS between the two sweeps, so global traffic stays one BF16 read and
+// one code write per element, the same as the group quantizer. Design and
+// measurements: docs/research/20261103/mxfp4_act_rowref_fold_plan.md.
+__device__ __forceinline__ int32_t mxfp4_act_group_exponent(float peak) {
+    const uint32_t bits = __float_as_uint(peak);
+    if (!(peak > 0.0f) || bits < 0x00800000u)
+        return -127;  // zero peak, subnormal peak, NaN or inf
+    const int32_t e_field = static_cast<int32_t>((bits >> 23) & 0xffu) - 127;
+    const float unit = __int_as_float(static_cast<uint32_t>(e_field + 127) << 23);
+    // Smallest e with 448 * 2^e >= peak, for peak = m * 2^e_field with m in [1, 2).
+    if (peak <= 0.875f * unit)
+        return e_field - 9;
+    if (peak <= 1.75f * unit)
+        return e_field - 8;
+    return e_field - 7;
+}
+
+__device__ __forceinline__ float mxfp4_act_pow2(int32_t e) {
+    const uint32_t bits = static_cast<uint32_t>(e + 127) << 23;
+    return __uint_as_float(bits != 0u ? bits : 0x00400000u);
+}
+
 __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowref_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     uint8_t* __restrict__ codes,
@@ -114,97 +134,102 @@ __global__ void __launch_bounds__(kThreadsPerRow) activation_quantize_mxfp4_rowr
     constexpr uint32_t kGroup = 128u;
     constexpr uint32_t kWaves = kThreadsPerRow / 32u;
     constexpr uint32_t kElemsPerLane = kGroup / 32u;
-    constexpr uint32_t kMaxGroups = 256u;
     const uint32_t m = blockIdx.x;
     const uint32_t wave = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
     const __hip_bfloat16* xb = reinterpret_cast<const __hip_bfloat16*>(input) +
         static_cast<size_t>(m) * input_row_stride;
     uint8_t* crow = codes +
         static_cast<size_t>(m >> 4u) * (static_cast<size_t>(code_row_stride) * 16u);
     const uint32_t m_tile = m & 15u;
     float* row_scales = scales + static_cast<size_t>(m) * (scale_row_stride / 4u);
-    const uint32_t groups = (k_padded + kGroup - 1u) / kGroup;
 
-    __shared__ int32_t s_exp[kMaxGroups];
-    __shared__ int32_t s_ref;
+    // One packed dword per (group, lane): the four E4M3 codes that lane owns.
+    extern __shared__ uint32_t lds[];
+    uint32_t* s_pack = lds;
+    int32_t* s_exp = reinterpret_cast<int32_t*>(lds + groups * 32u);
+    int32_t* s_wmax = s_exp + groups;
 
     for (uint32_t g = wave; g < groups; g += kWaves) {
-        const uint32_t base = g * kGroup;
-        const uint32_t i0 = base + lane * kElemsPerLane;
+        const uint32_t i0 = g * kGroup + lane * kElemsPerLane;
+        const bool full4 = (i0 + kElemsPerLane <= k);
+        uint64_t raw = 0u;
+        if (full4)
+            raw = *reinterpret_cast<const uint64_t*>(xb + i0);
+        float vals[kElemsPerLane];
         float peak = 0.0f;
         #pragma unroll
         for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
-            if (i0 + l < k) {
-                const float x = __bfloat162float(xb[i0 + l]);
-                if (isfinite(x)) {
-                    const float av = std::fabs(x);
-                    if (av > peak)
-                        peak = av;
-                }
-            }
+            const uint32_t word = full4 ? static_cast<uint32_t>((raw >> (16u * l)) & 0xffffu)
+                                        : (i0 + l < k ? __bfloat16_as_ushort(xb[i0 + l]) : 0u);
+            const float v = __uint_as_float(word << 16);
+            vals[l] = isfinite(v) ? v : 0.0f;
+            const float av = std::fabs(vals[l]);
+            if (av > peak)
+                peak = av;
         }
         #pragma unroll
-        for (uint32_t off = 16u; off > 0u; off >>= 1)
+        for (uint32_t off = 16u; off > 0u; off >>= 1u)
             peak = fmaxf(peak, __shfl_xor_sync(0xffffffffULL, peak, off));
-        if (lane == 0u) {
-            int32_t e = -127;
-            if (peak > 0.0f && isfinite(peak)) {
-                e = static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(peak) / 448.0)));
-                while (std::ldexp(static_cast<double>(448.0), e) < static_cast<double>(peak))
-                    ++e;
-                while (e > -127 &&
-                       std::ldexp(static_cast<double>(448.0), e - 1) >= static_cast<double>(peak))
-                    --e;
-            }
+        peak = __shfl_sync(0xffffffffULL, peak, 0u);
+        const int32_t e = mxfp4_act_group_exponent(peak);
+        const float inv = mxfp4_act_pow2(-e);
+        uint32_t packed = 0u;
+        #pragma unroll
+        for (uint32_t l = 0u; l < kElemsPerLane; ++l)
+            packed |= static_cast<uint32_t>(
+                ::shelf::quantization::codec::device::e4m3_encode_u8(vals[l] * inv)) << (8u * l);
+        s_pack[g * 32u + lane] = packed;
+        if (lane == 0u)
             s_exp[g] = e;
-        }
     }
     __syncthreads();
+
+    int32_t wmax = -127;
+    for (uint32_t g = wave; g < groups; g += kWaves)
+        if (s_exp[g] > wmax)
+            wmax = s_exp[g];
+    #pragma unroll
+    for (uint32_t off = 16u; off > 0u; off >>= 1u) {
+        const int32_t other = __shfl_xor_sync(0xffffffffULL, wmax, off);
+        if (other > wmax)
+            wmax = other;
+    }
+    if (lane == 0u)
+        s_wmax[wave] = wmax;
+    __syncthreads();
+    int32_t ref = -127;
+    #pragma unroll
+    for (uint32_t w = 0u; w < kWaves; ++w)
+        if (s_wmax[w] > ref)
+            ref = s_wmax[w];
 
     if (threadIdx.x == 0u) {
-        int32_t ref = -127;
-        for (uint32_t g = 0u; g < groups; ++g)
-            if (s_exp[g] > ref)
-                ref = s_exp[g];
-        s_ref = ref;
-    }
-    __syncthreads();
-
-    const int32_t ref = s_ref;
-    if (threadIdx.x < groups) {
-        if (threadIdx.x == 0u)
-            row_scales[0] = std::ldexp(1.0f, ref);
-        else
-            row_scales[threadIdx.x] = 0.0f;
+        row_scales[0] = mxfp4_act_pow2(ref);
+        for (uint32_t g = 1u; g < groups; ++g)
+            row_scales[g] = 0.0f;
     }
 
     for (uint32_t g = wave; g < groups; g += kWaves) {
-        const uint32_t base = g * kGroup;
-        const uint32_t i0 = base + lane * kElemsPerLane;
-        const int32_t e = s_exp[g];
-        const int32_t d = ref - e;
-        const float inv = e > -127 ? std::ldexp(1.0f, -e) : 0.0f;
-        const float fold = std::ldexp(1.0f, -d);
-        uint32_t packed = 0u;
-        #pragma unroll
-        for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
-            float v = 0.0f;
-            if (i0 + l < k) {
-                const float x = __bfloat162float(xb[i0 + l]);
-                v = isfinite(x) ? x : 0.0f;
+        const uint32_t i0 = g * kGroup + lane * kElemsPerLane;
+        const uint32_t packed = s_pack[g * 32u + lane];
+        const int32_t d = ref - s_exp[g];
+        uint32_t out = 0u;
+        if (d <= 120) {
+            const float fold = mxfp4_act_pow2(-d);
+            #pragma unroll
+            for (uint32_t l = 0u; l < kElemsPerLane; ++l) {
+                const uint8_t c = static_cast<uint8_t>((packed >> (8u * l)) & 0xffu);
+                const float folded = ::shelf::quantization::codec::device::e4m3_decode_f32(c) * fold;
+                out |= static_cast<uint32_t>(
+                    ::shelf::quantization::codec::device::e4m3_encode_u8(folded)) << (8u * l);
             }
-            const uint8_t c = inv > 0.0f
-                ? ::shelf::quantization::codec::device::e4m3_encode_u8(v * inv)
-                : 0u;
-            const float folded = ::shelf::quantization::codec::device::e4m3_decode_f32(c) * fold;
-            const uint8_t cf = ::shelf::quantization::codec::device::e4m3_encode_u8(folded);
-            packed |= static_cast<uint32_t>(cf) << (8u * l);
         }
         if (i0 + kElemsPerLane <= k_padded) {
             const uint32_t off = (i0 >> 6u) * ::shelf::quantization::fp8::kFragBlockBytes +
                                  ::shelf::quantization::fp8::fp8_frag_offset(m_tile, i0 & 63u);
-            *reinterpret_cast<uint32_t*>(crow + off) = packed;
+            *reinterpret_cast<uint32_t*>(crow + off) = out;
         }
     }
 }
@@ -259,7 +284,8 @@ hipError_t launch_activation_quantize_mxfp4_rowref(
     const uint32_t groups = (k_padded + 127u) / 128u;
     if (groups > 256u)
         return hipErrorNotSupported;
-    activation_quantize_mxfp4_rowref_kernel<<<rows, kThreadsPerRow, 0, stream>>>(
+    const uint32_t lds_bytes = groups * 128u + groups * 4u + 8u * 4u;
+    activation_quantize_mxfp4_rowref_kernel<<<rows, kThreadsPerRow, lds_bytes, stream>>>(
         input, codes, scales, k, k_padded, input_row_stride, code_row_stride,
         scale_row_stride);
     return hipGetLastError();

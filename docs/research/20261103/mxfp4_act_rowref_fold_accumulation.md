@@ -129,3 +129,18 @@ safe form は、chain 形が E2E の logit ゲートで落とされた場合の�
 案 B（per-token F32）は**採用対象から外す**。行基準が 2 冪でないため per-block 適用と
 epilogue 適用のビットが揃わないこと、および §11.1 で現行の 1.71 倍の誤差（C/D は
 1.39 倍）で優位性がないことが理由。
+
+## 7. 実測結果（§6 の分岐点の決着）
+
+chain 形を production 形として実装した。`tests/unit/test_mxfp4_linear.hip` の rowref
+断面で、chain 形（RowBlock+fold / Prefill2D+fold）は correctness path と **bf16 完全一致**
+（32768/32768、double 参照 rel_l2 1.658e-3）した（[mxfp4_gate_a_prime.md](mxfp4_gate_a_prime.md)
+§15.5）。§4 の仮定（block 内の 16 積の hardware 順序）より前の段階で説明が立つ:
+MXFP4 の inner loop の積は f32 で**厳密**（E4M3×E4M3 は有効桁 ≤ 8 bit、16 個の和は
+≤ 12 bit、2 冪 rescale は厳密）なので、K の加算順を保つ限り丸め差が出ない。
+SplitK が group 形で 2〜3 要素ずれるのは F32 group scale が 2 冪でないためで、
+行基準（2 冪）へ変えると splitk でも一致した。
+
+よって **reference は変更せず、chain 形を第一候補のまま採用できる**。safe form
+（per-block rescale を残す形）は実装したが、性能の比較で chain 形が優っているので
+フォールバックは使わない見込み（両方 kernel には残っている: `kFold=false` の行基準形）。
