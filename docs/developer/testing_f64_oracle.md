@@ -135,3 +135,22 @@ SHELF_MODEL_DIR=models/Qwen3.8-27B-FP8 SHELF_BUILD_DIR=build \
 - 最初の不一致は、fixture の margin が `0.5` 以下かつ生成 token が fixture の
   top5 に含まれる場合だけ許容する
 - 許容した不一致より前の token は完全一致する
+
+## 合成 checkpoint Fixture（外部 checkpoint 不要）
+
+`tests/fixtures/qwen35/qwen35_gdn_tiny/` は合成 Qwen3.5 checkpoint（2 层: 层 0 = GDN、
+层 1 = full attention、hidden 512、GDN key 2×128 / value 4×128）と、その f64 参照
+（`oracle.json` と `oracle_hidden.safetensors`）を commit した fixture である。
+`test_qwen35_gdn_gate_reference`（`gpu1;required`）が层 0 の残差出力と prompt 続きの
+argmax を比較し、GDN の gate 活性（silu 固定）を固定する。外部 checkpoint を必要としない
+ため required acceptance で毎回走る。
+
+再生成には oracle が必要:
+
+```sh
+python3 tools/qwen35_gdn_tiny_fixture.py \
+  --oracle-dir ../references/qwen35-f64-oracle
+```
+
+fixture の config は `output_gate_type` を**宣言しない**。これが contract の一部で
+（参照実装はこの key を読まない）、宣言した形で生成し直すと gate 契約の検証ではなくなる。

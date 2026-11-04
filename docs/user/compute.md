@@ -100,11 +100,11 @@ executor の row bucket も決める。prefill は chunk 分割で進むため�
 real-quantized fp8 model dir（`quantization_config` の `quant_method: fp8` から
 自動検出）のいずれも指定できる。
 
-> **BF16 (plain safetensors) checkpoint について**: ロードは動作し weight の GPU 上
-> 配置は checkpoint と byte 一致するが、生成結果の参照一致検証は未完了です
-> （f64 oracle fixture は `Qwen3.8-27B-FP8` の分のみ commit 済み）。
-> 詳細と再現手順は
-> `docs/research/20261104/bf16_9b_gdn_divergence.md`。
+> **BF16 (plain safetensors) checkpoint について**: 生成結果が参照実装と一致することを
+> 実測で確認済みです（`Qwen3.5-9B` の greedy 12 token が HF transformers の出力と全一致）。
+> GDN 層の数値は required test `test_qwen35_gdn_gate_reference` が合成 checkpoint の
+> f64 参照で固定しています。実モデルの f64 oracle fixture は `Qwen3.8-27B-FP8` の分が
+> commit 済みです。
 
 ### decode backend
 

@@ -77,10 +77,9 @@ dense family の source に MoE の語彙は現れないことを `test_architec
 - `intermediate_size` を宣言してはならない（MoE には dense FFN が無い）。
   逆方向も対称で、dense reader は `num_experts` を宣言する config を拒否する（§5）
 
-`text_config.output_gate_type` が欠落している場合は `output_gate_silu = true`
-（Qwen3.5 MoE checkpoint はこの key を持たず、参照実装は常に silu を適用する）。
-`sigmoid` の宣言はそのまま尊重される。dense 側の既定（key 省略時 sigmoid）は
-[qwen35.md](qwen35.md) §1.2 のまま変更しない。
+`text_config.output_gate_type` は読まない。ゲート活性は dense と共通の固定契約
+（GDN gate = silu、attention output gate = sigmoid）で、
+[qwen35.md](qwen35.md) §1.2 を参照。
 
 ## 3. routed experts の weight 契約（rank-3 native SoA）
 
@@ -409,7 +408,7 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 
 | test | label | 固定する内容 |
 | --- | --- | --- |
-| `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、gate 既定（key 省略時 silu）。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
+| `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、`output_gate_type` を宣言した config も受理すること。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
 | `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range |
 | `test_moe_expert_slice_fixture` | `cpu;required` | 合成 checkpoint の shard 内連続配置、manifest の logical / 物理名契約、payload bit 一致 |
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件 |

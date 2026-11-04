@@ -65,20 +65,22 @@ attn = attention(q_norm(rope(q)), k_norm(rope(k)), v)
 out  = o_proj(attn * sigmoid(gate))
 ```
 
-### 1.2 GDN 出力ゲート
+### 1.2 出力ゲートの活性
 
-GDN 層の recurrence 出力は `gdn_norm` 後に `qkv_proj` の gate 部分と活性を掛ける。
-活性は `text_config.output_gate_type` で決まる。
+2つのゲートはどちらも**固定**で、config key では変わらない。
 
-| `output_gate_type` | gate 活性 | 既定 |
+| ゲート | 活性 | 参照実装 |
 | --- | --- | --- |
-| `sigmoid` | sigmoid | ○（key 省略時） |
-| `swish` / `silu` | SiLU | |
+| full attention の output gate | `attn * sigmoid(gate)` | `Qwen3_5Attention` |
+| GDN の gated RMSNorm | norm → weight 掛け算 → `* silu(gate)` | `Qwen3_5RMSNormGated`（`activation = "silu"`） |
 
-未対応の値は model load 時の error とする（暗黙に sigmoid へ落とさない）。
-Qwen3.8-27B は `swish` である。Qwen3.5 MoE checkpoint はこの key を持たず、参照実装は
-常に silu を適用するため、MoE 側は key 省略時に silu となる。MoE の contract は
-[qwen35moe.md](qwen35moe.md) を参照。
+`text_config.output_gate_type` を宣言していても Shelf は読まない
+（transformers の Qwen3.5 / Qwen3-Next modeling はこの key を参照しない）。
+GDN の gate を config で切り替えると、この key を持たない checkpoint
+（Qwen3.5-9B など）で gate が sigmoid になって生成が壊れる。経緯・実測・再現手順は
+[../research/20261104/bf16_9b_gdn_divergence.md](../research/20261104/bf16_9b_gdn_divergence.md)。
+`test_qwen35_lowering_contract` が GDN の z gate が SiLU であること（および GDN のみの
+graph に Sigmoid が現れないこと）を固定する。
 
 ---
 

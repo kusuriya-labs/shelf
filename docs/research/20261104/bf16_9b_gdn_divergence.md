@@ -56,7 +56,10 @@ Shelf: 95839,98900,88792,15729,3709,67,13,...  -> 無意味列
 | optimized kernel 側のバグ | `SHELF_QWEN35_KERNEL_MODE=correctness` の taps と optimized の taps の差は bf16 丸め水準（層 0 で maxabs 0.0039、層 3 で 0.031）。greedy ids も同一 | 却下（**両 path が同じ誤った値を出している**） |
 | GDN 実装自体が壊れている | `test_qwen35_correctness_fixture`（f64 oracle fixture、27B-FP8）が PASS。層 taps 8 本の相対 L2 ≤ 2e-2 と greedy 64 token 一致 | 却下（**27B geometry では正しい**） |
 
-## 4. 残っている仮説（未検証・推測）
+## 4. 残っている仮説（未検証・推測）→ **§7 で却下**
+
+9B は **GDN の value features が hidden_size と一致する**（value_heads 32 × head_v 128 =
+4096 = hidden 4096）。他の checkpoint では一致しない:
 
 9B は **GDN の value features が hidden_size と一致する**（value_heads 32 × head_v 128 =
 4096 = hidden 4096）。他の checkpoint では一致しない:
@@ -101,3 +104,116 @@ Qwen3.8-27B-FP8               Passed
 ```
 
 つまり **ロード側は contract 通り**で、この問題は実行系（lowering / kernel / state）に残る。
+
+## 7. 原因確定と修正（2026-11-04 実施）
+
+### 7.1 原因
+
+`text_config.output_gate_type` が GDN の gate 活性を決めていた。
+
+| 箇所 | 当時の挙動 |
+| --- | --- |
+| `common/qwen_hybrid/config.h` | `bool output_gate_silu = false`（key 無し = false） |
+| `common/qwen_hybrid/config.cpp` | `output_gate_type ∈ {swish, silu}` で true、`sigmoid` で false、それ以外は load 失敗 |
+| `common/qwen_hybrid/gdn_lowering.h` | `geo.output_gate_silu ? SiLU : Sigmoid` |
+| `qwen35moe/model/qwen35moe_config.cpp` | MoE reader だけ key 省略時に true へ補正（dense は未補正） |
+
+HF 側は両 gate をハードコードしていて、`output_gate_type` は Qwen3.5 / Qwen3-Next の
+modeling で**一度も読まれない**（transformers 5.20.2 を grep して 0 件）。
+
+| gate | HF | Shelf（修正前） |
+| --- | --- | --- |
+| GDN gated RMSNorm | `silu` 固定（`Qwen3_5RMSNormGated.activation`）、norm → weight → ×silu(gate) | config 依存 |
+| attention output gate | `sigmoid` 固定 | 常に sigmoid ✓ |
+
+実在 checkpoint の宣言:
+
+| model | `output_gate_type` | 修正前の Shelf | 結果 |
+| --- | --- | --- | --- |
+| Qwen3.8-27B-FP8 | `swish` | silu（偶然一致） | f64 fixture PASS |
+| **Qwen3.5-9B** | **無し** | **sigmoid** | 生成破綻 |
+| Qwen3.6-35B-A3B-MXFP4 | 無し | sigmoid | （実行系未配線） |
+
+27B が通り 9B が壊れた理由がこれであり、「BF16 path だけ」「geometry」では無かった。
+
+### 7.2 局在に使った reproduction（合成 checkpoint）
+
+`models/` を使わずに合成 checkpoint で再現した。2 層（層 0 = GDN、層 1 = full attention）、
+hidden 512-5120、key 128 / value 128、16 tensor 程度で、実行は 30 ms 程度。
+
+比較は三者同時に行った:
+
+- **f64 oracle**: `../references/qwen35-f64-oracle/qwen35-oracle --dump-hidden`
+  （`hidden_00` = embedding、`hidden_{L+1}` = 層 L の残差出力。Shelf の
+  `SHELF_DEBUG_HIDDEN_FILE` の `prefill_L<tap>.bin` とは `tap ↔ hidden_{tap+1}`）
+- **HF transformers 5.20.2**（torch reference kernel 経路、`causal_conv1d` / `fla` 未導入）
+- **Shelf**（`SHELF_QWEN35_KERNEL_MODE=correctness`）
+
+層 0 を weight surgery で分解した実測（rel_l2 は oracle 比）:
+
+| 条件 | rel_l2 |
+| --- | --- |
+| 層 0 = embedding のみ（GDN out_proj と mlp.down_proj を zero） | **0.0000** |
+| 層 0 = embedding + MLP（GDN out_proj を zero） | **0.0046** |
+| 層 0 = 完全（GDN 込み） | **0.94** |
+
+つまり embedding / RMSNorm / SwiGLU MLP / residual は正しく、**GDN block だけが**違った。
+さらに次を測定して除外した:
+
+| 除外した仮説 | 根拠 |
+| --- | --- |
+| head / channel の取り違え | Shelf head block と HF head block の cos 行列は対角支配（0.6-0.73）、channel shift 候補は全て ~0 |
+| norm と gate の順序 | HF の `norm` module 出力は `norm→weight→×silu(gate)` と cos 0.999999、gate-first は 0.99986 → HF も norm-first で Shelf と同じ |
+| BF16 path 特有 | 同一 weight を HF fp8（block [128,128]）に変換して load しても Shelf の層 0 出力は同じ値だった |
+| GDN state の fp16 精度 | 合成 fixture の state 最大値は 3.7e-3 で fp16 の subnormal 域（6.1e-5）より十分大きく、numpy で state を f64 / f32 / f16 に変えても結果は変わらなかった |
+| geometry（value_features == hidden など） | 27B と同一 geometry（hidden 5120 / key 16×128 / value 48×128）の合成でも失敗。6 通りの geometry sweep で全て 0.83-1.02 |
+| recurrence（chunked / scan） | **1 token 入力でも再現**（T=1 では delta rule は out ∝ v に退化する）。よって scan ではなく pointwise 側に原因があった |
+| 参照側の誤り | HF と oracle は rel 0.005-0.03 で一致。oracle の `--gdn chunked` と `--gdn recurrent` は 5e-16 で一致 |
+
+決定的だったのは、**同じ weight・同じ geometry の fixture に
+`output_gate_type: "swish"` を 1 行足しただけ**で層 0 が一致したこと:
+
+| fixture | rel_l2 |
+| --- | --- |
+| config に key 無し | 1.194 / 0.917 |
+| config に `"output_gate_type": "swish"` を追加 | **0.0177 / 0.0140** |
+
+### 7.3 修正
+
+- `gdn_lowering.h` の z gate を **常に SiLU** にし、`GdnLoweringGeometry::output_gate_silu` を削除
+- `QwenHybridConfig::output_gate_silu` と `output_gate_type` の parse / 値検証を削除
+  （transformers が読まない key を Shelf の contract にしない）
+- `qwen35moe_config.cpp` の key 省略補正（`gate_declared`）を削除
+- 検査: `test_qwen35_lowering_contract` に「GDN の z gate は SiLU」「GDN のみの graph に
+  Sigmoid が現れない」を追加。`test_moe_config` の gate 既定 case は
+  「`output_gate_type` を宣言しても受理される」に置き換えた
+
+### 7.4 修正後の実測
+
+同一合成 sweep（f64 oracle 比、層 0 出力）:
+
+| case | 修正前 | 修正後 |
+| --- | --- | --- |
+| hidden 640 / key 2×128 / value 4×128 | 0.9432 | **0.0097** |
+| hidden 5120 / key 16×128 / value 48×128（27B と同じ geometry） | 0.8331 | **0.0101** |
+| hidden 640 / key 16×128 / value 48×128 | 0.8988 | **0.0090** |
+| hidden 640 / key 2×128 / value 6×128 | 1.0237 | **0.0093** |
+| hidden 4096 / key 16×128 / value 32×128（9B と同じ geometry） | 0.8352 | **0.0108** |
+| hidden 512 / key 2×128 / value 4×128 | 0.8958 | **0.0116** |
+
+実 checkpoint Qwen3.5-9B（BF16、production path = optimized kernel、greedy 12 token）:
+
+```text
+prompt : 3710 369 279 6511 314 9338 30 21134 25   # "What is the capital of France? Answer:"
+修正前 : 95839,98900,88792,15729,3709,67,13,...   # 無意味列
+修正後 : 11751,13,271,3710,369,279,6511,314,9564,30,21134,25
+       = " Paris.\n\nWhat is the capital of Germany? Answer:"   # §1 の HF 参照と一致
+```
+
+HF 参照も本機械で再実行して突き合わせた（torch 2.13.0+rocm10.0.0 / transformers 5.20.2、
+bf16、`attn_implementation="eager"`、greedy 12 token）:
+
+```text
+HF    : 11751,13,271,3710,369,279,6511,314,9564,30,21134,25
+Shelf : 11751,13,271,3710,369,279,6511,314,9564,30,21134,25   # 全 token 一致
+```
