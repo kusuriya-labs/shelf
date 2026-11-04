@@ -104,7 +104,7 @@ runtime create failed: src/shelf/quantization/bundle/quantized_model_reader.cpp:
 invalid argument: logical tensor not found
 ```
 
-原因是 `models/qwen35/weights/model_weights.cpp` の logical tensor 名列挙に expert 名が
+原因は `models/qwen35/weights/model_weights.cpp` の logical tensor 名列挙に expert 名が
 無いこと（`hf_quantized_logical_names` は dense FFN 名のみ）と、`architecture !=
 "qwen35_dense"` を拒否していること。`load_moe_expert_group` には production からの
 呼び出し元がまだ無い。Gate C で router / grouped linear / combine と WeightSlot の

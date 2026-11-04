@@ -43,7 +43,7 @@ token の `top_k` 個の group row を sort するだけで契約の集約順序
 `expert_row_begin` / `expert_group_begin` / `group_expert` / `group_rows` / `group_count`
 が group table である。
 
-容量は host 側单一の式で決める。
+容量は host 側単一の式で決める。
 
 ```text
 moe_group_count_upper_bound(rows, experts, top_k)
@@ -175,7 +175,7 @@ routed の 5.06e-2 は、同じ pipeline を numpy f64 で模した値（5.05e-2
 つまり GPU 側の誤差は **activation を E4M3 group 128 にする数値 class の差**で説明がつき、
 配線の狂いは無い（設計案 §5 の「A4 にしない」判断と同じ位置づけ）。層合計が routed より
 小さいのは shared expert 項が signal を足すためで、relative 値は項の大きさで動く。
-**层合計の gate は回帰検知としては弱く、段ごと gate（bf16 exact 1.0000）が正本**である。
+**層合計の gate は回帰検知としては弱く、段ごと gate（bf16 exact 1.0000）が正本**である。
 
 受け入れは `routed rel_l2 < 8e-2` / `層合計 rel_l2 < 8e-2`（実測 5.1e-2 / 3.7e-2）。
 
@@ -215,7 +215,7 @@ lowering したときと同じ 2 段がテストされる。
   N/k = 32 では絞れる領域が浅い（4 pass の histogram を 256 要素に振る方が高い）。
   design 案 §8 の rows=1 実測（WMMA 32 µs / correctness 163 µs）とも整合的に、
   **MoE router では radix化の利得は計測できない**と判断する。Gate D で配線した後に
-  层合計で再測定して確定させる。
+  層合計で再測定して確定させる。
 
 ## 8. 次の Gate で残るもの
 

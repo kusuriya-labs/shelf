@@ -222,7 +222,7 @@ sampling 系、`create_device_batch_context`）は合計 0.04 GiB 程度で支�
 
 ### working set reserve を auto にした（実測）
 
-上記の不确定分を、row bucket から推定して埋める方式にした。executor の arena 消費を
+上記の不確実分を、row bucket から推定して埋める方式にした。executor の arena 消費を
 確保単位で print して内訳を実測した（TP1 / FP8 KV / requests 4 / prefix cache off /
 bucket 4096）。
 
@@ -253,7 +253,7 @@ final の式は `44 × (hidden + intermediate / tp) / (hidden + intermediate)` �
 ### 誤った容量結論を出した原因
 
 最初に「TP2 + drafter は 262144 が入らない（上限 114,351 tokens）」と書いたが、これは
-以下の重ね書きによる見積もり过大だった。
+以下の重ね書きによる見積もりは大きすぎた。
 
 1. KV auto-fit が drafter 分を差し引いていなかったため、drafter が arena に入らず、
    `--working-set-reserve-gib 6` で回避していた（KV からさらに 2 GiB を削っている）

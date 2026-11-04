@@ -83,6 +83,10 @@ speculative decode の drafter は DFlash2 を使う。
 - 「Qwen3.5 Dense のみ」という記述で現在の Qwen3.8-27B / DFlash2 開発を
   説明したことにしない。
 - capabilities と性能値の正本は README ではなくそれぞれの docs に置く。
+- checkpoint がどのアーキテクチャか（identity）は config.json の `model_type` を
+  allowlist gate として読み、この build が実装していない宣言は tensor を開く前に
+  `Status::unsupported` で拒否する（`shelf::qwen_hybrid::check_config_identity`）。
+  identity で code path を選ばせない。dense / MoE の判定の正本は `num_experts` のまま。
 
 モデル固有の最適化は奨励される。
 

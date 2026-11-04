@@ -117,6 +117,11 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
 - 合成 manifest は `architecture = "qwen35_dense"` を立て、CRC32 は実データから計算される。
   `is_quantized_model_dir` がこの経路を検出し、
   `load_qwen35_weights_from_quantized_safetensors` が合成 manifest 経路へ入る。
+- `architecture` の値域は **Shelf の loader family 名**である（現在 `qwen35_dense` と
+  `dflash2_draft`）。loader は自分の expected 値と照合する（dense は
+  `model_weights.cpp`、drafter は `dflash2/weights.cpp`）。config.json の `model_type` を
+  写してはいけない。checkpoint の識別は `qwen_hybrid::check_config_identity` の gate が担う
+  （[architecture.md](architecture.md) の Checkpoint識別 節）
 
 ### axis-slice ロード
 

@@ -103,9 +103,9 @@ Qwen3.8-27B は `swish` である。Qwen3.5 MoE checkpoint はこの key を持�
 - `logits` : `{R, V}` f32
 - `sampled_tokens` : `{R}` int32
 - `execution_status` : `{1}` u32（0 に初期化）
-- GDN state pool と KV pool の层数は `shelf::qwen_hybrid::count_layer_topology(text_config)`
+- GDN state pool と KV pool の層数は `shelf::qwen_hybrid::count_layer_topology(text_config)`
   から決める。load 側の位相規則（`layer_is_gdn`）と同じ単一規則なので、
-  `layer_types` を宣言しない checkpoint でも load 済みの层構成と pool が食い違わない
+  `layer_types` を宣言しない checkpoint でも load 済みの層構成と pool が食い違わない
 - execution workspace : `max(各 bucket の workspace.total_bytes) + 8192 * 4`（scratch 付き）
 - host staging : `host_request_staging` / `host_pending_staging` / `host_sampled_staging`（pinned）
 
@@ -509,25 +509,27 @@ dense model の weight は「共通 backbone + dense FFN」の合成で、FFN �
 - `include/shelf/models/qwen35/model/qwen35_config.h`
   - `Qwen35TextConfig : shelf::qwen_hybrid::QwenHybridConfig { DenseFfnConfig ffn; }`
   - `read_qwen35_text_config`：`intermediate_size` 必須。`num_experts` を宣言する
-    config は dense ではないので拒否する
+    config は dense ではないので拒否する。routed expert identity を宣言する config も
+    拒否する（expert 数キーがこの build の語彙と違う綴りの場合に、dense として受理して
+    expert tensor を取りこぼさないため）。identity gate 自体は `shelf::qwen_hybrid` が持つ
 - `include/shelf/models/qwen35/weights/dense_ffn_weights.h`
   - `DenseFfnWeights{gate, up, down}`
 - `include/shelf/models/qwen35/weights/model_weights.h`
   - `Qwen35LayerWeights : shelf::qwen_hybrid::HybridLayerWeights { DenseFfnWeights ffn; }`
-  - `Qwen35MtpWeights`（1 层分の full attention backbone + dense FFN + fc + norms）
+  - `Qwen35MtpWeights`（1 層分の full attention backbone + dense FFN + fc + norms）
   - `Qwen35ModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights { layers; mtp; }`
   - `Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions`
     （`load_mtp_layers` / `vocab_parallel_lm_head` は dense 固有）
 - `src/shelf/models/qwen35/weights/model_weights.cpp`
   - dense FFN と MTP の tensor 名・load だけを持つ。embed / lm_head / final norm と
-    层の layernorm / attention は `shelf::qwen_hybrid` の load 部品を読む
+    層の layernorm / attention は `shelf::qwen_hybrid` の load 部品を読む
   - BF16 (plain safetensors) 経路の LM head は `model.language_model.lm_head.weight` を
     優先し、無い場合は `lm_head.weight` を読む（HF は出力 head に prefix を付けない）。
     quantized 経路と同じ别名規則
   - 行列は row-major `[out, in]` の bf16 そのまま（preshuffle はしない）。small vector の
     dtype が checkpoint 側で F32（`linear_attn.norm.weight`、`linear_attn.A_log` など）でも、
     GDN kernel が bf16 を読むため **bf16 へ変換して**ロードする。layernorm 系は
-    `load_bf16_or_f32_tensor` で f32 のまま保持する。层 0 の GDN tensor について
+    `load_bf16_or_f32_tensor` で f32 のまま保持する。層 0 の GDN tensor について
     byte 一致を実 checkpoint で検証するのは `test_qwen35_mtp_weight_real`
 - `include/shelf/models/qwen35/model/qwen35_model.h`
   - `validate_qwen35_weights(weights, Qwen35TextConfig)`：

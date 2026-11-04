@@ -86,7 +86,7 @@ dense 側の BF16 checkpoint path（`load_layer_bf16`）は `shelf::qwen35` の�
 - 両 path は topology 判定の手段も違う（BF16 path は checkpoint に `self_attn.q_proj` が
   有る無しさで絞り、quantized path は config の `layer_types` / `interval` で決める）。
   片方の規則へ無理に揃えると、BF16 path の既存受理条件が変わる。
-- 残った duplication（层 layernorm / attention の tensor 名列挙が 2 箇所）は、
+- 残った duplication（層 layernorm / attention の tensor 名列挙が 2 箇所）は、
   quantized path 側の名前列挙が `qhy::hf_quantized_body_names` に集約済みなので、
   BF16 path が独自に持つ 1 箇所のみ。将来 BF16 MoE checkpoint を扱う時点で共通化の
   価値が決まる（現時点では仮定）。
@@ -189,7 +189,7 @@ base は Gate D の構造（commit `28fed13`）、refactor は `refactor/model-f
   checkpoint safetensors の mmap page に支配されるため、peak RSS は page cache の状態で
   動く（Gate D の値は当時の実測としてそのまま残す。今回の run で再検証はしていない）。
 - 追加された host 側 work は validation が layer 分の plan を作り直すこと
-  （40 层 × 768 source 名 = 30,720 文字列）。これは load 全体の 0.1 s 未満で、
+  （40 層 × 768 source 名 = 30,720 文字列）。これは load 全体の 0.1 s 未満で、
   RSS にも表れていない（上表の一致）。
 
 ## 9.1 実測 A/B: dense production path（`shelf-compute`）も変化なし
@@ -237,7 +237,7 @@ compile は通っている（`test_qwen35moe_model_load_real` を含む）。
   `Qwen3.5-9B`（BF16）/ `Qwen3.8-27B-Quark-AWQ-MXFP4` / `Qwen3.8-27B-FP8`。
 - **層数計算が位相規則と分散していた（ARCH-11、修正済み）**。
   `layer_is_gdn` は `layer_types` → `full_attention_interval` → `l % 4 < 3` の順で位相を決めるが、
-  层数を数える側（`gdn_state_layout.h`、`executor.hip` の KV pool 照合、`compute_common.h`、
+  層数を数える側（`gdn_state_layout.h`、`executor.hip` の KV pool 照合、`compute_common.h`、
   `compute_runtime.hip`、`runtime/tensor_parallel.cpp`、`apps/bench/{tg,pp,batch,quality}.hip`）は
   `layer_types` を直接巡回していた。`layer_types` を宣言しない checkpoint では
   GDN state pool が 0（→ clamp 1）、KV pool が `num_attention_layers == 0` を拒否して

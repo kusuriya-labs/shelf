@@ -12,7 +12,7 @@ model load 経路に載せた第一段。現在形の contract は `docs/develop
 
 ```text
 qwen35 が公開する部品 (weights/quantized_model_body.h)
-  qwen35_hf_quantized_body_names(config)       ... embed / lm_head / norm + 层 layernorm / attn
+  qwen35_hf_quantized_body_names(config)       ... embed / lm_head / norm + 層 layernorm / attn
   qwen35_load_layer_body_quantized(...)        ... layernorm + attention のみ（FFN を触らない）
   qwen35_load_model_level_quantized(...)       ... embed / lm_head / final norm
   qwen35_open_quantized_reader(dir, names, crc)
@@ -92,7 +92,7 @@ fold-exact 平面 80 / 80
 ## 5. 実測: 合成 model-level fixture（`test_qwen35moe_model_load`）
 
 `tests/unit/moe_expert_fixture.h` に model-level 形（embed / lm_head / final norm +
-层 0 は GDN・层 1 は full attention）を追加し、`gpu1;required` で load を通した。
+層 0 は GDN・層 1 は full attention）を追加し、`gpu1;required` で load を通した。
 
 ```text
 arena 使用 2,593,792 B、expert 平面 421,888 B（210,944 B × 2 層）

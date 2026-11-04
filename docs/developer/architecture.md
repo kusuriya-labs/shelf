@@ -76,15 +76,17 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   （`HybridLayerWeights` / `HybridModelLevelWeights`）、FFN 非依存の checkpoint 読み取り
   （`qwen_hybrid::weight_loader`）と共通 invariant 検証（`qwen_hybrid::weight_validation`）
   を持つ。具体的なモデルを参照しない。
-  层の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
-  （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で层数を数える
+  層の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
+  （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で層数を数える
   `count_layer_topology`。GDN state pool・KV pool・TP plan・apps は全部これを使う
 - `shelf_qwen35` は dense FFN を持つ Qwen35（config・weight・lowering・TP・MTP・DFlash2）。
   `shelf_qwen_hybrid` に依存し、`shelf_qwen35moe` には依存しない
 - `shelf_qwen35moe` は Qwen35 MoE（config 契約・expert plan・rank-3 expert loader・
   MoE FFN の weight 保持）。`shelf_qwen_hybrid` に依存し、`shelf_qwen35` には依存しない
 - `shelf_models` は dense / MoE の weight load を `num_experts` で選ぶ入口
-  （`shelf::models::load_model_weights`）。両 loader を link する唯一のターゲット
+  （`shelf::models::load_model_weights`）。両 loader を link する唯一のターゲット。
+  family 選択は構造（`num_experts`）だけが決め、アーキテクチャの識別は
+  `shelf_qwen_hybrid` の identity gate が担う（次節）
 
 `shelf_kernels_correctness` は `shelf_runtime` にlinkする一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` だけを使う。
@@ -172,6 +174,35 @@ dense / MoE の直接 link、`shelf_qwen_hybrid` のモデル link、`shelf_weig
 新model向けの汎用抽象（IModel / Backend / Registry / Factory / Plugin interface）は
 作成しない。必要になった実装はmodel-local
 （`include/shelf/models/<model>/**`）に置く。
+
+## Checkpoint識別（config identity gate）
+
+safetensors checkpoint をどの契約で読むかは、宣言と構造の別々のキーで決める。
+
+| 決めること | キー | 実装 |
+| --- | --- | --- |
+| この build が実装するアーキテクチャか | `model_type` / `text_config.model_type` | `shelf::qwen_hybrid::check_config_identity`。受理集合は `supported_model_identities()`（ビルド時固定の allowlist） |
+| FFN が dense か routed expert か | `text_config.num_experts` | 各 family の config reader と `shelf::models::load_model_weights` |
+
+- gate は拒否専用である。集合外・宣言無しは `Status::unsupported` を返すだけで、
+  identity が code path を選択しない。ここから仮想ディスパッチや registry は生まれない
+- config を読む入口（`read_qwen_hybrid_config` / `read_declared_num_experts` /
+  `read_qwen35_rope_parameters`）はすべて gate を先に通るので、未対応アーキテクチャは
+  tensor 名探索や rope 解析の失敗ではなく、名指しの拒否として現れる
+- dense reader は routed-expert identity を拒否するが、これは `intermediate_size` と
+  `num_experts` の検査の後の backstop である（宣言より構造が正本）
+- 受理集合の拡張は、そのアーキテクチャの実装と同時だけに限る
+- payload の dtype も load 段階で拒否する。BF16 path が F32 / F16 payload を読むと
+  要素サイズ違いで arena へ書き、実行中に意味不明な失敗になるため、
+  `shelf_weights` の loader が `Status::invalid_argument` を返す
+- speculative decode の drafter は別の識別を持つ
+  （`architectures[0] == "DFlash2DraftModel"`、`qwen35/dflash2/config.cpp`）。
+  target の identity gate とは独立である
+
+受理・拒否の境界は `tests/unit/test_model_identity.cpp` が固定する
+（対応 identity の受理、集合外と宣言無しの拒否、identity と構造の矛盾、
+`read_declared_num_experts` と rope reader が同じ gate を通ること）。
+BF16 payload の dtype 検査は `tests/unit/test_weight_load.hip` が固定する。
 
 ## Server layer
 

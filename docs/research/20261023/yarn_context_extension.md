@@ -349,7 +349,7 @@ TP2 では kv_heads が半分（4→2）になるため **per-rank は上表の�
   `"free VRAM after weights cannot hold the required KV and workspace ..."`、
   明示 capacity 時は `capacity < max_seq_len+1` を invalid_argument、
   ページ不足は GiB 換算付き `insufficient_memory`（`compute_runtime.hip`）。
-- **TP 経路には単一 GPU 経路那样的 KV 予算の事前チェックがない**
+- **TP 経路には単一 GPU 経路のような KV 予算の事前チェックがない**
   （`src/shelf/models/qwen35/runtime/tensor_parallel.cpp` の
   `TpRankRuntime::create`）。arena 割り当て失敗がそのまま伝播する。
   → TP での容量拒否メッセージは Gate 4 の対象。

@@ -152,7 +152,7 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   ため結果は決定的である。scan は `row_token` を host 容量ぶん `-1` で埋める
   （activation 量子化は group 数ではなく容量ぶん row を launch する）。
 - group は `kMxfp4GemmRowTile`(=16) slot までで、expert をまたがない。host 側の容量は
-  `moe_group_count_upper_bound` / `moe_group_row_capacity` が单一の源。
+  `moe_group_count_upper_bound` / `moe_group_row_capacity` が単一の源。
 - `launch_moe_combine`: 1 workgroup = 1 token。top_k 個の group row を **group row 昇順
   （= expert 昇順）** に並べ替えて f32 で蓄積し、最後に 1 回 bf16 へ丸める。shared expert
   を渡すと `gate_weight * shared` を routed 合計の後に足す。`gate_weight` は活性化済み値で、

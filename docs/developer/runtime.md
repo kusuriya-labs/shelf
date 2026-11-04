@@ -146,7 +146,7 @@ MEMORY_PLAN tp rank N executor footprint: xx.xx GiB (reserve xx.xx GiB)
 内訳の支配項は program workspace（選択した row bucket の `program.workspace.total_bytes`
 + scratch + attention partials）である。program workspace は `build_program_set` の
 結果から決まり、それは `create_model_executor` の内部で構築されるため plan 時点では
-正確な値が分からない。この不确定分を埋めるのが `--working-set-reserve-gib` であり、
+正確な値が分からない。この不確実分を埋めるのが `--working-set-reserve-gib` であり、
 KV auto-fit の計算式には織り込めない。
 
 `--working-set-reserve-gib 0`（既定）は auto であり、`executor_footprint.h` の式で決める。
