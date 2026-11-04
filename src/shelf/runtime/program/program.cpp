@@ -90,8 +90,6 @@ struct Ctx {
         uint32_t experts = 0;
         uint32_t top_k = 0;
         uint64_t bytes = 0;
-        uint32_t first_command = 0;
-        uint32_t last_command = 0;
         std::vector<uint32_t> binding_refs;
     };
 
@@ -144,13 +142,10 @@ struct Ctx {
         b.scratch_experts = moe_scratch.experts;
         b.scratch_top_k = moe_scratch.top_k;
         moe_scratch.binding_refs.push_back(index);
-        if (!moe_scratch.first_command || index < moe_scratch.first_command)
-            moe_scratch.first_command = index;
-        if (index > moe_scratch.last_command) moe_scratch.last_command = index;
     }
 
-    // Marks the binding that is about to be pushed as a user of the plan scratch, and keeps
-    // the scratch live over every dispatch that reads or writes it.
+    // Marks the binding that is about to be pushed as a user of the plan scratch. The scratch
+    // keeps its workspace offset for the whole program, so no use span is tracked here.
     void use_moe_scratch(DispatchBinding& b) {
         attach_moe_scratch(b, static_cast<uint32_t>(plan->dispatches.size()));
     }
@@ -809,8 +804,11 @@ Status finalize_layout(Ctx& c) {
                                   nullptr, static_cast<int32_t>(i)});
     }
     if (c.moe_scratch.present) {
-        items.push_back(AllocItem{c.moe_scratch.bytes, c.moe_scratch.first_command,
-                                  c.moe_scratch.last_command, nullptr, -1, true});
+        // The router adds into the counters and a run zeroes the scratch once, at its start.
+        // A block that dies before the first router would leave its own bytes in the counters,
+        // so the scratch keeps its offset for the whole program instead of its dispatch span.
+        items.push_back(AllocItem{c.moe_scratch.bytes, 0u,
+                                  std::numeric_limits<uint32_t>::max(), nullptr, -1, true});
     }
     std::sort(items.begin(), items.end(), [](const AllocItem& a, const AllocItem& b) {
         if (a.first_command != b.first_command) return a.first_command < b.first_command;
@@ -1003,6 +1001,24 @@ Status Program::validate() const {
     }
     if (plan_scratch_slot != kNoWorkspace && plan_scratch_slot >= workspace.ranges.size())
         return fail("program plan scratch slot out of range");
+    if (plan_scratch_slot != kNoWorkspace) {
+        // The router adds into the plan counters and a program run zeroes them once, at its
+        // start. An allocation that dies before the first router would leave its own bytes in
+        // the counters, so nothing may share the plan range in a valid program.
+        const auto& plan_range = workspace.ranges[plan_scratch_slot];
+        const uint64_t plan_end = plan_range.offset + plan_range.bytes;
+        for (std::size_t i = 0; i < workspace.ranges.size(); ++i) {
+            if (i == plan_scratch_slot) continue;
+            const auto& r = workspace.ranges[i];
+            if (plan_range.offset < r.offset + r.bytes && r.offset < plan_end)
+                return fail("plan scratch range shared with another workspace range");
+        }
+        for (const auto& vb : values) {
+            if (vb.storage != ValueStorage::WORKSPACE) continue;
+            if (plan_range.offset < vb.offset + vb.bytes && vb.offset < plan_end)
+                return fail("plan scratch range shared with a workspace value");
+        }
+    }
     auto ws = workspace.validate();
     if (!ws.ok()) return ws;
     return Status::make_ok();

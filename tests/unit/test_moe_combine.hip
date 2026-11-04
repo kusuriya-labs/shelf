@@ -196,7 +196,7 @@ void run_case(const Case& spec, Device& d, hipStream_t stream) {
                   kExperts * moe::moe_slot_tile_count(c.rows) * sizeof(uint32_t)) != hipSuccess)
         check(false, tag + ": counts memset");
     if (moe::launch_moe_router(d.logits, kExperts, d.sel_expert, d.sel_weight, d.tile_counts,
-                               c.rows, kExperts, c.top_k, stream) != hipSuccess)
+                               c.rows, kExperts, c.top_k, nullptr, stream) != hipSuccess)
         check(false, tag + ": router");
     if (moe::launch_moe_slot_scan(d.tile_counts, d.row_begin, d.tile_base, d.group_begin,
                                   d.group_expert, d.group_rows, d.group_count, d.row_token, c.rows,

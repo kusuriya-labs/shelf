@@ -271,6 +271,11 @@ Status launch_host_backend_range(
         return Status::invalid_argument("dispatch range out of bounds", __FILE__,
                                         __LINE__);
     }
+    if (begin == 0u) {
+        const Status prepared =
+            ::shelf::execution::prepare_program_run(program, ctx, stream);
+        if (!prepared.ok()) return prepared;
+    }
     return runtime::execute_program_range(program, ctx, stream, begin, end);
 }
 
@@ -2193,6 +2198,8 @@ Result<BatchExecutionOutput> complete_batch(
         executor.active_submission_id = 0u;
         std::string message = "host program execution failed: status=";
         message += std::to_string(status);
+        if (status == static_cast<uint32_t>(::shelf::runtime::ProgramStatus::NUMERIC_ERROR))
+            message += " (a kernel reported a non-finite value: the run is stopped)";
         return Status::invalid_state(message.c_str(), __FILE__, __LINE__);
     }
 

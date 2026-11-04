@@ -6,6 +6,7 @@
 #include <shelf/kernels/optimized/moe/router.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/quantization/quantization_types.h>
+#include <shelf/runtime/program/device_program.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/runtime/program/moe_plan_scratch.h>
 #include <shelf/runtime/program/program.h>
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 namespace rt = shelf::runtime;
@@ -368,6 +370,37 @@ int main() {
     }
     check(second_out == prog_out, "a second program run over the same workspace is identical");
 
+    // A clean run leaves the error word alone, and one non-finite logit reports the run as a
+    // numeric error without faulting it: the caller stops on the word instead of the plan
+    // arrays being walked past their capacity.
+    uint32_t clean_word = 0xFFFFFFFFu;
+    if (hipMemcpy(&clean_word, d_error_word, sizeof(clean_word), hipMemcpyDeviceToHost) !=
+        hipSuccess) {
+        std::printf("FAIL clean error word readback\n");
+        return 1;
+    }
+    check(clean_word == static_cast<uint32_t>(rt::ProgramStatus::COMPLETE),
+          "a clean program run leaves the error word at COMPLETE");
+    {
+        std::vector<float> bad(static_cast<std::size_t>(kTokens) * logits_stride, 0.0f);
+        bad[0] = std::numeric_limits<float>::quiet_NaN();
+        if (hipMemcpy(d_logits, bad.data(), bad.size() * sizeof(float),
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            std::printf("FAIL NaN logits upload\n");
+            return 1;
+        }
+        const shelf::Status numeric = ex::execute_program(program, ctx, stream);
+        check(numeric.ok(), "a non-finite logit does not fault the program run");
+        check(hipStreamSynchronize(stream) == hipSuccess, "non-finite logit run sync");
+        uint32_t word = 0u;
+        if (hipMemcpy(&word, d_error_word, sizeof(word), hipMemcpyDeviceToHost) != hipSuccess) {
+            std::printf("FAIL numeric error word readback\n");
+            return 1;
+        }
+        check(word == static_cast<uint32_t>(rt::ProgramStatus::NUMERIC_ERROR),
+              "one non-finite logit reports the run as NUMERIC_ERROR");
+    }
+
     // Reference: the same kernels, separate arrays, arguments derived from the plan contract.
     int32_t* r_sel_expert = dalloc<int32_t>(slots);
     float* r_sel_weight = dalloc<float>(slots);
@@ -402,7 +435,8 @@ int main() {
         return 1;
     }
     if (kn::launch_moe_router(d_logits, logits_stride, r_sel_expert, r_sel_weight,
-                              r_tile_counts, kTokens, kExperts, kTopK, stream) != hipSuccess)
+                              r_tile_counts, kTokens, kExperts, kTopK, nullptr,
+                              stream) != hipSuccess)
         check(false, "reference router launch");
     if (kn::launch_moe_slot_scan(r_tile_counts, r_row_begin, r_tile_base, r_group_begin,
                                  r_group_expert, r_group_rows, r_group_count, r_row_token,

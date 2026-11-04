@@ -419,7 +419,7 @@ int main() {
                       sizeof(uint32_t)) != hipSuccess)
         check(false, "counts memset");
     check(moe::launch_moe_router(d_logits, experts, d_sel_expert, d_sel_weight, d_tile_counts,
-                                 tokens, experts, top_k, stream) == hipSuccess,
+                                 tokens, experts, top_k, nullptr, stream) == hipSuccess,
           "router launch");
     check(moe::launch_moe_slot_scan(d_tile_counts, d_row_begin, d_tile_base, d_group_begin,
                                     d_group_expert, d_group_rows, d_group_count, d_row_token,

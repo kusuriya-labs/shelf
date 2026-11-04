@@ -171,9 +171,9 @@ workspace 確保は Step 3（MoE node と dispatch）へ移した。消費者が
 する。`tile_counts` の層毎 zero 初期化もそこでの決定になる
 （scan kernel が消費後に zero に戻す案と、launcher が memset する案を追加 launch 実測で選ぶ）。
 
-## 7. Step 2a: 层 block の emit を qwen_hybrid へ抽出（FFN は各 family が持つ）
+## 7. Step 2a: 層 block の emit を qwen_hybrid へ抽出（FFN は各 family が持つ）
 
-MoE lowering を `shelf::qwen35moe` 側に置く前に、dense lowering の层ループから
+MoE lowering を `shelf::qwen35moe` 側に置く前に、dense lowering の層ループから
 **FFN を含まない block**（input norm → GDN / full attention → attention residual →
 post norm）を `qwen_hybrid::emit_hybrid_block`（`models/common/qwen_hybrid/block_lowering.h`）へ
 抽出した。dense 側はこれを見て FFN を emit し、MoE 側は同じ block を見て自分の FFN を
@@ -186,7 +186,7 @@ code path の変化は無い。
 
 ### 等価性の実測（A/B）
 
-合成 checkpoint `tests/fixtures/qwen35/qwen35_gdn_tiny`（hidden 512 / 2 层 / vocab 512）で
+合成 checkpoint `tests/fixtures/qwen35/qwen35_gdn_tiny`（hidden 512 / 2 層 / vocab 512）で
 `shelf-compute --max-new-tokens 4 --hidden-taps 0` を `SHELF_WS_DEBUG=1` を付けて
 抽出前後で実行した。
 
@@ -289,7 +289,7 @@ geometry は launch 前の検査で締切める（expert 平面の native layout
 | 案 | 判断 |
 | --- | --- |
 | `launch_moe_slot_scan` が消費後に zero へ戻す（追加 launch ゼロ） | 不採用（現状）。Gate C の kernel と test の契約を変え、層間で scratch を共有していることへの依存が kernel 契約に漏れる |
-| launcher が memset する | 不採用。layer 毎に +1 launch（40 层 decode で 40 launch/step） |
+| launcher が memset する | 不採用。layer 毎に +1 launch（40 層 decode で 40 launch/step） |
 | `Program::plan_scratch_slot` を持ち、`execute_program` が program 実行あたり 1 回 memset する | 採用。layer 間は同一 stream の逐次実行なので round が重ならず、1 回で足りる。group 数の上限（実測 geometry で R8192 でも 4352 語）に対し memset は range 分だけ |
 
 ### 判断: group-row の dispatch は plan geometry を持つ
@@ -374,7 +374,7 @@ hidden 2048 の model head は TP を使わないので 50 行程度で書ける
 
 ### 合成 MoE fixture の幾何を一貫化した
 
-`tests/unit/moe_expert_fixture.h` の GDN 层は tensor 次元が geometry と無関係だった
+`tests/unit/moe_expert_fixture.h` の GDN 層は tensor 次元が geometry と無関係だった
 （`in_proj_a [64,hidden]`・`out_proj [hidden,hidden]`・`conv1d [64,1,4]`・`norm [hidden]`）上、
 config.json が `linear_*` を宣言していなかった。load は「loaded か」しか見ないため通っていたが、
 lowering は config の geometry から expected shape と view 幅を導くので
@@ -391,10 +391,10 @@ invalid argument: view with empty feature range
   `[256,64]`、`norm` を `[16]`、`dt_bias`・`A_log` を `[4]` へ（`in_proj_qkv [192,256]` と
   `in_proj_z [64,256]` はそのままで一致）
 
-これで MoE fixture が **GDN 层と full attention 层の両方を含む lowerable checkpoint** になり、
+これで MoE fixture が **GDN 層と full attention 層の両方を含む lowerable checkpoint** になり、
 `test_qwen35moe_lowering` が hybrid backbone と MoE FFN の組合せを structure で固定できる。
-`tests/fixtures/qwen35moe`（HF f64 oracle 付きの 1 层 checkpoint）は full attention のみなので、
-これだけでは GDN + MoE が無カバーになる（実モデルは 40 层中 10 层が full attention）。
+`tests/fixtures/qwen35moe`（HF f64 oracle 付きの 1 層 checkpoint）は full attention のみなので、
+これだけでは GDN + MoE が無カバーになる（実モデルは 40 層中 10 層が full attention）。
 
 ### 実測
 
@@ -429,3 +429,157 @@ executor が family 依存になっている箇所は create 内に限られる:
 `qwen35_executor_reserve_bytes` の `kProgramValuesPerFullRow = 44` は dense FFN の
 行あたり bf16 値数であり、MoE の group 平面（`2*inter`・`inter`・`hidden` × group 行数）と
 plan scratch を計上しない。MoE 用の項は group 行数から直接立てる（Step 4）。
+
+## 11. Step 4a〜4d: executor / apps を family 中立へ、実行経路で出た plan scratch の 2 つのバグ
+
+### 配線の形
+
+- `create_executor(ExecutorModelInput&&, ...)` が `qwen_hybrid::HybridLoweredPrimitives` と
+  `RuntimeModelView{hybrid config, embed_tokens}` と `LayerOverrideSource`を受け取る。dense の
+  `create_model_executor(const Qwen35Model&, ...)` は wrapper。family 分岐は両 family を link
+  する `shelf::models::LoadedModel` に置いたので、apps は family を知らない
+  （`shelf_models` は `shelf_qwen35` + `shelf_qwen35_runtime` + `shelf_qwen35moe` を link する）
+- footprint は `qwen35_executor_reserve_bytes(config, ffn_intermediate_size, ...)` へ広げ、
+  grouped 項は `qwen35moe::moe_executor_grouped_bytes(config, max_batch_rows)`。
+  `Int8ActivationWorkspaceLayout` と `MoePlanScratch` から算出し、容量式は複製しない
+- 合成 MoE fixture の几何を、correctness backbone が実行できる次元（GDN key 2×128・value
+  4×128・conv 4、full attention head_dim 128）へ拡大した。これで MoE executor 経路の repro が
+  1 秒台になる（実 checkpoint load の約 25 s を繰り返さない）
+
+### バグ 1: production 経路が plan scratch を zero していなかった
+
+`prepare_program_run`（旧 `zero_plan_scratch`）は `execute_program`（test 入口）からしか呼ばれ
+ておらず、production は `execute_program_range` を直接呼んでいた。実 checkpoint 40 層の E2E で
+生成が `GENERATED_IDS=220,16,15,220` に退化していた件の出所として、これが最初に潰えた。
+`launch_host_backend_range` が `begin == 0` のときに呼ぶ。
+
+### バグ 2: workspace packer が plan scratch の offset を使い回していた（クラッシュの直接原因）
+
+executor の bucket 128 で `MOE_PLAN_SCATTER` が illegal memory access を起こした。program
+レベルの repro（experts 4・top_k 2・128 tokens・tiles 2、および experts 256・top_k 8）は同じ
+shape で通るので、executor 側の条件が必要だった。`SHELF_OP_SYNC=1` で失敗 op を
+`op 21 MOE_PLAN_SCATTER rows=128` へ絞り、scatter 直前の plan 配列を readback した:
+
+```text
+tokens=128 experts=4 top_k=2 tiles=2 row_cap=320 group_cap=20   scratch off=0 bytes=4620
+sel_expert   min=0 max=3 out_of_range=0            <- router の選択は正しい
+tile_base          = 0 1048592056 2097184111 1019264012 2067856040 3116448068 4165040095 ...
+expert_row_begin   = 0 2097184111 2067856040 4165040095 1967289920
+expert_group_begin = 0 20 20 20 20   group_count = 20
+```
+
+`tile_base` の並びは bf16 activation の byte 列に近い。scan が読む `tile_counts` がゼロでなく、
+run 開始時の memset がその後に上書きされていた。plan scratch の workspace item を **dispatch
+span（router〜combine）** で確保していたため、router より前に死ぬ value block が同じ offset を
+再利用できていた。memset は run の先頭で 1 回なので、使い回された byte が counter として残る。
+
+修正は plan scratch に program 全体で offset を持たせること（item の生涯を program 全体へ広げ
+る）。group 行数容量に比べれば scratch は fixture で 4.6 KB、実 geometry の bucket 8192 でも
+O(1 MB) 規模で、使い回す価値が無い。`Program::validate()` は plan range が他の workspace range
+や workspace storage の value と重ならないことを検証し、同じ形のバグを build 失敗へ変える。
+
+### 判断: router の non-finite は「安全に続ける」ではなく「中断する材料」
+
+readback で `sel_expert` は範囲内だったので、non-finite は今回のクラッシュの原因ではなかった。
+ただし softmax が NaN を返すと選択が search sentinel（`kMoeRouterMaxExperts`）に落ち、
+`tile_counts` への累算と scatter の expert index が容量外へ出て context を止める。
+
+初回は「logits の non-finite を `-INF` へ潰して plan を壊さない」だけを入れたが、それだと異常な
+推論結果が silent に走り続ける。契約は次の形に書き直した。
+
+- logits に 1 つでも non-finite（NaN / +INF / -INF）を含む行は**数値異常**。Qwen3.5 MoE の
+  router は logits へ正当な `-INF` マスクを置かないので、`-INF` も異常に含める
+- kernel は plan をメモリ安全に保つ（expert index は `[0, experts)`、weight は finite、
+  全 entry が non-finite の行は index 昇順の top_k 個を weight 0 で選ぶ）
+- 同じ行で program の error word へ `ProgramStatus::NUMERIC_ERROR`（= 6）を立てる。
+  `launch_moe_router` は `error_word` を引数に持ち、dispatch は `ctx.error_word` を渡す
+- executor は commit 時点で staged された word を読み、非 COMPLETE なら pending を poison して
+  `Status::invalid_state` を返す（文言には numeric error であることを添える）
+
+fallback は GPU context を壊さないための処置で、異常な推論結果の継続を許容するものではない。
+中断は上位（executor）が error word で行う、という分離にした。
+
+scatter へ `e < experts` の防御を入れる案は却下した。plan が壊れている事実を silent な誤答へ
+変えるためで、producer を直し、容量は validate と test で張る側に寄せる。
+
+#### tamper 実測（検査が機械的に効いていること）
+
+- `atomicCAS(NUMERIC_ERROR)` を無効化 → `test_moe_router` FAIL
+  （`the round is reported as a numeric error so the run stops`）、
+  `test_moe_program_execute` FAIL（`one non-finite logit reports the run as NUMERIC_ERROR`）
+- non-finite の `-INF` 潰しを無効化 → `test_moe_router` FAIL 5 check
+  （`every selected expert is in range`・`every slot is counted into the plan` など）
+
+いずれも戻して PASS。program レベルの case は external input の logits 1 entry を NaN にするだ
+けで error word が立ち、run は fault しない。clean run では word が COMPLETE のままことも張る。
+
+### 途中で確認した別問題（今回未修正）
+
+`shelf-compute --hidden-taps` で**最終層**を指定すると `duplicate external output entry`
+（`primitive_graph.cpp` の external output 重複検査）で止まる。dense / MoE 共通で、MoE の配線
+とは無関係に起きている。internal tap（最終層より前）は動く。
+
+### 実測
+
+```text
+required acceptance: Passed 154  Failed 0  Errors 0  Skipped 0
+```
+
+実 checkpoint 40 層 MoE を `shelf-compute` で実行した（prompt 6 token、
+`--max-new-tokens 8 --max-num-batched-tokens 64 --max-concurrent-requests 1 --seed 42`、
+`SHELF_HIP_GRAPH=OFF` なので全 program eager）。
+
+| 項目 | 値 |
+| --- | ---: |
+| MODEL_LOAD_MS | 23393.9 |
+| PREFILL_MS | 177.2 |
+| DECODE_MS | 869.5 |
+| DECODE_TOKENS | 7 |
+| DECODE_TOKENS_PER_SEC | 8.05 |
+| ARENA_USED_GB | 30.223 |
+| KV_POOL_RESERVED_BYTES | 10316349440 |
+
+`GENERATED_IDS=3966,51,271,248068,271,248069,271,760`。同じ prompt で plan scratch が壊れていた
+前の run は `220,16,15,220` で、これは壊れた plan の出力だった。修後は token 列として意味の
+ある形に戻っている（速度の anchor は `docs/perf/current.md` 側に置く）。
+
+`paged-attention: outside measured envelope (rows=6 max_visible=6) falling back to correctness
+path` が 1 件。decode 8.05 tok/s は DRAM roofline からの**推算**（backbone bf16 約 2.6 GB +
+lm_head 約 1.0 GB + shared expert 約 0.25 GB + routed experts 約 0.52 GB で token 当たり約
+4.4 GB → 636 GB/s で約 145 tok/s。**未実測の推算**）に対して 1/18 で、backbone の bf16 線形が
+allowlist 外で correctness へ落ちていることが主因と見ている（未確認。内訳は `shelf-bench tg`
+の perf stats で取る）。
+
+router に足した non-finite 検査は per-thread の warp reduce 1 回と shared 1 語で、既存の max
+reduce と同じ規模である。単体の cost は未測定。
+
+### perf stats: decode の fallback は backbone bf16 線形だけ（実測）
+
+`shelf-bench tg --mode greedy --context 64 --tokens 32 --warmup 1` に
+`SHELF_QWEN35_PERF_STATS=1 --perf-stats-output` を添えて取った内訳（32 decode step、40 層）:
+
+```text
+logical_dispatches 43360   optimized_operations 34944   correctness_fallbacks 5472
+linear bf16 { gemm 7040, fallback 5472 }   fp8 0   mxfp4 0
+fallback_reasons { SelectorRejected: 5472 }
+LINEAR_MXFP4_W4A8_GROUPED 2560   MOE_ROUTER 1280   MOE_PLAN_SCAN 1280
+MOE_PLAN_SCATTER 1280   MOE_COMBINE 1280   ACTIVATION_QUANTIZE_MXFP4_ROWREF 2560
+```
+
+`correctness_fallbacks` は **すべて bf16 線形の SelectorRejected** で、grouped 系・router・
+combine・quantize は 1 件も fallback していない（40 層 × 2 grouped = 80/step、router / scan /
+scatter / combine = 40/step で kernel_ids の数と一致）。token 当たりでは
+
+| 線形 | shape | 本数 / token | 状態 |
+| --- | --- | ---: | --- |
+| GDN in_proj_qkv / in_proj_z / in_proj_a / in_proj_b / out_proj | `{8192,2048}` `{4096,2048}` `{32,2048}`×2 `{2048,4096}` | 150 | 未登録 → correctness |
+| attention q_proj / o_proj | `{8192,2048}` `{2048,4096}` | 20 | 未登録 → correctness |
+| lm_head | `{248320,2048}` | 1 | 未登録 → correctness |
+| attention k_proj / v_proj | `{512,2048}` | 20 | MoE FFN 用の登録で最適化経路 |
+| router / shared gate・up / shared down / shared expert gate | `{256,2048}` `{512,2048}` `{2048,512}` `{1,2048}` | 160 | 最適化経路 |
+
+150 + 20 + 1 = 171 = `5472 / 32` で、fallback 本数と内訳がちょうど噛み合う。**decode 速度の
+律速は backbone bf16 線形 171 本 / token が correctness へ落ちていること**であり、MoE 自体で
+はない（この主因は上記の推算とは別に、perf stats で確認した）。
+未登録の 5 shape（`{8192,2048}`・`{4096,2048}`・`{32,2048}`・`{2048,4096}`・`{248320,2048}`）を
+allowlist へ載せるのは、**載せた前後の decode tok/s を測ってから**の作業にする。

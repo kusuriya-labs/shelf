@@ -155,6 +155,10 @@ const bool g_op_sync_enabled = [] {
     const char* e = std::getenv("SHELF_OP_SYNC");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
 }();
+const bool g_op_debug_enabled = [] {
+    const char* e = std::getenv("SHELF_OP_DEBUG");
+    return e != nullptr && e[0] != '\0';
+}();
 struct OpDumpTimer {
     std::chrono::steady_clock::time_point t0;
     const ::shelf::runtime::KernelId id;
@@ -421,10 +425,15 @@ Status execute_program_range(
             if (optimized.value().kind == OptimizedLaunchKind::Launched) {
                 if (sync_each_op) {
                     const hipError_t herr = hipStreamSynchronize(stream);
-                    if (herr != hipSuccess)
-                        return Status::hip_error(
-                            "optimized dispatch sync", hipGetErrorString(herr),
-                            __FILE__, __LINE__);
+                    if (herr != hipSuccess) {
+                        char detail[160];
+                        std::snprintf(detail, sizeof(detail),
+                                      "optimized dispatch sync (op %zu %s rows=%u)", i,
+                                      ::shelf::runtime::kernel_to_name(binding.kernel_id),
+                                      ctx.actual_rows);
+                        return Status::hip_error(detail, hipGetErrorString(herr), __FILE__,
+                                                 __LINE__);
+                    }
                 }
                 record_logical_covered(&binding_as_kid, 1);
                 if (sem_on)
@@ -438,6 +447,10 @@ Status execute_program_range(
                 continue;
             }
         }
+        if (g_op_debug_enabled)
+            std::fprintf(stderr, "OPFALLBACK i=%zu kernel=%s rows=%u\n", i,
+                         ::shelf::runtime::kernel_to_name(binding.kernel_id),
+                         ctx.actual_rows);
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
         record_correctness_fallback(binding.kernel_id);
@@ -590,13 +603,11 @@ Status execute_program_tp_ranges(
     return Status::make_ok();
 }
 
-namespace {
-
-// The router accumulates per-token-tile counts into the plan scratch, so a routing round
-// must start from zeros. One memset per program run covers every layer of the run: each
-// layer's scan consumes the counts before the next layer accumulates into them.
-Status zero_plan_scratch(const ::shelf::runtime::Program& program,
-                         HostExecutionContext& ctx, hipStream_t stream) {
+// The router accumulates per-token-tile counts into the plan scratch, so a program run must
+// start from zeros. One memset per run covers every layer: each layer's scan consumes the
+// counts and leaves them at zero, so no per-layer launch is needed.
+Status prepare_program_run(const ::shelf::runtime::Program& program,
+                           HostExecutionContext& ctx, hipStream_t stream) {
     if (program.plan_scratch_slot == ::shelf::runtime::kNoWorkspace) return Status::make_ok();
     if (ctx.workspace == nullptr)
         return Status::invalid_state("plan scratch zero: workspace not bound", __FILE__,
@@ -612,8 +623,6 @@ Status zero_plan_scratch(const ::shelf::runtime::Program& program,
     return Status::make_ok();
 }
 
-}
-
 Status execute_program(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,
@@ -621,7 +630,7 @@ Status execute_program(
     if (ctx.error_word == nullptr)
         return Status::invalid_state("error word not bound", __FILE__, __LINE__);
     {
-        const Status zero_status = zero_plan_scratch(program, ctx, stream);
+        const Status zero_status = prepare_program_run(program, ctx, stream);
         if (!zero_status.ok()) return zero_status;
     }
     const hipError_t herr =

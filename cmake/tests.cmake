@@ -148,6 +148,7 @@ shelf_add_test(NAME test_moe_grouped_linear SOURCE unit/test_moe_grouped_linear.
 shelf_add_test(NAME test_moe_combine SOURCE unit/test_moe_combine.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_qwen35moe_model_load SOURCE unit/test_qwen35moe_model_load.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_qwen35moe_lowering SOURCE unit/test_qwen35moe_lowering.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35moe shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+shelf_add_test(NAME test_qwen35moe_executor SOURCE unit/test_qwen35moe_executor.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_inference_state shelf_inference_execution shelf_inference_scheduling shelf_kernels_correctness shelf_kernels_optimized shelf_qwen35_kernels_optimized shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_moe_layer_e2e SOURCE unit/test_moe_layer_e2e.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 2 DEFS SHELF_MOE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/qwen35moe" LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_io shelf_gpu)
 shelf_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
@@ -170,7 +171,7 @@ shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowerin
 shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 
-# 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の层 0 = GDN を f64 参照で固定する。
+# 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の層 0 = GDN を f64 参照で固定する。
 add_test(NAME test_qwen35_gdn_gate_reference
          COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
              --gpu-count 1 --cost-gb 2 --timeout 300
@@ -299,6 +300,7 @@ add_custom_target(
         test_moe_layer_e2e
         test_qwen35moe_model_load
         test_qwen35moe_lowering
+        test_qwen35moe_executor
         test_dflash2_weight_contract
         test_dflash2_feature_concat
         test_dflash2_grouped_dynamic_conv

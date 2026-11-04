@@ -101,7 +101,7 @@ Result<OptimizedLaunchResult> try_launch_moe_router(const Program& program,
     const hipError_t herr = ::shelf::kernel::launch_moe_router(
         static_cast<const float*>(in.ptr), in.row_stride, plan.value().arrays.sel_expert,
         plan.value().arrays.sel_weight, plan.value().arrays.tile_counts, plan.value().tokens,
-        plan.value().experts, plan.value().top_k, stream);
+        plan.value().experts, plan.value().top_k, ctx.error_word, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe router launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);

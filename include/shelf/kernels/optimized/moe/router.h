@@ -71,6 +71,14 @@ constexpr uint32_t moe_group_row_capacity(uint32_t rows, uint32_t experts,
     return ::shelf::runtime::grouped_row_capacity(rows, {experts, top_k});
 }
 
+// A row whose logits hold a value that is not finite (NaN, +INF or -INF) is a numeric
+// anomaly: the Qwen3.5 MoE router puts no -INF mask on its logits, so -INF is an anomaly too.
+// The kernel keeps the plan usable in that case (the selected experts stay in
+// [0, experts), the weights stay finite, and a row with no finite logit takes the lowest
+// expert indices with weight 0) and reports the anomaly into error_word with
+// ProgramStatus::NUMERIC_ERROR. The fallback exists so a broken model cannot fault the
+// context; it does not make the result usable, and the caller has to stop the run.
+// error_word may be null, which skips the report.
 hipError_t launch_moe_router(
     const float* logits,
     uint32_t logits_row_stride,
@@ -80,10 +88,11 @@ hipError_t launch_moe_router(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
+    uint32_t* error_word,
     hipStream_t stream);
 
 hipError_t launch_moe_slot_scan(
-    const uint32_t* tile_counts,
+    uint32_t* tile_counts,
     uint32_t* expert_row_begin,
     uint32_t* tile_base,
     uint32_t* expert_group_begin,
