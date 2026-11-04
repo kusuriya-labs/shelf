@@ -24,7 +24,7 @@ using shelf::weights::MatrixEncoding;
 using shelf::weights::MatrixWeight;
 
 constexpr uint32_t kScaleBlockK = shelf::quantization::kMxfp4ScaleBlockK;
-constexpr uint32_t kNativeOutputTile = 16u;
+constexpr uint32_t kNativeOutputTile = shelf::quantization::mxfp4::mxfp4_native_output_tile;
 
 bool fuses_into_w13(MoeExpertProjection projection) noexcept {
     return projection == MoeExpertProjection::Gate || projection == MoeExpertProjection::Up;
@@ -149,8 +149,12 @@ Result<MatrixWeight> materialize_plane(const MoeExpertGroupPlan& plan, PlaneDraf
     }
 
     const uint64_t tiles = draft.rows / kNativeOutputTile;
-    const uint64_t codes_batch = tiles * native.codes_row_stride_bytes;
-    const uint64_t scales_batch = static_cast<uint64_t>(draft.rows) * native.scale_row_stride_bytes;
+    const uint64_t codes_batch =
+        shelf::quantization::mxfp4::mxfp4_native_codes_batch_stride_bytes(draft.rows,
+                                                                          draft.k_padded);
+    const uint64_t scales_batch =
+        shelf::quantization::mxfp4::mxfp4_native_scale_batch_stride_bytes(draft.rows,
+                                                                          draft.k_padded);
 
     w.codes = alloc_u8(native.codes.size(),
                        {plan.experts, static_cast<std::size_t>(tiles),

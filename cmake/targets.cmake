@@ -208,6 +208,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/paged_attention_dispatch.hip
     src/shelf/inference/execution/physical_launch.hip
     src/shelf/inference/execution/program_executor.hip
+    src/shelf/inference/execution/weight_slot_validation.cpp
     src/shelf/inference/execution/rope_dispatch.hip
     src/shelf/inference/execution/sampling_dispatch.hip
 )
@@ -238,6 +239,7 @@ set(
     src/shelf/models/common/qwen_hybrid/config.cpp
     src/shelf/models/common/qwen_hybrid/weight_loader.cpp
     src/shelf/models/common/qwen_hybrid/weight_validation.cpp
+    src/shelf/models/common/qwen_hybrid/weight_slot.cpp
 )
 
 add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})

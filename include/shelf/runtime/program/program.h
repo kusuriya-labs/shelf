@@ -37,6 +37,13 @@ struct WeightSlot {
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;
     bool preshuffled = false;
+    // Rank-3 expert planes. experts == 1 is the 2D path; when experts > 1, rows / cols /
+    // k_padded and the row strides describe ONE expert and the batch strides separate the
+    // experts inside one arena allocation. row_ref is then a [experts][rows] byte plane
+    // with row stride 1, so its batch stride is experts * rows.
+    uint32_t experts = 1;
+    uint64_t codes_batch_stride_bytes = 0;
+    uint64_t scales_batch_stride_bytes = 0;
     uint32_t output_col_offset = 0;
     uint32_t output_col_total = 0;
 };

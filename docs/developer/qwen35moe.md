@@ -102,6 +102,25 @@ expert 毎の `MatrixWeight` 配列は作らない。**1 layer あたり rank-3 
 native layout 自体は rank-2 と同一で、expert をまたぐ tile は作らない
 （[canonical_soa_payload.md](canonical_soa_payload.md) §6bis）。
 
+batch stride の式は `include/shelf/quantization/mxfp4/mxfp4_native.h` の
+`mxfp4_native_codes_batch_stride_bytes` / `mxfp4_native_scale_batch_stride_bytes` が単一源で、
+plan・expert plane loader・weight table validation・grouped GEMM launcher の 4 箇所はいずれも
+この式を読む（式を書き直す箇所は作らない）。`Mxfp4NativeView::validate()` も同じ式で
+codes 平面長を検証する。
+
+plan は `k_padded` が **128 の倍数**であることを要求する。grouped GEMM は K を 128 単位で
+読むため、64 単位で padding した平面は kernel が読めない。padding 境界で不一致が起きても
+launch 時ではなく plan 時点で `Status::unsupported` にする。
+
+`runtime::WeightSlot` も同じ `experts` / batch stride 字段を持ち、両 family の lowering は
+共通の `qwen_hybrid::make_weight_slot`（`models/common/qwen_hybrid/weight_slot.h`）で
+`MatrixWeight` を写す。weight table を device へ送るのは slot の構造体そのものの写しであり、
+字段を個別に列挙しない（列挙形式は字段を追加すると落ちる）。
+`validate_host_weight_slot` は `enc == Mxfp4` の rank-3 slot に対して
+`rows % 16 == 0` / `k_padded % 128 == 0` / batch stride が上記の式と一致を要求し、
+`experts > 1` の slot が MXFP4 以外であることを拒否する。grouped launcher の受理条件と
+同じ条件であり、host 側で落ちていれば launch まで待たずに失敗する。
+
 ### plan
 
 ```cpp
@@ -448,8 +467,6 @@ model load は §5 で配線済み（`shelf-compute` はまだ dense 入口を�
   dense FFN（`ffn.intermediate_size`）を前提にしており、MoE 几何では必ず失敗する。
   MoE の emit は `shelf::qwen35moe` 側に置き、backbone 部分の primitive emit は
   `shelf::qwen_hybrid` の型（`HybridLayerWeights`）をそのまま受け取れる（§1）
-- `WeightSlot` の `experts` / batch stride 字段と `make_weight_slot` /
-  `upload_host_weight_table` / `validate_host_weight_slot` の追従
 - linear selector の allowlist に MoE geometry（`1024:2048` = w13、`2048:512` = w2、
   `256:2048` = router）と grouped 形の選択
 - program workspace の group row 容量（`rows * top_k` ではなく

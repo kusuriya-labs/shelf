@@ -17,8 +17,8 @@ bool Mxfp4NativeView::validate() const {
         return false;
     if (scale_row_stride_bytes != blocks)
         return false;
-    const uint64_t tiles = rows / 16u;
-    if (codes_bytes != batch * tiles * blocks * mxfp4_native_block_bytes)
+    if (codes_bytes != batch * mxfp4_native_codes_batch_stride_bytes(
+                             static_cast<uint32_t>(rows), static_cast<uint32_t>(padded_k)))
         return false;
     return scales_bytes == batch * n * blocks;
 }
