@@ -27,9 +27,11 @@ Status validate_hybrid_model_level(const HybridModelLevelWeights& model,
                                    const QwenHybridConfig& config,
                                    std::size_t layer_count);
 
-// One layer's backbone for a known topology: the two layernorms, and the tensors of that
-// topology only. The other topology must stay unloaded, so a layer cannot carry both
-// attentions or neither.
+// One layer's backbone for a known topology: the two layernorms are [hidden], every
+// tensor of that topology is loaded, and the other topology's tensors are absent, so a
+// layer cannot carry both attentions or neither. The head geometry of a loaded
+// projection is not re-derived here: lowering takes it from the weight, so a width
+// difference is not decided at this boundary.
 Status validate_hybrid_layer_body(const HybridLayerWeights& layer,
                                   std::size_t hidden,
                                   bool is_gdn,

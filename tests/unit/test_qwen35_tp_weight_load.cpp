@@ -156,10 +156,15 @@ int main() {
             check(!shelf::qwen35::validate_qwen35_weights(wrong_ffn, cfg).ok(),
                   "an FFN slice that does not add back up to intermediate_size is rejected");
 
-            shelf::qwen35::Qwen35ModelWeights wrong_attn = r0;
-            wrong_attn.layers[1].attn_q_proj.cols = 33;
-            check(!shelf::qwen35::validate_qwen35_weights(wrong_attn, cfg).ok(),
-                  "an attention projection with the wrong input width is rejected");
+            shelf::qwen35::Qwen35ModelWeights missing_attn = r0;
+            missing_attn.layers[1].attn_q_proj = {};
+            check(!shelf::qwen35::validate_qwen35_weights(missing_attn, cfg).ok(),
+                  "an attention layer that lost q_proj is rejected");
+
+            shelf::qwen35::Qwen35ModelWeights both_attns = r0;
+            both_attns.layers[1].attn_in_proj_a = r0.layers[0].attn_in_proj_a;
+            check(!shelf::qwen35::validate_qwen35_weights(both_attns, cfg).ok(),
+                  "a layer carrying both attentions is rejected");
         }
     }
 

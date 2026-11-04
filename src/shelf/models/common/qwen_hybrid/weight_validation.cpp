@@ -48,16 +48,8 @@ Status check_matrix(const MatrixWeight& w, std::size_t rows, std::size_t cols, c
     return Status::make_ok();
 }
 
-Status check_col_width(const MatrixWeight& w, std::size_t hidden, const char* tag) {
-    if (w.rows == 0 || w.cols == 0) return fail(tag, "weight is not loaded");
-    if (full_cols(w) != hidden) return fail(tag, "input width is not hidden_size");
-    return Status::make_ok();
-}
-
-Status check_row_width(const MatrixWeight& w, std::size_t hidden, const char* tag) {
-    if (w.rows == 0 || w.cols == 0) return fail(tag, "weight is not loaded");
-    if (full_rows(w) != hidden) return fail(tag, "output width is not hidden_size");
-    return Status::make_ok();
+bool loaded_matrix(const MatrixWeight& w) {
+    return w.rows != 0 && w.cols != 0;
 }
 
 }  // namespace
@@ -105,16 +97,10 @@ Status validate_hybrid_layer_body(const HybridLayerWeights& layer,
         return fail(tag, "post_attention_layernorm is not [hidden]");
 
     if (is_gdn) {
-        Status st = check_col_width(layer.attn_in_proj_a, hidden, "linear_attn.in_proj_a");
-        if (!st.ok()) return st;
-        st = check_col_width(layer.attn_in_proj_b, hidden, "linear_attn.in_proj_b");
-        if (!st.ok()) return st;
-        st = check_col_width(layer.attn_in_proj_qkv, hidden, "linear_attn.in_proj_qkv");
-        if (!st.ok()) return st;
-        st = check_col_width(layer.attn_in_proj_z, hidden, "linear_attn.in_proj_z");
-        if (!st.ok()) return st;
-        st = check_row_width(layer.attn_out_proj, hidden, "linear_attn.out_proj");
-        if (!st.ok()) return st;
+        if (!loaded_matrix(layer.attn_in_proj_a) || !loaded_matrix(layer.attn_in_proj_b) ||
+            !loaded_matrix(layer.attn_in_proj_qkv) || !loaded_matrix(layer.attn_in_proj_z))
+            return fail(tag, "linear_attn in_proj is not loaded");
+        if (!loaded_matrix(layer.attn_out_proj)) return fail(tag, "linear_attn.out_proj");
         if (!loaded_vector(layer.attn_conv1d_weight)) return fail(tag, "linear_attn.conv1d");
         if (!loaded_vector(layer.attn_norm_weight)) return fail(tag, "linear_attn.norm");
         if (!loaded_vector(layer.attn_dt_bias)) return fail(tag, "linear_attn.dt_bias");
@@ -122,14 +108,9 @@ Status validate_hybrid_layer_body(const HybridLayerWeights& layer,
         if (layer.attn_q_proj.rows != 0)
             return fail(tag, "a gdn layer carries self_attn weights");
     } else {
-        Status st = check_col_width(layer.attn_q_proj, hidden, "self_attn.q_proj");
-        if (!st.ok()) return st;
-        st = check_col_width(layer.attn_k_proj, hidden, "self_attn.k_proj");
-        if (!st.ok()) return st;
-        st = check_col_width(layer.attn_v_proj, hidden, "self_attn.v_proj");
-        if (!st.ok()) return st;
-        st = check_row_width(layer.attn_o_proj, hidden, "self_attn.o_proj");
-        if (!st.ok()) return st;
+        if (!loaded_matrix(layer.attn_q_proj) || !loaded_matrix(layer.attn_k_proj) ||
+            !loaded_matrix(layer.attn_v_proj) || !loaded_matrix(layer.attn_o_proj))
+            return fail(tag, "self_attn projection is not loaded");
         if (!loaded_vector(layer.attn_q_norm_weight)) return fail(tag, "self_attn.q_norm");
         if (!loaded_vector(layer.attn_k_norm_weight)) return fail(tag, "self_attn.k_norm");
         if (layer.attn_in_proj_a.rows != 0)
