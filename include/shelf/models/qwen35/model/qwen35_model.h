@@ -10,12 +10,12 @@
 
 namespace shelf::qwen35 {
 
-// Model-level invariants of a loaded weight set: embed / lm_head vocab, hidden width,
-// final norm rank and width, layer count, and the gdn / full_attention topology the
-// config implies. The FFN of a layer is not part of these invariants.
+// Model invariants of a loaded dense weight set: the shared hybrid part (embed / lm_head
+// vocab, hidden width, final norm, layer count, per-layer backbone topology) plus the
+// dense FFN of every layer and, when present, the MTP block.
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const shelf::qwen_hybrid::QwenHybridConfig& config);
+    const Qwen35TextConfig& config);
 
 class Qwen35Model final {
 public:

@@ -1,4 +1,5 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/common/qwen_hybrid/weight_validation.h>
 
 #include <cstddef>
 #include <iterator>
@@ -6,76 +7,68 @@
 
 namespace shelf::qwen35 {
 
+namespace {
+
+// gate / up are [intermediate, hidden] and down is [hidden, intermediate], as the model
+// states them: a tensor-parallel rank holds one equal slice of the intermediate axis.
+Status validate_dense_ffn_weights(const DenseFfnWeights& ffn, std::size_t hidden,
+                                  std::size_t intermediate) {
+    namespace qhy = shelf::qwen_hybrid;
+    Status st = qhy::check_matrix_shape(ffn.gate, intermediate, hidden, "qwen35 ffn.gate_proj");
+    if (!st.ok()) return st;
+    st = qhy::check_matrix_shape(ffn.up, intermediate, hidden, "qwen35 ffn.up_proj");
+    if (!st.ok()) return st;
+    st = qhy::check_matrix_shape(ffn.down, hidden, intermediate, "qwen35 ffn.down_proj");
+    if (!st.ok()) return st;
+    return Status::make_ok();
+}
+
+}  // namespace
+
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const shelf::qwen_hybrid::QwenHybridConfig& config)
+    const Qwen35TextConfig& config)
 {
-    if (weights.embed_tokens.rows == 0 || weights.embed_tokens.cols == 0) {
+    namespace qhy = shelf::qwen_hybrid;
+
+    if (config.ffn.intermediate_size == 0) {
         return Status::invalid_argument(
-            "Qwen35Model: embed_tokens dimensions must be > 0",
-            __FILE__, __LINE__);
-    }
-    if (weights.lm_head.rows == 0 || weights.lm_head.cols == 0) {
-        return Status::invalid_argument(
-            "Qwen35Model: lm_head dimensions must be > 0",
-            __FILE__, __LINE__);
-    }
-    if (weights.final_norm_weight.ndim() != 1) {
-        return Status::invalid_argument(
-            "Qwen35Model: final_norm_weight must be 1D",
+            "Qwen35Model: intermediate_size is required",
             __FILE__, __LINE__);
     }
 
-    const std::size_t hidden_size = weights.embed_tokens.cols;
-    if (weights.final_norm_weight.dim(0) != hidden_size) {
-        return Status::invalid_argument(
-            "Qwen35Model: final_norm hidden size mismatch",
-            __FILE__, __LINE__);
-    }
+    Status st = qhy::validate_hybrid_model_level(weights, config, weights.layers.size());
+    if (!st.ok()) return st;
 
-    if (weights.embed_tokens.rows != config.vocab_size) {
-        return Status::invalid_argument(
-            "Qwen35Model: embed_tokens vocab size mismatch",
-            __FILE__, __LINE__);
-    }
-    if (weights.lm_head.rows != config.vocab_size) {
-        const bool vocab_sharded =
-            weights.lm_head.partition.has_value() &&
-            weights.lm_head.partition->axis == 0 &&
-            weights.lm_head.partition->count > 1 &&
-            static_cast<std::size_t>(weights.lm_head.rows) *
-                    weights.lm_head.partition->count ==
-                config.vocab_size;
-        if (!vocab_sharded) {
-            return Status::invalid_argument(
-                "Qwen35Model: lm_head vocab size mismatch",
-                __FILE__, __LINE__);
-        }
-    }
-    if (hidden_size != config.hidden_size) {
-        return Status::invalid_argument(
-            "Qwen35Model: hidden size mismatch",
-            __FILE__, __LINE__);
-    }
-    if (weights.layers.size() != config.num_hidden_layers) {
-        return Status::invalid_argument(
-            "Qwen35Model: layer count mismatch",
-            __FILE__, __LINE__);
-    }
-
+    const std::size_t hidden = config.hidden_size;
+    const std::size_t inter = config.ffn.intermediate_size;
     for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
-        const bool expected_gdn =
-            (config.full_attention_interval == 0)
-            ? (layer % 4 < 3)
-            : (layer % config.full_attention_interval <
-               config.full_attention_interval - 1);
-        if (weights.layers[layer].is_gdn != expected_gdn) {
-            return Status::invalid_argument(
-                "Qwen35Model: unexpected layer topology",
-                __FILE__, __LINE__);
-        }
+        st = qhy::validate_hybrid_layer_body(weights.layers[layer], config, layer);
+        if (!st.ok()) return st;
+        st = validate_dense_ffn_weights(weights.layers[layer].ffn, hidden, inter);
+        if (!st.ok()) return st;
     }
 
+    if (!weights.mtp.present) return Status::make_ok();
+
+    st = qhy::validate_hybrid_layer_body(weights.mtp.layer, hidden, false, "qwen35 mtp layer");
+    if (!st.ok()) return st;
+    st = validate_dense_ffn_weights(weights.mtp.layer.ffn, hidden, inter);
+    if (!st.ok()) return st;
+    if (weights.mtp.fc.rows == 0 || weights.mtp.fc.cols == 0) {
+        return Status::invalid_argument("qwen35 mtp: fc is not loaded", __FILE__, __LINE__);
+    }
+    const gpu::Tensor mtp_norms[] = {
+        weights.mtp.pre_fc_norm_embedding_weight,
+        weights.mtp.pre_fc_norm_hidden_weight,
+        weights.mtp.final_norm_weight,
+    };
+    for (const gpu::Tensor& t : mtp_norms) {
+        if (t.ndim() != 1 || static_cast<std::size_t>(t.dim(0)) != hidden) {
+            return Status::invalid_argument("qwen35 mtp: a norm is not [hidden]",
+                                            __FILE__, __LINE__);
+        }
+    }
     return Status::make_ok();
 }
 
