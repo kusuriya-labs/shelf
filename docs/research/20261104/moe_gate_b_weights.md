@@ -89,7 +89,7 @@ row-major のまま）ため、plan の確保量と disk 上の canonical 量が
 - expert e の平面は、その expert だけを rank-2 として preshuffle した結果と bit 一致
   （rank-3 化が dense path の byte 列を変えないことを固定）
 - `row_ref_exact` は平面別（w13 = true、w2 = false）。E8M0 byte の row 内 span が
-  fold 精确帯（距離 8）に入るか否かを合成 payload で両側から確認した
+  fold の exact 帯（距離 8）に入るか否かを合成 payload で両側から確認した
 - dead row（codes 0、E8M0 byte 1）の row reference が有限 byte のまま残る
 - E8M0 byte 255 を混ぜると `invalid_argument`
 - arena 使用量が plan の平面サイズ合計と一致（余分な確保・コピーが無い）

@@ -72,7 +72,7 @@ source にする）。範囲は `validate_hybrid_model_level(model, config, load
 loaded_layer_hi)` で受け、
 
 - 範囲が layer 0 から始まる（または最終 stage で head が tied）→ embedding を要求
-- 範囲が最終层で終わる → lm_head と final norm を要求
+- 範囲が最終層で終わる → lm_head と final norm を要求
 - 途中 stage → どちらも要求しない
 - 行数は partition の global 値で照合（TP rank が通る）
 
@@ -142,7 +142,7 @@ token、`--max-new-tokens 8 --max-num-batched-tokens 64 --max-concurrent-request
 | 統合後（`merge/moe-pp`） | `3966,51,271,248068,271,248069,271,760` | 8.02 | 30.223 |
 
 生成列と arena が一致。統合で validation と executor の共有部を変えたが、dense TP=2 も MoE
-40 层も同じ結果を出している。**これは生成列の一致であって、HF との数値照合ではない**（40 层
+40 層も同じ結果を出している。**これは生成列の一致であって、HF との数値照合ではない**（40 層
 E2E の数値 gate は未実施のまま）。
 
 ## 実測
@@ -172,6 +172,6 @@ load（約 26 s）より前の起動段階で拒否される。
 ## 統合後に残る確認事項
 
 - PP の E2E 採否（PP=1 と PP=2 の生成列一致）は `pipeline_parallel_port.md` の手順に従う。
-  MoE 側の 40 层 E2E 数値 gate（HF 照合）とは独立で、どちらも未実施
+  MoE 側の 40 層 E2E 数値 gate（HF 照合）とは独立で、どちらも未実施
 - `merge/moe-pp` は `.worktrees/moe-pp-merge` に作成した。`feature/moe-weights` への反映は
   `docs/homework.md` の未 commit 編集を片付けてから fast-forward する

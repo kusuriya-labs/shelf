@@ -239,7 +239,7 @@ binding には解決済みの offset を書かず、`scratch_slot` + `scratch_to
 
 `MOE_COMBINE` の arity は 3 固定（expert 出力・shared expert 出力・活性済み gate）。
 shared expert は Qwen3.5 MoE の必須部品で loader も shape を要求しているため、
-optional 入力を作って arity を可变にしない（`arity_of` は完全一致検証）。
+optional 入力を作って arity を可変にしない（`arity_of` は完全一致検証）。
 
 ### 検証の実測
 
@@ -255,7 +255,7 @@ MOE_COMBINE,RESIDUAL_ADD
 ```
 
 この test が plan scratch の契約を壊して検出することを確認した（実装側の欠落を意図的に
-再現して test を落とす検証）。grouped linear の binding から `use_moe_scratch` を 1 处外すと
+再現して test を落とす検証）。grouped linear の binding から `use_moe_scratch` を 1 箇所外すと
 
 ```text
 FAIL: seven dispatches read or write the plan scratch
