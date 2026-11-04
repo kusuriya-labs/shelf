@@ -1,6 +1,6 @@
 #include <shelf/models/qwen35/weights/tensor_parallel_plan.h>
 
-#include <cstdio>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <limits>
 #include <string>
 #include <vector>
@@ -17,9 +17,7 @@ using shelf::weights::validate_tensor_partition;
 using shelf::weights::validate_tensor_partition_plan;
 
 std::string layer_prefix(std::size_t layer) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "model.language_model.layers.%zu.", layer);
-    return buf;
+    return shelf::qwen_hybrid::layer_tensor_prefix(layer);
 }
 
 Status checked_dim_mul(uint64_t left, uint64_t right, uint64_t& out, const char* what) {
@@ -81,15 +79,10 @@ Result<TensorPartitionPlan> build_qwen35_tensor_partition_plan(
         return Status::invalid_argument("invalid qwen35 config geometry", __FILE__, __LINE__);
     }
 
-    std::vector<int> layer_types = config.layer_types;
-    if (layer_types.size() != config.num_hidden_layers) {
-        layer_types.clear();
-        for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-            const bool gdn = (config.full_attention_interval == 0)
-                ? (l % 4 < 3)
-                : (l % config.full_attention_interval < config.full_attention_interval - 1);
-            layer_types.push_back(gdn ? 0 : 1);
-        }
+    std::vector<int> layer_types;
+    layer_types.reserve(config.num_hidden_layers);
+    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+        layer_types.push_back(shelf::qwen_hybrid::layer_is_gdn(config, l) ? 0 : 1);
     }
     bool has_gdn = false;
     bool has_full_attention = false;

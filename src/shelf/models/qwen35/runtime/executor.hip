@@ -1582,10 +1582,8 @@ Result<Executor> create_model_executor(
                 + std::to_string(expected_gdn.head_v) + ")";
             return Status::invalid_argument(msg.c_str(), __FILE__, __LINE__);
         }
-        uint32_t expected_attn_layers = 0;
-        for (int lt : tc.layer_types) {
-            if (lt == 1) ++expected_attn_layers;
-        }
+        const uint32_t expected_attn_layers = static_cast<uint32_t>(
+            shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
         const uint32_t expected_kv_heads =
             (config.tp != nullptr && config.tp->tp_size > 1)
                 ? config.tp->local_key_value_heads

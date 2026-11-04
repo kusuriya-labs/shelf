@@ -8,11 +8,8 @@
 namespace shelf::app {
 
 inline uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
-    uint32_t n = 0;
-    for (int lt : tc.layer_types) {
-        if (lt == 1) ++n;
-    }
-    return n;
+    return static_cast<uint32_t>(
+        shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
 inline const char* finish_reason_name(shelf::qwen35::runtime::FinishReason reason) {

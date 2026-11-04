@@ -227,6 +227,15 @@ Result<QwenHybridConfig> read_qwen_hybrid_config(const std::string& model_dir) {
     return cfg;
 }
 
+HybridLayerCounts count_layer_topology(const QwenHybridConfig& config) noexcept {
+    HybridLayerCounts counts;
+    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+        if (layer_is_gdn(config, l)) ++counts.gdn_layers;
+        else ++counts.attention_layers;
+    }
+    return counts;
+}
+
 bool layer_is_gdn(const QwenHybridConfig& config, std::size_t layer) {
     if (config.layer_types.size() == config.num_hidden_layers) {
         return config.layer_types[layer] == 0;

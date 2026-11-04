@@ -1,3 +1,5 @@
+#include <shelf/models/common/qwen_hybrid/config.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/runtime/tp/tp_execution.h>
 
@@ -58,6 +60,43 @@ static Qwen35TextConfig base_config() {
     c.linear_conv_kernel_dim = 4;
     c.layer_types = {0, 1, 0, 1};
     return c;
+}
+
+// The GDN state pool and the KV pool size themselves from this counter, so it has to
+// follow the same rule the loader uses, including for a checkpoint that declares only
+// full_attention_interval and no layer_types.
+static void check_topology_counter() {
+    using shelf::qwen_hybrid::count_layer_topology;
+    using shelf::qwen_hybrid::layer_is_gdn;
+
+    Qwen35TextConfig interval_only = base_config();
+    interval_only.layer_types.clear();
+    interval_only.num_hidden_layers = 8;
+    interval_only.full_attention_interval = 4;
+    const auto by_interval = count_layer_topology(interval_only);
+    check(by_interval.gdn_layers == 6 && by_interval.attention_layers == 2,
+          "interval-only config counts every layer");
+    std::size_t gdn = 0;
+    for (std::size_t l = 0; l < interval_only.num_hidden_layers; ++l) {
+        if (layer_is_gdn(interval_only, l)) ++gdn;
+    }
+    check(gdn == by_interval.gdn_layers, "counter follows layer_is_gdn");
+    check(by_interval.gdn_layers + by_interval.attention_layers ==
+              interval_only.num_hidden_layers,
+          "every layer is counted exactly once");
+
+    Qwen35TextConfig typed = base_config();
+    typed.num_hidden_layers = 4;
+    typed.full_attention_interval = 2;
+    typed.layer_types = {1, 1, 0, 1};
+    const auto by_types = count_layer_topology(typed);
+    check(by_types.gdn_layers == 1 && by_types.attention_layers == 3,
+          "declared layer_types win over the interval rule");
+
+    check(shelf::qwen35::make_qwen35_gdn_state_layout(typed).num_gdn_states == 1u,
+          "gdn state pool follows the same rule (declared layer_types)");
+    check(shelf::qwen35::make_qwen35_gdn_state_layout(interval_only).num_gdn_states == 6u,
+          "gdn state pool counts interval-only configs over every layer");
 }
 
 static void test_context_valid() {
@@ -344,6 +383,7 @@ static void test_vocab_parallel_program() {
 }
 
 int main() {
+    check_topology_counter();
     test_context_valid();
     test_context_invalid();
     test_schedule_build();

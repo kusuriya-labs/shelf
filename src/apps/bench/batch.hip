@@ -20,11 +20,8 @@ namespace {
 uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1u) / b; }
 
 uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
-    uint32_t n = 0;
-    for (int lt : tc.layer_types) {
-        if (lt == 1) ++n;
-    }
-    return n;
+    return static_cast<uint32_t>(
+        shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
 void usage(FILE* f) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/status.h>
@@ -9,10 +10,8 @@ namespace qwen35 {
 
 inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
     const Qwen35TextConfig& tc) {
-    uint32_t gdn_layers = 0;
-    for (uint32_t t : tc.layer_types) {
-        if (t == 0) ++gdn_layers;
-    }
+    uint32_t gdn_layers =
+        static_cast<uint32_t>(shelf::qwen_hybrid::count_layer_topology(tc).gdn_layers);
     if (gdn_layers == 0) gdn_layers = 1;
     const uint32_t kh = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16;
     const uint32_t vh = tc.linear_num_value_heads != 0 ? tc.linear_num_value_heads : 16;

@@ -62,5 +62,15 @@ Result<bool> has_text_config_key(const std::string& model_dir, const char* key);
 // from full_attention_interval.
 bool layer_is_gdn(const QwenHybridConfig& config, std::size_t layer);
 
+// How many layers of each kind the model has, from the same rule. State pools and
+// the KV pool are sized from this, so counting layer_types directly (which a
+// checkpoint may not declare) cannot disagree with what the loader builds.
+struct HybridLayerCounts {
+    std::size_t gdn_layers = 0;
+    std::size_t attention_layers = 0;
+};
+
+HybridLayerCounts count_layer_topology(const QwenHybridConfig& config) noexcept;
+
 }
 }

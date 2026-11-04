@@ -25,21 +25,8 @@ std::uint32_t ceil_div(std::uint32_t a, std::uint32_t b) {
 }
 
 std::uint32_t count_attention_layers(const Qwen35TextConfig& tc) {
-    if (!tc.layer_types.empty()) {
-        std::uint32_t n = 0;
-        for (int lt : tc.layer_types) {
-            if (lt == 1) ++n;
-        }
-        return n;
-    }
-    std::uint32_t n = 0;
-    for (std::size_t l = 0; l < tc.num_hidden_layers; ++l) {
-        const bool gdn = (tc.full_attention_interval == 0)
-            ? (l % 4 < 3)
-            : (l % tc.full_attention_interval < tc.full_attention_interval - 1);
-        if (!gdn) ++n;
-    }
-    return n;
+    return static_cast<std::uint32_t>(
+        shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
 std::uint64_t tensor_bytes(const gpu::Tensor& t) {
