@@ -198,6 +198,56 @@ dtype 別に分ける変更が前提である。probe 中は実際に capability
 1 呼出 186.6 µs × 10 層 = 1.87 ms / token で token 全体（19 ms 台）の 10 % 程度、
 visible 65536 では 39.8 ms / token になって律速側へ寄る。
 
+## なぜ q_per_kv=8 の split-KV を今実装しないのか（採否判断）
+
+MoE decode の context 4096（`tg --context 4096 --tokens 8 --warmup 1 --device 1`、
+`SHELF_QWEN35_PERF_TIMING=1`）の per-op GPU time。timed window 151.516 ms / 8 token：
+
+| kernel | 件数 | total ms | mean µs | share |
+| --- | ---: | ---: | ---: | ---: |
+| `LINEAR_BF16` | 2363 | 65.694 | 27.80 | 43.4 % |
+| `PAGED_ATTENTION` | 60 | 14.156 | 235.94 | 9.3 % |
+| `LINEAR_MXFP4_W4A8_GROUPED` | 484 | 11.191 | 23.12 | 7.4 % |
+| `MOE_COMBINE` | 241 | 9.460 | 39.25 | 6.2 % |
+| `RMS_NORM` | 792 | 7.057 | 8.91 | 4.7 % |
+| `MOE_PLAN_SCAN` | 242 | 6.478 | 26.77 | 4.3 % |
+| 他（`ACTIVATION_QUANTIZE_MXFP4_ROWREF` 3.1 %、`SWIGLU` 2.6 %、`RESIDUAL_ADD` 2.5 %、`GDN_RECURRENCE` 2.5 %、`MOE_ROUTER` 2.3 %、`L2_NORMALIZE` 2.0 %） | | | | |
+
+（`gpu_tokens_per_sec` 35.18、`gpu_ms` 227.3910 ms / 8 token。この breakdown を取るための
+1 run の条件で、decode の現在値ではない。現在値は `docs/perf/current.md`）
+
+`16/2` の split counterfactual（上記 probe の表）で visible 4096 は 186.58 → 54.59 µs
+（3.4 倍）。したがって attention 14.156 ms は 4.16 ms になり、**timed window は 6.5 % 短くなる
+（9.996 ms の節約）**。context 64（59.01 tok/s の計測点）では 8.39 µs × 10 層 = 0.084 ms で、
+attention は token 時間の 0.5 %しかない。
+
+帯域側の論点も同じ方向を向く。KV 交通は 2 (K, V) × 2 kv_heads × 256 dim × 2 B × 10 層 =
+**20 KB / context token / decode token** で、weight traffic 4.4 GB/token と等しくなるのは
+context 約 215k。context 4096 では KV は 83 MB で weight の 2 % しかないため、
+この context での split-KV の得は帯域ではなく **latency / occupancy** に限られる。
+
+したがってこの時点での順序は次の通り。
+
+1. **Amdahl**: 最大項目は `LINEAR_BF16` 43.4 %、grouped GEMM + `MOE_COMBINE` +
+   `MOE_PLAN_SCAN` で 17.9 %。attention は 9.3 % で、その最大得は 6.5 %。
+2. **roofline の順序**: weight traffic 4.4 GB/token と DRAM 636 GB/s から roofline は
+   145 tok/s。現状 59.01 tok/s（context 64）で残り 2.4 倍があり、attention を消しても
+   この天井は動かない。
+3. **実装コスト**: template を足す話ではない。split 本体は `q_lds[kQPerKV*kHeadLimit]`
+   （8u で 8 KB）と `acc_lds[kSplitWaves*kQPerKV*kHeadLimit]`（32 KB）、
+   `acc[kQPerKV][kElemsPerLane]`（8u で 64 float）を q head ごとに直接載せる形で、
+   8u で static LDS 計 ~40 KB。q head を workgroup 間で分割する（reduce 側の
+   `qh_per_wg` と対応する）設計変更と partials layout の整合が前提。**naive な
+   instantiation は全要素系統的に誤り、原因の切り分けは未実施**。
+4. **capability の前提**: `paged_attention_split_supports` は kv dtype を見ていないので、
+   bf16 だけ 8u を足すと fp8 の geometry で planner が splits を選び、
+   `hipErrorInvalidValue` で実行失敗する（fallback にならない）。dtype 別への分割が先に要る。
+
+この判断は「入れない」ではなく「条件が揃うまで入れない」で、条件は上記 probe 節の 2 つ
+（q head の workgroup 分割と partials layout、capability の dtype 分割）。context が
+16k 〜 64k に達すれば attention は 7.14 ms（visible 16384）〜 39.7 ms（visible 65536）/ token
+になり、この順序は逆転する。
+
 ## 登録
 
 - `rmsnorm_selector.cpp`: `{BF16, BF16, BF16, PerFeature, mode 0, features 2048, group 2048, rows 1..kMeasuredMaxRows}`
