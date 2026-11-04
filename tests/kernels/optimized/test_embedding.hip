@@ -301,6 +301,8 @@ int main() {
         {"bf16-tail9", 32, 9, 4, 9, {5, 2, 9, 0}, false, false},
         {"bf16-tail31", 32, 31, 4, 31, {5, 2, 9, 0}, false, false},
         {"bf16-pad", 32, 2560, 8, 2576, {7, 1, 9, 0, 5, 3, 8, 2}, false, false},
+        {"bf16-hidden-2048", 64, 2048, 8, 2048, {7, 1, 9, 0, 5, 3, 8, 2}, false, false},
+        {"bf16-hidden-2048-pad", 64, 2048, 4, 2064, {3, 17, 22, 41}, false, false},
         {"bf16-weight", 32, 512, 4, 512, {5, 2, 9, 0}, false, true},
         {"bf16-inval-neg", 32, 128, 4, 128, {0, -1, 2, 3}, true, false},
         {"bf16-inval-upper", 32, 128, 4, 128, {0, 32, 2, 3}, true, false},

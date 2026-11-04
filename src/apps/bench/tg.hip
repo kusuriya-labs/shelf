@@ -258,6 +258,18 @@ void roctx_range_pop() {
 #endif
 }
 
+void dump_decode_stats(const std::string& out, hipStream_t stream, uint32_t tokens) {
+    if (out.empty()) return;
+    shelf::qwen35::runtime::perf_stats_dump(out.c_str(), tokens);
+    if (shelf::qwen35::runtime::semantic_timing_enabled()) {
+        std::string sem_path = out;
+        const std::string::size_type slash = sem_path.find_last_of('/');
+        sem_path = (slash != std::string::npos) ? sem_path.substr(0, slash + 1) + "semantic_timing.csv"
+                                                : "semantic_timing.csv";
+        shelf::qwen35::runtime::semantic_timing_end(stream, sem_path.c_str());
+    }
+}
+
 uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
@@ -408,6 +420,18 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
     auto executor = exec_result.release();
+
+    struct StatsOnExit {
+        const std::string& out;
+        hipStream_t stream;
+        bool fired = false;
+        ~StatsOnExit() {
+            if (fired || out.empty()) return;
+            dump_decode_stats(out, stream, 0u);
+            std::fprintf(stderr, "decode counters written for the failed run: %s\n",
+                         out.c_str());
+        }
+    } stats_on_exit{opts.perf_stats_output, stream};
 
 
     auto seq_result = shelf::state::create_paged_sequence_state(
@@ -716,16 +740,8 @@ int run_tg(int argc, char** argv) {
 
     auto wall_stop = std::chrono::high_resolution_clock::now();
 
-    if (!opts.perf_stats_output.empty())
-        shelf::qwen35::runtime::perf_stats_dump(opts.perf_stats_output.c_str(),
-                                             static_cast<uint32_t>(opts.tokens));
-    if (shelf::qwen35::runtime::semantic_timing_enabled()) {
-        std::string sem_path = opts.perf_stats_output;
-        const std::string::size_type slash = sem_path.find_last_of('/');
-        sem_path = (slash != std::string::npos) ? sem_path.substr(0, slash + 1) + "semantic_timing.csv"
-                                                 : "semantic_timing.csv";
-        shelf::qwen35::runtime::semantic_timing_end(stream, sem_path.c_str());
-    }
+    stats_on_exit.fired = true;
+    dump_decode_stats(opts.perf_stats_output, stream, static_cast<uint32_t>(opts.tokens));
     if (opts.gap_keepalive > 0) {
         keepalive_stop.store(true, std::memory_order_relaxed);
         keepalive_thread.join();

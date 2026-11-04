@@ -68,14 +68,14 @@ struct Fixture {
 };
 
 inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
-    std::uint32_t shared_inter = kInter) {
+    std::uint32_t shared_inter = kInter, std::uint32_t inter = kInter) {
     shelf::qwen35moe::Qwen35MoeTextConfig c;
     c.vocab_size = 1024;
     c.hidden_size = kHidden;
     c.num_hidden_layers = kLayers;
     c.ffn.num_experts = kExperts;
     c.ffn.num_experts_per_tok = 2;
-    c.ffn.moe_intermediate_size = kInter;
+    c.ffn.moe_intermediate_size = inter;
     c.ffn.shared_expert_intermediate_size = shared_inter;
     c.num_attention_heads = kAttnHeads;
     c.num_key_value_heads = kKvHeads;
@@ -92,7 +92,8 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
     return c;
 }
 
-inline std::string config_json(std::uint32_t shared_inter = kInter) {
+inline std::string config_json(std::uint32_t shared_inter = kInter,
+                                std::uint32_t inter = kInter) {
     std::string json = R"json({"model_type":"qwen3_5_moe","tie_word_embeddings":false,"text_config":{)json";
     json += R"json("model_type":"qwen3_5_moe_text","vocab_size":1024,"hidden_size":)json";
     json += std::to_string(kHidden);
@@ -101,7 +102,7 @@ inline std::string config_json(std::uint32_t shared_inter = kInter) {
     json += R"json(,"num_experts":)json";
     json += std::to_string(kExperts);
     json += R"json(,"num_experts_per_tok":2,"moe_intermediate_size":)json";
-    json += std::to_string(kInter);
+    json += std::to_string(inter);
     json += R"json(,"shared_expert_intermediate_size":)json";
     json += std::to_string(shared_inter);
     json += R"json(,"num_attention_heads":)json";
@@ -251,9 +252,10 @@ inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
 // shared_inter sets the checkpoint's shared_expert_intermediate_size, which a real
 // checkpoint may make different from the routed moe_intermediate_size.
 inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
-                          bool model_level = false, std::uint32_t shared_inter = kInter) {
+                          bool model_level = false, std::uint32_t shared_inter = kInter,
+                          std::uint32_t inter = kInter) {
     f.dir = dir;
-    f.config = text_config(shared_inter);
+    f.config = text_config(shared_inter, inter);
     std::error_code ec;
     fs::create_directories(dir, ec);
 
@@ -285,9 +287,9 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
             };
             // down_proj: rows = hidden, cols = inter. w2 carries the high E8M0 byte so its
             // row spread leaves the exact fold band, while w13 stays inside it.
-            push("down_proj", kHidden, kInter, 100u + e, true, true);
-            push("gate_proj", kInter, kHidden, 200u + e, true, false);
-            push("up_proj", kInter, kHidden, 300u + e, true, false);
+            push("down_proj", kHidden, inter, 100u + e, true, true);
+            push("gate_proj", inter, kHidden, 200u + e, true, false);
+            push("up_proj", inter, kHidden, 300u + e, true, false);
         }
         const std::string prefix =
             "model.language_model.layers." + std::to_string(layer) + ".mlp.";
@@ -322,7 +324,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
         return false;
 
     std::ofstream cfg(dir / "config.json", std::ios::binary | std::ios::trunc);
-    cfg << config_json(shared_inter);
+    cfg << config_json(shared_inter, inter);
     return cfg.good();
 }
 

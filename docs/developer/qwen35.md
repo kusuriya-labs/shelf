@@ -284,6 +284,8 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
      - `Launched` なら `record_optimized_dispatch(kernel_id)` して 1 dispatch 消費、`++i` で継続
      - `NotApplicable` なら fallthrough
    - **fallback**:
+     - value が `GROUPED_ROWS` 領域に触れていれば `Status::unsupported`（interpreter は group
+       行数を数えられない。`qwen35moe.md` §6-1）
      - `launch_host_binding(binding, program, ctx, stream)`
      - `record_fallback_dispatch(kernel_id, rows)` / `record_physical_launch(1)`
      - `semantic_timing_finish`（`SemPath::Correctness`）

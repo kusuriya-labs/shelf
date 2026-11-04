@@ -121,8 +121,6 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * qwen35moe対応・最適化
 * expert-parallelの実装
 * Small-M GEMMの最適化
-* Qwen3.5-9B BF16 の linear shape allowlist 追加（hidden 4096。現状は correctness path 律速。
-  `docs/research/20261104/qwen35_9b_linear_allowlist_gap.md`）
 
 ## pipeline parallel
 

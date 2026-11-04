@@ -111,6 +111,9 @@ dump する。`--compare` で baseline dump と突き合わせ、perplexity / me
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
 `shelf-bench pp/tg` の数値とは混ぜない。
 
+`--model-dir` は dense / grouped expert（MoE）のどちらでもよい（`--tp 1`）。
+`--tp 2` は dense checkpoint のみ対応で、grouped expert を指定すると起動時に拒否する。
+
 corpus は `vendor/BetterBench/corpus/v1` から生成する（token corpus は commit しない）。
 
 ```bash

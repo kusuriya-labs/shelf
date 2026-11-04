@@ -132,6 +132,30 @@ void test_fp8() {
           "fp8 small out_features -> RowBlock1");
 }
 
+void test_9b_shapes() {
+    const uint32_t shapes[][2] = {
+        {12288u, 4096u},
+        {4096u, 12288u},
+        {8192u, 4096u},
+        {4096u, 4096u},
+        {32u, 4096u},
+        {1024u, 4096u},
+        {248320u, 4096u},
+    };
+    char name[96];
+    for (const auto& s : shapes) {
+        for (uint32_t rows : {1u, 8u, 256u}) {
+            std::snprintf(name, sizeof(name), "9b bf16 %ux%u rows=%u -> config",
+                          s[0], s[1], rows);
+            check(sel_bf16(rows, s[0], s[1], s[1], true, true, false).has_value(), name);
+        }
+    }
+    check(!sel_bf16(1, 12289, 4096, 4096, true, true, false).has_value(),
+          "9b bf16 unknown shape still rejected");
+    check(!sel_fp8(1, 12288, 4096, 4096).has_value(),
+          "9b bf16 shapes are not enabled for fp8");
+}
+
 void test_tp2_shapes() {
     check(sel_bf16(1, 24, 5120, 5120, true, true, false).has_value(),
           "tp2 bf16 24x5120 rows=1 -> config");
@@ -183,6 +207,7 @@ void test_tp2_shapes() {
 int main() {
     test_bf16();
     test_fp8();
+    test_9b_shapes();
     test_tp2_shapes();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
