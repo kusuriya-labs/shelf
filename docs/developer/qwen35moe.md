@@ -531,16 +531,24 @@ workspace range や workspace storage の value と重ならないことを検�
   `GROUPED_ROWS` の value に触れる dispatch は optimized が NotApplicable でも interpreter へ
   落とさず、executor が `Status::unsupported` を返す（op index・kernel 名・group 行数を載せる）。
   geometry は allowlist に載っている必要がある: elementwise selector の `SwigluBf16 @512` と
-  `@128` は group 行数専用の bound `kMeasuredMaxGroupRows`(69632) まで、
+  `@128` は group 行数専用の bound `kMeasuredMaxGroupRows`(36608) まで、
   `SigmoidBf16ToF32 @1` と `ResidualBf16 @2048` は token 行数で `kOptimizedMaxRows`(8192) まで。
-  group 行数 capacity は `grouped_row_capacity(rows, {experts, top_k})` で、MoE geometry
-  （experts 256・top_k 8）なら token bucket 512 / 1024 / 2048 / 4096 / 8192 が
-  8192 / 12288 / 20480 / 36864 / 69632 行。elementwise kernel は行を
+  group 行数 capacity は `grouped_row_capacity(rows, {experts, top_k})` で、group 数は routing
+  に対する**厳密な最大値**である（`tiles <= slots`、
+  `tiles <= (slots + experts * (tile - 1)) / tile`、
+  `tiles <= experts * ceil(rows / tile)`。最後の項は 1 token が同じ expert を選ばないこと
+  由来で、これが無い旧式は token が少ない bucket で最大 2 倍過大だった）。MoE geometry
+  （experts 256・top_k 8）なら token 1 / 16 / 64 / 512 / 1024 / 2048 / 4096 が
+  128 / 2048 / 4352 / 7936 / 12032 / 20224 / 36608 行。
+  **grouped expert の token row bucket は 4096 まで**で、それを enforce するのが
+  `kMeasuredMaxGroupRows` である（8192 token 相当の 69376 行は allowlist 外なので
+  `Status::unsupported`）。elementwise kernel は行を
   `blockIdx.y + blockIdx.z * gridDim.y` で address する（grid.y 単独の上限は 65535 で、
-  `grid.y = 69632` の launch は `invalid configuration argument` になる）。したがって
-  最大の bucket R8192 も 1 launch で表現される。bound は容量の正本ではなく**実測した
-  geometry の上限**なので、`RowBucket` の最大容量（69632 行）より上の行数は allowlist 外
-  （`Status::unsupported`）。
+  `grid.y = 69632` の launch は `invalid configuration argument` になる）ので、
+  4096 という上限は kernel の限界ではなく policy である。
+  厳密性の検証は `tests/unit/test_grouped_row_shape.cpp`（小さな形状で DP により全 routing
+  の最大値を列挙して一致させる）と `tests/unit/test_moe_combine.hip`（実 router 出力の
+  group 数が host capacity を超えないこと）。
 - fused gate / up 平面は 2 つの view として読まれる。elementwise dispatch の alias 検査は
   **読み専用 operand 同士は同じ buffer を共有してよい**（行 stride で span が重なるため）、
   出力だけが各 operand と同一または非重複であることを要求する

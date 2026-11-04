@@ -90,14 +90,13 @@ physical KV capacity、`prefix cache` は hot tier の実サイズである。
 executor の row bucket も決める。prefill は chunk 分割で進むため、prompt が N を
 超えても生成は止まらない。N を小さくすると program workspace（executor の arena 確保の
 大半）が減って KV が増え、大きくすると prefill の step 数が減る代わりに arena を
-多く使う。grouped expert checkpoint（MoE）では 1 step の group 行数が
-`token 数 × top_k / 16 + experts` 個の group に増える。N の上限は最大の row bucket と同じ
-8192（group 69632 行）で、elementwise kernel は行を grid.y と grid.z へ分割して address する。
-実測では prefill throughput は chunk 2048 が最良で、8192 はそれより約 5 % 低い
-（`shelf-bench pp --prompt-tokens 8192` の chunk 1024 / 2048 / 4096 / 8192 で
-3648 / 3759 / 3684 / 3561 tok/s）。上限を超えた chunk は allowlist の geometry 外なので
-実行時点で `unsupported: grouped-row dispatch has no correctness path`
-を返し、誤った値で生成を続けることはない（実測は
+多く使う。grouped expert checkpoint（MoE）では 1 step の group 行数が token 数から決まる上限
+（experts 256・top_k 8 で、`token 数 × 8` slot を expert ごとに 16 行 tile へ切った厳密最大値）に
+増える。**MoE の `--max-num-batched-tokens` の上限は 4096**（group 36608 行）で、それを超える
+chunk は allowlist の geometry 外なので実行時点で
+`unsupported: grouped-row dispatch has no correctness path` を返し、誤った値で生成を続けることはない。
+prefill throughput の実測は chunk 2048 が最良で（`shelf-bench pp --prompt-tokens 8192` の
+chunk 1024 / 2048 / 4096 で 3648 / 3759 / 3684 tok/s）、上限を上げる理由にはならない（経緯は
 `docs/research/20261104/moe_group_row_elementwise_envelope.md`）。実測（27B FP8 / TP2 / requests 4 / drafter 込み / `--max-seq-len 262144`）:
 
 | `--max-num-batched-tokens` | rank の executor 実測 | 結果 |

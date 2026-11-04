@@ -421,10 +421,12 @@ int main(int argc, char** argv) {
         // MoE group rows: the count grows with tokens * top_k, so the FFN elementwise runs
         // far above the token row cap. These are the capacities of the 1024 / 4096 token
         // buckets (experts 256, top_k 8) and the fixture width.
-        {"swiglu-moe-group-r12288", Op::Swiglu, 512, 12288, 512, 512, 0, 0.0f, 260},
-        {"swiglu-moe-group-r36864", Op::Swiglu, 512, 36864, 512, 512, 0, 0.0f, 261},
-        // Above the grid.y bound: rows are addressed by blockIdx.y + blockIdx.z * gridDim.y,
-        // so the largest production bucket (8192 tokens -> 69632 group rows) is one launch.
+        {"swiglu-moe-group-r12032", Op::Swiglu, 512, 12032, 512, 512, 0, 0.0f, 260},
+        {"swiglu-moe-group-r36608", Op::Swiglu, 512, 36608, 512, 512, 0, 0.0f, 261},
+        // Above the grid.y hardware bound (65535): rows are addressed by
+        // blockIdx.y + blockIdx.z * gridDim.y, so they are still one launch. The MoE row
+        // bucket is capped at 4096 tokens (36608 group rows), so production does not reach
+        // these; they pin the kernel contract for a row domain above grid.y.
         {"swiglu-moe-group-r69632", Op::Swiglu, 512, 69632, 512, 512, 0, 0.0f, 264},
         // rows that do not split evenly over grid.z: the launch covers one extra row slot, so
         // this is the case that pins the row bound in the kernel (guard must stay untouched).

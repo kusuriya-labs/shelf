@@ -144,17 +144,17 @@ int main() {
                mk(ElementwiseProfile::SwigluBf16, 8193, 8704u, 0)),
            C, "tp2 swiglu 8704 rows=8193 out of range");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 12288u, 512u, 0)),
-           O, "moe group rows 12288 (bucket 1024 capacity) -> Optimized");
+               mk(ElementwiseProfile::SwigluBf16, 12032u, 512u, 0)),
+           O, "moe group rows 12032 (bucket 1024 capacity) -> Optimized");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 36864u, 512u, 0)),
-           O, "moe group rows 36864 (bucket 4096 capacity) -> Optimized");
+               mk(ElementwiseProfile::SwigluBf16, 36608u, 512u, 0)),
+           O, "moe group rows 36608 (bucket 4096 capacity) -> Optimized");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 36609u, 512u, 0)),
+           C, "moe group rows above the measured bound -> Correctness");
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SwigluBf16, 69632u, 512u, 0)),
-           O, "moe group rows 69632 (bucket 8192 capacity) -> Optimized");
-    expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 69633u, 512u, 0)),
-           C, "moe group rows above the measured bound -> Correctness");
+           C, "the 8192 token bucket is not enabled for grouped experts -> Correctness");
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SwigluBf16, 5120u, 128u, 0)),
            O, "moe group rows at width 128 -> Optimized");

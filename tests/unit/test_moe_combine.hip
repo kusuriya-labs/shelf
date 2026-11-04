@@ -216,6 +216,14 @@ void run_case(const Case& spec, Device& d, hipStream_t stream) {
     auto sel = d2h(d.sel_expert, static_cast<std::size_t>(c.rows) * c.top_k);
     c.sel_expert.assign(sel.begin(), sel.end());
 
+    // The plan arrays are sized by grouped_row_tile_count, so the group count the scan
+    // produced has to stay within it for every routing the router can emit.
+    const uint32_t groups = d2h(d.group_count, 1u)[0];
+    if (groups > c.group_capacity)
+        std::printf("  (%s: groups %u over capacity %u)\n", tag.c_str(), groups,
+                    c.group_capacity);
+    check(groups <= c.group_capacity, tag + ": group count stays within the host capacity");
+
     const hipError_t err = moe::launch_moe_combine(
         d.out, d.expert_out, d.sel_weight, d.slot_row_of, c.shared ? d.shared_out : nullptr,
         c.shared ? d.shared_gate : nullptr, c.rows, c.top_k, kFeatures, kFeatures, kFeatures,
