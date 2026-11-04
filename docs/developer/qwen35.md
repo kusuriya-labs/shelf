@@ -522,7 +522,13 @@ dense model の weight は「共通 backbone + dense FFN」の合成で、FFN �
   - dense FFN と MTP の tensor 名・load だけを持つ。embed / lm_head / final norm と
     层の layernorm / attention は `shelf::qwen_hybrid` の load 部品を読む
   - BF16 (plain safetensors) 経路の LM head は `model.language_model.lm_head.weight` を
-    優先し、無い場合は `lm_head.weight` を読む（HF は出力 head に prefix を付けない）。    quantized 経路と同じ别名規則
+    優先し、無い場合は `lm_head.weight` を読む（HF は出力 head に prefix を付けない）。
+    quantized 経路と同じ别名規則
+  - 行列は row-major `[out, in]` の bf16 そのまま（preshuffle はしない）。small vector の
+    dtype が checkpoint 側で F32（`linear_attn.norm.weight`、`linear_attn.A_log` など）でも、
+    GDN kernel が bf16 を読むため **bf16 へ変換して**ロードする。layernorm 系は
+    `load_bf16_or_f32_tensor` で f32 のまま保持する。层 0 の GDN tensor について
+    byte 一致を実 checkpoint で検証するのは `test_qwen35_mtp_weight_real`
 - `include/shelf/models/qwen35/model/qwen35_model.h`
   - `validate_qwen35_weights(weights, Qwen35TextConfig)`：
     `shelf::qwen_hybrid` の model-level / layer-body invariant に加え、

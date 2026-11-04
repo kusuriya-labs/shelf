@@ -75,6 +75,32 @@
   モデル族を増やすなら **(a) family 許可集合にする**、**(b) 検査を loader から format 層へ移す**
   のどちらかを決める必要がある（推測を含む設計判断）。
 
+## 4.1 `architecture` 文字列を決めるのに `model_type` は要るか
+
+結論: **要らない**。`architecture` が語っているのは checkpoint の出自ではなく、
+**その artifact を読む loader（= Shelf の model family）**だから、family はすでに
+`num_experts` で決まっている。
+
+- Shelf bundle を書く側（外部 tool）が `architecture` に何を書くべきかの正本は、
+  config.json の `model_type` ではなく「どの loader が読むか」である。
+  現状 repo 内に bundle 生成 tool は無い（`docs/developer/quantization.md` に「読込専用」）。
+  よって `model_type` を写す運用をしているとしても、それは契約ではなく運用の偶然である。
+- HF real-quantized path では `hf_manifest.cpp` が合成 manifest の `architecture` に
+  **常に `"qwen35_dense"` を書く**。呼び出し側は既に家族を知っている
+  （dense loader か MoE loader か）ので、ここで `model_type` は不要なのに、
+  結果として MoE checkpoint にも dense ラベルが付いている。
+  dense loader の `manifest.architecture != "qwen35_dense"` 検査は HF path では
+  **常に成立する形式検査**に落ちている。MoE loader は `architecture` を見ていない。
+- 整合させるなら選択肢は 2 つ（いずれも `model_type` は使わない）:
+  1. `open_quantized_model_reader` / `synthesize_hf_quantized_source` に
+     **呼び出し側が expected architecture を渡す**（dense なら `"qwen35_dense"`、
+     MoE なら `"qwen35_moe"`）。合成 manifest はその値を書き、loader は自分の値と照合する。
+     MoE 側にも検査が増え、HF path の形式検査が実検になる
+  2. `architecture` 検査を loader から外し、**format 层の contract 検証**
+     （`validate_quantized_manifest_contract` は現在 `architecture` を見ない）に任せる
+- 外部 bundle 作者向けには「Shelf model family 名を書く」ことを docs に明文化する必要がある
+  （現状 `architecture` の値域を定めた developer doc が無い）。
+
 ## 5. 実際に到達を確認した破綻例
 
 - `docs/research/20261104/moe_gate_b_weights.md` §8.1:

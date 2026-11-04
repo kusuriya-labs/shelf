@@ -437,6 +437,97 @@ int main() {
                             return true;
                         };
 
+
+                        // The MTP block is full attention only, so the hybrid body's GDN
+                        // tensors are checked here as well: the BF16 path must land the
+                        // checkpoint payload exactly, converting the F32 small tensors
+                        // (linear_attn.norm.weight, A_log) to bf16 on the way in.
+                        {
+                            const char* gdn_matrices[] = {
+                                "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                                "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+                                "model.language_model.layers.0.linear_attn.in_proj_a.weight",
+                                "model.language_model.layers.0.linear_attn.in_proj_b.weight",
+                                "model.language_model.layers.0.linear_attn.out_proj.weight",
+                            };
+                            const weights::MatrixWeight* gdn_matrix_slots[] = {
+                                &w.layers[0].attn_in_proj_qkv, &w.layers[0].attn_in_proj_z,
+                                &w.layers[0].attn_in_proj_a, &w.layers[0].attn_in_proj_b,
+                                &w.layers[0].attn_out_proj,
+                            };
+                            const char* gdn_vectors[] = {
+                                "model.language_model.layers.0.linear_attn.conv1d.weight",
+                                "model.language_model.layers.0.linear_attn.norm.weight",
+                                "model.language_model.layers.0.linear_attn.dt_bias",
+                                "model.language_model.layers.0.linear_attn.A_log",
+                            };
+                            const gpu::Tensor* gdn_vector_slots[] = {
+                                &w.layers[0].attn_conv1d_weight, &w.layers[0].attn_norm_weight,
+                                &w.layers[0].attn_dt_bias, &w.layers[0].attn_A_log,
+                            };
+
+                            const auto source_bytes = [&](const std::string& name,
+                                                          std::vector<uint8_t>& want,
+                                                          std::string& detail) -> bool {
+                                auto spec = collection.tensor_spec(name);
+                                if (!spec.ok()) {
+                                    detail = "spec: " + spec.status().message();
+                                    return false;
+                                }
+                                std::size_t bytes = 0;
+                                auto data = collection.tensor_data(name, bytes);
+                                if (!data.ok()) {
+                                    detail = "data: " + data.status().message();
+                                    return false;
+                                }
+                                const uint8_t* src = static_cast<const uint8_t*>(data.value());
+                                if (spec.value().dtype == shelf::io::SType::F32) {
+                                    const std::size_t elems = bytes / 4u;
+                                    want.resize(elems * 2u);
+                                    const float* f = reinterpret_cast<const float*>(src);
+                                    shelf::bf16_t* d = reinterpret_cast<shelf::bf16_t*>(want.data());
+                                    for (std::size_t e = 0; e < elems; ++e)
+                                        d[e].data = shelf::f32_to_bf16_rne(f[e]);
+                                } else {
+                                    want.assign(src, src + bytes);
+                                }
+                                return true;
+                            };
+
+                            for (int i = 0; i < 5; ++i) {
+                                std::vector<uint8_t> want;
+                                std::string detail;
+                                if (!source_bytes(gdn_matrices[i], want, detail)) {
+                                    fail_tensor(gdn_matrices[i], detail);
+                                    continue;
+                                }
+                                const gpu::Tensor& payload = gdn_matrix_slots[i]->bf16;
+                                if (payload.allocation_bytes() < want.size()) {
+                                    fail_tensor(gdn_matrices[i], "payload capacity smaller than source");
+                                } else if (d2h(payload.data<void>(), want.size()) != want) {
+                                    fail_tensor(gdn_matrices[i], "gdn body payload bytes differ");
+                                }
+                            }
+                            for (int i = 0; i < 4; ++i) {
+                                std::vector<uint8_t> want;
+                                std::string detail;
+                                if (!source_bytes(gdn_vectors[i], want, detail)) {
+                                    fail_tensor(gdn_vectors[i], detail);
+                                    continue;
+                                }
+                                const gpu::Tensor& payload = *gdn_vector_slots[i];
+                                if (payload.allocation_bytes() < want.size()) {
+                                    fail_tensor(gdn_vectors[i], "payload capacity smaller than source");
+                                } else if (d2h(payload.data<void>(), want.size()) != want) {
+                                    fail_tensor(gdn_vectors[i], "gdn body payload bytes differ");
+                                }
+                            }
+                            std::printf("gdn body tensors (layer 0): %zu matrices + %zu vectors compared\n",
+                                        sizeof(gdn_matrices) / sizeof(gdn_matrices[0]),
+                                        sizeof(gdn_vectors) / sizeof(gdn_vectors[0]));
+                        }
+
+
                         for (int i = 0; i < 8; ++i) {
                             const std::string name = kMatrixNames[i];
                             const weights::MatrixWeight& mw = *matrices[i];
