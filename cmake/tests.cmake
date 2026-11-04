@@ -169,7 +169,7 @@ shelf_add_test(NAME test_dflash2_kv_ring SOURCE unit/test_dflash2_kv_ring.hip LA
 shelf_add_test(NAME test_dflash2_attention_ring SOURCE unit/test_dflash2_attention_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
-shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35 shelf_qwen35_runtime)
 shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_pipeline_lowering SOURCE unit/test_qwen35_pipeline_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
@@ -446,6 +446,30 @@ set_tests_properties(test_compute_rope_factor_reject_yarn_word PROPERTIES
 # Rejection happens before any GPU query / model load.
 # ---------------------------------------------------------------------------
 set(_shelf_rope_fixture "${CMAKE_SOURCE_DIR}/tests/fixtures/rope_cap")
+# ---------------------------------------------------------------------------
+# MTP drafter option contract. Every rejection happens before any model load.
+# ---------------------------------------------------------------------------
+add_test(NAME test_compute_mtp_rejects_dflash2
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --dflash2-model-dir placeholder)
+set_tests_properties(test_compute_mtp_rejects_dflash2 PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "mutually exclusive")
+
+add_test(NAME test_compute_mtp_rejects_tp2
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --tp 2 --device 0,1)
+set_tests_properties(test_compute_mtp_rejects_tp2 PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "requires --tp 1")
+
+add_test(NAME test_compute_mtp_drafts_reject_over_ceiling
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --mtp-drafts 32)
+set_tests_properties(test_compute_mtp_drafts_reject_over_ceiling PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "bad --mtp-drafts")
+
 add_test(NAME test_compute_rope_cap_native_over
          COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_shelf_rope_fixture}" --rope-factor 1 --max-seq-len 262145)
@@ -539,6 +563,18 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # Model dir via SHELF_MODEL_DIR_MTP (preferred) or SHELF_MODEL_DIR.
     # Skips (exit 77) when none is set.
     shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35)
+
+    add_test(NAME test_mtp_parity
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+                 --gpu-count 1 --cost-gb 30 --timeout 1800
+                 --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+                 -- ${CMAKE_COMMAND} -E env
+                    "SHELF_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                    python3 "${CMAKE_SOURCE_DIR}/tests/correctness/test_mtp_parity.py")
+    set_tests_properties(test_mtp_parity PROPERTIES
+                         LABELS "gpu1;optional;external_files"
+                         TIMEOUT 1860
+                         SKIP_RETURN_CODE 77)
 
     # DFlash2 drafter weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_DFLASH2. Skips (exit 77) when unset.

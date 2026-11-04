@@ -1,0 +1,179 @@
+# MTP speculative decoding
+
+checkpoint の MTP block（`mtp.*`）を drafter として使う単一 request の compute 経路である。
+DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる。
+
+対象は dense checkpoint（`num_experts` を持たない model）に限る。MoE checkpoint は
+`LoadedModel::load` が `unsupported` を返す。`--tp 2`、`--pipeline-parallel 2`、
+`--serve-stdio`、`--dump-logits` との併用は起動時に拒否する。
+
+## Forward contract
+
+MTP block は次の順で 1 token を予測する。
+
+```text
+x_embed = pre_fc_norm_embedding(embed(token))
+x_hidden = pre_fc_norm_hidden(target_normed_hidden)
+h = fc(concat(x_embed, x_hidden))
+h = full_attention_decoder_layer(h)
+h = mtp.norm(h)
+logits = lm_head(h)
+```
+
+- `mtp.fc` の入力は `[embedding_norm | hidden_norm]` の順で、`hidden_size * 2` である。
+- MTP 層は `full_attention` 固定で、`mtp.layers.0.*` の 1 層だけを使う。
+- attention は gated query（`q_proj` 出力の head 内 `[q | gate]`）と
+  `attention = attn * sigmoid(gate)` を持つ。target と同じ Qwen3.5 の full attention である。
+- `pre_fc_norm_hidden` に入る `target_normed_hidden` は target の最終 RMSNorm 後である。
+  target の pre-norm の body 出力ではない。
+
+## target graph の normed token hidden
+
+MTP は target の全 token row の最終 RMSNorm 後 hidden を必要とする。target graph は
+通常、最終 RMSNorm を `OUTPUT_ROWS` にだけ適用する。`--mtp` のときは
+`Qwen35LowerOptions::emit_normed_token_hidden` を立て、`TOKEN_ROWS` 全体に同じ
+RMSNorm を適用した値をもう 1 つの external output として追加する。
+
+external output の並びは固定である。
+
+| index | 内容 |
+| --- | --- |
+| 0 | selected hidden（`OUTPUT_ROWS`） |
+| 1 | logits（`OUTPUT_ROWS`） |
+| 2 | sampled token（`OUTPUT_ROWS`） |
+| 3 | body output（`TOKEN_ROWS`、pre-final-norm） |
+| 4.. | target hidden taps（`target_hidden_tap_count` 個） |
+| 4 + tap count | normed token hidden（`TOKEN_ROWS`。`emit_normed_token_hidden` のときだけ） |
+
+`Executor` は normed token hidden を `normed_token_hidden` に書き、MTP drafter が
+`input_hidden` へ D2D copy して読む。
+
+MTP graph の external input は `[token_ids, hidden]` の 2 つである。executor は
+external input index 0 を token buffer、index 1 以降を `input_hidden` に bind する。
+`input_hidden` は graph が 2 つ以上の external input を持つときだけ確保する。
+
+## KV cache
+
+MTP 層は target とは独立した KV pool を持つ。
+
+- pool は 1 attention layer、`num_key_value_heads`、`attention_head_dim`、target と同じ
+  KV dtype で作る。
+- page 数は `ceil((max_seq_len + 1) / page_tokens) + 1` である。target pool の page 数
+  ではない。
+- MTP 用の `SequenceSlotPool` / `GdnStatePool` / `PagedSequenceState` を別に持つ。
+  `GdnStatePool` は `create_executor` の geometry 検証を通すための 1 state だけを持つ。
+- `mtp_spec_step` の各 round は MTP sequence を round 開始位置まで rewind してから
+  first pass を実行する。rewind は必要な page 数を残して余剰 page を release し、
+  `position` を戻す。
+
+## Round
+
+`position` を target sequence が次に consume する絶対位置とする。
+
+### prefill
+
+prompt を `executor.config.max_batch_rows` 単位で chunk prefill する。
+
+- 各 chunk は target の通常 prefill である。最終 chunk だけ logits / sample を計算し、
+  anchor token を得る。
+- 最終 chunk 以外は、その chunk の target normed hidden と
+  `[prompt[i+1]]`（chunk 末尾は次 chunk の先頭 token）で MTP の first pass を実行し、
+  MTP KV を構築する。logits は計算しない。
+- 最終 chunk の MTP first pass は step の先頭まで遅延する。これは anchor token が
+  prefill 完了後にしか決まらないためである。
+
+### step
+
+`K = min(num_drafts, remaining_tokens - 1, room - 1)`、`room = max_seq_len - position`。
+`K == 0` のときは単一 target decode だけを行い、MTP KV は更新しない。
+
+`K > 0` のとき:
+
+1. **first pass**: 直前の target 実行の committed prefix `rows = position - last_position`
+   について、入力 token を 1 つ shift し、末尾を pending token に置き換える。
+   hidden は target の normed token hidden の同じ row を使う。positions は
+   `last_position .. position-1`。これで MTP KV を committed prefix について更新し、
+   draft 0 を得る。
+2. **draft loop**: `i = 1..K-1` について、token は `draft[i-1]`、hidden は直前の
+   MTP normed hidden、position は `position + i - 1`。greedy で `draft[i]` を得る。
+3. **verify**: target に `[pending, draft0..draftK-1]` の `K+1` row を
+   `SPEC_VERIFY` で流し、各行の target sample を得る。
+4. **accept**: `spec_greedy_accept` で longest prefix を取る。full accept では
+   bonus token、partial accept では correction token を次 round の pending にする。
+
+すべての draft は target verify で棄却可能であり、出力の正しさは target が担保する。
+
+## Partial reject
+
+MTP の verify は target の GDN recurrence / conv を `K+1` row 分進める。partial accept
+では次を順に行う。
+
+1. verify 前に `spec_gdn_snapshot` で GDN conv / recurrent を保存する。
+2. `spec_gdn_restore` で verify 前の state に戻す。
+3. target sequence の `position` を round 開始位置へ戻し、必要な page 数まで rollback する。
+4. 受理済み prefix `accepted + 1` row を target でもう一度実行する。logits / sample は
+   計算しない。
+
+DFlash2 の compact log による replay は使わない。MTP の partial reject は target の
+prefix rerun を 1 回行うため、partial accept の round は full accept より遅い。
+再実行する row 数は `accepted + 1` であり、round 全体の verify row 数 `K+1` 以下である。
+
+## Sampling
+
+- MTP の draft は常に greedy である。draft の sampling config は使わない。
+- target verify は `--temperature` などの要求された sampling config を使う。
+  acceptance は target の sampled token との greedy longest-prefix である。
+- `sample_index` は target の実行 row 数だけ進める。prefill の最終 sample は 1、
+  verify は `K+1`、単一 decode は 1 である。MTP の greedy draft は index を使わない。
+
+## CLI
+
+- `--mtp`: MTP を drafter として有効化する。
+- `--mtp-drafts N`: 1 round の draft 数（default 7、1..31）。上限 31 は target verify の
+  `K+1 <= 32` を WmmaVerify の M32 row 契約に合わせるためである。
+- `--mtp-stats 0|1`: `MTP_*` 統計行の出力（default 1）。
+
+`--mtp` は `--dflash2-model-dir` と同時に指定できない。
+
+## 統計行
+
+```text
+MTP_DRAFTS MTP_ROUNDS MTP_FULL_ACCEPTS MTP_PARTIAL_ACCEPTS
+MTP_ACCEPTED_DRAFTS MTP_MEAN_ACCEPTED MTP_FULL_ACCEPT_RATE
+MTP_EMITTED_PER_ROUND MTP_VERIFY_ROWS MTP_RERUNS
+MTP_DRAFT_MS MTP_VERIFY_MS MTP_RERUN_MS MTP_ROUND_MS
+```
+
+`GENERATED_IDS` の形式は target-only と同一である。
+
+## 制約
+
+- dense checkpoint のみ。MoE checkpoint の MTP は未対応である。
+- `--tp 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
+- prefix cache は MTP の単一 request compute 経路では使わない。
+- partial accept は GDN snapshot と target prefix rerun を使う。compact log による
+  無再実行の復元は未実装である。
+- MTP KV は target KV とは別 pool である。KV 容量計画には
+  `mtp_drafter_reserve_bytes` の見積を使う。
+
+## Source map
+
+- `include/shelf/models/qwen35/runtime/mtp_drafter.h`
+- `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`
+- `include/shelf/models/qwen35/model/lower_to_primitives.h`（`emit_normed_token_hidden`）
+- `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
+- `src/shelf/models/qwen35/runtime/executor.hip`（hidden external input / normed output）
+- `src/apps/compute/single_request.hip`（`run_mtp_shot`）
+- `src/apps/compute/compute_cli.cpp`（`--mtp*`）
+
+required test:
+
+- `test_qwen35_lowering_contract`
+- `test_qwen35_mtp_lowering`
+- `test_qwen35_mtp_weight_load`
+- `test_compute_mtp_rejects_dflash2` / `test_compute_mtp_rejects_tp2` /
+  `test_compute_mtp_drafts_reject_over_ceiling`
+
+optional external test:
+
+- `test_mtp_parity`（`SHELF_MODEL_DIR_MTP` または `SHELF_MODEL_DIR`）

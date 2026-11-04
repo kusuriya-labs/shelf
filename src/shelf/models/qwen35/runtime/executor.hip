@@ -118,8 +118,17 @@ Status build_host_execution_context(
             executor.model.config->num_hidden_layers));
     auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
     for (uint32_t i = 0; i < program.external_input_count; ++i) {
-        ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
-                                                   : pipeline_in;
+        if (i == 0u) {
+            ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
+                                                       : pipeline_in;
+        } else {
+            void* hidden_in = executor.input_hidden.data<void>();
+            if (hidden_in == nullptr) {
+                return Status::invalid_state(
+                    "external hidden input has no bound buffer", __FILE__, __LINE__);
+            }
+            ctx.external_input_storage[i] = hidden_in;
+        }
     }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
         if (!last_stage) {
@@ -139,6 +148,14 @@ Status build_host_execution_context(
             ctx.external_output_storage[i] = executor.sampled_tokens.data<void>();
         } else if (i == 3u) {
             ctx.external_output_storage[i] = executor.token_hidden.data<void>();
+        } else if (executor.config.emit_normed_token_hidden &&
+                   i == 4u + executor.config.target_hidden_tap_count) {
+            void* normed = executor.normed_token_hidden.data<void>();
+            if (normed == nullptr) {
+                return Status::invalid_state(
+                    "normed token hidden output has no bound buffer", __FILE__, __LINE__);
+            }
+            ctx.external_output_storage[i] = normed;
         } else {
             const uint32_t tap = i - 4u;
             if (tap >= executor.config.target_hidden_tap_count) {
@@ -418,7 +435,13 @@ static bool attention_plan_key_for(
             executor.model.config->num_hidden_layers));
     auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
     for (uint32_t i = 0; i < program.external_input_count; ++i) {
-        inputs[i] = first_stage ? static_cast<const void*>(token_ids) : pipeline_in;
+        if (i == 0u) {
+            inputs[i] = first_stage ? static_cast<const void*>(token_ids) : pipeline_in;
+        } else {
+            const void* hidden_in = executor.input_hidden.data<void>();
+            if (hidden_in == nullptr) return false;
+            inputs[i] = hidden_in;
+        }
     }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
         if (!last_stage) {
@@ -434,6 +457,10 @@ static bool attention_plan_key_for(
             outputs[i] = executor.sampled_tokens.data<void>();
         } else if (i == 3u) {
             outputs[i] = executor.token_hidden.data<void>();
+        } else if (executor.config.emit_normed_token_hidden &&
+                   i == 4u + executor.config.target_hidden_tap_count) {
+            outputs[i] = executor.normed_token_hidden.data<void>();
+            if (outputs[i] == nullptr) return false;
         } else {
             const uint32_t tap = i - 4u;
             if (tap >= executor.config.target_hidden_tap_count) return false;
@@ -1134,11 +1161,13 @@ Executor::Executor(Executor&& other) noexcept
       host_ctx_graph_staging(other.host_ctx_graph_staging),
       graph_failed(other.graph_failed),
       input_ids(std::move(other.input_ids)),
+      input_hidden(std::move(other.input_hidden)),
       rope_inv_freq(std::move(other.rope_inv_freq)),
       output_hidden(std::move(other.output_hidden)),
       logits(std::move(other.logits)),
       sampled_tokens(std::move(other.sampled_tokens)),
       token_hidden(std::move(other.token_hidden)),
+      normed_token_hidden(std::move(other.normed_token_hidden)),
       pipeline_input_hidden(std::move(other.pipeline_input_hidden)),
       pipeline_output_hidden(std::move(other.pipeline_output_hidden)),
       dflash_target_hidden(std::move(other.dflash_target_hidden)),
@@ -1192,11 +1221,13 @@ Executor::Executor(Executor&& other) noexcept
     other.kv_pool = nullptr;
     other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
     other.input_ids = gpu::Tensor{};
+    other.input_hidden = gpu::Tensor{};
     other.rope_inv_freq = gpu::Tensor{};
     other.output_hidden = gpu::Tensor{};
     other.logits = gpu::Tensor{};
     other.sampled_tokens = gpu::Tensor{};
     other.token_hidden = gpu::Tensor{};
+    other.normed_token_hidden = gpu::Tensor{};
     other.pipeline_input_hidden = gpu::Tensor{};
     other.pipeline_output_hidden = gpu::Tensor{};
     other.dflash_target_hidden = {};
@@ -1274,11 +1305,13 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         execution_status = std::move(other.execution_status);
         execution_workspace = std::move(other.execution_workspace);
         input_ids = std::move(other.input_ids);
+        input_hidden = std::move(other.input_hidden);
         rope_inv_freq = std::move(other.rope_inv_freq);
         output_hidden = std::move(other.output_hidden);
         logits = std::move(other.logits);
         sampled_tokens = std::move(other.sampled_tokens);
         token_hidden = std::move(other.token_hidden);
+        normed_token_hidden = std::move(other.normed_token_hidden);
         pipeline_input_hidden = std::move(other.pipeline_input_hidden);
         pipeline_output_hidden = std::move(other.pipeline_output_hidden);
         dflash_target_hidden = std::move(other.dflash_target_hidden);
@@ -1320,11 +1353,13 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.kv_pool = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
+        other.input_hidden = gpu::Tensor{};
         other.rope_inv_freq = gpu::Tensor{};
         other.output_hidden = gpu::Tensor{};
         other.logits = gpu::Tensor{};
         other.sampled_tokens = gpu::Tensor{};
         other.token_hidden = gpu::Tensor{};
+        other.normed_token_hidden = gpu::Tensor{};
         other.pipeline_input_hidden = gpu::Tensor{};
         other.pipeline_output_hidden = gpu::Tensor{};
         other.dflash_target_hidden = {};
@@ -1496,10 +1531,12 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.logits = gpu::Tensor{};
     ex.output_hidden = gpu::Tensor{};
     ex.token_hidden = gpu::Tensor{};
+    ex.normed_token_hidden = gpu::Tensor{};
     ex.pipeline_input_hidden = gpu::Tensor{};
     ex.pipeline_output_hidden = gpu::Tensor{};
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
+    ex.input_hidden = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
     ex.model = RuntimeModelView{};
     ex.sequence_pool = nullptr;
@@ -1786,6 +1823,14 @@ Result<Executor> create_executor(
     }
     st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.token_hidden);
     if (!st.ok()) return st;
+    if (input.lowered.graph.external_inputs.size() > 1u) {
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.input_hidden);
+        if (!st.ok()) return st;
+    }
+    if (config.emit_normed_token_hidden) {
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.normed_token_hidden);
+        if (!st.ok()) return st;
+    }
     for (uint32_t t = 0; t < config.target_hidden_tap_count; ++t) {
         st = allocate_contiguous_tensor<bf16_t>(
             arena, {Npad, H}, ex.dflash_target_hidden[t]);
@@ -2372,6 +2417,7 @@ Result<Executor> create_model_executor(
     Qwen35LowerOptions lower_options;
     lower_options.rope_profile = config.rope_profile;
     lower_options.stage = config.stage;
+    lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
     lower_options.hidden_taps = std::span<const uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
     lower_options.tp = config.tp;

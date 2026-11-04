@@ -13,7 +13,7 @@ AMD RDNA4 GPU向けの単一ハードウェア推論ランタイムの研究プ�
 - ハードウェア: AMD RDNA4（gfx1201、R9700）/ ROCm / HIP / Linux
 - Runtime family: Qwen3.5 系 runtime（コード上は `src/shelf/models/qwen35/`）
 - 主要 performance target: **Qwen3.8-27B の HF FP8（`models/Qwen3.8-27B-FP8`）と BF16**
-- Speculative decode: **DFlash2** drafter（Qwen3.8-27B target + DFlash2）
+- Speculative decode: **DFlash2** drafter、または checkpoint の **MTP** block（compute の単一 request 経路）
 - KVキャッシュ: paged KV、BF16 / FP8_E4M3
 - 対応 dtype: BF16 / FP8 E4M3 のみ（weight・KV ともにこの 2 つ）
 
@@ -28,7 +28,8 @@ performance target に Qwen3.8-27B の HF FP8 / BF16 model を使っている。
 - correctness mode + Qwen-local optimized auto dispatch
 - `PrimitiveGraph` → `ProgramSet` → Qwen35 Executor
 - continuous batching（prefill / decode mixed）
-- DFlash2 speculative decode
+- DFlash2 speculative decode（serve / compute）
+- MTP speculative decode（compute の単一 request）
 - pre-quantized model loading（FP8 E4M3 / self-contained quantized safetensors）
 
 ## Server
@@ -43,7 +44,7 @@ protocol contract は [docs/developer/prefix_cache.md](docs/developer/prefix_cac
 
 | 名 | 用途 |
 |---|---|
-| `shelf-compute` | 単一request推論（BF16 / 量子化model、greedy、DFlash2 speculative decode） |
+| `shelf-compute` | 単一request推論（BF16 / 量子化model、greedy、DFlash2 / MTP speculative decode） |
 | `shelf-server` | OpenAI互換chat serving（[docs/user/server.md](docs/user/server.md)） |
 | `shelf-bench` | prefill/decode E2E + kernel/operator micro-benchmarks（[docs/user/bench.md](docs/user/bench.md)） |
 

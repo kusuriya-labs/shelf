@@ -2,6 +2,7 @@
 
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 
 #include <cstddef>
@@ -36,6 +37,9 @@ struct ComputeOptions {
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
     int dflash2_stats = 1;
+    bool mtp = false;
+    unsigned long mtp_drafts = 7;
+    int mtp_stats = 1;
     int prefix_cache_enabled = 1;
     unsigned long prefix_cache_hot_tokens = 16384;
     unsigned long prefix_cache_cold_tokens = 65536;

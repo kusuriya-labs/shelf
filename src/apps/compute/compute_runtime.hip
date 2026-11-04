@@ -6,6 +6,7 @@
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 
 #include <algorithm>
 #include <chrono>
@@ -212,7 +213,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto model_result = shelf::models::LoadedModel::load(
-        config_.model_dir, *arena_, stream_, config_.verify_weights);
+        config_.model_dir, *arena_, stream_, config_.verify_weights, config_.mtp);
     if (!model_result.ok()) {
         return model_result.status();
     }
@@ -435,6 +436,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config_.tp_combine_f32;
     exec_config.backend = config_.decode_backend;
+    exec_config.emit_normed_token_hidden = config_.mtp;
     if (config_.rope_profile.has_value()) {
         exec_config.rope_profile = *config_.rope_profile;
     }
@@ -490,6 +492,22 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 
 std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     const ::shelf::state::GdnStatePool& pool) const {
+    if (config_.mtp) {
+        qwen35::runtime::MtpDrafterConfig mtp_config;
+        mtp_config.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
+        mtp_config.max_seq_len = config_.max_seq_len;
+        mtp_config.page_tokens = config_.page_tokens;
+        mtp_config.max_batch_rows = exec_max_tokens_;
+        mtp_config.kv_dtype = config_.kv_cache_dtype;
+        if (config_.rope_profile.has_value()) {
+            mtp_config.rope_profile = *config_.rope_profile;
+        }
+        if (model_ != nullptr && model_->dense_model() != nullptr) {
+            return qwen35::runtime::mtp_drafter_reserve_bytes(
+                model_->dense_model()->text_config(), mtp_config);
+        }
+        return 0u;
+    }
     if (!config_.draft_config_ready) {
         return 0u;
     }

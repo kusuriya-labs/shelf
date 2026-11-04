@@ -60,6 +60,8 @@ int main(int argc, char** argv) {
     shelf::app::Qwen35RuntimeConfig config;
     config.model_dir = opt.model_dir;
     config.dflash2_model_dir = shelf::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
+    config.mtp = opt.mtp;
+    config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
     config.arena_bytes = opt.arena_gib_auto
@@ -176,8 +178,14 @@ int main(int argc, char** argv) {
                     static_cast<uint32_t>(dflash_config.target_layer_ids[t]);
             }
         } else {
-            config.max_num_batched_tokens = static_cast<uint32_t>(
-                std::max<unsigned long>(prompt_ids.size() + 1UL, 16UL));
+            unsigned long rows = std::max<unsigned long>(prompt_ids.size() + 1UL, 16UL);
+            if (opt.mtp) {
+                rows = std::max<unsigned long>(rows, opt.mtp_drafts + 1UL);
+            }
+            config.max_num_batched_tokens = static_cast<uint32_t>(rows);
+            config.max_scheduled_output_rows = opt.mtp
+                ? static_cast<uint32_t>(opt.mtp_drafts) + 1u
+                : 0u;
         }
     }
 
@@ -236,6 +244,11 @@ int main(int argc, char** argv) {
     printf("DECODE_BACKEND=%s\n",
            shelf::qwen35::runtime::decode_backend_name(
                runtime->config().decode_backend));
+    if (opt.mtp) {
+        return shelf::app::run_mtp_shot(*runtime, prompt_ids, opt.max_new_tokens,
+                                        static_cast<uint32_t>(opt.mtp_drafts),
+                                        opt.mtp_stats, opt.kv_cache_dtype, opt.sampling);
+    }
     if (shelf::app::compute_dflash_enabled(opt)) {
         return shelf::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
                                 opt.dflash2_model_dir, opt.dflash2_drafts, opt.dflash2_stats,

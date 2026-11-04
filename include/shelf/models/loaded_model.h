@@ -34,7 +34,8 @@ public:
         const std::string& model_dir,
         gpu::GpuArena& arena,
         hipStream_t stream,
-        bool verify_payload_crc = false);
+        bool verify_payload_crc = false,
+        bool load_mtp = false);
 
     static LoadedModel borrow(const shelf::qwen35::Qwen35Model& model);
 

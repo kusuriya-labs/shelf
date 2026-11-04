@@ -34,6 +34,9 @@
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
+| `--mtp` | enable the checkpoint's MTP block as the drafter |
+| `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
+| `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--prefix-cache-hot-tokens N` | prefix cache hot tier capacity in tokens (default 16384) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
@@ -46,7 +49,8 @@
 
 `--arena-gib auto` は起動時の空き VRAM から 1 GiB を引いた容量を arena に使う。
 KV の物理容量は個別に指定できない。model weight、prefix cache、`--working-set-reserve-gib`、
-DFlash2 の drafter（weight と session pool 等の runtime 領域）を確保した後に残る arena の領域を
+DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
+（専用 KV pool、executor、GDN snapshot）を確保した後に残る arena の領域を
 すべて KV に割り当てる。
 KV を増やすには `--arena-gib` を増やすか、prefix cache と `--working-set-reserve-gib` を減らす。
 既定は `0`（auto）で、executor が plan 後に確保する量を row bucket から推定して予約する。
@@ -73,7 +77,8 @@ MEMORY_PLAN mode=auto
 
 `target weights` は実際に arena へ load した後の使用量、`draft weights` は
 `--dflash2-model-dir` の safetensors サイズ、`drafter runtime` は drafter の
-scratch と session pool の領域（`--max-concurrent-requests` 分）、`runtime workspace` は
+scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分、MTP は
+専用 KV pool・executor・GDN snapshot）、`runtime workspace` は
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
 physical KV capacity、`prefix cache` は hot tier の実サイズである。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
@@ -113,6 +118,28 @@ real-quantized fp8 model dir（`quantization_config` の `quant_method: fp8` か
 gfx1201 の HIP kernel で decode を実行する既定構成である。選択結果は
 `DECODE_BACKEND=hip` として stdout に出力する
 （`--serve-stdio` の JSON Lines protocol には混ぜない）。
+
+### MTP speculative decoding
+
+`--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う単一
+request の speculative decode 経路に入る。DFlash2 とは排他的で、
+`--dflash2-model-dir` と同時に指定できない。
+
+```bash
+./build/shelf-compute \
+  --model-dir models/Qwen3.8-27B-FP8 \
+  --mtp --mtp-drafts 4 \
+  --max-new-tokens 32 --max-seq-len 512 --device 0
+```
+
+制約:
+
+- dense checkpoint のみ。MoE checkpoint では起動しない。
+- `--tp 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
+- partial accept は target の prefix rerun を行うため、full accept より遅い。
+- prefix cache は MTP 経路では使われない。
+
+詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。
 
 ### DFlash2 speculative decoding
 

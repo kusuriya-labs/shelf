@@ -91,6 +91,10 @@ void compute_usage(const char* prog) {
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
+    printf("  --mtp                  enable the checkpoint's MTP block as the drafter\n");
+    printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
+    printf("                         max %u)\n", shelf::qwen35::runtime::kMtpMaxDrafts);
+    printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
     printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
     printf("                                 (default 16384)\n");
@@ -163,6 +167,9 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_stats = opt.dflash2_stats;
+    auto& mtp = opt.mtp;
+    auto& mtp_drafts = opt.mtp_drafts;
+    auto& mtp_stats = opt.mtp_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
     auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
@@ -282,6 +289,21 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 fprintf(stderr, "bad --dflash2-stats (expected 0 or 1)\n");
                 return kComputeParseError;
             }
+        } else if (std::strcmp(argv[i], "--mtp") == 0) {
+            mtp = true;
+        } else if (std::strcmp(argv[i], "--mtp-drafts") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], mtp_drafts) || mtp_drafts == 0 ||
+                mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+                fprintf(stderr, "bad --mtp-drafts (expected 1..%u)\n",
+                        shelf::qwen35::runtime::kMtpMaxDrafts);
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--mtp-stats") == 0 && i + 1 < argc) {
+            mtp_stats = std::atoi(argv[++i]);
+            if (mtp_stats != 0 && mtp_stats != 1) {
+                fprintf(stderr, "bad --mtp-stats (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
         } else if (std::strcmp(argv[i], "--prefix-cache") == 0 && i + 1 < argc) {
             prefix_cache_enabled = std::atoi(argv[++i]);
             if (prefix_cache_enabled != 0 && prefix_cache_enabled != 1) {
@@ -348,6 +370,9 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& dflash2_model_dir = opt.dflash2_model_dir;
     const auto& dflash2_drafts = opt.dflash2_drafts;
     const auto& dflash2_stats = opt.dflash2_stats;
+    const auto& mtp = opt.mtp;
+    const auto& mtp_drafts = opt.mtp_drafts;
+    const auto& mtp_stats = opt.mtp_stats;
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     const auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
     const auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
@@ -404,6 +429,33 @@ int validate_compute_options(const ComputeOptions& opt) {
     if (dflash_enabled) {
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+    }
+    if (mtp) {
+        if (dflash_enabled) {
+            fprintf(stderr, "--mtp and --dflash2-model-dir are mutually exclusive\n");
+            return kComputeParseError;
+        }
+        if (tp != 1) {
+            fprintf(stderr, "--mtp currently requires --tp 1\n");
+            return kComputeParseError;
+        }
+        if (pipeline_parallel != 1) {
+            fprintf(stderr, "--mtp currently requires --pipeline-parallel 1\n");
+            return kComputeParseError;
+        }
+        if (serve_stdio) {
+            fprintf(stderr, "--mtp does not support --serve-stdio\n");
+            return kComputeParseError;
+        }
+        if (!dump_logits_path.empty()) {
+            fprintf(stderr, "MTP speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+        if (mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+            fprintf(stderr, "--mtp-drafts exceeds %u\n",
+                    shelf::qwen35::runtime::kMtpMaxDrafts);
             return kComputeParseError;
         }
     }
