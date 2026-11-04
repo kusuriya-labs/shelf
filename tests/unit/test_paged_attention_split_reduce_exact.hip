@@ -224,11 +224,11 @@ int main() {
 
     const uint32_t rows_max = 8u;
     const uint32_t kv_heads = 4u;
-    const uint32_t q_per_kv = 6u;
+    const uint32_t q_per_kv_max = 8u;
     const uint32_t splits_max = 16u;
-    const uint32_t q_heads = kv_heads * q_per_kv;
+    const uint32_t q_heads = kv_heads * q_per_kv_max;
     const size_t partials_max =
-        static_cast<size_t>(rows_max) * kv_heads * splits_max * q_per_kv * (2u + kHeadLimit);
+        static_cast<size_t>(rows_max) * kv_heads * splits_max * q_per_kv_max * (2u + kHeadLimit);
     const size_t out_max = static_cast<size_t>(rows_max) * q_heads * kHeadLimit;
 
     float* partials_dev = nullptr;
@@ -250,23 +250,25 @@ int main() {
     const uint32_t rows_list[] = {1u, 2u, 4u, 8u};
     const uint32_t splits_list[] = {2u, 4u, 8u, 16u};
     const uint32_t head_list[] = {128u, 256u};
-    for (uint32_t hd : head_list) {
-        for (uint32_t rows : rows_list) {
-            for (uint32_t splits : splits_list) {
-                for (uint32_t ext = 0u; ext < 2u; ++ext) {
-                    Case c{rows, kv_heads, q_per_kv, hd, splits, ext != 0u};
-                    run_case(c, partials_host, slots_host, partials_dev, slots_dev, positions_dev,
-                             out_a, out_b);
+    for (uint32_t q_per_kv : {6u, 8u}) {
+        for (uint32_t hd : head_list) {
+            for (uint32_t rows : rows_list) {
+                for (uint32_t splits : splits_list) {
+                    for (uint32_t ext = 0u; ext < 2u; ++ext) {
+                        Case c{rows, kv_heads, q_per_kv, hd, splits, ext != 0u};
+                        run_case(c, partials_host, slots_host, partials_dev, slots_dev,
+                                 positions_dev, out_a, out_b);
+                    }
                 }
             }
         }
-    }
 
-    for (uint32_t hd : head_list) {
-        for (uint32_t rows : {1u, 4u}) {
-            for (uint32_t splits : {2u, 16u}) {
-                run_zero_sum_case(rows, kv_heads, q_per_kv, hd, splits, partials_host, slots_host,
-                                  partials_dev, slots_dev, positions_dev, out_a);
+        for (uint32_t hd : head_list) {
+            for (uint32_t rows : {1u, 4u}) {
+                for (uint32_t splits : {2u, 16u}) {
+                    run_zero_sum_case(rows, kv_heads, q_per_kv, hd, splits, partials_host,
+                                      slots_host, partials_dev, slots_dev, positions_dev, out_a);
+                }
             }
         }
     }

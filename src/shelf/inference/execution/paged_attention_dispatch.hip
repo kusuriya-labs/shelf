@@ -195,6 +195,16 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     return out_args;
 }
 
+// The split kernels are separate instantiations per kv dtype, so the planner has to ask the
+// predicate that matches the KV cache dtype: planning splits for a dtype without an
+// instantiation makes the launch fail with hipErrorInvalidValue instead of falling back.
+bool split_capability(const PagedAttentionResolvedArgs& args) {
+    const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
+    return args.kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3
+               ? ::shelf::kernel::paged_attention_fp8_split_supports(q_per_kv)
+               : ::shelf::kernel::paged_attention_bf16_split_supports(q_per_kv);
+}
+
 PagedAttentionPlan plan_paged_attention(
     const PagedAttentionResolvedArgs& args,
     const HostExecutionContext& ctx,
@@ -220,8 +230,7 @@ PagedAttentionPlan plan_paged_attention(
         && ctx.decode_attn_partials != nullptr
         && ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible
         && args.common.q_heads % args.common.kv_heads == 0u
-        && ::shelf::kernel::paged_attention_split_supports(
-               args.common.q_heads / args.common.kv_heads)) {
+        && split_capability(args)) {
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
         const uint32_t s = 16u;
         const uint64_t need =

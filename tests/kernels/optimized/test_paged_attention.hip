@@ -103,6 +103,8 @@ struct Config {
 struct Dev {
     void* q = nullptr;
     void* out = nullptr;
+    void* out_split = nullptr;
+    void* partials = nullptr;
     void* row_seq = nullptr;
     void* row_pos = nullptr;
     void* anc_off = nullptr;
@@ -117,6 +119,8 @@ struct Dev {
 void free_dev(Dev& d) {
     if (d.q) shelf::gpu::discard_cleanup_result(hipFree(d.q));
     if (d.out) shelf::gpu::discard_cleanup_result(hipFree(d.out));
+    if (d.out_split) shelf::gpu::discard_cleanup_result(hipFree(d.out_split));
+    if (d.partials) shelf::gpu::discard_cleanup_result(hipFree(d.partials));
     if (d.row_seq) shelf::gpu::discard_cleanup_result(hipFree(d.row_seq));
     if (d.row_pos) shelf::gpu::discard_cleanup_result(hipFree(d.row_pos));
     if (d.anc_off) shelf::gpu::discard_cleanup_result(hipFree(d.anc_off));
@@ -471,6 +475,59 @@ bool run_case(const Config& cfg, const char* label) {
         return false;
     }
 
+    // A geometry the planner would send down the split path has to agree with the non-split
+    // kernel here: the split body and the reduce are separate instantiations per q_per_kv, so
+    // only this comparison catches a wrong pairing (the planner cannot).
+    if (!cfg.prefill && !cfg.tree && !cfg.fp8
+        && ::shelf::kernel::paged_attention_bf16_split_supports(q_per_kv)) {
+        const uint32_t splits = 16u;
+        const size_t part_elems = static_cast<size_t>(cfg.rows) * cfg.kv_heads * splits
+            * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit);
+        bool sok = hipMalloc(&d.partials, part_elems * 4) == hipSuccess
+                   && hipMalloc(&d.out_split, q_elems * 4) == hipSuccess;
+        if (sok) sok = hipMemset(d.out_split, 0, q_elems * 4) == hipSuccess;
+        c.output = d.out_split;
+        if (sok) {
+            const hipError_t se = ::shelf::kernel::launch_attention_paged_bf16_split(
+                c, static_cast<const bf16t*>(d.k_pool), static_cast<const bf16t*>(d.v_pool),
+                static_cast<float*>(d.partials), splits, 0);
+            sok = se == hipSuccess;
+            if (sok) {
+                const hipError_t re = ::shelf::kernel::launch_attention_paged_bf16_split_reduce(
+                    c, static_cast<const float*>(d.partials), splits, 0);
+                sok = re == hipSuccess;
+                if (!sok)
+                    std::printf("  (split reduce %s)\n", hipGetErrorString(re));
+            } else {
+                std::printf("  (split launch %s)\n", hipGetErrorString(se));
+            }
+            sok = sok && hipStreamSynchronize(0) == hipSuccess;
+        }
+        c.output = d.out;
+        std::vector<float> got_split(q_elems, 0.0f);
+        if (sok)
+            sok = hipMemcpy(got_split.data(), d.out_split, q_elems * 4,
+                            hipMemcpyDeviceToHost) == hipSuccess;
+        if (sok) {
+            double smax = 0.0;
+            size_t smm = 0;
+            for (size_t i = 0; i < q_elems; ++i) {
+                const double denom = std::fmax(1.0, std::fabs(static_cast<double>(ref[i])));
+                const double rel = std::fabs(static_cast<double>(got_split[i]) - ref[i]) / denom;
+                if (rel > smax) smax = rel;
+                if (rel > 2e-3) ++smm;
+            }
+            if (smm != 0) std::printf("  (split max_rel=%.3e mm=%zu)\n", smax, smm);
+            char split_label[192];
+            std::snprintf(split_label, sizeof(split_label), "%s split16", label);
+            check(smm == 0, split_label);
+        } else {
+            char split_label[192];
+            std::snprintf(split_label, sizeof(split_label), "%s split16", label);
+            check(false, split_label);
+        }
+    }
+
     std::vector<float> got(q_elems);
     if (hipMemcpy(got.data(), d.out, q_elems * 4, hipMemcpyDeviceToHost) != hipSuccess) ok = false;
     free_dev(d);
@@ -768,6 +825,27 @@ int main() {
     c.max_sequences = 1;
     c.visible_override = 2048;
     run_case(c, "bf16 TP2 DECODE qh=12 kvh=2 hd=256 page=64 vis=2048 rows=1");
+
+    // Qwen3.6-35B-A3B MoE local geometry: q_heads=16, kv_heads=2 (q_per_kv 8), head_dim=256.
+    // The split body and the reduce are instantiated per q_per_kv, so this is the case that
+    // pairs them for 8; a wrong pairing reads the partials with the wrong stride.
+    c = Config{};
+    c.rows = 1;
+    c.q_heads = 16;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 64;
+    c.num_pages = 128;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 128;
+    c.max_sequences = 1;
+    c.visible_override = 8192;
+    run_case(c, "bf16 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=8192 rows=1");
+    c.visible_override = 4096;
+    run_case(c, "bf16 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=4096 rows=1");
+    c.visible_override = 64;
+    run_case(c, "bf16 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=64 rows=1");
 
     std::printf("\nResults: %d passed, %d failed, %d skipped\n", passed, failed, skipped_cases);
     if (failed == 0 && passed == 0)

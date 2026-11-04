@@ -60,7 +60,10 @@ correctness 基準（rows 64 / visible 512）は 39330 µs で、optimized（179
 `kMeasuredMaxRows`（8192）まで `--check` を取ったので、rows は production の chunk 上限まで
 registered にできる。
 
-## split-KV は q_per_kv 4 と 6 の kernel しかない
+## 当初の制約: split-KV の kernel は q_per_kv 4 と 6 だけだった（後で 8 を追加）
+
+> この節は当時の記録。bf16 の `q_per_kv = 8` は後で実装した
+> （`split-KV の q_per_kv=8（probe → 原因特定 → 実装）` を参照）。
 
 `(16, 2)` は `q_per_kv = 8`。split-KV 経路の kernel は `q_per_kv` が 4 / 6 でしか起動しない
 （`src/shelf/kernels/optimized/attention/paged_decode.hip` の bf16 split / bf16 split reduce /
@@ -162,7 +165,9 @@ physical plan を作る側が独自の決定を持っていたので、gate は�
 
 `physical_kernel_launches` と `logical_dispatches` の差が split の有無を見る口になった。
 
-## split-KV の q_per_kv=8 を probe して却下した
+## split-KV の q_per_kv=8（probe → 原因特定 → 実装）
+
+### probe では全要素が壊れていた（当時の結論は誤りだった）
 
 bf16 の split / split reduce 本体を `kQPerKV = 8` で instantiation し、gate を通して
 `shelf-bench paged-attention --splits` で測った（rows=1、bf16 KV、f32 出力、`--check` 付き）。
@@ -173,32 +178,129 @@ bf16 の split / split reduce 本体を `kQPerKV = 8` で instantiation し、ga
 | 16384 | 722.94 µs | 664.28 | 334.82 | 180.06 | **FAIL** |
 | 65536 | 3982.16 µs | 3365.30 | 1741.56 | 764.28 | **FAIL** |
 
-潜力は 3.4〜5.2 倍。しかし splits=16 / visible 4096 の不一致は `mm=4092 / 4096 要素`・
-`max_rel=8.3`で、launch 失敗ではなく（bench は launch error を返す経路を持つ）**full head の
-split 本体 `attention_paged_split_bf16_body<8u,true>` が `kQPerKV = 8` で構造的に誤っている**。
-同じ bench で production が使う `q_per_kv = 4 / 6`（16/4・24/4・12/2）の splits 4 / 16 は
-`--check` PASS なので、bench 側の検証ではなく kernel 側の実差である。よって 8u の split は入れて
-いない。現状は非 split decode kernel が正しく、`PAGED_ATTENTION (16,2,256)` はその envelope で
-registered 済み。
+この時点で「split 本体が `kQPerKV = 8` で構造的に誤っている」と書いたが、**それは誤りだった**。
+不一致は `mm=4092 / 4096 要素`・`max_rel=8.3` で、launch 自体は成功していた。
 
-follow-up に残す条件: split 本体は `q_lds[kQPerKV*256]` と `acc_lds[kSplitWaves*kQPerKV*256]`
-を static LDS に取る（kSplitWaves=4 なので 8u で 8 KB + 32 KB = 40 KB、6u で 30 KB）。単に
-template を instantiate するだけでは壊れるので、reduce 側の `qh_per_wg` と同じ発想で q head を
-workgroup に分割し、partials layout もそれへ合わせる必要がある。
+### 原因: reduce の dispatch が 6u へ fallthrough していた
 
-もう 1 つ条件がある。`paged_attention_split_supports` は **kv dtype を見ていない**ので、
-bf16 と fp8 で同一の capability 表を読んでいる。8u を bf16 だけへ追加すると、fp8 の geometry で
-planner が splits を選び、fp8 split kernel が `hipErrorInvalidValue` を返して**実行失敗**になる
-（`hipErrorNotSupported` でないため fallback にもならない。契約は
-`docs/developer/kernels.md` の split-KV decode kernel 節）。8u を入れるなら capability を
-dtype 別に分ける変更が前提である。probe 中は実際に capability を bf16 / fp8 の 2 本へ分割したが、
-8u を却下したので元へ戻してある。
+`launch_attention_paged_bf16_split_reduce` の qh 経路は
 
-価値の出る範囲は visible ≥ 2048 の MoE decode に限られる。visible 4096 では attention が
-1 呼出 186.6 µs × 10 層 = 1.87 ms / token で token 全体（19 ms 台）の 10 % 程度、
-visible 65536 では 39.8 ms / token になって律速側へ寄る。
+```cpp
+if (qh_per_wg < q_per_kv && q_per_kv % qh_per_wg == 0u) {
+    if (q_per_kv == 4u) { ...q4 専用... }
+    return launch_split_reduce_qh<6u, ...>;   // 4u 以外は全部ここ
+}
+```
 
-## なぜ q_per_kv=8 の split-KV を今実装しないのか（採否判断）
+という形で、**`q_per_kv` が 6u でなければ 6u の reduce が走る**構造だった。
+`SHELF_PAGED_ATTENTION_SPLIT_REDUCE_QH` の既定は 1 で、`1 < 8 && 8 % 1 == 0` が真なので
+`q_per_kv = 8` はここへ落ち、partials を `a_stride = 6 * (2 + 256)` で読みながら
+split 側は `8 * (2 + 256)` で書いていた。全要素が一律に誤るが、
+`hipGetLastError()` は success のまま（kernel は正しく launch されている）。
+
+同じ理由で、capability を外した現状の木で `--splits 16` を叩くと
+`launch_attention_paged_bf16_split` が `hipErrorInvalidValue` を返すだけなので、
+`check_output` がその戻り値を無視していると **数値チェック失敗に見える**
+（p50 ≈ 1 µs で何も走っていない）。launch の成否と数値の不一致は、この bench では区別できない。
+
+### 修正
+
+1. **capability を kv dtype ごとに分割**（正本は `paged_attention.h`）
+   - `paged_attention_bf16_split_supports`: 4 / 6 / **8**
+   - `paged_attention_fp8_split_supports`: 4 / 6（8 の instantiation は作らない）
+   - planner は `split_capability(args)` で `args.kv_dtype` を見て選ぶ。
+     1 本の表を共有すると、bf16 だけ8 を足した瞬間に fp8 の geometry で splits が選ばれ、
+     `hipErrorInvalidValue` による**実行失敗**になる（fallback にならない）。
+2. **bf16 の2 つの launcher を total な dispatch へ**（split / reduce とも）。
+   `q_per_kv` ごとに明示し、`default` は `hipErrorInvalidValue`。
+   これで同じ種類の fallthrough を作れない。ついでに埋もれていた穴も塞いだ:
+   従来 `q_per_kv == 4u && !full_head` は **kernel を 1 本も launch せずに
+   古い success を返していた**。
+3. `SHELF_PAGED_ATTENTION_SPLIT_REDUCE_QH` が 8 を受け付けるようにした
+   （test が非 qh の reduce 経路を選ぶため）。
+
+### occupancy / latency の実測（gfx1201、`-Rpass-analysis=kernel-resource-usage`）
+
+| | q_per_kv 6 | q_per_kv 8 |
+| --- | ---: | ---: |
+| static LDS / block | 30936 B | 41240 B |
+| VGPRs | 166 | 208 |
+| scratch | 0 B | 0 B |
+| occupancy（waves/SIMD） | 4 | 3 |
+
+8u は LDS が 1.33 倍、VGPR が 1.25 倍で occupancy が 4 → 3（−25 %）。spill は無い。
+device の `MaxSharedMemoryPerBlock` は 65536 B なので LDS は制限内。
+**occupancy を落とす代わりに可視域の並列度で勝つ**というのがこの lever の実態。
+
+### 実測（修正後、GPU 空きのとき）
+
+`shelf-bench paged-attention --check`（rows=1、bf16 KV、f32 出力）:
+
+| visible | splits=1（非 split） | splits=16 | 倍率 |
+| ---: | ---: | ---: | ---: |
+| 4096 | 180.45 µs | 55.31 µs | 3.26× |
+| 16384 | 690.86 µs | 184.72 µs | 3.74× |
+
+dense の対照（24/4、q_per_kv 6、同じ bench）: visible 4096 で 178.55 → 49.84 µs、
+16384 で 717.12 → 173.65 µs。splits=16 で両者同じ 50 µs 台になり、
+**8u は 6u と同じ速度で走れている**。
+
+計測上の注意: 一度 `vis=4096 splits=16` が 807 µs と出て、その直後に
+非 split の 249 µs より遅いという矛盾が出た。原因は別セッションが GPU 0 を握っていた
+（`rocm-smi --showpids` で 33 GB の `shelf-compute`）ことで、空き device で測り直すと
+55.31 µs。**GPU の占有状況を測定ごとに確認しないと、3〜15 倍の誤差を作る。**
+
+### E2E A/B（capability の on / off、同一 tree、device 1、各 2 run）
+
+| run | split OFF（非 split） | split ON |
+| --- | --- | --- |
+| `tg --context 2048 --prefill-chunk 2048` | `GREEDY_TOKEN_SUM=745578`、55.02 / 55.11 tok/s | `GREEDY_TOKEN_SUM=827368`、56.60 / 55.01 tok/s |
+| `tg --context 4096 --prefill-chunk 2048` | `GREEDY_TOKEN_SUM=2192`、51.67 / 51.73 tok/s | `GREEDY_TOKEN_SUM=2192`、**56.19 / 56.25 tok/s** |
+
+- context 4096 は **生成列が不変で +8.7 %**
+- context 2048 は **greedy の合計が変わった**（745578 → 827368）。split は softmax を
+  split 範囲ごとに online で走らせ、最後に重み付きで合成するので、 reduction 順序が非 split
+  と異なる。末尾の bit が揺れ greedy の token が 1 つ反転したのがそのまま表れた。
+  速度は ±1 % で差が無い（visible 2048 は attention が短い）
+- 速度が効くのは visible ≥ 4096。context 4096 は attention が timed window の 9.3 % あった
+  （per-op 分解の節）ので、その大部分を消した形
+
+### 数値品質（split が実際に走る条件で A/B）
+
+`shelf-bench quality --context 2048 --positions 64`（score start 2049 なので可視 2048〜2111、
+`kPagedAttentionSplitMinVisible` を超え split が走る）。baseline = split ON、candidate = OFF:
+
+| 指標 | 値 |
+| --- | ---: |
+| `QUALITY_PPL`（split ON / OFF） | 31.754 / 30.896（−2.70 %） |
+| mean KL | 0.00623 |
+| top-1 一致率 | 0.984（64 中 63） |
+| top-5 overlap | 0.966 |
+| max abs logit delta | 1.216 |
+
+TP1 と TP2 の差（mean KL 0.00494、top-1 0.9375）と同じ帯で、reduction 順序の差として妥当。
+**この ppl が HF との絶対照合ではない**ことは `docs/perf/current.md` の記録規則のとおり。
+
+### 受け入れ
+
+- `tests/kernels/optimized/test_paged_attention.hip`: bf16 decode の全ケースで
+  **split16 の出力を非 split の参照と突き合わせる**。MoE geometry（qh=16 kvh=2 hd=256、
+  visible 64 / 4096 / 8192）と dense（24/4、12/2）を追加。`Results: 41 passed, 0 failed`
+- `tests/unit/test_paged_attention_split_reduce_exact.hip`: `q_per_kv` 6 / 8 の両方で
+  非 qh 経路（incumbent）と qh=1 / 2 / 4 の一致を bit 単位で確認。`passed=432 failed=0`
+- `tests/unit/test_paged_attention_plan_splits.cpp`: bf16 は 16/2 で splits=16、
+  fp8 は 16/2 で splits=1、capability 表の4 / 6 / 8 と fp8 の 8 なし
+- **fail-first は tamper で実演**: `case 8u:` の reduce を 6u の instantiation へ戻すと
+  `test_paged_attention` が MoE の split16 3 件で失敗、
+  `test_paged_attention_split_reduce_exact` は q_per_kv 8 の全ケースで失敗
+
+## 一度は「条件が揃うまで実装しない」とした採否判断（後で実装した）
+
+> この判断は per-op 分解に基づく Amdahl / roofline の順序論だった。その後、
+> 「latency / occupancy のレバーをいじりましょう」という指示で実装側へ進み、
+> 上の `split-KV の q_per_kv=8（probe → 原因特定 → 実装）` で原因（reduce dispatch の
+> fallthrough）を特定して入れた。ここに残すのは当時の根拠で、
+> **Amdahl の順序論（最大項目は LINEAR_BF16、roofline は weight traffic 側）自体は今も有効**。
 
 MoE decode の context 4096（`tg --context 4096 --tokens 8 --warmup 1 --device 1`、
 `SHELF_QWEN35_PERF_TIMING=1`）の per-op GPU time。timed window 151.516 ms / 8 token：

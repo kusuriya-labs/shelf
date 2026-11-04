@@ -803,7 +803,8 @@ uint32_t attention_split_reduce_qh_per_wg() {
     const char* s = std::getenv("SHELF_PAGED_ATTENTION_SPLIT_REDUCE_QH");
     if (s == nullptr || s[0] == '\0') return 1u;
     const long n = std::strtol(s, nullptr, 10);
-    if (n == 1 || n == 2 || n == 3 || n == 4 || n == 6) return static_cast<uint32_t>(n);
+    if (n == 1 || n == 2 || n == 3 || n == 4 || n == 6 || n == 8)
+        return static_cast<uint32_t>(n);
     return 1u;
 }
 
@@ -857,6 +858,21 @@ void shelf_attention_paged_bf16_reduce_other(
         args.common, args.partials, args.splits, args.common.output);
 }
 
+extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
+void shelf_attention_paged_bf16_split_q8_full(
+    ::shelf::kernel::PagedAttentionSplitArgs args) {
+    v_decode_bf16_split::attention_paged_split_bf16_body<8u, true>(
+        args.common, reinterpret_cast<const bf16*>(args.k_pool),
+        reinterpret_cast<const bf16*>(args.v_pool), args.partials, args.splits);
+}
+
+extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
+void shelf_attention_paged_bf16_reduce_q8_full(
+    ::shelf::kernel::PagedAttentionSplitReduceArgs args) {
+    v_decode_bf16_split::attention_paged_split_reduce_bf16_body<8u, true>(
+        args.common, args.partials, args.splits, args.common.output);
+}
+
 hipError_t launch_attention_paged_bf16_split(
     const PagedAttentionCommonArgs& common,
     const bf16_t* k_pool,
@@ -870,7 +886,7 @@ hipError_t launch_attention_paged_bf16_split(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (!paged_attention_split_supports(q_per_kv))
+    if (!paged_attention_bf16_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (common.page_tokens == 0u || common.block_table_stride == 0u || common.num_pages == 0u)
         return hipErrorInvalidValue;
@@ -886,40 +902,49 @@ hipError_t launch_attention_paged_bf16_split(
     const PagedAttentionCommonArgs a = common;
     const dim3 grid(static_cast<uint32_t>(grid_x));
     const bool full_head = common.head_dim == kHeadLimit;
-    if (q_per_kv == 4u && full_head) {
+    if (full_head) {
         PagedAttentionSplitArgs args{};
         args.common = a;
         args.k_pool = k_pool;
         args.v_pool = v_pool;
         args.partials = partials;
         args.splits = splits;
-        shelf_attention_paged_bf16_split_q4_full
-            <<<grid, kSplitThreads, 0, stream>>>(args);
-        return hipGetLastError();
-    }
-    if (q_per_kv == 4u) {
-        if (full_head) {
+        if (q_per_kv == 4u) {
+            shelf_attention_paged_bf16_split_q4_full
+                <<<grid, kSplitThreads, 0, stream>>>(args);
+            return hipGetLastError();
+        }
+        if (q_per_kv == 6u) {
+            shelf_attention_paged_bf16_split_other
+                <<<grid, kSplitThreads, 0, stream>>>(args);
+            return hipGetLastError();
+        }
+        if (q_per_kv == 8u) {
+            shelf_attention_paged_bf16_split_q8_full
+                <<<grid, kSplitThreads, 0, stream>>>(args);
+            return hipGetLastError();
+        }
+    } else {
+        if (q_per_kv == 4u) {
             attention_paged_split_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
                 a, reinterpret_cast<const bf16*>(k_pool),
                 reinterpret_cast<const bf16*>(v_pool), partials, splits);
+            return hipGetLastError();
         }
-    } else {
-        if (full_head) {
-            PagedAttentionSplitArgs stable{};
-            stable.common = a;
-            stable.k_pool = k_pool;
-            stable.v_pool = v_pool;
-            stable.partials = partials;
-            stable.splits = splits;
-            shelf_attention_paged_bf16_split_other
-                <<<grid, kSplitThreads, 0, stream>>>(stable);
-        } else {
+        if (q_per_kv == 6u) {
             attention_paged_split_bf16_impl<6u, false><<<grid, kSplitThreads, 0, stream>>>(
                 a, reinterpret_cast<const bf16*>(k_pool),
                 reinterpret_cast<const bf16*>(v_pool), partials, splits);
+            return hipGetLastError();
+        }
+        if (q_per_kv == 8u) {
+            attention_paged_split_bf16_impl<8u, false><<<grid, kSplitThreads, 0, stream>>>(
+                a, reinterpret_cast<const bf16*>(k_pool),
+                reinterpret_cast<const bf16*>(v_pool), partials, splits);
+            return hipGetLastError();
         }
     }
-    return hipGetLastError();
+    return hipErrorInvalidValue;
 }
 
 hipError_t launch_attention_paged_bf16_split_reduce(
@@ -933,7 +958,7 @@ hipError_t launch_attention_paged_bf16_split_reduce(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (!paged_attention_split_supports(q_per_kv))
+    if (!paged_attention_bf16_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (partials == nullptr || (splits != 2u && splits != 4u && splits != 8u && splits != 16u))
         return hipErrorInvalidValue;
@@ -946,69 +971,89 @@ hipError_t launch_attention_paged_bf16_split_reduce(
         using namespace v_decode_bf16_split_qh;
         const uint32_t qh_per_wg = attention_split_reduce_qh_per_wg();
         if (qh_per_wg < q_per_kv && q_per_kv % qh_per_wg == 0u) {
-            if (q_per_kv == 4u) {
-                if (full_head && (qh_per_wg == 1u || qh_per_wg == 2u)) {
-                    PagedAttentionSplitReduceArgs stable{};
-                    stable.common = a;
-                    stable.partials = partials;
-                    stable.splits = splits;
-                    const uint64_t qh_grid = static_cast<uint64_t>(a.rows) *
-                                             a.kv_heads *
-                                             (q_per_kv / qh_per_wg);
-                    const dim3 qhg(static_cast<uint32_t>(qh_grid));
-                    if (qh_per_wg == 1u) {
-                        shelf_attention_paged_bf16_reduce_q4_full_qh1
-                            <<<qhg, kPagedAttentionSplitBlock, 0, stream>>>(stable);
-                    } else {
-                        shelf_attention_paged_bf16_reduce_q4_full_qh2
-                            <<<qhg, kPagedAttentionSplitBlock, 0, stream>>>(stable);
-                    }
-                    return hipGetLastError();
+            if (q_per_kv == 4u && full_head && (qh_per_wg == 1u || qh_per_wg == 2u)) {
+                PagedAttentionSplitReduceArgs stable{};
+                stable.common = a;
+                stable.partials = partials;
+                stable.splits = splits;
+                const uint64_t qh_grid = static_cast<uint64_t>(a.rows) *
+                                         a.kv_heads *
+                                         (q_per_kv / qh_per_wg);
+                const dim3 qhg(static_cast<uint32_t>(qh_grid));
+                if (qh_per_wg == 1u) {
+                    shelf_attention_paged_bf16_reduce_q4_full_qh1
+                        <<<qhg, kPagedAttentionSplitBlock, 0, stream>>>(stable);
+                } else {
+                    shelf_attention_paged_bf16_reduce_q4_full_qh2
+                        <<<qhg, kPagedAttentionSplitBlock, 0, stream>>>(stable);
                 }
-                return full_head
-                    ? launch_split_reduce_qh<4u, true>(a, partials, splits, common.output,
-                                                       qh_per_wg, stream)
-                    : launch_split_reduce_qh<4u, false>(a, partials, splits, common.output,
-                                                        qh_per_wg, stream);
+                return hipGetLastError();
             }
-            return full_head
-                ? launch_split_reduce_qh<6u, true>(a, partials, splits, common.output,
-                                                   qh_per_wg, stream)
-                : launch_split_reduce_qh<6u, false>(a, partials, splits, common.output,
-                                                    qh_per_wg, stream);
+            switch (q_per_kv) {
+                case 4u:
+                    return full_head
+                        ? launch_split_reduce_qh<4u, true>(a, partials, splits, common.output,
+                                                           qh_per_wg, stream)
+                        : launch_split_reduce_qh<4u, false>(a, partials, splits, common.output,
+                                                            qh_per_wg, stream);
+                case 6u:
+                    return full_head
+                        ? launch_split_reduce_qh<6u, true>(a, partials, splits, common.output,
+                                                           qh_per_wg, stream)
+                        : launch_split_reduce_qh<6u, false>(a, partials, splits, common.output,
+                                                            qh_per_wg, stream);
+                case 8u:
+                    return full_head
+                        ? launch_split_reduce_qh<8u, true>(a, partials, splits, common.output,
+                                                           qh_per_wg, stream)
+                        : launch_split_reduce_qh<8u, false>(a, partials, splits, common.output,
+                                                            qh_per_wg, stream);
+                default:
+                    return hipErrorInvalidValue;
+            }
         }
     }
     const uint64_t grid_x = static_cast<uint64_t>(common.rows) * common.kv_heads;
     if (grid_x == 0u) return hipErrorInvalidValue;
     const dim3 grid(static_cast<uint32_t>(grid_x));
-    if (q_per_kv == 4u && full_head) {
+    if (full_head) {
         PagedAttentionSplitReduceArgs stable{};
         stable.common = a;
         stable.partials = partials;
         stable.splits = splits;
-        shelf_attention_paged_bf16_reduce_q4_full_base
-            <<<grid, kSplitThreads, 0, stream>>>(stable);
-        return hipGetLastError();
-    }
-    if (q_per_kv == 4u) {
-        if (full_head) {
-            attention_paged_split_reduce_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
-                a, partials, splits, common.output);
+        if (q_per_kv == 4u) {
+            shelf_attention_paged_bf16_reduce_q4_full_base
+                <<<grid, kSplitThreads, 0, stream>>>(stable);
+            return hipGetLastError();
         }
-    } else {
-        if (full_head) {
-            PagedAttentionSplitReduceArgs stable{};
-            stable.common = a;
-            stable.partials = partials;
-            stable.splits = splits;
+        if (q_per_kv == 6u) {
             shelf_attention_paged_bf16_reduce_other
                 <<<grid, kSplitThreads, 0, stream>>>(stable);
-        } else {
+            return hipGetLastError();
+        }
+        if (q_per_kv == 8u) {
+            shelf_attention_paged_bf16_reduce_q8_full
+                <<<grid, kSplitThreads, 0, stream>>>(stable);
+            return hipGetLastError();
+        }
+    } else {
+        if (q_per_kv == 4u) {
+            attention_paged_split_reduce_bf16_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
+                a, partials, splits, common.output);
+            return hipGetLastError();
+        }
+        if (q_per_kv == 6u) {
             attention_paged_split_reduce_bf16_impl<6u, false><<<grid, kSplitThreads, 0, stream>>>(
                 a, partials, splits, common.output);
+            return hipGetLastError();
+        }
+        if (q_per_kv == 8u) {
+            attention_paged_split_reduce_bf16_impl<8u, false><<<grid, kSplitThreads, 0, stream>>>(
+                a, partials, splits, common.output);
+            return hipGetLastError();
         }
     }
-    return hipGetLastError();
+    return hipErrorInvalidValue;
 }
 
 namespace { namespace v_decode_fp8 {
@@ -1620,7 +1665,7 @@ hipError_t launch_attention_paged_fp8_split(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (!paged_attention_split_supports(q_per_kv))
+    if (!paged_attention_fp8_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (common.page_tokens == 0u || common.block_table_stride == 0u || common.num_pages == 0u)
         return hipErrorInvalidValue;

@@ -483,7 +483,14 @@ hipError_t launch_optimized(const Env& e, hipStream_t s) {
 
 bool check_output(const Env& e, hipError_t (*launch)(const Env&, hipStream_t)) {
     (void)launch_correctness(e, nullptr);
-    (void)launch(e, nullptr);
+    const hipError_t hc = hipGetLastError();
+    const hipError_t ho = launch(e, nullptr);
+    // A refused launch must not read as a numeric mismatch: without this the output buffer
+    // keeps its old contents and the comparison reports every element wrong.
+    if (hc != hipSuccess || ho != hipSuccess) {
+        std::printf("  (launch corr=%s opt=%s)\n", hipGetErrorString(hc), hipGetErrorString(ho));
+        return false;
+    }
     if (hipDeviceSynchronize() != hipSuccess) return false;
     const size_t out_elems = (size_t)e.rows * e.q_features;
     std::vector<float> corr(out_elems), opt(out_elems);

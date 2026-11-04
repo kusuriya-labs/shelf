@@ -15,10 +15,16 @@ inline constexpr uint32_t kPagedAttentionSplitBlock = 128u;
 inline constexpr uint32_t kPagedAttentionPrefillBlock = 256u;
 inline constexpr uint32_t kPagedAttentionPrefillTileRows = 32u;
 
-// The split-KV decode kernels are instantiated for these q_per_kv values only. Any other
-// geometry runs the non-split decode kernel, which walks the whole visible range in one
-// workgroup per (row, q_head).
-inline constexpr bool paged_attention_split_supports(uint32_t q_per_kv) {
+// The split-KV decode kernels are instantiated per (kv dtype, q_per_kv). A geometry outside
+// the table runs the non-split decode kernel, which walks the whole visible range in one
+// workgroup per (row, q_head). The predicates are per dtype because the split and reduce
+// kernels are separate instantiations: planning splits for a dtype that has no instantiation
+// makes the launch fail with hipErrorInvalidValue instead of falling back.
+inline constexpr bool paged_attention_bf16_split_supports(uint32_t q_per_kv) {
+    return q_per_kv == 4u || q_per_kv == 6u || q_per_kv == 8u;
+}
+
+inline constexpr bool paged_attention_fp8_split_supports(uint32_t q_per_kv) {
     return q_per_kv == 4u || q_per_kv == 6u;
 }
 

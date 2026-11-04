@@ -87,16 +87,27 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   logical_dispatches 43360 = optimized_operations 43360、**correctness_fallbacks 0**
   （`physical_kernel_launches` 43392 は grouped 系の multi-launch ぶん。`EMBEDDING_LOOKUP`
   登録前は fallback 32、`RMS_NORM` / `PAGED_ATTENTION` 登録前は 2944）
+- split の on / off は `physical_kernel_launches - logical_dispatches` で見てよい
+  （context 4096 / 8 token で 88 = grouped の 8 + split attention の 80 = 10 層 × 8 decode）。
+  context 64 では 32（grouped のみ）で split は入らない
 - 前の値は `gpu_ms p50` 3128.75 / **10.22 tok/s**（anchor `GREEDY_TOKEN_SUM=2987`）。その前は
   5512.97 / 5.81 tok/s（anchor 15232）。登録と計測の経緯は
   [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md) と
   [../research/20261104/moe_rmsnorm_paged_attention_allowlist.md](../research/20261104/moe_rmsnorm_paged_attention_allowlist.md)
 - `shelf-compute` E2E（prompt 14 token、`--max-num-batched-tokens 64 --max-concurrent-requests 1`、
   8 decode）は DECODE_TOKENS_PER_SEC 56.52（1 run）。tg とは条件が違うので直接比較しない
-- 長い context: `shelf-bench tg --context 4096 --tokens 8` は 51.37 tok/s、
-  `--context 2048 --prefill-chunk 2048` は 54.91 tok/s（各 1 run）。
-  `q_per_kv = 8` の split-KV kernel が無いので非 split kernel を使う（probe の計測と採否は
-  research 記録）
+- 長い context（split-KV 有効後、device 1、各 2 run、`--prefill-chunk 2048`）:
+  `--context 4096` は 56.19 / 56.25 tok/s（anchor `GREEDY_TOKEN_SUM=2192` 不変）、
+  `--context 2048` は 56.60 / 55.01 tok/s。capability を外した同一 tree の A/B は
+  51.67 / 51.73 と 55.02 / 55.11 なので、**context 4096 で +8.7 %、context 2048 は差が無い**
+  （visible 2048 は attention が短く、split の効く余地が無い）。
+  `q_per_kv = 8` の split-KV は bf16 で有効（`max_visible_tokens >= 2048`）、fp8 は非 split のまま
+- context 2048 は split の on / off で greedy の合計が 745578 → 827368 に変わる
+  （reduction 順序の差。split は softmax を可視域ごとに online で走らせ最後に合成する）。
+  数値品質は context 2048 / 64 positions の A/B で mean KL 0.00623・top-1 一致 0.984・
+  ppl 差 −2.70 %（TP1 と TP2 の差と同じ帯。根拠は research 記録）
+- context 64 は split の閾値（2048）未満なので無変更。3 run で 58.74 / 58.86 / 59.17 tok/s、
+  anchor `GREEDY_TOKEN_SUM=2199`
 - MoE prefill chunk: `--prefill-chunk 1024 / 2048 / 4096` は 51.36 / 51.28 / 49.31 tok/s。
   bucket R8192（group 69632 行）は `unsupported` で拒否される（`compute.md` の上限）
 - 数値の連続性は teacher-forced A/B（base の生成列をプロンプトへ埋めた 14 token 入力、
@@ -118,6 +129,10 @@ teacher forcing できる。
 
 - **これは HF との絶対照合ではない**。生成列の一致 anchor は `docs/perf/current.md` の MoE
   decode 節と research 記録にあり、数値の正しさの gate は未実施のまま（§8）
+- split-KV が走る条件（context 2048 / 64 positions / score start 2049）での on / off A/B:
+  ppl 31.754（split）/ 30.896（非 split、−2.70 %）、mean KL 0.00623、top-1 一致 0.984、
+  top-5 overlap 0.966、max abs logit delta 1.216。reduction 順序の差として
+  TP1 と TP2（mean KL 0.00494・top-1 0.9375）と同じ帯
 - 同じ `quality` 経路の dense 側確認（Qwen3.8-27B-FP8、corpus 2203 token、context 128 /
   positions 32）: TP1 `QUALITY_PPL` 4.3905、TP2 4.5421（+3.45 %）、mean KL 0.00494、
   top-1 一致 0.9375、top-5 overlap 0.9563。TP1 と TP2 の差は reduction 順序によるもので、

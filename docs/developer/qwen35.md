@@ -400,7 +400,9 @@ Auto モードでは `execute_program` が単体 launcher を試す。
 
 各 launcher は selector（`select_*_implementation` / `select_*_config`）で `Correctness` / `Optimized` を判定し、`Optimized` でなければ `NotApplicable` を返す。量子化 linear は対応 weight が native layout に preshuffle 済みであることも検証する。Tensor Parallel の local geometry は半分の次元になるため、各 selector（`linear_selector` / `paged_attention_selector` / `gdn_recurrence_selector` / `rope_selector` / `kv_append_selector` / `l2_normalize_selector` / `gdn_conv_selector` / `rmsnorm_selector` / `elementwise_selector`）には TP=2 の validated shape を個別に登録する（[tensor_parallel_execution.md](tensor_parallel_execution.md) §10）。
 
-`PAGED_ATTENTION` で split-KV を使うかは `plan_paged_attention` の 1 箇所だけが決め、`append_decode_region` はその `splits` を引数で受け取る（region 単位の tree 判定のみ受け手側で行う）。kernel 側の capability（`q_per_kv` が 4 / 6）は `paged_attention_split_supports` を正本とし、planner と kernel の両方がそれを読む。split kernel は capability の無い geometry で `hipErrorInvalidValue` を返す（`hipErrorNotSupported` ではない）。dispatch は `hipErrorNotSupported` だけを correctness fallback へ訳すため、planner が capability を見ずに split を選べば実行は失敗になる。
+`PAGED_ATTENTION` で split-KV を使うかは `plan_paged_attention` の 1 箇所だけが決め、`append_decode_region` はその `splits` を引数で受け取る（region 単位の tree 判定のみ受け手側で行う）。kernel 側の capability（kv dtype ごとに bf16 が `q_per_kv` 4 / 6 / 8、fp8 が 4 / 6）は
+`paged_attention_bf16_split_supports` / `paged_attention_fp8_split_supports` を正本とし、planner
+（`split_capability`）と kernel の両方がそれを読む。split kernel は capability の無い geometry で `hipErrorInvalidValue` を返す（`hipErrorNotSupported` ではない）。dispatch は `hipErrorNotSupported` だけを correctness fallback へ訳すため、planner が capability を見ずに split を選べば実行は失敗になる。
 
 ---
 

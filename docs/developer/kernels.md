@@ -181,15 +181,22 @@ gfx1201 では両側に `global_inv scope:SCOPE_SE` が emit される。これ�
 
 `paged_decode.hip` / `paged_prefill.hip` は次を満たす。
 
-- split-KV decode kernel（bf16 split / bf16 split reduce / fp8 split）が起動するのは
-  `q_per_kv = q_heads / kv_heads` が 4 または 6 の geometry だけである。この capability は
-  `include/shelf/kernels/optimized/attention/paged_attention.h` の
-  `paged_attention_split_supports(q_per_kv)` を正本とし、kernel 側の gate と
-  `plan_paged_attention` の split 選択の両方がそれを読む。capability の無い geometry は
+- split-KV decode kernel（bf16 split / bf16 split reduce / fp8 split）が起動するのは、
+  kv dtype ごとの capability 表に載っている `q_per_kv = q_heads / kv_heads` の geometry だけである。
+  正本は `include/shelf/kernels/optimized/attention/paged_attention.h` の
+  `paged_attention_bf16_split_supports(q_per_kv)`（4 / 6 / 8）と
+  `paged_attention_fp8_split_supports(q_per_kv)`（4 / 6）で、kernel 側の gate と
+  `plan_paged_attention` の split 選択の両方がそれを読む。planner は `split_capability` で
+  kv dtype を選び、dtypeに無い instantiation を選ばない。capability の無い geometry は
   非 split decode kernel（1 workgroup / (row, q_head) で可視域を歩む）が受け持つ。
   kernel はこの条件を外れたときに `hipErrorInvalidValue` を返す（`hipErrorNotSupported` では
   ない）。dispatch 側は `hipErrorNotSupported` だけを correctness fallback へ訳すので、
   planner が capability を無視して splits を選べば実行は失敗として終わる。
+- split 本体と reduce は `q_per_kv` ごとの別 instantiation で、partials の stride も
+  `q_per_kv * (2 + head_dim)` である。片方だけを足すと stride がずれて**launch は成功したまま
+  静かに誤った値**になる（`hipErrorInvalidValue` ですらない）。bf16 の 8（MoE の 16/2）が
+  それで、`tests/kernels/optimized/test_paged_attention.hip` の split16 比較と
+  `tests/unit/test_paged_attention_split_reduce_exact.hip` の q_per_kv 6 / 8 が対にする。
 
 - 正規化の分母（softmax の指数和）が 0 のときは出力を書かない。
   full decode / split / reduce の全経路で同じ扱いとし、`0/0` を出力へ書かない。

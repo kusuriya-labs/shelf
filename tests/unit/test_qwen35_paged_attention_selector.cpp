@@ -160,11 +160,14 @@ int main() {
               PagedAttentionImplementation::Correctness,
           "moe 16/2/256 fp8 kv not measured -> Correctness");
 
-    check(::shelf::kernel::paged_attention_split_supports(4u), "split supports q_per_kv 4");
-    check(::shelf::kernel::paged_attention_split_supports(6u), "split supports q_per_kv 6");
-    check(!::shelf::kernel::paged_attention_split_supports(8u),
-          "split does not support q_per_kv 8 (moe 16/2 stays non-split)");
-    check(!::shelf::kernel::paged_attention_split_supports(1u), "split rejects q_per_kv 1");
+    check(::shelf::kernel::paged_attention_bf16_split_supports(4u), "bf16 split q_per_kv 4");
+    check(::shelf::kernel::paged_attention_bf16_split_supports(6u), "bf16 split q_per_kv 6");
+    check(::shelf::kernel::paged_attention_bf16_split_supports(8u), "bf16 split q_per_kv 8");
+    check(!::shelf::kernel::paged_attention_bf16_split_supports(1u), "bf16 split q_per_kv 1");
+    check(::shelf::kernel::paged_attention_fp8_split_supports(4u), "fp8 split q_per_kv 4");
+    check(::shelf::kernel::paged_attention_fp8_split_supports(6u), "fp8 split q_per_kv 6");
+    check(!::shelf::kernel::paged_attention_fp8_split_supports(8u),
+          "fp8 split has no q_per_kv 8 instantiation");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
