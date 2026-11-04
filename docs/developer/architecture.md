@@ -105,6 +105,10 @@ Executor Executor
 
 詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
 
+Pipeline parallel は layer range を stage に分割し、hidden を pinned host 経由で
+直列に hand-off する。current contract は [pipeline_parallel.md](pipeline_parallel.md)
+を参照。
+
 weights loader（`shelf_weights`）の依存は下方向のみ:
 
 ```text

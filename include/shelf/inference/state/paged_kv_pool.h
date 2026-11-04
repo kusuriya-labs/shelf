@@ -122,6 +122,8 @@ class PagedKVPool {
 
     Result<PageId> allocate();
 
+    Status adopt(PageId page);
+
     Status release(PageId page);
 
     Status release_many(const std::vector<PageId>& pages);

@@ -114,14 +114,25 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     if (config_.tp != 1 && config_.tp != 2) {
         return Status::unsupported("--tp supports 1 or 2", __FILE__, __LINE__);
     }
+    if (config_.pipeline_parallel == 0) {
+        return Status::invalid_argument(
+            "pipeline_parallel must be positive", __FILE__, __LINE__);
+    }
+    if (config_.pipeline_parallel > 1 && config_.tp != 1) {
+        return Status::unsupported(
+            "pipeline parallel requires tp 1", __FILE__, __LINE__);
+    }
 
     int dev_count = 0;
     if (hipGetDeviceCount(&dev_count) != hipSuccess || dev_count == 0) {
         return Status::invalid_state("no GPU available", __FILE__, __LINE__);
     }
-    if (config_.devices.size() != config_.tp) {
+    const std::size_t parallel_width = config_.pipeline_parallel > 1
+        ? config_.pipeline_parallel
+        : config_.tp;
+    if (config_.devices.size() != parallel_width) {
         return Status::invalid_argument(
-            "--device count must match --tp", __FILE__, __LINE__);
+            "--device count must match --tp or --pipeline-parallel", __FILE__, __LINE__);
     }
     for (int device : config_.devices) {
         if (device < 0 || device >= dev_count) {
@@ -166,6 +177,9 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         exec_max_tokens_ = 1;
     }
 
+    if (config_.pipeline_parallel > 1) {
+        return initialize_pipeline_parallel();
+    }
     if (config_.tp > 1) {
         return initialize_tensor_parallel();
     }
@@ -510,6 +524,70 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
     fflush(stderr);
 }
 
+Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
+    auto config_result = qwen35::read_qwen35_text_config(config_.model_dir);
+    if (!config_result.ok()) return config_result.status();
+    const qwen35::Qwen35TextConfig& text_config = config_result.value();
+    const auto ranges = qwen35::even_stage_ranges(
+        static_cast<std::uint32_t>(text_config.num_hidden_layers),
+        static_cast<std::uint32_t>(config_.pipeline_parallel));
+    if (ranges.size() != config_.pipeline_parallel) {
+        return Status::invalid_argument(
+            "--pipeline-parallel must not exceed the model layer count",
+            __FILE__, __LINE__);
+    }
+
+    qwen35::runtime::PipelineParallelConfig pp_config;
+    pp_config.model_dir = config_.model_dir;
+    pp_config.devices = config_.devices;
+    pp_config.stages = ranges;
+    pp_config.max_batch_rows = exec_max_tokens_;
+    pp_config.max_scheduled_requests = config_.max_concurrent_requests;
+    pp_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
+    pp_config.max_seq_len = config_.max_seq_len;
+    pp_config.page_tokens = config_.page_tokens;
+    pp_config.kv_cache_dtype = config_.kv_cache_dtype;
+    pp_config.arena_bytes = config_.arena_bytes;
+    pp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
+    if (config_.rope_profile.has_value()) {
+        pp_config.rope_profile = *config_.rope_profile;
+    }
+    pp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
+
+    const auto t_load_start = std::chrono::steady_clock::now();
+    auto coordinator_result =
+        qwen35::runtime::PipelineParallelCoordinator::create(pp_config);
+    if (!coordinator_result.ok()) return coordinator_result.status();
+    pp_coordinator_ = coordinator_result.release();
+    const auto t_load_end = std::chrono::steady_clock::now();
+    model_load_ms_ =
+        std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
+
+    qwen35::runtime::PipelineStageRuntime& stage0 = pp_coordinator_->stage(0);
+    fprintf(stderr,
+            "MEMORY_PLAN mode=%s pipeline=%u arena=%s used=%s available=%s\n",
+            auto_arena_ ? "auto" : "fixed",
+            static_cast<unsigned>(config_.pipeline_parallel),
+            gpu::format_gib(stage0.arena().capacity()).c_str(),
+            gpu::format_gib(stage0.arena().used()).c_str(),
+            gpu::format_gib(startup_available_bytes_).c_str());
+    fflush(stderr);
+    std::fprintf(stderr, "%s", pp_coordinator_->debug_report().c_str());
+
+    qwen35::runtime::ContinuousBatcherConfig batcher_config;
+    batcher_config.max_num_batched_tokens = exec_max_tokens_;
+    batcher_config.max_scheduled_requests = config_.max_concurrent_requests;
+    batcher_config.max_seq_len = config_.max_seq_len;
+    batcher_config.page_tokens = config_.page_tokens;
+    batcher_config.eos_token_ids = stage0.model().text_config().stop_tokens;
+
+    batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
+        stage0.executor(), stage0.sequence_pool(), stage0.gdn_pool(), stage0.kv_pool(),
+        batcher_config, stage0.stream());
+    batcher_->set_tp_batch_hook(pp_coordinator_.get());
+    return Status::make_ok();
+}
+
 Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     qwen35::runtime::TpCoordinatorConfig tp_config;
     tp_config.model_dir = config_.model_dir;
@@ -767,7 +845,7 @@ Status Qwen35ComputeRuntime::shutdown() {
         if (!st.ok() && first_error.ok()) first_error = st;
     }
 
-    auto exec_st = tp_coordinator_ != nullptr
+    auto exec_st = (tp_coordinator_ != nullptr || pp_coordinator_ != nullptr)
                        ? Status::make_ok()
                        : qwen35::executor_shutdown(executor_);
     if (!exec_st.ok() && first_error.ok()) first_error = exec_st;
@@ -804,6 +882,7 @@ Status Qwen35ComputeRuntime::shutdown() {
     tp_model_ = nullptr;
     tp_stream_ = nullptr;
     tp_coordinator_.reset();
+    pp_coordinator_.reset();
 
     shutdown_ = true;
     return first_error;

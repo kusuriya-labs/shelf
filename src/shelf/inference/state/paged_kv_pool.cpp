@@ -1,5 +1,7 @@
 #include <shelf/inference/state/paged_kv_pool.h>
 
+#include <algorithm>
+
 namespace shelf {
 namespace state {
 
@@ -148,6 +150,24 @@ Result<PageId> PagedKVPool::allocate() {
     ++used_count_;
 
     return page;
+}
+
+Status PagedKVPool::adopt(PageId page) {
+    if (page >= num_pages_) {
+        return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
+    }
+    if (in_use_[page]) {
+        return Status::invalid_argument("page already in use", __FILE__, __LINE__);
+    }
+    auto it = std::find(free_list_.begin(), free_list_.end(), page);
+    if (it == free_list_.end()) {
+        return Status::invalid_state("page is not in the free list", __FILE__, __LINE__);
+    }
+    if (it + 1 != free_list_.end()) *it = free_list_.back();
+    free_list_.pop_back();
+    in_use_[page] = true;
+    ++used_count_;
+    return Status::make_ok();
 }
 
 Status PagedKVPool::release(PageId page) {

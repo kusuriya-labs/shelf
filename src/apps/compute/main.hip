@@ -68,13 +68,17 @@ int main(int argc, char** argv) {
     config.page_tokens = static_cast<uint32_t>(opt.page_tokens);
     config.devices = opt.devices;
     config.tp = static_cast<uint32_t>(opt.tp);
+    config.pipeline_parallel = static_cast<uint32_t>(opt.pipeline_parallel);
     config.kv_cache_dtype = opt.kv_cache_dtype == "fp8"
         ? shelf::kernel::KVCacheDType::FP8_E4M3
         : shelf::kernel::KVCacheDType::BF16;
     config.verify_weights = opt.verify_weights != 0;
     config.tp_combine_f32 = static_cast<uint32_t>(opt.tp_combine_f32);
     config.decode_backend = opt.decode_backend;
-    config.prefix_cache = opt.prefix_cache_enabled != 0;
+    config.prefix_cache = opt.prefix_cache_enabled != 0 && opt.pipeline_parallel == 1;
+    if (opt.pipeline_parallel > 1 && opt.prefix_cache_enabled != 0) {
+        fprintf(stderr, "WARN: --pipeline-parallel disables prefix cache\n");
+    }
     config.prefix_cache_hot_tokens = static_cast<uint32_t>(opt.prefix_cache_hot_tokens);
     config.prefix_cache_cold_tokens = static_cast<uint32_t>(opt.prefix_cache_cold_tokens);
     config.prefix_cache_concurrency = static_cast<uint32_t>(opt.prefix_cache_concurrency);

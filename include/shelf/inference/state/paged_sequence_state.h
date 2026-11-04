@@ -91,6 +91,11 @@ struct PagedSequenceState {
         uint32_t old_block_count,
         hipStream_t stream);
 
+    friend Status import_sequence_block_table(
+        PagedSequenceState& dst,
+        const PagedSequenceState& src,
+        hipStream_t stream);
+
     friend Status commit_sequence_append(
         PagedSequenceState& seq,
         ::shelf::runtime::RequestHandle expected_handle,
@@ -123,6 +128,11 @@ Status reserve_sequence_append(
 Status rollback_sequence_append(
     PagedSequenceState& seq,
     uint32_t old_block_count,
+    hipStream_t stream);
+
+Status import_sequence_block_table(
+    PagedSequenceState& dst,
+    const PagedSequenceState& src,
     hipStream_t stream);
 
 Status commit_sequence_append(

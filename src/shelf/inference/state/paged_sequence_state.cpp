@@ -228,6 +228,62 @@ Status rollback_sequence_append(
     return Status::make_ok();
 }
 
+Status import_sequence_block_table(
+    PagedSequenceState& dst,
+    const PagedSequenceState& src,
+    hipStream_t stream) {
+    if (!dst.is_allocated() || !src.is_allocated()) {
+        return Status::invalid_argument("sequence state is not allocated", __FILE__, __LINE__);
+    }
+    if (dst.seq_pool_ == nullptr || dst.kv_pool_ == nullptr) {
+        return Status::invalid_state("sequence pool ownership is invalid", __FILE__, __LINE__);
+    }
+    if (dst.block_table.size() > src.block_table.size()) {
+        Status st = rollback_sequence_append(
+            dst, static_cast<uint32_t>(src.block_table.size()), stream);
+        if (!st.ok()) return st;
+    }
+    const std::size_t old_size = dst.block_table.size();
+    for (std::size_t i = 0; i < old_size; ++i) {
+        if (dst.block_table[i] != src.block_table[i]) {
+            return Status::invalid_state(
+                "pipeline mirror block table diverged from stage0", __FILE__, __LINE__);
+        }
+    }
+    if (old_size == src.block_table.size()) {
+        return Status::make_ok();
+    }
+
+    for (std::size_t i = old_size; i < src.block_table.size(); ++i) {
+        Status st = dst.kv_pool_->adopt(src.block_table[i]);
+        if (!st.ok()) {
+            for (std::size_t j = old_size; j < dst.block_table.size(); ++j) {
+                (void)dst.kv_pool_->release(dst.block_table[j]);
+            }
+            dst.block_table.resize(old_size);
+            return st;
+        }
+        dst.block_table.push_back(src.block_table[i]);
+    }
+
+    auto device_table = dst.seq_pool_->device_block_table(dst.slot);
+    hipError_t err = hipMemcpyAsync(
+        device_table.data<uint32_t>() + old_size,
+        dst.block_table.data() + old_size,
+        (dst.block_table.size() - old_size) * sizeof(uint32_t),
+        hipMemcpyHostToDevice, stream);
+    if (err != hipSuccess) {
+        for (std::size_t j = old_size; j < dst.block_table.size(); ++j) {
+            (void)dst.kv_pool_->release(dst.block_table[j]);
+        }
+        dst.block_table.resize(old_size);
+        return Status::hip_error(
+            "import_sequence_block_table hipMemcpyAsync", hipGetErrorString(err),
+            __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Status validate_sequence_append_commit(
     const PagedSequenceState& seq,
     ::shelf::runtime::RequestHandle expected_handle,
