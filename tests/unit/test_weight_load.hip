@@ -364,6 +364,66 @@ static void test_bf16_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
     check(got == t[0].bytes, "bf16 bytes");
 }
 
+static bool message_has(const Status& st, const std::string& needle) {
+    return std::string(st.message()).find(needle) != std::string::npos;
+}
+
+// A checkpoint whose payload is not bf16 has to fail at load. The bf16 path reads the
+// payload as 2-byte elements, so an F32 matrix would write twice the requested bytes past
+// the tensor and only fail later, inside a kernel.
+static void test_bf16_payload_dtype_guard(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("bf16_payload_dtype");
+    std::vector<Planned> t;
+    const auto add = [&](const std::string& name, io::SType dt, std::vector<std::size_t> shape,
+                         uint32_t seed) {
+        Planned p;
+        p.name = name;
+        p.dtype = dt;
+        p.shape = std::move(shape);
+        const uint64_t n = numel(p.shape);
+        p.bytes = (dt == io::SType::F32) ? f32_bytes(n, seed) : bf16_bytes(n, seed);
+        t.push_back(std::move(p));
+    };
+    add("bf16.weight", io::SType::BF16, {16, 16}, 1);
+    add("f32.weight", io::SType::F32, {16, 16}, 2);
+    add("f16.weight", io::SType::F16, {16}, 3);
+    add("f32_vec.weight", io::SType::F32, {16}, 4);
+    if (!write_shard((dir / "model.safetensors").string(), t, {})) return;
+    write_index(dir.string(), "model.safetensors", t);
+
+    auto cr = weights::SafetensorsCollection::open(dir.string());
+    if (!cr.ok()) {
+        fail("payload dtype guard: collection open");
+        return;
+    }
+    weights::SafetensorsCollection coll = cr.release();
+
+    auto matrix = weights::load_bf16_matrix(coll, "f32.weight", arena, stream,
+                                           weights::WeightLoadOptions{});
+    check(!matrix.ok(), "an F32 matrix is not read by the bf16 matrix path");
+    if (!matrix.ok()) {
+        check(message_has(matrix.status(), "must be BF16"),
+              "the matrix guard states the payload rule");
+        check(message_has(matrix.status(), "f32.weight is F32"),
+              "the matrix guard names the tensor and its dtype");
+    }
+
+    auto f16_norm = weights::load_bf16_or_f32_tensor(coll, "f16.weight", arena, stream);
+    check(!f16_norm.ok() && message_has(f16_norm.status(), "f16.weight is F16"),
+          "an F16 vector is rejected instead of read as bf16");
+
+    auto f16_vector = weights::load_bf16_tensor(coll, "f16.weight", arena, stream);
+    check(!f16_vector.ok() && message_has(f16_vector.status(), "f16.weight is F16"),
+          "the vector path guards the same way");
+
+    auto f32_vector = weights::load_bf16_or_f32_tensor(coll, "f32_vec.weight", arena, stream);
+    check(f32_vector.ok(), "an F32 vector keeps being converted, which the path supports");
+
+    auto bf16 = weights::load_bf16_matrix(coll, "bf16.weight", arena, stream,
+                                         weights::WeightLoadOptions{});
+    check(bf16.ok(), "a bf16 payload keeps loading");
+}
+
 // lm_head_name lets a case place the output head the way a HF checkpoint does: the
 // transformer tensors carry the model.language_model. prefix, lm_head does not.
 static bool build_bf16_model(const fs::path& dir,
@@ -1254,6 +1314,7 @@ int main() {
     fs::create_directories(g_root, ec);
 
     test_bf16_matrix_load(arena, stream);
+    test_bf16_payload_dtype_guard(arena, stream);
     test_bf16_model_load(arena, stream);
     test_bf16_model_load_bare_lm_head(arena, stream);
     test_standalone_quantized_reader(arena, stream);

@@ -141,6 +141,13 @@ Result<MatrixWeight> load_bf16_matrix_raw(
             ("matrix weight must be 2D: " + name).c_str(), __FILE__, __LINE__);
     }
 
+    if (spec.dtype != io::SType::BF16) {
+        return Status::invalid_argument(
+            ("bf16 matrix payload must be BF16: " + name + " is " + io::stype_name(spec.dtype))
+                .c_str(),
+            __FILE__, __LINE__);
+    }
+
     MatrixWeight w;
     w.encoding = MatrixEncoding::Bf16;
     w.rows = static_cast<uint32_t>(shape[0]);
@@ -682,6 +689,13 @@ Result<Tensor> load_bf16_tensor(
     const auto shape = spec.shape;
     const auto strides = contiguous_strides(shape);
 
+    if (spec.dtype != io::SType::BF16 && spec.dtype != io::SType::F32) {
+        return Status::invalid_argument(
+            ("bf16 vector payload must be BF16 or F32: " + name + " is " +
+             io::stype_name(spec.dtype)).c_str(),
+            __FILE__, __LINE__);
+    }
+
     std::size_t n = 1;
     for (auto d : shape) n *= d;
     Tensor t = alloc_tensor(shape, strides, arena);
@@ -711,9 +725,14 @@ Result<Tensor> load_bf16_or_f32_tensor(
     const auto shape = spec.shape;
     const auto strides = contiguous_strides(shape);
 
-    Tensor t = (spec.dtype == io::SType::BF16 || spec.dtype == io::SType::F16)
-        ? alloc_tensor(shape, strides, arena)
-        : alloc_tensor_f32(shape, strides, arena);
+    if (spec.dtype != io::SType::BF16 && spec.dtype != io::SType::F32) {
+        return Status::invalid_argument(
+            ("norm payload must be BF16 or F32: " + name + " is " +
+             io::stype_name(spec.dtype)).c_str(),
+            __FILE__, __LINE__);
+    }
+    Tensor t = spec.dtype == io::SType::BF16 ? alloc_tensor(shape, strides, arena)
+                                             : alloc_tensor_f32(shape, strides, arena);
     if (t.ndim() == 0) {
         return Status::insufficient_memory(
             ("tensor allocation failed: " + name).c_str(), __FILE__, __LINE__);
