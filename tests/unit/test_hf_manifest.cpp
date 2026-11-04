@@ -1,6 +1,7 @@
 #include <shelf/io/safetensors_reader.h>
 #include <shelf/io/safetensors_writer.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
@@ -553,6 +554,7 @@ static bool build_exl3_dir(const fs::path& dir) {
     const std::vector<uint8_t> trellis2 = pattern_bytes(8u * 8u * 64u * 2u, 47u);
     const std::vector<uint8_t> suh = pattern_bytes(128u * 2u, 53u);
     const std::vector<uint8_t> svh = pattern_bytes(128u * 2u, 59u);
+    const std::vector<uint8_t> f16_matrix = pattern_bytes(128u * 128u * 2u, 61u);
     const std::vector<uint8_t> mul1_marker = {0x2Du, 0xD1u, 0xDCu, 0x83u};
     const std::vector<uint8_t> mcg_marker = {0xEDu, 0x1Fu, 0xACu, 0xCBu};
 
@@ -569,6 +571,8 @@ static bool build_exl3_dir(const fs::path& dir) {
     tensors.push_back({p2 + ".suh", io::SType::F16, {128}, suh});
     tensors.push_back({p2 + ".svh", io::SType::F16, {128}, svh});
     tensors.push_back({p2 + ".mcg", io::SType::I32, {}, mcg_marker});
+    tensors.push_back(
+        {"layers.0.linear_attn.in_proj_a.weight", io::SType::F16, {128, 128}, f16_matrix});
 
     if (!write_shard((dir / shard).string(), tensors)) return false;
     std::vector<std::pair<std::string, std::string>> map;
@@ -589,7 +593,8 @@ static void test_exl3_manifest() {
 
     const std::vector<std::string> names = {
         "layers.0.mlp.down_proj.weight", "layers.1.mlp.down_proj.weight",
-        "layers.2.mlp.down_proj.weight", "layers.9.missing.weight"};
+        "layers.2.mlp.down_proj.weight", "layers.0.linear_attn.in_proj_a.weight",
+        "layers.9.missing.weight"};
     auto source_result =
         quantization::bundle::synthesize_hf_quantized_source(dir.string(), names, true);
     if (!source_result.ok()) {
@@ -598,7 +603,7 @@ static void test_exl3_manifest() {
     }
     quantization::bundle::HfQuantizedSource source = source_result.release();
     const auto& manifest = source.manifest;
-    check_eq_u64(manifest.tensors.size(), 3, "exl3 manifest tensor count");
+    check_eq_u64(manifest.tensors.size(), 4, "exl3 manifest tensor count");
     check(quantization::manifest::validate_quantized_manifest_contract(manifest).ok(),
           "exl3 manifest contract");
 
@@ -640,6 +645,24 @@ static void test_exl3_manifest() {
     const auto view1 = reader.resolve("layers.1.mlp.down_proj.weight");
     check(view1.ok() && view1.value().exl3_half && view1.value().exl3_ka == 3,
           "exl3 resolved half rate");
+
+    const auto& loaded = reader.manifest();
+    const auto& f16 = loaded.tensors.at("layers.0.linear_attn.in_proj_a.weight");
+    check(f16.encoding == quantization::manifest::QuantizedEncoding::Bf16,
+          "exl3 f16 tensor becomes a bf16 entry");
+    check(f16.data && f16.data->dtype == "BF16", "exl3 f16 tensor data is bf16");
+    auto f16_view = reader.resolve("layers.0.linear_attn.in_proj_a.weight");
+    check(f16_view.ok(), "exl3 f16 tensor resolves");
+    if (f16_view.ok()) {
+        check_eq_u64(f16_view.value().data.size, 128u * 128u * 2u,
+                     "exl3 f16 tensor staged byte count");
+        const std::vector<uint8_t> source = pattern_bytes(128u * 128u * 2u, 61u);
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(source.data());
+        const uint16_t* got = static_cast<const uint16_t*>(f16_view.value().data.data);
+        const uint16_t want = shelf::f32_to_bf16_rne(
+            quantization::exl3::f32_from_f16_bits(src[0]));
+        check(got[0] == want, "exl3 f16 tensor is widened to bf16");
+    }
 }
 
 int main() {

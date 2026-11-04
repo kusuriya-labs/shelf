@@ -116,7 +116,9 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
 - EXL3 の trellis / suh / svh / marker は 4 つの payload plane として manifest に載り、
   loader はバイト列を変換せず GPU へ転送する。codebook 復号と Hadamard は kernel 内で行う。
 - 量子化されていない tensor（norm / embed / lm_head / dt_bias / A_log /
-  conv1d.weight など）は BF16 entry として同一経路でロードされる。
+  conv1d.weight など）は BF16 entry として同一経路でロードされる。F16 で保存された
+  unquantized tensor は load 時に BF16 へ widen する（EXL3 checkpoint の
+  `linear_attn.in_proj_a/b` など）。
 - HF payload の K が block size（FP8: 128）の倍数でない場合、
   canonical の padded K contract を満たせないため `Status::unsupported` で拒否する。
 - 合成 manifest は `architecture = "qwen35_dense"` を立て、CRC32 は実データから計算される。

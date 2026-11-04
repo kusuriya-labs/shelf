@@ -89,6 +89,7 @@ struct QuantizedModelReader::Impl {
     std::map<std::string, std::string> shard_for_tensor;
     std::set<std::string> shard_files;
     std::map<std::string, std::vector<float>> fp32_scale_staging;
+    std::map<std::string, std::vector<uint16_t>> bf16_staging;
 
     mutable std::mutex shard_mutex;
     mutable std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> shard_readers;
@@ -216,6 +217,32 @@ struct QuantizedModelReader::Impl {
                               const std::vector<std::size_t>& shape,
                               uint64_t expected_bytes,
                               bool verify_crc) const {
+        auto bf16_it = bf16_staging.find(reference.tensor);
+        if (bf16_it != bf16_staging.end()) {
+            if (dtype != shelf::io::SType::BF16) {
+                return Status::invalid_argument(
+                    ("staged bf16 stream is not BF16: " + reference.tensor).c_str(),
+                    __FILE__, __LINE__);
+            }
+            const uint64_t staged_bytes = bf16_it->second.size() * sizeof(uint16_t);
+            if (staged_bytes != expected_bytes) {
+                return Status::invalid_argument(
+                    ("staged bf16 byte count mismatch: " + reference.tensor).c_str(),
+                    __FILE__, __LINE__);
+            }
+            if (verify_crc) {
+                auto expected_crc = parse_crc32(reference.crc32);
+                if (!expected_crc.ok()) return expected_crc.status();
+                if (crc32_iso_hdlc(bf16_it->second.data(),
+                                   static_cast<std::size_t>(staged_bytes)) !=
+                    expected_crc.value()) {
+                    return Status::invalid_argument(
+                        ("staged bf16 CRC32 mismatch: " + reference.tensor).c_str(),
+                        __FILE__, __LINE__);
+                }
+            }
+            return Status::make_ok();
+        }
         auto staged_it = fp32_scale_staging.find(reference.tensor);
         if (staged_it != fp32_scale_staging.end()) {
             if (dtype != shelf::io::SType::F32) {
@@ -526,6 +553,7 @@ Result<QuantizedModelReader> QuantizedModelReader::open_hf_source(
     pimpl->shard_for_tensor = std::move(source.shard_for_physical);
     pimpl->shard_readers = std::move(source.shard_readers);
     pimpl->fp32_scale_staging = std::move(source.fp32_scale_staging);
+    pimpl->bf16_staging = std::move(source.bf16_staging);
 
     for (const auto& kv : pimpl->shard_for_tensor) {
         pimpl->shard_files.insert(kv.second);
@@ -612,6 +640,11 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
 
     auto fetch = [&](const std::string& physical, std::size_t& out_bytes)
         -> Result<const void*> {
+        auto bf16_it = pimpl_->bf16_staging.find(physical);
+        if (bf16_it != pimpl_->bf16_staging.end()) {
+            out_bytes = bf16_it->second.size() * sizeof(uint16_t);
+            return bf16_it->second.data();
+        }
         auto staged_it = pimpl_->fp32_scale_staging.find(physical);
         if (staged_it != pimpl_->fp32_scale_staging.end()) {
             out_bytes = staged_it->second.size() * sizeof(float);

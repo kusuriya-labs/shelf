@@ -1,5 +1,7 @@
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/bundle/bundle_util.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/quant_format.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
@@ -533,9 +535,9 @@ Status synthesize_bf16_tensor(
     auto spec_result = reader->tensor_spec(canonical);
     if (!spec_result.ok()) return spec_result.status();
     const shelf::io::StTensorSpec& spec = spec_result.value();
-    if (spec.dtype != shelf::io::SType::BF16) {
+    if (spec.dtype != shelf::io::SType::BF16 && spec.dtype != shelf::io::SType::F16) {
         return Status::unsupported(
-            ("hf bf16 tensor has a non-BF16 dtype: " + canonical).c_str(),
+            ("hf unquantized tensor has a non-16-bit dtype: " + canonical).c_str(),
             __FILE__, __LINE__);
     }
     if (spec.shape.empty()) {
@@ -555,7 +557,19 @@ Status synthesize_bf16_tensor(
         out.logical_shape.push_back(static_cast<int64_t>(d));
     }
     out.k_padded = quant_padded_k(spec.shape.back(), quantization::QuantFormatId::Bf16);
-    out.data = make_ref(canonical, "BF16", data_result.value(), src_bytes, with_crc);
+    if (spec.dtype == shelf::io::SType::F16) {
+        const std::size_t count = src_bytes / 2u;
+        std::vector<uint16_t>& staging = source.bf16_staging[canonical];
+        staging.resize(count);
+        const uint16_t* src = static_cast<const uint16_t*>(data_result.value());
+        for (std::size_t i = 0; i < count; ++i) {
+            staging[i] = shelf::f32_to_bf16_rne(
+                quantization::exl3::f32_from_f16_bits(src[i]));
+        }
+        out.data = make_ref(canonical, "BF16", staging.data(), staging.size() * 2u, with_crc);
+    } else {
+        out.data = make_ref(canonical, "BF16", data_result.value(), src_bytes, with_crc);
+    }
     out.role = spec.shape.size() >= 2 ? "weight" : "norm";
     source.shard_for_physical[canonical] = codes_shard;
     return Status::make_ok();
