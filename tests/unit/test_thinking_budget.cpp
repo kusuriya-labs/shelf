@@ -10,7 +10,7 @@ using shelf::qwen35::runtime::FinishReason;
 using shelf::qwen35::runtime::RuntimeRequest;
 using shelf::qwen35::runtime::thinking_allowance;
 using shelf::qwen35::runtime::thinking_budget_enabled;
-using shelf::qwen35::StopTokens;
+using shelf::qwen_hybrid::StopTokens;
 
 static int g_fail = 0;
 

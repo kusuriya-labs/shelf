@@ -467,17 +467,13 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
     return load_qwen35_weights_bf16(model_dir, arena, stream, options);
 }
 
-bool qwen35_layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer) {
-    if (config.layer_types.size() == config.num_hidden_layers) {
-        return config.layer_types[layer] == 0;
-    }
-    if (config.full_attention_interval == 0) {
-        return layer % 4 < 3;
-    }
-    return layer % config.full_attention_interval < config.full_attention_interval - 1;
+bool qwen35_layer_is_gdn(const shelf::qwen_hybrid::QwenHybridConfig& config,
+                         std::size_t layer) {
+    return shelf::qwen_hybrid::layer_is_gdn(config, layer);
 }
 
-std::vector<std::string> qwen35_hf_quantized_body_names(const Qwen35TextConfig& config) {
+std::vector<std::string> qwen35_hf_quantized_body_names(
+    const shelf::qwen_hybrid::QwenHybridConfig& config) {
     std::vector<std::string> names = {
         "model.language_model.embed_tokens.weight",
         "model.language_model.lm_head.weight",
@@ -534,14 +530,14 @@ Result<shelf::quantization::bundle::QuantizedModelReader> qwen35_open_quantized_
 
 Status qwen35_load_model_level_quantized(
     const shelf::quantization::bundle::QuantizedModelReader& reader,
-    const Qwen35TextConfig& config,
+    const shelf::qwen_hybrid::QwenHybridConfig& config,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const Qwen35LoadOptions& options,
+    const shelf::weights::WeightLoadOptions& weight_options,
     Qwen35ModelWeights& weights)
 {
     auto embed = shelf::weights::load_quantized_matrix(
-        reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
+        reader, "model.language_model.embed_tokens.weight", arena, stream, weight_options);
     if (!embed.ok()) return embed.status();
     weights.embed_tokens = embed.release();
 
@@ -551,10 +547,10 @@ Status qwen35_load_model_level_quantized(
         return Status::make_ok();
     }
     auto head = shelf::weights::load_quantized_matrix(
-        reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+        reader, "model.language_model.lm_head.weight", arena, stream, weight_options);
     if (!head.ok()) {
         head = shelf::weights::load_quantized_matrix(
-            reader, "lm_head.weight", arena, stream, options.weights);
+            reader, "lm_head.weight", arena, stream, weight_options);
         if (!head.ok()) return head.status();
     }
     weights.lm_head = head.release();
@@ -674,7 +670,8 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     weights.layers.resize(config.num_hidden_layers);
 
     Status model_level =
-        qwen35_load_model_level_quantized(reader, config, arena, stream, options, weights);
+        qwen35_load_model_level_quantized(reader, config, arena, stream, options.weights,
+                                      weights);
     if (!model_level.ok()) return model_level;
 
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {

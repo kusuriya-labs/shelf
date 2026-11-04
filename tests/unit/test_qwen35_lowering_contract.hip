@@ -92,7 +92,7 @@ int main() {
     shelf::qwen35::Qwen35TextConfig cfg;
     cfg.vocab_size = kV;
     cfg.hidden_size = kH;
-    cfg.intermediate_size = kI;
+    cfg.ffn.intermediate_size = kI;
     cfg.num_hidden_layers = 1;
     cfg.linear_num_key_heads = kKh;
     cfg.linear_num_value_heads = kVh;

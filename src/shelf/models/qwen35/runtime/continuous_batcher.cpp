@@ -828,7 +828,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         stats.gdn_snapshot_bytes = session.decoder->gdn_snapshot_bytes;
         stats.gdn_compact_bytes = session.decoder->gdn_compact_bytes;
     }
-    if (is_stop_token(config_.eos_token_ids, session.pending_token)) {
+    if (qwen_hybrid::is_stop_token(config_.eos_token_ids, session.pending_token)) {
         request.finish_reason = FinishReason::Eos;
     }
     return Status::make_ok();

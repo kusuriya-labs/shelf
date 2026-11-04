@@ -34,9 +34,9 @@ void add_source(MoeExpertGroupPlan& plan, uint32_t expert, MoeExpertProjection p
 }  // namespace
 
 std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config) {
-    if (config.num_experts == 0)
+    if (config.ffn.num_experts == 0)
         return 0;
-    return config.num_hidden_layers * config.num_experts * 3u * 2u;
+    return config.num_hidden_layers * config.ffn.num_experts * 3u * 2u;
 }
 
 std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix) {
@@ -51,7 +51,7 @@ std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer) {
-    if (config.num_experts == 0)
+    if (config.ffn.num_experts == 0)
         return Status::unsupported(
             "build_moe_expert_group_plan: num_experts is 0 (not a MoE config)",
             __FILE__, __LINE__);
@@ -60,7 +60,7 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
             "build_moe_expert_group_plan: layer out of range", __FILE__, __LINE__);
 
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
-    const uint32_t inter = static_cast<uint32_t>(config.moe_intermediate_size);
+    const uint32_t inter = static_cast<uint32_t>(config.ffn.moe_intermediate_size);
     if (inter == 0 || hidden == 0)
         return Status::invalid_argument(
             "build_moe_expert_group_plan: moe_intermediate_size and hidden_size are required",
@@ -68,7 +68,7 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
 
     MoeExpertGroupPlan plan;
     plan.layer = static_cast<uint32_t>(layer);
-    plan.experts = static_cast<uint32_t>(config.num_experts);
+    plan.experts = static_cast<uint32_t>(config.ffn.num_experts);
     plan.scale_block_k = kMxScaleBlockK;
 
     plan.w13_rows = 2u * inter;

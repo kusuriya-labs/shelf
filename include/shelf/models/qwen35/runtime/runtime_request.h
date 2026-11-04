@@ -3,7 +3,7 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <shelf/models/qwen35/stop_tokens.h>
+#include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -98,7 +98,7 @@ enum class CommitAction : uint8_t {
 CommitAction commit_sampled_token(
     RuntimeRequest& request,
     int32_t token,
-    const StopTokens& stop_tokens);
+    const qwen_hybrid::StopTokens& stop_tokens);
 
 bool thinking_budget_enabled(const RuntimeRequest& request) noexcept;
 

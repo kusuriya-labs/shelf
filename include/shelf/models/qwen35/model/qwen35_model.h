@@ -15,7 +15,7 @@ namespace shelf::qwen35 {
 // config implies. The FFN of a layer is not part of these invariants.
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const Qwen35TextConfig& config);
+    const shelf::qwen_hybrid::QwenHybridConfig& config);
 
 class Qwen35Model final {
 public:

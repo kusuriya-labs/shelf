@@ -184,11 +184,11 @@ int main() {
               "the fixture config.json is accepted by the MoE reader: " +
                   (cfg.ok() ? "" : cfg.status().message()));
         if (cfg.ok()) {
-            check(cfg.value().num_experts == f.config.num_experts &&
-                      cfg.value().num_experts_per_tok == f.config.num_experts_per_tok &&
-                      cfg.value().moe_intermediate_size == f.config.moe_intermediate_size &&
-                      cfg.value().shared_expert_intermediate_size ==
-                          f.config.shared_expert_intermediate_size,
+            check(cfg.value().ffn.num_experts == f.config.ffn.num_experts &&
+                      cfg.value().ffn.num_experts_per_tok == f.config.ffn.num_experts_per_tok &&
+                      cfg.value().ffn.moe_intermediate_size == f.config.ffn.moe_intermediate_size &&
+                      cfg.value().ffn.shared_expert_intermediate_size ==
+                          f.config.ffn.shared_expert_intermediate_size,
                   "the fixture config.json carries the expert geometry the test uses");
             check(cfg.value().hidden_size == f.config.hidden_size &&
                       cfg.value().num_hidden_layers == f.config.num_hidden_layers,

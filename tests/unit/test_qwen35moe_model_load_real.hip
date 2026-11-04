@@ -96,9 +96,9 @@ int main() {
     if (!config.ok())
         return 1;
     std::printf("config hidden %zu moe_inter %zu shared_inter %zu experts %zu top_k %zu layers %zu\n",
-                config.value().hidden_size, config.value().moe_intermediate_size,
-                config.value().shared_expert_intermediate_size, config.value().num_experts,
-                config.value().num_experts_per_tok, config.value().num_hidden_layers);
+                config.value().hidden_size, config.value().ffn.moe_intermediate_size,
+                config.value().ffn.shared_expert_intermediate_size, config.value().ffn.num_experts,
+                config.value().ffn.num_experts_per_tok, config.value().num_hidden_layers);
 
     auto probe = models::probe_model_dir(model_dir);
     check(probe.ok() && probe.value() == models::ModelFamily::Moe, "the factory picks Moe");

@@ -26,10 +26,10 @@ Qwen35MoeTextConfig moe_config() {
     c.vocab_size = 248320;
     c.hidden_size = 2048;
     c.num_hidden_layers = 40;
-    c.num_experts = 256;
-    c.num_experts_per_tok = 8;
-    c.moe_intermediate_size = 512;
-    c.shared_expert_intermediate_size = 512;
+    c.ffn.num_experts = 256;
+    c.ffn.num_experts_per_tok = 8;
+    c.ffn.moe_intermediate_size = 512;
+    c.ffn.shared_expert_intermediate_size = 512;
     c.num_attention_heads = 16;
     c.num_key_value_heads = 2;
     c.attention_head_dim = 256;
@@ -124,8 +124,8 @@ int main() {
 
     {
         Qwen35MoeTextConfig dense = moe_config();
-        dense.num_experts = 0;
-        dense.num_experts_per_tok = 0;
+        dense.ffn.num_experts = 0;
+        dense.ffn.num_experts_per_tok = 0;
         check(!build_moe_expert_group_plan(dense, 0).ok(), "a dense config has no expert group");
         check(moe_expert_tensor_count(dense) == 0u, "a dense config has no expert tensors");
     }

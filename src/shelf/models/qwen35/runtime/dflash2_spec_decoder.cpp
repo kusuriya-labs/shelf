@@ -789,7 +789,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     if (dflash_k == 0u) {
         Status st = run_single_target(decoder, pending_token, out);
         if (!st.ok()) return st;
-        if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
+        if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
         return out;
     }
 
@@ -1136,13 +1136,13 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     for (uint32_t i = 0; i < out.emitted_count; ++i) {
-        if (is_stop_token(decoder.config.eos_tokens, out.emitted[i])) {
+        if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, out.emitted[i])) {
             out.emitted_count = i + 1u;
             out.finished = true;
             break;
         }
     }
-    if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
+    if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
     commit_history_tokens(decoder, out.emitted.data(), out.emitted_count);
     return out;
 }
@@ -1551,7 +1551,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
             const Status st = run_single_target(decoder, plan.anchor, result_out, forced);
             if (!st.ok()) return st;
-            if (is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
+            if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
                 result_out.finished = true;
             }
             continue;
@@ -1660,13 +1660,13 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
 
         for (uint32_t j = 0; j < result_out.emitted_count; ++j) {
-            if (is_stop_token(decoder.config.eos_tokens, result_out.emitted[j])) {
+            if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.emitted[j])) {
                 result_out.emitted_count = j + 1u;
                 result_out.finished = true;
                 break;
             }
         }
-        if (is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
+        if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
             result_out.finished = true;
         }
         commit_history_tokens(decoder, result_out.emitted.data(), result_out.emitted_count);

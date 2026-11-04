@@ -1,7 +1,7 @@
 #pragma once
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
-#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <hip/hip_runtime.h>
@@ -21,11 +21,13 @@ namespace qwen35 {
 
 // Layer topology rule: layer_types when it is complete, otherwise derived from
 // full_attention_interval.
-bool qwen35_layer_is_gdn(const Qwen35TextConfig& config, std::size_t layer);
+bool qwen35_layer_is_gdn(const shelf::qwen_hybrid::QwenHybridConfig& config,
+                         std::size_t layer);
 
 // Body logical names: embed_tokens, lm_head, final norm, and per layer the layernorms
 // plus the attention tensors of its topology. No FFN name appears here.
-std::vector<std::string> qwen35_hf_quantized_body_names(const Qwen35TextConfig& config);
+std::vector<std::string> qwen35_hf_quantized_body_names(
+    const shelf::qwen_hybrid::QwenHybridConfig& config);
 
 // Opens a Shelf quantized model directory, or synthesizes an HF real-quantized one from
 // the given logical names. A name the checkpoint does not carry is skipped by the
@@ -38,10 +40,10 @@ Result<shelf::quantization::bundle::QuantizedModelReader> qwen35_open_quantized_
 // embed_tokens, lm_head (honoring tie_word_embeddings) and the final norm.
 Status qwen35_load_model_level_quantized(
     const shelf::quantization::bundle::QuantizedModelReader& reader,
-    const Qwen35TextConfig& config,
+    const shelf::qwen_hybrid::QwenHybridConfig& config,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const Qwen35LoadOptions& options,
+    const shelf::weights::WeightLoadOptions& weight_options,
     Qwen35ModelWeights& weights);
 
 // One layer's layernorms and attention, and its is_gdn flag.

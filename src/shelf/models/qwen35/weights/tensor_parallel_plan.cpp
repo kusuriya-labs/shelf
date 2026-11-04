@@ -77,7 +77,7 @@ Result<TensorPartitionPlan> build_qwen35_tensor_partition_plan(
         return plan;
     }
     if (config.num_hidden_layers == 0 || config.hidden_size == 0 ||
-        config.intermediate_size == 0) {
+        config.ffn.intermediate_size == 0) {
         return Status::invalid_argument("invalid qwen35 config geometry", __FILE__, __LINE__);
     }
 
@@ -99,7 +99,7 @@ Result<TensorPartitionPlan> build_qwen35_tensor_partition_plan(
     }
 
     const uint64_t hidden = config.hidden_size;
-    const uint64_t intermediate = config.intermediate_size;
+    const uint64_t intermediate = config.ffn.intermediate_size;
     const uint64_t query_heads = config.num_attention_heads;
     const uint64_t kv_heads = config.num_key_value_heads;
     const uint64_t head_dim = config.attention_head_dim;

@@ -231,12 +231,26 @@ set(
     src/shelf/models/qwen35/dflash2/context_state.hip
 )
 
+# Qwen hybrid backbone: the model geometry and weight loading that a dense model and an
+# MoE model share. It knows nothing about either FFN.
+set(
+    SHELF_QWEN_HYBRID_SOURCES
+    src/shelf/models/common/qwen_hybrid/config.cpp
+)
+
+add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
+target_compile_features(shelf_qwen_hybrid PRIVATE cxx_std_20)
+target_include_directories(shelf_qwen_hybrid PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_qwen_hybrid PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(shelf_qwen_hybrid PUBLIC shelf_core shelf_io)
+target_compile_options(shelf_qwen_hybrid PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 add_library(shelf_qwen35 STATIC ${SHELF_QWEN35_SOURCES})
 target_compile_features(shelf_qwen35 PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_qwen35 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_qwen35 PUBLIC shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
+target_link_libraries(shelf_qwen35 PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_inference_state shelf_quant_reference shelf_quant_format shelf_quant_bundle shelf_runtime)
 target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Qwen3.5 MoE (model_type qwen3_5_moe): routed expert weights and config.

@@ -1,77 +1,50 @@
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 
-#include <fstream>
-#include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
 
 namespace shelf::qwen35moe {
 
-namespace {
-
-Result<nlohmann::json> read_config_root(const std::string& model_dir, const char* who) {
-    std::ifstream f(model_dir + "/config.json");
-    if (!f.is_open()) {
-        return Status::invalid_argument(
-            (std::string(who) + ": cannot open config.json").c_str(), __FILE__, __LINE__);
-    }
-    nlohmann::json root;
-    try {
-        f >> root;
-    } catch (const nlohmann::json::exception& e) {
-        return Status::invalid_argument(
-            (std::string(who) + ": bad config.json: " + std::string(e.what())).c_str(),
-            __FILE__, __LINE__);
-    }
-    if (!root.is_object() || !root.contains("text_config") || !root["text_config"].is_object()) {
-        return Status::invalid_argument(
-            (std::string(who) + ": config.json missing text_config").c_str(), __FILE__,
-            __LINE__);
-    }
-    return root;
-}
-
-}  // namespace
-
 Result<std::size_t> read_declared_num_experts(const std::string& model_dir) {
-    auto root = read_config_root(model_dir, "read_declared_num_experts");
-    if (!root.ok()) return root.status();
-    const nlohmann::json& t = root.value()["text_config"];
-    if (t.contains("num_experts") && t["num_experts"].is_number())
-        return t["num_experts"].get<std::size_t>();
-    return std::size_t{0};
+    auto sizes = shelf::qwen_hybrid::read_text_config_sizes(model_dir, {"num_experts"});
+    if (!sizes.ok()) return sizes.status();
+    return sizes.value()[0];
 }
 
 Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model_dir) {
-    auto base = shelf::qwen35::read_qwen35_text_config(model_dir);
-    if (!base.ok())
-        return base.status();
+    auto hybrid = shelf::qwen_hybrid::read_qwen_hybrid_config(model_dir);
+    if (!hybrid.ok()) return hybrid.status();
 
-    auto root = read_config_root(model_dir, "read_qwen35_moe_text_config");
-    if (!root.ok()) return root.status();
-    const nlohmann::json& t = root.value()["text_config"];
+    auto sizes = shelf::qwen_hybrid::read_text_config_sizes(
+        model_dir, {"num_experts", "num_experts_per_tok", "moe_intermediate_size",
+                    "shared_expert_intermediate_size"});
+    if (!sizes.ok()) return sizes.status();
+
+    auto has_dense_ffn = shelf::qwen_hybrid::has_text_config_key(model_dir, "intermediate_size");
+    if (!has_dense_ffn.ok()) return has_dense_ffn.status();
+
+    auto gate_declared = shelf::qwen_hybrid::has_text_config_key(model_dir, "output_gate_type");
+    if (!gate_declared.ok()) return gate_declared.status();
 
     Qwen35MoeTextConfig cfg;
-    static_cast<shelf::qwen35::Qwen35TextConfig&>(cfg) = base.value();
+    static_cast<shelf::qwen_hybrid::QwenHybridConfig&>(cfg) = hybrid.release();
+    cfg.ffn.num_experts = sizes.value()[0];
+    cfg.ffn.num_experts_per_tok = sizes.value()[1];
+    cfg.ffn.moe_intermediate_size = sizes.value()[2];
+    cfg.ffn.shared_expert_intermediate_size = sizes.value()[3];
 
-    auto read_size = [&](const char* key, std::size_t& out) {
-        if (t.contains(key) && t[key].is_number())
-            out = t[key].get<std::size_t>();
-    };
-    read_size("num_experts", cfg.num_experts);
-    read_size("num_experts_per_tok", cfg.num_experts_per_tok);
-    read_size("moe_intermediate_size", cfg.moe_intermediate_size);
-    read_size("shared_expert_intermediate_size", cfg.shared_expert_intermediate_size);
-
-    if (cfg.num_experts == 0) {
+    if (cfg.ffn.num_experts == 0) {
         return Status::invalid_argument(
             "read_qwen35_moe_text_config: num_experts is required (config is not MoE)",
             __FILE__, __LINE__);
     }
-    if (cfg.num_experts_per_tok == 0 || cfg.num_experts_per_tok > cfg.num_experts) {
+    if (cfg.ffn.num_experts_per_tok == 0 ||
+        cfg.ffn.num_experts_per_tok > cfg.ffn.num_experts) {
         return Status::invalid_argument(
             "read_qwen35_moe_text_config: num_experts_per_tok must be in [1, num_experts]",
             __FILE__, __LINE__);
     }
-    if (cfg.moe_intermediate_size == 0 || cfg.shared_expert_intermediate_size == 0) {
+    if (cfg.ffn.moe_intermediate_size == 0 || cfg.ffn.shared_expert_intermediate_size == 0) {
         return Status::invalid_argument(
             "read_qwen35_moe_text_config: moe config requires moe_intermediate_size and "
             "shared_expert_intermediate_size",
@@ -79,7 +52,7 @@ Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model
     }
     // A MoE model has no dense FFN: an intermediate_size here means the config mixes
     // the two topologies and the lowering contract does not define it.
-    if (cfg.intermediate_size != 0) {
+    if (has_dense_ffn.value()) {
         return Status::invalid_argument(
             "read_qwen35_moe_text_config: moe config must not declare intermediate_size",
             __FILE__, __LINE__);
@@ -87,8 +60,7 @@ Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model
     // The MoE checkpoint carries no output_gate_type key, and the reference applies
     // silu to the GDN output gate unconditionally. Only an explicit "sigmoid" selects
     // the other form.
-    if (!(t.contains("output_gate_type") && t["output_gate_type"].is_string()))
-        cfg.output_gate_silu = true;
+    if (!gate_declared.value()) cfg.output_gate_silu = true;
 
     return cfg;
 }

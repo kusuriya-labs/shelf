@@ -31,7 +31,7 @@ Result<Qwen35TensorParallelContext> make_qwen35_tensor_parallel_context(
 
     if (tp_size > 1) {
         Status st = require_divisible(
-            config.intermediate_size, tp_size,
+            config.ffn.intermediate_size, tp_size,
             "qwen35 tp requires intermediate_size divisible by tp_size");
         if (!st.ok()) return st;
         st = require_divisible(
@@ -53,7 +53,7 @@ Result<Qwen35TensorParallelContext> make_qwen35_tensor_parallel_context(
     }
 
     ctx.local_intermediate_size =
-        static_cast<std::uint32_t>(config.intermediate_size / tp_size);
+        static_cast<std::uint32_t>(config.ffn.intermediate_size / tp_size);
     ctx.local_attention_heads =
         static_cast<std::uint32_t>(config.num_attention_heads / tp_size);
     ctx.local_key_value_heads =

@@ -1,3 +1,4 @@
+#include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 
 #include <cstdio>
@@ -9,7 +10,7 @@
 namespace fs = std::filesystem;
 
 using shelf::qwen35::read_qwen35_text_config;
-using shelf::qwen35::read_qwen35_tie_word_embeddings;
+using shelf::qwen_hybrid::read_tie_word_embeddings;
 
 static int g_fail = 0;
 
@@ -43,7 +44,7 @@ static void expect_tie(const std::string& name, const std::string& text, bool ex
               name + ": text config tie_word_embeddings");
     }
 
-    auto tie = read_qwen35_tie_word_embeddings(dir);
+    auto tie = read_tie_word_embeddings(dir);
     check(tie.ok(), name + ": tie reader: " + (tie.ok() ? "" : tie.status().message()));
     if (tie.ok()) {
         check(tie.value() == expected, name + ": tie reader value");

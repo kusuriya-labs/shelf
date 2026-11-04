@@ -59,7 +59,7 @@ std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
     std::size_t total = 0u;
 
     const std::size_t intermediate =
-        text_config.intermediate_size != 0u ? text_config.intermediate_size : hidden;
+        text_config.ffn.intermediate_size != 0u ? text_config.ffn.intermediate_size : hidden;
     const std::size_t full_span = hidden + intermediate;
     const std::size_t rank_span = hidden + intermediate / tp_size;
     const std::size_t values_per_row =

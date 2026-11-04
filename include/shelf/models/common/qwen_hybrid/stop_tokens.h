@@ -4,11 +4,11 @@
 #include <vector>
 
 namespace shelf {
-namespace qwen35 {
+namespace qwen_hybrid {
 
 // Generation stop tokens for one model.
 //
-// A Qwen3.5/3.8 assistant turn ends with <|im_end|> and a document may end with
+// A Qwen hybrid assistant turn ends with <|im_end|> and a document may end with
 // <|endoftext|>; `generation_config.json` lists both. Generation stops when any
 // listed token is produced, matching the transformers generation contract.
 using StopTokens = std::vector<int32_t>;
@@ -28,5 +28,5 @@ inline int32_t primary_stop_token(const StopTokens& stop_tokens) {
     return stop_tokens.empty() ? -1 : stop_tokens.front();
 }
 
-}  // namespace qwen35
-}  // namespace shelf
+}
+}

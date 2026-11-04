@@ -181,7 +181,8 @@ Result<MoeModelWeights> load_qwen35moe_weights(
     out.layers.resize(config.num_hidden_layers);
 
     Status model_level =
-        q35::qwen35_load_model_level_quantized(reader, config, arena, stream, options, out.body);
+        q35::qwen35_load_model_level_quantized(reader, config, arena, stream, options.weights,
+                                                      out.body);
     if (!model_level.ok()) return model_level;
 
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {

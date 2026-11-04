@@ -8,7 +8,7 @@ namespace shelf::qwen35 {
 
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const Qwen35TextConfig& config)
+    const shelf::qwen_hybrid::QwenHybridConfig& config)
 {
     if (weights.embed_tokens.rows == 0 || weights.embed_tokens.cols == 0) {
         return Status::invalid_argument(

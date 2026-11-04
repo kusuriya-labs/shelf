@@ -133,7 +133,7 @@ struct Shape {
 
 std::vector<Shape> build_qwen_shapes(const shelf::qwen35::Qwen35TextConfig& c) {
     const uint32_t hidden = (uint32_t)c.hidden_size;
-    const uint32_t inter = (uint32_t)c.intermediate_size;
+    const uint32_t inter = (uint32_t)c.ffn.intermediate_size;
     const uint32_t qa = (uint32_t)c.num_attention_heads * (uint32_t)c.attention_head_dim;
     const uint32_t kva = (uint32_t)c.num_key_value_heads * (uint32_t)c.attention_head_dim;
     const uint32_t gqk = (uint32_t)c.linear_num_key_heads * (uint32_t)c.linear_key_head_dim;

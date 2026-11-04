@@ -52,10 +52,10 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config() {
     c.vocab_size = 1024;
     c.hidden_size = kHidden;
     c.num_hidden_layers = kLayers;
-    c.num_experts = kExperts;
-    c.num_experts_per_tok = 2;
-    c.moe_intermediate_size = kInter;
-    c.shared_expert_intermediate_size = kInter;
+    c.ffn.num_experts = kExperts;
+    c.ffn.num_experts_per_tok = 2;
+    c.ffn.moe_intermediate_size = kInter;
+    c.ffn.shared_expert_intermediate_size = kInter;
     c.num_attention_heads = 4;
     c.num_key_value_heads = 2;
     c.attention_head_dim = 64;

@@ -45,7 +45,7 @@ static Qwen35TextConfig base_config() {
     Qwen35TextConfig c;
     c.vocab_size = 128;
     c.hidden_size = 64;
-    c.intermediate_size = 128;
+    c.ffn.intermediate_size = 128;
     c.num_hidden_layers = 4;
     c.full_attention_interval = 2;
     c.num_attention_heads = 4;
@@ -108,7 +108,7 @@ static void test_context_invalid() {
     check(!make_qwen35_tensor_parallel_context(c, 2, 2).ok(), "tp_rank>=tp_size rejected");
 
     Qwen35TextConfig odd_i = base_config();
-    odd_i.intermediate_size = 131;
+    odd_i.ffn.intermediate_size = 131;
     check(!make_qwen35_tensor_parallel_context(odd_i, 2, 0).ok(),
           "indivisible intermediate rejected");
 

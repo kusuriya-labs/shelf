@@ -202,7 +202,7 @@ int main() {
             qwen35::Qwen35TextConfig config = config_res.release();
             const std::uint32_t H = static_cast<std::uint32_t>(config.hidden_size);
             std::printf("H=%zu I=%zu mtp.present=%d\n",
-                        config.hidden_size, config.intermediate_size, w.mtp.present ? 1 : 0);
+                        config.hidden_size, config.ffn.intermediate_size, w.mtp.present ? 1 : 0);
 
             if (!w.mtp.present) {
                 fail_tensor("(mtp)", "checkpoint has no MTP weights");

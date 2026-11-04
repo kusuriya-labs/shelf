@@ -8,7 +8,7 @@
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
-#include <shelf/models/qwen35/stop_tokens.h>
+#include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/runtime/execution/execution_types.h>
 #include <hip/hip_runtime.h>
 
@@ -30,7 +30,7 @@ constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
-    StopTokens eos_tokens;
+    qwen_hybrid::StopTokens eos_tokens;
 };
 
 struct DFlash2SpecTiming;

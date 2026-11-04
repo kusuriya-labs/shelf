@@ -90,7 +90,7 @@ Status validate_mtp_geometry(
         "invalid MTP fc geometry",
         fc_input_features);
     if (!status.ok()) return status;
-    status = checked_u32(config.intermediate_size, "invalid MTP intermediate size", intermediate_size);
+    status = checked_u32(config.ffn.intermediate_size, "invalid MTP intermediate size", intermediate_size);
     if (!status.ok()) return status;
     status = checked_product(
         config.num_attention_heads,
@@ -251,7 +251,7 @@ Status validate_geometry(
     std::uint32_t intermediate_size = 0;
     auto status = checked_u32(config.hidden_size, "invalid hidden size", hidden_size);
     if (!status.ok()) return status;
-    status = checked_u32(config.intermediate_size, "invalid intermediate size", intermediate_size);
+    status = checked_u32(config.ffn.intermediate_size, "invalid intermediate size", intermediate_size);
     if (!status.ok()) return status;
     const bool tp_active = tp != nullptr && tp->tp_size > 1;
     std::uint32_t local_query_heads = config.num_attention_heads;
@@ -453,7 +453,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
     uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
     uint32_t head_dim = static_cast<uint32_t>(config.attention_head_dim);
-    uint32_t mlp_intermediate = static_cast<uint32_t>(config.intermediate_size);
+    uint32_t mlp_intermediate = static_cast<uint32_t>(config.ffn.intermediate_size);
     if (options.tp != nullptr && options.tp->tp_size > 1) {
         key_heads = options.tp->local_gdn_key_heads;
         value_heads = options.tp->local_gdn_value_heads;
@@ -783,7 +783,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     const uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
     const uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(config.attention_head_dim);
-    const uint32_t intermediate = static_cast<uint32_t>(config.intermediate_size);
+    const uint32_t intermediate = static_cast<uint32_t>(config.ffn.intermediate_size);
     const uint32_t q_features = q_heads * head_dim;
     const uint32_t kv_features = kv_heads * head_dim;
     const uint32_t q_proj_features = 2u * q_features;

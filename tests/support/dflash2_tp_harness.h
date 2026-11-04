@@ -41,7 +41,7 @@ inline bool dflash2_step_loop(::shelf::qwen35::runtime::DFlash2SpecDecoder& deco
     const double prefill_tokens = static_cast<double>(opts.prompt.size());
     std::int32_t pending = prefill.value().pending_token;
     result.tokens.push_back(pending);
-    bool finished = ::shelf::qwen35::is_stop_token(text_config.stop_tokens, pending);
+    bool finished = ::shelf::qwen_hybrid::is_stop_token(text_config.stop_tokens, pending);
     while (!finished && result.tokens.size() < opts.max_new_tokens) {
         const std::uint32_t remaining =
             static_cast<std::uint32_t>(opts.max_new_tokens - result.tokens.size());

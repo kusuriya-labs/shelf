@@ -32,7 +32,7 @@ static Qwen35TextConfig mini_config() {
     Qwen35TextConfig c;
     c.vocab_size = 128;
     c.hidden_size = 64;
-    c.intermediate_size = 128;
+    c.ffn.intermediate_size = 128;
     c.num_hidden_layers = 4;
     c.full_attention_interval = 2;
     c.num_attention_heads = 4;
@@ -52,7 +52,7 @@ static Qwen35TextConfig qwen38_27b_config() {
     Qwen35TextConfig c;
     c.vocab_size = 248320;
     c.hidden_size = 5120;
-    c.intermediate_size = 17408;
+    c.ffn.intermediate_size = 17408;
     c.num_hidden_layers = 64;
     c.full_attention_interval = 4;
     c.num_attention_heads = 24;

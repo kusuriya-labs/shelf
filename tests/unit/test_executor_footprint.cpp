@@ -22,7 +22,7 @@ static Qwen35TextConfig reference_text_config() {
     Qwen35TextConfig config;
     config.hidden_size = 5120;
     config.vocab_size = 248320;
-    config.intermediate_size = 17408;
+    config.ffn.intermediate_size = 17408;
     config.num_key_value_heads = 4;
     return config;
 }

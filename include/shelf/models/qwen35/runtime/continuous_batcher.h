@@ -6,7 +6,7 @@
 #include <shelf/models/qwen35/runtime/token_budget_scheduler.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
-#include <shelf/models/qwen35/stop_tokens.h>
+#include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -27,7 +27,7 @@ struct ContinuousBatcherConfig {
     uint32_t max_scheduled_requests = 0;
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 0;
-    StopTokens eos_token_ids;
+    qwen_hybrid::StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
 };
 

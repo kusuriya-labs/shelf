@@ -241,9 +241,9 @@ int main() {
                                                shelf::io::SType::F32);
     const uint32_t tokens = static_cast<uint32_t>(hf_gate.size());
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
-    const uint32_t experts = static_cast<uint32_t>(config.num_experts);
-    const uint32_t top_k = static_cast<uint32_t>(config.num_experts_per_tok);
-    const uint32_t inter = static_cast<uint32_t>(config.moe_intermediate_size);
+    const uint32_t experts = static_cast<uint32_t>(config.ffn.num_experts);
+    const uint32_t top_k = static_cast<uint32_t>(config.ffn.num_experts_per_tok);
+    const uint32_t inter = static_cast<uint32_t>(config.ffn.moe_intermediate_size);
     if (xn.size() != static_cast<std::size_t>(tokens) * hidden ||
         hf_expert_out.size() != static_cast<std::size_t>(tokens) * hidden) {
         std::printf("FAIL fixture shapes\n");

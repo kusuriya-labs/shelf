@@ -215,7 +215,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     const auto& text_config = model_->text_config();
-    const qwen35::StopTokens& generation_stop_tokens = text_config.stop_tokens;
+    const qwen_hybrid::StopTokens& generation_stop_tokens = text_config.stop_tokens;
     const std::size_t used_after_weights = arena_->used();
     const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(text_config.attention_head_dim);

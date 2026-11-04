@@ -61,7 +61,7 @@ void print_model_geometry(const shelf::qwen35::Qwen35Model& model) {
         shelf::qwen35::make_qwen35_gdn_state_layout(text_config);
 
     printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
-    printf("MODEL_INTERMEDIATE_SIZE=%zu\n", text_config.intermediate_size);
+    printf("MODEL_INTERMEDIATE_SIZE=%zu\n", text_config.ffn.intermediate_size);
     printf("MODEL_LAYERS=%zu\n", text_config.num_hidden_layers);
     printf("MODEL_GDN_LAYERS=%u\n", gdn_layout.num_gdn_states);
     printf("MODEL_ATTENTION_LAYERS=%u\n", num_attn_layers);
@@ -639,7 +639,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
-    bool finished = shelf::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
+    bool finished = shelf::qwen_hybrid::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
