@@ -112,6 +112,22 @@ int main() {
               0, 3072, 256, 8193) == RmsNormImplementation::Correctness,
           "27b tp2 q_norm rows=8193 -> Correctness");
 
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 2048, 2048, 1) == RmsNormImplementation::Optimized,
+          "moe hidden norm BF16->BF16 PF ONE_PLUS F=2048 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 2048, 2048, 2048) == RmsNormImplementation::Optimized,
+          "moe hidden norm F=2048 rows=2048 -> Optimized");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 2048, 2048, 8193) == RmsNormImplementation::Correctness,
+          "moe hidden norm rows=8193 above measured -> Correctness");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 2048, 2048, 1) == RmsNormImplementation::Correctness,
+          "moe hidden norm f32 output not measured -> Correctness");
+    check(sel(DT::BF16, DT::BF16, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 1536, 1536, 1) == RmsNormImplementation::Correctness,
+          "unmeasured F=1536 -> Correctness");
+
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

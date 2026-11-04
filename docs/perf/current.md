@@ -66,35 +66,36 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 ## 2026-11-04 Qwen3.6-35B-A3B MoE decode
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を TP=1 / bf16 KV で
-計測した。backbone の bf16 線形 171 本 / token は allowlist 登録済みで、linear の correctness
-fallback は 0 である。
+計測した。decode の correctness path は `EMBEDDING_LOOKUP`（1 本 / token）だけである。
 
 | 条件 | 値 |
 | --- | ---: |
 | context tokens | 64 |
 | decode tokens | 32 |
 | warmup | 1 |
-| gpu_ms p50（clean 4 run） | 3128.75 |
-| gpu_tokens_per_sec p50 | 10.22 |
-| run 間 | 3126.98 / 3127.28 / 3130.21 / 3130.54 / 3150.59 ms |
-| 生成一致 anchor | `GREEDY_TOKEN_SUM=2987`（5 run すべて一致） |
+| gpu_ms p50（clean 7 run） | 547.73 |
+| gpu_tokens_per_sec p50 | 58.42 |
+| run 間 | 546.96 / 547.18 / 547.32 / 547.73 / 548.53 / 567.18 / 577.22 ms |
+| 生成一致 anchor | `GREEDY_TOKEN_SUM=2199`（7 run すべて一致） |
 
-- measurement revision: `5ce5dbd` + backbone 線形 5 shape（`8192:2048`・`4096:2048`・
-  `32:2048`・`2048:4096`・`248320:2048`）の `kLinearShapeRules` 登録
+- measurement revision: `4b8d413` + `RMS_NORM` @2048（per-feature）と `PAGED_ATTENTION`
+  `(q_heads 16, kv_heads 2, head_dim 256)` の registered 化、split-KV splits 決定の一本化
 - GPU: Radeon AI PRO R9700（`--device 0`、測定時は device 0 / 1 idle）
 - command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1`
-- 5 run 目は `SHELF_QWEN35_PERF_STATS=1 --perf-stats-output` を付けた（gpu_ms 3130.54 /
-  10.22 tok/s）。上の p50 は stats なしの 4 run から取った
-- 登録前は同じ条件で gpu_ms p50 5512.97 / 5.81 tok/s（anchor `GREEDY_TOKEN_SUM=15232`）だった。
-  micro bench と A/B の経緯は
-  [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md)
-- まだ 32 token 区間で `RMS_NORM` 2592・`PAGED_ATTENTION` 320・`EMBEDDING_LOOKUP` 32 が
-  correctness path に落ちている。kernel 単位の内訳は
-  [../research/20261104/moe_correctness_path_counters.md](../research/20261104/moe_correctness_path_counters.md)
-- 同じ checkpoint の `shelf-compute` E2E（prompt 8 token、`--max-num-batched-tokens 64
-  --max-concurrent-requests 1`）は DECODE_TOKENS_PER_SEC 19.64（1 run）。条件が違うので直接比較しない
-- **この数値は正しさの anchor を含まない**。E2E の生成列は correctness 経路と optimized 経路の
-  混在であり、HF との数値照合は未実施（§8 の 40 層 E2E gate）
+- kernel 単位 counter の内訳（`SHELF_QWEN35_PERF_STATS=1`、32 token 区間）:
+  logical 43360 / optimized_operations 43328 / correctness_fallbacks 32
+  （`EMBEDDING_LOOKUP` 32 のみ。`RMS_NORM` 4192・`PAGED_ATTENTION` 320・`LINEAR_BF16` は fallback ゼロ）
+- 前の値は `gpu_ms p50` 3128.75 / **10.22 tok/s**（anchor `GREEDY_TOKEN_SUM=2987`）。その前は
+  5512.97 / 5.81 tok/s（anchor 15232）。登録と計測の経緯は
+  [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md) と
+  [../research/20261104/moe_rmsnorm_paged_attention_allowlist.md](../research/20261104/moe_rmsnorm_paged_attention_allowlist.md)
+- `shelf-compute` E2E（prompt 14 token、`--max-num-batched-tokens 64 --max-concurrent-requests 1`、
+  8 decode）は DECODE_TOKENS_PER_SEC 56.52（1 run）。tg とは条件が違うので直接比較しない
+- 長い context: `shelf-bench tg --context 4096 --tokens 8` は 51.37 tok/s（1 run）。
+  `q_per_kv = 8` の split-KV kernel が無いので非 split kernel を使う（代价は research 記録）
+- 数値の連続性は teacher-forced A/B（base の生成列をプロンプトへ埋めた 14 token 入力、
+  `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
+  HF との絶対照合は未実施（§8 の 40 層 E2E gate）
 
 ## 記録規則
 

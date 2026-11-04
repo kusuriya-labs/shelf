@@ -282,7 +282,7 @@ qhy::check_matrix_shape(w, rows, cols, tag)
 ```
 
 - model level: 読み込んだ layer 範囲が layer 0 から始まるなら embed（tied head を持つ最終範囲も
-  含む）、最終层で終わるなら lm_head と final norm を要求し、中間範囲はどちらも要求しない。
+  含む）、最終層で終わるなら lm_head と final norm を要求し、中間範囲はどちらも要求しない。
   vocab は partition を模型側の次元へ戻して照合し、hidden 幅と `lm_head_tied` と実体の一致も見る
 - model level は layer 数を検証しない。vector の長さと config / stage 範囲の突き合わせは
   呼び出し側（`validate_qwen35_weights` と `validate_qwen35moe_weights`）が持つ
@@ -614,7 +614,14 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
 - 40 層 E2E の数値 gate（§6 の受け入れ）と MoE decode の性能実測。`shelf-bench tg` の
   fallback 内訳（`SHELF_QWEN35_PERF_STATS=1`）から未登録 geometry を洗い出し、**計測した
   ものだけ** linear / elementwise allowlist へ載せる。MoE FFN の bf16 線形
-  （`256:2048`・`512:2048`・`2048:512`・`1:2048`）は載っている
+  （`256:2048`・`512:2048`・`2048:512`・`1:2048`）と backbone 線形
+  （`8192:2048`・`4096:2048`・`32:2048`・`2048:4096`・`248320:2048`）、`RMS_NORM` @2048、
+  `PAGED_ATTENTION` `(16, 2, 256)` は載っている。decode に残る correctness path は
+  `EMBEDDING_LOOKUP`（1 本 / token）だけ
+- `q_per_kv = q_heads / kv_heads` が 8 の geometry（MoE の attention）には split-KV kernel が
+  無い。`max_visible_tokens >= kPagedAttentionSplitMinVisible` でも非 split decode kernel が
+  走るので正しいが、長い context では帯域下限の 3.7 倍の代价になる。split-KV の `q_per_kv = 8`
+  対応は未実施
 - group 行数が `kOptimizedMaxRows`(8192) を超える prefill chunk の扱い（elementwise が
   allowlist を外れ、grouped 系に correctness fallback が無い）
 - correctness path には grouped linear も router も combine も無い（grouped 系の fallback は

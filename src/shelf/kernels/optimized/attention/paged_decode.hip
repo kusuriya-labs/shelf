@@ -870,7 +870,7 @@ hipError_t launch_attention_paged_bf16_split(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (q_per_kv != 4u && q_per_kv != 6u)
+    if (!paged_attention_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (common.page_tokens == 0u || common.block_table_stride == 0u || common.num_pages == 0u)
         return hipErrorInvalidValue;
@@ -933,7 +933,7 @@ hipError_t launch_attention_paged_bf16_split_reduce(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (q_per_kv != 4u && q_per_kv != 6u)
+    if (!paged_attention_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (partials == nullptr || (splits != 2u && splits != 4u && splits != 8u && splits != 16u))
         return hipErrorInvalidValue;
@@ -1620,7 +1620,7 @@ hipError_t launch_attention_paged_fp8_split(
     if (common.q_heads == 0u || common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u)
         return hipErrorInvalidValue;
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    if (q_per_kv != 4u && q_per_kv != 6u)
+    if (!paged_attention_split_supports(q_per_kv))
         return hipErrorInvalidValue;
     if (common.page_tokens == 0u || common.block_table_stride == 0u || common.num_pages == 0u)
         return hipErrorInvalidValue;

@@ -15,6 +15,13 @@ inline constexpr uint32_t kPagedAttentionSplitBlock = 128u;
 inline constexpr uint32_t kPagedAttentionPrefillBlock = 256u;
 inline constexpr uint32_t kPagedAttentionPrefillTileRows = 32u;
 
+// The split-KV decode kernels are instantiated for these q_per_kv values only. Any other
+// geometry runs the non-split decode kernel, which walks the whole visible range in one
+// workgroup per (row, q_head).
+inline constexpr bool paged_attention_split_supports(uint32_t q_per_kv) {
+    return q_per_kv == 4u || q_per_kv == 6u;
+}
+
 inline constexpr const char* kPagedAttentionBf16Symbol =
     "shelf_attention_paged_bf16";
 inline constexpr const char* kPagedAttentionPrefillBf16Symbol =

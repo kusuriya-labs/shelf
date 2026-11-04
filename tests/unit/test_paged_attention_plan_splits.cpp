@@ -1,0 +1,80 @@
+#include <shelf/inference/execution/paged_attention_dispatch.h>
+#include <shelf/inference/execution/program_executor.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
+
+#include <cstdio>
+#include <cstdint>
+
+namespace {
+
+int failed = 0;
+
+void check(bool cond, const char* name) {
+    if (!cond) {
+        std::printf("FAIL: %s\n", name);
+        ++failed;
+    }
+}
+
+using shelf::execution::HostExecutionContext;
+using shelf::execution::PagedAttentionPlan;
+using shelf::execution::PagedAttentionResolvedArgs;
+using shelf::kernel::KVCacheDType;
+using shelf::runtime::ValueDType;
+
+// The pointer members only feed the workspace-size comparison; they are never read here.
+alignas(64) uint8_t kPartials[64] = {};
+uint32_t kTreeAnc[2] = {0u, 1u};
+
+PagedAttentionPlan plan_for(uint32_t q_heads, uint32_t kv_heads, uint32_t visible,
+                            uint32_t partial_bytes, bool tree) {
+    PagedAttentionResolvedArgs a;
+    a.kv_dtype = KVCacheDType::BF16;
+    a.output_dtype = ValueDType::F32;
+    a.common.rows = 1u;
+    a.common.q_heads = q_heads;
+    a.common.kv_heads = kv_heads;
+    a.common.head_dim = 256u;
+    a.common.page_tokens = 16u;
+    a.common.tree_anc_offsets = tree ? kTreeAnc : nullptr;
+
+    HostExecutionContext ctx;
+    ctx.spec.max_visible_tokens = visible;
+    ctx.decode_attn_partials = partial_bytes == 0u ? nullptr : kPartials;
+    ctx.decode_attn_partial_bytes = partial_bytes;
+    return shelf::execution::plan_paged_attention(a, ctx, false);
+}
+
+constexpr uint32_t kPlentyBytes = 1u << 20;
+
+}  // namespace
+
+int main() {
+    check(plan_for(16, 4, 4096, kPlentyBytes, false).splits == 16u,
+          "q_per_kv 4 with long visible takes splits");
+    check(plan_for(12, 2, 4096, kPlentyBytes, false).splits == 16u,
+          "q_per_kv 6 with long visible takes splits");
+    check(plan_for(16, 2, 4096, kPlentyBytes, false).splits == 1u,
+          "q_per_kv 8 has no split kernel and stays non-split");
+    check(plan_for(16, 2, 262144, kPlentyBytes, false).splits == 1u,
+          "q_per_kv 8 stays non-split at the measured max visible");
+    check(plan_for(16, 2, 4096, kPlentyBytes, false).optimized,
+          "q_per_kv 8 is still the optimized path");
+
+    check(plan_for(16, 4, 1024, kPlentyBytes, false).splits == 1u,
+          "short visible stays non-split");
+    check(plan_for(16, 4, 4096, 0u, false).splits == 1u,
+          "no partial workspace stays non-split");
+    check(plan_for(16, 4, 4096, 1024u, false).splits == 1u,
+          "partial workspace too small stays non-split");
+    check(plan_for(16, 4, 4096, kPlentyBytes, true).splits == 1u,
+          "tree rows stay non-split");
+
+    check(::shelf::kernel::paged_attention_split_supports(4u) &&
+              ::shelf::kernel::paged_attention_split_supports(6u) &&
+              !::shelf::kernel::paged_attention_split_supports(8u),
+          "split capability table is the single source");
+
+    std::printf("\nResults: %d failed\n", failed);
+    return failed > 0 ? 1 : 0;
+}

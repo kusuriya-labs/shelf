@@ -20,6 +20,9 @@ struct PagedAttentionRule {
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 constexpr uint32_t kMeasuredMaxVisible = 32768;
 constexpr uint32_t kMeasuredMaxVisible24 = 524288;
+// (q_heads, kv_heads) = (16, 2) has no split-KV kernel, so this is the non-split decode
+// kernel's measured range.
+constexpr uint32_t kMeasuredMaxVisible16x2 = 262144;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
@@ -34,6 +37,8 @@ constexpr PagedAttentionRule kPagedAttentionRules[] = {
       24, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       12, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
+      16, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
 };
 
 }  // namespace

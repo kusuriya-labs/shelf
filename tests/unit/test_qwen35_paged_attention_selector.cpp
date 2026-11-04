@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/selectors/paged_attention_selector.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
 
 #include <cstdio>
 
@@ -139,6 +140,31 @@ int main() {
     check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 24, 4, 256, 16, 1, 524289) ==
               PagedAttentionImplementation::Correctness,
           "27b fp8 vis=524289 above measured -> Correctness");
+
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 2, 256, 16, 1, 64) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 rows=1 vis=64 (measured) -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 2, 256, 16, 8192, 8192) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 rows=8192 vis=8192 (measured) -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 2, 256, 16, 1, 262144) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 vis=262144 (measured max) -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 2, 256, 16, 1, 262145) ==
+              PagedAttentionImplementation::Correctness,
+          "moe 16/2/256 vis=262145 above measured -> Correctness");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 2, 256, 16, 8193, 64) ==
+              PagedAttentionImplementation::Correctness,
+          "moe 16/2/256 rows=8193 above measured -> Correctness");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 1, 64) ==
+              PagedAttentionImplementation::Correctness,
+          "moe 16/2/256 fp8 kv not measured -> Correctness");
+
+    check(::shelf::kernel::paged_attention_split_supports(4u), "split supports q_per_kv 4");
+    check(::shelf::kernel::paged_attention_split_supports(6u), "split supports q_per_kv 6");
+    check(!::shelf::kernel::paged_attention_split_supports(8u),
+          "split does not support q_per_kv 8 (moe 16/2 stays non-split)");
+    check(!::shelf::kernel::paged_attention_split_supports(1u), "split rejects q_per_kv 1");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

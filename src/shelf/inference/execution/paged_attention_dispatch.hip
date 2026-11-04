@@ -219,7 +219,9 @@ PagedAttentionPlan plan_paged_attention(
         && args.common.tree_anc_offsets == nullptr
         && ctx.decode_attn_partials != nullptr
         && ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible
-        && args.common.q_heads % args.common.kv_heads == 0u) {
+        && args.common.q_heads % args.common.kv_heads == 0u
+        && ::shelf::kernel::paged_attention_split_supports(
+               args.common.q_heads / args.common.kv_heads)) {
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
         const uint32_t s = 16u;
         const uint64_t need =
@@ -314,18 +316,9 @@ void fill_prefill_pools(const PagedAttentionResolvedArgs& a,
 PhysicalResolveStatus append_decode_region(
     const PagedAttentionResolvedArgs& a,
     const ::shelf::kernel::PagedAttentionCommonArgs& region,
-    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
-    uint32_t splits = 1u;
-    if (region.tree_anc_offsets == nullptr &&
-        ctx.decode_attn_partials != nullptr &&
-        ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible &&
-        a.common.kv_heads != 0u && a.common.q_heads % a.common.kv_heads == 0u) {
-        const uint32_t q_per_kv = a.common.q_heads / a.common.kv_heads;
-        const uint64_t need =
-            static_cast<uint64_t>(region.rows) * a.common.kv_heads * 16u
-            * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
-        if (need <= ctx.decode_attn_partial_bytes) splits = 16u;
-    }
+    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out, uint32_t splits) {
+    if (splits > 1u && region.tree_anc_offsets != nullptr)
+        splits = 1u;
 
     if (splits <= 1u) {
         if (out.physical_count >= kPhysicalPagedAttentionMaxKernels)
@@ -458,7 +451,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
                 return PhysicalResolveStatus::NotApplicable;
             return PhysicalResolveStatus::Applicable;
         }
-        if (append_decode_region(a, a.common, ctx, out) !=
+        if (append_decode_region(a, a.common, ctx, out, plan.splits) !=
             PhysicalResolveStatus::Applicable)
             return PhysicalResolveStatus::NotApplicable;
         return PhysicalResolveStatus::Applicable;
@@ -488,7 +481,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (decode_rows > 0u) {
         const auto region = offset_paged_attention_rows(a.common, 0u, decode_rows);
         const uint32_t before = out.physical_count;
-        if (append_decode_region(a, region, ctx, out) !=
+        if (append_decode_region(a, region, ctx, out, plan.splits) !=
             PhysicalResolveStatus::Applicable)
             return PhysicalResolveStatus::NotApplicable;
         stamp_row_begin(before, 0u);
@@ -510,7 +503,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
             out.use_prefill = true;
-        } else if (append_decode_region(a, region, ctx, out) !=
+        } else if (append_decode_region(a, region, ctx, out, plan.splits) !=
                    PhysicalResolveStatus::Applicable) {
             return PhysicalResolveStatus::NotApplicable;
         }

@@ -237,6 +237,7 @@ shelf_add_test(NAME test_qwen35_rope_selector SOURCE unit/test_qwen35_rope_selec
 target_include_directories(test_qwen35_rope_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_qwen35_rope_profile SOURCE unit/test_qwen35_rope_profile.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_paged_attention_selector SOURCE unit/test_qwen35_paged_attention_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+shelf_add_test(NAME test_paged_attention_plan_splits SOURCE unit/test_paged_attention_plan_splits.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_runtime shelf_core)
 target_include_directories(test_qwen35_paged_attention_selector PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_paged_attention_split_reduce_exact SOURCE unit/test_paged_attention_split_reduce_exact.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
 shelf_add_test(NAME test_qwen35_gdn_recurrence_selector SOURCE unit/test_qwen35_gdn_recurrence_selector.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
@@ -296,6 +297,7 @@ add_custom_target(
         test_moe_weight_plan
         test_moe_expert_slice_fixture
         test_weight_slot_validation
+        test_decode_perf_stats
         test_moe_expert_load
         test_moe_router
         test_moe_grouped_linear
@@ -349,6 +351,7 @@ add_custom_target(
         test_qwen35_rope_selector
         test_qwen35_rope_profile
         test_qwen35_paged_attention_selector
+        test_paged_attention_plan_splits
         test_qwen35_gdn_recurrence_selector
         test_qwen35_gdn_conv_selector
         test_qwen35_elementwise_selector
