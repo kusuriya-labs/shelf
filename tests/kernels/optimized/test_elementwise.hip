@@ -49,6 +49,25 @@ struct Buf {
         bytes = b;
         return hipMalloc(&dev, b) == hipSuccess;
     }
+    // The correctness path writes the same output buffer that the optimized path is run
+    // into, so a row the optimized kernel forgets would keep a correct value. Poison it
+    // first: every row of the row domain has to be written by the launch under test.
+    bool poison() const {
+        return dev != nullptr && hipMemset(dev, 0xA5, bytes) == hipSuccess;
+    }
+    // Everything past the row domain must stay poisoned: when rows is split over grid.z the
+    // launch covers a few extra row slots, and a kernel that addressed them would write out
+    // of bounds.
+    bool guard_intact(size_t used_bytes) const {
+        if (bytes <= used_bytes) return true;
+        std::vector<uint8_t> tail(bytes - used_bytes);
+        if (hipMemcpy(tail.data(), static_cast<char*>(dev) + used_bytes, tail.size(),
+                      hipMemcpyDeviceToHost) != hipSuccess)
+            return false;
+        for (const uint8_t v : tail)
+            if (v != 0xA5u) return false;
+        return true;
+    }
     bool fill_f(const std::vector<float>& h) {
         return hipMemcpy(dev, h.data(), h.size() * 4, hipMemcpyHostToDevice) == hipSuccess;
     }
@@ -154,6 +173,8 @@ void gather_f(const Buf& buf, uint32_t rows, uint32_t f, uint32_t out_stride,
         }
 }
 
+constexpr size_t kGuardBytes = 4096;
+
 size_t cmp_bits(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
     size_t mm = 0;
     const size_t n = std::min(a.size(), b.size());
@@ -214,8 +235,9 @@ bool run_case(const Case& c, size_t* mm_out) {
     // input buffer size: rows * in_stride elements (in_stride in ELEMENTS)
     const size_t in_elems = (size_t)rows * c.in_stride;
     const size_t out_elems = (size_t)rows * c.out_stride;
-    if (!a.alloc(in_elems * 4) || !b.alloc(in_elems * 4) || !o0.alloc(out_elems * 4) ||
-        !o1.alloc(out_elems * 4) || !sig.alloc(out_elems * 4)) {
+    if (!a.alloc(in_elems * 4) || !b.alloc(in_elems * 4) ||
+        !o0.alloc(out_elems * 4 + kGuardBytes) ||
+        !o1.alloc(out_elems * 4 + kGuardBytes) || !sig.alloc(out_elems * 4)) {
         std::printf("  [%s] ALLOC FAIL\n", c.name);
         *mm_out = 1;
         return false;
@@ -307,6 +329,11 @@ bool run_case(const Case& c, size_t* mm_out) {
     }
 
     // ---- optimized ----
+    if (!o0.poison() || (split && !o1.poison())) {
+        std::printf("  [%s] POISON FAIL\n", c.name);
+        *mm_out = 1;
+        return false;
+    }
     {
         bool ok = false;
         switch (c.op) {
@@ -370,11 +397,15 @@ bool run_case(const Case& c, size_t* mm_out) {
         gather_u16(o0, rows, f, c.out_stride, got0);
         mm += cmp_bits(ref0, got0);
     }
+    const size_t used_out = static_cast<size_t>(rows) * c.out_stride * (f32_out ? 4u : 2u);
+    bool guard_ok = o0.guard_intact(used_out);
+    if (split) guard_ok = guard_ok && o1.guard_intact(used_out);
+    if (!guard_ok) ++mm;
     *mm_out = mm;
     const bool pass = (mm == 0);
-    std::printf("  [%s] op=%d f=%u rows=%u in_rs=%u out_rs=%u hd=%u | mm=%zu %s\n", c.name,
+    std::printf("  [%s] op=%d f=%u rows=%u in_rs=%u out_rs=%u hd=%u | mm=%zu guard=%s %s\n", c.name,
                 (int)c.op, f, rows, c.in_stride, c.out_stride, c.head_dim, mm,
-                pass ? "PASS" : "FAIL");
+                guard_ok ? "ok" : "TOUCHED", pass ? "PASS" : "FAIL");
     return true;
 }
 
@@ -392,6 +423,12 @@ int main(int argc, char** argv) {
         // buckets (experts 256, top_k 8) and the fixture width.
         {"swiglu-moe-group-r12288", Op::Swiglu, 512, 12288, 512, 512, 0, 0.0f, 260},
         {"swiglu-moe-group-r36864", Op::Swiglu, 512, 36864, 512, 512, 0, 0.0f, 261},
+        // Above the grid.y bound: rows are addressed by blockIdx.y + blockIdx.z * gridDim.y,
+        // so the largest production bucket (8192 tokens -> 69632 group rows) is one launch.
+        {"swiglu-moe-group-r69632", Op::Swiglu, 512, 69632, 512, 512, 0, 0.0f, 264},
+        // rows that do not split evenly over grid.z: the launch covers one extra row slot, so
+        // this is the case that pins the row bound in the kernel (guard must stay untouched).
+        {"swiglu-moe-group-r69633", Op::Swiglu, 128, 69633, 128, 128, 0, 0.0f, 265},
         {"swiglu-moe-group-f128", Op::Swiglu, 128, 5120, 128, 128, 0, 0.0f, 262},
         {"swiglu-tail", Op::Swiglu, 31, 4, 31, 31, 0, 0.0f, 105},
         {"sigmoid", Op::Sigmoid, 2048, 16, 2048, 2048, 0, 0.0f, 106},

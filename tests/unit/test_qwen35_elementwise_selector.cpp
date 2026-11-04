@@ -1,6 +1,8 @@
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
+#include <shelf/kernels/optimized/elementwise.h>
 
 #include <cstdio>
+#include <cstdint>
 
 using ::shelf::execution::ElementwiseImplementation;
 using ::shelf::execution::ElementwiseProfile;
@@ -17,6 +19,11 @@ static ElementwiseSelectorInput mk(ElementwiseProfile p, uint32_t rows, uint32_t
     in.features = features;
     in.aux = aux;
     return in;
+}
+
+static void check(bool ok, const char* msg) {
+    if (!ok) ++g_fail;
+    std::printf("  [%s] %s\n", msg, ok ? "PASS" : "FAIL");
 }
 
 static void expect(ElementwiseImplementation got, ElementwiseImplementation want, const char* msg) {
@@ -143,11 +150,28 @@ int main() {
                mk(ElementwiseProfile::SwigluBf16, 36864u, 512u, 0)),
            O, "moe group rows 36864 (bucket 4096 capacity) -> Optimized");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SwigluBf16, 36865u, 512u, 0)),
+               mk(ElementwiseProfile::SwigluBf16, 69632u, 512u, 0)),
+           O, "moe group rows 69632 (bucket 8192 capacity) -> Optimized");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 69633u, 512u, 0)),
            C, "moe group rows above the measured bound -> Correctness");
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SwigluBf16, 5120u, 128u, 0)),
            O, "moe group rows at width 128 -> Optimized");
+
+    // The row domain is split across grid.y (hardware bound 65535) and grid.z. grid.y must
+    // stay within the bound and the product must cover every row, at the split point and at
+    // the multiples of it.
+    for (const uint32_t rows : {1u, 2u, 65534u, 65535u, 65536u, 69632u, 131070u, 131071u,
+                                196605u, 196606u, 1000000u}) {
+        const uint32_t gy = ::shelf::kernel::elementwise_grid_y(rows);
+        const uint32_t gz = ::shelf::kernel::elementwise_grid_z(rows);
+        const bool covered = gz >= 1u && gy <= ::shelf::kernel::kElementwiseGridYMax &&
+                             static_cast<uint64_t>(gy) * gz >= rows;
+        char msg[96];
+        std::snprintf(msg, sizeof(msg), "grid.y / grid.z cover rows=%u (y=%u z=%u)", rows, gy, gz);
+        check(covered, msg);
+    }
     std::printf("%s: %d failures\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

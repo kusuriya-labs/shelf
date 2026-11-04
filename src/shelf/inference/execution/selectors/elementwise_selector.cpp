@@ -12,11 +12,11 @@ struct Rule {
     uint32_t max_rows;
 };
 
-// The elementwise kernels address rows with blockIdx.y, so a launch is bounded by the
-// grid.y limit. Group rows grow with tokens * top_k, so the MoE FFN needs a bound above
-// the token row cap; 36864 is the capacity of a 4096-token bucket (20480 for 2048 and
-// 12288 for 1024) and is measured.
-constexpr uint32_t kMeasuredMaxGroupRows = 36864u;
+// The elementwise kernels address rows with blockIdx.y, whose hardware bound is 65535; rows
+// above it are carried by grid.z (one launch still). Group rows grow with tokens * top_k, so
+// the MoE FFN needs a bound above the token row cap. 69632 is the group-row capacity of the
+// largest production bucket (8192 token rows, experts 256, top_k 8) and is measured.
+constexpr uint32_t kMeasuredMaxGroupRows = 69632u;
 
 constexpr Rule kRules[] = {
     {ElementwiseProfile::ResidualBf16, 2560u, 0u, 1u, kOptimizedMaxRows},

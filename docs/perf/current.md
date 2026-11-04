@@ -110,8 +110,16 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   ppl 差 −2.70 %（TP1 と TP2 の差と同じ帯。根拠は research 記録）
 - context 64 は split の閾値（2048）未満なので無変更。3 run で 58.74 / 58.86 / 59.17 tok/s、
   anchor `GREEDY_TOKEN_SUM=2199`
-- MoE prefill chunk: `--prefill-chunk 1024 / 2048 / 4096` は 51.36 / 51.28 / 49.31 tok/s。
-  bucket R8192（group 69632 行）は `unsupported` で拒否される（`compute.md` の上限）
+- MoE prefill chunk（decode、tg）: `--prefill-chunk 1024 / 2048 / 4096` は 51.36 / 51.28 /
+  49.31 tok/s。context 8192 では chunk 8192 が 52.61 / 54.93、chunk 4096 が 55.09 / 54.86 tok/s
+  （device 1、各 2 run。chunk 8192 は通るようになったが decode は速くない）
+- MoE prefill throughput（`shelf-bench pp --prompt-tokens 8192 --runs 3 --warmup 1`、device 1）。
+  `pp` が grouped expert checkpoint を load できるようになった（`LoadedModel` 配線）。
+  `--prefill-chunk 1024 / 2048 / 4096 / 8192` で **3648 / 3759 / 3684 / 3569 tok/s**。
+  bucket R8192（group 69632 行）は elementwise kernel の grid.z 分割で表現されるので拒否されないが、
+  **最良は chunk 2048 で 8192 は 5.3 % 低い**。elementwise 単体の roofline は 69632 行で
+  607 GB/s（DRAM 実測 636 GB/s の 95 %）なので、chunk 8192 が遅い理由は elementwise ではない
+  （経緯は `docs/research/20261104/moe_group_row_elementwise_envelope.md`）
 - 数値の連続性は teacher-forced A/B（base の生成列をプロンプトへ埋めた 14 token 入力、
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）

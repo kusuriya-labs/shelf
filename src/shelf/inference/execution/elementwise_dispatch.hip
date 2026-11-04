@@ -84,7 +84,9 @@ bool same_shape(const HostResolvedValue& x, const HostResolvedValue& y) {
 
 void fill_geometry(PhysicalElementwiseLaunch& d) {
     d.grid_x = ::shelf::kernel::elementwise_grid_x(d.features);
-    d.grid_y = d.rows;
+    // Rows past kElementwiseGridYMax are carried by grid.z in the launcher, so this records
+    // the grid.y part only.
+    d.grid_y = ::shelf::kernel::elementwise_grid_y(d.rows);
     d.workgroup = ::shelf::kernel::kElementwiseBlock;
 }
 

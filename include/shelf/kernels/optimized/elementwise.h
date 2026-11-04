@@ -20,6 +20,28 @@ constexpr uint32_t elementwise_grid_x(uint32_t features) {
                                  span);
 }
 
+// Rows are addressed by blockIdx.y + blockIdx.z * gridDim.y: a HIP grid's y dimension is
+// bounded by 65535 (a launch with grid.y = 69632 is rejected with `invalid configuration
+// argument`), so rows above that bound are carried by grid.z and one launch still covers the
+// whole row domain (MoE group rows reach 69632 at the largest production bucket). grid.y is
+// the even split of rows over grid.z, so the launch wastes at most grid.z - 1 row slots; the
+// kernels drop those with a row bound check.
+inline constexpr uint32_t kElementwiseGridYMax = 65535u;
+
+constexpr uint32_t elementwise_grid_z(uint32_t rows) {
+    return (rows + kElementwiseGridYMax - 1u) / kElementwiseGridYMax;
+}
+
+constexpr uint32_t elementwise_grid_y(uint32_t rows) {
+    const uint32_t gz = elementwise_grid_z(rows);
+    return (rows + gz - 1u) / gz;
+}
+
+inline dim3 elementwise_grid(uint32_t features, uint32_t rows) {
+    return dim3(elementwise_grid_x(features), elementwise_grid_y(rows),
+                elementwise_grid_z(rows));
+}
+
 inline constexpr const char* kElementwiseResidualAddBf16Symbol =
     "shelf_residual_add_bf16";
 inline constexpr const char* kElementwiseSwigluBf16Symbol =

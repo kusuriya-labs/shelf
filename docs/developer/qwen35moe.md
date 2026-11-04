@@ -531,12 +531,16 @@ workspace range や workspace storage の value と重ならないことを検�
   `GROUPED_ROWS` の value に触れる dispatch は optimized が NotApplicable でも interpreter へ
   落とさず、executor が `Status::unsupported` を返す（op index・kernel 名・group 行数を載せる）。
   geometry は allowlist に載っている必要がある: elementwise selector の `SwigluBf16 @512` と
-  `@128` は group 行数専用の bound `kMeasuredMaxGroupRows`(36864) まで、
+  `@128` は group 行数専用の bound `kMeasuredMaxGroupRows`(69632) まで、
   `SigmoidBf16ToF32 @1` と `ResidualBf16 @2048` は token 行数で `kOptimizedMaxRows`(8192) まで。
   group 行数 capacity は `grouped_row_capacity(rows, {experts, top_k})` で、MoE geometry
-  （experts 256・top_k 8）なら token bucket 512 / 1024 / 2048 / 4096 が 8192 / 12288 / 20480 /
-  36864 行。bucket R8192 は 69632 行で elementwise kernel の grid.y 上限（65535）を超えるため
-  起動時に拒否される（§8 の残作業）。
+  （experts 256・top_k 8）なら token bucket 512 / 1024 / 2048 / 4096 / 8192 が
+  8192 / 12288 / 20480 / 36864 / 69632 行。elementwise kernel は行を
+  `blockIdx.y + blockIdx.z * gridDim.y` で address する（grid.y 単独の上限は 65535 で、
+  `grid.y = 69632` の launch は `invalid configuration argument` になる）。したがって
+  最大の bucket R8192 も 1 launch で表現される。bound は容量の正本ではなく**実測した
+  geometry の上限**なので、`RowBucket` の最大容量（69632 行）より上の行数は allowlist 外
+  （`Status::unsupported`）。
 - fused gate / up 平面は 2 つの view として読まれる。elementwise dispatch の alias 検査は
   **読み専用 operand 同士は同じ buffer を共有してよい**（行 stride で span が重なるため）、
   出力だけが各 operand と同一または非重複であることを要求する
@@ -615,8 +619,8 @@ model load（§5）、graph / program の MoE 語彙（§6-1）、device dispatc
 decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/research/`、現在の性能値は
 `docs/perf/current.md` を正本とし、計測していない性能主張はここに書かない。
 
-- `shelf-server` と `shelf-bench` の `pp` / `batch` はまだ `LoadedModel` 経由でなく、MoE を
-  load できない。`quality` は `LoadedModel` 経由になり、`--tensor-parallel 1` で grouped expert を
+- `shelf-bench` の `pp` / `batch` はまだ `LoadedModel` 経由でなく、MoE を load できない。
+  `quality` は `LoadedModel` 経由になり、`--tensor-parallel 1` で grouped expert を
   teacher forcing できる（`--tensor-parallel 2` は `probe_model_dir` で dense のみを受理）
 - 40 層 E2E の数値 gate（§6 の受け入れ）と MoE decode の性能実測。`shelf-bench tg` の
   fallback 内訳（`SHELF_QWEN35_PERF_STATS=1`）から未登録 geometry を洗い出し、**計測した
@@ -633,10 +637,9 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   `test_paged_attention`（split16 比較）と `test_paged_attention_split_reduce_exact`
   （q_per_kv 6 / 8）が対にする（経緯と計測は
   `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md`）
-- bucket R8192（group 69632 行）は elementwise kernel が grid.y ≤ 65535 のため表現できない。
-  rows を grid.z か row offset で分割する kernel 変更が無い限り、MoE prefill の chunk は
-  4096 token まで（超過は `unsupported` として見える）
-- TP + MoE は §5 の受理条件で `unsupported`
+- TP + MoE は §5 の受理条件で `unsupported`。`shelf-bench pp` と `shelf-bench quality` の
+  `--tensor-parallel 2` も `probe_model_dir` で dense のみを受理し、grouped expert checkpoint
+  では起動時に拒否する（深い地点で落ちない）
 - pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
   しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
   grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に

@@ -17,14 +17,19 @@ constexpr uint32_t kThreads = 256u;
 static_assert(kThreads == kElementwiseBlock);
 static_assert(kVec == kElementwiseVec);
 
+__device__ __forceinline__ uint32_t elementwise_row() {
+    return blockIdx.y + blockIdx.z * gridDim.y;
+}
+
 namespace {
 namespace op_concat_bf16 {
 
 __global__ void impl(const bf16* a, uint32_t a_rs,
                      const bf16* b, uint32_t b_rs,
                      bf16* out, uint32_t out_rs,
-                     uint32_t fa, uint32_t features) {
-    const uint32_t row = blockIdx.y;
+                     uint32_t fa, uint32_t features, uint32_t rows) {
+    const uint32_t row = elementwise_row();
+    if (row >= rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const bf16* a_row = a + static_cast<size_t>(row) * a_rs;
@@ -58,13 +63,11 @@ hipError_t launch_concat_bf16(
     if (rows == 0u || features_a == 0u || features_b == 0u) return hipErrorInvalidValue;
     if (a == nullptr || b == nullptr || output == nullptr) return hipErrorInvalidValue;
     const uint32_t features = features_a + features_b;
-    const uint64_t gx =
-        (static_cast<uint64_t>(features) + kThreads * kVec - 1u) / (kThreads * kVec);
-    dim3 grid(static_cast<uint32_t>(gx), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     op_concat_bf16::impl<<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const bf16*>(a), a_row_stride,
         reinterpret_cast<const bf16*>(b), b_row_stride,
-        reinterpret_cast<bf16*>(output), output_row_stride, features_a, features);
+        reinterpret_cast<bf16*>(output), output_row_stride, features_a, features, rows);
     return hipGetLastError();
 }
 
@@ -74,7 +77,8 @@ void shelf_residual_add_bf16(ElementwiseArgs args) {
     const bf16* b = static_cast<const bf16*>(args.in1);
     bf16* out = static_cast<bf16*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     residual_add_bf16_body(a + static_cast<size_t>(row) * args.in0_row_stride,
@@ -99,7 +103,7 @@ hipError_t launch_residual_add_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_residual_add_bf16<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -110,7 +114,8 @@ void shelf_scale_f32(ElementwiseArgs args) {
     float* out = static_cast<float*>(args.out0);
     const uint32_t features = args.features;
     const float scale = args.scalar_a;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const float* in_row = in + static_cast<size_t>(row) * args.in0_row_stride;
@@ -146,7 +151,7 @@ hipError_t launch_scale_f32(
     args.features = features;
     args.scalar_a = scale;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_scale_f32<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -156,7 +161,8 @@ void shelf_sigmoid_bf16_f32(ElementwiseArgs args) {
     const bf16* in = static_cast<const bf16*>(args.in0);
     float* out = static_cast<float*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const bf16* in_row = in + static_cast<size_t>(row) * args.in0_row_stride;
@@ -191,7 +197,7 @@ hipError_t launch_sigmoid_bf16_f32(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_sigmoid_bf16_f32<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -201,7 +207,8 @@ void shelf_silu_bf16_f32(ElementwiseArgs args) {
     const bf16* in = static_cast<const bf16*>(args.in0);
     float* out = static_cast<float*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const bf16* in_row = in + static_cast<size_t>(row) * args.in0_row_stride;
@@ -236,7 +243,7 @@ hipError_t launch_silu_bf16_f32(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_silu_bf16_f32<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -246,7 +253,8 @@ void shelf_silu_f32_bf16(ElementwiseArgs args) {
     const float* in = static_cast<const float*>(args.in0);
     bf16* out = static_cast<bf16*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const float* in_row = in + static_cast<size_t>(row) * args.in0_row_stride;
@@ -281,7 +289,7 @@ hipError_t launch_silu_f32_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_silu_f32_bf16<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -292,7 +300,8 @@ void shelf_mul_f32_f32_bf16(ElementwiseArgs args) {
     const float* b = static_cast<const float*>(args.in1);
     bf16* out = static_cast<bf16*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     const float* a_row = a + static_cast<size_t>(row) * args.in0_row_stride;
     const float* b_row = b + static_cast<size_t>(row) * args.in1_row_stride;
@@ -316,7 +325,7 @@ hipError_t launch_mul_f32_f32_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_mul_f32_f32_bf16<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -329,7 +338,8 @@ void shelf_split_bf16(ElementwiseArgs args) {
     const uint32_t f0 = args.features;
     const uint32_t hd = args.aux;
     const bool interleaved = args.reserved != 0u;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= f0) return;
     const bf16* in_row = in + static_cast<size_t>(row) * args.in0_row_stride;
@@ -396,7 +406,7 @@ hipError_t launch_split_bf16(
     args.aux = head_dim;
     args.reserved = interleaved ? 1u : 0u;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_split_bf16<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
@@ -407,7 +417,8 @@ void shelf_swiglu_bf16(ElementwiseArgs args) {
     const bf16* up = static_cast<const bf16*>(args.in1);
     bf16* out = static_cast<bf16*>(args.out0);
     const uint32_t features = args.features;
-    const uint32_t row = blockIdx.y;
+    const uint32_t row = elementwise_row();
+    if (row >= args.rows) return;
     const uint32_t col0 = (blockIdx.x * blockDim.x + threadIdx.x) * kVec;
     if (col0 >= features) return;
     const bf16* gate_row = gate + static_cast<size_t>(row) * args.in0_row_stride;
@@ -450,7 +461,7 @@ hipError_t launch_swiglu_bf16(
     args.out0_row_stride = output_row_stride;
     args.features = features;
     args.rows = rows;
-    dim3 grid(elementwise_grid_x(features), rows);
+    const dim3 grid = elementwise_grid(features, rows);
     shelf_swiglu_bf16<<<grid, kThreads, 0, stream>>>(args);
     return hipGetLastError();
 }
