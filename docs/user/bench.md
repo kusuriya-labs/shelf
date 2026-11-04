@@ -72,6 +72,12 @@ detail and is not a `--variant` value.
 rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2` が
 必須。TP 実行では最終 chunk の logits を計算する。
 
+grouped expert checkpoint（Qwen3.6-35B-A3B MoE）は `--tensor-parallel 1` で load できる。
+`--tensor-parallel 2` は dense のみを受理し、MoE では起動時に
+`pp --tensor-parallel 2 runs dense checkpoints only` を返す。MoE の prefill throughput は
+`--prompt-tokens 8192 --prefill-chunk 1024 / 2048 / 4096 / 8192` で
+3648 / 3759 / 3684 / 3569 tok/s（既定 2048 が最良。値の根拠は `docs/perf/current.md`）。
+
 ## tg
 
 <!-- cli:bench-tg -->

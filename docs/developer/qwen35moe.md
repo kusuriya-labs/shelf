@@ -619,9 +619,11 @@ model load（§5）、graph / program の MoE 語彙（§6-1）、device dispatc
 decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/research/`、現在の性能値は
 `docs/perf/current.md` を正本とし、計測していない性能主張はここに書かない。
 
-- `shelf-bench` の `pp` / `batch` はまだ `LoadedModel` 経由でなく、MoE を load できない。
-  `quality` は `LoadedModel` 経由になり、`--tensor-parallel 1` で grouped expert を
-  teacher forcing できる（`--tensor-parallel 2` は `probe_model_dir` で dense のみを受理）
+- `shelf-bench` の `pp` / `batch` は `LoadedModel` 経由で load するようになり、grouped expert
+  checkpoint の prefill / continuous batching が測れる。`shelf-server` は `shelf-compute
+  --serve-stdio` を起動する側なので `LoadedModel` を持たず、compute 側は既に配線済みなので
+  server 側の配線は無い。`quality` も `LoadedModel` 経由で、`--tensor-parallel 1` で grouped
+  expert を teacher forcing できる
 - 40 層 E2E の数値 gate（§6 の受け入れ）と MoE decode の性能実測。`shelf-bench tg` の
   fallback 内訳（`SHELF_QWEN35_PERF_STATS=1`）から未登録 geometry を洗い出し、**計測した
   ものだけ** linear / elementwise allowlist へ載せる。MoE FFN の bf16 線形

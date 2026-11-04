@@ -1,5 +1,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/loaded_model.h>
+#include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
@@ -256,7 +258,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -325,7 +327,7 @@ int run_pp(int argc, char** argv) {
     hipStream_t stream = nullptr;
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coordinator;
     std::optional<shelf::gpu::GpuArena> tp1_arena;
-    std::optional<shelf::qwen35::Qwen35Model> tp1_model;
+    std::optional<shelf::models::LoadedModel> tp1_loaded;
     std::optional<shelf::state::SequenceSlotPool> tp1_seq_pool;
     std::optional<shelf::state::GdnStatePool> tp1_rec_pool;
     std::optional<shelf::state::PagedKVPool> tp1_kv_pool;
@@ -345,15 +347,15 @@ int run_pp(int argc, char** argv) {
         }
         tp1_arena.emplace(arena_result.release());
 
-        auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
-            opts.model_dir, *tp1_arena, stream, {});
+        auto model_result = shelf::models::LoadedModel::load(
+            opts.model_dir, *tp1_arena, stream);
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
             return 1;
         }
-        tp1_model.emplace(model_result.release());
+        tp1_loaded.emplace(model_result.release());
 
-        const auto& cfg = tp1_model->text_config();
+        const auto& cfg = tp1_loaded->hybrid_config();
         const uint32_t kv_heads = static_cast<uint32_t>(cfg.num_key_value_heads);
         const uint32_t head_dim = static_cast<uint32_t>(cfg.attention_head_dim);
         const uint32_t num_attn_layers = count_attention_layers(cfg);
@@ -401,14 +403,23 @@ int run_pp(int argc, char** argv) {
         exec_config.max_scheduled_requests = 1;
         exec_config.backend = opts.decode_backend;
 
-        auto exec_result = shelf::qwen35::create_model_executor(
-            *tp1_model, *tp1_seq_pool, *tp1_rec_pool, *tp1_kv_pool, *tp1_arena, exec_config);
+        auto exec_result = tp1_loaded->create_executor(
+            *tp1_seq_pool, *tp1_rec_pool, *tp1_kv_pool, *tp1_arena, exec_config);
         if (!exec_result.ok()) {
-            fprintf(stderr, "create_model_executor failed: %s\n", exec_result.status().message().c_str());
+            fprintf(stderr, "create_executor failed: %s\n", exec_result.status().message().c_str());
             return 1;
         }
         tp1_executor.emplace(exec_result.release());
     } else {
+        const auto family = shelf::models::probe_model_dir(opts.model_dir);
+        if (!family.ok()) {
+            fprintf(stderr, "model probe failed: %s\n", family.status().message().c_str());
+            return 1;
+        }
+        if (family.value() != shelf::models::ModelFamily::Dense) {
+            fprintf(stderr, "pp --tensor-parallel %d runs dense checkpoints only\n", opts.tp);
+            return 1;
+        }
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
@@ -431,17 +442,19 @@ int run_pp(int argc, char** argv) {
         stream = tp_coordinator->rank(0).stream();
     }
 
-    const auto& model = tp_coordinator ? tp_coordinator->rank(0).model() : *tp1_model;
+    const std::size_t vocab_size =
+        tp1_loaded
+            ? tp1_loaded->hybrid_config().vocab_size
+            : shelf::models::LoadedModel::borrow(tp_coordinator->rank(0).model())
+                  .hybrid_config().vocab_size;
     auto& seq_pool = tp_coordinator ? tp_coordinator->rank(0).sequence_pool() : *tp1_seq_pool;
     auto& rec_pool = tp_coordinator ? tp_coordinator->rank(0).gdn_pool() : *tp1_rec_pool;
     auto& kv_pool = tp_coordinator ? tp_coordinator->rank(0).kv_pool() : *tp1_kv_pool;
     auto& executor = tp_coordinator ? tp_coordinator->rank(0).executor() : *tp1_executor;
 
     const int32_t token_id = 1;
-    if (token_id < 0 ||
-        static_cast<std::size_t>(token_id) >= model.weights().embed_tokens.rows) {
-        fprintf(stderr, "token_id out of vocab range: vocab_size=%zu\n",
-                static_cast<std::size_t>(model.weights().embed_tokens.rows));
+    if (token_id < 0 || static_cast<std::size_t>(token_id) >= vocab_size) {
+        fprintf(stderr, "token_id out of vocab range: vocab_size=%zu\n", vocab_size);
         return 1;
     }
 
