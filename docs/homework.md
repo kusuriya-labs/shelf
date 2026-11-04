@@ -127,6 +127,22 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
   -28〜-40%、精度は現行の 1.34 倍（fold 自体の損は測定分解能外）。残っているのは
   採用判断（logit 変動ゲートへ切り替える可否）と本実装
 * qwen35moe対応・最適化
-* pipeline-parallelの実装
 * expert-parallelの実装
 * Small-M GEMMの最適化
+
+## pipeline parallel
+
+PP の layer split・host hand-off・E2E は実装済み。以下は未対応または未検証。
+
+* TP と PP の同時利用（現行は `--tp 1` のみ）
+* DFlash2 speculative decode との併用
+* prefix cache との併用
+* MTP block との併用
+* hidden taps / `--dump-logits` との併用
+* decode と prefill が同じ batch に混在する実行（機能 TODO の mixed batch と同じ。
+  PP coordinator は現在 `unsupported` を返す）
+* stage 間 overlap（現行は pinned host 経由の直列 hand-off。性能最適化は未着手）
+* 3 stage 以上の実機検証（この環境は 2 GPU のため PP=2 のみ実測）
+* stage 0 の KV page 数に全 stage を合わせる制約の解消
+  （非対称 layer 分割または stage ごとの page 数指定）
+* PP の prefill / decode 性能を warmup + 複数 run で計測し `docs/perf/current.md` へ記録

@@ -245,7 +245,8 @@ Status validate_gdn_shapes(
 Status validate_geometry(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
-    const Qwen35TensorParallelContext* tp) {
+    const Qwen35TensorParallelContext* tp,
+    const PipelineStage& stage) {
 
     std::uint32_t hidden_size = 0;
     std::uint32_t intermediate_size = 0;
@@ -279,17 +280,31 @@ Status validate_geometry(
     auto embed_status = validate_matrix(
         weights.embed_tokens, RT::MatrixwiseShapeKey{weights.embed_tokens.rows, hidden_size},
         "invalid embedding weight");
-    if (!embed_status.ok()) return embed_status;
-    if (!weights.lm_head_tied) {
-        auto lm_status = validate_matrix(
-            weights.lm_head, RT::MatrixwiseShapeKey{weights.lm_head.rows, hidden_size},
-            "invalid lm head weight");
-        if (!lm_status.ok()) return lm_status;
+    const bool stage_load = stage.enabled;
+    const bool first = !stage_load || stage.first();
+    const bool last = !stage_load || stage.last(static_cast<std::uint32_t>(config.num_hidden_layers));
+    if (first) {
+        if (!embed_status.ok()) return embed_status;
+    }
+    if (last) {
+        if (!weights.lm_head_tied) {
+            auto lm_status = validate_matrix(
+                weights.lm_head, RT::MatrixwiseShapeKey{weights.lm_head.rows, hidden_size},
+                "invalid lm head weight");
+            if (!lm_status.ok()) return lm_status;
+        }
     }
 
-    for (std::size_t layer_index = 0;
-         layer_index < config.num_hidden_layers;
-         ++layer_index) {
+    const std::uint32_t layer_lo = stage_load ? stage.layers.layer_lo : 0u;
+    const std::uint32_t layer_hi = stage_load
+        ? stage.layers.layer_hi
+        : static_cast<std::uint32_t>(config.num_hidden_layers);
+    if (stage_load &&
+        (layer_lo >= layer_hi ||
+         layer_hi > static_cast<std::uint32_t>(config.num_hidden_layers))) {
+        return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
+    }
+    for (std::uint32_t layer_index = layer_lo; layer_index < layer_hi; ++layer_index) {
 
         const auto& layer_weights = weights.layers[layer_index];
         bool is_gdn = layer_weights.is_gdn;
@@ -375,8 +390,24 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
     const Qwen35LowerOptions& options) {
-    auto geometry_status = validate_geometry(config, weights, options.tp);
+    auto geometry_status = validate_geometry(config, weights, options.tp, options.stage);
     if (!geometry_status.ok()) return geometry_status;
+
+    const bool stage_load = options.stage.enabled;
+    const std::uint32_t num_layers =
+        static_cast<std::uint32_t>(config.num_hidden_layers);
+    const std::uint32_t layer_lo = stage_load ? options.stage.layers.layer_lo : 0u;
+    const std::uint32_t layer_hi = stage_load ? options.stage.layers.layer_hi : num_layers;
+    const bool first_stage = !stage_load || options.stage.first();
+    const bool last_stage = !stage_load || options.stage.last(num_layers);
+    if (stage_load && !options.hidden_taps.empty()) {
+        return Status::unsupported(
+            "pipeline stage lowering does not accept hidden taps", __FILE__, __LINE__);
+    }
+    if (stage_load && !options.override_layers.empty()) {
+        return Status::unsupported(
+            "pipeline stage lowering does not accept layer overrides", __FILE__, __LINE__);
+    }
 
     for (std::size_t t = 0; t < options.hidden_taps.size(); ++t) {
         const std::size_t layer = options.hidden_taps[t];
@@ -405,45 +436,44 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         return static_cast<uint32_t>(weight_pointers.size() - 1);
     };
 
-    const uint32_t embed_index = add_weight(weights.embed_tokens);
+    const bool embed_loaded = first_stage || (last_stage && weights.lm_head_tied);
+    const uint32_t embed_index = embed_loaded ? add_weight(weights.embed_tokens) : UINT32_MAX;
     std::vector<LayerWeightIndices> layer_weights(weights.layers.size());
-    {
-        size_t cursor = 1;
-        for (size_t li = 0; li < weights.layers.size(); ++li) {
-            const auto& lw = weights.layers[li];
-            auto& idx = layer_weights[li];
-            if (lw.is_gdn) {
-                idx.gdn_qkv = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_in_proj_qkv);
-                idx.gdn_z = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_in_proj_z);
-                idx.gdn_b = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_in_proj_b);
-                idx.gdn_a = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_in_proj_a);
-                idx.gdn_out = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_out_proj);
-            } else {
-                idx.attn_q = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_q_proj);
-                idx.attn_k = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_k_proj);
-                idx.attn_v = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_v_proj);
-                idx.attn_o = static_cast<uint32_t>(cursor++);
-                (void)add_weight(lw.attn_o_proj);
-            }
-            idx.mlp_gate = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.ffn.gate);
-            idx.mlp_up = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.ffn.up);
-            idx.mlp_down = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.ffn.down);
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
+        const auto& lw = weights.layers[li];
+        auto& idx = layer_weights[li];
+        if (lw.is_gdn) {
+            idx.gdn_qkv = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_in_proj_qkv);
+            idx.gdn_z = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_in_proj_z);
+            idx.gdn_b = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_in_proj_b);
+            idx.gdn_a = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_in_proj_a);
+            idx.gdn_out = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_out_proj);
+        } else {
+            idx.attn_q = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_q_proj);
+            idx.attn_k = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_k_proj);
+            idx.attn_v = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_v_proj);
+            idx.attn_o = static_cast<uint32_t>(weight_pointers.size());
+            (void)add_weight(lw.attn_o_proj);
         }
+        idx.mlp_gate = static_cast<uint32_t>(weight_pointers.size());
+        (void)add_weight(lw.ffn.gate);
+        idx.mlp_up = static_cast<uint32_t>(weight_pointers.size());
+        (void)add_weight(lw.ffn.up);
+        idx.mlp_down = static_cast<uint32_t>(weight_pointers.size());
+        (void)add_weight(lw.ffn.down);
     }
     const bool lm_tied = weights.lm_head_tied;
-    const uint32_t lm_index =
-        lm_tied ? embed_index : add_weight(weights.lm_head);
+    const uint32_t lm_index = last_stage
+        ? (lm_tied ? embed_index : add_weight(weights.lm_head))
+        : UINT32_MAX;
 
     uint32_t key_heads = static_cast<uint32_t>(config.linear_num_key_heads);
     uint32_t value_heads = static_cast<uint32_t>(config.linear_num_value_heads);
@@ -491,7 +521,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     };
     std::vector<LayerParamIndices> layer_params(weights.layers.size());
     {
-        for (size_t li = 0; li < weights.layers.size(); ++li) {
+        for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
             const auto& lw = weights.layers[li];
             auto& lp = layer_params[li];
             if (lw.input_layernorm_weight.ndim() > 0)
@@ -510,7 +540,9 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
     }
     const uint32_t final_norm_param =
-        weights.final_norm_weight.ndim() > 0 ? reg_param(weights.final_norm_weight) : UINT32_MAX;
+        last_stage && weights.final_norm_weight.ndim() > 0
+            ? reg_param(weights.final_norm_weight)
+            : UINT32_MAX;
 
     uint32_t next_gdn_state_index = 0;
     uint32_t next_attention_state_index = 0;
@@ -520,9 +552,10 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const uint32_t hidden_size = static_cast<uint32_t>(config.hidden_size);
     const RT::RowwiseShapeKey hidden_key{hidden_size};
 
-    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
+    RT::ValueId tokens{};
     RT::ValueId layer_input = em.value(hidden_size);
-    {
+    if (first_stage) {
+        tokens = em.value(0, RT::ValueDType::I32);
         RT::EmbeddingLookupNode n;
         n.vocab_size = weights.embed_tokens.rows;
         n.hidden_size = hidden_size;
@@ -532,9 +565,11 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         em.emit(RT::PrimitiveNode{n}, {tokens}, {layer_input});
         pg.nodes.back().debug_name = "embedding";
         pg.external_inputs.push_back(tokens);
+    } else {
+        pg.external_inputs.push_back(layer_input);
     }
 
-    for (size_t li = 0; li < weights.layers.size(); ++li) {
+    for (std::uint32_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.layers[li];
         const auto& lw_idx = layer_weights[li];
         const std::string layer_prefix = "L" + std::to_string(li) + ".";
@@ -688,7 +723,9 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
     }
 
-    {
+    if (!last_stage) {
+        pg.external_outputs.push_back(layer_input);
+    } else {
         const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
         const uint64_t global_vocab = config.vocab_size;
         bool vocab_parallel = false;

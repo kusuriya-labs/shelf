@@ -113,6 +113,7 @@ shelf_add_test(NAME test_canonical_partition SOURCE unit/test_canonical_partitio
 shelf_add_test(NAME test_fp8_frag_layout SOURCE unit/test_fp8_frag_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_format)
 shelf_add_test(NAME test_qwen35_tensor_parallel_plan SOURCE unit/test_qwen35_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_context.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_pipeline_stage SOURCE unit/test_qwen35_pipeline_stage.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
@@ -166,6 +167,7 @@ shelf_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.
 shelf_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_qwen35_pipeline_lowering SOURCE unit/test_qwen35_pipeline_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 
 # 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の层 0 = GDN を f64 参照で固定する。
@@ -349,6 +351,8 @@ add_custom_target(
         test_prefix_cache_batcher
         test_qwen35_mtp_lowering
         test_qwen35_lowering_contract
+        test_qwen35_pipeline_stage
+        test_qwen35_pipeline_lowering
         test_qwen35_spec_verify
         test_architecture_boundaries
         test_gemm_bf16_verify_exact

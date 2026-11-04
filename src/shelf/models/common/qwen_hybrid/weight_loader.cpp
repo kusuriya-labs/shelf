@@ -54,30 +54,38 @@ std::vector<std::string> hf_quantized_body_names(const QwenHybridConfig& config)
         "model.language_model.lm_head.weight",
         "model.language_model.norm.weight",
     };
-    const auto add_layer = [&](const std::string& prefix, bool gdn) {
-        names.push_back(prefix + "input_layernorm.weight");
-        names.push_back(prefix + "post_attention_layernorm.weight");
-        if (gdn) {
-            names.push_back(prefix + "linear_attn.in_proj_a.weight");
-            names.push_back(prefix + "linear_attn.in_proj_b.weight");
-            names.push_back(prefix + "linear_attn.in_proj_qkv.weight");
-            names.push_back(prefix + "linear_attn.in_proj_z.weight");
-            names.push_back(prefix + "linear_attn.conv1d.weight");
-            names.push_back(prefix + "linear_attn.out_proj.weight");
-            names.push_back(prefix + "linear_attn.norm.weight");
-            names.push_back(prefix + "linear_attn.dt_bias");
-            names.push_back(prefix + "linear_attn.A_log");
-        } else {
-            names.push_back(prefix + "self_attn.q_proj.weight");
-            names.push_back(prefix + "self_attn.k_proj.weight");
-            names.push_back(prefix + "self_attn.v_proj.weight");
-            names.push_back(prefix + "self_attn.o_proj.weight");
-            names.push_back(prefix + "self_attn.q_norm.weight");
-            names.push_back(prefix + "self_attn.k_norm.weight");
-        }
-    };
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-        add_layer(layer_tensor_prefix(l), layer_is_gdn(config, l));
+        std::vector<std::string> layer_names =
+            hf_quantized_layer_body_names(config, l);
+        names.insert(names.end(), layer_names.begin(), layer_names.end());
+    }
+    return names;
+}
+
+std::vector<std::string> hf_quantized_layer_body_names(const QwenHybridConfig& config,
+                                                       std::size_t layer) {
+    std::vector<std::string> names;
+    const std::string prefix = layer_tensor_prefix(layer);
+    const bool gdn = layer_is_gdn(config, layer);
+    names.push_back(prefix + "input_layernorm.weight");
+    names.push_back(prefix + "post_attention_layernorm.weight");
+    if (gdn) {
+        names.push_back(prefix + "linear_attn.in_proj_a.weight");
+        names.push_back(prefix + "linear_attn.in_proj_b.weight");
+        names.push_back(prefix + "linear_attn.in_proj_qkv.weight");
+        names.push_back(prefix + "linear_attn.in_proj_z.weight");
+        names.push_back(prefix + "linear_attn.conv1d.weight");
+        names.push_back(prefix + "linear_attn.out_proj.weight");
+        names.push_back(prefix + "linear_attn.norm.weight");
+        names.push_back(prefix + "linear_attn.dt_bias");
+        names.push_back(prefix + "linear_attn.A_log");
+    } else {
+        names.push_back(prefix + "self_attn.q_proj.weight");
+        names.push_back(prefix + "self_attn.k_proj.weight");
+        names.push_back(prefix + "self_attn.v_proj.weight");
+        names.push_back(prefix + "self_attn.o_proj.weight");
+        names.push_back(prefix + "self_attn.q_norm.weight");
+        names.push_back(prefix + "self_attn.k_norm.weight");
     }
     return names;
 }
@@ -109,30 +117,40 @@ Status load_hybrid_model_level_quantized(
     const HybridLoadOptions& options,
     HybridModelLevelWeights& weights)
 {
-    auto embed = shelf::weights::load_quantized_matrix(
-        reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
-    if (!embed.ok()) return embed.status();
-    weights.embed_tokens = embed.release();
+    const bool need_embedding =
+        options.load_embedding ||
+        (options.load_lm_head && config.tie_word_embeddings);
+    if (need_embedding) {
+        auto embed = shelf::weights::load_quantized_matrix(
+            reader, "model.language_model.embed_tokens.weight", arena, stream,
+            options.weights);
+        if (!embed.ok()) return embed.status();
+        weights.embed_tokens = embed.release();
+    }
 
     if (config.tie_word_embeddings) {
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
-        return Status::make_ok();
+    } else if (options.load_lm_head) {
+        auto head = shelf::weights::load_quantized_matrix(
+            reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+        if (!head.ok()) {
+            head = shelf::weights::load_quantized_matrix(
+                reader, "lm_head.weight", arena, stream, options.weights);
+            if (!head.ok()) return head.status();
+        }
+        weights.lm_head = head.release();
+        weights.lm_head_tied = false;
+    } else {
+        weights.lm_head_tied = false;
     }
-    auto head = shelf::weights::load_quantized_matrix(
-        reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
-    if (!head.ok()) {
-        head = shelf::weights::load_quantized_matrix(
-            reader, "lm_head.weight", arena, stream, options.weights);
-        if (!head.ok()) return head.status();
-    }
-    weights.lm_head = head.release();
-    weights.lm_head_tied = false;
 
-    auto norm = shelf::weights::load_quantized_small(
-        reader, "model.language_model.norm.weight", arena, stream);
-    if (!norm.ok()) return norm.status();
-    weights.final_norm_weight = norm.release();
+    if (options.load_final_norm) {
+        auto norm = shelf::weights::load_quantized_small(
+            reader, "model.language_model.norm.weight", arena, stream);
+        if (!norm.ok()) return norm.status();
+        weights.final_norm_weight = norm.release();
+    }
     return Status::make_ok();
 }
 

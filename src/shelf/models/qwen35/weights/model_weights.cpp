@@ -316,10 +316,23 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
+    const bool stage_load = options.stage.enabled;
+    const std::uint32_t num_layers =
+        static_cast<std::uint32_t>(config.num_hidden_layers);
+    if (stage_load &&
+        (options.stage.layers.layer_lo >= options.stage.layers.layer_hi ||
+         options.stage.layers.layer_hi > num_layers)) {
+        return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
+    }
+    const std::uint32_t layer_lo = stage_load ? options.stage.layers.layer_lo : 0u;
+    const std::uint32_t layer_hi = stage_load ? options.stage.layers.layer_hi : num_layers;
+    const bool load_embedding = !stage_load || options.stage.first();
+    const bool load_final = !stage_load || options.stage.last(num_layers);
+
     shelf::weights::WeightLoadOptions embed_load;
     embed_load.preshuffle = false;
 
-    {
+    if (load_embedding) {
         auto m = shelf::weights::load_bf16_matrix(
             collection, "model.language_model.embed_tokens.weight", arena, stream, embed_load);
         if (!m.ok()) return m.status();
@@ -327,9 +340,16 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     }
 
     if (config.tie_word_embeddings) {
+        if (!load_embedding && load_final) {
+            auto m = shelf::weights::load_bf16_matrix(
+                collection, "model.language_model.embed_tokens.weight", arena, stream,
+                embed_load);
+            if (!m.ok()) return m.status();
+            weights.embed_tokens = m.release();
+        }
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
-    } else {
+    } else if (load_final) {
         auto m = shelf::weights::load_bf16_matrix(
             collection, "model.language_model.lm_head.weight", arena, stream, embed_load);
         if (!m.ok()) {
@@ -339,21 +359,23 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
         }
         weights.lm_head = m.release();
         weights.lm_head_tied = false;
+    } else {
+        weights.lm_head_tied = false;
     }
 
-    {
+    if (load_final) {
         auto t = shelf::weights::load_bf16_tensor(
             collection, "model.language_model.norm.weight", arena, stream);
         if (!t.ok()) return t.status();
         weights.final_norm_weight = t.release();
     }
 
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    for (std::uint32_t l = layer_lo; l < layer_hi; ++l) {
         Status st = load_layer_bf16(arena, stream, collection, l, options, weights.layers[l]);
         if (!st.ok()) return st;
     }
 
-    if (options.load_mtp_layers) {
+    if (options.load_mtp_layers && !stage_load) {
         Status mtp = load_mtp_bf16(arena, stream, collection, options, weights);
         if (!mtp.ok()) return mtp;
     }
@@ -481,12 +503,39 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     if (!config_result.ok()) return config_result.status();
     Qwen35TextConfig config = config_result.release();
 
-    std::vector<std::string> requested = shelf::qwen_hybrid::hf_quantized_body_names(config);
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    std::vector<std::string> requested;
+    const bool stage_load = options.stage.enabled;
+    const std::uint32_t num_layers =
+        static_cast<std::uint32_t>(config.num_hidden_layers);
+    if (stage_load &&
+        (options.stage.layers.layer_lo >= options.stage.layers.layer_hi ||
+         options.stage.layers.layer_hi > num_layers)) {
+        return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
+    }
+    const std::uint32_t layer_lo = stage_load ? options.stage.layers.layer_lo : 0u;
+    const std::uint32_t layer_hi = stage_load ? options.stage.layers.layer_hi : num_layers;
+    const bool load_embedding = !stage_load || options.stage.first();
+    const bool load_final = !stage_load || options.stage.last(num_layers);
+
+    if (load_embedding) {
+        requested.push_back("model.language_model.embed_tokens.weight");
+    }
+    if (load_final) {
+        if (config.tie_word_embeddings) {
+            requested.push_back("model.language_model.embed_tokens.weight");
+        } else {
+            requested.push_back("model.language_model.lm_head.weight");
+        }
+        requested.push_back("model.language_model.norm.weight");
+    }
+    for (std::uint32_t l = layer_lo; l < layer_hi; ++l) {
+        std::vector<std::string> layer_names =
+            shelf::qwen_hybrid::hf_quantized_layer_body_names(config, l);
+        requested.insert(requested.end(), layer_names.begin(), layer_names.end());
         const std::vector<std::string> ffn = dense_ffn_names(l);
         requested.insert(requested.end(), ffn.begin(), ffn.end());
     }
-    if (options.load_mtp_layers) {
+    if (options.load_mtp_layers && !stage_load) {
         const auto& mtp_names = mtp_required_tensors();
         requested.insert(requested.end(), mtp_names.begin(), mtp_names.end());
     }
@@ -510,11 +559,16 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
+    shelf::qwen_hybrid::HybridLoadOptions hybrid_options = options;
+    hybrid_options.load_embedding = load_embedding;
+    hybrid_options.load_lm_head = load_final;
+    hybrid_options.load_final_norm = load_final;
+
     Status model_level = shelf::qwen_hybrid::load_hybrid_model_level_quantized(
-        reader, config, arena, stream, options, weights);
+        reader, config, arena, stream, hybrid_options, weights);
     if (!model_level.ok()) return model_level;
 
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    for (std::uint32_t l = layer_lo; l < layer_hi; ++l) {
         Status st = shelf::qwen_hybrid::load_hybrid_layer_body_quantized(
             arena, stream, reader, config, l, options, weights.layers[l]);
         if (!st.ok()) return st;
@@ -522,7 +576,7 @@ Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
         if (!st.ok()) return st;
     }
 
-    if (options.load_mtp_layers) {
+    if (options.load_mtp_layers && !stage_load) {
         Status mtp = load_mtp_quantized(arena, stream, reader, options.weights, weights);
         if (!mtp.ok()) return mtp;
     }

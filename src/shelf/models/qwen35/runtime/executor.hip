@@ -111,10 +111,26 @@ Status build_host_execution_context(
         return Status::invalid_state("dispatch staging not allocated", __FILE__, __LINE__);
     }
     auto* token_ids = executor.batch_context_storage.token_ids.data<int32_t>();
+    const bool stage_enabled = executor.config.stage.enabled;
+    const bool first_stage = !stage_enabled || executor.config.stage.first();
+    const bool last_stage = !stage_enabled ||
+        executor.config.stage.last(static_cast<std::uint32_t>(
+            executor.model->text_config().num_hidden_layers));
+    auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
     for (uint32_t i = 0; i < program.external_input_count; ++i) {
-        ctx.external_input_storage[i] = token_ids;
+        ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
+                                                   : pipeline_in;
     }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
+        if (!last_stage) {
+            if (i != 0u) {
+                return Status::invalid_state(
+                    "pipeline stage has more than one external output",
+                    __FILE__, __LINE__);
+            }
+            ctx.external_output_storage[i] = executor.pipeline_output_hidden.data<void>();
+            continue;
+        }
         if (i == 0u) {
             ctx.external_output_storage[i] = executor.output_hidden.data<void>();
         } else if (i == 1u) {
@@ -390,8 +406,21 @@ static bool attention_plan_key_for(
     const void* inputs[kHostExternalCapacity] = {};
     void* outputs[kHostExternalCapacity] = {};
     auto* token_ids = executor.batch_context_storage.token_ids.data<int32_t>();
-    for (uint32_t i = 0; i < program.external_input_count; ++i) inputs[i] = token_ids;
+    const bool stage_enabled = executor.config.stage.enabled;
+    const bool first_stage = !stage_enabled || executor.config.stage.first();
+    const bool last_stage = !stage_enabled ||
+        executor.config.stage.last(static_cast<std::uint32_t>(
+            executor.model->text_config().num_hidden_layers));
+    auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
+    for (uint32_t i = 0; i < program.external_input_count; ++i) {
+        inputs[i] = first_stage ? static_cast<const void*>(token_ids) : pipeline_in;
+    }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
+        if (!last_stage) {
+            if (i != 0u) return false;
+            outputs[i] = executor.pipeline_output_hidden.data<void>();
+            continue;
+        }
         if (i == 0u) {
             outputs[i] = executor.output_hidden.data<void>();
         } else if (i == 1u) {
@@ -689,12 +718,23 @@ Result<PendingBatch> submit_co_batch(
     BatchExecutionOutput output;
     output.num_outputs = prep.num_outputs;
     output.num_token_rows = N;
-    if (N > 0) {
+    const bool stage_enabled = executor.config.stage.enabled;
+    const bool last_stage = !stage_enabled ||
+        executor.config.stage.last(static_cast<std::uint32_t>(
+            executor.model->text_config().num_hidden_layers));
+    if (!last_stage) {
+        if (N > 0) {
+            auto hidden_slice = executor.pipeline_output_hidden.slice(0, 0, N);
+            if (!hidden_slice.ok()) return on_error(Status::invalid_argument(
+                "pipeline_output_hidden slice", __FILE__, __LINE__));
+            output.final_hidden = hidden_slice.release();
+        }
+    } else if (N > 0) {
         auto token_hidden_slice = executor.token_hidden.slice(0, 0, N);
         if (!token_hidden_slice.ok()) return on_error(Status::invalid_argument("token_hidden slice", __FILE__, __LINE__));
         output.token_hidden = token_hidden_slice.release();
     }
-    if (prep.num_outputs > 0) {
+    if (last_stage && prep.num_outputs > 0) {
         auto hidden_slice = executor.output_hidden.slice(0, 0, prep.num_outputs);
         if (!hidden_slice.ok()) return on_error(Status::invalid_argument("final_hidden slice", __FILE__, __LINE__));
         auto logits_slice = executor.logits.slice(0, 0, prep.num_outputs);
@@ -1094,6 +1134,8 @@ Executor::Executor(Executor&& other) noexcept
       logits(std::move(other.logits)),
       sampled_tokens(std::move(other.sampled_tokens)),
       token_hidden(std::move(other.token_hidden)),
+      pipeline_input_hidden(std::move(other.pipeline_input_hidden)),
+      pipeline_output_hidden(std::move(other.pipeline_output_hidden)),
       dflash_target_hidden(std::move(other.dflash_target_hidden)),
       stochastic_topk_ids(std::move(other.stochastic_topk_ids)),
       stochastic_topk_logits(std::move(other.stochastic_topk_logits)),
@@ -1150,6 +1192,8 @@ Executor::Executor(Executor&& other) noexcept
     other.logits = gpu::Tensor{};
     other.sampled_tokens = gpu::Tensor{};
     other.token_hidden = gpu::Tensor{};
+    other.pipeline_input_hidden = gpu::Tensor{};
+    other.pipeline_output_hidden = gpu::Tensor{};
     other.dflash_target_hidden = {};
     other.stochastic_topk_ids = gpu::Tensor{};
     other.stochastic_topk_logits = gpu::Tensor{};
@@ -1230,6 +1274,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         logits = std::move(other.logits);
         sampled_tokens = std::move(other.sampled_tokens);
         token_hidden = std::move(other.token_hidden);
+        pipeline_input_hidden = std::move(other.pipeline_input_hidden);
+        pipeline_output_hidden = std::move(other.pipeline_output_hidden);
         dflash_target_hidden = std::move(other.dflash_target_hidden);
         stochastic_topk_ids = std::move(other.stochastic_topk_ids);
         stochastic_topk_logits = std::move(other.stochastic_topk_logits);
@@ -1274,6 +1320,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.logits = gpu::Tensor{};
         other.sampled_tokens = gpu::Tensor{};
         other.token_hidden = gpu::Tensor{};
+        other.pipeline_input_hidden = gpu::Tensor{};
+        other.pipeline_output_hidden = gpu::Tensor{};
         other.dflash_target_hidden = {};
         other.stochastic_topk_ids = gpu::Tensor{};
         other.stochastic_topk_logits = gpu::Tensor{};
@@ -1443,6 +1491,8 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.logits = gpu::Tensor{};
     ex.output_hidden = gpu::Tensor{};
     ex.token_hidden = gpu::Tensor{};
+    ex.pipeline_input_hidden = gpu::Tensor{};
+    ex.pipeline_output_hidden = gpu::Tensor{};
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
@@ -1555,8 +1605,8 @@ Result<Executor> create_model_executor(
 
     const Qwen35TextConfig& tc = model.text_config();
     {
-        auto expected_gdn_result = make_qwen35_gdn_state_layout_tp(
-            tc, config.tp != nullptr ? config.tp->tp_size : 1u);
+        auto expected_gdn_result = make_qwen35_gdn_state_layout_stage(
+            tc, config.stage, config.tp != nullptr ? config.tp->tp_size : 1u);
         if (!expected_gdn_result.ok()) return expected_gdn_result.status();
         const GdnStatePoolLayout& expected_gdn = expected_gdn_result.value();
         const auto& actual_gdn = gdn_state_pool.layout();
@@ -1582,8 +1632,8 @@ Result<Executor> create_model_executor(
                 + std::to_string(expected_gdn.head_v) + ")";
             return Status::invalid_argument(msg.c_str(), __FILE__, __LINE__);
         }
-        const uint32_t expected_attn_layers = static_cast<uint32_t>(
-            shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
+        const uint32_t expected_attn_layers =
+            qwen35_stage_attention_layers(tc, config.stage);
         const uint32_t expected_kv_heads =
             (config.tp != nullptr && config.tp->tp_size > 1)
                 ? config.tp->local_key_value_heads
@@ -1631,19 +1681,33 @@ Result<Executor> create_model_executor(
                       : R;
     if (MO > N) MO = N;
     ex.config.max_scheduled_output_rows = MO;
+    const bool stage_enabled = config.stage.enabled;
+    const std::uint32_t num_layers =
+        static_cast<std::uint32_t>(tc.num_hidden_layers);
+    const bool first_stage = !stage_enabled || config.stage.first();
+    const bool last_stage = !stage_enabled || config.stage.last(num_layers);
 
     auto st = allocate_contiguous_tensor<int32_t>(arena, {Npad}, ex.input_ids);
     if (!st.ok()) return st;
 
+    if (!first_stage) {
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.pipeline_input_hidden);
+        if (!st.ok()) return st;
+    }
+    if (!last_stage) {
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.pipeline_output_hidden);
+        if (!st.ok()) return st;
+    }
 
-
-    st = allocate_contiguous_tensor<bf16_t>(arena, {MO, H}, ex.output_hidden);
-    if (!st.ok()) return st;
-    st = allocate_contiguous_tensor<float>(arena, {MO, V}, ex.logits);
-    if (!st.ok()) return st;
     st = allocate_contiguous_tensor<int32_t>(arena, {MO}, ex.sampled_tokens);
     if (!st.ok()) return st;
-    if (V > 0u && MO > 0u) {
+    if (last_stage) {
+        st = allocate_contiguous_tensor<bf16_t>(arena, {MO, H}, ex.output_hidden);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {MO, V}, ex.logits);
+        if (!st.ok()) return st;
+    }
+    if (V > 0u && MO > 0u && last_stage) {
         ex.stochastic_topk_partitions = shelf::kernel::dflash2_radix_default_partitions(V);
         const std::size_t radix_bytes = shelf::kernel::dflash2_radix_topn_scratch_bytes(
             MO, ex.stochastic_topk_partitions, V);
@@ -1835,6 +1899,7 @@ Result<Executor> create_model_executor(
         }
         Qwen35LowerOptions lower_options;
         lower_options.rope_profile = ex.config.rope_profile;
+        lower_options.stage = ex.config.stage;
         lower_options.hidden_taps = std::span<const uint32_t>(
             ex.config.target_hidden_taps.data(), ex.config.target_hidden_tap_count);
         lower_options.tp = config.tp;

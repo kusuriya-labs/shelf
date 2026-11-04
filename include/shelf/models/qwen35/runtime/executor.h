@@ -45,6 +45,7 @@ struct ExecutorConfig {
     runtime::DecodeBackend backend = runtime::DecodeBackend::Hip;
     const Qwen35TensorParallelContext* tp = nullptr;
     EffectiveRopeProfile rope_profile;
+    PipelineStage stage;
 };
 
 using ::shelf::runtime::DispatchStagingPool;
@@ -125,6 +126,8 @@ struct Executor {
     gpu::Tensor logits;
     gpu::Tensor sampled_tokens;
     gpu::Tensor token_hidden;
+    gpu::Tensor pipeline_input_hidden;
+    gpu::Tensor pipeline_output_hidden;
     std::array<gpu::Tensor, kMaxTargetHiddenTaps> dflash_target_hidden;
     gpu::Tensor stochastic_topk_ids;
     gpu::Tensor stochastic_topk_logits;
