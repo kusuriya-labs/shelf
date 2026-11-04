@@ -52,9 +52,9 @@ void print_usage(FILE* out) {
         "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
         "  --page-tokens N              (default 16)\n"
         "  --arena-gib N|auto           (default auto = free VRAM minus 1 GiB)\n"
-        "  --device LIST                comma separated GPUs, one per --tp rank\n"
+        "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
-        "  --tp N                       1 | 2 (default 1)\n"
+        "  --tensor-parallel N          1 | 2 (default 1)\n"
         "  --dump PATH                  write teacher-forced logits rows\n"
         "  --compare PATH               compare against a baseline dump\n");
 }
@@ -159,9 +159,9 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 fprintf(stderr, "invalid --device\n");
                 return false;
             }
-        } else if (key == "--tp") {
+        } else if (key == "--tensor-parallel") {
             if (!parse_int(need_value(), opts.tp) || (opts.tp != 1 && opts.tp != 2)) {
-                fprintf(stderr, "invalid --tp (expected 1 or 2)\n");
+                fprintf(stderr, "invalid --tensor-parallel (expected 1 or 2)\n");
                 return false;
             }
         } else if (key == "--arena-gib") {
@@ -203,7 +203,7 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
         return false;
     }
     if (opts.devices.size() != static_cast<size_t>(opts.tp)) {
-        fprintf(stderr, "--device expects %d entries for --tp %d, got %zu\n",
+        fprintf(stderr, "--device expects %d entries for --tensor-parallel %d, got %zu\n",
                 opts.tp, opts.tp, opts.devices.size());
         return false;
     }
@@ -375,7 +375,7 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
         if (family.value() != shelf::models::ModelFamily::Dense) {
-            fprintf(stderr, "quality --tp %d runs dense checkpoints only\n", opts.tp);
+            fprintf(stderr, "quality --tensor-parallel %d runs dense checkpoints only\n", opts.tp);
             return 1;
         }
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;

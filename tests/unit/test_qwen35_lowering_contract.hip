@@ -177,6 +177,34 @@ int main() {
         check(sigmoids == 0, "gdn only: no sigmoid gate is emitted");
     }
 
+    {
+        shelf::qwen35::Qwen35LowerOptions normed_options;
+        normed_options.emit_normed_token_hidden = true;
+        auto normed = shelf::qwen35::lower_qwen35_to_primitives(cfg, w, normed_options);
+        check(normed.ok(), "normed token hidden: lowering succeeds");
+        if (normed.ok()) {
+            const auto& ng = normed.value().graph;
+            check(ng.external_outputs.size() == g.external_outputs.size() + 1,
+                  "normed token hidden: adds one external output");
+            if (!ng.external_outputs.empty()) {
+                const rt::ValueId tail = ng.external_outputs.back();
+                check(ng.value_specs[tail.id].row_domain == rt::ValueRowDomain::TOKEN_ROWS,
+                      "normed token hidden: covers token rows");
+                const rt::PrimitiveGraphNode* producer = nullptr;
+                for (const auto& n : ng.nodes) {
+                    for (const auto& out : n.outputs) {
+                        if (out.id == tail.id) producer = &n;
+                    }
+                }
+                check(producer != nullptr, "normed token hidden: has a producer");
+                if (producer != nullptr) {
+                    check(rt::primitive_kind_of(producer->node) == rt::PrimitiveKind::RMS_NORM,
+                          "normed token hidden: produced by RMS_NORM");
+                }
+            }
+        }
+    }
+
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail == 0) {
         std::printf("QWEN35_LOWERING_CONTRACT: PASS\n");

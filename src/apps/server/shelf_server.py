@@ -97,7 +97,7 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
     if opts.tp > 1:
-        argv += ["--tp", str(opts.tp)]
+        argv += ["--tensor-parallel", str(opts.tp)]
     if opts.verify_weights:
         argv += ["--verify-weights", "1"]
     return argv
@@ -392,8 +392,8 @@ def parse_args(argv=None):
                         help="GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto)")
     parser.add_argument("--device", default="0",
                         help="comma separated GPU devices, one per rank; "
-                             "count must match --tp (default 0)")
-    parser.add_argument("--tp", type=int, default=1, choices=(1, 2),
+                             "count must match --tensor-parallel (default 0)")
+    parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
     parser.add_argument("--kv-cache-dtype", default="bf16",
                         choices=("bf16", "fp8"),
@@ -419,7 +419,7 @@ def parse_args(argv=None):
     if not devices or any(not device.isdigit() for device in devices):
         parser.error(f"bad --device: {opts.device}")
     if len(devices) != opts.tp:
-        parser.error(f"--device expects {opts.tp} entries for --tp {opts.tp}, "
+        parser.error(f"--device expects {opts.tp} entries for --tensor-parallel {opts.tp}, "
                      f"got {len(devices)}")
     if len(set(devices)) != len(devices):
         parser.error(f"--device entries must be unique: {opts.device}")

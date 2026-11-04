@@ -9,6 +9,7 @@
 #include "private_target_weights.h"
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/dflash2_session_pool.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -743,6 +744,193 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
     printf("GENERATED_TOKENS=%zu\n", generated.size());
     printf("ARENA_USED_GB=%.3f\n", static_cast<double>(arena.used()) / (1024.0 * 1024.0 * 1024.0));
+    printf("ARENA_COMMITTED_GB=%.3f\n",
+           static_cast<double>(arena.committed()) / (1024.0 * 1024.0 * 1024.0));
+    printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());
+    printf("PREFILL_MS=%.1f\n", prefill_ms);
+    printf("DECODE_MS=%.1f\n", decode_ms);
+    printf("DECODE_TOKENS=%u\n", decode_tokens);
+    printf("DECODE_TOKENS_PER_SEC=%.2f\n", decode_tps);
+    printf("KV_CACHE_DTYPE=%s\n", kv_cache_dtype.c_str());
+    printf("KV_POOL_RESERVED_BYTES=%zu\n", kv_pool.reserved_bytes());
+
+    printf("GENERATED_IDS=");
+    for (std::size_t i = 0; i < generated.size(); ++i) {
+        if (i > 0) printf(",");
+        printf("%d", generated[i]);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    const uint32_t used_kv_pages = kv_pool.num_used_pages();
+    const uint32_t used_seq_slots = slot_pool.num_used_slots();
+    const uint32_t used_gdn_slots = gdn_pool.num_used_slots();
+    if (used_kv_pages != 0 || used_seq_slots != 0 || used_gdn_slots != 0) {
+        fprintf(stderr,
+                "pool leak after generation: kv_pages=%u seq_slots=%u gdn_slots=%u\n",
+                used_kv_pages, used_seq_slots, used_gdn_slots);
+        return 1;
+    }
+    auto shutdown_st = runtime.shutdown();
+    if (!shutdown_st.ok()) {
+        fprintf(stderr, "runtime shutdown failed: %s\n", shutdown_st.message().c_str());
+        return 1;
+    }
+    return 0;
+}
+
+
+int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
+                 const std::vector<int32_t>& prompt_ids,
+                 unsigned long max_new_tokens,
+                 uint32_t mtp_drafts,
+                 int mtp_stats,
+                 const std::string& kv_cache_dtype,
+                 const shelf::qwen35::runtime::SamplingConfig& sampling) {
+    auto& executor = runtime.executor();
+    auto& slot_pool = runtime.slot_pool();
+    auto& gdn_pool = runtime.gdn_pool();
+    auto& kv_pool = runtime.kv_pool();
+    auto& arena = runtime.arena();
+    const hipStream_t stream = runtime.stream();
+    const auto& text_config = runtime.model().hybrid_config();
+    const auto* dense = runtime.model().dense_model();
+    if (dense == nullptr) {
+        fprintf(stderr, "MTP requires a dense model\n");
+        return 1;
+    }
+    print_model_geometry(runtime.model());
+    if (std::getenv("SHELF_MEM_DEBUG") != nullptr) {
+        dump_mem_debug(runtime);
+    }
+
+    const uint32_t max_seq = runtime.config().max_seq_len;
+    auto sequence_result = shelf::state::create_paged_sequence_state(
+        slot_pool, gdn_pool, kv_pool, max_seq, stream);
+    if (!sequence_result.ok()) {
+        fprintf(stderr, "mtp target sequence create failed: %s\n",
+                sequence_result.status().message().c_str());
+        return 1;
+    }
+    shelf::state::PagedSequenceState sequence = sequence_result.release();
+
+    shelf::qwen35::runtime::MtpDrafterConfig drafter_config;
+    drafter_config.num_drafts = mtp_drafts;
+    drafter_config.max_seq_len = max_seq;
+    drafter_config.page_tokens = runtime.config().page_tokens;
+    drafter_config.max_batch_rows = std::min(
+        executor.config.max_batch_rows,
+        shelf::qwen35::runtime::kMtpMaxPrefillRows);
+    drafter_config.kv_dtype = runtime.config().kv_cache_dtype;
+    if (runtime.config().rope_profile.has_value()) {
+        drafter_config.rope_profile = *runtime.config().rope_profile;
+    }
+    auto drafter_result = shelf::qwen35::runtime::create_mtp_drafter(
+        *dense, gdn_pool, arena, stream, drafter_config);
+    if (!drafter_result.ok()) {
+        fprintf(stderr, "mtp drafter create failed: %s\n",
+                drafter_result.status().message().c_str());
+        (void)shelf::state::release_paged_sequence_state(sequence, stream);
+        return 1;
+    }
+    std::unique_ptr<shelf::qwen35::runtime::MtpDrafter> drafter =
+        drafter_result.release();
+    auto cleanup = [&]() {
+        (void)shelf::qwen35::runtime::mtp_drafter_shutdown(*drafter, stream);
+        drafter.reset();
+        (void)shelf::state::release_paged_sequence_state(sequence, stream);
+    };
+
+    const auto t_prefill_start = std::chrono::steady_clock::now();
+    auto prefill_result = shelf::qwen35::runtime::mtp_spec_prefill(
+        *drafter, executor, sequence, prompt_ids.data(),
+        static_cast<uint32_t>(prompt_ids.size()), sampling);
+    if (!prefill_result.ok()) {
+        fprintf(stderr, "mtp prefill failed: %s\n",
+                prefill_result.status().message().c_str());
+        cleanup();
+        return 1;
+    }
+    int32_t pending = prefill_result.value().pending_token;
+    std::vector<int32_t> generated;
+    generated.push_back(pending);
+    uint32_t decode_tokens = 0u;
+    const auto t_prefill_end = std::chrono::steady_clock::now();
+
+    const auto t_decode_start = std::chrono::steady_clock::now();
+    bool finished = shelf::qwen_hybrid::is_stop_token(text_config.stop_tokens, pending);
+    while (!finished && generated.size() < max_new_tokens) {
+        const uint32_t remaining =
+            static_cast<uint32_t>(max_new_tokens - generated.size());
+        auto step_result = shelf::qwen35::runtime::mtp_spec_step(
+            *drafter, executor, sequence, pending, remaining);
+        if (!step_result.ok()) {
+            fprintf(stderr, "mtp step failed: %s\n",
+                    step_result.status().message().c_str());
+            cleanup();
+            return 1;
+        }
+        auto step = step_result.release();
+        for (uint32_t i = 0u; i < step.emitted_count; ++i) {
+            generated.push_back(step.emitted[i]);
+            ++decode_tokens;
+        }
+        pending = step.pending_token;
+        finished = step.finished;
+    }
+    const hipError_t sync_err = hipStreamSynchronize(stream);
+    if (sync_err != hipSuccess) {
+        fprintf(stderr, "mtp sync failed: %s\n", hipGetErrorString(sync_err));
+        cleanup();
+        return 1;
+    }
+    const auto t_decode_end = std::chrono::steady_clock::now();
+
+    if (mtp_stats != 0) {
+        const auto& timing = drafter->timing;
+        const float mean_accepted = timing.rounds > 0u
+            ? static_cast<float>(timing.accepted_drafts) /
+                  static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float full_rate = timing.rounds > 0u
+            ? static_cast<float>(timing.full_accepts) /
+                  static_cast<float>(timing.rounds)
+            : 0.0f;
+        const float emitted_per_round = timing.rounds > 0u
+            ? static_cast<float>(timing.generated_tokens) /
+                  static_cast<float>(timing.rounds)
+            : 0.0f;
+        printf("MTP_DRAFTS=%u\n", drafter_config.num_drafts);
+        printf("MTP_ROUNDS=%u\n", timing.rounds);
+        printf("MTP_FULL_ACCEPTS=%u\n", timing.full_accepts);
+        printf("MTP_PARTIAL_ACCEPTS=%u\n", timing.partial_accepts);
+        printf("MTP_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
+        printf("MTP_MEAN_ACCEPTED=%.3f\n", mean_accepted);
+        printf("MTP_FULL_ACCEPT_RATE=%.3f\n", full_rate);
+        printf("MTP_EMITTED_PER_ROUND=%.3f\n", emitted_per_round);
+        printf("MTP_VERIFY_ROWS=%u\n", timing.verify_rows);
+        printf("MTP_GDN_RESTORES=%u\n", timing.gdn_restores);
+        printf("MTP_DRAFT_MS=%.2f\n", timing.draft_ms);
+        printf("MTP_VERIFY_MS=%.2f\n", timing.verify_ms);
+        printf("MTP_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
+        printf("MTP_COMPACT_REPLAY_MS=%.2f\n", timing.compact_replay_ms);
+        printf("MTP_ROUND_MS=%.2f\n", timing.round_ms);
+        fflush(stdout);
+    }
+
+    cleanup();
+
+    const auto prefill_ms =
+        std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+    const auto decode_ms =
+        std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+    const double decode_tps =
+        decode_ms > 0.0 ? decode_tokens * 1000.0 / decode_ms : 0.0;
+
+    printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
+    printf("GENERATED_TOKENS=%zu\n", generated.size());
+    printf("ARENA_USED_GB=%.3f\n",
+           static_cast<double>(arena.used()) / (1024.0 * 1024.0 * 1024.0));
     printf("ARENA_COMMITTED_GB=%.3f\n",
            static_cast<double>(arena.committed()) / (1024.0 * 1024.0 * 1024.0));
     printf("MODEL_LOAD_MS=%.1f\n", runtime.model_load_ms());

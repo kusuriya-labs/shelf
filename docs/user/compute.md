@@ -16,16 +16,16 @@
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
-| `--device N\|N,M` | GPU device(s); count must match --tp or --pipeline-parallel (default 0) |
-| `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
-| `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tp 1) |
+| `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
 | `--decode-backend TYPE` | hip (default) |
 | `--verify-weights 0\|1` | verify quantized payload CRC32 on load (default 0) |
 | `--dump-logits PATH` | append per-step sampled logits rows (raw f32) to PATH row k aligns with GENERATED_IDS[k] (prefill row first) |
 | `--hidden-taps LIST` | comma separated layer ids (max 8) for intermediate hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE |
-| `--tp-combine-f32 0\|1` | keep row-parallel combine output in f32 (default 0 = bf16 round as today; tp only) |
+| `--tensor-parallel-combine-f32 0\|1` | keep row-parallel combine output in f32 (default 0 = bf16 round as today; tp only) |
 | `--temperature F` | sampling temperature (default 0 = greedy) |
 | `--top-p F` | nucleus sampling threshold in (0, 1] (default 1) |
 | `--min-p F` | min-p threshold in [0, 1] (default 0 = disabled) |
@@ -34,6 +34,9 @@
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
+| `--mtp` | enable the checkpoint's MTP block as the drafter |
+| `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
+| `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--prefix-cache-hot-tokens N` | prefix cache hot tier capacity in tokens (default 16384) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
@@ -46,7 +49,8 @@
 
 `--arena-gib auto` は起動時の空き VRAM から 1 GiB を引いた容量を arena に使う。
 KV の物理容量は個別に指定できない。model weight、prefix cache、`--working-set-reserve-gib`、
-DFlash2 の drafter（weight と session pool 等の runtime 領域）を確保した後に残る arena の領域を
+DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
+（専用 KV pool、executor、GDN snapshot）を確保した後に残る arena の領域を
 すべて KV に割り当てる。
 KV を増やすには `--arena-gib` を増やすか、prefix cache と `--working-set-reserve-gib` を減らす。
 既定は `0`（auto）で、executor が plan 後に確保する量を row bucket から推定して予約する。
@@ -73,7 +77,8 @@ MEMORY_PLAN mode=auto
 
 `target weights` は実際に arena へ load した後の使用量、`draft weights` は
 `--dflash2-model-dir` の safetensors サイズ、`drafter runtime` は drafter の
-scratch と session pool の領域（`--max-concurrent-requests` 分）、`runtime workspace` は
+scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分、MTP は
+専用 KV pool・executor・GDN snapshot）、`runtime workspace` は
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
 physical KV capacity、`prefix cache` は hot tier の実サイズである。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
@@ -118,6 +123,28 @@ gfx1201 の HIP kernel で decode を実行する既定構成である。選択�
 `DECODE_BACKEND=hip` として stdout に出力する
 （`--serve-stdio` の JSON Lines protocol には混ぜない）。
 
+### MTP speculative decoding
+
+`--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う単一
+request の speculative decode 経路に入る。DFlash2 とは排他的で、
+`--dflash2-model-dir` と同時に指定できない。
+
+```bash
+./build/shelf-compute \
+  --model-dir models/Qwen3.8-27B-FP8 \
+  --mtp --mtp-drafts 4 \
+  --max-new-tokens 32 --max-seq-len 512 --device 0
+```
+
+制約:
+
+- dense checkpoint のみ。MoE checkpoint では起動しない。
+- `--tensor-parallel 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
+- partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
+- prefix cache は MTP 経路では使われない。
+
+詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。
+
 ### DFlash2 speculative decoding
 
 `--dflash2-model-dir` 指定時のみ DFlash 経路に入る。未指定時は既存の
@@ -145,7 +172,7 @@ DFlash2 経路でも受け付ける。
 - KV 容量計画は factor と独立である。必要な最小ページ数は `--max-seq-len` だけで決まり、残りのページ数は arena の余りで決まる。
 - 静的 YaRN は入力長に関係なく係数が一定であり、短文の品質にも影響しうる（Qwen 公式の注意）。長文を扱うときだけ有効化する。
 - speculative decoding（`--dflash2-model-dir`）と併用できる。Drafter は target の factor を継承せず、自身の checkpoint の RoPE（通常は `default`）を使う。起動時に `DFLASH2 rope:` 行を stderr へ出す。
-- 2x の全長（524,288）は `--kv-cache-dtype fp8 --tp 2` で容量が成立する（FP8 KV の品質特性は別途評価が必要）。
+- 2x の全長（524,288）は `--kv-cache-dtype fp8 --tensor-parallel 2` で容量が成立する（FP8 KV の品質特性は別途評価が必要）。
 
 ### prefix cache
 
@@ -159,14 +186,14 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 
 ### tensor parallel
 
-`--tp 2` で 2 GPU の tensor parallel 実行。`--device` に rank ごとの GPU を
+`--tensor-parallel 2` で 2 GPU の tensor parallel 実行。`--device` に rank ごとの GPU を
 カンマ区切りで指定する（例 `--device 0,1`、非連続な `--device 0,2` も可）。
-`--device` の既定は `0` であり、`--tp 2` のときは 2 個の指定が必須である
-（例 `--device 0,1`）。個数が `--tp` と一致しない場合・重複している場合・
+`--device` の既定は `0` であり、`--tensor-parallel 2` のときは 2 個の指定が必須である
+（例 `--device 0,1`）。個数が `--tensor-parallel` と一致しない場合・重複している場合・
 可視 device を超出する場合は明示エラー。model weight は rank ごとに
 順次 load するため load 時間は単 GPU より長い。
 
-`--tp 2` で併用できない option（いずれも model load 前にエラー）:
+`--tensor-parallel 2` で併用できない option（いずれも model load 前にエラー）:
 
 - prefix cache（`--prefix-cache 0` が必須）
 - `--dflash2-model-dir`（per-rank 配線が未実装）
@@ -180,12 +207,12 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 
 `--pipeline-parallel K` で model の layer を K stage に分割し、stage ごとに GPU を
 割り当てる。`--device` は stage 数と同じ個数を指定する（例 `--device 0,1`）。
-`--tp` は `1` でなければならない。
+`--tensor-parallel` は `1` でなければならない。
 
 ```bash
 ./build/shelf-compute --model-dir /opt/zen/work/models/Qwen3.8-27B-FP8 \
   --input-ids-file /tmp/opencode/ids_1024.txt \
-  --device 0,1 --tp 1 --pipeline-parallel 2 \
+  --device 0,1 --tensor-parallel 1 --pipeline-parallel 2 \
   --max-seq-len 2048 --max-num-batched-tokens 2048 \
   --prefix-cache 0
 ```

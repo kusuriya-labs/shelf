@@ -18,6 +18,14 @@ int run_single_shot(Qwen35ComputeRuntime& runtime,
                     const std::string& kv_cache_dtype,
                     const std::string& dump_logits_path);
 
+int run_mtp_shot(Qwen35ComputeRuntime& runtime,
+                 const std::vector<int32_t>& prompt_ids,
+                 unsigned long max_new_tokens,
+                 uint32_t mtp_drafts,
+                 int mtp_stats,
+                 const std::string& kv_cache_dtype,
+                 const shelf::qwen35::runtime::SamplingConfig& sampling);
+
 int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      const std::vector<int32_t>& prompt_ids,
                      unsigned long max_new_tokens,

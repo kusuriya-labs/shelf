@@ -83,6 +83,12 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
 
     const std::size_t taps = config.target_hidden_tap_count;
     total += align_up((1u + taps) * rows * hidden * sizeof(bf16_t));
+    if (config.emit_normed_token_hidden) {
+        total += align_up(rows * hidden * sizeof(bf16_t));
+    }
+    if (config.external_hidden_input) {
+        total += align_up(rows * hidden * sizeof(bf16_t));
+    }
 
     const std::size_t out_cap = std::max(requests, rows);
     total += align_up(3u * rows * sizeof(std::uint32_t));

@@ -713,6 +713,18 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         pg.external_outputs.push_back(hidden_tap_values[t]);
     }
 
+    if (last_stage && options.emit_normed_token_hidden) {
+        RT::RmsNormNode token_rms;
+        token_rms.shape = hidden_key;
+        token_rms.eps = eps;
+        token_rms.group_size = hidden_size;
+        token_rms.parameter_index = final_norm_param;
+        token_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+        RT::ValueId normed_tokens =
+            em.unary(RT::PrimitiveNode{token_rms}, layer_input, hidden_size);
+        pg.external_outputs.push_back(normed_tokens);
+    }
+
     auto st = RT::validate_primitive_graph(pg);
     if (!st.ok()) return st;
 

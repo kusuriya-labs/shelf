@@ -3,6 +3,7 @@
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/runtime/graph/primitive_graph.h>
 #include <shelf/runtime/graph/primitive_node.h>
 #include <shelf/weights/matrix_weight.h>
@@ -339,6 +340,23 @@ int main() {
         for (std::size_t i = 0; i < 7; ++i) {
             check(lowered.parameters[i].elements == kParamElements[i], "parameter elements");
         }
+    }
+
+    {
+        shelf::qwen35::runtime::MtpDrafterConfig options;
+        options.num_drafts = 4u;
+        options.max_seq_len = 128u;
+        options.page_tokens = 16u;
+        options.max_batch_rows = 16u;
+        const std::size_t short_bytes =
+            shelf::qwen35::runtime::mtp_drafter_reserve_bytes(cfg, options);
+        options.max_seq_len = 512u;
+        const std::size_t long_bytes =
+            shelf::qwen35::runtime::mtp_drafter_reserve_bytes(cfg, options);
+        check(short_bytes > 0u, "mtp reserve: positive");
+        check(long_bytes > short_bytes, "mtp reserve: grows with sequence length");
+        check(shelf::qwen35::runtime::kMtpMaxDrafts == 31u,
+              "mtp reserve: draft ceiling");
     }
 
     std::printf("%d passed, %d failed\n", g_pass, g_fail);

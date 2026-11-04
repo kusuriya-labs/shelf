@@ -19,7 +19,7 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 
 ## 2. Gate 6 — 2x の長文 E2E（品質・性能）
 
-- 容量は実測済み: `--rope-factor 2 --kv-cache-dtype fp8 --tp 2 --max-seq-len 524288` で起動・生成に成功し、
+- 容量は実測済み: `--rope-factor 2 --kv-cache-dtype fp8 --tensor-parallel 2 --max-seq-len 524288` で起動・生成に成功し、
   rank あたり使用 23.11 GiB／arena 30.63 GiB。
 - 必要な作業:
   - 524,288 トークン級の入力で prefill / decode の速度を測り、`docs/perf/current.md` に記録する。
@@ -40,7 +40,6 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 | --- | --- |
 | correctness の tree positions | `DeviceBatchContext::rope_positions` は書き込み経路が無く、correctness の `exec_rope` は常に `row_positions` にフォールバックする。spec verify で optimized が外れた場合に位置が食い違う可能性がある。inv_freq table と attention factor は Gate 3 で一致済み |
 | HIP Graph | `SHELF_HIP_GRAPH` は既定 OFF。`graph_eligible` が `tp_schedules.empty()` を要求するため、検証は TP=1 でのみ意味を持つ。capture/replay と GPU ポインタ寿命の確認が未実施 |
-| MTP | `lower_qwen35_mtp_to_primitives` は profile を受け取るようになったが production 経路に未接続（tests のみ）。「MTP 経路も整合する」完了定義は lowering テストの範囲に限定して扱う |
 | prefix cache のキー | キーはトークン列のみで rope 識別子を含まない。factor はプロセス起動時に固定・キャッシュはプロセスローカルなので現状は安全。factor を実行中に変える機構や永続化を入れる場合はキーへの追加が必要 |
 | uint32 の上限 | 100 万トークン域の `max_seq_len + 1` / `row_positions` の加算順序とオーバーフロー境界の検証（単体テスト）が未実施 |
 | server 回帰の前提 | `tests/server/test_server_context_boundary.py` は FP8 重み 27 GiB + 32K BF16 KV + workspace が 32 GiB のカードに収まらず、この環境では起動できない（arena に 3.26 GiB しか残らない）。テスト側の容量前提を見直すか、FP8 KV / 小さい `--working-set-reserve-gib` で実行する経路を用意する |
@@ -116,7 +115,6 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
   `build_program_set`）と create（arena 確保）へ分けられれば program workspace の
   実値を使える。TP2 では rank の shard 分だけ過大（見積 2.06 GiB / 実測 1.16 GiB）
 * Decode(投機ONの場合、SpecとVerify)とPrefillを同じバッチ内で同時実行可能にして、pp=row2048が動作している場合でも、Decode出力を止めない
-* MTPの実装
 * exl3(mul1)の実装
 * MXFP4 linear の A 側量子化は、採用判断（logit 変動ゲートへ切り替える可否）と本実装が未完了
   （docs/research/20261103/mxfp4_gate_a_prime.md §11〜§13）
@@ -128,11 +126,11 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 
 PP の layer split・host hand-off・E2E は実装済み。以下は未対応または未検証。
 
-* TP と PP の同時利用（現行は `--tp 1` のみ）
+* TP と PP の同時利用（現行は `--tensor-parallel 1` のみ）
 * DFlash2 speculative decode との併用
 * prefix cache との併用
-* MTP block との併用
 * hidden taps / `--dump-logits` との併用
+* MTP block との併用（compute の MTP は `--tensor-parallel 1` / `--pipeline-parallel 1` のみ）
 * decode と prefill が同じ batch に混在する実行（機能 TODO の mixed batch と同じ。
   PP coordinator は現在 `unsupported` を返す）
 * stage 間 overlap（現行は pinned host 経由の直列 hand-off。性能最適化は未着手）

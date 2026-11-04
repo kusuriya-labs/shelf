@@ -8,7 +8,9 @@
 
 ## 現在の状態
 
-**現在の build に対する qualified baseline は、2026-11-03 の long-context prefill 1 断面のみである。**
+**現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
+2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist
+である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -58,7 +60,7 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 
 - measurement revision: `bb2e56e` + 計測用 harness 変更
 - GPU: Radeon AI PRO R9700 × 2（device 0,1）
-- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 0,1 --kv-cache-dtype fp8 --prompt-tokens 262128 --prefill-chunk 2048 --runs 5 --warmup 1`
+- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --tensor-parallel 2 --device 0,1 --kv-cache-dtype fp8 --prompt-tokens 262128 --prefill-chunk 2048 --runs 5 --warmup 1`
 - 524,288 は production の値が未取得（`kMeasuredMaxVisible24 = 524288` を採用済みだが、
   warmup + 5 run の production 計測は未実施。1 run の参考値のみ research 記録にあり）。詳細は
   [../research/20261103/gate6_long_context.md](../research/20261103/gate6_long_context.md)。
@@ -114,6 +116,30 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）
 
+## 2026-11-04 MTP decode（Qwen3.8-27B MXFP4）
+
+`models/Qwen3.8-27B-Quark-AWQ-MXFP4` を TP=1 / BF16 KV で計測した。target-only と
+MTP drafter（`--mtp --mtp-drafts 7`）を交互に実行し、warmup 1 + 5 run の p50 を取った。
+全 run で `GENERATED_IDS` が target-only と一致した。
+
+| prompt | target t/s | MTP K=7 t/s | speedup | accepted/7 | full accept | prefill target/MTP ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1024 | 26.03 | 56.55 | 2.17x | 6.88 | 1.00 | 405.3 / 508.0 |
+| 2048 | 26.25 | 37.91 | 1.44x | 4.25 | 0.58 | 818.5 / 977.7 |
+| 4096 | 25.93 | 49.46 | 1.91x | 6.00 | 0.89 | 1682.6 / 1968.6 |
+
+- measurement revision: `2c3cdb1`
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`、他の GPU は idle）
+- command（MTP）: `shelf-compute --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4 --input-ids-file <prose N tokens> --max-new-tokens 64 --max-seq-len 4096（4096 は 8192） --device 0 --prefix-cache 0 --mtp --mtp-drafts 7`
+- prompt: `tests/data/mtp_perf/prose.txt` を tokenizer で 1024 / 2048 / 4096 token に伸ばしたもの
+- 生成一致 anchor（`GENERATED_IDS` の sha1）: 1024 `6c07c6fe36929d9ad2f750304422b1a6f6035edc`、
+  2048 `08e9e2c949de068a2d18621e676067db5170e070`、4096 `4aba2b4cee835fa60e6696f5528fb4ece21d6e42`
+- run 間の p50 は上表。1024 の MTP は 9-run 再測でも p50 56.71（54.73–80.86、80.86 の 1 run を除くと
+  54.73–56.75）。2048 / 4096 の MTP は 5-run の範囲がそれぞれ 36.42–38.08 / 49.18–49.59。
+- 参考: K=4 の 5-run p50 は 1024 41.00、2048 34.95、4096 37.73。計測した範囲では K=7 が上回る。
+- target の prefill chunk は target-only と同じ `max_batch_rows` を使う。MTP 側の first pass だけ
+  512 行以下に分割するため、MTP の prefill は target より長い（上表の prefill 差）。
+
 ## 2026-11-04 MoE teacher-forced quality（初回）
 
 `shelf-bench quality` を `LoadedModel` 経由にしたことで、grouped expert checkpoint も
@@ -136,7 +162,29 @@ teacher forcing できる。
 - 同じ `quality` 経路の dense 側確認（Qwen3.8-27B-FP8、corpus 2203 token、context 128 /
   positions 32）: TP1 `QUALITY_PPL` 4.3905、TP2 4.5421（+3.45 %）、mean KL 0.00494、
   top-1 一致 0.9375、top-5 overlap 0.9563。TP1 と TP2 の差は reduction 順序によるもので、
-  `quality` の `LoadedModel` 化で生じた変更ではない（`--tp 2` は dense のみ受理）
+  `quality` の `LoadedModel` 化で生じた変更ではない（`--tensor-parallel 2` は dense のみ受理）
+
+## 2026-11-04 Qwen3.5-9B BF16 linear allowlist
+
+`models/Qwen3.5-9B`（BF16）の hidden 4096 系 linear shape を
+`kLinearShapeRules` に追加した。201 token prompt / 8 decode token / BF16 KV で、
+変更前と変更後をそれぞれ 5 run 計測した。
+
+| 項目 | 変更前 p50 | 変更後 p50 |
+| --- | ---: | ---: |
+| prefill ms | 12392.6 | 294.3 |
+| decode tok/s | 3.77 | 13.69 |
+
+- measurement revision: 変更後 `500367c`、変更前 `5b4885f`（target-only 経路は同一。
+  変更前は MTP 無効の target-only build で計測）
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`）
+- command: `shelf-compute --model-dir models/Qwen3.5-9B --input-ids-file <prose 201 tokens> --max-new-tokens 8 --max-seq-len 512 --device 0 --prefix-cache 0`
+- prompt: `tests/data/mtp_perf/prose.txt` を Qwen3.5-9B の tokenizer で 201 token に切ったもの
+- 生成一致 anchor（`GENERATED_IDS` の sha1）: `db823356300f09e2258f9f9615ffd0df7abebb74`
+- 変更前の decode は 5 run 中 1 run が 2.48 tok/s、他は 3.77–3.78。変更後は
+  13.62–13.70 で安定。
+- 変更前は `SHELF_LINEAR_DEBUG=1` で 7 shape の `LINEAR_SELECT_MISS` が出ていた。
+  変更後は通常 decode で miss が出ない。生成列は correctness mode と一致する。
 
 ## 記録規則
 

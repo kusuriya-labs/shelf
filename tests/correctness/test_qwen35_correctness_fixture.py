@@ -85,7 +85,7 @@ def main() -> int:
             "--input-ids-file", str(ids_path),
             "--max-new-tokens", str(TOKEN_CHECK),
             "--max-seq-len", "128",
-            "--tp", str(tp),
+            "--tensor-parallel", str(tp),
             "--device", devices,
             "--kv-cache-dtype", "bf16",
             "--prefix-cache", "0",

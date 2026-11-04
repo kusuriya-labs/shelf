@@ -55,8 +55,8 @@ detail and is not a `--variant` value.
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |
 | `--mode forward\|greedy` | (default forward) |
-| `--device LIST` | comma separated GPUs, one per --tp rank (default 0; e.g. --device 0,2) |
-| `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--device LIST` | comma separated GPUs, one per --tensor-parallel rank (default 0; e.g. --device 0,2) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8` | (default bf16) |
@@ -67,9 +67,9 @@ detail and is not a `--variant` value.
 | `--output PATH` | (default none) |
 <!-- /cli:bench-pp -->
 
-`--tp 2` は `--device` の 2 GPU を使用する（例 `--device 0,1`、非連続な
-`--device 0,2` も可。`--tp 2` のときは 2 個の指定が必須）。`--arena-gib` は
-rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tp 2` が
+`--tensor-parallel 2` は `--device` の 2 GPU を使用する（例 `--device 0,1`、非連続な
+`--device 0,2` も可。`--tensor-parallel 2` のときは 2 個の指定が必須）。`--arena-gib` は
+rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2` が
 必須。TP 実行では最終 chunk の logits を計算する。
 
 ## tg
@@ -111,8 +111,8 @@ dump する。`--compare` で baseline dump と突き合わせ、perplexity / me
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
 `shelf-bench pp/tg` の数値とは混ぜない。
 
-`--model-dir` は dense / grouped expert（MoE）のどちらでもよい（`--tp 1`）。
-`--tp 2` は dense checkpoint のみ対応で、grouped expert を指定すると起動時に拒否する。
+`--model-dir` は dense / grouped expert（MoE）のどちらでもよい（`--tensor-parallel 1`）。
+`--tensor-parallel 2` は dense checkpoint のみ対応で、grouped expert を指定すると起動時に拒否する。
 
 corpus は `vendor/BetterBench/corpus/v1` から生成する（token corpus は commit しない）。
 
@@ -241,7 +241,7 @@ greedy argmax sampling。
 ## 例
 
 ```bash
-./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 512 --tp 2 --device 0,1 --arena-gib 16
+./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 512 --tensor-parallel 2 --device 0,1 --arena-gib 16
 ./build/shelf-bench tg --model-dir models/Qwen3.8-27B-FP8 --mode greedy --compute-logits 1
 ./build/shelf-bench gemm --check --rows 1,16,128
 ./build/shelf-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv

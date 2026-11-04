@@ -67,9 +67,9 @@ void compute_usage(const char* prog) {
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
-    printf("  --device N|N,M         GPU device(s); count must match --tp or --pipeline-parallel (default 0)\n");
-    printf("  --tp N                 tensor parallel degree 1 | 2 (default 1)\n");
-    printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tp 1)\n");
+    printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
+    printf("  --tensor-parallel N    tensor parallel degree 1 | 2 (default 1)\n");
+    printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
     printf("                         (default auto = model config: native unless the\n");
@@ -80,7 +80,7 @@ void compute_usage(const char* prog) {
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
     printf("  --hidden-taps LIST      comma separated layer ids (max 8) for intermediate\n");
     printf("                          hidden capture; dump to SHELF_DEBUG_HIDDEN_FILE\n");
-    printf("  --tp-combine-f32 0|1    keep row-parallel combine output in f32 (default 0 =\n");
+    printf("  --tensor-parallel-combine-f32 0|1  keep row-parallel combine output in f32 (default 0 =\n");
     printf("                          bf16 round as today; tp only)\n");
     printf("  --temperature F        sampling temperature (default 0 = greedy)\n");
     printf("  --top-p F              nucleus sampling threshold in (0, 1] (default 1)\n");
@@ -91,6 +91,10 @@ void compute_usage(const char* prog) {
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
+    printf("  --mtp                  enable the checkpoint's MTP block as the drafter\n");
+    printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
+    printf("                         max %u)\n", shelf::qwen35::runtime::kMtpMaxDrafts);
+    printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
     printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
     printf("                                 (default 16384)\n");
@@ -163,6 +167,9 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
     auto& dflash2_drafts = opt.dflash2_drafts;
     auto& dflash2_stats = opt.dflash2_stats;
+    auto& mtp = opt.mtp;
+    auto& mtp_drafts = opt.mtp_drafts;
+    auto& mtp_stats = opt.mtp_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
     auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
@@ -209,9 +216,9 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
-        } else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(argv[i], "--tensor-parallel") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2)) {
-                fprintf(stderr, "bad --tp (expected 1 or 2)\n");
+                fprintf(stderr, "bad --tensor-parallel (expected 1 or 2)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--pipeline-parallel") == 0 && i + 1 < argc) {
@@ -252,10 +259,10 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             dump_logits_path = argv[++i];
         } else if (std::strcmp(argv[i], "--hidden-taps") == 0 && i + 1 < argc) {
             hidden_taps = argv[++i];
-        } else if (std::strcmp(argv[i], "--tp-combine-f32") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(argv[i], "--tensor-parallel-combine-f32") == 0 && i + 1 < argc) {
             tp_combine_f32 = std::atoi(argv[++i]);
             if (tp_combine_f32 != 0 && tp_combine_f32 != 1) {
-                fprintf(stderr, "bad --tp-combine-f32 (expected 0 or 1)\n");
+                fprintf(stderr, "bad --tensor-parallel-combine-f32 (expected 0 or 1)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--temperature") == 0 && i + 1 < argc) {
@@ -280,6 +287,21 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             dflash2_stats = std::atoi(argv[++i]);
             if (dflash2_stats != 0 && dflash2_stats != 1) {
                 fprintf(stderr, "bad --dflash2-stats (expected 0 or 1)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--mtp") == 0) {
+            mtp = true;
+        } else if (std::strcmp(argv[i], "--mtp-drafts") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], mtp_drafts) || mtp_drafts == 0 ||
+                mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+                fprintf(stderr, "bad --mtp-drafts (expected 1..%u)\n",
+                        shelf::qwen35::runtime::kMtpMaxDrafts);
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--mtp-stats") == 0 && i + 1 < argc) {
+            mtp_stats = std::atoi(argv[++i]);
+            if (mtp_stats != 0 && mtp_stats != 1) {
+                fprintf(stderr, "bad --mtp-stats (expected 0 or 1)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--prefix-cache") == 0 && i + 1 < argc) {
@@ -348,6 +370,9 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& dflash2_model_dir = opt.dflash2_model_dir;
     const auto& dflash2_drafts = opt.dflash2_drafts;
     const auto& dflash2_stats = opt.dflash2_stats;
+    const auto& mtp = opt.mtp;
+    const auto& mtp_drafts = opt.mtp_drafts;
+    const auto& mtp_stats = opt.mtp_stats;
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     const auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
     const auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
@@ -359,12 +384,12 @@ int validate_compute_options(const ComputeOptions& opt) {
         return kComputeParseError;
     }
     if (tp != 1 && tp != 2) {
-        fprintf(stderr, "--tp must be 1 or 2\n");
+        fprintf(stderr, "--tensor-parallel must be 1 or 2\n");
         return kComputeParseError;
     }
     if (pipeline_parallel > 1) {
         if (tp != 1) {
-            fprintf(stderr, "--pipeline-parallel > 1 requires --tp 1\n");
+            fprintf(stderr, "--pipeline-parallel > 1 requires --tensor-parallel 1\n");
             return kComputeParseError;
         }
         if (devices.size() != pipeline_parallel) {
@@ -386,7 +411,7 @@ int validate_compute_options(const ComputeOptions& opt) {
             return kComputeParseError;
         }
     } else if (devices.size() != tp) {
-        fprintf(stderr, "--device expects %lu entries for --tp %lu, got %zu\n",
+        fprintf(stderr, "--device expects %lu entries for --tensor-parallel %lu, got %zu\n",
                 tp, tp, devices.size());
         return kComputeParseError;
     }
@@ -404,6 +429,33 @@ int validate_compute_options(const ComputeOptions& opt) {
     if (dflash_enabled) {
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+    }
+    if (mtp) {
+        if (dflash_enabled) {
+            fprintf(stderr, "--mtp and --dflash2-model-dir are mutually exclusive\n");
+            return kComputeParseError;
+        }
+        if (tp != 1) {
+            fprintf(stderr, "--mtp currently requires --tensor-parallel 1\n");
+            return kComputeParseError;
+        }
+        if (pipeline_parallel != 1) {
+            fprintf(stderr, "--mtp currently requires --pipeline-parallel 1\n");
+            return kComputeParseError;
+        }
+        if (serve_stdio) {
+            fprintf(stderr, "--mtp does not support --serve-stdio\n");
+            return kComputeParseError;
+        }
+        if (!dump_logits_path.empty()) {
+            fprintf(stderr, "MTP speculative decoding does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+        if (mtp_drafts > shelf::qwen35::runtime::kMtpMaxDrafts) {
+            fprintf(stderr, "--mtp-drafts exceeds %u\n",
+                    shelf::qwen35::runtime::kMtpMaxDrafts);
             return kComputeParseError;
         }
     }

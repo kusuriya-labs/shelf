@@ -58,9 +58,9 @@ void print_usage(FILE* out) {
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"
         "                                -1 = hipEventCreate)\n"
         "  --mode forward|greedy        (default forward)\n"
-        "  --device LIST                comma separated GPUs, one per --tp rank\n"
+        "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
-        "  --tp N                       tensor parallel degree 1 | 2 (default 1)\n"
+        "  --tensor-parallel N          tensor parallel degree 1 | 2 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
@@ -155,9 +155,9 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 fprintf(stderr, "invalid --device\n");
                 return false;
             }
-        } else if (key == "--tp") {
+        } else if (key == "--tensor-parallel") {
             if (!parse_int(need_value(), opts.tp) || (opts.tp != 1 && opts.tp != 2)) {
-                fprintf(stderr, "--tp must be 1 or 2\n");
+                fprintf(stderr, "--tensor-parallel must be 1 or 2\n");
                 return false;
             }
         } else if (key == "--model-dir") {
@@ -218,7 +218,7 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         return false;
     }
     if (opts.devices.size() != static_cast<size_t>(opts.tp)) {
-        fprintf(stderr, "--device expects %d entries for --tp %d, got %zu\n",
+        fprintf(stderr, "--device expects %d entries for --tensor-parallel %d, got %zu\n",
                 opts.tp, opts.tp, opts.devices.size());
         return false;
     }

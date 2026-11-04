@@ -25,6 +25,7 @@ struct Qwen35LowerOptions {
     std::span<const uint32_t> override_layers;
     EffectiveRopeProfile rope_profile;
     PipelineStage stage;
+    bool emit_normed_token_hidden = false;
 };
 
 Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(

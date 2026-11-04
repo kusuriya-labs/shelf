@@ -49,6 +49,8 @@ struct ExecutorConfig {
     const Qwen35TensorParallelContext* tp = nullptr;
     EffectiveRopeProfile rope_profile;
     PipelineStage stage;
+    bool emit_normed_token_hidden = false;
+    bool external_hidden_input = false;
 };
 
 using ::shelf::runtime::DispatchStagingPool;
@@ -148,6 +150,7 @@ struct Executor {
     bool graph_failed = false;
 
     gpu::Tensor input_ids;
+    gpu::Tensor input_hidden;
 
     gpu::Tensor rope_inv_freq;
 
@@ -155,6 +158,7 @@ struct Executor {
     gpu::Tensor logits;
     gpu::Tensor sampled_tokens;
     gpu::Tensor token_hidden;
+    gpu::Tensor normed_token_hidden;
     gpu::Tensor pipeline_input_hidden;
     gpu::Tensor pipeline_output_hidden;
     std::array<gpu::Tensor, kMaxTargetHiddenTaps> dflash_target_hidden;

@@ -298,6 +298,7 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/pipeline_parallel.cpp
     src/shelf/models/qwen35/runtime/executor.hip
     src/shelf/models/qwen35/runtime/spec_decode.cpp
+    src/shelf/models/qwen35/runtime/mtp_drafter.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_batch.cpp
     src/shelf/models/qwen35/runtime/dflash2_session_pool.cpp

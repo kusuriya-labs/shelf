@@ -33,6 +33,8 @@ struct Qwen35RuntimeConfig {
     qwen35::dflash2::DFlash2Config draft_config;
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
+    bool mtp = false;
+    uint32_t mtp_drafts = 7;
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;

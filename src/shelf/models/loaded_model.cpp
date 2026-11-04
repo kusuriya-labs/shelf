@@ -29,13 +29,19 @@ Result<LoadedModel> LoadedModel::load(
     const std::string& model_dir,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    bool verify_payload_crc) {
+    bool verify_payload_crc,
+    bool load_mtp) {
 
     auto family_result = probe_model_dir(model_dir);
     if (!family_result.ok()) return family_result.status();
 
     LoadedModel out;
     if (family_result.value() == ModelFamily::Moe) {
+        if (load_mtp) {
+            return Status::unsupported(
+                "MTP is not implemented for a model with grouped experts", __FILE__,
+                __LINE__);
+        }
         shelf::qwen_hybrid::HybridLoadOptions options;
         options.verify_quantized_payload_crc = verify_payload_crc;
         auto loaded = shelf::qwen35moe::Qwen35MoeModel::load_from_safetensors(
@@ -49,6 +55,7 @@ Result<LoadedModel> LoadedModel::load(
 
     shelf::qwen35::Qwen35LoadOptions options;
     options.verify_quantized_payload_crc = verify_payload_crc;
+    options.load_mtp_layers = load_mtp;
     auto loaded =
         shelf::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream, options);
     if (!loaded.ok()) return loaded.status();
