@@ -315,9 +315,9 @@ std::uint64_t TpRankRuntime::weight_bytes() const {
     add_matrix_bytes(total, w.embed_tokens);
     if (!w.lm_head_tied) add_matrix_bytes(total, w.lm_head);
     for (const Qwen35LayerWeights& layer : w.layers) {
-        add_matrix_bytes(total, layer.mlp_gate_proj);
-        add_matrix_bytes(total, layer.mlp_up_proj);
-        add_matrix_bytes(total, layer.mlp_down_proj);
+        add_matrix_bytes(total, layer.ffn.gate);
+        add_matrix_bytes(total, layer.ffn.up);
+        add_matrix_bytes(total, layer.ffn.down);
         if (layer.is_gdn) {
             add_matrix_bytes(total, layer.attn_in_proj_qkv);
             add_matrix_bytes(total, layer.attn_in_proj_z);

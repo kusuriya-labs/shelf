@@ -136,13 +136,13 @@ Status validate_mtp_geometry(
         layer.post_attention_layernorm_weight, hidden_size, "mtp.layers.0.post_attention_layernorm.weight");
     if (!status.ok()) return status;
     status = validate_mtp_matrix(
-        layer.mlp_gate_proj, intermediate_size, hidden_size, "mtp.layers.0.mlp.gate_proj.weight");
+        layer.ffn.gate, intermediate_size, hidden_size, "mtp.layers.0.mlp.gate_proj.weight");
     if (!status.ok()) return status;
     status = validate_mtp_matrix(
-        layer.mlp_up_proj, intermediate_size, hidden_size, "mtp.layers.0.mlp.up_proj.weight");
+        layer.ffn.up, intermediate_size, hidden_size, "mtp.layers.0.mlp.up_proj.weight");
     if (!status.ok()) return status;
     status = validate_mtp_matrix(
-        layer.mlp_down_proj, hidden_size, intermediate_size, "mtp.layers.0.mlp.down_proj.weight");
+        layer.ffn.down, hidden_size, intermediate_size, "mtp.layers.0.mlp.down_proj.weight");
     if (!status.ok()) return status;
     status = validate_mtp_matrix(
         layer.attn_q_proj, q_projection_features, hidden_size, "mtp.layers.0.self_attn.q_proj.weight");
@@ -171,11 +171,11 @@ Status validate_mlp_shapes(
     const RT::MatrixwiseShapeKey gate{intermediate_size, hidden_size};
     const RT::MatrixwiseShapeKey down{hidden_size, intermediate_size};
 
-    auto status = validate_matrix(weights.mlp_gate_proj, gate, "invalid MLP gate projection");
+    auto status = validate_matrix(weights.ffn.gate, gate, "invalid MLP gate projection");
     if (!status.ok()) return status;
-    status = validate_matrix(weights.mlp_up_proj, gate, "invalid MLP up projection");
+    status = validate_matrix(weights.ffn.up, gate, "invalid MLP up projection");
     if (!status.ok()) return status;
-    return validate_matrix(weights.mlp_down_proj, down, "invalid MLP down projection");
+    return validate_matrix(weights.ffn.down, down, "invalid MLP down projection");
 }
 
 Status validate_full_attention_shapes(
@@ -434,11 +434,11 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                 (void)add_weight(lw.attn_o_proj);
             }
             idx.mlp_gate = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.mlp_gate_proj);
+            (void)add_weight(lw.ffn.gate);
             idx.mlp_up = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.mlp_up_proj);
+            (void)add_weight(lw.ffn.up);
             idx.mlp_down = static_cast<uint32_t>(cursor++);
-            (void)add_weight(lw.mlp_down_proj);
+            (void)add_weight(lw.ffn.down);
         }
     }
     const bool lm_tied = weights.lm_head_tied;
@@ -825,9 +825,9 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     const uint32_t k_i = add_weight(lw.attn_k_proj);
     const uint32_t v_i = add_weight(lw.attn_v_proj);
     const uint32_t o_i = add_weight(lw.attn_o_proj);
-    const uint32_t gate_i = add_weight(lw.mlp_gate_proj);
-    const uint32_t up_i = add_weight(lw.mlp_up_proj);
-    const uint32_t down_i = add_weight(lw.mlp_down_proj);
+    const uint32_t gate_i = add_weight(lw.ffn.gate);
+    const uint32_t up_i = add_weight(lw.ffn.up);
+    const uint32_t down_i = add_weight(lw.ffn.down);
 
     const uint32_t p_enorm = reg_param(weights.mtp.pre_fc_norm_embedding_weight);
     const uint32_t p_hnorm = reg_param(weights.mtp.pre_fc_norm_hidden_weight);
@@ -975,14 +975,14 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     post_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
     RT::ValueId post_norm = em.unary(RT::PrimitiveNode{post_rms}, attn_residual, hidden_size);
 
-    RT::ValueId v_mlp_gate = em.linear(lw.mlp_gate_proj, gate_i, post_norm);
-    RT::ValueId v_mlp_up = em.linear(lw.mlp_up_proj, up_i, post_norm);
+    RT::ValueId v_mlp_gate = em.linear(lw.ffn.gate, gate_i, post_norm);
+    RT::ValueId v_mlp_up = em.linear(lw.ffn.up, up_i, post_norm);
     RT::ValueId v_swiglu = em.value(intermediate);
     {
         RT::SwiGluNode sn{RT::RowwiseShapeKey{intermediate}};
         em.emit(RT::PrimitiveNode{sn}, {v_mlp_gate, v_mlp_up}, {v_swiglu});
     }
-    RT::ValueId v_down = em.linear(lw.mlp_down_proj, down_i, v_swiglu);
+    RT::ValueId v_down = em.linear(lw.ffn.down, down_i, v_swiglu);
 
     RT::ValueId layer_output = em.value(hidden_size);
     {

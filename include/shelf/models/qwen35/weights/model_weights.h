@@ -1,42 +1,23 @@
 #pragma once
-#include <shelf/core/memory/tensor.h>
 #include <shelf/core/status.h>
-#include <shelf/weights/matrix_weight.h>
-#include <shelf/weights/weight_loader.h>
+#include <shelf/models/common/qwen_hybrid/layer_weights.h>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
+#include <shelf/models/common/qwen_hybrid/model_weights.h>
+#include <shelf/models/qwen35/weights/dense_ffn_weights.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace shelf {
 namespace qwen35 {
 
-struct Qwen35LayerWeights {
-    bool is_gdn = false;
-
-    gpu::Tensor input_layernorm_weight;
-    gpu::Tensor post_attention_layernorm_weight;
-
-    shelf::weights::MatrixWeight mlp_gate_proj;
-    shelf::weights::MatrixWeight mlp_up_proj;
-    shelf::weights::MatrixWeight mlp_down_proj;
-
-    shelf::weights::MatrixWeight attn_q_proj;
-    shelf::weights::MatrixWeight attn_k_proj;
-    shelf::weights::MatrixWeight attn_v_proj;
-    shelf::weights::MatrixWeight attn_o_proj;
-    gpu::Tensor attn_q_norm_weight;
-    gpu::Tensor attn_k_norm_weight;
-
-    shelf::weights::MatrixWeight attn_in_proj_a;
-    shelf::weights::MatrixWeight attn_in_proj_b;
-    shelf::weights::MatrixWeight attn_in_proj_qkv;
-    shelf::weights::MatrixWeight attn_in_proj_z;
-    gpu::Tensor attn_conv1d_weight;
-    shelf::weights::MatrixWeight attn_out_proj;
-    gpu::Tensor attn_norm_weight;
-    gpu::Tensor attn_dt_bias;
-    gpu::Tensor attn_A_log;
+// A dense qwen35 layer: the shared hybrid backbone (layernorms and whichever attention
+// the layer carries) plus the dense FFN. The FFN is a member, so a layer of this type
+// cannot be built without it and cannot hold any other FFN form.
+struct Qwen35LayerWeights : shelf::qwen_hybrid::HybridLayerWeights {
+    DenseFfnWeights ffn;
 };
 
 struct Qwen35MtpWeights {
@@ -50,25 +31,19 @@ struct Qwen35MtpWeights {
     Qwen35LayerWeights layer;
 };
 
-struct Qwen35ModelWeights {
-    using Tensor = gpu::Tensor;
-
-    shelf::weights::MatrixWeight embed_tokens;
-    Tensor final_norm_weight;
-
-    shelf::weights::MatrixWeight lm_head;
-    bool lm_head_tied = true;
-
+// A dense qwen35 model: the shared model-level weights, one dense layer per transformer
+// layer, and the optional MTP block.
+struct Qwen35ModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
     std::vector<Qwen35LayerWeights> layers;
 
     Qwen35MtpWeights mtp;
 };
 
-struct Qwen35LoadOptions {
-    bool verify_quantized_payload_crc = false;
+// Dense-only load options on top of the shared hybrid options: an MTP block and a
+// vocabulary-sharded LM head exist for the dense model only.
+struct Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
     bool vocab_parallel_lm_head = true;
-    shelf::weights::WeightLoadOptions weights;
 };
 
 Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(

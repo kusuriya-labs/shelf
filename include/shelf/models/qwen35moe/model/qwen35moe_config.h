@@ -17,8 +17,8 @@ struct MoeFfnConfig {
 };
 
 // Qwen3.5 MoE (`model_type = "qwen3_5_moe"`) text config: the shared Qwen hybrid
-// geometry plus the FFN section above. It carries no dense intermediate size, and it is
-// not related to shelf::qwen35::Qwen35TextConfig. This is the type the MoE weight plan
+// geometry plus the FFN section above. It carries no dense intermediate size, and it is a
+// sibling of the dense text config, not a form of it. This is the type the MoE weight plan
 // and loaders take.
 struct Qwen35MoeTextConfig : shelf::qwen_hybrid::QwenHybridConfig {
     MoeFfnConfig ffn;

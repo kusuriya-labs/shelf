@@ -99,9 +99,9 @@ void dump_mem_debug(shelf::app::Qwen35ComputeRuntime& runtime) {
     add_matrix(wts.embed_tokens);
     if (!wts.lm_head_tied) add_matrix(wts.lm_head);
     for (const auto& l : wts.layers) {
-        add_matrix(l.mlp_gate_proj);
-        add_matrix(l.mlp_up_proj);
-        add_matrix(l.mlp_down_proj);
+        add_matrix(l.ffn.gate);
+        add_matrix(l.ffn.up);
+        add_matrix(l.ffn.down);
         if (l.is_gdn) {
             add_matrix(l.attn_in_proj_a);
             add_matrix(l.attn_in_proj_b);

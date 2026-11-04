@@ -1,6 +1,6 @@
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 
-#include <cstdio>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
 
 namespace shelf::qwen35moe {
 
@@ -12,12 +12,6 @@ constexpr uint32_t kNativeOutputTile = 16u;
 
 uint32_t align_up_u32(uint32_t value, uint32_t alignment) noexcept {
     return (value + alignment - 1u) & ~(alignment - 1u);
-}
-
-std::string layer_prefix(std::size_t layer) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "model.language_model.layers.%zu.", layer);
-    return std::string(buf);
 }
 
 void add_source(MoeExpertGroupPlan& plan, uint32_t expert, MoeExpertProjection projection,
@@ -40,7 +34,7 @@ std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config) {
 }
 
 std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix) {
-    return layer_prefix(layer) + "mlp." + suffix;
+    return shelf::qwen_hybrid::layer_tensor_prefix(layer) + "mlp." + suffix;
 }
 
 std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,

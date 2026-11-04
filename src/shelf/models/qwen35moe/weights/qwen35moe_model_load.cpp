@@ -1,7 +1,7 @@
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 
-#include <shelf/models/qwen35/weights/quantized_model_body.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/models/common/qwen_hybrid/weight_validation.h>
 #include <shelf/weights/weight_loader.h>
 
 #include <filesystem>
@@ -12,7 +12,7 @@ namespace shelf::qwen35moe {
 namespace {
 
 namespace fs = std::filesystem;
-namespace q35 = shelf::qwen35;
+namespace qhy = shelf::qwen_hybrid;
 namespace qqb = shelf::quantization::bundle;
 namespace qqm = shelf::quantization::manifest;
 using shelf::weights::MatrixWeight;
@@ -103,7 +103,14 @@ uint64_t moe_expert_group_bytes(const MoeExpertGroupPlan& plan) {
            static_cast<uint64_t>(plan.w2_row_ref_bytes_per_expert) * plan.experts;
 }
 
-Status moe_layer_weights_match_plan(const MoeLayerWeights& w, const MoeExpertGroupPlan& plan) {
+Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& plan,
+                             const MoeFfnConfig& ffn) {
+    if (plan.experts != ffn.num_experts ||
+        plan.w13_gate_rows != ffn.moe_intermediate_size ||
+        plan.w13_up_rows != ffn.moe_intermediate_size)
+        return Status::invalid_argument(
+            "moe plan: expert group geometry differs from the config", __FILE__, __LINE__);
+
     Status st = check_plane(w.expert_w13, plan.experts, plan.w13_rows, plan.w13_cols,
                             plan.w13_k_padded, plan.w13_codes_row_stride_bytes,
                             plan.w13_scales_row_stride_bytes, plan.w13_codes_batch_stride_bytes,
@@ -115,35 +122,52 @@ Status moe_layer_weights_match_plan(const MoeLayerWeights& w, const MoeExpertGro
                      "moe w2");
     if (!st.ok()) return st;
 
-    if (w.router.rows != plan.experts || w.router.cols != plan.w13_cols)
+    const uint32_t hidden = plan.w13_cols;
+    if (w.router.rows != plan.experts || w.router.cols != hidden)
         return Status::invalid_argument(
             "moe router: shape is not [experts, hidden]", __FILE__, __LINE__);
-    if (w.shared_gate.rows != 1u || w.shared_gate.cols != plan.w13_cols)
+    if (w.shared_gate.rows != 1u || w.shared_gate.cols != hidden)
         return Status::invalid_argument(
             "moe shared_expert_gate: shape is not [1, hidden]", __FILE__, __LINE__);
-    const uint32_t inter = plan.w13_gate_rows;
-    if (w.shared_gate_proj.rows != inter || w.shared_gate_proj.cols != plan.w13_cols ||
-        w.shared_up_proj.rows != inter || w.shared_up_proj.cols != plan.w13_cols ||
-        w.shared_down_proj.rows != plan.w13_cols || w.shared_down_proj.cols != inter)
+
+    // The shared expert has its own width: config shared_expert_intermediate_size, which a
+    // checkpoint may set differently from the routed moe_intermediate_size.
+    const uint32_t shared_inter =
+        static_cast<uint32_t>(ffn.shared_expert_intermediate_size);
+    if (w.shared_gate_proj.rows != shared_inter || w.shared_gate_proj.cols != hidden ||
+        w.shared_up_proj.rows != shared_inter || w.shared_up_proj.cols != hidden ||
+        w.shared_down_proj.rows != hidden || w.shared_down_proj.cols != shared_inter)
         return Status::invalid_argument(
-            "moe shared expert: shapes are not [inter, hidden] / [hidden, inter]", __FILE__,
-            __LINE__);
+            "moe shared expert: shapes are not [shared_inter, hidden] / [hidden, "
+            "shared_inter]",
+            __FILE__, __LINE__);
     return Status::make_ok();
 }
 
-Result<MoeModelWeights> load_qwen35moe_weights(
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                  const Qwen35MoeTextConfig& config) {
+    Status st = qhy::validate_hybrid_model_level(weights, config, weights.layers.size());
+    if (!st.ok()) return st;
+
+    for (std::size_t l = 0; l < weights.layers.size(); ++l) {
+        st = qhy::validate_hybrid_layer_body(weights.layers[l], config, l);
+        if (!st.ok()) return st;
+        auto plan = build_moe_expert_group_plan(config, l);
+        if (!plan.ok()) return plan.status();
+        st = moe_ffn_weights_match(weights.layers[l].ffn, plan.value(), config.ffn);
+        if (!st.ok()) return st;
+    }
+    return Status::make_ok();
+}
+
+Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     const std::string& model_dir,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const q35::Qwen35LoadOptions& options) {
+    const qhy::HybridLoadOptions& options) {
     if (options.weights.partition_plan != nullptr) {
         return Status::unsupported(
             "qwen35moe single-GPU weight load does not accept a tensor partition plan",
-            __FILE__, __LINE__);
-    }
-    if (options.load_mtp_layers) {
-        return Status::unsupported(
-            "qwen35moe does not load MTP layers: speculative decode uses the DFlash2 drafter",
             __FILE__, __LINE__);
     }
     if (fs::exists(fs::path(model_dir) / qqm::kQuantizedMetadataFile)) {
@@ -157,7 +181,7 @@ Result<MoeModelWeights> load_qwen35moe_weights(
     if (!config_result.ok()) return config_result.status();
     const Qwen35MoeTextConfig& config = config_result.value();
 
-    std::vector<std::string> names = q35::qwen35_hf_quantized_body_names(config);
+    std::vector<std::string> names = qhy::hf_quantized_body_names(config);
     std::vector<MoeExpertGroupPlan> plans;
     plans.reserve(config.num_hidden_layers);
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
@@ -168,52 +192,50 @@ Result<MoeModelWeights> load_qwen35moe_weights(
         plans.push_back(plan.release());
     }
 
-    auto reader_result = q35::qwen35_open_quantized_reader(
-        model_dir, names, options.verify_quantized_payload_crc);
+    auto reader_result =
+        qhy::open_quantized_model_reader(model_dir, names, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();
     qqb::QuantizedModelReader reader = reader_result.release();
 
     Status contract = shelf::weights::validate_quantized_model(reader);
     if (!contract.ok()) return contract;
 
-    MoeModelWeights out;
-    out.body.layers.resize(config.num_hidden_layers);
+    Qwen35MoeModelWeights out;
     out.layers.resize(config.num_hidden_layers);
 
     Status model_level =
-        q35::qwen35_load_model_level_quantized(reader, config, arena, stream, options.weights,
-                                                      out.body);
+        qhy::load_hybrid_model_level_quantized(reader, config, arena, stream, options, out);
     if (!model_level.ok()) return model_level;
 
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-        Status st = q35::qwen35_load_layer_body_quantized(
-            arena, stream, reader, l, q35::qwen35_layer_is_gdn(config, l), options.weights,
-            out.body.layers[l]);
+        Status st = qhy::load_hybrid_layer_body_quantized(arena, stream, reader, config, l,
+                                                          options, out.layers[l]);
         if (!st.ok()) return st;
 
         const MoeExpertGroupPlan& plan = plans[l];
+        Qwen35MoeLayerWeights& layer = out.layers[l];
+
         auto group = load_moe_expert_group(reader, plan, arena, stream);
         if (!group.ok()) return group.status();
-        out.layers[l].expert_w13 = group.value().w13;
-        out.layers[l].expert_w2 = group.value().w2;
+        layer.ffn.expert_w13 = group.value().w13;
+        layer.ffn.expert_w2 = group.value().w2;
 
-        st = load_aux_matrix(reader, l, kRouter, arena, stream, options.weights,
-                             out.layers[l].router);
+        st = load_aux_matrix(reader, l, kRouter, arena, stream, options.weights, layer.ffn.router);
         if (!st.ok()) return st;
         st = load_aux_matrix(reader, l, kSharedGate, arena, stream, options.weights,
-                             out.layers[l].shared_gate);
+                             layer.ffn.shared_gate);
         if (!st.ok()) return st;
         st = load_aux_matrix(reader, l, kSharedGateProj, arena, stream, options.weights,
-                             out.layers[l].shared_gate_proj);
+                             layer.ffn.shared_gate_proj);
         if (!st.ok()) return st;
         st = load_aux_matrix(reader, l, kSharedUpProj, arena, stream, options.weights,
-                             out.layers[l].shared_up_proj);
+                             layer.ffn.shared_up_proj);
         if (!st.ok()) return st;
         st = load_aux_matrix(reader, l, kSharedDownProj, arena, stream, options.weights,
-                             out.layers[l].shared_down_proj);
+                             layer.ffn.shared_down_proj);
         if (!st.ok()) return st;
 
-        st = moe_layer_weights_match_plan(out.layers[l], plan);
+        st = moe_ffn_weights_match(layer.ffn, plan, config.ffn);
         if (!st.ok()) return st;
     }
 
