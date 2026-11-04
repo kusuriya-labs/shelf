@@ -103,6 +103,9 @@ Qwen3.8-27B は `swish` である。Qwen3.5 MoE checkpoint はこの key を持�
 - `logits` : `{R, V}` f32
 - `sampled_tokens` : `{R}` int32
 - `execution_status` : `{1}` u32（0 に初期化）
+- GDN state pool と KV pool の层数は `shelf::qwen_hybrid::count_layer_topology(text_config)`
+  から決める。load 側の位相規則（`layer_is_gdn`）と同じ単一規則なので、
+  `layer_types` を宣言しない checkpoint でも load 済みの层構成と pool が食い違わない
 - execution workspace : `max(各 bucket の workspace.total_bytes) + 8192 * 4`（scratch 付き）
 - host staging : `host_request_staging` / `host_pending_staging` / `host_sampled_staging`（pinned）
 
@@ -518,6 +521,8 @@ dense model の weight は「共通 backbone + dense FFN」の合成で、FFN �
 - `src/shelf/models/qwen35/weights/model_weights.cpp`
   - dense FFN と MTP の tensor 名・load だけを持つ。embed / lm_head / final norm と
     层の layernorm / attention は `shelf::qwen_hybrid` の load 部品を読む
+  - BF16 (plain safetensors) 経路の LM head は `model.language_model.lm_head.weight` を
+    優先し、無い場合は `lm_head.weight` を読む（HF は出力 head に prefix を付けない）。    quantized 経路と同じ别名規則
 - `include/shelf/models/qwen35/model/qwen35_model.h`
   - `validate_qwen35_weights(weights, Qwen35TextConfig)`：
     `shelf::qwen_hybrid` の model-level / layer-body invariant に加え、

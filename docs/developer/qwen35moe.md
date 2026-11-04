@@ -39,6 +39,9 @@ config.json の parse は `qwen_hybrid::read_qwen_hybrid_config` と
 FFN の key は各自の family reader が読む。
 
 MoE 判定の正本は `text_config.num_experts > 0`。`model_type` 文字列での分岐はしない。
+この非分岐契約が他のモデル族でどこに衝突するか（`architecture` 文字列分岐として残っている
+例外を含む）の調査記録は
+[../research/20261104/model_family_detection_boundaries.md](../research/20261104/model_family_detection_boundaries.md)。
 
 | key（`config.ffn.*`） | 意味 |
 | --- | --- |

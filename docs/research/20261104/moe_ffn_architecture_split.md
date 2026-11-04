@@ -198,16 +198,51 @@ base は Gate D の構造（commit `28fed13`）、refactor は `refactor/model-f
 compile は通っている（`test_qwen35moe_model_load_real` を含む）。
 個別テストの受理条件は `docs/developer/qwen35moe.md` §7 に現在形で書く。
 
-## 11. 今回観測した既存の穴（今回のスコープ外・未修正）
+## 11. 同時に生じた既存の穴（修正済み）と、残した実行系の穴
 
-- **BF16 path は `lm_head.weight` を解決できない**。`models/Qwen3.5-9B` は
-  `tie_word_embeddings: false` で tensor 名が `lm_head.weight`（prefix なし）だが、
-  dense の BF16 model-level load は `model.language_model.lm_head.weight` しか引かない。
-  quantized path には prefix なしへの fallback がある。base `28fed13` の
-  `shelf-compute` でも同じメッセージで失敗することを確認した（今回導入した現象ではない）。
-- **`test_qwen35_mtp_weight_real` は Shelf quantized bundle を要求する**。HF real-quantized
-  dir（`models/Qwen3.8-27B-Quark-AWQ-MXFP4`）では load と MTP geometry 検証まで通り、
-  後の CRC 比較段で `shelf_quantization.json not found` になる。base でも同じ。
-  `models/Qwen3.8-27B-FP8` は test が fixed で確保する 24 GiB arena に収まらない
-  （load 途中で `insufficient memory`）。この test を実機で通すには bundle 化された
-  dense checkpoint が必要。
+- **BF16 path は `lm_head.weight` を解決できなかった（ARCH-9、修正済み）**。
+  `models/Qwen3.5-9B` は `tie_word_embeddings: false` で tensor 名が `lm_head.weight`
+  （prefix なし）だが、dense の BF16 model-level load は
+  `model.language_model.lm_head.weight` しか引かなかった。quantized path には
+  prefix なしへの fallback が既にあった（非対称）。base `28fed13` の `shelf-compute`
+  でも同じメッセージで失敗することを確認した（今回導入した現象ではない）。
+  BF16 側にも同じ别名 fallback を入れ、`test_weight_load` に bare `lm_head.weight`
+  の BF16 fixture case を追加した。
+- **`test_qwen35_mtp_weight_real` は Shelf quantized bundle を要求していた（ARCH-10、修正済み）**。
+  HF real-quantized dir では load と MTP geometry 検証まで通り、後の CRC 比較段が
+  `QuantizedModelReader::open`（bundle 専用）を直接呼ぶため `shelf_quantization.json not found`
+  になった。base でも同じ。production と同じ `qhy::open_quantized_model_reader` を使うようにし、
+  arena も 24 GiB 固定から free VRAM 基準（`SHELF_MTP_REAL_ARENA_GIB` で上書き可）へ変えた。
+  実測（今回、すべて PASS・全 MTP tensor の CRC32 MATCH）:
+  `Qwen3.5-9B`（BF16）/ `Qwen3.8-27B-Quark-AWQ-MXFP4` / `Qwen3.8-27B-FP8`。
+- **層数計算が位相規則と分散していた（ARCH-11、修正済み）**。
+  `layer_is_gdn` は `layer_types` → `full_attention_interval` → `l % 4 < 3` の順で位相を決めるが、
+  层数を数える側（`gdn_state_layout.h`、`executor.hip` の KV pool 照合、`compute_common.h`、
+  `compute_runtime.hip`、`runtime/tensor_parallel.cpp`、`apps/bench/{tg,pp,batch,quality}.hip`）は
+  `layer_types` を直接巡回していた。`layer_types` を宣言しない checkpoint では
+  GDN state pool が 0（→ clamp 1）、KV pool が `num_attention_layers == 0` を拒否して
+  起動失敗する（`paged_kv_pool.cpp` の受理条件）。`qhy::count_layer_topology` に統合した。
+  該当 checkpoint は手元に無いため、この破綻経路自体は**静的判断**（統合後の規則一致は
+  `test_qwen35_tp_context` で検証）。
+- **残した穴: BF16 dense の実行結果が HF 参照と一致しない**。
+  lm_head 别名を直したことで `models/Qwen3.5-9B`（BF16）がロードできるようになったが、
+  `shelf-compute` の greedy 出力が HF transformers の参照と食い違う。
+  prompt token ids `[3710,369,279,6511,314,9338,30,21134,25]`
+  （"What is the capital of France? Answer:"）に対する 24 token:
+
+  ```text
+  HF      (torch 2.13+rocm10, transformers 5.20.2, bf16, greedy):
+          11751,13,271,3710,...  -> " Paris.\n\nWhat is the capital of Germany? Answer: Berlin..."
+  Shelf   (本次 refactor, tp 1, optimized):
+          95839,98900,88792,15729,3709,67,13,...  -> 無意味列
+  Shelf   (SHELF_QWEN35_KERNEL_MODE=correctness): 上記と同一 ids
+  ```
+
+  weight のロード自体は `test_qwen35_mtp_weight_real` の CRC32 MATCH で一致している。
+  `SHELF_QWEN35_KERNEL_TRACE=1` では `LINEAR_BF16` 996 件・`EMBEDDING_LOOKUP` 4 件・
+  `RESIDUAL_ADD` 256 件・`SWIGLU` 128 件が correctness fallback（optimized BF16 linear が
+  この形状で allowlist 外）、GDN / attention / rope / rmsnorm は optimized kernel。
+  optimized と correctness で ids が同一なので、原因は kernel 選択ではなく
+  load / lowering / state 構成側の可能性が高い（**未調査・推測**）。
+  本次の refactor とは無関係（BF16 9B は refactor 前にそもそもロードできなかった）。
+  追跡の入口としては `--hidden-taps` の layer 出力と HF の layer 出力比較が有効（未実施）。

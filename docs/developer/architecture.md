@@ -75,7 +75,10 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   geometry（`QwenHybridConfig`）、layer / model-level weight 型
   （`HybridLayerWeights` / `HybridModelLevelWeights`）、FFN 非依存の checkpoint 読み取り
   （`qwen_hybrid::weight_loader`）と共通 invariant 検証（`qwen_hybrid::weight_validation`）
-  を持つ。具体的なモデルを参照しない
+  を持つ。具体的なモデルを参照しない。
+  层の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
+  （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で层数を数える
+  `count_layer_topology`。GDN state pool・KV pool・TP plan・apps は全部これを使う
 - `shelf_qwen35` は dense FFN を持つ Qwen35（config・weight・lowering・TP・MTP・DFlash2）。
   `shelf_qwen_hybrid` に依存し、`shelf_qwen35moe` には依存しない
 - `shelf_qwen35moe` は Qwen35 MoE（config 契約・expert plan・rank-3 expert loader・
@@ -123,7 +126,8 @@ shelf_models    -> shelf_qwen35 + shelf_qwen35moe
 `shelf_qwen35` と `shelf_qwen35moe` は互いに参照しない。FFN に依存しない layer load 部品は
 `shelf/models/common/qwen_hybrid/weight_loader.h` にあり、FFN の tensor 名は各 loader が
 自分の module で読む。checkpoint の layer prefix
-（`qwen_hybrid::layer_tensor_prefix`）も 1 箇所だけにある。
+（`qwen_hybrid::layer_tensor_prefix`）を組み立てる箇所は 1 箇所だけで、TP partition plan も
+それを使う。
 
 weight の canonical → partition → preshuffle → upload の順序 contract は
 [tensor_partition.md](tensor_partition.md) を参照。
