@@ -27,6 +27,7 @@ std::size_t stype_elem_size(SType dtype) noexcept {
         case SType::I32: return 4;
         case SType::F8_E4M3: return 1;
         case SType::I64: return 8;
+        case SType::I16: return 2;
     }
     return 0;
 }
@@ -41,6 +42,7 @@ const char* stype_name(SType dtype) noexcept {
         case SType::I32: return "I32";
         case SType::F8_E4M3: return "F8_E4M3";
         case SType::I64: return "I64";
+        case SType::I16: return "I16";
     }
     return "UNKNOWN";
 }
@@ -206,6 +208,7 @@ Result<SafetensorsReader> SafetensorsReader::open(const std::string& path) {
             else if (dt == "U8") spec.dtype = SType::U8;
             else if (dt == "I32") spec.dtype = SType::I32;
             else if (dt == "I64") spec.dtype = SType::I64;
+            else if (dt == "I16") spec.dtype = SType::I16;
             else if (dt == "F8_E4M3") spec.dtype = SType::F8_E4M3;
             else return Status::invalid_argument("unsupported dtype", __FILE__, __LINE__);
 

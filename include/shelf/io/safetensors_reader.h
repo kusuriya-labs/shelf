@@ -18,6 +18,7 @@ enum class SType {
     I32 = 5,
     F8_E4M3 = 6,
     I64 = 7,
+    I16 = 8,
 };
 
 std::size_t stype_elem_size(SType dtype) noexcept;

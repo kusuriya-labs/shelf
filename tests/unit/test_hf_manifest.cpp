@@ -535,6 +535,113 @@ static void test_mxfp4_rejections() {
           "weight_scale in an fp8-method model rejected");
 }
 
+static std::string exl3_config_json() {
+    return std::string("{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,")
+         + "\"text_config\":{\"model_type\":\"qwen3_5_text\",\"num_hidden_layers\":2},"
+         + "\"quantization_config\":{\"quant_method\":\"exl3\",\"bits\":4.0,"
+         + "\"head_bits\":6,\"codebook\":\"mul1\"}}";
+}
+
+static bool build_exl3_dir(const fs::path& dir) {
+    const std::string shard = "model.safetensors";
+    const std::string p0 = "layers.0.mlp.down_proj";
+    const std::string p1 = "layers.1.mlp.down_proj";
+    const std::string p2 = "layers.2.mlp.down_proj";
+
+    const std::vector<uint8_t> trellis0 = pattern_bytes(8u * 8u * 64u * 2u, 41u);
+    const std::vector<uint8_t> trellis1 = pattern_bytes(8u * 8u * 56u * 2u, 43u);
+    const std::vector<uint8_t> trellis2 = pattern_bytes(8u * 8u * 64u * 2u, 47u);
+    const std::vector<uint8_t> suh = pattern_bytes(128u * 2u, 53u);
+    const std::vector<uint8_t> svh = pattern_bytes(128u * 2u, 59u);
+    const std::vector<uint8_t> mul1_marker = {0x2Du, 0xD1u, 0xDCu, 0x83u};
+    const std::vector<uint8_t> mcg_marker = {0xEDu, 0x1Fu, 0xACu, 0xCBu};
+
+    std::vector<Planned> tensors;
+    tensors.push_back({p0 + ".trellis", io::SType::I16, {8, 8, 64}, trellis0});
+    tensors.push_back({p0 + ".suh", io::SType::F16, {128}, suh});
+    tensors.push_back({p0 + ".svh", io::SType::F16, {128}, svh});
+    tensors.push_back({p0 + ".mul1", io::SType::I32, {}, mul1_marker});
+    tensors.push_back({p1 + ".trellis", io::SType::I16, {8, 8, 56}, trellis1});
+    tensors.push_back({p1 + ".suh", io::SType::F16, {128}, suh});
+    tensors.push_back({p1 + ".svh", io::SType::F16, {128}, svh});
+    tensors.push_back({p1 + ".mul1", io::SType::I32, {}, mul1_marker});
+    tensors.push_back({p2 + ".trellis", io::SType::I16, {8, 8, 64}, trellis2});
+    tensors.push_back({p2 + ".suh", io::SType::F16, {128}, suh});
+    tensors.push_back({p2 + ".svh", io::SType::F16, {128}, svh});
+    tensors.push_back({p2 + ".mcg", io::SType::I32, {}, mcg_marker});
+
+    if (!write_shard((dir / shard).string(), tensors)) return false;
+    std::vector<std::pair<std::string, std::string>> map;
+    for (const Planned& t : tensors) map.push_back({t.name, shard});
+    write_index(dir.string(), map);
+    write_text((dir / "config.json").string(), exl3_config_json());
+    return true;
+}
+
+static void test_exl3_manifest() {
+    const fs::path dir = make_case_dir("exl3");
+    if (!build_exl3_dir(dir)) return;
+
+    check(weights::is_quantized_model_dir(dir.string()), "exl3 dir is quantized");
+    auto method = quantization::bundle::detect_hf_quant_method(dir.string());
+    check(method.ok() && method.value() == quantization::bundle::HfQuantMethod::Exl3,
+          "exl3 method detected");
+
+    const std::vector<std::string> names = {
+        "layers.0.mlp.down_proj.weight", "layers.1.mlp.down_proj.weight",
+        "layers.2.mlp.down_proj.weight", "layers.9.missing.weight"};
+    auto source_result =
+        quantization::bundle::synthesize_hf_quantized_source(dir.string(), names, true);
+    if (!source_result.ok()) {
+        check(false, "exl3 synthesize: " + source_result.status().message());
+        return;
+    }
+    quantization::bundle::HfQuantizedSource source = source_result.release();
+    const auto& manifest = source.manifest;
+    check_eq_u64(manifest.tensors.size(), 3, "exl3 manifest tensor count");
+    check(quantization::manifest::validate_quantized_manifest_contract(manifest).ok(),
+          "exl3 manifest contract");
+
+    const auto& t0 = manifest.tensors.at("layers.0.mlp.down_proj.weight");
+    check(t0.encoding == quantization::manifest::QuantizedEncoding::Exl3, "exl3 encoding");
+    check(t0.codebook == "mul1", "exl3 mul1 codebook");
+    check(t0.logical_shape == std::vector<int64_t>({128, 128}), "exl3 logical shape");
+    check_eq_u64(t0.k_padded, 128, "exl3 k_padded");
+    check_eq_u64(t0.exl3_ka, 4, "exl3 integer bit rate");
+    check(!t0.exl3_half, "exl3 integer rate flag");
+    check(t0.codes && t0.codes->dtype == "U8", "exl3 trellis ref");
+    check(t0.suh && t0.suh->dtype == "FP16", "exl3 suh ref");
+    check(t0.svh && t0.svh->dtype == "FP16", "exl3 svh ref");
+    check(t0.marker && t0.marker->dtype == "I32", "exl3 marker ref");
+
+    const auto& t1 = manifest.tensors.at("layers.1.mlp.down_proj.weight");
+    check_eq_u64(t1.exl3_ka, 3, "exl3 half bit rate integer part");
+    check(t1.exl3_half, "exl3 half bit rate flag");
+    const auto& t2 = manifest.tensors.at("layers.2.mlp.down_proj.weight");
+    check(t2.codebook == "mcg", "exl3 mcg codebook");
+
+    auto reader_result =
+        quantization::bundle::QuantizedModelReader::open_hf_source(std::move(source), true);
+    if (!reader_result.ok()) {
+        check(false, "exl3 open_hf_source: " + reader_result.status().message());
+        return;
+    }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+    auto view = reader.resolve("layers.0.mlp.down_proj.weight");
+    if (!view.ok()) {
+        check(false, "exl3 resolve: " + view.status().message());
+        return;
+    }
+    check_eq_u64(view.value().codes.size, 8u * 8u * 64u * 2u, "exl3 trellis bytes");
+    check_eq_u64(view.value().suh.size, 256u, "exl3 suh bytes");
+    check_eq_u64(view.value().svh.size, 256u, "exl3 svh bytes");
+    check_eq_u64(view.value().marker.size, 4u, "exl3 marker bytes");
+    check(view.value().codebook == "mul1", "exl3 resolved codebook");
+    const auto view1 = reader.resolve("layers.1.mlp.down_proj.weight");
+    check(view1.ok() && view1.value().exl3_half && view1.value().exl3_ka == 3,
+          "exl3 resolved half rate");
+}
+
 int main() {
     std::error_code ec;
     g_root = fs::temp_directory_path(ec) /
@@ -545,6 +652,7 @@ int main() {
     test_fp8_unaligned_k();
     test_mxfp4_manifest();
     test_mxfp4_rejections();
+    test_exl3_manifest();
     test_unsupported_configs();
 
     fs::remove_all(g_root, ec);

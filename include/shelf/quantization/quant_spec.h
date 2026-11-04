@@ -22,6 +22,8 @@ enum class QuantScalarType : uint8_t {
     F32,
     FP8E4M3,
     E8M0,
+    FP16,
+    I32,
 };
 
 enum class ScaleGranularity : uint8_t {
@@ -76,6 +78,8 @@ constexpr WeightBlockShape default_weight_block(manifest::QuantizedEncoding enc)
             return WeightBlockShape{kFp8ScaleBlockN, kFp8ScaleBlockK};
         case manifest::QuantizedEncoding::Mxfp4:
             return WeightBlockShape{1u, kMxfp4ScaleBlockK};
+        case manifest::QuantizedEncoding::Exl3:
+            return WeightBlockShape{1u, 1u};
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -94,6 +98,8 @@ inline std::optional<WeightScaleSpec> default_weight_scale_spec(
     manifest::QuantizedEncoding enc) {
     switch (enc) {
         case manifest::QuantizedEncoding::Bf16:
+            return std::nullopt;
+        case manifest::QuantizedEncoding::Exl3:
             return std::nullopt;
         case manifest::QuantizedEncoding::Fp8:
             return WeightScaleSpec{
@@ -176,6 +182,8 @@ inline KVQuantSpec kv_quant_spec(manifest::QuantizedEncoding enc, uint32_t head_
             break;
         case manifest::QuantizedEncoding::Mxfp4:
             break;
+        case manifest::QuantizedEncoding::Exl3:
+            break;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -210,6 +218,8 @@ inline Status validate_kv_quant_spec(const KVQuantSpec& spec) {
             }
             return Status::make_ok();
         case manifest::QuantizedEncoding::Mxfp4:
+            break;
+        case manifest::QuantizedEncoding::Exl3:
             break;
     }
     return Status::unsupported("unsupported kv cache encoding", __FILE__, __LINE__);

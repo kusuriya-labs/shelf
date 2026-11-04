@@ -22,16 +22,22 @@ struct ByteSpan {
 struct QuantizedTensorView {
     std::string name;
     QuantizedEncoding encoding = QuantizedEncoding::Bf16;
+    std::string codebook;
     std::vector<int64_t> logical_shape;
     int64_t k_padded = 0;
     uint32_t scale_block_n = 0;
     uint32_t scale_block_k = 0;
+    uint32_t exl3_ka = 0;
+    bool exl3_half = false;
     ByteSpan data;
     ByteSpan codes;
     ByteSpan metadata1;
     ByteSpan metadata2;
     ByteSpan metadata3;
     ByteSpan metadata4;
+    ByteSpan suh;
+    ByteSpan svh;
+    ByteSpan marker;
 };
 
 // Output-only reader for a self-contained Shelf quantized safetensors

@@ -33,6 +33,12 @@ struct WeightSlot {
     uint32_t storage_scale_stride_bytes = 0;
     const void* compute_codes = nullptr;
     const void* compute_scales_bf16 = nullptr;
+    const void* exl3_suh = nullptr;
+    const void* exl3_svh = nullptr;
+    const void* exl3_marker = nullptr;
+    uint32_t exl3_ka = 0;
+    uint8_t exl3_half = 0;
+    uint8_t exl3_codebook = 0;
     uint32_t codes_row_stride_bytes = 0;
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;

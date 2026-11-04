@@ -44,6 +44,9 @@ void add_matrix_bytes(std::uint64_t& total, const shelf::weights::MatrixWeight& 
     total += tensor_bytes(w.scales);
     total += tensor_bytes(w.compute_codes);
     total += tensor_bytes(w.compute_scales_bf16);
+    total += tensor_bytes(w.exl3_suh);
+    total += tensor_bytes(w.exl3_svh);
+    total += tensor_bytes(w.exl3_marker);
 }
 
 }  // namespace

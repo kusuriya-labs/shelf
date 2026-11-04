@@ -16,6 +16,7 @@ enum class HfQuantMethod : uint8_t {
     None = 0,
     Fp8 = 1,
     QuarkMxfp4 = 2,
+    Exl3 = 3,
 };
 
 struct HfQuantizedSource {

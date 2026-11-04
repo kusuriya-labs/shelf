@@ -48,6 +48,15 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
         contract.activation_kernel = KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF;
         return contract;
     }
+    if (static_cast<MatrixEncoding>(weight_encoding) == MatrixEncoding::Exl3) {
+        if (compute_spec != static_cast<uint8_t>(ComputeSpecId::EXL3_W16A16_F32_BF16))
+            return Status::invalid_argument(
+                "exl3 linear weight requires exl3 w16a16 compute spec", __FILE__, __LINE__);
+        contract.linear_kernel = KernelId::LINEAR_EXL3_W16A16;
+        contract.requires_activation_quant = false;
+        contract.activation_k_alignment = 128u;
+        return contract;
+    }
     if (compute_spec != static_cast<uint8_t>(ComputeSpecId::BF16_F32_BF16))
         return Status::invalid_argument(
             "bf16 linear weight requires bf16 compute spec", __FILE__, __LINE__);

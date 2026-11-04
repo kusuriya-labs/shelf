@@ -559,6 +559,9 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_moe_grouped_linear(program, b, ctx, stream);
         case KernelId::MOE_COMBINE:
             return try_launch_moe_combine(program, b, ctx, stream);
+        case KernelId::LINEAR_EXL3_W16A16:
+            return Status::unsupported(
+                "exl3 w16a16 linear kernel is not implemented", __FILE__, __LINE__);
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM:

@@ -118,6 +118,45 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
         }
         return Status::make_ok();
     }
+    if (enc == 4u) {
+        if (s.device_ptr != nullptr || s.codes == nullptr || s.exl3_suh == nullptr ||
+            s.exl3_svh == nullptr || s.exl3_marker == nullptr) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot needs trellis+suh+svh+marker and no device_ptr: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.exl3_ka < 1u || s.exl3_ka > 8u || (s.exl3_half && s.exl3_ka > 3u)) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot bit rate invalid: index " + std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.exl3_codebook != 1u && s.exl3_codebook != 2u) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot codebook invalid: index " + std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        if (s.k_padded != s.cols || (s.cols & 127u) != 0u || (s.rows & 127u) != 0u) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot shape must be 128-aligned: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        const uint64_t words = 16u * s.exl3_ka + (s.exl3_half ? 8u : 0u);
+        const uint64_t row_stride = (static_cast<uint64_t>(s.rows) / 16u) * words * 2u;
+        if (s.codes_row_stride_bytes != row_stride) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot trellis stride mismatch: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     return Status::invalid_argument(
         ("unsupported weight table encoding: index " + std::to_string(index)).c_str(),
         __FILE__, __LINE__);

@@ -32,6 +32,12 @@ RT::WeightSlot make_weight_slot(const W::MatrixWeight& w) {
         s.compute_codes = w.compute_codes.ndim() != 0 ? w.compute_codes.data<void>() : nullptr;
         s.compute_scales_bf16 =
             w.compute_scales_bf16.ndim() != 0 ? w.compute_scales_bf16.data<void>() : nullptr;
+        s.exl3_suh = w.exl3_suh.ndim() != 0 ? w.exl3_suh.data<void>() : nullptr;
+        s.exl3_svh = w.exl3_svh.ndim() != 0 ? w.exl3_svh.data<void>() : nullptr;
+        s.exl3_marker = w.exl3_marker.ndim() != 0 ? w.exl3_marker.data<void>() : nullptr;
+        s.exl3_ka = w.exl3_ka;
+        s.exl3_half = w.exl3_half ? 1u : 0u;
+        s.exl3_codebook = w.exl3_codebook;
         s.codes_row_stride_bytes = w.codes_row_stride_bytes;
         s.scale_row_stride_bytes = w.scale_row_stride_bytes;
         s.weight_scale_group = w.weight_scale_group;

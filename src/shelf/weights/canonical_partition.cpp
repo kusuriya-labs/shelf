@@ -452,6 +452,11 @@ Status materialize_rank_local_canonical(
                 "tp partition of mxfp4 weights is not supported",
                 __FILE__, __LINE__);
             break;
+        case QuantizedEncoding::Exl3:
+            st = Status::unsupported(
+                "tp partition of exl3 weights is not supported",
+                __FILE__, __LINE__);
+            break;
     }
     if (!st.ok()) return st;
 

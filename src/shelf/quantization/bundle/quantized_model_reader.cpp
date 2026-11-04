@@ -302,6 +302,42 @@ struct QuantizedModelReader::Impl {
                 continue;
             }
 
+            if (tensor.encoding == QuantizedEncoding::Exl3) {
+                if (tensor.logical_shape.size() < 2 || !tensor.codes || !tensor.suh ||
+                    !tensor.svh || !tensor.marker) {
+                    return Status::invalid_argument(
+                        "exl3 quantized tensor payload is incomplete", __FILE__, __LINE__);
+                }
+                const uint64_t n =
+                    static_cast<uint64_t>(tensor.logical_shape[tensor.logical_shape.size() - 2]);
+                const uint32_t ka = tensor.exl3_ka;
+                if (ka < 1u || ka > 8u || (tensor.exl3_half && ka > 3u)) {
+                    return Status::invalid_argument("exl3 bit rate is invalid", __FILE__,
+                                                    __LINE__);
+                }
+                const uint64_t words = 16u * ka + (tensor.exl3_half ? 8u : 0u);
+                const std::vector<std::size_t> trellis_shape = {
+                    static_cast<std::size_t>(k / 16u),
+                    static_cast<std::size_t>(n / 16u),
+                    static_cast<std::size_t>(words)};
+                uint64_t trellis_bytes = 0;
+                Status bytes_status = checked_product(
+                    (k / 16u) * (n / 16u) * words, uint64_t{2}, trellis_bytes);
+                if (!bytes_status.ok()) return bytes_status;
+                Status st = validate_ref_exact(*tensor.codes, shelf::io::SType::I16,
+                                               trellis_shape, trellis_bytes);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.suh, shelf::io::SType::F16,
+                                        {static_cast<std::size_t>(k)}, k * 2u);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.svh, shelf::io::SType::F16,
+                                        {static_cast<std::size_t>(n)}, n * 2u);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.marker, shelf::io::SType::I32, {}, 4u);
+                if (!st.ok()) return st;
+                continue;
+            }
+
             const shelf::quantization::QuantFormatDesc* desc =
                 shelf::quantization::quant_format_desc(quant_format_id(tensor.encoding));
             if (desc == nullptr)
@@ -451,6 +487,9 @@ Result<QuantizedModelReader> QuantizedModelReader::open(
         if (t.metadata2) physical.push_back(t.metadata2->tensor);
         if (t.metadata3) physical.push_back(t.metadata3->tensor);
         if (t.metadata4) physical.push_back(t.metadata4->tensor);
+        if (t.suh) physical.push_back(t.suh->tensor);
+        if (t.svh) physical.push_back(t.svh->tensor);
+        if (t.marker) physical.push_back(t.marker->tensor);
         if (t.data) physical.push_back(t.data->tensor);
         for (const auto& p : physical) {
             if (!pimpl->shard_for_tensor.count(p)) {
@@ -563,10 +602,13 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
     QuantizedTensorView view;
     view.name = canonical;
     view.encoding = t.encoding;
+    view.codebook = t.codebook;
     view.logical_shape = t.logical_shape;
     view.k_padded = static_cast<int64_t>(t.k_padded);
     view.scale_block_n = t.scale_block_n;
     view.scale_block_k = t.scale_block_k;
+    view.exl3_ka = t.exl3_ka;
+    view.exl3_half = t.exl3_half;
 
     auto fetch = [&](const std::string& physical, std::size_t& out_bytes)
         -> Result<const void*> {
@@ -612,6 +654,24 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
         auto r = fetch(t.metadata4->tensor, nb);
         if (!r.ok()) return r.status();
         view.metadata4 = ByteSpan{r.value(), nb};
+    }
+    if (t.suh) {
+        std::size_t nb = 0;
+        auto r = fetch(t.suh->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.suh = ByteSpan{r.value(), nb};
+    }
+    if (t.svh) {
+        std::size_t nb = 0;
+        auto r = fetch(t.svh->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.svh = ByteSpan{r.value(), nb};
+    }
+    if (t.marker) {
+        std::size_t nb = 0;
+        auto r = fetch(t.marker->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.marker = ByteSpan{r.value(), nb};
     }
     if (t.data) {
         std::size_t nb = 0;

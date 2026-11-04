@@ -33,6 +33,7 @@ enum class KernelId : uint32_t {
     MOE_PLAN_SCATTER,
     LINEAR_MXFP4_W4A8_GROUPED,
     MOE_COMBINE,
+    LINEAR_EXL3_W16A16,
     COUNT,
 };
 
@@ -71,6 +72,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::MOE_PLAN_SCATTER: return "MOE_PLAN_SCATTER";
         case KernelId::LINEAR_MXFP4_W4A8_GROUPED: return "LINEAR_MXFP4_W4A8_GROUPED";
         case KernelId::MOE_COMBINE: return "MOE_COMBINE";
+        case KernelId::LINEAR_EXL3_W16A16: return "LINEAR_EXL3_W16A16";
         default: return "UNKNOWN";
     }
 }
