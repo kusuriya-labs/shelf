@@ -573,7 +573,6 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                 .value_head_dim = value_head_dim,
                 .conv_kernel = conv_kernel,
                 .eps = eps,
-                .output_gate_silu = config.output_gate_silu,
                 .out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
                                                     : RT::ValueDType::BF16,
             };

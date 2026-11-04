@@ -105,21 +105,18 @@ int main() {
         check(cfg.ffn.shared_expert_intermediate_size == 512u,
               "moe: shared_expert_intermediate_size");
         check(cfg.hidden_size == 2048u, "moe: hybrid geometry reaches the MoE config");
-        check(cfg.output_gate_silu, "moe: a missing output_gate_type defaults to silu");
         check(cfg.hidden_size == 2048u && cfg.num_hidden_layers == 40u, "moe: base geometry kept");
         check(cfg.vocab_size == 248320u, "moe: base vocab kept");
     }
 
+    // The reference fixes both gate activations (GDN gated RMSNorm = silu, attention
+    // output gate = sigmoid), so output_gate_type is not part of the config contract. A
+    // checkpoint that still declares it has to be accepted whatever the value is.
     {
-        const auto cfg = expect_moe_ok("moe_sigmoid", with_moe_identity(
+        const auto cfg = expect_moe_ok("moe_gate_key_ignored", with_moe_identity(
             std::string(kMoeBase) + R"json(,"output_gate_type":"sigmoid")json"));
-        check(!cfg.output_gate_silu, "moe: an explicit sigmoid gate is honoured");
-    }
-
-    {
-        const auto cfg = expect_moe_ok("moe_swish", with_moe_identity(
-            std::string(kMoeBase) + R"json(,"output_gate_type":"swish")json"));
-        check(cfg.output_gate_silu, "moe: explicit swish gate");
+        check(cfg.ffn.num_experts == 256u,
+              "an output_gate_type declaration does not disturb the config");
     }
 
     // The MoE reader owns the expert geometry; the shared Qwen35 reader must not grow
@@ -131,17 +128,9 @@ int main() {
         check(dense.ok(), "dense: base reader accepts");
         if (dense.ok()) {
             check(dense.value().ffn.intermediate_size == 17408u, "dense: intermediate_size");
-            check(dense.value().output_gate_silu, "dense: swish gate");
         }
         check(!read_qwen35_moe_text_config((g_root / "dense").string()).ok(),
               "a dense config is not a MoE config");
-    }
-
-    {
-        write_config("dense_missing_gate", with_dense_identity(kDenseBase));
-        auto dense = read_qwen35_text_config((g_root / "dense_missing_gate").string());
-        check(dense.ok() && !dense.value().output_gate_silu,
-              "the base reader keeps its own gate default");
     }
 
     // num_experts is the authority for MoE: a config that declares experts is not a dense
@@ -180,13 +169,6 @@ int main() {
                      with_moe_identity(R"json("vocab_size":248320,"hidden_size":2048,"num_hidden_layers":40,"num_experts":256,"num_experts_per_tok":8,"moe_intermediate_size":512)json"));
     expect_moe_error("moe_with_dense_ffn", with_moe_identity(
         std::string(kMoeBase) + R"json(,"intermediate_size":512)json"));
-
-    {
-        write_config("bad_gate", with_moe_identity(
-            std::string(kMoeBase) + R"json(,"output_gate_type":"gelu")json"));
-        check(!read_qwen35_moe_text_config((g_root / "bad_gate").string()).ok(),
-              "an unsupported output_gate_type is rejected");
-    }
 
     fs::remove_all(g_root);
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);

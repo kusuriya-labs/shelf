@@ -37,7 +37,6 @@ struct QwenHybridConfig {
     float partial_rotary_factor = 0.25f;
 
     bool tie_word_embeddings = false;
-    bool output_gate_silu = false;
 
     std::vector<int> layer_types;
 

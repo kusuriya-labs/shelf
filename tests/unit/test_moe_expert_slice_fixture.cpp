@@ -193,7 +193,6 @@ int main() {
             check(cfg.value().hidden_size == f.config.hidden_size &&
                       cfg.value().num_hidden_layers == f.config.num_hidden_layers,
                   "the fixture config.json carries the base geometry the test uses");
-            check(cfg.value().output_gate_silu, "a fixture config without output_gate_type is silu");
         }
     }
 

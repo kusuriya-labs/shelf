@@ -25,8 +25,6 @@ Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model
     auto has_dense_ffn = shelf::qwen_hybrid::has_text_config_key(model_dir, "intermediate_size");
     if (!has_dense_ffn.ok()) return has_dense_ffn.status();
 
-    auto gate_declared = shelf::qwen_hybrid::has_text_config_key(model_dir, "output_gate_type");
-    if (!gate_declared.ok()) return gate_declared.status();
 
     Qwen35MoeTextConfig cfg;
     static_cast<shelf::qwen_hybrid::QwenHybridConfig&>(cfg) = hybrid.release();
@@ -59,11 +57,6 @@ Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model
             "read_qwen35_moe_text_config: moe config must not declare intermediate_size",
             __FILE__, __LINE__);
     }
-    // The MoE checkpoint carries no output_gate_type key, and the reference applies
-    // silu to the GDN output gate unconditionally. Only an explicit "sigmoid" selects
-    // the other form.
-    if (!gate_declared.value()) cfg.output_gate_silu = true;
-
     return cfg;
 }
 

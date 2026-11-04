@@ -316,18 +316,6 @@ Result<QwenHybridConfig> read_qwen_hybrid_config(const std::string& model_dir) {
 
     cfg.tie_word_embeddings = tie_word_embeddings_from_json(root);
 
-    if (t.contains("output_gate_type") && t["output_gate_type"].is_string()) {
-        const std::string gate_type = t["output_gate_type"].get<std::string>();
-        if (gate_type == "swish" || gate_type == "silu") {
-            cfg.output_gate_silu = true;
-        } else if (gate_type != "sigmoid") {
-            return Status::invalid_argument(
-                ("read_qwen_hybrid_config: unsupported output_gate_type '" + gate_type + "'")
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-    }
-
     if (t.contains("layer_types") && t["layer_types"].is_array()) {
         cfg.layer_types.reserve(t["layer_types"].size());
         for (const auto& lt : t["layer_types"]) {

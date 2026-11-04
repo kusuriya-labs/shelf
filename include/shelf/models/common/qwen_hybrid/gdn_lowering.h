@@ -17,7 +17,6 @@ struct GdnLoweringGeometry {
     std::uint32_t value_head_dim = 0;
     std::uint32_t conv_kernel = 0;
     float eps = 1e-6f;
-    bool output_gate_silu = true;
     RT::ValueDType out_dtype = RT::ValueDType::BF16;
 };
 
@@ -137,10 +136,11 @@ inline RT::ValueId emit_gdn(
                                        value_features, RT::ValueDType::F32);
     name_last("gdn_norm");
 
+    // The gated RMSNorm of the reference (Qwen3_5RMSNormGated) hardcodes silu on the gate
+    // branch; it is not a config-selectable activation. The attention output gate stays
+    // sigmoid, which is also fixed there.
     const RT::ValueId v_gated_z = em.unary(
-        geo.output_gate_silu
-            ? RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{value_features}}}
-            : RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{value_features}}},
+        RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{value_features}}},
         v_z, value_features, RT::ValueDType::F32);
     name_last("gdn_z_gate");
 

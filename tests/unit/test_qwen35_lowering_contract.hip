@@ -157,6 +157,26 @@ int main() {
         }
     }
 
+    // The GDN gated RMSNorm branch is silu in the reference regardless of what a
+    // checkpoint declares as output_gate_type, and the attention output gate (sigmoid)
+    // never reaches a GDN-only graph.
+    {
+        const rt::PrimitiveGraphNode* gate = nullptr;
+        std::size_t sigmoids = 0;
+        for (const auto& n : g.nodes) {
+            if (n.debug_name.size() >= 10 &&
+                n.debug_name.compare(n.debug_name.size() - 10, 10, "gdn_z_gate") == 0)
+                gate = &n;
+            if (rt::primitive_kind_of(n.node) == rt::PrimitiveKind::SIGMOID) ++sigmoids;
+        }
+        check(gate != nullptr, "gdn: a z gate node is emitted");
+        if (gate != nullptr) {
+            check(rt::primitive_kind_of(gate->node) == rt::PrimitiveKind::SILU,
+                  "gdn: the z gate is silu, not sigmoid");
+        }
+        check(sigmoids == 0, "gdn only: no sigmoid gate is emitted");
+    }
+
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail == 0) {
         std::printf("QWEN35_LOWERING_CONTRACT: PASS\n");
