@@ -287,6 +287,9 @@ Y = (X diag(suh)) H128 W_hat H128 diag(svh)
 `W_hat` は trellis を tile 順に復号した回転基底の重みである。入力回転と出力回転は
 linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で書く。
 
+- 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
+  成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ
+  落とさない。
 - final projection / vocab-parallel LM head は `Bf16` を要求する既存契約のままであり、
   EXL3 の lm_head に対して vocab shard は行わない。
 - tensor partition（TP）は EXL3 では unsupported。

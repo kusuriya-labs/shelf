@@ -538,7 +538,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         return Status::invalid_state("exl3 linear: output dtype not BF16/F32", __FILE__,
                                      __LINE__);
     const uint32_t rows = rows_for(dst, ctx);
-    if (rows == 0) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (rows == 0) return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 
     ::shelf::kernel::Exl3GemmArgs args;
     args.trellis = e.codes;
