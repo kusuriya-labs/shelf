@@ -167,6 +167,18 @@ shelf_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_
 shelf_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+
+# 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の层 0 = GDN を f64 参照で固定する。
+add_test(NAME test_qwen35_gdn_gate_reference
+         COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+             --gpu-count 1 --cost-gb 2 --timeout 300
+             --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+             -- ${CMAKE_COMMAND} -E env
+                "SHELF_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                python3 "${CMAKE_SOURCE_DIR}/tests/correctness/test_qwen35_gdn_gate_reference.py")
+set_tests_properties(test_qwen35_gdn_gate_reference PROPERTIES
+                     LABELS "gpu1;required"
+                     TIMEOUT 420)
 shelf_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES shelf_inference_state)
 shelf_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 LIBRARIES shelf_gpu)
 shelf_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)

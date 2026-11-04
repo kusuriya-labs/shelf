@@ -1,0 +1,51 @@
+{
+ "format": "shelf-qwen35-gdn-tiny-oracle-v1",
+ "note": "\u5408\u6210 Qwen3.5 checkpoint\uff08output_gate_type \u975e\u5ba3\u8a00\uff09\u306e f64 \u53c2\u7167\u3002\u5c64 0 = GDN\u3002hidden_00 = embedding\u3001hidden_01 = \u5c64 0 \u306e\u6b8b\u5dee\u51fa\u529b\u3002",
+ "case": {
+  "input_ids": [
+   331,
+   154,
+   404,
+   49,
+   74,
+   96,
+   374,
+   59,
+   219,
+   38,
+   88,
+   444,
+   428,
+   71,
+   246,
+   92
+  ],
+  "prompt_last_argmax": 186,
+  "prompt_margin_last": 0.5857000057401986
+ },
+ "model": {
+  "geometry": {
+   "hidden_size": 512,
+   "num_hidden_layers": 2,
+   "linear_num_key_heads": 2,
+   "linear_key_head_dim": 128,
+   "linear_num_value_heads": 4,
+   "linear_value_head_dim": 128,
+   "linear_conv_kernel_dim": 4,
+   "vocab_size": 512
+  },
+  "seed": 7,
+  "declares_output_gate_type": false
+ },
+ "oracle": {
+  "implementation": "qwen35-f64-oracle",
+  "mode": "pure_f64",
+  "gdn": "chunked",
+  "dtype": "f64"
+ },
+ "layout": {
+  "hidden_00": "embedding",
+  "hidden_01": "decoder layer 0 \u306e\u6b8b\u5dee\u51fa\u529b",
+  "hidden_02": "final norm output"
+ }
+}
