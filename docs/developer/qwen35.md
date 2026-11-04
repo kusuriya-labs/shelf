@@ -277,16 +277,24 @@ clamp される（R8192 = 参照実装の CHUNK と同じ 8192 行）。
 2. `read_kernel_mode()` でモード取得
 3. `for i in 0..program.dispatches.size()`:
    - `OpDumpTimer`（`SHELF_OP_DUMP` 有効時）
-   - `semantic_timing_start`（`SHELF_OP_SYNC` 有効時）
+   - `semantic_timing_start`（`SHELF_QWEN35_PERF_TIMING` 有効時）
+   - `record_logical_dispatch(kernel_id)`
    - **Auto モード**（単体 launcher を試す）:
      - `try_launch_optimized(program, i, ctx, stream)`
-     - `Launched` なら 1 dispatch 消費して `++i` で継続
+     - `Launched` なら `record_optimized_dispatch(kernel_id)` して 1 dispatch 消費、`++i` で継続
      - `NotApplicable` なら fallthrough
    - **fallback**:
      - `launch_host_binding(binding, program, ctx, stream)`
-     - `record_correctness_fallback` / `record_physical_launch(1)` / `record_logical_covered`
+     - `record_fallback_dispatch(kernel_id, rows)` / `record_physical_launch(1)`
      - `semantic_timing_finish`（`SemPath::Correctness`）
      - `i++`
+
+このループが correctness path へ落ちたかを見る唯一の地点であり、`decode_perf_stats.h` の
+kernel 単位 counter（`logical` / `optimized` / `fallback`）はその 1 箇だけで更新される。
+不変式は `logical == optimized + fallback`（kernel 毎）。optimized kernel が inline の
+generic 版へ下がった件数は `degraded` に別建てで、correctness fallback には含めない。
+`SHELF_QWEN35_PERF_STATS=1` の dump JSON が kernel 名つきの内訳と `fallback_rows` の
+min / max を出す。
 
 ---
 

@@ -511,9 +511,11 @@ workspace range や workspace storage の value と重ならないことを検�
   router はその後に走り、scan が件数を消費してゼロに戻す）。production の入口は
   `launch_host_backend_range`（`begin == 0` のとき）、test 入口は `execute_program`。
 - fallback した dispatch は correctness interpreter へ渡るが、grouped 系 kernel に
-  correctness fallback は無い。どれが fallback したかは `SHELF_OP_DEBUG=1` が
-  `OPFALLBACK i=<op> kernel=<name> rows=<rows>` として出す。optimized dispatch が失敗した
-  ときの status には同じ op index・kernel 名・rows が載る。
+  correctness fallback は無い。どれが fallback したかは kernel 単位の計数が正本で、
+  `SHELF_QWEN35_PERF_STATS=1` の dump JSON が kernel 毎に `logical` / `optimized` /
+  `fallback`（と `fallback_rows` の min・max）を出す。contract は
+  `docs/developer/qwen35.md` §5。optimized dispatch が失敗したときの status には
+  op index・kernel 名・rows が載る。
 - device 側から実行側への報告は program の error word 1 語だけで行う。kernel は
   `ProgramStatus::COMPLETE` から `atomicCAS` で最初の異常を記録し、executor は commit 時点で
   staged された word を読んで、非 COMPLETE なら pending を poison して `Status::invalid_state`

@@ -29,32 +29,6 @@ void perf_stats_reset() {
     g_perf_stats = DecodePerfStats{};
 }
 
-namespace {
-
-const char* fallback_reason_name(FallbackReason r) {
-    switch (r) {
-        case FallbackReason::UnsupportedKernel:
-            return "UnsupportedKernel";
-        case FallbackReason::UnsupportedShape:
-            return "UnsupportedShape";
-        case FallbackReason::UnsupportedDType:
-            return "UnsupportedDType";
-        case FallbackReason::UnsupportedEncoding:
-            return "UnsupportedEncoding";
-        case FallbackReason::Alignment:
-            return "Alignment";
-        case FallbackReason::SelectorRejected:
-            return "SelectorRejected";
-        case FallbackReason::Other:
-            return "Other";
-        case FallbackReason::COUNT:
-            break;
-    }
-    return "Unknown";
-}
-
-}  // namespace
-
 void perf_stats_dump(const char* path, uint32_t tokens) {
     const DecodePerfStats& s = g_perf_stats;
     std::FILE* f = std::fopen(path, "w");
@@ -72,49 +46,28 @@ void perf_stats_dump(const char* path, uint32_t tokens) {
                  (unsigned long long)s.correctness_fallbacks);
     std::fprintf(f, "  \"physical_kernel_launches\": %llu,\n",
                  (unsigned long long)s.physical_kernel_launches);
-    std::fprintf(f, "  \"linear\": {\n");
-    std::fprintf(f, "    \"fp8\": {\"gemm\": %llu, \"fallback\": %llu},\n",
-                 (unsigned long long)s.fp8_gemm_hits,
-                 (unsigned long long)s.fp8_fallbacks);
-    std::fprintf(f, "    \"bf16\": {\"gemm\": %llu, \"fallback\": %llu},\n",
-                 (unsigned long long)s.bf16_gemm_hits,
-                 (unsigned long long)s.bf16_fallbacks);
-    std::fprintf(f, "    \"mxfp4\": {\"gemm\": %llu, \"fallback\": %llu}\n",
-                 (unsigned long long)s.mxfp4_gemm_hits,
-                 (unsigned long long)s.mxfp4_fallbacks);
-    std::fprintf(f, "  },\n");
-    std::fprintf(f, "  \"m_bucket\": [");
-    for (int i = 0; i < 6; ++i) {
-        if (i > 0)
-            std::fprintf(f, ", ");
-        std::fprintf(f, "%llu", (unsigned long long)s.m_bucket[i]);
-    }
-    std::fprintf(f, "],\n");
-    std::fprintf(f, "  \"fallback_reasons\": {");
+    std::fprintf(f, "  \"kernels\": {");
     bool first = true;
-    for (uint32_t i = 0; i < static_cast<uint32_t>(FallbackReason::COUNT); ++i) {
-        if (s.fallback_reasons[i] == 0)
+    for (uint32_t i = 0; i < kKernelIdCount; ++i) {
+        const KernelDispatchCounters& k = s.kernels[i];
+        if (k.logical == 0 && k.fallback == 0 && k.degraded == 0)
             continue;
+        const char* name =
+            ::shelf::runtime::kernel_to_name(static_cast<::shelf::runtime::KernelId>(i));
         if (!first)
-            std::fprintf(f, ", ");
-        std::fprintf(f, "\"%s\": %llu", fallback_reason_name(static_cast<FallbackReason>(i)),
-                     (unsigned long long)s.fallback_reasons[i]);
+            std::fprintf(f, ",\n");
         first = false;
+        std::fprintf(f, "    \"%s\": {\"logical\": %llu, \"optimized\": %llu, \"fallback\": %llu",
+                     name, (unsigned long long)k.logical, (unsigned long long)k.optimized,
+                     (unsigned long long)k.fallback);
+        if (k.fallback != 0u)
+            std::fprintf(f, ", \"fallback_rows\": [%u, %u]", k.fallback_rows_min,
+                         k.fallback_rows_max);
+        if (k.degraded != 0u)
+            std::fprintf(f, ", \"degraded\": %llu", (unsigned long long)k.degraded);
+        std::fprintf(f, "}");
     }
-    std::fprintf(f, "},\n");
-    std::fprintf(f, "  \"kernel_ids\": {");
-    first = true;
-    for (uint32_t i = 0; i < static_cast<uint32_t>(::shelf::runtime::KernelId::COUNT); ++i) {
-        if (s.kernel_id_calls[i] == 0)
-            continue;
-        if (!first)
-            std::fprintf(f, ", ");
-        std::fprintf(f, "\"%s\": %llu",
-                     ::shelf::runtime::kernel_to_name(static_cast<::shelf::runtime::KernelId>(i)),
-                     (unsigned long long)s.kernel_id_calls[i]);
-        first = false;
-    }
-    std::fprintf(f, "}\n");
+    std::fprintf(f, "%s}\n", first ? "" : "\n  ");
     std::fprintf(f, "}\n");
     std::fclose(f);
 }

@@ -68,7 +68,7 @@ void print_usage(FILE* out) {
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"
         "                                -1 = hipEventCreate)\n"
-        "  --perf-stats-output PATH     (default none, diagnostic decode counters)\n"
+        "  --perf-stats-output PATH     (default none; per-kernel dispatch counters JSON, needs SHELF_QWEN35_PERF_STATS=1)\n"
         "  --tokens-file PATH           PSKLDTOK corpus file used as the context\n"
         "  --tokens-offset N            corpus position to start the context (default 0)\n"
         "  --decode-backend TYPE        hip (default)\n");

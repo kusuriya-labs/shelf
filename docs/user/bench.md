@@ -90,13 +90,19 @@ rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらない�
 | `--output PATH` | (default none) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |
-| `--perf-stats-output PATH` | (default none, diagnostic decode counters) |
+| `--perf-stats-output PATH` | (default none; per-kernel dispatch counters JSON, needs SHELF_QWEN35_PERF_STATS=1) |
 | `--tokens-file PATH` | PSKLDTOK corpus file used as the context |
 | `--tokens-offset N` | corpus position to start the context (default 0) |
 | `--decode-backend TYPE` | hip (default) |
 <!-- /cli:bench-tg -->
 
 greedy mode は `--compute-logits 1` が必要。
+
+`--perf-stats-output PATH` は `SHELF_QWEN35_PERF_STATS=1` と併せたときだけ、測定区間の
+dispatch 内訳を JSON で書く。中身は kernel 名ごとの `logical` / `optimized` / `fallback`
+と、fallback が起きた rows 範囲（`fallback_rows`）で、**どの kernel が correctness path へ
+落ちているかを見る口はこれだけ**である。`SHELF_QWEN35_PERF_TIMING=1` を添えると 同じ場所に
+`semantic_timing.csv`（dispatch 毎の GPU time と optimized / correctness の別）も出る。
 
 ## quality
 

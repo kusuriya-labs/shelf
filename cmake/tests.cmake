@@ -143,6 +143,7 @@ shelf_add_test(NAME test_model_identity SOURCE unit/test_model_identity.cpp LABE
 shelf_add_test(NAME test_moe_weight_plan SOURCE unit/test_moe_weight_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe)
 shelf_add_test(NAME test_moe_expert_slice_fixture SOURCE unit/test_moe_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen35moe)
 shelf_add_test(NAME test_weight_slot_validation SOURCE unit/test_weight_slot_validation.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_qwen35moe shelf_qwen_hybrid shelf_core)
+shelf_add_test(NAME test_decode_perf_stats SOURCE unit/test_decode_perf_stats.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_runtime)
 shelf_add_test(NAME test_moe_expert_load SOURCE unit/test_moe_expert_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35moe shelf_gpu)
 shelf_add_test(NAME test_moe_router SOURCE unit/test_moe_router.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_moe_grouped_linear SOURCE unit/test_moe_grouped_linear.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_gpu)

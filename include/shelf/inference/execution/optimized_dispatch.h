@@ -42,12 +42,4 @@ Result<OptimizedLaunchResult> try_launch_optimized(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-
-void record_correctness_fallback(::shelf::runtime::KernelId id);
-
-void rope_optimized_hit();
-void gdn_recurrence_optimized_hit();
-
-uint32_t embedding_optimized_count() noexcept;
-
 }

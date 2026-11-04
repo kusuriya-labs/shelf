@@ -155,10 +155,6 @@ const bool g_op_sync_enabled = [] {
     const char* e = std::getenv("SHELF_OP_SYNC");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
 }();
-const bool g_op_debug_enabled = [] {
-    const char* e = std::getenv("SHELF_OP_DEBUG");
-    return e != nullptr && e[0] != '\0';
-}();
 struct OpDumpTimer {
     std::chrono::steady_clock::time_point t0;
     const ::shelf::runtime::KernelId id;
@@ -418,6 +414,7 @@ Status execute_program_range(
         const bool sem_on = semantic_timing_enabled();
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
         const uint32_t binding_as_kid = static_cast<uint32_t>(binding.kernel_id);
+        record_logical_dispatch(binding.kernel_id);
         if (mode == KernelMode::Auto) {
             const Result<OptimizedLaunchResult> optimized =
                 try_launch_optimized(program, i, ctx, stream);
@@ -435,7 +432,7 @@ Status execute_program_range(
                                                  __LINE__);
                     }
                 }
-                record_logical_covered(&binding_as_kid, 1);
+                record_optimized_dispatch(binding.kernel_id);
                 if (sem_on)
                     semantic_timing_finish(stream, sem_seq, binding_as_kid,
                                            static_cast<uint32_t>(SemPath::Optimized), 1);
@@ -447,15 +444,10 @@ Status execute_program_range(
                 continue;
             }
         }
-        if (g_op_debug_enabled)
-            std::fprintf(stderr, "OPFALLBACK i=%zu kernel=%s rows=%u\n", i,
-                         ::shelf::runtime::kernel_to_name(binding.kernel_id),
-                         ctx.actual_rows);
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
-        record_correctness_fallback(binding.kernel_id);
+        record_fallback_dispatch(binding.kernel_id, ctx.actual_rows);
         record_physical_launch(1);
-        record_logical_covered(&binding_as_kid, 1);
         if (sem_on)
             semantic_timing_finish(stream, sem_seq, binding_as_kid,
                                    static_cast<uint32_t>(SemPath::Correctness), 1);

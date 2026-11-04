@@ -150,9 +150,7 @@ Result<OptimizedLaunchResult> try_launch_rope(
         return Status::hip_error("rope optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
     if (launch.variant == PhysicalRopeVariant::F32Bf16Generic)
-        record_correctness_fallback(b.kernel_id);
-    else
-        rope_optimized_hit();
+        record_degraded_dispatch(b.kernel_id);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

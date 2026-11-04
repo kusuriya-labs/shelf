@@ -335,9 +335,7 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
         return Status::hip_error("gdn-recurrence optimized launch",
                                  hipGetErrorString(herr), __FILE__, __LINE__);
     if (ran_f32)
-        record_correctness_fallback(b.kernel_id);
-    else
-        gdn_recurrence_optimized_hit();
+        record_degraded_dispatch(b.kernel_id);
     record_physical_launch(physical_launches);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

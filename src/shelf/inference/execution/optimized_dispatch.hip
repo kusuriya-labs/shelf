@@ -48,55 +48,6 @@ using ::shelf::runtime::ValueRowDomain;
 
 namespace {
 
- std::atomic<uint32_t> g_rmsnorm_optimized_count{0};
- std::atomic<uint32_t> g_kv_append_optimized_count{0};
- std::atomic<uint32_t> g_paged_attention_optimized_count{0};
- std::atomic<uint32_t> g_gdn_recurrence_optimized_count{0};
- std::atomic<uint32_t> g_elementwise_optimized_count{0};
- std::atomic<uint32_t> g_embedding_optimized_count{0};
- std::atomic<uint32_t> g_sampling_optimized_count{0};
- std::atomic<uint32_t> g_l2_normalize_optimized_count{0};
- std::atomic<uint32_t> g_gdn_conv_optimized_count{0};
- std::atomic<uint32_t> g_rope_optimized_count{0};
- std::atomic<uint32_t> g_output_gather_optimized_count{0};
- std::atomic<uint32_t> g_activation_quantize_optimized_count{0};
- std::atomic<uint32_t> g_fallback_counts[::shelf::runtime::kernel_id_count()];
-
- bool kernel_trace_enabled() {
-    static const bool enabled = [] {
-        const char* e = std::getenv("SHELF_QWEN35_KERNEL_TRACE");
-        return e != nullptr && e[0] != '\0' && std::strcmp(e, "0") != 0;
-    }();
-    if (enabled) {
-        static bool registered = false;
-        if (!registered) {
-            std::atexit([]() {
-                    std::printf("KERNEL_TRACE rmsnorm_optimized=%u kv_append=%u paged_attention=%u gdn_recurrence=%u elementwise=%u embedding=%u sampling=%u l2_normalize=%u gdn_conv=%u rope=%u output_gather=%u activation_quantize=%u\n",
-                     g_rmsnorm_optimized_count.load(std::memory_order_relaxed),
-                     g_kv_append_optimized_count.load(std::memory_order_relaxed),
-                     g_paged_attention_optimized_count.load(std::memory_order_relaxed),
-                     g_gdn_recurrence_optimized_count.load(std::memory_order_relaxed),
-                     g_elementwise_optimized_count.load(std::memory_order_relaxed),
-                     g_embedding_optimized_count.load(std::memory_order_relaxed),
-                     g_sampling_optimized_count.load(std::memory_order_relaxed),
-                     g_l2_normalize_optimized_count.load(std::memory_order_relaxed),
-                     g_gdn_conv_optimized_count.load(std::memory_order_relaxed),
-                     g_rope_optimized_count.load(std::memory_order_relaxed),
-                     g_output_gather_optimized_count.load(std::memory_order_relaxed),
-                     g_activation_quantize_optimized_count.load(std::memory_order_relaxed));
-                for (uint32_t k = 0u; k < ::shelf::runtime::kernel_id_count(); ++k) {
-                    const uint32_t c = g_fallback_counts[k].load(std::memory_order_relaxed);
-                    if (c != 0u)
-                        std::printf("KERNEL_TRACE_FALLBACK %s %u\n",
-                                    ::shelf::runtime::kernel_to_name(static_cast<KernelId>(k)), c);
-                }
-             });
-            registered = true;
-        }
-    }
-    return enabled;
-}
-
 uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
     if (v.row_domain == ValueRowDomain::OUTPUT_ROWS)
         return ctx.actual_outputs;
@@ -139,9 +90,7 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
         return Status::hip_error("act-quant optimized launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
     if (!specialized)
-        record_correctness_fallback(b.kernel_id);
-    else
-        g_activation_quantize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
+        record_degraded_dispatch(b.kernel_id);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
@@ -172,7 +121,6 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
     if (herr != hipSuccess)
         return Status::hip_error("rmsnorm optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
-    g_rmsnorm_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
@@ -283,7 +231,6 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     const Fp8FinegrainedGemmSelectorInput lin{rows, e.rows, e.cols, wkp};
     const auto config = select_fp8_finegrained_gemm_config(lin);
     if (!config) {
-        linear_record_fallback(LinearFamilyRef::Fp8, FallbackReason::SelectorRejected);
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }
     if (!e.preshuffled)
@@ -312,7 +259,6 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8(
     if (herr != hipSuccess)
         return Status::hip_error("fp8 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
-    linear_record_hit(LinearFamilyRef::Fp8, rows);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
@@ -394,7 +340,6 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
     const Mxfp4GemmSelectorInput sel{rows, e.rows, e.cols, wkp};
     const auto config = select_mxfp4_gemm_config(sel);
     if (!config) {
-        linear_record_fallback(LinearFamilyRef::Mxfp4, FallbackReason::SelectorRejected);
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }
     const uint64_t range_off = program.workspace.ranges[b.workspace_slot].offset;
@@ -423,7 +368,6 @@ Result<OptimizedLaunchResult> try_launch_linear_mxfp4(
     if (herr != hipSuccess)
         return Status::hip_error("mxfp4 gemm launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
-    linear_record_hit(LinearFamilyRef::Mxfp4, rows);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
@@ -492,7 +436,6 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     lin.verify_exact = ctx.role == ::shelf::runtime::ExecutionRole::Verify;
     const auto config = select_bf16_gemm_config(lin);
     if (!config) {
-        linear_record_fallback(LinearFamilyRef::Bf16, FallbackReason::SelectorRejected);
         return PhysicalResolveStatus::NotApplicable;
     }
 
@@ -570,7 +513,6 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     if (herr != hipSuccess)
         return Status::hip_error("bf16 gemm launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
-    linear_record_hit(LinearFamilyRef::Bf16, launch.rows);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
@@ -587,25 +529,6 @@ Result<KernelMode> read_kernel_mode() {
     return Status::invalid_argument("invalid SHELF_QWEN35_KERNEL_MODE", __FILE__, __LINE__);
 }
 
-void record_correctness_fallback(::shelf::runtime::KernelId id) {
-    (void)kernel_trace_enabled();
-    const uint32_t k = static_cast<uint32_t>(id);
-    if (k < ::shelf::runtime::kernel_id_count())
-        g_fallback_counts[k].fetch_add(1u, std::memory_order_relaxed);
-}
-
-void rope_optimized_hit() {
-    g_rope_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-}
-
-void gdn_recurrence_optimized_hit() {
-    g_gdn_recurrence_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-}
-
-uint32_t embedding_optimized_count() noexcept {
-    return g_embedding_optimized_count.load(std::memory_order_relaxed);
-}
-
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -613,110 +536,59 @@ Result<OptimizedLaunchResult> try_launch_optimized(
     hipStream_t stream) {
     if (dispatch_index >= program.dispatches.size())
         return Status::invalid_state("dispatch_index out of range", __FILE__, __LINE__);
-    (void)kernel_trace_enabled();
     const auto& b = program.dispatches[dispatch_index];
-    if (b.kernel_id == KernelId::EMBEDDING_LOOKUP) {
-        auto em = try_launch_embedding(program, dispatch_index, ctx, stream);
-        if (!em.ok()) return em.status();
-        if (em.value().kind == OptimizedLaunchKind::Launched)
-            g_embedding_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return em;
+    switch (b.kernel_id) {
+        case KernelId::EMBEDDING_LOOKUP:
+            return try_launch_embedding(program, dispatch_index, ctx, stream);
+        case KernelId::SAMPLING:
+            return try_launch_sampling(program, dispatch_index, ctx, stream);
+        case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED:
+        case KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF:
+            return try_launch_activation_quantize(program, b, ctx, stream);
+        case KernelId::LINEAR_FP8_FINEGRAINED:
+            return try_launch_linear_fp8(program, b, ctx, stream);
+        case KernelId::LINEAR_MXFP4_W4A8:
+            return try_launch_linear_mxfp4(program, b, ctx, stream);
+        case KernelId::MOE_ROUTER:
+            return try_launch_moe_router(program, b, ctx, stream);
+        case KernelId::MOE_PLAN_SCAN:
+            return try_launch_moe_plan_scan(program, b, ctx, stream);
+        case KernelId::MOE_PLAN_SCATTER:
+            return try_launch_moe_plan_scatter(program, b, ctx, stream);
+        case KernelId::LINEAR_MXFP4_W4A8_GROUPED:
+            return try_launch_moe_grouped_linear(program, b, ctx, stream);
+        case KernelId::MOE_COMBINE:
+            return try_launch_moe_combine(program, b, ctx, stream);
+        case KernelId::LINEAR_BF16:
+            return try_launch_linear_bf16(program, b, ctx, stream);
+        case KernelId::RMS_NORM:
+            return try_launch_rmsnorm(program, b, ctx, stream);
+        case KernelId::ROPE:
+            return try_launch_rope(program, dispatch_index, ctx, stream);
+        case KernelId::OUTPUT_GATHER:
+            return try_launch_output_gather(program, b, ctx, stream);
+        case KernelId::L2_NORMALIZE:
+            return try_launch_l2_normalize(program, dispatch_index, ctx, stream);
+        case KernelId::SPLIT:
+        case KernelId::SWIGLU:
+        case KernelId::SIGMOID:
+        case KernelId::RESIDUAL_ADD:
+        case KernelId::SILU:
+        case KernelId::MUL:
+        case KernelId::SCALE:
+        case KernelId::CONCAT:
+            return try_launch_elementwise(program, dispatch_index, ctx, stream);
+        case KernelId::KV_APPEND:
+            return try_launch_kv_append(program, dispatch_index, ctx, stream);
+        case KernelId::PAGED_ATTENTION:
+            return try_launch_paged_attention(program, dispatch_index, ctx, stream);
+        case KernelId::STATEFUL_CAUSAL_CONV1D:
+            return try_launch_gdn_conv1d(program, dispatch_index, ctx, stream);
+        case KernelId::GDN_RECURRENCE:
+            return try_launch_gdn_recurrence(program, dispatch_index, ctx, stream);
+        default:
+            return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }
-    if (b.kernel_id == KernelId::SAMPLING) {
-        auto sm = try_launch_sampling(program, dispatch_index, ctx, stream);
-        if (!sm.ok()) return sm.status();
-        if (sm.value().kind == OptimizedLaunchKind::Launched)
-            g_sampling_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return sm;
-    }
-    if (b.kernel_id == KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED ||
-        b.kernel_id == KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
-        return try_launch_activation_quantize(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::LINEAR_FP8_FINEGRAINED)
-        return try_launch_linear_fp8(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::LINEAR_MXFP4_W4A8)
-        return try_launch_linear_mxfp4(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::MOE_ROUTER)
-        return try_launch_moe_router(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::MOE_PLAN_SCAN)
-        return try_launch_moe_plan_scan(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::MOE_PLAN_SCATTER)
-        return try_launch_moe_plan_scatter(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::LINEAR_MXFP4_W4A8_GROUPED)
-        return try_launch_moe_grouped_linear(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::MOE_COMBINE)
-        return try_launch_moe_combine(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::LINEAR_BF16)
-        return try_launch_linear_bf16(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::RMS_NORM)
-        return try_launch_rmsnorm(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::ROPE)
-        return try_launch_rope(program, dispatch_index, ctx, stream);
-    if (b.kernel_id == KernelId::OUTPUT_GATHER) {
-        auto og = try_launch_output_gather(program, b, ctx, stream);
-        if (!og.ok()) return og.status();
-        if (og.value().kind == OptimizedLaunchKind::Launched)
-            g_output_gather_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return og;
-    }
-    if (b.kernel_id == KernelId::L2_NORMALIZE) {
-        auto l2 = try_launch_l2_normalize(program, dispatch_index, ctx, stream);
-        if (!l2.ok()) return l2.status();
-        if (l2.value().kind == OptimizedLaunchKind::Launched)
-            g_l2_normalize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return l2;
-    }
-    if (b.kernel_id == KernelId::SPLIT) {
-        auto q = try_launch_elementwise(program, dispatch_index, ctx, stream);
-        if (!q.ok()) return q.status();
-        if (q.value().kind == OptimizedLaunchKind::Launched)
-            g_elementwise_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return q;
-    }
-    if (b.kernel_id == KernelId::KV_APPEND) {
-        auto kvr = try_launch_kv_append(program, dispatch_index, ctx, stream);
-        if (kvr.ok() && kvr.value().kind == OptimizedLaunchKind::Launched)
-            g_kv_append_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return kvr;
-    }
-    if (b.kernel_id == KernelId::PAGED_ATTENTION) {
-        auto pa = try_launch_paged_attention(program, dispatch_index, ctx, stream);
-        if (pa.ok() && pa.value().kind == OptimizedLaunchKind::Launched)
-            g_paged_attention_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return pa;
-    }
-    if (b.kernel_id == KernelId::STATEFUL_CAUSAL_CONV1D) {
-        auto cv = try_launch_gdn_conv1d(program, dispatch_index, ctx, stream);
-        if (!cv.ok()) return cv.status();
-        if (cv.value().kind == OptimizedLaunchKind::Launched)
-            g_gdn_conv_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return cv;
-    }
-    if (b.kernel_id == KernelId::GDN_RECURRENCE) {
-        auto grd = try_launch_gdn_recurrence(program, dispatch_index, ctx, stream);
-        if (!grd.ok()) return grd.status();
-        if (grd.value().kind == OptimizedLaunchKind::Launched)
-            g_gdn_recurrence_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return grd.value();
-    }
-    if (b.kernel_id == KernelId::SWIGLU) {
-        auto q = try_launch_elementwise(program, dispatch_index, ctx, stream);
-        if (!q.ok()) return q.status();
-        if (q.value().kind == OptimizedLaunchKind::Launched)
-            g_elementwise_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return q;
-    }
-    if (b.kernel_id == KernelId::SIGMOID || b.kernel_id == KernelId::RESIDUAL_ADD ||
-        b.kernel_id == KernelId::SILU ||
-        b.kernel_id == KernelId::MUL || b.kernel_id == KernelId::SCALE ||
-        b.kernel_id == KernelId::CONCAT) {
-        auto q = try_launch_elementwise(program, dispatch_index, ctx, stream);
-        if (!q.ok()) return q.status();
-        if (q.value().kind == OptimizedLaunchKind::Launched)
-            g_elementwise_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return q;
-    }
-    return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
 }
 
 }
