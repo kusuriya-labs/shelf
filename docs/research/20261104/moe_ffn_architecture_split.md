@@ -172,9 +172,42 @@ base は Gate D の構造（commit `28fed13`）、refactor は `refactor/model-f
   （40 层 × 768 source 名 = 30,720 文字列）。これは load 全体の 0.1 s 未満で、
   RSS にも表れていない（上表の一致）。
 
+## 9.1 実測 A/B: dense production path（`shelf-compute`）も変化なし
+
+`shelf-compute --model-dir models/Qwen3.8-27B-FP8 --input-ids-file <5 tokens>
+--max-new-tokens 8` を同一機械で base と refactor の binary から実行した。
+
+| run | arena 使用 | load | decode | sampled ids |
+| --- | --- | --- | --- | --- |
+| `28fed13` tp 1 | 30.777 GiB | 2.57 s | 18.45 tok/s | `11,401,52280,84857,369,8093,3762,26861` |
+| refactor tp 1 | 30.777 GiB | 3.95 s | 18.22 tok/s | 同上 |
+| `28fed13` tp 2（device 0,1） | 29.838 GiB | 20.43 s | 29.33 tok/s | 同上 |
+| refactor tp 2（device 0,1） | 29.838 GiB | 20.59 s | 29.29 tok/s | 同上 |
+
+- `validate_qwen35_weights` は 27B dense checkpoint（単一 GPU / TP rank 双方）を
+  通る。新規の形状検査（backbone tensor の充足、dense FFN の `[intermediate, hidden]`、
+  partition を考慮した次元復元）は実 checkpoint を拒否しない。
+- sampled ids は 4 run で一致。load 時間の差（tp 1 の 2.57 s / 3.95 s）は page cache の
+  warm 状態の差で、TP2 では 20.43 s / 20.59 s と差がない。decode 速率の差は run 間噪声の
+  範囲（1.5%）。**性能改善の主張はしない**（構造変更なので利得も想定していない）。
+
 ## 10. 受け入れ
 
 `python3 tests/run_required_acceptance.py --build-dir build`（gfx1201、GPU あり）で
 **146 / 146 PASS、SKIP 0**。optional 込みの全 test target（163 件登録）も
 compile は通っている（`test_qwen35moe_model_load_real` を含む）。
 個別テストの受理条件は `docs/developer/qwen35moe.md` §7 に現在形で書く。
+
+## 11. 今回観測した既存の穴（今回のスコープ外・未修正）
+
+- **BF16 path は `lm_head.weight` を解決できない**。`models/Qwen3.5-9B` は
+  `tie_word_embeddings: false` で tensor 名が `lm_head.weight`（prefix なし）だが、
+  dense の BF16 model-level load は `model.language_model.lm_head.weight` しか引かない。
+  quantized path には prefix なしへの fallback がある。base `28fed13` の
+  `shelf-compute` でも同じメッセージで失敗することを確認した（今回導入した現象ではない）。
+- **`test_qwen35_mtp_weight_real` は Shelf quantized bundle を要求する**。HF real-quantized
+  dir（`models/Qwen3.8-27B-Quark-AWQ-MXFP4`）では load と MTP geometry 検証まで通り、
+  後の CRC 比較段で `shelf_quantization.json not found` になる。base でも同じ。
+  `models/Qwen3.8-27B-FP8` は test が fixed で確保する 24 GiB arena に収まらない
+  （load 途中で `insufficient memory`）。この test を実機で通すには bundle 化された
+  dense checkpoint が必要。
