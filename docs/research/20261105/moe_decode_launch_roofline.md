@@ -135,3 +135,54 @@ per-op（timer on、context 64）は `MOE_COMBINE` 40.39 → 11.83 µs、`MOE_PL
 - E2E: `GREEDY_TOKEN_SUM=2199`（context 64 / 32 token）と `2192`（context 4096 / 8 token）が
   変更前後で不変。combine は per-element の accumulate 順序を変えないので bit 一致のはずで、
   greedy 列が動かないことがその確認になっている
+
+## fusion の economics を rows=1 の単発 launch で実測した（2026-11-05 追加）
+
+「FusedMoE にすると何 µs 儲かるのか」を推定ではなく実測で決めるため、decode の geometry
+（`rows=1`、`k=2048`）で profile 単体の launch 時間を測った。device 1、`--warmup 10 --samples 20`、
+`--launches 1` と `--launches 10` で**差が無い**（＝back-to-back launch 下限に張り付いている）。
+`optimized` variant の単発 launch で、`correctness` variant は常に 2.5 µs 台（reference kernel）。
+
+| profile（単発 launch µs） | f=1 | f=8 | f=64 | f=256 | f=512 | f=1024 | f=2048 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `LINEAR_BF16` | 1.77 | 2.44 | 2.44 | 2.50 | 2.56 | 2.59 | 2.56 |
+| `ADD_BIAS_BF16` | 1.77 | 1.77 | 1.77 | 1.98 | 3.44 | 3.43 | 3.44 |
+| `MUL_ADD_BF16` | 0.78 | 0.78 | 0.78 | 0.78 | 1.79 | 1.92 | 2.02 |
+| `RESIDUAL_WARP` | 1.79 | 1.79 | 1.80 | 1.80 | 1.80 | 1.78 | 1.80 |
+| `RMS_NORM_WARP` | 1.83 | 1.80 | 1.98 | 2.40 | 2.52 | 2.52 | 2.40 |
+| `RMS_RESIDUAL_WARP` | 2.41 | 2.40 | 2.52 | 3.41 | 3.48 | 3.39 | 3.41 |
+| `RMS_SCALE_WARP`（k=1024） | 1.78 | 1.78 | 2.52 | 3.37 | 2.43 | 3.44 | — |
+| `RMS_RESIDUAL_SCALE`（production、block reduce） | — | 3.45 | — | — | — | — | 4.20 |
+| `ACTIVATION_QUANTIZE_MXFP4_ROWREF`（k=1024） | 1.78 | 1.78 | 1.78 | 1.78 | 2.52 | 2.56 | — |
+
+帰結（この表から直接言えること）:
+
+1. **1 dispatch の下限が支配的で、fold した work は安い**。`RESIDUAL` 単体 1.80 µs を
+   `RMS_NORM` へ fold すると 2.40 → 3.41 µs（+1.01 µs）で、**0.8 µs + launch 1 本ぶん（3.6 µs）
+   の浮き**がある。`MUL_ADD`（scale 平面 16 KB 書き）も単体 1.92 µs → fold で +0.97 µs。
+   つまり **2 dispatch を 1 に統合する收益は 2.5〜3.5 µs**（work の増加を引いた実値）
+2. `LINEAR_BF16` は f=512 でも f=2048 でも 2.56 µs で、**launch 下限に貼っている**。だから
+   shared expert の gate と up（各 f=512）を 1 本へ統合（f=1024 で 2.59 µs）は
+   **40 層で 2.5 µs × 40 = 0.10 ms/token = 約 2 %**（decode 4.97 ms 基準）
+3. 逆に **block reduce の RMS（4.20 µs）は warp reduce（2.40 µs）より 1.8 µs 遅い**。production の
+   `RMS_RESIDUAL_SCALE` / `RMS_F32_SCALE`（`norm.hip`）は block reduce + LDS scratch で、
+   feature 方向を grid で分割していない。**ここは fusion ではなく kernel 側の修正**で、
+   40 層 × 2 本 × 1.8 µs = 0.14 ms/token = 2.9 % の余地がある（未試作）
+4. `ACTIVATION_QUANTIZE_MXFP4_ROWREF`（1.78 µs）と grouped GEMM は launch 下限に貼っているので、
+   activation 量子化を GEMM へ fold しても收益は quantum 1 本ぶん（≈1.8 µs）/ 層にとどまる
+
+### MoE FFN 1 層の dispatch 一覧（`lower_to_primitives.cpp` から確定）
+
+`LINEAR_BF16`(router) → `MOE_ROUTER`（+ `MOE_PLAN_SCAN` / `MOE_PLAN_SCATTER`）→
+`ACTIVATION_QUANTIZE_MXFP4_ROWREF` + `LINEAR_MXFP4_W4A8_GROUPED`（gate/up、**w13 融合平面を
+2 view で読む = ここは既に fused**）→ `SWIGLU`（routed）→ 量子化 + grouped GEMM（down）→
+`LINEAR_BF16` × 4（shared gate / up / down / scale）→ `SWIGLU`（shared）→ `SIGMOID` →
+`MOE_COMBINE`（routed 合計 + shared×gate、**fused**）。1 層 16 dispatch、40 層で **640 dispatch/token**
+（decode 全体 1355 dispatch/token の 47 %）。
+
+fused になっていない所は 3 つ: ① activation 量子化が GEMM と別 kernel ② `SWIGLU` が GEMM の
+epilogue ではない ③ shared expert の gate / up が 2 本の `LINEAR_BF16`（dense 側は w13 平面で
+統合済みなので、**shared expert だけが未統合**）。vLLM の `fused_moe_kernel` は ①②を持たず
+（`moe_kernel_quantize_input` と `apply_moe_activation` が別 kernel）、gather と
+`MUL_ROUTED_WEIGHT` を epilogue でやっている。**SHELF の①②は vLLM と同じ形**で、削れるのは
+③と router bias（`MOE_ROUTER` へ吸収可、約 1 µs/層）と plan の scan/scatter 統合になる。
