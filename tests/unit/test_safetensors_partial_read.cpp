@@ -107,7 +107,7 @@ static void test_i64_unsupported_dtype_still_rejected() {
     remove_file(path);
     {
         FILE* f = std::fopen(path.c_str(), "wb");
-        std::string h = R"({"a":{"dtype":"I16","shape":[2],"data_offsets":[0,4]}})";
+        std::string h = R"({"a":{"dtype":"U16","shape":[2],"data_offsets":[0,4]}})";
         std::uint64_t len = h.size();
         std::fwrite(&len, 1, 8, f);
         std::fwrite(h.data(), 1, h.size(), f);

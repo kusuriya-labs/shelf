@@ -7,6 +7,7 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
@@ -488,6 +489,85 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     return PhysicalResolveStatus::Applicable;
 }
 
+Result<OptimizedLaunchResult> try_launch_linear_exl3(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.output_count != 1 || b.input_count != 1)
+        return Status::invalid_state("exl3 linear: bad io count", __FILE__, __LINE__);
+    if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
+        return Status::invalid_state("exl3 linear: weight_index invalid", __FILE__, __LINE__);
+    const ::shelf::runtime::WeightSlot e = ctx.weights[b.weight_index];
+    if (e.encoding != 4u)
+        return Status::invalid_state("exl3 linear: encoding != exl3", __FILE__, __LINE__);
+    if (e.device_ptr != nullptr || e.codes == nullptr || e.exl3_suh == nullptr ||
+        e.exl3_svh == nullptr) {
+        return Status::invalid_state("exl3 linear: bad weight slot", __FILE__, __LINE__);
+    }
+    if (e.preshuffled)
+        return Status::invalid_state("exl3 linear: trellis must not be preshuffled", __FILE__,
+                                     __LINE__);
+    if (e.rows == 0 || e.cols == 0 || e.k_padded != e.cols)
+        return Status::invalid_state("exl3 linear: weight dims invalid", __FILE__, __LINE__);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+    if (!in_res.ok()) return in_res.status();
+    const HostResolvedValue in = in_res.value();
+    if (in.dtype != ValueDType::BF16) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (in.feature_count != e.cols)
+        return Status::invalid_state("exl3 linear: input features != weight cols", __FILE__,
+                                     __LINE__);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+    if (!out_res.ok()) return out_res.status();
+    const HostResolvedValue dst = out_res.value();
+    const uint64_t expected_out_features =
+        e.output_col_total != 0u ? static_cast<uint64_t>(e.output_col_total)
+                                 : static_cast<uint64_t>(e.rows);
+    if (static_cast<uint64_t>(dst.feature_count) != expected_out_features)
+        return Status::invalid_state("exl3 linear: output features mismatch", __FILE__,
+                                     __LINE__);
+    if (e.output_col_total != 0u &&
+        static_cast<uint64_t>(e.output_col_offset) + e.rows >
+            static_cast<uint64_t>(e.output_col_total)) {
+        return Status::invalid_state("exl3 linear: column offset out of range", __FILE__,
+                                     __LINE__);
+    }
+    const bool out_bf16 = dst.dtype == ValueDType::BF16;
+    const bool out_f32 = dst.dtype == ValueDType::F32;
+    if (!out_bf16 && !out_f32)
+        return Status::invalid_state("exl3 linear: output dtype not BF16/F32", __FILE__,
+                                     __LINE__);
+    const uint32_t rows = rows_for(dst, ctx);
+    if (rows == 0) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+
+    ::shelf::kernel::Exl3GemmArgs args;
+    args.trellis = e.codes;
+    args.suh = e.exl3_suh;
+    args.svh = e.exl3_svh;
+    args.input = in.ptr;
+    args.output = static_cast<void*>(
+        static_cast<uint8_t*>(dst.ptr) +
+        static_cast<uint64_t>(e.output_col_offset) * value_dtype_bytes(dst.dtype));
+    args.rows = rows;
+    args.out_features = e.rows;
+    args.k = e.cols;
+    args.input_row_stride = in.row_stride;
+    args.output_row_stride = dst.row_stride;
+    args.output_dtype = out_bf16 ? 0u : 1u;
+    args.ka = e.exl3_ka;
+    args.half = e.exl3_half ? 1u : 0u;
+    args.codebook = e.exl3_codebook;
+    const hipError_t herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+    if (herr == hipErrorNotSupported)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (herr != hipSuccess)
+        return Status::hip_error("exl3 gemm launch", hipGetErrorString(herr), __FILE__,
+                                 __LINE__);
+    record_physical_launch(1);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
 Result<OptimizedLaunchResult> try_launch_linear_bf16(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
@@ -560,8 +640,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::MOE_COMBINE:
             return try_launch_moe_combine(program, b, ctx, stream);
         case KernelId::LINEAR_EXL3_W16A16:
-            return Status::unsupported(
-                "exl3 w16a16 linear kernel is not implemented", __FILE__, __LINE__);
+            return try_launch_linear_exl3(program, b, ctx, stream);
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM:

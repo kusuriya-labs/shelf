@@ -18,7 +18,8 @@ self-contained quantized safetensors を直接ロードする。
 - `QuantFormatId` — weight storage / compute formatのID（`quantization/quant_format.h`）。
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
-- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32。
+- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32 /
+  EXL3 trellis（`mul1` / `mcg`）。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -95,6 +96,8 @@ real-quantized safetensors を manifest 非依存で直接ロードできる。
   `export.weight_format == "real_quantized"`。
   これ以外（group ≠ 32、`scale_format` が e8m0 以外、fake quant export）は
   `Status::unsupported` で拒否する。
+- `quant_method == "exl3"` — `<prefix>.trellis` を持つ linear を EXL3 として読む。
+  コードブックは `<prefix>.mul1` / `.mcg` の存在で決まり、どちらも無い tensor は拒否する。
 
 合成は `quantization/bundle/hf_manifest.{h,cpp}` が行う。HF の tensor naming
 （codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16）、
@@ -110,6 +113,8 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
 - MXFP4 の logical K は codes の 2 倍として復元する。K が 32 の倍数でない、または
   64 の倍数でない tensor（activation の 64 K fragment に載らない）は拒否する。
   同様に native の 16 行 tile に載らない rows は拒否する。
+- EXL3 の trellis / suh / svh / marker は 4 つの payload plane として manifest に載り、
+  loader はバイト列を変換せず GPU へ転送する。codebook 復号と Hadamard は kernel 内で行う。
 - 量子化されていない tensor（norm / embed / lm_head / dt_bias / A_log /
   conv1d.weight など）は BF16 entry として同一経路でロードされる。
 - HF payload の K が block size（FP8: 128）の倍数でない場合、
@@ -156,7 +161,7 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
 この経路は generic weights layer の API としてのみ存在し、model 側からの呼び出し元は無い。
 
 MoE routed experts を layer あたり rank-3 の MXFP4 native SoA へ集約するロード経路
-（`shelf::qwen35moe`、`MatrixWeight` の `experts` / batch stride 字段を含む）は
+（`shelf::qwen35moe`、`MatrixWeight` の `experts` / batch stride フィールドを含む）は
 [qwen35moe.md](qwen35moe.md) を参照。
 
 ## Runtime contract
@@ -185,6 +190,7 @@ production の Program Builder は linear の activation 量子化方針を
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 | `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3（group E8M0 を行基準へ fold） | 64 | あり |
+| `Exl3` | `EXL3_W16A16_F32_BF16` | `LINEAR_EXL3_W16A16` | なし（BF16 を入力で F16 へ回転） | 128（未使用） | なし |
 
 - MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
   checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
@@ -254,6 +260,35 @@ production の Program Builder は linear の activation 量子化方針を
   1回の quantize と1つの workspace range を共有する。共有の検証は
   K / `k_padded`、activation spec、および producer kernel id（平面の形）の一致で行い、
   食い違う場合は構築時に失敗する。
+
+### EXL3 W16A16
+
+EXL3 は HF checkpoint の `quantization_config.quant_method == "exl3"` を検出し、
+`<prefix>.trellis` / `.suh` / `.svh` / `.mul1` または `.mcg` から 1 つの
+`MatrixWeight`（`MatrixEncoding::Exl3`）を作る。shelf 側で EXL3 artifact を生成する
+経路は持たない。
+
+- trellis は `<k/16, n/16, 16*ka + (half ? 8 : 0)>` の I16。`ka` は 1..8、`half` は
+  mul1 の 1.5 / 2.5 / 3.5 のみ。
+- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。コードブックは
+  marker 名で決まり、値は kernel では使わない。
+- `k` と `n` は 128 の倍数、`k_padded == k`。trellis の語数から `ka` / `half` を
+  復元し、`suh` / `svh` の長さと照合する。
+- `LINEAR_EXL3_W16A16` は trellis を kernel 内で復号し、F16 の重み・活性で
+  WMMA（F32 累算）する。活性量子化は行わず、workspace も持たない。
+
+```text
+Y = (X diag(suh)) H128 W_hat H128 diag(svh)
+```
+
+`H128` は 128 要素ブロックの正規化 Sylvester Hadamard（1/sqrt(128) を両軸に 1 回）、
+`W_hat` は trellis を tile 順に復号した回転基底の重みである。入力回転と出力回転は
+linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で書く。
+
+- final projection / vocab-parallel LM head は `Bf16` を要求する既存契約のままであり、
+  EXL3 の lm_head に対して vocab shard は行わない。
+- tensor partition（TP）は EXL3 では unsupported。
+- MoE routed expert と DFlash2 drafter は EXL3 を受理しない。
 
 ## KV quantization
 

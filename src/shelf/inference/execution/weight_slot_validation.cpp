@@ -127,6 +127,13 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
                     .c_str(),
                 __FILE__, __LINE__);
         }
+        if (s.preshuffled) {
+            return Status::invalid_argument(
+                ("exl3 weight table slot must not be preshuffled: index " +
+                 std::to_string(index))
+                    .c_str(),
+                __FILE__, __LINE__);
+        }
         if (s.exl3_ka < 1u || s.exl3_ka > 8u || (s.exl3_half && s.exl3_ka > 3u)) {
             return Status::invalid_argument(
                 ("exl3 weight table slot bit rate invalid: index " + std::to_string(index))
