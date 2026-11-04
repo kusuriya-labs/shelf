@@ -1,8 +1,11 @@
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
+#include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/runtime/graph/primitive_graph.h>
+#include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/runtime/program/moe_plan_scratch.h>
 #include <shelf/runtime/program/program.h>
 
@@ -20,6 +23,7 @@
 
 namespace fs = std::filesystem;
 namespace moe = shelf::qwen35moe;
+namespace q35 = shelf::qwen35;
 namespace rt = shelf::runtime;
 namespace qmx = shelf::quantization::mxfp4;
 using namespace moe_expert_fixture;
@@ -344,6 +348,48 @@ int main() {
     check(grouped_planes == 3u * kLayers && grouped_at_capacity,
           "each layer's three group-row planes are sized by the plan capacity");
     check(grouped_views == 2u * kLayers, "each layer's fused plane is read through two views");
+
+    // The MoE footprint term has to cover what the program actually allocated for the
+    // grouped row space, and the whole reserve has to cover the whole workspace.
+    std::size_t grouped_values = 0;
+    for (const auto& v : program.values) {
+        if (v.row_domain != rt::ValueRowDomain::GROUPED_ROWS) continue;
+        if (v.storage == rt::ValueStorage::WORKSPACE_VIEW) continue;
+        grouped_values += v.bytes;
+    }
+    std::size_t grouped_plane_bytes = 0;
+    for (const auto& b : program.dispatches) {
+        if (b.kernel_id != rt::KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF) continue;
+        grouped_plane_bytes += rt::Int8ActivationWorkspaceLayout::make(b.activation_kp,
+                                                                  b.activation_max_rows)
+                              .total_bytes;
+    }
+    const std::size_t plan_range = program.workspace.ranges[program.plan_scratch_slot].bytes;
+    // The layers are identical, so one layer's grouped demand is the sum divided by the
+    // layer count. The workspace itself reuses ranges across layers, so its total is the
+    // weaker check below.
+    const std::size_t grouped_actual =
+        (grouped_values + grouped_plane_bytes) / kLayers + plan_range;
+    const std::size_t grouped_reserve = moe::moe_executor_grouped_bytes(config, kBucketTokens);
+    std::printf("fixture bucket %u: grouped reserve %zu B, one layer grouped %zu B "
+                "(values %zu planes %zu plan %zu), workspace total %zu B\n",
+                kBucketTokens, grouped_reserve, grouped_actual, grouped_values, grouped_plane_bytes,
+                plan_range, program.workspace.total_bytes);
+    check(grouped_reserve >= grouped_actual,
+          "the MoE grouped footprint term covers the group-row allocations");
+
+    q35::ExecutorConfig reserve_config;
+    reserve_config.max_batch_rows = kBucketTokens;
+    reserve_config.max_scheduled_requests = 4u;
+    reserve_config.target_hidden_tap_count = 0u;
+    const std::size_t reserve =
+        q35::runtime::qwen35_executor_reserve_bytes(config,
+            static_cast<std::size_t>(config.ffn.shared_expert_intermediate_size),
+            reserve_config, 1u) + grouped_reserve;
+    std::printf("fixture reserve %zu B vs program workspace %zu B\n", reserve,
+                program.workspace.total_bytes);
+    check(reserve >= program.workspace.total_bytes,
+          "the MoE executor reserve covers the program workspace");
 
     {
         const std::uint32_t taps[] = {0u};

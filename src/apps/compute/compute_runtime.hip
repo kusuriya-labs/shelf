@@ -503,7 +503,8 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
     reserve_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     reserve_config.target_hidden_tap_count = config_.target_hidden_tap_count;
     config_.working_set_reserve_bytes = qwen35::runtime::qwen35_executor_reserve_bytes(
-        model_->text_config(), reserve_config, config_.tp);
+        model_->text_config(), model_->text_config().ffn.intermediate_size, reserve_config,
+        config_.tp);
     fprintf(stderr, "MEMORY_PLAN auto: working set reserve %s (row bucket %u)\n",
             gpu::format_gib(config_.working_set_reserve_bytes).c_str(),
             static_cast<unsigned>(exec_max_tokens_));

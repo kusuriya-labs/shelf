@@ -45,9 +45,9 @@ int main() {
     check(qwen35_padded_row_count(512u) >= 512u, "row padding keeps the requested rows");
     check(qwen35_padded_row_count(8192u) >= 8192u, "row padding covers the largest bucket");
 
-    const std::size_t rows512 = qwen35_executor_reserve_bytes(text, exec_config(512u, 4u, 0u), 1u);
-    const std::size_t rows2048 = qwen35_executor_reserve_bytes(text, exec_config(2048u, 4u, 0u), 1u);
-    const std::size_t rows4096 = qwen35_executor_reserve_bytes(text, exec_config(4096u, 4u, 0u), 1u);
+    const std::size_t rows512 = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(512u, 4u, 0u), 1u);
+    const std::size_t rows2048 = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(2048u, 4u, 0u), 1u);
+    const std::size_t rows4096 = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(4096u, 4u, 0u), 1u);
 
     check((rows512 % 256u) == 0u, "reserve is alignment padded");
     check(rows4096 > rows2048 && rows2048 > rows512, "reserve grows with the row bucket");
@@ -59,22 +59,22 @@ int main() {
     check(rows4096 >= 1823ull * kMiB, "reserve covers the measured 4096 bucket");
     check(rows4096 < 2048ull * kMiB, "reserve stays within 15 percent of the measurement");
 
-    const std::size_t taps = qwen35_executor_reserve_bytes(text, exec_config(4096u, 4u, 0u, 5u), 1u);
+    const std::size_t taps = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(4096u, 4u, 0u, 5u), 1u);
     const std::size_t tap_bytes = 5ull * 4096ull * text.hidden_size * sizeof(shelf::bf16_t);
     check(taps >= rows4096 + tap_bytes, "reserve covers the target hidden tap buffers");
 
-    const std::size_t wide = qwen35_executor_reserve_bytes(text, exec_config(4096u, 4u, 1024u), 1u);
+    const std::size_t wide = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(4096u, 4u, 1024u), 1u);
     const std::size_t logits = 1020ull * text.vocab_size * sizeof(float);
     check(wide >= rows4096 + logits, "reserve covers the extra logits for large output rows");
 
-    const std::size_t clamped = qwen35_executor_reserve_bytes(text, exec_config(64u, 4u, 4096u), 1u);
-    const std::size_t base = qwen35_executor_reserve_bytes(text, exec_config(64u, 4u, 0u), 1u);
+    const std::size_t clamped = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(64u, 4u, 4096u), 1u);
+    const std::size_t base = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(64u, 4u, 0u), 1u);
     const std::size_t clamped_logits = 60ull * text.vocab_size * sizeof(float);
     check(clamped >= base + clamped_logits,
           "output rows are clamped to the scheduled token count");
 
-    const std::size_t tp2 = qwen35_executor_reserve_bytes(text, exec_config(8192u, 4u, 0u), 2u);
-    const std::size_t tp1 = qwen35_executor_reserve_bytes(text, exec_config(8192u, 4u, 0u), 1u);
+    const std::size_t tp2 = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(8192u, 4u, 0u), 2u);
+    const std::size_t tp1 = qwen35_executor_reserve_bytes(text, text.ffn.intermediate_size, exec_config(8192u, 4u, 0u), 1u);
     check(tp2 < tp1, "reserve shrinks when intermediate_size is sharded");
     check(tp2 >= 1885ull * kMiB, "reserve covers the measured tp2 executor footprint");
 

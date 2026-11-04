@@ -37,7 +37,8 @@ std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
     return rows;
 }
 
-std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
+std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& text_config,
+                                          std::size_t ffn_intermediate_size,
                                           const ExecutorConfig& config,
                                           std::size_t tp_size) noexcept {
     if (tp_size == 0u) {
@@ -58,8 +59,7 @@ std::size_t qwen35_executor_reserve_bytes(const Qwen35TextConfig& text_config,
 
     std::size_t total = 0u;
 
-    const std::size_t intermediate =
-        text_config.ffn.intermediate_size != 0u ? text_config.ffn.intermediate_size : hidden;
+    const std::size_t intermediate = ffn_intermediate_size != 0u ? ffn_intermediate_size : hidden;
     const std::size_t full_span = hidden + intermediate;
     const std::size_t rank_span = hidden + intermediate / tp_size;
     const std::size_t values_per_row =
