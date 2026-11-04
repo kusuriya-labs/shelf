@@ -88,6 +88,13 @@ struct DispatchBinding {
     uint32_t activation_max_rows = 0;
     uint32_t activation_code_stride = 0;
     uint32_t activation_scale_stride = 0;
+    // Plan scratch for a routing round: a workspace range laid out by MoePlanScratch. The
+    // three geometry fields are what the layout was built for, so a consumer rebuilds the
+    // same offsets rather than carrying its own copy of them.
+    uint32_t scratch_slot = kNoWorkspace;
+    uint32_t scratch_tokens = 0;
+    uint32_t scratch_experts = 0;
+    uint32_t scratch_top_k = 0;
 };
 
 enum class ValueStorage : uint8_t {

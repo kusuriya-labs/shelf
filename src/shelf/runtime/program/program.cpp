@@ -1,6 +1,7 @@
 #include <shelf/runtime/program/program.h>
 #include <shelf/runtime/program/activation_workspace_layout.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
+#include <shelf/runtime/program/moe_plan_scratch.h>
 #include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/core/memory/alignment.h>
 #include <algorithm>
@@ -83,10 +84,22 @@ struct Ctx {
     Program* plan = nullptr;
     ProgramBuildOptions options;
     uint32_t current_source_node = 0;
+    struct MoeScratchUse {
+        bool present = false;
+        uint32_t tokens = 0;
+        uint32_t experts = 0;
+        uint32_t top_k = 0;
+        uint64_t bytes = 0;
+        uint32_t first_command = 0;
+        uint32_t last_command = 0;
+        std::vector<uint32_t> binding_refs;
+    };
+
     std::unordered_map<uint32_t, uint32_t> external_indices;
     std::map<uint32_t, ValueLifetime> lifetimes;
     std::map<uint64_t, uint32_t> activation_ws_by_input;
     std::vector<ActivationWorkspace> activation_workspaces;
+    MoeScratchUse moe_scratch;
 
     const ValueBinding* find(ValueId v) const {
         for (const auto& b : plan->values) {
@@ -110,6 +123,33 @@ struct Ctx {
             return grouped_row_capacity(token_rows(), graph->grouped_row_shape);
         }
         return token_rows();
+    }
+
+    bool open_moe_scratch() {
+        if (moe_scratch.present) return true;
+        const uint32_t tokens = token_rows();
+        const GroupedRowShape shape = graph->grouped_row_shape;
+        const MoePlanScratch plan = MoePlanScratch::make(tokens, shape.experts, shape.top_k);
+        if (!plan.valid()) return false;
+        moe_scratch.present = true;
+        moe_scratch.tokens = tokens;
+        moe_scratch.experts = shape.experts;
+        moe_scratch.top_k = shape.top_k;
+        moe_scratch.bytes = plan.bytes();
+        return true;
+    }
+
+    // Marks the binding that is about to be pushed as a user of the plan scratch, and keeps
+    // the scratch live over every dispatch that reads or writes it.
+    void use_moe_scratch(DispatchBinding& b) {
+        b.scratch_tokens = moe_scratch.tokens;
+        b.scratch_experts = moe_scratch.experts;
+        b.scratch_top_k = moe_scratch.top_k;
+        const uint32_t index = static_cast<uint32_t>(plan->dispatches.size());
+        moe_scratch.binding_refs.push_back(index);
+        if (!moe_scratch.first_command || index < moe_scratch.first_command)
+            moe_scratch.first_command = index;
+        if (index > moe_scratch.last_command) moe_scratch.last_command = index;
     }
 
     void note_use(ValueId v, uint32_t dispatch_index) {
@@ -569,6 +609,142 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::MOE_ROUTER: {
+            if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+            const uint32_t cmd0 = static_cast<uint32_t>(c.plan->dispatches.size());
+            DispatchBinding rb = base_binding(KernelId::MOE_ROUTER);
+            rb.input_slots[0] = node.inputs[0].id;
+            rb.input_count = 1;
+            c.use_moe_scratch(rb);
+            c.push(rb);
+            DispatchBinding sb = base_binding(KernelId::MOE_PLAN_SCAN);
+            c.use_moe_scratch(sb);
+            c.push(sb);
+            DispatchBinding tb = base_binding(KernelId::MOE_PLAN_SCATTER);
+            c.use_moe_scratch(tb);
+            c.push(tb);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::MOE_GROUPED_LINEAR: {
+            const auto& n = node_as<MoeGroupedLinearNode>(node);
+            if (n.weight_index >= c.weights.count)
+                return fail("moe grouped linear weight index exceeds view");
+            if (node.outputs.empty()) return fail("moe grouped linear node has no output value");
+            const auto w = c.weights.at(n.weight_index);
+            if (w.experts < 2u)
+                return fail("moe grouped linear weight is not a rank-3 expert plane");
+            if (w.rows != n.shape.output_features || w.cols != n.shape.input_features)
+                return fail("moe grouped linear weight shape mismatch");
+            const Result<ResolvedLinearQuantContract> resolved =
+                resolve_linear_quant_contract(w.encoding, w.compute_spec);
+            if (!resolved.ok()) return resolved.status();
+            const ResolvedLinearQuantContract& contract = resolved.value();
+            if (contract.activation_kernel != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
+                return fail("moe grouped linear needs the mxfp4 rowref activation form");
+            const uint32_t kdim = w.cols;
+            const uint32_t kp = w.k_padded;
+            if (kp != activation_k_padded_for(contract.activation_k_alignment, kdim))
+                return fail("moe expert plane k_padded does not match the activation plane");
+            if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+            const uint32_t rows_cap = c.rows_for(ValueRowDomain::GROUPED_ROWS);
+            if (rows_cap == 0) return fail("grouped row capacity is empty");
+
+            const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id);
+            const uint32_t cmd_idx = static_cast<uint32_t>(c.plan->dispatches.size());
+            const auto* in_spec = c.graph->value_spec(node.inputs[0]);
+            const bool gather_rows =
+                in_spec != nullptr && in_spec->row_domain == ValueRowDomain::TOKEN_ROWS;
+
+            auto it = c.activation_ws_by_input.find(act_ws_key);
+            if (it == c.activation_ws_by_input.end()) {
+                const uint32_t ws_idx = static_cast<uint32_t>(c.activation_workspaces.size());
+                ActivationWorkspace aw{};
+                aw.input_value = node.inputs[0].id;
+                aw.k = kdim;
+                aw.k_padded = kp;
+                aw.max_rows = rows_cap;
+                aw.activation = contract.activation;
+                aw.activation_kernel = contract.activation_kernel;
+                Int8ActivationWorkspaceLayout a8l;
+                const Status layout_status =
+                    make_activation_workspace_layout(contract.activation, kp, rows_cap, a8l);
+                if (!layout_status.ok()) return layout_status;
+                aw.total_bytes = a8l.total_bytes;
+                aw.first_command = cmd_idx;
+                aw.last_command = cmd_idx;
+                c.activation_workspaces.push_back(aw);
+                c.activation_ws_by_input[act_ws_key] = ws_idx;
+
+                DispatchBinding qb = base_binding(contract.activation_kernel);
+                qb.group_size = 32;
+                qb.activation_kp = kp;
+                qb.activation_max_rows = rows_cap;
+                qb.activation_code_stride = a8l.code_row_stride_bytes;
+                qb.activation_scale_stride = a8l.scale_row_stride_bytes;
+                qb.input_slots[0] = node.inputs[0].id;
+                qb.input_count = 1;
+                if (gather_rows) c.use_moe_scratch(qb);
+                c.push(qb);
+                c.activation_workspaces[ws_idx].binding_refs.push_back(
+                    static_cast<uint32_t>(c.plan->dispatches.size()) - 1u);
+                c.activation_workspaces[ws_idx].last_command =
+                    static_cast<uint32_t>(c.plan->dispatches.size()) - 1u;
+            } else {
+                auto& aw = c.activation_workspaces[it->second];
+                if (aw.k != kdim || aw.k_padded != kp)
+                    return fail("activation workspace K mismatch for shared input");
+                if (!activation_quant_matches(aw.activation, contract.activation))
+                    return fail("activation workspace quant spec mismatch for shared input");
+                if (aw.activation_kernel != contract.activation_kernel)
+                    return fail("activation workspace plane form mismatch for shared input");
+                if (aw.max_rows != rows_cap)
+                    return fail("activation workspace row space mismatch for shared input");
+                aw.last_command = cmd_idx;
+            }
+
+            DispatchBinding b = base_binding(KernelId::LINEAR_MXFP4_W4A8_GROUPED);
+            b.weight_index = n.weight_index;
+            b.compute_spec = w.compute_spec;
+            b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
+            auto& aw = c.activation_workspaces[c.activation_ws_by_input[act_ws_key]];
+            b.activation_kp = aw.k_padded;
+            b.activation_max_rows = aw.max_rows;
+            {
+                Int8ActivationWorkspaceLayout a8l;
+                const Status layout_status =
+                    make_activation_workspace_layout(aw.activation, aw.k_padded, aw.max_rows, a8l);
+                if (!layout_status.ok()) return layout_status;
+                b.activation_code_stride = a8l.code_row_stride_bytes;
+                b.activation_scale_stride = a8l.scale_row_stride_bytes;
+            }
+            b.input_count = 0;
+            c.use_moe_scratch(b);
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            const uint32_t binding_idx = static_cast<uint32_t>(c.plan->dispatches.size());
+            c.push(b);
+            aw.binding_refs.push_back(binding_idx);
+            aw.last_command = static_cast<uint32_t>(c.plan->dispatches.size()) - 1u;
+            return Status::make_ok();
+        }
+        case PrimitiveKind::MOE_COMBINE: {
+            if (!c.moe_scratch.present) return fail("moe combine before any routing round");
+            if (node.inputs.size() != 3) return fail("moe combine needs three input values");
+            if (c.graph->value_dtype(node.inputs[2]) != ValueDType::F32)
+                return fail("moe combine shared expert gate must be f32");
+            DispatchBinding b = base_binding(KernelId::MOE_COMBINE);
+            for (uint32_t i = 0; i < 3; ++i) b.input_slots[i] = node.inputs[i].id;
+            b.input_count = 3;
+            c.use_moe_scratch(b);
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
     }
     return fail("unknown primitive kind");
 }
@@ -592,6 +768,7 @@ Status finalize_layout(Ctx& c) {
         uint32_t last_command = 0;
         ValueBinding* value = nullptr;
         int32_t aw_index = -1;
+        bool moe_scratch = false;
     };
     std::vector<AllocItem> items;
     for (auto& vb : c.plan->values) {
@@ -603,6 +780,10 @@ Status finalize_layout(Ctx& c) {
         auto& aw = c.activation_workspaces[i];
         items.push_back(AllocItem{aw.total_bytes, aw.first_command, aw.last_command,
                                   nullptr, static_cast<int32_t>(i)});
+    }
+    if (c.moe_scratch.present) {
+        items.push_back(AllocItem{c.moe_scratch.bytes, c.moe_scratch.first_command,
+                                  c.moe_scratch.last_command, nullptr, -1, true});
     }
     std::sort(items.begin(), items.end(), [](const AllocItem& a, const AllocItem& b) {
         if (a.first_command != b.first_command) return a.first_command < b.first_command;
@@ -666,6 +847,9 @@ Status finalize_layout(Ctx& c) {
         if (item.value != nullptr) {
             item.value->offset = offset;
             item.value->slot = slot;
+        } else if (item.moe_scratch) {
+            for (uint32_t ref : c.moe_scratch.binding_refs)
+                c.plan->dispatches[ref].scratch_slot = slot;
         } else {
             auto& aw = c.activation_workspaces[item.aw_index];
             aw.range_slot = slot;
@@ -777,6 +961,15 @@ Status Program::validate() const {
         if (b.workspace_slot != kNoWorkspace &&
             b.workspace_slot >= workspace.ranges.size())
             return fail("binding workspace slot out of range");
+        if (b.scratch_slot != kNoWorkspace) {
+            if (b.scratch_slot >= workspace.ranges.size())
+                return fail("binding plan scratch slot out of range");
+            if (b.scratch_tokens == 0u || b.scratch_experts == 0u || b.scratch_top_k == 0u)
+                return fail("binding plan scratch geometry missing");
+            if (!MoePlanScratch::make(b.scratch_tokens, b.scratch_experts, b.scratch_top_k)
+                     .valid())
+                return fail("binding plan scratch geometry invalid");
+        }
     }
     auto ws = workspace.validate();
     if (!ws.ok()) return ws;

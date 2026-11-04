@@ -34,6 +34,9 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return {1, 1};
         case PrimitiveKind::SAMPLING: return {1, 1};
         case PrimitiveKind::CONCAT: return {2, 1};
+        case PrimitiveKind::MOE_ROUTER: return {1, 0};
+        case PrimitiveKind::MOE_GROUPED_LINEAR: return {1, 1};
+        case PrimitiveKind::MOE_COMBINE: return {3, 1};
     }
     return {0, 0};
 }
@@ -149,6 +152,15 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 shapes_ok = valid_shape_key(v.shape) && valid_shape_key(v.input_shape_a) &&
                             valid_shape_key(v.input_shape_b);
             }
+            else if constexpr (std::is_same_v<T, MoeRouterNode>) {
+                shapes_ok = v.experts != 0u && v.top_k != 0u && v.top_k <= v.experts;
+            }
+            else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) {
+                shapes_ok = valid_shape_key(v.shape);
+            }
+            else if constexpr (std::is_same_v<T, MoeCombineNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.top_k != 0u;
+            }
         }, n.node);
         if (!shapes_ok) return fail("invalid shape key");
 
@@ -165,6 +177,14 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     weight_status = Status::invalid_argument("linear weight index out of bounds", __FILE__, __LINE__);
                 } else if (!(graph.weight_table[v.weight_index] == v.shape)) {
                     weight_status = Status::invalid_argument("linear weight geometry mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) {
+                if (v.weight_index >= graph.weight_table.size()) {
+                    weight_status = Status::invalid_argument(
+                        "moe grouped linear weight index out of bounds", __FILE__, __LINE__);
+                } else if (!(graph.weight_table[v.weight_index] == v.shape)) {
+                    weight_status = Status::invalid_argument(
+                        "moe grouped linear weight geometry mismatch", __FILE__, __LINE__);
                 }
             } else if constexpr (std::is_same_v<T, EmbeddingLookupNode>) {
                 if (v.weight_index >= graph.weight_table.size()) {
@@ -185,6 +205,58 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             }
         }, n.node);
         if (!weight_status.ok()) return weight_status;
+
+        // A MoE node states its geometry and the graph states the row space it belongs to.
+        // They have to agree, and the router's logits must be as wide as the expert count.
+        Status moe_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            const GroupedRowShape plan = graph.grouped_row_shape;
+            if constexpr (std::is_same_v<T, MoeRouterNode>) {
+                if (plan.experts == 0u) {
+                    moe_status = Status::invalid_argument(
+                        "moe router without a grouped row shape", __FILE__, __LINE__);
+                } else if (v.experts != plan.experts || v.top_k != plan.top_k) {
+                    moe_status = Status::invalid_argument(
+                        "moe router geometry differs from the grouped row shape", __FILE__,
+                        __LINE__);
+                } else if (graph.value_features(n.inputs[0]) != plan.experts) {
+                    moe_status = Status::invalid_argument(
+                        "moe router logits are not one column per expert", __FILE__, __LINE__);
+                } else if (graph.value_dtype(n.inputs[0]) != ValueDType::F32) {
+                    moe_status = Status::invalid_argument(
+                        "moe router logits must be f32", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) {
+                if (plan.experts == 0u) {
+                    moe_status = Status::invalid_argument(
+                        "moe grouped linear without a grouped row shape", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.outputs[0]) != ValueRowDomain::GROUPED_ROWS) {
+                    moe_status = Status::invalid_argument(
+                        "moe grouped linear output is not in group rows", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, MoeCombineNode>) {
+                if (plan.experts == 0u) {
+                    moe_status = Status::invalid_argument(
+                        "moe combine without a grouped row shape", __FILE__, __LINE__);
+                } else if (v.top_k != plan.top_k) {
+                    moe_status = Status::invalid_argument(
+                        "moe combine selection width differs from the grouped row shape",
+                        __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.inputs[0]) != ValueRowDomain::GROUPED_ROWS) {
+                    moe_status = Status::invalid_argument(
+                        "moe combine expert output is not in group rows", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.outputs[0]) != ValueRowDomain::TOKEN_ROWS) {
+                    moe_status = Status::invalid_argument(
+                        "moe combine output is not one row per token", __FILE__, __LINE__);
+                } else if (graph.value_features(n.inputs[1]) != v.shape.features ||
+                           graph.value_features(n.outputs[0]) != v.shape.features) {
+                    moe_status = Status::invalid_argument(
+                        "moe combine feature count mismatch", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!moe_status.ok()) return moe_status;
 
         const bool stateful =
             k == PrimitiveKind::KV_APPEND ||

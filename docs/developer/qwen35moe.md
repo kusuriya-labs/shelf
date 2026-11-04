@@ -435,6 +435,46 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 弱く、**段ごと gate が正本**である。クラス誤差の実測値と内訳は
 [../research/20261104/moe_gate_c_kernels.md](../research/20261104/moe_gate_c_kernels.md) §6。
 
+## 6-1. graph / program の MoE 契約（配線済み）
+
+primitive は 3 種で、tensor arity は固定である（`primitive_graph.cpp` の `arity_of`）。
+
+| PrimitiveKind | in / out | KernelId |
+| --- | --- | --- |
+| `MOE_ROUTER` | 1 / 0 | `MOE_ROUTER` + `MOE_PLAN_SCAN` + `MOE_PLAN_SCATTER`（1 node から 3 dispatch） |
+| `MOE_GROUPED_LINEAR` | 1 / 1 | `ACTIVATION_QUANTIZE_MXFP4_ROWREF` + `LINEAR_MXFP4_W4A8_GROUPED`（1 node から 2 dispatch。dense の LINEAR と同じ形） |
+| `MOE_COMBINE` | 3 / 1 | `MOE_COMBINE` |
+
+- `MOE_ROUTER` の入力は router linear の **f32** logits（features = `experts`、TOKEN_ROWS）。
+  選択と plan は value にしない（§6）ので、この node は tensor を産まない。
+- `MOE_GROUPED_LINEAR` の `shape` は **1 expert の {output, input} features**。expert 数と
+  plane stride は weight slot が持つ（§3）。`k_padded` が activation 平面の padding
+  （`activation_k_padded_for(64, cols)`）と一致しない expert 平面は program build が拒否する。
+  平面が rank-3（`experts >= 2`）でない weight も拒否する。
+- gate / up 融合平面の 2 半分は `PrimitiveValueView`（`feature_offset = 0` と `= inter`）で
+  `SWIGLU` に渡す。複製・split はしない。
+- `MOE_COMBINE` の入力は **expert 出力（GROUPED_ROWS）・shared expert 出力（TOKEN_ROWS）・
+  活性済み shared gate（TOKEN_ROWS, f32, 1 列）**、出力は TOKEN_ROWS の hidden。
+  shared expert は Qwen3.5 MoE の必須部品なので arity は固定で、gate 活性は既存の
+  `SIGMOID` primitive が担う（§6）。
+
+### plan scratch
+
+routing round の scratch（`sel_expert` / `sel_weight` / `tile_counts` / `expert_row_begin` /
+`tile_base` / `expert_group_begin` / `group_expert` / `group_rows` / `group_count` /
+`row_token` / `slot_row_of`）は **program workspace の 1 本の range** であり、配置は
+`runtime/program/moe_plan_scratch.h` の `MoePlanScratch::make(tokens, experts, top_k)` が
+単一源である（unit は uint32、region は end to end）。program は 1 本だけ確保し、
+routing round を使う全 dispatch が同じ range を指す。
+
+`DispatchBinding` は `scratch_slot` と `scratch_tokens` / `scratch_experts` /
+`scratch_top_k` を持つ。offset そのものを binding に写さず、consumer は同じ
+`MoePlanScratch::make` を呼んで offset を導く（二重に持たせない）。
+`tokens` はその program の bucket の token rows なので、確保容量と読む容量がズレない。
+
+`Program::validate()` は `scratch_slot` が range を指すことと geometry が非ゼロであることを
+検証する。
+
 ## 7. test contract
 
 | test | label | 固定する内容 |
@@ -447,6 +487,8 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
 | `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないことと MoE への MTP option 拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在を `static_assert` で固定 |
+| `test_grouped_row_shape` | `cpu;required` | group row 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128 など）と不変条件（group 数は slot 数を超えない・容量は slot 数を覆う・16 の倍数）、`GROUPED_ROWS` value の binding 行数が容量基準になること、`grouped_row_shape` 未宣言の graph を graph 検証と `build_program` の両方が拒否すること、dense graph に grouped 行空間が現れないこと |
+| `test_program_moe_plan` | `cpu;required` | 1 MoE FFN の graph / program 配線: `MOE_ROUTER` 1 node から 3 dispatch・grouped linear 1 node から量子化+grouped の 2 dispatch・combine まで dispatch 列で固定、plan scratch が workspace に 1 本だけ確保され scratch を読む 7 dispatch すべてが同じ range を指すこと、fused 出力と activation 平面が group row 容量で確保されること、router が shape と不一致・combine が TOKEN_ROWS を読む・weight が rank-2・`k_padded` が平面 padding と不一致、いずれも拒否 |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
@@ -469,20 +511,20 @@ GPU 不足による skip は required では失敗として扱う（テスト受
 
 ## 8. 配線が未実装な範囲
 
-model load は §5 で配線済み（`shelf-compute` はまだ dense 入口を使っており、MoE を
-選ぶのは apps 側を factory に切り替えてから）。residual は **graph / kernel 配線**である。
+model load（§5）と graph / program の MoE 語彙（§6-1）は配線済み。graph は組めるが
+**まだ実行できない**。residual は device 実行と lowering である。
 
-- `PrimitiveKind` / `PrimitiveNode` への MoE node、`lower_to_primitives` の emit、
-  `emit_node` の case、`KernelId::MOE_ROUTER` / `LINEAR_MXFP4_GROUPED` / `MOE_COMBINE` と
-  `try_launch_optimized` の分岐
-- `Qwen35MoeModelWeights` を受け取る lowering。qwen35 側の `lower_to_primitives.cpp` は
-  dense FFN（`ffn.intermediate_size`）を前提にしており、MoE 几何では必ず失敗する。
-  MoE の emit は `shelf::qwen35moe` 側に置き、backbone 部分の primitive emit は
-  `shelf::qwen_hybrid` の型（`HybridLayerWeights`）をそのまま受け取れる（§1）
+- `try_launch_optimized` の `MOE_ROUTER` / `MOE_PLAN_SCAN` / `MOE_PLAN_SCATTER` /
+  `LINEAR_MXFP4_W4A8_GROUPED` / `MOE_COMBINE` の分岐
+- `ACTIVATION_QUANTIZE_MXFP4_ROWREF` に `row_index` 間接参照が無い（group row へ gathered
+  する producer として使えない）。binding の scratch 参照から `row_token` を引く
+- routing round が `tile_counts` を zero から始めるための初期化（層毎）。scan kernel が
+  消費後に zero へ戻す案と launcher が memset する案を追加 launch 実測で選ぶ
+- `Qwen35MoeModelWeights` を受け取る lowering。MoE の emit は `shelf::qwen35moe` 側に置き、
+  backbone は `qwen_hybrid::emit_hybrid_block` を使う（§1・§7 Step 2a）
 - linear selector の allowlist に MoE geometry（`1024:2048` = w13、`2048:512` = w2、
   `256:2048` = router）と grouped 形の選択
-- program workspace の group row 容量（`rows * top_k` ではなく
-  `moe_group_row_capacity` から決まる行数）と `qwen35_executor_reserve_bytes` の MoE 項
+- `qwen35_executor_reserve_bytes` の MoE 項（dense の `ffn.intermediate_size` 前提のまま）
 - correctness path には grouped linear も router も無い（fallback は成立しない）
 - `shelf-bench` に MoE の計測口が無い（性能主張は配線と計測口の両方が揃うまでしない）
 - `shelf-compute` / `shelf-server` / `shelf-bench` の load 入口を `shelf::models` の

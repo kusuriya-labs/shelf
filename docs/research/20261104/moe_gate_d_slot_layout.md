@@ -211,3 +211,65 @@ FAIL: include/shelf/models/qwen35/model/lower_to_primitives.h contains forbidden
 
 で落ちた。dense 側のヘッダに MoE の語彙を書かない、というルールが文言レベルでも
 機械的に適用されている。表現を「whatever FFN a model emits」へ変えて解消した。
+
+## 8. Step 3a: MoE primitive・plan scratch を graph / program に配線（device 実行は未配線）
+
+`PrimitiveKind` に `MOE_ROUTER` / `MOE_GROUPED_LINEAR` / `MOE_COMBINE`、`KernelId` に
+`MOE_ROUTER` / `MOE_PLAN_SCAN` / `MOE_PLAN_SCATTER` / `LINEAR_MXFP4_W4A8_GROUPED` /
+`MOE_COMBINE` を追加し、`emit_node` の case と plan scratch の workspace 確保を入れた。
+device 側の dispatch は Step 3b なので、**graph は組めるが実行はまだできない**。
+
+### 判断: plan 配列は value にせず workspace range、offset は binding に写さない
+
+plan 配列（`sel_expert` / `tile_counts` / `group_expert` / `row_token` / `slot_row_of` など）は
+features を持たず、行も slot・group で token でもない。value model（`rows × features`）に
+乗せると必ず過大・過小になるので、program workspace の **1 本の range** にした。配置は
+`runtime/program/moe_plan_scratch.h` が単一源。
+
+binding には解決済みの offset を書かず、`scratch_slot` + `scratch_tokens` / `scratch_experts` /
+`scratch_top_k` だけ持つ。consumer は同じ `MoePlanScratch::make` を呼ぶので、
+書かれた offset と読まれた offset がズレる余地が無い（`Int8ActivationWorkspaceLayout` を
+`activation_*` で使う既存形と同じ考え方）。
+
+### 判断: fused gate / up は view、shared expert は必須部品
+
+`w13` の出力（2 × inter 列）の gate 半分と up 半分は `PrimitiveValueView`
+（`feature_offset = 0` / `= inter`）で `SWIGLU` に渡す。split や複製は入れない
+（copy 1 回 + 平面 1 本が増えるだけ）。
+
+`MOE_COMBINE` の arity は 3 固定（expert 出力・shared expert 出力・活性済み gate）。
+shared expert は Qwen3.5 MoE の必須部品で loader も shape を要求しているため、
+optional 入力を作って arity を可变にしない（`arity_of` は完全一致検証）。
+
+### 検証の実測
+
+新規 required test `test_program_moe_plan`（CPU、`shelf_runtime`）は 29 checks PASS。
+1 MoE FFN の dispatch 列を固定する:
+
+```text
+MOE_ROUTER,MOE_PLAN_SCAN,MOE_PLAN_SCATTER,
+ACTIVATION_QUANTIZE_MXFP4_ROWREF,LINEAR_MXFP4_W4A8_GROUPED,SWIGLU,
+ACTIVATION_QUANTIZE_MXFP4_ROWREF,LINEAR_MXFP4_W4A8_GROUPED,
+LINEAR_BF16,LINEAR_BF16,SWIGLU,LINEAR_BF16,LINEAR_BF16,SIGMOID,
+MOE_COMBINE,RESIDUAL_ADD
+```
+
+この test が plan scratch の契約を壊して検出することを確認した（実装側の欠落を意図的に
+再現して test を落とす検証）。grouped linear の binding から `use_moe_scratch` を 1 处外すと
+
+```text
+FAIL: seven dispatches read or write the plan scratch
+FAIL (24 passed, 1 failed)
+```
+
+となり、戻すと `PASS (29 passed, 0 failed)`。
+
+required acceptance（Step 3a 後）:
+
+```text
+Passed: 151  Failed: 0  Errors: 0  Skipped: 0
+```
+
+150 → 151 は新規 `test_program_moe_plan`。`KernelId` 追加による `decode_perf_stats` の
+配列サイズや dispatch 名表は `kernel_id_count()` 基準なので追従は不要だった
+（`kernel_to_name` に case を足さないと `UNKNOWN` 表示になるため追加済み）。
