@@ -96,7 +96,7 @@ executor の row bucket も決める。prefill は chunk 分割で進むため�
 chunk は allowlist の geometry 外なので実行時点で
 `unsupported: grouped-row dispatch has no correctness path` を返し、誤った値で生成を続けることはない。
 prefill throughput の実測は chunk 2048 が最良で（`shelf-bench pp --prompt-tokens 8192` の
-chunk 1024 / 2048 / 4096 で 3648 / 3759 / 3684 tok/s）、上限を上げる理由にはならない（経緯は
+chunk 1024 / 2048 / 4096 で 3662 / 3807 / 3631 tok/s）、上限を上げる理由にはならない（経緯は
 `docs/research/20261104/moe_group_row_elementwise_envelope.md`）。実測（27B FP8 / TP2 / requests 4 / drafter 込み / `--max-seq-len 262144`）:
 
 | `--max-num-batched-tokens` | rank の executor 実測 | 結果 |

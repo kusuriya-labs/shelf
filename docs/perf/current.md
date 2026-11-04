@@ -120,8 +120,10 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   decode は 51.36 / 51.28 / 49.31 tok/s。context 8192 では chunk 4096 が 55.09 / 54.86 tok/s
   （`GREEDY_TOKEN_SUM=710`）
 - MoE prefill throughput（`shelf-bench pp --prompt-tokens 8192 --runs 3 --warmup 1`、device 1、
-  `LoadedModel` 配線後）: `--prefill-chunk 1024 / 2048 / 4096` で **3648 / 3759 / 3684 tok/s**。
-  **chunk 2048 が最良**。grouped expert の row bucket は 4096 token（group 36608 行）が上限で、
+  `LoadedModel` 配線後、group 行数 capacity 厳密化後の tree）:
+  `--prefill-chunk 1024 / 2048 / 4096` で **3662 / 3807 / 3631 tok/s**（chunk 1024 は 2 rep で
+  3662.29 / 3645.01、run 揺れ 0.5 %）。**chunk 2048 が最良**。grouped expert の row bucket は
+  4096 token（group 36608 行）が上限で、
   chunk 8192 は allowlist 外なので `unsupported`（上限を 8192 に上げたときの値は
   3569 tok/s で最良より 5.3 % 低く、raise の根拠にはならなかった。
   経緯は `docs/research/20261104/moe_group_row_elementwise_envelope.md` と

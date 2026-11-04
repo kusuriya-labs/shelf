@@ -75,7 +75,7 @@ rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらない�
 grouped expert checkpoint（Qwen3.6-35B-A3B MoE）は `--tensor-parallel 1` で load できる。
 `--tensor-parallel 2` は dense のみを受理し、MoE では起動時に
 `pp --tensor-parallel 2 runs dense checkpoints only` を返す。MoE の prefill throughput は
-`--prompt-tokens 8192 --prefill-chunk 1024 / 2048 / 4096` で 3648 / 3759 / 3684 tok/s
+`--prompt-tokens 8192 --prefill-chunk 1024 / 2048 / 4096` で 3662 / 3807 / 3631 tok/s
 （既定 2048 が最良。grouped expert の row bucket は 4096 token までなので、
 `--prefill-chunk 8192` は `unsupported: grouped-row dispatch has no correctness path` になる。
 値の根拠は `docs/perf/current.md`）。
