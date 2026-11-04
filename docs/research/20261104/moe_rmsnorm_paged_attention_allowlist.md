@@ -152,7 +152,7 @@ template を instantiate するだけでは壊れるので、reduce 側の `qh_p
 workgroup に分割し、partials layout もそれへ合わせる必要がある。
 
 価値の出る範囲は visible ≥ 2048 の MoE decode に限られる。visible 4096 では attention が
-1 呼出 186.6 µs × 10 层 = 1.87 ms / token で token 全体（19 ms 台）の 10 % 程度、
+1 呼出 186.6 µs × 10 層 = 1.87 ms / token で token 全体（19 ms 台）の 10 % 程度、
 visible 65536 では 39.8 ms / token になって律速側へ寄る。
 
 ## 登録

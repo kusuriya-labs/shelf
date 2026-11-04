@@ -20,7 +20,7 @@ logical 1355  optimized_ops 1310  fallbacks 45
 SWIGLU  logical=80  optimized=40  fallback=40  fallback_rows=[1024, 1024]
 ```
 
-40 层のうち shared expert 側（token rows=1024）は optimized、**routed expert 側（group rows）が
+40 層のうち shared expert 側（token rows=1024）は optimized、**routed expert 側（group rows）が
 correctness 経路に落ちていた**。`fallback_rows` に 1024 と出ているが、これは executor が
 `ctx.actual_rows` を記録していたもので、実際の行数は group 行数だった。
 
