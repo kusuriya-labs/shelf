@@ -4,7 +4,7 @@
 fixture は合成 Qwen3.5 checkpoint で、`output_gate_type` を**宣言しない**。
 参照実装（transformers の Qwen3_5RMSNormGated）は GDN の gate を silu に固定しているため、
 Shelf も config key に依存せず silu を emission しなければならない。gate が sigmoid に
-落ちると层 0（GDN）の出力が rel_l2 0.9 規模で逸脱するので、この test はその回帰を捕まえる。
+落ちると層 0（GDN）の出力が rel_l2 0.9 規模で逸脱するので、この test はその回帰を捕まえる。
 
 fixture の再生成: tools/qwen35_gdn_tiny_fixture.py（外部の qwen35-f64-oracle が必要）。
 build dir は SHELF_BUILD_DIR、無ければ repo の build/ を使う。
