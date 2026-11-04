@@ -136,7 +136,7 @@ request の speculative decode 経路に入る。DFlash2 とは排他的で、
 
 - dense checkpoint のみ。MoE checkpoint では起動しない。
 - `--tp 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
-- partial accept は target の prefix rerun を行うため、full accept より遅い。
+- partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使われない。
 
 詳細な round 契約は [../developer/mtp.md](../developer/mtp.md) を参照。

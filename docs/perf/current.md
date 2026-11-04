@@ -8,7 +8,8 @@
 
 ## 現在の状態
 
-**現在の build に対する qualified baseline は、2026-11-03 の long-context prefill 1 断面のみである。**
+**現在の build に対する qualified baseline は、2026-11-03 の long-context prefill と
+2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -96,6 +97,30 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 - 数値の連続性は teacher-forced A/B（base の生成列をプロンプトへ埋めた 14 token 入力、
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）
+
+## 2026-11-04 MTP decode（Qwen3.8-27B MXFP4）
+
+`models/Qwen3.8-27B-Quark-AWQ-MXFP4` を TP=1 / BF16 KV で計測した。target-only と
+MTP drafter（`--mtp --mtp-drafts 7`）を交互に実行し、warmup 1 + 5 run の p50 を取った。
+全 run で `GENERATED_IDS` が target-only と一致した。
+
+| prompt | target t/s | MTP K=7 t/s | speedup | accepted/7 | full accept | prefill target/MTP ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1024 | 26.03 | 56.55 | 2.17x | 6.88 | 1.00 | 405.3 / 508.0 |
+| 2048 | 26.25 | 37.91 | 1.44x | 4.25 | 0.58 | 818.5 / 977.7 |
+| 4096 | 25.93 | 49.46 | 1.91x | 6.00 | 0.89 | 1682.6 / 1968.6 |
+
+- measurement revision: `2c3cdb1`
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`、他の GPU は idle）
+- command（MTP）: `shelf-compute --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4 --input-ids-file <prose N tokens> --max-new-tokens 64 --max-seq-len 4096（4096 は 8192） --device 0 --prefix-cache 0 --mtp --mtp-drafts 7`
+- prompt: `tests/data/mtp_perf/prose.txt` を tokenizer で 1024 / 2048 / 4096 token に伸ばしたもの
+- 生成一致 anchor（`GENERATED_IDS` の sha1）: 1024 `6c07c6fe36929d9ad2f750304422b1a6f6035edc`、
+  2048 `08e9e2c949de068a2d18621e676067db5170e070`、4096 `4aba2b4cee835fa60e6696f5528fb4ece21d6e42`
+- run 間の p50 は上表。1024 の MTP は 9-run 再測でも p50 56.71（54.73–80.86、80.86 の 1 run を除くと
+  54.73–56.75）。2048 / 4096 の MTP は 5-run の範囲がそれぞれ 36.42–38.08 / 49.18–49.59。
+- 参考: K=4 の 5-run p50 は 1024 41.00、2048 34.95、4096 37.73。計測した範囲では K=7 が上回る。
+- target の prefill chunk は target-only と同じ `max_batch_rows` を使う。MTP 側の first pass だけ
+  512 行以下に分割するため、MTP の prefill は target より長い（上表の prefill 差）。
 
 ## 記録規則
 
