@@ -295,6 +295,7 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/continuous_batcher.cpp
     src/shelf/models/qwen35/runtime/prefix_cache.cpp
     src/shelf/models/qwen35/runtime/tensor_parallel.cpp
+    src/shelf/models/qwen35/runtime/pipeline_parallel.cpp
     src/shelf/models/qwen35/runtime/executor.hip
     src/shelf/models/qwen35/runtime/spec_decode.cpp
     src/shelf/models/qwen35/runtime/dflash2_spec_decoder.cpp

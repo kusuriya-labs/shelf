@@ -3,6 +3,7 @@
 #include <shelf/models/common/qwen_hybrid/layer_weights.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/models/common/qwen_hybrid/model_weights.h>
+#include <shelf/models/qwen35/model/stage_range.h>
 #include <shelf/models/qwen35/weights/dense_ffn_weights.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -44,6 +45,7 @@ struct Qwen35ModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
 struct Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
     bool vocab_parallel_lm_head = true;
+    PipelineStage stage;
 };
 
 Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(

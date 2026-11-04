@@ -275,14 +275,17 @@ options は `qhy::HybridLoadOptions`（`verify_quantized_payload_crc` と
 `shelf/models/common/qwen_hybrid/weight_validation.h`:
 
 ```cpp
-qhy::validate_hybrid_model_level(model, config, layer_count)
+qhy::validate_hybrid_model_level(model, config, loaded_layer_lo, loaded_layer_hi)
 qhy::validate_hybrid_layer_body(layer, config, layer)
 qhy::validate_hybrid_layer_body(layer, hidden, is_gdn, tag)
 qhy::check_matrix_shape(w, rows, cols, tag)
 ```
 
-- model level: embed / lm_head の vocab（vocab parallel の partition は許容）、hidden 幅、
-  final norm の幅、`lm_head_tied` と実体の一致、layer 数
+- model level: 読み込んだ layer 範囲が layer 0 から始まるなら embed（tied head を持つ最終範囲も
+  含む）、最終层で終わるなら lm_head と final norm を要求し、中間範囲はどちらも要求しない。
+  vocab は partition を模型側の次元へ戻して照合し、hidden 幅と `lm_head_tied` と実体の一致も見る
+- model level は layer 数を検証しない。vector の長さと config / stage 範囲の突き合わせは
+  呼び出し側（`validate_qwen35_weights` と `validate_qwen35moe_weights`）が持つ
 - layer body: 2 つの layernorm と、その topology が要求する attention tensor。
   逆 topology の tensor が残っていれば拒否する
 - partition は axis と count で模型側の次元へ戻して比較するため、TP rank でも成立する
@@ -615,3 +618,7 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
 - correctness path には grouped linear も router も combine も無い（grouped 系の fallback は
   成立しない）
 - TP + MoE は §5 の受理条件で `unsupported`
+- pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
+  しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
+  grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に
+  `unsupported` を返す（拒否の実装と条件は `pipeline_parallel.md` §4 が正本）

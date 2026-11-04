@@ -69,6 +69,18 @@ Skipped は開発者ローカル向けの表示にすぎず、required acceptanc
 R&D Gate / 診断用 test は旧 `tests/rnd` に置いていたが削除済みである。
 経緯は Git history を参照する。
 
+### required 外の E2E は変更内容で実走を決める
+
+external checkpoint と複数 GPU を要求する E2E（`test_qwen35_tp_e2e`、
+`test_dflash2_tp_e2e`、`test_qwen35moe_model_load_real` など）は `required` 集合に
+含まれない。required acceptance が通っても、これらは自動では走らない。
+
+model invariant・共有 weight load / validation・executor 経路・apps の load 経路を変える変更は、
+統合の前に `test_qwen35_tp_e2e`（TP=1 と TP=2 の greedy 列一致）を実走させて確認する。
+dense / MoE の一方しか通していない変更で既存 family の経路を触った場合は、もう一方の
+実 model E2E も同じ条件で走らせる。実測が未取得なら、その旨を R&D 記録に書いて
+性能主張・正しさの主張をしない。
+
 ## quality regression
 
 性能 regression（`perf` label）とは別に、model の品質を測る `quality` label を置く。

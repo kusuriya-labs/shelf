@@ -9,6 +9,7 @@
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
+#include <shelf/models/qwen35/runtime/pipeline_parallel.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -42,6 +43,7 @@ struct Qwen35RuntimeConfig {
     uint32_t page_tokens = 16;
     std::vector<int> devices = {0};
     uint32_t tp = 1;
+    uint32_t pipeline_parallel = 1;
     kernel::KVCacheDType kv_cache_dtype = kernel::KVCacheDType::BF16;
     bool verify_weights = false;
     uint32_t max_scheduled_output_rows = 0;
@@ -100,32 +102,43 @@ class Qwen35ComputeRuntime {
 
     const shelf::models::LoadedModel& model() const
     {
+        if (pp_model_ != nullptr) return *pp_model_;
         return tp_model_ != nullptr ? *tp_model_ : *model_;
     }
 
     qwen35::Executor& executor()
     {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).executor();
         return tp_executor_ != nullptr ? *tp_executor_ : executor_;
     }
 
     state::SequenceSlotPool& slot_pool()
     {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).sequence_pool();
         return tp_slots_ != nullptr ? *tp_slots_ : *slot_pool_;
     }
 
     state::GdnStatePool& gdn_pool()
     {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).gdn_pool();
         return tp_gdn_ != nullptr ? *tp_gdn_ : *gdn_pool_;
     }
 
     state::PagedKVPool& kv_pool()
     {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).kv_pool();
         return tp_kv_ != nullptr ? *tp_kv_ : *kv_pool_;
     }
 
-    gpu::GpuArena& arena() { return tp_arena_ != nullptr ? *tp_arena_ : *arena_; }
+    gpu::GpuArena& arena() {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).arena();
+        return tp_arena_ != nullptr ? *tp_arena_ : *arena_;
+    }
 
-    hipStream_t stream() const noexcept { return tp_stream_ != nullptr ? tp_stream_ : stream_; }
+    hipStream_t stream() const noexcept {
+        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).stream();
+        return tp_stream_ != nullptr ? tp_stream_ : stream_;
+    }
 
     double model_load_ms() const noexcept { return model_load_ms_; }
 
@@ -164,6 +177,8 @@ class Qwen35ComputeRuntime {
 
     Status initialize_tensor_parallel();
 
+    Status initialize_pipeline_parallel();
+
     std::size_t drafter_reserve_bytes(const ::shelf::state::GdnStatePool& pool) const;
 
     void apply_auto_working_set_reserve();
@@ -176,7 +191,9 @@ class Qwen35ComputeRuntime {
     std::size_t startup_available_bytes_ = 0;
 
     std::unique_ptr<qwen35::runtime::TpCoordinator> tp_coordinator_;
+    std::unique_ptr<qwen35::runtime::PipelineParallelCoordinator> pp_coordinator_;
     std::unique_ptr<shelf::models::LoadedModel> tp_model_;
+    std::unique_ptr<shelf::models::LoadedModel> pp_model_;
     qwen35::Executor* tp_executor_ = nullptr;
     state::SequenceSlotPool* tp_slots_ = nullptr;
     state::GdnStatePool* tp_gdn_ = nullptr;

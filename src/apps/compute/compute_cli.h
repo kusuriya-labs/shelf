@@ -23,6 +23,7 @@ struct ComputeOptions {
     unsigned long max_num_batched_tokens = 2048;
     std::vector<int> devices = {0};
     unsigned long tp = 1;
+    unsigned long pipeline_parallel = 1;
     std::string kv_cache_dtype = "bf16";
     shelf::qwen35::runtime::DecodeBackend decode_backend =
         shelf::qwen35::runtime::DecodeBackend::Hip;

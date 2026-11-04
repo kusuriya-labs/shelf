@@ -23,6 +23,9 @@ namespace qwen_hybrid {
 
 struct HybridLoadOptions {
     bool verify_quantized_payload_crc = false;
+    bool load_embedding = true;
+    bool load_lm_head = true;
+    bool load_final_norm = true;
     shelf::weights::WeightLoadOptions weights;
 };
 
@@ -33,6 +36,9 @@ std::string layer_tensor_prefix(std::size_t layer);
 // Body logical names: embed_tokens, lm_head, the final norm, and per layer the two
 // layernorms plus the attention tensors of that layer's topology. No FFN names.
 std::vector<std::string> hf_quantized_body_names(const QwenHybridConfig& config);
+
+std::vector<std::string> hf_quantized_layer_body_names(const QwenHybridConfig& config,
+                                                       std::size_t layer);
 
 // Opens a Shelf quantized model directory, or synthesizes an HF real-quantized one from
 // the given logical names. A name the checkpoint does not carry is skipped by the

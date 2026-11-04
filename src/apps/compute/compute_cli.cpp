@@ -53,7 +53,8 @@ bool parse_devices(const char* s, std::vector<int>& out) {
 
 void compute_usage(const char* prog) {
     printf("usage: %s [options]\n", prog);
-    printf("\nShelf inference runtime for Qwen 3.5 Dense on AMD RDNA4\n");
+    printf("\nShelf inference runtime for Qwen 3.5 dense and grouped-expert models"
+           " on AMD RDNA4\n");
     printf("options:\n");
     printf("  --model-dir PATH       BF16 or quantized model directory (auto-detected via\n");
     printf("                         shelf_quantization.json) (required)\n");
@@ -66,8 +67,9 @@ void compute_usage(const char* prog) {
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
-    printf("  --device N|N,M         GPU device(s); count must match --tp (default 0)\n");
+    printf("  --device N|N,M         GPU device(s); count must match --tp or --pipeline-parallel (default 0)\n");
     printf("  --tp N                 tensor parallel degree 1 | 2 (default 1)\n");
+    printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tp 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
     printf("                         (default auto = model config: native unless the\n");
@@ -149,6 +151,7 @@ int parse_compute_options(int argc, char** argv, ComputeOptions& opt) {
 auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& devices = opt.devices;
     auto& tp = opt.tp;
+    auto& pipeline_parallel = opt.pipeline_parallel;
     auto& kv_cache_dtype = opt.kv_cache_dtype;
     shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     auto& verify_weights = opt.verify_weights;
@@ -209,6 +212,11 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2)) {
                 fprintf(stderr, "bad --tp (expected 1 or 2)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--pipeline-parallel") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], pipeline_parallel) || pipeline_parallel < 1) {
+                fprintf(stderr, "bad --pipeline-parallel (expected N >= 1)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--kv-cache-dtype") == 0 && i + 1 < argc) {
@@ -330,6 +338,7 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& max_concurrent_requests = opt.max_concurrent_requests;
     const auto& devices = opt.devices;
     const auto& tp = opt.tp;
+    const auto& pipeline_parallel = opt.pipeline_parallel;
     const auto& kv_cache_dtype = opt.kv_cache_dtype;
     const shelf::qwen35::runtime::DecodeBackend& decode_backend = opt.decode_backend;
     const auto& verify_weights = opt.verify_weights;
@@ -353,7 +362,30 @@ int validate_compute_options(const ComputeOptions& opt) {
         fprintf(stderr, "--tp must be 1 or 2\n");
         return kComputeParseError;
     }
-    if (devices.size() != tp) {
+    if (pipeline_parallel > 1) {
+        if (tp != 1) {
+            fprintf(stderr, "--pipeline-parallel > 1 requires --tp 1\n");
+            return kComputeParseError;
+        }
+        if (devices.size() != pipeline_parallel) {
+            fprintf(stderr,
+                    "--device expects %lu entries for --pipeline-parallel %lu, got %zu\n",
+                    pipeline_parallel, pipeline_parallel, devices.size());
+            return kComputeParseError;
+        }
+        if (!dflash2_model_dir.empty()) {
+            fprintf(stderr, "--pipeline-parallel does not support DFlash2 speculative decoding\n");
+            return kComputeParseError;
+        }
+        if (!dump_logits_path.empty()) {
+            fprintf(stderr, "--pipeline-parallel does not support --dump-logits\n");
+            return kComputeParseError;
+        }
+        if (!opt.hidden_taps.empty()) {
+            fprintf(stderr, "--pipeline-parallel does not support --hidden-taps\n");
+            return kComputeParseError;
+        }
+    } else if (devices.size() != tp) {
         fprintf(stderr, "--device expects %lu entries for --tp %lu, got %zu\n",
                 tp, tp, devices.size());
         return kComputeParseError;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/model/stage_range.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/core/status.h>
 #include <shelf/core/memory/arena.h>
@@ -15,7 +16,8 @@ namespace shelf::qwen35 {
 // dense FFN of every layer and, when present, the MTP block.
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const Qwen35TextConfig& config);
+    const Qwen35TextConfig& config,
+    const PipelineStage& stage = {});
 
 class Qwen35Model final {
 public:
@@ -43,7 +45,13 @@ public:
 
     static Result<Qwen35Model> adopt(
         Qwen35ModelWeights&& weights,
-        Qwen35TextConfig text_config);
+        Qwen35TextConfig text_config,
+        const PipelineStage& stage = {});
+
+    [[nodiscard]]
+    const PipelineStage& stage() const noexcept {
+        return stage_;
+    }
 
     [[nodiscard]]
     const Qwen35ModelWeights&
@@ -60,10 +68,12 @@ public:
 private:
     Qwen35Model(
         Qwen35ModelWeights&& weights,
-        Qwen35TextConfig text_config);
+        Qwen35TextConfig text_config,
+        PipelineStage stage);
 
     Qwen35ModelWeights weights_;
     Qwen35TextConfig text_config_;
+    PipelineStage stage_;
 };
 
 } // namespace shelf::qwen35

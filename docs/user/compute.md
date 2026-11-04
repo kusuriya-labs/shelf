@@ -16,8 +16,9 @@
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
-| `--device N\|N,M` | GPU device(s); count must match --tp (default 0) |
+| `--device N\|N,M` | GPU device(s); count must match --tp or --pipeline-parallel (default 0) |
 | `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tp 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
 | `--decode-backend TYPE` | hip (default) |
@@ -169,6 +170,31 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 `--serve-stdio` も同じ runtime の TP 経路を使う。TP2 の serve 性能は未計測であり、
 性能値は [../perf/current.md](../perf/current.md)、数値互換性・対応範囲の契約は
 [../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md)
+を参照。
+
+### pipeline parallel
+
+`--pipeline-parallel K` で model の layer を K stage に分割し、stage ごとに GPU を
+割り当てる。`--device` は stage 数と同じ個数を指定する（例 `--device 0,1`）。
+`--tp` は `1` でなければならない。
+
+```bash
+./build/shelf-compute --model-dir /opt/zen/work/models/Qwen3.8-27B-FP8 \
+  --input-ids-file /tmp/opencode/ids_1024.txt \
+  --device 0,1 --tp 1 --pipeline-parallel 2 \
+  --max-seq-len 2048 --max-num-batched-tokens 2048 \
+  --prefix-cache 0
+```
+
+- 先頭 stage が embedding、最終 stage が final norm と lm_head を持つ。
+- stage 間の hidden は bf16 のまま pinned host 経由で直列に受け渡す。
+- `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
+  `--dump-logits` と併用できない。grouped expert model（MoE）では使えない。
+- decode と prefill が同じ batch に混在する実行は未対応である。
+  `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
+- KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。
+
+契約の詳細は [../developer/pipeline_parallel.md](../developer/pipeline_parallel.md)
 を参照。
 
 ## serve-stdio

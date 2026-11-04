@@ -27,7 +27,8 @@ Status validate_dense_ffn_weights(const DenseFfnWeights& ffn, std::size_t hidden
 
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const Qwen35TextConfig& config)
+    const Qwen35TextConfig& config,
+    const PipelineStage& stage)
 {
     namespace qhy = shelf::qwen_hybrid;
 
@@ -37,16 +38,36 @@ Status validate_qwen35_weights(
             __FILE__, __LINE__);
     }
 
-    Status st = qhy::validate_hybrid_model_level(weights, config, weights.layers.size());
+    const bool full = !stage.enabled;
+    const std::uint32_t num_layers =
+        static_cast<std::uint32_t>(config.num_hidden_layers);
+    const std::uint32_t lo = full ? 0u : stage.layers.layer_lo;
+    const std::uint32_t hi = full ? num_layers : stage.layers.layer_hi;
+    if (lo >= hi || hi > num_layers) {
+        return Status::invalid_argument("Qwen35Model: invalid pipeline stage range",
+                                        __FILE__, __LINE__);
+    }
+    if (weights.layers.size() != config.num_hidden_layers) {
+        return Status::invalid_argument("Qwen35Model: layer count mismatch",
+                                        __FILE__, __LINE__);
+    }
+
+    Status st = qhy::validate_hybrid_model_level(weights, config, lo, hi);
     if (!st.ok()) return st;
 
     const std::size_t hidden = config.hidden_size;
     const std::size_t inter = config.ffn.intermediate_size;
-    for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
+    for (std::uint32_t layer = lo; layer < hi; ++layer) {
         st = qhy::validate_hybrid_layer_body(weights.layers[layer], config, layer);
         if (!st.ok()) return st;
         st = validate_dense_ffn_weights(weights.layers[layer].ffn, hidden, inter);
         if (!st.ok()) return st;
+    }
+
+    if (stage.enabled && weights.mtp.present) {
+        return Status::unsupported(
+            "pipeline stage weight load does not accept an MTP block",
+            __FILE__, __LINE__);
     }
 
     if (!weights.mtp.present) return Status::make_ok();
@@ -91,12 +112,12 @@ Result<Qwen35Model> Qwen35Model::load_from_safetensors(
     }
     Qwen35ModelWeights weights = weights_result.release();
 
-    auto validation = validate_qwen35_weights(weights, text_config);
+    auto validation = validate_qwen35_weights(weights, text_config, options.stage);
     if (!validation.ok()) {
         return validation;
     }
 
-    return Qwen35Model(std::move(weights), text_config);
+    return Qwen35Model(std::move(weights), text_config, options.stage);
 }
 
 Result<Qwen35Model> Qwen35Model::load_tensor_parallel_from_safetensors(
@@ -120,30 +141,33 @@ Result<Qwen35Model> Qwen35Model::load_tensor_parallel_from_safetensors(
     }
     Qwen35ModelWeights weights = weights_result.release();
 
-    auto validation = validate_qwen35_weights(weights, text_config);
+    auto validation = validate_qwen35_weights(weights, text_config, options.stage);
     if (!validation.ok()) {
         return validation;
     }
 
-    return Qwen35Model(std::move(weights), text_config);
+    return Qwen35Model(std::move(weights), text_config, options.stage);
 }
 
 Result<Qwen35Model> Qwen35Model::adopt(
     Qwen35ModelWeights&& weights,
-    Qwen35TextConfig text_config)
+    Qwen35TextConfig text_config,
+    const PipelineStage& stage)
 {
-    auto validation = validate_qwen35_weights(weights, text_config);
+    auto validation = validate_qwen35_weights(weights, text_config, stage);
     if (!validation.ok()) {
         return validation;
     }
-    return Qwen35Model(std::move(weights), text_config);
+    return Qwen35Model(std::move(weights), text_config, stage);
 }
 
 Qwen35Model::Qwen35Model(
     Qwen35ModelWeights&& weights,
-    Qwen35TextConfig text_config)
+    Qwen35TextConfig text_config,
+    PipelineStage stage)
     : weights_(std::move(weights)),
-      text_config_(std::move(text_config))
+      text_config_(std::move(text_config)),
+      stage_(stage)
 {
 }
 

@@ -380,5 +380,10 @@ pipeline parallel、TP=4 production support。
 | `test_qwen35_tp_execution` | gpu2;optional | tiny model: Stage A/B + full forward + prefill/decode + greedy 一致 + rank0/rank1 identical + layer別 drift |
 | `test_qwen35_tp_e2e` | gpu2;optional;external_files | Qwen3.8-27B 実モデル TP=1 vs TP=2 greedy（`SHELF_TP_MODEL_DIR`） |
 
+`test_qwen35_tp_e2e` の TP=1 leg は単一 GPU に full model を載せるため、
+`models/Qwen3.8-27B-FP8` では既定 arena（24 GiB）が足りない。この checkpoint では
+`SHELF_TP_ARENA_GIB=28` を指定して実行する（指定しないと weight load が insufficient memory
+で落ちる）。
+
 GPU2 テストは `ctest -L gpu2` で実行する。GPU 不足時は runner が exit 77 で
 skip し、required acceptance（`-L required`）には含まれない。

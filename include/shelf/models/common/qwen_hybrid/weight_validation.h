@@ -21,11 +21,15 @@ Status check_matrix_shape(const shelf::weights::MatrixWeight& w,
                           std::size_t cols,
                           const char* tag);
 
-// Embedding and LM head vocab (a vocabulary-sharded LM head is accepted), hidden width,
-// final norm rank and width, and the layer count.
+// Embedding and LM head vocab (a vocabulary-sharded LM head is accepted), hidden width and
+// final norm rank, over the layer range the weights were loaded for. A range that starts at
+// layer 0 carries the embedding, a range that ends at the last layer carries the final norm
+// and the LM head, and a middle stage carries neither. Row counts are the global counts a
+// partition reports, so a rank of a sharded model passes.
 Status validate_hybrid_model_level(const HybridModelLevelWeights& model,
                                    const QwenHybridConfig& config,
-                                   std::size_t layer_count);
+                                   std::size_t loaded_layer_lo,
+                                   std::size_t loaded_layer_hi);
 
 // One layer's backbone for a known topology: the two layernorms are [hidden], every
 // tensor of that topology is loaded, and the other topology's tensors are absent, so a
