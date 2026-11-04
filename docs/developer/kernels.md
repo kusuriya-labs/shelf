@@ -151,11 +151,17 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   へ写す。atomic は LDS の per-expert cursor だけで、block ごとに token 昇順を保持する
   ため結果は決定的である。scan は `row_token` を host 容量ぶん `-1` で埋める
   （activation 量子化は group 数ではなく容量ぶん row を launch する）。
+  scan は 1 workgroup で、expert 別の合計は全 thread で LDS へ集約してから、prefix の計算を
+  thread 0 が行う（thread 0 だけに依存ループを戻すと decode で 27 µs 級に遅い。計算順は
+  expert index 昇順のままなので出力は変わらない）
 - group は `kMxfp4GemmRowTile`(=16) slot までで、expert をまたがない。host 側の容量は
   `moe_group_count_upper_bound` / `moe_group_row_capacity` が単一の源。
-- `launch_moe_combine`: 1 workgroup = 1 token。top_k 個の group row を **group row 昇順
-  （= expert 昇順）** に並べ替えて f32 で蓄積し、最後に 1 回 bf16 へ丸める。shared expert
-  を渡すと `gate_weight * shared` を routed 合計の後に足す。`gate_weight` は活性化済み値で、
+- `launch_moe_combine`: grid は `(rows, ceil(features / kCombineThreads))` で、
+  1 workgroup が 1 token の 128 feature 分を持つ（decode の rows=1 でも feature 方向に
+  並列化する）。top_k 個の group row を **group row 昇順（= expert 昇順）** に並べ替えて
+  f32 で蓄積し、最後に 1 回 bf16 へ丸める。feature ごとの accumulate 順序は workgroup 分割に
+  よらないので、出力は分割前後で bit 一致する。shared expert を渡すと
+  `gate_weight * shared` を routed 合計の後に足す。`gate_weight` は活性化済み値で、
   活性化自体は既存の `launch_sigmoid_bf16_f32` が担う（combine は超越関数を使わない）。
 - activation 平面の生成は `launch_activation_quantize_mxfp4_rowref` の `row_index`
   間接参照を使う（`row_index[m] < 0` の行は zero operand + scale 1.0 になる）。

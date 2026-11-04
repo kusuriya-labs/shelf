@@ -183,13 +183,22 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
     uint32_t tiles,
     uint32_t group_capacity) {
     const uint32_t tid = threadIdx.x;
+    // thread 0 alone would serialize experts * tiles dependent loads before it can lay out
+    // any row, which costs more than the scan itself at decode. Sum the per-expert totals
+    // with all threads into LDS first; the layout below then only reads LDS and stores.
+    __shared__ uint32_t s_total[kMoeRouterMaxExperts];
+    for (uint32_t e = tid; e < experts; e += kScanThreads) {
+        uint32_t expert_total = 0u;
+        for (uint32_t tl = 0u; tl < tiles; ++tl)
+            expert_total += tile_counts[static_cast<size_t>(e) * tiles + tl];
+        s_total[e] = expert_total;
+    }
+    __syncthreads();
     if (tid == 0u) {
         uint32_t slots = 0u;
         uint32_t groups = 0u;
         for (uint32_t e = 0u; e < experts; ++e) {
-            uint32_t expert_total = 0u;
-            for (uint32_t tl = 0u; tl < tiles; ++tl)
-                expert_total += tile_counts[static_cast<size_t>(e) * tiles + tl];
+            const uint32_t expert_total = s_total[e];
             expert_row_begin[e] = slots;
             expert_group_begin[e] = groups;
             uint32_t at = slots;

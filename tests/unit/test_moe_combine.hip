@@ -19,7 +19,9 @@ namespace moe = shelf::kernel;
 namespace {
 
 constexpr uint32_t kRowTile = moe::kMxfp4GemmRowTile;
-constexpr uint32_t kFeatures = 512u;
+// Production feature width (Qwen3.6-35B-A3B hidden 2048). The combine kernel splits features
+// over grid.y in kCombineThreads-sized blocks, so this width uses 16 blocks per row.
+constexpr uint32_t kFeatures = 2048u;
 constexpr uint32_t kExperts = 256u;
 constexpr uint32_t kMaxRows = 64u;
 constexpr uint32_t kMaxTopK = 8u;
@@ -277,6 +279,67 @@ void run_order_discriminating_case(Device& d, hipStream_t stream) {
             check(false, "order case: every feature column agrees");
 }
 
+// features is not a multiple of the block width: the last block of a row is partial, and the
+// rows of the feature domain beyond `features` must stay untouched.
+void run_partial_feature_block_case(Device& d, hipStream_t stream) {
+    constexpr uint32_t rows = 2u;
+    constexpr uint32_t top_k = 2u;
+    constexpr uint32_t feats = 200u;
+    constexpr uint32_t stride = 256u;
+    constexpr uint16_t kSentinel = 0x0001u;
+
+    const std::vector<int32_t> slot_row_of = {5, 2, 7, 3};
+    const std::vector<float> weight = {2.0f, 0.5f, 1.0f, 4.0f};
+    auto payload_value = [](uint32_t row, uint32_t f) {
+        return static_cast<uint16_t>(100u + ((row * 397u + f * 7u) % 500u));
+    };
+
+    std::vector<shelf::bf16_t> payload(static_cast<std::size_t>(kMaxPlaneRows) * stride);
+    for (uint32_t row = 0; row < kMaxPlaneRows; ++row)
+        for (uint32_t f = 0; f < stride; ++f)
+            payload[static_cast<std::size_t>(row) * stride + f] =
+                shelf::bf16_t{payload_value(row, f)};
+
+    std::vector<shelf::bf16_t> poison(static_cast<std::size_t>(kMaxRows) * kFeatures,
+                                      shelf::bf16_t{kSentinel});
+    h2d(d.slot_row_of, slot_row_of);
+    h2d(d.sel_weight, weight);
+    h2d(d.expert_out, payload);
+    h2d(d.out, poison);
+
+    const hipError_t err = moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight,
+                                                   d.slot_row_of, nullptr, nullptr, rows, top_k,
+                                                   feats, stride, stride, stream);
+    check(err == hipSuccess, "partial feature case: launch_moe_combine");
+    const std::vector<shelf::bf16_t> got =
+        d2h(d.out, static_cast<std::size_t>(kMaxRows) * kFeatures);
+
+    // The kernel walks the slots in ascending group row.
+    const uint32_t order[2][2] = {{2u, 5u}, {3u, 7u}};
+    const float order_weight[2][2] = {{0.5f, 2.0f}, {4.0f, 1.0f}};
+    uint32_t mismatches = 0;
+    for (uint32_t t = 0; t < rows; ++t) {
+        for (uint32_t f = 0; f < feats; ++f) {
+            float acc = 0.0f;
+            for (uint32_t j = 0; j < top_k; ++j)
+                acc = std::fmaf(order_weight[t][j],
+                                bf16_to_f32(payload[static_cast<std::size_t>(order[t][j]) * stride +
+                                                    f]),
+                                acc);
+            const shelf::bf16_t want{shelf::f32_to_bf16_rne(acc)};
+            if (got[static_cast<std::size_t>(t) * feats + f].data != want.data)
+                ++mismatches;
+        }
+    }
+    check(mismatches == 0, "partial feature case: every feature column matches the reference");
+
+    uint32_t touched = 0;
+    for (std::size_t i = static_cast<std::size_t>(rows) * feats; i < poison.size(); ++i)
+        if (got[i].data != kSentinel)
+            ++touched;
+    check(touched == 0, "partial feature case: nothing outside the feature domain is written");
+}
+
 }  // namespace
 
 int main() {
@@ -318,6 +381,7 @@ int main() {
     run_case(make_case(64, 8, true), d, stream);
     run_case(make_case(64, 4, false), d, stream);
     run_order_discriminating_case(d, stream);
+    run_partial_feature_block_case(d, stream);
 
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, d.shared_out,
                                   nullptr, 1, 2, kFeatures, kFeatures, kFeatures,

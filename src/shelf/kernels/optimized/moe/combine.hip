@@ -33,6 +33,7 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
     if (t >= rows)
         return;
     const uint32_t tid = threadIdx.x;
+    const uint32_t f = blockIdx.y * kCombineThreads + tid;
 
     __shared__ int32_t s_row[kCombineMaxTopK];
     __shared__ float s_weight[kCombineMaxTopK];
@@ -65,22 +66,22 @@ __global__ void __launch_bounds__(kCombineThreads) moe_combine_kernel(
 
     const size_t out_base = static_cast<size_t>(t) * features;
     const size_t shared_base = static_cast<size_t>(t) * shared_row_stride;
-    for (uint32_t f = tid; f < features; f += kCombineThreads) {
-        float acc = 0.0f;
-        for (uint32_t j = 0; j < top_k; ++j) {
-            const int32_t row = s_row[j];
-            if (row < 0)
-                continue;
-            const float value =
-                bf16_f32(expert_output[static_cast<size_t>(row) * expert_row_stride + f]);
-            acc = __fmaf_rn(s_weight[j], value, acc);
-        }
-        if (shared_output != nullptr) {
-            const float shared_value = bf16_f32(shared_output[shared_base + f]);
-            acc = __fmaf_rn(gate, shared_value, acc);
-        }
-        output[out_base + f] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc))};
+    if (f >= features)
+        return;
+    float acc = 0.0f;
+    for (uint32_t j = 0; j < top_k; ++j) {
+        const int32_t row = s_row[j];
+        if (row < 0)
+            continue;
+        const float value =
+            bf16_f32(expert_output[static_cast<size_t>(row) * expert_row_stride + f]);
+        acc = __fmaf_rn(s_weight[j], value, acc);
     }
+    if (shared_output != nullptr) {
+        const float shared_value = bf16_f32(shared_output[shared_base + f]);
+        acc = __fmaf_rn(gate, shared_value, acc);
+    }
+    output[out_base + f] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc))};
 }
 
 }  // namespace
@@ -111,7 +112,8 @@ hipError_t launch_moe_combine(
         return hipErrorInvalidValue;
     if (shared_output != nullptr && shared_row_stride < features)
         return hipErrorInvalidValue;
-    moe_combine_kernel<<<rows, kCombineThreads, 0, stream>>>(
+    const dim3 grid(rows, (features + kCombineThreads - 1u) / kCombineThreads);
+    moe_combine_kernel<<<grid, kCombineThreads, 0, stream>>>(
         output, expert_output, sel_weight, slot_row_of, shared_output, shared_gate_weight, rows, top_k,
         features, expert_row_stride, shared_row_stride);
     return hipGetLastError();

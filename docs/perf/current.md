@@ -75,14 +75,16 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 | context tokens | 64 |
 | decode tokens | 32 |
 | warmup | 1 |
-| gpu_ms p50（clean 6 run） | 542.29 |
-| gpu_tokens_per_sec p50 | 59.01 |
-| run 間 | 541.36 / 541.86 / 541.91 / 542.68 / 542.96 / 543.01 ms |
-| 生成一致 anchor | `GREEDY_TOKEN_SUM=2199`（7 run すべて一致） |
+| gpu_ms p50（clean 6 run） | 497.27 |
+| gpu_tokens_per_sec p50 | 64.35 |
+| run 間 | 496.28 / 496.70 / 497.21 / 497.34 / 497.42 / 498.87 ms |
+| 生成一致 anchor | `GREEDY_TOKEN_SUM=2199`（11 run すべて一致） |
 
 - measurement revision: `4b8d413` + `RMS_NORM` @2048（per-feature）と `PAGED_ATTENTION`
   `(q_heads 16, kv_heads 2, head_dim 256)` の registered 化、split-KV splits 決定の一本化、
-  `EMBEDDING_LOOKUP` @2048 の registered 化
+  `EMBEDDING_LOOKUP` @2048 の registered 化、`MOE_COMBINE` の feature 方向分割と
+  `MOE_PLAN_SCAN` の expert 合計 LDS 前段（2026-11-05、
+  [../research/20261105/moe_decode_launch_roofline.md](../research/20261105/moe_decode_launch_roofline.md)）
 - GPU: Radeon AI PRO R9700（`--device 0`、測定時は device 0 / 1 idle）
 - command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1`
 - kernel 単位 counter の内訳（`SHELF_QWEN35_PERF_STATS=1`、32 token 区間）:
@@ -92,18 +94,22 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 - split の on / off は `physical_kernel_launches - logical_dispatches` で見てよい
   （context 4096 / 8 token で 88 = grouped の 8 + split attention の 80 = 10 層 × 8 decode）。
   context 64 では 32（grouped のみ）で split は入らない
-- 前の値は `gpu_ms p50` 3128.75 / **10.22 tok/s**（anchor `GREEDY_TOKEN_SUM=2987`）。その前は
+- 前の値（同一条件、combine / plan scan 変更前）は `gpu_ms p50` 542.29 / **59.01 tok/s**。
+  その前は `gpu_ms p50` 3128.75 / **10.22 tok/s**（anchor `GREEDY_TOKEN_SUM=2987`）。その前は
   5512.97 / 5.81 tok/s（anchor 15232）。登録と計測の経緯は
   [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md) と
   [../research/20261104/moe_rmsnorm_paged_attention_allowlist.md](../research/20261104/moe_rmsnorm_paged_attention_allowlist.md)
 - `shelf-compute` E2E（prompt 14 token、`--max-num-batched-tokens 64 --max-concurrent-requests 1`、
   8 decode）は DECODE_TOKENS_PER_SEC 56.52（1 run）。tg とは条件が違うので直接比較しない
-- 長い context（split-KV 有効後、device 1、各 2 run、`--prefill-chunk 2048`）:
-  `--context 4096` は 56.19 / 56.25 tok/s（anchor `GREEDY_TOKEN_SUM=2192` 不変）、
-  `--context 2048` は 56.60 / 55.01 tok/s。capability を外した同一 tree の A/B は
-  51.67 / 51.73 と 55.02 / 55.11 なので、**context 4096 で +8.7 %、context 2048 は差が無い**
-  （visible 2048 は attention が短く、split の効く余地が無い）。
-  `q_per_kv = 8` の split-KV は bf16 で有効（`max_visible_tokens >= 2048`）、fp8 は非 split のまま
+- 長い context（device 1、各 2 run、`--prefill-chunk 2048`）。split-KV 有効後:
+  `--context 4096` は 56.19 / 56.25 tok/s、`--context 2048` は 56.60 / 55.01 tok/s。
+  capability を外した同一 tree の A/B は 51.67 / 51.73 と 55.02 / 55.11 なので、
+  **context 4096 で +8.7 %、context 2048 は差が無い**（visible 2048 は attention が短く、
+  split の効く余地が無い）。`q_per_kv = 8` の split-KV は bf16 で有効（`max_visible_tokens >= 2048`）、
+  fp8 は非 split のまま
+- 同じ条件を MoE combine / plan scan の変更後に測ると `--context 4096` は **58.79 / 61.64**
+  （anchor `GREEDY_TOKEN_SUM=2192` 不変。combine だけの中間測定で 60.40 / 60.43）。
+  context 4096 の run 揺れは 2.9 ms/token（5.3 %）あるので、2 run の差を性能主張に使わない
 - context 2048 は split の on / off で greedy の合計が 745578 → 827368 に変わる
   （reduction 順序の差。split は softmax を可視域ごとに online で走らせ最後に合成する）。
   数値品質は context 2048 / 64 positions の A/B で mean KL 0.00623・top-1 一致 0.984・
