@@ -60,7 +60,7 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 
 - measurement revision: `bb2e56e` + 計測用 harness 変更
 - GPU: Radeon AI PRO R9700 × 2（device 0,1）
-- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --tp 2 --device 0,1 --kv-cache-dtype fp8 --prompt-tokens 262128 --prefill-chunk 2048 --runs 5 --warmup 1`
+- command: `shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --tensor-parallel 2 --device 0,1 --kv-cache-dtype fp8 --prompt-tokens 262128 --prefill-chunk 2048 --runs 5 --warmup 1`
 - 524,288 は production の値が未取得（`kMeasuredMaxVisible24 = 524288` を採用済みだが、
   warmup + 5 run の production 計測は未実施。1 run の参考値のみ research 記録にあり）。詳細は
   [../research/20261103/gate6_long_context.md](../research/20261103/gate6_long_context.md)。
@@ -147,7 +147,7 @@ teacher forcing できる。
 - 同じ `quality` 経路の dense 側確認（Qwen3.8-27B-FP8、corpus 2203 token、context 128 /
   positions 32）: TP1 `QUALITY_PPL` 4.3905、TP2 4.5421（+3.45 %）、mean KL 0.00494、
   top-1 一致 0.9375、top-5 overlap 0.9563。TP1 と TP2 の差は reduction 順序によるもので、
-  `quality` の `LoadedModel` 化で生じた変更ではない（`--tp 2` は dense のみ受理）
+  `quality` の `LoadedModel` 化で生じた変更ではない（`--tensor-parallel 2` は dense のみ受理）
 
 ## 2026-11-04 Qwen3.5-9B BF16 linear allowlist
 

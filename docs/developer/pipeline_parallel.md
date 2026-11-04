@@ -50,12 +50,12 @@ ContinuousBatcher (stage 0 の pools を所有)
 
 ```bash
 shelf-compute --model-dir models/Qwen3.8-27B-FP8 \
-  --device 0,1 --tp 1 --pipeline-parallel 2 \
+  --device 0,1 --tensor-parallel 1 --pipeline-parallel 2 \
   --max-seq-len 2048 --max-num-batched-tokens 2048 \
   --prefix-cache 0
 ```
 
-- `--pipeline-parallel > 1` は `--tp 1` を要求する。
+- `--pipeline-parallel > 1` は `--tensor-parallel 1` を要求する。
 - `--device` の個数は `--pipeline-parallel` と一致させる。
 - `--prefix-cache` は PP では無効化する（指定時は警告）。
 

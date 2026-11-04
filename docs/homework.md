@@ -19,7 +19,7 @@ Static YaRN（`--rope-factor`）の Target 対応は Gate 0〜4 まで完了し�
 
 ## 2. Gate 6 — 2x の長文 E2E（品質・性能）
 
-- 容量は実測済み: `--rope-factor 2 --kv-cache-dtype fp8 --tp 2 --max-seq-len 524288` で起動・生成に成功し、
+- 容量は実測済み: `--rope-factor 2 --kv-cache-dtype fp8 --tensor-parallel 2 --max-seq-len 524288` で起動・生成に成功し、
   rank あたり使用 23.11 GiB／arena 30.63 GiB。
 - 必要な作業:
   - 524,288 トークン級の入力で prefill / decode の速度を測り、`docs/perf/current.md` に記録する。
@@ -126,11 +126,11 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 
 PP の layer split・host hand-off・E2E は実装済み。以下は未対応または未検証。
 
-* TP と PP の同時利用（現行は `--tp 1` のみ）
+* TP と PP の同時利用（現行は `--tensor-parallel 1` のみ）
 * DFlash2 speculative decode との併用
 * prefix cache との併用
 * hidden taps / `--dump-logits` との併用
-* MTP block との併用（compute の MTP は `--tp 1` / `--pipeline-parallel 1` のみ）
+* MTP block との併用（compute の MTP は `--tensor-parallel 1` / `--pipeline-parallel 1` のみ）
 * decode と prefill が同じ batch に混在する実行（機能 TODO の mixed batch と同じ。
   PP coordinator は現在 `unsupported` を返す）
 * stage 間 overlap（現行は pinned host 経由の直列 hand-off。性能最適化は未着手）

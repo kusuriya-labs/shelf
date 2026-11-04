@@ -327,19 +327,19 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
 - execution の正式サポートは **tp_size = 2**（`TpCoordinator` は3枚以上を
   `unsupported` で拒否する）。descriptor / plan builder は任意の tp_size を
   表現できるが、execution runtime まで tp_size=4 対応済みとは表現しない。
-- execution は `shelf-compute --tp 1|2` から利用できる
+- execution は `shelf-compute --tensor-parallel 1|2` から利用できる
   （`--device` に rank ごとの GPU をカンマ区切りで指定、例 `--device 0,2`。
-  個数が `--tp` と一致しない場合は明示エラー）。
+  個数が `--tensor-parallel` と一致しない場合は明示エラー）。
   単一 request 経路と `--serve-stdio` の両方が同じ runtime の TP 経路を使う。
   `--dflash2-model-dir` と併用できる
   （drafter は compute が local load する。DFlash2 の drafter は非分割）。
-  prefix cache も `--tp 2` で有効である
+  prefix cache も `--tensor-parallel 2` で有効である
   （TP rank shard 付きの hot overflow と state demotion は unsupported エラー）。
-  `shelf-bench` は pp / quality で `--tp 1|2` を露出する（tg / batch は未露出）。
+  `shelf-bench` は pp / quality で `--tensor-parallel 1|2` を露出する（tg / batch は未露出）。
   pp の TP 実行は `TpBatchHook::on_execute` 経由で、最終 chunk の
   `compute_logits` は TP 時に強制される（combine 出力行が必要なため）。
-  `shelf-server` の CLI は `--tp` を露出しない
-  （server が compute へ渡す argv にも `--tp` は無い）。
+  `shelf-server` の CLI は `--tensor-parallel` を露出しない
+  （server が compute へ渡す argv にも `--tensor-parallel` は無い）。
 - TP=2 の local geometry は optimized selector の validated allowlist に含める。
   現在の対象は Linear / Paged Attention / GDN Recurrence / Rope / KV Append /
   L2 Normalize / GDN conv1d / RMSNorm / Elementwise の全 selector で、
@@ -347,7 +347,7 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   個別に追加し、未知 shape を自動許可しない。現在の rule は
   `kLinearShapeRules` と selector / gemm テストが正本である。
 - DFlash2 は **drafter を非分割・target verify のみ TP2** で動作する。
-  `shelf-compute --tp 2 --dflash2-model-dir ...` から利用できる
+  `shelf-compute --tensor-parallel 2 --dflash2-model-dir ...` から利用できる
   （drafter は compute process が local load）。
   `test_dflash2_tp_e2e` が backend ごとに「speculative ≡ target-only greedy」を
   48 token 全域で assert し、TP2 では partial reject 大半（18 rounds）の

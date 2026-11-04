@@ -113,7 +113,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             "max_concurrent_requests must be positive", __FILE__, __LINE__);
     }
     if (config_.tp != 1 && config_.tp != 2) {
-        return Status::unsupported("--tp supports 1 or 2", __FILE__, __LINE__);
+        return Status::unsupported("--tensor-parallel supports 1 or 2", __FILE__, __LINE__);
     }
     if (config_.pipeline_parallel == 0) {
         return Status::invalid_argument(
@@ -133,7 +133,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         : config_.tp;
     if (config_.devices.size() != parallel_width) {
         return Status::invalid_argument(
-            "--device count must match --tp or --pipeline-parallel", __FILE__, __LINE__);
+            "--device count must match --tensor-parallel or --pipeline-parallel", __FILE__, __LINE__);
     }
     for (int device : config_.devices) {
         if (device < 0 || device >= dev_count) {

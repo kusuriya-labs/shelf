@@ -271,7 +271,7 @@ class ComputeHarness:
         if not self.auto_arena:
             argv += ["--arena-gib", str(arena_gib)]
         if self.tp > 1:
-            argv += ["--tp", str(self.tp)]
+            argv += ["--tensor-parallel", str(self.tp)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)
         if reserve is not None:
             argv += ["--working-set-reserve-gib", str(reserve)]

@@ -456,12 +456,19 @@ set_tests_properties(test_compute_mtp_rejects_dflash2 PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "mutually exclusive")
 
+add_test(NAME test_compute_rejects_tp_abbreviation
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --tp 2 --device 0,1)
+set_tests_properties(test_compute_rejects_tp_abbreviation PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "unknown argument: --tp")
+
 add_test(NAME test_compute_mtp_rejects_tp2
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir placeholder --mtp --tp 2 --device 0,1)
+             --model-dir placeholder --mtp --tensor-parallel 2 --device 0,1)
 set_tests_properties(test_compute_mtp_rejects_tp2 PROPERTIES
                      LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "requires --tp 1")
+                     PASS_REGULAR_EXPRESSION "requires --tensor-parallel 1")
 
 add_test(NAME test_compute_mtp_drafts_reject_over_ceiling
          COMMAND $<TARGET_FILE:shelf-compute>

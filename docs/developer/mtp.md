@@ -4,7 +4,7 @@ checkpoint の MTP block（`mtp.*`）を drafter として使う単一 request �
 DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる。
 
 対象は dense checkpoint（`num_experts` を持たない model）に限る。MoE checkpoint は
-`LoadedModel::load` が `unsupported` を返す。`--tp 2`、`--pipeline-parallel 2`、
+`LoadedModel::load` が `unsupported` を返す。`--tensor-parallel 2`、`--pipeline-parallel 2`、
 `--serve-stdio`、`--dump-logits` との併用は起動時に拒否する。
 
 ## Forward contract
@@ -163,7 +163,7 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 ## 制約
 
 - dense checkpoint のみ。MoE checkpoint の MTP は未対応である。
-- `--tp 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
+- `--tensor-parallel 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
 - prefix cache は MTP の単一 request compute 経路では使わない。
 - partial accept は GDN snapshot + compact log replay で復元する。target rerun は行わない。
 - MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は

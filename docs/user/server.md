@@ -78,8 +78,8 @@ Ready.
 | `--large-context-tokens LARGE_CONTEXT_TOKENS` | prompt tokens above which the larger inference budget applies (default 262144) |
 | `--large-context-inference-budget-tokens LARGE_CONTEXT_INFERENCE_BUDGET_TOKENS` | max generated tokens for a request whose prompt is longer than --large-context-tokens (default 65536) |
 | `--arena-gib N\|auto` | GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto) |
-| `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tp (default 0) |
-| `--tp {1,2}` | tensor parallel size forwarded to compute (default 1) |
+| `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
+| `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
 | `--kv-cache-dtype {bf16,fp8}` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
@@ -255,7 +255,7 @@ curl http://127.0.0.1:8000/v1/meta
 | `max_concurrent_requests` | `--max-concurrent-requests`。最大 in-flight 数 |
 | `inference_budget` | 推論予算。`tokens`（`--inference-budget-tokens`）、`large_context_tokens`、`large_context_inference_budget_tokens`、既定予算での `answer_reserve_tokens` / `thinking_budget_tokens` |
 | `arena_gib` | `--arena-gib`（`"auto"` または整数 GiB） |
-| `device` / `tensor_parallel` | `--device` / `--tp` |
+| `device` / `tensor_parallel` | `--device` / `--tensor-parallel` |
 | `kv_cache_dtype` | KV cache の dtype |
 | `working_set_reserve_gib` | `--working-set-reserve-gib` |
 | `speculative` | 有効時の drafter（`{"method": "dflash2", "drafts": 7}` 等）。無効時は `null` |
@@ -295,7 +295,7 @@ TP=2 と FP8 KV を使う。
 ```bash
 ./build/shelf-server \
     --model-dir models/Qwen3.8-27B-FP8 \
-    --tp 2 --device 2,3 --port 8123 \
+    --tensor-parallel 2 --device 2,3 --port 8123 \
     --kv-cache-dtype fp8 --max-seq-len 131072
 ```
 
