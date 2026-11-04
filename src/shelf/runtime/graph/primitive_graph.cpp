@@ -72,6 +72,16 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
         return fail("value id counters desynchronized");
     }
 
+    const bool grouped = graph.grouped_row_shape.experts != 0u;
+    for (const auto& spec : graph.value_specs) {
+        if (spec.row_domain != ValueRowDomain::GROUPED_ROWS) continue;
+        if (!grouped) return fail("grouped row value without a declared grouped row shape");
+        if (spec.features == 0u) return fail("grouped row value has no features");
+    }
+    if (grouped && graph.grouped_row_shape.top_k == 0u) {
+        return fail("grouped row shape has an empty selection width");
+    }
+
     std::unordered_map<uint64_t, uint32_t> state_slot_owner;
     for (uint32_t si = 0; si < graph.states.size(); ++si) {
         auto& s = graph.states[si];

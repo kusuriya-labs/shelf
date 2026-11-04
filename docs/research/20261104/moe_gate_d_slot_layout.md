@@ -1,4 +1,4 @@
-# Gate D 実施記録 第二段 Step 1a: rank-3 weight slot と batch stride の単一源
+# Gate D 実施記録 第二段 Step 1a / 1b: rank-3 weight slot と group row 行空間
 
 MoE FFN を graph / kernel に配する前の下ごしらえ。`WeightSlot`（program の weight 記述）を
 rank-3 expert 平面に対応させ、expert 間 stride の式を 1 箇所に集約した。
@@ -98,3 +98,75 @@ fold-exact planes: 80 / 80 (both planes in 40 layers)
 arena・expert 平面・fold-exact 数は第一段の実測（20.527 GiB / 15.967 GiB / 80 本）と同一。
 load 時間の差（32.7 s → 25.4 s）は同一 build 系の再現実行のばらつきで、
 今回の変更による短縮としては計測していない。
+
+## 6. Step 1b: group row の行空間（`ValueRowDomain::GROUPED_ROWS`）
+
+grouped GEMM は group row（`group * 16 + 内offset`）でアドレスするので、activation 平面・
+grouped 出力・combine の読む行は token 行ではない。既存の program は全 value が
+`rows_for(TOKEN_ROWS)` または `rows_for(OUTPUT_ROWS)` の行数を持つ前提で、
+`moe_group_row_capacity(rows, experts, top_k)` 相当の行数を扱えなかった。
+
+### 配置の判断: 容量の式は runtime が持つ
+
+候補と採否:
+
+| 案 | 判断 |
+| --- | --- |
+| 容量の式を `kernels/optimized/moe/router.h` に残し、program から include する | 却下。link 辺は要らなくても（constexpr）、`shelf_runtime` は `shelf_core` / `shelf_gpu` のみを link する契約（`docs/developer/architecture.md`）に依存方向が逆 |
+| lowering（models 側）が容量を計算して node に定数で持たせる | 却下。program は 1 つの graph を row bucket 変換で 10 本作る（`build_program_set`）ため、容量は bucket の token rows から決まり、graph の時点で確定できない |
+| `runtime/graph/grouped_row_shape.h`（header-only）に容量を置き、kernel 側はそれを呼ぶ alias にする | 採用。`shelf_kernels_optimized` は `shelf_runtime` に link する既存方向で、`static_assert(kMxfp4GemmRowTile == kGroupedRowTile)` が kernel の行 tile と plan の group tile を張り合わせる |
+
+`Int8ActivationWorkspaceLayout`（runtime が kernel の 16 / 64 の定数で workspace 容量を決める）
+が同じ形の前例である。
+
+語彙は `GROUPED_ROWS` / `grouped_row_*` にした。`MOE` という単語を runtime に置く必要は
+なく、行空間の本質は「grouped GEMM の plan が決まる行」である
+（`include/shelf/runtime` に `MOE` は増えない）。
+
+### plan geometry は graph が 1 度宣言する
+
+`PrimitiveGraph::grouped_row_shape{experts, top_k}`。value ごとに容量を持たせないのは、
+容量が bucket の token rows に依存する一方で `experts` / `top_k` は model の定数だからで、
+定数だけを graph に置き、行数は program build が計算する。検証は両側に入れた:
+
+- `validate_primitive_graph`: `GROUPED_ROWS` の value があるのに shape 未宣言なら fail
+- `build_program`: 同じ条件で fail（graph 検証を通さずに呼ぶ経路があるため）
+
+### fail-first 実演
+
+`tests/unit/test_grouped_row_shape.cpp`（CPU、required）を先に置いた。
+
+```text
+tests/unit/test_grouped_row_shape.cpp:1:10: fatal error:
+  'shelf/runtime/graph/grouped_row_shape.h' file not found
+```
+
+実装後は 16 checks PASS。固定したのは
+
+- 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128、
+  rows=512 → group 512・group row 8192）
+- 不変条件（group 数は slot 数を超えない、容量は slot 数を覆う、容量は 16 の倍数）
+- program build で `GROUPED_ROWS` value の binding 行数が容量基準になること
+  （bucket R16 / experts 4 / top_k 2 → 96 行）
+- shape 未宣言の graph が graph 検証と program build の両方で拒否されること
+- dense graph（token rows のみ）には grouped 行空間が現れないこと
+
+### 実測
+
+required acceptance:
+
+```text
+Passed: 150  Failed: 0  Errors: 0  Skipped: 0
+```
+
+149 → 150 の 1 件は新規 `test_grouped_row_shape`。kernel 側の 3 関数を runtime alias に
+置き換えた後、`test_moe_router` / `test_moe_grouped_linear` / `test_moe_combine` /
+`test_moe_layer_e2e` はそのまま PASS（Gate C の数値 gate は不変）。
+
+### Step 1b で意図的に置かなかったもの
+
+plan 配列（`sel_expert` / `tile_counts` / `group_expert` / `row_token` / `slot_row_of` など）の
+workspace 確保は Step 3（MoE node と dispatch）へ移した。消費者が無いまま program に
+確保項目だけ置くのは production 到達不能な placeholder になるため、node 追加と同じ commit に
+する。`tile_counts` の層毎 zero 初期化もそこでの決定になる
+（scan kernel が消費後に zero に戻す案と、launcher が memset する案を追加 launch 実測で選ぶ）。

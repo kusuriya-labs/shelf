@@ -95,13 +95,21 @@ struct Ctx {
         return nullptr;
     }
 
-    uint32_t rows_for(ValueRowDomain domain) const {
+    uint32_t token_rows() const {
         const uint32_t limit = row_bucket_limit(plan->row_bucket);
-        if (domain == ValueRowDomain::OUTPUT_ROWS) {
-            return options.max_output_rows != 0 ? options.max_output_rows : limit;
-        }
         if (options.max_token_rows != 0) return std::min(limit, options.max_token_rows);
         return limit;
+    }
+
+    uint32_t rows_for(ValueRowDomain domain) const {
+        if (domain == ValueRowDomain::OUTPUT_ROWS) {
+            const uint32_t limit = row_bucket_limit(plan->row_bucket);
+            return options.max_output_rows != 0 ? options.max_output_rows : limit;
+        }
+        if (domain == ValueRowDomain::GROUPED_ROWS) {
+            return grouped_row_capacity(token_rows(), graph->grouped_row_shape);
+        }
+        return token_rows();
     }
 
     void note_use(ValueId v, uint32_t dispatch_index) {
@@ -787,6 +795,12 @@ Result<Program> build_program(
             "program requires target execution class", __FILE__, __LINE__);
     }
     if (graph.nodes.empty()) return fail("empty primitive graph");
+    if (graph.grouped_row_shape.experts == 0u) {
+        for (const auto& spec : graph.value_specs) {
+            if (spec.row_domain == ValueRowDomain::GROUPED_ROWS)
+                return fail("grouped row values need a grouped row shape");
+        }
+    }
 
     Program plan;
     plan.row_bucket = bucket;

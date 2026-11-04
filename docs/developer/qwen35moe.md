@@ -352,9 +352,21 @@ GEMM 出力・w2 入力・combine の読む行はすべて group row 番号
 group row 数が expert 昇順なので、**token の選択を group row 昇順に並べることは expert
 昇順に並べることと同じ**である。combine はこの順序を使う。
 
-host 側の容量は `moe_group_count_upper_bound(rows, experts, top_k)`（=
-`min(rows*top_k, rows*top_k/16 + experts)`）と `moe_group_row_capacity` の単一源から取る。
+host 側の容量は `include/shelf/runtime/graph/grouped_row_shape.h` が単一源である
+（`grouped_row_tile_count` = `min(rows*top_k, rows*top_k/16 + experts)`、
+`grouped_row_capacity` = 容量行数、`kGroupedRowTile` = 16）。
+`kernels/optimized/moe/router.h` の `moe_group_count_upper_bound` /
+`moe_group_row_capacity` / `moe_slot_tile_count` はこれを呼ぶ alias で、
+`static_assert(kMxfp4GemmRowTile == kGroupedRowTile)` が kernel の行 tile と張り合わせる。
 plan 配列はすべてこの容量で確保する。
+
+graph 側では group row 空間は `ValueRowDomain::GROUPED_ROWS` の value であり、plan geometry
+（`experts` / `top_k`）は `PrimitiveGraph::grouped_row_shape` に 1 度宣言する（value 毎に
+繰り返さない）。`GROUPED_ROWS` の value があるのに shape が未宣言なら
+`validate_primitive_graph` と `build_program` の両方が拒否する。program の
+`rows_for(GROUPED_ROWS)` は bucket の token rows（`max_token_rows` を適用した後）から容量を
+計算するので、activation 平面・grouped 出力の binding byte 数は plan 配列と同じ容量基準に
+なる。token rows と group row を混同した確保はできない。
 
 ### activation 平面（group row 順）
 
