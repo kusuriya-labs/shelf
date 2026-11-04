@@ -615,8 +615,9 @@ model load（§5）、graph / program の MoE 語彙（§6-1）、device dispatc
 decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/research/`、現在の性能値は
 `docs/perf/current.md` を正本とし、計測していない性能主張はここに書かない。
 
-- `shelf-server` と `shelf-bench` の `pp` / `batch` / `quality` はまだ `LoadedModel` 経由で
-  なく、MoE を load できない
+- `shelf-server` と `shelf-bench` の `pp` / `batch` はまだ `LoadedModel` 経由でなく、MoE を
+  load できない。`quality` は `LoadedModel` 経由になり、`--tp 1` で grouped expert を
+  teacher forcing できる（`--tp 2` は `probe_model_dir` で dense のみを受理）
 - 40 層 E2E の数値 gate（§6 の受け入れ）と MoE decode の性能実測。`shelf-bench tg` の
   fallback 内訳（`SHELF_QWEN35_PERF_STATS=1`）から未登録 geometry を洗い出し、**計測した
   ものだけ** linear / elementwise allowlist へ載せる。MoE FFN の bf16 線形

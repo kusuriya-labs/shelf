@@ -97,6 +97,26 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）
 
+## 2026-11-04 MoE teacher-forced quality（初回）
+
+`shelf-bench quality` を `LoadedModel` 経由にしたことで、grouped expert checkpoint も
+teacher forcing できる。
+
+| 条件 | 値 |
+| --- | ---: |
+| model | Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 / TP=1 / bf16 KV |
+| corpus | `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus`（2191 token、sha256 `9136d38b…`） |
+| context / scored positions | 128 / 64 |
+| `QUALITY_PPL` | 75.146 |
+| 再現性 | 同一条件の self-compare: mean KL 0、top-1 一致 1.000、ppl 差 0（決定論的） |
+
+- **これは HF との絶対照合ではない**。生成列の一致 anchor は `docs/perf/current.md` の MoE
+  decode 節と research 記録にあり、数値の正しさの gate は未実施のまま（§8）
+- 同じ `quality` 経路の dense 側確認（Qwen3.8-27B-FP8、corpus 2203 token、context 128 /
+  positions 32）: TP1 `QUALITY_PPL` 4.3905、TP2 4.5421（+3.45 %）、mean KL 0.00494、
+  top-1 一致 0.9375、top-5 overlap 0.9563。TP1 と TP2 の差は reduction 順序によるもので、
+  `quality` の `LoadedModel` 化で生じた変更ではない（`--tp 2` は dense のみ受理）
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

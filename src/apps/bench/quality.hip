@@ -2,6 +2,7 @@
 
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/models/loaded_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
@@ -220,7 +221,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1u) / b;
 }
 
-uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -335,12 +336,11 @@ int run_quality(int argc, char** argv) {
 
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
     std::unique_ptr<shelf::gpu::GpuArena> tp1_arena;
-    std::unique_ptr<shelf::qwen35::Qwen35Model> tp1_model;
+    std::unique_ptr<shelf::models::LoadedModel> tp1_loaded;
     std::unique_ptr<shelf::state::SequenceSlotPool> tp1_seq_pool;
     std::unique_ptr<shelf::state::GdnStatePool> tp1_gdn_pool;
     std::unique_ptr<shelf::state::PagedKVPool> tp1_kv_pool;
     std::unique_ptr<shelf::qwen35::Executor> tp1_executor;
-    const shelf::qwen35::Qwen35Model* model = nullptr;
     shelf::state::SequenceSlotPool* seq_pool = nullptr;
     shelf::state::GdnStatePool* gdn_pool = nullptr;
     shelf::state::PagedKVPool* kv_pool = nullptr;
@@ -355,14 +355,13 @@ int run_quality(int argc, char** argv) {
         }
         tp1_arena = std::make_unique<shelf::gpu::GpuArena>(arena_result.release());
 
-        auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
-            opts.model_dir, *tp1_arena, stream, {});
+        auto model_result =
+            shelf::models::LoadedModel::load(opts.model_dir, *tp1_arena, stream);
         if (!model_result.ok()) {
             fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
             return 1;
         }
-        tp1_model = std::make_unique<shelf::qwen35::Qwen35Model>(model_result.release());
-        model = tp1_model.get();
+        tp1_loaded = std::make_unique<shelf::models::LoadedModel>(model_result.release());
 
         hip_err = hipStreamSynchronize(stream);
         if (hip_err != hipSuccess) {
@@ -370,6 +369,15 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
     } else {
+        const auto family = shelf::models::probe_model_dir(opts.model_dir);
+        if (!family.ok()) {
+            fprintf(stderr, "model probe failed: %s\n", family.status().message().c_str());
+            return 1;
+        }
+        if (family.value() != shelf::models::ModelFamily::Dense) {
+            fprintf(stderr, "quality --tp %d runs dense checkpoints only\n", opts.tp);
+            return 1;
+        }
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
@@ -388,7 +396,6 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
         tp_coord = coord_result.release();
-        model = &tp_coord->rank(0).model();
         seq_pool = &tp_coord->rank(0).sequence_pool();
         gdn_pool = &tp_coord->rank(0).gdn_pool();
         kv_pool = &tp_coord->rank(0).kv_pool();
@@ -397,7 +404,11 @@ int run_quality(int argc, char** argv) {
                 tp_coord->tp_size(), tp_coord->transport_name());
     }
 
-    const auto& tc = model->text_config();
+    shelf::qwen_hybrid::QwenHybridConfig tc;
+    if (tp1_loaded != nullptr)
+        tc = tp1_loaded->hybrid_config();
+    else
+        tc = shelf::models::LoadedModel::borrow(tp_coord->rank(0).model()).hybrid_config();
     const uint32_t vocab = static_cast<uint32_t>(tc.vocab_size);
     const uint32_t kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(tc.attention_head_dim);
@@ -441,8 +452,8 @@ int run_quality(int argc, char** argv) {
         tp1_kv_pool = std::make_unique<shelf::state::PagedKVPool>(kv_pool_result.release());
         kv_pool = tp1_kv_pool.get();
 
-        auto exec_result = shelf::qwen35::create_model_executor(
-            *model, *seq_pool, *gdn_pool, *kv_pool, *tp1_arena, exec_config);
+        auto exec_result = tp1_loaded->create_executor(
+            *seq_pool, *gdn_pool, *kv_pool, *tp1_arena, exec_config);
         if (!exec_result.ok()) {
             fprintf(stderr, "create_model_executor failed: %s\n",
                     exec_result.status().message().c_str());
