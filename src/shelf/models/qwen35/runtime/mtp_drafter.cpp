@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <vector>
 
 namespace shelf::qwen35::runtime {
@@ -92,7 +91,8 @@ Result<int32_t> copy_sampled_token(const gpu::Tensor& sampled, hipStream_t strea
 }
 
 Status copy_hidden_to_input(MtpDrafter& drafter, const gpu::Tensor& source,
-                            uint32_t rows, hipStream_t stream) {
+                            uint32_t source_row_offset, uint32_t rows,
+                            hipStream_t stream) {
     if (rows == 0u) return Status::make_ok();
     const std::size_t hidden = drafter.config.hidden_size;
     void* dst = drafter.executor.input_hidden.data<void>();
@@ -100,8 +100,11 @@ Status copy_hidden_to_input(MtpDrafter& drafter, const gpu::Tensor& source,
         return Status::invalid_state("mtp drafter has no hidden input buffer", __FILE__,
                                      __LINE__);
     }
+    const std::size_t offset =
+        static_cast<std::size_t>(source_row_offset) * hidden * sizeof(bf16_t);
     const hipError_t err = hipMemcpyAsync(
-        dst, source.data<void>(), static_cast<std::size_t>(rows) * hidden * sizeof(bf16_t),
+        dst, static_cast<const std::uint8_t*>(source.data<void>()) + offset,
+        static_cast<std::size_t>(rows) * hidden * sizeof(bf16_t),
         hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
         return Status::hip_error("mtp hidden input copy", hipGetErrorString(err), __FILE__,
@@ -155,6 +158,7 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
                                         bool speculative_verify,
                                         const SamplingConfig& sampling,
                                         uint64_t sampling_index,
+                                        const ExecuteBatchOptions* execute_options,
                                         hipStream_t stream) {
     (void)drafter;
     if (tokens.empty()) {
@@ -169,6 +173,9 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
         sequence, requests, tokens.data(), static_cast<uint32_t>(tokens.size()), prefix,
         output_rows, compute_logits, sample, execution_class, speculative_verify,
         compute_logits ? &sampling : nullptr, sampling_index);
+    if (execute_options != nullptr) {
+        return execute_batch(target, batch, stream, *execute_options);
+    }
     return execute_batch(target, batch, stream);
 }
 
@@ -205,8 +212,19 @@ std::size_t mtp_drafter_reserve_bytes(const Qwen35TextConfig& config,
          static_cast<std::size_t>(gdn.num_v_heads) * gdn.head_k * gdn.head_v *
              sizeof(fp16_t));
     const std::size_t snapshots = 2u * gdn_state;
+    const std::size_t history =
+        static_cast<std::size_t>(options.num_drafts) * gdn.num_gdn_states *
+        gdn.conv_history_stride * gdn.conv_history * sizeof(bf16_t);
+    const std::uint64_t log_rows = static_cast<std::uint64_t>(options.num_drafts) + 1u;
+    const std::uint64_t vdim =
+        static_cast<std::uint64_t>(gdn.num_v_heads) * gdn.head_v;
+    const std::uint64_t qkdim =
+        static_cast<std::uint64_t>(gdn.num_v_heads) * gdn.head_k;
+    const std::size_t compact =
+        static_cast<std::size_t>(gdn.num_gdn_states) * log_rows *
+        (vdim + qkdim + gdn.num_v_heads) * sizeof(float);
     constexpr std::size_t kMargin = 64ull * 1024ull * 1024ull;
-    return kv + executor + gdn_state + snapshots + kMargin;
+    return kv + executor + gdn_state + snapshots + history + compact + kMargin;
 }
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
@@ -292,7 +310,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->executor = executor.release();
 
     auto fail_with_sequence = [&](const Status& status) {
-        Status st = executor_shutdown(drafter->executor);
+        Status st = shutdown_gdn_spec_history(drafter->gdn_history);
+        (void)st;
+        st = executor_shutdown(drafter->executor);
         (void)st;
         st = state::release_paged_sequence_state(*drafter->sequence, stream);
         (void)st;
@@ -311,6 +331,53 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         drafter->gdn_recurrent_snapshot = view.release().data();
     }
 
+    auto history = create_gdn_spec_history(arena, target_gdn_pool,
+                                           options.num_drafts, false);
+    if (!history.ok()) return fail_with_sequence(history.status());
+    drafter->gdn_history = history.release();
+
+    const GdnStatePoolDeviceView pool = target_gdn_pool.device_view();
+    const std::uint64_t log_rows = static_cast<std::uint64_t>(options.num_drafts) + 1u;
+    const std::uint64_t vdim = static_cast<std::uint64_t>(pool.num_v_heads) * pool.head_v;
+    const std::uint64_t qkdim = static_cast<std::uint64_t>(pool.num_v_heads) * pool.head_k;
+    drafter->compact_delta_layer_stride = log_rows * vdim;
+    drafter->compact_k_layer_stride = log_rows * qkdim;
+    drafter->compact_a_layer_stride = log_rows * pool.num_v_heads;
+    const std::size_t delta_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+        drafter->compact_delta_layer_stride * sizeof(float);
+    const std::size_t k_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+        drafter->compact_k_layer_stride * sizeof(float);
+    const std::size_t a_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+        drafter->compact_a_layer_stride * sizeof(float);
+    {
+        auto view = arena.allocate_aligned(delta_bytes, 256u);
+        if (!view.ok()) return fail_with_sequence(view.status());
+        drafter->compact_delta = static_cast<float*>(view.release().data());
+    }
+    {
+        auto view = arena.allocate_aligned(k_bytes, 256u);
+        if (!view.ok()) return fail_with_sequence(view.status());
+        drafter->compact_k = static_cast<float*>(view.release().data());
+    }
+    {
+        auto view = arena.allocate_aligned(a_bytes, 256u);
+        if (!view.ok()) return fail_with_sequence(view.status());
+        drafter->compact_a = static_cast<float*>(view.release().data());
+    }
+    {
+        auto view = arena.allocate_aligned(
+            sizeof(::shelf::runtime::DeviceRequestDescriptor), 256u);
+        if (!view.ok()) return fail_with_sequence(view.status());
+        drafter->commit_request =
+            static_cast<::shelf::runtime::DeviceRequestDescriptor*>(view.release().data());
+    }
+    drafter->commit_request_host.row_begin = 0u;
+    drafter->commit_request_host.row_count = 0u;
+    drafter->gdn_key_heads = static_cast<std::uint32_t>(
+        model.text_config().linear_num_key_heads != 0u
+            ? model.text_config().linear_num_key_heads
+            : 16u);
+
     drafter->last_tokens.reserve(options.num_drafts + 1u);
     drafter->initialized = true;
     return drafter;
@@ -324,13 +391,19 @@ Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept {
         if (first_error.ok() && !st.ok()) first_error = st;
         drafter.sequence.reset();
     }
-    Status st = executor_shutdown(drafter.executor);
+    Status st = shutdown_gdn_spec_history(drafter.gdn_history);
+    if (first_error.ok() && !st.ok()) first_error = st;
+    st = executor_shutdown(drafter.executor);
     if (first_error.ok() && !st.ok()) first_error = st;
     drafter.kv_pool.reset();
     drafter.gdn_pool.reset();
     drafter.slot_pool.reset();
     drafter.gdn_conv_snapshot = nullptr;
     drafter.gdn_recurrent_snapshot = nullptr;
+    drafter.compact_delta = nullptr;
+    drafter.compact_k = nullptr;
+    drafter.compact_a = nullptr;
+    drafter.commit_request = nullptr;
     drafter.initialized = false;
     return first_error;
 }
@@ -363,6 +436,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     const hipStream_t stream = nullptr;
     const uint32_t chunk_limit =
         target.config.max_batch_rows != 0u ? target.config.max_batch_rows : prompt_count;
+    const uint32_t mtp_limit = drafter.executor.config.max_batch_rows;
     drafter.sampling = sampling;
     int32_t pending = -1;
     std::vector<int32_t> chunk_tokens;
@@ -376,27 +450,49 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
         auto target_output = run_target(
             drafter, target, target_sequence, chunk_tokens, begin, final_chunk,
             final_chunk, 1u, ::shelf::runtime::ExecutionClass::PREFILL, false, sampling,
-            drafter.sample_index, stream);
+            drafter.sample_index, nullptr, stream);
         if (!target_output.ok()) return target_output.status();
         if (final_chunk) {
             auto sampled = copy_sampled_token(target_output.value().sampled_tokens, stream);
             if (!sampled.ok()) return sampled.status();
             pending = sampled.value();
             drafter.sample_index += 1u;
-            drafter.last_tokens.assign(prompt_tokens + begin, prompt_tokens + end);
-            drafter.last_position = begin;
+            const uint32_t last_row = end - 1u;
+            const uint32_t build_end = rows > 1u ? last_row : begin;
+            for (uint32_t mtp_begin = begin; mtp_begin < build_end; mtp_begin += mtp_limit) {
+                const uint32_t mtp_end = std::min(build_end, mtp_begin + mtp_limit);
+                const uint32_t mtp_rows = mtp_end - mtp_begin;
+                mtp_tokens.resize(mtp_rows);
+                for (uint32_t i = 0u; i < mtp_rows; ++i) {
+                    mtp_tokens[i] = prompt_tokens[mtp_begin + i + 1u];
+                }
+                Status copy = copy_hidden_to_input(
+                    drafter, target.normed_token_hidden, mtp_begin - begin, mtp_rows, stream);
+                if (!copy.ok()) return copy;
+                auto mtp_output = run_mtp_forward(drafter, mtp_tokens, mtp_begin, false,
+                                                  stream);
+                if (!mtp_output.ok()) return mtp_output.status();
+            }
+            drafter.last_tokens.assign(1u, prompt_tokens[last_row]);
+            drafter.last_position = last_row;
+            drafter.last_hidden_offset = last_row - begin;
             continue;
         }
 
-        mtp_tokens.resize(rows);
-        for (uint32_t i = 0u; i < rows; ++i) {
-            mtp_tokens[i] = prompt_tokens[begin + i + 1u];
+        for (uint32_t mtp_begin = begin; mtp_begin < end; mtp_begin += mtp_limit) {
+            const uint32_t mtp_end = std::min(end, mtp_begin + mtp_limit);
+            const uint32_t mtp_rows = mtp_end - mtp_begin;
+            mtp_tokens.resize(mtp_rows);
+            for (uint32_t i = 0u; i < mtp_rows; ++i) {
+                mtp_tokens[i] = prompt_tokens[mtp_begin + i + 1u];
+            }
+            Status copy = copy_hidden_to_input(
+                drafter, target.normed_token_hidden, mtp_begin - begin, mtp_rows, stream);
+            if (!copy.ok()) return copy;
+            auto mtp_output = run_mtp_forward(drafter, mtp_tokens, mtp_begin, false,
+                                              stream);
+            if (!mtp_output.ok()) return mtp_output.status();
         }
-        Status copy = copy_hidden_to_input(drafter, target.normed_token_hidden, rows,
-                                           stream);
-        if (!copy.ok()) return copy;
-        auto mtp_output = run_mtp_forward(drafter, mtp_tokens, begin, false, stream);
-        if (!mtp_output.ok()) return mtp_output.status();
     }
 
     MtpPrefillOutput output;
@@ -441,13 +537,14 @@ Result<MtpIterationOutput> mtp_spec_step(
         auto executed = run_target(
             drafter, target, target_sequence, tokens, position, true, true, 1u,
             ::shelf::runtime::ExecutionClass::DECODE, false,
-            drafter.sampling, drafter.sample_index, stream);
+            drafter.sampling, drafter.sample_index, nullptr, stream);
         if (!executed.ok()) return executed.status();
         drafter.sample_index += 1u;
         auto sampled = copy_sampled_token(executed.value().sampled_tokens, stream);
         if (!sampled.ok()) return sampled.status();
         drafter.last_tokens.assign(1u, pending_token);
         drafter.last_position = position;
+        drafter.last_hidden_offset = 0u;
         output.emitted[0] = sampled.value();
         output.emitted_count = 1u;
         output.pending_token = sampled.value();
@@ -475,7 +572,7 @@ Result<MtpIterationOutput> mtp_spec_step(
     }
     first_pass[prefix_rows - 1u] = pending_token;
     Status copy = copy_hidden_to_input(drafter, target.normed_token_hidden,
-                                       prefix_rows, stream);
+                                       drafter.last_hidden_offset, prefix_rows, stream);
     if (!copy.ok()) return copy;
     auto first = run_mtp_forward(drafter, first_pass, drafter.last_position, true,
                                  stream);
@@ -485,7 +582,7 @@ Result<MtpIterationOutput> mtp_spec_step(
 
     std::array<int32_t, kMtpMaxDrafts> proposals{};
     proposals[0] = first_sampled.value();
-    copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 1u, stream);
+    copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 0u, 1u, stream);
     if (!copy.ok()) return copy;
 
     for (uint32_t i = 1u; i < drafts; ++i) {
@@ -496,7 +593,7 @@ Result<MtpIterationOutput> mtp_spec_step(
         auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
         if (!sampled.ok()) return sampled.status();
         proposals[i] = sampled.value();
-        copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 1u, stream);
+        copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 0u, 1u, stream);
         if (!copy.ok()) return copy;
     }
 
@@ -512,12 +609,22 @@ Result<MtpIterationOutput> mtp_spec_step(
     verify_tokens[0] = pending_token;
     for (uint32_t i = 0u; i < drafts; ++i) verify_tokens[i + 1u] = proposals[i];
 
+    ExecuteBatchOptions verify_options;
+    verify_options.gdn_spec_history =
+        gdn_spec_history_view(drafter.gdn_history, drafts);
+    verify_options.gdn_compact.delta = drafter.compact_delta;
+    verify_options.gdn_compact.k = drafter.compact_k;
+    verify_options.gdn_compact.a = drafter.compact_a;
+    verify_options.gdn_compact.delta_layer_stride = drafter.compact_delta_layer_stride;
+    verify_options.gdn_compact.k_layer_stride = drafter.compact_k_layer_stride;
+    verify_options.gdn_compact.a_layer_stride = drafter.compact_a_layer_stride;
+
     auto verified = run_target(
         drafter, target, target_sequence, verify_tokens, position, true, true,
         drafts + 1u,
         drafts + 1u == 1u ? ::shelf::runtime::ExecutionClass::DECODE
                           : ::shelf::runtime::ExecutionClass::SPEC_VERIFY,
-        true, drafter.sampling, drafter.sample_index, stream);
+        true, drafter.sampling, drafter.sample_index, &verify_options, stream);
     if (!verified.ok()) return verified.status();
     drafter.sample_index += static_cast<uint64_t>(drafts) + 1u;
 
@@ -556,35 +663,53 @@ Result<MtpIterationOutput> mtp_spec_step(
     if (accepted_drafts == drafts) {
         drafter.last_tokens = verify_tokens;
         drafter.last_position = position;
+        drafter.last_hidden_offset = 0u;
         const uint32_t required = ceil_div_u32(target_sequence.position, page_tokens);
         Status rollback = rollback_sequence_append(target_sequence, required, stream);
         if (!rollback.ok()) return rollback;
         drafter.timing.full_accepts += 1u;
     } else {
+        const uint32_t committed = accepted_drafts + 1u;
+        const uint32_t required = ceil_div_u32(position + committed, page_tokens);
+        const auto restore_started = std::chrono::steady_clock::now();
         Status restore = spec_gdn_restore(
             *target.gdn_state_pool, target_sequence.slot, drafter.gdn_conv_snapshot,
             drafter.gdn_recurrent_snapshot, drafter.gdn_conv_bytes,
             drafter.gdn_recurrent_bytes, stream);
         if (!restore.ok()) return restore;
-        const uint32_t committed = accepted_drafts + 1u;
-        const uint32_t required = ceil_div_u32(position + committed, page_tokens);
-        target_sequence.position = position;
+        Status conv = restore_gdn_spec_conv(*target.gdn_state_pool, target_sequence.slot,
+                                            drafter.gdn_history, accepted_drafts, stream);
+        if (!conv.ok()) return conv;
+        const auto restore_done = std::chrono::steady_clock::now();
+        drafter.commit_request_host.request_handle = target_sequence.request_handle();
+        drafter.commit_request_host.row_begin = 0u;
+        drafter.commit_request_host.row_count = 0u;
+        hipError_t upload = hipMemcpyAsync(drafter.commit_request,
+                                           &drafter.commit_request_host,
+                                           sizeof(drafter.commit_request_host),
+                                           hipMemcpyHostToDevice, stream);
+        if (upload != hipSuccess) {
+            return Status::hip_error("mtp commit request upload", hipGetErrorString(upload),
+                                     __FILE__, __LINE__);
+        }
+        Status compact = commit_gdn_compact_log(
+            *target.gdn_state_pool, target_sequence.slot, verify_options.gdn_compact,
+            drafter.commit_request, committed, drafter.gdn_key_heads, stream);
+        if (!compact.ok()) return compact;
+        const auto compact_done = std::chrono::steady_clock::now();
+        target_sequence.position = position + committed;
         Status rollback = rollback_sequence_append(target_sequence, required, stream);
         if (!rollback.ok()) return rollback;
-        std::vector<int32_t> rerun(verify_tokens.begin(),
+        drafter.last_tokens.assign(verify_tokens.begin(),
                                    verify_tokens.begin() + committed);
-        for (uint32_t i = 0u; i < committed; ++i) {
-            std::vector<int32_t> one{rerun[i]};
-            auto rerun_output = run_target(
-                drafter, target, target_sequence, one, position + i, false, false, 1u,
-                ::shelf::runtime::ExecutionClass::DECODE, false, drafter.sampling,
-                drafter.sample_index, stream);
-            if (!rerun_output.ok()) return rerun_output.status();
-        }
-        drafter.last_tokens = rerun;
         drafter.last_position = position;
+        drafter.last_hidden_offset = 0u;
         drafter.timing.partial_accepts += 1u;
-        drafter.timing.reruns += 1u;
+        drafter.timing.gdn_restores += 1u;
+        drafter.timing.gdn_restore_ms +=
+            std::chrono::duration<double, std::milli>(restore_done - restore_started).count();
+        drafter.timing.compact_replay_ms +=
+            std::chrono::duration<double, std::milli>(compact_done - restore_done).count();
     }
 
     for (uint32_t i = 0u; i < output.emitted_count; ++i) {
@@ -611,10 +736,6 @@ Result<MtpIterationOutput> mtp_spec_step(
         std::chrono::duration<double, std::milli>(verify_done - draft_started).count();
     drafter.timing.round_ms +=
         std::chrono::duration<double, std::milli>(finished_at - started).count();
-    if (accepted_drafts != drafts) {
-        drafter.timing.rerun_ms +=
-            std::chrono::duration<double, std::milli>(finished_at - verify_done).count();
-    }
     return output;
 }
 

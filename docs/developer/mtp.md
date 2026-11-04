@@ -105,23 +105,32 @@ prompt を `executor.config.max_batch_rows` 単位で chunk prefill する。
 
 ## Partial reject
 
-MTP の verify は target の GDN recurrence / conv を `K+1` row 分進める。partial accept
-では次を順に行う。
+MTP の verify は target の GDN recurrence / conv を `K+1` row 分進める。verify には
+DFlash2 と同じ GDN spec history（conv）と compact log を渡す。partial accept では次を
+順に行う。
 
 1. verify 前に `spec_gdn_snapshot` で GDN conv / recurrent を保存する。
 2. `spec_gdn_restore` で verify 前の state に戻す。
-3. target sequence の `position` を round 開始位置へ戻し、必要な page 数まで rollback する。
-4. 受理済み prefix `accepted + 1` row を **1 row ずつ DECODE で** 実行する。
-   logits / sample は計算しない。
+3. `restore_gdn_spec_conv` で受理 prefix の conv を戻す。
+4. `commit_gdn_compact_log` で受理 `accepted + 1` row の recurrent を replay する。
+5. target sequence の `position` を `position + accepted + 1` にし、必要な page 数まで
+   rollback する。
 
-rerun を 1 回の multi-row batch（PREFILL）にまとめてはならない。multi-row の GDN
-recurrence は、単一 row decode の逐次更新と丸めが一致しない。rerun の state が
-target-only の逐次 decode とずれると、その後の verify が別の token を sampling し、
-`GENERATED_IDS` が target-only と一致しなくなる。
+target の再 forward は行わない。受理 row の target KV は verify が書いた値をそのまま
+使う。compact log の commit descriptor は **target sequence の slot** でなければ
+ならない。MTP drafter の slot を渡すと、state が別 slot に書かれて次の round の
+verify が target-only と一致しなくなる。
 
-DFlash2 の compact log による replay は使わない。MTP の partial reject は target の
-prefix rerun を `accepted + 1` 回の単一 row decode として行うため、partial accept の
-round は full accept より遅い。
+## MTP prefill
+
+target の prefill chunk は target-only と同じ `max_batch_rows` を使う。target の
+chunk を MTP 用に変えてはならない。chunk を変えると prefill kernel の丸めが変わり、
+target-only と `GENERATED_IDS` が一致しなくなる。
+
+MTP 側の first pass は独立に `kMtpMaxPrefillRows`（512）行以下へ分割する。これに
+より target executor と MTP executor の workspace を同時に確保しても 32 GiB に
+収まる。最終 prompt chunk の最後の 1 row は anchor token が必要なため prefill では
+実行せず、最初の step で 1 row だけ実行する。
 
 ## Sampling
 
@@ -145,8 +154,8 @@ round は full accept より遅い。
 ```text
 MTP_DRAFTS MTP_ROUNDS MTP_FULL_ACCEPTS MTP_PARTIAL_ACCEPTS
 MTP_ACCEPTED_DRAFTS MTP_MEAN_ACCEPTED MTP_FULL_ACCEPT_RATE
-MTP_EMITTED_PER_ROUND MTP_VERIFY_ROWS MTP_RERUNS
-MTP_DRAFT_MS MTP_VERIFY_MS MTP_RERUN_MS MTP_ROUND_MS
+MTP_EMITTED_PER_ROUND MTP_VERIFY_ROWS MTP_GDN_RESTORES
+MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 ```
 
 `GENERATED_IDS` の形式は target-only と同一である。
@@ -156,8 +165,9 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_RERUN_MS MTP_ROUND_MS
 - dense checkpoint のみ。MoE checkpoint の MTP は未対応である。
 - `--tp 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
 - prefix cache は MTP の単一 request compute 経路では使わない。
-- partial accept は GDN snapshot と target prefix rerun を使う。compact log による
-  無再実行の復元は未実装である。
+- partial accept は GDN snapshot + compact log replay で復元する。target rerun は行わない。
+- MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は
+  target-only と同じ値を使う。
 - MTP KV は target KV とは別 pool である。KV 容量計画には
   `mtp_drafter_reserve_bytes` の見積を使う。
 

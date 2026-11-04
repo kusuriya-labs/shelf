@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <hip/hip_runtime.h>
 
@@ -23,6 +24,7 @@ namespace qwen35 {
 namespace runtime {
 
 constexpr uint32_t kMtpMaxDrafts = 31u;
+constexpr uint32_t kMtpMaxPrefillRows = 512u;
 
 struct MtpDrafterConfig {
     uint32_t num_drafts = 7;
@@ -52,10 +54,11 @@ struct MtpTiming {
     uint32_t accepted_drafts = 0;
     uint32_t generated_tokens = 0;
     uint32_t verify_rows = 0;
-    uint32_t reruns = 0;
+    uint32_t gdn_restores = 0;
     double draft_ms = 0.0;
     double verify_ms = 0.0;
-    double rerun_ms = 0.0;
+    double gdn_restore_ms = 0.0;
+    double compact_replay_ms = 0.0;
     double round_ms = 0.0;
 };
 
@@ -72,8 +75,20 @@ struct MtpDrafter {
     std::size_t gdn_conv_bytes = 0;
     std::size_t gdn_recurrent_bytes = 0;
 
+    GdnSpecHistory gdn_history;
+    float* compact_delta = nullptr;
+    float* compact_k = nullptr;
+    float* compact_a = nullptr;
+    std::uint64_t compact_delta_layer_stride = 0;
+    std::uint64_t compact_k_layer_stride = 0;
+    std::uint64_t compact_a_layer_stride = 0;
+    ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
+    ::shelf::runtime::DeviceRequestDescriptor commit_request_host{};
+    std::uint32_t gdn_key_heads = 0;
+
     std::vector<int32_t> last_tokens;
     uint32_t last_position = 0;
+    uint32_t last_hidden_offset = 0;
     uint64_t sample_index = 0;
     SamplingConfig sampling;
     uint32_t max_seq_len = 0;

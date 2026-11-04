@@ -818,7 +818,9 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     drafter_config.num_drafts = mtp_drafts;
     drafter_config.max_seq_len = max_seq;
     drafter_config.page_tokens = runtime.config().page_tokens;
-    drafter_config.max_batch_rows = executor.config.max_batch_rows;
+    drafter_config.max_batch_rows = std::min(
+        executor.config.max_batch_rows,
+        shelf::qwen35::runtime::kMtpMaxPrefillRows);
     drafter_config.kv_dtype = runtime.config().kv_cache_dtype;
     if (runtime.config().rope_profile.has_value()) {
         drafter_config.rope_profile = *runtime.config().rope_profile;
@@ -907,10 +909,11 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         printf("MTP_FULL_ACCEPT_RATE=%.3f\n", full_rate);
         printf("MTP_EMITTED_PER_ROUND=%.3f\n", emitted_per_round);
         printf("MTP_VERIFY_ROWS=%u\n", timing.verify_rows);
-        printf("MTP_RERUNS=%u\n", timing.reruns);
+        printf("MTP_GDN_RESTORES=%u\n", timing.gdn_restores);
         printf("MTP_DRAFT_MS=%.2f\n", timing.draft_ms);
         printf("MTP_VERIFY_MS=%.2f\n", timing.verify_ms);
-        printf("MTP_RERUN_MS=%.2f\n", timing.rerun_ms);
+        printf("MTP_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
+        printf("MTP_COMPACT_REPLAY_MS=%.2f\n", timing.compact_replay_ms);
         printf("MTP_ROUND_MS=%.2f\n", timing.round_ms);
         fflush(stdout);
     }

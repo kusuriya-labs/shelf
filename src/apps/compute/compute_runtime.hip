@@ -497,7 +497,8 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
         mtp_config.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
         mtp_config.max_seq_len = config_.max_seq_len;
         mtp_config.page_tokens = config_.page_tokens;
-        mtp_config.max_batch_rows = exec_max_tokens_;
+        mtp_config.max_batch_rows = std::min(
+            exec_max_tokens_, qwen35::runtime::kMtpMaxPrefillRows);
         mtp_config.kv_dtype = config_.kv_cache_dtype;
         if (config_.rope_profile.has_value()) {
             mtp_config.rope_profile = *config_.rope_profile;
