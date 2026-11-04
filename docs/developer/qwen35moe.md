@@ -526,11 +526,17 @@ workspace range や workspace storage の value と重ならないことを検�
   kernel 側はこれを `moe_group_rows(b, ctx)` で実際の token 数から引き直した group 行数に
   使うので、`rows * top_k` でも bucket の token 行数でもない、**その batch の group 行数**
   で work が決まる。
-- grouped 系の kernel には correctness fallback が無い。`KernelMode::Auto` で optimized が
-  NotApplicable になると fallback は失敗するため、geometry は allowlist に載っている必要がある
-  （elementwise selector: `SwigluBf16 @512`・`SigmoidBf16ToF32 @1`・`ResidualBf16 @2048`、
-  `max_rows = kOptimizedMaxRows`(8192)）。group 行数が 8192 を超える prefill chunk では
-  動かない（chunk 上限は §8 の残作業）。
+- grouped 系の kernel には correctness fallback が無い。加えて **correctness interpreter は
+  group 行数を数えられない**（`value_rows()` は token 行数を返す）。したがって
+  `GROUPED_ROWS` の value に触れる dispatch は optimized が NotApplicable でも interpreter へ
+  落とさず、executor が `Status::unsupported` を返す（op index・kernel 名・group 行数を載せる）。
+  geometry は allowlist に載っている必要がある: elementwise selector の `SwigluBf16 @512` と
+  `@128` は group 行数専用の bound `kMeasuredMaxGroupRows`(36864) まで、
+  `SigmoidBf16ToF32 @1` と `ResidualBf16 @2048` は token 行数で `kOptimizedMaxRows`(8192) まで。
+  group 行数 capacity は `grouped_row_capacity(rows, {experts, top_k})` で、MoE geometry
+  （experts 256・top_k 8）なら token bucket 512 / 1024 / 2048 / 4096 が 8192 / 12288 / 20480 /
+  36864 行。bucket R8192 は 69632 行で elementwise kernel の grid.y 上限（65535）を超えるため
+  起動時に拒否される（§8 の残作業）。
 - fused gate / up 平面は 2 つの view として読まれる。elementwise dispatch の alias 検査は
   **読み専用 operand 同士は同じ buffer を共有してよい**（行 stride で span が重なるため）、
   出力だけが各 operand と同一または非重複であることを要求する
@@ -622,10 +628,9 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   無い。`max_visible_tokens >= kPagedAttentionSplitMinVisible` でも非 split decode kernel が
   走るので正しいが、長い context では帯域下限の 3.7 倍の代价になる。split-KV の `q_per_kv = 8`
   対応は未実施
-- group 行数が `kOptimizedMaxRows`(8192) を超える prefill chunk の扱い（elementwise が
-  allowlist を外れ、grouped 系に correctness fallback が無い）
-- correctness path には grouped linear も router も combine も無い（grouped 系の fallback は
-  成立しない）
+- bucket R8192（group 69632 行）は elementwise kernel が grid.y ≤ 65535 のため表現できない。
+  rows を grid.z か row offset で分割する kernel 変更が無い限り、MoE prefill の chunk は
+  4096 token まで（超過は `unsupported` として見える）
 - TP + MoE は §5 の受理条件で `unsupported`
 - pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
   しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を

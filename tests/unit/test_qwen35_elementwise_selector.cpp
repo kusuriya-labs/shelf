@@ -136,6 +136,18 @@ int main() {
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SwigluBf16, 8193, 8704u, 0)),
            C, "tp2 swiglu 8704 rows=8193 out of range");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 12288u, 512u, 0)),
+           O, "moe group rows 12288 (bucket 1024 capacity) -> Optimized");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 36864u, 512u, 0)),
+           O, "moe group rows 36864 (bucket 4096 capacity) -> Optimized");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 36865u, 512u, 0)),
+           C, "moe group rows above the measured bound -> Correctness");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 5120u, 128u, 0)),
+           O, "moe group rows at width 128 -> Optimized");
     std::printf("%s: %d failures\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

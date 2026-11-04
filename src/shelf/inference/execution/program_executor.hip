@@ -4,6 +4,7 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_calib_dump.h>
 #include <shelf/inference/execution/linear_input_dump.h>
+#include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/inference/execution/weight_slot_validation.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <hip/hip_runtime.h>
@@ -166,6 +167,37 @@ struct OpDumpTimer {
     }
 };
 }
+
+// A dispatch whose values live in the grouped row domain has no correctness path: the
+// interpreter counts rows in tokens, so it would process part of a group plane and leave
+// the rest stale. Report the geometry instead of running it.
+namespace {
+struct FallbackDomain {
+    bool grouped = false;
+    uint32_t rows = 0;
+};
+
+FallbackDomain fallback_domain(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    const HostExecutionContext& ctx) {
+    FallbackDomain out;
+    out.rows = ctx.actual_rows;
+    const uint32_t slots = b.input_count + b.output_count;
+    for (uint32_t i = 0u; i < slots; ++i) {
+        const uint32_t slot = i < b.input_count ? b.input_slots[i] : b.output_slots[i - b.input_count];
+        const Result<HostResolvedValue> v =
+            resolve_host_value(program, ::shelf::runtime::ValueId{slot}, ctx);
+        if (!v.ok()) continue;
+        if (v.value().row_domain == ::shelf::runtime::ValueRowDomain::GROUPED_ROWS) {
+            out.grouped = true;
+            out.rows = moe_group_rows(b, ctx);
+            return out;
+        }
+    }
+    return out;
+}
+}  // namespace
 
 static int bucket_to_index(::shelf::runtime::RowBucket bucket) {
     switch (bucket) {
@@ -444,9 +476,18 @@ Status execute_program_range(
                 continue;
             }
         }
+        const FallbackDomain domain = fallback_domain(program, binding, ctx);
+        if (domain.grouped) {
+            char detail[200];
+            std::snprintf(detail, sizeof(detail),
+                          "grouped-row dispatch has no correctness path (op %zu %s rows=%u; "
+                          "raise the elementwise allowlist or lower the row budget)",
+                          i, ::shelf::runtime::kernel_to_name(binding.kernel_id), domain.rows);
+            return Status::unsupported(detail, __FILE__, __LINE__);
+        }
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
-        record_fallback_dispatch(binding.kernel_id, ctx.actual_rows);
+        record_fallback_dispatch(binding.kernel_id, domain.rows);
         record_physical_launch(1);
         if (sem_on)
             semantic_timing_finish(stream, sem_seq, binding_as_kid,

@@ -387,6 +387,12 @@ int main(int argc, char** argv) {
         {"residual-tail", Op::Residual, 33, 4, 33, 33, 0, 0.0f, 102},
         {"residual-pad", Op::Residual, 2560, 8, 2576, 2576, 0, 0.0f, 103},
         {"swiglu", Op::Swiglu, 4096, 16, 4096, 4096, 0, 0.0f, 104},
+        // MoE group rows: the count grows with tokens * top_k, so the FFN elementwise runs
+        // far above the token row cap. These are the capacities of the 1024 / 4096 token
+        // buckets (experts 256, top_k 8) and the fixture width.
+        {"swiglu-moe-group-r12288", Op::Swiglu, 512, 12288, 512, 512, 0, 0.0f, 260},
+        {"swiglu-moe-group-r36864", Op::Swiglu, 512, 36864, 512, 512, 0, 0.0f, 261},
+        {"swiglu-moe-group-f128", Op::Swiglu, 128, 5120, 128, 128, 0, 0.0f, 262},
         {"swiglu-tail", Op::Swiglu, 31, 4, 31, 31, 0, 0.0f, 105},
         {"sigmoid", Op::Sigmoid, 2048, 16, 2048, 2048, 0, 0.0f, 106},
         {"sigmoid-tail", Op::Sigmoid, 5, 4, 5, 5, 0, 0.0f, 107},

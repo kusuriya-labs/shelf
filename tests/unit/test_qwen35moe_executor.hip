@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/inference/execution/program_executor.h>
+#include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/runtime/execution/row_bucket.h>
 
 #include <hip/hip_runtime.h>
@@ -13,6 +14,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -164,6 +166,7 @@ bool run_rounds(q35::Executor& ex, st::PagedSequenceState& seq, hipStream_t stre
 
 int main() {
     std::printf("=== qwen35moe through the executor (GPU) ===\n");
+    ::setenv("SHELF_QWEN35_PERF_STATS", "1", 1);
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
         std::printf("SKIP: no GPU available\n");
@@ -266,11 +269,23 @@ int main() {
         // A batch cannot exceed the executor's row budget, so the prompt is the bucket.
         const std::vector<int32_t> prompt = make_prompt(rows);
         std::vector<int32_t> sampled;
+        const uint64_t swiglu_before =
+            shelf::execution::perf_stats_instance()
+                .kernels[static_cast<std::size_t>(rt::KernelId::SWIGLU)]
+                .fallback;
         if (!run_rounds(ex, seq, stream, prompt, sampled, tag)) {
             (void)st::release_paged_sequence_state(seq, stream);
             continue;
         }
         check(sampled.size() == 3u, tag + ": prefill and two decode steps sampled");
+        // The FFN elementwise runs on group rows, and the correctness interpreter counts
+        // rows in tokens, so a grouped dispatch that fell back would process part of the
+        // plane. None of them may fall back.
+        check(swiglu_before ==
+                  shelf::execution::perf_stats_instance()
+                      .kernels[static_cast<std::size_t>(rt::KernelId::SWIGLU)]
+                      .fallback,
+              tag + ": no grouped swiglu dispatch took the correctness path");
         bool in_vocab = sampled.size() == 3u;
         for (int32_t t : sampled)
             if (t < 0 || static_cast<uint32_t>(t) >= kVocab) in_vocab = false;
@@ -292,6 +307,59 @@ int main() {
             (void)st::release_paged_sequence_state(seq2, stream);
         } else {
             check(false, tag + ": second sequence create");
+        }
+    }
+
+    // A MoE intermediate width outside the elementwise envelope cannot run through the
+    // interpreter (it would process token rows over a group plane), so the executor has to
+    // report it instead of producing values.
+    {
+        Fixture bad;
+        if (!write_fixture(bad, root / "moe_unregistered", false, true, kInter, 384u)) {
+            std::printf("FAIL: unregistered fixture write\n");
+            ++failed;
+        } else {
+            auto bad_loaded = shelf::models::LoadedModel::load(
+                (root / "moe_unregistered").string(), gpu_arena, stream);
+            if (!bad_loaded.ok()) {
+                std::printf("FAIL: unregistered fixture load: %s\n",
+                            bad_loaded.status().message().c_str());
+                ++failed;
+            } else {
+                shelf::models::LoadedModel bad_model = bad_loaded.release();
+                q35::ExecutorConfig ec3;
+                ec3.max_batch_rows = 16u;
+                ec3.max_scheduled_requests = 1u;
+                ec3.max_scheduled_output_rows = 1u;
+                auto bad_exec = bad_model.create_executor(seq_pool, gdn_pool, kv_pool, gpu_arena, ec3);
+                if (!bad_exec.ok()) {
+                    std::printf("FAIL: unregistered create_executor: %s\n",
+                                bad_exec.status().message().c_str());
+                    ++failed;
+                } else {
+                    q35::Executor bad_ex = bad_exec.release();
+                    auto bad_seq = st::create_paged_sequence_state(
+                        seq_pool, gdn_pool, kv_pool, max_tokens + 16u, stream);
+                    if (!bad_seq.ok()) {
+                        std::printf("FAIL: unregistered sequence create\n");
+                        ++failed;
+                    } else {
+                        st::PagedSequenceState bseq = bad_seq.release();
+                        const std::vector<int32_t> prompt = make_prompt(16u);
+                        std::vector<q35::ScheduledRequest> requests;
+                        auto prefill = q35::execute_batch(
+                            bad_ex, make_batch(bseq, requests, prompt.data(), 16u, 1u), stream);
+                        check(!prefill.ok(),
+                              "a group geometry outside the envelope is refused, not run");
+                        if (!prefill.ok()) {
+                            const std::string msg = prefill.status().message();
+                            check(msg.find("grouped-row dispatch") != std::string::npos,
+                                  "the refusal names the grouped row domain");
+                        }
+                        (void)st::release_paged_sequence_state(bseq, stream);
+                    }
+                }
+            }
         }
     }
 

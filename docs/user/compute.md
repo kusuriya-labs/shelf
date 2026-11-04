@@ -85,7 +85,11 @@ physical KV capacity、`prefix cache` は hot tier の実サイズである。
 executor の row bucket も決める。prefill は chunk 分割で進むため、prompt が N を
 超えても生成は止まらない。N を小さくすると program workspace（executor の arena 確保の
 大半）が減って KV が増え、大きくすると prefill の step 数が減る代わりに arena を
-多く使う。実測（27B FP8 / TP2 / requests 4 / drafter 込み / `--max-seq-len 262144`）:
+多く使う。grouped expert checkpoint（MoE）では 1 step の group 行数が
+`token 数 × top_k / 16 + experts` 個の group に増えるため、N は 4096 までである。
+超えた chunk を実行した時点で `unsupported: grouped-row dispatch has no correctness path`
+を返し、誤った値で生成を続けることはない（実測は
+`docs/research/20261104/moe_group_row_elementwise_envelope.md`）。実測（27B FP8 / TP2 / requests 4 / drafter 込み / `--max-seq-len 262144`）:
 
 | `--max-num-batched-tokens` | rank の executor 実測 | 結果 |
 | --- | --- | --- |
