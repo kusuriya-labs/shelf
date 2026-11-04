@@ -40,11 +40,34 @@ struct QwenHybridConfig {
     bool output_gate_silu = false;
 
     std::vector<int> layer_types;
+
+    // What the checkpoint declares itself to be. Shelf reads it as a gate only: the
+    // supported set is fixed at build time, so an unimplemented architecture is
+    // rejected before any tensor is opened. It never selects code paths per model.
+    std::string declared_model_type;
+    std::string declared_text_model_type;
+    std::vector<std::string> declared_architectures;
+    // Read from the declared identity, not from the FFN keys. A model that declares a
+    // routed-expert identity is not read by a dense reader even when the expert count is
+    // spelled in a way this build does not know; the opposite direction stays decided by
+    // the structure, because that is the part that can be checked against the weights.
+    bool identity_declares_routed_experts = false;
 };
 
 // Reads the shared part of config.json. FFN keys (an intermediate size, an expert
 // count) are left to the model family that owns them.
+// config.json is rejected here when it does not declare one of the model identities
+// this build implements (Status::unsupported), so an unimplemented architecture
+// cannot reach tensor lookup.
 Result<QwenHybridConfig> read_qwen_hybrid_config(const std::string& model_dir);
+
+// The identities this build implements, for diagnostics and tests.
+const std::vector<std::string>& supported_model_identities();
+
+// Gates config.json on the identity it declares, without reading any other field.
+// Every config entry point gates on this first, so an unimplemented architecture is
+// named as such instead of failing later on a tensor name.
+Status check_config_identity(const std::string& model_dir);
 
 Result<bool> read_tie_word_embeddings(const std::string& model_dir);
 

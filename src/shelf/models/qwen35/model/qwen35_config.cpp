@@ -31,6 +31,19 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
             "read_qwen35_text_config: dense config must not declare num_experts",
             __FILE__, __LINE__);
     }
+    // Backstop for the case the structure cannot show: a routed-expert identity whose
+    // expert count is spelled in a way this build does not know would be accepted here
+    // and lose its expert tensors. The identity vocabulary lives in the shared config, so
+    // the dense family names no expert vocabulary of its own.
+    if (cfg.identity_declares_routed_experts) {
+        const std::string who = !cfg.declared_text_model_type.empty() ? cfg.declared_text_model_type
+                                                                      : cfg.declared_model_type;
+        return Status::unsupported(
+            ("read_qwen35_text_config: identity declares a routed-expert model (model_type='" +
+             who + "')")
+                .c_str(),
+            __FILE__, __LINE__);
+    }
     return cfg;
 }
 

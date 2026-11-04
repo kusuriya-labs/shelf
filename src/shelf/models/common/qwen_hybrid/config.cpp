@@ -20,7 +20,118 @@ bool tie_word_embeddings_from_json(const nlohmann::json& root) {
     return false;
 }
 
+struct ModelIdentity {
+    const char* model_type;
+    // What this identity declares about the FFN of the model. It is only used to reject a
+    // reader, never to choose one: the FFN kind of a loaded model stays decided by its
+    // structure, which is the part that can be checked against the weight set.
+    bool declares_routed_experts;
+};
+
+constexpr ModelIdentity kModelIdentities[] = {
+    {"qwen3_5", false},
+    {"qwen3_5_text", false},
+    {"qwen3_5_moe", true},
+    {"qwen3_5_moe_text", true},
+};
+
+const ModelIdentity* find_model_identity(const std::string& model_type) {
+    for (const auto& identity : kModelIdentities) {
+        if (identity.model_type == model_type)
+            return &identity;
+    }
+    return nullptr;
+}
+
+struct DeclaredIdentity {
+    std::string model_type;
+    std::string text_model_type;
+    std::vector<std::string> architectures;
+    bool declares_routed_experts = false;
+};
+
+DeclaredIdentity identity_from_root(const nlohmann::json& root) {
+    DeclaredIdentity id;
+    if (root.contains("model_type") && root["model_type"].is_string())
+        id.model_type = root["model_type"].get<std::string>();
+    if (root.contains("text_config") && root["text_config"].is_object()) {
+        const nlohmann::json& t = root["text_config"];
+        if (t.contains("model_type") && t["model_type"].is_string())
+            id.text_model_type = t["model_type"].get<std::string>();
+    }
+    if (root.contains("architectures") && root["architectures"].is_array()) {
+        for (const auto& a : root["architectures"]) {
+            if (a.is_string()) id.architectures.push_back(a.get<std::string>());
+        }
+    }
+    for (const std::string& candidate : {id.model_type, id.text_model_type}) {
+        const ModelIdentity* found = find_model_identity(candidate);
+        if (found != nullptr && found->declares_routed_experts)
+            id.declares_routed_experts = true;
+    }
+    return id;
+}
+
+// The gate. An identity is a declaration, so it can only reject: what a model is read as
+// stays decided by the loaded structure (num_experts, tensor names, shapes).
+Status gate_declared_identity(const DeclaredIdentity& id, const char* who) {
+    const bool declared = !id.model_type.empty() || !id.text_model_type.empty();
+    if (!declared) {
+        return Status::unsupported(
+            (std::string(who) + ": config.json declares no model identity (model_type)").c_str(),
+            __FILE__, __LINE__);
+    }
+    for (const std::string& candidate : {id.model_type, id.text_model_type}) {
+        if (find_model_identity(candidate) != nullptr)
+            return Status::make_ok();
+    }
+    std::string msg = std::string(who) + ": unsupported model identity model_type='" +
+                      id.model_type + "'";
+    if (!id.text_model_type.empty())
+        msg += " text_config.model_type='" + id.text_model_type + "'";
+    if (!id.architectures.empty()) {
+        msg += " architectures=" + id.architectures[0];
+        if (id.architectures.size() > 1) msg += "...";
+    }
+    msg += " (this build implements";
+    for (const auto& identity : kModelIdentities)
+        msg += std::string(" ") + identity.model_type;
+    msg += ")";
+    return Status::unsupported(msg.c_str(), __FILE__, __LINE__);
+}
+
 }  // namespace
+
+const std::vector<std::string>& supported_model_identities() {
+    static const std::vector<std::string> supported = [] {
+        std::vector<std::string> names;
+        for (const auto& identity : kModelIdentities)
+            names.emplace_back(identity.model_type);
+        return names;
+    }();
+    return supported;
+}
+
+Status check_config_identity(const std::string& model_dir) {
+    std::ifstream f(model_dir + "/config.json");
+    if (!f.is_open()) {
+        return Status::invalid_argument(
+            "check_config_identity: cannot open config.json", __FILE__, __LINE__);
+    }
+    nlohmann::json root;
+    try {
+        f >> root;
+    } catch (const nlohmann::json::exception& e) {
+        return Status::invalid_argument(
+            (std::string("check_config_identity: bad config.json: ") + e.what()).c_str(),
+            __FILE__, __LINE__);
+    }
+    if (!root.is_object()) {
+        return Status::invalid_argument(
+            "check_config_identity: config.json is not an object", __FILE__, __LINE__);
+    }
+    return gate_declared_identity(identity_from_root(root), "check_config_identity");
+}
 
 Result<bool> read_tie_word_embeddings(const std::string& model_dir) {
     const std::string path = model_dir + "/config.json";
@@ -111,13 +222,26 @@ Result<QwenHybridConfig> read_qwen_hybrid_config(const std::string& model_dir) {
             __FILE__, __LINE__);
     }
 
-    if (!root.is_object() || !root.contains("text_config")) {
+    if (!root.is_object()) {
+        return Status::invalid_argument(
+            "read_qwen_hybrid_config: config.json is not an object", __FILE__, __LINE__);
+    }
+
+    const DeclaredIdentity identity = identity_from_root(root);
+    Status identity_status = gate_declared_identity(identity, "read_qwen_hybrid_config");
+    if (!identity_status.ok()) return identity_status;
+
+    if (!root.contains("text_config")) {
         return Status::invalid_argument(
             "read_qwen_hybrid_config: config.json missing text_config", __FILE__, __LINE__);
     }
 
     const nlohmann::json& t = root["text_config"];
     QwenHybridConfig cfg;
+    cfg.declared_model_type = identity.model_type;
+    cfg.declared_text_model_type = identity.text_model_type;
+    cfg.declared_architectures = identity.architectures;
+    cfg.identity_declares_routed_experts = identity.declares_routed_experts;
 
     auto read_size = [&](const char* key, std::size_t& out) -> bool {
         if (!t.contains(key) || !t[key].is_number()) return false;

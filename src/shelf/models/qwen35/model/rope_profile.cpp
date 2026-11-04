@@ -1,3 +1,4 @@
+#include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <cmath>
 #include <fstream>
@@ -19,6 +20,8 @@ bool finite_positive(double v) {
 }
 
 Result<Qwen35RopeParameters> read_qwen35_rope_parameters(const std::string& model_dir) {
+    Status identity = shelf::qwen_hybrid::check_config_identity(model_dir);
+    if (!identity.ok()) return identity;
     std::ifstream f(model_dir + "/config.json");
     if (!f.is_open()) {
         return Status::invalid_argument(

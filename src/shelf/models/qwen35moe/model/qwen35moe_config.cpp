@@ -6,6 +6,8 @@
 namespace shelf::qwen35moe {
 
 Result<std::size_t> read_declared_num_experts(const std::string& model_dir) {
+    Status identity = shelf::qwen_hybrid::check_config_identity(model_dir);
+    if (!identity.ok()) return identity;
     auto sizes = shelf::qwen_hybrid::read_text_config_sizes(model_dir, {"num_experts"});
     if (!sizes.ok()) return sizes.status();
     return sizes.value()[0];

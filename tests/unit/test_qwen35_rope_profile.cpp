@@ -32,11 +32,18 @@ static void check_close(double a, double b, double tol, const std::string& msg) 
 
 static fs::path g_root;
 
+std::string with_identity(const std::string& body) {
+    if (body.find("model_type") != std::string::npos)
+        return body;
+    const std::size_t brace = body.find('{');
+    return body.substr(0, brace + 1) + R"json("model_type":"qwen3_5",)json" + body.substr(brace + 1);
+}
+
 static void write_config(const std::string& name, const std::string& body) {
     const fs::path dir = g_root / name;
     fs::create_directories(dir);
     std::ofstream f(dir / "config.json");
-    f << body;
+    f << with_identity(body);
 }
 
 static const char* kDefaultConfig = R"json({
