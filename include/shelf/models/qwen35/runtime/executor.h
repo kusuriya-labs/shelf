@@ -1,6 +1,9 @@
 #pragma once
+#include <shelf/models/common/qwen_hybrid/config.h>
+#include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
+#include <shelf/weights/matrix_weight.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/execution_types.h>
@@ -50,6 +53,32 @@ struct ExecutorConfig {
 using ::shelf::runtime::DispatchStagingPool;
 using ::shelf::runtime::ProgramStagingMeta;
 
+// What the runtime reads from a loaded model while it runs: the backbone geometry, and the
+// embedding table the drafter looks tokens up in. Both are the same whatever a layer's FFN
+// is, so the executor needs nothing else from the model's weights after lowering.
+struct RuntimeModelView {
+    const shelf::qwen_hybrid::QwenHybridConfig* config = nullptr;
+    const shelf::weights::MatrixWeight* embed_tokens = nullptr;
+};
+
+// One layer's input replaced with host data (SHELF_LAYER_INPUT_OVERRIDE). It names a layer
+// before the graph exists, so the value id is resolved from the lowered form later.
+struct LayerOverrideSource {
+    uint32_t layer = 0;
+    uint32_t rows = 0;
+    uint32_t hidden = 0;
+    std::vector<std::uint16_t> host;
+};
+
+// Everything the executor needs to run a model: the family-neutral lowered form, the view of
+// the loaded model it reads while running, and the layer input overrides. A model family
+// lowers its own weights and hands the result here, so the executor names no family.
+struct ExecutorModelInput {
+    RuntimeModelView model;
+    shelf::qwen_hybrid::HybridLoweredPrimitives lowered;
+    std::vector<LayerOverrideSource> layer_overrides;
+};
+
 struct GraphCacheSlot {
     hipGraphExec_t exec = nullptr;
     uint32_t token_count = 0;
@@ -74,7 +103,7 @@ struct Executor {
     Executor(Executor&& other) noexcept;
     Executor& operator=(Executor&& other) noexcept;
     bool is_shutdown() const noexcept;
-    const Qwen35Model* model = nullptr;
+    RuntimeModelView model;
 
     SequenceSlotPool* sequence_pool = nullptr;
     GdnStatePool* gdn_state_pool = nullptr;
@@ -142,6 +171,18 @@ struct Executor {
 
     ::shelf::runtime::StreamSignal completion_signal{};
 };
+
+// The layer input overrides named in the environment, as host data. `hidden` is the model's
+// hidden width, which fixes the row count of each override file.
+std::vector<LayerOverrideSource> read_layer_override_sources(uint32_t hidden);
+
+Result<Executor> create_executor(
+    ExecutorModelInput&& input,
+    SequenceSlotPool& sequence_pool,
+    GdnStatePool& gdn_state_pool,
+    PagedKVPool& kv_pool,
+    gpu::GpuArena& arena,
+    const ExecutorConfig& config);
 
 Result<Executor> create_model_executor(
     const Qwen35Model& model,

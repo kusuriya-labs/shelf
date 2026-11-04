@@ -9,7 +9,7 @@ namespace shelf {
 namespace qwen35 {
 
 inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
-    const Qwen35TextConfig& tc) {
+    const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     uint32_t gdn_layers =
         static_cast<uint32_t>(shelf::qwen_hybrid::count_layer_topology(tc).gdn_layers);
     if (gdn_layers == 0) gdn_layers = 1;
@@ -24,7 +24,7 @@ inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
 }
 
 inline Result<state::GdnStatePoolLayout> make_qwen35_gdn_state_layout_tp(
-    const Qwen35TextConfig& tc, uint32_t tp_size) {
+    const shelf::qwen_hybrid::QwenHybridConfig& tc, uint32_t tp_size) {
     if (tp_size == 0) {
         return Status::invalid_argument("tp_size must be at least 1", __FILE__,
                                         __LINE__);

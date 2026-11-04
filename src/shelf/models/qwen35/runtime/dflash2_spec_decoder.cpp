@@ -82,7 +82,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     const std::vector<DFlash2GdnRankBinding>* tp_ranks,
     TpBatchHook* tp_hook,
     DFlash2SpecWorkspace* workspace) {
-    if (target.model == nullptr) {
+    if (target.model.config == nullptr || target.model.embed_tokens == nullptr) {
         return Status::invalid_state("create_dflash2_spec_decoder: target model is null",
                                      __FILE__, __LINE__);
     }
@@ -100,8 +100,8 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     }
 
     const dflash2::DFlash2Config& dcfg = *draft.config;
-    const Qwen35TextConfig& tc = target.model->text_config();
-    const shelf::weights::MatrixWeight& embed = target.model->weights().embed_tokens;
+    const shelf::qwen_hybrid::QwenHybridConfig& tc = *target.model.config;
+    const shelf::weights::MatrixWeight& embed = *target.model.embed_tokens;
 
     if (embed.cols != dcfg.hidden_size) {
         return Status::invalid_argument(
@@ -185,7 +185,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
     const DFlash2SpecDecoderConfig& config,
     hipStream_t stream,
     const std::vector<DFlash2GdnRankBinding>* tp_ranks) {
-    if (target.model == nullptr) {
+    if (target.model.config == nullptr || target.model.embed_tokens == nullptr) {
         return Status::invalid_state("create_dflash2_spec_workspace: target model is null",
                                      __FILE__, __LINE__);
     }
@@ -248,7 +248,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
     }
 
     const uint32_t history_rows = config.num_drafts;
-    const Qwen35TextConfig& tc = target.model->text_config();
+    const shelf::qwen_hybrid::QwenHybridConfig& tc = *target.model.config;
     workspace.gdn_key_heads =
         static_cast<uint32_t>(tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u);
 
