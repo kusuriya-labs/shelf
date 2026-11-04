@@ -5,6 +5,7 @@
 #include <shelf/io/safetensors_writer.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/weight_loader.h>
@@ -362,6 +363,22 @@ static void test_mtp_bf16_contract(gpu::GpuArena& arena, hipStream_t stream) {
     check(config_res.ok(), "config read");
     if (!config_res.ok()) return;
     qwen35::Qwen35TextConfig config = config_res.release();
+
+    check(qwen35::validate_qwen35_weights(w, config).ok(),
+          std::string("case A model invariants: ") +
+              (qwen35::validate_qwen35_weights(w, config).ok()
+                   ? ""
+                   : qwen35::validate_qwen35_weights(w, config).message().c_str()));
+    {
+        qwen35::Qwen35ModelWeights no_fc = w;
+        no_fc.mtp.fc = {};
+        check(!qwen35::validate_qwen35_weights(no_fc, config).ok(),
+              "a present MTP block without fc is rejected");
+        qwen35::Qwen35ModelWeights bad_mtp_norm = w;
+        bad_mtp_norm.mtp.final_norm_weight = {};
+        check(!qwen35::validate_qwen35_weights(bad_mtp_norm, config).ok(),
+              "a present MTP block without its final norm is rejected");
+    }
 
     auto lower = qwen35::lower_qwen35_mtp_to_primitives(config, w);
     check(lower.ok(), std::string("case A lower mtp: ") + (lower.ok() ? "" : lower.status().message().c_str()));

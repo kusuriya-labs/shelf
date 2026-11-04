@@ -1,5 +1,6 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 
 #include <hip/hip_runtime.h>
@@ -137,6 +138,29 @@ int main() {
               "embedding replicated");
         check(!r0.embed_tokens.partition.has_value(), "embedding has no partition");
         check(r0.layers[0].input_layernorm_weight.dim(0) == 64, "input norm replicated");
+
+        // The model invariants are stated for the model, not for one rank: a rank holds an
+        // equal slice of a sharded axis, and validate has to accept that and reject a slice
+        // that does not add back up.
+        auto config_result = shelf::qwen35::read_qwen35_text_config(dir.string());
+        check(config_result.ok(), "dense config for the TP fixture");
+        if (config_result.ok()) {
+            const shelf::qwen35::Qwen35TextConfig& cfg = config_result.value();
+            check(shelf::qwen35::validate_qwen35_weights(r0, cfg).ok(),
+                  "rank0 weights pass the model invariants (partition aware)");
+            check(shelf::qwen35::validate_qwen35_weights(r1, cfg).ok(),
+                  "rank1 weights pass the model invariants (partition aware)");
+
+            shelf::qwen35::Qwen35ModelWeights wrong_ffn = r0;
+            wrong_ffn.layers[0].ffn.gate.rows = 33;
+            check(!shelf::qwen35::validate_qwen35_weights(wrong_ffn, cfg).ok(),
+                  "an FFN slice that does not add back up to intermediate_size is rejected");
+
+            shelf::qwen35::Qwen35ModelWeights wrong_attn = r0;
+            wrong_attn.layers[1].attn_q_proj.cols = 33;
+            check(!shelf::qwen35::validate_qwen35_weights(wrong_attn, cfg).ok(),
+                  "an attention projection with the wrong input width is rejected");
+        }
     }
 
     {
