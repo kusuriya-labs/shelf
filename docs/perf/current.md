@@ -63,33 +63,38 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   warmup + 5 run の production 計測は未実施。1 run の参考値のみ research 記録にあり）。詳細は
   [../research/20261103/gate6_long_context.md](../research/20261103/gate6_long_context.md)。
 
-## 2026-11-04 Qwen3.6-35B-A3B MoE decode（初回）
+## 2026-11-04 Qwen3.6-35B-A3B MoE decode
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を TP=1 / bf16 KV で
-計測した。**これは fallback 混在の初期 baseline であり、最適化経路の decode 速度ではない**。
-decode 1 step あたり bf16 線形 171 本が selector 却下で correctness path へ落ちている
-（内訳は [../research/20261104/moe_gate_d_slot_layout.md](../research/20261104/moe_gate_d_slot_layout.md)
-§11。MoE 系の kernel は 1 本も fallback していない）。
+計測した。backbone の bf16 線形 171 本 / token は allowlist 登録済みで、linear の correctness
+fallback は 0 である。
 
 | 条件 | 値 |
 | --- | ---: |
 | context tokens | 64 |
 | decode tokens | 32 |
 | warmup | 1 |
-| gpu_ms p50（clean 4 run） | 5512.97 |
-| gpu_tokens_per_sec p50 | 5.81 |
-| run 間 | 5490.07 / 5511.22 / 5514.72 / 5521.73 ms |
-| 生成一致 anchor | `GREEDY_TOKEN_SUM=15232`（5 run すべて一致） |
+| gpu_ms p50（clean 4 run） | 3128.75 |
+| gpu_tokens_per_sec p50 | 10.22 |
+| run 間 | 3126.98 / 3127.28 / 3130.21 / 3130.54 / 3150.59 ms |
+| 生成一致 anchor | `GREEDY_TOKEN_SUM=2987`（5 run すべて一致） |
 
-- measurement revision: `d92c9e3` + `LoadedModel` 配線と plan scratch / router 契約の修正
+- measurement revision: `5ce5dbd` + backbone 線形 5 shape（`8192:2048`・`4096:2048`・
+  `32:2048`・`2048:4096`・`248320:2048`）の `kLinearShapeRules` 登録
 - GPU: Radeon AI PRO R9700（`--device 0`、測定時は device 0 / 1 idle）
 - command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1`
-- 5 run 目は `SHELF_QWEN35_PERF_STATS=1 --perf-stats-output` を付けた（gpu_ms 5502.91 /
-  5.82 tok/s）。上の p50 は stats なしの 4 run から取った
-- 同じ checkpoint の `shelf-compute` E2E（prompt 6 token、`--max-num-batched-tokens 64
-  --max-concurrent-requests 1`）は DECODE_TOKENS_PER_SEC 8.05。条件が違うので直接比較しない
-- **この数値は正しさの anchor を含まない**。E2E の生成列は correctness backbone と optimized
-  MoE の混合経路であり、HF との数値照合は未実施（§8 の 40 層 E2E gate）
+- 5 run 目は `SHELF_QWEN35_PERF_STATS=1 --perf-stats-output` を付けた（gpu_ms 3130.54 /
+  10.22 tok/s）。上の p50 は stats なしの 4 run から取った
+- 登録前は同じ条件で gpu_ms p50 5512.97 / 5.81 tok/s（anchor `GREEDY_TOKEN_SUM=15232`）だった。
+  micro bench と A/B の経緯は
+  [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md)
+- まだ 32 token 区間で `RMS_NORM` 2592・`PAGED_ATTENTION` 320・`EMBEDDING_LOOKUP` 32 が
+  correctness path に落ちている。kernel 単位の内訳は
+  [../research/20261104/moe_correctness_path_counters.md](../research/20261104/moe_correctness_path_counters.md)
+- 同じ checkpoint の `shelf-compute` E2E（prompt 8 token、`--max-num-batched-tokens 64
+  --max-concurrent-requests 1`）は DECODE_TOKENS_PER_SEC 19.64（1 run）。条件が違うので直接比較しない
+- **この数値は正しさの anchor を含まない**。E2E の生成列は correctness 経路と optimized 経路の
+  混在であり、HF との数値照合は未実施（§8 の 40 層 E2E gate）
 
 ## 記録規則
 

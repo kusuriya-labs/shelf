@@ -69,6 +69,13 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 512, 2048, kFamilyBf16 },
     { 2048, 512, kFamilyBf16 },
     { 1, 2048, kFamilyBf16 },
+    // The hybrid backbone of the grouped-expert checkpoint at hidden 2048: GDN in/out
+    // projections, attention q and o, and the lm_head row over the full vocabulary.
+    { 8192, 2048, kFamilyBf16 },
+    { 4096, 2048, kFamilyBf16 },
+    { 32, 2048, kFamilyBf16 },
+    { 2048, 4096, kFamilyBf16 },
+    { 248320, 2048, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {
