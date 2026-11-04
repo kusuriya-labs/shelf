@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <variant>
 
 namespace shelf::models {
 
@@ -19,28 +20,24 @@ enum class ModelFamily : std::uint8_t {
     Moe,
 };
 
-struct LoadedModelWeights {
-    ModelFamily family = ModelFamily::Dense;
+// A loaded model holds exactly one family's weights. There is no empty member of the
+// other family and no dense view of an MoE checkpoint, so an MoE model cannot be read as
+// if it had a dense FFN. Access is explicit: std::get_if<Qwen35MoeModelWeights>(...) is
+// null for a dense model.
+using LoadedModelWeights = std::variant<
+    shelf::qwen35::Qwen35ModelWeights,
+    shelf::qwen35moe::Qwen35MoeModelWeights>;
 
-    // Filled when family == Dense.
-    shelf::qwen35::Qwen35ModelWeights dense;
-
-    // Filled when family == Moe. Its body carries embed / lm_head / final norm and each
-    // layer's layernorms and attention; layers carries the routed-expert FFN.
-    shelf::qwen35moe::MoeModelWeights moe;
-
-    // The qwen35-shaped part of either family: what the attention and norm primitives
-    // consume.
-    const shelf::qwen35::Qwen35ModelWeights& body() const noexcept {
-        return family == ModelFamily::Moe ? moe.body : dense;
-    }
-};
+ModelFamily model_family(const LoadedModelWeights& loaded) noexcept;
 
 // num_experts > 0 selects Moe. Fails only when config.json cannot be read.
 Result<ModelFamily> probe_model_dir(const std::string& model_dir);
 
-// Reads config.json, loads with the family's loader, and runs
-// shelf::qwen35::validate_qwen35_weights on the resulting body.
+// Reads config.json, loads with that family's loader, and runs that family's validation.
+// A dense checkpoint is rejected by the MoE loader and an MoE checkpoint by the dense
+// loader, so the probe cannot silently pick the wrong path. The options are the dense
+// ones; an MoE checkpoint rejects the dense-only MTP option instead of ignoring it. This
+// module does not decide how a model runs on the GPU.
 Result<LoadedModelWeights> load_model_weights(
     const std::string& model_dir,
     gpu::GpuArena& arena,

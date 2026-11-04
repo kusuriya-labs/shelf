@@ -236,13 +236,15 @@ set(
 set(
     SHELF_QWEN_HYBRID_SOURCES
     src/shelf/models/common/qwen_hybrid/config.cpp
+    src/shelf/models/common/qwen_hybrid/weight_loader.cpp
+    src/shelf/models/common/qwen_hybrid/weight_validation.cpp
 )
 
 add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
 target_compile_features(shelf_qwen_hybrid PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen_hybrid PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen_hybrid PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen_hybrid PUBLIC shelf_core shelf_io)
+target_link_libraries(shelf_qwen_hybrid PUBLIC shelf_weights shelf_io shelf_quant_bundle)
 target_compile_options(shelf_qwen_hybrid PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35 STATIC ${SHELF_QWEN35_SOURCES})
@@ -267,10 +269,9 @@ target_compile_features(shelf_qwen35moe PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35moe PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35moe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(shelf_qwen35moe SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen35 shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
-# Qwen3.5 continuous batching runtime.
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC src/shelf/models/model_weights_factory.cpp)
