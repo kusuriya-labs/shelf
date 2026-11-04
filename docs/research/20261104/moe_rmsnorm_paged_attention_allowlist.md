@@ -127,11 +127,33 @@ physical plan を作る側が独自の決定を持っていたので、gate は�
 
 `physical_kernel_launches` と `logical_dispatches` の差が split の有無を見る口になった。
 
-## split-KV の q_per_kv=8 対応は未実施
+## split-KV の q_per_kv=8 を probe して却下した
 
-`q_per_kv = 8` の split kernel は存在しないので、長い context の MoE decode は非 split kernel
-（1 workgroup / (row, q_head)）で歩く。262144 context で 15.5 ms / 呼出、KV 交通量から見た帯域下限
-は 4.2 ms / token（10 層）なので 3.7 倍の余裕がある。split-KV の `q_per_kv = 8` 対応は残件。
+bf16 の split / split reduce 本体を `kQPerKV = 8` で instantiation し、gate を通して
+`shelf-bench paged-attention --splits` で測った（rows=1、bf16 KV、f32 出力、`--check` 付き）。
+
+| visible | splits=1（非 split） | splits=4 | splits=8 | splits=16 | `--check`（splits ≥ 2） |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 4096 | 186.58 µs | 172.78 | 92.42 | 54.59 | **FAIL** |
+| 16384 | 722.94 µs | 664.28 | 334.82 | 180.06 | **FAIL** |
+| 65536 | 3982.16 µs | 3365.30 | 1741.56 | 764.28 | **FAIL** |
+
+潜力は 3.4〜5.2 倍。しかし splits=16 / visible 4096 の不一致は `mm=4092 / 4096 要素`・
+`max_rel=8.3`で、launch 失敗ではなく（bench は launch error を返す経路を持つ）**full head の
+split 本体 `attention_paged_split_bf16_body<8u,true>` が `kQPerKV = 8` で構造的に誤っている**。
+同じ bench で production が使う `q_per_kv = 4`（16/4・24/4）の splits 4 / 16 は `--check` PASS
+なので、bench 側の検証ではなく kernel 側の実差である。よって 8u の split は入れていない。
+現状は非 split decode kernel が正しく、`PAGED_ATTENTION (16,2,256)` はその envelope で
+registered 済み。
+
+follow-up に残す条件: split 本体は `q_lds[kQPerKV*256]` と `acc_lds[kSplitWaves*kQPerKV*256]`
+を static LDS に取る（kSplitWaves=4 なので 8u で 8 KB + 32 KB = 40 KB、6u で 30 KB）。単に
+template を instantiate するだけでは壊れるので、reduce 側の `qh_per_wg` と同じ発想で q head を
+workgroup に分割し、partials layout もそれへ合わせる必要がある。
+
+価値の出る範囲は visible ≥ 2048 の MoE decode に限られる。visible 4096 では attention が
+1 呼出 186.6 µs × 10 层 = 1.87 ms / token で token 全体（19 ms 台）の 10 % 程度、
+visible 65536 では 39.8 ms / token になって律速側へ寄る。
 
 ## 登録
 
@@ -145,12 +167,43 @@ physical plan を作る側が独自の決定を持っていたので、gate は�
   失敗し、`paged_attention_split_supports(8u) == false` の assertion も planner の gate を
   外すと意味を失うため、capability の所在を test に置いてある。
 
+## EMBEDDING_LOOKUP @2048（decode に残った最後の fallback）
+
+kernel 単位 counter で残った最後の 1 本 / token が `EMBEDDING_LOOKUP` だった。
+`embedding_selector.cpp` の rule は hidden 2560 と 5120 のみで、hidden 2048 が無かった。
+
+```sh
+shelf-bench embedding --variant optimized|correctness --storage bf16 --vocab 248320 --hidden 2048 \
+  --rows 1,64,1024,2048
+```
+
+| rows | optimized p50 µs | correctness p50 µs | 倍率 |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.87 | 145.04 | 37.5× |
+| 64 | 3.93 | 144.18 | 36.7× |
+| 1024 | 19.67 | 219.20 | 11.1× |
+| 2048 | 14.34 | 250.05 | 17.4× |
+
+decode 1 本ぶん（145 → 3.9 µs）なので速度への寄与は 17 ms/token に対して 0.8 % と小さい。
+意味は**decode の correctness fallback がゼロになった**ことで、`SHELF_QWEN35_PERF_STATS=1` の
+census が `logical_dispatches == optimized_operations`（43360 / 43360、fallback 0）を
+受け入れ条件にできる。
+
+`shelf-bench embedding` には `--check` が無いので、数値は
+`tests/kernels/optimized/test_embedding.hip` に `bf16-hidden-2048` と `bf16-hidden-2048-pad`
+（correctness path と CPU 参照の突き合わせ）を追加して固定した。selector 側の境界は
+`tests/unit/test_qwen35_embedding_selector.cpp`（rows 1 / 2048 は Optimized、8193 は
+Correctness）。
+
+
+
 ## 数値ゲート（teacher-forced A/B）
 
-`shelf-bench quality` は MoE checkpoint を load できない（`qwen35_config.cpp` の
-`read_qwen35_text_config` が dense 直行で、quality はまだ `LoadedModel` 経由でない。
-`docs/developer/qwen35moe.md` の残件そのまま）。teacher forcing は `shelf-compute` 側で
-base の生成列をプロンプトへ埋めて再現した。
+この当時 `shelf-bench quality` は MoE checkpoint を load できなかった（`qwen35_config.cpp` の
+`read_qwen35_text_config` が dense 直行で、quality は `LoadedModel` 経由でない）。teacher
+forcing は `shelf-compute` 側で base の生成列をプロンプトへ埋めて再現した。
+（`quality` の LoadedModel 配線は後日 `402ef9e` で入り、MoE の teacher-forced ppl が
+`docs/perf/current.md` に載った。）
 
 - base = rule 2 本を削った build、cand = rule ありの build（同一 tree のそれ以外）
 - prompt = `ids_moe.txt`（6 token）+ base が生成した 8 token = 14 token、

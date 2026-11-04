@@ -29,6 +29,10 @@ int main() {
     const EmbeddingStorage BF = EmbeddingStorage::Bf16;
     expect(select_embedding_implementation(mk(BF, 4, 2560u)), O, "bf16 2560 rows=4 in range");
     expect(select_embedding_implementation(mk(BF, 512, 5120u)), O, "bf16 5120 rows=512 in range");
+    expect(select_embedding_implementation(mk(BF, 1, 2048u)), O, "bf16 hidden 2048 rows=1");
+    expect(select_embedding_implementation(mk(BF, 2048, 2048u)), O, "bf16 hidden 2048 rows=2048");
+    expect(select_embedding_implementation(mk(BF, 8193, 2048u)), C,
+           "bf16 hidden 2048 rows=8193 above measured");
     expect(select_embedding_implementation(mk(BF, 0, 5120u)), C, "bf16 rows=0");
     expect(select_embedding_implementation(mk(BF, 4, 123456789u)), C, "bf16 unknown hidden");
     std::printf("%s: %d failures\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);

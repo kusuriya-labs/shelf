@@ -623,12 +623,15 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   ものだけ** linear / elementwise allowlist へ載せる。MoE FFN の bf16 線形
   （`256:2048`・`512:2048`・`2048:512`・`1:2048`）と backbone 線形
   （`8192:2048`・`4096:2048`・`32:2048`・`2048:4096`・`248320:2048`）、`RMS_NORM` @2048、
-  `PAGED_ATTENTION` `(16, 2, 256)` は載っている。decode に残る correctness path は
-  `EMBEDDING_LOOKUP`（1 本 / token）だけ
+  `PAGED_ATTENTION` `(16, 2, 256)`・`EMBEDDING_LOOKUP` @2048 は載っている。decode の
+  correctness fallback はゼロで、census が `logical_dispatches == optimized_operations`
+  （context 64 / 32 token で 43360 / 43360）を出す
 - `q_per_kv = q_heads / kv_heads` が 8 の geometry（MoE の attention）には split-KV kernel が
   無い。`max_visible_tokens >= kPagedAttentionSplitMinVisible` でも非 split decode kernel が
-  走るので正しいが、長い context では帯域下限の 3.7 倍の代价になる。split-KV の `q_per_kv = 8`
-  対応は未実施
+  走るので正しいが、長い context では代价が高い。`kQPerKV = 8` を instantiate した probe は
+  3.4〜5.2 倍速いが数値が一致せず（`--check` FAIL、4092 / 4096 要素）却下した。split 本体は
+  q head を LDS に乗せる形なので、workgroup 単位で q head を分割する変更が別途必要
+  （計測と採否判断は `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md`）
 - bucket R8192（group 69632 行）は elementwise kernel が grid.y ≤ 65535 のため表現できない。
   rows を grid.z か row offset で分割する kernel 変更が無い限り、MoE prefill の chunk は
   4096 token まで（超過は `unsupported` として見える）

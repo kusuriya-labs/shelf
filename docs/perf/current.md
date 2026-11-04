@@ -73,26 +73,32 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 | context tokens | 64 |
 | decode tokens | 32 |
 | warmup | 1 |
-| gpu_ms p50（clean 7 run） | 547.73 |
-| gpu_tokens_per_sec p50 | 58.42 |
-| run 間 | 546.96 / 547.18 / 547.32 / 547.73 / 548.53 / 567.18 / 577.22 ms |
+| gpu_ms p50（clean 6 run） | 542.29 |
+| gpu_tokens_per_sec p50 | 59.01 |
+| run 間 | 541.36 / 541.86 / 541.91 / 542.68 / 542.96 / 543.01 ms |
 | 生成一致 anchor | `GREEDY_TOKEN_SUM=2199`（7 run すべて一致） |
 
 - measurement revision: `4b8d413` + `RMS_NORM` @2048（per-feature）と `PAGED_ATTENTION`
-  `(q_heads 16, kv_heads 2, head_dim 256)` の registered 化、split-KV splits 決定の一本化
+  `(q_heads 16, kv_heads 2, head_dim 256)` の registered 化、split-KV splits 決定の一本化、
+  `EMBEDDING_LOOKUP` @2048 の registered 化
 - GPU: Radeon AI PRO R9700（`--device 0`、測定時は device 0 / 1 idle）
 - command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1`
 - kernel 単位 counter の内訳（`SHELF_QWEN35_PERF_STATS=1`、32 token 区間）:
-  logical 43360 / optimized_operations 43328 / correctness_fallbacks 32
-  （`EMBEDDING_LOOKUP` 32 のみ。`RMS_NORM` 4192・`PAGED_ATTENTION` 320・`LINEAR_BF16` は fallback ゼロ）
+  logical_dispatches 43360 = optimized_operations 43360、**correctness_fallbacks 0**
+  （`physical_kernel_launches` 43392 は grouped 系の multi-launch ぶん。`EMBEDDING_LOOKUP`
+  登録前は fallback 32、`RMS_NORM` / `PAGED_ATTENTION` 登録前は 2944）
 - 前の値は `gpu_ms p50` 3128.75 / **10.22 tok/s**（anchor `GREEDY_TOKEN_SUM=2987`）。その前は
   5512.97 / 5.81 tok/s（anchor 15232）。登録と計測の経緯は
   [../research/20261104/moe_backbone_linear_allowlist.md](../research/20261104/moe_backbone_linear_allowlist.md) と
   [../research/20261104/moe_rmsnorm_paged_attention_allowlist.md](../research/20261104/moe_rmsnorm_paged_attention_allowlist.md)
 - `shelf-compute` E2E（prompt 14 token、`--max-num-batched-tokens 64 --max-concurrent-requests 1`、
   8 decode）は DECODE_TOKENS_PER_SEC 56.52（1 run）。tg とは条件が違うので直接比較しない
-- 長い context: `shelf-bench tg --context 4096 --tokens 8` は 51.37 tok/s（1 run）。
-  `q_per_kv = 8` の split-KV kernel が無いので非 split kernel を使う（代价は research 記録）
+- 長い context: `shelf-bench tg --context 4096 --tokens 8` は 51.37 tok/s、
+  `--context 2048 --prefill-chunk 2048` は 54.91 tok/s（各 1 run）。
+  `q_per_kv = 8` の split-KV kernel が無いので非 split kernel を使う（probe の計測と採否は
+  research 記録）
+- MoE prefill chunk: `--prefill-chunk 1024 / 2048 / 4096` は 51.36 / 51.28 / 49.31 tok/s。
+  bucket R8192（group 69632 行）は `unsupported` で拒否される（`compute.md` の上限）
 - 数値の連続性は teacher-forced A/B（base の生成列をプロンプトへ埋めた 14 token 入力、
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）
