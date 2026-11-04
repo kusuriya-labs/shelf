@@ -9,8 +9,6 @@ namespace qwen35 {
 
 namespace {
 
-constexpr double kFallbackTheta = 10000000.0;
-constexpr double kFallbackPartial = 0.25;
 constexpr std::uint64_t kOfficialMaxContextTokens = 1000000ull;
 
 bool finite_positive(double v) {
