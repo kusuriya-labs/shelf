@@ -264,6 +264,7 @@ set(
     src/shelf/models/qwen35moe/model/qwen35moe_config.cpp
     src/shelf/models/qwen35moe/model/lower_to_primitives.cpp
     src/shelf/models/qwen35moe/runtime/executor_footprint.cpp
+    src/shelf/models/qwen35moe/model/qwen35moe_model.cpp
     src/shelf/models/qwen35moe/weights/moe_weight_plan.cpp
     src/shelf/models/qwen35moe/weights/moe_expert_load.cpp
     src/shelf/models/qwen35moe/weights/qwen35moe_model_load.cpp
@@ -279,11 +280,13 @@ target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=
 
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
-add_library(shelf_models STATIC src/shelf/models/model_weights_factory.cpp)
+add_library(shelf_models STATIC
+    src/shelf/models/model_weights_factory.cpp
+    src/shelf/models/loaded_model.cpp)
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35moe shelf_gpu)
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC
@@ -333,6 +336,8 @@ target_link_libraries(
         shelf_inference_execution
         shelf_qwen35
         shelf_qwen35_runtime
+        shelf_qwen35moe
+        shelf_models
         shelf_quant_format
         shelf_quant_bundle
 )

@@ -1,4 +1,5 @@
 #include <shelf/core/memory/arena.h>
+#include <shelf/models/loaded_model.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
@@ -261,7 +262,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -336,8 +337,8 @@ int run_tg(int argc, char** argv) {
     }
     auto arena = arena_result.release();
 
-    auto model_result = shelf::qwen35::Qwen35Model::load_from_safetensors(
-        opts.model_dir, arena, stream, {});
+    auto model_result =
+        shelf::models::LoadedModel::load(opts.model_dir, arena, stream);
     if (!model_result.ok()) {
         fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
         return 1;
@@ -350,7 +351,7 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
 
-    const auto& tc = model.text_config();
+    const auto& tc = model.hybrid_config();
     const uint32_t kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(tc.attention_head_dim);
     const uint32_t num_attn_layers = count_attention_layers(tc);
@@ -375,7 +376,7 @@ int run_tg(int argc, char** argv) {
     auto seq_pool = seq_pool_result.release();
 
     auto rec_pool_result = shelf::state::GdnStatePool::create(
-        arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(model.text_config()));
+        arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(model.hybrid_config()));
     if (!rec_pool_result.ok()) {
         fprintf(stderr, "GdnStatePool::create failed: %s\n",
             rec_pool_result.status().message().c_str());
@@ -399,8 +400,8 @@ int run_tg(int argc, char** argv) {
     exec_config.max_scheduled_requests = 1;
     exec_config.backend = opts.decode_backend;
 
-    auto exec_result = shelf::qwen35::create_model_executor(
-        model, seq_pool, rec_pool, kv_pool, arena, exec_config);
+    auto exec_result =
+        model.create_executor(seq_pool, rec_pool, kv_pool, arena, exec_config);
     if (!exec_result.ok()) {
         fprintf(stderr, "create_model_executor failed: %s\n",
             exec_result.status().message().c_str());

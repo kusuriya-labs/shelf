@@ -606,7 +606,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         }
         dflash.weights = weights_result.release();
 
-        const auto& text_config = runtime.model().text_config();
+        const auto& text_config = runtime.model().hybrid_config();
         const uint32_t batch_max_rows = std::min<uint32_t>(
             runtime.config().max_concurrent_requests *
                 static_cast<uint32_t>(dflash.config.block_size),
@@ -617,10 +617,10 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         draft_config.max_batch_rows = batch_max_rows;
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
         draft_config.target_lm_head = serve_tp_sharded ? private_lm_head
-                                       : &runtime.model().weights().lm_head;
+                                       : &runtime.model().lm_head();
         draft_config.target_embed_tokens =
             serve_tp_sharded ? private_embed
-                             : &runtime.model().weights().embed_tokens;
+                             : &runtime.model().embed_tokens();
         auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {

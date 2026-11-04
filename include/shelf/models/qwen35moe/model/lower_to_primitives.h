@@ -14,6 +14,9 @@ namespace shelf::qwen35moe {
 // contract. There is no MTP field either; speculative decode uses the DFlash2 drafter.
 struct Qwen35MoeLowerOptions {
     std::span<const uint32_t> hidden_taps;
+    // Layers whose input value the runtime wants to replace at run time. Like the hidden
+    // taps, these are exposed in the lowered form's layer_input_values.
+    std::span<const uint32_t> override_layers;
     float rope_attention_factor = 1.0f;
 };
 

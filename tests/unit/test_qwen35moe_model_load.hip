@@ -107,7 +107,7 @@ void check_backbone(const qhy::HybridLayerWeights& layer, bool is_gdn, const std
               tag + ": GDN layer body loaded");
         check(layer.attn_q_proj.rows == 0u, tag + ": a GDN layer carries no self_attn weights");
     } else {
-        check(layer.attn_q_proj.rows == 4u * 64u && layer.attn_k_proj.rows == 2u * 64u,
+        check(layer.attn_q_proj.rows == kAttnQRows && layer.attn_k_proj.rows == kAttnKvRows,
               tag + ": attention layer body loaded");
         check(layer.attn_in_proj_a.rows == 0u,
               tag + ": an attention layer carries no linear_attn weights");

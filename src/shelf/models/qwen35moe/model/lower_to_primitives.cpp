@@ -394,6 +394,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
             block.attention_indices.state_index = next_attention_state_index++;
         }
 
+        for (std::size_t o = 0; o < options.override_layers.size(); ++o) {
+            if (static_cast<std::size_t>(options.override_layers[o]) == li)
+                lowered.layer_input_values.emplace_back(static_cast<uint32_t>(li),
+                                                        layer_input);
+        }
+
         const QH::HybridBlockOutput blk =
             QH::emit_hybrid_block(em, hidden_key, block, layer_input, layer_prefix);
 

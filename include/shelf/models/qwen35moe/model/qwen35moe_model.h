@@ -1,0 +1,55 @@
+#pragma once
+#include <shelf/core/memory/arena.h>
+#include <shelf/core/status.h>
+#include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
+
+#include <hip/hip_runtime.h>
+
+#include <string>
+
+namespace shelf::qwen35moe {
+
+// A loaded MoE model: its config and one MoE layer per transformer layer, resident in the
+// caller's arena. There is no dense view of these weights and no MTP block; speculative
+// decode uses the DFlash2 drafter instead.
+class Qwen35MoeModel final {
+public:
+    Qwen35MoeModel(const Qwen35MoeModel&) = delete;
+    Qwen35MoeModel& operator=(const Qwen35MoeModel&) = delete;
+
+    Qwen35MoeModel(Qwen35MoeModel&&) noexcept = default;
+    Qwen35MoeModel& operator=(Qwen35MoeModel&&) noexcept = delete;
+
+    ~Qwen35MoeModel() = default;
+
+    static Result<Qwen35MoeModel> load_from_safetensors(
+        const std::string& model_dir,
+        gpu::GpuArena& arena,
+        hipStream_t stream,
+        const shelf::qwen_hybrid::HybridLoadOptions& options = {});
+
+    static Result<Qwen35MoeModel> adopt(
+        Qwen35MoeModelWeights&& weights,
+        Qwen35MoeTextConfig text_config);
+
+    [[nodiscard]]
+    const Qwen35MoeModelWeights&
+    weights() const noexcept {
+        return weights_;
+    }
+
+    [[nodiscard]]
+    const Qwen35MoeTextConfig&
+    text_config() const noexcept {
+        return text_config_;
+    }
+
+private:
+    Qwen35MoeModel(Qwen35MoeModelWeights&& weights, Qwen35MoeTextConfig text_config)
+        : weights_(std::move(weights)), text_config_(std::move(text_config)) {}
+
+    Qwen35MoeModelWeights weights_;
+    Qwen35MoeTextConfig text_config_;
+};
+
+}  // namespace shelf::qwen35moe

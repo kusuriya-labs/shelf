@@ -26,7 +26,7 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-uint32_t count_attention_layers(const qwen35::Qwen35TextConfig& tc) {
+uint32_t count_attention_layers(const qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
 
@@ -196,21 +196,18 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
     arena_.emplace(arena_result.release());
 
-    qwen35::Qwen35LoadOptions options;
-    options.verify_quantized_payload_crc = config_.verify_weights;
-
     const auto t_load_start = std::chrono::steady_clock::now();
-    auto model_result = qwen35::Qwen35Model::load_from_safetensors(
-        config_.model_dir, *arena_, stream_, options);
+    auto model_result = shelf::models::LoadedModel::load(
+        config_.model_dir, *arena_, stream_, config_.verify_weights);
     if (!model_result.ok()) {
         return model_result.status();
     }
-    model_ = std::make_unique<qwen35::Qwen35Model>(model_result.release());
+    model_ = std::make_unique<shelf::models::LoadedModel>(model_result.release());
     const auto t_load_end = std::chrono::steady_clock::now();
     model_load_ms_ =
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
-    const auto& text_config = model_->text_config();
+    const auto& text_config = model_->hybrid_config();
     const qwen_hybrid::StopTokens& generation_stop_tokens = text_config.stop_tokens;
     const std::size_t used_after_weights = arena_->used();
     const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
@@ -429,8 +426,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
 
     const std::size_t executor_before = arena_->used();
-    auto exec_result = qwen35::create_model_executor(
-        *model_, *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);
+    auto exec_result = model_->create_executor(
+        *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);
     fprintf(stderr,
             "MEMORY_PLAN executor footprint: %s (reserve %s)\n",
             gpu::format_gib(arena_->used() - executor_before).c_str(),
@@ -486,7 +483,7 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     spec_config.num_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
     std::size_t lm_head_k = 0u;
     if (model_) {
-        lm_head_k = static_cast<std::size_t>(model_->weights().lm_head.k_padded);
+        lm_head_k = static_cast<std::size_t>(model_->lm_head().k_padded);
     }
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
@@ -497,14 +494,9 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
     if (config_.working_set_reserve_bytes != 0u) {
         return;
     }
-    qwen35::ExecutorConfig reserve_config;
-    reserve_config.max_batch_rows = exec_max_tokens_;
-    reserve_config.max_scheduled_requests = config_.max_concurrent_requests;
-    reserve_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
-    reserve_config.target_hidden_tap_count = config_.target_hidden_tap_count;
-    config_.working_set_reserve_bytes = qwen35::runtime::qwen35_executor_reserve_bytes(
-        model_->text_config(), model_->text_config().ffn.intermediate_size, reserve_config,
-        config_.tp);
+    config_.working_set_reserve_bytes = model_->executor_reserve_bytes(
+        exec_max_tokens_, config_.max_concurrent_requests, config_.max_scheduled_output_rows,
+        config_.target_hidden_tap_count, config_.tp);
     fprintf(stderr, "MEMORY_PLAN auto: working set reserve %s (row bucket %u)\n",
             gpu::format_gib(config_.working_set_reserve_bytes).c_str(),
             static_cast<unsigned>(exec_max_tokens_));
@@ -565,7 +557,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     qwen35::runtime::TpRankRuntime& rank0 = tp_coordinator_->rank(0);
-    tp_model_ = &rank0.model();
+    tp_model_ = std::make_unique<shelf::models::LoadedModel>(
+        shelf::models::LoadedModel::borrow(rank0.model()));
     tp_executor_ = &rank0.executor();
     tp_slots_ = &rank0.sequence_pool();
     tp_gdn_ = &rank0.gdn_pool();
