@@ -71,8 +71,15 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   `shelf_inference_execution` は model 非依存層
 - `shelf_qwen35` / `shelf_qwen35_runtime` /
   `shelf_qwen35_kernels_optimized`（dflash2）は Qwen35 固有層
+- `shelf_qwen_hybrid` は Qwen hybrid backbone の共通部。FFN の形に依存しない config
+  geometry（`QwenHybridConfig`）、layer / model-level weight 型
+  （`HybridLayerWeights` / `HybridModelLevelWeights`）、FFN 非依存の checkpoint 読み取り
+  （`qwen_hybrid::weight_loader`）と共通 invariant 検証（`qwen_hybrid::weight_validation`）
+  を持つ。具体的なモデルを参照しない
+- `shelf_qwen35` は dense FFN を持つ Qwen35（config・weight・lowering・TP・MTP・DFlash2）。
+  `shelf_qwen_hybrid` に依存し、`shelf_qwen35moe` には依存しない
 - `shelf_qwen35moe` は Qwen35 MoE（config 契約・expert plan・rank-3 expert loader・
-  MoE FFN の weight 保持）。`shelf_qwen35` に依存する逆方向の依存は持たない
+  MoE FFN の weight 保持）。`shelf_qwen_hybrid` に依存し、`shelf_qwen35` には依存しない
 - `shelf_models` は dense / MoE の weight load を `num_experts` で選ぶ入口
   （`shelf::models::load_model_weights`）。両 loader を link する唯一のターゲット
 
@@ -96,16 +103,27 @@ Executor Executor
 weights loader（`shelf_weights`）の依存は下方向のみ:
 
 ```text
-shelf_weights -> shelf_quant_format / shelf_quant_bundle / shelf_quant_reference / shelf_io / shelf_core / shelf_gpu
-shelf_qwen35    -> shelf_weights
-shelf_qwen35moe -> shelf_qwen35
+shelf_weights   -> shelf_quant_format / shelf_quant_bundle / shelf_quant_reference / shelf_io / shelf_core / shelf_gpu
+shelf_qwen_hybrid -> shelf_weights + shelf_io + shelf_quant_bundle
+shelf_qwen35    -> shelf_qwen_hybrid
+shelf_qwen35moe -> shelf_qwen_hybrid
 shelf_models    -> shelf_qwen35 + shelf_qwen35moe
 ```
 
-`shelf_qwen35` は `qwen35moe` を参照しない（`test_architecture_boundaries` が静的に検証）。
-dense 側の layer load 部品は FFN を含まない「body」部分だけを
-`shelf/models/qwen35/weights/quantized_model_body.h` で公開し、FFN は各 loader が自分の
-名前で読む。
+```text
+        qwen35 (dense FFN)        qwen35moe (MoE FFN)
+                 \                     /
+                  v                   v
+              common/qwen_hybrid  (backbone config / weights / loader / validation)
+                          |
+                          v
+                shelf_weights / shelf_quant_* / shelf_io
+```
+
+`shelf_qwen35` と `shelf_qwen35moe` は互いに参照しない。FFN に依存しない layer load 部品は
+`shelf/models/common/qwen_hybrid/weight_loader.h` にあり、FFN の tensor 名は各 loader が
+自分の module で読む。checkpoint の layer prefix
+（`qwen_hybrid::layer_tensor_prefix`）も 1 箇所だけにある。
 
 weight の canonical → partition → preshuffle → upload の順序 contract は
 [tensor_partition.md](tensor_partition.md) を参照。
@@ -116,11 +134,17 @@ CMake targetの一覧は `cmake/targets.cmake` を参照。
 
 ```text
 runtime core -> Qwen35            : forbidden
-Qwen35 -> Qwen35 MoE             : forbidden（qwen35moe -> qwen35 の一方向のみ）
+Qwen35 -> Qwen35 MoE             : forbidden
+Qwen35 MoE -> Qwen35             : forbidden
+common/qwen_hybrid -> 具体モデル   : forbidden
 weights / quantization -> Qwen35  : forbidden（models/ の include 不可）
 Qwen35 model -> Qwen35 runtime    : forbidden
 Qwen35 kernels -> Qwen35 runtime  : forbidden
 ```
+
+`cmake/targets.cmake` の `target_link_libraries` も同じ test が token 単位で読み、
+dense / MoE の直接 link、`shelf_qwen_hybrid` のモデル link、`shelf_weights` /
+`shelf_runtime` のモデル link を拒否する。
 
 - `include/shelf/runtime/**` と `src/shelf/runtime/**` は
   Qwen35を一切参照しない（`qwen35` / `Qwen35` / `shelf/models/` が存在しない）。

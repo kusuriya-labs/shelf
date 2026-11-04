@@ -11,11 +11,14 @@ MoE 固有の contract をここに集約する。dense 側の配線・kernel・
 | namespace | `shelf::qwen35moe` |
 | headers | `include/shelf/models/qwen35moe/` |
 | sources | `src/shelf/models/qwen35moe/` |
-| CMake target | `shelf_qwen35moe`（`shelf_qwen35` に依存） |
+| CMake target | `shelf_qwen35moe`（`shelf_qwen_hybrid` に依存。`shelf_qwen35` には依存しない） |
 
 checkpoint の `model_type` は `qwen3_5_moe` だが、runtime family は `qwen35` のまま
 （rename しない）。MoE 固有の型・loader はこの module に置き、`shelf::qwen35` 側へ
-MoE の分岐を増やさない。
+MoE の分岐を増やさない。逆に `shelf::qwen35moe` は `shelf::qwen35` を include しない。
+両家が共有するのは `shelf::qwen_hybrid`（`include/shelf/models/common/qwen_hybrid/`）だけ
+であり、dense / MoE の直接依存は `test_architecture_boundaries` が source と
+`cmake/targets.cmake` の両方で拒否する。
 
 実装済みは config 契約、routed experts の weight 集約ロード、そして
 routing / grouped linear / combine の GPU kernel（standalone launcher）である。
@@ -26,13 +29,18 @@ lowering）は未実装**なので、`shelf-compute` は MoE checkpoint を prod
 
 ## 2. config 契約
 
-`shelf::qwen35moe::Qwen35MoeTextConfig` は `shelf::qwen35::Qwen35TextConfig` を基底とし、
-expert 幾何を追加する。読み込みは
+`shelf::qwen35moe::Qwen35MoeTextConfig` は FFN に依存しない geometry を持つ
+`shelf::qwen_hybrid::QwenHybridConfig` を基底にし、expert 幾何は `MoeFfnConfig ffn` に
+まとめる。dense の `intermediate_size` はこの型に存在しない（`Qwen35TextConfig` は
+兄弟であり、基底でも MoE の特殊形でもない）。読み込みは
 `Result<Qwen35MoeTextConfig> read_qwen35_moe_text_config(const std::string& model_dir)`。
+config.json の parse は `qwen_hybrid::read_qwen_hybrid_config` と
+`qwen_hybrid::read_text_config_sizes` / `has_text_config_key` の 1 箇所にあり、
+FFN の key は各自の family reader が読む。
 
 MoE 判定の正本は `text_config.num_experts > 0`。`model_type` 文字列での分岐はしない。
 
-| key | 意味 |
+| key（`config.ffn.*`） | 意味 |
 | --- | --- |
 | `num_experts` | routed expert 数 |
 | `num_experts_per_tok` | 1 token に選択される expert 数 |
@@ -44,7 +52,8 @@ MoE 判定の正本は `text_config.num_experts > 0`。`model_type` 文字列で
 - `num_experts > 0`（dense config を MoE reader が拒否する）
 - `num_experts_per_tok` は `[1, num_experts]`
 - `moe_intermediate_size` と `shared_expert_intermediate_size` は必須
-- `intermediate_size` を宣言してはならない（MoE には dense FFN が無い）
+- `intermediate_size` を宣言してはならない（MoE には dense FFN が無い）。
+  逆方向も対称で、dense reader は `num_experts` を宣言する config を拒否する（§5）
 
 `text_config.output_gate_type` が欠落している場合は `output_gate_silu = true`
 （Qwen3.5 MoE checkpoint はこの key を持たず、参照実装は常に silu を適用する）。
@@ -145,78 +154,121 @@ MoE checkpoint の weight load は `shelf::models` の factory が選ぶ。判�
 ```cpp
 // shelf/models/model_weights_factory.h
 enum class ModelFamily { Dense, Moe };
-struct LoadedModelWeights {
-    ModelFamily family;
-    shelf::qwen35::Qwen35ModelWeights dense;   // family == Dense
-    shelf::qwen35moe::MoeModelWeights moe;     // family == Moe
-    const shelf::qwen35::Qwen35ModelWeights& body() const;   // 両家に共通の形
-};
+using LoadedModelWeights = std::variant<
+    shelf::qwen35::Qwen35ModelWeights,          // family == Dense
+    shelf::qwen35moe::Qwen35MoeModelWeights>;   // family == Moe
+ModelFamily model_family(const LoadedModelWeights&) noexcept;
 Result<ModelFamily> probe_model_dir(const std::string& model_dir);
 Result<LoadedModelWeights> load_model_weights(model_dir, arena, stream, options);
 ```
 
+- factory が保持するのは **有効な 1 family の weight だけ**。両 family を同時に持つ
+  フィールドと、MoE から dense を取り出す `body()` は存在しない。具体型への access は
+  `std::get_if<shelf::qwen35moe::Qwen35MoeModelWeights>(...)` で明示する
+  （null は「その family では無い」ことを意味する）。
 - `shelf_models` は `shelf_qwen35` と `shelf_qwen35moe` を link する唯一のターゲット。
-  `shelf_qwen35` は `qwen35moe` を参照しない（`test_architecture_boundaries` が静的に検証）。
-- **MoE FFN は `shelf::qwen35moe` の型で保持する**。`Qwen35LayerWeights` に expert 字段は
-  増やさない（§1 の module 境界）。
+  両 family が互いを参照する必要はない（§1）。
+- factory はその family の validation を呼ぶ。GPU 実行方式は決めない。
+
+### MoE 側の weight 保持
 
 ```cpp
-// shelf/models/qwen35moe/weights/qwen35moe_model_load.h
-struct MoeLayerWeights {          // 1 layer の MoE FFN（GPU 常駐）
+// shelf/models/qwen35moe/weights/moe_ffn_weights.h
+struct MoeFfnWeights {          // 1 layer の MoE FFN（GPU 常駐）
     MatrixWeight router;          // [experts, hidden]
     MatrixWeight expert_w13;      // rank-3 native SoA、gate 行が先
     MatrixWeight expert_w2;       // rank-3 native SoA
     MatrixWeight shared_gate;     // [1, hidden]
     MatrixWeight shared_gate_proj, shared_up_proj, shared_down_proj;
 };
-struct MoeModelWeights {
-    shelf::qwen35::Qwen35ModelWeights body;   // embed / lm_head / norm / 层 layernorm + attn
-    std::vector<MoeLayerWeights> layers;      // body.layers と index が揃う
+
+// shelf/models/qwen35moe/weights/qwen35moe_model_load.h
+struct Qwen35MoeLayerWeights : shelf::qwen_hybrid::HybridLayerWeights {
+    MoeFfnWeights ffn;
+};
+struct Qwen35MoeModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
+    std::vector<Qwen35MoeLayerWeights> layers;
 };
 std::vector<std::string> moe_aux_tensor_names(layer);   // router / shared 5 本
 std::vector<std::string> moe_layer_logical_names(plan); // aux + experts（plan 順）
 uint64_t moe_expert_group_bytes(plan);                  // 常駐平面 byte の单一源
-Status moe_layer_weights_match_plan(w, plan);
-Result<MoeModelWeights> load_qwen35moe_weights(model_dir, arena, stream, options);
+Status moe_ffn_weights_match(ffn, plan, ffn_config);
+Status validate_qwen35moe_weights(weights, config);
+Result<Qwen35MoeModelWeights> load_qwen35moe_weights(model_dir, arena, stream, options);
 ```
 
-`body` の dense FFN 字段（`mlp_gate_proj` / `mlp_up_proj` / `mlp_down_proj`）は空のまま
-（checkpoint に存在しない）。`moe_layer_logical_names` は logical 名だけを返す。
-物理 `<name>_scale` は要求しない（§3）。
+- **layer 配列は 1 つ**。dense FFN の空フィールドも、dense model の内包も無い。
+  backbone（layernorm 2 本 + GDN / full attention）は `HybridLayerWeights` の字段で、
+  层の `is_gdn` と同じ構造体に入るので index の暗黙的同期は発生しない。
+- MoE layer 型は dense FFN 字段を表現できず、逆もまた同様
+  （`test_qwen35moe_model_load` の concept + `static_assert`）。
+- `moe_layer_logical_names` は logical 名だけを返す。物理 `<name>_scale` は要求しない（§3）。
+- `moe_ffn_weights_match` は expert 平面を plan で、router と shared expert を
+  `MoeFfnConfig` で検証する。shared expert の幅は `shared_expert_intermediate_size` であり、
+  routed expert の `moe_intermediate_size`（plan の `w13_gate_rows`）とは混同しない。
+  両者が異なる checkpoint も受理し、routed 幅の shared expert は拒否する。
 
-### dense 側が公開する部品
+### 共通 backbone loader
 
-FFN の形に依存しない部分だけを `shelf/models/qwen35/weights/quantized_model_body.h`
-で公開する。FFN は各 loader が自分の名前を読むので、dense 用フラグは存在しない。
+FFN の形に依存しない部品は `shelf/models/common/qwen_hybrid/weight_loader.h` にある。
+dense 側が公開する load 部品は存在せず、両家が同じ部品の上位に自分の FFN を置く。
 
 ```cpp
-qwen35_layer_is_gdn(config, layer)
-qwen35_hf_quantized_body_names(config)   // embed / lm_head / norm + 层 layernorm / attn
-qwen35_open_quantized_reader(model_dir, logical_names, verify_crc)
-qwen35_load_model_level_quantized(reader, config, arena, stream, options, weights)
-qwen35_load_layer_body_quantized(arena, stream, reader, layer, is_gdn, weight_options, w)
+qhy::layer_tensor_prefix(layer)            // "model.language_model.layers.<l>."
+qhy::hf_quantized_body_names(config)       // embed / lm_head / norm + 层 layernorm / attn
+qhy::open_quantized_model_reader(model_dir, logical_names, verify_crc)
+qhy::load_hybrid_model_level_quantized(reader, config, arena, stream, options, weights)
+qhy::load_hybrid_layer_body_quantized(arena, stream, reader, config, layer, options, w)
 ```
 
-`validate_qwen35_weights(weights, config)`（`qwen35_model.h`）は embed / lm_head の
-vocab、hidden 幅、final norm、layer 数、gdn / full_attention topology の
-model-level invariant で、FFN は検査しない。factory は dense / MoE の両方に同じものを
-適用する。
+`load_hybrid_layer_body_quantized` は `qhy::layer_is_gdn(config, layer)` で topology を
+決める（`layer_types` が层数分あればそれを優先し、無ければ `full_attention_interval` から
+導出する）。呼び出し側が `is_gdn` を渡さないため、load 結果と config が食い違えない。
+options は `qhy::HybridLoadOptions`（`verify_quantized_payload_crc` と
+`shelf::weights::WeightLoadOptions`）だけで、MTP や vocab partition の dense 固有
+オプションを MoE 側は要求できない。
+
+### 共通 invariant
+
+`shelf/models/common/qwen_hybrid/weight_validation.h`:
+
+```cpp
+qhy::validate_hybrid_model_level(model, config, layer_count)
+qhy::validate_hybrid_layer_body(layer, config, layer)
+qhy::validate_hybrid_layer_body(layer, hidden, is_gdn, tag)
+qhy::check_matrix_shape(w, rows, cols, tag)
+```
+
+- model level: embed / lm_head の vocab（vocab parallel の partition は許容）、hidden 幅、
+  final norm の幅、`lm_head_tied` と実体の一致、layer 数
+- layer body: 2 つの layernorm と、その topology が要求する attention tensor。
+  逆 topology の tensor が残っていれば拒否する
+- partition は axis と count で模型側の次元へ戻して比較するため、TP rank でも成立する
+
+FFN の検査は各 family の validation が持つ。dense は `validate_qwen35_weights`
+（`Qwen35TextConfig` を取る）で gate / up = `[intermediate, hidden]`、
+down = `[hidden, intermediate]`、MTP block を見る。MoE は `validate_qwen35moe_weights`
+で plan の幾何・stride・row_ref と router / shared 形状を見る。
 
 ### 受理条件
 
 | 条件 | 結果 |
 | --- | --- |
 | `options.weights.partition_plan != nullptr` | `Status::unsupported`（rank-3 の TP partition は contract 外。§3） |
-| `options.load_mtp_layers == true` | `Status::unsupported`（MoE は MTP 层を load しない。speculative decode は DFlash2 drafter） |
+| MTP 层の要求 | MoE loader の options 型に `load_mtp_layers` は存在しない。factory が dense options を受けて `Status::unsupported` |
 | Shelf quantized bundle（`shelf_quantization.json` がある dir） | `Status::unsupported`（MoE は HF real-quantized dir のみを読む） |
 | dense config（`num_experts == 0`） | `read_qwen35_moe_text_config` の `Status::invalid_argument` |
-| loaded 平面が plan の幾何 / stride / row_ref / router・shared 形状と不一致 | `moe_layer_weights_match_plan` が `Status::invalid_argument` |
+| loaded 平面が plan の幾何 / stride / row_ref と不一致、router・shared expert が config の幅と不一致 | `moe_ffn_weights_match` の `Status::invalid_argument` |
+| 层 topology 違反、backbone tensor 欠落、layer 数不一致 | `validate_qwen35moe_weights` の `Status::invalid_argument` |
 
-dense loader は MoE checkpoint を従来どおり拒否する（dense FFN 名が解決できず
-`logical tensor not found`）。この拒否と上の表は `test_qwen35moe_model_load` が固定する。
+dense loader は MoE checkpoint を config 段で拒否する。`read_qwen35_text_config` は
+`intermediate_size` を必須とし、`num_experts` を宣言する config を
+`dense config must not declare num_experts` で弾く（`num_experts: 0` は dense のまま）。
+この拒否と上の表は `test_qwen35moe_model_load` が固定する。
 
 load 時間 / host RSS / 実 checkpoint の `row_ref_exact` 平面数など、この段階の実測は
-[../research/20261104/moe_gate_d_load_wiring.md](../research/20261104/moe_gate_d_load_wiring.md)。
+[../research/20261104/moe_gate_d_load_wiring.md](../research/20261104/moe_gate_d_load_wiring.md)
+と [../research/20261104/moe_ffn_architecture_split.md](../research/20261104/moe_ffn_architecture_split.md)。
 
 ## 6. GPU kernel 契約（routing / grouped linear / combine）
 
@@ -333,14 +385,14 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 
 | test | label | 固定する内容 |
 | --- | --- | --- |
-| `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、gate 既定（key 省略時 silu） |
+| `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、gate 既定（key 省略時 silu）。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
 | `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range |
 | `test_moe_expert_slice_fixture` | `cpu;required` | 合成 checkpoint の shard 内連続配置、manifest の logical / 物理名契約、payload bit 一致 |
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件 |
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
-| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: factory の family 判定、`body`（embed / lm_head / norm / attention）と `layers`（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、dense FFN は空のまま、dense loader による MoE 拒否、MTP / partition plan / Shelf bundle の拒否、`moe_layer_weights_match_plan` の tamper 検知 |
+| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないことと MoE への MTP option 拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在を `static_assert` で固定 |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
@@ -356,7 +408,7 @@ Shelf の MXFP4 codec と同一規則で量子化した**あと**の値を HF �
 量子化誤差は参照側に含まれない。
 
 `test_qwen35moe_model_load_real`（`gpu1;optional;external_files`）は実 checkpoint を
-factory 経由で load し、`moe_layer_weights_match_plan` の一致と常駐 byte・load 時間・
+factory 経由で load し、`moe_ffn_weights_match` と `validate_qwen35moe_weights` の一致と常駐 byte・load 時間・
 peak RSS・`row_ref_exact` の平面数を表示する（`SHELF_MODEL_DIR_MOE`）。
 
 GPU 不足による skip は required では失敗として扱う（テスト受入ルール）。
@@ -369,9 +421,10 @@ model load は §5 で配線済み（`shelf-compute` はまだ dense 入口を�
 - `PrimitiveKind` / `PrimitiveNode` への MoE node、`lower_to_primitives` の emit、
   `emit_node` の case、`KernelId::MOE_ROUTER` / `LINEAR_MXFP4_GROUPED` / `MOE_COMBINE` と
   `try_launch_optimized` の分岐
-- `MoeModelWeights` を受け取る lowering。qwen35 側の `lower_to_primitives.cpp` は
-  dense FFN（`intermediate_size`）を前提にしており、MoE 几何では必ず失敗する。
-  MoE の emit は `shelf::qwen35moe` 側に置く（§1）
+- `Qwen35MoeModelWeights` を受け取る lowering。qwen35 側の `lower_to_primitives.cpp` は
+  dense FFN（`ffn.intermediate_size`）を前提にしており、MoE 几何では必ず失敗する。
+  MoE の emit は `shelf::qwen35moe` 側に置き、backbone 部分の primitive emit は
+  `shelf::qwen_hybrid` の型（`HybridLayerWeights`）をそのまま受け取れる（§1）
 - `WeightSlot` の `experts` / batch stride 字段と `make_weight_slot` /
   `upload_host_weight_table` / `validate_host_weight_slot` の追従
 - linear selector の allowlist に MoE geometry（`1024:2048` = w13、`2048:512` = w2、

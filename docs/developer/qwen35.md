@@ -497,6 +497,33 @@ Qwen35 の top-level load path は partition plan を
   - `geometry_check.h` / `gdn_geometry.h` / `attention_geometry.h`
   - `emitter.h` / `gdn_lowering.h`（`emit_gdn`） /
     `attention_lowering.h`（`emit_gated_attention`）
+
+### Weights / Config
+
+dense model の weight は「共通 backbone + dense FFN」の合成で、FFN 以外の字段を
+`shelf::qwen35` は持たない。
+
+- `include/shelf/models/qwen35/model/qwen35_config.h`
+  - `Qwen35TextConfig : shelf::qwen_hybrid::QwenHybridConfig { DenseFfnConfig ffn; }`
+  - `read_qwen35_text_config`：`intermediate_size` 必須。`num_experts` を宣言する
+    config は dense ではないので拒否する
+- `include/shelf/models/qwen35/weights/dense_ffn_weights.h`
+  - `DenseFfnWeights{gate, up, down}`
+- `include/shelf/models/qwen35/weights/model_weights.h`
+  - `Qwen35LayerWeights : shelf::qwen_hybrid::HybridLayerWeights { DenseFfnWeights ffn; }`
+  - `Qwen35MtpWeights`（1 层分の full attention backbone + dense FFN + fc + norms）
+  - `Qwen35ModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights { layers; mtp; }`
+  - `Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions`
+    （`load_mtp_layers` / `vocab_parallel_lm_head` は dense 固有）
+- `src/shelf/models/qwen35/weights/model_weights.cpp`
+  - dense FFN と MTP の tensor 名・load だけを持つ。embed / lm_head / final norm と
+    层の layernorm / attention は `shelf::qwen_hybrid` の load 部品を読む
+- `include/shelf/models/qwen35/model/qwen35_model.h`
+  - `validate_qwen35_weights(weights, Qwen35TextConfig)`：
+    `shelf::qwen_hybrid` の model-level / layer-body invariant に加え、
+    gate / up = `[intermediate, hidden]`、down = `[hidden, intermediate]`、
+    MTP block（backbone・FFN・fc・3 norms）を検査する。partition を考慮するので
+    TP rank の weight でも成立する
 - `src/shelf/runtime/program/program.cpp`
   - `build_program`
   - `build_program_set`
