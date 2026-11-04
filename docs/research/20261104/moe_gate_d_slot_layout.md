@@ -170,3 +170,44 @@ workspace 確保は Step 3（MoE node と dispatch）へ移した。消費者が
 確保項目だけ置くのは production 到達不能な placeholder になるため、node 追加と同じ commit に
 する。`tile_counts` の層毎 zero 初期化もそこでの決定になる
 （scan kernel が消費後に zero に戻す案と、launcher が memset する案を追加 launch 実測で選ぶ）。
+
+## 7. Step 2a: 层 block の emit を qwen_hybrid へ抽出（FFN は各 family が持つ）
+
+MoE lowering を `shelf::qwen35moe` 側に置く前に、dense lowering の层ループから
+**FFN を含まない block**（input norm → GDN / full attention → attention residual →
+post norm）を `qwen_hybrid::emit_hybrid_block`（`models/common/qwen_hybrid/block_lowering.h`）へ
+抽出した。dense 側はこれを見て FFN を emit し、MoE 側は同じ block を見て自分の FFN を
+emit する。抽出しないと backbone の 60 行が両家に複製され、norm 順序や state index 採番の
+逸脱が 2 所に生まれる。
+
+同じ理由で lowered 保持型も `qwen_hybrid::HybridLoweredPrimitives` に置いた。
+`Qwen35LoweredPrimitives` はその alias で、呼び出し側は `auto` しか使っていないため
+code path の変化は無い。
+
+### 等価性の実測（A/B）
+
+合成 checkpoint `tests/fixtures/qwen35/qwen35_gdn_tiny`（hidden 512 / 2 层 / vocab 512）で
+`shelf-compute --max-new-tokens 4 --hidden-taps 0` を `SHELF_WS_DEBUG=1` を付けて
+抽出前後で実行した。
+
+| | program workspace ranges | 生成 id |
+| --- | --- | --- |
+| 抽出前（`4e147c3`） | 10 プログラムすべて `ranges=43` | `186,507,39,454` |
+| 抽出後 | 10 プログラムすべて `ranges=43` | `186,507,39,454` |
+
+graph 検証・value binding・lifetime から決まる range 数と、greedy 生成列が一致した。
+required acceptance は 150 PASS / 0 FAIL / 0 ERROR / 0 SKIP
+（`test_qwen35_lowering_contract` / `test_qwen35_mtp_lowering` /
+`test_qwen35_gdn_gate_reference` を含む）。
+
+### 境界 test が実際の契約として機能した例
+
+抽出直後のコメントに「a dense model and an MoE model …」と書き、
+`test_architecture_boundaries` が
+
+```text
+FAIL: include/shelf/models/qwen35/model/lower_to_primitives.h contains forbidden MoE
+```
+
+で落ちた。dense 側のヘッダに MoE の語彙を書かない、というルールが文言レベルでも
+機械的に適用されている。表現を「whatever FFN a model emits」へ変えて解消した。

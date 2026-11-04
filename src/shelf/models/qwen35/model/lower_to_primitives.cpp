@@ -10,6 +10,7 @@
 #include <shelf/models/common/qwen_hybrid/gdn_lowering.h>
 #include <shelf/models/common/qwen_hybrid/attention_lowering.h>
 #include <shelf/models/common/qwen_hybrid/weight_slot.h>
+#include <shelf/models/common/qwen_hybrid/block_lowering.h>
 
 namespace shelf::qwen35 {
 
@@ -520,16 +521,11 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
 
         const auto& lp = layer_params[li];
-        RT::RmsNormNode input_rms;
-        input_rms.shape = hidden_key;
-        input_rms.eps = eps;
-        input_rms.group_size = hidden_size;
-        input_rms.parameter_index = lp.input_norm;
-        input_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId normed = em.unary(RT::PrimitiveNode{input_rms}, layer_input, hidden_size);
-        name_last("input_norm");
-
-        RT::ValueId block_out{0};
+        QH::HybridBlockLowering block;
+        block.is_gdn = lw.is_gdn;
+        block.eps = eps;
+        block.weight_input_norm = lp.input_norm;
+        block.weight_post_norm = lp.post_norm;
         if (lw.is_gdn) {
             const MW& w_qkv = *weight_pointers[lw_idx.gdn_qkv];
             const MW& w_z = *weight_pointers[lw_idx.gdn_z];
@@ -537,91 +533,61 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
             const MW& w_a = *weight_pointers[lw_idx.gdn_a];
             const MW& w_out = *weight_pointers[lw_idx.gdn_out];
 
-            const QH::GdnLoweringGeometry geo{
-                .key_heads = key_heads,
-                .value_heads = value_heads,
-                .key_head_dim = key_head_dim,
-                .value_head_dim = value_head_dim,
-                .conv_kernel = conv_kernel,
-                .eps = eps,
-                .out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
-                                                    : RT::ValueDType::BF16,
-            };
-            const QH::GdnLoweringWeights gdn_weights{
-                .qkv = &w_qkv,
-                .z = &w_z,
-                .b = &w_b,
-                .a = &w_a,
-                .out = &w_out,
-            };
-            const QH::GdnLoweringIndices gdn_indices{
-                .w_qkv = lw_idx.gdn_qkv,
-                .w_z = lw_idx.gdn_z,
-                .w_b = lw_idx.gdn_b,
-                .w_a = lw_idx.gdn_a,
-                .w_out = lw_idx.gdn_out,
-                .p_conv = lp.conv,
-                .p_dt_bias = lp.dt_bias,
-                .p_a_log = lp.a_log,
-                .p_gdn_norm = lp.gdn_norm,
-                .state_index = next_gdn_state_index++,
-            };
-            block_out = QH::emit_gdn(em, geo, gdn_weights, gdn_indices, normed,
-                                     layer_prefix);
+            block.gdn_geometry.key_heads = key_heads;
+            block.gdn_geometry.value_heads = value_heads;
+            block.gdn_geometry.key_head_dim = key_head_dim;
+            block.gdn_geometry.value_head_dim = value_head_dim;
+            block.gdn_geometry.conv_kernel = conv_kernel;
+            block.gdn_geometry.eps = eps;
+            block.gdn_geometry.out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
+                                                                  : RT::ValueDType::BF16;
+            block.gdn_weights.qkv = &w_qkv;
+            block.gdn_weights.z = &w_z;
+            block.gdn_weights.b = &w_b;
+            block.gdn_weights.a = &w_a;
+            block.gdn_weights.out = &w_out;
+            block.gdn_indices.w_qkv = lw_idx.gdn_qkv;
+            block.gdn_indices.w_z = lw_idx.gdn_z;
+            block.gdn_indices.w_b = lw_idx.gdn_b;
+            block.gdn_indices.w_a = lw_idx.gdn_a;
+            block.gdn_indices.w_out = lw_idx.gdn_out;
+            block.gdn_indices.p_conv = lp.conv;
+            block.gdn_indices.p_dt_bias = lp.dt_bias;
+            block.gdn_indices.p_a_log = lp.a_log;
+            block.gdn_indices.p_gdn_norm = lp.gdn_norm;
+            block.gdn_indices.state_index = next_gdn_state_index++;
         } else {
             const MW& w_q = *weight_pointers[lw_idx.attn_q];
             const MW& w_k = *weight_pointers[lw_idx.attn_k];
             const MW& w_v = *weight_pointers[lw_idx.attn_v];
             const MW& w_o = *weight_pointers[lw_idx.attn_o];
 
-            const QH::GatedAttentionLoweringGeometry geo{
-                .query_heads = q_heads,
-                .kv_heads = kv_heads,
-                .head_dim = head_dim,
-                .rotary_dim = rotary_dim,
-                .rope_theta = rope_theta,
-                .rope_attention_factor =
-                    static_cast<float>(options.rope_profile.attention_factor),
-                .eps = eps,
-                .out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
-                                                    : RT::ValueDType::BF16,
-            };
-            const QH::GatedAttentionLoweringWeights attn_weights{
-                .q = &w_q,
-                .k = &w_k,
-                .v = &w_v,
-                .o = &w_o,
-            };
-            const QH::GatedAttentionLoweringIndices attn_indices{
-                .w_q = lw_idx.attn_q,
-                .w_k = lw_idx.attn_k,
-                .w_v = lw_idx.attn_v,
-                .w_o = lw_idx.attn_o,
-                .p_q_norm = lp.q_norm,
-                .p_k_norm = lp.k_norm,
-                .state_index = next_attention_state_index++,
-            };
-            block_out = QH::emit_gated_attention(
-                em, geo, attn_weights, attn_indices, normed, layer_prefix);
+            block.attention_geometry.query_heads = q_heads;
+            block.attention_geometry.kv_heads = kv_heads;
+            block.attention_geometry.head_dim = head_dim;
+            block.attention_geometry.rotary_dim = rotary_dim;
+            block.attention_geometry.rope_theta = rope_theta;
+            block.attention_geometry.rope_attention_factor =
+                static_cast<float>(options.rope_profile.attention_factor);
+            block.attention_geometry.eps = eps;
+            block.attention_geometry.out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
+                                                                       : RT::ValueDType::BF16;
+            block.attention_weights.q = &w_q;
+            block.attention_weights.k = &w_k;
+            block.attention_weights.v = &w_v;
+            block.attention_weights.o = &w_o;
+            block.attention_indices.w_q = lw_idx.attn_q;
+            block.attention_indices.w_k = lw_idx.attn_k;
+            block.attention_indices.w_v = lw_idx.attn_v;
+            block.attention_indices.w_o = lw_idx.attn_o;
+            block.attention_indices.p_q_norm = lp.q_norm;
+            block.attention_indices.p_k_norm = lp.k_norm;
+            block.attention_indices.state_index = next_attention_state_index++;
         }
-
-        RT::ValueId attn_residual{0};
-        {
-            RT::ResidualAddNode ra{hidden_key};
-            attn_residual = em.value(hidden_size);
-            em.emit(RT::PrimitiveNode{ra}, {block_out, layer_input}, {attn_residual});
-            name_last("residual_attn");
-        }
-
-        RT::RmsNormNode post_rms;
-        post_rms.shape = hidden_key;
-        post_rms.eps = eps;
-        post_rms.group_size = hidden_size;
-        post_rms.parameter_index = lp.post_norm;
-        post_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId post_norm = em.unary(RT::PrimitiveNode{post_rms}, attn_residual,
-                                         hidden_size);
-        name_last("post_norm");
+        const QH::HybridBlockOutput blk =
+            QH::emit_hybrid_block(em, hidden_key, block, layer_input, layer_prefix);
+        const RT::ValueId attn_residual = blk.attention_residual;
+        const RT::ValueId post_norm = blk.post_norm;
 
         const MW& w_gate = *weight_pointers[lw_idx.mlp_gate];
         const MW& w_up = *weight_pointers[lw_idx.mlp_up];

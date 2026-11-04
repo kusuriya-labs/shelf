@@ -1,5 +1,6 @@
 #pragma once
 #include <shelf/core/status.h>
+#include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
@@ -13,12 +14,9 @@
 
 namespace shelf::qwen35 {
 
-struct Qwen35LoweredPrimitives {
-    shelf::runtime::PrimitiveGraph graph;
-    std::vector<shelf::runtime::WeightSlot> weights;
-    std::vector<shelf::runtime::StaticParameterSlot> parameters;
-    std::vector<std::pair<std::uint32_t, shelf::runtime::ValueId>> layer_input_values;
-};
+// The lowered form is family neutral: whatever FFN a model emits, the graph, its weight
+// table and its parameter table have the same shape, and the executor consumes one type.
+using Qwen35LoweredPrimitives = shelf::qwen_hybrid::HybridLoweredPrimitives;
 
 struct Qwen35LowerOptions {
     std::span<const uint32_t> hidden_taps;
