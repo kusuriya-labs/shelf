@@ -123,6 +123,26 @@ shared_expert_intermediate_size == 128`）だったので、この混同は検�
   （当初 config だけ 128 のまま tensor が 192 という fixture 不整合でテストが失敗した。
   検出したのは production 側の検証であり、fixture の穴だった）。
 
+## 6.1 ARCH-12: layer body の行列幅検査は撤回した（REJECT、自分の実装を差し替え）
+
+共通 layer body 検証で `self_attn.q/k/v_proj` の入力幅と `out_proj` の出力幅が
+`hidden_size` と一致することを要求した（partition を考慮して模型次元へ戻して比較）。
+**`test_weight_load` の BF16 fixture がこれを拒否した**ため、契約自体を調べ直した:
+
+- fixture は `k_padded` の非一致経路を検証するために `self_attn.k_proj` を
+  `cols = 24` / `hidden = 32` の**意図的な非一致形状**にしている（既存の意図であり、
+  fixture の誤りではない）
+- lowering は head 幾何を **weight から**取り、config の head 字段から再導出しない
+  （`common/qwen_hybrid/attention_geometry.h` は config 側も見るが、行列幅の正典は weight）
+- よって「attention 行列の入力幅 = hidden」はこの境界で保証されていない主張だった
+
+撤回後の layer body 検証は 3 点: (a) 2 つの layernorm が `[hidden]`、
+(b) その topology が要求する tensor が全てロード済み、(c) 逆 topology の tensor が無い。
+幅の検査は、契約が幅を定めている箇所だけに残した: model level の vocab / hidden、
+dense FFN の `[intermediate, hidden]` / `[hidden, intermediate]`（実 checkpoint 27B FP8・
+MXFP4・9B BF16 で通過を確認）。教訓: **fixture を通すために契約を緩めたのではなく、
+契約が元から及んでいない箇所へ検査を伸ばしていた**。
+
 ## 7. ARCH-7: dense config の受理条件を強化（ACCEPT）
 
 `read_qwen35_text_config` は `intermediate_size == 0` を拒否し、
