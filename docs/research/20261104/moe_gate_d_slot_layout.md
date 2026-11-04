@@ -337,3 +337,95 @@ Passed: 152  Failed: 0  Errors: 0  Skipped: 0
 - non-blocking stream では同期しない `hipMemcpy` を使い、2 回目の実行結果を readback したため
   test 側が race を起こした（実行していないのに差分が出た）。`hipStreamSynchronize` を入れて
   解消。production の executor は同期経路を持つので、この race は test 側だけのものである。
+
+## 10. Step 2b: MoE lowering と model head の共有
+
+`shelf::qwen35moe` に `lower_qwen35_moe_to_primitives(Qwen35MoeTextConfig, Qwen35MoeModelWeights,
+Qwen35MoeLowerOptions)` を置き、`Qwen35MoeModelWeights`（§5）から §6-1 の primitive を emit した。
+返り値は family 中立の `qwen_hybrid::HybridLoweredPrimitives` なので、executor は 1 型で消費できる。
+
+### 判断: model head を `qwen_hybrid::emit_hybrid_head` として抽出した
+
+抽出前、head（`OUTPUT_GATHER` → final norm → lm_head → `SAMPLING`）は
+**dense 主経路・MTP・(予定の)MoE の 3 箇所**に同じ形で現れる。node 列そのものより
+**外部出力 4 本の順**が問題で、これは executor の staging 順であり、family ごとに書き直すと
+実行時に破綻する（どの出力が何かを staging index で決めている）。よって集約した。
+
+- TP の vocab parallel は `qwen_hybrid` が TP 型を知らないので shared emit の外に残し、
+  返り値の `logits_node_index` を見て呼び出し側が node を patch する形にした
+- MTP は 4 本目の外部出力が normed_hidden（model は last block output）なので、
+  `tail_output_is_normed_hidden` の 1 個の bool で吸収した。これで MTP 側の 3 番目の複製も消えた
+
+等価性（合成 `tests/fixtures/qwen35/qwen35_gdn_tiny`、`--hidden-taps 0`、`SHELF_WS_DEBUG=1`）:
+
+| | program workspace ranges | greedy 生成 |
+| --- | --- | --- |
+| 抽出前（`764af6d`） | 10 プログラムすべて `ranges=43` | `186,507,39,454` |
+| 抽出後 | 10 プログラムすべて `ranges=43` | `186,507,39,454` |
+
+`test_qwen35_gdn_gate_reference` は抽出後も `rel_l2=0.0127745 mean_abs=0.00884933` /
+prompt argmax 186 で、抽出前と同一。
+
+### 却下: MoE 側に head を複製する
+
+hidden 2048 の model head は TP を使わないので 50 行程度で書けるが、外部出力の順と
+`OUTPUT_ROWS` / `TOKEN_ROWS` の domain 指定（normed_hidden は TOKEN_ROWS のまま）を
+2 箇手で保つことになり、drift が実行破綻になる。複製は採らない。
+
+### 合成 MoE fixture の幾何を一貫化した
+
+`tests/unit/moe_expert_fixture.h` の GDN 层は tensor 次元が geometry と無関係だった
+（`in_proj_a [64,hidden]`・`out_proj [hidden,hidden]`・`conv1d [64,1,4]`・`norm [hidden]`）上、
+config.json が `linear_*` を宣言していなかった。load は「loaded か」しか見ないため通っていたが、
+lowering は config の geometry から expected shape と view 幅を導くので
+
+```text
+invalid argument: view with empty feature range
+```
+
+で落ちた（GDN の q / k / v view の feature が 0 になった）。fixture を一貫した幾何へ直した:
+
+-宣言: `linear_num_key_heads 2` / `linear_key_head_dim 32` / `linear_num_value_heads 4` /
+  `linear_value_head_dim 16` / `linear_conv_kernel_dim 4`（qk 64・value 64・conv_features 192）
+- tensor: `in_proj_a`・`in_proj_b` を `[4,256]`、`conv1d` を `[192,1,4]`、`out_proj` を
+  `[256,64]`、`norm` を `[16]`、`dt_bias`・`A_log` を `[4]` へ（`in_proj_qkv [192,256]` と
+  `in_proj_z [64,256]` はそのままで一致）
+
+これで MoE fixture が **GDN 层と full attention 层の両方を含む lowerable checkpoint** になり、
+`test_qwen35moe_lowering` が hybrid backbone と MoE FFN の組合せを structure で固定できる。
+`tests/fixtures/qwen35moe`（HF f64 oracle 付きの 1 层 checkpoint）は full attention のみなので、
+これだけでは GDN + MoE が無カバーになる（実モデルは 40 层中 10 层が full attention）。
+
+### 実測
+
+新規 required test `test_qwen35moe_lowering`（`gpu1;required`）は 36 checks PASS。固定したのは
+§7 の表どおり（graph 構造、expert 平面の rank-3 native stride、group-row value 数と幅、
+head の外部出力 4 本の shape / 順、bucket R16 の program での dispatch 数・plan scratch・
+96 group 行・view の slot / offset、hidden tap の受理と拒否、不正 weight の 4 種の拒否）。
+
+```text
+required acceptance: Passed 153  Failed 0  Errors 0  Skipped 0
+実 checkpoint MoE load: 25.4 s / arena 20.527 GiB / expert planes 15.967 GiB /
+                        fold-exact 80 / 80 / peak RSS 21.26 GiB（Step 2b 後も不変）
+```
+
+tamper 実演（契約が機械的に効いていることの確認）:
+
+- up view の `feature_offset` を 0 へ潰す → `FAIL: the views name the gate half and the up half
+  of one grouped plane`（35 passed, 1 failed）。戻して PASS
+- `pg.grouped_row_shape` の宣言を消す → lowering が
+  `grouped row value without a declared grouped row shape` で失敗し test が FAIL
+
+### Step 4 の配線表面（この step で確認した事実）
+
+executor が family 依存になっている箇所は create 内に限られる:
+
+- `create_model_executor` 内の `model.text_config()`（hybrid 字段のみ使用）と
+  `lower_qwen35_to_primitives(...)` の 1 呼び出し
+- `Executor::model` を deref しているのは `dflash2_spec_decoder.cpp` の
+  `text_config()`（`num_hidden_layers` / `linear_num_key_heads`）と
+  `weights().embed_tokens` の 2 箇所だけで、どちらも hybrid 中立な型で読める
+
+`qwen35_executor_reserve_bytes` の `kProgramValuesPerFullRow = 44` は dense FFN の
+行あたり bf16 値数であり、MoE の group 平面（`2*inter`・`inter`・`hidden` × group 行数）と
+plan scratch を計上しない。MoE 用の項は group 行数から直接立てる（Step 4）。

@@ -27,6 +27,17 @@ inline constexpr std::uint32_t kExperts = 4;
 inline constexpr std::uint32_t kHidden = 256;
 inline constexpr std::uint32_t kInter = 128;
 inline constexpr std::size_t kLayers = 2;
+// The GDN geometry of the linear_attention layer, stated so the checkpoint tensors and the
+// config agree: in_proj_qkv carries the convolution features, in_proj_a / in_proj_b and
+// dt_bias / A_log carry the value head count, and out_proj reads the value features.
+inline constexpr std::uint32_t kKeyHeads = 2u;
+inline constexpr std::uint32_t kKeyHeadDim = 32u;
+inline constexpr std::uint32_t kValueHeads = 4u;
+inline constexpr std::uint32_t kValueHeadDim = 16u;
+inline constexpr std::uint32_t kConvKernel = 4u;
+inline constexpr std::uint32_t kQkFeatures = kKeyHeads * kKeyHeadDim;
+inline constexpr std::uint32_t kValueFeatures = kValueHeads * kValueHeadDim;
+inline constexpr std::uint32_t kConvFeatures = 2u * kQkFeatures + kValueFeatures;
 inline constexpr std::uint8_t kE8m0DeadByte = 1u;
 // High enough to leave the exact fold band (row spread 11 > 8) while staying within
 // three powers of two of the other blocks, so the same payload serves the load test and
@@ -60,6 +71,11 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
     c.num_attention_heads = 4;
     c.num_key_value_heads = 2;
     c.attention_head_dim = 64;
+    c.linear_num_key_heads = kKeyHeads;
+    c.linear_key_head_dim = kKeyHeadDim;
+    c.linear_num_value_heads = kValueHeads;
+    c.linear_value_head_dim = kValueHeadDim;
+    c.linear_conv_kernel_dim = kConvKernel;
     // Matches the config_json layer_types order (layer 0 linear_attention, layer 1
     // full_attention) the way the model-level topology check derives it.
     c.full_attention_interval = 2;
@@ -80,6 +96,17 @@ inline std::string config_json(std::uint32_t shared_inter = kInter) {
     json += R"json(,"shared_expert_intermediate_size":)json";
     json += std::to_string(shared_inter);
     json += R"json(,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":64,)json";
+    json += R"json("linear_num_key_heads":)json";
+    json += std::to_string(kKeyHeads);
+    json += R"json(,"linear_key_head_dim":)json";
+    json += std::to_string(kKeyHeadDim);
+    json += R"json(,"linear_num_value_heads":)json";
+    json += std::to_string(kValueHeads);
+    json += R"json(,"linear_value_head_dim":)json";
+    json += std::to_string(kValueHeadDim);
+    json += R"json(,"linear_conv_kernel_dim":)json";
+    json += std::to_string(kConvKernel);
+    json += R"json(,)json";
     json += R"json("full_attention_interval":2,"layer_types":["linear_attention","full_attention"]},)json";
     json += R"json("quantization_config":{"quant_method":"quark","version":"0.13",)json";
     json += R"json("global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group",)json";
@@ -164,19 +191,27 @@ inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
                            make_bf16(rows * cols, seed)});
     };
     if (layer % 2u == 0u) {
-        matrix("linear_attn.in_proj_a.weight", 64, kHidden, 41u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_b.weight", 64, kHidden, 43u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_qkv.weight", 3 * 64, kHidden, 47u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_z.weight", 64, kHidden, 53u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_a.weight", kValueHeads, kHidden,
+               41u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_b.weight", kValueHeads, kHidden,
+               43u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_qkv.weight", kConvFeatures, kHidden,
+               47u + static_cast<std::uint32_t>(layer));
+        matrix("linear_attn.in_proj_z.weight", kValueFeatures, kHidden,
+               53u + static_cast<std::uint32_t>(layer));
         planned.push_back({prefix + "linear_attn.conv1d.weight", shelf::io::SType::BF16,
-                           {64, 1, 4}, make_bf16(64 * 4, 59u + static_cast<std::uint32_t>(layer))});
-        matrix("linear_attn.out_proj.weight", kHidden, kHidden, 61u + static_cast<std::uint32_t>(layer));
-        planned.push_back({prefix + "linear_attn.norm.weight", shelf::io::SType::BF16, {kHidden},
-                           make_bf16(kHidden, 67u + static_cast<std::uint32_t>(layer))});
-        planned.push_back({prefix + "linear_attn.dt_bias", shelf::io::SType::BF16, {64},
-                           make_bf16(64, 71u + static_cast<std::uint32_t>(layer))});
-        planned.push_back({prefix + "linear_attn.A_log", shelf::io::SType::BF16, {64},
-                           make_bf16(64, 73u + static_cast<std::uint32_t>(layer))});
+                           {kConvFeatures, 1u, kConvKernel},
+                           make_bf16(kConvFeatures * kConvKernel,
+                                     59u + static_cast<std::uint32_t>(layer))});
+        matrix("linear_attn.out_proj.weight", kHidden, kValueFeatures,
+               61u + static_cast<std::uint32_t>(layer));
+        planned.push_back({prefix + "linear_attn.norm.weight", shelf::io::SType::BF16,
+                           {kValueHeadDim},
+                           make_bf16(kValueHeadDim, 67u + static_cast<std::uint32_t>(layer))});
+        planned.push_back({prefix + "linear_attn.dt_bias", shelf::io::SType::BF16, {kValueHeads},
+                           make_bf16(kValueHeads, 71u + static_cast<std::uint32_t>(layer))});
+        planned.push_back({prefix + "linear_attn.A_log", shelf::io::SType::BF16, {kValueHeads},
+                           make_bf16(kValueHeads, 73u + static_cast<std::uint32_t>(layer))});
     } else {
         matrix("self_attn.q_proj.weight", 4 * 64, kHidden, 79u + static_cast<std::uint32_t>(layer));
         matrix("self_attn.k_proj.weight", 2 * 64, kHidden, 83u + static_cast<std::uint32_t>(layer));

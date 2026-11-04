@@ -11,6 +11,7 @@
 #include <shelf/models/common/qwen_hybrid/attention_lowering.h>
 #include <shelf/models/common/qwen_hybrid/weight_slot.h>
 #include <shelf/models/common/qwen_hybrid/block_lowering.h>
+#include <shelf/models/common/qwen_hybrid/head_lowering.h>
 
 namespace shelf::qwen35 {
 
@@ -651,46 +652,20 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         const uint32_t out_vocab =
             vocab_parallel ? static_cast<uint32_t>(global_vocab) : lmw->rows;
 
-        RT::ValueId selected_hidden = em.value(
-            hidden_size, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
-        RT::OutputGatherNode og{RT::RowwiseShapeKey{hidden_size}};
-        em.emit(RT::PrimitiveNode{og}, {layer_input}, {selected_hidden});
-        pg.nodes.back().debug_name = "selected_hidden";
-
-        RT::RmsNormNode head_rms;
-        head_rms.shape = hidden_key;
-        head_rms.eps = eps;
-        head_rms.group_size = hidden_size;
-        head_rms.parameter_index = final_norm_param;
-        head_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId normed_hidden = em.value(hidden_size);
-        em.emit(RT::PrimitiveNode{head_rms}, {selected_hidden}, {normed_hidden});
-        pg.nodes.back().debug_name = "final_norm";
-
-        RT::ValueId selected_logits = em.value(
-            out_vocab, RT::ValueDType::F32, RT::ValueRowDomain::OUTPUT_ROWS);
-        RT::LinearNode ln;
-        ln.shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-        ln.weight_index = lm_index;
-        ln.out_dtype = RT::ValueDType::F32;
-        em.emit(RT::PrimitiveNode{ln}, {normed_hidden}, {selected_logits});
-        pg.nodes.back().debug_name = "logits";
+        QH::HybridHeadLowering head;
+        head.hidden_features = hidden_size;
+        head.eps = eps;
+        head.final_norm_param = final_norm_param;
+        head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+        head.lm_weight_index = lm_index;
+        head.out_vocab = out_vocab;
+        const QH::HybridHeadOutput hd = QH::emit_hybrid_head(em, head, layer_input);
         if (vocab_parallel) {
-            pg.nodes.back().tp_combine = 1;
-            pg.nodes.back().tp_combine_local_cols = lmw->rows;
+            pg.nodes[hd.logits_node_index].tp_combine = 1;
+            pg.nodes[hd.logits_node_index].tp_combine_local_cols = lmw->rows;
             lowered.weights[lm_index].output_col_offset = lm_head_col_offset;
             lowered.weights[lm_index].output_col_total = out_vocab;
         }
-
-        RT::ValueId sampled = em.value(
-            1, RT::ValueDType::I32, RT::ValueRowDomain::OUTPUT_ROWS);
-        em.emit(RT::PrimitiveNode{RT::SamplingNode{out_vocab}}, {selected_logits}, {sampled});
-        pg.nodes.back().debug_name = "sampled";
-
-        pg.external_outputs.push_back(selected_hidden);
-        pg.external_outputs.push_back(selected_logits);
-        pg.external_outputs.push_back(sampled);
-        pg.external_outputs.push_back(layer_input);
     }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
@@ -926,43 +901,20 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
         em.emit(RT::PrimitiveNode{ra}, {v_down, attn_residual}, {layer_output});
     }
 
-    RT::RmsNormNode final_rms;
-    final_rms.shape = hidden_key;
-    final_rms.eps = eps;
-    final_rms.group_size = hidden_size;
-    final_rms.parameter_index = p_finalnorm;
-    final_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-
-    RT::ValueId selected_hidden = em.value(
-        hidden_size, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
-    RT::OutputGatherNode og{RT::RowwiseShapeKey{hidden_size}};
-    em.emit(RT::PrimitiveNode{og}, {layer_output}, {selected_hidden});
-
-    RT::ValueId normed_hidden =
-        em.unary(RT::PrimitiveNode{final_rms}, selected_hidden, hidden_size);
-
     const MW* lmw = weights.lm_head_tied ? &weights.embed_tokens : &weights.lm_head;
     if (lmw->rows != config.vocab_size) {
         return Status::unsupported(
             "mtp lowering requires an unsharded lm_head", __FILE__, __LINE__);
     }
-    RT::ValueId selected_logits = em.value(
-        lmw->rows, RT::ValueDType::F32, RT::ValueRowDomain::OUTPUT_ROWS);
-    {
-        RT::LinearNode ln;
-        ln.shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-        ln.weight_index = lm_index;
-        ln.out_dtype = RT::ValueDType::F32;
-        em.emit(RT::PrimitiveNode{ln}, {normed_hidden}, {selected_logits});
-    }
-
-    RT::ValueId sampled = em.value(1, RT::ValueDType::I32, RT::ValueRowDomain::OUTPUT_ROWS);
-    em.emit(RT::PrimitiveNode{RT::SamplingNode{lmw->rows}}, {selected_logits}, {sampled});
-
-    pg.external_outputs.push_back(selected_hidden);
-    pg.external_outputs.push_back(selected_logits);
-    pg.external_outputs.push_back(sampled);
-    pg.external_outputs.push_back(normed_hidden);
+    QH::HybridHeadLowering head;
+    head.hidden_features = hidden_size;
+    head.eps = eps;
+    head.final_norm_param = p_finalnorm;
+    head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+    head.lm_weight_index = lm_index;
+    head.out_vocab = lmw->rows;
+    head.tail_output_is_normed_hidden = true;
+    QH::emit_hybrid_head(em, head, layer_output);
 
     auto st = RT::validate_primitive_graph(pg);
     if (!st.ok()) return st;

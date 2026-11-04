@@ -78,8 +78,10 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   を持つ。具体的なモデルを参照しない。
   lowering の共有部品もここが持つ: 层の block emit（`emit_hybrid_block` = input norm →
   GDN / full attention → attention residual → post norm。FFN は各 family が自分の形を
-  emit する）と、family 中立な lowered 保持型（`HybridLoweredPrimitives`）、
-  `MatrixWeight` → `runtime::WeightSlot` の写し（`make_weight_slot`）。
+  emit する）、model head の emit（`emit_hybrid_head` = output gather → final norm →
+  lm_head → sampling。外部出力 4 本の順もここで固定する）、family 中立な lowered 保持型
+  （`HybridLoweredPrimitives`）、`MatrixWeight` → `runtime::WeightSlot` の写し
+  （`make_weight_slot`）。
   層の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
   （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で層数を数える
   `count_layer_topology`。GDN state pool・KV pool・TP plan・apps は全部これを使う
