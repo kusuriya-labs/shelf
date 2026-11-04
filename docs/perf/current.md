@@ -123,6 +123,28 @@ teacher forcing できる。
   top-1 一致 0.9375、top-5 overlap 0.9563。TP1 と TP2 の差は reduction 順序によるもので、
   `quality` の `LoadedModel` 化で生じた変更ではない（`--tp 2` は dense のみ受理）
 
+## 2026-11-04 Qwen3.5-9B BF16 linear allowlist
+
+`models/Qwen3.5-9B`（BF16）の hidden 4096 系 linear shape を
+`kLinearShapeRules` に追加した。201 token prompt / 8 decode token / BF16 KV で、
+変更前と変更後をそれぞれ 5 run 計測した。
+
+| 項目 | 変更前 p50 | 変更後 p50 |
+| --- | ---: | ---: |
+| prefill ms | 12392.6 | 294.3 |
+| decode tok/s | 3.77 | 13.69 |
+
+- measurement revision: 変更後 `500367c`、変更前 `5b4885f`（target-only 経路は同一。
+  変更前は `feature/mtp` worktree の MTP 無効 build で計測）
+- GPU: Radeon AI PRO R9700 × 1（`--device 0`）
+- command: `shelf-compute --model-dir models/Qwen3.5-9B --input-ids-file <prose 201 tokens> --max-new-tokens 8 --max-seq-len 512 --device 0 --prefix-cache 0`
+- prompt: `tests/data/mtp_perf/prose.txt` を Qwen3.5-9B の tokenizer で 201 token に切ったもの
+- 生成一致 anchor（`GENERATED_IDS` の sha1）: `db823356300f09e2258f9f9615ffd0df7abebb74`
+- 変更前の decode は 5 run 中 1 run が 2.48 tok/s、他は 3.77–3.78。変更後は
+  13.62–13.70 で安定。
+- 変更前は `SHELF_LINEAR_DEBUG=1` で 7 shape の `LINEAR_SELECT_MISS` が出ていた。
+  変更後は通常 decode で miss が出ない。生成列は correctness mode と一致する。
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。
