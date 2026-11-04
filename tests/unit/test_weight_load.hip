@@ -2,6 +2,8 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/io/safetensors_writer.h>
+#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
@@ -362,7 +364,10 @@ static void test_bf16_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
     check(got == t[0].bytes, "bf16 bytes");
 }
 
-static bool build_bf16_model(const fs::path& dir) {
+// lm_head_name lets a case place the output head the way a HF checkpoint does: the
+// transformer tensors carry the model.language_model. prefix, lm_head does not.
+static bool build_bf16_model(const fs::path& dir,
+                             const char* lm_head_name = "model.language_model.lm_head.weight") {
     std::vector<Planned> t;
     const auto add = [&](const std::string& name, io::SType dt, std::vector<std::size_t> shape, uint32_t seed) {
         Planned p;
@@ -375,7 +380,7 @@ static bool build_bf16_model(const fs::path& dir) {
     };
 
     add("model.language_model.embed_tokens.weight", io::SType::BF16, {40, 32}, 1);
-    add("model.language_model.lm_head.weight", io::SType::BF16, {40, 32}, 2);
+    add(lm_head_name, io::SType::BF16, {40, 32}, 2);
     add("model.language_model.norm.weight", io::SType::BF16, {32}, 3);
 
     add("model.language_model.layers.0.input_layernorm.weight", io::SType::F32, {32}, 4);
@@ -488,6 +493,29 @@ static void test_bf16_model_load(gpu::GpuArena& arena, hipStream_t stream) {
     if (!wr2.ok()) { fail("bf16 model load skip_preshuffle"); return; }
     qwen35::Qwen35ModelWeights w2 = wr2.release();
     check(!w2.layers[1].attn_q_proj.preshuffled, "skip_preshuffle q raw");
+}
+
+static void test_bf16_model_load_bare_lm_head(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("bf16_model_bare_head");
+    if (!build_bf16_model(dir, "lm_head.weight")) return;
+
+    auto wr = qwen35::load_qwen35_weights_from_safetensors(dir.string(), arena, stream,
+                                                           qwen35::Qwen35LoadOptions{});
+    if (!wr.ok()) { fail("bf16 model load with bare lm_head.weight: " + wr.status().message()); return; }
+    qwen35::Qwen35ModelWeights w = wr.release();
+
+    check_eq_u64(w.lm_head.rows, 40, "bare lm_head rows");
+    check_eq_u64(w.lm_head.cols, 32, "bare lm_head cols");
+    check(!w.lm_head_tied, "bare lm_head is untied");
+    check(w.lm_head.bf16.data() != w.embed_tokens.bf16.data(),
+          "bare lm_head is its own storage");
+
+    auto config_res = qwen35::read_qwen35_text_config(dir.string());
+    check(config_res.ok(), "bare lm_head config read");
+    if (config_res.ok()) {
+        auto st = qwen35::validate_qwen35_weights(w, config_res.value());
+        check(st.ok(), std::string("bare lm_head model invariants: ") + (st.ok() ? "" : st.message()));
+    }
 }
 
 static void test_standalone_quantized_reader(gpu::GpuArena& arena, hipStream_t stream) {
@@ -1227,6 +1255,7 @@ int main() {
 
     test_bf16_matrix_load(arena, stream);
     test_bf16_model_load(arena, stream);
+    test_bf16_model_load_bare_lm_head(arena, stream);
     test_standalone_quantized_reader(arena, stream);
     test_qwen35_quantized_model_load(arena, stream);
     test_qwen35_hf_fp8_model_load(arena, stream);

@@ -332,7 +332,11 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     } else {
         auto m = shelf::weights::load_bf16_matrix(
             collection, "model.language_model.lm_head.weight", arena, stream, embed_load);
-        if (!m.ok()) return m.status();
+        if (!m.ok()) {
+            m = shelf::weights::load_bf16_matrix(
+                collection, "lm_head.weight", arena, stream, embed_load);
+            if (!m.ok()) return m.status();
+        }
         weights.lm_head = m.release();
         weights.lm_head_tied = false;
     }
