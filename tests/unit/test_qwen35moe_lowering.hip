@@ -300,8 +300,8 @@ int main() {
 
     const rt::MoePlanScratch bucket =
         rt::MoePlanScratch::make(kBucketTokens, kExperts, kTopK);
-    check(bucket.row_capacity == 96u && bucket.group_capacity == 6u,
-          "bucket R16 with 4 experts and top_k 2 holds 96 group rows");
+    check(bucket.row_capacity == 64u && bucket.group_capacity == 4u,
+          "bucket R16 with 4 experts and top_k 2 holds 64 group rows");
     check(program.plan_scratch_slot != rt::kNoWorkspace &&
               program.workspace.ranges[program.plan_scratch_slot].bytes >= bucket.bytes(),
           "the program carries one plan scratch range at the bucket capacity");

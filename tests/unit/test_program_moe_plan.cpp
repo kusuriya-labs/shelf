@@ -225,7 +225,7 @@ std::string kernel_sequence(const rt::Program& program, size_t from) {
 void check_plan_scratch(const rt::Program& program) {
     const rt::MoePlanScratch plan = rt::MoePlanScratch::make(kBucketTokens, kExperts, kTopK);
     check(plan.slots == kBucketTokens * kTopK, "scratch holds one entry per slot");
-    check(plan.group_capacity == 6u && plan.row_capacity == 96u,
+    check(plan.group_capacity == 4u && plan.row_capacity == 64u,
           "scratch sizes match the grouped row capacity");
     check(plan.row_token_offset > plan.group_count_offset &&
               plan.slot_row_of_offset > plan.row_token_offset &&
