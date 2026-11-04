@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/config.h>
 #include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/runtime/program/device_program.h>
 
 #include <hip/hip_runtime.h>
 
@@ -28,7 +29,8 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
-    uint32_t tiles) {
+    uint32_t tiles,
+    uint32_t* error_word) {
     const uint32_t t = blockIdx.x;
     if (t >= rows)
         return;
@@ -40,9 +42,18 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
     float v[kRouterMaxPerThread];
     uint32_t idx[kRouterMaxPerThread];
     uint32_t n = 0u;
+    uint32_t non_finite = 0u;
     float best = -INFINITY;
     for (uint32_t e = tid; e < experts; e += kRouterThreads) {
-        const float x = row[e];
+        // A non-finite logit is a numeric anomaly, and this row is reported for it. It may not
+        // win the selection either: a winner taken from NaN probabilities falls back to the
+        // search sentinel, and an expert index outside [0, experts) walks the plan arrays and
+        // the scatter past their capacity.
+        const float raw = row[e];
+        const bool finite = isfinite(raw);
+        if (!finite)
+            ++non_finite;
+        const float x = finite ? raw : -INFINITY;
         idx[n] = e;
         v[n] = x;
         ++n;
@@ -52,15 +63,30 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
 
     __shared__ float s_val[kRouterWaves];
     __shared__ int32_t s_idx[kRouterWaves];
+    __shared__ uint32_t s_non_finite[kRouterWaves];
     __shared__ int32_t s_win_idx[kMoeRouterMaxTopK];
     __shared__ float s_win_val[kMoeRouterMaxTopK];
 
+    #pragma unroll
+    for (uint32_t off = 16u; off > 0u; off >>= 1u)
+        non_finite += __shfl_xor_sync(0xffffffffULL, non_finite, off);
+    if (lane == 0u)
+        s_non_finite[wave] = non_finite;
     #pragma unroll
     for (uint32_t off = 16u; off > 0u; off >>= 1u)
         best = fmaxf(best, __shfl_xor_sync(0xffffffffULL, best, off));
     if (lane == 0u)
         s_val[wave] = best;
     __syncthreads();
+    uint32_t row_non_finite = s_non_finite[0];
+    #pragma unroll
+    for (uint32_t w = 1u; w < kRouterWaves; ++w)
+        row_non_finite += s_non_finite[w];
+    if (row_non_finite != 0u && tid == 0u && error_word != nullptr) {
+        atomicCAS(error_word,
+                  static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE),
+                  static_cast<uint32_t>(::shelf::runtime::ProgramStatus::NUMERIC_ERROR));
+    }
     float row_max = s_val[0];
     #pragma unroll
     for (uint32_t w = 1u; w < kRouterWaves; ++w)
@@ -145,7 +171,7 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
 }
 
 __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
-    const uint32_t* __restrict__ tile_counts,
+    uint32_t* __restrict__ tile_counts,
     uint32_t* __restrict__ expert_row_begin,
     uint32_t* __restrict__ tile_base,
     uint32_t* __restrict__ expert_group_begin,
@@ -186,6 +212,12 @@ __global__ void __launch_bounds__(kScanThreads) moe_slot_scan_kernel(
         group_count[0] = groups;
     }
     __syncthreads();
+
+    // The router accumulates these counters, so a round that consumed them has to leave
+    // them at zero: a model with several MoE layers shares one plan scratch, and the host
+    // cannot zero them per layer without one more launch per layer.
+    const uint32_t counts_here = experts * tiles;
+    for (uint32_t c = tid; c < counts_here; c += kScanThreads) tile_counts[c] = 0u;
 
     // The activation producer launches over the host capacity, so every row that no group
     // claims has to say so, not just the tail past the last active group.
@@ -243,6 +275,7 @@ hipError_t launch_moe_router(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
+    uint32_t* error_word,
     hipStream_t stream) {
     if (logits == nullptr || sel_expert == nullptr || sel_weight == nullptr || tile_counts == nullptr)
         return hipErrorInvalidValue;
@@ -254,12 +287,13 @@ hipError_t launch_moe_router(
         return hipErrorInvalidValue;
     const uint32_t tiles = moe_slot_tile_count(rows);
     moe_router_kernel<<<rows, kRouterThreads, 0, stream>>>(
-        logits, logits_row_stride, sel_expert, sel_weight, tile_counts, rows, experts, top_k, tiles);
+        logits, logits_row_stride, sel_expert, sel_weight, tile_counts, rows, experts, top_k, tiles,
+        error_word);
     return hipGetLastError();
 }
 
 hipError_t launch_moe_slot_scan(
-    const uint32_t* tile_counts,
+    uint32_t* tile_counts,
     uint32_t* expert_row_begin,
     uint32_t* tile_base,
     uint32_t* expert_group_begin,

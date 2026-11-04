@@ -1,13 +1,13 @@
 #pragma once
 
 #include <shelf/models/qwen35/runtime/runtime_request.h>
-#include <shelf/models/qwen35/model/qwen35_config.h>
+#include <shelf/models/common/qwen_hybrid/config.h>
 
 #include <cstdint>
 
 namespace shelf::app {
 
-inline uint32_t count_attention_layers(const shelf::qwen35::Qwen35TextConfig& tc) {
+inline uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }

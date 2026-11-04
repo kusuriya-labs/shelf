@@ -110,6 +110,14 @@ Status execute_program(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+// Prepare the device state a program run starts from. The plan scratch of a grouped expert
+// FFN is accumulated into by the router, so a run has to start from zeros; the scan then
+// leaves the counters zero, which is what lets every layer of one run share a single scratch.
+Status prepare_program_run(
+    const ::shelf::runtime::Program& program,
+    HostExecutionContext& ctx,
+    hipStream_t stream);
+
 Status execute_program_range(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,

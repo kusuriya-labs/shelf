@@ -284,7 +284,10 @@ codes bytes     = rows * padded_k / 2
 metadata1 bytes = rows * padded_k / 32
 ```
 
-scale は row を共有しないため、batch / rank-3 では各行列分を積み上げる。
+scale は row を共有しないため、batch / rank-3 では各行列分を積み上げる。その expert 間の
+stride は `include/shelf/quantization/mxfp4/mxfp4_native.h` の
+`mxfp4_native_codes_batch_stride_bytes` / `mxfp4_native_scale_batch_stride_bytes` が単一源で、
+native preshuffle・weight plan・weight table 検証・grouped GEMM はいずれもこの式を読む。
 
 ---
 

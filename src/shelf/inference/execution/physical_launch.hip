@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/physical_launch.h>
+#include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/quantization/quant_contract.h>
 
 #include <shelf/inference/execution/decode_perf_stats.h>
@@ -184,7 +185,18 @@ Result<PhysicalResolveStatus> resolve_activation_quantize_physical(
     if (b.activation_kp < in.feature_count || (b.activation_kp & 31u) != 0u)
         return Status::invalid_state("act-quant optimized: activation_kp invalid",
                                      __FILE__, __LINE__);
-    const uint32_t rows = rows_for(in, ctx);
+    uint32_t rows = rows_for(in, ctx);
+    // A grouped plane is addressed in group rows: the plan geometry sizes the rows, and the
+    // rows whose input is still token rows are gathered through the plan's row_token.
+    const bool grouped = in.row_domain == ::shelf::runtime::ValueRowDomain::GROUPED_ROWS ||
+                         b.scratch_slot != ::shelf::runtime::kNoWorkspace;
+    if (grouped) {
+        const Result<MoePlanView> plan = resolve_moe_plan(program, b, ctx);
+        if (!plan.ok()) return plan.status();
+        rows = plan.value().row_capacity;
+        if (in.row_domain == ::shelf::runtime::ValueRowDomain::TOKEN_ROWS)
+            out.row_index = reinterpret_cast<uint64_t>(plan.value().arrays.row_token);
+    }
     if (rows == 0) return PhysicalResolveStatus::NotApplicable;
     if (rows > b.activation_max_rows)
         return Status::invalid_state("act-quant optimized: rows out of range",

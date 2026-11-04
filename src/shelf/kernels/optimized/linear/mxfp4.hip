@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/detail/lds_barrier_device.h>
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
@@ -21,7 +22,10 @@ constexpr uint32_t kThreadsPerBlock = 32u;
 // output row ol owns 16 contiguous bytes and byte b holds code[k = b] in the
 // low nibble and code[k = 16 + b] in the high nibble.
 constexpr uint32_t kGroupElements = 32u;
-constexpr uint32_t kWeightBlockBytes = 256u;
+constexpr uint32_t kWeightBlockBytes = ::shelf::quantization::mxfp4::mxfp4_native_block_bytes;
+
+static_assert(kMxfp4GemmRowTile == ::shelf::quantization::mxfp4::mxfp4_native_output_tile,
+              "the GEMM row tile must match the native layout's output row block");
 constexpr uint32_t kFragBlockBytes = 1024u;
 constexpr uint32_t kFragLaneBytes = 32u;
 
@@ -972,9 +976,10 @@ hipError_t launch_gemm_mxfp4_w4a8_grouped(
     if (weight_scale_stride_bytes != nb)
         return hipErrorInvalidValue;
     if (weight_codes_batch_stride_bytes !=
-        static_cast<uint64_t>(weight_rows >> 4) * nb * kWeightBlockBytes)
+        ::shelf::quantization::mxfp4::mxfp4_native_codes_batch_stride_bytes(weight_rows, k_padded))
         return hipErrorInvalidValue;
-    if (weight_scales_batch_stride_bytes != static_cast<uint64_t>(weight_rows) * nb)
+    if (weight_scales_batch_stride_bytes !=
+        ::shelf::quantization::mxfp4::mxfp4_native_scale_batch_stride_bytes(weight_rows, k_padded))
         return hipErrorInvalidValue;
     if (activation_code_stride_bytes < k_padded || (activation_code_stride_bytes & 15u) != 0u)
         return hipErrorInvalidValue;

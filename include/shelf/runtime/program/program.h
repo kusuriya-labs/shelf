@@ -37,6 +37,13 @@ struct WeightSlot {
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;
     bool preshuffled = false;
+    // Rank-3 expert planes. experts == 1 is the 2D path; when experts > 1, rows / cols /
+    // k_padded and the row strides describe ONE expert and the batch strides separate the
+    // experts inside one arena allocation. row_ref is then a [experts][rows] byte plane
+    // with row stride 1, so its batch stride is experts * rows.
+    uint32_t experts = 1;
+    uint64_t codes_batch_stride_bytes = 0;
+    uint64_t scales_batch_stride_bytes = 0;
     uint32_t output_col_offset = 0;
     uint32_t output_col_total = 0;
 };
@@ -81,6 +88,13 @@ struct DispatchBinding {
     uint32_t activation_max_rows = 0;
     uint32_t activation_code_stride = 0;
     uint32_t activation_scale_stride = 0;
+    // Plan scratch for a routing round: a workspace range laid out by MoePlanScratch. The
+    // three geometry fields are what the layout was built for, so a consumer rebuilds the
+    // same offsets rather than carrying its own copy of them.
+    uint32_t scratch_slot = kNoWorkspace;
+    uint32_t scratch_tokens = 0;
+    uint32_t scratch_experts = 0;
+    uint32_t scratch_top_k = 0;
 };
 
 enum class ValueStorage : uint8_t {
@@ -123,6 +137,9 @@ struct Program {
     uint32_t parameter_slot_count = 0;
     uint32_t external_input_count = 0;
     uint32_t external_output_count = 0;
+    // The workspace range holding the routing plan, or kNoWorkspace. The router accumulates
+    // into it, so the executor zeroes it before a program runs.
+    uint32_t plan_scratch_slot = kNoWorkspace;
 
     Status validate() const;
 

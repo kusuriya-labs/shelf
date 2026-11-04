@@ -1,14 +1,18 @@
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 
+#include <shelf/quantization/mxfp4/mxfp4_native.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 
 namespace shelf::qwen35moe {
 
 namespace {
 
+namespace QMX = ::shelf::quantization::mxfp4;
+
 constexpr uint32_t kMxScaleBlockK = 32u;
 constexpr uint32_t kMxPaddedKAlignment = 64u;
-constexpr uint32_t kNativeOutputTile = 16u;
+constexpr uint32_t kNativeOutputTile = QMX::mxfp4_native_output_tile;
+constexpr uint32_t kNativeKGroupAlignment = kNativeOutputTile * 8u;
 
 uint32_t align_up_u32(uint32_t value, uint32_t alignment) noexcept {
     return (value + alignment - 1u) & ~(alignment - 1u);
@@ -79,24 +83,27 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
         return Status::unsupported(
             "build_moe_expert_group_plan: expert output rows must be a multiple of 16",
             __FILE__, __LINE__);
+    if ((plan.w13_k_padded % kNativeKGroupAlignment) != 0u ||
+        (plan.w2_k_padded % kNativeKGroupAlignment) != 0u)
+        return Status::unsupported(
+            "build_moe_expert_group_plan: expert k_padded must be a multiple of 128",
+            __FILE__, __LINE__);
 
     const uint32_t w13_blocks = plan.w13_k_padded / kMxScaleBlockK;
     const uint32_t w2_blocks = plan.w2_k_padded / kMxScaleBlockK;
-    plan.w13_codes_row_stride_bytes = w13_blocks * 256u;
+    plan.w13_codes_row_stride_bytes = w13_blocks * QMX::mxfp4_native_block_bytes;
     plan.w13_scales_row_stride_bytes = w13_blocks;
-    plan.w2_codes_row_stride_bytes = w2_blocks * 256u;
+    plan.w2_codes_row_stride_bytes = w2_blocks * QMX::mxfp4_native_block_bytes;
     plan.w2_scales_row_stride_bytes = w2_blocks;
 
-    plan.w13_codes_batch_stride_bytes =
-        (static_cast<uint64_t>(plan.w13_rows) / kNativeOutputTile) *
-        plan.w13_codes_row_stride_bytes;
-    plan.w13_scales_batch_stride_bytes =
-        static_cast<uint64_t>(plan.w13_rows) * plan.w13_scales_row_stride_bytes;
-    plan.w2_codes_batch_stride_bytes =
-        (static_cast<uint64_t>(plan.w2_rows) / kNativeOutputTile) *
-        plan.w2_codes_row_stride_bytes;
-    plan.w2_scales_batch_stride_bytes =
-        static_cast<uint64_t>(plan.w2_rows) * plan.w2_scales_row_stride_bytes;
+    plan.w13_codes_batch_stride_bytes = QMX::
+        mxfp4_native_codes_batch_stride_bytes(plan.w13_rows, plan.w13_k_padded);
+    plan.w13_scales_batch_stride_bytes = QMX::
+        mxfp4_native_scale_batch_stride_bytes(plan.w13_rows, plan.w13_k_padded);
+    plan.w2_codes_batch_stride_bytes = QMX::
+        mxfp4_native_codes_batch_stride_bytes(plan.w2_rows, plan.w2_k_padded);
+    plan.w2_scales_batch_stride_bytes = QMX::
+        mxfp4_native_scale_batch_stride_bytes(plan.w2_rows, plan.w2_k_padded);
 
     plan.w13_codes_bytes = plan.w13_codes_batch_stride_bytes * plan.experts;
     plan.w13_scales_bytes = plan.w13_scales_batch_stride_bytes * plan.experts;

@@ -173,7 +173,9 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         reserve_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         reserve_config.target_hidden_tap_count = config.target_hidden_tap_count;
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
-            rank->model_->text_config(), reserve_config, config.tp_size);
+            rank->model_->text_config(),
+            rank->model_->text_config().ffn.intermediate_size, reserve_config,
+            config.tp_size);
         std::fprintf(stderr,
                      "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u)\n",
                      static_cast<unsigned>(config.tp_rank),

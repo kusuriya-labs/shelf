@@ -76,6 +76,12 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   （`HybridLayerWeights` / `HybridModelLevelWeights`）、FFN 非依存の checkpoint 読み取り
   （`qwen_hybrid::weight_loader`）と共通 invariant 検証（`qwen_hybrid::weight_validation`）
   を持つ。具体的なモデルを参照しない。
+  lowering の共有部品もここが持つ: 層の block emit（`emit_hybrid_block` = input norm →
+  GDN / full attention → attention residual → post norm。FFN は各 family が自分の形を
+  emit する）、model head の emit（`emit_hybrid_head` = output gather → final norm →
+  lm_head → sampling。外部出力 4 本の順もここで固定する）、family 中立な lowered 保持型
+  （`HybridLoweredPrimitives`）、`MatrixWeight` → `runtime::WeightSlot` の写し
+  （`make_weight_slot`）。
   層の位相（GDN か full attention か）を決める規則もここで持つ: `layer_is_gdn`
   （`layer_types` → `full_attention_interval` → `layer % 4 < 3`）と、同じ規則で層数を数える
   `count_layer_topology`。GDN state pool・KV pool・TP plan・apps は全部これを使う
@@ -84,7 +90,9 @@ generic 層（`shelf/kernels` / `shelf/inference` /
 - `shelf_qwen35moe` は Qwen35 MoE（config 契約・expert plan・rank-3 expert loader・
   MoE FFN の weight 保持）。`shelf_qwen_hybrid` に依存し、`shelf_qwen35` には依存しない
 - `shelf_models` は dense / MoE の weight load を `num_experts` で選ぶ入口
-  （`shelf::models::load_model_weights`）。両 loader を link する唯一のターゲット。
+  （`shelf::models::load_model_weights`）と、load 済みの model から executor を作る入口
+  （`shelf::models::LoadedModel`）。executor 生成の family 分岐はここに置き、apps は family を
+  知らない。両 loader を link する唯一のターゲットで、`shelf_qwen35_runtime` も link する。
   family 選択は構造（`num_experts`）だけが決め、アーキテクチャの識別は
   `shelf_qwen_hybrid` の identity gate が担う（次節）
 
@@ -116,7 +124,7 @@ shelf_weights   -> shelf_quant_format / shelf_quant_bundle / shelf_quant_referen
 shelf_qwen_hybrid -> shelf_weights + shelf_io + shelf_quant_bundle
 shelf_qwen35    -> shelf_qwen_hybrid
 shelf_qwen35moe -> shelf_qwen_hybrid
-shelf_models    -> shelf_qwen35 + shelf_qwen35moe
+shelf_models    -> shelf_qwen35 + shelf_qwen35_runtime + shelf_qwen35moe
 ```
 
 ```text

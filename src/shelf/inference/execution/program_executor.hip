@@ -4,6 +4,7 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/kv_calib_dump.h>
 #include <shelf/inference/execution/linear_input_dump.h>
+#include <shelf/inference/execution/weight_slot_validation.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -108,83 +109,6 @@ Status fill_staging_image(
     return Status::make_ok();
 }
 
-Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t index) {
-    const uint8_t enc = s.encoding;
-    if (s.rows == 0 || s.cols == 0) {
-        return Status::invalid_argument(
-            ("weight table slot has zero rows/cols: index " + std::to_string(index)).c_str(),
-            __FILE__, __LINE__);
-    }
-    if (enc == 0u) {
-        if (s.device_ptr == nullptr || s.codes != nullptr || s.scales != nullptr) {
-            return Status::invalid_argument(
-                ("bf16 weight table slot needs device_ptr and no codes/scales: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    }
-    if (enc == 2u) {
-        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
-            return Status::invalid_argument(
-                ("rocm fp8 weight table slot needs codes+scales and no device_ptr: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        if (s.k_padded < s.cols || (s.k_padded & 31u) != 0u) {
-            return Status::invalid_argument(
-                ("rocm fp8 weight table slot k_padded invalid: index " + std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    }
-    if (enc == 1u) {
-        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
-            return Status::invalid_argument(
-                ("block scaled weight table slot needs codes+scales and no device_ptr: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        const uint32_t k_align = 127u;
-        if (s.k_padded < s.cols || (s.k_padded & k_align) != 0u) {
-            return Status::invalid_argument(
-                ("block scaled weight table slot k_padded invalid: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    }
-    if (enc == 3u) {
-        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
-            return Status::invalid_argument(
-                ("mxfp4 weight table slot needs codes+scales and no device_ptr: index " +
-                 std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        if (s.k_padded < s.cols || (s.k_padded & 63u) != 0u) {
-            return Status::invalid_argument(
-                ("mxfp4 weight table slot k_padded invalid: index " + std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        if (s.weight_scale_group != 32u) {
-            return Status::invalid_argument(
-                ("mxfp4 weight table slot scale group must be 32: index " + std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    }
-    return Status::invalid_argument(
-        ("unsupported weight table encoding: index " + std::to_string(index)).c_str(),
-        __FILE__, __LINE__);
-}
 
 
 using ::shelf::Result;
@@ -230,6 +154,10 @@ const bool g_op_dump_enabled = [] {
 const bool g_op_sync_enabled = [] {
     const char* e = std::getenv("SHELF_OP_SYNC");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
+}();
+const bool g_op_debug_enabled = [] {
+    const char* e = std::getenv("SHELF_OP_DEBUG");
+    return e != nullptr && e[0] != '\0';
 }();
 struct OpDumpTimer {
     std::chrono::steady_clock::time_point t0;
@@ -497,10 +425,15 @@ Status execute_program_range(
             if (optimized.value().kind == OptimizedLaunchKind::Launched) {
                 if (sync_each_op) {
                     const hipError_t herr = hipStreamSynchronize(stream);
-                    if (herr != hipSuccess)
-                        return Status::hip_error(
-                            "optimized dispatch sync", hipGetErrorString(herr),
-                            __FILE__, __LINE__);
+                    if (herr != hipSuccess) {
+                        char detail[160];
+                        std::snprintf(detail, sizeof(detail),
+                                      "optimized dispatch sync (op %zu %s rows=%u)", i,
+                                      ::shelf::runtime::kernel_to_name(binding.kernel_id),
+                                      ctx.actual_rows);
+                        return Status::hip_error(detail, hipGetErrorString(herr), __FILE__,
+                                                 __LINE__);
+                    }
                 }
                 record_logical_covered(&binding_as_kid, 1);
                 if (sem_on)
@@ -514,6 +447,10 @@ Status execute_program_range(
                 continue;
             }
         }
+        if (g_op_debug_enabled)
+            std::fprintf(stderr, "OPFALLBACK i=%zu kernel=%s rows=%u\n", i,
+                         ::shelf::runtime::kernel_to_name(binding.kernel_id),
+                         ctx.actual_rows);
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
         record_correctness_fallback(binding.kernel_id);
@@ -666,12 +603,36 @@ Status execute_program_tp_ranges(
     return Status::make_ok();
 }
 
+// The router accumulates per-token-tile counts into the plan scratch, so a program run must
+// start from zeros. One memset per run covers every layer: each layer's scan consumes the
+// counts and leaves them at zero, so no per-layer launch is needed.
+Status prepare_program_run(const ::shelf::runtime::Program& program,
+                           HostExecutionContext& ctx, hipStream_t stream) {
+    if (program.plan_scratch_slot == ::shelf::runtime::kNoWorkspace) return Status::make_ok();
+    if (ctx.workspace == nullptr)
+        return Status::invalid_state("plan scratch zero: workspace not bound", __FILE__,
+                                     __LINE__);
+    if (program.plan_scratch_slot >= program.workspace.ranges.size())
+        return Status::invalid_state("plan scratch zero: slot out of range", __FILE__,
+                                     __LINE__);
+    const auto& range = program.workspace.ranges[program.plan_scratch_slot];
+    const hipError_t err = hipMemsetAsync(ctx.workspace + range.offset, 0, range.bytes, stream);
+    if (err != hipSuccess)
+        return Status::hip_error("plan scratch zero", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    return Status::make_ok();
+}
+
 Status execute_program(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     if (ctx.error_word == nullptr)
         return Status::invalid_state("error word not bound", __FILE__, __LINE__);
+    {
+        const Status zero_status = prepare_program_run(program, ctx, stream);
+        if (!zero_status.ok()) return zero_status;
+    }
     const hipError_t herr =
         hipMemsetAsync(ctx.error_word, 0, sizeof(uint32_t), stream);
     if (herr != hipSuccess)
@@ -693,24 +654,7 @@ Status upload_host_weight_table(
         auto s = weights.at(i);
         Status vst = validate_host_weight_slot(s, i);
         if (!vst.ok()) return vst;
-        host[i].device_ptr = s.device_ptr;
-        host[i].rows = s.rows;
-        host[i].cols = s.cols;
-        host[i].k_padded = s.k_padded;
-        host[i].encoding = s.encoding;
-        host[i].codes = s.codes;
-        host[i].scales = s.scales;
-        host[i].row_ref = s.row_ref;
-        host[i].row_ref_exact = s.row_ref_exact;
-        host[i].storage_scale_stride_bytes = s.storage_scale_stride_bytes;
-        host[i].compute_codes = s.compute_codes;
-        host[i].compute_scales_bf16 = s.compute_scales_bf16;
-        host[i].codes_row_stride_bytes = s.codes_row_stride_bytes;
-        host[i].scale_row_stride_bytes = s.scale_row_stride_bytes;
-        host[i].weight_scale_group = s.weight_scale_group;
-        host[i].preshuffled = s.preshuffled;
-        host[i].output_col_offset = s.output_col_offset;
-        host[i].output_col_total = s.output_col_total;
+        host[i] = s;
     }
     WeightSlot* dev = nullptr;
     hipError_t err =

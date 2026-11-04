@@ -1,4 +1,5 @@
 #pragma once
+#include <shelf/runtime/graph/grouped_row_shape.h>
 #include <shelf/runtime/graph/primitive_node.h>
 #include <shelf/runtime/graph/value_type.h>
 #include <shelf/core/status.h>
@@ -72,6 +73,10 @@ struct PrimitiveGraph {
     std::vector<MatrixwiseShapeKey> weight_table;
     uint32_t next_value_id = 0;
     std::vector<PrimitiveValueSpec> value_specs;
+    // The plan geometry of the GROUPED_ROWS row space, or experts == 0 when the graph has
+    // no grouped rows. Every grouped value and every grouped node reads it from here, so a
+    // lowering states it once instead of repeating it per value.
+    GroupedRowShape grouped_row_shape;
 
     ValueId alloc_value(
         uint32_t features = 0,
@@ -83,6 +88,15 @@ struct PrimitiveGraph {
             .row_domain = rows,
         });
         return ValueId{next_value_id++};
+    }
+
+    ValueId alloc_grouped_value(uint32_t features,
+                                ValueDType dtype = ValueDType::BF16) {
+        return alloc_value(features, dtype, ValueRowDomain::GROUPED_ROWS);
+    }
+
+    bool has_grouped_rows() const noexcept {
+        return grouped_row_shape.experts != 0u;
     }
 
     const PrimitiveValueSpec* value_spec(ValueId v) const noexcept {

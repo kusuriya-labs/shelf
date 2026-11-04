@@ -41,60 +41,22 @@ Status validate_qwen35_weights(
     const bool full = !stage.enabled;
     const std::uint32_t num_layers =
         static_cast<std::uint32_t>(config.num_hidden_layers);
+    const std::uint32_t lo = full ? 0u : stage.layers.layer_lo;
+    const std::uint32_t hi = full ? num_layers : stage.layers.layer_hi;
+    if (lo >= hi || hi > num_layers) {
+        return Status::invalid_argument("Qwen35Model: invalid pipeline stage range",
+                                        __FILE__, __LINE__);
+    }
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument("Qwen35Model: layer count mismatch",
                                         __FILE__, __LINE__);
     }
-    if (!full) {
-        if (stage.layers.layer_lo >= stage.layers.layer_hi ||
-            stage.layers.layer_hi > num_layers) {
-            return Status::invalid_argument("Qwen35Model: invalid pipeline stage range",
-                                            __FILE__, __LINE__);
-        }
-    }
 
-    const bool load_embedding = full || stage.first();
-    const bool load_final = full || stage.last(num_layers);
-    const bool load_head = load_final;
+    Status st = qhy::validate_hybrid_model_level(weights, config, lo, hi);
+    if (!st.ok()) return st;
 
-    if (load_embedding || (load_head && weights.lm_head_tied)) {
-        const auto& embed = weights.embed_tokens;
-        if (embed.rows == 0 || embed.cols == 0) {
-            return Status::invalid_argument("Qwen35Model: embed_tokens is not loaded",
-                                            __FILE__, __LINE__);
-        }
-        if (embed.rows != config.vocab_size || embed.cols != config.hidden_size) {
-            return Status::invalid_argument(
-                "Qwen35Model: embed_tokens geometry mismatch", __FILE__, __LINE__);
-        }
-    }
-    if (load_head) {
-        const auto& head = weights.lm_head;
-        if (head.rows == 0 || head.cols == 0) {
-            return Status::invalid_argument("Qwen35Model: lm_head is not loaded",
-                                            __FILE__, __LINE__);
-        }
-        if (head.rows != config.vocab_size || head.cols != config.hidden_size) {
-            return Status::invalid_argument(
-                "Qwen35Model: lm_head geometry mismatch", __FILE__, __LINE__);
-        }
-        if (weights.lm_head_tied && head.cols != config.hidden_size) {
-            return Status::invalid_argument(
-                "Qwen35Model: tied lm_head geometry mismatch", __FILE__, __LINE__);
-        }
-        const gpu::Tensor& norm = weights.final_norm_weight;
-        if (norm.ndim() != 1 ||
-            static_cast<std::size_t>(norm.dim(0)) != config.hidden_size) {
-            return Status::invalid_argument("Qwen35Model: final_norm is not [hidden]",
-                                            __FILE__, __LINE__);
-        }
-    }
-
-    const std::uint32_t lo = full ? 0u : stage.layers.layer_lo;
-    const std::uint32_t hi = full ? num_layers : stage.layers.layer_hi;
     const std::size_t hidden = config.hidden_size;
     const std::size_t inter = config.ffn.intermediate_size;
-    Status st = Status::make_ok();
     for (std::uint32_t layer = lo; layer < hi; ++layer) {
         st = qhy::validate_hybrid_layer_body(weights.layers[layer], config, layer);
         if (!st.ok()) return st;

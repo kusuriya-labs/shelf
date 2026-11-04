@@ -37,6 +37,10 @@ ContinuousBatcher (stage 0 の pools を所有)
   - 中間 stage: model-level の重みを読まない。
 - `Qwen35ModelWeights::layers` は全 layer 分の vector だが、担当範囲外は空である。
   `validate_qwen35_weights` は `PipelineStage` の範囲だけを検証する。
+- model level の検査は `qhy::validate_hybrid_model_level(model, config, loaded_layer_lo,
+  loaded_layer_hi)` が単一源で、上記の読み分けを同じ規則で検証する。行数は
+  `TensorPartitionDesc` の global 値へ張り戻して照合するので、vocab を shard した TP rank の
+  local 行数を拒否しない。
 - KV page 数は stage 0 の auto-fit 結果を全 stage で共有する。これは block table の
   page ID を stage 間で一致させるためである。stage 0 の容量が最大でない構成では、
   stage 0 が使う page 数に他 stage が収まらない場合に起動が失敗する。
@@ -60,6 +64,10 @@ shelf-compute --model-dir models/Qwen3.8-27B-FP8 \
 以下は PP の current contract に含めない。要求された場合は起動時または実行前に拒否する。
 
 - TP と PP の同時利用
+- grouped expert model（MoE）。`shelf::models::probe_model_dir` が `Moe` を返す checkpoint では
+  `initialize_pipeline_parallel` が `unsupported` を返す。stage 分割は dense の weight load
+  （`HybridLoadOptions` の stage 字段）と dense の executor footprint を前提にしており、group
+  行数容量と plan scratch の stage 別配分を持たない
 - DFlash2 speculative decode
 - prefix cache
 - MTP block

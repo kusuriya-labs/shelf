@@ -62,6 +62,13 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 5120, 8192, kFamilyBf16 },
     { 5120, 2560, kFamilyBf16 },
     { 2560, 10240, kFamilyBf16 },
+    // Routed MoE FFN in bf16: the router over the experts, and the shared expert next to it.
+    // The routed experts themselves are grouped mxfp4 launches, which take their geometry
+    // from the expert plane rather than from this table.
+    { 256, 2048, kFamilyBf16 },
+    { 512, 2048, kFamilyBf16 },
+    { 2048, 512, kFamilyBf16 },
+    { 1, 2048, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {

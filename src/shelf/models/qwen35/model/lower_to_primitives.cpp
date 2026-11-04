@@ -9,6 +9,9 @@
 #include <shelf/models/common/qwen_hybrid/attention_geometry.h>
 #include <shelf/models/common/qwen_hybrid/gdn_lowering.h>
 #include <shelf/models/common/qwen_hybrid/attention_lowering.h>
+#include <shelf/models/common/qwen_hybrid/weight_slot.h>
+#include <shelf/models/common/qwen_hybrid/block_lowering.h>
+#include <shelf/models/common/qwen_hybrid/head_lowering.h>
 
 namespace shelf::qwen35 {
 
@@ -22,6 +25,7 @@ using QH::checked_product;
 using QH::checked_double;
 using QH::validate_matrix;
 using QH::Emitter;
+using QH::make_weight_slot;
 using MW = ::shelf::weights::MatrixWeight;
 
 std::size_t tensor_element_count(const gpu::Tensor& t) {
@@ -338,37 +342,6 @@ Status validate_geometry(
     return Status::make_ok();
 }
 
-RT::WeightSlot make_weight_slot(const MW& w) {
-    RT::WeightSlot s{};
-    s.rows = w.rows;
-    s.cols = w.cols;
-    s.k_padded = w.k_padded;
-    s.encoding = static_cast<uint8_t>(w.encoding);
-    s.compute_spec = static_cast<uint8_t>(w.compute_spec);
-    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
-        s.device_ptr = w.bf16.data<void>();
-        s.bytes = static_cast<uint64_t>(w.rows) * w.cols * sizeof(uint16_t);
-        s.codes = nullptr;
-        s.scales = nullptr;
-    } else {
-        s.device_ptr = nullptr;
-        s.bytes = 0;
-        s.codes = w.codes.ndim() != 0 ? w.codes.data<void>() : nullptr;
-        s.scales = w.scales.ndim() != 0 ? w.scales.data<void>() : nullptr;
-        s.row_ref = w.row_ref.ndim() != 0 ? w.row_ref.data<void>() : nullptr;
-        s.row_ref_exact = w.row_ref_exact;
-        s.storage_scale_stride_bytes = w.storage_scale_stride_bytes;
-        s.compute_codes = w.compute_codes.ndim() != 0 ? w.compute_codes.data<void>() : nullptr;
-        s.compute_scales_bf16 =
-            w.compute_scales_bf16.ndim() != 0 ? w.compute_scales_bf16.data<void>() : nullptr;
-        s.codes_row_stride_bytes = w.codes_row_stride_bytes;
-        s.scale_row_stride_bytes = w.scale_row_stride_bytes;
-        s.weight_scale_group = w.weight_scale_group;
-        s.preshuffled = w.preshuffled;
-    }
-    return s;
-}
-
 struct LayerWeightIndices {
     uint32_t attn_q = 0;
     uint32_t attn_k = 0;
@@ -584,16 +557,11 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
 
         const auto& lp = layer_params[li];
-        RT::RmsNormNode input_rms;
-        input_rms.shape = hidden_key;
-        input_rms.eps = eps;
-        input_rms.group_size = hidden_size;
-        input_rms.parameter_index = lp.input_norm;
-        input_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId normed = em.unary(RT::PrimitiveNode{input_rms}, layer_input, hidden_size);
-        name_last("input_norm");
-
-        RT::ValueId block_out{0};
+        QH::HybridBlockLowering block;
+        block.is_gdn = lw.is_gdn;
+        block.eps = eps;
+        block.weight_input_norm = lp.input_norm;
+        block.weight_post_norm = lp.post_norm;
         if (lw.is_gdn) {
             const MW& w_qkv = *weight_pointers[lw_idx.gdn_qkv];
             const MW& w_z = *weight_pointers[lw_idx.gdn_z];
@@ -601,91 +569,61 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
             const MW& w_a = *weight_pointers[lw_idx.gdn_a];
             const MW& w_out = *weight_pointers[lw_idx.gdn_out];
 
-            const QH::GdnLoweringGeometry geo{
-                .key_heads = key_heads,
-                .value_heads = value_heads,
-                .key_head_dim = key_head_dim,
-                .value_head_dim = value_head_dim,
-                .conv_kernel = conv_kernel,
-                .eps = eps,
-                .out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
-                                                    : RT::ValueDType::BF16,
-            };
-            const QH::GdnLoweringWeights gdn_weights{
-                .qkv = &w_qkv,
-                .z = &w_z,
-                .b = &w_b,
-                .a = &w_a,
-                .out = &w_out,
-            };
-            const QH::GdnLoweringIndices gdn_indices{
-                .w_qkv = lw_idx.gdn_qkv,
-                .w_z = lw_idx.gdn_z,
-                .w_b = lw_idx.gdn_b,
-                .w_a = lw_idx.gdn_a,
-                .w_out = lw_idx.gdn_out,
-                .p_conv = lp.conv,
-                .p_dt_bias = lp.dt_bias,
-                .p_a_log = lp.a_log,
-                .p_gdn_norm = lp.gdn_norm,
-                .state_index = next_gdn_state_index++,
-            };
-            block_out = QH::emit_gdn(em, geo, gdn_weights, gdn_indices, normed,
-                                     layer_prefix);
+            block.gdn_geometry.key_heads = key_heads;
+            block.gdn_geometry.value_heads = value_heads;
+            block.gdn_geometry.key_head_dim = key_head_dim;
+            block.gdn_geometry.value_head_dim = value_head_dim;
+            block.gdn_geometry.conv_kernel = conv_kernel;
+            block.gdn_geometry.eps = eps;
+            block.gdn_geometry.out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
+                                                                  : RT::ValueDType::BF16;
+            block.gdn_weights.qkv = &w_qkv;
+            block.gdn_weights.z = &w_z;
+            block.gdn_weights.b = &w_b;
+            block.gdn_weights.a = &w_a;
+            block.gdn_weights.out = &w_out;
+            block.gdn_indices.w_qkv = lw_idx.gdn_qkv;
+            block.gdn_indices.w_z = lw_idx.gdn_z;
+            block.gdn_indices.w_b = lw_idx.gdn_b;
+            block.gdn_indices.w_a = lw_idx.gdn_a;
+            block.gdn_indices.w_out = lw_idx.gdn_out;
+            block.gdn_indices.p_conv = lp.conv;
+            block.gdn_indices.p_dt_bias = lp.dt_bias;
+            block.gdn_indices.p_a_log = lp.a_log;
+            block.gdn_indices.p_gdn_norm = lp.gdn_norm;
+            block.gdn_indices.state_index = next_gdn_state_index++;
         } else {
             const MW& w_q = *weight_pointers[lw_idx.attn_q];
             const MW& w_k = *weight_pointers[lw_idx.attn_k];
             const MW& w_v = *weight_pointers[lw_idx.attn_v];
             const MW& w_o = *weight_pointers[lw_idx.attn_o];
 
-            const QH::GatedAttentionLoweringGeometry geo{
-                .query_heads = q_heads,
-                .kv_heads = kv_heads,
-                .head_dim = head_dim,
-                .rotary_dim = rotary_dim,
-                .rope_theta = rope_theta,
-                .rope_attention_factor =
-                    static_cast<float>(options.rope_profile.attention_factor),
-                .eps = eps,
-                .out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
-                                                    : RT::ValueDType::BF16,
-            };
-            const QH::GatedAttentionLoweringWeights attn_weights{
-                .q = &w_q,
-                .k = &w_k,
-                .v = &w_v,
-                .o = &w_o,
-            };
-            const QH::GatedAttentionLoweringIndices attn_indices{
-                .w_q = lw_idx.attn_q,
-                .w_k = lw_idx.attn_k,
-                .w_v = lw_idx.attn_v,
-                .w_o = lw_idx.attn_o,
-                .p_q_norm = lp.q_norm,
-                .p_k_norm = lp.k_norm,
-                .state_index = next_attention_state_index++,
-            };
-            block_out = QH::emit_gated_attention(
-                em, geo, attn_weights, attn_indices, normed, layer_prefix);
+            block.attention_geometry.query_heads = q_heads;
+            block.attention_geometry.kv_heads = kv_heads;
+            block.attention_geometry.head_dim = head_dim;
+            block.attention_geometry.rotary_dim = rotary_dim;
+            block.attention_geometry.rope_theta = rope_theta;
+            block.attention_geometry.rope_attention_factor =
+                static_cast<float>(options.rope_profile.attention_factor);
+            block.attention_geometry.eps = eps;
+            block.attention_geometry.out_dtype = options.tp_combine_f32 ? RT::ValueDType::F32
+                                                                       : RT::ValueDType::BF16;
+            block.attention_weights.q = &w_q;
+            block.attention_weights.k = &w_k;
+            block.attention_weights.v = &w_v;
+            block.attention_weights.o = &w_o;
+            block.attention_indices.w_q = lw_idx.attn_q;
+            block.attention_indices.w_k = lw_idx.attn_k;
+            block.attention_indices.w_v = lw_idx.attn_v;
+            block.attention_indices.w_o = lw_idx.attn_o;
+            block.attention_indices.p_q_norm = lp.q_norm;
+            block.attention_indices.p_k_norm = lp.k_norm;
+            block.attention_indices.state_index = next_attention_state_index++;
         }
-
-        RT::ValueId attn_residual{0};
-        {
-            RT::ResidualAddNode ra{hidden_key};
-            attn_residual = em.value(hidden_size);
-            em.emit(RT::PrimitiveNode{ra}, {block_out, layer_input}, {attn_residual});
-            name_last("residual_attn");
-        }
-
-        RT::RmsNormNode post_rms;
-        post_rms.shape = hidden_key;
-        post_rms.eps = eps;
-        post_rms.group_size = hidden_size;
-        post_rms.parameter_index = lp.post_norm;
-        post_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId post_norm = em.unary(RT::PrimitiveNode{post_rms}, attn_residual,
-                                         hidden_size);
-        name_last("post_norm");
+        const QH::HybridBlockOutput blk =
+            QH::emit_hybrid_block(em, hidden_key, block, layer_input, layer_prefix);
+        const RT::ValueId attn_residual = blk.attention_residual;
+        const RT::ValueId post_norm = blk.post_norm;
 
         const MW& w_gate = *weight_pointers[lw_idx.mlp_gate];
         const MW& w_up = *weight_pointers[lw_idx.mlp_up];
@@ -751,46 +689,20 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         const uint32_t out_vocab =
             vocab_parallel ? static_cast<uint32_t>(global_vocab) : lmw->rows;
 
-        RT::ValueId selected_hidden = em.value(
-            hidden_size, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
-        RT::OutputGatherNode og{RT::RowwiseShapeKey{hidden_size}};
-        em.emit(RT::PrimitiveNode{og}, {layer_input}, {selected_hidden});
-        pg.nodes.back().debug_name = "selected_hidden";
-
-        RT::RmsNormNode head_rms;
-        head_rms.shape = hidden_key;
-        head_rms.eps = eps;
-        head_rms.group_size = hidden_size;
-        head_rms.parameter_index = final_norm_param;
-        head_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-        RT::ValueId normed_hidden = em.value(hidden_size);
-        em.emit(RT::PrimitiveNode{head_rms}, {selected_hidden}, {normed_hidden});
-        pg.nodes.back().debug_name = "final_norm";
-
-        RT::ValueId selected_logits = em.value(
-            out_vocab, RT::ValueDType::F32, RT::ValueRowDomain::OUTPUT_ROWS);
-        RT::LinearNode ln;
-        ln.shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-        ln.weight_index = lm_index;
-        ln.out_dtype = RT::ValueDType::F32;
-        em.emit(RT::PrimitiveNode{ln}, {normed_hidden}, {selected_logits});
-        pg.nodes.back().debug_name = "logits";
+        QH::HybridHeadLowering head;
+        head.hidden_features = hidden_size;
+        head.eps = eps;
+        head.final_norm_param = final_norm_param;
+        head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+        head.lm_weight_index = lm_index;
+        head.out_vocab = out_vocab;
+        const QH::HybridHeadOutput hd = QH::emit_hybrid_head(em, head, layer_input);
         if (vocab_parallel) {
-            pg.nodes.back().tp_combine = 1;
-            pg.nodes.back().tp_combine_local_cols = lmw->rows;
+            pg.nodes[hd.logits_node_index].tp_combine = 1;
+            pg.nodes[hd.logits_node_index].tp_combine_local_cols = lmw->rows;
             lowered.weights[lm_index].output_col_offset = lm_head_col_offset;
             lowered.weights[lm_index].output_col_total = out_vocab;
         }
-
-        RT::ValueId sampled = em.value(
-            1, RT::ValueDType::I32, RT::ValueRowDomain::OUTPUT_ROWS);
-        em.emit(RT::PrimitiveNode{RT::SamplingNode{out_vocab}}, {selected_logits}, {sampled});
-        pg.nodes.back().debug_name = "sampled";
-
-        pg.external_outputs.push_back(selected_hidden);
-        pg.external_outputs.push_back(selected_logits);
-        pg.external_outputs.push_back(sampled);
-        pg.external_outputs.push_back(layer_input);
     }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
@@ -1026,43 +938,20 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
         em.emit(RT::PrimitiveNode{ra}, {v_down, attn_residual}, {layer_output});
     }
 
-    RT::RmsNormNode final_rms;
-    final_rms.shape = hidden_key;
-    final_rms.eps = eps;
-    final_rms.group_size = hidden_size;
-    final_rms.parameter_index = p_finalnorm;
-    final_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
-
-    RT::ValueId selected_hidden = em.value(
-        hidden_size, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
-    RT::OutputGatherNode og{RT::RowwiseShapeKey{hidden_size}};
-    em.emit(RT::PrimitiveNode{og}, {layer_output}, {selected_hidden});
-
-    RT::ValueId normed_hidden =
-        em.unary(RT::PrimitiveNode{final_rms}, selected_hidden, hidden_size);
-
     const MW* lmw = weights.lm_head_tied ? &weights.embed_tokens : &weights.lm_head;
     if (lmw->rows != config.vocab_size) {
         return Status::unsupported(
             "mtp lowering requires an unsharded lm_head", __FILE__, __LINE__);
     }
-    RT::ValueId selected_logits = em.value(
-        lmw->rows, RT::ValueDType::F32, RT::ValueRowDomain::OUTPUT_ROWS);
-    {
-        RT::LinearNode ln;
-        ln.shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-        ln.weight_index = lm_index;
-        ln.out_dtype = RT::ValueDType::F32;
-        em.emit(RT::PrimitiveNode{ln}, {normed_hidden}, {selected_logits});
-    }
-
-    RT::ValueId sampled = em.value(1, RT::ValueDType::I32, RT::ValueRowDomain::OUTPUT_ROWS);
-    em.emit(RT::PrimitiveNode{RT::SamplingNode{lmw->rows}}, {selected_logits}, {sampled});
-
-    pg.external_outputs.push_back(selected_hidden);
-    pg.external_outputs.push_back(selected_logits);
-    pg.external_outputs.push_back(sampled);
-    pg.external_outputs.push_back(normed_hidden);
+    QH::HybridHeadLowering head;
+    head.hidden_features = hidden_size;
+    head.eps = eps;
+    head.final_norm_param = p_finalnorm;
+    head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+    head.lm_weight_index = lm_index;
+    head.out_vocab = lmw->rows;
+    head.tail_output_is_normed_hidden = true;
+    QH::emit_hybrid_head(em, head, layer_output);
 
     auto st = RT::validate_primitive_graph(pg);
     if (!st.ok()) return st;

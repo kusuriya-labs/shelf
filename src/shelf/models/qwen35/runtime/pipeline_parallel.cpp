@@ -165,7 +165,8 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     exec_config.rope_profile = config.rope_profile;
     exec_config.stage = config.stage;
     if (reserved == 0u) {
-        reserved = qwen35_executor_reserve_bytes(tc, exec_config, 1u);
+        reserved = qwen35_executor_reserve_bytes(
+            tc, tc.ffn.intermediate_size, exec_config, 1u);
         std::fprintf(stderr,
                      "MEMORY_PLAN auto pipeline stage %u..%u: working set reserve %s\n",
                      config.stage.layers.layer_lo, config.stage.layers.layer_hi,

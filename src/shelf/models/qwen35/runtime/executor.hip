@@ -115,7 +115,7 @@ Status build_host_execution_context(
     const bool first_stage = !stage_enabled || executor.config.stage.first();
     const bool last_stage = !stage_enabled ||
         executor.config.stage.last(static_cast<std::uint32_t>(
-            executor.model->text_config().num_hidden_layers));
+            executor.model.config->num_hidden_layers));
     auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
     for (uint32_t i = 0; i < program.external_input_count; ++i) {
         ctx.external_input_storage[i] = first_stage ? static_cast<void*>(token_ids)
@@ -287,6 +287,11 @@ Status launch_host_backend_range(
         return Status::invalid_argument("dispatch range out of bounds", __FILE__,
                                         __LINE__);
     }
+    if (begin == 0u) {
+        const Status prepared =
+            ::shelf::execution::prepare_program_run(program, ctx, stream);
+        if (!prepared.ok()) return prepared;
+    }
     return runtime::execute_program_range(program, ctx, stream, begin, end);
 }
 
@@ -410,7 +415,7 @@ static bool attention_plan_key_for(
     const bool first_stage = !stage_enabled || executor.config.stage.first();
     const bool last_stage = !stage_enabled ||
         executor.config.stage.last(static_cast<std::uint32_t>(
-            executor.model->text_config().num_hidden_layers));
+            executor.model.config->num_hidden_layers));
     auto* pipeline_in = executor.pipeline_input_hidden.data<void>();
     for (uint32_t i = 0; i < program.external_input_count; ++i) {
         inputs[i] = first_stage ? static_cast<const void*>(token_ids) : pipeline_in;
@@ -721,7 +726,7 @@ Result<PendingBatch> submit_co_batch(
     const bool stage_enabled = executor.config.stage.enabled;
     const bool last_stage = !stage_enabled ||
         executor.config.stage.last(static_cast<std::uint32_t>(
-            executor.model->text_config().num_hidden_layers));
+            executor.model.config->num_hidden_layers));
     if (!last_stage) {
         if (N > 0) {
             auto hidden_slice = executor.pipeline_output_hidden.slice(0, 0, N);
@@ -1181,7 +1186,7 @@ Executor::Executor(Executor&& other) noexcept
     other.graph_failed = false;
     other.execution_status = gpu::Tensor{};
     other.execution_workspace = gpu::Tensor{};
-    other.model = nullptr;
+    other.model = RuntimeModelView{};
     other.sequence_pool = nullptr;
     other.gdn_state_pool = nullptr;
     other.kv_pool = nullptr;
@@ -1309,7 +1314,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.graph_failed = false;
         other.execution_status = gpu::Tensor{};
         other.execution_workspace = gpu::Tensor{};
-        other.model = nullptr;
+        other.model = RuntimeModelView{};
         other.sequence_pool = nullptr;
         other.gdn_state_pool = nullptr;
         other.kv_pool = nullptr;
@@ -1496,7 +1501,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
-    ex.model = nullptr;
+    ex.model = RuntimeModelView{};
     ex.sequence_pool = nullptr;
     ex.gdn_state_pool = nullptr;
     ex.kv_pool = nullptr;
@@ -1556,8 +1561,60 @@ void PendingBatch::destroy() noexcept {
     output = BatchExecutionOutput{};
 }
 
-Result<Executor> create_model_executor(
-    const Qwen35Model& model,
+std::vector<LayerOverrideSource> read_layer_override_sources(uint32_t hidden) {
+    std::vector<LayerOverrideSource> out;
+    const char* ovr = std::getenv("SHELF_LAYER_INPUT_OVERRIDE");
+    if (ovr == nullptr) return out;
+    const char* p = ovr;
+    while (*p != '\0' && out.size() < kMaxTargetHiddenTaps) {
+        char* end = nullptr;
+        const unsigned long lid = std::strtoul(p, &end, 10);
+        if (end == p || *end != ':') break;
+        p = end + 1;
+        const char* comma = std::strchr(p, ',');
+        const char* path_end = comma != nullptr ? comma : p + std::strlen(p);
+        const std::string path(p, static_cast<std::size_t>(path_end - p));
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "layer override cannot open %s\n", path.c_str());
+            break;
+        }
+        std::fseek(f, 0, SEEK_END);
+        const long fbytes = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        const std::size_t floats =
+            fbytes > 0 ? static_cast<std::size_t>(fbytes) / sizeof(float) : 0;
+        if (hidden == 0 || floats == 0 || floats % hidden != 0) {
+            std::fclose(f);
+            std::fprintf(stderr, "layer override bad size %s\n", path.c_str());
+            break;
+        }
+        std::vector<float> raw(floats);
+        if (std::fread(raw.data(), sizeof(float), floats, f) != floats) {
+            std::fclose(f);
+            std::fprintf(stderr, "layer override read failed %s\n", path.c_str());
+            break;
+        }
+        std::fclose(f);
+        LayerOverrideSource source;
+        source.layer = static_cast<uint32_t>(lid);
+        source.rows = static_cast<uint32_t>(floats / hidden);
+        source.hidden = hidden;
+        source.host.resize(floats);
+        for (std::size_t i = 0; i < floats; ++i) {
+            uint32_t ui;
+            std::memcpy(&ui, &raw[i], 4);
+            source.host[i] = static_cast<std::uint16_t>((ui + 0x8000u) >> 16);
+        }
+        out.push_back(std::move(source));
+        if (comma == nullptr) break;
+        p = comma + 1;
+    }
+    return out;
+}
+
+Result<Executor> create_executor(
+    ExecutorModelInput&& input,
     SequenceSlotPool& sequence_pool,
     GdnStatePool& gdn_state_pool,
     PagedKVPool& kv_pool,
@@ -1603,7 +1660,7 @@ Result<Executor> create_model_executor(
         }
     }
 
-    const Qwen35TextConfig& tc = model.text_config();
+    const shelf::qwen_hybrid::QwenHybridConfig& tc = *input.model.config;
     {
         auto expected_gdn_result = make_qwen35_gdn_state_layout_stage(
             tc, config.stage, config.tp != nullptr ? config.tp->tp_size : 1u);
@@ -1667,7 +1724,7 @@ Result<Executor> create_model_executor(
     }
 
     Executor ex;
-    ex.model = &model;
+    ex.model = input.model;
     ex.sequence_pool = &sequence_pool;
     ex.gdn_state_pool = &gdn_state_pool;
     ex.kv_pool = &kv_pool;
@@ -1844,82 +1901,14 @@ Result<Executor> create_model_executor(
             return Status::hip_error("hipStreamCreate program upload", hipGetErrorString(herr2), __FILE__, __LINE__);
         }
         ::shelf::runtime::ProgramSet built_set;
-        std::array<uint32_t, kMaxTargetHiddenTaps> override_ids{};
-        uint32_t override_count = 0;
-        std::vector<std::vector<std::uint16_t>> override_host;
-        std::vector<std::uint32_t> override_rows;
-        std::vector<std::uint32_t> override_hidden;
-        if (const char* ovr = std::getenv("SHELF_LAYER_INPUT_OVERRIDE")) {
-            const uint32_t hidden = model.text_config().hidden_size;
-            const char* p = ovr;
-            while (*p != '\0' && override_count < kMaxTargetHiddenTaps) {
-                char* end = nullptr;
-                const unsigned long lid = std::strtoul(p, &end, 10);
-                if (end == p || *end != ':') break;
-                p = end + 1;
-                const char* comma = std::strchr(p, ',');
-                const char* path_end = comma != nullptr ? comma : p + std::strlen(p);
-                const std::string path(p, static_cast<std::size_t>(path_end - p));
-                FILE* f = std::fopen(path.c_str(), "rb");
-                if (f == nullptr) {
-                    std::fprintf(stderr, "layer override cannot open %s\n", path.c_str());
-                    break;
-                }
-                std::fseek(f, 0, SEEK_END);
-                const long fbytes = std::ftell(f);
-                std::fseek(f, 0, SEEK_SET);
-                const std::size_t floats =
-                    fbytes > 0 ? static_cast<std::size_t>(fbytes) / sizeof(float) : 0;
-                if (hidden == 0 || floats == 0 || floats % hidden != 0) {
-                    std::fclose(f);
-                    std::fprintf(stderr, "layer override bad size %s\n", path.c_str());
-                    break;
-                }
-                std::vector<float> raw(floats);
-                if (std::fread(raw.data(), sizeof(float), floats, f) != floats) {
-                    std::fclose(f);
-                    std::fprintf(stderr, "layer override read failed %s\n", path.c_str());
-                    break;
-                }
-                std::fclose(f);
-                std::vector<std::uint16_t> bf(floats);
-                for (std::size_t i = 0; i < floats; ++i) {
-                    uint32_t ui;
-                    std::memcpy(&ui, &raw[i], 4);
-                    bf[i] = static_cast<std::uint16_t>((ui + 0x8000u) >> 16);
-                }
-                override_ids[override_count] = static_cast<uint32_t>(lid);
-                override_rows.push_back(static_cast<std::uint32_t>(floats / hidden));
-                override_hidden.push_back(hidden);
-                override_host.push_back(std::move(bf));
-                ++override_count;
-                if (comma == nullptr) break;
-                p = comma + 1;
-            }
-        }
-        Qwen35LowerOptions lower_options;
-        lower_options.rope_profile = ex.config.rope_profile;
-        lower_options.stage = ex.config.stage;
-        lower_options.hidden_taps = std::span<const uint32_t>(
-            ex.config.target_hidden_taps.data(), ex.config.target_hidden_tap_count);
-        lower_options.tp = config.tp;
-        lower_options.tp_combine_f32 = ex.config.tp_combine_f32 != 0;
-        lower_options.override_layers =
-            std::span<const uint32_t>(override_ids.data(), override_count);
-        auto lower_res =
-            lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
-        if (!lower_res.ok()) {
-            shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
-            return lower_res.status();
-        }
-        auto lowered = lower_res.release();
-        for (uint32_t i = 0; i < override_count; ++i) {
+        auto& lowered = input.lowered;
+        for (auto& ov : input.layer_overrides) {
             for (const auto& lv : lowered.layer_input_values) {
-                if (lv.first == override_ids[i]) {
+                if (lv.first == ov.layer) {
                     ex.layer_override_value_ids.push_back(lv.second.id);
-                    ex.layer_override_rows.push_back(override_rows[i]);
-                    ex.layer_override_hidden.push_back(override_hidden[i]);
-                    ex.layer_override_host.push_back(std::move(override_host[i]));
+                    ex.layer_override_rows.push_back(ov.rows);
+                    ex.layer_override_hidden.push_back(ov.hidden);
+                    ex.layer_override_host.push_back(std::move(ov.host));
                     break;
                 }
             }
@@ -2005,7 +1994,7 @@ Result<Executor> create_model_executor(
                 return st;
             }
             {
-                float rope_theta = model.text_config().rope_theta;
+                float rope_theta = tc.rope_theta;
                 if (rope_theta <= 0.0f) rope_theta = 10000000.0f;
                 hipError_t rerr = hipSuccess;
                 if (ex.config.rope_profile.type == EffectiveRopeProfile::Type::Yarn) {
@@ -2273,6 +2262,8 @@ Result<BatchExecutionOutput> complete_batch(
         executor.active_submission_id = 0u;
         std::string message = "host program execution failed: status=";
         message += std::to_string(status);
+        if (status == static_cast<uint32_t>(::shelf::runtime::ProgramStatus::NUMERIC_ERROR))
+            message += " (a kernel reported a non-finite value: the run is stopped)";
         return Status::invalid_state(message.c_str(), __FILE__, __LINE__);
     }
 
@@ -2362,6 +2353,43 @@ DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept
                    static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE)
                ? DecodeStatus::Complete
                : DecodeStatus::Error;
+}
+
+Result<Executor> create_model_executor(
+    const Qwen35Model& model,
+    SequenceSlotPool& sequence_pool,
+    GdnStatePool& gdn_state_pool,
+    PagedKVPool& kv_pool,
+    gpu::GpuArena& arena,
+    const ExecutorConfig& config) {
+
+    std::vector<LayerOverrideSource> overrides =
+        read_layer_override_sources(static_cast<uint32_t>(model.text_config().hidden_size));
+    std::vector<uint32_t> override_layers;
+    override_layers.reserve(overrides.size());
+    for (const auto& ov : overrides) override_layers.push_back(ov.layer);
+
+    Qwen35LowerOptions lower_options;
+    lower_options.rope_profile = config.rope_profile;
+    lower_options.stage = config.stage;
+    lower_options.hidden_taps = std::span<const uint32_t>(
+        config.target_hidden_taps.data(), config.target_hidden_tap_count);
+    lower_options.tp = config.tp;
+    lower_options.tp_combine_f32 = config.tp_combine_f32 != 0;
+    lower_options.override_layers =
+        std::span<const uint32_t>(override_layers.data(), override_layers.size());
+
+    auto lower_res =
+        lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
+    if (!lower_res.ok()) return lower_res.status();
+
+    ExecutorModelInput input;
+    input.model.config = &model.text_config();
+    input.model.embed_tokens = &model.weights().embed_tokens;
+    input.lowered = lower_res.release();
+    input.layer_overrides = std::move(overrides);
+    return create_executor(std::move(input), sequence_pool, gdn_state_pool, kv_pool, arena,
+                           config);
 }
 
 }

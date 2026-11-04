@@ -52,8 +52,8 @@ std::size_t safetensors_dir_bytes(const std::string& dir) {
 
 
 
-void print_model_geometry(const shelf::qwen35::Qwen35Model& model) {
-    const auto& text_config = model.text_config();
+void print_model_geometry(const shelf::models::LoadedModel& model) {
+    const auto& text_config = model.hybrid_config();
     const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(text_config.attention_head_dim);
     const uint32_t num_attn_layers = count_attention_layers(text_config);
@@ -61,7 +61,18 @@ void print_model_geometry(const shelf::qwen35::Qwen35Model& model) {
         shelf::qwen35::make_qwen35_gdn_state_layout(text_config);
 
     printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
-    printf("MODEL_INTERMEDIATE_SIZE=%zu\n", text_config.ffn.intermediate_size);
+    printf("MODEL_FAMILY=%s\n", model.runs_grouped_experts() ? "moe" : "dense");
+    if (const auto* dense = model.dense_model()) {
+        printf("MODEL_INTERMEDIATE_SIZE=%zu\n", dense->text_config().ffn.intermediate_size);
+    }
+    if (const auto* moe = model.moe_model()) {
+        printf("MODEL_EXPERTS=%zu\n", moe->text_config().ffn.num_experts);
+        printf("MODEL_EXPERTS_PER_TOK=%zu\n", moe->text_config().ffn.num_experts_per_tok);
+        printf("MODEL_MOE_INTERMEDIATE_SIZE=%zu\n",
+               moe->text_config().ffn.moe_intermediate_size);
+        printf("MODEL_SHARED_EXPERT_INTERMEDIATE_SIZE=%zu\n",
+               moe->text_config().ffn.shared_expert_intermediate_size);
+    }
     printf("MODEL_LAYERS=%zu\n", text_config.num_hidden_layers);
     printf("MODEL_GDN_LAYERS=%u\n", gdn_layout.num_gdn_states);
     printf("MODEL_ATTENTION_LAYERS=%u\n", num_attn_layers);
@@ -81,7 +92,7 @@ void dump_mem_debug(shelf::app::Qwen35ComputeRuntime& runtime) {
     const auto& model = runtime.model();
     auto& executor = runtime.executor();
     const auto& gdn_pool = runtime.gdn_pool();
-    const auto& wts = model.weights();
+    const auto* wts = model.dense_model() ? &model.dense_model()->weights() : nullptr;
     uint64_t bf16_bytes = 0, fp8_codes = 0, fp8_scales = 0;
     uint64_t w4_codes = 0, w4_sscales = 0, w4_cscales = 0;
     uint64_t w8_codes = 0, w8_sscales = 0, w8_cscales = 0;
@@ -96,23 +107,27 @@ void dump_mem_debug(shelf::app::Qwen35ComputeRuntime& runtime) {
             fp8_scales += ((r + 127u) / 128u) * (m.k_padded / 128u) * 4u;
         }
     };
-    add_matrix(wts.embed_tokens);
-    if (!wts.lm_head_tied) add_matrix(wts.lm_head);
-    for (const auto& l : wts.layers) {
-        add_matrix(l.ffn.gate);
-        add_matrix(l.ffn.up);
-        add_matrix(l.ffn.down);
-        if (l.is_gdn) {
-            add_matrix(l.attn_in_proj_a);
-            add_matrix(l.attn_in_proj_b);
-            add_matrix(l.attn_in_proj_qkv);
-            add_matrix(l.attn_in_proj_z);
-            add_matrix(l.attn_out_proj);
-        } else {
-            add_matrix(l.attn_q_proj);
-            add_matrix(l.attn_k_proj);
-            add_matrix(l.attn_v_proj);
-            add_matrix(l.attn_o_proj);
+    // The per-encoding breakdown is read from a dense weight set. A model with grouped
+    // experts reports its resident bytes through ARENA_USED_BYTES instead.
+    if (wts != nullptr) {
+        add_matrix(wts->embed_tokens);
+        if (!wts->lm_head_tied) add_matrix(wts->lm_head);
+        for (const auto& l : wts->layers) {
+            add_matrix(l.ffn.gate);
+            add_matrix(l.ffn.up);
+            add_matrix(l.ffn.down);
+            if (l.is_gdn) {
+                add_matrix(l.attn_in_proj_a);
+                add_matrix(l.attn_in_proj_b);
+                add_matrix(l.attn_in_proj_qkv);
+                add_matrix(l.attn_in_proj_z);
+                add_matrix(l.attn_out_proj);
+            } else {
+                add_matrix(l.attn_q_proj);
+                add_matrix(l.attn_k_proj);
+                add_matrix(l.attn_v_proj);
+                add_matrix(l.attn_o_proj);
+            }
         }
     }
     uint64_t staging_dispatch_count = 0;
@@ -323,7 +338,7 @@ int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     LogitsDumper dumper;
     if (!dump_logits_path.empty()) {
-        if (!dumper.open(dump_logits_path, runtime.model().text_config().vocab_size)) {
+        if (!dumper.open(dump_logits_path, runtime.model().hybrid_config().vocab_size)) {
             fprintf(stderr, "cannot open --dump-logits path %s\n", dump_logits_path.c_str());
             return 1;
         }
@@ -450,7 +465,7 @@ int run_single_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
     const double decode_tps = decode_ms > 0.0 ? decode_tokens * 1000.0 / decode_ms : 0.0;
 
-    printf("MODEL_LAYERS=%zu\n", runtime.model().text_config().num_hidden_layers);
+    printf("MODEL_LAYERS=%zu\n", runtime.model().hybrid_config().num_hidden_layers);
     printf("PROMPT_TOKENS=%zu\n", prompt_ids.size());
     printf("GENERATED_TOKENS=%zu\n", generated.size());
     printf("ARENA_USED_GB=%.3f\n", static_cast<double>(runtime.arena().used()) / (1024.0 * 1024.0 * 1024.0));
@@ -507,7 +522,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     auto& kv_pool = runtime.kv_pool();
     auto& arena = runtime.arena();
     const hipStream_t stream = runtime.stream();
-    const auto& text_config = model.text_config();
+    const auto& text_config = model.hybrid_config();
     shelf::qwen35::runtime::TpCoordinator* tp_coord = runtime.tp_coordinator();
     std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding> rank_bindings;
     if (tp_coord != nullptr) {
@@ -551,9 +566,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head =
-        tp_sharded ? private_lm_head : &model.weights().lm_head;
+        tp_sharded ? private_lm_head : &model.lm_head();
     draft_config.target_embed_tokens =
-        tp_sharded ? private_embed : &model.weights().embed_tokens;
+        tp_sharded ? private_embed : &model.embed_tokens();
     auto draft_result = shelf::qwen35::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {

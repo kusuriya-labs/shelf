@@ -2,6 +2,7 @@
 
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/loaded_model.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
@@ -99,9 +100,9 @@ class Qwen35ComputeRuntime {
 
     const Qwen35RuntimeConfig& config() const noexcept { return config_; }
 
-    const qwen35::Qwen35Model& model() const
+    const shelf::models::LoadedModel& model() const
     {
-        if (pp_coordinator_ != nullptr) return pp_coordinator_->stage(0).model();
+        if (pp_model_ != nullptr) return *pp_model_;
         return tp_model_ != nullptr ? *tp_model_ : *model_;
     }
 
@@ -191,7 +192,8 @@ class Qwen35ComputeRuntime {
 
     std::unique_ptr<qwen35::runtime::TpCoordinator> tp_coordinator_;
     std::unique_ptr<qwen35::runtime::PipelineParallelCoordinator> pp_coordinator_;
-    const qwen35::Qwen35Model* tp_model_ = nullptr;
+    std::unique_ptr<shelf::models::LoadedModel> tp_model_;
+    std::unique_ptr<shelf::models::LoadedModel> pp_model_;
     qwen35::Executor* tp_executor_ = nullptr;
     state::SequenceSlotPool* tp_slots_ = nullptr;
     state::GdnStatePool* tp_gdn_ = nullptr;
@@ -201,7 +203,7 @@ class Qwen35ComputeRuntime {
 
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
-    std::unique_ptr<qwen35::Qwen35Model> model_;
+    std::unique_ptr<shelf::models::LoadedModel> model_;
     std::optional<state::SequenceSlotPool> slot_pool_;
     std::optional<state::GdnStatePool> gdn_pool_;
     std::optional<state::PagedKVPool> kv_pool_;

@@ -146,7 +146,13 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                   const Qwen35MoeTextConfig& config) {
-    Status st = qhy::validate_hybrid_model_level(weights, config, weights.layers.size());
+    if (weights.layers.size() != config.num_hidden_layers) {
+        return Status::invalid_argument(
+            "Qwen35MoeModel: layer count does not match the config",
+            __FILE__, __LINE__);
+    }
+    Status st = qhy::validate_hybrid_model_level(weights, config, 0u,
+                                                 weights.layers.size());
     if (!st.ok()) return st;
 
     for (std::size_t l = 0; l < weights.layers.size(); ++l) {

@@ -9,13 +9,13 @@
 namespace shelf {
 namespace qwen35 {
 
-inline std::uint32_t qwen35_stage_layer_count(const Qwen35TextConfig& tc,
+inline std::uint32_t qwen35_stage_layer_count(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                               const PipelineStage& stage) {
     if (!stage.enabled) return static_cast<std::uint32_t>(tc.num_hidden_layers);
     return stage.layers.layer_count();
 }
 
-inline std::uint32_t qwen35_stage_gdn_layers(const Qwen35TextConfig& tc,
+inline std::uint32_t qwen35_stage_gdn_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                              const PipelineStage& stage) {
     if (!stage.enabled) {
         return static_cast<std::uint32_t>(
@@ -28,7 +28,7 @@ inline std::uint32_t qwen35_stage_gdn_layers(const Qwen35TextConfig& tc,
     return count;
 }
 
-inline std::uint32_t qwen35_stage_attention_layers(const Qwen35TextConfig& tc,
+inline std::uint32_t qwen35_stage_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                                    const PipelineStage& stage) {
     if (!stage.enabled) {
         return static_cast<std::uint32_t>(
@@ -42,7 +42,7 @@ inline std::uint32_t qwen35_stage_attention_layers(const Qwen35TextConfig& tc,
 }
 
 inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
-    const Qwen35TextConfig& tc) {
+    const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     uint32_t gdn_layers =
         static_cast<uint32_t>(shelf::qwen_hybrid::count_layer_topology(tc).gdn_layers);
     if (gdn_layers == 0) gdn_layers = 1;
@@ -57,7 +57,7 @@ inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
 }
 
 inline Result<state::GdnStatePoolLayout> make_qwen35_gdn_state_layout_stage(
-    const Qwen35TextConfig& tc, const PipelineStage& stage, uint32_t tp_size) {
+    const shelf::qwen_hybrid::QwenHybridConfig& tc, const PipelineStage& stage, uint32_t tp_size) {
     if (tp_size == 0) {
         return Status::invalid_argument("tp_size must be at least 1", __FILE__,
                                         __LINE__);
@@ -83,7 +83,7 @@ inline Result<state::GdnStatePoolLayout> make_qwen35_gdn_state_layout_stage(
 }
 
 inline Result<state::GdnStatePoolLayout> make_qwen35_gdn_state_layout_tp(
-    const Qwen35TextConfig& tc, uint32_t tp_size) {
+    const shelf::qwen_hybrid::QwenHybridConfig& tc, uint32_t tp_size) {
     if (tp_size == 0) {
         return Status::invalid_argument("tp_size must be at least 1", __FILE__,
                                         __LINE__);

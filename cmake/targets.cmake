@@ -203,11 +203,13 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/kv_append_dispatch.hip
     src/shelf/inference/execution/kv_calib_dump.cpp
     src/shelf/inference/execution/linear_input_dump.cpp
+    src/shelf/inference/execution/moe_dispatch.hip
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
     src/shelf/inference/execution/physical_launch.hip
     src/shelf/inference/execution/program_executor.hip
+    src/shelf/inference/execution/weight_slot_validation.cpp
     src/shelf/inference/execution/rope_dispatch.hip
     src/shelf/inference/execution/sampling_dispatch.hip
 )
@@ -238,6 +240,7 @@ set(
     src/shelf/models/common/qwen_hybrid/config.cpp
     src/shelf/models/common/qwen_hybrid/weight_loader.cpp
     src/shelf/models/common/qwen_hybrid/weight_validation.cpp
+    src/shelf/models/common/qwen_hybrid/weight_slot.cpp
 )
 
 add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
@@ -259,6 +262,9 @@ target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=ret
 set(
     SHELF_QWEN35MOE_SOURCES
     src/shelf/models/qwen35moe/model/qwen35moe_config.cpp
+    src/shelf/models/qwen35moe/model/lower_to_primitives.cpp
+    src/shelf/models/qwen35moe/runtime/executor_footprint.cpp
+    src/shelf/models/qwen35moe/model/qwen35moe_model.cpp
     src/shelf/models/qwen35moe/weights/moe_weight_plan.cpp
     src/shelf/models/qwen35moe/weights/moe_expert_load.cpp
     src/shelf/models/qwen35moe/weights/qwen35moe_model_load.cpp
@@ -274,11 +280,13 @@ target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=
 
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
-add_library(shelf_models STATIC src/shelf/models/model_weights_factory.cpp)
+add_library(shelf_models STATIC
+    src/shelf/models/model_weights_factory.cpp
+    src/shelf/models/loaded_model.cpp)
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35moe shelf_gpu)
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC
@@ -329,6 +337,8 @@ target_link_libraries(
         shelf_inference_execution
         shelf_qwen35
         shelf_qwen35_runtime
+        shelf_qwen35moe
+        shelf_models
         shelf_quant_format
         shelf_quant_bundle
 )

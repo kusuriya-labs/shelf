@@ -53,7 +53,8 @@ bool parse_devices(const char* s, std::vector<int>& out) {
 
 void compute_usage(const char* prog) {
     printf("usage: %s [options]\n", prog);
-    printf("\nShelf inference runtime for Qwen 3.5 Dense on AMD RDNA4\n");
+    printf("\nShelf inference runtime for Qwen 3.5 dense and grouped-expert models"
+           " on AMD RDNA4\n");
     printf("options:\n");
     printf("  --model-dir PATH       BF16 or quantized model directory (auto-detected via\n");
     printf("                         shelf_quantization.json) (required)\n");

@@ -124,3 +124,6 @@ fixture は両方書く必要があった。正本をどちらにするかは別
 `PrimitiveKind` 3 種と `KernelId` 3 種、`WeightSlot` の experts 化、selector allowlist、
 program workspace の group row 容量、apps 入口の factory 化、`shelf-bench` の計測口、
 40 層 E2E 実測。
+
+うち `WeightSlot` の experts 化と batch stride の単一源は
+[moe_gate_d_slot_layout.md](moe_gate_d_slot_layout.md)（第二段 Step 1a）で実施した。

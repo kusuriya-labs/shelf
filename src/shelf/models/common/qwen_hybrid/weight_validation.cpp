@@ -61,29 +61,39 @@ Status check_matrix_shape(const MatrixWeight& w, std::size_t rows, std::size_t c
 
 Status validate_hybrid_model_level(const HybridModelLevelWeights& model,
                                    const QwenHybridConfig& config,
-                                   std::size_t layer_count) {
-    if (model.embed_tokens.rows == 0 || model.embed_tokens.cols == 0)
-        return Status::invalid_argument("Qwen hybrid: embed_tokens is not loaded", __FILE__,
-                                        __LINE__);
+                                   std::size_t loaded_layer_lo,
+                                   std::size_t loaded_layer_hi) {
+    const std::size_t num_layers = config.num_hidden_layers;
+    if (loaded_layer_lo >= loaded_layer_hi || loaded_layer_hi > num_layers)
+        return Status::invalid_argument("Qwen hybrid: loaded layer range is outside the model",
+                                        __FILE__, __LINE__);
+    const bool first_layers = loaded_layer_lo == 0u;
+    const bool last_layers = loaded_layer_hi == num_layers;
+
+    if (first_layers || (last_layers && model.lm_head_tied)) {
+        if (model.embed_tokens.rows == 0 || model.embed_tokens.cols == 0)
+            return Status::invalid_argument("Qwen hybrid: embed_tokens is not loaded", __FILE__,
+                                            __LINE__);
+        if (full_rows(model.embed_tokens) != config.vocab_size)
+            return Status::invalid_argument("Qwen hybrid: embed_tokens vocab size mismatch",
+                                            __FILE__, __LINE__);
+        if (model.embed_tokens.cols != config.hidden_size)
+            return Status::invalid_argument("Qwen hybrid: embed_tokens hidden size mismatch",
+                                            __FILE__, __LINE__);
+    }
+    if (!last_layers) return Status::make_ok();
+
     if (model.lm_head.rows == 0 || model.lm_head.cols == 0)
         return Status::invalid_argument("Qwen hybrid: lm_head is not loaded", __FILE__, __LINE__);
-    if (full_rows(model.embed_tokens) != config.vocab_size)
-        return Status::invalid_argument("Qwen hybrid: embed_tokens vocab size mismatch",
-                                        __FILE__, __LINE__);
     if (full_rows(model.lm_head) != config.vocab_size)
         return Status::invalid_argument("Qwen hybrid: lm_head vocab size mismatch", __FILE__,
                                         __LINE__);
-    if (model.embed_tokens.cols != config.hidden_size)
-        return Status::invalid_argument("Qwen hybrid: embed_tokens hidden size mismatch",
-                                        __FILE__, __LINE__);
     if (!vector_of_width(model.final_norm_weight, config.hidden_size))
         return Status::invalid_argument("Qwen hybrid: final_norm_weight is not [hidden]",
                                         __FILE__, __LINE__);
     if (model.lm_head_tied != (payload(model.lm_head) == payload(model.embed_tokens)))
         return Status::invalid_argument("Qwen hybrid: lm_head_tied disagrees with lm_head storage",
                                         __FILE__, __LINE__);
-    if (layer_count != config.num_hidden_layers)
-        return Status::invalid_argument("Qwen hybrid: layer count mismatch", __FILE__, __LINE__);
     return Status::make_ok();
 }
 

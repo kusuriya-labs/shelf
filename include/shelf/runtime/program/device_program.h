@@ -48,6 +48,9 @@ enum class ProgramStatus : uint32_t {
     INVALID_BINDING = 3,
     DISPATCH_FAILED = 4,
     UNSUPPORTED_P2P = 5,
+    // A kernel found a value that is not finite. The run keeps its memory safety, but the
+    // numbers are not usable, and the caller has to stop the inference and report it.
+    NUMERIC_ERROR = 6,
 };
 
 }

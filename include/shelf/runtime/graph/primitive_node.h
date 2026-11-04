@@ -28,6 +28,9 @@ enum class PrimitiveKind : uint16_t {
     OUTPUT_GATHER = 16,
     SAMPLING = 17,
     CONCAT = 18,
+    MOE_ROUTER = 19,
+    MOE_GROUPED_LINEAR = 20,
+    MOE_COMBINE = 21,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -51,6 +54,9 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return "OUTPUT_GATHER";
         case PrimitiveKind::SAMPLING: return "SAMPLING";
         case PrimitiveKind::CONCAT: return "CONCAT";
+        case PrimitiveKind::MOE_ROUTER: return "MOE_ROUTER";
+        case PrimitiveKind::MOE_GROUPED_LINEAR: return "MOE_GROUPED_LINEAR";
+        case PrimitiveKind::MOE_COMBINE: return "MOE_COMBINE";
     }
     return "UNKNOWN";
 }
@@ -173,6 +179,31 @@ struct ConcatNode {
     RowwiseShapeKey input_shape_b;
 };
 
+// Routing of one batch: softmax over `experts`, top_k selection, renormalization, and the
+// group plan. The selection and the plan are not values: they live in the plan scratch the
+// graph declares, so this node produces no tensor value.
+struct MoeRouterNode {
+    uint32_t experts = 0;
+    uint32_t top_k = 0;
+};
+
+// One expert projection of a rank-3 expert plane. `shape` is one expert's {output, input}
+// features; the expert count and the plane strides come from the weight slot. Its input is
+// the bf16 activation, and the activation plane it quantizes into is addressed in group
+// rows.
+struct MoeGroupedLinearNode {
+    MatrixwiseShapeKey shape;
+    uint32_t weight_index = 0;
+    ValueDType out_dtype = ValueDType::BF16;
+};
+
+// Weighted sum of a token's selected expert outputs in group row order, plus the shared
+// expert scaled by its activated gate.
+struct MoeCombineNode {
+    RowwiseShapeKey shape;
+    uint32_t top_k = 0;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -192,7 +223,10 @@ using PrimitiveNode = std::variant<
     GdnRecurrenceNode,
     OutputGatherNode,
     SamplingNode,
-    ConcatNode
+    ConcatNode,
+    MoeRouterNode,
+    MoeGroupedLinearNode,
+    MoeCombineNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -217,6 +251,9 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, OutputGatherNode>) return PrimitiveKind::OUTPUT_GATHER;
         else if constexpr (std::is_same_v<T, SamplingNode>) return PrimitiveKind::SAMPLING;
         else if constexpr (std::is_same_v<T, ConcatNode>) return PrimitiveKind::CONCAT;
+        else if constexpr (std::is_same_v<T, MoeRouterNode>) return PrimitiveKind::MOE_ROUTER;
+        else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) return PrimitiveKind::MOE_GROUPED_LINEAR;
+        else if constexpr (std::is_same_v<T, MoeCombineNode>) return PrimitiveKind::MOE_COMBINE;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

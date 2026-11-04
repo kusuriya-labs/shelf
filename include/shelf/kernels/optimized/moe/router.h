@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/kernels/optimized/linear/config.h>
+#include <shelf/runtime/graph/grouped_row_shape.h>
 
 #include <hip/hip_runtime.h>
 
@@ -49,24 +50,35 @@ namespace shelf::kernel {
 // accumulated by the router kernel, so the caller must zero it first.
 constexpr uint32_t kMoeRouterMaxExperts = 512u;
 constexpr uint32_t kMoeRouterMaxTopK = 16u;
-constexpr uint32_t kMoeSlotTileTokens = 64u;
+constexpr uint32_t kMoeSlotTileTokens = ::shelf::runtime::kGroupedSlotTileRows;
 
+static_assert(kMxfp4GemmRowTile == ::shelf::runtime::kGroupedRowTile,
+              "a group is one grouped GEMM row tile, so the plan and the GEMM tile must match");
+
+// The plan capacities are the runtime's grouped row contract: the same numbers size the
+// program workspace, so the launcher and the allocator cannot drift apart.
 constexpr uint32_t moe_slot_tile_count(uint32_t rows) noexcept {
-    return (rows + kMoeSlotTileTokens - 1u) / kMoeSlotTileTokens;
+    return ::shelf::runtime::grouped_slot_tile_count(rows);
 }
 
 constexpr uint32_t moe_group_count_upper_bound(uint32_t rows, uint32_t experts,
                                                uint32_t top_k) noexcept {
-    const uint64_t slots = static_cast<uint64_t>(rows) * top_k;
-    const uint64_t bound = slots / kMxfp4GemmRowTile + experts;
-    return bound < slots ? static_cast<uint32_t>(bound) : static_cast<uint32_t>(slots);
+    return ::shelf::runtime::grouped_row_tile_count(rows, {experts, top_k});
 }
 
 constexpr uint32_t moe_group_row_capacity(uint32_t rows, uint32_t experts,
                                           uint32_t top_k) noexcept {
-    return moe_group_count_upper_bound(rows, experts, top_k) * kMxfp4GemmRowTile;
+    return ::shelf::runtime::grouped_row_capacity(rows, {experts, top_k});
 }
 
+// A row whose logits hold a value that is not finite (NaN, +INF or -INF) is a numeric
+// anomaly: the Qwen3.5 MoE router puts no -INF mask on its logits, so -INF is an anomaly too.
+// The kernel keeps the plan usable in that case (the selected experts stay in
+// [0, experts), the weights stay finite, and a row with no finite logit takes the lowest
+// expert indices with weight 0) and reports the anomaly into error_word with
+// ProgramStatus::NUMERIC_ERROR. The fallback exists so a broken model cannot fault the
+// context; it does not make the result usable, and the caller has to stop the run.
+// error_word may be null, which skips the report.
 hipError_t launch_moe_router(
     const float* logits,
     uint32_t logits_row_stride,
@@ -76,10 +88,11 @@ hipError_t launch_moe_router(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
+    uint32_t* error_word,
     hipStream_t stream);
 
 hipError_t launch_moe_slot_scan(
-    const uint32_t* tile_counts,
+    uint32_t* tile_counts,
     uint32_t* expert_row_begin,
     uint32_t* tile_base,
     uint32_t* expert_group_begin,

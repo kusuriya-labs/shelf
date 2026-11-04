@@ -142,11 +142,14 @@ shelf_add_test(NAME test_moe_config SOURCE unit/test_moe_config.cpp LABELS "cpu;
 shelf_add_test(NAME test_model_identity SOURCE unit/test_model_identity.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_moe_weight_plan SOURCE unit/test_moe_weight_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe)
 shelf_add_test(NAME test_moe_expert_slice_fixture SOURCE unit/test_moe_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen35moe)
+shelf_add_test(NAME test_weight_slot_validation SOURCE unit/test_weight_slot_validation.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_qwen35moe shelf_qwen_hybrid shelf_core)
 shelf_add_test(NAME test_moe_expert_load SOURCE unit/test_moe_expert_load.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35moe shelf_gpu)
 shelf_add_test(NAME test_moe_router SOURCE unit/test_moe_router.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_moe_grouped_linear SOURCE unit/test_moe_grouped_linear.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_moe_combine SOURCE unit/test_moe_combine.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_qwen35moe_model_load SOURCE unit/test_qwen35moe_model_load.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_quant_bundle shelf_gpu)
+shelf_add_test(NAME test_qwen35moe_lowering SOURCE unit/test_qwen35moe_lowering.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35moe shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+shelf_add_test(NAME test_qwen35moe_executor SOURCE unit/test_qwen35moe_executor.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_models shelf_qwen35moe shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_inference_state shelf_inference_execution shelf_inference_scheduling shelf_kernels_correctness shelf_kernels_optimized shelf_qwen35_kernels_optimized shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 shelf_add_test(NAME test_moe_layer_e2e SOURCE unit/test_moe_layer_e2e.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 2 DEFS SHELF_MOE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/qwen35moe" LIBRARIES shelf_kernels_optimized shelf_qwen35moe shelf_quant_bundle shelf_io shelf_gpu)
 shelf_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized)
@@ -170,7 +173,7 @@ shelf_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_loweri
 shelf_add_test(NAME test_qwen35_pipeline_lowering SOURCE unit/test_qwen35_pipeline_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 
-# 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の层 0 = GDN を f64 参照で固定する。
+# 合成 Qwen3.5 checkpoint（output_gate_type 非宣言）の層 0 = GDN を f64 参照で固定する。
 add_test(NAME test_qwen35_gdn_gate_reference
          COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
              --gpu-count 1 --cost-gb 2 --timeout 300
@@ -186,6 +189,9 @@ shelf_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;require
 shelf_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness)
 shelf_add_test(NAME test_architecture_boundaries SOURCE unit/test_architecture_boundaries.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_core DEFS SHELF_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 shelf_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_program_workspace_lifetime.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_grouped_row_shape SOURCE unit/test_grouped_row_shape.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_program_moe_plan SOURCE unit/test_program_moe_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_moe_program_execute SOURCE unit/test_moe_program_execute.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu shelf_core)
 shelf_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_activation_workspace_layout SOURCE unit/test_activation_workspace_layout.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
@@ -288,12 +294,15 @@ add_custom_target(
         test_model_identity
         test_moe_weight_plan
         test_moe_expert_slice_fixture
+        test_weight_slot_validation
         test_moe_expert_load
         test_moe_router
         test_moe_grouped_linear
         test_moe_combine
         test_moe_layer_e2e
         test_qwen35moe_model_load
+        test_qwen35moe_lowering
+        test_qwen35moe_executor
         test_dflash2_weight_contract
         test_dflash2_feature_concat
         test_dflash2_grouped_dynamic_conv
@@ -358,6 +367,9 @@ add_custom_target(
         test_gemm_bf16_verify_exact
         test_argmax_f32_top2
         test_program_workspace_lifetime
+        test_grouped_row_shape
+        test_program_moe_plan
+        test_moe_program_execute
         test_program_block_scaled_lowering
         test_linear_quant_contract
         test_activation_workspace_layout

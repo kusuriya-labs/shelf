@@ -275,7 +275,7 @@ PlanView run_router_and_plan(const Case& c, Device& d, hipStream_t stream,
     if (hipMemset(d.tile_counts, 0, counts_bytes) != hipSuccess)
         check(false, tag + ": counts memset");
     if (moe::launch_moe_router(d.logits, c.experts, d.sel_expert, d.sel_weight, d.tile_counts,
-                               c.rows, c.experts, c.top_k, stream) != hipSuccess)
+                               c.rows, c.experts, c.top_k, nullptr, stream) != hipSuccess)
         check(false, tag + ": launch_moe_router");
     if (moe::launch_moe_slot_scan(d.tile_counts, d.row_begin, d.tile_base, d.group_begin,
                                   d.group_expert, d.group_rows, d.group_count, d.row_token, c.rows,

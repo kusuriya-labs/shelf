@@ -13,6 +13,8 @@ enum class ValueDType : uint8_t {
 enum class ValueRowDomain : uint8_t {
     TOKEN_ROWS = 0,
     OUTPUT_ROWS = 1,
+    // Rows of a grouped GEMM plan. See runtime/graph/grouped_row_shape.h.
+    GROUPED_ROWS = 2,
 };
 
 constexpr uint32_t value_dtype_bytes(ValueDType dtype) noexcept {
@@ -31,5 +33,14 @@ struct PrimitiveValueSpec {
     ValueDType dtype = ValueDType::BF16;
     ValueRowDomain row_domain = ValueRowDomain::TOKEN_ROWS;
 };
+
+inline const char* to_string(ValueRowDomain domain) noexcept {
+    switch (domain) {
+        case ValueRowDomain::TOKEN_ROWS: return "TOKEN_ROWS";
+        case ValueRowDomain::OUTPUT_ROWS: return "OUTPUT_ROWS";
+        case ValueRowDomain::GROUPED_ROWS: return "GROUPED_ROWS";
+    }
+    return "UNKNOWN";
+}
 
 }

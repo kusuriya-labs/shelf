@@ -68,6 +68,27 @@ struct Mxfp4NativeHost {
 // codes of output row `row` at K positions `k` and `k + 16`, both block-local.
 constexpr uint32_t mxfp4_native_block_bytes = 256u;
 
+// One block covers this many output rows, so a plane holds rows / 16 blocks per K
+// block group. A plane whose output rows are not a multiple of this is not a native
+// layout.
+constexpr uint32_t mxfp4_native_output_tile = 16u;
+
+// Rank-3 expert planes stack whole matrices along `batch`, and these are the byte
+// distances between consecutive experts. `output_rows` is one expert's output row
+// count (a multiple of mxfp4_native_output_tile). The grouped GEMM and the weight
+// table validation both read the stride from here, so no consumer restates it.
+constexpr uint64_t mxfp4_native_codes_batch_stride_bytes(uint32_t output_rows,
+                                                         uint32_t padded_k) noexcept {
+    return (static_cast<uint64_t>(output_rows) / mxfp4_native_output_tile) *
+           (static_cast<uint64_t>(padded_k) / kMxfp4ScaleBlockK) * mxfp4_native_block_bytes;
+}
+
+constexpr uint64_t mxfp4_native_scale_batch_stride_bytes(uint32_t output_rows,
+                                                         uint32_t padded_k) noexcept {
+    return static_cast<uint64_t>(output_rows) *
+           (static_cast<uint64_t>(padded_k) / kMxfp4ScaleBlockK);
+}
+
 constexpr uint32_t mxfp4_native_byte(uint32_t row, uint32_t k) noexcept {
     return row * 16u + (k & 15u);
 }

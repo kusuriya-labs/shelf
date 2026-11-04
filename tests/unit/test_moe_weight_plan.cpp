@@ -133,10 +133,15 @@ int main() {
         check(!build_moe_expert_group_plan(cfg, cfg.num_hidden_layers).ok(),
               "layer out of range is rejected");
         Qwen35MoeTextConfig odd = moe_config();
-        odd.hidden_size = 2064;  // a multiple of 16, not of 64
+        odd.hidden_size = 2064;  // k_padded rounds to 2112: 16 aligned, but not 128
+        check(!build_moe_expert_group_plan(odd, 0).ok(),
+              "a k_padded that is not a multiple of 128 has no expert group plan");
+        odd = moe_config();
+        odd.ffn.moe_intermediate_size = 200;  // k_padded rounds up to 256
         auto res = build_moe_expert_group_plan(odd, 0);
-        check(res.ok() && res.value().w13_k_padded == 2112u,
-              "k_padded rounds up to the native 64 K alignment");
+        check(res.ok() && res.value().w2_k_padded == 256u,
+              "k_padded rounds up to the K alignment the grouped layout reads");
+        odd = moe_config();
         odd.hidden_size = 2049;  // expert output rows are not a multiple of 16
         check(!build_moe_expert_group_plan(odd, 0).ok(),
               "expert output rows that are not a multiple of 16 are rejected");

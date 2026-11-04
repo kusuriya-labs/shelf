@@ -28,6 +28,11 @@ enum class KernelId : uint32_t {
     LINEAR_MXFP4_W4A8,
     VERIFY_ACCEPT,
     ACTIVATION_QUANTIZE_MXFP4_ROWREF,
+    MOE_ROUTER,
+    MOE_PLAN_SCAN,
+    MOE_PLAN_SCATTER,
+    LINEAR_MXFP4_W4A8_GROUPED,
+    MOE_COMBINE,
     COUNT,
 };
 
@@ -61,6 +66,11 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::LINEAR_MXFP4_W4A8: return "LINEAR_MXFP4_W4A8";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
+        case KernelId::MOE_ROUTER: return "MOE_ROUTER";
+        case KernelId::MOE_PLAN_SCAN: return "MOE_PLAN_SCAN";
+        case KernelId::MOE_PLAN_SCATTER: return "MOE_PLAN_SCATTER";
+        case KernelId::LINEAR_MXFP4_W4A8_GROUPED: return "LINEAR_MXFP4_W4A8_GROUPED";
+        case KernelId::MOE_COMBINE: return "MOE_COMBINE";
         default: return "UNKNOWN";
     }
 }

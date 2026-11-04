@@ -35,6 +35,11 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SwigluBf16, 8704u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::ScaleF32, 1024u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SplitBf16InterleavedHeads, 3072u, 256u, 1u, kOptimizedMaxRows},
+    // Qwen3.6-35B-A3B MoE FFN: the routed gate / up fusion and the shared expert work on
+    // group rows, whose count grows with tokens * top_k.
+    {ElementwiseProfile::SwigluBf16, 512u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16ToF32, 1u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ResidualBf16, 2048u, 0u, 1u, kOptimizedMaxRows},
 };
 
 }  // namespace

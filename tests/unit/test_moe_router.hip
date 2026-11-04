@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/config.h>
 #include <shelf/kernels/optimized/moe/router.h>
+#include <shelf/runtime/program/device_program.h>
 
 #include <hip/hip_runtime.h>
 
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -66,6 +68,7 @@ void h2d(T* dev, const std::vector<T>& host) {
 
 struct Buffers {
     float* logits = nullptr;
+    uint32_t* error_word = nullptr;
     int32_t* sel_expert = nullptr;
     float* sel_weight = nullptr;
     uint32_t* tile_counts = nullptr;
@@ -158,23 +161,30 @@ struct Plan {
     std::vector<int32_t> row_token;
     std::vector<int32_t> slot_row_of;
     uint32_t group_count = 0;
+    uint32_t status_word = 0;
 };
 
 Plan run_plan(const std::vector<float>& logits, uint32_t rows, uint32_t experts, uint32_t top_k,
-              const Buffers& b, hipStream_t stream, const std::string& tag) {
+              const Buffers& b, hipStream_t stream, const std::string& tag,
+              bool zero_counts = true) {
     const uint32_t tiles = moe_slot_tile_count(rows);
     const uint32_t slots = rows * top_k;
     const uint32_t group_bound = moe_group_count_upper_bound(rows, experts, top_k);
     const uint32_t row_capacity = moe_group_row_capacity(rows, experts, top_k);
 
     h2d(b.logits, logits);
-    if (hipMemset(b.tile_counts, 0, static_cast<std::size_t>(experts) * tiles * sizeof(uint32_t)) !=
-        hipSuccess) {
+    if (hipMemset(b.error_word, 0, sizeof(uint32_t)) != hipSuccess) {
+        std::printf("FAIL memset error word %s\n", tag.c_str());
+        std::exit(1);
+    }
+    if (zero_counts &&
+        hipMemset(b.tile_counts, 0, static_cast<std::size_t>(experts) * tiles * sizeof(uint32_t)) !=
+            hipSuccess) {
         std::printf("FAIL memset %s\n", tag.c_str());
         std::exit(1);
     }
     if (launch_moe_router(b.logits, experts, b.sel_expert, b.sel_weight, b.tile_counts, rows,
-                          experts, top_k, stream) != hipSuccess)
+                          experts, top_k, b.error_word, stream) != hipSuccess)
         check(false, tag + ": launch_moe_router");
     if (launch_moe_slot_scan(b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
                              b.group_expert, b.group_rows, b.group_count, b.row_token, rows, experts,
@@ -197,6 +207,7 @@ Plan run_plan(const std::vector<float>& logits, uint32_t rows, uint32_t experts,
     p.row_token = d2h(b.row_token, row_capacity);
     p.slot_row_of = d2h(b.slot_row_of, slots);
     p.group_count = d2h(b.group_count, 1).at(0);
+    p.status_word = d2h(b.error_word, 1).at(0);
     return p;
 }
 
@@ -372,6 +383,8 @@ void run_case(uint32_t rows, uint32_t experts, uint32_t top_k, bool with_ties,
     const Reference ref = reference_route(logits, rows, experts, top_k);
 
     const Plan p = run_plan(logits, rows, experts, top_k, b, stream, tag);
+    check(p.status_word == static_cast<uint32_t>(::shelf::runtime::ProgramStatus::COMPLETE),
+          tag + ": finite logits leave the error word alone");
     compare_selection(p, ref, rows, experts, top_k, tag);
     compare_plan(p, rows, experts, top_k, tag);
 
@@ -396,8 +409,64 @@ void run_case(uint32_t rows, uint32_t experts, uint32_t top_k, bool with_ties,
               again.row_token == p.row_token && again.slot_row_of == p.slot_row_of &&
               again.group_count == p.group_count,
           tag + ": the plan is bit identical across runs");
+
+    // A model with more than one MoE layer shares one plan scratch inside a single program
+    // run, so the counters a routing round consumes have to be left ready for the next
+    // round. Zeroing them from the host per layer would cost one launch per layer.
+    const Plan chained =
+        run_plan(logits, rows, experts, top_k, b, stream, tag + "/chained", false);
+    check(chained.group_count == p.group_count &&
+              chained.expert_row_begin == p.expert_row_begin &&
+              chained.expert_group_begin == p.expert_group_begin &&
+              chained.group_expert == p.group_expert && chained.group_rows == p.group_rows &&
+              chained.row_token == p.row_token && chained.slot_row_of == p.slot_row_of,
+          tag + ": a second round without an external zeroing gives the same plan");
     std::printf("%s: groups %u / slot rows %u\n", tag.c_str(), p.group_count,
                 p.group_count * kMxfp4GemmRowTile);
+}
+
+void run_unsafe_logits_case(const Buffers& b, hipStream_t stream) {
+    // A row whose logits are not finite must still give a usable plan: an out-of-range expert
+    // index makes the scatter walk past its arrays and fault the context.
+    constexpr uint32_t rows = 4u;
+    constexpr uint32_t experts = 8u;
+    constexpr uint32_t top_k = 2u;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::vector<float> logits = {
+        nan, 5.0f, 1.0f, inf, -inf, 2.0f, nan, 0.5f,   // only the finite entries compete
+        -inf, -inf, -inf, -inf, -inf, -inf, -inf, -inf, // nothing finite at all
+        nan, nan, nan, nan, nan, nan, nan, nan,        // nothing finite at all
+        inf, inf, 1.0f, 0.0f, -1.0f, nan, inf, -inf,   // +inf is not a winner either
+    };
+    const std::string tag = "non-finite logits";
+
+    const Plan p = run_plan(logits, rows, experts, top_k, b, stream, tag);
+
+    check(p.status_word == static_cast<uint32_t>(::shelf::runtime::ProgramStatus::NUMERIC_ERROR),
+          tag + ": the round is reported as a numeric error so the run stops");
+    bool in_range = true;
+    for (const int32_t e : p.sel_expert)
+        if (e < 0 || static_cast<uint32_t>(e) >= experts) in_range = false;
+    check(in_range, tag + ": every selected expert is in range");
+
+    const std::vector<int32_t> want = {1, 5, 0, 1, 0, 1, 2, 3};
+    check(p.sel_expert == std::vector<int32_t>(want),
+          tag + ": non-finite entries lose to finite ones, an all-non-finite row takes the "
+                "lowest indices");
+
+    bool weights_finite = true;
+    for (const float w : p.sel_weight)
+        if (!std::isfinite(w)) weights_finite = false;
+    check(weights_finite, tag + ": every routing weight is finite");
+    check(p.sel_weight[0] > 0.0f && p.sel_weight[0] + p.sel_weight[1] > 0.999f &&
+              p.sel_weight[0] + p.sel_weight[1] < 1.001f,
+          tag + ": the finite row renormalizes to 1 per token");
+    check(p.sel_weight[4] == 0.0f && p.sel_weight[5] == 0.0f,
+          tag + ": an all-non-finite row routes with zero weight");
+    check(p.expert_row_begin[experts] == rows * top_k,
+          tag + ": every slot is counted into the plan");
+    compare_plan(p, rows, experts, top_k, tag);
 }
 
 }  // namespace
@@ -423,6 +492,7 @@ int main() {
 
     Buffers b;
     b.logits = dalloc<float>(static_cast<std::size_t>(kMaxRows) * kMaxExperts);
+    b.error_word = dalloc<uint32_t>(1);
     b.sel_expert = dalloc<int32_t>(static_cast<std::size_t>(kMaxRows) * kMaxTopK);
     b.sel_weight = dalloc<float>(static_cast<std::size_t>(kMaxRows) * kMaxTopK);
     b.tile_counts = dalloc<uint32_t>(static_cast<std::size_t>(kMaxExperts) * max_tiles);
@@ -442,20 +512,25 @@ int main() {
     run_case(65, 256, 8, false, b, stream);
     run_case(512, 256, 8, false, b, stream);
 
-    check(launch_moe_router(nullptr, 0, nullptr, nullptr, nullptr, 1, 8, 2, stream) != hipSuccess,
+    check(launch_moe_router(nullptr, 0, nullptr, nullptr, nullptr, 1, 8, 2, nullptr,
+                            stream) != hipSuccess,
           "null logits rejected");
     check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 9,
-                            stream) != hipSuccess,
+                            b.error_word, stream) != hipSuccess,
           "top_k greater than experts rejected");
     check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1,
-                            kMoeRouterMaxExperts + 1u, 2, stream) != hipSuccess,
+                            kMoeRouterMaxExperts + 1u, 2, b.error_word,
+                            stream) != hipSuccess,
           "experts above the kernel bound rejected");
     check(launch_moe_slot_scatter(b.sel_expert, b.tile_base, b.expert_row_begin,
                                   b.expert_group_begin, b.row_token, b.slot_row_of, 0, 8, 2,
                                   stream) != hipSuccess,
           "zero rows rejected");
 
+    run_unsafe_logits_case(b, stream);
+
     hipFree(b.logits);
+    hipFree(b.error_word);
     hipFree(b.sel_expert);
     hipFree(b.sel_weight);
     hipFree(b.tile_counts);

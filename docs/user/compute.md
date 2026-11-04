@@ -18,7 +18,7 @@
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--device N\|N,M` | GPU device(s); count must match --tp or --pipeline-parallel (default 0) |
 | `--tp N` | tensor parallel degree 1 \| 2 (default 1) |
-| `--pipeline-parallel N` | pipeline parallel stage count (default 1; requires --tp 1) |
+| `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tp 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
 | `--decode-backend TYPE` | hip (default) |
@@ -189,7 +189,7 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 - 先頭 stage が embedding、最終 stage が final norm と lm_head を持つ。
 - stage 間の hidden は bf16 のまま pinned host 経由で直列に受け渡す。
 - `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
-  `--dump-logits` と併用できない。
+  `--dump-logits` と併用できない。grouped expert model（MoE）では使えない。
 - decode と prefill が同じ batch に混在する実行は未対応である。
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。
