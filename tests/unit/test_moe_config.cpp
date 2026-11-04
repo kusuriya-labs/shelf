@@ -23,6 +23,10 @@ void check(bool cond, const std::string& msg) {
     }
 }
 
+bool message_contains(const shelf::Status& st, const std::string& needle) {
+    return std::string(st.message()).find(needle) != std::string::npos;
+}
+
 fs::path g_root;
 
 void write_config(const std::string& name, const std::string& text) {
@@ -131,13 +135,28 @@ int main() {
               "the base reader keeps its own gate default");
     }
 
-    // Expert keys in a config the base reader accepts are ignored there: num_experts is
-    // only meaningful through the MoE config type.
+    // num_experts is the authority for MoE: a config that declares experts is not a dense
+    // model, so the dense reader refuses it instead of reading an FFN the checkpoint does
+    // not carry. num_experts: 0 keeps the model dense.
     {
         write_config("dense_with_experts", with_text_config(
             std::string(kDenseBase) + R"json(,"num_experts":256,"num_experts_per_tok":8)json"));
         auto dense = read_qwen35_text_config((g_root / "dense_with_experts").string());
-        check(dense.ok(), "the base reader does not reject expert keys");
+        check(!dense.ok() && message_contains(dense.status(), "must not declare num_experts"),
+              "the dense reader rejects a config that declares experts");
+    }
+    {
+        write_config("dense_zero_experts", with_text_config(
+            std::string(kDenseBase) + R"json(,"num_experts":0)json"));
+        check(read_qwen35_text_config((g_root / "dense_zero_experts").string()).ok(),
+              "num_experts: 0 keeps the model dense");
+    }
+    {
+        write_config("dense_no_intermediate", with_text_config(
+            R"json("vocab_size":248320,"hidden_size":5120,"num_hidden_layers":64)json"));
+        auto dense = read_qwen35_text_config((g_root / "dense_no_intermediate").string());
+        check(!dense.ok() && message_contains(dense.status(), "requires intermediate_size"),
+              "a dense config without intermediate_size is rejected");
     }
 
     expect_moe_error("moe_topk_too_large",

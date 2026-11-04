@@ -122,6 +122,80 @@ void check_no_server_deps(const fs::path& root) {
     scan_clean(root / "include/shelf", forbidden);
 }
 
+// The libraries one CMake target links, as written in cmake/targets.cmake. The marker ends
+// in a space so shelf_qwen35 does not match the shelf_qwen35moe clause.
+std::vector<std::string> linked_targets(const std::string& text, const std::string& target) {
+    std::vector<std::string> out;
+    const std::string marker = "target_link_libraries(" + target + " ";
+    std::size_t pos = 0;
+    while ((pos = text.find(marker, pos)) != std::string::npos) {
+        const std::size_t begin = pos + marker.size();
+        const std::size_t end = text.find(')', begin);
+        if (end == std::string::npos) break;
+        std::string token;
+        for (std::size_t i = begin; i < end; ++i) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (std::isspace(c) || c == ';') {
+                if (!token.empty()) {
+                    out.push_back(token);
+                    token.clear();
+                }
+            } else {
+                token.push_back(static_cast<char>(c));
+            }
+        }
+        if (!token.empty()) out.push_back(token);
+        pos = end;
+    }
+    return out;
+}
+
+void check_cmake_target_edges(const fs::path& root) {
+    const std::string text = read_file(root / "cmake/targets.cmake");
+    if (text.empty()) {
+        fail("cmake/targets.cmake could not be read");
+        return;
+    }
+
+    struct EdgeRule {
+        const char* target;
+        const char* forbidden;
+    };
+    const std::vector<EdgeRule> forbidden_edges = {
+        {"shelf_qwen35", "shelf_qwen35moe"},
+        {"shelf_qwen35moe", "shelf_qwen35"},
+        {"shelf_qwen_hybrid", "shelf_qwen35"},
+        {"shelf_qwen_hybrid", "shelf_qwen35moe"},
+        {"shelf_weights", "shelf_qwen35"},
+        {"shelf_weights", "shelf_qwen35moe"},
+        {"shelf_runtime", "shelf_qwen35"},
+        {"shelf_runtime", "shelf_qwen35moe"},
+    };
+    for (const auto& rule : forbidden_edges) {
+        const std::vector<std::string> links = linked_targets(text, rule.target);
+        if (links.empty()) {
+            fail(std::string("no target_link_libraries clause for ") + rule.target);
+            continue;
+        }
+        for (const auto& lib : links) {
+            if (lib == rule.forbidden) {
+                fail(std::string(rule.target) + " links " + rule.forbidden);
+            }
+        }
+        ++passed;
+    }
+
+    // Both families build on the shared hybrid target rather than on each other.
+    for (const char* family : {"shelf_qwen35", "shelf_qwen35moe"}) {
+        bool hybrid = false;
+        for (const auto& lib : linked_targets(text, family)) {
+            if (lib == "shelf_qwen_hybrid") hybrid = true;
+        }
+        if (!hybrid) fail(std::string(family) + " does not link shelf_qwen_hybrid");
+        else ++passed;
+    }
+}
+
 }
 
 int main() {
@@ -188,9 +262,9 @@ int main() {
         scan_clean(dir, {"models/qwen35/runtime", "Executor", "ContinuousBatcher"});
     }
 
-    // Qwen3.5 MoE sits above the dense qwen35 layer: qwen35moe names qwen35, never the
-    // other way round. The choice between the two loaders lives in
-    // models/model_weights_factory, which is the only target that links both.
+    // The dense family and the MoE family are siblings: neither names the other. Both use
+    // models/common/qwen_hybrid for what they share, and the choice between the two
+    // loaders lives in models/model_weights_factory, the only target that links both.
     const std::vector<fs::path> qwen35_dirs = {
         root / "include/shelf/models/qwen35",
         root / "src/shelf/models/qwen35",
@@ -198,6 +272,25 @@ int main() {
     for (const auto& dir : qwen35_dirs) {
         scan_clean(dir, {"qwen35moe", "Qwen35Moe", "MoE", "moe"});
     }
+    const std::vector<fs::path> qwen35moe_dirs = {
+        root / "include/shelf/models/qwen35moe",
+        root / "src/shelf/models/qwen35moe",
+    };
+    for (const auto& dir : qwen35moe_dirs) {
+        scan_clean(dir, {"models/qwen35/", "shelf::qwen35::", "qwen35::", "Qwen35TextConfig",
+                         "Qwen35MtpWeights", "DenseFfnConfig", "DenseFfnWeights",
+                         "quantized_model_body"});
+    }
+
+    // The hybrid module is the shared part, so it may not reach down into either family.
+    scan_clean(root / "include/shelf/models/common/qwen_hybrid",
+               {"Qwen35Moe", "qwen35moe", "Qwen35Text", "Qwen35Layer", "Qwen35Model",
+                "MoeExpert", "MoeFfn", "DenseFfn", "load_qwen35"});
+    scan_clean(root / "src/shelf/models/common/qwen_hybrid",
+               {"Qwen35Moe", "qwen35moe", "Qwen35Text", "Qwen35Layer", "Qwen35Model",
+                "MoeExpert", "MoeFfn", "DenseFfn", "load_qwen35"});
+
+    check_cmake_target_edges(root);
 
     const std::vector<fs::path> kernel_dirs = {
         root / "include/shelf/models/qwen35/kernels",

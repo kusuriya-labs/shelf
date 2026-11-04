@@ -304,10 +304,10 @@ static void test_mtp_bf16_contract(gpu::GpuArena& arena, hipStream_t stream) {
     check_eq_u64(w.mtp.fc.cols, 64, "case A mtp.fc.cols == 2H");
     check(w.mtp.fc.encoding == weights::MatrixEncoding::Bf16, "case A mtp.fc encoding");
 
-    check_eq_u64(w.mtp.layer.mlp_gate_proj.rows, 48, "mtp gate rows == I");
-    check_eq_u64(w.mtp.layer.mlp_gate_proj.cols, 32, "mtp gate cols == H");
-    check_eq_u64(w.mtp.layer.mlp_down_proj.rows, 32, "mtp down rows == H");
-    check_eq_u64(w.mtp.layer.mlp_down_proj.cols, 48, "mtp down cols == I");
+    check_eq_u64(w.mtp.layer.ffn.gate.rows, 48, "mtp gate rows == I");
+    check_eq_u64(w.mtp.layer.ffn.gate.cols, 32, "mtp gate cols == H");
+    check_eq_u64(w.mtp.layer.ffn.down.rows, 32, "mtp down rows == H");
+    check_eq_u64(w.mtp.layer.ffn.down.cols, 48, "mtp down cols == I");
     check_eq_u64(w.mtp.layer.attn_q_proj.rows, 64, "mtp q_proj rows == 2Q");
     check_eq_u64(w.mtp.layer.attn_q_proj.cols, 32, "mtp q_proj cols == H");
     check_eq_u64(w.mtp.layer.attn_k_proj.rows, 16, "mtp k_proj rows == KV");
@@ -325,9 +325,9 @@ static void test_mtp_bf16_contract(gpu::GpuArena& arena, hipStream_t stream) {
 
     const weights::MatrixWeight* matrices[8] = {
         &w.mtp.fc,
-        &w.mtp.layer.mlp_gate_proj,
-        &w.mtp.layer.mlp_up_proj,
-        &w.mtp.layer.mlp_down_proj,
+        &w.mtp.layer.ffn.gate,
+        &w.mtp.layer.ffn.up,
+        &w.mtp.layer.ffn.down,
         &w.mtp.layer.attn_q_proj,
         &w.mtp.layer.attn_k_proj,
         &w.mtp.layer.attn_v_proj,

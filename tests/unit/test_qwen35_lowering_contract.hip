@@ -116,9 +116,9 @@ int main() {
     gdn.is_gdn = true;
     gdn.input_layernorm_weight = alloc({kH}, "gdn input_layernorm");
     gdn.post_attention_layernorm_weight = alloc({kH}, "gdn post_attention_layernorm");
-    gdn.mlp_gate_proj = make_matrix(alloc({kI, kH}, "gdn mlp gate"), kI, kH);
-    gdn.mlp_up_proj = make_matrix(alloc({kI, kH}, "gdn mlp up"), kI, kH);
-    gdn.mlp_down_proj = make_matrix(alloc({kH, kI}, "gdn mlp down"), kH, kI);
+    gdn.ffn.gate = make_matrix(alloc({kI, kH}, "gdn mlp gate"), kI, kH);
+    gdn.ffn.up = make_matrix(alloc({kI, kH}, "gdn mlp up"), kI, kH);
+    gdn.ffn.down = make_matrix(alloc({kH, kI}, "gdn mlp down"), kH, kI);
     gdn.attn_in_proj_qkv =
         make_matrix(alloc({kConvF, kH}, "gdn qkv"), kConvF, kH);
     gdn.attn_in_proj_z = make_matrix(alloc({kVal, kH}, "gdn z"), kVal, kH);

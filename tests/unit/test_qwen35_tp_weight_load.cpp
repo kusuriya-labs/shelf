@@ -94,16 +94,16 @@ int main() {
         const shelf::qwen35::Qwen35ModelWeights& r1 = rank1_result.value();
         check(r0.layers.size() == 4 && r1.layers.size() == 4, "layer count");
 
-        check(r0.layers[0].mlp_gate_proj.rows == 64, "rank0 gate rows local");
-        check(r1.layers[0].mlp_gate_proj.rows == 64, "rank1 gate rows local");
-        check_partition(r0.layers[0].mlp_gate_proj, 0, 0, {128, 64}, {{0, 64}},
+        check(r0.layers[0].ffn.gate.rows == 64, "rank0 gate rows local");
+        check(r1.layers[0].ffn.gate.rows == 64, "rank1 gate rows local");
+        check_partition(r0.layers[0].ffn.gate, 0, 0, {128, 64}, {{0, 64}},
                         "rank0 gate");
-        check_partition(r1.layers[0].mlp_gate_proj, 0, 1, {128, 64}, {{64, 64}},
+        check_partition(r1.layers[0].ffn.gate, 0, 1, {128, 64}, {{64, 64}},
                         "rank1 gate");
-        check(r0.layers[0].mlp_down_proj.cols == 64, "rank0 down cols local");
-        check_partition(r0.layers[0].mlp_down_proj, 1, 0, {64, 128}, {{0, 64}},
+        check(r0.layers[0].ffn.down.cols == 64, "rank0 down cols local");
+        check_partition(r0.layers[0].ffn.down, 1, 0, {64, 128}, {{0, 64}},
                         "rank0 down");
-        check_partition(r1.layers[0].mlp_down_proj, 1, 1, {64, 128}, {{64, 64}},
+        check_partition(r1.layers[0].ffn.down, 1, 1, {64, 128}, {{64, 64}},
                         "rank1 down");
 
         check(r0.layers[1].attn_q_proj.rows == 64, "rank0 q rows local");

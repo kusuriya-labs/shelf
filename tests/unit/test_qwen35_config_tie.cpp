@@ -24,7 +24,7 @@ static void check(bool cond, const std::string& msg) {
 static fs::path g_root;
 
 static const char* kTextConfig =
-    R"json("vocab_size":248320,"hidden_size":2560,"num_hidden_layers":32)json";
+    R"json("vocab_size":248320,"hidden_size":2560,"num_hidden_layers":32,"intermediate_size":9728)json";
 
 static void write_config(const std::string& name, const std::string& text) {
     const fs::path dir = g_root / name;

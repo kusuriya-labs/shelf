@@ -386,8 +386,8 @@ inline RunResult run_tp1(const RunOptions& opts) {
 
     const Qwen35ModelWeights& weights = model.weights();
     if (!weights.layers.empty()) {
-        result.gate_rows = weights.layers[0].mlp_gate_proj.rows;
-        result.down_cols = weights.layers[0].mlp_down_proj.cols;
+        result.gate_rows = weights.layers[0].ffn.gate.rows;
+        result.down_cols = weights.layers[0].ffn.down.cols;
         result.gdn_qkv_rows = weights.layers[0].attn_in_proj_qkv.rows;
     }
     if (weights.layers.size() > 1) {
@@ -438,8 +438,8 @@ inline RunResult run_tp2(const RunOptions& opts) {
     {
         const Qwen35ModelWeights& weights = rank0.model().weights();
         if (!weights.layers.empty()) {
-            result.gate_rows = weights.layers[0].mlp_gate_proj.rows;
-            result.down_cols = weights.layers[0].mlp_down_proj.cols;
+            result.gate_rows = weights.layers[0].ffn.gate.rows;
+            result.down_cols = weights.layers[0].ffn.down.cols;
             result.gdn_qkv_rows = weights.layers[0].attn_in_proj_qkv.rows;
         }
         if (weights.layers.size() > 1) {

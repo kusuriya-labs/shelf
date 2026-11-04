@@ -1,6 +1,5 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/model_weights_factory.h>
-#include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
@@ -14,6 +13,7 @@
 #include <filesystem>
 #include <string>
 #include <sys/resource.h>
+#include <variant>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -115,29 +115,38 @@ int main() {
     }
     const double seconds = std::chrono::duration<double>(end - begin).count();
     const models::LoadedModelWeights& w = loaded.value();
-
-    check(q35::validate_qwen35_weights(w.body(), config.value()).ok(),
-          "the MoE body passes the qwen35 model-level invariants");
-    check(w.moe.body.layers.size() == config.value().num_hidden_layers, "layer count");
-    check(w.moe.layers.size() == config.value().num_hidden_layers, "one MoE FFN per layer");
+    check(models::model_family(w) == models::ModelFamily::Moe, "the factory reports MoE");
+    const auto* m = std::get_if<moe::Qwen35MoeModelWeights>(&w);
+    check(m != nullptr, "the factory holds MoE weights only");
+    if (m == nullptr) {
+        gpu_arena.shutdown();
+        hipStreamDestroy(stream);
+        return 1;
+    }
+    check(std::get_if<q35::Qwen35ModelWeights>(&w) == nullptr,
+          "the factory holds no dense weights for a MoE checkpoint");
+    check(moe::validate_qwen35moe_weights(*m, config.value()).ok(),
+          "the MoE model passes its own invariants");
+    check(m->layers.size() == config.value().num_hidden_layers,
+          "one MoE layer per transformer layer");
 
     std::uint64_t expert_bytes = 0;
     std::uint64_t fold_exact_layers = 0;
     std::uint64_t fold_exact_planes = 0;
-    for (std::size_t l = 0; l < w.moe.layers.size(); ++l) {
+    for (std::size_t l = 0; l < m->layers.size(); ++l) {
         auto plan = moe::build_moe_expert_group_plan(config.value(), l);
         if (!plan.ok()) {
             check(false, "plan for layer " + std::to_string(l));
             break;
         }
-        check(moe::moe_layer_weights_match_plan(w.moe.layers[l], plan.value()).ok(),
-              "layer " + std::to_string(l) + " planes match the plan");
+        check(moe::moe_ffn_weights_match(m->layers[l].ffn, plan.value(), config.value().ffn).ok(),
+              "layer " + std::to_string(l) + " FFN matches the plan and config");
         expert_bytes += moe::moe_expert_group_bytes(plan.value());
-        if (w.moe.layers[l].expert_w13.row_ref_exact)
+        if (m->layers[l].ffn.expert_w13.row_ref_exact)
             ++fold_exact_planes;
-        if (w.moe.layers[l].expert_w2.row_ref_exact)
+        if (m->layers[l].ffn.expert_w2.row_ref_exact)
             ++fold_exact_planes;
-        if (w.moe.layers[l].expert_w13.row_ref_exact && w.moe.layers[l].expert_w2.row_ref_exact)
+        if (m->layers[l].ffn.expert_w13.row_ref_exact && m->layers[l].ffn.expert_w2.row_ref_exact)
             ++fold_exact_layers;
     }
     std::printf("load %.1f s, arena used %.3f GiB, expert planes %.3f GiB (plan sum), peak RSS %.2f GiB\n",
@@ -146,7 +155,7 @@ int main() {
                 static_cast<double>(peak_rss_bytes()) / (1 << 30));
     std::printf("fold-exact planes: %llu / %llu (both planes in %llu layers)\n",
                 static_cast<unsigned long long>(fold_exact_planes),
-                static_cast<unsigned long long>(2ull * w.moe.layers.size()),
+                static_cast<unsigned long long>(2ull * m->layers.size()),
                 static_cast<unsigned long long>(fold_exact_layers));
     check(gpu_arena.used() >= expert_bytes,
           "arena use covers the expert planes");

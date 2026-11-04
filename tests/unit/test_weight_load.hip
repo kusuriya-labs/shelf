@@ -732,10 +732,10 @@ static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t s
     check_eq_u64(w.embed_tokens.cols, 32, "quant embed cols");
     check(w.embed_tokens.encoding == weights::MatrixEncoding::Bf16, "quant embed encoding");
 
-    check_eq_u64(static_cast<uint32_t>(w.layers[0].mlp_gate_proj.encoding),
+    check_eq_u64(static_cast<uint32_t>(w.layers[0].ffn.gate.encoding),
                  static_cast<uint32_t>(weights::MatrixEncoding::Fp8Finegrained), "quant gate encoding");
-    check(w.layers[0].mlp_gate_proj.preshuffled, "quant gate preshuffled");
-    check(w.layers[0].mlp_down_proj.compute_spec ==
+    check(w.layers[0].ffn.gate.preshuffled, "quant gate preshuffled");
+    check(w.layers[0].ffn.down.compute_spec ==
               quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16,
           "quant down compute_spec");
     check(w.layers[0].attn_in_proj_a.encoding == weights::MatrixEncoding::Bf16, "in_proj_a bf16 matrix");
@@ -1028,16 +1028,16 @@ static void test_qwen35_hf_fp8_model_load(gpu::GpuArena& arena, hipStream_t stre
         check(got == f.bf16.at("lm_head.weight"), "hf fp8 lm_head bytes via bare name");
     }
 
-    check_fp8_hf_matrix(w.layers[0].mlp_gate_proj, f, hf_layer_prefix(0) + "mlp.gate_proj.weight", 128, 128);
+    check_fp8_hf_matrix(w.layers[0].ffn.gate, f, hf_layer_prefix(0) + "mlp.gate_proj.weight", 128, 128);
     check_fp8_hf_matrix(w.layers[0].attn_in_proj_qkv, f, hf_layer_prefix(0) + "linear_attn.in_proj_qkv.weight", 24, 128);
     check_fp8_hf_matrix(w.layers[1].attn_q_proj, f, hf_layer_prefix(1) + "self_attn.q_proj.weight", 128, 128);
     check_fp8_hf_matrix(w.layers[1].attn_k_proj, f, hf_layer_prefix(1) + "self_attn.k_proj.weight", 32, 128);
-    check_fp8_hf_matrix(w.layers[1].mlp_down_proj, f, hf_layer_prefix(1) + "mlp.down_proj.weight", 128, 128);
+    check_fp8_hf_matrix(w.layers[1].ffn.down, f, hf_layer_prefix(1) + "mlp.down_proj.weight", 128, 128);
 
     check(w.layers[0].attn_in_proj_a.encoding == weights::MatrixEncoding::Bf16, "hf fp8 in_proj_a bf16");
     check(w.layers[0].attn_conv1d_weight.ndim() == 3, "hf fp8 conv1d ndim");
     check(w.mtp.fc.encoding == weights::MatrixEncoding::Bf16, "hf fp8 mtp fc bf16");
-    check(w.mtp.layer.mlp_gate_proj.encoding == weights::MatrixEncoding::Fp8Finegrained,
+    check(w.mtp.layer.ffn.gate.encoding == weights::MatrixEncoding::Fp8Finegrained,
           "hf fp8 mtp layer fp8");
 }
 
@@ -1203,7 +1203,7 @@ static void test_qwen35_hf_fp8_model_load_without_mtp(
     check_eq_u64(w.layers.size(), 2, "hf fp8 no mtp layers");
     check(!w.mtp.present, "hf fp8 no mtp present");
     check_eq_u64(w.mtp.fc.rows, 0, "hf fp8 no mtp fc rows");
-    check_eq_u64(w.mtp.layer.mlp_gate_proj.rows, 0, "hf fp8 no mtp layer rows");
+    check_eq_u64(w.mtp.layer.ffn.gate.rows, 0, "hf fp8 no mtp layer rows");
 }
 
 int main() {

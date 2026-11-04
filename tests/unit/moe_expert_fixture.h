@@ -47,7 +47,8 @@ struct Fixture {
     std::map<std::string, std::vector<std::uint8_t>> scales;
 };
 
-inline shelf::qwen35moe::Qwen35MoeTextConfig text_config() {
+inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
+    std::uint32_t shared_inter = kInter) {
     shelf::qwen35moe::Qwen35MoeTextConfig c;
     c.vocab_size = 1024;
     c.hidden_size = kHidden;
@@ -55,7 +56,7 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config() {
     c.ffn.num_experts = kExperts;
     c.ffn.num_experts_per_tok = 2;
     c.ffn.moe_intermediate_size = kInter;
-    c.ffn.shared_expert_intermediate_size = kInter;
+    c.ffn.shared_expert_intermediate_size = shared_inter;
     c.num_attention_heads = 4;
     c.num_key_value_heads = 2;
     c.attention_head_dim = 64;
@@ -66,7 +67,7 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config() {
     return c;
 }
 
-inline std::string config_json() {
+inline std::string config_json(std::uint32_t shared_inter = kInter) {
     std::string json = R"json({"model_type":"qwen3_5_moe","tie_word_embeddings":false,"text_config":{)json";
     json += R"json("model_type":"qwen3_5_moe_text","vocab_size":1024,"hidden_size":)json";
     json += std::to_string(kHidden);
@@ -77,7 +78,7 @@ inline std::string config_json() {
     json += R"json(,"num_experts_per_tok":2,"moe_intermediate_size":)json";
     json += std::to_string(kInter);
     json += R"json(,"shared_expert_intermediate_size":)json";
-    json += std::to_string(kInter);
+    json += std::to_string(shared_inter);
     json += R"json(,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":64,)json";
     json += R"json("full_attention_interval":2,"layer_types":["linear_attention","full_attention"]},)json";
     json += R"json("quantization_config":{"quant_method":"quark","version":"0.13",)json";
@@ -192,10 +193,12 @@ inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
 // file order (expert-major, then name order: down_proj, gate_proj, up_proj). With
 // model_level the shard also carries the model-level and attention tensors, so the
 // directory can go through a full model load.
+// shared_inter sets the checkpoint's shared_expert_intermediate_size, which a real
+// checkpoint may make different from the routed moe_intermediate_size.
 inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
-                          bool model_level = false) {
+                          bool model_level = false, std::uint32_t shared_inter = kInter) {
     f.dir = dir;
-    f.config = text_config();
+    f.config = text_config(shared_inter);
     std::error_code ec;
     fs::create_directories(dir, ec);
 
@@ -238,11 +241,11 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
         planned.push_back({prefix + "shared_expert_gate.weight", shelf::io::SType::BF16,
                            {1, kHidden}, make_bf16(kHidden, 13u)});
         planned.push_back({prefix + "shared_expert.gate_proj.weight", shelf::io::SType::BF16,
-                           {kInter, kHidden}, make_bf16(kInter * kHidden, 17u)});
+                           {shared_inter, kHidden}, make_bf16(shared_inter * kHidden, 17u)});
         planned.push_back({prefix + "shared_expert.up_proj.weight", shelf::io::SType::BF16,
-                           {kInter, kHidden}, make_bf16(kInter * kHidden, 19u)});
+                           {shared_inter, kHidden}, make_bf16(shared_inter * kHidden, 19u)});
         planned.push_back({prefix + "shared_expert.down_proj.weight", shelf::io::SType::BF16,
-                           {kHidden, kInter}, make_bf16(kHidden * kInter, 23u)});
+                           {kHidden, shared_inter}, make_bf16(kHidden * shared_inter, 23u)});
         if (model_level) add_model_level_tensors(planned, layer);
     }
 
@@ -264,7 +267,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
         return false;
 
     std::ofstream cfg(dir / "config.json", std::ios::binary | std::ios::trunc);
-    cfg << config_json();
+    cfg << config_json(shared_inter);
     return cfg.good();
 }
 

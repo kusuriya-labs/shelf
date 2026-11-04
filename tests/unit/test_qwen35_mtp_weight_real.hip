@@ -227,9 +227,9 @@ int main() {
                         quantization::bundle::QuantizedModelReader reader = rr.release();
                         const weights::MatrixWeight* matrices[8] = {
                             &w.mtp.fc,
-                            &w.mtp.layer.mlp_gate_proj,
-                            &w.mtp.layer.mlp_up_proj,
-                            &w.mtp.layer.mlp_down_proj,
+                            &w.mtp.layer.ffn.gate,
+                            &w.mtp.layer.ffn.up,
+                            &w.mtp.layer.ffn.down,
                             &w.mtp.layer.attn_q_proj,
                             &w.mtp.layer.attn_k_proj,
                             &w.mtp.layer.attn_v_proj,
@@ -372,9 +372,9 @@ int main() {
                         weights::SafetensorsCollection collection = cr.release();
                         const weights::MatrixWeight* matrices[8] = {
                             &w.mtp.fc,
-                            &w.mtp.layer.mlp_gate_proj,
-                            &w.mtp.layer.mlp_up_proj,
-                            &w.mtp.layer.mlp_down_proj,
+                            &w.mtp.layer.ffn.gate,
+                            &w.mtp.layer.ffn.up,
+                            &w.mtp.layer.ffn.down,
                             &w.mtp.layer.attn_q_proj,
                             &w.mtp.layer.attn_k_proj,
                             &w.mtp.layer.attn_v_proj,

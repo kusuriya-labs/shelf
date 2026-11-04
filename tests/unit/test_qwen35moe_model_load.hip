@@ -1,4 +1,5 @@
 #include <shelf/core/memory/arena.h>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
@@ -14,11 +15,14 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 #include <unistd.h>
+#include <variant>
 #include <vector>
 
 namespace fs = std::filesystem;
 namespace q35 = shelf::qwen35;
+namespace qhy = shelf::qwen_hybrid;
 namespace moe = shelf::qwen35moe;
 using namespace moe_expert_fixture;
 
@@ -54,43 +58,60 @@ bool write_dense_config_only(const fs::path& dir) {
     return cfg.good();
 }
 
-void check_layer(const moe::MoeLayerWeights& w, const moe::MoeExpertGroupPlan& plan,
-                 const std::string& tag) {
-    check(moe::moe_layer_weights_match_plan(w, plan).ok(), tag + ": planes match the plan");
-    check(w.router.rows == kExperts && w.router.cols == kHidden, tag + ": router is [E, hidden]");
-    check(w.expert_w13.experts == kExperts && w.expert_w2.experts == kExperts,
+template <typename T>
+concept has_dense_ffn = requires(const T& w) { w.ffn.gate; };
+
+template <typename T>
+concept has_moe_ffn = requires(const T& w) { w.ffn.expert_w13; };
+
+template <typename T>
+concept has_nested_body = requires(const T& w) { w.body; };
+
+template <typename T>
+concept has_mtp_option = requires(const T& o) { o.load_mtp_layers; };
+
+// A dense layer cannot state an MoE FFN and an MoE layer cannot state a dense FFN, and a
+// MoE model carries no second layer array. The load options of the shared backbone have no
+// MTP field either, so an MoE load cannot ask for one. All of this is fixed in the types.
+static_assert(std::is_base_of_v<qhy::HybridLayerWeights, q35::Qwen35LayerWeights>);
+static_assert(std::is_base_of_v<qhy::HybridLayerWeights, moe::Qwen35MoeLayerWeights>);
+static_assert(std::is_base_of_v<qhy::HybridModelLevelWeights, moe::Qwen35MoeModelWeights>);
+static_assert(has_dense_ffn<q35::Qwen35LayerWeights> && !has_moe_ffn<q35::Qwen35LayerWeights>);
+static_assert(has_moe_ffn<moe::Qwen35MoeLayerWeights> && !has_dense_ffn<moe::Qwen35MoeLayerWeights>);
+static_assert(!has_nested_body<moe::Qwen35MoeModelWeights>);
+static_assert(!has_mtp_option<qhy::HybridLoadOptions>);
+static_assert(has_mtp_option<q35::Qwen35LoadOptions>);
+
+void check_ffn(const moe::MoeFfnWeights& ffn, const moe::MoeExpertGroupPlan& plan,
+               std::uint32_t shared_inter, const std::string& tag) {
+    check(ffn.router.rows == kExperts && ffn.router.cols == kHidden, tag + ": router is [E, hidden]");
+    check(ffn.expert_w13.experts == kExperts && ffn.expert_w2.experts == kExperts,
           tag + ": expert planes carry the expert count");
-    check(w.expert_w13.codes_batch_stride_bytes == plan.w13_codes_batch_stride_bytes,
+    check(ffn.expert_w13.codes_batch_stride_bytes == plan.w13_codes_batch_stride_bytes,
           tag + ": w13 batch stride survives the model load");
-    check(w.expert_w2.scales_batch_stride_bytes == plan.w2_scales_batch_stride_bytes,
-          tag + ": w2 scale batch stride survives the model load");
-    check(w.shared_gate_proj.rows == kInter && w.shared_gate_proj.cols == kHidden &&
-              w.shared_down_proj.rows == kHidden && w.shared_down_proj.cols == kInter,
-          tag + ": shared expert shapes");
-    check(w.shared_gate.rows == 1u, tag + ": shared expert gate is one row");
+    check(ffn.expert_w2.scales_batch_stride_bytes == plan.w2_scales_batch_stride_bytes,
+          tag + ": w2 batch stride survives the model load");
+    check(ffn.shared_gate_proj.rows == shared_inter && ffn.shared_gate_proj.cols == kHidden &&
+              ffn.shared_up_proj.rows == shared_inter && ffn.shared_down_proj.cols == shared_inter &&
+              ffn.shared_down_proj.rows == kHidden,
+          tag + ": shared expert shapes follow shared_expert_intermediate_size");
+    check(ffn.shared_gate.rows == 1u, tag + ": shared expert gate is one row");
 }
 
-void check_body(const q35::Qwen35ModelWeights& body, const std::string& tag) {
-    check(body.embed_tokens.rows == kVocab && body.embed_tokens.cols == kHidden,
-          tag + ": embed_tokens geometry");
-    check(body.lm_head.rows == kVocab && body.lm_head.cols == kHidden, tag + ": lm_head geometry");
-    check(body.final_norm_weight.ndim() == 1 && body.final_norm_weight.dim(0) == kHidden,
-          tag + ": final norm is a hidden vector");
-    check(body.layers.size() == kLayers, tag + ": layer count");
-    check(body.layers[0].is_gdn && !body.layers[1].is_gdn, tag + ": layer topology");
-    for (std::size_t l = 0; l < body.layers.size(); ++l) {
-        const q35::Qwen35LayerWeights& layer = body.layers[l];
-        check(layer.input_layernorm_weight.ndim() == 1 &&
-                  layer.post_attention_layernorm_weight.ndim() == 1,
-              tag + "/layer" + std::to_string(l) + ": layernorms loaded");
-        check(layer.mlp_gate_proj.rows == 0u && layer.mlp_up_proj.rows == 0u &&
-                  layer.mlp_down_proj.rows == 0u,
-              tag + "/layer" + std::to_string(l) + ": dense FFN stays empty");
+void check_backbone(const qhy::HybridLayerWeights& layer, bool is_gdn, const std::string& tag) {
+    check(layer.input_layernorm_weight.ndim() == 1 &&
+              layer.post_attention_layernorm_weight.ndim() == 1,
+          tag + ": layernorms loaded");
+    if (is_gdn) {
+        check(layer.attn_in_proj_qkv.rows != 0u && layer.attn_out_proj.rows != 0u,
+              tag + ": GDN layer body loaded");
+        check(layer.attn_q_proj.rows == 0u, tag + ": a GDN layer carries no self_attn weights");
+    } else {
+        check(layer.attn_q_proj.rows == 4u * 64u && layer.attn_k_proj.rows == 2u * 64u,
+              tag + ": attention layer body loaded");
+        check(layer.attn_in_proj_a.rows == 0u,
+              tag + ": an attention layer carries no linear_attn weights");
     }
-    check(body.layers[0].attn_in_proj_qkv.rows != 0u && body.layers[0].attn_out_proj.rows != 0u,
-          tag + ": GDN layer body loaded");
-    check(body.layers[1].attn_q_proj.rows == 4u * 64u && body.layers[1].attn_k_proj.rows == 2u * 64u,
-          tag + ": attention layer body loaded");
 }
 
 }  // namespace
@@ -165,54 +186,137 @@ int main() {
     auto loaded = moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream);
     check(loaded.ok(), "load_qwen35moe_weights");
     if (loaded.ok()) {
-        const moe::MoeModelWeights& w = loaded.value();
-        check_body(w.body, "moe body");
-        check(w.layers.size() == kLayers, "one MoeLayerWeights per layer");
+        const moe::Qwen35MoeModelWeights& w = loaded.value();
+        check(w.embed_tokens.rows == kVocab && w.embed_tokens.cols == kHidden,
+              "moe model: embed_tokens geometry");
+        check(w.lm_head.rows == kVocab && w.lm_head.cols == kHidden,
+              "moe model: lm_head geometry");
+        check(w.final_norm_weight.ndim() == 1 && w.final_norm_weight.dim(0) == kHidden,
+              "moe model: final norm is a hidden vector");
+        check(w.layers.size() == kLayers, "one MoE layer per transformer layer");
         std::uint64_t expert_bytes = 0;
         for (std::size_t l = 0; l < kLayers; ++l) {
             auto plan = moe::build_moe_expert_group_plan(f.config, l);
             check(plan.ok(), "plan for layer " + std::to_string(l));
-            check_layer(w.layers[l], plan.value(), "layer" + std::to_string(l));
-            expert_bytes += plane_bytes(w.layers[l].expert_w13) + plane_bytes(w.layers[l].expert_w2);
+            const std::string tag = "layer" + std::to_string(l);
+            check(moe::moe_ffn_weights_match(w.layers[l].ffn, plan.value(), f.config.ffn).ok(),
+                  tag + ": FFN weights match the plan");
+            check_ffn(w.layers[l].ffn, plan.value(), kInter, tag);
+            check_backbone(w.layers[l], l == 0u, tag);
+            check(w.layers[l].is_gdn == (l == 0u), tag + ": layer topology");
+            expert_bytes += plane_bytes(w.layers[l].ffn.expert_w13) +
+                            plane_bytes(w.layers[l].ffn.expert_w2);
             check(expert_bytes == 0 || expert_bytes <= gpu_arena.used() - empty_used,
-                  "layer" + std::to_string(l) + ": expert bytes are inside the arena use");
+                  tag + ": expert bytes are inside the arena use");
         }
         check(expert_bytes == moe::moe_expert_group_bytes(moe::build_moe_expert_group_plan(f.config, 0).value()) * kLayers,
               "resident expert plane bytes equal the plan sum for both layers");
         std::printf("arena used %llu B, expert planes %llu B\n",
                     static_cast<unsigned long long>(gpu_arena.used() - empty_used),
                     static_cast<unsigned long long>(expert_bytes));
-        check(q35::validate_qwen35_weights(w.body, f.config).ok(),
-              "the MoE body passes the qwen35 model-level invariants");
+        check(moe::validate_qwen35moe_weights(w, f.config).ok(),
+              "the MoE model passes its own invariants");
     }
 
     {
-        q35::Qwen35LoadOptions mtp;
-        mtp.load_mtp_layers = true;
-        auto st = moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream, mtp);
-        check(!st.ok() && message_contains(st.status(), "does not load MTP layers"),
-              "MTP layers are rejected for a MoE checkpoint");
-
         auto dense = q35::load_qwen35_weights_from_quantized_safetensors((root / "moe").string(),
                                                                         gpu_arena, stream);
-        check(!dense.ok() && message_contains(dense.status(), "logical tensor not found"),
-              "the dense loader still rejects a MoE checkpoint (dense FFN is absent)");
+        check(!dense.ok() && message_contains(dense.status(), "intermediate_size"),
+              "the dense loader rejects a MoE config (no dense FFN width)");
 
         auto not_moe = moe::load_qwen35moe_weights(dense_dir.string(), gpu_arena, stream);
         check(!not_moe.ok() && message_contains(not_moe.status(), "num_experts is required"),
               "the MoE loader rejects a dense config");
     }
 
+    {
+        // The shared expert has its own width: a checkpoint that makes it different from
+        // the routed experts must still load, and one that carries the routed width there
+        // must be rejected. plan.w13_gate_rows is not the shared expert's width.
+        constexpr std::uint32_t kWideShared = 192u;
+        Fixture wide;
+        if (!write_fixture(wide, root / "moe_wide_shared", false, true, kWideShared)) {
+            std::printf("FAIL wide shared expert fixture write\n");
+            return 1;
+        }
+        auto loaded_wide = moe::load_qwen35moe_weights((root / "moe_wide_shared").string(),
+                                                       gpu_arena, stream);
+        check(loaded_wide.ok(),
+              "shared_expert_intermediate_size differs from moe_intermediate_size: " +
+                  std::string(loaded_wide.ok() ? "" : loaded_wide.status().message()));
+        if (loaded_wide.ok()) {
+            auto plan = moe::build_moe_expert_group_plan(wide.config, 0);
+            check(plan.ok(), "plan for the wide shared fixture");
+            check(moe::moe_ffn_weights_match(loaded_wide.value().layers[0].ffn, plan.value(),
+                                             wide.config.ffn)
+                      .ok(),
+                  "the wide shared expert matches its own width");
+            check_ffn(loaded_wide.value().layers[0].ffn, plan.value(), kWideShared, "wide shared");
+            check(moe::validate_qwen35moe_weights(loaded_wide.value(), wide.config).ok(),
+                  "the wide shared model passes its own invariants");
+
+            moe::MoeFfnWeights as_routed = loaded_wide.value().layers[0].ffn;
+            as_routed.shared_gate_proj.rows = kInter;
+            check(!moe::moe_ffn_weights_match(as_routed, plan.value(), wide.config.ffn).ok(),
+                  "a shared expert at the routed width is rejected");
+            moe::MoeFfnWeights as_routed_down = loaded_wide.value().layers[0].ffn;
+            as_routed_down.shared_down_proj.cols = kInter;
+            check(!moe::moe_ffn_weights_match(as_routed_down, plan.value(), wide.config.ffn).ok(),
+                  "a shared down_proj at the routed width is rejected");
+        }
+    }
+
     if (loaded.ok()) {
-        moe::MoeLayerWeights tampered = loaded.value().layers[0];
-        tampered.expert_w13.codes_batch_stride_bytes += 256u;
         auto plan = moe::build_moe_expert_group_plan(f.config, 0);
-        check(!moe::moe_layer_weights_match_plan(tampered, plan.value()).ok(),
+        moe::MoeFfnWeights tampered = loaded.value().layers[0].ffn;
+        tampered.expert_w13.codes_batch_stride_bytes += 256u;
+        check(!moe::moe_ffn_weights_match(tampered, plan.value(), f.config.ffn).ok(),
               "a tampered w13 batch stride is rejected by the plan check");
-        moe::MoeLayerWeights tampered_router = loaded.value().layers[0];
+
+        moe::MoeFfnWeights tampered_router = loaded.value().layers[0].ffn;
         tampered_router.router.rows = kExperts - 1u;
-        check(!moe::moe_layer_weights_match_plan(tampered_router, plan.value()).ok(),
+        check(!moe::moe_ffn_weights_match(tampered_router, plan.value(), f.config.ffn).ok(),
               "a router that is not [experts, hidden] is rejected");
+
+        moe::Qwen35MoeModelWeights bad_topology = loaded.value();
+        bad_topology.layers[0].is_gdn = false;
+        check(!moe::validate_qwen35moe_weights(bad_topology, f.config).ok(),
+              "a layer whose topology disagrees with the config is rejected");
+
+        moe::Qwen35MoeModelWeights missing_body = loaded.value();
+        missing_body.layers[1].attn_q_proj = {};
+        check(!moe::validate_qwen35moe_weights(missing_body, f.config).ok(),
+              "an attention layer without its self_attn weights is rejected");
+
+        moe::Qwen35MoeModelWeights extra_layer = loaded.value();
+        extra_layer.layers.push_back({});
+        check(!moe::validate_qwen35moe_weights(extra_layer, f.config).ok(),
+              "a layer array that does not match the config length is rejected");
+    }
+
+    {
+        // The factory holds exactly one family's weights, and the dense-only MTP option is
+        // refused for a MoE checkpoint instead of being ignored.
+        auto via_factory = shelf::models::load_model_weights((root / "moe").string(), gpu_arena,
+                                                             stream);
+        check(via_factory.ok(), "load_model_weights picks the MoE loader");
+        if (via_factory.ok()) {
+            check(shelf::models::model_family(via_factory.value()) ==
+                      shelf::models::ModelFamily::Moe,
+                  "the factory reports the MoE family");
+            check(std::get_if<q35::Qwen35ModelWeights>(&via_factory.value()) == nullptr,
+                  "the factory holds no dense weights for a MoE checkpoint");
+            const auto* m = std::get_if<moe::Qwen35MoeModelWeights>(&via_factory.value());
+            check(m != nullptr && m->layers.size() == kLayers,
+                  "the factory holds the MoE layer array");
+        }
+
+        q35::Qwen35LoadOptions mtp;
+        mtp.load_mtp_layers = true;
+        auto st = shelf::models::load_model_weights((root / "moe").string(), gpu_arena, stream,
+                                                    mtp);
+        check(!st.ok() && message_contains(st.status(), "does not load MTP layers"),
+              "the factory rejects an MTP request for a MoE checkpoint");
     }
 
     fs::remove_all(root, ec);

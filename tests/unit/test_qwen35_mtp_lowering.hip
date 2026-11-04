@@ -113,9 +113,9 @@ int main() {
     w.mtp.layer.attn_k_proj = make_matrix(alloc({kKV * kHd, kH}, "mtp k_proj"), kKV * kHd, kH);
     w.mtp.layer.attn_v_proj = make_matrix(alloc({kKV * kHd, kH}, "mtp v_proj"), kKV * kHd, kH);
     w.mtp.layer.attn_o_proj = make_matrix(alloc({kH, kQ * kHd}, "mtp o_proj"), kH, kQ * kHd);
-    w.mtp.layer.mlp_gate_proj = make_matrix(alloc({kI, kH}, "mtp mlp gate"), kI, kH);
-    w.mtp.layer.mlp_up_proj = make_matrix(alloc({kI, kH}, "mtp mlp up"), kI, kH);
-    w.mtp.layer.mlp_down_proj = make_matrix(alloc({kH, kI}, "mtp mlp down"), kH, kI);
+    w.mtp.layer.ffn.gate = make_matrix(alloc({kI, kH}, "mtp mlp gate"), kI, kH);
+    w.mtp.layer.ffn.up = make_matrix(alloc({kI, kH}, "mtp mlp up"), kI, kH);
+    w.mtp.layer.ffn.down = make_matrix(alloc({kH, kI}, "mtp mlp down"), kH, kI);
     w.mtp.pre_fc_norm_embedding_weight = alloc({kH}, "pre_fc_norm_embedding");
     w.mtp.pre_fc_norm_hidden_weight = alloc({kH}, "pre_fc_norm_hidden");
     w.mtp.final_norm_weight = alloc({kH}, "mtp final_norm");
