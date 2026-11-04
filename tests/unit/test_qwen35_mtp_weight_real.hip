@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/manifest/crc32.h>
@@ -172,7 +173,24 @@ int main() {
         failures.push_back({t, d});
     };
 
-    auto ar = gpu::GpuArena::create(0, 24ull * 1024ull * 1024ull * 1024ull);
+    // The arena has to hold the whole model: a 30B class checkpoint does not fit a
+    // fixed 24 GiB. Size it from the free VRAM like the other real-checkpoint tests, with
+    // an override for a run that must stay inside a budget.
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess) {
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        return 1;
+    }
+    std::uint64_t arena_bytes = free_bytes > (1ull << 30) ? free_bytes - (1ull << 30) : 0;
+    if (const char* gib = std::getenv("SHELF_MTP_REAL_ARENA_GIB")) {
+        const unsigned long long v = std::strtoull(gib, nullptr, 10);
+        if (v > 0) arena_bytes = v << 30;
+    }
+    std::printf("arena %llu GiB of %llu GiB total\n",
+                static_cast<unsigned long long>(arena_bytes >> 30),
+                static_cast<unsigned long long>(total_bytes >> 30));
+    auto ar = gpu::GpuArena::create(0, arena_bytes);
     if (!ar.ok()) {
         std::printf("FAIL: arena: %s\n", ar.status().message().c_str());
         std::printf("MTP_WEIGHT_CONTRACT: FAIL\n");
@@ -220,7 +238,15 @@ int main() {
                     "tensor", "src fmt", "src shape", "source_crc32", "device payload");
 
                 if (quantized) {
-                    auto rr = quantization::bundle::QuantizedModelReader::open(model_dir, false);
+                    // The same opening rule the production loader uses: a Shelf quantized
+                    // bundle is opened directly, an HF real-quantized directory is read
+                    // through a synthesized source. The test compares against the payload
+                    // bytes the reader hands out, so either form is the same check.
+                    std::vector<std::string> logical_names;
+                    for (const char* n : kMatrixNames) logical_names.push_back(n);
+                    for (const char* n : kVectorNames) logical_names.push_back(n);
+                    auto rr = shelf::qwen_hybrid::open_quantized_model_reader(model_dir,
+                                                                            logical_names, false);
                     if (!rr.ok()) {
                         fail_tensor("(reader)", rr.status().message());
                     } else {

@@ -504,7 +504,7 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # MTP weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_MTP (preferred) or SHELF_MODEL_DIR.
     # Skips (exit 77) when none is set.
-    shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES shelf_weights shelf_qwen35)
+    shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35)
 
     # DFlash2 drafter weight contract against a real model directory.
     # Model dir via SHELF_MODEL_DIR_DFLASH2. Skips (exit 77) when unset.
