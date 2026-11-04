@@ -17,6 +17,7 @@
 #include <shelf/inference/execution/l2_normalize_dispatch.h>
 #include <shelf/inference/execution/gdn_conv_dispatch.h>
 #include <shelf/inference/execution/rope_dispatch.h>
+#include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/kernels/optimized/output_gather.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
@@ -124,7 +125,10 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize(
                   reinterpret_cast<uint8_t*>(launch.codes),
                   reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
                   launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-                  launch.scale_row_stride, nullptr, stream)
+                  launch.scale_row_stride,
+                  launch.row_index != 0u
+                      ? reinterpret_cast<const int32_t*>(launch.row_index)
+                      : nullptr, stream)
             : ::shelf::kernel::launch_activation_quantize_fp8_finegrained(
                   reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
                   reinterpret_cast<uint8_t*>(launch.codes),
@@ -632,6 +636,16 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return try_launch_linear_fp8(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_MXFP4_W4A8)
         return try_launch_linear_mxfp4(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::MOE_ROUTER)
+        return try_launch_moe_router(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::MOE_PLAN_SCAN)
+        return try_launch_moe_plan_scan(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::MOE_PLAN_SCATTER)
+        return try_launch_moe_plan_scatter(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::LINEAR_MXFP4_W4A8_GROUPED)
+        return try_launch_moe_grouped_linear(program, b, ctx, stream);
+    if (b.kernel_id == KernelId::MOE_COMBINE)
+        return try_launch_moe_combine(program, b, ctx, stream);
     if (b.kernel_id == KernelId::LINEAR_BF16)
         return try_launch_linear_bf16(program, b, ctx, stream);
     if (b.kernel_id == KernelId::RMS_NORM)

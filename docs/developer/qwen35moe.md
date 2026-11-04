@@ -473,7 +473,28 @@ routing round を使う全 dispatch が同じ range を指す。
 `tokens` はその program の bucket の token rows なので、確保容量と読む容量がズレない。
 
 `Program::validate()` は `scratch_slot` が range を指すことと geometry が非ゼロであることを
-検証する。
+検証し、program は `plan_scratch_slot` を持つ。
+
+### 実行側の契約
+
+- router は token tile 別の件数を **累算**する。したがって routing round は zero から始まら
+  なければならず、`execute_program` が program 実行ごとに plan scratch range を 1 回 memset
+  する（層毎ではない。layer L の scatter までが layer L の round を使い、layer L+1 の router
+  はその後に走る）。
+- group-row value に触れる dispatch は、plan 配列を読まない場合でも `scratch_tokens` /
+  `scratch_experts` / `scratch_top_k` を持つ（`build_program` が emit 後に付与する）。
+  kernel 側はこれを `moe_group_rows(b, ctx)` で実際の token 数から引き直した group 行数に
+  使うので、`rows * top_k` でも bucket の token 行数でもない、**その batch の group 行数**
+  で work が決まる。
+- grouped 系の kernel には correctness fallback が無い。`KernelMode::Auto` で optimized が
+  NotApplicable になると fallback は失敗するため、geometry は allowlist に載っている必要がある
+  （elementwise selector: `SwigluBf16 @512`・`SigmoidBf16ToF32 @1`・`ResidualBf16 @2048`、
+  `max_rows = kOptimizedMaxRows`(8192)）。group 行数が 8192 を超える prefill chunk では
+  動かない（chunk 上限は §8 の残作業）。
+- fused gate / up 平面は 2 つの view として読まれる。elementwise dispatch の alias 検査は
+  **読み専用 operand 同士は同じ buffer を共有してよい**（行 stride で span が重なるため）、
+  出力だけが各 operand と同一または非重複であることを要求する
+  （`elementwise_dispatch.hip` の `output_alias_ok`）。
 
 ## 7. test contract
 
@@ -489,6 +510,7 @@ routing round を使う全 dispatch が同じ range を指す。
 | `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないことと MoE への MTP option 拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在を `static_assert` で固定 |
 | `test_grouped_row_shape` | `cpu;required` | group row 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128 など）と不変条件（group 数は slot 数を超えない・容量は slot 数を覆う・16 の倍数）、`GROUPED_ROWS` value の binding 行数が容量基準になること、`grouped_row_shape` 未宣言の graph を graph 検証と `build_program` の両方が拒否すること、dense graph に grouped 行空間が現れないこと |
 | `test_program_moe_plan` | `cpu;required` | 1 MoE FFN の graph / program 配線: `MOE_ROUTER` 1 node から 3 dispatch・grouped linear 1 node から量子化+grouped の 2 dispatch・combine まで dispatch 列で固定、plan scratch が workspace に 1 本だけ確保され scratch を読む 7 dispatch すべてが同じ range を指すこと、fused 出力と activation 平面が group row 容量で確保されること、router が shape と不一致・combine が TOKEN_ROWS を読む・weight が rank-2・`k_padded` が平面 padding と不一致、いずれも拒否 |
+| `test_moe_program_execute` | `gpu1;required` | 実測 geometry（experts 256・top_k 8・hidden 2048・moe_inter 512）の 1 MoE FFN を program 経由で実行し、同じ kernel を直接呼んだ参照路径と combine 出力が bit 一致。9 dispatch すべて optimized path を通り、同一 workspace での 2 回目の実行が 1 回目と一致（plan scratch の zeroing が効いていることの固定） |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
@@ -511,21 +533,19 @@ GPU 不足による skip は required では失敗として扱う（テスト受
 
 ## 8. 配線が未実装な範囲
 
-model load（§5）と graph / program の MoE 語彙（§6-1）は配線済み。graph は組めるが
-**まだ実行できない**。residual は device 実行と lowering である。
+model load（§5）、graph / program の MoE 語彙（§6-1）、device dispatch（§6-1 の実行側契約）は
+配線済み。program 経由の 1 MoE FFN は §7 の `test_moe_program_execute` で実測している。
+residual は **model への配線**である。
 
-- `try_launch_optimized` の `MOE_ROUTER` / `MOE_PLAN_SCAN` / `MOE_PLAN_SCATTER` /
-  `LINEAR_MXFP4_W4A8_GROUPED` / `MOE_COMBINE` の分岐
-- `ACTIVATION_QUANTIZE_MXFP4_ROWREF` に `row_index` 間接参照が無い（group row へ gathered
-  する producer として使えない）。binding の scratch 参照から `row_token` を引く
-- routing round が `tile_counts` を zero から始めるための初期化（層毎）。scan kernel が
-  消費後に zero へ戻す案と launcher が memset する案を追加 launch 実測で選ぶ
-- `Qwen35MoeModelWeights` を受け取る lowering。MoE の emit は `shelf::qwen35moe` 側に置き、
-  backbone は `qwen_hybrid::emit_hybrid_block` を使う（§1・§7 Step 2a）
-- linear selector の allowlist に MoE geometry（`1024:2048` = w13、`2048:512` = w2、
-  `256:2048` = router）と grouped 形の選択
-- `qwen35_executor_reserve_bytes` の MoE 項（dense の `ffn.intermediate_size` 前提のまま）
-- correctness path には grouped linear も router も無い（fallback は成立しない）
+- `Qwen35MoeModelWeights` を受け取る lowering（`shelf::qwen35moe` 側に置く。backbone は
+  `qwen_hybrid::emit_hybrid_block` を使い、§6-1 の primitive を emit する）。
+  router linear（`256:2048` bf16）と shared expert linear（`512:2048` / `2048:512` bf16）の
+  geometry を linear selector の allowlist に載せる
+- `Qwen35MoeTextConfig` を受け取る executor 入口と `qwen35_executor_reserve_bytes` の MoE 項
+  （dense の `ffn.intermediate_size` 前提のまま。group row 容量と plan scratch が計上されない）
+- group 行数が `kOptimizedMaxRows`(8192) を超える prefill chunk の扱い（elementwise が
+  allowlist を外れ、grouped 系に fallback が無い）
+- correctness path には grouped linear も router も combine も無い（fallback は成立しない）
 - `shelf-bench` に MoE の計測口が無い（性能主張は配線と計測口の両方が揃うまでしない）
 - `shelf-compute` / `shelf-server` / `shelf-bench` の load 入口を `shelf::models` の
   factory へ切り替える（§5）。TP + MoE は §5 の受理条件で `unsupported`

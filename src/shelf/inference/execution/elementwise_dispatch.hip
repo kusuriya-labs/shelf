@@ -1,6 +1,7 @@
 #include <shelf/inference/execution/elementwise_dispatch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/physical_launch.h>
+#include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
@@ -16,6 +17,8 @@
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 #include <hip/hip_runtime.h>
+#include <cstdlib>
+#include <cstdio>
 
 #include <cstdint>
 #include <cstddef>
@@ -29,7 +32,9 @@ using ::shelf::runtime::ValueRowDomain;
 
 constexpr OptimizedLaunchResult kNone{OptimizedLaunchKind::NotApplicable};
 
-uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx) {
+uint32_t rows_for(const HostResolvedValue& v, const HostExecutionContext& ctx,
+                  const ::shelf::runtime::DispatchBinding& b) {
+    if (v.row_domain == ValueRowDomain::GROUPED_ROWS) return moe_group_rows(b, ctx);
     if (v.row_domain == ValueRowDomain::OUTPUT_ROWS) return ctx.actual_outputs;
     return ctx.actual_rows != 0 ? ctx.actual_rows : 1u;
 }
@@ -61,6 +66,15 @@ bool all_alias_ok(const ByteRange* rs, size_t n) {
     for (size_t i = 0u; i < n; ++i)
         for (size_t j = i + 1u; j < n; ++j)
             if (!ranges_ok(rs[i], rs[j])) return false;
+    return true;
+}
+
+// Two read-only operands may share a buffer: a fused gate / up plane is read as two views
+// whose byte spans overlap because their row stride is the plane's width. Writing is the
+// hazard, so only the output has to be identical or disjoint from every operand.
+bool output_alias_ok(const ByteRange* rs, size_t n, size_t output) {
+    for (size_t i = 0u; i < n; ++i)
+        if (i != output && !ranges_ok(rs[output], rs[i])) return false;
     return true;
 }
 
@@ -105,7 +119,7 @@ Result<PhysicalResolveStatus> resolve_unary_bf16_to_f32(
         dst.row_stride < in.feature_count) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[2] = {value_range(in, rows), value_range(dst, rows)};
     if (!all_alias_ok(ranges, 2)) return PhysicalResolveStatus::NotApplicable;
@@ -138,7 +152,7 @@ Result<PhysicalResolveStatus> resolve_unary_f32_to_bf16(
         dst.row_stride < in.feature_count) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[2] = {value_range(in, rows), value_range(dst, rows)};
     if (!all_alias_ok(ranges, 2)) return PhysicalResolveStatus::NotApplicable;
@@ -171,7 +185,7 @@ Result<PhysicalResolveStatus> resolve_unary_f32_scale(
         dst.row_stride < in.feature_count) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[2] = {value_range(in, rows), value_range(dst, rows)};
     if (!all_alias_ok(ranges, 2)) return PhysicalResolveStatus::NotApplicable;
@@ -211,11 +225,11 @@ Result<PhysicalResolveStatus> resolve_binary_bf16(
         bb.row_stride < dst.feature_count || dst.row_stride < dst.feature_count) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[3] = {value_range(a, rows), value_range(bb, rows),
                                  value_range(dst, rows)};
-    if (!all_alias_ok(ranges, 3)) return PhysicalResolveStatus::NotApplicable;
+    if (!output_alias_ok(ranges, 3, 2u)) return PhysicalResolveStatus::NotApplicable;
     out.profile = profile;
     out.in0 = reinterpret_cast<uint64_t>(a.ptr);
     out.in0_stride = a.row_stride;
@@ -252,11 +266,11 @@ Result<PhysicalResolveStatus> resolve_binary_f32_to_bf16(
         bb.row_stride < dst.feature_count || dst.row_stride < dst.feature_count) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[3] = {value_range(a, rows), value_range(bb, rows),
                                  value_range(dst, rows)};
-    if (!all_alias_ok(ranges, 3)) return PhysicalResolveStatus::NotApplicable;
+    if (!output_alias_ok(ranges, 3, 2u)) return PhysicalResolveStatus::NotApplicable;
     out.profile = ElementwiseProfile::MulF32F32ToBf16;
     out.in0 = reinterpret_cast<uint64_t>(a.ptr);
     out.in0_stride = a.row_stride;
@@ -306,7 +320,7 @@ Result<PhysicalResolveStatus> resolve_split_desc(
         if (head_dim == 0u || f0 % head_dim != 0u)
             return PhysicalResolveStatus::NotApplicable;
     }
-    const uint32_t rows = rows_for(o0, ctx);
+    const uint32_t rows = rows_for(o0, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[3] = {value_range(in, rows), value_range(o0, rows),
                                  value_range(o1, rows)};
@@ -372,7 +386,7 @@ Result<PhysicalResolveStatus> resolve_concat_desc(
         return PhysicalResolveStatus::NotApplicable;
     if (a.row_stride < fa || bb.row_stride < fb || dst.row_stride < dst.feature_count)
         return PhysicalResolveStatus::NotApplicable;
-    const uint32_t rows = rows_for(dst, ctx);
+    const uint32_t rows = rows_for(dst, ctx, b);
     if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
     const ByteRange ranges[3] = {value_range(a, rows), value_range(bb, rows),
                                  value_range(dst, rows)};

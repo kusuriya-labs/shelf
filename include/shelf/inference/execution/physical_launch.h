@@ -75,6 +75,9 @@ struct PhysicalActivationQuantizeLaunch {
     uint64_t input = 0;
     uint64_t codes = 0;
     uint64_t scales = 0;
+    // Group-plan row indirection: output row m reads input row row_index[m], and a negative
+    // entry writes a zero row. Zero when the rows are the input's own rows.
+    uint64_t row_index = 0;
     uint32_t rows = 0;
     uint32_t k = 0;
     uint32_t k_padded = 0;

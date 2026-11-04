@@ -137,6 +137,9 @@ struct Program {
     uint32_t parameter_slot_count = 0;
     uint32_t external_input_count = 0;
     uint32_t external_output_count = 0;
+    // The workspace range holding the routing plan, or kNoWorkspace. The router accumulates
+    // into it, so the executor zeroes it before a program runs.
+    uint32_t plan_scratch_slot = kNoWorkspace;
 
     Status validate() const;
 

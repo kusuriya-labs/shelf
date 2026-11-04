@@ -273,3 +273,67 @@ Passed: 151  Failed: 0  Errors: 0  Skipped: 0
 150 → 151 は新規 `test_program_moe_plan`。`KernelId` 追加による `decode_perf_stats` の
 配列サイズや dispatch 名表は `kernel_id_count()` 基準なので追従は不要だった
 （`kernel_to_name` に case を足さないと `UNKNOWN` 表示になるため追加済み）。
+
+## 9. Step 3b: MoE dispatch を device に配線し、program 経由と直接呼び出しを bit 比較
+
+`optimized_dispatch.hip` の chain に `MOE_ROUTER` / `MOE_PLAN_SCAN` / `MOE_PLAN_SCATTER` /
+`LINEAR_MXFP4_W4A8_GROUPED` / `MOE_COMBINE` を入れ、`inference/execution/moe_dispatch.hip`
+に resolve + launch を置いた。grouped 系には selector が無い（形が固定）ので、
+geometry は launch 前の検査で締切める（expert 平面の native layout、batch stride、
+`k_padded % 128`、`rows % 16`、`experts >= 2`）。
+
+### 判断: tile_counts の zero 初期化は executor の 1 回 memset
+
+層毎に必要なので候補は 3 つだった。
+
+| 案 | 判断 |
+| --- | --- |
+| `launch_moe_slot_scan` が消費後に zero へ戻す（追加 launch ゼロ） | 不採用（現状）。Gate C の kernel と test の契約を変え、層間で scratch を共有していることへの依存が kernel 契約に漏れる |
+| launcher が memset する | 不採用。layer 毎に +1 launch（40 层 decode で 40 launch/step） |
+| `Program::plan_scratch_slot` を持ち、`execute_program` が program 実行あたり 1 回 memset する | 採用。layer 間は同一 stream の逐次実行なので round が重ならず、1 回で足りる。group 数の上限（実測 geometry で R8192 でも 4352 語）に対し memset は range 分だけ |
+
+### 判断: group-row の dispatch は plan geometry を持つ
+
+elementwise（fused gate / up の swiglu）は plan 配列を読まないが、処理する行数が
+group 行数である。binding に `scratch_slot` を持たせず `scratch_experts` / `scratch_top_k` /
+`scratch_tokens` だけ持たせる案だと scratch の寿命管理が二重になるため、
+`build_program` が emit 後に「group-row value に触れる dispatch」へ scratch slot と geometry を
+一括で付与する形にした（`note_grouped_row_dispatches`）。kernel 側は
+`moe_group_rows(b, ctx)` で実際の token 数から引き直す。
+
+### 修正: elementwise の alias 検査は読み専用 operand 同士を許す
+
+fused 平面の gate 半分と up 半分は view で表す（複製しない）。view の byte span は
+行 stride のぶんお互いに重なるため、既存の `all_alias_ok`（全 pair が同一または非重複）が
+SWIGLU を NotApplicable にした。optimized が通らないと grouped 系は correctness fallback で
+失敗するので、規則を分けた: **読み専用 operand 同士は共有可、出力は各 operand と同一または
+非重複**（`output_alias_ok`）。
+
+### 実測: program 経由と直接 launch の bit 一致
+
+新規 required test `test_moe_program_execute`（`gpu1;required`）。geometry は実 checkpoint の
+実測値（experts 256・top_k 8・hidden 2048・moe_inter 512）、tokens 3 / bucket R16。
+
+- 9 dispatch すべて optimized path（`execute_program_range` を dispatch 毎に分割実行して確認）
+- combine 出力 6144 語が、同じ kernel を直接呼んだ参照路径（plan 配列を別確保し、
+  容量を `moe_group_count_upper_bound` / `moe_group_row_capacity` から独立に導出）と bit 一致
+- 同一 workspace で 2 回 `execute_program` を実行すると出力が一致
+  （2 回目に `d_prog_out` だけを zero にし、workspace は再初期化しない。plan scratch の
+  memset が効いていれば一致する）
+
+required acceptance（Step 3b 後）:
+
+```text
+Passed: 152  Failed: 0  Errors: 0  Skipped: 0
+```
+
+151 → 152 は新規 `test_moe_program_execute`。
+
+### 途中で出た別の問題（実測で判明）
+
+- group 行数は bucket によって線形以上に増える（R8192 で 69632 行）。elementwise allowlist の
+  `max_rows` は 8192 なので、大きな prefill chunk では optimized kernel が選ばれず、
+  grouped 系には fallback が無いため実行できない。chunk 上限の決定として §8 に残作業で書く。
+- non-blocking stream では同期しない `hipMemcpy` を使い、2 回目の実行結果を readback したため
+  test 側が race を起こした（実行していないのに差分が出た）。`hipStreamSynchronize` を入れて
+  解消。production の executor は同期経路を持つので、この race は test 側だけのものである。

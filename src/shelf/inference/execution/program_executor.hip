@@ -590,12 +590,40 @@ Status execute_program_tp_ranges(
     return Status::make_ok();
 }
 
+namespace {
+
+// The router accumulates per-token-tile counts into the plan scratch, so a routing round
+// must start from zeros. One memset per program run covers every layer of the run: each
+// layer's scan consumes the counts before the next layer accumulates into them.
+Status zero_plan_scratch(const ::shelf::runtime::Program& program,
+                         HostExecutionContext& ctx, hipStream_t stream) {
+    if (program.plan_scratch_slot == ::shelf::runtime::kNoWorkspace) return Status::make_ok();
+    if (ctx.workspace == nullptr)
+        return Status::invalid_state("plan scratch zero: workspace not bound", __FILE__,
+                                     __LINE__);
+    if (program.plan_scratch_slot >= program.workspace.ranges.size())
+        return Status::invalid_state("plan scratch zero: slot out of range", __FILE__,
+                                     __LINE__);
+    const auto& range = program.workspace.ranges[program.plan_scratch_slot];
+    const hipError_t err = hipMemsetAsync(ctx.workspace + range.offset, 0, range.bytes, stream);
+    if (err != hipSuccess)
+        return Status::hip_error("plan scratch zero", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    return Status::make_ok();
+}
+
+}
+
 Status execute_program(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,
     hipStream_t stream) {
     if (ctx.error_word == nullptr)
         return Status::invalid_state("error word not bound", __FILE__, __LINE__);
+    {
+        const Status zero_status = zero_plan_scratch(program, ctx, stream);
+        if (!zero_status.ok()) return zero_status;
+    }
     const hipError_t herr =
         hipMemsetAsync(ctx.error_word, 0, sizeof(uint32_t), stream);
     if (herr != hipSuccess)

@@ -139,17 +139,42 @@ struct Ctx {
         return true;
     }
 
-    // Marks the binding that is about to be pushed as a user of the plan scratch, and keeps
-    // the scratch live over every dispatch that reads or writes it.
-    void use_moe_scratch(DispatchBinding& b) {
+    void attach_moe_scratch(DispatchBinding& b, uint32_t index) {
         b.scratch_tokens = moe_scratch.tokens;
         b.scratch_experts = moe_scratch.experts;
         b.scratch_top_k = moe_scratch.top_k;
-        const uint32_t index = static_cast<uint32_t>(plan->dispatches.size());
         moe_scratch.binding_refs.push_back(index);
         if (!moe_scratch.first_command || index < moe_scratch.first_command)
             moe_scratch.first_command = index;
         if (index > moe_scratch.last_command) moe_scratch.last_command = index;
+    }
+
+    // Marks the binding that is about to be pushed as a user of the plan scratch, and keeps
+    // the scratch live over every dispatch that reads or writes it.
+    void use_moe_scratch(DispatchBinding& b) {
+        attach_moe_scratch(b, static_cast<uint32_t>(plan->dispatches.size()));
+    }
+
+    // A dispatch that touches group-row values is sized by the plan even when it reads none
+    // of the plan arrays, so it carries the plan geometry too.
+    void note_grouped_row_dispatches(size_t first_new_dispatch) {
+        if (!moe_scratch.present) return;
+        for (size_t i = first_new_dispatch; i < plan->dispatches.size(); ++i) {
+            auto& b = plan->dispatches[i];
+            if (b.scratch_slot != kNoWorkspace) continue;
+            bool grouped = false;
+            for (uint32_t s = 0; s < b.input_count; ++s) {
+                if (graph->value_row_domain(ValueId{b.input_slots[s]}) ==
+                    ValueRowDomain::GROUPED_ROWS)
+                    grouped = true;
+            }
+            for (uint32_t s = 0; s < b.output_count; ++s) {
+                if (graph->value_row_domain(ValueId{b.output_slots[s]}) ==
+                    ValueRowDomain::GROUPED_ROWS)
+                    grouped = true;
+            }
+            if (grouped) attach_moe_scratch(b, static_cast<uint32_t>(i));
+        }
     }
 
     void note_use(ValueId v, uint32_t dispatch_index) {
@@ -683,7 +708,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 qb.activation_scale_stride = a8l.scale_row_stride_bytes;
                 qb.input_slots[0] = node.inputs[0].id;
                 qb.input_count = 1;
-                if (gather_rows) c.use_moe_scratch(qb);
+                // The plane is addressed in group rows, so the plan geometry sizes it even
+                // when the rows are already in group order and no gather is needed.
+                c.use_moe_scratch(qb);
                 c.push(qb);
                 c.activation_workspaces[ws_idx].binding_refs.push_back(
                     static_cast<uint32_t>(c.plan->dispatches.size()) - 1u);
@@ -848,6 +875,7 @@ Status finalize_layout(Ctx& c) {
             item.value->offset = offset;
             item.value->slot = slot;
         } else if (item.moe_scratch) {
+            c.plan->plan_scratch_slot = slot;
             for (uint32_t ref : c.moe_scratch.binding_refs)
                 c.plan->dispatches[ref].scratch_slot = slot;
         } else {
@@ -969,8 +997,12 @@ Status Program::validate() const {
             if (!MoePlanScratch::make(b.scratch_tokens, b.scratch_experts, b.scratch_top_k)
                      .valid())
                 return fail("binding plan scratch geometry invalid");
+            if (plan_scratch_slot == kNoWorkspace || plan_scratch_slot != b.scratch_slot)
+                return fail("binding plan scratch is not the program plan range");
         }
     }
+    if (plan_scratch_slot != kNoWorkspace && plan_scratch_slot >= workspace.ranges.size())
+        return fail("program plan scratch slot out of range");
     auto ws = workspace.validate();
     if (!ws.ok()) return ws;
     return Status::make_ok();
@@ -1015,8 +1047,10 @@ Result<Program> build_program(
             c.note_use(keep, static_cast<uint32_t>(c.plan->dispatches.size()));
         }
         c.current_source_node = static_cast<uint32_t>(ni);
+        const size_t first_new_dispatch = c.plan->dispatches.size();
         auto st = emit_node(c, graph.nodes[ni]);
         if (!st.ok()) return st;
+        c.note_grouped_row_dispatches(first_new_dispatch);
     }
     auto st_ext = finalize_externals(c);
     if (!st_ext.ok()) return st_ext;

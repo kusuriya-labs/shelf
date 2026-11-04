@@ -252,8 +252,9 @@ void check_plan_scratch(const rt::Program& program) {
                   b.scratch_top_k == kTopK,
               "scratch bindings carry the layout geometry");
     }
-    // router, scan, scatter, the gathered quantize, both grouped linears, combine.
-    check(scratch_bindings == 7u, "seven dispatches read or write the plan scratch");
+    // router, scan, scatter, both plane producers, both grouped linears, the group-row
+    // swiglu, combine.
+    check(scratch_bindings == 9u, "nine dispatches read or size themselves by the plan scratch");
 
     const rt::ValueBinding* y13 = nullptr;
     for (const auto& v : program.values) {
