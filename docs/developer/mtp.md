@@ -111,12 +111,17 @@ MTP の verify は target の GDN recurrence / conv を `K+1` row 分進める�
 1. verify 前に `spec_gdn_snapshot` で GDN conv / recurrent を保存する。
 2. `spec_gdn_restore` で verify 前の state に戻す。
 3. target sequence の `position` を round 開始位置へ戻し、必要な page 数まで rollback する。
-4. 受理済み prefix `accepted + 1` row を target でもう一度実行する。logits / sample は
-   計算しない。
+4. 受理済み prefix `accepted + 1` row を **1 row ずつ DECODE で** 実行する。
+   logits / sample は計算しない。
+
+rerun を 1 回の multi-row batch（PREFILL）にまとめてはならない。multi-row の GDN
+recurrence は、単一 row decode の逐次更新と丸めが一致しない。rerun の state が
+target-only の逐次 decode とずれると、その後の verify が別の token を sampling し、
+`GENERATED_IDS` が target-only と一致しなくなる。
 
 DFlash2 の compact log による replay は使わない。MTP の partial reject は target の
-prefix rerun を 1 回行うため、partial accept の round は full accept より遅い。
-再実行する row 数は `accepted + 1` であり、round 全体の verify row 数 `K+1` 以下である。
+prefix rerun を `accepted + 1` 回の単一 row decode として行うため、partial accept の
+round は full accept より遅い。
 
 ## Sampling
 

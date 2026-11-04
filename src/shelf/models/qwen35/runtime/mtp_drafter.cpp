@@ -573,12 +573,14 @@ Result<MtpIterationOutput> mtp_spec_step(
         if (!rollback.ok()) return rollback;
         std::vector<int32_t> rerun(verify_tokens.begin(),
                                    verify_tokens.begin() + committed);
-        auto rerun_output = run_target(
-            drafter, target, target_sequence, rerun, position, false, false, 1u,
-            committed == 1u ? ::shelf::runtime::ExecutionClass::DECODE
-                            : ::shelf::runtime::ExecutionClass::PREFILL,
-            false, drafter.sampling, drafter.sample_index, stream);
-        if (!rerun_output.ok()) return rerun_output.status();
+        for (uint32_t i = 0u; i < committed; ++i) {
+            std::vector<int32_t> one{rerun[i]};
+            auto rerun_output = run_target(
+                drafter, target, target_sequence, one, position + i, false, false, 1u,
+                ::shelf::runtime::ExecutionClass::DECODE, false, drafter.sampling,
+                drafter.sample_index, stream);
+            if (!rerun_output.ok()) return rerun_output.status();
+        }
         drafter.last_tokens = rerun;
         drafter.last_position = position;
         drafter.timing.partial_accepts += 1u;
