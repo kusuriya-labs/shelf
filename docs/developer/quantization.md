@@ -342,7 +342,9 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
 - final projection / vocab-parallel LM head は `Bf16` を要求する既存契約のままであり、
   EXL3 の lm_head に対して vocab shard は行わない。
 - tensor partition（TP）は EXL3 では unsupported。
-- MoE routed expert と DFlash2 drafter は EXL3 を受理しない。
+- MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
+- DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
+  logits を計算する（drafter の重みは BF16 / FP8 のまま）。
 
 ## KV quantization
 

@@ -16,6 +16,7 @@
 #include <shelf/kernels/optimized/embedding.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/runtime/selector_types.h>
 #include <cstdint>
@@ -999,7 +1000,8 @@ Status lm_head_validate(
     const DFlash2Config& config = *executor.config;
     const bool bf16 = weight.encoding == shelf::weights::MatrixEncoding::Bf16;
     const bool fp8 = weight.encoding == shelf::weights::MatrixEncoding::Fp8Finegrained;
-    if (!bf16 && !fp8) {
+    const bool exl3 = weight.encoding == shelf::weights::MatrixEncoding::Exl3;
+    if (!bf16 && !fp8 && !exl3) {
         return Status::unsupported("dflash2 target lm_head encoding unsupported", __FILE__,
                                    __LINE__);
     }
@@ -1020,6 +1022,15 @@ Status lm_head_validate(
             return Status::invalid_argument("dflash2 target lm_head layout invalid", __FILE__,
                                             __LINE__);
         }
+    } else {
+        if (weight.preshuffled || weight.codes.ndim() == 0 ||
+            weight.exl3_suh.ndim() == 0 || weight.exl3_svh.ndim() == 0 ||
+            (weight.k_padded % 128u) != 0u || (weight.rows % 128u) != 0u ||
+            weight.exl3_ka < 1u || weight.exl3_ka > 8u ||
+            (weight.exl3_half && weight.exl3_ka > 3u)) {
+            return Status::invalid_argument("dflash2 target lm_head exl3 layout invalid",
+                                            __FILE__, __LINE__);
+        }
     }
     if (rows == 0u || rows > executor.max_rows) {
         return Status::invalid_argument("dflash2 logits rows out of range", __FILE__, __LINE__);
@@ -1033,7 +1044,8 @@ Status lm_head_quantize(
     const bf16_t* hidden,
     uint32_t rows,
     hipStream_t stream) {
-    if (weight.encoding == shelf::weights::MatrixEncoding::Bf16) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Bf16 ||
+        weight.encoding == shelf::weights::MatrixEncoding::Exl3) {
         return Status::make_ok();
     }
     const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(
@@ -1067,6 +1079,33 @@ Status lm_head_gemm(
     float* logits,
     uint32_t logits_row_stride,
     hipStream_t stream) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Exl3) {
+        ::shelf::kernel::Exl3GemmArgs args;
+        args.trellis = weight.codes.data<void>();
+        args.suh = weight.exl3_suh.data<void>();
+        args.svh = weight.exl3_svh.data<void>();
+        args.input = hidden;
+        args.output = logits;
+        args.rows = rows;
+        args.out_features = weight.rows;
+        args.k = weight.cols;
+        args.input_row_stride = weight.cols;
+        args.output_row_stride = logits_row_stride;
+        args.output_dtype = 1u;
+        args.ka = weight.exl3_ka;
+        args.half = weight.exl3_half ? 1u : 0u;
+        args.splitk_scratch = nullptr;
+        args.splitk_floats = 0u;
+        args.splitk_splits = 1u;
+        args.xrot = nullptr;
+        args.groups = 0u;
+        const hipError_t err = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("dflash2 target lm_head exl3 gemm launch",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     if (weight.encoding == shelf::weights::MatrixEncoding::Bf16) {
         const auto config =
             select_bf16_gemm(weight, rows, weight.cols, weight.bf16.data<void>(), hidden,

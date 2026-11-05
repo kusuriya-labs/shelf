@@ -84,6 +84,20 @@ EXL3 経路の現在値である。
   `SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算、LDS pitch 136）に切り替えられる。
 - decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
+- DFlash2（drafts=7）は EXL3 target でも動作する（DFlash2 の target lm_head に
+  EXL3 経路を追加）。5 token prompt、32 new token、bf16 KV、`--arena-gib 28`:
+
+  | 条件 | 値 |
+  | --- | ---: |
+  | non-spec decode | 20.82 tok/s |
+  | DFlash2 drafts=3 | 40.53 tok/s（accepted 1.58/round） |
+  | DFlash2 drafts=5 | 47.73 tok/s（accepted 2.10/round） |
+  | DFlash2 drafts=7 | 50.59 / 51.65 / 51.67 tok/s（accepted 2.44/round） |
+  | DFlash2 drafts=7、64 new token | 60.74 tok/s（accepted 3.20/round） |
+
+  生成 32 token は non-spec と一致する。303 token の合成 random prompt では
+  accepted 0.48/round まで落ち、9.81 tok/s と non-spec を下回る（自然文では有効）。
+
   E2E decode は 22.40 tok/s、MTP-2 は 18.3 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
