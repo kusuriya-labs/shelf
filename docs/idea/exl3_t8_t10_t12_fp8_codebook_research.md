@@ -28,6 +28,10 @@
 
 ## 2. 提案の基本構造
 
+EXL3をそのまま使うのではなく、CPUで展開が速い、以下の変種を使用する。
+
+`https://github.com/lxe/dsx/blob/main/docs/t16-format.md`
+
 ```text
 [オフライン量子化]
 高精度の元重み
