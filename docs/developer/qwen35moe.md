@@ -266,9 +266,8 @@ qhy::load_hybrid_layer_body_quantized(arena, stream, reader, config, layer, opti
 `load_hybrid_layer_body_quantized` は `qhy::layer_is_gdn(config, layer)` で topology を
 決める（`layer_types` が層数分あればそれを優先し、無ければ `full_attention_interval` から
 導出する）。呼び出し側が `is_gdn` を渡さないため、load 結果と config が食い違えない。
-options は `qhy::HybridLoadOptions`（`verify_quantized_payload_crc` と
-`shelf::weights::WeightLoadOptions`）だけで、MTP や vocab partition の dense 固有
-オプションを MoE 側は要求できない。
+options は `Qwen35MoeLoadOptions`（`qhy::HybridLoadOptions` を base に `load_mtp_layers` を足した型）。
+vocab partition の dense 固有オプションは MoE 側は要求できない。
 
 ### 共通 invariant
 
@@ -293,14 +292,35 @@ qhy::check_matrix_shape(w, rows, cols, tag)
 FFN の検査は各 family の validation が持つ。dense は `validate_qwen35_weights`
 （`Qwen35TextConfig` を取る）で gate / up = `[intermediate, hidden]`、
 down = `[hidden, intermediate]`、MTP block を見る。MoE は `validate_qwen35moe_weights`
-で plan の幾何・stride・row_ref と router / shared 形状を見る。
+で plan の幾何・stride・row_ref と router / shared 形状を見、`mtp.present` のときは
+`validate_qwen35moe_mtp_weights` を同じ validation の一部として通す。
+
+### MTP block
+
+checkpoint が `mtp.*` として持つ 1 層ぶんの transformer を読む。transformer layer 配列とは
+別個に、`Qwen35MoeModelWeights::mtp` へ入れる。
+
+- body（layernorm と full attention）は `qhy::load_hybrid_layer_body_quantized_at` を
+  prefix `mtp.layers.0.` と `is_gdn = false` で読む。名前列は
+  `qhy::hf_layer_body_names(prefix, is_gdn)` が同じ列表を使う
+- routed expert は transformer layer と同じ plan 幾何だが、checkpoint では fused rank-3 の BF16
+  （`mtp.layers.0.mlp.experts.gate_up_proj` = `[experts][2 * moe_intermediate][hidden]`、
+  `experts.down_proj` = `[experts][hidden][moe_intermediate]`）で保存される。
+  `build_moe_mtp_expert_group_plan` は `fused_rank3 = true` と 2 つの平面名を持ち、
+  `load_moe_expert_group` は `gather_fused_plane` で MXFP4 へ再量子化して native SoA 平面に落とす。
+  gate rows が前半、up rows が後半（HF の `linear(x, gate_up_proj[e]).chunk(2, dim=-1)` と同じ順）
+- block 固有 tensor は `mtp.fc.weight` = `[hidden, 2 * hidden]`、
+  `mtp.pre_fc_norm_embedding.weight` / `mtp.pre_fc_norm_hidden.weight` / `mtp.norm.weight` = `[hidden]`
+- router と shared expert は transformer layer と同じ名前の並びを prefix `mtp.layers.0.mlp.` で読む
+  （`moe_aux_tensor_names(mlp_prefix)`）
 
 ### 受理条件
 
 | 条件 | 結果 |
 | --- | --- |
 | `options.weights.partition_plan != nullptr` | `Status::unsupported`（rank-3 の TP partition は contract 外。§3） |
-| MTP 層の要求 | MoE loader の options 型に `load_mtp_layers` は存在しない。factory が dense options を受けて `Status::unsupported` |
+| MTP 層の要求で checkpoint に `mtp.*` が無い | reader の要求名前列が tensor 欠落で失敗する（block を無いものとして通さない） |
+| `mtp.present` のくに `mtp.fc` が `[hidden, 2 * hidden]` で無い / block norm が `[hidden]` で無い / body が full attention tensor を持たない / FFN が MTP plan と不一致 | `validate_qwen35moe_mtp_weights` の `Status::invalid_argument` |
 | Shelf quantized bundle（`shelf_quantization.json` がある dir） | `Status::unsupported`（MoE は HF real-quantized dir のみを読む） |
 | dense config（`num_experts == 0`） | `read_qwen35_moe_text_config` の `Status::invalid_argument` |
 | loaded 平面が plan の幾何 / stride / row_ref と不一致、router・shared expert が config の幅と不一致 | `moe_ffn_weights_match` の `Status::invalid_argument` |
@@ -562,10 +582,17 @@ workspace range や workspace storage の value と重ならないことを検�
 
 - 入口で `validate_qwen35moe_weights` を通す。load 済みの weight に対しても lowering は
   自分の graph の幾何を保つため、検証を省略しない。
-- `Qwen35MoeLowerOptions` に tensor partition 字段も MTP 字段も無い。MoE の lowering は
-  1 device を前提とする（rank-3 expert 平面は partition contract の外。§5 と同じ理由）。
-  rope は config の `rope_theta` / `partial_rotary_factor` と options の
-  `rope_attention_factor` から決める。
+- `Qwen35MoeLowerOptions` に tensor partition 字段は無い。MoE の lowering は 1 device を
+  前提とする（rank-3 expert 平面は partition contract の外。§5 と同じ理由）。
+  `emit_normed_token_hidden` は target graph の external output を 1 本増やす
+  （[mtp.md](mtp.md) の target graph 節）。rope は config の `rope_theta` /
+  `partial_rotary_factor` と options の `rope_attention_factor` から決める。
+- MTP block は `lower_qwen35_moe_mtp_to_primitives` が別 graph として lower する。
+  外部入力は `[token_ids, hidden]`、state は KV cache 1 本（`state_index 0`）だけで GDN state は
+  持たない。body は `emit_hybrid_block`（full attention 固定）、FFN は target と同じ
+  `emit_moe_ffn` を MTP plan で呼び、head は `mtp.norm.weight` を final norm として
+  `tail_output_is_normed_hidden = true` で `emit_hybrid_head` を使う。
+  plan は §5 の MTP block（fused rank-3 を load 時再量子化したもの）を読む。
 - `pg.grouped_row_shape = {num_experts, num_experts_per_tok}` を 1 度だけ宣言する。
   value にも node にも容量は書かない（§6-1）。
 - weight table の並びは embedding → 層ごと（backbone 線形 → router → expert w13 →
@@ -589,16 +616,17 @@ workspace range や workspace storage の value と重ならないことを検�
 | `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、`output_gate_type` を宣言した config も受理すること。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
 | `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range |
 | `test_moe_expert_slice_fixture` | `cpu;required` | 合成 checkpoint の shard 内連続配置、manifest の logical / 物理名契約、payload bit 一致 |
-| `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件 |
+| `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件。fused rank-3 plan では checkpoint の BF16 payload を再量子化して preshuffle した結果と平面が bit 一致すること、fused plan を per-expert checkpoint へ / unfused plan を fused checkpoint へ適用したときの拒否も固定 |
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound、外部 zeroing なしの 2 つ目の round が同じ plan になること（scan が `tile_counts` を消費する契約）、non-finite logits で expert index が `[0, experts)` に収まり weight が finite であること、その round が error word へ `NUMERIC_ERROR` を立てること（有限 logits では word が立たないことも一緒に固定） |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
-| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないことと MoE への MTP option 拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在を `static_assert` で固定 |
+| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないこと、MTP block を持つ checkpoint を `load_mtp_layers` で load したときに block が present になり fc / block norm / body / FFN plan と一致すること、MTP block を持たない checkpoint の MTP load 失敗、MTP tamper（fc 幅・block norm 欠落・expert 平面欠落・attention tensor 欠落）の拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在、`Qwen35MoeLoadOptions` の MTP 字段存在を `static_assert` で固定 |
 | `test_qwen35moe_lowering` | `gpu1;required` | 合成 MoE checkpoint（GDN 層と full attention 層を含む）を load して lower し、graph 構造を固定: `grouped_row_shape`、層ごとの FFN node 列、fused 平面を 2 view で読むこと、group-row value の数と幅、expert 平面が rank-3 native stride で weight table へ入ること、router が f32 / experts 列の logits を読むこと、combine の行空間 crossing、head の外部出力 4 本の shape と順。bucket R16 の `build_program` で dispatch 数・plan scratch 1 本・group row 容量 96 行・view の slot / offset を固定。さらに hidden tap（inner 層は受理、最終層と range 外は拒否）、expert 数 1 化・shared expert 幅伪造・top_k > experts・batch stride 伪造の各拒否 |
 | `test_grouped_row_shape` | `cpu;required` | group row 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128 など）と不変条件（group 数は slot 数を超えない・容量は slot 数を覆う・16 の倍数）、`GROUPED_ROWS` value の binding 行数が容量基準になること、`grouped_row_shape` 未宣言の graph を graph 検証と `build_program` の両方が拒否すること、dense graph に grouped 行空間が現れないこと |
 | `test_program_moe_plan` | `cpu;required` | 1 MoE FFN の graph / program 配線: `MOE_ROUTER` 1 node から 3 dispatch・grouped linear 1 node から量子化+grouped の 2 dispatch・combine まで dispatch 列で固定、plan scratch が workspace に 1 本だけ確保され scratch を読む 7 dispatch すべてが同じ range を指すこと、fused 出力と activation 平面が group row 容量で確保されること、router が shape と不一致・combine が TOKEN_ROWS を読む・weight が rank-2・`k_padded` が平面 padding と不一致、いずれも拒否 |
 | `test_moe_program_execute` | `gpu1;required` | 実測 geometry（experts 256・top_k 8・hidden 2048・moe_inter 512）の 1 MoE FFN を program 経由で実行し、同じ kernel を直接呼んだ参照路径と combine 出力が bit 一致。9 dispatch すべて optimized path を通り、同一 workspace での 2 回目の実行が 1 回目と一致（plan scratch の zeroing が効いていることの固定）。logits の 1 entry が NaN の run が fault せず error word が `NUMERIC_ERROR` になり、clean な run では word が COMPLETE のままなこと |
 | `test_qwen35moe_executor` | `gpu1;required` | 合成 MoE checkpoint を `LoadedModel` 経由で load し、`create_executor` の実行経路で prefill + decode を回す。row bucket 16 / 64 / 128（group 行数容量と plan scratch 容量が変わる）で、program が `plan_scratch_slot` を持つこと、hidden 行が finite かつゼロででないこと、同一 rounds を別 sequence で実行すると同一 token になること（run 跨ぎ・層跨ぎで plan scratch が漏れないことの固定） |
+| `test_qwen35moe_mtp_executor` | `gpu1;required` | MTP graph を executor（`external_hidden_input`、1 attention layer の KV / GDN pool）で実行し、routed expert 平面と shared expert 平面をそれぞれ zero したときに block output の hidden 行が変わること（MoE FFN の両分岐が実際に出力へ届いていることの固定）。create_executor 直後の最初の batch が失敗しないこともこの経路が通ることで固定する |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、

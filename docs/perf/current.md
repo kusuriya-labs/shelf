@@ -233,6 +233,33 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
   自分の roofline の 27 %）。経緯と内訳は
   [../research/20261105/moe_fp8_kv.md](../research/20261105/moe_fp8_kv.md)
 
+## 2026-11-05 MoE MTP speculative decode（未成立）
+
+`models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4` を TP=1 / bf16 KV / device 0 で、target-only と
+`--mtp` を比べた。prompt は corpus から切った 1600 token、`--max-seq-len 4096`。
+
+| 条件 | t/s | rounds | accepted drafts | mean accepted |
+| --- | ---: | ---: | ---: | ---: |
+| target-only | **61.23** | - | - | - |
+| `--mtp --mtp-drafts 1` | 22.09 | 7 | 3 | 0.429 |
+| `--mtp --mtp-drafts 4` | 17.20 | 6 | 2 | 0.333 |
+| `--mtp --mtp-drafts 7` | 15.78 | 5 | 3 | 0.600 |
+
+- measurement revision: `feature/moe-mtp`（MTP block の load / lowering / drafter 接続後）
+- dense `Qwen3.8-27B-Quark-AWQ-MXFP4` の MTP（accepted/7 = 6.88、§2026-11-04）が同一 code path の
+  対照で、MoE の draft はほぼ弃られる
+- **MTP run の `GENERATED_IDS` は target-only の greedy 列と一致しない**
+  （target-only: `264,13759,506,3603,13,...` / MTP: `264,13759,220,16,17,...`）。
+  greedy verify を使う限り、これは MoE forward の行数依存から来る
+- 行数依存の実測（`shelf-bench quality` の teacher-forced logits を position で突き合わせ）:
+  MoE は 8 行 batch vs 1 行 batch で logit rms 1.50・top-20 重複 10/20、
+  8 行 vs 16 行は **bit 一致**、16 行 vs 12 行は rms 0.90 で argmax 反転。
+  dense 対照は 8 行 vs 1 行で rms 0.076・top-20 20/20
+- weight load 実測（MTP block 込み、`test_qwen35moe_model_load_real`）: load 28.6 s、
+  arena 21.000 GiB（うち MTP expert 平面 0.399 GiB）、peak RSS 22.98 GiB
+- 経緯・原因の切り分け・採否判断は
+  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

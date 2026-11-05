@@ -3,9 +3,19 @@
 checkpoint の MTP block（`mtp.*`）を drafter として使う単一 request の compute 経路である。
 DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる。
 
-対象は dense checkpoint（`num_experts` を持たない model）に限る。MoE checkpoint は
-`LoadedModel::load` が `unsupported` を返す。`--tensor-parallel 2`、`--pipeline-parallel 2`、
-`--serve-stdio`、`--dump-logits` との併用は起動時に拒否する。
+MTP block は checkpoint が `mtp.*` として持つ tensor から作り、dense / grouped expert
+（MoE）のどちらの model でも load / lower / 実行できる。MTP block を持たない checkpoint で
+`--mtp` を指定すると `LoadedModel::mtp_drafter_input` が `unsupported` を返す。
+`--tensor-parallel 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` との併用は
+起動時に拒否する。
+
+grouped expert を使う model の MTP block は、routed expert を checkpoint で fused rank-3 の
+BF16（`mtp.layers.0.mlp.experts.gate_up_proj` / `experts.down_proj`）として保持する。
+load 時に MXFP4 へ再量子化して transformer layer と同じ native plane に落とす
+（[qwen35moe.md](qwen35moe.md) の MTP block 節）。
+MoE の MTP decode は multi-row forward を verify に使うため、現状 target-only の greedy 列と
+一致せず性能上の利点も無い。実測と原因は
+[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) を正本とする。
 
 ## Forward contract
 
@@ -162,21 +172,26 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 
 ## 制約
 
-- dense checkpoint のみ。MoE checkpoint の MTP は未対応である。
+- MTP block を持たない checkpoint では使えない。dense / MoE のどちらの family でも
+  block があれば load される。
 - `--tensor-parallel 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
 - prefix cache は MTP の単一 request compute 経路では使わない。
 - partial accept は GDN snapshot + compact log replay で復元する。target rerun は行わない。
 - MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は
   target-only と同じ値を使う。
 - MTP KV は target KV とは別 pool である。KV 容量計画には
-  `mtp_drafter_reserve_bytes` の見積を使う。
+  `LoadedModel::mtp_drafter_reserve_bytes` の見積を使う。これは drafter の executor 項として
+  dense 相当の token row 項と、grouped expert を使う model では
+  `moe_executor_grouped_bytes` を加える。
 
 ## Source map
 
-- `include/shelf/models/qwen35/runtime/mtp_drafter.h`
+- `include/shelf/models/qwen35/runtime/mtp_drafter.h`（`MtpDrafterInput`、`mtp_drafter_rows`）
 - `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`
 - `include/shelf/models/qwen35/model/lower_to_primitives.h`（`emit_normed_token_hidden`）
 - `src/shelf/models/qwen35/model/lower_to_primitives.cpp`
+- `include/shelf/models/qwen35moe/model/lower_to_primitives.h`（`lower_qwen35_moe_mtp_to_primitives`）
+- `include/shelf/models/loaded_model.h`（`has_mtp_block` / `mtp_drafter_input` / `mtp_drafter_reserve_bytes`）
 - `src/shelf/models/qwen35/runtime/executor.hip`（hidden external input / normed output）
 - `src/apps/compute/single_request.hip`（`run_mtp_shot`）
 - `src/apps/compute/compute_cli.cpp`（`--mtp*`）
