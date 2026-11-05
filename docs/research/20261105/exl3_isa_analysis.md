@@ -302,6 +302,49 @@ prefill も同じ decode_tile を使うため、行数が多い場合にも効�
 rows 1〜17、split 1〜32 がすべて PASS し、E2E は `11751,13,198`（` Paris.`）を
 維持した。
 
+## prefill の row group 再利用（採用）
+
+prefill は同じ重み tile を 16 行ごとに復号し直していた。rows=128 では
+decode + stage が 31.5 %、うち state 抽出 + store が 14.9 %、global stage が 16.6 %。
+16 行 tile を複数まとめて 1 block で処理すれば、復号と stage をその分だけ共有できる。
+
+- kernel を `kGroups` でテンプレート化し、`kRows = 16 * kGroups` 行を 1 block が担当する。
+- `xrot` と `rowsum` は `kRows` 行ぶん確保し、`acc[kGroups]` に row group ごとの
+  累算を持つ。WMMA は復号した A fragment を group 間で再利用する。
+- epilogue は 16 行ぶんの `area.accum` を使い回し、group ごとに affine / H128 / svh を
+  適用する。
+- split-K の reduce は 16 行 / block のままなので、reduce の grid は
+  `ceil(rows / 16)` で別に計算する。ここを row group の grid と共有して
+  rows 16 以降が書かれないバグを一度作った。
+
+`kGroups` の比較（n=5120, k=5120, rows=128, split=1）:
+
+| 版 | 時間 | pp128 |
+| --- | ---: | ---: |
+| 1 | 0.528 ms | 226.06 tok/s |
+| 2 | **0.441 ms** | **265.51 tok/s** |
+| 4 | — | 188.84 tok/s |
+
+groups=4 は LDS が約 26 KiB になり 2 block/CU へ落ちるため、block 数が増える
+rows=128 でも逆効果だった。groups=2 は LDS 約 18 KiB で 3 block/CU を保てる。
+rows=32 で groups=2 を強制すると block 数が 40 に減り、0.202 → 0.247 ms へ悪化する。
+そのため自動選択は次を条件にする。
+
+```text
+rows >= 32 かつ grid_x * ceil(rows / 32) >= 128 のとき groups=2
+```
+
+結果（同じ GPU 1、3 run）:
+
+| 条件 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| prefill 128 | 226.06 tok/s | **265.51 tok/s** |
+| prefill 512 | 230.85 tok/s | **273.57 tok/s** |
+
+decode（rows=1）は groups=1 のまま。n=5120 / k=5120 / split=8 の GEMM は
+変更前 0.0778 ms、変更後 0.0777 ms で差がない。`test_exl3_linear` の
+rows=64 / n=8192 で groups=2 の経路を検証している。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
@@ -323,12 +366,11 @@ prefill の WMMA をそのまま使えることを優先する。
 
 ## 次の候補
 
-1. **rows 別の split / scratch チューニング**。batch 8 / 16 では token あたり
-   1/7.3 / 1/13.5 まで amortize している。rows から split 数と scratch 容量を
-   決め、multi-request の実測で確認する。
-2. **decode の LDS store 削減**。store は全体の約 20 %。256 half を A fragment の
+1. **decode の LDS store 削減**。store は全体の約 20 %。256 half を A fragment の
    配置で直接作れれば LDS を経由しないが、lane 間 shuffle が増える。2 系列
    インターリーブが効果なかったため、優先度は低い。
+2. **prefill の row group 数**。groups=2 が LDS と block 数のバランス点だった。
+   LDS をさらに削って 3 block/CU を保てるなら groups=4 を再評価する余地がある。
 3. **WMMA の直列依存**。M=1 では WMMA が 43 % を占めるが、16 行のうち 1 行しか
    使わない構造上のコストである。W16A16 を維持する限り削れない。
 4. **hash / modulo の削減**は効果なし。gfx1201 の `v_mul_lo_u32` が 1/4 rate でも、
