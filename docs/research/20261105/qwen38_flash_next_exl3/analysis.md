@@ -510,7 +510,15 @@ site 全体の sequence は `test_qwen4exp_hyper_site` が固定する。
 
 GDN の出力ゲートも `sigmoid_gate` で切り替えられるようにした。
 `test_qwen4exp_gdn_gate` が Qwen4Exp の sigmoid と Qwen3.5 の silu を固定する。
-残りは Qwen4Exp decoder layer の lowering（QSA、PLE 注入）と、
+
+PLE 注入の状態を持たない部分も実装した。
+
+- `launch_ple_gate`: `sign(x) * sqrt(max(|x|, 1e-6))`
+- `launch_ple_broadcast_mul`: `sigmoid(gate) * value` を hc stream へ複製
+
+`test_ple_gate` が CPU 参照と一致することを固定する。
+残りは PLE の key/value 射影、grouped RMSNorm、depthwise short conv（kernel 4、
+dilation 3、state 9）、HyperConnection への加算と、QSA / decoder layer の lowering、
 4 stream を運ぶ runtime state の接続である。
 
 #### 結論

@@ -149,8 +149,20 @@ Qwen3.5 の GDN は gate 分岐に silu を固定していた。Qwen4Exp は
 `GDN_RECURRENCE,RMS_NORM,SIGMOID,MUL`、既定で
 `GDN_RECURRENCE,RMS_NORM,SILU,MUL` になることを固定する。
 
-残りは、Qwen4Exp decoder layer の lowering（HyperConnection site の組み立て、
-QSA、PLE 注入）と、4 stream を運ぶ runtime state の接続である。
+## 2-4. PLE gate と broadcast
+
+PLE 注入のうち、状態を持たない 2 つの要素を実装した。
+
+| kernel | 内容 |
+| --- | --- |
+| `launch_ple_gate` | `sign(x) * sqrt(max(|x|, 1e-6))` |
+| `launch_ple_broadcast_mul` | `out[r, h*hidden+i] = sigmoid(gate[r,i]) * value[r,i]` |
+
+`test_ple_gate` は rows 3、hc 4、hidden 128 で CPU 参照と一致することを固定する。
+
+残りは PLE の key/value 射影、grouped RMSNorm、depthwise short conv（kernel 4、
+dilation 3、state 9）、HyperConnection への加算と、QSA / decoder layer の
+lowering、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 
