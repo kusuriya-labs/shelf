@@ -477,6 +477,35 @@ mul1 の 11-bit `d` を 8-bit に丸めれば 1 回の INT8 GEMM で MMA を半�
   INT8 1.96 倍 × 2 回で MMA 時間は FP16 と同等になり、活性 int8 の誤差だけ残る。
 - したがって、INT8 1-GEMM は品質・性能の両面で採用しない。
 
+## Trellis ring の lane shuffle 化（採用）
+
+ka=4 の ISA では、`global_load_b32` → `ds_store_b32`（ring）→ wave barrier →
+`ds_load_b32`×2 → `v_alignbit_b32` の順だった。ka=4 で必要なのは自分の word と
+1 つ前の lane の word だけなので、ring を LDS に作らず、
+`source[lane]` と `__shfl_sync(0xFFFFFFFFull, b, (lane + 31) & 31, 32)` に置き換えた。
+gfx1201 ではこれは `ds_bpermute_b32` 1 命令になる。
+
+差分:
+
+- 削除: `ds_store_b32`、wave barrier、`ds_load_b32`×2、ring のアドレス計算
+- 追加: `ds_bpermute_b32`
+- 変更なし: `v_alignbit_b32` / `v_bfe_u32`、`v_mul_lo_u32`、SAD、
+  `ds_store_2addr_b32`、`ds_load_b128`、`v_wmma_f32_16x16x16_f16`
+
+GEMM 単体（auto split、ring / shuffle）:
+
+| rows | n=5120 k=5120 | n=17408 k=5120 |
+| ---: | ---: | ---: |
+| 1 | 0.0757 → **0.0746** | 0.2080 → **0.2051** |
+| 4 | 0.0810 → **0.0797** | 0.2211 → **0.2187** |
+| 16 | 0.0958 → **0.0947** | 0.2924 → **0.2852** |
+| 32 | 0.1672 → **0.1652** | 0.4824 → **0.4682** |
+| 128 | 0.4799 → **0.4670** | — |
+
+**1〜3 %** の短縮。production の decode は横ばい（14.79〜14.85 tok/s）、
+prefill 128 は 336.44 → 339.82、2048 は 353.68 → 356.55 tok/s。
+Trellis ring の LDS 往復は主因ではなく、寄与は 1 % 程度だった。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、

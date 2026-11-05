@@ -49,20 +49,14 @@ __device__ __forceinline__ uint32_t pick4(uint32_t r, uint32_t a, uint32_t b, ui
 __device__ __forceinline__ void decode_tile_ka4(const Exl3GemmArgs& args, uint32_t kt,
                                                uint32_t nt, uint32_t lane, uint32_t* ring,
                                                uint16_t* tile) {
+    (void) ring;
     const uint32_t n_tiles = args.out_features / 16u;
     const uint16_t* tile_base =
         static_cast<const uint16_t*>(args.trellis) +
         (static_cast<uint64_t>(kt) * n_tiles + nt) * 64u;
     const uint32_t* source = reinterpret_cast<const uint32_t*>(tile_base);
-    ring[lane] = source[lane];
-    __syncwarp();
-
-    uint32_t i0 = lane + 31u;
-    uint32_t i1 = lane + 32u;
-    if (i0 >= 32u) i0 -= 32u;
-    if (i1 >= 32u) i1 -= 32u;
-    const uint32_t a = ring[i0];
-    const uint32_t b = ring[i1];
+    const uint32_t b = source[lane];
+    const uint32_t a = __shfl_sync(0xFFFFFFFFull, b, (lane + 31u) & 31u, 32);
 
     uint32_t st[8];
     st[0] = __builtin_amdgcn_alignbit(a, b, 28) & 0xFFFFu;
