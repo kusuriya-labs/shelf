@@ -49,6 +49,8 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
         return bad("qsa key cache: state binding missing");
     const auto& view = ctx.model_state.qsa;
     if (!qsa_view_ready(view)) return bad("qsa key cache: state pool missing");
+    if (b.group_size != view.compress_ratio || b.flags != view.max_blocks)
+        return bad("qsa key cache: geometry differs from the state pool");
     auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
     if (!in.ok()) return in.status();
     if (in.value().dtype != ValueDType::BF16 ||
@@ -118,6 +120,9 @@ Result<OptimizedLaunchResult> try_launch_qsa_scores(
         return bad("qsa scores: state binding missing");
     const auto& view = ctx.model_state.qsa;
     if (!qsa_view_ready(view)) return bad("qsa scores: state pool missing");
+    if (b.flags != view.max_blocks ||
+        static_cast<uint32_t>(b.scalar_b) != view.compress_ratio)
+        return bad("qsa scores: geometry differs from the state pool");
     auto q = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
     if (!q.ok()) return q.status();
     auto scores = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
