@@ -298,8 +298,9 @@ sync → A/B/WMMA を 2 回、という形にした。barrier は 1 tile あた�
 | prefill 128 | 199.67 tok/s | **226.06 tok/s** |
 
 prefill も同じ decode_tile を使うため、行数が多い場合にも効果がある。
-`test_exl3_linear` の ka=3+half / 4 / 6 / 7、rows 1〜17、split 1〜32 が
-すべて PASS し、E2E は `11751,13,198`（` Paris.`）を維持した。
+`test_exl3_linear` の ka=1 / 2 / 3+half / 4 / 5 / 6 / 7 / 8、half 1.5 / 2.5、
+rows 1〜17、split 1〜32 がすべて PASS し、E2E は `11751,13,198`（` Paris.`）を
+維持した。
 
 ## 参照実装との比較
 

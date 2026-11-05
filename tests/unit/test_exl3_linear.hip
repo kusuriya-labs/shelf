@@ -300,6 +300,12 @@ int main() {
     run_case({16, 256, 256, 3, true, "mul1_3half_rows16"});
     run_case({17, 384, 128, 7, false, "mul1_7_rows17"});
     run_case({5, 256, 256, 6, false, "mul1_6_rows5"});
+    run_case({1, 128, 128, 1, false, "mul1_1_rows1"});
+    run_case({2, 128, 128, 2, false, "mul1_2_rows2"});
+    run_case({3, 256, 128, 5, false, "mul1_5_rows3"});
+    run_case({1, 128, 128, 8, false, "mul1_8_rows1"});
+    run_case({2, 128, 128, 1, true, "mul1_1half_rows2"});
+    run_case({2, 256, 256, 2, true, "mul1_2half_rows2"});
     run_case({1, 8192, 128, 4, false, "nosplit_n8192", 1});
     run_case({5, 5120, 512, 4, false, "nosplit_rows5_n5120", 1});
     run_case({1, 1024, 512, 4, false, "split8_n1024", 8});
