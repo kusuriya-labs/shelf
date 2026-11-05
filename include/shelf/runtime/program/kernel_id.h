@@ -37,6 +37,9 @@ enum class KernelId : uint32_t {
     LINEAR_EXL3_W16A16_GROUPED,
     HYPER_MIX,
     HYPER_APPLY,
+    PLE_GATE,
+    PLE_BROADCAST_MUL,
+    PLE_CONV,
     COUNT,
 };
 
@@ -79,6 +82,9 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::LINEAR_EXL3_W16A16_GROUPED: return "LINEAR_EXL3_W16A16_GROUPED";
         case KernelId::HYPER_MIX: return "HYPER_MIX";
         case KernelId::HYPER_APPLY: return "HYPER_APPLY";
+        case KernelId::PLE_GATE: return "PLE_GATE";
+        case KernelId::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
+        case KernelId::PLE_CONV: return "PLE_CONV";
         default: return "UNKNOWN";
     }
 }

@@ -8,11 +8,21 @@
 namespace shelf {
 namespace kernel {
 
+struct PleConvStateView {
+    shelf::bf16_t* base = nullptr;
+    uint32_t max_sequences = 0;
+    uint32_t channels = 0;
+    uint64_t slot_stride = 0;
+    uint64_t layer_stride = 0;
+    uint64_t history_stride = 0;
+};
+
 struct ModelDispatchStateView {
     ::shelf::state::SequenceBlockTableDeviceView block_table{};
     ::shelf::state::GdnStatePoolDeviceView gdn{};
     ::shelf::state::PagedKVPoolBF16View kv_bf16{};
     ::shelf::state::PagedKVPoolFP8View kv_fp8{};
+    PleConvStateView ple_conv{};
     uint32_t kv_dtype = 0;
 };
 

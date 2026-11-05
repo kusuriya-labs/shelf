@@ -199,8 +199,30 @@ attn HyperConnection mix
 - `MOE_ROUTER,MOE_GROUPED_LINEAR,MOE_GROUPED_LINEAR,SWIGLU,MOE_GROUPED_LINEAR`
 - `MOE_COMBINE,HYPER_APPLY`
 
-残りは PLE の key/value 射影と grouped RMSNorm の graph 接続、`PLE_CONV` の
-runtime state、QSA indexer、4 stream を運ぶ runtime state の接続である。
+### PLE injection
+
+`emit_qwen4exp_ple` が PLE 注入を graph に接続する。
+
+```text
+key_proj -> RMSNorm(norm_key)
+hyper    -> RMSNorm(norm_query)
+  -> HYPER_MIX -> SCALE(hc / sqrt(hidden)) -> PLE_GATE
+value_proj -> PLE_BROADCAST_MUL(gate, value)
+  -> RMSNorm(norm_conv) -> PLE_CONV -> RESIDUAL_ADD(gated, short)
+  -> RESIDUAL_ADD(hyper, output)
+```
+
+- `PLE_GATE` は `sign(x) * sqrt(max(|x|, 1e-6))`
+- `PLE_BROADCAST_MUL` は `sigmoid(gate) * value` を hc stream へ複製
+- `PLE_CONV` は depthwise、kernel 4、dilation 3、causal、SiLU
+- `PLE_CONV` の state は `PrimitiveStateKind::PLE_CONV_STATE`
+
+`emit_qwen4exp_layer` は `has_ple=true` のとき、attention site の前に PLE を置く。
+`test_qwen4exp_ple_site` が PLE 単体の sequence を、`test_qwen4exp_layer` が
+PLE → attention site → GDN → ... の順序を固定する。
+
+残りは `PLE_CONV` の state pool を Qwen4Exp runtime に持たせること、
+QSA indexer、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

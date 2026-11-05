@@ -14,16 +14,25 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         return Status::unsupported(
             "Qwen4Exp QSA layer lowering is not implemented yet", __FILE__, __LINE__);
     }
+    ::shelf::runtime::ValueId input_hyper = hyper;
+    if (layer.has_ple) {
+        auto ple = emit_qwen4exp_ple(em, layer.ple_geometry, layer.ple_weights,
+                                     layer.ple_indices, input_hyper,
+                                     layer.ple_embeddings, debug_prefix);
+        if (!ple.ok()) return ple.status();
+        input_hyper = ple.value();
+    }
+
     auto attn_mix = emit_hyper_connection_mix(
-        em, layer.hyper, layer.attn_hyper_weights, layer.attn_hyper_indices, hyper, true,
-        debug_prefix);
+        em, layer.hyper, layer.attn_hyper_weights, layer.attn_hyper_indices, input_hyper,
+        true, debug_prefix);
     if (!attn_mix.ok()) return attn_mix.status();
 
     const RT::ValueId attn_out = ::shelf::qwen_hybrid::emit_gdn(
         em, layer.gdn_geometry, layer.gdn_weights, layer.gdn_indices, attn_mix.value().mixed,
         debug_prefix);
     auto hyper_after_attn = emit_hyper_connection_apply(
-        em, layer.hyper, hyper, attn_out, attn_mix.value().injection, debug_prefix);
+        em, layer.hyper, input_hyper, attn_out, attn_mix.value().injection, debug_prefix);
     if (!hyper_after_attn.ok()) return hyper_after_attn.status();
 
     auto mlp_mix = emit_hyper_connection_mix(

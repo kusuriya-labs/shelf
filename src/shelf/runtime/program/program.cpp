@@ -565,6 +565,50 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::PLE_GATE: {
+            DispatchBinding b = base_binding(KernelId::PLE_GATE);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_BROADCAST_MUL: {
+            const auto& n = node_as<PleBroadcastMulNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_BROADCAST_MUL);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_CONV: {
+            const auto& n = node_as<PleConvNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_CONV);
+            b.descriptor_slot =
+                register_state(c, node.state_inputs.front(),
+                               PrimitiveStateKind::PLE_CONV_STATE, n.state_index) +
+                1;
+            b.parameter_index0 = n.parameter_index;
+            b.flags = static_cast<uint32_t>(n.shape.features);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::KV_APPEND: {
             const auto& n = node_as<KvAppendNode>(node);
             DispatchBinding b = base_binding(KernelId::KV_APPEND);

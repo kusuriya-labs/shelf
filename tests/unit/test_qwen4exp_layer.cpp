@@ -24,6 +24,7 @@ constexpr std::uint32_t kHidden = 128u;
 constexpr std::uint32_t kHc = 4u;
 constexpr std::uint32_t kLowrank = 64u;
 constexpr std::uint32_t kWidth = kHc * kHidden;
+constexpr std::uint32_t kEmbed = 160u;
 constexpr std::uint32_t kExperts = 4u;
 constexpr std::uint32_t kTopK = 2u;
 constexpr std::uint32_t kIntermediate = 128u;
@@ -70,6 +71,8 @@ int main() {
     shelf::weights::MatrixWeight b = matrix(kValueHeads, kHidden);
     shelf::weights::MatrixWeight a = matrix(kValueHeads, kHidden);
     shelf::weights::MatrixWeight out = matrix(kHidden, kValue);
+    shelf::weights::MatrixWeight ple_key = matrix(kWidth, kEmbed);
+    shelf::weights::MatrixWeight ple_value = matrix(kHidden, kEmbed);
 
     shelf::qwen4exp::Qwen4ExpMoeWeights moe;
     moe.router = matrix(kExperts, kHidden);
@@ -111,9 +114,12 @@ int main() {
     add_weight(kIntermediate, kHidden);
     add_weight(kIntermediate, kHidden);
     add_weight(kHidden, kIntermediate);
+    add_weight(kWidth, kEmbed);
+    add_weight(kHidden, kEmbed);
 
     const rt::ValueId hyper = graph.alloc_value(kWidth);
-    graph.external_inputs = {hyper};
+    const rt::ValueId embeddings = graph.alloc_value(kEmbed);
+    graph.external_inputs = {hyper, embeddings};
 
     shelf::qwen_hybrid::Emitter em{graph};
     shelf::qwen4exp::Qwen4ExpLayerLowering layer;
@@ -145,6 +151,21 @@ int main() {
     layer.moe_weights = moe;
     layer.moe_indices = {15u, 16u, 17u, 18u, 19u, 20u, 21u, 22u};
 
+    layer.has_ple = true;
+    layer.ple_geometry.hc = kHc;
+    layer.ple_geometry.hidden = kHidden;
+    layer.ple_geometry.embed_dim = kEmbed;
+    layer.ple_geometry.eps = 1e-6f;
+    layer.ple_geometry.norm_key_parameter_index = 20u;
+    layer.ple_geometry.norm_query_parameter_index = 21u;
+    layer.ple_geometry.norm_conv_parameter_index = 22u;
+    layer.ple_geometry.conv_weight_parameter_index = 23u;
+    layer.ple_geometry.state_index = 1u;
+    layer.ple_weights.key_proj = &ple_key;
+    layer.ple_weights.value_proj = &ple_value;
+    layer.ple_indices = {23u, 24u};
+    layer.ple_embeddings = embeddings;
+
     auto emitted = shelf::qwen4exp::emit_qwen4exp_layer(em, layer, hyper, "test.");
     if (!emitted.ok()) {
         std::printf("FAIL emit: %s\n", emitted.status().message().c_str());
@@ -163,6 +184,9 @@ int main() {
         if (!sequence.empty()) sequence += ",";
         sequence += rt::to_string(rt::primitive_kind_of(node.node));
     }
+    check(sequence.find("PLE_GATE,LINEAR,PLE_BROADCAST_MUL,RMS_NORM,PLE_CONV,"
+                        "RESIDUAL_ADD,RESIDUAL_ADD,RMS_NORM") != std::string::npos,
+          "PLE injection precedes the attention HyperConnection");
     check(sequence.find("SCALE,LINEAR,LINEAR,LINEAR,LINEAR,STATEFUL_CAUSAL_CONV1D") !=
               std::string::npos,
           "attention HyperConnection feeds GDN");

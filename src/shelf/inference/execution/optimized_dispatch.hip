@@ -9,6 +9,7 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
+#include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
@@ -758,6 +759,12 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_hyper_mix(program, b, ctx, stream);
         case KernelId::HYPER_APPLY:
             return try_launch_hyper_apply(program, b, ctx, stream);
+        case KernelId::PLE_GATE:
+            return try_launch_ple_gate(program, b, ctx, stream);
+        case KernelId::PLE_BROADCAST_MUL:
+            return try_launch_ple_broadcast_mul(program, b, ctx, stream);
+        case KernelId::PLE_CONV:
+            return try_launch_ple_conv(program, b, ctx, stream);
         default:
             return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }

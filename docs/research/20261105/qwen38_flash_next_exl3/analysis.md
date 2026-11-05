@@ -530,8 +530,19 @@ GDN 層の decoder layer も graph に組み立てた。
 - `test_qwen4exp_layer` が site / GDN sigmoid / grouped expert / combine の
   sequence を固定する
 
-残りは PLE の key/value 射影と grouped RMSNorm の graph 接続、`PLE_CONV` の
-runtime state、QSA indexer、4 stream を運ぶ runtime state の接続である。
+PLE 注入も graph に接続した。
+
+- `key_proj` / `value_proj` の BF16 linear
+- `norm_key` / `norm_query` / `norm_conv` の grouped RMSNorm
+- `HYPER_MIX` + `SCALE` + `PLE_GATE`
+- `PLE_BROADCAST_MUL`
+- `PLE_CONV`（`PLE_CONV_STATE`）
+- `RESIDUAL_ADD` × 2
+
+`test_qwen4exp_ple_site` が PLE 単体の sequence を、
+`test_qwen4exp_layer` が PLE → attention site → GDN → MLP site → MoE の順序を
+固定する。残りは `PLE_CONV` の state pool を runtime に持たせること、
+QSA indexer、4 stream を運ぶ runtime state の接続である。
 
 #### 結論
 

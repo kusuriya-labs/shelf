@@ -39,6 +39,9 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_COMBINE: return {3, 1};
         case PrimitiveKind::HYPER_MIX: return {2, 1};
         case PrimitiveKind::HYPER_APPLY: return {3, 1};
+        case PrimitiveKind::PLE_GATE: return {1, 1};
+        case PrimitiveKind::PLE_BROADCAST_MUL: return {2, 1};
+        case PrimitiveKind::PLE_CONV: return {1, 1};
     }
     return {0, 0};
 }
@@ -55,6 +58,8 @@ bool allowed_state_kind(PrimitiveStateKind sk, PrimitiveKind nk) noexcept {
             return nk == PrimitiveKind::STATEFUL_CAUSAL_CONV1D;
         case PrimitiveStateKind::GDN_RECURRENCE_STATE:
             return nk == PrimitiveKind::GDN_RECURRENCE;
+        case PrimitiveStateKind::PLE_CONV_STATE:
+            return nk == PrimitiveKind::PLE_CONV;
     }
     return false;
 }
@@ -66,6 +71,7 @@ uint32_t node_state_index(const PrimitiveGraphNode& n) noexcept {
         else if constexpr (std::is_same_v<T, PagedAttentionNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, StatefulCausalConv1DNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) return v.state_index;
+        else if constexpr (std::is_same_v<T, PleConvNode>) return v.state_index;
         else return 0;
     }, n.node);
 }
@@ -170,6 +176,16 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, HyperApplyNode>) {
                 shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
                             v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, PleGateNode>) {
+                shapes_ok = valid_shape_key(v.shape);
+            }
+            else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, PleConvNode>) {
+                shapes_ok = valid_shape_key(v.shape);
             }
         }, n.node);
         if (!shapes_ok) return fail("invalid shape key");
@@ -308,11 +324,40 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
         }, n.node);
         if (!hyper_status.ok()) return hyper_status;
 
+        Status ple_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, PleGateNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "ple gate feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) {
+                const uint64_t hidden = v.hidden;
+                if (graph.value_features(n.inputs[0]) != hidden ||
+                    graph.value_features(n.inputs[1]) != hidden ||
+                    graph.value_features(n.outputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * hidden) {
+                    ple_status = Status::invalid_argument(
+                        "ple broadcast feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleConvNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "ple conv feature count mismatch", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!ple_status.ok()) return ple_status;
+
         const bool stateful =
             k == PrimitiveKind::KV_APPEND ||
             k == PrimitiveKind::PAGED_ATTENTION ||
             k == PrimitiveKind::STATEFUL_CAUSAL_CONV1D ||
-            k == PrimitiveKind::GDN_RECURRENCE;
+            k == PrimitiveKind::GDN_RECURRENCE ||
+            k == PrimitiveKind::PLE_CONV;
         if (!stateful && (!n.state_inputs.empty() || !n.state_outputs.empty())) {
             return fail("state reference on primitive without state access");
         }

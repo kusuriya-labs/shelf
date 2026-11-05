@@ -33,6 +33,9 @@ enum class PrimitiveKind : uint16_t {
     MOE_COMBINE = 21,
     HYPER_MIX = 22,
     HYPER_APPLY = 23,
+    PLE_GATE = 24,
+    PLE_BROADCAST_MUL = 25,
+    PLE_CONV = 26,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -61,6 +64,9 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_COMBINE: return "MOE_COMBINE";
         case PrimitiveKind::HYPER_MIX: return "HYPER_MIX";
         case PrimitiveKind::HYPER_APPLY: return "HYPER_APPLY";
+        case PrimitiveKind::PLE_GATE: return "PLE_GATE";
+        case PrimitiveKind::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
+        case PrimitiveKind::PLE_CONV: return "PLE_CONV";
     }
     return "UNKNOWN";
 }
@@ -232,6 +238,25 @@ struct HyperApplyNode {
     uint32_t hidden = 0;
 };
 
+// PLE gate shaping: sign(x) * sqrt(max(|x|, 1e-6)).
+struct PleGateNode {
+    RowwiseShapeKey shape;  // hidden
+};
+
+// PLE sigmoid(gate) * value broadcast over hc streams.
+struct PleBroadcastMulNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// PLE depthwise causal conv, kernel 4, dilation 3, SiLU; state is per sequence.
+struct PleConvNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t parameter_index = UINT32_MAX;
+    uint32_t state_index = 0;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -256,7 +281,10 @@ using PrimitiveNode = std::variant<
     MoeGroupedLinearNode,
     MoeCombineNode,
     HyperMixNode,
-    HyperApplyNode
+    HyperApplyNode,
+    PleGateNode,
+    PleBroadcastMulNode,
+    PleConvNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -286,6 +314,9 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, MoeCombineNode>) return PrimitiveKind::MOE_COMBINE;
         else if constexpr (std::is_same_v<T, HyperMixNode>) return PrimitiveKind::HYPER_MIX;
         else if constexpr (std::is_same_v<T, HyperApplyNode>) return PrimitiveKind::HYPER_APPLY;
+        else if constexpr (std::is_same_v<T, PleGateNode>) return PrimitiveKind::PLE_GATE;
+        else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) return PrimitiveKind::PLE_BROADCAST_MUL;
+        else if constexpr (std::is_same_v<T, PleConvNode>) return PrimitiveKind::PLE_CONV;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

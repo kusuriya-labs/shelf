@@ -5,6 +5,7 @@
 #include <shelf/models/common/qwen_hybrid/gdn_lowering.h>
 #include <shelf/models/qwen4exp/model/hyper_connection_lowering.h>
 #include <shelf/models/qwen4exp/model/moe_lowering.h>
+#include <shelf/models/qwen4exp/model/ple_lowering.h>
 
 #include <cstdint>
 
@@ -27,6 +28,13 @@ struct Qwen4ExpLayerLowering {
     Qwen4ExpMoeLoweringGeometry moe_geometry;
     Qwen4ExpMoeWeights moe_weights;
     Qwen4ExpMoeLoweringIndices moe_indices;
+
+    // Layer 1 (zero-based) carries the PLE injection before the attention site.
+    bool has_ple = false;
+    Qwen4ExpPleLoweringGeometry ple_geometry;
+    Qwen4ExpPleLoweringWeights ple_weights;
+    Qwen4ExpPleLoweringIndices ple_indices;
+    ::shelf::runtime::ValueId ple_embeddings{0};
 };
 
 // One Qwen4Exp decoder layer:

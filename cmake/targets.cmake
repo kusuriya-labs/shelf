@@ -210,6 +210,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/linear_input_dump.cpp
     src/shelf/inference/execution/moe_dispatch.hip
     src/shelf/inference/execution/hyper_connection_dispatch.hip
+    src/shelf/inference/execution/ple_dispatch.hip
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
@@ -303,6 +304,7 @@ set(
     src/shelf/models/qwen4exp/model/hyper_connection_lowering.cpp
     src/shelf/models/qwen4exp/model/moe_lowering.cpp
     src/shelf/models/qwen4exp/model/layer_lowering.cpp
+    src/shelf/models/qwen4exp/model/ple_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
 )
