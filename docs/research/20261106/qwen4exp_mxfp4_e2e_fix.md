@@ -97,7 +97,24 @@ decode は 11.2 → 26.8 tok/s、prefill は 165.9 → 106 ms になった。
 | DFlash2 drafts=6 | 61.13 | 2.15 |
 | DFlash2 drafts=7（参考、不一致） | 59.71 | 2.15 |
 
-## 4. 残っている課題
+## 4. 長文 decode の QSA top-k
+
+512 token の decode が 2.53 tok/s だった。`SHELF_OP_DUMP` で 1 step を分解すると
+`QSA_TOPK` が 332 ms（12 層）を占め、次点の `LINEAR_BF16` 29.7 ms を大きく上回った。
+`qsa_topk` は 1 thread / row で `k` 回の選択を行い、各選択が可視 block を走査する
+ため `O(k * visible^2)` である。可視 block が `k` 以下なら全 block が選ばれるので、
+1 回の選択で全 block を score 降順（同値は index 昇順）に並べる fast path を追加した。
+選択集合は同じで、mask の意味は変わらない。
+
+- 512 context decode: 2.53 → **20.21 tok/s**
+- 512 context prefill: 607 → 293 ms
+- 128 context decode: 20.36 → **25.79 tok/s**
+- 128 context prefill: 176 → 164 ms
+
+`visible > k` の長文では従来の選択が残る。QSA budget を超える context では、
+top-k 自体の並列化が次の課題である。
+
+## 5. 残っている課題
 
 - 8 行 verify の losslessness。target verify の logits が target-only と
   bit-exact でない可能性があり、near-tie で token が変わる。

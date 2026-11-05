@@ -73,6 +73,23 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
   性能値として採らない。
 - 同一条件 2 回の `--dump-logits` は bitwise 一致する。
 
+### context 128 / 512 の pp / tg
+
+同じ revision・同じ 4 GPU で、prompt を 128 / 512 token にした断面。`shelf-bench` は
+Qwen4Exp の TP4 を扱わないため、`shelf-compute` の `PREFILL_MS` と
+`DECODE_TOKENS_PER_SEC` で測っている。DFlash2 の accept は corpus に依存する。
+
+| 断面 | target-only | DFlash2 drafts=6 |
+| --- | ---: | ---: |
+| pp 128 token | 164.0 ms（780 tok/s） | 175.6 ms |
+| pp 512 token | 293.1 ms（1747 tok/s） | 318.7 ms |
+| tg ctx128、自然文 64 new | 25.74 tok/s | 35.95 tok/s（accepted 0.909） |
+| tg ctx128、反復文 64 new | 25.79 tok/s | 129.15 tok/s（accepted 6.000） |
+| tg ctx512、反復文 32 new | 20.21 tok/s | 95.33 tok/s（accepted 5.200） |
+
+反復文は DFlash の accept が最大になる上限側の参考値であり、自然文の
+`tg ctx128 = 35.95 tok/s` を通常の期待値として扱う。
+
 ## 2026-11-06 Qwen3.8-Flash-Next EXL3 decode reference
 
 `models/Qwen3.8-Flash-Next-exl3` を TP=2 / bf16 KV / prefix cache なしで計測した

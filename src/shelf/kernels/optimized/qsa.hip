@@ -10,6 +10,7 @@ namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kThreads = kQsaThreads;
+constexpr uint32_t kQsaFastPathBlocks = 512u;
 
 __device__ __forceinline__ float bf16_value(const shelf::bf16_t* p) {
     return __uint_as_float(static_cast<std::uint32_t>(p->data) << 16);
@@ -85,6 +86,28 @@ __global__ void __launch_bounds__(1) qsa_topk_kernel(QsaTopkArgs args) {
         args.visible[row] < args.blocks ? args.visible[row] : args.blocks;
     int32_t* out = args.indices + static_cast<std::uint64_t>(row) * args.k;
     for (uint32_t j = 0; j < args.k; ++j) out[j] = -1;
+    // Every visible block fits in the budget: one selection pass over `visible` blocks
+    // (instead of `k` passes) yields the same score-descending order.
+    if (visible <= args.k && visible <= kQsaFastPathBlocks) {
+        bool used[kQsaFastPathBlocks] = {};
+        for (uint32_t j = 0; j < visible; ++j) {
+            int32_t best = -1;
+            float best_score = -INFINITY;
+            for (uint32_t block = 0; block < visible; ++block) {
+                if (used[block]) continue;
+                const float score =
+                    args.scores[static_cast<std::uint64_t>(row) * args.blocks + block];
+                if (score > best_score ||
+                    (score == best_score && static_cast<int32_t>(block) < best)) {
+                    best_score = score;
+                    best = static_cast<int32_t>(block);
+                }
+            }
+            out[j] = best;
+            used[best] = true;
+        }
+        return;
+    }
     for (uint32_t j = 0; j < args.k && j < visible; ++j) {
         int32_t best = -1;
         float best_score = -INFINITY;
@@ -114,6 +137,27 @@ __global__ void __launch_bounds__(1) qsa_topk_batch_kernel(QsaTopkBatchArgs args
     const uint32_t visible = complete < args.blocks ? complete : args.blocks;
     int32_t* out = args.indices + static_cast<std::uint64_t>(row) * args.indices_row_stride;
     for (uint32_t j = 0; j < args.k; ++j) out[j] = -1;
+    if (visible <= args.k && visible <= kQsaFastPathBlocks) {
+        bool used[kQsaFastPathBlocks] = {};
+        for (uint32_t j = 0; j < visible; ++j) {
+            int32_t best = -1;
+            float best_score = -INFINITY;
+            for (uint32_t block = 0; block < visible; ++block) {
+                if (used[block]) continue;
+                const float score =
+                    args.scores[static_cast<std::uint64_t>(row) * args.scores_row_stride +
+                                block];
+                if (score > best_score ||
+                    (score == best_score && static_cast<int32_t>(block) < best)) {
+                    best_score = score;
+                    best = static_cast<int32_t>(block);
+                }
+            }
+            out[j] = best;
+            used[best] = true;
+        }
+        return;
+    }
     for (uint32_t j = 0; j < args.k && j < visible; ++j) {
         int32_t best = -1;
         float best_score = -INFINITY;
