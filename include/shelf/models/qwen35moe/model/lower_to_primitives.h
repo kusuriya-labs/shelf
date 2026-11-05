@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/core/status.h>
 #include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 
@@ -28,6 +29,11 @@ struct Qwen35MoeLowerOptions {
     // matching partition plan. tp_size == 1 lowers the whole model on one device.
     uint32_t tp_size = 1;
     uint32_t tp_rank = 0;
+    // One pipeline stage: only the stage's own layers are lowered, the embedding is emitted
+    // by the first stage, and the final norm + lm_head + sampling by the last. The other
+    // stages take the hidden of the previous stage as their external input and hand their
+    // last layer's output out. The weights must have been loaded with the same range.
+    shelf::qwen_hybrid::PipelineStage stage;
 };
 
 // Lowers a loaded MoE model to the shared lowered form: the hybrid backbone of every layer

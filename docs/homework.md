@@ -137,4 +137,6 @@ PP の layer split・host hand-off・E2E は実装済み。以下は未対応ま
 * 3 stage 以上の実機検証（この環境は 2 GPU のため PP=2 のみ実測）
 * stage 0 の KV page 数に全 stage を合わせる制約の解消
   （非対称 layer 分割または stage ごとの page 数指定）
-* PP の prefill / decode 性能を warmup + 複数 run で計測し `docs/perf/current.md` へ記録
+* PP の性能計測: grouped expert（Qwen3.6-35B-A3B）の PP=2 は E2E で prompt 512 / 1024 /
+  1943 token を 2 run ずつ測り `docs/perf/current.md` へ記録した。dense checkpoint の
+  PP=2 prefill / decode はまだ warmup + 複数 run で測っていない

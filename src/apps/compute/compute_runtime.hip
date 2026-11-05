@@ -3,6 +3,8 @@
 
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
+#include <shelf/models/pipeline_stage_model.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
@@ -534,17 +536,12 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
 }
 
 Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
-    const auto family = shelf::models::probe_model_dir(config_.model_dir);
-    if (!family.ok()) return family.status();
-    if (family.value() == shelf::models::ModelFamily::Moe) {
-        return Status::unsupported(
-            "pipeline parallel is not implemented for grouped expert models",
-            __FILE__, __LINE__);
-    }
-    auto config_result = qwen35::read_qwen35_text_config(config_.model_dir);
+    auto config_result = qwen_hybrid::read_qwen_hybrid_config(config_.model_dir);
     if (!config_result.ok()) return config_result.status();
-    const qwen35::Qwen35TextConfig& text_config = config_result.value();
-    const auto ranges = qwen35::even_stage_ranges(
+    const qwen_hybrid::QwenHybridConfig& text_config = config_result.value();
+    auto builder_result = shelf::models::select_pipeline_stage_model(config_.model_dir);
+    if (!builder_result.ok()) return builder_result.status();
+    const auto ranges = qwen_hybrid::even_stage_ranges(
         static_cast<std::uint32_t>(text_config.num_hidden_layers),
         static_cast<std::uint32_t>(config_.pipeline_parallel));
     if (ranges.size() != config_.pipeline_parallel) {
@@ -569,6 +566,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
         pp_config.rope_profile = *config_.rope_profile;
     }
     pp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
+    pp_config.build_stage_model = builder_result.value();
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto coordinator_result =
@@ -581,7 +579,9 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
 
     qwen35::runtime::PipelineStageRuntime& stage0 = pp_coordinator_->stage(0);
     pp_model_ = std::make_unique<shelf::models::LoadedModel>(
-        shelf::models::LoadedModel::borrow(stage0.model()));
+        stage0.model().dense_model() != nullptr
+            ? shelf::models::LoadedModel::borrow(*stage0.model().dense_model())
+            : shelf::models::LoadedModel::borrow(*stage0.model().grouped_model()));
     fprintf(stderr,
             "MEMORY_PLAN mode=%s pipeline=%u arena=%s used=%s available=%s\n",
             auto_arena_ ? "auto" : "fixed",
@@ -597,7 +597,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     batcher_config.max_scheduled_requests = config_.max_concurrent_requests;
     batcher_config.max_seq_len = config_.max_seq_len;
     batcher_config.page_tokens = config_.page_tokens;
-    batcher_config.eos_token_ids = stage0.model().text_config().stop_tokens;
+    batcher_config.eos_token_ids = stage0.model().hybrid_config().stop_tokens;
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
         stage0.executor(), stage0.sequence_pool(), stage0.gdn_pool(), stage0.kv_pool(),

@@ -259,17 +259,24 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                   const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
-                                  std::uint32_t tp_rank) {
+                                  std::uint32_t tp_rank,
+                                  const shelf::qwen_hybrid::PipelineStage& stage) {
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument(
             "Qwen35MoeModel: layer count does not match the config",
             __FILE__, __LINE__);
     }
-    Status st = qhy::validate_hybrid_model_level(weights, config, 0u,
-                                                 weights.layers.size());
+    const std::size_t num_layers = weights.layers.size();
+    const std::size_t lo = stage.enabled ? stage.layers.layer_lo : 0u;
+    const std::size_t hi = stage.enabled ? stage.layers.layer_hi : num_layers;
+    if (lo >= hi || hi > num_layers) {
+        return Status::invalid_argument("Qwen35MoeModel: invalid pipeline stage range",
+                                        __FILE__, __LINE__);
+    }
+    Status st = qhy::validate_hybrid_model_level(weights, config, lo, hi);
     if (!st.ok()) return st;
 
-    for (std::size_t l = 0; l < weights.layers.size(); ++l) {
+    for (std::size_t l = lo; l < hi; ++l) {
         st = qhy::validate_hybrid_layer_body(weights.layers[l], config, l);
         if (!st.ok()) return st;
         auto plan = build_moe_expert_group_plan(config, l, tp_size, tp_rank);
@@ -278,6 +285,11 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
         if (!st.ok()) return st;
     }
 
+    if (stage.enabled && weights.mtp.present) {
+        return Status::unsupported(
+            "pipeline stage weight load does not accept an MTP block",
+            __FILE__, __LINE__);
+    }
     if (!weights.mtp.present) return Status::make_ok();
     auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
     if (!mtp_plan.ok()) return mtp_plan.status();
@@ -285,8 +297,16 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
 }
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                  const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
+                                  std::uint32_t tp_rank) {
+    return validate_qwen35moe_weights(weights, config, tp_size, tp_rank,
+                                      shelf::qwen_hybrid::PipelineStage{});
+}
+
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                   const Qwen35MoeTextConfig& config) {
-    return validate_qwen35moe_weights(weights, config, 1u, 0u);
+    return validate_qwen35moe_weights(weights, config, 1u, 0u,
+                                      shelf::qwen_hybrid::PipelineStage{});
 }
 
 Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
@@ -306,6 +326,12 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     }
     const uint32_t tp_size = partition != nullptr ? partition->tp_size : 1u;
     const uint32_t tp_rank = partition != nullptr ? partition->tp_rank : 0u;
+    if (partition != nullptr && options.stage.enabled) {
+        return Status::unsupported(
+            "a pipeline stage of an expert-axis rank is not wired: one layer would need a "
+            "layer range and an expert range at once",
+            __FILE__, __LINE__);
+    }
     if (fs::exists(fs::path(model_dir) / qqm::kQuantizedMetadataFile)) {
         return Status::unsupported(
             "qwen35moe reads an HF real-quantized model dir only: rank-3 expert planes are "
@@ -317,18 +343,40 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     if (!config_result.ok()) return config_result.status();
     const Qwen35MoeTextConfig& config = config_result.value();
 
-    std::vector<std::string> names = qhy::hf_quantized_body_names(config);
-    std::vector<MoeExpertGroupPlan> plans;
-    plans.reserve(config.num_hidden_layers);
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    const bool stage_load = options.stage.enabled;
+    const std::size_t num_layers = config.num_hidden_layers;
+    if (stage_load && (options.stage.layers.layer_lo >= options.stage.layers.layer_hi ||
+                       options.stage.layers.layer_hi > num_layers)) {
+        return Status::invalid_argument("invalid pipeline stage range", __FILE__, __LINE__);
+    }
+    const std::size_t layer_lo = stage_load ? options.stage.layers.layer_lo : 0u;
+    const std::size_t layer_hi = stage_load ? options.stage.layers.layer_hi : num_layers;
+    const bool load_embedding = !stage_load || options.stage.first();
+    const bool load_final = !stage_load || options.stage.last(static_cast<uint32_t>(num_layers));
+
+    std::vector<std::string> names;
+    if (load_embedding) {
+        names.push_back("model.language_model.embed_tokens.weight");
+    }
+    if (load_final) {
+        names.push_back(config.tie_word_embeddings
+                            ? "model.language_model.embed_tokens.weight"
+                            : "model.language_model.lm_head.weight");
+        names.push_back("model.language_model.norm.weight");
+    }
+    std::vector<MoeExpertGroupPlan> plans(num_layers);
+    for (std::size_t l = layer_lo; l < layer_hi; ++l) {
+        const std::vector<std::string> body_names =
+            qhy::hf_quantized_layer_body_names(config, l);
+        names.insert(names.end(), body_names.begin(), body_names.end());
         auto plan = build_moe_expert_group_plan(config, l, tp_size, tp_rank);
         if (!plan.ok()) return plan.status();
         const std::vector<std::string> layer_names = moe_layer_logical_names(plan.value());
         names.insert(names.end(), layer_names.begin(), layer_names.end());
-        plans.push_back(plan.release());
+        plans[l] = plan.release();
     }
 
-    if (options.load_mtp_layers) {
+    if (options.load_mtp_layers && !stage_load) {
         auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
         if (!mtp_plan.ok()) return mtp_plan.status();
         const std::vector<std::string> ffn_names = moe_layer_logical_names(mtp_plan.value());
@@ -351,13 +399,18 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     if (!contract.ok()) return contract;
 
     Qwen35MoeModelWeights out;
-    out.layers.resize(config.num_hidden_layers);
+    out.layers.resize(num_layers);
 
-    Status model_level =
-        qhy::load_hybrid_model_level_quantized(reader, config, arena, stream, options, out);
+    qhy::HybridLoadOptions hybrid_options = options;
+    hybrid_options.load_embedding = load_embedding;
+    hybrid_options.load_lm_head = load_final;
+    hybrid_options.load_final_norm = load_final;
+
+    Status model_level = qhy::load_hybrid_model_level_quantized(reader, config, arena, stream,
+                                                                hybrid_options, out);
     if (!model_level.ok()) return model_level;
 
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    for (std::size_t l = layer_lo; l < layer_hi; ++l) {
         Status st = qhy::load_hybrid_layer_body_quantized(arena, stream, reader, config, l,
                                                           options, out.layers[l]);
         if (!st.ok()) return st;

@@ -142,6 +142,7 @@ Result<q35::Executor> create_moe_model_executor(
     lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
     lower_options.tp_size = tp_size;
     lower_options.tp_rank = tp_rank;
+    lower_options.stage = config.stage;
 
     auto lowered = qmoe::lower_qwen35_moe_to_primitives(model.text_config(), model.weights(),
                                                         lower_options);

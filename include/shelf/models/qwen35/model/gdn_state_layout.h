@@ -2,12 +2,14 @@
 
 #include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/status.h>
 
 namespace shelf {
 namespace qwen35 {
+
+using ::shelf::qwen_hybrid::PipelineStage;
 
 inline std::uint32_t qwen35_stage_layer_count(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                               const PipelineStage& stage) {

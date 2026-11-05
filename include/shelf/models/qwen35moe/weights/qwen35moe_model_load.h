@@ -4,6 +4,7 @@
 #include <shelf/models/common/qwen_hybrid/layer_weights.h>
 #include <shelf/models/common/qwen_hybrid/model_weights.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
 #include <shelf/models/qwen35moe/weights/moe_expert_load.h>
 #include <shelf/models/qwen35moe/weights/moe_ffn_weights.h>
@@ -63,6 +64,12 @@ inline bool uses_exl3_linear(const Qwen35MoeModelWeights& weights) noexcept {
 
 struct Qwen35MoeLoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
+
+    // A pipeline stage loads only its own layer range. The layers outside the range stay in
+    // the vector and hold no tensors, and the embedding / LM head / final norm are loaded
+    // only by the stage that consumes them. A stage combined with an expert-axis rank is not
+    // wired: the expert planes of a stage would need both a layer range and an expert range.
+    shelf::qwen_hybrid::PipelineStage stage;
 };
 
 // Router and shared-expert checkpoint names of one layer, in the order a request list
@@ -94,6 +101,14 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
 // MTP block that is present is validated with it.
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  const Qwen35MoeTextConfig& config);
+
+// The same invariants for one pipeline stage: only the stage's own layers carry tensors, and
+// the model-level tensors follow the first / last rule. An MTP block with a stage is rejected.
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                  const Qwen35MoeTextConfig& config,
+                                  std::uint32_t tp_size,
+                                  std::uint32_t tp_rank,
+                                  const shelf::qwen_hybrid::PipelineStage& stage);
 
 // The same invariants for one rank of an expert-axis split: the routed expert planes carry
 // config.ffn.num_experts / tp_size experts, the shared expert is tp_size times narrower, and

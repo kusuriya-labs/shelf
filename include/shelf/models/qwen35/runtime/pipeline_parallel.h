@@ -3,7 +3,8 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -18,9 +19,35 @@
 #include <unordered_map>
 #include <vector>
 
+namespace shelf::models {
+class PipelineStageModel;
+}  // namespace shelf::models
+
 namespace shelf {
 namespace qwen35 {
 namespace runtime {
+
+using ::shelf::qwen_hybrid::PipelineStage;
+using ::shelf::qwen_hybrid::StageRange;
+
+// Loads one stage's weights and hands back the family-specific model behind them. The stage
+// runtime does not know which family a checkpoint is, so the caller supplies the builder;
+// shelf::models chooses between the families (shelf::models::select_pipeline_stage_model).
+using PipelineStageModelBuilder =
+    ::shelf::Result<std::unique_ptr<shelf::models::PipelineStageModel>> (*)(
+        const std::string& model_dir,
+        const PipelineStage& stage,
+        gpu::GpuArena& arena,
+        hipStream_t stream,
+        const ::shelf::qwen_hybrid::HybridLoadOptions& load_options);
+
+// The dense family's builder.
+::shelf::Result<std::unique_ptr<shelf::models::PipelineStageModel>>
+build_dense_pipeline_stage_model(const std::string& model_dir,
+                                 const PipelineStage& stage,
+                                 gpu::GpuArena& arena,
+                                 hipStream_t stream,
+                                 const ::shelf::qwen_hybrid::HybridLoadOptions& load_options);
 
 struct PipelineStageRuntimeConfig {
     std::string model_dir;
@@ -36,7 +63,8 @@ struct PipelineStageRuntimeConfig {
     std::size_t working_set_reserve_bytes = 0;
     std::uint32_t kv_pool_pages = 0;
     EffectiveRopeProfile rope_profile;
-    Qwen35LoadOptions load_options;
+    ::shelf::qwen_hybrid::HybridLoadOptions load_options;
+    PipelineStageModelBuilder build_stage_model = nullptr;
 };
 
 class PipelineStageRuntime {
@@ -51,7 +79,7 @@ public:
     int device_id() const noexcept { return device_id_; }
     hipStream_t stream() const noexcept { return stream_; }
     gpu::GpuArena& arena() { return arena_.value(); }
-    const Qwen35Model& model() const { return model_.value(); }
+    const shelf::models::PipelineStageModel& model() const { return *model_; }
     SequenceSlotPool& sequence_pool() { return seq_pool_.value(); }
     GdnStatePool& gdn_pool() { return gdn_pool_.value(); }
     PagedKVPool& kv_pool() { return kv_pool_.value(); }
@@ -65,7 +93,7 @@ private:
     int device_id_ = -1;
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
-    std::optional<Qwen35Model> model_;
+    std::unique_ptr<shelf::models::PipelineStageModel> model_;
     std::optional<SequenceSlotPool> seq_pool_;
     std::optional<GdnStatePool> gdn_pool_;
     std::optional<PagedKVPool> kv_pool_;
@@ -87,7 +115,8 @@ struct PipelineParallelConfig {
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     std::size_t working_set_reserve_bytes = 0;
     EffectiveRopeProfile rope_profile;
-    Qwen35LoadOptions load_options;
+    ::shelf::qwen_hybrid::HybridLoadOptions load_options;
+    PipelineStageModelBuilder build_stage_model = nullptr;
 };
 
 class PipelineParallelCoordinator final : public TpBatchHook {

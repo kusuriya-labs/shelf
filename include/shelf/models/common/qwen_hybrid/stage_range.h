@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace shelf::qwen35 {
+namespace shelf::qwen_hybrid {
 
 struct StageRange {
     std::uint32_t layer_lo = 0;
@@ -45,4 +45,4 @@ inline std::vector<StageRange> even_stage_ranges(std::uint32_t num_layers,
     return out;
 }
 
-}  // namespace shelf::qwen35
+}  // namespace shelf::qwen_hybrid

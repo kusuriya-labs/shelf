@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 
 #include <hip/hip_runtime.h>
@@ -30,7 +31,15 @@ public:
 
     static Result<Qwen35MoeModel> adopt(
         Qwen35MoeModelWeights&& weights,
-        Qwen35MoeTextConfig text_config);
+        Qwen35MoeTextConfig text_config,
+        const shelf::qwen_hybrid::PipelineStage& stage = {});
+
+    // The layer range this model holds. A full-model load reports a disabled stage.
+    [[nodiscard]]
+    const shelf::qwen_hybrid::PipelineStage&
+    stage() const noexcept {
+        return stage_;
+    }
 
     [[nodiscard]]
     const Qwen35MoeModelWeights&
@@ -45,11 +54,13 @@ public:
     }
 
 private:
-    Qwen35MoeModel(Qwen35MoeModelWeights&& weights, Qwen35MoeTextConfig text_config)
-        : weights_(std::move(weights)), text_config_(std::move(text_config)) {}
+    Qwen35MoeModel(Qwen35MoeModelWeights&& weights, Qwen35MoeTextConfig text_config,
+                   shelf::qwen_hybrid::PipelineStage stage)
+        : weights_(std::move(weights)), text_config_(std::move(text_config)), stage_(stage) {}
 
     Qwen35MoeModelWeights weights_;
     Qwen35MoeTextConfig text_config_;
+    shelf::qwen_hybrid::PipelineStage stage_;
 };
 
 }  // namespace shelf::qwen35moe

@@ -21,19 +21,21 @@ Result<Qwen35MoeModel> Qwen35MoeModel::load_from_safetensors(
     // against that range. The plan is the only statement of it.
     const shelf::weights::TensorPartitionPlan* plan = options.weights.partition_plan;
     Status validation = plan != nullptr
-        ? validate_qwen35moe_weights(weights, text_config, plan->tp_size, plan->tp_rank)
-        : validate_qwen35moe_weights(weights, text_config);
+        ? validate_qwen35moe_weights(weights, text_config, plan->tp_size, plan->tp_rank,
+                                     options.stage)
+        : validate_qwen35moe_weights(weights, text_config, 1u, 0u, options.stage);
     if (!validation.ok()) return validation;
 
-    return Qwen35MoeModel(std::move(weights), std::move(text_config));
+    return Qwen35MoeModel(std::move(weights), std::move(text_config), options.stage);
 }
 
 Result<Qwen35MoeModel> Qwen35MoeModel::adopt(
     Qwen35MoeModelWeights&& weights,
-    Qwen35MoeTextConfig text_config) {
-    Status validation = validate_qwen35moe_weights(weights, text_config);
+    Qwen35MoeTextConfig text_config,
+    const shelf::qwen_hybrid::PipelineStage& stage) {
+    Status validation = validate_qwen35moe_weights(weights, text_config, 1u, 0u, stage);
     if (!validation.ok()) return validation;
-    return Qwen35MoeModel(std::move(weights), std::move(text_config));
+    return Qwen35MoeModel(std::move(weights), std::move(text_config), stage);
 }
 
 }  // namespace shelf::qwen35moe
