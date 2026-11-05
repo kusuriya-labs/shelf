@@ -9,8 +9,8 @@
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
-2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist
-である。**
+2026-11-05 の MTP decode（Qwen3.8-27B MXFP4）・MoE decode / prefill / quality・
+MoE MTP decode（Qwen3.6-35B-A3B MXFP4）、2026-11-04 の 9B BF16 linear allowlist である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -136,29 +136,41 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
   `--dump-logits` 9 行）で top-1 一致 7/9、入力列が同一だった row 0〜6 はすべて一致。
   HF との絶対照合は未実施（§8 の 40 層 E2E gate）
 
-## 2026-11-04 MTP decode（Qwen3.8-27B MXFP4）
+## 2026-11-05 MTP decode（Qwen3.8-27B MXFP4）
 
 `models/Qwen3.8-27B-Quark-AWQ-MXFP4` を TP=1 / BF16 KV で計測した。target-only と
-MTP drafter（`--mtp --mtp-drafts 7`）を交互に実行し、warmup 1 + 5 run の p50 を取った。
+MTP drafter（`--mtp --mtp-drafts 7`）を交互に実行し、各 3 run の p50 を取った。
 全 run で `GENERATED_IDS` が target-only と一致した。
 
 | prompt | target t/s | MTP K=7 t/s | speedup | accepted/7 | full accept | prefill target/MTP ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1024 | 26.03 | 56.55 | 2.17x | 6.88 | 1.00 | 405.3 / 508.0 |
-| 2048 | 26.25 | 37.91 | 1.44x | 4.25 | 0.58 | 818.5 / 977.7 |
-| 4096 | 25.93 | 49.46 | 1.91x | 6.00 | 0.89 | 1682.6 / 1968.6 |
+| 1024 | 26.07 | **91.89** | **3.52x** | 6.88 | 1.00 | 407.1 / 468.3 |
+| 2048 | 26.33 | 63.55 | 2.41x | 4.25 | 0.58 | 821.8 / 938.0 |
+| 4096 | 26.08 | 80.27 | 3.08x | 6.00 | 0.89 | 1657.1 / 1938.9 |
 
-- measurement revision: `2c3cdb1`
+- measurement revision: executor の keepalive thread を削除した `feature-moe-mtp` build
+  （combine gate 修正・MTP requant 採否なしの状態と同じ forward）
 - GPU: Radeon AI PRO R9700 × 1（`--device 0`、他の GPU は idle）
 - command（MTP）: `shelf-compute --model-dir models/Qwen3.8-27B-Quark-AWQ-MXFP4 --input-ids-file <prose N tokens> --max-new-tokens 64 --max-seq-len 4096（4096 は 8192） --device 0 --prefix-cache 0 --mtp --mtp-drafts 7`
 - prompt: `tests/data/mtp_perf/prose.txt` を tokenizer で 1024 / 2048 / 4096 token に伸ばしたもの
-- 生成一致 anchor（`GENERATED_IDS` の sha1）: 1024 `6c07c6fe36929d9ad2f750304422b1a6f6035edc`、
+- 生成一致 anchor（`GENERATED_IDS` の sha1、keepalive thread 削除前後で同一）:
+  1024 `6c07c6fe36929d9ad2f750304422b1a6f6035edc`、
   2048 `08e9e2c949de068a2d18621e676067db5170e070`、4096 `4aba2b4cee835fa60e6696f5528fb4ece21d6e42`
-- run 間の p50 は上表。1024 の MTP は 9-run 再測でも p50 56.71（54.73–80.86、80.86 の 1 run を除くと
-  54.73–56.75）。2048 / 4096 の MTP は 5-run の範囲がそれぞれ 36.42–38.08 / 49.18–49.59。
-- 参考: K=4 の 5-run p50 は 1024 41.00、2048 34.95、4096 37.73。計測した範囲では K=7 が上回る。
+- run 間の散布は小さい（1024 MTP 91.89 / 91.89 / 93.16、2048 MTP 63.39–63.59、
+  4096 MTP 75.98–81.00）。4096 target-only の 3 run は 26.03 / 26.08 / 26.08
+- verify 時間 / round は 1024 で 43.6 ms（349.0 / 8 round）、2048 で 44.0 ms（527.6 / 12 round）、
+  4096 で 45.6–46.3 ms（410.1–416.8 / 9 round）。draft 時間 / round は 41.1–42.1 / 38.6–38.8 /
+  40.8–45.8 ms
+- 旧値（`2c3cdb1`、executor keepalive thread が既定 on だった build、5 run p50）は
+  1024 target 26.03 / MTP 56.55（2.17x）、2048 26.25 / 37.91（1.44x）、
+  4096 25.93 / 49.46（1.91x）で、**MTP 側は無効**。keepalive thread が verify round に
+  約 1.6 倍の費用を載せていた（切り分けは
+  [../research/20261105/executor_keepalive_thread.md](../research/20261105/executor_keepalive_thread.md)）。
+  target-only 側は削除前後で同じ帯（26.0–26.3 t/s）
+- 参考: K=4 の 5-run p50 は 1024 41.00、2048 34.95、4096 37.73。計測した範囲では K=7 が上回る
+  （K=4 は keepalive on build の実測で、削除後は K の比較を改めてしていない）
 - target の prefill chunk は target-only と同じ `max_batch_rows` を使う。MTP 側の first pass だけ
-  512 行以下に分割するため、MTP の prefill は target より長い（上表の prefill 差）。
+  512 行以下に分割するため、MTP の prefill は target より長い（上表の prefill 差）
 
 ## 2026-11-04 MoE teacher-forced quality（初回）
 
@@ -251,25 +263,28 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4` を TP=1 / bf16 KV / device 0 で、target-only と
 `--mtp` を比べた。prompt は corpus から切った 1600 token、`--max-new-tokens 32`、
 `--max-seq-len 4096`。combine の shared gate stride 修正後、かつ executor の keepalive
-thread を既定無効にした build の実測。
+thread を削除した build の実測。
 
 | 条件 | t/s | vs target | rounds | accepted drafts | mean accepted | verify rows | draft ms | verify ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| target-only | 61.56 / 61.44 | 1.00x | - | - | - | - | - | - |
-| `--mtp --mtp-drafts 1` | **84.80** | 1.38x | 16 | 14 | 0.875 | 32 | 41.31 | 307.92 |
-| `--mtp --mtp-drafts 4` | **115.83** | **1.88x** | 9 | 22 | 2.444 | 43 | 81.94 | 185.62 |
-| `--mtp --mtp-drafts 7` | 93.37 | 1.52x | 9 | 22 | 2.444 | 63 | 129.60 | 202.28 |
+| target-only | 61.59 / 60.87 | 1.00x | - | - | - | - | - | - |
+| `--mtp --mtp-drafts 1` | **83.83** | 1.37x | 16 | 14 | 0.875 | 32 | 43.42 | 309.89 |
+| `--mtp --mtp-drafts 4` | **113.18** | **1.85x** | 9 | 22 | 2.444 | 43 | 86.89 | 186.93 |
+| `--mtp --mtp-drafts 7` | 90.93 | 1.49x | 9 | 22 | 2.444 | 63 | 137.08 | 203.71 |
 
 - 生成一致アンカー: 三条件の `GENERATED_IDS` は target-only の greedy 列と**完全一致**
   （`264,13759,506,3603,440,799,75727,13,561,25786,2942,513,220,16,11,220,17,11,220,20,11,321,220,16,15,4276,13,8771,628,5144,506,2957`）
-- measurement revision: combine の shared gate stride 修正 + executor keepalive thread 既定無効
+- measurement revision: combine の shared gate stride 修正 + executor keepalive thread 削除
   （`feature-moe-mtp`）
-- verify 時間 / round は 2 行 19.2 ms、平均 4.8 行 20.6 ms、7 行 22.5 ms で行数に対して緩やかに増える。
+- 直前 revision（keepalive thread を opt-in にして無効で動かした build）では
+  61.56 / 61.44、84.80、115.83、93.37 t/s だった。削除後 build との差は 1.3〜2.6 % で
+  GPU 共有下の run 間振れの範囲内
+- verify 時間 / round は 2 行 19.4 ms、平均 4.8 行 20.8 ms、7 行 22.6 ms で行数に対して緩やかに増える。
   同じ model の 2 行 forward 単体（`shelf-bench pp --prefill-chunk 2` = 11.24 ms/token）と同じ帯で、
   **round に forward 外の費用は载っていない**
-- draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-04）に対し 2.444 / 7 = 35 % のまま。
+- draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-05 MTP decode）に対し 2.444 / 7 = 35 % のまま。
   それでも break-even を超えるため速度上の利点がある。drafts=4 の break-even:
-  round 267.63 / 9 = 29.7 ms ÷ 16.3 ms/token = 1.82 token / round、実測 emitted/round = 3.444
+  round 273.89 / 9 = 30.4 ms ÷ 16.2 ms/token = 1.88 token / round、実測 emitted/round = 3.444
 - weight load 実測（MTP block 込み、`test_qwen35moe_model_load_real`）: load 28.6 s、
   arena 21.000 GiB（うち MTP expert 平面 0.399 GiB）、peak RSS 22.98 GiB
 - 経緯（受理率の評価、verify round 費用の切り分け）は
@@ -311,6 +326,12 @@ shared expert の寄与が落ちていた**（原因と修正は
   で 497.27 → 494.80 / 495.34 ms）。**生成アンカーは変わった**（context 64 の
   `GREEDY_TOKEN_SUM` 2199 → 976467）。fp8 KV は context 64 で bf16 と同一の生成列になった
   （修正前は 14441 で不一致）
+- 上表は executor の keepalive thread が既定 on だった build の実測。thread を削除した build で
+  同じ条件を再測すると context 64 で 499.63 / 500.15 ms（64.05 / 63.98 tok/s）、context 2048 bf16 で
+  512.11 / 512.04 ms（62.49 / 62.49 tok/s）で、`GREEDY_TOKEN_SUM`（976467 / 975006）を含む
+  生成列は同一だった。差異は 1.0 % で GPU 共有下の run 間振れの範囲内。
+  `shelf-bench pp --prompt-tokens 8192 --prefill-chunk 2048 --runs 3 --warmup 1` も
+  3809.14 / 3762.39 tok/s で、上記の 3807 と同じ
 - context 2048 の fp8 greedy は `GREEDY_FIRST_TOKENS=1,1,1,...`（id 1 の退化列）で検出力が
   無い。fp8 の比較としては上の quality 表が有効
 - 行数をまたいだ teacher-forced logits の一致（walk 突合）の実測は

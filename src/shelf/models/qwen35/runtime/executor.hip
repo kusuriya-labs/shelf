@@ -22,10 +22,6 @@
 #include <limits>
 #include <string>
 #include <vector>
-#include <chrono>
-#include <thread>
-#include <atomic>
-#include <new>
 #include <shelf/inference/execution/selectors/embedding_selector.h>
 #include <shelf/kernels/optimized/radix_topn.h>
 #include <shelf/kernels/optimized/sampling_common.h>
@@ -1046,73 +1042,6 @@ Result<PendingBatch> submit_co_batch(
     return pending;
 }
 
-namespace {
-
-constexpr uint32_t kKeepAliveIntervalUs = 1000u;
-
-struct KeepAlive {
-    hipStream_t stream = nullptr;
-    hipEvent_t event = nullptr;
-    int device = 0;
-    std::atomic<bool> stop{false};
-    std::thread thread;
-};
-
-bool keepalive_requested() {
-    const char* e = std::getenv("SHELF_KEEPALIVE");
-    return e != nullptr && e[0] != '\0' && e[0] != '0';
-}
-
-KeepAlive* keepalive_start() {
-    if (!keepalive_requested()) return nullptr;
-    auto* ka = new (std::nothrow) KeepAlive();
-    if (ka == nullptr) return nullptr;
-    if (hipStreamCreate(&ka->stream) != hipSuccess) {
-        delete ka;
-        return nullptr;
-    }
-    if (hipEventCreateWithFlags(&ka->event, hipEventDisableSystemFence) != hipSuccess) {
-        shelf::gpu::discard_cleanup_result(hipStreamDestroy(ka->stream));
-        delete ka;
-        return nullptr;
-    }
-    if (hipGetDevice(&ka->device) != hipSuccess) ka->device = 0;
-    ka->thread = std::thread([ka] {
-        (void)hipSetDevice(ka->device);
-        while (!ka->stop.load(std::memory_order_relaxed)) {
-            (void)hipEventRecord(ka->event, ka->stream);
-            std::this_thread::sleep_for(std::chrono::microseconds(kKeepAliveIntervalUs));
-        }
-    });
-    return ka;
-}
-
-Status keepalive_stop(KeepAlive* ka) {
-    if (ka == nullptr) return Status::make_ok();
-    Status first_error = Status::make_ok();
-    ka->stop.store(true, std::memory_order_relaxed);
-    if (ka->thread.joinable()) ka->thread.join();
-    hipError_t err = hipStreamSynchronize(ka->stream);
-    if (first_error.ok() && err != hipSuccess) {
-        first_error = Status::hip_error("hipStreamSynchronize keepalive",
-                                        hipGetErrorString(err), __FILE__, __LINE__);
-    }
-    err = hipEventDestroy(ka->event);
-    if (first_error.ok() && err != hipSuccess) {
-        first_error = Status::hip_error("hipEventDestroy keepalive",
-                                        hipGetErrorString(err), __FILE__, __LINE__);
-    }
-    err = hipStreamDestroy(ka->stream);
-    if (first_error.ok() && err != hipSuccess) {
-        first_error = Status::hip_error("hipStreamDestroy keepalive",
-                                        hipGetErrorString(err), __FILE__, __LINE__);
-    }
-    delete ka;
-    return first_error;
-}
-
-}  // namespace
-
 Executor::~Executor() noexcept {
     auto st = executor_shutdown(*this);
     (void)st;
@@ -1179,8 +1108,7 @@ Executor::Executor(Executor&& other) noexcept
       layer_override_value_ids(std::move(other.layer_override_value_ids)),
       layer_override_rows(std::move(other.layer_override_rows)),
       layer_override_hidden(std::move(other.layer_override_hidden)),
-      layer_override_host(std::move(other.layer_override_host)),
-      keepalive(other.keepalive) {
+      layer_override_host(std::move(other.layer_override_host)) {
     if (batch_context_storage.device_struct.allocation_base() != nullptr) {
         batch_context = batch_context_storage.device_struct.data<::shelf::runtime::DeviceBatchContext>();
     } else {
@@ -1236,7 +1164,6 @@ Executor::Executor(Executor&& other) noexcept
     other.stochastic_topk_active_counts = gpu::Tensor{};
     other.stochastic_topk_partitions = 0;
     other.stochastic_topk_scratch_bytes = 0;
-    other.keepalive = nullptr;
 }
 
 Executor& Executor::operator=(Executor&& other) noexcept {
@@ -1368,8 +1295,6 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.stochastic_topk_active_counts = gpu::Tensor{};
         other.stochastic_topk_partitions = 0;
         other.stochastic_topk_scratch_bytes = 0;
-        keepalive = other.keepalive;
-        other.keepalive = nullptr;
     }
     return *this;
 }
@@ -1382,11 +1307,6 @@ bool Executor::is_shutdown() const noexcept {
 
 Status executor_shutdown(Executor& ex) noexcept {
     Status first_error = Status::make_ok();
-    if (ex.keepalive != nullptr) {
-        Status ka_status = keepalive_stop(static_cast<KeepAlive*>(ex.keepalive));
-        ex.keepalive = nullptr;
-        if (first_error.ok() && !ka_status.ok()) first_error = ka_status;
-    }
     if (ex.host_sampled_staging != nullptr) {
         hipError_t err = hipHostFree(ex.host_sampled_staging);
         if (first_error.ok() && err != hipSuccess) {
@@ -2253,8 +2173,6 @@ Result<Executor> create_executor(
         }
         shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
     }
-
-    ex.keepalive = keepalive_start();
 
     return ex;
 }

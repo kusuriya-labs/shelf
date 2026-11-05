@@ -37,16 +37,13 @@ model_dispatch_correctness (shelf::kernel, single launcher)
 - sync semantics: opごとにstaging H2D（async）→ launch →
   `hipStreamSynchronize`（pool経由でnon-synchronous opはskip）。
 
-### Executor の stream と keepalive thread
+### Executor の stream
 
-`Executor` は呼び出し側が渡す compute stream 上で launch する。既定では、executor 自身が持つ
-host thread と追加 stream は無い。
+`Executor` は呼び出し側が渡す compute stream 上で launch する。executor 自身が所有する
+host thread と追加 stream は持たない。
 
-`SHELF_KEEPALIVE=1` を設定したときだけ `create_executor` が専用 stream と 1 ms 間隔で
-`hipEventRecord` を行う keepalive thread を起動し、`executor_shutdown` が thread を join して
-stream / event を解放する（cleanup 失敗は `Status` で返す）。既定は無効。
-`shelf-bench` の `--gap-keepalive` は app 側が自分で event を record するものであり、
-executor の keepalive とは別である。
+GPU の idle 復帰（command processor の起动）を測る口は `shelf-bench` の `--gap-keepalive` で、
+app が自分の stream へ event を record する。executor 側にこの種の background activity は無い。
 
 ## Decode backend
 

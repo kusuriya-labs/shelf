@@ -1,6 +1,6 @@
 # Executor の keepalive thread が multi-row batch の per-dispatch latency を悪化させていた
 
-実験 ID `EXEC-KEEPALIVE`、結論 **ACCEPT（keepalive thread を既定は無効に変更）**。
+実験 ID `EXEC-KEEPALIVE`、結論 **ACCEPT（executor の keepalive thread を削除）**。
 
 対象: `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）、device 0 / TP=1。
 動機は [./moe_mtp.md](./moe_mtp.md) §6 で残った未切り分けの課題、つまり MoE MTP の
@@ -14,6 +14,9 @@ verify round が forward 単体より約 40 ms 高いという実測の局所化
   「row bucket ぶん elementwise を walk している」仮説は否定済み。
 - 40 ms が round 側の費用（descriptor・staging・sampling・state save）なのか、
   multi-row batch 自体の遅さなのかが未切り分けだった。
+- `Executor` の keepalive thread はこの branch 以前（`main` の `a1eb24c` 時点）から既定 on で、
+  `SHELF_KEEPALIVE=0` で止まるだけの形だった。したがってこれまでに測られた MoE の multi-row
+  数値はすべて keepalive が効いた状態で測られていたことになる
 
 ## 2. round 内の費用を hip event で切る
 
@@ -114,20 +117,69 @@ clock 変化ではなく per-dispatch の固定費用である。pass 集計で�
 差が出るのは dispatch 数が多く 1 kernel が短い batch（multi-row forward・verify）と
 prefill の空隙である。
 
-## 6. 採否判断
+## 6. dense 27B 側への影響（keepalive を消して良いか）
 
-- **ACCEPT**: executor の keepalive thread を既定は無効にした。`SHELF_KEEPALIVE=1` を
-  明示的に設定したときだけ有効になる（`keepalive_requested()`）。
-  既定時の計測可能なオーバーヘッドが大きい（MoE MTP verify round で 3.2 倍）ため。
-  idle 復帰を測る口は `shelf-bench` の `--gap-keepalive` が opt-in で残っている。
-- **無効化による生成列・数値の変化は無い**（同じ kernel を同じ引数で launch するだけ）。
-  MoE target-only の `GENERATED_IDS`、`tg --context 1600` の `GREEDY_TOKEN_SUM=1005760` は
-  on / off で一致した。
-- keepalive が CP の idle 復帰に与える効果は本 build では実測していない（benefit の証拠が無い
-  ことと、harm が実測できたことで判断は確定できる）。戻るなら tg の
-  `--gap-keepalive` と同一の条件で、GPU idle を意図的に作って比較する。
+MoE だけの結論で既定を変えるのは危険なので、`models/Qwen3.8-27B-Quark-AWQ-MXFP4`（dense）で
+同じ A/B をした。実行順が結果に効くので、on / off を交互に並べたペアで測った。
 
-## 7. MoE MTP への影響
+| 条件 | keepalive on | keepalive off |
+| --- | ---: | ---: |
+| pp prompt 8192 chunk 2048（交互 5 ペア、runs 3 warmup 1 の median） | 3519.9 / 3565.1 / 3569.7 / 3575.9 / 3576.6 ms | 3626.8 / 3632.9 / 3728.9 / 3741.4 / 3774.1 ms |
+| 同上を別セッションで交互 2 ペア（runs 2 warmup 1） | 3560.1 / 3571.0 ms | 3560.5 / 3575.2 ms |
+| pp prompt 32768 chunk 2048（交互 2 ペア） | 19143.6 / 19220.2 ms（1711.69 / 1704.87 tok/s） | 19218.3 / 19237.0 ms（1705.04 / 1703.39 tok/s） |
+| MoE pp prompt 8192 chunk 2048（交互 3 run） | 2158.5 / 2175.6 / 2176.8 ms | 2168.8 / 2170.4 / 2171.3 ms |
+| dense tg context 1024 / 2048（tokens 32） | 25.97 / 26.27 t/s | 26.02 / 26.25 t/s |
+| dense MTP drafts=7 prompt 1024（8 round） | verify 431.4 / 755.6 / 754.1 ms、81.56 / 57.08 / 57.18 t/s | verify 349.6 / 350.8 / 350.2 ms、91.88 / 92.89 / 92.69 t/s |
+
+- dense prefill の差は**再現しなかった**。交互 5 ペアでは on が 1.4〜5.9 % 速かったが、
+  同じ条件（prompt 8192・chunk 2048・runs 2・交互）の別セッションでは 0.01 % / 0.12 %、
+  prompt 32768 でも 0.4 % だった。run 数の違いや heuristics では説明できず、
+  **small effect は GPU 共有下で信用できない**ということなので、keepalive の benefit としては
+  採用しない（harm 側の再現性は高い。下表・下 §6-1 参照）
+- MoE prefill・dense / MoE の 1 行 decode は差が無い（測定誤差以内）
+- dense MTP は keepalive off が 1.6 倍速く、しかも run 間の振れが消える
+  （on は 57.18 / 57.08 / 81.56 と振れ、off は 91.88 / 92.89 / 92.69）
+
+### 6-1. 費用は thread 数と record 数に比例する
+
+executor は 1 台につき 1 つ thread を持つため、MTP run は target と drafter で **2 本**になる。
+thread を device 単位で共有する（refcount）一時パッチで測ると、MoE MTP verify round は
+27.2 ms（1 本）まで下がり、無効時の 20.9 ms に近づいた（on 2 本では 64.3 ms）。
+同様に record 間隔を空けると費用は比例して消えた（MoE MTP drafts=4 の verify 合計と t/s）。
+
+| record 間隔 | verify 合計 | t/s |
+| --- | ---: | ---: |
+| 1 ms（既定） | 581.42 ms | 45.39 |
+| 20 ms | 300.99 ms | 78.99 |
+| 100 ms | 199.84 ms | 109.25 |
+| 無効 | 188.08 ms | 112.74 |
+
+つまり原因は thread の存在ではなく **別 stream への signal 投入回数**で、1 回あたり
+dispatch 1 本ぶん（約 13 µs）に相当する費用が乗る。共有化や間隔の緩和は部分的にしか効かず、
+`hipEventRecord` を使う限り費用は残る。driver 側の clock / PM 設定で代替できるかは、
+`power_dpm_force_performance_level` が root 専用で確認できなかった（未解決）。
+
+## 7. 採否判断
+
+- **ACCEPT（削除）**: executor の keepalive thread を**削除**した。`KeepAlive` /
+  `keepalive_start` / `keepalive_stop` と `SHELF_KEEPALIVE` を `Executor` から取り除き、
+  executor は追加の host thread と追加 stream を持たない契約にした。
+  - 費用は再現する（MoE MTP verify round 62.2 → 19.2 ms、dense MTP verify round 94.5 → 43.9 ms、
+    kernel trace の busy / idle per dispatch は §5 と §8 の表）
+  - 利点は再現しなかった（§6。dense prefill で 1.4〜5.9 % 出たセッションもあるが、同一条件の
+    別セッションで 0.01 % / 0.12 %、prompt 32768 で 0.4 %）
+  - `hipEventRecord` を使う限り費用は残るので、thread 共有や間隔の緩和は採用しない（§6-1）
+- driver / firmware 側の clock・PM 設定（`power_dpm_force_performance_level` など）で
+  代替できる可能性は、benefit 自体が再現しなくなったため追わない。設定は root 専用で
+  本環境では検証できない
+- idle 復帰を測る口は `shelf-bench` の `--gap-keepalive` が app 側に opt-in で残っている。
+  executor 側に同種の activity を戻さないこと
+- **削除による生成列・数値の変化は無い**（同じ kernel を同じ引数で launch するだけ）。
+  MoE target-only の `GENERATED_IDS`、MoE `tg` の `GREEDY_TOKEN_SUM`（context 64 で 976467、
+  context 2048 で 975006）、dense `tg` の `GREEDY_TOKEN_SUM`（context 1024 で 153624、
+  context 2048 で 184095）、dense MTP の `GENERATED_IDS` sha1 は keepalive on / off で一致した
+
+## 8. MoE MTP への影響
 
 keepalive 無効化後の MoE MTP（同一条件: 1600 token prompt、`--max-new-tokens 32`、
 `--max-seq-len 4096`、bf16 KV、device 0、TP=1）。数値の正本は
@@ -151,7 +203,28 @@ MoE の MTP 有効化（性能主張）は [./moe_mtp.md](./moe_mtp.md) §5 / §
 **ACCEPT に訂正**する。受理率は 35 % のままですが break-even（drafts=4 で accepted ≥ 0.82）を
 超えるためである。break-even の計算を §6 に訂正して残した。
 
-## 8. 再現条件
+## 8-1. 削除後 build での確認
+
+keepalive thread を削除した build で、同じ条件を再測した（device 0 / TP=1、1600 token prompt、
+`--max-new-tokens 32`、`--max-seq-len 4096`）。
+
+| 条件 | t/s | verify ms / round |
+| --- | ---: | ---: |
+| target-only | 61.59 / 60.87 | - |
+| `--mtp-drafts 1` | 83.83 | 19.4 |
+| `--mtp-drafts 4` | 113.18 | 20.8 |
+| `--mtp-drafts 7` | 90.93 | 22.6 |
+
+opt-in 化して無効にした build（上表）と同じ帯で、差異は GPU 共有下の run 間振れの範囲内
+（1.3 〜 2.6 %）。`GENERATED_IDS` は target-only と一致したままだ。
+`shelf-bench tg` の MoE anchor も保持された（context 64 で 499.63 / 500.15 ms、
+`GREEDY_TOKEN_SUM=976467`、context 2048 で 512.11 / 512.04 ms、`GREEDY_TOKEN_SUM=975006`）、
+`shelf-bench pp --prompt-tokens 8192 --prefill-chunk 2048` は 3809.14 / 3762.39 tok/s。
+
+dense 27B 側も `GENERATED_IDS` の sha1 が記録した anchor と一致した
+（1024 `6c07c6fe…`、2048 `08e9e2c9…`。target-only と MTP で同一）。
+
+## 9. 再現条件
 
 - build: `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo` +
   `ninja -C build shelf-compute shelf-bench`
@@ -161,3 +234,5 @@ MoE の MTP 有効化（性能主張）は [./moe_mtp.md](./moe_mtp.md) §5 / §
   kernel 時間合計（busy）と span の差が idle 空隙で、`Grid_Size_*` / `Workgroup_Size_X` /
   `Scratch_Size` / `VGPR_Count` が同じかを必ず確認する（launch shape が変わっていないことを
   示さないと「kernel が遅い」を主張できない）。
+- on / off の切替は削除前 build の `SHELF_KEEPALIVE=0`（既定 on）で行った。削除後の build には
+  on 側が存在しないので、上記の on 数値を再現するには thread を戻す必要がある

@@ -230,7 +230,8 @@ keepalive thread によるもので、削除後は round 29.7 ms / 1.82 token �
 
 §6 の「round の 62 ms のうち forward が約 22 ms、残り約 40 ms は forward 以外の費用」は
 **誤りだった**。原因は `Executor` が既定で起動していた keepalive thread（1 ms 間隔で別 stream へ
-`hipEventRecord` を投げる）で、`SHELF_KEEPALIVE=0` で止めると消えた。測定と切り分けは
+`hipEventRecord` を投げる）で、無効にすると消えた（この thread は後に `Executor` から削除された）。
+測定と切り分けは
 [./executor_keepalive_thread.md](./executor_keepalive_thread.md) が正本。同じ 2 行・同じ kernel・
 同じ launch shape の verify pass が span 65.8 ms → 22.8 ms（idle / dispatch 24.3 → 4.3 µs、
 busy / dispatch 23.8 → 12.4 µs）。1 行 decode（`shelf-bench tg`）は on / off で差が無いので、

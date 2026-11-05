@@ -174,8 +174,6 @@ struct Executor {
     std::vector<std::uint32_t> layer_override_hidden;
     std::vector<std::vector<std::uint16_t>> layer_override_host;
 
-    void* keepalive = nullptr;
-
     ::shelf::runtime::StreamSignal completion_signal{};
 };
 
