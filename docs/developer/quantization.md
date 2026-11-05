@@ -193,6 +193,7 @@ production の Program Builder は linear の activation 量子化方針を
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 | `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3（group E8M0 を行基準へ fold） | 64 | あり |
 | `Exl3` | `EXL3_W16A16_F32_BF16` | `LINEAR_EXL3_W16A16` | なし（BF16 を入力で F16 へ回転） | 128（未使用） | なし |
+| `Exl3`（mul24） | `EXL3_MUL24_INT8_W8A8_F32_BF16` | `LINEAR_EXL3_INT8` | kernel 内で int8 化（EXL3 workspace） | 128（未使用） | EXL3 workspace |
 
 - MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
   checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
@@ -272,8 +273,9 @@ EXL3 は HF checkpoint の `quantization_config.quant_method == "exl3"` を検�
 
 - コードブックは mul1 のみ。trellis は `<k/16, n/16, 16*ka + (half ? 8 : 0)>` の I16。
   `ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
-- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。marker の値は kernel では
-  使わない。
+- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。marker の値は codebook の
+  乗数で、format を決める（下の EXL3-INT8 を参照）。mul1（`0x83DCD12D`）が W16A16、
+  mul24（`0xDCD12D`）が EXL3-INT8。どちらでもない値は load が拒否する。
 - `k` と `n` は 128 の倍数、`k_padded == k`。trellis の語数から `ka` / `half` を
   復元し、`suh` / `svh` の長さと照合する。
 - `LINEAR_EXL3_W16A16` は trellis を kernel 内で復号し、F16 の重み・活性で
@@ -355,6 +357,35 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
 - MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
 - DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
   logits を計算する（drafter の重みは BF16 / FP8 のまま）。
+
+
+### EXL3-INT8（mul24）
+
+marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_INT8_W8A8_F32_BF16` /
+`LINEAR_EXL3_INT8` として実行する。EXL3 を最初から INT8 grid への復号を前提に量子化した形式
+（rocm_exl3 の `research/codebook`、仕様の正本は同 `doc/exl3_int8.md`）で、再量子化が必要。
+重みは trellis のまま常駐し、INT8 の重み行列は存在しない。manifest と plane は W16A16 と同じで、
+`weight_loader.cpp` が marker から spec を決める。
+
+- 復号（GEMM 内、読むたびに）: 重み 1 個の state は、タイルの循環ビット列（word 内は MSB 先頭）から
+  `(t * bits + bits - 16 + 256 * bits) mod (256 * bits)` の位置の 16 bit。`q = (B - 509) >> 2`、`B` は
+  `state * 0xDCD12D`（uint32、24 bit 定数なので `v_mul_u32_u24` 1 命令）の 4 byte の和で、範囲は −128..127。
+  実数値は `q * kExl3Int8GridStep`（`4 * 887 * 2^-17`）。タイル内の並びは WMMA の B フラグメント順で、
+  ストリーム位置 `t` は行 `k = 8 * (t / 128) + t % 8`、列 `n = (t / 8) % 16`。lane `l` が復号する 8 個
+  （`t = 8l..8l+7`）がそのまま iu8 WMMA の B フラグメント（列 `l % 16`、連続 8 個の k）になる。
+  CPU 参照は `exl3_decode_int8`（テストの正解のみに使う）。
+- 常駐形式: 16x16 タイルを `[nt][kt]` の順に並べ替えて置く（`exl3_tiles_to_nmajor`、load 時に CPU）。
+  wave が K 方向に連続して読め、キャッシュに載らない重みでは `[kt][nt]` のままより約 2 割速い。
+- 実行: 3 launch。(1) 入力に `suh` を掛けて 128 ごとに Hadamard、128 ごとに `amax / 127` の scale で
+  int8 化（codes は自然な k 順）。(2) trellis を復号し、LDS を使わず直接 WMMA の B にして iu8 WMMA で
+  128 ごとに int32 で厳密に累積、F32 の scale と `kExl3Int8GridStep` を掛ける。(3) 128 ごとの Hadamard と
+  `svh` で bf16 / f32 に戻す。scale は fp32 のまま GEMM の外で掛ける。
+- decode（rows <= 16）の GEMM は K を split して wave を埋める（各 split が F32 出力の別スライスに書き、
+  (3) が足す。決定的）。n の小さい線形は wave が足りず帯域が落ちるため。
+- workspace: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes と scale、accum 領域に F32 の
+  回転前出力を置き、入らない行数は行を分けて実行する。
+- 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数、TP と MoE の expert は未対応。
+  correctness fallback は持たない。
 
 ## KV quantization
 
