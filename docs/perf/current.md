@@ -64,6 +64,11 @@ EXL3 経路の現在値である。
 - measurement revision: `ca5af8f`（dense 経路の rowsum 事前計算、hipBLASLt algo の
   16 候補選択、recon の row-major 書き込み。prefill `rows >= 256` は dense recon +
   hipBLASLt、`rows < 256` / decode / verify / LM-Head は融合 W16A16）
+- `feature-moe-mtp` の木（EXL3 の実行 workspace を条件つき確保へ変えた後）で同じ条件を
+  `--device 0` / `--arena-gib 28` で再測した: prefill 2048 **1439.4** tok/s、decode 128
+  **20.70** tok/s。上表の帯と同じかややくらい。dense recon 経路が落ちていると prefill 2048 は
+  **715 tok/s** になる（落ち方の記録は
+  [../research/20261105/exl3_workspace_conditional.md](../research/20261105/exl3_workspace_conditional.md) §6）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -409,11 +414,16 @@ expert 軸を選んだ理由・数値破綻の経過・allowlist 登録の内訳
 
 | prefill chunk | TP=1 bf16 KV | TP=2 bf16 KV | TP=2 / TP=1 |
 | ---: | ---: | ---: | ---: |
-| 1024 | 3777.7 | 6209.5 | **1.64 倍** |
-| 2048 | 3785.0 | 6543.6 | **1.73 倍** |
-| 4096 | 3616.7 | 6466.5 | **1.79 倍** |
+| 1024 | 3755.3 | 6204.3 | **1.65 倍** |
+| 2048 | 3782.8 | 6510.8 | **1.72 倍** |
+| 4096 | 3618.7 | 6439.1 | **1.78 倍** |
 
-- fp8 KV（chunk 2048）: TP=1 **3743.3** / TP=2 **6491.3**（1.73 倍）
+- fp8 KV（chunk 2048）: TP=1 **3732.6** / TP=2 **6508.7**（1.74 倍）
+- 上の値は `main`（EXL3 W16A16 系）を取り込み、EXL3 の実行 workspace を条件つき確保へ変えた
+  tree の再測（measurement revision: `ef80238` 以降、required 168/168・gpu2 6/6）。同一条件の
+  合体前の値は TP=1 3777.7 / 3785.0 / 3616.7、TP=2 6209.5 / 6543.6 / 6466.5 で、差は run 揺れの
+  範囲（0.6 % 以下）。executor footprint は 1.31 → **1.33 GiB**（scratch 8192 → 3145728 float
+  分）、KV pool は 18.86 → **18.64 GiB**（auto slack 0.20 GiB を確保した分）
 - 上記は TP=2 の rank local shape を registered 側へ載せた後の値。載せる前は chunk 1024 / 2048 /
   4096 で **123.4 / 152.4 / 151.6 tok/s**（TP=1 の 1/25）で、backbone が correctness path へ
   落ちていた。kernel 別の倍率と登録した shape は research 記録 §7
@@ -450,8 +460,10 @@ corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` し
 ### decode
 
 - `shelf-bench tg` には `--tensor-parallel` が無いので tg では測れない。TP=1 の tg
-  （`--mode greedy --context 64 --tokens 32 --warmup 1`、2 run）は **63.90 / 63.94 tok/s**、
+  （`--mode greedy --context 64 --tokens 32 --warmup 1`、2 run）は **63.88 / 64.65 tok/s**、
   `GREEDY_TOKEN_SUM=976467`（combine gate stride 修正後の現行 anchor と一致）
+- 合体後の tree で teacher-forced の ctx 192 を TP=1 vs TP=2 で測り直すと最大 KL **2.6e-3**・
+  top-1 全一致・非有限 0 で、下表と同一の帯
 - TP=2 の decode は `shelf-compute` E2E で測る（`--tensor-parallel 2` は `--prefix-cache 0` が
   必須）。prompt は上の corpus の 1200 番地以降 16 token（special token を除いたもの、
   `/tmp` 上の作業ファイルなので再現には同様のスライスを使う）、
@@ -459,12 +471,13 @@ corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` し
 
 | | TP=1 | TP=2 | DECODE_TOKENS |
 | --- | ---: | ---: | ---: |
-| run 1 | 64.24 | 71.84 | 47 |
-| run 2 | 64.24 | 70.53 | 47 |
-| `PREFILL_MS` | 42.7 / 41.7 | 47.9 / 42.6 |  |
+| run 1 | 64.76 | 71.39 | 47 |
+| run 2 | 64.79 | 50.46 | 47 |
+| `PREFILL_MS` | 41.8 / 41.8 | 49.0 / 46.5 |  |
 
-  → **DECODE_TOKENS_PER_SEC +11 %**。`GENERATED_IDS` は 48 token すべて TP=1 と TP=2 で一致し、
-  TP=2 の run 間でも一致した
+  → **DECODE_TOKENS_PER_SEC +10 %**（run 2 の 50.46 は GPU 0 共有時の外れ値。合体前の同条件は
+  TP=1 64.24 / 64.24、TP=2 71.84 / 70.53）。`GENERATED_IDS` は 48 token すべて TP=1 と TP=2 で
+  一致した
 - TP=2 の E2E は auto reserve の slack 修正前（row bucket 16）は
   `arena capacity exceeded` で起動できなかった。修正の経緯は
   [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §5

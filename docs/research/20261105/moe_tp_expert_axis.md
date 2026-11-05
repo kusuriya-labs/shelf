@@ -81,7 +81,11 @@ weight 側は `test_qwen35moe_model_load` が固定する: rank 平面の byte �
   bucket 192 で 0.13 GiB）。KV pool を残り領域で切る順序なので、過小評価は
   `arena capacity exceeded` の起動失敗になる。auto 経路には `max(64 MiB, free / 100)` の slack を
   残すようにした。容量式そのものの過小評価は残っている
-- MoE pipeline parallel は未実装（順序は fp8 KV → MTP → TP → PP の最后）
+- `main` の EXL3 系は execution workspace に 306〜816 MiB（row bucket 依存）を無条件で
+  足していた。EXL3 linear を走らせる実行だけ確保する形へ変えたので、EXL3 を使わない model
+  （BF16 / HF FP8 / MXFP4）の容量式は変更前と同じ値に戻る。経過と採否は
+  [exl3_workspace_conditional.md](exl3_workspace_conditional.md)
+- MoE pipeline parallel は未実装（順序は fp8 KV → MTP → TP → PP の最後）
 - expert 配分は均等な contiguous 範囲のみ。負荷に応じた expert 配置（真の EP scheduler）は非目標
 - MoE MTP block は分割しない（dense と同じ）
 
