@@ -33,6 +33,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     void* d_xrot = nullptr;
     void* d_dense = nullptr;
     void* d_accum = nullptr;
+    void* d_rowsum = nullptr;
     void* d_fused = nullptr;
     void* d_dense_out = nullptr;
     if (hipMalloc(&d_trellis, tile_words * 2u) != hipSuccess) return false;
@@ -42,6 +43,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     if (hipMalloc(&d_xrot, static_cast<std::size_t>(rows) * k * 2u) != hipSuccess) return false;
     if (hipMalloc(&d_dense, static_cast<std::size_t>(k) * n * 2u) != hipSuccess) return false;
     if (hipMalloc(&d_accum, static_cast<std::size_t>(rows) * n * 4u) != hipSuccess) return false;
+    if (hipMalloc(&d_rowsum, static_cast<std::size_t>(rows) * 4u) != hipSuccess) return false;
     if (hipMalloc(&d_fused, static_cast<std::size_t>(rows) * n * 4u) != hipSuccess) return false;
     if (hipMalloc(&d_dense_out, static_cast<std::size_t>(rows) * n * 4u) != hipSuccess) {
         return false;
@@ -89,7 +91,10 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     args.splitk_splits = 1u;
     args.groups = 0u;
 
-    if (k::launch_rotate_exl3(args, d_xrot, nullptr) != hipSuccess) return false;
+    if (k::launch_rotate_exl3_rowsum(args, d_xrot, static_cast<float*>(d_rowsum), nullptr) !=
+        hipSuccess) {
+        return false;
+    }
     if (k::launch_gemm_exl3_w16a16_pre(args, d_xrot, nullptr) != hipSuccess) return false;
 
     if (k::launch_recon_exl3_dense(args, d_dense, nullptr) != hipSuccess) return false;
@@ -132,7 +137,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     }
     if (ok) {
         args.output = d_dense_out;
-        ok = k::launch_epilogue_exl3_dense(args, d_xrot, d_accum, nullptr) == hipSuccess;
+        ok = k::launch_epilogue_exl3_dense(args, d_rowsum, d_accum, nullptr) == hipSuccess;
     }
     (void) hipblasLtMatmulPreferenceDestroy(pref);
     (void) hipblasLtMatrixLayoutDestroy(la);

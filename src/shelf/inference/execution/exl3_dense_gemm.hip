@@ -3,6 +3,7 @@
 #include <hipblaslt/hipblaslt.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace shelf::execution {
 namespace {
@@ -98,13 +99,17 @@ hipError_t exl3_dense_gemm(const shelf::kernel::Exl3GemmArgs& args, const void* 
     const hipblasLtMatmulAlgo_t* cached = find_algo(lt, args.rows, args.out_features, args.k);
     hipblasLtMatmulAlgo_t algo{};
     size_t workspace_size = 0u;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
     if (cached != nullptr) {
         algo = *cached;
     } else {
-        hipblasLtMatmulHeuristicResult_t result{};
+        constexpr int kCandidates = 16;
+        hipblasLtMatmulHeuristicResult_t results[kCandidates]{};
         int found = 0;
-        if (hipblasLtMatmulAlgoGetHeuristic(lt.handle, desc, la, lb, lc, lc, pref, 1,
-                                            &result, &found) != HIPBLAS_STATUS_SUCCESS ||
+        if (hipblasLtMatmulAlgoGetHeuristic(lt.handle, desc, la, lb, lc, lc, pref,
+                                            kCandidates, results, &found) !=
+                HIPBLAS_STATUS_SUCCESS ||
             found == 0) {
             (void) hipblasLtMatmulPreferenceDestroy(pref);
             (void) hipblasLtMatrixLayoutDestroy(la);
@@ -113,8 +118,55 @@ hipError_t exl3_dense_gemm(const shelf::kernel::Exl3GemmArgs& args, const void* 
             (void) hipblasLtMatmulDescDestroy(desc);
             return hipErrorNotSupported;
         }
-        algo = result.algo;
-        workspace_size = result.workspaceSize;
+        bool tuned = false;
+        static const bool tune_enabled = [] {
+            const char* e = std::getenv("SHELF_EXL3_DENSE_TUNE");
+            return e == nullptr || std::strtoul(e, nullptr, 10) != 0ul;
+        }();
+        if (tune_enabled && found > 1) {
+            double best_ms = 1.0e30;
+            int best = -1;
+            for (int i = 0; i < found; ++i) {
+                hipEvent_t start = nullptr;
+                hipEvent_t stop = nullptr;
+                if (hipEventCreate(&start) != hipSuccess ||
+                    hipEventCreate(&stop) != hipSuccess) {
+                    if (start != nullptr) (void) hipEventDestroy(start);
+                    if (stop != nullptr) (void) hipEventDestroy(stop);
+                    break;
+                }
+                hipblasStatus_t st = HIPBLAS_STATUS_SUCCESS;
+                float elapsed = 0.0f;
+                for (int rep = 0; rep < 2; ++rep) {
+                    (void) hipEventRecord(start, stream);
+                    st = hipblasLtMatmul(
+                        lt.handle, desc, &alpha, dense, la, args.xrot, lb, &beta, accum,
+                        lc, accum, lc, &results[i].algo, nullptr,
+                        results[i].workspaceSize, stream);
+                    (void) hipEventRecord(stop, stream);
+                    (void) hipEventSynchronize(stop);
+                    float rep_ms = 0.0f;
+                    (void) hipEventElapsedTime(&rep_ms, start, stop);
+                    if (rep == 0 || rep_ms < elapsed) elapsed = rep_ms;
+                }
+                (void) hipEventDestroy(start);
+                (void) hipEventDestroy(stop);
+                if (st != HIPBLAS_STATUS_SUCCESS) continue;
+                if (elapsed < best_ms) {
+                    best_ms = elapsed;
+                    best = i;
+                }
+            }
+            if (best >= 0) {
+                algo = results[best].algo;
+                workspace_size = results[best].workspaceSize;
+                tuned = true;
+            }
+        }
+        if (!tuned) {
+            algo = results[0].algo;
+            workspace_size = results[0].workspaceSize;
+        }
         store_algo(lt, args.rows, args.out_features, args.k, algo);
     }
 
@@ -129,8 +181,6 @@ hipError_t exl3_dense_gemm(const shelf::kernel::Exl3GemmArgs& args, const void* 
             return hipErrorOutOfMemory;
         }
     }
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
     const hipblasStatus_t status =
         hipblasLtMatmul(lt.handle, desc, &alpha, dense, la, args.xrot, lb, &beta, accum, lc,
                         accum, lc, &algo, workspace, workspace_size, stream);

@@ -193,24 +193,12 @@ __global__ __launch_bounds__(256) void recon_exl3_dense_kernel(Exl3GemmArgs args
 
 __global__ __launch_bounds__(256) void exl3_dense_epilogue_kernel(Exl3GemmArgs args,
                                                                   const float* accum,
-                                                                  const __half* xrot) {
+                                                                  const float* rowsum) {
     const uint32_t warp = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t row = blockIdx.x * 8u + warp;
     if (row >= args.rows) return;
-    float row_sum = 0.f;
-    for (uint32_t k = lane * 4u; k < args.k; k += 128u) {
-        const __half* p = xrot + static_cast<uint64_t>(row) * args.k + k;
-        row_sum += __half2float(p[0]) + __half2float(p[1]) + __half2float(p[2]) +
-                   __half2float(p[3]);
-    }
-    row_sum += __shfl_down(row_sum, 16, 32);
-    row_sum += __shfl_down(row_sum, 8, 32);
-    row_sum += __shfl_down(row_sum, 4, 32);
-    row_sum += __shfl_down(row_sum, 2, 32);
-    row_sum += __shfl_down(row_sum, 1, 32);
-    row_sum = __shfl_sync(0xFFFFFFFFull, row_sum, 0, 32);
-    const float bias = exl3_detail::kMul1BiasOverInv * row_sum;
+    const float bias = exl3_detail::kMul1BiasOverInv * rowsum[row];
     const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
     const uint16_t* svh = static_cast<const uint16_t*>(args.svh);
     const uint32_t n_blocks = args.out_features / 128u;
@@ -249,16 +237,18 @@ __global__ __launch_bounds__(256) void exl3_dense_epilogue_kernel(Exl3GemmArgs a
     }
 }
 
+template <bool kRowSum>
 __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* input,
                                                          const uint16_t* suh, __half* xrot,
                                                          uint32_t rows, uint32_t k,
-                                                         uint32_t stride) {
+                                                         uint32_t stride, float* rowsum) {
     const uint32_t row = blockIdx.x;
     if (row >= rows) return;
     const uint32_t tid = threadIdx.x;
     const uint32_t warp = tid >> 5u;
     const uint32_t lane = tid & 31u;
     const uint32_t kb_count = k / 128u;
+    float row_acc = 0.f;
     for (uint32_t kb = warp; kb < kb_count; kb += 8u) {
         const uint32_t k_base = kb * 128u;
         float suh_v[4];
@@ -273,11 +263,35 @@ __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* i
         float v2 = bf16_value(src + 2) * suh_v[2];
         float v3 = bf16_value(src + 3) * suh_v[3];
         exl3_detail::fwht128(v0, v1, v2, v3, lane);
+        const __half hv0 = __float2half(v0 * kInvSqrt128);
+        const __half hv1 = __float2half(v1 * kInvSqrt128);
+        const __half hv2 = __float2half(v2 * kInvSqrt128);
+        const __half hv3 = __float2half(v3 * kInvSqrt128);
         __half* dst = xrot + static_cast<uint64_t>(row) * k + k_base + lane * 4u;
-        dst[0] = __float2half(v0 * kInvSqrt128);
-        dst[1] = __float2half(v1 * kInvSqrt128);
-        dst[2] = __float2half(v2 * kInvSqrt128);
-        dst[3] = __float2half(v3 * kInvSqrt128);
+        dst[0] = hv0;
+        dst[1] = hv1;
+        dst[2] = hv2;
+        dst[3] = hv3;
+        if constexpr (kRowSum) {
+            row_acc += __half2float(hv0) + __half2float(hv1) + __half2float(hv2) +
+                       __half2float(hv3);
+        }
+    }
+    if constexpr (kRowSum) {
+        row_acc += __shfl_down(row_acc, 16, 32);
+        row_acc += __shfl_down(row_acc, 8, 32);
+        row_acc += __shfl_down(row_acc, 4, 32);
+        row_acc += __shfl_down(row_acc, 2, 32);
+        row_acc += __shfl_down(row_acc, 1, 32);
+        __shared__ float warp_sums[8];
+        if (lane == 0u) warp_sums[warp] = row_acc;
+        __syncthreads();
+        if (tid == 0u) {
+            float total = 0.f;
+#pragma unroll
+            for (uint32_t i = 0u; i < 8u; ++i) total += warp_sums[i];
+            rowsum[row] = total;
+        }
     }
 }
 
@@ -716,6 +730,15 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
     return launch_plan<false>(args, make_launch_plan(args), stream);
 }
 
+hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float* rowsum,
+                                     hipStream_t stream) {
+    rotate_exl3_kernel<true><<<dim3(args.rows), 256, 0, stream>>>(
+        static_cast<const shelf::bf16_t*>(args.input),
+        static_cast<const uint16_t*>(args.suh), static_cast<__half*>(xrot), args.rows,
+        args.k, args.input_row_stride, rowsum);
+    return hipGetLastError();
+}
+
 hipError_t launch_recon_exl3_dense(const Exl3GemmArgs& args, void* dense, hipStream_t stream) {
     if (args.trellis == nullptr || dense == nullptr) return hipErrorInvalidValue;
     if ((args.k % 16u) != 0u || (args.out_features % 16u) != 0u) {
@@ -730,23 +753,23 @@ hipError_t launch_recon_exl3_dense(const Exl3GemmArgs& args, void* dense, hipStr
     return hipGetLastError();
 }
 
-hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* xrot,
+hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* rowsum,
                                       const void* accum, hipStream_t stream) {
-    if (xrot == nullptr || accum == nullptr || args.output == nullptr) {
+    if (rowsum == nullptr || accum == nullptr || args.output == nullptr) {
         return hipErrorInvalidValue;
     }
     if ((args.out_features % 128u) != 0u) return hipErrorInvalidValue;
     const uint32_t blocks = (args.rows + 7u) / 8u;
     exl3_dense_epilogue_kernel<<<blocks, 256, 0, stream>>>(
-        args, static_cast<const float*>(accum), static_cast<const __half*>(xrot));
+        args, static_cast<const float*>(accum), static_cast<const float*>(rowsum));
     return hipGetLastError();
 }
 
 hipError_t launch_rotate_exl3(const Exl3GemmArgs& args, void* xrot, hipStream_t stream) {
-    rotate_exl3_kernel<<<dim3(args.rows), 256, 0, stream>>>(
+    rotate_exl3_kernel<false><<<dim3(args.rows), 256, 0, stream>>>(
         static_cast<const shelf::bf16_t*>(args.input),
         static_cast<const uint16_t*>(args.suh), static_cast<__half*>(xrot), args.rows,
-        args.k, args.input_row_stride);
+        args.k, args.input_row_stride, nullptr);
     return hipGetLastError();
 }
 

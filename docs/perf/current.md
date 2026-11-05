@@ -53,12 +53,11 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 20.41 / 20.44 / 20.75 tok/s（48.2〜48.9 µs/token） |
-| prefill 128 | 638.48 / 639.14 / 639.28 tok/s（1.564〜1.566 ms/token） |
-| prefill 256 | 797.15 / 798.88 / 799.12 tok/s（1.251〜1.254 ms/token） |
-| prefill 512 | 1113.59 / 1114.97 / 1115.79 tok/s（0.896〜0.898 ms/token） |
-| prefill 1024 | 1316.40 / 1317.99 / 1318.92 tok/s（0.758〜0.760 ms/token） |
-| prefill 2048 | 1423.09 / 1424.78 / 1425.86 tok/s（0.701〜0.703 ms/token） |
+| decode | 20.09 / 20.16 / 20.47 tok/s（48.9〜49.8 µs/token） |
+| prefill 128 | 632.98 / 633.17 / 636.39 tok/s（1.571〜1.580 ms/token） |
+| prefill 512 | 1096.12 / 1097.37 / 1104.84 tok/s（0.905〜0.912 ms/token） |
+| prefill 1024 | 1293.05 / 1295.17 / 1298.60 tok/s（0.770〜0.773 ms/token） |
+| prefill 2048 | 1389.53 / 1390.41 / 1398.79 tok/s（0.715〜0.719 ms/token） |
 
 - measurement revision: `96f5646`（prefill `rows >= 256` を dense recon + hipBLASLt に
   変更。`rows < 256`、decode、verify、LM-Head は融合 W16A16。以前の 2 N tile /

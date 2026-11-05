@@ -585,16 +585,20 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     const uint64_t dense_bytes = static_cast<uint64_t>(args.k) * args.out_features * 2u;
     const uint64_t accum_bytes = static_cast<uint64_t>(args.rows) * args.out_features * 4u;
     const bool use_dense = use_pre && ctx.exl3_dense != nullptr &&
-                           ctx.exl3_accum != nullptr && args.rows >= dense_min_rows &&
+                           ctx.exl3_accum != nullptr && ctx.exl3_rowsum != nullptr &&
+                           args.rows >= dense_min_rows &&
                            (args.out_features % 128u) == 0u &&
                            dense_bytes <= ctx.exl3_dense_bytes &&
-                           accum_bytes <= ctx.exl3_accum_bytes;
+                           accum_bytes <= ctx.exl3_accum_bytes &&
+                           static_cast<uint64_t>(args.rows) * sizeof(float) <=
+                               ctx.exl3_rowsum_bytes;
     hipError_t herr = hipSuccess;
     bool dense_done = false;
     if (use_dense) {
         ::shelf::kernel::Exl3GemmArgs dense_args = args;
         dense_args.xrot = ctx.exl3_xrot;
-        herr = ::shelf::kernel::launch_rotate_exl3(dense_args, ctx.exl3_xrot, stream);
+        herr = ::shelf::kernel::launch_rotate_exl3_rowsum(
+            dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum), stream);
         if (herr == hipSuccess) {
             herr = ::shelf::kernel::launch_recon_exl3_dense(dense_args, ctx.exl3_dense, stream);
         }
@@ -604,7 +608,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         }
         if (herr == hipSuccess) {
             herr = ::shelf::kernel::launch_epilogue_exl3_dense(
-                dense_args, ctx.exl3_xrot, ctx.exl3_accum, stream);
+                dense_args, ctx.exl3_rowsum, ctx.exl3_accum, stream);
         }
         dense_done = herr == hipSuccess;
     }

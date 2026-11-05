@@ -36,8 +36,10 @@ struct Exl3GemmArgs {
 
 hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream);
 hipError_t launch_rotate_exl3(const Exl3GemmArgs& args, void* xrot, hipStream_t stream);
+hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float* rowsum,
+                                     hipStream_t stream);
 hipError_t launch_recon_exl3_dense(const Exl3GemmArgs& args, void* dense, hipStream_t stream);
-hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* xrot,
+hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* rowsum,
                                       const void* accum, hipStream_t stream);
 hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xrot,
                                        hipStream_t stream);

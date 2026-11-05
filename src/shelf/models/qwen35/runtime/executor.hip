@@ -9,6 +9,7 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/runtime/program/program.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/core/gpu/cleanup.h>
@@ -243,8 +244,21 @@ Status build_host_execution_context(
         return Status::insufficient_memory("execution workspace too small for EXL3 accum",
                                            __FILE__, __LINE__);
     }
+    const uint64_t exl3_accum_bytes = runtime::exl3_dense_accum_bytes(
+        runtime::qwen35_padded_row_count(executor.config.max_batch_rows));
+    if (exl3_accum_offset + exl3_accum_bytes > workspace_bytes) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 accum",
+                                           __FILE__, __LINE__);
+    }
     ctx.exl3_accum = ws_base + exl3_accum_offset;
-    ctx.exl3_accum_bytes = workspace_bytes - exl3_accum_offset;
+    ctx.exl3_accum_bytes = exl3_accum_bytes;
+    const uint64_t exl3_rowsum_offset = (exl3_accum_offset + exl3_accum_bytes + 255ull) & ~255ull;
+    if (exl3_rowsum_offset >= workspace_bytes) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 rowsum",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_rowsum = ws_base + exl3_rowsum_offset;
+    ctx.exl3_rowsum_bytes = workspace_bytes - exl3_rowsum_offset;
     ctx.error_word = status_ptr;
     ctx.bucket_m = static_cast<uint32_t>(program.row_bucket);
     ctx.staging = executor.dispatch_staging;
@@ -2051,7 +2065,8 @@ Result<Executor> create_executor(
                                                      runtime::kDecodeAttnPartialBytes +
                                                      kExl3XrotBytes +
                                                      runtime::kExl3DenseBytes +
-                                                     exl3_accum_bytes;
+                                                     exl3_accum_bytes + Npad * sizeof(float) +
+                                                     512u;
             if (exec_workspace_bytes > 0) {
                 st = allocate_contiguous_tensor<uint8_t>(
                     arena, {exec_workspace_bytes}, ex.execution_workspace);
