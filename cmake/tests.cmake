@@ -141,6 +141,7 @@ shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cp
 shelf_add_test(NAME test_moe_config SOURCE unit/test_moe_config.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_model_identity SOURCE unit/test_model_identity.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_moe_weight_plan SOURCE unit/test_moe_weight_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe)
+shelf_add_test(NAME test_qwen35moe_tensor_parallel_plan SOURCE unit/test_qwen35moe_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_moe_expert_slice_fixture SOURCE unit/test_moe_expert_slice_fixture.cpp LABELS "cpu;required" TIMEOUT 120 LIBRARIES shelf_qwen35moe)
 shelf_add_test(NAME test_weight_slot_validation SOURCE unit/test_weight_slot_validation.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_qwen35moe shelf_qwen_hybrid shelf_core)
 shelf_add_test(NAME test_decode_perf_stats SOURCE unit/test_decode_perf_stats.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_inference_execution shelf_runtime)
@@ -297,6 +298,7 @@ add_custom_target(
         test_moe_config
         test_model_identity
         test_moe_weight_plan
+        test_qwen35moe_tensor_parallel_plan
         test_moe_expert_slice_fixture
         test_weight_slot_validation
         test_decode_perf_stats

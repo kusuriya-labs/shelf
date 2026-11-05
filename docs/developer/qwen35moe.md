@@ -161,14 +161,41 @@ Result<MoeExpertGroupWeights> load_moe_expert_group(
 - `logical_shape` / `k_padded` が plan の幾何と一致しない
 - codes / scale payload size が padded 幾何から求められる byte 数と一致しない
 - source の row range が行き先平面を超える
+- source の expert が plan の expert 範囲外（分割 plan の名前がその rank の範囲を指さない）
 - plan の `experts` と `sources` 数が一致しない
 - E8M0 byte 255（NaN）を含む平面
 
 `row_ref_exact` は平面単位で計算される。1 expert を単独で preshuffle した結果と
 byte 一致する（rank-3 でも fold band の判定は expert 毎）。
 
-MXFP4 の rank-3 (N-D) canonical partition / TP materialization は unsupported のまま
-（[tensor_partition.md](tensor_partition.md) §5）。
+### expert 軸の分割（rank あたりの平面）
+
+routed expert 平面は matrix axis を持たないため、`TensorPartitionPlan` では分割できない。
+分割は expert 軸そのもので、`MoeExpertGroupPlan` が持つ。
+
+```cpp
+// models/qwen35moe/weights/moe_weight_plan.h
+Result<MoeExpertGroupPlan> build_moe_expert_group_plan(
+    const Qwen35MoeTextConfig&, std::size_t layer, uint32_t tp_size, uint32_t tp_rank);
+```
+
+- `experts` はその plan が平面に持つ expert 数、`expert_begin` はその最初の global expert id、
+  `global_experts` は checkpoint の平面 depth であり router が top-k を選ぶ幅。
+  `experts * tp_size == global_experts` と `expert_begin == tp_rank * experts` が contract
+- `num_experts` が `tp_size` で割り切れない場合は `Status::unsupported`。分割は contiguous な
+  expert 範囲のみ（非均等な expert 配分は無い）
+- source の名前は global expert id を保つ（checkpoint の名前は global 単位）。集約時の
+  行き先 slot は `expert - expert_begin`
+- fused rank-3（MTP block）も同じ範囲で切る。checkpoint の tensor は `[global_experts][rows][cols]`
+  のまま読まれ、再量子化するのは所有範囲の expert だけ
+- 1 expert の layout（rows / cols / k_padded / batch stride / native preshuffle）は分割前後で
+  同一。したがって rank 平面を global 順に並べた byte 列は単一 GPU の平面と一致する
+  （`test_qwen35moe_model_load` が byte 一致で固定）
+
+routed MXFP4 expert は `materialize_rank_local_canonical` を通らない（MXFP4 の N-D canonical
+partition は今も unsupported。[tensor_partition.md](tensor_partition.md) §5）。分割は上の
+expert 軸で起き、matrix axis の分割は backbone と shared expert だけが使う
+（`build_qwen35moe_tensor_partition_plan`）。
 
 ## 4. 対象 checkpoint の幾何アンカー
 
@@ -318,7 +345,7 @@ checkpoint が `mtp.*` として持つ 1 層ぶんの transformer を読む。tr
 
 | 条件 | 結果 |
 | --- | --- |
-| `options.weights.partition_plan != nullptr` | `Status::unsupported`（rank-3 の TP partition は contract 外。§3） |
+| `options.weights.partition_plan != nullptr` | その rank の load。plan の `tp_size` / `tp_rank` が 2 未満なら `Status::invalid_argument`。backbone と shared expert は plan の matrix axis で分割、routed expert は expert 軸で分割（§3-1） |
 | MTP 層の要求で checkpoint に `mtp.*` が無い | reader の要求名前列が tensor 欠落で失敗する（block を無いものとして通さない） |
 | `mtp.present` のくに `mtp.fc` が `[hidden, 2 * hidden]` で無い / block norm が `[hidden]` で無い / body が full attention tensor を持たない / FFN が MTP plan と不一致 | `validate_qwen35moe_mtp_weights` の `Status::invalid_argument` |
 | Shelf quantized bundle（`shelf_quantization.json` がある dir） | `Status::unsupported`（MoE は HF real-quantized dir のみを読む） |
@@ -697,9 +724,11 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   `test_paged_attention_split_reduce_exact`（q_per_kv 6 / 8）が対にする（経緯と計測は
   `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md` と
   `docs/research/20261105/moe_fp8_kv.md`）
-- TP + MoE は §5 の受理条件で `unsupported`。`shelf-bench pp` と `shelf-bench quality` の
-  `--tensor-parallel 2` も `probe_model_dir` で dense のみを受理し、grouped expert checkpoint
-  では起動時に拒否する（深い地点で落ちない）
+- MoE の expert 軸分割は weight load まで配線済み（§3「expert 軸の分割」）。実行側は未配線で、
+  `LoadedModel::create_executor` が grouped expert と `tp_size > 1` を
+  `Status::unsupported`（"a model with grouped experts runs on one device"）で拒否する。
+  `shelf-bench pp` と `shelf-bench quality` の `--tensor-parallel 2` も `probe_model_dir` で
+  dense のみを受理し、grouped expert checkpoint では起動時に拒否する（深い地点で落ちない）
 - pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
   しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
   grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に

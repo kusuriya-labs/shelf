@@ -85,7 +85,9 @@ Status load_moe_mtp(gpu::GpuArena& arena, hipStream_t stream,
                     const Qwen35MoeTextConfig& config,
                     const qhy::HybridLoadOptions& options,
                     Qwen35MoeMtpWeights& m) {
-    auto plan = build_moe_mtp_expert_group_plan(config);
+    auto plan = build_moe_mtp_expert_group_plan(
+        config, options.weights.partition_plan ? options.weights.partition_plan->tp_size : 1u,
+        options.weights.partition_plan ? options.weights.partition_plan->tp_rank : 0u);
     if (!plan.ok()) return plan.status();
     const MoeExpertGroupPlan& group = plan.value();
 
@@ -202,11 +204,17 @@ uint64_t moe_expert_group_bytes(const MoeExpertGroupPlan& plan) {
 
 Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& plan,
                              const MoeFfnConfig& ffn) {
-    if (plan.experts != ffn.num_experts ||
+    if (plan.global_experts != ffn.num_experts ||
         plan.w13_gate_rows != ffn.moe_intermediate_size ||
         plan.w13_up_rows != ffn.moe_intermediate_size)
         return Status::invalid_argument(
             "moe plan: expert group geometry differs from the config", __FILE__, __LINE__);
+    if (plan.tp_size == 0u || plan.tp_rank >= plan.tp_size ||
+        plan.experts * plan.tp_size != plan.global_experts ||
+        plan.expert_begin != plan.tp_rank * plan.experts)
+        return Status::invalid_argument(
+            "moe plan: the expert range does not split the config's expert count", __FILE__,
+            __LINE__);
 
     Status st = check_plane(w.expert_w13, plan.experts, plan.w13_rows, plan.w13_cols,
                             plan.w13_k_padded, plan.w13_codes_row_stride_bytes,
@@ -220,29 +228,38 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
     if (!st.ok()) return st;
 
     const uint32_t hidden = plan.w13_cols;
-    if (w.router.rows != plan.experts || w.router.cols != hidden)
+    // The router selects over every expert of the config on every rank: a rank that owned
+    // only its own slice of the logits would select a different set of experts.
+    if (w.router.rows != plan.global_experts || w.router.cols != hidden)
         return Status::invalid_argument(
-            "moe router: shape is not [experts, hidden]", __FILE__, __LINE__);
+            "moe router: shape is not [global experts, hidden]", __FILE__, __LINE__);
     if (w.shared_gate.rows != 1u || w.shared_gate.cols != hidden)
         return Status::invalid_argument(
             "moe shared_expert_gate: shape is not [1, hidden]", __FILE__, __LINE__);
 
     // The shared expert has its own width: config shared_expert_intermediate_size, which a
-    // checkpoint may set differently from the routed moe_intermediate_size.
+    // checkpoint may set differently from the routed moe_intermediate_size. It divides
+    // across ranks the way a dense FFN does.
     const uint32_t shared_inter =
         static_cast<uint32_t>(ffn.shared_expert_intermediate_size);
-    if (w.shared_gate_proj.rows != shared_inter || w.shared_gate_proj.cols != hidden ||
-        w.shared_up_proj.rows != shared_inter || w.shared_up_proj.cols != hidden ||
-        w.shared_down_proj.rows != hidden || w.shared_down_proj.cols != shared_inter)
+    if (shared_inter == 0u || (shared_inter % plan.tp_size) != 0u)
         return Status::invalid_argument(
-            "moe shared expert: shapes are not [shared_inter, hidden] / [hidden, "
-            "shared_inter]",
+            "moe shared expert: shared_expert_intermediate_size must divide by tp_size",
+            __FILE__, __LINE__);
+    const uint32_t local_shared_inter = shared_inter / plan.tp_size;
+    if (w.shared_gate_proj.rows != local_shared_inter || w.shared_gate_proj.cols != hidden ||
+        w.shared_up_proj.rows != local_shared_inter || w.shared_up_proj.cols != hidden ||
+        w.shared_down_proj.rows != hidden || w.shared_down_proj.cols != local_shared_inter)
+        return Status::invalid_argument(
+            "moe shared expert: shapes are not [local shared_inter, hidden] / [hidden, "
+            "local shared_inter]",
             __FILE__, __LINE__);
     return Status::make_ok();
 }
 
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
-                                  const Qwen35MoeTextConfig& config) {
+                                  const Qwen35MoeTextConfig& config, std::uint32_t tp_size,
+                                  std::uint32_t tp_rank) {
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument(
             "Qwen35MoeModel: layer count does not match the config",
@@ -255,16 +272,21 @@ Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
     for (std::size_t l = 0; l < weights.layers.size(); ++l) {
         st = qhy::validate_hybrid_layer_body(weights.layers[l], config, l);
         if (!st.ok()) return st;
-        auto plan = build_moe_expert_group_plan(config, l);
+        auto plan = build_moe_expert_group_plan(config, l, tp_size, tp_rank);
         if (!plan.ok()) return plan.status();
         st = moe_ffn_weights_match(weights.layers[l].ffn, plan.value(), config.ffn);
         if (!st.ok()) return st;
     }
 
     if (!weights.mtp.present) return Status::make_ok();
-    auto mtp_plan = build_moe_mtp_expert_group_plan(config);
+    auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
     if (!mtp_plan.ok()) return mtp_plan.status();
     return validate_qwen35moe_mtp_weights(weights.mtp, mtp_plan.value(), config);
+}
+
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                  const Qwen35MoeTextConfig& config) {
+    return validate_qwen35moe_weights(weights, config, 1u, 0u);
 }
 
 Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
@@ -272,11 +294,18 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     gpu::GpuArena& arena,
     hipStream_t stream,
     const Qwen35MoeLoadOptions& options) {
-    if (options.weights.partition_plan != nullptr) {
-        return Status::unsupported(
-            "qwen35moe single-GPU weight load does not accept a tensor partition plan",
-            __FILE__, __LINE__);
+    const shelf::weights::TensorPartitionPlan* partition = options.weights.partition_plan;
+    if (partition != nullptr) {
+        Status plan_valid = shelf::weights::validate_tensor_partition_plan(*partition);
+        if (!plan_valid.ok()) return plan_valid;
+        if (partition->tp_size < 2u) {
+            return Status::invalid_argument(
+                "qwen35moe weight load: a tensor partition plan requires tp_size >= 2",
+                __FILE__, __LINE__);
+        }
     }
+    const uint32_t tp_size = partition != nullptr ? partition->tp_size : 1u;
+    const uint32_t tp_rank = partition != nullptr ? partition->tp_rank : 0u;
     if (fs::exists(fs::path(model_dir) / qqm::kQuantizedMetadataFile)) {
         return Status::unsupported(
             "qwen35moe reads an HF real-quantized model dir only: rank-3 expert planes are "
@@ -292,7 +321,7 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     std::vector<MoeExpertGroupPlan> plans;
     plans.reserve(config.num_hidden_layers);
     for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
-        auto plan = build_moe_expert_group_plan(config, l);
+        auto plan = build_moe_expert_group_plan(config, l, tp_size, tp_rank);
         if (!plan.ok()) return plan.status();
         const std::vector<std::string> layer_names = moe_layer_logical_names(plan.value());
         names.insert(names.end(), layer_names.begin(), layer_names.end());
@@ -300,7 +329,7 @@ Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     }
 
     if (options.load_mtp_layers) {
-        auto mtp_plan = build_moe_mtp_expert_group_plan(config);
+        auto mtp_plan = build_moe_mtp_expert_group_plan(config, tp_size, tp_rank);
         if (!mtp_plan.ok()) return mtp_plan.status();
         const std::vector<std::string> ffn_names = moe_layer_logical_names(mtp_plan.value());
         names.insert(names.end(), ffn_names.begin(), ffn_names.end());

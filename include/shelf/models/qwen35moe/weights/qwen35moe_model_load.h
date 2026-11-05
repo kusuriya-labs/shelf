@@ -77,6 +77,14 @@ Status moe_ffn_weights_match(const MoeFfnWeights& w, const MoeExpertGroupPlan& p
 Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
                                  const Qwen35MoeTextConfig& config);
 
+// The same invariants for one rank of an expert-axis split: the routed expert planes carry
+// config.ffn.num_experts / tp_size experts, the shared expert is tp_size times narrower, and
+// the router keeps the whole expert count.
+Status validate_qwen35moe_weights(const Qwen35MoeModelWeights& weights,
+                                 const Qwen35MoeTextConfig& config,
+                                 std::uint32_t tp_size,
+                                 std::uint32_t tp_rank);
+
 // The MTP block's own invariants: fc is [hidden, 2 * hidden], the three block norms are
 // [hidden], its layer is a full-attention body, and its FFN matches the MTP plan (the
 // checkpoint keeps those experts fused, so their planes are requantized on load).
@@ -88,6 +96,11 @@ Status validate_qwen35moe_mtp_weights(const Qwen35MoeMtpWeights& mtp,
 // layer's routed experts as rank-3 native SoA planes plus its router and shared expert.
 // Only an HF real-quantized model dir is read; a Shelf quantized bundle is rejected
 // because rank-3 canonical partitions are not part of that contract.
+//
+// With options.weights.partition_plan the load is one rank of a split: the plan carries
+// tp_size / tp_rank, the backbone and the shared expert are cut along their matrix axes by
+// that plan, and the routed experts are cut along the expert axis. The router and the
+// shared-expert gate stay whole on every rank.
 Result<Qwen35MoeModelWeights> load_qwen35moe_weights(
     const std::string& model_dir,
     gpu::GpuArena& arena,

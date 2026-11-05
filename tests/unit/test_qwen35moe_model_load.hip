@@ -4,6 +4,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
+#include <shelf/models/qwen35moe/weights/moe_tensor_parallel_plan.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 
 #include <hip/hip_runtime.h>
@@ -12,11 +13,13 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -44,6 +47,19 @@ bool message_contains(const shelf::Status& st, const std::string& needle) {
 std::uint64_t plane_bytes(const shelf::weights::MatrixWeight& w) {
     return static_cast<std::uint64_t>(w.codes.allocation_bytes() + w.scales.allocation_bytes() +
                                       w.row_ref.allocation_bytes());
+}
+
+// Device bytes of one resident plane, read back for byte-level comparison.
+std::vector<std::uint8_t> take(const shelf::gpu::Tensor& t, std::size_t offset,
+                               std::size_t bytes) {
+    std::vector<std::uint8_t> host(bytes, 0u);
+    if (bytes == 0)
+        return host;
+    if (hipMemcpy(host.data(), t.data<std::uint8_t>() + offset, bytes,
+                  hipMemcpyDeviceToHost) != hipSuccess) {
+        check(false, "device to host copy");
+    }
+    return host;
 }
 
 // A config-only directory: enough for the probes and for the config-level rejections,
@@ -222,6 +238,109 @@ int main() {
                     static_cast<unsigned long long>(expert_bytes));
         check(moe::validate_qwen35moe_weights(w, f.config).ok(),
               "the MoE model passes its own invariants");
+    }
+
+    {
+        // One rank of an expert-axis split: the routed experts divide along the expert axis,
+        // the shared expert and the backbone divide along their matrix axes, and the router
+        // stays whole. A rank's expert bytes must be the same bytes the whole load holds for
+        // the experts that rank owns.
+        const std::size_t whole_layers = loaded.ok() ? loaded.value().layers.size() : 0u;
+        auto rank_plan = moe::build_qwen35moe_tensor_partition_plan(f.config, 2, 1);
+        check(rank_plan.ok(), "a rank's MoE partition plan builds");
+        if (rank_plan.ok()) {
+            check(rank_plan.value().tensors.count(
+                      "model.language_model.layers.0.mlp.gate.weight") == 0,
+                  "the router stays out of the partition plan");
+            moe::Qwen35MoeLoadOptions rank_opts;
+            rank_opts.weights.partition_plan = &rank_plan.value();
+            auto rank = moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream,
+                                                    rank_opts);
+            check(rank.ok(), "one rank of an expert-axis split loads");
+            if (!rank.ok())
+                std::printf("FAIL %s\n", rank.status().message().c_str());
+            if (rank.ok() && whole_layers == rank.value().layers.size()) {
+                const moe::Qwen35MoeModelWeights& r = rank.value();
+                const moe::Qwen35MoeModelWeights& g = loaded.value();
+                check(moe::validate_qwen35moe_weights(r, f.config, 2u, 1u).ok(),
+                      "a rank's weights pass the rank invariants");
+                check(!moe::validate_qwen35moe_weights(r, f.config).ok(),
+                      "a rank's weights do not pass the whole-model invariants");
+                check(r.embed_tokens.rows == kVocab && r.lm_head.rows == kVocab / 2u,
+                      "a rank embeds the whole vocab and holds half the lm_head");
+                for (std::size_t l = 0; l < r.layers.size(); ++l) {
+                    const std::string tag = "rank layer " + std::to_string(l);
+                    const moe::MoeFfnWeights& rf = r.layers[l].ffn;
+                    const moe::MoeFfnWeights& gf = g.layers[l].ffn;
+                    check(rf.router.rows == kExperts && rf.router.cols == kHidden,
+                          tag + ": the router keeps every expert on every rank");
+                    check(rf.shared_gate.rows == 1u, tag + ": the shared expert gate stays whole");
+                    check(rf.shared_gate_proj.rows == kInter / 2u &&
+                              rf.shared_up_proj.rows == kInter / 2u &&
+                              rf.shared_down_proj.cols == kInter / 2u,
+                          tag + ": the shared expert is half as wide");
+                    check(rf.shared_gate_proj.partition.has_value() &&
+                              rf.shared_gate_proj.partition->axis == 0 &&
+                              rf.shared_gate_proj.partition->index == 1u &&
+                              rf.shared_down_proj.partition.has_value() &&
+                              rf.shared_down_proj.partition->axis == 1,
+                          tag + ": the shared expert carries its partition");
+                    check(r.layers[l].attn_in_proj_qkv.partition.has_value() ||
+                              r.layers[l].attn_q_proj.partition.has_value(),
+                          tag + ": the backbone projection is partitioned");
+
+                    const std::uint32_t owned = kExperts / 2u;
+                    for (const auto& pair : {std::pair<const shelf::weights::MatrixWeight*,
+                                                       const shelf::weights::MatrixWeight*>{
+                                                 &rf.expert_w13, &gf.expert_w13},
+                                             {&rf.expert_w2, &gf.expert_w2}}) {
+                        const shelf::weights::MatrixWeight& rw = *pair.first;
+                        const shelf::weights::MatrixWeight& gw = *pair.second;
+                        check(rw.experts == owned && gw.experts == kExperts,
+                              tag + ": the rank plane holds its own experts only");
+                        check(rw.codes_batch_stride_bytes == gw.codes_batch_stride_bytes &&
+                                  rw.scales_batch_stride_bytes == gw.scales_batch_stride_bytes &&
+                                  rw.rows == gw.rows && rw.cols == gw.cols &&
+                                  rw.k_padded == gw.k_padded,
+                              tag + ": per-expert layout is unchanged by the split");
+                        bool bytes_ok = true;
+                        for (std::uint32_t e = 0; e < owned; ++e) {
+                            const std::uint32_t global_e = kExperts / 2u + e;
+                            if (std::memcmp(take(rw.codes, e * rw.codes_batch_stride_bytes,
+                                                 rw.codes_batch_stride_bytes)
+                                                .data(),
+                                            take(gw.codes, global_e * gw.codes_batch_stride_bytes,
+                                                 gw.codes_batch_stride_bytes)
+                                                .data(),
+                                            rw.codes_batch_stride_bytes) != 0)
+                                bytes_ok = false;
+                            if (std::memcmp(take(rw.scales, e * rw.scales_batch_stride_bytes,
+                                                 rw.scales_batch_stride_bytes)
+                                                .data(),
+                                            take(gw.scales, global_e * gw.scales_batch_stride_bytes,
+                                                 gw.scales_batch_stride_bytes)
+                                                .data(),
+                                            rw.scales_batch_stride_bytes) != 0)
+                                bytes_ok = false;
+                            const std::size_t ref_bytes = rw.rows;
+                            if (std::memcmp(take(rw.row_ref, static_cast<std::size_t>(e) * ref_bytes,
+                                                 ref_bytes)
+                                                .data(),
+                                            take(gw.row_ref, static_cast<std::size_t>(global_e) *
+                                                                 ref_bytes,
+                                                 ref_bytes)
+                                                .data(),
+                                            ref_bytes) != 0)
+                                bytes_ok = false;
+                        }
+                        check(bytes_ok, tag + ": the rank's expert bytes equal the whole model's");
+                    }
+                    std::printf("rank1 layer %zu: experts=%u w13 rows=%u shared rows=%u q rows=%u\n",
+                                l, rf.expert_w13.experts, rf.expert_w13.rows,
+                                rf.shared_gate_proj.rows, r.layers[l].attn_q_proj.rows);
+                }
+            }
+        }
     }
 
     {

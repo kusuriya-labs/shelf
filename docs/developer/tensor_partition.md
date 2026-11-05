@@ -287,26 +287,30 @@ local_shape = [256, 1280, 2560]
 
 descriptor と N-D slicing は 3D tensor を扱える
 （`tests/unit/test_canonical_partition.cpp` の 3D case）。
+ただし **routed expert 平面の分割はここを通さない**。MXFP4 の N-D canonical partition は
+今も `Status::unsupported` で、Qwen3.5 MoE は expert 軸を `MoeExpertGroupPlan` の
+`expert_begin` / `experts` で切る。matrix axis の partition descriptor は backbone と
+shared expert、そして dense FFN が使う（正本は
+[qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
 
 ## 11. 現在の runtime で未対応のもの
 
-**current runtime は Multi-GPU execution を実装していない。**
-partition metadata の導入は weight materialization 基盤であり、
-TP / EP 対応済みを意味しない。
+partition metadata の導入は weight materialization 基盤であり、それ自体は分散実行の
+対応完了を意味しない。dense の TP=2 execution は
+[tensor_parallel_execution.md](tensor_parallel_execution.md) に実装済みで、その局所 geometry は
+plan から来る。現在も未対応なものは以下。
 
-- Qwen35 top-level の weight load path（`load_qwen35_weights_from_*`）は
+- 単一 GPU の weight load path（`load_qwen35_weights_from_*`）は
   `WeightLoadOptions.partition_plan` が非 nullptr なら
-  `Status::unsupported` で停止する
-  （現行 lowering / `validate_matrix` は global geometry を前提とするため）。
-  multi-GPU Executor / TP graph が lowering を local geometry に対応させた後にのみ、
-  この guard を外す。
-- generic weight loader（`load_quantized_matrix`）では partition を動作・検証できる。
-  `generic weight partition support = 完成`、
-  `Qwen35 multi-GPU execution = 未完成` である。
-- embedding / lm_head / norm / q_norm / k_norm / GDN norm / MTP は replicated
-  （partition plan に entry を作らない）。
-- `linear_attn.dt_bias` / `A_log` は value-head 単位の partition を
-  plan 上で表現できるが、GPU runtime 側の対応は未実装である。
+  `Status::unsupported` で停止する。partition を受け付けるのは tensor parallel の rank load
+  （`load_qwen35_weights_tensor_parallel_rank`）と MoE の rank load のみ
+- MXFP4 の N-D canonical partition（`materialize_rank_local_canonical`）は `unsupported`
+- `QuantizedModelReader` 側の rank-3 payload（fused expert 平面）は partition descriptor を
+  作らない。expert 範囲で絞るのは plan の責任
+- MTP block は partition しない（plan に entry を作らない）
+- `tp_size > 2` の execution は `TpCoordinator` が `unsupported` で拒否する
+- embedding と norm、router（`mlp.gate.weight`）、`mlp.shared_expert_gate.weight` は
+  replicated（partition plan に entry を作らない）
 
 ## 12. transport から独立
 

@@ -241,6 +241,7 @@ set(
     src/shelf/models/common/qwen_hybrid/weight_loader.cpp
     src/shelf/models/common/qwen_hybrid/weight_validation.cpp
     src/shelf/models/common/qwen_hybrid/weight_slot.cpp
+    src/shelf/models/common/qwen_hybrid/tensor_partition.cpp
 )
 
 add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
@@ -267,6 +268,7 @@ set(
     src/shelf/models/qwen35moe/model/qwen35moe_model.cpp
     src/shelf/models/qwen35moe/weights/moe_weight_plan.cpp
     src/shelf/models/qwen35moe/weights/moe_expert_load.cpp
+    src/shelf/models/qwen35moe/weights/moe_tensor_parallel_plan.cpp
     src/shelf/models/qwen35moe/weights/qwen35moe_model_load.cpp
 )
 

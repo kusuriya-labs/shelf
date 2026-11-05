@@ -130,6 +130,72 @@ int main() {
         check(moe_expert_tensor_count(dense) == 0u, "a dense config has no expert tensors");
     }
     {
+        // An expert-axis split: one rank owns a contiguous range of the expert axis, the
+        // plane depth shrinks and the source names keep the global expert ids.
+        auto r0 = build_moe_expert_group_plan(cfg, 3, 2, 0);
+        auto r1 = build_moe_expert_group_plan(cfg, 3, 2, 1);
+        check(r0.ok() && r1.ok(), "both ranks of a 2-way expert split have a plan");
+        const auto& a = r0.value();
+        const auto& b = r1.value();
+        check(a.experts == 128u && a.expert_begin == 0u && a.global_experts == 256u,
+              "rank 0 holds the first half of the expert axis");
+        check(b.experts == 128u && b.expert_begin == 128u && b.global_experts == 256u,
+              "rank 1 holds the second half");
+        check(a.tp_size == 2u && a.tp_rank == 0u && b.tp_rank == 1u,
+              "the plan carries the split it was built for");
+        check(a.layer == 3u && b.layer == 3u, "the split keeps the layer");
+        check(a.w13_codes_bytes * 2u == p.w13_codes_bytes &&
+                  a.w13_scales_bytes * 2u == p.w13_scales_bytes &&
+                  a.w2_codes_bytes * 2u == p.w2_codes_bytes &&
+                  a.w2_scales_bytes * 2u == p.w2_scales_bytes,
+              "each rank's planes are half the depth, per-expert geometry unchanged");
+        check(a.w13_rows == p.w13_rows && a.w13_k_padded == p.w13_k_padded &&
+                  a.w13_codes_batch_stride_bytes == p.w13_codes_batch_stride_bytes,
+              "the split does not change one expert's layout");
+        check(a.sources.size() == 128u * 3u && b.sources.size() == 128u * 3u,
+              "sources enumerate only the owned experts");
+        check(a.sources.front().name ==
+                  "model.language_model.layers.3.mlp.experts.0.down_proj.weight",
+              "rank 0's first source is global expert 0");
+        check(b.sources.front().name ==
+                  "model.language_model.layers.3.mlp.experts.128.down_proj.weight",
+              "rank 1's first source keeps the global expert id 128");
+        check(b.sources.back().name ==
+                  "model.language_model.layers.3.mlp.experts.255.up_proj.weight",
+              "rank 1's last source is the last expert of the config");
+        bool in_range = true;
+        for (const auto& src : b.sources) {
+            if (src.expert < b.expert_begin || src.expert >= b.expert_begin + b.experts)
+                in_range = false;
+        }
+        check(in_range, "every source of a rank plan is inside that rank's expert range");
+
+        auto whole = build_moe_expert_group_plan(cfg, 3);
+        check(whole.ok() && whole.value().expert_begin == 0u &&
+                  whole.value().experts == whole.value().global_experts &&
+                  whole.value().tp_size == 1u,
+              "without a split the plan owns every expert");
+
+        Qwen35MoeTextConfig odd = moe_config();
+        odd.ffn.num_experts = 253;
+        check(!build_moe_expert_group_plan(odd, 0, 2, 0).ok(),
+              "an expert count that does not divide by tp_size has no split plan");
+        check(!build_moe_expert_group_plan(cfg, 0, 0, 0).ok(), "tp_size 0 is rejected");
+        check(!build_moe_expert_group_plan(cfg, 0, 2, 2).ok(), "tp_rank >= tp_size is rejected");
+    }
+    {
+        auto mtp = build_moe_mtp_expert_group_plan(cfg, 2, 1);
+        check(mtp.ok(), "the MTP block's fused planes split too");
+        if (mtp.ok()) {
+            check(mtp.value().fused_rank3 && mtp.value().experts == 128u &&
+                      mtp.value().expert_begin == 128u && mtp.value().sources.empty(),
+                  "the MTP split keeps the fused plane names and the rank's expert range");
+            check(mtp.value().w13_name == "mtp.layers.0.mlp.experts.gate_up_proj" &&
+                      mtp.value().w2_name == "mtp.layers.0.mlp.experts.down_proj",
+                  "the MTP fused plane names are unchanged by the split");
+        }
+    }
+    {
         check(!build_moe_expert_group_plan(cfg, cfg.num_hidden_layers).ok(),
               "layer out of range is rejected");
         Qwen35MoeTextConfig odd = moe_config();

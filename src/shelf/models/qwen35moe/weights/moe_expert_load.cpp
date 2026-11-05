@@ -105,7 +105,14 @@ Status gather_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan
             return Status::invalid_argument(
                 ("moe expert scale payload size mismatch: " + src.name).c_str(), __FILE__, __LINE__);
         }
-        const uint64_t row_base = static_cast<uint64_t>(src.expert) * out.rows + src.row_offset;
+        if (src.expert < plan.expert_begin ||
+            src.expert >= plan.expert_begin + plan.experts) {
+            return Status::invalid_argument(
+                ("moe expert source outside the plan's expert range: " + src.name).c_str(),
+                __FILE__, __LINE__);
+        }
+        const uint64_t local_expert = src.expert - plan.expert_begin;
+        const uint64_t row_base = local_expert * out.rows + src.row_offset;
         std::memcpy(out.codes.data() + row_base * packed_k, v.codes.data,
                     static_cast<std::size_t>(codes_want));
         std::memcpy(out.scales.data() + row_base * out.scale_k, v.metadata1.data,
@@ -136,13 +143,13 @@ Status gather_fused_plane(const QuantizedModelReader& reader, const MoeExpertGro
             ("moe fused expert tensor is not bf16: " + name).c_str(), __FILE__, __LINE__);
     }
     if (v.logical_shape.size() != 3u ||
-        static_cast<uint64_t>(v.logical_shape[0]) != plan.experts ||
+        static_cast<uint64_t>(v.logical_shape[0]) != plan.global_experts ||
         static_cast<uint64_t>(v.logical_shape[1]) != out.rows ||
         static_cast<uint64_t>(v.logical_shape[2]) != out.cols) {
         return Status::invalid_argument(
             ("moe fused expert logical shape mismatch: " + name).c_str(), __FILE__, __LINE__);
     }
-    const uint64_t elements = static_cast<uint64_t>(plan.experts) * out.rows * out.cols;
+    const uint64_t elements = static_cast<uint64_t>(plan.global_experts) * out.rows * out.cols;
     if (v.data.data == nullptr || v.data.size != elements * 2u) {
         return Status::invalid_argument(
             ("moe fused expert payload size mismatch: " + name).c_str(), __FILE__, __LINE__);
@@ -151,16 +158,17 @@ Status gather_fused_plane(const QuantizedModelReader& reader, const MoeExpertGro
     const auto* src = static_cast<const uint16_t*>(v.data.data);
     const std::size_t expert_elements = static_cast<std::size_t>(out.rows) * out.cols;
     std::vector<float> stage(expert_elements);
-    for (uint32_t e = 0; e < plan.experts; ++e) {
-        const uint64_t base = static_cast<uint64_t>(e) * expert_elements;
+    for (uint32_t local = 0; local < plan.experts; ++local) {
+        const uint64_t global = static_cast<uint64_t>(plan.expert_begin) + local;
+        const uint64_t base = global * expert_elements;
         for (std::size_t i = 0; i < expert_elements; ++i) {
             const uint32_t bits = static_cast<uint32_t>(src[base + i]) << 16;
             std::memcpy(&stage[i], &bits, sizeof(bits));
         }
         shelf::quantization::mxfp4::quantize_mxfp4_matrix(
             stage.data(), out.cols, out.rows, out.cols, out.k_padded,
-            out.codes.data() + static_cast<std::size_t>(e) * expert_codes,
-            out.scales.data() + static_cast<std::size_t>(e) * expert_scales);
+            out.codes.data() + static_cast<std::size_t>(local) * expert_codes,
+            out.scales.data() + static_cast<std::size_t>(local) * expert_scales);
     }
     return Status::make_ok();
 }

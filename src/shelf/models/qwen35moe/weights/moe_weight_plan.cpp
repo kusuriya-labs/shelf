@@ -65,7 +65,9 @@ std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
 }
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
-                                                        std::size_t layer) {
+                                                        std::size_t layer,
+                                                        uint32_t tp_size,
+                                                        uint32_t tp_rank) {
     if (config.ffn.num_experts == 0)
         return Status::unsupported(
             "build_moe_expert_group_plan: num_experts is 0 (not a MoE config)",
@@ -73,6 +75,14 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     if (layer >= config.num_hidden_layers)
         return Status::invalid_argument(
             "build_moe_expert_group_plan: layer out of range", __FILE__, __LINE__);
+    if (tp_size == 0 || tp_rank >= tp_size)
+        return Status::invalid_argument(
+            "build_moe_expert_group_plan: tp_size / tp_rank out of range", __FILE__, __LINE__);
+    const uint32_t global_experts = static_cast<uint32_t>(config.ffn.num_experts);
+    if (global_experts % tp_size != 0u)
+        return Status::unsupported(
+            "build_moe_expert_group_plan: num_experts must divide by tp_size", __FILE__,
+            __LINE__);
 
     const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
     const uint32_t inter = static_cast<uint32_t>(config.ffn.moe_intermediate_size);
@@ -84,7 +94,11 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     MoeExpertGroupPlan plan;
     plan.layer = static_cast<uint32_t>(layer);
     plan.mlp_prefix = moe_mlp_prefix(layer);
-    plan.experts = static_cast<uint32_t>(config.ffn.num_experts);
+    plan.experts = global_experts / tp_size;
+    plan.expert_begin = tp_rank * plan.experts;
+    plan.global_experts = global_experts;
+    plan.tp_size = tp_size;
+    plan.tp_rank = tp_rank;
     plan.scale_block_k = kMxScaleBlockK;
 
     plan.w13_rows = 2u * inter;
@@ -132,7 +146,7 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     plan.w2_row_ref_bytes_per_expert = plan.w2_rows;
 
     plan.sources.reserve(static_cast<std::size_t>(plan.experts) * 3u);
-    for (uint32_t e = 0; e < plan.experts; ++e) {
+    for (uint32_t e = plan.expert_begin; e < plan.expert_begin + plan.experts; ++e) {
         add_source(plan, e, MoeExpertProjection::Down, "down_proj", 0u, plan.w2_rows);
         add_source(plan, e, MoeExpertProjection::Gate, "gate_proj", 0u, inter);
         add_source(plan, e, MoeExpertProjection::Up, "up_proj", inter, inter);
@@ -140,20 +154,32 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
     return plan;
 }
 
-Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config) {
+Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                        std::size_t layer) {
+    return build_moe_expert_group_plan(config, layer, 1u, 0u);
+}
+
+Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                            uint32_t tp_size,
+                                                            uint32_t tp_rank) {
     if (config.num_hidden_layers == 0u)
         return Status::invalid_argument(
             "build_moe_mtp_expert_group_plan: the config has no layer geometry", __FILE__,
             __LINE__);
-    auto plan = build_moe_expert_group_plan(config, 0u);
+    auto plan = build_moe_expert_group_plan(config, 0u, tp_size, tp_rank);
     if (!plan.ok()) return plan;
     MoeExpertGroupPlan& out = plan.value();
+    out.layer = 0u;
     out.fused_rank3 = true;
     out.mlp_prefix = moe_mtp_mlp_prefix();
     out.w13_name = out.mlp_prefix + "experts.gate_up_proj";
     out.w2_name = out.mlp_prefix + "experts.down_proj";
     out.sources.clear();
     return plan;
+}
+
+Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config) {
+    return build_moe_mtp_expert_group_plan(config, 1u, 0u);
 }
 
 }  // namespace shelf::qwen35moe

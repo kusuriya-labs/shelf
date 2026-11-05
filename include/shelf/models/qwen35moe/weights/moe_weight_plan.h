@@ -32,7 +32,17 @@ struct MoeExpertTensorSource {
 // per one expert unless the name says otherwise.
 struct MoeExpertGroupPlan {
     uint32_t layer = 0;
+    // Experts this plan's planes hold. Without a split it is every expert of the config;
+    // with an expert-axis split it is one rank's contiguous range, named by expert_begin.
     uint32_t experts = 0;
+    uint32_t expert_begin = 0;
+    // The expert count the router selects over. It is the whole config count whatever the
+    // split is, and it is what the checkpoint's own plane depth is.
+    uint32_t global_experts = 0;
+    // The split this plan was built for. The shared expert divides the way a dense FFN
+    // does, so the plan carries the width to check it against.
+    uint32_t tp_size = 1;
+    uint32_t tp_rank = 0;
     uint32_t scale_block_k = 0;
 
     // Checkpoint location of this group's FFN tensors: "<layer prefix>mlp.". It is not a
@@ -101,8 +111,20 @@ std::string moe_expert_tensor_name(const std::string& mlp, uint32_t expert,
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer);
 
+// The same plan for one rank of an expert-axis split: the rank owns the contiguous expert
+// range [tp_rank * experts/tp_size, ...), and `experts` counts that range. The plane depth
+// a checkpoint stores stays the global count, which the plan keeps as global_experts.
+// num_experts must divide by tp_size.
+Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                        std::size_t layer,
+                                                        uint32_t tp_size,
+                                                        uint32_t tp_rank);
+
 // The MTP block's routed experts: the same geometry as a transformer layer, stored fused
 // and in the checkpoint's own dtype, so the load requantizes them.
 Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config);
+Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config,
+                                                           uint32_t tp_size,
+                                                           uint32_t tp_rank);
 
 }  // namespace shelf::qwen35moe
