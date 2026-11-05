@@ -3,6 +3,7 @@
 
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
@@ -544,7 +545,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     auto config_result = qwen35::read_qwen35_text_config(config_.model_dir);
     if (!config_result.ok()) return config_result.status();
     const qwen35::Qwen35TextConfig& text_config = config_result.value();
-    const auto ranges = qwen35::even_stage_ranges(
+    const auto ranges = qwen_hybrid::even_stage_ranges(
         static_cast<std::uint32_t>(text_config.num_hidden_layers),
         static_cast<std::uint32_t>(config_.pipeline_parallel));
     if (ranges.size() != config_.pipeline_parallel) {

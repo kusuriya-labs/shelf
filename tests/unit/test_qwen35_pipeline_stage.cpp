@@ -1,7 +1,7 @@
 #include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/common/qwen_hybrid/model_weights.h>
 #include <shelf/models/common/qwen_hybrid/weight_validation.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/tensor_partition.h>
 
@@ -22,8 +22,8 @@ void check(bool cond, const std::string& msg) {
 }  // namespace
 
 int main() {
-    using shelf::qwen35::StageRange;
-    using shelf::qwen35::even_stage_ranges;
+    using shelf::qwen_hybrid::StageRange;
+    using shelf::qwen_hybrid::even_stage_ranges;
 
     {
         const auto r = even_stage_ranges(64, 2);

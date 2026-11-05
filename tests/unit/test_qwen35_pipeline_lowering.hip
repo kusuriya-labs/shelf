@@ -2,7 +2,7 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/runtime/graph/primitive_graph.h>
 #include <shelf/weights/matrix_weight.h>
@@ -180,7 +180,7 @@ int main() {
 
     shelf::qwen35::Qwen35LowerOptions stage0_options;
     stage0_options.stage.enabled = true;
-    stage0_options.stage.layers = shelf::qwen35::StageRange{0, 1};
+    stage0_options.stage.layers = shelf::qwen_hybrid::StageRange{0, 1};
     auto stage0 = shelf::qwen35::lower_qwen35_to_primitives(cfg, w, stage0_options);
     if (!stage0.ok()) {
         std::printf("FAIL: stage0 lowering: %s\n", stage0.status().message().c_str());
@@ -200,7 +200,7 @@ int main() {
 
     shelf::qwen35::Qwen35LowerOptions stage1_options;
     stage1_options.stage.enabled = true;
-    stage1_options.stage.layers = shelf::qwen35::StageRange{1, 2};
+    stage1_options.stage.layers = shelf::qwen_hybrid::StageRange{1, 2};
     auto stage1 = shelf::qwen35::lower_qwen35_to_primitives(cfg, w, stage1_options);
     if (!stage1.ok()) {
         std::printf("FAIL: stage1 lowering: %s\n", stage1.status().message().c_str());

@@ -3,7 +3,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -21,6 +21,9 @@
 namespace shelf {
 namespace qwen35 {
 namespace runtime {
+
+using ::shelf::qwen_hybrid::PipelineStage;
+using ::shelf::qwen_hybrid::StageRange;
 
 struct PipelineStageRuntimeConfig {
     std::string model_dir;
