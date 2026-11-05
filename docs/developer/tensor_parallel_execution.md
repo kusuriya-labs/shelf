@@ -338,8 +338,9 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   `shelf-bench` は pp / quality で `--tensor-parallel 1|2` を露出する（tg / batch は未露出）。
   pp の TP 実行は `TpBatchHook::on_execute` 経由で、最終 chunk の
   `compute_logits` は TP 時に強制される（combine 出力行が必要なため）。
-  `shelf-server` の CLI は `--tensor-parallel` を露出しない
-  （server が compute へ渡す argv にも `--tensor-parallel` は無い）。
+  `shelf-server` の CLI は `--tensor-parallel {1,2}` を露出し、`--device` の個数を
+  `--tensor-parallel` と一致させる（不一致は起動時エラー）。server は compute へ
+  `--tensor-parallel` をそのまま渡す。
 - TP=2 の local geometry は optimized selector の validated allowlist に含める。
   現在の対象は Linear / Paged Attention / GDN Recurrence / Rope / KV Append /
   L2 Normalize / GDN conv1d / RMSNorm / Elementwise の全 selector で、
@@ -356,6 +357,38 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
 - device 不足は明示エラー（bench / compute）または skip（test runner 77）。
 - 異種 GPU は未サポート（同一 RDNA4 を前提。異なる場合は unsupported 方針）。
 
+## 11-1. routed expert を持つ model の分割
+
+grouped expert checkpoint は §3 の plan だけでは分割できない。routed expert 平面は
+matrix axis を持たないため、分割は expert 軸で起きる（契約は
+[qwen35moe.md](qwen35moe.md) §3「expert 軸の分割」）。
+
+- 分割されるもの: routed expert（expert 軸で contiguous な範囲）、shared expert
+  （dense FFN と同じ matrix axis 分割）、backbone（§4 と同じ）
+- 分割されないもの: router（`mlp.gate.weight`）と `mlp.shared_expert_gate.weight`。
+  softmax・top-k・再正規化は model 全体の expert に対して行われ、全 rank が同じ選択と
+  同じ weight を持つ。router を分割すると rank ごとに違う expert 集合を選ぶため、
+  combine の部分和が元の結果にならなくなる
+- routing: `moe_router_kernel` は所有範囲内の選択を local expert index へ写し、範囲外の
+  選択は `kMoeSlotNotOwned` で残す。plan scratch・grouped 行容量・activation 平面は
+  local expert 数基準なので、分割すると容量も費用も半分になる
+- combine: `MOE_COMBINE` の出力がその rank の部分和であり、collective point は
+  combine node の出力（`tp_combine = 1`）。`o_proj` / `gdn_out` と同じ機構で、
+  1 layer あたり barrier は backbone 1 回 + FFN 1 回
+- MoE の graph では lm_head は replicated のまま（vocab parallel は dense のみ）。
+  `build_qwen35moe_tensor_partition_plan` は既定で lm_head を plan に入れない
+- rank の geometry は `make_qwen35moe_tensor_parallel_context` が state する
+  （`global_num_experts` / `local_num_experts` / `expert_begin` /
+  `local_shared_expert_intermediate_size`）。`LoadedModel::create_executor` は
+  grouped expert model に対して expert 範囲を state しない TP context を渡すと
+  `Status::unsupported` で止まる
+- 配線状況: weight load・lowering・program・kernel・executor まで配線済みで、
+  `test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致と
+  rank 間の logits 一致を検証する。`TpCoordinator` / `TpRankRuntime` は dense の
+  rank load しか行わないので、`shelf-compute --tensor-parallel` と
+  `shelf-bench pp / quality --tensor-parallel` は grouped expert checkpoint では
+  起動時に dense のみを受理する（multi-rank runtime の MoE 配線が未実装）
+
 ### 未対応 / 非目標
 
 Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAll）、
@@ -363,8 +396,8 @@ Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAl
 計算との overlap は未対応）、
 graph capture との併用（`SHELF_HIP_GRAPH` は TP schedule と非併用）、
 MTP 分散実行、vocab parallel、distributed sampling、
-structured generation / server 統合、Expert Parallel / MoE、
-pipeline parallel、TP=4 production support。
+structured generation / server 統合、grouped expert model の multi-rank runtime 配線
+（§11-1）、pipeline parallel、TP=4 production support。
 
 ## 12. tests
 
@@ -379,6 +412,9 @@ pipeline parallel、TP=4 production support。
 | `test_tp_transport` | gpu2;optional | `sum_hidden` の CPU reference oracle（実装 backend 全体） |
 | `test_qwen35_tp_execution` | gpu2;optional | tiny model: Stage A/B + full forward + prefill/decode + greedy 一致 + rank0/rank1 identical + layer別 drift |
 | `test_qwen35_tp_e2e` | gpu2;optional;external_files | Qwen3.8-27B 実モデル TP=1 vs TP=2 greedy（`SHELF_TP_MODEL_DIR`） |
+| `test_qwen35moe_tensor_parallel_plan` | cpu;required | grouped expert checkpoint の rank plan（shared expert の axis 分割 / router は plan 外 / backbone entries は dense と一致） |
+| `test_qwen35moe_tp_execution` | gpu2;optional | MoE fixture を TP=1 と TP=2 で実行し、greedy token 一致・rank 間 logits 一致・plan / shared expert / KV pool の局所 geometry を検証（§11-1） |
+| `test_moe_router` | gpu1;required | routing / group plan。expert 軸分割では選択と再正規化 weight が unsplit と完全一致し、slot がちょうど一方の rank での materialize されることを検証 |
 
 `test_qwen35_tp_e2e` の TP=1 leg は単一 GPU に full model を載せるため、
 `models/Qwen3.8-27B-FP8` では既定 arena（24 GiB）が足りない。この checkpoint では

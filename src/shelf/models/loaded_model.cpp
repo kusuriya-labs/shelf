@@ -88,7 +88,7 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
         hybrid_config(), token_row_ffn, reserve_config, tp_size);
     if (moe_ != nullptr)
         total += shelf::qwen35moe::moe_executor_grouped_bytes(moe_->text_config(),
-                                                              max_batch_rows);
+                                                              max_batch_rows, tp_size);
     return total;
 }
 
@@ -104,10 +104,16 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
                                                     kv_pool, arena, config);
     }
 
-    if (config.tp != nullptr && config.tp->tp_size > 1u) {
+    std::uint32_t tp_size = 1u;
+    std::uint32_t tp_rank = 0u;
+    if (config.tp != nullptr) {
+        tp_size = config.tp->tp_size;
+        tp_rank = config.tp->tp_rank;
+    }
+    if (tp_size > 1u && config.tp->global_num_experts == 0u) {
         return Status::unsupported(
-            "a model with grouped experts runs on one device: the expert planes are not "
-            "part of the tensor partition contract",
+            "a model with grouped experts needs a tensor parallel context that states its "
+            "expert range: the expert planes are not part of the matrix partition contract",
             __FILE__, __LINE__);
     }
 
@@ -125,6 +131,8 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
         override_layers.data(), override_layers.size());
     lower_options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
     lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
+    lower_options.tp_size = tp_size;
+    lower_options.tp_rank = tp_rank;
 
     auto lowered = shelf::qwen35moe::lower_qwen35_moe_to_primitives(
         moe_->text_config(), moe_->weights(), lower_options);

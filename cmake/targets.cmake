@@ -242,6 +242,7 @@ set(
     src/shelf/models/common/qwen_hybrid/weight_validation.cpp
     src/shelf/models/common/qwen_hybrid/weight_slot.cpp
     src/shelf/models/common/qwen_hybrid/tensor_partition.cpp
+    src/shelf/models/common/qwen_hybrid/tensor_parallel_context.cpp
 )
 
 add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
@@ -263,6 +264,7 @@ target_compile_options(shelf_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werror=ret
 set(
     SHELF_QWEN35MOE_SOURCES
     src/shelf/models/qwen35moe/model/qwen35moe_config.cpp
+    src/shelf/models/qwen35moe/model/tensor_parallel_context.cpp
     src/shelf/models/qwen35moe/model/lower_to_primitives.cpp
     src/shelf/models/qwen35moe/runtime/executor_footprint.cpp
     src/shelf/models/qwen35moe/model/qwen35moe_model.cpp

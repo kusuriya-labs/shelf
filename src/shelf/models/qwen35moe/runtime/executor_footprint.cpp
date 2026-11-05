@@ -34,18 +34,19 @@ std::size_t moe_padded_row_count(std::size_t max_batch_rows) noexcept {
 }
 
 std::size_t moe_executor_grouped_bytes(const Qwen35MoeTextConfig& config,
-                                       std::size_t max_batch_rows) noexcept {
+                                       std::size_t max_batch_rows,
+                                       std::uint32_t tp_size) noexcept {
     const std::size_t tokens = moe_padded_row_count(max_batch_rows);
     if (tokens == 0u || config.ffn.num_experts == 0u || config.ffn.num_experts_per_tok == 0u)
         return 0u;
+    if (tp_size == 0u || (config.ffn.num_experts % tp_size) != 0u) return 0u;
 
-    auto plan_result = build_moe_expert_group_plan(config, 0);
+    auto plan_result = build_moe_expert_group_plan(config, 0, tp_size, 0u);
     if (!plan_result.ok()) return 0u;
     const MoeExpertGroupPlan& plan = plan_result.value();
 
     const ::shelf::runtime::GroupedRowShape shape{
-        static_cast<std::uint32_t>(config.ffn.num_experts),
-        static_cast<std::uint32_t>(config.ffn.num_experts_per_tok)};
+        plan.experts, static_cast<std::uint32_t>(config.ffn.num_experts_per_tok)};
     const std::size_t group_rows = ::shelf::runtime::grouped_row_capacity(
         static_cast<std::uint32_t>(tokens), shape);
 

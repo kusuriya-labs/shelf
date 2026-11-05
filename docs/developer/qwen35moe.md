@@ -401,6 +401,20 @@ scan は `tile_counts` を**消費してゼロに戻す**。層を跨いだ rout
 使うが、層毎の memset launch は足さない（消費を張った契約は `test_moe_router` の chained
 round case）。
 
+**expert 軸を分割した rank の routing**。`launch_moe_router` は logits 幅（model 全体の
+expert 数）で softmax / top-k / 再正規化を行い、`expert_begin` から `owned_experts` 個の
+範囲だけで plan を作る。範囲内の選択は `sel_expert` へ**範囲内の index** を書き、範囲外の
+選択は `kMoeSlotNotOwned`（-1）を書く。`sel_weight` は全 selection に対する再正規化値のまま
+どの rank でも同じなので、rank の combine 出力は部分和となり、その和が分割しない run と
+同じ値になる（barrier の f32 累積 → 1 回だけ bf16 へ丸める契約は
+[tensor_parallel_execution.md](tensor_parallel_execution.md) §6）。
+`moe_slot_scatter_kernel` はマーカーの slot を plan に載せず `slot_row_of` へ -1 を書く。
+`tile_counts`・`expert_row_begin`・`group_expert`・grouped 行容量は `owned_experts` 基準で、
+plan scratch と activation 平面もその分だけ小さくなる（footprint は
+`moe_executor_grouped_bytes(config, rows, tp_size)`）。
+`moe_combine_kernel` は `slot_row_of < 0` の行を加算しないので、combine 側の契約は変わらない。
+選択の順序・決定順・non-finite 契約は分割前後で同一である。
+
 slot は (token, 選択 expert) の組で、数は正確に `rows * top_k`。slot は expert 昇順、
 同一 expert 内は token 昇順で番号付けする。さらにその slot 空間を
 `kMxfp4GemmRowTile`(=16) slot 以下の **group** に切り、group は expert をまたがない。
@@ -557,6 +571,10 @@ routing round を使う全 dispatch が同じ range を指す。
 `scratch_top_k` を持つ。offset そのものを binding に写さず、consumer は同じ
 `MoePlanScratch::make` を呼んで offset を導く（二重に持たせない）。
 `tokens` はその program の bucket の token rows なので、確保容量と読む容量がズレない。
+`MOE_ROUTER` の binding だけが `scratch_logit_experts` と `scratch_expert_begin` を持つ。
+expert 軸を分割した rank では logits 幅（model 全体の expert 数）と plan の深さ
+（`scratch_experts`）が異なるためで、0 は「logits 幅は plan の深さと同じ」を意味する
+（§6 の分割契約。scan / scatter の binding は local 幅のみを見る）。
 
 `Program::validate()` は `scratch_slot` が range を指すことと geometry が非ゼロであることを
 検証し、program は `plan_scratch_slot` を持つ。
@@ -638,7 +656,12 @@ workspace range や workspace storage の value と重ならないことを検�
   `tail_output_is_normed_hidden = true` で `emit_hybrid_head` を使う。
   plan は §5 の MTP block（fused rank-3 を load 時再量子化したもの）を読む。
 - `pg.grouped_row_shape = {num_experts, num_experts_per_tok}` を 1 度だけ宣言する。
-  value にも node にも容量は書かない（§6-1）。
+  value にも node にも容量は書かない（§6-1）。expert 軸を分割した rank では
+  `{local_experts, top_k}` になり、`MoeRouterNode` が logits 幅としての `experts` と
+  その rank の `local_experts` / `expert_begin` を併せ持つ（§3「expert 軸の分割」）。
+  分割時は `MOE_COMBINE` node に `tp_combine = 1` を立て、combine 出力を collective point
+  にする（`o_proj` / `gdn_out` と同じ機構。単一 device では execution schedule を作らない
+  ため、この annotation は inert）。
 - weight table の並びは embedding → 層ごと（backbone 線形 → router → expert w13 →
   expert w2 → shared expert gate / up / down → shared expert gate）→ lm_head
   （tied の場合は embedding の index を使い回す）。expert 平面は rank-3 のまま
@@ -658,20 +681,22 @@ workspace range や workspace storage の value と重ならないことを検�
 | test | label | 固定する内容 |
 | --- | --- | --- |
 | `test_moe_config` | `cpu;required` | MoE field の読込、`num_experts > 0` が正本、dense config の拒否、`intermediate_size` 併記拒否、`output_gate_type` を宣言した config も受理すること。`Qwen35MoeTextConfig` に dense 幅字段が無く `Qwen35TextConfig` に expert 字段が無いことを concept + `static_assert` で固定 |
-| `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range |
+| `test_moe_weight_plan` | `cpu;required` | plan の幾何・stride・平面サイズ、実測 payload との一致、source の file order と gate 先行 row range 、expert 軸分割の plan（rank の contiguous 範囲・global 名を持つ source・平面 depth が半分・per-expert layout 不変）、`num_experts` が tp_size で割れない場合と tp_size / tp_rank の範囲外の拒否 |
 | `test_moe_expert_slice_fixture` | `cpu;required` | 合成 checkpoint の shard 内連続配置、manifest の logical / 物理名契約、payload bit 一致 |
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件。fused rank-3 plan では checkpoint の BF16 payload を再量子化して preshuffle した結果と平面が bit 一致すること、fused plan を per-expert checkpoint へ / unfused plan を fused checkpoint へ適用したときの拒否も固定 |
-| `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound、外部 zeroing なしの 2 つ目の round が同じ plan になること（scan が `tile_counts` を消費する契約）、non-finite logits で expert index が `[0, experts)` に収まり weight が finite であること、その round が error word へ `NUMERIC_ERROR` を立てること（有限 logits では word が立たないことも一緒に固定） |
+| `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound、外部 zeroing なしの 2 つ目の round が同じ plan になること（scan が `tile_counts` を消費する契約）、non-finite logits で expert index が `[0, experts)` に収まり weight が finite であること、その round が error word へ `NUMERIC_ERROR` を立てること（有限 logits では word が立たないことも一緒に固定）。expert 軸分割では、同じ logits で unsplit と 2 rank を比べ、選択と再正規化 weight が全 slot で完全一致、`sel_expert` が local index か `kMoeSlotNotOwned`、slot がちょうど一方の rank でのみ group row を持つ、両 rank の slot 数の和が全 slot と一致、`group_expert` が local 平面を指すことを固定。範囲外の owned 範囲を要求する launch の拒否も固定 |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
 | `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算（gate 平面は padded row stride で置く case を含む。packed 前提だと 2 行目以降が壊れる）、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
-| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないこと、MTP block を持つ checkpoint を `load_mtp_layers` で load したときに block が present になり fc / block norm / body / FFN plan と一致すること、MTP block を持たない checkpoint の MTP load 失敗、MTP tamper（fc 幅・block norm 欠落・expert 平面欠落・attention tensor 欠落）の拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在、`Qwen35MoeLoadOptions` の MTP 字段存在を `static_assert` で固定 |
+| `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないこと、MTP block を持つ checkpoint を `load_mtp_layers` で load したときに block が present になり fc / block norm / body / FFN plan と一致すること、MTP block を持たない checkpoint の MTP load 失敗、MTP tamper（fc 幅・block norm 欠落・expert 平面欠落・attention tensor 欠落）の拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。expert 軸分割の rank load では、rank 平面の byte 列が単一 GPU load の対応する expert と一致し、shared expert が半幅で partition を持ち、router は全 expert 数のまま、rank の weights が whole-model invariant を通らないことを固定。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在、`Qwen35MoeLoadOptions` の MTP 字段存在を `static_assert` で固定 |
 | `test_qwen35moe_lowering` | `gpu1;required` | 合成 MoE checkpoint（GDN 層と full attention 層を含む）を load して lower し、graph 構造を固定: `grouped_row_shape`、層ごとの FFN node 列、fused 平面を 2 view で読むこと、group-row value の数と幅、expert 平面が rank-3 native stride で weight table へ入ること、router が f32 / experts 列の logits を読むこと、combine の行空間 crossing、head の外部出力 4 本の shape と順。bucket R16 の `build_program` で dispatch 数・plan scratch 1 本・group row 容量 96 行・view の slot / offset を固定。さらに hidden tap（inner 層は受理、最終層と range 外は拒否）、expert 数 1 化・shared expert 幅伪造・top_k > experts・batch stride 伪造の各拒否 |
+| `test_qwen35moe_tensor_parallel_plan` | `cpu;required` | rank の matrix axis partition plan: shared expert の gate / up が axis 0、down が axis 1 で分割されること、router と `shared_expert_gate` が plan に入らないこと（分割すると rank が別の expert 集合を選ぶため）、routed expert が plan に入らないこと、backbone entries が dense plan と byte 単位で一致すること、lm_head の vocab 分割と tied 時の不在、`num_experts` / `shared_expert_intermediate_size` / head 数が tp_size で割れない場合の拒否 |
 | `test_grouped_row_shape` | `cpu;required` | group row 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128 など）と不変条件（group 数は slot 数を超えない・容量は slot 数を覆う・16 の倍数）、`GROUPED_ROWS` value の binding 行数が容量基準になること、`grouped_row_shape` 未宣言の graph を graph 検証と `build_program` の両方が拒否すること、dense graph に grouped 行空間が現れないこと |
 | `test_program_moe_plan` | `cpu;required` | 1 MoE FFN の graph / program 配線: `MOE_ROUTER` 1 node から 3 dispatch・grouped linear 1 node から量子化+grouped の 2 dispatch・combine まで dispatch 列で固定、plan scratch が workspace に 1 本だけ確保され scratch を読む 7 dispatch すべてが同じ range を指すこと、fused 出力と activation 平面が group row 容量で確保されること、router が shape と不一致・combine が TOKEN_ROWS を読む・weight が rank-2・`k_padded` が平面 padding と不一致、いずれも拒否 |
 | `test_moe_program_execute` | `gpu1;required` | 実測 geometry（experts 256・top_k 8・hidden 2048・moe_inter 512）の 1 MoE FFN を program 経由で実行し、同じ kernel を直接呼んだ参照路径と combine 出力が bit 一致。9 dispatch すべて optimized path を通り、同一 workspace での 2 回目の実行が 1 回目と一致（plan scratch の zeroing が効いていることの固定）。logits の 1 entry が NaN の run が fault せず error word が `NUMERIC_ERROR` になり、clean な run では word が COMPLETE のままなこと |
 | `test_qwen35moe_executor` | `gpu1;required` | 合成 MoE checkpoint を `LoadedModel` 経由で load し、`create_executor` の実行経路で prefill + decode を回す。row bucket 16 / 64 / 128（group 行数容量と plan scratch 容量が変わる）で、program が `plan_scratch_slot` を持つこと、hidden 行が finite かつゼロででないこと、同一 rounds を別 sequence で実行すると同一 token になること（run 跨ぎ・層跨ぎで plan scratch が漏れないことの固定） |
 | `test_qwen35moe_mtp_executor` | `gpu1;required` | MTP graph を executor（`external_hidden_input`、1 attention layer の KV / GDN pool）で実行し、routed expert 平面と shared expert 平面をそれぞれ zero したときに block output の hidden 行が変わること（MoE FFN の両分岐が実際に出力へ届いていることの固定）。create_executor 直後の最初の batch が失敗しないこともこの経路が通ることで固定する |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
+| `test_qwen35moe_tp_execution` | `gpu2;optional` | 合成 MoE checkpoint を 2 device で TP=2 実行し、TP=1 と同じ greedy token になること（rank 双方）、expert 平面が expert 数の半分・shared expert が半幅・KV pool が半分の kv heads・router は全 expert 数を持つこと、hidden / logits 行が TP=1 と 5 % 以内、barrier 後の logits が rank 間で bit 一致すること |
 | `test_qwen35moe_rows_parity` | `gpu1;required` | 同じ prompt を executor で違う batch 行数の walk（1 行ずつ / 4+4 / 2x4 / 8 / 3+5 / 1+7 / 2+6 / 5+3 / 3+3+2 / 1+1+6 / 4+1x4 / 1x4+4）で forward し、token 行ごとの hidden が 1 行 walk と一致すること（forward の batch 行数非依存）。GDN 層を含む fixture と全 layer full attention の fixture の両方で行う。combine が shared gate 平面の row stride を仮定すると 2 行目以降の shared expert が落ちてこの一致が壊れる |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
@@ -724,11 +749,14 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   `test_paged_attention_split_reduce_exact`（q_per_kv 6 / 8）が対にする（経緯と計測は
   `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md` と
   `docs/research/20261105/moe_fp8_kv.md`）
-- MoE の expert 軸分割は weight load まで配線済み（§3「expert 軸の分割」）。実行側は未配線で、
-  `LoadedModel::create_executor` が grouped expert と `tp_size > 1` を
-  `Status::unsupported`（"a model with grouped experts runs on one device"）で拒否する。
-  `shelf-bench pp` と `shelf-bench quality` の `--tensor-parallel 2` も `probe_model_dir` で
-  dense のみを受理し、grouped expert checkpoint では起動時に拒否する（深い地点で落ちない）
+- MoE の expert 軸分割は weight load・lowering・program・kernel・executor まで配線済みで、
+  `test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致を検証する
+  （契約は §3「expert 軸の分割」と §6 の routing、
+  [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）。
+  未配線なのは multi-rank runtime 側で、`TpRankRuntime` は dense の rank load しか行わない。
+  したがって `shelf-compute --tensor-parallel` と `shelf-bench pp` / `shelf-bench quality` の
+  `--tensor-parallel 2` は `probe_model_dir` で dense のみを受理し、grouped expert checkpoint
+  では起動時に拒否する（深い地点で落ちない）。MTP block は分割しない（§5）
 - pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
   しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
   grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に

@@ -1,23 +1,17 @@
 #pragma once
 
 #include <shelf/core/status.h>
+#include <shelf/models/common/qwen_hybrid/tensor_parallel_context.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 
 #include <cstdint>
 
-namespace shelf::qwen35 {
+namespace shelf {
+namespace qwen35 {
 
-struct Qwen35TensorParallelContext {
-    std::uint32_t tp_size = 1;
-    std::uint32_t tp_rank = 0;
-    std::uint32_t local_intermediate_size = 0;
-    std::uint32_t local_attention_heads = 0;
-    std::uint32_t local_key_value_heads = 0;
-    std::uint32_t local_gdn_key_heads = 0;
-    std::uint32_t local_gdn_value_heads = 0;
-    std::uint32_t local_vocab_size = 0;
-    bool vocab_parallel_lm_head = false;
-};
+// The rank geometry a dense model runs with. The shared fields come from the hybrid
+// backbone context; the dense FFN width is the one extra term.
+using Qwen35TensorParallelContext = shelf::qwen_hybrid::TensorParallelContext;
 
 Result<Qwen35TensorParallelContext> make_qwen35_tensor_parallel_context(
     const Qwen35TextConfig& config,
@@ -25,4 +19,5 @@ Result<Qwen35TensorParallelContext> make_qwen35_tensor_parallel_context(
     std::uint32_t tp_rank,
     bool vocab_parallel_lm_head = true);
 
+}
 }
