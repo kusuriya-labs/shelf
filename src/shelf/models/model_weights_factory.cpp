@@ -27,17 +27,19 @@ Result<LoadedModelWeights> load_model_weights(
     if (!family.ok()) return family.status();
 
     if (family.value() == ModelFamily::Moe) {
-        if (options.load_mtp_layers) {
+        if (options.stage.enabled) {
             return Status::unsupported(
-                "qwen35moe does not load MTP layers: speculative decode uses the DFlash2 "
-                "drafter",
-                __FILE__, __LINE__);
+                "a model with grouped experts has no pipeline stage weight load", __FILE__,
+                __LINE__);
         }
+        shelf::qwen35moe::Qwen35MoeLoadOptions moe_options;
+        static_cast<shelf::qwen_hybrid::HybridLoadOptions&>(moe_options) =
+            static_cast<const shelf::qwen_hybrid::HybridLoadOptions&>(options);
+        moe_options.load_mtp_layers = options.load_mtp_layers;
         auto config = shelf::qwen35moe::read_qwen35_moe_text_config(model_dir);
         if (!config.ok()) return config.status();
-        auto weights = shelf::qwen35moe::load_qwen35moe_weights(
-            model_dir, arena, stream,
-            static_cast<const shelf::qwen_hybrid::HybridLoadOptions&>(options));
+        auto weights = shelf::qwen35moe::load_qwen35moe_weights(model_dir, arena, stream,
+                                                                moe_options);
         if (!weights.ok()) return weights.status();
         Status valid = shelf::qwen35moe::validate_qwen35moe_weights(weights.value(),
                                                                     config.value());

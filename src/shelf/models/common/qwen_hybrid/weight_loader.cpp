@@ -64,12 +64,14 @@ std::vector<std::string> hf_quantized_body_names(const QwenHybridConfig& config)
 
 std::vector<std::string> hf_quantized_layer_body_names(const QwenHybridConfig& config,
                                                        std::size_t layer) {
+    return hf_layer_body_names(layer_tensor_prefix(layer), layer_is_gdn(config, layer));
+}
+
+std::vector<std::string> hf_layer_body_names(const std::string& prefix, bool is_gdn) {
     std::vector<std::string> names;
-    const std::string prefix = layer_tensor_prefix(layer);
-    const bool gdn = layer_is_gdn(config, layer);
     names.push_back(prefix + "input_layernorm.weight");
     names.push_back(prefix + "post_attention_layernorm.weight");
-    if (gdn) {
+    if (is_gdn) {
         names.push_back(prefix + "linear_attn.in_proj_a.weight");
         names.push_back(prefix + "linear_attn.in_proj_b.weight");
         names.push_back(prefix + "linear_attn.in_proj_qkv.weight");
@@ -163,8 +165,20 @@ Status load_hybrid_layer_body_quantized(
     const HybridLoadOptions& options,
     HybridLayerWeights& w)
 {
-    const std::string prefix = layer_tensor_prefix(layer);
-    const bool is_gdn = layer_is_gdn(config, layer);
+    return load_hybrid_layer_body_quantized_at(arena, stream, reader,
+                                               layer_tensor_prefix(layer),
+                                               layer_is_gdn(config, layer), options, w);
+}
+
+Status load_hybrid_layer_body_quantized_at(
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const qqb::QuantizedModelReader& reader,
+    const std::string& prefix,
+    bool is_gdn,
+    const HybridLoadOptions& options,
+    HybridLayerWeights& w)
+{
     w.is_gdn = is_gdn;
 
     Status st = load_small(reader, prefix + "input_layernorm.weight", arena, stream,

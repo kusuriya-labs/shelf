@@ -37,13 +37,9 @@ Result<LoadedModel> LoadedModel::load(
 
     LoadedModel out;
     if (family_result.value() == ModelFamily::Moe) {
-        if (load_mtp) {
-            return Status::unsupported(
-                "MTP is not implemented for a model with grouped experts", __FILE__,
-                __LINE__);
-        }
-        shelf::qwen_hybrid::HybridLoadOptions options;
+        shelf::qwen35moe::Qwen35MoeLoadOptions options;
         options.verify_quantized_payload_crc = verify_payload_crc;
+        options.load_mtp_layers = load_mtp;
         auto loaded = shelf::qwen35moe::Qwen35MoeModel::load_from_safetensors(
             model_dir, arena, stream, options);
         if (!loaded.ok()) return loaded.status();

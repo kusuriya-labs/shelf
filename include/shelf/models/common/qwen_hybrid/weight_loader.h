@@ -40,6 +40,10 @@ std::vector<std::string> hf_quantized_body_names(const QwenHybridConfig& config)
 std::vector<std::string> hf_quantized_layer_body_names(const QwenHybridConfig& config,
                                                        std::size_t layer);
 
+// Body logical names at an explicit checkpoint prefix and topology: a checkpoint block
+// that is not a transformer layer (the MTP block) gives its own prefix.
+std::vector<std::string> hf_layer_body_names(const std::string& prefix, bool is_gdn);
+
 // Opens a Shelf quantized model directory, or synthesizes an HF real-quantized one from
 // the given logical names. A name the checkpoint does not carry is skipped by the
 // synthesis, so the caller owns the completeness check.
@@ -64,6 +68,16 @@ Status load_hybrid_layer_body_quantized(
     const shelf::quantization::bundle::QuantizedModelReader& reader,
     const QwenHybridConfig& config,
     std::size_t layer,
+    const HybridLoadOptions& options,
+    HybridLayerWeights& w);
+
+// The same body at an explicit prefix and topology.
+Status load_hybrid_layer_body_quantized_at(
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const shelf::quantization::bundle::QuantizedModelReader& reader,
+    const std::string& prefix,
+    bool is_gdn,
     const HybridLoadOptions& options,
     HybridLayerWeights& w);
 

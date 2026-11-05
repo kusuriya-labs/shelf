@@ -8,7 +8,7 @@ Result<Qwen35MoeModel> Qwen35MoeModel::load_from_safetensors(
     const std::string& model_dir,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const shelf::qwen_hybrid::HybridLoadOptions& options) {
+    const Qwen35MoeLoadOptions& options) {
     auto config_result = read_qwen35_moe_text_config(model_dir);
     if (!config_result.ok()) return config_result.status();
     Qwen35MoeTextConfig text_config = config_result.release();

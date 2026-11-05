@@ -21,7 +21,7 @@ uint32_t align_up_u32(uint32_t value, uint32_t alignment) noexcept {
 void add_source(MoeExpertGroupPlan& plan, uint32_t expert, MoeExpertProjection projection,
                 const char* projection_name, uint32_t row_offset, uint32_t rows) {
     MoeExpertTensorSource src;
-    src.name = moe_expert_tensor_name(plan.layer, expert, projection_name, false);
+    src.name = moe_expert_tensor_name(plan.mlp_prefix, expert, projection_name, false);
     src.expert = expert;
     src.projection = projection;
     src.row_offset = row_offset;
@@ -37,14 +37,31 @@ std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config) {
     return config.num_hidden_layers * config.ffn.num_experts * 3u * 2u;
 }
 
+std::string moe_mlp_prefix(std::size_t layer) {
+    return shelf::qwen_hybrid::layer_tensor_prefix(layer) + "mlp.";
+}
+
+std::string moe_mtp_layer_prefix() {
+    return "mtp.layers.0.";
+}
+
+std::string moe_mtp_mlp_prefix() {
+    return moe_mtp_layer_prefix() + "mlp.";
+}
+
 std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix) {
-    return shelf::qwen_hybrid::layer_tensor_prefix(layer) + "mlp." + suffix;
+    return moe_mlp_prefix(layer) + suffix;
+}
+
+std::string moe_expert_tensor_name(const std::string& mlp, uint32_t expert,
+                                   const char* projection, bool scale) {
+    return mlp + "experts." + std::to_string(expert) + "." + projection + ".weight" +
+           (scale ? "_scale" : "");
 }
 
 std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
                                    const char* projection, bool scale) {
-    return moe_mlp_tensor_name(layer, "experts." + std::to_string(expert) + "." + projection +
-                                      ".weight" + (scale ? "_scale" : ""));
+    return moe_expert_tensor_name(moe_mlp_prefix(layer), expert, projection, scale);
 }
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
@@ -66,6 +83,7 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
 
     MoeExpertGroupPlan plan;
     plan.layer = static_cast<uint32_t>(layer);
+    plan.mlp_prefix = moe_mlp_prefix(layer);
     plan.experts = static_cast<uint32_t>(config.ffn.num_experts);
     plan.scale_block_k = kMxScaleBlockK;
 
@@ -119,6 +137,22 @@ Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig
         add_source(plan, e, MoeExpertProjection::Gate, "gate_proj", 0u, inter);
         add_source(plan, e, MoeExpertProjection::Up, "up_proj", inter, inter);
     }
+    return plan;
+}
+
+Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config) {
+    if (config.num_hidden_layers == 0u)
+        return Status::invalid_argument(
+            "build_moe_mtp_expert_group_plan: the config has no layer geometry", __FILE__,
+            __LINE__);
+    auto plan = build_moe_expert_group_plan(config, 0u);
+    if (!plan.ok()) return plan;
+    MoeExpertGroupPlan& out = plan.value();
+    out.fused_rank3 = true;
+    out.mlp_prefix = moe_mtp_mlp_prefix();
+    out.w13_name = out.mlp_prefix + "experts.gate_up_proj";
+    out.w2_name = out.mlp_prefix + "experts.down_proj";
+    out.sources.clear();
     return plan;
 }
 

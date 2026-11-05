@@ -214,6 +214,37 @@ void test_per_expert_equivalence(const CanonicalPlane& canon, const MatrixWeight
     }
 }
 
+// One fused rank-3 plane's canonical payload, assembled from the checkpoint's bf16
+// values with the Shelf codec: gate rows first, experts in ascending order.
+CanonicalPlane build_fused_plane(const Fixture& f, const MoeExpertGroupPlan& plan,
+                                 bool gate_up) {
+    CanonicalPlane p;
+    p.rows = gate_up ? plan.w13_rows : plan.w2_rows;
+    p.k_padded = gate_up ? plan.w13_k_padded : plan.w2_k_padded;
+    p.codes.assign(static_cast<std::size_t>(plan.experts) * p.rows * (p.k_padded / 2u), 0u);
+    p.scales.assign(static_cast<std::size_t>(plan.experts) * p.rows * (p.k_padded / 32u), 0u);
+    const std::string name = gate_up ? plan.w13_name : plan.w2_name;
+    const std::vector<std::uint16_t>& src = f.fused.at(name);
+    const std::uint32_t cols = gate_up ? plan.w13_cols : plan.w2_cols;
+    std::vector<float> row(p.k_padded, 0.0f);
+    for (std::uint32_t e = 0; e < plan.experts; ++e) {
+        for (std::uint32_t r = 0; r < p.rows; ++r) {
+            for (std::uint32_t c = 0; c < cols; ++c) {
+                const std::uint16_t bits = src[(static_cast<std::size_t>(e) * p.rows + r) * cols + c];
+                const std::uint32_t word = static_cast<std::uint32_t>(bits) << 16;
+                float value = 0.0f;
+                std::memcpy(&value, &word, sizeof(value));
+                row[c] = value;
+            }
+            shelf::quantization::mxfp4::quantize_mxfp4_matrix(
+                row.data(), cols, 1u, cols, p.k_padded,
+                p.codes.data() + (static_cast<std::size_t>(e) * p.rows + r) * (p.k_padded / 2u),
+                p.scales.data() + (static_cast<std::size_t>(e) * p.rows + r) * (p.k_padded / 32u));
+        }
+    }
+    return p;
+}
+
 void test_geometry(const MoeExpertGroupPlan& plan, const MoeExpertGroupWeights& g) {
     const auto report = [](const MatrixWeight& w, const char* tag) {
         std::printf("%s: experts=%u rows=%u cols=%u k_padded=%u codes_row=%u scale_row=%u "
@@ -378,6 +409,66 @@ int main() {
           "the group occupies exactly the planned planes in one arena bump each");
 
     test_rejections(reader.value(), p, arena, stream);
+
+    {
+        // The same checkpoint read with a fused plan asks for tensor names that do not
+        // exist there, so it fails instead of assembling an empty plane.
+        auto fused_plan = shelf::qwen35moe::build_moe_mtp_expert_group_plan(f.config);
+        check(fused_plan.ok(), "the fused expert group plan builds");
+        if (fused_plan.ok()) {
+            const MoeExpertGroupPlan& mp = fused_plan.value();
+            check(mp.fused_rank3 && mp.sources.empty() && !mp.w13_name.empty() &&
+                      !mp.w2_name.empty(),
+                  "a fused plan names two planes and no per-expert source");
+            check(mp.mlp_prefix == shelf::qwen35moe::moe_mtp_mlp_prefix() &&
+                      mp.w13_name == mp.mlp_prefix + "experts.gate_up_proj" &&
+                      mp.w2_name == mp.mlp_prefix + "experts.down_proj",
+                  "a fused plan names the checkpoint's fused tensors");
+            check(mp.w13_gate_rows == f.config.ffn.moe_intermediate_size &&
+                      mp.w13_rows == 2u * mp.w13_gate_rows && mp.w2_rows == kHidden &&
+                      mp.experts == kExperts,
+                  "a fused plan keeps the layer's expert geometry");
+            auto st = shelf::qwen35moe::load_moe_expert_group(reader.value(), mp, arena, stream);
+            check(!st.ok(), "a fused plan over a checkpoint without fused planes fails");
+        }
+    }
+
+    Fixture fused;
+    if (write_fixture(fused, root / "mxfp4_fused", false, false, kInter, kInter, true)) {
+        auto fused_plan = shelf::qwen35moe::build_moe_mtp_expert_group_plan(fused.config);
+        if (fused_plan.ok()) {
+            const MoeExpertGroupPlan& mp = fused_plan.value();
+            auto fused_source = shelf::quantization::bundle::synthesize_hf_quantized_source(
+                root / "mxfp4_fused", {mp.w13_name, mp.w2_name}, false);
+            check(fused_source.ok(), "fused fixture synthesizes");
+            if (fused_source.ok()) {
+                auto fused_reader =
+                    QuantizedModelReader::open_hf_source(fused_source.release(), false);
+                check(fused_reader.ok(), "fused fixture reader opens");
+                if (fused_reader.ok()) {
+                    auto fused_group = shelf::qwen35moe::load_moe_expert_group(
+                        fused_reader.value(), mp, arena, stream);
+                    check(fused_group.ok(), "the fused planes load");
+                    if (fused_group.ok()) {
+                        const MoeExpertGroupWeights& g = fused_group.value();
+                        check(g.w13.rows == mp.w13_rows && g.w2.rows == mp.w2_rows &&
+                                  g.w13.experts == mp.experts,
+                              "the fused planes carry the plan geometry");
+                        const CanonicalPlane w13_canon = build_fused_plane(fused, mp, true);
+                        const CanonicalPlane w2_canon = build_fused_plane(fused, mp, false);
+                        test_native_layout(w13_canon, g.w13, "fused w13");
+                        test_native_layout(w2_canon, g.w2, "fused w2");
+                        test_per_expert_equivalence(w13_canon, g.w13, "fused w13");
+                        test_per_expert_equivalence(w2_canon, g.w2, "fused w2");
+                    }
+                }
+            }
+        } else {
+            check(false, "fused expert group plan builds");
+        }
+    } else {
+        check(false, "fused fixture written");
+    }
 
     Fixture poisoned;
     if (write_fixture(poisoned, root / "mxfp4_nan_byte", true)) {

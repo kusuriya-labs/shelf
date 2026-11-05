@@ -10,8 +10,8 @@
 namespace shelf::qwen35moe {
 
 // A loaded MoE model: its config and one MoE layer per transformer layer, resident in the
-// caller's arena. There is no dense view of these weights and no MTP block; speculative
-// decode uses the DFlash2 drafter instead.
+// caller's arena. There is no dense view of these weights. The checkpoint's MTP block is
+// loaded when the options ask for it and is the speculative decode drafter.
 class Qwen35MoeModel final {
 public:
     Qwen35MoeModel(const Qwen35MoeModel&) = delete;
@@ -26,7 +26,7 @@ public:
         const std::string& model_dir,
         gpu::GpuArena& arena,
         hipStream_t stream,
-        const shelf::qwen_hybrid::HybridLoadOptions& options = {});
+        const Qwen35MoeLoadOptions& options = {});
 
     static Result<Qwen35MoeModel> adopt(
         Qwen35MoeModelWeights&& weights,

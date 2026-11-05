@@ -114,6 +114,57 @@ Status gather_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan
     return Status::make_ok();
 }
 
+Status gather_fused_plane(const QuantizedModelReader& reader, const MoeExpertGroupPlan& plan,
+                          bool fused_gate_up, PlaneDraft& out) {
+    const std::string name = fused_gate_up ? plan.w13_name : plan.w2_name;
+    out.rows = fused_gate_up ? plan.w13_rows : plan.w2_rows;
+    out.cols = fused_gate_up ? plan.w13_cols : plan.w2_cols;
+    out.k_padded = fused_gate_up ? plan.w13_k_padded : plan.w2_k_padded;
+    out.scale_k = out.k_padded / kScaleBlockK;
+    const uint64_t packed_k = out.k_padded / 2u;
+    const uint64_t expert_codes = static_cast<uint64_t>(out.rows) * packed_k;
+    const uint64_t expert_scales = static_cast<uint64_t>(out.rows) * out.scale_k;
+    out.codes.assign(static_cast<std::size_t>(expert_codes * plan.experts), 0u);
+    out.scales.assign(static_cast<std::size_t>(expert_scales * plan.experts), 0u);
+
+    auto resolved = reader.resolve(name);
+    if (!resolved.ok())
+        return resolved.status();
+    const QuantizedTensorView& v = resolved.value();
+    if (v.encoding != QuantizedEncoding::Bf16) {
+        return Status::invalid_argument(
+            ("moe fused expert tensor is not bf16: " + name).c_str(), __FILE__, __LINE__);
+    }
+    if (v.logical_shape.size() != 3u ||
+        static_cast<uint64_t>(v.logical_shape[0]) != plan.experts ||
+        static_cast<uint64_t>(v.logical_shape[1]) != out.rows ||
+        static_cast<uint64_t>(v.logical_shape[2]) != out.cols) {
+        return Status::invalid_argument(
+            ("moe fused expert logical shape mismatch: " + name).c_str(), __FILE__, __LINE__);
+    }
+    const uint64_t elements = static_cast<uint64_t>(plan.experts) * out.rows * out.cols;
+    if (v.data.data == nullptr || v.data.size != elements * 2u) {
+        return Status::invalid_argument(
+            ("moe fused expert payload size mismatch: " + name).c_str(), __FILE__, __LINE__);
+    }
+
+    const auto* src = static_cast<const uint16_t*>(v.data.data);
+    const std::size_t expert_elements = static_cast<std::size_t>(out.rows) * out.cols;
+    std::vector<float> stage(expert_elements);
+    for (uint32_t e = 0; e < plan.experts; ++e) {
+        const uint64_t base = static_cast<uint64_t>(e) * expert_elements;
+        for (std::size_t i = 0; i < expert_elements; ++i) {
+            const uint32_t bits = static_cast<uint32_t>(src[base + i]) << 16;
+            std::memcpy(&stage[i], &bits, sizeof(bits));
+        }
+        shelf::quantization::mxfp4::quantize_mxfp4_matrix(
+            stage.data(), out.cols, out.rows, out.cols, out.k_padded,
+            out.codes.data() + static_cast<std::size_t>(e) * expert_codes,
+            out.scales.data() + static_cast<std::size_t>(e) * expert_scales);
+    }
+    return Status::make_ok();
+}
+
 Result<MatrixWeight> materialize_plane(const MoeExpertGroupPlan& plan, PlaneDraft& draft,
                                        GpuArena& arena, hipStream_t stream,
                                        const char* plane_name) {
@@ -225,16 +276,23 @@ Result<MoeExpertGroupWeights> load_moe_expert_group(const QuantizedModelReader& 
     if (plan.experts == 0u)
         return Status::invalid_argument("load_moe_expert_group: plan has no experts",
                                         __FILE__, __LINE__);
-    if (plan.sources.size() != static_cast<std::size_t>(plan.experts) * 3u)
+    if (plan.fused_rank3) {
+        if (plan.w13_name.empty() || plan.w2_name.empty())
+            return Status::invalid_argument("load_moe_expert_group: fused plan has no plane name",
+                                            __FILE__, __LINE__);
+    } else if (plan.sources.size() != static_cast<std::size_t>(plan.experts) * 3u) {
         return Status::invalid_argument("load_moe_expert_group: plan source count mismatch",
                                         __FILE__, __LINE__);
+    }
 
     PlaneDraft w13_draft;
-    Status st = gather_plane(reader, plan, true, w13_draft);
+    Status st = plan.fused_rank3 ? gather_fused_plane(reader, plan, true, w13_draft)
+                                 : gather_plane(reader, plan, true, w13_draft);
     if (!st.ok())
         return st;
     PlaneDraft w2_draft;
-    st = gather_plane(reader, plan, false, w2_draft);
+    st = plan.fused_rank3 ? gather_fused_plane(reader, plan, false, w2_draft)
+                          : gather_plane(reader, plan, false, w2_draft);
     if (!st.ok())
         return st;
 

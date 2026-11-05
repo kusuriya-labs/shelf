@@ -12,6 +12,7 @@
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -65,6 +66,11 @@ struct Fixture {
     // Canonical on-disk payload per tensor name, exactly as written.
     std::map<std::string, std::vector<std::uint8_t>> codes;
     std::map<std::string, std::vector<std::uint8_t>> scales;
+    // MTP fused expert planes as bf16 values in the checkpoint's own layout
+    // (expert-major, then row-major), keyed by the logical plane name. The loader
+    // requantizes these into the native MXFP4 planes.
+    std::map<std::string, std::vector<std::uint16_t>> fused;
+    bool mtp = false;
 };
 
 inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
@@ -190,59 +196,118 @@ struct PlannedTensor {
     std::vector<std::uint8_t> bytes;
 };
 
+// Body tensor values: deterministic bf16 with a per-row and per-column pattern, so a
+// row, column or expert mix-up in a loader changes both the codes and the E8M0 scales.
+inline std::vector<std::uint16_t> make_fused_values(std::size_t rows, std::size_t cols,
+                                                    std::uint32_t seed) {
+    std::vector<std::uint16_t> out(rows * cols);
+    for (std::size_t row = 0; row < rows; ++row) {
+        for (std::size_t col = 0; col < cols; ++col) {
+            const std::uint32_t h =
+                static_cast<std::uint32_t>((row * 31u + col * 7u + seed) % 17u);
+            const float magnitude = 0.5f + 0.25f * static_cast<float>(h);
+            const float value = (h < 8u) ? -magnitude : magnitude;
+            out[row * cols + col] = shelf::f32_to_bf16_rne(value);
+        }
+    }
+    return out;
+}
+
+// Adds one transformer-shaped body (layernorms and attention) at an explicit checkpoint
+// prefix. The MTP block uses the same shape at its own prefix.
+inline void add_layer_body(std::vector<PlannedTensor>& planned, const std::string& prefix,
+                           bool is_gdn, std::uint32_t seed) {
+    planned.push_back({prefix + "input_layernorm.weight", shelf::io::SType::BF16, {kHidden},
+                       make_bf16(kHidden, 31u + seed)});
+    planned.push_back({prefix + "post_attention_layernorm.weight", shelf::io::SType::BF16,
+                       {kHidden}, make_bf16(kHidden, 37u + seed)});
+    const auto matrix = [&](const std::string& name, std::size_t rows, std::size_t cols,
+                            std::uint32_t offset) {
+        planned.push_back({prefix + name, shelf::io::SType::BF16, {rows, cols},
+                           make_bf16(rows * cols, offset + seed)});
+    };
+    if (is_gdn) {
+        matrix("linear_attn.in_proj_a.weight", kValueHeads, kHidden, 41u);
+        matrix("linear_attn.in_proj_b.weight", kValueHeads, kHidden, 43u);
+        matrix("linear_attn.in_proj_qkv.weight", kConvFeatures, kHidden, 47u);
+        matrix("linear_attn.in_proj_z.weight", kValueFeatures, kHidden, 53u);
+        planned.push_back({prefix + "linear_attn.conv1d.weight", shelf::io::SType::BF16,
+                           {kConvFeatures, 1u, kConvKernel},
+                           make_bf16(kConvFeatures * kConvKernel, 59u + seed)});
+        matrix("linear_attn.out_proj.weight", kHidden, kValueFeatures, 61u);
+        planned.push_back({prefix + "linear_attn.norm.weight", shelf::io::SType::BF16,
+                           {kValueHeadDim}, make_bf16(kValueHeadDim, 67u + seed)});
+        planned.push_back({prefix + "linear_attn.dt_bias", shelf::io::SType::BF16, {kValueHeads},
+                           make_bf16(kValueHeads, 71u + seed)});
+        planned.push_back({prefix + "linear_attn.A_log", shelf::io::SType::BF16, {kValueHeads},
+                           make_bf16(kValueHeads, 73u + seed)});
+    } else {
+        matrix("self_attn.q_proj.weight", kAttnQRows, kHidden, 79u);
+        matrix("self_attn.k_proj.weight", kAttnKvRows, kHidden, 83u);
+        matrix("self_attn.v_proj.weight", kAttnKvRows, kHidden, 89u);
+        matrix("self_attn.o_proj.weight", kHidden, kAttnHeadFeatures, 97u);
+        planned.push_back({prefix + "self_attn.q_norm.weight", shelf::io::SType::BF16,
+                           {kAttnHeadDim}, make_bf16(kAttnHeadDim, 101u + seed)});
+        planned.push_back({prefix + "self_attn.k_norm.weight", shelf::io::SType::BF16,
+                           {kAttnHeadDim}, make_bf16(kAttnHeadDim, 103u + seed)});
+    }
+}
+
 // Adds the tensors a full model load asks for: embed / lm_head / final norm and, per
-// layer, the attention body. Shapes follow the synthetic config (4 heads, 2 kv heads,
-// head_dim 64) and the layer_types order (layer 0 is GDN).
+// layer, the attention body. Shapes follow the synthetic config and the layer_types
+// order (layer 0 is GDN).
 inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
                                     std::size_t layer) {
     const std::string prefix = "model.language_model.layers." + std::to_string(layer) + ".";
-    planned.push_back({prefix + "input_layernorm.weight", shelf::io::SType::BF16, {kHidden},
-                       make_bf16(kHidden, 31u + static_cast<std::uint32_t>(layer))});
-    planned.push_back({prefix + "post_attention_layernorm.weight", shelf::io::SType::BF16,
-                       {kHidden}, make_bf16(kHidden, 37u + static_cast<std::uint32_t>(layer))});
-    const auto matrix = [&](const std::string& name, std::size_t rows, std::size_t cols,
-                            std::uint32_t seed) {
-        planned.push_back({prefix + name, shelf::io::SType::BF16, {rows, cols},
-                           make_bf16(rows * cols, seed)});
+    add_layer_body(planned, prefix, layer % 2u == 0u, static_cast<std::uint32_t>(layer));
+}
+
+// Writes the MTP block the way a Qwen3.5-MoE checkpoint stores it: the block norms and
+// fc, one full-attention layer body, the router and shared expert, and the routed
+// experts as one fused bf16 rank-3 tensor per plane (gate rows first).
+inline void add_mtp_tensors(std::vector<PlannedTensor>& planned, Fixture& f,
+                            std::uint32_t shared_inter, std::uint32_t inter) {
+    const std::string layer = shelf::qwen35moe::moe_mtp_layer_prefix();
+    const std::string mlp = shelf::qwen35moe::moe_mtp_mlp_prefix();
+
+    planned.push_back({"mtp.pre_fc_norm_embedding.weight", shelf::io::SType::BF16, {kHidden},
+                       make_bf16(kHidden, 211u)});
+    planned.push_back({"mtp.pre_fc_norm_hidden.weight", shelf::io::SType::BF16, {kHidden},
+                       make_bf16(kHidden, 223u)});
+    planned.push_back({"mtp.norm.weight", shelf::io::SType::BF16, {kHidden},
+                       make_bf16(kHidden, 227u)});
+    planned.push_back({"mtp.fc.weight", shelf::io::SType::BF16, {kHidden, 2u * kHidden},
+                       make_bf16(kHidden * 2u * kHidden, 229u)});
+
+    add_layer_body(planned, layer, false, 200u);
+
+    const auto push_fused = [&](const std::string& name, std::size_t rows, std::size_t cols,
+                                std::uint32_t seed) {
+        std::vector<std::uint16_t> values;
+        values.reserve(kExperts * rows * cols);
+        for (std::uint32_t e = 0; e < kExperts; ++e) {
+            const std::vector<std::uint16_t> one = make_fused_values(rows, cols, seed + e);
+            values.insert(values.end(), one.begin(), one.end());
+        }
+        std::vector<std::uint8_t> bytes(values.size() * 2u);
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+        planned.push_back({name, shelf::io::SType::BF16, {kExperts, rows, cols},
+                           std::move(bytes)});
+        f.fused[name] = std::move(values);
     };
-    if (layer % 2u == 0u) {
-        matrix("linear_attn.in_proj_a.weight", kValueHeads, kHidden,
-               41u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_b.weight", kValueHeads, kHidden,
-               43u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_qkv.weight", kConvFeatures, kHidden,
-               47u + static_cast<std::uint32_t>(layer));
-        matrix("linear_attn.in_proj_z.weight", kValueFeatures, kHidden,
-               53u + static_cast<std::uint32_t>(layer));
-        planned.push_back({prefix + "linear_attn.conv1d.weight", shelf::io::SType::BF16,
-                           {kConvFeatures, 1u, kConvKernel},
-                           make_bf16(kConvFeatures * kConvKernel,
-                                     59u + static_cast<std::uint32_t>(layer))});
-        matrix("linear_attn.out_proj.weight", kHidden, kValueFeatures,
-               61u + static_cast<std::uint32_t>(layer));
-        planned.push_back({prefix + "linear_attn.norm.weight", shelf::io::SType::BF16,
-                           {kValueHeadDim},
-                           make_bf16(kValueHeadDim, 67u + static_cast<std::uint32_t>(layer))});
-        planned.push_back({prefix + "linear_attn.dt_bias", shelf::io::SType::BF16, {kValueHeads},
-                           make_bf16(kValueHeads, 71u + static_cast<std::uint32_t>(layer))});
-        planned.push_back({prefix + "linear_attn.A_log", shelf::io::SType::BF16, {kValueHeads},
-                           make_bf16(kValueHeads, 73u + static_cast<std::uint32_t>(layer))});
-    } else {
-        matrix("self_attn.q_proj.weight", kAttnQRows, kHidden,
-               79u + static_cast<std::uint32_t>(layer));
-        matrix("self_attn.k_proj.weight", kAttnKvRows, kHidden,
-               83u + static_cast<std::uint32_t>(layer));
-        matrix("self_attn.v_proj.weight", kAttnKvRows, kHidden,
-               89u + static_cast<std::uint32_t>(layer));
-        matrix("self_attn.o_proj.weight", kHidden, kAttnHeadFeatures,
-               97u + static_cast<std::uint32_t>(layer));
-        planned.push_back({prefix + "self_attn.q_norm.weight", shelf::io::SType::BF16,
-                           {kAttnHeadDim},
-                           make_bf16(kAttnHeadDim, 101u + static_cast<std::uint32_t>(layer))});
-        planned.push_back({prefix + "self_attn.k_norm.weight", shelf::io::SType::BF16,
-                           {kAttnHeadDim},
-                           make_bf16(kAttnHeadDim, 103u + static_cast<std::uint32_t>(layer))});
-    }
+    push_fused(mlp + "experts.gate_up_proj", 2u * inter, kHidden, 1000u);
+    push_fused(mlp + "experts.down_proj", kHidden, inter, 2000u);
+
+    planned.push_back({mlp + "gate.weight", shelf::io::SType::BF16, {kExperts, kHidden},
+                       make_bf16(kExperts * kHidden, 211u)});
+    planned.push_back({mlp + "shared_expert_gate.weight", shelf::io::SType::BF16, {1, kHidden},
+                       make_bf16(kHidden, 223u)});
+    planned.push_back({mlp + "shared_expert.gate_proj.weight", shelf::io::SType::BF16,
+                       {shared_inter, kHidden}, make_bf16(shared_inter * kHidden, 227u)});
+    planned.push_back({mlp + "shared_expert.up_proj.weight", shelf::io::SType::BF16,
+                       {shared_inter, kHidden}, make_bf16(shared_inter * kHidden, 229u)});
+    planned.push_back({mlp + "shared_expert.down_proj.weight", shelf::io::SType::BF16,
+                       {kHidden, shared_inter}, make_bf16(kHidden * shared_inter, 233u)});
 }
 
 // Writes one safetensors shard plus config.json. Tensors are emitted in checkpoint
@@ -251,11 +316,13 @@ inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
 // directory can go through a full model load.
 // shared_inter sets the checkpoint's shared_expert_intermediate_size, which a real
 // checkpoint may make different from the routed moe_intermediate_size.
+// with_mtp adds the MTP block, and requires model_level.
 inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
                           bool model_level = false, std::uint32_t shared_inter = kInter,
-                          std::uint32_t inter = kInter) {
+                          std::uint32_t inter = kInter, bool with_mtp = false) {
     f.dir = dir;
     f.config = text_config(shared_inter, inter);
+    f.mtp = with_mtp;
     std::error_code ec;
     fs::create_directories(dir, ec);
 
@@ -305,6 +372,8 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
                            {kHidden, shared_inter}, make_bf16(kHidden * shared_inter, 23u)});
         if (model_level) add_model_level_tensors(planned, layer);
     }
+
+    if (with_mtp) add_mtp_tensors(planned, f, shared_inter, inter);
 
     auto writer = shelf::io::SafetensorsWriter::create((dir / "model.safetensors").string());
     if (!writer.ok())

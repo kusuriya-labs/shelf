@@ -35,6 +35,10 @@ struct MoeExpertGroupPlan {
     uint32_t experts = 0;
     uint32_t scale_block_k = 0;
 
+    // Checkpoint location of this group's FFN tensors: "<layer prefix>mlp.". It is not a
+    // transformer layer prefix for a block that lives outside the layer array (MTP).
+    std::string mlp_prefix;
+
     uint32_t w13_rows = 0;
     uint32_t w13_cols = 0;
     uint32_t w13_k_padded = 0;
@@ -61,6 +65,13 @@ struct MoeExpertGroupPlan {
     uint32_t w13_row_ref_bytes_per_expert = 0;
     uint32_t w2_row_ref_bytes_per_expert = 0;
 
+    // A checkpoint that stores the routed experts as one fused rank-3 tensor per plane
+    // ([experts][rows][cols], gate rows first) has no per-expert logical names. The plane
+    // names replace sources, and the payload is in the checkpoint's own dtype.
+    bool fused_rank3 = false;
+    std::string w13_name;
+    std::string w2_name;
+
     // Sources in checkpoint file order (expert-major, down_proj then gate_proj then
     // up_proj). One source is one logical tensor: its codes plane and its E8M0 scale
     // plane. A layer's 6 physical tensors per expert are one contiguous run on disk.
@@ -74,10 +85,24 @@ std::size_t moe_expert_tensor_count(const Qwen35MoeTextConfig& config);
 // followed by suffix, e.g. "gate.weight" or "shared_expert.down_proj.weight".
 std::string moe_mlp_tensor_name(std::size_t layer, const std::string& suffix);
 
+// The "<prefix>mlp." location of one group's FFN tensors. A block that is not a
+// transformer layer (the MTP block) has its own prefix.
+std::string moe_mlp_prefix(std::size_t layer);
+std::string moe_mtp_layer_prefix();
+std::string moe_mtp_mlp_prefix();
+
 std::string moe_expert_tensor_name(std::size_t layer, uint32_t expert,
+                                   const char* projection, bool scale);
+
+// The same tensor name under an explicit mlp location (a plan's mlp_prefix).
+std::string moe_expert_tensor_name(const std::string& mlp, uint32_t expert,
                                    const char* projection, bool scale);
 
 Result<MoeExpertGroupPlan> build_moe_expert_group_plan(const Qwen35MoeTextConfig& config,
                                                         std::size_t layer);
+
+// The MTP block's routed experts: the same geometry as a transformer layer, stored fused
+// and in the checkpoint's own dtype, so the load requantizes them.
+Result<MoeExpertGroupPlan> build_moe_mtp_expert_group_plan(const Qwen35MoeTextConfig& config);
 
 }  // namespace shelf::qwen35moe

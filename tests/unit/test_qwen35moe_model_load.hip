@@ -81,6 +81,7 @@ static_assert(has_moe_ffn<moe::Qwen35MoeLayerWeights> && !has_dense_ffn<moe::Qwe
 static_assert(!has_nested_body<moe::Qwen35MoeModelWeights>);
 static_assert(!has_mtp_option<qhy::HybridLoadOptions>);
 static_assert(has_mtp_option<q35::Qwen35LoadOptions>);
+static_assert(has_mtp_option<moe::Qwen35MoeLoadOptions>);
 
 void check_ffn(const moe::MoeFfnWeights& ffn, const moe::MoeExpertGroupPlan& plan,
                std::uint32_t shared_inter, const std::string& tag) {
@@ -142,6 +143,11 @@ int main() {
     const fs::path dense_dir = root / "dense";
     if (!write_dense_config_only(dense_dir)) {
         std::printf("FAIL dense config write\n");
+        return 1;
+    }
+    Fixture mf;
+    if (!write_fixture(mf, root / "moe_mtp", false, true, kInter, kInter, true)) {
+        std::printf("FAIL moe mtp fixture write\n");
         return 1;
     }
 
@@ -295,8 +301,8 @@ int main() {
     }
 
     {
-        // The factory holds exactly one family's weights, and the dense-only MTP option is
-        // refused for a MoE checkpoint instead of being ignored.
+        // The factory holds exactly one family's weights, and an MTP request goes to the
+        // MoE loader instead of being refused.
         auto via_factory = shelf::models::load_model_weights((root / "moe").string(), gpu_arena,
                                                              stream);
         check(via_factory.ok(), "load_model_weights picks the MoE loader");
@@ -309,14 +315,77 @@ int main() {
             const auto* m = std::get_if<moe::Qwen35MoeModelWeights>(&via_factory.value());
             check(m != nullptr && m->layers.size() == kLayers,
                   "the factory holds the MoE layer array");
+            check(m != nullptr && !m->mtp.present,
+                  "a load without the MTP option leaves the block absent");
         }
 
         q35::Qwen35LoadOptions mtp;
         mtp.load_mtp_layers = true;
-        auto st = shelf::models::load_model_weights((root / "moe").string(), gpu_arena, stream,
-                                                    mtp);
-        check(!st.ok() && message_contains(st.status(), "does not load MTP layers"),
-              "the factory rejects an MTP request for a MoE checkpoint");
+        auto via_factory_mtp = shelf::models::load_model_weights((root / "moe_mtp").string(),
+                                                                 gpu_arena, stream, mtp);
+        check(via_factory_mtp.ok(), "the factory loads an MoE checkpoint's MTP block");
+        if (via_factory_mtp.ok()) {
+            const auto* m = std::get_if<moe::Qwen35MoeModelWeights>(&via_factory_mtp.value());
+            check(m != nullptr && m->mtp.present, "the factory holds the MTP block");
+        }
+
+        auto no_mtp = shelf::models::load_model_weights((root / "moe").string(), gpu_arena,
+                                                        stream, mtp);
+        check(!no_mtp.ok(), "a checkpoint without the MTP block fails an MTP load");
+    }
+
+    {
+        // The MTP block: the checkpoint stores its routed experts fused and bf16, and the
+        // loader turns them into the same native planes a transformer layer gets.
+        moe::Qwen35MoeLoadOptions options;
+        options.load_mtp_layers = true;
+        auto with_mtp = moe::load_qwen35moe_weights((root / "moe_mtp").string(), gpu_arena,
+                                                    stream, options);
+        check(with_mtp.ok(), "a MoE checkpoint with an MTP block loads");
+        if (with_mtp.ok()) {
+            const moe::Qwen35MoeModelWeights& w = with_mtp.value();
+            check(w.mtp.present, "the MTP block is present");
+            check(w.mtp.fc.rows == kHidden && w.mtp.fc.cols == 2u * kHidden,
+                  "mtp fc is [hidden, 2 * hidden]");
+            check(w.mtp.layer.is_gdn == false, "the MTP layer is a full attention body");
+            check(w.mtp.layer.ffn.expert_w13.rows != 0u &&
+                      w.mtp.layer.ffn.expert_w2.rows != 0u,
+                  "the MTP block keeps its routed experts out of the transformer layer array");
+            check_backbone(w.mtp.layer, false, "mtp layer");
+            check(moe::validate_qwen35moe_weights(w, mf.config).ok(),
+                  "the loaded MTP block passes validation");
+
+            auto plan = moe::build_moe_mtp_expert_group_plan(mf.config);
+            check(plan.ok(), "the MTP expert plan builds for the loaded config");
+            if (plan.ok()) {
+                check(moe::moe_ffn_weights_match(w.mtp.layer.ffn, plan.value(), mf.config.ffn)
+                          .ok(),
+                      "the MTP FFN matches the fused plan");
+                moe::Qwen35MoeMtpWeights absent;
+                check(!moe::validate_qwen35moe_mtp_weights(absent, plan.value(), mf.config).ok(),
+                      "an mtp block that was not loaded is rejected");
+            }
+
+            moe::Qwen35MoeModelWeights short_fc = with_mtp.value();
+            short_fc.mtp.fc.cols = kHidden;
+            check(!moe::validate_qwen35moe_weights(short_fc, mf.config).ok(),
+                  "an mtp fc that is not [hidden, 2 * hidden] is rejected");
+
+            moe::Qwen35MoeModelWeights no_norm = with_mtp.value();
+            no_norm.mtp.final_norm_weight = {};
+            check(!moe::validate_qwen35moe_weights(no_norm, mf.config).ok(),
+                  "an mtp block without its final norm is rejected");
+
+            moe::Qwen35MoeModelWeights no_experts = with_mtp.value();
+            no_experts.mtp.layer.ffn.expert_w13 = {};
+            check(!moe::validate_qwen35moe_weights(no_experts, mf.config).ok(),
+                  "an mtp block without its routed experts is rejected");
+
+            moe::Qwen35MoeModelWeights no_attention = with_mtp.value();
+            no_attention.mtp.layer.attn_q_proj = {};
+            check(!moe::validate_qwen35moe_weights(no_attention, mf.config).ok(),
+                  "an mtp body without its full attention weights is rejected");
+        }
     }
 
     fs::remove_all(root, ec);

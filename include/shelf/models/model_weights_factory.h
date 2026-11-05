@@ -36,8 +36,8 @@ Result<ModelFamily> probe_model_dir(const std::string& model_dir);
 // Reads config.json, loads with that family's loader, and runs that family's validation.
 // A dense checkpoint is rejected by the MoE loader and an MoE checkpoint by the dense
 // loader, so the probe cannot silently pick the wrong path. The options are the dense
-// ones; an MoE checkpoint rejects the dense-only MTP option instead of ignoring it. This
-// module does not decide how a model runs on the GPU.
+// ones; a pipeline stage is rejected for a model with grouped experts instead of being
+// ignored. This module does not decide how a model runs on the GPU.
 Result<LoadedModelWeights> load_model_weights(
     const std::string& model_dir,
     gpu::GpuArena& arena,
