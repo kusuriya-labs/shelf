@@ -202,6 +202,25 @@ void test_tp2_shapes() {
           "unknown bf16 shape still rejected");
 }
 
+void test_moe_tp2_shapes() {
+    // Qwen3.6-35B-A3B MoE at tp_size 2: the rank-local backbone widths. The routed expert
+    // plane splits along the expert axis, so its grouped widths are unchanged.
+    using shelf::execution::linear_shape_supported;
+    using shelf::execution::LinearComputeFamily;
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 2048u, 2048u),
+          "moe tp2 bf16 2048x2048 (in_proj_z, out_proj, o_proj)");
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 2048u, 256u),
+          "moe tp2 bf16 2048x256 (shared expert down)");
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 16u, 2048u),
+          "moe tp2 bf16 16x2048 (GDN in_proj_a, in_proj_b)");
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 256u, 2048u),
+          "moe tp2 bf16 256x2048 (k_proj, shared gate and up)");
+    check(linear_shape_supported(LinearComputeFamily::Bf16, 4096u, 2048u),
+          "moe tp2 bf16 4096x2048 (in_proj_qkv, q_proj)");
+    check(!linear_shape_supported(LinearComputeFamily::Bf16, 2048u, 1024u),
+          "moe tp2 bf16 2048x1024 stays unmeasured");
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +228,7 @@ int main() {
     test_fp8();
     test_9b_shapes();
     test_tp2_shapes();
+    test_moe_tp2_shapes();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

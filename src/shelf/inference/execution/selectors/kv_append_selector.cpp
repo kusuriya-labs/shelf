@@ -20,6 +20,9 @@ constexpr KvAppendRule kKvAppendRules[] = {
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, 4, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::BF16, 2, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, 2, 256, 16, 1, kMeasuredMaxRows },
+    // Qwen3.6-35B-A3B MoE at tp_size 2: one KV head per rank.
+    { ::shelf::kernel::KVCacheDType::BF16, 1, 256, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, 1, 256, 16, 1, kMeasuredMaxRows },
 };
 
 }  // namespace

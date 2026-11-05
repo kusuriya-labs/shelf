@@ -43,6 +43,18 @@ int main() {
           "hidden norm rows=0 -> Correctness");
 
     check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              0, 2048, 256, 512) == RmsNormImplementation::Optimized,
+          "tp2 rank per-head q norm BF16->F32 features 2048 group 256 -> Optimized");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerFeature,
+              0, 256, 256, 512) == RmsNormImplementation::Optimized,
+          "tp2 rank per-head k norm BF16->F32 one head (weight per feature) -> Optimized");
+    check(sel(DT::F32, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              1, 2048, 128, 1) == RmsNormImplementation::Optimized,
+          "tp2 rank GDN head norm F32->F32 features 2048 -> Optimized");
+    check(sel(DT::F32, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              1, 2048, 128, 2048) == RmsNormImplementation::Optimized,
+          "tp2 rank GDN head norm rows=2048 -> Optimized");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
               0, 4096, 256, 1) == RmsNormImplementation::Optimized,
           "Q norm BF16->F32 PG ONE_PLUS F=4096 rows=1 -> Optimized");
     check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,

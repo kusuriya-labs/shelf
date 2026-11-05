@@ -59,8 +59,12 @@ int main() {
           sel(2048, 1, 2048, 8, 24, 128, 128) == GdnRecurrenceImplementation::Optimized);
     check("27b tp2 rows=8193 out of range correctness",
           sel(8193, 1, 8193, 8, 24, 128, 128) == GdnRecurrenceImplementation::Correctness);
+    check("35b a3b tp2 heads optimized",
+          sel(1, 1, 1, 8, 16, 128, 128) == GdnRecurrenceImplementation::Optimized);
+    check("35b a3b tp2 rows=2048 optimized",
+          sel(2048, 1, 2048, 8, 16, 128, 128) == GdnRecurrenceImplementation::Optimized);
     check("unknown heads correctness",
-          sel(4, 2, 3, 8, 16, 128, 128) == GdnRecurrenceImplementation::Correctness);
+          sel(4, 2, 3, 8, 12, 128, 128) == GdnRecurrenceImplementation::Correctness);
     check("unknown head dims correctness",
           sel(4, 2, 3, 16, 32, 64, 64) == GdnRecurrenceImplementation::Correctness);
 

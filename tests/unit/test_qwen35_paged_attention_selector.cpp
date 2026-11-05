@@ -46,6 +46,15 @@ int main() {
     check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 4, 256, 16, 64, 1024) ==
               PagedAttentionImplementation::Optimized,
           "bf16 actual rows=64 vis=1024 -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 8, 1, 256, 16, 2048, 4096) ==
+              PagedAttentionImplementation::Optimized,
+          "bf16 tp2 rank geometry (q 8, kv 1) rows=2048 vis=4096 -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 8, 1, 256, 16, 1, 262144) ==
+              PagedAttentionImplementation::Optimized,
+          "fp8 tp2 rank geometry (q 8, kv 1) rows=1 vis=262144 -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 8, 1, 256, 16, 1, 262145) ==
+              PagedAttentionImplementation::Correctness,
+          "bf16 tp2 rank geometry above the measured visible range -> Correctness");
     check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 4, 256, 16, 2048, 4096) ==
               PagedAttentionImplementation::Optimized,
           "bf16 actual rows=2048 vis=4096 -> Optimized");

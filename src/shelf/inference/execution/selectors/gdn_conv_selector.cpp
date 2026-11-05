@@ -25,6 +25,9 @@ constexpr GdnConvRule kRules[] = {
       10240u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
     { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       5120u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
+    // Qwen3.6-35B-A3B MoE at tp_size 2: local conv features (Q and K each halved, V halved).
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      4096u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
 };
 
 }  // namespace

@@ -50,8 +50,12 @@ int main() {
           "max_request_rows=0 -> Correctness");
     check(sel(DT::BF16, DT::F32, 10240u, 3u, 8193u, 1u, 1u) == GdnConvImplementation::Correctness,
           "rows=8193 -> Correctness");
-    check(sel(DT::BF16, DT::F32, 4096u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Correctness,
+    check(sel(DT::BF16, DT::F32, 3072u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Correctness,
           "unknown conv_dim -> Correctness");
+    check(sel(DT::BF16, DT::F32, 4096u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Optimized,
+          "tp2 rank local conv_dim=4096 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::F32, 4096u, 3u, 2048u, 1u, 2048u) == GdnConvImplementation::Optimized,
+          "tp2 rank local conv_dim=4096 rows=2048 -> Optimized");
     check(sel(DT::BF16, DT::F32, 10240u, 2u, 1u, 1u, 1u) == GdnConvImplementation::Correctness,
           "history != 3 -> Correctness");
     check(sel(DT::F32, DT::F32, 10240u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Correctness,

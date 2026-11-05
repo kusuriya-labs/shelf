@@ -75,8 +75,28 @@ int main() {
                mk(ElementwiseProfile::SiluF32ToBf16, 8193, 8192u, 0)),
            C, "silu-f2b 8192 rows=8193 out of range");
     expect(select_elementwise_implementation(
-               mk(ElementwiseProfile::SiluF32ToBf16, 1, 4096u, 0)),
-           C, "silu-f2b 4096 wrong direction");
+               mk(ElementwiseProfile::SiluF32ToBf16, 1, 6144u, 0)),
+           C, "silu-f2b 6144 wrong direction");
+    for (uint32_t rows : {1u, 2048u}) {
+        expect(select_elementwise_implementation(
+                   mk(ElementwiseProfile::SiluF32ToBf16, rows, 4096u, 0)),
+               O, "silu-f2b 4096 (tp2 conv plane)");
+        expect(select_elementwise_implementation(
+                   mk(ElementwiseProfile::SiluBf16ToF32, rows, 2048u, 0)),
+               O, "silu-b2f 2048 (tp2 gate plane)");
+        expect(select_elementwise_implementation(
+                   mk(ElementwiseProfile::MulF32F32ToBf16, rows, 2048u, 0)),
+               O, "mul 2048 (tp2 gated mul)");
+        expect(select_elementwise_implementation(
+                   mk(ElementwiseProfile::SwigluBf16, rows, 256u, 0)),
+               O, "swiglu 256 (tp2 shared expert)");
+    }
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SplitBf16InterleavedHeads, 2048, 2048u, 256u)),
+           O, "split 2048 head 256 (tp2 q head split)");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SigmoidBf16ToF32, 512, 2048u, 0)),
+           O, "sigmoid 2048 (tp2 gate)");
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::SiluBf16ToF32, 1, 4096u, 0)),
            O, "silu-b2f 4096 rows=1");

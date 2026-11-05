@@ -41,6 +41,12 @@ constexpr PagedAttentionRule kPagedAttentionRules[] = {
       16, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       16, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
+    // (q_heads, kv_heads) = (8, 1) is the same model at tp_size 2: the same q_per_kv 8 and half
+    // the heads. The visible range is the model's max sequence length, as for (16, 2).
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
+      8, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
+      8, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
 };
 
 }  // namespace

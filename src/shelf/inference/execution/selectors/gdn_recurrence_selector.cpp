@@ -22,7 +22,9 @@ select_gdn_recurrence_implementation(const GdnRecurrenceSelectorInput& in) {
     constexpr Rule kRule_4b{16u, 32u, 128u, 128u, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows};
     constexpr Rule kRule_27b{16u, 48u, 128u, 128u, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows};
     constexpr Rule kRule_27b_tp2{8u, 24u, 128u, 128u, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows};
-    const Rule rules[] = {kRule_4b, kRule_27b, kRule_27b_tp2};
+    // Qwen3.6-35B-A3B MoE at tp_size 2: local key heads 8, local value heads 16.
+    constexpr Rule kRule_35b_a3b_tp2{8u, 16u, 128u, 128u, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows, 1u, kOptimizedMaxRows};
+    const Rule rules[] = {kRule_4b, kRule_27b, kRule_27b_tp2, kRule_35b_a3b_tp2};
     for (const auto& r : rules) {
         if (in.key_heads != r.key_heads || in.num_v_heads != r.num_v_heads ||
             in.head_k != r.head_k || in.head_v != r.head_v) {

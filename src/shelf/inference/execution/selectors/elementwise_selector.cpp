@@ -48,6 +48,14 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SwigluBf16, 128u, 0u, 1u, kMeasuredMaxGroupRows},
     {ElementwiseProfile::SigmoidBf16ToF32, 1u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::ResidualBf16, 2048u, 0u, 1u, kOptimizedMaxRows},
+    // Qwen3.6-35B-A3B MoE at tp_size 2: the GDN gate / conv planes and the shared expert are
+    // half as wide on a rank. Group rows and the routed expert widths do not change.
+    {ElementwiseProfile::SiluF32ToBf16, 4096u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16ToF32, 2048u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::MulF32F32ToBf16, 2048u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SwigluBf16, 256u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16InterleavedHeads, 2048u, 256u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16ToF32, 2048u, 0u, 1u, kOptimizedMaxRows},
 };
 
 }  // namespace

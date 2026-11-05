@@ -39,6 +39,10 @@ int main() {
           "27B q rope -> Optimized");
     check(sel(DT::F32, DT::BF16, 1024u, 256u, 64u, 1u) == RopeImplementation::Optimized,
           "27B k rope -> Optimized");
+    check(sel(DT::F32, DT::BF16, 2048u, 256u, 64u, 2048u) == RopeImplementation::Optimized,
+          "tp2 rank local query features 2048 -> Optimized");
+    check(sel(DT::F32, DT::BF16, 256u, 256u, 64u, 1u) == RopeImplementation::Optimized,
+          "tp2 rank local key features 256 -> Optimized");
     check(sel(DT::F32, DT::BF16, 4096u, 256u, 64u, 1u) == RopeImplementation::Optimized,
           "4B q rope -> Optimized");
     check(sel(DT::F32, DT::BF16, 6144u, 256u, 64u, 2048u) == RopeImplementation::Optimized,

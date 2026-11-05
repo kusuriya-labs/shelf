@@ -38,6 +38,12 @@ int main() {
           "bf16 actual rows=1 -> Optimized");
     check(sel(KVCacheDType::BF16, 4, 256, 16, 64) == KvAppendImplementation::Optimized,
           "bf16 actual rows=64 -> Optimized");
+    check(sel(KVCacheDType::BF16, 1, 256, 16, 2048) == KvAppendImplementation::Optimized,
+          "bf16 one kv head (tp2 rank) rows=2048 -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, 1, 256, 16, 1) == KvAppendImplementation::Optimized,
+          "fp8 one kv head (tp2 rank) rows=1 -> Optimized");
+    check(sel(KVCacheDType::BF16, 3, 256, 16, 1) == KvAppendImplementation::Correctness,
+          "bf16 unknown kv_heads=3 -> Correctness");
     check(sel(KVCacheDType::BF16, 4, 256, 16, 2048) == KvAppendImplementation::Optimized,
           "bf16 actual rows=2048 -> Optimized");
     check(sel(KVCacheDType::BF16, 4, 256, 16, 0) == KvAppendImplementation::Correctness,

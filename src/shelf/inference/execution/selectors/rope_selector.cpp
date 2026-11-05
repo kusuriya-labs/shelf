@@ -27,6 +27,11 @@ constexpr RopeRule kRules[] = {
       3072u, 256u, 64u, 1u, kMeasuredMaxRows },
     { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
       512u, 256u, 64u, 1u, kMeasuredMaxRows },
+    // Qwen3.6-35B-A3B MoE at tp_size 2: local query features 2048, local key features 256.
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
+      2048u, 256u, 64u, 1u, kMeasuredMaxRows },
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::BF16,
+      256u, 256u, 64u, 1u, kMeasuredMaxRows },
 };
 
 }  // namespace

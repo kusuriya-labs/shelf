@@ -83,6 +83,13 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 32, 2048, kFamilyBf16 },
     { 2048, 4096, kFamilyBf16 },
     { 248320, 2048, kFamilyBf16 },
+    // Qwen3.6-35B-A3B MoE at tp_size 2. The expert plane splits along the expert axis, so the
+    // grouped widths are unchanged; what halves is the backbone: in_proj_z / out_proj / o_proj
+    // (2048 by 2048), the shared expert down (2048 by 256) and the GDN a / b projections
+    // (16 by 2048). The shared gate / up (256 by 2048) and k_proj (256 by 2048) are already here.
+    { 2048, 2048, kFamilyBf16 },
+    { 2048, 256, kFamilyBf16 },
+    { 16, 2048, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {

@@ -38,6 +38,10 @@ constexpr RmsNormRule kRmsNormRules[] = {
     { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
       ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       1, 4096, 128, 1, kMeasuredMaxRows },
+    // The GDN head norm of Qwen3.6-35B-A3B at tp_size 2 (local value features 2048).
+    { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      1, 2048, 128, 1, kMeasuredMaxRows },
     { ::shelf::runtime::ValueDType::F32, ::shelf::runtime::ValueDType::F32,
       ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       1, 6144, 128, 1, kMeasuredMaxRows },
@@ -50,6 +54,15 @@ constexpr RmsNormRule kRmsNormRules[] = {
     { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 512, 256, 1, kMeasuredMaxRows },
+    // The per-head QK norms of Qwen3.6-35B-A3B at tp_size 2: local query features 2048 with
+    // head_dim 256 groups. The local key plane is one head wide, so the weight vector is as
+    // long as the plane and the resolve reads it as PER_FEATURE.
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      0, 2048, 256, 1, kMeasuredMaxRows },
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
+      0, 256, 256, 1, kMeasuredMaxRows },
     { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 3072, 256, 1, kMeasuredMaxRows },

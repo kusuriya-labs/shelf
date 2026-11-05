@@ -156,6 +156,10 @@ const bool g_op_sync_enabled = [] {
     const char* e = std::getenv("SHELF_OP_SYNC");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
 }();
+const bool g_op_fallback_debug_enabled = [] {
+    const char* e = std::getenv("SHELF_OP_FALLBACK_DEBUG");
+    return e != nullptr && e[0] != '\0';
+}();
 struct OpDumpTimer {
     std::chrono::steady_clock::time_point t0;
     const ::shelf::runtime::KernelId id;
@@ -484,6 +488,28 @@ Status execute_program_range(
                           "raise the elementwise allowlist or lower the row budget)",
                           i, ::shelf::runtime::kernel_to_name(binding.kernel_id), domain.rows);
             return Status::unsupported(detail, __FILE__, __LINE__);
+        }
+        if (g_op_fallback_debug_enabled) {
+            std::fprintf(stderr, "FALLBACK op %zu %s rows=%u io=", i,
+                         ::shelf::runtime::kernel_to_name(binding.kernel_id), domain.rows);
+            const uint32_t slots = binding.input_count + binding.output_count;
+            for (uint32_t o = 0u; o < slots; ++o) {
+                const uint32_t slot = o < binding.input_count
+                                          ? binding.input_slots[o]
+                                          : binding.output_slots[o - binding.input_count];
+                const Result<HostResolvedValue> v =
+                    resolve_host_value(program, ::shelf::runtime::ValueId{slot}, ctx);
+                if (!v.ok()) {
+                    std::fprintf(stderr, " v%u(?)", slot);
+                    continue;
+                }
+                std::fprintf(stderr, " v%u(f%u,dt%u,dom%u,s%u)", slot,
+                             v.value().feature_count, static_cast<unsigned>(v.value().dtype),
+                             static_cast<unsigned>(v.value().row_domain), v.value().row_stride);
+            }
+            if (binding.weight_index != ::shelf::runtime::kNoWeight)
+                std::fprintf(stderr, "  w=%u", binding.weight_index);
+            std::fprintf(stderr, "\n");
         }
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
