@@ -4,6 +4,7 @@
 #include <shelf/inference/state/paged_sequence_state.h>
 #include <shelf/inference/state/sequence_slot_pool.h>
 #include <shelf/inference/state/gdn_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
 
 namespace shelf {
 namespace kernel {
@@ -23,6 +24,7 @@ struct ModelDispatchStateView {
     ::shelf::state::PagedKVPoolBF16View kv_bf16{};
     ::shelf::state::PagedKVPoolFP8View kv_fp8{};
     PleConvStateView ple_conv{};
+    ::shelf::state::QsaKeyStatePoolDeviceView qsa{};
     uint32_t kv_dtype = 0;
 };
 

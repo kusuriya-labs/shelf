@@ -189,7 +189,9 @@ attn HyperConnection mix
 - shared expert は gate_proj / up_proj / down_proj の dense EXL3 linear と
   `shared_expert_gate` の sigmoid で表現する。
 - `MoeCombineNode` が expert の部分和と shared expert を token row に戻す。
-- QSA（full_attention）層は indexer primitive が入るまで `unsupported` とする。
+- QSA（full_attention）層は sparse attention の mask 入力が入るまで `unsupported` とする。
+  indexer の graph lowering と key state は実装済みで、残るのは paged attention への
+  token mask 適用である。
 
 `test_qwen4exp_layer` は GDN 層について次を固定する。
 
@@ -240,11 +242,58 @@ mean → RMSNorm → partial rope を行い、pooled key を書き出す。
 
 `test_qsa_pool_scores` は head_dim 128 で CPU 参照と比較する。
 `qsa_topk` はまだ 1 thread / row の正しさ優先実装である。
-残りは multi-sequence の key state pool、top-k の性能版、
-causal mask への AND、QSA の graph 化と main attention への接続である。
 
-残りは `PLE_CONV` の state pool を Qwen4Exp runtime に持たせること、
-QSA の top-k / mask / attention 接続、4 stream を運ぶ runtime state の接続である。
+### QSA key state pool
+
+`QsaKeyStatePool` は sequence slot ごとに次を持つ。
+
+| 領域 | 形状 |
+| --- | --- |
+| pooled key | `[qsa_layers][max_blocks][head_dim]` BF16 |
+| partial key | `[qsa_layers][compress_ratio][head_dim]` BF16 |
+| counts | `[qsa_layers][2]` U32（完了 block 数、partial 行数） |
+
+`initialize` / `reset` / `release` / `copy_slot_from` を持ち、`device_view()` が
+`ModelDispatchStateView::qsa` に入る。prefix cache の slot copy は pooled key、
+partial key、両 count をまとめて複製する。
+
+multi-sequence 用に次の batch kernel を追加した。
+
+| kernel | 形状 |
+| --- | --- |
+| `launch_qsa_key_cache_batch` | request ごとに 1 block。行を順に partial へ積み、4 行で pooled key を確定する |
+| `launch_qsa_scores_batch` | 行ごとに `row_sequence_slots` から sequence の pooled key を解決する |
+| `launch_qsa_topk_batch` | 行位置から可視 block 数を求めて top-k する |
+
+`positions` と `DeviceRequestDescriptor` は device memory から読むため、decode で
+行数や位置を kernel 引数に焼き込まない。
+
+### QSA graph 接続
+
+次の primitive を追加した。
+
+| primitive | 内容 |
+| --- | --- |
+| `QSA_ROPE` | indexer query の partial rope。`position_scale` 1〜2 |
+| `QSA_KEY_CACHE` | raw key の partial block と pooled key の更新 |
+| `QSA_SCORES` | query と pooled key の block score |
+| `QSA_TOPK` | block score の top-k |
+| `QSA_EXPAND_MASK` | selected block を token mask へ展開 |
+
+`emit_qwen4exp_qsa_indexer` は `index_qk_proj` を q / k に分け、q に
+`index_q_layernorm` と `QSA_ROPE`、k に `QSA_KEY_CACHE` を適用し、
+`QSA_SCORES` → `QSA_TOPK` → 任意の `QSA_EXPAND_MASK` を接続する。
+
+`test_qwen4exp_qsa_site` は graph が
+`LINEAR,RMS_NORM,QSA_ROPE,QSA_KEY_CACHE,QSA_SCORES,QSA_TOPK,QSA_EXPAND_MASK`
+に lower され、program が同じ順に dispatch を出し、key cache と scores が
+同じ `QSA_KEY_STATE` descriptor を共有することを固定する。
+
+`test_qsa_state_pool` は 2 sequence の key cache を CPU 参照と比較し、
+scores / top-k / mask と slot copy を検証する。
+
+残りは top-k の性能版、`PagedAttention` への token mask 入力、
+QSA 層全体の lowering、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

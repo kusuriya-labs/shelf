@@ -609,6 +609,92 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::QSA_KEY_CACHE: {
+            const auto& n = node_as<QsaKeyCacheNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_KEY_CACHE);
+            b.descriptor_slot =
+                register_state(c, node.state_outputs.front(),
+                               PrimitiveStateKind::QSA_KEY_STATE, n.state_index) +
+                1;
+            b.parameter_index0 = n.parameter_index;
+            b.group_size = n.compress_ratio;
+            b.rotary_dim = n.rotary_dim;
+            b.flags = n.max_blocks;
+            b.scalar_a = n.theta;
+            b.scalar_b = n.position_scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            b.output_count = 0;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_SCORES: {
+            const auto& n = node_as<QsaScoresNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_SCORES);
+            b.descriptor_slot =
+                register_state(c, node.state_inputs.front(),
+                               PrimitiveStateKind::QSA_KEY_STATE, n.state_index) +
+                1;
+            b.group_size = n.n_heads;
+            b.rotary_dim = n.head_dim;
+            b.flags = n.blocks;
+            b.scalar_a = n.scale;
+            b.scalar_b = static_cast<float>(n.compress_ratio);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_TOPK: {
+            const auto& n = node_as<QsaTopkNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_TOPK);
+            b.group_size = n.k;
+            b.flags = n.blocks;
+            b.scalar_b = static_cast<float>(n.compress_ratio);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_ROPE: {
+            const auto& n = node_as<QsaRopeNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_ROPE);
+            b.group_size = n.heads;
+            b.rotary_dim = n.rotary_dim;
+            b.flags = n.head_dim;
+            b.scalar_a = n.theta;
+            b.scalar_b = n.position_scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_EXPAND_MASK: {
+            const auto& n = node_as<QsaExpandMaskNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_EXPAND_MASK);
+            b.group_size = n.compress_ratio;
+            b.flags = n.total_len;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::KV_APPEND: {
             const auto& n = node_as<KvAppendNode>(node);
             DispatchBinding b = base_binding(KernelId::KV_APPEND);

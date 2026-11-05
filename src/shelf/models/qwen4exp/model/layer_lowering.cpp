@@ -12,7 +12,8 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
                                         const char* debug_prefix) {
     if (!layer.is_gdn) {
         return Status::unsupported(
-            "Qwen4Exp QSA layer lowering is not implemented yet", __FILE__, __LINE__);
+            "Qwen4Exp QSA layer lowering needs the attention mask input (Gate B)",
+            __FILE__, __LINE__);
     }
     ::shelf::runtime::ValueId input_hyper = hyper;
     if (layer.has_ple) {

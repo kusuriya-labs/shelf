@@ -557,9 +557,25 @@ QSA indexer のうち、状態を持たない計算も実装した。
 補正済み周波数を使う。`test_qsa_pool_scores` が rope 2x と key cache を
 CPU 参照と比較する。
 `qsa_topk` は 1 thread / row の正しさ優先実装である。
-残りは multi-sequence の key state pool、top-k の性能版、
-causal mask への AND、QSA の graph 化と main attention への接続、
-4 stream を運ぶ runtime state の接続である。
+
+Gate A として、QSA の key state pool と indexer の graph 接続を追加した。
+
+- `QsaKeyStatePool`: sequence slot ごとの pooled key / partial key / counts と、
+  `initialize` / `reset` / `release` / `copy_slot_from`。
+- multi-sequence kernel: `qsa_key_cache_batch`、`qsa_scores_batch`、
+  `qsa_topk_batch`。位置と request は device memory から読む。
+- primitive: `QSA_ROPE`、`QSA_KEY_CACHE`、`QSA_SCORES`、`QSA_TOPK`、
+  `QSA_EXPAND_MASK`。
+- `emit_qwen4exp_qsa_indexer`: `index_qk_proj` → q/k 分割 →
+  `index_q_layernorm` → `QSA_ROPE` → `QSA_KEY_CACHE` → `QSA_SCORES` →
+  `QSA_TOPK` → `QSA_EXPAND_MASK`。
+- `test_qsa_state_pool` が 2 sequence の pooled / partial / counts / slot copy、
+  scores / top-k / mask を CPU 参照と比較する。
+- `test_qwen4exp_qsa_site` が graph と program の dispatch 順、state descriptor を
+  固定する。
+
+QSA 層全体はまだ `unsupported` である。残りは `PagedAttention` への token mask
+入力（Gate B）、QSA 層の lowering、4 stream を運ぶ runtime state の接続である。
 
 #### 結論
 

@@ -164,6 +164,7 @@ add_library(shelf_inference_state STATIC
     src/shelf/inference/state/paged_sequence_state.cpp
     src/shelf/inference/state/sequence_slot_pool.cpp
     src/shelf/inference/state/gdn_state_pool.cpp
+    src/shelf/inference/state/qsa_state_pool.cpp
     src/shelf/inference/state/paged_kv_pool.cpp
 )
 target_compile_features(shelf_inference_state PRIVATE cxx_std_20)
@@ -212,6 +213,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/moe_dispatch.hip
     src/shelf/inference/execution/hyper_connection_dispatch.hip
     src/shelf/inference/execution/ple_dispatch.hip
+    src/shelf/inference/execution/qsa_dispatch.hip
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
@@ -306,6 +308,7 @@ set(
     src/shelf/models/qwen4exp/model/moe_lowering.cpp
     src/shelf/models/qwen4exp/model/layer_lowering.cpp
     src/shelf/models/qwen4exp/model/ple_lowering.cpp
+    src/shelf/models/qwen4exp/model/qsa_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
 )

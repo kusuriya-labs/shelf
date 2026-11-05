@@ -36,6 +36,11 @@ enum class PrimitiveKind : uint16_t {
     PLE_GATE = 24,
     PLE_BROADCAST_MUL = 25,
     PLE_CONV = 26,
+    QSA_KEY_CACHE = 27,
+    QSA_SCORES = 28,
+    QSA_TOPK = 29,
+    QSA_EXPAND_MASK = 30,
+    QSA_ROPE = 31,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -67,6 +72,11 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::PLE_GATE: return "PLE_GATE";
         case PrimitiveKind::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
         case PrimitiveKind::PLE_CONV: return "PLE_CONV";
+        case PrimitiveKind::QSA_KEY_CACHE: return "QSA_KEY_CACHE";
+        case PrimitiveKind::QSA_SCORES: return "QSA_SCORES";
+        case PrimitiveKind::QSA_TOPK: return "QSA_TOPK";
+        case PrimitiveKind::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
+        case PrimitiveKind::QSA_ROPE: return "QSA_ROPE";
     }
     return "UNKNOWN";
 }
@@ -257,6 +267,57 @@ struct PleConvNode {
     uint32_t state_index = 0;
 };
 
+// Partial rotary of the QSA indexer query heads. Unlike ROPE, this carries the position
+// scale explicitly and runs the QSA rope kernel (up to 2x).
+struct QsaRopeNode {
+    RowwiseShapeKey shape;  // heads * head_dim
+    uint32_t heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t rotary_dim = 0;
+    float theta = 10000000.0f;
+    float position_scale = 1.0f;
+};
+
+// Qwen4Exp QSA indexer key cache. Raw indexer keys are appended to the per-sequence
+// partial block; every `compress_ratio` rows complete one pooled block key. The pooled
+// key is mean -> RMSNorm(1 + parameter) -> partial RoPE at the block's first position.
+struct QsaKeyCacheNode {
+    RowwiseShapeKey shape;  // indexer head_dim
+    uint32_t parameter_index = UINT32_MAX;
+    uint32_t state_index = 0;
+    uint32_t compress_ratio = 4;
+    uint32_t rotary_dim = 0;
+    uint32_t max_blocks = 0;
+    float theta = 10000000.0f;
+    float position_scale = 1.0f;
+};
+
+// Per-row indexer block scores from the query against the sequence's pooled keys.
+struct QsaScoresNode {
+    RowwiseShapeKey shape;  // index_heads * index_head_dim
+    uint32_t state_index = 0;
+    uint32_t n_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t blocks = 0;
+    uint32_t compress_ratio = 4;
+    float scale = 1.0f;
+};
+
+// Top-k block selection over the scores, with -1 padding past the visible blocks.
+struct QsaTopkNode {
+    RowwiseShapeKey shape;  // blocks
+    uint32_t k = 0;
+    uint32_t blocks = 0;
+    uint32_t compress_ratio = 4;
+};
+
+// Expand the selected blocks to a token mask and AND it with causality.
+struct QsaExpandMaskNode {
+    RowwiseShapeKey shape;  // selected blocks
+    uint32_t total_len = 0;
+    uint32_t compress_ratio = 4;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -284,7 +345,12 @@ using PrimitiveNode = std::variant<
     HyperApplyNode,
     PleGateNode,
     PleBroadcastMulNode,
-    PleConvNode
+    PleConvNode,
+    QsaKeyCacheNode,
+    QsaScoresNode,
+    QsaTopkNode,
+    QsaExpandMaskNode,
+    QsaRopeNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -317,6 +383,11 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, PleGateNode>) return PrimitiveKind::PLE_GATE;
         else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) return PrimitiveKind::PLE_BROADCAST_MUL;
         else if constexpr (std::is_same_v<T, PleConvNode>) return PrimitiveKind::PLE_CONV;
+        else if constexpr (std::is_same_v<T, QsaKeyCacheNode>) return PrimitiveKind::QSA_KEY_CACHE;
+        else if constexpr (std::is_same_v<T, QsaScoresNode>) return PrimitiveKind::QSA_SCORES;
+        else if constexpr (std::is_same_v<T, QsaTopkNode>) return PrimitiveKind::QSA_TOPK;
+        else if constexpr (std::is_same_v<T, QsaExpandMaskNode>) return PrimitiveKind::QSA_EXPAND_MASK;
+        else if constexpr (std::is_same_v<T, QsaRopeNode>) return PrimitiveKind::QSA_ROPE;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

@@ -488,6 +488,8 @@ int main() {
         args.selected_per_row = kSelected;
         args.compress_ratio = kCr;
         args.total_len = kTotal;
+        args.selected_row_stride = kSelected;
+        args.mask_row_stride = kTotal;
         check(shelf::kernel::launch_qsa_expand_mask(args, nullptr) == hipSuccess,
               "qsa expand mask launch");
         check(hipDeviceSynchronize() == hipSuccess, "qsa expand mask sync");

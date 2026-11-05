@@ -40,6 +40,11 @@ enum class KernelId : uint32_t {
     PLE_GATE,
     PLE_BROADCAST_MUL,
     PLE_CONV,
+    QSA_KEY_CACHE,
+    QSA_SCORES,
+    QSA_TOPK,
+    QSA_EXPAND_MASK,
+    QSA_ROPE,
     COUNT,
 };
 
@@ -85,6 +90,11 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::PLE_GATE: return "PLE_GATE";
         case KernelId::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
         case KernelId::PLE_CONV: return "PLE_CONV";
+        case KernelId::QSA_KEY_CACHE: return "QSA_KEY_CACHE";
+        case KernelId::QSA_SCORES: return "QSA_SCORES";
+        case KernelId::QSA_TOPK: return "QSA_TOPK";
+        case KernelId::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
+        case KernelId::QSA_ROPE: return "QSA_ROPE";
         default: return "UNKNOWN";
     }
 }

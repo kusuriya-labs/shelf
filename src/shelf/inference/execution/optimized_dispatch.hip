@@ -10,6 +10,7 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
 #include <shelf/inference/execution/ple_dispatch.h>
+#include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
@@ -765,6 +766,16 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_ple_broadcast_mul(program, b, ctx, stream);
         case KernelId::PLE_CONV:
             return try_launch_ple_conv(program, b, ctx, stream);
+        case KernelId::QSA_KEY_CACHE:
+            return try_launch_qsa_key_cache(program, b, ctx, stream);
+        case KernelId::QSA_SCORES:
+            return try_launch_qsa_scores(program, b, ctx, stream);
+        case KernelId::QSA_TOPK:
+            return try_launch_qsa_topk(program, b, ctx, stream);
+        case KernelId::QSA_EXPAND_MASK:
+            return try_launch_qsa_expand_mask(program, b, ctx, stream);
+        case KernelId::QSA_ROPE:
+            return try_launch_qsa_rope(program, b, ctx, stream);
         default:
             return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }

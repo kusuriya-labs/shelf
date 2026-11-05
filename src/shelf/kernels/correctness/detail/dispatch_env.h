@@ -100,6 +100,8 @@ __device__ __forceinline__ float load_elem(const ResolvedValue& v, size_t idx) {
             return static_cast<const float*>(v.ptr)[idx];
         case ValueDType::I32:
             return static_cast<float>(static_cast<const int32_t*>(v.ptr)[idx]);
+        case ValueDType::U8:
+            return static_cast<float>(static_cast<const uint8_t*>(v.ptr)[idx]);
     }
     return 0.f;
 }
@@ -114,6 +116,9 @@ __device__ __forceinline__ void store_elem(const ResolvedValue& v, size_t idx, f
             break;
         case ValueDType::I32:
             static_cast<int32_t*>(v.ptr)[idx] = static_cast<int32_t>(x);
+            break;
+        case ValueDType::U8:
+            static_cast<uint8_t*>(v.ptr)[idx] = static_cast<uint8_t>(x);
             break;
     }
 }
@@ -138,6 +143,8 @@ __device__ __forceinline__ float load_parameter_elem(
             return static_cast<const float*>(ptr)[index];
         case ValueDType::I32:
             return static_cast<float>(static_cast<const int32_t*>(ptr)[index]);
+        case ValueDType::U8:
+            return static_cast<float>(static_cast<const uint8_t*>(ptr)[index]);
     }
     return 0.f;
 }

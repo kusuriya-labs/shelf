@@ -24,6 +24,7 @@ enum class PrimitiveStateKind : uint8_t {
     GDN_CONV_STATE = 1,
     GDN_RECURRENCE_STATE = 2,
     PLE_CONV_STATE = 3,
+    QSA_KEY_STATE = 4,
 };
 
 inline const char* to_string(PrimitiveStateKind k) noexcept {
@@ -32,6 +33,7 @@ inline const char* to_string(PrimitiveStateKind k) noexcept {
         case PrimitiveStateKind::GDN_CONV_STATE: return "GDN_CONV_STATE";
         case PrimitiveStateKind::GDN_RECURRENCE_STATE: return "GDN_RECURRENCE_STATE";
         case PrimitiveStateKind::PLE_CONV_STATE: return "PLE_CONV_STATE";
+        case PrimitiveStateKind::QSA_KEY_STATE: return "QSA_KEY_STATE";
     }
     return "UNKNOWN";
 }
