@@ -1,6 +1,8 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/runtime/program/program.h>
 
 #include <cstdio>
 #include <string>
@@ -86,6 +88,36 @@ int main() {
     check(exl3_4096 - rows4096 ==
               shelf::qwen35::runtime::exl3_workspace_bytes(qwen35_padded_row_count(4096u)),
           "reserve adds the trellis staging term only when the model uses it");
+
+    const auto binding = [](::shelf::runtime::KernelId id) {
+        ::shelf::runtime::DispatchBinding b;
+        b.kernel_id = id;
+        return b;
+    };
+    const ::shelf::runtime::Program plain_program = [&binding] {
+        ::shelf::runtime::Program p;
+        p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_BF16));
+        return p;
+    }();
+    check(!shelf::qwen35::program_needs_exl3_workspace(plain_program),
+          "no trellis workspace for a program that never runs one");
+    const ::shelf::runtime::Program trellis_program = [&binding] {
+        ::shelf::runtime::Program p;
+        p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_BF16));
+        p.dispatches.push_back(binding(::shelf::runtime::KernelId::LINEAR_EXL3_W16A16));
+        return p;
+    }();
+    check(shelf::qwen35::program_needs_exl3_workspace(trellis_program),
+          "trellis workspace for a program that runs one");
+    ::shelf::runtime::ProgramSet plain;
+    plain.programs[0] = plain_program;
+    check(!shelf::qwen35::program_set_needs_exl3_workspace(plain),
+          "no trellis workspace for a program set without one");
+    ::shelf::runtime::ProgramSet trellis;
+    trellis.programs[3] = plain_program;
+    trellis.programs[7] = trellis_program;
+    check(shelf::qwen35::program_set_needs_exl3_workspace(trellis),
+          "trellis workspace when any bucket runs such a linear");
 
     if (g_fail != 0) {
         std::printf("executor footprint: failed=%d\n", g_fail);

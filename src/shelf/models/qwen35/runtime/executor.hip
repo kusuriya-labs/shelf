@@ -214,7 +214,7 @@ Status build_host_execution_context(
     }
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
-    if (executor.exl3_workspace) {
+    if (program_needs_exl3_workspace(program)) {
         const uint64_t exl3_xrot_offset =
             (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
         if (exl3_xrot_offset + runtime::kExl3XrotBytes >
@@ -1607,6 +1607,20 @@ std::vector<LayerOverrideSource> read_layer_override_sources(uint32_t hidden) {
     return out;
 }
 
+bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noexcept {
+    for (const ::shelf::runtime::DispatchBinding& binding : program.dispatches) {
+        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16) return true;
+    }
+    return false;
+}
+
+bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept {
+    for (const ::shelf::runtime::Program& prog : programs.programs) {
+        if (program_needs_exl3_workspace(prog)) return true;
+    }
+    return false;
+}
+
 Result<Executor> create_executor(
     ExecutorModelInput&& input,
     SequenceSlotPool& sequence_pool,
@@ -1972,17 +1986,7 @@ Result<Executor> create_executor(
                     std::max(max_staging_bytes, ::shelf::runtime::max_host_staging_bytes(prog));
             }
             constexpr std::size_t kScratchBytes = 3145728 * sizeof(float);
-            bool exl3_workspace = false;
-            for (const auto& prog : built_set.programs) {
-                for (const auto& d : prog.dispatches) {
-                    if (d.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16) {
-                        exl3_workspace = true;
-                        break;
-                    }
-                }
-                if (exl3_workspace) break;
-            }
-            ex.exl3_workspace = exl3_workspace;
+            const bool exl3_workspace = program_set_needs_exl3_workspace(built_set);
             const std::size_t exec_workspace_bytes =
                 max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes +
                 (exl3_workspace ? runtime::exl3_workspace_bytes(Npad) : 0u) + 512u;

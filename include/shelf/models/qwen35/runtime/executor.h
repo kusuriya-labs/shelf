@@ -98,6 +98,14 @@ struct GraphCacheSlot {
     bool valid = false;
 };
 
+// True when one program runs a linear carried in the rotated-domain trellis form. The
+// executor's staging planes for that form are large, so they exist only for a program that
+// uses them: everything else takes that arena space as KV pool.
+bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noexcept;
+
+// True when any program of the set does. This is what sizes the execution workspace.
+bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept;
+
 struct Executor {
     Executor();
     ~Executor() noexcept;
@@ -134,7 +142,6 @@ struct Executor {
     int tp_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
-    bool exl3_workspace = false;
     ::shelf::runtime::WeightSlot* host_weight_table = nullptr;
     ::shelf::runtime::StaticParameterSlot* host_parameter_table = nullptr;
     std::vector<::shelf::runtime::StaticParameterSlot> host_parameter_slots;
