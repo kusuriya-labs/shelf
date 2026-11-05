@@ -53,20 +53,21 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 12.16 / 12.20 / 12.23 tok/s（81.8〜82.3 µs/token） |
-| prefill 128 | 199.17 / 199.67 / 200.16 tok/s（5.00〜5.02 ms/token） |
+| decode | 13.63 / 13.64 / 13.66 tok/s（73.2〜73.4 µs/token） |
+| prefill 128 | 224.86 / 226.06 / 226.46 tok/s（4.42〜4.45 ms/token） |
 
-- measurement revision: `d0b2f08`（batch-aware split-K、xrot race 修正）
+- measurement revision: `336b184`（ring window の 4-word 一括ロード、batch-aware split-K、
+  xrot race 修正）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
 - prefill command:
   `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens 128 --runs 3 --warmup 1 --device 1 --arena-gib 28`
-- split-K を無効にした同一条件（`SHELF_EXL3_SPLIT=1`）は 8.85 tok/s。
+- split-K を無効にした同一条件（`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。
   auto split は n=5120 / n=1024 で 8、n=17408 で 3（scratch 上限）を使う。
   reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 12.67〜12.82 tok/s、MTP-2 は 14.30 tok/s（`--arena-gib 27`）。
+  E2E decode は 14.50 tok/s、MTP-2 は 15.48 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
