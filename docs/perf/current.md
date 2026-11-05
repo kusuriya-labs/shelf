@@ -9,8 +9,8 @@
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
-2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist
-である。**
+2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist、
+2026-11-05 の EXL3 W16A16 decode / prefill である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -44,6 +44,65 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | TP=2 scaling | `test_qwen35_tp_e2e` | decode tok/s p50 |
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
+
+## 2026-11-05 EXL3 W16A16 decode / prefill
+
+`models/Qwen3.8-27B-exl3`（mul1、4 bpw、lm_head 6 bpw）を TP1 / bf16 KV / GPU 1 枚で
+計測した。EXL3 は production target（FP8 / BF16）とは別の経路であり、以下の値は
+EXL3 経路の現在値である。
+
+| 条件 | 値 |
+| --- | ---: |
+| decode | 20.09 / 20.16 / 20.47 tok/s（48.9〜49.8 µs/token） |
+| prefill 128 | 632.98 / 633.17 / 636.39 tok/s（1.571〜1.580 ms/token） |
+| prefill 256 | 800.07 / 800.13 / 801.87 tok/s（1.247〜1.250 ms/token） |
+| prefill 512 | 1096.12 / 1097.37 / 1104.84 tok/s（0.905〜0.912 ms/token） |
+| prefill 1024 | 1293.05 / 1295.17 / 1298.60 tok/s（0.770〜0.773 ms/token） |
+| prefill 2048 | 1389.53 / 1390.41 / 1398.79 tok/s（0.715〜0.719 ms/token） |
+
+- measurement revision: `ca5af8f`（dense 経路の rowsum 事前計算、hipBLASLt algo の
+  16 候補選択、recon の row-major 書き込み。prefill `rows >= 256` は dense recon +
+  hipBLASLt、`rows < 256` / decode / verify / LM-Head は融合 W16A16）
+- GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
+- decode command:
+  `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
+- prefill command:
+  `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens <N> --runs 3 --warmup 1 --device 1 --arena-gib 28`
+- split は `grid_x <= 16 → 8`、`grid_x <= 160 → 4`、それ以上は 1 を基本に、
+  K chunk 数と 12 MiB の scratch 容量で制限する。`SHELF_EXL3_SPLIT` で上書きできる。
+  rows=2048 では scratch 制限により split=1 になる。
+- prefill は `rows >= 256` かつ dense / accum の容量に収まるとき、recon kernel が
+  trellis を row-major FP16 へ展開し、hipBLASLt の GEMM と epilogue で計算する。
+  `SHELF_EXL3_DENSE` でしきい値を変更できる（0 で無効）。LM-Head、decode、verify、
+  `rows < 256` は融合 W16A16 のまま。
+- 融合経路の N tile は `rows >= 4` かつ `out_features % 256 == 0` かつ
+  `out_features >= 1024` のとき 2。row group は `rows >= 256` かつ `grid_x >= 8` の
+  とき 4、`rows >= 32` かつ `grid_x * ceil(rows/32) * splits >= 128` のとき 2。
+  `SHELF_EXL3_GROUPS` で 1 / 2 / 4 を強制できる。
+- 入力回転は `rows >= 4` かつ `rows * k * 2 <= 80 MiB` のとき linear ごとに 1 回だけ
+  計算する。pre 経路は xrot を LDS にコピーせず global から B fragment を読む。
+  `SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算、LDS pitch 136）に切り替えられる。
+- decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
+- 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
+- DFlash2（drafts=7）は EXL3 target でも動作する（DFlash2 の target lm_head に
+  EXL3 経路を追加）。5 token prompt、32 new token、bf16 KV、`--arena-gib 28`:
+
+  | 条件 | 値 |
+  | --- | ---: |
+  | non-spec decode | 20.82 tok/s |
+  | DFlash2 drafts=3 | 40.53 tok/s（accepted 1.58/round） |
+  | DFlash2 drafts=5 | 47.73 tok/s（accepted 2.10/round） |
+  | DFlash2 drafts=7 | 50.59 / 51.65 / 51.67 tok/s（accepted 2.44/round） |
+  | DFlash2 drafts=7、64 new token | 60.74 tok/s（accepted 3.20/round） |
+
+  生成 32 token は non-spec と一致する。303 token の合成 random prompt では
+  accepted 0.48/round まで落ち、9.81 tok/s と non-spec を下回る（自然文では有効）。
+
+  E2E decode は 22.40 tok/s、MTP-2 は 18.3 tok/s（`--arena-gib 27`）。
+- 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
+  9.04〜9.06 tok/s からの内訳と棄却した実験は
+  [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
+  を参照。
 
 ## 2026-11-03 long-context prefill
 

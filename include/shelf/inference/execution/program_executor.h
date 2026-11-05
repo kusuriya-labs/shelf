@@ -64,6 +64,14 @@ struct HostExecutionContext {
     uint32_t scratch_floats = 0;
     uint8_t* decode_attn_partials = nullptr;
     uint32_t decode_attn_partial_bytes = 0;
+    void* exl3_xrot = nullptr;
+    uint32_t exl3_xrot_bytes = 0;
+    void* exl3_dense = nullptr;
+    uint64_t exl3_dense_bytes = 0;
+    void* exl3_accum = nullptr;
+    uint64_t exl3_accum_bytes = 0;
+    void* exl3_rowsum = nullptr;
+    uint64_t exl3_rowsum_bytes = 0;
     uint32_t* error_word = nullptr;
     uint32_t bucket_m = 0;
     void* staging = nullptr;

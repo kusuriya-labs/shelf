@@ -87,6 +87,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
+    src/shelf/kernels/optimized/linear/exl3.hip
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
@@ -197,6 +198,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/selectors/sampling_selector.cpp
     src/shelf/inference/execution/decode_perf_stats.cpp
     src/shelf/inference/execution/elementwise_dispatch.hip
+    src/shelf/inference/execution/exl3_dense_gemm.hip
     src/shelf/inference/execution/embedding_dispatch.hip
     src/shelf/inference/execution/gdn_conv_dispatch.hip
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip
@@ -215,7 +217,13 @@ add_library(shelf_inference_execution STATIC
 )
 target_compile_features(shelf_inference_execution PRIVATE cxx_std_20)
 target_include_directories(shelf_inference_execution PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+find_library(SHELF_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 target_link_libraries(shelf_inference_execution PUBLIC shelf_core shelf_gpu shelf_runtime shelf_inference_state shelf_inference_scheduling shelf_kernels_optimized shelf_kernels_correctness)
+if(SHELF_HIPBLASLT_LIBRARY)
+    target_link_libraries(shelf_inference_execution PUBLIC "${SHELF_HIPBLASLT_LIBRARY}")
+else()
+    message(FATAL_ERROR "hipblaslt was not found under ${SHELF_ROCM_ROOT}/lib")
+endif()
 target_compile_options(shelf_inference_execution PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Qwen3.5 model sources.
@@ -377,6 +385,7 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/fp8/fp8_native.cpp
     src/shelf/quantization/mxfp4/mxfp4.cpp
     src/shelf/quantization/mxfp4/mxfp4_native.cpp
+    src/shelf/quantization/exl3/exl3.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

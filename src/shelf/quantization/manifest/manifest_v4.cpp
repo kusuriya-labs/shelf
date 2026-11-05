@@ -36,6 +36,8 @@ const char* scalar_type_name(QuantScalarType dtype) {
         case QuantScalarType::F32: return "F32";
         case QuantScalarType::FP8E4M3: return "FP8E4M3";
         case QuantScalarType::E8M0: return "E8M0";
+        case QuantScalarType::FP16: return "FP16";
+        case QuantScalarType::I32: return "I32";
     }
     return "U8";
 }
@@ -47,6 +49,8 @@ Result<QuantScalarType> parse_scalar_type(const std::string& name) {
     if (name == "F32") return QuantScalarType::F32;
     if (name == "FP8E4M3") return QuantScalarType::FP8E4M3;
     if (name == "E8M0") return QuantScalarType::E8M0;
+    if (name == "FP16") return QuantScalarType::FP16;
+    if (name == "I32") return QuantScalarType::I32;
     return Status::invalid_argument("unsupported quant scalar type", __FILE__, __LINE__);
 }
 
@@ -88,6 +92,9 @@ const char* role_name(QuantPayloadRole role) {
         case QuantPayloadRole::Codebook: return "codebook";
         case QuantPayloadRole::Auxiliary: return "auxiliary";
         case QuantPayloadRole::Data: return "data";
+        case QuantPayloadRole::Suh: return "suh";
+        case QuantPayloadRole::Svh: return "svh";
+        case QuantPayloadRole::Marker: return "marker";
     }
     return "codes";
 }
@@ -99,6 +106,9 @@ Result<QuantPayloadRole> parse_role(const std::string& name) {
     if (name == "codebook") return QuantPayloadRole::Codebook;
     if (name == "auxiliary") return QuantPayloadRole::Auxiliary;
     if (name == "data") return QuantPayloadRole::Data;
+    if (name == "suh") return QuantPayloadRole::Suh;
+    if (name == "svh") return QuantPayloadRole::Svh;
+    if (name == "marker") return QuantPayloadRole::Marker;
     return Status::invalid_argument("unsupported quant payload role", __FILE__, __LINE__);
 }
 
@@ -262,6 +272,33 @@ Status normalize_descriptor(
         out.data = QuantizedTensorRef{data->tensor, "BF16", data->crc32};
         return Status::make_ok();
     }
+    if (desc.quant.encoding == QuantizedEncoding::Exl3) {
+        const QuantPayloadRef* trellis =
+            shelf::quantization::find_payload(desc, QuantPayloadRole::Codes);
+        const QuantPayloadRef* suh =
+            shelf::quantization::find_payload(desc, QuantPayloadRole::Suh);
+        const QuantPayloadRef* svh =
+            shelf::quantization::find_payload(desc, QuantPayloadRole::Svh);
+        const QuantPayloadRef* marker =
+            shelf::quantization::find_payload(desc, QuantPayloadRole::Marker);
+        out.codes = QuantizedTensorRef{trellis->tensor, "U8", trellis->crc32};
+        out.suh = QuantizedTensorRef{suh->tensor, "FP16", suh->crc32};
+        out.svh = QuantizedTensorRef{svh->tensor, "FP16", svh->crc32};
+        out.marker = QuantizedTensorRef{marker->tensor, "I32", marker->crc32};
+        out.scale_block_n = 0;
+        out.scale_block_k = 0;
+        if (trellis->shape.size() == 3) {
+            const uint64_t words = trellis->shape[2];
+            if ((words % 16u) == 8u) {
+                out.exl3_half = true;
+                out.exl3_ka = static_cast<uint32_t>((words - 8u) / 16u);
+            } else {
+                out.exl3_half = false;
+                out.exl3_ka = static_cast<uint32_t>(words / 16u);
+            }
+        }
+        return Status::make_ok();
+    }
     const QuantPayloadRef* codes = shelf::quantization::find_payload(desc, QuantPayloadRole::Codes);
     const QuantPayloadRef* scale = shelf::quantization::find_payload(desc, QuantPayloadRole::Scale);
     out.codes = QuantizedTensorRef{codes->tensor, "U8", codes->crc32};
@@ -277,7 +314,7 @@ nlohmann::json tensor_to_v4(const QuantizedTensorMetadata& t) {
     tj["logical_shape"] = t.logical_shape;
     nlohmann::json qj;
     qj["encoding"] = v4_encoding_name(enc);
-    if (enc != QuantizedEncoding::Bf16) {
+    if (enc != QuantizedEncoding::Bf16 && enc != QuantizedEncoding::Exl3) {
         const WeightBlockShape block = WeightBlockShape{
             t.scale_block_n != 0 ? t.scale_block_n : default_weight_block(enc).n,
             t.scale_block_k != 0 ? t.scale_block_k : default_weight_block(enc).k};
@@ -296,6 +333,15 @@ nlohmann::json tensor_to_v4(const QuantizedTensorMetadata& t) {
     if (enc == QuantizedEncoding::Bf16) {
         nlohmann::json physical = nlohmann::json::array();
         for (const int64_t dim : t.logical_shape) physical.push_back(dim);
+        lj["physical_shape"] = std::move(physical);
+    } else if (enc == QuantizedEncoding::Exl3) {
+        const uint64_t k = static_cast<uint64_t>(t.logical_shape.back());
+        const uint64_t n =
+            static_cast<uint64_t>(t.logical_shape[t.logical_shape.size() - 2]);
+        nlohmann::json physical = nlohmann::json::array();
+        physical.push_back(k / 16u);
+        physical.push_back(n / 16u);
+        physical.push_back(16u * t.exl3_ka + (t.exl3_half ? 8u : 0u));
         lj["physical_shape"] = std::move(physical);
     } else {
         nlohmann::json physical = nlohmann::json::array();
@@ -324,9 +370,48 @@ nlohmann::json tensor_to_v4(const QuantizedTensorMetadata& t) {
         pj["tensor"] = t.codes->tensor;
         pj["dtype"] = "U8";
         nlohmann::json shape = nlohmann::json::array();
-        for (const uint64_t dim : codes_shape_of(t.logical_shape, t.k_padded, enc)) shape.push_back(dim);
+        if (enc == QuantizedEncoding::Exl3) {
+            const uint64_t k = static_cast<uint64_t>(t.logical_shape.back());
+            const uint64_t n =
+                static_cast<uint64_t>(t.logical_shape[t.logical_shape.size() - 2]);
+            shape.push_back(k / 16u);
+            shape.push_back(n / 16u);
+            shape.push_back(16u * t.exl3_ka + (t.exl3_half ? 8u : 0u));
+        } else {
+            for (const uint64_t dim : codes_shape_of(t.logical_shape, t.k_padded, enc)) {
+                shape.push_back(dim);
+            }
+        }
         pj["shape"] = std::move(shape);
         pj["crc32"] = t.codes->crc32;
+        payloads.push_back(std::move(pj));
+    }
+    if (t.suh) {
+        nlohmann::json pj;
+        pj["role"] = role_name(QuantPayloadRole::Suh);
+        pj["tensor"] = t.suh->tensor;
+        pj["dtype"] = "FP16";
+        pj["shape"] = nlohmann::json::array({t.logical_shape.back()});
+        pj["crc32"] = t.suh->crc32;
+        payloads.push_back(std::move(pj));
+    }
+    if (t.svh) {
+        nlohmann::json pj;
+        pj["role"] = role_name(QuantPayloadRole::Svh);
+        pj["tensor"] = t.svh->tensor;
+        pj["dtype"] = "FP16";
+        pj["shape"] = nlohmann::json::array(
+            {t.logical_shape[t.logical_shape.size() - 2]});
+        pj["crc32"] = t.svh->crc32;
+        payloads.push_back(std::move(pj));
+    }
+    if (t.marker) {
+        nlohmann::json pj;
+        pj["role"] = role_name(QuantPayloadRole::Marker);
+        pj["tensor"] = t.marker->tensor;
+        pj["dtype"] = "I32";
+        pj["shape"] = nlohmann::json::array();
+        pj["crc32"] = t.marker->crc32;
         payloads.push_back(std::move(pj));
     }
     if (t.metadata1) {
@@ -356,6 +441,7 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
         case QuantizedEncoding::Bf16: return "bf16";
         case QuantizedEncoding::Fp8: return kFp8V4EncodingName;
         case QuantizedEncoding::Mxfp4: return kMxfp4V4EncodingName;
+        case QuantizedEncoding::Exl3: return "exl3_trellis";
     }
     return "unknown";
 }
@@ -364,6 +450,7 @@ Result<QuantizedEncoding> parse_v4_encoding(const std::string& name) {
     if (name == "bf16") return QuantizedEncoding::Bf16;
     if (name == kFp8V4EncodingName) return QuantizedEncoding::Fp8;
     if (name == kMxfp4V4EncodingName) return QuantizedEncoding::Mxfp4;
+    if (name == "exl3_trellis") return QuantizedEncoding::Exl3;
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 

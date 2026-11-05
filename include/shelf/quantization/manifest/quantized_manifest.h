@@ -17,6 +17,8 @@ constexpr const char* kFp8EncodingName = "fp8_e4m3_block128_f32";
 constexpr const char* kFp8LayoutName = "fp8_e4m3_row_major_block128_v1";
 constexpr const char* kMxfp4EncodingName = "mxfp4_e2m1_e8m0_g32";
 constexpr const char* kMxfp4LayoutName = "mxfp4_e2m1_row_major_block32_v1";
+constexpr const char* kExl3EncodingName = "exl3_trellis_mul1_fp16";
+constexpr const char* kExl3LayoutName = "exl3_trellis_v1";
 constexpr const char* kCodesSuffix = ".__shelf_codes";
 constexpr const char* kMetadata1Suffix = ".__shelf_metadata1";
 constexpr const char* kMetadata2Suffix = ".__shelf_metadata2";
@@ -27,6 +29,7 @@ enum class QuantizedEncoding : uint8_t {
     Bf16 = 0,
     Fp8 = 5,
     Mxfp4 = 7,
+    Exl3 = 9,
 };
 
 struct QuantizedTensorRef {
@@ -38,17 +41,21 @@ struct QuantizedTensorRef {
 struct QuantizedTensorMetadata {
     std::string role;
     QuantizedEncoding encoding = QuantizedEncoding::Bf16;
-    std::string codebook;
     std::string layout;
     std::vector<int64_t> logical_shape;
     uint64_t k_padded = 0;
     uint32_t scale_block_n = 0;
     uint32_t scale_block_k = 0;
+    uint32_t exl3_ka = 0;
+    bool exl3_half = false;
     std::optional<QuantizedTensorRef> codes;
     std::optional<QuantizedTensorRef> metadata1;
     std::optional<QuantizedTensorRef> metadata2;
     std::optional<QuantizedTensorRef> metadata3;
     std::optional<QuantizedTensorRef> metadata4;
+    std::optional<QuantizedTensorRef> suh;
+    std::optional<QuantizedTensorRef> svh;
+    std::optional<QuantizedTensorRef> marker;
     std::optional<QuantizedTensorRef> data;
 };
 

@@ -51,12 +51,14 @@ enum class QuantFormatId : uint8_t {
     Bf16 = 1,
     Fp8Finegrained = 2,
     Mxfp4Finegrained = 3,
+    Exl3Trellis = 4,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
 static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
 static_assert(static_cast<uint8_t>(QuantFormatId::Fp8Finegrained) == 2);
 static_assert(static_cast<uint8_t>(QuantFormatId::Mxfp4Finegrained) == 3);
+static_assert(static_cast<uint8_t>(QuantFormatId::Exl3Trellis) == 4);
 
 inline constexpr QuantFormatDesc kBf16FormatDesc = {
     16, 1, 32,
@@ -94,11 +96,22 @@ inline constexpr QuantFormatDesc kMxfp4FinegrainedFormatDesc = {
     },
 };
 
+inline constexpr QuantFormatDesc kExl3TrellisFormatDesc = {
+    128, 1, 0,
+    {
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
 inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
     switch (id) {
         case QuantFormatId::Bf16: return &kBf16FormatDesc;
         case QuantFormatId::Fp8Finegrained: return &kFp8FinegrainedFormatDesc;
         case QuantFormatId::Mxfp4Finegrained: return &kMxfp4FinegrainedFormatDesc;
+        case QuantFormatId::Exl3Trellis: return &kExl3TrellisFormatDesc;
         default: return nullptr;
     }
 }
@@ -177,6 +190,7 @@ inline uint64_t quant_payload_bytes(uint64_t rows, uint64_t padded_k, const Quan
 inline uint64_t quant_padded_k(uint64_t k, QuantFormatId id) {
     const QuantFormatDesc* f = quant_format_desc(id);
     if (f == nullptr || id == QuantFormatId::Bf16) return k;
+    if (id == QuantFormatId::Exl3Trellis) return k;
     return ((k + f->block_elements - 1u) / f->block_elements) * f->block_elements;
 }
 

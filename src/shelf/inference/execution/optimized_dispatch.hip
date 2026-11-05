@@ -7,7 +7,9 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
@@ -488,6 +490,167 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
     return PhysicalResolveStatus::Applicable;
 }
 
+Result<OptimizedLaunchResult> try_launch_linear_exl3(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.output_count != 1 || b.input_count != 1)
+        return Status::invalid_state("exl3 linear: bad io count", __FILE__, __LINE__);
+    if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
+        return Status::invalid_state("exl3 linear: weight_index invalid", __FILE__, __LINE__);
+    const ::shelf::runtime::WeightSlot e = ctx.weights[b.weight_index];
+    if (e.encoding != 4u)
+        return Status::invalid_state("exl3 linear: encoding != exl3", __FILE__, __LINE__);
+    if (e.device_ptr != nullptr || e.codes == nullptr || e.exl3_suh == nullptr ||
+        e.exl3_svh == nullptr) {
+        return Status::invalid_state("exl3 linear: bad weight slot", __FILE__, __LINE__);
+    }
+    if (e.preshuffled)
+        return Status::invalid_state("exl3 linear: trellis must not be preshuffled", __FILE__,
+                                     __LINE__);
+    if (e.rows == 0 || e.cols == 0 || e.k_padded != e.cols)
+        return Status::invalid_state("exl3 linear: weight dims invalid", __FILE__, __LINE__);
+    auto in_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+    if (!in_res.ok()) return in_res.status();
+    const HostResolvedValue in = in_res.value();
+    if (in.dtype != ValueDType::BF16) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (in.feature_count != e.cols)
+        return Status::invalid_state("exl3 linear: input features != weight cols", __FILE__,
+                                     __LINE__);
+    auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+    if (!out_res.ok()) return out_res.status();
+    const HostResolvedValue dst = out_res.value();
+    const uint64_t expected_out_features =
+        e.output_col_total != 0u ? static_cast<uint64_t>(e.output_col_total)
+                                 : static_cast<uint64_t>(e.rows);
+    if (static_cast<uint64_t>(dst.feature_count) != expected_out_features)
+        return Status::invalid_state("exl3 linear: output features mismatch", __FILE__,
+                                     __LINE__);
+    if (e.output_col_total != 0u &&
+        static_cast<uint64_t>(e.output_col_offset) + e.rows >
+            static_cast<uint64_t>(e.output_col_total)) {
+        return Status::invalid_state("exl3 linear: column offset out of range", __FILE__,
+                                     __LINE__);
+    }
+    const bool out_bf16 = dst.dtype == ValueDType::BF16;
+    const bool out_f32 = dst.dtype == ValueDType::F32;
+    if (!out_bf16 && !out_f32)
+        return Status::invalid_state("exl3 linear: output dtype not BF16/F32", __FILE__,
+                                     __LINE__);
+    const uint32_t rows = rows_for(dst, ctx);
+    if (rows == 0) return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+
+    ::shelf::kernel::Exl3GemmArgs args;
+    args.trellis = e.codes;
+    args.suh = e.exl3_suh;
+    args.svh = e.exl3_svh;
+    args.input = in.ptr;
+    args.output = static_cast<void*>(
+        static_cast<uint8_t*>(dst.ptr) +
+        static_cast<uint64_t>(e.output_col_offset) * value_dtype_bytes(dst.dtype));
+    args.rows = rows;
+    args.out_features = e.rows;
+    args.k = e.cols;
+    args.input_row_stride = in.row_stride;
+    args.output_row_stride = dst.row_stride;
+    args.output_dtype = out_bf16 ? 0u : 1u;
+    args.ka = e.exl3_ka;
+    args.half = e.exl3_half ? 1u : 0u;
+    args.splitk_scratch = ctx.scratch;
+    args.splitk_floats = ctx.scratch_floats;
+    static const uint32_t split_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_SPLIT");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    args.splitk_splits = split_override;
+    static const uint32_t groups_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_GROUPS");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    args.groups = groups_override;
+    const uint64_t xrot_bytes = static_cast<uint64_t>(args.rows) * args.k * 2u;
+    static const bool pre_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_PRE");
+        return e != nullptr && std::strtoul(e, nullptr, 10) == 0u;
+    }();
+    const bool use_pre = !pre_override && ctx.exl3_xrot != nullptr && args.rows >= 4u &&
+                         xrot_bytes <= ctx.exl3_xrot_bytes;
+    static const uint32_t dense_min_rows = [] {
+        const char* e = std::getenv("SHELF_EXL3_DENSE");
+        if (e == nullptr) return 256u;
+        const unsigned long v = std::strtoul(e, nullptr, 10);
+        return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
+    }();
+    const uint64_t dense_bytes = static_cast<uint64_t>(args.k) * args.out_features * 2u;
+    const uint64_t accum_bytes = static_cast<uint64_t>(args.rows) * args.out_features * 4u;
+    const bool use_dense = use_pre && ctx.exl3_dense != nullptr &&
+                           ctx.exl3_accum != nullptr && ctx.exl3_rowsum != nullptr &&
+                           args.rows >= dense_min_rows &&
+                           (args.out_features % 128u) == 0u &&
+                           dense_bytes <= ctx.exl3_dense_bytes &&
+                           accum_bytes <= ctx.exl3_accum_bytes &&
+                           static_cast<uint64_t>(args.rows) * sizeof(float) <=
+                               ctx.exl3_rowsum_bytes;
+    static const uint32_t sim_mode = [] {
+        const char* e = std::getenv("SHELF_EXL3_SIM");
+        if (e == nullptr) return 0u;
+        if (std::strcmp(e, "w8") == 0) return 1u;
+        if (std::strcmp(e, "x8") == 0) return 2u;
+        if (std::strcmp(e, "w8x8") == 0) return 3u;
+        if (std::strcmp(e, "x8res") == 0) return 6u;
+        return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    }();
+    hipError_t herr = hipSuccess;
+    bool dense_done = false;
+    if (use_dense) {
+        ::shelf::kernel::Exl3GemmArgs dense_args = args;
+        dense_args.xrot = ctx.exl3_xrot;
+        herr = ::shelf::kernel::launch_rotate_exl3_rowsum(
+            dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum), stream);
+        if (herr == hipSuccess && (sim_mode & 2u) != 0u) {
+            herr = ::shelf::kernel::launch_quantize_xrot_x8(
+                dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum),
+                (sim_mode & 4u) != 0u, stream);
+        }
+        if (herr == hipSuccess) {
+            herr = ::shelf::kernel::launch_recon_exl3_dense(dense_args, ctx.exl3_dense, stream);
+        }
+        if (herr == hipSuccess && (sim_mode & 1u) != 0u) {
+            herr = ::shelf::kernel::launch_quantize_dense_w8(dense_args, ctx.exl3_dense, stream);
+        }
+        if (herr == hipSuccess) {
+            herr = ::shelf::execution::exl3_dense_gemm(dense_args, ctx.exl3_dense,
+                                                       ctx.exl3_accum, stream);
+        }
+        if (herr == hipSuccess) {
+            herr = ::shelf::kernel::launch_epilogue_exl3_dense(
+                dense_args, ctx.exl3_rowsum, ctx.exl3_accum, stream);
+        }
+        dense_done = herr == hipSuccess;
+    }
+    if (!dense_done) {
+        herr = hipSuccess;
+        if (use_pre) {
+            herr = ::shelf::kernel::launch_rotate_exl3(args, ctx.exl3_xrot, stream);
+            if (herr == hipSuccess) {
+                herr = ::shelf::kernel::launch_gemm_exl3_w16a16_pre(args, ctx.exl3_xrot,
+                                                                    stream);
+            }
+        } else {
+            herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+        }
+    }
+    if (herr == hipErrorNotSupported)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (herr != hipSuccess)
+        return Status::hip_error("exl3 gemm launch", hipGetErrorString(herr), __FILE__,
+                                 __LINE__);
+    record_physical_launch(dense_done ? 4u : (use_pre ? 2u : 1u));
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
 Result<OptimizedLaunchResult> try_launch_linear_bf16(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
@@ -559,6 +722,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_moe_grouped_linear(program, b, ctx, stream);
         case KernelId::MOE_COMBINE:
             return try_launch_moe_combine(program, b, ctx, stream);
+        case KernelId::LINEAR_EXL3_W16A16:
+            return try_launch_linear_exl3(program, b, ctx, stream);
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM:

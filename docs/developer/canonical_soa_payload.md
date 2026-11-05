@@ -7,7 +7,8 @@
 実装の正本は `include/shelf/quantization/**`、`src/shelf/quantization/**`、
 `include/shelf/weights/**`、`src/shelf/weights/**` である。
 
-対象 format は BF16 / FP8 K128N128 の 2 つ。
+対象 format は BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32 /
+EXL3 trellis（HF 由来の load-only）である。
 
 `canonical` は「GPU が直接読む形式」を意味しない。
 
@@ -255,6 +256,28 @@ amax == 0        -> byte 1（2^-126）
 code 側は 0.5 ulp 未満へ丸める **half-away-from-zero** である（MX の
 round-half-to-even ではない）。0.25 / 1.25 / 2.5 / 5 の境界で code が変わるため、
 生成元 packer との bit 一致をテストで固定する。
+
+---
+
+## 6ter. EXL3 trellis（HF 由来、load-only）
+
+Shelf は EXL3 の canonical artifact を生成しない。HF checkpoint の 4 tensor を
+そのまま payload plane として manifest に載せ、byte 列を変換せず GPU へ転送する。
+
+| role | tensor | dtype | shape |
+| --- | --- | --- | --- |
+| `codes` | `<prefix>.trellis` | I16 | `[k/16, n/16, 16*ka + (half ? 8 : 0)]` |
+| `suh` | `<prefix>.suh` | F16 | `[k]` |
+| `svh` | `<prefix>.svh` | F16 | `[n]` |
+| `marker` | `<prefix>.mul1` | I32 | scalar |
+
+- コードブックは mul1 固定。`ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
+- `k_padded == k`、`k` と `n` は 128 の倍数。
+- `preshuffled == false`。trellis は tile のまま常駐し、kernel が ring と codebook を
+  復号する。Hadamard は kernel 内で行う。
+- marker の値は kernel では使わない。
+- EXL3 の unquantized tensor は BF16 entry とし、F16 で保存されている場合は load 時に
+  BF16 へ widen する。
 
 ---
 

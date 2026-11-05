@@ -66,6 +66,23 @@ RT::WeightSlot mxfp4_slot(uint32_t rows, uint32_t cols, uint32_t k_padded,
     return s;
 }
 
+RT::WeightSlot exl3_slot() {
+    RT::WeightSlot s{};
+    s.rows = 128u;
+    s.cols = 128u;
+    s.k_padded = 128u;
+    s.encoding = static_cast<uint8_t>(MW::MatrixEncoding::Exl3);
+    s.compute_spec = static_cast<uint8_t>(MW::encoding_to_compute_spec(MW::MatrixEncoding::Exl3));
+    s.codes = g_ptr;
+    s.exl3_suh = g_ptr;
+    s.exl3_svh = g_ptr;
+    s.exl3_marker = g_ptr;
+    s.exl3_ka = 4u;
+    s.exl3_half = 0u;
+    s.codes_row_stride_bytes = 8u * 64u * 2u;
+    return s;
+}
+
 MW::MatrixWeight mxfp4_matrix(uint32_t rows, uint32_t cols, uint32_t k_padded,
                               uint32_t experts) {
     MW::MatrixWeight w{};
@@ -135,6 +152,25 @@ int main() {
     ok_slot(dense_bf16, "dense bf16 slot accepted");
 
     ok_slot(mxfp4_slot(1024, 2048, 2048, 1u, 0, 0), "dense mxfp4 slot accepted");
+    ok_slot(exl3_slot(), "exl3 slot accepted");
+    {
+        RT::WeightSlot s = exl3_slot();
+        s.exl3_suh = nullptr;
+        rejected(s, "exl3 slot without suh rejected");
+        s = exl3_slot();
+        s.exl3_ka = 9u;
+        rejected(s, "exl3 slot with a bad bit rate rejected");
+        s = exl3_slot();
+        s.codes_row_stride_bytes = 7u;
+        rejected(s, "exl3 slot with a bad trellis stride rejected");
+        s = exl3_slot();
+        s.cols = 64u;
+        s.k_padded = 64u;
+        rejected(s, "exl3 slot with a non-128 shape rejected");
+        s = exl3_slot();
+        s.preshuffled = true;
+        rejected(s, "exl3 slot with a preshuffle flag rejected");
+    }
 
     ok_slot(mxfp4_slot(pl.w13_rows, pl.w13_cols, pl.w13_k_padded, experts,
                        pl.w13_codes_batch_stride_bytes, pl.w13_scales_batch_stride_bytes),

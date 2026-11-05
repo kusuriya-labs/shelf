@@ -1,5 +1,7 @@
 #include <shelf/quantization/bundle/hf_manifest.h>
 #include <shelf/quantization/bundle/bundle_util.h>
+#include <shelf/core/memory/types.h>
+#include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/manifest/crc32.h>
 #include <shelf/quantization/quant_format.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
@@ -58,7 +60,7 @@ bool supported_hf_quant_method_name(const nlohmann::json* qc) {
     auto it = qc->find("quant_method");
     if (it == qc->end() || !it->is_string()) return false;
     const std::string method = it->get<std::string>();
-    return method == "fp8" || method == "quark";
+    return method == "fp8" || method == "quark" || method == "exl3";
 }
 
 bool json_int_equals(const nlohmann::json& value, int64_t expected) {
@@ -377,6 +379,146 @@ Status synthesize_mxfp4_tensor(
     return Status::make_ok();
 }
 
+struct LoadedHfTensor {
+    shelf::io::StTensorSpec spec;
+    const void* data = nullptr;
+    std::size_t bytes = 0;
+};
+
+Status load_hf_tensor(HfShardSet& shards, const std::string& name, LoadedHfTensor& out) {
+    auto sit = shards.shard_for_tensor.find(name);
+    if (sit == shards.shard_for_tensor.end()) {
+        return Status::invalid_argument(("hf tensor not found: " + name).c_str(), __FILE__,
+                                        __LINE__);
+    }
+    auto reader_result = shards.reader_for_shard(sit->second);
+    if (!reader_result.ok()) return reader_result.status();
+    auto spec_result = reader_result.value()->tensor_spec(name);
+    if (!spec_result.ok()) return spec_result.status();
+    out.spec = spec_result.value();
+    auto data_result = reader_result.value()->tensor_data(name, out.bytes);
+    if (!data_result.ok()) return data_result.status();
+    out.data = data_result.value();
+    return Status::make_ok();
+}
+
+std::string strip_weight_suffix(const std::string& name) {
+    static const std::string kSuffix = ".weight";
+    if (name.size() > kSuffix.size() &&
+        name.compare(name.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
+        return name.substr(0, name.size() - kSuffix.size());
+    }
+    return name;
+}
+
+Status synthesize_exl3_tensor(
+    HfShardSet& shards,
+    HfQuantizedSource& source,
+    const std::string& canonical,
+    const std::string& prefix,
+    bool with_crc,
+    QuantizedTensorMetadata& out) {
+    const std::string trellis_name = prefix + ".trellis";
+    const std::string suh_name = prefix + ".suh";
+    const std::string svh_name = prefix + ".svh";
+    const std::string mul1_name = prefix + ".mul1";
+
+    LoadedHfTensor trellis;
+    Status st = load_hf_tensor(shards, trellis_name, trellis);
+    if (!st.ok()) return st;
+    if (trellis.spec.dtype != shelf::io::SType::I16 || trellis.spec.shape.size() != 3) {
+        return Status::unsupported(
+            ("hf exl3 trellis must be a rank-3 I16 tensor: " + trellis_name).c_str(),
+            __FILE__, __LINE__);
+    }
+    const uint64_t kt = trellis.spec.shape[0];
+    const uint64_t nt = trellis.spec.shape[1];
+    const uint64_t words = trellis.spec.shape[2];
+    const uint64_t k = kt * 16u;
+    const uint64_t n = nt * 16u;
+    if (k == 0u || n == 0u || (k % 128u) != 0u || (n % 128u) != 0u) {
+        return Status::unsupported(
+            ("hf exl3 shape is not 128-aligned: " + canonical).c_str(), __FILE__, __LINE__);
+    }
+    uint32_t ka = 0;
+    bool half = false;
+    if ((words % 16u) == 0u) {
+        ka = static_cast<uint32_t>(words / 16u);
+    } else if ((words % 16u) == 8u) {
+        ka = static_cast<uint32_t>((words - 8u) / 16u);
+        half = true;
+    } else {
+        return Status::unsupported(
+            ("hf exl3 trellis word count is invalid: " + canonical).c_str(), __FILE__,
+            __LINE__);
+    }
+    if (ka < 1u || ka > 8u || (half && ka > 3u)) {
+        return Status::unsupported(
+            ("hf exl3 bit rate is invalid: " + canonical).c_str(), __FILE__, __LINE__);
+    }
+    uint64_t expected_trellis_bytes = kt * nt * words * 2u;
+    if (trellis.bytes != expected_trellis_bytes) {
+        return Status::invalid_argument(
+            ("hf exl3 trellis byte count mismatch: " + canonical).c_str(), __FILE__,
+            __LINE__);
+    }
+
+    LoadedHfTensor suh;
+    st = load_hf_tensor(shards, suh_name, suh);
+    if (!st.ok()) return st;
+    if (suh.spec.dtype != shelf::io::SType::F16 || suh.spec.shape.size() != 1 ||
+        suh.spec.shape[0] != k || suh.bytes != k * 2u) {
+        return Status::unsupported(
+            ("hf exl3 suh shape or dtype mismatch: " + suh_name).c_str(), __FILE__, __LINE__);
+    }
+    LoadedHfTensor svh;
+    st = load_hf_tensor(shards, svh_name, svh);
+    if (!st.ok()) return st;
+    if (svh.spec.dtype != shelf::io::SType::F16 || svh.spec.shape.size() != 1 ||
+        svh.spec.shape[0] != n || svh.bytes != n * 2u) {
+        return Status::unsupported(
+            ("hf exl3 svh shape or dtype mismatch: " + svh_name).c_str(), __FILE__, __LINE__);
+    }
+
+    if (shards.shard_for_tensor.count(mul1_name) == 0u) {
+        if (shards.shard_for_tensor.count(prefix + ".mcg") != 0u) {
+            return Status::unsupported(
+                ("hf exl3 mcg codebook is not supported: " + canonical).c_str(), __FILE__,
+                __LINE__);
+        }
+        return Status::unsupported(
+            ("hf exl3 tensor has no mul1 marker: " + canonical).c_str(), __FILE__, __LINE__);
+    }
+    LoadedHfTensor marker;
+    st = load_hf_tensor(shards, mul1_name, marker);
+    if (!st.ok()) return st;
+    if (marker.spec.dtype != shelf::io::SType::I32 || !marker.spec.shape.empty() ||
+        marker.bytes != 4u) {
+        return Status::unsupported(
+            ("hf exl3 marker must be an I32 scalar: " + mul1_name).c_str(), __FILE__,
+            __LINE__);
+    }
+
+    out.role = "weight";
+    out.encoding = QuantizedEncoding::Exl3;
+    out.layout = shelf::quantization::manifest::kExl3LayoutName;
+    out.logical_shape = {static_cast<int64_t>(n), static_cast<int64_t>(k)};
+    out.k_padded = k;
+    out.exl3_ka = ka;
+    out.exl3_half = half;
+    out.codes =
+        make_ref(trellis_name, "U8", trellis.data, trellis.bytes, with_crc);
+    out.suh = make_ref(suh_name, "FP16", suh.data, suh.bytes, with_crc);
+    out.svh = make_ref(svh_name, "FP16", svh.data, svh.bytes, with_crc);
+    out.marker = make_ref(mul1_name, "I32", marker.data, marker.bytes, with_crc);
+
+    source.shard_for_physical[trellis_name] = shards.shard_for_tensor.at(trellis_name);
+    source.shard_for_physical[suh_name] = shards.shard_for_tensor.at(suh_name);
+    source.shard_for_physical[svh_name] = shards.shard_for_tensor.at(svh_name);
+    source.shard_for_physical[mul1_name] = shards.shard_for_tensor.at(mul1_name);
+    return Status::make_ok();
+}
+
 Status synthesize_bf16_tensor(
     const shelf::io::SafetensorsReader* reader,
     HfQuantizedSource& source,
@@ -387,9 +529,9 @@ Status synthesize_bf16_tensor(
     auto spec_result = reader->tensor_spec(canonical);
     if (!spec_result.ok()) return spec_result.status();
     const shelf::io::StTensorSpec& spec = spec_result.value();
-    if (spec.dtype != shelf::io::SType::BF16) {
+    if (spec.dtype != shelf::io::SType::BF16 && spec.dtype != shelf::io::SType::F16) {
         return Status::unsupported(
-            ("hf bf16 tensor has a non-BF16 dtype: " + canonical).c_str(),
+            ("hf unquantized tensor has a non-16-bit dtype: " + canonical).c_str(),
             __FILE__, __LINE__);
     }
     if (spec.shape.empty()) {
@@ -409,7 +551,19 @@ Status synthesize_bf16_tensor(
         out.logical_shape.push_back(static_cast<int64_t>(d));
     }
     out.k_padded = quant_padded_k(spec.shape.back(), quantization::QuantFormatId::Bf16);
-    out.data = make_ref(canonical, "BF16", data_result.value(), src_bytes, with_crc);
+    if (spec.dtype == shelf::io::SType::F16) {
+        const std::size_t count = src_bytes / 2u;
+        std::vector<uint16_t>& staging = source.bf16_staging[canonical];
+        staging.resize(count);
+        const uint16_t* src = static_cast<const uint16_t*>(data_result.value());
+        for (std::size_t i = 0; i < count; ++i) {
+            staging[i] = shelf::f32_to_bf16_rne(
+                quantization::exl3::f32_from_f16_bits(src[i]));
+        }
+        out.data = make_ref(canonical, "BF16", staging.data(), staging.size() * 2u, with_crc);
+    } else {
+        out.data = make_ref(canonical, "BF16", data_result.value(), src_bytes, with_crc);
+    }
     out.role = spec.shape.size() >= 2 ? "weight" : "norm";
     source.shard_for_physical[canonical] = codes_shard;
     return Status::make_ok();
@@ -454,6 +608,10 @@ Result<HfQuantMethod> detect_hf_quant_method(const std::string& model_dir) {
         return HfQuantMethod::QuarkMxfp4;
     }
 
+    if (method == "exl3") {
+        return HfQuantMethod::Exl3;
+    }
+
     return Status::unsupported("unsupported HF quant_method", __FILE__, __LINE__);
 }
 
@@ -485,62 +643,87 @@ Result<HfQuantizedSource> synthesize_hf_quantized_source(
         if (!processed.insert(logical).second) continue;
 
         std::string canonical = logical;
-        const bool has_direct = find_shard(canonical) != nullptr;
-        if (!has_direct && canonical == "model.language_model.lm_head.weight" &&
-            find_shard("lm_head.weight") != nullptr) {
+        if (find_shard(canonical) == nullptr &&
+            canonical == "model.language_model.lm_head.weight" &&
+            (find_shard("lm_head.weight") != nullptr ||
+             find_shard("lm_head.trellis") != nullptr)) {
             canonical = "lm_head.weight";
             source.manifest.aliases[logical] = canonical;
         }
 
-        const std::string* codes_shard = find_shard(canonical);
-        const std::string scale_inv_name = canonical + "_scale_inv";
-        const std::string scale_name = canonical + "_scale";
-        const std::string* scale_inv_shard = find_shard(scale_inv_name);
-        const std::string* scale_shard = find_shard(scale_name);
-
-        if (codes_shard == nullptr && scale_inv_shard == nullptr && scale_shard == nullptr) {
-            continue;
-        }
-        if (codes_shard == nullptr) {
-            return Status::invalid_argument(
-                ("hf quantized tensor missing weight payload: " + canonical).c_str(),
-                __FILE__, __LINE__);
-        }
-
-        auto reader_result = shard_set->reader_for_shard(*codes_shard);
-        if (!reader_result.ok()) return reader_result.status();
-        const shelf::io::SafetensorsReader* reader = reader_result.value();
-
-        if (scale_inv_shard != nullptr && scale_shard != nullptr) {
-            return Status::invalid_argument(
-                ("hf tensor carries both weight_scale_inv and weight_scale: " + canonical).c_str(),
-                __FILE__, __LINE__);
-        }
+        const std::string prefix = strip_weight_suffix(canonical);
+        const std::string* trellis_shard = find_shard(prefix + ".trellis");
 
         QuantizedTensorMetadata meta;
-        if (scale_inv_shard != nullptr) {
-            if (method != HfQuantMethod::Fp8) {
-                return Status::unsupported(
-                    ("hf tensor carries weight_scale_inv in a non-fp8 model: " + canonical).c_str(),
-                    __FILE__, __LINE__);
+        if (method == HfQuantMethod::Exl3) {
+            if (trellis_shard != nullptr) {
+                Status adapter = synthesize_exl3_tensor(
+                    *shard_set, source, canonical, prefix, with_crc, meta);
+                if (!adapter.ok()) return adapter;
+            } else {
+                const std::string* direct_shard = find_shard(canonical);
+                if (direct_shard == nullptr) continue;
+                auto reader_result = shard_set->reader_for_shard(*direct_shard);
+                if (!reader_result.ok()) return reader_result.status();
+                Status adapter = synthesize_bf16_tensor(
+                    reader_result.value(), source, canonical, *direct_shard, meta, with_crc);
+                if (!adapter.ok()) return adapter;
             }
-            Status adapter = synthesize_fp8_tensor(
-                reader, source, canonical, scale_inv_name, *codes_shard, *scale_inv_shard, meta,
-                with_crc);
-            if (!adapter.ok()) return adapter;
-        } else if (scale_shard != nullptr) {
-            if (method != HfQuantMethod::QuarkMxfp4) {
-                return Status::unsupported(
-                    ("hf tensor carries weight_scale in a non-mxfp4 model: " + canonical).c_str(),
-                    __FILE__, __LINE__);
-            }
-            Status adapter = synthesize_mxfp4_tensor(
-                reader, source, canonical, scale_name, *codes_shard, *scale_shard, meta, with_crc);
-            if (!adapter.ok()) return adapter;
         } else {
-            Status adapter =
-                synthesize_bf16_tensor(reader, source, canonical, *codes_shard, meta, with_crc);
-            if (!adapter.ok()) return adapter;
+            const std::string* codes_shard = find_shard(canonical);
+            const std::string scale_inv_name = canonical + "_scale_inv";
+            const std::string scale_name = canonical + "_scale";
+            const std::string* scale_inv_shard = find_shard(scale_inv_name);
+            const std::string* scale_shard = find_shard(scale_name);
+
+            if (codes_shard == nullptr && scale_inv_shard == nullptr &&
+                scale_shard == nullptr) {
+                continue;
+            }
+            if (codes_shard == nullptr) {
+                return Status::invalid_argument(
+                    ("hf quantized tensor missing weight payload: " + canonical).c_str(),
+                    __FILE__, __LINE__);
+            }
+
+            auto reader_result = shard_set->reader_for_shard(*codes_shard);
+            if (!reader_result.ok()) return reader_result.status();
+            const shelf::io::SafetensorsReader* reader = reader_result.value();
+
+            if (scale_inv_shard != nullptr && scale_shard != nullptr) {
+                return Status::invalid_argument(
+                    ("hf tensor carries both weight_scale_inv and weight_scale: " + canonical)
+                        .c_str(),
+                    __FILE__, __LINE__);
+            }
+
+            if (scale_inv_shard != nullptr) {
+                if (method != HfQuantMethod::Fp8) {
+                    return Status::unsupported(
+                        ("hf tensor carries weight_scale_inv in a non-fp8 model: " + canonical)
+                            .c_str(),
+                        __FILE__, __LINE__);
+                }
+                Status adapter = synthesize_fp8_tensor(
+                    reader, source, canonical, scale_inv_name, *codes_shard, *scale_inv_shard,
+                    meta, with_crc);
+                if (!adapter.ok()) return adapter;
+            } else if (scale_shard != nullptr) {
+                if (method != HfQuantMethod::QuarkMxfp4) {
+                    return Status::unsupported(
+                        ("hf tensor carries weight_scale in a non-mxfp4 model: " + canonical)
+                            .c_str(),
+                        __FILE__, __LINE__);
+                }
+                Status adapter = synthesize_mxfp4_tensor(
+                    reader, source, canonical, scale_name, *codes_shard, *scale_shard, meta,
+                    with_crc);
+                if (!adapter.ok()) return adapter;
+            } else {
+                Status adapter = synthesize_bf16_tensor(
+                    reader, source, canonical, *codes_shard, meta, with_crc);
+                if (!adapter.ok()) return adapter;
+            }
         }
 
         if (meta.logical_shape.size() < 2 && meta.encoding != QuantizedEncoding::Bf16) {
@@ -550,11 +733,14 @@ Result<HfQuantizedSource> synthesize_hf_quantized_source(
         }
 
         uint64_t tensor_bytes = 0;
-        const QuantizedTensorRef* refs[5] = {
+        const QuantizedTensorRef* refs[8] = {
             meta.codes ? &*meta.codes : nullptr,
             meta.metadata1 ? &*meta.metadata1 : nullptr,
             meta.metadata2 ? &*meta.metadata2 : nullptr,
             meta.metadata3 ? &*meta.metadata3 : nullptr,
+            meta.suh ? &*meta.suh : nullptr,
+            meta.svh ? &*meta.svh : nullptr,
+            meta.marker ? &*meta.marker : nullptr,
             meta.data ? &*meta.data : nullptr};
         for (const QuantizedTensorRef* ref : refs) {
             if (ref == nullptr) continue;

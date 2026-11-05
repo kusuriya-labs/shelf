@@ -1,0 +1,1021 @@
+# EXL3 W16A16 kernel の ISA 調査
+
+## 対象
+
+- `src/shelf/kernels/optimized/linear/exl3.hip`
+- `gemm_exl3_w16a16_kernel`（8 warp block + mul1 affine epilogue / packed pair 復号）
+- build: `397e763` 相当、`-O3 --offload-arch=gfx1201`
+
+ISA は `clang++ --save-temps` で device 側の `.s` を出して読んだ。
+
+## kernel metadata
+
+| 項目 | 値 |
+| --- | ---: |
+| wavefront | wave32 |
+| threads / block | 256（8 warp） |
+| VGPR | 92（割り当て粒度 24 で 96） |
+| SGPR | 32 |
+| LDS / block | 14,400 B |
+
+## occupancy の再計算
+
+`rocminfo` の gfx1201 は **2 SIMD/CU、Max Waves/CU = 32、wave32**。
+RDNA4 の SIMD あたり 1,536 VGPR、割り当て粒度 24 とすると、96 VGPR は
+
+```text
+floor(1536 / 96) = 16 waves/SIMD
+2 SIMD/CU -> 32 waves/CU
+```
+
+で **ハードウェア上限**に一致する。VGPR は occupancy を制限していない。
+LDS も 14,400 B × 4 block = 57.6 KiB で、64 KiB/CU に 4 block 収まる。
+つまり **資源上限は 4 block/CU（32 waves/CU）** であり、
+「VGPR を 85 以下にしないと 3 block/CU にならない」という以前の見積は誤りだった。
+
+実際の occupancy は **grid 数**で決まる。decode の rows=1 では
+grid = (n/128) × 1 block、1 block = 8 warp。
+
+| shape | blocks | waves | waves / 2048 slots |
+| --- | ---: | ---: | ---: |
+| n=1024 | 8 | 64 | 3.1 % |
+| n=5120 | 40 | 320 | 15.6 % |
+| n=17408 | 136 | 1,088 | 53.1 % |
+| n=248320 (lm_head) | 1,940 | 15,520 | 100 %（資源上限で多重 wave） |
+
+n=5120 / n=1024 は **CU あたり 0.6 / 0.125 block** しかなく、資源上限の 4 block/CU に
+まったく届いていない。n=17408 でも 2.1 block/CU で、上限の半分程度。
+VGPR 削減ではなく、**独立した warp を増やす**（K 分割や出力 tile の細分化）か、
+1 warp 内の ILP を上げるのが筋になる。
+
+`rocprofv3` の PMC は gfx1201 で 0 が返り、PC sampling も出力が得られなかった。
+この環境では resident/active waves の実測ができないため、上記は resource と grid からの
+計算値である。`wait` 命令数も待機サイクル数ではないので、stall の内訳は
+段階別マイクロベンチで確認する必要がある。
+
+## 命令 mix
+
+全 2,168 命令（`state_from_ring` の modulo / 64-bit shift を残した状態）。
+
+| 分類 | 数 | 割合 |
+| --- | ---: | ---: |
+| VALU | 1,022 | 47.1 % |
+| wait / delay | 580 | **26.8 %** |
+| LDS | 284 | 13.1 % |
+| SALU / control | 262 | 12.1 % |
+| VMEM | 20 | 0.9 % |
+
+主な命令:
+
+| 命令 | 数 |
+| --- | ---: |
+| `s_wait_dscnt` | 198 |
+| `s_wait_alu` | 191 |
+| `s_delay_alu` | 174 |
+| `ds_load_b32` | 130 |
+| `ds_bpermute_b32` | 88 |
+| `v_mul_lo_u32` | 86 |
+| `v_and_b32_e32` | 84 |
+| `v_lshrrev_b64` | 64 |
+| `v_add_co_u32` / `v_add_co_ci_u32_e64` | 45 / 46 |
+| `v_cndmask_b32_e64` | 47 |
+| `v_mul_hi_u32` | 16 |
+| `v_sad_u8` / `v_sad_hi_u8` | 32 / 32 |
+| `v_wmma_f32_16x16x16_f16` | 8 |
+
+## 読み取れること
+
+1. **MMA は主コストではない。**
+   1 k chunk あたり `v_wmma` は 8 個（8 ks）。全 2,168 命令の 0.4 %。
+   16×16×16 の WMMA 自体はボトルネックではない。
+
+2. **wait / delay が 26.8 %。**
+   `s_wait_dscnt`（LDS load 待ち）198、`s_wait_alu`（VALU 依存）191、
+   `s_delay_alu` 174。命令 issue ではなく **依存 stall** が支配している。
+
+3. **`state_from_ring` の runtime 除算と 64-bit shift が ISA に出ている。**
+   `lo % word_count` / `hi % word_count` が `v_mul_hi_u32`、`v_add_co_u32`、
+   `v_add_co_ci_u32_e64`、`v_cndmask_b32_e64` の列になり、
+   `(pair >> shift)` が `v_lshrrev_b64` 64 個になっている。
+
+4. **LDS の往復が多い。**
+   `ds_load_b32` 130（ring の読み出しが主）、`ds_load_b128` 18（A fragment）、
+   `ds_store_b32` 42（tile の u32 store）。tile を LDS に置いて A fragment を
+   読み直す transpose が、decode と WMMA の間に `__syncwarp()` を挟んでいる。
+
+5. **`ds_bpermute_b32` 88。**
+   FWHT の 4 値 × 5 step × 2 row と row sum の reduction。
+
+## 実験: 除算と 64-bit shift を消す
+
+`state_from_ring` を次のように変えた。
+
+- `% word_count` を条件減算へ（`lo`/`hi` は `2*word_count` 未満）。
+- `(pair >> shift)` を `__funnelshift_r` へ。
+
+ISA の変化:
+
+| 項目 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| 全命令 | 2,168 | **1,980**（-8.7 %） |
+| VALU | 1,022 | 893 |
+| wait / delay | 580 | 528 |
+| `v_mul_hi_u32` | 16 | 0 |
+| `v_lshrrev_b64` | 64 | 0 |
+| `v_alignbit_b32` | 0 | 64 |
+
+性能（同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run）:
+
+| 版 | tok/s |
+| --- | ---: |
+| 変更前 | 9.04 / 9.05 / 9.06 |
+| 変更後 | 9.08 / 9.10 / 9.10 |
+
+**命令数を 8.7 % 減らしても、decode は 0.5 % しか改善しなかった。**
+この結果から、律速は命令スループットではなく、decode の依存 chain と
+LDS / barrier / shuffle の stall であると判断した。変更は revert した。
+
+## 段階別マイクロベンチ
+
+production とは別に `/tmp` の kernel コピーへ `clock64()` を入れ、block 0 / warp 0 の
+累積 cycles を shape 別に測った。5 sample 平均。
+
+| shape | total | rot | decode | A load | B load | WMMA |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| n=1024, k=5120 | 0.178 ms | 10.6 % | **70.2 %** | 2.3 % | 2.6 % | 2.5 % |
+| n=5120, k=5120 | 0.193 ms | 9.6 % | **72.2 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=5120, k=6144 | 0.230 ms | 9.6 % | **72.3 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=5120, k=17408 | 0.641 ms | 9.6 % | **73.1 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=17408, k=5120 | 0.302 ms | 9.4 % | **73.4 %** | 3.2 % | 4.1 % | 1.6 % |
+| lm_head | 3.208 ms | 9.1 % | **73.9 %** | 4.4 % | 4.8 % | 1.2 % |
+
+- phase の合計は約 88〜90 %。残りは `__syncthreads()`、出力 epilogue、その他。
+- clock probe では decode が 70〜74 %、入力回転が 9〜11 %、A/B load + WMMA が 8〜10 %。
+- WMMA の issue 時間は 1〜2.5 % と出たが、後述の ablation では WMMA が 43 % を占める。
+  `clock64()` を tile ごとに挟むと依存 chain が切れ、decode の割合が過大に出る。
+  以下の判断には ablation の値を使う。
+
+## decode / WMMA の ablation
+
+production と同じ kernel から一部だけを無効化し、shape と split を固定して
+GEMM + reduce の時間を比較した。n=5120 / k=5120 / split=8、10 sample 平均。
+
+| 版 | 時間 | 差分 |
+| --- | ---: | --- |
+| 全体 | 0.0864 ms | — |
+| decode を空にする（ring stage も含めて削除） | 0.0556 ms | decode + stage = 36 % |
+| decode を空にし、WMMA を 1 個の half 加算へ置換 | 0.0184 ms | WMMA = 43 % |
+| decode を空にし、A/B load と WMMA を削除 | 0.0190 ms | A/B load は無視できる |
+| decode の LDS store だけ削除 | 0.0689 ms | store = 20 % |
+| decode の state 抽出 + hash だけ削除 | 0.0694 ms | 抽出 + hash = 20 % |
+
+**M=1 では WMMA が最大のコスト（43 %）**。16 行のうち 1 行しか使わないため、
+演算の 15/16 が捨てられる。decode は 36 % で、hash の置換や modulo の除去だけでは
+全体を動かせない。残り約 21 % は入力回転、epilogue、launch、reduce である。
+
+## hash / modulo の A/B（棄却）
+
+参照実装 `Luke458/qwen38-27b-exl3-rdna4` は mul1 の hash を full-rate の 24-bit 乗算
+2 回へ置き換えている。gfx1201 では `v_mul_lo_u32` が 1/4 rate のためである。
+同じ変更と、`% word_count` を条件付き減算へ変える変更を 4 通りで比較した。
+
+- A: 変更なし
+- B: modulo だけ条件付き減算
+- C: hash だけ 24-bit 乗算 2 回
+- D: 両方
+
+n=5120 / k=5120 / split=8 の GEMM 時間は A 0.0859 / B 0.0856 / C 0.0860 /
+D 0.0856 ms（2 round）。**差は 1 % 未満**。`v_mul_lo_u32` は 188 → 20 命令まで
+減ったが、時間は変わらなかった。この kernel は ALU スループットではなく
+WMMA と tile 間の依存で律速している。両変更は revert した。
+
+## batch-aware split-K（採用）
+
+grid 数が足りない shape で K を分割する。`rows == 1` 固定ではなく、行 tile と
+n tile の両方から決める。
+
+- 1 block は従来どおり 16 行 × 128 列を担当する。
+- `splits > 1` のとき、grid を `(n_tiles * splits, row_tiles)` にし、
+  block は `split` ごとに K chunk を飛び飛びに処理する。
+- 部分和 `acc` と rowsum を scratch に書き、reduce kernel が split 方向に加算して
+  affine 変換、`H128`、`svh` を適用する。
+- 自動 split は `grid_x <= 64 ? 8 : grid_x <= 160 ? 4 : 1`。scratch 容量と
+  K chunk 数で上限を下げる。scratch は 524,288 float（2 MiB）で、
+  rows=8 / n=5120 / split=8 まで収まる。
+- 部分和の順序が変わるため、CPU affine 参照との差は split あり / なしの両方で
+  確認する。
+
+### 見つけた race
+
+最初の実装は E2E の生成が崩れた。`rows=5, n=5120` の数値テストも実行ごとに
+PASS / FAIL が変わった。原因は K ループ先頭で、前の chunk の `xrot` をまだ読んでいる
+warp がある間に、別の warp が次の chunk の `xrot` を上書きしていたことである。
+K ループ先頭に `__syncthreads()` を追加して解消した。3 回連続で PASS、
+E2E は `11751,13,198`（` Paris.`）に戻った。
+
+### 結果
+
+同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run。
+
+| 版 | tok/s |
+| --- | ---: |
+| split なし（`SHELF_EXL3_SPLIT=1`） | 8.85 |
+| auto split | **12.16 / 12.20 / 12.23** |
+| E2E decode | 12.67 |
+| MTP-2 | 14.30 |
+
+shape 別の GEMM + reduce（10 sample 平均、split=1 → 最良）:
+
+| shape | split=1 | 最良 split | 時間 |
+| --- | ---: | ---: | ---: |
+| n=1024, k=5120 | 0.1526 ms | 8 | 0.0333 ms |
+| n=5120, k=5120 | 0.1521 ms | 8 | 0.0861 ms |
+| n=5120, k=17408 | 0.4960 ms | 8 | 0.2484 ms |
+| n=17408, k=5120 | 0.2986 ms | 3（scratch 上限） | 0.2537 ms |
+
+reduce kernel は平均 3.5 µs。split を増やすと block 数は増えるが、reduce と
+launch の追加は小さい。prefill 128 は 199.67 tok/s で split 前と同じ。
+
+batch>1 の GEMM 時間（n=5120, k=5120, rows=8）:
+
+| split | 時間 |
+| --- | ---: |
+| 1 | 0.1697 ms |
+| 2 | 0.1222 ms |
+| 4 | 0.1301 ms |
+| 8 | **0.0944 ms** |
+
+rows=8 でも split 8 が効くため、scratch を 2 MiB まで広げた。rows=16 では
+split 4 / 8 が 0.1024 / 0.1017 ms でほぼ同じ、rows=32 以上では split の効果は
+1 % 程度になる。
+
+## 2 系列インターリーブ（棄却）
+
+2 本の ring と 2 枚の tile を用意し、ring 2 本を stage → sync → 2 tile を復号 →
+sync → A/B/WMMA を 2 回、という形にした。barrier は 1 tile あたり 2 回から
+2 tile あたり 2 回へ半減する。
+
+| 版 | tok/s |
+| --- | ---: |
+| 1 系列（現行） | 9.04 / 9.05 / 9.06 |
+| 2 系列 | 8.96 / 8.96 / 9.04 |
+
+**改善せず**、LDS が 14.4 KiB → 16.4 KiB に増えて 4 block/CU から 3 block/CU へ
+落ちた可能性がある。decode の依存 chain はすでに compiler が 4 pair 分
+インターリーブしており、明示的な 2 系列化の追加コストが上回った。revert した。
+
+## ring window の 4-word 一括ロード（採用）
+
+1 lane が担当する 8 状態は 8 連続 position なので、16-bit window の開始位置は
+`ka`（half では 1 bit 交互）ずつしか進まない。8 状態を覆う範囲は最大でも
+約 102 bit であり、4 個の u32 に収まる。`state_from_ring` を状態ごとに呼ぶと
+1 tile あたり 16 回の LDS load になるが、先頭 word を 4 個だけ load し、
+`pick4` で相対 word を選ぶ形にすると 4 回で済む。
+
+- 先頭 word `w0` は最大 `2 * word_count - 1` になる。4 個の index は
+  条件付き減算を 2 回行って `word_count` 未満へ落とす。1 回では
+  `w0 + 3 >= 2 * word_count` のときに範囲外になる（試作で踏んだ）。
+- window の抽出式は `state_from_ring` と同じで、相対 index が 0..3 に収まる。
+- 余分な選択命令は増えるが、この kernel は ALU 律速ではないため、
+  LDS load の削減がそのまま効いた。
+
+同じ shape・split での GEMM + reduce（10 sample 平均）:
+
+| shape | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| n=1024, k=5120 | 0.0338 ms | 0.0327 ms |
+| n=5120, k=5120 | 0.0864 ms | **0.0777 ms** |
+| n=5120, k=17408 | 0.2506 ms | **0.2175 ms** |
+
+全体（同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run）:
+
+| 条件 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| decode（auto split） | 12.16〜12.23 tok/s | **13.63〜13.66 tok/s** |
+| decode（split なし） | 8.85 tok/s | 9.51 tok/s |
+| E2E decode | 12.67〜12.82 tok/s | **14.50 tok/s** |
+| MTP-2 | 14.30 tok/s | **15.48 tok/s** |
+| prefill 128 | 199.67 tok/s | **226.06 tok/s** |
+
+prefill も同じ decode_tile を使うため、行数が多い場合にも効果がある。
+`test_exl3_linear` の ka=1 / 2 / 3+half / 4 / 5 / 6 / 7 / 8、half 1.5 / 2.5、
+rows 1〜17、split 1〜32 がすべて PASS し、E2E は `11751,13,198`（` Paris.`）を
+維持した。
+
+## prefill の row group 再利用（採用）
+
+prefill は同じ重み tile を 16 行ごとに復号し直していた。rows=128 では
+decode + stage が 31.5 %、うち state 抽出 + store が 14.9 %、global stage が 16.6 %。
+16 行 tile を複数まとめて 1 block で処理すれば、復号と stage をその分だけ共有できる。
+
+- kernel を `kGroups` でテンプレート化し、`kRows = 16 * kGroups` 行を 1 block が担当する。
+- `xrot` と `rowsum` は `kRows` 行ぶん確保し、`acc[kGroups]` に row group ごとの
+  累算を持つ。WMMA は復号した A fragment を group 間で再利用する。
+- epilogue は 16 行ぶんの `area.accum` を使い回し、group ごとに affine / H128 / svh を
+  適用する。
+- split-K の reduce は 16 行 / block のままなので、reduce の grid は
+  `ceil(rows / 16)` で別に計算する。ここを row group の grid と共有して
+  rows 16 以降が書かれないバグを一度作った。
+
+`kGroups` の比較（n=5120, k=5120, rows=128, split=1）:
+
+| 版 | 時間 | pp128 |
+| --- | ---: | ---: |
+| 1 | 0.528 ms | 226.06 tok/s |
+| 2 | **0.441 ms** | **265.51 tok/s** |
+| 4 | — | 188.84 tok/s |
+
+groups=4 は LDS が約 26 KiB になり 2 block/CU へ落ちるため、block 数が増える
+rows=128 でも逆効果だった。groups=2 は LDS 約 18 KiB で 3 block/CU を保てる。
+rows=32 で groups=2 を強制すると block 数が 40 に減り、0.202 → 0.247 ms へ悪化する。
+そのため自動選択は次を条件にする。
+
+```text
+rows >= 32 かつ grid_x * ceil(rows / 32) >= 128 のとき groups=2
+```
+
+結果（同じ GPU 1、3 run）:
+
+| 条件 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| prefill 128 | 226.06 tok/s | **265.51 tok/s** |
+| prefill 512 | 230.85 tok/s | **273.57 tok/s** |
+
+decode（rows=1）は groups=1 のまま。n=5120 / k=5120 / split=8 の GEMM は
+変更前 0.0778 ms、変更後 0.0777 ms で差がない。`test_exl3_linear` の
+rows=64 / n=8192 で groups=2 の経路を検証している。
+
+## 入力回転の事前計算（採用）
+
+現行 kernel の定数は `kOutBlock = 128`、`kRowTile = 16`、`kThreads = 256`
+（8 warp、1 warp = 16 列）、`kGroups = 1`（decode）/ `2`（prefill 条件付き）。
+入力回転は CTA ごとに、同じ Activation を n tile 数と split 数だけ繰り返していた。
+
+まず回転ブロック（`suh` load、BF16 load、FWHT、FP16 変換、`xrot` LDS 書き込み）を
+丸ごと外した ablation を、auto split で測った。
+
+| rows | n=5120 k=5120 | n=5120 k=17408 | n=17408 k=5120 |
+| ---: | ---: | ---: | ---: |
+| 1 | -15 % | -17 % | -16 % |
+| 4 | -33 % | -22 % | -21 % |
+| 16 | -25 % | -28 % | -31 % |
+| 128 | -41 % | — | — |
+
+回転は decode でも 15 %、prefill では 41 % を占める。`fwht128` だけを外した
+以前の ablation が効果なしだったのは、重いのは FWHT ではなく、
+BF16 load / suh / LDS 書き込みだったためである。
+
+実装:
+
+- `rotate_exl3_kernel` が 1 linear につき 1 回だけ `xrot[rows][k]`（FP16）を作る。
+  row ごとに 1 block、8 warp で K/128 block を分担する。
+- GEMM は `kPre` template で分岐し、`xrot` を global から LDS へコピーして使う。
+  行 sum はコピー後の LDS から計算するので split でも整合する。
+- `xrot` は execution workspace に 80 MiB 確保する。`rows * k * 2 <= 80 MiB` かつ
+  `rows >= 4` のときだけ使い、それ以外は従来の fused 経路に落とす。
+
+結果（同じ GPU 1、3 run、`SHELF_EXL3_PRE=0` が fused）:
+
+| prompt | fused | pre | 改善 |
+| ---: | ---: | ---: | ---: |
+| 128 | 265.51 | **315.25** | +18.7 % |
+| 512 | 273.57 | **328.92** | +20.2 % |
+| 1024 | 274.37 | **326.17** | +18.9 % |
+| 2048 | 274.06 | **330.00** | +20.4 % |
+
+32 MiB では 2048×17408 の `down_proj` が fused に落ち、pp2048 は 314.37 だった。
+80 MiB に広げると 330.00 まで上がる。decode（rows=1）は fused のまま。
+`n=5120 / k=5120 / split=8` の GEMM は 0.0785 → 0.0775 ms で、fused 側の回帰はない。
+
+### decode prefetch（棄却）
+
+次の tile の ring を現在の decode/WMMA より先に global load する形も試した。
+単一 tile + 2 ring にしたが、rows=1 0.0792（base 0.0793）、rows=16 0.0997（0.0978）、
+rows=128 0.4959（0.4931）で改善しなかった。compiler がすでに unroll で
+load を先行させており、明示的な prefetch の追加コストが上回る。revert した。
+
+### rowsum のガード
+
+非 split 経路の `rowsum` 書き込みは index が `kRows` 未満で範囲内、非アクティブ行の
+`row_acc` は 0、epilogue も `r >= active_rows` を弾くため誤出力はなかった。
+防御的に `r < active_rows` のガードを追加した。
+
+## ka=4 の 8 状態一括抽出（採用）
+
+`codebook_pair_h_bits()` は既に `v_sad_u8` + `v_sad_hi_u8` を使っており、
+hash は `v_mul_lo_u32` である。24-bit split hash は ka=4 抽出の後でも **±0.5 %**
+で効果がなかった。`v_mul_lo_u32` は 1/4 rate だが、この kernel では律速ではない。
+
+generic 経路は state ごとに 4 word から 2 word を `pick4` で選び、64-bit 結合と
+可変 shift を行う。ka=4 / half=0 では 1 lane の 8 状態が 2 word に収まり、
+オフセットが lane に依存しない。
+
+- `w0 = lane + 31`、`w1 = lane + 32`（word_count=32、1 回だけ条件付き減算）
+- `pair01 = (w0 << 32) | w1` → `v_alignbit` shifts 28, 24, 20
+- `pair11 = (w1 << 32) | w1` → shifts 16, 12, 8, 4, 0
+- 2 LDS load + 8 `v_alignbit` + 8 mask で 8 状態
+
+GEMM 単体（auto split、導入前 / 導入後）:
+
+| shape | rows | 導入前 | 導入後 |
+| --- | ---: | ---: | ---: |
+| n=5120 k=5120 | 1 | 0.0792 | **0.0754** |
+| n=5120 k=5120 | 4 | 0.0848 | **0.0792** |
+| n=5120 k=5120 | 32 | 0.1759 | **0.1673** |
+| n=5120 k=5120 | 128 | 0.4961 | **0.4805** |
+| n=5120 k=17408 | 1 | 0.2282 | **0.2117** |
+| n=17408 k=5120 | 1 | 0.2217 | **0.2083** |
+
+n=5120 / k=5120 の rows=16 は導入前の測定が 0.1246 ms と外れていたため表から外した。
+導入後は 0.0956 ms。全体として **5〜7 %** の短縮。
+
+production（ka=4 後の precompute on/off）:
+
+| prompt | fused | pre | 改善 |
+| ---: | ---: | ---: | ---: |
+| 128 | 278.95 | **336.44** | +20.6 % |
+| 2048 | 289.60 | **353.68** | +22.1 % |
+
+decode は 13.36〜13.39 → **14.80〜14.91 tok/s**。E2E は 15.93 tok/s、
+MTP-2 は 15.68 tok/s。ka=4 以外（lm_head の ka=6、half）は generic 経路のまま。
+
+## 棄却した試行（依存チェーンと LDS）
+
+- **Accumulator の 2 本 / 4 本分割**: `acc[g]` を偶数・奇数 K tile で分け、最後に
+  FP32 加算した。2 本は rows=1 0.0746 → 0.0742 ms、rows=128 0.4835 → 0.4784 ms で
+  誤差範囲。4 本は rows=128 が 0.4835 → 0.5892 ms へ悪化した（VGPR 増で occupancy 低下）。
+  WMMA の累積依存チェーンは主因ではない。
+- **xrot の row pitch 128 → 130 halfs**: B fragment の bank を分散させる狙い。
+  rows=1 0.0746 → 0.0743 ms、rows=128 0.4835 → 0.4837 ms で変化なし。
+- **tile の column pitch 16 → 18 halfs**: A fragment の bank を分散させる狙い。
+  rows=1 0.0746 → 0.0983 ms（+32%）、rows=128 0.4835 → 0.5896 ms へ悪化。
+  16B vector load の alignment が崩れるためで、pitch 変更は逆効果。
+- 以上から、decode → LDS → WMMA の逐次依存や bank conflict を主因とする仮説は
+  支持されない。次の大きな候補は M=1〜8 の Small-M カーネル（fdot2/dot2 系）で、
+  WMMA の M 方向 15/16 の浪費を避ける経路である。
+
+## INT8 1-GEMM の品質ゲート（棄却）
+
+gfx1201 の INT8 WMMA は FP16 の **1.96 倍**（93.5 → 183.1 T-MAC/s）で、
+mul1 の 11-bit `d` を 8-bit に丸めれば 1 回の INT8 GEMM で MMA を半分にできる。
+既存の FP16 カーネルに「重みだけ int8 相当（`d` を 4 刻みに丸める）」シミュレーションを
+入れ、prose 32 position で品質を比較した。
+
+| 指標 | FP16 | 重み int8 |
+| --- | ---: | ---: |
+| PPL | 3.7558 | 3.8093（**+1.43 %**） |
+| mean KL | — | 0.000615 |
+| top-1 一致 | — | 100 % |
+| top-5 overlap | — | 99.4 % |
+| logit max abs delta | — | 0.413 |
+
+プロジェクトの既定ゲートは PPL 回帰 1.0 % 以下である。**重みだけの int8 で既に
++1.43 %** となり、超過する。活性も int8 にすると量子化誤差は約 1.1 % RMS まで増え、
+さらに悪化する。
+
+- `d` を 2 個の int8（lo/hi）に分ける 2-GEMM は重み精度を保てるが、
+  INT8 1.96 倍 × 2 回で MMA 時間は FP16 と同等になり、活性 int8 の誤差だけ残る。
+- したがって、INT8 1-GEMM は品質・性能の両面で採用しない。
+
+## INT8 方式の再検討（A: 再量子化 / B: mul1 byte 分解）
+
+以前の INT8 1-GEMM の棄却は、dense に展開した `W_hat` を固定スケールで 8-bit に
+丸める方式（A）だけを対象にしていた。mul1 の整数構造を保存する方式（B）は別物で
+あるため、recon 経路に品質シミュレーションを追加して Q0〜Q4 を測り直した。
+
+- Q0: FP16 基準
+- Q1: per-column INT8 重み + FP16 活性
+- Q2: per-column INT8 重み + per-row INT8 活性（A 方式）
+- Q3: 重みは mul1 byte 分解のまま（追加量子化なし）+ per-row INT8 活性（B 方式）
+- Q4: Q3 + INT8 residual 補正
+
+シミュレーションは dense 経路の recon 後に重みを per-column、`xrot` を per-row で
+INT8 格子へ丸め、FP16 GEMM に通す（`SHELF_EXL3_SIM=w8|x8|w8x8|x8res`）。INT8 WMMA
+自体はまだ実装していない。corpus は BetterBench v1 の 2203 token、context 128、
+2048 position、BF16 KV。
+
+| 実験 | PPL | PPL 差 | mean KL | top-1 | top-5 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q0 FP16 | 8.7308 | — | — | — | — |
+| Q2 A 方式 | 7.9661 | **-8.76%** | 0.00653 | 96.6% | 97.4% |
+| Q3 B 方式 | 9.2012 | **+5.39%** | 0.00314 | 97.7% | 98.2% |
+| Q4 residual | 8.7285 | -0.03% | 0.00068 | 98.7% | 99.0% |
+
+512 position でも同じ符号（Q2 -11.2%、Q3 +2.77%、Q4 -1.25%）だった。
+
+**Q3 が +5.39% で既定ゲート +1.0% を超える**。重み側は byte 分解で正確に保てるため、
+制約は活性の INT8 化である。Q4 の residual 補正は品質をほぼ完全に戻す（KL 0.00068、
+top1 98.7%）が、INT8 GEMM が 2 回必要になる。
+
+速度面では B 方式は 4 byte plane を展開するため論理 K あたり 4 倍の整数積和になり、
+INT8 WMMA が FP16 の 1.96 倍でも約 2 倍遅い。2-GEMM / residual も 2 回で利得が消える。
+したがって **B 方式は品質・性能の両面で採用しない**。
+
+A 方式（Q2）は PPL が改善するが、これはこの corpus でモデルが過信傾向にあるための
+見かけの改善で、KL 0.0065 / top1 96.6% は実際の分布変化を示す。PPL だけでは判定
+できないため、A 方式を実装する前に、prior gate と同じ校正済み corpus（prose、PPL
+3.76 前後）か、KL / top1 の閾値を加えたゲートで再判定する必要がある。
+
+### A 方式の再ゲート（固定閾値）
+
+ゲート条件を先に固定して、校正済み corpus で A 方式を再測定した。
+
+- corpus: `vendor/BetterBench/corpus/v1` の 2191 token（sha256 `9136d38b…`）
+- context 128、BF16 KV、dense 経路
+- 合格条件: PPL 回帰 +1.0% 以下、mean KL 0.001 以下、top-1 98% 以上、
+  top-5 overlap 98.5% 以上
+
+同じ corpus でも先頭 32 position は PPL 3.99、1024 position では PPL 14.34 と
+後半が難しいため、両方を記録する。
+
+| 条件 | PPL 差 | mean KL | top-1 | top-5 | 判定 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 32 pos: w8（重みのみ） | -0.61% | 0.00128 | 100% | 95.6% | KL / top-5 で不合格 |
+| 32 pos: x8（活性のみ） | -0.30% | 0.00037 | 100% | 98.1% | top-5 で不合格（1 位置） |
+| 32 pos: A（w8x8） | -2.58% | 0.00088 | 100% | 95.6% | top-5 で不合格 |
+| 1024 pos: w8 | -18.6% | 0.0139 | 94.1% | 97.0% | KL / top-1 / top-5 で不合格 |
+| 1024 pos: x8 | +1.44% | 0.00091 | 98.7% | 98.8% | PPL で不合格 |
+| 1024 pos: A（w8x8） | -17.7% | 0.0120 | 94.5% | 97.5% | KL / top-1 / top-5 で不合格 |
+
+PPL の負方向は、この corpus の後半でモデルが過信傾向にあり、量子化ノイズが
+PPL を下げるためで、品質改善ではない。KL / top-1 が実際の分布変化を示す。
+
+**判定: A 方式は不合格**。32 position では top-5、1024 position では KL と top-1 が
+閾値を超える。原因は重みの per-column INT8 で、活性のみ（x8）は KL 0.0009 /
+top-1 98.7% / top-5 98.8% とほぼ合格圏（PPL のみ +1.44%）。
+
+### 結論と次の判断
+
+- A 方式は固定ゲートを通らないため、INT8 WMMA は実装しない。
+- B 方式（正確な重み + INT8 活性）は品質が近いが、4 byte plane で約 2 倍遅く、
+  速度の利点がない。
+- 重みの per-K128 scale は品質を改善する可能性があるが、K ブロックごとの部分和に
+  別 scale を適用する必要があり、hipBLASLt の 1 回の GEMM では表現できない。
+  複数 GEMM か custom kernel になり、速度優位が残る保証がない。
+- 現行の FP16 dense + hipBLASLt（pp2048 約 1,390 tok/s、1 層 108.7 TFLOPS）を維持する。
+
+## Trellis ring の lane shuffle 化（採用）
+
+ka=4 の ISA では、`global_load_b32` → `ds_store_b32`（ring）→ wave barrier →
+`ds_load_b32`×2 → `v_alignbit_b32` の順だった。ka=4 で必要なのは自分の word と
+1 つ前の lane の word だけなので、ring を LDS に作らず、
+`source[lane]` と `__shfl_sync(0xFFFFFFFFull, b, (lane + 31) & 31, 32)` に置き換えた。
+gfx1201 ではこれは `ds_bpermute_b32` 1 命令になる。
+
+差分:
+
+- 削除: `ds_store_b32`、wave barrier、`ds_load_b32`×2、ring のアドレス計算
+- 追加: `ds_bpermute_b32`
+- 変更なし: `v_alignbit_b32` / `v_bfe_u32`、`v_mul_lo_u32`、SAD、
+  `ds_store_2addr_b32`、`ds_load_b128`、`v_wmma_f32_16x16x16_f16`
+
+GEMM 単体（auto split、ring / shuffle）:
+
+| rows | n=5120 k=5120 | n=17408 k=5120 |
+| ---: | ---: | ---: |
+| 1 | 0.0757 → **0.0746** | 0.2080 → **0.2051** |
+| 4 | 0.0810 → **0.0797** | 0.2211 → **0.2187** |
+| 16 | 0.0958 → **0.0947** | 0.2924 → **0.2852** |
+| 32 | 0.1672 → **0.1652** | 0.4824 → **0.4682** |
+| 128 | 0.4799 → **0.4670** | — |
+
+**1〜3 %** の短縮。production の decode は横ばい（14.79〜14.85 tok/s）、
+prefill 128 は 336.44 → 339.82、2048 は 353.68 → 356.55 tok/s。
+Trellis ring の LDS 往復は主因ではなく、寄与は 1 % 程度だった。
+
+## groups / split-K の分離スイープ（採用）
+
+M=16→32 で総 throughput が伸びない原因を、`groups` と split-K を固定して分離した。
+n=5120 / k=5120、時間は ms、括弧内は `M / time` の相対 throughput。
+
+| M | g1 s1 | g2 s1 | g1 s4 | g2 s4 |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 0.1513 | 0.1521 | 0.0799 | **0.0792** |
+| 16 | 0.1533 | 0.1554 | 0.0863 | **0.0858** |
+| 32 | 0.1856 | 0.2240 | 0.1540 | **0.1342** |
+| 64 | 0.2858 | 0.2963 | 0.2874 | **0.2482** |
+| 128 | 0.5529 | 0.4470 | 0.4894 | **0.4217** |
+
+- **M=16→32 の頭打ちは groups=2 ではなく split 容量**だった。production は
+  M=16 で split 6、M=32 で split 3 に容量制限され、block 数が 240 → 120 に減る。
+  split=1 固定では M=16→32 の throughput は 104→172（+65%）まで伸びる。
+- split=4 固定では **M≥32 で groups=2 が 15〜16% 速い**。M=8/16 はほぼ同等。
+- M=1/4 は split=4 が最適（M=1: s4 0.0713 / s8 0.0771、M=4: 0.0767 / 0.0784）。
+- n=1024 は block 数が少ないため **split=8** が最適（M=1: s4 0.0404 / s8 0.0299）。
+- n=17408 も M≥32 で groups=2 が 8〜14% 速い（M=32: 0.4656 / 0.5138、
+  M=128: 1.5492 / 1.7640）。
+
+### 新しい dispatch
+
+```text
+split: grid_x <= 16 ? 8 : (grid_x <= 160 ? 4 : 1)
+groups=2: rows >= 32 かつ grid_x * ceil(rows/32) * splits >= 128
+```
+
+- split scratch を 2 MiB → **12 MiB** に広げ、M=32/64/128 の split=4 を可能にした。
+  M=32 (0.66M float)、M=64 (1.31M)、M=128 (2.62M) が収まる。
+- M=8/16 は groups=1、n=1024 は split=8 のまま。
+
+production（同じ GPU 1、3 run）:
+
+| 条件 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| decode | 14.79〜14.85 | **15.00〜15.10** |
+| prefill 128 | 339.8 | 340.4（横ばい） |
+| prefill 2048 | 356.6 | 355.9（横ばい） |
+| E2E decode | 15.89 | 15.86 |
+| MTP-2 | 15.60 | 15.77 |
+
+単一 stream の伸びは 1.5 % 程度だが、GEMM 単体では M=32 で約 28%（g1 s3 →
+g2 s4）、M=64 で約 13%、M=128 で約 6% 改善する。batch decode の主対象は
+この範囲なので、Continuous Batching の改善として採用する。
+
+## pp2048 のカーネル内訳と FP16 展開の診断
+
+pp2048（2048 token、GPU 1）を `rocprofv3 --kernel-trace` で測った。総カーネル時間
+5664 ms の内訳:
+
+| カーネル | 時間 | 割合 |
+| --- | ---: | ---: |
+| EXL3 GEMM `<2,false,true>` | 5423.5 ms | **95.8 %** |
+| rotate_exl3 | 31.5 ms | 0.6 % |
+| GDN recurrence | 51.0 ms | 0.9 % |
+| PagedAttention prefill | 25.4 ms | **0.4 %** |
+| SwiGLU / mul / residual / norm 等 | 約 100 ms | 1.8 % |
+
+**PagedAttention は遅くない**。pp2048 のボトルネックは EXL3 GEMM である。
+EXL3 の 400 launch の内訳は次のとおり。
+
+| n | k | launches |
+| ---: | ---: | ---: |
+| 17408 | 5120 | 128 |
+| 5120 | 6144 | 64 |
+| 5120 | 17408 | 64 |
+| 6144 | 5120 | 48 |
+| 10240 | 5120 | 48 |
+| 1024 | 5120 | 32 |
+| 12288 | 5120 | 16 |
+
+### 重みを FP16 に展開した場合（診断）
+
+同じ `launch_gemm_exl3_w16a16` 構造（pre 経路、groups=2、split=1、M=2048）で、
+trellis の代わりに事前復号済み FP16 tile を global から読む診断カーネルを 1 shape
+ずつ実行した。FP16 tile は 0 で埋め、メモリ流量だけを再現している。
+
+| n | k | 現行 | FP16 tile | 比 |
+| ---: | ---: | ---: | ---: | ---: |
+| 17408 | 5120 | 17.43 ms | 18.21 ms | **0.96** |
+| 5120 | 6144 | 6.43 ms | 5.69 ms | 1.13 |
+| 5120 | 17408 | 18.12 ms | 17.32 ms | 1.05 |
+| 6144 | 5120 | 6.47 ms | 5.71 ms | 1.13 |
+| 10240 | 5120 | 10.79 ms | 10.24 ms | 1.05 |
+| 1024 | 5120 | 1.18 ms | 0.97 ms | 1.21 |
+| 12288 | 5120 | 12.93 ms | 12.39 ms | 1.04 |
+
+- 最大の `n=17408, k=5120`（gate/up、128 launch、EXL3 時間の 41 %）は
+  **FP16 展開の方が遅い**。FP16 は 4 bpw trellis の 4 倍の重み流量で、
+  M=2048 では同じ重みを 64 row block が読むため bandwidth-bound になる。
+- 現在の pp2048 は 361.0 tok/s。診断結果を trace の shape 別時間へ適用すると、
+  FP16 展開の pp2048 は **約 366〜381 tok/s**（+2〜6 %）に留まる。
+- モデル全体の FP16 重みは 27B × 2 B ≈ **54 GB** で、32 GB VRAM に収まらない。
+  レイヤーごとに on-demand 展開しても、最大 178 MB の書き込み・読み出しが加わる。
+- したがって「先に FP16 に展開して同じカーネルで回す」案は採用しない。
+  より大きな row tile（128 行）で重みの再読み出しを 4 分の 1 にする dense GEMM なら
+  別だが、それは現在の `launch_gemm_exl3_w16a16` ではない。
+
+### A0/B0/B3 分離（1 layer、M=2048、K=N=5120、g=1、s=1）
+
+`tests/benchmarks/exl3_isolation/` に独立ベンチを作り、rocBLAS FP16 GEMM（A0）、
+現行 WMMA に事前復号 FP16 fragment を直接渡す経路（B0）、現行 EXL3（B3）を
+同一 shape で測った。10 warmup + 50 samples。
+
+| Stage | kernel ms | tok/s（単一 Linear） | TFLOPS | A0b 比 |
+| --- | ---: | ---: | ---: | ---: |
+| A0 rocBLAS FP16 | 0.7136 | 2,869,894 | 150.47 | 1.02× 遅い |
+| A0b hipBLASLt FP16 | **0.6987** | 2,930,987 | **153.67** | 1.00× |
+| B0 現行 WMMA + FP16 fragment | 4.7674 | 429,583 | 22.52 | 6.82× 遅い |
+| B3 現行 EXL3 mul1 | 6.6537 | 307,798 | 16.14 | 9.52× 遅い |
+
+- B0 は bit 抽出、mul1 hash、SAD、LDS tile 往復をすべて省き、事前復号した
+  raw FP16 tile を WMMA の A fragment として直接読む。
+- **B0 と B3 の全出力は bit 一致**（`max_abs=0`）。B0 は忠実な decode-free 基準。
+- hipBLASLt と rocBLAS は 2% 以内で一致し、A0 の基準は安定している。
+- 現行 WMMA 構造は、**decode を一切含まなくても hipBLASLt の 6.82 倍遅い**。
+  EXL3 decode 全体の追加は B0 比 1.40 倍に過ぎない。
+- したがって主因は hash / bit抽出 / ring / accumulator ではなく、
+  **WMMA のタイル構造・データ供給・スケジューリング**である。decode をさらに
+  削っても、このカーネルの上限は約 1.4 倍。次は 128×128 以上の large-tile WMMA
+  （register blocking、K pipeline）か、128 行単位で重みを再利用する dense GEMM。
+- 成果物: `tests/benchmarks/exl3_isolation/result_summary.md`、`result.csv`、
+  `isa/stage_b0.s`、`isa/stage_b3.s`、`profiles/pp2048_breakdown.txt`。
+
+### 原因: B fragment の LDS bank conflict（修正済み）
+
+B0 で演算を一つずつ外した probe（no-epi、M=2048、K=N=5120）:
+
+| probe | g=1 | g=8 |
+| --- | ---: | ---: |
+| B0（A global + B LDS） | 4.573 ms | 4.453 ms |
+| A（重み）ロードを除去 | 3.920 | 3.987 |
+| B（活性）LDS ロードを除去 | 3.624 | **2.724** |
+| A と B の両方を除去 | 1.764 | 2.185 |
+
+B の LDS ロードが最大の単一要因だった。B は
+
+```text
+xrot + (g * 16 + lane16) * 128 + ks * 16 + lane_high * 8
+```
+
+で読む。row stride 128 halfs = 256 B = 64 banks なので、16 row が同じ bank 群に
+当たり **16-way conflict** になる。
+
+pitch を **136 halfs**（272 B = 68 banks、16 B alignment を維持）にすると
+row ごとに 4 bank ずつずれ、2-way まで減る。
+
+| groups | pitch 128 | pitch 136 |
+| ---: | ---: | ---: |
+| 1 | 4.75 ms | **3.66 ms** |
+| 2 | 4.53 | **2.76** |
+| 4 | 4.53 | **2.75** |
+| 8 | 4.53 | **2.75** |
+
+B3（EXL3）も 6.65 → **4.65 ms**。pitch 130 は 16 B alignment が崩れて誤りで、
+136 が正しい。production では `kXrotPitch = 136` を採用した。
+
+production:
+
+| 条件 | 修正前 | 修正後 |
+| --- | ---: | ---: |
+| decode | 15.00 | **20.47** tok/s |
+| prefill 128 | 340.4 | **479.0** tok/s |
+| prefill 512 | 353.3 | **512.4** tok/s |
+| prefill 1024 | 354.7 | **523.6** tok/s |
+| prefill 2048 | 355.9 | **526.7** tok/s |
+| E2E decode | 15.86 | **21.95** tok/s |
+| MTP-2 | 15.77 | **18.68** tok/s |
+
+残る B0 2.75 ms と hipBLASLt 0.70 ms の差は、A のグローバルロード（prefetch なし）と
+WMMA / loop の floor（A+B 除去で 1.76〜2.18 ms）である。次は A の LDS stage /
+prefetch と 128×128 tile の検討になる。
+
+
+### pre 経路の xrot LDS copy 除去（採用）
+
+pitch 136 の後も、pre 経路は xrot を CTA ごとに global から LDS へコピーしていた。
+n tile ごとに同じ xrot をコピーするため、M=2048 では約 40 倍の重複になる。
+probe（no-epi、M=2048、K=N=5120）で、コピーをやめて B fragment を global xrot から
+直接読む経路を比較した。
+
+| probe | g=1 | g=8 |
+| --- | ---: | ---: |
+| LDS B（copy あり） | 4.33 ms | 4.18 ms |
+| global B（copy なし） | 3.39 | 2.50 |
+| noA + global B | 1.66 | 1.97 |
+| noA + noB + global B | **1.08** | 1.77 |
+
+- global B だけで g1 -22%、g8 -40%。
+- A を外すと g1 1.66、B も外すと g1 1.08 ms（99.5 TFLOPS）。残る差は A の
+  グローバルロードと WMMA / loop。
+- production の pre 経路を global B に変更し、rowsum も global xrot から計算する。
+  fused（rows<4）は従来どおり LDS pitch 136。
+
+prefill:
+
+| prompt | LDS B | global B |
+| ---: | ---: | ---: |
+| 128 | 478.97 | **486.85** |
+| 512 | 512.35 | **529.21** |
+| 1024 | 523.64 | **537.23** |
+| 2048 | 526.67 | **542.85** |
+
+decode（fused）は 20.30〜20.39 tok/s、E2E 22.35、MTP-2 18.35。
+
+
+## hipBLASLt の 16-bit WMMA 構造と残差
+
+hipBLASLt の open source 実装（roc-libraries の TensileLite）を読み、A0b（M=2048、
+K=N=5120、153.8 TFLOPS）が現在の W16A16 と何を変えているかを確認した。使用される
+kernel 名は `MT128x128x32_MI16x16x1_MIWT4_4` で、次の構成を意味する。
+
+- MacroTile 128×128、DepthU 32。CTA あたり 128×128 の出力を 4 個の wave で分担する。
+- MatrixInstruction は 16×16×16 の WMMA 1 命令。
+- MIWT4_4 は wave tile 4×4、すなわち 1 wave が 64×64 を担当し、K16 あたり 16 WMMA を
+  発行する。A fragment 4 個 + B fragment 4 個を 16 WMMA で共有するため、
+  fragment load は 0.5 個 / WMMA になる。
+
+データ供給は Tensile の標準構成で、global load を coalesced に LDS へ書き、LDS から
+`ds_read` で fragment を作る。DepthU 32 と GlobalRead の prefetch により 2 iteration
+先まで読みを先行させる。加えて WorkGroupMapping で blockIdx を並べ替え、L2 で A/B tile
+が再利用されるようにする。
+
+現在の W16A16 は warp が 1 個の 16-column tile を持ち、16-row group を g 個処理する。
+K16 あたりの fragment load は (1 + g) 個を g 個の WMMA で割るので、g=8 でも 1.125 個 /
+WMMA であり、hipBLASLt の 2.25 倍になる。wave tile が 1×1 相当で B の再利用が小さいこと、
+A を LDS へ書いてから読むことが構造差である。ただし EXL3 は A を trellis から復号する
+必要があり、hipBLASLt の「LDS に置くだけ」の A 供給をそのまま採ることはできない。
+
+### 実験: N tile の拡大（採用）
+
+warp あたりの n tile を 1 から 2 に増やし、kOutBlock を 128 から 256 にした。8 warp が
+16 個の n tile を 2 個ずつ担当する。B fragment 1 個を 2 個の WMMA で共有できるため、
+fragment load は (2 + g) / (2g) 個 / WMMA になる。
+
+M=2048、K=N=5120、split=4、groups=2 の isolation（pre 経路）:
+
+| kOutBlock | n tile / warp | ms | TFLOPS |
+| ---: | ---: | ---: | ---: |
+| 128 | 1 | 3.33 | 32.3 |
+| 256 | 2 | 2.45 | 43.9 |
+| 512 | 4 | 3.21 | 33.4 |
+
+512 は acc register が 64 個になり、spill と occupancy 低下で悪化する。256 を採用した。
+
+### 実験: row group の拡大（採用）
+
+kOutBlock 256 では groups=2（32 row）から groups=4（64 row）へ増やすと、復号済み A tile
+を共有する WMMA が 2 倍になる。acc は 64 VGPR で、groups=8（128 VGPR）より軽い。
+
+| groups | ms | TFLOPS |
+| ---: | ---: | ---: |
+| 1 | 3.54 | 30.3 |
+| 2 | 2.65 | 40.5 |
+| 4 | **2.13** | **50.5** |
+| 8 | 2.96 | 36.3 |
+
+groups=4 は `rows >= 256` かつ `grid_x >= 8` のとき選ぶ。rows=128 では grid_y が 2 に
+なり CTA 数が足りないため groups=2 の方が速い。
+
+### 実験: 残差の内訳
+
+kOutBlock 256、groups=4、split=4 で A / B のロードを個別に外した probe
+（M=2048、K=N=5120）:
+
+| probe | ms | TFLOPS |
+| --- | ---: | ---: |
+| base | 2.196 | 48.9 |
+| A（trellis 復号 + LDS）を除去 | 1.365 | 78.7 |
+| B（global xrot）を除去 | 1.907 | 56.3 |
+| A と B を除去 | 1.012 | 106.2 |
+
+残差は A 復号 0.83 ms、B 0.29 ms、WMMA / loop の floor 1.01 ms に分かれる。
+hipBLASLt は 0.70 ms（153.8 TFLOPS）なので、floor だけで 1.45 倍、A 復号を含めると
+3.0 倍である。A 復号は ALU（8 state 抽出 + codebook 4 対 + 8 scattered store）で、
+DRAM / L3 の帯域ではない。
+
+### 棄却した実験
+
+- A 復号の software pipeline（ks+1 を WMMA の前に復号）: 2.125 → 2.090 ms（-1.7%）。
+  compiler が既に命令を並べ替えており、効果が小さい。
+- CTA swizzle（M 方向 2/4/8/16 block をまとめて L2 再利用）: 2.13 → 2.12 ms。
+  trellis 13 MiB と xrot 20 MiB は L3 64 MiB に収まるため、DRAM の再読みが主因ではない。
+- kOutBlock 512（n tile / warp = 4）: 3.21 ms。acc register 64 個で悪化。
+
+
+### 実験: 4×4 wave tile（棄却）
+
+hipBLASLt と同じ 4×4 wave tile（1 wave が 64 行 × 64 列、K16 あたり A 4 個 + B 4 個で
+16 WMMA）を実装した。CTA は 128 行 × 256 列、8 warp を 2 row-wave × 4 col-wave に
+配置し、acc は 1 thread あたり 128 個の FP32 になる。epilogue は 64 行 × 128 列の
+32 KiB 領域を 4 回使う。
+
+| 構成 | VGPR | spill (B/lane) | ms | TFLOPS |
+| --- | ---: | ---: | ---: | ---: |
+| 素直な実装（decode 4 個を unroll） | 256 | 72 | 3.10 | 34.1 |
+| A fragment を LDS から都度ロード | 256 | 48 | 3.15 | 34.1 |
+| 上記 + decode を `unroll 1` | 215 | 0 | 2.31 | 46.4 |
+| decode を row-wave 間で LDS 共有 | 216 | 0 | 2.25 | 47.7 |
+| decode なし（A を LDS の固定値に） | 180 | 0 | **1.13** | **95.0** |
+
+decode を外すと 4×4 は 1.13 ms（95 TFLOPS）で、現行 4×2 の 1.36 ms（75 TFLOPS）より
+17 % 速い。しかし EXL3 の decode を入れると 2.25〜2.31 ms になり、現行 4×2 の
+2.07〜2.13 ms を上回る。原因は 128 個の FP32 accumulator と decode の一時レジスタが
+同時に必要で、256 VGPR を超えて spill するか、spill を避けると 215 VGPR で occupancy が
+落ちるためである。hipBLASLt は A が dense で decode の一時レジスタが不要なため、
+同じ 4×4 を成立させている。
+
+row group を 5 / 6 / 7 に増やす案も測った（kOutBlock 256、N tile 2）。acc は
+80 / 96 / 112 個になるが、2.37 / 2.32 / 2.90 ms で groups=4 の 2.07〜2.13 ms より
+遅い。register pressure と occupancy のバランス点は groups=4 のままである。
+
+**結論**: gfx1201 の EXL3 W16A16 では 4×4 wave tile を採用しない。dense A の GEMM で
+あれば 4×4 は有効だが、trellis 復号の一時レジスタと両立しない。残る差を縮めるには
+A 復号の命令数削減が主対象になる。
+
+### dense 経路の追い込み
+
+1 層（M=2048、K=N=5120）の内訳を次のように詰めた。
+
+| 変更 | 前 | 後 |
+| --- | ---: | ---: |
+| rowsum を rotate で事前計算 | epilogue 0.142 | epilogue 0.060 |
+| hipBLASLt の algo を 16 候補から選択 | gemm 0.87 | gemm 0.744 |
+| recon の row-major 書き込み | 0.166 | 0.140 |
+| 合計 | 1.089（99 TFLOPS） | **0.988（108.7 TFLOPS）** |
+
+転置 operand 順（`A = xrot`、C column-major）は 0.994 ms でほぼ同等だったが、
+MLP 形状（K=5120/N=17408、K=17408/N=5120）と end-to-end で row-major 版を上回らな
+かったため採用しない。epilogue の LDS transpose も不要になった。
+
+recon は row-major で 52 MB + trellis 13 MB を 0.14 ms で書いており、実効 464 GB/s
+（DRAM 640 GB/s の 72%）。store は 32 B sector を満たしているため、n tile をまとめる
+追加の coalescing は行っていない。
+
+end-to-end の pp2048 は変更前後で 1384 / 1390 tok/s（同一セッションで A/B）であり、
+以前の 1425 tok/s は GPU 状態による差である。1 層あたりは 1.089 → 0.988 ms に短縮
+している。
+
+### production
+
+| 条件 | NT=1 / groups<=2 | NT=2 / groups=4 |
+| --- | ---: | ---: |
+| decode | 20.30〜20.39 | 20.30〜20.39（fused は NT=1） |
+| prefill 128 | 486.9 | **632.4** |
+| prefill 512 | 529.2 | **768.1** |
+| prefill 1024 | 537.2 | **851.4** |
+| prefill 2048 | 542.9 | **859.4** |
+
+prefill は +30〜58%。decode は fused（rows < 4）で NT=1 のままなので変化しない。
+E2E decode 22.43 tok/s、MTP-2 18.35 tok/s、生成は `11751,13,198`。
+
+## dense recon + hipBLASLt の prefill 経路
+
+融合 decode のままでは、decode が warp 時間の約 4 割を占め、WMMA と issue ポートを
+奪い合うため 120 TFLOPS に届かない。prefill に限り、重みを 1 回だけ dense FP16 へ
+展開し、GEMM を hipBLASLt に任せる経路を採用した。
+
+### 1 層の内訳（M=2048、K=N=5120）
+
+| stage | ms |
+| --- | ---: |
+| 入力回転 | 0.043 |
+| recon（trellis → row-major FP16、52 MB 書き込み） | 0.166 |
+| hipBLASLt GEMM（f16×f16→f32、row-major C） | 0.738 |
+| epilogue（rowsum + H128 + svh + bf16） | 0.142 |
+| 合計 | 1.089（約 99 TFLOPS） |
+
+融合 W16A16 は同じ shape で 2.0 ms（52 TFLOPS）なので約 1.8 倍。hipBLASLt の
+operand 順は、row-major C を得るために `A = W_hat (N×K)`、`B = xrot (K×M)` とした。
+転置側（`A = xrot`）は 0.66 ms だが C が column-major になるため、epilogue の
+transpose が必要になる。今回は row-major C を優先した。
+
+### 経路の選択
+
+- `rows >= 256` の layer linear: recon + hipBLASLt
+- `rows < 256`、decode、MTP / DFlash2 verify、LM-Head: 融合 W16A16
+- LM-Head の logits 行数は `num_outputs`（request 数、通常 1）なので常に融合
+- 容量超過（LM-Head の 2.5 GB dense など）も融合へ fallback
+
+### Mixed Batching
+
+recon / fused の選択は request ではなく linear launch の合計 rows で決まる。
+`ScheduledBatch` は分割せず、prefill + decode の混合バッチは合計 rows が 256 以上なら
+recon、以下なら融合で全体を計算する。両経路は同じ math で、長い prompt（303 token）の
+生成 ID は dense 有効 / 無効で一致した。
+
+### production
+
+| 条件 | 融合（以前） | recon + hipBLASLt |
+| --- | ---: | ---: |
+| decode | 20.4〜20.8 | 20.4〜20.8（変更なし） |
+| pp128 | 637 | 639（変更なし） |
+| pp512 | 774 | **1097** |
+| pp1024 | 857 | **1295** |
+| pp2048 | 866 | **1390** |
+| E2E decode | 22.4 | 22.3 |
+| MTP-2 | 18.4 | 18.5 |
+
+## 参照実装との比較
+
+
+
+`Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
+plain decode 41.3 tok/s、MTP-3 で 73.9 tok/s を記録している。dot kernel は
+GEMV（`fdot2`）で、1.1〜1.25 T weights/s、ALU-bound と報告している。
+multi-row GEMV は m=4 で m=1 の 1.07〜1.31 倍のコストである。
+
+この差は主に M=1 での WMMA の無駄に由来する。現在の W16A16 は 16 行を同時に
+計算するため、M=1 では演算の 15/16 を捨てる。ablation でも WMMA が 43 % を占めた。
+一方、batch を増やすと WMMA の無駄は減る。n=5120 / k=5120 / split=8 の
+1 step は rows=1 で 0.0861 ms、rows=8 で 0.0944 ms、rows=16 で 0.1017 ms であり、
+batch 8 / 16 では token あたりコストがそれぞれ 1/7.3 / 1/13.5 になる。
+
+GEMV は batch 1〜16 のすべてで W16A16 より 2〜3 倍速い見込みだが、
+multi-request / mixed batch を前提とする現在の設計では decode 経路を 2 つ持つ
+コストが大きい。**今回は W16A16 を維持し、GEMV 経路は実装しない**。
+この判断は性能の上限を 1.55 倍程度に限定するが、multi-request の amortize と
+prefill の WMMA をそのまま使えることを優先する。
+
+## 次の候補
+
+1. **M=1〜2 の Small-M dot2 カーネル**。現在の M=1 は 16 行 WMMA の 15/16 を捨てる。
+   `v_dot2_f32_f16` で復号済み tile を直接畳めば、WMMA の M 浪費を避けられる。
+   M=4 以上は WMMA を維持する。品質リスクはない。
+2. **ka=6 の windows8 特殊化**。lm_head はまだ generic 経路。decode 全体への寄与は
+   小さいが、同じ 2-word / alignbit の考え方を適用できる。
+3. **prefill の dense FP16 GEMM**。再構築 0.17 ms（5120²）は小さく、M=512 以上では
+   パイプライン化した dense GEMM が fused を上回る可能性がある。素朴な 128×128 tile は
+   10 T-MAC/s で、double buffering が必要。
+4. **row group の拡大**。groups=2 が LDS と block 数のバランス点。xrot を global から
+   直接読むようにして LDS を削れば groups=4 を再評価できる。
+5. **INT8 1-GEMM は品質ゲートで棄却**。重みだけの int8 で PPL +1.43 %、既定ゲートは
+   +1.0 % 以下。2-GEMM も MMA が FP16 と同等で利得がない。

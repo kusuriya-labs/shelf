@@ -485,6 +485,10 @@ Status execute_program_range(
                           i, ::shelf::runtime::kernel_to_name(binding.kernel_id), domain.rows);
             return Status::unsupported(detail, __FILE__, __LINE__);
         }
+        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16) {
+            return Status::unsupported(
+                "exl3 w16a16 linear has no correctness-path kernel", __FILE__, __LINE__);
+        }
         Status st = launch_host_binding(binding, program, ctx, stream);
         if (!st.ok()) return st;
         record_fallback_dispatch(binding.kernel_id, domain.rows);

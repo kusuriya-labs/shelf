@@ -13,6 +13,7 @@
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
+#include <shelf/models/common/qwen_hybrid/weight_slot.h>
 #include <shelf/weights/matrix_weight.h>
 #include <shelf/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
@@ -1294,6 +1295,87 @@ static void test_qwen35_hf_fp8_model_load_without_mtp(
     check_eq_u64(w.mtp.layer.ffn.gate.rows, 0, "hf fp8 no mtp layer rows");
 }
 
+static std::vector<uint8_t> exl3_pattern(std::size_t bytes, uint32_t seed) {
+    std::vector<uint8_t> out(bytes);
+    uint32_t state = seed;
+    for (uint8_t& b : out) {
+        state = state * 1664525u + 1013904223u;
+        b = static_cast<uint8_t>(state >> 24);
+    }
+    return out;
+}
+
+static void test_hf_exl3_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("hf_exl3");
+    constexpr uint32_t k = 128u;
+    constexpr uint32_t n = 128u;
+    constexpr uint32_t words = 64u;
+
+    const std::vector<uint8_t> trellis = exl3_pattern(8u * 8u * words * 2u, 71u);
+    const std::vector<uint8_t> suh = exl3_pattern(k * 2u, 73u);
+    const std::vector<uint8_t> svh = exl3_pattern(n * 2u, 79u);
+    const std::vector<uint8_t> marker = {0x2Du, 0xD1u, 0xDCu, 0x83u};
+
+    std::vector<Planned> shard;
+    shard.push_back({"layer.trellis", io::SType::I16, {8, 8, words}, trellis});
+    shard.push_back({"layer.suh", io::SType::F16, {k}, suh});
+    shard.push_back({"layer.svh", io::SType::F16, {n}, svh});
+    shard.push_back({"layer.mul1", io::SType::I32, {}, marker});
+    if (!write_shard((dir / "model.safetensors").string(), shard, {})) return;
+    write_index(dir.string(), "model.safetensors", shard);
+    write_text((dir / "config.json").string(),
+               std::string("{\"model_type\":\"qwen3_5\",\"quantization_config\":")
+                   + "{\"quant_method\":\"exl3\",\"codebook\":\"mul1\"}}");
+
+    auto source = quantization::bundle::synthesize_hf_quantized_source(
+        dir.string(), {"layer.weight"}, true);
+    if (!source.ok()) {
+        fail("exl3 hf source: " + source.status().message());
+        return;
+    }
+    auto reader_result = quantization::bundle::QuantizedModelReader::open_hf_source(
+        source.release(), true);
+    if (!reader_result.ok()) {
+        fail("exl3 reader: " + reader_result.status().message());
+        return;
+    }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+
+    auto loaded = weights::load_quantized_matrix(
+        reader, "layer.weight", arena, stream, weights::WeightLoadOptions{});
+    if (!loaded.ok()) {
+        fail("load exl3 matrix: " + loaded.status().message());
+        return;
+    }
+    weights::MatrixWeight m = loaded.release();
+    check(m.encoding == weights::MatrixEncoding::Exl3, "exl3 matrix encoding");
+    check_eq_u64(m.rows, n, "exl3 matrix rows");
+    check_eq_u64(m.cols, k, "exl3 matrix cols");
+    check_eq_u64(m.k_padded, k, "exl3 matrix k_padded");
+    check_eq_u64(m.exl3_ka, 4, "exl3 matrix bit rate");
+    check(!m.exl3_half, "exl3 matrix integer rate");
+    check(!m.preshuffled, "exl3 matrix is not preshuffled");
+    check_eq_u64(m.codes_row_stride_bytes, 8u * words * 2u, "exl3 trellis row stride");
+    check(m.codes.ndim() == 3, "exl3 trellis tensor is rank 3");
+    check(m.exl3_suh.ndim() == 1, "exl3 suh tensor is rank 1");
+    check(m.exl3_svh.ndim() == 1, "exl3 svh tensor is rank 1");
+    check(m.exl3_marker.ndim() == 1, "exl3 marker tensor is rank 1");
+    check(d2h(m.codes.data<void>(), trellis.size()) == trellis, "exl3 trellis reaches the GPU");
+    check(d2h(m.exl3_suh.data<void>(), suh.size()) == suh, "exl3 suh reaches the GPU");
+    check(d2h(m.exl3_svh.data<void>(), svh.size()) == svh, "exl3 svh reaches the GPU");
+    check(d2h(m.exl3_marker.data<void>(), marker.size()) == marker,
+          "exl3 marker reaches the GPU");
+
+    const runtime::WeightSlot slot = shelf::qwen_hybrid::make_weight_slot(m);
+    check(slot.encoding == static_cast<uint8_t>(weights::MatrixEncoding::Exl3),
+          "exl3 weight slot encoding");
+    check(slot.codes == m.codes.data<void>() && slot.exl3_suh == m.exl3_suh.data<void>() &&
+              slot.exl3_svh == m.exl3_svh.data<void>() &&
+              slot.exl3_marker == m.exl3_marker.data<void>(),
+          "exl3 weight slot carries the four payload planes");
+    check_eq_u64(slot.exl3_ka, 4, "exl3 weight slot bit rate");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -1322,6 +1404,7 @@ int main() {
     test_qwen35_hf_fp8_model_load(arena, stream);
     test_qwen35_hf_fp8_model_load_without_mtp(arena, stream);
     test_hf_mxfp4_matrix_load(arena, stream);
+    test_hf_exl3_matrix_load(arena, stream);
 
     fs::remove_all(g_root, ec);
     arena.shutdown();

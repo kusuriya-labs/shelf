@@ -440,6 +440,95 @@ Result<MatrixWeight> load_quantized_view(
         return w;
     }
 
+    if (v.encoding == QuantizedEncoding::Exl3) {
+        if ((kp % 128u) != 0u || (m % 128u) != 0u) {
+            return Status::unsupported(
+                ("exl3 matrix shape must be 128-aligned: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+
+        if (v.data.data != nullptr || v.metadata1.data != nullptr) {
+            return Status::invalid_argument(
+                ("exl3 tensor must not carry data or scale: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+        if (v.suh.data == nullptr || v.svh.data == nullptr || v.marker.data == nullptr) {
+            return Status::invalid_argument(
+                ("exl3 tensor is missing suh/svh/marker: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+        const uint32_t ka = v.exl3_ka;
+        if (ka < 1u || ka > 8u || (v.exl3_half && ka > 3u)) {
+            return Status::invalid_argument(
+                ("exl3 bit rate is invalid: " + name).c_str(), __FILE__, __LINE__);
+        }
+        const uint64_t words = 16u * ka + (v.exl3_half ? 8u : 0u);
+        const uint64_t kt = kp / 16u;
+        const uint64_t nt = m / 16u;
+        const uint64_t trellis_bytes = kt * nt * words * 2u;
+        auto st = expect_bytes(name + " trellis", v.codes, trellis_bytes);
+        if (!st.ok()) return st;
+        st = expect_bytes(name + " suh", v.suh, kp * 2u);
+        if (!st.ok()) return st;
+        st = expect_bytes(name + " svh", v.svh, m * 2u);
+        if (!st.ok()) return st;
+        st = expect_bytes(name + " marker", v.marker, 4u);
+        if (!st.ok()) return st;
+
+        w.encoding = MatrixEncoding::Exl3;
+        w.exl3_ka = ka;
+        w.exl3_half = v.exl3_half;
+
+        const uint64_t codes_row_bytes = nt * words * 2u;
+        std::vector<std::size_t> cshape = {static_cast<std::size_t>(kt),
+                                           static_cast<std::size_t>(nt),
+                                           static_cast<std::size_t>(words * 2u)};
+        std::vector<std::size_t> cstrides = {static_cast<std::size_t>(codes_row_bytes),
+                                             static_cast<std::size_t>(words * 2u), 1u};
+        w.codes = alloc_bytes(v.codes.size, cshape, cstrides, arena);
+        if (w.codes.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("exl3 trellis allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.codes.data<void>(), v.codes.data, v.codes.size, stream);
+        if (!st.ok()) return st;
+
+        std::vector<std::size_t> suh_shape = {static_cast<std::size_t>(kp)};
+        std::vector<std::size_t> suh_strides = {1};
+        w.exl3_suh = alloc_tensor(suh_shape, suh_strides, arena);
+        if (w.exl3_suh.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("exl3 suh allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.exl3_suh.data<void>(), v.suh.data, v.suh.size, stream);
+        if (!st.ok()) return st;
+
+        std::vector<std::size_t> svh_shape = {static_cast<std::size_t>(m)};
+        std::vector<std::size_t> svh_strides = {1};
+        w.exl3_svh = alloc_tensor(svh_shape, svh_strides, arena);
+        if (w.exl3_svh.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("exl3 svh allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.exl3_svh.data<void>(), v.svh.data, v.svh.size, stream);
+        if (!st.ok()) return st;
+
+        std::vector<std::size_t> marker_shape = {4};
+        std::vector<std::size_t> marker_strides = {1};
+        w.exl3_marker = alloc_bytes(4, marker_shape, marker_strides, arena);
+        if (w.exl3_marker.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("exl3 marker allocation failed: " + name).c_str(), __FILE__, __LINE__);
+        }
+        st = copy_to_device(w.exl3_marker.data<void>(), v.marker.data, v.marker.size, stream);
+        if (!st.ok()) return st;
+
+        w.codes_row_stride_bytes = static_cast<uint32_t>(codes_row_bytes);
+        w.preshuffled = false;
+        apply_default_compute_spec(w);
+        return w;
+    }
+
     return Status::invalid_argument(
         ("quantized matrix unknown encoding: " + name).c_str(), __FILE__, __LINE__);
 }
