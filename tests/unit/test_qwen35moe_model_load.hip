@@ -241,6 +241,84 @@ int main() {
     }
 
     {
+        // A pipeline stage loads only the layers it owns. The model-level tensors follow the
+        // first / last rule, and the planes of the other stage are not resident at all.
+        moe::Qwen35MoeLoadOptions first_opts;
+        first_opts.stage.enabled = true;
+        first_opts.stage.layers = qhy::StageRange{0u, 1u};
+        auto first =
+            moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream, first_opts);
+        check(first.ok(), "stage 0 of a two layer MoE loads");
+        if (!first.ok())
+            std::printf("FAIL stage 0: %s\n", first.status().message().c_str());
+        if (first.ok()) {
+            const moe::Qwen35MoeModelWeights& w = first.value();
+            check(w.layers.size() == kLayers, "a stage load keeps one entry per transformer layer");
+            check(w.embed_tokens.rows == kVocab, "the first stage holds the embedding");
+            check(w.final_norm_weight.ndim() == 0, "a stage that is not last holds no final norm");
+            check(w.layers[0].ffn.router.rows == kExperts, "the stage's own router is resident");
+            check(w.layers[1].ffn.expert_w13.codes.ndim() == 0 &&
+                      w.layers[1].ffn.router.codes.ndim() == 0,
+                  "the other stage's expert planes and router are not resident");
+            check(w.layers[1].input_layernorm_weight.ndim() == 0,
+                  "the other stage's backbone is not resident");
+            check(moe::validate_qwen35moe_weights(w, f.config, 1u, 0u, first_opts.stage).ok(),
+                  "a stage load passes the stage invariants");
+            check(!moe::validate_qwen35moe_weights(w, f.config).ok(),
+                  "a stage load does not pass the whole-model invariants");
+            check(moe::moe_expert_group_bytes(moe::build_moe_expert_group_plan(f.config, 1).value()) >
+                      0u,
+                  "the stage's own layer would have had expert bytes");
+        }
+
+        moe::Qwen35MoeLoadOptions last_opts;
+        last_opts.stage.enabled = true;
+        last_opts.stage.layers = qhy::StageRange{1u, 2u};
+        auto last =
+            moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream, last_opts);
+        check(last.ok(), "stage 1 of a two layer MoE loads");
+        if (!last.ok())
+            std::printf("FAIL stage 1: %s\n", last.status().message().c_str());
+        if (last.ok()) {
+            const moe::Qwen35MoeModelWeights& w = last.value();
+            check(w.embed_tokens.codes.ndim() == 0, "a stage that is not first holds no embedding");
+            check(w.lm_head.rows == kVocab && w.lm_head.cols == kHidden,
+                  "the last stage holds the lm_head");
+            check(w.final_norm_weight.ndim() == 1 && w.final_norm_weight.dim(0) == kHidden,
+                  "the last stage holds the final norm");
+            check(w.layers[0].ffn.expert_w2.codes.ndim() == 0,
+                  "the first stage's expert planes are not resident here");
+            check(w.layers[1].ffn.expert_w2.codes.ndim() != 0,
+                  "this stage's own expert planes are resident");
+            check(moe::validate_qwen35moe_weights(w, f.config, 1u, 0u, last_opts.stage).ok(),
+                  "the last stage passes the stage invariants");
+        }
+
+        auto rank_plan = moe::build_qwen35moe_tensor_partition_plan(f.config, 2, 1);
+        check(rank_plan.ok(), "a rank's MoE partition plan builds for the stage combination");
+        if (rank_plan.ok()) {
+            moe::Qwen35MoeLoadOptions both = first_opts;
+            both.weights.partition_plan = &rank_plan.value();
+            auto rejected =
+                moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream, both);
+            check(!rejected.ok() &&
+                      message_contains(rejected.status(), "pipeline stage of an expert-axis rank"),
+                  "a stage of an expert-axis rank is rejected before reading tensors");
+        }
+
+        for (const qhy::StageRange bad : {qhy::StageRange{1u, 1u}, qhy::StageRange{0u, 3u}}) {
+            moe::Qwen35MoeLoadOptions bad_opts;
+            bad_opts.stage.enabled = true;
+            bad_opts.stage.layers = bad;
+            auto rejected =
+                moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream, bad_opts);
+            check(!rejected.ok() && message_contains(rejected.status(), "invalid pipeline stage range"),
+                  "stage range [" + std::to_string(bad.layer_lo) + ", " +
+                      std::to_string(bad.layer_hi) + ") is rejected");
+        }
+    }
+
+    {
         // One rank of an expert-axis split: the routed experts divide along the expert axis,
         // the shared expert and the backbone divide along their matrix axes, and the router
         // stays whole. A rank's expert bytes must be the same bytes the whole load holds for
