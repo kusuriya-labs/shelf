@@ -516,6 +516,44 @@ A 方式（Q2）は PPL が改善するが、これはこの corpus でモデル
 できないため、A 方式を実装する前に、prior gate と同じ校正済み corpus（prose、PPL
 3.76 前後）か、KL / top1 の閾値を加えたゲートで再判定する必要がある。
 
+### A 方式の再ゲート（固定閾値）
+
+ゲート条件を先に固定して、校正済み corpus で A 方式を再測定した。
+
+- corpus: `vendor/BetterBench/corpus/v1` の 2191 token（sha256 `9136d38b…`）
+- context 128、BF16 KV、dense 経路
+- 合格条件: PPL 回帰 +1.0% 以下、mean KL 0.001 以下、top-1 98% 以上、
+  top-5 overlap 98.5% 以上
+
+同じ corpus でも先頭 32 position は PPL 3.99、1024 position では PPL 14.34 と
+後半が難しいため、両方を記録する。
+
+| 条件 | PPL 差 | mean KL | top-1 | top-5 | 判定 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 32 pos: w8（重みのみ） | -0.61% | 0.00128 | 100% | 95.6% | KL / top-5 で不合格 |
+| 32 pos: x8（活性のみ） | -0.30% | 0.00037 | 100% | 98.1% | top-5 で不合格（1 位置） |
+| 32 pos: A（w8x8） | -2.58% | 0.00088 | 100% | 95.6% | top-5 で不合格 |
+| 1024 pos: w8 | -18.6% | 0.0139 | 94.1% | 97.0% | KL / top-1 / top-5 で不合格 |
+| 1024 pos: x8 | +1.44% | 0.00091 | 98.7% | 98.8% | PPL で不合格 |
+| 1024 pos: A（w8x8） | -17.7% | 0.0120 | 94.5% | 97.5% | KL / top-1 / top-5 で不合格 |
+
+PPL の負方向は、この corpus の後半でモデルが過信傾向にあり、量子化ノイズが
+PPL を下げるためで、品質改善ではない。KL / top-1 が実際の分布変化を示す。
+
+**判定: A 方式は不合格**。32 position では top-5、1024 position では KL と top-1 が
+閾値を超える。原因は重みの per-column INT8 で、活性のみ（x8）は KL 0.0009 /
+top-1 98.7% / top-5 98.8% とほぼ合格圏（PPL のみ +1.44%）。
+
+### 結論と次の判断
+
+- A 方式は固定ゲートを通らないため、INT8 WMMA は実装しない。
+- B 方式（正確な重み + INT8 活性）は品質が近いが、4 byte plane で約 2 倍遅く、
+  速度の利点がない。
+- 重みの per-K128 scale は品質を改善する可能性があるが、K ブロックごとの部分和に
+  別 scale を適用する必要があり、hipBLASLt の 1 回の GEMM では表現できない。
+  複数 GEMM か custom kernel になり、速度優位が残る保証がない。
+- 現行の FP16 dense + hipBLASLt（pp2048 約 1,390 tok/s、1 層 108.7 TFLOPS）を維持する。
+
 ## Trellis ring の lane shuffle 化（採用）
 
 ka=4 の ISA では、`global_load_b32` → `ds_store_b32`（ring）→ wave barrier →
