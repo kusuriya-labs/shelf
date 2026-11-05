@@ -454,6 +454,29 @@ MTP-2 は 15.68 tok/s。ka=4 以外（lm_head の ka=6、half）は generic 経�
   支持されない。次の大きな候補は M=1〜8 の Small-M カーネル（fdot2/dot2 系）で、
   WMMA の M 方向 15/16 の浪費を避ける経路である。
 
+## INT8 1-GEMM の品質ゲート（棄却）
+
+gfx1201 の INT8 WMMA は FP16 の **1.96 倍**（93.5 → 183.1 T-MAC/s）で、
+mul1 の 11-bit `d` を 8-bit に丸めれば 1 回の INT8 GEMM で MMA を半分にできる。
+既存の FP16 カーネルに「重みだけ int8 相当（`d` を 4 刻みに丸める）」シミュレーションを
+入れ、prose 32 position で品質を比較した。
+
+| 指標 | FP16 | 重み int8 |
+| --- | ---: | ---: |
+| PPL | 3.7558 | 3.8093（**+1.43 %**） |
+| mean KL | — | 0.000615 |
+| top-1 一致 | — | 100 % |
+| top-5 overlap | — | 99.4 % |
+| logit max abs delta | — | 0.413 |
+
+プロジェクトの既定ゲートは PPL 回帰 1.0 % 以下である。**重みだけの int8 で既に
++1.43 %** となり、超過する。活性も int8 にすると量子化誤差は約 1.1 % RMS まで増え、
+さらに悪化する。
+
+- `d` を 2 個の int8（lo/hi）に分ける 2-GEMM は重み精度を保てるが、
+  INT8 1.96 倍 × 2 回で MMA 時間は FP16 と同等になり、活性 int8 の誤差だけ残る。
+- したがって、INT8 1-GEMM は品質・性能の両面で採用しない。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
@@ -475,16 +498,15 @@ prefill の WMMA をそのまま使えることを優先する。
 
 ## 次の候補
 
-1. **INT8 WMMA（1-GEMM）の品質検証**。gfx1201 の INT8 WMMA は FP16 の 1.96 倍
-   （93.5 → 183.1 T-MAC/s）。mul1 の 11-bit 整数を 2 個の INT8 GEMM に分けると
-   1.02 倍で利得がないため、codebook の範囲 ±3.45 を固定スケールで 8-bit に
-   再量子化する 1-GEMM 案だけが候補になる。top-1 / logit の品質ゲートが必要。
-2. **decode と WMMA のパイプライン**。単純な prefetch は効果なかった。
-   生産 warp と消費 warp を分ける、または 2 tile を明示的に交互実行する案は
-   まだ未検証だが、2 系列インターリーブが効果なかったため優先度は低い。
-3. **row group の拡大**。groups=2 が LDS と block 数のバランス点。xrot を
-   global から直接読むようにして LDS を削れば groups=4 を再評価できる。
-4. **prefill の dense FP16 GEMM**。再構築 0.17 ms（5120²）は小さく、M=512 以上では
-   パイプライン化した dense GEMM が fused を上回る可能性がある。ただし素朴な
-   128×128 tile は 10 T-MAC/s しか出ず、double buffering が必要。
-5. W16A16 の M=1 は WMMA の 15/16 が無駄になる構造コストが残る。
+1. **M=1〜2 の Small-M dot2 カーネル**。現在の M=1 は 16 行 WMMA の 15/16 を捨てる。
+   `v_dot2_f32_f16` で復号済み tile を直接畳めば、WMMA の M 浪費を避けられる。
+   M=4 以上は WMMA を維持する。品質リスクはない。
+2. **ka=6 の windows8 特殊化**。lm_head はまだ generic 経路。decode 全体への寄与は
+   小さいが、同じ 2-word / alignbit の考え方を適用できる。
+3. **prefill の dense FP16 GEMM**。再構築 0.17 ms（5120²）は小さく、M=512 以上では
+   パイプライン化した dense GEMM が fused を上回る可能性がある。素朴な 128×128 tile は
+   10 T-MAC/s で、double buffering が必要。
+4. **row group の拡大**。groups=2 が LDS と block 数のバランス点。xrot を global から
+   直接読むようにして LDS を削れば groups=4 を再評価できる。
+5. **INT8 1-GEMM は品質ゲートで棄却**。重みだけの int8 で PPL +1.43 %、既定ゲートは
+   +1.0 % 以下。2-GEMM も MMA が FP16 と同等で利得がない。
