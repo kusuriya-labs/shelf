@@ -1,4 +1,5 @@
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/weights/moe_weight_plan.h>
@@ -450,6 +451,103 @@ int main() {
     }
     check(moe::lower_qwen35_moe_to_primitives(config, weights).ok(),
           "the untouched weights lower again after the rejections");
+
+    {
+        const auto has_prefix = [](const rt::PrimitiveGraph& graph, const char* prefix) {
+            for (const rt::PrimitiveGraphNode& n : graph.nodes) {
+                if (n.debug_name.rfind(prefix, 0u) == 0u) return true;
+            }
+            return false;
+        };
+
+        moe::Qwen35MoeLowerOptions first;
+        first.stage.enabled = true;
+        first.stage.layers = shelf::qwen_hybrid::StageRange{0u, 1u};
+        auto s0 = moe::lower_qwen35_moe_to_primitives(config, weights, first);
+        if (!s0.ok())
+            std::printf("FAIL stage 0 lowering: %s\n", s0.status().message().c_str());
+        check(s0.ok(), "the first stage lowers");
+        if (s0.ok()) {
+            const rt::PrimitiveGraph& g0 = s0.value().graph;
+            check(g0.external_inputs.size() == 1u &&
+                      g0.value_dtype(g0.external_inputs[0]) == rt::ValueDType::I32,
+                  "the first stage takes token ids");
+            check(g0.external_outputs.size() == 1u &&
+                      g0.value_features(g0.external_outputs[0]) == kHidden,
+                  "the first stage hands out one hidden plane");
+            check(has_prefix(g0, "embedding"), "the first stage emits the embedding");
+            check(has_prefix(g0, "L0."), "the first stage lowers its own layer");
+            check(!has_prefix(g0, "L1."), "the first stage lowers no other layer");
+            check(!has_prefix(g0, "logits"), "the first stage has no head");
+            check(g0.grouped_row_shape.experts == kExperts &&
+                      g0.grouped_row_shape.top_k == kTopK,
+                  "the first stage declares the same grouped row shape");
+            const rt::WeightTableView v0{s0.value().weights.data(), s0.value().weights.size()};
+            auto p0 = rt::build_program(g0, v0, rt::RowBucket::R16, rt::ExecutionClass::PREFILL,
+                                        rt::ProgramBuildOptions{});
+            if (!p0.ok())
+                std::printf("FAIL stage 0 program: %s\n", p0.status().message().c_str());
+            check(p0.ok(), "the first stage's graph builds a program");
+            if (p0.ok()) {
+                check(dispatch_count(p0.value(), rt::KernelId::MOE_ROUTER) == 1u,
+                      "the first stage's program routes one layer");
+                check(dispatch_count(p0.value(), rt::KernelId::SAMPLING) == 0u,
+                      "the first stage's program samples nothing");
+            }
+        }
+
+        moe::Qwen35MoeLowerOptions last;
+        last.stage.enabled = true;
+        last.stage.layers = shelf::qwen_hybrid::StageRange{1u, 2u};
+        auto s1 = moe::lower_qwen35_moe_to_primitives(config, weights, last);
+        if (!s1.ok())
+            std::printf("FAIL stage 1 lowering: %s\n", s1.status().message().c_str());
+        check(s1.ok(), "the last stage lowers");
+        if (s1.ok()) {
+            const rt::PrimitiveGraph& g1 = s1.value().graph;
+            check(g1.external_inputs.size() == 1u &&
+                      g1.value_dtype(g1.external_inputs[0]) == rt::ValueDType::BF16,
+                  "the last stage takes the previous stage's hidden");
+            check(g1.external_outputs.size() == 4u, "the last stage carries the head outputs");
+            check(!has_prefix(g1, "embedding"), "the last stage emits no embedding");
+            check(!has_prefix(g1, "L0."), "the last stage lowers no other layer");
+            check(has_prefix(g1, "L1."), "the last stage lowers its own layer");
+            check(has_prefix(g1, "logits"), "the last stage has the head");
+            const rt::WeightTableView v1{s1.value().weights.data(), s1.value().weights.size()};
+            auto p1 = rt::build_program(g1, v1, rt::RowBucket::R16, rt::ExecutionClass::DECODE,
+                                        rt::ProgramBuildOptions{});
+            check(p1.ok(), "the last stage's graph builds a program");
+            if (p1.ok()) {
+                check(dispatch_count(p1.value(), rt::KernelId::MOE_ROUTER) == 1u,
+                      "the last stage's program routes one layer");
+                check(dispatch_count(p1.value(), rt::KernelId::SAMPLING) == 1u,
+                      "the last stage's program samples once");
+            }
+        }
+
+        const uint32_t tap_layer[1] = {0u};
+        moe::Qwen35MoeLowerOptions taps = first;
+        taps.hidden_taps = std::span<const uint32_t>(tap_layer, 1u);
+        check(!moe::lower_qwen35_moe_to_primitives(config, weights, taps).ok(),
+              "a stage lowers no hidden taps");
+        const uint32_t override_layer[1] = {0u};
+        moe::Qwen35MoeLowerOptions overrides = first;
+        overrides.override_layers = std::span<const uint32_t>(override_layer, 1u);
+        check(!moe::lower_qwen35_moe_to_primitives(config, weights, overrides).ok(),
+              "a stage lowers no layer overrides");
+
+        moe::Qwen35MoeLoadOptions stage_load;
+        stage_load.stage = first.stage;
+        auto sw = moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream,
+                                              stage_load);
+        check(sw.ok(), "the first stage's own weights load");
+        if (sw.ok()) {
+            check(moe::lower_qwen35_moe_to_primitives(config, sw.value(), first).ok(),
+                  "the stage's own weights lower into the stage graph");
+            check(!moe::lower_qwen35_moe_to_primitives(config, sw.value()).ok(),
+                  "a stage's weights do not lower as the whole model");
+        }
+    }
 
     {
         Fixture mf;
