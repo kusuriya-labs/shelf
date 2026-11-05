@@ -25,7 +25,7 @@ inline constexpr bool paged_attention_bf16_split_supports(uint32_t q_per_kv) {
 }
 
 inline constexpr bool paged_attention_fp8_split_supports(uint32_t q_per_kv) {
-    return q_per_kv == 4u || q_per_kv == 6u;
+    return q_per_kv == 4u || q_per_kv == 6u || q_per_kv == 8u;
 }
 
 inline constexpr const char* kPagedAttentionBf16Symbol =

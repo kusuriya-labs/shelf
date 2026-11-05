@@ -157,8 +157,20 @@ int main() {
               PagedAttentionImplementation::Correctness,
           "moe 16/2/256 rows=8193 above measured -> Correctness");
     check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 1, 64) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 fp8 kv rows=1 vis=64 (measured) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 2048, 4096) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 fp8 kv rows=2048 vis=4096 (measured) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 1, 262144) ==
+              PagedAttentionImplementation::Optimized,
+          "moe 16/2/256 fp8 kv vis=262144 (measured max) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 1, 262145) ==
               PagedAttentionImplementation::Correctness,
-          "moe 16/2/256 fp8 kv not measured -> Correctness");
+          "moe 16/2/256 fp8 kv vis=262145 above measured -> Correctness");
+    check(sel(KVCacheDType::FP8_E4M3, ValueDType::F32, 16, 2, 256, 16, 8193, 64) ==
+              PagedAttentionImplementation::Correctness,
+          "moe 16/2/256 fp8 kv rows=8193 above measured -> Correctness");
 
     check(::shelf::kernel::paged_attention_bf16_split_supports(4u), "bf16 split q_per_kv 4");
     check(::shelf::kernel::paged_attention_bf16_split_supports(6u), "bf16 split q_per_kv 6");
@@ -166,8 +178,8 @@ int main() {
     check(!::shelf::kernel::paged_attention_bf16_split_supports(1u), "bf16 split q_per_kv 1");
     check(::shelf::kernel::paged_attention_fp8_split_supports(4u), "fp8 split q_per_kv 4");
     check(::shelf::kernel::paged_attention_fp8_split_supports(6u), "fp8 split q_per_kv 6");
-    check(!::shelf::kernel::paged_attention_fp8_split_supports(8u),
-          "fp8 split has no q_per_kv 8 instantiation");
+    check(::shelf::kernel::paged_attention_fp8_split_supports(8u),
+          "fp8 split q_per_kv 8 has an instantiation");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

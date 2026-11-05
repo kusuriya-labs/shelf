@@ -65,8 +65,12 @@ int main() {
           "27b tp2 bf16 rows=2048 -> Optimized");
     check(sel(KVCacheDType::BF16, 2, 256, 16, 8193) == KvAppendImplementation::Correctness,
           "27b tp2 bf16 rows=8193 -> Correctness");
-    check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 1) == KvAppendImplementation::Correctness,
-          "27b tp2 fp8 kv not enabled -> Correctness");
+    check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 1) == KvAppendImplementation::Optimized,
+          "kv_heads 2 fp8 rows=1 (measured) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 2048) == KvAppendImplementation::Optimized,
+          "kv_heads 2 fp8 rows=2048 (measured) -> Optimized");
+    check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 8193) == KvAppendImplementation::Correctness,
+          "kv_heads 2 fp8 rows=8193 (above measured) -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
