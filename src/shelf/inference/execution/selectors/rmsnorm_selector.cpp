@@ -66,6 +66,14 @@ constexpr RmsNormRule kRmsNormRules[] = {
     { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::F32,
       ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 3072, 256, 1, kMeasuredMaxRows },
+    // Qwen4Exp hyper-connection and PLE norms: four streams of 2560, weight per feature.
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerFeature,
+      0, 10240, 2560, 1, kMeasuredMaxRows },
+    // Qwen4Exp indexer query norm: four 128-wide heads, weight per group.
+    { ::shelf::runtime::ValueDType::BF16, ::shelf::runtime::ValueDType::BF16,
+      ::shelf::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      0, 512, 128, 1, kMeasuredMaxRows },
 };
 
 }

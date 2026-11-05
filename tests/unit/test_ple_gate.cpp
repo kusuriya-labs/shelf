@@ -1,5 +1,6 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/fused/silu_scale.h>
 #include <shelf/kernels/optimized/ple.h>
 
 #include <hip/hip_runtime.h>
@@ -226,6 +227,84 @@ int main() {
         std::fprintf(stderr, "scale bf16 max_abs=%g\n", max_scaled);
         check(max_scaled <= 2.0e-2, "scale bf16 matches the CPU reference");
         (void)hipFree(d_scaled_bf16);
+    }
+
+    {
+        void* d_sig = nullptr;
+        void* d_silu = nullptr;
+        void* d_sig_f32 = nullptr;
+        const std::size_t count = kRows * kHidden;
+        check(hipMalloc(&d_sig, count * sizeof(shelf::bf16_t)) == hipSuccess,
+              "hipMalloc sigmoid bf16");
+        check(hipMalloc(&d_silu, count * sizeof(shelf::bf16_t)) == hipSuccess,
+              "hipMalloc silu bf16");
+        check(hipMalloc(&d_sig_f32, count * sizeof(float)) == hipSuccess,
+              "hipMalloc sigmoid f32");
+        std::vector<float> input_f32(count);
+        for (std::size_t i = 0; i < count; ++i)
+            input_f32[i] = bf16_to_float(value[i].data);
+        (void)hipMemcpy(d_sig_f32, input_f32.data(), count * sizeof(float),
+                        hipMemcpyHostToDevice);
+        check(shelf::kernel::launch_sigmoid_bf16(
+                  static_cast<const shelf::bf16_t*>(d_value), kHidden,
+                  static_cast<shelf::bf16_t*>(d_sig), kHidden, kRows, kHidden, nullptr) ==
+                  hipSuccess,
+              "sigmoid bf16 launch");
+        const float silu_scale = 0.25f;
+        check(shelf::kernel::launch_silu_bf16(
+                  static_cast<const shelf::bf16_t*>(d_value), kHidden,
+                  static_cast<shelf::bf16_t*>(d_silu), kHidden, kRows, kHidden,
+                  silu_scale, nullptr) == hipSuccess,
+              "silu bf16 launch");
+        check(hipDeviceSynchronize() == hipSuccess, "elementwise bf16 sync");
+        std::vector<shelf::bf16_t> got_sig(count);
+        std::vector<shelf::bf16_t> got_silu(count);
+        (void)hipMemcpy(got_sig.data(), d_sig, count * sizeof(shelf::bf16_t),
+                        hipMemcpyDeviceToHost);
+        (void)hipMemcpy(got_silu.data(), d_silu, count * sizeof(shelf::bf16_t),
+                        hipMemcpyDeviceToHost);
+        double max_sig = 0.0;
+        double max_silu = 0.0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const float x = bf16_to_float(value[i].data);
+            const float want_sig = 1.0f / (1.0f + std::exp(-x));
+            const float xs = x * silu_scale;
+            const float want_silu = xs / (1.0f + std::exp(-xs));
+            max_sig = std::max<double>(
+                max_sig, std::fabs(static_cast<double>(bf16_to_float(got_sig[i].data)) -
+                                   want_sig));
+            max_silu = std::max<double>(
+                max_silu, std::fabs(static_cast<double>(bf16_to_float(got_silu[i].data)) -
+                                    want_silu));
+        }
+        std::fprintf(stderr, "sigmoid bf16 max_abs=%g silu bf16 max_abs=%g\n",
+                     max_sig, max_silu);
+        check(max_sig <= 2.0e-2, "sigmoid bf16 matches the CPU reference");
+        check(max_silu <= 2.0e-2, "silu bf16 matches the CPU reference");
+        void* d_sig_f32_out = nullptr;
+        check(hipMalloc(&d_sig_f32_out, count * sizeof(float)) == hipSuccess,
+              "hipMalloc sigmoid f32 out");
+        check(shelf::kernel::launch_sigmoid_f32(
+                  static_cast<const float*>(d_sig_f32), kHidden,
+                  static_cast<float*>(d_sig_f32_out), kHidden, kRows, kHidden,
+                  nullptr) == hipSuccess,
+              "sigmoid f32 launch");
+        check(hipDeviceSynchronize() == hipSuccess, "sigmoid f32 sync");
+        std::vector<float> got_sig_f32(count);
+        (void)hipMemcpy(got_sig_f32.data(), d_sig_f32_out, count * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        double max_sig_f32 = 0.0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const float want = 1.0f / (1.0f + std::exp(-input_f32[i]));
+            max_sig_f32 = std::max<double>(
+                max_sig_f32, std::fabs(static_cast<double>(got_sig_f32[i]) - want));
+        }
+        std::fprintf(stderr, "sigmoid f32 max_abs=%g\n", max_sig_f32);
+        check(max_sig_f32 <= 2.0e-2, "sigmoid f32 matches the CPU reference");
+        (void)hipFree(d_sig);
+        (void)hipFree(d_silu);
+        (void)hipFree(d_sig_f32);
+        (void)hipFree(d_sig_f32_out);
     }
 
     std::fprintf(stderr, failures == 0 ? "PASS\n" : "FAILURES=%d\n", failures);

@@ -2,6 +2,7 @@
 
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
+#include <shelf/kernels/fused/hyper_connection.h>
 #include <shelf/kernels/optimized/hyper_connection.h>
 
 namespace shelf::execution {
@@ -70,11 +71,44 @@ Result<OptimizedLaunchResult> try_launch_hyper_mix(const Program& program,
     args.gate_stride = gate.value().row_stride;
     args.normed_stride = normed.value().row_stride;
     args.output_stride = out.value().row_stride;
+    args.sigmoid_gate = b.compute_spec != 0u ? 1u : 0u;
     const hipError_t error = ::shelf::kernel::launch_hyper_mix(args, stream);
     if (error != hipSuccess) {
         return Status::hip_error("hyper mix launch", hipGetErrorString(error), __FILE__,
                                  __LINE__);
     }
+    record_physical_launch(1u);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+Result<OptimizedLaunchResult> try_launch_hyper_inject(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    if (!in.ok()) return in.status();
+    auto out = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!out.ok()) return out.status();
+    const uint32_t hc = b.group_size;
+    if (hc == 0u || in.value().dtype != ValueDType::BF16 ||
+        out.value().dtype != ValueDType::BF16 ||
+        in.value().feature_count != hc || out.value().feature_count != hc ||
+        in.value().ptr == nullptr || out.value().ptr == nullptr) {
+        return bad("hyper inject: value contract mismatch");
+    }
+    ::shelf::kernel::HyperInjectArgs args;
+    args.input = in.value().ptr;
+    args.output = out.value().ptr;
+    args.rows = token_rows(ctx);
+    args.hc = hc;
+    args.input_stride = in.value().row_stride;
+    args.output_stride = out.value().row_stride;
+    args.scale = 2.0f;
+    args.inverse_hc = 1.0f / static_cast<float>(hc);
+    const hipError_t error = ::shelf::kernel::launch_hyper_inject(args, stream);
+    if (error != hipSuccess)
+        return Status::hip_error("hyper inject launch", hipGetErrorString(error),
+                                 __FILE__, __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

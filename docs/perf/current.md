@@ -47,6 +47,22 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-06 Qwen3.8-Flash-Next EXL3 decode reference
+
+`models/Qwen3.8-Flash-Next-exl3` を TP=2 / bf16 KV / prefix cache なしで計測した
+単発の reference run である。qualified baseline ではない。
+
+| 条件 | 値 |
+| --- | ---: |
+| prefill 5 token | 98.9 ms |
+| decode | 22.28 tok/s（44.9 ms/token、15 token） |
+
+- command:
+  `shelf-compute --model-dir models/Qwen3.8-Flash-Next-exl3 --input-ids-file <5 token> --max-new-tokens 16 --max-seq-len 128 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0`
+- GPU: Radeon AI PRO R9700 2 枚（GPU 0,1）
+- 生成結果: `The capital of France is Paris. The capital of the United Kingdom is London.`
+- decode は rank あたり 26 GiB の weight traffic による DRAM bound にほぼ一致する。
+
 ## 2026-11-05 EXL3 W16A16 decode / prefill
 
 `models/Qwen3.8-27B-exl3`（mul1、4 bpw、lm_head 6 bpw）を TP1 / bf16 KV / GPU 1 枚で

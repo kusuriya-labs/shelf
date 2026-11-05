@@ -69,39 +69,27 @@ Result<HyperConnectionMixOutput> emit_hyper_connection_mix(
 
     const RT::ValueId down = em.linear(*weights.down, indices.w_down, normed);
     const float inverse_hc = 1.0f / static_cast<float>(geometry.hc);
-    const RT::ValueId down_scaled = emit_unary(
-        em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.lowrank},
-                                            inverse_hc}},
-        down, geometry.lowrank, RT::ValueDType::BF16);
     const RT::ValueId down_act = emit_unary(
-        em, RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{geometry.lowrank}}},
-        down_scaled, geometry.lowrank, RT::ValueDType::BF16);
+        em, RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{geometry.lowrank},
+                                           inverse_hc}},
+        down, geometry.lowrank, RT::ValueDType::BF16);
     const RT::ValueId up = em.linear(*weights.up, indices.w_up, down_act);
-    const RT::ValueId gate = emit_unary(
-        em, RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{width}}}, up, width,
-        RT::ValueDType::BF16);
 
     RT::HyperMixNode mix_node;
     mix_node.shape = RT::RowwiseShapeKey{geometry.hidden};
     mix_node.hc = geometry.hc;
     mix_node.hidden = geometry.hidden;
+    mix_node.sigmoid_gate = true;
     RT::ValueId mixed = em.value(geometry.hidden, RT::ValueDType::BF16);
-    em.emit(RT::PrimitiveNode{mix_node}, {gate, normed}, {mixed});
+    em.emit(RT::PrimitiveNode{mix_node}, {up, normed}, {mixed});
 
     RT::ValueId injection{0};
     if (with_inject) {
         const RT::ValueId inject = em.linear(*weights.inject, indices.w_inject, normed);
-        const RT::ValueId inject_scaled = emit_unary(
-            em,
-            RT::PrimitiveNode{
-                RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, inverse_hc}},
-            inject, geometry.hc, RT::ValueDType::BF16);
-        const RT::ValueId inject_act = emit_unary(
-            em, RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{geometry.hc}}},
-            inject_scaled, geometry.hc, RT::ValueDType::BF16);
         injection = emit_unary(
-            em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, 2.0f}},
-            inject_act, geometry.hc, RT::ValueDType::BF16);
+            em, RT::PrimitiveNode{RT::HyperInjectNode{
+                    RT::RowwiseShapeKey{geometry.hc}, 2.0f}},
+            inject, geometry.hc, RT::ValueDType::BF16);
     }
     return HyperConnectionMixOutput{mixed, injection};
 }

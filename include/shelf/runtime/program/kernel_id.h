@@ -47,6 +47,7 @@ enum class KernelId : uint32_t {
     QSA_ROPE,
     PLE_STREAM_DOT,
     REPEAT_STREAMS,
+    HYPER_INJECT,
     COUNT,
 };
 
@@ -99,6 +100,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::QSA_ROPE: return "QSA_ROPE";
         case KernelId::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case KernelId::REPEAT_STREAMS: return "REPEAT_STREAMS";
+        case KernelId::HYPER_INJECT: return "HYPER_INJECT";
         default: return "UNKNOWN";
     }
 }

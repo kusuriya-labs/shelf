@@ -1,4 +1,5 @@
 #include <shelf/core/memory/types.h>
+#include <shelf/kernels/fused/hyper_connection.h>
 #include <shelf/kernels/optimized/hyper_connection.h>
 
 #include <hip/hip_runtime.h>
@@ -59,8 +60,9 @@ int main() {
             float acc = 0.0f;
             for (std::uint32_t h = 0; h < kHc; ++h) {
                 const std::uint32_t offset = row * kWidth + h * kHidden + i;
-                acc += bf16_to_float(gate[offset].data) *
-                       bf16_to_float(normed[offset].data);
+                const float g = bf16_to_float(gate[offset].data);
+                const float sigmoid = 1.0f / (1.0f + std::exp(-g));
+                acc += sigmoid * bf16_to_float(normed[offset].data);
             }
             want_mix[row * kHidden + i] = acc / static_cast<float>(kHc);
         }
@@ -116,6 +118,7 @@ int main() {
     mix_args.gate_stride = kWidth;
     mix_args.normed_stride = kWidth;
     mix_args.output_stride = kHidden;
+    mix_args.sigmoid_gate = 1;
     check(shelf::kernel::launch_hyper_mix(mix_args, nullptr) == hipSuccess,
           "hyper mix launch");
     check(hipDeviceSynchronize() == hipSuccess, "hyper mix sync");
@@ -155,6 +158,44 @@ int main() {
                              std::fabs(static_cast<double>(bf16_to_float(got_apply[i].data)) -
                                        want_apply[i]));
     }
+    void* d_inject_in = nullptr;
+    void* d_inject_out = nullptr;
+    check(hipMalloc(&d_inject_in, kRows * kHc * sizeof(shelf::bf16_t)) == hipSuccess,
+          "hipMalloc inject in");
+    check(hipMalloc(&d_inject_out, kRows * kHc * sizeof(shelf::bf16_t)) == hipSuccess,
+          "hipMalloc inject out");
+    const auto inject_logits = random_bf16(kRows * kHc, rng);
+    hipMemcpy(d_inject_in, inject_logits.data(),
+              inject_logits.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice);
+    shelf::kernel::HyperInjectArgs inject_args;
+    inject_args.input = d_inject_in;
+    inject_args.output = d_inject_out;
+    inject_args.rows = kRows;
+    inject_args.hc = kHc;
+    inject_args.input_stride = kHc;
+    inject_args.output_stride = kHc;
+    inject_args.scale = 2.0f;
+    inject_args.inverse_hc = 1.0f / static_cast<float>(kHc);
+    check(shelf::kernel::launch_hyper_inject(inject_args, nullptr) == hipSuccess,
+          "hyper inject launch");
+    check(hipDeviceSynchronize() == hipSuccess, "hyper inject sync");
+    std::vector<shelf::bf16_t> got_inject(kRows * kHc);
+    hipMemcpy(got_inject.data(), d_inject_out, got_inject.size() * sizeof(shelf::bf16_t),
+              hipMemcpyDeviceToHost);
+    double max_inject = 0.0;
+    for (std::size_t i = 0; i < got_inject.size(); ++i) {
+        const float x = bf16_to_float(inject_logits[i].data) /
+                        static_cast<float>(kHc);
+        const float want = 2.0f / (1.0f + std::exp(-x));
+        max_inject = std::max<double>(
+            max_inject, std::fabs(static_cast<double>(bf16_to_float(got_inject[i].data)) -
+                                  want));
+    }
+    std::fprintf(stderr, "hyper inject max_abs=%g\n", max_inject);
+    check(max_inject <= 2.0e-2, "hyper inject matches the CPU reference");
+    (void)hipFree(d_inject_in);
+    (void)hipFree(d_inject_out);
+
     std::fprintf(stderr, "hyper mix max_abs=%g apply max_abs=%g\n", max_mix, max_apply);
     check(max_mix <= 2.0e-2, "hyper mix matches the CPU reference");
     check(max_apply <= 2.0e-2, "hyper apply matches the CPU reference");

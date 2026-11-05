@@ -112,6 +112,13 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/radix_topn.hip
 )
 
+# Fused kernels: more than one logical operation in one launch, separate from the
+# single-operation optimized family.
+set(SHELF_FUSED_KERNEL_SOURCES
+    src/shelf/kernels/fused/hyper_connection.hip
+    src/shelf/kernels/fused/silu_scale.hip
+)
+
 # Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
 # stay under models/qwen35 until a second model needs them.
 set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
@@ -128,7 +135,8 @@ set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
     src/shelf/models/qwen35/kernels/dflash2/noise_input.hip
 )
 
-add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
+add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES}
+                                            ${SHELF_FUSED_KERNEL_SOURCES})
 target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
 target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

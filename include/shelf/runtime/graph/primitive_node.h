@@ -43,6 +43,7 @@ enum class PrimitiveKind : uint16_t {
     QSA_ROPE = 31,
     PLE_STREAM_DOT = 32,
     REPEAT_STREAMS = 33,
+    HYPER_INJECT = 34,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -81,6 +82,7 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::QSA_ROPE: return "QSA_ROPE";
         case PrimitiveKind::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case PrimitiveKind::REPEAT_STREAMS: return "REPEAT_STREAMS";
+        case PrimitiveKind::HYPER_INJECT: return "HYPER_INJECT";
     }
     return "UNKNOWN";
 }
@@ -131,6 +133,7 @@ struct SplitNode {
 
 struct SiLUNode {
     RowwiseShapeKey shape;
+    float scale = 1.0f;
 };
 
 struct SigmoidNode {
@@ -248,6 +251,13 @@ struct HyperMixNode {
     RowwiseShapeKey shape;  // hidden
     uint32_t hc = 0;
     uint32_t hidden = 0;
+    bool sigmoid_gate = true;
+};
+
+// Qwen4Exp injection gate: 2 * sigmoid(x / hc) in one pass.
+struct HyperInjectNode {
+    RowwiseShapeKey shape;  // hc
+    float scale = 1.0f;
 };
 
 // Qwen4Exp hyper-connection injection: raw[h] + y * injection[h].
@@ -375,7 +385,8 @@ using PrimitiveNode = std::variant<
     QsaExpandMaskNode,
     QsaRopeNode,
     PleStreamDotNode,
-    RepeatStreamsNode
+    RepeatStreamsNode,
+    HyperInjectNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -415,6 +426,7 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, QsaRopeNode>) return PrimitiveKind::QSA_ROPE;
         else if constexpr (std::is_same_v<T, PleStreamDotNode>) return PrimitiveKind::PLE_STREAM_DOT;
         else if constexpr (std::is_same_v<T, RepeatStreamsNode>) return PrimitiveKind::REPEAT_STREAMS;
+        else if constexpr (std::is_same_v<T, HyperInjectNode>) return PrimitiveKind::HYPER_INJECT;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

@@ -134,8 +134,8 @@ int main() {
         Site site = make_site(true);
         const std::string got = build_and_sequence(site);
         const std::string want =
-            "RMS_NORM,LINEAR_BF16,SCALE,SILU,LINEAR_BF16,SIGMOID,HYPER_MIX,"
-            "LINEAR_BF16,SCALE,SIGMOID,SCALE,HYPER_APPLY";
+            "RMS_NORM,LINEAR_BF16,SILU,LINEAR_BF16,HYPER_MIX,"
+            "LINEAR_BF16,HYPER_INJECT,HYPER_APPLY";
         check(got == want, "the gated-residual site lowers to the expected sequence");
         if (got != want) std::printf("      got %s\n", got.c_str());
     }
@@ -143,7 +143,7 @@ int main() {
         Site site = make_site(false);
         const std::string got = build_and_sequence(site);
         const std::string want =
-            "RMS_NORM,LINEAR_BF16,SCALE,SILU,LINEAR_BF16,SIGMOID,HYPER_MIX";
+            "RMS_NORM,LINEAR_BF16,SILU,LINEAR_BF16,HYPER_MIX";
         check(got == want, "the final mixer lowers without an injection branch");
         if (got != want) std::printf("      got %s\n", got.c_str());
     }

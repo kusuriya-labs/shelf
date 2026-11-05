@@ -65,6 +65,13 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SigmoidBf16ToF32, 10240u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16ToF32, 4u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SiluBf16ToF32, 320u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ScaleBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 4u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 1u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 320u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
 };
 
 }  // namespace

@@ -480,7 +480,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             uint32_t rot = 0;
             uint32_t group = 0;
             if (kind == PrimitiveKind::SIGMOID) kid = KernelId::SIGMOID;
-            else if (kind == PrimitiveKind::L2_NORMALIZE) {
+            else if (kind == PrimitiveKind::SILU) {
+                sa = node_as<SiLUNode>(node).scale;
+            } else if (kind == PrimitiveKind::L2_NORMALIZE) {
                 kid = KernelId::L2_NORMALIZE;
                 sa = node_as<L2NormalizeNode>(node).eps;
                 group = node_as<L2NormalizeNode>(node).group_size;
@@ -541,9 +543,24 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             DispatchBinding b = base_binding(KernelId::HYPER_MIX);
             b.group_size = hn.hc;
             b.flags = hn.hidden;
+            b.compute_spec = hn.sigmoid_gate ? 1u : 0u;
             b.input_slots[0] = node.inputs[0].id;
             b.input_slots[1] = node.inputs[1].id;
             b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::HYPER_INJECT: {
+            const auto& n = node_as<HyperInjectNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_INJECT);
+            b.group_size = static_cast<uint32_t>(n.shape.features);
+            b.scalar_a = n.scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
             auto po = c.produce(node.outputs[0]);
             if (!po.ok()) return po;
             b.output_slots[0] = node.outputs[0].id;

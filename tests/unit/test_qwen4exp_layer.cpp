@@ -187,7 +187,7 @@ int main() {
     check(sequence.find("PLE_STREAM_DOT,SCALE,PLE_GATE,LINEAR,PLE_BROADCAST_MUL,RMS_NORM,"
                         "PLE_CONV,RESIDUAL_ADD,RESIDUAL_ADD,RMS_NORM") != std::string::npos,
           "PLE injection precedes the attention HyperConnection");
-    check(sequence.find("SCALE,LINEAR,LINEAR,LINEAR,LINEAR,STATEFUL_CAUSAL_CONV1D") !=
+    check(sequence.find("HYPER_MIX,LINEAR,HYPER_INJECT,LINEAR,LINEAR,LINEAR,LINEAR,STATEFUL_CAUSAL_CONV1D") !=
               std::string::npos,
           "attention HyperConnection feeds GDN");
     check(sequence.find("GDN_RECURRENCE,RMS_NORM,SIGMOID,MUL") != std::string::npos,

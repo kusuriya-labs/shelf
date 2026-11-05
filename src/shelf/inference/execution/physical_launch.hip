@@ -140,13 +140,20 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
         wdt == ValueDType::BF16 &&
         wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP &&
         out.weight_mode == ::shelf::kernel::RmsNormWeightMode::ONE_PLUS;
+    const bool bf16_pg_one_plus =
+        in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::BF16 &&
+        wdt == ValueDType::BF16 &&
+        wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP &&
+        out.weight_mode == ::shelf::kernel::RmsNormWeightMode::ONE_PLUS;
     out.variant = bf16_pf_one_plus
                       ? PhysicalRmsNormVariant::Bf16PfOnePlus
                       : (f32_pg_direct
                              ? PhysicalRmsNormVariant::F32PgDirect
                              : (bf16_f32_pg_one_plus
                                     ? PhysicalRmsNormVariant::Bf16F32PgOnePlus
-                                    : PhysicalRmsNormVariant::Unsupported));
+                                    : (bf16_pg_one_plus
+                                           ? PhysicalRmsNormVariant::Bf16PgOnePlus
+                                           : PhysicalRmsNormVariant::Unsupported)));
     if (out.variant != PhysicalRmsNormVariant::Unsupported) {
         out.grid = ::shelf::kernel::rmsnorm_bf16_pf_oneplus_grid(rows, F, G);
         out.workgroup = ::shelf::kernel::rmsnorm_bf16_pf_oneplus_block_size(G);

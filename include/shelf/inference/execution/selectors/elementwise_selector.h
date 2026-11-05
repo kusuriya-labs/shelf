@@ -14,7 +14,10 @@ enum class ElementwiseProfile : uint8_t {
     SplitBf16Halves = 7,
     SplitBf16InterleavedHeads = 8,
     ScaleBf16 = 9,
-    Count = 10,
+    SigmoidBf16 = 10,
+    SiluBf16 = 11,
+    SigmoidF32 = 12,
+    Count = 13,
 };
 
 enum class ElementwiseImplementation : uint8_t {

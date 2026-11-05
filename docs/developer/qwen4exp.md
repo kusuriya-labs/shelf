@@ -305,6 +305,26 @@ multi-sequence 用に次の batch kernel を追加した。
 `test_qsa_state_pool` は 2 sequence の key cache を CPU 参照と比較し、
 scores / top-k / mask と slot copy を検証する。
 
+### fused kernel
+
+複数の論理演算を 1 launch にまとめたカーネルは `src/shelf/kernels/fused/` に置く。
+
+| ファイル | 内容 |
+| --- | --- |
+| `src/shelf/kernels/fused/hyper_connection.hip` | `HYPER_MIX`（gate sigmoid 込み）と `HYPER_INJECT` |
+| `include/shelf/kernels/fused/hyper_connection.h` | 上記の args と launcher |
+| `src/shelf/kernels/fused/silu_scale.hip` | `SiLU(x * scale)` |
+| `include/shelf/kernels/fused/silu_scale.h` | 上記の launcher |
+
+`HYPER_MIX` は per-stream の `sigmoid(gate) * normed` を平均し、
+`HYPER_INJECT` は `2 * sigmoid(x / hc)` を 1 回で書く。
+HyperConnection site は次の順に lower される。
+
+```text
+RMS_NORM -> LINEAR(down) -> SILU(1/hc) -> LINEAR(up) -> HYPER_MIX
+  -> LINEAR(inject) -> HYPER_INJECT -> HYPER_APPLY
+```
+
 ### paged attention の token mask
 
 `PagedAttentionCommonArgs` に次の 3 つを追加した。

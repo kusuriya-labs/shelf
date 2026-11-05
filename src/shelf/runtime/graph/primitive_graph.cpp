@@ -49,6 +49,7 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::QSA_ROPE: return {1, 1};
         case PrimitiveKind::PLE_STREAM_DOT: return {2, 1};
         case PrimitiveKind::REPEAT_STREAMS: return {1, 1};
+        case PrimitiveKind::HYPER_INJECT: return {1, 1};
     }
     return {0, 0};
 }
@@ -323,6 +324,12 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                                graph.value_row_domain(n.outputs[0])) {
                     hyper_status = Status::invalid_argument(
                         "hyper mix row domains disagree", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, HyperInjectNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper inject feature count mismatch", __FILE__, __LINE__);
                 }
             } else if constexpr (std::is_same_v<T, HyperApplyNode>) {
                 const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;

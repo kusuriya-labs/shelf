@@ -90,6 +90,21 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 2048, 2048, kFamilyBf16 },
     { 2048, 256, kFamilyBf16 },
     { 16, 2048, kFamilyBf16 },
+    // Qwen3.8-Flash-Next (Qwen4Exp): the replicated backbone and hyper-connection widths.
+    { 320, 10240, kFamilyBf16 },
+    { 10240, 320, kFamilyBf16 },
+    { 4, 10240, kFamilyBf16 },
+    { 10240, 2560, kFamilyBf16 },
+    { 6144, 2560, kFamilyBf16 },
+    { 48, 2560, kFamilyBf16 },
+    { 2560, 6144, kFamilyBf16 },
+    { 12288, 2560, kFamilyBf16 },
+    { 512, 2560, kFamilyBf16 },
+    { 640, 2560, kFamilyBf16 },
+    { 1, 2560, kFamilyBf16 },
+    { 2560, 640, kFamilyBf16 },
+    { 2560, 2560, kFamilyBf16 },
+    { 512, 2560, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {

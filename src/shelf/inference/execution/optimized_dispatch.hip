@@ -758,6 +758,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_gdn_recurrence(program, dispatch_index, ctx, stream);
         case KernelId::HYPER_MIX:
             return try_launch_hyper_mix(program, b, ctx, stream);
+        case KernelId::HYPER_INJECT:
+            return try_launch_hyper_inject(program, b, ctx, stream);
         case KernelId::HYPER_APPLY:
             return try_launch_hyper_apply(program, b, ctx, stream);
         case KernelId::PLE_STREAM_DOT:

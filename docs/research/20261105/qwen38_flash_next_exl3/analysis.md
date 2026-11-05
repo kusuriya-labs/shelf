@@ -618,9 +618,31 @@ DECODE_MS=1606.0
 DECODE_TOKENS_PER_SEC=1.87
 ```
 
-decode 1.87 tok/s は最適化前の参照値である。elementwise / RMSNorm の
-allowlist に Qwen4Exp の幅（320 / 640 / 2560 / 10240）がまだ一部なく、
-correctness path に落ちる演算がある。数値と生成結果は正しい。
+decode 1.87 tok/s は最適化前の参照値である。その後、次の最適化で
+22.3 tok/s まで改善した。
+
+- linear / RMSNorm の allowlist に Qwen4Exp の幅
+  （320 / 640 / 2560 / 6144 / 10240 など）を追加した。
+- BF16 の `SILU` / `SIGMOID` / `SCALE` と F32 の `SIGMOID` を追加した。
+- `HYPER_MIX` に gate sigmoid を融合した。
+- `HYPER_INJECT` に `Scale(1/hc) -> Sigmoid -> Scale(2)` を融合した。
+- `SILU` に `Scale(1/hc)` を融合した。
+- fused kernel は `src/shelf/kernels/fused/` に分離した。
+
+実測（`--max-new-tokens 16`、5 token prompt、TP=2、bf16 KV、prefix cache なし）:
+
+```text
+PROMPT: The capital of France is
+GENERATED: Paris. The capital of the United Kingdom is London. The capital of the United
+
+PREFILL_MS=98.9
+DECODE_MS=673.3
+DECODE_TOKENS=15
+DECODE_TOKENS_PER_SEC=22.28
+```
+
+decode 44.9 ms/token は rank あたり 26 GiB の重みを 1 token で読む
+DRAM bound（約 43 ms、640 GB/s）にほぼ一致する。
 
 #### 結論
 
