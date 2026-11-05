@@ -53,10 +53,10 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 8.51 / 8.53 / 8.54 tok/s（117 µs/token） |
-| prefill 128 | 191.08 / 191.20 / 191.42 tok/s（5.22〜5.23 ms/token） |
+| decode | 9.04 / 9.05 / 9.06 tok/s（110.4〜110.6 µs/token） |
+| prefill 128 | 199.44 / 199.66 / 199.70 tok/s（5.01〜5.01 ms/token） |
 
-- measurement revision: `820ae3b`（8 warp block 化後）
+- measurement revision: `397e763`（8 warp block + mul1 affine epilogue / packed pair 復号）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
