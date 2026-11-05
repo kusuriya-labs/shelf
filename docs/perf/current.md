@@ -53,15 +53,15 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 15.00 / 15.07 / 15.10 tok/s（66.2〜66.7 µs/token） |
-| prefill 128 | 339.94 / 340.42 / 341.16 tok/s（2.93〜2.94 ms/token） |
-| prefill 512 | 353.06 / 353.32 / 353.84 tok/s（2.83〜2.83 ms/token） |
-| prefill 1024 | 354.10 / 354.69 / 355.25 tok/s（2.81〜2.82 ms/token） |
-| prefill 2048 | 355.55 / 355.94 / 356.91 tok/s（2.80〜2.81 ms/token） |
+| decode | 20.47 / 20.48 / 20.51 tok/s（48.7〜48.9 µs/token） |
+| prefill 128 | 478.21 / 478.97 / 480.29 tok/s（2.08〜2.09 ms/token） |
+| prefill 512 | 512.08 / 512.35 / 512.61 tok/s（1.95〜1.95 ms/token） |
+| prefill 1024 | 523.50 / 523.64 / 524.16 tok/s（1.908〜1.910 ms/token） |
+| prefill 2048 | 525.56 / 526.67 / 528.18 tok/s（1.893〜1.903 ms/token） |
 
-- measurement revision: `a5c4583`（groups / split-K dispatch 調整、ka=4 ring の lane
-  shuffle 化、ka=4 の 8 状態一括抽出、入力回転の linear 単位事前計算、prefill の
-  row group 再利用）
+- measurement revision: `7c5f56b`（xrot LDS pitch 136 による B fragment の bank
+  conflict 解消、groups / split-K dispatch 調整、ka=4 ring の lane shuffle 化、
+  ka=4 の 8 状態一括抽出、入力回転の linear 単位事前計算、prefill の row group 再利用）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -75,7 +75,7 @@ EXL3 経路の現在値である。
   計算する。`SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算）に切り替えられる。
 - decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 15.86 tok/s、MTP-2 は 15.77 tok/s（`--arena-gib 27`）。
+  E2E decode は 21.95 tok/s、MTP-2 は 18.68 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
