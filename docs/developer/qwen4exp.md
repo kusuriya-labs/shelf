@@ -280,6 +280,9 @@ multi-sequence 用に次の batch kernel を追加した。
 | `QSA_TOPK` | block score の top-k |
 | `QSA_EXPAND_MASK` | selected block を token mask へ展開 |
 
+`make_qwen4exp_qsa_indexer_geometry` が config の indexer geometry、
+`indexer_budget / compress_ratio` の block 数、rope 次元を導く。
+
 `emit_qwen4exp_qsa_indexer` は `index_qk_proj` を q / k に分け、q に
 `index_q_layernorm` と `QSA_ROPE`、k に `QSA_KEY_CACHE` を適用し、
 `QSA_SCORES` → `QSA_TOPK` → 任意の `QSA_EXPAND_MASK` を接続する。

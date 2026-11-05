@@ -43,6 +43,27 @@ int main() {
     constexpr std::uint32_t kTopK = 3u;
     constexpr std::uint32_t kMaskLen = 32u;
 
+    shelf::qwen4exp::Qwen4ExpTextConfig config;
+    config.hidden_size = kHidden;
+    config.attention_head_dim = 256u;
+    config.partial_rotary_factor = 0.25f;
+    config.rope_theta = 10000000.0f;
+    config.rms_norm_eps = 1e-6f;
+    config.indexer.n_heads = kIndexHeads;
+    config.indexer.kv_heads = 1u;
+    config.indexer.head_dim = kIndexDim;
+    config.indexer.budget = 8u;
+    config.indexer.compress_ratio = 4u;
+    const auto from_config = shelf::qwen4exp::make_qwen4exp_qsa_indexer_geometry(
+        config, kBlocks, kMaskLen, 2u);
+    check(from_config.hidden == kHidden && from_config.index_heads == kIndexHeads &&
+              from_config.index_head_dim == kIndexDim &&
+              from_config.index_rotary_dim == 64u &&
+              from_config.compress_ratio == 4u &&
+              from_config.blocks == kBlocks && from_config.top_k == 2u &&
+              from_config.mask_len == kMaskLen && from_config.state_index == 2u,
+          "config derives the QSA indexer geometry");
+
     rt::PrimitiveGraph graph;
     const rt::ValueId normed = graph.alloc_value(kHidden);
     graph.external_inputs = {normed};

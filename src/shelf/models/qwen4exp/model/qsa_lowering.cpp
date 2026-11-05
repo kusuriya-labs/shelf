@@ -22,6 +22,29 @@ RT::ValueId emit_unary(Emitter& em, const RT::PrimitiveNode& node, RT::ValueId i
 
 }  // namespace
 
+Qwen4ExpQsaIndexerGeometry make_qwen4exp_qsa_indexer_geometry(
+    const Qwen4ExpTextConfig& config, std::uint32_t blocks, std::uint32_t mask_len,
+    std::uint32_t state_index) {
+    const std::uint32_t index_comp = static_cast<std::uint32_t>(config.indexer.compress_ratio);
+    const std::uint32_t index_budget = static_cast<std::uint32_t>(config.indexer.budget);
+    const std::uint32_t rope_dim = static_cast<std::uint32_t>(
+        static_cast<double>(config.attention_head_dim) * config.partial_rotary_factor);
+    Qwen4ExpQsaIndexerGeometry geometry;
+    geometry.hidden = static_cast<std::uint32_t>(config.hidden_size);
+    geometry.index_heads = static_cast<std::uint32_t>(config.indexer.n_heads);
+    geometry.index_kv_heads = static_cast<std::uint32_t>(config.indexer.kv_heads);
+    geometry.index_head_dim = static_cast<std::uint32_t>(config.indexer.head_dim);
+    geometry.index_rotary_dim = rope_dim;
+    geometry.compress_ratio = index_comp;
+    geometry.blocks = blocks;
+    geometry.top_k = index_comp != 0u ? index_budget / index_comp : 0u;
+    geometry.mask_len = mask_len;
+    geometry.state_index = state_index;
+    geometry.theta = config.rope_theta;
+    geometry.eps = config.rms_norm_eps;
+    return geometry;
+}
+
 Result<Qwen4ExpQsaIndexerOutputs> emit_qwen4exp_qsa_indexer(
     Emitter& em, const Qwen4ExpQsaIndexerGeometry& geometry,
     const Qwen4ExpQsaIndexerWeights& weights, const Qwen4ExpQsaIndexerIndices& indices,

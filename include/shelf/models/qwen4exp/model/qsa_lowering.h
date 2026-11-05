@@ -2,6 +2,7 @@
 
 #include <shelf/core/status.h>
 #include <shelf/models/common/qwen_hybrid/emitter.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/weights/matrix_weight.h>
 
 #include <cstdint>
@@ -46,6 +47,12 @@ struct Qwen4ExpQsaIndexerOutputs {
     ::shelf::runtime::ValueId selected; // [rows, top_k] I32
     ::shelf::runtime::ValueId mask;     // [rows, mask_len] U8, zero when mask_len == 0
 };
+
+// Geometry implied by the checkpoint config. `blocks` is the key-state capacity and
+// `mask_len` the token width of the expanded mask (zero stops at the selected ids).
+Qwen4ExpQsaIndexerGeometry make_qwen4exp_qsa_indexer_geometry(
+    const Qwen4ExpTextConfig& config, std::uint32_t blocks, std::uint32_t mask_len,
+    std::uint32_t state_index);
 
 // Indexer part of one QSA layer. The main attention uses the existing gated-attention
 // lowering; this emits the raw key cache, the block scores and the selected blocks that
