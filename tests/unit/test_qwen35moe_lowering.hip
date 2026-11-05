@@ -389,7 +389,7 @@ int main() {
     const std::size_t reserve =
         q35::runtime::qwen35_executor_reserve_bytes(config,
             static_cast<std::size_t>(config.ffn.shared_expert_intermediate_size),
-            reserve_config, 1u) + grouped_reserve;
+            reserve_config, 1u, false) + grouped_reserve;
     std::printf("fixture reserve %zu B vs program workspace %zu B\n", reserve,
                 program.workspace.total_bytes);
     check(reserve >= program.workspace.total_bytes,

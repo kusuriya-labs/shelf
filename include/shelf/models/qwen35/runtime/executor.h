@@ -134,6 +134,7 @@ struct Executor {
     int tp_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
+    bool exl3_workspace = false;
     ::shelf::runtime::WeightSlot* host_weight_table = nullptr;
     ::shelf::runtime::StaticParameterSlot* host_parameter_table = nullptr;
     std::vector<::shelf::runtime::StaticParameterSlot> host_parameter_slots;

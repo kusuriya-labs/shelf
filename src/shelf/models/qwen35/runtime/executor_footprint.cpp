@@ -19,7 +19,6 @@ constexpr std::size_t kAlignBytes = 256u;
 constexpr std::size_t kProgramValuesPerFullRow = 44u;
 
 constexpr std::size_t kScratchFloats = 3145728u;
-constexpr std::size_t kExl3XrotBytes = 80u * 1024u * 1024u;
 
 std::size_t align_up(std::size_t bytes) noexcept {
     return ((bytes + kAlignBytes - 1u) / kAlignBytes) * kAlignBytes;
@@ -42,7 +41,8 @@ std::size_t qwen35_padded_row_count(std::uint32_t max_batch_rows) noexcept {
 std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& text_config,
                                           std::size_t ffn_intermediate_size,
                                           const ExecutorConfig& config,
-                                          std::size_t tp_size) noexcept {
+                                          std::size_t tp_size,
+                                          bool exl3_linear_workspace) noexcept {
     if (tp_size == 0u) {
         tp_size = 1u;
     }
@@ -69,10 +69,9 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     total += align_up(values_per_row * rows * hidden * sizeof(bf16_t));
     total += align_up(kScratchFloats * sizeof(float));
     total += align_up(::shelf::execution::kDecodeAttnPartialBytes);
-    total += align_up(kExl3XrotBytes);
-    total += align_up(kExl3DenseBytes);
-    total += align_up(exl3_dense_accum_bytes(rows));
-    total += align_up(rows * sizeof(float));
+    if (exl3_linear_workspace) {
+        total += exl3_workspace_bytes(rows);
+    }
 
     total += align_up(rows * sizeof(int32_t));
     total += align_up(output_rows * hidden * sizeof(bf16_t));

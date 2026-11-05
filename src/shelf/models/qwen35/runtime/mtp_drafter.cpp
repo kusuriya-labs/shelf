@@ -184,7 +184,8 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
 std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& config,
                                       const MtpDrafterConfig& options,
                                       std::size_t token_row_intermediate,
-                                      std::size_t grouped_executor_bytes) noexcept {
+                                      std::size_t grouped_executor_bytes,
+                                      bool exl3_linear_workspace) noexcept {
     if (options.max_seq_len == 0u || options.page_tokens == 0u) {
         return 0u;
     }
@@ -203,7 +204,8 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
     const std::size_t executor = qwen35_executor_reserve_bytes(
-        mtp, token_row_intermediate, executor_config, 1u) + grouped_executor_bytes;
+        mtp, token_row_intermediate, executor_config, 1u, exl3_linear_workspace) +
+        grouped_executor_bytes;
 
     const state::GdnStatePoolLayout gdn = make_qwen35_gdn_state_layout(config);
     const std::size_t gdn_state =

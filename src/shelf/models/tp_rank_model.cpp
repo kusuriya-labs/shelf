@@ -71,6 +71,8 @@ public:
                                                 context_.tp_size);
     }
 
+    bool uses_exl3_linear() const override { return qmoe::uses_exl3_linear(model_.weights()); }
+
     shelf::Result<q35::Executor> create_executor(
         q35::SequenceSlotPool& sequence_pool, q35::GdnStatePool& gdn_state_pool,
         q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,

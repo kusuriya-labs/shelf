@@ -178,7 +178,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         // still sit at token rows: for a model with grouped experts those are its shared
         // expert. The routed experts add their own group-row term.
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
-            tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size);
+            tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size,
+            rank->model_->uses_exl3_linear());
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
         // The capacity formula is an estimate, and it is short of the executor's real footprint
         // by a little (measured: 10 - 130 MiB on a 40 layer model). The KV pool is sized from
@@ -353,6 +354,10 @@ public:
     }
 
     std::size_t ffn_workspace_reserve_bytes(std::size_t) const override { return 0u; }
+
+    bool uses_exl3_linear() const override {
+        return ::shelf::qwen35::uses_exl3_linear(model_.weights());
+    }
 
     Result<Executor> create_executor(SequenceSlotPool& sequence_pool,
                                      GdnStatePool& gdn_state_pool, PagedKVPool& kv_pool,

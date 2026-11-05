@@ -124,7 +124,8 @@ inline uint32_t mtp_drafter_rows(const MtpDrafterConfig& options) noexcept {
 std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& config,
                                       const MtpDrafterConfig& options,
                                       std::size_t token_row_intermediate,
-                                      std::size_t grouped_executor_bytes) noexcept;
+                                      std::size_t grouped_executor_bytes,
+                                      bool exl3_linear_workspace) noexcept;
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,

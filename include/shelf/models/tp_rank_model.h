@@ -48,6 +48,10 @@ public:
     // Program workspace the FFN needs on top of the token-row term. Zero for a dense model,
     // whose estimate already covers every FFN activation.
     virtual std::size_t ffn_workspace_reserve_bytes(std::size_t max_batch_rows) const = 0;
+    // True when this rank's linears are carried in the rotated-domain trellis form. The
+    // executor's staging planes for that form are large, and the memory plan only reserves
+    // them when a program will actually run such a linear.
+    virtual bool uses_exl3_linear() const = 0;
 
     virtual shelf::Result<shelf::qwen35::Executor> create_executor(
         shelf::qwen35::SequenceSlotPool& sequence_pool,

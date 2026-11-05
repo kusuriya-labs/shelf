@@ -310,6 +310,12 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   `rows * k * 2` が execution workspace の xrot 領域（80 MiB）に収まるときだけ
   この経路を使い、それ以外は fused 経路にする。回転の演算順は fused と同じで、
   出力は一致する。
+- xrot / dense / accum / rowsum の領域は、program set に `LINEAR_EXL3_W16A16` dispatch が
+  存在するときだけ execution workspace に確保する。存在しない model ではこれらの領域は無く、
+  arena の残りはそのまま KV pool へ回る。executor footprint の見積もりも、load した weight
+  列に `MatrixEncoding::Exl3` が含まれるときだけ `exl3_workspace_bytes(rows)` を加える
+  （`qwen35_executor_reserve_bytes` の `exl3_linear_workspace` 引数）。経過は
+  [../research/20261105/exl3_workspace_conditional.md](../research/20261105/exl3_workspace_conditional.md)
 - `ka == 4` かつ `half == 0` の decode は、1 lane の 8 状態を 2 word の窓と
   `v_alignbit` の即値 shift でまとめて抽出する。ring は使わず、`source[lane]` と
   lane shuffle で前の word を得る。他の rate は 4 word の generic 経路を使う。

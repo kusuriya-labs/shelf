@@ -91,8 +91,11 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     const std::size_t token_row_ffn =
         moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
                         : dense_->text_config().ffn.intermediate_size;
+    const bool exl3 =
+        moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
+                        : shelf::qwen35::uses_exl3_linear(dense_->weights());
     std::size_t total = shelf::qwen35::runtime::qwen35_executor_reserve_bytes(
-        hybrid_config(), token_row_ffn, reserve_config, tp_size);
+        hybrid_config(), token_row_ffn, reserve_config, tp_size, exl3);
     if (moe_ != nullptr)
         total += shelf::qwen35moe::moe_executor_grouped_bytes(moe_->text_config(),
                                                               max_batch_rows, tp_size);
@@ -131,6 +134,7 @@ namespace {
 struct MtpExecutorTerms {
     std::size_t token_row_intermediate = 0;
     std::size_t grouped_executor_bytes = 0;
+    bool exl3_linear_workspace = false;
 };
 
 MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) {
@@ -140,8 +144,11 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
         terms.token_row_intermediate = moe.text_config().ffn.shared_expert_intermediate_size;
         terms.grouped_executor_bytes =
             shelf::qwen35moe::moe_executor_grouped_bytes(moe.text_config(), rows);
+        terms.exl3_linear_workspace = shelf::qwen35moe::uses_exl3_linear(moe.weights());
     } else {
         terms.token_row_intermediate = model.dense_model()->text_config().ffn.intermediate_size;
+        terms.exl3_linear_workspace =
+            shelf::qwen35::uses_exl3_linear(model.dense_model()->weights());
     }
     return terms;
 }
@@ -160,7 +167,7 @@ std::size_t LoadedModel::mtp_drafter_reserve_bytes(
     const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
     return shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
         hybrid_config(), options, terms.token_row_intermediate,
-        terms.grouped_executor_bytes);
+        terms.grouped_executor_bytes, terms.exl3_linear_workspace);
 }
 
 Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(

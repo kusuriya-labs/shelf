@@ -33,5 +33,19 @@ struct HybridLayerWeights {
     gpu::Tensor attn_A_log;
 };
 
+// True when one of this layer's projections is carried in the rotated-domain trellis form.
+// The execution workspace that form needs is sized per rank and per row bucket, so a model
+// that uses it must say so before the KV pool takes the rest of the arena.
+inline bool layer_uses_exl3_linear(const HybridLayerWeights& layer) noexcept {
+    const shelf::weights::MatrixWeight* projections[] = {
+        &layer.attn_q_proj, &layer.attn_k_proj,   &layer.attn_v_proj,
+        &layer.attn_o_proj, &layer.attn_in_proj_a, &layer.attn_in_proj_b,
+        &layer.attn_in_proj_qkv, &layer.attn_in_proj_z, &layer.attn_out_proj};
+    for (const shelf::weights::MatrixWeight* w : projections) {
+        if (w->encoding == shelf::weights::MatrixEncoding::Exl3) return true;
+    }
+    return false;
+}
+
 }  // namespace qwen_hybrid
 }  // namespace shelf

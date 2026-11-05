@@ -40,6 +40,26 @@ struct Qwen35ModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
     Qwen35MtpWeights mtp;
 };
 
+// True when any linear of this weight set is carried in the rotated-domain trellis form,
+// including the LM head and the MTP block. The memory plan uses it to decide whether the
+// executor workspace must hold that form's staging planes.
+inline bool uses_exl3_linear(const Qwen35ModelWeights& weights) noexcept {
+    if (weights.lm_head.encoding == shelf::weights::MatrixEncoding::Exl3) return true;
+    if (weights.mtp.present &&
+        weights.mtp.fc.encoding == shelf::weights::MatrixEncoding::Exl3)
+        return true;
+    if (weights.mtp.present &&
+        (shelf::qwen_hybrid::layer_uses_exl3_linear(weights.mtp.layer) ||
+         ffn_uses_exl3_linear(weights.mtp.layer.ffn)))
+        return true;
+    for (const Qwen35LayerWeights& layer : weights.layers) {
+        if (shelf::qwen_hybrid::layer_uses_exl3_linear(layer) ||
+            ffn_uses_exl3_linear(layer.ffn))
+            return true;
+    }
+    return false;
+}
+
 // Dense-only load options on top of the shared hybrid options: an MTP block and a
 // vocabulary-sharded LM head exist for the dense model only.
 struct Qwen35LoadOptions : shelf::qwen_hybrid::HybridLoadOptions {

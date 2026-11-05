@@ -21,5 +21,16 @@ struct MoeFfnWeights {
     shelf::weights::MatrixWeight shared_down_proj;
 };
 
+inline bool ffn_uses_exl3_linear(const MoeFfnWeights& ffn) noexcept {
+    const shelf::weights::MatrixWeight* projections[] = {
+        &ffn.router,        &ffn.expert_w13,       &ffn.expert_w2,
+        &ffn.shared_gate,   &ffn.shared_gate_proj, &ffn.shared_up_proj,
+        &ffn.shared_down_proj};
+    for (const shelf::weights::MatrixWeight* w : projections) {
+        if (w->encoding == shelf::weights::MatrixEncoding::Exl3) return true;
+    }
+    return false;
+}
+
 }  // namespace qwen35moe
 }  // namespace shelf

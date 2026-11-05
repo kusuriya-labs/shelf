@@ -43,6 +43,24 @@ struct Qwen35MoeModelWeights : shelf::qwen_hybrid::HybridModelLevelWeights {
     Qwen35MoeMtpWeights mtp;
 };
 
+// True when any linear of this weight set is carried in the rotated-domain trellis form,
+// including the LM head and the MTP block. The memory plan uses it to decide whether the
+// executor workspace must hold that form's staging planes.
+inline bool uses_exl3_linear(const Qwen35MoeModelWeights& weights) noexcept {
+    if (weights.lm_head.encoding == shelf::weights::MatrixEncoding::Exl3) return true;
+    if (weights.mtp.present &&
+        (weights.mtp.fc.encoding == shelf::weights::MatrixEncoding::Exl3 ||
+         shelf::qwen_hybrid::layer_uses_exl3_linear(weights.mtp.layer) ||
+         ffn_uses_exl3_linear(weights.mtp.layer.ffn)))
+        return true;
+    for (const Qwen35MoeLayerWeights& layer : weights.layers) {
+        if (shelf::qwen_hybrid::layer_uses_exl3_linear(layer) ||
+            ffn_uses_exl3_linear(layer.ffn))
+            return true;
+    }
+    return false;
+}
+
 struct Qwen35MoeLoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
 };
