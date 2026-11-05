@@ -11,7 +11,8 @@
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
 2026-11-05 の MTP decode（Qwen3.8-27B MXFP4）・MoE decode / prefill / quality・
 MoE MTP decode（Qwen3.6-35B-A3B MXFP4）・MoE tensor parallel prefill（Qwen3.6-35B-A3B MXFP4）・
-EXL3 W16A16 decode / prefill、2026-11-04 の 9B BF16 linear allowlist である。**
+MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、EXL3 W16A16 decode / prefill、
+2026-11-04 の 9B BF16 linear allowlist である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -481,6 +482,46 @@ corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` し
 - TP=2 の E2E は auto reserve の slack 修正前（row bucket 16）は
   `arena capacity exceeded` で起動できなかった。修正の経緯は
   [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §5
+
+## 2026-11-05 MoE pipeline parallel（PP=2）
+
+`models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を device 0,1 の
+PP=2（stage `[0,20)` / `[20,40)`）で測った。分割契約と stage model の interface は
+[../developer/pipeline_parallel.md](../developer/pipeline_parallel.md) §2、
+実装の経過と採否は
+[../research/20261105/moe_pipeline_parallel.md](../research/20261105/moe_pipeline_parallel.md)。
+
+command（`shelf-compute`。PP は `shelf-bench` に無いので E2E で測る。prompt は corpus
+`9136d38b` の 100 番地以降で special token を除いた 512 / 1024 / 1943 token）:
+
+```text
+shelf-compute --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 \\
+  --input-ids-file <prompt N ids> --max-new-tokens 32 --max-seq-len <N+64> \\
+  --max-concurrent-requests 1 [--pipeline-parallel 2 --device 0,1]
+```
+
+| prompt token | prefill ms（PP=1） | prefill ms（PP=2） | decode tok/s（PP=1） | decode tok/s（PP=2） |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 142.8 / 142.6 | 148.4 / 145.4 | 63.01 / 62.97 | 57.70 / 57.82 |
+| 1024 | 260.2 / 261.7 | 257.4 / 255.0 | 42.28 / 48.77 | 31.44 / 56.93 |
+| 1943 | 600.2 / 579.0 | **487.3 / 487.3** | 58.63 / 58.66 | 55.13 / 55.11 |
+
+- 生成列は PP=1 と PP=2 で**全 case 一致**（`GENERATED_IDS` 30〜31 token。`DECODE_TOKENS` は
+  31 / 31 / 30）
+- PP=2 の decode は 5〜8 % 遅い。stage 間 hand-off は pinned host 経由の直列で overlap が
+  無い（1 batch を stage 順に通す）ため、1 step の壁時刻は stage 時間の合計になる
+- prefill は 512 / 1024 で等価、1943 で +19 %（487.3 vs 579.0〜600.2 ms）。stage ごとに
+  weight traffic は半分へ寄るが、直列なので上限は出ない。1024 の decode 側 run 値
+  （31.44 / 56.93）は GPU 0 共有の揺れ
+- 容量（1943 token case）: 1 stage あたり weight_bytes **11,003,576,320 B**（checkpoint
+  24,600,713,248 B の layer 分割分）、`KV_POOL_RESERVED_BYTES` **20,746,240,000 B**。
+  PP=1 では同一 GPU に全 weight が入り `KV_POOL_RESERVED_BYTES` **9,750,446,080 B** で、
+  PP=2 は KV pool が **2.13 倍**。`ARENA_USED_GB` 30.157（PP=2、stage 每）/ 30.746（PP=1）、
+  auto reserve 0.78 GiB（row bucket 1944、auto slack 0.20 GiB を含む）
+- measurement revision: `a14a7ce`（stage model interface 導入後）で、required 168/168・
+  gpu2 6/6。dense checkpoint の PP=2 は起動と生成を確認したが warmup + 複数 run の計測は
+  していない
+- 3 stage 以上は未検証（この環境は GPU 2 枚まで）。TP と PP の同時利用は非対応
 
 ## 記録規則
 

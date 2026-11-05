@@ -763,13 +763,18 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）。multi-rank runtime は
   `shelf::qwen35` にあるので family をまたぐ判断は持てず、rank の model は
   `shelf::models::TpRankModel` 経由で注入される（builder の選択は `shelf::models`）
-- ただし実 model（Qwen3.6-35B-A3B）では TP=2 と TP=1 の生成列が**一致していない**。
-  合成 fixture の一致は expert 分割・collective・rank geometry の契約が成立していることの
-  証明であって、実 model の kernel 選択（TP=2 の局所 shape が optimized allowlist の外側で
-  correctness path へ落ちる）を含んでいない。経緯は
-  [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md)。
+- 実 model（Qwen3.6-35B-A3B）でも TP=2 と TP=1 の生成列は一致する。E2E 48 token が全一致し、
+  teacher-forced の TP=1 vs TP=2 は最大 KL 1.4e-2 以内・非有限 0。TP=2 の rank local shape は
+  optimized allowlist に登録済みで、fallback は 0 本。値と条件は
+  [../perf/current.md](../perf/current.md)、数値破綻の切り分けと登録の根拠は
+  [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §6 / §7。
   MTP block は分割しない（§5）
-- pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
-  しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
-  grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に
-  `unsupported` を返す（拒否の実装と条件は `pipeline_parallel.md` §4 が正本）
+- pipeline parallel は layer 範囲の分割で対応する。stage は `Qwen35MoeLoadOptions::stage` の
+  範囲だけ load し（担当外 layer の expert 平面・router・shared expert は载らない）、
+  `Qwen35MoeLowerOptions::stage` でその範囲だけ lower する。embed は first stage、lm_head と
+  final norm は last stage。expert 平面は layer 軸で割られ、**TP と PP を同時に割る配線は
+  無い**（stage + partition plan は loader で `unsupported`）。stage model は
+  `shelf::models::PipelineStageModel` 経由で注入され、executor footprint は
+  `token_row_ffn_size`（shared expert 幅）と `ffn_workspace_reserve_bytes`
+  （group 行平面 + plan scratch）の 2 項で組む。契約は
+  [pipeline_parallel.md](pipeline_parallel.md) §2 が正本
