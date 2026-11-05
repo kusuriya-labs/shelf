@@ -295,6 +295,8 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   `splits * rows * out_features + splits * rows` float である。
 - 部分和の加算順は split 数で変わるため、split あり / なしの出力は bit 一致しない。
   CPU affine 参照との比較は両方の経路で行う。
+- prefill では grid 数が十分なとき 1 block が 2 個の 16-row tile を処理し、復号済みの
+  weight tile を共有する。row group の選択は出力値に依存しない。
 
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ

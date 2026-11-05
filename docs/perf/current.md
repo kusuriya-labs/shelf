@@ -54,16 +54,20 @@ EXL3 経路の現在値である。
 | 条件 | 値 |
 | --- | ---: |
 | decode | 13.63 / 13.64 / 13.66 tok/s（73.2〜73.4 µs/token） |
-| prefill 128 | 224.86 / 226.06 / 226.46 tok/s（4.42〜4.45 ms/token） |
+| prefill 128 | 265.32 / 265.51 / 266.42 tok/s（3.75〜3.77 ms/token） |
+| prefill 512 | 273.28 / 273.57 / 273.65 tok/s（3.65〜3.66 ms/token） |
 
-- measurement revision: `336b184`（ring window の 4-word 一括ロード、batch-aware split-K、
-  xrot race 修正）
+- measurement revision: `11392a6`（prefill の row group 再利用、ring window の 4-word
+  一括ロード、batch-aware split-K、xrot race 修正）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
 - prefill command:
   `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens 128 --runs 3 --warmup 1 --device 1 --arena-gib 28`
-- split-K を無効にした同一条件（`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。
+  （512 は `--prompt-tokens 512`）
+- prefill は `grid_x * ceil(rows / 32) >= 128` のとき 2 個の 16-row tile を 1 block で
+  処理し、復号と weight stage を共有する。decode（rows=1）は 1 tile のまま。
+- split-K を無効にした decode（`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。
   auto split は n=5120 / n=1024 で 8、n=17408 で 3（scratch 上限）を使う。
   reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
