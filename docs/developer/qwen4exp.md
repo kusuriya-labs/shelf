@@ -160,9 +160,19 @@ PLE 注入のうち、状態を持たない 2 つの要素を実装した。
 
 `test_ple_gate` は rows 3、hc 4、hidden 128 で CPU 参照と一致することを固定する。
 
-残りは PLE の key/value 射影、grouped RMSNorm、depthwise short conv（kernel 4、
-dilation 3、state 9）、HyperConnection への加算と、QSA / decoder layer の
-lowering、4 stream を運ぶ runtime state の接続である。
+short conv も実装した。
+
+| kernel | 内容 |
+| --- | --- |
+| `launch_ple_conv` | depthwise、kernel 4、dilation 3、causal、SiLU |
+
+状態は `[max_sequences][9][channels]` BF16 で、request の row を順に処理し、
+最後に history 9 行を書き戻す。`test_ple_conv` は 2 sequence と decode 1 row で
+CPU 参照と一致することを固定する。
+
+残りは PLE の key/value 射影と grouped RMSNorm を graph に接続すること、
+`PLE_CONV` の state を runtime に持たせること、HyperConnection への加算と、
+QSA / decoder layer の lowering、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

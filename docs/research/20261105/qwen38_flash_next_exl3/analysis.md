@@ -517,8 +517,11 @@ PLE 注入の状態を持たない部分も実装した。
 - `launch_ple_broadcast_mul`: `sigmoid(gate) * value` を hc stream へ複製
 
 `test_ple_gate` が CPU 参照と一致することを固定する。
-残りは PLE の key/value 射影、grouped RMSNorm、depthwise short conv（kernel 4、
-dilation 3、state 9）、HyperConnection への加算と、QSA / decoder layer の lowering、
+short conv も depthwise、kernel 4、dilation 3、causal、SiLU で実装し、
+`[max_sequences][9][channels]` の BF16 state を持つ。
+`test_ple_conv` が 2 sequence と decode 1 row を CPU 参照と比較する。
+残りは PLE の key/value 射影と grouped RMSNorm の graph 接続、`PLE_CONV` の
+runtime state、HyperConnection への加算と、QSA / decoder layer の lowering、
 4 stream を運ぶ runtime state の接続である。
 
 #### 結論
