@@ -563,13 +563,28 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
     }();
     args.splitk_splits = split_override;
-    const hipError_t herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+    const uint64_t xrot_bytes = static_cast<uint64_t>(args.rows) * args.k * 2u;
+    static const bool pre_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_PRE");
+        return e != nullptr && std::strtoul(e, nullptr, 10) == 0u;
+    }();
+    const bool use_pre = !pre_override && ctx.exl3_xrot != nullptr && args.rows >= 4u &&
+                         xrot_bytes <= ctx.exl3_xrot_bytes;
+    hipError_t herr = hipSuccess;
+    if (use_pre) {
+        herr = ::shelf::kernel::launch_rotate_exl3(args, ctx.exl3_xrot, stream);
+        if (herr == hipSuccess) {
+            herr = ::shelf::kernel::launch_gemm_exl3_w16a16_pre(args, ctx.exl3_xrot, stream);
+        }
+    } else {
+        herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+    }
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("exl3 gemm launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
-    record_physical_launch(1);
+    record_physical_launch(use_pre ? 2u : 1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }

@@ -345,6 +345,61 @@ decode（rows=1）は groups=1 のまま。n=5120 / k=5120 / split=8 の GEMM �
 変更前 0.0778 ms、変更後 0.0777 ms で差がない。`test_exl3_linear` の
 rows=64 / n=8192 で groups=2 の経路を検証している。
 
+## 入力回転の事前計算（採用）
+
+現行 kernel の定数は `kOutBlock = 128`、`kRowTile = 16`、`kThreads = 256`
+（8 warp、1 warp = 16 列）、`kGroups = 1`（decode）/ `2`（prefill 条件付き）。
+入力回転は CTA ごとに、同じ Activation を n tile 数と split 数だけ繰り返していた。
+
+まず回転ブロック（`suh` load、BF16 load、FWHT、FP16 変換、`xrot` LDS 書き込み）を
+丸ごと外した ablation を、auto split で測った。
+
+| rows | n=5120 k=5120 | n=5120 k=17408 | n=17408 k=5120 |
+| ---: | ---: | ---: | ---: |
+| 1 | -15 % | -17 % | -16 % |
+| 4 | -33 % | -22 % | -21 % |
+| 16 | -25 % | -28 % | -31 % |
+| 128 | -41 % | — | — |
+
+回転は decode でも 15 %、prefill では 41 % を占める。`fwht128` だけを外した
+以前の ablation が効果なしだったのは、重いのは FWHT ではなく、
+BF16 load / suh / LDS 書き込みだったためである。
+
+実装:
+
+- `rotate_exl3_kernel` が 1 linear につき 1 回だけ `xrot[rows][k]`（FP16）を作る。
+  row ごとに 1 block、8 warp で K/128 block を分担する。
+- GEMM は `kPre` template で分岐し、`xrot` を global から LDS へコピーして使う。
+  行 sum はコピー後の LDS から計算するので split でも整合する。
+- `xrot` は execution workspace に 80 MiB 確保する。`rows * k * 2 <= 80 MiB` かつ
+  `rows >= 4` のときだけ使い、それ以外は従来の fused 経路に落とす。
+
+結果（同じ GPU 1、3 run、`SHELF_EXL3_PRE=0` が fused）:
+
+| prompt | fused | pre | 改善 |
+| ---: | ---: | ---: | ---: |
+| 128 | 265.51 | **315.25** | +18.7 % |
+| 512 | 273.57 | **328.92** | +20.2 % |
+| 1024 | 274.37 | **326.17** | +18.9 % |
+| 2048 | 274.06 | **330.00** | +20.4 % |
+
+32 MiB では 2048×17408 の `down_proj` が fused に落ち、pp2048 は 314.37 だった。
+80 MiB に広げると 330.00 まで上がる。decode（rows=1）は fused のまま。
+`n=5120 / k=5120 / split=8` の GEMM は 0.0785 → 0.0775 ms で、fused 側の回帰はない。
+
+### decode prefetch（棄却）
+
+次の tile の ring を現在の decode/WMMA より先に global load する形も試した。
+単一 tile + 2 ring にしたが、rows=1 0.0792（base 0.0793）、rows=16 0.0997（0.0978）、
+rows=128 0.4959（0.4931）で改善しなかった。compiler がすでに unroll で
+load を先行させており、明示的な prefetch の追加コストが上回る。revert した。
+
+### rowsum のガード
+
+非 split 経路の `rowsum` 書き込みは index が `kRows` 未満で範囲内、非アクティブ行の
+`row_acc` は 0、epilogue も `r >= active_rows` を弾くため誤出力はなかった。
+防御的に `r < active_rows` のガードを追加した。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
@@ -366,13 +421,16 @@ prefill の WMMA をそのまま使えることを優先する。
 
 ## 次の候補
 
-1. **decode の LDS store 削減**。store は全体の約 20 %。256 half を A fragment の
-   配置で直接作れれば LDS を経由しないが、lane 間 shuffle が増える。2 系列
-   インターリーブが効果なかったため、優先度は低い。
-2. **prefill の row group 数**。groups=2 が LDS と block 数のバランス点だった。
-   LDS をさらに削って 3 block/CU を保てるなら groups=4 を再評価する余地がある。
-3. **WMMA の直列依存**。M=1 では WMMA が 43 % を占めるが、16 行のうち 1 行しか
-   使わない構造上のコストである。W16A16 を維持する限り削れない。
-4. **hash / modulo の削減**は効果なし。gfx1201 の `v_mul_lo_u32` が 1/4 rate でも、
-   この kernel では律速にならない。
-5. GEMV 経路は batch 1〜16 で 2〜3 倍の余地があるが、今回は実装しない判断とした。
+1. **INT8 WMMA（1-GEMM）の品質検証**。gfx1201 の INT8 WMMA は FP16 の 1.96 倍
+   （93.5 → 183.1 T-MAC/s）。mul1 の 11-bit 整数を 2 個の INT8 GEMM に分けると
+   1.02 倍で利得がないため、codebook の範囲 ±3.45 を固定スケールで 8-bit に
+   再量子化する 1-GEMM 案だけが候補になる。top-1 / logit の品質ゲートが必要。
+2. **decode と WMMA のパイプライン**。単純な prefetch は効果なかった。
+   生産 warp と消費 warp を分ける、または 2 tile を明示的に交互実行する案は
+   まだ未検証だが、2 系列インターリーブが効果なかったため優先度は低い。
+3. **row group の拡大**。groups=2 が LDS と block 数のバランス点。xrot を
+   global から直接読むようにして LDS を削れば groups=4 を再評価できる。
+4. **prefill の dense FP16 GEMM**。再構築 0.17 ms（5120²）は小さく、M=512 以上では
+   パイプライン化した dense GEMM が fused を上回る可能性がある。ただし素朴な
+   128×128 tile は 10 T-MAC/s しか出ず、double buffering が必要。
+5. W16A16 の M=1 は WMMA の 15/16 が無駄になる構造コストが残る。

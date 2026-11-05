@@ -166,6 +166,7 @@ struct Case {
     bool half;
     const char* tag;
     uint32_t splits = 0;
+    bool pre = false;
 };
 
 static bool run_case(const Case& c) {
@@ -220,6 +221,11 @@ static bool run_case(const Case& c) {
     void* d_scratch = nullptr;
     check(hipMalloc(&d_scratch, kScratchFloats * sizeof(float)) == hipSuccess,
           "malloc splitk scratch");
+    void* d_xrot = nullptr;
+    if (c.pre) {
+        check(hipMalloc(&d_xrot, static_cast<std::size_t>(c.rows) * c.k * 2u) == hipSuccess,
+              "malloc xrot");
+    }
     check(hipMemcpy(d_trellis, trellis.data(), trellis_bytes, hipMemcpyHostToDevice) ==
               hipSuccess,
           "copy trellis");
@@ -248,7 +254,16 @@ static bool run_case(const Case& c) {
     args.splitk_scratch = static_cast<float*>(d_scratch);
     args.splitk_floats = static_cast<uint32_t>(kScratchFloats);
     args.splitk_splits = c.splits;
-    const hipError_t herr = shelf::kernel::launch_gemm_exl3_w16a16(args, nullptr);
+    hipError_t herr = hipSuccess;
+    if (c.pre) {
+        herr = shelf::kernel::launch_rotate_exl3(args, d_xrot, nullptr);
+        check(herr == hipSuccess, std::string(c.tag) + " rotate " + hipGetErrorString(herr));
+        if (herr == hipSuccess) {
+            herr = shelf::kernel::launch_gemm_exl3_w16a16_pre(args, d_xrot, nullptr);
+        }
+    } else {
+        herr = shelf::kernel::launch_gemm_exl3_w16a16(args, nullptr);
+    }
     check(herr == hipSuccess, std::string(c.tag) + " launch " + hipGetErrorString(herr));
     if (herr == hipSuccess) {
         check(hipDeviceSynchronize() == hipSuccess, std::string(c.tag) + " sync");
@@ -279,6 +294,7 @@ static bool run_case(const Case& c) {
     check(hipFree(d_input) == hipSuccess, "free input");
     check(hipFree(d_output) == hipSuccess, "free output");
     check(hipFree(d_scratch) == hipSuccess, "free splitk scratch");
+    if (c.pre) check(hipFree(d_xrot) == hipSuccess, "free xrot");
     return ok;
 }
 
@@ -327,6 +343,11 @@ int main() {
     run_case({8, 5120, 512, 4, false, "auto_rows8_n5120", 0});
     run_case({1, 17408, 512, 4, false, "auto_n17408", 0});
     run_case({5, 5120, 512, 4, false, "auto_rows5_n5120", 0});
+    run_case({4, 128, 128, 4, false, "pre_rows4", 1, true});
+    run_case({16, 256, 256, 4, false, "pre_rows16", 1, true});
+    run_case({64, 8192, 128, 4, false, "pre_groups2_rows64", 1, true});
+    run_case({5, 5120, 512, 4, false, "pre_auto_rows5", 0, true});
+    run_case({32, 1024, 512, 4, false, "pre_split2_rows32", 2, true});
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

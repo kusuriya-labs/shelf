@@ -297,6 +297,12 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   CPU affine 参照との比較は両方の経路で行う。
 - prefill では grid 数が十分なとき 1 block が 2 個の 16-row tile を処理し、復号済みの
   weight tile を共有する。row group の選択は出力値に依存しない。
+- `Exl3GemmArgs::xrot` が非 null のとき、`launch_gemm_exl3_w16a16_pre` は入力回転を
+  再計算せず、xrot を LDS へコピーして GEMM する。xrot は `launch_rotate_exl3` が
+  `rows * k` の FP16 で 1 回だけ作る。dispatcher は `rows >= 4` かつ
+  `rows * k * 2` が execution workspace の xrot 領域（80 MiB）に収まるときだけ
+  この経路を使い、それ以外は fused 経路にする。回転の演算順は fused と同じで、
+  出力は一致する。
 
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ

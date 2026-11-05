@@ -173,6 +173,7 @@ Status build_host_execution_context(
         return Status::invalid_state("execution workspace not allocated", __FILE__, __LINE__);
     }
     constexpr uint64_t kScratchFloats = 524288;
+    constexpr uint64_t kExl3XrotBytes = 80ull * 1024ull * 1024ull;
     const uint64_t scratch_offset =
         (static_cast<uint64_t>(program.workspace.total_bytes) + 255ull) & ~255ull;
     if (scratch_offset + kScratchFloats * sizeof(float) >
@@ -216,6 +217,15 @@ Status build_host_execution_context(
     }
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
+    const uint64_t exl3_xrot_offset =
+        (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+    if (exl3_xrot_offset + kExl3XrotBytes >
+        executor.execution_workspace.allocation_bytes()) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 xrot",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_xrot = ws_base + exl3_xrot_offset;
+    ctx.exl3_xrot_bytes = static_cast<uint32_t>(kExl3XrotBytes);
     ctx.error_word = status_ptr;
     ctx.bucket_m = static_cast<uint32_t>(program.row_bucket);
     ctx.staging = executor.dispatch_staging;
@@ -2015,8 +2025,10 @@ Result<Executor> create_executor(
                     std::max(max_staging_bytes, ::shelf::runtime::max_host_staging_bytes(prog));
             }
             constexpr std::size_t kScratchBytes = 524288 * sizeof(float);
-            const std::size_t exec_workspace_bytes =
-                max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes;
+            constexpr std::size_t kExl3XrotBytes = 80u * 1024u * 1024u;
+            const std::size_t exec_workspace_bytes = max_workspace_bytes + kScratchBytes +
+                                                     runtime::kDecodeAttnPartialBytes +
+                                                     kExl3XrotBytes;
             if (exec_workspace_bytes > 0) {
                 st = allocate_contiguous_tensor<uint8_t>(
                     arena, {exec_workspace_bytes}, ex.execution_workspace);
