@@ -53,15 +53,16 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 20.30 / 20.34 / 20.39 tok/s（49.0〜49.3 µs/token） |
-| prefill 128 | 486.08 / 486.85 / 487.37 tok/s（2.05〜2.06 ms/token） |
-| prefill 512 | 529.16 / 529.21 / 530.36 tok/s（1.885〜1.890 ms/token） |
-| prefill 1024 | 536.72 / 537.23 / 538.22 tok/s（1.858〜1.863 ms/token） |
-| prefill 2048 | 542.18 / 542.85 / 544.49 tok/s（1.836〜1.844 ms/token） |
+| decode | 20.41 / 20.44 / 20.69 tok/s（48.3〜49.0 µs/token） |
+| prefill 128 | 637.22 / 637.26 / 640.90 tok/s（1.561〜1.569 ms/token） |
+| prefill 512 | 773.02 / 774.24 / 775.07 tok/s（1.290〜1.294 ms/token） |
+| prefill 1024 | 855.51 / 857.04 / 857.80 tok/s（1.166〜1.169 ms/token） |
+| prefill 2048 | 865.09 / 865.94 / 867.48 tok/s（1.153〜1.156 ms/token） |
 
-- measurement revision: `62a365a`（pre 経路の xrot global B 化、xrot LDS pitch 136 に
-  よる B fragment の bank conflict 解消、groups / split-K dispatch 調整、ka=4 ring の
-  lane shuffle 化、ka=4 の 8 状態一括抽出、入力回転の linear 単位事前計算）
+- measurement revision: `e260705`（1 warp 2 N tile（kOutBlock 256）と row group 4、
+  pre 経路の xrot global B 化、xrot LDS pitch 136 による B fragment の bank
+  conflict 解消、ka=4 ring の lane shuffle 化、ka=4 の 8 状態一括抽出、入力回転の
+  linear 単位事前計算）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -69,14 +70,17 @@ EXL3 経路の現在値である。
   `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens <N> --runs 3 --warmup 1 --device 1 --arena-gib 28`
 - split は `grid_x <= 16 → 8`、`grid_x <= 160 → 4`、それ以上は 1 を基本に、
   K chunk 数と 12 MiB の scratch 容量で制限する。`SHELF_EXL3_SPLIT` で上書きできる。
-  `groups=2` は `rows >= 32` かつ `grid_x * ceil(rows/32) * splits >= 128` のとき。
-  `SHELF_EXL3_GROUPS` で 1 / 2 を強制できる。
+  rows=2048 では scratch 制限により split=1 になる。
+- N tile は `rows >= 4` かつ `out_features % 256 == 0` かつ
+  `out_features >= 1024` のとき 2。row group は `rows >= 256` かつ `grid_x >= 8` の
+  とき 4、`rows >= 32` かつ `grid_x * ceil(rows/32) * splits >= 128` のとき 2。
+  `SHELF_EXL3_GROUPS` で 1 / 2 / 4 を強制できる。
 - 入力回転は `rows >= 4` かつ `rows * k * 2 <= 80 MiB` のとき linear ごとに 1 回だけ
   計算する。pre 経路は xrot を LDS にコピーせず global から B fragment を読む。
   `SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算、LDS pitch 136）に切り替えられる。
 - decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 22.35 tok/s、MTP-2 は 18.35 tok/s（`--arena-gib 27`）。
+  E2E decode は 22.43 tok/s、MTP-2 は 18.35 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
