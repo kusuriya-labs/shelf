@@ -298,6 +298,7 @@ target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=
 set(
     SHELF_QWEN4EXP_SOURCES
     src/shelf/models/qwen4exp/model/qwen4exp_config.cpp
+    src/shelf/models/qwen4exp/model/hyper_connection_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
 )

@@ -212,6 +212,7 @@ shelf_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_program_wor
 shelf_add_test(NAME test_grouped_row_shape SOURCE unit/test_grouped_row_shape.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_program_moe_plan SOURCE unit/test_program_moe_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_program_hyper_connection SOURCE unit/test_program_hyper_connection.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_qwen4exp_hyper_site SOURCE unit/test_qwen4exp_hyper_site.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen4exp shelf_runtime)
 shelf_add_test(NAME test_moe_program_execute SOURCE unit/test_moe_program_execute.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu shelf_core)
 shelf_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
