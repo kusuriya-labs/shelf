@@ -9,8 +9,8 @@
 ## 現在の状態
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
-2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist
-である。**
+2026-11-04 の MTP decode（Qwen3.8-27B MXFP4）、2026-11-04 の 9B BF16 linear allowlist、
+2026-11-05 の EXL3 W16A16 decode / prefill である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -44,6 +44,29 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | TP=2 scaling | `test_qwen35_tp_e2e` | decode tok/s p50 |
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
+
+## 2026-11-05 EXL3 W16A16 decode / prefill
+
+`models/Qwen3.8-27B-exl3`（mul1、4 bpw、lm_head 6 bpw）を TP1 / bf16 KV / GPU 1 枚で
+計測した。EXL3 は production target（FP8 / BF16）とは別の経路であり、以下の値は
+EXL3 経路の現在値である。
+
+| 条件 | 値 |
+| --- | ---: |
+| decode | 8.51 / 8.53 / 8.54 tok/s（117 µs/token） |
+| prefill 128 | 191.08 / 191.20 / 191.42 tok/s（5.22〜5.23 ms/token） |
+
+- measurement revision: `820ae3b`（8 warp block 化後）
+- GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
+- decode command:
+  `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
+- prefill command:
+  `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens 128 --runs 3 --warmup 1 --device 1 --arena-gib 28`
+- 生成一致アンカー: `The capital of France is` → ` Paris.`、`--mtp` も起動・生成を確認
+- 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。ボトルネックの内訳と
+  棄却した実験は
+  [../research/20261105/exl3_decode_bottleneck.md](../research/20261105/exl3_decode_bottleneck.md)
+  を参照
 
 ## 2026-11-03 long-context prefill
 
