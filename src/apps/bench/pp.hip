@@ -1,3 +1,4 @@
+
 #include <shelf/core/memory/arena.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/loaded_model.h>
@@ -48,6 +49,7 @@ struct BenchOptions {
     int runs = 3;
     int warmup = 0;
     std::string output;
+    std::string perf_stats_output;
     shelf::qwen35::runtime::DecodeBackend decode_backend =
         shelf::qwen35::runtime::DecodeBackend::Hip;
 };
@@ -70,6 +72,8 @@ void print_usage(FILE* out) {
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
+        "  --perf-stats-output PATH     (default none; per-kernel dispatch counters JSON,\n"
+        "                                needs SHELF_QWEN35_PERF_STATS=1)\n"
         "  --decode-backend TYPE        hip (default)\n"
         "  --output PATH                (default none)\n");
 }
@@ -204,6 +208,8 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--output") {
             opts.output = need_value();
+        } else if (key == "--perf-stats-output") {
+            opts.perf_stats_output = need_value();
         } else if (key == "--help" || key == "-h") {
             print_usage(stdout);
             exit(0);
@@ -529,8 +535,7 @@ int run_pp(int argc, char** argv) {
             req.token_begin = 0;
             req.num_tokens = chunk_len;
             req.prefix_tokens = seq.position;
-            req.compute_logits = last &&
-                (opts.mode == "greedy" || tp_coordinator != nullptr);
+            req.compute_logits = last;
             req.sample = last && opts.mode == "greedy";
             std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
             shelf::qwen35::ScheduledBatch batch;
@@ -630,8 +635,12 @@ int run_pp(int argc, char** argv) {
         if (run_once(run, false) != 0) return 1;
     }
 
+    shelf::qwen35::runtime::perf_stats_reset();
     for (int run = 0; run < opts.runs; ++run) {
         if (run_once(run, true) != 0) return 1;
+    }
+    if (!opts.perf_stats_output.empty()) {
+        shelf::qwen35::runtime::perf_stats_dump(opts.perf_stats_output.c_str(), 0u);
     }
 
     if (opts.gap_keepalive > 0) {

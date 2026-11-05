@@ -63,6 +63,7 @@ detail and is not a `--variant` value.
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
 | `--runs N` | (default 3) |
 | `--warmup N` | (default 0) |
+| `--perf-stats-output PATH` | (default none; per-kernel dispatch counters JSON, needs SHELF_QWEN35_PERF_STATS=1) |
 | `--decode-backend TYPE` | hip (default) |
 | `--output PATH` | (default none) |
 <!-- /cli:bench-pp -->
@@ -70,11 +71,14 @@ detail and is not a `--variant` value.
 `--tensor-parallel 2` は `--device` の 2 GPU を使用する（例 `--device 0,1`、非連続な
 `--device 0,2` も可。`--tensor-parallel 2` のときは 2 個の指定が必須）。`--arena-gib` は
 rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2` が
-必須。TP 実行では最終 chunk の logits を計算する。
+必須。`--mode forward` でも最終 chunk の最終行の logits を計算する（lm_head 以降の dispatch は
+mode と TP で変わらない）。
 
-grouped expert checkpoint（Qwen3.6-35B-A3B MoE）は `--tensor-parallel 1` で load できる。
-`--tensor-parallel 2` は dense のみを受理し、MoE では起動時に
-`pp --tensor-parallel 2 runs dense checkpoints only` を返す。MoE の prefill throughput は
+grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も `--tensor-parallel 2` を受理する
+（expert 軸分割で、rank が expert の contiguous 範囲を持つ）。rank local shape は
+backbone kernel の allowlist に登録済みで、prefill の throughput は TP=2 が TP=1 の
+1.64〜1.79 倍（bf16 / fp8 KV 双方。値は `docs/perf/current.md`）。MoE の prefill throughput
+（TP=1）は
 `--prompt-tokens 8192 --prefill-chunk 1024 / 2048 / 4096` で 3662 / 3807 / 3631 tok/s
 （既定 2048 が最良。grouped expert の row bucket は 4096 token までなので、
 `--prefill-chunk 8192` は `unsupported: grouped-row dispatch has no correctness path` になる。
@@ -125,8 +129,8 @@ dump する。`--compare` で baseline dump と突き合わせ、perplexity / me
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
 `shelf-bench pp/tg` の数値とは混ぜない。
 
-`--model-dir` は dense / grouped expert（MoE）のどちらでもよい（`--tensor-parallel 1`）。
-`--tensor-parallel 2` は dense checkpoint のみ対応で、grouped expert を指定すると起動時に拒否する。
+`--model-dir` は dense / grouped expert（MoE）のどちらでもよく、`--tensor-parallel 1 / 2` が
+使える。
 
 corpus は `vendor/BetterBench/corpus/v1` から生成する（token corpus は commit しない）。
 
