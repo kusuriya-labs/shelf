@@ -1,4 +1,5 @@
 #include <shelf/core/memory/types.h>
+#include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/kernels/optimized/ple.h>
 
 #include <hip/hip_runtime.h>
@@ -198,6 +199,34 @@ int main() {
     (void)hipFree(d_gate);
     (void)hipFree(d_value);
     (void)hipFree(d_broadcast);
+
+    {
+        void* d_scaled_bf16 = nullptr;
+        check(hipMalloc(&d_scaled_bf16, got_gate.size() * sizeof(shelf::bf16_t)) ==
+                  hipSuccess,
+              "hipMalloc scale bf16");
+        const float factor = 0.25f;
+        check(shelf::kernel::launch_scale_bf16(
+                  static_cast<const shelf::bf16_t*>(d_gate), kHc,
+                  static_cast<shelf::bf16_t*>(d_scaled_bf16), kHc, kRows, kHc, factor,
+                  nullptr) == hipSuccess,
+              "scale bf16 launch");
+        check(hipDeviceSynchronize() == hipSuccess, "scale bf16 sync");
+        std::vector<shelf::bf16_t> got_scaled(kRows * kHc);
+        (void)hipMemcpy(got_scaled.data(), d_scaled_bf16,
+                        got_scaled.size() * sizeof(shelf::bf16_t),
+                        hipMemcpyDeviceToHost);
+        double max_scaled = 0.0;
+        for (std::size_t i = 0; i < got_scaled.size(); ++i) {
+            max_scaled = std::max<double>(
+                max_scaled,
+                std::fabs(static_cast<double>(bf16_to_float(got_scaled[i].data)) -
+                          bf16_to_float(got_gate[i].data) * factor));
+        }
+        std::fprintf(stderr, "scale bf16 max_abs=%g\n", max_scaled);
+        check(max_scaled <= 2.0e-2, "scale bf16 matches the CPU reference");
+        (void)hipFree(d_scaled_bf16);
+    }
 
     std::fprintf(stderr, failures == 0 ? "PASS\n" : "FAILURES=%d\n", failures);
     return failures == 0 ? 0 : 1;
