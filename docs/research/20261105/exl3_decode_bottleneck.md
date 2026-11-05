@@ -60,7 +60,7 @@ decode は EXL3 linear だけで決まっている。
    n=248320 は 1940 block で、85.7 GB/s。それでも decode 全体の 1.4 % にすぎない。
 
 4. **prefill は decode よりはマシだが同じ構造。**
-   `pp --prompt-tokens 128` は 70.0 tok/s（14.3 ms/token）。
+   `pp --prompt-tokens 128` は 70.0 tok/s（14.3 ms/token、runs 1 / warmup 0 の参考値）。
    16 行 block を使うため、row tile 数に比例して重みを復号し直す。
 
 ## 試して棄却したもの
@@ -94,6 +94,8 @@ work area と出力 accum は union で重ね、LDS は 14 KiB。
   - n=248320, k=5120: 11.12 → 3.72 ms
 - correctness: `test_exl3_linear` の rows 1 / 3 / 5 / 16 / 17 が CPU 参照と一致。
 - E2E: `The capital of France is` → ` Paris.`、`--mtp` も動作。
+- prefill 128（runs 3 / warmup 1）は **191 tok/s**。multi-warp 前の 70.0 tok/s は
+  runs 1 / warmup 0 の参考値なので、厳密な A/B ではない。
 
 ## 残るボトルネック
 
