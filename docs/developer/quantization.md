@@ -290,13 +290,16 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
 - `Exl3GemmArgs::splitk_scratch` が非 null のとき、grid 数が少ない shape では K を
   複数 block へ分割する。各 block は部分和と rowsum を scratch に書き、
   reduce kernel が split 方向に加算してから affine 変換、`H128`、`svh` を適用する。
-  split 数は n tile 数、row tile 数、K chunk 数、scratch 容量から決まり、
-  `splitk_splits` が 0 でなければその値を使う。scratch の必要量は
+  split 数は `grid_x <= 16 ? 8 : (grid_x <= 160 ? 4 : 1)` を K chunk 数と
+  scratch 容量（12 MiB）で制限した値になる。`splitk_splits` が 0 でなければ
+  その値を使う。scratch の必要量は
   `splits * rows * out_features + splits * rows` float である。
 - 部分和の加算順は split 数で変わるため、split あり / なしの出力は bit 一致しない。
   CPU affine 参照との比較は両方の経路で行う。
-- prefill では grid 数が十分なとき 1 block が 2 個の 16-row tile を処理し、復号済みの
-  weight tile を共有する。row group の選択は出力値に依存しない。
+- prefill / batch では `rows >= 32` かつ
+  `grid_x * ceil(rows / 32) * splits >= 128` のとき 1 block が 2 個の 16-row tile を
+  処理し、復号済みの weight tile を共有する。それ以外は 1 tile。
+  row group の選択は出力値に依存しない。
 - `Exl3GemmArgs::xrot` が非 null のとき、`launch_gemm_exl3_w16a16_pre` は入力回転を
   再計算せず、xrot を LDS へコピーして GEMM する。xrot は `launch_rotate_exl3` が
   `rows * k` の FP16 で 1 回だけ作る。dispatcher は `rows >= 4` かつ

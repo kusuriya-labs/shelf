@@ -217,7 +217,7 @@ static bool run_case(const Case& c) {
     check(hipMalloc(&d_input, input.size() * 2u) == hipSuccess, "malloc input");
     const std::size_t out_bytes = expected.size() * sizeof(float);
     check(hipMalloc(&d_output, out_bytes) == hipSuccess, "malloc output");
-    constexpr std::size_t kScratchFloats = 524288u;
+    constexpr std::size_t kScratchFloats = 3145728u;
     void* d_scratch = nullptr;
     check(hipMalloc(&d_scratch, kScratchFloats * sizeof(float)) == hipSuccess,
           "malloc splitk scratch");

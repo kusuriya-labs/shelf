@@ -172,7 +172,7 @@ Status build_host_execution_context(
     if (ws_base == nullptr) {
         return Status::invalid_state("execution workspace not allocated", __FILE__, __LINE__);
     }
-    constexpr uint64_t kScratchFloats = 524288;
+    constexpr uint64_t kScratchFloats = 3145728;
     constexpr uint64_t kExl3XrotBytes = 80ull * 1024ull * 1024ull;
     const uint64_t scratch_offset =
         (static_cast<uint64_t>(program.workspace.total_bytes) + 255ull) & ~255ull;
@@ -2024,7 +2024,7 @@ Result<Executor> create_executor(
                 max_staging_bytes =
                     std::max(max_staging_bytes, ::shelf::runtime::max_host_staging_bytes(prog));
             }
-            constexpr std::size_t kScratchBytes = 524288 * sizeof(float);
+            constexpr std::size_t kScratchBytes = 3145728 * sizeof(float);
             constexpr std::size_t kExl3XrotBytes = 80u * 1024u * 1024u;
             const std::size_t exec_workspace_bytes = max_workspace_bytes + kScratchBytes +
                                                      runtime::kDecodeAttnPartialBytes +

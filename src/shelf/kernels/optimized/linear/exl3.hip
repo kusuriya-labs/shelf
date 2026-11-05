@@ -490,16 +490,10 @@ struct LaunchPlan {
 LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     LaunchPlan plan;
     plan.grid_x = args.out_features / kOutBlock;
-    const uint32_t row_blocks2 = (args.rows + 2u * kRowTile - 1u) / (2u * kRowTile);
-    if (args.rows >= 2u * kRowTile && plan.grid_x * row_blocks2 >= 128u) {
-        plan.groups = 2u;
-    }
-    const uint32_t rows_per_block = kRowTile * plan.groups;
-    plan.grid_y = (args.rows + rows_per_block - 1u) / rows_per_block;
     if (args.splitk_scratch != nullptr) {
         uint32_t desired = args.splitk_splits;
         if (desired == 0u) {
-            desired = plan.grid_x <= 64u ? 8u : (plan.grid_x <= 160u ? 4u : 1u);
+            desired = plan.grid_x <= 16u ? 8u : (plan.grid_x <= 160u ? 4u : 1u);
         }
         const uint32_t k_chunks = args.k / 128u;
         if (desired > k_chunks) desired = k_chunks;
@@ -511,6 +505,17 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
         }
         plan.splits = desired;
     }
+    const uint32_t row_blocks2 = (args.rows + 2u * kRowTile - 1u) / (2u * kRowTile);
+    if (args.groups == 1u) {
+        plan.groups = 1u;
+    } else if (args.groups == 2u) {
+        plan.groups = 2u;
+    } else if (args.rows >= 2u * kRowTile &&
+               plan.grid_x * row_blocks2 * plan.splits >= 128u) {
+        plan.groups = 2u;
+    }
+    const uint32_t rows_per_block = kRowTile * plan.groups;
+    plan.grid_y = (args.rows + rows_per_block - 1u) / rows_per_block;
     return plan;
 }
 

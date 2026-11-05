@@ -17,7 +17,7 @@ constexpr std::size_t kAlignBytes = 256u;
 
 constexpr std::size_t kProgramValuesPerFullRow = 44u;
 
-constexpr std::size_t kScratchFloats = 524288u;
+constexpr std::size_t kScratchFloats = 3145728u;
 constexpr std::size_t kExl3XrotBytes = 80u * 1024u * 1024u;
 
 std::size_t align_up(std::size_t bytes) noexcept {
