@@ -55,13 +55,14 @@ EXL3 経路の現在値である。
 | --- | ---: |
 | decode | 20.09 / 20.16 / 20.47 tok/s（48.9〜49.8 µs/token） |
 | prefill 128 | 632.98 / 633.17 / 636.39 tok/s（1.571〜1.580 ms/token） |
+| prefill 256 | 800.07 / 800.13 / 801.87 tok/s（1.247〜1.250 ms/token） |
 | prefill 512 | 1096.12 / 1097.37 / 1104.84 tok/s（0.905〜0.912 ms/token） |
 | prefill 1024 | 1293.05 / 1295.17 / 1298.60 tok/s（0.770〜0.773 ms/token） |
 | prefill 2048 | 1389.53 / 1390.41 / 1398.79 tok/s（0.715〜0.719 ms/token） |
 
-- measurement revision: `96f5646`（prefill `rows >= 256` を dense recon + hipBLASLt に
-  変更。`rows < 256`、decode、verify、LM-Head は融合 W16A16。以前の 2 N tile /
-  row group 4、xrot global B、pitch 136、ka=4 ring shuffle を含む）
+- measurement revision: `ca5af8f`（dense 経路の rowsum 事前計算、hipBLASLt algo の
+  16 候補選択、recon の row-major 書き込み。prefill `rows >= 256` は dense recon +
+  hipBLASLt、`rows < 256` / decode / verify / LM-Head は融合 W16A16）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -83,7 +84,7 @@ EXL3 経路の現在値である。
   `SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算、LDS pitch 136）に切り替えられる。
 - decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 22.29 tok/s、MTP-2 は 18.45 tok/s（`--arena-gib 27`）。
+  E2E decode は 22.40 tok/s、MTP-2 は 18.3 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
