@@ -99,6 +99,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/hyper_connection.hip
     src/shelf/kernels/optimized/ple.hip
     src/shelf/kernels/optimized/ple_conv.hip
+    src/shelf/kernels/optimized/qsa.hip
     src/shelf/kernels/optimized/l2_normalize.hip
     src/shelf/kernels/optimized/output_gather.hip
     src/shelf/kernels/optimized/activation_quantize.hip

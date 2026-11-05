@@ -221,8 +221,21 @@ value_proj -> PLE_BROADCAST_MUL(gate, value)
 `test_qwen4exp_ple_site` が PLE 単体の sequence を、`test_qwen4exp_layer` が
 PLE → attention site → GDN → ... の順序を固定する。
 
+## 2-6. QSA key pooling と block score
+
+QSA indexer のうち、状態を持たない 2 つの計算を実装した。
+
+| kernel | 内容 |
+| --- | --- |
+| `launch_qsa_pool` | compress_ratio=4 の key 平均、RMSNorm、`1 + weight` |
+| `launch_qsa_scores` | `sum_h relu(q · k) / sqrt(head_dim)`、可視 block 外は -inf |
+
+`test_qsa_pool_scores` は head_dim 128 で CPU 参照と比較する。
+残りは q の partial rope、raw key と pooled key の state、block top-k、
+causal mask への AND、main attention への接続である。
+
 残りは `PLE_CONV` の state pool を Qwen4Exp runtime に持たせること、
-QSA indexer、4 stream を運ぶ runtime state の接続である。
+QSA の top-k / mask / attention 接続、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

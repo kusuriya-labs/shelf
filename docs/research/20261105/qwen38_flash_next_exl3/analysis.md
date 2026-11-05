@@ -541,8 +541,17 @@ PLE 注入も graph に接続した。
 
 `test_qwen4exp_ple_site` が PLE 単体の sequence を、
 `test_qwen4exp_layer` が PLE → attention site → GDN → MLP site → MoE の順序を
-固定する。残りは `PLE_CONV` の state pool を runtime に持たせること、
-QSA indexer、4 stream を運ぶ runtime state の接続である。
+固定する。残りは `PLE_CONV` の state pool を runtime に持たせることである。
+
+QSA indexer のうち、状態を持たない計算も実装した。
+
+- `launch_qsa_pool`: 4 token の key 平均、RMSNorm、`1 + weight`
+- `launch_qsa_scores`: `sum_h relu(q · k) / sqrt(head_dim)`、可視外は -inf
+
+`test_qsa_pool_scores` が head_dim 128 で CPU 参照と比較する。
+残りは q の partial rope、raw/pooled key の state、block top-k、
+causal mask への AND、main attention への接続、
+4 stream を運ぶ runtime state の接続である。
 
 #### 結論
 
