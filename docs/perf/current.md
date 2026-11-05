@@ -53,15 +53,15 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 14.80 / 14.87 / 14.91 tok/s（67.1〜67.6 µs/token） |
-| prefill 128 | 336.05 / 336.44 / 336.67 tok/s（2.97〜2.98 ms/token） |
-| prefill 512 | 350.92 / 352.10 / 352.18 tok/s（2.84〜2.85 ms/token） |
-| prefill 1024 | 352.32 / 352.86 / 353.38 tok/s（2.83〜2.84 ms/token） |
-| prefill 2048 | 353.12 / 353.68 / 354.69 tok/s（2.82〜2.83 ms/token） |
+| decode | 14.79 / 14.81 / 14.85 tok/s（67.3〜67.6 µs/token） |
+| prefill 128 | 339.61 / 339.82 / 340.76 tok/s（2.93〜2.94 ms/token） |
+| prefill 512 | 353.06 / 353.32 / 353.84 tok/s（2.83〜2.83 ms/token） |
+| prefill 1024 | 354.10 / 354.69 / 355.25 tok/s（2.81〜2.82 ms/token） |
+| prefill 2048 | 355.51 / 356.55 / 357.62 tok/s（2.80〜2.81 ms/token） |
 
-- measurement revision: `f3e4540`（ka=4 の 8 状態一括抽出、入力回転の linear 単位
-  事前計算、prefill の row group 再利用、ring window の 4-word 一括ロード、
-  batch-aware split-K、xrot race 修正）
+- measurement revision: `803d923`（ka=4 ring の lane shuffle 化、ka=4 の 8 状態一括抽出、
+  入力回転の linear 単位事前計算、prefill の row group 再利用、batch-aware split-K、
+  xrot race 修正）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -69,12 +69,11 @@ EXL3 経路の現在値である。
   `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens <N> --runs 3 --warmup 1 --device 1 --arena-gib 28`
 - 入力回転は `rows >= 4` かつ `rows * k * 2 <= 80 MiB` のとき linear ごとに 1 回だけ
   計算する。`SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算）に切り替えられる。
-  同じ ka=4 での fused は 128: 278.95 / 2048: 289.60 tok/s。
 - decode（rows=1）は fused のまま。split-K を無効にした decode
   （`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。auto split は n=5120 / n=1024 で 8、
   n=17408 で 3（scratch 上限）を使う。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 15.93 tok/s、MTP-2 は 15.68 tok/s（`--arena-gib 27`）。
+  E2E decode は 15.89 tok/s、MTP-2 は 15.60 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
