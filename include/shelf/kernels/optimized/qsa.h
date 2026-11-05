@@ -39,7 +39,19 @@ struct QsaScoresArgs {
 inline constexpr uint32_t kQsaHeadDim = 128u;
 inline constexpr uint32_t kQsaThreads = 128u;
 
+// Per-row top-k over block scores. Ties go to the smaller block index. Entries past the
+// visible block count, or past the number of selected blocks, are -1.
+struct QsaTopkArgs {
+    const float* scores = nullptr;
+    const uint32_t* visible = nullptr;
+    int32_t* indices = nullptr;
+    uint32_t rows = 0;
+    uint32_t blocks = 0;
+    uint32_t k = 0;
+};
+
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream);
 hipError_t launch_qsa_scores(const QsaScoresArgs& args, hipStream_t stream);
+hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream);
 
 }  // namespace shelf::kernel

@@ -79,6 +79,35 @@ __global__ __launch_bounds__(kThreads) void qsa_scores_kernel(QsaScoresArgs args
     }
 }
 
+__global__ void __launch_bounds__(1) qsa_topk_kernel(QsaTopkArgs args) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t visible =
+        args.visible[row] < args.blocks ? args.visible[row] : args.blocks;
+    int32_t* out = args.indices + static_cast<std::uint64_t>(row) * args.k;
+    for (uint32_t j = 0; j < args.k; ++j) out[j] = -1;
+    for (uint32_t j = 0; j < args.k && j < visible; ++j) {
+        int32_t best = -1;
+        float best_score = -INFINITY;
+        for (uint32_t block = 0; block < visible; ++block) {
+            bool used = false;
+            for (uint32_t p = 0; p < j; ++p) {
+                if (out[p] == static_cast<int32_t>(block)) {
+                    used = true;
+                    break;
+                }
+            }
+            if (used) continue;
+            const float score =
+                args.scores[static_cast<std::uint64_t>(row) * args.blocks + block];
+            if (score > best_score) {
+                best_score = score;
+                best = static_cast<int32_t>(block);
+            }
+        }
+        out[j] = best;
+    }
+}
+
 }  // namespace
 
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {
@@ -90,6 +119,17 @@ hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {
         return hipErrorInvalidValue;
     }
     qsa_pool_kernel<<<args.blocks, kThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream) {
+    if (args.scores == nullptr || args.visible == nullptr || args.indices == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (args.rows == 0u || args.blocks == 0u || args.k == 0u) {
+        return hipErrorInvalidValue;
+    }
+    qsa_topk_kernel<<<args.rows, 1, 0, stream>>>(args);
     return hipGetLastError();
 }
 

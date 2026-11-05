@@ -547,9 +547,11 @@ QSA indexer のうち、状態を持たない計算も実装した。
 
 - `launch_qsa_pool`: 4 token の key 平均、RMSNorm、`1 + weight`
 - `launch_qsa_scores`: `sum_h relu(q · k) / sqrt(head_dim)`、可視外は -inf
+- `launch_qsa_topk`: block score の top-k（同点は小さい index）
 
 `test_qsa_pool_scores` が head_dim 128 で CPU 参照と比較する。
-残りは q の partial rope、raw/pooled key の state、block top-k、
+`qsa_topk` は 1 thread / row の正しさ優先実装である。
+残りは q の partial rope、raw/pooled key の state、top-k の性能版、
 causal mask への AND、main attention への接続、
 4 stream を運ぶ runtime state の接続である。
 

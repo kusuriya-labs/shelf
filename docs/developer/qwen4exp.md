@@ -229,9 +229,11 @@ QSA indexer のうち、状態を持たない 2 つの計算を実装した。
 | --- | --- |
 | `launch_qsa_pool` | compress_ratio=4 の key 平均、RMSNorm、`1 + weight` |
 | `launch_qsa_scores` | `sum_h relu(q · k) / sqrt(head_dim)`、可視 block 外は -inf |
+| `launch_qsa_topk` | block ごとの score から top-k（同点は小さい index） |
 
 `test_qsa_pool_scores` は head_dim 128 で CPU 参照と比較する。
-残りは q の partial rope、raw key と pooled key の state、block top-k、
+`qsa_topk` はまだ 1 thread / row の正しさ優先実装である。
+残りは q の partial rope、raw key と pooled key の state、top-k の性能版、
 causal mask への AND、main attention への接続である。
 
 残りは `PLE_CONV` の state pool を Qwen4Exp runtime に持たせること、

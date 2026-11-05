@@ -187,6 +187,45 @@ int main() {
         (void)hipFree(d_visible);
     }
 
+    {
+        constexpr std::uint32_t kRows = 3;
+        constexpr std::uint32_t kBlocks = 5;
+        constexpr std::uint32_t kK = 3;
+        const float scores[kRows * kBlocks] = {
+            5.0f, 4.0f, 3.0f, 2.0f, 1.0f,
+            1.0f, 5.0f, 2.0f, 4.0f, 0.0f,
+            9.0f, 8.0f, 7.0f, 6.0f, 5.0f};
+        const std::uint32_t visible[kRows] = {5u, 3u, 1u};
+        const int32_t want[kRows * kK] = {0, 1, 2, 1, 2, 0, 0, -1, -1};
+        void* d_scores = nullptr;
+        void* d_visible = nullptr;
+        void* d_indices = nullptr;
+        check(hipMalloc(&d_scores, sizeof(scores)) == hipSuccess, "hipMalloc topk scores");
+        check(hipMalloc(&d_visible, sizeof(visible)) == hipSuccess,
+              "hipMalloc topk visible");
+        check(hipMalloc(&d_indices, sizeof(want)) == hipSuccess, "hipMalloc topk indices");
+        hipMemcpy(d_scores, scores, sizeof(scores), hipMemcpyHostToDevice);
+        hipMemcpy(d_visible, visible, sizeof(visible), hipMemcpyHostToDevice);
+        shelf::kernel::QsaTopkArgs args;
+        args.scores = static_cast<const float*>(d_scores);
+        args.visible = static_cast<const std::uint32_t*>(d_visible);
+        args.indices = static_cast<int32_t*>(d_indices);
+        args.rows = kRows;
+        args.blocks = kBlocks;
+        args.k = kK;
+        check(shelf::kernel::launch_qsa_topk(args, nullptr) == hipSuccess,
+              "qsa topk launch");
+        check(hipDeviceSynchronize() == hipSuccess, "qsa topk sync");
+        int32_t got[kRows * kK];
+        hipMemcpy(got, d_indices, sizeof(got), hipMemcpyDeviceToHost);
+        bool same = true;
+        for (std::size_t i = 0; i < kRows * kK; ++i) same = same && got[i] == want[i];
+        check(same, "qsa topk matches the CPU reference");
+        (void)hipFree(d_scores);
+        (void)hipFree(d_visible);
+        (void)hipFree(d_indices);
+    }
+
     std::fprintf(stderr, failures == 0 ? "PASS\n" : "FAILURES=%d\n", failures);
     return failures == 0 ? 0 : 1;
 }
