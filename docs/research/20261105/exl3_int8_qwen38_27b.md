@@ -26,17 +26,16 @@ mul1 の乗数 0x83DCD12D は 32 bit 乗算 + byte 和 + 補正で、1 重みあ
 - 復号: `test_exl3_int8_decode`（rocm_exl3 の NumPy 参照 = 実機復号器とビット一致）が通る。bits 1〜8 で GEMM が参照と一致。
 - kernel: `test_exl3_int8_linear` 全 PASS（suh / svh は F16、trellis は n-major）。回転 + INT8 化と出力回転は CPU の float32 鏡像計算と完全一致、
   GEMM の相対誤差 約 1e-7、理想の式（float64）との相対 L2 誤差 約 0.65%（INT8 活性のノイズ）。split-K（2/3/4/8 分割）も同じ精度。
-- KLD（BF16 = llama.cpp に対する、同一の 8 ケース・2632 位置のプロトコル）。rocm_exl3 の reconstruct 経路で測定:
+- KLD（BF16 = llama.cpp に対する、同一の 8 ケース・2632 位置）。rocm_exl3 で測定:
 
   | | mean KLD | top-1 一致 |
   |---|---|---|
-  | 4bpw mul1（同じ量子化器、変更前） | 0.01931（最終行除く）/ 0.01927（全行） | 0.9457 |
-  | 4bpw mul24 fp16 | 0.01979（最終行除く）/ 0.05814（全行） | 0.9453 |
-  | 4bpw mul24 INT8（固定 grid + 活性 INT8） | 0.02175（最終行除く）/ 0.06027（全行） | 0.9407 |
+  | 4bpw mul1（同じ量子化器、変更前） | 0.01927 | 0.9457 |
+  | 4bpw mul24 fp16 | 0.01973 | 0.9472 |
+  | 4bpw mul24 INT8（固定 grid + 活性 INT8） | 0.02167 | 0.9403 |
 
-  mul24 の fp16 は mul1 に対し +0.0005（+2.5%）、INT8 化でさらに +0.0020。
-  注意: rocm_exl3 の mul24 モデルは小行数（<=32）のネイティブ GEMM が mul1 の並びで読むため、各ケース最終の 1 行 chunk の
-  logits が壊れる。表は各ケースの最終行を両モデルとも除いた値（全行は表の右側の値）。top-1 は全行の値で、壊れた行は 2632 位置中 8 行なので影響は小さい。mul24 の速度測定は shelf で行う。
+  mul24 の fp16 は mul1 に対し +0.0005（+2.4%）、INT8 化でさらに +0.0019（約 +10%）。
+  rocm_exl3 は mul24 を R9700 と V620 の両方で native に復号する（V620 の decode は mul1 と同等の 22 tok/s）。
 - shelf 自体の KLD: 12 位置（4 ケース × 3 位置、prefill）で BF16 に対し 0.0415。同じ位置の rocm_exl3 は INT8 0.0421、fp16 0.0416。
   shelf と rocm_exl3 INT8 の間は 0.0032。
 - end-to-end: 128 token のプロンプトから greedy 64 token。生成は自然な文で、速度最適化の前後で先頭 24 token は同一。
