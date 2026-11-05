@@ -612,16 +612,18 @@ trellis の代わりに事前復号済み FP16 tile を global から読む診�
 現行 WMMA に事前復号 FP16 fragment を直接渡す経路（B0）、現行 EXL3（B3）を
 同一 shape で測った。10 warmup + 50 samples。
 
-| Stage | kernel ms | tok/s（単一 Linear） | TFLOPS | A0 比 |
+| Stage | kernel ms | tok/s（単一 Linear） | TFLOPS | A0b 比 |
 | --- | ---: | ---: | ---: | ---: |
-| A0 rocBLAS FP16 | 0.7139 | 2,868,713 | **150.40** | 1.00× |
-| B0 現行 WMMA + FP16 fragment | 4.7511 | 431,055 | 22.60 | 6.65× 遅い |
-| B3 現行 EXL3 mul1 | 6.6431 | 308,291 | 16.16 | 9.31× 遅い |
+| A0 rocBLAS FP16 | 0.7136 | 2,869,894 | 150.47 | 1.02× 遅い |
+| A0b hipBLASLt FP16 | **0.6987** | 2,930,987 | **153.67** | 1.00× |
+| B0 現行 WMMA + FP16 fragment | 4.7674 | 429,583 | 22.52 | 6.82× 遅い |
+| B3 現行 EXL3 mul1 | 6.6537 | 307,798 | 16.14 | 9.52× 遅い |
 
 - B0 は bit 抽出、mul1 hash、SAD、LDS tile 往復をすべて省き、事前復号した
   raw FP16 tile を WMMA の A fragment として直接読む。
 - **B0 と B3 の全出力は bit 一致**（`max_abs=0`）。B0 は忠実な decode-free 基準。
-- 現行 WMMA 構造は、**decode を一切含まなくても rocBLAS の 6.65 倍遅い**。
+- hipBLASLt と rocBLAS は 2% 以内で一致し、A0 の基準は安定している。
+- 現行 WMMA 構造は、**decode を一切含まなくても hipBLASLt の 6.82 倍遅い**。
   EXL3 decode 全体の追加は B0 比 1.40 倍に過ぎない。
 - したがって主因は hash / bit抽出 / ring / accumulator ではなく、
   **WMMA のタイル構造・データ供給・スケジューリング**である。decode をさらに

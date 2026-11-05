@@ -2,6 +2,7 @@
 #include <shelf/core/memory/types.h>
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
+#include <hipblaslt/hipblaslt.h>
 
 #include <cmath>
 #include <cstdint>
@@ -188,12 +189,57 @@ int main() {
     a0_ms /= kSamples;
     rocblas_destroy_handle(handle);
 
+    hipblasLtHandle_t lt = nullptr;
+    hipblasLtCreate(&lt);
+    hipblasLtMatmulDesc_t lt_desc = nullptr;
+    hipblasLtMatmulDescCreate(&lt_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+    hipblasOperation_t lt_op = HIPBLAS_OP_N;
+    hipblasLtMatmulDescSetAttribute(lt_desc, HIPBLASLT_MATMUL_DESC_TRANSA, &lt_op,
+                                    sizeof(lt_op));
+    hipblasLtMatmulDescSetAttribute(lt_desc, HIPBLASLT_MATMUL_DESC_TRANSB, &lt_op,
+                                    sizeof(lt_op));
+    hipblasLtMatrixLayout_t lt_a = nullptr;
+    hipblasLtMatrixLayout_t lt_b = nullptr;
+    hipblasLtMatrixLayout_t lt_c = nullptr;
+    hipblasLtMatrixLayoutCreate(&lt_a, HIP_R_16F, M, K, M);
+    hipblasLtMatrixLayoutCreate(&lt_b, HIP_R_16F, K, N, K);
+    hipblasLtMatrixLayoutCreate(&lt_c, HIP_R_32F, M, N, M);
+    hipblasLtMatmulPreference_t lt_pref = nullptr;
+    hipblasLtMatmulPreferenceCreate(&lt_pref);
+    size_t lt_ws_size = 32u << 20;
+    hipblasLtMatmulPreferenceSetAttribute(lt_pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                          &lt_ws_size, sizeof(lt_ws_size));
+    hipblasLtMatmulHeuristicResult_t lt_heur{};
+    int lt_got = 0;
+    hipblasLtMatmulAlgoGetHeuristic(lt, lt_desc, lt_a, lt_b, lt_c, lt_c, lt_pref, 1,
+                                    &lt_heur, &lt_got);
+    void* lt_ws = nullptr;
+    if (lt_heur.workspaceSize > 0) hipMalloc(&lt_ws, lt_heur.workspaceSize);
+    for (int i = 0; i < 10; ++i) {
+        hipblasLtMatmul(lt, lt_desc, &alpha, dA, lt_a, dB, lt_b, &beta, dC, lt_c, dC, lt_c,
+                        &lt_heur.algo, lt_ws, lt_heur.workspaceSize, 0);
+    }
+    hipDeviceSynchronize();
+    double lt_ms = 0.0;
+    for (int i = 0; i < kSamples; ++i) {
+        hipEventRecord(a0_start, nullptr);
+        hipblasLtMatmul(lt, lt_desc, &alpha, dA, lt_a, dB, lt_b, &beta, dC, lt_c, dC, lt_c,
+                        &lt_heur.algo, lt_ws, lt_heur.workspaceSize, 0);
+        hipEventRecord(a0_stop, nullptr);
+        hipEventSynchronize(a0_stop);
+        float t = 0.0f;
+        hipEventElapsedTime(&t, a0_start, a0_stop);
+        lt_ms += t;
+    }
+    lt_ms /= kSamples;
+
     const double flops = 2.0 * M * K * N;
     auto report = [&](const char* stage, double ms) {
         std::printf("RESULT %s M=%u K=%u N=%u g=1 s=1 kernel_ms=%.4f tok_s=%.1f tflops=%.2f\n",
                     stage, M, K, N, ms, M * 1000.0 / ms, flops / (ms * 1e9));
     };
     report("A0_rocblas_f16", a0_ms);
+    report("A0b_hipblaslt_f16", lt_ms);
     report("B0_wmma_fp16_direct", b0_ms);
     report("B3_exl3_current", b3_ms);
     return 0;
