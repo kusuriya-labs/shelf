@@ -60,35 +60,14 @@ struct Qwen4ExpPleWeights {
     shelf::gpu::Tensor norm_conv;
 };
 
-// One routed-expert projection of one rank. The payload is the checkpoint's EXL3
-// trellis, left packed. experts are contiguous global indices
-// [expert_begin, expert_begin + local_experts). The per-expert strides are the same for
-// every expert in a layer because a layer's routed experts share one bit rate and shape.
-struct Qwen4ExpExpertPlane {
+// One routed-expert projection of one rank is the shared rank-3 MatrixWeight form:
+// experts are contiguous global indices [expert_begin, expert_begin + experts), and the
+// encoding-specific plane (EXL3 trellis / MXFP4 native) is described by MatrixWeight.
+struct Qwen4ExpExpertRange {
     std::uint32_t global_experts = 0;
     std::uint32_t local_experts = 0;
     std::uint32_t expert_begin = 0;
-    std::uint32_t rows = 0;  // logical output rows (n)
-    std::uint32_t cols = 0;  // logical input columns (k)
-    std::uint32_t k_padded = 0;
-    std::uint32_t ka = 0;
-    bool half = false;
-
-    std::uint64_t trellis_bytes_per_expert = 0;
-    std::uint64_t suh_bytes_per_expert = 0;
-    std::uint64_t svh_bytes_per_expert = 0;
-
-    shelf::gpu::Tensor codes;   // [local_experts, trellis_bytes]
-    shelf::gpu::Tensor suh;     // [local_experts, k_padded] F16
-    shelf::gpu::Tensor svh;     // [local_experts, rows] F16
-    shelf::gpu::Tensor marker;  // [local_experts, 4] U8 (mul1)
-
-    [[nodiscard]] std::uint64_t resident_bytes() const noexcept;
 };
-
-// A rank-3 MatrixWeight view over one packed expert plane. The runtime weight table
-// consumes this shape; it does not own the GPU memory, which stays in the rank arena.
-shelf::weights::MatrixWeight make_expert_matrix(const Qwen4ExpExpertPlane& plane);
 
 struct Qwen4ExpMoeWeights {
     shelf::weights::MatrixWeight router;       // [global experts, hidden] replicated
@@ -97,9 +76,10 @@ struct Qwen4ExpMoeWeights {
     shelf::weights::MatrixWeight shared_up_proj;
     shelf::weights::MatrixWeight shared_down_proj;
 
-    Qwen4ExpExpertPlane gate_experts;
-    Qwen4ExpExpertPlane up_experts;
-    Qwen4ExpExpertPlane down_experts;
+    shelf::weights::MatrixWeight gate_experts;
+    shelf::weights::MatrixWeight up_experts;
+    shelf::weights::MatrixWeight down_experts;
+    Qwen4ExpExpertRange experts;
 };
 
 struct Qwen4ExpLayerWeights {

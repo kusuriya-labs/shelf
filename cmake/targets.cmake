@@ -86,6 +86,7 @@ shelf_set_hip_archs(shelf_kernels_correctness)
 set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
+    src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/linear/exl3.hip
     src/shelf/kernels/optimized/moe/router.hip
@@ -214,6 +215,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/decode_perf_stats.cpp
     src/shelf/inference/execution/elementwise_dispatch.hip
     src/shelf/inference/execution/exl3_dense_gemm.hip
+    src/shelf/inference/execution/fp8_ptpc_dispatch.hip
     src/shelf/inference/execution/embedding_dispatch.hip
     src/shelf/inference/execution/gdn_conv_dispatch.hip
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip

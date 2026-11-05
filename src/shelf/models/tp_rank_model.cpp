@@ -104,6 +104,7 @@ private:
         };
         add(w.codes);
         add(w.scales);
+        add(w.row_ref);
         add(w.compute_codes);
         add(w.compute_scales_bf16);
     }
@@ -167,9 +168,9 @@ public:
             add_matrix(total, layer.mlp.shared_gate_proj);
             add_matrix(total, layer.mlp.shared_up_proj);
             add_matrix(total, layer.mlp.shared_down_proj);
-            add_plane(total, layer.mlp.gate_experts);
-            add_plane(total, layer.mlp.up_experts);
-            add_plane(total, layer.mlp.down_experts);
+            add_matrix(total, layer.mlp.gate_experts);
+            add_matrix(total, layer.mlp.up_experts);
+            add_matrix(total, layer.mlp.down_experts);
             if (layer.ple.present) {
                 add_matrix(total, layer.ple.key_proj);
                 add_matrix(total, layer.ple.value_proj);
@@ -224,6 +225,7 @@ private:
         };
         add(w.codes);
         add(w.scales);
+        add(w.row_ref);
         add(w.compute_codes);
         add(w.compute_scales_bf16);
         add(w.exl3_suh);
@@ -237,11 +239,6 @@ private:
         if (h.block_inject.rows != 0u) add_matrix(total, h.block_inject);
         total += h.hc_norm.ndim() == 0u ? 0u : h.hc_norm.dim(0) * 2u;
     }
-    static void add_plane(std::uint64_t& total,
-                          const qwen4exp::Qwen4ExpExpertPlane& p) {
-        total += p.resident_bytes();
-    }
-
     qwen4exp::Qwen4ExpModel model_;
     qhy::TensorParallelContext context_;
     std::uint32_t max_context_tokens_ = 512u;

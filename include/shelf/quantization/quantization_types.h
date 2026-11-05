@@ -20,6 +20,8 @@ enum class QuantLayout : uint8_t {
     BF16_V1,
     FP8_E4M3_BLOCK128_V1,
     FP8_SCALE_F32_N128K128_V1,
+    FP8_E4M3_ROW_MAJOR_V1,
+    FP8_SCALE_F32_PER_N_V1,
     MXFP4_E2M1_BLOCK32_V1,
     MXFP4_SCALE_E8M0_PER_ROW_BLOCK32_V1,
     EXL3_TRELLIS_V1,
@@ -35,17 +37,19 @@ struct QuantDescriptor {
 };
 
 enum class QuantSpecId : uint8_t {
-    BF16_V1,
-    FP8_FINEGRAINED_F32_V1,
-    MXFP4_E8M0_G32_V1,
-    EXL3_W16A16_V1,
+    BF16_V1 = 0,
+    FP8_FINEGRAINED_F32_V1 = 1,
+    MXFP4_E8M0_G32_V1 = 2,
+    EXL3_W16A16_V1 = 3,
+    FP8_PERTokenChannel_V1 = 4,
 };
 
 enum class ComputeSpecId : uint8_t {
-    BF16_F32_BF16,
-    FP8_FINEGRAINED_W8A8_F32_BF16,
-    MXFP4_W4A8_F32_BF16,
-    EXL3_W16A16_F32_BF16,
+    BF16_F32_BF16 = 0,
+    FP8_FINEGRAINED_W8A8_F32_BF16 = 1,
+    MXFP4_W4A8_F32_BF16 = 2,
+    EXL3_W16A16_F32_BF16 = 3,
+    FP8_PERTokenChannel_W8A8_F32_BF16 = 4,
 };
 
 struct ResolvedQuantSpec {
@@ -59,6 +63,8 @@ inline Result<ComputeSpecId> preferred_gemm_compute_spec(QuantSpecId quant_spec)
             return ComputeSpecId::BF16_F32_BF16;
         case QuantSpecId::FP8_FINEGRAINED_F32_V1:
             return ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16;
+        case QuantSpecId::FP8_PERTokenChannel_V1:
+            return ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
         case QuantSpecId::MXFP4_E8M0_G32_V1:
             return ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case QuantSpecId::EXL3_W16A16_V1:
@@ -75,6 +81,8 @@ inline bool is_gemm_compute_compatible(
             return compute_spec == ComputeSpecId::BF16_F32_BF16;
         case QuantSpecId::FP8_FINEGRAINED_F32_V1:
             return compute_spec == ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16;
+        case QuantSpecId::FP8_PERTokenChannel_V1:
+            return compute_spec == ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
         case QuantSpecId::MXFP4_E8M0_G32_V1:
             return compute_spec == ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case QuantSpecId::EXL3_W16A16_V1:

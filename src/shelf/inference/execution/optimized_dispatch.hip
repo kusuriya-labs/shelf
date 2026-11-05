@@ -11,6 +11,7 @@
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
+#include <shelf/inference/execution/fp8_ptpc_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
@@ -711,8 +712,12 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED:
         case KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF:
             return try_launch_activation_quantize(program, b, ctx, stream);
+        case KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN:
+            return try_launch_activation_quantize_fp8_pertoken(program, b, ctx, stream);
         case KernelId::LINEAR_FP8_FINEGRAINED:
             return try_launch_linear_fp8(program, b, ctx, stream);
+        case KernelId::LINEAR_FP8_PTPC:
+            return try_launch_linear_fp8_ptpc(program, b, ctx, stream);
         case KernelId::LINEAR_MXFP4_W4A8:
             return try_launch_linear_mxfp4(program, b, ctx, stream);
         case KernelId::MOE_ROUTER:

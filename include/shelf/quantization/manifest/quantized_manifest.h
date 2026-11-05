@@ -15,6 +15,8 @@ constexpr uint32_t kQuantizedSafetensorsFormatVersion = 4;
 constexpr const char* kQuantizedMetadataFile = "shelf_quantization.json";
 constexpr const char* kFp8EncodingName = "fp8_e4m3_block128_f32";
 constexpr const char* kFp8LayoutName = "fp8_e4m3_row_major_block128_v1";
+constexpr const char* kFp8PerChannelEncodingName = "fp8_e4m3_row_major_perchannel_f32";
+constexpr const char* kFp8PerChannelLayoutName = "fp8_e4m3_row_major_perchannel_v1";
 constexpr const char* kMxfp4EncodingName = "mxfp4_e2m1_e8m0_g32";
 constexpr const char* kMxfp4LayoutName = "mxfp4_e2m1_row_major_block32_v1";
 constexpr const char* kExl3EncodingName = "exl3_trellis_mul1_fp16";
@@ -30,6 +32,7 @@ enum class QuantizedEncoding : uint8_t {
     Fp8 = 5,
     Mxfp4 = 7,
     Exl3 = 9,
+    Fp8PerChannel = 10,
 };
 
 struct QuantizedTensorRef {

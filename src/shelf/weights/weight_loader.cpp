@@ -318,6 +318,76 @@ Result<MatrixWeight> load_quantized_view(
         return w;
     }
 
+    if (v.encoding == QuantizedEncoding::Fp8PerChannel) {
+        auto st = expect_bytes(name + " codes", v.codes, m * kp);
+        if (!st.ok()) return st;
+        st = expect_bytes(name + " scales", v.metadata1, m * sizeof(float));
+        if (!st.ok()) return st;
+        if ((kp % 64u) != 0u) {
+            return Status::unsupported(
+                ("fp8 per-channel k must be a multiple of 64: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        quantization::fp8::Fp8BlockCanonicalView cv;
+        cv.batch = 1;
+        cv.n = m;
+        cv.padded_k = kp;
+        cv.codes = static_cast<const std::uint8_t*>(v.codes.data);
+        cv.codes_bytes = v.codes.size;
+        cv.scale_n = (m + 127u) / 128u;
+        cv.scale_k = kp / 128u;
+        cv.scale_block_k = 128u;
+        std::vector<float> dummy_scales(
+            static_cast<std::size_t>(cv.scale_n * cv.scale_k), 0.0f);
+        cv.scales = dummy_scales.data();
+        cv.scales_bytes = dummy_scales.size() * sizeof(float);
+        if (!cv.validate()) {
+            return Status::invalid_argument(
+                ("fp8 per-channel canonical payload invalid: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        quantization::fp8::Fp8NativeHost native;
+        if (!quantization::fp8::preshuffle_fp8_native(cv, native)) {
+            return Status::invalid_argument(
+                ("fp8 per-channel payload not supported for arch: " + name).c_str(),
+                __FILE__, __LINE__);
+        }
+        w.encoding = MatrixEncoding::Fp8PerChannel;
+        w.weight_scale_group = 0;
+        std::vector<std::size_t> cshape = {native.rows / 16u,
+                                           static_cast<std::size_t>(
+                                               native.codes_row_stride_bytes)};
+        std::vector<std::size_t> cstrides = {
+            static_cast<std::size_t>(native.codes_row_stride_bytes), 1u};
+        w.codes = alloc_bytes(native.codes_bytes, cshape, cstrides, arena);
+        if (w.codes.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("fp8 per-channel codes allocation failed: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+        st = copy_to_device(w.codes.data<void>(), native.codes.get(), native.codes_bytes,
+                            stream);
+        if (!st.ok()) return st;
+        std::vector<std::size_t> sshape = {static_cast<std::size_t>(m)};
+        std::vector<std::size_t> sstrides = {1u};
+        w.scales = alloc_tensor_f32(sshape, sstrides, arena);
+        if (w.scales.ndim() == 0) {
+            return Status::insufficient_memory(
+                ("fp8 per-channel scales allocation failed: " + name).c_str(), __FILE__,
+                __LINE__);
+        }
+        st = copy_to_device(w.scales.data<void>(), v.metadata1.data, v.metadata1.size,
+                            stream);
+        if (!st.ok()) return st;
+        w.codes_row_stride_bytes =
+            static_cast<uint32_t>(native.codes_row_stride_bytes);
+        w.scale_row_stride_bytes = static_cast<uint32_t>(sizeof(float));
+        w.storage_scale_stride_bytes = static_cast<uint32_t>(sizeof(float));
+        w.preshuffled = true;
+        apply_default_compute_spec(w);
+        return w;
+    }
+
     if (v.encoding == QuantizedEncoding::Mxfp4) {
         if ((kp % 64u) != 0u) {
             return Status::unsupported(

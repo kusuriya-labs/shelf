@@ -360,9 +360,20 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                         in_spec != nullptr ? in_spec->row_domain : ValueRowDomain::TOKEN_ROWS);
                     if (aw.max_rows == 0) return fail("activation workspace has no rows");
                     Int8ActivationWorkspaceLayout a8l;
-                    const Status layout_status = make_activation_workspace_layout(
-                        contract.activation, kp, aw.max_rows, a8l);
+                    const Status layout_status =
+                        contract.activation_kernel ==
+                                KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN
+                            ? (aw.max_rows == 0
+                                   ? Status::invalid_argument(
+                                         "activation workspace has no rows", __FILE__,
+                                         __LINE__)
+                                   : Status::make_ok())
+                            : make_activation_workspace_layout(
+                                  contract.activation, kp, aw.max_rows, a8l);
                     if (!layout_status.ok()) return layout_status;
+                    if (contract.activation_kernel ==
+                        KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN)
+                        a8l = Int8ActivationWorkspaceLayout::make(kp, aw.max_rows);
                     aw.activation = contract.activation;
                     aw.activation_kernel = contract.activation_kernel;
                     aw.total_bytes = a8l.total_bytes;
@@ -400,9 +411,17 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 b.activation_max_rows = aw.max_rows;
                 {
                     Int8ActivationWorkspaceLayout a8l;
-                    const Status layout_status = make_activation_workspace_layout(
-                        aw.activation, aw.k_padded, aw.max_rows, a8l);
+                    const Status layout_status =
+                        aw.activation_kernel ==
+                                KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN
+                            ? Status::make_ok()
+                            : make_activation_workspace_layout(
+                                  aw.activation, aw.k_padded, aw.max_rows, a8l);
                     if (!layout_status.ok()) return layout_status;
+                    if (aw.activation_kernel ==
+                        KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN)
+                        a8l = Int8ActivationWorkspaceLayout::make(aw.k_padded,
+                                                                  aw.max_rows);
                     b.activation_code_stride = a8l.code_row_stride_bytes;
                     b.activation_scale_stride = a8l.scale_row_stride_bytes;
                 }

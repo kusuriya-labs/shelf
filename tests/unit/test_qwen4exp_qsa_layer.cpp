@@ -83,13 +83,12 @@ int main() {
     moe.shared_gate_proj = matrix(kShared, kHidden);
     moe.shared_up_proj = matrix(kShared, kHidden);
     moe.shared_down_proj = matrix(kHidden, kShared);
-    moe.gate_experts.local_experts = kExperts;
-    moe.gate_experts.rows = kIntermediate;
-    moe.gate_experts.cols = kHidden;
+    moe.gate_experts = matrix(kIntermediate, kHidden);
+    moe.gate_experts.experts = kExperts;
     moe.up_experts = moe.gate_experts;
-    moe.down_experts.local_experts = kExperts;
-    moe.down_experts.rows = kHidden;
-    moe.down_experts.cols = kIntermediate;
+    moe.down_experts = matrix(kHidden, kIntermediate);
+    moe.down_experts.experts = kExperts;
+    moe.experts = {kExperts, kExperts, 0u};
 
     const auto add_weight = [&](std::uint32_t rows, std::uint32_t cols) {
         graph.weight_table.push_back(rt::MatrixwiseShapeKey{rows, cols});

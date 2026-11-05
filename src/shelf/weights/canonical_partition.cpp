@@ -457,6 +457,11 @@ Status materialize_rank_local_canonical(
                 "tp partition of exl3 weights is not supported",
                 __FILE__, __LINE__);
             break;
+        case QuantizedEncoding::Fp8PerChannel:
+            st = Status::unsupported(
+                "tp partition of per-channel fp8 weights is not supported",
+                __FILE__, __LINE__);
+            break;
     }
     if (!st.ok()) return st;
 

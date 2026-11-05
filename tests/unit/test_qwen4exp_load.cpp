@@ -80,10 +80,11 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
                           std::uint32_t rank, hipStream_t stream) {
     const auto& layer0 = w.layers[0];
     const auto& gate = layer0.mlp.gate_experts;
+    const auto& range = layer0.mlp.experts;
     const std::uint64_t sample_bytes =
-        std::min<std::uint64_t>(4096u, gate.trellis_bytes_per_expert);
-    const std::uint32_t first_expert = gate.expert_begin;
-    const std::uint32_t last_expert = gate.expert_begin + gate.local_experts - 1;
+        std::min<std::uint64_t>(4096u, gate.codes_batch_stride_bytes);
+    const std::uint32_t first_expert = range.expert_begin;
+    const std::uint32_t last_expert = range.expert_begin + range.local_experts - 1;
     const std::string first_name =
         "model.language_model.layers.0.mlp.experts." + std::to_string(first_expert) +
         ".gate_proj.trellis";
@@ -98,8 +99,8 @@ void verify_expert_sample(const std::string& model_dir, const shelf::qwen4exp::Q
     std::snprintf(label, sizeof(label), "rank%u last expert trellis matches source", rank);
     check(compare_plane_prefix(model_dir, last_name,
                                gate.codes.data<std::uint8_t>() +
-                                   static_cast<std::uint64_t>(gate.local_experts - 1u) *
-                                       gate.trellis_bytes_per_expert,
+                                   static_cast<std::uint64_t>(range.local_experts - 1u) *
+                                       gate.codes_batch_stride_bytes,
                                sample_bytes, stream),
           label);
 }
@@ -268,9 +269,8 @@ int main(int argc, char** argv) {
         verify_expert_sample(model_dir, weights, rank, streams[index]);
         auto validation = shelf::qwen4exp::validate_qwen4exp_rank(weights, config, 2, rank);
         check(validation.ok(), "rank weight invariants");
-        const auto expert_matrix =
-            shelf::qwen4exp::make_expert_matrix(weights.layers[0].mlp.gate_experts);
-        const auto expert_slot = shelf::qwen_hybrid::make_weight_slot(expert_matrix);
+        const auto expert_slot = shelf::qwen_hybrid::make_weight_slot(
+            weights.layers[0].mlp.gate_experts);
         check(shelf::execution::validate_host_weight_slot(expert_slot, 0u).ok(),
               "EXL3 expert plane forms a rank-3 weight slot");
         if (const hipError_t error = hipStreamSynchronize(streams[index]);

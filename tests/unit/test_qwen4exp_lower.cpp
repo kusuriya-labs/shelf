@@ -51,17 +51,12 @@ shelf::weights::MatrixWeight matrix(std::uint32_t rows, std::uint32_t cols) {
     return w;
 }
 
-shelf::qwen4exp::Qwen4ExpExpertPlane plane(std::uint32_t rows, std::uint32_t cols) {
-    shelf::qwen4exp::Qwen4ExpExpertPlane p;
-    p.global_experts = kExperts;
-    p.local_experts = kExperts;
-    p.expert_begin = 0u;
-    p.rows = rows;
-    p.cols = cols;
-    p.k_padded = cols;
-    p.ka = 1u;
-    p.half = false;
-    return p;
+shelf::weights::MatrixWeight experts(std::uint32_t rows, std::uint32_t cols) {
+    shelf::weights::MatrixWeight w = matrix(rows, cols);
+    w.encoding = shelf::weights::MatrixEncoding::Exl3;
+    w.experts = kExperts;
+    w.exl3_ka = 1u;
+    return w;
 }
 
 shelf::qwen4exp::Qwen4ExpHyperConnectionWeights hyper() {
@@ -139,9 +134,10 @@ int main() {
         layer.mlp.shared_gate_proj = matrix(kShared, kHidden);
         layer.mlp.shared_up_proj = matrix(kShared, kHidden);
         layer.mlp.shared_down_proj = matrix(kHidden, kShared);
-        layer.mlp.gate_experts = plane(kIntermediate, kHidden);
-        layer.mlp.up_experts = plane(kIntermediate, kHidden);
-        layer.mlp.down_experts = plane(kHidden, kIntermediate);
+        layer.mlp.gate_experts = experts(kIntermediate, kHidden);
+        layer.mlp.up_experts = experts(kIntermediate, kHidden);
+        layer.mlp.down_experts = experts(kHidden, kIntermediate);
+        layer.mlp.experts = {kExperts, kExperts, 0u};
         if (config.layer_has_ple(li)) {
             layer.ple.present = true;
             layer.ple.key_proj = matrix(kWidth, kHidden);

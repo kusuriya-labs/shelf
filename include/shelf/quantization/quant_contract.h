@@ -17,6 +17,7 @@ enum class QuantKernelKind : uint8_t {
     LinearFp8Finegrained,
     LinearMxfp4Finegrained,
     LinearExl3W16A16,
+    LinearFp8Pertoken,
 };
 
 inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel) {
@@ -25,6 +26,7 @@ inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel
         case QuantKernelKind::LinearFp8Finegrained: return manifest::QuantizedEncoding::Fp8;
         case QuantKernelKind::LinearMxfp4Finegrained: return manifest::QuantizedEncoding::Mxfp4;
         case QuantKernelKind::LinearExl3W16A16: return manifest::QuantizedEncoding::Exl3;
+        case QuantKernelKind::LinearFp8Pertoken: return manifest::QuantizedEncoding::Fp8PerChannel;
     }
     return manifest::QuantizedEncoding::Bf16;
 }
@@ -35,6 +37,8 @@ inline const char* canonical_layout_name(manifest::QuantizedEncoding enc) {
         case manifest::QuantizedEncoding::Fp8: return manifest::kFp8LayoutName;
         case manifest::QuantizedEncoding::Mxfp4: return manifest::kMxfp4LayoutName;
         case manifest::QuantizedEncoding::Exl3: return manifest::kExl3LayoutName;
+        case manifest::QuantizedEncoding::Fp8PerChannel:
+            return manifest::kFp8PerChannelLayoutName;
     }
     return "";
 }
@@ -300,6 +304,8 @@ inline bool weight_block_supported(
             return block.k == kMxfp4ScaleBlockK;
         case manifest::QuantizedEncoding::Exl3:
             return false;
+        case manifest::QuantizedEncoding::Fp8PerChannel:
+            return block.n == 1u;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }

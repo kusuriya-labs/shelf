@@ -24,6 +24,7 @@ enum class MetaCountMode : uint8_t {
     PerBlock = 1,
     PerSuperBlock = 2,
     MatrixBlock = 3,
+    PerRow = 4,
 };
 
 enum class MetaStorage : uint8_t {
@@ -52,6 +53,7 @@ enum class QuantFormatId : uint8_t {
     Fp8Finegrained = 2,
     Mxfp4Finegrained = 3,
     Exl3Trellis = 4,
+    Fp8PerChannel = 5,
 };
 
 static_assert(static_cast<uint8_t>(QuantFormatId::None) == 0);
@@ -59,6 +61,7 @@ static_assert(static_cast<uint8_t>(QuantFormatId::Bf16) == 1);
 static_assert(static_cast<uint8_t>(QuantFormatId::Fp8Finegrained) == 2);
 static_assert(static_cast<uint8_t>(QuantFormatId::Mxfp4Finegrained) == 3);
 static_assert(static_cast<uint8_t>(QuantFormatId::Exl3Trellis) == 4);
+static_assert(static_cast<uint8_t>(QuantFormatId::Fp8PerChannel) == 5);
 
 inline constexpr QuantFormatDesc kBf16FormatDesc = {
     16, 1, 32,
@@ -76,6 +79,18 @@ inline constexpr QuantFormatDesc kFp8FinegrainedFormatDesc = {
     kFp8ScaleBlockK, 1, kFp8ScaleBlockK,
     {
         {4, MetaCountMode::MatrixBlock, MetaStorage::F32, kFp8ScaleBlockN, kFp8ScaleBlockK},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+        {0, MetaCountMode::None, MetaStorage::U8},
+    },
+};
+
+// FP8 E4M3 with one F32 scale per output row. The activation side is one F32
+// scale per token, so the GEMM applies both scales once in the epilogue.
+inline constexpr QuantFormatDesc kFp8PerChannelFormatDesc = {
+    kFp8ScaleBlockK, 1, kFp8ScaleBlockK,
+    {
+        {4, MetaCountMode::PerRow, MetaStorage::F32, 1, 0},
         {0, MetaCountMode::None, MetaStorage::U8},
         {0, MetaCountMode::None, MetaStorage::U8},
         {0, MetaCountMode::None, MetaStorage::U8},
@@ -112,6 +127,7 @@ inline constexpr const QuantFormatDesc* quant_format_desc(QuantFormatId id) {
         case QuantFormatId::Fp8Finegrained: return &kFp8FinegrainedFormatDesc;
         case QuantFormatId::Mxfp4Finegrained: return &kMxfp4FinegrainedFormatDesc;
         case QuantFormatId::Exl3Trellis: return &kExl3TrellisFormatDesc;
+        case QuantFormatId::Fp8PerChannel: return &kFp8PerChannelFormatDesc;
         default: return nullptr;
     }
 }
@@ -141,6 +157,8 @@ inline uint64_t quant_metadata_count(
             return batch * rows * quant_num_blocks(padded_k, f);
         case MetaCountMode::PerSuperBlock:
             return batch * rows * quant_num_superblocks(padded_k, f);
+        case MetaCountMode::PerRow:
+            return batch * rows;
         case MetaCountMode::MatrixBlock: {
             const uint64_t bn = m.block_n != 0 ? m.block_n : 1;
             const uint64_t bk = m.block_k != 0 ? m.block_k : f.block_elements;

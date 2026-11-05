@@ -114,8 +114,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::invalid_argument(
             "max_concurrent_requests must be positive", __FILE__, __LINE__);
     }
-    if (config_.tp != 1 && config_.tp != 2) {
-        return Status::unsupported("--tensor-parallel supports 1 or 2", __FILE__, __LINE__);
+    if (config_.tp != 1 && config_.tp != 2 && config_.tp != 4) {
+        return Status::unsupported("--tensor-parallel supports 1, 2 or 4", __FILE__, __LINE__);
     }
     if (config_.pipeline_parallel == 0) {
         return Status::invalid_argument(

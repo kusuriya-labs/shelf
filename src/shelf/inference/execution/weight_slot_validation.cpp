@@ -119,6 +119,20 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
         }
         return Status::make_ok();
     }
+    if (enc == 5u) {
+        if (s.device_ptr != nullptr || s.codes == nullptr || s.scales == nullptr) {
+            return Status::invalid_argument(
+                ("fp8 per-channel weight table slot needs codes+scales and no device_ptr: "
+                 "index " + std::to_string(index)).c_str(), __FILE__, __LINE__);
+        }
+        if (s.k_padded != s.cols || s.codes_row_stride_bytes < s.cols ||
+            s.scale_row_stride_bytes != sizeof(float)) {
+            return Status::invalid_argument(
+                ("fp8 per-channel weight table slot layout invalid: index " +
+                 std::to_string(index)).c_str(), __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     if (enc == 4u) {
         if (s.device_ptr != nullptr || s.codes == nullptr || s.exl3_suh == nullptr ||
             s.exl3_svh == nullptr || s.exl3_marker == nullptr) {

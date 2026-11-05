@@ -68,7 +68,7 @@ void compute_usage(const char* prog) {
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
     printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
-    printf("  --tensor-parallel N    tensor parallel degree 1 | 2 (default 1)\n");
+    printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
     printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
@@ -217,8 +217,8 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--tensor-parallel") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2)) {
-                fprintf(stderr, "bad --tensor-parallel (expected 1 or 2)\n");
+            if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2 && tp != 4)) {
+                fprintf(stderr, "bad --tensor-parallel (expected 1, 2 or 4)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--pipeline-parallel") == 0 && i + 1 < argc) {
@@ -383,8 +383,8 @@ int validate_compute_options(const ComputeOptions& opt) {
         fprintf(stderr, "model-dir required\n");
         return kComputeParseError;
     }
-    if (tp != 1 && tp != 2) {
-        fprintf(stderr, "--tensor-parallel must be 1 or 2\n");
+    if (tp != 1 && tp != 2 && tp != 4) {
+        fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
         return kComputeParseError;
     }
     if (pipeline_parallel > 1) {

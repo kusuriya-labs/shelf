@@ -12,6 +12,7 @@ enum class MatrixEncoding : uint8_t {
     Fp8Finegrained = 1,
     Mxfp4 = 3,
     Exl3 = 4,
+    Fp8PerChannel = 5,
 };
 
 struct MatrixWeight {
@@ -60,6 +61,7 @@ inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noex
         case MatrixEncoding::Fp8Finegrained: return quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1;
         case MatrixEncoding::Mxfp4: return quantization::QuantSpecId::MXFP4_E8M0_G32_V1;
         case MatrixEncoding::Exl3: return quantization::QuantSpecId::EXL3_W16A16_V1;
+        case MatrixEncoding::Fp8PerChannel: return quantization::QuantSpecId::FP8_PERTokenChannel_V1;
     }
     return quantization::QuantSpecId::BF16_V1;
 }
@@ -70,6 +72,7 @@ inline quantization::ComputeSpecId encoding_to_compute_spec(MatrixEncoding enc) 
         case MatrixEncoding::Fp8Finegrained: return quantization::ComputeSpecId::FP8_FINEGRAINED_W8A8_F32_BF16;
         case MatrixEncoding::Mxfp4: return quantization::ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case MatrixEncoding::Exl3: return quantization::ComputeSpecId::EXL3_W16A16_F32_BF16;
+        case MatrixEncoding::Fp8PerChannel: return quantization::ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16;
     }
     return quantization::ComputeSpecId::BF16_F32_BF16;
 }

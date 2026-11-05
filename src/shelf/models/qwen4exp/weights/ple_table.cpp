@@ -16,10 +16,25 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <map>
 #include <nlohmann/json.hpp>
+#include <shelf/io/safetensors_reader.h>
 
 namespace shelf {
 namespace qwen4exp {
+
+namespace {
+float e4m3_to_f32(uint8_t x) {
+    const int sign = (x & 0x80u) ? -1 : 1;
+    const int exp = (x >> 3) & 0x0Fu;
+    const int man = x & 0x07u;
+    if (exp == 0x0F) return sign * 448.0f;
+    const float value = (exp == 0)
+        ? (static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, -6)
+        : (1.0f + static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, exp - 7);
+    return sign * value;
+}
+}  // namespace
 namespace {
 
 constexpr std::size_t kReadChunk = 64ull * 1024ull * 1024ull;
@@ -161,16 +176,162 @@ void PleTable::FreeDeleter::operator()(void* p) const noexcept {
     std::free(p);
 }
 
+
+Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
+                                    const Qwen4ExpTextConfig& config,
+                                    bool fadvise_dontneed) {
+    (void)fadvise_dontneed;
+    const std::vector<std::size_t> ple_layers = config.ple_layers();
+    if (ple_layers.size() != 1u) {
+        return Status::unsupported(
+            "PLE table load expects exactly one ple_layer_ids entry", __FILE__, __LINE__);
+    }
+    const std::string prefix = "model.language_model.layers." +
+                               std::to_string(ple_layers[0]) +
+                               ".ple.ple_embedding.";
+    const std::string index_path = model_dir + "/model.safetensors.index.json";
+    std::ifstream index_file(index_path);
+    if (!index_file.is_open()) {
+        return Status::invalid_argument("PLE table index is missing", __FILE__, __LINE__);
+    }
+    nlohmann::json index;
+    try {
+        index_file >> index;
+    } catch (const nlohmann::json::exception& e) {
+        return Status::invalid_argument(
+            (std::string("bad PLE index: ") + e.what()).c_str(), __FILE__, __LINE__);
+    }
+    if (!index.contains("weight_map") || !index["weight_map"].is_object()) {
+        return Status::invalid_argument("PLE index has no weight_map", __FILE__, __LINE__);
+    }
+    const auto& weight_map = index["weight_map"];
+    const std::string shard_prefix = prefix + "ngram_embedding.shard_";
+    std::map<std::uint32_t, std::string> shards;
+    for (auto it = weight_map.begin(); it != weight_map.end(); ++it) {
+        const std::string name = it.key();
+        if (name.size() < shard_prefix.size() + 7u ||
+            name.compare(0, shard_prefix.size(), shard_prefix) != 0 ||
+            name.compare(name.size() - 7u, 7u, ".weight") != 0) {
+            continue;
+        }
+        const std::string digits =
+            name.substr(shard_prefix.size(), name.size() - shard_prefix.size() - 7u);
+        if (digits.empty()) continue;
+        const std::uint32_t id = static_cast<std::uint32_t>(std::stoul(digits));
+        shards.emplace(id, name);
+    }
+    if (shards.size() != config.ple.split_ngram_parts) {
+        return Status::invalid_argument("PLE FP8 shard count differs from split_ngram_parts",
+                                        __FILE__, __LINE__);
+    }
+    const auto head_sizes = qwen4exp_ple_head_vocab_sizes(config, 0u);
+    const auto head_offsets = qwen4exp_ple_head_offsets(config, 0u);
+    const auto multipliers = qwen4exp_ple_layer_multipliers(config, 0u);
+    if (!head_sizes.ok() || !head_offsets.ok() || !multipliers.ok()) {
+        return Status::invalid_argument("cannot derive PLE hash metadata from config",
+                                        __FILE__, __LINE__);
+    }
+    PleTable table;
+    table.mode_ = TableMode::Fp8E4M3;
+    table.file_path_ = index_path;
+    auto padded_rows = qwen4exp_ple_padded_rows(config, 0u);
+    if (!padded_rows.ok()) return padded_rows.status();
+    table.rows_ = padded_rows.value();
+    table.row_width_ = kExpectedRowWidth;
+    table.row_bytes_ = kExpectedRowWidth;
+    table.shard_count_ = static_cast<std::uint32_t>(shards.size());
+    table.shard_rows_ = 2500012u;
+    table.ngram_size_ = static_cast<std::uint32_t>(config.ple.ngram_size);
+    table.heads_per_ngram_ = static_cast<std::uint32_t>(config.ple.heads_per_ngram);
+    table.eos_token_id_ = config.ple.eos_token_id;
+    table.head_offsets_.assign(head_offsets.value().begin(), head_offsets.value().end());
+    table.head_vocab_sizes_.assign(head_sizes.value().begin(), head_sizes.value().end());
+    table.layer_multipliers_.assign(multipliers.value().begin(), multipliers.value().end());
+
+    std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> readers;
+    auto reader_for = [&](const std::string& shard)
+        -> Result<const shelf::io::SafetensorsReader*> {
+        auto it = readers.find(shard);
+        if (it != readers.end()) return it->second.get();
+        auto opened = shelf::io::SafetensorsReader::open(model_dir + "/" + shard);
+        if (!opened.ok()) return opened.status();
+        auto inserted = readers.emplace(
+            shard, std::make_unique<shelf::io::SafetensorsReader>(opened.release()));
+        return inserted.first->second.get();
+    };
+
+    auto scale_name = prefix + "ngram_embedding.weight_scale";
+    auto scale_it = weight_map.find(scale_name);
+    if (scale_it == weight_map.end()) {
+        return Status::invalid_argument("PLE FP8 weight_scale is missing", __FILE__,
+                                        __LINE__);
+    }
+    auto scale_reader = reader_for(scale_it.value().get<std::string>());
+    if (!scale_reader.ok()) return scale_reader.status();
+    auto scale_spec = scale_reader.value()->tensor_spec(scale_name);
+    if (!scale_spec.ok() || scale_spec.value().dtype != shelf::io::SType::BF16) {
+        return Status::invalid_argument("PLE FP8 weight_scale is not BF16", __FILE__,
+                                        __LINE__);
+    }
+    std::size_t scale_bytes = 0;
+    auto scale_data = scale_reader.value()->tensor_data(scale_name, scale_bytes);
+    if (!scale_data.ok() || scale_bytes != 2u) {
+        return Status::invalid_argument("PLE FP8 weight_scale size is invalid", __FILE__,
+                                        __LINE__);
+    }
+    const std::uint16_t scale_bits = *static_cast<const std::uint16_t*>(scale_data.value());
+    table.fp8_scale_ = shelf::quantization::exl3::f32_from_f16_bits(scale_bits);
+
+    table.shards_.resize(table.shard_count_);
+    for (std::uint32_t id = 0; id < table.shard_count_; ++id) {
+        auto name_it = shards.find(id);
+        if (name_it == shards.end()) {
+            return Status::invalid_argument("PLE FP8 shard index is not contiguous",
+                                            __FILE__, __LINE__);
+        }
+        auto shard_it = weight_map.find(name_it->second);
+        if (shard_it == weight_map.end()) {
+            return Status::invalid_argument("PLE FP8 shard is missing from the index",
+                                            __FILE__, __LINE__);
+        }
+        auto reader = reader_for(shard_it.value().get<std::string>());
+        if (!reader.ok()) return reader.status();
+        auto spec = reader.value()->tensor_spec(name_it->second);
+        if (!spec.ok() || spec.value().dtype != shelf::io::SType::F8_E4M3 ||
+            spec.value().shape.size() != 2u ||
+            spec.value().shape[0] != table.shard_rows_ ||
+            spec.value().shape[1] != table.row_width_) {
+            return Status::invalid_argument("PLE FP8 shard shape is invalid", __FILE__,
+                                            __LINE__);
+        }
+        std::size_t bytes = 0;
+        auto data = reader.value()->tensor_data(name_it->second, bytes);
+        if (!data.ok() || bytes != static_cast<std::size_t>(table.shard_rows_) *
+                                     table.row_width_) {
+            return Status::invalid_argument("PLE FP8 shard byte count is invalid", __FILE__,
+                                            __LINE__);
+        }
+        void* memory = nullptr;
+        if (::posix_memalign(&memory, 64u, bytes) != 0) {
+            return Status::insufficient_memory("cannot allocate PLE FP8 shard", __FILE__,
+                                               __LINE__);
+        }
+        std::memcpy(memory, data.value(), bytes);
+        table.shards_[id].data.reset(static_cast<std::uint8_t*>(memory));
+        table.shards_[id].bytes = bytes;
+    }
+    table.payload_bytes_ = static_cast<std::uint64_t>(table.shard_count_) *
+                           table.shard_rows_ * table.row_bytes_;
+    return table;
+}
+
 Result<PleTable> PleTable::load(const std::string& model_dir,
                                 const Qwen4ExpTextConfig& config,
                                 bool fadvise_dontneed) {
     const std::string path = model_dir + "/ngram_embedding.safetensors";
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        return Status::invalid_argument(
-            (std::string("cannot open PLE table: ") + path + ": " + std::strerror(errno))
-                .c_str(),
-            __FILE__, __LINE__);
+        return load_fp8(model_dir, config, fadvise_dontneed);
     }
 
     struct stat st {};
@@ -529,6 +690,26 @@ Result<std::vector<float>> PleTable::decode_row(std::uint64_t row) const {
     const std::uint8_t* packed = row_ptr(row);
     if (packed == nullptr) {
         return Status::out_of_range("PLE row is out of range", __FILE__, __LINE__);
+    }
+    if (mode_ == TableMode::Fp8E4M3) {
+        std::vector<float> out(row_width_);
+        const std::uint32_t heads = static_cast<std::uint32_t>(head_offsets_.size());
+        std::uint32_t head = 0;
+        if (heads != 0u) {
+            auto upper = std::upper_bound(head_offsets_.begin(), head_offsets_.end(),
+                                          static_cast<std::int64_t>(row));
+            if (upper != head_offsets_.begin())
+                head = static_cast<std::uint32_t>(upper - head_offsets_.begin() - 1);
+            if (head >= heads) head = heads - 1;
+        }
+        for (std::uint32_t i = 0; i < row_width_; ++i) {
+            float value = e4m3_to_f32(packed[i]) * fp8_scale_;
+            if (!head_bias_f16_.empty())
+                value += shelf::quantization::exl3::f32_from_f16_bits(
+                    head_bias_f16_[static_cast<std::size_t>(head) * row_width_ + i]);
+            out[i] = value;
+        }
+        return out;
     }
     auto upper = std::upper_bound(head_offsets_.begin(), head_offsets_.end(),
                                   static_cast<std::int64_t>(row));

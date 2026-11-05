@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <deque>
 #include <string>
 #include <vector>
 
@@ -106,12 +105,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     }
 
     const std::uint32_t local_experts =
-        static_cast<std::uint32_t>(weights.layers.front().mlp.gate_experts.local_experts);
+        static_cast<std::uint32_t>(weights.layers.front().mlp.experts.local_experts);
     const std::uint32_t expert_begin =
-        static_cast<std::uint32_t>(weights.layers.front().mlp.gate_experts.expert_begin);
+        static_cast<std::uint32_t>(weights.layers.front().mlp.experts.expert_begin);
     for (const auto& layer : weights.layers) {
-        if (layer.mlp.gate_experts.local_experts != local_experts ||
-            layer.mlp.gate_experts.expert_begin != expert_begin) {
+        if (layer.mlp.experts.local_experts != local_experts ||
+            layer.mlp.experts.expert_begin != expert_begin) {
             return Status::invalid_argument(
                 "Qwen4Exp lowering expert range differs between layers", __FILE__,
                 __LINE__);
@@ -133,16 +132,11 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     pg.grouped_row_shape = RT::GroupedRowShape{local_experts, top_k};
 
     std::vector<const MatrixWeight*> weight_pointers;
-    std::deque<MatrixWeight> owned_expert_matrices;
     auto add_weight = [&](const MatrixWeight& w) -> std::uint32_t {
         weight_pointers.push_back(&w);
         lowered.weights.push_back(QH::make_weight_slot(w));
         pg.weight_table.push_back(RT::MatrixwiseShapeKey{w.rows, w.cols});
         return static_cast<std::uint32_t>(weight_pointers.size() - 1);
-    };
-    auto add_expert = [&](const Qwen4ExpExpertPlane& plane) -> std::uint32_t {
-        owned_expert_matrices.push_back(make_expert_matrix(plane));
-        return add_weight(owned_expert_matrices.back());
     };
     auto reg_param = [&](const gpu::Tensor& t) -> std::uint32_t {
         RT::StaticParameterSlot s{};
@@ -179,9 +173,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         idx.shared_gate_proj = add_weight(lw.mlp.shared_gate_proj);
         idx.shared_up_proj = add_weight(lw.mlp.shared_up_proj);
         idx.shared_down_proj = add_weight(lw.mlp.shared_down_proj);
-        idx.gate_experts = add_expert(lw.mlp.gate_experts);
-        idx.up_experts = add_expert(lw.mlp.up_experts);
-        idx.down_experts = add_expert(lw.mlp.down_experts);
+        idx.gate_experts = add_weight(lw.mlp.gate_experts);
+        idx.up_experts = add_weight(lw.mlp.up_experts);
+        idx.down_experts = add_weight(lw.mlp.down_experts);
         if (lw.ple.present) {
             idx.ple_key = add_weight(lw.ple.key_proj);
             idx.ple_value = add_weight(lw.ple.value_proj);

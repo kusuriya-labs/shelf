@@ -48,6 +48,8 @@ enum class KernelId : uint32_t {
     PLE_STREAM_DOT,
     REPEAT_STREAMS,
     HYPER_INJECT,
+    ACTIVATION_QUANTIZE_FP8_PERTOKEN,
+    LINEAR_FP8_PTPC,
     COUNT,
 };
 
@@ -101,6 +103,8 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case KernelId::REPEAT_STREAMS: return "REPEAT_STREAMS";
         case KernelId::HYPER_INJECT: return "HYPER_INJECT";
+        case KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN: return "ACTIVATION_QUANTIZE_FP8_PERTOKEN";
+        case KernelId::LINEAR_FP8_PTPC: return "LINEAR_FP8_PTPC";
         default: return "UNKNOWN";
     }
 }

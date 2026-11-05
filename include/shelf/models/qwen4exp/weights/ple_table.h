@@ -76,6 +76,14 @@ public:
                                                       std::uint64_t row) const;
 
 private:
+    static Result<PleTable> load_fp8(const std::string& model_dir,
+                                     const Qwen4ExpTextConfig& config,
+                                     bool fadvise_dontneed);
+
+    enum class TableMode : std::uint8_t { Exl3Trellis = 0, Fp8E4M3 = 1 };
+    TableMode mode_ = TableMode::Exl3Trellis;
+    float fp8_scale_ = 1.0f;
+
     struct FreeDeleter {
         void operator()(void* p) const noexcept;
     };

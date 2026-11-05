@@ -436,10 +436,6 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
         return Status::invalid_argument("tp coordinator requires at least 2 devices",
                                         __FILE__, __LINE__);
     }
-    if (config.devices.size() > 2) {
-        return Status::unsupported(
-            "tp execution currently supports tp_size = 2 only", __FILE__, __LINE__);
-    }
 
     std::unique_ptr<TpCoordinator> coordinator(new TpCoordinator());
     Status init = coordinator->initialize(config);

@@ -37,6 +37,20 @@ inline Result<ResolvedLinearQuantContract> resolve_linear_quant_contract(
         contract.activation_k_alignment = 128u;
         return contract;
     }
+    if (static_cast<MatrixEncoding>(weight_encoding) == MatrixEncoding::Fp8PerChannel) {
+        if (compute_spec != static_cast<uint8_t>(
+                                ComputeSpecId::FP8_PERTokenChannel_W8A8_F32_BF16))
+            return Status::invalid_argument(
+                "fp8 per-channel linear requires per-token-channel compute spec",
+                __FILE__, __LINE__);
+        contract.linear_kernel = KernelId::LINEAR_FP8_PTPC;
+        contract.requires_activation_quant = true;
+        contract.activation = quantization::kFp8FinegrainedActivationQuantSpec;
+        contract.activation.group_k = 0;
+        contract.activation_k_alignment = 32u;
+        contract.activation_kernel = KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN;
+        return contract;
+    }
     if (static_cast<MatrixEncoding>(weight_encoding) == MatrixEncoding::Mxfp4) {
         if (compute_spec != static_cast<uint8_t>(ComputeSpecId::MXFP4_W4A8_F32_BF16))
             return Status::invalid_argument(

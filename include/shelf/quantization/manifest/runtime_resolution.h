@@ -106,6 +106,32 @@ inline Result<shelf::quantization::ResolvedQuantSpec> resolve_quant_spec(
         return resolved;
     }
 
+    if (tensor.encoding == QuantizedEncoding::Fp8PerChannel) {
+        if (!tensor.codes || !tensor.metadata1)
+            return Status::invalid_argument(
+                "fp8 per-channel tensor needs codes and scales", __FILE__, __LINE__);
+        if (tensor.data)
+            return Status::invalid_argument(
+                "fp8 per-channel tensor must not carry data", __FILE__, __LINE__);
+        if (!tensor.layout.empty() && tensor.layout != kFp8PerChannelLayoutName)
+            return Status::invalid_argument(
+                "fp8 per-channel layout mismatch", __FILE__, __LINE__);
+        if (tensor.codes->dtype != "U8" || tensor.metadata1->dtype != "F32")
+            return Status::invalid_argument(
+                "fp8 per-channel dtype mismatch", __FILE__, __LINE__);
+        if (tensor.k_padded != logical_k)
+            return Status::invalid_argument(
+                "fp8 per-channel k_padded must equal logical k", __FILE__, __LINE__);
+        d.group_size = 0;
+        d.block_size = 0;
+        d.storage_type = StorageDType::U8;
+        d.scale_type = StorageDType::FP32;
+        d.weight_layout = QuantLayout::FP8_E4M3_ROW_MAJOR_V1;
+        d.scale_layout = QuantLayout::FP8_SCALE_F32_PER_N_V1;
+        resolved.spec_id = QuantSpecId::FP8_PERTokenChannel_V1;
+        return resolved;
+    }
+
     if (tensor.encoding == QuantizedEncoding::Mxfp4) {
         if (!tensor.codes) {
             return Status::invalid_argument("mxfp4 quantized tensor missing codes ref", __FILE__, __LINE__);

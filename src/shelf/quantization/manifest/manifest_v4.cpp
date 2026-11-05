@@ -442,6 +442,7 @@ const char* v4_encoding_name(QuantizedEncoding enc) {
         case QuantizedEncoding::Fp8: return kFp8V4EncodingName;
         case QuantizedEncoding::Mxfp4: return kMxfp4V4EncodingName;
         case QuantizedEncoding::Exl3: return "exl3_trellis";
+        case QuantizedEncoding::Fp8PerChannel: return kFp8PerChannelEncodingName;
     }
     return "unknown";
 }

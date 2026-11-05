@@ -21,9 +21,9 @@ Status require_matrix(const MatrixWeight& weight, std::uint32_t rows, std::uint3
     return Status::make_ok();
 }
 
-Status require_expert_plane(const Qwen4ExpExpertPlane& plane, std::uint32_t local_experts,
-                            std::uint32_t rows, std::uint32_t cols, const char* what) {
-    if (plane.local_experts != local_experts || plane.rows != rows || plane.cols != cols) {
+Status require_experts(const MatrixWeight& weight, std::uint32_t local_experts,
+                       std::uint32_t rows, std::uint32_t cols, const char* what) {
+    if (weight.experts != local_experts || weight.rows != rows || weight.cols != cols) {
         return Status::invalid_argument(
             (std::string("Qwen4Exp MoE expert plane mismatch: ") + what).c_str(), __FILE__,
             __LINE__);
@@ -72,14 +72,14 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
     st = require_matrix(weights.shared_down_proj, geometry.hidden,
                         geometry.shared_intermediate, "shared_down_proj");
     if (!st.ok()) return st;
-    st = require_expert_plane(weights.gate_experts, geometry.local_experts,
-                              geometry.intermediate, geometry.hidden, "gate_experts");
+    st = require_experts(weights.gate_experts, geometry.local_experts,
+                         geometry.intermediate, geometry.hidden, "gate_experts");
     if (!st.ok()) return st;
-    st = require_expert_plane(weights.up_experts, geometry.local_experts,
-                              geometry.intermediate, geometry.hidden, "up_experts");
+    st = require_experts(weights.up_experts, geometry.local_experts,
+                         geometry.intermediate, geometry.hidden, "up_experts");
     if (!st.ok()) return st;
-    st = require_expert_plane(weights.down_experts, geometry.local_experts, geometry.hidden,
-                              geometry.intermediate, "down_experts");
+    st = require_experts(weights.down_experts, geometry.local_experts, geometry.hidden,
+                         geometry.intermediate, "down_experts");
     if (!st.ok()) return st;
 
     const RT::ValueId logits = em.linear(weights.router, indices.w_router, post_norm,

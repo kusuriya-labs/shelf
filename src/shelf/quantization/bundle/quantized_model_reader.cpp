@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <string>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -180,9 +181,14 @@ struct QuantizedModelReader::Impl {
         const bool dtype_ok = spec.dtype == expected_dtype ||
             (expected_dtype == shelf::io::SType::U8 && spec.dtype == shelf::io::SType::F8_E4M3);
         if (!dtype_ok || spec.shape != expected_shape) {
-            return Status::invalid_argument(
-                ("quantized physical tensor dtype or shape mismatch: " + reference.tensor).c_str(),
-                __FILE__, __LINE__);
+            std::string detail = "quantized physical tensor dtype or shape mismatch: " +
+                                 reference.tensor + " expected(" +
+                                 std::to_string(static_cast<int>(expected_dtype)) + ",";
+            for (std::size_t d : expected_shape) detail += std::to_string(d) + ",";
+            detail += ") actual(" + std::to_string(static_cast<int>(spec.dtype)) + ",";
+            for (std::size_t d : spec.shape) detail += std::to_string(d) + ",";
+            detail += ")";
+            return Status::invalid_argument(detail.c_str(), __FILE__, __LINE__);
         }
         if (spec.data_end - spec.data_begin != expected_bytes) {
             return Status::invalid_argument(
@@ -423,6 +429,38 @@ struct QuantizedModelReader::Impl {
                         checked_product(scale_count, meta_desc.element_bytes, scale_bytes);
                     if (!scale_status.ok()) return scale_status;
                     const Status st = validate_ref_exact(**meta_ref[s], scale_dtype, scale_shape, scale_bytes);
+                    if (!st.ok()) return st;
+                } else if (meta_desc.count_mode == shelf::quantization::MetaCountMode::PerRow) {
+                    uint64_t batch = 1;
+                    std::vector<std::size_t> rows_shape;
+                    if (tensor.logical_shape.size() < 2) {
+                        return Status::invalid_argument(
+                            "per-row scale requires a matrix shape", __FILE__, __LINE__);
+                    }
+                    for (std::size_t index = 0; index + 2 < tensor.logical_shape.size();
+                         ++index) {
+                        const int64_t dimension = tensor.logical_shape[index];
+                        if (dimension <= 0) {
+                            return Status::invalid_argument(
+                                "per-row scale shape is invalid", __FILE__, __LINE__);
+                        }
+                        batch *= static_cast<uint64_t>(dimension);
+                        rows_shape.push_back(static_cast<std::size_t>(dimension));
+                    }
+                    const int64_t n_dim =
+                        tensor.logical_shape[tensor.logical_shape.size() - 2];
+                    if (n_dim <= 0) {
+                        return Status::invalid_argument(
+                            "per-row scale row count is invalid", __FILE__, __LINE__);
+                    }
+                    rows_shape.push_back(static_cast<std::size_t>(n_dim));
+                    const uint64_t scale_count = batch * static_cast<uint64_t>(n_dim);
+                    uint64_t scale_bytes = 0;
+                    Status scale_status = checked_product(scale_count, meta_desc.element_bytes,
+                                                          scale_bytes);
+                    if (!scale_status.ok()) return scale_status;
+                    const Status st = validate_ref_exact(**meta_ref[s], scale_dtype, rows_shape,
+                                                         scale_bytes);
                     if (!st.ok()) return st;
                 } else {
                     const Status st = validate_ref(**meta_ref[s], scale_dtype,
