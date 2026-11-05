@@ -47,6 +47,32 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-06 Qwen3.8-Flash-Next MXFP4 TP4
+
+`models/Qwen3.8-Flash-Next-Quark-MXFP4` を TP4 / bf16 KV / prefix cache なしで
+計測した reference run である。qualified baseline ではない。
+
+| 条件 | target-only | DFlash2 drafts=6 |
+| --- | ---: | ---: |
+| prompt 5 token、64 new token | 26.77 tok/s | 61.13 tok/s |
+| prefill 5 token | 106.1 ms | 113.7 ms |
+| mean accepted / round | - | 2.150 |
+| full accept rate | - | 0.150 |
+| DFlash2 round | - | 20 rounds / 1030.1 ms |
+
+- measurement revision: `0a715da`
+- GPU: Radeon AI PRO R9700 4 枚（device 0,1,2,3）
+- command（target-only）:
+  `shelf-compute --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --input-ids-file <5 token> --max-new-tokens 64 --max-seq-len 256 --device 0,1,2,3 --tensor-parallel 4 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0 --arena-gib 31`
+- command（DFlash2）: 上記に
+  `--dflash2-model-dir models/Qwen3.8-Flash-Next-DFlash2 --dflash2-drafts 6` を加える
+- 生成一致アンカー: `The capital of France is` →
+  ` Paris. The capital of Germany is Berlin`
+  （`11751,13,561,6511,314,9564,369,19241`）。drafts=6 の 64 token は target-only と
+  完全一致する。drafts=7（8 行 verify）は 64 token で 46 token 目に分岐するため、
+  性能値として採らない。
+- 同一条件 2 回の `--dump-logits` は bitwise 一致する。
+
 ## 2026-11-06 Qwen3.8-Flash-Next EXL3 decode reference
 
 `models/Qwen3.8-Flash-Next-exl3` を TP=2 / bf16 KV / prefix cache なしで計測した
