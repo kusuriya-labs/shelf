@@ -136,10 +136,21 @@ BF16 linear である。
 
 `test_hyper_connection` は rows 3、hc 4、hidden 128 で CPU 参照と比較する。
 `test_program_hyper_connection` は graph が `HYPER_MIX, HYPER_APPLY` に
-lower されることを固定する。
+lower されることを固定する。`test_qwen4exp_hyper_site` は HyperConnection site
+全体の sequence を固定する。
 
-残りは、Qwen4Exp decoder layer の lowering（HyperConnection site、QSA、
-GDN sigmoid gate、PLE 注入）と、4 stream を運ぶ runtime state の接続である。
+## 2-3. GDN の sigmoid 出力ゲート
+
+Qwen3.5 の GDN は gate 分岐に silu を固定していた。Qwen4Exp は
+`output_gate_type: sigmoid` を宣言するため、`GdnLoweringGeometry::sigmoid_gate`
+を追加し、`emit_gdn` が `SIGMOID` と `SILU` を切り替えるようにした。
+
+`test_qwen4exp_gdn_gate` は sigmoid 指定で
+`GDN_RECURRENCE,RMS_NORM,SIGMOID,MUL`、既定で
+`GDN_RECURRENCE,RMS_NORM,SILU,MUL` になることを固定する。
+
+残りは、Qwen4Exp decoder layer の lowering（HyperConnection site の組み立て、
+QSA、PLE 注入）と、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

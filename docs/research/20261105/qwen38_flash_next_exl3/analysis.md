@@ -506,7 +506,12 @@ CPU 参照と一致することを固定する。`test_program_hyper_connection`
 site 全体は、既存の grouped RMSNorm（`group_size=hidden`、`ONE_PLUS`）と
 BF16 linear（down/up/block_inject）、`SILU` / `SIGMOID` / `SCALE` を組み合わせ、
 最後に `HYPER_MIX` / `HYPER_APPLY` を置く形で表現できる。
-残りは Qwen4Exp decoder layer の lowering と、4 stream を運ぶ runtime state の接続である。
+site 全体の sequence は `test_qwen4exp_hyper_site` が固定する。
+
+GDN の出力ゲートも `sigmoid_gate` で切り替えられるようにした。
+`test_qwen4exp_gdn_gate` が Qwen4Exp の sigmoid と Qwen3.5 の silu を固定する。
+残りは Qwen4Exp decoder layer の lowering（QSA、PLE 注入）と、
+4 stream を運ぶ runtime state の接続である。
 
 #### 結論
 

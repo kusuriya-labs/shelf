@@ -18,6 +18,8 @@ struct GdnLoweringGeometry {
     std::uint32_t conv_kernel = 0;
     float eps = 1e-6f;
     RT::ValueDType out_dtype = RT::ValueDType::BF16;
+    // Qwen3.5 hardcodes silu on the gate branch; Qwen3.8-Flash-Next declares sigmoid.
+    bool sigmoid_gate = false;
 };
 
 struct GdnLoweringWeights {
@@ -136,13 +138,12 @@ inline RT::ValueId emit_gdn(
                                        value_features, RT::ValueDType::F32);
     name_last("gdn_norm");
 
-    // The gated RMSNorm of the reference (Qwen3_5RMSNormGated) hardcodes silu on the gate
-    // branch; it is not a config-selectable activation. The attention output gate stays
-    // sigmoid, which is also fixed there.
-    const RT::ValueId v_gated_z = em.unary(
-        RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{value_features}}},
-        v_z, value_features, RT::ValueDType::F32);
-    name_last("gdn_z_gate");
+    const RT::PrimitiveNode gate_node = geo.sigmoid_gate
+        ? RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{value_features}}}
+        : RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{value_features}}};
+    const RT::ValueId v_gated_z = em.unary(gate_node, v_z, value_features,
+                                           RT::ValueDType::F32);
+    name_last(geo.sigmoid_gate ? "gdn_z_sigmoid" : "gdn_z_gate");
 
     RT::ValueId v_gated{0};
     {
