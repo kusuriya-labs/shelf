@@ -5,6 +5,7 @@
 #include <shelf/kernels/model_dispatch_state.h>
 #include <shelf/kernels/optimized/ple.h>
 #include <shelf/kernels/optimized/ple_conv.h>
+#include <shelf/kernels/optimized/repeat_streams.h>
 
 namespace shelf::execution {
 
@@ -32,6 +33,84 @@ const ::shelf::runtime::StateBinding* find_state_binding(const Program& program,
 }
 
 }  // namespace
+
+Result<OptimizedLaunchResult> try_launch_repeat_streams(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.input_count != 1u || b.output_count != 1u)
+        return bad("repeat streams: bad io count");
+    const uint32_t hc = b.group_size;
+    const uint32_t hidden = b.flags;
+    if (hc == 0u || hidden == 0u) return bad("repeat streams: empty geometry");
+    auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    if (!in.ok()) return in.status();
+    auto out = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!out.ok()) return out.status();
+    if (in.value().dtype != ValueDType::BF16 || out.value().dtype != ValueDType::BF16 ||
+        in.value().feature_count != hidden ||
+        out.value().feature_count != static_cast<uint64_t>(hc) * hidden ||
+        in.value().ptr == nullptr || out.value().ptr == nullptr) {
+        return bad("repeat streams: value contract mismatch");
+    }
+    ::shelf::kernel::RepeatStreamsArgs args;
+    args.input = static_cast<const ::shelf::bf16_t*>(in.value().ptr);
+    args.output = static_cast<::shelf::bf16_t*>(out.value().ptr);
+    args.rows = ctx.actual_rows != 0u ? ctx.actual_rows : 1u;
+    args.hc = hc;
+    args.hidden = hidden;
+    args.input_stride = in.value().row_stride;
+    args.output_stride = out.value().row_stride;
+    const hipError_t error = ::shelf::kernel::launch_repeat_streams(args, stream);
+    if (error != hipSuccess)
+        return Status::hip_error("repeat streams launch", hipGetErrorString(error),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1u);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+Result<OptimizedLaunchResult> try_launch_ple_stream_dot(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.input_count != 2u || b.output_count != 1u)
+        return bad("ple stream dot: bad io count");
+    const uint32_t hc = b.group_size;
+    const uint32_t hidden = b.flags;
+    if (hc == 0u || hidden == 0u) return bad("ple stream dot: empty geometry");
+    auto key = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    if (!key.ok()) return key.status();
+    auto query = resolve_host_value(program, ValueId{b.input_slots[1]}, ctx);
+    if (!query.ok()) return query.status();
+    auto out = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!out.ok()) return out.status();
+    const uint64_t width = static_cast<uint64_t>(hc) * hidden;
+    if (key.value().dtype != ValueDType::BF16 ||
+        query.value().dtype != ValueDType::BF16 ||
+        out.value().dtype != ValueDType::BF16 ||
+        key.value().feature_count != width ||
+        query.value().feature_count != width || out.value().feature_count != hc ||
+        key.value().ptr == nullptr || query.value().ptr == nullptr ||
+        out.value().ptr == nullptr) {
+        return bad("ple stream dot: value contract mismatch");
+    }
+    ::shelf::kernel::PleStreamDotArgs args;
+    args.key = static_cast<const ::shelf::bf16_t*>(key.value().ptr);
+    args.query = static_cast<const ::shelf::bf16_t*>(query.value().ptr);
+    args.output = static_cast<::shelf::bf16_t*>(out.value().ptr);
+    args.rows = ctx.actual_rows != 0u ? ctx.actual_rows : 1u;
+    args.hc = hc;
+    args.hidden = hidden;
+    args.key_stride = key.value().row_stride;
+    args.query_stride = query.value().row_stride;
+    args.output_stride = out.value().row_stride;
+    const hipError_t error = ::shelf::kernel::launch_ple_stream_dot(args, stream);
+    if (error != hipSuccess)
+        return Status::hip_error("ple stream dot launch", hipGetErrorString(error),
+                                 __FILE__, __LINE__);
+    record_physical_launch(1u);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
 
 Result<OptimizedLaunchResult> try_launch_ple_gate(const Program& program,
                                                   const DispatchBinding& b,
@@ -82,7 +161,7 @@ Result<OptimizedLaunchResult> try_launch_ple_broadcast_mul(
     if (!out.ok()) return out.status();
     if (gate.value().dtype != ValueDType::BF16 ||
         value.value().dtype != ValueDType::BF16 || out.value().dtype != ValueDType::BF16 ||
-        gate.value().feature_count != hidden || value.value().feature_count != hidden ||
+        gate.value().feature_count != hc || value.value().feature_count != hidden ||
         out.value().feature_count != hc * hidden || gate.value().ptr == nullptr ||
         value.value().ptr == nullptr || out.value().ptr == nullptr) {
         return bad("ple broadcast: value contract mismatch");

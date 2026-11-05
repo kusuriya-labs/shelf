@@ -75,22 +75,21 @@ Result<RT::ValueId> emit_qwen4exp_ple(Emitter& em,
     const RT::ValueId query_normed =
         emit_unary(em, RT::PrimitiveNode{query_norm}, hyper, width);
 
-    RT::HyperMixNode mix;
-    mix.shape = RT::RowwiseShapeKey{geometry.hidden};
-    mix.hc = geometry.hc;
-    mix.hidden = geometry.hidden;
-    RT::ValueId gate_raw = em.value(geometry.hidden, RT::ValueDType::BF16);
-    em.emit(RT::PrimitiveNode{mix}, {key_normed, query_normed}, {gate_raw});
+    RT::PleStreamDotNode dot;
+    dot.shape = RT::RowwiseShapeKey{geometry.hc};
+    dot.hc = geometry.hc;
+    dot.hidden = geometry.hidden;
+    RT::ValueId stream_dot = em.value(geometry.hc, RT::ValueDType::BF16);
+    em.emit(RT::PrimitiveNode{dot}, {key_normed, query_normed}, {stream_dot});
 
-    const float gate_scale =
-        static_cast<float>(geometry.hc) / std::sqrt(static_cast<float>(geometry.hidden));
+    const float gate_scale = 1.0f / std::sqrt(static_cast<float>(geometry.hidden));
     const RT::ValueId scaled = emit_unary(
-        em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hidden},
+        em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc},
                                             gate_scale}},
-        gate_raw, geometry.hidden);
+        stream_dot, geometry.hc);
     const RT::ValueId gate = emit_unary(
-        em, RT::PrimitiveNode{RT::PleGateNode{RT::RowwiseShapeKey{geometry.hidden}}},
-        scaled, geometry.hidden);
+        em, RT::PrimitiveNode{RT::PleGateNode{RT::RowwiseShapeKey{geometry.hc}}},
+        scaled, geometry.hc);
 
     const RT::ValueId value = em.linear(*weights.value_proj, indices.w_value_proj,
                                         embeddings);

@@ -47,6 +47,8 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::QSA_TOPK: return {1, 1};
         case PrimitiveKind::QSA_EXPAND_MASK: return {1, 1};
         case PrimitiveKind::QSA_ROPE: return {1, 1};
+        case PrimitiveKind::PLE_STREAM_DOT: return {2, 1};
+        case PrimitiveKind::REPEAT_STREAMS: return {1, 1};
     }
     return {0, 0};
 }
@@ -353,7 +355,7 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 }
             } else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) {
                 const uint64_t hidden = v.hidden;
-                if (graph.value_features(n.inputs[0]) != hidden ||
+                if (graph.value_features(n.inputs[0]) != v.hc ||
                     graph.value_features(n.inputs[1]) != hidden ||
                     graph.value_features(n.outputs[0]) !=
                         static_cast<uint64_t>(v.hc) * hidden) {
@@ -365,6 +367,24 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     graph.value_features(n.outputs[0]) != v.shape.features) {
                     ple_status = Status::invalid_argument(
                         "ple conv feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, RepeatStreamsNode>) {
+                if (v.hc == 0u || v.hidden == 0u ||
+                    v.shape.features != static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.inputs[0]) != v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "repeat streams shape mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleStreamDotNode>) {
+                if (v.hc == 0u || v.hidden == 0u || v.shape.features != v.hc ||
+                    graph.value_features(n.inputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.inputs[1]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.hc) {
+                    ple_status = Status::invalid_argument(
+                        "ple stream dot shape mismatch", __FILE__, __LINE__);
                 }
             }
         }, n.node);

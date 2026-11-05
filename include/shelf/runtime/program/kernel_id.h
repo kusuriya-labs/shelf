@@ -45,6 +45,8 @@ enum class KernelId : uint32_t {
     QSA_TOPK,
     QSA_EXPAND_MASK,
     QSA_ROPE,
+    PLE_STREAM_DOT,
+    REPEAT_STREAMS,
     COUNT,
 };
 
@@ -95,6 +97,8 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::QSA_TOPK: return "QSA_TOPK";
         case KernelId::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
         case KernelId::QSA_ROPE: return "QSA_ROPE";
+        case KernelId::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
+        case KernelId::REPEAT_STREAMS: return "REPEAT_STREAMS";
         default: return "UNKNOWN";
     }
 }

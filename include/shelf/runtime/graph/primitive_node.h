@@ -41,6 +41,8 @@ enum class PrimitiveKind : uint16_t {
     QSA_TOPK = 29,
     QSA_EXPAND_MASK = 30,
     QSA_ROPE = 31,
+    PLE_STREAM_DOT = 32,
+    REPEAT_STREAMS = 33,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -77,6 +79,8 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::QSA_TOPK: return "QSA_TOPK";
         case PrimitiveKind::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
         case PrimitiveKind::QSA_ROPE: return "QSA_ROPE";
+        case PrimitiveKind::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
+        case PrimitiveKind::REPEAT_STREAMS: return "REPEAT_STREAMS";
     }
     return "UNKNOWN";
 }
@@ -253,6 +257,20 @@ struct HyperApplyNode {
     uint32_t hidden = 0;
 };
 
+// Repeat one hidden row across hc streams: out[r, h*hidden+i] = in[r, i].
+struct RepeatStreamsNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// PLE per-stream dot over one stream's hidden lanes.
+struct PleStreamDotNode {
+    RowwiseShapeKey shape;  // hc
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
 // PLE gate shaping: sign(x) * sqrt(max(|x|, 1e-6)).
 struct PleGateNode {
     RowwiseShapeKey shape;  // hidden
@@ -355,7 +373,9 @@ using PrimitiveNode = std::variant<
     QsaScoresNode,
     QsaTopkNode,
     QsaExpandMaskNode,
-    QsaRopeNode
+    QsaRopeNode,
+    PleStreamDotNode,
+    RepeatStreamsNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -393,6 +413,8 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, QsaTopkNode>) return PrimitiveKind::QSA_TOPK;
         else if constexpr (std::is_same_v<T, QsaExpandMaskNode>) return PrimitiveKind::QSA_EXPAND_MASK;
         else if constexpr (std::is_same_v<T, QsaRopeNode>) return PrimitiveKind::QSA_ROPE;
+        else if constexpr (std::is_same_v<T, PleStreamDotNode>) return PrimitiveKind::PLE_STREAM_DOT;
+        else if constexpr (std::is_same_v<T, RepeatStreamsNode>) return PrimitiveKind::REPEAT_STREAMS;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

@@ -9,6 +9,18 @@ namespace shelf::execution {
 
 struct HostExecutionContext;
 
+Result<OptimizedLaunchResult> try_launch_repeat_streams(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream);
+
+Result<OptimizedLaunchResult> try_launch_ple_stream_dot(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream);
+
 Result<OptimizedLaunchResult> try_launch_ple_gate(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,

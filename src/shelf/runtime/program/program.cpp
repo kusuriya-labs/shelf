@@ -565,6 +565,35 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::REPEAT_STREAMS: {
+            const auto& n = node_as<RepeatStreamsNode>(node);
+            DispatchBinding b = base_binding(KernelId::REPEAT_STREAMS);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_STREAM_DOT: {
+            const auto& n = node_as<PleStreamDotNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_STREAM_DOT);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::PLE_GATE: {
             DispatchBinding b = base_binding(KernelId::PLE_GATE);
             b.input_slots[0] = node.inputs[0].id;

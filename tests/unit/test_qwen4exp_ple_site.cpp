@@ -109,7 +109,7 @@ int main() {
         if (i + 1 != built.value().dispatches.size()) sequence += ",";
     }
     const std::string want =
-        "LINEAR_BF16,RMS_NORM,RMS_NORM,HYPER_MIX,SCALE,PLE_GATE,LINEAR_BF16,"
+        "LINEAR_BF16,RMS_NORM,RMS_NORM,PLE_STREAM_DOT,SCALE,PLE_GATE,LINEAR_BF16,"
         "PLE_BROADCAST_MUL,RMS_NORM,PLE_CONV,RESIDUAL_ADD,RESIDUAL_ADD";
     check(sequence == want, "the PLE injection lowers in the expected order");
     if (sequence != want) std::printf("      got %s\n", sequence.c_str());

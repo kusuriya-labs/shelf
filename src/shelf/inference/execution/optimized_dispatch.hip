@@ -760,6 +760,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_hyper_mix(program, b, ctx, stream);
         case KernelId::HYPER_APPLY:
             return try_launch_hyper_apply(program, b, ctx, stream);
+        case KernelId::PLE_STREAM_DOT:
+            return try_launch_ple_stream_dot(program, b, ctx, stream);
+        case KernelId::REPEAT_STREAMS:
+            return try_launch_repeat_streams(program, b, ctx, stream);
         case KernelId::PLE_GATE:
             return try_launch_ple_gate(program, b, ctx, stream);
         case KernelId::PLE_BROADCAST_MUL:
