@@ -287,6 +287,15 @@ Y = (X diag(suh)) H128 W_hat H128 diag(svh)
 `W_hat` は trellis を tile 順に復号した回転基底の重みである。入力回転と出力回転は
 linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で書く。
 
+- `Exl3GemmArgs::splitk_scratch` が非 null のとき、grid 数が少ない shape では K を
+  複数 block へ分割する。各 block は部分和と rowsum を scratch に書き、
+  reduce kernel が split 方向に加算してから affine 変換、`H128`、`svh` を適用する。
+  split 数は n tile 数、row tile 数、K chunk 数、scratch 容量から決まり、
+  `splitk_splits` が 0 でなければその値を使う。scratch の必要量は
+  `splits * rows * out_features + splits * rows` float である。
+- 部分和の加算順は split 数で変わるため、split あり / なしの出力は bit 一致しない。
+  CPU affine 参照との比較は両方の経路で行う。
+
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ
   落とさない。

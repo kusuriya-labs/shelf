@@ -150,10 +150,104 @@ production とは別に `/tmp` の kernel コピーへ `clock64()` を入れ、b
 | lm_head | 3.208 ms | 9.1 % | **73.9 %** | 4.4 % | 4.8 % | 1.2 % |
 
 - phase の合計は約 88〜90 %。残りは `__syncthreads()`、出力 epilogue、その他。
-- **decode が 70〜74 %**。入力回転は 9〜11 %、A/B load + WMMA は 8〜10 %。
-- WMMA の issue 時間は 1〜2.5 % で、やはり MMA 自体は主コストではない。
-- decode 内を clock でさらに分割すると probe の overhead が大きく（+60 % 程度）、
-  内訳の数値は信頼できないため採用しなかった。
+- clock probe では decode が 70〜74 %、入力回転が 9〜11 %、A/B load + WMMA が 8〜10 %。
+- WMMA の issue 時間は 1〜2.5 % と出たが、後述の ablation では WMMA が 43 % を占める。
+  `clock64()` を tile ごとに挟むと依存 chain が切れ、decode の割合が過大に出る。
+  以下の判断には ablation の値を使う。
+
+## decode / WMMA の ablation
+
+production と同じ kernel から一部だけを無効化し、shape と split を固定して
+GEMM + reduce の時間を比較した。n=5120 / k=5120 / split=8、10 sample 平均。
+
+| 版 | 時間 | 差分 |
+| --- | ---: | --- |
+| 全体 | 0.0864 ms | — |
+| decode を空にする（ring stage も含めて削除） | 0.0556 ms | decode + stage = 36 % |
+| decode を空にし、WMMA を 1 個の half 加算へ置換 | 0.0184 ms | WMMA = 43 % |
+| decode を空にし、A/B load と WMMA を削除 | 0.0190 ms | A/B load は無視できる |
+| decode の LDS store だけ削除 | 0.0689 ms | store = 20 % |
+| decode の state 抽出 + hash だけ削除 | 0.0694 ms | 抽出 + hash = 20 % |
+
+**M=1 では WMMA が最大のコスト（43 %）**。16 行のうち 1 行しか使わないため、
+演算の 15/16 が捨てられる。decode は 36 % で、hash の置換や modulo の除去だけでは
+全体を動かせない。残り約 21 % は入力回転、epilogue、launch、reduce である。
+
+## hash / modulo の A/B（棄却）
+
+参照実装 `Luke458/qwen38-27b-exl3-rdna4` は mul1 の hash を full-rate の 24-bit 乗算
+2 回へ置き換えている。gfx1201 では `v_mul_lo_u32` が 1/4 rate のためである。
+同じ変更と、`% word_count` を条件付き減算へ変える変更を 4 通りで比較した。
+
+- A: 変更なし
+- B: modulo だけ条件付き減算
+- C: hash だけ 24-bit 乗算 2 回
+- D: 両方
+
+n=5120 / k=5120 / split=8 の GEMM 時間は A 0.0859 / B 0.0856 / C 0.0860 /
+D 0.0856 ms（2 round）。**差は 1 % 未満**。`v_mul_lo_u32` は 188 → 20 命令まで
+減ったが、時間は変わらなかった。この kernel は ALU スループットではなく
+WMMA と tile 間の依存で律速している。両変更は revert した。
+
+## batch-aware split-K（採用）
+
+grid 数が足りない shape で K を分割する。`rows == 1` 固定ではなく、行 tile と
+n tile の両方から決める。
+
+- 1 block は従来どおり 16 行 × 128 列を担当する。
+- `splits > 1` のとき、grid を `(n_tiles * splits, row_tiles)` にし、
+  block は `split` ごとに K chunk を飛び飛びに処理する。
+- 部分和 `acc` と rowsum を scratch に書き、reduce kernel が split 方向に加算して
+  affine 変換、`H128`、`svh` を適用する。
+- 自動 split は `grid_x <= 64 ? 8 : grid_x <= 160 ? 4 : 1`。scratch 容量と
+  K chunk 数で上限を下げる。scratch は 524,288 float（2 MiB）で、
+  rows=8 / n=5120 / split=8 まで収まる。
+- 部分和の順序が変わるため、CPU affine 参照との差は split あり / なしの両方で
+  確認する。
+
+### 見つけた race
+
+最初の実装は E2E の生成が崩れた。`rows=5, n=5120` の数値テストも実行ごとに
+PASS / FAIL が変わった。原因は K ループ先頭で、前の chunk の `xrot` をまだ読んでいる
+warp がある間に、別の warp が次の chunk の `xrot` を上書きしていたことである。
+K ループ先頭に `__syncthreads()` を追加して解消した。3 回連続で PASS、
+E2E は `11751,13,198`（` Paris.`）に戻った。
+
+### 結果
+
+同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run。
+
+| 版 | tok/s |
+| --- | ---: |
+| split なし（`SHELF_EXL3_SPLIT=1`） | 8.85 |
+| auto split | **12.16 / 12.20 / 12.23** |
+| E2E decode | 12.67 |
+| MTP-2 | 14.30 |
+
+shape 別の GEMM + reduce（10 sample 平均、split=1 → 最良）:
+
+| shape | split=1 | 最良 split | 時間 |
+| --- | ---: | ---: | ---: |
+| n=1024, k=5120 | 0.1526 ms | 8 | 0.0333 ms |
+| n=5120, k=5120 | 0.1521 ms | 8 | 0.0861 ms |
+| n=5120, k=17408 | 0.4960 ms | 8 | 0.2484 ms |
+| n=17408, k=5120 | 0.2986 ms | 3（scratch 上限） | 0.2537 ms |
+
+reduce kernel は平均 3.5 µs。split を増やすと block 数は増えるが、reduce と
+launch の追加は小さい。prefill 128 は 199.67 tok/s で split 前と同じ。
+
+batch>1 の GEMM 時間（n=5120, k=5120, rows=8）:
+
+| split | 時間 |
+| --- | ---: |
+| 1 | 0.1697 ms |
+| 2 | 0.1222 ms |
+| 4 | 0.1301 ms |
+| 8 | **0.0944 ms** |
+
+rows=8 でも split 8 が効くため、scratch を 2 MiB まで広げた。rows=16 では
+split 4 / 8 が 0.1024 / 0.1017 ms でほぼ同じ、rows=32 以上では split の効果は
+1 % 程度になる。
 
 ## 2 系列インターリーブ（棄却）
 
@@ -170,17 +264,35 @@ sync → A/B/WMMA を 2 回、という形にした。barrier は 1 tile あた�
 落ちた可能性がある。decode の依存 chain はすでに compiler が 4 pair 分
 インターリーブしており、明示的な 2 系列化の追加コストが上回った。revert した。
 
+## 参照実装との比較
+
+`Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
+plain decode 41.3 tok/s、MTP-3 で 73.9 tok/s を記録している。dot kernel は
+GEMV（`fdot2`）で、1.1〜1.25 T weights/s、ALU-bound と報告している。
+multi-row GEMV は m=4 で m=1 の 1.07〜1.31 倍のコストである。
+
+この差は主に M=1 での WMMA の無駄に由来する。現在の W16A16 は 16 行を同時に
+計算するため、M=1 では演算の 15/16 を捨てる。ablation でも WMMA が 43 % を占めた。
+一方、batch を増やすと WMMA の無駄は減る。n=5120 / k=5120 / split=8 の
+1 step は rows=1 で 0.0861 ms、rows=8 で 0.0944 ms、rows=16 で 0.1017 ms であり、
+batch 8 / 16 では token あたりコストがそれぞれ 1/7.3 / 1/13.5 になる。
+
+したがって、単一 stream の 12 tok/s は W16A16 の構造上の上限に近い。GEMV を
+small-M 専用に併用すれば単一 stream は改善するが、multi-request では W16A16 の
+方が有利になり得る。採否は別途判断する。
+
 ## 次の候補
 
-1. **batch-aware な K 分割（最有力）**。n=5120 / 1024 は block 数が足りず
-   occupancy が 16 % / 3 %。`rows == 1` 固定ではなく、row tile 数と n から
-   split 数を決め、scratch 容量に収める。以前の rows==1 版は 8.53 → 10.34 tok/s
-   だったので、一般化すれば decode 全体で 10 % 以上の余地がある。
-2. **A/B load と WMMA の重ね合わせ**。段階別では A+B+WMMA が 8〜10 %。
-   decode に比べると小さいが、LDS 待ちの一部を隠せる可能性がある。
-3. **FWHT はすでに register-local**。現在の 128 点は 4 値の local 4-point（bit 0/1）
-   + 5 回の lane shuffle（bit 2..6）で、これ以上大きく削る余地は小さい。
-4. **128 / 256 threads 構成**。総 warp 数は n/16 で変わらないため、K 分割なしでは
-   occupancy の上限は同じ。split-K と組み合わせる場合のみ比較する。
-5. decode の内訳（ring / state / store）は clock probe では正確に測れなかった。
-   必要なら stage ごとに別 kernel を作り、clock なしで総時間を比較する。
+1. **small-M 用 GEMV の併用**。rows が小さいときだけ GEMV、大きいときは
+   W16A16 にする。参照実装の GEMV は m=4 まで m=1 の 1.07〜1.31 倍で動く。
+   M=1 の現状 12.2 tok/s に対して 2〜3 倍の余地がある。
+2. **W16A16 の rows 別チューニング**。batch 8 / 16 ではすでに token あたり
+   1/7.3 / 1/13.5 まで amortize している。split 数と scratch を rows から決め、
+   multi-request の実測で確認する。
+3. **A/B load と WMMA の重ね合わせ**。ablation では A/B load は無視できる。
+   WMMA の直列依存を分ける余地は小さい。
+4. **decode の LDS store 削減**。store は 20 %、抽出 + hash は 20 %。
+   両方を削るには ring から A fragment を直接作る必要があり、lane 間 shuffle が
+   増える。2 系列インターリーブが効果なかったため、優先度は低い。
+5. **hash / modulo の削減**は効果なし。gfx1201 の `v_mul_lo_u32` が 1/4 rate でも、
+   この kernel では律速にならない。

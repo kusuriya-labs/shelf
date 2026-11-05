@@ -165,6 +165,7 @@ struct Case {
     uint32_t ka;
     bool half;
     const char* tag;
+    uint32_t splits = 0;
 };
 
 static bool run_case(const Case& c) {
@@ -215,6 +216,10 @@ static bool run_case(const Case& c) {
     check(hipMalloc(&d_input, input.size() * 2u) == hipSuccess, "malloc input");
     const std::size_t out_bytes = expected.size() * sizeof(float);
     check(hipMalloc(&d_output, out_bytes) == hipSuccess, "malloc output");
+    constexpr std::size_t kScratchFloats = 524288u;
+    void* d_scratch = nullptr;
+    check(hipMalloc(&d_scratch, kScratchFloats * sizeof(float)) == hipSuccess,
+          "malloc splitk scratch");
     check(hipMemcpy(d_trellis, trellis.data(), trellis_bytes, hipMemcpyHostToDevice) ==
               hipSuccess,
           "copy trellis");
@@ -240,6 +245,9 @@ static bool run_case(const Case& c) {
     args.output_dtype = 1u;
     args.ka = c.ka;
     args.half = c.half ? 1u : 0u;
+    args.splitk_scratch = static_cast<float*>(d_scratch);
+    args.splitk_floats = static_cast<uint32_t>(kScratchFloats);
+    args.splitk_splits = c.splits;
     const hipError_t herr = shelf::kernel::launch_gemm_exl3_w16a16(args, nullptr);
     check(herr == hipSuccess, std::string(c.tag) + " launch " + hipGetErrorString(herr));
     if (herr == hipSuccess) {
@@ -270,6 +278,7 @@ static bool run_case(const Case& c) {
     check(hipFree(d_svh) == hipSuccess, "free svh");
     check(hipFree(d_input) == hipSuccess, "free input");
     check(hipFree(d_output) == hipSuccess, "free output");
+    check(hipFree(d_scratch) == hipSuccess, "free splitk scratch");
     return ok;
 }
 
@@ -291,6 +300,19 @@ int main() {
     run_case({16, 256, 256, 3, true, "mul1_3half_rows16"});
     run_case({17, 384, 128, 7, false, "mul1_7_rows17"});
     run_case({5, 256, 256, 6, false, "mul1_6_rows5"});
+    run_case({1, 8192, 128, 4, false, "nosplit_n8192", 1});
+    run_case({5, 5120, 512, 4, false, "nosplit_rows5_n5120", 1});
+    run_case({1, 1024, 512, 4, false, "split8_n1024", 8});
+    run_case({1, 1024, 512, 4, false, "split16_n1024", 16});
+    run_case({1, 1024, 512, 4, false, "split32_n1024", 32});
+    run_case({3, 1024, 512, 4, false, "split4_rows3", 4});
+    run_case({16, 1024, 512, 4, false, "split2_rows16", 2});
+    run_case({1, 5120, 128, 4, false, "split4_n5120", 4});
+    run_case({1, 17408, 128, 4, false, "split2_n17408", 2});
+    run_case({5, 5120, 512, 4, false, "split2_rows5_n5120", 2});
+    run_case({8, 5120, 512, 4, false, "auto_rows8_n5120", 0});
+    run_case({1, 17408, 512, 4, false, "auto_n17408", 0});
+    run_case({5, 5120, 512, 4, false, "auto_rows5_n5120", 0});
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

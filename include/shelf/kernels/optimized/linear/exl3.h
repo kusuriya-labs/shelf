@@ -27,6 +27,9 @@ struct Exl3GemmArgs {
     uint32_t output_dtype = 0;
     uint32_t ka = 0;
     uint32_t half = 0;
+    float* splitk_scratch = nullptr;
+    uint32_t splitk_floats = 0;
+    uint32_t splitk_splits = 0;
 };
 
 hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream);

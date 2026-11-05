@@ -17,7 +17,7 @@ constexpr std::size_t kAlignBytes = 256u;
 
 constexpr std::size_t kProgramValuesPerFullRow = 44u;
 
-constexpr std::size_t kScratchFloats = 8192u;
+constexpr std::size_t kScratchFloats = 524288u;
 
 std::size_t align_up(std::size_t bytes) noexcept {
     return ((bytes + kAlignBytes - 1u) / kAlignBytes) * kAlignBytes;

@@ -556,6 +556,13 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     args.output_dtype = out_bf16 ? 0u : 1u;
     args.ka = e.exl3_ka;
     args.half = e.exl3_half ? 1u : 0u;
+    args.splitk_scratch = ctx.scratch;
+    args.splitk_floats = ctx.scratch_floats;
+    static const uint32_t split_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_SPLIT");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    args.splitk_splits = split_override;
     const hipError_t herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
