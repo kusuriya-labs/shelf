@@ -456,6 +456,51 @@ int main() {
         (void)hipFree(d_partial_count);
     }
 
+    {
+        constexpr std::uint32_t kRows = 3;
+        constexpr std::uint32_t kSelected = 3;
+        constexpr std::uint32_t kCr = 4;
+        constexpr std::uint32_t kTotal = 10;
+        const int32_t selected[kRows * kSelected] = {
+            0, 1, -1,
+            0, -1, -1,
+            -1, -1, -1};
+        const std::uint32_t positions[kRows] = {9u, 5u, 2u};
+        const std::uint8_t want[kRows * kTotal] = {
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 0, 0, 0, 0,
+            1, 1, 1, 0, 0, 0, 0, 0, 0, 0};
+        void* d_selected = nullptr;
+        void* d_positions = nullptr;
+        void* d_mask = nullptr;
+        check(hipMalloc(&d_selected, sizeof(selected)) == hipSuccess,
+              "hipMalloc expand selected");
+        check(hipMalloc(&d_positions, sizeof(positions)) == hipSuccess,
+              "hipMalloc expand positions");
+        check(hipMalloc(&d_mask, sizeof(want)) == hipSuccess, "hipMalloc expand mask");
+        hipMemcpy(d_selected, selected, sizeof(selected), hipMemcpyHostToDevice);
+        hipMemcpy(d_positions, positions, sizeof(positions), hipMemcpyHostToDevice);
+        shelf::kernel::QsaExpandMaskArgs args;
+        args.selected_blocks = static_cast<const int32_t*>(d_selected);
+        args.positions = static_cast<const std::uint32_t*>(d_positions);
+        args.mask = static_cast<std::uint8_t*>(d_mask);
+        args.rows = kRows;
+        args.selected_per_row = kSelected;
+        args.compress_ratio = kCr;
+        args.total_len = kTotal;
+        check(shelf::kernel::launch_qsa_expand_mask(args, nullptr) == hipSuccess,
+              "qsa expand mask launch");
+        check(hipDeviceSynchronize() == hipSuccess, "qsa expand mask sync");
+        std::uint8_t got[kRows * kTotal];
+        hipMemcpy(got, d_mask, sizeof(got), hipMemcpyDeviceToHost);
+        bool same = true;
+        for (std::size_t i = 0; i < sizeof(got); ++i) same = same && got[i] == want[i];
+        check(same, "qsa expand mask matches the CPU reference");
+        (void)hipFree(d_selected);
+        (void)hipFree(d_positions);
+        (void)hipFree(d_mask);
+    }
+
     std::fprintf(stderr, failures == 0 ? "PASS\n" : "FAILURES=%d\n", failures);
     return failures == 0 ? 0 : 1;
 }

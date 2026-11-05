@@ -551,6 +551,7 @@ QSA indexer のうち、状態を持たない計算も実装した。
 - `launch_qsa_rope`: partial rotary。`inv_freq`、`position_scale` 1〜2、
   `attention_factor` を持つ
 - `launch_qsa_key_cache`: raw key の partial block と pooled key の更新
+- `launch_qsa_expand_mask`: selected block を token mask に展開し causal と AND
 
 `position_scale` は 2x まで受理する。`inv_freq` を渡す場合は YaRN の
 補正済み周波数を使う。`test_qsa_pool_scores` が rope 2x と key cache を

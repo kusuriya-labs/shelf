@@ -232,6 +232,7 @@ QSA indexer のうち、状態を持たない 2 つの計算を実装した。
 | `launch_qsa_topk` | block ごとの score から top-k（同点は小さい index） |
 | `launch_qsa_rope` | partial rotary。`inv_freq` / `position_scale` 1〜2 / `attention_factor` |
 | `launch_qsa_key_cache` | raw key の partial block と pooled key の更新 |
+| `launch_qsa_expand_mask` | selected block を token mask に展開し causal と AND |
 
 `qsa_rope` は `position_scale <= 2` を受理し、`inv_freq` が渡された場合は
 YaRN の補正済み周波数を使う。`qsa_key_cache` は 4 token が揃った時点で

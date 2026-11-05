@@ -208,6 +208,33 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_kernel(
     }
 }
 
+__global__ __launch_bounds__(kQsaHeadDim) void qsa_expand_mask_kernel(
+    QsaExpandMaskArgs args) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t position = args.positions[row];
+    const uint32_t complete_blocks = (position + 1u) / args.compress_ratio;
+    const int32_t* selected =
+        args.selected_blocks + static_cast<std::uint64_t>(row) * args.selected_per_row;
+    uint8_t* mask = args.mask + static_cast<std::uint64_t>(row) * args.total_len;
+    for (uint32_t token = threadIdx.x; token < args.total_len; token += blockDim.x) {
+        bool visible = false;
+        if (token <= position) {
+            const uint32_t block = token / args.compress_ratio;
+            if (token >= complete_blocks * args.compress_ratio) {
+                visible = true;
+            } else {
+                for (uint32_t i = 0; i < args.selected_per_row; ++i) {
+                    if (selected[i] == static_cast<int32_t>(block)) {
+                        visible = true;
+                        break;
+                    }
+                }
+            }
+        }
+        mask[token] = visible ? 1u : 0u;
+    }
+}
+
 }  // namespace
 
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {
@@ -219,6 +246,19 @@ hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream) {
         return hipErrorInvalidValue;
     }
     qsa_pool_kernel<<<args.blocks, kThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_expand_mask(const QsaExpandMaskArgs& args, hipStream_t stream) {
+    if (args.selected_blocks == nullptr || args.positions == nullptr ||
+        args.mask == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (args.rows == 0u || args.selected_per_row == 0u ||
+        args.compress_ratio == 0u || args.total_len == 0u) {
+        return hipErrorInvalidValue;
+    }
+    qsa_expand_mask_kernel<<<args.rows, kQsaHeadDim, 0, stream>>>(args);
     return hipGetLastError();
 }
 

@@ -98,4 +98,19 @@ struct QsaKeyCacheArgs {
 
 hipError_t launch_qsa_key_cache(const QsaKeyCacheArgs& args, hipStream_t stream);
 
+// Expand selected block indices to a token mask. A token is visible when it is in the
+// incomplete tail block (or at/before the query position) or in a selected complete block,
+// and never after the query position.
+struct QsaExpandMaskArgs {
+    const int32_t* selected_blocks = nullptr;
+    const uint32_t* positions = nullptr;
+    uint8_t* mask = nullptr;
+    uint32_t rows = 0;
+    uint32_t selected_per_row = 0;
+    uint32_t compress_ratio = 0;
+    uint32_t total_len = 0;
+};
+
+hipError_t launch_qsa_expand_mask(const QsaExpandMaskArgs& args, hipStream_t stream);
+
 }  // namespace shelf::kernel
