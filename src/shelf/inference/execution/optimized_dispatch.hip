@@ -9,6 +9,7 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
@@ -575,21 +576,56 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     }();
     const bool use_pre = !pre_override && ctx.exl3_xrot != nullptr && args.rows >= 4u &&
                          xrot_bytes <= ctx.exl3_xrot_bytes;
+    static const uint32_t dense_min_rows = [] {
+        const char* e = std::getenv("SHELF_EXL3_DENSE");
+        if (e == nullptr) return 256u;
+        const unsigned long v = std::strtoul(e, nullptr, 10);
+        return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
+    }();
+    const uint64_t dense_bytes = static_cast<uint64_t>(args.k) * args.out_features * 2u;
+    const uint64_t accum_bytes = static_cast<uint64_t>(args.rows) * args.out_features * 4u;
+    const bool use_dense = use_pre && ctx.exl3_dense != nullptr &&
+                           ctx.exl3_accum != nullptr && args.rows >= dense_min_rows &&
+                           (args.out_features % 128u) == 0u &&
+                           dense_bytes <= ctx.exl3_dense_bytes &&
+                           accum_bytes <= ctx.exl3_accum_bytes;
     hipError_t herr = hipSuccess;
-    if (use_pre) {
-        herr = ::shelf::kernel::launch_rotate_exl3(args, ctx.exl3_xrot, stream);
+    bool dense_done = false;
+    if (use_dense) {
+        ::shelf::kernel::Exl3GemmArgs dense_args = args;
+        dense_args.xrot = ctx.exl3_xrot;
+        herr = ::shelf::kernel::launch_rotate_exl3(dense_args, ctx.exl3_xrot, stream);
         if (herr == hipSuccess) {
-            herr = ::shelf::kernel::launch_gemm_exl3_w16a16_pre(args, ctx.exl3_xrot, stream);
+            herr = ::shelf::kernel::launch_recon_exl3_dense(dense_args, ctx.exl3_dense, stream);
         }
-    } else {
-        herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+        if (herr == hipSuccess) {
+            herr = ::shelf::execution::exl3_dense_gemm(dense_args, ctx.exl3_dense,
+                                                       ctx.exl3_accum, stream);
+        }
+        if (herr == hipSuccess) {
+            herr = ::shelf::kernel::launch_epilogue_exl3_dense(
+                dense_args, ctx.exl3_xrot, ctx.exl3_accum, stream);
+        }
+        dense_done = herr == hipSuccess;
+    }
+    if (!dense_done) {
+        herr = hipSuccess;
+        if (use_pre) {
+            herr = ::shelf::kernel::launch_rotate_exl3(args, ctx.exl3_xrot, stream);
+            if (herr == hipSuccess) {
+                herr = ::shelf::kernel::launch_gemm_exl3_w16a16_pre(args, ctx.exl3_xrot,
+                                                                    stream);
+            }
+        } else {
+            herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
+        }
     }
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
         return Status::hip_error("exl3 gemm launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
-    record_physical_launch(use_pre ? 2u : 1u);
+    record_physical_launch(dense_done ? 4u : (use_pre ? 2u : 1u));
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }

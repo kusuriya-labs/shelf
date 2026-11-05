@@ -318,6 +318,21 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   する。row stride 128 halfs では B fragment が 16-way bank conflict になるため、
   row ごとに bank を 4 つずつずらす。
 
+- `rows >= 256` かつ次の条件を満たすとき、prefill 用に dense recon + hipBLASLt 経路を使う。
+  `k * out_features * 2 <= 192 MiB`、`rows * out_features * 4 <= accum 領域`、
+  `out_features % 128 == 0`、`ka` / `half` が復号可能、xrot が 80 MiB に収まる。
+  - rotate で xrot を作り、recon kernel が trellis を row-major の `W_hat`（K×N、FP16）へ
+    展開する。H128 と `svh` は展開せず、既存の epilogue と同じ変換を後段で行う。
+  - hipBLASLt は `A = W_hat`（N×K、ld=N）、`B = xrot`（K×rows、ld=K）、
+    `C = accum`（N×rows、ld=N）として M×N の row-major 出力を計算する。
+  - epilogue kernel が rowsum、`kMul1BiasOverInv`、`H128`、`svh` を適用し、BF16 / F32 で
+    書く。部分和・split-K は使わない。
+  - 条件を満たさない場合（decode、verify、LM-Head、小さい prefill、容量超過）は
+    従来の融合 W16A16 経路へ fallback する。LM-Head は logits 行数が request 数
+    （通常 1）であるため、融合経路のままとする。
+  - dense 領域は 192 MiB、accum は `padded_rows * 17408 * 4` byte を executor
+    workspace に予約する。recon 経路の選択は `SHELF_EXL3_DENSE` で上書きできる
+    （0 で無効、値は rows のしきい値）。
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ
   落とさない。

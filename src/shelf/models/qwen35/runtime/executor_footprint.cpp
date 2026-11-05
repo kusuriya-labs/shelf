@@ -1,4 +1,5 @@
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
 
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -69,6 +70,8 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     total += align_up(kScratchFloats * sizeof(float));
     total += align_up(::shelf::execution::kDecodeAttnPartialBytes);
     total += align_up(kExl3XrotBytes);
+    total += align_up(kExl3DenseBytes);
+    total += align_up(exl3_dense_accum_bytes(rows));
 
     total += align_up(rows * sizeof(int32_t));
     total += align_up(output_rows * hidden * sizeof(bf16_t));

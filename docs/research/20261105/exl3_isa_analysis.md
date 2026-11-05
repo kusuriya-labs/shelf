@@ -837,7 +837,55 @@ A 復号の命令数削減が主対象になる。
 prefill は +30〜58%。decode は fused（rows < 4）で NT=1 のままなので変化しない。
 E2E decode 22.43 tok/s、MTP-2 18.35 tok/s、生成は `11751,13,198`。
 
+## dense recon + hipBLASLt の prefill 経路
+
+融合 decode のままでは、decode が warp 時間の約 4 割を占め、WMMA と issue ポートを
+奪い合うため 120 TFLOPS に届かない。prefill に限り、重みを 1 回だけ dense FP16 へ
+展開し、GEMM を hipBLASLt に任せる経路を採用した。
+
+### 1 層の内訳（M=2048、K=N=5120）
+
+| stage | ms |
+| --- | ---: |
+| 入力回転 | 0.043 |
+| recon（trellis → row-major FP16、52 MB 書き込み） | 0.166 |
+| hipBLASLt GEMM（f16×f16→f32、row-major C） | 0.738 |
+| epilogue（rowsum + H128 + svh + bf16） | 0.142 |
+| 合計 | 1.089（約 99 TFLOPS） |
+
+融合 W16A16 は同じ shape で 2.0 ms（52 TFLOPS）なので約 1.8 倍。hipBLASLt の
+operand 順は、row-major C を得るために `A = W_hat (N×K)`、`B = xrot (K×M)` とした。
+転置側（`A = xrot`）は 0.66 ms だが C が column-major になるため、epilogue の
+transpose が必要になる。今回は row-major C を優先した。
+
+### 経路の選択
+
+- `rows >= 256` の layer linear: recon + hipBLASLt
+- `rows < 256`、decode、MTP / DFlash2 verify、LM-Head: 融合 W16A16
+- LM-Head の logits 行数は `num_outputs`（request 数、通常 1）なので常に融合
+- 容量超過（LM-Head の 2.5 GB dense など）も融合へ fallback
+
+### Mixed Batching
+
+recon / fused の選択は request ではなく linear launch の合計 rows で決まる。
+`ScheduledBatch` は分割せず、prefill + decode の混合バッチは合計 rows が 256 以上なら
+recon、以下なら融合で全体を計算する。両経路は同じ math で、長い prompt（303 token）の
+生成 ID は dense 有効 / 無効で一致した。
+
+### production
+
+| 条件 | 融合（以前） | recon + hipBLASLt |
+| --- | ---: | ---: |
+| decode | 20.4〜20.8 | 20.4〜20.8（変更なし） |
+| pp128 | 637 | 639（変更なし） |
+| pp512 | 774 | **1115** |
+| pp1024 | 857 | **1318** |
+| pp2048 | 866 | **1425** |
+| E2E decode | 22.4 | 22.3 |
+| MTP-2 | 18.4 | 18.5 |
+
 ## 参照実装との比較
+
 
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
