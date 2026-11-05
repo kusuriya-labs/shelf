@@ -6,6 +6,7 @@
 #include <shelf/models/qwen4exp/weights/qwen4exp_weights.h>
 
 #include <cstdint>
+#include <span>
 
 namespace shelf {
 namespace qwen4exp {
@@ -16,6 +17,9 @@ struct Qwen4ExpLowerOptions {
     std::uint32_t max_context_tokens = 512;
     std::uint32_t tp_rank = 0;
     float rope_attention_factor = 1.0f;
+    // Target layers whose completed output, averaged over the hyper-connection streams,
+    // is exposed as a DFlash2 target feature. Appended after the head's four outputs.
+    std::span<const std::uint32_t> hidden_taps;
 };
 
 // Lowers one loaded rank: embedding repeated into the hc stream stack, every decoder layer

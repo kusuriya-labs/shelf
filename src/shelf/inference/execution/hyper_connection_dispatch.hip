@@ -4,6 +4,7 @@
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/fused/hyper_connection.h>
 #include <shelf/kernels/optimized/hyper_connection.h>
+#include <shelf/kernels/optimized/mean_streams.h>
 
 namespace shelf::execution {
 
@@ -109,6 +110,39 @@ Result<OptimizedLaunchResult> try_launch_hyper_inject(
     if (error != hipSuccess)
         return Status::hip_error("hyper inject launch", hipGetErrorString(error),
                                  __FILE__, __LINE__);
+    record_physical_launch(1u);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+Result<OptimizedLaunchResult> try_launch_mean_streams(
+    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
+    hipStream_t stream) {
+    if (b.input_count != 1u || b.output_count != 1u)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    const uint32_t hc = b.group_size;
+    const uint32_t hidden = b.flags;
+    if (hc == 0u || hidden == 0u)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    auto in = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    auto out = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!in.ok() || !out.ok())
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    if (in.value().dtype != ValueDType::BF16 || out.value().dtype != ValueDType::BF16 ||
+        in.value().feature_count != hc * hidden || out.value().feature_count != hidden)
+        return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    ::shelf::kernel::MeanStreamsArgs args;
+    args.input = in.value().ptr;
+    args.output = out.value().ptr;
+    args.rows = token_rows(ctx);
+    args.hc = hc;
+    args.hidden = hidden;
+    args.input_stride = in.value().row_stride;
+    args.output_stride = out.value().row_stride;
+    const hipError_t error = ::shelf::kernel::launch_mean_streams_bf16(args, stream);
+    if (error != hipSuccess)
+        return Status::hip_error("mean streams launch", hipGetErrorString(error), __FILE__,
+                                 __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

@@ -50,6 +50,7 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::PLE_STREAM_DOT: return {2, 1};
         case PrimitiveKind::REPEAT_STREAMS: return {1, 1};
         case PrimitiveKind::HYPER_INJECT: return {1, 1};
+        case PrimitiveKind::MEAN_STREAMS: return {1, 1};
     }
     return {0, 0};
 }
@@ -193,6 +194,10 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
                             v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
             }
+            else if constexpr (std::is_same_v<T, MeanStreamsNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == v.hidden;
+            }
             else if constexpr (std::is_same_v<T, PleGateNode>) {
                 shapes_ok = valid_shape_key(v.shape);
             }
@@ -330,6 +335,13 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     graph.value_features(n.outputs[0]) != v.shape.features) {
                     hyper_status = Status::invalid_argument(
                         "hyper inject feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, MeanStreamsNode>) {
+                if (graph.value_features(n.inputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.hidden) {
+                    hyper_status = Status::invalid_argument(
+                        "mean streams feature counts are invalid", __FILE__, __LINE__);
                 }
             } else if constexpr (std::is_same_v<T, HyperApplyNode>) {
                 const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;

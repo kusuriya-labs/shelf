@@ -140,6 +140,7 @@ int main() {
     layer.qsa_geometry.attention.rotary_dim = kRotary;
     layer.qsa_geometry.attention.rope_theta = 10000000.0f;
     layer.qsa_geometry.attention.eps = 1e-6f;
+    layer.qsa_geometry.attention.tp_combine = false;
     layer.qsa_geometry.indexer.hidden = kHidden;
     layer.qsa_geometry.indexer.index_heads = kIndexHeads;
     layer.qsa_geometry.indexer.index_kv_heads = 1u;
@@ -209,6 +210,14 @@ int main() {
         masked_attention = pa.has_token_mask && node.inputs.size() == 2u;
     }
     check(masked_attention, "QSA attention node consumes the token mask");
+
+    {
+        std::uint32_t combines = 0;
+        for (const auto& node : graph.nodes)
+            if (node.tp_combine != 0) ++combines;
+        check(combines == 1u,
+              "only the MoE combine is a TP reduction for replicated attention/GDN");
+    }
 
     std::printf("%s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL", passed,
                 failed);

@@ -587,6 +587,20 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::MEAN_STREAMS: {
+            const auto& n = node_as<MeanStreamsNode>(node);
+            DispatchBinding b = base_binding(KernelId::MEAN_STREAMS);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::HYPER_APPLY: {
             const auto& hn = node_as<HyperApplyNode>(node);
             DispatchBinding b = base_binding(KernelId::HYPER_APPLY);

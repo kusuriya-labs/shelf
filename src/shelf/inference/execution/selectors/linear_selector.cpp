@@ -45,6 +45,7 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 8192, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 9216, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 256, 5120, kFamilyBf16 },
+    { 256, 2560, kFamilyBf16 },
     { 10240, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 12288, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 12288, 4096, kFamilyBf16 },
@@ -104,6 +105,11 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 1, 2560, kFamilyBf16 },
     { 2560, 640, kFamilyBf16 | kFamilyMxfp4 },
     { 2560, 2560, kFamilyBf16 },
+    // Qwen3.8-Flash-Next DFlash2 drafter: q/k/v/o, gate/up, down, and the fc over five
+    // target taps (5 * 2560).
+    { 7680, 2560, kFamilyBf16 },
+    { 2560, 7680, kFamilyBf16 },
+    { 2560, 12800, kFamilyBf16 },
     { 512, 2560, kFamilyBf16 },
 };
 

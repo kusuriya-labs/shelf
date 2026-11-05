@@ -131,14 +131,24 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
             if (config_.tp < 2) {
                 return Status::unsupported(
-                    "Qwen4Exp requires --tensor-parallel 2", __FILE__, __LINE__);
+                    "Qwen4Exp requires --tensor-parallel 2 or 4", __FILE__, __LINE__);
             }
             // The PLE token history is built from the scheduled rows; a prefix cache that
             // restores tokens the history never saw would make the n-gram rows wrong.
             config_.prefix_cache = false;
             config_.mtp = false;
-            config_.dflash2_model_dir.clear();
-            config_.draft_config_ready = false;
+            // The Qwen4Exp rank already holds a complete replicated lm_head / embedding, so
+            // the drafter borrows those instead of loading a second private copy.
+            config_.private_target_weights = false;
+            config_.private_target_lm_head = false;
+            // The 8-row verify path (block_size 8, drafts 7) is not yet lossless for this
+            // family; 6 drafts stays on the validated 7-row verify path.
+            if (config_.draft_config_ready && config_.dflash2_drafts > 6u) {
+                std::fprintf(stderr,
+                             "Qwen4Exp DFlash2: drafts capped at 6 "
+                             "(8-row verify is not validated)\n");
+                config_.dflash2_drafts = 6u;
+            }
         }
     }
 

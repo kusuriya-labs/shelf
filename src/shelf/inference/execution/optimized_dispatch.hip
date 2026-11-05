@@ -767,6 +767,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_hyper_inject(program, b, ctx, stream);
         case KernelId::HYPER_APPLY:
             return try_launch_hyper_apply(program, b, ctx, stream);
+        case KernelId::MEAN_STREAMS:
+            return try_launch_mean_streams(program, b, ctx, stream);
         case KernelId::PLE_STREAM_DOT:
             return try_launch_ple_stream_dot(program, b, ctx, stream);
         case KernelId::REPEAT_STREAMS:

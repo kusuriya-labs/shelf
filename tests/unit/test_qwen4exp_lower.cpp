@@ -187,6 +187,12 @@ int main() {
           "every layer runs the MoE FFN");
     check(sequence.size() > 40u, "all layers are present");
 
+    std::uint32_t combines = 0;
+    for (const auto& node : graph.nodes)
+        if (node.tp_combine != 0) ++combines;
+    check(combines == config.num_hidden_layers,
+          "each layer contributes exactly one TP reduction (the MoE combine)");
+
     bool grouped = false;
     for (const auto& node : graph.nodes) {
         if (rt::primitive_kind_of(node.node) != rt::PrimitiveKind::PAGED_ATTENTION)
@@ -194,6 +200,27 @@ int main() {
         grouped = std::get<rt::PagedAttentionNode>(node.node).has_token_mask;
     }
     check(grouped, "QSA attention consumes the expanded mask");
+
+    {
+        const std::uint32_t tap_layers[] = {0u};
+        shelf::qwen4exp::Qwen4ExpLowerOptions tap_options = options;
+        tap_options.hidden_taps = tap_layers;
+        auto tapped = shelf::qwen4exp::lower_qwen4exp_to_primitives(config, weights,
+                                                                    tap_options);
+        check(tapped.ok(), "a hidden tap lowers");
+        if (tapped.ok()) {
+            const rt::PrimitiveGraph& tap_graph = tapped.value().graph;
+            check(tap_graph.external_outputs.size() == 5u,
+                  "one target feature is appended after the head outputs");
+            std::string tap_sequence;
+            for (const auto& node : tap_graph.nodes) {
+                if (!tap_sequence.empty()) tap_sequence += ",";
+                tap_sequence += rt::to_string(rt::primitive_kind_of(node.node));
+            }
+            check(tap_sequence.find("MEAN_STREAMS") != std::string::npos,
+                  "the target feature is the mean over the hyper streams");
+        }
+    }
 
     std::printf("%s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL", passed,
                 failed);

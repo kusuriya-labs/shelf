@@ -98,6 +98,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/elementwise.hip
     src/shelf/kernels/optimized/rmsnorm.hip
     src/shelf/kernels/optimized/hyper_connection.hip
+    src/shelf/kernels/optimized/mean_streams.hip
     src/shelf/kernels/optimized/ple.hip
     src/shelf/kernels/optimized/ple_conv.hip
     src/shelf/kernels/optimized/repeat_streams.hip

@@ -7,6 +7,8 @@ verify し、一致した prefix だけを commit する。
 対象:
 
 - target: `models/Qwen3.8-27B-*`（Qwen3.8-27B、64 層）
+- target: `models/Qwen3.8-Flash-Next-Quark-MXFP4`（Qwen4Exp、48 層、hidden 2560）。
+  [qwen4exp.md](qwen4exp.md) の DFlash2 target tap を参照
 - drafter: `models/Qwen3.8-27B-DFlash2`（BF16、指定は `--dflash2-model-dir`）
 - `--dflash2-model-dir` を指定したときだけ DFlash2 経路に入る。未指定時は既存の
   `ContinuousBatcher` 経路を変更しない。
@@ -1000,6 +1002,25 @@ DFLASH2_ROUND_MS
   `DFlash2SpecDecoder`）が確保し、明示的な shutdown 経路を持つ。
 
 ---
+
+## Qwen4Exp target
+
+Qwen3.8-Flash-Next は 48 層で、drafter の `dflash_config.target_layer_ids` は
+`[5, 15, 25, 35, 45]` である。Qwen4Exp の hidden は 4 本の hyper stream を持つため、
+target tap は層の完了出力を stream 方向に平均した `[rows, hidden=2560]` とする
+（`MEAN_STREAMS` primitive）。tap は head の 4 出力の後ろに external output として
+追加され、`Executor` の `dflash_target_hidden` に bind される。
+
+- Qwen4Exp の attention / GDN は複製で、TP 集約は MoE combine だけである。
+  DFlash2 の target verify も同じ TP 経路を使う。
+- CLI: `--dflash2-model-dir models/Qwen3.8-Flash-Next-DFlash2`。
+- serve: `--serve-stdio` と併用できる。
+- `--dflash2-drafts` は **6 以下**。block_size 8 の 8 行 verify は
+  target-only greedy と 64 token で分岐する未解決課題があるため、7 以上を要求すると
+  6 に cap して stderr に出す。
+- 生成一致アンカー: `The capital of France is` → ` Paris. The capital of Germany is Berlin`
+  （`11751,13,561,6511,314,9564,369,19241`）。drafts=6 の 64 token は target-only と
+  完全一致する。
 
 ## Known limitations
 

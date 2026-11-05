@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
         dflash_serve.enabled = true;
         dflash_serve.config = dflash_config;
         dflash_serve.model_dir = opt.dflash2_model_dir;
-        dflash_serve.drafts = static_cast<uint32_t>(opt.dflash2_drafts);
+        dflash_serve.drafts = config.dflash2_drafts;
     }
 
     if (opt.serve_stdio) {
@@ -251,8 +251,8 @@ int main(int argc, char** argv) {
     }
     if (shelf::app::compute_dflash_enabled(opt)) {
         return shelf::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
-                                opt.dflash2_model_dir, opt.dflash2_drafts, opt.dflash2_stats,
-                                opt.kv_cache_dtype, opt.sampling);
+                                opt.dflash2_model_dir, runtime->config().dflash2_drafts,
+                                opt.dflash2_stats, opt.kv_cache_dtype, opt.sampling);
     }
     return shelf::app::run_single_shot(*runtime, prompt_ids, opt.max_new_tokens,
                                     opt.sampling, opt.kv_cache_dtype,

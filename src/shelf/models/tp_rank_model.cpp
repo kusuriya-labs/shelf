@@ -261,6 +261,8 @@ Result<q35::Executor> create_qwen4exp_model_executor(
         config.max_context_tokens != 0u ? config.max_context_tokens : 512u;
     options.tp_rank = config.tp != nullptr ? config.tp->tp_rank : 0u;
     options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
+    options.hidden_taps = std::span<const std::uint32_t>(
+        config.target_hidden_taps.data(), config.target_hidden_tap_count);
     auto lowered = qwen4exp::lower_qwen4exp_to_primitives(cfg, model.weights(), options);
     if (!lowered.ok()) return lowered.status();
 

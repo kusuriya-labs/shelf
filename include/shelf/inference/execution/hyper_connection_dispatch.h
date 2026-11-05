@@ -21,6 +21,12 @@ Result<OptimizedLaunchResult> try_launch_hyper_inject(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+Result<OptimizedLaunchResult> try_launch_mean_streams(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream);
+
 Result<OptimizedLaunchResult> try_launch_hyper_apply(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,

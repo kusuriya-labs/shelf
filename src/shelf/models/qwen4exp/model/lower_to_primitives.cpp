@@ -246,6 +246,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     std::uint32_t next_attention_state = 0;
     std::uint32_t next_ple_state = 0;
 
+    std::vector<RT::ValueId> hidden_tap_values(options.hidden_taps.size(), RT::ValueId{0});
+    std::vector<std::uint8_t> hidden_tap_found(options.hidden_taps.size(), 0);
+    for (std::size_t t = 0; t < options.hidden_taps.size(); ++t) {
+        if (options.hidden_taps[t] >= weights.layers.size())
+            return Status::invalid_argument("Qwen4Exp hidden tap layer index out of range",
+                                            __FILE__, __LINE__);
+        for (std::size_t u = 0; u < t; ++u) {
+            if (options.hidden_taps[u] == options.hidden_taps[t])
+                return Status::invalid_argument("Qwen4Exp hidden tap layer index is duplicated",
+                                                __FILE__, __LINE__);
+        }
+    }
+
     for (std::size_t li = 0; li < weights.layers.size(); ++li) {
         const auto& lw = weights.layers[li];
         const auto& idx = layer_weights[li];
@@ -381,6 +394,19 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         hyper = out.value();
         lowered.layer_output_values.emplace_back(
             static_cast<std::uint32_t>(li), hyper);
+        for (std::size_t t = 0; t < options.hidden_taps.size(); ++t) {
+            if (options.hidden_taps[t] != li) continue;
+            RT::MeanStreamsNode mean;
+            mean.shape = RT::RowwiseShapeKey{hidden};
+            mean.hc = hc;
+            mean.hidden = hidden;
+            RT::ValueId tap = em.value(hidden);
+            em.emit(RT::PrimitiveNode{mean}, {hyper}, {tap});
+            em.pg.nodes.back().debug_name = prefix + "hidden_tap";
+            hidden_tap_values[t] = tap;
+            hidden_tap_found[t] = 1;
+            break;
+        }
     }
 
     HyperConnectionSiteGeometry mixer_geometry;
@@ -406,6 +432,13 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
     QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
+
+    for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
+        if (hidden_tap_found[t] == 0)
+            return Status::invalid_state("Qwen4Exp hidden tap layer was not lowered", __FILE__,
+                                         __LINE__);
+        pg.external_outputs.push_back(hidden_tap_values[t]);
+    }
 
     for (const auto& node : pg.nodes) {
         if (!node.debug_name.empty() && !node.outputs.empty()) {

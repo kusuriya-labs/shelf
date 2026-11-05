@@ -139,6 +139,7 @@ int main() {
     layer.gdn_geometry.value_head_dim = kValueDim;
     layer.gdn_geometry.conv_kernel = 4u;
     layer.gdn_geometry.sigmoid_gate = true;
+    layer.gdn_geometry.tp_combine = false;
     layer.gdn_weights.qkv = &qkv;
     layer.gdn_weights.z = &z;
     layer.gdn_weights.b = &b;
@@ -198,6 +199,14 @@ int main() {
           "MoE uses separate gate/up/down grouped planes");
     check(sequence.find("MOE_COMBINE,HYPER_APPLY") != std::string::npos,
           "the MoE combine is injected back into the hyper stack");
+
+    {
+        std::uint32_t combines = 0;
+        for (const auto& node : graph.nodes)
+            if (node.tp_combine != 0) ++combines;
+        check(combines == 1u,
+              "only the MoE combine is a TP reduction for replicated attention/GDN");
+    }
 
     std::printf("%s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL", passed,
                 failed);

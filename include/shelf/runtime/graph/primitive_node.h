@@ -44,6 +44,7 @@ enum class PrimitiveKind : uint16_t {
     PLE_STREAM_DOT = 32,
     REPEAT_STREAMS = 33,
     HYPER_INJECT = 34,
+    MEAN_STREAMS = 35,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -83,6 +84,7 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case PrimitiveKind::REPEAT_STREAMS: return "REPEAT_STREAMS";
         case PrimitiveKind::HYPER_INJECT: return "HYPER_INJECT";
+        case PrimitiveKind::MEAN_STREAMS: return "MEAN_STREAMS";
     }
     return "UNKNOWN";
 }
@@ -274,6 +276,13 @@ struct RepeatStreamsNode {
     uint32_t hidden = 0;
 };
 
+// Mean one hidden row over hc streams: out[r, i] = mean_h in[r, h*hidden + i].
+struct MeanStreamsNode {
+    RowwiseShapeKey shape;  // hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
 // PLE per-stream dot over one stream's hidden lanes.
 struct PleStreamDotNode {
     RowwiseShapeKey shape;  // hc
@@ -386,7 +395,8 @@ using PrimitiveNode = std::variant<
     QsaRopeNode,
     PleStreamDotNode,
     RepeatStreamsNode,
-    HyperInjectNode
+    HyperInjectNode,
+    MeanStreamsNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -427,6 +437,7 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, PleStreamDotNode>) return PrimitiveKind::PLE_STREAM_DOT;
         else if constexpr (std::is_same_v<T, RepeatStreamsNode>) return PrimitiveKind::REPEAT_STREAMS;
         else if constexpr (std::is_same_v<T, HyperInjectNode>) return PrimitiveKind::HYPER_INJECT;
+        else if constexpr (std::is_same_v<T, MeanStreamsNode>) return PrimitiveKind::MEAN_STREAMS;
         else return PrimitiveKind::LINEAR;
     }, n);
 }
