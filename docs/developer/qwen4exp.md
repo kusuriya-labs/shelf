@@ -230,11 +230,17 @@ QSA indexer のうち、状態を持たない 2 つの計算を実装した。
 | `launch_qsa_pool` | compress_ratio=4 の key 平均、RMSNorm、`1 + weight` |
 | `launch_qsa_scores` | `sum_h relu(q · k) / sqrt(head_dim)`、可視 block 外は -inf |
 | `launch_qsa_topk` | block ごとの score から top-k（同点は小さい index） |
+| `launch_qsa_rope` | partial rotary。`inv_freq` / `position_scale` 1〜2 / `attention_factor` |
+| `launch_qsa_key_cache` | raw key の partial block と pooled key の更新 |
+
+`qsa_rope` は `position_scale <= 2` を受理し、`inv_freq` が渡された場合は
+YaRN の補正済み周波数を使う。`qsa_key_cache` は 4 token が揃った時点で
+mean → RMSNorm → partial rope を行い、pooled key を書き出す。
 
 `test_qsa_pool_scores` は head_dim 128 で CPU 参照と比較する。
 `qsa_topk` はまだ 1 thread / row の正しさ優先実装である。
-残りは q の partial rope、raw key と pooled key の state、top-k の性能版、
-causal mask への AND、main attention への接続である。
+残りは multi-sequence の key state pool、top-k の性能版、
+causal mask への AND、QSA の graph 化と main attention への接続である。
 
 残りは `PLE_CONV` の state pool を Qwen4Exp runtime に持たせること、
 QSA の top-k / mask / attention 接続、4 stream を運ぶ runtime state の接続である。
