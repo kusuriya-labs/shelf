@@ -262,10 +262,12 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
 - 生成一致アンカー: 三条件の `GENERATED_IDS` は target-only の greedy 列と**完全一致**
 - measurement revision: combine の shared gate stride 修正後（`feature-moe-mtp`）
 - **どの drafts でも target-only より遅い**（最良でも 45.92 / 61.74 = 0.74 倍）。verify 時間は
-  行数に対してほぼ一定（2 行 62.2 ms / 平均 4.8 行 64.3 ms / 7 行 66.8 ms）で、そのうち
-  forward 単体は約 22 ms（同一 model の `shelf-bench pp --mode forward --prompt-tokens 1600` の
-  chunk 2 = 11.24 ms/token = 2 行 22.5 ms、chunk 4 = 21.9 ms、chunk 16 = 26.2 ms）。
-  **残りの約 40 ms は round 側の費用**（descriptor 準備・staging・KV / GDN state・sampling）
+  行数に対してほぼ一定（2 行 62.2 ms / 平均 4.8 行 64.3 ms / 7 行 66.8 ms）で、同じ model の
+  2 行 forward 単体の既知の費用は約 22 ms（`shelf-bench pp --mode forward --prompt-tokens 1600`
+  の chunk 2 = 11.24 ms/token、chunk 16 = 26.2 ms）なので、**verify round には forward 以外の
+  約 40 ms 载っている**。それが round 側の費用（descriptor 準備・staging・sampling・state save）
+  なのか DECODE class の multi-row batch の遅さなのかは未切り分け。内訳は
+  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §6
 - draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-04）に対し 2.444 / 7 = 35 %
 - break-even の目安（drafts=4）: round 75.0 ms ÷ 16.2 ms/token = 4.63 token / round なので
   accepted ≥ 3.63 が必要。実測 2.444 では足りない

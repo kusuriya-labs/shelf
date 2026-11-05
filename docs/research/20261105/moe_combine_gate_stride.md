@@ -145,7 +145,7 @@ KV 量子化ではなく combine の bug だった。
   [./moe_mtp.md](./moe_mtp.md) §4 で「未受理」としていた gate はこれで受理条件に置き換わる
 - [./moe_mtp.md](./moe_mtp.md) §5 の「MoE の MTP decode は REJECT」は、本修正によって
   前提（multi-row forward の不一致）が消えたため再評価した。再評価結果は
-  [./moe_mtp.md](./moe_mtp.md) §7 に記載
+  [./moe_mtp.md](./moe_mtp.md) §6 に記載
 
 ## 6. 再現手順
 

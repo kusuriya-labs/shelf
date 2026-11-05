@@ -161,7 +161,9 @@ optimized variantは `src/shelf/kernels/optimized/` に実装する。
   並列化する）。top_k 個の group row を **group row 昇順（= expert 昇順）** に並べ替えて
   f32 で蓄積し、最後に 1 回 bf16 へ丸める。feature ごとの accumulate 順序は workgroup 分割に
   よらないので、出力は分割前後で bit 一致する。shared expert を渡すと
-  `gate_weight * shared` を routed 合計の後に足す。`gate_weight` は活性化済み値で、
+  `gate_weight[t * gate_row_stride] * shared[t]` を routed 合計の後に足す。gate は 1 列でも
+  row-major value の平面なので row stride を呼び出し側が渡す（packed 前提だと token 0 以外の
+  shared expert の寄与が消えるか別データの bytes を読む）。`gate_weight` は活性化済み値で、
   活性化自体は既存の `launch_sigmoid_bf16_f32` が担う（combine は超越関数を使わない）。
 - activation 平面の生成は `launch_activation_quantize_mxfp4_rowref` の `row_index`
   間接参照を使う（`row_index[m] < 0` の行は zero operand + scale 1.0 になる）。

@@ -208,3 +208,7 @@ required test:
 optional external test:
 
 - `test_mtp_parity`（`SHELF_MODEL_DIR_MTP` または `SHELF_MODEL_DIR`）
+  - dense / grouped expert のどちらの checkpoint へ向けても成立する（MoE でも `--mtp` の
+    `GENERATED_IDS` が target-only greedy と一致し、partial accept の GDN compact log replay
+    が走る）。grouped expert model の forward は batch 行数に依存しないことを
+    `test_qwen35moe_rows_parity` が別に固定する（[qwen35moe.md](qwen35moe.md) §7）

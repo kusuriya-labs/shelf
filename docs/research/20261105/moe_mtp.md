@@ -191,6 +191,10 @@ bf16 KV、device 0、修正後 build）で再実測した。
 - **MTP run の `GENERATED_IDS` は三条件とも target-only の greedy 列と完全一致**した
   （§3 で分岐していた 3 番目以降も含む）。verify の前提（multi-row forward の一致）は
   修正で成立した
+- 同じ条件の長い生成で `test_mtp_parity`（`SHELF_MODEL_DIR_MTP=<MoE>`）が PASS:
+  2048 token prompt / 64 token 生成 / drafts=7 で **rounds=15、gdn_restores=11**、
+  `--mtp` ありとなしの `GENERATED_IDS` が完全一致。partial accept の compact log replay を
+  含む経路が MoE で target-only greedy と一致することの gate になった
 - mean accepted は 0.429 / 0.333 / 0.600 → 0.875 / 2.444 / 2.444。draft 受理率も修正で上がった。
   これは §4 の不一致が reject を量大で生んでいたことの裏返しでもある。
   ただし dense 対照（accepted/7 = 6.88 = 98 %）に対し MoE は 2.444 / 7 = 35 % のまま
@@ -202,9 +206,16 @@ bf16 KV、device 0、修正後 build）で再実測した。
 同じ model の multi-row batch forward 単体は `shelf-bench pp --mode forward --prompt-tokens 1600`
 の chunk 別実測で、chunk 2 = 11.24 ms/token（2 行で 22.5 ms）、chunk 4 = 5.48 ms/token
 （21.9 ms）、chunk 8 = 23.5 ms、chunk 16 = 26.2 ms と行数に対して緩やかに増える
-（decode 1 行 = 16.2 ms、chunk 2048 = 3807 tok/s）。つまり **round の 62 ms のうち forward が
-約 22 ms、残りの約 40 ms は verify round 側の費用**（descriptor 準備・staging・KV / GDN state
-・sampling）である。MoE MTP を speedup に载せるには、受理率を dense 並みに上げる前に、
+（decode 1 行 = 16.2 ms、chunk 2048 = 3807 tok/s）。つまり 2 行 forward の既知の上限が
+約 22 ms で、**verify round の 62 ms はそれを 40 ms 上回る**。この 40 ms が
+forward 以外の費用（descriptor 準備・staging・sampling・state save）なのか、
+DECODE class の multi-row batch が prefill class より遅いことなのかは未切り分けである
+（`SHELF_OP_DUMP` は 1 dispatch ごとに fprintf するため 1355 dispatch / pass の MoE で
+host 費用が支配的になり、この分離には使えなかった）。**row bucket は疑いを外した**。
+`--max-num-batched-tokens 16 / 64 / 256 / 2048` で verify 合計は drafts=1 が
+743.20 / 742.20 / 736.30 / 739.53 ms（12 round）、drafts=7 が 463.78 / 465.54 / 462.70 /
+460.84 ms（7 round）で差が無く、生成列も同一だった。bucket の大きさで walk する行数が変わる
+仮説は否定される。MoE MTP を speedup に载せるには、受理率を dense 並みに上げる前に、
 この round 費用を落とすほうが先。受理率側の論点は §3 と同じく MTP expert の MXFP4 再量子化
 （checkpoint では BF16 の expert を phase-2 codec で再量子化している）に残る。
 
@@ -212,7 +223,7 @@ break-even の目安（K=4）: round 675.03 / 9 = 75.0 ms、1 token あたり 16
 round あたり 75.0 / 16.2 = 4.63 token 必要。bonus token を引くと **accepted ≥ 3.63 / 4** で
 あり、実測 2.444 では足りない。
 
-## 6. 副次で見つかった不具合（修正済み）
+## 7. 副次で見つかった不具合（修正済み）
 
 `create_executor` 直後の最初の `execute_batch` で、`prepare_batch_descriptor` の launch が
 `invalid argument` を返し、batch が失敗していた（2 回目の同一 launch は成功する）。
@@ -220,7 +231,7 @@ kernel module の初回 launch と競合する形に見える。`create_executor
 0 request の batch descriptor を 1 回 launch する warm を置き、初回 batch が初回 launch に
 ならないようにした（`test_qwen35moe_mtp_executor` がその経路を通る）。
 
-## 7. 再現条件
+## 8. 再現条件
 
 - build: `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHELF_ROCM_ROOT=$ROCM_PATH
   -DCMAKE_PREFIX_PATH=$ROCM_PATH -DCMAKE_HIP_COMPILER_ROCM_ROOT=$ROCM_PATH
