@@ -39,6 +39,7 @@ enum class QuantSpecId : uint8_t {
     FP8_FINEGRAINED_F32_V1,
     MXFP4_E8M0_G32_V1,
     EXL3_W16A16_V1,
+    EXL3_MUL24_INT8_V1,
 };
 
 enum class ComputeSpecId : uint8_t {
@@ -46,6 +47,7 @@ enum class ComputeSpecId : uint8_t {
     FP8_FINEGRAINED_W8A8_F32_BF16,
     MXFP4_W4A8_F32_BF16,
     EXL3_W16A16_F32_BF16,
+    EXL3_MUL24_INT8_W8A8_F32_BF16,
 };
 
 struct ResolvedQuantSpec {
@@ -63,6 +65,8 @@ inline Result<ComputeSpecId> preferred_gemm_compute_spec(QuantSpecId quant_spec)
             return ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case QuantSpecId::EXL3_W16A16_V1:
             return ComputeSpecId::EXL3_W16A16_F32_BF16;
+        case QuantSpecId::EXL3_MUL24_INT8_V1:
+            return ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
     }
     return Status::invalid_argument("unknown quant spec id", __FILE__, __LINE__);
 }
@@ -79,6 +83,8 @@ inline bool is_gemm_compute_compatible(
             return compute_spec == ComputeSpecId::MXFP4_W4A8_F32_BF16;
         case QuantSpecId::EXL3_W16A16_V1:
             return compute_spec == ComputeSpecId::EXL3_W16A16_F32_BF16;
+        case QuantSpecId::EXL3_MUL24_INT8_V1:
+            return compute_spec == ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16;
     }
     return false;
 }

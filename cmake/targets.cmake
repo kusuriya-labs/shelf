@@ -88,6 +88,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/linear/exl3.hip
+    src/shelf/kernels/optimized/linear/exl3_int8.hip
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
@@ -257,6 +258,7 @@ add_library(shelf_qwen_hybrid STATIC ${SHELF_QWEN_HYBRID_SOURCES})
 target_compile_features(shelf_qwen_hybrid PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen_hybrid PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen_hybrid PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_qwen_hybrid SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_qwen_hybrid PUBLIC shelf_weights shelf_io shelf_quant_bundle)
 target_compile_options(shelf_qwen_hybrid PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
@@ -391,6 +393,7 @@ add_library(shelf_quant_reference STATIC
     src/shelf/quantization/mxfp4/mxfp4.cpp
     src/shelf/quantization/mxfp4/mxfp4_native.cpp
     src/shelf/quantization/exl3/exl3.cpp
+    src/shelf/quantization/exl3/exl3_int8.cpp
 )
 set_source_files_properties(
     src/shelf/quantization/fp8/fp8.cpp

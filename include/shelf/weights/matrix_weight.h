@@ -82,6 +82,7 @@ inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexc
         case quantization::QuantSpecId::FP8_FINEGRAINED_F32_V1: return MatrixEncoding::Fp8Finegrained;
         case quantization::QuantSpecId::MXFP4_E8M0_G32_V1: return MatrixEncoding::Mxfp4;
         case quantization::QuantSpecId::EXL3_W16A16_V1: return MatrixEncoding::Exl3;
+        case quantization::QuantSpecId::EXL3_MUL24_INT8_V1: return MatrixEncoding::Exl3;
         default: break;
     }
     return MatrixEncoding::Bf16;

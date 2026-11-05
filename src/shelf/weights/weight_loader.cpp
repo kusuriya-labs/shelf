@@ -3,6 +3,7 @@
 
 #include <shelf/core/memory/types.h>
 #include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/quantization/manifest/runtime_resolution.h>
 #include <shelf/quantization/fp8/fp8_native.h>
 #include <shelf/quantization/mxfp4/mxfp4.h>
@@ -10,11 +11,13 @@
 #include <shelf/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace shelf::weights {
@@ -490,8 +493,44 @@ Result<MatrixWeight> load_quantized_view(
             return Status::insufficient_memory(
                 ("exl3 trellis allocation failed: " + name).c_str(), __FILE__, __LINE__);
         }
-        st = copy_to_device(w.codes.data<void>(), v.codes.data, v.codes.size, stream);
+        // The marker value is the codebook multiplier: it names the format. The W16A16 kernels decode mul1 only and
+        // the INT8 kernels mul24 only, so anything else is refused. mul24 tiles are made resident n-major.
+        if (v.marker.size != 4u || v.marker.data == nullptr) {
+            return Status::invalid_argument(
+                ("exl3 marker must be 4 bytes: " + name).c_str(), __FILE__, __LINE__);
+        }
+        uint32_t multiplier = 0;
+        std::memcpy(&multiplier, v.marker.data, sizeof(multiplier));
+        const bool mul24 = multiplier == quantization::exl3::kExl3Mul24Multiplier;
+        if (!mul24 && multiplier != quantization::exl3::kExl3Mul1Multiplier) {
+            return Status::unsupported(
+                ("exl3 codebook multiplier is neither mul1 nor mul24: " + name).c_str(), __FILE__, __LINE__);
+        }
+        if (mul24 && v.exl3_half) {
+            return Status::unsupported(
+                ("exl3 mul24 supports integer bit rates only: " + name).c_str(), __FILE__, __LINE__);
+        }
+        if (mul24) {
+            std::vector<uint16_t> resident(trellis_bytes / 2u);
+            if (!quantization::exl3::exl3_tiles_to_nmajor(
+                    static_cast<const uint16_t*>(v.codes.data), kt, nt, ka, resident.data(),
+                    std::max(1u, std::thread::hardware_concurrency()))) {
+                return Status::invalid_argument(
+                    ("exl3 tile repack failed: " + name).c_str(), __FILE__, __LINE__);
+            }
+            st = copy_to_device(w.codes.data<void>(), resident.data(), trellis_bytes, stream);
+            if (st.ok()) {
+                const hipError_t synced = hipStreamSynchronize(stream);  // `resident` dies at the end of this block
+                if (synced != hipSuccess)
+                    return Status::hip_error("hipStreamSynchronize", hipGetErrorString(synced), __FILE__, __LINE__);
+            }
+        } else {
+            st = copy_to_device(w.codes.data<void>(), v.codes.data, v.codes.size, stream);
+        }
         if (!st.ok()) return st;
+        w.quant_spec = mul24 ? quantization::QuantSpecId::EXL3_MUL24_INT8_V1 : quantization::QuantSpecId::EXL3_W16A16_V1;
+        w.compute_spec = mul24 ? quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16
+                               : quantization::ComputeSpecId::EXL3_W16A16_F32_BF16;
 
         std::vector<std::size_t> suh_shape = {static_cast<std::size_t>(kp)};
         std::vector<std::size_t> suh_strides = {1};
@@ -525,7 +564,6 @@ Result<MatrixWeight> load_quantized_view(
 
         w.codes_row_stride_bytes = static_cast<uint32_t>(codes_row_bytes);
         w.preshuffled = false;
-        apply_default_compute_spec(w);
         return w;
     }
 
