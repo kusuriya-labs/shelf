@@ -30,6 +30,8 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
     uint32_t experts,
     uint32_t top_k,
     uint32_t tiles,
+    uint32_t expert_begin,
+    uint32_t owned_experts,
     uint32_t* error_word) {
     const uint32_t t = blockIdx.x;
     if (t >= rows)
@@ -163,10 +165,21 @@ __global__ void __launch_bounds__(kRouterThreads) moe_router_kernel(
         sel_sum += s_win_val[j];
     if (tid < top_k) {
         const int32_t e = s_win_idx[tid];
+        // The weight is renormalized over the whole selection on every rank. A rank that owns
+        // only part of the selection therefore contributes part of the same sum, and the
+        // combine outputs of the ranks add to what one device computes.
+        const bool owned = static_cast<uint32_t>(e) >= expert_begin &&
+                           static_cast<uint32_t>(e) < expert_begin + owned_experts;
         const float w = sel_sum > 0.0f ? s_win_val[tid] / sel_sum : 0.0f;
-        sel_expert[static_cast<size_t>(t) * top_k + tid] = e;
+        sel_expert[static_cast<size_t>(t) * top_k + tid] =
+            owned ? e - static_cast<int32_t>(expert_begin) : kMoeSlotNotOwned;
         sel_weight[static_cast<size_t>(t) * top_k + tid] = w;
-        atomicAdd(&tile_counts[static_cast<size_t>(e) * tiles + tile], 1u);
+        if (owned) {
+            atomicAdd(&tile_counts[static_cast<size_t>(e - static_cast<int32_t>(expert_begin)) *
+                                       tiles +
+                                   tile],
+                      1u);
+        }
     }
 }
 
@@ -263,7 +276,12 @@ __global__ void __launch_bounds__(kRouterThreads) moe_slot_scatter_kernel(
     for (uint32_t t = t_begin; t < t_end; ++t) {
         if (tid < top_k) {
             const uint32_t j = static_cast<size_t>(t) * top_k + tid;
-            const uint32_t e = static_cast<uint32_t>(sel_expert[j]);
+            const int32_t sel = sel_expert[j];
+            if (sel < 0) {
+                slot_row_of[j] = sel;
+                continue;
+            }
+            const uint32_t e = static_cast<uint32_t>(sel);
             const uint32_t slot = atomicAdd(&s_base[e], 1u);
             const uint32_t rank = slot - s_first[e];
             const uint32_t row = (s_group[e] + rank / kGroupRows) * kGroupRows + rank % kGroupRows;
@@ -284,6 +302,8 @@ hipError_t launch_moe_router(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
+    uint32_t expert_begin,
+    uint32_t owned_experts,
     uint32_t* error_word,
     hipStream_t stream) {
     if (logits == nullptr || sel_expert == nullptr || sel_weight == nullptr || tile_counts == nullptr)
@@ -292,12 +312,16 @@ hipError_t launch_moe_router(
         return hipErrorInvalidValue;
     if (top_k == 0u || top_k > kMoeRouterMaxTopK || top_k > experts)
         return hipErrorInvalidValue;
+    if (owned_experts == 0u || owned_experts > experts)
+        return hipErrorInvalidValue;
+    if (expert_begin > experts - owned_experts)
+        return hipErrorInvalidValue;
     if (logits_row_stride < experts)
         return hipErrorInvalidValue;
     const uint32_t tiles = moe_slot_tile_count(rows);
     moe_router_kernel<<<rows, kRouterThreads, 0, stream>>>(
-        logits, logits_row_stride, sel_expert, sel_weight, tile_counts, rows, experts, top_k, tiles,
-        error_word);
+        logits, logits_row_stride, sel_expert, sel_weight, tile_counts, rows, experts, top_k,
+        tiles, expert_begin, owned_experts, error_word);
     return hipGetLastError();
 }
 

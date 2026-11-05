@@ -182,9 +182,19 @@ struct ConcatNode {
 // Routing of one batch: softmax over `experts`, top_k selection, renormalization, and the
 // group plan. The selection and the plan are not values: they live in the plan scratch the
 // graph declares, so this node produces no tensor value.
+//
+// `experts` is the logits width and stays the whole expert count of the model even when the
+// experts are split across devices: every rank must select the same experts. The rank's own
+// range is `expert_begin` for `local_experts` experts, and the plan scratch is sized by that
+// local count. `local_experts == 0` means the rank owns the whole width.
 struct MoeRouterNode {
     uint32_t experts = 0;
     uint32_t top_k = 0;
+    uint32_t local_experts = 0;
+    uint32_t expert_begin = 0;
+
+    // A node that states no range owns every expert.
+    uint32_t owned_experts() const noexcept { return local_experts != 0u ? local_experts : experts; }
 };
 
 // One expert projection of a rank-3 expert plane. `shape` is one expert's {output, input}

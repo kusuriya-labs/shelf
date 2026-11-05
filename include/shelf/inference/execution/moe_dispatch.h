@@ -36,7 +36,11 @@ struct MoePlanArrays {
 struct MoePlanView {
     MoePlanArrays arrays;
     uint32_t tokens = 0;
+    // The experts this device owns and plans rows for. With a split this is one range of the
+    // model's experts, and the router's logits stay as wide as the whole expert count.
     uint32_t experts = 0;
+    uint32_t logit_experts = 0;
+    uint32_t expert_begin = 0;
     uint32_t top_k = 0;
     uint32_t group_capacity = 0;
     uint32_t row_capacity = 0;

@@ -632,9 +632,12 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
         case PrimitiveKind::MOE_ROUTER: {
             if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
             const uint32_t cmd0 = static_cast<uint32_t>(c.plan->dispatches.size());
+            const auto& n = node_as<MoeRouterNode>(node);
             DispatchBinding rb = base_binding(KernelId::MOE_ROUTER);
             rb.input_slots[0] = node.inputs[0].id;
             rb.input_count = 1;
+            rb.scratch_logit_experts = n.experts;
+            rb.scratch_expert_begin = n.expert_begin;
             c.use_moe_scratch(rb);
             c.push(rb);
             DispatchBinding sb = base_binding(KernelId::MOE_PLAN_SCAN);

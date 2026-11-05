@@ -88,6 +88,7 @@ Status emit_moe_ffn(
     uint32_t moe_intermediate,
     uint32_t shared_intermediate,
     uint32_t experts,
+    uint32_t global_experts,
     uint32_t top_k,
     const std::string& layer_prefix,
     MoeFfnOutput& out) {
@@ -102,8 +103,12 @@ Status emit_moe_ffn(
 
     {
         RT::MoeRouterNode route;
-        route.experts = experts;
+        // The logits and the selection cover every expert of the model on every rank; only
+        // the plan arrays and the grouped rows are this rank's range.
+        route.experts = global_experts;
         route.top_k = top_k;
+        route.local_experts = experts;
+        route.expert_begin = plan.expert_begin;
         em.emit(RT::PrimitiveNode{route}, {logits}, {});
         name_last("route");
     }
@@ -175,6 +180,12 @@ Status emit_moe_ffn(
         n.top_k = top_k;
         em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {ffn_out});
         name_last("combine");
+        // With a split, what this rank computed is a partial sum: the experts it does not own
+        // are absent from the group rows, and the shared expert is only part of its width.
+        // The rank partials add to the unsplit result, so the combine output is the
+        // collection point. Like o_proj and gdn_out, this is unconditional: a single-device
+        // program never builds an execution schedule, so the annotation is inert there.
+        pg.nodes.back().tp_combine = 1;
     }
 
     RT::ValueId layer_output = em.value(static_cast<uint32_t>(hidden_key.features));
@@ -195,7 +206,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     const Qwen35MoeModelWeights& weights,
     const Qwen35MoeLowerOptions& options) {
 
-    Status status = validate_qwen35moe_weights(weights, config);
+    if (options.tp_size == 0u || options.tp_rank >= options.tp_size) {
+        return Status::invalid_argument("MoE lowering: tp_size / tp_rank out of range",
+                                        __FILE__, __LINE__);
+    }
+    Status status = validate_qwen35moe_weights(weights, config, options.tp_size,
+                                               options.tp_rank);
     if (!status.ok()) return status;
     status = validate_hidden_taps(options, weights.layers.size());
     if (!status.ok()) return status;
@@ -226,9 +242,43 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     status = QH::checked_double(moe_intermediate, "invalid fused expert width", fused_rows);
     if (!status.ok()) return status;
 
+    // The rank's own widths. The routed experts keep their per-expert geometry and divide
+    // along the expert axis; the shared expert and the backbone's heads divide in width.
+    const uint32_t tp_size = options.tp_size;
+    if ((experts % tp_size) != 0u) {
+        return Status::unsupported("MoE lowering: num_experts must divide by tp_size",
+                                   __FILE__, __LINE__);
+    }
+    if ((shared_intermediate % tp_size) != 0u) {
+        return Status::unsupported(
+            "MoE lowering: shared_expert_intermediate_size must divide by tp_size", __FILE__,
+            __LINE__);
+    }
+    const uint32_t local_experts = experts / tp_size;
+    const uint32_t expert_begin = options.tp_rank * local_experts;
+    const uint32_t local_shared_intermediate = shared_intermediate / tp_size;
+    auto divide_heads = [&](std::size_t heads, const char* what) -> Result<uint32_t> {
+        if (heads == 0u || (heads % tp_size) != 0u) {
+            return Status::unsupported(what, __FILE__, __LINE__);
+        }
+        return static_cast<uint32_t>(heads / tp_size);
+    };
+    auto local_query_heads = divide_heads(config.num_attention_heads,
+                                          "MoE lowering: num_attention_heads must divide by tp_size");
+    if (!local_query_heads.ok()) return local_query_heads.status();
+    auto local_kv_heads = divide_heads(config.num_key_value_heads,
+                                       "MoE lowering: num_key_value_heads must divide by tp_size");
+    if (!local_kv_heads.ok()) return local_kv_heads.status();
+    auto local_key_heads = divide_heads(config.linear_num_key_heads,
+                                        "MoE lowering: linear_num_key_heads must divide by tp_size");
+    if (!local_key_heads.ok()) return local_key_heads.status();
+    auto local_value_heads = divide_heads(config.linear_num_value_heads,
+                                          "MoE lowering: linear_num_value_heads must divide by tp_size");
+    if (!local_value_heads.ok()) return local_value_heads.status();
+
     QH::HybridLoweredPrimitives lowered;
     RT::PrimitiveGraph& pg = lowered.graph;
-    pg.grouped_row_shape = RT::GroupedRowShape{experts, top_k};
+    pg.grouped_row_shape = RT::GroupedRowShape{local_experts, top_k};
 
     std::vector<const MW*> weight_pointers;
     auto add_weight = [&](const MW& w) -> uint32_t {
@@ -242,7 +292,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     std::vector<LayerWeightIndices> layer_weights(weights.layers.size());
     const uint32_t embed_index = add_weight(weights.embed_tokens);
     for (std::size_t li = 0; li < weights.layers.size(); ++li) {
-        auto plan_result = build_moe_expert_group_plan(config, li);
+        auto plan_result = build_moe_expert_group_plan(config, li, tp_size, options.tp_rank);
         if (!plan_result.ok()) return plan_result.status();
         plans[li] = plan_result.release();
 
@@ -346,9 +396,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         block.weight_input_norm = lp.input_norm;
         block.weight_post_norm = lp.post_norm;
         if (lw.is_gdn) {
-            block.gdn_geometry.key_heads = static_cast<uint32_t>(config.linear_num_key_heads);
-            block.gdn_geometry.value_heads =
-                static_cast<uint32_t>(config.linear_num_value_heads);
+            block.gdn_geometry.key_heads = local_key_heads.value();
+            block.gdn_geometry.value_heads = local_value_heads.value();
             block.gdn_geometry.key_head_dim =
                 static_cast<uint32_t>(config.linear_key_head_dim);
             block.gdn_geometry.value_head_dim =
@@ -372,10 +421,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
             block.gdn_indices.p_gdn_norm = lp.gdn_norm;
             block.gdn_indices.state_index = next_gdn_state_index++;
         } else {
-            block.attention_geometry.query_heads =
-                static_cast<uint32_t>(config.num_attention_heads);
-            block.attention_geometry.kv_heads =
-                static_cast<uint32_t>(config.num_key_value_heads);
+            block.attention_geometry.query_heads = local_query_heads.value();
+            block.attention_geometry.kv_heads = local_kv_heads.value();
             block.attention_geometry.head_dim = head_dim;
             block.attention_geometry.rotary_dim = rotary_dim;
             block.attention_geometry.rope_theta = rope_theta;
@@ -406,7 +453,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         MoeFfnOutput ffn_out;
         status = emit_moe_ffn(em, plans[li], lw_idx, lw.ffn, blk.post_norm,
                               blk.attention_residual, hidden_key, moe_intermediate,
-                              shared_intermediate, experts, top_k, layer_prefix, ffn_out);
+                              local_shared_intermediate, local_experts, experts, top_k,
+                              layer_prefix, ffn_out);
         if (!status.ok()) return status;
         layer_input = ffn_out.layer_output;
 
@@ -669,8 +717,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_mtp_to_primitives(
 
     MoeFfnOutput ffn_out;
     status = emit_moe_ffn(em, plan, idx, lw.ffn, blk.post_norm, blk.attention_residual,
-                          hidden_key, moe_intermediate, shared_intermediate, experts, top_k,
-                          "mtp.ffn.", ffn_out);
+                          hidden_key, moe_intermediate, shared_intermediate, experts, experts,
+                          top_k, "mtp.ffn.", ffn_out);
     if (!status.ok()) return status;
 
     const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;

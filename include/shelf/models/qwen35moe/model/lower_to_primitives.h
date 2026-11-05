@@ -9,9 +9,10 @@
 
 namespace shelf::qwen35moe {
 
-// What a caller asks the MoE lowering to add. There is no tensor-partition field: an MoE
-// model lowers to one device, and the routed expert planes are not part of the partition
-// contract.
+// What a caller asks the MoE lowering to add. The tensor-partition fields are tp_size and
+// tp_rank: an MoE model lowers to one rank of an expert-axis split, where the routed expert
+// planes are cut along the expert axis (MoeExpertGroupPlan) and the shared expert and the
+// backbone along their matrix axes (the rank's partition plan).
 struct Qwen35MoeLowerOptions {
     std::span<const uint32_t> hidden_taps;
     // Layers whose input value the runtime wants to replace at run time. Like the hidden
@@ -21,6 +22,12 @@ struct Qwen35MoeLowerOptions {
     // One more external output: the final norm applied to every token row of the last
     // layer. An MTP drafter reads it as the previous hidden of its own block.
     bool emit_normed_token_hidden = false;
+    // One rank of an expert-axis split. The routed experts divide along the expert axis, the
+    // shared expert and the backbone along their matrix axes, and the graph's grouped row
+    // shape carries this rank's expert count. The weights have to have been loaded with the
+    // matching partition plan. tp_size == 1 lowers the whole model on one device.
+    uint32_t tp_size = 1;
+    uint32_t tp_rank = 0;
 };
 
 // Lowers a loaded MoE model to the shared lowered form: the hybrid backbone of every layer

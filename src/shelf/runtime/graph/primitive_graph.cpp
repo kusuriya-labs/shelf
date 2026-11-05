@@ -216,11 +216,15 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                 if (plan.experts == 0u) {
                     moe_status = Status::invalid_argument(
                         "moe router without a grouped row shape", __FILE__, __LINE__);
-                } else if (v.experts != plan.experts || v.top_k != plan.top_k) {
+                } else if (v.owned_experts() != plan.experts || v.top_k != plan.top_k) {
                     moe_status = Status::invalid_argument(
                         "moe router geometry differs from the grouped row shape", __FILE__,
                         __LINE__);
-                } else if (graph.value_features(n.inputs[0]) != plan.experts) {
+                } else if (v.local_experts != 0u &&
+                           v.expert_begin + v.local_experts > v.experts) {
+                    moe_status = Status::invalid_argument(
+                        "moe router owns experts outside its logits", __FILE__, __LINE__);
+                } else if (graph.value_features(n.inputs[0]) != v.experts) {
                     moe_status = Status::invalid_argument(
                         "moe router logits are not one column per expert", __FILE__, __LINE__);
                 } else if (graph.value_dtype(n.inputs[0]) != ValueDType::F32) {

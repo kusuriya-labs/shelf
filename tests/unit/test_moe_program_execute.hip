@@ -435,7 +435,7 @@ int main() {
         return 1;
     }
     if (kn::launch_moe_router(d_logits, logits_stride, r_sel_expert, r_sel_weight,
-                              r_tile_counts, kTokens, kExperts, kTopK, nullptr,
+                              r_tile_counts, kTokens, kExperts, kTopK, 0u, kExperts, nullptr,
                               stream) != hipSuccess)
         check(false, "reference router launch");
     if (kn::launch_moe_slot_scan(r_tile_counts, r_row_begin, r_tile_base, r_group_begin,

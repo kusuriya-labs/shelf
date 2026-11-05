@@ -15,6 +15,7 @@
 #include <vector>
 
 using shelf::kernel::kMoeRouterMaxExperts;
+using shelf::kernel::kMoeSlotNotOwned;
 using shelf::kernel::kMxfp4GemmRowTile;
 using shelf::kernel::launch_moe_router;
 using shelf::kernel::launch_moe_slot_scan;
@@ -166,11 +167,14 @@ struct Plan {
 
 Plan run_plan(const std::vector<float>& logits, uint32_t rows, uint32_t experts, uint32_t top_k,
               const Buffers& b, hipStream_t stream, const std::string& tag,
-              bool zero_counts = true) {
+              bool zero_counts = true, uint32_t expert_begin = 0, uint32_t owned_experts = 0) {
+    // The logits are always as wide as the model's experts. A split plans and materializes
+    // only the owned range, so the plan arrays are sized by owned_experts.
+    const uint32_t owned = owned_experts != 0u ? owned_experts : experts;
     const uint32_t tiles = moe_slot_tile_count(rows);
     const uint32_t slots = rows * top_k;
-    const uint32_t group_bound = moe_group_count_upper_bound(rows, experts, top_k);
-    const uint32_t row_capacity = moe_group_row_capacity(rows, experts, top_k);
+    const uint32_t group_bound = moe_group_count_upper_bound(rows, owned, top_k);
+    const uint32_t row_capacity = moe_group_row_capacity(rows, owned, top_k);
 
     h2d(b.logits, logits);
     if (hipMemset(b.error_word, 0, sizeof(uint32_t)) != hipSuccess) {
@@ -178,20 +182,21 @@ Plan run_plan(const std::vector<float>& logits, uint32_t rows, uint32_t experts,
         std::exit(1);
     }
     if (zero_counts &&
-        hipMemset(b.tile_counts, 0, static_cast<std::size_t>(experts) * tiles * sizeof(uint32_t)) !=
+        hipMemset(b.tile_counts, 0, static_cast<std::size_t>(owned) * tiles * sizeof(uint32_t)) !=
             hipSuccess) {
         std::printf("FAIL memset %s\n", tag.c_str());
         std::exit(1);
     }
     if (launch_moe_router(b.logits, experts, b.sel_expert, b.sel_weight, b.tile_counts, rows,
-                          experts, top_k, b.error_word, stream) != hipSuccess)
+                          experts, top_k, expert_begin, owned, b.error_word,
+                          stream) != hipSuccess)
         check(false, tag + ": launch_moe_router");
     if (launch_moe_slot_scan(b.tile_counts, b.expert_row_begin, b.tile_base, b.expert_group_begin,
-                             b.group_expert, b.group_rows, b.group_count, b.row_token, rows, experts,
+                             b.group_expert, b.group_rows, b.group_count, b.row_token, rows, owned,
                              top_k, stream) != hipSuccess)
         check(false, tag + ": launch_moe_slot_scan");
     if (launch_moe_slot_scatter(b.sel_expert, b.tile_base, b.expert_row_begin,
-                                b.expert_group_begin, b.row_token, b.slot_row_of, rows, experts,
+                                b.expert_group_begin, b.row_token, b.slot_row_of, rows, owned,
                                 top_k, stream) != hipSuccess)
         check(false, tag + ": launch_moe_slot_scatter");
     if (hipStreamSynchronize(stream) != hipSuccess)
@@ -200,8 +205,8 @@ Plan run_plan(const std::vector<float>& logits, uint32_t rows, uint32_t experts,
     Plan p;
     p.sel_expert = d2h(b.sel_expert, slots);
     p.sel_weight = d2h(b.sel_weight, slots);
-    p.expert_row_begin = d2h(b.expert_row_begin, experts + 1u);
-    p.expert_group_begin = d2h(b.expert_group_begin, experts + 1u);
+    p.expert_row_begin = d2h(b.expert_row_begin, owned + 1u);
+    p.expert_group_begin = d2h(b.expert_group_begin, owned + 1u);
     p.group_expert = d2h(b.group_expert, group_bound);
     p.group_rows = d2h(b.group_rows, group_bound);
     p.row_token = d2h(b.row_token, row_capacity);
@@ -269,8 +274,10 @@ bool selects(const Plan& p, uint32_t token, uint32_t expert, uint32_t top_k) {
 }
 
 void compare_plan(const Plan& p, uint32_t rows, uint32_t experts, uint32_t top_k,
-                  const std::string& tag) {
-    const uint32_t slots = rows * top_k;
+                  const std::string& tag, uint32_t slot_total = 0) {
+    // A rank of an expert-axis split plans only its owned selections, so the slot total it has
+    // to partition is smaller than rows * top_k.
+    const uint32_t slots = slot_total != 0u ? slot_total : rows * top_k;
     check(p.expert_row_begin[0] == 0u && p.expert_row_begin[experts] == slots,
           tag + ": expert slot ranges partition every slot");
     check(p.expert_group_begin[0] == 0u, tag + ": group ranges start at 0");
@@ -350,12 +357,19 @@ void compare_plan(const Plan& p, uint32_t rows, uint32_t experts, uint32_t top_k
         for (uint32_t j = 0; j < top_k; ++j) {
             const std::size_t at = static_cast<std::size_t>(t) * top_k + j;
             const int32_t r = p.slot_row_of[at];
+            const int32_t e = p.sel_expert[at];
+            // A rank of an expert-axis split leaves the selections it does not own marked in
+            // both arrays; they claim no group row and are not part of the ordering.
+            if (e == kMoeSlotNotOwned) {
+                if (r != kMoeSlotNotOwned) row_map_ok = false;
+                continue;
+            }
             if (r < 0 || static_cast<uint32_t>(r) >= p.row_token.size() || used[r] ||
                 p.row_token[r] != static_cast<int32_t>(t))
                 row_map_ok = false;
             else
                 used[r] = 1;
-            by_row.push_back({r, p.sel_expert[at]});
+            by_row.push_back({r, e});
         }
         std::sort(by_row.begin(), by_row.end());
         for (std::size_t i = 1; i < by_row.size(); ++i)
@@ -423,6 +437,75 @@ void run_case(uint32_t rows, uint32_t experts, uint32_t top_k, bool with_ties,
           tag + ": a second round without an external zeroing gives the same plan");
     std::printf("%s: groups %u / slot rows %u\n", tag.c_str(), p.group_count,
                 p.group_count * kMxfp4GemmRowTile);
+}
+
+void run_expert_axis_split_case(const Buffers& b, hipStream_t stream) {
+    // The same logits routed by two ranks that own half the experts each. The selection and
+    // the renormalized weights have to be identical to the unsplit round on every slot; only
+    // the plan arrays and the group rows are restricted to the owned range, and a slot the
+    // rank does not own carries the not-owned marker in both sel_expert and slot_row_of.
+    constexpr uint32_t rows = 64u;
+    constexpr uint32_t experts = 256u;
+    constexpr uint32_t top_k = 8u;
+    constexpr uint32_t half = experts / 2u;
+    const std::vector<float> logits = make_logits(rows, experts, top_k, 20261105u, false);
+
+    const Plan whole = run_plan(logits, rows, experts, top_k, b, stream, "split whole");
+    const Plan r0 = run_plan(logits, rows, experts, top_k, b, stream, "split rank 0", true, 0u,
+                             half);
+    const Plan r1 = run_plan(logits, rows, experts, top_k, b, stream, "split rank 1", true, half,
+                             half);
+    const Reference ref = reference_route(logits, rows, experts, top_k);
+
+    bool weight_ok = true;
+    bool index_ok = true;
+    bool marker_ok = true;
+    bool partition_ok = true;
+    for (uint32_t t = 0; t < rows; ++t) {
+        for (uint32_t j = 0; j < top_k; ++j) {
+            const std::size_t at = static_cast<std::size_t>(t) * top_k + j;
+            if (whole.sel_expert[at] != ref.expert[at]) index_ok = false;
+            const int32_t e = whole.sel_expert[at];
+            const bool low = static_cast<uint32_t>(e) < half;
+            if (r0.sel_weight[at] != whole.sel_weight[at] ||
+                r1.sel_weight[at] != whole.sel_weight[at])
+                weight_ok = false;
+            if (r0.sel_expert[at] != (low ? e : kMoeSlotNotOwned) ||
+                r1.sel_expert[at] != (low ? kMoeSlotNotOwned : e - static_cast<int32_t>(half)))
+                marker_ok = false;
+            if ((r0.slot_row_of[at] < 0) == (r1.slot_row_of[at] < 0)) partition_ok = false;
+            if (r0.slot_row_of[at] < 0 && r1.slot_row_of[at] >= 0) {
+                if (whole.sel_expert[at] < static_cast<int32_t>(half)) partition_ok = false;
+            }
+            if (r1.slot_row_of[at] < 0 && r0.slot_row_of[at] >= 0) {
+                if (whole.sel_expert[at] >= static_cast<int32_t>(half)) partition_ok = false;
+            }
+        }
+    }
+    check(weight_ok, "split: every rank carries the whole selection's renormalized weight");
+    check(marker_ok, "split: sel_expert is the local plane index or kMoeSlotNotOwned");
+    check(partition_ok, "split: exactly one rank materializes each selection slot");
+
+    // Each rank's plan is a plan over its own expert count, and the two ranks together cover
+    // every slot the unsplit round planned.
+    const uint32_t whole_slots = rows * top_k;
+    uint32_t owned0 = 0;
+    uint32_t owned1 = 0;
+    for (uint32_t at = 0; at < whole_slots; ++at) {
+        if (r0.slot_row_of[at] >= 0) ++owned0;
+        if (r1.slot_row_of[at] >= 0) ++owned1;
+    }
+    compare_plan(r0, rows, half, top_k, "split rank 0 plan", owned0);
+    compare_plan(r1, rows, half, top_k, "split rank 1 plan", owned1);
+    check(owned0 + owned1 == whole_slots, "split: the two ranks cover every slot");
+    check(owned0 == r0.expert_row_begin[half],
+          "split: rank 0's plan counts exactly its owned slots");
+    check(owned1 == r1.expert_row_begin[half],
+          "split: rank 1's plan counts exactly its owned slots");
+    bool local_experts_ok = true;
+    for (uint32_t g = 0; g < r1.group_count; ++g)
+        if (r1.group_expert[g] >= half) local_experts_ok = false;
+    check(local_experts_ok, "split: group_expert indexes the local plane, not the global expert");
 }
 
 void run_unsafe_logits_case(const Buffers& b, hipStream_t stream) {
@@ -512,22 +595,32 @@ int main() {
     run_case(65, 256, 8, false, b, stream);
     run_case(512, 256, 8, false, b, stream);
 
-    check(launch_moe_router(nullptr, 0, nullptr, nullptr, nullptr, 1, 8, 2, nullptr,
+    check(launch_moe_router(nullptr, 0, nullptr, nullptr, nullptr, 1, 8, 2, 0u, 8u, nullptr,
                             stream) != hipSuccess,
           "null logits rejected");
-    check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 9,
+    check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 9, 0u, 8u,
                             b.error_word, stream) != hipSuccess,
           "top_k greater than experts rejected");
     check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1,
-                            kMoeRouterMaxExperts + 1u, 2, b.error_word,
+                            kMoeRouterMaxExperts + 1u, 2, 0u, kMoeRouterMaxExperts + 1u, b.error_word,
                             stream) != hipSuccess,
           "experts above the kernel bound rejected");
     check(launch_moe_slot_scatter(b.sel_expert, b.tile_base, b.expert_row_begin,
                                   b.expert_group_begin, b.row_token, b.slot_row_of, 0, 8, 2,
                                   stream) != hipSuccess,
           "zero rows rejected");
+    check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 2, 0u, 0u,
+                            b.error_word, stream) != hipSuccess,
+          "an empty owned expert range is rejected");
+    check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 2, 0u, 9u,
+                            b.error_word, stream) != hipSuccess,
+          "owning more experts than the logits hold is rejected");
+    check(launch_moe_router(b.logits, 8, b.sel_expert, b.sel_weight, b.tile_counts, 1, 8, 2, 5u, 4u,
+                            b.error_word, stream) != hipSuccess,
+          "an owned expert range that runs past the logits is rejected");
 
     run_unsafe_logits_case(b, stream);
+    run_expert_axis_split_case(b, stream);
 
     hipFree(b.logits);
     hipFree(b.error_word);

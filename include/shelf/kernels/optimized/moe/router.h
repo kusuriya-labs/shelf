@@ -52,6 +52,12 @@ constexpr uint32_t kMoeRouterMaxExperts = 512u;
 constexpr uint32_t kMoeRouterMaxTopK = 16u;
 constexpr uint32_t kMoeSlotTileTokens = ::shelf::runtime::kGroupedSlotTileRows;
 
+// A selection whose expert this device does not own. The routed-expert split is along the
+// expert axis, so every rank selects the same global top-k but only materializes the slots
+// it owns. sel_weight stays renormalized over the whole selection, which is what makes the
+// ranks' partial sums equal the unsplit result.
+constexpr int32_t kMoeSlotNotOwned = -1;
+
 static_assert(kMxfp4GemmRowTile == ::shelf::runtime::kGroupedRowTile,
               "a group is one grouped GEMM row tile, so the plan and the GEMM tile must match");
 
@@ -88,6 +94,13 @@ hipError_t launch_moe_router(
     uint32_t rows,
     uint32_t experts,
     uint32_t top_k,
+    // The expert range this device owns. `experts` is always the logits width, because the
+    // softmax and the top-k selection have to be the same on every rank. A selection inside
+    // the owned range is written as its index in that range, and one outside it as
+    // kMoeSlotNotOwned, so the plan arrays are indexed by the local expert count
+    // `owned_experts` and tile_counts holds owned_experts * moe_slot_tile_count(rows) entries.
+    uint32_t expert_begin,
+    uint32_t owned_experts,
     uint32_t* error_word,
     hipStream_t stream);
 

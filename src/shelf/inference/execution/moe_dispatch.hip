@@ -59,6 +59,8 @@ Result<MoePlanView> resolve_moe_plan(const Program& program, const DispatchBindi
     MoePlanView view;
     view.tokens = tokens;
     view.experts = b.scratch_experts;
+    view.logit_experts = b.scratch_logit_experts != 0u ? b.scratch_logit_experts : b.scratch_experts;
+    view.expert_begin = b.scratch_expert_begin;
     view.top_k = b.scratch_top_k;
     view.group_capacity =
         ::shelf::runtime::grouped_row_tile_count(tokens, {b.scratch_experts, b.scratch_top_k});
@@ -93,7 +95,7 @@ Result<OptimizedLaunchResult> try_launch_moe_router(const Program& program,
     const HostResolvedValue in = in_res.value();
     if (in.dtype != ValueDType::F32) return bad("moe router: logits are not f32");
     if (in.row_domain != ValueRowDomain::TOKEN_ROWS) return bad("moe router: logits row domain");
-    if (in.feature_count != plan.value().experts)
+    if (in.feature_count != plan.value().logit_experts)
         return bad("moe router: logits are not one column per expert");
     if (in.ptr == nullptr) return bad("moe router: logits unbound");
     if (in.row_stride < in.feature_count) return bad("moe router: logits row stride");
@@ -101,7 +103,8 @@ Result<OptimizedLaunchResult> try_launch_moe_router(const Program& program,
     const hipError_t herr = ::shelf::kernel::launch_moe_router(
         static_cast<const float*>(in.ptr), in.row_stride, plan.value().arrays.sel_expert,
         plan.value().arrays.sel_weight, plan.value().arrays.tile_counts, plan.value().tokens,
-        plan.value().experts, plan.value().top_k, ctx.error_word, stream);
+        plan.value().logit_experts, plan.value().top_k, plan.value().expert_begin,
+        plan.value().experts, ctx.error_word, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe router launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);

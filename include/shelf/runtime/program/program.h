@@ -95,6 +95,11 @@ struct DispatchBinding {
     uint32_t scratch_tokens = 0;
     uint32_t scratch_experts = 0;
     uint32_t scratch_top_k = 0;
+    // On MOE_ROUTER only: the logits' expert count and the first expert this device owns. The
+    // plan scratch covers the owned range, so with a split these differ from scratch_experts.
+    // Zero logit_experts means the logits are as wide as the scratch is deep.
+    uint32_t scratch_logit_experts = 0;
+    uint32_t scratch_expert_begin = 0;
 };
 
 enum class ValueStorage : uint8_t {
