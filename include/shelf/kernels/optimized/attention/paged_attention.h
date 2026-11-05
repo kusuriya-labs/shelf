@@ -93,6 +93,14 @@ struct PagedAttentionCommonArgs {
     uint32_t elems_per_layer = 0;
 
     float scale = 0.0f;
+
+    // Optional per-query token mask, one U8 per logical cache position. A token is
+    // visible only when its byte is non-zero. `mask_stride` is the row stride in bytes
+    // and `mask_tokens` is the number of covered positions. When null, attention is
+    // causal over the row position.
+    const uint8_t* token_mask = nullptr;
+    uint32_t mask_stride = 0;
+    uint32_t mask_tokens = 0;
 };
 
 struct PagedAttentionBf16Args {
@@ -101,7 +109,7 @@ struct PagedAttentionBf16Args {
     const bf16_t* v_pool = nullptr;
 };
 
-static_assert(sizeof(PagedAttentionCommonArgs) == 144);
+static_assert(sizeof(PagedAttentionCommonArgs) == 160);
 static_assert(alignof(PagedAttentionCommonArgs) == 8);
 static_assert(offsetof(PagedAttentionCommonArgs, q) == 0);
 static_assert(offsetof(PagedAttentionCommonArgs, output) == 8);
@@ -128,10 +136,13 @@ static_assert(offsetof(PagedAttentionCommonArgs, elems_per_token) == 128);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_page) == 132);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_layer) == 136);
 static_assert(offsetof(PagedAttentionCommonArgs, scale) == 140);
-static_assert(sizeof(PagedAttentionBf16Args) == 160);
+static_assert(offsetof(PagedAttentionCommonArgs, token_mask) == 144);
+static_assert(offsetof(PagedAttentionCommonArgs, mask_stride) == 152);
+static_assert(offsetof(PagedAttentionCommonArgs, mask_tokens) == 156);
+static_assert(sizeof(PagedAttentionBf16Args) == 176);
 static_assert(alignof(PagedAttentionBf16Args) == 8);
-static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 144);
-static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 152);
+static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 160);
+static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 168);
 
 struct PagedAttentionSplitArgs {
     PagedAttentionCommonArgs common{};
@@ -147,16 +158,16 @@ struct PagedAttentionSplitReduceArgs {
     uint32_t splits = 0;
 };
 
-static_assert(sizeof(PagedAttentionSplitArgs) == 176);
+static_assert(sizeof(PagedAttentionSplitArgs) == 192);
 static_assert(alignof(PagedAttentionSplitArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 144);
-static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 152);
-static_assert(offsetof(PagedAttentionSplitArgs, partials) == 160);
-static_assert(offsetof(PagedAttentionSplitArgs, splits) == 168);
-static_assert(sizeof(PagedAttentionSplitReduceArgs) == 160);
+static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 160);
+static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 168);
+static_assert(offsetof(PagedAttentionSplitArgs, partials) == 176);
+static_assert(offsetof(PagedAttentionSplitArgs, splits) == 184);
+static_assert(sizeof(PagedAttentionSplitReduceArgs) == 176);
 static_assert(alignof(PagedAttentionSplitReduceArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 144);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 152);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 160);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 168);
 
 struct PagedAttentionFp8SplitArgs {
     PagedAttentionCommonArgs common{};
@@ -168,14 +179,14 @@ struct PagedAttentionFp8SplitArgs {
     uint32_t splits = 0;
 };
 
-static_assert(sizeof(PagedAttentionFp8SplitArgs) == 192);
+static_assert(sizeof(PagedAttentionFp8SplitArgs) == 208);
 static_assert(alignof(PagedAttentionFp8SplitArgs) == 8);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, k_pool) == 144);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, v_pool) == 152);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, k_scale_pool) == 160);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, v_scale_pool) == 168);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, partials) == 176);
-static_assert(offsetof(PagedAttentionFp8SplitArgs, splits) == 184);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, k_pool) == 160);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, v_pool) == 168);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, k_scale_pool) == 176);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, v_scale_pool) == 184);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, partials) == 192);
+static_assert(offsetof(PagedAttentionFp8SplitArgs, splits) == 200);
 
 hipError_t
 launch_attention_paged_bf16(

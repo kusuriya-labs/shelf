@@ -189,8 +189,20 @@ attn HyperConnection mix
 - shared expert は gate_proj / up_proj / down_proj の dense EXL3 linear と
   `shared_expert_gate` の sigmoid で表現する。
 - `MoeCombineNode` が expert の部分和と shared expert を token row に戻す。
-- QSA（full_attention）層は `PagedAttentionNode` が token mask を入力に持たないため
-  `unsupported` とする。indexer の graph lowering と key state はこの層の外で接続できる。
+- QSA（full_attention）層は indexer の token mask を `PagedAttentionNode` の
+  2 番目の入力にし、gated attention で消費する。
+
+QSA 層は次の順に lower される。
+
+```text
+indexer -> QSA_EXPAND_MASK
+q/k/v 射影 -> q/k norm -> rope -> KV_APPEND
+  -> PAGED_ATTENTION(mask)
+  -> sigmoid gate -> o_proj
+```
+
+`test_qwen4exp_qsa_layer` は QSA 層が mask を生成し、paged attention が
+2 入力で消費し、sigmoid gate と MoE に接続することを固定する。
 
 `test_qwen4exp_layer` は GDN 層について次を固定する。
 
@@ -293,6 +305,26 @@ multi-sequence 用に次の batch kernel を追加した。
 
 `test_qsa_state_pool` は 2 sequence の key cache を CPU 参照と比較し、
 scores / top-k / mask と slot copy を検証する。
+
+### paged attention の token mask
+
+`PagedAttentionCommonArgs` に次の 3 つを追加した。
+
+| フィールド | 内容 |
+| --- | --- |
+| `token_mask` | `[rows][mask_stride]` U8。0 の key は attention から除外 |
+| `mask_stride` | mask の row stride（byte） |
+| `mask_tokens` | mask が覆う論理位置数 |
+
+`mask_tokens` より後ろの位置は可視でない。`token_mask == nullptr` のときは
+従来どおり row position までの causal attention である。
+
+mask がある場合、selector は tiled prefill kernel と split decode kernel を
+選ばない。per-(row, q_head) の decode kernel が mask を参照する。mixed batch でも
+prefill region は decode kernel で処理する。tree ancestor の token も同じ mask を通す。
+
+`test_qsa_attention_mask` は mask 付き attention を CPU 参照と比較する。
+`test_paged_attention_plan_splits` は mask が prefill / split を無効にすることを固定する。
 
 ## 3. routed expert plane
 

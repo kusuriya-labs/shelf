@@ -159,7 +159,11 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, L2NormalizeNode>) shapes_ok = valid_shape_key(v.shape) && valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, ScaleNode>) shapes_ok = valid_shape_key(v.shape);
             else if constexpr (std::is_same_v<T, KvAppendNode>) shapes_ok = valid_shape_key(v.attention);
-            else if constexpr (std::is_same_v<T, PagedAttentionNode>) shapes_ok = valid_shape_key(v.attention);
+            else if constexpr (std::is_same_v<T, PagedAttentionNode>) {
+            shapes_ok = valid_shape_key(v.attention) &&
+                        (!v.has_token_mask ||
+                         (v.mask_features != 0u && v.mask_features <= (1u << 20)));
+        }
             else if constexpr (std::is_same_v<T, StatefulCausalConv1DNode>) shapes_ok = valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) shapes_ok = valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, EmbeddingLookupNode>) shapes_ok = v.vocab_size != 0 && v.hidden_size != 0 && valid_shape_key(v.weight_shape);
@@ -200,7 +204,12 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
         if (!shapes_ok) return fail("invalid shape key");
 
         auto arity = arity_of(k);
-        if (n.inputs.size() != arity.tensor_inputs || n.outputs.size() != arity.tensor_outputs) {
+        size_t expected_inputs = arity.tensor_inputs;
+        if (k == PrimitiveKind::PAGED_ATTENTION &&
+            std::get<PagedAttentionNode>(n.node).has_token_mask) {
+            expected_inputs = 2u;
+        }
+        if (n.inputs.size() != expected_inputs || n.outputs.size() != arity.tensor_outputs) {
             return fail("primitive tensor arity mismatch");
         }
 
@@ -401,6 +410,19 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             }
         }, n.node);
         if (!qsa_status.ok()) return qsa_status;
+
+        if (k == PrimitiveKind::PAGED_ATTENTION) {
+            const auto& pa = std::get<PagedAttentionNode>(n.node);
+            if (pa.has_token_mask) {
+                if (graph.value_dtype(n.inputs[1]) != ValueDType::U8 ||
+                    graph.value_row_domain(n.inputs[1]) != ValueRowDomain::TOKEN_ROWS ||
+                    graph.value_features(n.inputs[1]) != pa.mask_features) {
+                    return fail("paged attention token mask shape mismatch");
+                }
+            } else if (n.inputs.size() != 1u) {
+                return fail("paged attention without mask has extra inputs");
+            }
+        }
 
         const bool stateful =
             k == PrimitiveKind::KV_APPEND ||

@@ -6,6 +6,7 @@
 #include <shelf/models/qwen4exp/model/hyper_connection_lowering.h>
 #include <shelf/models/qwen4exp/model/moe_lowering.h>
 #include <shelf/models/qwen4exp/model/ple_lowering.h>
+#include <shelf/models/qwen4exp/model/qsa_lowering.h>
 
 #include <cstdint>
 
@@ -25,6 +26,10 @@ struct Qwen4ExpLayerLowering {
     ::shelf::qwen_hybrid::GdnLoweringWeights gdn_weights;
     ::shelf::qwen_hybrid::GdnLoweringIndices gdn_indices;
 
+    Qwen4ExpQsaLoweringGeometry qsa_geometry;
+    Qwen4ExpQsaLoweringWeights qsa_weights;
+    Qwen4ExpQsaLoweringIndices qsa_indices;
+
     Qwen4ExpMoeLoweringGeometry moe_geometry;
     Qwen4ExpMoeWeights moe_weights;
     Qwen4ExpMoeLoweringIndices moe_indices;
@@ -38,11 +43,11 @@ struct Qwen4ExpLayerLowering {
 };
 
 // One Qwen4Exp decoder layer:
-//   attn HyperConnection mix -> GDN -> apply
+//   attn HyperConnection mix -> GDN or QSA -> apply
 //   mlp  HyperConnection mix -> MoE FFN -> apply
 //
-// `hyper` is the [rows, hc * hidden] BF16 stream stack. QSA (full-attention) layers are
-// rejected until the indexer primitive exists.
+// `hyper` is the [rows, hc * hidden] BF16 stream stack. A QSA layer runs the indexer and
+// feeds its token mask to the gated attention.
 Result<::shelf::runtime::ValueId> emit_qwen4exp_layer(
     ::shelf::qwen_hybrid::Emitter& em,
     const Qwen4ExpLayerLowering& layer,

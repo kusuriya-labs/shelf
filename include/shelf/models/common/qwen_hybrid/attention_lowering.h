@@ -36,6 +36,9 @@ struct GatedAttentionLoweringIndices {
     std::uint32_t p_q_norm = 0;
     std::uint32_t p_k_norm = 0;
     std::uint32_t state_index = 0;
+    // QSA sparse selection: when set, the paged attention consumes this U8 token mask.
+    bool has_token_mask = false;
+    RT::ValueId token_mask{};
 };
 
 inline RT::ValueId emit_gated_attention(
@@ -119,10 +122,14 @@ inline RT::ValueId emit_gated_attention(
         RT::PagedAttentionNode pan{
             attn_key,
             geo.head_dim ? 1.0f / sqrtf(static_cast<float>(geo.head_dim)) : 1.0f,
-            idx.state_index};
+            idx.state_index,
+            idx.has_token_mask,
+            idx.has_token_mask ? em.pg.value_features(idx.token_mask) : 0u,
+        };
         v_ctx = em.value(q_features, RT::ValueDType::F32);
         auto& pgn = pg.add_node(RT::PrimitiveNode{pan});
-        pgn.inputs = {v_qr};
+        pgn.inputs = idx.has_token_mask ? std::vector<RT::ValueId>{v_qr, idx.token_mask}
+                                        : std::vector<RT::ValueId>{v_qr};
         pgn.outputs = {v_ctx};
         pgn.state_inputs = {kv_state};
         name_last("attn_core");

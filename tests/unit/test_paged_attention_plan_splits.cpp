@@ -24,6 +24,7 @@ using shelf::runtime::ValueDType;
 
 // The pointer members only feed the workspace-size comparison; they are never read here.
 alignas(64) uint8_t kPartials[64] = {};
+alignas(64) uint8_t kTokenMask[64] = {};
 uint32_t kTreeAnc[2] = {0u, 1u};
 
 PagedAttentionPlan plan_for(uint32_t q_heads, uint32_t kv_heads, uint32_t visible,
@@ -47,6 +48,25 @@ PagedAttentionPlan plan_for(uint32_t q_heads, uint32_t kv_heads, uint32_t visibl
 }
 
 constexpr uint32_t kPlentyBytes = 1u << 20;
+
+PagedAttentionPlan masked_plan(bool prefill_intent) {
+    PagedAttentionResolvedArgs a;
+    a.kv_dtype = KVCacheDType::BF16;
+    a.output_dtype = ValueDType::F32;
+    a.common.rows = 1u;
+    a.common.q_heads = 16u;
+    a.common.kv_heads = 4u;
+    a.common.head_dim = 256u;
+    a.common.page_tokens = 16u;
+    a.common.token_mask = kTokenMask;
+    a.common.mask_stride = sizeof(kTokenMask);
+    a.common.mask_tokens = sizeof(kTokenMask);
+    HostExecutionContext ctx;
+    ctx.spec.max_visible_tokens = 4096u;
+    ctx.decode_attn_partials = kPartials;
+    ctx.decode_attn_partial_bytes = kPlentyBytes;
+    return shelf::execution::plan_paged_attention(a, ctx, prefill_intent);
+}
 
 }  // namespace
 
@@ -76,6 +96,10 @@ int main() {
           "partial workspace too small stays non-split");
     check(plan_for(16, 4, 4096, kPlentyBytes, true).splits == 1u,
           "tree rows stay non-split");
+    check(masked_plan(false).splits == 1u,
+          "a token mask disables the split decode kernel");
+    check(!masked_plan(false).use_prefill && !masked_plan(true).use_prefill,
+          "a token mask disables the tiled prefill kernel");
 
     check(::shelf::kernel::paged_attention_bf16_split_supports(4u) &&
               ::shelf::kernel::paged_attention_bf16_split_supports(6u) &&

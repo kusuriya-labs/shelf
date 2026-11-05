@@ -719,8 +719,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                n.state_index) +
                 1;
             b.group_size = n.attention.head_dim;
-            b.input_slots[0] = node.inputs[0].id;
-            b.input_count = 1;
+            for (uint32_t i = 0; i < node.inputs.size() && i < kMaxIoSlots; ++i)
+                b.input_slots[i] = node.inputs[i].id;
+            b.input_count = static_cast<uint32_t>(node.inputs.size());
             auto po = c.produce(node.outputs[0]);
             if (!po.ok()) return po;
             b.output_slots[0] = node.outputs[0].id;

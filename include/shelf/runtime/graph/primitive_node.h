@@ -170,6 +170,11 @@ struct PagedAttentionNode {
     AttentionShapeKey attention;
     float scale = 0.0f;
     uint32_t state_index = 0;
+    // When true, the second tensor input is a [rows, mask_features] U8 mask. A key is
+    // visible only when its byte is non-zero, so the attention consumes the block
+    // selection produced by the QSA indexer.
+    bool has_token_mask = false;
+    uint32_t mask_features = 0;
 };
 
 struct StatefulCausalConv1DNode {

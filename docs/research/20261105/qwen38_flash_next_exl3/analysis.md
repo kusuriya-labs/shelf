@@ -574,8 +574,22 @@ Gate A として、QSA の key state pool と indexer の graph 接続を追加�
 - `test_qwen4exp_qsa_site` が graph と program の dispatch 順、state descriptor を
   固定する。
 
-QSA 層全体はまだ `unsupported` である。残りは `PagedAttention` への token mask
-入力（Gate B）、QSA 層の lowering、4 stream を運ぶ runtime state の接続である。
+Gate B として、QSA の token mask を paged attention に適用した。
+
+- `PagedAttentionCommonArgs` に `token_mask` / `mask_stride` / `mask_tokens` を追加。
+- mask がある場合、decode kernel が key ごとに mask を参照する。
+- tiled prefill kernel と split decode kernel は mask を扱えないため、
+  selector がそれらを選ばない。mixed batch の prefill region も decode kernel で処理する。
+- tree ancestor の token も同じ mask を通す。
+- `emit_gated_attention` は任意の token mask を paged attention の 2 番目の入力にできる。
+- `emit_qwen4exp_qsa` が indexer の mask を gated attention に接続し、
+  `emit_qwen4exp_layer` が QSA 層を lower する。
+- `test_qsa_attention_mask` が mask 付き attention を CPU 参照と比較する。
+- `test_qwen4exp_qsa_layer` が QSA 層の mask 生成、mask 消費、sigmoid gate、
+  MoE 接続を固定する。
+
+残りは Qwen4Exp executor、全 48 層の model lowering、4 stream を運ぶ runtime state の
+接続である。
 
 #### 結論
 

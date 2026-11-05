@@ -59,8 +59,8 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     const auto& b = program.dispatches[dispatch_index];
     if (b.kernel_id != KernelId::PAGED_ATTENTION)
         return Status::invalid_state("paged-attention: kernel_id != PAGED_ATTENTION", __FILE__, __LINE__);
-    if (b.input_count != 1 || b.output_count != 1)
-        return Status::invalid_state("paged-attention: io count != 1/1", __FILE__, __LINE__);
+    if ((b.input_count != 1 && b.input_count != 2) || b.output_count != 1)
+        return Status::invalid_state("paged-attention: io count is not q[/mask]/out", __FILE__, __LINE__);
 
     const auto* sb = find_state_binding_for_descriptor(program, b.descriptor_slot);
     if (sb == nullptr || sb->kind != ::shelf::runtime::PrimitiveStateKind::KV_CACHE)
@@ -73,6 +73,19 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     auto out_res = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue out = out_res.value();
+    HostResolvedValue mask_in{};
+    if (b.input_count == 2u) {
+        auto mask_res =
+            resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[1]}, ctx);
+        if (!mask_res.ok()) return mask_res.status();
+        mask_in = mask_res.value();
+        if (mask_in.dtype != ::shelf::runtime::ValueDType::U8 ||
+            mask_in.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS ||
+            mask_in.feature_count == 0u ||
+            mask_in.row_stride < mask_in.feature_count || mask_in.ptr == nullptr)
+            return Status::invalid_state("paged-attention: token mask contract invalid",
+                                         __FILE__, __LINE__);
+    }
 
     if (q_in.dtype != ::shelf::runtime::ValueDType::BF16)
         return Status::invalid_state("paged-attention: Q dtype != BF16", __FILE__, __LINE__);
@@ -192,6 +205,15 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     c.elems_per_page = epp;
     c.elems_per_layer = epl;
     c.scale = b.scalar_a;
+    if (b.input_count == 2u) {
+        c.token_mask = static_cast<const uint8_t*>(mask_in.ptr);
+        c.mask_stride = mask_in.row_stride;
+        c.mask_tokens = mask_in.feature_count;
+        if (ctx.spec.max_visible_tokens > mask_in.feature_count)
+            return Status::invalid_state(
+                "paged-attention: token mask does not cover max visible tokens",
+                __FILE__, __LINE__);
+    }
     return out_args;
 }
 
@@ -225,6 +247,13 @@ PagedAttentionPlan plan_paged_attention(
         return plan;
     plan.optimized = true;
     plan.use_prefill = use_prefill;
+    // The token mask is per query row, so the tiled prefill kernel and the split decode
+    // kernel cannot consume it. Fall back to the per-(row, q_head) decode kernel.
+    if (args.common.token_mask != nullptr) {
+        plan.use_prefill = false;
+        plan.splits = 1u;
+        return plan;
+    }
     if (!plan.use_prefill
         && args.common.tree_anc_offsets == nullptr
         && ctx.decode_attn_partials != nullptr
@@ -266,6 +295,9 @@ uint32_t paged_attention_output_element_bytes(
         region.row_positions = base.row_positions + row_begin;
     if (base.tree_anc_offsets != nullptr)
         region.tree_anc_offsets = base.tree_anc_offsets + row_begin;
+    if (base.token_mask != nullptr)
+        region.token_mask = base.token_mask +
+                            static_cast<uint64_t>(row_begin) * base.mask_stride;
     region.rows = rows;
     return region;
 }
@@ -507,7 +539,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const auto region =
             offset_paged_attention_rows(a.common, d.row_begin, d.row_count);
         const uint32_t before = out.physical_count;
-        if (d.row_count >= kPagedAttentionPrefillMinRows) {
+        if (a.common.token_mask == nullptr &&
+            d.row_count >= kPagedAttentionPrefillMinRows) {
             if (append_prefill_region(a, region, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;

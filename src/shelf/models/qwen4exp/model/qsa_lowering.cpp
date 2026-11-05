@@ -159,5 +159,26 @@ Result<Qwen4ExpQsaIndexerOutputs> emit_qwen4exp_qsa_indexer(
     };
 }
 
+Result<RT::ValueId> emit_qwen4exp_qsa(
+    Emitter& em, const Qwen4ExpQsaLoweringGeometry& geometry,
+    const Qwen4ExpQsaLoweringWeights& weights, const Qwen4ExpQsaLoweringIndices& indices,
+    RT::ValueId normed, const char* debug_prefix) {
+    if (geometry.indexer.mask_len == 0u) {
+        return Status::invalid_argument(
+            "Qwen4Exp QSA needs a non-zero token mask length", __FILE__, __LINE__);
+    }
+    auto indexer = emit_qwen4exp_qsa_indexer(em, geometry.indexer, weights.indexer,
+                                             indices.indexer, normed, debug_prefix);
+    if (!indexer.ok()) return indexer.status();
+
+    ::shelf::qwen_hybrid::GatedAttentionLoweringIndices attention_indices =
+        indices.attention;
+    attention_indices.has_token_mask = true;
+    attention_indices.token_mask = indexer.value().mask;
+    return ::shelf::qwen_hybrid::emit_gated_attention(
+        em, geometry.attention, weights.attention, attention_indices, normed,
+        debug_prefix);
+}
+
 }  // namespace qwen4exp
 }  // namespace shelf

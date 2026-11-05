@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/status.h>
+#include <shelf/models/common/qwen_hybrid/attention_lowering.h>
 #include <shelf/models/common/qwen_hybrid/emitter.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 #include <shelf/weights/matrix_weight.h>
@@ -62,6 +63,31 @@ Result<Qwen4ExpQsaIndexerOutputs> emit_qwen4exp_qsa_indexer(
     const Qwen4ExpQsaIndexerGeometry& geometry,
     const Qwen4ExpQsaIndexerWeights& weights,
     const Qwen4ExpQsaIndexerIndices& indices,
+    ::shelf::runtime::ValueId normed,
+    const char* debug_prefix);
+
+// One QSA attention site: the indexer emits the token mask, and the gated attention
+// consumes it. `geometry.mask_len` must be non-zero.
+struct Qwen4ExpQsaLoweringGeometry {
+    ::shelf::qwen_hybrid::GatedAttentionLoweringGeometry attention;
+    Qwen4ExpQsaIndexerGeometry indexer;
+};
+
+struct Qwen4ExpQsaLoweringWeights {
+    ::shelf::qwen_hybrid::GatedAttentionLoweringWeights attention;
+    Qwen4ExpQsaIndexerWeights indexer;
+};
+
+struct Qwen4ExpQsaLoweringIndices {
+    ::shelf::qwen_hybrid::GatedAttentionLoweringIndices attention;
+    Qwen4ExpQsaIndexerIndices indexer;
+};
+
+Result<::shelf::runtime::ValueId> emit_qwen4exp_qsa(
+    ::shelf::qwen_hybrid::Emitter& em,
+    const Qwen4ExpQsaLoweringGeometry& geometry,
+    const Qwen4ExpQsaLoweringWeights& weights,
+    const Qwen4ExpQsaLoweringIndices& indices,
     ::shelf::runtime::ValueId normed,
     const char* debug_prefix);
 

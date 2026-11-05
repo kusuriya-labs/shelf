@@ -10,11 +10,6 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
                                         const Qwen4ExpLayerLowering& layer,
                                         RT::ValueId hyper,
                                         const char* debug_prefix) {
-    if (!layer.is_gdn) {
-        return Status::unsupported(
-            "Qwen4Exp QSA layer lowering needs the attention mask input (Gate B)",
-            __FILE__, __LINE__);
-    }
     ::shelf::runtime::ValueId input_hyper = hyper;
     if (layer.has_ple) {
         auto ple = emit_qwen4exp_ple(em, layer.ple_geometry, layer.ple_weights,
@@ -29,9 +24,18 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         true, debug_prefix);
     if (!attn_mix.ok()) return attn_mix.status();
 
-    const RT::ValueId attn_out = ::shelf::qwen_hybrid::emit_gdn(
-        em, layer.gdn_geometry, layer.gdn_weights, layer.gdn_indices, attn_mix.value().mixed,
-        debug_prefix);
+    RT::ValueId attn_out{0};
+    if (layer.is_gdn) {
+        attn_out = ::shelf::qwen_hybrid::emit_gdn(
+            em, layer.gdn_geometry, layer.gdn_weights, layer.gdn_indices,
+            attn_mix.value().mixed, debug_prefix);
+    } else {
+        auto qsa = emit_qwen4exp_qsa(em, layer.qsa_geometry, layer.qsa_weights,
+                                     layer.qsa_indices, attn_mix.value().mixed,
+                                     debug_prefix);
+        if (!qsa.ok()) return qsa.status();
+        attn_out = qsa.value();
+    }
     auto hyper_after_attn = emit_hyper_connection_apply(
         em, layer.hyper, input_hyper, attn_out, attn_mix.value().injection, debug_prefix);
     if (!hyper_after_attn.ok()) return hyper_after_attn.status();
