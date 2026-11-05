@@ -39,6 +39,10 @@ hipError_t launch_rotate_exl3(const Exl3GemmArgs& args, void* xrot, hipStream_t 
 hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float* rowsum,
                                      hipStream_t stream);
 hipError_t launch_recon_exl3_dense(const Exl3GemmArgs& args, void* dense, hipStream_t stream);
+hipError_t launch_quantize_dense_w8(const Exl3GemmArgs& args, void* dense,
+                                   hipStream_t stream);
+hipError_t launch_quantize_xrot_x8(const Exl3GemmArgs& args, void* xrot, float* rowsum,
+                                   bool residual, hipStream_t stream);
 hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* rowsum,
                                       const void* accum, hipStream_t stream);
 hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xrot,

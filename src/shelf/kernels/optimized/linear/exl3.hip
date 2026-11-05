@@ -237,6 +237,90 @@ __global__ __launch_bounds__(256) void exl3_dense_epilogue_kernel(Exl3GemmArgs a
     }
 }
 
+__global__ __launch_bounds__(256) void quantize_dense_w8_kernel(uint16_t* dense, uint32_t k,
+                                                               uint32_t n) {
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= n) return;
+    float amax = 0.f;
+    for (uint32_t r = 0u; r < k; ++r) {
+        const float v =
+            fabsf(__half2float(__ushort_as_half(dense[static_cast<uint64_t>(r) * n + col])));
+        amax = fmaxf(amax, v);
+    }
+    const float scale = amax > 0.f ? amax / 127.f : 1.f;
+    const float inv = 1.f / scale;
+    for (uint32_t r = 0u; r < k; ++r) {
+        const uint64_t idx = static_cast<uint64_t>(r) * n + col;
+        const float v = __half2float(__ushort_as_half(dense[idx]));
+        const float q = static_cast<float>(__float2int_rn(v * inv));
+        dense[idx] = __half_as_ushort(__float2half(q * scale));
+    }
+}
+
+template <bool kResidual>
+__global__ __launch_bounds__(256) void quantize_xrot_x8_kernel(__half* xrot, float* rowsum,
+                                                              uint32_t rows, uint32_t k) {
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t row = blockIdx.x * 8u + warp;
+    if (row >= rows) return;
+    const uint64_t base = static_cast<uint64_t>(row) * k;
+    float amax = 0.f;
+    for (uint32_t i = lane * 4u; i < k; i += 128u) {
+#pragma unroll
+        for (uint32_t j = 0u; j < 4u; ++j) {
+            amax = fmaxf(amax, fabsf(__half2float(xrot[base + i + j])));
+        }
+    }
+    amax = fmaxf(amax, __shfl_xor(amax, 16, 32));
+    amax = fmaxf(amax, __shfl_xor(amax, 8, 32));
+    amax = fmaxf(amax, __shfl_xor(amax, 4, 32));
+    amax = fmaxf(amax, __shfl_xor(amax, 2, 32));
+    amax = fmaxf(amax, __shfl_xor(amax, 1, 32));
+    const float scale = amax > 0.f ? amax / 127.f : 1.f;
+    const float inv = 1.f / scale;
+    float rmax = 0.f;
+    float rscale = 1.f;
+    float rinv = 1.f;
+    if constexpr (kResidual) {
+        for (uint32_t i = lane * 4u; i < k; i += 128u) {
+#pragma unroll
+            for (uint32_t j = 0u; j < 4u; ++j) {
+                const float v = __half2float(xrot[base + i + j]);
+                const float q = static_cast<float>(__float2int_rn(v * inv)) * scale;
+                rmax = fmaxf(rmax, fabsf(v - q));
+            }
+        }
+        rmax = fmaxf(rmax, __shfl_xor(rmax, 16, 32));
+        rmax = fmaxf(rmax, __shfl_xor(rmax, 8, 32));
+        rmax = fmaxf(rmax, __shfl_xor(rmax, 4, 32));
+        rmax = fmaxf(rmax, __shfl_xor(rmax, 2, 32));
+        rmax = fmaxf(rmax, __shfl_xor(rmax, 1, 32));
+        rscale = rmax > 0.f ? rmax / 127.f : 1.f;
+        rinv = 1.f / rscale;
+    }
+    float sum = 0.f;
+    for (uint32_t i = lane * 4u; i < k; i += 128u) {
+#pragma unroll
+        for (uint32_t j = 0u; j < 4u; ++j) {
+            const float v = __half2float(xrot[base + i + j]);
+            float q = static_cast<float>(__float2int_rn(v * inv)) * scale;
+            if constexpr (kResidual) {
+                const float r = v - q;
+                q += static_cast<float>(__float2int_rn(r * rinv)) * rscale;
+            }
+            xrot[base + i + j] = __float2half(q);
+            sum += q;
+        }
+    }
+    sum += __shfl_down(sum, 16, 32);
+    sum += __shfl_down(sum, 8, 32);
+    sum += __shfl_down(sum, 4, 32);
+    sum += __shfl_down(sum, 2, 32);
+    sum += __shfl_down(sum, 1, 32);
+    if (lane == 0u) rowsum[row] = sum;
+}
+
 template <bool kRowSum>
 __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* input,
                                                          const uint16_t* suh, __half* xrot,
@@ -736,6 +820,29 @@ hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float
         static_cast<const shelf::bf16_t*>(args.input),
         static_cast<const uint16_t*>(args.suh), static_cast<__half*>(xrot), args.rows,
         args.k, args.input_row_stride, rowsum);
+    return hipGetLastError();
+}
+
+hipError_t launch_quantize_dense_w8(const Exl3GemmArgs& args, void* dense,
+                                   hipStream_t stream) {
+    if (dense == nullptr) return hipErrorInvalidValue;
+    const uint32_t blocks = (args.out_features + 255u) / 256u;
+    quantize_dense_w8_kernel<<<blocks, 256, 0, stream>>>(
+        static_cast<uint16_t*>(dense), args.k, args.out_features);
+    return hipGetLastError();
+}
+
+hipError_t launch_quantize_xrot_x8(const Exl3GemmArgs& args, void* xrot, float* rowsum,
+                                   bool residual, hipStream_t stream) {
+    if (xrot == nullptr || rowsum == nullptr) return hipErrorInvalidValue;
+    const uint32_t blocks = (args.rows + 7u) / 8u;
+    if (residual) {
+        quantize_xrot_x8_kernel<true><<<blocks, 256, 0, stream>>>(
+            static_cast<__half*>(xrot), rowsum, args.rows, args.k);
+    } else {
+        quantize_xrot_x8_kernel<false><<<blocks, 256, 0, stream>>>(
+            static_cast<__half*>(xrot), rowsum, args.rows, args.k);
+    }
     return hipGetLastError();
 }
 

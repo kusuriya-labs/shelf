@@ -477,6 +477,45 @@ mul1 の 11-bit `d` を 8-bit に丸めれば 1 回の INT8 GEMM で MMA を半�
   INT8 1.96 倍 × 2 回で MMA 時間は FP16 と同等になり、活性 int8 の誤差だけ残る。
 - したがって、INT8 1-GEMM は品質・性能の両面で採用しない。
 
+## INT8 方式の再検討（A: 再量子化 / B: mul1 byte 分解）
+
+以前の INT8 1-GEMM の棄却は、dense に展開した `W_hat` を固定スケールで 8-bit に
+丸める方式（A）だけを対象にしていた。mul1 の整数構造を保存する方式（B）は別物で
+あるため、recon 経路に品質シミュレーションを追加して Q0〜Q4 を測り直した。
+
+- Q0: FP16 基準
+- Q1: per-column INT8 重み + FP16 活性
+- Q2: per-column INT8 重み + per-row INT8 活性（A 方式）
+- Q3: 重みは mul1 byte 分解のまま（追加量子化なし）+ per-row INT8 活性（B 方式）
+- Q4: Q3 + INT8 residual 補正
+
+シミュレーションは dense 経路の recon 後に重みを per-column、`xrot` を per-row で
+INT8 格子へ丸め、FP16 GEMM に通す（`SHELF_EXL3_SIM=w8|x8|w8x8|x8res`）。INT8 WMMA
+自体はまだ実装していない。corpus は BetterBench v1 の 2203 token、context 128、
+2048 position、BF16 KV。
+
+| 実験 | PPL | PPL 差 | mean KL | top-1 | top-5 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q0 FP16 | 8.7308 | — | — | — | — |
+| Q2 A 方式 | 7.9661 | **-8.76%** | 0.00653 | 96.6% | 97.4% |
+| Q3 B 方式 | 9.2012 | **+5.39%** | 0.00314 | 97.7% | 98.2% |
+| Q4 residual | 8.7285 | -0.03% | 0.00068 | 98.7% | 99.0% |
+
+512 position でも同じ符号（Q2 -11.2%、Q3 +2.77%、Q4 -1.25%）だった。
+
+**Q3 が +5.39% で既定ゲート +1.0% を超える**。重み側は byte 分解で正確に保てるため、
+制約は活性の INT8 化である。Q4 の residual 補正は品質をほぼ完全に戻す（KL 0.00068、
+top1 98.7%）が、INT8 GEMM が 2 回必要になる。
+
+速度面では B 方式は 4 byte plane を展開するため論理 K あたり 4 倍の整数積和になり、
+INT8 WMMA が FP16 の 1.96 倍でも約 2 倍遅い。2-GEMM / residual も 2 回で利得が消える。
+したがって **B 方式は品質・性能の両面で採用しない**。
+
+A 方式（Q2）は PPL が改善するが、これはこの corpus でモデルが過信傾向にあるための
+見かけの改善で、KL 0.0065 / top1 96.6% は実際の分布変化を示す。PPL だけでは判定
+できないため、A 方式を実装する前に、prior gate と同じ校正済み corpus（prose、PPL
+3.76 前後）か、KL / top1 の閾値を加えたゲートで再判定する必要がある。
+
 ## Trellis ring の lane shuffle 化（採用）
 
 ka=4 の ISA では、`global_load_b32` → `ds_store_b32`（ring）→ wave barrier →
