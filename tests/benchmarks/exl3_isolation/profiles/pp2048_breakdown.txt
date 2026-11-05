@@ -1,0 +1,7 @@
+pp2048 kernel breakdown (rocprofv3 --kernel-trace, GPU1):
+total kernel 5664.2 ms
+  EXL3 GEMM <2,false,true>   5423.5 ms  95.8%  (400 launches)
+  rotate_exl3                  31.5 ms   0.6%
+  GDN recurrence               51.0 ms   0.9%
+  PagedAttention prefill       25.4 ms   0.4%  (16 launches)
+  SwiGLU / mul / residual etc ~100 ms    1.8%

@@ -606,6 +606,30 @@ trellis の代わりに事前復号済み FP16 tile を global から読む診�
   より大きな row tile（128 行）で重みの再読み出しを 4 分の 1 にする dense GEMM なら
   別だが、それは現在の `launch_gemm_exl3_w16a16` ではない。
 
+### A0/B0/B3 分離（1 layer、M=2048、K=N=5120、g=1、s=1）
+
+`tests/benchmarks/exl3_isolation/` に独立ベンチを作り、rocBLAS FP16 GEMM（A0）、
+現行 WMMA に事前復号 FP16 fragment を直接渡す経路（B0）、現行 EXL3（B3）を
+同一 shape で測った。10 warmup + 50 samples。
+
+| Stage | kernel ms | tok/s（単一 Linear） | TFLOPS | A0 比 |
+| --- | ---: | ---: | ---: | ---: |
+| A0 rocBLAS FP16 | 0.7139 | 2,868,713 | **150.40** | 1.00× |
+| B0 現行 WMMA + FP16 fragment | 4.7511 | 431,055 | 22.60 | 6.65× 遅い |
+| B3 現行 EXL3 mul1 | 6.6431 | 308,291 | 16.16 | 9.31× 遅い |
+
+- B0 は bit 抽出、mul1 hash、SAD、LDS tile 往復をすべて省き、事前復号した
+  raw FP16 tile を WMMA の A fragment として直接読む。
+- **B0 と B3 の全出力は bit 一致**（`max_abs=0`）。B0 は忠実な decode-free 基準。
+- 現行 WMMA 構造は、**decode を一切含まなくても rocBLAS の 6.65 倍遅い**。
+  EXL3 decode 全体の追加は B0 比 1.40 倍に過ぎない。
+- したがって主因は hash / bit抽出 / ring / accumulator ではなく、
+  **WMMA のタイル構造・データ供給・スケジューリング**である。decode をさらに
+  削っても、このカーネルの上限は約 1.4 倍。次は 128×128 以上の large-tile WMMA
+  （register blocking、K pipeline）か、128 行単位で重みを再利用する dense GEMM。
+- 成果物: `tests/benchmarks/exl3_isolation/result_summary.md`、`result.csv`、
+  `isa/stage_b0.s`、`isa/stage_b3.s`、`profiles/pp2048_breakdown.txt`。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
