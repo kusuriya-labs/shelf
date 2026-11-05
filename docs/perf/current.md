@@ -53,15 +53,15 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 20.47 / 20.48 / 20.51 tok/s（48.7〜48.9 µs/token） |
-| prefill 128 | 478.21 / 478.97 / 480.29 tok/s（2.08〜2.09 ms/token） |
-| prefill 512 | 512.08 / 512.35 / 512.61 tok/s（1.95〜1.95 ms/token） |
-| prefill 1024 | 523.50 / 523.64 / 524.16 tok/s（1.908〜1.910 ms/token） |
-| prefill 2048 | 525.56 / 526.67 / 528.18 tok/s（1.893〜1.903 ms/token） |
+| decode | 20.30 / 20.34 / 20.39 tok/s（49.0〜49.3 µs/token） |
+| prefill 128 | 486.08 / 486.85 / 487.37 tok/s（2.05〜2.06 ms/token） |
+| prefill 512 | 529.16 / 529.21 / 530.36 tok/s（1.885〜1.890 ms/token） |
+| prefill 1024 | 536.72 / 537.23 / 538.22 tok/s（1.858〜1.863 ms/token） |
+| prefill 2048 | 542.18 / 542.85 / 544.49 tok/s（1.836〜1.844 ms/token） |
 
-- measurement revision: `7c5f56b`（xrot LDS pitch 136 による B fragment の bank
-  conflict 解消、groups / split-K dispatch 調整、ka=4 ring の lane shuffle 化、
-  ka=4 の 8 状態一括抽出、入力回転の linear 単位事前計算、prefill の row group 再利用）
+- measurement revision: `62a365a`（pre 経路の xrot global B 化、xrot LDS pitch 136 に
+  よる B fragment の bank conflict 解消、groups / split-K dispatch 調整、ka=4 ring の
+  lane shuffle 化、ka=4 の 8 状態一括抽出、入力回転の linear 単位事前計算）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
@@ -72,10 +72,11 @@ EXL3 経路の現在値である。
   `groups=2` は `rows >= 32` かつ `grid_x * ceil(rows/32) * splits >= 128` のとき。
   `SHELF_EXL3_GROUPS` で 1 / 2 を強制できる。
 - 入力回転は `rows >= 4` かつ `rows * k * 2 <= 80 MiB` のとき linear ごとに 1 回だけ
-  計算する。`SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算）に切り替えられる。
+  計算する。pre 経路は xrot を LDS にコピーせず global から B fragment を読む。
+  `SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算、LDS pitch 136）に切り替えられる。
 - decode（rows=1）は fused のまま。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 21.95 tok/s、MTP-2 は 18.68 tok/s（`--arena-gib 27`）。
+  E2E decode は 22.35 tok/s、MTP-2 は 18.35 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
