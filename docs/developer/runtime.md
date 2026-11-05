@@ -37,6 +37,17 @@ model_dispatch_correctness (shelf::kernel, single launcher)
 - sync semantics: opごとにstaging H2D（async）→ launch →
   `hipStreamSynchronize`（pool経由でnon-synchronous opはskip）。
 
+### Executor の stream と keepalive thread
+
+`Executor` は呼び出し側が渡す compute stream 上で launch する。既定では、executor 自身が持つ
+host thread と追加 stream は無い。
+
+`SHELF_KEEPALIVE=1` を設定したときだけ `create_executor` が専用 stream と 1 ms 間隔で
+`hipEventRecord` を行う keepalive thread を起動し、`executor_shutdown` が thread を join して
+stream / event を解放する（cleanup 失敗は `Status` で返す）。既定は無効。
+`shelf-bench` の `--gap-keepalive` は app 側が自分で event を record するものであり、
+executor の keepalive とは別である。
+
 ## Decode backend
 
 1つの `Executor` が持つ実行経路は Host のみである。ownership は phase や

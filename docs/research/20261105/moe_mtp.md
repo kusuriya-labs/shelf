@@ -174,7 +174,9 @@ draft の良し悪し以前に **verify 自体が target-only の greedy と別�
 **（2026-11-05 更新）§4 の原因は特定・修正された**。combine の shared expert gate 平面
 stride 欠落であり、[./moe_combine_gate_stride.md](./moe_combine_gate_stride.md) が正本。
 §3 の数値と §5 の「verify の前提が壊れている」判定はその bug が入った forward での実測で、
-§6 で再評価した。
+§6 で再評価した。**さらに §6 の「round の forward 外費用」も executor の keepalive thread が
+原因と分かって解消された**（[./executor_keepalive_thread.md](./executor_keepalive_thread.md)）。
+性能主張の判定は §7 のとおり **ACCEPT に訂正**する。
 
 ## 6. combine 修正後の再評価
 
@@ -221,9 +223,39 @@ host 費用が支配的になり、この分離には使えなかった）。**r
 
 break-even の目安（K=4）: round 675.03 / 9 = 75.0 ms、1 token あたり 16.2 ms なので、
 round あたり 75.0 / 16.2 = 4.63 token 必要。bonus token を引くと **accepted ≥ 3.63 / 4** で
-あり、実測 2.444 では足りない。
+あり、実測 2.444 では足りない。**この計算は §7 で無効**（round 費用の 40 ms が executor の
+keepalive thread によるもので、削除後は round 29.7 ms / 1.82 token になる）。
 
-## 7. 副次で見つかった不具合（修正済み）
+## 7. verify round の forward 外 40 ms の原因（executor keepalive thread）
+
+§6 の「round の 62 ms のうち forward が約 22 ms、残り約 40 ms は forward 以外の費用」は
+**誤りだった**。原因は `Executor` が既定で起動していた keepalive thread（1 ms 間隔で別 stream へ
+`hipEventRecord` を投げる）で、`SHELF_KEEPALIVE=0` で止めると消えた。測定と切り分けは
+[./executor_keepalive_thread.md](./executor_keepalive_thread.md) が正本。同じ 2 行・同じ kernel・
+同じ launch shape の verify pass が span 65.8 ms → 22.8 ms（idle / dispatch 24.3 → 4.3 µs、
+busy / dispatch 23.8 → 12.4 µs）。1 行 decode（`shelf-bench tg`）は on / off で差が無いので、
+multi-row batch で dispatch 数が多く 1 kernel が短い場合にだけ効く費用だった。
+
+修正後（同一条件）:
+
+| 条件 | t/s | vs target | verify ms / round | round ms / round |
+| --- | ---: | ---: | ---: | ---: |
+| target-only | 61.56 / 61.44 | 1.00x | - | - |
+| drafts=1 | 84.80 | 1.38x | 19.2 | 21.8 |
+| drafts=4 | **115.83** | **1.88x** | 20.6 | 29.7 |
+| drafts=7 | 93.37 | 1.52x | 22.5 | 36.9 |
+
+三条件の `GENERATED_IDS` は target-only と一致したままだ。verify 時間は 19.2 / 20.6 / 22.5 ms
+となり、同じ model の 2 行 forward 単体の既知の費用（`pp --prefill-chunk 2` = 22.5 ms）と同じ帯に
+入った。**round に forward 外の費用は残っていない**。受理率は 2.444 / 7 = 35 % のままだが
+break-even を超える: drafts=4 で round 29.7 ms ÷ 16.3 ms/token = 1.82 token / round、
+実測 emitted/round = 3.444（accepted 2.444 + bonus 1）。
+
+したがって §5 の「MoE の MTP decode 有効化（性能主張）は REJECT」は **ACCEPT に訂正**する
+（drafts=4 で 1.88 倍）。受理率を dense 並みに上げる work（§3 の MTP expert の MXFP4 再量子化、
+[./moe_mtp_requant.md](./moe_mtp_requant.md)）は、speedup をさらに伸ばす話として残る。
+
+## 8. 副次で見つかった不具合（修正済み）
 
 `create_executor` 直後の最初の `execute_batch` で、`prepare_batch_descriptor` の launch が
 `invalid argument` を返し、batch が失敗していた（2 回目の同一 launch は成功する）。
@@ -231,7 +263,7 @@ kernel module の初回 launch と競合する形に見える。`create_executor
 0 request の batch descriptor を 1 回 launch する warm を置き、初回 batch が初回 launch に
 ならないようにした（`test_qwen35moe_mtp_executor` がその経路を通る）。
 
-## 8. 再現条件
+## 9. 再現条件
 
 - build: `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHELF_ROCM_ROOT=$ROCM_PATH
   -DCMAKE_PREFIX_PATH=$ROCM_PATH -DCMAKE_HIP_COMPILER_ROCM_ROOT=$ROCM_PATH

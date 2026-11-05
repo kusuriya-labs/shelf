@@ -1060,8 +1060,7 @@ struct KeepAlive {
 
 bool keepalive_requested() {
     const char* e = std::getenv("SHELF_KEEPALIVE");
-    if (e == nullptr) return true;
-    return e[0] != '0';
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
 }
 
 KeepAlive* keepalive_start() {

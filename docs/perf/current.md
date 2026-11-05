@@ -250,33 +250,33 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4` を TP=1 / bf16 KV / device 0 で、target-only と
 `--mtp` を比べた。prompt は corpus から切った 1600 token、`--max-new-tokens 32`、
-`--max-seq-len 4096`。combine の shared gate stride 修正後の実測。
+`--max-seq-len 4096`。combine の shared gate stride 修正後、かつ executor の keepalive
+thread を既定無効にした build の実測。
 
-| 条件 | t/s | rounds | accepted drafts | mean accepted | verify rows | draft ms | verify ms |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| target-only | **61.74** | - | - | - | - | - | - |
-| `--mtp --mtp-drafts 1` | 28.09 | 16 | 14 | 0.875 | 32 | 46.40 | 995.88 |
-| `--mtp --mtp-drafts 4` | 45.92 | 9 | 22 | 2.444 | 43 | 95.86 | 578.93 |
-| `--mtp --mtp-drafts 7` | 41.23 | 9 | 22 | 2.444 | 63 | 150.73 | 600.91 |
+| 条件 | t/s | vs target | rounds | accepted drafts | mean accepted | verify rows | draft ms | verify ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| target-only | 61.56 / 61.44 | 1.00x | - | - | - | - | - | - |
+| `--mtp --mtp-drafts 1` | **84.80** | 1.38x | 16 | 14 | 0.875 | 32 | 41.31 | 307.92 |
+| `--mtp --mtp-drafts 4` | **115.83** | **1.88x** | 9 | 22 | 2.444 | 43 | 81.94 | 185.62 |
+| `--mtp --mtp-drafts 7` | 93.37 | 1.52x | 9 | 22 | 2.444 | 63 | 129.60 | 202.28 |
 
 - 生成一致アンカー: 三条件の `GENERATED_IDS` は target-only の greedy 列と**完全一致**
-- measurement revision: combine の shared gate stride 修正後（`feature-moe-mtp`）
-- **どの drafts でも target-only より遅い**（最良でも 45.92 / 61.74 = 0.74 倍）。verify 時間は
-  行数に対してほぼ一定（2 行 62.2 ms / 平均 4.8 行 64.3 ms / 7 行 66.8 ms）で、同じ model の
-  2 行 forward 単体の既知の費用は約 22 ms（`shelf-bench pp --mode forward --prompt-tokens 1600`
-  の chunk 2 = 11.24 ms/token、chunk 16 = 26.2 ms）なので、**verify round には forward 以外の
-  約 40 ms 载っている**。それが round 側の費用（descriptor 準備・staging・sampling・state save）
-  なのか DECODE class の multi-row batch の遅さなのかは未切り分け。内訳は
-  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §6
-- draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-04）に対し 2.444 / 7 = 35 %
-- break-even の目安（drafts=4）: round 75.0 ms ÷ 16.2 ms/token = 4.63 token / round なので
-  accepted ≥ 3.63 が必要。実測 2.444 では足りない
+  （`264,13759,506,3603,440,799,75727,13,561,25786,2942,513,220,16,11,220,17,11,220,20,11,321,220,16,15,4276,13,8771,628,5144,506,2957`）
+- measurement revision: combine の shared gate stride 修正 + executor keepalive thread 既定無効
+  （`feature-moe-mtp`）
+- verify 時間 / round は 2 行 19.2 ms、平均 4.8 行 20.6 ms、7 行 22.5 ms で行数に対して緩やかに増える。
+  同じ model の 2 行 forward 単体（`shelf-bench pp --prefill-chunk 2` = 11.24 ms/token）と同じ帯で、
+  **round に forward 外の費用は载っていない**
+- draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-04）に対し 2.444 / 7 = 35 % のまま。
+  それでも break-even を超えるため速度上の利点がある。drafts=4 の break-even:
+  round 267.63 / 9 = 29.7 ms ÷ 16.3 ms/token = 1.82 token / round、実測 emitted/round = 3.444
 - weight load 実測（MTP block 込み、`test_qwen35moe_model_load_real`）: load 28.6 s、
   arena 21.000 GiB（うち MTP expert 平面 0.399 GiB）、peak RSS 22.98 GiB
-- 修正前の forward で測った値（t/s 22.09 / 17.20 / 15.78、mean accepted 0.429 / 0.333 / 0.600、
-  `GENERATED_IDS` が target-only と不一致）は無効。再評価の経緯は
-  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §6
-
+- 経緯（受理率の評価、verify round 費用の切り分け）は
+  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)、
+  round 費用の原因は [../research/20261105/executor_keepalive_thread.md](../research/20261105/executor_keepalive_thread.md)
+- 上記以外の条件（keepalive thread が既定 on だった build、および combine 修正前の forward
+  で測った t/s 28.09 / 45.92 / 41.23 と 22.09 / 17.20 / 15.78）は無効
 ## 2026-11-05 MoE combine 修正後の再測
 
 `moe_combine_kernel` が shared expert gate の平面を packed 前提で読み、**2 行目以降の token で

@@ -15,8 +15,9 @@ load 時に MXFP4 へ再量子化して transformer layer と同じ native plane
 （[qwen35moe.md](qwen35moe.md) の MTP block 節）。
 MoE の MTP decode は verify の multi-row forward を使うが、greedy 列は target-only と一致する
 （verify の前提である forward の batch 行数非依存は `test_qwen35moe_rows_parity` で固定）。
-速度上の利点は現状無く、round 費用が forward より大きい。実測は
-`docs/perf/current.md`、経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
+実測で target-only より速い（`--mtp-drafts 4` で 1.88 倍）。draft 受理率は dense より低い
+（35 % に対し 98 %）が break-even は超える。数値は `docs/perf/current.md`、経緯は
+[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
 
 ## Forward contract
 
