@@ -170,9 +170,37 @@ short conv も実装した。
 最後に history 9 行を書き戻す。`test_ple_conv` は 2 sequence と decode 1 row で
 CPU 参照と一致することを固定する。
 
-残りは PLE の key/value 射影と grouped RMSNorm を graph に接続すること、
-`PLE_CONV` の state を runtime に持たせること、HyperConnection への加算と、
-QSA / decoder layer の lowering、4 stream を運ぶ runtime state の接続である。
+## 2-5. Decoder layer と MoE FFN
+
+GDN 層の decoder layer を 1 つの graph に組み立てる helper を追加した。
+
+```text
+attn HyperConnection mix
+  -> GDN（sigmoid gate）
+  -> HyperConnection apply
+  -> mlp HyperConnection mix
+  -> MoE FFN
+  -> HyperConnection apply
+```
+
+- `emit_qwen4exp_moe` は router（global 512、top-10）を置き、routed expert を
+  gate / up / down の 3 つの `MoeGroupedLinearNode` に分ける。
+  gate/up の入力は token row、down の入力は group row である。
+- shared expert は gate_proj / up_proj / down_proj の dense EXL3 linear と
+  `shared_expert_gate` の sigmoid で表現する。
+- `MoeCombineNode` が expert の部分和と shared expert を token row に戻す。
+- QSA（full_attention）層は indexer primitive が入るまで `unsupported` とする。
+
+`test_qwen4exp_layer` は GDN 層について次を固定する。
+
+- attention HyperConnection が GDN に接続する
+- `GDN_RECURRENCE,RMS_NORM,SIGMOID,MUL` の sigmoid gate
+- attention apply が MLP HyperConnection mix に接続する
+- `MOE_ROUTER,MOE_GROUPED_LINEAR,MOE_GROUPED_LINEAR,SWIGLU,MOE_GROUPED_LINEAR`
+- `MOE_COMBINE,HYPER_APPLY`
+
+残りは PLE の key/value 射影と grouped RMSNorm の graph 接続、`PLE_CONV` の
+runtime state、QSA indexer、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 

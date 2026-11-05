@@ -520,9 +520,18 @@ PLE 注入の状態を持たない部分も実装した。
 short conv も depthwise、kernel 4、dilation 3、causal、SiLU で実装し、
 `[max_sequences][9][channels]` の BF16 state を持つ。
 `test_ple_conv` が 2 sequence と decode 1 row を CPU 参照と比較する。
+
+GDN 層の decoder layer も graph に組み立てた。
+
+- attention HyperConnection mix -> GDN -> apply
+- MLP HyperConnection mix -> MoE -> apply
+- MoE は router、gate/up/down の 3 grouped EXL3 linear、shared expert、
+  combine で構成する
+- `test_qwen4exp_layer` が site / GDN sigmoid / grouped expert / combine の
+  sequence を固定する
+
 残りは PLE の key/value 射影と grouped RMSNorm の graph 接続、`PLE_CONV` の
-runtime state、HyperConnection への加算と、QSA / decoder layer の lowering、
-4 stream を運ぶ runtime state の接続である。
+runtime state、QSA indexer、4 stream を運ぶ runtime state の接続である。
 
 #### 結論
 

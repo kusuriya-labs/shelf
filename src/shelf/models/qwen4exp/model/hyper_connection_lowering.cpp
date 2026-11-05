@@ -30,15 +30,15 @@ Status require_matrix(const MatrixWeight* weight, std::uint32_t rows, std::uint3
 
 }  // namespace
 
-Result<HyperConnectionSiteOutput> emit_hyper_connection_site(
+Result<HyperConnectionMixOutput> emit_hyper_connection_mix(
     Emitter& em,
     const HyperConnectionSiteGeometry& geometry,
     const HyperConnectionSiteWeights& weights,
     const HyperConnectionSiteIndices& indices,
     RT::ValueId hyper,
-    RT::ValueId sublayer,
     bool with_inject,
     const char* debug_prefix) {
+    (void)debug_prefix;
     if (geometry.hc == 0u || geometry.hidden == 0u || geometry.lowrank == 0u) {
         return Status::invalid_argument("Qwen4Exp HyperConnection geometry is empty",
                                         __FILE__, __LINE__);
@@ -47,12 +47,6 @@ Result<HyperConnectionSiteOutput> emit_hyper_connection_site(
     if (em.pg.value_features(hyper) != width ||
         em.pg.value_dtype(hyper) != RT::ValueDType::BF16) {
         return Status::invalid_argument("Qwen4Exp HyperConnection input is not BF16 width",
-                                        __FILE__, __LINE__);
-    }
-    if (with_inject &&
-        (em.pg.value_features(sublayer) != geometry.hidden ||
-         em.pg.value_dtype(sublayer) != RT::ValueDType::BF16)) {
-        return Status::invalid_argument("Qwen4Exp HyperConnection sublayer is not BF16 hidden",
                                         __FILE__, __LINE__);
     }
     Status st = require_matrix(weights.down, geometry.lowrank, width, "down");
@@ -94,29 +88,68 @@ Result<HyperConnectionSiteOutput> emit_hyper_connection_site(
     RT::ValueId mixed = em.value(geometry.hidden, RT::ValueDType::BF16);
     em.emit(RT::PrimitiveNode{mix_node}, {gate, normed}, {mixed});
 
-    HyperConnectionSiteOutput out{mixed, RT::ValueId{0}};
-    if (!with_inject) return out;
+    RT::ValueId injection{0};
+    if (with_inject) {
+        const RT::ValueId inject = em.linear(*weights.inject, indices.w_inject, normed);
+        const RT::ValueId inject_scaled = emit_unary(
+            em,
+            RT::PrimitiveNode{
+                RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, inverse_hc}},
+            inject, geometry.hc, RT::ValueDType::BF16);
+        const RT::ValueId inject_act = emit_unary(
+            em, RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{geometry.hc}}},
+            inject_scaled, geometry.hc, RT::ValueDType::BF16);
+        injection = emit_unary(
+            em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, 2.0f}},
+            inject_act, geometry.hc, RT::ValueDType::BF16);
+    }
+    return HyperConnectionMixOutput{mixed, injection};
+}
 
-    const RT::ValueId inject = em.linear(*weights.inject, indices.w_inject, normed);
-    const RT::ValueId inject_scaled = emit_unary(
-        em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, inverse_hc}},
-        inject, geometry.hc, RT::ValueDType::BF16);
-    const RT::ValueId inject_act = emit_unary(
-        em, RT::PrimitiveNode{RT::SigmoidNode{RT::RowwiseShapeKey{geometry.hc}}},
-        inject_scaled, geometry.hc, RT::ValueDType::BF16);
-    const RT::ValueId injection = emit_unary(
-        em, RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hc}, 2.0f}},
-        inject_act, geometry.hc, RT::ValueDType::BF16);
-
+Result<RT::ValueId> emit_hyper_connection_apply(
+    Emitter& em,
+    const HyperConnectionSiteGeometry& geometry,
+    RT::ValueId hyper,
+    RT::ValueId sublayer,
+    RT::ValueId injection,
+    const char* debug_prefix) {
+    (void)debug_prefix;
+    const std::uint32_t width = geometry.hc * geometry.hidden;
+    if (em.pg.value_features(hyper) != width ||
+        em.pg.value_features(sublayer) != geometry.hidden ||
+        em.pg.value_features(injection) != geometry.hc) {
+        return Status::invalid_argument(
+            "Qwen4Exp HyperConnection apply feature counts are invalid", __FILE__,
+            __LINE__);
+    }
     RT::HyperApplyNode apply_node;
     apply_node.shape = RT::RowwiseShapeKey{width};
     apply_node.hc = geometry.hc;
     apply_node.hidden = geometry.hidden;
     RT::ValueId applied = em.value(width, RT::ValueDType::BF16);
     em.emit(RT::PrimitiveNode{apply_node}, {hyper, sublayer, injection}, {applied});
-    out.hyper = applied;
-    (void)debug_prefix;
-    return out;
+    return applied;
+}
+
+Result<HyperConnectionSiteOutput> emit_hyper_connection_site(
+    Emitter& em,
+    const HyperConnectionSiteGeometry& geometry,
+    const HyperConnectionSiteWeights& weights,
+    const HyperConnectionSiteIndices& indices,
+    RT::ValueId hyper,
+    RT::ValueId sublayer,
+    bool with_inject,
+    const char* debug_prefix) {
+    auto mix = emit_hyper_connection_mix(em, geometry, weights, indices, hyper,
+                                         with_inject, debug_prefix);
+    if (!mix.ok()) return mix.status();
+    if (!with_inject) {
+        return HyperConnectionSiteOutput{mix.value().mixed, RT::ValueId{0}};
+    }
+    auto applied = emit_hyper_connection_apply(em, geometry, hyper, sublayer,
+                                               mix.value().injection, debug_prefix);
+    if (!applied.ok()) return applied.status();
+    return HyperConnectionSiteOutput{mix.value().mixed, applied.value()};
 }
 
 }  // namespace qwen4exp

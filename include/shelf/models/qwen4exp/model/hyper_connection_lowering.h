@@ -31,12 +31,38 @@ struct HyperConnectionSiteIndices {
     std::uint32_t w_inject = 0;
 };
 
-struct HyperConnectionSiteOutput {
+struct HyperConnectionMixOutput {
     // The gate-weighted mean that feeds the attention or MLP sublayer.
+    RT::ValueId mixed;
+    // 2 * sigmoid(block_inject(normed) / hc); zero when with_inject is false.
+    RT::ValueId injection;
+};
+
+struct HyperConnectionSiteOutput {
     RT::ValueId mixed;
     // The updated hyper stack; zero when the caller asked for the final mixer only.
     RT::ValueId hyper;
 };
+
+// The mix half of a site: grouped RMSNorm, low-rank gate, HYPER_MIX, and (optionally) the
+// injection weights. The caller runs the sublayer between mix and apply.
+Result<HyperConnectionMixOutput> emit_hyper_connection_mix(
+    ::shelf::qwen_hybrid::Emitter& em,
+    const HyperConnectionSiteGeometry& geometry,
+    const HyperConnectionSiteWeights& weights,
+    const HyperConnectionSiteIndices& indices,
+    RT::ValueId hyper,
+    bool with_inject,
+    const char* debug_prefix);
+
+// The apply half: hyper + sublayer * injection over hc streams.
+Result<RT::ValueId> emit_hyper_connection_apply(
+    ::shelf::qwen_hybrid::Emitter& em,
+    const HyperConnectionSiteGeometry& geometry,
+    RT::ValueId hyper,
+    RT::ValueId sublayer,
+    RT::ValueId injection,
+    const char* debug_prefix);
 
 // One Qwen4Exp gated-residual site:
 //
