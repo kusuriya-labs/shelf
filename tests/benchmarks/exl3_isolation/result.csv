@@ -1,0 +1,5 @@
+stage,m,k,n,groups,split_k,kernel_ms,total_ms,tokens_per_sec,tflops,vgpr,sgpr,lds_bytes,max_abs_error
+A0_rocblas_f16,2048,5120,5120,1,1,0.7136,0.7136,2869894,150.47,,,0,0
+A0b_hipblaslt_f16,2048,5120,5120,1,1,0.6987,0.6987,2930987,153.67,,,0,0
+B0_wmma_fp16_direct,2048,5120,5120,1,1,4.7674,4.7674,429583,22.52,96,128,14848,0
+B3_exl3_current,2048,5120,5120,1,1,6.6537,6.6537,307798,16.14,96,128,14848,0

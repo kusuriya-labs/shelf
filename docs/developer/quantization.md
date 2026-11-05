@@ -18,7 +18,8 @@ self-contained quantized safetensors を直接ロードする。
 - `QuantFormatId` — weight storage / compute formatのID（`quantization/quant_format.h`）。
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
-- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32。
+- 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32 /
+  EXL3 trellis（mul1）。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -95,6 +96,8 @@ real-quantized safetensors を manifest 非依存で直接ロードできる。
   `export.weight_format == "real_quantized"`。
   これ以外（group ≠ 32、`scale_format` が e8m0 以外、fake quant export）は
   `Status::unsupported` で拒否する。
+- `quant_method == "exl3"` — `<prefix>.trellis` と `<prefix>.mul1` を持つ linear を
+  EXL3 として読む。mul1 以外（`.mcg` など）は `Status::unsupported` で拒否する。
 
 合成は `quantization/bundle/hf_manifest.{h,cpp}` が行う。HF の tensor naming
 （codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16）、
@@ -110,8 +113,12 @@ preshuffle / runtime 経路は self-contained 量子化 model と同一である
 - MXFP4 の logical K は codes の 2 倍として復元する。K が 32 の倍数でない、または
   64 の倍数でない tensor（activation の 64 K fragment に載らない）は拒否する。
   同様に native の 16 行 tile に載らない rows は拒否する。
+- EXL3 の trellis / suh / svh / marker は 4 つの payload plane として manifest に載り、
+  loader はバイト列を変換せず GPU へ転送する。codebook 復号と Hadamard は kernel 内で行う。
 - 量子化されていない tensor（norm / embed / lm_head / dt_bias / A_log /
-  conv1d.weight など）は BF16 entry として同一経路でロードされる。
+  conv1d.weight など）は BF16 entry として同一経路でロードされる。F16 で保存された
+  unquantized tensor は load 時に BF16 へ widen する（EXL3 checkpoint の
+  `linear_attn.in_proj_a/b` など）。
 - HF payload の K が block size（FP8: 128）の倍数でない場合、
   canonical の padded K contract を満たせないため `Status::unsupported` で拒否する。
 - 合成 manifest は `architecture = "qwen35_dense"` を立て、CRC32 は実データから計算される。
@@ -156,7 +163,7 @@ Result<MatrixWeight> load_fp8_matrix_axis_slice(
 この経路は generic weights layer の API としてのみ存在し、model 側からの呼び出し元は無い。
 
 MoE routed experts を layer あたり rank-3 の MXFP4 native SoA へ集約するロード経路
-（`shelf::qwen35moe`、`MatrixWeight` の `experts` / batch stride 字段を含む）は
+（`shelf::qwen35moe`、`MatrixWeight` の `experts` / batch stride フィールドを含む）は
 [qwen35moe.md](qwen35moe.md) を参照。
 
 ## Runtime contract
@@ -185,6 +192,7 @@ production の Program Builder は linear の activation 量子化方針を
 | `Bf16` | `BF16_F32_BF16` | `LINEAR_BF16` | なし | 32（未使用） | なし |
 | `Fp8Finegrained` | `FP8_FINEGRAINED_W8A8_F32_BF16` | `LINEAR_FP8_FINEGRAINED` | E4M3 | 128 | あり |
 | `Mxfp4` | `MXFP4_W4A8_F32_BF16` | `LINEAR_MXFP4_W4A8` | E4M3（group E8M0 を行基準へ fold） | 64 | あり |
+| `Exl3` | `EXL3_W16A16_F32_BF16` | `LINEAR_EXL3_W16A16` | なし（BF16 を入力で F16 へ回転） | 128（未使用） | なし |
 
 - MXFP4 linear は weight storage が 4-bit でも activation を 4-bit にしない。
   checkpoint が宣言する dynamic MXFP4 activation は使わず、上記の E4M3 spec を
@@ -254,6 +262,89 @@ production の Program Builder は linear の activation 量子化方針を
   1回の quantize と1つの workspace range を共有する。共有の検証は
   K / `k_padded`、activation spec、および producer kernel id（平面の形）の一致で行い、
   食い違う場合は構築時に失敗する。
+
+### EXL3 W16A16
+
+EXL3 は HF checkpoint の `quantization_config.quant_method == "exl3"` を検出し、
+`<prefix>.trellis` / `.suh` / `.svh` / `.mul1` から 1 つの
+`MatrixWeight`（`MatrixEncoding::Exl3`）を作る。shelf 側で EXL3 artifact を生成する
+経路は持たない。
+
+- コードブックは mul1 のみ。trellis は `<k/16, n/16, 16*ka + (half ? 8 : 0)>` の I16。
+  `ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
+- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。marker の値は kernel では
+  使わない。
+- `k` と `n` は 128 の倍数、`k_padded == k`。trellis の語数から `ka` / `half` を
+  復元し、`suh` / `svh` の長さと照合する。
+- `LINEAR_EXL3_W16A16` は trellis を kernel 内で復号し、F16 の重み・活性で
+  WMMA（F32 累算）する。活性量子化は行わず、workspace も持たない。
+
+```text
+Y = (X diag(suh)) H128 W_hat H128 diag(svh)
+```
+
+`H128` は 128 要素ブロックの正規化 Sylvester Hadamard（1/sqrt(128) を両軸に 1 回）、
+`W_hat` は trellis を tile 順に復号した回転基底の重みである。入力回転と出力回転は
+linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で書く。
+
+- `Exl3GemmArgs::splitk_scratch` が非 null のとき、grid 数が少ない shape では K を
+  複数 block へ分割する。各 block は部分和と rowsum を scratch に書き、
+  reduce kernel が split 方向に加算してから affine 変換、`H128`、`svh` を適用する。
+  split 数は `grid_x <= 16 ? 8 : (grid_x <= 160 ? 4 : 1)` を K chunk 数と
+  scratch 容量（12 MiB）で制限した値になる。`splitk_splits` が 0 でなければ
+  その値を使う。scratch の必要量は
+  `splits * rows * out_features + splits * rows` float である。
+- 部分和の加算順は split 数で変わるため、split あり / なしの出力は bit 一致しない。
+  CPU affine 参照との比較は両方の経路で行う。
+- 1 warp は 16-column tile を 1 個または 2 個担当する。2 個のとき kOutBlock は 256 で、
+  B fragment 1 個を 2 個の WMMA で共有する。n tile 数は出力値に依存しない。
+  `rows >= 4`、`out_features % 256 == 0`、`out_features >= 1024` のとき 2 個、
+  それ以外は 1 個とする。
+- row group は 1 block が処理する 16-row tile の数である。`rows >= 256` かつ
+  `grid_x >= 8` のとき 4、`rows >= 32` かつ
+  `grid_x * ceil(rows / 32) * splits >= 128` のとき 2、それ以外は 1。
+  n tile が 1 個の経路では 2 以下に制限する。row group の選択は出力値に依存しない。
+- `Exl3GemmArgs::xrot` が非 null のとき、`launch_gemm_exl3_w16a16_pre` は入力回転を
+  再計算せず、B fragment と rowsum を global xrot から読む。xrot は
+  `launch_rotate_exl3` が `rows * k` の FP16 で 1 回だけ作る。dispatcher は `rows >= 4` かつ
+  `rows * k * 2` が execution workspace の xrot 領域（80 MiB）に収まるときだけ
+  この経路を使い、それ以外は fused 経路にする。回転の演算順は fused と同じで、
+  出力は一致する。
+- `ka == 4` かつ `half == 0` の decode は、1 lane の 8 状態を 2 word の窓と
+  `v_alignbit` の即値 shift でまとめて抽出する。ring は使わず、`source[lane]` と
+  lane shuffle で前の word を得る。他の rate は 4 word の generic 経路を使う。
+  どちらも同じ state を生成する。
+- fused（rows < 4）の xrot は LDS に置き、pitch を **136 halfs**（16 B alignment）に
+  する。row stride 128 halfs では B fragment が 16-way bank conflict になるため、
+  row ごとに bank を 4 つずつずらす。
+
+- `rows >= 256` かつ次の条件を満たすとき、prefill 用に dense recon + hipBLASLt 経路を使う。
+  `k * out_features * 2 <= 192 MiB`、`rows * out_features * 4 <= accum 領域`、
+  `out_features % 128 == 0`、`ka` / `half` が復号可能、xrot が 80 MiB に収まる。
+  - rotate で xrot と rowsum（行ごとの xrot 和）を作り、recon kernel が trellis を
+    row-major の `W_hat`（K×N、FP16）へ展開する。H128 と `svh` は展開せず、既存の
+    epilogue と同じ変換を後段で行う。
+  - hipBLASLt は `A = W_hat`（N×K、ld=N）、`B = xrot`（K×rows、ld=K）、
+    `C = accum`（N×rows、ld=N）として M×N の row-major 出力を計算する。
+  - epilogue kernel が事前計算済みの rowsum、`kMul1BiasOverInv`、`H128`、`svh` を適用し、
+    BF16 / F32 で書く。部分和・split-K は使わない。
+  - hipBLASLt の algo は `(rows, out_features, k)` ごとに候補 16 個を 1 回だけ計測して
+    最速をキャッシュする。`SHELF_EXL3_DENSE_TUNE=0` で先頭候補に固定できる。
+  - 条件を満たさない場合（decode、verify、LM-Head、小さい prefill、容量超過）は
+    従来の融合 W16A16 経路へ fallback する。LM-Head は logits 行数が request 数
+    （通常 1）であるため、融合経路のままとする。
+  - dense 領域は 192 MiB、accum は `padded_rows * 17408 * 4` byte、rowsum は
+    `padded_rows * 4` byte を executor workspace に予約する。recon 経路の選択は
+    `SHELF_EXL3_DENSE` で上書きできる（0 で無効、値は rows のしきい値）。
+- 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
+  成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ
+  落とさない。
+- final projection / vocab-parallel LM head は `Bf16` を要求する既存契約のままであり、
+  EXL3 の lm_head に対して vocab shard は行わない。
+- tensor partition（TP）は EXL3 では unsupported。
+- MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
+- DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
+  logits を計算する（drafter の重みは BF16 / FP8 のまま）。
 
 ## KV quantization
 

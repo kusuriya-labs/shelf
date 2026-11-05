@@ -89,6 +89,7 @@ struct QuantizedModelReader::Impl {
     std::map<std::string, std::string> shard_for_tensor;
     std::set<std::string> shard_files;
     std::map<std::string, std::vector<float>> fp32_scale_staging;
+    std::map<std::string, std::vector<uint16_t>> bf16_staging;
 
     mutable std::mutex shard_mutex;
     mutable std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> shard_readers;
@@ -216,6 +217,32 @@ struct QuantizedModelReader::Impl {
                               const std::vector<std::size_t>& shape,
                               uint64_t expected_bytes,
                               bool verify_crc) const {
+        auto bf16_it = bf16_staging.find(reference.tensor);
+        if (bf16_it != bf16_staging.end()) {
+            if (dtype != shelf::io::SType::BF16) {
+                return Status::invalid_argument(
+                    ("staged bf16 stream is not BF16: " + reference.tensor).c_str(),
+                    __FILE__, __LINE__);
+            }
+            const uint64_t staged_bytes = bf16_it->second.size() * sizeof(uint16_t);
+            if (staged_bytes != expected_bytes) {
+                return Status::invalid_argument(
+                    ("staged bf16 byte count mismatch: " + reference.tensor).c_str(),
+                    __FILE__, __LINE__);
+            }
+            if (verify_crc) {
+                auto expected_crc = parse_crc32(reference.crc32);
+                if (!expected_crc.ok()) return expected_crc.status();
+                if (crc32_iso_hdlc(bf16_it->second.data(),
+                                   static_cast<std::size_t>(staged_bytes)) !=
+                    expected_crc.value()) {
+                    return Status::invalid_argument(
+                        ("staged bf16 CRC32 mismatch: " + reference.tensor).c_str(),
+                        __FILE__, __LINE__);
+                }
+            }
+            return Status::make_ok();
+        }
         auto staged_it = fp32_scale_staging.find(reference.tensor);
         if (staged_it != fp32_scale_staging.end()) {
             if (dtype != shelf::io::SType::F32) {
@@ -299,6 +326,42 @@ struct QuantizedModelReader::Impl {
             if (tensor.encoding == QuantizedEncoding::Bf16) {
                 Status ref_status = validate_ref(*tensor.data, shelf::io::SType::BF16, k, sizeof(uint16_t));
                 if (!ref_status.ok()) return ref_status;
+                continue;
+            }
+
+            if (tensor.encoding == QuantizedEncoding::Exl3) {
+                if (tensor.logical_shape.size() < 2 || !tensor.codes || !tensor.suh ||
+                    !tensor.svh || !tensor.marker) {
+                    return Status::invalid_argument(
+                        "exl3 quantized tensor payload is incomplete", __FILE__, __LINE__);
+                }
+                const uint64_t n =
+                    static_cast<uint64_t>(tensor.logical_shape[tensor.logical_shape.size() - 2]);
+                const uint32_t ka = tensor.exl3_ka;
+                if (ka < 1u || ka > 8u || (tensor.exl3_half && ka > 3u)) {
+                    return Status::invalid_argument("exl3 bit rate is invalid", __FILE__,
+                                                    __LINE__);
+                }
+                const uint64_t words = 16u * ka + (tensor.exl3_half ? 8u : 0u);
+                const std::vector<std::size_t> trellis_shape = {
+                    static_cast<std::size_t>(k / 16u),
+                    static_cast<std::size_t>(n / 16u),
+                    static_cast<std::size_t>(words)};
+                uint64_t trellis_bytes = 0;
+                Status bytes_status = checked_product(
+                    (k / 16u) * (n / 16u) * words, uint64_t{2}, trellis_bytes);
+                if (!bytes_status.ok()) return bytes_status;
+                Status st = validate_ref_exact(*tensor.codes, shelf::io::SType::I16,
+                                               trellis_shape, trellis_bytes);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.suh, shelf::io::SType::F16,
+                                        {static_cast<std::size_t>(k)}, k * 2u);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.svh, shelf::io::SType::F16,
+                                        {static_cast<std::size_t>(n)}, n * 2u);
+                if (!st.ok()) return st;
+                st = validate_ref_exact(*tensor.marker, shelf::io::SType::I32, {}, 4u);
+                if (!st.ok()) return st;
                 continue;
             }
 
@@ -451,6 +514,9 @@ Result<QuantizedModelReader> QuantizedModelReader::open(
         if (t.metadata2) physical.push_back(t.metadata2->tensor);
         if (t.metadata3) physical.push_back(t.metadata3->tensor);
         if (t.metadata4) physical.push_back(t.metadata4->tensor);
+        if (t.suh) physical.push_back(t.suh->tensor);
+        if (t.svh) physical.push_back(t.svh->tensor);
+        if (t.marker) physical.push_back(t.marker->tensor);
         if (t.data) physical.push_back(t.data->tensor);
         for (const auto& p : physical) {
             if (!pimpl->shard_for_tensor.count(p)) {
@@ -487,6 +553,7 @@ Result<QuantizedModelReader> QuantizedModelReader::open_hf_source(
     pimpl->shard_for_tensor = std::move(source.shard_for_physical);
     pimpl->shard_readers = std::move(source.shard_readers);
     pimpl->fp32_scale_staging = std::move(source.fp32_scale_staging);
+    pimpl->bf16_staging = std::move(source.bf16_staging);
 
     for (const auto& kv : pimpl->shard_for_tensor) {
         pimpl->shard_files.insert(kv.second);
@@ -567,9 +634,16 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
     view.k_padded = static_cast<int64_t>(t.k_padded);
     view.scale_block_n = t.scale_block_n;
     view.scale_block_k = t.scale_block_k;
+    view.exl3_ka = t.exl3_ka;
+    view.exl3_half = t.exl3_half;
 
     auto fetch = [&](const std::string& physical, std::size_t& out_bytes)
         -> Result<const void*> {
+        auto bf16_it = pimpl_->bf16_staging.find(physical);
+        if (bf16_it != pimpl_->bf16_staging.end()) {
+            out_bytes = bf16_it->second.size() * sizeof(uint16_t);
+            return bf16_it->second.data();
+        }
         auto staged_it = pimpl_->fp32_scale_staging.find(physical);
         if (staged_it != pimpl_->fp32_scale_staging.end()) {
             out_bytes = staged_it->second.size() * sizeof(float);
@@ -612,6 +686,24 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
         auto r = fetch(t.metadata4->tensor, nb);
         if (!r.ok()) return r.status();
         view.metadata4 = ByteSpan{r.value(), nb};
+    }
+    if (t.suh) {
+        std::size_t nb = 0;
+        auto r = fetch(t.suh->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.suh = ByteSpan{r.value(), nb};
+    }
+    if (t.svh) {
+        std::size_t nb = 0;
+        auto r = fetch(t.svh->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.svh = ByteSpan{r.value(), nb};
+    }
+    if (t.marker) {
+        std::size_t nb = 0;
+        auto r = fetch(t.marker->tensor, nb);
+        if (!r.ok()) return r.status();
+        view.marker = ByteSpan{r.value(), nb};
     }
     if (t.data) {
         std::size_t nb = 0;

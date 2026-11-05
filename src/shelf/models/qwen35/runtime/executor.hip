@@ -8,6 +8,8 @@
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/execution/row_bucket.h>
+#include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/runtime/program/program.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/core/gpu/cleanup.h>
@@ -168,7 +170,8 @@ Status build_host_execution_context(
     if (ws_base == nullptr) {
         return Status::invalid_state("execution workspace not allocated", __FILE__, __LINE__);
     }
-    constexpr uint64_t kScratchFloats = 8192;
+    constexpr uint64_t kScratchFloats = 3145728;
+    constexpr uint64_t kExl3XrotBytes = 80ull * 1024ull * 1024ull;
     const uint64_t scratch_offset =
         (static_cast<uint64_t>(program.workspace.total_bytes) + 255ull) & ~255ull;
     if (scratch_offset + kScratchFloats * sizeof(float) >
@@ -212,6 +215,46 @@ Status build_host_execution_context(
     }
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
+    const uint64_t exl3_xrot_offset =
+        (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+    if (exl3_xrot_offset + kExl3XrotBytes >
+        executor.execution_workspace.allocation_bytes()) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 xrot",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_xrot = ws_base + exl3_xrot_offset;
+    ctx.exl3_xrot_bytes = static_cast<uint32_t>(kExl3XrotBytes);
+    const uint64_t exl3_dense_offset =
+        (exl3_xrot_offset + kExl3XrotBytes + 255ull) & ~255ull;
+    if (exl3_dense_offset + runtime::kExl3DenseBytes >
+        executor.execution_workspace.allocation_bytes()) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 dense",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_dense = ws_base + exl3_dense_offset;
+    ctx.exl3_dense_bytes = static_cast<uint64_t>(runtime::kExl3DenseBytes);
+    const uint64_t exl3_accum_offset =
+        (exl3_dense_offset + runtime::kExl3DenseBytes + 255ull) & ~255ull;
+    const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
+    if (exl3_accum_offset >= workspace_bytes) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 accum",
+                                           __FILE__, __LINE__);
+    }
+    const uint64_t exl3_accum_bytes = runtime::exl3_dense_accum_bytes(
+        runtime::qwen35_padded_row_count(executor.config.max_batch_rows));
+    if (exl3_accum_offset + exl3_accum_bytes > workspace_bytes) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 accum",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_accum = ws_base + exl3_accum_offset;
+    ctx.exl3_accum_bytes = exl3_accum_bytes;
+    const uint64_t exl3_rowsum_offset = (exl3_accum_offset + exl3_accum_bytes + 255ull) & ~255ull;
+    if (exl3_rowsum_offset >= workspace_bytes) {
+        return Status::insufficient_memory("execution workspace too small for EXL3 rowsum",
+                                           __FILE__, __LINE__);
+    }
+    ctx.exl3_rowsum = ws_base + exl3_rowsum_offset;
+    ctx.exl3_rowsum_bytes = workspace_bytes - exl3_rowsum_offset;
     ctx.error_word = status_ptr;
     ctx.bucket_m = static_cast<uint32_t>(program.row_bucket);
     ctx.staging = executor.dispatch_staging;
@@ -1926,9 +1969,16 @@ Result<Executor> create_executor(
                 max_staging_bytes =
                     std::max(max_staging_bytes, ::shelf::runtime::max_host_staging_bytes(prog));
             }
-            constexpr std::size_t kScratchBytes = 8192 * sizeof(float);
-            const std::size_t exec_workspace_bytes =
-                max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes;
+            constexpr std::size_t kScratchBytes = 3145728 * sizeof(float);
+            constexpr std::size_t kExl3XrotBytes = 80u * 1024u * 1024u;
+            const std::size_t exl3_accum_bytes =
+                runtime::exl3_dense_accum_bytes(Npad);
+            const std::size_t exec_workspace_bytes = max_workspace_bytes + kScratchBytes +
+                                                     runtime::kDecodeAttnPartialBytes +
+                                                     kExl3XrotBytes +
+                                                     runtime::kExl3DenseBytes +
+                                                     exl3_accum_bytes + Npad * sizeof(float) +
+                                                     512u;
             if (exec_workspace_bytes > 0) {
                 st = allocate_contiguous_tensor<uint8_t>(
                     arena, {exec_workspace_bytes}, ex.execution_workspace);

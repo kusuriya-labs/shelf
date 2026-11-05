@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/status.h>
+#include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/quantization/quant_format.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
@@ -140,6 +141,46 @@ inline Result<shelf::quantization::ResolvedQuantSpec> resolve_quant_spec(
         d.weight_layout = QuantLayout::MXFP4_E2M1_BLOCK32_V1;
         d.scale_layout = QuantLayout::MXFP4_SCALE_E8M0_PER_ROW_BLOCK32_V1;
         resolved.spec_id = QuantSpecId::MXFP4_E8M0_G32_V1;
+        return resolved;
+    }
+
+    if (tensor.encoding == QuantizedEncoding::Exl3) {
+        if (!tensor.codes || !tensor.suh || !tensor.svh || !tensor.marker) {
+            return Status::invalid_argument(
+                "exl3 quantized tensor is missing a payload ref", __FILE__, __LINE__);
+        }
+        if (tensor.data || tensor.scale_block_n != 0 || tensor.scale_block_k != 0) {
+            return Status::invalid_argument(
+                "exl3 quantized tensor must not carry data or a scale block", __FILE__,
+                __LINE__);
+        }
+        if (!tensor.layout.empty() && tensor.layout != kExl3LayoutName) {
+            return Status::invalid_argument("exl3 layout mismatch", __FILE__, __LINE__);
+        }
+        if (tensor.codes->dtype != "U8" || tensor.suh->dtype != "FP16" ||
+            tensor.svh->dtype != "FP16" || tensor.marker->dtype != "I32") {
+            return Status::invalid_argument("exl3 payload dtype mismatch", __FILE__, __LINE__);
+        }
+        if (tensor.k_padded != logical_k ||
+            (logical_k % shelf::quantization::exl3::kHadamardBlock) != 0u) {
+            return Status::invalid_argument("exl3 k_padded invalid", __FILE__, __LINE__);
+        }
+        if (tensor.logical_shape.size() < 2) {
+            return Status::invalid_argument("exl3 tensor must be a matrix", __FILE__, __LINE__);
+        }
+        const uint64_t n =
+            static_cast<uint64_t>(tensor.logical_shape[tensor.logical_shape.size() - 2]);
+        if ((n % shelf::quantization::exl3::kHadamardBlock) != 0u) {
+            return Status::invalid_argument("exl3 N is not a multiple of 128", __FILE__,
+                                            __LINE__);
+        }
+        d.group_size = 0;
+        d.block_size = 0;
+        d.storage_type = StorageDType::U8;
+        d.scale_type = StorageDType::FP16;
+        d.weight_layout = QuantLayout::EXL3_TRELLIS_V1;
+        d.scale_layout = QuantLayout::NONE;
+        resolved.spec_id = QuantSpecId::EXL3_W16A16_V1;
         return resolved;
     }
 

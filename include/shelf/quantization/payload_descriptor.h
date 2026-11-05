@@ -15,6 +15,9 @@ enum class QuantPayloadRole : uint8_t {
     Codebook,
     Auxiliary,
     Data,
+    Suh,
+    Svh,
+    Marker,
 };
 
 enum class TensorStorageOrder : uint8_t {

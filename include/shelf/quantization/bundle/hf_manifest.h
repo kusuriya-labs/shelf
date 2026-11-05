@@ -16,6 +16,7 @@ enum class HfQuantMethod : uint8_t {
     None = 0,
     Fp8 = 1,
     QuarkMxfp4 = 2,
+    Exl3 = 3,
 };
 
 struct HfQuantizedSource {
@@ -23,6 +24,7 @@ struct HfQuantizedSource {
     QuantizedManifest manifest;
     std::map<std::string, std::string> shard_for_physical;
     std::map<std::string, std::vector<float>> fp32_scale_staging;
+    std::map<std::string, std::vector<uint16_t>> bf16_staging;
     std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> shard_readers;
 };
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/quantization/exl3/exl3.h>
 #include <shelf/quantization/manifest/quantized_manifest.h>
 #include <shelf/quantization/payload_descriptor.h>
 #include <shelf/quantization/quant_format.h>
@@ -15,6 +16,7 @@ enum class QuantKernelKind : uint8_t {
     LinearBf16,
     LinearFp8Finegrained,
     LinearMxfp4Finegrained,
+    LinearExl3W16A16,
 };
 
 inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel) {
@@ -22,6 +24,7 @@ inline manifest::QuantizedEncoding kernel_weight_encoding(QuantKernelKind kernel
         case QuantKernelKind::LinearBf16: return manifest::QuantizedEncoding::Bf16;
         case QuantKernelKind::LinearFp8Finegrained: return manifest::QuantizedEncoding::Fp8;
         case QuantKernelKind::LinearMxfp4Finegrained: return manifest::QuantizedEncoding::Mxfp4;
+        case QuantKernelKind::LinearExl3W16A16: return manifest::QuantizedEncoding::Exl3;
     }
     return manifest::QuantizedEncoding::Bf16;
 }
@@ -31,6 +34,7 @@ inline const char* canonical_layout_name(manifest::QuantizedEncoding enc) {
         case manifest::QuantizedEncoding::Bf16: return "";
         case manifest::QuantizedEncoding::Fp8: return manifest::kFp8LayoutName;
         case manifest::QuantizedEncoding::Mxfp4: return manifest::kMxfp4LayoutName;
+        case manifest::QuantizedEncoding::Exl3: return manifest::kExl3LayoutName;
     }
     return "";
 }
@@ -62,7 +66,8 @@ inline Status validate_weight_scale_spec(const WeightQuantSpec& spec) {
     if (!fixed.has_value()) {
         if (spec.scale.has_value()) {
             return Status::invalid_argument(
-                "bf16 weight quant spec must not carry a scale", __FILE__, __LINE__);
+                "weight quant spec must not carry a scale for this encoding", __FILE__,
+                __LINE__);
         }
         return Status::make_ok();
     }
@@ -129,6 +134,85 @@ inline Status validate_payload_contract(const QuantizedTensorDescriptor& desc) {
         if (!payload_shape_equals(data->shape, desc.logical_shape)) {
             return Status::invalid_argument(
                 "bf16 data payload shape mismatch", __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+
+    if (desc.quant.encoding == manifest::QuantizedEncoding::Exl3) {
+        if (count_payload(desc, QuantPayloadRole::Codes) != 1 ||
+            count_payload(desc, QuantPayloadRole::Suh) != 1 ||
+            count_payload(desc, QuantPayloadRole::Svh) != 1 ||
+            count_payload(desc, QuantPayloadRole::Marker) != 1) {
+            return Status::invalid_argument(
+                "exl3 payload requires codes, suh, svh and marker streams", __FILE__, __LINE__);
+        }
+        if (count_payload(desc, QuantPayloadRole::Scale) != 0 ||
+            count_payload(desc, QuantPayloadRole::Data) != 0) {
+            return Status::invalid_argument(
+                "exl3 payload must not carry scale or data", __FILE__, __LINE__);
+        }
+        if (desc.logical_shape.size() < 2) {
+            return Status::invalid_argument(
+                "exl3 payload requires a matrix shape", __FILE__, __LINE__);
+        }
+        if (k_padded != logical_k) {
+            return Status::invalid_argument(
+                "exl3 k_padded does not match logical k", __FILE__, __LINE__);
+        }
+        if ((logical_k % exl3::kHadamardBlock) != 0u) {
+            return Status::invalid_argument("exl3 K is not a multiple of 128", __FILE__, __LINE__);
+        }
+        const uint64_t n =
+            static_cast<uint64_t>(desc.logical_shape[desc.logical_shape.size() - 2]);
+        if ((n % exl3::kHadamardBlock) != 0u) {
+            return Status::invalid_argument("exl3 N is not a multiple of 128", __FILE__, __LINE__);
+        }
+
+        const QuantPayloadRef* codes = find_payload(desc, QuantPayloadRole::Codes);
+        if (codes->dtype != QuantScalarType::U8 || codes->shape.size() != 3) {
+            return Status::invalid_argument("exl3 codes payload must be a rank-3 U8 trellis",
+                                            __FILE__, __LINE__);
+        }
+        if (codes->shape[0] != logical_k / exl3::kTileSide ||
+            codes->shape[1] != n / exl3::kTileSide) {
+            return Status::invalid_argument("exl3 trellis tile grid mismatch", __FILE__, __LINE__);
+        }
+        const uint64_t words = codes->shape[2];
+        uint32_t ka = 0;
+        bool half = false;
+        if ((words % 16u) == 0u) {
+            ka = static_cast<uint32_t>(words / 16u);
+        } else if ((words % 16u) == 8u) {
+            ka = static_cast<uint32_t>((words - 8u) / 16u);
+            half = true;
+        } else {
+            return Status::invalid_argument("exl3 trellis word count is invalid", __FILE__,
+                                            __LINE__);
+        }
+        if (ka < 1u || ka > 8u || (half && ka > 3u)) {
+            return Status::invalid_argument("exl3 trellis bit rate is invalid", __FILE__, __LINE__);
+        }
+
+        const QuantPayloadRef* suh = find_payload(desc, QuantPayloadRole::Suh);
+        const QuantPayloadRef* svh = find_payload(desc, QuantPayloadRole::Svh);
+        const QuantPayloadRef* marker = find_payload(desc, QuantPayloadRole::Marker);
+        if (suh->dtype != QuantScalarType::FP16 || svh->dtype != QuantScalarType::FP16) {
+            return Status::invalid_argument("exl3 suh/svh payload must be FP16", __FILE__,
+                                            __LINE__);
+        }
+        std::vector<uint64_t> expected_suh = {logical_k};
+        std::vector<uint64_t> expected_svh = {n};
+        if (!payload_shape_equals(suh->shape, expected_suh) ||
+            !payload_shape_equals(svh->shape, expected_svh)) {
+            return Status::invalid_argument("exl3 suh/svh payload shape mismatch", __FILE__,
+                                            __LINE__);
+        }
+        if (marker->dtype != QuantScalarType::I32) {
+            return Status::invalid_argument("exl3 marker payload must be I32", __FILE__, __LINE__);
+        }
+        if (!marker->shape.empty() && (marker->shape.size() != 1 || marker->shape[0] != 1u)) {
+            return Status::invalid_argument("exl3 marker payload must be scalar", __FILE__,
+                                            __LINE__);
         }
         return Status::make_ok();
     }
@@ -214,6 +298,8 @@ inline bool weight_block_supported(
             return block.k == kFp8ScaleBlockK || block.k == kFp8ScaleBlockK / 2u;
         case manifest::QuantizedEncoding::Mxfp4:
             return block.k == kMxfp4ScaleBlockK;
+        case manifest::QuantizedEncoding::Exl3:
+            return false;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
