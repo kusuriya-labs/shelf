@@ -261,6 +261,21 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     st::PagedSequenceState sequence = seq_state.release();
 
     const std::vector<int32_t> prompt = make_prompt(64u);
+    // Beyond parity, this test pins the run-start contract: the routing plan scratch is
+    // accumulated into by the router, so every program run has to start from a prepared
+    // scratch. Poisoning it here means a run that skips the preparation cannot reach the
+    // reference result.
+    for (const auto& program : ex.program_set.programs) {
+        if (program.plan_scratch_slot == shelf::runtime::kNoWorkspace) continue;
+        const auto& range = program.workspace.ranges[program.plan_scratch_slot];
+        if (range.bytes == 0u) continue;
+        if (hipMemsetAsync(ex.execution_workspace.data<std::uint8_t>() + range.offset, 0xff,
+                           range.bytes, stream) != hipSuccess) {
+            result.error = "poison plan scratch";
+            (void)st::release_paged_sequence_state(sequence, stream);
+            return result;
+        }
+    }
     std::vector<q35::ScheduledRequest> requests;
     auto prefill = q35::execute_batch(ex, make_batch(sequence, requests, prompt.data(),
                                                      static_cast<std::uint32_t>(prompt.size())),
@@ -281,6 +296,17 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
         download_row0(ex.logits, device, result.logits_row0);
     }
     for (int step = 0; step < 8; ++step) {
+        // A run that does not prepare its scratch, or that reads a plane row the grouped GEMM
+        // never wrote, shows up here: the workspace is filled with a large non-zero pattern
+        // before one step, and the step still has to match the other geometry.
+        if (step == 4) {
+            if (hipMemsetAsync(ex.execution_workspace.data<std::uint8_t>(), 0x7f,
+                               ex.execution_workspace.allocation_bytes(), stream) != hipSuccess) {
+                result.error = "poison workspace";
+                (void)st::release_paged_sequence_state(sequence, stream);
+                return result;
+            }
+        }
         std::vector<int32_t> one{result.tokens.back()};
         auto decode = q35::execute_batch(ex, make_batch(sequence, requests, one.data(), 1u),
                                          stream);

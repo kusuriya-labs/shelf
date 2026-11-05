@@ -20,6 +20,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <thread>
 #include <vector>
 
@@ -94,10 +95,15 @@ struct TracedValue {
     std::uint32_t rows = 0;
     std::uint32_t features = 0;
     std::vector<float> row0;
+    // A routed expert output lives in group rows, so the question is which row the combine
+    // read. Below the capture threshold the whole plane is kept, not only row 0.
+    std::uint32_t kept_rows = 0;
+    std::vector<float> all_rows;
 };
 
 struct TraceCapture {
     int device = 0;
+    std::uint32_t keep_all_rows_below = 0;
     std::map<std::uint32_t, TracedValue> values;
     ValueTraceSink sink;
 
@@ -123,6 +129,8 @@ struct TraceCapture {
             entry.rows = rows;
             entry.features = feature_count;
             entry.row0.resize(n);
+            const bool keep_plane = value_id < keep_all_rows_below && rows > 1u &&
+                                    row_stride >= feature_count;
             if (elem == 2 && dtype == shelf::runtime::ValueDType::BF16) {
                 const auto* u = reinterpret_cast<const std::uint16_t*>(host.data());
                 for (std::size_t i = 0; i < n; ++i) entry.row0[i] = bf16_to_float(u[i]);
@@ -131,6 +139,34 @@ struct TraceCapture {
                 entry.row0.assign(f, f + n);
             } else {
                 return;
+            }
+            if (keep_plane) {
+                const std::uint32_t kept = std::min<std::uint32_t>(rows, 256u);
+                std::vector<std::uint8_t> plane(static_cast<std::size_t>(kept) * row_stride *
+                                                elem);
+                if (hipMemcpyAsync(plane.data(), device_ptr, plane.size(), hipMemcpyDeviceToHost,
+                                   stream) == hipSuccess &&
+                    hipStreamSynchronize(stream) == hipSuccess) {
+                    entry.kept_rows = kept;
+                    entry.all_rows.assign(static_cast<std::size_t>(kept) * feature_count, 0.0f);
+                    for (std::uint32_t r = 0; r < kept; ++r) {
+                        for (std::uint32_t f = 0; f < feature_count; ++f) {
+                            const std::size_t src =
+                                (static_cast<std::size_t>(r) * row_stride + f) * elem;
+                            if (elem == 2) {
+                                std::uint16_t bits = 0;
+                                std::memcpy(&bits, plane.data() + src, sizeof(bits));
+                                entry.all_rows[static_cast<std::size_t>(r) * feature_count + f] =
+                                    bf16_to_float(bits);
+                            } else {
+                                float f32 = 0.0f;
+                                std::memcpy(&f32, plane.data() + src, sizeof(f32));
+                                entry.all_rows[static_cast<std::size_t>(r) * feature_count + f] =
+                                    f32;
+                            }
+                        }
+                    }
+                }
             }
             this->values[value_id] = std::move(entry);
         };
@@ -360,6 +396,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
 
     TraceCapture capture;
     capture.device = device;
+    capture.keep_all_rows_below = 72u;
     capture.bind();
     ex.value_trace = &capture.sink;
 
@@ -562,6 +599,64 @@ void place_kv(const std::vector<float>& src, std::uint32_t rank, const StateSnap
     }
 }
 
+// The grouped expert plane, row by row: which rows the grouped GEMM wrote and which it left
+// alone shows up here, because an untouched row keeps the previous program's contents.
+void dump_plane(const RunResult& run, const char* tag, std::uint32_t value_id) {
+    auto it = run.values.find(value_id);
+    if (it == run.values.end() || it->second.kept_rows == 0u) {
+        std::printf("%s v%u: no plane captured\n", tag, value_id);
+        return;
+    }
+    const TracedValue& v = it->second;
+    std::printf("%s v%u plane: rows=%u kept=%u features=%u\n", tag, value_id, v.rows,
+                v.kept_rows, v.features);
+    for (std::uint32_t r = 0; r < v.kept_rows; ++r) {
+        const float* row = v.all_rows.data() + static_cast<std::size_t>(r) * v.features;
+        float worst = 0.0f;
+        int nonfinite = 0;
+        for (std::uint32_t f = 0; f < v.features; ++f) {
+            if (!std::isfinite(row[f])) {
+                ++nonfinite;
+                continue;
+            }
+            worst = std::max(worst, std::fabs(row[f]));
+        }
+        if (r >= 160u && nonfinite == 0 && worst < 1e3f) continue;
+        std::printf("  row %3u: max|v|=%12.5g nonfinite=%5d  row[0]=%12.5g row[1]=%12.5g\n", r,
+                    static_cast<double>(worst), nonfinite, static_cast<double>(row[0]),
+                    static_cast<double>(row[1]));
+    }
+}
+
+// Where did the combine's garbage come from? Look for the combine output's own values inside
+// the plane it reads, and report the row index they sit in.
+void locate_in_plane(const RunResult& run, std::uint32_t combine_id, std::uint32_t plane_id,
+                     const char* tag) {
+    auto combine = run.values.find(combine_id);
+    auto plane = run.values.find(plane_id);
+    if (combine == run.values.end() || plane == run.values.end() ||
+        plane->second.kept_rows == 0u) {
+        return;
+    }
+    const TracedValue& out = combine->second;
+    const TracedValue& src = plane->second;
+    for (std::uint32_t f = 0; f < std::min<std::uint32_t>(out.features, 8u); ++f) {
+        const float want = out.row0[f];
+        if (!std::isfinite(want) || std::fabs(want) < 1e3f) continue;
+        for (std::uint32_t r = 0; r < src.kept_rows; ++r) {
+            const float* row = src.all_rows.data() + static_cast<std::size_t>(r) * src.features;
+            for (std::uint32_t c = 0; c < src.features; ++c) {
+                if (row[c] == want) {
+                    std::printf("%s: combine v%u[%u] = %g found in plane v%u row %u col %u\n", tag,
+                                combine_id, f, static_cast<double>(want), plane_id, r, c);
+                    r = src.kept_rows;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void compare_state(const StateSnapshot& reference, const StateSnapshot& rank0,
                    const StateSnapshot& rank1) {
     std::printf("--- state after prefill, TP=1 vs reassembled TP=2 ---\n");
@@ -732,5 +827,13 @@ int main(int argc, char** argv) {
 
     compare_traces(solo, rank0, "TP=1 vs TP=2 rank0");
     compare_traces(rank0, rank1, "rank0 vs rank1");
+
+    const std::pair<const RunResult*, const char*> runs[] = {{&solo, "tp1"},
+                                                             {&rank0, "rank0"},
+                                                             {&rank1, "rank1"}};
+    for (const auto& entry : runs) {
+        for (std::uint32_t plane : {23u, 26u, 27u}) dump_plane(*entry.first, entry.second, plane);
+        locate_in_plane(*entry.first, 34u, 27u, entry.second);
+    }
     return 0;
 }

@@ -113,11 +113,15 @@ Status execute_program(
 // Prepare the device state a program run starts from. The plan scratch of a grouped expert
 // FFN is accumulated into by the router, so a run has to start from zeros; the scan then
 // leaves the counters zero, which is what lets every layer of one run share a single scratch.
+// The owner of a program run calls this once, before it chooses an execution path, so a
+// multi-rank run cannot take a path that skips it.
 Status prepare_program_run(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+// Launches dispatches [begin, end) and the rank segments of a TP schedule. Neither prepares the
+// run: the caller that starts the program does.
 Status execute_program_range(
     const ::shelf::runtime::Program& program,
     HostExecutionContext& ctx,

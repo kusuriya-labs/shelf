@@ -284,28 +284,44 @@ Status build_host_execution_context(
     return Status::make_ok();
 }
 
-Status launch_host_backend_range(
+// One program run starts here, whichever execution path it then takes. The plan scratch of a
+// grouped expert FFN is accumulated into by the router, so the run has to be prepared before
+// the first op: a multi-rank run is not allowed to skip it, and a rank prepares its own scratch
+// on its own stream.
+Status launch_program_run(
     Executor& executor,
     const ::shelf::runtime::Program& program,
     runtime::HostExecutionContext& ctx,
     hipStream_t stream,
-    uint32_t begin,
-    uint32_t end) {
-    (void)executor;
+    uint32_t dispatch_count) {
     if (ctx.error_word == nullptr) {
         return Status::invalid_state("error word not bound", __FILE__, __LINE__);
     }
-    if (begin > end ||
-        static_cast<std::size_t>(end) > program.dispatches.size()) {
-        return Status::invalid_argument("dispatch range out of bounds", __FILE__,
-                                        __LINE__);
+    const Status prepared =
+        ::shelf::execution::prepare_program_run(program, ctx, stream);
+    if (!prepared.ok()) return prepared;
+    const hipError_t word_err =
+        hipMemsetAsync(ctx.error_word, 0, sizeof(uint32_t), stream);
+    if (word_err != hipSuccess) {
+        return Status::hip_error("hipMemsetAsync error word", hipGetErrorString(word_err),
+                                 __FILE__, __LINE__);
     }
-    if (begin == 0u) {
-        const Status prepared =
-            ::shelf::execution::prepare_program_run(program, ctx, stream);
-        if (!prepared.ok()) return prepared;
+
+    const size_t program_index = static_cast<size_t>(
+        &program - executor.program_set.programs.data());
+    if (!executor.tp_schedules.empty()) {
+        if (program_index >= executor.tp_schedules.size() ||
+            !executor.tp_schedules[program_index].active() ||
+            executor.tp_barrier == nullptr) {
+            return Status::invalid_state(
+                "tp execution schedule is active but cannot be launched",
+                __FILE__, __LINE__);
+        }
+        return runtime::execute_program_tp_ranges(
+            program, ctx, stream, executor.tp_schedules[program_index],
+            executor.tp_barrier, executor.tp_rank);
     }
-    return runtime::execute_program_range(program, ctx, stream, begin, end);
+    return runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
 }
 
 template <typename T>
@@ -860,30 +876,7 @@ Result<PendingBatch> submit_co_batch(
             executor.batch_context, executor.config.max_scheduled_requests, stream);
         if (!stq.ok()) return stq;
 
-        const hipError_t word_err =
-            hipMemsetAsync(ctx.error_word, 0, sizeof(uint32_t), stream);
-        if (word_err != hipSuccess) {
-            return Status::hip_error("hipMemsetAsync error word",
-                                     hipGetErrorString(word_err), __FILE__, __LINE__);
-        }
-        const size_t program_index = static_cast<size_t>(
-            program - executor.program_set.programs.data());
-        const bool tp_configured = !executor.tp_schedules.empty();
-        if (tp_configured) {
-            if (program_index >= executor.tp_schedules.size() ||
-                !executor.tp_schedules[program_index].active() ||
-                executor.tp_barrier == nullptr) {
-                return Status::invalid_state(
-                    "tp execution schedule is active but cannot be launched",
-                    __FILE__, __LINE__);
-            }
-            stq = runtime::execute_program_tp_ranges(
-                *program, ctx, stream, executor.tp_schedules[program_index],
-                executor.tp_barrier, executor.tp_rank);
-        } else {
-            stq = launch_host_backend_range(executor, *program, ctx, stream, 0u,
-                                            dispatch_count);
-        }
+        stq = launch_program_run(executor, *program, ctx, stream, dispatch_count);
         if (!stq.ok()) return stq;
         auto* host_status = static_cast<uint32_t*>(executor.host_status_staging);
         if (host_status == nullptr) {
