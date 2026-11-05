@@ -348,13 +348,23 @@ int main() {
         options.max_seq_len = 128u;
         options.page_tokens = 16u;
         options.max_batch_rows = 16u;
-        const std::size_t short_bytes =
-            shelf::qwen35::runtime::mtp_drafter_reserve_bytes(cfg, options);
+        const std::size_t short_bytes = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+            cfg, options, cfg.ffn.intermediate_size, 0u);
         options.max_seq_len = 512u;
-        const std::size_t long_bytes =
-            shelf::qwen35::runtime::mtp_drafter_reserve_bytes(cfg, options);
+        const std::size_t long_bytes = shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+            cfg, options, cfg.ffn.intermediate_size, 0u);
         check(short_bytes > 0u, "mtp reserve: positive");
         check(long_bytes > short_bytes, "mtp reserve: grows with sequence length");
+        const std::size_t grouped_bytes =
+            shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+                cfg, options, cfg.ffn.intermediate_size, 1u << 20);
+        check(grouped_bytes == long_bytes + (1u << 20),
+              "mtp reserve: adds the grouped expert workspace term");
+        check(shelf::qwen35::runtime::mtp_drafter_rows(options) == 16u,
+              "mtp rows: the executor batch limit, widened to the verify width");
+        options.max_batch_rows = 4u;
+        check(shelf::qwen35::runtime::mtp_drafter_rows(options) == 5u,
+              "mtp rows: at least the drafts plus the verified token");
         check(shelf::qwen35::runtime::kMtpMaxDrafts == 31u,
               "mtp reserve: draft ceiling");
     }

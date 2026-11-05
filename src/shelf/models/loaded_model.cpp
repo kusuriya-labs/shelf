@@ -1,4 +1,5 @@
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
@@ -123,6 +124,7 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     lower_options.override_layers = std::span<const std::uint32_t>(
         override_layers.data(), override_layers.size());
     lower_options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
+    lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
 
     auto lowered = shelf::qwen35moe::lower_qwen35_moe_to_primitives(
         moe_->text_config(), moe_->weights(), lower_options);
@@ -135,6 +137,77 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     input.layer_overrides = std::move(overrides);
     return shelf::qwen35::create_executor(std::move(input), sequence_pool, gdn_state_pool,
                                           kv_pool, arena, config);
+}
+
+namespace {
+
+// The executor workspace terms of one drafter block: the FFN activations that still sit at
+// token rows, and, for a model that runs on grouped expert rows, the group-row planes and
+// routing plan the shared estimate cannot take from a dense intermediate width.
+struct MtpExecutorTerms {
+    std::size_t token_row_intermediate = 0;
+    std::size_t grouped_executor_bytes = 0;
+};
+
+MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) {
+    MtpExecutorTerms terms;
+    if (model.moe_model() != nullptr) {
+        const auto& moe = *model.moe_model();
+        terms.token_row_intermediate = moe.text_config().ffn.shared_expert_intermediate_size;
+        terms.grouped_executor_bytes =
+            shelf::qwen35moe::moe_executor_grouped_bytes(moe.text_config(), rows);
+    } else {
+        terms.token_row_intermediate = model.dense_model()->text_config().ffn.intermediate_size;
+    }
+    return terms;
+}
+
+}  // namespace
+
+bool LoadedModel::has_mtp_block() const noexcept {
+    if (moe_ != nullptr) return moe_->weights().mtp.present;
+    return dense_ != nullptr && dense_->weights().mtp.present;
+}
+
+std::size_t LoadedModel::mtp_drafter_reserve_bytes(
+    const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+    if (!has_mtp_block()) return 0u;
+    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    return shelf::qwen35::runtime::mtp_drafter_reserve_bytes(
+        hybrid_config(), options, terms.token_row_intermediate,
+        terms.grouped_executor_bytes);
+}
+
+Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
+    const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+    if (!has_mtp_block()) {
+        return Status::unsupported(
+            "the loaded model has no MTP block: load it with the MTP option", __FILE__,
+            __LINE__);
+    }
+    shelf::qwen35::runtime::MtpDrafterInput input;
+    input.config = &hybrid_config();
+    input.embed_tokens = &embed_tokens();
+    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    input.token_row_intermediate = terms.token_row_intermediate;
+    input.grouped_executor_bytes = terms.grouped_executor_bytes;
+
+    if (moe_ != nullptr) {
+        auto lowered = shelf::qwen35moe::lower_qwen35_moe_mtp_to_primitives(
+            moe_->text_config(), moe_->weights(),
+            static_cast<float>(options.rope_profile.attention_factor));
+        if (!lowered.ok()) return lowered.status();
+        input.lowered = lowered.release();
+        return input;
+    }
+
+    auto lowered = shelf::qwen35::lower_qwen35_mtp_to_primitives(
+        dense_->text_config(), dense_->weights(), options.rope_profile);
+    if (!lowered.ok()) return lowered.status();
+    input.lowered = lowered.release();
+    return input;
 }
 
 }  // namespace shelf::models

@@ -440,6 +440,254 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         pg.external_outputs.push_back(hidden_tap_values[t]);
     }
 
+    if (options.emit_normed_token_hidden) {
+        if (final_norm_param == UINT32_MAX) {
+            return Status::invalid_argument("the normed token hidden needs the final norm",
+                                            __FILE__, __LINE__);
+        }
+        RT::RmsNormNode token_rms;
+        token_rms.shape = hidden_key;
+        token_rms.eps = eps;
+        token_rms.group_size = hidden_size;
+        token_rms.parameter_index = final_norm_param;
+        token_rms.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+        RT::ValueId normed_tokens = em.unary(RT::PrimitiveNode{token_rms}, layer_input,
+                                             hidden_size);
+        pg.nodes.back().debug_name = "normed_token_hidden";
+        pg.external_outputs.push_back(normed_tokens);
+    }
+
+    status = RT::validate_primitive_graph(pg);
+    if (!status.ok()) return status;
+
+    return lowered;
+}
+
+// The MTP block is one hybrid block: a full-attention layer with this family's MoE FFN,
+// preceded by the block's own norms and fc over the concatenated embedding and previous
+// hidden. It reads the checkpoint's fused expert planes, so the plan it lowers against is
+// the MTP plan, not a transformer layer's.
+Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_mtp_to_primitives(
+    const Qwen35MoeTextConfig& config,
+    const Qwen35MoeModelWeights& weights,
+    float rope_attention_factor) {
+
+    if (!weights.mtp.present) {
+        return Status::unsupported("the MoE model has no MTP block", __FILE__, __LINE__);
+    }
+    auto plan_result = build_moe_mtp_expert_group_plan(config);
+    if (!plan_result.ok()) return plan_result.status();
+    const MoeExpertGroupPlan& plan = plan_result.value();
+    Status status = validate_qwen35moe_mtp_weights(weights.mtp, plan, config);
+    if (!status.ok()) return status;
+
+    uint32_t experts = 0;
+    uint32_t top_k = 0;
+    uint32_t moe_intermediate = 0;
+    uint32_t shared_intermediate = 0;
+    uint32_t hidden_size = 0;
+    uint32_t q_heads = 0;
+    uint32_t kv_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t q_features = 0;
+    uint32_t kv_features = 0;
+    status = QH::checked_u32(config.ffn.num_experts, "invalid expert count", experts);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.ffn.num_experts_per_tok, "invalid expert selection width",
+                             top_k);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.ffn.moe_intermediate_size, "invalid routed expert width",
+                             moe_intermediate);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.ffn.shared_expert_intermediate_size,
+                             "invalid shared expert width", shared_intermediate);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.hidden_size, "invalid hidden size", hidden_size);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.num_attention_heads, "invalid attention head count",
+                             q_heads);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.num_key_value_heads, "invalid attention kv head count",
+                             kv_heads);
+    if (!status.ok()) return status;
+    status = QH::checked_u32(config.attention_head_dim, "invalid attention head width",
+                             head_dim);
+    if (!status.ok()) return status;
+    status = QH::checked_product(q_heads, head_dim, "invalid attention query geometry",
+                                 q_features);
+    if (!status.ok()) return status;
+    status = QH::checked_product(kv_heads, head_dim, "invalid attention kv geometry",
+                                 kv_features);
+    if (!status.ok()) return status;
+    if (top_k > experts) {
+        return Status::invalid_argument("more experts are selected than exist", __FILE__,
+                                        __LINE__);
+    }
+    const uint32_t q_proj_features = 2u * q_features;
+    if (weights.mtp.layer.attn_q_proj.rows != q_proj_features ||
+        weights.mtp.layer.attn_k_proj.rows != kv_features ||
+        weights.mtp.layer.attn_v_proj.rows != kv_features ||
+        weights.mtp.layer.attn_o_proj.cols != q_features) {
+        return Status::invalid_argument("the MTP block's attention is not the gated shape",
+                                        __FILE__, __LINE__);
+    }
+
+    float eps = config.rms_norm_eps;
+    float rope_theta = config.rope_theta;
+    float partial = config.partial_rotary_factor;
+    if (eps == 0) eps = 1e-6f;
+    if (rope_theta == 0) rope_theta = 10000000.0f;
+    if (partial == 0) partial = 0.25f;
+    const uint32_t rotary_dim = static_cast<uint32_t>((double)head_dim * (double)partial);
+
+    QH::HybridLoweredPrimitives lowered;
+    RT::PrimitiveGraph& pg = lowered.graph;
+    pg.grouped_row_shape = RT::GroupedRowShape{experts, top_k};
+
+    std::vector<const MW*> weight_pointers;
+    auto add_weight = [&](const MW& w) -> uint32_t {
+        weight_pointers.push_back(&w);
+        lowered.weights.push_back(make_weight_slot(w));
+        pg.weight_table.push_back(RT::MatrixwiseShapeKey{w.rows, w.cols});
+        return static_cast<uint32_t>(weight_pointers.size() - 1);
+    };
+    auto reg_param = [&](const gpu::Tensor& t) -> uint32_t {
+        RT::StaticParameterSlot s{};
+        s.device_ptr = t.data<void>();
+        std::size_t n = 1;
+        for (std::size_t i = 0; i < t.ndim(); ++i) n *= t.dim(i);
+        s.elements = static_cast<uint32_t>(n);
+        s.dtype = t.element_size() == 2 ? RT::ValueDType::BF16 : RT::ValueDType::F32;
+        lowered.parameters.push_back(s);
+        return static_cast<uint32_t>(lowered.parameters.size() - 1);
+    };
+
+    const uint32_t embed_index = add_weight(weights.embed_tokens);
+    const bool lm_tied = weights.lm_head_tied;
+    const uint32_t lm_index = lm_tied ? embed_index : add_weight(weights.lm_head);
+    const uint32_t fc_index = add_weight(weights.mtp.fc);
+
+    const auto& lw = weights.mtp.layer;
+    LayerWeightIndices idx;
+    idx.attn_q = add_weight(lw.attn_q_proj);
+    idx.attn_k = add_weight(lw.attn_k_proj);
+    idx.attn_v = add_weight(lw.attn_v_proj);
+    idx.attn_o = add_weight(lw.attn_o_proj);
+    idx.router = add_weight(lw.ffn.router);
+    idx.expert_w13 = add_weight(lw.ffn.expert_w13);
+    idx.expert_w2 = add_weight(lw.ffn.expert_w2);
+    idx.shared_gate = add_weight(lw.ffn.shared_gate_proj);
+    idx.shared_up = add_weight(lw.ffn.shared_up_proj);
+    idx.shared_down = add_weight(lw.ffn.shared_down_proj);
+    idx.shared_scale = add_weight(lw.ffn.shared_gate);
+
+    const uint32_t p_embed_norm = reg_param(weights.mtp.pre_fc_norm_embedding_weight);
+    const uint32_t p_hidden_norm = reg_param(weights.mtp.pre_fc_norm_hidden_weight);
+    const uint32_t p_final_norm = reg_param(weights.mtp.final_norm_weight);
+    LayerParamIndices lp;
+    lp.input_norm = reg_param(lw.input_layernorm_weight);
+    lp.post_norm = reg_param(lw.post_attention_layernorm_weight);
+    lp.q_norm = reg_param(lw.attn_q_norm_weight);
+    lp.k_norm = reg_param(lw.attn_k_norm_weight);
+
+    QH::Emitter em{pg};
+    const RT::RowwiseShapeKey hidden_key{hidden_size};
+
+    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
+    RT::ValueId hidden_in = em.value(hidden_size);
+    pg.external_inputs.push_back(tokens);
+    pg.external_inputs.push_back(hidden_in);
+
+    RT::ValueId embedded = em.value(hidden_size);
+    {
+        RT::EmbeddingLookupNode n;
+        n.vocab_size = weights.embed_tokens.rows;
+        n.hidden_size = hidden_size;
+        n.weight_shape =
+            RT::MatrixwiseShapeKey{weights.embed_tokens.rows, weights.embed_tokens.cols};
+        n.weight_index = embed_index;
+        em.emit(RT::PrimitiveNode{n}, {tokens}, {embedded});
+        pg.nodes.back().debug_name = "mtp.embedding";
+    }
+
+    RT::RmsNormNode enorm;
+    enorm.shape = hidden_key;
+    enorm.eps = eps;
+    enorm.group_size = hidden_size;
+    enorm.parameter_index = p_embed_norm;
+    enorm.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+    RT::ValueId normed_embedded = em.unary(RT::PrimitiveNode{enorm}, embedded, hidden_size);
+    pg.nodes.back().debug_name = "mtp.pre_fc_norm_embedding";
+
+    RT::RmsNormNode hnorm;
+    hnorm.shape = hidden_key;
+    hnorm.eps = eps;
+    hnorm.group_size = hidden_size;
+    hnorm.parameter_index = p_hidden_norm;
+    hnorm.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+    RT::ValueId normed_hidden_in = em.unary(RT::PrimitiveNode{hnorm}, hidden_in, hidden_size);
+    pg.nodes.back().debug_name = "mtp.pre_fc_norm_hidden";
+
+    RT::ValueId concatenated = em.value(2u * hidden_size);
+    {
+        RT::ConcatNode cn;
+        cn.shape = RT::RowwiseShapeKey{2u * hidden_size};
+        cn.input_shape_a = hidden_key;
+        cn.input_shape_b = hidden_key;
+        em.emit(RT::PrimitiveNode{cn}, {normed_embedded, normed_hidden_in}, {concatenated});
+        pg.nodes.back().debug_name = "mtp.concat";
+    }
+
+    RT::ValueId block_input = em.linear(weights.mtp.fc, fc_index, concatenated);
+    pg.nodes.back().debug_name = "mtp.fc";
+
+    QH::HybridBlockLowering block;
+    block.is_gdn = false;
+    block.eps = eps;
+    block.weight_input_norm = lp.input_norm;
+    block.weight_post_norm = lp.post_norm;
+    block.attention_geometry.query_heads = q_heads;
+    block.attention_geometry.kv_heads = kv_heads;
+    block.attention_geometry.head_dim = head_dim;
+    block.attention_geometry.rotary_dim = rotary_dim;
+    block.attention_geometry.rope_theta = rope_theta;
+    block.attention_geometry.rope_attention_factor = rope_attention_factor;
+    block.attention_geometry.eps = eps;
+    block.attention_weights.q = weight_pointers[idx.attn_q];
+    block.attention_weights.k = weight_pointers[idx.attn_k];
+    block.attention_weights.v = weight_pointers[idx.attn_v];
+    block.attention_weights.o = weight_pointers[idx.attn_o];
+    block.attention_indices.w_q = idx.attn_q;
+    block.attention_indices.w_k = idx.attn_k;
+    block.attention_indices.w_v = idx.attn_v;
+    block.attention_indices.w_o = idx.attn_o;
+    block.attention_indices.p_q_norm = lp.q_norm;
+    block.attention_indices.p_k_norm = lp.k_norm;
+    block.attention_indices.state_index = 0;
+    const QH::HybridBlockOutput blk = QH::emit_hybrid_block(em, hidden_key, block,
+                                                            block_input, "mtp.attn.");
+
+    MoeFfnOutput ffn_out;
+    status = emit_moe_ffn(em, plan, idx, lw.ffn, blk.post_norm, blk.attention_residual,
+                          hidden_key, moe_intermediate, shared_intermediate, experts, top_k,
+                          "mtp.ffn.", ffn_out);
+    if (!status.ok()) return status;
+
+    const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
+    if (lmw->rows != config.vocab_size) {
+        return Status::unsupported("MoE MTP lowering requires an unsharded lm_head",
+                                   __FILE__, __LINE__);
+    }
+    QH::HybridHeadLowering head;
+    head.hidden_features = hidden_size;
+    head.eps = eps;
+    head.final_norm_param = p_final_norm;
+    head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+    head.lm_weight_index = lm_index;
+    head.out_vocab = lmw->rows;
+    head.tail_output_is_normed_hidden = true;
+    QH::emit_hybrid_head(em, head, ffn_out.layer_output, "mtp.");
+
     status = RT::validate_primitive_graph(pg);
     if (!status.ok()) return status;
 

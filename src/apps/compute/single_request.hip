@@ -794,11 +794,6 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     auto& arena = runtime.arena();
     const hipStream_t stream = runtime.stream();
     const auto& text_config = runtime.model().hybrid_config();
-    const auto* dense = runtime.model().dense_model();
-    if (dense == nullptr) {
-        fprintf(stderr, "MTP requires a dense model\n");
-        return 1;
-    }
     print_model_geometry(runtime.model());
     if (std::getenv("SHELF_MEM_DEBUG") != nullptr) {
         dump_mem_debug(runtime);
@@ -825,8 +820,15 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     if (runtime.config().rope_profile.has_value()) {
         drafter_config.rope_profile = *runtime.config().rope_profile;
     }
+    auto drafter_input = runtime.model().mtp_drafter_input(drafter_config);
+    if (!drafter_input.ok()) {
+        fprintf(stderr, "mtp drafter input failed: %s\n",
+                drafter_input.status().message().c_str());
+        (void)shelf::state::release_paged_sequence_state(sequence, stream);
+        return 1;
+    }
     auto drafter_result = shelf::qwen35::runtime::create_mtp_drafter(
-        *dense, gdn_pool, arena, stream, drafter_config);
+        drafter_input.value(), gdn_pool, arena, stream, drafter_config);
     if (!drafter_result.ok()) {
         fprintf(stderr, "mtp drafter create failed: %s\n",
                 drafter_result.status().message().c_str());

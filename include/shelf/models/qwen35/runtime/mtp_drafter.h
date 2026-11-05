@@ -6,12 +6,13 @@
 #include <shelf/inference/state/paged_kv_pool.h>
 #include <shelf/inference/state/paged_sequence_state.h>
 #include <shelf/inference/state/sequence_slot_pool.h>
-#include <shelf/models/qwen35/model/qwen35_config.h>
-#include <shelf/models/qwen35/model/qwen35_model.h>
+#include <shelf/models/common/qwen_hybrid/config.h>
+#include <shelf/models/common/qwen_hybrid/lowered_primitives.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
 #include <array>
@@ -63,7 +64,7 @@ struct MtpTiming {
 };
 
 struct MtpDrafter {
-    Qwen35TextConfig config;
+    shelf::qwen_hybrid::QwenHybridConfig config;
     std::unique_ptr<state::SequenceSlotPool> slot_pool;
     std::unique_ptr<state::GdnStatePool> gdn_pool;
     std::unique_ptr<state::PagedKVPool> kv_pool;
@@ -97,11 +98,36 @@ struct MtpDrafter {
     bool initialized = false;
 };
 
-std::size_t mtp_drafter_reserve_bytes(const Qwen35TextConfig& config,
-                                      const MtpDrafterConfig& options) noexcept;
+// What a drafter needs from the model it drafts for: the target's geometry, the embedding
+// its graph reads (the model's own, not a copy), and the drafter block already lowered by
+// that model's family. The drafter does not know how a layer's FFN is built; a model that
+// runs on grouped expert rows also names the workspace term those rows add, because the
+// shared executor estimate cannot take it from a dense intermediate width.
+struct MtpDrafterInput {
+    const shelf::qwen_hybrid::QwenHybridConfig* config = nullptr;
+    const shelf::weights::MatrixWeight* embed_tokens = nullptr;
+    shelf::qwen_hybrid::HybridLoweredPrimitives lowered;
+    std::size_t token_row_intermediate = 0;
+    std::size_t grouped_executor_bytes = 0;
+};
+
+// The row count the drafter's executor runs at: its own batch limit, widened to hold the
+// drafts plus the token the target verifies.
+inline uint32_t mtp_drafter_rows(const MtpDrafterConfig& options) noexcept {
+    const uint32_t verify_rows = options.num_drafts + 1u;
+    return options.max_batch_rows > verify_rows ? options.max_batch_rows : verify_rows;
+}
+
+// Arena bytes the drafter reserves: its own KV cache and executor workspace, plus the
+// target's GDN state snapshots and speculative history it drives. The two executor terms
+// are what the model's family adds at `mtp_drafter_rows(options)` rows.
+std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& config,
+                                      const MtpDrafterConfig& options,
+                                      std::size_t token_row_intermediate,
+                                      std::size_t grouped_executor_bytes) noexcept;
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
-    const Qwen35Model& model,
+    const MtpDrafterInput& input,
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,

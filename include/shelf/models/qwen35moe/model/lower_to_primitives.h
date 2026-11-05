@@ -11,13 +11,16 @@ namespace shelf::qwen35moe {
 
 // What a caller asks the MoE lowering to add. There is no tensor-partition field: an MoE
 // model lowers to one device, and the routed expert planes are not part of the partition
-// contract. There is no MTP field either; speculative decode uses the DFlash2 drafter.
+// contract.
 struct Qwen35MoeLowerOptions {
     std::span<const uint32_t> hidden_taps;
     // Layers whose input value the runtime wants to replace at run time. Like the hidden
     // taps, these are exposed in the lowered form's layer_input_values.
     std::span<const uint32_t> override_layers;
     float rope_attention_factor = 1.0f;
+    // One more external output: the final norm applied to every token row of the last
+    // layer. An MTP drafter reads it as the previous hidden of its own block.
+    bool emit_normed_token_hidden = false;
 };
 
 // Lowers a loaded MoE model to the shared lowered form: the hybrid backbone of every layer
@@ -28,5 +31,14 @@ Result<shelf::qwen_hybrid::HybridLoweredPrimitives> lower_qwen35_moe_to_primitiv
     const Qwen35MoeTextConfig& config,
     const Qwen35MoeModelWeights& weights,
     const Qwen35MoeLowerOptions& options = {});
+
+// The checkpoint's MTP block as its own graph: the block's norms and fc over the token
+// embedding and the previous hidden, one full-attention hybrid block with this family's
+// MoE FFN, then the model's lm_head and sampling. Its external inputs are the token ids
+// and the previous hidden; its state is the block's KV cache only.
+Result<shelf::qwen_hybrid::HybridLoweredPrimitives> lower_qwen35_moe_mtp_to_primitives(
+    const Qwen35MoeTextConfig& config,
+    const Qwen35MoeModelWeights& weights,
+    float rope_attention_factor = 1.0f);
 
 }  // namespace shelf::qwen35moe

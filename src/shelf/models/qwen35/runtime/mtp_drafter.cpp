@@ -1,7 +1,6 @@
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
-#include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 
@@ -19,8 +18,9 @@ uint32_t ceil_div_u32(uint32_t value, uint32_t divisor) noexcept {
     return (value + divisor - 1u) / divisor;
 }
 
-Qwen35TextConfig mtp_executor_config(const Qwen35TextConfig& source) {
-    Qwen35TextConfig config = source;
+shelf::qwen_hybrid::QwenHybridConfig mtp_executor_config(
+    const shelf::qwen_hybrid::QwenHybridConfig& source) {
+    shelf::qwen_hybrid::QwenHybridConfig config = source;
     config.num_hidden_layers = 1;
     config.layer_types = {1};
     config.full_attention_interval = 1;
@@ -181,12 +181,14 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
 
 }  // namespace
 
-std::size_t mtp_drafter_reserve_bytes(const Qwen35TextConfig& config,
-                                      const MtpDrafterConfig& options) noexcept {
+std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig& config,
+                                      const MtpDrafterConfig& options,
+                                      std::size_t token_row_intermediate,
+                                      std::size_t grouped_executor_bytes) noexcept {
     if (options.max_seq_len == 0u || options.page_tokens == 0u) {
         return 0u;
     }
-    Qwen35TextConfig mtp = mtp_executor_config(config);
+    shelf::qwen_hybrid::QwenHybridConfig mtp = mtp_executor_config(config);
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
     const std::size_t kv = state::PagedKVPool::page_bytes(
@@ -196,13 +198,12 @@ std::size_t mtp_drafter_reserve_bytes(const Qwen35TextConfig& config,
         static_cast<std::size_t>(pages);
 
     ExecutorConfig executor_config;
-    executor_config.max_batch_rows =
-        std::max(options.max_batch_rows, options.num_drafts + 1u);
+    executor_config.max_batch_rows = mtp_drafter_rows(options);
     executor_config.max_scheduled_requests = 1u;
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
     const std::size_t executor = qwen35_executor_reserve_bytes(
-        mtp, config.ffn.intermediate_size, executor_config, 1u);
+        mtp, token_row_intermediate, executor_config, 1u) + grouped_executor_bytes;
 
     const state::GdnStatePoolLayout gdn = make_qwen35_gdn_state_layout(config);
     const std::size_t gdn_state =
@@ -228,12 +229,21 @@ std::size_t mtp_drafter_reserve_bytes(const Qwen35TextConfig& config,
 }
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
-    const Qwen35Model& model,
+    const MtpDrafterInput& input,
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,
     const MtpDrafterConfig& options) {
 
+    if (input.config == nullptr || input.embed_tokens == nullptr) {
+        return Status::invalid_argument("mtp drafter input is incomplete", __FILE__,
+                                        __LINE__);
+    }
+    if (input.lowered.graph.external_inputs.size() != 2u) {
+        return Status::invalid_argument(
+            "the drafter graph takes a token id and the previous hidden", __FILE__,
+            __LINE__);
+    }
     if (options.num_drafts == 0u || options.num_drafts > kMtpMaxDrafts) {
         return Status::invalid_argument("mtp num_drafts is out of range", __FILE__,
                                         __LINE__);
@@ -252,13 +262,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     }
 
     std::unique_ptr<MtpDrafter> drafter(new MtpDrafter());
-    drafter->config = mtp_executor_config(model.text_config());
+    drafter->config = mtp_executor_config(*input.config);
     drafter->max_seq_len = options.max_seq_len;
     drafter->num_drafts = options.num_drafts;
-
-    auto lower = lower_qwen35_mtp_to_primitives(model.text_config(), model.weights(),
-                                                 options.rope_profile);
-    if (!lower.ok()) return lower.status();
 
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
@@ -285,21 +291,20 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->sequence =
         std::make_unique<state::PagedSequenceState>(sequence.release());
 
-    ExecutorModelInput input;
-    input.model.config = &drafter->config;
-    input.model.embed_tokens = &model.weights().embed_tokens;
-    input.lowered = lower.release();
+    ExecutorModelInput model_input;
+    model_input.model.config = &drafter->config;
+    model_input.model.embed_tokens = input.embed_tokens;
+    model_input.lowered = input.lowered;
 
     ExecutorConfig executor_config;
-    executor_config.max_batch_rows =
-        std::max(options.max_batch_rows, options.num_drafts + 1u);
+    executor_config.max_batch_rows = mtp_drafter_rows(options);
     executor_config.max_scheduled_requests = 1u;
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
     executor_config.rope_profile = options.rope_profile;
     executor_config.backend = runtime::DecodeBackend::Hip;
 
-    auto executor = create_executor(std::move(input), *drafter->slot_pool,
+    auto executor = create_executor(std::move(model_input), *drafter->slot_pool,
                                     *drafter->gdn_pool, *drafter->kv_pool, arena,
                                     executor_config);
     if (!executor.ok()) {
@@ -374,9 +379,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->commit_request_host.row_begin = 0u;
     drafter->commit_request_host.row_count = 0u;
     drafter->gdn_key_heads = static_cast<std::uint32_t>(
-        model.text_config().linear_num_key_heads != 0u
-            ? model.text_config().linear_num_key_heads
-            : 16u);
+        input.config->linear_num_key_heads != 0u ? input.config->linear_num_key_heads : 16u);
 
     drafter->last_tokens.reserve(options.num_drafts + 1u);
     drafter->initialized = true;

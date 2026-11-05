@@ -503,10 +503,7 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
         if (config_.rope_profile.has_value()) {
             mtp_config.rope_profile = *config_.rope_profile;
         }
-        if (model_ != nullptr && model_->dense_model() != nullptr) {
-            return qwen35::runtime::mtp_drafter_reserve_bytes(
-                model_->dense_model()->text_config(), mtp_config);
-        }
+        if (model_ != nullptr) return model_->mtp_drafter_reserve_bytes(mtp_config);
         return 0u;
     }
     if (!config_.draft_config_ready) {

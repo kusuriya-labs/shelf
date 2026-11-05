@@ -62,6 +62,10 @@ std::vector<std::size_t> positions_of(const rt::PrimitiveGraph& g, rt::Primitive
     return out;
 }
 
+std::size_t count_of_kind(const rt::PrimitiveGraph& g, rt::PrimitiveKind kind) {
+    return positions_of(g, kind).size();
+}
+
 std::size_t dispatch_count(const rt::Program& p, rt::KernelId id) {
     std::size_t n = 0;
     for (const auto& b : p.dispatches)
@@ -446,6 +450,110 @@ int main() {
     }
     check(moe::lower_qwen35_moe_to_primitives(config, weights).ok(),
           "the untouched weights lower again after the rejections");
+
+    {
+        Fixture mf;
+        if (!write_fixture(mf, root / "moe_mtp", false, true, kInter, kInter, true)) {
+            check(false, "moe mtp fixture write");
+        } else {
+            moe::Qwen35MoeLoadOptions load_options;
+            load_options.load_mtp_layers = true;
+            auto mtp_weights = moe::load_qwen35moe_weights((root / "moe_mtp").string(),
+                                                           gpu_arena, stream, load_options);
+            check(mtp_weights.ok(), "the MTP fixture loads with its block");
+            if (mtp_weights.ok()) {
+                auto mtp = moe::lower_qwen35_moe_mtp_to_primitives(mf.config,
+                                                                   mtp_weights.value());
+                check(mtp.ok(), "the MoE MTP block lowers to a graph");
+                if (mtp.ok()) {
+                    const rt::PrimitiveGraph& mg = mtp.value().graph;
+                    check(mg.grouped_row_shape.experts == kExperts &&
+                              mg.grouped_row_shape.top_k == kTopK && mg.has_grouped_rows(),
+                          "the MTP graph declares the same grouped row shape");
+                    check(mg.external_inputs.size() == 2u,
+                          "the MTP graph takes the token ids and the previous hidden");
+                    if (mg.external_inputs.size() == 2u) {
+                        check(mg.value_dtype(mg.external_inputs[0]) == rt::ValueDType::I32 &&
+                                  mg.value_features(mg.external_inputs[1]) == kHidden,
+                              "the MTP graph's inputs are token ids and a hidden row");
+                    }
+                    check(mg.external_outputs.size() == 4u,
+                          "the MTP graph ends in the model head's four outputs");
+                    if (mg.external_outputs.size() == 4u) {
+                        const rt::ValueId tail = mg.external_outputs[3u];
+                        check(mg.value_row_domain(tail) == rt::ValueRowDomain::TOKEN_ROWS &&
+                                  mg.value_features(tail) == kHidden,
+                              "the MTP head's tail output is the normed hidden");
+                    }
+                    check(count_of_kind(mg, rt::PrimitiveKind::MOE_ROUTER) == 1u &&
+                              count_of_kind(mg, rt::PrimitiveKind::MOE_GROUPED_LINEAR) == 2u &&
+                              count_of_kind(mg, rt::PrimitiveKind::MOE_COMBINE) == 1u,
+                          "the MTP block carries one MoE FFN");
+                    check(count_of_kind(mg, rt::PrimitiveKind::KV_APPEND) == 1u &&
+                              count_of_kind(mg, rt::PrimitiveKind::PAGED_ATTENTION) == 1u,
+                          "the MTP block carries one full attention layer");
+                    check(count_of_kind(mg, rt::PrimitiveKind::CONCAT) == 1u &&
+                              count_of_kind(mg, rt::PrimitiveKind::EMBEDDING_LOOKUP) == 1u,
+                          "the MTP graph embeds the token and concatenates the two norms");
+                    check(mg.states.size() == 1u &&
+                              mg.states[0].kind == rt::PrimitiveStateKind::KV_CACHE &&
+                              mg.states[0].state_index == 0u,
+                          "the MTP block needs one KV cache state and no GDN state");
+
+                    const std::vector<rt::WeightSlot>& mslots = mtp.value().weights;
+                    const rt::WeightTableView mview{mslots.data(), mslots.size()};
+                    auto mprogram = rt::build_program(mg, mview, rt::RowBucket::R16,
+                                                      rt::ExecutionClass::DECODE,
+                                                      rt::ProgramBuildOptions{});
+                    check(mprogram.ok(), "the MTP graph builds a program");
+                    if (mprogram.ok()) {
+                        const rt::Program& mp = mprogram.value();
+                        check(dispatch_count(mp, rt::KernelId::MOE_ROUTER) == 1u &&
+                                  dispatch_count(mp, rt::KernelId::LINEAR_MXFP4_W4A8_GROUPED) ==
+                                      2u &&
+                                  dispatch_count(mp, rt::KernelId::MOE_COMBINE) == 1u,
+                              "the MTP program carries one routing round and two grouped projections");
+                    }
+                }
+
+                {
+                    auto broken = mtp_weights.value();
+                    const uint32_t keep = broken.mtp.layer.attn_q_proj.rows;
+                    broken.mtp.layer.attn_q_proj.rows = keep / 2u;
+                    check(!moe::lower_qwen35_moe_mtp_to_primitives(mf.config, broken).ok(),
+                          "an MTP block whose attention is not the gated shape is rejected");
+                    broken.mtp.layer.attn_q_proj.rows = keep;
+                    broken.mtp.fc.rows = kHidden / 2u;
+                    check(!moe::lower_qwen35_moe_mtp_to_primitives(mf.config, broken).ok(),
+                          "an MTP block with a wrong fc is rejected");
+                }
+
+                moe::Qwen35MoeLowerOptions target_options;
+                target_options.emit_normed_token_hidden = true;
+                auto normed = moe::lower_qwen35_moe_to_primitives(mf.config,
+                                                                  mtp_weights.value(),
+                                                                  target_options);
+                check(normed.ok(), "the MoE target graph can emit the normed token hidden");
+                if (normed.ok()) {
+                    const rt::PrimitiveGraph& ng = normed.value().graph;
+                    check(ng.external_outputs.size() == 5u,
+                          "the normed token hidden is one more external output");
+                    if (ng.external_outputs.size() == 5u) {
+                        const rt::ValueId v = ng.external_outputs[4u];
+                        check(ng.value_row_domain(v) == rt::ValueRowDomain::TOKEN_ROWS &&
+                                  ng.value_features(v) == kHidden,
+                              "the normed token hidden stands at every token row");
+                    }
+                }
+            }
+        }
+
+        auto bare = moe::load_qwen35moe_weights((root / "moe").string(), gpu_arena, stream);
+        check(bare.ok(), "the fixture without an MTP block loads");
+        if (bare.ok())
+            check(!moe::lower_qwen35_moe_mtp_to_primitives(f.config, bare.value()).ok(),
+                  "a model without an MTP block does not lower one");
+    }
 
     fs::remove_all(root, ec);
     std::printf("%s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL", passed, failed);

@@ -4,6 +4,7 @@
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/weights/matrix_weight.h>
 
@@ -88,6 +89,23 @@ public:
         shelf::qwen35::PagedKVPool& kv_pool,
         gpu::GpuArena& arena,
         const shelf::qwen35::ExecutorConfig& config) const;
+
+    // True when the checkpoint's own MTP block was loaded. That block is the drafter for
+    // speculative decode; a model that was loaded without it has none.
+    [[nodiscard]]
+    bool has_mtp_block() const noexcept;
+
+    // The drafter input: this model's geometry and embedding, and its MTP block lowered by
+    // the family that loaded it. Fails when there is no block, so a caller cannot ask for
+    // speculative decode on a checkpoint that does not carry one.
+    Result<shelf::qwen35::runtime::MtpDrafterInput> mtp_drafter_input(
+        const shelf::qwen35::runtime::MtpDrafterConfig& options) const;
+
+    // Arena bytes the drafter needs, with the executor terms this model's FFN adds at the
+    // drafter's row count.
+    [[nodiscard]]
+    std::size_t mtp_drafter_reserve_bytes(
+        const shelf::qwen35::runtime::MtpDrafterConfig& options) const;
 
 private:
     LoadedModel() = default;
