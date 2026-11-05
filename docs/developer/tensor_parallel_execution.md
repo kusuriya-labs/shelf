@@ -417,9 +417,22 @@ using TpRankModelBuilder = ...;   // TpRankRuntimeConfig / TpCoordinatorConfig �
 weight load・lowering・program・kernel・executor・multi-rank runtime まで配線済みで、
 `shelf-compute --tensor-parallel 2` / `shelf-bench pp` / `shelf-bench quality` は
 grouped expert checkpoint も受理する。`test_qwen35moe_tp_execution` は 2 GPU で
-TP=1 と TP=2 の greedy 一致・rank 間 logits 一致・KV / GDN / expert 平面の局所 geometry
-を固定する。実 model（Qwen3.6-35B-A3B）での TP=2 と TP=1 の一致は**未成立**
-（research 記録 [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md)）。
+TP=1 と TP=2 の greedy 一致・rank 間 logits 一致・KV / GDN / expert 平面の局所 geometry を
+固定し、plan scratch を埋めた状態でも一致することで run 開始時の準備（qwen35moe.md 実行側の
+契約）を固定する。実 model（Qwen3.6-35B-A3B）でも TP=2 は TP=1 と一致する
+（数値の帯と経過は [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §6、
+速度は [../perf/current.md](../perf/current.md)）。
+
+Qwen3.6-35B-A3B を TP=2 で動かす rank local shape は registered 側に載っている
+（GDN key / value heads `(8,16)`、conv features 4096、`PAGED_ATTENTION` `(q 8, kv 1)` を
+bf16 / fp8 KV 双方、`KV_APPEND` の local head 1、per-head QK norm、backbone linear の半幅、
+GDN gate / conv の elementwise 半幅）。登録の根拠と fallback を消した経過は
+[../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §7。
+
+per-head norm の weight layout は rank の平面幅で変わることに注意する。local KV head が 1 の
+rank では K 平面が `head_dim` と同じ幅になり、weight 長が feature 長と一致するため
+`resolve_rmsnorm_physical` はそれを **PER_FEATURE** として選ぶ（PER_GROUP より先に見る）。
+したがって allowlist には PER_GROUP 版と PER_FEATURE 版の両方が必要になる。
 
 ### 未対応 / 非目標
 

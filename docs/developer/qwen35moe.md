@@ -590,14 +590,22 @@ workspace range や workspace storage の value と重ならないことを検�
 - router は token tile 別の件数を **累算**する。したがって routing round は zero から始まら
   なければならず、`prepare_program_run` が program run の開始時に plan scratch range を 1 回
   memset する（層毎ではない。layer L の scatter までが layer L の round を使い、layer L+1 の
-  router はその後に走り、scan が件数を消費してゼロに戻す）。production の入口は
-  `launch_host_backend_range`（`begin == 0` のとき）、test 入口は `execute_program`。
+  router はその後に走り、scan が件数を消費してゼロに戻す）。memset は **実行経路を選ぶ直前の
+  1 箇所**で置く。single rank でも multi rank でも同じ前処理を通すため、前処理は経路側
+  （`execute_program_range` / `execute_program_tp_ranges`）では行わない。production の入口は
+  `launch_program_run`、test 入口は `execute_program`。multi rank では rank が自分の stream 上で
+  自分の scratch を準備する。
 - fallback した dispatch は correctness interpreter へ渡るが、grouped 系 kernel に
   correctness fallback は無い。どれが fallback したかは kernel 単位の計数が正本で、
   `SHELF_QWEN35_PERF_STATS=1` の dump JSON が kernel 毎に `logical` / `optimized` /
   `fallback`（と `fallback_rows` の min・max）を出す。contract は
   `docs/developer/qwen35.md` §5。optimized dispatch が失敗したときの status には
   op index・kernel 名・rows が載る。
+- kernel 別の計数は thread 単位で集まるので、multi rank の rank thread 分は main thread の
+  dump に乗らない（dump が 0 になる）。multi rank で fallback を見るには
+  `SHELF_OP_FALLBACK_DEBUG=1` を使い、op index・kernel・io の feature count / dtype /
+  row domain を読む。kernel 別の所要時間を見るなら `SHELF_OP_DUMP=1`（per-op 同期が入るので
+  絶対値は使わない）。
 - device 側から実行側への報告は program の error word 1 語だけで行う。kernel は
   `ProgramStatus::COMPLETE` から `atomicCAS` で最初の異常を記録し、executor は commit 時点で
   staged された word を読んで、非 COMPLETE なら pending を poison して `Status::invalid_state`

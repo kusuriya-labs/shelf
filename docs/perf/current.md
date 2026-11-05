@@ -10,7 +10,8 @@
 
 **現在の build に対する qualified baseline は、2026-11-03 の long-context prefill、
 2026-11-05 の MTP decode（Qwen3.8-27B MXFP4）・MoE decode / prefill / quality・
-MoE MTP decode（Qwen3.6-35B-A3B MXFP4）、2026-11-04 の 9B BF16 linear allowlist である。**
+MoE MTP decode（Qwen3.6-35B-A3B MXFP4）・MoE tensor parallel prefill（Qwen3.6-35B-A3B MXFP4）、
+2026-11-04 の 9B BF16 linear allowlist である。**
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -336,6 +337,78 @@ shared expert の寄与が落ちていた**（原因と修正は
   無い。fp8 の比較としては上の quality 表が有効
 - 行数をまたいだ teacher-forced logits の一致（walk 突合）の実測は
   [../research/20261105/moe_combine_gate_stride.md](../research/20261105/moe_combine_gate_stride.md) §3
+
+## 2026-11-05 MoE tensor parallel（TP=2）
+
+`models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8・moe_intermediate 512・
+shared 512）を TP=2 / device 0,1 で測った。分割方針と契約は
+[../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md) §11-1、
+expert 軸を選んだ理由・数値破綻の経過・allowlist 登録の内訳は
+[../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §6 / §7。
+
+### prefill throughput（`shelf-bench pp --prompt-tokens 8192 --runs 3 --warmup 1`、median）
+
+| prefill chunk | TP=1 bf16 KV | TP=2 bf16 KV | TP=2 / TP=1 |
+| ---: | ---: | ---: | ---: |
+| 1024 | 3777.7 | 6209.5 | **1.64 倍** |
+| 2048 | 3785.0 | 6543.6 | **1.73 倍** |
+| 4096 | 3616.7 | 6466.5 | **1.79 倍** |
+
+- fp8 KV（chunk 2048）: TP=1 **3743.3** / TP=2 **6491.3**（1.73 倍）
+- 上記は TP=2 の rank local shape を registered 側へ載せた後の値。載せる前は chunk 1024 / 2048 /
+  4096 で **123.4 / 152.4 / 151.6 tok/s**（TP=1 の 1/25）で、backbone が correctness path へ
+  落ちていた。kernel 別の倍率と登録した shape は research 記録 §7
+- fallback 数（`SHELF_OP_FALLBACK_DEBUG=1`、`pp --prompt-tokens 512 --prefill-chunk 512 --runs 1`）:
+  bf16 KV で TP=1 **0** / TP=2 **0**、fp8 KV でも TP=1 **0** / TP=2 **0**
+- 上の TP=1 値は `pp` が mode にかかわらず最終 chunk の logits を計算するようになった tree の
+  ものである。同じ tree で logits を計算しなかった測定は 3763.0 / 3740.6 / 3574.1（chunk 1024 /
+  2048 / 4096 の median）で、差は run 揺れの範囲（1 % 未満）。logits 変更前の別 revision の
+  記録値は 3662 / 3807 / 3631（§2026-11-04 Qwen3.6-35B-A3B MoE decode）
+- barrier の費用は kernel 別倍率では読めない。collect 直後の op（`RESIDUAL_ADD`）に peer send /
+  sum の待りが載り、per-rank 6.4 倍に見える（research 記録 §7）
+
+### 数値一致（TP=1 vs TP=2、teacher-forced 4 位置、bf16 KV、同一 tree・同一 corpus）
+
+corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` した 2191 token
+（sha256 prefix `9136d38b`）。
+
+| context | 行ごとの最大 KL | top-1 一致 | 非有限 |
+| ---: | ---: | --- | --- |
+| 32 | 1.6e-3 | 4/4 | 0 |
+| 64 | 3.6e-3 | 3/4 | 0 |
+| 96 | 7.7e-3 | 4/4 | 0 |
+| 128 | 1.4e-2 | 4/4 | 0 |
+| 192 | 2.6e-3 | 4/4 | 0 |
+| 256 | 4.9e-3 | 4/4 | 0 |
+
+- 同じ tree で backbone を registered 側に載せる前は、同じ比較で最大 KL が ctx 96 で 8.2e-2、
+  ctx 256 で 3.5e-2、top-1 不一致が 3 あった。**optimized kernel の方が TP=1 と近い**（correctness
+  path は reduction 順序・精度が違い、registered 側は dense TP と同じ丸め経路を通る）
+- 数値破綻（`NUMERIC_ERROR`）を直した直後の測定値と、破綻の切り分け・原因は
+  [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §6
+- TP=1 側が prefill chunk を変えたときの KL 幅（1e-4 〜 1.4e-2）と同じ帯に入っている
+
+### decode
+
+- `shelf-bench tg` には `--tensor-parallel` が無いので tg では測れない。TP=1 の tg
+  （`--mode greedy --context 64 --tokens 32 --warmup 1`、2 run）は **63.90 / 63.94 tok/s**、
+  `GREEDY_TOKEN_SUM=976467`（combine gate stride 修正後の現行 anchor と一致）
+- TP=2 の decode は `shelf-compute` E2E で測る（`--tensor-parallel 2` は `--prefix-cache 0` が
+  必須）。prompt は上の corpus の 1200 番地以降 16 token（special token を除いたもの、
+  `/tmp` 上の作業ファイルなので再現には同様のスライスを使う）、
+  `--max-new-tokens 48 --max-num-batched-tokens 1024 --max-concurrent-requests 1 --max-seq-len 512`
+
+| | TP=1 | TP=2 | DECODE_TOKENS |
+| --- | ---: | ---: | ---: |
+| run 1 | 64.24 | 71.84 | 47 |
+| run 2 | 64.24 | 70.53 | 47 |
+| `PREFILL_MS` | 42.7 / 41.7 | 47.9 / 42.6 |  |
+
+  → **DECODE_TOKENS_PER_SEC +11 %**。`GENERATED_IDS` は 48 token すべて TP=1 と TP=2 で一致し、
+  TP=2 の run 間でも一致した
+- TP=2 の E2E は auto reserve の slack 修正前（row bucket 16）は
+  `arena capacity exceeded` で起動できなかった。修正の経緯は
+  [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md) §5
 
 ## 記録規則
 
