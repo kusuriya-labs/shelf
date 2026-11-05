@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -79,6 +81,13 @@ bool read_tensor(const std::string& model_dir, const std::string& name, HostTens
 
 int main(int argc, char** argv) {
     std::string model_dir = "/mnt/Qwen3.8-Flash-Next-exl3";
+    if (const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR")) {
+        model_dir = env;
+    } else if (const char* home = std::getenv("HOME")) {
+        const std::string candidate =
+            std::string(home) + "/work/shelf/models/Qwen3.8-Flash-Next-exl3";
+        if (::access(candidate.c_str(), R_OK) == 0) model_dir = candidate;
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model-dir") == 0 && i + 1 < argc) {
             model_dir = argv[++i];

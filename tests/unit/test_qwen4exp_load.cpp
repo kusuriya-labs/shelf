@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -165,6 +167,13 @@ void verify_ple(const std::string& model_dir, const shelf::qwen4exp::PleTable& t
 
 int main(int argc, char** argv) {
     std::string model_dir = "/mnt/Qwen3.8-Flash-Next-exl3";
+    if (const char* env = std::getenv("SHELF_QWEN4EXP_MODEL_DIR")) {
+        model_dir = env;
+    } else if (const char* home = std::getenv("HOME")) {
+        const std::string candidate =
+            std::string(home) + "/work/shelf/models/Qwen3.8-Flash-Next-exl3";
+        if (::access(candidate.c_str(), R_OK) == 0) model_dir = candidate;
+    }
     bool skip_ple = false;
     bool skip_gpu = false;
     int single_rank = -1;
