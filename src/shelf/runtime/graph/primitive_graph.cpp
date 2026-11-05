@@ -37,6 +37,8 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_ROUTER: return {1, 0};
         case PrimitiveKind::MOE_GROUPED_LINEAR: return {1, 1};
         case PrimitiveKind::MOE_COMBINE: return {3, 1};
+        case PrimitiveKind::HYPER_MIX: return {2, 1};
+        case PrimitiveKind::HYPER_APPLY: return {3, 1};
     }
     return {0, 0};
 }
@@ -161,6 +163,14 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, MoeCombineNode>) {
                 shapes_ok = valid_shape_key(v.shape) && v.top_k != 0u;
             }
+            else if constexpr (std::is_same_v<T, HyperMixNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, HyperApplyNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
+            }
         }, n.node);
         if (!shapes_ok) return fail("invalid shape key");
 
@@ -261,6 +271,42 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             }
         }, n.node);
         if (!moe_status.ok()) return moe_status;
+
+        Status hyper_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, HyperMixNode>) {
+                const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;
+                if (graph.value_features(n.inputs[0]) != width ||
+                    graph.value_features(n.inputs[1]) != width) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper mix inputs are not hc * hidden", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[1]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.outputs[0])) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper mix row domains disagree", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, HyperApplyNode>) {
+                const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;
+                if (graph.value_features(n.inputs[0]) != width ||
+                    graph.value_features(n.inputs[1]) != v.hidden ||
+                    graph.value_features(n.inputs[2]) != v.hc) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper apply input feature counts are invalid", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[1]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[2]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.outputs[0])) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper apply row domains disagree", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!hyper_status.ok()) return hyper_status;
 
         const bool stateful =
             k == PrimitiveKind::KV_APPEND ||

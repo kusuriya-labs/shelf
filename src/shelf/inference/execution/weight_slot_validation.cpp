@@ -23,9 +23,10 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
             ("weight table slot has zero experts: index " + std::to_string(index)).c_str(),
             __FILE__, __LINE__);
     }
-    if (s.experts > 1u && enc != 3u) {
+    if (s.experts > 1u && enc != 3u && enc != 4u) {
         return Status::invalid_argument(
-            ("rank-3 weight table slot needs the mxfp4 encoding: index " + std::to_string(index))
+            ("rank-3 weight table slot needs the mxfp4 or exl3 encoding: index " +
+             std::to_string(index))
                 .c_str(),
             __FILE__, __LINE__);
     }
@@ -155,6 +156,21 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
                  std::to_string(index))
                     .c_str(),
                 __FILE__, __LINE__);
+        }
+        if (s.experts > 1u) {
+            const uint64_t expert_trellis_bytes =
+                (static_cast<uint64_t>(s.cols) / 16u) * row_stride;
+            if (s.codes_batch_stride_bytes != expert_trellis_bytes ||
+                s.exl3_suh_batch_stride_bytes != static_cast<uint64_t>(s.cols) * 2u ||
+                s.exl3_svh_batch_stride_bytes != static_cast<uint64_t>(s.rows) * 2u ||
+                s.exl3_marker_batch_stride_bytes != 4u) {
+                return Status::invalid_argument(
+                    ("rank-3 exl3 weight table slot batch strides do not match the expert "
+                     "plane: index " +
+                     std::to_string(index))
+                        .c_str(),
+                    __FILE__, __LINE__);
+            }
         }
         return Status::make_ok();
     }

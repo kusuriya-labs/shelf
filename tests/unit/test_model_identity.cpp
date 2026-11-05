@@ -140,8 +140,9 @@ int main() {
     {
         const auto& supported = shelf::qwen_hybrid::supported_model_identities();
         check(supported == std::vector<std::string>{"qwen3_5", "qwen3_5_text", "qwen3_5_moe",
-                                                    "qwen3_5_moe_text"},
-              "the supported identity set is the Qwen3.5 dense and routed-expert pair");
+                                                    "qwen3_5_moe_text", "qwen4_exp",
+                                                    "qwen4_exp_text"},
+              "the supported identity set includes the Qwen3.5 families and Qwen4Exp");
     }
 
     fs::remove_all(g_root);

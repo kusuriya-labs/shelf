@@ -33,6 +33,8 @@ constexpr ModelIdentity kModelIdentities[] = {
     {"qwen3_5_text", false},
     {"qwen3_5_moe", true},
     {"qwen3_5_moe_text", true},
+    {"qwen4_exp", true},
+    {"qwen4_exp_text", true},
 };
 
 const ModelIdentity* find_model_identity(const std::string& model_type) {

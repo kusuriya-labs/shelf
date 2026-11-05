@@ -2,6 +2,7 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
+#include <shelf/kernels/optimized/linear/exl3_grouped.h>
 #include <shelf/kernels/optimized/moe/combine.h>
 #include <shelf/kernels/optimized/moe/router.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
@@ -231,6 +232,81 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
     if (herr != hipSuccess)
         return Status::hip_error("moe grouped gemm launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);
+    record_physical_launch(1u);
+    record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+}
+
+Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program,
+                                                          const DispatchBinding& b,
+                                                          HostExecutionContext& ctx,
+                                                          hipStream_t stream) {
+    const Result<MoePlanView> plan = resolve_moe_plan(program, b, ctx);
+    if (!plan.ok()) return plan.status();
+    if (b.output_count != 1u || b.input_count != 1u)
+        return bad("moe grouped exl3: bad io count");
+    if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
+        return bad("moe grouped exl3: weight_index invalid");
+
+    const WeightSlot e = ctx.weights[b.weight_index];
+    if (e.encoding != 4u) return bad("moe grouped exl3: encoding != Exl3");
+    if (e.codes == nullptr || e.exl3_suh == nullptr || e.exl3_svh == nullptr)
+        return bad("moe grouped exl3: weight planes missing");
+    if (e.experts < 2u) return bad("moe grouped exl3: weight is not an expert plane");
+    if (e.k_padded != e.cols || (e.cols & 127u) != 0u || (e.rows & 127u) != 0u)
+        return bad("moe grouped exl3: shape is not 128-aligned");
+
+    const Result<HostResolvedValue> in_res =
+        resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
+    if (!in_res.ok()) return in_res.status();
+    const HostResolvedValue in = in_res.value();
+    const bool token_rows = in.row_domain == ValueRowDomain::TOKEN_ROWS;
+    if (in.dtype != ValueDType::BF16 ||
+        (!token_rows && in.row_domain != ValueRowDomain::GROUPED_ROWS))
+        return bad("moe grouped exl3: input is not BF16 token/group rows");
+    if (in.feature_count != e.cols || in.row_stride < in.feature_count)
+        return bad("moe grouped exl3: input features mismatch");
+    if (in.ptr == nullptr) return bad("moe grouped exl3: input unbound");
+
+    const Result<HostResolvedValue> out_res =
+        resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!out_res.ok()) return out_res.status();
+    const HostResolvedValue out = out_res.value();
+    if (out.row_domain != ValueRowDomain::GROUPED_ROWS)
+        return bad("moe grouped exl3: output is not in group rows");
+    if (out.feature_count != e.rows || out.row_stride < out.feature_count)
+        return bad("moe grouped exl3: output features mismatch");
+    if (out.dtype != ValueDType::BF16 && out.dtype != ValueDType::F32)
+        return bad("moe grouped exl3: output dtype not BF16/F32");
+    if (out.ptr == nullptr) return bad("moe grouped exl3: output unbound");
+
+    ::shelf::kernel::Exl3GroupedArgs args;
+    args.trellis = e.codes;
+    args.suh = e.exl3_suh;
+    args.svh = e.exl3_svh;
+    args.input = in.ptr;
+    args.output = out.ptr;
+    args.out_features = e.rows;
+    args.k = e.cols;
+    args.input_row_stride = in.row_stride;
+    args.output_row_stride = out.row_stride;
+    args.output_dtype = out.dtype == ValueDType::BF16 ? 0u : 1u;
+    args.ka = e.exl3_ka;
+    args.half = e.exl3_half;
+    args.trellis_batch_stride = e.codes_batch_stride_bytes;
+    args.suh_batch_stride = e.exl3_suh_batch_stride_bytes;
+    args.svh_batch_stride = e.exl3_svh_batch_stride_bytes;
+    args.group_expert = plan.value().arrays.group_expert;
+    args.group_rows = plan.value().arrays.group_rows;
+    args.group_count = plan.value().arrays.group_count;
+    args.row_token = token_rows ? plan.value().arrays.row_token : nullptr;
+    args.group_capacity = plan.value().group_capacity;
+
+    const hipError_t herr =
+        ::shelf::kernel::launch_gemm_exl3_w16a16_grouped(args, stream);
+    if (herr != hipSuccess)
+        return Status::hip_error("moe grouped exl3 launch", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

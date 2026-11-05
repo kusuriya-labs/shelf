@@ -536,6 +536,14 @@ void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
 }
 
 Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
+    const auto family = shelf::models::probe_model_dir(config_.model_dir);
+    if (!family.ok()) return family.status();
+    if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
+        return Status::unsupported(
+            "Qwen4Exp is loaded by the qwen4exp load path; pipeline execution is not "
+            "wired yet",
+            __FILE__, __LINE__);
+    }
     auto config_result = qwen_hybrid::read_qwen_hybrid_config(config_.model_dir);
     if (!config_result.ok()) return config_result.status();
     const qwen_hybrid::QwenHybridConfig& text_config = config_result.value();

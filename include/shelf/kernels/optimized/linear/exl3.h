@@ -32,6 +32,22 @@ struct Exl3GemmArgs {
     uint32_t splitk_splits = 0;
     void* xrot = nullptr;
     uint32_t groups = 0;
+
+    // Optional routed-expert group plan. When group_expert is non-null, blockIdx.z is
+    // the group, group_expert[g] selects the expert plane and group_rows[g] bounds the
+    // rows this group owns. The trellis/suh/svh pointers are bases and the batch
+    // strides select one expert. Input and output are the group-row planes; group g
+    // owns rows [g * kExl3W16A16RowTile, ...).
+    const uint32_t* group_expert = nullptr;
+    const uint32_t* group_rows = nullptr;
+    const uint32_t* group_count = nullptr;
+    // Optional token row for each group row. When non-null, the input plane is token rows
+    // and the kernel gathers through this table; when null, the input plane is already in
+    // group-row order.
+    const int32_t* row_token = nullptr;
+    uint64_t trellis_batch_stride = 0;
+    uint64_t suh_batch_stride = 0;
+    uint64_t svh_batch_stride = 0;
 };
 
 hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream);

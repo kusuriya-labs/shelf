@@ -8,6 +8,7 @@
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/inference/execution/hyper_connection_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
@@ -720,6 +721,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_moe_plan_scatter(program, b, ctx, stream);
         case KernelId::LINEAR_MXFP4_W4A8_GROUPED:
             return try_launch_moe_grouped_linear(program, b, ctx, stream);
+        case KernelId::LINEAR_EXL3_W16A16_GROUPED:
+            return try_launch_moe_grouped_exl3(program, b, ctx, stream);
         case KernelId::MOE_COMBINE:
             return try_launch_moe_combine(program, b, ctx, stream);
         case KernelId::LINEAR_EXL3_W16A16:
@@ -751,6 +754,10 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_gdn_conv1d(program, dispatch_index, ctx, stream);
         case KernelId::GDN_RECURRENCE:
             return try_launch_gdn_recurrence(program, dispatch_index, ctx, stream);
+        case KernelId::HYPER_MIX:
+            return try_launch_hyper_mix(program, b, ctx, stream);
+        case KernelId::HYPER_APPLY:
+            return try_launch_hyper_apply(program, b, ctx, stream);
         default:
             return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }

@@ -536,6 +536,35 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::HYPER_MIX: {
+            const auto& hn = node_as<HyperMixNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_MIX);
+            b.group_size = hn.hc;
+            b.flags = hn.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::HYPER_APPLY: {
+            const auto& hn = node_as<HyperApplyNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_APPLY);
+            b.group_size = hn.hc;
+            b.flags = hn.hidden;
+            for (uint32_t i = 0; i < 3; ++i) b.input_slots[i] = node.inputs[i].id;
+            b.input_count = 3;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::KV_APPEND: {
             const auto& n = node_as<KvAppendNode>(node);
             DispatchBinding b = base_binding(KernelId::KV_APPEND);
@@ -662,6 +691,27 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 resolve_linear_quant_contract(w.encoding, w.compute_spec);
             if (!resolved.ok()) return resolved.status();
             const ResolvedLinearQuantContract& contract = resolved.value();
+            if (w.encoding == 4u) {
+                if (contract.requires_activation_quant)
+                    return fail("exl3 grouped linear must not quantize its activation");
+                if (w.k_padded != w.cols || (w.cols & 127u) != 0u ||
+                    (w.rows & 127u) != 0u)
+                    return fail("exl3 grouped linear shape is not 128-aligned");
+                if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+                DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_W16A16_GROUPED);
+                b.weight_index = n.weight_index;
+                b.compute_spec = w.compute_spec;
+                b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
+                b.input_slots[0] = node.inputs[0].id;
+                b.input_count = 1;
+                c.use_moe_scratch(b);
+                auto po = c.produce(node.outputs[0]);
+                if (!po.ok()) return po;
+                b.output_slots[0] = node.outputs[0].id;
+                b.output_count = 1;
+                c.push(b);
+                return Status::make_ok();
+            }
             if (contract.activation_kernel != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
                 return fail("moe grouped linear needs the mxfp4 rowref activation form");
             const uint32_t kdim = w.cols;

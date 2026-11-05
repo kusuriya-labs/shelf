@@ -31,7 +31,7 @@ constexpr uint32_t kInter = 128u;
 constexpr uint32_t kFused = 2u * kInter;
 constexpr uint32_t kBucketTokens = 16u;
 
-rt::WeightSlot expert_plane(uint32_t rows, uint32_t cols) {
+rt::WeightSlot expert_plane(uint32_t rows, uint32_t cols, bool exl3 = false) {
     rt::WeightSlot s{};
     s.rows = rows;
     s.cols = cols;
@@ -49,6 +49,27 @@ rt::WeightSlot expert_plane(uint32_t rows, uint32_t cols) {
     s.experts = kExperts;
     s.codes_batch_stride_bytes = (static_cast<uint64_t>(rows) / 16u) * (cols / 32u) * 256u;
     s.scales_batch_stride_bytes = static_cast<uint64_t>(rows) * (cols / 32u);
+    if (exl3) {
+        s.encoding = static_cast<uint8_t>(shelf::weights::MatrixEncoding::Exl3);
+        s.compute_spec = static_cast<uint8_t>(
+            shelf::quantization::ComputeSpecId::EXL3_W16A16_F32_BF16);
+        s.codes = reinterpret_cast<const void*>(0x5000);
+        s.scales = nullptr;
+        s.row_ref = nullptr;
+        s.exl3_suh = reinterpret_cast<const void*>(0x6000);
+        s.exl3_svh = reinterpret_cast<const void*>(0x7000);
+        s.exl3_marker = reinterpret_cast<const void*>(0x8000);
+        s.exl3_ka = 3u;
+        s.exl3_half = 1u;
+        const uint64_t words = 16u * 3u + 8u;
+        s.codes_row_stride_bytes =
+            static_cast<uint32_t>((static_cast<uint64_t>(rows) / 16u) * words * 2u);
+        s.codes_batch_stride_bytes = s.codes_row_stride_bytes;
+        s.scales_batch_stride_bytes = 0u;
+        s.exl3_suh_batch_stride_bytes = static_cast<uint64_t>(cols) * 2u;
+        s.exl3_svh_batch_stride_bytes = static_cast<uint64_t>(rows) * 2u;
+        s.exl3_marker_batch_stride_bytes = 4u;
+    }
     return s;
 }
 
@@ -94,13 +115,13 @@ struct MoeGraph {
 };
 
 MoeGraph build_moe_graph(bool router_matches_shape = true,
-                        bool combine_in_group_rows = true) {
+                        bool combine_in_group_rows = true, bool exl3 = false) {
     MoeGraph m;
     m.g.grouped_row_shape = rt::GroupedRowShape{kExperts, kTopK};
 
     const uint32_t w_router = m.add_weight(bf16_matrix(kExperts, kHidden));
-    const uint32_t w13 = m.add_weight(expert_plane(kFused, kHidden));
-    const uint32_t w2 = m.add_weight(expert_plane(kHidden, kInter));
+    const uint32_t w13 = m.add_weight(expert_plane(kFused, kHidden, exl3));
+    const uint32_t w2 = m.add_weight(expert_plane(kHidden, kInter, exl3));
     const uint32_t w_shared_gate = m.add_weight(bf16_matrix(kInter, kHidden));
     const uint32_t w_shared_up = m.add_weight(bf16_matrix(kInter, kHidden));
     const uint32_t w_shared_down = m.add_weight(bf16_matrix(kHidden, kInter));
@@ -317,6 +338,40 @@ int main() {
         check(got == want, "the MoE FFN lowers to the planned dispatch sequence");
 
         check_plan_scratch(program);
+    }
+
+    {
+        auto m = build_moe_graph(true, true, true);
+        auto st = rt::validate_primitive_graph(m.g);
+        if (!st.ok()) {
+            std::printf("FAIL exl3 graph validation: %s\n", st.message().c_str());
+            return 1;
+        }
+        std::vector<rt::WeightSlot> weights = m.weights;
+        const rt::WeightTableView view{weights.data(), weights.size()};
+        auto built = rt::build_program(m.g, view, rt::RowBucket::R16,
+                                       rt::ExecutionClass::DECODE,
+                                       rt::ProgramBuildOptions{});
+        if (!built.ok()) {
+            std::printf("FAIL exl3 build_program: %s\n", built.status().message().c_str());
+            return 1;
+        }
+        const rt::Program& program = built.value();
+        size_t ffn_start = 0;
+        for (size_t i = 0; i < program.dispatches.size(); ++i) {
+            if (program.dispatches[i].kernel_id == rt::KernelId::MOE_ROUTER) {
+                ffn_start = i;
+                break;
+            }
+        }
+        const std::string want =
+            "MOE_ROUTER,MOE_PLAN_SCAN,MOE_PLAN_SCATTER,"
+            "LINEAR_EXL3_W16A16_GROUPED,SWIGLU,LINEAR_EXL3_W16A16_GROUPED,"
+            "LINEAR_BF16,LINEAR_BF16,SWIGLU,LINEAR_BF16,LINEAR_BF16,SIGMOID,"
+            "MOE_COMBINE,RESIDUAL_ADD";
+        const std::string got = kernel_sequence(program, ffn_start);
+        if (got != want) std::printf("      got %s\n", got.c_str());
+        check(got == want, "the EXL3 MoE FFN skips activation quantization");
     }
 
     {

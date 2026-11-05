@@ -211,6 +211,12 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
     }
     auto family = probe_model_dir(config.model_dir);
     if (!family.ok()) return family.status();
+    if (family.value() == ModelFamily::Qwen4Exp) {
+        return Status::unsupported(
+            "Qwen4Exp is loaded by shelf_qwen4exp; its tensor-parallel executor is not "
+            "wired yet",
+            __FILE__, __LINE__);
+    }
     config.build_rank_model = family.value() == ModelFamily::Moe
         ? &build_moe_tp_rank_model
         : &q35r::build_dense_tp_rank_model;

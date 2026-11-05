@@ -36,6 +36,11 @@ Result<LoadedModel> LoadedModel::load(
 
     auto family_result = probe_model_dir(model_dir);
     if (!family_result.ok()) return family_result.status();
+    if (family_result.value() == ModelFamily::Qwen4Exp) {
+        return Status::unsupported(
+            "Qwen4Exp is loaded by shelf_qwen4exp; its executor is not wired yet",
+            __FILE__, __LINE__);
+    }
 
     LoadedModel out;
     if (family_result.value() == ModelFamily::Moe) {

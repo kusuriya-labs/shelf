@@ -96,6 +96,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/embedding.hip
     src/shelf/kernels/optimized/elementwise.hip
     src/shelf/kernels/optimized/rmsnorm.hip
+    src/shelf/kernels/optimized/hyper_connection.hip
     src/shelf/kernels/optimized/l2_normalize.hip
     src/shelf/kernels/optimized/output_gather.hip
     src/shelf/kernels/optimized/activation_quantize.hip
@@ -206,6 +207,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/kv_calib_dump.cpp
     src/shelf/inference/execution/linear_input_dump.cpp
     src/shelf/inference/execution/moe_dispatch.hip
+    src/shelf/inference/execution/hyper_connection_dispatch.hip
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
@@ -289,6 +291,24 @@ target_include_directories(shelf_qwen35moe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 target_include_directories(shelf_qwen35moe SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
+# Qwen3.8-Flash-Next (model_type qwen4_exp): EXL3 body, PLE n-gram table and the
+# expert-axis tensor-parallel load path. This target owns the load contract only; the
+# forward/executor path is a later family port.
+set(
+    SHELF_QWEN4EXP_SOURCES
+    src/shelf/models/qwen4exp/model/qwen4exp_config.cpp
+    src/shelf/models/qwen4exp/weights/ple_table.cpp
+    src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
+)
+
+add_library(shelf_qwen4exp STATIC ${SHELF_QWEN4EXP_SOURCES})
+target_compile_features(shelf_qwen4exp PRIVATE cxx_std_20)
+target_include_directories(shelf_qwen4exp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_qwen4exp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_qwen4exp SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_qwen4exp PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.

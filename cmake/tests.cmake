@@ -106,6 +106,8 @@ shelf_add_test(NAME test_mxfp4_codec SOURCE unit/test_mxfp4_codec.cpp LABELS "cp
 shelf_add_test(NAME test_exl3_codec SOURCE unit/test_exl3_codec.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_linear SOURCE unit/test_exl3_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_dense SOURCE unit/test_exl3_dense.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_exl3_grouped SOURCE unit/test_exl3_grouped.cpp LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_io)
+target_include_directories(test_exl3_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 find_library(SHELF_TEST_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 if(SHELF_TEST_HIPBLASLT_LIBRARY)
     target_link_libraries(test_exl3_dense PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
@@ -132,6 +134,10 @@ shelf_add_test(NAME test_qwen35moe_tp_layer_trace SOURCE unit/test_qwen35moe_tp_
 shelf_add_test(NAME test_qwen35moe_tp_execution SOURCE unit/test_qwen35moe_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 900 GPU_COUNT 2 GPU_COST_GB 3 LIBRARIES shelf_qwen35moe shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_inference_execution shelf_inference_state shelf_runtime shelf_kernels_optimized shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 target_include_directories(test_qwen35moe_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/tests/unit")
 shelf_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES shelf_qwen35_runtime)
+
+# Qwen3.8-Flash-Next (qwen4_exp) EXL3 load: TP=2 expert-axis split, body + PLE table.
+shelf_add_test(NAME test_qwen4exp_load SOURCE unit/test_qwen4exp_load.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 30 LIBRARIES shelf_qwen4exp shelf_qwen_hybrid shelf_inference_execution shelf_gpu shelf_io shelf_quant_bundle)
+target_include_directories(test_qwen4exp_load SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 shelf_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_qwen35)
 target_include_directories(test_qwen35_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
@@ -205,6 +211,7 @@ shelf_add_test(NAME test_architecture_boundaries SOURCE unit/test_architecture_b
 shelf_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_program_workspace_lifetime.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_grouped_row_shape SOURCE unit/test_grouped_row_shape.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_program_moe_plan SOURCE unit/test_program_moe_plan.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
+shelf_add_test(NAME test_program_hyper_connection SOURCE unit/test_program_hyper_connection.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_moe_program_execute SOURCE unit/test_moe_program_execute.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_runtime shelf_gpu shelf_core)
 shelf_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_linear_quant_contract SOURCE unit/test_linear_quant_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
@@ -234,6 +241,7 @@ shelf_add_test(NAME test_gdn_compact_log_commit SOURCE kernels/optimized/test_gd
 shelf_add_test(NAME test_gdn_compact_commit_poc SOURCE unit/test_gdn_compact_commit_poc.hip LABELS "gpu1;optional" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_gpu)
 shelf_add_test(NAME test_gdn_conv1d SOURCE kernels/optimized/test_gdn_conv1d.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_elementwise SOURCE kernels/optimized/test_elementwise.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_hyper_connection SOURCE unit/test_hyper_connection.cpp LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_embedding SOURCE kernels/optimized/test_embedding.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_argmax SOURCE kernels/optimized/test_argmax.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_qwen35_kernel_mode SOURCE unit/test_qwen35_kernel_mode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)

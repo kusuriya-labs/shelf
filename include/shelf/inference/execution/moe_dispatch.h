@@ -81,6 +81,12 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
+Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(
+    const ::shelf::runtime::Program& program,
+    const ::shelf::runtime::DispatchBinding& b,
+    HostExecutionContext& ctx,
+    hipStream_t stream);
+
 Result<OptimizedLaunchResult> try_launch_moe_combine(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,

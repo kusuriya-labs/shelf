@@ -31,6 +31,8 @@ enum class PrimitiveKind : uint16_t {
     MOE_ROUTER = 19,
     MOE_GROUPED_LINEAR = 20,
     MOE_COMBINE = 21,
+    HYPER_MIX = 22,
+    HYPER_APPLY = 23,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -57,6 +59,8 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_ROUTER: return "MOE_ROUTER";
         case PrimitiveKind::MOE_GROUPED_LINEAR: return "MOE_GROUPED_LINEAR";
         case PrimitiveKind::MOE_COMBINE: return "MOE_COMBINE";
+        case PrimitiveKind::HYPER_MIX: return "HYPER_MIX";
+        case PrimitiveKind::HYPER_APPLY: return "HYPER_APPLY";
     }
     return "UNKNOWN";
 }
@@ -214,6 +218,20 @@ struct MoeCombineNode {
     uint32_t top_k = 0;
 };
 
+// Qwen4Exp hyper-connection mix: gate * normed averaged over hc streams.
+struct HyperMixNode {
+    RowwiseShapeKey shape;  // hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// Qwen4Exp hyper-connection injection: raw[h] + y * injection[h].
+struct HyperApplyNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -236,7 +254,9 @@ using PrimitiveNode = std::variant<
     ConcatNode,
     MoeRouterNode,
     MoeGroupedLinearNode,
-    MoeCombineNode
+    MoeCombineNode,
+    HyperMixNode,
+    HyperApplyNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -264,6 +284,8 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, MoeRouterNode>) return PrimitiveKind::MOE_ROUTER;
         else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) return PrimitiveKind::MOE_GROUPED_LINEAR;
         else if constexpr (std::is_same_v<T, MoeCombineNode>) return PrimitiveKind::MOE_COMBINE;
+        else if constexpr (std::is_same_v<T, HyperMixNode>) return PrimitiveKind::HYPER_MIX;
+        else if constexpr (std::is_same_v<T, HyperApplyNode>) return PrimitiveKind::HYPER_APPLY;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

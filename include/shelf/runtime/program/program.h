@@ -49,6 +49,9 @@ struct WeightSlot {
     uint32_t experts = 1;
     uint64_t codes_batch_stride_bytes = 0;
     uint64_t scales_batch_stride_bytes = 0;
+    uint64_t exl3_suh_batch_stride_bytes = 0;
+    uint64_t exl3_svh_batch_stride_bytes = 0;
+    uint64_t exl3_marker_batch_stride_bytes = 0;
     uint32_t output_col_offset = 0;
     uint32_t output_col_total = 0;
 };
