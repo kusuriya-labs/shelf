@@ -477,6 +477,14 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 弱く、**段ごと gate が正本**である。クラス誤差の実測値と内訳は
 [../research/20261104/moe_gate_c_kernels.md](../research/20261104/moe_gate_c_kernels.md) §6。
 
+段ごと・1 層 E2E の gate はいずれも**固定 token 数**の比較である。同じ token を
+**違う batch 行数**で forward したときの一致（single-row walk と multi-row walk の一致）は
+まだ受け入れられていない。grouped expert を使う model では 2 行から logits が相対 40 % 級で動き、
+hybrid の dense 対照では 0.1 級に収まる。実測と再現手順は
+[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §4 を正本とする。
+MTP の verify はこの一致を前提にするため、MoE の speculative decode はこの解消まで保留である
+（[mtp.md](mtp.md)）。
+
 ## 6-1. graph / program の MoE 契約（配線済み）
 
 primitive は 3 種で、tensor arity は固定である（`primitive_graph.cpp` の `arity_of`）。

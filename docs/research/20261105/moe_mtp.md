@@ -111,6 +111,51 @@ experts 8 / top_k 2、rel_l2 1.7e-3。`test_moe_program_execute` は program 経
 grouped 行の int8 activation plane の stride、pad 行が plan に混入ときの扱い）であると**推定**されるが、
 本記録では切り分けは未実施（仮説として残す）。
 
+### 4-1. 2 行から壊れている
+
+同じ position を、スコア行 2 本の batch と 1 本の batch で比べた
+（context 134 + positions 2 と、context 135 + positions 1）。
+
+| 比較 | position | max\|Δ\| | rms Δ | argmax一致 | top20 重複 |
+| --- | ---: | ---: | ---: | :---: | ---: |
+| 2 行 batch vs 1 行 batch | 136 | 6.63 | 1.04 | する | 13/20 |
+
+logits 自身の rms は 2.59 なので**相対で 40 % 級の差**で、行数 2 から既に成立している。
+
+### 4-2. 合成 fixture での walk 比較（形を確認する診断）
+
+`tests/unit/moe_expert_fixture.h` の 2 層 MoE（experts 4 / top_k 2 / hidden 256）を executor で実行し、
+token 行ごとの hidden を (a) 8 行 1 batch、(b) 1 行ずつ 8 步（decode class）、(c) 4 行 × 2 chunk、
+(d) 1 行ずつ 8 步（prefill class）で取った。最終行の先頭 4 つ:
+
+| walk | 最終行の値 |
+| --- | --- |
+| 8 行 1 batch | -1.271e+07, 1.540e+06, 5.636e+06, 1.769e+06 |
+| 4 行 × 2 chunk | 3.539e+06, -9.011e+05, -1.049e+06, -4.391e+06 |
+| 1 行ずつ（prefill） | 6.016e+04, -1.536e+04, -2.381e+04, -9.165e+04 |
+| 1 行ずつ（decode） | 6.016e+04, -1.536e+04, -2.381e+04, -9.165e+04 |
+
+**1 行ずつの walk は execution class を問わず一致**し、multi-row walk はそこへ一致しない。
+合成 model は未学習なので hidden の絶対値自体が 1e4〜1e7 へ発散する（GDN の recurrence が
+ランダム係数で増幅する）ため、この数値差を実モデルの誤差として読むことはできない。
+読めるのは「single-row walk 同士は一致し、multi-row walk はそこへ一致しない」という
+**形**が §4 の実測と同じ、ということだけである。
+発散しない geometry で同じ比較をやり直す（fixture の expert 側にもっと小さな値を入れる等）ことは
+本記録では実施していない。
+
+再現手順（新規 code は要らない。`shelf-bench quality` だけで再現する）:
+
+```bash
+for spec in "128 8" "128 16" "124 12" "134 2" "135 1" "129 1" "131 1" "133 1"; do
+  set -- $spec
+  ./build/shelf-bench quality --model-dir <MoE> --tokens-file <corpus> \
+    --context $1 --positions $2 --device 0 --dump /tmp/moe_q_$1_$2.psq
+done
+```
+
+dump は `PSQUAL01` header 32 byte に続けて行ごと `int32 target`、`uint32 position`、
+`float logits[vocab]`。position で突き合わせて logits ベクトルの差を見る。
+
 MTP の verify は「複数行を同時に forward した結果」と「1 行ずつ forward した結果」が一致することを
 前提にしている。MoE ではそれが §4 の大きさで崩れるため、
 draft の良し悪し以前に **verify 自体が target-only の greedy と別の列を作る**。
