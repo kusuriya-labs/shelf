@@ -70,6 +70,10 @@ Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を TP=1 / bf16 KV で
 計測した。decode の correctness path は `EMBEDDING_LOOKUP`（1 本 / token）だけである。
 
+**生成一致アンカー（`GREEDY_TOKEN_SUM`）は combine の shared expert gate stride 修正で変わった**
+（context 64 で 2199 → 976467）。decode 速度そのものは修正前後で変わらず、修正後の再測は
+[§2026-11-05 MoE combine 修正後の再測](#2026-11-05-moe-combine-修正後の再測)。
+
 | 条件 | 値 |
 | --- | ---: |
 | context tokens | 64 |
@@ -161,6 +165,10 @@ MTP drafter（`--mtp --mtp-drafts 7`）を交互に実行し、warmup 1 + 5 run 
 `shelf-bench quality` を `LoadedModel` 経由にしたことで、grouped expert checkpoint も
 teacher forcing できる。
 
+**この節の数値は combine の shared expert gate stride 欠落のある forward で測ったもので、
+絶対値は無効**（修正後は [§2026-11-05 MoE combine 修正後の再測](#2026-11-05-moe-combine-修正後の再測)）。
+on / off A/B という比較の形自体に関する結論は同じ節の notes を参照。
+
 | 条件 | 値 |
 | --- | ---: |
 | model | Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 / TP=1 / bf16 KV |
@@ -219,6 +227,11 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
 | `quality --context 128 --positions 64` | ppl 94.3507（bf16 75.1460、**+25.56 %**）、KL 0.16576、top-1 0.8125、top-5 0.7781 | 75.1460 |
 | KV 容量（`shelf-compute --max-seq-len 8192`、auto arena） | KV budget 10.07 GiB = **1,039,728 tokens** | 10.07 GiB = **527,968 tokens** |
 
+- **上の quality 3 行と fp8 / bf16 の生成列差は、combine の shared expert gate stride 欠落が
+  入った forward での計測で無効**。修正後は fp8 KV は bf16 と同じ帯に入り、context 128 の
+  ppl 差 +25.56 % は観測されなくなった。修正後の値は
+  [§2026-11-05 MoE combine 修正後の再測](#2026-11-05-moe-combine-修正後の再測)
+
 - measurement revision: `feature/moe-fp8-kv` の fp8 rule 追加後（bf16 側は同 tree の再測）
 - GPU: Radeon AI PRO R9700（`--device 0`、測定中は他の GPU に workload なし）
 - command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1 --kv-cache-dtype fp8`
@@ -233,32 +246,73 @@ KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` �
   自分の roofline の 27 %）。経緯と内訳は
   [../research/20261105/moe_fp8_kv.md](../research/20261105/moe_fp8_kv.md)
 
-## 2026-11-05 MoE MTP speculative decode（未成立）
+## 2026-11-05 MoE MTP speculative decode
 
 `models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4` を TP=1 / bf16 KV / device 0 で、target-only と
-`--mtp` を比べた。prompt は corpus から切った 1600 token、`--max-seq-len 4096`。
+`--mtp` を比べた。prompt は corpus から切った 1600 token、`--max-new-tokens 32`、
+`--max-seq-len 4096`。combine の shared gate stride 修正後の実測。
 
-| 条件 | t/s | rounds | accepted drafts | mean accepted |
-| --- | ---: | ---: | ---: | ---: |
-| target-only | **61.23** | - | - | - |
-| `--mtp --mtp-drafts 1` | 22.09 | 7 | 3 | 0.429 |
-| `--mtp --mtp-drafts 4` | 17.20 | 6 | 2 | 0.333 |
-| `--mtp --mtp-drafts 7` | 15.78 | 5 | 3 | 0.600 |
+| 条件 | t/s | rounds | accepted drafts | mean accepted | verify rows | draft ms | verify ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| target-only | **61.74** | - | - | - | - | - | - |
+| `--mtp --mtp-drafts 1` | 28.09 | 16 | 14 | 0.875 | 32 | 46.40 | 995.88 |
+| `--mtp --mtp-drafts 4` | 45.92 | 9 | 22 | 2.444 | 43 | 95.86 | 578.93 |
+| `--mtp --mtp-drafts 7` | 41.23 | 9 | 22 | 2.444 | 63 | 150.73 | 600.91 |
 
-- measurement revision: `feature/moe-mtp`（MTP block の load / lowering / drafter 接続後）
-- dense `Qwen3.8-27B-Quark-AWQ-MXFP4` の MTP（accepted/7 = 6.88、§2026-11-04）が同一 code path の
-  対照で、MoE の draft はほぼ弃られる
-- **MTP run の `GENERATED_IDS` は target-only の greedy 列と一致しない**
-  （target-only: `264,13759,506,3603,13,...` / MTP: `264,13759,220,16,17,...`）。
-  greedy verify を使う限り、これは MoE forward の行数依存から来る
-- 行数依存の実測（`shelf-bench quality` の teacher-forced logits を position で突き合わせ）:
-  MoE は 8 行 batch vs 1 行 batch で logit rms 1.50・top-20 重複 10/20、
-  8 行 vs 16 行は **bit 一致**、16 行 vs 12 行は rms 0.90 で argmax 反転。
-  dense 対照は 8 行 vs 1 行で rms 0.076・top-20 20/20
+- 生成一致アンカー: 三条件の `GENERATED_IDS` は target-only の greedy 列と**完全一致**
+- measurement revision: combine の shared gate stride 修正後（`feature-moe-mtp`）
+- **どの drafts でも target-only より遅い**（最良でも 45.92 / 61.74 = 0.74 倍）。verify 時間は
+  行数に対してほぼ一定（2 行 62.2 ms / 平均 4.8 行 64.3 ms / 7 行 66.8 ms）で、そのうち
+  forward 単体は約 22 ms（同一 model の `shelf-bench pp --mode forward --prompt-tokens 1600` の
+  chunk 2 = 11.24 ms/token = 2 行 22.5 ms、chunk 4 = 21.9 ms、chunk 16 = 26.2 ms）。
+  **残りの約 40 ms は round 側の費用**（descriptor 準備・staging・KV / GDN state・sampling）
+- draft 受理率は dense 対照（accepted/7 = 6.88 = 98 %、§2026-11-04）に対し 2.444 / 7 = 35 %
+- break-even の目安（drafts=4）: round 75.0 ms ÷ 16.2 ms/token = 4.63 token / round なので
+  accepted ≥ 3.63 が必要。実測 2.444 では足りない
 - weight load 実測（MTP block 込み、`test_qwen35moe_model_load_real`）: load 28.6 s、
   arena 21.000 GiB（うち MTP expert 平面 0.399 GiB）、peak RSS 22.98 GiB
-- 経緯・原因の切り分け・採否判断は
-  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)
+- 修正前の forward で測った値（t/s 22.09 / 17.20 / 15.78、mean accepted 0.429 / 0.333 / 0.600、
+  `GENERATED_IDS` が target-only と不一致）は無効。再評価の経緯は
+  [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §6
+
+## 2026-11-05 MoE combine 修正後の再測
+
+`moe_combine_kernel` が shared expert gate の平面を packed 前提で読み、**2 行目以降の token で
+shared expert の寄与が落ちていた**（原因と修正は
+[../research/20261105/moe_combine_gate_stride.md](../research/20261105/moe_combine_gate_stride.md)）。
+この bug は multi-row forward（= prefill）に入るので、MoE の数値品質の実測と greedy 生成
+アンカーはすべて修正前のものだった。修正後 build（`feature-moe-mtp`）・device 0・TP=1 で
+再測した。corpus は `vendor/BetterBench/corpus/v1` を `tools/quality_gate.py corpus` した
+2191 token（sha256 prefix `9136d38b`）。
+
+`shelf-bench quality --positions 64` の `QUALITY_PPL`:
+
+| context | bf16 KV | fp8 KV | fp8 差 | mean KL | top-1 一致 | top-5 overlap |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 9.7973 | 9.7530 | **-0.45 %** | 0.008783 | 0.96875 | 0.934375 |
+| 512 | 14.1440 | 14.4508 | +2.17 % | 0.017500 | 0.921875 | 0.921875 |
+| 2048 | 4.1820 | 4.0059 | -4.21 % | 0.006101 | 1.0000 | 0.953125 |
+
+- 修正前の同条件（**無効**）: context 128 で bf16 75.1460 / fp8 94.3507（+25.56 %）、
+  context 512 で 29.6400 / 27.4009、context 2048 で 4.5247 / 4.4925。**fp8 KV の短 context
+  劣化（+25.6 %）は bug の側で、修正後は fp8 は bf16 と同じ帯**に入っている
+- `shelf-bench tg --mode greedy --tokens 32 --warmup 1 --prefill-chunk 2048`（2 run の
+  gpu_ms と `GREEDY_TOKEN_SUM`）:
+
+| context | bf16 KV | fp8 KV |
+| ---: | ---: | ---: |
+| 64 | 494.80 / 495.34 ms、64.67 / 64.60 tok/s、**976467** | 494.01 / 495.10 ms、64.78 / 64.63 tok/s、**976467** |
+| 1024 | 512.99 / 541.72 ms、62.38 / 59.07 tok/s、**975006** | 515.70 / 543.79 ms、62.05 / 58.85 tok/s、**975269** |
+| 2048 | 507.78 / 507.77 ms、63.02 / 63.02 tok/s、**975006** | 507.56 / 507.42 ms、63.05 / 63.06 tok/s、**904565** |
+
+- decode throughput は kernel 作業が変わらないため修正前と同程度（context 64 の clean anchor
+  で 497.27 → 494.80 / 495.34 ms）。**生成アンカーは変わった**（context 64 の
+  `GREEDY_TOKEN_SUM` 2199 → 976467）。fp8 KV は context 64 で bf16 と同一の生成列になった
+  （修正前は 14441 で不一致）
+- context 2048 の fp8 greedy は `GREEDY_FIRST_TOKENS=1,1,1,...`（id 1 の退化列）で検出力が
+  無い。fp8 の比較としては上の quality 表が有効
+- 行数をまたいだ teacher-forced logits の一致（walk 突合）の実測は
+  [../research/20261105/moe_combine_gate_stride.md](../research/20261105/moe_combine_gate_stride.md) §3
 
 ## 記録規則
 

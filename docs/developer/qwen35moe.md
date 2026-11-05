@@ -442,17 +442,23 @@ launch_gemm_mxfp4_w4a8_grouped(...)
 ```cpp
 // kernels/optimized/moe/combine.h
 launch_moe_combine(output, expert_output, sel_weight, slot_row_of,
-                   shared_output /*nullable*/, shared_gate /*nullable*/, ...)
+                   shared_output /*nullable*/, shared_gate /*nullable*/,
+                   rows, top_k, features, expert_row_stride, shared_row_stride,
+                   shared_gate_row_stride, stream)
 ```
 
 1 workgroup = 1 token。token の `top_k` 個の group row を **昇順（= expert 昇順）** に
 並べ替え、`out[f] = Σ_j weight_j * expert_output[row_j][f]` を **f32 で蓄積**して最後に
 1 回 bf16 へ丸める。`shared_output` を渡した場合は
-`shared_gate_weight[t] * shared[t]` を routed 合計の**後**に足す。
+`shared_gate_weight[t * shared_gate_row_stride] * shared[t]` を routed 合計の**後**に足す。
 `shared_gate_weight` は**活性化済みの gate 値**で、生成は既存の
 `launch_sigmoid_bf16_f32`（`shared_expert_gate` の [1,H] linear 出力が bf16 なのでその
 形）が担う。combine 自身は超越関数を使わない。
-`shared_output` と `shared_gate_weight` は対で渡す（片方だけなら拒否）。
+`shared_output` と `shared_gate_weight` は対で渡す（片方だけなら拒否、gate の row stride が
+0 なら拒否）。**gate は 1 列でも row-major value の平面なので stride を渡す**——packed
+（添字 1 刻み）で読むと token 0 以外は padding か別データの bytes を読み、shared expert の
+寄与が消えるまたは汚染される。この規則は `test_moe_combine` の padded gate case と
+`test_qwen35moe_rows_parity`（§7）で固定する。
 
 ### 数値の受け入れ
 
@@ -478,12 +484,15 @@ HF への gate は含む。層合計の relative 値は shared expert 項の大�
 [../research/20261104/moe_gate_c_kernels.md](../research/20261104/moe_gate_c_kernels.md) §6。
 
 段ごと・1 層 E2E の gate はいずれも**固定 token 数**の比較である。同じ token を
-**違う batch 行数**で forward したときの一致（single-row walk と multi-row walk の一致）は
-まだ受け入れられていない。grouped expert を使う model では 2 行から logits が相対 40 % 級で動き、
-hybrid の dense 対照では 0.1 級に収まる。実測と再現手順は
-[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) §4 を正本とする。
-MTP の verify はこの一致を前提にするため、MoE の speculative decode はこの解消まで保留である
-（[mtp.md](mtp.md)）。
+**違う batch 行数**で forward したときの一致は `test_qwen35moe_rows_parity`（required）で
+受け入れる。合成 MoE model（GDN 層を含む fixture と全 layer full attention の fixture）を
+executor で走らせ、1 行ずつの walk と multi-row walk（4+4 / 2x4 / 8 / 3+5 / 1+7 / 2+6 /
+5+3 / 3+3+2 / 1+1+6 / 4+1x4 / 1x4+4）の token 行ごと hidden を突き合わせ、
+rel_l2 < 5e-2 を要求する（実測は全 case・全 row で 0、bit 一致）。
+実 checkpoint では chunked prefill と stepwise decode の GDN 丸め差（layer 0 の router logits
+で rel 3e-5 級）が残る。grouped expert を使う model では router の top-k 選択が離散的なので
+この差が expert 集合の反転へ増幅し、walk をまたいだ token 列の bit 一致は要求しない。
+経緯と実測は [../research/20261105/moe_combine_gate_stride.md](../research/20261105/moe_combine_gate_stride.md)。
 
 ## 6-1. graph / program の MoE 契約（配線済み）
 
@@ -627,7 +636,7 @@ workspace range や workspace storage の value と重ならないことを検�
 | `test_moe_expert_load` | `gpu1;required` | GPU 常駐平面が native block layout、expert 単位で dense path と bit 一致、`row_ref_exact` の平面別判定、arena 使用量、不受理条件。fused rank-3 plan では checkpoint の BF16 payload を再量子化して preshuffle した結果と平面が bit 一致すること、fused plan を per-expert checkpoint へ / unfused plan を fused checkpoint へ適用したときの拒否も固定 |
 | `test_moe_router` | `gpu1;required` | softmax/top-k/renorm の決定順（同値は小 index）、group table と slot→group row 写像の不変条件、padding 行 = -1、実行間 bit 一致、容量 bound、外部 zeroing なしの 2 つ目の round が同じ plan になること（scan が `tile_counts` を消費する契約）、non-finite logits で expert index が `[0, experts)` に収まり weight が finite であること、その round が error word へ `NUMERIC_ERROR` を立てること（有限 logits では word が立たないことも一緒に固定） |
 | `test_moe_grouped_linear` | `gpu1;required` | grouped w13 / w2 が GPU の使った operand の double 参照へ bf16 exact 1.0000、`group_rows[g]` 超の行を書かない、fold / unfold が bit 一致（厳密帯域内）、plan 由来の expert 選択（空 expert・複数 group・skew routing） |
-| `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
+| `test_moe_combine` | `gpu1;required` | expert 昇順 f32 蓄積との bit 一致、shared expert の gate 値を最後に加算（gate 平面は padded row stride で置く case を含む。packed 前提だと 2 行目以降が壊れる）、順序を判別する工作例（ascending 0 / descending 2）、入力の不受理条件 |
 | `test_qwen35moe_model_load` | `gpu1;required` | model-level MoE load: 単一 layer 配列で backbone（layernorm / attention）と MoE FFN（router・rank-3 expert 平面・shared expert）が plan の幾何・stride・row_ref と一致、shared expert が routed expert と異なる `shared_expert_intermediate_size` を持つ checkpoint も受理し routed 幅へ伪造は拒否、layer topology 違反 / backbone tensor 欠落 / layer 数不一致の拒否、factory が dense weight を持たないこと、MTP block を持つ checkpoint を `load_mtp_layers` で load したときに block が present になり fc / block norm / body / FFN plan と一致すること、MTP block を持たない checkpoint の MTP load 失敗、MTP tamper（fc 幅・block norm 欠落・expert 平面欠落・attention tensor 欠落）の拒否、dense loader による MoE config 拒否と MoE loader による dense config 拒否、`moe_ffn_weights_match` の tamper 検知。dense / MoE FFN 字段の非共存と `HybridLoadOptions` の MTP 字段不在、`Qwen35MoeLoadOptions` の MTP 字段存在を `static_assert` で固定 |
 | `test_qwen35moe_lowering` | `gpu1;required` | 合成 MoE checkpoint（GDN 層と full attention 層を含む）を load して lower し、graph 構造を固定: `grouped_row_shape`、層ごとの FFN node 列、fused 平面を 2 view で読むこと、group-row value の数と幅、expert 平面が rank-3 native stride で weight table へ入ること、router が f32 / experts 列の logits を読むこと、combine の行空間 crossing、head の外部出力 4 本の shape と順。bucket R16 の `build_program` で dispatch 数・plan scratch 1 本・group row 容量 96 行・view の slot / offset を固定。さらに hidden tap（inner 層は受理、最終層と range 外は拒否）、expert 数 1 化・shared expert 幅伪造・top_k > experts・batch stride 伪造の各拒否 |
 | `test_grouped_row_shape` | `cpu;required` | group row 容量の数値（rows=1 / experts=256 / top_k=8 → group 8・group row 128 など）と不変条件（group 数は slot 数を超えない・容量は slot 数を覆う・16 の倍数）、`GROUPED_ROWS` value の binding 行数が容量基準になること、`grouped_row_shape` 未宣言の graph を graph 検証と `build_program` の両方が拒否すること、dense graph に grouped 行空間が現れないこと |
@@ -636,6 +645,7 @@ workspace range や workspace storage の value と重ならないことを検�
 | `test_qwen35moe_executor` | `gpu1;required` | 合成 MoE checkpoint を `LoadedModel` 経由で load し、`create_executor` の実行経路で prefill + decode を回す。row bucket 16 / 64 / 128（group 行数容量と plan scratch 容量が変わる）で、program が `plan_scratch_slot` を持つこと、hidden 行が finite かつゼロででないこと、同一 rounds を別 sequence で実行すると同一 token になること（run 跨ぎ・層跨ぎで plan scratch が漏れないことの固定） |
 | `test_qwen35moe_mtp_executor` | `gpu1;required` | MTP graph を executor（`external_hidden_input`、1 attention layer の KV / GDN pool）で実行し、routed expert 平面と shared expert 平面をそれぞれ zero したときに block output の hidden 行が変わること（MoE FFN の両分岐が実際に出力へ届いていることの固定）。create_executor 直後の最初の batch が失敗しないこともこの経路が通ることで固定する |
 | `test_moe_layer_e2e` | `gpu1;required` | 1 MoE layer 全体（router → plan → 量子化 → grouped w13 → swiglu → 量子化 → grouped w2 → combine）が HF `Qwen3_5MoeSparseMoeBlock` の f64 参照と、段ごと / routed / 層合計の各 gate で一致。device router の選択は HF と完全一致、Shelf の codec が fixture payload を再現 |
+| `test_qwen35moe_rows_parity` | `gpu1;required` | 同じ prompt を executor で違う batch 行数の walk（1 行ずつ / 4+4 / 2x4 / 8 / 3+5 / 1+7 / 2+6 / 5+3 / 3+3+2 / 1+1+6 / 4+1x4 / 1x4+4）で forward し、token 行ごとの hidden が 1 行 walk と一致すること（forward の batch 行数非依存）。GDN 層を含む fixture と全 layer full attention の fixture の両方で行う。combine が shared gate 平面の row stride を仮定すると 2 行目以降の shared expert が落ちてこの一致が壊れる |
 
 `test_moe_layer_e2e` が読む合成 fixture は `tests/fixtures/qwen35moe/`（commit 済み、
 torch 不要で読むだけ）で、再生成は

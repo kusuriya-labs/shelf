@@ -171,6 +171,47 @@ draft の良し悪し以前に **verify 自体が target-only の greedy と別�
   これは MTP 固有ではなく、`shelf-bench quality` の teacher forcing と prefill chunk 分割にも
   直接効く問題として扱う。
 
+**（2026-11-05 更新）§4 の原因は特定・修正された**。combine の shared expert gate 平面
+stride 欠落であり、[./moe_combine_gate_stride.md](./moe_combine_gate_stride.md) が正本。
+§3 の数値と §5 の「verify の前提が壊れている」判定はその bug が入った forward での実測で、
+§6 で再評価した。
+
+## 6. combine 修正後の再評価
+
+§3 と同一条件（1600 token prompt、`--max-new-tokens 32`、`--max-seq-len 4096`、TP=1、
+bf16 KV、device 0、修正後 build）で再実測した。
+
+| 条件 | t/s | rounds | accepted drafts | mean accepted | verify rows | draft ms | verify ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| target-only | **61.74** | - | - | - | - | - | - |
+| MTP drafts=1 | 28.09 | 16 | 14 | 0.875 | 32 | 46.40 | 995.88 |
+| MTP drafts=4 | 45.92 | 9 | 22 | 2.444 | 43 | 95.86 | 578.93 |
+| MTP drafts=7 | 41.23 | 9 | 22 | 2.444 | 63 | 150.73 | 600.91 |
+
+- **MTP run の `GENERATED_IDS` は三条件とも target-only の greedy 列と完全一致**した
+  （§3 で分岐していた 3 番目以降も含む）。verify の前提（multi-row forward の一致）は
+  修正で成立した
+- mean accepted は 0.429 / 0.333 / 0.600 → 0.875 / 2.444 / 2.444。draft 受理率も修正で上がった。
+  これは §4 の不一致が reject を量大で生んでいたことの裏返しでもある。
+  ただし dense 対照（accepted/7 = 6.88 = 98 %）に対し MoE は 2.444 / 7 = 35 % のまま
+- 速度は依然として target-only に劣る（最良でも 45.92 / 61.74 = 0.74 倍）。**性能主張の
+  REJECT は据え置き**だが、理由は §4 の bug ではなくなった
+
+内訳（1 round あたり）。verify 時間は drafts=1 で 62.2 ms（2 行）、drafts=4 で 64.3 ms
+（平均 4.8 行）、drafts=7 で 66.8 ms（平均 7 行）で、**行数に対してほぼ一定**。
+同じ model の multi-row batch forward 単体は `shelf-bench pp --mode forward --prompt-tokens 1600`
+の chunk 別実測で、chunk 2 = 11.24 ms/token（2 行で 22.5 ms）、chunk 4 = 5.48 ms/token
+（21.9 ms）、chunk 8 = 23.5 ms、chunk 16 = 26.2 ms と行数に対して緩やかに増える
+（decode 1 行 = 16.2 ms、chunk 2048 = 3807 tok/s）。つまり **round の 62 ms のうち forward が
+約 22 ms、残りの約 40 ms は verify round 側の費用**（descriptor 準備・staging・KV / GDN state
+・sampling）である。MoE MTP を speedup に载せるには、受理率を dense 並みに上げる前に、
+この round 費用を落とすほうが先。受理率側の論点は §3 と同じく MTP expert の MXFP4 再量子化
+（checkpoint では BF16 の expert を phase-2 codec で再量子化している）に残る。
+
+break-even の目安（K=4）: round 675.03 / 9 = 75.0 ms、1 token あたり 16.2 ms なので、
+round あたり 75.0 / 16.2 = 4.63 token 必要。bonus token を引くと **accepted ≥ 3.63 / 4** で
+あり、実測 2.444 では足りない。
+
 ## 6. 副次で見つかった不具合（修正済み）
 
 `create_executor` 直後の最初の `execute_batch` で、`prepare_batch_descriptor` の launch が

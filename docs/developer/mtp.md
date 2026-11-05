@@ -13,9 +13,10 @@ grouped expert を使う model の MTP block は、routed expert を checkpoint 
 BF16（`mtp.layers.0.mlp.experts.gate_up_proj` / `experts.down_proj`）として保持する。
 load 時に MXFP4 へ再量子化して transformer layer と同じ native plane に落とす
 （[qwen35moe.md](qwen35moe.md) の MTP block 節）。
-MoE の MTP decode は multi-row forward を verify に使うため、現状 target-only の greedy 列と
-一致せず性能上の利点も無い。実測と原因は
-[../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md) を正本とする。
+MoE の MTP decode は verify の multi-row forward を使うが、greedy 列は target-only と一致する
+（verify の前提である forward の batch 行数非依存は `test_qwen35moe_rows_parity` で固定）。
+速度上の利点は現状無く、round 費用が forward より大きい。実測は
+`docs/perf/current.md`、経緯は [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
 
 ## Forward contract
 

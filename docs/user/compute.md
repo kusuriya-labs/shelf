@@ -145,9 +145,10 @@ request の speculative decode 経路に入る。DFlash2 とは排他的で、
 - `--tensor-parallel 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
-- grouped expert（MoE）checkpoint でも MTP block は load / 実行されるが、現状 `--mtp` は
-  target-only より遅い（draft の accept 率が低く、verify の multi-row forward が target-only の
-  greedy 列と一致しない）。速度目的では使わないこと。実測値は
+- grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は
+  target-only の greedy 列と一致する。ただし MoE では現状どの `--mtp-drafts` でも
+  target-only より遅い（draft の accept 率が dense より低く、round 費用が forward を超える）。
+  速度目的では使わないこと。実測値は
   [../perf/current.md](../perf/current.md)、経緯は
   [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
 
