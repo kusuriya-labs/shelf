@@ -11,7 +11,7 @@ namespace shelf::kernel {
 inline constexpr const char* kExl3W16A16Symbol = "shelf_gemm_exl3_w16a16";
 inline constexpr uint32_t kExl3W16A16OutBlock = 128u;
 inline constexpr uint32_t kExl3W16A16RowTile = 16u;
-inline constexpr uint32_t kExl3W16A16Threads = 32u;
+inline constexpr uint32_t kExl3W16A16Threads = 256u;
 
 struct Exl3GemmArgs {
     const void* trellis = nullptr;

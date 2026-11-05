@@ -73,15 +73,41 @@ decode は EXL3 linear だけで決まっている。
 - **rows=1 のとき入力回転を有効行だけに制限**:
   単独の A/B では有意差を確認できず。回転は全体の数 % 程度。**保留**。
 
+## multi-warp block（実装・採用）
+
+8 warp = 1 warp / 16 出力 subtile に割り当てた。ring / tile は warp ごとの LDS、
+tile は double buffer、xrot と出力だけ `__syncthreads()`、tile 復号は `__syncwarp()`。
+work area と出力 accum は union で重ね、LDS は 14 KiB。
+
+結果（同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run）:
+
+| 版 | tok/s | µs/token |
+| --- | ---: | ---: |
+| 単一 warp | 1.32〜1.34 | 747〜756 |
+| multi-warp | **8.51〜8.54** | 117 |
+
+- `LINEAR_EXL3_W16A16` の合計: 766.5 → 122.4 ms（6.3 倍）
+- 実効重み帯域: 16.8 → **106.7 GB/s**
+- shape 別の 1 launch:
+  - n=17408, k=5120: 1.41 → 0.32 ms
+  - n=5120, k=17408: 4.42 → 0.53 ms
+  - n=248320, k=5120: 11.12 → 3.72 ms
+- correctness: `test_exl3_linear` の rows 1 / 3 / 5 / 16 / 17 が CPU 参照と一致。
+- E2E: `The capital of France is` → ` Paris.`、`--mtp` も動作。
+
+## 残るボトルネック
+
+- n=17408 が 41 ms、n=5120 / k=17408 が 34 ms で、linear 123 ms の 61 %。
+- n=1024 は 8 block しかなく、14.3 GB/s。block 数が足りない形状は split-K が必要。
+- 1 重みあたりの `__hfma` 復号はまだ残っている。lm_head は 256 GB/s まで来たが、
+  DRAM の 40 %。
+
 ## 次の候補
 
-1. **multi-warp block**。8 warp を 1 warp = 1 n subtile（16 出力）に割り当て、
-   ring / tile は warp ごとの LDS、同期は `__syncwarp()`、xrot と出力だけ block 同期にする。
-   1 block の k ループ latency を約 1/8 にし、同時に warp 数で LDS/barrier の stall を隠す。
-2. **rows == 1 専用 GEMV**。mul1 は `state * 0x83DCD12D` の byte 和に対してアフィンなので、
+1. **rows == 1 専用 GEMV**。mul1 は `state * 0x83DCD12D` の byte 和に対してアフィンなので、
    exllamav3 の `exl3_gemv_int8` と同様に `dp4a` / `v_sad_u8` で 4 重みずつ復号・積和できる。
    現行の 1 重みずつの `__hfma` 復号より桁で速い可能性がある。
-3. **小 n 形状の split-K**。n=1024 / 6144 / 10240 は block 数が少なく CU が遊ぶ。
+2. **小 n 形状の split-K**。n=1024 / 6144 / 10240 は block 数が少なく CU が遊ぶ。
    K を分割して部分和を reduction する。workspace と 2 段 launch が必要。
-4. barrier の削減。LDS 自体は shuffle より速いので、ring staging と tile 書き込みの
-   間の同期を warp 単位に落とせるかは、multi-warp 化と合わせて再評価する。
+3. prefill の行 tile 再利用。現状は 16 行ごとに同じ重みを復号し直すため、
+   prefill は row tile 数に比例する。

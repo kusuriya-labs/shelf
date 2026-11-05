@@ -1,6 +1,5 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/kernels/optimized/linear/exl3_decode_device.h>
-#include <shelf/kernels/optimized/detail/lds_barrier_device.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -16,20 +15,30 @@ using f32x8_t = float __attribute__((ext_vector_type(8)));
 
 constexpr uint32_t kOutBlock = kExl3W16A16OutBlock;
 constexpr uint32_t kRowTile = kExl3W16A16RowTile;
+constexpr uint32_t kWarps = kOutBlock / 16u;
 constexpr uint32_t kThreads = kExl3W16A16Threads;
-constexpr uint32_t kSubTiles = kOutBlock / 16u;
 constexpr float kInvSqrt128 = 0.08838834764831844055f;
+
+struct WorkArea {
+    uint16_t tile[kWarps][2][16u * 16u];
+    uint32_t ring[kWarps][64];
+};
+
+union SharedArea {
+    WorkArea work;
+    float accum[kRowTile * kOutBlock];
+};
 
 __device__ __forceinline__ float bf16_value(const shelf::bf16_t* p) {
     return __uint_as_float(static_cast<uint32_t>(p->data) << 16u);
 }
 
-__device__ __forceinline__ f16x8_t load_f16x8(const __half* p) {
+__device__ __forceinline__ f16x8_t load_f16x8(const void* p) {
     return *reinterpret_cast<const f16x8_t*>(p);
 }
 
 __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t kt, uint32_t nt,
-                                            uint32_t lane, uint32_t* ring, __half* tile) {
+                                            uint32_t lane, uint32_t* ring, uint16_t* tile) {
     const uint32_t words = 16u * args.ka + (args.half != 0u ? 8u : 0u);
     const uint32_t word_count = words / 2u;
     const uint32_t n_tiles = args.out_features / 16u;
@@ -38,9 +47,8 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
         (static_cast<uint64_t>(kt) * n_tiles + nt) * words;
     const uint32_t* source = reinterpret_cast<const uint32_t*>(tile_base);
 
-    detail::lds_barrier();
     for (uint32_t i = lane; i < word_count; i += 32u) ring[i] = source[i];
-    detail::lds_barrier();
+    __syncwarp();
 
 #pragma unroll
     for (uint32_t j = 0u; j < 8u; ++j) {
@@ -51,29 +59,26 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
         uint32_t row = 0;
         uint32_t col = 0;
         exl3_detail::tile_coords(position, &row, &col);
-        tile[col * 16u + row] = __ushort_as_half(bits);
+        tile[col * 16u + row] = bits;
     }
-    detail::lds_barrier();
+    __syncwarp();
 }
 
 __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs args) {
+    const uint32_t warp = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t lane16 = lane & 15u;
     const uint32_t lane_high = lane >> 4;
 
     const uint32_t n0 = blockIdx.x * kOutBlock;
     const uint32_t r0 = blockIdx.y * kRowTile;
+    const uint32_t active_rows =
+        args.rows - r0 < kRowTile ? args.rows - r0 : kRowTile;
 
     __shared__ __align__(16) __half xrot[kRowTile * kOutBlock];
-    __shared__ __align__(16) __half wtile[16u * 16u];
-    __shared__ __align__(16) float accum[kRowTile * kOutBlock];
-    __shared__ __align__(16) uint32_t ring[64];
+    __shared__ __align__(16) SharedArea area;
 
-    f32x8_t acc[kSubTiles];
-#pragma unroll
-    for (uint32_t s = 0u; s < kSubTiles; ++s) {
-        acc[s] = f32x8_t{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-    }
+    f32x8_t acc = f32x8_t{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
 
     const uint16_t* suh = static_cast<const uint16_t*>(args.suh);
     const uint16_t* svh = static_cast<const uint16_t*>(args.svh);
@@ -89,21 +94,17 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
         }
 
 #pragma unroll
-        for (uint32_t r = 0u; r < kRowTile; ++r) {
+        for (uint32_t ri = 0u; ri < 2u; ++ri) {
+            const uint32_t r = warp * 2u + ri;
+            if (r >= active_rows) break;
             const uint32_t row = r0 + r;
-            float v0 = 0.f;
-            float v1 = 0.f;
-            float v2 = 0.f;
-            float v3 = 0.f;
-            if (row < args.rows) {
-                const shelf::bf16_t* src =
-                    input + static_cast<uint64_t>(row) * args.input_row_stride + k_base +
-                    lane * 4u;
-                v0 = bf16_value(src + 0) * suh_v[0];
-                v1 = bf16_value(src + 1) * suh_v[1];
-                v2 = bf16_value(src + 2) * suh_v[2];
-                v3 = bf16_value(src + 3) * suh_v[3];
-            }
+            const shelf::bf16_t* src =
+                input + static_cast<uint64_t>(row) * args.input_row_stride + k_base +
+                lane * 4u;
+            float v0 = bf16_value(src + 0) * suh_v[0];
+            float v1 = bf16_value(src + 1) * suh_v[1];
+            float v2 = bf16_value(src + 2) * suh_v[2];
+            float v3 = bf16_value(src + 3) * suh_v[3];
             exl3_detail::fwht128(v0, v1, v2, v3, lane);
             __half* dst = xrot + r * kOutBlock + lane * 4u;
             dst[0] = __float2half(v0 * kInvSqrt128);
@@ -111,37 +112,36 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             dst[2] = __float2half(v2 * kInvSqrt128);
             dst[3] = __float2half(v3 * kInvSqrt128);
         }
-        detail::lds_barrier();
+        __syncthreads();
 
-        const uint32_t n_tile_base = blockIdx.x * kSubTiles;
+        const uint32_t n_tile = blockIdx.x * kWarps + warp;
 #pragma unroll
         for (uint32_t ks = 0u; ks < 8u; ++ks) {
-            const uint32_t k_offset = ks * 16u;
-#pragma unroll
-            for (uint32_t s = 0u; s < kSubTiles; ++s) {
-                decode_tile(args, kc * 8u + ks, n_tile_base + s, lane, ring, wtile);
-                const f16x8_t a = load_f16x8(wtile + lane16 * 16u + lane_high * 8u);
-                const f16x8_t b =
-                    load_f16x8(xrot + lane16 * kOutBlock + k_offset + lane_high * 8u);
-                acc[s] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[s]);
-            }
+            const uint32_t buf = ks & 1u;
+            uint16_t* tile = area.work.tile[warp][buf];
+            decode_tile(args, kc * 8u + ks, n_tile, lane, area.work.ring[warp], tile);
+            const f16x8_t a = load_f16x8(tile + lane16 * 16u + lane_high * 8u);
+            const f16x8_t b =
+                load_f16x8(xrot + lane16 * kOutBlock + ks * 16u + lane_high * 8u);
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
         }
     }
 
-#pragma unroll
-    for (uint32_t s = 0u; s < kSubTiles; ++s) {
-#pragma unroll
-        for (uint32_t j = 0u; j < 8u; ++j) {
-            const uint32_t out_col = s * 16u + lane_high * 8u + j;
-            accum[lane16 * kOutBlock + out_col] = acc[s][j];
-        }
-    }
-    detail::lds_barrier();
+    __syncthreads();
 
-    for (uint32_t r = 0u; r < kRowTile; ++r) {
+#pragma unroll
+    for (uint32_t j = 0u; j < 8u; ++j) {
+        const uint32_t out_col = warp * 16u + lane_high * 8u + j;
+        area.accum[lane16 * kOutBlock + out_col] = acc[j];
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (uint32_t ri = 0u; ri < 2u; ++ri) {
+        const uint32_t r = warp * 2u + ri;
+        if (r >= active_rows) break;
         const uint32_t row = r0 + r;
-        if (row >= args.rows) continue;
-        const float* src = accum + r * kOutBlock + lane * 4u;
+        const float* src = area.accum + r * kOutBlock + lane * 4u;
         float v0 = src[0];
         float v1 = src[1];
         float v2 = src[2];
