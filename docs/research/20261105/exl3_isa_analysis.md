@@ -135,24 +135,52 @@ ISA の変化:
 この結果から、律速は命令スループットではなく、decode の依存 chain と
 LDS / barrier / shuffle の stall であると判断した。変更は revert した。
 
+## 段階別マイクロベンチ
+
+production とは別に `/tmp` の kernel コピーへ `clock64()` を入れ、block 0 / warp 0 の
+累積 cycles を shape 別に測った。5 sample 平均。
+
+| shape | total | rot | decode | A load | B load | WMMA |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| n=1024, k=5120 | 0.178 ms | 10.6 % | **70.2 %** | 2.3 % | 2.6 % | 2.5 % |
+| n=5120, k=5120 | 0.193 ms | 9.6 % | **72.2 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=5120, k=6144 | 0.230 ms | 9.6 % | **72.3 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=5120, k=17408 | 0.641 ms | 9.6 % | **73.1 %** | 2.1 % | 2.5 % | 2.3 % |
+| n=17408, k=5120 | 0.302 ms | 9.4 % | **73.4 %** | 3.2 % | 4.1 % | 1.6 % |
+| lm_head | 3.208 ms | 9.1 % | **73.9 %** | 4.4 % | 4.8 % | 1.2 % |
+
+- phase の合計は約 88〜90 %。残りは `__syncthreads()`、出力 epilogue、その他。
+- **decode が 70〜74 %**。入力回転は 9〜11 %、A/B load + WMMA は 8〜10 %。
+- WMMA の issue 時間は 1〜2.5 % で、やはり MMA 自体は主コストではない。
+- decode 内を clock でさらに分割すると probe の overhead が大きく（+60 % 程度）、
+  内訳の数値は信頼できないため採用しなかった。
+
+## 2 系列インターリーブ（棄却）
+
+2 本の ring と 2 枚の tile を用意し、ring 2 本を stage → sync → 2 tile を復号 →
+sync → A/B/WMMA を 2 回、という形にした。barrier は 1 tile あたり 2 回から
+2 tile あたり 2 回へ半減する。
+
+| 版 | tok/s |
+| --- | ---: |
+| 1 系列（現行） | 9.04 / 9.05 / 9.06 |
+| 2 系列 | 8.96 / 8.96 / 9.04 |
+
+**改善せず**、LDS が 14.4 KiB → 16.4 KiB に増えて 4 block/CU から 3 block/CU へ
+落ちた可能性がある。decode の依存 chain はすでに compiler が 4 pair 分
+インターリーブしており、明示的な 2 系列化の追加コストが上回った。revert した。
+
 ## 次の候補
 
-1. **独立した Trellis 系列のインターリーブ**。1 warp 内で 2 / 4 / 8 個の tile を
-   同時に復号し、`load_state → hash → sad → store` の依存待ちに別系列の命令を挟む。
-   VGPR 増加と ISA の並びを確認し、2 / 4 / 8 を比較する。
-2. **FWHT 初期段の register-local 化**。4 値を同一 lane に置いて初期 2 段を VALU で
-   処理し、`ds_bpermute` を減らす。現在の 128 点 FWHT は 4 値 × 5 step なので、
-   どこまでローカル化できるかを確認する。
-3. **grid を増やす分割**。n=5120 / 1024 は block 数が足りず occupancy が 16 % / 3 %。
-   `rows == 1` 固定ではなく、row tile 数と n から必要な split 数を決める
-   batch-aware な K 分割にする。
-4. **decode と WMMA の software pipeline**。double buffer を使い、次の tile の復号を
-   現在の WMMA の後ろに置く。WMMA は 8 命令なので、主目的は LDS/依存 stall の隠蔽。
-5. **A fragment の LDS 経由をやめる**。ring から直接 A fragment を作れれば
-   `ds_store` / `ds_load` / `__syncwarp` を削れるが、window がレーン間に分散するため
-   shuffle が必要。以前の shuffle 実験は LDS より遅かったので、系列インターリーブ後に再評価する。
-6. **段階別マイクロベンチ**。decode のみ / FWHT まで / A fragment まで / WMMA までを
-   同一 shape で測り、tok/s では見えない差を切り分ける。
-7. **128 / 256 threads 構成の比較**。8 warp block を 4 warp block にして
-   block 数を増やした場合の効果を測る。ただし総 warp 数は n/16 で変わらないため、
-   K 分割なしでは occupancy の上限は同じ。
+1. **batch-aware な K 分割（最有力）**。n=5120 / 1024 は block 数が足りず
+   occupancy が 16 % / 3 %。`rows == 1` 固定ではなく、row tile 数と n から
+   split 数を決め、scratch 容量に収める。以前の rows==1 版は 8.53 → 10.34 tok/s
+   だったので、一般化すれば decode 全体で 10 % 以上の余地がある。
+2. **A/B load と WMMA の重ね合わせ**。段階別では A+B+WMMA が 8〜10 %。
+   decode に比べると小さいが、LDS 待ちの一部を隠せる可能性がある。
+3. **FWHT はすでに register-local**。現在の 128 点は 4 値の local 4-point（bit 0/1）
+   + 5 回の lane shuffle（bit 2..6）で、これ以上大きく削る余地は小さい。
+4. **128 / 256 threads 構成**。総 warp 数は n/16 で変わらないため、K 分割なしでは
+   occupancy の上限は同じ。split-K と組み合わせる場合のみ比較する。
+5. decode の内訳（ring / state / store）は clock probe では正確に測れなかった。
+   必要なら stage ごとに別 kernel を作り、clock なしで総時間を比較する。
