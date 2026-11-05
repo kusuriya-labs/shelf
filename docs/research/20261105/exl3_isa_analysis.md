@@ -793,6 +793,37 @@ DRAM / L3 の帯域ではない。
   trellis 13 MiB と xrot 20 MiB は L3 64 MiB に収まるため、DRAM の再読みが主因ではない。
 - kOutBlock 512（n tile / warp = 4）: 3.21 ms。acc register 64 個で悪化。
 
+
+### 実験: 4×4 wave tile（棄却）
+
+hipBLASLt と同じ 4×4 wave tile（1 wave が 64 行 × 64 列、K16 あたり A 4 個 + B 4 個で
+16 WMMA）を実装した。CTA は 128 行 × 256 列、8 warp を 2 row-wave × 4 col-wave に
+配置し、acc は 1 thread あたり 128 個の FP32 になる。epilogue は 64 行 × 128 列の
+32 KiB 領域を 4 回使う。
+
+| 構成 | VGPR | spill (B/lane) | ms | TFLOPS |
+| --- | ---: | ---: | ---: | ---: |
+| 素直な実装（decode 4 個を unroll） | 256 | 72 | 3.10 | 34.1 |
+| A fragment を LDS から都度ロード | 256 | 48 | 3.15 | 34.1 |
+| 上記 + decode を `unroll 1` | 215 | 0 | 2.31 | 46.4 |
+| decode を row-wave 間で LDS 共有 | 216 | 0 | 2.25 | 47.7 |
+| decode なし（A を LDS の固定値に） | 180 | 0 | **1.13** | **95.0** |
+
+decode を外すと 4×4 は 1.13 ms（95 TFLOPS）で、現行 4×2 の 1.36 ms（75 TFLOPS）より
+17 % 速い。しかし EXL3 の decode を入れると 2.25〜2.31 ms になり、現行 4×2 の
+2.07〜2.13 ms を上回る。原因は 128 個の FP32 accumulator と decode の一時レジスタが
+同時に必要で、256 VGPR を超えて spill するか、spill を避けると 215 VGPR で occupancy が
+落ちるためである。hipBLASLt は A が dense で decode の一時レジスタが不要なため、
+同じ 4×4 を成立させている。
+
+row group を 5 / 6 / 7 に増やす案も測った（kOutBlock 256、N tile 2）。acc は
+80 / 96 / 112 個になるが、2.37 / 2.32 / 2.90 ms で groups=4 の 2.07〜2.13 ms より
+遅い。register pressure と occupancy のバランス点は groups=4 のままである。
+
+**結論**: gfx1201 の EXL3 W16A16 では 4×4 wave tile を採用しない。dense A の GEMM で
+あれば 4×4 は有効だが、trellis 復号の一時レジスタと両立しない。残る差を縮めるには
+A 復号の命令数削減が主対象になる。
+
 ### production
 
 | 条件 | NT=1 / groups<=2 | NT=2 / groups=4 |
