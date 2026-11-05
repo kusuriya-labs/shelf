@@ -37,6 +37,15 @@ __device__ __forceinline__ f16x8_t load_f16x8(const void* p) {
     return *reinterpret_cast<const f16x8_t*>(p);
 }
 
+__device__ __forceinline__ uint32_t pick4(uint32_t r, uint32_t a, uint32_t b, uint32_t c,
+                                          uint32_t d) {
+    uint32_t v = a;
+    v = r == 1u ? b : v;
+    v = r == 2u ? c : v;
+    v = r == 3u ? d : v;
+    return v;
+}
+
 __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t kt, uint32_t nt,
                                             uint32_t lane, uint32_t* ring, uint16_t* tile) {
     const uint32_t words = 16u * args.ka + (args.half != 0u ? 8u : 0u);
@@ -50,14 +59,53 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
     for (uint32_t i = lane; i < word_count; i += 32u) ring[i] = source[i];
     __syncwarp();
 
+    const uint32_t bit_length = 256u * args.ka + (args.half != 0u ? 128u : 0u);
+    const uint32_t p0 = lane * 8u;
+    const uint32_t step0 = p0 + 1u;
+    const uint32_t end0 =
+        step0 * args.ka + (args.half != 0u ? step0 / 2u : 0u) + bit_length;
+    const uint32_t w0 = (end0 - 16u) >> 5;
+    uint32_t i0 = w0;
+    uint32_t i1 = w0 + 1u;
+    uint32_t i2 = w0 + 2u;
+    uint32_t i3 = w0 + 3u;
+    if (i0 >= word_count) i0 -= word_count;
+    if (i1 >= word_count) i1 -= word_count;
+    if (i2 >= word_count) i2 -= word_count;
+    if (i3 >= word_count) i3 -= word_count;
+    if (i0 >= word_count) i0 -= word_count;
+    if (i1 >= word_count) i1 -= word_count;
+    if (i2 >= word_count) i2 -= word_count;
+    if (i3 >= word_count) i3 -= word_count;
+    const uint32_t v0 = ring[i0];
+    const uint32_t v1 = ring[i1];
+    const uint32_t v2 = ring[i2];
+    const uint32_t v3 = ring[i3];
+
     uint32_t* tile32 = reinterpret_cast<uint32_t*>(tile);
 #pragma unroll
     for (uint32_t p = 0u; p < 4u; ++p) {
-        const uint32_t position = lane * 8u + p * 2u;
-        const uint16_t state0 = exl3_detail::state_from_ring(
-            ring, word_count, position, args.ka, args.half);
-        const uint16_t state1 = exl3_detail::state_from_ring(
-            ring, word_count, position + 1u, args.ka, args.half);
+        const uint32_t position = p0 + p * 2u;
+        const uint32_t step = position + 1u;
+        const uint32_t end =
+            step * args.ka + (args.half != 0u ? step / 2u : 0u) + bit_length;
+        const uint32_t shift = (((end - 1u) >> 5) + 1u) * 32u - end;
+        const uint32_t lo = ((end - 16u) >> 5) - w0;
+        const uint32_t hi = ((end - 1u) >> 5) - w0;
+        const uint32_t state0 = static_cast<uint16_t>(
+            ((static_cast<uint64_t>(pick4(lo, v0, v1, v2, v3)) << 32) |
+             pick4(hi, v0, v1, v2, v3)) >>
+            shift);
+        const uint32_t step1 = position + 2u;
+        const uint32_t end1 =
+            step1 * args.ka + (args.half != 0u ? step1 / 2u : 0u) + bit_length;
+        const uint32_t shift1 = (((end1 - 1u) >> 5) + 1u) * 32u - end1;
+        const uint32_t lo1 = ((end1 - 16u) >> 5) - w0;
+        const uint32_t hi1 = ((end1 - 1u) >> 5) - w0;
+        const uint32_t state1 = static_cast<uint16_t>(
+            ((static_cast<uint64_t>(pick4(lo1, v0, v1, v2, v3)) << 32) |
+             pick4(hi1, v0, v1, v2, v3)) >>
+            shift1);
         const uint32_t packed = exl3_detail::codebook_pair_h_bits(state0, state1);
         uint32_t row = 0;
         uint32_t col = 0;

@@ -264,6 +264,43 @@ sync → A/B/WMMA を 2 回、という形にした。barrier は 1 tile あた�
 落ちた可能性がある。decode の依存 chain はすでに compiler が 4 pair 分
 インターリーブしており、明示的な 2 系列化の追加コストが上回った。revert した。
 
+## ring window の 4-word 一括ロード（採用）
+
+1 lane が担当する 8 状態は 8 連続 position なので、16-bit window の開始位置は
+`ka`（half では 1 bit 交互）ずつしか進まない。8 状態を覆う範囲は最大でも
+約 102 bit であり、4 個の u32 に収まる。`state_from_ring` を状態ごとに呼ぶと
+1 tile あたり 16 回の LDS load になるが、先頭 word を 4 個だけ load し、
+`pick4` で相対 word を選ぶ形にすると 4 回で済む。
+
+- 先頭 word `w0` は最大 `2 * word_count - 1` になる。4 個の index は
+  条件付き減算を 2 回行って `word_count` 未満へ落とす。1 回では
+  `w0 + 3 >= 2 * word_count` のときに範囲外になる（試作で踏んだ）。
+- window の抽出式は `state_from_ring` と同じで、相対 index が 0..3 に収まる。
+- 余分な選択命令は増えるが、この kernel は ALU 律速ではないため、
+  LDS load の削減がそのまま効いた。
+
+同じ shape・split での GEMM + reduce（10 sample 平均）:
+
+| shape | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| n=1024, k=5120 | 0.0338 ms | 0.0327 ms |
+| n=5120, k=5120 | 0.0864 ms | **0.0777 ms** |
+| n=5120, k=17408 | 0.2506 ms | **0.2175 ms** |
+
+全体（同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run）:
+
+| 条件 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| decode（auto split） | 12.16〜12.23 tok/s | **13.63〜13.66 tok/s** |
+| decode（split なし） | 8.85 tok/s | 9.51 tok/s |
+| E2E decode | 12.67〜12.82 tok/s | **14.50 tok/s** |
+| MTP-2 | 14.30 tok/s | **15.48 tok/s** |
+| prefill 128 | 199.67 tok/s | **226.06 tok/s** |
+
+prefill も同じ decode_tile を使うため、行数が多い場合にも効果がある。
+`test_exl3_linear` の ka=3+half / 4 / 6 / 7、rows 1〜17、split 1〜32 が
+すべて PASS し、E2E は `11751,13,198`（` Paris.`）を維持した。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
@@ -277,22 +314,22 @@ multi-row GEMV は m=4 で m=1 の 1.07〜1.31 倍のコストである。
 1 step は rows=1 で 0.0861 ms、rows=8 で 0.0944 ms、rows=16 で 0.1017 ms であり、
 batch 8 / 16 では token あたりコストがそれぞれ 1/7.3 / 1/13.5 になる。
 
-したがって、単一 stream の 12 tok/s は W16A16 の構造上の上限に近い。GEMV を
-small-M 専用に併用すれば単一 stream は改善するが、multi-request では W16A16 の
-方が有利になり得る。採否は別途判断する。
+GEMV は batch 1〜16 のすべてで W16A16 より 2〜3 倍速い見込みだが、
+multi-request / mixed batch を前提とする現在の設計では decode 経路を 2 つ持つ
+コストが大きい。**今回は W16A16 を維持し、GEMV 経路は実装しない**。
+この判断は性能の上限を 1.55 倍程度に限定するが、multi-request の amortize と
+prefill の WMMA をそのまま使えることを優先する。
 
 ## 次の候補
 
-1. **small-M 用 GEMV の併用**。rows が小さいときだけ GEMV、大きいときは
-   W16A16 にする。参照実装の GEMV は m=4 まで m=1 の 1.07〜1.31 倍で動く。
-   M=1 の現状 12.2 tok/s に対して 2〜3 倍の余地がある。
-2. **W16A16 の rows 別チューニング**。batch 8 / 16 ではすでに token あたり
-   1/7.3 / 1/13.5 まで amortize している。split 数と scratch を rows から決め、
-   multi-request の実測で確認する。
-3. **A/B load と WMMA の重ね合わせ**。ablation では A/B load は無視できる。
-   WMMA の直列依存を分ける余地は小さい。
-4. **decode の LDS store 削減**。store は 20 %、抽出 + hash は 20 %。
-   両方を削るには ring から A fragment を直接作る必要があり、lane 間 shuffle が
-   増える。2 系列インターリーブが効果なかったため、優先度は低い。
-5. **hash / modulo の削減**は効果なし。gfx1201 の `v_mul_lo_u32` が 1/4 rate でも、
+1. **rows 別の split / scratch チューニング**。batch 8 / 16 では token あたり
+   1/7.3 / 1/13.5 まで amortize している。rows から split 数と scratch 容量を
+   決め、multi-request の実測で確認する。
+2. **decode の LDS store 削減**。store は全体の約 20 %。256 half を A fragment の
+   配置で直接作れれば LDS を経由しないが、lane 間 shuffle が増える。2 系列
+   インターリーブが効果なかったため、優先度は低い。
+3. **WMMA の直列依存**。M=1 では WMMA が 43 % を占めるが、16 行のうち 1 行しか
+   使わない構造上のコストである。W16A16 を維持する限り削れない。
+4. **hash / modulo の削減**は効果なし。gfx1201 の `v_mul_lo_u32` が 1/4 rate でも、
    この kernel では律速にならない。
+5. GEMV 経路は batch 1〜16 で 2〜3 倍の余地があるが、今回は実装しない判断とした。
