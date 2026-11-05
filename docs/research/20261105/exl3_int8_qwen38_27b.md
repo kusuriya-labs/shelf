@@ -45,14 +45,29 @@ mul1 の乗数 0x83DCD12D は 32 bit 乗算 + byte 和 + 補正で、1 重みあ
 R9700、`shelf-compute`、bf16 KV、各 3〜5 回。main（EXL3 W16A16 を持つ `53898d0`）の上に載せた状態で測った。
 同じ量子化器で作った同じモデル（4.0bpw）を、mul1（main の W16A16）と mul24（本実装）で比べる。
 
-| | decode（128 token プロンプト、63 token） | prefill 128 token | prefill 2048 token |
-|---|---|---|---|
-| main の EXL3 W16A16（mul1） | 約 43.2 ms/token（23.1 tok/s） | 約 195 ms | 約 2.2〜2.3 s |
-| EXL3-INT8（mul24、本実装） | 約 37.3 ms/token（26.8 tok/s） | 約 172 ms | 約 2.2 s |
+decode（`shelf-compute`、128 token プロンプト、63 token）:
 
-decode は W16A16 より約 14% 速い。prefill は 128 token で約 12% 速く、2048 token ではほぼ同じ
-（INT8 側の prefill GEMM は約 60 TOPS で、行数が多いと伸びない）。
-この GPU は他の負荷の有無で decode の所要が 2 倍近くまで振れることがあり、上は最速側の揃った値を採った。
+| | decode |
+|---|---|
+| main の EXL3 W16A16（mul1） | 約 43.2 ms/token（23.1 tok/s） |
+| EXL3-INT8（mul24、本実装） | 約 37.3 ms/token（26.8 tok/s） |
+
+decode は W16A16 より約 14% 速い。この GPU は他の負荷の有無で decode の所要が 2 倍近くまで振れることがあり、
+上は最速側の揃った値を採った。
+
+prefill（`shelf-bench pp --mode forward --runs 3 --warmup 1 --device 0 --arena-gib 28`、GPU 時間の median）:
+
+| prompt token | mul1（W16A16） | mul24（本実装） | mul24 / mul1 |
+|---:|---:|---:|---:|
+| 128 | 171.6 ms | 152.5 ms | 0.89 |
+| 256 | 282.7 ms | 288.4 ms | 1.02 |
+| 512 | 385.0 ms | 548.2 ms | 1.42 |
+| 1024 | 655.3 ms | 1077.9 ms | 1.64 |
+| 2048 | 1188.8 ms | 2156.8 ms | 1.81 |
+
+**prefill は 512 token 以上で mul24 の方が遅い。** main の W16A16 は `rows >= 256` で trellis を FP16 に展開して
+hipBLASLt の GEMM を使う（2048 token で約 1720 tok/s）のに対し、本実装の INT8 prefill GEMM は約 60 TOPS で、
+行数が増えても伸びない（2048 token で約 950 tok/s）。128 token 以下だけ mul24 が速い。
 
 rebase 前（main に取り込む前）の実装で decode を 41.7 → 37.1 ms にした経緯:
 
@@ -120,6 +135,7 @@ target-only は mul1 が 23.2〜23.4 tok/s、mul24 が 26.6 tok/s。
 
 ## 未実施・未確認
 
+- prefill GEMM の最適化（上表のとおり 512 token 以上は W16A16 より遅い）。
 - 長い context、TP、MoE の expert、cb0 / mcg、DFlash2 との組み合わせ（MTP は上で測定済み）。
 - shelf の teacher-forced な全位置 KLD（`--dump-logits` は sampled row だけなので 12 位置の抜き取り）。
 - mul24 の実モデル断片を fixture にすること（現在の fixture は NumPy 参照復号器から再生成した期待値）。
