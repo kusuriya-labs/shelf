@@ -632,6 +632,55 @@ trellis の代わりに事前復号済み FP16 tile を global から読む診�
 - 成果物: `tests/benchmarks/exl3_isolation/result_summary.md`、`result.csv`、
   `isa/stage_b0.s`、`isa/stage_b3.s`、`profiles/pp2048_breakdown.txt`。
 
+### 原因: B fragment の LDS bank conflict（修正済み）
+
+B0 で演算を一つずつ外した probe（no-epi、M=2048、K=N=5120）:
+
+| probe | g=1 | g=8 |
+| --- | ---: | ---: |
+| B0（A global + B LDS） | 4.573 ms | 4.453 ms |
+| A（重み）ロードを除去 | 3.920 | 3.987 |
+| B（活性）LDS ロードを除去 | 3.624 | **2.724** |
+| A と B の両方を除去 | 1.764 | 2.185 |
+
+B の LDS ロードが最大の単一要因だった。B は
+
+```text
+xrot + (g * 16 + lane16) * 128 + ks * 16 + lane_high * 8
+```
+
+で読む。row stride 128 halfs = 256 B = 64 banks なので、16 row が同じ bank 群に
+当たり **16-way conflict** になる。
+
+pitch を **136 halfs**（272 B = 68 banks、16 B alignment を維持）にすると
+row ごとに 4 bank ずつずれ、2-way まで減る。
+
+| groups | pitch 128 | pitch 136 |
+| ---: | ---: | ---: |
+| 1 | 4.75 ms | **3.66 ms** |
+| 2 | 4.53 | **2.76** |
+| 4 | 4.53 | **2.75** |
+| 8 | 4.53 | **2.75** |
+
+B3（EXL3）も 6.65 → **4.65 ms**。pitch 130 は 16 B alignment が崩れて誤りで、
+136 が正しい。production では `kXrotPitch = 136` を採用した。
+
+production:
+
+| 条件 | 修正前 | 修正後 |
+| --- | ---: | ---: |
+| decode | 15.00 | **20.47** tok/s |
+| prefill 128 | 340.4 | **479.0** tok/s |
+| prefill 512 | 353.3 | **512.4** tok/s |
+| prefill 1024 | 354.7 | **523.6** tok/s |
+| prefill 2048 | 355.9 | **526.7** tok/s |
+| E2E decode | 15.86 | **21.95** tok/s |
+| MTP-2 | 15.77 | **18.68** tok/s |
+
+残る B0 2.75 ms と hipBLASLt 0.70 ms の差は、A のグローバルロード（prefetch なし）と
+WMMA / loop の floor（A+B 除去で 1.76〜2.18 ms）である。次は A の LDS stage /
+prefetch と 128×128 tile の検討になる。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、

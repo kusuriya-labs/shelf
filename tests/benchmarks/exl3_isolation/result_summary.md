@@ -46,3 +46,21 @@ HIP_VISIBLE_DEVICES=1 /tmp/iso_bench
 - `main.cpp` — A0 rocBLAS, B0, B3, timing, correctness.
 - `isa/stage_b0.s`, `isa/stage_b3.s` — generated gfx1201 ISA for the two kernels.
 - `result.csv` — machine-readable results.
+
+## Follow-up: B fragment LDS bank conflict (fixed)
+
+The B0/B3 numbers above are the **pre-fix baseline** (xrot row pitch = 128 halfs).
+The B fragment load `xrot[row*128 + ...]` has a 16-way LDS bank conflict: a 256 B
+row stride maps all 16 rows to the same bank group. Changing the LDS pitch to
+**136 halfs** (272 B, 16 B aligned) reduces it to 2-way:
+
+| groups | pitch 128 | pitch 136 |
+| ---: | ---: | ---: |
+| 1 | 4.75 ms | 3.66 ms |
+| 2 | 4.53 | 2.76 |
+| 4 | 4.53 | 2.75 |
+| 8 | 4.53 | 2.75 |
+
+B3 (EXL3) also improves from 6.65 to 4.65 ms. This is integrated in the production
+kernel (`kXrotPitch = 136`); production results are decode 20.5 tok/s and
+pp2048 527 tok/s.

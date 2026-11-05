@@ -310,6 +310,9 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   `v_alignbit` の即値 shift でまとめて抽出する。ring は使わず、`source[lane]` と
   lane shuffle で前の word を得る。他の rate は 4 word の generic 経路を使う。
   どちらも同じ state を生成する。
+- xrot の LDS pitch は **136 halfs**（16 B alignment を維持）とする。B fragment の
+  row stride を 128 halfs にすると 16 row が同じ bank 群に当たり 16-way conflict に
+  なるため、row ごとに bank を 4 つずつずらす。
 
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ

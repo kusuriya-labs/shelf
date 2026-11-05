@@ -16,6 +16,7 @@ using f32x8_t = float __attribute__((ext_vector_type(8)));
 constexpr uint32_t kOutBlock = kExl3W16A16OutBlock;
 constexpr uint32_t kRowTile = kExl3W16A16RowTile;
 constexpr uint32_t kWarps = kOutBlock / 16u;
+constexpr uint32_t kXrotPitch = 136u;
 constexpr uint32_t kThreads = kExl3W16A16Threads;
 constexpr float kInvSqrt128 = 0.08838834764831844055f;
 
@@ -203,7 +204,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     const uint32_t active_rows = args.rows - r0 < kRows ? args.rows - r0 : kRows;
     const __half* xrot_global = static_cast<const __half*>(args.xrot);
 
-    __shared__ __align__(16) __half xrot[kRows * kOutBlock];
+    __shared__ __align__(16) __half xrot[kRows * kXrotPitch];
     __shared__ __align__(16) SharedArea area;
     __shared__ __align__(16) float rowsum[kRows];
 
@@ -232,7 +233,8 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             for (uint32_t i = threadIdx.x; i < copy_rows * kOutBlock; i += kThreads) {
                 const uint32_t r = i / kOutBlock;
                 const uint32_t c = i % kOutBlock;
-                xrot[i] = xrot_global[static_cast<uint64_t>(r0 + r) * args.k + k_base + c];
+                xrot[r * kXrotPitch + c] =
+                    xrot_global[static_cast<uint64_t>(r0 + r) * args.k + k_base + c];
             }
         } else {
             float suh_v[4];
@@ -262,7 +264,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                     const __half hv3 = __float2half(v3 * kInvSqrt128);
                     row_acc[g][ri] += __half2float(hv0) + __half2float(hv1) +
                                       __half2float(hv2) + __half2float(hv3);
-                    __half* dst = xrot + r * kOutBlock + lane * 4u;
+                    __half* dst = xrot + r * kXrotPitch + lane * 4u;
                     dst[0] = hv0;
                     dst[1] = hv1;
                     dst[2] = hv2;
@@ -278,7 +280,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 for (uint32_t ri = 0u; ri < 2u; ++ri) {
                     const uint32_t r = g * kRowTile + warp * 2u + ri;
                     if (r >= active_rows) continue;
-                    const __half* p = xrot + r * kOutBlock + lane * 4u;
+                    const __half* p = xrot + r * kXrotPitch + lane * 4u;
                     row_acc[g][ri] += __half2float(p[0]) + __half2float(p[1]) +
                                       __half2float(p[2]) + __half2float(p[3]);
                 }
@@ -298,7 +300,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                     if (g * kRowTile >= active_rows) continue;
                 }
                 const f16x8_t b = load_f16x8(xrot +
-                                             (g * kRowTile + lane16) * kOutBlock +
+                                             (g * kRowTile + lane16) * kXrotPitch +
                                              ks * 16u + lane_high * 8u);
                 acc[g] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[g]);
             }
