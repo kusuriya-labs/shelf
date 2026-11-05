@@ -3,6 +3,7 @@
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
@@ -105,7 +106,7 @@ class Qwen35ComputeRuntime {
     const shelf::models::LoadedModel& model() const
     {
         if (pp_model_ != nullptr) return *pp_model_;
-        return tp_model_ != nullptr ? *tp_model_ : *model_;
+        return tp_group_ != nullptr ? tp_group_->model() : *model_;
     }
 
     qwen35::Executor& executor()
@@ -156,9 +157,7 @@ class Qwen35ComputeRuntime {
 
     uint32_t max_num_batched_tokens() const noexcept { return exec_max_tokens_; }
 
-    qwen35::runtime::TpCoordinator* tp_coordinator() noexcept {
-        return tp_coordinator_.get();
-    }
+    qwen35::runtime::TpCoordinator* tp_coordinator() noexcept { return tp_coordinator_; }
 
     bool prefix_cache_active() const noexcept { return prefix_cache_.has_value(); }
 
@@ -192,9 +191,11 @@ class Qwen35ComputeRuntime {
     bool auto_arena_ = false;
     std::size_t startup_available_bytes_ = 0;
 
-    std::unique_ptr<qwen35::runtime::TpCoordinator> tp_coordinator_;
+    // The tensor parallel group owns the ranks, their weights and the loaded-model handle.
+    // tp_coordinator_ is a handle into it, so it is cleared before the group is.
+    std::unique_ptr<shelf::models::TpGroup> tp_group_;
+    qwen35::runtime::TpCoordinator* tp_coordinator_ = nullptr;
     std::unique_ptr<qwen35::runtime::PipelineParallelCoordinator> pp_coordinator_;
-    std::unique_ptr<shelf::models::LoadedModel> tp_model_;
     std::unique_ptr<shelf::models::LoadedModel> pp_model_;
     qwen35::Executor* tp_executor_ = nullptr;
     state::SequenceSlotPool* tp_slots_ = nullptr;

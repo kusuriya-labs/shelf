@@ -44,6 +44,7 @@ using shelf::qwen35::runtime::ContinuousBatcher;
 using shelf::qwen35::runtime::ContinuousBatcherConfig;
 using shelf::qwen35::runtime::RuntimeRequest;
 using shelf::qwen35::runtime::TpCoordinator;
+using shelf::qwen35::runtime::build_dense_tp_rank_model;
 using shelf::qwen35::runtime::TpCoordinatorConfig;
 using shelf::qwen35::runtime::TpRankRuntime;
 using shelf::qwen35::kMaxTargetHiddenTaps;
@@ -424,6 +425,7 @@ inline RunResult run_tp2(const RunOptions& opts) {
         std::min<std::size_t>(opts.taps.size(), static_cast<std::size_t>(kMaxTargetHiddenTaps)));
     config.load_options.verify_quantized_payload_crc = opts.verify_crc;
 
+    config.build_rank_model = &build_dense_tp_rank_model;
     auto coordinator_result = TpCoordinator::create(config);
     if (!coordinator_result.ok()) {
         result.error = "tp2 coordinator: " + coordinator_result.status().message();
@@ -436,7 +438,7 @@ inline RunResult run_tp2(const RunOptions& opts) {
     TpRankRuntime& rank1 = coordinator->rank(1);
 
     {
-        const Qwen35ModelWeights& weights = rank0.model().weights();
+        const Qwen35ModelWeights& weights = rank0.dense_model()->weights();
         if (!weights.layers.empty()) {
             result.gate_rows = weights.layers[0].ffn.gate.rows;
             result.down_cols = weights.layers[0].ffn.down.cols;
@@ -453,7 +455,8 @@ inline RunResult run_tp2(const RunOptions& opts) {
 
     ContinuousBatcher batcher(rank0.executor(), rank0.sequence_pool(), rank0.gdn_pool(),
                               rank0.kv_pool(),
-                              batcher_config(rank0.text_config(), opts), rank0.stream());
+                              batcher_config(rank0.dense_model()->text_config(), opts),
+                              rank0.stream());
     batcher.set_tp_batch_hook(coordinator.get());
 
     result.trace.device = rank0.device_id();

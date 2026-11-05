@@ -270,6 +270,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     config.load_options.verify_quantized_payload_crc = o.verify_crc;
     config.load_options.vocab_parallel_lm_head = false;
 
+    config.build_rank_model = &build_dense_tp_rank_model;
     auto coordinator_result = TpCoordinator::create(config);
     if (!coordinator_result.ok()) {
         result.error = "dflash2 tp2 coordinator: " + coordinator_result.status().message();
@@ -278,7 +279,7 @@ inline RunResult run_dflash2_tp2(const DFlash2Options& opts) {
     std::unique_ptr<TpCoordinator> coordinator = coordinator_result.release();
     TpRankRuntime& rank0 = coordinator->rank(0);
 
-    const auto& model = rank0.model();
+    const auto& model = *rank0.dense_model();
     const hipStream_t stream = rank0.stream();
     gpu::GpuArena& arena = rank0.arena();
 

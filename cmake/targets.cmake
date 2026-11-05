@@ -286,7 +286,8 @@ target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC
     src/shelf/models/model_weights_factory.cpp
-    src/shelf/models/loaded_model.cpp)
+    src/shelf/models/loaded_model.cpp
+    src/shelf/models/tp_rank_model.cpp)
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

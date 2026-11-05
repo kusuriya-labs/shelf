@@ -1,6 +1,7 @@
 #include <shelf/models/loaded_model.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 
@@ -67,6 +68,12 @@ LoadedModel LoadedModel::borrow(const shelf::qwen35::Qwen35Model& model) {
     return out;
 }
 
+LoadedModel LoadedModel::borrow(const shelf::qwen35moe::Qwen35MoeModel& model) {
+    LoadedModel out;
+    out.moe_ = &model;
+    return out;
+}
+
 std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,
@@ -104,47 +111,16 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
                                                     kv_pool, arena, config);
     }
 
-    std::uint32_t tp_size = 1u;
-    std::uint32_t tp_rank = 0u;
-    if (config.tp != nullptr) {
-        tp_size = config.tp->tp_size;
-        tp_rank = config.tp->tp_rank;
-    }
-    if (tp_size > 1u && config.tp->global_num_experts == 0u) {
+    // The MoE family's lowering options, including the rank's expert range, are built by one
+    // helper so a tensor parallel rank reaches the executor the same way.
+    if (config.tp != nullptr && config.tp->tp_size > 1u && config.tp->global_num_experts == 0u) {
         return Status::unsupported(
             "a model with grouped experts needs a tensor parallel context that states its "
             "expert range: the expert planes are not part of the matrix partition contract",
             __FILE__, __LINE__);
     }
-
-    std::vector<shelf::qwen35::LayerOverrideSource> overrides =
-        shelf::qwen35::read_layer_override_sources(
-            static_cast<std::uint32_t>(moe_->text_config().hidden_size));
-    std::vector<std::uint32_t> override_layers;
-    override_layers.reserve(overrides.size());
-    for (const auto& ov : overrides) override_layers.push_back(ov.layer);
-
-    shelf::qwen35moe::Qwen35MoeLowerOptions lower_options;
-    lower_options.hidden_taps = std::span<const std::uint32_t>(
-        config.target_hidden_taps.data(), config.target_hidden_tap_count);
-    lower_options.override_layers = std::span<const std::uint32_t>(
-        override_layers.data(), override_layers.size());
-    lower_options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
-    lower_options.emit_normed_token_hidden = config.emit_normed_token_hidden;
-    lower_options.tp_size = tp_size;
-    lower_options.tp_rank = tp_rank;
-
-    auto lowered = shelf::qwen35moe::lower_qwen35_moe_to_primitives(
-        moe_->text_config(), moe_->weights(), lower_options);
-    if (!lowered.ok()) return lowered.status();
-
-    shelf::qwen35::ExecutorModelInput input;
-    input.model.config = &moe_->text_config();
-    input.model.embed_tokens = &moe_->weights().embed_tokens;
-    input.lowered = lowered.release();
-    input.layer_overrides = std::move(overrides);
-    return shelf::qwen35::create_executor(std::move(input), sequence_pool, gdn_state_pool,
-                                          kv_pool, arena, config);
+    return create_moe_model_executor(
+        *moe_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
 }
 
 namespace {

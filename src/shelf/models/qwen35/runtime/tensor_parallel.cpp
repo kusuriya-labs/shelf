@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
+#include <shelf/models/tp_rank_model.h>
 
 #include <cstdio>
 #include <sstream>
@@ -24,7 +25,7 @@ std::uint32_t ceil_div(std::uint32_t a, std::uint32_t b) {
     return (a + b - 1u) / b;
 }
 
-std::uint32_t count_attention_layers(const Qwen35TextConfig& tc) {
+std::uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<std::uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
 }
@@ -85,8 +86,6 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                                  __FILE__, __LINE__);
     }
 
-    Qwen35LoadOptions load_options = config.load_options;
-
     std::size_t arena_budget = config.arena_bytes;
     if (arena_budget == 0) {
         std::size_t free_bytes = 0;
@@ -115,23 +114,22 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     if (!arena_result.ok()) return arena_result.status();
     rank->arena_.emplace(arena_result.release());
 
-    auto model_result = Qwen35Model::load_tensor_parallel_from_safetensors(
-        config.model_dir, config.tp_size, config.tp_rank, rank->arena_.value(),
-        rank->stream_, load_options);
+    // The rank's model is the caller's choice: which family the checkpoint is, and therefore
+    // which weights this rank loads and which local geometry it runs with, is not something
+    // the rank runtime can decide.
+    if (config.build_rank_model == nullptr) {
+        return Status::invalid_argument(
+            "tp rank runtime requires a rank model builder", __FILE__, __LINE__);
+    }
+    auto model_result = config.build_rank_model(config, rank->arena_.value(), rank->stream_);
     if (!model_result.ok()) return model_result.status();
-    rank->model_.emplace(model_result.release());
+    rank->model_ = model_result.release();
 
-    auto context_result = make_qwen35_tensor_parallel_context(
-        rank->model_.value().text_config(), config.tp_size, config.tp_rank,
-        load_options.vocab_parallel_lm_head);
-    if (!context_result.ok()) return context_result.status();
-    rank->context_.emplace(context_result.release());
-
-    const Qwen35TextConfig& tc = rank->model_.value().text_config();
+    const shelf::qwen_hybrid::QwenHybridConfig& tc = rank->hybrid_config();
     const std::uint32_t max_blocks_per_sequence =
         ceil_div(config.max_seq_len + 1u, config.page_tokens) + 1u;
     const std::uint32_t attention_layers = count_attention_layers(tc);
-    const std::uint32_t local_kv_heads = rank->context_.value().local_key_value_heads;
+    const std::uint32_t local_kv_heads = rank->context().local_key_value_heads;
     const std::uint32_t head_dim = static_cast<std::uint32_t>(tc.attention_head_dim);
 
     const std::size_t kv_page_bytes = PagedKVPool::page_bytes(
@@ -172,10 +170,12 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         reserve_config.max_scheduled_requests = config.max_scheduled_requests;
         reserve_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         reserve_config.target_hidden_tap_count = config.target_hidden_tap_count;
+        // The dense FFN term of the shared estimate stands in for the FFN activations that
+        // still sit at token rows: for a model with grouped experts those are its shared
+        // expert. The routed experts add their own group-row term.
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
-            rank->model_->text_config(),
-            rank->model_->text_config().ffn.intermediate_size, reserve_config,
-            config.tp_size);
+            tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size);
+        reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
         std::fprintf(stderr,
                      "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u)\n",
                      static_cast<unsigned>(config.tp_rank),
@@ -279,12 +279,12 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.target_hidden_tap_count = config.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config.tp_combine_f32;
     exec_config.rope_profile = config.rope_profile;
-    exec_config.tp = &rank->context_.value();
+    exec_config.tp = &rank->context();
 
     const std::size_t executor_before = rank->arena_->used();
-    auto exec_result = create_model_executor(
-        rank->model_.value(), rank->seq_pool_.value(), rank->gdn_pool_.value(),
-        rank->kv_pool_.value(), rank->arena_.value(), exec_config);
+    auto exec_result = rank->model_->create_executor(
+        rank->seq_pool_.value(), rank->gdn_pool_.value(), rank->kv_pool_.value(),
+        rank->arena_.value(), exec_config);
     std::fprintf(stderr,
                  "MEMORY_PLAN tp rank %u executor footprint: %s (reserve %s)\n",
                  static_cast<unsigned>(config.tp_rank),
@@ -297,30 +297,95 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     return rank;
 }
 
-std::uint64_t TpRankRuntime::weight_bytes() const {
-    if (!model_) return 0;
-    const Qwen35ModelWeights& w = model_.value().weights();
-    std::uint64_t total = 0;
-    add_matrix_bytes(total, w.embed_tokens);
-    if (!w.lm_head_tied) add_matrix_bytes(total, w.lm_head);
-    for (const Qwen35LayerWeights& layer : w.layers) {
-        add_matrix_bytes(total, layer.ffn.gate);
-        add_matrix_bytes(total, layer.ffn.up);
-        add_matrix_bytes(total, layer.ffn.down);
-        if (layer.is_gdn) {
-            add_matrix_bytes(total, layer.attn_in_proj_qkv);
-            add_matrix_bytes(total, layer.attn_in_proj_z);
-            add_matrix_bytes(total, layer.attn_in_proj_a);
-            add_matrix_bytes(total, layer.attn_in_proj_b);
-            add_matrix_bytes(total, layer.attn_out_proj);
-        } else {
-            add_matrix_bytes(total, layer.attn_q_proj);
-            add_matrix_bytes(total, layer.attn_k_proj);
-            add_matrix_bytes(total, layer.attn_v_proj);
-            add_matrix_bytes(total, layer.attn_o_proj);
-        }
+namespace {
+
+class DenseTpRankModel final : public shelf::models::TpRankModel {
+public:
+    DenseTpRankModel(Qwen35Model&& model, Qwen35TensorParallelContext&& context)
+        : model_(std::move(model)), context_(context) {}
+
+    const shelf::qwen_hybrid::QwenHybridConfig& hybrid_config() const override {
+        return model_.text_config();
     }
-    return total;
+    const Qwen35TensorParallelContext& context() const override { return context_; }
+
+    std::uint64_t weight_bytes() const override {
+        const Qwen35ModelWeights& w = model_.weights();
+        std::uint64_t total = 0;
+        add_matrix_bytes(total, w.embed_tokens);
+        if (!w.lm_head_tied) add_matrix_bytes(total, w.lm_head);
+        for (const Qwen35LayerWeights& layer : w.layers) {
+            add_matrix_bytes(total, layer.ffn.gate);
+            add_matrix_bytes(total, layer.ffn.up);
+            add_matrix_bytes(total, layer.ffn.down);
+            if (layer.is_gdn) {
+                add_matrix_bytes(total, layer.attn_in_proj_qkv);
+                add_matrix_bytes(total, layer.attn_in_proj_z);
+                add_matrix_bytes(total, layer.attn_in_proj_a);
+                add_matrix_bytes(total, layer.attn_in_proj_b);
+                add_matrix_bytes(total, layer.attn_out_proj);
+            } else {
+                add_matrix_bytes(total, layer.attn_q_proj);
+                add_matrix_bytes(total, layer.attn_k_proj);
+                add_matrix_bytes(total, layer.attn_v_proj);
+                add_matrix_bytes(total, layer.attn_o_proj);
+            }
+        }
+        return total;
+    }
+
+    std::size_t token_row_ffn_size() const override {
+        return model_.text_config().ffn.intermediate_size;
+    }
+
+    std::size_t ffn_workspace_reserve_bytes(std::size_t) const override { return 0u; }
+
+    Result<Executor> create_executor(SequenceSlotPool& sequence_pool,
+                                     GdnStatePool& gdn_state_pool, PagedKVPool& kv_pool,
+                                     gpu::GpuArena& arena,
+                                     const ExecutorConfig& config) const override {
+        return create_model_executor(model_, sequence_pool, gdn_state_pool, kv_pool, arena,
+                                     config);
+    }
+
+    const Qwen35Model* dense_model() const override { return &model_; }
+
+private:
+    Qwen35Model model_;
+    Qwen35TensorParallelContext context_;
+};
+
+}  // namespace
+
+Result<std::unique_ptr<shelf::models::TpRankModel>> build_dense_tp_rank_model(
+    const TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream) {
+    auto model_result = Qwen35Model::load_tensor_parallel_from_safetensors(
+        config.model_dir, config.tp_size, config.tp_rank, arena, stream, config.load_options);
+    if (!model_result.ok()) return model_result.status();
+
+    auto context_result = make_qwen35_tensor_parallel_context(
+        model_result.value().text_config(), config.tp_size, config.tp_rank,
+        config.load_options.vocab_parallel_lm_head);
+    if (!context_result.ok()) return context_result.status();
+
+    return std::unique_ptr<shelf::models::TpRankModel>(std::make_unique<DenseTpRankModel>(
+        model_result.release(), context_result.release()));
+}
+
+const shelf::models::TpRankModel* TpRankRuntime::rank_model() const { return model_.get(); }
+
+const Qwen35Model* TpRankRuntime::dense_model() const {
+    return model_ ? model_->dense_model() : nullptr;
+}
+
+const shelf::qwen_hybrid::QwenHybridConfig& TpRankRuntime::hybrid_config() const {
+    return model_->hybrid_config();
+}
+
+const Qwen35TensorParallelContext& TpRankRuntime::context() const { return model_->context(); }
+
+std::uint64_t TpRankRuntime::weight_bytes() const {
+    return model_ ? model_->weight_bytes() : 0u;
 }
 
 std::uint64_t TpRankRuntime::kv_bytes() const {
@@ -409,6 +474,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;
         rank_config.tp_combine_f32 = config.tp_combine_f32;
         rank_config.rope_profile = config.rope_profile;
+        rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
         auto rank_result = TpRankRuntime::create(rank_config);
         if (!rank_result.ok()) return rank_result.status();

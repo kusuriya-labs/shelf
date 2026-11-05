@@ -650,18 +650,17 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
 
     const auto t_load_start = std::chrono::steady_clock::now();
-    auto coordinator_result = qwen35::runtime::TpCoordinator::create(tp_config);
-    if (!coordinator_result.ok()) {
-        return coordinator_result.status();
+    auto group_result = shelf::models::TpGroup::create(tp_config);
+    if (!group_result.ok()) {
+        return group_result.status();
     }
-    tp_coordinator_ = coordinator_result.release();
+    tp_group_ = std::make_unique<shelf::models::TpGroup>(group_result.release());
+    tp_coordinator_ = &tp_group_->coordinator();
     const auto t_load_end = std::chrono::steady_clock::now();
     model_load_ms_ =
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     qwen35::runtime::TpRankRuntime& rank0 = tp_coordinator_->rank(0);
-    tp_model_ = std::make_unique<shelf::models::LoadedModel>(
-        shelf::models::LoadedModel::borrow(rank0.model()));
     tp_executor_ = &rank0.executor();
     tp_slots_ = &rank0.sequence_pool();
     tp_gdn_ = &rank0.gdn_pool();
@@ -682,11 +681,11 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     batcher_config.max_scheduled_requests = config_.max_concurrent_requests;
     batcher_config.max_seq_len = config_.max_seq_len;
     batcher_config.page_tokens = config_.page_tokens;
-    batcher_config.eos_token_ids = rank0.text_config().stop_tokens;
+    batcher_config.eos_token_ids = rank0.hybrid_config().stop_tokens;
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
         *tp_executor_, *tp_slots_, *tp_gdn_, *tp_kv_, batcher_config, tp_stream_);
-    batcher_->set_tp_batch_hook(tp_coordinator_.get());
+    batcher_->set_tp_batch_hook(tp_coordinator_);
 
     if (config_.prefix_cache) {
         qwen35::runtime::PrefixCacheConfig prefix_config;
@@ -696,7 +695,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         prefix_config.cold_state_slots = config_.prefix_cache_cold_state_slots;
         prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
 
-        const auto& tc = rank0.text_config();
+        const auto& tc = rank0.hybrid_config();
         const qwen35::runtime::PrefixCacheGeometry geometry{
             .page_tokens = config_.page_tokens,
             .num_attention_layers = count_attention_layers(tc),
@@ -755,7 +754,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
                 arena(), kv_pool(), gdn_pool(), prefix_config, extra_ranks);
             if (prefix_result.ok()) {
                 prefix_cache_.emplace(prefix_result.release());
-                (void)prefix_cache_->set_tp_hook(tp_coordinator_.get());
+                (void)prefix_cache_->set_tp_hook(tp_coordinator_);
                 batcher_->set_prefix_cache(&prefix_cache_.value());
             } else {
                 prefix_cache_error_ = prefix_result.status().message();
@@ -898,9 +897,9 @@ Status Qwen35ComputeRuntime::shutdown() {
     tp_gdn_ = nullptr;
     tp_kv_ = nullptr;
     tp_arena_ = nullptr;
-    tp_model_ = nullptr;
     tp_stream_ = nullptr;
-    tp_coordinator_.reset();
+    tp_coordinator_ = nullptr;
+    tp_group_.reset();
     pp_model_ = nullptr;
     pp_coordinator_.reset();
 

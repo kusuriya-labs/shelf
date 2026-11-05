@@ -58,6 +58,7 @@ root namespace は `shelf`。`include/shelf/**` と `src/shelf/**` のディレ�
 | `shelf/models/qwen35/**` | `shelf::qwen35`（下位: `runtime` / `dflash2`） |
 | `shelf/models/qwen35moe/**` | `shelf::qwen35moe` |
 | `shelf/models/model_weights_factory.h` / `src/shelf/models/model_weights_factory.cpp` | `shelf::models` |
+| `shelf/models/tp_rank_model.h` / `src/shelf/models/tp_rank_model.cpp` | `shelf::models` |
 | `src/apps/**` | `shelf::app` / `shelf::bench::quality` |
 
 generic 層（`shelf/kernels` / `shelf/inference` /
@@ -93,8 +94,11 @@ generic 層（`shelf/kernels` / `shelf/inference` /
   （`shelf::models::load_model_weights`）と、load 済みの model から executor を作る入口
   （`shelf::models::LoadedModel`）。executor 生成の family 分岐はここに置き、apps は family を
   知らない。両 loader を link する唯一のターゲットで、`shelf_qwen35_runtime` も link する。
-  family 選択は構造（`num_experts`）だけが決め、アーキテクチャの識別は
-  `shelf_qwen_hybrid` の identity gate が担う（次節）
+  family 選択は構造（`num_experts`）だけが決め、アーキテクチャの識別は `shelf_qwen_hybrid` の
+  identity gate が担う（次節）。tensor parallel の rank も同じ形で、rank が読む checkpoint の
+  family は `shelf::models::TpRankModel`（`models/tp_rank_model.h`）を介して注入する。
+  rank runtime 自身は `shelf_qwen35_runtime` にあり dense family を名乗るが、family をまたぐ
+  判断は持たない（契約は [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）
 
 `shelf_kernels_correctness` は `shelf_runtime` にlinkする一方、
 `shelf_runtime` は `shelf_core` / `shelf_gpu` だけを使う。

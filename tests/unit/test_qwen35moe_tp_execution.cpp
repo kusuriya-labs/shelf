@@ -172,7 +172,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     moe::Qwen35MoeModel model = model_result.release();
 
     q35::ExecutorConfig ec;
-    ec.max_batch_rows = 16u;
+    ec.max_batch_rows = 64u;
     ec.max_scheduled_requests = 1u;
     ec.max_scheduled_output_rows = 1u;
 
@@ -197,8 +197,12 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     for (int lt : hybrid.layer_types)
         if (lt != 0) ++attn_layers;
 
+    // The sequence spans several KV pages and several decode steps: a rank's KV and GDN state
+    // has to survive a step boundary, and a single-token step reads back what earlier steps
+    // appended. One page and two steps would not show a state that only matters when the
+    // sequence has history.
     const std::uint32_t page_tokens = 16u;
-    const std::uint32_t max_tokens = 64u;
+    const std::uint32_t max_tokens = 128u;
     const std::uint32_t num_pages = ceil_div(max_tokens + 16u, page_tokens) + 4u;
 
     auto seq_result = st::SequenceSlotPool::create(arena, 1u, num_pages + 4u);
@@ -256,7 +260,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
     }
     st::PagedSequenceState sequence = seq_state.release();
 
-    const std::vector<int32_t> prompt = make_prompt(16u);
+    const std::vector<int32_t> prompt = make_prompt(64u);
     std::vector<q35::ScheduledRequest> requests;
     auto prefill = q35::execute_batch(ex, make_batch(sequence, requests, prompt.data(),
                                                      static_cast<std::uint32_t>(prompt.size())),
@@ -276,7 +280,7 @@ RunResult run_rank(const std::string& model_dir, int device, std::uint32_t tp_si
         download_row0(out.token_hidden, device, result.hidden_row0);
         download_row0(ex.logits, device, result.logits_row0);
     }
-    for (int step = 0; step < 2; ++step) {
+    for (int step = 0; step < 8; ++step) {
         std::vector<int32_t> one{result.tokens.back()};
         auto decode = q35::execute_batch(ex, make_batch(sequence, requests, one.data(), 1u),
                                          stream);

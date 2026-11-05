@@ -749,14 +749,18 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   `test_paged_attention_split_reduce_exact`（q_per_kv 6 / 8）が対にする（経緯と計測は
   `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md` と
   `docs/research/20261105/moe_fp8_kv.md`）
-- MoE の expert 軸分割は weight load・lowering・program・kernel・executor まで配線済みで、
-  `test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致を検証する
-  （契約は §3「expert 軸の分割」と §6 の routing、
-  [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）。
-  未配線なのは multi-rank runtime 側で、`TpRankRuntime` は dense の rank load しか行わない。
-  したがって `shelf-compute --tensor-parallel` と `shelf-bench pp` / `shelf-bench quality` の
-  `--tensor-parallel 2` は `probe_model_dir` で dense のみを受理し、grouped expert checkpoint
-  では起動時に拒否する（深い地点で落ちない）。MTP block は分割しない（§5）
+- MoE の expert 軸分割は weight load・lowering・program・kernel・executor・multi-rank runtime
+  まで配線済みで、`test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致を
+  検証する（契約は §3「expert 軸の分割」と §6 の routing、
+  [tensor_parallel_execution.md](tensor_parallel_execution.md) §11-1）。multi-rank runtime は
+  `shelf::qwen35` にあるので family をまたぐ判断は持てず、rank の model は
+  `shelf::models::TpRankModel` 経由で注入される（builder の選択は `shelf::models`）
+- ただし実 model（Qwen3.6-35B-A3B）では TP=2 と TP=1 の生成列が**一致していない**。
+  合成 fixture の一致は expert 分割・collective・rank geometry の契約が成立していることの
+  証明であって、実 model の kernel 選択（TP=2 の局所 shape が optimized allowlist の外側で
+  correctness path へ落ちる）を含んでいない。経緯は
+  [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md)。
+  MTP block は分割しない（§5）
 - pipeline parallel も未対応。stage 分割は dense の weight load と executor footprint を前提に
   しており、group 行数容量と plan scratch の stage 別配分が無い。`--pipeline-parallel` を
   grouped expert checkpoint へ向けると `shelf::models::probe_model_dir` により起動時に

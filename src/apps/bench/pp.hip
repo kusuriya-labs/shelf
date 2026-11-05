@@ -1,6 +1,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/model_weights_factory.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
@@ -411,15 +412,6 @@ int run_pp(int argc, char** argv) {
         }
         tp1_executor.emplace(exec_result.release());
     } else {
-        const auto family = shelf::models::probe_model_dir(opts.model_dir);
-        if (!family.ok()) {
-            fprintf(stderr, "model probe failed: %s\n", family.status().message().c_str());
-            return 1;
-        }
-        if (family.value() != shelf::models::ModelFamily::Dense) {
-            fprintf(stderr, "pp --tensor-parallel %d runs dense checkpoints only\n", opts.tp);
-            return 1;
-        }
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
@@ -432,6 +424,11 @@ int run_pp(int argc, char** argv) {
                                     : shelf::kernel::KVCacheDType::BF16;
         tp_cfg.arena_bytes = arena_bytes;
         tp_cfg.working_set_reserve_bytes = 0;
+        shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);
+        if (!sel.ok()) {
+            fprintf(stderr, "tensor parallel rank model: %s\n", sel.message().c_str());
+            return 1;
+        }
         auto tp_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!tp_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
@@ -445,8 +442,7 @@ int run_pp(int argc, char** argv) {
     const std::size_t vocab_size =
         tp1_loaded
             ? tp1_loaded->hybrid_config().vocab_size
-            : shelf::models::LoadedModel::borrow(tp_coordinator->rank(0).model())
-                  .hybrid_config().vocab_size;
+            : tp_coordinator->rank(0).hybrid_config().vocab_size;
     auto& seq_pool = tp_coordinator ? tp_coordinator->rank(0).sequence_pool() : *tp1_seq_pool;
     auto& rec_pool = tp_coordinator ? tp_coordinator->rank(0).gdn_pool() : *tp1_rec_pool;
     auto& kv_pool = tp_coordinator ? tp_coordinator->rank(0).kv_pool() : *tp1_kv_pool;

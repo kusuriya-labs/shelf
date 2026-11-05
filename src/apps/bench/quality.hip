@@ -3,6 +3,7 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
@@ -369,15 +370,6 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
     } else {
-        const auto family = shelf::models::probe_model_dir(opts.model_dir);
-        if (!family.ok()) {
-            fprintf(stderr, "model probe failed: %s\n", family.status().message().c_str());
-            return 1;
-        }
-        if (family.value() != shelf::models::ModelFamily::Dense) {
-            fprintf(stderr, "quality --tensor-parallel %d runs dense checkpoints only\n", opts.tp);
-            return 1;
-        }
         shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
         tp_cfg.model_dir = opts.model_dir;
         tp_cfg.devices = opts.devices;
@@ -389,6 +381,11 @@ int run_quality(int argc, char** argv) {
         tp_cfg.kv_cache_dtype = opts.kv_dtype;
         tp_cfg.arena_bytes = arena_bytes;
         tp_cfg.working_set_reserve_bytes = 1ull * 1024ull * 1024ull * 1024ull;
+        shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);
+        if (!sel.ok()) {
+            fprintf(stderr, "tensor parallel rank model: %s\n", sel.message().c_str());
+            return 1;
+        }
         auto coord_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
         if (!coord_result.ok()) {
             fprintf(stderr, "TpCoordinator::create failed: %s\n",
@@ -408,7 +405,7 @@ int run_quality(int argc, char** argv) {
     if (tp1_loaded != nullptr)
         tc = tp1_loaded->hybrid_config();
     else
-        tc = shelf::models::LoadedModel::borrow(tp_coord->rank(0).model()).hybrid_config();
+        tc = tp_coord->rank(0).hybrid_config();
     const uint32_t vocab = static_cast<uint32_t>(tc.vocab_size);
     const uint32_t kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(tc.attention_head_dim);

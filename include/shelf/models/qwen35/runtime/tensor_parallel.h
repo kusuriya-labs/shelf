@@ -25,14 +25,30 @@
 #include <vector>
 
 namespace shelf {
+namespace models {
+class TpRankModel;
+}
+}
+
+namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
 using PrivateWeightLoader = std::function<Status(
     gpu::GpuArena&, hipStream_t, weights::MatrixWeight&, weights::MatrixWeight&)>;
 
+// Builds one rank's model: its weights, the local geometry of the split, and the path from
+// that model to the executor. The rank runtime does not know which model family a checkpoint
+// is, so a caller supplies this. shelf::models implements it for both model families and picks
+// one (shelf::models::select_tp_rank_model); build_dense_tp_rank_model below is the dense
+// family's, usable by a caller that already knows its checkpoint is dense.
+using TpRankModelBuilder =
+    ::shelf::Result<std::unique_ptr<shelf::models::TpRankModel>> (*)(
+        const struct TpRankRuntimeConfig&, gpu::GpuArena&, hipStream_t);
+
 struct TpRankRuntimeConfig {
     std::string model_dir;
+    TpRankModelBuilder build_rank_model = nullptr;
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
     int device_id = 0;
@@ -75,13 +91,18 @@ public:
     int device_id() const noexcept { return device_id_; }
     hipStream_t stream() const noexcept { return stream_; }
     gpu::GpuArena& arena() { return arena_.value(); }
-    const Qwen35Model& model() const { return model_.value(); }
+    // The rank's model, which owns the weights and states the rank's local geometry.
+    const shelf::models::TpRankModel* rank_model() const;
+    // The dense family's model. Null for a model whose FFN runs on grouped expert rows.
+    const Qwen35Model* dense_model() const;
+    // The geometry the backbone, the state pools and the footprint are sized by. It is the
+    // same whatever the FFN of a layer is.
+    const shelf::qwen_hybrid::QwenHybridConfig& hybrid_config() const;
+    const Qwen35TensorParallelContext& context() const;
     SequenceSlotPool& sequence_pool() { return seq_pool_.value(); }
     GdnStatePool& gdn_pool() { return gdn_pool_.value(); }
     PagedKVPool& kv_pool() { return kv_pool_.value(); }
     Executor& executor() { return executor_; }
-    const Qwen35TensorParallelContext& context() const { return context_.value(); }
-    const Qwen35TextConfig& text_config() const { return model_.value().text_config(); }
 
     weights::MatrixWeight& private_lm_head() { return private_lm_head_; }
     weights::MatrixWeight& private_embed_tokens() { return private_embed_tokens_; }
@@ -96,8 +117,7 @@ private:
     int device_id_ = -1;
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
-    std::optional<Qwen35Model> model_;
-    std::optional<Qwen35TensorParallelContext> context_;
+    std::unique_ptr<shelf::models::TpRankModel> model_;
     std::optional<SequenceSlotPool> seq_pool_;
     std::optional<GdnStatePool> gdn_pool_;
     std::optional<PagedKVPool> kv_pool_;
@@ -107,8 +127,14 @@ private:
     weights::MatrixWeight private_embed_tokens_;
 };
 
+// The dense family's rank model builder: loads one rank through the dense tensor parallel
+// weight load and states the rank's local widths from the dense config.
+Result<std::unique_ptr<shelf::models::TpRankModel>> build_dense_tp_rank_model(
+    const TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream);
+
 struct TpCoordinatorConfig {
     std::string model_dir;
+    TpRankModelBuilder build_rank_model = nullptr;
     std::vector<int> devices;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;

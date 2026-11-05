@@ -382,12 +382,44 @@ matrix axis を持たないため、分割は expert 軸で起きる（契約は
   `local_shared_expert_intermediate_size`）。`LoadedModel::create_executor` は
   grouped expert model に対して expert 範囲を state しない TP context を渡すと
   `Status::unsupported` で止まる
-- 配線状況: weight load・lowering・program・kernel・executor まで配線済みで、
-  `test_qwen35moe_tp_execution` が 2 GPU で TP=1 と TP=2 の greedy 一致と
-  rank 間の logits 一致を検証する。`TpCoordinator` / `TpRankRuntime` は dense の
-  rank load しか行わないので、`shelf-compute --tensor-parallel` と
-  `shelf-bench pp / quality --tensor-parallel` は grouped expert checkpoint では
-  起動時に dense のみを受理する（multi-rank runtime の MoE 配線が未実装）
+### multi-rank runtime の family 境界
+
+`TpRankRuntime` / `TpCoordinator` は `shelf::qwen35` にあり、dense family 側から
+grouped expert family を名乗れない（`test_architecture_boundaries` の sibling rule）。
+一方で rank がどの checkpoint を読むかは runtime 自身には分からない。そのため
+rank の model は interface 経由で注入する。
+
+```cpp
+// models/tp_rank_model.h  (namespace shelf::models)
+class TpRankModel {           // rank の model 側の決定だけを持つ
+    hybrid_config(); context(); weight_bytes();
+    token_row_ffn_size(); ffn_workspace_reserve_bytes(max_batch_rows);
+    create_executor(...);
+    dense_model(); grouped_model();
+};
+using TpRankModelBuilder = ...;   // TpRankRuntimeConfig / TpCoordinatorConfig が持つ
+```
+
+- `shelf::qwen35::runtime::build_dense_tp_rank_model` が dense 側の実装
+  （`qwen35` namespace なので dense を名乗ってよい）
+- `shelf::models::build_moe_tp_rank_model` が grouped expert 側の実装
+- `shelf::models::select_tp_rank_model(config)` が `num_experts` を読んで builder を選ぶ。
+  family 判断は `models/model_weights_factory` と同じ層にしか置けない
+- `shelf::models::TpGroup` は coordinator と rank 0 の `LoadedModel` handle をまとめて
+  保持する entry。application はこれを使い、`TpCoordinator::create` を直接呼ぶ場合は
+  builder 側を自分で設定する
+- rank の arena・state pool・KV page 数・footprint reserve は `TpRankModel` の
+  `hybrid_config()` / `context()` / `token_row_ffn_size()` /
+  `ffn_workspace_reserve_bytes()` から決まる。family 固有の容量式を runtime が持たない
+
+### 配線状況
+
+weight load・lowering・program・kernel・executor・multi-rank runtime まで配線済みで、
+`shelf-compute --tensor-parallel 2` / `shelf-bench pp` / `shelf-bench quality` は
+grouped expert checkpoint も受理する。`test_qwen35moe_tp_execution` は 2 GPU で
+TP=1 と TP=2 の greedy 一致・rank 間 logits 一致・KV / GDN / expert 平面の局所 geometry
+を固定する。実 model（Qwen3.6-35B-A3B）での TP=2 と TP=1 の一致は**未成立**
+（research 記録 [../research/20261105/moe_tp_expert_axis.md](../research/20261105/moe_tp_expert_axis.md)）。
 
 ### 未対応 / 非目標
 
@@ -396,8 +428,8 @@ Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAl
 計算との overlap は未対応）、
 graph capture との併用（`SHELF_HIP_GRAPH` は TP schedule と非併用）、
 MTP 分散実行、vocab parallel、distributed sampling、
-structured generation / server 統合、grouped expert model の multi-rank runtime 配線
-（§11-1）、pipeline parallel、TP=4 production support。
+structured generation / server 統合、
+pipeline parallel、TP=4 production support。
 
 ## 12. tests
 

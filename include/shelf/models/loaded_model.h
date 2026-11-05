@@ -39,6 +39,7 @@ public:
         bool load_mtp = false);
 
     static LoadedModel borrow(const shelf::qwen35::Qwen35Model& model);
+    static LoadedModel borrow(const shelf::qwen35moe::Qwen35MoeModel& model);
 
     [[nodiscard]]
     ModelFamily family() const noexcept {
