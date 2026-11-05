@@ -51,6 +51,7 @@ __global__ __launch_bounds__(kThreadsPerBlock) void gemm_fp8_ptpc_kernel(
     const uint32_t out_features,
     const uint32_t k_padded,
     const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
     const uint32_t output_row_stride) {
     const uint32_t tid = threadIdx.x;
     const uint32_t m_lane = tid & 15u;
@@ -97,7 +98,10 @@ __global__ __launch_bounds__(kThreadsPerBlock) void gemm_fp8_ptpc_kernel(
     for (int j = 0; j < 8; ++j) {
         const uint32_t r = r_base + static_cast<uint32_t>(j);
         if (r >= rows) continue;
-        const float value = acc[j] * weight_scale * activation_scales[r];
+        const float value =
+            acc[j] * weight_scale *
+            activation_scales[static_cast<std::size_t>(r) *
+                              (activation_scale_stride / sizeof(float))];
         const std::size_t out_idx =
             static_cast<std::size_t>(r) * output_row_stride + o_self;
         if (output_dtype ==
@@ -123,6 +127,7 @@ hipError_t launch_gemm_fp8_ptpc(
     uint32_t out_features,
     uint32_t k_padded,
     uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
     hipStream_t stream) {
     if (weight_codes == nullptr || weight_scales == nullptr ||
@@ -130,6 +135,7 @@ hipError_t launch_gemm_fp8_ptpc(
         output == nullptr || rows == 0u || out_features == 0u || k_padded == 0u ||
         (k_padded % kFragBlockK) != 0u ||
         activation_code_stride_bytes < k_padded ||
+        activation_scale_stride_bytes < sizeof(float) ||
         output_row_stride < out_features) {
         return hipErrorInvalidValue;
     }
@@ -138,7 +144,8 @@ hipError_t launch_gemm_fp8_ptpc(
     gemm_fp8_ptpc_kernel<<<grid, kThreadsPerBlock, 0, stream>>>(
         weight_codes, weight_scales, activation_codes, activation_scales, output,
         static_cast<uint32_t>(output_dtype), rows, out_features, k_padded,
-        activation_code_stride_bytes, output_row_stride);
+        activation_code_stride_bytes, activation_scale_stride_bytes,
+        output_row_stride);
     return hipGetLastError();
 }
 

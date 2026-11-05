@@ -24,6 +24,12 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         true, debug_prefix);
     if (!attn_mix.ok()) return attn_mix.status();
 
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "attn_mixed",
+                                  attn_mix.value().mixed);
+        layer.trace->emplace_back(std::string(debug_prefix) + "attn_inject",
+                                  attn_mix.value().injection);
+    }
     RT::ValueId attn_out{0};
     if (layer.is_gdn) {
         attn_out = ::shelf::qwen_hybrid::emit_gdn(
@@ -36,9 +42,16 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         if (!qsa.ok()) return qsa.status();
         attn_out = qsa.value();
     }
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "attn_out", attn_out);
+    }
     auto hyper_after_attn = emit_hyper_connection_apply(
         em, layer.hyper, input_hyper, attn_out, attn_mix.value().injection, debug_prefix);
     if (!hyper_after_attn.ok()) return hyper_after_attn.status();
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "hyper_attn",
+                                  hyper_after_attn.value());
+    }
 
     HyperConnectionSiteGeometry mlp_hyper = layer.hyper;
     if (layer.mlp_hyper_norm_parameter_index != UINT32_MAX)
@@ -48,9 +61,20 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         hyper_after_attn.value(), true, debug_prefix);
     if (!mlp_mix.ok()) return mlp_mix.status();
 
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "mlp_mixed",
+                                  mlp_mix.value().mixed);
+    }
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "mlp_inject",
+                                  mlp_mix.value().injection);
+    }
     auto ffn = emit_qwen4exp_moe(em, layer.moe_geometry, layer.moe_weights,
                                  layer.moe_indices, mlp_mix.value().mixed, debug_prefix);
     if (!ffn.ok()) return ffn.status();
+    if (layer.trace != nullptr) {
+        layer.trace->emplace_back(std::string(debug_prefix) + "moe_out", ffn.value());
+    }
 
     return emit_hyper_connection_apply(em, layer.hyper, hyper_after_attn.value(), ffn.value(),
                                        mlp_mix.value().injection, debug_prefix);

@@ -28,6 +28,7 @@ hipError_t launch_gemm_fp8_ptpc(
     uint32_t out_features,
     uint32_t k_padded,
     uint32_t activation_code_stride_bytes,
+    uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
     hipStream_t stream);
 

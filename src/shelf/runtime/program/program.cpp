@@ -918,7 +918,11 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             const uint32_t rows_cap = c.rows_for(ValueRowDomain::GROUPED_ROWS);
             if (rows_cap == 0) return fail("grouped row capacity is empty");
 
-            const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id);
+            // Group rows are a different activation plane from the token rows of the
+            // same input value; sharing one workspace would make a dense consumer read
+            // group rows. The high bit separates the two forms.
+            const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id) |
+                                        (std::uint64_t{1} << 63);
             const uint32_t cmd_idx = static_cast<uint32_t>(c.plan->dispatches.size());
             const auto* in_spec = c.graph->value_spec(node.inputs[0]);
             const bool gather_rows =

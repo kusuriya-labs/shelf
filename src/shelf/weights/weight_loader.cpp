@@ -80,6 +80,21 @@ Status copy_to_device(void* dst, const void* src, std::size_t bytes, hipStream_t
     return Status::make_ok();
 }
 
+// For a source that lives only for the duration of this call (a preshuffle staging
+// buffer). Pageable H2D hipMemcpyAsync may complete after the caller returns, so the
+// copy has to be ordered before the staging buffer is destroyed.
+Status copy_to_device_blocking(void* dst, const void* src, std::size_t bytes,
+                               hipStream_t stream) {
+    Status st = copy_to_device(dst, src, bytes, stream);
+    if (!st.ok()) return st;
+    const hipError_t e = hipStreamSynchronize(stream);
+    if (e != hipSuccess) {
+        return Status::hip_error("hipStreamSynchronize", hipGetErrorString(e), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Status expect_bytes(const std::string& name, const quantization::bundle::ByteSpan& span, std::size_t expected) {
     if ((expected > 0 && span.data == nullptr) || span.size != expected) {
         return Status::invalid_argument(
@@ -286,7 +301,7 @@ Result<MatrixWeight> load_quantized_view(
             return w;
         }
 
-        static quantization::fp8::Fp8NativeHost native;
+        quantization::fp8::Fp8NativeHost native;
         if (!quantization::fp8::preshuffle_fp8_native(cv, native)) {
             return Status::invalid_argument(
                 ("fp8 block128 payload not supported for arch: " + name).c_str(), __FILE__, __LINE__);
@@ -298,7 +313,8 @@ Result<MatrixWeight> load_quantized_view(
             return Status::insufficient_memory(
                 ("quantized matrix codes allocation failed: " + name).c_str(), __FILE__, __LINE__);
         }
-        st = copy_to_device(w.codes.data<void>(), native.codes.get(), native.codes_bytes, stream);
+        st = copy_to_device_blocking(w.codes.data<void>(), native.codes.get(),
+                                     native.codes_bytes, stream);
         if (!st.ok()) return st;
         std::vector<std::size_t> sshape = {native.scale_n, native.scale_k};
         std::vector<std::size_t> sstrides = {native.scale_k, 1};
@@ -307,8 +323,8 @@ Result<MatrixWeight> load_quantized_view(
             return Status::insufficient_memory(
                 ("quantized matrix scales allocation failed: " + name).c_str(), __FILE__, __LINE__);
         }
-        st = copy_to_device(w.scales.data<void>(), native.scales.get(),
-                            native.scale_count * sizeof(float), stream);
+        st = copy_to_device_blocking(w.scales.data<void>(), native.scales.get(),
+                                     native.scale_count * sizeof(float), stream);
         if (!st.ok()) return st;
         w.storage_scale_stride_bytes = static_cast<uint32_t>(native.scale_k * sizeof(float));
         w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);
@@ -365,8 +381,8 @@ Result<MatrixWeight> load_quantized_view(
                 ("fp8 per-channel codes allocation failed: " + name).c_str(), __FILE__,
                 __LINE__);
         }
-        st = copy_to_device(w.codes.data<void>(), native.codes.get(), native.codes_bytes,
-                            stream);
+        st = copy_to_device_blocking(w.codes.data<void>(), native.codes.get(),
+                                     native.codes_bytes, stream);
         if (!st.ok()) return st;
         std::vector<std::size_t> sshape = {static_cast<std::size_t>(m)};
         std::vector<std::size_t> sstrides = {1u};
@@ -376,8 +392,8 @@ Result<MatrixWeight> load_quantized_view(
                 ("fp8 per-channel scales allocation failed: " + name).c_str(), __FILE__,
                 __LINE__);
         }
-        st = copy_to_device(w.scales.data<void>(), v.metadata1.data, v.metadata1.size,
-                            stream);
+        st = copy_to_device_blocking(w.scales.data<void>(), v.metadata1.data,
+                                     v.metadata1.size, stream);
         if (!st.ok()) return st;
         w.codes_row_stride_bytes =
             static_cast<uint32_t>(native.codes_row_stride_bytes);
@@ -431,7 +447,7 @@ Result<MatrixWeight> load_quantized_view(
         w.weight_scale_group = quantization::kMxfp4ScaleBlockK;
 
         if (options.preshuffle) {
-            static quantization::mxfp4::Mxfp4NativeHost native;
+            quantization::mxfp4::Mxfp4NativeHost native;
             if (!quantization::mxfp4::preshuffle_mxfp4_native(cv, native)) {
                 return Status::invalid_argument(
                     ("mxfp4 native payload not supported for arch: " + name).c_str(),
@@ -446,8 +462,8 @@ Result<MatrixWeight> load_quantized_view(
                     ("mxfp4 native codes allocation failed: " + name).c_str(),
                     __FILE__, __LINE__);
             }
-            st = copy_to_device(w.codes.data<void>(), native.codes.data(),
-                                native.codes.size(), stream);
+            st = copy_to_device_blocking(w.codes.data<void>(), native.codes.data(),
+                                         native.codes.size(), stream);
             if (!st.ok()) return st;
 
             std::vector<std::size_t> sshape = {m, scale_k};
@@ -458,8 +474,8 @@ Result<MatrixWeight> load_quantized_view(
                     ("mxfp4 native scales allocation failed: " + name).c_str(),
                     __FILE__, __LINE__);
             }
-            st = copy_to_device(w.scales.data<void>(), native.scales.data(),
-                                native.scales.size(), stream);
+            st = copy_to_device_blocking(w.scales.data<void>(), native.scales.data(),
+                                         native.scales.size(), stream);
             if (!st.ok()) return st;
 
             std::vector<std::size_t> rshape = {m, 1};
@@ -469,8 +485,8 @@ Result<MatrixWeight> load_quantized_view(
                 return Status::insufficient_memory(
                     ("mxfp4 row reference allocation failed: " + name).c_str(), __FILE__, __LINE__);
             }
-            st = copy_to_device(w.row_ref.data<void>(), native.row_ref.data(),
-                                native.row_ref.size(), stream);
+            st = copy_to_device_blocking(w.row_ref.data<void>(), native.row_ref.data(),
+                                         native.row_ref.size(), stream);
             if (!st.ok()) return st;
 
             w.codes_row_stride_bytes = static_cast<uint32_t>(native.codes_row_stride_bytes);

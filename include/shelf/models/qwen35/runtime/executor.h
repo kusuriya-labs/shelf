@@ -200,6 +200,10 @@ struct Executor {
     uint32_t stochastic_topk_partitions = 0;
     std::size_t stochastic_topk_scratch_bytes = 0;
 
+    std::vector<std::uint32_t> layer_output_layers;
+    std::vector<std::uint32_t> layer_output_value_ids;
+    std::vector<std::string> trace_names;
+    std::vector<std::uint32_t> trace_value_ids;
     std::vector<std::uint32_t> layer_override_value_ids;
     std::vector<std::uint32_t> layer_override_rows;
     std::vector<std::uint32_t> layer_override_hidden;

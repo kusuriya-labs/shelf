@@ -42,6 +42,9 @@ struct Qwen4ExpLayerLowering {
     Qwen4ExpPleLoweringWeights ple_weights;
     Qwen4ExpPleLoweringIndices ple_indices;
     ::shelf::runtime::ValueId ple_embeddings{0};
+
+    // Debug trace names for the intermediate values of this layer.
+    std::vector<std::pair<std::string, ::shelf::runtime::ValueId>>* trace = nullptr;
 };
 
 // One Qwen4Exp decoder layer:

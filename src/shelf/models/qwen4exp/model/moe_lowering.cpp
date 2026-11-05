@@ -84,6 +84,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
 
     const RT::ValueId logits = em.linear(weights.router, indices.w_router, post_norm,
                                          RT::ValueDType::F32);
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_router_logits";
     {
         RT::MoeRouterNode route;
         route.experts = geometry.global_experts;
@@ -121,17 +122,21 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         n.weight_index = indices.w_down_experts;
         n.out_dtype = RT::ValueDType::BF16;
         em.emit(RT::PrimitiveNode{n}, {act}, {expert_out});
+        em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_expert_out";
     }
 
     const RT::ValueId shared_gate =
         em.linear(weights.shared_gate_proj, indices.w_shared_gate_proj, post_norm);
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_gate";
     const RT::ValueId shared_up =
         em.linear(weights.shared_up_proj, indices.w_shared_up_proj, post_norm);
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_up";
     const RT::ValueId shared_act = em.value(geometry.shared_intermediate);
     {
         RT::SwiGluNode n{RT::RowwiseShapeKey{geometry.shared_intermediate}};
         em.emit(RT::PrimitiveNode{n}, {shared_gate, shared_up}, {shared_act});
     }
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_act";
     RT::ValueId shared_out =
         em.linear(weights.shared_down_proj, indices.w_shared_down_proj, shared_act);
     if (geometry.shared_scale != 1.0f) {
@@ -141,6 +146,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
                 {shared_out}, {scaled});
         shared_out = scaled;
     }
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_shared_out";
     const RT::ValueId shared_logit =
         em.linear(weights.shared_gate, indices.w_shared_gate, post_norm,
                   RT::ValueDType::F32);
@@ -159,6 +165,7 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
     }
     // The routed experts are an expert-axis partial sum; the shared expert is already
     // complete on the contributing rank.
+    em.pg.nodes.back().debug_name = std::string(debug_prefix) + "moe_combine";
     em.pg.nodes.back().tp_combine = 1;
     return output;
 }

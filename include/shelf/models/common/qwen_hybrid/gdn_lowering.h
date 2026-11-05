@@ -20,6 +20,9 @@ struct GdnLoweringGeometry {
     RT::ValueDType out_dtype = RT::ValueDType::BF16;
     // Qwen3.5 hardcodes silu on the gate branch; Qwen3.8-Flash-Next declares sigmoid.
     bool sigmoid_gate = false;
+    // True when the out projection is column-split across ranks and its partial sums must
+    // be reduced. A family that replicates the GDN weights clears this.
+    bool tp_combine = true;
 };
 
 struct GdnLoweringWeights {
@@ -155,7 +158,7 @@ inline RT::ValueId emit_gdn(
     const RT::ValueId block_out =
         em.linear(*w.out, idx.w_out, v_gated, geo.out_dtype);
     name_last("gdn_out");
-    pg.nodes.back().tp_combine = 1;
+    if (geo.tp_combine) pg.nodes.back().tp_combine = 1;
     return block_out;
 }
 

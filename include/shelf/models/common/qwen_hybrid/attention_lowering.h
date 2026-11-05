@@ -19,6 +19,9 @@ struct GatedAttentionLoweringGeometry {
     float rope_attention_factor = 1.0f;
     float eps = 1e-6f;
     RT::ValueDType out_dtype = RT::ValueDType::BF16;
+    // True when the o projection is column-split across ranks and its partial sums must be
+    // reduced. A family that replicates the attention weights clears this.
+    bool tp_combine = true;
 };
 
 struct GatedAttentionLoweringWeights {
@@ -150,7 +153,7 @@ inline RT::ValueId emit_gated_attention(
     const RT::ValueId block_out =
         em.linear(*w.o, idx.w_o, v_att, geo.out_dtype);
     name_last("o_proj");
-    pg.nodes.back().tp_combine = 1;
+    if (geo.tp_combine) pg.nodes.back().tp_combine = 1;
     return block_out;
 }
 

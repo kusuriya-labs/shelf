@@ -108,6 +108,17 @@ Status copy_async(void* dst, const void* src, std::size_t bytes, hipStream_t str
     return Status::make_ok();
 }
 
+Status copy_from_staging(void* dst, const void* src, std::size_t bytes, hipStream_t stream,
+                         const char* what) {
+    Status st = copy_async(dst, src, bytes, stream, what);
+    if (!st.ok()) return st;
+    const hipError_t error = hipStreamSynchronize(stream);
+    if (error != hipSuccess) {
+        return Status::hip_error(what, hipGetErrorString(error), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
                                           std::uint32_t tp_size,
                                           std::uint32_t tp_rank) {
@@ -422,9 +433,10 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
                         native.scales.data(), static_cast<std::size_t>(scales_batch), stream,
                         "Qwen4Exp MXFP4 expert scales upload");
         if (!st.ok()) return st;
-        st = copy_async(w.row_ref.data<std::uint8_t>() + static_cast<std::uint64_t>(local) * rows,
-                        native.row_ref.data(), static_cast<std::size_t>(rows), stream,
-                        "Qwen4Exp MXFP4 expert row_ref upload");
+        st = copy_from_staging(
+            w.row_ref.data<std::uint8_t>() + static_cast<std::uint64_t>(local) * rows,
+            native.row_ref.data(), static_cast<std::size_t>(rows), stream,
+            "Qwen4Exp MXFP4 expert row_ref upload");
         if (!st.ok()) return st;
     }
     shelf::weights::apply_default_compute_spec(w);

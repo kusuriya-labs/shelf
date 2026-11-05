@@ -17,6 +17,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -329,6 +330,65 @@ Status build_host_execution_context(
     return Status::make_ok();
 }
 
+// Debug-only layer output dump (SHELF_LAYER_DUMP_DIR). The values are captured by the
+// value trace right after the producing dispatch, because the workspace is reused by later
+// layers and a post-run copy would read a different value.
+struct LayerOutputDump {
+    const std::vector<std::pair<std::string, std::uint32_t>>* entries = nullptr;
+    int rank = 0;
+    std::uint32_t run = 0;
+    std::string dir;
+
+    void on_value(std::uint32_t value_id, const void* device_ptr, std::uint32_t row_stride,
+                  std::uint32_t feature_count, ::shelf::runtime::ValueDType dtype,
+                  std::uint32_t rows, hipStream_t stream) const {
+        if (device_ptr == nullptr ||
+            (dtype != ::shelf::runtime::ValueDType::BF16 &&
+             dtype != ::shelf::runtime::ValueDType::F32) ||
+            rows == 0u || feature_count == 0u || entries == nullptr)
+            return;
+        const std::string* name = nullptr;
+        for (const auto& entry : *entries) {
+            if (entry.second == value_id) {
+                name = &entry.first;
+                break;
+            }
+        }
+        if (name == nullptr) return;
+        if (hipStreamSynchronize(stream) != hipSuccess) return;
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/tp%d_run%u_%s.bin", dir.c_str(), rank, run,
+                      name->c_str());
+        FILE* file = std::fopen(path, "wb");
+        if (file == nullptr) return;
+        const std::size_t element_bytes =
+            dtype == ::shelf::runtime::ValueDType::F32 ? 4u : 2u;
+        std::vector<std::uint8_t> row(static_cast<std::size_t>(feature_count) *
+                                      element_bytes);
+        for (std::uint32_t r = 0; r < rows; ++r) {
+            const void* src = static_cast<const std::uint8_t*>(device_ptr) +
+                              static_cast<std::size_t>(r) * row_stride * element_bytes;
+            if (hipMemcpy(row.data(), src, row.size(), hipMemcpyDeviceToHost) != hipSuccess)
+                break;
+            std::fwrite(row.data(), element_bytes, feature_count, file);
+        }
+        std::fclose(file);
+        std::snprintf(path, sizeof(path), "%s/tp%d_run%u_%s.meta", dir.c_str(), rank,
+                      run, name->c_str());
+        if (FILE* meta = std::fopen(path, "w")) {
+            std::fprintf(meta, "rows %u\nfeatures %u\nstride %u\nelem %zu\nid %u\nptr %p\n",
+                         rows, feature_count, row_stride, element_bytes, value_id,
+                         device_ptr);
+            std::fclose(meta);
+        }
+    }
+};
+
+bool layer_output_dump_enabled() {
+    const char* dir = std::getenv("SHELF_LAYER_DUMP_DIR");
+    return dir != nullptr && dir[0] != '\0';
+}
+
 // One program run starts here, whichever execution path it then takes. The plan scratch of a
 // grouped expert FFN is accumulated into by the router, so the run has to be prepared before
 // the first op: a multi-rank run is not allowed to skip it, and a rank prepares its own scratch
@@ -354,6 +414,38 @@ Status launch_program_run(
 
     const size_t program_index = static_cast<size_t>(
         &program - executor.program_set.programs.data());
+    const bool dump_layers = layer_output_dump_enabled() &&
+                             (!executor.layer_output_value_ids.empty() ||
+                              !executor.trace_value_ids.empty());
+    std::vector<std::pair<std::string, std::uint32_t>> dump_entries;
+    LayerOutputDump dump;
+    ::shelf::execution::ValueTraceSink dump_sink;
+    if (dump_layers) {
+        for (std::size_t i = 0; i < executor.layer_output_value_ids.size(); ++i) {
+            dump_entries.emplace_back("L" + std::to_string(executor.layer_output_layers[i]),
+                                      executor.layer_output_value_ids[i]);
+        }
+        for (std::size_t i = 0; i < executor.trace_value_ids.size(); ++i) {
+            std::string name = executor.trace_names[i];
+            for (char& c : name)
+                if (c == '.' || c == '/') c = '_';
+            dump_entries.emplace_back(std::move(name), executor.trace_value_ids[i]);
+        }
+        static std::atomic<std::uint32_t> dump_run{0};
+        dump.entries = &dump_entries;
+        dump.rank = executor.tp_rank;
+        dump.run = dump_run.fetch_add(1);
+        dump.dir = std::getenv("SHELF_LAYER_DUMP_DIR");
+        dump_sink.on_value = [&dump](std::uint32_t value_id, const void* device_ptr,
+                                     std::uint32_t row_stride, std::uint32_t feature_count,
+                                     ::shelf::runtime::ValueDType dtype, std::uint32_t rows,
+                                     hipStream_t value_stream) {
+            dump.on_value(value_id, device_ptr, row_stride, feature_count, dtype, rows,
+                          value_stream);
+        };
+        ctx.value_trace = &dump_sink;
+    }
+    Status run = Status::make_ok();
     if (!executor.tp_schedules.empty()) {
         if (program_index >= executor.tp_schedules.size() ||
             !executor.tp_schedules[program_index].active() ||
@@ -362,11 +454,14 @@ Status launch_program_run(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
-        return runtime::execute_program_tp_ranges(
+        run = runtime::execute_program_tp_ranges(
             program, ctx, stream, executor.tp_schedules[program_index],
             executor.tp_barrier, executor.tp_rank);
+    } else {
+        run = runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
     }
-    return runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
+    if (dump_layers) ctx.value_trace = nullptr;
+    return run;
 }
 
 template <typename T>
@@ -1187,6 +1282,10 @@ Executor::Executor(Executor&& other) noexcept
       stochastic_topk_active_counts(std::move(other.stochastic_topk_active_counts)),
       stochastic_topk_partitions(other.stochastic_topk_partitions),
       stochastic_topk_scratch_bytes(other.stochastic_topk_scratch_bytes),
+      layer_output_layers(std::move(other.layer_output_layers)),
+      layer_output_value_ids(std::move(other.layer_output_value_ids)),
+      trace_names(std::move(other.trace_names)),
+      trace_value_ids(std::move(other.trace_value_ids)),
       layer_override_value_ids(std::move(other.layer_override_value_ids)),
       layer_override_rows(std::move(other.layer_override_rows)),
       layer_override_hidden(std::move(other.layer_override_hidden)),
@@ -1332,6 +1431,10 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         stochastic_topk_active_counts = std::move(other.stochastic_topk_active_counts);
         stochastic_topk_partitions = other.stochastic_topk_partitions;
         stochastic_topk_scratch_bytes = other.stochastic_topk_scratch_bytes;
+        layer_output_layers = std::move(other.layer_output_layers);
+        layer_output_value_ids = std::move(other.layer_output_value_ids);
+        trace_names = std::move(other.trace_names);
+        trace_value_ids = std::move(other.trace_value_ids);
         layer_override_value_ids = std::move(other.layer_override_value_ids);
         layer_override_rows = std::move(other.layer_override_rows);
         layer_override_hidden = std::move(other.layer_override_hidden);
@@ -2015,6 +2118,14 @@ Result<Executor> create_executor(
                     break;
                 }
             }
+        }
+        for (const auto& lv : lowered.layer_output_values) {
+            ex.layer_output_layers.push_back(lv.first);
+            ex.layer_output_value_ids.push_back(lv.second.id);
+        }
+        for (const auto& lv : lowered.trace_values) {
+            ex.trace_names.push_back(lv.first);
+            ex.trace_value_ids.push_back(lv.second.id);
         }
         std::vector<::shelf::runtime::WeightSlot> weight_slots =
             std::move(lowered.weights);

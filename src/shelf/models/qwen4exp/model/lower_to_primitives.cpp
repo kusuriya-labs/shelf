@@ -291,6 +291,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             layer.gdn_geometry.conv_kernel =
                 static_cast<std::uint32_t>(config.linear_conv_kernel_dim);
             layer.gdn_geometry.sigmoid_gate = true;
+            layer.gdn_geometry.tp_combine = false;
             layer.gdn_geometry.eps = eps;
             layer.gdn_weights.qkv = &lw.attention.in_proj_qkv;
             layer.gdn_weights.z = &lw.attention.in_proj_z;
@@ -312,6 +313,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             layer.qsa_geometry.attention.rope_attention_factor =
                 options.rope_attention_factor;
             layer.qsa_geometry.attention.eps = eps;
+            layer.qsa_geometry.attention.tp_combine = false;
             layer.qsa_geometry.indexer = make_qwen4exp_qsa_indexer_geometry(
                 config, index_blocks, options.max_context_tokens, next_attention_state);
             layer.qsa_geometry.indexer.top_k =
@@ -373,9 +375,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             layer.ple_embeddings = ple_embeddings;
         }
 
+        layer.trace = &lowered.trace_values;
         auto out = emit_qwen4exp_layer(em, layer, hyper, prefix.c_str());
         if (!out.ok()) return out.status();
         hyper = out.value();
+        lowered.layer_output_values.emplace_back(
+            static_cast<std::uint32_t>(li), hyper);
     }
 
     HyperConnectionSiteGeometry mixer_geometry;
@@ -401,6 +406,12 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
     head.lm_weight_index = lm_index;
     head.out_vocab = vocab;
     QH::emit_hybrid_head(em, head, mixed.value().mixed, "head.");
+
+    for (const auto& node : pg.nodes) {
+        if (!node.debug_name.empty() && !node.outputs.empty()) {
+            lowered.trace_values.emplace_back(node.debug_name, node.outputs[0]);
+        }
+    }
 
     Status status = RT::validate_primitive_graph(pg);
     if (!status.ok()) return status;

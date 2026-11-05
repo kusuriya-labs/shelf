@@ -100,9 +100,9 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 2560, 6144, kFamilyBf16 },
     { 12288, 2560, kFamilyBf16 },
     { 512, 2560, kFamilyBf16 },
-    { 640, 2560, kFamilyBf16 },
+    { 640, 2560, kFamilyBf16 | kFamilyMxfp4 },
     { 1, 2560, kFamilyBf16 },
-    { 2560, 640, kFamilyBf16 },
+    { 2560, 640, kFamilyBf16 | kFamilyMxfp4 },
     { 2560, 2560, kFamilyBf16 },
     { 512, 2560, kFamilyBf16 },
 };

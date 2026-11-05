@@ -28,11 +28,21 @@ float e4m3_to_f32(uint8_t x) {
     const int sign = (x & 0x80u) ? -1 : 1;
     const int exp = (x >> 3) & 0x0Fu;
     const int man = x & 0x07u;
-    if (exp == 0x0F) return sign * 448.0f;
+    if (exp == 0x0F) {
+        if (man == 0x07) return std::numeric_limits<float>::quiet_NaN();
+        return sign * 448.0f;
+    }
     const float value = (exp == 0)
         ? (static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, -6)
         : (1.0f + static_cast<float>(man) * 0.125f) * std::ldexp(1.0f, exp - 7);
     return sign * value;
+}
+
+float bf16_bits_to_f32(std::uint16_t bits) {
+    const std::uint32_t wide = static_cast<std::uint32_t>(bits) << 16;
+    float value = 0.0f;
+    std::memcpy(&value, &wide, sizeof(value));
+    return value;
 }
 }  // namespace
 namespace {
@@ -280,7 +290,7 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
                                         __LINE__);
     }
     const std::uint16_t scale_bits = *static_cast<const std::uint16_t*>(scale_data.value());
-    table.fp8_scale_ = shelf::quantization::exl3::f32_from_f16_bits(scale_bits);
+    table.fp8_scale_ = bf16_bits_to_f32(scale_bits);
 
     table.shards_.resize(table.shard_count_);
     for (std::uint32_t id = 0; id < table.shard_count_; ++id) {

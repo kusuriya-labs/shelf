@@ -99,7 +99,7 @@ Result<OptimizedLaunchResult> try_launch_linear_fp8_ptpc(
         workspace + layout.codes_offset,
         reinterpret_cast<const float*>(workspace + layout.scales_offset), out.value().ptr,
         output_dtype, rows, w.rows, w.cols, layout.code_row_stride_bytes,
-        out.value().row_stride, stream);
+        layout.scale_row_stride_bytes, out.value().row_stride, stream);
     if (error != hipSuccess)
         return Status::hip_error("fp8 ptpc gemm launch", hipGetErrorString(error),
                                  __FILE__, __LINE__);

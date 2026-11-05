@@ -17,7 +17,7 @@
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
-| `--tensor-parallel N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
