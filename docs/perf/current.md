@@ -53,25 +53,27 @@ EXL3 経路の現在値である。
 
 | 条件 | 値 |
 | --- | ---: |
-| decode | 13.63 / 13.64 / 13.66 tok/s（73.2〜73.4 µs/token） |
-| prefill 128 | 265.32 / 265.51 / 266.42 tok/s（3.75〜3.77 ms/token） |
-| prefill 512 | 273.28 / 273.57 / 273.65 tok/s（3.65〜3.66 ms/token） |
+| decode | 13.36 / 13.38 / 13.39 tok/s（74.7〜74.9 µs/token） |
+| prefill 128 | 314.10 / 315.25 / 315.56 tok/s（3.17〜3.18 ms/token） |
+| prefill 512 | 331.50 / 332.00 / 332.05 tok/s（3.01〜3.02 ms/token） |
+| prefill 1024 | 325.55 / 326.17 / 326.49 tok/s（3.06〜3.07 ms/token） |
+| prefill 2048 | 329.77 / 330.00 / 330.47 tok/s（3.03〜3.03 ms/token） |
 
-- measurement revision: `11392a6`（prefill の row group 再利用、ring window の 4-word
-  一括ロード、batch-aware split-K、xrot race 修正）
+- measurement revision: `fb9a59c`（入力回転の linear 単位事前計算、prefill の row group
+  再利用、ring window の 4-word 一括ロード、batch-aware split-K、xrot race 修正）
 - GPU: Radeon AI PRO R9700 1 枚（`--device 1`、他プロセスなし）
 - decode command:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
 - prefill command:
-  `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens 128 --runs 3 --warmup 1 --device 1 --arena-gib 28`
-  （512 は `--prompt-tokens 512`）
-- prefill は `grid_x * ceil(rows / 32) >= 128` のとき 2 個の 16-row tile を 1 block で
-  処理し、復号と weight stage を共有する。decode（rows=1）は 1 tile のまま。
-- split-K を無効にした decode（`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。
-  auto split は n=5120 / n=1024 で 8、n=17408 で 3（scratch 上限）を使う。
-  reduce kernel は平均 3.5 µs。
+  `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens <N> --runs 3 --warmup 1 --device 1 --arena-gib 28`
+- 入力回転は `rows >= 4` かつ `rows * k * 2 <= 80 MiB` のとき linear ごとに 1 回だけ
+  計算する。`SHELF_EXL3_PRE=0` で fused 経路（毎 CTA 再計算）に切り替えられる。
+  fused の prefill は 128: 265.5 / 512: 273.6 / 1024: 274.4 / 2048: 274.1 tok/s。
+- decode（rows=1）は fused のまま。split-K を無効にした decode
+  （`SHELF_EXL3_SPLIT=1`）は 9.51 tok/s。auto split は n=5120 / n=1024 で 8、
+  n=17408 で 3（scratch 上限）を使う。reduce kernel は平均 3.5 µs。
 - 生成一致アンカー: `The capital of France is` → ` Paris.`（`11751,13,198`）。
-  E2E decode は 14.50 tok/s、MTP-2 は 15.48 tok/s（`--arena-gib 27`）。
+  E2E decode は 14.04 tok/s、MTP-2 は 15.35 tok/s（`--arena-gib 27`）。
 - 8 warp 化前（`2504163`）の同一 decode 条件は 1.32〜1.34 tok/s。split-K 前の
   9.04〜9.06 tok/s からの内訳と棄却した実験は
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
