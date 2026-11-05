@@ -446,10 +446,7 @@ Result<MatrixWeight> load_quantized_view(
                 ("exl3 matrix shape must be 128-aligned: " + name).c_str(), __FILE__,
                 __LINE__);
         }
-        if (v.codebook != "mcg" && v.codebook != "mul1") {
-            return Status::unsupported(
-                ("exl3 codebook is not supported: " + name).c_str(), __FILE__, __LINE__);
-        }
+
         if (v.data.data != nullptr || v.metadata1.data != nullptr) {
             return Status::invalid_argument(
                 ("exl3 tensor must not carry data or scale: " + name).c_str(), __FILE__,
@@ -481,7 +478,6 @@ Result<MatrixWeight> load_quantized_view(
         w.encoding = MatrixEncoding::Exl3;
         w.exl3_ka = ka;
         w.exl3_half = v.exl3_half;
-        w.exl3_codebook = v.codebook == "mcg" ? 1u : 2u;
 
         const uint64_t codes_row_bytes = nt * words * 2u;
         std::vector<std::size_t> cshape = {static_cast<std::size_t>(kt),

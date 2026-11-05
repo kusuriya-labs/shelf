@@ -42,10 +42,10 @@ static float bf16_to_f32(uint16_t bits) {
     return f;
 }
 
-__global__ void debug_codebook_kernel(uint16_t* out, uint32_t codebook) {
+__global__ void debug_codebook_kernel(uint16_t* out) {
     const uint32_t state = blockIdx.x * blockDim.x + threadIdx.x;
     if (state < 65536u) {
-        out[state] = shelf::kernel::exl3_detail::codebook_f16_bits(state, codebook);
+        out[state] = shelf::kernel::exl3_detail::codebook_f16_bits(state);
     }
 }
 
@@ -73,28 +73,22 @@ __global__ void debug_ring_kernel(const uint32_t* words, uint32_t word_count,
 
 static void test_device_helpers() {
     std::vector<uint16_t> expected(65536);
-    for (uint32_t cb = 0; cb < 3u; ++cb) {
-        const Codebook codebook = static_cast<Codebook>(cb);
-        for (uint32_t s = 0; s < 65536u; ++s) {
-            expected[s] = codebook_f16_bits(static_cast<uint16_t>(s), codebook);
-        }
-        void* d_out = nullptr;
-        check(hipMalloc(&d_out, 65536u * 2u) == hipSuccess, "malloc codebook");
-        debug_codebook_kernel<<<256, 256>>>(static_cast<uint16_t*>(d_out), cb);
-        check(hipDeviceSynchronize() == hipSuccess, "codebook sync");
-        std::vector<uint16_t> got(65536);
-        check(hipMemcpy(got.data(), d_out, 65536u * 2u, hipMemcpyDeviceToHost) == hipSuccess,
-              "codebook copy");
-        uint32_t mismatches = 0;
-        for (uint32_t s = 0; s < 65536u; ++s) {
-            if (got[s] != expected[s]) ++mismatches;
-        }
-        if (mismatches != 0) {
-            std::printf("  codebook %u mismatches=%u\n", cb, mismatches);
-        }
-        check(mismatches == 0, std::string("device codebook ") + std::to_string(cb));
-        check(hipFree(d_out) == hipSuccess, "free codebook");
+    for (uint32_t s = 0; s < 65536u; ++s) {
+        expected[s] = codebook_f16_bits(static_cast<uint16_t>(s));
     }
+    void* d_out = nullptr;
+    check(hipMalloc(&d_out, 65536u * 2u) == hipSuccess, "malloc codebook");
+    debug_codebook_kernel<<<256, 256>>>(static_cast<uint16_t*>(d_out));
+    check(hipDeviceSynchronize() == hipSuccess, "codebook sync");
+    std::vector<uint16_t> got(65536);
+    check(hipMemcpy(got.data(), d_out, 65536u * 2u, hipMemcpyDeviceToHost) == hipSuccess,
+          "codebook copy");
+    uint32_t mismatches = 0;
+    for (uint32_t s = 0; s < 65536u; ++s) {
+        if (got[s] != expected[s]) ++mismatches;
+    }
+    check(mismatches == 0, "device codebook");
+    check(hipFree(d_out) == hipSuccess, "free codebook");
 
     {
         std::vector<float> in(128);
@@ -170,7 +164,6 @@ struct Case {
     uint32_t k;
     uint32_t ka;
     bool half;
-    Codebook codebook;
     const char* tag;
 };
 
@@ -187,16 +180,13 @@ static bool run_case(const Case& c) {
     for (uint16_t& v : svh) v = f16_bits_from_f32(next_float(1.0f));
 
     std::vector<shelf::bf16_t> input(static_cast<std::size_t>(c.rows) * c.k);
-    std::vector<float> input_f(static_cast<std::size_t>(c.rows) * c.k);
     for (std::size_t i = 0; i < input.size(); ++i) {
-        const float v = next_float(2.0f);
-        input_f[i] = v;
-        input[i].data = shelf::f32_to_bf16_rne(v);
+        input[i].data = shelf::f32_to_bf16_rne(next_float(2.0f));
     }
 
     std::vector<float> weight(static_cast<std::size_t>(c.k) * c.n);
     if (!dequant(trellis.data(), suh.data(), svh.data(), c.k, c.n, c.ka, c.half,
-                 c.codebook, weight.data())) {
+                 weight.data())) {
         check(false, std::string(c.tag) + " cpu dequant");
         return false;
     }
@@ -250,7 +240,6 @@ static bool run_case(const Case& c) {
     args.output_dtype = 1u;
     args.ka = c.ka;
     args.half = c.half ? 1u : 0u;
-    args.codebook = static_cast<uint32_t>(c.codebook);
     const hipError_t herr = shelf::kernel::launch_gemm_exl3_w16a16(args, nullptr);
     check(herr == hipSuccess, std::string(c.tag) + " launch " + hipGetErrorString(herr));
     if (herr == hipSuccess) {
@@ -297,11 +286,11 @@ int main() {
 
     test_device_helpers();
 
-    run_case({1, 128, 128, 4, false, Codebook::Mcg, "mcg4_rows1"});
-    run_case({3, 128, 128, 4, false, Codebook::Mcg, "mcg4_rows3"});
-    run_case({16, 256, 256, 3, true, Codebook::Mul1, "mul1_3half_rows16"});
-    run_case({17, 384, 128, 7, false, Codebook::Mul1, "mul1_7_rows17"});
-    run_case({5, 256, 256, 6, false, Codebook::Mcg, "mcg6_rows5"});
+    run_case({1, 128, 128, 4, false, "mul1_4_rows1"});
+    run_case({3, 128, 128, 4, false, "mul1_4_rows3"});
+    run_case({16, 256, 256, 3, true, "mul1_3half_rows16"});
+    run_case({17, 384, 128, 7, false, "mul1_7_rows17"});
+    run_case({5, 256, 256, 6, false, "mul1_6_rows5"});
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

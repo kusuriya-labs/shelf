@@ -121,7 +121,6 @@ Result<QuantizedManifest> parse_quantized_manifest_v3(const std::string& json) {
             return enc_result.status();
         }
         t.encoding = enc_result.release();
-        t.codebook = tj.value("codebook", std::string());
         t.layout = tj.value("layout", std::string());
         if (tj.contains("logical_shape") && tj["logical_shape"].is_array()) {
             for (const auto& d : tj["logical_shape"]) {

@@ -79,7 +79,6 @@ RT::WeightSlot exl3_slot() {
     s.exl3_marker = g_ptr;
     s.exl3_ka = 4u;
     s.exl3_half = 0u;
-    s.exl3_codebook = 2u;
     s.codes_row_stride_bytes = 8u * 64u * 2u;
     return s;
 }

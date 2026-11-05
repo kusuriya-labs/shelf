@@ -36,38 +36,20 @@ static uint32_t crc32_u16(const uint16_t* values, std::size_t count) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-static Codebook parse_codebook(const char* name) {
-    if (std::strcmp(name, "mcg") == 0) return Codebook::Mcg;
-    if (std::strcmp(name, "mul1") == 0) return Codebook::Mul1;
-    if (std::strcmp(name, "3inst") == 0) return Codebook::ThreeInst;
-    return Codebook::Unknown;
-}
-
 static void test_codebook_tables() {
     std::vector<uint16_t> bits(65536);
     for (uint32_t state = 0; state < 65536u; ++state) {
-        bits[state] = codebook_f16_bits(static_cast<uint16_t>(state), Codebook::ThreeInst);
-    }
-    check(crc32_u16(bits.data(), bits.size()) == testdata::kCodebook3instCrc,
-          "3inst codebook table");
-    for (uint32_t state = 0; state < 65536u; ++state) {
-        bits[state] = codebook_f16_bits(static_cast<uint16_t>(state), Codebook::Mcg);
-    }
-    check(crc32_u16(bits.data(), bits.size()) == testdata::kCodebookMcgCrc,
-          "mcg codebook table");
-    for (uint32_t state = 0; state < 65536u; ++state) {
-        bits[state] = codebook_f16_bits(static_cast<uint16_t>(state), Codebook::Mul1);
+        bits[state] = codebook_f16_bits(static_cast<uint16_t>(state));
     }
     check(crc32_u16(bits.data(), bits.size()) == testdata::kCodebookMul1Crc,
           "mul1 codebook table");
 }
 
 static void test_golden_tiles(const testdata::GoldenTile& golden, const std::string& tag) {
-    const Codebook codebook = parse_codebook(golden.codebook);
-    check(layout_valid(golden.ka, golden.half, codebook), tag + " layout");
+    check(layout_valid(golden.ka, golden.half), tag + " layout");
     check(words_per_tile(golden.ka, golden.half) == golden.word_count, tag + " word count");
     float tile[kTileWeights];
-    check(decode_tile(golden.words, golden.ka, golden.half, codebook, tile), tag + " decode");
+    check(decode_tile(golden.words, golden.ka, golden.half, tile), tag + " decode");
     std::vector<uint16_t> bits(kTileWeights);
     for (uint32_t i = 0; i < kTileWeights; ++i) bits[i] = f16_bits_from_f32(tile[i]);
     check(crc32_u16(bits.data(), bits.size()) == golden.tile_crc, tag + " tile crc");
@@ -101,7 +83,7 @@ static void test_dequant() {
     constexpr uint32_t n = 128;
     std::vector<float> out(static_cast<std::size_t>(k) * n);
     check(dequant(testdata::kDequantTrellis, testdata::kDequantSuh, testdata::kDequantSvh, k, n,
-                  4, false, Codebook::Mcg, out.data()),
+                  4, false, out.data()),
           "dequant decode");
     for (uint32_t i = 0; i < 8; ++i) {
         const uint32_t r = testdata::kDequantCoords[i][0];

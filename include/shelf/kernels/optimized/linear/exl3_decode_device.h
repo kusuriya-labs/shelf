@@ -29,22 +29,14 @@ __device__ __forceinline__ void tile_coords(uint32_t position, uint32_t* row, ui
     *col = (lane >> 2) + ((j & 4u) ? 8u : 0u);
 }
 
-__device__ __forceinline__ uint16_t codebook_f16_bits(uint32_t state, uint32_t codebook) {
-    if (codebook == 2u) {
-        const uint32_t x = state * 0x83DCD12Du;
-        const int sum = static_cast<int>(x & 0xFFu) + static_cast<int>((x >> 8) & 0xFFu) +
-                        static_cast<int>((x >> 16) & 0xFFu) + static_cast<int>(x >> 24);
-        const __half h = __ushort_as_half(static_cast<unsigned short>(0x6400u + sum));
-        const __half k_inv = __ushort_as_half(0x1EEEu);
-        const __half k_bias = __ushort_as_half(0xC931u);
-        return __half_as_ushort(__hfma(h, k_inv, k_bias));
-    }
-    uint32_t x = state * (codebook == 1u ? 0xCBAC1FEDu : 89226354u);
-    if (codebook == 0u) x += 64248484u;
-    x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
-    const __half lo = __ushort_as_half(static_cast<unsigned short>(x & 0xFFFFu));
-    const __half hi = __ushort_as_half(static_cast<unsigned short>(x >> 16));
-    return __half_as_ushort(__hadd(lo, hi));
+__device__ __forceinline__ uint16_t codebook_f16_bits(uint32_t state) {
+    const uint32_t x = state * 0x83DCD12Du;
+    const int sum = static_cast<int>(x & 0xFFu) + static_cast<int>((x >> 8) & 0xFFu) +
+                    static_cast<int>((x >> 16) & 0xFFu) + static_cast<int>(x >> 24);
+    const __half h = __ushort_as_half(static_cast<unsigned short>(0x6400u + sum));
+    const __half k_inv = __ushort_as_half(0x1EEEu);
+    const __half k_bias = __ushort_as_half(0xC931u);
+    return __half_as_ushort(__hfma(h, k_inv, k_bias));
 }
 
 __device__ __forceinline__ void fwht128(float& v0, float& v1, float& v2, float& v3,

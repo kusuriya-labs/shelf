@@ -38,7 +38,6 @@ struct WeightSlot {
     const void* exl3_marker = nullptr;
     uint32_t exl3_ka = 0;
     uint8_t exl3_half = 0;
-    uint8_t exl3_codebook = 0;
     uint32_t codes_row_stride_bytes = 0;
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;

@@ -556,7 +556,6 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     args.output_dtype = out_bf16 ? 0u : 1u;
     args.ka = e.exl3_ka;
     args.half = e.exl3_half ? 1u : 0u;
-    args.codebook = e.exl3_codebook;
     const hipError_t herr = ::shelf::kernel::launch_gemm_exl3_w16a16(args, stream);
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};

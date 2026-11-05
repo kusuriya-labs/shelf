@@ -547,16 +547,13 @@ static bool build_exl3_dir(const fs::path& dir) {
     const std::string shard = "model.safetensors";
     const std::string p0 = "layers.0.mlp.down_proj";
     const std::string p1 = "layers.1.mlp.down_proj";
-    const std::string p2 = "layers.2.mlp.down_proj";
 
     const std::vector<uint8_t> trellis0 = pattern_bytes(8u * 8u * 64u * 2u, 41u);
     const std::vector<uint8_t> trellis1 = pattern_bytes(8u * 8u * 56u * 2u, 43u);
-    const std::vector<uint8_t> trellis2 = pattern_bytes(8u * 8u * 64u * 2u, 47u);
     const std::vector<uint8_t> suh = pattern_bytes(128u * 2u, 53u);
     const std::vector<uint8_t> svh = pattern_bytes(128u * 2u, 59u);
     const std::vector<uint8_t> f16_matrix = pattern_bytes(128u * 128u * 2u, 61u);
     const std::vector<uint8_t> mul1_marker = {0x2Du, 0xD1u, 0xDCu, 0x83u};
-    const std::vector<uint8_t> mcg_marker = {0xEDu, 0x1Fu, 0xACu, 0xCBu};
 
     std::vector<Planned> tensors;
     tensors.push_back({p0 + ".trellis", io::SType::I16, {8, 8, 64}, trellis0});
@@ -567,10 +564,6 @@ static bool build_exl3_dir(const fs::path& dir) {
     tensors.push_back({p1 + ".suh", io::SType::F16, {128}, suh});
     tensors.push_back({p1 + ".svh", io::SType::F16, {128}, svh});
     tensors.push_back({p1 + ".mul1", io::SType::I32, {}, mul1_marker});
-    tensors.push_back({p2 + ".trellis", io::SType::I16, {8, 8, 64}, trellis2});
-    tensors.push_back({p2 + ".suh", io::SType::F16, {128}, suh});
-    tensors.push_back({p2 + ".svh", io::SType::F16, {128}, svh});
-    tensors.push_back({p2 + ".mcg", io::SType::I32, {}, mcg_marker});
     tensors.push_back(
         {"layers.0.linear_attn.in_proj_a.weight", io::SType::F16, {128, 128}, f16_matrix});
 
@@ -593,8 +586,7 @@ static void test_exl3_manifest() {
 
     const std::vector<std::string> names = {
         "layers.0.mlp.down_proj.weight", "layers.1.mlp.down_proj.weight",
-        "layers.2.mlp.down_proj.weight", "layers.0.linear_attn.in_proj_a.weight",
-        "layers.9.missing.weight"};
+        "layers.0.linear_attn.in_proj_a.weight", "layers.9.missing.weight"};
     auto source_result =
         quantization::bundle::synthesize_hf_quantized_source(dir.string(), names, true);
     if (!source_result.ok()) {
@@ -603,13 +595,12 @@ static void test_exl3_manifest() {
     }
     quantization::bundle::HfQuantizedSource source = source_result.release();
     const auto& manifest = source.manifest;
-    check_eq_u64(manifest.tensors.size(), 4, "exl3 manifest tensor count");
+    check_eq_u64(manifest.tensors.size(), 3, "exl3 manifest tensor count");
     check(quantization::manifest::validate_quantized_manifest_contract(manifest).ok(),
           "exl3 manifest contract");
 
     const auto& t0 = manifest.tensors.at("layers.0.mlp.down_proj.weight");
     check(t0.encoding == quantization::manifest::QuantizedEncoding::Exl3, "exl3 encoding");
-    check(t0.codebook == "mul1", "exl3 mul1 codebook");
     check(t0.logical_shape == std::vector<int64_t>({128, 128}), "exl3 logical shape");
     check_eq_u64(t0.k_padded, 128, "exl3 k_padded");
     check_eq_u64(t0.exl3_ka, 4, "exl3 integer bit rate");
@@ -622,8 +613,6 @@ static void test_exl3_manifest() {
     const auto& t1 = manifest.tensors.at("layers.1.mlp.down_proj.weight");
     check_eq_u64(t1.exl3_ka, 3, "exl3 half bit rate integer part");
     check(t1.exl3_half, "exl3 half bit rate flag");
-    const auto& t2 = manifest.tensors.at("layers.2.mlp.down_proj.weight");
-    check(t2.codebook == "mcg", "exl3 mcg codebook");
 
     auto reader_result =
         quantization::bundle::QuantizedModelReader::open_hf_source(std::move(source), true);
@@ -641,7 +630,6 @@ static void test_exl3_manifest() {
     check_eq_u64(view.value().suh.size, 256u, "exl3 suh bytes");
     check_eq_u64(view.value().svh.size, 256u, "exl3 svh bytes");
     check_eq_u64(view.value().marker.size, 4u, "exl3 marker bytes");
-    check(view.value().codebook == "mul1", "exl3 resolved codebook");
     const auto view1 = reader.resolve("layers.1.mlp.down_proj.weight");
     check(view1.ok() && view1.value().exl3_half && view1.value().exl3_ka == 3,
           "exl3 resolved half rate");
@@ -665,6 +653,31 @@ static void test_exl3_manifest() {
     }
 }
 
+static void test_exl3_mcg_rejected() {
+    const fs::path dir = make_case_dir("exl3_mcg");
+    const std::vector<uint8_t> trellis = pattern_bytes(8u * 8u * 64u * 2u, 67u);
+    const std::vector<uint8_t> suh = pattern_bytes(128u * 2u, 69u);
+    const std::vector<uint8_t> svh = pattern_bytes(128u * 2u, 71u);
+    const std::vector<uint8_t> mcg = {0xEDu, 0x1Fu, 0xACu, 0xCBu};
+    std::vector<Planned> tensors = {
+        {"layer.trellis", io::SType::I16, {8, 8, 64}, trellis},
+        {"layer.suh", io::SType::F16, {128}, suh},
+        {"layer.svh", io::SType::F16, {128}, svh},
+        {"layer.mcg", io::SType::I32, {}, mcg}};
+    if (!write_shard((dir / "model.safetensors").string(), tensors)) return;
+    std::vector<std::pair<std::string, std::string>> map;
+    for (const Planned& t : tensors) map.push_back({t.name, "model.safetensors"});
+    write_index(dir.string(), map);
+    write_text((dir / "config.json").string(), exl3_config_json());
+
+    auto source = quantization::bundle::synthesize_hf_quantized_source(
+        dir.string(), {"layer.weight"}, false);
+    check(!source.ok() && source.status().code() == Status::Code::unsupported,
+          "exl3 mcg checkpoint rejected");
+    check(!source.ok() && source.status().message().find("mcg") != std::string::npos,
+          "exl3 mcg rejection names the codebook");
+}
+
 int main() {
     std::error_code ec;
     g_root = fs::temp_directory_path(ec) /
@@ -676,6 +689,7 @@ int main() {
     test_mxfp4_manifest();
     test_mxfp4_rejections();
     test_exl3_manifest();
+    test_exl3_mcg_rejected();
     test_unsupported_configs();
 
     fs::remove_all(g_root, ec);

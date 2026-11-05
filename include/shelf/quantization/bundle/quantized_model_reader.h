@@ -22,7 +22,6 @@ struct ByteSpan {
 struct QuantizedTensorView {
     std::string name;
     QuantizedEncoding encoding = QuantizedEncoding::Bf16;
-    std::string codebook;
     std::vector<int64_t> logical_shape;
     int64_t k_padded = 0;
     uint32_t scale_block_n = 0;

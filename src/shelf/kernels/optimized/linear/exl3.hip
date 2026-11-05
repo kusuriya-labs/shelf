@@ -47,7 +47,7 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
         const uint32_t position = lane * 8u + j;
         const uint16_t state = exl3_detail::state_from_ring(
             ring, word_count, position, args.ka, args.half);
-        const uint16_t bits = exl3_detail::codebook_f16_bits(state, args.codebook);
+        const uint16_t bits = exl3_detail::codebook_f16_bits(state);
         uint32_t row = 0;
         uint32_t col = 0;
         exl3_detail::tile_coords(position, &row, &col);
@@ -186,9 +186,6 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
         return hipErrorInvalidValue;
     }
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
-        return hipErrorInvalidValue;
-    }
-    if (args.codebook != 0u && args.codebook != 1u && args.codebook != 2u) {
         return hipErrorInvalidValue;
     }
     const uint32_t grid_x = args.out_features / kOutBlock;

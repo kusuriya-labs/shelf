@@ -33,7 +33,6 @@ struct MatrixWeight {
     gpu::Tensor exl3_marker;
     uint32_t exl3_ka = 0;
     bool exl3_half = false;
-    uint8_t exl3_codebook = 0;
     // Rank-3 expert groups. experts == 1 is the 2D path. When experts > 1, rows /
     // cols / k_padded and the row strides describe ONE expert, and the batch strides
     // separate experts inside the single arena allocation. row_ref is then a batched

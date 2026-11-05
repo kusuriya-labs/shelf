@@ -4,11 +4,9 @@
 
 namespace shelf::quantization::exl3::testdata {
 
-constexpr uint32_t kCodebook3instCrc = 0x4c83d524u;
-constexpr uint32_t kCodebookMcgCrc = 0xd2d13c52u;
 constexpr uint32_t kCodebookMul1Crc = 0x2bdf05c5u;
 
-struct GoldenTile { uint32_t ka; bool half; const char* codebook; const uint16_t* words; uint32_t word_count; uint32_t tile_crc; };
+struct GoldenTile { uint32_t ka; bool half; const uint16_t* words; uint32_t word_count; uint32_t tile_crc; };
 
 constexpr uint16_t kTileWords0[] = {
     0xc19d, 0xb2ff, 0xb18d, 0x3a32, 0xc4de, 0xc9e4, 0x1315, 0x5117, 0xefd9, 0x3444, 0x2482, 0xcc20,
@@ -16,7 +14,7 @@ constexpr uint16_t kTileWords0[] = {
     0xe59d, 0x9147, 0xc331, 0x992a, 0x8a5f, 0x3690, 0xcfc4, 0x2fcd,
 };
 
-constexpr GoldenTile kGoldenTile0 = {2, false, "mcg", kTileWords0, 32, 0xf2dff71du};
+constexpr GoldenTile kGoldenTile0 = {2, false, kTileWords0, 32, 0xbb9cac89u};
 
 constexpr uint16_t kTileWords1[] = {
     0x9e2d, 0x3aa8, 0xbd77, 0xac39, 0xabff, 0x9d0c, 0xfe19, 0xf119, 0xa8df, 0xb4c6, 0x07f9, 0x3f8d,
@@ -25,7 +23,7 @@ constexpr uint16_t kTileWords1[] = {
     0xfdc3, 0x366b, 0xb9c2, 0x5393, 0x0012, 0x1db1, 0xb753, 0xbbe2, 0x0eaa, 0xc637, 0xc3b2, 0x385a,
 };
 
-constexpr GoldenTile kGoldenTile1 = {3, false, "mul1", kTileWords1, 48, 0x1dd5667cu};
+constexpr GoldenTile kGoldenTile1 = {3, false, kTileWords1, 48, 0x1dd5667cu};
 
 constexpr uint16_t kTileWords2[] = {
     0x08c0, 0xb709, 0x61b7, 0x14e3, 0x5b3d, 0x643f, 0xeb09, 0x28ee, 0x7e56, 0xbe77, 0xce43, 0x5710,
@@ -36,7 +34,7 @@ constexpr uint16_t kTileWords2[] = {
     0x6c55, 0xb3d8, 0x1508, 0xede9,
 };
 
-constexpr GoldenTile kGoldenTile2 = {4, false, "mcg", kTileWords2, 64, 0xc8b05f0fu};
+constexpr GoldenTile kGoldenTile2 = {4, false, kTileWords2, 64, 0xbcbdaf2fu};
 
 constexpr uint16_t kTileWords3[] = {
     0x7cc1, 0x8a9d, 0xd8a6, 0x8bd2, 0x4d5f, 0x4046, 0x55c4, 0xf00b, 0xab5a, 0x8d8e, 0x8796, 0x7eb7,
@@ -48,7 +46,7 @@ constexpr uint16_t kTileWords3[] = {
     0x266f, 0x63ec, 0x65b8, 0x4dec, 0xbd7c, 0xf35e, 0xf541, 0x70dd,
 };
 
-constexpr GoldenTile kGoldenTile3 = {5, false, "mul1", kTileWords3, 80, 0xdeea0b3eu};
+constexpr GoldenTile kGoldenTile3 = {5, false, kTileWords3, 80, 0xdeea0b3eu};
 
 constexpr uint16_t kTileWords4[] = {
     0xbe79, 0xa59d, 0xa91e, 0x2673, 0x97cd, 0xce70, 0x2f9b, 0x37ca, 0x5803, 0xc472, 0xe521, 0x796d,
@@ -61,7 +59,7 @@ constexpr uint16_t kTileWords4[] = {
     0xed07, 0x5826, 0x076e, 0x15e8, 0x0b24, 0x6ddd, 0xf721, 0x9e38, 0x7c5e, 0xc586, 0xc1ac, 0x8976,
 };
 
-constexpr GoldenTile kGoldenTile4 = {6, false, "mcg", kTileWords4, 96, 0xe7c7fb11u};
+constexpr GoldenTile kGoldenTile4 = {6, false, kTileWords4, 96, 0x85df7223u};
 
 constexpr uint16_t kTileWords5[] = {
     0xe3f7, 0x1ba8, 0x57b1, 0xa270, 0xeba2, 0x1941, 0xc816, 0x2ca3, 0xcba8, 0xf644, 0xb53f, 0x3f87,
@@ -76,7 +74,7 @@ constexpr uint16_t kTileWords5[] = {
     0x844b, 0x0f93, 0x2df0, 0x555c,
 };
 
-constexpr GoldenTile kGoldenTile5 = {7, false, "mul1", kTileWords5, 112, 0xc1a00c82u};
+constexpr GoldenTile kGoldenTile5 = {7, false, kTileWords5, 112, 0xc1a00c82u};
 
 constexpr uint16_t kTileWords6[] = {
     0xc21b, 0x29e8, 0x7298, 0x4860, 0x5195, 0x20b0, 0x07d7, 0x4826, 0x32f0, 0x59e5, 0x8c61, 0x15db,
@@ -92,14 +90,14 @@ constexpr uint16_t kTileWords6[] = {
     0x3a67, 0x2b6d, 0x89fb, 0xfa3f, 0x8e28, 0x6e93, 0xb159, 0xdde0,
 };
 
-constexpr GoldenTile kGoldenTile6 = {8, false, "mcg", kTileWords6, 128, 0x388717deu};
+constexpr GoldenTile kGoldenTile6 = {8, false, kTileWords6, 128, 0x7b56e9cdu};
 
 constexpr uint16_t kTileWords7[] = {
     0x47c8, 0xfce2, 0xbc1e, 0x0bcd, 0x6a59, 0xf6f4, 0xa7a4, 0x4a52, 0xe3f9, 0xefa6, 0xa9b8, 0xdcc5,
     0x8921, 0x13d8, 0x29e5, 0x99d1, 0xf091, 0x14c8, 0x4a21, 0x5821, 0xe0a2, 0xe1c0, 0xf870, 0x0e3b,
 };
 
-constexpr GoldenTile kGoldenTile7 = {1, true, "mul1", kTileWords7, 24, 0xe48e38adu};
+constexpr GoldenTile kGoldenTile7 = {1, true, kTileWords7, 24, 0xe48e38adu};
 
 constexpr uint16_t kTileWords8[] = {
     0x0898, 0x95d7, 0x9f90, 0xc34b, 0xe5e1, 0xab36, 0x8907, 0x0063, 0xb7b3, 0xad4e, 0x981c, 0x17c4,
@@ -108,7 +106,7 @@ constexpr uint16_t kTileWords8[] = {
     0xd4dc, 0x9078, 0x5160, 0x6d03,
 };
 
-constexpr GoldenTile kGoldenTile8 = {2, true, "mul1", kTileWords8, 40, 0xe5854209u};
+constexpr GoldenTile kGoldenTile8 = {2, true, kTileWords8, 40, 0xe5854209u};
 
 constexpr uint16_t kTileWords9[] = {
     0x53f5, 0xb307, 0x4ec1, 0x29bc, 0x518c, 0x726d, 0xf3d7, 0x2a76, 0x9c15, 0x6a92, 0x2122, 0x4216,
@@ -118,7 +116,7 @@ constexpr uint16_t kTileWords9[] = {
     0x5535, 0x9cfd, 0x0e73, 0xb5a4, 0x5181, 0xe24c, 0x30b7, 0xeef5,
 };
 
-constexpr GoldenTile kGoldenTile9 = {3, true, "mul1", kTileWords9, 56, 0xf6cdb69cu};
+constexpr GoldenTile kGoldenTile9 = {3, true, kTileWords9, 56, 0xf6cdb69cu};
 
 constexpr uint16_t kDequantTrellis[] = {
     0x8662, 0x0e41, 0x28d1, 0xfae1, 0x07ba, 0x95e0, 0xc9f2, 0x80e3, 0x5b66, 0xd565, 0x1340, 0xc1f0,
@@ -494,6 +492,6 @@ constexpr uint16_t kDequantSvh[] = {
 };
 
 constexpr uint32_t kDequantCoords[][2] = {{0, 0}, {1, 17}, {63, 64}, {127, 127}, {5, 100}, {100, 5}, {64, 64}, {31, 96}};
-constexpr float kDequantSamples[] = {-0.270011387f, -0.176363307f, -0.976424205f, 0.700219198f, -0.0233040744f, -1.58798815f, 0.00740488704f, -0.614786044f};
+constexpr float kDequantSamples[] = {-0.0827699381f, -0.734453098f, -0.340078327f, -0.511411658f, -0.207639418f, 2.17547328f, -0.00785718625f, 0.267922704f};
 
 }

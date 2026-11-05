@@ -140,12 +140,6 @@ Status validate_host_weight_slot(const ::shelf::runtime::WeightSlot& s, size_t i
                     .c_str(),
                 __FILE__, __LINE__);
         }
-        if (s.exl3_codebook != 1u && s.exl3_codebook != 2u) {
-            return Status::invalid_argument(
-                ("exl3 weight table slot codebook invalid: index " + std::to_string(index))
-                    .c_str(),
-                __FILE__, __LINE__);
-        }
         if (s.k_padded != s.cols || (s.cols & 127u) != 0u || (s.rows & 127u) != 0u) {
             return Status::invalid_argument(
                 ("exl3 weight table slot shape must be 128-aligned: index " +

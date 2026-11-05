@@ -1354,7 +1354,6 @@ static void test_hf_exl3_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
     check_eq_u64(m.k_padded, k, "exl3 matrix k_padded");
     check_eq_u64(m.exl3_ka, 4, "exl3 matrix bit rate");
     check(!m.exl3_half, "exl3 matrix integer rate");
-    check_eq_u64(m.exl3_codebook, 2, "exl3 matrix mul1 codebook");
     check(!m.preshuffled, "exl3 matrix is not preshuffled");
     check_eq_u64(m.codes_row_stride_bytes, 8u * words * 2u, "exl3 trellis row stride");
     check(m.codes.ndim() == 3, "exl3 trellis tensor is rank 3");
@@ -1375,7 +1374,6 @@ static void test_hf_exl3_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
               slot.exl3_marker == m.exl3_marker.data<void>(),
           "exl3 weight slot carries the four payload planes");
     check_eq_u64(slot.exl3_ka, 4, "exl3 weight slot bit rate");
-    check_eq_u64(slot.exl3_codebook, 2, "exl3 weight slot codebook");
 }
 
 int main() {

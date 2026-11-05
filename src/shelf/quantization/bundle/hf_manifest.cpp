@@ -422,7 +422,6 @@ Status synthesize_exl3_tensor(
     const std::string suh_name = prefix + ".suh";
     const std::string svh_name = prefix + ".svh";
     const std::string mul1_name = prefix + ".mul1";
-    const std::string mcg_name = prefix + ".mcg";
 
     LoadedHfTensor trellis;
     Status st = load_hf_tensor(shards, trellis_name, trellis);
@@ -481,32 +480,27 @@ Status synthesize_exl3_tensor(
             ("hf exl3 svh shape or dtype mismatch: " + svh_name).c_str(), __FILE__, __LINE__);
     }
 
-    std::string marker_name;
-    std::string codebook;
-    if (shards.shard_for_tensor.count(mul1_name) != 0u) {
-        marker_name = mul1_name;
-        codebook = "mul1";
-    } else if (shards.shard_for_tensor.count(mcg_name) != 0u) {
-        marker_name = mcg_name;
-        codebook = "mcg";
-    } else {
+    if (shards.shard_for_tensor.count(mul1_name) == 0u) {
+        if (shards.shard_for_tensor.count(prefix + ".mcg") != 0u) {
+            return Status::unsupported(
+                ("hf exl3 mcg codebook is not supported: " + canonical).c_str(), __FILE__,
+                __LINE__);
+        }
         return Status::unsupported(
-            ("hf exl3 tensor has no mul1/mcg marker: " + canonical).c_str(), __FILE__,
-            __LINE__);
+            ("hf exl3 tensor has no mul1 marker: " + canonical).c_str(), __FILE__, __LINE__);
     }
     LoadedHfTensor marker;
-    st = load_hf_tensor(shards, marker_name, marker);
+    st = load_hf_tensor(shards, mul1_name, marker);
     if (!st.ok()) return st;
     if (marker.spec.dtype != shelf::io::SType::I32 || !marker.spec.shape.empty() ||
         marker.bytes != 4u) {
         return Status::unsupported(
-            ("hf exl3 marker must be an I32 scalar: " + marker_name).c_str(), __FILE__,
+            ("hf exl3 marker must be an I32 scalar: " + mul1_name).c_str(), __FILE__,
             __LINE__);
     }
 
     out.role = "weight";
     out.encoding = QuantizedEncoding::Exl3;
-    out.codebook = codebook;
     out.layout = shelf::quantization::manifest::kExl3LayoutName;
     out.logical_shape = {static_cast<int64_t>(n), static_cast<int64_t>(k)};
     out.k_padded = k;
@@ -516,12 +510,12 @@ Status synthesize_exl3_tensor(
         make_ref(trellis_name, "U8", trellis.data, trellis.bytes, with_crc);
     out.suh = make_ref(suh_name, "FP16", suh.data, suh.bytes, with_crc);
     out.svh = make_ref(svh_name, "FP16", svh.data, svh.bytes, with_crc);
-    out.marker = make_ref(marker_name, "I32", marker.data, marker.bytes, with_crc);
+    out.marker = make_ref(mul1_name, "I32", marker.data, marker.bytes, with_crc);
 
     source.shard_for_physical[trellis_name] = shards.shard_for_tensor.at(trellis_name);
     source.shard_for_physical[suh_name] = shards.shard_for_tensor.at(suh_name);
     source.shard_for_physical[svh_name] = shards.shard_for_tensor.at(svh_name);
-    source.shard_for_physical[marker_name] = shards.shard_for_tensor.at(marker_name);
+    source.shard_for_physical[mul1_name] = shards.shard_for_tensor.at(mul1_name);
     return Status::make_ok();
 }
 

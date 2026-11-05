@@ -19,7 +19,7 @@ self-contained quantized safetensors を直接ロードする。
   numeric valueはin-memory専用で、file / manifestには保存しない。
   on-diskのencodingは `shelf_quantization.json` の文字列名で管理する。
 - 対応 encoding: BF16 / FP8 K128N128 / MXFP4 E2M1 + E8M0 group 32 /
-  EXL3 trellis（`mul1` / `mcg`）。
+  EXL3 trellis（mul1）。
   `manifest/quantized_manifest.h` の `QuantizedEncoding` が唯一の on-disk encoding enum である。
   各formatの canonical stream、metadata、preshuffle は
   [canonical_soa_payload.md](canonical_soa_payload.md) を参照。
@@ -96,8 +96,8 @@ real-quantized safetensors を manifest 非依存で直接ロードできる。
   `export.weight_format == "real_quantized"`。
   これ以外（group ≠ 32、`scale_format` が e8m0 以外、fake quant export）は
   `Status::unsupported` で拒否する。
-- `quant_method == "exl3"` — `<prefix>.trellis` を持つ linear を EXL3 として読む。
-  コードブックは `<prefix>.mul1` / `.mcg` の存在で決まり、どちらも無い tensor は拒否する。
+- `quant_method == "exl3"` — `<prefix>.trellis` と `<prefix>.mul1` を持つ linear を
+  EXL3 として読む。mul1 以外（`.mcg` など）は `Status::unsupported` で拒否する。
 
 合成は `quantization/bundle/hf_manifest.{h,cpp}` が行う。HF の tensor naming
 （codes = `<name>.weight`、FP8 scales = `<name>.weight_scale_inv`（BF16）、
@@ -266,14 +266,14 @@ production の Program Builder は linear の activation 量子化方針を
 ### EXL3 W16A16
 
 EXL3 は HF checkpoint の `quantization_config.quant_method == "exl3"` を検出し、
-`<prefix>.trellis` / `.suh` / `.svh` / `.mul1` または `.mcg` から 1 つの
+`<prefix>.trellis` / `.suh` / `.svh` / `.mul1` から 1 つの
 `MatrixWeight`（`MatrixEncoding::Exl3`）を作る。shelf 側で EXL3 artifact を生成する
 経路は持たない。
 
-- trellis は `<k/16, n/16, 16*ka + (half ? 8 : 0)>` の I16。`ka` は 1..8、`half` は
-  mul1 の 1.5 / 2.5 / 3.5 のみ。
-- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。コードブックは
-  marker 名で決まり、値は kernel では使わない。
+- コードブックは mul1 のみ。trellis は `<k/16, n/16, 16*ka + (half ? 8 : 0)>` の I16。
+  `ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
+- `suh` は `[k]`、`svh` は `[n]` の F16、marker は I32 scalar。marker の値は kernel では
+  使わない。
 - `k` と `n` は 128 の倍数、`k_padded == k`。trellis の語数から `ka` / `half` を
   復元し、`suh` / `svh` の長さと照合する。
 - `LINEAR_EXL3_W16A16` は trellis を kernel 内で復号し、F16 の重み・活性で

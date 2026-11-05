@@ -41,7 +41,6 @@ struct QuantizedTensorRef {
 struct QuantizedTensorMetadata {
     std::string role;
     QuantizedEncoding encoding = QuantizedEncoding::Bf16;
-    std::string codebook;
     std::string layout;
     std::vector<int64_t> logical_shape;
     uint64_t k_padded = 0;

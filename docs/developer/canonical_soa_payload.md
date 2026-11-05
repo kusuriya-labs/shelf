@@ -269,13 +269,13 @@ Shelf は EXL3 の canonical artifact を生成しない。HF checkpoint の 4 t
 | `codes` | `<prefix>.trellis` | I16 | `[k/16, n/16, 16*ka + (half ? 8 : 0)]` |
 | `suh` | `<prefix>.suh` | F16 | `[k]` |
 | `svh` | `<prefix>.svh` | F16 | `[n]` |
-| `marker` | `<prefix>.mul1` / `<prefix>.mcg` | I32 | scalar |
+| `marker` | `<prefix>.mul1` | I32 | scalar |
 
-- `ka` は 1..8、`half` は mul1 の 1.5 / 2.5 / 3.5 のみ。
+- コードブックは mul1 固定。`ka` は 1..8、`half` は 1.5 / 2.5 / 3.5。
 - `k_padded == k`、`k` と `n` は 128 の倍数。
 - `preshuffled == false`。trellis は tile のまま常駐し、kernel が ring と codebook を
   復号する。Hadamard は kernel 内で行う。
-- marker の値は kernel では使わない。codebook は marker 名（`.mul1` / `.mcg`）で決まる。
+- marker の値は kernel では使わない。
 - EXL3 の unquantized tensor は BF16 entry とし、F16 で保存されている場合は load 時に
   BF16 へ widen する。
 

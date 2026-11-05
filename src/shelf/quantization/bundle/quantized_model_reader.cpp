@@ -630,7 +630,6 @@ Result<QuantizedTensorView> QuantizedModelReader::resolve(const std::string& log
     QuantizedTensorView view;
     view.name = canonical;
     view.encoding = t.encoding;
-    view.codebook = t.codebook;
     view.logical_shape = t.logical_shape;
     view.k_padded = static_cast<int64_t>(t.k_padded);
     view.scale_block_n = t.scale_block_n;
