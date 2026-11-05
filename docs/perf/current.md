@@ -202,6 +202,37 @@ teacher forcing できる。
 - 変更前は `SHELF_LINEAR_DEBUG=1` で 7 shape の `LINEAR_SELECT_MISS` が出ていた。
   変更後は通常 decode で miss が出ない。生成列は correctness mode と一致する。
 
+## 2026-11-05 MoE fp8 KV cache
+
+`models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4`（40 層・experts 256・top_k 8）を TP=1 / device 0 で、
+KV cache を bf16 と fp8 E4M3 で比べた。測定向けに `shelf-bench tg` へ
+`--kv-cache-dtype bf16|fp8` を追加している。fp8 は登録前は `PAGED_ATTENTION` `(16, 2, 256)` と
+`KV_APPEND` `(2, 256)` の rule が無く correctness fallback だった。
+
+| 条件 | fp8 | bf16 |
+| --- | ---: | ---: |
+| `tg --context 64 --tokens 32 --warmup 1`（gpu_ms / tok/s） | 495.81 / **64.54** | 497.27 / 64.35 |
+| `tg --context 4096 --prefill-chunk 2048 --tokens 8` run1 / run2（tok/s） | **62.23 / 62.23** | 62.18 / 62.07 |
+| census（context 4096、fp8） | logical 10840 = optimized 10840、**fallback 0**、physical 10928（split 80 + grouped 8） | 同一内訳 |
+| `quality --context 2048 --positions 64` | ppl 4.4925（bf16 4.5247、**-0.71 %**）、KL 0.00695、top-1 0.9531、top-5 0.9625 | 4.5247 |
+| `quality --context 512 --positions 64` | ppl 27.4009（bf16 29.6400、-7.55 %）、KL 0.07542、top-1 0.7969、top-5 0.8563 | 29.6400 |
+| `quality --context 128 --positions 64` | ppl 94.3507（bf16 75.1460、**+25.56 %**）、KL 0.16576、top-1 0.8125、top-5 0.7781 | 75.1460 |
+| KV 容量（`shelf-compute --max-seq-len 8192`、auto arena） | KV budget 10.07 GiB = **1,039,728 tokens** | 10.07 GiB = **527,968 tokens** |
+
+- measurement revision: `feature/moe-fp8-kv` の fp8 rule 追加後（bf16 側は同 tree の再測）
+- GPU: Radeon AI PRO R9700（`--device 0`、測定中は他の GPU に workload なし）
+- command: `shelf-bench tg --mode greedy --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --context 64 --tokens 32 --warmup 1 --kv-cache-dtype fp8`
+- 生成一致 anchor: bf16 KV の `GREEDY_TOKEN_SUM` は context 64 で 2199（既存記録）、fp8 KV では
+  **14441**（生成列が変わる）。context 4096 / 8 token は fp8 / bf16 とも `GREEDY_TOKEN_SUM=8`
+  （id 1 の退化列で検出力が無い）
+- dense `Qwen3.8-27B-FP8` の同条件（corpus 2203 token、`--positions 64`）: context 128 で
+  bf16 12.3659 → fp8 11.3385（-8.31 %、KL 0.00504）、context 2048 で bf16 5.8388 → fp8 6.1002
+  （+4.48 %、KL 0.00724）。**fp8 KV の短 context 劣化は dense 側には無い**
+- fp8 KV の decode 速度は bf16 と同等。kernel 単体では可視 16384 で bf16 split 178.74 µs に対し
+  fp8 split 173.85 µs、非 split は bf16 701.17 µs に対し fp8 785.36 µs（fp8 非 split kernel は
+  自分の roofline の 27 %）。経緯と内訳は
+  [../research/20261105/moe_fp8_kv.md](../research/20261105/moe_fp8_kv.md)
+
 ## 記録規則
 
 - 新しい計測をしていない数値は更新しない。

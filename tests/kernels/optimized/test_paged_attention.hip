@@ -478,8 +478,9 @@ bool run_case(const Config& cfg, const char* label) {
     // A geometry the planner would send down the split path has to agree with the non-split
     // kernel here: the split body and the reduce are separate instantiations per q_per_kv, so
     // only this comparison catches a wrong pairing (the planner cannot).
-    if (!cfg.prefill && !cfg.tree && !cfg.fp8
-        && ::shelf::kernel::paged_attention_bf16_split_supports(q_per_kv)) {
+    if (!cfg.prefill && !cfg.tree
+        && (cfg.fp8 ? ::shelf::kernel::paged_attention_fp8_split_supports(q_per_kv)
+                    : ::shelf::kernel::paged_attention_bf16_split_supports(q_per_kv))) {
         const uint32_t splits = 16u;
         const size_t part_elems = static_cast<size_t>(cfg.rows) * cfg.kv_heads * splits
             * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit);
@@ -488,9 +489,18 @@ bool run_case(const Config& cfg, const char* label) {
         if (sok) sok = hipMemset(d.out_split, 0, q_elems * 4) == hipSuccess;
         c.output = d.out_split;
         if (sok) {
-            const hipError_t se = ::shelf::kernel::launch_attention_paged_bf16_split(
-                c, static_cast<const bf16t*>(d.k_pool), static_cast<const bf16t*>(d.v_pool),
-                static_cast<float*>(d.partials), splits, 0);
+            const hipError_t se =
+                cfg.fp8
+                    ? ::shelf::kernel::launch_attention_paged_fp8_split(
+                          c, static_cast<const fp8*>(d.k_pool),
+                          static_cast<const fp8*>(d.v_pool),
+                          static_cast<const float*>(d.k_scale),
+                          static_cast<const float*>(d.v_scale),
+                          static_cast<float*>(d.partials), splits, 0)
+                    : ::shelf::kernel::launch_attention_paged_bf16_split(
+                          c, static_cast<const bf16t*>(d.k_pool),
+                          static_cast<const bf16t*>(d.v_pool),
+                          static_cast<float*>(d.partials), splits, 0);
             sok = se == hipSuccess;
             if (sok) {
                 const hipError_t re = ::shelf::kernel::launch_attention_paged_bf16_split_reduce(
@@ -681,6 +691,18 @@ int main() {
     run_case(c, "fp8 PREFILL qh=4 kvh=2 hd=256 page=16 rows=64");
     c = Config{};
     c.rows = 64;
+    c.q_heads = 16;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 16;
+    c.num_pages = 16;
+    c.block_table_stride = 16;
+    c.max_sequences = 8;
+    c.prefill = true;
+    c.fp8 = true;
+    run_case(c, "fp8 PREFILL qh=16 kvh=2 hd=256 page=16 rows=64");
+    c = Config{};
+    c.rows = 64;
     c.q_heads = 4;
     c.kv_heads = 2;
     c.head_dim = 256;
@@ -846,6 +868,25 @@ int main() {
     run_case(c, "bf16 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=4096 rows=1");
     c.visible_override = 64;
     run_case(c, "bf16 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=64 rows=1");
+
+    c = Config{};
+    c.rows = 1;
+    c.q_heads = 16;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 64;
+    c.num_pages = 128;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 128;
+    c.max_sequences = 1;
+    c.fp8 = true;
+    c.visible_override = 8192;
+    run_case(c, "fp8 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=8192 rows=1");
+    c.visible_override = 4096;
+    run_case(c, "fp8 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=4096 rows=1");
+    c.visible_override = 64;
+    run_case(c, "fp8 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=64 rows=1");
 
     std::printf("\nResults: %d passed, %d failed, %d skipped\n", passed, failed, skipped_cases);
     if (failed == 0 && passed == 0)

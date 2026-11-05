@@ -38,6 +38,7 @@ struct BenchOptions {
     int device = 0;
     std::string model_dir;
     int page_tokens = 16;
+    std::string kv_cache_dtype = "bf16";
     double arena_gib = 0.0;
     bool arena_auto = true;
     std::string output;
@@ -63,6 +64,7 @@ void print_usage(FILE* out) {
         "  --device N                   (default 0)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
+        "  --kv-cache-dtype bf16|fp8   (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
         "  --output PATH                (default none)\n"
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
@@ -174,6 +176,12 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
                 fprintf(stderr, "invalid --page-tokens\n");
+                return false;
+            }
+        } else if (key == "--kv-cache-dtype") {
+            opts.kv_cache_dtype = need_value();
+            if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8") {
+                fprintf(stderr, "invalid --kv-cache-dtype: expected bf16|fp8\n");
                 return false;
             }
         } else if (key == "--arena-gib") {
@@ -398,7 +406,9 @@ int run_tg(int argc, char** argv) {
 
     auto kv_pool_result = shelf::state::PagedKVPool::create(
         arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-        num_attn_layers, kv_heads, head_dim, shelf::kernel::KVCacheDType::BF16);
+        num_attn_layers, kv_heads, head_dim,
+        opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                    : shelf::kernel::KVCacheDType::BF16);
     if (!kv_pool_result.ok()) {
         fprintf(stderr, "PagedKVPool::create failed: %s\n",
             kv_pool_result.status().message().c_str());
@@ -792,6 +802,7 @@ int run_tg(int argc, char** argv) {
     printf("warmup=%d\n", opts.warmup);
     printf("compute_logits=%d\n", opts.compute_logits ? 1 : 0);
     printf("page_tokens=%d\n", opts.page_tokens);
+    printf("kv_cache_dtype=%s\n", opts.kv_cache_dtype.c_str());
     printf("\n");
     printf("gpu_ms=%.4f\n", gpu_ms);
     printf("wall_ms=%.4f\n", wall_ms);

@@ -61,8 +61,12 @@ int main() {
           "q_per_kv 8 takes splits at the measured max visible");
     check(plan_for(16, 2, 4096, kPlentyBytes, false).optimized,
           "q_per_kv 8 is still the optimized path");
-    check(plan_for(16, 2, 4096, kPlentyBytes, false, KVCacheDType::FP8_E4M3).splits == 1u,
-          "fp8 has no q_per_kv 8 instantiation and stays non-split");
+    check(plan_for(16, 2, 4096, kPlentyBytes, false, KVCacheDType::FP8_E4M3).splits == 16u,
+          "fp8 q_per_kv 8 takes splits");
+    check(plan_for(16, 2, 4096, kPlentyBytes, false, KVCacheDType::FP8_E4M3).optimized,
+          "fp8 q_per_kv 8 is the optimized path");
+    check(plan_for(16, 2, 4096, 0u, false, KVCacheDType::FP8_E4M3).splits == 1u,
+          "fp8 q_per_kv 8 without a partial workspace stays non-split");
 
     check(plan_for(16, 4, 1024, kPlentyBytes, false).splits == 1u,
           "short visible stays non-split");
@@ -80,8 +84,9 @@ int main() {
           "bf16 split capability is the single source and covers 4 / 6 / 8");
     check(::shelf::kernel::paged_attention_fp8_split_supports(4u) &&
               ::shelf::kernel::paged_attention_fp8_split_supports(6u) &&
-              !::shelf::kernel::paged_attention_fp8_split_supports(8u),
-          "fp8 split capability has no q_per_kv 8 instantiation");
+              ::shelf::kernel::paged_attention_fp8_split_supports(8u) &&
+              !::shelf::kernel::paged_attention_fp8_split_supports(1u),
+          "fp8 split capability is the single source and covers 4 / 6 / 8");
 
     std::printf("\nResults: %d failed\n", failed);
     return failed > 0 ? 1 : 0;

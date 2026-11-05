@@ -19,6 +19,7 @@ constexpr KvAppendRule kKvAppendRules[] = {
     { ::shelf::kernel::KVCacheDType::BF16, 4, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, 4, 256, 16, 1, kMeasuredMaxRows },
     { ::shelf::kernel::KVCacheDType::BF16, 2, 256, 16, 1, kMeasuredMaxRows },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, 2, 256, 16, 1, kMeasuredMaxRows },
 };
 
 }  // namespace

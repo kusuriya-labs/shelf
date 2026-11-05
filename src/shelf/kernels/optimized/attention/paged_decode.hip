@@ -1641,6 +1641,16 @@ void shelf_attention_paged_fp8_split_q4_full(
 }
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
+void shelf_attention_paged_fp8_split_q8_full(
+    ::shelf::kernel::PagedAttentionFp8SplitArgs args) {
+    v_decode_fp8_split::attention_paged_split_fp8_body<8u, true>(
+        args.common,
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.k_pool),
+        reinterpret_cast<const ::shelf::kernel::fp8e4m3_storage_t*>(args.v_pool),
+        args.k_scale_pool, args.v_scale_pool, args.partials, args.splits);
+}
+
+extern "C" __global__ __launch_bounds__(kPagedAttentionSplitBlock)
 void shelf_attention_paged_fp8_split_other(
     ::shelf::kernel::PagedAttentionFp8SplitArgs args) {
     v_decode_fp8_split::attention_paged_split_fp8_body<6u, true>(
@@ -1697,6 +1707,25 @@ hipError_t launch_attention_paged_fp8_split(
     }
     if (q_per_kv == 4u) {
         attention_paged_split_fp8_impl<4u, false><<<grid, kSplitThreads, 0, stream>>>(
+            a, reinterpret_cast<const fp8*>(k_pool), reinterpret_cast<const fp8*>(v_pool),
+            k_scale_pool, v_scale_pool, partials, splits);
+        return hipGetLastError();
+    }
+    if (q_per_kv == 8u && full_head) {
+        PagedAttentionFp8SplitArgs args{};
+        args.common = a;
+        args.k_pool = k_pool;
+        args.v_pool = v_pool;
+        args.k_scale_pool = k_scale_pool;
+        args.v_scale_pool = v_scale_pool;
+        args.partials = partials;
+        args.splits = splits;
+        shelf_attention_paged_fp8_split_q8_full
+            <<<grid, kSplitThreads, 0, stream>>>(args);
+        return hipGetLastError();
+    }
+    if (q_per_kv == 8u) {
+        attention_paged_split_fp8_impl<8u, false><<<grid, kSplitThreads, 0, stream>>>(
             a, reinterpret_cast<const fp8*>(k_pool), reinterpret_cast<const fp8*>(v_pool),
             k_scale_pool, v_scale_pool, partials, splits);
         return hipGetLastError();

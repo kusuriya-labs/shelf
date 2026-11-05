@@ -639,14 +639,18 @@ decode は `shelf-compute` で通る。実行の経緯と計測値は `docs/rese
   （`8192:2048`・`4096:2048`・`32:2048`・`2048:4096`・`248320:2048`）、`RMS_NORM` @2048、
   `PAGED_ATTENTION` `(16, 2, 256)`・`EMBEDDING_LOOKUP` @2048 は載っている。decode の
   correctness fallback はゼロで、census が `logical_dispatches == optimized_operations`
-  （context 64 / 32 token で 43360 / 43360）を出す
-- `q_per_kv = 8`（MoE の 16/2）の split-KV は bf16 で有効で、`max_visible_tokens >= 2048`
-  の decode で planner が splits=16 を選ぶ。fp8 には instantiation が無く非 split のまま
-  （`paged_attention_fp8_split_supports`）。split と reduce は `q_per_kv` ごとの別
-  instantiation で、pairing のずれは launch 成功のまま静かに誤るため
-  `test_paged_attention`（split16 比較）と `test_paged_attention_split_reduce_exact`
-  （q_per_kv 6 / 8）が対にする（経緯と計測は
-  `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md`）
+  （context 64 / 32 token で 43360 / 43360）を出す。これは bf16 KV・fp8 KV のどちらでも
+  成立する（`KV_APPEND` `(2, 256)` と `PAGED_ATTENTION` `(16, 2, 256)` は bf16 / fp8 双方に
+  載っている）
+- `q_per_kv = 8`（MoE の 16/2）の split-KV は bf16・fp8 の双方で有効で、
+  `max_visible_tokens >= 2048` の decode で planner が splits=16 を選ぶ。capability は
+  dtype 別に `paged_attention_bf16_split_supports` / `paged_attention_fp8_split_supports`
+  （いずれも 4 / 6 / 8）が単一源。split と reduce は `q_per_kv` ごとの別 instantiation で、
+  pairing のずれは launch 成功のまま静かに誤るため
+  `test_paged_attention`（split16 比較を bf16 / fp8 双方で）と
+  `test_paged_attention_split_reduce_exact`（q_per_kv 6 / 8）が対にする（経緯と計測は
+  `docs/research/20261104/moe_rmsnorm_paged_attention_allowlist.md` と
+  `docs/research/20261105/moe_fp8_kv.md`）
 - TP + MoE は §5 の受理条件で `unsupported`。`shelf-bench pp` と `shelf-bench quality` の
   `--tensor-parallel 2` も `probe_model_dir` で dense のみを受理し、grouped expert checkpoint
   では起動時に拒否する（深い地点で落ちない）

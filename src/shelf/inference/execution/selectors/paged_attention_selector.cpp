@@ -20,8 +20,8 @@ struct PagedAttentionRule {
 constexpr uint32_t kMeasuredMaxRows = kOptimizedMaxRows;
 constexpr uint32_t kMeasuredMaxVisible = 32768;
 constexpr uint32_t kMeasuredMaxVisible24 = 524288;
-// (q_heads, kv_heads) = (16, 2) has no split-KV kernel, so this is the non-split decode
-// kernel's measured range.
+// (q_heads, kv_heads) = (16, 2) is the MoE local geometry (q_per_kv 8). Both KV dtypes are
+// measured through the model's max sequence length, so there is no cliff inside the range.
 constexpr uint32_t kMeasuredMaxVisible16x2 = 262144;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
@@ -38,6 +38,8 @@ constexpr PagedAttentionRule kPagedAttentionRules[] = {
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       12, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
+      16, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       16, 2, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
 };
 

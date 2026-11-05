@@ -94,6 +94,7 @@ grouped expert checkpoint（Qwen3.6-35B-A3B MoE）は `--tensor-parallel 1` で 
 | `--device N` | (default 0) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
+| `--kv-cache-dtype bf16\|fp8` | (default bf16) |
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
 | `--output PATH` | (default none) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
@@ -105,6 +106,11 @@ grouped expert checkpoint（Qwen3.6-35B-A3B MoE）は `--tensor-parallel 1` で 
 <!-- /cli:bench-tg -->
 
 greedy mode は `--compute-logits 1` が必要。
+
+`--kv-cache-dtype fp8` は KV cache を fp8 E4M3 にする。grouped expert checkpoint（MoE）でも
+bf16 / fp8 の双方で `KV_APPEND` と `PAGED_ATTENTION` が registered geometry であり、
+long context では split-KV（splits 16）が選ばれる。fp8 KV の decode 速度は bf16 と同等で、
+KV の容量は半分になる（実測は [../perf/current.md](../perf/current.md)）。
 
 `--perf-stats-output PATH` は `SHELF_QWEN35_PERF_STATS=1` と併せたときだけ、測定区間の
 dispatch 内訳を JSON で書く。中身は kernel 名ごとの `logical` / `optimized` / `fallback`
