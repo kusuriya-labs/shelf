@@ -486,7 +486,7 @@ int main() {
         check(false, "reference grouped w2 launch");
     if (kn::launch_moe_combine(r_out, r_expert, r_sel_weight, r_slot_row_of, d_shared, d_gate,
                                kTokens, kTopK, kHidden, expert_stride, shared_stride,
-                               stream) != hipSuccess)
+                               gate_stride, stream) != hipSuccess)
         check(false, "reference combine launch");
     if (hipStreamSynchronize(stream) != hipSuccess) {
         std::printf("FAIL reference sync\n");

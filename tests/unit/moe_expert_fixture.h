@@ -74,7 +74,8 @@ struct Fixture {
 };
 
 inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
-    std::uint32_t shared_inter = kInter, std::uint32_t inter = kInter) {
+    std::uint32_t shared_inter = kInter, std::uint32_t inter = kInter,
+    bool all_attention = false) {
     shelf::qwen35moe::Qwen35MoeTextConfig c;
     c.vocab_size = 1024;
     c.hidden_size = kHidden;
@@ -92,14 +93,15 @@ inline shelf::qwen35moe::Qwen35MoeTextConfig text_config(
     c.linear_value_head_dim = kValueHeadDim;
     c.linear_conv_kernel_dim = kConvKernel;
     // Matches the config_json layer_types order (layer 0 linear_attention, layer 1
-    // full_attention) the way the model-level topology check derives it.
-    c.full_attention_interval = 2;
-    c.layer_types = {0, 1};
+    // full_attention) the way the model-level topology check derives it. all_attention
+    // makes every layer full attention, which leaves the GDN path out of a case.
+    c.full_attention_interval = all_attention ? 1u : 2u;
+    c.layer_types = all_attention ? std::vector<int>{1, 1} : std::vector<int>{0, 1};
     return c;
 }
 
 inline std::string config_json(std::uint32_t shared_inter = kInter,
-                                std::uint32_t inter = kInter) {
+                                std::uint32_t inter = kInter, bool all_attention = false) {
     std::string json = R"json({"model_type":"qwen3_5_moe","tie_word_embeddings":false,"text_config":{)json";
     json += R"json("model_type":"qwen3_5_moe_text","vocab_size":1024,"hidden_size":)json";
     json += std::to_string(kHidden);
@@ -128,7 +130,9 @@ inline std::string config_json(std::uint32_t shared_inter = kInter,
     json += R"json(,"linear_conv_kernel_dim":)json";
     json += std::to_string(kConvKernel);
     json += R"json(,)json";
-    json += R"json("full_attention_interval":2,"layer_types":["linear_attention","full_attention"]},)json";
+    json += all_attention
+                ? R"json("full_attention_interval":1,"layer_types":["full_attention","full_attention"]},)json"
+                : R"json("full_attention_interval":2,"layer_types":["linear_attention","full_attention"]},)json";
     json += R"json("quantization_config":{"quant_method":"quark","version":"0.13",)json";
     json += R"json("global_quant_config":{"weight":{"dtype":"fp4","qscheme":"per_group",)json";
     json += R"json("group_size":32,"is_dynamic":false,"scale_format":"e8m0","ch_axis":-1},)json";
@@ -257,9 +261,10 @@ inline void add_layer_body(std::vector<PlannedTensor>& planned, const std::strin
 // layer, the attention body. Shapes follow the synthetic config and the layer_types
 // order (layer 0 is GDN).
 inline void add_model_level_tensors(std::vector<PlannedTensor>& planned,
-                                    std::size_t layer) {
+                                    std::size_t layer, bool all_attention = false) {
     const std::string prefix = "model.language_model.layers." + std::to_string(layer) + ".";
-    add_layer_body(planned, prefix, layer % 2u == 0u, static_cast<std::uint32_t>(layer));
+    const bool gdn = !all_attention && layer % 2u == 0u;
+    add_layer_body(planned, prefix, gdn, static_cast<std::uint32_t>(layer));
 }
 
 // Writes the MTP block the way a Qwen3.5-MoE checkpoint stores it: the block norms and
@@ -319,9 +324,10 @@ inline void add_mtp_tensors(std::vector<PlannedTensor>& planned, Fixture& f,
 // with_mtp adds the MTP block, and requires model_level.
 inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = false,
                           bool model_level = false, std::uint32_t shared_inter = kInter,
-                          std::uint32_t inter = kInter, bool with_mtp = false) {
+                          std::uint32_t inter = kInter, bool with_mtp = false,
+                          bool all_attention = false) {
     f.dir = dir;
-    f.config = text_config(shared_inter, inter);
+    f.config = text_config(shared_inter, inter, all_attention);
     f.mtp = with_mtp;
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -370,7 +376,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
                            {shared_inter, kHidden}, make_bf16(shared_inter * kHidden, 19u)});
         planned.push_back({prefix + "shared_expert.down_proj.weight", shelf::io::SType::BF16,
                            {kHidden, shared_inter}, make_bf16(kHidden * shared_inter, 23u)});
-        if (model_level) add_model_level_tensors(planned, layer);
+        if (model_level) add_model_level_tensors(planned, layer, all_attention);
     }
 
     if (with_mtp) add_mtp_tensors(planned, f, shared_inter, inter);
@@ -393,7 +399,7 @@ inline bool write_fixture(Fixture& f, const fs::path& dir, bool with_nan_byte = 
         return false;
 
     std::ofstream cfg(dir / "config.json", std::ios::binary | std::ios::trunc);
-    cfg << config_json(shared_inter, inter);
+    cfg << config_json(shared_inter, inter, all_attention);
     return cfg.good();
 }
 

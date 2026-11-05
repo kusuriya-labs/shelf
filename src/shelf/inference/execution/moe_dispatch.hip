@@ -271,6 +271,7 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
     if (expert.feature_count != out.feature_count || shared.feature_count != out.feature_count)
         return bad("moe combine: feature count mismatch");
     if (gate.feature_count != 1u) return bad("moe combine: shared gate is not one column");
+    if (gate.row_stride == 0u) return bad("moe combine: shared gate row stride is zero");
     if (expert.ptr == nullptr || shared.ptr == nullptr || gate.ptr == nullptr ||
         out.ptr == nullptr)
         return bad("moe combine: value unbound");
@@ -290,7 +291,7 @@ Result<OptimizedLaunchResult> try_launch_moe_combine(const Program& program,
         plan.value().arrays.sel_weight, plan.value().arrays.slot_row_of,
         static_cast<const ::shelf::bf16_t*>(shared.ptr),
         static_cast<const float*>(gate.ptr), plan.value().tokens, plan.value().top_k,
-        out.feature_count, expert.row_stride, shared.row_stride, stream);
+        out.feature_count, expert.row_stride, shared.row_stride, gate.row_stride, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe combine launch", hipGetErrorString(herr), __FILE__,
                                  __LINE__);

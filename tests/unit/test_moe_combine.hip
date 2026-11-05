@@ -101,6 +101,9 @@ struct Case {
     uint32_t top_k = 2;
     bool shared = false;
     uint32_t group_capacity = 0;
+    // The gate plane is a padded row-major value in the program workspace, so a row's gate
+    // is not necessarily the next float. The kernel has to be told the stride.
+    uint32_t gate_stride = 1u;
     std::vector<float> logits;
     std::vector<shelf::bf16_t> expert_payload;
     std::vector<shelf::bf16_t> shared_payload;
@@ -110,8 +113,10 @@ struct Case {
     std::vector<uint32_t> sel_expert;
 };
 
-Case make_case(uint32_t rows, uint32_t top_k, bool shared) {
+Case make_case(uint32_t rows, uint32_t top_k, bool shared,
+                 uint32_t gate_stride = 1u) {
     Case c;
+    c.gate_stride = gate_stride;
     c.rows = rows;
     c.top_k = top_k;
     c.shared = shared;
@@ -140,9 +145,9 @@ Case make_case(uint32_t rows, uint32_t top_k, bool shared) {
         v = shelf::bf16_t{shelf::f32_to_bf16_rne(rnd())};
     // The kernel receives the gate already activated, so the fixture stores sigmoid
     // values directly and the reference uses the same numbers.
-    c.gate.assign(kMaxRows, 0.0f);
+    c.gate.assign(static_cast<std::size_t>(kMaxRows) * c.gate_stride, 0.0f);
     for (uint32_t t = 0; t < kMaxRows; ++t)
-        c.gate[t] = 1.0f / (1.0f + std::exp(-rnd()));
+        c.gate[static_cast<std::size_t>(t) * c.gate_stride] = 1.0f / (1.0f + std::exp(-rnd()));
     return c;
 }
 
@@ -165,7 +170,7 @@ std::vector<shelf::bf16_t> reference_combine(const Case& c, bool expert_ascendin
                       [](const std::pair<int32_t, float>& a, const std::pair<int32_t, float>& b) {
                           return a.first > b.first;
                       });
-        const float gate = c.gate[t];
+        const float gate = c.gate[static_cast<std::size_t>(t) * c.gate_stride];
         for (uint32_t f = 0; f < kFeatures; ++f) {
             float acc = 0.0f;
             for (const auto& slot : slots)
@@ -227,7 +232,7 @@ void run_case(const Case& spec, Device& d, hipStream_t stream) {
     const hipError_t err = moe::launch_moe_combine(
         d.out, d.expert_out, d.sel_weight, d.slot_row_of, c.shared ? d.shared_out : nullptr,
         c.shared ? d.shared_gate : nullptr, c.rows, c.top_k, kFeatures, kFeatures, kFeatures,
-        stream);
+        c.gate_stride, stream);
     check(err == hipSuccess, tag + ": launch_moe_combine");
     if (hipStreamSynchronize(stream) != hipSuccess) {
         check(false, tag + ": combine sync");
@@ -265,7 +270,7 @@ void run_order_discriminating_case(Device& d, hipStream_t stream) {
     h2d(d.expert_out, payload);
     const hipError_t err = moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight,
                                                    d.slot_row_of, nullptr, nullptr, rows, top_k,
-                                                   kFeatures, kFeatures, kFeatures, stream);
+                                                   kFeatures, kFeatures, kFeatures, 1u, stream);
     check(err == hipSuccess, "order case: launch_moe_combine");
     const std::vector<shelf::bf16_t> got = d2h(d.out, static_cast<std::size_t>(rows) * kFeatures);
 
@@ -317,7 +322,7 @@ void run_partial_feature_block_case(Device& d, hipStream_t stream) {
 
     const hipError_t err = moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight,
                                                    d.slot_row_of, nullptr, nullptr, rows, top_k,
-                                                   feats, stride, stride, stream);
+                                                   feats, stride, stride, 1u, stream);
     check(err == hipSuccess, "partial feature case: launch_moe_combine");
     const std::vector<shelf::bf16_t> got =
         d2h(d.out, static_cast<std::size_t>(kMaxRows) * kFeatures);
@@ -380,7 +385,7 @@ int main() {
     d.slot_row_of = alloc<int32_t>(static_cast<std::size_t>(kMaxRows) * kMaxTopK);
     d.expert_out = alloc<shelf::bf16_t>(static_cast<std::size_t>(kMaxPlaneRows) * kFeatures);
     d.shared_out = alloc<shelf::bf16_t>(static_cast<std::size_t>(kMaxRows) * kFeatures);
-    d.shared_gate = alloc<float>(kMaxRows);
+    d.shared_gate = alloc<float>(static_cast<std::size_t>(kMaxRows) * 8u);
     d.out = alloc<shelf::bf16_t>(static_cast<std::size_t>(kMaxRows) * kFeatures);
 
     run_case(make_case(1, 8, false), d, stream);
@@ -388,29 +393,36 @@ int main() {
     run_case(make_case(8, 8, true), d, stream);
     run_case(make_case(64, 8, true), d, stream);
     run_case(make_case(64, 4, false), d, stream);
+    // A padded gate plane: every token after the first would read another row's bytes (or
+    // padding) if the gate were indexed packed, which silently drops the shared expert.
+    run_case(make_case(8, 8, true, 4u), d, stream);
     run_order_discriminating_case(d, stream);
     run_partial_feature_block_case(d, stream);
 
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, d.shared_out,
-                                  nullptr, 1, 2, kFeatures, kFeatures, kFeatures,
+                                  nullptr, 1, 2, kFeatures, kFeatures, kFeatures, 1u,
                                   stream) != hipSuccess,
           "shared output without a gate is rejected");
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, nullptr,
-                                  d.shared_gate, 1, 2, kFeatures, kFeatures, kFeatures,
+                                  d.shared_gate, 1, 2, kFeatures, kFeatures, kFeatures, 1u,
                                   stream) != hipSuccess,
           "shared gate without output is rejected");
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, nullptr,
-                                  nullptr, 1, 0, kFeatures, kFeatures, kFeatures,
+                                  nullptr, 1, 0, kFeatures, kFeatures, kFeatures, 1u,
                                   stream) != hipSuccess,
           "zero top_k is rejected");
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, nullptr,
                                   nullptr, 1, moe::kMoeRouterMaxTopK + 1u, kFeatures, kFeatures,
-                                  kFeatures, stream) != hipSuccess,
+                                  kFeatures, 1u, stream) != hipSuccess,
           "top_k above the kernel bound is rejected");
     check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, nullptr,
-                                  nullptr, 1, 2, kFeatures, kFeatures - 1u, kFeatures,
+                                  nullptr, 1, 2, kFeatures, kFeatures - 1u, kFeatures, 1u,
                                   stream) != hipSuccess,
           "an expert row stride below features is rejected");
+    check(moe::launch_moe_combine(d.out, d.expert_out, d.sel_weight, d.slot_row_of, d.shared_out,
+                                  d.shared_gate, 1, 2, kFeatures, kFeatures, kFeatures, 0u,
+                                  stream) != hipSuccess,
+          "a shared gate plane with no row stride is rejected");
 
     hipFree(d.logits);
     hipFree(d.sel_expert);

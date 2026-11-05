@@ -606,10 +606,10 @@ int main() {
     // shared expert term, whose magnitude changes a relative measure of the sum without
     // changing the per-element error.
     check(moe::launch_moe_combine(d_routed, d_out2, d_sel_weight, d_slot_row_of, nullptr, nullptr,
-                                  tokens, top_k, hidden, p.w2_rows, hidden, stream) == hipSuccess,
+                                  tokens, top_k, hidden, p.w2_rows, hidden, 1u, stream) == hipSuccess,
           "combine launch without the shared expert");
     check(moe::launch_moe_combine(d_combined, d_out2, d_sel_weight, d_slot_row_of, d_shared,
-                                  d_gate, tokens, top_k, hidden, p.w2_rows, hidden,
+                                  d_gate, tokens, top_k, hidden, p.w2_rows, hidden, 1u,
                                   stream) == hipSuccess,
           "combine launch with the shared expert");
     if (hipStreamSynchronize(stream) != hipSuccess) {
