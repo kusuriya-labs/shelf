@@ -83,6 +83,31 @@ rebase 前（main に取り込む前）の実装で decode を 41.7 → 37.1 ms 
   （`x & 0x3F3F3F3F` の byte 和 − 126）に変えれば shift が要らなくなるが、再量子化が必要で、節約は mask と相殺されるため見送った。
   表引き（LDS 64 KB）は LDS の bank 競合で ALU より遅くなる（research 済み）。
 
+### MTP（`--mtp`）との組み合わせ
+
+shelf の MTP 経路（K+1 行の一括 verify、GDN snapshot / compact log replay）を、mul1（main の W16A16）と
+mul24 で同じ条件で比べた。R9700、greedy、64 token 生成、`tests/data/mtp_perf` の prose / code / reasoning
+（繰り返しなし、約 430〜480 token）、各 1 run。出力（`GENERATED_IDS`）は全条件で target-only と一致した。
+target-only は mul1 が 23.2〜23.4 tok/s、mul24 が 26.6 tok/s。
+
+| prompt | K | mul1 tok/s | mul24 tok/s | mul1 受理 | mul24 受理 | verify/round mul1 → mul24 |
+|---|---:|---:|---:|---:|---:|---|
+| prose | 2 | 39.9 | 47.7 | 1.17 | 1.17 | 48.0 → 40.2 ms |
+| prose | 4 | 44.8 | 46.0 | 1.86 | 1.42 | 51.3 → 42.6 ms |
+| prose | 7 | 38.1 | 38.8 | 1.86 | 1.42 | 53.4 → 45.5 ms |
+| code | 2 | 46.0 | 55.7 | 1.52 | 1.58 | 48.4 → 40.4 ms |
+| code | 4 | 47.0 | **66.7** | 2.10 | 2.50 | 51.7 → 42.7 ms |
+| code | 7 | 42.4 | 57.0 | 2.26 | 2.65 | 53.7 → 45.7 ms |
+| reasoning | 2 | 38.3 | 47.9 | 1.14 | 1.21 | 48.5 → 40.4 ms |
+| reasoning | 4 | 33.9 | 46.2 | 1.39 | 1.48 | 55.5 → 42.8 ms |
+| reasoning | 7 | 31.5 | 39.0 | 1.39 | 1.48 | 53.7 → 45.8 ms |
+
+- verify（8 行まで）は単一 token decode の 1.1〜1.3 倍の時間で済み、INT8 の split-K 経路（rows <= 16）に入る。
+  mul24 の verify は mul1 より 15〜20% 短く、これが速度差の主因である（受理数は prompt で上下する）。
+- K=7 より K=4 が速い（受理数が伸びず draft と verify の時間だけ増える）。
+- 受理数は MXFP4 版の MTP（約 98%）より大きく低い。MTP block の 4bpw 量子化かプロンプトかは未切り分け。
+- 1 run ずつで散布は取っていない。長い context は未測定。
+
 ## main への載せ方
 
 - manifest と weight の読み込みは main の EXL3（trellis / suh / svh / marker の 4 plane）をそのまま使い、
@@ -95,7 +120,7 @@ rebase 前（main に取り込む前）の実装で decode を 41.7 → 37.1 ms 
 
 ## 未実施・未確認
 
-- 長い context、TP、MoE の expert、cb0 / mcg、投機 decode（DFlash2）との組み合わせ。
+- 長い context、TP、MoE の expert、cb0 / mcg、DFlash2 との組み合わせ（MTP は上で測定済み）。
 - shelf の teacher-forced な全位置 KLD（`--dump-logits` は sampled row だけなので 12 位置の抜き取り）。
 - mul24 の実モデル断片を fixture にすること（現在の fixture は NumPy 参照復号器から再生成した期待値）。
 - prefill の GEMM（MT=4、約 61 TOPS）は未最適化。
