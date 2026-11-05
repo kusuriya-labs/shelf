@@ -839,6 +839,14 @@ A 復号の命令数削減が主対象になる。
 MLP 形状（K=5120/N=17408、K=17408/N=5120）と end-to-end で row-major 版を上回らな
 かったため採用しない。epilogue の LDS transpose も不要になった。
 
+recon は row-major で 52 MB + trellis 13 MB を 0.14 ms で書いており、実効 464 GB/s
+（DRAM 640 GB/s の 72%）。store は 32 B sector を満たしているため、n tile をまとめる
+追加の coalescing は行っていない。
+
+end-to-end の pp2048 は変更前後で 1384 / 1390 tok/s（同一セッションで A/B）であり、
+以前の 1425 tok/s は GPU 状態による差である。1 層あたりは 1.089 → 0.988 ms に短縮
+している。
+
 ### production
 
 | 条件 | NT=1 / groups<=2 | NT=2 / groups=4 |
