@@ -12,6 +12,7 @@
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/tp_rank_model.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 
@@ -176,11 +177,21 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
             tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size);
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
+        // The capacity formula is an estimate, and it is short of the executor's real footprint
+        // by a little (measured: 10 - 130 MiB on a 40 layer model). The KV pool is sized from
+        // what is left, so an estimate that is too small turns into a failed allocation after
+        // the pool already took the arena. The auto path keeps slack back; an explicit
+        // --working-set-reserve is taken as given.
+        const std::size_t slack =
+            std::max<std::size_t>(64ull << 20ull, arena_free_now / 100ull);
+        reserved += slack;
         std::fprintf(stderr,
-                     "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u)\n",
+                     "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u, "
+                     "incl. %s slack)\n",
                      static_cast<unsigned>(config.tp_rank),
                      gpu::format_gib(reserved).c_str(),
-                     static_cast<unsigned>(config.max_batch_rows));
+                     static_cast<unsigned>(config.max_batch_rows),
+                     gpu::format_gib(slack).c_str());
     }
     if (config.prefix_cache) {
         PrefixCacheConfig prefix_config;
