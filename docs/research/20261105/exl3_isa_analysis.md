@@ -400,6 +400,45 @@ load を先行させており、明示的な prefetch の追加コストが上�
 `row_acc` は 0、epilogue も `r >= active_rows` を弾くため誤出力はなかった。
 防御的に `r < active_rows` のガードを追加した。
 
+## ka=4 の 8 状態一括抽出（採用）
+
+`codebook_pair_h_bits()` は既に `v_sad_u8` + `v_sad_hi_u8` を使っており、
+hash は `v_mul_lo_u32` である。24-bit split hash は ka=4 抽出の後でも **±0.5 %**
+で効果がなかった。`v_mul_lo_u32` は 1/4 rate だが、この kernel では律速ではない。
+
+generic 経路は state ごとに 4 word から 2 word を `pick4` で選び、64-bit 結合と
+可変 shift を行う。ka=4 / half=0 では 1 lane の 8 状態が 2 word に収まり、
+オフセットが lane に依存しない。
+
+- `w0 = lane + 31`、`w1 = lane + 32`（word_count=32、1 回だけ条件付き減算）
+- `pair01 = (w0 << 32) | w1` → `v_alignbit` shifts 28, 24, 20
+- `pair11 = (w1 << 32) | w1` → shifts 16, 12, 8, 4, 0
+- 2 LDS load + 8 `v_alignbit` + 8 mask で 8 状態
+
+GEMM 単体（auto split、導入前 / 導入後）:
+
+| shape | rows | 導入前 | 導入後 |
+| --- | ---: | ---: | ---: |
+| n=5120 k=5120 | 1 | 0.0792 | **0.0754** |
+| n=5120 k=5120 | 4 | 0.0848 | **0.0792** |
+| n=5120 k=5120 | 32 | 0.1759 | **0.1673** |
+| n=5120 k=5120 | 128 | 0.4961 | **0.4805** |
+| n=5120 k=17408 | 1 | 0.2282 | **0.2117** |
+| n=17408 k=5120 | 1 | 0.2217 | **0.2083** |
+
+n=5120 / k=5120 の rows=16 は導入前の測定が 0.1246 ms と外れていたため表から外した。
+導入後は 0.0956 ms。全体として **5〜7 %** の短縮。
+
+production（ka=4 後の precompute on/off）:
+
+| prompt | fused | pre | 改善 |
+| ---: | ---: | ---: | ---: |
+| 128 | 278.95 | **336.44** | +20.6 % |
+| 2048 | 289.60 | **353.68** | +22.1 % |
+
+decode は 13.36〜13.39 → **14.80〜14.91 tok/s**。E2E は 15.93 tok/s、
+MTP-2 は 15.68 tok/s。ka=4 以外（lm_head の ka=6、half）は generic 経路のまま。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、

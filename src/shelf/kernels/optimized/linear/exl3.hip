@@ -46,8 +46,54 @@ __device__ __forceinline__ uint32_t pick4(uint32_t r, uint32_t a, uint32_t b, ui
     return v;
 }
 
+__device__ __forceinline__ void decode_tile_ka4(const Exl3GemmArgs& args, uint32_t kt,
+                                               uint32_t nt, uint32_t lane, uint32_t* ring,
+                                               uint16_t* tile) {
+    const uint32_t n_tiles = args.out_features / 16u;
+    const uint16_t* tile_base =
+        static_cast<const uint16_t*>(args.trellis) +
+        (static_cast<uint64_t>(kt) * n_tiles + nt) * 64u;
+    const uint32_t* source = reinterpret_cast<const uint32_t*>(tile_base);
+    ring[lane] = source[lane];
+    __syncwarp();
+
+    uint32_t i0 = lane + 31u;
+    uint32_t i1 = lane + 32u;
+    if (i0 >= 32u) i0 -= 32u;
+    if (i1 >= 32u) i1 -= 32u;
+    const uint32_t a = ring[i0];
+    const uint32_t b = ring[i1];
+
+    uint32_t st[8];
+    st[0] = __builtin_amdgcn_alignbit(a, b, 28) & 0xFFFFu;
+    st[1] = __builtin_amdgcn_alignbit(a, b, 24) & 0xFFFFu;
+    st[2] = __builtin_amdgcn_alignbit(a, b, 20) & 0xFFFFu;
+    st[3] = __builtin_amdgcn_alignbit(b, b, 16) & 0xFFFFu;
+    st[4] = __builtin_amdgcn_alignbit(b, b, 12) & 0xFFFFu;
+    st[5] = __builtin_amdgcn_alignbit(b, b, 8) & 0xFFFFu;
+    st[6] = __builtin_amdgcn_alignbit(b, b, 4) & 0xFFFFu;
+    st[7] = b & 0xFFFFu;
+
+    uint32_t* tile32 = reinterpret_cast<uint32_t*>(tile);
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        const uint32_t position = lane * 8u + p * 2u;
+        const uint32_t packed =
+            exl3_detail::codebook_pair_h_bits(st[2u * p], st[2u * p + 1u]);
+        uint32_t row = 0;
+        uint32_t col = 0;
+        exl3_detail::tile_coords(position, &row, &col);
+        tile32[col * 8u + (row >> 1)] = packed;
+    }
+    __syncwarp();
+}
+
 __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t kt, uint32_t nt,
                                             uint32_t lane, uint32_t* ring, uint16_t* tile) {
+    if (args.ka == 4u && args.half == 0u) {
+        decode_tile_ka4(args, kt, nt, lane, ring, tile);
+        return;
+    }
     const uint32_t words = 16u * args.ka + (args.half != 0u ? 8u : 0u);
     const uint32_t word_count = words / 2u;
     const uint32_t n_tiles = args.out_features / 16u;

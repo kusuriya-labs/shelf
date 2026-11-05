@@ -303,6 +303,9 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   `rows * k * 2` が execution workspace の xrot 領域（80 MiB）に収まるときだけ
   この経路を使い、それ以外は fused 経路にする。回転の演算順は fused と同じで、
   出力は一致する。
+- `ka == 4` かつ `half == 0` の decode は、1 lane の 8 状態を 2 word の窓と
+  `v_alignbit` の即値 shift でまとめて抽出する。他の rate は 4 word の generic
+  経路を使う。どちらも同じ state を生成する。
 
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ
