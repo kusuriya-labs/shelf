@@ -439,6 +439,21 @@ production（ka=4 後の precompute on/off）:
 decode は 13.36〜13.39 → **14.80〜14.91 tok/s**。E2E は 15.93 tok/s、
 MTP-2 は 15.68 tok/s。ka=4 以外（lm_head の ka=6、half）は generic 経路のまま。
 
+## 棄却した試行（依存チェーンと LDS）
+
+- **Accumulator の 2 本 / 4 本分割**: `acc[g]` を偶数・奇数 K tile で分け、最後に
+  FP32 加算した。2 本は rows=1 0.0746 → 0.0742 ms、rows=128 0.4835 → 0.4784 ms で
+  誤差範囲。4 本は rows=128 が 0.4835 → 0.5892 ms へ悪化した（VGPR 増で occupancy 低下）。
+  WMMA の累積依存チェーンは主因ではない。
+- **xrot の row pitch 128 → 130 halfs**: B fragment の bank を分散させる狙い。
+  rows=1 0.0746 → 0.0743 ms、rows=128 0.4835 → 0.4837 ms で変化なし。
+- **tile の column pitch 16 → 18 halfs**: A fragment の bank を分散させる狙い。
+  rows=1 0.0746 → 0.0983 ms（+32%）、rows=128 0.4835 → 0.5896 ms へ悪化。
+  16B vector load の alignment が崩れるためで、pitch 変更は逆効果。
+- 以上から、decode → LDS → WMMA の逐次依存や bank conflict を主因とする仮説は
+  支持されない。次の大きな候補は M=1〜8 の Small-M カーネル（fdot2/dot2 系）で、
+  WMMA の M 方向 15/16 の浪費を避ける経路である。
+
 ## 参照実装との比較
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
