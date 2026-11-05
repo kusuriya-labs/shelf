@@ -97,19 +97,62 @@ work area と出力 accum は union で重ね、LDS は 14 KiB。
 - prefill 128（runs 3 / warmup 1）は **191 tok/s**。multi-warp 前の 70.0 tok/s は
   runs 1 / warmup 0 の参考値なので、厳密な A/B ではない。
 
+## mul1 affine の epilogue 移動 + packed pair 復号（実装・採用）
+
+mul1 の値は `h = 1024 + bsum` に対してアフィンである。
+
+```text
+w = k_inv * h + k_bias
+```
+
+GEMM の重みを `h` にし、`k_inv` / `k_bias` を epilogue へ移した。
+
+- 2 重みを `v_sad_u8` / `v_sad_hi_u8` で同時に復号し、`0x6400 + bsum` の f16 bits を
+  packed u32 で tile に書く。tile は A fragment の転置順なので、u32 1 本が
+  同じ出力列の隣接 k 2 個になる。
+- 入力回転時に `rowsum[r] = sum_k Xrot[r,k]` を f16 値で作る。
+- epilogue は H128 の前に `(k_bias / k_inv) * rowsum[r]` を足し、H128 の後に
+  `k_inv * svh` を掛ける。
+- per-weight `__hfma` と scalar byte sum が消え、tile への store も u16 8 本から
+  u32 4 本になった。
+
+数値:
+
+- 重みは `fp16(h*k_inv + k_bias)` ではなく f32 のアフィン値になる。
+  per-weight の fp16 丸めがなくなるため、exllamav3 の参照とは bit 一致しない。
+  CPU 側に `dequant(..., affine=true)` を追加し、その参照でテストする。
+- E2E の生成 token は不変。
+
+結果（同じ GPU 1、`tg --context 128 --tokens 16 --warmup 1`、3 run）:
+
+| 版 | tok/s | µs/token |
+| --- | ---: | ---: |
+| multi-warp | 8.51〜8.54 | 117 |
+| + affine epilogue + packed pair | **9.04〜9.06** | **110** |
+
+- `LINEAR_EXL3_W16A16` の合計: 122.4 → 118.3 ms
+- shape 別の 1 launch:
+  - n=17408, k=5120: 0.326 → 0.299 ms
+  - n=5120, k=17408: 0.533 → 0.526 ms
+  - lm_head: 3.83 → 3.72 ms
+  - 小 n 形状はほぼ変化なし
+- prefill 128: 191 → **199.5 tok/s**
+- correctness: `test_exl3_linear` の rows 1 / 3 / 5 / 16 / 17、n=128〜8192、
+  mul1 4 / 6 / 7 bpw、3.5 half が affine 参照と一致。E2E / MTP も動作。
+
 ## 残るボトルネック
 
-- n=17408 が 41 ms、n=5120 / k=17408 が 34 ms で、linear 123 ms の 61 %。
-- n=1024 は 8 block しかなく、14.3 GB/s。block 数が足りない形状は split-K が必要。
-- 1 重みあたりの `__hfma` 復号はまだ残っている。lm_head は 256 GB/s まで来たが、
-  DRAM の 40 %。
+- n=17408（38.3 ms）と n=5120 / k=17408（33.7 ms）で linear 118.8 ms の 61 %。
+- 1 重みあたりの `state_from_ring` がまだ残っている。pair 化した byte sum より
+  ring からの 16-bit window 抽出の方が重くなった。
+- n=1024 / 6144 / 10240 は block / warp 数が足りず、帯域も低いまま。
 
 ## 次の候補
 
-1. **rows == 1 専用 GEMV**。mul1 は `state * 0x83DCD12D` の byte 和に対してアフィンなので、
-   exllamav3 の `exl3_gemv_int8` と同様に `dp4a` / `v_sad_u8` で 4 重みずつ復号・積和できる。
-   現行の 1 重みずつの `__hfma` 復号より桁で速い可能性がある。
-2. **小 n 形状の split-K**。n=1024 / 6144 / 10240 は block 数が少なく CU が遊ぶ。
-   K を分割して部分和を reduction する。workspace と 2 段 launch が必要。
-3. prefill の行 tile 再利用。現状は 16 行ごとに同じ重みを復号し直すため、
+1. **ring window の pair 抽出**。隣接 2 window は `16-ka` bit を共有するので、
+   funnel shift / `v_alignbit` で 1 回の抽出にまとめる。`state_from_ring` が
+   現在の decode の主コスト。
+2. prefill の行 tile 再利用。現状は 16 行ごとに同じ重みを復号し直すため、
    prefill は row tile 数に比例する。
+3. 小 n 形状の block 数。split-K は `rows == 1` 依存になるため、batch-aware な
+   分割（scheduler の row 数から block 数を決める）でなければ採用しない。

@@ -81,6 +81,13 @@ uint16_t codebook_f16_bits(uint16_t state) {
     return f16_bits_from_f64(h * k_inv + k_bias);
 }
 
+float codebook_affine_value(uint16_t state) {
+    const uint32_t x = static_cast<uint32_t>(state) * kMul1Multiplier;
+    const int sum = static_cast<int>(x & 0xFFu) + static_cast<int>((x >> 8) & 0xFFu) +
+                    static_cast<int>((x >> 16) & 0xFFu) + static_cast<int>(x >> 24);
+    return (1024.0f + static_cast<float>(sum)) * kMul1Inv + kMul1Bias;
+}
+
 uint16_t state_from_ring(const uint32_t* words, uint32_t word_count, uint32_t position,
                          uint32_t ka, bool half) {
     const uint32_t bit_length = bits_per_tile(ka, half);
@@ -102,8 +109,8 @@ void tile_coords(uint32_t position, uint32_t* row, uint32_t* col) {
     *col = (lane >> 2) + ((j & 4u) ? 8u : 0u);
 }
 
-bool decode_tile(const uint16_t* trellis_words, uint32_t ka, bool half,
-                 float* out_row_major) {
+bool decode_tile(const uint16_t* trellis_words, uint32_t ka, bool half, float* out_row_major,
+                 bool affine) {
     if (trellis_words == nullptr || out_row_major == nullptr) return false;
     if (!layout_valid(ka, half)) return false;
     const uint32_t word_count = words_per_tile(ka, half) / 2u;
@@ -118,13 +125,14 @@ bool decode_tile(const uint16_t* trellis_words, uint32_t ka, bool half,
         tile_coords(t, &row, &col);
         const uint16_t state = state_from_ring(ring, word_count, t, ka, half);
         out_row_major[row * kTileSide + col] =
-            f32_from_f16_bits(codebook_f16_bits(state));
+            affine ? codebook_affine_value(state)
+                   : f32_from_f16_bits(codebook_f16_bits(state));
     }
     return true;
 }
 
 bool decode_rotated(const uint16_t* trellis, uint32_t k, uint32_t n, uint32_t ka, bool half,
-                    float* out_row_major) {
+                    float* out_row_major, bool affine) {
     if (trellis == nullptr || out_row_major == nullptr) return false;
     if (!layout_valid(ka, half)) return false;
     if ((k % kTileSide) != 0u || (n % kTileSide) != 0u) return false;
@@ -135,7 +143,7 @@ bool decode_rotated(const uint16_t* trellis, uint32_t k, uint32_t n, uint32_t ka
     for (uint32_t ti = 0; ti < kt; ++ti) {
         for (uint32_t tj = 0; tj < nt; ++tj) {
             const uint16_t* source = trellis + (static_cast<uint64_t>(ti) * nt + tj) * words;
-            if (!decode_tile(source, ka, half, tile)) return false;
+            if (!decode_tile(source, ka, half, tile, affine)) return false;
             for (uint32_t r = 0; r < kTileSide; ++r) {
                 float* dst = out_row_major + (static_cast<uint64_t>(ti) * kTileSide + r) * n +
                              static_cast<uint64_t>(tj) * kTileSide;
@@ -162,10 +170,11 @@ void hadamard128_inplace(float* values) {
 }
 
 bool dequant(const uint16_t* trellis, const uint16_t* suh_f16, const uint16_t* svh_f16,
-             uint32_t k, uint32_t n, uint32_t ka, bool half, float* out_row_major) {
+             uint32_t k, uint32_t n, uint32_t ka, bool half, float* out_row_major,
+             bool affine) {
     if (suh_f16 == nullptr || svh_f16 == nullptr) return false;
     if ((k % kHadamardBlock) != 0u || (n % kHadamardBlock) != 0u) return false;
-    if (!decode_rotated(trellis, k, n, ka, half, out_row_major)) return false;
+    if (!decode_rotated(trellis, k, n, ka, half, out_row_major, affine)) return false;
 
     float block[kHadamardBlock];
     for (uint32_t kb = 0u; kb < k / kHadamardBlock; ++kb) {

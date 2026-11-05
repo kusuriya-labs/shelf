@@ -50,16 +50,19 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
     for (uint32_t i = lane; i < word_count; i += 32u) ring[i] = source[i];
     __syncwarp();
 
+    uint32_t* tile32 = reinterpret_cast<uint32_t*>(tile);
 #pragma unroll
-    for (uint32_t j = 0u; j < 8u; ++j) {
-        const uint32_t position = lane * 8u + j;
-        const uint16_t state = exl3_detail::state_from_ring(
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        const uint32_t position = lane * 8u + p * 2u;
+        const uint16_t state0 = exl3_detail::state_from_ring(
             ring, word_count, position, args.ka, args.half);
-        const uint16_t bits = exl3_detail::codebook_f16_bits(state);
+        const uint16_t state1 = exl3_detail::state_from_ring(
+            ring, word_count, position + 1u, args.ka, args.half);
+        const uint32_t packed = exl3_detail::codebook_pair_h_bits(state0, state1);
         uint32_t row = 0;
         uint32_t col = 0;
         exl3_detail::tile_coords(position, &row, &col);
-        tile[col * 16u + row] = bits;
+        tile32[col * 8u + (row >> 1)] = packed;
     }
     __syncwarp();
 }
@@ -77,8 +80,10 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
 
     __shared__ __align__(16) __half xrot[kRowTile * kOutBlock];
     __shared__ __align__(16) SharedArea area;
+    __shared__ __align__(16) float rowsum[kRowTile];
 
     f32x8_t acc = f32x8_t{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    float row_acc[2] = {0.f, 0.f};
 
     const uint16_t* suh = static_cast<const uint16_t*>(args.suh);
     const uint16_t* svh = static_cast<const uint16_t*>(args.svh);
@@ -106,11 +111,17 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             float v2 = bf16_value(src + 2) * suh_v[2];
             float v3 = bf16_value(src + 3) * suh_v[3];
             exl3_detail::fwht128(v0, v1, v2, v3, lane);
+            const __half hv0 = __float2half(v0 * kInvSqrt128);
+            const __half hv1 = __float2half(v1 * kInvSqrt128);
+            const __half hv2 = __float2half(v2 * kInvSqrt128);
+            const __half hv3 = __float2half(v3 * kInvSqrt128);
+            row_acc[ri] += __half2float(hv0) + __half2float(hv1) +
+                           __half2float(hv2) + __half2float(hv3);
             __half* dst = xrot + r * kOutBlock + lane * 4u;
-            dst[0] = __float2half(v0 * kInvSqrt128);
-            dst[1] = __float2half(v1 * kInvSqrt128);
-            dst[2] = __float2half(v2 * kInvSqrt128);
-            dst[3] = __float2half(v3 * kInvSqrt128);
+            dst[0] = hv0;
+            dst[1] = hv1;
+            dst[2] = hv2;
+            dst[3] = hv3;
         }
         __syncthreads();
 
@@ -127,6 +138,16 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
         }
     }
 
+#pragma unroll
+    for (uint32_t ri = 0u; ri < 2u; ++ri) {
+        float sum = row_acc[ri];
+        sum += __shfl_down(sum, 16, 32);
+        sum += __shfl_down(sum, 8, 32);
+        sum += __shfl_down(sum, 4, 32);
+        sum += __shfl_down(sum, 2, 32);
+        sum += __shfl_down(sum, 1, 32);
+        if (lane == 0u) rowsum[warp * 2u + ri] = sum;
+    }
     __syncthreads();
 
 #pragma unroll
@@ -142,10 +163,11 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
         if (r >= active_rows) break;
         const uint32_t row = r0 + r;
         const float* src = area.accum + r * kOutBlock + lane * 4u;
-        float v0 = src[0];
-        float v1 = src[1];
-        float v2 = src[2];
-        float v3 = src[3];
+        const float bias = exl3_detail::kMul1BiasOverInv * rowsum[r];
+        float v0 = src[0] + bias;
+        float v1 = src[1] + bias;
+        float v2 = src[2] + bias;
+        float v3 = src[3] + bias;
         exl3_detail::fwht128(v0, v1, v2, v3, lane);
         const uint32_t col = n0 + lane * 4u;
         const float s0 = __half2float(__ushort_as_half(svh[col + 0]));
@@ -154,10 +176,11 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
         const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
         const uint64_t out_base =
             static_cast<uint64_t>(row) * args.output_row_stride + col;
-        const float y0 = v0 * kInvSqrt128 * s0;
-        const float y1 = v1 * kInvSqrt128 * s1;
-        const float y2 = v2 * kInvSqrt128 * s2;
-        const float y3 = v3 * kInvSqrt128 * s3;
+        const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+        const float y0 = v0 * scale * s0;
+        const float y1 = v1 * scale * s1;
+        const float y2 = v2 * scale * s2;
+        const float y3 = v3 * scale * s3;
         if (args.output_dtype == 0u) {
             shelf::bf16_t* dst = static_cast<shelf::bf16_t*>(args.output) + out_base;
             dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};

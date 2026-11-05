@@ -186,7 +186,7 @@ static bool run_case(const Case& c) {
 
     std::vector<float> weight(static_cast<std::size_t>(c.k) * c.n);
     if (!dequant(trellis.data(), suh.data(), svh.data(), c.k, c.n, c.ka, c.half,
-                 weight.data())) {
+                 weight.data(), true)) {
         check(false, std::string(c.tag) + " cpu dequant");
         return false;
     }

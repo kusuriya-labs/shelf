@@ -7,6 +7,10 @@
 
 namespace shelf::kernel::exl3_detail {
 
+constexpr float kMul1Inv = 0.00676727294921875f;
+constexpr float kMul1Bias = -10.3828125f;
+constexpr float kMul1BiasOverInv = kMul1Bias / kMul1Inv;
+
 __device__ __forceinline__ uint16_t state_from_ring(const uint32_t* ring, uint32_t word_count,
                                                     uint32_t position, uint32_t ka,
                                                     uint32_t half) {
@@ -37,6 +41,13 @@ __device__ __forceinline__ uint16_t codebook_f16_bits(uint32_t state) {
     const __half k_inv = __ushort_as_half(0x1EEEu);
     const __half k_bias = __ushort_as_half(0xC931u);
     return __half_as_ushort(__hfma(h, k_inv, k_bias));
+}
+
+__device__ __forceinline__ uint32_t codebook_pair_h_bits(uint32_t state0, uint32_t state1) {
+    const uint32_t p0 = state0 * 0x83DCD12Du;
+    const uint32_t p1 = state1 * 0x83DCD12Du;
+    const uint32_t sum0 = __builtin_amdgcn_sad_u8(p0, 0u, 0x64006400u);
+    return __builtin_amdgcn_sad_hi_u8(p1, 0u, sum0);
 }
 
 __device__ __forceinline__ void fwht128(float& v0, float& v1, float& v2, float& v3,
