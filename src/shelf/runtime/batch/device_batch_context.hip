@@ -98,4 +98,13 @@ Status launch_prepare_batch_descriptor(DeviceBatchContext* ctx, uint32_t max_req
     if (err != hipSuccess) return Status::hip_error("prepare_batch_descriptor", hipGetErrorString(err), __FILE__, __LINE__);
     return Status::make_ok();
 }
+
+// A descriptor with no requests: every thread returns without touching the batch. Launching
+// it once loads the kernel, so the first real batch is not the first launch of its module.
+void warm_prepare_batch_descriptor(DeviceBatchContext* ctx, hipStream_t stream) {
+    if (ctx == nullptr) return;
+    constexpr uint32_t kBlock = 256;
+    hipLaunchKernelGGL(prepare_batch_descriptor_kernel, dim3(1), dim3(kBlock), 0, stream, ctx);
+    hipGetLastError();
+}
 }

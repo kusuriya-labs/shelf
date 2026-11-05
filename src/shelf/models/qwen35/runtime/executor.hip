@@ -2244,6 +2244,8 @@ Result<Executor> create_executor(
         ex.program_set = std::move(built_set);
         ex.program_set_ready = true;
 
+        ::shelf::runtime::warm_prepare_batch_descriptor(ex.batch_context, upload_stream);
+
         hipError_t serr = hipStreamSynchronize(upload_stream);
         if (serr != hipSuccess) {
             shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));

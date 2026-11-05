@@ -292,10 +292,13 @@ int main() {
                 static_cast<unsigned long long>(2ull * m->layers.size()),
                 static_cast<unsigned long long>(fold_exact_layers));
     if (mtp_bytes != 0u)
-        std::printf("MTP expert planes %.3f GiB (plan sum), fc %llu x %llu\n",
+        std::printf("MTP expert planes %.3f GiB (plan sum), fc %llu x %llu, "
+                    "w13 row_ref_exact=%d w2 row_ref_exact=%d\n",
                     static_cast<double>(mtp_bytes) / (1 << 30),
                     static_cast<unsigned long long>(m->mtp.fc.rows),
-                    static_cast<unsigned long long>(m->mtp.fc.cols));
+                    static_cast<unsigned long long>(m->mtp.fc.cols),
+                    m->mtp.layer.ffn.expert_w13.row_ref_exact ? 1 : 0,
+                    m->mtp.layer.ffn.expert_w2.row_ref_exact ? 1 : 0);
     check(gpu_arena.used() >= expert_bytes + mtp_bytes,
           "arena use covers the expert planes");
 

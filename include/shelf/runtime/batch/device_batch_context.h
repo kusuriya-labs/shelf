@@ -84,4 +84,8 @@ Result<DeviceBatchContextStorage> create_device_batch_context(gpu::GpuArena& are
 Status destroy_device_batch_context(DeviceBatchContextStorage& storage) noexcept;
 Status launch_prepare_batch_descriptor(DeviceBatchContext* ctx, uint32_t max_requests, hipStream_t stream);
 
+// A descriptor with no requests: every thread returns without touching the batch. Launching
+// it once loads the kernel, so the first real batch is not the first launch of its module.
+void warm_prepare_batch_descriptor(DeviceBatchContext* ctx, hipStream_t stream);
+
 }
