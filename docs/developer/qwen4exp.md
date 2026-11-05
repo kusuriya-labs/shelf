@@ -189,9 +189,8 @@ attn HyperConnection mix
 - shared expert は gate_proj / up_proj / down_proj の dense EXL3 linear と
   `shared_expert_gate` の sigmoid で表現する。
 - `MoeCombineNode` が expert の部分和と shared expert を token row に戻す。
-- QSA（full_attention）層は sparse attention の mask 入力が入るまで `unsupported` とする。
-  indexer の graph lowering と key state は実装済みで、残るのは paged attention への
-  token mask 適用である。
+- QSA（full_attention）層は `PagedAttentionNode` が token mask を入力に持たないため
+  `unsupported` とする。indexer の graph lowering と key state はこの層の外で接続できる。
 
 `test_qwen4exp_layer` は GDN 層について次を固定する。
 
@@ -294,9 +293,6 @@ multi-sequence 用に次の batch kernel を追加した。
 
 `test_qsa_state_pool` は 2 sequence の key cache を CPU 参照と比較し、
 scores / top-k / mask と slot copy を検証する。
-
-残りは top-k の性能版、`PagedAttention` への token mask 入力、
-QSA 層全体の lowering、4 stream を運ぶ runtime state の接続である。
 
 ## 3. routed expert plane
 
