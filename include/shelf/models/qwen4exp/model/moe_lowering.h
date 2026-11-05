@@ -17,6 +17,9 @@ struct Qwen4ExpMoeLoweringGeometry {
     std::uint32_t hidden = 0;
     std::uint32_t intermediate = 0;
     std::uint32_t shared_intermediate = 0;
+    // The shared expert is replicated on every rank. Only one rank contributes it before
+    // the TP sum; the others scale it to zero.
+    float shared_scale = 1.0f;
 };
 
 struct Qwen4ExpMoeLoweringIndices {

@@ -560,6 +560,23 @@ Result<PendingBatch> submit_co_batch(
     auto vst = validate_scheduled_batch(batch, executor.config.max_batch_rows, executor.config.max_scheduled_requests);
     if (!vst.ok()) return vst;
 
+    // Qwen4Exp model-level state starts at the first scheduled token of a sequence. A
+    // continuing prefill chunk or a decode step leaves it alone.
+    if (executor.qsa_state_pool != nullptr || executor.ple_conv_state_pool != nullptr) {
+        for (uint32_t i = 0; i < batch.num_requests; ++i) {
+            const auto* sequence = batch.requests[i].sequence;
+            if (sequence == nullptr || sequence->position != 0u) continue;
+            if (executor.qsa_state_pool != nullptr) {
+                Status rst = executor.qsa_state_pool->reset(sequence->slot, stream);
+                if (!rst.ok()) return rst;
+            }
+            if (executor.ple_conv_state_pool != nullptr) {
+                Status rst = executor.ple_conv_state_pool->reset(sequence->slot, stream);
+                if (!rst.ok()) return rst;
+            }
+        }
+    }
+
     const uint32_t N = batch.num_tokens;
     const uint32_t R = batch.num_requests;
 
@@ -869,6 +886,7 @@ Result<PendingBatch> submit_co_batch(
         N > 0 &&
         graph_slot_idx >= 0 &&
         executor.value_trace == nullptr &&
+        !executor.external_input_preparer &&
         !spec_verify_without_history &&
         !tree_batch &&
         exec_role == ::shelf::runtime::ExecutionRole::Decode;
@@ -920,6 +938,29 @@ Result<PendingBatch> submit_co_batch(
         stq = ::shelf::runtime::launch_prepare_batch_descriptor(
             executor.batch_context, executor.config.max_scheduled_requests, stream);
         if (!stq.ok()) return stq;
+
+        if (executor.external_input_preparer &&
+            executor.input_hidden.data<void>() != nullptr) {
+            std::vector<bf16_t> host;
+            stq = executor.external_input_preparer(batch, host);
+            if (!stq.ok()) return stq;
+            const std::size_t expected =
+                static_cast<std::size_t>(N) * executor.model.config->hidden_size;
+            if (host.size() != expected) {
+                return Status::invalid_state(
+                    "external input preparer returned a wrong row count", __FILE__,
+                    __LINE__);
+            }
+            const hipError_t copy_error =
+                hipMemcpyAsync(executor.input_hidden.data<void>(), host.data(),
+                               host.size() * sizeof(bf16_t), hipMemcpyHostToDevice,
+                               stream);
+            if (copy_error != hipSuccess) {
+                return Status::hip_error("external input upload",
+                                         hipGetErrorString(copy_error), __FILE__,
+                                         __LINE__);
+            }
+        }
 
         stq = launch_program_run(executor, *program, ctx, stream, dispatch_count);
         if (!stq.ok()) return stq;
@@ -1092,6 +1133,9 @@ Executor::Executor(Executor&& other) noexcept
       sequence_pool(other.sequence_pool),
       gdn_state_pool(other.gdn_state_pool),
       kv_pool(other.kv_pool),
+      qsa_state_pool(std::move(other.qsa_state_pool)),
+      ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
+      external_input_preparer(std::move(other.external_input_preparer)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1212,6 +1256,9 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         sequence_pool = other.sequence_pool;
         gdn_state_pool = other.gdn_state_pool;
         kv_pool = other.kv_pool;
+        qsa_state_pool = std::move(other.qsa_state_pool);
+        ple_conv_state_pool = std::move(other.ple_conv_state_pool);
+        external_input_preparer = std::move(other.external_input_preparer);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1315,6 +1362,9 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.sequence_pool = nullptr;
         other.gdn_state_pool = nullptr;
         other.kv_pool = nullptr;
+        other.qsa_state_pool.reset();
+        other.ple_conv_state_pool.reset();
+        other.external_input_preparer = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -1499,6 +1549,9 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.sequence_pool = nullptr;
     ex.gdn_state_pool = nullptr;
     ex.kv_pool = nullptr;
+    ex.qsa_state_pool.reset();
+    ex.ple_conv_state_pool.reset();
+    ex.external_input_preparer = nullptr;
     ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};
@@ -1670,10 +1723,14 @@ Result<Executor> create_executor(
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc = *input.model.config;
     {
-        auto expected_gdn_result = make_qwen35_gdn_state_layout_stage(
-            tc, config.stage, config.tp != nullptr ? config.tp->tp_size : 1u);
-        if (!expected_gdn_result.ok()) return expected_gdn_result.status();
-        const GdnStatePoolLayout& expected_gdn = expected_gdn_result.value();
+        const GdnStatePoolLayout expected_storage =
+            make_qwen35_gdn_state_layout_local(
+                tc, qwen35_stage_gdn_layers(tc, config.stage),
+                config.tp != nullptr ? config.tp->local_gdn_key_heads
+                                     : static_cast<std::uint32_t>(tc.linear_num_key_heads),
+                config.tp != nullptr ? config.tp->local_gdn_value_heads
+                                     : static_cast<std::uint32_t>(tc.linear_num_value_heads));
+        const GdnStatePoolLayout& expected_gdn = expected_storage;
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||
@@ -1887,10 +1944,40 @@ Result<Executor> create_executor(
     }
 #endif
 
+    if (input.uses_qsa_state) {
+        auto pool = ::shelf::state::QsaKeyStatePool::create(
+            arena, sequence_pool.max_sequences(),
+            ::shelf::state::QsaKeyStatePoolLayout::make(
+                input.qsa_layers, 128u, input.qsa_compress_ratio, input.qsa_max_blocks));
+        if (!pool.ok()) return pool.status();
+        ex.qsa_state_pool =
+            std::make_unique<::shelf::state::QsaKeyStatePool>(pool.release());
+    }
+    if (input.uses_ple_conv_state) {
+        auto pool = ::shelf::state::PleConvStatePool::create(
+            arena, sequence_pool.max_sequences(),
+            ::shelf::state::PleConvStatePoolLayout::make(input.ple_conv_layers,
+                                                         input.ple_conv_channels));
+        if (!pool.ok()) return pool.status();
+        ex.ple_conv_state_pool =
+            std::make_unique<::shelf::state::PleConvStatePool>(pool.release());
+    }
     {
         ::shelf::kernel::ModelDispatchStateView ms{};
         ms.block_table = sequence_pool.device_view();
         ms.gdn = gdn_state_pool.device_view();
+        if (ex.qsa_state_pool != nullptr) ms.qsa = ex.qsa_state_pool->device_view();
+        if (ex.ple_conv_state_pool != nullptr) {
+            const auto view = ex.ple_conv_state_pool->device_view();
+            ms.ple_conv = ::shelf::kernel::PleConvStateView{
+                .base = view.base,
+                .max_sequences = view.max_sequences,
+                .channels = view.channels,
+                .slot_stride = view.slot_stride,
+                .layer_stride = view.layer_stride,
+                .history_stride = view.history_stride,
+            };
+        }
         if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
             ms.kv_fp8 = make_paged_kv_fp8_view(kv_pool);
         } else {

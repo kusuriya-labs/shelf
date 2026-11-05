@@ -588,8 +588,39 @@ Gate B として、QSA の token mask を paged attention に適用した。
 - `test_qwen4exp_qsa_layer` が QSA 層の mask 生成、mask 消費、sigmoid gate、
   MoE 接続を固定する。
 
-残りは Qwen4Exp executor、全 48 層の model lowering、4 stream を運ぶ runtime state の
-接続である。
+Gate C として、Qwen4Exp の executor と全 48 層を接続した。
+
+- `Qwen4ExpModel` と `lower_qwen4exp_to_primitives` を追加した。
+  embedding を 4 stream に複製し、HyperConnection / GDN / QSA / PLE / MoE /
+  final mixer / lm_head を 1 graph にする。
+- PLE の gate を参照実装に合わせて per-stream dot に修正した。
+  `PLE_STREAM_DOT` は stream ごとに hidden 方向の dot を取る。
+- 最終 head は final norm なしで lm_head に入る。
+- TP=2 は expert 軸のみ分割するため、shared expert は rank0 だけが寄与し、
+  `MOE_COMBINE` で TP 集約する。
+- GDN state layout を rank context の local head 数から作るようにした。
+  Qwen4Exp の GDN は複製なので、TP=2 でも 16/48 head のままである。
+- `QsaKeyStatePool` と `PleConvStatePool` を executor が所有し、
+  `position == 0` の最初の step で zero にする。
+- PLE embedding は `PleInputRuntime` が sequence ごとの token history から
+  CPU で 16 行を gather し、executor が 2 番目の external input に upload する。
+- Qwen4Exp では prefix cache と MTP / DFlash2 を無効にした。
+
+実 checkpoint の実行結果:
+
+```text
+PROMPT: The capital of France is
+GENERATED: Paris. The capital
+PROMPT_TOKENS=5
+GENERATED_TOKENS=4
+PREFILL_MS=636.2
+DECODE_MS=1606.0
+DECODE_TOKENS_PER_SEC=1.87
+```
+
+decode 1.87 tok/s は最適化前の参照値である。elementwise / RMSNorm の
+allowlist に Qwen4Exp の幅（320 / 640 / 2560 / 10240）がまだ一部なく、
+correctness path に落ちる演算がある。数値と生成結果は正しい。
 
 #### 結論
 

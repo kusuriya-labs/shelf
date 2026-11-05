@@ -50,6 +50,8 @@ inline constexpr const char* kElementwiseMulF32F32Bf16Symbol =
     "shelf_mul_f32_f32_bf16";
 inline constexpr const char* kElementwiseScaleF32Symbol =
     "shelf_scale_f32";
+inline constexpr const char* kElementwiseScaleBf16Symbol =
+    "shelf_scale_bf16";
 inline constexpr const char* kElementwiseSiluBf16ToF32Symbol =
     "shelf_silu_bf16_f32";
 inline constexpr const char* kElementwiseSiluF32ToBf16Symbol =
@@ -128,6 +130,11 @@ hipError_t launch_mul_f32_f32_bf16(
 hipError_t launch_scale_f32(
     const float* input, uint32_t input_row_stride,
     float* output, uint32_t output_row_stride,
+    uint32_t rows, uint32_t features, float scale, hipStream_t stream);
+
+hipError_t launch_scale_bf16(
+    const bf16_t* input, uint32_t input_row_stride,
+    bf16_t* output, uint32_t output_row_stride,
     uint32_t rows, uint32_t features, float scale, hipStream_t stream);
 
 hipError_t launch_split_bf16(

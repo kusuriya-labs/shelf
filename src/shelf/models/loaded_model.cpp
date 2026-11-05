@@ -4,6 +4,7 @@
 #include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
+#include <shelf/models/qwen4exp/model/lower_to_primitives.h>
 
 #include <cstdint>
 #include <span>
@@ -13,6 +14,10 @@
 namespace shelf::models {
 
 const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const noexcept {
+    if (qwen4exp_ != nullptr) {
+        return static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
+            qwen4exp_->text_config());
+    }
     return moe_ != nullptr ? static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
                                  moe_->text_config())
                            : static_cast<const shelf::qwen_hybrid::QwenHybridConfig&>(
@@ -20,10 +25,12 @@ const shelf::qwen_hybrid::QwenHybridConfig& LoadedModel::hybrid_config() const n
 }
 
 const shelf::weights::MatrixWeight& LoadedModel::embed_tokens() const noexcept {
+    if (qwen4exp_ != nullptr) return qwen4exp_->weights().embed_tokens;
     return moe_ != nullptr ? moe_->weights().embed_tokens : dense_->weights().embed_tokens;
 }
 
 const shelf::weights::MatrixWeight& LoadedModel::lm_head() const noexcept {
+    if (qwen4exp_ != nullptr) return qwen4exp_->weights().lm_head;
     return moe_ != nullptr ? moe_->weights().lm_head : dense_->weights().lm_head;
 }
 
@@ -36,13 +43,16 @@ Result<LoadedModel> LoadedModel::load(
 
     auto family_result = probe_model_dir(model_dir);
     if (!family_result.ok()) return family_result.status();
-    if (family_result.value() == ModelFamily::Qwen4Exp) {
-        return Status::unsupported(
-            "Qwen4Exp is loaded by shelf_qwen4exp; its executor is not wired yet",
-            __FILE__, __LINE__);
-    }
-
     LoadedModel out;
+    if (family_result.value() == ModelFamily::Qwen4Exp) {
+        auto loaded = shelf::qwen4exp::Qwen4ExpModel::load_from_safetensors(
+            model_dir, 1u, 0u, arena, stream, shelf::qwen4exp::Qwen4ExpLoadOptions{});
+        if (!loaded.ok()) return loaded.status();
+        out.owns_qwen4exp_ =
+            std::make_unique<shelf::qwen4exp::Qwen4ExpModel>(loaded.release());
+        out.qwen4exp_ = out.owns_qwen4exp_.get();
+        return out;
+    }
     if (family_result.value() == ModelFamily::Moe) {
         shelf::qwen35moe::Qwen35MoeLoadOptions options;
         options.verify_quantized_payload_crc = verify_payload_crc;
@@ -79,6 +89,12 @@ LoadedModel LoadedModel::borrow(const shelf::qwen35moe::Qwen35MoeModel& model) {
     return out;
 }
 
+LoadedModel LoadedModel::borrow(const shelf::qwen4exp::Qwen4ExpModel& model) {
+    LoadedModel out;
+    out.qwen4exp_ = &model;
+    return out;
+}
+
 std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,
@@ -94,11 +110,13 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     // The dense FFN term of the shared estimate stands in for the FFN activations that
     // still sit at token rows: for a model with grouped experts those are its shared expert.
     const std::size_t token_row_ffn =
-        moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
-                        : dense_->text_config().ffn.intermediate_size;
+        qwen4exp_ != nullptr ? qwen4exp_->text_config().ffn.shared_expert_intermediate_size
+        : moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
+                          : dense_->text_config().ffn.intermediate_size;
     const bool exl3 =
-        moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
-                        : shelf::qwen35::uses_exl3_linear(dense_->weights());
+        qwen4exp_ != nullptr ? true
+        : moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
+                          : shelf::qwen35::uses_exl3_linear(dense_->weights());
     std::size_t total = shelf::qwen35::runtime::qwen35_executor_reserve_bytes(
         hybrid_config(), token_row_ffn, reserve_config, tp_size, exl3);
     if (moe_ != nullptr)
@@ -114,6 +132,11 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
     gpu::GpuArena& arena,
     const shelf::qwen35::ExecutorConfig& config) const {
 
+    if (qwen4exp_ != nullptr) {
+        return Status::unsupported(
+            "Qwen4Exp runs through the tensor-parallel rank model, not LoadedModel",
+            __FILE__, __LINE__);
+    }
     if (dense_ != nullptr) {
         return shelf::qwen35::create_model_executor(*dense_, sequence_pool, gdn_state_pool,
                                                     kv_pool, arena, config);
@@ -161,6 +184,7 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
 }  // namespace
 
 bool LoadedModel::has_mtp_block() const noexcept {
+    if (qwen4exp_ != nullptr) return false;
     if (moe_ != nullptr) return moe_->weights().mtp.present;
     return dense_ != nullptr && dense_->weights().mtp.present;
 }

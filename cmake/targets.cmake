@@ -166,6 +166,7 @@ add_library(shelf_inference_state STATIC
     src/shelf/inference/state/sequence_slot_pool.cpp
     src/shelf/inference/state/gdn_state_pool.cpp
     src/shelf/inference/state/qsa_state_pool.cpp
+    src/shelf/inference/state/ple_conv_state_pool.cpp
     src/shelf/inference/state/paged_kv_pool.cpp
 )
 target_compile_features(shelf_inference_state PRIVATE cxx_std_20)
@@ -305,12 +306,16 @@ target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=
 set(
     SHELF_QWEN4EXP_SOURCES
     src/shelf/models/qwen4exp/model/qwen4exp_config.cpp
+    src/shelf/models/qwen4exp/model/qwen4exp_model.cpp
+    src/shelf/models/qwen4exp/model/lower_to_primitives.cpp
     src/shelf/models/qwen4exp/model/hyper_connection_lowering.cpp
     src/shelf/models/qwen4exp/model/moe_lowering.cpp
     src/shelf/models/qwen4exp/model/layer_lowering.cpp
     src/shelf/models/qwen4exp/model/ple_lowering.cpp
     src/shelf/models/qwen4exp/model/qsa_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
+    src/shelf/models/qwen4exp/runtime/ple_input.cpp
+    src/shelf/models/qwen4exp/runtime/ple_input.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
 )
 
@@ -332,7 +337,7 @@ add_library(shelf_models STATIC
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_gpu)
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen4exp shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC

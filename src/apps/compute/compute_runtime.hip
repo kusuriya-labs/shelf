@@ -125,6 +125,22 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::unsupported(
             "pipeline parallel requires tp 1", __FILE__, __LINE__);
     }
+    {
+        auto family = shelf::models::probe_model_dir(config_.model_dir);
+        if (!family.ok()) return family.status();
+        if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
+            if (config_.tp < 2) {
+                return Status::unsupported(
+                    "Qwen4Exp requires --tensor-parallel 2", __FILE__, __LINE__);
+            }
+            // The PLE token history is built from the scheduled rows; a prefix cache that
+            // restores tokens the history never saw would make the n-gram rows wrong.
+            config_.prefix_cache = false;
+            config_.mtp = false;
+            config_.dflash2_model_dir.clear();
+            config_.draft_config_ready = false;
+        }
+    }
 
     int dev_count = 0;
     if (hipGetDeviceCount(&dev_count) != hipSuccess || dev_count == 0) {
@@ -437,6 +453,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     exec_config.target_hidden_taps = config_.target_hidden_taps;
     exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config_.tp_combine_f32;
+    exec_config.max_context_tokens = config_.max_seq_len + 1u;
     exec_config.backend = config_.decode_backend;
     exec_config.emit_normed_token_hidden = config_.mtp;
     if (config_.rope_profile.has_value()) {

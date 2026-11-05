@@ -132,8 +132,15 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         RT::SwiGluNode n{RT::RowwiseShapeKey{geometry.shared_intermediate}};
         em.emit(RT::PrimitiveNode{n}, {shared_gate, shared_up}, {shared_act});
     }
-    const RT::ValueId shared_out =
+    RT::ValueId shared_out =
         em.linear(weights.shared_down_proj, indices.w_shared_down_proj, shared_act);
+    if (geometry.shared_scale != 1.0f) {
+        RT::ValueId scaled = em.value(geometry.hidden);
+        em.emit(RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{geometry.hidden},
+                                                geometry.shared_scale}},
+                {shared_out}, {scaled});
+        shared_out = scaled;
+    }
     const RT::ValueId shared_logit =
         em.linear(weights.shared_gate, indices.w_shared_gate, post_norm,
                   RT::ValueDType::F32);
@@ -150,6 +157,9 @@ Result<RT::ValueId> emit_qwen4exp_moe(Emitter& em,
         n.top_k = geometry.top_k;
         em.emit(RT::PrimitiveNode{n}, {expert_out, shared_out, shared_weight}, {output});
     }
+    // The routed experts are an expert-axis partial sum; the shared expert is already
+    // complete on the contributing rank.
+    em.pg.nodes.back().tp_combine = 1;
     return output;
 }
 

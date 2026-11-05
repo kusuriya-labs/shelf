@@ -132,9 +132,10 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
 
-    auto gdn_layout_result =
-        make_qwen35_gdn_state_layout_tp(tc, config.tp_size);
-    if (!gdn_layout_result.ok()) return gdn_layout_result.status();
+    const auto& rank_context = rank->context();
+    const auto gdn_layout_result = make_qwen35_gdn_state_layout_local(
+        tc, qwen35_stage_gdn_layers(tc, {}), rank_context.local_gdn_key_heads,
+        rank_context.local_gdn_value_heads);
 
     if (config.load_private_weights && config.tp_rank == 0u) {
         Status private_status = config.load_private_weights(
@@ -150,7 +151,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     auto gdn_result = GdnStatePool::create(rank->arena_.value(),
                                            config.max_scheduled_requests,
-                                           gdn_layout_result.value());
+                                           gdn_layout_result);
     if (!gdn_result.ok()) return gdn_result.status();
     rank->gdn_pool_.emplace(gdn_result.release());
 
@@ -201,7 +202,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             .dtype = config.kv_cache_dtype,
         };
         const PrefixCacheBytes prefix_bytes = prefix_cache_bytes(
-            prefix_config, gdn_layout_result.value(), prefix_geometry);
+            prefix_config, gdn_layout_result, prefix_geometry);
         reserved += prefix_bytes.hot_total();
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
                      gpu::format_gib(prefix_bytes.hot_total()).c_str());
@@ -282,6 +283,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.target_hidden_taps = config.target_hidden_taps;
     exec_config.target_hidden_tap_count = config.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config.tp_combine_f32;
+    exec_config.max_context_tokens = config.max_seq_len + 1u;
     exec_config.rope_profile = config.rope_profile;
     exec_config.tp = &rank->context();
 

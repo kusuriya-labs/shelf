@@ -671,6 +671,16 @@ Result<std::vector<float>> PleTable::gather(const std::vector<std::int32_t>& his
     return out;
 }
 
+Result<std::vector<bf16_t>> PleTable::gather_bf16(
+    const std::vector<std::int32_t>& history, std::size_t out_len) const {
+    auto floats = gather(history, out_len);
+    if (!floats.ok()) return floats.status();
+    std::vector<bf16_t> out(floats.value().size());
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i].data = shelf::f32_to_bf16_rne(floats.value()[i]);
+    return out;
+}
+
 Result<std::vector<std::uint8_t>> PleTable::read_source_row(const std::string& model_dir,
                                                             std::uint64_t row) const {
     if (row >= rows_ || shard_rows_ == 0u) {

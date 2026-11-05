@@ -1,5 +1,6 @@
 #pragma once
 
+#include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_config.h>
 
@@ -65,6 +66,10 @@ public:
     // concatenated per position. Used to validate the row layout and the hash.
     Result<std::vector<float>> gather(const std::vector<std::int32_t>& history,
                                       std::size_t out_len) const;
+
+    // Same gather, rounded once to BF16 for the graph's PLE external input.
+    Result<std::vector<bf16_t>> gather_bf16(const std::vector<std::int32_t>& history,
+                                            std::size_t out_len) const;
 
     // Re-read one packaged row from the source file. Validation only.
     Result<std::vector<std::uint8_t>> read_source_row(const std::string& model_dir,

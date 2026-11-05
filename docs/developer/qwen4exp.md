@@ -1,8 +1,7 @@
-# Qwen4Exp (Qwen3.8-Flash-Next) load contract
+# Qwen4Exp (Qwen3.8-Flash-Next) contract
 
-Qwen3.8-Flash-Next の `model_type=qwen4_exp` checkpoint を読むための現在の contract である。
-forward/executor はまだ接続していない。ロードだけを行う `shelf_qwen4exp` と、
-実 checkpoint を検証する `test_qwen4exp_load` が対象である。
+Qwen3.8-Flash-Next の `model_type=qwen4_exp` checkpoint を読み、text-only で実行する
+ための現在の contract である。対象は TP=2、BF16 KV、48 層、PLE 有効である。
 
 ## 1. identity と probe
 
@@ -11,9 +10,9 @@ checkpoint を Qwen4Exp と判定する。判定は構造で行い、`model_type
 code path を選ばない。`model_type` は allowlist gate であり、`qwen4_exp` と
 `qwen4_exp_text` を受理する。
 
-`probe_model_dir` は `ModelFamily::Qwen4Exp` を返す。既存の `LoadedModel`、
-tensor-parallel coordinator、pipeline parallel は Qwen4Exp を明示的に拒否する。
-Qwen4Exp の executor を接続するまで、`shelf-compute` からは起動できない。
+`probe_model_dir` は `ModelFamily::Qwen4Exp` を返す。`shelf-compute` は
+`--tensor-parallel 2` で起動し、TP=1 と pipeline parallel は拒否する。
+Qwen4Exp では prefix cache と MTP / DFlash2 を無効にする。
 
 ## 2. TP=2 のロード
 
@@ -325,6 +324,51 @@ prefill region は decode kernel で処理する。tree ancestor の token も�
 
 `test_qsa_attention_mask` は mask 付き attention を CPU 参照と比較する。
 `test_paged_attention_plan_splits` は mask が prefill / split を無効にすることを固定する。
+
+## 2-7. model と executor
+
+`Qwen4ExpModel` が rank の重みと config を保持する。
+`lower_qwen4exp_to_primitives` が 1 rank の全 48 層を 1 つの primitive graph にする。
+
+```text
+embedding -> REPEAT_STREAMS(hc)
+for each layer:
+  PLE (layer 1 のみ)
+  attn HyperConnection mix
+  GDN または QSA
+  HyperConnection apply
+  mlp HyperConnection mix
+  MoE
+  HyperConnection apply
+final hyper_connection_mixer
+lm_head (final norm なし)
+```
+
+- embedding は hc 個の同一 stream へ複製する。
+- QSA 層は indexer の mask を paged attention に渡す。
+- routed expert は layer ごとに rank の local expert plane を使う。
+- shared expert は rank0 だけが寄与し、`MOE_COMBINE` を TP で集約する。
+- PLE embedding は graph の 2 番目の external input である。
+
+`create_qwen4exp_model_executor` が次を作る。
+
+| state | 内容 |
+| --- | --- |
+| QSA key state | `QsaKeyStatePool`（12 QSA 層） |
+| PLE conv state | `PleConvStatePool`（1 PLE 層） |
+| PLE input | `PleInputRuntime` が sequence ごとの token history から 16 n-gram 行を gather |
+
+新しい sequence の最初の step（`position == 0`）で QSA / PLE state を zero にする。
+prefix cache を無効にする理由は、PLE の n-gram history が cache から復元された
+prefix token を持たないためである。
+
+起動例:
+
+```bash
+./build/shelf-compute --model-dir /mnt/Qwen3.8-Flash-Next-exl3 \
+  --input-ids-file prompt.txt --max-new-tokens 4 --max-seq-len 64 \
+  --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16
+```
 
 ## 3. routed expert plane
 

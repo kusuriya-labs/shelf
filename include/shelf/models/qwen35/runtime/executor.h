@@ -8,6 +8,8 @@
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/execution_types.h>
 #include <shelf/models/qwen35/state/state_types.h>
+#include <shelf/inference/state/qsa_state_pool.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
 #include <shelf/models/qwen35/runtime/gdn_spec_history.h>
 #include <shelf/runtime/batch/device_batch_context.h>
 #include <shelf/runtime/program/program.h>
@@ -21,6 +23,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
@@ -45,6 +48,9 @@ struct ExecutorConfig {
     std::array<uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     uint32_t target_hidden_tap_count = 0;
     uint32_t tp_combine_f32 = 0;
+    // Maximum cached context the model-level graphs size their state from. Qwen4Exp uses
+    // it for the QSA indexer capacity; the Qwen35 families ignore it.
+    uint32_t max_context_tokens = 0;
     runtime::DecodeBackend backend = runtime::DecodeBackend::Hip;
     const Qwen35TensorParallelContext* tp = nullptr;
     EffectiveRopeProfile rope_profile;
@@ -80,7 +86,21 @@ struct ExecutorModelInput {
     RuntimeModelView model;
     shelf::qwen_hybrid::HybridLoweredPrimitives lowered;
     std::vector<LayerOverrideSource> layer_overrides;
+
+    // Qwen4Exp model-level state that is not part of the GDN / KV pools.
+    bool uses_qsa_state = false;
+    std::uint32_t qsa_layers = 0;
+    std::uint32_t qsa_max_blocks = 0;
+    std::uint32_t qsa_compress_ratio = 0;
+    bool uses_ple_conv_state = false;
+    std::uint32_t ple_conv_layers = 0;
+    std::uint32_t ple_conv_channels = 0;
 };
+
+// Prepares the extra external input (the PLE embedding rows) for one batch. The executor
+// owns no PLE policy: the family that has PLE supplies this hook.
+using ExternalInputPreparer =
+    std::function<Status(const ScheduledBatch&, std::vector<bf16_t>&)>;
 
 struct GraphCacheSlot {
     hipGraphExec_t exec = nullptr;
@@ -119,6 +139,9 @@ struct Executor {
     SequenceSlotPool* sequence_pool = nullptr;
     GdnStatePool* gdn_state_pool = nullptr;
     PagedKVPool* kv_pool = nullptr;
+    std::unique_ptr<::shelf::state::QsaKeyStatePool> qsa_state_pool;
+    std::unique_ptr<::shelf::state::PleConvStatePool> ple_conv_state_pool;
+    ExternalInputPreparer external_input_preparer;
 
     ExecutorConfig config;
 

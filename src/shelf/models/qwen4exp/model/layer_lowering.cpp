@@ -40,8 +40,11 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
         em, layer.hyper, input_hyper, attn_out, attn_mix.value().injection, debug_prefix);
     if (!hyper_after_attn.ok()) return hyper_after_attn.status();
 
+    HyperConnectionSiteGeometry mlp_hyper = layer.hyper;
+    if (layer.mlp_hyper_norm_parameter_index != UINT32_MAX)
+        mlp_hyper.norm_parameter_index = layer.mlp_hyper_norm_parameter_index;
     auto mlp_mix = emit_hyper_connection_mix(
-        em, layer.hyper, layer.mlp_hyper_weights, layer.mlp_hyper_indices,
+        em, mlp_hyper, layer.mlp_hyper_weights, layer.mlp_hyper_indices,
         hyper_after_attn.value(), true, debug_prefix);
     if (!mlp_mix.ok()) return mlp_mix.status();
 

@@ -17,6 +17,8 @@ struct Qwen4ExpLayerLowering {
     bool is_gdn = false;
 
     HyperConnectionSiteGeometry hyper;
+    // The MLP site has its own hc_norm. When unset, the attention norm is reused.
+    std::uint32_t mlp_hyper_norm_parameter_index = UINT32_MAX;
     HyperConnectionSiteWeights attn_hyper_weights;
     HyperConnectionSiteIndices attn_hyper_indices;
     HyperConnectionSiteWeights mlp_hyper_weights;
