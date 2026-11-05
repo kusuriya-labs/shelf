@@ -681,7 +681,40 @@ production:
 WMMA / loop の floor（A+B 除去で 1.76〜2.18 ms）である。次は A の LDS stage /
 prefetch と 128×128 tile の検討になる。
 
+
+### pre 経路の xrot LDS copy 除去（採用）
+
+pitch 136 の後も、pre 経路は xrot を CTA ごとに global から LDS へコピーしていた。
+n tile ごとに同じ xrot をコピーするため、M=2048 では約 40 倍の重複になる。
+probe（no-epi、M=2048、K=N=5120）で、コピーをやめて B fragment を global xrot から
+直接読む経路を比較した。
+
+| probe | g=1 | g=8 |
+| --- | ---: | ---: |
+| LDS B（copy あり） | 4.33 ms | 4.18 ms |
+| global B（copy なし） | 3.39 | 2.50 |
+| noA + global B | 1.66 | 1.97 |
+| noA + noB + global B | **1.08** | 1.77 |
+
+- global B だけで g1 -22%、g8 -40%。
+- A を外すと g1 1.66、B も外すと g1 1.08 ms（99.5 TFLOPS）。残る差は A の
+  グローバルロードと WMMA / loop。
+- production の pre 経路を global B に変更し、rowsum も global xrot から計算する。
+  fused（rows<4）は従来どおり LDS pitch 136。
+
+prefill:
+
+| prompt | LDS B | global B |
+| ---: | ---: | ---: |
+| 128 | 478.97 | **486.85** |
+| 512 | 512.35 | **529.21** |
+| 1024 | 523.64 | **537.23** |
+| 2048 | 526.67 | **542.85** |
+
+decode（fused）は 20.30〜20.39 tok/s、E2E 22.35、MTP-2 18.35。
+
 ## 参照実装との比較
+
 
 `Luke458/qwen38-27b-exl3-rdna4` は同じ gfx1201 で Qwen3.8-27B EXL3 を動かし、
 plain decode 41.3 tok/s、MTP-3 で 73.9 tok/s を記録している。dot kernel は
