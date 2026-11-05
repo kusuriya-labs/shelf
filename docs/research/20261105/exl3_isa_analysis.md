@@ -14,13 +14,44 @@ ISA は `clang++ --save-temps` で device 側の `.s` を出して読んだ。
 | --- | ---: |
 | wavefront | wave32 |
 | threads / block | 256（8 warp） |
-| VGPR | 92（rocprofv3 表示は 96） |
+| VGPR | 92（割り当て粒度 24 で 96） |
 | SGPR | 32 |
 | LDS / block | 14,400 B |
 
-VGPR は 92 × 256 = 23,552 / block。64K VGPR では 2 block/CU まで。
-LDS も 14.4 KiB × 2 = 28.8 KiB で 2 block/CU まで。したがって
-**16 warp/CU = 8 warp/SIMD** で、3 block/CU には VGPR を 85 以下へ下げる必要がある。
+## occupancy の再計算
+
+`rocminfo` の gfx1201 は **2 SIMD/CU、Max Waves/CU = 32、wave32**。
+RDNA4 の SIMD あたり 1,536 VGPR、割り当て粒度 24 とすると、96 VGPR は
+
+```text
+floor(1536 / 96) = 16 waves/SIMD
+2 SIMD/CU -> 32 waves/CU
+```
+
+で **ハードウェア上限**に一致する。VGPR は occupancy を制限していない。
+LDS も 14,400 B × 4 block = 57.6 KiB で、64 KiB/CU に 4 block 収まる。
+つまり **資源上限は 4 block/CU（32 waves/CU）** であり、
+「VGPR を 85 以下にしないと 3 block/CU にならない」という以前の見積は誤りだった。
+
+実際の occupancy は **grid 数**で決まる。decode の rows=1 では
+grid = (n/128) × 1 block、1 block = 8 warp。
+
+| shape | blocks | waves | waves / 2048 slots |
+| --- | ---: | ---: | ---: |
+| n=1024 | 8 | 64 | 3.1 % |
+| n=5120 | 40 | 320 | 15.6 % |
+| n=17408 | 136 | 1,088 | 53.1 % |
+| n=248320 (lm_head) | 1,940 | 15,520 | 100 %（資源上限で多重 wave） |
+
+n=5120 / n=1024 は **CU あたり 0.6 / 0.125 block** しかなく、資源上限の 4 block/CU に
+まったく届いていない。n=17408 でも 2.1 block/CU で、上限の半分程度。
+VGPR 削減ではなく、**独立した warp を増やす**（K 分割や出力 tile の細分化）か、
+1 warp 内の ILP を上げるのが筋になる。
+
+`rocprofv3` の PMC は gfx1201 で 0 が返り、PC sampling も出力が得られなかった。
+この環境では resident/active waves の実測ができないため、上記は resource と grid からの
+計算値である。`wait` 命令数も待機サイクル数ではないので、stall の内訳は
+段階別マイクロベンチで確認する必要がある。
 
 ## 命令 mix
 
@@ -106,15 +137,22 @@ LDS / barrier / shuffle の stall であると判断した。変更は revert �
 
 ## 次の候補
 
-1. **decode と WMMA の software pipeline**。double buffer はすでにあるので、
-   次の tile の復号を現在の WMMA の後ろに置き、独立命令で stall を埋める。
-   ただし WMMA は 8 命令しかないため、期待できるのは LDS/依存 stall の隠蔽。
-2. **A fragment を LDS 経由にしない**。現在は 16×16 tile を LDS に transpose して
-   A fragment を読む。ring から直接 A fragment を生成できれば `ds_store` /
-   `ds_load` / `__syncwarp` を削れるが、window がレーン間に分散するため
-   shuffle が必要で、以前の shuffle 実験は LDS より遅かった。
-3. **VGPR を 85 以下にして 3 block/CU**。現在は 2 block/CU。VGPR を削るには
-   accumulator か address のレジスタを減らす必要がある。
-4. **row sum / FWHT の shuffle 削減**。`ds_bpermute` 88 の一部。
-5. rocprofv3 の PMC は gfx1201 で 0 が返り、PC sampling も出力が得られなかった。
-   次の判断は静的 ISA と A/B 測定で行う。
+1. **独立した Trellis 系列のインターリーブ**。1 warp 内で 2 / 4 / 8 個の tile を
+   同時に復号し、`load_state → hash → sad → store` の依存待ちに別系列の命令を挟む。
+   VGPR 増加と ISA の並びを確認し、2 / 4 / 8 を比較する。
+2. **FWHT 初期段の register-local 化**。4 値を同一 lane に置いて初期 2 段を VALU で
+   処理し、`ds_bpermute` を減らす。現在の 128 点 FWHT は 4 値 × 5 step なので、
+   どこまでローカル化できるかを確認する。
+3. **grid を増やす分割**。n=5120 / 1024 は block 数が足りず occupancy が 16 % / 3 %。
+   `rows == 1` 固定ではなく、row tile 数と n から必要な split 数を決める
+   batch-aware な K 分割にする。
+4. **decode と WMMA の software pipeline**。double buffer を使い、次の tile の復号を
+   現在の WMMA の後ろに置く。WMMA は 8 命令なので、主目的は LDS/依存 stall の隠蔽。
+5. **A fragment の LDS 経由をやめる**。ring から直接 A fragment を作れれば
+   `ds_store` / `ds_load` / `__syncwarp` を削れるが、window がレーン間に分散するため
+   shuffle が必要。以前の shuffle 実験は LDS より遅かったので、系列インターリーブ後に再評価する。
+6. **段階別マイクロベンチ**。decode のみ / FWHT まで / A fragment まで / WMMA までを
+   同一 shape で測り、tok/s では見えない差を切り分ける。
+7. **128 / 256 threads 構成の比較**。8 warp block を 4 warp block にして
+   block 数を増やした場合の効果を測る。ただし総 warp 数は n/16 で変わらないため、
+   K 分割なしでは occupancy の上限は同じ。
