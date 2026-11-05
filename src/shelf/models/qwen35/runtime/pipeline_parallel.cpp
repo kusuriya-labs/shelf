@@ -4,7 +4,9 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/size_format.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
+#include <shelf/models/pipeline_stage_model.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/weights/weight_bytes.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/runtime/request_handle.h>
 
@@ -12,6 +14,7 @@
 #include <cstdio>
 #include <span>
 #include <sstream>
+#include <utility>
 
 namespace shelf {
 namespace qwen35 {
@@ -19,34 +22,15 @@ namespace runtime {
 
 namespace {
 
+using ::shelf::weights::add_matrix_bytes;
+
 std::uint32_t ceil_div(std::uint32_t a, std::uint32_t b) {
     return (a + b - 1u) / b;
 }
 
-std::uint32_t count_attention_layers(const Qwen35TextConfig& tc,
+std::uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                      const PipelineStage& stage) {
     return qwen35_stage_attention_layers(tc, stage);
-}
-
-std::uint64_t tensor_bytes(const gpu::Tensor& t) {
-    if (t.ndim() == 0) return 0;
-    std::size_t bytes = 0;
-    if (!t.required_span_bytes(bytes).ok()) return 0;
-    return bytes;
-}
-
-void add_matrix_bytes(std::uint64_t& total, const shelf::weights::MatrixWeight& w) {
-    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
-        total += static_cast<std::uint64_t>(w.rows) * w.cols * 2u;
-        return;
-    }
-    total += tensor_bytes(w.codes);
-    total += tensor_bytes(w.scales);
-    total += tensor_bytes(w.compute_codes);
-    total += tensor_bytes(w.compute_scales_bf16);
-    total += tensor_bytes(w.exl3_suh);
-    total += tensor_bytes(w.exl3_svh);
-    total += tensor_bytes(w.exl3_marker);
 }
 
 }  // namespace
@@ -64,6 +48,78 @@ PipelineStageRuntime::~PipelineStageRuntime() noexcept {
         shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream_));
         stream_ = nullptr;
     }
+}
+
+namespace {
+
+class DensePipelineStageModel final : public shelf::models::PipelineStageModel {
+public:
+    DensePipelineStageModel(Qwen35Model&& model) : model_(std::move(model)) {}
+
+    const shelf::qwen_hybrid::QwenHybridConfig& hybrid_config() const override {
+        return model_.text_config();
+    }
+
+    std::uint64_t weight_bytes() const override {
+        const Qwen35ModelWeights& w = model_.weights();
+        std::uint64_t total = 0;
+        add_matrix_bytes(total, w.embed_tokens);
+        if (!w.lm_head_tied) add_matrix_bytes(total, w.lm_head);
+        for (const Qwen35LayerWeights& layer : w.layers) {
+            add_matrix_bytes(total, layer.ffn.gate);
+            add_matrix_bytes(total, layer.ffn.up);
+            add_matrix_bytes(total, layer.ffn.down);
+            if (layer.is_gdn) {
+                add_matrix_bytes(total, layer.attn_in_proj_qkv);
+                add_matrix_bytes(total, layer.attn_in_proj_z);
+                add_matrix_bytes(total, layer.attn_in_proj_a);
+                add_matrix_bytes(total, layer.attn_in_proj_b);
+                add_matrix_bytes(total, layer.attn_out_proj);
+            } else {
+                add_matrix_bytes(total, layer.attn_q_proj);
+                add_matrix_bytes(total, layer.attn_k_proj);
+                add_matrix_bytes(total, layer.attn_v_proj);
+                add_matrix_bytes(total, layer.attn_o_proj);
+            }
+        }
+        return total;
+    }
+
+    std::size_t token_row_ffn_size() const override {
+        return model_.text_config().ffn.intermediate_size;
+    }
+    std::size_t ffn_workspace_reserve_bytes(std::size_t) const override { return 0u; }
+    bool uses_exl3_linear() const override {
+        return ::shelf::qwen35::uses_exl3_linear(model_.weights());
+    }
+
+    Result<Executor> create_executor(SequenceSlotPool& sequence_pool,
+                                     GdnStatePool& gdn_state_pool, PagedKVPool& kv_pool,
+                                     gpu::GpuArena& arena,
+                                     const ExecutorConfig& config) const override {
+        return create_model_executor(model_, sequence_pool, gdn_state_pool, kv_pool, arena,
+                                     config);
+    }
+
+    const Qwen35Model* dense_model() const override { return &model_; }
+
+private:
+    Qwen35Model model_;
+};
+
+}  // namespace
+
+Result<std::unique_ptr<shelf::models::PipelineStageModel>> build_dense_pipeline_stage_model(
+    const std::string& model_dir, const PipelineStage& stage, gpu::GpuArena& arena,
+    hipStream_t stream, const shelf::qwen_hybrid::HybridLoadOptions& load_options) {
+    Qwen35LoadOptions dense_options;
+    static_cast<shelf::qwen_hybrid::HybridLoadOptions&>(dense_options) = load_options;
+    dense_options.stage = stage;
+    auto model_result =
+        Qwen35Model::load_from_safetensors(model_dir, arena, stream, dense_options);
+    if (!model_result.ok()) return model_result.status();
+    return std::unique_ptr<shelf::models::PipelineStageModel>(
+        std::make_unique<DensePipelineStageModel>(std::move(model_result.value())));
 }
 
 Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
@@ -119,14 +175,17 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     if (!arena_result.ok()) return arena_result.status();
     stage->arena_.emplace(arena_result.release());
 
-    Qwen35LoadOptions load_options = config.load_options;
-    load_options.stage = config.stage;
-    auto model_result = Qwen35Model::load_from_safetensors(
-        config.model_dir, stage->arena_.value(), stage->stream_, load_options);
+    if (config.build_stage_model == nullptr) {
+        return Status::invalid_argument("pipeline stage runtime needs a stage model builder",
+                                        __FILE__, __LINE__);
+    }
+    auto model_result = config.build_stage_model(config.model_dir, config.stage,
+                                                 stage->arena_.value(), stage->stream_,
+                                                 config.load_options);
     if (!model_result.ok()) return model_result.status();
-    stage->model_.emplace(model_result.release());
+    stage->model_ = std::move(model_result.value());
 
-    const Qwen35TextConfig& tc = stage->model_.value().text_config();
+    const shelf::qwen_hybrid::QwenHybridConfig& tc = stage->model_->hybrid_config();
     const std::uint32_t max_blocks_per_sequence =
         ceil_div(config.max_seq_len + 1u, config.page_tokens) + 1u;
     const std::uint32_t attention_layers = count_attention_layers(tc, config.stage);
@@ -169,12 +228,21 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     exec_config.stage = config.stage;
     if (reserved == 0u) {
         reserved = qwen35_executor_reserve_bytes(
-            tc, tc.ffn.intermediate_size, exec_config, 1u,
-            uses_exl3_linear(stage->model_.value().weights()));
+            tc, stage->model_->token_row_ffn_size(), exec_config, 1u,
+            stage->model_->uses_exl3_linear());
+        reserved += stage->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
+        // The KV pool is sized from what the arena leaves after this reserve, so an estimate
+        // that is short of the executor's real footprint turns into a failed allocation. The
+        // auto path keeps slack back; an explicit --working-set-reserve is taken as given.
+        const std::size_t slack = std::max<std::size_t>(64ull << 20ull, arena_free_now / 100ull);
+        reserved += slack;
         std::fprintf(stderr,
-                     "MEMORY_PLAN auto pipeline stage %u..%u: working set reserve %s\n",
+                     "MEMORY_PLAN auto pipeline stage %u..%u: working set reserve %s "
+                     "(row bucket %u, incl. %s slack)\n",
                      config.stage.layers.layer_lo, config.stage.layers.layer_hi,
-                     gpu::format_gib(reserved).c_str());
+                     gpu::format_gib(reserved).c_str(),
+                     static_cast<unsigned>(config.max_batch_rows),
+                     gpu::format_gib(slack).c_str());
     }
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
@@ -223,9 +291,9 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     stage->kv_pool_.emplace(kv_result.release());
 
     const std::size_t executor_before = stage->arena_->used();
-    auto exec_result = create_model_executor(
-        stage->model_.value(), stage->seq_pool_.value(), stage->gdn_pool_.value(),
-        stage->kv_pool_.value(), stage->arena_.value(), exec_config);
+    auto exec_result = stage->model_->create_executor(
+        stage->seq_pool_.value(), stage->gdn_pool_.value(), stage->kv_pool_.value(),
+        stage->arena_.value(), exec_config);
     std::fprintf(stderr,
                  "MEMORY_PLAN pipeline stage %u..%u device=%d executor footprint: %s\n",
                  config.stage.layers.layer_lo, config.stage.layers.layer_hi,
@@ -302,13 +370,15 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
         stage_config.kv_pool_pages = i == 0 ? 0u : kv_pages;
         stage_config.rope_profile = config.rope_profile;
         stage_config.load_options = config.load_options;
+        stage_config.build_stage_model = config.build_stage_model;
         auto stage_result = PipelineStageRuntime::create(stage_config);
         if (!stage_result.ok()) return stage_result.status();
         stages_.push_back(stage_result.release());
         if (i == 0) kv_pages = stages_.back()->kv_pool_pages();
     }
 
-    const Qwen35TextConfig& tc = stages_.front()->model().text_config();
+    const shelf::qwen_hybrid::QwenHybridConfig& tc =
+        stages_.front()->model().hybrid_config();
     hidden_size_ = static_cast<std::uint32_t>(tc.hidden_size);
     max_rows_ = config.max_batch_rows;
     max_outputs_ = config.max_scheduled_output_rows > config.max_scheduled_requests
@@ -598,32 +668,11 @@ std::string PipelineParallelCoordinator::debug_report() const {
     out << "pipeline_stages=" << stages_.size() << " hidden=" << hidden_size_ << "\n";
     for (std::size_t i = 0; i < stages_.size(); ++i) {
         const PipelineStageRuntime& stage = *stages_[i];
-        const Qwen35ModelWeights& weights = stage.model().weights();
-        std::uint64_t weight_bytes = 0;
-        add_matrix_bytes(weight_bytes, weights.embed_tokens);
-        if (!weights.lm_head_tied) add_matrix_bytes(weight_bytes, weights.lm_head);
-        for (const Qwen35LayerWeights& layer : weights.layers) {
-            add_matrix_bytes(weight_bytes, layer.ffn.gate);
-            add_matrix_bytes(weight_bytes, layer.ffn.up);
-            add_matrix_bytes(weight_bytes, layer.ffn.down);
-            if (layer.is_gdn) {
-                add_matrix_bytes(weight_bytes, layer.attn_in_proj_qkv);
-                add_matrix_bytes(weight_bytes, layer.attn_in_proj_z);
-                add_matrix_bytes(weight_bytes, layer.attn_in_proj_a);
-                add_matrix_bytes(weight_bytes, layer.attn_in_proj_b);
-                add_matrix_bytes(weight_bytes, layer.attn_out_proj);
-            } else {
-                add_matrix_bytes(weight_bytes, layer.attn_q_proj);
-                add_matrix_bytes(weight_bytes, layer.attn_k_proj);
-                add_matrix_bytes(weight_bytes, layer.attn_v_proj);
-                add_matrix_bytes(weight_bytes, layer.attn_o_proj);
-            }
-        }
         out << "  stage" << i
             << " device=" << stage.device_id()
             << " layers=[" << stage.stage().layers.layer_lo << ","
             << stage.stage().layers.layer_hi << ")"
-            << " weight_bytes=" << weight_bytes
+            << " weight_bytes=" << stage.model().weight_bytes()
             << " kv_pages=" << stage.kv_pool_pages() << "\n";
     }
     return out.str();

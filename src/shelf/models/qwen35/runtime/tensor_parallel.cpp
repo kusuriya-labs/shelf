@@ -1,6 +1,7 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 
 #include <shelf/core/gpu/cleanup.h>
+#include <shelf/weights/weight_bytes.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/request_handle.h>
@@ -22,6 +23,8 @@ namespace runtime {
 
 namespace {
 
+using ::shelf::weights::add_matrix_bytes;
+
 std::uint32_t ceil_div(std::uint32_t a, std::uint32_t b) {
     return (a + b - 1u) / b;
 }
@@ -36,20 +39,6 @@ std::uint64_t tensor_bytes(const gpu::Tensor& t) {
     std::size_t bytes = 0;
     if (!t.required_span_bytes(bytes).ok()) return 0;
     return bytes;
-}
-
-void add_matrix_bytes(std::uint64_t& total, const shelf::weights::MatrixWeight& w) {
-    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
-        total += static_cast<std::uint64_t>(w.rows) * w.cols * 2u;
-        return;
-    }
-    total += tensor_bytes(w.codes);
-    total += tensor_bytes(w.scales);
-    total += tensor_bytes(w.compute_codes);
-    total += tensor_bytes(w.compute_scales_bf16);
-    total += tensor_bytes(w.exl3_suh);
-    total += tensor_bytes(w.exl3_svh);
-    total += tensor_bytes(w.exl3_marker);
 }
 
 }
