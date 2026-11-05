@@ -296,13 +296,17 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   `splits * rows * out_features + splits * rows` float である。
 - 部分和の加算順は split 数で変わるため、split あり / なしの出力は bit 一致しない。
   CPU affine 参照との比較は両方の経路で行う。
-- prefill / batch では `rows >= 32` かつ
-  `grid_x * ceil(rows / 32) * splits >= 128` のとき 1 block が 2 個の 16-row tile を
-  処理し、復号済みの weight tile を共有する。それ以外は 1 tile。
-  row group の選択は出力値に依存しない。
+- 1 warp は 16-column tile を 1 個または 2 個担当する。2 個のとき kOutBlock は 256 で、
+  B fragment 1 個を 2 個の WMMA で共有する。n tile 数は出力値に依存しない。
+  `rows >= 4`、`out_features % 256 == 0`、`out_features >= 1024` のとき 2 個、
+  それ以外は 1 個とする。
+- row group は 1 block が処理する 16-row tile の数である。`rows >= 256` かつ
+  `grid_x >= 8` のとき 4、`rows >= 32` かつ
+  `grid_x * ceil(rows / 32) * splits >= 128` のとき 2、それ以外は 1。
+  n tile が 1 個の経路では 2 以下に制限する。row group の選択は出力値に依存しない。
 - `Exl3GemmArgs::xrot` が非 null のとき、`launch_gemm_exl3_w16a16_pre` は入力回転を
-  再計算せず、xrot を LDS へコピーして GEMM する。xrot は `launch_rotate_exl3` が
-  `rows * k` の FP16 で 1 回だけ作る。dispatcher は `rows >= 4` かつ
+  再計算せず、B fragment と rowsum を global xrot から読む。xrot は
+  `launch_rotate_exl3` が `rows * k` の FP16 で 1 回だけ作る。dispatcher は `rows >= 4` かつ
   `rows * k * 2` が execution workspace の xrot 領域（80 MiB）に収まるときだけ
   この経路を使い、それ以外は fused 経路にする。回転の演算順は fused と同じで、
   出力は一致する。
@@ -313,8 +317,6 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
 - fused（rows < 4）の xrot は LDS に置き、pitch を **136 halfs**（16 B alignment）に
   する。row stride 128 halfs では B fragment が 16-way bank conflict になるため、
   row ごとに bank を 4 つずつずらす。
-- pre（rows >= 4）は xrot を LDS にコピーせず、global xrot から B fragment を直接読む。
-  rowsum も global xrot から計算する。
 
 - 出力行が 0 の linear（MTP の `compute_logits=false` 経路など）は launch せずに
   成功として扱う。EXL3 の correctness fallback は持たないため、ここで fallback へ

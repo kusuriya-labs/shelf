@@ -348,6 +348,10 @@ int main() {
     run_case({64, 8192, 128, 4, false, "pre_groups2_rows64", 1, true});
     run_case({5, 5120, 512, 4, false, "pre_auto_rows5", 0, true});
     run_case({32, 1024, 512, 4, false, "pre_split2_rows32", 2, true});
+    run_case({5, 2048, 512, 4, false, "nt2_rows5", 2});
+    run_case({256, 2048, 512, 4, false, "auto_nt2_g4_rows256", 0});
+    run_case({320, 2048, 512, 4, false, "pre_nt2_g4_rows320", 1, true});
+    run_case({256, 2048, 512, 4, false, "pre_nt2_g4_rows256", 1, true});
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -713,6 +713,99 @@ prefill:
 
 decode（fused）は 20.30〜20.39 tok/s、E2E 22.35、MTP-2 18.35。
 
+
+## hipBLASLt の 16-bit WMMA 構造と残差
+
+hipBLASLt の open source 実装（roc-libraries の TensileLite）を読み、A0b（M=2048、
+K=N=5120、153.8 TFLOPS）が現在の W16A16 と何を変えているかを確認した。使用される
+kernel 名は `MT128x128x32_MI16x16x1_MIWT4_4` で、次の構成を意味する。
+
+- MacroTile 128×128、DepthU 32。CTA あたり 128×128 の出力を 4 個の wave で分担する。
+- MatrixInstruction は 16×16×16 の WMMA 1 命令。
+- MIWT4_4 は wave tile 4×4、すなわち 1 wave が 64×64 を担当し、K16 あたり 16 WMMA を
+  発行する。A fragment 4 個 + B fragment 4 個を 16 WMMA で共有するため、
+  fragment load は 0.5 個 / WMMA になる。
+
+データ供給は Tensile の標準構成で、global load を coalesced に LDS へ書き、LDS から
+`ds_read` で fragment を作る。DepthU 32 と GlobalRead の prefetch により 2 iteration
+先まで読みを先行させる。加えて WorkGroupMapping で blockIdx を並べ替え、L2 で A/B tile
+が再利用されるようにする。
+
+現在の W16A16 は warp が 1 個の 16-column tile を持ち、16-row group を g 個処理する。
+K16 あたりの fragment load は (1 + g) 個を g 個の WMMA で割るので、g=8 でも 1.125 個 /
+WMMA であり、hipBLASLt の 2.25 倍になる。wave tile が 1×1 相当で B の再利用が小さいこと、
+A を LDS へ書いてから読むことが構造差である。ただし EXL3 は A を trellis から復号する
+必要があり、hipBLASLt の「LDS に置くだけ」の A 供給をそのまま採ることはできない。
+
+### 実験: N tile の拡大（採用）
+
+warp あたりの n tile を 1 から 2 に増やし、kOutBlock を 128 から 256 にした。8 warp が
+16 個の n tile を 2 個ずつ担当する。B fragment 1 個を 2 個の WMMA で共有できるため、
+fragment load は (2 + g) / (2g) 個 / WMMA になる。
+
+M=2048、K=N=5120、split=4、groups=2 の isolation（pre 経路）:
+
+| kOutBlock | n tile / warp | ms | TFLOPS |
+| ---: | ---: | ---: | ---: |
+| 128 | 1 | 3.33 | 32.3 |
+| 256 | 2 | 2.45 | 43.9 |
+| 512 | 4 | 3.21 | 33.4 |
+
+512 は acc register が 64 個になり、spill と occupancy 低下で悪化する。256 を採用した。
+
+### 実験: row group の拡大（採用）
+
+kOutBlock 256 では groups=2（32 row）から groups=4（64 row）へ増やすと、復号済み A tile
+を共有する WMMA が 2 倍になる。acc は 64 VGPR で、groups=8（128 VGPR）より軽い。
+
+| groups | ms | TFLOPS |
+| ---: | ---: | ---: |
+| 1 | 3.54 | 30.3 |
+| 2 | 2.65 | 40.5 |
+| 4 | **2.13** | **50.5** |
+| 8 | 2.96 | 36.3 |
+
+groups=4 は `rows >= 256` かつ `grid_x >= 8` のとき選ぶ。rows=128 では grid_y が 2 に
+なり CTA 数が足りないため groups=2 の方が速い。
+
+### 実験: 残差の内訳
+
+kOutBlock 256、groups=4、split=4 で A / B のロードを個別に外した probe
+（M=2048、K=N=5120）:
+
+| probe | ms | TFLOPS |
+| --- | ---: | ---: |
+| base | 2.196 | 48.9 |
+| A（trellis 復号 + LDS）を除去 | 1.365 | 78.7 |
+| B（global xrot）を除去 | 1.907 | 56.3 |
+| A と B を除去 | 1.012 | 106.2 |
+
+残差は A 復号 0.83 ms、B 0.29 ms、WMMA / loop の floor 1.01 ms に分かれる。
+hipBLASLt は 0.70 ms（153.8 TFLOPS）なので、floor だけで 1.45 倍、A 復号を含めると
+3.0 倍である。A 復号は ALU（8 state 抽出 + codebook 4 対 + 8 scattered store）で、
+DRAM / L3 の帯域ではない。
+
+### 棄却した実験
+
+- A 復号の software pipeline（ks+1 を WMMA の前に復号）: 2.125 → 2.090 ms（-1.7%）。
+  compiler が既に命令を並べ替えており、効果が小さい。
+- CTA swizzle（M 方向 2/4/8/16 block をまとめて L2 再利用）: 2.13 → 2.12 ms。
+  trellis 13 MiB と xrot 20 MiB は L3 64 MiB に収まるため、DRAM の再読みが主因ではない。
+- kOutBlock 512（n tile / warp = 4）: 3.21 ms。acc register 64 個で悪化。
+
+### production
+
+| 条件 | NT=1 / groups<=2 | NT=2 / groups=4 |
+| --- | ---: | ---: |
+| decode | 20.30〜20.39 | 20.30〜20.39（fused は NT=1） |
+| prefill 128 | 486.9 | **632.4** |
+| prefill 512 | 529.2 | **768.1** |
+| prefill 1024 | 537.2 | **851.4** |
+| prefill 2048 | 542.9 | **859.4** |
+
+prefill は +30〜58%。decode は fused（rows < 4）で NT=1 のままなので変化しない。
+E2E decode 22.43 tok/s、MTP-2 18.35 tok/s、生成は `11751,13,198`。
+
 ## 参照実装との比較
 
 

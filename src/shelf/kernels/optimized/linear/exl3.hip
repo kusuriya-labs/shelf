@@ -13,21 +13,23 @@ namespace {
 using f16x8_t = _Float16 __attribute__((ext_vector_type(8)));
 using f32x8_t = float __attribute__((ext_vector_type(8)));
 
-constexpr uint32_t kOutBlock = kExl3W16A16OutBlock;
+constexpr uint32_t kOutBlockBase = kExl3W16A16OutBlock;
 constexpr uint32_t kRowTile = kExl3W16A16RowTile;
-constexpr uint32_t kWarps = kOutBlock / 16u;
-constexpr uint32_t kXrotPitch = 136u;
 constexpr uint32_t kThreads = kExl3W16A16Threads;
+constexpr uint32_t kWarps = kThreads / 32u;
+constexpr uint32_t kXrotPitch = 136u;
 constexpr float kInvSqrt128 = 0.08838834764831844055f;
 
-struct WorkArea {
-    uint16_t tile[kWarps][2][16u * 16u];
+template <uint32_t kNTiles>
+struct WorkAreaT {
+    uint16_t tile[kWarps][2][kNTiles * 16u * 16u];
     uint32_t ring[kWarps][64];
 };
 
-union SharedArea {
-    WorkArea work;
-    float accum[kRowTile * kOutBlock];
+template <uint32_t kNTiles>
+union SharedAreaT {
+    WorkAreaT<kNTiles> work;
+    float accum[kRowTile * kOutBlockBase * kNTiles];
 };
 
 __device__ __forceinline__ float bf16_value(const shelf::bf16_t* p) {
@@ -188,10 +190,13 @@ __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* i
     }
 }
 
-template <uint32_t kGroups, bool kPartial, bool kPre>
+template <uint32_t kGroups, bool kPartial, bool kPre, uint32_t kNTiles>
 __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs args,
                                                                     uint32_t splits) {
+    constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
+    constexpr uint32_t kNTilesPerBlock = kOutBlock / 16u;
     constexpr uint32_t kRows = kRowTile * kGroups;
+    using SharedArea = SharedAreaT<kNTiles>;
     const uint32_t warp = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t lane16 = lane & 15u;
@@ -208,10 +213,13 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     __shared__ __align__(16) SharedArea area;
     __shared__ __align__(16) float rowsum[kRows];
 
-    f32x8_t acc[kGroups];
+    f32x8_t acc[kGroups][kNTiles];
 #pragma unroll
     for (uint32_t g = 0u; g < kGroups; ++g) {
-        acc[g] = f32x8_t{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+        for (uint32_t t = 0u; t < kNTiles; ++t) {
+            acc[g][t] = f32x8_t{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        }
     }
     float row_acc[kGroups][2];
 #pragma unroll
@@ -281,13 +289,18 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             }
         }
 
-        const uint32_t n_tile = n_tile_base * kWarps + warp;
+        const uint32_t n_tile = n_tile_base * kNTilesPerBlock + warp * kNTiles;
 #pragma unroll
         for (uint32_t ks = 0u; ks < 8u; ++ks) {
             const uint32_t buf = ks & 1u;
             uint16_t* tile = area.work.tile[warp][buf];
-            decode_tile(args, kc * 8u + ks, n_tile, lane, area.work.ring[warp], tile);
-            const f16x8_t a = load_f16x8(tile + lane16 * 16u + lane_high * 8u);
+            f16x8_t a[kNTiles];
+#pragma unroll
+            for (uint32_t t = 0u; t < kNTiles; ++t) {
+                decode_tile(args, kc * 8u + ks, n_tile + t, lane, area.work.ring[warp],
+                            tile + t * 256u);
+                a[t] = load_f16x8(tile + t * 256u + lane16 * 16u + lane_high * 8u);
+            }
 #pragma unroll
             for (uint32_t g = 0u; g < kGroups; ++g) {
                 if constexpr (kGroups > 1u) {
@@ -303,7 +316,11 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                     b = load_f16x8(xrot + (g * kRowTile + lane16) * kXrotPitch +
                                    ks * 16u + lane_high * 8u);
                 }
-                acc[g] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[g]);
+#pragma unroll
+                for (uint32_t t = 0u; t < kNTiles; ++t) {
+                    acc[g][t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a[t], b, acc[g][t]);
+                }
             }
         }
     }
@@ -335,10 +352,15 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             if (r < active_rows) {
                 const uint64_t row_index =
                     static_cast<uint64_t>(split) * args.rows + (r0 + r);
-                const uint32_t out_col = n0 + warp * 16u + lane_high * 8u;
-                float* dst = args.splitk_scratch + row_index * args.out_features + out_col;
 #pragma unroll
-                for (uint32_t j = 0u; j < 8u; ++j) dst[j] = acc[g][j];
+                for (uint32_t t = 0u; t < kNTiles; ++t) {
+                    const uint32_t out_col =
+                        n0 + (warp * kNTiles + t) * 16u + lane_high * 8u;
+                    float* dst =
+                        args.splitk_scratch + row_index * args.out_features + out_col;
+#pragma unroll
+                    for (uint32_t j = 0u; j < 8u; ++j) dst[j] = acc[g][t][j];
+                }
             }
         }
     } else {
@@ -365,9 +387,13 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 if (g * kRowTile >= active_rows) continue;
             }
 #pragma unroll
-            for (uint32_t j = 0u; j < 8u; ++j) {
-                const uint32_t out_col = warp * 16u + lane_high * 8u + j;
-                area.accum[lane16 * kOutBlock + out_col] = acc[g][j];
+            for (uint32_t t = 0u; t < kNTiles; ++t) {
+#pragma unroll
+                for (uint32_t j = 0u; j < 8u; ++j) {
+                    const uint32_t out_col =
+                        (warp * kNTiles + t) * 16u + lane_high * 8u + j;
+                    area.accum[lane16 * kOutBlock + out_col] = acc[g][t][j];
+                }
             }
             __syncthreads();
 
@@ -376,38 +402,42 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 const uint32_t r = g * kRowTile + warp * 2u + ri;
                 if (r >= active_rows) continue;
                 const uint32_t row = r0 + r;
-                const float* src =
-                    area.accum + (r - g * kRowTile) * kOutBlock + lane * 4u;
                 const float bias = exl3_detail::kMul1BiasOverInv * rowsum[r];
-                float v0 = src[0] + bias;
-                float v1 = src[1] + bias;
-                float v2 = src[2] + bias;
-                float v3 = src[3] + bias;
-                exl3_detail::fwht128(v0, v1, v2, v3, lane);
-                const uint32_t col = n0 + lane * 4u;
-                const float s0 = __half2float(__ushort_as_half(svh[col + 0]));
-                const float s1 = __half2float(__ushort_as_half(svh[col + 1]));
-                const float s2 = __half2float(__ushort_as_half(svh[col + 2]));
-                const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
-                const uint64_t out_base =
-                    static_cast<uint64_t>(row) * args.output_row_stride + col;
-                const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
-                const float y0 = v0 * scale * s0;
-                const float y1 = v1 * scale * s1;
-                const float y2 = v2 * scale * s2;
-                const float y3 = v3 * scale * s3;
-                if (args.output_dtype == 0u) {
-                    shelf::bf16_t* dst = static_cast<shelf::bf16_t*>(args.output) + out_base;
-                    dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};
-                    dst[1] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y1))};
-                    dst[2] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y2))};
-                    dst[3] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y3))};
-                } else {
-                    float* dst = static_cast<float*>(args.output) + out_base;
-                    dst[0] = y0;
-                    dst[1] = y1;
-                    dst[2] = y2;
-                    dst[3] = y3;
+#pragma unroll
+                for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
+                    const float* src = area.accum + (r - g * kRowTile) * kOutBlock +
+                                       cb * 128u + lane * 4u;
+                    float v0 = src[0] + bias;
+                    float v1 = src[1] + bias;
+                    float v2 = src[2] + bias;
+                    float v3 = src[3] + bias;
+                    exl3_detail::fwht128(v0, v1, v2, v3, lane);
+                    const uint32_t col = n0 + cb * 128u + lane * 4u;
+                    const float s0 = __half2float(__ushort_as_half(svh[col + 0]));
+                    const float s1 = __half2float(__ushort_as_half(svh[col + 1]));
+                    const float s2 = __half2float(__ushort_as_half(svh[col + 2]));
+                    const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
+                    const uint64_t out_base =
+                        static_cast<uint64_t>(row) * args.output_row_stride + col;
+                    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+                    const float y0 = v0 * scale * s0;
+                    const float y1 = v1 * scale * s1;
+                    const float y2 = v2 * scale * s2;
+                    const float y3 = v3 * scale * s3;
+                    if (args.output_dtype == 0u) {
+                        shelf::bf16_t* dst =
+                            static_cast<shelf::bf16_t*>(args.output) + out_base;
+                        dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};
+                        dst[1] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y1))};
+                        dst[2] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y2))};
+                        dst[3] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y3))};
+                    } else {
+                        float* dst = static_cast<float*>(args.output) + out_base;
+                        dst[0] = y0;
+                        dst[1] = y1;
+                        dst[2] = y2;
+                        dst[3] = y3;
+                    }
                 }
             }
             if constexpr (kGroups > 1u) {
@@ -417,8 +447,10 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     }
 }
 
+template <uint32_t kNTiles>
 __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmArgs args,
                                                                      uint32_t splits) {
+    constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
     const uint32_t warp = threadIdx.x >> 5u;
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t n0 = blockIdx.x * kOutBlock;
@@ -441,44 +473,47 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
             row_sum += rowsums[static_cast<uint64_t>(s) * args.rows + row];
         }
         const float bias = exl3_detail::kMul1BiasOverInv * row_sum;
-        const uint32_t col = n0 + lane * 4u;
-        float v0 = bias;
-        float v1 = bias;
-        float v2 = bias;
-        float v3 = bias;
-        for (uint32_t s = 0u; s < splits; ++s) {
-            const float* src = partials +
-                               (static_cast<uint64_t>(s) * args.rows + row) *
-                                   args.out_features +
-                               col;
-            v0 += src[0];
-            v1 += src[1];
-            v2 += src[2];
-            v3 += src[3];
-        }
-        exl3_detail::fwht128(v0, v1, v2, v3, lane);
-        const float s0 = __half2float(__ushort_as_half(svh[col + 0]));
-        const float s1 = __half2float(__ushort_as_half(svh[col + 1]));
-        const float s2 = __half2float(__ushort_as_half(svh[col + 2]));
-        const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
-        const uint64_t out_base =
-            static_cast<uint64_t>(row) * args.output_row_stride + col;
-        const float y0 = v0 * scale * s0;
-        const float y1 = v1 * scale * s1;
-        const float y2 = v2 * scale * s2;
-        const float y3 = v3 * scale * s3;
-        if (args.output_dtype == 0u) {
-            shelf::bf16_t* dst = static_cast<shelf::bf16_t*>(args.output) + out_base;
-            dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};
-            dst[1] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y1))};
-            dst[2] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y2))};
-            dst[3] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y3))};
-        } else {
-            float* dst = static_cast<float*>(args.output) + out_base;
-            dst[0] = y0;
-            dst[1] = y1;
-            dst[2] = y2;
-            dst[3] = y3;
+#pragma unroll
+        for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
+            const uint32_t col = n0 + cb * 128u + lane * 4u;
+            float v0 = bias;
+            float v1 = bias;
+            float v2 = bias;
+            float v3 = bias;
+            for (uint32_t s = 0u; s < splits; ++s) {
+                const float* src = partials +
+                                   (static_cast<uint64_t>(s) * args.rows + row) *
+                                       args.out_features +
+                                   col;
+                v0 += src[0];
+                v1 += src[1];
+                v2 += src[2];
+                v3 += src[3];
+            }
+            exl3_detail::fwht128(v0, v1, v2, v3, lane);
+            const float s0 = __half2float(__ushort_as_half(svh[col + 0]));
+            const float s1 = __half2float(__ushort_as_half(svh[col + 1]));
+            const float s2 = __half2float(__ushort_as_half(svh[col + 2]));
+            const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
+            const uint64_t out_base =
+                static_cast<uint64_t>(row) * args.output_row_stride + col;
+            const float y0 = v0 * scale * s0;
+            const float y1 = v1 * scale * s1;
+            const float y2 = v2 * scale * s2;
+            const float y3 = v3 * scale * s3;
+            if (args.output_dtype == 0u) {
+                shelf::bf16_t* dst = static_cast<shelf::bf16_t*>(args.output) + out_base;
+                dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};
+                dst[1] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y1))};
+                dst[2] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y2))};
+                dst[3] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y3))};
+            } else {
+                float* dst = static_cast<float*>(args.output) + out_base;
+                dst[0] = y0;
+                dst[1] = y1;
+                dst[2] = y2;
+                dst[3] = y3;
+            }
         }
     }
 }
@@ -490,9 +525,16 @@ struct LaunchPlan {
     uint32_t groups = 1;
 };
 
+uint32_t pick_n_tiles(const Exl3GemmArgs& args) {
+    if (args.rows < 4u) return 1u;
+    if (args.out_features % (kOutBlockBase * 2u) != 0u) return 1u;
+    if (args.out_features < kOutBlockBase * 8u) return 1u;
+    return 2u;
+}
+
 LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     LaunchPlan plan;
-    plan.grid_x = args.out_features / kOutBlock;
+    plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(args));
     if (args.splitk_scratch != nullptr) {
         uint32_t desired = args.splitk_splits;
         if (desired == 0u) {
@@ -511,8 +553,11 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     const uint32_t row_blocks2 = (args.rows + 2u * kRowTile - 1u) / (2u * kRowTile);
     if (args.groups == 1u) {
         plan.groups = 1u;
-    } else if (args.groups == 2u) {
-        plan.groups = 2u;
+    } else if (args.groups == 2u || args.groups == 4u) {
+        plan.groups = args.groups;
+    } else if (pick_n_tiles(args) == 2u && args.rows >= 16u * kRowTile &&
+               plan.grid_x >= 8u) {
+        plan.groups = 4u;
     } else if (args.rows >= 2u * kRowTile &&
                plan.grid_x * row_blocks2 * plan.splits >= 128u) {
         plan.groups = 2u;
@@ -522,15 +567,15 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     return plan;
 }
 
-template <uint32_t kGroups, bool kPre>
+template <uint32_t kGroups, bool kPre, uint32_t kNTiles>
 hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
                          hipStream_t stream) {
     if (plan.splits > 1u) {
-        gemm_exl3_w16a16_kernel<kGroups, true, kPre>
+        gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles>
             <<<dim3(plan.grid_x * plan.splits, plan.grid_y), kThreads, 0, stream>>>(
                 args, plan.splits);
     } else {
-        gemm_exl3_w16a16_kernel<kGroups, false, kPre>
+        gemm_exl3_w16a16_kernel<kGroups, false, kPre, kNTiles>
             <<<dim3(plan.grid_x, plan.grid_y), kThreads, 0, stream>>>(args, 1u);
     }
     return hipGetLastError();
@@ -539,14 +584,26 @@ hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
 template <bool kPre>
 hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
                        hipStream_t stream) {
-    const hipError_t err =
-        plan.groups == 2u ? launch_kernel<2u, kPre>(args, plan, stream)
-                          : launch_kernel<1u, kPre>(args, plan, stream);
+    const uint32_t n_tiles = pick_n_tiles(args);
+    hipError_t err = hipSuccess;
+    if (n_tiles == 2u) {
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 2u>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 2u>(args, plan, stream);
+    } else {
+        err = plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
+                                : launch_kernel<1u, kPre, 1u>(args, plan, stream);
+    }
     if (err != hipSuccess) return err;
     if (plan.splits > 1u) {
         const uint32_t reduce_grid_y = (args.rows + kRowTile - 1u) / kRowTile;
-        exl3_splitk_reduce_kernel<<<dim3(plan.grid_x, reduce_grid_y), kThreads, 0,
-                                    stream>>>(args, plan.splits);
+        if (n_tiles == 2u) {
+            exl3_splitk_reduce_kernel<2u><<<dim3(plan.grid_x, reduce_grid_y), kThreads,
+                                            0, stream>>>(args, plan.splits);
+        } else {
+            exl3_splitk_reduce_kernel<1u><<<dim3(plan.grid_x, reduce_grid_y), kThreads,
+                                            0, stream>>>(args, plan.splits);
+        }
     }
     return hipGetLastError();
 }
@@ -559,7 +616,7 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
         return hipErrorInvalidValue;
     }
     if (args.rows == 0u || args.out_features == 0u || args.k == 0u) return hipErrorInvalidValue;
-    if ((args.out_features % kOutBlock) != 0u || (args.k % 128u) != 0u) {
+    if ((args.out_features % kOutBlockBase) != 0u || (args.k % 128u) != 0u) {
         return hipErrorInvalidValue;
     }
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
@@ -583,7 +640,7 @@ hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xro
         return hipErrorInvalidValue;
     }
     if (args.rows == 0u || args.out_features == 0u || args.k == 0u) return hipErrorInvalidValue;
-    if ((args.out_features % kOutBlock) != 0u || (args.k % 128u) != 0u) {
+    if ((args.out_features % kOutBlockBase) != 0u || (args.k % 128u) != 0u) {
         return hipErrorInvalidValue;
     }
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
