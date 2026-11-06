@@ -376,14 +376,23 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   CPU 参照は `exl3_decode_int8`（テストの正解のみに使う）。
 - 常駐形式: 16x16 タイルを `[nt][kt]` の順に並べ替えて置く（`exl3_tiles_to_nmajor`、load 時に CPU）。
   wave が K 方向に連続して読め、キャッシュに載らない重みでは `[kt][nt]` のままより約 2 割速い。
-- 実行: 3 launch。(1) 入力に `suh` を掛けて 128 ごとに Hadamard、128 ごとに `amax / 127` の scale で
+- 実行（decode と rows < 256）: 3 launch。(1) 入力に `suh` を掛けて 128 ごとに Hadamard、128 ごとに `amax / 127` の scale で
   int8 化（codes は自然な k 順）。(2) trellis を復号し、LDS を使わず直接 WMMA の B にして iu8 WMMA で
   128 ごとに int32 で厳密に累積、F32 の scale と `kExl3Int8GridStep` を掛ける。(3) 128 ごとの Hadamard と
   `svh` で bf16 / f32 に戻す。scale は fp32 のまま GEMM の外で掛ける。
 - decode（rows <= 16）の GEMM は K を split して wave を埋める（各 split が F32 出力の別スライスに書き、
   (3) が足す。決定的）。n の小さい線形は wave が足りず帯域が落ちるため。
-- workspace: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes と scale、accum 領域に F32 の
-  回転前出力を置き、入らない行数は行を分けて実行する。
+- prefill（rows >= 256、`SHELF_EXL3_INT8_DENSE` で変更、0 で無効）は W16A16 の dense 経路と同じ構造で、
+  trellis を int8 の dense 行列 `[n][k]` に展開（`dense` 領域、k*n バイト）して hipBLASLt の int8 GEMM
+  （int8 x int8 -> int32）に流す。1 本の GEMM は K 全体にわたるので、活性の scale は 128 ごとではなく
+  **行ごとに 1 つ**（その行の group scale の最大）にして codes を丸め直す。1 つの group が scale energy の
+  `SHELF_EXL3_INT8_FLAG`（既定 0.5）を超える行（massive activation の token）は丸め直さず、group scale のまま
+  融合 kernel で計算する（1 batch で最大 `exl3_int8_flag_cap(rows)` = rows/8 行、行順で決定的）。
+  hipBLASLt に int8 の algorithm が無い形は融合 kernel に戻る。候補の実測選択は既定で行わない
+  （`SHELF_EXL3_INT8_TUNE=1` で有効。行数が変わるたびに約 0.15 s かかる）。
+- workspace: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes と scale（dense 経路ではさらに
+  フラグ行の slot と codes / scale）、accum 領域に F32 の回転前出力（dense 経路では int32 の累積器に続けて
+  フラグ行の F32 出力）を置き、入らない行数は行を分けて実行する。accum 領域は `exl3_int8_flag_cap` 行ぶん大きい。
 - 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数、TP と MoE の expert は未対応。
   correctness fallback は持たない。
 

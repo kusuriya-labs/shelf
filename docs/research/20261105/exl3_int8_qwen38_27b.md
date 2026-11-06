@@ -55,19 +55,43 @@ decode（`shelf-compute`、128 token プロンプト、63 token）:
 decode は W16A16 より約 14% 速い。この GPU は他の負荷の有無で decode の所要が 2 倍近くまで振れることがあり、
 上は最速側の揃った値を採った。
 
-prefill（`shelf-bench pp --mode forward --runs 3 --warmup 1 --device 0 --arena-gib 28`、GPU 時間の median）:
+prefill は main の W16A16 と同じ構造にした（rows >= 256）。trellis を int8 の dense 行列に展開し、hipBLASLt の
+int8 GEMM（int8 x int8 -> int32、230〜310 TOPS）で計算する。`shelf-bench pp --mode forward --runs 3 --warmup 1
+--device 0 --arena-gib 28`、GPU 時間の median:
 
-| prompt token | mul1（W16A16） | mul24（本実装） | mul24 / mul1 |
-|---:|---:|---:|---:|
-| 128 | 171.6 ms | 152.5 ms | 0.89 |
-| 256 | 282.7 ms | 288.4 ms | 1.02 |
-| 512 | 385.0 ms | 548.2 ms | 1.42 |
-| 1024 | 655.3 ms | 1077.9 ms | 1.64 |
-| 2048 | 1188.8 ms | 2156.8 ms | 1.81 |
+| prompt token | mul1（W16A16） | mul24（dense int8） | mul24 / mul1 | 自作の融合 kernel だけ（参考） |
+|---:|---:|---:|---:|---:|
+| 128 | 174.8 ms | 154.6 ms | 0.88 | 152.5 ms |
+| 256 | 283.8 ms | 239.7 ms | 0.84 | 288.4 ms |
+| 512 | 400.2 ms | 345.1 ms | 0.86 | 548.2 ms |
+| 1024 | 656.2 ms | 583.5 ms | 0.89 | 1077.9 ms |
+| 2048 | 1203.8 ms | 1111.9 ms | 0.92 | 2156.8 ms |
+| 4096 | 3043.6 ms | 2100.1 ms | 0.69 | — |
 
-**prefill は 512 token 以上で mul24 の方が遅い。** main の W16A16 は `rows >= 256` で trellis を FP16 に展開して
-hipBLASLt の GEMM を使う（2048 token で約 1720 tok/s）のに対し、本実装の INT8 prefill GEMM は約 60 TOPS で、
-行数が増えても伸びない（2048 token で約 950 tok/s）。128 token 以下だけ mul24 が速い。
+- 128 token 以下は融合 kernel のまま（256 行未満）。融合 kernel だけだと 512 token 以上で W16A16 より最大 1.8 倍遅かった
+  （INT8 GEMM が約 60 TOPS で頭打ち）ため、dense 経路を加えた。
+- 1 つの hipBLASLt GEMM は K 全体を足すので 128 ごとの scale を掛けられない。活性の scale を**行ごとに 1 つ**
+  （group scale の最大）にして codes を丸め直す。massive activation の行（1 つの group が scale energy の 50% 超）は
+  丸め直さず、融合 kernel で group scale のまま計算する（`exl3_int8_flag_cap` 行まで）。
+- 単体: recon、行 scale の丸め直し、int32 の GEMM、フラグ行の slot は CPU の整数計算と完全一致
+  （`test_exl3_int8_linear`、フラグ行が slot を超える場合を含む）。
+- 実モデルでの品質（`shelf-bench quality`、teacher-forced、融合 kernel のみの出力を基準にした KL）。比較の目安として
+  「融合 kernel のまま prefill chunk を 256 にした場合」の KL（数値のノイズの床）を並べる:
+
+  | コーパス | dense（フラグ行あり） | dense（フラグ行なし） | ノイズの床 |
+  |---|---:|---:|---:|
+  | corpA（KLD ケース連結、1542 位置） | 0.0149 | 0.0145 | 0.0111 |
+  | corpB（mtp_perf 4 種連結、1069 位置） | 0.0111 | 0.0227 | 0.0148 |
+
+  フラグ行を融合 kernel にすると、corpB で KL がノイズの床の水準に収まる。短い単独サンプル（json 372 位置）は
+  少数の位置で KL が 10 を超え、構成を変えるだけで 0.012〜0.06 に振れる（chunk 長を変えるだけでも 0.025〜0.034）。
+  BF16 に対する KLD は未測定（rocm_exl3 の INT8 活性に行 scale を入れた測定が必要）。
+- 初回の hipBLASLt 呼び出し（ライブラリ初期化、mul1 も同じ）で最初の 1 回の prefill が約 0.5 s 遅れる。
+  `shelf-compute` の 1 回だけの実行では融合 kernel のみの方が速い（約 480 ms 対 約 1015 ms、431 token）。
+  上の表は初期化後の値。
+- MTP の出力は dense prefill でも target-only と一致した（上の MTP 節の条件で確認）。
+
+decode の速度は変わらない（約 26.6 tok/s）。
 
 rebase 前（main に取り込む前）の実装で decode を 41.7 → 37.1 ms にした経緯:
 
@@ -135,7 +159,7 @@ target-only は mul1 が 23.2〜23.4 tok/s、mul24 が 26.6 tok/s。
 
 ## 未実施・未確認
 
-- prefill GEMM の最適化（上表のとおり 512 token 以上は W16A16 より遅い）。
+- BF16 に対する KLD（dense prefill の行 scale）。
 - 長い context、TP、MoE の expert、cb0 / mcg、DFlash2 との組み合わせ（MTP は上で測定済み）。
 - shelf の teacher-forced な全位置 KLD（`--dump-logits` は sampled row だけなので 12 位置の抜き取り）。
 - mul24 の実モデル断片を fixture にすること（現在の fixture は NumPy 参照復号器から再生成した期待値）。

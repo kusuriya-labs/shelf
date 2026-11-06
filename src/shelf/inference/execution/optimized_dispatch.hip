@@ -713,31 +713,95 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
         static_cast<uint8_t*>(ctx.exl3_xrot) + ((static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull));
     float* yprime = static_cast<float*>(ctx.exl3_accum);
     const uint32_t out_elem_bytes = out_bf16 ? 2u : 4u;
+    // Prefill: like the W16A16 dense path, expand the trellis to a dense int8 matrix and run one hipBLASLt int8 GEMM.
+    // That GEMM takes one activation scale per row (decode keeps one per 128-K group).
+    static const uint32_t dense_min_rows = [] {
+        const char* env = std::getenv("SHELF_EXL3_INT8_DENSE");
+        if (env == nullptr) return 256u;
+        const unsigned long v = std::strtoul(env, nullptr, 10);
+        return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
+    }();
+    static const float flag_share = [] {
+        const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
+        return env != nullptr ? std::strtof(env, nullptr) : 0.5f;
+    }();
+    // Workspace layout of the dense path (xrot region after codes + scales): slots[chunk] (+ the slot count),
+    // then the compact codes / scales of the flagged rows; the accum region holds acc[chunk][n] (int32) followed by
+    // the flagged rows' F32 output yprime2[cap][n].
+    const uint64_t cap_rows = ::shelf::kernel::exl3_int8_flag_cap(chunk);
+    const uint64_t scales_off = (static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull;
+    const uint64_t slots_off = (scales_off + static_cast<uint64_t>(chunk) * scale_stride_bytes + 255u) & ~255ull;
+    const uint64_t codes_f_off = (slots_off + (static_cast<uint64_t>(chunk) + 1u) * 4u + 255u) & ~255ull;
+    const uint64_t scales_f_off = (codes_f_off + cap_rows * code_stride + 255u) & ~255ull;
+    const uint64_t xrot_need = scales_f_off + cap_rows * scale_stride_bytes;
+    const uint64_t yprime2_off = (static_cast<uint64_t>(chunk) * n * 4u + 255u) & ~255ull;
+    const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr &&
+                          static_cast<uint64_t>(k) * n <= ctx.exl3_dense_bytes && xrot_need <= ctx.exl3_xrot_bytes &&
+                          yprime2_off + cap_rows * n * 4u <= ctx.exl3_accum_bytes;
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
-        const uint32_t splits = ::shelf::kernel::exl3_int8_gemm_splits(n_rows, n, k, scratch_rows);
-        hipError_t herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
-            reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride,
-            in.row_stride, static_cast<const uint16_t*>(e.exl3_suh), codes, scales, n_rows, k, code_stride,
-            scale_stride_bytes, stream);
-        if (herr == hipSuccess) {
-            herr = ::shelf::kernel::launch_exl3_int8_gemm(
-                codes, scales, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes), e.exl3_ka,
-                yprime, n_rows, n, k, splits, stream);
+        const bool use_dense = dense_ok && n_rows >= dense_min_rows &&
+                               static_cast<uint64_t>(n_rows) * sizeof(float) <= ctx.exl3_rowsum_bytes;
+        const ::shelf::bf16_t* x = reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride;
+        const uint16_t* suh = static_cast<const uint16_t*>(e.exl3_suh);
+        const uint16_t* svh = static_cast<const uint16_t*>(e.exl3_svh);
+        void* out_ptr = static_cast<uint8_t*>(dst.ptr) +
+            (static_cast<uint64_t>(e.output_col_offset) + static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes;
+        const auto out_dtype =
+            out_bf16 ? ::shelf::kernel::Exl3Int8OutputDType::BF16 : ::shelf::kernel::Exl3Int8OutputDType::F32;
+        hipError_t herr = hipSuccess;
+        bool done = false;
+        if (use_dense) {
+            float* rowscale = static_cast<float*>(ctx.exl3_rowsum);
+            int8_t* dense = static_cast<int8_t*>(ctx.exl3_dense);
+            uint8_t* xr = static_cast<uint8_t*>(ctx.exl3_xrot);
+            int32_t* slots = reinterpret_cast<int32_t*>(xr + slots_off);
+            uint32_t* count = reinterpret_cast<uint32_t*>(slots + chunk);
+            int8_t* codes_f = reinterpret_cast<int8_t*>(xr + codes_f_off);
+            float* scales_f = reinterpret_cast<float*>(xr + scales_f_off);
+            float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + yprime2_off);
+            const uint32_t cap = static_cast<uint32_t>(::shelf::kernel::exl3_int8_flag_cap(n_rows));
+            herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
+                x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_rowscale(
+                    codes, scales, rowscale, slots, count, codes_f, scales_f, n_rows, cap, k, code_stride,
+                    scale_stride_bytes, flag_share, stream);
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_recon(
+                    static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
+            if (herr == hipSuccess)
+                herr = ::shelf::execution::exl3_dense_gemm_int8(n_rows, n, k, dense, codes, yprime, stream);
+            // The flagged rows (count of them, at most cap) go through the fused per-group kernel.
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_gemm(
+                    codes_f, scales_f, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes),
+                    e.exl3_ka, yprime2, cap, n, k, 1u, stream, count);
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_rotate_out_i32(
+                    static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh, out_ptr, out_dtype,
+                    n_rows, n, dst.row_stride, stream);
+            done = herr == hipSuccess;
+            launches += done ? 7u : 0u;
+            // hipBLASLt has no int8 algorithm for this shape: run the fused kernel instead (it needs the group scales back).
+            if (herr == hipErrorNotSupported) herr = hipSuccess;
         }
-        if (herr == hipSuccess) {
-            herr = ::shelf::kernel::launch_exl3_int8_rotate_out(
-                yprime, static_cast<const uint16_t*>(e.exl3_svh),
-                static_cast<uint8_t*>(dst.ptr) +
-                    (static_cast<uint64_t>(e.output_col_offset) +
-                     static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes,
-                out_bf16 ? ::shelf::kernel::Exl3Int8OutputDType::BF16 : ::shelf::kernel::Exl3Int8OutputDType::F32,
-                n_rows, n, dst.row_stride, splits, stream);
+        if (!done && herr == hipSuccess) {
+            const uint32_t splits = ::shelf::kernel::exl3_int8_gemm_splits(n_rows, n, k, scratch_rows);
+            herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
+                x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_gemm(
+                    codes, scales, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes), e.exl3_ka,
+                    yprime, n_rows, n, k, splits, stream);
+            if (herr == hipSuccess)
+                herr = ::shelf::kernel::launch_exl3_int8_rotate_out(
+                    yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, splits, stream);
+            launches += 3u;
         }
         if (herr != hipSuccess)
             return Status::hip_error("exl3 int8 launch", hipGetErrorString(herr), __FILE__, __LINE__);
-        launches += 3u;
     }
     record_physical_launch(launches);
     record_optimized_op();

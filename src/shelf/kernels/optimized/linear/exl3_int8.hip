@@ -100,10 +100,14 @@ __global__ void __launch_bounds__(128) exl3_int8_gemm_kernel(
     const uint32_t scale_row_stride_floats,
     const uint32_t* __restrict__ trellis,
     float* __restrict__ yprime,
-    const uint32_t rows,
+    const uint32_t rows_cap,
+    const uint32_t* __restrict__ active_rows,
     const uint32_t n,
     const uint32_t k,
     const uint32_t groups_per_split) {
+    // active_rows (device) lets a launch sized for an upper bound skip the row tiles that hold nothing.
+    const uint32_t rows = active_rows != nullptr ? min(rows_cap, *active_rows) : rows_cap;
+    if (blockIdx.y * (16u * MT) >= rows) return;
     constexpr uint32_t kWords = 8u * BITS;
     constexpr uint32_t kBits = 256u * BITS;
     constexpr bool kAlignedWindows = (BITS % 4) == 0;
@@ -253,20 +257,20 @@ __global__ void __launch_bounds__(128) exl3_int8_gemm_kernel(
 template <int BITS>
 hipError_t launch_gemm_bits(
     const int8_t* codes, const float* scales, uint32_t code_stride, uint32_t sstride,
-    const uint32_t* trellis, float* yprime, uint32_t rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream) {
+    const uint32_t* trellis, float* yprime, uint32_t rows, const uint32_t* active_rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream) {
     const dim3 block(128);
     // Only the decode-sized (MT=1) kernel splits K; wider row tiles already have enough waves.
     const uint32_t sp = rows <= 16u ? splits : 1u;
     const uint32_t gps = (k / kBlock + sp - 1u) / sp;
     if (rows <= 16u) {
         exl3_int8_gemm_kernel<BITS, 1><<<dim3(n / 64u, 1, sp), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, n, k, gps);
+            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     } else if (rows <= 32u) {
         exl3_int8_gemm_kernel<BITS, 2><<<dim3(n / 64u, (rows + 31u) / 32u), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, n, k, gps);
+            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     } else {
         exl3_int8_gemm_kernel<BITS, 4><<<dim3(n / 64u, (rows + 63u) / 64u), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, n, k, gps);
+            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     }
     return hipGetLastError();
 }
@@ -295,6 +299,172 @@ __global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_kernel(
     }
 }
 
+
+// Prefill path (structure of the W16A16 dense path): a single hipBLASLt int8 GEMM over the whole K cannot apply
+// per-128-K-group activation scales, so the activations get ONE scale per row (the max group scale) and the
+// per-group codes are re-rounded onto it. A row whose group scales differ a lot (a massive-activation token) would lose
+// most of its resolution that way, so such rows keep their group codes and are computed by the fused per-group
+// kernel instead; the dense GEMM result for them is ignored.
+//   rowstat: rowscale[m] = max_g s_g; flag[m] = (max^2 > share * sum_g s_g^2), i.e. one group holds more than `share`
+//            of the row's scale energy (a massive-activation token).
+//   rowslot: flagged rows get consecutive slots in row order (deterministic); beyond `cap` they stay unflagged.
+//   rowfinish: flagged rows are copied (codes + scales) to the compact buffers; the others are re-rounded in place.
+__global__ void __launch_bounds__(256) exl3_int8_rowstat_kernel(
+    const float* __restrict__ scales,
+    float* __restrict__ rowscale,
+    int32_t* __restrict__ slots,
+    const uint32_t scale_row_stride_floats,
+    const uint32_t groups,
+    const float share) {
+    __shared__ float red[2][8];
+    const uint32_t m = blockIdx.x;
+    const uint32_t t = threadIdx.x;
+    float peak = 0.0f, sq = 0.0f;
+    for (uint32_t g = t; g < groups; g += 256u) {
+        const float sg = scales[static_cast<size_t>(m) * scale_row_stride_floats + g];
+        peak = fmaxf(peak, sg);
+        sq += sg * sg;
+    }
+    #pragma unroll
+    for (uint32_t off = 16u; off > 0u; off >>= 1u) {
+        peak = fmaxf(peak, __shfl_xor(peak, off));
+        sq += __shfl_xor(sq, off);
+    }
+    if ((t & 31u) == 0u) { red[0][t >> 5u] = peak; red[1][t >> 5u] = sq; }
+    __syncthreads();
+    if (t == 0u) {
+        float pk = red[0][0], sm = red[1][0];
+        for (uint32_t i = 1u; i < 8u; ++i) { pk = fmaxf(pk, red[0][i]); sm += red[1][i]; }
+        rowscale[m] = pk;
+        slots[m] = (pk > 0.0f && pk * pk > share * sm) ? 1 : -1;
+    }
+}
+
+__global__ void __launch_bounds__(1024) exl3_int8_rowslot_kernel(
+    int32_t* __restrict__ slots,
+    uint32_t* __restrict__ count,
+    const uint32_t rows,
+    const uint32_t cap) {
+    __shared__ uint32_t partial[1024];
+    const uint32_t t = threadIdx.x;
+    const uint32_t per = (rows + 1023u) / 1024u;
+    const uint32_t lo = min(rows, t * per), hi = min(rows, lo + per);
+    uint32_t c = 0u;
+    for (uint32_t m = lo; m < hi; ++m) c += slots[m] >= 0 ? 1u : 0u;
+    partial[t] = c;
+    __syncthreads();
+    if (t == 0u) {
+        uint32_t run = 0u;
+        for (uint32_t i = 0u; i < 1024u; ++i) { const uint32_t v = partial[i]; partial[i] = run; run += v; }
+        count[0] = min(run, cap);
+    }
+    __syncthreads();
+    uint32_t next = partial[t];
+    for (uint32_t m = lo; m < hi; ++m) {
+        if (slots[m] < 0) continue;
+        slots[m] = next < cap ? static_cast<int32_t>(next) : -1;
+        ++next;
+    }
+}
+
+__global__ void __launch_bounds__(256) exl3_int8_rowfinish_kernel(
+    int8_t* __restrict__ codes,
+    const float* __restrict__ scales,
+    const float* __restrict__ rowscale,
+    const int32_t* __restrict__ slots,
+    int8_t* __restrict__ codes_f,
+    float* __restrict__ scales_f,
+    const uint32_t code_row_stride,
+    const uint32_t scale_row_stride_floats,
+    const uint32_t k) {
+    const uint32_t m = blockIdx.x;
+    const uint32_t t = threadIdx.x;
+    const int32_t slot = slots[m];
+    int8_t* row = codes + static_cast<size_t>(m) * code_row_stride;
+    const float* srow = scales + static_cast<size_t>(m) * scale_row_stride_floats;
+    if (slot >= 0) {
+        int8_t* dst = codes_f + static_cast<size_t>(slot) * code_row_stride;
+        for (uint32_t i = t; i < k; i += 256u) dst[i] = row[i];
+        float* sdst = scales_f + static_cast<size_t>(slot) * scale_row_stride_floats;
+        for (uint32_t g = t; g < k / kBlock; g += 256u) sdst[g] = srow[g];
+        return;
+    }
+    const float peak = rowscale[m];
+    if (peak <= 0.0f) return;
+    for (uint32_t i = t; i < k; i += 256u) {
+        const float ratio = srow[i / kBlock] / peak;
+        if (ratio == 1.0f) continue;
+        row[i] = static_cast<int8_t>(static_cast<int>(rintf(static_cast<float>(row[i]) * ratio)));
+    }
+}
+
+// trellis -> dense int8 weight matrix [n][k] (k contiguous), for a hipBLASLt int8 GEMM with A transposed.
+// One wave per 16x16 tile, the same lane / window / decode as the gemm kernel: lane l holds column n = l % 16 and
+// the eight k rows 8 * (l / 16) .. +7 of the tile. A block is 8 consecutive k tiles of one n tile, so a row of the
+// output is written in 128 contiguous bytes.
+template <int BITS>
+__global__ void __launch_bounds__(256) exl3_int8_recon_kernel(
+    const uint32_t* __restrict__ trellis,
+    int8_t* __restrict__ dense,
+    const uint32_t k) {
+    constexpr uint32_t kWords = 8u * BITS;
+    constexpr uint32_t kBits = 256u * BITS;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t kt = blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint32_t nt = blockIdx.y;
+    const uint32_t base_bit = (lane * 8u * BITS + BITS + kBits - 16u) % kBits;
+    const uint32_t off = base_bit & 31u;
+    const uint32_t i0 = base_bit >> 5u;
+    const uint32_t* tile = trellis + (static_cast<size_t>(nt) * (k >> 4u) + kt) * kWords;
+    const uint32_t w0 = tile[i0];
+    const uint32_t w1 = tile[(i0 + 1u) % kWords];
+    const uint32_t w2 = tile[(i0 + 2u) % kWords];
+    uint32_t packed[2] = {0u, 0u};
+    #pragma unroll
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        const uint32_t e = off + i * BITS + 16u;
+        const uint32_t wl = (e - 1u) >> 5u;
+        const uint32_t r = 32u - (e - 32u * wl);
+        const uint32_t lo = wl == 0u ? w0 : (wl == 1u ? w1 : w2);
+        const uint32_t hi = wl == 0u ? 0u : (wl == 1u ? w0 : w1);
+        const uint32_t state = __builtin_amdgcn_alignbit(hi, lo, r) & 0xFFFFu;
+        const uint32_t b3 = __builtin_amdgcn_udot4(__umul24(state, 0xDCD12Du), 0x01010101u, 3u, false);
+        packed[i >> 2u] |= (b3 >> 2u) << ((i & 3u) * 8u);
+    }
+    uint2 v;
+    v.x = packed[0] ^ 0x80808080u;
+    v.y = packed[1] ^ 0x80808080u;
+    *reinterpret_cast<uint2*>(dense + static_cast<size_t>(nt * 16u + (lane & 15u)) * k + kt * 16u + (lane >> 4u) * 8u) = v;
+}
+
+// Same as rotate_out but the input is the int32 hipBLASLt accumulator: yprime = acc * row scale * S_FIX.
+// Rows with a slot take the F32 result of the fused per-group kernel (yprime2[slot]) instead.
+template <bool BF16>
+__global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_i32_kernel(
+    const int32_t* __restrict__ acc,
+    const float* __restrict__ rowscale,
+    const int32_t* __restrict__ slots,
+    const float* __restrict__ yprime2,
+    const uint16_t* __restrict__ svh,
+    void* __restrict__ out,
+    const uint32_t n,
+    const uint32_t out_row_stride) {
+    __shared__ float smem[kBlock];
+    const uint32_t t = threadIdx.x;
+    const uint32_t m = blockIdx.x;
+    const uint32_t col = blockIdx.y * kBlock + t;
+    const int32_t slot = slots[m];
+    float v = slot >= 0 ? yprime2[static_cast<size_t>(slot) * n + col]
+                        : static_cast<float>(acc[static_cast<size_t>(m) * n + col]) * rowscale[m] *
+                              ::shelf::quantization::exl3::kExl3Int8GridStep;
+    v = fwht128(v, smem, t) * kInvSqrt128 * f16_bits_to_f32(svh[col]);
+    if constexpr (BF16) {
+        reinterpret_cast<::shelf::bf16_t*>(out)[static_cast<size_t>(m) * out_row_stride + col] =
+            ::shelf::bf16_t{f32_to_bf16_rne_device(v)};
+    } else {
+        reinterpret_cast<float*>(out)[static_cast<size_t>(m) * out_row_stride + col] = v;
+    }
+}
 }
 
 hipError_t launch_exl3_int8_rotate_quantize(
@@ -334,7 +504,7 @@ uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t s
 hipError_t launch_exl3_int8_gemm(
     const int8_t* codes, const float* scales, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, const uint16_t* trellis, uint32_t bits, float* yprime,
-    uint32_t rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream) {
+    uint32_t rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream, const uint32_t* active_rows) {
     if (rows == 0u) return hipSuccess;
     if (splits == 0u || splits > k / kBlock) return hipErrorInvalidValue;
     if ((n % 64u) != 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u)
@@ -342,14 +512,14 @@ hipError_t launch_exl3_int8_gemm(
     const uint32_t sstride = scale_row_stride_bytes / 4u;
     const uint32_t* t32 = reinterpret_cast<const uint32_t*>(trellis);
     switch (bits) {
-        case 1: return launch_gemm_bits<1>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 2: return launch_gemm_bits<2>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 3: return launch_gemm_bits<3>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 4: return launch_gemm_bits<4>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 5: return launch_gemm_bits<5>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 6: return launch_gemm_bits<6>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 7: return launch_gemm_bits<7>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
-        case 8: return launch_gemm_bits<8>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, n, k, splits, stream);
+        case 1: return launch_gemm_bits<1>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 2: return launch_gemm_bits<2>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 3: return launch_gemm_bits<3>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 4: return launch_gemm_bits<4>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 5: return launch_gemm_bits<5>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 6: return launch_gemm_bits<6>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 7: return launch_gemm_bits<7>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
+        case 8: return launch_gemm_bits<8>(codes, scales, code_row_stride_bytes, sstride, t32, yprime, rows, active_rows, n, k, splits, stream);
         default: return hipErrorInvalidValue;
     }
 }
@@ -364,6 +534,52 @@ hipError_t launch_exl3_int8_rotate_out(
         exl3_int8_rotate_out_kernel<true><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
     else
         exl3_int8_rotate_out_kernel<false><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
+    return hipGetLastError();
+}
+
+
+hipError_t launch_exl3_int8_rowscale(
+    int8_t* codes, const float* scales, float* rowscale, int32_t* slots, uint32_t* count, int8_t* codes_f,
+    float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,
+    uint32_t scale_row_stride_bytes, float share, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u) return hipErrorInvalidValue;
+    exl3_int8_rowstat_kernel<<<rows, 256, 0, stream>>>(scales, rowscale, slots, scale_row_stride_bytes / 4u, k / kBlock, share);
+    exl3_int8_rowslot_kernel<<<1, 1024, 0, stream>>>(slots, count, rows, cap);
+    exl3_int8_rowfinish_kernel<<<rows, 256, 0, stream>>>(
+        codes, scales, rowscale, slots, codes_f, scales_f, code_row_stride_bytes, scale_row_stride_bytes / 4u, k);
+    return hipGetLastError();
+}
+
+hipError_t launch_exl3_int8_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
+                                  hipStream_t stream) {
+    if ((n % 16u) != 0u || (k % kBlock) != 0u) return hipErrorInvalidValue;
+    const dim3 grid(k / 128u, n / 16u);
+    const uint32_t* t32 = reinterpret_cast<const uint32_t*>(trellis);
+    switch (bits) {
+        case 1: exl3_int8_recon_kernel<1><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 2: exl3_int8_recon_kernel<2><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 3: exl3_int8_recon_kernel<3><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 4: exl3_int8_recon_kernel<4><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 5: exl3_int8_recon_kernel<5><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 6: exl3_int8_recon_kernel<6><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 7: exl3_int8_recon_kernel<7><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 8: exl3_int8_recon_kernel<8><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        default: return hipErrorInvalidValue;
+    }
+    return hipGetLastError();
+}
+
+hipError_t launch_exl3_int8_rotate_out_i32(
+    const int32_t* acc, const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
+    void* out, Exl3Int8OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
+    const dim3 grid(rows, n / kBlock);
+    if (out_dtype == Exl3Int8OutputDType::BF16)
+        exl3_int8_rotate_out_i32_kernel<true><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
+    else
+        exl3_int8_rotate_out_i32_kernel<false><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
     return hipGetLastError();
 }
 
