@@ -734,7 +734,8 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
 Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
-    const EffectiveRopeProfile& rope_profile) {
+    const EffectiveRopeProfile& rope_profile,
+    const shelf::weights::MatrixWeight* lm_head_override) {
 
     auto mtp_geometry_status = validate_mtp_geometry(config, weights);
     if (!mtp_geometry_status.ok()) return mtp_geometry_status;
@@ -776,8 +777,12 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     };
 
     const uint32_t embed_index = add_weight(weights.embed_tokens);
+    const MW* lmw = lm_head_override != nullptr
+                        ? lm_head_override
+                        : (weights.lm_head_tied ? &weights.embed_tokens : &weights.lm_head);
     const uint32_t lm_index =
-        weights.lm_head_tied ? embed_index : add_weight(weights.lm_head);
+        (lm_head_override == nullptr && weights.lm_head_tied) ? embed_index
+                                                             : add_weight(*lmw);
     const uint32_t fc_index = add_weight(weights.mtp.fc);
 
     const auto& lw = weights.mtp.layer;
@@ -950,7 +955,6 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
         em.emit(RT::PrimitiveNode{ra}, {v_down, attn_residual}, {layer_output});
     }
 
-    const MW* lmw = weights.lm_head_tied ? &weights.embed_tokens : &weights.lm_head;
     if (lmw->rows != config.vocab_size) {
         return Status::unsupported(
             "mtp lowering requires an unsharded lm_head", __FILE__, __LINE__);

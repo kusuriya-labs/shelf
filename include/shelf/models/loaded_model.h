@@ -108,7 +108,8 @@ public:
     // the family that loaded it. Fails when there is no block, so a caller cannot ask for
     // speculative decode on a checkpoint that does not carry one.
     Result<shelf::qwen35::runtime::MtpDrafterInput> mtp_drafter_input(
-        const shelf::qwen35::runtime::MtpDrafterConfig& options) const;
+        const shelf::qwen35::runtime::MtpDrafterConfig& options,
+        const shelf::weights::MatrixWeight* lm_head_override = nullptr) const;
 
     // Arena bytes the drafter needs, with the executor terms this model's FFN adds at the
     // drafter's row count.

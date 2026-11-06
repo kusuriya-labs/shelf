@@ -200,7 +200,8 @@ std::size_t LoadedModel::mtp_drafter_reserve_bytes(
 }
 
 Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
-    const shelf::qwen35::runtime::MtpDrafterConfig& options) const {
+    const shelf::qwen35::runtime::MtpDrafterConfig& options,
+    const shelf::weights::MatrixWeight* lm_head_override) const {
     if (!has_mtp_block()) {
         return Status::unsupported(
             "the loaded model has no MTP block: load it with the MTP option", __FILE__,
@@ -224,7 +225,8 @@ Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
     }
 
     auto lowered = shelf::qwen35::lower_qwen35_mtp_to_primitives(
-        dense_->text_config(), dense_->weights(), options.rope_profile);
+        dense_->text_config(), dense_->weights(), options.rope_profile,
+        lm_head_override);
     if (!lowered.ok()) return lowered.status();
     input.lowered = lowered.release();
     return input;

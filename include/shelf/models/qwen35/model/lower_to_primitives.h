@@ -36,6 +36,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
 Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
-    const EffectiveRopeProfile& rope_profile = {});
+    const EffectiveRopeProfile& rope_profile = {},
+    const shelf::weights::MatrixWeight* lm_head_override = nullptr);
 
 }

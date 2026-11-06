@@ -830,7 +830,13 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     if (runtime.config().rope_profile.has_value()) {
         drafter_config.rope_profile = *runtime.config().rope_profile;
     }
-    auto drafter_input = runtime.model().mtp_drafter_input(drafter_config);
+    const shelf::weights::MatrixWeight* lm_head_override = nullptr;
+    if (auto* tp = runtime.tp_coordinator(); tp != nullptr && tp->tp_size() > 0) {
+        auto& private_lm_head = tp->rank(0).private_lm_head();
+        if (private_lm_head.rows != 0u) lm_head_override = &private_lm_head;
+    }
+    auto drafter_input =
+        runtime.model().mtp_drafter_input(drafter_config, lm_head_override);
     if (!drafter_input.ok()) {
         fprintf(stderr, "mtp drafter input failed: %s\n",
                 drafter_input.status().message().c_str());
