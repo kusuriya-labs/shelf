@@ -7,6 +7,10 @@
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/weights/moe_tensor_parallel_plan.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
+#include <shelf/kernels/optimized/qsa.h>
+#include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen4exp/runtime/ple_input.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/runtime/graph/grouped_row_shape.h>
@@ -130,6 +134,34 @@ std::shared_ptr<const qwen4exp::PleTable> shared_ple_table(
 std::mutex prefetched_ple_mutex;
 std::unordered_map<std::string, std::shared_ptr<const qwen4exp::PleTable>> prefetched_ple;
 
+struct Qwen4ExpStatePoolLayouts {
+    bool uses_qsa = false;
+    bool uses_ple_conv = false;
+    ::shelf::state::QsaKeyStatePoolLayout qsa{};
+    ::shelf::state::PleConvStatePoolLayout ple_conv{};
+};
+
+Qwen4ExpStatePoolLayouts qwen4exp_state_pool_layouts(
+    const qwen4exp::Qwen4ExpTextConfig& cfg, std::uint32_t max_context_tokens) {
+    const auto counts = qhy::count_layer_topology(cfg);
+    Qwen4ExpStatePoolLayouts layouts;
+    layouts.uses_qsa = counts.attention_layers != 0u;
+    if (layouts.uses_qsa) {
+        const std::uint32_t ratio = static_cast<std::uint32_t>(cfg.indexer.compress_ratio);
+        const std::uint32_t blocks = (max_context_tokens + ratio - 1u) / ratio;
+        layouts.qsa = ::shelf::state::QsaKeyStatePoolLayout::make(
+            static_cast<std::uint32_t>(counts.attention_layers),
+            ::shelf::kernel::kQsaHeadDim, ratio, blocks);
+    }
+    const std::uint32_t ple_layers = static_cast<std::uint32_t>(cfg.ple.layer_ids.size());
+    layouts.uses_ple_conv = ple_layers != 0u;
+    if (layouts.uses_ple_conv) {
+        layouts.ple_conv = ::shelf::state::PleConvStatePoolLayout::make(
+            ple_layers, static_cast<std::uint32_t>(cfg.hc_count * cfg.hidden_size));
+    }
+    return layouts;
+}
+
 class Qwen4ExpTpRankModel final : public TpRankModel {
 public:
     Qwen4ExpTpRankModel(qwen4exp::Qwen4ExpModel&& model,
@@ -198,11 +230,36 @@ public:
             tokens, ::shelf::runtime::GroupedRowShape{local_experts, top_k});
         std::size_t total = static_cast<std::size_t>(group_rows) * inter * 2u * 2u;
         total += static_cast<std::size_t>(group_rows) * hidden * 2u;
-        total += static_cast<std::size_t>(tokens) * max_context_tokens_ * 5u;
+        const std::size_t rows = ::shelf::qwen35::runtime::qwen35_padded_row_count(tokens);
+        const std::size_t blocks = qsa_blocks(cfg);
+        const std::size_t mask_bytes = ((blocks + 31u) / 32u) * 4u;
+        total += rows * ((mask_bytes + 15u) / 16u) * 16u;
         total += ::shelf::runtime::MoePlanScratch::make(tokens, local_experts, top_k).bytes();
         return total;
     }
 
+    std::size_t executor_state_reserve_bytes(
+        std::size_t max_scheduled_requests) const override {
+        const auto layouts = qwen4exp_state_pool_layouts(model_.text_config(),
+                                                         max_context_tokens_);
+        const std::uint32_t slots = static_cast<std::uint32_t>(max_scheduled_requests);
+        std::size_t total = 0u;
+        if (layouts.uses_qsa)
+            total += ::shelf::state::qsa_key_state_pool_bytes(slots, layouts.qsa).total();
+        if (layouts.uses_ple_conv)
+            total += ::shelf::state::ple_conv_state_pool_bytes(slots, layouts.ple_conv);
+        return total;
+    }
+
+private:
+    std::size_t qsa_blocks(const qwen4exp::Qwen4ExpTextConfig& cfg) const {
+        const std::size_t ratio = cfg.indexer.compress_ratio != 0u
+                                      ? cfg.indexer.compress_ratio
+                                      : 1u;
+        return (max_context_tokens_ + ratio - 1u) / ratio;
+    }
+
+public:
     bool uses_exl3_linear() const override { return true; }
 
     std::uint32_t normed_token_hidden_width() const override {
@@ -289,27 +346,24 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     auto lowered = qwen4exp::lower_qwen4exp_to_primitives(cfg, model.weights(), options);
     if (!lowered.ok()) return lowered.status();
 
-    const auto counts = qwen_hybrid::count_layer_topology(cfg);
     q35::ExecutorModelInput input;
     input.model.config = &cfg;
     input.model.embed_tokens = &model.weights().embed_tokens;
     input.lowered = lowered.release();
-    input.uses_qsa_state = counts.attention_layers != 0u;
-    input.qsa_layers = static_cast<std::uint32_t>(counts.attention_layers);
-    input.qsa_compress_ratio = static_cast<std::uint32_t>(cfg.indexer.compress_ratio);
-    input.qsa_max_blocks =
-        (options.max_context_tokens + input.qsa_compress_ratio - 1u) /
-        input.qsa_compress_ratio;
-    const std::uint32_t ple_layers = static_cast<std::uint32_t>(cfg.ple.layer_ids.size());
-    input.uses_ple_conv_state = ple_layers != 0u;
-    input.ple_conv_layers = ple_layers;
-    input.ple_conv_channels =
-        static_cast<std::uint32_t>(cfg.hc_count * cfg.hidden_size);
+    const auto state_layouts = qwen4exp_state_pool_layouts(cfg, options.max_context_tokens);
+    input.uses_qsa_state = state_layouts.uses_qsa;
+    input.qsa_layers = state_layouts.qsa.num_qsa_states;
+    input.qsa_head_dim = state_layouts.qsa.head_dim;
+    input.qsa_compress_ratio = state_layouts.qsa.compress_ratio;
+    input.qsa_max_blocks = state_layouts.qsa.max_blocks;
+    input.uses_ple_conv_state = state_layouts.uses_ple_conv;
+    input.ple_conv_layers = state_layouts.ple_conv.num_ple_states;
+    input.ple_conv_channels = state_layouts.ple_conv.channels;
 
     auto executor = q35::create_executor(std::move(input), sequence_pool, gdn_state_pool,
                                          kv_pool, arena, config);
     if (!executor.ok()) return executor.status();
-    if (ple_layers != 0u && ple_table != nullptr) {
+    if (state_layouts.uses_ple_conv && ple_table != nullptr) {
         auto runtime = qwen4exp::PleInputRuntime::create(
             ple_table, static_cast<std::uint32_t>(cfg.hidden_size));
         if (runtime == nullptr) {

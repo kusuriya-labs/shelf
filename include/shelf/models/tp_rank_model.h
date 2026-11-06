@@ -57,7 +57,7 @@ public:
     // State pools the executor owns and allocates after the memory plan has sized the KV
     // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
     // the rank runtime already holds.
-    virtual std::size_t executor_state_reserve_bytes(std::size_t max_scheduled_requests) const {
+    virtual std::size_t executor_state_reserve_bytes(std::size_t) const {
         return 0u;
     }
     // Width of the hidden the family exposes for MTP. Zero means the model's hidden size.

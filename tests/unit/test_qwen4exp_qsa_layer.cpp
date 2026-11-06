@@ -39,7 +39,7 @@ constexpr std::uint32_t kIndexDim = 128u;
 constexpr std::uint32_t kIndexRotary = 64u;
 constexpr std::uint32_t kIndexBlocks = 8u;
 constexpr std::uint32_t kIndexTopK = 2u;
-constexpr std::uint32_t kMaskLen = 32u;
+constexpr std::uint32_t kMaskBytes = 4u;
 
 shelf::weights::MatrixWeight matrix(std::uint32_t rows, std::uint32_t cols) {
     shelf::weights::MatrixWeight w;
@@ -149,7 +149,7 @@ int main() {
     layer.qsa_geometry.indexer.compress_ratio = 4u;
     layer.qsa_geometry.indexer.blocks = kIndexBlocks;
     layer.qsa_geometry.indexer.top_k = kIndexTopK;
-    layer.qsa_geometry.indexer.mask_len = kMaskLen;
+    layer.qsa_geometry.indexer.mask_bytes = kMaskBytes;
     layer.qsa_geometry.indexer.state_index = 3u;
     layer.qsa_weights.attention.q = &q_proj;
     layer.qsa_weights.attention.k = &k_proj;
@@ -190,11 +190,11 @@ int main() {
         sequence += rt::to_string(rt::primitive_kind_of(node.node));
     }
 
-    const std::size_t mask_pos = sequence.find("QSA_EXPAND_MASK");
+    const std::size_t mask_pos = sequence.find("QSA_SELECT");
     const std::size_t attention_pos = sequence.find("PAGED_ATTENTION");
-    check(mask_pos != std::string::npos, "QSA indexer emits the token mask");
+    check(mask_pos != std::string::npos, "QSA indexer emits the block selection");
     check(attention_pos != std::string::npos, "QSA layer emits paged attention");
-    check(mask_pos < attention_pos, "token mask precedes the paged attention");
+    check(mask_pos < attention_pos, "block selection precedes the paged attention");
     check(sequence.find("PAGED_ATTENTION,SIGMOID,MUL,LINEAR,HYPER_APPLY") !=
               std::string::npos,
           "QSA attention is gated and injected into the hyper stack");
@@ -207,9 +207,9 @@ int main() {
         if (rt::primitive_kind_of(node.node) != rt::PrimitiveKind::PAGED_ATTENTION)
             continue;
         const auto& pa = std::get<rt::PagedAttentionNode>(node.node);
-        masked_attention = pa.has_token_mask && node.inputs.size() == 2u;
+        masked_attention = pa.has_block_mask && node.inputs.size() == 2u;
     }
-    check(masked_attention, "QSA attention node consumes the token mask");
+    check(masked_attention, "QSA attention node consumes the block mask");
 
     {
         std::uint32_t combines = 0;

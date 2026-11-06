@@ -19,14 +19,16 @@ struct PagedTokenAddress {
     bool valid;
 };
 
-// A null mask is the ordinary causal case. A position past the mask's covered range is
-// not visible: the mask is the complete selection, not a prefix hint.
+// A null mask is the ordinary causal case. A block past the mask's covered range is not
+// visible: the mask is the complete selection, not a prefix hint.
 __device__ __forceinline__ bool paged_token_visible(const uint8_t* mask, uint32_t stride,
-                                                    uint32_t tokens, uint32_t row,
-                                                    uint32_t pos) {
+                                                    uint32_t blocks, uint32_t block_shift,
+                                                    uint32_t row, uint32_t pos) {
     if (mask == nullptr) return true;
-    if (pos >= tokens) return false;
-    return mask[static_cast<size_t>(row) * stride + pos] != 0u;
+    const uint32_t block = pos >> block_shift;
+    if (block >= blocks) return false;
+    const size_t byte = static_cast<size_t>(row) * stride + (block >> 3u);
+    return ((mask[byte] >> (block & 7u)) & 1u) != 0u;
 }
 
 __device__ __forceinline__ PagedTokenAddress

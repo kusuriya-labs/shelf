@@ -2057,7 +2057,8 @@ Result<Executor> create_executor(
         auto pool = ::shelf::state::QsaKeyStatePool::create(
             arena, sequence_pool.max_sequences(),
             ::shelf::state::QsaKeyStatePoolLayout::make(
-                input.qsa_layers, 128u, input.qsa_compress_ratio, input.qsa_max_blocks));
+                input.qsa_layers, input.qsa_head_dim, input.qsa_compress_ratio,
+                input.qsa_max_blocks));
         if (!pool.ok()) return pool.status();
         ex.qsa_state_pool =
             std::make_unique<::shelf::state::QsaKeyStatePool>(pool.release());

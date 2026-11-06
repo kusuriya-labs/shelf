@@ -177,8 +177,7 @@ int main() {
           "PLE injection is lowered");
     check(sequence.find("STATEFUL_CAUSAL_CONV1D") != std::string::npos && sequence.find("GDN_RECURRENCE") != std::string::npos,
           "GDN layer is lowered");
-    check(sequence.find("QSA_KEY_CACHE,QSA_SCORES,QSA_TOPK,QSA_EXPAND_MASK") !=
-              std::string::npos,
+    check(sequence.find("QSA_KEY_CACHE,QSA_SELECT") != std::string::npos,
           "QSA indexer is lowered");
     check(sequence.find("PAGED_ATTENTION") != std::string::npos,
           "QSA attention is lowered");
@@ -197,7 +196,7 @@ int main() {
     for (const auto& node : graph.nodes) {
         if (rt::primitive_kind_of(node.node) != rt::PrimitiveKind::PAGED_ATTENTION)
             continue;
-        grouped = std::get<rt::PagedAttentionNode>(node.node).has_token_mask;
+        grouped = std::get<rt::PagedAttentionNode>(node.node).has_block_mask;
     }
     check(grouped, "QSA attention consumes the expanded mask");
 

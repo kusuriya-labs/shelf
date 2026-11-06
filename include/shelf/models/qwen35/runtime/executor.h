@@ -95,6 +95,7 @@ struct ExecutorModelInput {
     // Qwen4Exp model-level state that is not part of the GDN / KV pools.
     bool uses_qsa_state = false;
     std::uint32_t qsa_layers = 0;
+    std::uint32_t qsa_head_dim = 0;
     std::uint32_t qsa_max_blocks = 0;
     std::uint32_t qsa_compress_ratio = 0;
     bool uses_ple_conv_state = false;

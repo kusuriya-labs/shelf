@@ -39,9 +39,11 @@ struct GatedAttentionLoweringIndices {
     std::uint32_t p_q_norm = 0;
     std::uint32_t p_k_norm = 0;
     std::uint32_t state_index = 0;
-    // QSA sparse selection: when set, the paged attention consumes this U8 token mask.
-    bool has_token_mask = false;
-    RT::ValueId token_mask{};
+    // QSA sparse selection: when set, the paged attention consumes this block bitmap,
+    // whose rows hold one bit per indexer block of `block_size` tokens.
+    bool has_block_mask = false;
+    RT::ValueId block_mask{};
+    std::uint32_t block_size = 0;
 };
 
 inline RT::ValueId emit_gated_attention(
@@ -126,12 +128,13 @@ inline RT::ValueId emit_gated_attention(
             attn_key,
             geo.head_dim ? 1.0f / sqrtf(static_cast<float>(geo.head_dim)) : 1.0f,
             idx.state_index,
-            idx.has_token_mask,
-            idx.has_token_mask ? em.pg.value_features(idx.token_mask) : 0u,
+            idx.has_block_mask,
+            idx.has_block_mask ? em.pg.value_features(idx.block_mask) : 0u,
+            idx.has_block_mask ? idx.block_size : 0u,
         };
         v_ctx = em.value(q_features, RT::ValueDType::F32);
         auto& pgn = pg.add_node(RT::PrimitiveNode{pan});
-        pgn.inputs = idx.has_token_mask ? std::vector<RT::ValueId>{v_qr, idx.token_mask}
+        pgn.inputs = idx.has_block_mask ? std::vector<RT::ValueId>{v_qr, idx.block_mask}
                                         : std::vector<RT::ValueId>{v_qr};
         pgn.outputs = {v_ctx};
         pgn.state_inputs = {kv_state};

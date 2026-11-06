@@ -55,7 +55,7 @@ struct Qwen4ExpLayerLowering {
 //   mlp  HyperConnection mix -> MoE FFN -> apply
 //
 // `hyper` is the [rows, hc * hidden] BF16 stream stack. A QSA layer runs the indexer and
-// feeds its token mask to the gated attention.
+// feeds its block bitmap to the gated attention.
 Result<::shelf::runtime::ValueId> emit_qwen4exp_layer(
     ::shelf::qwen_hybrid::Emitter& em,
     const Qwen4ExpLayerLowering& layer,

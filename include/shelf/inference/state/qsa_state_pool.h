@@ -58,6 +58,19 @@ struct QsaKeyStatePoolLayout {
     }
 };
 
+struct QsaKeyStatePoolBytes {
+    std::size_t pooled = 0;
+    std::size_t partial = 0;
+    std::size_t counts = 0;
+
+    std::size_t total() const noexcept { return pooled + partial + counts; }
+};
+
+inline constexpr std::size_t kQsaKeyStatePoolAlignment = 256u;
+
+QsaKeyStatePoolBytes qsa_key_state_pool_bytes(uint32_t max_sequences,
+                                              const QsaKeyStatePoolLayout& layout) noexcept;
+
 class QsaKeyStatePool {
  public:
     static Result<QsaKeyStatePool> create(

@@ -328,7 +328,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             layer.qsa_geometry.attention.eps = eps;
             layer.qsa_geometry.attention.tp_combine = false;
             layer.qsa_geometry.indexer = make_qwen4exp_qsa_indexer_geometry(
-                config, index_blocks, options.max_context_tokens, next_attention_state);
+                config, index_blocks, next_attention_state);
             layer.qsa_geometry.indexer.top_k =
                 std::min(layer.qsa_geometry.indexer.top_k, index_blocks);
             layer.qsa_weights.attention.q = &lw.attention.q_proj;

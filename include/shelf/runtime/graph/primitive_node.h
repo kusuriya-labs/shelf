@@ -37,14 +37,12 @@ enum class PrimitiveKind : uint16_t {
     PLE_BROADCAST_MUL = 25,
     PLE_CONV = 26,
     QSA_KEY_CACHE = 27,
-    QSA_SCORES = 28,
-    QSA_TOPK = 29,
-    QSA_EXPAND_MASK = 30,
-    QSA_ROPE = 31,
-    PLE_STREAM_DOT = 32,
-    REPEAT_STREAMS = 33,
-    HYPER_INJECT = 34,
-    MEAN_STREAMS = 35,
+    QSA_SELECT = 28,
+    QSA_ROPE = 29,
+    PLE_STREAM_DOT = 30,
+    REPEAT_STREAMS = 31,
+    HYPER_INJECT = 32,
+    MEAN_STREAMS = 33,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -77,9 +75,7 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
         case PrimitiveKind::PLE_CONV: return "PLE_CONV";
         case PrimitiveKind::QSA_KEY_CACHE: return "QSA_KEY_CACHE";
-        case PrimitiveKind::QSA_SCORES: return "QSA_SCORES";
-        case PrimitiveKind::QSA_TOPK: return "QSA_TOPK";
-        case PrimitiveKind::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
+        case PrimitiveKind::QSA_SELECT: return "QSA_SELECT";
         case PrimitiveKind::QSA_ROPE: return "QSA_ROPE";
         case PrimitiveKind::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case PrimitiveKind::REPEAT_STREAMS: return "REPEAT_STREAMS";
@@ -179,11 +175,12 @@ struct PagedAttentionNode {
     AttentionShapeKey attention;
     float scale = 0.0f;
     uint32_t state_index = 0;
-    // When true, the second tensor input is a [rows, mask_features] U8 mask. A key is
-    // visible only when its byte is non-zero, so the attention consumes the block
-    // selection produced by the QSA indexer.
-    bool has_token_mask = false;
-    uint32_t mask_features = 0;
+    // When true, the second tensor input is the QSA block selection: one bit per indexer
+    // block, `mask_bytes` bytes per row. A key is visible only when its block's bit is set,
+    // so the attention consumes the indexer selection without a per-token mask.
+    bool has_block_mask = false;
+    uint32_t mask_bytes = 0;
+    uint32_t block_size = 0;
 };
 
 struct StatefulCausalConv1DNode {
@@ -334,30 +331,21 @@ struct QsaKeyCacheNode {
     float position_scale = 1.0f;
 };
 
-// Per-row indexer block scores from the query against the sequence's pooled keys.
-struct QsaScoresNode {
-    RowwiseShapeKey shape;  // index_heads * index_head_dim
+// Qwen4Exp QSA block selection. The query is scored against the sequence's pooled block
+// keys in chunks and the top-k blocks are kept, so no per-block score row is materialized.
+// The first output is the selected block indices, unused entries are -1. The optional
+// second output is a bitmap over the block indices, 1 bit per block, row stride padded to
+// a multiple of 4 bytes.
+struct QsaSelectNode {
+    RowwiseShapeKey shape;
     uint32_t state_index = 0;
     uint32_t n_heads = 0;
     uint32_t head_dim = 0;
     uint32_t blocks = 0;
     uint32_t compress_ratio = 4;
+    uint32_t top_k = 0;
+    uint32_t mask_bytes = 0;
     float scale = 1.0f;
-};
-
-// Top-k block selection over the scores, with -1 padding past the visible blocks.
-struct QsaTopkNode {
-    RowwiseShapeKey shape;  // blocks
-    uint32_t k = 0;
-    uint32_t blocks = 0;
-    uint32_t compress_ratio = 4;
-};
-
-// Expand the selected blocks to a token mask and AND it with causality.
-struct QsaExpandMaskNode {
-    RowwiseShapeKey shape;  // selected blocks
-    uint32_t total_len = 0;
-    uint32_t compress_ratio = 4;
 };
 
 using PrimitiveNode = std::variant<
@@ -389,9 +377,7 @@ using PrimitiveNode = std::variant<
     PleBroadcastMulNode,
     PleConvNode,
     QsaKeyCacheNode,
-    QsaScoresNode,
-    QsaTopkNode,
-    QsaExpandMaskNode,
+    QsaSelectNode,
     QsaRopeNode,
     PleStreamDotNode,
     RepeatStreamsNode,
@@ -430,9 +416,7 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) return PrimitiveKind::PLE_BROADCAST_MUL;
         else if constexpr (std::is_same_v<T, PleConvNode>) return PrimitiveKind::PLE_CONV;
         else if constexpr (std::is_same_v<T, QsaKeyCacheNode>) return PrimitiveKind::QSA_KEY_CACHE;
-        else if constexpr (std::is_same_v<T, QsaScoresNode>) return PrimitiveKind::QSA_SCORES;
-        else if constexpr (std::is_same_v<T, QsaTopkNode>) return PrimitiveKind::QSA_TOPK;
-        else if constexpr (std::is_same_v<T, QsaExpandMaskNode>) return PrimitiveKind::QSA_EXPAND_MASK;
+        else if constexpr (std::is_same_v<T, QsaSelectNode>) return PrimitiveKind::QSA_SELECT;
         else if constexpr (std::is_same_v<T, QsaRopeNode>) return PrimitiveKind::QSA_ROPE;
         else if constexpr (std::is_same_v<T, PleStreamDotNode>) return PrimitiveKind::PLE_STREAM_DOT;
         else if constexpr (std::is_same_v<T, RepeatStreamsNode>) return PrimitiveKind::REPEAT_STREAMS;

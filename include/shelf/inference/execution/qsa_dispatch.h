@@ -15,25 +15,13 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-Result<OptimizedLaunchResult> try_launch_qsa_scores(
+Result<OptimizedLaunchResult> try_launch_qsa_select(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
     hipStream_t stream);
 
 Result<OptimizedLaunchResult> try_launch_qsa_rope(
-    const ::shelf::runtime::Program& program,
-    const ::shelf::runtime::DispatchBinding& b,
-    HostExecutionContext& ctx,
-    hipStream_t stream);
-
-Result<OptimizedLaunchResult> try_launch_qsa_topk(
-    const ::shelf::runtime::Program& program,
-    const ::shelf::runtime::DispatchBinding& b,
-    HostExecutionContext& ctx,
-    hipStream_t stream);
-
-Result<OptimizedLaunchResult> try_launch_qsa_expand_mask(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,

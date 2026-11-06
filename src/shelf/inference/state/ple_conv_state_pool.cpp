@@ -1,5 +1,7 @@
 #include <shelf/inference/state/ple_conv_state_pool.h>
 
+#include <shelf/core/memory/alignment.h>
+
 namespace shelf {
 namespace state {
 
@@ -8,6 +10,13 @@ std::size_t slot_elems(const PleConvStatePoolLayout& l) {
     return static_cast<std::size_t>(l.num_ple_states) * l.history * l.channels;
 }
 }  // namespace
+
+std::size_t ple_conv_state_pool_bytes(uint32_t max_sequences,
+                                      const PleConvStatePoolLayout& layout) noexcept {
+    return ::shelf::gpu::align_up(static_cast<std::size_t>(max_sequences) *
+                                      slot_elems(layout) * sizeof(bf16_t),
+                                  kPleConvStatePoolAlignment);
+}
 
 Result<PleConvStatePool> PleConvStatePool::create(
     gpu::GpuArena& arena, uint32_t max_sequences,
@@ -21,9 +30,8 @@ Result<PleConvStatePool> PleConvStatePool::create(
     pool.device_ = arena.device();
     pool.max_slots_ = max_sequences;
     pool.layout_ = layout;
-    const std::size_t bytes = static_cast<std::size_t>(max_sequences) * slot_elems(layout) *
-                              sizeof(bf16_t);
-    auto alloc = arena.allocate_aligned(bytes, 256);
+    const std::size_t bytes = ple_conv_state_pool_bytes(max_sequences, layout);
+    auto alloc = arena.allocate_aligned(bytes, kPleConvStatePoolAlignment);
     if (!alloc.ok()) return alloc.status();
     std::size_t shape[4] = {
         static_cast<std::size_t>(max_sequences),

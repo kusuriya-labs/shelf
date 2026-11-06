@@ -1,5 +1,7 @@
 #include <shelf/inference/state/qsa_state_pool.h>
 
+#include <shelf/core/memory/alignment.h>
+
 #include <cassert>
 
 namespace shelf {
@@ -23,6 +25,20 @@ std::size_t count_slot_elems(const QsaKeyStatePoolLayout& layout) {
 
 }  // namespace
 
+QsaKeyStatePoolBytes qsa_key_state_pool_bytes(uint32_t max_sequences,
+                                              const QsaKeyStatePoolLayout& layout) noexcept {
+    const std::size_t slots = static_cast<std::size_t>(max_sequences);
+    return QsaKeyStatePoolBytes{
+        .pooled = ::shelf::gpu::align_up(slots * pooled_slot_elems(layout) * sizeof(bf16_t),
+                                         kQsaKeyStatePoolAlignment),
+        .partial =
+            ::shelf::gpu::align_up(slots * partial_slot_elems(layout) * sizeof(bf16_t),
+                                   kQsaKeyStatePoolAlignment),
+        .counts = ::shelf::gpu::align_up(slots * count_slot_elems(layout) * sizeof(uint32_t),
+                                         kQsaKeyStatePoolAlignment),
+    };
+}
+
 Result<QsaKeyStatePool> QsaKeyStatePool::create(
     gpu::GpuArena& arena,
     uint32_t max_sequences,
@@ -42,21 +58,16 @@ Result<QsaKeyStatePool> QsaKeyStatePool::create(
     pool.layout_ = layout;
     pool.used_count_ = 0u;
 
-    const std::size_t pooled_bytes =
-        static_cast<std::size_t>(max_sequences) * pooled_slot_elems(layout) *
-        sizeof(bf16_t);
-    const std::size_t partial_bytes =
-        static_cast<std::size_t>(max_sequences) * partial_slot_elems(layout) *
-        sizeof(bf16_t);
-    const std::size_t count_bytes =
-        static_cast<std::size_t>(max_sequences) * count_slot_elems(layout) *
-        sizeof(uint32_t);
+    const auto pool_bytes = qsa_key_state_pool_bytes(max_sequences, layout);
+    const std::size_t pooled_bytes = pool_bytes.pooled;
+    const std::size_t partial_bytes = pool_bytes.partial;
+    const std::size_t count_bytes = pool_bytes.counts;
 
-    auto pooled_alloc = arena.allocate_aligned(pooled_bytes, 256);
+    auto pooled_alloc = arena.allocate_aligned(pooled_bytes, kQsaKeyStatePoolAlignment);
     if (!pooled_alloc.ok()) return pooled_alloc.status();
-    auto partial_alloc = arena.allocate_aligned(partial_bytes, 256);
+    auto partial_alloc = arena.allocate_aligned(partial_bytes, kQsaKeyStatePoolAlignment);
     if (!partial_alloc.ok()) return partial_alloc.status();
-    auto count_alloc = arena.allocate_aligned(count_bytes, 256);
+    auto count_alloc = arena.allocate_aligned(count_bytes, kQsaKeyStatePoolAlignment);
     if (!count_alloc.ok()) return count_alloc.status();
 
     std::size_t pooled_shape[4] = {

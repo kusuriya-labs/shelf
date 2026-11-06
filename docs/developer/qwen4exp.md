@@ -78,8 +78,8 @@ lm_head (final norm なし)
 
 - embedding は hc 個の同一 stream へ複製する。
 - GDN は `output_gate_type: sigmoid` を使う。Qwen3.5 の silu とは切り替える。
-- QSA は indexer の token mask を `PagedAttentionNode` の 2 番目の入力にする。
-  mask がある場合、attention selector は tiled prefill / split decode を選ばない。
+- QSA は indexer の block bitmap を `PagedAttentionNode` の 2 番目の入力にする。
+  bitmap がある場合、fp8 KV と行数の少ない chunk は tiled prefill を選ばない。
 - MoE は router（global 512、top-10）、gate/up/down の 3 grouped linear、shared expert、
   combine で構成する。shared expert の gate は sigmoid。
 - PLE は layer 1 の attention site の前に注入する。key_proj / value_proj /
@@ -109,8 +109,13 @@ checkpoint は E4M3 code × per-tensor BF16 scale、EXL3 checkpoint は
 
 `QsaKeyStatePool` は sequence slot ごとに pooled key / partial key / counts を持つ。
 `QSA_KEY_CACHE` は 4 token が揃った時点で mean → RMSNorm → partial RoPE を行い、
-pooled key を書く。`QSA_SCORES` / `QSA_TOPK` / `QSA_EXPAND_MASK` が token mask を作り、
-paged attention が消費する。QSA 層は 4 層周期（0 始まりで 3, 7, ..., 47）。
+pooled key を書く。`QSA_SELECT` は block ごとに score を計算しながら top-k を保持する
+ため、`[rows, blocks]` の score buffer は確保しない。出力は行あたり
+`ceil(blocks / 32) * 4` byte の block bitmap（1 block = 1 bit、下位 block が下位 bit）で、
+選んだ block と、まだ揃っていない tail block の bit を立てる。
+`PagedAttentionNode` はこの bitmap を 2 番目の入力として、token を
+`position >> log2(compress_ratio)` の block で判定する。QSA 層は 4 層周期
+（0 始まりで 3, 7, ..., 47）。
 
 ## 5. executor
 
@@ -144,9 +149,21 @@ BF16/F32 の raw ファイルと `.meta` に書き出す。ファイル名は
 ./build/tests/test_qwen4exp_lower
 ./build/tests/test_qwen4exp_layer
 ./build/tests/test_qwen4exp_qsa_layer
+./build/tests/test_qsa_select
+./build/tests/test_qsa_key_path
+./build/tests/test_qsa_state_pool
+./build/tests/test_qsa_attention_mask
+./build/tests/test_paged_attention
+./build/tests/test_executor_state_reserve
 ./build/tests/test_program_activation_planes
 ./build/tests/test_fp8_ptpc
 ```
+
+`test_qsa_select` は CPU 参照の top-k と block bitmap を、chunk 境界（visible block
+64 / 128）と compress_ratio 1 / 2 / 4 で比較する。`test_paged_attention` の
+`QSA MASKED` ケースが、bitmap を消費する bf16 tiled prefill と bf16 / fp8 decode を
+CPU 参照と突き合わせる。`test_executor_state_reserve` は state pool の予約 byte 数が
+arena の実消費と一致することを検証する。
 
 実 checkpoint の E2E:
 

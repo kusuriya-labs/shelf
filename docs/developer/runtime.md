@@ -179,6 +179,18 @@ values_per_row = 44 × (hidden + intermediate / tp) / (hidden + intermediate)
   `token_hidden {Npad, H}`、target hidden taps、sampling radix、
   `create_device_batch_context` の各 buffer、scratch 32 KiB、attention partials 32 MiB）
 
+grouped expert と QSA を持つ family（Qwen4Exp）は、上の式に加えて
+`TpRankModel::ffn_workspace_reserve_bytes()` と
+`TpRankModel::executor_state_reserve_bytes()` を reserve へ加える。
+
+- `ffn_workspace_reserve_bytes()` は grouped row 容量の activation、`MoePlanScratch`、
+  QSA の block bitmap（行あたり `ceil(blocks / 32) * 4` byte）
+- `executor_state_reserve_bytes()` は executor が plan 後に作る state pool
+  （`QsaKeyStatePool` の pooled / partial / counts、`PleConvStatePool`）で、
+  `max_scheduled_requests` 個の slot 分を確保する。byte 数は
+  `qsa_key_state_pool_bytes()` と `ple_conv_state_pool_bytes()` が決め、pool の `create`
+  と同じ関数を使う。`test_executor_state_reserve` が arena の実消費と一致することを検証する
+
 executor footprint の実測内訳（TP1 / bucket 4096 / requests 4）は program workspace が
 ほぼ全てである（合計 1.78 GiB のうち 1,780.66 MiB。うち max program 1,748.62 MiB）。
 `logits` は 3.79 MiB、`token_hidden` + sampling で 40.24 MiB、batch context 類は 1 MiB 未満。

@@ -795,12 +795,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_ple_conv(program, b, ctx, stream);
         case KernelId::QSA_KEY_CACHE:
             return try_launch_qsa_key_cache(program, b, ctx, stream);
-        case KernelId::QSA_SCORES:
-            return try_launch_qsa_scores(program, b, ctx, stream);
-        case KernelId::QSA_TOPK:
-            return try_launch_qsa_topk(program, b, ctx, stream);
-        case KernelId::QSA_EXPAND_MASK:
-            return try_launch_qsa_expand_mask(program, b, ctx, stream);
+        case KernelId::QSA_SELECT:
+            return try_launch_qsa_select(program, b, ctx, stream);
         case KernelId::QSA_ROPE:
             return try_launch_qsa_rope(program, b, ctx, stream);
         default:

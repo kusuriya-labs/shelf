@@ -22,28 +22,18 @@ struct QsaPoolArgs {
     float eps = 1e-6f;
 };
 
-// QSA block scores:
-// score[r, b] = sum_h relu(dot(q[r,h], pooled[b])) / sqrt(head_dim).
-// Blocks at or beyond visible[r] are written as -inf.
-struct QsaScoresArgs {
-    const bf16_t* q = nullptr;
-    const bf16_t* pooled = nullptr;
-    float* scores = nullptr;
-    const uint32_t* visible = nullptr;
-    uint32_t rows = 0;
-    uint32_t blocks = 0;
-    uint32_t n_heads = 0;
-    uint32_t head_dim = 0;
-    float scale = 0.0f;
-};
+inline constexpr uint32_t kQsaHeadDim = 128u;
+inline constexpr uint32_t kQsaThreads = 128u;
 
-// Multi-sequence block scores. Each row resolves its own pooled-key base through
-// `row_sequence_slots`; `visible` comes from the row position so a prefill chunk cannot
-// score a block whose keys are later than the query.
-struct QsaScoresBatchArgs {
+inline constexpr uint32_t kQsaSelectChunk = 64u;
+inline constexpr uint32_t kQsaSelectMaxHeads = 8u;
+inline constexpr uint32_t kQsaSelectMaxTopK = 1024u;
+
+struct QsaSelectBatchArgs {
     const bf16_t* q = nullptr;
     const bf16_t* pooled_base = nullptr;
-    float* scores = nullptr;
+    int32_t* selected = nullptr;
+    uint8_t* block_mask = nullptr;
     const uint32_t* row_sequence_slots = nullptr;
     const uint32_t* positions = nullptr;
     uint32_t rows = 0;
@@ -53,38 +43,13 @@ struct QsaScoresBatchArgs {
     uint32_t compress_ratio = 0;
     uint32_t state_index = 0;
     uint32_t max_sequences = 0;
+    uint32_t top_k = 0;
     uint32_t q_row_stride = 0;
-    uint32_t scores_row_stride = 0;
+    uint32_t selected_row_stride = 0;
+    uint32_t mask_row_bytes = 0;
     uint64_t pooled_slot_stride = 0;
     uint64_t pooled_layer_stride = 0;
     float scale = 0.0f;
-};
-
-inline constexpr uint32_t kQsaHeadDim = 128u;
-inline constexpr uint32_t kQsaThreads = 128u;
-
-// Per-row top-k over block scores. Ties go to the smaller block index. Entries past the
-// visible block count, or past the number of selected blocks, are -1.
-struct QsaTopkArgs {
-    const float* scores = nullptr;
-    const uint32_t* visible = nullptr;
-    int32_t* indices = nullptr;
-    uint32_t rows = 0;
-    uint32_t blocks = 0;
-    uint32_t k = 0;
-};
-
-// Per-row visible block count derived from the query position: floor((position + 1) / r).
-struct QsaTopkBatchArgs {
-    const float* scores = nullptr;
-    const uint32_t* positions = nullptr;
-    int32_t* indices = nullptr;
-    uint32_t rows = 0;
-    uint32_t blocks = 0;
-    uint32_t k = 0;
-    uint32_t compress_ratio = 0;
-    uint32_t scores_row_stride = 0;
-    uint32_t indices_row_stride = 0;
 };
 
 // Partial rotary in place over the first rotary_dim lanes of each head:
@@ -107,10 +72,7 @@ struct QsaRopeArgs {
 };
 
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream);
-hipError_t launch_qsa_scores(const QsaScoresArgs& args, hipStream_t stream);
-hipError_t launch_qsa_scores_batch(const QsaScoresBatchArgs& args, hipStream_t stream);
-hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream);
-hipError_t launch_qsa_topk_batch(const QsaTopkBatchArgs& args, hipStream_t stream);
+hipError_t launch_qsa_select_batch(const QsaSelectBatchArgs& args, hipStream_t stream);
 hipError_t launch_qsa_rope(const QsaRopeArgs& args, hipStream_t stream);
 
 // Append raw keys to one sequence's partial block and emit a pooled key when the block
@@ -172,22 +134,5 @@ struct QsaKeyCacheBatchArgs {
 
 hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
                                       hipStream_t stream);
-
-// Expand selected block indices to a token mask. A token is visible when it is in the
-// incomplete tail block (or at/before the query position) or in a selected complete block,
-// and never after the query position.
-struct QsaExpandMaskArgs {
-    const int32_t* selected_blocks = nullptr;
-    const uint32_t* positions = nullptr;
-    uint8_t* mask = nullptr;
-    uint32_t rows = 0;
-    uint32_t selected_per_row = 0;
-    uint32_t compress_ratio = 0;
-    uint32_t total_len = 0;
-    uint32_t selected_row_stride = 0;
-    uint32_t mask_row_stride = 0;
-};
-
-hipError_t launch_qsa_expand_mask(const QsaExpandMaskArgs& args, hipStream_t stream);
 
 }  // namespace shelf::kernel

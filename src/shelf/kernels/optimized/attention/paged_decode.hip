@@ -159,7 +159,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
             const uint64_t elem =
@@ -198,8 +198,8 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     if (a.tree_anc_offsets != nullptr) {
         for (uint32_t ai = wave; ai < anc_count; ai += kWaves) {
             const uint32_t pos = a.tree_anc_positions[anc_base + ai];
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
-                                     pos))
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                     a.mask_block_shift, row, pos))
                 continue;
             const uint32_t anc_page_index = pos / page_tokens;
             const uint32_t anc_off = pos % page_tokens;
@@ -451,7 +451,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
         for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
             const uint64_t elem =
@@ -1231,7 +1231,7 @@ void attention_paged_fp8_impl(
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
             const uint64_t elem =
@@ -1274,8 +1274,8 @@ void attention_paged_fp8_impl(
     if (a.tree_anc_offsets != nullptr) {
         for (uint32_t ai = wave; ai < anc_count; ai += kWaves) {
             const uint32_t pos = a.tree_anc_positions[anc_base + ai];
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
-                                     pos))
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                     a.mask_block_shift, row, pos))
                 continue;
             const uint32_t anc_page_index = pos / page_tokens;
             const uint32_t anc_off = pos % page_tokens;
@@ -1528,7 +1528,7 @@ __device__ __forceinline__ void attention_paged_split_fp8_body(
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
         for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
-            if (!paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens, row,
+            if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
             const uint64_t elem =

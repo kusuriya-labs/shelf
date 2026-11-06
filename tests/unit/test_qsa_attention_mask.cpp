@@ -46,8 +46,9 @@ int main() {
     constexpr std::uint32_t kRows = 3u;
     constexpr std::uint32_t kMaxSequences = 2u;
     constexpr std::uint32_t kBlockTableStride = 4u;
-    constexpr std::uint32_t kMaskTokens = 8u;
-    constexpr std::uint32_t kMaskStride = 16u;
+    constexpr std::uint32_t kMaskBlocks = 8u;
+    constexpr std::uint32_t kMaskStride = 4u;
+    constexpr std::uint32_t kBlockShift = 1u;
     const float kScale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
 
     const std::uint32_t q_features = kQHeads * kHeadDim;
@@ -62,9 +63,9 @@ int main() {
         3u, 2u, 1u, 0u,
     };
     const std::uint8_t mask[kRows * kMaskStride] = {
-        1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-        0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        0x05u, 0u, 0u, 0u,
+        0x09u, 0u, 0u, 0u,
+        0x0au, 0u, 0u, 0u,
     };
 
     std::mt19937 rng(424242u);
@@ -79,11 +80,13 @@ int main() {
     std::vector<float> want(static_cast<std::size_t>(kRows) * q_features, 0.0f);
     for (std::uint32_t row = 0; row < kRows; ++row) {
         std::vector<std::uint32_t> keys;
-        for (std::uint32_t t = 0; t < kMaskTokens; ++t) {
-            if (t <= positions[row] && mask[row * kMaskStride + t] != 0u)
-                keys.push_back(t);
+        for (std::uint32_t t = 0; t < (kMaskBlocks << kBlockShift); ++t) {
+            const std::uint32_t block = t >> kBlockShift;
+            const bool marked =
+                ((mask[row * kMaskStride + (block >> 3u)] >> (block & 7u)) & 1u) != 0u;
+            if (t <= positions[row] && marked) keys.push_back(t);
         }
-        check(!keys.empty(), "mask leaves at least one visible key");
+        check(!keys.empty(), "block mask leaves at least one visible key");
         for (std::uint32_t head = 0; head < kQHeads; ++head) {
             const std::uint32_t kv_head = 0u;
             std::vector<float> scores(keys.size());
@@ -191,9 +194,10 @@ int main() {
     args.elems_per_page = elems_per_page;
     args.elems_per_layer = elems_per_layer;
     args.scale = kScale;
-    args.token_mask = static_cast<const std::uint8_t*>(d_mask);
+    args.block_mask = static_cast<const std::uint8_t*>(d_mask);
     args.mask_stride = kMaskStride;
-    args.mask_tokens = kMaskTokens;
+    args.mask_blocks = kMaskBlocks;
+    args.mask_block_shift = kBlockShift;
 
     const hipError_t error = shelf::kernel::launch_attention_paged_bf16(
         args, static_cast<const shelf::bf16_t*>(d_k),

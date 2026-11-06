@@ -55,7 +55,6 @@ int main() {
     constexpr std::uint32_t kRows = 16;
     constexpr std::uint32_t kIndexHeads = 4;
     constexpr std::uint32_t kSelected = 2;
-    constexpr std::uint32_t kMaskLen = 12;
 
     auto arena = shelf::gpu::GpuArena::create(0, 32ull * 1024ull * 1024ull);
     check(arena.ok(), "arena create");
@@ -280,55 +279,68 @@ int main() {
     }
 
     const auto q = random_bf16(kRows * kIndexHeads * kHeadDim, rng);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+    const std::uint32_t mask_row_bytes = ((kBlocks + 31u) / 32u) * 4u;
+
     void* d_q = nullptr;
-    void* d_scores = nullptr;
+    void* d_selected = nullptr;
+    void* d_mask = nullptr;
     check(hipMalloc(&d_q, q.size() * sizeof(shelf::bf16_t)) == hipSuccess, "malloc q");
-    check(hipMalloc(&d_scores, kRows * kBlocks * sizeof(float)) == hipSuccess,
-          "malloc scores");
+    check(hipMalloc(&d_selected, kRows * kSelected * sizeof(std::int32_t)) == hipSuccess,
+          "malloc selected");
+    check(hipMalloc(&d_mask, kRows * mask_row_bytes) == hipSuccess, "malloc block mask");
     check(hipMemcpy(d_q, q.data(), q.size() * sizeof(shelf::bf16_t),
                     hipMemcpyHostToDevice) == hipSuccess,
           "copy q");
 
-    void* d_slots = nullptr;
     std::vector<std::uint32_t> row_slots(kRows);
     for (std::uint32_t i = 0; i < 10u; ++i) row_slots[i] = 0u;
     for (std::uint32_t i = 10u; i < kRows; ++i) row_slots[i] = 1u;
+    void* d_slots = nullptr;
     check(hipMalloc(&d_slots, row_slots.size() * sizeof(std::uint32_t)) == hipSuccess,
           "malloc row slots");
     check(hipMemcpy(d_slots, row_slots.data(), row_slots.size() * sizeof(std::uint32_t),
                     hipMemcpyHostToDevice) == hipSuccess,
           "copy row slots");
 
-    shelf::kernel::QsaScoresBatchArgs score_args;
-    score_args.q = static_cast<const shelf::bf16_t*>(d_q);
-    score_args.pooled_base = view.pooled_base;
-    score_args.scores = static_cast<float*>(d_scores);
-    score_args.row_sequence_slots = static_cast<const std::uint32_t*>(d_slots);
-    score_args.positions = static_cast<const std::uint32_t*>(d_positions);
-    score_args.rows = kRows;
-    score_args.blocks = kBlocks;
-    score_args.n_heads = kIndexHeads;
-    score_args.head_dim = kHeadDim;
-    score_args.compress_ratio = kCompress;
-    score_args.state_index = 0u;
-    score_args.max_sequences = view.max_sequences;
-    score_args.q_row_stride = kIndexHeads * kHeadDim;
-    score_args.scores_row_stride = kBlocks;
-    score_args.pooled_slot_stride = view.pooled_slot_stride;
-    score_args.pooled_layer_stride = view.pooled_layer_stride;
-    score_args.scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
-    check(shelf::kernel::launch_qsa_scores_batch(score_args, nullptr) == hipSuccess,
-          "scores batch launch");
-    check(hipDeviceSynchronize() == hipSuccess, "scores sync");
+    shelf::kernel::QsaSelectBatchArgs select_args;
+    select_args.q = static_cast<const shelf::bf16_t*>(d_q);
+    select_args.pooled_base = view.pooled_base;
+    select_args.selected = static_cast<std::int32_t*>(d_selected);
+    select_args.block_mask = static_cast<std::uint8_t*>(d_mask);
+    select_args.row_sequence_slots = static_cast<const std::uint32_t*>(d_slots);
+    select_args.positions = static_cast<const std::uint32_t*>(d_positions);
+    select_args.rows = kRows;
+    select_args.blocks = kBlocks;
+    select_args.n_heads = kIndexHeads;
+    select_args.head_dim = kHeadDim;
+    select_args.compress_ratio = kCompress;
+    select_args.state_index = 0u;
+    select_args.max_sequences = view.max_sequences;
+    select_args.top_k = kSelected;
+    select_args.q_row_stride = kIndexHeads * kHeadDim;
+    select_args.selected_row_stride = kSelected;
+    select_args.mask_row_bytes = mask_row_bytes;
+    select_args.pooled_slot_stride = view.pooled_slot_stride;
+    select_args.pooled_layer_stride = view.pooled_layer_stride;
+    select_args.scale = scale;
+    check(shelf::kernel::launch_qsa_select_batch(select_args, nullptr) == hipSuccess,
+          "select batch launch");
+    check(hipDeviceSynchronize() == hipSuccess, "select sync");
 
-    std::vector<float> got_scores(kRows * kBlocks);
-    (void)hipMemcpy(got_scores.data(), d_scores, got_scores.size() * sizeof(float),
-                    hipMemcpyDeviceToHost);
-    std::vector<float> want_scores(kRows * kBlocks, -std::numeric_limits<float>::infinity());
+    std::vector<std::int32_t> got_selected(kRows * kSelected, -2);
+    (void)hipMemcpy(got_selected.data(), d_selected,
+                    got_selected.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost);
+    std::vector<std::uint8_t> got_mask(kRows * mask_row_bytes, 0u);
+    (void)hipMemcpy(got_mask.data(), d_mask, got_mask.size(), hipMemcpyDeviceToHost);
+
+    bool selected_ok = true;
+    bool mask_ok = true;
     for (std::uint32_t row = 0; row < kRows; ++row) {
         const std::uint32_t slot = row_slots[row];
-        const std::uint32_t visible = (positions[row] + 1u) / kCompress;
-        for (std::uint32_t b = 0; b < std::min(visible, kBlocks); ++b) {
+        const std::uint32_t visible = std::min((positions[row] + 1u) / kCompress, kBlocks);
+        std::vector<float> scores(visible, 0.0f);
+        for (std::uint32_t b = 0; b < visible; ++b) {
             float total = 0.0f;
             for (std::uint32_t h = 0; h < kIndexHeads; ++h) {
                 float dot = 0.0f;
@@ -339,101 +351,46 @@ int main() {
                 }
                 total += std::max(dot, 0.0f);
             }
-            want_scores[row * kBlocks + b] =
-                total / std::sqrt(static_cast<float>(kHeadDim));
+            scores[b] = total * scale;
         }
-    }
-    double max_score_error = 0.0;
-    bool invisible_ok = true;
-    for (std::uint32_t row = 0; row < kRows; ++row) {
-        for (std::uint32_t b = 0; b < kBlocks; ++b) {
-            const float got = got_scores[row * kBlocks + b];
-            const float want = want_scores[row * kBlocks + b];
-            if (std::isinf(want)) {
-                if (!(std::isinf(got) && got < 0.0f)) invisible_ok = false;
-            } else {
-                max_score_error = std::max<double>(
-                    max_score_error, std::fabs(static_cast<double>(got) - want));
-            }
-        }
-    }
-    std::fprintf(stderr, "scores max_abs=%g\n", max_score_error);
-    check(invisible_ok, "unvisible blocks are -inf");
-    check(max_score_error <= 3.0e-3, "block scores match CPU reference");
-
-    void* d_selected = nullptr;
-    check(hipMalloc(&d_selected, kRows * kSelected * sizeof(int32_t)) == hipSuccess,
-          "malloc selected");
-    shelf::kernel::QsaTopkBatchArgs topk_args;
-    topk_args.scores = static_cast<const float*>(d_scores);
-    topk_args.positions = static_cast<const std::uint32_t*>(d_positions);
-    topk_args.indices = static_cast<int32_t*>(d_selected);
-    topk_args.rows = kRows;
-    topk_args.blocks = kBlocks;
-    topk_args.k = kSelected;
-    topk_args.compress_ratio = kCompress;
-    topk_args.scores_row_stride = kBlocks;
-    topk_args.indices_row_stride = kSelected;
-    check(shelf::kernel::launch_qsa_topk_batch(topk_args, nullptr) == hipSuccess,
-          "topk batch launch");
-    check(hipDeviceSynchronize() == hipSuccess, "topk sync");
-    std::vector<int32_t> got_selected(kRows * kSelected);
-    (void)hipMemcpy(got_selected.data(), d_selected,
-                    got_selected.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
-    bool selected_ok = true;
-    for (std::uint32_t row = 0; row < kRows; ++row) {
-        const std::uint32_t visible = (positions[row] + 1u) / kCompress;
-        std::vector<std::uint32_t> order(std::min(visible, kBlocks));
-        for (std::uint32_t b = 0; b < order.size(); ++b) order[b] = b;
+        std::vector<std::uint32_t> order(visible);
+        for (std::uint32_t b = 0; b < visible; ++b) order[b] = b;
         std::stable_sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) {
-            return want_scores[row * kBlocks + a] > want_scores[row * kBlocks + b];
+            if (scores[a] != scores[b]) return scores[a] > scores[b];
+            return a < b;
         });
+        const std::uint32_t take = std::min(visible, kSelected);
+        std::vector<std::int32_t> want;
+        for (std::uint32_t j = 0; j < take; ++j) want.push_back(static_cast<std::int32_t>(order[j]));
+        std::vector<std::int32_t> got;
         for (std::uint32_t j = 0; j < kSelected; ++j) {
-            const int32_t want = j < order.size() ? static_cast<int32_t>(order[j]) : -1;
-            if (got_selected[row * kSelected + j] != want) selected_ok = false;
-        }
-    }
-    check(selected_ok, "topk matches CPU reference");
-
-    void* d_mask = nullptr;
-    check(hipMalloc(&d_mask, kRows * kMaskLen) == hipSuccess, "malloc mask");
-    shelf::kernel::QsaExpandMaskArgs mask_args;
-    mask_args.selected_blocks = static_cast<const int32_t*>(d_selected);
-    mask_args.positions = static_cast<const std::uint32_t*>(d_positions);
-    mask_args.mask = static_cast<std::uint8_t*>(d_mask);
-    mask_args.rows = kRows;
-    mask_args.selected_per_row = kSelected;
-    mask_args.compress_ratio = kCompress;
-    mask_args.total_len = kMaskLen;
-    mask_args.selected_row_stride = kSelected;
-    mask_args.mask_row_stride = kMaskLen;
-    check(shelf::kernel::launch_qsa_expand_mask(mask_args, nullptr) == hipSuccess,
-          "expand mask launch");
-    check(hipDeviceSynchronize() == hipSuccess, "expand mask sync");
-    std::vector<std::uint8_t> got_mask(kRows * kMaskLen);
-    (void)hipMemcpy(got_mask.data(), d_mask, got_mask.size(), hipMemcpyDeviceToHost);
-    bool mask_ok = true;
-    for (std::uint32_t row = 0; row < kRows; ++row) {
-        for (std::uint32_t token = 0; token < kMaskLen; ++token) {
-            bool visible = false;
-            if (token <= positions[row]) {
-                const std::uint32_t complete = (positions[row] + 1u) / kCompress;
-                const std::uint32_t block = token / kCompress;
-                if (token >= complete * kCompress) {
-                    visible = true;
-                } else {
-                    for (std::uint32_t j = 0; j < kSelected; ++j) {
-                        if (got_selected[row * kSelected + j] ==
-                            static_cast<int32_t>(block)) {
-                            visible = true;
-                        }
-                    }
-                }
+            const std::int32_t value = got_selected[row * kSelected + j];
+            if (j >= take) {
+                if (value != -1) selected_ok = false;
+            } else if (value >= 0) {
+                got.push_back(value);
             }
-            if (got_mask[row * kMaskLen + token] != (visible ? 1u : 0u)) mask_ok = false;
+        }
+        std::sort(got.begin(), got.end());
+        std::sort(want.begin(), want.end());
+        if (got != want) selected_ok = false;
+
+        const std::uint32_t tail = (positions[row] + 1u) / kCompress;
+        std::vector<std::int32_t> marked = want;
+        if (tail < kBlocks) marked.push_back(static_cast<std::int32_t>(tail));
+        std::sort(marked.begin(), marked.end());
+        for (std::uint32_t b = 0; b < kBlocks; ++b) {
+            const bool expected =
+                std::binary_search(marked.begin(), marked.end(), static_cast<std::int32_t>(b));
+            const std::size_t byte = static_cast<std::size_t>(row) * mask_row_bytes +
+                                     (b >> 3u);
+            const bool set = ((got_mask[byte] >> (b & 7u)) & 1u) != 0u;
+            if (set != expected) mask_ok = false;
         }
     }
-    check(mask_ok, "expanded mask matches CPU reference");
+    check(selected_ok, "select matches the pooled keys of each sequence slot");
+    check(mask_ok, "block mask marks the selection and the partial tail block");
+
 
     check(pool.release(0u).ok(), "release slot 0");
     check(pool.release(1u).ok(), "release slot 1");
@@ -444,7 +401,6 @@ int main() {
     (void)hipFree(d_positions);
     (void)hipFree(d_requests);
     (void)hipFree(d_q);
-    (void)hipFree(d_scores);
     (void)hipFree(d_slots);
     (void)hipFree(d_selected);
     (void)hipFree(d_mask);

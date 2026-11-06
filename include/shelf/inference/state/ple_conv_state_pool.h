@@ -36,6 +36,11 @@ struct PleConvStatePoolLayout {
     }
 };
 
+inline constexpr std::size_t kPleConvStatePoolAlignment = 256u;
+
+std::size_t ple_conv_state_pool_bytes(uint32_t max_sequences,
+                                      const PleConvStatePoolLayout& layout) noexcept;
+
 class PleConvStatePool {
  public:
     static Result<PleConvStatePool> create(gpu::GpuArena& arena, uint32_t max_sequences,

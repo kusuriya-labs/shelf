@@ -38,7 +38,7 @@ Result<RT::ValueId> emit_qwen4exp_layer(Emitter& em,
     } else if (layer.dense_attention) {
         ::shelf::qwen_hybrid::GatedAttentionLoweringIndices dense_indices =
             layer.qsa_indices.attention;
-        dense_indices.has_token_mask = false;
+        dense_indices.has_block_mask = false;
         attn_out = ::shelf::qwen_hybrid::emit_gated_attention(
             em, layer.qsa_geometry.attention, layer.qsa_weights.attention, dense_indices,
             attn_mix.value().mixed, debug_prefix);

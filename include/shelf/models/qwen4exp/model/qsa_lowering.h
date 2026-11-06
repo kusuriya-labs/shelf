@@ -13,8 +13,8 @@ namespace qwen4exp {
 
 // QSA indexer geometry. The indexer is MQA: `index_heads` query heads share one key head.
 // `blocks` is the key-state pool capacity, `top_k` is the block budget (indexer_budget /
-// compress_ratio), and `mask_len` is the token length the expanded mask covers. A zero
-// `mask_len` stops the lowering at the selected block ids.
+// compress_ratio), and `mask_bytes` is the per-row width of the block bitmap the select
+// writes.
 struct Qwen4ExpQsaIndexerGeometry {
     std::uint32_t hidden = 0;
     std::uint32_t index_heads = 0;
@@ -24,7 +24,7 @@ struct Qwen4ExpQsaIndexerGeometry {
     std::uint32_t compress_ratio = 4;
     std::uint32_t blocks = 0;
     std::uint32_t top_k = 0;
-    std::uint32_t mask_len = 0;
+    std::uint32_t mask_bytes = 0;
     std::uint32_t state_index = 0;
     float theta = 10000000.0f;
     float position_scale = 1.0f;
@@ -44,20 +44,16 @@ struct Qwen4ExpQsaIndexerIndices {
 
 struct Qwen4ExpQsaIndexerOutputs {
     ::shelf::runtime::ValueId q;        // [rows, index_heads * index_head_dim]
-    ::shelf::runtime::ValueId scores;   // [rows, blocks] F32
-    ::shelf::runtime::ValueId selected; // [rows, top_k] I32
-    ::shelf::runtime::ValueId mask;     // [rows, mask_len] U8, zero when mask_len == 0
+    ::shelf::runtime::ValueId mask;     // [rows, mask_bytes] U8
 };
 
-// Geometry implied by the checkpoint config. `blocks` is the key-state capacity and
-// `mask_len` the token width of the expanded mask (zero stops at the selected ids).
+// Geometry implied by the checkpoint config. `blocks` is the key-state capacity, and the
+// block bitmap width follows from it.
 Qwen4ExpQsaIndexerGeometry make_qwen4exp_qsa_indexer_geometry(
-    const Qwen4ExpTextConfig& config, std::uint32_t blocks, std::uint32_t mask_len,
-    std::uint32_t state_index);
+    const Qwen4ExpTextConfig& config, std::uint32_t blocks, std::uint32_t state_index);
 
 // Indexer part of one QSA layer. The main attention uses the existing gated-attention
-// lowering; this emits the raw key cache, the block scores and the selected blocks that
-// the attention mask will consume.
+// lowering; this emits the raw key cache and the block selection the attention consumes.
 Result<Qwen4ExpQsaIndexerOutputs> emit_qwen4exp_qsa_indexer(
     ::shelf::qwen_hybrid::Emitter& em,
     const Qwen4ExpQsaIndexerGeometry& geometry,
@@ -66,8 +62,8 @@ Result<Qwen4ExpQsaIndexerOutputs> emit_qwen4exp_qsa_indexer(
     ::shelf::runtime::ValueId normed,
     const char* debug_prefix);
 
-// One QSA attention site: the indexer emits the token mask, and the gated attention
-// consumes it. `geometry.mask_len` must be non-zero.
+// One QSA attention site: the indexer emits the block selection, and the gated attention
+// consumes it.
 struct Qwen4ExpQsaLoweringGeometry {
     ::shelf::qwen_hybrid::GatedAttentionLoweringGeometry attention;
     Qwen4ExpQsaIndexerGeometry indexer;

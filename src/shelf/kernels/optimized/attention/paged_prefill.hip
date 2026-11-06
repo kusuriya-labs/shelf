@@ -290,11 +290,11 @@ void attention_paged_prefill_bf16_body(
             const uint32_t tok_b = page_start + tb;
             const uint32_t mask_row = row0 + r;
             const bool va = tok_a < visr &&
-                paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens,
-                                    mask_row, tok_a);
+                paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                    a.mask_block_shift, mask_row, tok_a);
             const bool vb = tok_b < visr &&
-                paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens,
-                                    mask_row, tok_b);
+                paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                    a.mask_block_shift, mask_row, tok_b);
             sa = va ? sa * scale : -FLT_MAX;
             sb = vb ? sb * scale : -FLT_MAX;
             const float pmax = group_max8(fmaxf(sa, sb));

@@ -24,7 +24,7 @@ using shelf::runtime::ValueDType;
 
 // The pointer members only feed the workspace-size comparison; they are never read here.
 alignas(64) uint8_t kPartials[64] = {};
-alignas(64) uint8_t kTokenMask[64] = {};
+alignas(64) uint8_t kBlockMask[64] = {};
 uint32_t kTreeAnc[2] = {0u, 1u};
 
 PagedAttentionPlan plan_for(uint32_t q_heads, uint32_t kv_heads, uint32_t visible,
@@ -58,9 +58,10 @@ PagedAttentionPlan masked_plan(bool prefill_intent) {
     a.common.kv_heads = 4u;
     a.common.head_dim = 256u;
     a.common.page_tokens = 16u;
-    a.common.token_mask = kTokenMask;
-    a.common.mask_stride = sizeof(kTokenMask);
-    a.common.mask_tokens = sizeof(kTokenMask);
+    a.common.block_mask = kBlockMask;
+    a.common.mask_stride = 8u;
+    a.common.mask_blocks = 64u;
+    a.common.mask_block_shift = 2u;
     HostExecutionContext ctx;
     ctx.spec.max_visible_tokens = 4096u;
     ctx.decode_attn_partials = kPartials;
@@ -97,9 +98,9 @@ int main() {
     check(plan_for(16, 4, 4096, kPlentyBytes, true).splits == 1u,
           "tree rows stay non-split");
     check(masked_plan(false).splits == 1u,
-          "a token mask disables the split decode kernel");
+          "a block mask disables the split decode kernel");
     check(!masked_plan(false).use_prefill && !masked_plan(true).use_prefill,
-          "a token mask disables the tiled prefill kernel");
+          "a block mask disables the tiled prefill kernel");
 
     check(::shelf::kernel::paged_attention_bf16_split_supports(4u) &&
               ::shelf::kernel::paged_attention_bf16_split_supports(6u) &&

@@ -707,9 +707,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
-        case PrimitiveKind::QSA_SCORES: {
-            const auto& n = node_as<QsaScoresNode>(node);
-            DispatchBinding b = base_binding(KernelId::QSA_SCORES);
+        case PrimitiveKind::QSA_SELECT: {
+            const auto& n = node_as<QsaSelectNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_SELECT);
             b.descriptor_slot =
                 register_state(c, node.state_inputs.front(),
                                PrimitiveStateKind::QSA_KEY_STATE, n.state_index) +
@@ -717,27 +717,13 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.group_size = n.n_heads;
             b.rotary_dim = n.head_dim;
             b.flags = n.blocks;
+            b.compute_spec = n.top_k;
             b.scalar_a = n.scale;
             b.scalar_b = static_cast<float>(n.compress_ratio);
             b.input_slots[0] = node.inputs[0].id;
             b.input_count = 1;
-            auto po = c.produce(node.outputs[0]);
-            if (!po.ok()) return po;
-            b.output_slots[0] = node.outputs[0].id;
-            b.output_count = 1;
-            c.push(b);
-            return Status::make_ok();
-        }
-        case PrimitiveKind::QSA_TOPK: {
-            const auto& n = node_as<QsaTopkNode>(node);
-            DispatchBinding b = base_binding(KernelId::QSA_TOPK);
-            b.group_size = n.k;
-            b.flags = n.blocks;
-            b.scalar_b = static_cast<float>(n.compress_ratio);
-            b.input_slots[0] = node.inputs[0].id;
-            b.input_count = 1;
-            auto po = c.produce(node.outputs[0]);
-            if (!po.ok()) return po;
+            auto first = c.produce(node.outputs[0]);
+            if (!first.ok()) return first;
             b.output_slots[0] = node.outputs[0].id;
             b.output_count = 1;
             c.push(b);
@@ -751,20 +737,6 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.flags = n.head_dim;
             b.scalar_a = n.theta;
             b.scalar_b = n.position_scale;
-            b.input_slots[0] = node.inputs[0].id;
-            b.input_count = 1;
-            auto po = c.produce(node.outputs[0]);
-            if (!po.ok()) return po;
-            b.output_slots[0] = node.outputs[0].id;
-            b.output_count = 1;
-            c.push(b);
-            return Status::make_ok();
-        }
-        case PrimitiveKind::QSA_EXPAND_MASK: {
-            const auto& n = node_as<QsaExpandMaskNode>(node);
-            DispatchBinding b = base_binding(KernelId::QSA_EXPAND_MASK);
-            b.group_size = n.compress_ratio;
-            b.flags = n.total_len;
             b.input_slots[0] = node.inputs[0].id;
             b.input_count = 1;
             auto po = c.produce(node.outputs[0]);
@@ -798,6 +770,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                n.state_index) +
                 1;
             b.group_size = n.attention.head_dim;
+            b.rotary_dim = n.has_block_mask ? n.block_size : 0u;
             for (uint32_t i = 0; i < node.inputs.size() && i < kMaxIoSlots; ++i)
                 b.input_slots[i] = node.inputs[i].id;
             b.input_count = static_cast<uint32_t>(node.inputs.size());

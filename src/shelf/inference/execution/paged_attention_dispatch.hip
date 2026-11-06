@@ -84,7 +84,7 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
             mask_in.row_domain != ::shelf::runtime::ValueRowDomain::TOKEN_ROWS ||
             mask_in.feature_count == 0u ||
             mask_in.row_stride < mask_in.feature_count || mask_in.ptr == nullptr)
-            return Status::invalid_state("paged-attention: token mask contract invalid",
+            return Status::invalid_state("paged-attention: block mask contract invalid",
                                          __FILE__, __LINE__);
     }
 
@@ -207,12 +207,20 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     c.elems_per_layer = epl;
     c.scale = b.scalar_a;
     if (b.input_count == 2u) {
-        c.token_mask = static_cast<const uint8_t*>(mask_in.ptr);
-        c.mask_stride = mask_in.row_stride;
-        c.mask_tokens = mask_in.feature_count;
-        if (ctx.spec.max_visible_tokens > mask_in.feature_count)
+        if (b.rotary_dim == 0u || (b.rotary_dim & (b.rotary_dim - 1u)) != 0u)
             return Status::invalid_state(
-                "paged-attention: token mask does not cover max visible tokens",
+                "paged-attention: block mask size is not a power of two", __FILE__,
+                __LINE__);
+        uint32_t shift = 0u;
+        while ((1u << shift) < b.rotary_dim) ++shift;
+        c.block_mask = static_cast<const uint8_t*>(mask_in.ptr);
+        c.mask_stride = mask_in.row_stride;
+        c.mask_blocks = static_cast<uint32_t>(mask_in.feature_count) * 8u;
+        c.mask_block_shift = shift;
+        if (static_cast<uint64_t>(ctx.spec.max_visible_tokens) >
+            static_cast<uint64_t>(c.mask_blocks) << shift)
+            return Status::invalid_state(
+                "paged-attention: block mask does not cover max visible tokens",
                 __FILE__, __LINE__);
     }
     return out_args;
@@ -248,9 +256,9 @@ PagedAttentionPlan plan_paged_attention(
         return plan;
     plan.optimized = true;
     plan.use_prefill = use_prefill;
-    // The bf16 prefill kernel applies the per-row token mask. The fp8 prefill kernel
+    // The bf16 prefill kernel applies the per-row block mask. The fp8 prefill kernel
     // does not, so masked fp8 KV keeps the per-(row, q_head) decode kernel.
-    if (args.common.token_mask != nullptr &&
+    if (args.common.block_mask != nullptr &&
         (args.kv_dtype != ::shelf::kernel::KVCacheDType::BF16 ||
          args.common.rows < kMaskedPrefillMinRows)) {
         plan.use_prefill = false;
@@ -298,8 +306,8 @@ uint32_t paged_attention_output_element_bytes(
         region.row_positions = base.row_positions + row_begin;
     if (base.tree_anc_offsets != nullptr)
         region.tree_anc_offsets = base.tree_anc_offsets + row_begin;
-    if (base.token_mask != nullptr)
-        region.token_mask = base.token_mask +
+    if (base.block_mask != nullptr)
+        region.block_mask = base.block_mask +
                             static_cast<uint64_t>(row_begin) * base.mask_stride;
     region.rows = rows;
     return region;
@@ -542,7 +550,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const auto region =
             offset_paged_attention_rows(a.common, d.row_begin, d.row_count);
         const uint32_t before = out.physical_count;
-        if (a.common.token_mask == nullptr &&
+        if (a.common.block_mask == nullptr &&
             d.row_count >= kPagedAttentionPrefillMinRows) {
             if (append_prefill_region(a, region, out) !=
                 PhysicalResolveStatus::Applicable)

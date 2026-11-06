@@ -41,7 +41,7 @@ int main() {
     constexpr std::uint32_t kRotary = 64u;
     constexpr std::uint32_t kBlocks = 8u;
     constexpr std::uint32_t kTopK = 3u;
-    constexpr std::uint32_t kMaskLen = 32u;
+    constexpr std::uint32_t kMaskBytes = 4u;
 
     shelf::qwen4exp::Qwen4ExpTextConfig config;
     config.hidden_size = kHidden;
@@ -55,13 +55,13 @@ int main() {
     config.indexer.budget = 8u;
     config.indexer.compress_ratio = 4u;
     const auto from_config = shelf::qwen4exp::make_qwen4exp_qsa_indexer_geometry(
-        config, kBlocks, kMaskLen, 2u);
+        config, kBlocks, 2u);
     check(from_config.hidden == kHidden && from_config.index_heads == kIndexHeads &&
               from_config.index_head_dim == kIndexDim &&
               from_config.index_rotary_dim == 64u &&
               from_config.compress_ratio == 4u &&
               from_config.blocks == kBlocks && from_config.top_k == 2u &&
-              from_config.mask_len == kMaskLen && from_config.state_index == 2u,
+              from_config.mask_bytes == kMaskBytes && from_config.state_index == 2u,
           "config derives the QSA indexer geometry");
 
     rt::PrimitiveGraph graph;
@@ -86,7 +86,7 @@ int main() {
     geometry.compress_ratio = 4u;
     geometry.blocks = kBlocks;
     geometry.top_k = kTopK;
-    geometry.mask_len = kMaskLen;
+    geometry.mask_bytes = kMaskBytes;
     geometry.state_index = 2u;
     geometry.theta = 10000000.0f;
     geometry.position_scale = 1.0f;
@@ -113,9 +113,9 @@ int main() {
     }
 
     const std::string sequence = join_kinds(graph);
-    check(sequence.find("LINEAR,RMS_NORM,QSA_ROPE,QSA_KEY_CACHE,QSA_SCORES,QSA_TOPK,"
-                        "QSA_EXPAND_MASK") != std::string::npos,
-          "QSA indexer lowers to key cache, scores, topk and mask");
+    check(sequence.find("LINEAR,RMS_NORM,QSA_ROPE,QSA_KEY_CACHE,QSA_SELECT") !=
+              std::string::npos,
+          "QSA indexer lowers to key cache and block select");
     check(graph.states.size() == 1u &&
               graph.states[0].kind == rt::PrimitiveStateKind::QSA_KEY_STATE &&
               graph.states[0].state_index == 2u,
@@ -143,8 +143,7 @@ int main() {
         kernels += rt::kernel_to_name(dispatch.kernel_id);
     }
     std::printf("kernels: %s\n", kernels.c_str());
-    check(kernels.find("QSA_ROPE,QSA_KEY_CACHE,QSA_SCORES,QSA_TOPK,QSA_EXPAND_MASK") !=
-              std::string::npos,
+    check(kernels.find("QSA_ROPE,QSA_KEY_CACHE,QSA_SELECT") != std::string::npos,
           "program emits the QSA indexer dispatch sequence");
     check(program.value().states.size() == 1u &&
               program.value().states[0].kind == rt::PrimitiveStateKind::QSA_KEY_STATE &&
@@ -157,7 +156,7 @@ int main() {
     uint32_t qsa_states = 0u;
     for (const auto& dispatch : program.value().dispatches) {
         if (dispatch.kernel_id == rt::KernelId::QSA_KEY_CACHE ||
-            dispatch.kernel_id == rt::KernelId::QSA_SCORES) {
+            dispatch.kernel_id == rt::KernelId::QSA_SELECT) {
             ++qsa_states;
             if (dispatch.descriptor_slot == 0u) qsa_descriptors_match = false;
         }
@@ -247,15 +246,16 @@ int main() {
         bool indexer_seen = false;
         for (const auto& node : qsa_graph.nodes) {
             const auto kind = rt::primitive_kind_of(node.node);
-            if (kind == rt::PrimitiveKind::QSA_EXPAND_MASK) indexer_seen = true;
+            if (kind == rt::PrimitiveKind::QSA_SELECT) indexer_seen = true;
             if (kind == rt::PrimitiveKind::PAGED_ATTENTION) {
                 const auto& pa = std::get<rt::PagedAttentionNode>(node.node);
-                mask_consumed = pa.has_token_mask && node.inputs.size() == 2u;
+                mask_consumed = pa.has_block_mask && node.inputs.size() == 2u &&
+                                pa.mask_bytes == kMaskBytes && pa.block_size == 4u;
                 mask_after_indexer = indexer_seen;
             }
         }
-        check(mask_consumed, "QSA mask is the second paged-attention input");
-        check(mask_after_indexer, "QSA mask is produced before the attention");
+        check(mask_consumed, "QSA block mask is the second paged-attention input");
+        check(mask_after_indexer, "QSA block mask is produced before the attention");
 
         const rt::WeightSlot qsa_slots[5] = {
             shelf::qwen_hybrid::make_weight_slot(q_proj),
@@ -287,7 +287,7 @@ int main() {
             if (state.kind == rt::PrimitiveStateKind::QSA_KEY_STATE)
                 indexer_state = true;
         }
-        check(dispatch_mask, "paged-attention dispatch carries the QSA mask");
+        check(dispatch_mask, "paged-attention dispatch carries the QSA block mask");
         check(kv_state && indexer_state,
               "QSA layer registers both KV and indexer states");
     }

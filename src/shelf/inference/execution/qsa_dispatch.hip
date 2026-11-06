@@ -110,41 +110,42 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
-Result<OptimizedLaunchResult> try_launch_qsa_scores(
+Result<OptimizedLaunchResult> try_launch_qsa_select(
     const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
     hipStream_t stream) {
     if (b.input_count != 1u || b.output_count != 1u)
-        return bad("qsa scores: bad io count");
+        return bad("qsa select: bad io count");
     const auto* state = find_state_binding(program, b.descriptor_slot);
     if (state == nullptr || state->kind != PrimitiveStateKind::QSA_KEY_STATE)
-        return bad("qsa scores: state binding missing");
+        return bad("qsa select: state binding missing");
     const auto& view = ctx.model_state.qsa;
-    if (!qsa_view_ready(view)) return bad("qsa scores: state pool missing");
+    if (!qsa_view_ready(view)) return bad("qsa select: state pool missing");
     if (b.flags != view.max_blocks ||
         static_cast<uint32_t>(b.scalar_b) != view.compress_ratio)
-        return bad("qsa scores: geometry differs from the state pool");
+        return bad("qsa select: geometry differs from the state pool");
     auto q = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
     if (!q.ok()) return q.status();
-    auto scores = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
-    if (!scores.ok()) return scores.status();
+    auto mask = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
+    if (!mask.ok()) return mask.status();
     if (q.value().dtype != ValueDType::BF16 ||
         q.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
         q.value().feature_count !=
             static_cast<uint64_t>(b.group_size) * b.rotary_dim ||
-        scores.value().dtype != ValueDType::F32 ||
-        scores.value().feature_count != b.flags || q.value().ptr == nullptr ||
-        scores.value().ptr == nullptr) {
-        return bad("qsa scores: value contract mismatch");
+        mask.value().dtype != ValueDType::U8 ||
+        mask.value().row_domain != ValueRowDomain::TOKEN_ROWS ||
+        mask.value().feature_count * 8u < b.flags ||
+        q.value().ptr == nullptr || mask.value().ptr == nullptr) {
+        return bad("qsa select: value contract mismatch");
     }
     if (ctx.row_sequence_slots == nullptr || ctx.row_positions == nullptr)
-        return bad("qsa scores: row metadata missing");
+        return bad("qsa select: row metadata missing");
     const uint32_t rows = ctx.actual_rows;
     if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
 
-    ::shelf::kernel::QsaScoresBatchArgs args;
+    ::shelf::kernel::QsaSelectBatchArgs args;
     args.q = static_cast<const ::shelf::bf16_t*>(q.value().ptr);
     args.pooled_base = view.pooled_base;
-    args.scores = static_cast<float*>(scores.value().ptr);
+    args.block_mask = static_cast<uint8_t*>(mask.value().ptr);
     args.row_sequence_slots = ctx.row_sequence_slots;
     args.positions = ctx.row_positions;
     args.rows = rows;
@@ -154,14 +155,15 @@ Result<OptimizedLaunchResult> try_launch_qsa_scores(
     args.compress_ratio = static_cast<uint32_t>(b.scalar_b);
     args.state_index = state->state_index;
     args.max_sequences = view.max_sequences;
+    args.top_k = b.compute_spec;
     args.q_row_stride = q.value().row_stride;
-    args.scores_row_stride = scores.value().row_stride;
+    args.mask_row_bytes = mask.value().row_stride;
     args.pooled_slot_stride = view.pooled_slot_stride;
     args.pooled_layer_stride = view.pooled_layer_stride;
     args.scale = b.scalar_a;
-    const hipError_t error = ::shelf::kernel::launch_qsa_scores_batch(args, stream);
+    const hipError_t error = ::shelf::kernel::launch_qsa_select_batch(args, stream);
     if (error != hipSuccess)
-        return Status::hip_error("qsa scores launch", hipGetErrorString(error), __FILE__,
+        return Status::hip_error("qsa select launch", hipGetErrorString(error), __FILE__,
                                  __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
@@ -219,83 +221,6 @@ Result<OptimizedLaunchResult> try_launch_qsa_rope(
     if (error != hipSuccess)
         return Status::hip_error("qsa rope launch", hipGetErrorString(error), __FILE__,
                                  __LINE__);
-    record_physical_launch(1u);
-    record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
-}
-
-Result<OptimizedLaunchResult> try_launch_qsa_topk(
-    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
-    hipStream_t stream) {
-    if (b.input_count != 1u || b.output_count != 1u)
-        return bad("qsa topk: bad io count");
-    auto scores = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
-    if (!scores.ok()) return scores.status();
-    auto indices = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
-    if (!indices.ok()) return indices.status();
-    if (scores.value().dtype != ValueDType::F32 ||
-        scores.value().feature_count != b.flags ||
-        indices.value().dtype != ValueDType::I32 ||
-        indices.value().feature_count != b.group_size ||
-        scores.value().ptr == nullptr || indices.value().ptr == nullptr) {
-        return bad("qsa topk: value contract mismatch");
-    }
-    if (ctx.row_positions == nullptr) return bad("qsa topk: positions missing");
-    const uint32_t rows = ctx.actual_rows;
-    if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-
-    ::shelf::kernel::QsaTopkBatchArgs args;
-    args.scores = static_cast<const float*>(scores.value().ptr);
-    args.positions = ctx.row_positions;
-    args.indices = static_cast<int32_t*>(indices.value().ptr);
-    args.rows = rows;
-    args.blocks = b.flags;
-    args.k = b.group_size;
-    args.compress_ratio = static_cast<uint32_t>(b.scalar_b);
-    args.scores_row_stride = scores.value().row_stride;
-    args.indices_row_stride = indices.value().row_stride;
-    const hipError_t error = ::shelf::kernel::launch_qsa_topk_batch(args, stream);
-    if (error != hipSuccess)
-        return Status::hip_error("qsa topk launch", hipGetErrorString(error), __FILE__,
-                                 __LINE__);
-    record_physical_launch(1u);
-    record_optimized_op();
-    return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
-}
-
-Result<OptimizedLaunchResult> try_launch_qsa_expand_mask(
-    const Program& program, const DispatchBinding& b, HostExecutionContext& ctx,
-    hipStream_t stream) {
-    if (b.input_count != 1u || b.output_count != 1u)
-        return bad("qsa expand mask: bad io count");
-    auto selected = resolve_host_value(program, ValueId{b.input_slots[0]}, ctx);
-    if (!selected.ok()) return selected.status();
-    auto mask = resolve_host_value(program, ValueId{b.output_slots[0]}, ctx);
-    if (!mask.ok()) return mask.status();
-    if (selected.value().dtype != ValueDType::I32 ||
-        mask.value().dtype != ValueDType::U8 ||
-        mask.value().feature_count != b.flags || selected.value().ptr == nullptr ||
-        mask.value().ptr == nullptr) {
-        return bad("qsa expand mask: value contract mismatch");
-    }
-    if (ctx.row_positions == nullptr) return bad("qsa expand mask: positions missing");
-    const uint32_t rows = ctx.actual_rows;
-    if (rows == 0u) return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-
-    ::shelf::kernel::QsaExpandMaskArgs args;
-    args.selected_blocks = static_cast<const int32_t*>(selected.value().ptr);
-    args.positions = ctx.row_positions;
-    args.mask = static_cast<uint8_t*>(mask.value().ptr);
-    args.rows = rows;
-    args.selected_per_row = selected.value().feature_count;
-    args.compress_ratio = b.group_size;
-    args.total_len = b.flags;
-    args.selected_row_stride = selected.value().row_stride;
-    args.mask_row_stride = mask.value().row_stride;
-    const hipError_t error = ::shelf::kernel::launch_qsa_expand_mask(args, stream);
-    if (error != hipSuccess)
-        return Status::hip_error("qsa expand mask launch", hipGetErrorString(error),
-                                 __FILE__, __LINE__);
     record_physical_launch(1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};

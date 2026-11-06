@@ -271,7 +271,9 @@ KV、その後ろの残余を prefix cache に割り当てる。
 
 3 のページ数は、後で 4 / 5 / 6 に使う分を先に差し引く。
 
-- 4 分: `working_set_reserve_bytes`。0 の場合は `executor_footprint.h` の auto 値
+- 4 分: `working_set_reserve_bytes`。0 の場合は `executor_footprint.h` の auto 値に
+  family 固有の分（grouped expert activation、QSA の block bitmap、
+  executor が plan 後に作る `QsaKeyStatePool` / `PleConvStatePool`）を加える
 - 5 分: prefix cache の hot tier（`prefix_cache_bytes()` を rank の local kv heads と
   GDN layout で計算）
 - 6 分: drafter 重み・draft executor の scratch・spec batch context・session pool の

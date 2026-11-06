@@ -43,9 +43,7 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::PLE_BROADCAST_MUL: return {2, 1};
         case PrimitiveKind::PLE_CONV: return {1, 1};
         case PrimitiveKind::QSA_KEY_CACHE: return {1, 0};
-        case PrimitiveKind::QSA_SCORES: return {1, 1};
-        case PrimitiveKind::QSA_TOPK: return {1, 1};
-        case PrimitiveKind::QSA_EXPAND_MASK: return {1, 1};
+        case PrimitiveKind::QSA_SELECT: return {1, 1};
         case PrimitiveKind::QSA_ROPE: return {1, 1};
         case PrimitiveKind::PLE_STREAM_DOT: return {2, 1};
         case PrimitiveKind::REPEAT_STREAMS: return {1, 1};
@@ -70,7 +68,7 @@ bool allowed_state_kind(PrimitiveStateKind sk, PrimitiveKind nk) noexcept {
         case PrimitiveStateKind::PLE_CONV_STATE:
             return nk == PrimitiveKind::PLE_CONV;
         case PrimitiveStateKind::QSA_KEY_STATE:
-            return nk == PrimitiveKind::QSA_KEY_CACHE || nk == PrimitiveKind::QSA_SCORES;
+            return nk == PrimitiveKind::QSA_KEY_CACHE || nk == PrimitiveKind::QSA_SELECT;
     }
     return false;
 }
@@ -84,7 +82,7 @@ uint32_t node_state_index(const PrimitiveGraphNode& n) noexcept {
         else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, PleConvNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, QsaKeyCacheNode>) return v.state_index;
-        else if constexpr (std::is_same_v<T, QsaScoresNode>) return v.state_index;
+        else if constexpr (std::is_same_v<T, QsaSelectNode>) return v.state_index;
         else return 0;
     }, n.node);
 }
@@ -165,8 +163,8 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, KvAppendNode>) shapes_ok = valid_shape_key(v.attention);
             else if constexpr (std::is_same_v<T, PagedAttentionNode>) {
             shapes_ok = valid_shape_key(v.attention) &&
-                        (!v.has_token_mask ||
-                         (v.mask_features != 0u && v.mask_features <= (1u << 20)));
+                        (!v.has_block_mask ||
+                         (v.mask_bytes != 0u && v.block_size != 0u));
         }
             else if constexpr (std::is_same_v<T, StatefulCausalConv1DNode>) shapes_ok = valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) shapes_ok = valid_shape_key(v.gdn);
@@ -214,11 +212,11 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
         auto arity = arity_of(k);
         size_t expected_inputs = arity.tensor_inputs;
         if (k == PrimitiveKind::PAGED_ATTENTION &&
-            std::get<PagedAttentionNode>(n.node).has_token_mask) {
+            std::get<PagedAttentionNode>(n.node).has_block_mask) {
             expected_inputs = 2u;
         }
         if (n.inputs.size() != expected_inputs || n.outputs.size() != arity.tensor_outputs) {
-            return fail("primitive tensor arity mismatch");
+            return fail((std::string("primitive tensor arity mismatch: ") + to_string(k)).c_str());
         }
 
         Status weight_status = Status::make_ok();
@@ -418,18 +416,13 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     qsa_status = Status::invalid_argument(
                         "qsa key cache feature count mismatch", __FILE__, __LINE__);
                 }
-            } else if constexpr (std::is_same_v<T, QsaScoresNode>) {
+            } else if constexpr (std::is_same_v<T, QsaSelectNode>) {
                 if (graph.value_features(n.inputs[0]) !=
                         static_cast<uint64_t>(v.n_heads) * v.head_dim ||
-                    graph.value_features(n.outputs[0]) != v.blocks) {
+                    graph.value_features(n.outputs[0]) != v.mask_bytes ||
+                    graph.value_dtype(n.outputs[0]) != ValueDType::U8) {
                     qsa_status = Status::invalid_argument(
-                        "qsa scores shape mismatch", __FILE__, __LINE__);
-                }
-            } else if constexpr (std::is_same_v<T, QsaTopkNode>) {
-                if (graph.value_features(n.inputs[0]) != v.blocks ||
-                    graph.value_features(n.outputs[0]) != v.k) {
-                    qsa_status = Status::invalid_argument(
-                        "qsa topk shape mismatch", __FILE__, __LINE__);
+                        "qsa select shape mismatch", __FILE__, __LINE__);
                 }
             } else if constexpr (std::is_same_v<T, QsaRopeNode>) {
                 if (graph.value_features(n.inputs[0]) != v.shape.features ||
@@ -439,24 +432,17 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     qsa_status = Status::invalid_argument(
                         "qsa rope shape mismatch", __FILE__, __LINE__);
                 }
-            } else if constexpr (std::is_same_v<T, QsaExpandMaskNode>) {
-                if (graph.value_features(n.inputs[0]) != v.shape.features ||
-                    graph.value_features(n.outputs[0]) != v.total_len ||
-                    graph.value_dtype(n.outputs[0]) != ValueDType::U8) {
-                    qsa_status = Status::invalid_argument(
-                        "qsa expand mask shape mismatch", __FILE__, __LINE__);
-                }
             }
         }, n.node);
         if (!qsa_status.ok()) return qsa_status;
 
         if (k == PrimitiveKind::PAGED_ATTENTION) {
             const auto& pa = std::get<PagedAttentionNode>(n.node);
-            if (pa.has_token_mask) {
+            if (pa.has_block_mask) {
                 if (graph.value_dtype(n.inputs[1]) != ValueDType::U8 ||
                     graph.value_row_domain(n.inputs[1]) != ValueRowDomain::TOKEN_ROWS ||
-                    graph.value_features(n.inputs[1]) != pa.mask_features) {
-                    return fail("paged attention token mask shape mismatch");
+                    graph.value_features(n.inputs[1]) != pa.mask_bytes) {
+                    return fail("paged attention block mask shape mismatch");
                 }
             } else if (n.inputs.size() != 1u) {
                 return fail("paged attention without mask has extra inputs");
@@ -470,7 +456,7 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             k == PrimitiveKind::GDN_RECURRENCE ||
             k == PrimitiveKind::PLE_CONV ||
             k == PrimitiveKind::QSA_KEY_CACHE ||
-            k == PrimitiveKind::QSA_SCORES;
+            k == PrimitiveKind::QSA_SELECT;
         if (!stateful && (!n.state_inputs.empty() || !n.state_outputs.empty())) {
             return fail("state reference on primitive without state access");
         }
@@ -525,11 +511,11 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     return fail("QSA_KEY_CACHE must write exactly one indexer state");
                 break;
             }
-            case PrimitiveKind::QSA_SCORES: {
+            case PrimitiveKind::QSA_SELECT: {
                 if (n.state_inputs.size() != 1)
-                    return fail("QSA_SCORES must read exactly one indexer state");
+                    return fail("QSA_SELECT must read exactly one indexer state");
                 if (!n.state_outputs.empty())
-                    return fail("QSA_SCORES must not write state");
+                    return fail("QSA_SELECT must not write state");
                 break;
             }
             default: break;

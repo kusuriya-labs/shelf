@@ -41,9 +41,7 @@ enum class KernelId : uint32_t {
     PLE_BROADCAST_MUL,
     PLE_CONV,
     QSA_KEY_CACHE,
-    QSA_SCORES,
-    QSA_TOPK,
-    QSA_EXPAND_MASK,
+    QSA_SELECT,
     QSA_ROPE,
     PLE_STREAM_DOT,
     REPEAT_STREAMS,
@@ -97,9 +95,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
         case KernelId::PLE_CONV: return "PLE_CONV";
         case KernelId::QSA_KEY_CACHE: return "QSA_KEY_CACHE";
-        case KernelId::QSA_SCORES: return "QSA_SCORES";
-        case KernelId::QSA_TOPK: return "QSA_TOPK";
-        case KernelId::QSA_EXPAND_MASK: return "QSA_EXPAND_MASK";
+        case KernelId::QSA_SELECT: return "QSA_SELECT";
         case KernelId::QSA_ROPE: return "QSA_ROPE";
         case KernelId::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
         case KernelId::REPEAT_STREAMS: return "REPEAT_STREAMS";
