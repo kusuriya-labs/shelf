@@ -56,23 +56,29 @@ detail and is not a `--variant` value.
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |
 | `--mode forward\|greedy` | (default forward) |
 | `--device LIST` | comma separated GPUs, one per --tensor-parallel rank (default 0; e.g. --device 0,2) |
-| `--tensor-parallel N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8` | (default bf16) |
 | `--arena-gib N` | (default auto = free VRAM minus 1 GiB) |
 | `--runs N` | (default 3) |
 | `--warmup N` | (default 0) |
+| `--tokens-file PATH` | PSKLDTOK corpus file used as the prompt |
+| `--tokens-offset N` | corpus position to start the prompt (default 0) |
 | `--perf-stats-output PATH` | (default none; per-kernel dispatch counters JSON, needs SHELF_QWEN35_PERF_STATS=1) |
 | `--decode-backend TYPE` | hip (default) |
 | `--output PATH` | (default none) |
 <!-- /cli:bench-pp -->
 
-`--tensor-parallel 2` は `--device` の 2 GPU を使用する（例 `--device 0,1`、非連続な
-`--device 0,2` も可。`--tensor-parallel 2` のときは 2 個の指定が必須）。`--arena-gib` は
-rank ごとの容量で、Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2` が
-必須。`--mode forward` でも最終 chunk の最終行の logits を計算する（lm_head 以降の dispatch は
-mode と TP で変わらない）。
+`--tensor-parallel N` は `--device` の N GPU を使用する（N=1 / 2 / 4。例 `--device 0,1`、
+非連続な `--device 0,2` も可。N 個の指定が必須）。`--arena-gib` は rank ごとの容量である。
+Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2` が必須。
+`models/Qwen3.8-Flash-Next-Quark-MXFP4` は rank あたり約 30 GiB の重みを持つため
+`--tensor-parallel 4` を使う。`--mode forward` でも最終 chunk の最終行の logits を計算する
+（lm_head 以降の dispatch は mode と TP で変わらない）。
+
+`--tokens-file` を指定すると PSKLDTOK corpus の先頭（`--tokens-offset` 以降）を prompt に
+使う。省略時は token id 1 の繰り返しになる。
 
 grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も `--tensor-parallel 2` を受理する
 （expert 軸分割で、rank が expert の contiguous 範囲を持つ）。rank local shape は
@@ -95,7 +101,8 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--prefill-chunk N` | (default 128) |
 | `--warmup N` | (default 0) |
 | `--compute-logits 0\|1` | (default 1) |
-| `--device N` | (default 0) |
+| `--device LIST` | comma separated GPUs, one per --tensor-parallel rank (default 0; e.g. --device 0,2) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
 | `--kv-cache-dtype bf16\|fp8` | (default bf16) |
@@ -110,6 +117,11 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 <!-- /cli:bench-tg -->
 
 greedy mode は `--compute-logits 1` が必要。
+
+`--tensor-parallel N`（N=1 / 2 / 4）は decode を N GPU に分割する。`--device` に N 個の
+GPU を指定する。`models/Qwen3.8-Flash-Next-Quark-MXFP4` は `--tensor-parallel 4` を使う。
+TP の decode は rank0 の stream で測り、`tp=` と `devices=` を出力する。
+`--tokens-file` / `--tokens-offset` は prefill する context を PSKLDTOK corpus から取る。
 
 `--kv-cache-dtype fp8` は KV cache を fp8 E4M3 にする。grouped expert checkpoint（MoE）でも
 bf16 / fp8 の双方で `KV_APPEND` と `PAGED_ATTENTION` が registered geometry であり、
@@ -129,8 +141,8 @@ dump する。`--compare` で baseline dump と突き合わせ、perplexity / me
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
 `shelf-bench pp/tg` の数値とは混ぜない。
 
-`--model-dir` は dense / grouped expert（MoE）のどちらでもよく、`--tensor-parallel 1 / 2` が
-使える。
+`--model-dir` は dense / grouped expert（MoE）/ Qwen4Exp のいずれでもよく、
+`--tensor-parallel 1 / 2 / 4` が使える。Qwen4Exp は `--tensor-parallel 4` を使う。
 
 corpus は `vendor/BetterBench/corpus/v1` から生成する（token corpus は commit しない）。
 
@@ -261,6 +273,12 @@ greedy argmax sampling。
 ```bash
 ./build/shelf-bench pp --model-dir models/Qwen3.8-27B-FP8 --prompt-tokens 512 --tensor-parallel 2 --device 0,1 --arena-gib 16
 ./build/shelf-bench tg --model-dir models/Qwen3.8-27B-FP8 --mode greedy --compute-logits 1
+./build/shelf-bench pp --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 \
+  --tokens-file /tmp/corpus.psktok --prompt-tokens 512 \
+  --tensor-parallel 4 --device 0,1,2,3 --arena-gib 31
+./build/shelf-bench tg --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 \
+  --tokens-file /tmp/corpus.psktok --context 128 --tokens 64 \
+  --tensor-parallel 4 --device 0,1,2,3 --arena-gib 31
 ./build/shelf-bench gemm --check --rows 1,16,128
 ./build/shelf-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv
 ```

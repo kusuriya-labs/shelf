@@ -55,7 +55,7 @@ void print_usage(FILE* out) {
         "  --arena-gib N|auto           (default auto = free VRAM minus 1 GiB)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
-        "  --tensor-parallel N          1 | 2 (default 1)\n"
+        "  --tensor-parallel N          1 | 2 | 4 (default 1)\n"
         "  --dump PATH                  write teacher-forced logits rows\n"
         "  --compare PATH               compare against a baseline dump\n");
 }
@@ -161,8 +161,9 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 return false;
             }
         } else if (key == "--tensor-parallel") {
-            if (!parse_int(need_value(), opts.tp) || (opts.tp != 1 && opts.tp != 2)) {
-                fprintf(stderr, "invalid --tensor-parallel (expected 1 or 2)\n");
+            if (!parse_int(need_value(), opts.tp) ||
+                (opts.tp != 1 && opts.tp != 2 && opts.tp != 4)) {
+                fprintf(stderr, "invalid --tensor-parallel (expected 1, 2 or 4)\n");
                 return false;
             }
         } else if (key == "--arena-gib") {

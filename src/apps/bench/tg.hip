@@ -1,8 +1,11 @@
 #include <shelf/core/memory/arena.h>
 #include <shelf/models/loaded_model.h>
+#include <shelf/models/model_weights_factory.h>
+#include <shelf/models/tp_rank_model.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
+#include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -35,7 +38,8 @@ struct BenchOptions {
     int tokens = 8;
     int warmup = 0;
     bool compute_logits = true;
-    int device = 0;
+    std::vector<int> devices = {0};
+    int tp = 1;
     std::string model_dir;
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
@@ -61,7 +65,9 @@ void print_usage(FILE* out) {
         "  --prefill-chunk N            (default 128)\n"
         "  --warmup N                   (default 0)\n"
         "  --compute-logits 0|1         (default 1)\n"
-        "  --device N                   (default 0)\n"
+        "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
+        "                                (default 0; e.g. --device 0,2)\n"
+        "  --tensor-parallel N          tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8   (default bf16)\n"
@@ -106,6 +112,22 @@ bool parse_double(const std::string& value, double& out) {
         return false;
     }
     return pos == value.size();
+}
+
+bool parse_devices(const std::string& value, std::vector<int>& out) {
+    out.clear();
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t comma = value.find(',', start);
+        std::string token = value.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start);
+        int device = 0;
+        if (!parse_int(token, device) || device < 0) return false;
+        out.push_back(device);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return !out.empty();
 }
 
 bool parse_args(int argc, char** argv, BenchOptions& opts) {
@@ -167,8 +189,14 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 return false;
             }
         } else if (key == "--device") {
-            if (!parse_int(need_value(), opts.device)) {
+            if (!parse_devices(need_value(), opts.devices)) {
                 fprintf(stderr, "invalid --device\n");
+                return false;
+            }
+        } else if (key == "--tensor-parallel") {
+            if (!parse_int(need_value(), opts.tp) ||
+                (opts.tp != 1 && opts.tp != 2 && opts.tp != 4)) {
+                fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
                 return false;
             }
         } else if (key == "--model-dir") {
@@ -229,6 +257,18 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
     }
     if (opts.model_dir.empty()) {
         fprintf(stderr, "--model-dir is required\n");
+        return false;
+    }
+    if (opts.devices.size() != static_cast<size_t>(opts.tp)) {
+        fprintf(stderr, "--device expects %d entries for --tensor-parallel %d, got %zu\n",
+                opts.tp, opts.tp, opts.devices.size());
+        return false;
+    }
+    std::vector<int> sorted_devices = opts.devices;
+    std::sort(sorted_devices.begin(), sorted_devices.end());
+    if (std::adjacent_find(sorted_devices.begin(), sorted_devices.end()) !=
+        sorted_devices.end()) {
+        fprintf(stderr, "--device entries must be unique\n");
         return false;
     }
     return true;
@@ -317,16 +357,9 @@ int run_tg(int argc, char** argv) {
 
     roctx_pause();
 
-    hipError_t hip_err = hipSetDevice(opts.device);
+    hipError_t hip_err = hipSetDevice(opts.devices[0]);
     if (hip_err != hipSuccess) {
         fprintf(stderr, "hipSetDevice failed: %s\n", hipGetErrorString(hip_err));
-        return 1;
-    }
-
-    hipStream_t stream = nullptr;
-    hip_err = hipStreamCreate(&stream);
-    if (hip_err != hipSuccess) {
-        fprintf(stderr, "hipStreamCreate failed: %s\n", hipGetErrorString(hip_err));
         return 1;
     }
 
@@ -350,71 +383,13 @@ int run_tg(int argc, char** argv) {
         arena_bytes = static_cast<std::size_t>(opts.arena_gib * 1024.0 * 1024.0 * 1024.0);
     }
 
-    auto arena_result = shelf::gpu::GpuArena::create(opts.device, arena_bytes);
-    if (!arena_result.ok()) {
-        fprintf(stderr, "GpuArena::create failed: %s\n", arena_result.status().message().c_str());
-        return 1;
-    }
-    auto arena = arena_result.release();
-
-    auto model_result =
-        shelf::models::LoadedModel::load(opts.model_dir, arena, stream);
-    if (!model_result.ok()) {
-        fprintf(stderr, "model load failed: %s\n", model_result.status().message().c_str());
-        return 1;
-    }
-    auto model = model_result.release();
-
-    hip_err = hipStreamSynchronize(stream);
-    if (hip_err != hipSuccess) {
-        fprintf(stderr, "weight sync failed: %s\n", hipGetErrorString(hip_err));
-        return 1;
-    }
-
-    const auto& tc = model.hybrid_config();
-    const uint32_t kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
-    const uint32_t head_dim = static_cast<uint32_t>(tc.attention_head_dim);
-    const uint32_t num_attn_layers = count_attention_layers(tc);
-    const uint32_t vocab_size = static_cast<uint32_t>(tc.vocab_size);
-    const uint32_t hidden_size = static_cast<uint32_t>(tc.hidden_size);
-
     const uint32_t required_seq_len =
         static_cast<uint32_t>(opts.context)
         + static_cast<uint32_t>(opts.warmup)
         + static_cast<uint32_t>(opts.tokens)
         + 1u;
-
-    const uint32_t num_pages = ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
-
-    auto seq_pool_result =
-        shelf::state::SequenceSlotPool::create(arena, 1, num_pages);
-    if (!seq_pool_result.ok()) {
-        fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
-            seq_pool_result.status().message().c_str());
-        return 1;
-    }
-    auto seq_pool = seq_pool_result.release();
-
-    auto rec_pool_result = shelf::state::GdnStatePool::create(
-        arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(model.hybrid_config()));
-    if (!rec_pool_result.ok()) {
-        fprintf(stderr, "GdnStatePool::create failed: %s\n",
-            rec_pool_result.status().message().c_str());
-        return 1;
-    }
-    auto rec_pool = rec_pool_result.release();
-
-    auto kv_pool_result = shelf::state::PagedKVPool::create(
-        arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-        num_attn_layers, kv_heads, head_dim,
-        opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
-                                    : shelf::kernel::KVCacheDType::BF16);
-    if (!kv_pool_result.ok()) {
-        fprintf(stderr, "PagedKVPool::create failed: %s\n",
-            kv_pool_result.status().message().c_str());
-        return 1;
-    }
-    auto kv_pool = kv_pool_result.release();
+    const uint32_t num_pages =
+        ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
 
     shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows =
@@ -422,14 +397,137 @@ int run_tg(int argc, char** argv) {
     exec_config.max_scheduled_requests = 1;
     exec_config.backend = opts.decode_backend;
 
-    auto exec_result =
-        model.create_executor(seq_pool, rec_pool, kv_pool, arena, exec_config);
-    if (!exec_result.ok()) {
-        fprintf(stderr, "create_model_executor failed: %s\n",
-            exec_result.status().message().c_str());
-        return 1;
+    hipStream_t stream = nullptr;
+    shelf::qwen_hybrid::QwenHybridConfig tc;
+    std::unique_ptr<shelf::gpu::GpuArena> tp1_arena;
+    std::unique_ptr<shelf::models::LoadedModel> tp1_model;
+    std::unique_ptr<shelf::state::SequenceSlotPool> tp1_seq_pool;
+    std::unique_ptr<shelf::state::GdnStatePool> tp1_rec_pool;
+    std::unique_ptr<shelf::state::PagedKVPool> tp1_kv_pool;
+    std::unique_ptr<shelf::qwen35::Executor> tp1_executor;
+    std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coordinator;
+    shelf::state::SequenceSlotPool* seq_pool = nullptr;
+    shelf::state::GdnStatePool* rec_pool = nullptr;
+    shelf::state::PagedKVPool* kv_pool = nullptr;
+    shelf::qwen35::Executor* executor = nullptr;
+
+    if (opts.tp == 1) {
+        hip_err = hipStreamCreate(&stream);
+        if (hip_err != hipSuccess) {
+            fprintf(stderr, "hipStreamCreate failed: %s\n", hipGetErrorString(hip_err));
+            return 1;
+        }
+
+        auto arena_result = shelf::gpu::GpuArena::create(opts.devices[0], arena_bytes);
+        if (!arena_result.ok()) {
+            fprintf(stderr, "GpuArena::create failed: %s\n",
+                    arena_result.status().message().c_str());
+            return 1;
+        }
+        tp1_arena = std::make_unique<shelf::gpu::GpuArena>(arena_result.release());
+
+        auto model_result =
+            shelf::models::LoadedModel::load(opts.model_dir, *tp1_arena, stream);
+        if (!model_result.ok()) {
+            fprintf(stderr, "model load failed: %s\n",
+                    model_result.status().message().c_str());
+            return 1;
+        }
+        tp1_model = std::make_unique<shelf::models::LoadedModel>(model_result.release());
+
+        hip_err = hipStreamSynchronize(stream);
+        if (hip_err != hipSuccess) {
+            fprintf(stderr, "weight sync failed: %s\n", hipGetErrorString(hip_err));
+            return 1;
+        }
+
+        tc = tp1_model->hybrid_config();
+        const uint32_t kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
+        const uint32_t head_dim = static_cast<uint32_t>(tc.attention_head_dim);
+        const uint32_t num_attn_layers = count_attention_layers(tc);
+
+        auto seq_pool_result =
+            shelf::state::SequenceSlotPool::create(*tp1_arena, 1, num_pages);
+        if (!seq_pool_result.ok()) {
+            fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
+                seq_pool_result.status().message().c_str());
+            return 1;
+        }
+        tp1_seq_pool =
+            std::make_unique<shelf::state::SequenceSlotPool>(seq_pool_result.release());
+        seq_pool = tp1_seq_pool.get();
+
+        auto rec_pool_result = shelf::state::GdnStatePool::create(
+            *tp1_arena, 1, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
+        if (!rec_pool_result.ok()) {
+            fprintf(stderr, "GdnStatePool::create failed: %s\n",
+                rec_pool_result.status().message().c_str());
+            return 1;
+        }
+        tp1_rec_pool =
+            std::make_unique<shelf::state::GdnStatePool>(rec_pool_result.release());
+        rec_pool = tp1_rec_pool.get();
+
+        auto kv_pool_result = shelf::state::PagedKVPool::create(
+            *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
+            num_attn_layers, kv_heads, head_dim,
+            opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                        : shelf::kernel::KVCacheDType::BF16);
+        if (!kv_pool_result.ok()) {
+            fprintf(stderr, "PagedKVPool::create failed: %s\n",
+                kv_pool_result.status().message().c_str());
+            return 1;
+        }
+        tp1_kv_pool =
+            std::make_unique<shelf::state::PagedKVPool>(kv_pool_result.release());
+        kv_pool = tp1_kv_pool.get();
+
+        auto exec_result = tp1_model->create_executor(
+            *seq_pool, *rec_pool, *kv_pool, *tp1_arena, exec_config);
+        if (!exec_result.ok()) {
+            fprintf(stderr, "create_model_executor failed: %s\n",
+                exec_result.status().message().c_str());
+            return 1;
+        }
+        tp1_executor =
+            std::make_unique<shelf::qwen35::Executor>(exec_result.release());
+        executor = tp1_executor.get();
+    } else {
+        shelf::qwen35::runtime::TpCoordinatorConfig tp_cfg;
+        tp_cfg.model_dir = opts.model_dir;
+        tp_cfg.devices = opts.devices;
+        tp_cfg.max_batch_rows = exec_config.max_batch_rows;
+        tp_cfg.max_scheduled_requests = 1;
+        tp_cfg.max_scheduled_output_rows = 1;
+        tp_cfg.max_seq_len = required_seq_len;
+        tp_cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
+        tp_cfg.kv_cache_dtype = opts.kv_cache_dtype == "fp8"
+                                    ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                    : shelf::kernel::KVCacheDType::BF16;
+        tp_cfg.arena_bytes = arena_bytes;
+        tp_cfg.working_set_reserve_bytes = 0;
+        shelf::Status sel = shelf::models::select_tp_rank_model(tp_cfg);
+        if (!sel.ok()) {
+            fprintf(stderr, "tensor parallel rank model: %s\n", sel.message().c_str());
+            return 1;
+        }
+        auto tp_result = shelf::qwen35::runtime::TpCoordinator::create(tp_cfg);
+        if (!tp_result.ok()) {
+            fprintf(stderr, "TpCoordinator::create failed: %s\n",
+                tp_result.status().message().c_str());
+            return 1;
+        }
+        tp_coordinator = tp_result.release();
+        stream = tp_coordinator->rank(0).stream();
+        tc = tp_coordinator->rank(0).hybrid_config();
+        seq_pool = &tp_coordinator->rank(0).sequence_pool();
+        rec_pool = &tp_coordinator->rank(0).gdn_pool();
+        kv_pool = &tp_coordinator->rank(0).kv_pool();
+        executor = &tp_coordinator->rank(0).executor();
     }
-    auto executor = exec_result.release();
+
+    const uint32_t vocab_size = static_cast<uint32_t>(tc.vocab_size);
+    const uint32_t hidden_size = static_cast<uint32_t>(tc.hidden_size);
 
     struct StatsOnExit {
         const std::string& out;
@@ -445,12 +543,26 @@ int run_tg(int argc, char** argv) {
 
 
     auto seq_result = shelf::state::create_paged_sequence_state(
-        seq_pool, rec_pool, kv_pool, required_seq_len, stream);
+        *seq_pool, *rec_pool, *kv_pool, required_seq_len, stream);
     if (!seq_result.ok()) {
         fprintf(stderr, "create_paged_sequence_state failed: %s\n", seq_result.status().message().c_str());
         return 1;
     }
     shelf::state::PagedSequenceState seq = seq_result.release();
+    if (tp_coordinator != nullptr) {
+        shelf::Status mirror_status = tp_coordinator->on_sequence_created(seq);
+        if (!mirror_status.ok()) {
+            fprintf(stderr, "tp sequence mirror failed: %s\n",
+                    mirror_status.message().c_str());
+            return 1;
+        }
+    }
+
+    auto run_batch = [&](const shelf::qwen35::ScheduledBatch& batch)
+        -> shelf::Result<shelf::qwen35::BatchExecutionOutput> {
+        if (tp_coordinator != nullptr) return tp_coordinator->on_execute(batch);
+        return shelf::qwen35::execute_batch(*executor, batch, stream);
+    };
 
     int32_t token_id = 1;
     if (token_id < 0 || static_cast<std::size_t>(token_id) >= vocab_size) {
@@ -512,7 +624,7 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 0;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 1;
-            auto st = shelf::qwen35::execute_batch(executor, batch, stream);
+            auto st = run_batch(batch);
             if (!st.ok()) {
                 fprintf(stderr, "context population failed at %u: %s\n", processed, st.status().message().c_str());
                 return 1;
@@ -546,7 +658,7 @@ int run_tg(int argc, char** argv) {
         batch.num_decode_requests = 1;
         batch.num_verify_requests = 0;
         batch.num_prefill_requests = 0;
-        auto res = shelf::qwen35::execute_batch(executor, batch, stream);
+        auto res = run_batch(batch);
         if (!res.ok()) return res.status();
         (void)res.release();
         return shelf::Status::make_ok();
@@ -641,7 +753,7 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 1;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 0;
-            auto res = shelf::qwen35::execute_batch(executor, batch, stream);
+            auto res = run_batch(batch);
             if (!res.ok()) {
                 fprintf(stderr, "forward failed at %d: %s\n", i, res.status().message().c_str());
                 return 1;
@@ -703,7 +815,7 @@ int run_tg(int argc, char** argv) {
             batch.num_decode_requests = 1;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 0;
-            auto res = shelf::qwen35::execute_batch(executor, batch, stream);
+            auto res = run_batch(batch);
             if (!res.ok()) {
                 fprintf(stderr, "greedy forward failed at %d: %s\n", i, res.status().message().c_str());
                 return 1;
@@ -795,7 +907,14 @@ int run_tg(int argc, char** argv) {
 #ifdef SHELF_GIT_SHA
     printf("git_sha=%s\n", SHELF_GIT_SHA);
 #endif
-    printf("device=%d\n", opts.device);
+    printf("device=%d\n", opts.devices[0]);
+    printf("devices=");
+    for (std::size_t i = 0; i < opts.devices.size(); ++i) {
+        if (i > 0) printf(",");
+        printf("%d", opts.devices[i]);
+    }
+    printf("\n");
+    printf("tp=%d\n", opts.tp);
     printf("mode=%s\n", mode_label);
     printf("context=%d\n", opts.context);
     printf("tokens=%d\n", opts.tokens);
@@ -824,15 +943,16 @@ int run_tg(int argc, char** argv) {
         }
         if (ftell(out) == 0) {
             fprintf(out,
-                "schema_version,device,mode,context_start,measured_tokens,"
+                "schema_version,device,tp,mode,context_start,measured_tokens,"
                 "compute_logits,page_tokens,gpu_elapsed_ms,wall_elapsed_ms,"
                 "gpu_us_per_token,wall_us_per_token,gpu_tokens_per_sec,"
                 "wall_tokens_per_sec,final_position,kv_used_pages,"
                 "kv_reserved_bytes,roctx_enabled\n");
         }
         fprintf(out,
-            "2,%d,%s,%d,%d,%d,%d,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%d,%u,%zu,%d\n",
-            opts.device,
+            "3,%d,%d,%s,%d,%d,%d,%d,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%d,%u,%zu,%d\n",
+            opts.devices[0],
+            opts.tp,
             mode_label,
             opts.context,
             static_cast<int>(measured_tokens),
@@ -862,16 +982,27 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
 
+    if (tp_coordinator != nullptr) {
+        shelf::Status mirror_st = tp_coordinator->on_sequence_released(seq);
+        if (!mirror_st.ok()) {
+            fprintf(stderr, "tp sequence mirror release failed: %s\n",
+                    mirror_st.message().c_str());
+            return 1;
+        }
+    }
     auto release_st = shelf::state::release_paged_sequence_state(seq, stream);
     if (!release_st.ok()) {
         fprintf(stderr, "release_paged_sequence_state failed: %s\n", release_st.message().c_str());
         return 1;
     }
 
-    auto shutdown_st = arena.shutdown();
-    if (!shutdown_st.ok()) {
-        fprintf(stderr, "arena shutdown failed: %s\n", shutdown_st.message().c_str());
-        return 1;
+    tp_coordinator.reset();
+    if (tp1_arena != nullptr) {
+        auto shutdown_st = tp1_arena->shutdown();
+        if (!shutdown_st.ok()) {
+            fprintf(stderr, "arena shutdown failed: %s\n", shutdown_st.message().c_str());
+            return 1;
+        }
     }
 
     return 0;
