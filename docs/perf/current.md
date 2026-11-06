@@ -382,6 +382,9 @@ FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。
 | DFlash2 drafts=6、32 new token | 50.71 tok/s | 51.41 tok/s |
 
 - FlashNext の MTP は `--mtp` が TP1、Qwen4Exp が TP2 以上を要求するため実行できない。
+- 27B-exl3 の MTP（TP1、`--mtp --mtp-drafts 4`）は **44.51〜44.67 tok/s**
+  （target-only 17.09、mean accepted 2.750）。同条件の DFlash2 TP1 は drafts=6 で
+  45.45〜45.84 tok/s。TP2 + DFlash2 の 63.38 tok/s が最速。
 - measurement revision: `exp/exl3-speed` の working tree（ka=5 / ka=3 の固定 rate
   template 実体、rows 別 split-K 既定、`SHELF_EXL3_FAST_DECODE=0` で従来経路）
 - GPU: Radeon AI PRO R9700 1 枚 / 2 枚（device 1 / device 0,1）

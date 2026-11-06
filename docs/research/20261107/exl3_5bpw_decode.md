@@ -126,6 +126,33 @@ drafts を振ると drafts=4 が最良だった。
 target-only は 24.99 tok/s なので、drafts=4 で 2.14 倍。生成列は target-only と一致する。
 
 
+### 2-8. 27B dense の MTP
+
+27B-exl3 は TP1 で MTP が動く。5 token prompt、32 new token、device 1、bf16 KV、
+`--arena-gib 28`。
+
+| drafts | mean accepted | emitted/round | tok/s |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.000 | 2.000 | 29.32 |
+| 2 | 1.500 | 2.500 | 33.84 |
+| 3 | 2.000 | 3.000 | 38.39 |
+| **4** | **2.750** | **3.750** | **44.51 / 44.67 / 44.56** |
+| 5 | 2.750 | 3.750 | 42.58 |
+| 6 | 2.750 | 3.750 | 40.82 |
+| 7 | 2.750 | 3.750 | 39.05 |
+
+target-only は 17.09 tok/s なので drafts=4 で 2.60 倍。`GENERATED_IDS` は target-only と
+一致する。drafts=4 の内訳は `MTP_DRAFT_MS=117.65`、`MTP_VERIFY_MS=519.12`、
+`MTP_ROUND_MS=636.83`、`ARENA_USED_GB=27.788`。
+
+同条件の DFlash2 TP1 は drafts=6 で 45.45 / 45.84 tok/s で、MTP より約 2 % 速い。
+ただし DFlash2 は drafter model の追加ロードと VRAM が要る。MTP は checkpoint 内の
+block だけで動く。
+
+MTP は TP1 のみ、DFlash2 は TP2 も使える。TP2 + DFlash2 は 63.38 tok/s で、
+27B の現時点の最速構成はこちら。
+
+
 ## 3. 結果
 
 TP=1、device 1、bf16 KV、`--arena-gib 28`。
