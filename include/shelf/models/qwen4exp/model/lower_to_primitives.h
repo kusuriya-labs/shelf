@@ -15,6 +15,7 @@ struct Qwen4ExpLowerOptions {
     // QSA indexer capacity. The graph sizes its block scores, top-k and expanded token
     // mask from this value, so it must be the runtime's maximum context length.
     std::uint32_t max_context_tokens = 512;
+    std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;
     float rope_attention_factor = 1.0f;
     // Target layers whose completed output, averaged over the hyper-connection streams,

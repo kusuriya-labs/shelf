@@ -221,6 +221,90 @@ int main() {
         }
     }
 
+    {
+        shelf::qwen4exp::Qwen4ExpTextConfig tp_config = config;
+        tp_config.num_key_value_heads = 2u;
+        const std::uint32_t tp = 2u;
+        const std::uint32_t lq = kQHeads / tp;
+        const std::uint32_t lkv = tp_config.num_key_value_heads / tp;
+        const std::uint32_t lqf = lq * kHeadDim;
+        const std::uint32_t lkvf = lkv * kHeadDim;
+        const std::uint32_t lgk = kGdnKeyHeads / tp;
+        const std::uint32_t lgv = kGdnValueHeads / tp;
+        const std::uint32_t lgkf = lgk * kGdnHeadDim;
+        const std::uint32_t lgvf = lgv * kGdnHeadDim;
+        const std::uint32_t lconv = 2u * lgkf + lgvf;
+        const std::uint32_t lexperts = kExperts / tp;
+
+        shelf::qwen4exp::Qwen4ExpRankWeights tw;
+        tw.embed_tokens = matrix(kVocab, kHidden);
+        tw.lm_head = matrix(kVocab, kHidden);
+        tw.mixer = hyper();
+        tw.layers.resize(tp_config.num_hidden_layers);
+        for (std::uint32_t li = 0; li < tp_config.num_hidden_layers; ++li) {
+            auto& layer = tw.layers[li];
+            layer.attn_hyper_connection = hyper();
+            layer.mlp_hyper_connection = hyper();
+            layer.attention.is_gdn = li == 0u;
+            if (layer.attention.is_gdn) {
+                layer.attention.in_proj_qkv = matrix(lconv, kHidden);
+                layer.attention.in_proj_z = matrix(lgvf, kHidden);
+                layer.attention.in_proj_b = matrix(lgv, kHidden);
+                layer.attention.in_proj_a = matrix(lgv, kHidden);
+                layer.attention.out_proj = matrix(kHidden, lgvf);
+            } else {
+                layer.attention.q_proj = matrix(2u * lqf, kHidden);
+                layer.attention.k_proj = matrix(lkvf, kHidden);
+                layer.attention.v_proj = matrix(lkvf, kHidden);
+                layer.attention.o_proj = matrix(kHidden, lqf);
+                layer.attention.index_qk_proj =
+                    matrix((kIndexHeads + 1u) * kIndexDim, kHidden);
+            }
+            layer.mlp.router = matrix(kExperts, kHidden);
+            layer.mlp.shared_gate = matrix(1u, kHidden);
+            layer.mlp.shared_gate_proj = matrix(kShared, kHidden);
+            layer.mlp.shared_up_proj = matrix(kShared, kHidden);
+            layer.mlp.shared_down_proj = matrix(kHidden, kShared);
+            layer.mlp.gate_experts = experts(kIntermediate, kHidden);
+            layer.mlp.gate_experts.experts = lexperts;
+            layer.mlp.up_experts = experts(kIntermediate, kHidden);
+            layer.mlp.up_experts.experts = lexperts;
+            layer.mlp.down_experts = experts(kHidden, kIntermediate);
+            layer.mlp.down_experts.experts = lexperts;
+            layer.mlp.experts = {kExperts, lexperts, 0u};
+            if (tp_config.layer_has_ple(li)) {
+                layer.ple.present = true;
+                layer.ple.key_proj = matrix(kWidth, kHidden);
+                layer.ple.value_proj = matrix(kHidden, kHidden);
+            }
+        }
+
+        shelf::qwen4exp::Qwen4ExpLowerOptions tp_options;
+        tp_options.max_context_tokens = 64u;
+        tp_options.tp_size = tp;
+        tp_options.tp_rank = 0u;
+        auto tp_lowered = shelf::qwen4exp::lower_qwen4exp_to_primitives(
+            tp_config, tw, tp_options);
+        check(tp_lowered.ok(), "a TP=2 rank lowers");
+        if (tp_lowered.ok()) {
+            const auto& tp_graph = tp_lowered.value().graph;
+            check(rt::validate_primitive_graph(tp_graph).ok(), "the TP=2 graph validates");
+            std::uint32_t tp_combines = 0;
+            for (const auto& node : tp_graph.nodes)
+                if (node.tp_combine != 0) ++tp_combines;
+            check(tp_combines == 2u * tp_config.num_hidden_layers,
+                  "each TP=2 layer reduces the projection output and the MoE combine");
+            bool local_heads = false;
+            for (const auto& node : tp_graph.nodes) {
+                if (rt::primitive_kind_of(node.node) != rt::PrimitiveKind::PAGED_ATTENTION)
+                    continue;
+                const auto& attn = std::get<rt::PagedAttentionNode>(node.node).attention;
+                local_heads = attn.query_heads == lq && attn.kv_heads == lkv;
+            }
+            check(local_heads, "the TP=2 attention runs the rank's local heads");
+        }
+    }
+
     std::printf("%s (%d passed, %d failed)\n", failed == 0 ? "PASS" : "FAIL", passed,
                 failed);
     return failed == 0 ? 0 : 1;

@@ -104,6 +104,27 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
                                         __LINE__);
     }
 
+    const std::uint32_t tp_size = options.tp_size == 0u ? 1u : options.tp_size;
+    auto divide_heads = [&](std::size_t heads, const char* what) -> Result<std::uint32_t> {
+        if (heads == 0u || (heads % tp_size) != 0u) {
+            return Status::unsupported(what, __FILE__, __LINE__);
+        }
+        return static_cast<std::uint32_t>(heads / tp_size);
+    };
+    auto local_query_heads = divide_heads(
+        config.num_attention_heads, "Qwen4Exp num_attention_heads must divide by tp_size");
+    if (!local_query_heads.ok()) return local_query_heads.status();
+    auto local_kv_heads = divide_heads(
+        config.num_key_value_heads, "Qwen4Exp num_key_value_heads must divide by tp_size");
+    if (!local_kv_heads.ok()) return local_kv_heads.status();
+    auto local_gdn_key_heads = divide_heads(
+        config.linear_num_key_heads, "Qwen4Exp linear_num_key_heads must divide by tp_size");
+    if (!local_gdn_key_heads.ok()) return local_gdn_key_heads.status();
+    auto local_gdn_value_heads = divide_heads(
+        config.linear_num_value_heads,
+        "Qwen4Exp linear_num_value_heads must divide by tp_size");
+    if (!local_gdn_value_heads.ok()) return local_gdn_value_heads.status();
+
     const std::uint32_t local_experts =
         static_cast<std::uint32_t>(weights.layers.front().mlp.experts.local_experts);
     const std::uint32_t expert_begin =
@@ -293,10 +314,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
         layer.mlp_hyper_norm_parameter_index = lp.mlp_norm;
 
         if (lw.attention.is_gdn) {
-            layer.gdn_geometry.key_heads =
-                static_cast<std::uint32_t>(config.linear_num_key_heads);
-            layer.gdn_geometry.value_heads =
-                static_cast<std::uint32_t>(config.linear_num_value_heads);
+            layer.gdn_geometry.key_heads = local_gdn_key_heads.value();
+            layer.gdn_geometry.value_heads = local_gdn_value_heads.value();
             layer.gdn_geometry.key_head_dim =
                 static_cast<std::uint32_t>(config.linear_key_head_dim);
             layer.gdn_geometry.value_head_dim =
@@ -304,7 +323,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
             layer.gdn_geometry.conv_kernel =
                 static_cast<std::uint32_t>(config.linear_conv_kernel_dim);
             layer.gdn_geometry.sigmoid_gate = true;
-            layer.gdn_geometry.tp_combine = false;
+            layer.gdn_geometry.tp_combine = tp_size > 1u;
             layer.gdn_geometry.eps = eps;
             layer.gdn_weights.qkv = &lw.attention.in_proj_qkv;
             layer.gdn_weights.z = &lw.attention.in_proj_z;
@@ -316,17 +335,15 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
                 lp.conv, lp.dt_bias, lp.a_log, lp.gdn_norm, next_gdn_state++,
             };
         } else {
-            layer.qsa_geometry.attention.query_heads =
-                static_cast<std::uint32_t>(config.num_attention_heads);
-            layer.qsa_geometry.attention.kv_heads =
-                static_cast<std::uint32_t>(config.num_key_value_heads);
+            layer.qsa_geometry.attention.query_heads = local_query_heads.value();
+            layer.qsa_geometry.attention.kv_heads = local_kv_heads.value();
             layer.qsa_geometry.attention.head_dim = head_dim;
             layer.qsa_geometry.attention.rotary_dim = rotary_dim;
             layer.qsa_geometry.attention.rope_theta = rope_theta;
             layer.qsa_geometry.attention.rope_attention_factor =
                 options.rope_attention_factor;
             layer.qsa_geometry.attention.eps = eps;
-            layer.qsa_geometry.attention.tp_combine = false;
+            layer.qsa_geometry.attention.tp_combine = tp_size > 1u;
             layer.qsa_geometry.indexer = make_qwen4exp_qsa_indexer_geometry(
                 config, index_blocks, next_attention_state);
             layer.qsa_geometry.indexer.top_k =

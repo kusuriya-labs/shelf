@@ -338,6 +338,7 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     qwen4exp::Qwen4ExpLowerOptions options;
     options.max_context_tokens =
         config.max_context_tokens != 0u ? config.max_context_tokens : 512u;
+    options.tp_size = config.tp != nullptr ? config.tp->tp_size : 1u;
     options.tp_rank = config.tp != nullptr ? config.tp->tp_rank : 0u;
     options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
     options.hidden_taps = std::span<const std::uint32_t>(
@@ -441,10 +442,14 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     qhy::TensorParallelContext context;
     context.tp_size = config.tp_size;
     context.tp_rank = config.tp_rank;
-    context.local_attention_heads = static_cast<std::uint32_t>(cfg.num_attention_heads);
-    context.local_key_value_heads = static_cast<std::uint32_t>(cfg.num_key_value_heads);
-    context.local_gdn_key_heads = static_cast<std::uint32_t>(cfg.linear_num_key_heads);
-    context.local_gdn_value_heads = static_cast<std::uint32_t>(cfg.linear_num_value_heads);
+    context.local_attention_heads =
+        static_cast<std::uint32_t>(cfg.num_attention_heads / config.tp_size);
+    context.local_key_value_heads =
+        static_cast<std::uint32_t>(cfg.num_key_value_heads / config.tp_size);
+    context.local_gdn_key_heads =
+        static_cast<std::uint32_t>(cfg.linear_num_key_heads / config.tp_size);
+    context.local_gdn_value_heads =
+        static_cast<std::uint32_t>(cfg.linear_num_value_heads / config.tp_size);
     context.local_vocab_size = static_cast<std::uint32_t>(cfg.vocab_size);
     context.vocab_parallel_lm_head = false;
     context.global_num_experts = static_cast<std::uint32_t>(cfg.ffn.num_experts);

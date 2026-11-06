@@ -134,9 +134,14 @@ Result<TensorPartitionPlan> build_tp_plan(const Qwen4ExpTextConfig& config,
         return Status::unsupported("Qwen4Exp num_experts must divide by tp_size", __FILE__,
                                    __LINE__);
     }
-    // EXL3 matrices are not part of the canonical partition contract yet. The first load
-    // path therefore splits only the routed experts on the expert axis and replicates
-    // every non-expert matrix on both ranks.
+    auto body_result = qhy::build_hybrid_partition(config, tp_size, tp_rank);
+    if (!body_result.ok()) return body_result.status();
+    const qhy::HybridPartition& body = body_result.value();
+    for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+        Status st = qhy::add_hybrid_layer_partitions(
+            plan, body, layer_prefix(layer), qhy::layer_is_gdn(config, layer));
+        if (!st.ok()) return st;
+    }
     return plan;
 }
 
@@ -1094,17 +1099,21 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
     const std::uint32_t q_heads = static_cast<std::uint32_t>(config.num_attention_heads);
     const std::uint32_t kv_heads = static_cast<std::uint32_t>(config.num_key_value_heads);
     const std::uint32_t head_dim = static_cast<std::uint32_t>(config.attention_head_dim);
-    const std::uint32_t q_features = q_heads * head_dim;
-    const std::uint32_t kv_features = kv_heads * head_dim;
+    const std::uint32_t local_q_heads = q_heads / tp_size;
+    const std::uint32_t local_kv_heads = kv_heads / tp_size;
+    const std::uint32_t local_q_features = local_q_heads * head_dim;
+    const std::uint32_t local_kv_features = local_kv_heads * head_dim;
 
     const std::uint32_t gdn_key_heads =
         static_cast<std::uint32_t>(config.linear_num_key_heads);
     const std::uint32_t gdn_value_heads =
         static_cast<std::uint32_t>(config.linear_num_value_heads);
+    const std::uint32_t local_gdn_key_heads = gdn_key_heads / tp_size;
+    const std::uint32_t local_gdn_value_heads = gdn_value_heads / tp_size;
     const std::uint32_t gdn_key_features =
-        gdn_key_heads * static_cast<std::uint32_t>(config.linear_key_head_dim);
+        local_gdn_key_heads * static_cast<std::uint32_t>(config.linear_key_head_dim);
     const std::uint32_t gdn_value_features =
-        gdn_value_heads * static_cast<std::uint32_t>(config.linear_value_head_dim);
+        local_gdn_value_heads * static_cast<std::uint32_t>(config.linear_value_head_dim);
     const std::uint32_t gdn_conv_features =
         2u * gdn_key_features + gdn_value_features;
 
@@ -1145,10 +1154,10 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
             st = expect_matrix(w.attention.in_proj_z, gdn_value_features, hidden,
                                "in_proj_z");
             if (!st.ok()) return st;
-            st = expect_matrix(w.attention.in_proj_a, gdn_value_heads, hidden,
+            st = expect_matrix(w.attention.in_proj_a, local_gdn_value_heads, hidden,
                                "in_proj_a");
             if (!st.ok()) return st;
-            st = expect_matrix(w.attention.in_proj_b, gdn_value_heads, hidden,
+            st = expect_matrix(w.attention.in_proj_b, local_gdn_value_heads, hidden,
                                "in_proj_b");
             if (!st.ok()) return st;
             st = expect_matrix(w.attention.out_proj, hidden, gdn_value_features,
@@ -1160,20 +1169,24 @@ Status validate_qwen4exp_rank(const Qwen4ExpRankWeights& weights,
             st = expect_tensor_1d(w.attention.norm, config.linear_value_head_dim,
                                   "linear_attn.norm");
             if (!st.ok()) return st;
-            st = expect_tensor_1d(w.attention.a_log, gdn_value_heads,
+            st = expect_tensor_1d(w.attention.a_log, local_gdn_value_heads,
                                   "linear_attn.A_log");
             if (!st.ok()) return st;
-            st = expect_tensor_1d(w.attention.dt_bias, gdn_value_heads,
+            st = expect_tensor_1d(w.attention.dt_bias, local_gdn_value_heads,
                                   "linear_attn.dt_bias");
             if (!st.ok()) return st;
         } else {
-            st = expect_matrix(w.attention.q_proj, 2u * q_features, hidden, "q_proj");
+            st = expect_matrix(w.attention.q_proj, 2u * local_q_features, hidden,
+                               "q_proj");
             if (!st.ok()) return st;
-            st = expect_matrix(w.attention.k_proj, kv_features, hidden, "k_proj");
+            st = expect_matrix(w.attention.k_proj, local_kv_features, hidden,
+                               "k_proj");
             if (!st.ok()) return st;
-            st = expect_matrix(w.attention.v_proj, kv_features, hidden, "v_proj");
+            st = expect_matrix(w.attention.v_proj, local_kv_features, hidden,
+                               "v_proj");
             if (!st.ok()) return st;
-            st = expect_matrix(w.attention.o_proj, hidden, q_features, "o_proj");
+            st = expect_matrix(w.attention.o_proj, hidden, local_q_features,
+                               "o_proj");
             if (!st.ok()) return st;
             st = expect_tensor_1d(w.attention.q_norm, head_dim, "q_norm");
             if (!st.ok()) return st;

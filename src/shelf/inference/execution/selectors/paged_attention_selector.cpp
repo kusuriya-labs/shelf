@@ -52,6 +52,10 @@ constexpr PagedAttentionRule kPagedAttentionRules[] = {
       8, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
       8, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible16x2 },
+    { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
+      12, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
+    { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,
+      12, 1, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
 };
 
 }  // namespace
