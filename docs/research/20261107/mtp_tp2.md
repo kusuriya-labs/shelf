@@ -58,6 +58,6 @@ MTP は `--tensor-parallel 1` のみ許可されていた。理由は MTP block 
 - grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を拒否する。
 - TP=4 は未計測。
 - MTP weight を全 rank が複製するため、rank1 の VRAM に MTP block 分の重複がある。
-- この計測は EXL3 の ka=5 fast path を含まない build で取った。fast path を入れた build では
-  target / MTP とも再測が必要。
+- この計測は EXL3 の ka=5 fast path を含まない build で取った。fast path と merge した後の
+  32 token は target 26.48、MTP 61.81、DFlash2 64.00 tok/s。128 token は未測。
 - DFlash2 TP2 の方が速い。MTP の利点は drafter model の追加 load が不要なこと。

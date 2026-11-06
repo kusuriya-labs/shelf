@@ -408,11 +408,12 @@ FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。
 
 | 条件 | 値 |
 | --- | ---: |
-| target-only TP2、128 token | 22.89 tok/s |
-| MTP TP2 drafts=4、32 token | 54.18 tok/s |
-| MTP TP2 drafts=4、128 token | **59.28 tok/s** |
+| target-only TP2、32 token（merge 後） | 26.48 tok/s |
+| MTP TP2 drafts=4、32 token（merge 後） | **61.81 tok/s** |
+| DFlash2 TP2 drafts=6、32 token（merge 後） | **64.00 tok/s** |
+| MTP TP2 drafts=4、128 token（fast path なし） | 59.28 tok/s |
+| DFlash2 TP2 drafts=6、128 token（fast path なし） | 72.87 tok/s |
 | MTP TP2 drafts=4、128 token の mean accepted | 2.750 |
-| DFlash2 TP2 drafts=6、128 token | **72.87 tok/s** |
 
 - measurement revision: MTP の TP=2 対応を入れた working tree（TP partition plan に
   MTP entry なし、`emit_normed_token_hidden`、per-rank GDN snapshot / compact、
@@ -420,13 +421,13 @@ FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。
 - GPU: Radeon AI PRO R9700 2 枚（device 0,1）
 - command:
   `shelf-compute --model-dir models/Qwen3.8-27B-exl3 --input-ids-file <5 token> --max-new-tokens 128 --max-seq-len 256 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0 --arena-gib 30 --mtp --mtp-drafts 4`
+  （merge 後の 32 token は `--max-new-tokens 32 --arena-gib 30`、DFlash2 は `--dflash2-drafts 6`）
 - 生成一致アンカー: target-only TP2 と MTP TP2 の 128 token `GENERATED_IDS` は一致する。
   2048 token prompt / 64 token の `test_mtp_parity_tp2` も PASS（rounds 12、
   GDN restore 5）。
 - MTP は TP1 でも動く（32 token、drafts=4 で 44.51 tok/s）。TP2 で +33 %。
 - DFlash2 TP2 の方が速い。MTP は drafter model の追加 load が不要な点が利点。
-- この計測は EXL3 の ka=5 fast path を含まない build で取った。merge 後は fast path を
-  含むため、target / MTP / DFlash2 とも再測が必要。
+- merge 後の 32 token は EXL3 ka=5 fast path を含む。128 token の merge 後は未測。
 
 ## 2026-11-03 long-context prefill
 
