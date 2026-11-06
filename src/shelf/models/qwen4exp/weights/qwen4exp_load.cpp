@@ -340,6 +340,7 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
     w.preshuffled = true;
 
     shelf::quantization::mxfp4::Mxfp4NativeHost native;
+    bool row_ref_exact = true;
     std::uint64_t codes_batch = 0;
     std::uint64_t scales_batch = 0;
     for (std::uint32_t local = 0; local < local_experts; ++local) {
@@ -379,6 +380,7 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
                 ("Qwen4Exp MXFP4 native preshuffle failed: " + name).c_str(), __FILE__,
                 __LINE__);
         }
+        row_ref_exact = row_ref_exact && native.row_ref_exact;
         if (local == 0u) {
             codes_batch = native.codes.size();
             scales_batch = native.scales.size();
@@ -389,7 +391,6 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
             w.storage_scale_stride_bytes = w.scale_row_stride_bytes;
             w.codes_batch_stride_bytes = codes_batch;
             w.scales_batch_stride_bytes = scales_batch;
-            w.row_ref_exact = native.row_ref_exact;
             const std::uint64_t tiles =
                 rows / shelf::quantization::mxfp4::mxfp4_native_output_tile;
             w.codes = alloc_u8(
@@ -439,6 +440,7 @@ Result<MatrixWeight> load_mxfp4_expert_matrix(
             "Qwen4Exp MXFP4 expert row_ref upload");
         if (!st.ok()) return st;
     }
+    w.row_ref_exact = row_ref_exact;
     shelf::weights::apply_default_compute_spec(w);
     return w;
 }
