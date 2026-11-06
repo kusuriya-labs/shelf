@@ -86,6 +86,8 @@ Ready.
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
+| `--mtp` | checkpoint の MTP block を drafter として使う（request は直列化される） |
+| `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
 | `--verify-weights` | verify quantized payload CRC32 on load |
 <!-- /cli:server -->
 
@@ -150,6 +152,28 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
     --arena-gib auto \
     --max-seq-len 4096 \
     --kv-cache-dtype fp8
+```
+
+## MTP speculative decoding
+
+`--mtp` を指定すると、checkpoint の MTP block（`mtp.*`）を drafter として使う。
+`--dflash2-model-dir` とは排他的である。
+
+- server の MTP は **1 request ずつ直列**に処理する。`--max-concurrent-requests` を
+  2 以上にしても、生成中の request が完了するまで次を開始しない。
+- tool calling / sampling / cancel は MTP 経路でも利用できる。ただし生成中の
+  cancel はその request が終わるまで反映されない。
+- 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。
+- `--mtp-drafts` は 4 前後が目安。大きすぎると verify の固定費が増える。
+
+```bash
+./build/shelf-server \
+    --model-dir models/Qwen3.8-27B-exl3 \
+    --mtp --mtp-drafts 4 \
+    --device 0,1 --tensor-parallel 2 \
+    --max-seq-len 524288 --rope-factor 2 \
+    --kv-cache-dtype fp8 \
+    --port 8123
 ```
 
 ## 使い方

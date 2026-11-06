@@ -153,7 +153,9 @@ dense checkpoint を TP=2 で動かす場合:
 - checkpoint に MTP block（`mtp.*`）が必要。無い checkpoint で `--mtp` を指定すると起動時に失敗する。
 - dense checkpoint は `--tensor-parallel 2` に対応する。grouped expert（MoE）の TP では
   MTP block を rank に分割しないため、現行の MoE TP load は MTP を拒否する。
-- `--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
+- `--pipeline-parallel 2`、`--dump-logits` は未対応。
+- `--serve-stdio` は MTP を 1 request ずつ直列に処理する。`--max-concurrent-requests`
+  を 2 以上にしても、MTP の生成中は次の request を開始しない。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
 - grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は

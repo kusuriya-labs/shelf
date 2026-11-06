@@ -413,10 +413,6 @@ int validate_compute_options(const ComputeOptions& opt) {
             fprintf(stderr, "--mtp currently requires --pipeline-parallel 1\n");
             return kComputeParseError;
         }
-        if (serve_stdio) {
-            fprintf(stderr, "--mtp does not support --serve-stdio\n");
-            return kComputeParseError;
-        }
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "MTP speculative decoding does not support --dump-logits\n");
             return kComputeParseError;

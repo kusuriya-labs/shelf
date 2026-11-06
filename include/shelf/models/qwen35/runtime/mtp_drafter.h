@@ -179,6 +179,8 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
 
 Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept;
 
+Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexcept;
+
 Result<MtpPrefillOutput> mtp_spec_prefill(
     MtpDrafter& drafter,
     Executor& target,

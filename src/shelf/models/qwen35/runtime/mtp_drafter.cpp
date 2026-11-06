@@ -555,6 +555,30 @@ Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept {
     return first_error;
 }
 
+Status mtp_drafter_reset_sequence(MtpDrafter& drafter, hipStream_t stream) noexcept {
+    if (!drafter.initialized || drafter.sequence == nullptr) {
+        return Status::invalid_state("mtp reset: drafter is not initialized", __FILE__,
+                                     __LINE__);
+    }
+    Status st = state::release_paged_sequence_state(*drafter.sequence, stream);
+    if (!st.ok()) return st;
+    auto sequence = state::create_paged_sequence_state(
+        *drafter.slot_pool, *drafter.gdn_pool, *drafter.kv_pool, drafter.max_seq_len,
+        stream);
+    if (!sequence.ok()) {
+        drafter.sequence.reset();
+        return sequence.status();
+    }
+    drafter.sequence =
+        std::make_unique<state::PagedSequenceState>(sequence.release());
+    drafter.last_tokens.clear();
+    drafter.last_position = 0u;
+    drafter.last_hidden_offset = 0u;
+    drafter.sample_index = 0u;
+    drafter.timing = MtpTiming{};
+    return Status::make_ok();
+}
+
 Result<MtpPrefillOutput> mtp_spec_prefill(
     MtpDrafter& drafter,
     Executor& target,

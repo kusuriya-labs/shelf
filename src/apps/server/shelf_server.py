@@ -96,6 +96,8 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
+    if opts.mtp:
+        argv += ["--mtp", "--mtp-drafts", str(opts.mtp_drafts)]
     if opts.tensor_parallel > 1:
         argv += ["--tensor-parallel", str(opts.tensor_parallel)]
     if opts.verify_weights:
@@ -420,6 +422,11 @@ def parse_args(argv=None):
                         help="DFlash2 draft model directory (enables speculative decoding)")
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
+    parser.add_argument("--mtp", action="store_true",
+                        help="enable the checkpoint's MTP block as the drafter "
+                             "(served requests are serialized)")
+    parser.add_argument("--mtp-drafts", type=int, default=4,
+                        help="MTP draft tokens per round (default 4)")
 
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
@@ -454,6 +461,14 @@ def parse_args(argv=None):
         parser.error("--page-tokens must be >= 1")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
+    if opts.mtp_drafts < 1:
+        parser.error("--mtp-drafts must be >= 1")
+    if opts.mtp and opts.dflash2_model_dir:
+        parser.error("--mtp and --dflash2-model-dir are mutually exclusive")
+    if opts.mtp and opts.max_concurrent_requests > 1:
+        print("warning: --mtp serializes compute requests; "
+              "--max-concurrent-requests is limited to 1 in practice",
+              file=sys.stderr, flush=True)
     return opts
 
 

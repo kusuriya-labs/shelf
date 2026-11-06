@@ -42,6 +42,19 @@ MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool �
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
 `build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
 
+## serve-stdio
+
+`--mtp --serve-stdio` は 1 request ずつ処理する直列 serve である。`shelf-server` の
+MTP 経路はこれを使う。
+
+- 起動時に MTP drafter を 1 つ作り、request ごとに target sequence を作成する。
+- request の開始時に `mtp_drafter_reset_sequence` で drafter の sequence を
+  release / recreate し、KV / GDN state を空にする。
+- prefill / step の結果を `token` event として逐次 emit し、最後に `done` event を返す。
+- 生成中は次の JSONL request を読まない。`max-concurrent-requests` は実質 1 である。
+- TP では既存の `TpCoordinator` 経路を使い、rank0 の drafter と全 rank の target
+  verify / GDN restore を実行する。
+
 ## Forward contract
 
 MTP block は次の順で 1 token を予測する。
