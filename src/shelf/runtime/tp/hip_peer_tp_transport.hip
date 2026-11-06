@@ -37,32 +37,87 @@ __global__ void tp_add_peers_bf16_kernel(const uint16_t* own,
                                          const uint16_t* const* peers,
                                          uint32_t npeers, uint16_t* out, uint64_t count) {
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < count; i += stride) {
-        float acc = tp_bf16_to_f32(own[i]);
-        for (uint32_t p = 0; p < npeers; ++p) {
-            acc += tp_bf16_to_f32(peers[p][i]);
+    const uint64_t vectors = count >> 3u;
+    for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         v < vectors; v += stride) {
+        const uint4 own4 = reinterpret_cast<const uint4*>(own)[v];
+        float acc[8];
+        #pragma unroll
+        for (uint32_t j = 0; j < 8u; ++j) {
+            const uint32_t word = (j & 4u) == 0u
+                ? (j & 2u) == 0u ? own4.x : own4.y
+                : (j & 2u) == 0u ? own4.z : own4.w;
+            acc[j] = tp_bf16_to_f32(static_cast<uint16_t>(
+                (word >> (16u * (j & 1u))) & 0xFFFFu));
         }
-        out[i] = tp_f32_to_bf16(acc);
+        for (uint32_t p = 0; p < npeers; ++p) {
+            const uint4 peer4 = reinterpret_cast<const uint4*>(peers[p])[v];
+            #pragma unroll
+            for (uint32_t j = 0; j < 8u; ++j) {
+                const uint32_t word = (j & 4u) == 0u
+                    ? (j & 2u) == 0u ? peer4.x : peer4.y
+                    : (j & 2u) == 0u ? peer4.z : peer4.w;
+                acc[j] += tp_bf16_to_f32(static_cast<uint16_t>(
+                    (word >> (16u * (j & 1u))) & 0xFFFFu));
+            }
+        }
+        uint4 result;
+        uint32_t* words = reinterpret_cast<uint32_t*>(&result);
+        #pragma unroll
+        for (uint32_t w = 0; w < 4u; ++w) {
+            words[w] = static_cast<uint32_t>(tp_f32_to_bf16(acc[2u * w])) |
+                       (static_cast<uint32_t>(tp_f32_to_bf16(acc[2u * w + 1u])) << 16u);
+        }
+        reinterpret_cast<uint4*>(out)[v] = result;
+    }
+    const uint64_t tail = vectors << 3u;
+    for (uint64_t i = tail + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < count; i += stride) {
+        float value = tp_bf16_to_f32(own[i]);
+        for (uint32_t p = 0; p < npeers; ++p)
+            value += tp_bf16_to_f32(peers[p][i]);
+        out[i] = tp_f32_to_bf16(value);
     }
 }
 
 __global__ void tp_add_peers_f32_kernel(const float* own, const float* const* peers,
                                         uint32_t npeers, float* out, uint64_t count) {
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < count; i += stride) {
-        float acc = own[i];
+    const uint64_t vectors = count >> 2u;
+    for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         v < vectors; v += stride) {
+        const uint4 own4 = reinterpret_cast<const uint4*>(own)[v];
+        float acc[4] = {__uint_as_float(own4.x), __uint_as_float(own4.y),
+                        __uint_as_float(own4.z), __uint_as_float(own4.w)};
         for (uint32_t p = 0; p < npeers; ++p) {
-            acc += peers[p][i];
+            const uint4 peer4 = reinterpret_cast<const uint4*>(peers[p])[v];
+            acc[0] += __uint_as_float(peer4.x);
+            acc[1] += __uint_as_float(peer4.y);
+            acc[2] += __uint_as_float(peer4.z);
+            acc[3] += __uint_as_float(peer4.w);
         }
-        out[i] = acc;
+        reinterpret_cast<uint4*>(out)[v] =
+            make_uint4(__float_as_uint(acc[0]), __float_as_uint(acc[1]),
+                       __float_as_uint(acc[2]), __float_as_uint(acc[3]));
+    }
+    const uint64_t tail = vectors << 2u;
+    for (uint64_t i = tail + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < count; i += stride) {
+        float value = own[i];
+        for (uint32_t p = 0; p < npeers; ++p) value += peers[p][i];
+        out[i] = value;
     }
 }
 
 __global__ void tp_copy_bf16_kernel(uint16_t* out, const uint16_t* in, uint64_t count) {
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 3u;
+    for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         v < vectors; v += stride) {
+        reinterpret_cast<uint4*>(out)[v] = reinterpret_cast<const uint4*>(in)[v];
+    }
+    const uint64_t tail = vectors << 3u;
+    for (uint64_t i = tail + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          i < count; i += stride) {
         out[i] = in[i];
     }
@@ -70,7 +125,13 @@ __global__ void tp_copy_bf16_kernel(uint16_t* out, const uint16_t* in, uint64_t 
 
 __global__ void tp_copy_f32_kernel(float* out, const float* in, uint64_t count) {
     const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const uint64_t vectors = count >> 2u;
+    for (uint64_t v = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         v < vectors; v += stride) {
+        reinterpret_cast<uint4*>(out)[v] = reinterpret_cast<const uint4*>(in)[v];
+    }
+    const uint64_t tail = vectors << 2u;
+    for (uint64_t i = tail + static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          i < count; i += stride) {
         out[i] = in[i];
     }

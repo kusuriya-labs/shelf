@@ -216,6 +216,7 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/decode_perf_stats.cpp
     src/shelf/inference/execution/elementwise_dispatch.hip
     src/shelf/inference/execution/exl3_dense_gemm.hip
+    src/shelf/inference/execution/gemm_lt.hip
     src/shelf/inference/execution/fp8_ptpc_dispatch.hip
     src/shelf/inference/execution/embedding_dispatch.hip
     src/shelf/inference/execution/gdn_conv_dispatch.hip

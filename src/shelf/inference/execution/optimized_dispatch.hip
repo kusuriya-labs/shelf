@@ -14,6 +14,7 @@
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
+#include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
@@ -671,12 +672,24 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::shelf::kernel::launch_gemm_bf16(
-        launch.config, reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
-        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
-        reinterpret_cast<void*>(launch.output), launch.output_dtype,
-        launch.rows, launch.out_features, launch.k, launch.input_row_stride,
-        launch.output_row_stride, stream);
+    constexpr uint32_t kLtMinRows = 128u;
+    hipError_t herr = hipErrorNotSupported;
+    if (launch.rows >= kLtMinRows) {
+        herr = shelf::execution::gemm_bf16_lt(
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+            reinterpret_cast<void*>(launch.output), launch.rows, launch.out_features,
+            launch.k, launch.input_row_stride, launch.output_row_stride,
+            launch.output_dtype == ::shelf::kernel::Bf16GemmOutputDType::BF16, stream);
+    }
+    if (herr == hipErrorNotSupported) {
+        herr = ::shelf::kernel::launch_gemm_bf16(
+            launch.config, reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+            reinterpret_cast<void*>(launch.output), launch.output_dtype,
+            launch.rows, launch.out_features, launch.k, launch.input_row_stride,
+            launch.output_row_stride, stream);
+    }
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)

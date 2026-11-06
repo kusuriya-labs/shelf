@@ -13,8 +13,8 @@
 MoE MTP decode（Qwen3.6-35B-A3B MXFP4）・MoE tensor parallel prefill（Qwen3.6-35B-A3B MXFP4）・
 MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、EXL3 W16A16 decode / prefill、
 2026-11-04 の 9B BF16 linear allowlist である。**
-2026-11-06 の model load（Flash Next MXFP4 TP4 / 27B FP8 TP2）は reference run
-として下の節に記録する。
+2026-11-06 の model load（Flash Next MXFP4 TP4 / 27B FP8 TP2）と、同じ日の
+BF16 GEMM / TP copy（Flash Next MXFP4 TP4）は reference run として下の節に記録する。
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -232,6 +232,41 @@ GPU time は trace の kernel duration、launch は physical launch の 4 rank �
 - 上位 4 カーネルの ISA と律速要因、採用した対策は
   [../research/20261106/pp2048_tp4_isa_analysis.md](../research/20261106/pp2048_tp4_isa_analysis.md)
   にある。ISA dump は `build/isa/pp2048_tp4/` に置いた。
+
+## 2026-11-06 Qwen3.8-Flash-Next MXFP4 TP4 の BF16 GEMM と TP copy
+
+`models/Qwen3.8-Flash-Next-Quark-MXFP4` を TP4 / bf16 KV / prefix cache なしで測った
+reference run である。qualified baseline ではない。
+
+- `tp_copy_bf16` / `tp_add_peers_bf16` / `tp_copy_f32` / `tp_add_peers_f32` を
+  128-bit vector load/store 化した。
+- BF16 linear の `rows >= 128` を hipBLASLt に切り替えた。`rows < 128` は従来カーネル。
+- FP8 PTPC の hipBLASLt 化は採らない。判断と根拠は
+  [../research/20261106/fp8_ptpc_hipblaslt.md](../research/20261106/fp8_ptpc_hipblaslt.md)
+  にある。
+
+| 断面 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| pp 2048 | 733.17 / 751.91 ms | **633.97 / 634.35 ms** |
+| pp 2048 tok/s | 2793.35 / 2723.74 | **3230.42 / 3228.49** |
+| pp 512 | 293.1 ms（`shelf-compute`） | 176.71 ms / 2897.41 tok/s |
+| pp 128 | 164.0 ms（`shelf-compute`） | 81.81 ms / 1564.56 tok/s |
+| tg ctx128、8 new | 25.91 tok/s | 25.94 tok/s |
+| trace の `tp_copy_bf16` | 384.72 ms | 313.75 ms |
+
+- measurement revision: `981d492` の working tree（TP copy の vector 化、BF16 GEMM の
+  hipBLASLt 化）
+- GPU: Radeon AI PRO R9700 × 4（device 0,1,2,3）
+- command（pp）:
+  `shelf-bench pp --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --tokens-file <2203 token corpus> --tokens-offset 0 --prompt-tokens 2048 --prefill-chunk 2048 --runs 5 --warmup 1 --device 0,1,2,3 --tensor-parallel 4 --arena-gib 31`
+- command（tg）:
+  `shelf-bench tg --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --mode greedy --context 128 --tokens 8 --warmup 1 --device 0,1,2,3 --tensor-parallel 4 --arena-gib 31`
+- 生成一致アンカー: `GREEDY_TOKEN_SUM=505644`。BF16 linear を全行 hipBLASLt にした場合と
+  全行従来カーネルにした場合はどちらも `819968` で、prefill と decode で経路を分けた
+  ときだけ分岐する。これは丸め差による greedy の分岐であり、同一性の判定には使えない。
+  `shelf-compute --max-new-tokens 1` の 3 token prompt は `GENERATED_IDS=1118` で
+  変更前と一致する。
+- pp 2048 の改善は 733.17 → 634.35 ms（13.5 %）。
 
 ## 2026-11-06 Qwen3.8-Flash-Next EXL3 decode reference
 
