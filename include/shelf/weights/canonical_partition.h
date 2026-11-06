@@ -17,6 +17,9 @@ struct OwnedCanonicalTensor {
     std::vector<uint8_t> metadata2;
     std::vector<uint8_t> metadata3;
     std::vector<uint8_t> metadata4;
+    std::vector<uint8_t> suh;
+    std::vector<uint8_t> svh;
+    std::vector<uint8_t> marker;
 };
 
 Status materialize_rank_local_canonical(
