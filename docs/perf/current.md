@@ -13,6 +13,8 @@
 MoE MTP decode（Qwen3.6-35B-A3B MXFP4）・MoE tensor parallel prefill（Qwen3.6-35B-A3B MXFP4）・
 MoE pipeline parallel（Qwen3.6-35B-A3B MXFP4）、EXL3 W16A16 decode / prefill、
 2026-11-04 の 9B BF16 linear allowlist である。**
+2026-11-06 の model load（Flash Next MXFP4 TP4 / 27B FP8 TP2）は reference run
+として下の節に記録する。
 
 これまでに記録していた値は、計測の前提だった構成がソースから削除されたため、
 再現できなくなっている。該当する計測を削除した。
@@ -47,6 +49,49 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-06 model load
+
+起動時の weight load を短縮した。rank runtime を並列に生成し、Qwen4Exp MXFP4
+checkpoint の PLE table（FP8 E4M3 per-tensor）を rank の weight load と同時に
+prefetch する。変更内容と切り分けは
+[../research/20261106/model_load_parallelism.md](../research/20261106/model_load_parallelism.md)。
+
+### Qwen3.8-Flash-Next-Quark-MXFP4 / TP=4
+
+| 状態 | `MODEL_LOAD_MS` | wall |
+| --- | ---: | ---: |
+| 変更前（warm） | 60.36 / 60.38 s | 63.35 / 64.98 s |
+| 変更前（1 回目） | 69.18 s | 73.77 s |
+| 変更後（warm） | **15.51 / 17.51 / 18.23 s** | 20.14 / 22.10 / 21.28 s |
+| 変更後（page cache 追い出し後） | 30.42 s | 33.49 s |
+
+- measurement revision: `4efa8de` の working tree（rank 並列化、PLE shard copy の
+  16 worker 化、PLE prefetch）
+- GPU: Radeon AI PRO R9700 × 4（device 0,1,2,3）
+- command:
+  `shelf-compute --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --input-ids-file <3 token> --max-new-tokens 1 --max-seq-len 256 --device 0,1,2,3 --tensor-parallel 4 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0 --arena-gib 31`
+- 生成一致アンカー: `GENERATED_IDS=1118`（3 token prompt）。変更前の同じコマンドと
+  一致する。5 token prompt / 8 token 生成の 2 回は
+  `9338,11,321,279,7526,3177,303,4357` で一致し、`--dump-logits` も bitwise 一致した。
+- PLE table 単体（`test_qwen4exp_load --skip-gpu`）は 24.57 s → **7.23 s**
+  （128 shard、47.684 GiB、16 worker）。
+
+### 他の family（参考）
+
+| model | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| Qwen3.8-27B-FP8 / TP=2、1 回目 | 30.08 s | **19.15 s** |
+| Qwen3.8-27B-FP8 / TP=2、2 回目 | 20.91 s | **10.47 s** |
+| Qwen3.6-35B-A3B MXFP4 / TP=2 | 未測 | 18.96 s |
+
+- 27B の command は
+  `shelf-compute --model-dir models/Qwen3.8-27B-FP8 --input-ids-file <3 token> --max-new-tokens 1 --max-seq-len 128 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0`
+- MoE の command は
+  `shelf-compute --model-dir models/Qwen3.6-35B-A3B-Quark-AWQ-MXFP4 --input-ids-file <3 token> --max-new-tokens 1 --max-seq-len 512 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0`
+- いずれも `GENERATED_IDS=1118` で変更前と一致する。
+
+page cache の状態で値が変わるため、cold / warm を混ぜた比較はしない。
+
 ## 2026-11-06 Qwen3.8-Flash-Next MXFP4 TP4
 
 `models/Qwen3.8-Flash-Next-Quark-MXFP4` を TP4 / bf16 KV / prefix cache なしで
@@ -75,9 +120,10 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 
 ### context 128 / 512 の pp / tg
 
-同じ revision・同じ 4 GPU で、prompt を 128 / 512 token にした断面。`shelf-bench` は
-Qwen4Exp の TP4 を扱わないため、`shelf-compute` の `PREFILL_MS` と
-`DECODE_TOKENS_PER_SEC` で測っている。DFlash2 の accept は corpus に依存する。
+同じ revision・同じ 4 GPU で、prompt を 128 / 512 token にした断面。この表は当時
+`shelf-bench` が Qwen4Exp の TP4 を扱わなかったため、`shelf-compute` の `PREFILL_MS` と
+`DECODE_TOKENS_PER_SEC` で測ったものである。現在は `shelf-bench pp/tg/quality/batch` が
+`--tensor-parallel 4` を受理する。DFlash2 の accept は corpus に依存する。
 
 | 断面 | target-only | DFlash2 drafts=6 |
 | --- | ---: | ---: |
@@ -89,6 +135,103 @@ Qwen4Exp の TP4 を扱わないため、`shelf-compute` の `PREFILL_MS` と
 
 反復文は DFlash の accept が最大になる上限側の参考値であり、自然文の
 `tg ctx128 = 35.95 tok/s` を通常の期待値として扱う。
+
+### pp 2048（TP=4、shelf-bench）
+
+`shelf-bench pp` の Qwen4Exp TP4 対応後に、同じ 4 GPU で 2048 token の prefill を
+5 run ずつ 2 回測した。corpus は `vendor/BetterBench/corpus/v1` から
+`tools/quality_gate.py corpus` で生成した 2203 token の先頭 2048 token である。
+
+| 条件 | gpu_ms p50 | gpu_tokens_per_sec | run 間 |
+| --- | ---: | ---: | --- |
+| 1 回目 | 733.17 ms | 2793.35 | min 727.91 / p10 729.72 / p90 747.84 / stddev 10.67 ms |
+| 2 回目 | 751.91 ms | 2723.74 | min 747.25 / p10 748.86 / p90 753.92 / stddev 2.78 ms |
+
+- measurement revision: `4efa8de` の working tree（shelf-bench の TP4 対応、QSA top-k の
+  radix select 化、mask 対応 prefill attention、BF16 / FP8 GEMM の出力 tile 再利用を含む）
+- GPU: Radeon AI PRO R9700 × 4（device 0,1,2,3）
+- command:
+  `shelf-bench pp --model-dir models/Qwen3.8-Flash-Next-Quark-MXFP4 --tokens-file <2203 token corpus> --tokens-offset 0 --prompt-tokens 2048 --prefill-chunk 2048 --runs 5 --warmup 1 --device 0,1,2,3 --tensor-parallel 4 --arena-gib 31`
+- `shelf-bench pp` は top-level の `TpCoordinator` 経由で 4 rank を実行する。
+  `PREFILL_MS` ではなく prefill ループの GPU event 区間を測るため、`shelf-compute` の
+  `PREFILL_MS` とは区間が違う。混ぜて比較しない。
+- 2 回の p50 差は 2.6 %。2 回目の run 間ばらつきは 1.5 % で、5 run の p50 として採用する。
+- 最適化前（同じ条件、`4efa8de` の working tree で shelf-bench TP4 対応直後）は
+  1202.36 / 1208.92 ms、1703.31 / 1694.07 tok/s だった。現在は約 38 % 短い。
+
+#### kernel 内訳
+
+rocprofv3 1.3.5 の `--kernel-trace` で `--runs 1 --warmup 0` の 1 run を取得した。
+trace 下の wall は 809.02 ms で、通常の p50 733.17〜751.91 ms より約 8〜10 % 大きい。
+GPU time は trace の kernel duration、launch は physical launch の 4 rank 合計である。
+
+| kernel | launch（4 rank 合計） | GPU time（4 rank 合計、ms） | 1 call 平均（µs） | share |
+| --- | ---: | ---: | ---: | ---: |
+| `gemm_bf16_wmma` | 976 | 496.413 | 508.62 | 19.1% |
+| `tp_copy_bf16` | 720 | 384.721 | 534.33 | 14.8% |
+| `gemm_fp8_ptpc` | 960 | 376.251 | 391.93 | 14.5% |
+| `gemm_mxfp4_w4a8_grouped` | 576 | 159.162 | 276.32 | 6.1% |
+| `shelf_gdn_recurrence_wmma_lossy` | 144 | 148.730 | 1032.85 | 5.7% |
+| `qsa_scores_batch` | 48 | 131.861 | 2747.10 | 5.1% |
+| `v_prefill_bf16::attention_paged_prefill_bf16_impl` | 48 | 77.337 | 1611.19 | 3.0% |
+| `hyper_mix` | 388 | 71.371 | 183.95 | 2.7% |
+| `activation_quantize_mxfp4_rowref` | 768 | 68.333 | 88.97 | 2.6% |
+| `qsa_topk_batch` | 48 | 62.962 | 1311.70 | 2.4% |
+| `hyper_apply` | 384 | 61.229 | 159.45 | 2.4% |
+| `qsa_key_cache_batch` | 48 | 59.213 | 1233.61 | 2.3% |
+| `shelf_rmsnorm_bf16_pf_oneplus` | 400 | 51.343 | 128.36 | 2.0% |
+| `shelf_mul_f32_f32_bf16` | 192 | 50.582 | 263.45 | 1.9% |
+| `moe_combine` | 192 | 44.511 | 231.83 | 1.7% |
+| `shelf_silu_f32_bf16` | 144 | 35.885 | 249.20 | 1.4% |
+| `activation_quantize_fp8_pertoken` | 384 | 31.640 | 82.40 | 1.2% |
+| `qsa_expand_mask` | 48 | 29.177 | 607.86 | 1.1% |
+| `shelf_swiglu_bf16` | 384 | 26.903 | 70.06 | 1.0% |
+| `gemm_mxfp4_w4a8_prefill_2d` | 576 | 26.803 | 46.53 | 1.0% |
+| `gemm_bf16_splitk_wmma` | 576 | 25.769 | 44.74 | 1.0% |
+| `shelf_gdn_conv1d_bf16_f32` | 144 | 25.352 | 176.06 | 1.0% |
+| `tp_add_peers_bf16` | 240 | 22.442 | 93.51 | 0.9% |
+| `shelf_rmsnorm_f32_pg_direct` | 144 | 22.248 | 154.50 | 0.9% |
+| `shelf_sigmoid_bf16_f32` | 192 | 18.432 | 96.00 | 0.7% |
+| `moe_slot_scan` | 192 | 17.542 | 91.36 | 0.7% |
+| `moe_router` | 192 | 9.076 | 47.27 | 0.3% |
+| `shelf_rope_f32_bf16_pair` | 96 | 8.276 | 86.21 | 0.3% |
+| `shelf_l2_normalize_bf16_f32` | 288 | 8.242 | 28.62 | 0.3% |
+| `shelf_gemm_bf16_exact_rows_1` | 4 | 8.064 | 2016.06 | 0.3% |
+| `shelf_split_bf16` | 48 | 6.941 | 144.61 | 0.3% |
+| `shelf_rmsnorm_bf16_f32_pg_oneplus` | 96 | 5.035 | 52.45 | 0.2% |
+| `shelf_scale_f32` | 144 | 2.889 | 20.06 | 0.1% |
+| `shelf_scale_bf16` | 148 | 2.826 | 19.09 | 0.1% |
+| `ple_conv` | 4 | 2.777 | 694.26 | 0.1% |
+| `moe_slot_scatter` | 192 | 2.717 | 14.15 | 0.1% |
+| `silu_scale_bf16` | 388 | 2.610 | 6.73 | 0.1% |
+| `model_dispatch` | 192 | 2.565 | 13.36 | 0.1% |
+| `shelf_residual_add_bf16` | 8 | 1.663 | 207.90 | 0.1% |
+| `prepare_batch_descriptor` | 4 | 1.063 | 265.78 | 0.0% |
+| `amd_rocclr_copyBuffer` | 264 | 1.035 | 3.92 | 0.0% |
+| `hyper_inject` | 384 | 0.943 | 2.46 | 0.0% |
+| `ple_stream_dot` | 4 | 0.724 | 181.04 | 0.0% |
+| `qsa_rope` | 48 | 0.689 | 14.34 | 0.0% |
+| `shelf_kv_append_bf16` | 48 | 0.687 | 14.32 | 0.0% |
+| `amd_rocclr_fillBufferUnAligned` | 36 | 0.628 | 17.46 | 0.0% |
+| `amd_rocclr_copyBufferRectAligned` | 48 | 0.496 | 10.33 | 0.0% |
+| `rmsnorm_impl` | 48 | 0.396 | 8.24 | 0.0% |
+| `repeat_streams` | 4 | 0.367 | 91.67 | 0.0% |
+| `ple_broadcast_mul` | 4 | 0.365 | 91.19 | 0.0% |
+| `shelf_embedding_bf16` | 4 | 0.147 | 36.77 | 0.0% |
+| `ple_gate` | 4 | 0.018 | 4.62 | 0.0% |
+| `output_gather` | 4 | 0.010 | 2.50 | 0.0% |
+| `argmax_single_impl` | 4 | 0.009 | 2.30 | 0.0% |
+| `amd_rocclr_streamOpsWrite` | 4 | 0.009 | 2.19 | 0.0% |
+
+- 4 rank 合計の GPU time は wall と加算できない。1 rank あたりは概ね 1/4 で、
+  合計 2595.3 ms、1 rank 平均 648.8 ms である。
+- `shelf_scale_bf16` だけ rank0 が 1 回、他 rank が 49 回。他は 4 rank で同数。
+- 上位は `gemm_bf16_wmma` 19.1 %、`tp_copy_bf16` 14.8 %、`gemm_fp8_ptpc` 14.5 %、
+  `gemm_mxfp4_w4a8_grouped` 6.1 %、`gdn_recurrence_wmma_lossy` 5.7 %。
+- `__amd_rocclr_*` は prefill 区間の copy / fill を含む。
+- 上位 4 カーネルの ISA と律速要因、採用した対策は
+  [../research/20261106/pp2048_tp4_isa_analysis.md](../research/20261106/pp2048_tp4_isa_analysis.md)
+  にある。ISA dump は `build/isa/pp2048_tp4/` に置いた。
 
 ## 2026-11-06 Qwen3.8-Flash-Next EXL3 decode reference
 

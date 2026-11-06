@@ -10,7 +10,6 @@ namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kThreads = kQsaThreads;
-constexpr uint32_t kQsaFastPathBlocks = 512u;
 
 __device__ __forceinline__ float bf16_value(const shelf::bf16_t* p) {
     return __uint_as_float(static_cast<std::uint32_t>(p->data) << 16);
@@ -80,106 +79,107 @@ __global__ __launch_bounds__(kThreads) void qsa_scores_kernel(QsaScoresArgs args
     }
 }
 
-__global__ void __launch_bounds__(1) qsa_topk_kernel(QsaTopkArgs args) {
-    const uint32_t row = blockIdx.x;
-    const uint32_t visible =
-        args.visible[row] < args.blocks ? args.visible[row] : args.blocks;
-    int32_t* out = args.indices + static_cast<std::uint64_t>(row) * args.k;
-    for (uint32_t j = 0; j < args.k; ++j) out[j] = -1;
-    // Every visible block fits in the budget: one selection pass over `visible` blocks
-    // (instead of `k` passes) yields the same score-descending order.
-    if (visible <= args.k && visible <= kQsaFastPathBlocks) {
-        bool used[kQsaFastPathBlocks] = {};
-        for (uint32_t j = 0; j < visible; ++j) {
-            int32_t best = -1;
-            float best_score = -INFINITY;
-            for (uint32_t block = 0; block < visible; ++block) {
-                if (used[block]) continue;
-                const float score =
-                    args.scores[static_cast<std::uint64_t>(row) * args.blocks + block];
-                if (score > best_score ||
-                    (score == best_score && static_cast<int32_t>(block) < best)) {
-                    best_score = score;
-                    best = static_cast<int32_t>(block);
-                }
-            }
-            out[j] = best;
-            used[best] = true;
-        }
-        return;
-    }
-    for (uint32_t j = 0; j < args.k && j < visible; ++j) {
-        int32_t best = -1;
-        float best_score = -INFINITY;
-        for (uint32_t block = 0; block < visible; ++block) {
-            bool used = false;
-            for (uint32_t p = 0; p < j; ++p) {
-                if (out[p] == static_cast<int32_t>(block)) {
-                    used = true;
-                    break;
-                }
-            }
-            if (used) continue;
-            const float score =
-                args.scores[static_cast<std::uint64_t>(row) * args.blocks + block];
-            if (score > best_score) {
-                best_score = score;
-                best = static_cast<int32_t>(block);
-            }
-        }
-        out[j] = best;
+__device__ __forceinline__ uint32_t qsa_order_key(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+__device__ __forceinline__ bool qsa_rank_better(const float* scores, int32_t a, int32_t b) {
+    const float sa = scores[a];
+    const float sb = scores[b];
+    return sa > sb || (sa == sb && a < b);
+}
+
+__device__ void qsa_heap_sift(const float* scores, int32_t* out, uint32_t root,
+                             uint32_t count) {
+    for (;;) {
+        uint32_t child = 2u * root + 1u;
+        if (child >= count) return;
+        if (child + 1u < count && qsa_rank_better(scores, out[child + 1u], out[child]))
+            ++child;
+        if (!qsa_rank_better(scores, out[child], out[root])) return;
+        const int32_t tmp = out[root];
+        out[root] = out[child];
+        out[child] = tmp;
+        root = child;
     }
 }
 
+__device__ void qsa_sort_indices(const float* scores, int32_t* out, uint32_t count) {
+    if (count < 2u) return;
+    for (uint32_t start = count / 2u; start > 0u; --start)
+        qsa_heap_sift(scores, out, start - 1u, count);
+    for (uint32_t end = count; end > 1u; --end) {
+        const int32_t tmp = out[0];
+        out[0] = out[end - 1u];
+        out[end - 1u] = tmp;
+        qsa_heap_sift(scores, out, 0u, end - 1u);
+    }
+    for (uint32_t i = 0u, j = count - 1u; i < j; ++i, --j) {
+        const int32_t tmp = out[i];
+        out[i] = out[j];
+        out[j] = tmp;
+    }
+}
+
+__device__ void qsa_topk_row(const float* scores, uint32_t visible, uint32_t k,
+                             int32_t* out, uint32_t* hist) {
+    for (uint32_t j = 0; j < k; ++j) out[j] = -1;
+    if (visible == 0u || k == 0u) return;
+    if (visible <= k) {
+        for (uint32_t j = 0; j < visible; ++j) out[j] = static_cast<int32_t>(j);
+        qsa_sort_indices(scores, out, visible);
+        return;
+    }
+
+    uint32_t key_prefix = 0u;
+    uint32_t rank = k;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (uint32_t bucket = 0; bucket < 256u; ++bucket) hist[bucket] = 0u;
+        for (uint32_t i = 0; i < visible; ++i) {
+            const uint32_t key = qsa_order_key(scores[i]);
+            if (shift < 24 && (key >> (shift + 8)) != (key_prefix >> (shift + 8)))
+                continue;
+            hist[(key >> shift) & 0xFFu]++;
+        }
+        for (int bucket = 255; bucket >= 0; --bucket) {
+            const uint32_t count = hist[bucket];
+            if (rank > count) {
+                rank -= count;
+                continue;
+            }
+            key_prefix |= static_cast<uint32_t>(bucket) << shift;
+            break;
+        }
+    }
+
+    uint32_t count = 0u;
+    for (uint32_t i = 0; i < visible && count < k; ++i) {
+        if (qsa_order_key(scores[i]) > key_prefix) out[count++] = static_cast<int32_t>(i);
+    }
+    for (uint32_t i = 0; i < visible && count < k; ++i) {
+        if (qsa_order_key(scores[i]) == key_prefix) out[count++] = static_cast<int32_t>(i);
+    }
+    qsa_sort_indices(scores, out, k);
+}
+
+__global__ void __launch_bounds__(1) qsa_topk_kernel(QsaTopkArgs args) {
+    __shared__ uint32_t hist[256];
+    const uint32_t row = blockIdx.x;
+    const uint32_t visible =
+        args.visible[row] < args.blocks ? args.visible[row] : args.blocks;
+    qsa_topk_row(args.scores + static_cast<std::uint64_t>(row) * args.blocks, visible,
+                 args.k, args.indices + static_cast<std::uint64_t>(row) * args.k, hist);
+}
+
 __global__ void __launch_bounds__(1) qsa_topk_batch_kernel(QsaTopkBatchArgs args) {
+    __shared__ uint32_t hist[256];
     const uint32_t row = blockIdx.x;
     const uint32_t complete = (args.positions[row] + 1u) / args.compress_ratio;
     const uint32_t visible = complete < args.blocks ? complete : args.blocks;
     int32_t* out = args.indices + static_cast<std::uint64_t>(row) * args.indices_row_stride;
-    for (uint32_t j = 0; j < args.k; ++j) out[j] = -1;
-    if (visible <= args.k && visible <= kQsaFastPathBlocks) {
-        bool used[kQsaFastPathBlocks] = {};
-        for (uint32_t j = 0; j < visible; ++j) {
-            int32_t best = -1;
-            float best_score = -INFINITY;
-            for (uint32_t block = 0; block < visible; ++block) {
-                if (used[block]) continue;
-                const float score =
-                    args.scores[static_cast<std::uint64_t>(row) * args.scores_row_stride +
-                                block];
-                if (score > best_score ||
-                    (score == best_score && static_cast<int32_t>(block) < best)) {
-                    best_score = score;
-                    best = static_cast<int32_t>(block);
-                }
-            }
-            out[j] = best;
-            used[best] = true;
-        }
-        return;
-    }
-    for (uint32_t j = 0; j < args.k && j < visible; ++j) {
-        int32_t best = -1;
-        float best_score = -INFINITY;
-        for (uint32_t block = 0; block < visible; ++block) {
-            bool used = false;
-            for (uint32_t p = 0; p < j; ++p) {
-                if (out[p] == static_cast<int32_t>(block)) {
-                    used = true;
-                    break;
-                }
-            }
-            if (used) continue;
-            const float score =
-                args.scores[static_cast<std::uint64_t>(row) * args.scores_row_stride +
-                            block];
-            if (score > best_score) {
-                best_score = score;
-                best = static_cast<int32_t>(block);
-            }
-        }
-        out[j] = best;
-    }
+    qsa_topk_row(args.scores + static_cast<std::uint64_t>(row) * args.scores_row_stride,
+                 visible, args.k, out, hist);
 }
 
 __global__ __launch_bounds__(kQsaThreads) void qsa_scores_batch_kernel(

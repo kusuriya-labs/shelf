@@ -286,8 +286,15 @@ void attention_paged_prefill_bf16_body(
             float sb = s.s_part[pmt][0][rr][tb] + s.s_part[pmt][1][rr][tb]
                 + s.s_part[pmt][2][rr][tb] + s.s_part[pmt][3][rr][tb];
             const uint32_t visr = s.vis[r];
-            const bool va = (page_start + ta) < visr;
-            const bool vb = (page_start + tb) < visr;
+            const uint32_t tok_a = page_start + ta;
+            const uint32_t tok_b = page_start + tb;
+            const uint32_t mask_row = row0 + r;
+            const bool va = tok_a < visr &&
+                paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens,
+                                    mask_row, tok_a);
+            const bool vb = tok_b < visr &&
+                paged_token_visible(a.token_mask, a.mask_stride, a.mask_tokens,
+                                    mask_row, tok_b);
             sa = va ? sa * scale : -FLT_MAX;
             sb = vb ? sb * scale : -FLT_MAX;
             const float pmax = group_max8(fmaxf(sa, sb));

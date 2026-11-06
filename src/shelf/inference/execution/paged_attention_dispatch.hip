@@ -39,6 +39,7 @@ const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
 }
 
 constexpr uint32_t kPrefillKernelMinRows = kPagedAttentionPrefillMinRows;
+constexpr uint32_t kMaskedPrefillMinRows = 256u;
 
 bool should_use_paged_attention_prefill(uint32_t rows, const HostExecutionContext& ctx) {
     if (rows < kPrefillKernelMinRows) return false;
@@ -247,9 +248,11 @@ PagedAttentionPlan plan_paged_attention(
         return plan;
     plan.optimized = true;
     plan.use_prefill = use_prefill;
-    // The token mask is per query row, so the tiled prefill kernel and the split decode
-    // kernel cannot consume it. Fall back to the per-(row, q_head) decode kernel.
-    if (args.common.token_mask != nullptr) {
+    // The bf16 prefill kernel applies the per-row token mask. The fp8 prefill kernel
+    // does not, so masked fp8 KV keeps the per-(row, q_head) decode kernel.
+    if (args.common.token_mask != nullptr &&
+        (args.kv_dtype != ::shelf::kernel::KVCacheDType::BF16 ||
+         args.common.rows < kMaskedPrefillMinRows)) {
         plan.use_prefill = false;
         plan.splits = 1u;
         return plan;

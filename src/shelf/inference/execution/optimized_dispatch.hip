@@ -479,7 +479,9 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
             break;
         case ::shelf::kernel::Bf16GemmConfigId::WmmaWide:
             out.variant = PhysicalBf16Variant::WmmaWide;
-            out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_x = rows >= 512u
+                             ? ::shelf::kernel::bf16_wmma_grid_x_wide(e.rows)
+                             : ::shelf::kernel::bf16_wmma_grid_x(e.rows);
             out.grid_y = ::shelf::kernel::bf16_wmma_grid_y(
                 rows, ::shelf::kernel::kBf16WmmaWideRowTiles);
             out.workgroup = ::shelf::kernel::kBf16WmmaThreads;
