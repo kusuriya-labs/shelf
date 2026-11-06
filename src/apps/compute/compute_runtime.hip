@@ -625,7 +625,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     tp_config.load_options.load_mtp_layers = config_.mtp;
     if (config_.mtp) {
-        constexpr std::size_t kMtpTpReserveBytes = 4ull * 1024ull * 1024ull * 1024ull;
+        constexpr std::size_t kMtpTpReserveBytes = 1536ull * 1024ull * 1024ull;
         if (tp_config.working_set_reserve_bytes < kMtpTpReserveBytes) {
             tp_config.working_set_reserve_bytes = kMtpTpReserveBytes;
         }
