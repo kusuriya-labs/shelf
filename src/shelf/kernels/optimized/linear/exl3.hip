@@ -7,6 +7,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace shelf::kernel {
 namespace {
@@ -400,9 +401,19 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     const uint32_t group_index = blockIdx.z;
     if (args.group_expert != nullptr) {
         if (group_index >= args.group_count[0]) return;
-        const uint32_t rows_here = args.group_rows[group_index];
-        if (rows_here == 0u) return;
         const uint32_t expert = args.group_expert[group_index];
+        uint32_t rows_here = args.group_rows[group_index];
+        if (args.expert_group_begin != nullptr) {
+            const uint32_t begin = args.expert_group_begin[expert];
+            const uint32_t end = args.expert_group_begin[expert + 1u];
+            if (((group_index - begin) % kGroups) != 0u) return;
+            const uint32_t chunk_end =
+                (group_index + kGroups) < end ? (group_index + kGroups) : end;
+            rows_here = 0u;
+            for (uint32_t gi = group_index; gi < chunk_end; ++gi)
+                rows_here += args.group_rows[gi];
+        }
+        if (rows_here == 0u) return;
         args.trellis = static_cast<const std::uint8_t*>(args.trellis) +
                        static_cast<std::uint64_t>(expert) * args.trellis_batch_stride;
         args.suh = static_cast<const std::uint8_t*>(args.suh) +
@@ -817,8 +828,9 @@ hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
               : plan.groups == 2u ? launch_kernel<2u, kPre, 2u>(args, plan, stream)
                                   : launch_kernel<1u, kPre, 2u>(args, plan, stream);
     } else {
-        err = plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
-                                : launch_kernel<1u, kPre, 1u>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 1u>(args, plan, stream);
     }
     if (err != hipSuccess) return err;
     if (plan.splits > 1u) {
@@ -884,10 +896,17 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.output_dtype = args.output_dtype;
     dense.ka = args.ka;
     dense.half = args.half;
-    dense.groups = 1u;
+    static const uint32_t fuse_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_GROUPED_FUSE");
+        if (e == nullptr) return kExl3GroupedFuse;
+        return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    }();
+    dense.groups = (args.expert_group_begin != nullptr && fuse_override > 1u) ? fuse_override
+                                                                            : 1u;
     dense.group_expert = args.group_expert;
     dense.group_rows = args.group_rows;
     dense.group_count = args.group_count;
+    dense.expert_group_begin = args.expert_group_begin;
     dense.row_token = args.row_token;
     dense.trellis_batch_stride = args.trellis_batch_stride;
     dense.suh_batch_stride = args.suh_batch_stride;
@@ -898,7 +917,7 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     plan.grid_y = 1u;
     plan.grid_z = args.group_capacity;
     plan.splits = 1u;
-    plan.groups = 1u;
+    plan.groups = dense.groups;
     return launch_plan<false>(dense, plan, stream);
 }
 

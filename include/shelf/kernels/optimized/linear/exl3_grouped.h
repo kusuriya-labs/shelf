@@ -37,6 +37,9 @@ struct Exl3GroupedArgs {
     const uint32_t* group_expert = nullptr;
     const uint32_t* group_rows = nullptr;
     const uint32_t* group_count = nullptr;
+    // Optional per-expert group range. When non-null, consecutive groups of one expert are
+    // fused into one block so the expert's weight tiles are dequantized once per fused chunk.
+    const uint32_t* expert_group_begin = nullptr;
     const int32_t* row_token = nullptr;
     uint32_t group_capacity = 0;
 };

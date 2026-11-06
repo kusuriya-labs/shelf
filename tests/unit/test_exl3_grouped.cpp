@@ -324,6 +324,89 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "token-row grouped EXL3 max_abs=%g\n", token_max_abs);
     check(token_max_abs <= 2.0e-2, "token-row gather matches the CPU reference");
 
+    // Fused grouped: one expert owns 5 groups, so the first block fuses 4 groups (64 rows)
+    // and the next block takes the remaining group. Every group sees the same expert plane.
+    {
+        const std::uint32_t fused_groups = 5u;
+        std::vector<std::uint16_t> fused_input(
+            static_cast<std::size_t>(fused_groups) * row_tile * k, 0u);
+        for (std::uint32_t g = 0; g < fused_groups; ++g) {
+            fused_input[static_cast<std::size_t>(g) * row_tile * k] = 0x3F80u;
+        }
+        std::vector<std::uint16_t> fused_output(
+            static_cast<std::size_t>(fused_groups) * row_tile * n, 0u);
+        void* d_fused_input = nullptr;
+        void* d_fused_output = nullptr;
+        std::uint32_t* d_fused_expert = nullptr;
+        std::uint32_t* d_fused_rows = nullptr;
+        std::uint32_t* d_fused_count = nullptr;
+        std::uint32_t* d_fused_begin = nullptr;
+        check(hipMalloc(&d_fused_input, fused_input.size() * 2u) == hipSuccess,
+              "malloc fused input");
+        check(hipMalloc(&d_fused_output, fused_output.size() * 2u) == hipSuccess,
+              "malloc fused output");
+        check(hipMalloc(&d_fused_expert, fused_groups * 4u) == hipSuccess,
+              "malloc fused expert");
+        check(hipMalloc(&d_fused_rows, fused_groups * 4u) == hipSuccess, "malloc fused rows");
+        check(hipMalloc(&d_fused_count, 4u) == hipSuccess, "malloc fused count");
+        check(hipMalloc(&d_fused_begin, 2u * 4u) == hipSuccess, "malloc fused begin");
+        const std::uint32_t fused_expert[5] = {0u, 0u, 0u, 0u, 0u};
+        const std::uint32_t fused_rows[5] = {16u, 16u, 16u, 16u, 16u};
+        const std::uint32_t fused_count = fused_groups;
+        const std::uint32_t fused_begin[2] = {0u, 5u};
+        check(hipMemcpy(d_fused_input, fused_input.data(), fused_input.size() * 2u,
+                        hipMemcpyHostToDevice) == hipSuccess,
+              "copy fused input");
+        check(hipMemcpy(d_fused_expert, fused_expert, sizeof(fused_expert),
+                        hipMemcpyHostToDevice) == hipSuccess,
+              "copy fused expert");
+        check(hipMemcpy(d_fused_rows, fused_rows, sizeof(fused_rows),
+                        hipMemcpyHostToDevice) == hipSuccess,
+              "copy fused rows");
+        check(hipMemcpy(d_fused_count, &fused_count, 4u, hipMemcpyHostToDevice) ==
+                  hipSuccess,
+              "copy fused count");
+        check(hipMemcpy(d_fused_begin, fused_begin, sizeof(fused_begin),
+                        hipMemcpyHostToDevice) == hipSuccess,
+              "copy fused begin");
+
+        shelf::kernel::Exl3GroupedArgs fused_args = args;
+        fused_args.input = d_fused_input;
+        fused_args.output = d_fused_output;
+        fused_args.row_token = nullptr;
+        fused_args.group_expert = d_fused_expert;
+        fused_args.group_rows = d_fused_rows;
+        fused_args.group_count = d_fused_count;
+        fused_args.expert_group_begin = d_fused_begin;
+        fused_args.group_capacity = fused_groups;
+        check(shelf::kernel::launch_gemm_exl3_w16a16_grouped(fused_args, nullptr) ==
+                  hipSuccess,
+              "fused launch");
+        check(hipDeviceSynchronize() == hipSuccess, "fused sync");
+        check(hipMemcpy(fused_output.data(), d_fused_output, fused_output.size() * 2u,
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "copy fused output");
+
+        double fused_max_abs = 0.0;
+        for (std::uint32_t g = 0; g < fused_groups; ++g) {
+            for (std::uint32_t col = 0; col < n; ++col) {
+                const float expected = reference[0][col];
+                const float actual = bf16_to_float(
+                    fused_output[static_cast<std::size_t>(g) * row_tile * n + col]);
+                fused_max_abs = std::max<double>(
+                    fused_max_abs, std::fabs(static_cast<double>(actual - expected)));
+            }
+        }
+        std::fprintf(stderr, "fused grouped EXL3 max_abs=%g\n", fused_max_abs);
+        check(fused_max_abs <= 2.0e-2, "fused grouped matches the CPU reference");
+        (void)hipFree(d_fused_input);
+        (void)hipFree(d_fused_output);
+        (void)hipFree(d_fused_expert);
+        (void)hipFree(d_fused_rows);
+        (void)hipFree(d_fused_count);
+        (void)hipFree(d_fused_begin);
+    }
+
     (void)hipFree(device_row_token);
     (void)hipFree(device_trellis);
     (void)hipFree(device_suh);

@@ -12,6 +12,7 @@ inline constexpr const char* kExl3W16A16Symbol = "shelf_gemm_exl3_w16a16";
 inline constexpr uint32_t kExl3W16A16OutBlock = 128u;
 inline constexpr uint32_t kExl3W16A16RowTile = 16u;
 inline constexpr uint32_t kExl3W16A16Threads = 256u;
+inline constexpr uint32_t kExl3GroupedFuse = 2u;
 
 struct Exl3GemmArgs {
     const void* trellis = nullptr;
@@ -41,6 +42,11 @@ struct Exl3GemmArgs {
     const uint32_t* group_expert = nullptr;
     const uint32_t* group_rows = nullptr;
     const uint32_t* group_count = nullptr;
+    // Optional per-expert group range. When non-null, consecutive groups of one expert are
+    // fused into one block: a block whose group index is the first of a kGroups stride inside
+    // [expert_group_begin[e], expert_group_begin[e+1]) owns up to kGroups groups of expert e
+    // and dequantizes its weight tiles once for all of them.
+    const uint32_t* expert_group_begin = nullptr;
     // Optional token row for each group row. When non-null, the input plane is token rows
     // and the kernel gathers through this table; when null, the input plane is already in
     // group-row order.

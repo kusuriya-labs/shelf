@@ -299,6 +299,7 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.group_expert = plan.value().arrays.group_expert;
     args.group_rows = plan.value().arrays.group_rows;
     args.group_count = plan.value().arrays.group_count;
+    args.expert_group_begin = plan.value().arrays.expert_group_begin;
     args.row_token = token_rows ? plan.value().arrays.row_token : nullptr;
     args.group_capacity = plan.value().group_capacity;
 
