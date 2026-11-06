@@ -88,6 +88,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     args.output_dtype = 1u;
     args.ka = ka;
     args.half = half ? 1u : 0u;
+    args.ka5_fast = (ka == 5u && !half) ? 1u : 0u;
     args.splitk_splits = 1u;
     args.groups = 0u;
 
@@ -191,6 +192,7 @@ int main() {
     bool ok = true;
     ok = run_case(256, 1024, 512, 4, false, "dense_ka4_rows256") && ok;
     ok = run_case(320, 1024, 512, 4, false, "dense_ka4_rows320") && ok;
+    ok = run_case(256, 1024, 512, 5, false, "dense_ka5_rows256") && ok;
     ok = run_case(256, 1024, 512, 6, false, "dense_ka6_rows256") && ok;
     std::printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;

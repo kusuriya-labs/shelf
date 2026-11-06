@@ -251,6 +251,7 @@ static bool run_case(const Case& c) {
     args.output_dtype = 1u;
     args.ka = c.ka;
     args.half = c.half ? 1u : 0u;
+    args.ka5_fast = (c.ka == 5u && !c.half) ? 1u : 0u;
     args.splitk_scratch = static_cast<float*>(d_scratch);
     args.splitk_floats = static_cast<uint32_t>(kScratchFloats);
     args.splitk_splits = c.splits;
@@ -325,6 +326,9 @@ int main() {
     run_case({64, 1024, 512, 4, false, "auto_rows64_n1024", 0});
     run_case({5, 256, 256, 6, false, "mul1_6_rows5"});
     run_case({1, 128, 128, 1, false, "mul1_1_rows1"});
+    run_case({1, 128, 128, 5, false, "mul1_5_rows1"});
+    run_case({16, 256, 256, 5, false, "mul1_5_rows16"});
+    run_case({64, 1024, 512, 5, false, "auto_rows64_n1024_ka5", 0});
     run_case({2, 128, 128, 2, false, "mul1_2_rows2"});
     run_case({3, 256, 128, 5, false, "mul1_5_rows3"});
     run_case({1, 128, 128, 8, false, "mul1_8_rows1"});
