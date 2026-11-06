@@ -88,7 +88,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t ka, bool half, con
     args.output_dtype = 1u;
     args.ka = ka;
     args.half = half ? 1u : 0u;
-    args.ka5_fast = (ka == 5u && !half) ? 1u : 0u;
+    args.fast_decode = ((ka == 5u && !half) || ka == 3u) ? 1u : 0u;
     args.splitk_splits = 1u;
     args.groups = 0u;
 

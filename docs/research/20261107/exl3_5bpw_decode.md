@@ -4,7 +4,7 @@
 
 結論:
 
-- **ACCEPT**: ka=5 half=0 専用の `decode_tile_ka5` と、decode / verify 用の split-K 選択
+- **ACCEPT**: ka=5 half=0 専用の `decode_tile_ka5`、ka=3 の固定 rate path、decode / verify 用の split-K 選択
 - **REJECT**: rows=1 での `n_tiles=2`
 - **REJECT**: split-K reduce の warp-per-block 化
 - **DEFER**: trellis の `[n_tile][k_tile][words]` repack
@@ -33,9 +33,9 @@ ka=4 の fast path と同じ形で、`off0 = 40 * lane + 1269` から 8 状態�
 
 | 条件 | runtime branch | 専用 template 実体 |
 | --- | ---: | ---: |
-| PP128、`SHELF_EXL3_KA5=0` | 389.4 tok/s | **449.1 tok/s** |
-| PP128、`SHELF_EXL3_KA5=1` | 435.6 tok/s | **505.5 tok/s** |
-| TG、`SHELF_EXL3_KA5=0` | 14.53 tok/s | **14.77 tok/s** |
+| PP128、`SHELF_EXL3_FAST_DECODE=0` | 389.4 tok/s | **449.1 tok/s** |
+| PP128、`SHELF_EXL3_FAST_DECODE=1` | 435.6 tok/s | **505.5 tok/s** |
+| TG、`SHELF_EXL3_FAST_DECODE=0` | 14.53 tok/s | **14.77 tok/s** |
 
 そのため `gemm_exl3_w16a16_kernel` に `bool kKa5` を追加し、ka=5 half=0 のときだけ
 `<..., true>` を launch する形にした。`kKa5=false` の実体は変更前と同じコードになる。
@@ -87,6 +87,23 @@ hipBLASLt の 6.82 倍遅く、decode chain の追加は 1.40 倍だった。つ
 tile 構造と data supply であり、repack 単独の見込みは低い。今回は実装せず、
 rows=1 専用 GEMV など構造側の変更を次の候補にする。
 
+### 2-6. FlashNext（ka=3 / 3.5）への展開（ACCEPT、ただし効果は小さい）
+
+FlashNext-exl3 の language 本体は 3.0 bpw（ka=3 half=0）が 61,440 module、
+3.5 bpw（ka=3 half=1）が 12,288 module で、27B の ka=5 とは rate が違う。
+同じ仕組みを `decode_tile_fixed<3, false>` / `<3, true>` として追加し、grouped
+launch でも `fast_decode` を有効にした。
+
+| 条件 | fast_decode=0 | fast_decode=1 |
+| --- | ---: | ---: |
+| FlashNext-exl3 TP2 TG ctx128 / 16 token | 24.45 tok/s | 24.87 tok/s |
+| FlashNext-exl3 TP2 DFlash2 drafts=6 | 50.71 tok/s | 51.41 tok/s |
+
+27B の +16 % に対し、FlashNext は +1.4〜1.7 % にとどまる。FlashNext の decode は
+MoE の routing / grouped launch / combine が支配的で、3 bit の dequant 自体の比率が
+小さいためである。共通経路なので採用するが、FlashNext をさらに速くするには
+grouped expert 側の launch / combine を詰める必要がある。
+
 ## 3. 結果
 
 TP=1、device 1、bf16 KV、`--arena-gib 28`。
@@ -114,4 +131,4 @@ bitwise 一致した（同じ split 条件）。
 - `test_exl3_codec`、`test_exl3_linear`、`test_exl3_dense`、`test_exl3_grouped` はすべて PASS。
 - `test_exl3_linear` に ka=5 の rows=1 / rows=16 / rows=64 split 自動の case を追加。
 - `test_exl3_dense` に ka=5 の dense recon 比較を追加。
-- `SHELF_EXL3_KA5=0` で従来経路に戻せる。
+- `SHELF_EXL3_FAST_DECODE=0` で従来経路に戻せる。

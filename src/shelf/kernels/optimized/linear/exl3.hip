@@ -139,11 +139,74 @@ __device__ __forceinline__ void decode_tile_ka5(const Exl3GemmArgs& args, uint32
     __syncwarp();
 }
 
-template <bool kKa5>
+template <uint32_t KA, bool HALF>
+__device__ __forceinline__ void decode_tile_fixed(const Exl3GemmArgs& args, uint32_t kt,
+                                                  uint32_t nt, uint32_t lane, uint32_t* ring,
+                                                  uint16_t* tile) {
+    constexpr uint32_t kWords = 16u * KA + (HALF ? 8u : 0u);
+    constexpr uint32_t kWordCount = kWords / 2u;
+    constexpr uint32_t kBitLength = 256u * KA + (HALF ? 128u : 0u);
+    const uint32_t n_tiles = args.out_features / 16u;
+    const uint16_t* tile_base =
+        static_cast<const uint16_t*>(args.trellis) +
+        (static_cast<uint64_t>(kt) * n_tiles + nt) * kWords;
+    const uint32_t* source = reinterpret_cast<const uint32_t*>(tile_base);
+    for (uint32_t i = lane; i < kWordCount; i += 32u) ring[i] = source[i];
+    __syncwarp();
+
+    const uint32_t p0 = lane * 8u;
+    const uint32_t step0 = p0 + 1u;
+    const uint32_t end0 = step0 * KA + (HALF ? step0 / 2u : 0u) + kBitLength;
+    const uint32_t w0 = (end0 - 16u) >> 5u;
+    const uint32_t v0 = ring[(w0 + 0u) % kWordCount];
+    const uint32_t v1 = ring[(w0 + 1u) % kWordCount];
+    const uint32_t v2 = ring[(w0 + 2u) % kWordCount];
+    const uint32_t v3 = ring[(w0 + 3u) % kWordCount];
+
+    uint32_t* tile32 = reinterpret_cast<uint32_t*>(tile);
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        const uint32_t position = p0 + p * 2u;
+        const uint32_t step = position + 1u;
+        const uint32_t end = step * KA + (HALF ? step / 2u : 0u) + kBitLength;
+        const uint32_t shift = (((end - 1u) >> 5) + 1u) * 32u - end;
+        const uint32_t lo = ((end - 16u) >> 5) - w0;
+        const uint32_t hi = ((end - 1u) >> 5) - w0;
+        const uint32_t state0 = static_cast<uint16_t>(
+            ((static_cast<uint64_t>(pick4(lo, v0, v1, v2, v3)) << 32) |
+             pick4(hi, v0, v1, v2, v3)) >>
+            shift);
+        const uint32_t step1 = position + 2u;
+        const uint32_t end1 = step1 * KA + (HALF ? step1 / 2u : 0u) + kBitLength;
+        const uint32_t shift1 = (((end1 - 1u) >> 5) + 1u) * 32u - end1;
+        const uint32_t lo1 = ((end1 - 16u) >> 5) - w0;
+        const uint32_t hi1 = ((end1 - 1u) >> 5) - w0;
+        const uint32_t state1 = static_cast<uint16_t>(
+            ((static_cast<uint64_t>(pick4(lo1, v0, v1, v2, v3)) << 32) |
+             pick4(hi1, v0, v1, v2, v3)) >>
+            shift1);
+        const uint32_t packed = exl3_detail::codebook_pair_h_bits(state0, state1);
+        uint32_t row = 0;
+        uint32_t col = 0;
+        exl3_detail::tile_coords(position, &row, &col);
+        tile32[col * 8u + (row >> 1)] = packed;
+    }
+    __syncwarp();
+}
+
+template <uint32_t kDecode>
 __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t kt, uint32_t nt,
                                             uint32_t lane, uint32_t* ring, uint16_t* tile) {
-    if constexpr (kKa5) {
+    if constexpr (kDecode == 1u) {
         decode_tile_ka5(args, kt, nt, lane, ring, tile);
+        return;
+    }
+    if constexpr (kDecode == 2u) {
+        decode_tile_fixed<3u, false>(args, kt, nt, lane, ring, tile);
+        return;
+    }
+    if constexpr (kDecode == 3u) {
+        decode_tile_fixed<3u, true>(args, kt, nt, lane, ring, tile);
         return;
     }
     if (args.ka == 4u && args.half == 0u) {
@@ -236,7 +299,7 @@ __global__ __launch_bounds__(256) void recon_exl3_dense_kernel(Exl3GemmArgs args
          idx += static_cast<uint64_t>(gridDim.x) * 8u) {
         const uint32_t kt = static_cast<uint32_t>(idx / n_tiles);
         const uint32_t nt = static_cast<uint32_t>(idx % n_tiles);
-        decode_tile<false>(args, kt, nt, lane, work.ring[warp], tile);
+        decode_tile<0u>(args, kt, nt, lane, work.ring[warp], tile);
         const uint32_t row = lane >> 1u;
         const uint32_t half = lane & 1u;
         uint16_t vals[8];
@@ -438,7 +501,7 @@ __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* i
     }
 }
 
-template <uint32_t kGroups, bool kPartial, bool kPre, uint32_t kNTiles, bool kKa5>
+template <uint32_t kGroups, bool kPartial, bool kPre, uint32_t kNTiles, uint32_t kDecode>
 __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs args,
                                                                     uint32_t splits) {
     constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
@@ -589,7 +652,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             f16x8_t a[kNTiles];
 #pragma unroll
             for (uint32_t t = 0u; t < kNTiles; ++t) {
-                decode_tile<kKa5>(args, kc * 8u + ks, n_tile + t, lane,
+                decode_tile<kDecode>(args, kc * 8u + ks, n_tile + t, lane,
                                   area.work.ring[warp], tile + t * 256u);
                 a[t] = load_f16x8(tile + t * 256u + lane16 * 16u + lane_high * 8u);
             }
@@ -867,34 +930,34 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     return plan;
 }
 
-template <uint32_t kGroups, bool kPre, uint32_t kNTiles, bool kKa5>
+template <uint32_t kGroups, bool kPre, uint32_t kNTiles, uint32_t kDecode>
 hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
                          hipStream_t stream) {
     if (plan.splits > 1u) {
-        gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles, kKa5>
+        gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles, kDecode>
             <<<dim3(plan.grid_x * plan.splits, plan.grid_y, plan.grid_z), kThreads, 0,
                stream>>>(args, plan.splits);
     } else {
-        gemm_exl3_w16a16_kernel<kGroups, false, kPre, kNTiles, kKa5>
+        gemm_exl3_w16a16_kernel<kGroups, false, kPre, kNTiles, kDecode>
             <<<dim3(plan.grid_x, plan.grid_y, plan.grid_z), kThreads, 0, stream>>>(args,
                                                                                   1u);
     }
     return hipGetLastError();
 }
 
-template <bool kPre, bool kKa5>
+template <bool kPre, uint32_t kDecode>
 hipError_t launch_plan_typed(const Exl3GemmArgs& args, const LaunchPlan& plan,
                              hipStream_t stream) {
     const uint32_t n_tiles = pick_n_tiles(args);
     hipError_t err = hipSuccess;
     if (n_tiles == 2u) {
-        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u, kKa5>(args, plan, stream)
-              : plan.groups == 2u ? launch_kernel<2u, kPre, 2u, kKa5>(args, plan, stream)
-                                  : launch_kernel<1u, kPre, 2u, kKa5>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u, kDecode>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 2u, kDecode>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 2u, kDecode>(args, plan, stream);
     } else {
-        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u, kKa5>(args, plan, stream)
-              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u, kKa5>(args, plan, stream)
-                                  : launch_kernel<1u, kPre, 1u, kKa5>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u, kDecode>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u, kDecode>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 1u, kDecode>(args, plan, stream);
     }
     if (err != hipSuccess) return err;
     if (plan.splits > 1u) {
@@ -913,10 +976,18 @@ hipError_t launch_plan_typed(const Exl3GemmArgs& args, const LaunchPlan& plan,
 template <bool kPre>
 hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
                        hipStream_t stream) {
-    if (args.ka == 5u && args.half == 0u && args.ka5_fast != 0u) {
-        return launch_plan_typed<kPre, true>(args, plan, stream);
+    if (args.fast_decode != 0u) {
+        if (args.ka == 5u && args.half == 0u) {
+            return launch_plan_typed<kPre, 1u>(args, plan, stream);
+        }
+        if (args.ka == 3u && args.half == 0u) {
+            return launch_plan_typed<kPre, 2u>(args, plan, stream);
+        }
+        if (args.ka == 3u && args.half == 1u) {
+            return launch_plan_typed<kPre, 3u>(args, plan, stream);
+        }
     }
-    return launch_plan_typed<kPre, false>(args, plan, stream);
+    return launch_plan_typed<kPre, 0u>(args, plan, stream);
 }
 
 }
@@ -969,6 +1040,11 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.output_dtype = args.output_dtype;
     dense.ka = args.ka;
     dense.half = args.half;
+    static const uint32_t fast_decode = [] {
+        const char* e = std::getenv("SHELF_EXL3_FAST_DECODE");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 1u;
+    }();
+    dense.fast_decode = fast_decode;
     static const uint32_t fuse_override = [] {
         const char* e = std::getenv("SHELF_EXL3_GROUPED_FUSE");
         if (e == nullptr) return kExl3GroupedFuse;

@@ -251,7 +251,7 @@ static bool run_case(const Case& c) {
     args.output_dtype = 1u;
     args.ka = c.ka;
     args.half = c.half ? 1u : 0u;
-    args.ka5_fast = (c.ka == 5u && !c.half) ? 1u : 0u;
+    args.fast_decode = ((c.ka == 5u && !c.half) || c.ka == 3u) ? 1u : 0u;
     args.splitk_scratch = static_cast<float*>(d_scratch);
     args.splitk_floats = static_cast<uint32_t>(kScratchFloats);
     args.splitk_splits = c.splits;

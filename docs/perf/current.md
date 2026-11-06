@@ -372,8 +372,16 @@ TP=2。
 | PP 128 | 812.89 tok/s | **902.39 tok/s** |
 | DFlash2 drafts=7 | 58.44 tok/s | **63.26 tok/s** |
 
-- measurement revision: `exp/exl3-speed` の working tree（ka=5 専用 template 実体、
-  rows 別 split-K 既定、`SHELF_EXL3_KA5=0` で従来経路）
+FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。TP=2、device 0,1、
+`--arena-gib 30`。
+
+| 断面 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| TG ctx128 / 16 token | 24.45 tok/s | 24.87 tok/s |
+| DFlash2 drafts=6 | 50.71 tok/s | 51.41 tok/s |
+
+- measurement revision: `exp/exl3-speed` の working tree（ka=5 / ka=3 の固定 rate
+  template 実体、rows 別 split-K 既定、`SHELF_EXL3_FAST_DECODE=0` で従来経路）
 - GPU: Radeon AI PRO R9700 1 枚 / 2 枚（device 1 / device 0,1）
 - command（TG）:
   `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
