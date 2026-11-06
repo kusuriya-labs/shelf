@@ -1,10 +1,10 @@
 # Prefix Cache
 
 prefix cache は `shelf-compute` の runtime が所有する GPU-resident cache である。
-radix tree 上の page 単位で prefix の paged KV と GDN state を保持し、
-`ContinuousBatcher` が request の admission / prefill / decode / 出力末尾で
-lookup・restore・save を行う。共有 prefix への extension と multi-turn の会話で
-prefill を省略する。
+radix tree 上の page 単位で、prefix の paged KV は active KV pool の page を共有して
+保持し、GDN state は shadow slot に保持する。`ContinuousBatcher` が request の
+admission / prefill / decode / 出力末尾で lookup・restore・save を行う。
+共有 prefix への extension と multi-turn の会話で prefill を省略する。
 
 ## Radix tree
 
@@ -17,37 +17,38 @@ prefill を省略する。
 - entry は radix node ごとに 1 つずつ対応し、page 揃え後の position と
   GDN state の保持先 slot を持つ。
 
-## 2-tier store
+## KV page sharing
 
-hot tier は VRAM（GpuArena から確保する shadow pool）、
-cold tier は pinned DRAM（`hipHostMalloc`）である。
+KV は model-independent な `shelf::inference::prefix::PrefixKVStore` が管理する。
+store は `PagedKVPool` の物理 page を refcount 付きで共有し、shadow KV pool を持たない。
 
-- hot KV: shadow `PagedKVPool`。既定は `--prefix-cache-hot-tokens` = 16384 token 分で、
-  `--page-tokens` 未満は指定できない。
-- hot state: shadow `GdnStatePool` の `2 × max_concurrent` slots
-  （`max_concurrent` = `--prefix-cache-concurrency` 既定 4）。うち `max_concurrent` slots は
-  capture 中 rolling slot、残り `max_concurrent` slots が entry 保持用である。
-  entry 用 slot が不足すると hot state を cold へ demote する。
-- cold KV: `--prefix-cache-cold-tokens` 既定 65536 token 分の pinned host buffer。
-- cold state: pinned host buffer。既定は `--prefix-cache-cold-state-slots 0` = auto で
-  `4 × max_concurrent` slots。
-- `PrefixCache::create` は hot 分の arena 空き容量と cold 分の host memory 空きを検査し、
-  不足なら作成自体を失敗させる。
+- save は active sequence の page ID を radix entry に登録するだけで、D2D copy をしない。
+- restore は entry の page ID を新しい sequence の block table に map するだけで、
+  D2D copy をしない。
+- page は sequence 参照と cache 参照の両方を持ち、どちらも 0 になったときだけ free list に戻る。
+- cache は KV pool の全 page を追跡できる。cache 専用の VRAM 予約は存在しない。
+- 物理 page が不足した場合、`PagedKVPool` は cache の reclaimer を呼び、
+  LRU entry を evict して page を返却する。
 
-### pin と eviction
+## state store
 
-- 最新 `max_concurrent` 件の entry（`last_used` 降順）の page は pin され、
-  実行中の request が参照する entry を冷やさない。
-- hot KV に空きが不足すると、次の順で room を確保する。
+KV 以外のモデル状態は family 固有の adapter が管理する。
 
-  1. 非 pin の LRU leaf node を cold tier へ migration する
-  2. それでも不足すれば pin 対象の LRU leaf も cold tier へ migration する
-  3. それでも不足すれば refcount 0 で entry を持たない LRU leaf を実削除する
-  4. それでも確保できなければ save を `insufficient_memory` で中断する（fail-closed）。
-     serving は継続し、当該 request は prefix cache を使わない。
+- Qwen3.5 / 3.8: GDN state と DFlash2 drafter ring。
+- Qwen4Exp: QSA state、PLE conv state、必要な場合は GDN state。
+- 常駐 state は family の shadow pool の `2 × max_concurrent` slots
+  （capture rolling と entry 保持用）。
+- entry 用 slot が不足すると、LRU entry を evict して slot を回収する。
 
-- cold state が満杯のときは、cold LRU entry を削除して slot を回収してから
-  hot state を demote する。
+### eviction
+
+- prefix cache は page quota を持たない。KV pool の page を active request と共有し、
+  物理 page が不足したら `PagedKVPool` の reclaimer が
+  `PrefixKVStore::reclaim_pages` を呼ぶ。
+- `reclaim_pages` は entry を持たない refcount 0 の leaf node を削除し、
+  それでも不足すれば LRU entry を evict する。
+- entry 用の GDN state slot が不足した場合も LRU entry を evict する。
+- save は page を新規 allocate しない。したがって容量不足で save を fail-closed にはしない。
 
 ## hit / restore
 
@@ -59,8 +60,8 @@ hit かつ `state_position < input_len` のときだけ restore する。
 `state_position >= input_len` は restore せず miss 扱いである
 （その位置の初回サンプルの forward が存在しないため）。
 
-restore は entry の KV page を新規 sequence の block table へ予約・複写し、
-GDN state を entry slot から active state pool の slot へ複写する。
+restore は entry の KV page を新規 sequence の block table に map し（copy なし）、
+family adapter が GDN / QSA / ring などの state を active slot へ復元する。
 restore 後の token 数は `done.restored_tokens` に入る。
 
 ## save
@@ -71,12 +72,9 @@ save は page 揃え位置でのみ発生する。
   かつ input の範囲内なら `save_input_boundary` が input prefix を保存する。
   `save_input_boundary` は `seq.position == input_len を page 揃えした値` を必須検証し、
   違反は `invalid_argument` である。`min_prefix_tokens`（64）未満は保存しない。
-  DFlash2 経路では prefill を page 揃えした chunk 境界で区切り、各境界で保存する。
-  最後の chunk は input 末尾より前の直近の page 境界で分割するため、input 長が
-  page 揃えでなくても直近の境界までは保存される。ring は chunk 完了時点の
-  drafter context から保存する。
+  DFlash2 経路では prefill chunk ごとの `save_input_boundary` を呼ばない。
 - decode: 最終 prefill の完了時に capture を開始し、各 step 後に position が
-  page 境界を新しく通過するたびに GDN state を rolling slot へ capture する。
+  page 境界を新しく通過するたびに family state を rolling slot へ capture する。
   DFlash2 では次の page 境界までの残りトークン数に draft 数を制限し、境界を
   飛び越えずに capture できる位置で step を止める。
 - 出力末尾: EOS / `max_new_tokens` で終了し、capture 位置が最終 page 境界と一致するとき、
@@ -86,6 +84,8 @@ save は page 揃え位置でのみ発生する。
 ## options
 
 option の一覧と既定値は [../user/compute.md](../user/compute.md) の options を正本とする。
+`--prefix-cache` は ON/OFF のみで、KV 容量は指定しない。
+`--prefix-cache-concurrency` は同時に保持する capture / GDN state entry 数を決める。
 
 作成に失敗したときは prefix cache を無効化して続行し、警告を 1 行 stderr に出す。
 `--serve-stdio` の stdout（JSONL protocol）には混ぜない。
@@ -132,15 +132,18 @@ Qwen runtime や GPU へこの値は渡さない。
 - 同一プロンプトの再実行は restore しない。最長一致が input 全長に達しているため
   `state_position < input_len` を満たさない。restore が効くのは共有 prefix への
   extension と multi-turn の output tail である。
-- Tensor Parallel の mirror は未対応である。
+- KV page sharing は Tensor Parallel の rank shards に対応する。
+- 物理 page が枯渇したときは LRU entry を evict する。
 
 ## DFlash2 経路
 
 DFlash2 も通常 decode と同じ `ContinuousBatcher` の `prefix_*` ヘルパを通る。entry には
 paged KV と GDN state に加えて drafter の `DFlash2ContextState` ring（
-`SpecRingRef` / `SpecRingOut`）を保存する。restore では ring も復元し、
-`dflash2_spec_prefill` は残り suffix のみを prefill する（`prefix_tokens` 引数）。
-ring は hot entry slot にのみ保持し、cold tier への migration はしない。
+`SpecRingRef` / `SpecRingOut`）を保存する。ring は model-specific state であり、
+`Qwen35PrefixState` の ring slot が管理する。generic な `PrefixKVStore` は
+entry ごとの opaque payload だけを持ち、ring の意味を知らない。
+restore では ring も復元し、`dflash2_spec_prefill` は残り suffix のみを prefill する
+（`prefix_tokens` 引数）。ring は entry の state slot に保持する。
 ring を保存できないときは suffix prefill が長くなるだけで、挙動は正しい。
 
 restore / save の入力は次のとおりである。

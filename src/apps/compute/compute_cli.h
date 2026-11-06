@@ -41,10 +41,7 @@ struct ComputeOptions {
     unsigned long mtp_drafts = 7;
     int mtp_stats = 1;
     int prefix_cache_enabled = 1;
-    unsigned long prefix_cache_hot_tokens = 16384;
-    unsigned long prefix_cache_cold_tokens = 65536;
     unsigned long prefix_cache_concurrency = 4;
-    unsigned long prefix_cache_cold_state_slots = 0;
     unsigned long working_set_reserve_gib = 0;
     std::string rope_factor = "auto";
 };

@@ -92,7 +92,7 @@ BETTERBENCH_HOME=/tmp/bb betterbench run --endpoint http://127.0.0.1:8123/v1 \
 
 - corpus は `vendor/BetterBench/corpus/v1`（コード/json/math/summarization/file_edit/
   reasoning/chat/prose）。sampling 既定は temp 0.7 / top_p 0.95 / top_k 20、nonce により
-  prefix cache は cold。
+  prefix cache は未ヒット（空）の状態で開始する。
 - 参照側の公開表と比較するときは harness の版
   （`betterbench --version`）と corpus 版、`--max-seq-len`、pass 数を併記する。
 - **update 粒度の差**: こちらは `shelf-compute` がトークン 1 個ごとに SSE を出すため

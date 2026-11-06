@@ -198,6 +198,17 @@ target_include_directories(shelf_inference_scheduling PUBLIC "${CMAKE_CURRENT_SO
 target_link_libraries(shelf_inference_scheduling PUBLIC shelf_core shelf_gpu shelf_inference_state)
 target_compile_options(shelf_inference_scheduling PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+# Model-independent paged-KV prefix cache. Owns the radix tree, refcounted page
+# sharing and eviction; model-specific recurrent state is supplied by a
+# per-family adapter.
+add_library(shelf_inference_prefix STATIC
+    src/shelf/inference/prefix/prefix_kv_cache.cpp
+)
+target_compile_features(shelf_inference_prefix PRIVATE cxx_std_20)
+target_include_directories(shelf_inference_prefix PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(shelf_inference_prefix PUBLIC shelf_core shelf_gpu shelf_inference_state)
+target_compile_options(shelf_inference_prefix PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 # Model-independent op selectors (choose optimized kernel variants from
 # Program / DispatchBinding shape facts). Shared by Qwen35 and future
 # Qwen-family runtimes; never touches model weights or model config.
@@ -374,7 +385,7 @@ add_library(shelf_qwen35_runtime STATIC
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
+target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
 target_compile_options(shelf_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)

@@ -797,13 +797,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(),
         static_cast<uint32_t>(request.input_tokens.size()), request.restored_tokens,
-        config_.page_tokens,
-        [this, &request](uint32_t position) {
-            if (config_.page_tokens != 0u &&
-                position % config_.page_tokens == 0u) {
-                prefix_save_prefill(request);
-            }
-        });
+        config_.page_tokens, {});
     if (!prefill_result.ok()) {
         (void)dflash2_spec_decoder_shutdown(*session.decoder);
         session.decoder.reset();

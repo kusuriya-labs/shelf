@@ -81,11 +81,7 @@ int main(int argc, char** argv) {
     if (opt.pipeline_parallel > 1 && opt.prefix_cache_enabled != 0) {
         fprintf(stderr, "WARN: --pipeline-parallel disables prefix cache\n");
     }
-    config.prefix_cache_hot_tokens = static_cast<uint32_t>(opt.prefix_cache_hot_tokens);
-    config.prefix_cache_cold_tokens = static_cast<uint32_t>(opt.prefix_cache_cold_tokens);
     config.prefix_cache_concurrency = static_cast<uint32_t>(opt.prefix_cache_concurrency);
-    config.prefix_cache_cold_state_slots =
-        static_cast<uint32_t>(opt.prefix_cache_cold_state_slots);
     config.working_set_reserve_bytes =
         static_cast<std::size_t>(opt.working_set_reserve_gib) * 1024ull * 1024ull * 1024ull;
     config.rope_profile = rope_profile;

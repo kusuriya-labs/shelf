@@ -66,10 +66,7 @@ struct TpRankRuntimeConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_hot_tokens = 0;
-    std::uint32_t prefix_cold_tokens = 0;
     std::uint32_t prefix_concurrency = 4;
-    std::uint32_t prefix_cold_state_slots = 0;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
@@ -156,10 +153,7 @@ struct TpCoordinatorConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_hot_tokens = 0;
-    std::uint32_t prefix_cold_tokens = 0;
     std::uint32_t prefix_concurrency = 4;
-    std::uint32_t prefix_cold_state_slots = 0;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};

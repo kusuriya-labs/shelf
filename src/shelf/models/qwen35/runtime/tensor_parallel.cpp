@@ -177,12 +177,15 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             rank->model_->executor_state_reserve_bytes(config.max_scheduled_requests);
         reserved += state_pools;
         // The capacity formula is an estimate, and it is short of the executor's real footprint
-        // by a little (measured: 10 - 130 MiB on a 40 layer model). The KV pool is sized from
-        // what is left, so an estimate that is too small turns into a failed allocation after
-        // the pool already took the arena. The auto path keeps slack back; an explicit
-        // --working-set-reserve is taken as given.
+        // because the real workspace is the max program workspace, which the estimate only
+        // approximates. The gap grows with the row bucket (measured: 10 - 130 MiB on a 40 layer
+        // model, ~210 MiB on a 48 layer EXL3 model at a 2048 row bucket). The KV pool is sized
+        // from what is left, so an estimate that is too small turns into a failed allocation
+        // after the pool already took the arena. The auto path keeps slack back, scaled to the
+        // estimate so it tracks the row bucket; an explicit --working-set-reserve is taken as
+        // given.
         const std::size_t slack =
-            std::max<std::size_t>(64ull << 20ull, arena_free_now / 100ull);
+            std::max<std::size_t>(64ull << 20ull, reserved / 3ull);
         reserved += slack;
         std::fprintf(stderr,
                      "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u, "
@@ -194,23 +197,13 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     }
     if (config.prefix_cache) {
         PrefixCacheConfig prefix_config;
-        prefix_config.hot_capacity_tokens = config.prefix_hot_tokens;
-        prefix_config.cold_capacity_tokens = config.prefix_cold_tokens;
         prefix_config.max_concurrent = config.prefix_concurrency;
-        prefix_config.cold_state_slots = config.prefix_cold_state_slots;
         prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
-        const PrefixCacheGeometry prefix_geometry{
-            .page_tokens = config.page_tokens,
-            .num_attention_layers = attention_layers,
-            .kv_heads = local_kv_heads,
-            .head_dim = head_dim,
-            .dtype = config.kv_cache_dtype,
-        };
-        const PrefixCacheBytes prefix_bytes = prefix_cache_bytes(
-            prefix_config, gdn_layout_result, prefix_geometry);
-        reserved += prefix_bytes.hot_total();
+        const PrefixCacheBytes prefix_bytes =
+            prefix_cache_bytes(prefix_config, gdn_layout_result);
+        reserved += prefix_bytes.total();
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
-                     gpu::format_gib(prefix_bytes.hot_total()).c_str());
+                     gpu::format_gib(prefix_bytes.total()).c_str());
     }
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
@@ -495,10 +488,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.drafter_sessions = config.drafter_sessions;
         rank_config.drafter_lm_head_k = config.drafter_lm_head_k;
         rank_config.prefix_cache = config.prefix_cache;
-        rank_config.prefix_hot_tokens = config.prefix_hot_tokens;
-        rank_config.prefix_cold_tokens = config.prefix_cold_tokens;
         rank_config.prefix_concurrency = config.prefix_concurrency;
-        rank_config.prefix_cold_state_slots = config.prefix_cold_state_slots;
         rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;

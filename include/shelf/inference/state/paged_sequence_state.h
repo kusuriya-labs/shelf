@@ -8,6 +8,7 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
+#include <span>
 #include <vector>
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,10 @@ struct PagedSequenceState {
     }
 
     PagedKVPool* kv_pool() const noexcept { return kv_pool_; }
+
+    Status append_pages(std::span<const PageId> pages,
+                        std::span<const uint8_t> owned,
+                        hipStream_t stream);
 
  private:
     PagedKVPool* kv_pool_ = nullptr;

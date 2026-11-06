@@ -56,10 +56,7 @@ struct Qwen35RuntimeConfig {
     qwen35::runtime::DecodeBackend decode_backend =
         qwen35::runtime::DecodeBackend::Hip;
     bool prefix_cache = true;
-    uint32_t prefix_cache_hot_tokens = 16384;
-    uint32_t prefix_cache_cold_tokens = 65536;
     uint32_t prefix_cache_concurrency = 4;
-    uint32_t prefix_cache_cold_state_slots = 0;
     uint32_t prefix_cache_spec_ring_bytes = 0;
     std::size_t working_set_reserve_bytes = 4ull * 1024ull * 1024ull * 1024ull;
     std::optional<qwen35::EffectiveRopeProfile> rope_profile;

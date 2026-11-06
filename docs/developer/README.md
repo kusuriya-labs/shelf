@@ -15,7 +15,7 @@
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
 - [qwen35moe.md](qwen35moe.md) — Qwen3.5 MoE の config と routed expert weight 集約 contract
 - [sampling.md](sampling.md) — target LM sampling（temperature / top-k / top-p / seed）
-- [prefix_cache.md](prefix_cache.md) — prefix cache の radix tree / 2-tier store と JSONL protocol contract
+- [prefix_cache.md](prefix_cache.md) — prefix cache の radix tree / KV page sharing / state store と JSONL protocol contract
 
 ## speculative decode
 

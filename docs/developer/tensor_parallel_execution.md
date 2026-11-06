@@ -256,27 +256,26 @@ per-step barrier でも peer 経路をそのまま使える。
 
 ## 8. TP arena の予算順序
 
-TP=2 の rank ごとに、ephemeral arena の確保順序は次のとおりである。
-推論に必須の固定消費を先に確保し、`working_set_reserve_bytes` を除いた arena の余りを
-KV、その後ろの残余を prefix cache に割り当てる。
+TP=2 の rank ごとに、ephemeral arena の予算順序は次のとおりである。
+推論に必須の固定消費を先に確保し、`working_set_reserve_bytes` と prefix cache の
+state 分を予約した残りを KV に割り当てる。
 
 ```text
 1. private target weights（rank 0 のみ。TP 時に語彙全体が必要な行列）
 2. SequenceSlotPool / GdnStatePool
-3. PagedKVPool（rank-local kv_heads、arena の余りから計算したページ数）
-4. Executor workspace（working set reserve の範囲）
-5. prefix cache（残余。収まらない場合は hot tokens を縮小し、0 なら無効化）
-6. drafter executor / batch context / session pool（DFlash2）
+3. Executor workspace と prefix cache の state 予約
+4. PagedKVPool（rank-local kv_heads、予約を引いた arena の余りから計算したページ数）
+5. drafter executor / batch context / session pool（DFlash2）
 ```
 
-3 のページ数は、後で 4 / 5 / 6 に使う分を先に差し引く。
+workspace / prefix state / drafter の予約を先に差し引いた残りが 4 のページ数を決める。
 
-- 4 分: `working_set_reserve_bytes`。0 の場合は `executor_footprint.h` の auto 値に
+- workspace 分: `working_set_reserve_bytes`。0 の場合は `executor_footprint.h` の auto 値に
   family 固有の分（grouped expert activation、QSA の block bitmap、
   executor が plan 後に作る `QsaKeyStatePool` / `PleConvStatePool`）を加える
-- 5 分: prefix cache の hot tier（`prefix_cache_bytes()` を rank の local kv heads と
-  GDN layout で計算）
-- 6 分: drafter 重み・draft executor の scratch・spec batch context・session pool の
+- prefix state 分: `prefix_cache_bytes()` を rank の GDN layout と
+  `--prefix-cache-concurrency` で計算し、GDN state shadow slot と ring の分だけを予約する
+- drafter 分: drafter 重み・draft executor の scratch・spec batch context・session pool の
   slot × `--max-concurrent-requests`（`dflash2_footprint.h`）
 
 これらは rank ごとに `MEMORY_PLAN tp prefix cache:` / `MEMORY_PLAN tp drafter:` として
@@ -284,9 +283,10 @@ stderr に出る。計算式は `docs/developer/runtime.md` の arena budget と
 
 private target weights は `TpRankRuntime::create()` が KV より前に確保する。
 
-prefix cache は必須ではない。`prefix_cache_bytes()` で hot 分の arena 消費を
-見積もり、`arena_free - draft 予約` を超える場合は page 単位で hot tokens を
-二分探索して縮小する。縮小結果が 0 なら section を無効化する。
+prefix cache は KV を予約せず、active KV pool の page を refcount 付きで共有する。
+`prefix_cache_bytes()` が見積もるのは GDN state と ring だけであり、KV の予約はない。
+KV の上限は KV pool のページ数で決まり、物理 page が不足したときは LRU entry を
+evict する。
 
 `max_seq_len + 1` tokens を保持できる KV page が arena の余りに収まらない場合は、
 `insufficient_memory` で起動時に fail-closed する。
@@ -339,7 +339,7 @@ prompt は `SHELF_TP_PROMPT` で差し替えられる。
   `--dflash2-model-dir` と併用できる
   （drafter は compute が local load する。DFlash2 の drafter は非分割）。
   prefix cache も `--tensor-parallel 2` で有効である
-  （TP rank shard 付きの hot overflow と state demotion は unsupported エラー）。
+  （TP rank の KV page を shard ごとに共有し、state slot を rank ごとに保持する）。
   `shelf-bench` は pp / quality で `--tensor-parallel 1|2` を露出する（tg / batch は未露出）。
   pp の TP 実行は `TpBatchHook::on_execute` 経由で、最終 chunk の
   `compute_logits` は TP 時に強制される（combine 出力行が必要なため）。

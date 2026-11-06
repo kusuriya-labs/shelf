@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -313,7 +315,6 @@ void free_seq(std::optional<PagedSequenceState>& seq, hipStream_t stream) {
 
 void test_radix(Env& env) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 1024;
     config.max_concurrent = 3;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
@@ -385,9 +386,7 @@ void test_radix(Env& env) {
 
 void test_refcount_share(Env& env) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 1024;
-    config.max_concurrent = 1;
-    config.cold_state_slots = 1;
+    config.max_concurrent = 3;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "share cache create");
@@ -431,16 +430,15 @@ void test_refcount_share(Env& env) {
     check(seed_kv(*env.kv_bf16, *seq_c, 12, env.stream), "share seed kv c");
     check(seed_state(*env.gdn, seq_c->slot, 12, env.stream), "share seed state c");
     check(cache.save_input_boundary(*seq_c, tokens_c, 8, env.stream).ok(),
-          "share save c evicts parent");
+          "share save c");
 
     const PrefixCacheStats stats_after = cache.stats();
-    check(stats_after.entries == 2, "share parent entry evicted");
-    check(stats_after.entries_evicted == 1, "share parent eviction count");
-    check(stats_after.used_pages == 5, "share pages survive entry eviction");
+    check(stats_after.entries == 3, "share keeps all entries");
+    check(stats_after.entries_evicted == 0, "share does not evict");
+    check(stats_after.used_pages == 5, "share pages after third save");
 
     const PrefixHit hit_a = cache.lookup(tokens_a);
-    check(!hit_a.hit() && hit_a.match_tokens == 8,
-          "share stateless node yields miss");
+    check(hit_a.hit() && hit_a.state_position == 8, "share parent still hits");
 
     auto dst = make_seq(env, *env.kv_bf16);
     check(dst.has_value(), "share restore dst");
@@ -464,7 +462,6 @@ void test_refcount_share(Env& env) {
 
 void test_hit_rule(Env& env) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 1024;
     config.max_concurrent = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
@@ -518,9 +515,7 @@ void test_hit_rule(Env& env) {
           "rule state position beyond match misses");
 
     PrefixCacheConfig small_config;
-    small_config.hot_capacity_tokens = 1024;
     small_config.max_concurrent = 1;
-    small_config.cold_state_slots = 1;
     small_config.min_prefix_tokens = 4;
     auto small_cache_opt = make_cache(env, *env.kv_bf16, small_config);
     check(small_cache_opt.has_value(), "rule small cache create");
@@ -547,7 +542,7 @@ void test_hit_rule(Env& env) {
     check(seed_state(*env.gdn, seq_y->slot, 24, env.stream), "rule seed state y");
     check(small_cache.save_input_boundary(*seq_y, tokens_y, 8, env.stream).ok(),
           "rule small save y");
-    check(small_cache.stats().entries == 2, "rule small demote keeps entries");
+    check(small_cache.stats().entries == 1, "rule small keeps one entry");
 
     check(append_tokens(*seq_z, 8, env.stream), "rule append z");
     const std::vector<uint32_t> tokens_z = make_tokens(8, 13000);
@@ -555,8 +550,8 @@ void test_hit_rule(Env& env) {
     check(seed_state(*env.gdn, seq_z->slot, 25, env.stream), "rule seed state z");
     check(small_cache.save_input_boundary(*seq_z, tokens_z, 8, env.stream).ok(),
           "rule small save z");
-    check(small_cache.stats().entries == 2, "rule small entry evicted");
-    check(small_cache.stats().entries_evicted == 1, "rule small eviction count");
+    check(small_cache.stats().entries == 1, "rule small entry evicted");
+    check(small_cache.stats().entries_evicted == 2, "rule small eviction count");
 
     const PrefixHit hit_stateless = small_cache.lookup(tokens_x);
     check(!hit_stateless.hit() && hit_stateless.match_tokens == 8,
@@ -571,7 +566,6 @@ void test_hit_rule(Env& env) {
 
 void test_roundtrip(Env& env, PagedKVPool& kv, uint32_t tag) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 256;
     config.max_concurrent = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, kv, config);
@@ -618,7 +612,6 @@ void test_roundtrip(Env& env, PagedKVPool& kv, uint32_t tag) {
 
 void test_capture(Env& env) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 1024;
     config.max_concurrent = 2;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
@@ -769,7 +762,6 @@ void test_capture(Env& env) {
     }
 
     PrefixCacheConfig strict_config;
-    strict_config.hot_capacity_tokens = 1024;
     strict_config.max_concurrent = 1;
     strict_config.min_prefix_tokens = 64;
     auto strict_cache_opt = make_cache(env, *env.kv_bf16, strict_config);
@@ -800,348 +792,53 @@ void test_capture(Env& env) {
 
 void test_eviction(Env& env) {
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 16;
-    config.cold_capacity_tokens = 8;
     config.max_concurrent = 1;
-    config.cold_state_slots = 1;
     config.min_prefix_tokens = 4;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
     check(cache_opt.has_value(), "eviction cache create");
     if (!cache_opt.has_value()) return;
     PrefixCache& cache = *cache_opt;
 
-    auto seq1 = make_seq(env, *env.kv_bf16);
-    auto seq2 = make_seq(env, *env.kv_bf16);
-    auto seq3 = make_seq(env, *env.kv_bf16);
-    auto seq4 = make_seq(env, *env.kv_bf16);
-    check(seq1.has_value() && seq2.has_value() && seq3.has_value() && seq4.has_value(),
-          "eviction seqs");
-    if (!seq1.has_value() || !seq2.has_value() || !seq3.has_value() ||
-        !seq4.has_value()) {
-        return;
-    }
+    auto seq_a = make_seq(env, *env.kv_bf16);
+    auto seq_b = make_seq(env, *env.kv_bf16);
+    check(seq_a.has_value() && seq_b.has_value(), "eviction seqs");
+    if (!seq_a.has_value() || !seq_b.has_value()) return;
 
-    check(append_tokens(*seq1, 8, env.stream), "eviction append 1");
-    const std::vector<uint32_t> tokens1 = make_tokens(8, 1000);
-    check(seed_kv(*env.kv_bf16, *seq1, 31, env.stream), "eviction seed kv 1");
-    check(seed_state(*env.gdn, seq1->slot, 31, env.stream), "eviction seed state 1");
-    check(cache.save_input_boundary(*seq1, tokens1, 8, env.stream).ok(),
-          "eviction save 1");
-    check(cache.stats().used_pages == 2, "eviction first save pages");
+    check(append_tokens(*seq_a, 8, env.stream), "eviction append a");
+    const std::vector<uint32_t> tokens_a = make_tokens(8, 1000);
+    check(seed_kv(*env.kv_bf16, *seq_a, 31, env.stream), "eviction seed kv a");
+    check(seed_state(*env.gdn, seq_a->slot, 31, env.stream), "eviction seed state a");
+    check(cache.save_input_boundary(*seq_a, tokens_a, 8, env.stream).ok(),
+          "eviction save a");
+    check(cache.lookup(tokens_a).hit(), "eviction a hits");
 
-    check(append_tokens(*seq2, 8, env.stream), "eviction append 2");
-    const std::vector<uint32_t> tokens2 = make_tokens(8, 4000);
-    check(seed_kv(*env.kv_bf16, *seq2, 32, env.stream), "eviction seed kv 2");
-    check(seed_state(*env.gdn, seq2->slot, 32, env.stream), "eviction seed state 2");
-    check(cache.save_input_boundary(*seq2, tokens2, 8, env.stream).ok(),
-          "eviction save 2");
-    check(cache.stats().entries == 2, "eviction demote keeps both entries");
-    check(cache.stats().states_migrated_cold == 1, "eviction state demoted to cold");
-    check(cache.stats().used_pages == 4, "eviction pages after demote");
-
-    check(append_tokens(*seq3, 8, env.stream), "eviction append 3");
-    const std::vector<uint32_t> tokens3 = make_tokens(8, 6000);
-    check(seed_kv(*env.kv_bf16, *seq3, 33, env.stream), "eviction seed kv 3");
-    check(seed_state(*env.gdn, seq3->slot, 33, env.stream), "eviction seed state 3");
-    check(cache.save_input_boundary(*seq3, tokens3, 8, env.stream).ok(),
-          "eviction save 3 cold migration");
-    check(cache.stats().pages_migrated_cold == 2, "eviction cold migration page count");
-    check(cache.stats().entries_evicted == 1, "eviction cold overflow drops entry");
-    check(cache.stats().entries == 2, "eviction entries after overflow");
-    check(cache.stats().used_pages == 4, "eviction hot page budget after migration");
-    check(cache.stats().cold_pages_used == 2, "eviction cold page gauge");
-
-    check(append_tokens(*seq4, 8, env.stream), "eviction append 4");
-    const std::vector<uint32_t> tokens4 = make_tokens(8, 8000);
-    check(seed_kv(*env.kv_bf16, *seq4, 34, env.stream), "eviction seed kv 4");
-    check(seed_state(*env.gdn, seq4->slot, 34, env.stream), "eviction seed state 4");
-    check(cache.save_input_boundary(*seq4, tokens4, 8, env.stream).ok(),
-          "eviction save 4 leaf lru");
-    check(cache.stats().pages_evicted == 2, "eviction leaf lru page count");
-    check(cache.stats().pages_dropped_cold == 2, "eviction dropped instead of cold");
-    check(cache.stats().used_pages == 4, "eviction leaf lru page budget");
-    check(cache.stats().entries == 2, "eviction entry after leaf eviction");
-
-    free_seq(seq4, env.stream);
-    free_seq(seq3, env.stream);
-    free_seq(seq2, env.stream);
-    free_seq(seq1, env.stream);
-
-    {
-    PrefixCacheConfig blocked_config;
-    blocked_config.hot_capacity_tokens = 16;
-    blocked_config.cold_capacity_tokens = 0;
-    blocked_config.max_concurrent = 2;
-    blocked_config.min_prefix_tokens = 4;
-    auto blocked_cache_opt = make_cache(env, *env.kv_bf16, blocked_config);
-    check(blocked_cache_opt.has_value(), "eviction blocked cache create");
-    if (!blocked_cache_opt.has_value()) return;
-    PrefixCache& blocked_cache = *blocked_cache_opt;
-
-    auto seq4 = make_seq(env, *env.kv_bf16);
-    auto seq5 = make_seq(env, *env.kv_bf16);
-    auto seq6 = make_seq(env, *env.kv_bf16);
-    check(seq4.has_value() && seq5.has_value() && seq6.has_value(),
-          "eviction blocked seqs");
-    if (!seq4.has_value() || !seq5.has_value() || !seq6.has_value()) return;
-
-    check(append_tokens(*seq4, 8, env.stream), "eviction blocked append 4");
-    const std::vector<uint32_t> tokens4 = make_tokens(8, 1000);
-    check(seed_kv(*env.kv_bf16, *seq4, 41, env.stream), "eviction blocked seed kv 4");
-    check(seed_state(*env.gdn, seq4->slot, 41, env.stream),
-          "eviction blocked seed state 4");
-    check(blocked_cache.save_input_boundary(*seq4, tokens4, 8, env.stream).ok(),
-          "eviction blocked save 4");
-
-    check(append_tokens(*seq5, 8, env.stream), "eviction blocked append 5");
-    const std::vector<uint32_t> tokens5 = make_tokens(8, 4000);
-    check(seed_kv(*env.kv_bf16, *seq5, 42, env.stream), "eviction blocked seed kv 5");
-    check(seed_state(*env.gdn, seq5->slot, 42, env.stream),
-          "eviction blocked seed state 5");
-    check(blocked_cache.save_input_boundary(*seq5, tokens5, 8, env.stream).ok(),
-          "eviction blocked save 5");
-
-    check(append_tokens(*seq6, 8, env.stream), "eviction blocked append 6");
-    const std::vector<uint32_t> tokens6 = make_tokens(8, 7000);
-    check(seed_kv(*env.kv_bf16, *seq6, 43, env.stream), "eviction blocked seed kv 6");
-    check(seed_state(*env.gdn, seq6->slot, 43, env.stream),
-          "eviction blocked seed state 6");
-
-    const uint32_t active_before = env.kv_bf16->num_used_pages();
-    const shelf::Status blocked_st =
-        blocked_cache.save_input_boundary(*seq6, tokens6, 8, env.stream);
-    const uint32_t active_after = env.kv_bf16->num_used_pages();
-
-    check(blocked_st.code() == shelf::Status::Code::insufficient_memory,
-          "eviction reports skipped too large");
-    const PrefixCacheStats stats = blocked_cache.stats();
-    check(stats.skipped_too_large == 1, "eviction too large counted");
-    check(stats.pages_evicted == 0, "eviction protected pages untouched");
-    check(stats.entries == 2, "eviction entries untouched on failure");
-    check(stats.used_pages == 4, "eviction shadow pages untouched on failure");
-    check(active_before == active_after, "eviction active pool untouched");
-
-    free_seq(seq6, env.stream);
-    free_seq(seq5, env.stream);
-    free_seq(seq4, env.stream);
-    }
-}
-
-bool save_prefix(
-    Env& env,
-    PrefixCache& cache,
-    PagedKVPool& kv,
-    uint32_t base,
-    uint32_t tag,
-    std::optional<PagedSequenceState>& seq_out) {
-    std::optional<PagedSequenceState> seq = make_seq(env, kv);
-    if (!seq.has_value()) return false;
-    seq_out.emplace(std::move(seq.value()));
-    if (!append_tokens(*seq_out, 8, env.stream)) return false;
-    const std::vector<uint32_t> tokens = make_tokens(8, base);
-    if (!seed_kv(kv, *seq_out, tag, env.stream)) return false;
-    if (!seed_state(*env.gdn, seq_out->slot, tag, env.stream)) return false;
-    return cache.save_input_boundary(*seq_out, tokens, 8, env.stream).ok();
-}
-
-void test_tier_migration(Env& env) {
-    PrefixCacheConfig config;
-    config.hot_capacity_tokens = 16;
-    config.cold_capacity_tokens = 32;
-    config.max_concurrent = 1;
-    config.cold_state_slots = 4;
-    config.min_prefix_tokens = 4;
-    auto cache_opt = make_cache(env, *env.kv_bf16, config);
-    check(cache_opt.has_value(), "tier cache create");
-    if (!cache_opt.has_value()) return;
-    PrefixCache& cache = *cache_opt;
-
-    std::optional<PagedSequenceState> seq_a;
-    std::optional<PagedSequenceState> seq_b;
-    std::optional<PagedSequenceState> seq_c;
-    check(save_prefix(env, cache, *env.kv_bf16, 20000, 70, seq_a), "tier save a");
-    check(save_prefix(env, cache, *env.kv_bf16, 21000, 71, seq_b), "tier save b");
-    check(save_prefix(env, cache, *env.kv_bf16, 22000, 72, seq_c), "tier save c");
+    check(append_tokens(*seq_b, 8, env.stream), "eviction append b");
+    const std::vector<uint32_t> tokens_b = make_tokens(8, 4000);
+    check(seed_kv(*env.kv_bf16, *seq_b, 32, env.stream), "eviction seed kv b");
+    check(seed_state(*env.gdn, seq_b->slot, 32, env.stream), "eviction seed state b");
+    check(cache.save_input_boundary(*seq_b, tokens_b, 8, env.stream).ok(),
+          "eviction save b");
 
     const PrefixCacheStats stats = cache.stats();
-    check(stats.pages_migrated_cold == 2, "tier oldest pages migrated to cold");
-    check(stats.cold_pages_used == 2, "tier cold page gauge");
-    check(stats.used_pages == 4, "tier hot page budget constant");
-    check(stats.states_migrated_cold == 2, "tier entry states demoted to cold");
-    check(stats.cold_states_used == 2, "tier cold state gauge");
-    check(stats.pinned_demoted == 0, "tier pinned pages not demoted");
+    check(stats.entries == 1, "eviction keeps one entry");
+    check(stats.entries_evicted == 1, "eviction drops the old entry");
+    check(!cache.lookup(tokens_a).hit(), "eviction old entry misses");
+    const PrefixHit hit_b = cache.lookup(tokens_b);
+    check(hit_b.hit() && hit_b.state_position == 8, "eviction new entry hits");
 
-    const PrefixHit hit_a = cache.lookup(make_tokens(8, 20000));
-    check(hit_a.hit() && hit_a.state_position == 8, "tier cold entry still hits");
-
-    auto dst_a = make_seq(env, *env.kv_bf16);
-    check(dst_a.has_value(), "tier dst a");
-    if (!dst_a.has_value()) return;
-    check(cache.restore(hit_a.entry_id, *dst_a, env.stream).ok(),
-          "tier restore cold entry");
+    auto dst = make_seq(env, *env.kv_bf16);
+    check(dst.has_value(), "eviction dst");
+    if (!dst.has_value()) return;
+    check(cache.restore(hit_b.entry_id, *dst, env.stream).ok(), "eviction restore");
     if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "tier restore sync");
+        check(false, "eviction restore sync");
         return;
     }
-    check(dst_a->position == 8, "tier cold restore position");
-    check(verify_kv(*env.kv_bf16, *dst_a, 70, env.stream), "tier cold restore kv bytes");
-    check(verify_state(*env.gdn, dst_a->slot, 70, env.stream),
-          "tier cold restore state bytes");
+    check(verify_kv(*env.kv_bf16, *dst, 32, env.stream), "eviction restore kv bytes");
+    check(verify_state(*env.gdn, dst->slot, 32, env.stream),
+          "eviction restore state bytes");
 
-    const PrefixHit hit_b = cache.lookup(make_tokens(8, 21000));
-    check(hit_b.hit() && hit_b.state_position == 8, "tier pinned entry still hits");
-    auto dst_b = make_seq(env, *env.kv_bf16);
-    check(dst_b.has_value(), "tier dst b");
-    if (!dst_b.has_value()) return;
-    check(cache.restore(hit_b.entry_id, *dst_b, env.stream).ok(),
-          "tier restore pinned entry");
-    if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "tier restore pinned sync");
-        return;
-    }
-    check(verify_kv(*env.kv_bf16, *dst_b, 71, env.stream),
-          "tier pinned restore kv bytes");
-    check(verify_state(*env.gdn, dst_b->slot, 71, env.stream),
-          "tier pinned restore state bytes");
-
-    free_seq(dst_b, env.stream);
-    free_seq(dst_a, env.stream);
-    free_seq(seq_c, env.stream);
-    free_seq(seq_b, env.stream);
-    free_seq(seq_a, env.stream);
-}
-
-void test_pin_priority(Env& env) {
-    PrefixCacheConfig config;
-    config.hot_capacity_tokens = 24;
-    config.cold_capacity_tokens = 64;
-    config.max_concurrent = 2;
-    config.cold_state_slots = 8;
-    config.min_prefix_tokens = 4;
-    auto cache_opt = make_cache(env, *env.kv_bf16, config);
-    check(cache_opt.has_value(), "pin cache create");
-    if (!cache_opt.has_value()) return;
-    PrefixCache& cache = *cache_opt;
-
-    std::optional<PagedSequenceState> seq_a;
-    std::optional<PagedSequenceState> seq_b;
-    std::optional<PagedSequenceState> seq_c;
-    std::optional<PagedSequenceState> seq_d;
-    check(save_prefix(env, cache, *env.kv_bf16, 24000, 75, seq_a), "pin save a");
-    check(save_prefix(env, cache, *env.kv_bf16, 25000, 76, seq_b), "pin save b");
-    check(save_prefix(env, cache, *env.kv_bf16, 26000, 77, seq_c), "pin save c");
-    check(cache.stats().pages_migrated_cold == 0, "pin no migration before pressure");
-    check(save_prefix(env, cache, *env.kv_bf16, 27000, 78, seq_d), "pin save d");
-
-    const PrefixCacheStats stats = cache.stats();
-    check(stats.pages_migrated_cold == 2, "pin oldest unpinned pages migrated first");
-    check(stats.pinned_demoted == 0, "pin recent pages stay in hot tier");
-    check(stats.cold_pages_used == 2, "pin cold page gauge");
-    check(stats.states_migrated_cold == 2, "pin entry states demoted");
-    check(stats.cold_states_used == 2, "pin cold state gauge");
-    check(stats.used_pages == 6, "pin hot page budget constant");
-
-    const PrefixHit hit_b = cache.lookup(make_tokens(8, 25000));
-    check(hit_b.hit() && hit_b.state_position == 8, "pin second entry hits");
-    auto dst_b = make_seq(env, *env.kv_bf16);
-    check(dst_b.has_value(), "pin dst b");
-    if (!dst_b.has_value()) return;
-    check(cache.restore(hit_b.entry_id, *dst_b, env.stream).ok(), "pin restore b");
-    if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "pin restore sync");
-        return;
-    }
-    check(verify_kv(*env.kv_bf16, *dst_b, 76, env.stream), "pin restore b kv bytes");
-    check(verify_state(*env.gdn, dst_b->slot, 76, env.stream),
-          "pin restore b state bytes");
-
-    const PrefixHit hit_a = cache.lookup(make_tokens(8, 24000));
-    check(hit_a.hit() && hit_a.state_position == 8, "pin oldest entry hits");
-    auto dst_a = make_seq(env, *env.kv_bf16);
-    check(dst_a.has_value(), "pin dst a");
-    if (!dst_a.has_value()) return;
-    check(cache.restore(hit_a.entry_id, *dst_a, env.stream).ok(), "pin restore a");
-    if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "pin restore a sync");
-        return;
-    }
-    check(verify_kv(*env.kv_bf16, *dst_a, 75, env.stream), "pin restore a kv bytes");
-    check(verify_state(*env.gdn, dst_a->slot, 75, env.stream),
-          "pin restore a state bytes");
-
-    free_seq(dst_a, env.stream);
-    free_seq(dst_b, env.stream);
-    free_seq(seq_d, env.stream);
-    free_seq(seq_c, env.stream);
-    free_seq(seq_b, env.stream);
-    free_seq(seq_a, env.stream);
-}
-
-void test_state_tier(Env& env) {
-    PrefixCacheConfig config;
-    config.hot_capacity_tokens = 16;
-    config.cold_capacity_tokens = 32;
-    config.max_concurrent = 1;
-    config.cold_state_slots = 1;
-    config.min_prefix_tokens = 4;
-    auto cache_opt = make_cache(env, *env.kv_bf16, config);
-    check(cache_opt.has_value(), "state tier cache create");
-    if (!cache_opt.has_value()) return;
-    PrefixCache& cache = *cache_opt;
-
-    std::optional<PagedSequenceState> seq_a;
-    std::optional<PagedSequenceState> seq_b;
-    std::optional<PagedSequenceState> seq_c;
-    check(save_prefix(env, cache, *env.kv_bf16, 28000, 80, seq_a), "state tier save a");
-    check(save_prefix(env, cache, *env.kv_bf16, 29000, 81, seq_b), "state tier save b");
-    check(cache.stats().states_migrated_cold == 1, "state tier first demote");
-    check(cache.stats().entries == 2, "state tier entries after demote");
-
-    check(save_prefix(env, cache, *env.kv_bf16, 30000, 82, seq_c), "state tier save c");
-    const PrefixCacheStats stats = cache.stats();
-    check(stats.entries == 2, "state tier entries after cold overflow");
-    check(stats.entries_evicted == 1, "state tier cold lru removed");
-    check(stats.states_migrated_cold == 2, "state tier second demote");
-    check(stats.cold_states_used == 1, "state tier cold state gauge");
-    check(stats.pages_migrated_cold == 2, "state tier page migration");
-
-    const PrefixHit hit_a = cache.lookup(make_tokens(8, 28000));
-    check(!hit_a.hit() && hit_a.match_tokens == 8, "state tier removed entry misses");
-
-    const PrefixHit hit_b = cache.lookup(make_tokens(8, 29000));
-    check(hit_b.hit() && hit_b.state_position == 8, "state tier demoted entry hits");
-    auto dst_b = make_seq(env, *env.kv_bf16);
-    check(dst_b.has_value(), "state tier dst b");
-    if (!dst_b.has_value()) return;
-    check(cache.restore(hit_b.entry_id, *dst_b, env.stream).ok(),
-          "state tier restore cold state");
-    if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "state tier restore sync");
-        return;
-    }
-    check(dst_b->position == 8, "state tier restore position");
-    check(verify_kv(*env.kv_bf16, *dst_b, 81, env.stream),
-          "state tier restore kv bytes");
-    check(verify_state(*env.gdn, dst_b->slot, 81, env.stream),
-          "state tier restore gdn bytes");
-
-    const PrefixHit hit_c = cache.lookup(make_tokens(8, 30000));
-    check(hit_c.hit() && hit_c.state_position == 8, "state tier hot entry hits");
-    auto dst_c = make_seq(env, *env.kv_bf16);
-    check(dst_c.has_value(), "state tier dst c");
-    if (!dst_c.has_value()) return;
-    check(cache.restore(hit_c.entry_id, *dst_c, env.stream).ok(),
-          "state tier restore hot state");
-    if (hipStreamSynchronize(env.stream) != hipSuccess) {
-        check(false, "state tier restore c sync");
-        return;
-    }
-    check(verify_state(*env.gdn, dst_c->slot, 82, env.stream),
-          "state tier restore hot gdn bytes");
-
-    free_seq(dst_c, env.stream);
-    free_seq(dst_b, env.stream);
-    free_seq(seq_c, env.stream);
+    free_seq(dst, env.stream);
     free_seq(seq_b, env.stream);
     free_seq(seq_a, env.stream);
 }
@@ -1149,10 +846,7 @@ void test_state_tier(Env& env) {
 void test_spec_ring(Env& env) {
     constexpr uint32_t kRingBytes = 64;
     PrefixCacheConfig config;
-    config.hot_capacity_tokens = 16;
-    config.cold_capacity_tokens = 32;
     config.max_concurrent = 1;
-    config.cold_state_slots = 1;
     config.min_prefix_tokens = 4;
     config.spec_ring_bytes = 2 * kRingBytes;
     auto cache_opt = make_cache(env, *env.kv_bf16, config);
@@ -1262,59 +956,7 @@ void test_spec_ring(Env& env) {
     hipFree(out_v);
 }
 
-void test_tier_fail_closed(Env& env) {
-    PrefixCacheConfig config;
-    config.hot_capacity_tokens = 16;
-    config.cold_capacity_tokens = 8;
-    config.max_concurrent = 1;
-    config.cold_state_slots = 2;
-    config.min_prefix_tokens = 4;
-    auto cache_opt = make_cache(env, *env.kv_bf16, config);
-    check(cache_opt.has_value(), "fail closed cache create");
-    if (!cache_opt.has_value()) return;
-    PrefixCache& cache = *cache_opt;
-
-    std::optional<PagedSequenceState> seq_a;
-    std::optional<PagedSequenceState> seq_b;
-    std::optional<PagedSequenceState> seq_c;
-    check(save_prefix(env, cache, *env.kv_bf16, 31000, 85, seq_a), "fail closed save a");
-    check(save_prefix(env, cache, *env.kv_bf16, 32000, 86, seq_b), "fail closed save b");
-    check(save_prefix(env, cache, *env.kv_bf16, 33000, 87, seq_c), "fail closed save c");
-
-    auto seq_d = make_seq(env, *env.kv_bf16);
-    check(seq_d.has_value(), "fail closed seq d");
-    if (!seq_d.has_value()) return;
-    check(append_tokens(*seq_d, 8, env.stream), "fail closed append d");
-    const std::vector<uint32_t> tokens_d = make_tokens(8, 34000);
-    check(seed_kv(*env.kv_bf16, *seq_d, 88, env.stream), "fail closed seed kv d");
-    check(seed_state(*env.gdn, seq_d->slot, 88, env.stream), "fail closed seed state d");
-
-    const uint32_t active_before = env.kv_bf16->num_used_pages();
-    const shelf::Status st =
-        cache.save_input_boundary(*seq_d, tokens_d, 8, env.stream);
-    const uint32_t active_after = env.kv_bf16->num_used_pages();
-
-    check(st.code() == shelf::Status::Code::insufficient_memory,
-          "fail closed reports insufficient memory");
-    const PrefixCacheStats stats = cache.stats();
-    check(stats.skipped_too_large == 1, "fail closed too large counted");
-    check(stats.pages_migrated_cold == 2, "fail closed migration limited by cold tier");
-    check(stats.pages_dropped_cold == 0, "fail closed no pages dropped");
-    check(stats.pinned_demoted == 0, "fail closed no pin demotion");
-    check(stats.entries == 3, "fail closed entries untouched");
-    check(stats.used_pages == 4, "fail closed shadow pages untouched");
-    check(active_before == active_after, "fail closed active pool untouched");
-
-    const PrefixHit hit_b = cache.lookup(make_tokens(8, 32000));
-    check(hit_b.hit() && hit_b.state_position == 8, "fail closed entries still hit");
-
-    free_seq(seq_d, env.stream);
-    free_seq(seq_c, env.stream);
-    free_seq(seq_b, env.stream);
-    free_seq(seq_a, env.stream);
-}
-
-}
+}  // namespace
 
 int main() {
     if (hipSetDevice(0) != hipSuccess) {
@@ -1365,18 +1007,18 @@ int main() {
     env.slots = &slots;
     env.stream = stream;
 
-    test_radix(env);
-    test_refcount_share(env);
-    test_hit_rule(env);
-    test_roundtrip(env, kv_bf16, 77);
-    test_roundtrip(env, kv_fp8, 78);
-    test_capture(env);
-    test_eviction(env);
-    test_tier_migration(env);
-    test_pin_priority(env);
-    test_state_tier(env);
-    test_spec_ring(env);
-    test_tier_fail_closed(env);
+    const char* only = std::getenv("SHELF_PFX_TEST");
+    auto run = [&](const char* name, void (*fn)(Env&)) {
+        if (only == nullptr || std::strcmp(only, name) == 0) fn(env);
+    };
+    run("radix", test_radix);
+    run("share", test_refcount_share);
+    run("rule", test_hit_rule);
+    run("roundtrip-bf16", +[](Env& e) { test_roundtrip(e, *e.kv_bf16, 77); });
+    run("roundtrip-fp8", +[](Env& e) { test_roundtrip(e, *e.kv_fp8, 78); });
+    run("capture", test_capture);
+    run("eviction", test_eviction);
+    run("ring", test_spec_ring);
 
     const shelf::Status arena_release = arena.shutdown();
     check(arena_release.ok(), "arena shutdown");
