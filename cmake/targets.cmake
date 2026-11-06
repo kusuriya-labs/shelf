@@ -119,7 +119,15 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
 set(SHELF_FUSED_KERNEL_SOURCES
     src/shelf/kernels/fused/hyper_connection.hip
     src/shelf/kernels/fused/silu_scale.hip
+    src/shelf/kernels/fused/tp_combine.hip
 )
+
+add_library(shelf_kernels_fused STATIC ${SHELF_FUSED_KERNEL_SOURCES})
+target_compile_features(shelf_kernels_fused PRIVATE cxx_std_20)
+target_include_directories(shelf_kernels_fused PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(shelf_kernels_fused PUBLIC shelf_core shelf_gpu)
+target_compile_options(shelf_kernels_fused PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_kernels_fused)
 
 # Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
 # stay under models/qwen35 until a second model needs them.
@@ -137,12 +145,11 @@ set(SHELF_QWEN35_SPEC_KERNEL_SOURCES
     src/shelf/models/qwen35/kernels/dflash2/noise_input.hip
 )
 
-add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES}
-                                            ${SHELF_FUSED_KERNEL_SOURCES})
+add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
 target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
 target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state)
+target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
 target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_kernels_optimized)
 
@@ -167,7 +174,7 @@ add_library(shelf_runtime STATIC
 )
 target_compile_features(shelf_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu)
+target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu shelf_kernels_fused)
 target_compile_options(shelf_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_runtime)
 

@@ -636,8 +636,13 @@ Status execute_program_tp_ranges(
                 }
             }
         }
-        Status st = execute_program_range(program, ctx, stream, producer_begin,
-                                          segment.dispatch_end);
+        const bool fuse = segment.fusion != ::shelf::runtime::TpCombineFusion::None &&
+                          barrier->supports_combine_fusion();
+        const uint32_t run_end =
+            segment.fusion != ::shelf::runtime::TpCombineFusion::None
+                ? segment.producer_end
+                : segment.dispatch_end;
+        Status st = execute_program_range(program, ctx, stream, producer_begin, run_end);
         if (!st.ok()) return st;
         if (!combines) continue;
         ::shelf::runtime::TpSumTarget target;
@@ -646,6 +651,30 @@ Status execute_program_tp_ranges(
         target.row_stride = value.row_stride;
         target.feature_count = value.feature_count;
         target.dtype = value.dtype;
+        if (fuse) {
+            auto residual =
+                resolve_host_value(program, segment.fusion_residual, ctx);
+            if (!residual.ok()) return residual.status();
+            auto fused_output =
+                resolve_host_value(program, segment.fusion_output, ctx);
+            if (!fused_output.ok()) return fused_output.status();
+            target.fusion = segment.fusion;
+            target.residual = residual.value().ptr;
+            target.residual_row_stride = residual.value().row_stride;
+            target.fusion_output = fused_output.value().ptr;
+            target.output_row_stride = fused_output.value().row_stride;
+            target.hidden = value.feature_count;
+            if (segment.fusion == ::shelf::runtime::TpCombineFusion::HyperApply) {
+                auto injection =
+                    resolve_host_value(program, segment.fusion_injection, ctx);
+                if (!injection.ok()) return injection.status();
+                target.injection = injection.value().ptr;
+                target.injection_row_stride = injection.value().row_stride;
+                if (target.hidden != 0u) {
+                    target.hc = residual.value().feature_count / target.hidden;
+                }
+            }
+        }
         if (std::getenv("SHELF_TP_SUM_DEBUG") != nullptr) {
             std::fprintf(stderr,
                          "SUM rank=%d id=%u ptr=%p rows=%u stride=%u feat=%u dtype=%d "
@@ -662,6 +691,12 @@ Status execute_program_tp_ranges(
         ctx.tp_peer_written = false;
         ctx.tp_peer_value = 0;
         if (!st.ok()) return st;
+        if (!fuse && segment.fusion != ::shelf::runtime::TpCombineFusion::None) {
+            Status consumer = execute_program_range(program, ctx, stream,
+                                                    segment.producer_end,
+                                                    segment.dispatch_end);
+            if (!consumer.ok()) return consumer;
+        }
     }
     return Status::make_ok();
 }

@@ -19,6 +19,7 @@ public:
     const char* name() const noexcept override { return "hip-p2p"; }
     Status verify() override;
     Status sum_hidden(const TpSumInvocation& invocation) override;
+    bool supports_combine_fusion() const noexcept override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
 
 private:

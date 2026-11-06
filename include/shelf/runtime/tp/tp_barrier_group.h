@@ -23,6 +23,7 @@ public:
 
     Status arrive(int rank, const TpSumTarget& target, hipStream_t stream,
                     bool peer_written) override;
+    bool supports_combine_fusion() const noexcept override;
     Status peer_write_target(int rank, std::size_t bytes, void*& peer_out) override;
 
 private:

@@ -3,10 +3,12 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/kernels/fused/tp_combine.h>
 
 #include "tp_transport_internal.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -162,20 +164,64 @@ Status launch_copy(void* dst, const void* src, std::size_t bytes, ValueDType dty
     return Status::make_ok();
 }
 
-Status launch_add(void* out, const void* own, const void* peers_device, uint32_t npeers,
-                  std::size_t bytes, ValueDType dtype, hipStream_t stream) {
-    if (dtype == ValueDType::F32) {
+Status launch_add(const TpSumTarget& target, const void* peers_device, uint32_t npeers,
+                  std::size_t bytes, hipStream_t stream) {
+    if (target.dtype == ValueDType::BF16 &&
+        target.fusion == TpCombineFusion::ResidualAdd) {
+        ::shelf::kernel::TpSumResidualArgs args;
+        args.out = target.fusion_output;
+        args.own = target.ptr;
+        args.peers = static_cast<const void* const*>(peers_device);
+        args.peer_count = npeers;
+        args.residual = target.residual;
+        args.rows = target.rows;
+        args.features = target.feature_count;
+        args.combine_stride = target.row_stride;
+        args.residual_stride = target.residual_row_stride;
+        args.output_stride = target.output_row_stride;
+        const hipError_t err = ::shelf::kernel::launch_tp_sum_residual_bf16(args, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("tp fused residual launch", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+    if (target.dtype == ValueDType::BF16 &&
+        target.fusion == TpCombineFusion::HyperApply) {
+        ::shelf::kernel::TpSumHyperApplyArgs args;
+        args.out = target.fusion_output;
+        args.own = target.ptr;
+        args.peers = static_cast<const void* const*>(peers_device);
+        args.peer_count = npeers;
+        args.raw = target.residual;
+        args.injection = target.injection;
+        args.rows = target.rows;
+        args.hidden = target.hidden;
+        args.hc = target.hc;
+        args.combine_stride = target.row_stride;
+        args.raw_stride = target.residual_row_stride;
+        args.injection_stride = target.injection_row_stride;
+        args.output_stride = target.output_row_stride;
+        const hipError_t err =
+            ::shelf::kernel::launch_tp_sum_hyper_apply_bf16(args, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("tp fused hyper apply launch", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
+    if (target.dtype == ValueDType::F32) {
         const uint64_t count = bytes / sizeof(float);
         tp_add_peers_f32_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
-            static_cast<const float*>(own),
+            static_cast<const float*>(target.ptr),
             reinterpret_cast<const float* const*>(peers_device), npeers,
-            static_cast<float*>(out), count);
+            static_cast<float*>(target.ptr), count);
     } else {
         const uint64_t count = bytes / sizeof(uint16_t);
         tp_add_peers_bf16_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
-            static_cast<const uint16_t*>(own),
+            static_cast<const uint16_t*>(target.ptr),
             reinterpret_cast<const uint16_t* const*>(peers_device), npeers,
-            static_cast<uint16_t*>(out), count);
+            static_cast<uint16_t*>(target.ptr), count);
     }
     const hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -414,9 +460,8 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
                                          __LINE__);
             }
         }
-        st = launch_add(invocation.targets[r].ptr, invocation.targets[r].ptr,
-                        inbox_ptrs_dev_[r][parity], rank_count - 1, bytes, dtype,
-                        invocation.streams[r]);
+        st = launch_add(invocation.targets[r], inbox_ptrs_dev_[r][parity],
+                        rank_count - 1, bytes, invocation.streams[r]);
         if (!st.ok()) return st;
     }
     parity_ ^= 1u;
@@ -538,6 +583,14 @@ Status HipPeerTpTransport::verify() {
     }
     verified_ = true;
     return Status::make_ok();
+}
+
+bool HipPeerTpTransport::supports_combine_fusion() const noexcept {
+    static const bool enabled = [] {
+        const char* e = std::getenv("SHELF_TP_FUSE");
+        return e == nullptr || std::strtoul(e, nullptr, 10) != 0ul;
+    }();
+    return enabled;
 }
 
 Status HipPeerTpTransport::sum_hidden(const TpSumInvocation& invocation) {

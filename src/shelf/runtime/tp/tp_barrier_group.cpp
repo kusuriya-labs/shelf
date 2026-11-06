@@ -136,6 +136,10 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
     return aborted_ ? abort_status_ : Status::make_ok();
 }
 
+bool TpBarrierGroup::supports_combine_fusion() const noexcept {
+    return transport_ != nullptr && transport_->supports_combine_fusion();
+}
+
 Status TpBarrierGroup::peer_write_target(int rank, std::size_t bytes, void*& peer_out) {
     if (rank < 0 || rank >= rank_count_) {
         return Status::invalid_argument("tp barrier rank out of range", __FILE__, __LINE__);
