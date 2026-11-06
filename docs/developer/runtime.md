@@ -282,13 +282,13 @@ Queued requestをadmissionする。`max_concurrent_requests > 1` でも全reques
 `DeviceBatchContext::num_requests` が1 stepでco-batchされたrequest数である。debug時は
 `SHELF_BATCH_TRACE=1` でstderrへ `SHELF_BATCH_STEP requests=R tokens=T` を出す。
 
-注意: 通常decodeのlinear kernelはbatch行数に応じてGEMV / GEMM configを選択する
+注意: 通常decodeのlinear kernelはbatch行数に応じてconfigを選択する
 （`inference/execution/selectors/linear_selector.cpp`）。このためco-batchされたrequestのgreedy tokenは、
 single-request実行と一致しない場合がある（argmaxが僅差のとき）。これはcross-request
-混入ではなく、kernel選択に依存する浮動小数の差である。batch行数に依らずdecodeと
-bit一致する経路はtarget verify（`role == Verify`）のexact系kernelに限られる
-（GEMMのmulti-row `ExactRows`とGDN recurrenceのserial variant、mode切替なしの
-role固定）。request間の
+混入ではなく、kernel選択に依存する浮動小数の差である。bf16 GEMM は行数だけで config が
+決まるため（`rows == 1` と `2 <= rows <= 16` は `ExactRows`、`rows >= 17` は WMMA 系）、
+target verify も decode と同じ config になる。batch 行数に依らず bit 一致する経路は
+GDN recurrence の serial variant（`role == Verify` 固定）だけである。request間の
 event demultiplexと `token* == done.generated_ids` はco-batchでも保証される。
 
 ## Request retirement

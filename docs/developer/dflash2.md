@@ -23,7 +23,10 @@ verify し、一致した prefix だけを commit する。
   stochastic の verify は target の sample 結果と draft を比較する sample-and-compare
   方式で、出力分布は target の分布に一致する。round で消費した row 数だけ
   `sample_index` を進め、RNG key の再利用を避けている。
-- target verify は execution role が Verify のときだけ exact 系 kernel（GEMM は multi-row `ExactRows`、GDN recurrence は serial 系 variant）を固定選択する。mode の切替は持たず、decode / prefill は通常経路のままである。
+- bf16 GEMM の kernel は実行行数だけで決まる。`rows == 1` は `ExactRows` の 1 行版、
+  `2 <= rows <= 16` は multi-row `ExactRows`、`rows >= 17` は WMMA 系である。decode と
+  verify で同じ行数なら同じ kernel になるため、batch 構成の違いで kernel が切り替わらない。
+  GDN recurrence だけは execution role が Verify のとき serial 系 variant を固定選択する。
 - drafter は 1 round で anchor 1 row + draft `block_size - 1` row を陽に処理する
   block-parallel 構成である。提案 block 内は非 causal。
 - target 層数・tap 位置などは drafter の config が宣言し、target の層数と shape に
@@ -334,10 +337,10 @@ drafter の bf16 linear（q/k/v/o/gate/up/down/fc）は
   tolerance と determinism を検証する）。
 - **byte-exact ではない**。drafter の proposal は draft 品質にのみ影響し、出力の正しさは
   target verify が担保する。
-- target verify は role 固定で `ExactRows`（decode と byte-exact）のままであり、
-  dot2 経路は drafter からのみ opt-in する（`allow_dot2_rows`）。
-- n=1 の単一 request 経路も同じ config を選ぶため、batch 経路と単一経路の
-  kernel 選択は一致する。
+- target verify と decode は同じ行数なら同じ config（`ExactRows`）を選ぶ。dot2 経路は
+  drafter からのみ opt-in する（`allow_dot2_rows`）。
+- kernel 選択は execution role に依存せず行数だけで決まるため、単一 request（rows=1）と
+  batch（rows=2..16）の違いは kernel の差ではなく行数の差だけである。
 
 ### hot-path contract
 
@@ -574,7 +577,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
    - target verify: `[anchor, composite]` の `1 + K` 行を
      `execution_class = SPEC_VERIFY`（行数 > 1 のとき）, `speculative_verify = true`,
      `num_output_rows = 1 + K`, `prefix_tokens = position` で実行する。
-     verify の kernel 選択は role 固定の exact 系（GEMM `ExactRows` / GDN serial variant）である。
+     GEMM の kernel は行数だけで決まり（`2 <= rows <= 16` は `ExactRows`）、
+     GDN recurrence は role 固定の serial variant である。
    - target samples から `spec_greedy_accept` で longest-prefix acceptance を行う。
 
 ### batched step

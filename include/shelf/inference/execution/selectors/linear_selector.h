@@ -19,7 +19,6 @@ struct Bf16GemmSelectorInput {
     uint32_t input_row_stride = 0;
     bool weight_aligned16 = false;
     bool input_aligned16 = false;
-    bool verify_exact = false;
     bool allow_exact_rows = true;
     bool allow_dot2_rows = false;
 };

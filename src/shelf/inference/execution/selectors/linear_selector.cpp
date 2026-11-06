@@ -177,9 +177,9 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
         input.input_aligned16)
         return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
 
-    if (input.allow_exact_rows && input.verify_exact
+    if (input.allow_exact_rows
         && input.rows >= 2u
-        && input.rows <= shelf::kernel::kBf16GemmExactRowsMax
+        && input.rows <= shelf::kernel::kBf16GemmExactRowsKernelMax
         && k_aligned
         && input.weight_aligned16
         && input.input_aligned16

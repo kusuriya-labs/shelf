@@ -440,7 +440,6 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
         (reinterpret_cast<uintptr_t>(weight) & 15u) == 0u;
     lin.input_aligned16 =
         (reinterpret_cast<uintptr_t>(input) & 15u) == 0u;
-    lin.verify_exact = ctx.role == ::shelf::runtime::ExecutionRole::Verify;
     const auto config = select_bf16_gemm_config(lin);
     if (!config) {
         return PhysicalResolveStatus::NotApplicable;

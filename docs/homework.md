@@ -121,6 +121,32 @@ compute 出力が oracle（`3793, 248046` = `OK`）と一致せず `91`（`|`）
 * qwen35moe対応・最適化
 * expert-parallelの実装
 * Small-M GEMMの最適化
+  * 2026-11-06 実測: `shelf-bench gemm --dtype bf16 --shapes 2560:2560` の rows=2 が
+    40.3 µs で、rows=4 の 36.4 µs より遅い（rows=2 だけ損をする）。
+  * `shelf-bench gemm --dtype fp8` の rows=1..16 は 9.4〜10.1 µs で flat。
+    BF16 は rows=2..32 が 36〜40 µs で flat（帯域限界は約 10.3 µs）。
+
+## マルチリクエスト + 投機推論
+
+2026-11-06 時点の実測にもとづく残課題。測定はすべて 1 rank（TP4）per-rank shape
+`2560:2560`、`shelf-bench gemm` p50。
+
+* 既定の `--max-concurrent-requests` は 4（`shelf-compute` / `shelf-server` とも）。
+  DFlash2 の verify 行数は `4 × block_size = 32`。`kDFlash2SpecMaxVerifyRows = 512`。
+* GEMM は rows=4→16 でほぼ時間が変わらない（FP8 9.6→9.8 µs、BF16 36.4→36.9 µs）。
+  並列 4 は GEMM 側では完全に余っており、並列数を上げる余地が大きい。
+* 計測口が未整備。`shelf-bench batch` は合成トークンで即 EOS するため decode
+  スループットを測れず、token/s も出力しない。`shelf-server` 用の並列負荷生成器も無い。
+* やること:
+  * `shelf-bench batch` に corpus 指定と decode token/s を追加する、または `shelf-server`
+    用の並列負荷生成器を用意する（先にこれが必要）。
+  * `--max-concurrent-requests 4 → 16` の効果（スループットと KV 容量）を測る。
+    `--max-num-batched-tokens` の既定 2048 が row bucket を決めている点に注意。
+  * 投機推論は `requests × block_size` 行が flat 領域に収まることを確認し、accept 率と
+    verify の内訳（draft / verify GPU ms）を同時に記録する。
+  * rows 8〜64 の BF16 / FP8 GEMM 効率（2〜4 倍の余地）を詰める。
+  * router 側は decode で 1.73 ms/token（4.5%）。`moe_router` は帯域限界の 3.6 倍、
+    `moe_slot_scan` は prefill で 15 倍。融合（router + top-k + slot_scan + scatter）が候補。
 
 ## pipeline parallel
 
