@@ -96,7 +96,8 @@ prefix cache は compute runtime に実装されており、server はその pro
   から応答を組み立てる。KV page の導入・解放は decode と同じ `PagedKVPool` を見る。
 - 値は page 単位である。`free_tokens` は空き page を `page_tokens` で換算した値であり、
   page 境界の端数は含まない。
-- 取得は短い timeout（既定 5 秒）で行い、間に合わない場合は `kv_cache: null` を返す。
+- 取得は短い timeout（既定 5 秒）で行い、間に合わない場合は直近に取得できた
+  `kv_cache` を `stale: true` として返す。直近値も無ければ `kv_cache: null` を返す。
   server の起動値と `inflight` / `queued` は常に返すため、client は `null` を
   「メトリクス未取得」として扱う。
 

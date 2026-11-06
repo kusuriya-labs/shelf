@@ -306,12 +306,22 @@ async def handle_meta(request: web.Request) -> web.Response:
     meta["prefix_cache"] = compute.capabilities.prefix_cache
     meta["inflight"] = compute.inflight
     meta["queued"] = compute.queued
+    stale = False
     try:
         kv = await compute.kv_stats()
     except (ComputeError, asyncio.TimeoutError) as exc:
-        _log(f"/v1/meta kv stats unavailable: {exc}")
-        kv = None
-    meta["kv_cache"] = None if kv is None else kv.to_wire()
+        kv = compute.last_kv_stats
+        stale = kv is not None
+        now = time.monotonic()
+        if now - request.app.get("kv_stats_warn_at", 0.0) >= 60.0:
+            _log(f"/v1/meta kv stats unavailable: {exc}")
+            request.app["kv_stats_warn_at"] = now
+    if kv is None:
+        meta["kv_cache"] = None
+    else:
+        wire = kv.to_wire()
+        wire["stale"] = stale
+        meta["kv_cache"] = wire
     return web.json_response(meta)
 
 
