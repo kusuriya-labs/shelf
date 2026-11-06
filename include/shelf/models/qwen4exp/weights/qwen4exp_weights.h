@@ -90,11 +90,23 @@ struct Qwen4ExpLayerWeights {
     Qwen4ExpPleWeights ple;
 };
 
+struct Qwen4ExpMtpWeights {
+    bool present = false;
+    shelf::weights::MatrixWeight fc_hidden;
+    shelf::weights::MatrixWeight fc_embedding;
+    shelf::gpu::Tensor pre_fc_norm_hidden;
+    shelf::gpu::Tensor pre_fc_norm_embedding;
+    Qwen4ExpHyperConnectionWeights mixer;
+    Qwen4ExpLayerWeights layer;
+};
+
 struct Qwen4ExpRankWeights {
     shelf::weights::MatrixWeight embed_tokens;  // replicated BF16
     shelf::weights::MatrixWeight lm_head;       // replicated EXL3
     Qwen4ExpHyperConnectionWeights mixer;       // model-level stream collapse
     std::vector<Qwen4ExpLayerWeights> layers;
+    // The draft head is a rank-local copy on rank 0. It is not sharded by the TP plan.
+    Qwen4ExpMtpWeights mtp;
 
     [[nodiscard]] std::uint64_t resident_bytes() const noexcept;
 };
@@ -106,6 +118,9 @@ struct Qwen4ExpLoadOptions {
     // Text-only is the first target. MTP and Vision are not loaded by this path.
     bool load_mtp = false;
     bool load_vision = false;
+    // Load the embedding table, LM head and MTP block only. Used by the MTP draft-head
+    // test and by a rank that does not need the trunk.
+    bool mtp_only = false;
 };
 
 // Logical checkpoint names this rank asks the HF reader for. Exposed for tests and for
@@ -113,7 +128,9 @@ struct Qwen4ExpLoadOptions {
 // safetensors index.
 std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& config,
                                                      std::uint32_t tp_size,
-                                                     std::uint32_t tp_rank);
+                                                     std::uint32_t tp_rank,
+                                                     bool load_mtp = false,
+                                                     bool mtp_only = false);
 
 // Loads one tensor-parallel rank of a Qwen4Exp checkpoint. Routed experts are split on
 // the expert axis. The canonical partition contract does not split EXL3 matrices yet, so

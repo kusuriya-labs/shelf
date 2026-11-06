@@ -173,6 +173,9 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size,
             rank->model_->uses_exl3_linear());
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
+        const std::size_t state_pools =
+            rank->model_->executor_state_reserve_bytes(config.max_scheduled_requests);
+        reserved += state_pools;
         // The capacity formula is an estimate, and it is short of the executor's real footprint
         // by a little (measured: 10 - 130 MiB on a 40 layer model). The KV pool is sized from
         // what is left, so an estimate that is too small turns into a failed allocation after
@@ -285,6 +288,11 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.target_hidden_taps = config.target_hidden_taps;
     exec_config.target_hidden_tap_count = config.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config.tp_combine_f32;
+    exec_config.emit_normed_token_hidden = config.emit_normed_token_hidden;
+    if (config.emit_normed_token_hidden) {
+        const std::uint32_t width = rank->model_->normed_token_hidden_width();
+        if (width != 0u) exec_config.normed_token_hidden_width = width;
+    }
     exec_config.max_context_tokens = config.max_seq_len + 1u;
     exec_config.rope_profile = config.rope_profile;
     exec_config.tp = &rank->context();
@@ -495,6 +503,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;
+        rank_config.emit_normed_token_hidden = config.emit_normed_token_hidden;
         rank_config.tp_combine_f32 = config.tp_combine_f32;
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;

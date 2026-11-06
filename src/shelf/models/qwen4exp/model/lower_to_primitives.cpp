@@ -439,12 +439,276 @@ Result<QH::HybridLoweredPrimitives> lower_qwen4exp_to_primitives(
                                          __LINE__);
         pg.external_outputs.push_back(hidden_tap_values[t]);
     }
+    if (options.expose_wide_hidden) {
+        pg.external_outputs.push_back(hyper);
+    }
 
     for (const auto& node : pg.nodes) {
         if (!node.debug_name.empty() && !node.outputs.empty()) {
             lowered.trace_values.emplace_back(node.debug_name, node.outputs[0]);
         }
     }
+
+    Status status = RT::validate_primitive_graph(pg);
+    if (!status.ok()) return status;
+    return lowered;
+}
+
+Result<QH::HybridLoweredPrimitives> lower_qwen4exp_mtp_to_primitives(
+    const Qwen4ExpTextConfig& config, const Qwen4ExpRankWeights& weights,
+    const Qwen4ExpLowerOptions& options) {
+    if (!weights.mtp.present) {
+        return Status::unsupported("the Qwen4Exp checkpoint has no MTP block", __FILE__,
+                                   __LINE__);
+    }
+    const Qwen4ExpMtpWeights& mtp = weights.mtp;
+    const std::uint32_t hc = static_cast<std::uint32_t>(config.hc_count);
+    const std::uint32_t hidden = static_cast<std::uint32_t>(config.hidden_size);
+    const std::uint32_t lowrank = static_cast<std::uint32_t>(config.hc_lowrank);
+    const std::uint32_t stream_width = hc * hidden;
+    const std::uint32_t global_experts =
+        static_cast<std::uint32_t>(config.ffn.num_experts);
+    const std::uint32_t local_experts =
+        static_cast<std::uint32_t>(mtp.layer.mlp.experts.local_experts);
+    const std::uint32_t expert_begin =
+        static_cast<std::uint32_t>(mtp.layer.mlp.experts.expert_begin);
+    const std::uint32_t top_k =
+        static_cast<std::uint32_t>(config.ffn.num_experts_per_tok);
+    const std::uint32_t intermediate =
+        static_cast<std::uint32_t>(config.ffn.moe_intermediate_size);
+    const std::uint32_t shared_intermediate =
+        static_cast<std::uint32_t>(config.ffn.shared_expert_intermediate_size);
+    const std::uint32_t vocab = static_cast<std::uint32_t>(config.vocab_size);
+    if (hc == 0u || hidden == 0u || lowrank == 0u || global_experts == 0u ||
+        local_experts == 0u || top_k == 0u) {
+        return Status::invalid_argument("Qwen4Exp MTP lowering geometry is empty", __FILE__,
+                                        __LINE__);
+    }
+    if (local_experts != global_experts || expert_begin != 0u) {
+        return Status::unsupported(
+            "Qwen4Exp MTP lowering needs the unsharded expert range", __FILE__, __LINE__);
+    }
+
+    float eps = config.rms_norm_eps;
+    float rope_theta = config.rope_theta;
+    float partial = config.partial_rotary_factor;
+    if (eps == 0.0f) eps = 1e-6f;
+    if (rope_theta == 0.0f) rope_theta = 10000000.0f;
+    if (partial == 0.0f) partial = 0.25f;
+    const std::uint32_t head_dim = static_cast<std::uint32_t>(config.attention_head_dim);
+    const std::uint32_t rotary_dim =
+        static_cast<std::uint32_t>(static_cast<double>(head_dim) * partial);
+
+    QH::HybridLoweredPrimitives lowered;
+    RT::PrimitiveGraph& pg = lowered.graph;
+    pg.grouped_row_shape = RT::GroupedRowShape{local_experts, top_k};
+
+    std::vector<const MatrixWeight*> weight_pointers;
+    auto add_weight = [&](const MatrixWeight& w) -> std::uint32_t {
+        weight_pointers.push_back(&w);
+        lowered.weights.push_back(QH::make_weight_slot(w));
+        pg.weight_table.push_back(RT::MatrixwiseShapeKey{w.rows, w.cols});
+        return static_cast<std::uint32_t>(weight_pointers.size() - 1);
+    };
+    auto reg_param = [&](const gpu::Tensor& t) -> std::uint32_t {
+        RT::StaticParameterSlot s{};
+        s.device_ptr = t.data<void>();
+        s.elements = tensor_elements(t);
+        s.dtype = t.element_size() == 2 ? RT::ValueDType::BF16 : RT::ValueDType::F32;
+        lowered.parameters.push_back(s);
+        return static_cast<std::uint32_t>(lowered.parameters.size() - 1);
+    };
+
+    const std::uint32_t embed_index = add_weight(weights.embed_tokens);
+    const std::uint32_t lm_index = add_weight(weights.lm_head);
+    const std::uint32_t fc_hidden_index = add_weight(mtp.fc_hidden);
+    const std::uint32_t fc_embedding_index = add_weight(mtp.fc_embedding);
+
+    const auto& lw = mtp.layer;
+    const std::uint32_t attn_q = add_weight(lw.attention.q_proj);
+    const std::uint32_t attn_k = add_weight(lw.attention.k_proj);
+    const std::uint32_t attn_v = add_weight(lw.attention.v_proj);
+    const std::uint32_t attn_o = add_weight(lw.attention.o_proj);
+    const std::uint32_t router = add_weight(lw.mlp.router);
+    const std::uint32_t shared_gate = add_weight(lw.mlp.shared_gate);
+    const std::uint32_t shared_gate_proj = add_weight(lw.mlp.shared_gate_proj);
+    const std::uint32_t shared_up_proj = add_weight(lw.mlp.shared_up_proj);
+    const std::uint32_t shared_down_proj = add_weight(lw.mlp.shared_down_proj);
+    const std::uint32_t gate_experts = add_weight(lw.mlp.gate_experts);
+    const std::uint32_t up_experts = add_weight(lw.mlp.up_experts);
+    const std::uint32_t down_experts = add_weight(lw.mlp.down_experts);
+
+    const std::uint32_t attn_hyper_down =
+        add_weight(lw.attn_hyper_connection.input_mix_down);
+    const std::uint32_t attn_hyper_up =
+        add_weight(lw.attn_hyper_connection.input_mix_up);
+    const std::uint32_t attn_hyper_inject =
+        add_weight(lw.attn_hyper_connection.block_inject);
+    const std::uint32_t mlp_hyper_down =
+        add_weight(lw.mlp_hyper_connection.input_mix_down);
+    const std::uint32_t mlp_hyper_up = add_weight(lw.mlp_hyper_connection.input_mix_up);
+    const std::uint32_t mlp_hyper_inject =
+        add_weight(lw.mlp_hyper_connection.block_inject);
+    const std::uint32_t mixer_down = add_weight(mtp.mixer.input_mix_down);
+    const std::uint32_t mixer_up = add_weight(mtp.mixer.input_mix_up);
+
+    const std::uint32_t p_enorm = reg_param(mtp.pre_fc_norm_embedding);
+    const std::uint32_t p_hnorm = reg_param(mtp.pre_fc_norm_hidden);
+    const std::uint32_t p_attn_norm = reg_param(lw.attn_hyper_connection.hc_norm);
+    const std::uint32_t p_mlp_norm = reg_param(lw.mlp_hyper_connection.hc_norm);
+    const std::uint32_t p_q_norm = reg_param(lw.attention.q_norm);
+    const std::uint32_t p_k_norm = reg_param(lw.attention.k_norm);
+    const std::uint32_t p_mixer_norm = reg_param(mtp.mixer.hc_norm);
+
+    QH::Emitter em{pg};
+    const RT::RowwiseShapeKey hidden_key{hidden};
+    const RT::RowwiseShapeKey stream_key{stream_width};
+
+    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
+    RT::ValueId hidden_in = em.value(stream_width);
+    pg.external_inputs.push_back(tokens);
+    pg.external_inputs.push_back(hidden_in);
+
+    RT::ValueId embedded = em.value(hidden);
+    {
+        RT::EmbeddingLookupNode n;
+        n.vocab_size = weights.embed_tokens.rows;
+        n.hidden_size = hidden;
+        n.weight_shape =
+            RT::MatrixwiseShapeKey{weights.embed_tokens.rows, weights.embed_tokens.cols};
+        n.weight_index = embed_index;
+        em.emit(RT::PrimitiveNode{n}, {tokens}, {embedded});
+        pg.nodes.back().debug_name = "mtp.embedding";
+    }
+
+    RT::RmsNormNode e_norm_node;
+    e_norm_node.shape = hidden_key;
+    e_norm_node.eps = eps;
+    e_norm_node.group_size = hidden;
+    e_norm_node.parameter_index = p_enorm;
+    e_norm_node.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+    RT::ValueId e_norm = em.value(hidden);
+    em.emit(RT::PrimitiveNode{e_norm_node}, {embedded}, {e_norm});
+    pg.nodes.back().debug_name = "mtp.pre_fc_norm_embedding";
+
+    RT::RmsNormNode h_norm_node;
+    h_norm_node.shape = stream_key;
+    h_norm_node.eps = eps;
+    h_norm_node.group_size = hidden;
+    h_norm_node.parameter_index = p_hnorm;
+    h_norm_node.weight_mode = RT::RmsNormWeightMode::ONE_PLUS;
+    RT::ValueId h_norm = em.value(stream_width);
+    em.emit(RT::PrimitiveNode{h_norm_node}, {hidden_in}, {h_norm});
+    pg.nodes.back().debug_name = "mtp.pre_fc_norm_hidden";
+
+    RT::ValueId embedded_proj = em.linear(mtp.fc_embedding, fc_embedding_index, e_norm);
+    pg.nodes.back().debug_name = "mtp.fc_embedding";
+
+    RT::ValueId hyper{0};
+    for (std::uint32_t stream = 0; stream < hc; ++stream) {
+        RT::ValueId stream_view = em.value(hidden);
+        pg.views.push_back(RT::PrimitiveValueView{stream_view, h_norm, stream * hidden,
+                                                  hidden});
+        RT::ValueId hidden_proj =
+            em.linear(mtp.fc_hidden, fc_hidden_index, stream_view);
+        pg.nodes.back().debug_name =
+            "mtp.fc_hidden." + std::to_string(stream);
+        RT::ValueId sum = em.value(hidden);
+        em.emit(RT::PrimitiveNode{RT::ResidualAddNode{hidden_key}},
+                {embedded_proj, hidden_proj}, {sum});
+        pg.nodes.back().debug_name =
+            "mtp.combine." + std::to_string(stream);
+        if (stream == 0u) {
+            hyper = sum;
+        } else {
+            RT::ValueId concatenated = em.value((stream + 1u) * hidden);
+            RT::ConcatNode concat;
+            concat.shape = RT::RowwiseShapeKey{(stream + 1u) * hidden};
+            concat.input_shape_a = RT::RowwiseShapeKey{stream * hidden};
+            concat.input_shape_b = hidden_key;
+            em.emit(RT::PrimitiveNode{concat}, {hyper, sum}, {concatenated});
+            pg.nodes.back().debug_name =
+                "mtp.combine_concat." + std::to_string(stream);
+            hyper = concatenated;
+        }
+    }
+
+    Qwen4ExpLayerLowering layer;
+    layer.is_gdn = false;
+    layer.dense_attention = true;
+    layer.hyper.hc = hc;
+    layer.hyper.hidden = hidden;
+    layer.hyper.lowrank = lowrank;
+    layer.hyper.eps = eps;
+    layer.hyper.norm_parameter_index = p_attn_norm;
+    layer.mlp_hyper_norm_parameter_index = p_mlp_norm;
+
+    layer.attn_hyper_weights.down = &lw.attn_hyper_connection.input_mix_down;
+    layer.attn_hyper_weights.up = &lw.attn_hyper_connection.input_mix_up;
+    layer.attn_hyper_weights.inject = &lw.attn_hyper_connection.block_inject;
+    layer.attn_hyper_indices = {attn_hyper_down, attn_hyper_up, attn_hyper_inject};
+    layer.mlp_hyper_weights.down = &lw.mlp_hyper_connection.input_mix_down;
+    layer.mlp_hyper_weights.up = &lw.mlp_hyper_connection.input_mix_up;
+    layer.mlp_hyper_weights.inject = &lw.mlp_hyper_connection.block_inject;
+    layer.mlp_hyper_indices = {mlp_hyper_down, mlp_hyper_up, mlp_hyper_inject};
+
+    layer.qsa_geometry.attention.query_heads =
+        static_cast<std::uint32_t>(config.num_attention_heads);
+    layer.qsa_geometry.attention.kv_heads =
+        static_cast<std::uint32_t>(config.num_key_value_heads);
+    layer.qsa_geometry.attention.head_dim = head_dim;
+    layer.qsa_geometry.attention.rotary_dim = rotary_dim;
+    layer.qsa_geometry.attention.rope_theta = rope_theta;
+    layer.qsa_geometry.attention.rope_attention_factor = options.rope_attention_factor;
+    layer.qsa_geometry.attention.eps = eps;
+    layer.qsa_geometry.attention.tp_combine = false;
+    layer.qsa_weights.attention.q = &lw.attention.q_proj;
+    layer.qsa_weights.attention.k = &lw.attention.k_proj;
+    layer.qsa_weights.attention.v = &lw.attention.v_proj;
+    layer.qsa_weights.attention.o = &lw.attention.o_proj;
+    layer.qsa_indices.attention.w_q = attn_q;
+    layer.qsa_indices.attention.w_k = attn_k;
+    layer.qsa_indices.attention.w_v = attn_v;
+    layer.qsa_indices.attention.w_o = attn_o;
+    layer.qsa_indices.attention.p_q_norm = p_q_norm;
+    layer.qsa_indices.attention.p_k_norm = p_k_norm;
+    layer.qsa_indices.attention.state_index = 0u;
+
+    layer.moe_geometry = {global_experts, local_experts, expert_begin, top_k, hidden,
+                          intermediate, shared_intermediate, 1.0f};
+    layer.moe_weights = lw.mlp;
+    layer.moe_indices = {router, shared_gate, shared_gate_proj, shared_up_proj,
+                         shared_down_proj, gate_experts, up_experts, down_experts};
+
+    auto block_output = emit_qwen4exp_layer(em, layer, hyper, "mtp.block.");
+    if (!block_output.ok()) return block_output.status();
+
+    HyperConnectionSiteGeometry mixer_geometry;
+    mixer_geometry.hc = hc;
+    mixer_geometry.hidden = hidden;
+    mixer_geometry.lowrank = lowrank;
+    mixer_geometry.eps = eps;
+    mixer_geometry.norm_parameter_index = p_mixer_norm;
+    HyperConnectionSiteWeights mixer_weights;
+    mixer_weights.down = &mtp.mixer.input_mix_down;
+    mixer_weights.up = &mtp.mixer.input_mix_up;
+    HyperConnectionSiteIndices mixer_indices{mixer_down, mixer_up, 0u};
+    auto mixed = emit_hyper_connection_mix(em, mixer_geometry, mixer_weights,
+                                           mixer_indices, block_output.value(), false,
+                                           "mtp.mixer.");
+    if (!mixed.ok()) return mixed.status();
+
+    QH::HybridHeadLowering head;
+    head.hidden_features = hidden;
+    head.eps = eps;
+    head.final_norm_param = UINT32_MAX;
+    head.apply_final_norm = false;
+    head.lm_shape = RT::MatrixwiseShapeKey{weights.lm_head.rows, weights.lm_head.cols};
+    head.lm_weight_index = lm_index;
+    head.out_vocab = vocab;
+    QH::emit_hybrid_head(em, head, mixed.value().mixed, "mtp.head.");
+
+    pg.external_outputs.push_back(block_output.value());
 
     Status status = RT::validate_primitive_graph(pg);
     if (!status.ok()) return status;

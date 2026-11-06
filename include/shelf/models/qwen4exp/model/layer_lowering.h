@@ -15,6 +15,9 @@ namespace qwen4exp {
 
 struct Qwen4ExpLayerLowering {
     bool is_gdn = false;
+    // The MTP draft head attends densely: its QSA indexer is not part of the first draft
+    // path, and a dense block is a numerical superset for the target verify.
+    bool dense_attention = false;
 
     HyperConnectionSiteGeometry hyper;
     // The MLP site has its own hc_norm. When unset, the attention norm is reused.

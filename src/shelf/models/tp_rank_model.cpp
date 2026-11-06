@@ -205,6 +205,11 @@ public:
 
     bool uses_exl3_linear() const override { return true; }
 
+    std::uint32_t normed_token_hidden_width() const override {
+        return static_cast<std::uint32_t>(model_.text_config().hc_count *
+                                          model_.text_config().hidden_size);
+    }
+
     Result<q35::Executor> create_executor(
         q35::SequenceSlotPool& sequence_pool, q35::GdnStatePool& gdn_state_pool,
         q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
@@ -280,6 +285,7 @@ Result<q35::Executor> create_qwen4exp_model_executor(
     options.rope_attention_factor = static_cast<float>(config.rope_profile.attention_factor);
     options.hidden_taps = std::span<const std::uint32_t>(
         config.target_hidden_taps.data(), config.target_hidden_tap_count);
+    options.expose_wide_hidden = config.emit_normed_token_hidden;
     auto lowered = qwen4exp::lower_qwen4exp_to_primitives(cfg, model.weights(), options);
     if (!lowered.ok()) return lowered.status();
 

@@ -54,6 +54,15 @@ public:
     // executor's staging planes for that form are large, and the memory plan only reserves
     // them when a program will actually run such a linear.
     virtual bool uses_exl3_linear() const = 0;
+    // State pools the executor owns and allocates after the memory plan has sized the KV
+    // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
+    // the rank runtime already holds.
+    virtual std::size_t executor_state_reserve_bytes(std::size_t max_scheduled_requests) const {
+        return 0u;
+    }
+    // Width of the hidden the family exposes for MTP. Zero means the model's hidden size.
+    // Qwen4Exp exposes the pre-mixer wide residual (hc * hidden).
+    virtual std::uint32_t normed_token_hidden_width() const { return 0u; }
 
     virtual shelf::Result<shelf::qwen35::Executor> create_executor(
         shelf::qwen35::SequenceSlotPool& sequence_pool,

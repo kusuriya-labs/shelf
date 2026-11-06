@@ -1955,11 +1955,17 @@ Result<Executor> create_executor(
     st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.token_hidden);
     if (!st.ok()) return st;
     if (input.lowered.graph.external_inputs.size() > 1u) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.input_hidden);
+        const std::size_t external_width =
+            config.external_hidden_width != 0u ? config.external_hidden_width : H;
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, external_width},
+                                                ex.input_hidden);
         if (!st.ok()) return st;
     }
     if (config.emit_normed_token_hidden) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.normed_token_hidden);
+        const std::size_t normed_width =
+            config.normed_token_hidden_width != 0u ? config.normed_token_hidden_width : H;
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, normed_width},
+                                                ex.normed_token_hidden);
         if (!st.ok()) return st;
     }
     for (uint32_t t = 0; t < config.target_hidden_tap_count; ++t) {

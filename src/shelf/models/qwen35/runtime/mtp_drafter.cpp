@@ -74,6 +74,11 @@ ScheduledBatch make_batch(state::PagedSequenceState& sequence,
     return batch;
 }
 
+const gpu::Tensor& drafter_hidden_output(const MtpDrafter& drafter) {
+    return drafter.wide_hidden ? drafter.executor.normed_token_hidden
+                               : drafter.executor.token_hidden;
+}
+
 Result<int32_t> copy_sampled_token(const gpu::Tensor& sampled, hipStream_t stream) {
     int32_t token = -1;
     const hipError_t err =
@@ -94,7 +99,7 @@ Status copy_hidden_to_input(MtpDrafter& drafter, const gpu::Tensor& source,
                             uint32_t source_row_offset, uint32_t rows,
                             hipStream_t stream) {
     if (rows == 0u) return Status::make_ok();
-    const std::size_t hidden = drafter.config.hidden_size;
+    const std::size_t hidden = drafter.hidden_width;
     void* dst = drafter.executor.input_hidden.data<void>();
     if (dst == nullptr) {
         return Status::invalid_state("mtp drafter has no hidden input buffer", __FILE__,
@@ -267,6 +272,10 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->config = mtp_executor_config(*input.config);
     drafter->max_seq_len = options.max_seq_len;
     drafter->num_drafts = options.num_drafts;
+    drafter->hidden_width = input.hidden_width != 0u
+        ? input.hidden_width
+        : static_cast<std::uint32_t>(input.config->hidden_size);
+    drafter->wide_hidden = input.wide_hidden;
 
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
@@ -303,6 +312,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     executor_config.max_scheduled_requests = 1u;
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
+    executor_config.external_hidden_width = drafter->hidden_width;
+    executor_config.emit_normed_token_hidden = drafter->wide_hidden;
+    executor_config.normed_token_hidden_width = drafter->hidden_width;
     executor_config.rope_profile = options.rope_profile;
     executor_config.backend = runtime::DecodeBackend::Hip;
 
@@ -587,7 +599,7 @@ Result<MtpIterationOutput> mtp_spec_step(
 
     std::array<int32_t, kMtpMaxDrafts> proposals{};
     proposals[0] = first_sampled.value();
-    copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 0u, 1u, stream);
+    copy = copy_hidden_to_input(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
     if (!copy.ok()) return copy;
 
     for (uint32_t i = 1u; i < drafts; ++i) {
@@ -598,7 +610,7 @@ Result<MtpIterationOutput> mtp_spec_step(
         auto sampled = copy_sampled_token(step.value().sampled_tokens, stream);
         if (!sampled.ok()) return sampled.status();
         proposals[i] = sampled.value();
-        copy = copy_hidden_to_input(drafter, drafter.executor.token_hidden, 0u, 1u, stream);
+        copy = copy_hidden_to_input(drafter, drafter_hidden_output(drafter), 0u, 1u, stream);
         if (!copy.ok()) return copy;
     }
 

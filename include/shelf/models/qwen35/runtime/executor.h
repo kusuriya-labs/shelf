@@ -57,6 +57,11 @@ struct ExecutorConfig {
     PipelineStage stage;
     bool emit_normed_token_hidden = false;
     bool external_hidden_input = false;
+    // 0 means the family's hidden size. Qwen4Exp's MTP block consumes the pre-mixer wide
+    // residual (hc * hidden), so both its hidden input and its returned residual differ
+    // from the token-row hidden.
+    std::uint32_t external_hidden_width = 0;
+    std::uint32_t normed_token_hidden_width = 0;
 };
 
 using ::shelf::runtime::DispatchStagingPool;

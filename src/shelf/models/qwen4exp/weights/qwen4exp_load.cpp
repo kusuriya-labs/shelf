@@ -211,6 +211,32 @@ std::vector<std::string> ple_names(const std::string& prefix) {
     };
 }
 
+std::vector<std::string> mtp_names(const Qwen4ExpTextConfig& config) {
+    const std::uint32_t experts = static_cast<std::uint32_t>(config.ffn.num_experts);
+    std::vector<std::string> names = {
+        "mtp.fc_hidden.weight",
+        "mtp.fc_embedding.weight",
+        "mtp.pre_fc_norm_hidden.weight",
+        "mtp.pre_fc_norm_embedding.weight",
+        "mtp.hyper_connection_mixer.input_mix_weight_down.weight",
+        "mtp.hyper_connection_mixer.input_mix_weight_up.weight",
+        "mtp.hyper_connection_mixer.hc_norm.weight",
+    };
+    const std::string layer_prefix = "mtp.layers.0.";
+    const std::vector<std::string> mtp_attn_hyper =
+        hyper_names(layer_prefix + "attn_hyper_connection.");
+    const std::vector<std::string> mtp_mlp_hyper =
+        hyper_names(layer_prefix + "mlp_hyper_connection.");
+    const std::vector<std::string> mtp_attention =
+        attention_names(layer_prefix, false);
+    names.insert(names.end(), mtp_attn_hyper.begin(), mtp_attn_hyper.end());
+    names.insert(names.end(), mtp_mlp_hyper.begin(), mtp_mlp_hyper.end());
+    names.insert(names.end(), mtp_attention.begin(), mtp_attention.end());
+    const std::vector<std::string> moe = moe_names(layer_prefix, 0u, experts);
+    names.insert(names.end(), moe.begin(), moe.end());
+    return names;
+}
+
 Status load_matrix(const qqb::QuantizedModelReader& reader, const std::string& name,
                    GpuArena& arena, hipStream_t stream, const WeightLoadOptions& options,
                    MatrixWeight& out) {
@@ -250,10 +276,10 @@ Status load_hyper(const qqb::QuantizedModelReader& reader, const std::string& pr
     return load_small(reader, names[3], arena, stream, options, out.hc_norm);
 }
 
-Status load_mixer(const qqb::QuantizedModelReader& reader, GpuArena& arena,
-                  hipStream_t stream, const WeightLoadOptions& options,
-                  Qwen4ExpHyperConnectionWeights& out) {
-    const std::string prefix = "model.language_model.hyper_connection_mixer.";
+Status load_mixer_prefix(const qqb::QuantizedModelReader& reader, const std::string& prefix,
+                         GpuArena& arena, hipStream_t stream,
+                         const WeightLoadOptions& options,
+                         Qwen4ExpHyperConnectionWeights& out) {
     Status st = load_matrix(reader, prefix + "input_mix_weight_down.weight", arena, stream,
                             options, out.input_mix_down);
     if (!st.ok()) return st;
@@ -261,6 +287,13 @@ Status load_mixer(const qqb::QuantizedModelReader& reader, GpuArena& arena,
                      out.input_mix_up);
     if (!st.ok()) return st;
     return load_small(reader, prefix + "hc_norm.weight", arena, stream, options, out.hc_norm);
+}
+
+Status load_mixer(const qqb::QuantizedModelReader& reader, GpuArena& arena,
+                  hipStream_t stream, const WeightLoadOptions& options,
+                  Qwen4ExpHyperConnectionWeights& out) {
+    return load_mixer_prefix(reader, "model.language_model.hyper_connection_mixer.", arena,
+                             stream, options, out);
 }
 
 Status load_attention(const qqb::QuantizedModelReader& reader, const std::string& prefix,
@@ -642,6 +675,42 @@ Status load_ple(const qqb::QuantizedModelReader& reader, const std::string& pref
     return Status::make_ok();
 }
 
+Status load_mtp(const qqb::QuantizedModelReader& reader, const Qwen4ExpTextConfig& config,
+                GpuArena& arena, hipStream_t stream, const WeightLoadOptions& options,
+                Qwen4ExpMtpWeights& out) {
+    Status st = load_matrix(reader, "mtp.fc_hidden.weight", arena, stream, options,
+                            out.fc_hidden);
+    if (!st.ok()) return st;
+    st = load_matrix(reader, "mtp.fc_embedding.weight", arena, stream, options,
+                     out.fc_embedding);
+    if (!st.ok()) return st;
+    st = load_small(reader, "mtp.pre_fc_norm_hidden.weight", arena, stream, options,
+                    out.pre_fc_norm_hidden);
+    if (!st.ok()) return st;
+    st = load_small(reader, "mtp.pre_fc_norm_embedding.weight", arena, stream, options,
+                    out.pre_fc_norm_embedding);
+    if (!st.ok()) return st;
+    st = load_mixer_prefix(reader, "mtp.hyper_connection_mixer.", arena, stream, options,
+                           out.mixer);
+    if (!st.ok()) return st;
+
+    const std::string layer_prefix = "mtp.layers.0.";
+    st = load_hyper(reader, layer_prefix + "attn_hyper_connection.", arena, stream, options,
+                    out.layer.attn_hyper_connection);
+    if (!st.ok()) return st;
+    st = load_hyper(reader, layer_prefix + "mlp_hyper_connection.", arena, stream, options,
+                    out.layer.mlp_hyper_connection);
+    if (!st.ok()) return st;
+    st = load_attention(reader, layer_prefix, false, arena, stream, options,
+                        out.layer.attention);
+    if (!st.ok()) return st;
+    st = load_moe(reader, layer_prefix, config, 1u, 0u, arena, stream, options,
+                  out.layer.mlp);
+    if (!st.ok()) return st;
+    out.present = true;
+    return Status::make_ok();
+}
+
 }  // namespace
 
 std::uint64_t Qwen4ExpRankWeights::resident_bytes() const noexcept {
@@ -649,6 +718,32 @@ std::uint64_t Qwen4ExpRankWeights::resident_bytes() const noexcept {
     (void)add_matrix(total, embed_tokens);
     (void)add_matrix(total, lm_head);
     (void)add_hyper(total, mixer);
+    if (mtp.present) {
+        (void)add_matrix(total, mtp.fc_hidden);
+        (void)add_matrix(total, mtp.fc_embedding);
+        (void)add_tensor(total, mtp.pre_fc_norm_hidden);
+        (void)add_tensor(total, mtp.pre_fc_norm_embedding);
+        (void)add_hyper(total, mtp.mixer);
+        (void)add_hyper(total, mtp.layer.attn_hyper_connection);
+        (void)add_hyper(total, mtp.layer.mlp_hyper_connection);
+        (void)add_matrix(total, mtp.layer.attention.q_proj);
+        (void)add_matrix(total, mtp.layer.attention.k_proj);
+        (void)add_matrix(total, mtp.layer.attention.v_proj);
+        (void)add_matrix(total, mtp.layer.attention.o_proj);
+        (void)add_tensor(total, mtp.layer.attention.q_norm);
+        (void)add_tensor(total, mtp.layer.attention.k_norm);
+        (void)add_matrix(total, mtp.layer.attention.index_qk_proj);
+        (void)add_tensor(total, mtp.layer.attention.index_q_layernorm);
+        (void)add_tensor(total, mtp.layer.attention.index_k_layernorm);
+        (void)add_matrix(total, mtp.layer.mlp.router);
+        (void)add_matrix(total, mtp.layer.mlp.shared_gate);
+        (void)add_matrix(total, mtp.layer.mlp.shared_gate_proj);
+        (void)add_matrix(total, mtp.layer.mlp.shared_up_proj);
+        (void)add_matrix(total, mtp.layer.mlp.shared_down_proj);
+        (void)add_matrix(total, mtp.layer.mlp.gate_experts);
+        (void)add_matrix(total, mtp.layer.mlp.up_experts);
+        (void)add_matrix(total, mtp.layer.mlp.down_experts);
+    }
     for (const Qwen4ExpLayerWeights& layer : layers) {
         (void)add_hyper(total, layer.attn_hyper_connection);
         (void)add_hyper(total, layer.mlp_hyper_connection);
@@ -690,7 +785,8 @@ std::uint64_t Qwen4ExpRankWeights::resident_bytes() const noexcept {
 
 std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& config,
                                                      std::uint32_t tp_size,
-                                                     std::uint32_t tp_rank) {
+                                                     std::uint32_t tp_rank,
+                                                     bool load_mtp, bool mtp_only) {
     std::vector<std::string> names = {
         "model.language_model.embed_tokens.weight",
         "model.language_model.lm_head.weight",
@@ -698,6 +794,14 @@ std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& c
         "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight",
         "model.language_model.hyper_connection_mixer.hc_norm.weight",
     };
+    if (mtp_only) {
+        names.resize(2u);
+        if (load_mtp) {
+            const std::vector<std::string> mtp = mtp_names(config);
+            names.insert(names.end(), mtp.begin(), mtp.end());
+        }
+        return names;
+    }
     const std::uint32_t local_experts =
         static_cast<std::uint32_t>(config.ffn.num_experts) / tp_size;
     const std::uint32_t expert_begin = tp_rank * local_experts;
@@ -716,6 +820,10 @@ std::vector<std::string> qwen4exp_rank_logical_names(const Qwen4ExpTextConfig& c
             const std::vector<std::string> ple = ple_names(prefix);
             names.insert(names.end(), ple.begin(), ple.end());
         }
+    }
+    if (load_mtp) {
+        const std::vector<std::string> mtp = mtp_names(config);
+        names.insert(names.end(), mtp.begin(), mtp.end());
     }
     return names;
 }
@@ -740,7 +848,8 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     const TensorPartitionPlan& plan = plan_result.value();
 
     const std::vector<std::string> names =
-        qwen4exp_rank_logical_names(config, options.tp_size, options.tp_rank);
+        qwen4exp_rank_logical_names(config, options.tp_size, options.tp_rank,
+                                    options.load_mtp, options.mtp_only);
     auto reader_result = qhy::open_quantized_model_reader(
         model_dir, names, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();
@@ -758,35 +867,53 @@ Result<Qwen4ExpRankWeights> load_qwen4exp_rank(const std::string& model_dir,
     st = load_matrix(reader, "model.language_model.lm_head.weight", arena, stream,
                      weight_options, out.lm_head);
     if (!st.ok()) return st;
-    st = load_mixer(reader, arena, stream, weight_options, out.mixer);
-    if (!st.ok()) return st;
+    if (!options.mtp_only) {
+        st = load_mixer(reader, arena, stream, weight_options, out.mixer);
+        if (!st.ok()) return st;
+    }
 
-    for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
-        const std::string prefix = layer_prefix(layer);
-        Qwen4ExpLayerWeights& weights = out.layers[layer];
-        st = load_hyper(reader, prefix + "attn_hyper_connection.", arena, stream,
-                        weight_options, weights.attn_hyper_connection);
-        if (!st.ok()) return st;
-        st = load_hyper(reader, prefix + "mlp_hyper_connection.", arena, stream,
-                        weight_options, weights.mlp_hyper_connection);
-        if (!st.ok()) return st;
-        st = load_attention(reader, prefix, qhy::layer_is_gdn(config, layer), arena, stream,
-                            weight_options, weights.attention);
-        if (!st.ok()) return st;
-        st = load_moe(reader, prefix, config, options.tp_size, options.tp_rank, arena, stream,
-                      weight_options, weights.mlp);
-        if (!st.ok()) return st;
-        if (config.layer_has_ple(layer)) {
-            st = load_ple(reader, prefix, arena, stream, weight_options, weights.ple);
+    if (!options.mtp_only) {
+        for (std::size_t layer = 0; layer < config.num_hidden_layers; ++layer) {
+            const std::string prefix = layer_prefix(layer);
+            Qwen4ExpLayerWeights& weights = out.layers[layer];
+            st = load_hyper(reader, prefix + "attn_hyper_connection.", arena, stream,
+                            weight_options, weights.attn_hyper_connection);
             if (!st.ok()) return st;
+            st = load_hyper(reader, prefix + "mlp_hyper_connection.", arena, stream,
+                            weight_options, weights.mlp_hyper_connection);
+            if (!st.ok()) return st;
+            st = load_attention(reader, prefix, qhy::layer_is_gdn(config, layer), arena,
+                                stream, weight_options, weights.attention);
+            if (!st.ok()) return st;
+            st = load_moe(reader, prefix, config, options.tp_size, options.tp_rank, arena,
+                          stream, weight_options, weights.mlp);
+            if (!st.ok()) return st;
+            if (config.layer_has_ple(layer)) {
+                st = load_ple(reader, prefix, arena, stream, weight_options, weights.ple);
+                if (!st.ok()) return st;
+            }
+            const hipError_t sync_error = hipStreamSynchronize(stream);
+            if (sync_error != hipSuccess) {
+                return Status::hip_error("Qwen4Exp layer upload",
+                                         hipGetErrorString(sync_error), __FILE__,
+                                         __LINE__);
+            }
         }
+    }
+
+    if (options.load_mtp && options.tp_rank == 0u) {
+        st = load_mtp(reader, config, arena, stream, weight_options, out.mtp);
+        if (!st.ok()) return st;
         const hipError_t sync_error = hipStreamSynchronize(stream);
         if (sync_error != hipSuccess) {
-            return Status::hip_error("Qwen4Exp layer upload", hipGetErrorString(sync_error),
+            return Status::hip_error("Qwen4Exp MTP upload", hipGetErrorString(sync_error),
                                      __FILE__, __LINE__);
         }
     }
 
+    if (options.mtp_only) {
+        return out;
+    }
     Status valid = validate_qwen4exp_rank(out, config, options.tp_size, options.tp_rank);
     if (!valid.ok()) return valid;
     return out;

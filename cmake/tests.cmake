@@ -613,6 +613,10 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # Skips (exit 77) when none is set.
     shelf_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35)
 
+    # Qwen4Exp MTP draft head against a real checkpoint. Model dir via
+    # SHELF_MODEL_DIR_QWEN4EXP. Skips (exit 77) when unset.
+    shelf_add_test(NAME test_qwen4exp_mtp SOURCE unit/test_qwen4exp_mtp.cpp LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES shelf_qwen4exp shelf_qwen35 shelf_qwen35_runtime shelf_qwen_hybrid shelf_runtime shelf_inference_state shelf_inference_execution shelf_inference_scheduling shelf_kernels_correctness shelf_kernels_optimized shelf_qwen35_kernels_optimized shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+
     add_test(NAME test_mtp_parity
              COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
                  --gpu-count 1 --cost-gb 30 --timeout 1800
