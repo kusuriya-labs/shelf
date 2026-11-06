@@ -137,10 +137,23 @@ request の speculative decode 経路に入る。DFlash2 とは排他的で、
   --max-new-tokens 32 --max-seq-len 512 --device 0
 ```
 
+dense checkpoint を TP=2 で動かす場合:
+
+```bash
+./build/shelf-compute \
+  --model-dir models/Qwen3.8-27B-exl3 \
+  --mtp --mtp-drafts 4 \
+  --max-new-tokens 32 --max-seq-len 128 \
+  --device 0,1 --tensor-parallel 2 \
+  --prefix-cache 0 --arena-gib 30
+```
+
 制約:
 
 - checkpoint に MTP block（`mtp.*`）が必要。無い checkpoint で `--mtp` を指定すると起動時に失敗する。
-- `--tensor-parallel 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
+- dense checkpoint は `--tensor-parallel 2` に対応する。grouped expert（MoE）の TP では
+  MTP block を rank に分割しないため、現行の MoE TP load は MTP を拒否する。
+- `--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` は未対応。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
 - grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は

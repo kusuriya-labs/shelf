@@ -618,10 +618,18 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.target_hidden_taps = config_.target_hidden_taps;
     tp_config.target_hidden_tap_count = config_.target_hidden_tap_count;
     tp_config.tp_combine_f32 = config_.tp_combine_f32;
+    tp_config.emit_normed_token_hidden = config_.mtp;
     if (config_.rope_profile.has_value()) {
         tp_config.rope_profile = *config_.rope_profile;
     }
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
+    tp_config.load_options.load_mtp_layers = config_.mtp;
+    if (config_.mtp) {
+        constexpr std::size_t kMtpTpReserveBytes = 4ull * 1024ull * 1024ull * 1024ull;
+        if (tp_config.working_set_reserve_bytes < kMtpTpReserveBytes) {
+            tp_config.working_set_reserve_bytes = kMtpTpReserveBytes;
+        }
+    }
 
     const auto t_load_start = std::chrono::steady_clock::now();
     auto group_result = shelf::models::TpGroup::create(tp_config);

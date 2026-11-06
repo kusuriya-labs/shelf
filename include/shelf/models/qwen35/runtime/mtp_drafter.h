@@ -63,6 +63,35 @@ struct MtpTiming {
     double round_ms = 0.0;
 };
 
+class TpBatchHook;
+
+struct MtpGdnRankBinding {
+    const state::GdnStatePool* pool = nullptr;
+    gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
+    int device = -1;
+};
+
+struct MtpGdnRankState {
+    const state::GdnStatePool* pool = nullptr;
+    hipStream_t stream = nullptr;
+    int device = -1;
+    void* conv_snapshot = nullptr;
+    void* recurrent_snapshot = nullptr;
+    std::size_t conv_bytes = 0;
+    std::size_t recurrent_bytes = 0;
+    GdnSpecHistory history;
+    float* compact_delta = nullptr;
+    float* compact_k = nullptr;
+    float* compact_a = nullptr;
+    std::uint64_t compact_delta_layer_stride = 0;
+    std::uint64_t compact_k_layer_stride = 0;
+    std::uint64_t compact_a_layer_stride = 0;
+    ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
+    ::shelf::runtime::DeviceRequestDescriptor commit_request_host{};
+    std::uint32_t gdn_key_heads = 0;
+};
+
 struct MtpDrafter {
     shelf::qwen_hybrid::QwenHybridConfig config;
     std::unique_ptr<state::SequenceSlotPool> slot_pool;
@@ -86,6 +115,12 @@ struct MtpDrafter {
     ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
     ::shelf::runtime::DeviceRequestDescriptor commit_request_host{};
     std::uint32_t gdn_key_heads = 0;
+
+    const state::GdnStatePool* target_pool = nullptr;
+    hipStream_t target_stream = nullptr;
+    int target_device = -1;
+    std::vector<MtpGdnRankState> extra_ranks;
+    TpBatchHook* tp_hook = nullptr;
 
     std::vector<int32_t> last_tokens;
     uint32_t last_position = 0;
@@ -138,7 +173,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const MtpDrafterConfig& options);
+    const MtpDrafterConfig& options,
+    const std::vector<MtpGdnRankBinding>* extra_ranks = nullptr,
+    TpBatchHook* tp_hook = nullptr);
 
 Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept;
 

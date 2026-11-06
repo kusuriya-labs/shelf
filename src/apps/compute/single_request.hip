@@ -837,8 +837,22 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         (void)shelf::state::release_paged_sequence_state(sequence, stream);
         return 1;
     }
+    std::vector<shelf::qwen35::runtime::MtpGdnRankBinding> extra_ranks;
+    auto* tp = runtime.tp_coordinator();
+    if (tp != nullptr) {
+        for (int r = 1; r < tp->tp_size(); ++r) {
+            auto& rank = tp->rank(static_cast<std::size_t>(r));
+            shelf::qwen35::runtime::MtpGdnRankBinding binding;
+            binding.pool = &rank.gdn_pool();
+            binding.arena = &rank.arena();
+            binding.stream = rank.stream();
+            binding.device = rank.device_id();
+            extra_ranks.push_back(binding);
+        }
+    }
     auto drafter_result = shelf::qwen35::runtime::create_mtp_drafter(
-        drafter_input.value(), gdn_pool, arena, stream, drafter_config);
+        drafter_input.value(), gdn_pool, arena, stream, drafter_config,
+        extra_ranks.empty() ? nullptr : &extra_ranks, tp);
     if (!drafter_result.ok()) {
         fprintf(stderr, "mtp drafter create failed: %s\n",
                 drafter_result.status().message().c_str());
@@ -847,9 +861,21 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     }
     std::unique_ptr<shelf::qwen35::runtime::MtpDrafter> drafter =
         drafter_result.release();
+    if (tp != nullptr) {
+        Status mirrored = tp->on_sequence_created(sequence);
+        if (!mirrored.ok()) {
+            fprintf(stderr, "mtp tp mirror create failed: %s\n",
+                    mirrored.message().c_str());
+            (void)shelf::qwen35::runtime::mtp_drafter_shutdown(*drafter, stream);
+            drafter.reset();
+            (void)shelf::state::release_paged_sequence_state(sequence, stream);
+            return 1;
+        }
+    }
     auto cleanup = [&]() {
         (void)shelf::qwen35::runtime::mtp_drafter_shutdown(*drafter, stream);
         drafter.reset();
+        if (tp != nullptr) (void)tp->on_sequence_released(sequence);
         (void)shelf::state::release_paged_sequence_state(sequence, stream);
     };
 

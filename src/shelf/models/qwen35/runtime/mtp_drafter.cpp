@@ -1,8 +1,10 @@
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 
+#include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
+#include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 
 #include <algorithm>
 #include <chrono>
@@ -151,6 +153,59 @@ Result<BatchExecutionOutput> run_mtp_forward(MtpDrafter& drafter,
     return execute_batch(drafter.executor, batch, stream);
 }
 
+MtpGdnRankState rank0_state_view(const MtpDrafter& drafter) {
+    MtpGdnRankState state;
+    state.pool = drafter.target_pool;
+    state.stream = drafter.target_stream;
+    state.device = drafter.target_device;
+    state.conv_snapshot = drafter.gdn_conv_snapshot;
+    state.recurrent_snapshot = drafter.gdn_recurrent_snapshot;
+    state.conv_bytes = drafter.gdn_conv_bytes;
+    state.recurrent_bytes = drafter.gdn_recurrent_bytes;
+    state.history = drafter.gdn_history;
+    state.compact_delta = drafter.compact_delta;
+    state.compact_k = drafter.compact_k;
+    state.compact_a = drafter.compact_a;
+    state.compact_delta_layer_stride = drafter.compact_delta_layer_stride;
+    state.compact_k_layer_stride = drafter.compact_k_layer_stride;
+    state.compact_a_layer_stride = drafter.compact_a_layer_stride;
+    state.commit_request = drafter.commit_request;
+    state.commit_request_host = drafter.commit_request_host;
+    state.gdn_key_heads = drafter.gdn_key_heads;
+    return state;
+}
+
+std::vector<MtpGdnRankState> all_rank_states(const MtpDrafter& drafter) {
+    std::vector<MtpGdnRankState> states;
+    states.reserve(1u + drafter.extra_ranks.size());
+    states.push_back(rank0_state_view(drafter));
+    for (const MtpGdnRankState& state : drafter.extra_ranks) states.push_back(state);
+    return states;
+}
+
+ExecuteBatchOptions verify_options_for(const MtpGdnRankState& state, uint32_t rows) {
+    ExecuteBatchOptions options;
+    options.gdn_spec_history = gdn_spec_history_view(state.history, rows);
+    options.gdn_compact.delta = state.compact_delta;
+    options.gdn_compact.k = state.compact_k;
+    options.gdn_compact.a = state.compact_a;
+    options.gdn_compact.delta_layer_stride = state.compact_delta_layer_stride;
+    options.gdn_compact.k_layer_stride = state.compact_k_layer_stride;
+    options.gdn_compact.a_layer_stride = state.compact_a_layer_stride;
+    return options;
+}
+
+std::vector<ExecuteBatchOptions> build_verify_options(const MtpDrafter& drafter,
+                                                      uint32_t rows) {
+    std::vector<MtpGdnRankState> states = all_rank_states(drafter);
+    std::vector<ExecuteBatchOptions> options;
+    options.reserve(states.size());
+    for (const MtpGdnRankState& state : states) {
+        options.push_back(verify_options_for(state, rows));
+    }
+    return options;
+}
+
 Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
                                         Executor& target,
                                         state::PagedSequenceState& sequence,
@@ -163,9 +218,8 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
                                         bool speculative_verify,
                                         const SamplingConfig& sampling,
                                         uint64_t sampling_index,
-                                        const ExecuteBatchOptions* execute_options,
+                                        const std::vector<ExecuteBatchOptions>* per_rank,
                                         hipStream_t stream) {
-    (void)drafter;
     if (tokens.empty()) {
         return Status::invalid_argument("target forward has no tokens", __FILE__, __LINE__);
     }
@@ -178,8 +232,14 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
         sequence, requests, tokens.data(), static_cast<uint32_t>(tokens.size()), prefix,
         output_rows, compute_logits, sample, execution_class, speculative_verify,
         compute_logits ? &sampling : nullptr, sampling_index);
-    if (execute_options != nullptr) {
-        return execute_batch(target, batch, stream, *execute_options);
+    if (drafter.tp_hook != nullptr) {
+        if (per_rank != nullptr && !per_rank->empty()) {
+            return drafter.tp_hook->on_execute(batch, per_rank->data());
+        }
+        return drafter.tp_hook->on_execute(batch);
+    }
+    if (per_rank != nullptr && !per_rank->empty()) {
+        return execute_batch(target, batch, stream, (*per_rank)[0]);
     }
     return execute_batch(target, batch, stream);
 }
@@ -240,7 +300,9 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    const MtpDrafterConfig& options) {
+    const MtpDrafterConfig& options,
+    const std::vector<MtpGdnRankBinding>* extra_ranks,
+    TpBatchHook* tp_hook) {
 
     if (input.config == nullptr || input.embed_tokens == nullptr) {
         return Status::invalid_argument("mtp drafter input is incomplete", __FILE__,
@@ -276,6 +338,10 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         ? input.hidden_width
         : static_cast<std::uint32_t>(input.config->hidden_size);
     drafter->wide_hidden = input.wide_hidden;
+    drafter->target_pool = &target_gdn_pool;
+    drafter->target_stream = stream;
+    hipGetDevice(&drafter->target_device);
+    drafter->tp_hook = tp_hook;
 
     const uint32_t pages =
         ceil_div_u32(options.max_seq_len + 1u, options.page_tokens) + 1u;
@@ -394,6 +460,70 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     drafter->commit_request_host.row_count = 0u;
     drafter->gdn_key_heads = static_cast<std::uint32_t>(
         input.config->linear_num_key_heads != 0u ? input.config->linear_num_key_heads : 16u);
+
+    if (extra_ranks != nullptr) {
+        for (const MtpGdnRankBinding& binding : *extra_ranks) {
+            if (binding.pool == nullptr || binding.arena == nullptr) {
+                return fail_with_sequence(Status::invalid_argument(
+                    "mtp extra rank binding is incomplete", __FILE__, __LINE__));
+            }
+            auto scope = shelf::gpu::ScopedDevice::create(binding.device);
+            if (!scope.ok()) return fail_with_sequence(scope.status());
+            MtpGdnRankState state;
+            state.pool = binding.pool;
+            state.stream = binding.stream;
+            state.device = binding.device;
+            state.conv_bytes = spec_gdn_conv_bytes(*binding.pool);
+            state.recurrent_bytes = spec_gdn_recurrent_bytes(*binding.pool);
+            if (state.conv_bytes != 0u) {
+                auto view = binding.arena->allocate_aligned(state.conv_bytes, 256u);
+                if (!view.ok()) return fail_with_sequence(view.status());
+                state.conv_snapshot = view.release().data();
+            }
+            if (state.recurrent_bytes != 0u) {
+                auto view = binding.arena->allocate_aligned(state.recurrent_bytes, 256u);
+                if (!view.ok()) return fail_with_sequence(view.status());
+                state.recurrent_snapshot = view.release().data();
+            }
+            auto history = create_gdn_spec_history(*binding.arena, *binding.pool,
+                                                   options.num_drafts, false);
+            if (!history.ok()) return fail_with_sequence(history.status());
+            state.history = history.release();
+            const auto pool = binding.pool->device_view();
+            const std::uint64_t log_rows = static_cast<std::uint64_t>(options.num_drafts) + 1u;
+            const std::uint64_t vdim =
+                static_cast<std::uint64_t>(pool.num_v_heads) * pool.head_v;
+            const std::uint64_t qkdim =
+                static_cast<std::uint64_t>(pool.num_v_heads) * pool.head_k;
+            state.compact_delta_layer_stride = log_rows * vdim;
+            state.compact_k_layer_stride = log_rows * qkdim;
+            state.compact_a_layer_stride = log_rows * pool.num_v_heads;
+            const std::size_t delta_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+                state.compact_delta_layer_stride * sizeof(float);
+            const std::size_t k_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+                state.compact_k_layer_stride * sizeof(float);
+            const std::size_t a_bytes = static_cast<std::size_t>(pool.num_gdn_states) *
+                state.compact_a_layer_stride * sizeof(float);
+            auto delta = binding.arena->allocate_aligned(delta_bytes, 256u);
+            if (!delta.ok()) return fail_with_sequence(delta.status());
+            state.compact_delta = static_cast<float*>(delta.release().data());
+            auto kb = binding.arena->allocate_aligned(k_bytes, 256u);
+            if (!kb.ok()) return fail_with_sequence(kb.status());
+            state.compact_k = static_cast<float*>(kb.release().data());
+            auto ab = binding.arena->allocate_aligned(a_bytes, 256u);
+            if (!ab.ok()) return fail_with_sequence(ab.status());
+            state.compact_a = static_cast<float*>(ab.release().data());
+            auto request = binding.arena->allocate_aligned(
+                sizeof(::shelf::runtime::DeviceRequestDescriptor), 256u);
+            if (!request.ok()) return fail_with_sequence(request.status());
+            state.commit_request =
+                static_cast<::shelf::runtime::DeviceRequestDescriptor*>(request.release().data());
+            state.commit_request_host.row_begin = 0u;
+            state.commit_request_host.row_count = 0u;
+            state.gdn_key_heads = drafter->gdn_key_heads;
+            drafter->extra_ranks.push_back(std::move(state));
+        }
+    }
 
     drafter->last_tokens.reserve(options.num_drafts + 1u);
     drafter->initialized = true;
@@ -616,25 +746,22 @@ Result<MtpIterationOutput> mtp_spec_step(
 
     auto draft_started = std::chrono::steady_clock::now();
 
-    Status snapshot = spec_gdn_snapshot(
-        *target.gdn_state_pool, target_sequence.slot, drafter.gdn_conv_snapshot,
-        drafter.gdn_recurrent_snapshot, drafter.gdn_conv_bytes,
-        drafter.gdn_recurrent_bytes, stream);
-    if (!snapshot.ok()) return snapshot;
+    std::vector<MtpGdnRankState> rank_states = all_rank_states(drafter);
+    for (const MtpGdnRankState& state : rank_states) {
+        auto scope = shelf::gpu::ScopedDevice::create(state.device);
+        if (!scope.ok()) return scope.status();
+        Status snapshot = spec_gdn_snapshot(
+            *state.pool, target_sequence.slot, state.conv_snapshot,
+            state.recurrent_snapshot, state.conv_bytes, state.recurrent_bytes,
+            state.stream);
+        if (!snapshot.ok()) return snapshot;
+    }
 
     std::vector<int32_t> verify_tokens(drafts + 1u);
     verify_tokens[0] = pending_token;
     for (uint32_t i = 0u; i < drafts; ++i) verify_tokens[i + 1u] = proposals[i];
 
-    ExecuteBatchOptions verify_options;
-    verify_options.gdn_spec_history =
-        gdn_spec_history_view(drafter.gdn_history, drafts);
-    verify_options.gdn_compact.delta = drafter.compact_delta;
-    verify_options.gdn_compact.k = drafter.compact_k;
-    verify_options.gdn_compact.a = drafter.compact_a;
-    verify_options.gdn_compact.delta_layer_stride = drafter.compact_delta_layer_stride;
-    verify_options.gdn_compact.k_layer_stride = drafter.compact_k_layer_stride;
-    verify_options.gdn_compact.a_layer_stride = drafter.compact_a_layer_stride;
+    std::vector<ExecuteBatchOptions> verify_options = build_verify_options(drafter, drafts);
 
     auto verified = run_target(
         drafter, target, target_sequence, verify_tokens, position, true, true,
@@ -689,30 +816,40 @@ Result<MtpIterationOutput> mtp_spec_step(
         const uint32_t committed = accepted_drafts + 1u;
         const uint32_t required = ceil_div_u32(position + committed, page_tokens);
         const auto restore_started = std::chrono::steady_clock::now();
-        Status restore = spec_gdn_restore(
-            *target.gdn_state_pool, target_sequence.slot, drafter.gdn_conv_snapshot,
-            drafter.gdn_recurrent_snapshot, drafter.gdn_conv_bytes,
-            drafter.gdn_recurrent_bytes, stream);
-        if (!restore.ok()) return restore;
-        Status conv = restore_gdn_spec_conv(*target.gdn_state_pool, target_sequence.slot,
-                                            drafter.gdn_history, accepted_drafts, stream);
-        if (!conv.ok()) return conv;
-        const auto restore_done = std::chrono::steady_clock::now();
-        drafter.commit_request_host.request_handle = target_sequence.request_handle();
-        drafter.commit_request_host.row_begin = 0u;
-        drafter.commit_request_host.row_count = 0u;
-        hipError_t upload = hipMemcpyAsync(drafter.commit_request,
-                                           &drafter.commit_request_host,
-                                           sizeof(drafter.commit_request_host),
-                                           hipMemcpyHostToDevice, stream);
-        if (upload != hipSuccess) {
-            return Status::hip_error("mtp commit request upload", hipGetErrorString(upload),
-                                     __FILE__, __LINE__);
+        for (const MtpGdnRankState& state : rank_states) {
+            auto scope = shelf::gpu::ScopedDevice::create(state.device);
+            if (!scope.ok()) return scope.status();
+            Status restore = spec_gdn_restore(
+                *state.pool, target_sequence.slot, state.conv_snapshot,
+                state.recurrent_snapshot, state.conv_bytes, state.recurrent_bytes,
+                state.stream);
+            if (!restore.ok()) return restore;
+            Status conv = restore_gdn_spec_conv(*state.pool, target_sequence.slot,
+                                                state.history, accepted_drafts,
+                                                state.stream);
+            if (!conv.ok()) return conv;
         }
-        Status compact = commit_gdn_compact_log(
-            *target.gdn_state_pool, target_sequence.slot, verify_options.gdn_compact,
-            drafter.commit_request, committed, drafter.gdn_key_heads, stream);
-        if (!compact.ok()) return compact;
+        const auto restore_done = std::chrono::steady_clock::now();
+        for (std::size_t ri = 0u; ri < rank_states.size(); ++ri) {
+            const MtpGdnRankState& state = rank_states[ri];
+            auto scope = shelf::gpu::ScopedDevice::create(state.device);
+            if (!scope.ok()) return scope.status();
+            ::shelf::runtime::DeviceRequestDescriptor request = state.commit_request_host;
+            request.request_handle = target_sequence.request_handle();
+            request.row_begin = 0u;
+            request.row_count = 0u;
+            hipError_t upload = hipMemcpyAsync(state.commit_request, &request,
+                                               sizeof(request), hipMemcpyHostToDevice,
+                                               state.stream);
+            if (upload != hipSuccess) {
+                return Status::hip_error("mtp commit request upload",
+                                         hipGetErrorString(upload), __FILE__, __LINE__);
+            }
+            Status compact = commit_gdn_compact_log(
+                *state.pool, target_sequence.slot, verify_options[ri].gdn_compact,
+                state.commit_request, committed, state.gdn_key_heads, state.stream);
+            if (!compact.ok()) return compact;
+        }
         const auto compact_done = std::chrono::steady_clock::now();
         target_sequence.position = position + committed;
         Status rollback = rollback_sequence_append(target_sequence, required, stream);

@@ -6,8 +6,8 @@ DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる�
 MTP block は checkpoint が `mtp.*` として持つ tensor から作り、dense / grouped expert
 （MoE）のどちらの model でも load / lower / 実行できる。MTP block を持たない checkpoint で
 `--mtp` を指定すると `LoadedModel::mtp_drafter_input` が `unsupported` を返す。
-`--tensor-parallel 2`、`--pipeline-parallel 2`、`--serve-stdio`、`--dump-logits` との併用は
-起動時に拒否する。
+dense model は `--tensor-parallel 2` と併用できる。`--pipeline-parallel 2`、
+`--serve-stdio`、`--dump-logits` との併用は起動時に拒否する。
 
 grouped expert を使う model の MTP block は、routed expert を checkpoint で fused rank-3 の
 BF16（`mtp.layers.0.mlp.experts.gate_up_proj` / `experts.down_proj`）として保持する。
@@ -18,6 +18,29 @@ MoE の MTP decode は verify の multi-row forward を使うが、greedy 列は
 実測で target-only より速い（`--mtp-drafts 4` で 1.88 倍）。draft 受理率は dense より低い
 （35 % に対し 98 %）が break-even は超える。数値は `docs/perf/current.md`、経緯は
 [../research/20261105/moe_mtp.md](../research/20261105/moe_mtp.md)。
+
+## Tensor parallel
+
+dense model の TP=2 では、MTP block の重みは partition しない（TP partition plan に
+`mtp.*` の entry は無い）。各 rank が MTP block を複製して load し、drafter executor は
+rank0 だけで動かす。
+
+target の prefill / verify は `TpCoordinator::on_execute` で全 rank に同じ batch を流す。
+speculative verify は rank ごとの `ExecuteBatchOptions` を渡し、各 rank の
+`GdnSpecHistory` と compact log buffer を使う。snapshot / restore / compact replay は
+全 rank に対して実行する。受理数は rank0 の logits から決め、その値で全 rank の GDN を
+同じ prefix に戻す。
+
+coordinator の mirror sequence は `on_sequence_created` / `on_sequence_released` で
+target sequence と対応付ける。MTP+TP のときは TP executor に
+`emit_normed_token_hidden` を立て、rank0 の normed hidden を drafter に渡す。
+
+MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool の後ろに必要になる。
+`Qwen35ComputeRuntime::initialize_tensor_parallel` は `--mtp` のとき working set reserve を
+最低 4 GiB 確保する。
+
+grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
+`build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
 
 ## Forward contract
 

@@ -508,12 +508,12 @@ set_tests_properties(test_compute_rejects_tp_abbreviation PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "unknown argument: --tp")
 
-add_test(NAME test_compute_mtp_rejects_tp2
+add_test(NAME test_compute_mtp_rejects_pp2
          COMMAND $<TARGET_FILE:shelf-compute>
-             --model-dir placeholder --mtp --tensor-parallel 2 --device 0,1)
-set_tests_properties(test_compute_mtp_rejects_tp2 PROPERTIES
+             --model-dir placeholder --mtp --pipeline-parallel 2 --device 0,1)
+set_tests_properties(test_compute_mtp_rejects_pp2 PROPERTIES
                      LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "requires --tensor-parallel 1")
+                     PASS_REGULAR_EXPRESSION "requires --pipeline-parallel 1")
 
 add_test(NAME test_compute_mtp_drafts_reject_over_ceiling
          COMMAND $<TARGET_FILE:shelf-compute>
@@ -629,6 +629,20 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
                     python3 "${CMAKE_SOURCE_DIR}/tests/correctness/test_mtp_parity.py")
     set_tests_properties(test_mtp_parity PROPERTIES
                          LABELS "gpu1;optional;external_files"
+                         TIMEOUT 1860
+                         SKIP_RETURN_CODE 77)
+
+    add_test(NAME test_mtp_parity_tp2
+             COMMAND $<TARGET_FILE:shelf-gpu-test-runner>
+                 --gpu-count 2 --cost-gb 30 --timeout 1800
+                 --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
+                 -- ${CMAKE_COMMAND} -E env
+                    "SHELF_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                    "SHELF_TP=2"
+                    "SHELF_TEST_DEVICE=0,1"
+                    python3 "${CMAKE_SOURCE_DIR}/tests/correctness/test_mtp_parity.py")
+    set_tests_properties(test_mtp_parity_tp2 PROPERTIES
+                         LABELS "gpu2;optional;external_files"
                          TIMEOUT 1860
                          SKIP_RETURN_CODE 77)
 

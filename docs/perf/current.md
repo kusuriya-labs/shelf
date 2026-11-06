@@ -348,6 +348,34 @@ EXL3 経路の現在値である。
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
   を参照。
 
+## 2026-11-07 MTP TP=2（Qwen3.8-27B-exl3）
+
+`models/Qwen3.8-27B-exl3`（5 bpw）の MTP を TP=2 で動かした。MTP block は rank に
+分割せず、rank0 の drafter と全 rank の target verify / GDN restore で実行する。
+契約は [../developer/mtp.md](../developer/mtp.md) の Tensor parallel 節。
+
+| 条件 | 値 |
+| --- | ---: |
+| target-only TP2、128 token | 22.89 tok/s |
+| MTP TP2 drafts=4、32 token | 54.18 tok/s |
+| MTP TP2 drafts=4、128 token | **59.28 tok/s** |
+| MTP TP2 drafts=4、128 token の mean accepted | 2.750 |
+| DFlash2 TP2 drafts=6、128 token | **72.87 tok/s** |
+
+- measurement revision: MTP の TP=2 対応を入れた working tree（TP partition plan に
+  MTP entry なし、`emit_normed_token_hidden`、per-rank GDN snapshot / compact、
+  MTP+TP の working set reserve 4 GiB）
+- GPU: Radeon AI PRO R9700 2 枚（device 0,1）
+- command:
+  `shelf-compute --model-dir models/Qwen3.8-27B-exl3 --input-ids-file <5 token> --max-new-tokens 128 --max-seq-len 256 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0 --arena-gib 30 --mtp --mtp-drafts 4`
+- 生成一致アンカー: target-only TP2 と MTP TP2 の 128 token `GENERATED_IDS` は一致する。
+  2048 token prompt / 64 token の `test_mtp_parity_tp2` も PASS（rounds 12、
+  GDN restore 5）。
+- MTP は TP1 でも動く（32 token、drafts=4 で 44.51 tok/s）。TP2 で +33 %。
+- DFlash2 TP2 の方が速い。MTP は drafter model の追加 load が不要な点が利点。
+- この計測は EXL3 の ka=5 fast path を含まない build で取った。fast path を入れた
+  build では target / MTP とも再測が必要。
+
 ## 2026-11-03 long-context prefill
 
 Qwen3.8-27B-FP8 / TP2 / FP8 KV / `--rope-factor 2`、selector の範囲内

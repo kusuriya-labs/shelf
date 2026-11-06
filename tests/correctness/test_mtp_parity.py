@@ -80,7 +80,9 @@ def main() -> int:
         print(f"tokenizer load failed: {error}", file=sys.stderr)
         return 1
 
-    device = os.environ.get("SHELF_TEST_DEVICE", "0")
+    tp = int(os.environ.get("SHELF_TP", "1"))
+    device = os.environ.get("SHELF_TEST_DEVICE", "0,1" if tp > 1 else "0")
+    tp_args = ["--tensor-parallel", str(tp)] if tp > 1 else []
     text = PROMPT_SOURCE.read_text(encoding="utf-8")
     base_ids = tokenizer.encode(text)
     if not base_ids:
@@ -95,12 +97,12 @@ def main() -> int:
         ids_path = Path(tmp) / "ids.txt"
         ids_path.write_text("\n".join(str(v) for v in input_ids))
 
-        target, code = run(compute, model_dir, ids_path, device, [])
+        target, code = run(compute, model_dir, ids_path, device, tp_args)
         if target is None:
             return code
         mtp, code = run(
             compute, model_dir, ids_path, device,
-            ["--mtp", "--mtp-drafts", str(MTP_DRAFTS)],
+            ["--mtp", "--mtp-drafts", str(MTP_DRAFTS), *tp_args],
         )
         if mtp is None:
             return code

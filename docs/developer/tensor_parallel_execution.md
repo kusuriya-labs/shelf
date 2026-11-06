@@ -136,7 +136,8 @@ norm parameter・embedding は replicated（partition plan に entry なし）�
 lm_head は vocab-parallel（語彙軸を rank 分割。各 rank が担当列だけ計算し、
 非所有列を 0 埋めした full 幅 buffer を既存 SumHidden で結合する。tie 時と
 DFlash2 spec 経路では複製経路。`Qwen35LoadOptions::vocab_parallel_lm_head` で切替）。
-MTP は partition せず（plan に entry なし。分散実行は別 Gate）。
+MTP の weight は partition しない（plan に entry なし）。rank0 の drafter と全 rank の
+target verify / GDN snapshot で分散実行する（[mtp.md](mtp.md) の Tensor parallel 節）。
 
 ## 5. execution schedule と collective boundary
 
@@ -445,7 +446,7 @@ Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAl
 通信と計算の本格的な overlap（各 barrier 内の send / add は並列だが、segment の
 計算との overlap は未対応）、
 graph capture との併用（`SHELF_HIP_GRAPH` は TP schedule と非併用）、
-MTP 分散実行、vocab parallel、distributed sampling、
+vocab parallel、distributed sampling、
 structured generation / server 統合、
 pipeline parallel、TP=4 production support。
 

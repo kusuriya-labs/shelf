@@ -409,10 +409,6 @@ int validate_compute_options(const ComputeOptions& opt) {
             fprintf(stderr, "--mtp and --dflash2-model-dir are mutually exclusive\n");
             return kComputeParseError;
         }
-        if (tp != 1) {
-            fprintf(stderr, "--mtp currently requires --tensor-parallel 1\n");
-            return kComputeParseError;
-        }
         if (pipeline_parallel != 1) {
             fprintf(stderr, "--mtp currently requires --pipeline-parallel 1\n");
             return kComputeParseError;
