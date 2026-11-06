@@ -378,8 +378,10 @@ FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。
 | 断面 | 変更前 | 変更後 |
 | --- | ---: | ---: |
 | TG ctx128 / 16 token | 24.45 tok/s | 24.87 tok/s |
-| DFlash2 drafts=6 | 50.71 tok/s | 51.41 tok/s |
+| DFlash2 drafts=4、32 new token | - | **53.37 tok/s** |
+| DFlash2 drafts=6、32 new token | 50.71 tok/s | 51.41 tok/s |
 
+- FlashNext の MTP は `--mtp` が TP1、Qwen4Exp が TP2 以上を要求するため実行できない。
 - measurement revision: `exp/exl3-speed` の working tree（ka=5 / ka=3 の固定 rate
   template 実体、rows 別 split-K 既定、`SHELF_EXL3_FAST_DECODE=0` で従来経路）
 - GPU: Radeon AI PRO R9700 1 枚 / 2 枚（device 1 / device 0,1）

@@ -104,6 +104,28 @@ MoE の routing / grouped launch / combine が支配的で、3 bit の dequant �
 小さいためである。共通経路なので採用するが、FlashNext をさらに速くするには
 grouped expert 側の launch / combine を詰める必要がある。
 
+### 2-7. FlashNext の MTP と DFlash2
+
+FlashNext の checkpoint には MTP block があるが、現行 runtime では
+`--mtp` は `--tensor-parallel 1` を要求し、Qwen4Exp は `--tensor-parallel 2` 以上を
+要求する。両者は同時に満たせないため、FlashNext で MTP は実行できない
+（`--mtp currently requires --tensor-parallel 1`）。
+
+利用できる speculative decode は DFlash2 だけである。TP2、32 new token で
+drafts を振ると drafts=4 が最良だった。
+
+| drafts | mean accepted | tok/s |
+| ---: | ---: | ---: |
+| 2 | 1.214 | 45.08 |
+| 3 | 1.583 | 50.17 |
+| 4 | 1.818 | **53.37** |
+| 5 | 1.818 | 52.26 |
+| 6 | 1.818 | 51.41 |
+| 7 | 1.818 | 51.19 |
+
+target-only は 24.99 tok/s なので、drafts=4 で 2.14 倍。生成列は target-only と一致する。
+
+
 ## 3. 結果
 
 TP=1、device 1、bf16 KV、`--arena-gib 28`。
