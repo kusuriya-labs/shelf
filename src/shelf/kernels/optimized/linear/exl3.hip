@@ -762,6 +762,7 @@ struct LaunchPlan {
 };
 
 uint32_t pick_n_tiles(const Exl3GemmArgs& args) {
+    if (args.n_tiles != 0u) return args.n_tiles;
     if (args.rows < 4u) return 1u;
     if (args.out_features % (kOutBlockBase * 2u) != 0u) return 1u;
     if (args.out_features < kOutBlockBase * 8u) return 1u;
@@ -901,6 +902,11 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
         if (e == nullptr) return kExl3GroupedFuse;
         return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
     }();
+    static const uint32_t ntiles_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_GROUPED_NTILES");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    dense.n_tiles = ntiles_override;
     dense.groups = (args.expert_group_begin != nullptr && fuse_override > 1u) ? fuse_override
                                                                             : 1u;
     dense.group_expert = args.group_expert;
