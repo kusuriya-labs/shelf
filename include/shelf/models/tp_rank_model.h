@@ -90,6 +90,9 @@ shelf::Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     const shelf::qwen35::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
     hipStream_t stream);
 
+void prefetch_qwen4exp_ple_table(const std::string& model_dir);
+void release_prefetched_qwen4exp_ple_table();
+
 // Sets config.build_rank_model to the family config.model_dir declares, read from
 // num_experts before any tensor is opened.
 shelf::Status select_tp_rank_model(shelf::qwen35::runtime::TpCoordinatorConfig& config);

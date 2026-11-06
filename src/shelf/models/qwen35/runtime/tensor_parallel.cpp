@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <sstream>
+#include <thread>
+#include <utility>
 
 namespace shelf {
 namespace qwen35 {
@@ -446,10 +448,25 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
 
+    std::jthread model_prefetch;
+    if (config.prefetch_rank_model != nullptr) {
+        model_prefetch = std::jthread(
+            [model_dir = config.model_dir, prefetch = config.prefetch_rank_model]() {
+                prefetch(model_dir);
+            });
+    }
+
     auto transport_result = ::shelf::runtime::create_tp_transport(devices_);
     if (!transport_result.ok()) return transport_result.status();
     transport_ = std::move(transport_result.value().transport);
 
+    struct RankSlot {
+        std::unique_ptr<TpRankRuntime> runtime;
+        Status status = Status::make_ok();
+    };
+    std::vector<RankSlot> slots(devices_.size());
+    std::vector<std::thread> loaders;
+    loaders.reserve(devices_.size());
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         TpRankRuntimeConfig rank_config;
         rank_config.model_dir = config.model_dir;
@@ -482,9 +499,22 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
-        auto rank_result = TpRankRuntime::create(rank_config);
-        if (!rank_result.ok()) return rank_result.status();
-        ranks_.push_back(rank_result.release());
+        loaders.emplace_back(
+            [&slots, r, rank_config = std::move(rank_config)]() {
+                auto rank_result = TpRankRuntime::create(rank_config);
+                if (rank_result.ok()) {
+                    slots[r].runtime = rank_result.release();
+                } else {
+                    slots[r].status = rank_result.status();
+                }
+            });
+    }
+    for (std::thread& loader : loaders) loader.join();
+    if (model_prefetch.joinable()) model_prefetch.join();
+    if (config.release_rank_model != nullptr) config.release_rank_model();
+    for (RankSlot& slot : slots) {
+        if (!slot.status.ok()) return slot.status;
+        ranks_.push_back(std::move(slot.runtime));
     }
 
     Status verify_status = transport_->verify();

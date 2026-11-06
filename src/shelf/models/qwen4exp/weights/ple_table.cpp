@@ -17,6 +17,8 @@
 #include <unistd.h>
 
 #include <map>
+#include <mutex>
+#include <thread>
 #include <nlohmann/json.hpp>
 #include <shelf/io/safetensors_reader.h>
 
@@ -259,8 +261,10 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
     table.layer_multipliers_.assign(multipliers.value().begin(), multipliers.value().end());
 
     std::map<std::string, std::unique_ptr<shelf::io::SafetensorsReader>> readers;
+    std::mutex readers_mutex;
     auto reader_for = [&](const std::string& shard)
         -> Result<const shelf::io::SafetensorsReader*> {
+        std::lock_guard<std::mutex> lock(readers_mutex);
         auto it = readers.find(shard);
         if (it != readers.end()) return it->second.get();
         auto opened = shelf::io::SafetensorsReader::open(model_dir + "/" + shard);
@@ -293,7 +297,7 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
     table.fp8_scale_ = bf16_bits_to_f32(scale_bits);
 
     table.shards_.resize(table.shard_count_);
-    for (std::uint32_t id = 0; id < table.shard_count_; ++id) {
+    auto load_shard = [&](std::uint32_t id) -> Status {
         auto name_it = shards.find(id);
         if (name_it == shards.end()) {
             return Status::invalid_argument("PLE FP8 shard index is not contiguous",
@@ -329,6 +333,27 @@ Result<PleTable> PleTable::load_fp8(const std::string& model_dir,
         std::memcpy(memory, data.value(), bytes);
         table.shards_[id].data.reset(static_cast<std::uint8_t*>(memory));
         table.shards_[id].bytes = bytes;
+        return Status::make_ok();
+    };
+    const std::uint32_t worker_count =
+        std::min<std::uint32_t>(16u, table.shard_count_);
+    std::vector<Status> errors(worker_count, Status::make_ok());
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::uint32_t worker = 0; worker < worker_count; ++worker) {
+        workers.emplace_back([&, worker]() {
+            for (std::uint32_t id = worker; id < table.shard_count_; id += worker_count) {
+                Status status = load_shard(id);
+                if (!status.ok()) {
+                    errors[worker] = status;
+                    return;
+                }
+            }
+        });
+    }
+    for (std::thread& worker : workers) worker.join();
+    for (const Status& error : errors) {
+        if (!error.ok()) return error;
     }
     table.payload_bytes_ = static_cast<std::uint64_t>(table.shard_count_) *
                            table.shard_rows_ * table.row_bytes_;

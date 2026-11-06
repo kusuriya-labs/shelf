@@ -132,9 +132,14 @@ private:
 Result<std::unique_ptr<shelf::models::TpRankModel>> build_dense_tp_rank_model(
     const TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream);
 
+using TpRankModelPrefetch = void (*)(const std::string&);
+using TpRankModelRelease = void (*)();
+
 struct TpCoordinatorConfig {
     std::string model_dir;
     TpRankModelBuilder build_rank_model = nullptr;
+    TpRankModelPrefetch prefetch_rank_model = nullptr;
+    TpRankModelRelease release_rank_model = nullptr;
     std::vector<int> devices;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;

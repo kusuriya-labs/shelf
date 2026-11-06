@@ -26,6 +26,9 @@ ContinuousBatcher (global, 1個)
 - **1 rank = 1 device-local runtime**（`TpRankRuntime`）。既存の single-GPU
   `Executor` を rank-local execution engine としてそのまま再利用し、
   multi-device な巨大 Executor には作り替えていない。
+- rank runtime は起動時に rank ごとの thread で並列に生成する。各 thread は
+  自分の device の `ScopedDevice` を持ち、model / arena / stream / state pool を
+  独立に作る。
 - `TpCoordinator` の責務は only: rank runtime 生成、同一 batch の配布、
   program segment の同期（barrier）、collective 呼び出し、rank failure の集約、
   rank0 の結果（sampling で確定した token）の返却。quantization実装 /

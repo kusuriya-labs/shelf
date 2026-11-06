@@ -127,6 +127,9 @@ std::shared_ptr<const qwen4exp::PleTable> shared_ple_table(
     return table;
 }
 
+std::mutex prefetched_ple_mutex;
+std::unordered_map<std::string, std::shared_ptr<const qwen4exp::PleTable>> prefetched_ple;
+
 class Qwen4ExpTpRankModel final : public TpRankModel {
 public:
     Qwen4ExpTpRankModel(qwen4exp::Qwen4ExpModel&& model,
@@ -246,6 +249,20 @@ private:
 };
 
 }  // namespace
+
+void prefetch_qwen4exp_ple_table(const std::string& model_dir) {
+    auto config_result = qwen4exp::read_qwen4exp_text_config(model_dir);
+    if (!config_result.ok()) return;
+    auto table = shared_ple_table(model_dir, config_result.value());
+    if (table == nullptr) return;
+    std::lock_guard<std::mutex> lock(prefetched_ple_mutex);
+    prefetched_ple[model_dir] = std::move(table);
+}
+
+void release_prefetched_qwen4exp_ple_table() {
+    std::lock_guard<std::mutex> lock(prefetched_ple_mutex);
+    prefetched_ple.clear();
+}
 
 Result<q35::Executor> create_qwen4exp_model_executor(
     const qwen4exp::Qwen4ExpModel& model,
@@ -447,6 +464,8 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
     if (!family.ok()) return family.status();
     if (family.value() == ModelFamily::Qwen4Exp) {
         config.build_rank_model = &build_qwen4exp_tp_rank_model;
+        config.prefetch_rank_model = &prefetch_qwen4exp_ple_table;
+        config.release_rank_model = &release_prefetched_qwen4exp_ple_table;
         return Status::make_ok();
     }
     config.build_rank_model = family.value() == ModelFamily::Moe

@@ -22,7 +22,8 @@ MTP は無効である。DFlash2 は `--dflash2-model-dir` で有効になる。
 | routed expert | MXFP4 E2M1 / E8M0 group32 | expert 軸で 512 を tp_size 分割し、rank-3 `MatrixWeight` |
 | shared expert | MXFP4 | 全 rank に複製 |
 | attention / GDN | FP8 E4M3 per-channel + F32 `[n]` | 全 rank に複製、preshuffle して WMMA fragment order |
-| PLE table | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
+| PLE table（MXFP4 checkpoint） | FP8 E4M3 per-tensor + BF16 `[1]` | CPU RAM に 1 個を共有 |
+| PLE table（EXL3 checkpoint） | `ngram_embedding.safetensors` の trellis（`mul1`、K=8、row stride 162 B） | CPU RAM に 1 個を共有 |
 | embed / lm_head / hyper / router | BF16 | 全 rank に複製 |
 
 - routed expert は `preshuffle_mxfp4_native` で 16 出力 x 32 K の 256 バイト block に
@@ -30,8 +31,12 @@ MTP は無効である。DFlash2 は `--dflash2-model-dir` で有効になる。
 - attention / GDN は `preshuffle_fp8_native` で gfx1201 の FP8 WMMA fragment order に
   する。活性は per-token dynamic FP8（`scale = amax / 448`）で、GEMM の epilogue で
   `weight_scale[o] * activation_scale[row]` を 1 回だけ適用する。
-- PLE は 128 シャードを `pread` で読み、`row = mul1_codebook` ではなく
-  E4M3 code × per-tensor scale で復号する。`weight_scale` は **BF16** である。
+- PLE table は checkpoint の形式で 2 経路ある。`ngram_embedding.safetensors` を持つ
+  EXL3 checkpoint は `pread` で読み、`row = mul1_codebook` の trellis で復号する。
+  `models/Qwen3.8-Flash-Next-Quark-MXFP4` の PLE は HF shard 内の **FP8 E4M3
+  per-tensor** で、E4M3 code × per-tensor scale で復号する（`weight_scale` は BF16）。
+  FP8 経路は 128 シャードを最大 16 worker で読み、EXL3 経路は従来の `pread` のままである。
+  どちらも起動時は rank の weight load と並行に prefetch する。
 - MXFP4 / FP8 の preshuffle staging は関数ローカルの buffer を非同期コピーしない。
   同期コピーで device へ移してから buffer を破棄する。
 
@@ -93,8 +98,10 @@ RMS_NORM -> LINEAR(down) -> SILU(1/hc) -> LINEAR(up) -> HYPER_MIX
 
 ### PLE
 
-`PleTable::decode_row` は E4M3 code × per-tensor BF16 scale を復号する。
-`ngram_rows` は 16 head（bigram 8 + trigram 8）の行番号を返し、
+`PleTable::decode_row` は checkpoint の形式に応じて 2 経路を復号する。MXFP4
+checkpoint は E4M3 code × per-tensor BF16 scale、EXL3 checkpoint は
+`mul1_codebook` の trellis である。`ngram_rows` は 16 head（bigram 8 + trigram 8）の
+行番号を返し、
 `PleInputRuntime` が sequence ごとの token history から 16 行を gather する。
 1 token あたり 16 行 = 2,560 要素である。
 
