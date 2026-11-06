@@ -348,6 +348,58 @@ EXL3 経路の現在値である。
   [../research/20261105/exl3_isa_analysis.md](../research/20261105/exl3_isa_analysis.md)
   を参照。
 
+## 2026-11-07 EXL3 5 bpw decode（ka=5 fast path）
+
+`models/Qwen3.8-27B-exl3`（5 bpw、lm_head 6 bpw）の decode に ka=5 half=0 専用の
+dequant path を追加し、decode / verify の split-K 既定を rows で分けた。判断と
+棄却した候補は
+[../research/20261107/exl3_5bpw_decode.md](../research/20261107/exl3_5bpw_decode.md)。
+
+TP=1、device 1、bf16 KV、`--arena-gib 28`。
+
+| 断面 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| TG ctx128 / 16 token | 14.49〜14.56 tok/s | **16.79〜16.83 tok/s** |
+| PP 128 | 447.96 tok/s | **504.60 tok/s** |
+| PP 512 | 1042.93 tok/s | 1053.62 tok/s |
+| PP 2048 | 1356.65 tok/s | 1364.05 tok/s |
+
+TP=2。
+
+| 断面 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| TG ctx128 / 16 token | 22.99 tok/s | **26.52 tok/s** |
+| PP 128 | 812.89 tok/s | **902.39 tok/s** |
+| DFlash2 drafts=7 | 58.44 tok/s | **63.26 tok/s** |
+
+FlashNext-exl3（3.0 / 3.5 bpw）にも同じ固定 rate path を適用した。TP=2、device 0,1、
+`--arena-gib 30`。
+
+| 断面 | 変更前 | 変更後 |
+| --- | ---: | ---: |
+| TG ctx128 / 16 token | 24.45 tok/s | 24.87 tok/s |
+| DFlash2 drafts=4、32 new token | - | **53.37 tok/s** |
+| DFlash2 drafts=6、32 new token | 50.71 tok/s | 51.41 tok/s |
+
+- FlashNext の MTP は `--mtp` が TP1、Qwen4Exp が TP2 以上を要求するため実行できない。
+- 27B-exl3 の MTP（TP1、`--mtp --mtp-drafts 4`）は **44.51〜44.67 tok/s**
+  （target-only 17.09、mean accepted 2.750）。同条件の DFlash2 TP1 は drafts=6 で
+  45.45〜45.84 tok/s。TP2 + DFlash2 は 32 token で 63.38 tok/s（fast path 入り）。
+  TP2 MTP は次の節を参照。
+- measurement revision: `exp/exl3-speed` の working tree（ka=5 / ka=3 の固定 rate
+  template 実体、rows 別 split-K 既定、`SHELF_EXL3_FAST_DECODE=0` で従来経路）
+- GPU: Radeon AI PRO R9700 1 枚 / 2 枚（device 1 / device 0,1）
+- command（TG）:
+  `shelf-bench tg --model-dir models/Qwen3.8-27B-exl3 --mode forward --context 128 --tokens 16 --warmup 1 --device 1 --arena-gib 28`
+- command（PP）:
+  `shelf-bench pp --model-dir models/Qwen3.8-27B-exl3 --mode forward --prompt-tokens N --runs 3 --warmup 1 --device 1 --arena-gib 28`
+- command（DFlash2）:
+  `shelf-compute --model-dir models/Qwen3.8-27B-exl3 --input-ids-file <5 token> --max-new-tokens 32 --max-seq-len 128 --device 0,1 --tensor-parallel 2 --prefix-cache 0 --kv-cache-dtype bf16 --temperature 0 --arena-gib 28 --dflash2-model-dir models/Qwen3.8-27B-DFlash2 --dflash2-drafts 7`
+- 生成一致アンカー: DFlash2 と target-only の `GENERATED_IDS` は
+  `11751,13,198,760,6511,314,9564,369,19241,13,198,760,6511,314,14898,369,21047,13,198,760,6511,314,17163,369,23327,13,198,760,6511,314,32208,369`。
+  TG の `LOGITS` は ka5 の on / off で bitwise 一致した。
+- `test_exl3_codec` / `test_exl3_linear` / `test_exl3_dense` / `test_exl3_grouped` は PASS。
+
 ## 2026-11-07 MTP TP=2（Qwen3.8-27B-exl3）
 
 `models/Qwen3.8-27B-exl3`（5 bpw）の MTP を TP=2 で動かした。MTP block は rank に
@@ -373,8 +425,8 @@ EXL3 経路の現在値である。
   GDN restore 5）。
 - MTP は TP1 でも動く（32 token、drafts=4 で 44.51 tok/s）。TP2 で +33 %。
 - DFlash2 TP2 の方が速い。MTP は drafter model の追加 load が不要な点が利点。
-- この計測は EXL3 の ka=5 fast path を含まない build で取った。fast path を入れた
-  build では target / MTP とも再測が必要。
+- この計測は EXL3 の ka=5 fast path を含まない build で取った。merge 後は fast path を
+  含むため、target / MTP / DFlash2 とも再測が必要。
 
 ## 2026-11-03 long-context prefill
 

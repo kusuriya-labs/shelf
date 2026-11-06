@@ -575,6 +575,11 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
     }();
     args.groups = groups_override;
+    static const uint32_t fast_decode = [] {
+        const char* e = std::getenv("SHELF_EXL3_FAST_DECODE");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 1u;
+    }();
+    args.fast_decode = fast_decode;
     const uint64_t xrot_bytes = static_cast<uint64_t>(args.rows) * args.k * 2u;
     static const bool pre_override = [] {
         const char* e = std::getenv("SHELF_EXL3_PRE");

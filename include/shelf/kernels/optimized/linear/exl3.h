@@ -35,6 +35,8 @@ struct Exl3GemmArgs {
     uint32_t groups = 0;
     // Optional n-tile override for the grouped path. 0 keeps pick_n_tiles' shape choice.
     uint32_t n_tiles = 0;
+    // Experimental ka=5 half=0 dequant path (dense 5 bpw checkpoints).
+    uint32_t fast_decode = 0;
 
     // Optional routed-expert group plan. When group_expert is non-null, blockIdx.z is
     // the group, group_expert[g] selects the expert plane and group_rows[g] bounds the
