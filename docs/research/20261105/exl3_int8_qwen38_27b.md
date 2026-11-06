@@ -66,8 +66,12 @@ int8 GEMM（int8 x int8 -> int32、230〜310 TOPS）で計算する。`shelf-ben
 | 512 | 400.2 ms | 345.1 ms | 0.86 | 548.2 ms |
 | 1024 | 656.2 ms | 583.5 ms | 0.89 | 1077.9 ms |
 | 2048 | 1203.8 ms | 1111.9 ms | 0.92 | 2156.8 ms |
-| 4096 | 3043.6 ms | 2100.1 ms | 0.69 | — |
+| 4096 | 2984.2 ms（`--prefill-chunk 2048` なら 2456.1 ms） | 2100.1 ms（chunk 2048 なら 2295.9 ms） | 0.70（chunk 2048 同士で 0.93） | — |
 
+- mul1 は 2409 行を超える 1 batch で急に遅くなる（2400 token 1424 ms、2416 token 1790 ms）。main の W16A16 は入力回転の
+  領域が 80 MiB で、`rows * k * 2` がそれを超えると、down_proj（k = 17408）が dense 経路ではなく融合 kernel に落ちるため。
+  4096 token の mul1 の値はその落ちた状態で、chunk 2048 に分ければ戻る。mul24 は行を分けて実行するのでこの段差が無い。
+  公平な比較は chunk 2048 同士（0.93）。
 - 128 token 以下は融合 kernel のまま（256 行未満）。融合 kernel だけだと 512 token 以上で W16A16 より最大 1.8 倍遅かった
   （INT8 GEMM が約 60 TOPS で頭打ち）ため、dense 経路を加えた。
 - 1 つの hipBLASLt GEMM は K 全体を足すので 128 ごとの scale を掛けられない。活性の scale を**行ごとに 1 つ**
