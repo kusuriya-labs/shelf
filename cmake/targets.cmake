@@ -89,6 +89,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/linear/exl3.hip
+    src/shelf/kernels/optimized/linear/exl3_mul24_grouped.hip
     src/shelf/kernels/optimized/linear/exl3_int8.hip
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip

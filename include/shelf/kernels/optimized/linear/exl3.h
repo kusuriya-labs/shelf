@@ -69,6 +69,11 @@ hipError_t launch_quantize_xrot_x8(const Exl3GemmArgs& args, void* xrot, float* 
                                    bool residual, hipStream_t stream);
 hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* rowsum,
                                       const void* accum, hipStream_t stream);
+// Grouped mul24 GEMM (exl3_mul24_grouped.hip). `args` is the grouped plan as launch_gemm_exl3_w16a16_grouped builds it
+// (rows = one group tile, groups = fused groups per block, 1 or 2; more is run as 2). int8_act selects INT8 activations
+// with an iu8 WMMA; otherwise an FP16 WMMA on the exact integer weights. n_tiles is 1 or 2 (128 output columns each).
+hipError_t launch_exl3_mul24_grouped(const Exl3GemmArgs& args, bool int8_act, uint32_t n_tiles,
+                                     uint32_t grid_x, uint32_t grid_z, hipStream_t stream);
 hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xrot,
                                        hipStream_t stream);
 

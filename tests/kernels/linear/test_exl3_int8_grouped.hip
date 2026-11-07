@@ -1,5 +1,7 @@
 // MoE routed expert (grouped EXL3) with the mul24 codebook: the grouped kernel decodes q * kExl3Int8GridStep and runs
-// an FP16 GEMM. A synthetic rank-3 expert plane (canonical [kt][nt] trellis, as the Qwen4Exp loader leaves it) is
+// either an FP16 GEMM or, with int8_act, an iu8 WMMA GEMM on per-row, per-128-K int8 activations. Both are checked here
+// (the INT8 CPU reference mirrors the activation rounding), and the INT8 activation noise against the FP16 result is
+// printed. A synthetic rank-3 expert plane (canonical [kt][nt] trellis, as the Qwen4Exp loader leaves it) is
 // checked against a CPU reference built on exl3_decode_int8. Covers several bit rates, experts with no / few / many
 // tokens (fused groups of one expert), token-row gather, and BF16 / F32 output.
 #include <shelf/core/memory/types.h>
@@ -127,19 +129,16 @@ bool run_case(const Case& c, uint32_t seed) {
     HIP_OK(hipMemcpy(d_gc.p, &group_count, 4, hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(d_eb.p, expert_begin.data(), expert_begin.size() * 4, hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(d_rt.p, row_token.data(), row_token.size() * 4, hipMemcpyHostToDevice));
-    HIP_OK(hipMemset(d_out.p, 0xFF, out_elems * (c.bf16_out ? 2u : 4u)));  // untouched rows stay 0xFF
-
     kernel::Exl3GroupedArgs args;
     args.trellis = d_trellis.p;
     args.suh = d_suh.p;
     args.svh = d_svh.p;
     args.input = d_in.p;
-    args.output = d_out.p;
-    args.out_features = n;
-    args.k = k;
     args.input_row_stride = k;
     args.output_row_stride = n;
     args.output_dtype = c.bf16_out ? 0u : 1u;
+    args.out_features = n;
+    args.k = k;
     args.ka = bits;
     args.half = 0;
     args.mul24 = 1;
@@ -152,11 +151,18 @@ bool run_case(const Case& c, uint32_t seed) {
     args.expert_group_begin = c.fuse ? d_eb.p : nullptr;
     args.row_token = c.token_rows ? d_rt.p : nullptr;
     args.group_capacity = group_count;
-    HIP_OK(kernel::launch_gemm_exl3_w16a16_grouped(args, nullptr));
-    HIP_OK(hipDeviceSynchronize());
 
-    std::vector<uint8_t> raw(out_elems * (c.bf16_out ? 2u : 4u));
-    HIP_OK(hipMemcpy(raw.data(), d_out.p, raw.size(), hipMemcpyDeviceToHost));
+    const size_t out_bytes = out_elems * (c.bf16_out ? 2u : 4u);
+    std::vector<uint8_t> raw[2];
+    for (uint32_t mode = 0; mode < 2; ++mode) {  // 0: FP16 GEMM, 1: INT8 activations
+        HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));  // untouched rows stay 0xFF
+        args.output = d_out.p;
+        args.int8_act = mode;
+        HIP_OK(kernel::launch_gemm_exl3_w16a16_grouped(args, nullptr));
+        HIP_OK(hipDeviceSynchronize());
+        raw[mode].resize(out_bytes);
+        HIP_OK(hipMemcpy(raw[mode].data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+    }
 
     // CPU reference per expert: q from the canonical trellis.
     std::vector<std::vector<int8_t>> q(c.experts);
@@ -164,69 +170,109 @@ bool run_case(const Case& c, uint32_t seed) {
         q[e].assign(static_cast<size_t>(n) * k, 0);
         if (!exl3::exl3_decode_int8(trellis.data() + e * trellis_words, kt, nt, bits, q[e].data(), 2)) return false;
     }
-    double max_ref = 0.0, max_err = 0.0;
-    size_t untouched_bad = 0;
-    std::vector<float> ref(out_elems, 0.0f);
+    // refs[0]: FP16 GEMM mirror (xrot rounded to FP16). refs[1]: INT8 mirror (per row and 128-K block scale
+    // amax / 127, codes rint(v * (1 / scale)) clamped, exact integer block sums, fp32 accumulation of scale * sum).
+    std::vector<float> refs[2] = {std::vector<float>(out_elems, 0.0f), std::vector<float>(out_elems, 0.0f)};
     std::vector<uint8_t> row_written(plane_rows, 0);
+    double max_ref = 0.0;
     for (uint32_t g = 0; g < group_count; ++g) {
         const uint32_t e = group_expert[g];
         for (uint32_t r = 0; r < group_rows[g]; ++r) {
             const uint32_t out_row = g * kRowTile + r;
             row_written[out_row] = 1;
             const uint32_t in_row = c.token_rows ? static_cast<uint32_t>(row_token[out_row]) : out_row;
-            std::vector<float> xrot(k);
+            std::vector<float> xrot(k), xq(k), scale(k / 128u);
             for (uint32_t b = 0; b < k / 128u; ++b) {
                 float v[128];
                 for (int t = 0; t < 128; ++t)
                     v[t] = bf16_to_f32(input[static_cast<size_t>(in_row) * k + b * 128 + t]) *
                            f16_value(suh[static_cast<size_t>(e) * k + b * 128 + t]);
                 fwht128(v);
-                for (int t = 0; t < 128; ++t) xrot[b * 128 + t] = f16_value(f16_bits(v[t] * kInvSqrt128));
-            }
-            std::vector<float> yp(n);
-            for (uint32_t col = 0; col < n; ++col) {
-                double acc = 0.0;
-                const int8_t* qrow = q[e].data() + static_cast<size_t>(col) * k;
-                for (uint32_t i = 0; i < k; ++i) acc += static_cast<double>(qrow[i]) * xrot[i];
-                yp[col] = static_cast<float>(acc * exl3::kExl3Int8GridStep);
-            }
-            for (uint32_t b = 0; b < n / 128u; ++b) {
-                fwht128(yp.data() + b * 128);
+                float peak = 0.0f;
                 for (int t = 0; t < 128; ++t) {
-                    const uint32_t col = b * 128 + t;
-                    const float y = yp[col] * kInvSqrt128 * f16_value(svh[static_cast<size_t>(e) * n + col]);
-                    ref[static_cast<size_t>(out_row) * n + col] = y;
-                    max_ref = std::max(max_ref, static_cast<double>(std::fabs(y)));
+                    v[t] *= kInvSqrt128;
+                    peak = std::max(peak, std::fabs(v[t]));
+                }
+                scale[b] = peak / 127.0f;
+                const float inv = scale[b] > 0.0f ? 1.0f / scale[b] : 0.0f;
+                for (int t = 0; t < 128; ++t) {
+                    xrot[b * 128 + t] = f16_value(f16_bits(v[t]));
+                    xq[b * 128 + t] = std::min(std::max(std::nearbyintf(v[t] * inv), -128.0f), 127.0f);
+                }
+            }
+            for (uint32_t mode = 0; mode < 2; ++mode) {
+                std::vector<float> yp(n);
+                for (uint32_t col = 0; col < n; ++col) {
+                    const int8_t* qrow = q[e].data() + static_cast<size_t>(col) * k;
+                    if (mode == 0) {
+                        double acc = 0.0;
+                        for (uint32_t i = 0; i < k; ++i) acc += static_cast<double>(qrow[i]) * xrot[i];
+                        yp[col] = static_cast<float>(acc * exl3::kExl3Int8GridStep);
+                    } else {
+                        float accf = 0.0f;
+                        for (uint32_t b = 0; b < k / 128u; ++b) {
+                            int64_t isum = 0;
+                            for (uint32_t i = b * 128; i < (b + 1) * 128; ++i)
+                                isum += static_cast<int64_t>(qrow[i]) * static_cast<int64_t>(xq[i]);
+                            accf += static_cast<float>(isum) * scale[b];
+                        }
+                        yp[col] = accf * exl3::kExl3Int8GridStep;
+                    }
+                }
+                for (uint32_t b = 0; b < n / 128u; ++b) {
+                    fwht128(yp.data() + b * 128);
+                    for (int t = 0; t < 128; ++t) {
+                        const uint32_t col = b * 128 + t;
+                        const float y = yp[col] * kInvSqrt128 * f16_value(svh[static_cast<size_t>(e) * n + col]);
+                        refs[mode][static_cast<size_t>(out_row) * n + col] = y;
+                        if (mode == 0) max_ref = std::max(max_ref, static_cast<double>(std::fabs(y)));
+                    }
                 }
             }
         }
     }
+    auto element = [&](const std::vector<uint8_t>& bytes, size_t i) {
+        float got;
+        if (c.bf16_out) {
+            uint16_t b;
+            std::memcpy(&b, &bytes[i * 2], 2);
+            got = bf16_to_f32(b);
+        } else {
+            std::memcpy(&got, &bytes[i * 4], 4);
+        }
+        return got;
+    };
+    // The CPU mirrors round like the kernel; the rest is FP32 summation order (and bf16 output rounding). The INT8
+    // mirror may differ from the kernel by a flipped rint tie (one activation code by 1) and the order of the FHT.
+    const double tol = (c.bf16_out ? 1.0e-2 : 1.0e-3) * std::max(max_ref, 1e-6);
+    bool ok = true;
+    double err[2] = {0.0, 0.0};
+    size_t untouched_bad = 0;
+    double noise_sq = 0.0, ref_sq = 0.0;
     for (uint32_t row = 0; row < plane_rows; ++row) {
         for (uint32_t col = 0; col < n; ++col) {
             const size_t i = static_cast<size_t>(row) * n + col;
             if (!row_written[row]) {
                 // The kernel must leave rows beyond group_rows alone (still 0xFF).
                 const size_t w = c.bf16_out ? 2u : 4u;
-                for (size_t b = 0; b < w; ++b)
-                    if (raw[i * w + b] != 0xFFu) { ++untouched_bad; break; }
+                for (uint32_t mode = 0; mode < 2; ++mode)
+                    for (size_t b = 0; b < w; ++b)
+                        if (raw[mode][i * w + b] != 0xFFu) { ++untouched_bad; break; }
                 continue;
             }
-            float got;
-            if (c.bf16_out) {
-                uint16_t b;
-                std::memcpy(&b, &raw[i * 2], 2);
-                got = bf16_to_f32(b);
-            } else {
-                std::memcpy(&got, &raw[i * 4], 4);
-            }
-            max_err = std::max(max_err, static_cast<double>(std::fabs(got - ref[i])));
+            for (uint32_t mode = 0; mode < 2; ++mode)
+                err[mode] = std::max(err[mode], static_cast<double>(std::fabs(element(raw[mode], i) - refs[mode][i])));
+            const double d = static_cast<double>(element(raw[1], i)) - static_cast<double>(element(raw[0], i));
+            noise_sq += d * d;
+            ref_sq += static_cast<double>(element(raw[0], i)) * element(raw[0], i);
         }
     }
-    // The CPU mirror rounds xrot to FP16 like the kernel; the rest is FP32 summation order (and bf16 output rounding).
-    const double tol = (c.bf16_out ? 1.0e-2 : 1.0e-3) * std::max(max_ref, 1e-6);
-    const bool ok = max_err <= tol && untouched_bad == 0;
-    std::printf("%s: bits=%u k=%u n=%u groups=%u max_ref=%g max_err=%g tol=%g untouched_bad=%zu %s\n", c.name, bits, k,
-                n, group_count, max_ref, max_err, tol, untouched_bad, ok ? "ok" : "FAIL");
+    const double noise = ref_sq > 0.0 ? std::sqrt(noise_sq / ref_sq) : 0.0;
+    ok = err[0] <= tol && err[1] <= tol && untouched_bad == 0 && noise < 2.0e-2;
+    std::printf("%s: bits=%u k=%u n=%u groups=%u max_ref=%g err_fp16=%g err_int8=%g tol=%g untouched_bad=%zu "
+                "int8_vs_fp16_rel_rms=%.3e %s\n",
+                c.name, bits, k, n, group_count, max_ref, err[0], err[1], tol, untouched_bad, noise,
+                ok ? "ok" : "FAIL");
     return ok;
 }
 
@@ -250,6 +296,11 @@ int main() {
     run({"nt1-tokenrows", 4, 256, 512, 2, mixed, false, true, false});
     run({"bf16-out", 4, 256, 512, 3, mixed, true, true, true});
     run({"single-row", 2, 128, 128, 4, {{1, 1}}, false, false, false});
+    // Zero-row groups, one-token experts and a heavily loaded expert (six full groups plus a short one).
+    run({"zero-and-one", 3, 256, 512, 3, {{0, 0}, {1, 1}, {2, 16}, {2, 0}}, true, true, false});
+    run({"heavy-expert", 2, 384, 512, 4, {{0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 7}, {1, 2}},
+         true, true, false});
+    run({"heavy-expert-nt2-bf16", 2, 384, 1024, 2, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, true});
     if (failed != 0) {
         std::printf("FAILED: %d case(s)\n", failed);
         return 1;
