@@ -179,6 +179,16 @@ const RuntimeRequest* ContinuousBatcher::request(uint64_t id) const {
     return &*it->second;
 }
 
+Status ContinuousBatcher::set_external_request_id(uint64_t id,
+                                                  int64_t external_request_id) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end()) {
+        return Status::invalid_argument("request id not found", __FILE__, __LINE__);
+    }
+    it->second->external_request_id = external_request_id;
+    return Status::make_ok();
+}
+
 std::size_t ContinuousBatcher::queued_count() const noexcept {
     std::size_t n = 0;
     for (const auto& r : requests_) {
@@ -642,6 +652,27 @@ Result<StepResult> ContinuousBatcher::step() {
         RuntimeRequest* prefill_request = resolve(scheduled);
         if (prefill_request != nullptr) {
             prefill_request->prefill_ms += exec_ms;
+            const uint32_t processed =
+                scheduled.prefix_tokens + scheduled.num_tokens;
+            const uint32_t base = prefill_request->restored_tokens;
+            const uint32_t processed_new = processed > base ? processed - base : 0u;
+            const uint32_t last_new =
+                prefill_request->prefill_log_tokens > base
+                    ? prefill_request->prefill_log_tokens - base
+                    : 0u;
+            const double interval_ms =
+                prefill_request->prefill_ms - prefill_request->prefill_log_ms;
+            if (interval_ms >= 3000.0 && processed_new > last_new) {
+                std::fprintf(
+                    stderr,
+                    "[req %lld] prefill_tok_s=%.1f tokens=%u interval_s=%.2f\n",
+                    static_cast<long long>(prefill_request->external_request_id),
+                    static_cast<double>(processed_new - last_new) * 1000.0 /
+                        interval_ms,
+                    processed_new, interval_ms / 1000.0);
+                prefill_request->prefill_log_ms = prefill_request->prefill_ms;
+                prefill_request->prefill_log_tokens = processed;
+            }
         }
     }
     if (!exec_result.ok()) {
@@ -823,7 +854,24 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     const uint32_t page_tokens = config_.page_tokens;
     const uint32_t last_boundary =
         page_tokens == 0u ? prompt_count : (prompt_count / page_tokens) * page_tokens;
+    const auto prefill_started = std::chrono::steady_clock::now();
+    auto last_prefill_log = prefill_started;
+    uint32_t last_prefill_offset = request.restored_tokens;
     auto save_input_boundary = [&](uint32_t offset) {
+        const auto now = std::chrono::steady_clock::now();
+        const double interval_s = std::chrono::duration<double>(
+                                      now - last_prefill_log)
+                                      .count();
+        if (interval_s >= 3.0 && offset > last_prefill_offset) {
+            const uint32_t delta = offset - last_prefill_offset;
+            std::fprintf(stderr,
+                         "[req %lld] prefill_tok_s=%.1f tokens=%u interval_s=%.2f\n",
+                         static_cast<long long>(request.external_request_id),
+                         static_cast<double>(delta) / interval_s,
+                         offset - request.restored_tokens, interval_s);
+            last_prefill_log = now;
+            last_prefill_offset = offset;
+        }
         if (prefix_cache_ == nullptr || page_tokens == 0u) {
             return;
         }
@@ -854,7 +902,6 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
                          st.message().c_str());
         }
     };
-    const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(), prompt_count,
         request.restored_tokens, page_tokens, save_input_boundary);

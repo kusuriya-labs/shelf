@@ -82,6 +82,8 @@ struct ServeGeneration {
     uint32_t max_new_tokens = 0;
     std::chrono::steady_clock::time_point submitted_at;
     std::chrono::steady_clock::time_point first_token_at;
+    std::chrono::steady_clock::time_point last_log_at;
+    std::size_t last_log_tokens = 0;
     bool has_first_token = false;
 };
 
@@ -141,12 +143,29 @@ void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
     while (generation.emitted_tokens < request->generated.size()) {
         if (!generation.has_first_token) {
             generation.first_token_at = std::chrono::steady_clock::now();
+            generation.last_log_at = generation.first_token_at;
             generation.has_first_token = true;
         }
         emit_token(generation.external_request_id,
                    request->generated[generation.emitted_tokens]);
         ++generation.emitted_tokens;
     }
+    if (!generation.has_first_token) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double interval_s = std::chrono::duration<double>(
+                                  now - generation.last_log_at)
+                                  .count();
+    if (interval_s < 3.0 || generation.emitted_tokens <= generation.last_log_tokens) {
+        return;
+    }
+    const std::size_t delta = generation.emitted_tokens - generation.last_log_tokens;
+    std::fprintf(stderr,
+                 "[req %lld] decode_tok_s=%.1f tokens=%zu interval_s=%.2f\n",
+                 static_cast<long long>(generation.external_request_id),
+                 static_cast<double>(delta) / interval_s, generation.emitted_tokens,
+                 interval_s);
+    generation.last_log_at = now;
+    generation.last_log_tokens = generation.emitted_tokens;
 }
 
 void serve_push_terminal(ServeState& state, int64_t external_request_id) {
@@ -524,6 +543,13 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
     generation.internal_request_id = submit_result.release();
+    const shelf::Status external_status = runtime.set_external_request_id(
+        generation.internal_request_id, external_request_id);
+    if (!external_status.ok()) {
+        (void)runtime.cancel(generation.internal_request_id);
+        emit_error_with_code(request_id, "internal", external_status.message());
+        return false;
+    }
     state.inflight.emplace(external_request_id, std::move(generation));
     return true;
 }

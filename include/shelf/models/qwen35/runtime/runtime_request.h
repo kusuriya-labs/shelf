@@ -47,6 +47,7 @@ struct ThinkingBudget {
 
 struct RuntimeRequest {
     uint64_t id = 0;
+    int64_t external_request_id = 0;
 
     std::vector<int32_t> input_tokens;
     uint32_t max_new_tokens = 0;
@@ -71,6 +72,8 @@ struct RuntimeRequest {
     uint32_t prefix_capture = 0;
     uint32_t prefix_boundary_pos = 0;
     double prefill_ms = 0.0;
+    double prefill_log_ms = 0.0;
+    uint32_t prefill_log_tokens = 0;
 
     bool speculative_decode = false;
     std::unique_ptr<DFlash2RequestSession> dflash;

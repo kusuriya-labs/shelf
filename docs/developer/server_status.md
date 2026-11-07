@@ -119,6 +119,18 @@ compute は request が完了するたびに stderr へ 1 行を出す。server 
 - `ttft_ms` は submit から最初の token event までであり、queue 待ちを含む。
 - `decode_ms` は最初の token event から done までである。
 - `prefill_tok_s = prefill / prefill_ms`、`decode_tok_s = gen / decode_ms` である。
+- prefill 中は 3 秒ごとに次の行も出す。DFlash2 は prefill chunk の完了時、
+  それ以外は prefill batch の完了時に判定する。
+
+```text
+[req 12] prefill_tok_s=482.1 tokens=4096 interval_s=3.02
+```
+
+- decode 中も 3 秒ごとに次の行を出す。
+
+```text
+[req 12] decode_tok_s=38.4 tokens=1520 interval_s=3.01
+```
 
 ## Architecture
 

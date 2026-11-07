@@ -753,6 +753,14 @@ const qwen35::runtime::RuntimeRequest* Qwen35ComputeRuntime::request(uint64_t id
     return batcher_->request(id);
 }
 
+Status Qwen35ComputeRuntime::set_external_request_id(uint64_t id,
+                                                     int64_t external_request_id) {
+    if (batcher_ == nullptr) {
+        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    }
+    return batcher_->set_external_request_id(id, external_request_id);
+}
+
 Status Qwen35ComputeRuntime::cancel_all() {
     if (batcher_ == nullptr) {
         return Status::make_ok();
