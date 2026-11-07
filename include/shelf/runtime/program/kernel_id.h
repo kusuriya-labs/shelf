@@ -49,6 +49,7 @@ enum class KernelId : uint32_t {
     MEAN_STREAMS,
     ACTIVATION_QUANTIZE_FP8_PERTOKEN,
     LINEAR_FP8_PTPC,
+    LINEAR_EXL3_INT8,
     COUNT,
 };
 
@@ -103,6 +104,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::MEAN_STREAMS: return "MEAN_STREAMS";
         case KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN: return "ACTIVATION_QUANTIZE_FP8_PERTOKEN";
         case KernelId::LINEAR_FP8_PTPC: return "LINEAR_FP8_PTPC";
+        case KernelId::LINEAR_EXL3_INT8: return "LINEAR_EXL3_INT8";
         default: return "UNKNOWN";
     }
 }

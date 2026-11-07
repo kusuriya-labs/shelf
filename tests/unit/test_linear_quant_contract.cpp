@@ -112,10 +112,22 @@ int main() {
             check(c.activation_k_alignment == 128u, "exl3: activation alignment");
         }
     }
+    {
+        auto resolved = rt::resolve_linear_quant_contract(
+            static_cast<uint8_t>(shelf::weights::MatrixEncoding::Exl3),
+            spec(quant::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16));
+        check(resolved.ok(), "exl3 int8: contract resolves");
+        if (resolved.ok()) {
+            const rt::ResolvedLinearQuantContract& c = resolved.value();
+            check(c.linear_kernel == rt::KernelId::LINEAR_EXL3_INT8, "exl3 int8: linear kernel");
+            check(!c.requires_activation_quant, "exl3 int8: quantizes inside the kernel");
+            check(c.activation_k_alignment == 128u, "exl3 int8: activation alignment");
+        }
+    }
     expect_error(
         static_cast<uint8_t>(shelf::weights::MatrixEncoding::Exl3),
         spec(quant::ComputeSpecId::BF16_F32_BF16),
-        "exl3 linear weight requires exl3 w16a16 compute spec", "exl3 bf16 spec");
+        "exl3 linear weight requires an exl3 compute spec", "exl3 bf16 spec");
 
     expect_error(
         static_cast<uint8_t>(shelf::weights::MatrixEncoding::Mxfp4),
