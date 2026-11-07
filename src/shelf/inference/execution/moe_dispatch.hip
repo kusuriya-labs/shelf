@@ -7,6 +7,7 @@
 #include <shelf/kernels/optimized/moe/router.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/quantization/mxfp4/mxfp4_native.h>
+#include <shelf/quantization/quantization_types.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -237,6 +238,9 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_linear(const Program& progr
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+// Default for mul24 expert activations; SHELF_EXL3_INT8_MOE overrides it.
+constexpr bool kExl3Int8MoeDefault = false;
+
 Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program,
                                                           const DispatchBinding& b,
                                                           HostExecutionContext& ctx,
@@ -293,6 +297,17 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.output_dtype = out.dtype == ValueDType::BF16 ? 0u : 1u;
     args.ka = e.exl3_ka;
     args.half = e.exl3_half;
+    args.mul24 = e.compute_spec == static_cast<uint8_t>(
+                                       ::shelf::quantization::ComputeSpecId::
+                                           EXL3_MUL24_INT8_W8A8_F32_BF16)
+                     ? 1u
+                     : 0u;
+    // SHELF_EXL3_INT8_MOE=1 runs mul24 experts with INT8 activations (iu8 WMMA); 0 keeps the FP16 GEMM.
+    static const bool int8_act = [] {
+        const char* v = std::getenv("SHELF_EXL3_INT8_MOE");
+        return v != nullptr ? std::atoi(v) != 0 : kExl3Int8MoeDefault;
+    }();
+    args.int8_act = args.mul24 != 0u && int8_act ? 1u : 0u;
     args.trellis_batch_stride = e.codes_batch_stride_bytes;
     args.suh_batch_stride = e.exl3_suh_batch_stride_bytes;
     args.svh_batch_stride = e.exl3_svh_batch_stride_bytes;

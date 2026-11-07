@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/kernels/optimized/linear/exl3_decode_device.h>
+#include <shelf/kernels/optimized/linear/exl3_group_plan_device.h>
 #include <shelf/kernels/optimized/linear/exl3_grouped.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
@@ -399,43 +400,9 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     uint32_t r0 = blockIdx.y * kRows;
     uint32_t active_rows = args.rows - r0 < kRows ? args.rows - r0 : kRows;
     const uint32_t group_index = blockIdx.z;
-    if (args.group_expert != nullptr) {
-        if (group_index >= args.group_count[0]) return;
-        const uint32_t expert = args.group_expert[group_index];
-        uint32_t rows_here = args.group_rows[group_index];
-        if (args.expert_group_begin != nullptr) {
-            const uint32_t begin = args.expert_group_begin[expert];
-            const uint32_t end = args.expert_group_begin[expert + 1u];
-            if (((group_index - begin) % kGroups) != 0u) return;
-            const uint32_t chunk_end =
-                (group_index + kGroups) < end ? (group_index + kGroups) : end;
-            rows_here = 0u;
-            for (uint32_t gi = group_index; gi < chunk_end; ++gi)
-                rows_here += args.group_rows[gi];
-        }
-        if (rows_here == 0u) return;
-        args.trellis = static_cast<const std::uint8_t*>(args.trellis) +
-                       static_cast<std::uint64_t>(expert) * args.trellis_batch_stride;
-        args.suh = static_cast<const std::uint8_t*>(args.suh) +
-                   static_cast<std::uint64_t>(expert) * args.suh_batch_stride;
-        args.svh = static_cast<const std::uint8_t*>(args.svh) +
-                   static_cast<std::uint64_t>(expert) * args.svh_batch_stride;
-        const std::uint64_t output_offset =
-            static_cast<std::uint64_t>(group_index) * kRowTile * args.output_row_stride;
-        if (args.row_token == nullptr) {
-            const std::uint64_t input_offset =
-                static_cast<std::uint64_t>(group_index) * kRowTile * args.input_row_stride;
-            args.input = static_cast<const shelf::bf16_t*>(args.input) + input_offset;
-        }
-        args.output = args.output_dtype == 0u
-                          ? static_cast<void*>(static_cast<shelf::bf16_t*>(args.output) +
-                                               output_offset)
-                          : static_cast<void*>(static_cast<float*>(args.output) +
-                                               output_offset);
-        args.rows = rows_here;
-        r0 = 0u;
-        active_rows = rows_here < kRows ? rows_here : kRows;
-    }
+    if (args.group_expert != nullptr &&
+        !exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows))
+        return;
     const __half* xrot_global = static_cast<const __half*>(args.xrot);
 
     __shared__ __align__(16) __half xrot[kPre ? 1u : kRows * kXrotPitch];
@@ -882,6 +849,8 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
         args.group_capacity == 0u || args.group_capacity > 65535u) {
         return hipErrorInvalidValue;
     }
+    if (args.mul24 != 0u && args.half != 0u) return hipErrorInvalidValue;  // mul24 has integer bit rates only
+    if (args.int8_act != 0u && args.mul24 == 0u) return hipErrorInvalidValue;  // INT8 activations exist for mul24 only
 
     Exl3GemmArgs dense;
     dense.trellis = args.trellis;
@@ -918,12 +887,18 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.suh_batch_stride = args.suh_batch_stride;
     dense.svh_batch_stride = args.svh_batch_stride;
 
+    // An n-tile override (SHELF_EXL3_GROUPED_NTILES) that does not divide the output would silently drop columns.
+    if ((args.out_features % (kOutBlockBase * pick_n_tiles(dense))) != 0u) return hipErrorInvalidValue;
     LaunchPlan plan;
     plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(dense));
     plan.grid_y = 1u;
     plan.grid_z = args.group_capacity;
     plan.splits = 1u;
     plan.groups = dense.groups;
+    // mul24 has its own kernel (exl3_mul24_grouped.hip): same group plan, mul24 decode, FP16 or INT8 activations.
+    if (args.mul24 != 0u)
+        return launch_exl3_mul24_grouped(dense, args.int8_act != 0u, pick_n_tiles(dense), plan.grid_x,
+                                         plan.grid_z, stream);
     return launch_plan<false>(dense, plan, stream);
 }
 

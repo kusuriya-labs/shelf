@@ -1765,7 +1765,8 @@ std::vector<LayerOverrideSource> read_layer_override_sources(uint32_t hidden) {
 
 bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noexcept {
     for (const ::shelf::runtime::DispatchBinding& binding : program.dispatches) {
-        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16) return true;
+        if (binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_W16A16 ||
+            binding.kernel_id == ::shelf::runtime::KernelId::LINEAR_EXL3_INT8) return true;
     }
     return false;
 }
