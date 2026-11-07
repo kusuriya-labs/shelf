@@ -18,5 +18,12 @@ inline bool ffn_uses_exl3_linear(const DenseFfnWeights& ffn) noexcept {
            ffn.down.encoding == shelf::weights::MatrixEncoding::Exl3;
 }
 
+inline void note_ffn_exl3_linear(const DenseFfnWeights& ffn,
+                                 shelf::weights::Exl3LinearShape& shape) noexcept {
+    shelf::weights::note_exl3_linear(ffn.gate, shape);
+    shelf::weights::note_exl3_linear(ffn.up, shape);
+    shelf::weights::note_exl3_linear(ffn.down, shape);
+}
+
 }  // namespace qwen35
 }  // namespace shelf

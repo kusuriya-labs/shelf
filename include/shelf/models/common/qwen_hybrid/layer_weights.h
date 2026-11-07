@@ -47,5 +47,16 @@ inline bool layer_uses_exl3_linear(const HybridLayerWeights& layer) noexcept {
     return false;
 }
 
+inline void note_layer_exl3_linear(const HybridLayerWeights& layer,
+                                   shelf::weights::Exl3LinearShape& shape) noexcept {
+    const shelf::weights::MatrixWeight* projections[] = {
+        &layer.attn_q_proj, &layer.attn_k_proj,   &layer.attn_v_proj,
+        &layer.attn_o_proj, &layer.attn_in_proj_a, &layer.attn_in_proj_b,
+        &layer.attn_in_proj_qkv, &layer.attn_in_proj_z, &layer.attn_out_proj};
+    for (const shelf::weights::MatrixWeight* w : projections) {
+        shelf::weights::note_exl3_linear(*w, shape);
+    }
+}
+
 }  // namespace qwen_hybrid
 }  // namespace shelf

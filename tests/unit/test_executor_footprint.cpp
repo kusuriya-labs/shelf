@@ -86,8 +86,25 @@ int main() {
     const std::size_t exl3_4096 = qwen35_executor_reserve_bytes(
         text, text.ffn.intermediate_size, exec_config(4096u, 4u, 0u), 1u, true);
     check(exl3_4096 - rows4096 ==
-              shelf::qwen35::runtime::exl3_workspace_bytes(qwen35_padded_row_count(4096u)),
+              shelf::qwen35::runtime::exl3_workspace_bytes(
+                  qwen35_padded_row_count(4096u)).total(),
           "reserve adds the trellis staging term only when the model uses it");
+
+    shelf::weights::Exl3LinearShape exl3_shape;
+    exl3_shape.max_k = 5120u;
+    exl3_shape.max_out_features = 17408u;
+    exl3_shape.max_dense_bytes = 5120ull * 17408ull * 2ull;
+    ExecutorConfig shaped_config = exec_config(4096u, 4u, 0u);
+    shaped_config.exl3_linear_shape = exl3_shape;
+    const std::size_t exl3_shaped = qwen35_executor_reserve_bytes(
+        text, text.ffn.intermediate_size, shaped_config, 1u, true);
+    check(exl3_shaped <= exl3_4096, "a model-sized trellis shape does not grow the reserve");
+    check(exl3_4096 - exl3_shaped ==
+              shelf::qwen35::runtime::exl3_workspace_bytes(
+                  qwen35_padded_row_count(4096u)).total() -
+                  shelf::qwen35::runtime::exl3_workspace_bytes(
+                      qwen35_padded_row_count(4096u), exl3_shape).total(),
+          "the trellis term follows the model shape");
 
     const auto binding = [](::shelf::runtime::KernelId id) {
         ::shelf::runtime::DispatchBinding b;

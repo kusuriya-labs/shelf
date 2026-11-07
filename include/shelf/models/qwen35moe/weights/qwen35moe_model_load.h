@@ -62,6 +62,18 @@ inline bool uses_exl3_linear(const Qwen35MoeModelWeights& weights) noexcept {
     return false;
 }
 
+// The staging-plane geometry of this rank's linears. The LM head and the MTP block are
+// excluded: the LM head stays on the fused path, and the MTP block runs in its own executor.
+inline shelf::weights::Exl3LinearShape exl3_linear_shape(
+    const Qwen35MoeModelWeights& weights) noexcept {
+    shelf::weights::Exl3LinearShape shape;
+    for (const Qwen35MoeLayerWeights& layer : weights.layers) {
+        shelf::qwen_hybrid::note_layer_exl3_linear(layer, shape);
+        note_ffn_exl3_linear(layer.ffn, shape);
+    }
+    return shape;
+}
+
 struct Qwen35MoeLoadOptions : shelf::qwen_hybrid::HybridLoadOptions {
     bool load_mtp_layers = false;
 

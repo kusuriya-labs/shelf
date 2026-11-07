@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
 #include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/models/qwen4exp/weights/ple_table.h>
+#include <shelf/weights/matrix_weight.h>
 
 #include <hip/hip_runtime.h>
 
@@ -54,6 +55,9 @@ public:
     // executor's staging planes for that form are large, and the memory plan only reserves
     // them when a program will actually run such a linear.
     virtual bool uses_exl3_linear() const = 0;
+    // Largest rotated-domain linear this rank runs, which sizes those staging planes. An
+    // empty shape keeps the model-independent upper bound.
+    virtual shelf::weights::Exl3LinearShape exl3_linear_shape() const { return {}; }
     // State pools the executor owns and allocates after the memory plan has sized the KV
     // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
     // the rank runtime already holds.

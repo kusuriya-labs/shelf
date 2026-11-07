@@ -49,8 +49,6 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
     const uint32_t history_rows = config.num_drafts == 0u ? 1u : config.num_drafts;
     total += align_up(static_cast<std::size_t>(history_rows) * view.conv_slot_stride *
                       sizeof(bf16_t));
-    total += align_up(static_cast<std::size_t>(history_rows) * view.recurrent_slot_stride *
-                      sizeof(fp16_t));
 
     const std::size_t log_rows = static_cast<std::size_t>(config.num_drafts) + 1u;
     const std::size_t states = view.num_gdn_states;

@@ -111,6 +111,58 @@ struct Qwen4ExpRankWeights {
     [[nodiscard]] std::uint64_t resident_bytes() const noexcept;
 };
 
+inline void note_exl3_linear(const Qwen4ExpHyperConnectionWeights& w,
+                             shelf::weights::Exl3LinearShape& shape) noexcept {
+    shelf::weights::note_exl3_linear(w.input_mix_down, shape);
+    shelf::weights::note_exl3_linear(w.input_mix_up, shape);
+    shelf::weights::note_exl3_linear(w.block_inject, shape);
+}
+
+inline void note_exl3_linear(const Qwen4ExpAttentionWeights& w,
+                             shelf::weights::Exl3LinearShape& shape) noexcept {
+    const shelf::weights::MatrixWeight* projections[] = {
+        &w.in_proj_qkv, &w.in_proj_z,  &w.in_proj_a, &w.in_proj_b,
+        &w.out_proj,    &w.q_proj,     &w.k_proj,    &w.v_proj,
+        &w.o_proj,      &w.index_qk_proj};
+    for (const shelf::weights::MatrixWeight* m : projections) {
+        shelf::weights::note_exl3_linear(*m, shape);
+    }
+}
+
+inline void note_exl3_linear(const Qwen4ExpMoeWeights& w,
+                             shelf::weights::Exl3LinearShape& shape) noexcept {
+    shelf::weights::note_exl3_linear(w.router, shape);
+    shelf::weights::note_exl3_linear(w.shared_gate, shape);
+    shelf::weights::note_exl3_linear(w.shared_gate_proj, shape);
+    shelf::weights::note_exl3_linear(w.shared_up_proj, shape);
+    shelf::weights::note_exl3_linear(w.shared_down_proj, shape);
+    shelf::weights::note_exl3_linear(w.gate_experts, shape);
+    shelf::weights::note_exl3_linear(w.up_experts, shape);
+    shelf::weights::note_exl3_linear(w.down_experts, shape);
+}
+
+inline void note_exl3_linear(const Qwen4ExpPleWeights& w,
+                             shelf::weights::Exl3LinearShape& shape) noexcept {
+    shelf::weights::note_exl3_linear(w.key_proj, shape);
+    shelf::weights::note_exl3_linear(w.value_proj, shape);
+}
+
+// The staging-plane geometry of this rank's linears. The LM head and the MTP block are
+// excluded: the LM head stays on the fused path, and the MTP block runs in its own executor.
+inline shelf::weights::Exl3LinearShape exl3_linear_shape(
+    const Qwen4ExpRankWeights& weights) noexcept {
+    shelf::weights::Exl3LinearShape shape;
+    note_exl3_linear(weights.mixer, shape);
+    for (const Qwen4ExpLayerWeights& layer : weights.layers) {
+        note_exl3_linear(layer.attn_hyper_connection, shape);
+        note_exl3_linear(layer.mlp_hyper_connection, shape);
+        note_exl3_linear(layer.attention, shape);
+        note_exl3_linear(layer.mlp, shape);
+        note_exl3_linear(layer.ple, shape);
+    }
+    return shape;
+}
+
 struct Qwen4ExpLoadOptions {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;

@@ -157,6 +157,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     if (!gdn_result.ok()) return gdn_result.status();
     rank->gdn_pool_.emplace(gdn_result.release());
 
+    const shelf::weights::Exl3LinearShape exl3_linear_shape =
+        rank->model_->exl3_linear_shape();
     const std::size_t arena_free_now =
         rank->arena_->capacity() - rank->arena_->used();
     std::size_t reserved = config.working_set_reserve_bytes;
@@ -166,6 +168,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         reserve_config.max_scheduled_requests = config.max_scheduled_requests;
         reserve_config.max_scheduled_output_rows = config.max_scheduled_output_rows;
         reserve_config.target_hidden_tap_count = config.target_hidden_tap_count;
+        reserve_config.exl3_linear_shape = exl3_linear_shape;
         // The dense FFN term of the shared estimate stands in for the FFN activations that
         // still sit at token rows: for a model with grouped experts those are its shared
         // expert. The routed experts add their own group-row term.
@@ -183,9 +186,10 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         // from what is left, so an estimate that is too small turns into a failed allocation
         // after the pool already took the arena. The auto path keeps slack back, scaled to the
         // estimate so it tracks the row bucket; an explicit --working-set-reserve is taken as
-        // given.
-        const std::size_t slack =
-            std::max<std::size_t>(64ull << 20ull, reserved / 3ull);
+        // given. The scale is capped because the measured gap does not grow with the estimate
+        // past a few hundred MiB, and every MiB held back here is a MiB the KV pool cannot use.
+        const std::size_t slack = std::min<std::size_t>(
+            std::max<std::size_t>(64ull << 20ull, reserved / 8ull), 256ull << 20ull);
         reserved += slack;
         std::fprintf(stderr,
                      "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u, "
@@ -289,6 +293,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.max_context_tokens = config.max_seq_len + 1u;
     exec_config.rope_profile = config.rope_profile;
     exec_config.tp = &rank->context();
+    exec_config.exl3_linear_shape = exl3_linear_shape;
 
     const std::size_t executor_before = rank->arena_->used();
     auto exec_result = rank->model_->create_executor(
@@ -351,6 +356,10 @@ public:
 
     bool uses_exl3_linear() const override {
         return ::shelf::qwen35::uses_exl3_linear(model_.weights());
+    }
+
+    shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
+        return ::shelf::qwen35::exl3_linear_shape(model_.weights());
     }
 
     Result<Executor> create_executor(SequenceSlotPool& sequence_pool,

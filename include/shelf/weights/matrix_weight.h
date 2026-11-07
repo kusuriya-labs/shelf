@@ -2,6 +2,7 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/quantization/quantization_types.h>
 #include <shelf/weights/tensor_partition.h>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -92,6 +93,26 @@ inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexc
         default: break;
     }
     return MatrixEncoding::Bf16;
+}
+
+// The staging planes the rotated-domain trellis form needs are sized by the largest linear
+// a rank actually runs: xrot by k, the dense copy by k * n, the accumulators by n. The LM
+// head is excluded because it stays on the fused path.
+struct Exl3LinearShape {
+    std::size_t max_k = 0;
+    std::size_t max_out_features = 0;
+    std::size_t max_dense_bytes = 0;
+
+    bool present() const noexcept { return max_k != 0u; }
+};
+
+inline void note_exl3_linear(const MatrixWeight& w, Exl3LinearShape& shape) noexcept {
+    if (w.encoding != MatrixEncoding::Exl3) return;
+    const std::size_t k = w.k_padded > w.cols ? w.k_padded : w.cols;
+    if (k > shape.max_k) shape.max_k = k;
+    if (w.rows > shape.max_out_features) shape.max_out_features = w.rows;
+    const std::size_t dense = k * static_cast<std::size_t>(w.rows) * 2u;
+    if (dense > shape.max_dense_bytes) shape.max_dense_bytes = dense;
 }
 
 }
