@@ -21,6 +21,7 @@ struct AlgoKey {
 
 struct LtState {
     hipblasLtHandle_t handle = nullptr;
+    int device = -1;  // the device the handle was created on
     AlgoKey cache[kCacheCapacity];
 
     ~LtState() {
@@ -68,7 +69,16 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
         return hipErrorInvalidValue;
     }
     LtState& lt = state();
+    // A handle is bound to the device current at creation. TP ranks run on one thread per device, so this holds
+    // already; recreate on a mismatch rather than launch on another device's handle.
+    int cur_device = -1;
+    if (hipGetDevice(&cur_device) != hipSuccess) return hipErrorInvalidDevice;
+    if (lt.handle != nullptr && lt.device != cur_device) {
+        (void) hipblasLtDestroy(lt.handle);
+        lt.handle = nullptr;
+    }
     if (lt.handle == nullptr) {
+        lt.device = cur_device;
         if (hipblasLtCreate(&lt.handle) != HIPBLAS_STATUS_SUCCESS) {
             lt.handle = nullptr;
             return hipErrorInitializationError;

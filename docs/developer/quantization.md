@@ -353,7 +353,8 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   落とさない。
 - final projection / vocab-parallel LM head は `Bf16` を要求する既存契約のままであり、
   EXL3 の lm_head に対して vocab shard は行わない。
-- tensor partition（TP）は EXL3 では unsupported。
+- tensor partition（TP）は EXL3 の trellis / `suh` / `svh` / marker を軸ごとに分割できる
+  （`materialize_rank_local_canonical`。n 軸は kt ごとに nt を、k 軸は kt を選ぶ）。mul24 の INT8 実行は下記。
 - MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
 - DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
   logits を計算する（drafter の重みは BF16 / FP8 のまま）。
@@ -393,8 +394,16 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
 - workspace: W16A16 の EXL3 workspace を共有する。xrot 領域に int8 codes と scale（dense 経路ではさらに
   フラグ行の slot と codes / scale）、accum 領域に F32 の回転前出力（dense 経路では int32 の累積器に続けて
   フラグ行の F32 出力）を置き、入らない行数は行を分けて実行する。accum 領域は `exl3_int8_flag_cap` 行ぶん大きい。
-- 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数、TP と MoE の expert は未対応。
-  correctness fallback は持たない。
+- tensor parallel: rank-local の view（partition 後の trellis / `suh` / `svh`）に対し、各 rank が上と同じ経路を実行する。
+  分割は 128 の倍数でなければならない（Hadamard の block）。n 分割（列並列）は出力が列ごとに独立で、
+  1 GPU で全体を実行した結果とビット一致する。k 分割（行並列）は各 rank が自分の K 区間の部分和を出し、
+  collective で足す。group scale は 128 ごとなので分割の影響を受けず、dense 経路の行 scale だけが
+  rank-local の K 区間の最大になる（活性の丸めが変わるだけ）。`test_exl3_int8_tp` が partition 実装、rank ごとの
+  INT8 経路、結合（n は連結、k は加算）を 1 GPU で再現して照合する（tp=2/4、実モデル形状を含む）。
+  hipBLASLt の handle と algorithm cache は rank の worker thread ごと（device ごと）に持つ。
+  **複数 GPU での実行（collective を含む）は未検証。**
+- 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数。MoE の expert（grouped EXL3）は mul1 のみで、
+  mul24 の expert は program 構築時に拒否する（grouped 版の INT8 kernel は無い）。correctness fallback は持たない。
 
 ## KV quantization
 

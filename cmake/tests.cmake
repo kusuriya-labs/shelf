@@ -108,12 +108,14 @@ shelf_add_test(NAME test_exl3_int8_decode SOURCE unit/test_exl3_int8_decode.cpp 
 shelf_add_test(NAME test_exl3_linear SOURCE unit/test_exl3_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_dense SOURCE unit/test_exl3_dense.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_int8_linear SOURCE kernels/linear/test_exl3_int8_linear.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_exl3_int8_tp SOURCE kernels/linear/test_exl3_int8_tp.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_weights shelf_gpu)
 shelf_add_test(NAME test_exl3_grouped SOURCE unit/test_exl3_grouped.cpp LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_io)
 target_include_directories(test_exl3_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 find_library(SHELF_TEST_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 if(SHELF_TEST_HIPBLASLT_LIBRARY)
     target_link_libraries(test_exl3_dense PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
     target_link_libraries(test_exl3_int8_linear PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
+    target_link_libraries(test_exl3_int8_tp PRIVATE "${SHELF_TEST_HIPBLASLT_LIBRARY}")
 endif()
 shelf_add_test(NAME test_mxfp4_canonical_payload SOURCE unit/test_mxfp4_canonical_payload.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference shelf_quant_bundle shelf_weights)
 shelf_add_test(NAME test_mxfp4_linear SOURCE unit/test_mxfp4_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_kernels_optimized shelf_quant_reference shelf_runtime shelf_gpu)
@@ -320,6 +322,7 @@ add_custom_target(
         test_exl3_linear
         test_exl3_dense
         test_exl3_int8_linear
+        test_exl3_int8_tp
         test_mxfp4_canonical_payload
         test_mxfp4_linear
         test_fp8_wmma_subnormal
