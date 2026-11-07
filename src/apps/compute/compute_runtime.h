@@ -88,6 +88,8 @@ class Qwen35ComputeRuntime {
 
     const qwen35::runtime::RuntimeRequest* request(uint64_t id) const;
 
+    Status set_external_request_id(uint64_t id, int64_t external_request_id);
+
     Status cancel(uint64_t id);
 
     Status retire(uint64_t id);

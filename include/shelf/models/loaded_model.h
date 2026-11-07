@@ -83,6 +83,10 @@ public:
         return qwen4exp_;
     }
 
+    // Largest rotated-domain linear this model runs, which sizes the EXL3 staging planes.
+    [[nodiscard]]
+    shelf::weights::Exl3LinearShape exl3_linear_shape() const;
+
     // The arena bytes the executor needs: the shared part plus, for grouped experts, the
     // group-row planes and the routing plan.
     [[nodiscard]]

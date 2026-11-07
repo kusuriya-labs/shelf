@@ -62,6 +62,9 @@ struct ExecutorConfig {
     // from the token-row hidden.
     std::uint32_t external_hidden_width = 0;
     std::uint32_t normed_token_hidden_width = 0;
+    // Largest rotated-domain linear this rank runs, used to size the EXL3 staging planes.
+    // An empty shape keeps the model-independent upper bound.
+    shelf::weights::Exl3LinearShape exl3_linear_shape;
 };
 
 using ::shelf::runtime::DispatchStagingPool;

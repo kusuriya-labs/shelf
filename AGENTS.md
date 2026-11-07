@@ -77,7 +77,7 @@
 これを基盤として、現在の主要 performance target は `models/Qwen3.8-27B-FP8`
 （HF fp8）と Qwen3.8-27B の BF16 で、
 speculative decode の drafter は DFlash2 を使う。
-対応する量子化フォーマットは BF16 / FP8 E4M3 のみである。
+対応する量子化フォーマットは BF16 / FP8 E4M3 / EXL3（W16A16 は mul1、EXL3-INT8 は mul24）である。
 
 - namespace / directory を `qwen35` から rename しない。
 - 「Qwen3.5 Dense のみ」という記述で現在の Qwen3.8-27B / DFlash2 開発を

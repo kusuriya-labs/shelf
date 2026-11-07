@@ -84,6 +84,10 @@ public:
 
     bool uses_exl3_linear() const override { return qmoe::uses_exl3_linear(model_.weights()); }
 
+    shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
+        return qmoe::exl3_linear_shape(model_.weights());
+    }
+
     shelf::Result<q35::Executor> create_executor(
         q35::SequenceSlotPool& sequence_pool, q35::GdnStatePool& gdn_state_pool,
         q35::PagedKVPool& kv_pool, gpu::GpuArena& arena,
@@ -261,6 +265,10 @@ private:
 
 public:
     bool uses_exl3_linear() const override { return true; }
+
+    shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
+        return qwen4exp::exl3_linear_shape(model_.weights());
+    }
 
     std::uint32_t normed_token_hidden_width() const override {
         return static_cast<std::uint32_t>(model_.text_config().hc_count *

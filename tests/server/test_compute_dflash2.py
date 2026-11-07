@@ -206,12 +206,34 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
         checker.check(f"{label} prefix seed tokens", len(seed_ids) > 0, str(seed_ids))
         if not seed_ids:
             return
-        extension = prefix_prompt + seed_ids[:-1] + [prefix_prompt[-1]]
+        boundary_input = paged_prompt(PROMPT, PREFIX_PROMPT_TOKENS + 8)
         harness.send({
-            "op": "generate", "request_id": 7, "input_ids": extension,
+            "op": "generate", "request_id": 7, "input_ids": boundary_input,
             "max_new_tokens": PREFIX_EXTENSION_TOKENS, "temperature": 0.0,
         })
-        _, ext_done, ext_errors = collect(harness, 7)
+        _, boundary_done, boundary_errors = collect(harness, 7)
+        checker.check(f"{label} prefix boundary ok",
+                      not boundary_errors and boundary_done is not None,
+                      str(boundary_errors))
+        if boundary_done is not None:
+            boundary_restored = boundary_done.get("restored_tokens")
+            expected_boundary = (PREFIX_PROMPT_TOKENS // 16) * 16
+            checker.check(f"{label} prefix input boundary restored_tokens",
+                          boundary_restored == expected_boundary,
+                          f"restored={boundary_restored} "
+                          f"expected={expected_boundary}")
+            checker.check(f"{label} prefix input boundary prefill_tokens",
+                          boundary_done.get("prefill_tokens") ==
+                          len(boundary_input) - expected_boundary,
+                          f"prefill={boundary_done.get('prefill_tokens')} "
+                          f"input={len(boundary_input)} restored={boundary_restored}")
+
+        extension = prefix_prompt + seed_ids[:-1] + [prefix_prompt[-1]]
+        harness.send({
+            "op": "generate", "request_id": 8, "input_ids": extension,
+            "max_new_tokens": PREFIX_EXTENSION_TOKENS, "temperature": 0.0,
+        })
+        _, ext_done, ext_errors = collect(harness, 8)
         checker.check(f"{label} extension generation ok",
                       not ext_errors and ext_done is not None, str(ext_errors))
         if ext_done is None:
@@ -229,10 +251,10 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
         checker.check(f"{label} prefix extension tokens", len(ext_ids) > 0, str(ext_ids))
 
         harness.send({
-            "op": "generate", "request_id": 8, "input_ids": extension,
+            "op": "generate", "request_id": 9, "input_ids": extension,
             "max_new_tokens": PREFIX_EXTENSION_TOKENS, "temperature": 0.0,
         })
-        _, ext2_done, ext2_errors = collect(harness, 8)
+        _, ext2_done, ext2_errors = collect(harness, 9)
         checker.check(f"{label} prefix replay ok",
                       not ext2_errors and ext2_done is not None, str(ext2_errors))
         if ext2_done is not None:

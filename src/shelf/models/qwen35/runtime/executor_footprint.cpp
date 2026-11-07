@@ -70,7 +70,7 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     total += align_up(kScratchFloats * sizeof(float));
     total += align_up(::shelf::execution::kDecodeAttnPartialBytes);
     if (exl3_linear_workspace) {
-        total += exl3_workspace_bytes(rows);
+        total += exl3_workspace_bytes(rows, config.exl3_linear_shape).total();
     }
 
     total += align_up(rows * sizeof(int32_t));

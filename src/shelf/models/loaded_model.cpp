@@ -95,6 +95,19 @@ LoadedModel LoadedModel::borrow(const shelf::qwen4exp::Qwen4ExpModel& model) {
     return out;
 }
 
+shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
+    if (qwen4exp_ != nullptr) {
+        return shelf::qwen4exp::exl3_linear_shape(qwen4exp_->weights());
+    }
+    if (moe_ != nullptr) {
+        return shelf::qwen35moe::exl3_linear_shape(moe_->weights());
+    }
+    if (dense_ != nullptr) {
+        return shelf::qwen35::exl3_linear_shape(dense_->weights());
+    }
+    return {};
+}
+
 std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
                                                 std::size_t max_scheduled_requests,
                                                 std::size_t max_scheduled_output_rows,
@@ -106,6 +119,7 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
     reserve_config.max_scheduled_output_rows =
         static_cast<std::uint32_t>(max_scheduled_output_rows);
     reserve_config.target_hidden_tap_count = static_cast<std::uint32_t>(target_hidden_tap_count);
+    reserve_config.exl3_linear_shape = exl3_linear_shape();
 
     // The dense FFN term of the shared estimate stands in for the FFN activations that
     // still sit at token rows: for a model with grouped experts those are its shared expert.
@@ -137,9 +151,11 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
             "Qwen4Exp runs through the tensor-parallel rank model, not LoadedModel",
             __FILE__, __LINE__);
     }
+    shelf::qwen35::ExecutorConfig resolved = config;
+    resolved.exl3_linear_shape = exl3_linear_shape();
     if (dense_ != nullptr) {
         return shelf::qwen35::create_model_executor(*dense_, sequence_pool, gdn_state_pool,
-                                                    kv_pool, arena, config);
+                                                    kv_pool, arena, resolved);
     }
 
     // The MoE family's lowering options, including the rank's expert range, are built by one
@@ -151,7 +167,7 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
             __FILE__, __LINE__);
     }
     return create_moe_model_executor(
-        *moe_, sequence_pool, gdn_state_pool, kv_pool, arena, config);
+        *moe_, sequence_pool, gdn_state_pool, kv_pool, arena, resolved);
 }
 
 namespace {
