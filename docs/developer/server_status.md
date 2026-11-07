@@ -103,6 +103,23 @@ prefix cache は compute runtime に実装されており、server はその pro
 
 user 向けのフィールド表は [../user/server.md](../user/server.md) を参照。
 
+## Compute request log
+
+compute は request が完了するたびに stderr へ 1 行を出す。server は compute の stderr を
+`[compute] ` 接頭辞付きで自身の stderr へ転送する。
+
+```text
+[req 12] prompt=102400 restored=102144 prefill=256 gen=37 prefill_ms=... prefill_tok_s=... ttft_ms=... decode_ms=... decode_tok_s=...
+```
+
+- `prompt` / `prefill` / `gen` は token 数であり、`prefill = prompt - restored`。
+- `restored` は prefix cache から復元した token 数である。0 は cache miss を意味する。
+- `prefill_ms` は DFlash2 の prefill 実行区間である。非 DFlash2 では prefill batch の
+  `execute_batch` 時間の合計である。
+- `ttft_ms` は submit から最初の token event までであり、queue 待ちを含む。
+- `decode_ms` は最初の token event から done までである。
+- `prefill_tok_s = prefill / prefill_ms`、`decode_tok_s = gen / decode_ms` である。
+
 ## Architecture
 
 責務境界と layer 構成は [architecture.md](architecture.md) を参照。

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +80,9 @@ struct ServeGeneration {
     uint64_t internal_request_id = 0;
     std::size_t emitted_tokens = 0;
     uint32_t max_new_tokens = 0;
+    std::chrono::steady_clock::time_point submitted_at;
+    std::chrono::steady_clock::time_point first_token_at;
+    bool has_first_token = false;
 };
 
 struct MtpServeContext {
@@ -135,6 +139,10 @@ void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
     const auto* request = runtime.request(generation.internal_request_id);
     if (request == nullptr) return;
     while (generation.emitted_tokens < request->generated.size()) {
+        if (!generation.has_first_token) {
+            generation.first_token_at = std::chrono::steady_clock::now();
+            generation.has_first_token = true;
+        }
         emit_token(generation.external_request_id,
                    request->generated[generation.emitted_tokens]);
         ++generation.emitted_tokens;
@@ -174,6 +182,44 @@ void serve_emit_done(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     } else {
         done["generated_ids"] = std::vector<int32_t>{};
         done["finish_reason"] = "error";
+    }
+    if (request != nullptr) {
+        const auto finished_at = std::chrono::steady_clock::now();
+        const double total_ms = std::chrono::duration<double, std::milli>(
+                                    finished_at - generation.submitted_at)
+                                    .count();
+        const double ttft_ms =
+            generation.has_first_token
+                ? std::chrono::duration<double, std::milli>(
+                      generation.first_token_at - generation.submitted_at)
+                      .count()
+                : total_ms;
+        const double decode_ms =
+            generation.has_first_token
+                ? std::chrono::duration<double, std::milli>(
+                      finished_at - generation.first_token_at)
+                      .count()
+                : 0.0;
+        const std::size_t prompt = request->input_tokens.size();
+        const std::size_t restored =
+            std::min<std::size_t>(request->restored_tokens, prompt);
+        const std::size_t prefill = prompt - restored;
+        const std::size_t generated = request->generated.size();
+        const double prefill_tok_s =
+            request->prefill_ms > 0.0
+                ? static_cast<double>(prefill) * 1000.0 / request->prefill_ms
+                : 0.0;
+        const double decode_tok_s =
+            decode_ms > 0.0 ? static_cast<double>(generated) * 1000.0 / decode_ms
+                            : 0.0;
+        std::fprintf(
+            stderr,
+            "[req %lld] prompt=%zu restored=%zu prefill=%zu gen=%zu "
+            "prefill_ms=%.1f prefill_tok_s=%.1f ttft_ms=%.1f decode_ms=%.1f "
+            "decode_tok_s=%.1f\n",
+            static_cast<long long>(generation.external_request_id), prompt, restored,
+            prefill, generated, request->prefill_ms, prefill_tok_s, ttft_ms,
+            decode_ms, decode_tok_s);
     }
     emit_json(done);
     serve_push_terminal(state, generation.external_request_id);
@@ -467,6 +513,7 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     generation.external_request_id = external_request_id;
     generation.emitted_tokens = 0;
     generation.max_new_tokens = max_new_tokens;
+    generation.submitted_at = std::chrono::steady_clock::now();
 
     shelf::Result<uint64_t> submit_result =
         runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);

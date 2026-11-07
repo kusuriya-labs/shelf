@@ -361,21 +361,32 @@ void ContinuousBatcher::prefix_finish_capture(RuntimeRequest& request, FinishRea
         ring_ptr = &ring;
     }
     bool saved = false;
-    if (captured_pos == boundary) {
+    const uint32_t input_len = static_cast<uint32_t>(request.input_tokens.size());
+    const bool position_covers_input = position >= input_len;
+    const uint32_t committed = position_covers_input ? position - input_len : 0u;
+    const bool committed_valid =
+        position_covers_input && committed <= request.generated.size();
+    if (captured_pos == boundary && committed_valid) {
         std::vector<uint32_t> tokens;
-        tokens.reserve(request.input_tokens.size() + request.generated.size() - 1u);
+        tokens.reserve(position);
         for (int32_t token : request.input_tokens) {
             tokens.push_back(static_cast<uint32_t>(token));
         }
-        for (std::size_t i = 0; i + 1u < request.generated.size(); ++i) {
+        for (uint32_t i = 0; i < committed; ++i) {
             tokens.push_back(static_cast<uint32_t>(request.generated[i]));
         }
-        if (tokens.size() == position) {
-            const Status st = prefix_cache_->save_output_tail(
-                capture, request.sequence, tokens, position, stream, ring_ptr);
-            if (st.ok()) {
-                saved = true;
-            }
+        const Status st = prefix_cache_->save_output_tail(
+            capture, request.sequence, tokens, position, stream, ring_ptr);
+        if (st.ok()) {
+            saved = true;
+        }
+        if (getenv("SHELF_PFXDBG") != nullptr) {
+            std::fprintf(stderr,
+                         "PFXDBG save_output_tail pos=%u boundary=%u committed=%u ring=%d "
+                         "ok=%d %s\n",
+                         position, boundary, committed,
+                         static_cast<int>(ring_ptr != nullptr),
+                         static_cast<int>(st.ok()), st.message().c_str());
         }
     }
     if (!saved) {
@@ -617,9 +628,22 @@ Result<StepResult> ContinuousBatcher::step() {
         return request;
     };
 
+    const auto exec_started = std::chrono::steady_clock::now();
     auto exec_result = tp_batch_hook_ != nullptr
                           ? tp_batch_hook_->on_execute(plan.batch)
                           : execute_batch(executor_, plan.batch, stream_);
+    const double exec_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - exec_started)
+                               .count();
+    for (auto& scheduled : plan.scheduled_requests) {
+        if (scheduled.execution_class != ::shelf::runtime::ExecutionClass::PREFILL) {
+            continue;
+        }
+        RuntimeRequest* prefill_request = resolve(scheduled);
+        if (prefill_request != nullptr) {
+            prefill_request->prefill_ms += exec_ms;
+        }
+    }
     if (!exec_result.ok()) {
         Status first_error = Status::make_ok();
         for (auto& scheduled : plan.scheduled_requests) {
@@ -794,10 +818,49 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         std::make_unique<DFlash2SpecDecoder>(decoder_result.release());
     session.decoder->timing = &session.timing;
     dflash2_spec_decoder_set_sampling(*session.decoder, request.sampling);
+    const uint32_t prompt_count =
+        static_cast<uint32_t>(request.input_tokens.size());
+    const uint32_t page_tokens = config_.page_tokens;
+    const uint32_t last_boundary =
+        page_tokens == 0u ? prompt_count : (prompt_count / page_tokens) * page_tokens;
+    auto save_input_boundary = [&](uint32_t offset) {
+        if (prefix_cache_ == nullptr || page_tokens == 0u) {
+            return;
+        }
+        if (offset == 0u || offset != last_boundary || offset % page_tokens != 0u) {
+            return;
+        }
+        if (request.sequence.position != offset) {
+            return;
+        }
+        const std::vector<uint32_t> tokens(
+            request.input_tokens.begin(),
+            request.input_tokens.begin() + static_cast<std::ptrdiff_t>(offset));
+        SpecRingRef ring;
+        const SpecRingRef* ring_ptr = nullptr;
+        if (session.context != nullptr && session.context->initialized) {
+            ring.k = session.context->k_ring.data<bf16_t>();
+            ring.v = session.context->v_ring.data<bf16_t>();
+            ring.length = session.context->length;
+            ring.next_position = session.context->next_position;
+            ring_ptr = &ring;
+        }
+        const Status st = prefix_cache_->save_input_boundary(
+            request.sequence, tokens, offset, stream_, ring_ptr);
+        if (getenv("SHELF_PFXDBG") != nullptr) {
+            std::fprintf(stderr,
+                         "PFXDBG save_input_boundary at=%u ring=%d ok=%d %s\n", offset,
+                         static_cast<int>(ring_ptr != nullptr), static_cast<int>(st.ok()),
+                         st.message().c_str());
+        }
+    };
+    const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill_result = dflash2_spec_prefill(
-        *session.decoder, request.input_tokens.data(),
-        static_cast<uint32_t>(request.input_tokens.size()), request.restored_tokens,
-        config_.page_tokens, {});
+        *session.decoder, request.input_tokens.data(), prompt_count,
+        request.restored_tokens, page_tokens, save_input_boundary);
+    request.prefill_ms += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - prefill_started)
+                              .count();
     if (!prefill_result.ok()) {
         (void)dflash2_spec_decoder_shutdown(*session.decoder);
         session.decoder.reset();

@@ -60,6 +60,12 @@ hit かつ `state_position < input_len` のときだけ restore する。
 `state_position >= input_len` は restore せず miss 扱いである
 （その位置の初回サンプルの forward が存在しないため）。
 
+入力境界の entry は、次の request の input が同じ token 列で延長される限り一致する。
+出力末尾の entry は、client が返した assistant メッセージを再レンダリングした token 列が
+生成時の raw token 列と一致する場合だけ一致する。reasoning の trim、answer の lstrip、
+強制 close の挿入などでテキストが正規化されると、出力末尾の entry は使われず
+入力境界の entry まで戻る。
+
 restore は entry の KV page を新規 sequence の block table に map し（copy なし）、
 family adapter が GDN / QSA / ring などの state を active slot へ復元する。
 restore 後の token 数は `done.restored_tokens` に入る。
@@ -72,13 +78,14 @@ save は page 揃え位置でのみ発生する。
   かつ input の範囲内なら `save_input_boundary` が input prefix を保存する。
   `save_input_boundary` は `seq.position == input_len を page 揃えした値` を必須検証し、
   違反は `invalid_argument` である。`min_prefix_tokens`（64）未満は保存しない。
-  DFlash2 経路では prefill chunk ごとの `save_input_boundary` を呼ばない。
+  DFlash2 は chunk ごとではなく `dflash2_spec_prefill` の最後の page 境界で 1 回だけ
+  `save_input_boundary` を呼ぶ。
 - decode: 最終 prefill の完了時に capture を開始し、各 step 後に position が
   page 境界を新しく通過するたびに family state を rolling slot へ capture する。
   DFlash2 では次の page 境界までの残りトークン数に draft 数を制限し、境界を
   飛び越えずに capture できる位置で step を止める。
 - 出力末尾: EOS / `max_new_tokens` で終了し、capture 位置が最終 page 境界と一致するとき、
-  input と生成列から成る position 長の token 列を `save_output_tail` で entry 化する。
+  `sequence.position` が commit 済みの token 列を `save_output_tail` で entry 化する。
   cancel などで境界が一致しない場合は capture を解放して保存しない。
 
 ## options
@@ -129,9 +136,9 @@ Qwen runtime や GPU へこの値は渡さない。
 
 ## 既知の制限
 
-- 同一プロンプトの再実行は restore しない。最長一致が input 全長に達しているため
-  `state_position < input_len` を満たさない。restore が効くのは共有 prefix への
-  extension と multi-turn の output tail である。
+- 同一プロンプトの再実行は、input 長が page 境界に一致するとき restore しない
+  （`state_position == input_len` となり `state_position < input_len` を満たさない）。
+  input 長が page 境界に一致しない場合は、その直前の境界まで restore する。
 - KV page sharing は Tensor Parallel の rank shards に対応する。
 - 物理 page が枯渇したときは LRU entry を evict する。
 
@@ -156,8 +163,12 @@ restore / save の入力は次のとおりである。
 - output tail の entry は page 揃えした position の prefix である。ring の
   `length` / `next_position` は **entry position へ clamp して** 保存する
   （final position のまま保存すると entry の KV 範囲と ring の範囲がずれる）。
-- prefill 境界の `save_input_boundary` は DFlash2 では呼ばない。DFlash2 は
-  prefill 完了時の capture 開始と page 境界通過時の `capture_boundary` のみを使う。
+- 入力境界の save は `dflash2_spec_prefill` の最後の page 境界で 1 回だけ行う。
+  その時点の `DFlash2ContextState` ring を `SpecRingRef` として渡し、ring も
+  entry に保存する。後続の suffix prefill で ring が進む前にコピーするため、
+  entry position と ring の範囲は一致する。
+- 入力境界の entry は assistant の再レンダリングに依存しないため、強制 close や
+  trim で出力末尾の token 列が変わる場合でも restore できる。
 - DFlash2 request は **ring を持つ entry だけ** を restore する。`lookup` は entry の
   ring 情報（`PrefixHit::ring_length` / `ring_next_position`）を返し、
   `ring_covers_state()`（`ring_length != 0` かつ `ring_next_position == state_position`）を
@@ -172,6 +183,8 @@ drafter ring の shadow は `PrefixCacheConfig::spec_ring_bytes` で指定する
   compute は DFlash2 有効時に `DFlash2Config::context_ring_bytes()`
   （`2 × num_hidden_layers × sliding_window × attention_kv_rows() × 2` bytes。
   27B では 40 MiB）を渡す。
+- 1 request は入力境界と出力末尾で最大 2 entry を作る。ring slot は hot slot と
+  同じ `max_concurrent` で、枯渇時は LRU entry を evict して回収する。
 - 実体は arena（VRAM）上の連続 buffer で、save / load は D2D コピーである。
 - `spec_ring_bytes == 0`（既定）のときは slot を 1 つも確保しない。ring を渡した save は
   `insufficient_memory` で失敗し、entry が作られないため DFlash2 の restore も起きない。
