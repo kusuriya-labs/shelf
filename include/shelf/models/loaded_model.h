@@ -121,6 +121,13 @@ public:
     std::size_t mtp_drafter_reserve_bytes(
         const shelf::qwen35::runtime::MtpDrafterConfig& options) const;
 
+    // The arena the batched MTP serve needs: one drafter per concurrent request plus the
+    // shared per-rank history / compact log.
+    [[nodiscard]]
+    std::size_t mtp_spec_batch_reserve_bytes(
+        const shelf::qwen35::runtime::MtpDrafterConfig& options,
+        std::size_t max_requests) const;
+
 private:
     LoadedModel() = default;
 

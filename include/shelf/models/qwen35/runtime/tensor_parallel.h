@@ -46,6 +46,19 @@ using TpRankModelBuilder =
     ::shelf::Result<std::unique_ptr<shelf::models::TpRankModel>> (*)(
         const struct TpRankRuntimeConfig&, gpu::GpuArena&, hipStream_t);
 
+// The batched MTP serve's arena, added to the rank's working-set reserve after the target
+// executor estimate. The rank runtime computes it from the rank model it just loaded, so
+// the app does not have to know the model's MTP geometry before the group exists.
+struct MtpBatchReserveConfig {
+    bool enabled = false;
+    std::uint32_t num_drafts = 0;
+    std::uint32_t max_seq_len = 0;
+    std::uint32_t page_tokens = 0;
+    std::uint32_t max_batch_rows = 0;
+    KVCacheDType kv_dtype = KVCacheDType::BF16;
+    std::uint32_t max_requests = 0;
+};
+
 struct TpRankRuntimeConfig {
     std::string model_dir;
     TpRankModelBuilder build_rank_model = nullptr;
@@ -75,6 +88,7 @@ struct TpRankRuntimeConfig {
     bool emit_normed_token_hidden = false;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
+    MtpBatchReserveConfig mtp_batch;
 };
 
 class TpRankRuntime {
@@ -162,6 +176,7 @@ struct TpCoordinatorConfig {
     bool emit_normed_token_hidden = false;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
+    MtpBatchReserveConfig mtp_batch;
 };
 
 class TpCoordinator final : public TpBatchHook {

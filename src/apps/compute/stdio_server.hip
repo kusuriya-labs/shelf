@@ -87,10 +87,27 @@ struct ServeGeneration {
     bool has_first_token = false;
 };
 
+struct MtpRequest {
+    int64_t external_id = 0;
+    std::unique_ptr<shelf::state::PagedSequenceState> sequence;
+    uint32_t drafter_slot = 0u;
+    int32_t pending_token = -1;
+    uint32_t max_new_tokens = 0u;
+    uint32_t generated = 0u;
+    std::size_t prompt_tokens = 0u;
+    std::vector<int32_t> generated_ids;
+};
+
 struct MtpServeContext {
     bool enabled = false;
     uint32_t drafts = 4;
-    std::unique_ptr<shelf::qwen35::runtime::MtpDrafter> drafter;
+    shelf::qwen35::runtime::MtpSpecBatchContext batch;
+    std::vector<std::unique_ptr<MtpRequest>> active;
+    std::vector<uint32_t> free_slots;
+    uint64_t rounds = 0u;
+    uint64_t accepted_drafts = 0u;
+    uint64_t emitted_tokens = 0u;
+    double round_ms = 0.0;
 };
 
 struct ServeState {
@@ -554,15 +571,48 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     return true;
 }
 
-bool serve_mtp_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
-                        MtpServeContext& mtp, const nlohmann::json& request) {
+void serve_mtp_emit_done(ServeState& state, MtpRequest& request, const char* reason) {
+    nlohmann::json done;
+    done["event"] = "done";
+    done["request_id"] = request.external_id;
+    done["generated_ids"] = request.generated_ids;
+    done["finish_reason"] = reason;
+    done["prompt_tokens"] = request.prompt_tokens;
+    done["restored_tokens"] = 0;
+    done["prefill_tokens"] = request.prompt_tokens;
+    done["cache_checkpoint_tokens"] = 0;
+    emit_json(done);
+    serve_push_terminal(state, request.external_id);
+}
+
+void serve_mtp_release(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+                       MtpServeContext& mtp, std::size_t index) {
+    MtpRequest& request = *mtp.active[index];
+    auto* tp = runtime.tp_coordinator();
+    if (tp != nullptr) {
+        (void)tp->on_sequence_released(*request.sequence);
+    }
+    (void)shelf::state::release_paged_sequence_state(*request.sequence, runtime.stream());
+    mtp.free_slots.push_back(request.drafter_slot);
+    mtp.active[index] = std::move(mtp.active.back());
+    mtp.active.pop_back();
+}
+
+bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+                     MtpServeContext& mtp, const nlohmann::json& request) {
     if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
         emit_error(nullptr, "missing or invalid request_id");
         return false;
     }
     const nlohmann::json request_id = request["request_id"];
     const int64_t external_request_id = request_id.get<int64_t>();
-    if (!state.inflight.empty() || serve_is_recent_terminal(state, external_request_id)) {
+    for (const auto& entry : mtp.active) {
+        if (entry->external_id == external_request_id) {
+            emit_error(request_id, "duplicate or concurrent request_id");
+            return false;
+        }
+    }
+    if (serve_is_recent_terminal(state, external_request_id)) {
         emit_error(request_id, "duplicate or concurrent request_id");
         return false;
     }
@@ -603,6 +653,10 @@ bool serve_mtp_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& s
     if (static_cast<uint64_t>(input_ids.size()) + max_new_tokens >
         static_cast<uint64_t>(runtime.config().max_seq_len)) {
         emit_error(request_id, "input_ids + max_new_tokens exceeds max_seq_len");
+        return false;
+    }
+    if (mtp.free_slots.empty()) {
+        emit_error_with_code(request_id, "busy", "mtp slots are exhausted");
         return false;
     }
     shelf::qwen35::runtime::SamplingConfig sampling;
@@ -657,76 +711,141 @@ bool serve_mtp_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& s
                                  sequence_result.status().message());
         return false;
     }
-    shelf::state::PagedSequenceState sequence = sequence_result.release();
+    auto sequence = std::make_unique<shelf::state::PagedSequenceState>(
+        sequence_result.release());
     auto* tp = runtime.tp_coordinator();
-    auto release = [&]() {
-        if (tp != nullptr) (void)tp->on_sequence_released(sequence);
-        (void)shelf::state::release_paged_sequence_state(sequence, runtime.stream());
-    };
     if (tp != nullptr) {
-        const shelf::Status mirror = tp->on_sequence_created(sequence);
+        const shelf::Status mirror = tp->on_sequence_created(*sequence);
         if (!mirror.ok()) {
             emit_error_with_code(request_id, "internal",
                                  "tp mirror create failed: " + mirror.message());
-            release();
+            (void)shelf::state::release_paged_sequence_state(*sequence, runtime.stream());
             return false;
         }
     }
+    const uint32_t slot = mtp.free_slots.back();
+    auto& drafter = *mtp.batch.drafters[slot];
     shelf::Status reset =
-        shelf::qwen35::runtime::mtp_drafter_reset_sequence(*state.mtp.drafter,
-                                                           runtime.stream());
+        shelf::qwen35::runtime::mtp_drafter_reset_sequence(drafter, runtime.stream());
     if (!reset.ok()) {
         emit_error_with_code(request_id, "internal",
                              "mtp reset failed: " + reset.message());
-        release();
+        if (tp != nullptr) (void)tp->on_sequence_released(*sequence);
+        (void)shelf::state::release_paged_sequence_state(*sequence, runtime.stream());
         return false;
     }
-    state.mtp.drafter->sampling = sampling;
+    mtp.free_slots.pop_back();
+    drafter.sampling = sampling;
     auto prefill = shelf::qwen35::runtime::mtp_spec_prefill(
-        *state.mtp.drafter, runtime.executor(), sequence, input_ids.data(),
+        drafter, runtime.executor(), *sequence, input_ids.data(),
         static_cast<uint32_t>(input_ids.size()), sampling);
     if (!prefill.ok()) {
         emit_error_with_code(request_id, "internal",
                              "mtp prefill failed: " + prefill.status().message());
-        release();
+        mtp.free_slots.push_back(slot);
+        if (tp != nullptr) (void)tp->on_sequence_released(*sequence);
+        (void)shelf::state::release_paged_sequence_state(*sequence, runtime.stream());
         return false;
     }
-    std::vector<int32_t> generated;
-    generated.push_back(prefill.value().pending_token);
+
+    auto admitted = std::make_unique<MtpRequest>();
+    admitted->external_id = external_request_id;
+    admitted->sequence = std::move(sequence);
+    admitted->drafter_slot = slot;
+    admitted->pending_token = prefill.value().pending_token;
+    admitted->max_new_tokens = max_new_tokens;
+    admitted->prompt_tokens = input_ids.size();
+    admitted->generated = 1u;
+    admitted->generated_ids.push_back(prefill.value().pending_token);
     emit_token(external_request_id, prefill.value().pending_token);
-    bool finished = false;
-    int32_t pending = prefill.value().pending_token;
-    while (!finished && generated.size() < max_new_tokens) {
-        const uint32_t remaining =
-            static_cast<uint32_t>(max_new_tokens - generated.size());
-        auto step = shelf::qwen35::runtime::mtp_spec_step(
-            *state.mtp.drafter, runtime.executor(), sequence, pending, remaining);
-        if (!step.ok()) {
-            emit_error_with_code(request_id, "internal",
-                                 "mtp step failed: " + step.status().message());
-            release();
-            return false;
-        }
-        for (uint32_t i = 0u; i < step.value().emitted_count; ++i) {
-            emit_token(external_request_id, step.value().emitted[i]);
-            generated.push_back(step.value().emitted[i]);
-        }
-        pending = step.value().pending_token;
-        finished = step.value().finished;
+    const bool stop = shelf::qwen_hybrid::is_stop_token(
+        runtime.model().hybrid_config().stop_tokens, prefill.value().pending_token);
+    if (stop || admitted->generated >= admitted->max_new_tokens) {
+        serve_mtp_emit_done(state, *admitted, stop ? "stop" : "length");
+        if (tp != nullptr) (void)tp->on_sequence_released(*admitted->sequence);
+        (void)shelf::state::release_paged_sequence_state(*admitted->sequence,
+                                                         runtime.stream());
+        mtp.free_slots.push_back(slot);
+        return true;
     }
-    nlohmann::json done;
-    done["event"] = "done";
-    done["request_id"] = external_request_id;
-    done["generated_ids"] = generated;
-    done["finish_reason"] = finished ? "stop" : "length";
-    done["prompt_tokens"] = input_ids.size();
-    done["restored_tokens"] = 0;
-    done["prefill_tokens"] = input_ids.size();
-    done["cache_checkpoint_tokens"] = 0;
-    emit_json(done);
-    serve_push_terminal(state, external_request_id);
-    release();
+    mtp.active.push_back(std::move(admitted));
     return true;
+}
+
+void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
+                    MtpServeContext& mtp) {
+    if (mtp.active.empty()) return;
+    std::vector<shelf::qwen35::runtime::MtpSpecBatchSlot> slots;
+    std::vector<std::size_t> indices;
+    slots.reserve(mtp.active.size());
+    indices.reserve(mtp.active.size());
+    for (std::size_t i = 0u; i < mtp.active.size(); ++i) {
+        MtpRequest& request = *mtp.active[i];
+        if (request.generated >= request.max_new_tokens) continue;
+        shelf::qwen35::runtime::MtpSpecBatchSlot slot;
+        slot.drafter = mtp.batch.drafters[request.drafter_slot].get();
+        slot.sequence = request.sequence.get();
+        slot.pending_token = request.pending_token;
+        slot.num_drafts = mtp.drafts;
+        slot.remaining_tokens = request.max_new_tokens - request.generated;
+        slot.page_tokens = runtime.config().page_tokens;
+        slots.push_back(slot);
+        indices.push_back(i);
+    }
+    if (slots.empty()) {
+        for (std::size_t i = mtp.active.size(); i-- > 0u;) {
+            MtpRequest& request = *mtp.active[i];
+            serve_mtp_emit_done(state, request, "length");
+            serve_mtp_release(runtime, state, mtp, i);
+        }
+        return;
+    }
+    auto stepped = shelf::qwen35::runtime::mtp_spec_step_batch(mtp.batch, slots);
+    if (!stepped.ok()) {
+        const std::string message = "mtp batch step failed: " + stepped.status().message();
+        for (std::size_t i = 0u; i < mtp.active.size(); ++i) {
+            emit_error(nlohmann::json(mtp.active[i]->external_id), message);
+            serve_push_terminal(state, mtp.active[i]->external_id);
+        }
+        for (std::size_t i = mtp.active.size(); i-- > 0u;) {
+            serve_mtp_release(runtime, state, mtp, i);
+        }
+        return;
+    }
+    const auto& result = stepped.value();
+    mtp.rounds += 1u;
+    mtp.round_ms += result.round_ms;
+    std::vector<bool> finished(slots.size(), false);
+    std::vector<const char*> reasons(slots.size(), "length");
+    for (std::size_t j = 0u; j < slots.size(); ++j) {
+        MtpRequest& request = *mtp.active[indices[j]];
+        const auto& out = result.slots[j];
+        for (uint32_t t = 0u; t < out.emitted_count; ++t) {
+            emit_token(request.external_id, out.emitted[t]);
+            request.generated_ids.push_back(out.emitted[t]);
+            request.generated += 1u;
+        }
+        request.pending_token = out.pending_token;
+        mtp.accepted_drafts += out.num_accepted;
+        mtp.emitted_tokens += out.emitted_count;
+        const bool length_done = request.generated >= request.max_new_tokens;
+        finished[j] = out.finished || length_done;
+        reasons[j] = out.finished ? "stop" : "length";
+    }
+    for (std::size_t j = slots.size(); j-- > 0u;) {
+        if (!finished[j]) continue;
+        MtpRequest& request = *mtp.active[indices[j]];
+        serve_mtp_emit_done(state, request, reasons[j]);
+        request.max_new_tokens = request.generated;
+        serve_mtp_release(runtime, state, mtp, indices[j]);
+    }
+    if (mtp.active.empty() && !state.exit_requested) {
+        fprintf(stderr, "MTP_BATCH rounds=%llu accepted=%llu emitted=%llu round_ms=%.3f\n",
+                static_cast<unsigned long long>(mtp.rounds),
+                static_cast<unsigned long long>(mtp.accepted_drafts),
+                static_cast<unsigned long long>(mtp.emitted_tokens),
+                mtp.rounds > 0u ? mtp.round_ms / static_cast<double>(mtp.rounds) : 0.0);
+    }
 }
 
 void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
@@ -789,6 +908,17 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         }
         const nlohmann::json request_id = request["request_id"];
         const int64_t id = request_id.get<int64_t>();
+        if (state.mtp.enabled) {
+            for (std::size_t i = 0u; i < state.mtp.active.size(); ++i) {
+                if (state.mtp.active[i]->external_id != id) continue;
+                serve_mtp_emit_done(state, *state.mtp.active[i], "cancelled");
+                serve_mtp_release(runtime, state, state.mtp, i);
+                return;
+            }
+            if (serve_is_recent_terminal(state, id)) return;
+            emit_error(request_id, "unknown or mismatched request_id");
+            return;
+        }
         if (state.inflight.count(id) > 0) {
             serve_cancel_one(runtime, state, id);
         } else if (serve_is_recent_terminal(state, id)) {
@@ -800,7 +930,7 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     }
     if (op == "generate") {
         if (state.mtp.enabled) {
-            serve_mtp_generate(runtime, state, state.mtp, request);
+            serve_mtp_admit(runtime, state, state.mtp, request);
         } else {
             serve_parse_generate(runtime, state, dflash, request);
         }
@@ -998,17 +1128,28 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 extra_ranks.push_back(binding);
             }
         }
-        auto drafter = shelf::qwen35::runtime::create_mtp_drafter(
-            drafter_input.value(), runtime.gdn_pool(), runtime.arena(),
-            runtime.stream(), mtp_config,
+        const uint32_t verify_rows = state.mtp.drafts + 1u;
+        uint32_t max_slots = runtime.config().max_concurrent_requests;
+        if (max_slots == 0u) max_slots = 1u;
+        if (mtp_config.max_batch_rows / verify_rows < max_slots) {
+            max_slots = mtp_config.max_batch_rows / verify_rows;
+            if (max_slots == 0u) max_slots = 1u;
+        }
+        auto batch = shelf::qwen35::runtime::create_mtp_spec_batch_context(
+            runtime.executor(), drafter_input.value(), runtime.gdn_pool(),
+            runtime.arena(), runtime.stream(), mtp_config, max_slots,
             extra_ranks.empty() ? nullptr : &extra_ranks, tp);
-        if (!drafter.ok()) {
-            fprintf(stderr, "mtp drafter create failed: %s\n",
-                    drafter.status().message().c_str());
+        if (!batch.ok()) {
+            fprintf(stderr, "mtp batch context create failed: %s\n",
+                    batch.status().message().c_str());
             return 1;
         }
-        state.mtp.drafter = drafter.release();
-        fprintf(stderr, "MTP_SERVE=serial\n");
+        state.mtp.batch = batch.release();
+        for (uint32_t i = 0u; i < max_slots; ++i) {
+            state.mtp.free_slots.push_back(max_slots - 1u - i);
+        }
+        fprintf(stderr, "MTP_SERVE=batch\n");
+        fprintf(stderr, "MTP_SLOTS=%u\n", max_slots);
         fprintf(stderr, "MTP_DRAFTS=%u\n", state.mtp.drafts);
     }
     fprintf(stderr, "SHELF_SERVE_READY\n");
@@ -1016,7 +1157,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
     JsonlInput input;
     state.max_inflight = runtime.config().max_concurrent_requests;
     while (!state.exit_requested) {
-        jsonl_poll_and_read(input, state.inflight.empty());
+        const bool mtp_idle = !state.mtp.enabled || state.mtp.active.empty();
+        jsonl_poll_and_read(input, state.inflight.empty() && mtp_idle);
         std::string line;
         while (jsonl_take_line(input, line)) {
             if (line.empty()) continue;
@@ -1024,7 +1166,13 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             if (state.exit_requested) break;
         }
         if (state.exit_requested) break;
-        if (!state.inflight.empty()) {
+        if (state.mtp.enabled) {
+            if (!state.mtp.active.empty()) {
+                serve_mtp_step(runtime, state, state.mtp);
+            } else if (input.eof) {
+                break;
+            }
+        } else if (!state.inflight.empty()) {
             if (input.eof) {
                 serve_cancel_all_inflight(runtime, state);
             } else {
@@ -1132,12 +1280,14 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         }
     }
 
-    if (state.mtp.drafter != nullptr) {
+    for (std::size_t i = state.mtp.active.size(); i-- > 0u;) {
+        serve_mtp_release(runtime, state, state.mtp, i);
+    }
+    if (state.mtp.batch.initialized) {
         const shelf::Status mtp_st =
-            shelf::qwen35::runtime::mtp_drafter_shutdown(*state.mtp.drafter, runtime.stream());
-        state.mtp.drafter.reset();
+            shelf::qwen35::runtime::shutdown_mtp_spec_batch_context(state.mtp.batch);
         if (!mtp_st.ok()) {
-            fprintf(stderr, "mtp drafter shutdown failed: %s\n",
+            fprintf(stderr, "mtp batch shutdown failed: %s\n",
                     mtp_st.message().c_str());
         }
     }

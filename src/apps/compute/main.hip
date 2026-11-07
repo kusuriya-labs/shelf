@@ -61,6 +61,7 @@ int main(int argc, char** argv) {
     config.model_dir = opt.model_dir;
     config.dflash2_model_dir = shelf::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
     config.mtp = opt.mtp;
+    config.mtp_serve = opt.serve_stdio;
     config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
@@ -131,6 +132,14 @@ int main(int argc, char** argv) {
         config.max_num_batched_tokens = static_cast<uint32_t>(opt.max_num_batched_tokens);
         if (config.max_num_batched_tokens < config.max_concurrent_requests) {
             config.max_num_batched_tokens = config.max_concurrent_requests;
+        }
+        if (config.mtp) {
+            const uint32_t verify_rows = static_cast<uint32_t>(opt.mtp_drafts) + 1u;
+            const uint32_t batch_rows = config.max_concurrent_requests * verify_rows;
+            if (config.max_num_batched_tokens < batch_rows) {
+                config.max_num_batched_tokens = batch_rows;
+            }
+            config.max_scheduled_output_rows = batch_rows;
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
             const uint32_t batch_rows = config.max_concurrent_requests *

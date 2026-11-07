@@ -35,6 +35,7 @@ struct Qwen35RuntimeConfig {
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
     bool mtp = false;
+    bool mtp_serve = false;
     uint32_t mtp_drafts = 7;
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
@@ -180,6 +181,9 @@ class Qwen35ComputeRuntime {
     Status initialize_pipeline_parallel();
 
     std::size_t drafter_reserve_bytes(const ::shelf::state::GdnStatePool& pool) const;
+
+    std::size_t mtp_batch_requests(
+        const qwen35::runtime::MtpDrafterConfig& options) const;
 
     void apply_auto_working_set_reserve();
 

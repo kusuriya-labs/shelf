@@ -474,7 +474,13 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
         if (config_.rope_profile.has_value()) {
             mtp_config.rope_profile = *config_.rope_profile;
         }
-        if (model_ != nullptr) return model_->mtp_drafter_reserve_bytes(mtp_config);
+        if (model_ != nullptr) {
+            if (config_.mtp_serve) {
+                return model_->mtp_spec_batch_reserve_bytes(
+                    mtp_config, mtp_batch_requests(mtp_config));
+            }
+            return model_->mtp_drafter_reserve_bytes(mtp_config);
+        }
         return 0u;
     }
     if (!config_.draft_config_ready) {
@@ -489,6 +495,18 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
         config_.max_concurrent_requests).total();
+}
+
+std::size_t Qwen35ComputeRuntime::mtp_batch_requests(
+    const qwen35::runtime::MtpDrafterConfig& options) const {
+    const uint32_t verify_rows = options.num_drafts + 1u;
+    uint32_t rows = std::min(exec_max_tokens_,
+                             qwen35::runtime::kMtpMaxPrefillRows);
+    uint32_t slots = config_.max_concurrent_requests;
+    if (slots == 0u) slots = 1u;
+    if (verify_rows == 0u) return slots;
+    if (rows / verify_rows < slots) slots = rows / verify_rows;
+    return slots == 0u ? 1u : slots;
 }
 
 void Qwen35ComputeRuntime::apply_auto_working_set_reserve() {
@@ -625,10 +643,23 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.load_options.verify_quantized_payload_crc = config_.verify_weights;
     tp_config.load_options.load_mtp_layers = config_.mtp;
     if (config_.mtp) {
-        constexpr std::size_t kMtpTpReserveBytes = 1536ull * 1024ull * 1024ull;
-        if (tp_config.working_set_reserve_bytes < kMtpTpReserveBytes) {
-            tp_config.working_set_reserve_bytes = kMtpTpReserveBytes;
+        qwen35::runtime::MtpDrafterConfig mtp_options;
+        mtp_options.num_drafts = config_.mtp_drafts == 0u ? 7u : config_.mtp_drafts;
+        mtp_options.max_seq_len = config_.max_seq_len;
+        mtp_options.page_tokens = config_.page_tokens;
+        mtp_options.max_batch_rows = std::min(
+            exec_max_tokens_, qwen35::runtime::kMtpMaxPrefillRows);
+        mtp_options.kv_dtype = config_.kv_cache_dtype;
+        if (config_.rope_profile.has_value()) {
+            mtp_options.rope_profile = *config_.rope_profile;
         }
+        tp_config.mtp_batch.enabled = config_.mtp_serve;
+        tp_config.mtp_batch.num_drafts = mtp_options.num_drafts;
+        tp_config.mtp_batch.max_seq_len = mtp_options.max_seq_len;
+        tp_config.mtp_batch.page_tokens = mtp_options.page_tokens;
+        tp_config.mtp_batch.max_batch_rows = mtp_options.max_batch_rows;
+        tp_config.mtp_batch.kv_dtype = mtp_options.kv_dtype;
+        tp_config.mtp_batch.max_requests = mtp_batch_requests(mtp_options);
     }
 
     const auto t_load_start = std::chrono::steady_clock::now();

@@ -215,6 +215,17 @@ std::size_t LoadedModel::mtp_drafter_reserve_bytes(
         terms.grouped_executor_bytes, terms.exl3_linear_workspace);
 }
 
+std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
+    const shelf::qwen35::runtime::MtpDrafterConfig& options,
+    std::size_t max_requests) const {
+    if (!has_mtp_block()) return 0u;
+    const std::size_t rows = shelf::qwen35::runtime::mtp_drafter_rows(options);
+    const MtpExecutorTerms terms = mtp_executor_terms(*this, rows);
+    return shelf::qwen35::runtime::mtp_spec_batch_reserve_bytes(
+        hybrid_config(), options, max_requests, terms.token_row_intermediate,
+        terms.grouped_executor_bytes, terms.exl3_linear_workspace);
+}
+
 Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
     const shelf::qwen35::runtime::MtpDrafterConfig& options,
     const shelf::weights::MatrixWeight* lm_head_override) const {
