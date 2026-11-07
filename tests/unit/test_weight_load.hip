@@ -1376,6 +1376,87 @@ static void test_hf_exl3_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
     check_eq_u64(slot.exl3_ka, 4, "exl3 weight slot bit rate");
 }
 
+static void test_hf_exl3_mul24_matrix_load(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("hf_exl3_mul24");
+    constexpr uint32_t k = 128u;
+    constexpr uint32_t n = 256u;
+    constexpr uint32_t bits = 4u;
+    constexpr uint32_t words = 16u * bits;
+    constexpr uint32_t kt = k / 16u, nt = n / 16u;
+
+    const std::vector<uint8_t> trellis = exl3_pattern(kt * nt * words * 2u, 91u);
+    const std::vector<uint8_t> suh = exl3_pattern(k * 2u, 93u);
+    const std::vector<uint8_t> svh = exl3_pattern(n * 2u, 95u);
+    const std::vector<uint8_t> marker = {0x2Du, 0xD1u, 0xDCu, 0x00u};  // mul24 multiplier 0xDCD12D
+
+    std::vector<Planned> shard;
+    shard.push_back({"layer.trellis", io::SType::I16, {kt, nt, words}, trellis});
+    shard.push_back({"layer.suh", io::SType::F16, {k}, suh});
+    shard.push_back({"layer.svh", io::SType::F16, {n}, svh});
+    shard.push_back({"layer.mul1", io::SType::I32, {}, marker});
+    if (!write_shard((dir / "model.safetensors").string(), shard, {})) return;
+    write_index(dir.string(), "model.safetensors", shard);
+    write_text((dir / "config.json").string(),
+               std::string("{\"model_type\":\"qwen3_5\",\"quantization_config\":")
+                   + "{\"quant_method\":\"exl3\",\"codebook\":\"mul1\"}}");
+
+    auto source = quantization::bundle::synthesize_hf_quantized_source(
+        dir.string(), {"layer.weight"}, true);
+    if (!source.ok()) {
+        fail("exl3 mul24 hf source: " + source.status().message());
+        return;
+    }
+    auto reader_result = quantization::bundle::QuantizedModelReader::open_hf_source(
+        source.release(), true);
+    if (!reader_result.ok()) {
+        fail("exl3 mul24 reader: " + reader_result.status().message());
+        return;
+    }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+    auto loaded = weights::load_quantized_matrix(
+        reader, "layer.weight", arena, stream, weights::WeightLoadOptions{});
+    if (!loaded.ok()) {
+        fail("load exl3 mul24 matrix: " + loaded.status().message());
+        return;
+    }
+    weights::MatrixWeight m = loaded.release();
+    check(m.encoding == weights::MatrixEncoding::Exl3, "exl3 mul24 matrix encoding");
+    check(m.quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1, "exl3 mul24 quant spec");
+    check(m.compute_spec == quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16,
+          "exl3 mul24 compute spec");
+    // The resident trellis is n-major: tile (a, c) of the file moves to position c * kt + a.
+    std::vector<uint8_t> expected(trellis.size());
+    const size_t tile_bytes = words * 2u;
+    for (uint32_t a = 0; a < kt; ++a)
+        for (uint32_t c = 0; c < nt; ++c)
+            std::memcpy(expected.data() + (static_cast<size_t>(c) * kt + a) * tile_bytes,
+                        trellis.data() + (static_cast<size_t>(a) * nt + c) * tile_bytes, tile_bytes);
+    check(d2h(m.codes.data<void>(), trellis.size()) == expected, "exl3 mul24 trellis is resident n-major");
+    check(d2h(m.exl3_svh.data<void>(), svh.size()) == svh, "exl3 mul24 svh reaches the GPU");
+}
+
+static void test_hf_exl3_unknown_multiplier_rejected(gpu::GpuArena& arena, hipStream_t stream) {
+    const fs::path dir = make_case_dir("hf_exl3_badmul");
+    constexpr uint32_t words = 64u;
+    std::vector<Planned> shard;
+    shard.push_back({"layer.trellis", io::SType::I16, {8, 8, words}, exl3_pattern(8u * 8u * words * 2u, 71u)});
+    shard.push_back({"layer.suh", io::SType::F16, {128u}, exl3_pattern(256u, 73u)});
+    shard.push_back({"layer.svh", io::SType::F16, {128u}, exl3_pattern(256u, 79u)});
+    shard.push_back({"layer.mul1", io::SType::I32, {}, {0x01u, 0x02u, 0x03u, 0x04u}});
+    if (!write_shard((dir / "model.safetensors").string(), shard, {})) return;
+    write_index(dir.string(), "model.safetensors", shard);
+    write_text((dir / "config.json").string(),
+               std::string("{\"model_type\":\"qwen3_5\",\"quantization_config\":")
+                   + "{\"quant_method\":\"exl3\",\"codebook\":\"mul1\"}}");
+    auto source = quantization::bundle::synthesize_hf_quantized_source(dir.string(), {"layer.weight"}, true);
+    if (!source.ok()) { fail("exl3 badmul source: " + source.status().message()); return; }
+    auto reader_result = quantization::bundle::QuantizedModelReader::open_hf_source(source.release(), true);
+    if (!reader_result.ok()) { fail("exl3 badmul reader: " + reader_result.status().message()); return; }
+    quantization::bundle::QuantizedModelReader reader = reader_result.release();
+    auto loaded = weights::load_quantized_matrix(reader, "layer.weight", arena, stream, weights::WeightLoadOptions{});
+    check(!loaded.ok(), "exl3 with an unknown codebook multiplier is refused");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -1405,6 +1486,8 @@ int main() {
     test_qwen35_hf_fp8_model_load_without_mtp(arena, stream);
     test_hf_mxfp4_matrix_load(arena, stream);
     test_hf_exl3_matrix_load(arena, stream);
+    test_hf_exl3_mul24_matrix_load(arena, stream);
+    test_hf_exl3_unknown_multiplier_rejected(arena, stream);
 
     fs::remove_all(g_root, ec);
     arena.shutdown();

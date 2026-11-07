@@ -875,6 +875,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             if (!resolved.ok()) return resolved.status();
             const ResolvedLinearQuantContract& contract = resolved.value();
             if (w.encoding == 4u) {
+                // The grouped kernel decodes the mul1 codebook only; a mul24 expert would be read as garbage.
+                if (contract.linear_kernel == KernelId::LINEAR_EXL3_INT8)
+                    return fail("exl3 grouped linear supports mul1 only (mul24 experts have no grouped kernel)");
                 if (contract.requires_activation_quant)
                     return fail("exl3 grouped linear must not quantize its activation");
                 if (w.k_padded != w.cols || (w.cols & 127u) != 0u ||
