@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen35moe/weights/moe_tensor_parallel_plan.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/models/qwen4exp/runtime/executor_footprint.h>
 #include <shelf/inference/state/ple_conv_state_pool.h>
 #include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/kernels/optimized/qsa.h>
@@ -83,6 +84,11 @@ public:
     }
 
     bool uses_exl3_linear() const override { return qmoe::uses_exl3_linear(model_.weights()); }
+
+    std::size_t mtp_grouped_reserve_bytes(std::size_t rows,
+                                          std::uint32_t) const override {
+        return qmoe::moe_executor_grouped_bytes(model_.text_config(), rows, 1u);
+    }
 
     shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
         return qmoe::exl3_linear_shape(model_.weights());
@@ -266,6 +272,12 @@ private:
 public:
     bool uses_exl3_linear() const override { return true; }
 
+    std::size_t mtp_grouped_reserve_bytes(std::size_t rows,
+                                          std::uint32_t max_context_tokens) const override {
+        return qwen4exp::mtp_grouped_executor_bytes(model_.text_config(), rows,
+                                                    max_context_tokens);
+    }
+
     shelf::weights::Exl3LinearShape exl3_linear_shape() const override {
         return qwen4exp::exl3_linear_shape(model_.weights());
     }
@@ -442,9 +454,11 @@ Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
     auto text_config = qwen4exp::read_qwen4exp_text_config(config.model_dir);
     if (!text_config.ok()) return text_config.status();
     const auto& cfg = text_config.value();
+    qwen4exp::Qwen4ExpLoadOptions load_options;
+    load_options.load_mtp = config.load_options.load_mtp_layers;
     auto model = qwen4exp::Qwen4ExpModel::load_from_safetensors(
         config.model_dir, config.tp_size, config.tp_rank, arena, stream,
-        qwen4exp::Qwen4ExpLoadOptions{});
+        load_options);
     if (!model.ok()) return model.status();
 
     qhy::TensorParallelContext context;

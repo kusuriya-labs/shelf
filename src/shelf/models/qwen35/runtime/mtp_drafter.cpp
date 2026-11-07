@@ -198,6 +198,15 @@ MtpGdnRankState rank0_state_view(const MtpDrafter& drafter) {
     state.commit_request = drafter.commit_request;
     state.commit_request_host = drafter.commit_request_host;
     state.gdn_key_heads = drafter.gdn_key_heads;
+    state.target = drafter.target_executor;
+    state.qsa_partial_history = drafter.qsa_partial_history;
+    state.qsa_count_history = drafter.qsa_count_history;
+    state.qsa_partial_state_stride = drafter.qsa_partial_state_stride;
+    state.qsa_count_state_stride = drafter.qsa_count_state_stride;
+    state.qsa_history_rows = drafter.qsa_history_rows;
+    state.ple_conv_history = drafter.ple_conv_history;
+    state.ple_conv_state_stride = drafter.ple_conv_state_stride;
+    state.ple_conv_history_rows = drafter.ple_conv_history_rows;
     return state;
 }
 
@@ -218,6 +227,14 @@ ExecuteBatchOptions verify_options_for(const MtpGdnRankState& state, uint32_t ro
     options.gdn_compact.delta_layer_stride = state.compact_delta_layer_stride;
     options.gdn_compact.k_layer_stride = state.compact_k_layer_stride;
     options.gdn_compact.a_layer_stride = state.compact_a_layer_stride;
+    options.qsa_spec_history.partial = state.qsa_partial_history;
+    options.qsa_spec_history.counts = state.qsa_count_history;
+    options.qsa_spec_history.rows = state.qsa_history_rows;
+    options.qsa_spec_history.partial_state_stride = state.qsa_partial_state_stride;
+    options.qsa_spec_history.count_state_stride = state.qsa_count_state_stride;
+    options.ple_conv_history.store = state.ple_conv_history;
+    options.ple_conv_history.rows = state.ple_conv_history_rows;
+    options.ple_conv_history.state_stride = state.ple_conv_state_stride;
     return options;
 }
 
@@ -268,6 +285,83 @@ Result<BatchExecutionOutput> run_target(MtpDrafter& drafter,
         return execute_batch(target, batch, stream, (*per_rank)[0]);
     }
     return execute_batch(target, batch, stream);
+}
+
+Status allocate_qsa_history(Executor* target, gpu::GpuArena& arena, uint32_t rows,
+                           bf16_t*& partial, std::uint32_t*& counts,
+                           std::uint64_t& partial_state_stride,
+                           std::uint64_t& count_state_stride) {
+    if (target == nullptr || target->qsa_state_pool == nullptr || rows == 0u) {
+        return Status::make_ok();
+    }
+    const auto view = target->qsa_state_pool->device_view();
+    if (view.num_qsa_states == 0u || view.compress_ratio == 0u || view.head_dim == 0u) {
+        return Status::make_ok();
+    }
+    partial_state_stride =
+        static_cast<std::uint64_t>(rows) * view.compress_ratio * view.head_dim;
+    count_state_stride = static_cast<std::uint64_t>(rows) * 2u;
+    const std::size_t partial_bytes = static_cast<std::size_t>(view.num_qsa_states) *
+        partial_state_stride * sizeof(bf16_t);
+    const std::size_t count_bytes = static_cast<std::size_t>(view.num_qsa_states) *
+        count_state_stride * sizeof(std::uint32_t);
+    auto pv = arena.allocate_aligned(partial_bytes, 256u);
+    if (!pv.ok()) return pv.status();
+    partial = static_cast<bf16_t*>(pv.release().data());
+    auto cv = arena.allocate_aligned(count_bytes, 256u);
+    if (!cv.ok()) return cv.status();
+    counts = static_cast<std::uint32_t*>(cv.release().data());
+    return Status::make_ok();
+}
+
+Status restore_rank_qsa(const MtpGdnRankState& state, SequenceSlotId slot, uint32_t row) {
+    if (state.target == nullptr || state.target->qsa_state_pool == nullptr ||
+        state.qsa_partial_history == nullptr || state.qsa_count_history == nullptr) {
+        return Status::make_ok();
+    }
+    ::shelf::execution::QsaSpecHistoryDeviceView view;
+    view.partial = state.qsa_partial_history;
+    view.counts = state.qsa_count_history;
+    view.rows = state.qsa_history_rows;
+    view.partial_state_stride = state.qsa_partial_state_stride;
+    view.count_state_stride = state.qsa_count_state_stride;
+    auto scope = shelf::gpu::ScopedDevice::create(state.device);
+    if (!scope.ok()) return scope.status();
+    return restore_qsa_spec_state(*state.target->qsa_state_pool, slot, view, row,
+                                  state.stream);
+}
+
+Status allocate_ple_conv_history(Executor* target, gpu::GpuArena& arena, uint32_t rows,
+                                bf16_t*& store, std::uint64_t& state_stride) {
+    if (target == nullptr || target->ple_conv_state_pool == nullptr || rows == 0u) {
+        return Status::make_ok();
+    }
+    const auto view = target->ple_conv_state_pool->device_view();
+    if (view.channels == 0u || view.history_stride == 0u) return Status::make_ok();
+    const std::size_t history_elems = static_cast<std::size_t>(view.history_stride) *
+                                      ::shelf::kernel::kPleConvHistory;
+    state_stride = static_cast<std::uint64_t>(rows) * history_elems;
+    const std::size_t bytes = static_cast<std::size_t>(
+        target->ple_conv_state_pool->num_ple_states()) * state_stride * sizeof(bf16_t);
+    auto view_alloc = arena.allocate_aligned(bytes, 256u);
+    if (!view_alloc.ok()) return view_alloc.status();
+    store = static_cast<bf16_t*>(view_alloc.release().data());
+    return Status::make_ok();
+}
+
+Status restore_rank_ple(const MtpGdnRankState& state, SequenceSlotId slot, uint32_t row) {
+    if (state.target == nullptr || state.target->ple_conv_state_pool == nullptr ||
+        state.ple_conv_history == nullptr) {
+        return Status::make_ok();
+    }
+    ::shelf::execution::PleConvSpecHistoryDeviceView view;
+    view.store = state.ple_conv_history;
+    view.rows = state.ple_conv_history_rows;
+    view.state_stride = state.ple_conv_state_stride;
+    auto scope = shelf::gpu::ScopedDevice::create(state.device);
+    if (!scope.ok()) return scope.status();
+    return restore_ple_conv_spec_state(*state.target->ple_conv_state_pool, slot, view,
+                                       row, state.stream);
 }
 
 }  // namespace
@@ -325,6 +419,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,
+    Executor* target,
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,
@@ -359,6 +454,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     }
 
     std::unique_ptr<MtpDrafter> drafter(new MtpDrafter());
+    drafter->target_executor = target;
     drafter->config = mtp_executor_config(*input.config);
     drafter->max_seq_len = options.max_seq_len;
     drafter->num_drafts = options.num_drafts;
@@ -446,6 +542,20 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
         drafter->hidden_cache = tensor.release();
     }
 
+    if (options.allocate_spec_buffers) {
+        Status qsa = allocate_qsa_history(
+            target, arena, options.num_drafts + 1u, drafter->qsa_partial_history,
+            drafter->qsa_count_history, drafter->qsa_partial_state_stride,
+            drafter->qsa_count_state_stride);
+        if (!qsa.ok()) return fail_with_sequence(qsa);
+        drafter->qsa_history_rows = options.num_drafts + 1u;
+        Status ple = allocate_ple_conv_history(
+            target, arena, options.num_drafts + 1u, drafter->ple_conv_history,
+            drafter->ple_conv_state_stride);
+        if (!ple.ok()) return fail_with_sequence(ple);
+        drafter->ple_conv_history_rows = options.num_drafts + 1u;
+    }
+
     drafter->gdn_conv_bytes = spec_gdn_conv_bytes(target_gdn_pool);
     drafter->gdn_recurrent_bytes = spec_gdn_recurrent_bytes(target_gdn_pool);
     if (drafter->gdn_conv_bytes != 0u) {
@@ -520,6 +630,20 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
             state.pool = binding.pool;
             state.stream = binding.stream;
             state.device = binding.device;
+            state.target = binding.executor;
+            if (options.allocate_spec_buffers) {
+                Status qsa = allocate_qsa_history(
+                    binding.executor, *binding.arena, options.num_drafts + 1u,
+                    state.qsa_partial_history, state.qsa_count_history,
+                    state.qsa_partial_state_stride, state.qsa_count_state_stride);
+                if (!qsa.ok()) return fail_with_sequence(qsa);
+                state.qsa_history_rows = options.num_drafts + 1u;
+                Status ple = allocate_ple_conv_history(
+                    binding.executor, *binding.arena, options.num_drafts + 1u,
+                    state.ple_conv_history, state.ple_conv_state_stride);
+                if (!ple.ok()) return fail_with_sequence(ple);
+                state.ple_conv_history_rows = options.num_drafts + 1u;
+            }
             state.conv_bytes = spec_gdn_conv_bytes(*binding.pool);
             state.recurrent_bytes = spec_gdn_recurrent_bytes(*binding.pool);
             if (state.conv_bytes != 0u) {
@@ -611,6 +735,12 @@ Status mtp_drafter_shutdown(MtpDrafter& drafter, hipStream_t stream) noexcept {
     drafter.compact_k = nullptr;
     drafter.compact_a = nullptr;
     drafter.commit_request = nullptr;
+    drafter.qsa_partial_history = nullptr;
+    drafter.qsa_count_history = nullptr;
+    drafter.qsa_history_rows = 0u;
+    drafter.ple_conv_history = nullptr;
+    drafter.ple_conv_state_stride = 0u;
+    drafter.ple_conv_history_rows = 0u;
     drafter.initialized = false;
     return first_error;
 }
@@ -828,6 +958,12 @@ Result<MtpIterationOutput> accept_verified(
                                                 log_ranks[ri].history,
                                                 row_base + accepted_drafts, state.stream);
             if (!conv.ok()) return conv;
+            Status qsa = restore_rank_qsa(log_ranks[ri], sequence.slot,
+                                          row_base + accepted_drafts + 1u);
+            if (!qsa.ok()) return qsa;
+            Status ple = restore_rank_ple(log_ranks[ri], sequence.slot,
+                                          row_base + accepted_drafts + 1u);
+            if (!ple.ok()) return ple;
         }
         const auto restore_done = std::chrono::steady_clock::now();
         for (std::size_t ri = 0u; ri < request_ranks.size(); ++ri) {
@@ -1114,8 +1250,8 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     per_request.allocate_spec_buffers = false;
     context.drafters.reserve(max_requests);
     for (uint32_t i = 0u; i < max_requests; ++i) {
-        auto drafter = create_mtp_drafter(input, target_gdn_pool, arena, stream,
-                                          per_request, extra_ranks, tp_hook);
+        auto drafter = create_mtp_drafter(input, &target, target_gdn_pool, arena,
+                                          stream, per_request, extra_ranks, tp_hook);
         if (!drafter.ok()) {
             (void)shutdown_mtp_spec_batch_context(context);
             return drafter.status();
@@ -1126,12 +1262,24 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     int rank0_device = 0;
     hipGetDevice(&rank0_device);
     auto make_rank = [&](const state::GdnStatePool& pool, gpu::GpuArena& rank_arena,
-                         hipStream_t rank_stream,
-                         int device) -> Result<MtpGdnRankState> {
+                         hipStream_t rank_stream, int device,
+                         Executor* executor) -> Result<MtpGdnRankState> {
         MtpGdnRankState state;
         state.pool = &pool;
         state.stream = rank_stream;
         state.device = device;
+        state.target = executor;
+        Status qsa = allocate_qsa_history(
+            executor, rank_arena, options.max_batch_rows, state.qsa_partial_history,
+            state.qsa_count_history, state.qsa_partial_state_stride,
+            state.qsa_count_state_stride);
+        if (!qsa.ok()) return qsa;
+        state.qsa_history_rows = options.max_batch_rows;
+        Status ple = allocate_ple_conv_history(
+            executor, rank_arena, options.max_batch_rows, state.ple_conv_history,
+            state.ple_conv_state_stride);
+        if (!ple.ok()) return ple;
+        state.ple_conv_history_rows = options.max_batch_rows;
         auto history = create_gdn_spec_history(rank_arena, pool, options.max_batch_rows,
                                                false);
         if (!history.ok()) return history.status();
@@ -1161,7 +1309,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         return state;
     };
 
-    auto rank0 = make_rank(target_gdn_pool, arena, stream, rank0_device);
+    auto rank0 = make_rank(target_gdn_pool, arena, stream, rank0_device, &target);
     if (!rank0.ok()) {
         (void)shutdown_mtp_spec_batch_context(context);
         return rank0.status();
@@ -1175,7 +1323,7 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
                                                 __FILE__, __LINE__);
             }
             auto state = make_rank(*binding.pool, *binding.arena, binding.stream,
-                                   binding.device);
+                                   binding.device, binding.executor);
             if (!state.ok()) {
                 (void)shutdown_mtp_spec_batch_context(context);
                 return state.status();
@@ -1224,7 +1372,6 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     const auto started = std::chrono::steady_clock::now();
     MtpSpecBatchOutput out;
     out.slots.resize(slots.size());
-
     std::vector<MtpDraftResult> drafts(slots.size());
     std::vector<uint32_t> row_begin(slots.size(), 0u);
     uint32_t total_rows = 0u;
@@ -1317,6 +1464,17 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 context.ranks[r].compact_delta_layer_stride;
             options[r].gdn_compact.k_layer_stride = context.ranks[r].compact_k_layer_stride;
             options[r].gdn_compact.a_layer_stride = context.ranks[r].compact_a_layer_stride;
+            options[r].qsa_spec_history.partial = context.ranks[r].qsa_partial_history;
+            options[r].qsa_spec_history.counts = context.ranks[r].qsa_count_history;
+            options[r].qsa_spec_history.rows = context.ranks[r].qsa_history_rows;
+            options[r].qsa_spec_history.partial_state_stride =
+                context.ranks[r].qsa_partial_state_stride;
+            options[r].qsa_spec_history.count_state_stride =
+                context.ranks[r].qsa_count_state_stride;
+            options[r].ple_conv_history.store = context.ranks[r].ple_conv_history;
+            options[r].ple_conv_history.rows = context.ranks[r].ple_conv_history_rows;
+            options[r].ple_conv_history.state_stride =
+                context.ranks[r].ple_conv_state_stride;
         }
         MtpDrafter& leader = *slots.front().drafter;
         auto executed = leader.tp_hook != nullptr

@@ -28,6 +28,15 @@
 namespace shelf {
 namespace app {
 
+enum class ArenaBudgetMode {
+    // Free VRAM at startup minus a small margin.
+    Auto,
+    // Exactly `arena_bytes`.
+    Fixed,
+    // Total VRAM minus `arena_bytes` (a margin).
+    TotalMinus,
+};
+
 struct Qwen35RuntimeConfig {
     std::string model_dir;
     std::string dflash2_model_dir;
@@ -40,6 +49,7 @@ struct Qwen35RuntimeConfig {
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;
+    ArenaBudgetMode arena_mode = ArenaBudgetMode::Auto;
     std::size_t arena_bytes = 0;
     std::size_t draft_bytes = 0;
     bool private_target_weights = false;

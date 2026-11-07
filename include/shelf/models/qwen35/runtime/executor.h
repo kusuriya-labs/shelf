@@ -282,6 +282,8 @@ struct PendingBatch {
 struct ExecuteBatchOptions {
     runtime::GdnSpecHistoryDeviceView gdn_spec_history{};
     runtime::GdnCompactLogDeviceView gdn_compact{};
+    ::shelf::execution::QsaSpecHistoryDeviceView qsa_spec_history{};
+    ::shelf::execution::PleConvSpecHistoryDeviceView ple_conv_history{};
     const uint32_t* tree_anc_offsets = nullptr;
     const uint32_t* tree_anc_positions = nullptr;
     uint32_t tree_committed_end = 0u;

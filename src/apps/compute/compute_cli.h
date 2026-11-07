@@ -17,7 +17,7 @@ struct ComputeOptions {
     std::string input_ids_file;
     unsigned long max_new_tokens = 32;
     unsigned long max_seq_len = 512;
-    unsigned long arena_gib = 16;
+    double arena_gib = 16.0;
     bool arena_gib_auto = true;
     unsigned long page_tokens = 16;
     unsigned long max_concurrent_requests = 4;

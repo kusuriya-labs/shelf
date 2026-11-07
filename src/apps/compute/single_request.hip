@@ -853,11 +853,12 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             binding.arena = &rank.arena();
             binding.stream = rank.stream();
             binding.device = rank.device_id();
+            binding.executor = &rank.executor();
             extra_ranks.push_back(binding);
         }
     }
     auto drafter_result = shelf::qwen35::runtime::create_mtp_drafter(
-        drafter_input.value(), gdn_pool, arena, stream, drafter_config,
+        drafter_input.value(), &executor, gdn_pool, arena, stream, drafter_config,
         extra_ranks.empty() ? nullptr : &extra_ranks, tp);
     if (!drafter_result.ok()) {
         fprintf(stderr, "mtp drafter create failed: %s\n",

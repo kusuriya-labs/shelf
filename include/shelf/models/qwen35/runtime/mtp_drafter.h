@@ -74,6 +74,7 @@ struct MtpGdnRankBinding {
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = -1;
+    Executor* executor = nullptr;
 };
 
 struct MtpGdnRankState {
@@ -94,6 +95,15 @@ struct MtpGdnRankState {
     ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
     ::shelf::runtime::DeviceRequestDescriptor commit_request_host{};
     std::uint32_t gdn_key_heads = 0;
+    Executor* target = nullptr;
+    bf16_t* qsa_partial_history = nullptr;
+    std::uint32_t* qsa_count_history = nullptr;
+    std::uint64_t qsa_partial_state_stride = 0;
+    std::uint64_t qsa_count_state_stride = 0;
+    std::uint32_t qsa_history_rows = 0;
+    bf16_t* ple_conv_history = nullptr;
+    std::uint64_t ple_conv_state_stride = 0;
+    std::uint32_t ple_conv_history_rows = 0;
 };
 
 struct MtpDrafter {
@@ -129,6 +139,16 @@ struct MtpDrafter {
     // The target hidden of the tokens the drafter has committed, copied out of the target
     // batch so a request that sits out a round still has its input.
     gpu::Tensor hidden_cache;
+    Executor* target_executor = nullptr;
+    bf16_t* qsa_partial_history = nullptr;
+    std::uint32_t* qsa_count_history = nullptr;
+    std::uint64_t qsa_partial_state_stride = 0;
+    std::uint64_t qsa_count_state_stride = 0;
+    std::uint32_t qsa_history_rows = 0;
+    bf16_t* ple_conv_history = nullptr;
+    std::uint64_t ple_conv_state_stride = 0;
+    std::uint32_t ple_conv_history_rows = 0;
+
     std::vector<int32_t> last_tokens;
     uint32_t last_position = 0;
     uint32_t last_hidden_offset = 0;
@@ -177,6 +197,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,
+    Executor* target,
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,

@@ -12,7 +12,7 @@
 | `--input-ids-file PATH` | whitespace separated prompt token ids |
 | `--max-new-tokens N` | max tokens to generate (default 32) |
 | `--max-seq-len N` | max sequence length (default 512) |
-| `--arena-gib N\|auto` | arena capacity in GiB; auto uses free VRAM minus 1 GiB (default auto) |
+| `--arena-gib N\|auto\|-N` | arena capacity in GiB; auto uses free VRAM minus 0.5 GiB, `-N` uses total VRAM minus N GiB (default auto) |
 | `--page-tokens N` | paged KV page size in tokens (default 16) |
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
@@ -44,7 +44,8 @@
 | `--help` | show this help |
 <!-- /cli:compute -->
 
-`--arena-gib auto` は起動時の空き VRAM から 1 GiB を引いた容量を arena に使う。
+`--arena-gib auto` は起動時の空き VRAM から 0.5 GiB を引いた容量を arena に使う。
+`--arena-gib -0.3` は VRAM の総容量から 0.3 GiB を引いた容量を使う。
 KV の物理容量は個別に指定できない。model weight、`--working-set-reserve-gib`、
 DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
 （専用 KV pool、executor、GDN snapshot）、prefix cache の GDN state / ring を確保した後に

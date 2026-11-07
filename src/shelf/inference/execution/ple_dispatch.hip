@@ -242,6 +242,9 @@ Result<OptimizedLaunchResult> try_launch_ple_conv(const Program& program,
     args.state_slot_stride = view.slot_stride;
     args.state_layer_stride = view.layer_stride;
     args.state_history_stride = view.history_stride;
+    args.state_history_store = ctx.spec.ple_conv_history.store;
+    args.history_rows = ctx.spec.ple_conv_history.rows;
+    args.history_state_stride = ctx.spec.ple_conv_history.state_stride;
     const hipError_t error = ::shelf::kernel::launch_ple_conv(args, stream);
     if (error != hipSuccess)
         return Status::hip_error("ple conv launch", hipGetErrorString(error), __FILE__,

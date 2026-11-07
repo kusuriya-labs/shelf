@@ -340,7 +340,7 @@ int run_pp(int argc, char** argv) {
             fprintf(stderr, "hipMemGetInfo failed: %s\n", hipGetErrorString(arena_err));
             return 1;
         }
-        const std::size_t margin = 1ull * 1024ull * 1024ull * 1024ull;
+        const std::size_t margin = 512ull * 1024ull * 1024ull;
         arena_bytes = free_bytes > margin ? free_bytes - margin : free_bytes / 2u;
         if (arena_bytes == 0) {
             fprintf(stderr, "no VRAM available for the arena\n");

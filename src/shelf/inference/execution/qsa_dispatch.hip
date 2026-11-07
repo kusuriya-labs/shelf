@@ -83,6 +83,12 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     args.partial_base = view.partial_base;
     args.pool_count_base = view.pool_count_base;
     args.partial_count_base = view.partial_count_base;
+    args.partial_history = ctx.spec.qsa_spec_history.partial;
+    args.count_history = ctx.spec.qsa_spec_history.counts;
+    args.history_rows = ctx.spec.qsa_spec_history.rows;
+    args.history_partial_state_stride =
+        ctx.spec.qsa_spec_history.partial_state_stride;
+    args.history_count_state_stride = ctx.spec.qsa_spec_history.count_state_stride;
     args.num_requests = num_requests;
     args.actual_rows = ctx.actual_rows;
     args.max_sequences = view.max_sequences;

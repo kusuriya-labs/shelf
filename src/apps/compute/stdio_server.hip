@@ -1125,6 +1125,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 binding.arena = &rank.arena();
                 binding.stream = rank.stream();
                 binding.device = rank.device_id();
+                binding.executor = &rank.executor();
                 extra_ranks.push_back(binding);
             }
         }

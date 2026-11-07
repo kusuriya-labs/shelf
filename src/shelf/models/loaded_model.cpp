@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35moe/model/lower_to_primitives.h>
 #include <shelf/models/qwen35moe/runtime/executor_footprint.h>
 #include <shelf/models/qwen4exp/model/lower_to_primitives.h>
+#include <shelf/models/qwen4exp/runtime/executor_footprint.h>
 
 #include <cstdint>
 #include <span>
@@ -183,7 +184,14 @@ struct MtpExecutorTerms {
 
 MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) {
     MtpExecutorTerms terms;
-    if (model.moe_model() != nullptr) {
+    if (model.qwen4exp_model() != nullptr) {
+        const auto& q4 = *model.qwen4exp_model();
+        terms.token_row_intermediate =
+            q4.text_config().ffn.shared_expert_intermediate_size;
+        terms.grouped_executor_bytes = shelf::qwen4exp::mtp_grouped_executor_bytes(
+            q4.text_config(), rows, 0u);
+        terms.exl3_linear_workspace = true;
+    } else if (model.moe_model() != nullptr) {
         const auto& moe = *model.moe_model();
         terms.token_row_intermediate = moe.text_config().ffn.shared_expert_intermediate_size;
         terms.grouped_executor_bytes =
@@ -200,7 +208,7 @@ MtpExecutorTerms mtp_executor_terms(const LoadedModel& model, std::size_t rows) 
 }  // namespace
 
 bool LoadedModel::has_mtp_block() const noexcept {
-    if (qwen4exp_ != nullptr) return false;
+    if (qwen4exp_ != nullptr) return qwen4exp_->weights().mtp.present;
     if (moe_ != nullptr) return moe_->weights().mtp.present;
     return dense_ != nullptr && dense_->weights().mtp.present;
 }
@@ -242,6 +250,18 @@ Result<shelf::qwen35::runtime::MtpDrafterInput> LoadedModel::mtp_drafter_input(
     input.token_row_intermediate = terms.token_row_intermediate;
     input.grouped_executor_bytes = terms.grouped_executor_bytes;
 
+    if (qwen4exp_ != nullptr) {
+        shelf::qwen4exp::Qwen4ExpLowerOptions lower_options;
+        lower_options.max_context_tokens = options.max_seq_len + 1u;
+        auto lowered = shelf::qwen4exp::lower_qwen4exp_mtp_to_primitives(
+            qwen4exp_->text_config(), qwen4exp_->weights(), lower_options);
+        if (!lowered.ok()) return lowered.status();
+        input.lowered = lowered.release();
+        input.hidden_width = static_cast<std::uint32_t>(
+            qwen4exp_->text_config().hc_count * qwen4exp_->text_config().hidden_size);
+        input.wide_hidden = true;
+        return input;
+    }
     if (moe_ != nullptr) {
         auto lowered = shelf::qwen35moe::lower_qwen35_moe_mtp_to_primitives(
             moe_->text_config(), moe_->weights(),

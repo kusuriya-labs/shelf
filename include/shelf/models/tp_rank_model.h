@@ -64,6 +64,11 @@ public:
     virtual std::size_t executor_state_reserve_bytes(std::size_t) const {
         return 0u;
     }
+    // Group-row workspace the family's MTP block needs on top of the shared executor
+    // estimate. Zero for a family whose draft block has no grouped experts.
+    virtual std::size_t mtp_grouped_reserve_bytes(std::size_t, std::uint32_t) const {
+        return 0u;
+    }
     // Width of the hidden the family exposes for MTP. Zero means the model's hidden size.
     // Qwen4Exp exposes the pre-mixer wide residual (hc * hidden).
     virtual std::uint32_t normed_token_hidden_width() const { return 0u; }

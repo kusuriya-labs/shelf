@@ -242,8 +242,9 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             qwen35::runtime::mtp_spec_batch_reserve_bytes(
                 tc, mtp_options, config.mtp_batch.max_requests,
                 rank->model_->token_row_ffn_size(),
-                rank->model_->ffn_workspace_reserve_bytes(
-                    qwen35::runtime::mtp_drafter_rows(mtp_options)),
+                rank->model_->mtp_grouped_reserve_bytes(
+                    qwen35::runtime::mtp_drafter_rows(mtp_options),
+                    mtp_options.max_seq_len + 1u),
                 rank->model_->uses_exl3_linear());
         reserved += batch_bytes;
         std::fprintf(stderr, "MEMORY_PLAN tp mtp batch reserve: %s (%u slots)\n",

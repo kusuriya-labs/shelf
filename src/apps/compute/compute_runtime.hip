@@ -22,7 +22,7 @@ namespace app {
 
 namespace {
 
-constexpr std::size_t kAutoArenaMarginBytes = 1ull * 1024ull * 1024ull * 1024ull;
+constexpr std::size_t kAutoArenaMarginBytes = 512ull * 1024ull * 1024ull;
 constexpr std::size_t kAutoWorkspaceMinimumBytes = 128ull * 1024ull * 1024ull;
 
 uint32_t ceil_div(uint32_t a, uint32_t b) {
@@ -134,7 +134,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             // The PLE token history is built from the scheduled rows; a prefix cache that
             // restores tokens the history never saw would make the n-gram rows wrong.
             config_.prefix_cache = false;
-            config_.mtp = false;
             // The Qwen4Exp rank already holds a complete replicated lm_head / embedding, so
             // the drafter borrows those instead of loading a second private copy.
             config_.private_target_weights = false;
@@ -172,9 +171,15 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::hip_error("hipSetDevice", hipGetErrorString(herr), __FILE__, __LINE__);
     }
 
-    const bool auto_arena = config_.arena_bytes == 0;
+    const bool auto_arena = config_.arena_mode == ArenaBudgetMode::Auto;
     auto_arena_ = auto_arena;
-    if (auto_arena) {
+    if (config_.arena_mode == ArenaBudgetMode::Fixed) {
+        if (config_.arena_bytes == 0u) {
+            return Status::insufficient_memory(
+                "arena capacity is zero", __FILE__, __LINE__);
+        }
+        startup_available_bytes_ = config_.arena_bytes;
+    } else {
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         herr = hipMemGetInfo(&free_bytes, &total_bytes);
@@ -182,13 +187,37 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
             return Status::hip_error("hipMemGetInfo", hipGetErrorString(herr), __FILE__,
                                      __LINE__);
         }
-        startup_available_bytes_ = free_bytes;
-        if (free_bytes == 0) {
-            return Status::insufficient_memory(
-                "no VRAM available for the arena", __FILE__, __LINE__);
+        const std::size_t margin =
+            auto_arena ? kAutoArenaMarginBytes : config_.arena_bytes;
+        if (auto_arena) {
+            if (free_bytes == 0) {
+                return Status::insufficient_memory(
+                    "no VRAM available for the arena", __FILE__, __LINE__);
+            }
+            config_.arena_bytes = free_bytes > margin ? free_bytes - margin
+                                                      : free_bytes / 2u;
+            startup_available_bytes_ = free_bytes;
+            if (config_.arena_bytes == 0u) {
+                return Status::insufficient_memory(
+                    "no VRAM available for the arena", __FILE__, __LINE__);
+            }
+            fprintf(stderr, "ARENA auto: free=%s margin=%s capacity=%s\n",
+                    gpu::format_gib(free_bytes).c_str(),
+                    gpu::format_gib(margin).c_str(),
+                    gpu::format_gib(config_.arena_bytes).c_str());
+        } else {
+            if (total_bytes == 0u || margin >= total_bytes) {
+                return Status::invalid_argument(
+                    "--arena-gib margin exceeds the total VRAM", __FILE__, __LINE__);
+            }
+            config_.arena_bytes = total_bytes - margin;
+            startup_available_bytes_ = config_.arena_bytes;
+            fprintf(stderr, "ARENA total-minus: total=%s margin=%s capacity=%s\n",
+                    gpu::format_gib(total_bytes).c_str(),
+                    gpu::format_gib(margin).c_str(),
+                    gpu::format_gib(config_.arena_bytes).c_str());
         }
-    } else {
-        startup_available_bytes_ = config_.arena_bytes;
+        fflush(stderr);
     }
 
     exec_max_tokens_ = config_.max_num_batched_tokens;
@@ -216,21 +245,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::hip_error("hipStreamCreate", hipGetErrorString(herr), __FILE__, __LINE__);
     }
 
-    if (auto_arena_) {
-        const std::size_t free_bytes = startup_available_bytes_;
-        const std::size_t available = free_bytes > kAutoArenaMarginBytes
-            ? free_bytes - kAutoArenaMarginBytes
-            : free_bytes / 2u;
-        if (available == 0) {
-            return Status::insufficient_memory(
-                "no VRAM available for the arena", __FILE__, __LINE__);
-        }
-        config_.arena_bytes = available;
-        fprintf(stderr, "ARENA auto: free=%s capacity=%s\n",
-                gpu::format_gib(free_bytes).c_str(),
-                gpu::format_gib(config_.arena_bytes).c_str());
-        fflush(stderr);
-    }
     auto arena_result = shelf::gpu::GpuArena::create(config_.devices[0], config_.arena_bytes);
     if (!arena_result.ok()) {
         return arena_result.status();
@@ -653,13 +667,14 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         if (config_.rope_profile.has_value()) {
             mtp_options.rope_profile = *config_.rope_profile;
         }
-        tp_config.mtp_batch.enabled = config_.mtp_serve;
+        tp_config.mtp_batch.enabled = true;
         tp_config.mtp_batch.num_drafts = mtp_options.num_drafts;
         tp_config.mtp_batch.max_seq_len = mtp_options.max_seq_len;
         tp_config.mtp_batch.page_tokens = mtp_options.page_tokens;
         tp_config.mtp_batch.max_batch_rows = mtp_options.max_batch_rows;
         tp_config.mtp_batch.kv_dtype = mtp_options.kv_dtype;
-        tp_config.mtp_batch.max_requests = mtp_batch_requests(mtp_options);
+        tp_config.mtp_batch.max_requests =
+            config_.mtp_serve ? mtp_batch_requests(mtp_options) : 1u;
     }
 
     const auto t_load_start = std::chrono::steady_clock::now();

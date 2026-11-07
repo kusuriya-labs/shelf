@@ -65,9 +65,18 @@ int main(int argc, char** argv) {
     config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
-    config.arena_bytes = opt.arena_gib_auto
-        ? 0u
-        : static_cast<std::size_t>(opt.arena_gib) * 1024ull * 1024ull * 1024ull;
+    if (opt.arena_gib_auto) {
+        config.arena_mode = shelf::app::ArenaBudgetMode::Auto;
+        config.arena_bytes = 0u;
+    } else if (opt.arena_gib < 0.0) {
+        config.arena_mode = shelf::app::ArenaBudgetMode::TotalMinus;
+        config.arena_bytes = static_cast<std::size_t>(
+            -opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
+    } else {
+        config.arena_mode = shelf::app::ArenaBudgetMode::Fixed;
+        config.arena_bytes = static_cast<std::size_t>(
+            opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
+    }
     config.page_tokens = static_cast<uint32_t>(opt.page_tokens);
     config.devices = opt.devices;
     config.tp = static_cast<uint32_t>(opt.tp);

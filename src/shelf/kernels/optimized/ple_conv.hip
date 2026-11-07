@@ -45,6 +45,16 @@ __global__ __launch_bounds__(kThreads) void ple_conv_kernel(PleConvArgs args) {
     for (std::uint32_t t = 0; t < request.row_count; ++t) {
         const std::uint32_t row = request.row_begin + t;
         if (row >= args.actual_rows) break;
+        if (args.state_history_store != nullptr && row < args.history_rows) {
+            shelf::bf16_t* hp = args.state_history_store +
+                static_cast<std::uint64_t>(args.state_index) * args.history_state_stride +
+                static_cast<std::uint64_t>(row) * args.state_history_stride *
+                    kPleConvHistory;
+            for (std::uint32_t i = 0; i < kPleConvHistory; ++i) {
+                hp[static_cast<std::uint64_t>(i) * args.state_history_stride + ch] =
+                    bf16_from(history[i]);
+            }
+        }
         const float x = bf16_value(args.input +
                                    static_cast<std::uint64_t>(row) *
                                        args.input_row_stride + ch);
