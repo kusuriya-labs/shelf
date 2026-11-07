@@ -2,6 +2,7 @@
 #include <shelf/kernels/optimized/linear/exl3_decode_device.h>
 #include <shelf/kernels/optimized/linear/exl3_grouped.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -160,6 +161,56 @@ __device__ __forceinline__ void decode_tile(const Exl3GemmArgs& args, uint32_t k
     __syncwarp();
 }
 
+
+// mul24 (EXL3-INT8) tile decode straight into the WMMA A fragment. Lane l holds stream positions 8l..8l+7, which are
+// output column l % 16 and the consecutive k rows 8 * (l / 16) .. +7 of the tile, so no LDS transpose is needed.
+// q = (B - 509) >> 2 is an exact integer in [-128, 127] and is kept unscaled in FP16; kExl3Int8GridStep is applied in
+// the epilogue. The tile is read from the canonical [kt][nt] trellis (the expert plane is not repacked n-major).
+__device__ __forceinline__ f16x8_t decode_frag_mul24(const Exl3GemmArgs& args, uint32_t kt,
+                                                    uint32_t nt, uint32_t lane) {
+    const uint32_t word_count = 8u * args.ka;
+    const uint32_t n_tiles = args.out_features / 16u;
+    const uint32_t* source = reinterpret_cast<const uint32_t*>(
+        static_cast<const uint16_t*>(args.trellis) +
+        (static_cast<uint64_t>(kt) * n_tiles + nt) * (16u * args.ka));
+    const uint32_t bit_length = 256u * args.ka;
+    const uint32_t p0 = lane * 8u;
+    const uint32_t w0 = ((p0 + 1u) * args.ka + bit_length - 16u) >> 5;
+    uint32_t i0 = w0;
+    uint32_t i1 = w0 + 1u;
+    uint32_t i2 = w0 + 2u;
+    uint32_t i3 = w0 + 3u;
+    if (i0 >= word_count) i0 -= word_count;
+    if (i1 >= word_count) i1 -= word_count;
+    if (i2 >= word_count) i2 -= word_count;
+    if (i3 >= word_count) i3 -= word_count;
+    if (i0 >= word_count) i0 -= word_count;
+    if (i1 >= word_count) i1 -= word_count;
+    if (i2 >= word_count) i2 -= word_count;
+    if (i3 >= word_count) i3 -= word_count;
+    const uint32_t v0 = source[i0];
+    const uint32_t v1 = source[i1];
+    const uint32_t v2 = source[i2];
+    const uint32_t v3 = source[i3];
+    f16x8_t frag;
+#pragma unroll
+    for (uint32_t j = 0u; j < 8u; ++j) {
+        const uint32_t end = (p0 + j + 1u) * args.ka + bit_length;
+        const uint32_t shift = (((end - 1u) >> 5) + 1u) * 32u - end;
+        const uint32_t lo = ((end - 16u) >> 5) - w0;
+        const uint32_t hi = ((end - 1u) >> 5) - w0;
+        const uint32_t state = static_cast<uint16_t>(
+            ((static_cast<uint64_t>(pick4(lo, v0, v1, v2, v3)) << 32) |
+             pick4(hi, v0, v1, v2, v3)) >>
+            shift);
+        const uint32_t biased =
+            __builtin_amdgcn_udot4(__umul24(state, 0xDCD12Du), 0x01010101u, 3u, false) >> 2;
+        // 1024 + (q + 128) is exact in FP16; subtracting 1152 leaves q.
+        frag[j] = __builtin_bit_cast(_Float16, static_cast<uint16_t>(0x6400u + biased)) -
+                  static_cast<_Float16>(1152.0f);
+    }
+    return frag;
+}
 
 struct ReconWork {
     uint16_t tile[8][256];
@@ -381,7 +432,7 @@ __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* i
     }
 }
 
-template <uint32_t kGroups, bool kPartial, bool kPre, uint32_t kNTiles>
+template <uint32_t kGroups, bool kPartial, bool kPre, uint32_t kNTiles, bool kMul24 = false>
 __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs args,
                                                                     uint32_t splits) {
     constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
@@ -532,9 +583,13 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
             f16x8_t a[kNTiles];
 #pragma unroll
             for (uint32_t t = 0u; t < kNTiles; ++t) {
-                decode_tile(args, kc * 8u + ks, n_tile + t, lane, area.work.ring[warp],
-                            tile + t * 256u);
-                a[t] = load_f16x8(tile + t * 256u + lane16 * 16u + lane_high * 8u);
+                if constexpr (kMul24) {
+                    a[t] = decode_frag_mul24(args, kc * 8u + ks, n_tile + t, lane);
+                } else {
+                    decode_tile(args, kc * 8u + ks, n_tile + t, lane, area.work.ring[warp],
+                                tile + t * 256u);
+                    a[t] = load_f16x8(tile + t * 256u + lane16 * 16u + lane_high * 8u);
+                }
             }
 #pragma unroll
             for (uint32_t g = 0u; g < kGroups; ++g) {
@@ -637,7 +692,8 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 const uint32_t r = g * kRowTile + warp * 2u + ri;
                 if (r >= active_rows) continue;
                 const uint32_t row = r0 + r;
-                const float bias = exl3_detail::kMul1BiasOverInv * rowsum[r];
+                // mul24 has no codebook bias: its grid is symmetric around zero.
+                const float bias = kMul24 ? 0.f : exl3_detail::kMul1BiasOverInv * rowsum[r];
 #pragma unroll
                 for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
                     const float* src = area.accum + (r - g * kRowTile) * kOutBlock +
@@ -654,7 +710,9 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                     const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
                     const uint64_t out_base =
                         static_cast<uint64_t>(row) * args.output_row_stride + col;
-                    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+                    const float scale =
+                        kInvSqrt128 * (kMul24 ? ::shelf::quantization::exl3::kExl3Int8GridStep
+                                              : exl3_detail::kMul1Inv);
                     const float y0 = v0 * scale * s0;
                     const float y1 = v1 * scale * s1;
                     const float y2 = v2 * scale * s2;
@@ -804,10 +862,15 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     return plan;
 }
 
-template <uint32_t kGroups, bool kPre, uint32_t kNTiles>
+template <uint32_t kGroups, bool kPre, uint32_t kNTiles, bool kMul24 = false>
 hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
                          hipStream_t stream) {
-    if (plan.splits > 1u) {
+    if constexpr (kMul24) {
+        // Only the grouped path runs mul24, and it never splits K.
+        if (plan.splits > 1u) return hipErrorInvalidValue;
+        gemm_exl3_w16a16_kernel<kGroups, false, kPre, kNTiles, true>
+            <<<dim3(plan.grid_x, plan.grid_y, plan.grid_z), kThreads, 0, stream>>>(args, 1u);
+    } else if (plan.splits > 1u) {
         gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles>
             <<<dim3(plan.grid_x * plan.splits, plan.grid_y, plan.grid_z), kThreads, 0,
                stream>>>(args, plan.splits);
@@ -819,19 +882,19 @@ hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
     return hipGetLastError();
 }
 
-template <bool kPre>
+template <bool kPre, bool kMul24 = false>
 hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
                        hipStream_t stream) {
     const uint32_t n_tiles = pick_n_tiles(args);
     hipError_t err = hipSuccess;
     if (n_tiles == 2u) {
-        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u>(args, plan, stream)
-              : plan.groups == 2u ? launch_kernel<2u, kPre, 2u>(args, plan, stream)
-                                  : launch_kernel<1u, kPre, 2u>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u, kMul24>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 2u, kMul24>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 2u, kMul24>(args, plan, stream);
     } else {
-        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u>(args, plan, stream)
-              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
-                                  : launch_kernel<1u, kPre, 1u>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u, kMul24>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u, kMul24>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 1u, kMul24>(args, plan, stream);
     }
     if (err != hipSuccess) return err;
     if (plan.splits > 1u) {
@@ -878,6 +941,7 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
         return hipErrorInvalidValue;
     }
+    if (args.mul24 != 0u && args.half != 0u) return hipErrorInvalidValue;  // mul24 has integer bit rates only
     if (args.input_row_stride < args.k || args.output_row_stride < args.out_features ||
         args.group_capacity == 0u || args.group_capacity > 65535u) {
         return hipErrorInvalidValue;
@@ -924,7 +988,8 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     plan.grid_z = args.group_capacity;
     plan.splits = 1u;
     plan.groups = dense.groups;
-    return launch_plan<false>(dense, plan, stream);
+    return args.mul24 != 0u ? launch_plan<false, true>(dense, plan, stream)
+                            : launch_plan<false>(dense, plan, stream);
 }
 
 hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float* rowsum,

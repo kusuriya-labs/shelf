@@ -108,6 +108,7 @@ shelf_add_test(NAME test_exl3_int8_decode SOURCE unit/test_exl3_int8_decode.cpp 
 shelf_add_test(NAME test_exl3_linear SOURCE unit/test_exl3_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_dense SOURCE unit/test_exl3_dense.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_int8_linear SOURCE kernels/linear/test_exl3_int8_linear.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_gpu)
+shelf_add_test(NAME test_exl3_int8_grouped SOURCE kernels/linear/test_exl3_int8_grouped.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_int8_tp SOURCE kernels/linear/test_exl3_int8_tp.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_weights shelf_gpu)
 shelf_add_test(NAME test_exl3_grouped SOURCE unit/test_exl3_grouped.cpp LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_io)
 target_include_directories(test_exl3_grouped SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
@@ -322,6 +323,7 @@ add_custom_target(
         test_exl3_linear
         test_exl3_dense
         test_exl3_int8_linear
+        test_exl3_int8_grouped
         test_exl3_int8_tp
         test_mxfp4_canonical_payload
         test_mxfp4_linear

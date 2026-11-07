@@ -355,7 +355,7 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   EXL3 の lm_head に対して vocab shard は行わない。
 - tensor partition（TP）は EXL3 の trellis / `suh` / `svh` / marker を軸ごとに分割できる
   （`materialize_rank_local_canonical`。n 軸は kt ごとに nt を、k 軸は kt を選ぶ）。mul24 の INT8 実行は下記。
-- MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
+- DFlash2 drafter の重みは EXL3 を受理しない。MoE routed expert（Qwen4Exp）は grouped EXL3 として受理する（mul24 は下記）。
 - DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
   logits を計算する（drafter の重みは BF16 / FP8 のまま）。
 
@@ -402,8 +402,27 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   INT8 経路、結合（n は連結、k は加算）を 1 GPU で再現して照合する（tp=2/4、実モデル形状を含む）。
   hipBLASLt の handle と algorithm cache は rank の worker thread ごと（device ごと）に持つ。
   **複数 GPU での実行（collective を含む）は未検証。**
-- 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数。MoE の expert（grouped EXL3）は mul1 のみで、
-  mul24 の expert は program 構築時に拒否する（grouped 版の INT8 kernel は無い）。correctness fallback は持たない。
+- MoE の routed expert（rank-3 の grouped EXL3）: mul24 の expert plane も `LINEAR_EXL3_W16A16_GROUPED` で実行する
+  （kernel は 1 本で、`WeightSlot` の `compute_spec` が `EXL3_MUL24_INT8_W8A8_F32_BF16` のとき復号だけを mul24 に切り替える。
+  `Exl3GroupedArgs::mul24`）。**INT8 活性ではなく FP16 の GEMM**（dense の iu8 WMMA 経路とは別物）: 活性は mul1 と同じく
+  `suh` と H128 を掛けて FP16 にし、重みは `q`（−128..127 の整数、FP16 で厳密）を WMMA の A フラグメントとして直接作る
+  （lane が復号する 8 個が A の列 `l % 16`、連続 8 個の k なので LDS を通さない）。`kExl3Int8GridStep` は FP16 の重みに
+  焼き込まず、epilogue の scale（`kInvSqrt128 * kExl3Int8GridStep`）に畳む（`q * step` は FP16 で丸まるため）。mul24 に
+  codebook の bias は無いので rowsum の補正は行わない。
+  expert plane の trellis は dense のように n-major に並べ替えず、canonical の `[kt][nt]` のまま常駐する
+  （`load_expert_matrix` は expert ごとに trellis をそのまま upload する）。grouped kernel の tile 参照は mul1 と同じ
+  `(kt * n_tiles + nt) * words` である。expert の分割は expert parallel（expert 軸の切り出しのみ）で、
+  trellis の中は分割しないため、rank-local の view でも並びは変わらない。
+  loader は expert plane の全 expert の marker が同じ乗数であることを検査し、mul1 と mul24 の混在（plane 内、
+  1 層の gate / up / down の間、層をまたぐ plane 間）を明示エラーにする。dense の linear と expert の format の混在は
+  禁止していない（dispatch は weight ごと）。
+- 制約: 整数 bit rate のみ（half は拒否。expert も同じで、loader と program 構築の両方で拒否する）、K と N が 128 の倍数。
+  expert の mul24 は **iu8 WMMA の INT8 活性版ではない**（grouped の INT8 kernel は未実装）ため、decode の帯域は
+  mul1 の grouped と同等で、dense の mul24 のような INT8 の利点はない。expert の trellis は n-major ではない。
+  correctness fallback は持たない。
+  **未検証**: 実モデル（Qwen3.8-Flash-Next の mul24 版 80 GB）の実行、複数 GPU（expert parallel と collective）、
+  性能。検証済みなのは `test_exl3_int8_grouped`（合成した expert plane を CPU 参照と照合、単一 GPU）と
+  `test_program_moe_plan`（program 構築）である。
 
 ## KV quantization
 

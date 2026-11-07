@@ -31,6 +31,9 @@ struct Exl3GroupedArgs {
     uint32_t output_dtype = 0;
     uint32_t ka = 0;
     uint32_t half = 0;
+    // 0: mul1 codebook (W16A16). 1: mul24 codebook (EXL3-INT8 weights, q * kExl3Int8GridStep) run as an FP16 GEMM.
+    // The trellis stays in the canonical [kt][nt] tile order in both cases. mul24 requires half == 0.
+    uint32_t mul24 = 0;
     std::uint64_t trellis_batch_stride = 0;
     std::uint64_t suh_batch_stride = 0;
     std::uint64_t svh_batch_stride = 0;
