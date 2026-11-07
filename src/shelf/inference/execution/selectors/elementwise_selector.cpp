@@ -56,6 +56,22 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SwigluBf16, 256u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SplitBf16InterleavedHeads, 2048u, 256u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16ToF32, 2048u, 0u, 1u, kOptimizedMaxRows},
+    // Qwen4Exp hyper-connections scale a 320-wide low-rank plane and a 4-wide injection.
+    {ElementwiseProfile::ScaleBf16, 320u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ScaleBf16, 4u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ScaleBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SwigluBf16, 640u, 0u, 1u, kMeasuredMaxGroupRows},
+    {ElementwiseProfile::ResidualBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16ToF32, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16ToF32, 4u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16ToF32, 320u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ScaleBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 4u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 1u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SigmoidBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 320u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
 };
 
 }  // namespace

@@ -60,7 +60,7 @@ __global__
   これにより binary に存在しない組み合わせを表現できない。
 - `KernelConfig` は launch 時の transient value である。`Program` / `DispatchBinding` /
   `KernelId` などの runtime Program ABI には保存しない。`actual_rows`、batch topology、
-  pointer alignment、verify_exact などは runtime で変わるため。
+  pointer alignment などは runtime で変わるため。
 - Selector が config 選択の single source of truth である。launcher は shape policy を
   再判定しない。launcher に残してよいのは引数の整合性チェックと Config から
   specialization への dispatch だけである。

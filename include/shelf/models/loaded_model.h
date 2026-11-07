@@ -6,6 +6,7 @@
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_model.h>
 #include <shelf/weights/matrix_weight.h>
 
 #include <hip/hip_runtime.h>
@@ -40,9 +41,11 @@ public:
 
     static LoadedModel borrow(const shelf::qwen35::Qwen35Model& model);
     static LoadedModel borrow(const shelf::qwen35moe::Qwen35MoeModel& model);
+    static LoadedModel borrow(const shelf::qwen4exp::Qwen4ExpModel& model);
 
     [[nodiscard]]
     ModelFamily family() const noexcept {
+        if (qwen4exp_ != nullptr) return ModelFamily::Qwen4Exp;
         return dense_ != nullptr ? ModelFamily::Dense : ModelFamily::Moe;
     }
 
@@ -50,7 +53,7 @@ public:
     // workspace estimate cannot take from a dense intermediate width.
     [[nodiscard]]
     bool runs_grouped_experts() const noexcept {
-        return moe_ != nullptr;
+        return moe_ != nullptr || qwen4exp_ != nullptr;
     }
 
     [[nodiscard]]
@@ -73,6 +76,11 @@ public:
     [[nodiscard]]
     const shelf::qwen35moe::Qwen35MoeModel* moe_model() const noexcept {
         return moe_;
+    }
+
+    [[nodiscard]]
+    const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_model() const noexcept {
+        return qwen4exp_;
     }
 
     // The arena bytes the executor needs: the shared part plus, for grouped experts, the
@@ -113,8 +121,10 @@ private:
 
     std::unique_ptr<shelf::qwen35::Qwen35Model> owns_dense_;
     std::unique_ptr<shelf::qwen35moe::Qwen35MoeModel> owns_moe_;
+    std::unique_ptr<shelf::qwen4exp::Qwen4ExpModel> owns_qwen4exp_;
     const shelf::qwen35::Qwen35Model* dense_ = nullptr;
     const shelf::qwen35moe::Qwen35MoeModel* moe_ = nullptr;
+    const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_ = nullptr;
 };
 
 }  // namespace shelf::models

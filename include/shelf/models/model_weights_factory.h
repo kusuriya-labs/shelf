@@ -18,6 +18,7 @@ namespace shelf::models {
 enum class ModelFamily : std::uint8_t {
     Dense,
     Moe,
+    Qwen4Exp,
 };
 
 // A loaded model holds exactly one family's weights. There is no empty member of the

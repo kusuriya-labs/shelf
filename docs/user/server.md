@@ -96,6 +96,17 @@ Ready.
 `--large-context-inference-budget-tokens` は `--inference-budget-tokens` 以上でなければならない。
 `--arena-gib auto` は compute と同じ memory plan を compute 側の stderr に出す。
 
+### prefix cache
+
+prefix cache は常に有効である。active KV pool の物理 page を refcount 付きで共有し、
+save は page を登録するだけ、restore は block table に page を map するだけで、
+KV のコピーも shadow pool も作らない。cache は KV pool の全 page を追跡できるため、
+`--max-seq-len` を削って prefix cache の領域を作る必要はない。
+
+モデル固有の GDN state と DFlash2 ring だけは shadow slot を持つ。
+Qwen3.8-27B / TP=2 / DFlash2 ではこの予約は約 0.45 GiB/rank である。
+起動時に compute の stderr に出る `MEMORY_PLAN tp prefix cache` で確認する。
+
 ## 推論予算
 
 request 1 個あたりの生成予算（推論予算）は `--inference-budget-tokens`（default 32768）である。
@@ -243,7 +254,8 @@ curl http://127.0.0.1:8000/v1/meta
     "active_requests": 0,
     "queued_requests": 0,
     "banker_safe": true,
-    "overcommit_pages": 0
+    "overcommit_pages": 0,
+    "stale": false
   }
 }
 ```
@@ -277,9 +289,11 @@ curl http://127.0.0.1:8000/v1/meta
 | `queued_requests` | compute に submit 済みで、sequence slot または KV admission を待つ request 数 |
 | `banker_safe` | KV Banker の不変条件を満たしているか |
 | `overcommit_pages` | active request の最大要求が物理 page を超えた量（通常は 0） |
+| `stale` | 直近に取得した値を返しているか。最新の取得に失敗したとき `true` |
 
 `kv_cache` は HTTP 応答を待たせないよう短い timeout で取得する。compute が prefill 中などで
-間に合わない場合は `null` を返し、server の起動オプション由来のフィールドはそのまま返す。
+間に合わない場合は、直近に取得できた値を `stale: true` として返す。直近値も無い場合は
+`null` を返し、server の起動オプション由来のフィールドはそのまま返す。
 
 ### client の context 設定
 
@@ -487,8 +501,9 @@ POST /v1/responses   -> HTTP 404 {"error": {"code": "unsupported_endpoint"}}
 
 ## Prefix Cache
 
-prefix cache は compute runtime が提供する。共有 prefix の paged KV と GDN state を
-page 単位で保持し、共有 prefix への extension や multi-turn の会話で prefill を省略する。
+prefix cache は compute runtime が提供する。共有 prefix の paged KV は active KV pool の
+page を refcount 付きで共有し、GDN state だけを page 単位で保持する。
+共有 prefix への extension や multi-turn の会話で prefill を省略する。
 
 - server は常に `prefix_cache_checkpoint_position = 0` を送る（prefix の再利用位置は
   compute 側の radix lookup に一元化されている）

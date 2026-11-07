@@ -407,6 +407,157 @@ Status materialize_quant(QuantFormatId format_id,
     return Status::make_ok();
 }
 
+Status materialize_exl3(const TensorPartitionDesc& partition,
+                        const QuantizedTensorView& global,
+                        const std::vector<int64_t>& local_shape,
+                        bool k_axis,
+                        OwnedCanonicalTensor& owned) {
+    Status st = require_absent(global.data, "exl3 tensor must not carry a data stream");
+    if (!st.ok()) return st;
+    const ByteSpan* absent[4] = {
+        &global.metadata1, &global.metadata2, &global.metadata3, &global.metadata4};
+    for (const ByteSpan* stream : absent) {
+        st = require_absent(*stream, "exl3 tensor must not carry metadata streams");
+        if (!st.ok()) return st;
+    }
+    if (global.codes.data == nullptr || global.suh.data == nullptr ||
+        global.svh.data == nullptr || global.marker.data == nullptr) {
+        return Status::invalid_argument("exl3 tensor is missing suh/svh/marker",
+                                        __FILE__, __LINE__);
+    }
+    if (partition.global_shape.size() != 2) {
+        return Status::unsupported("tp partition of exl3 requires a 2D tensor",
+                                   __FILE__, __LINE__);
+    }
+
+    const uint64_t m_global = static_cast<uint64_t>(partition.global_shape[0]);
+    const uint64_t k_global = static_cast<uint64_t>(partition.global_shape[1]);
+    if (global.k_padded <= 0 ||
+        static_cast<uint64_t>(global.k_padded) != k_global) {
+        return Status::invalid_argument("exl3 k_padded does not match the logical K",
+                                        __FILE__, __LINE__);
+    }
+    if ((m_global % 16u) != 0u || (k_global % 16u) != 0u) {
+        return Status::invalid_argument("exl3 tensor shape is not tile aligned",
+                                        __FILE__, __LINE__);
+    }
+    for (const TensorPartitionRange& range : partition.ranges) {
+        if ((range.global_offset % 16u) != 0u || (range.extent % 16u) != 0u) {
+            return Status::invalid_argument(
+                "tensor partition range is not aligned to the exl3 tile", __FILE__,
+                __LINE__);
+        }
+    }
+
+    const uint32_t ka = global.exl3_ka;
+    const bool half = global.exl3_half;
+    if (ka < 1u || ka > 8u || (half && ka > 3u)) {
+        return Status::invalid_argument("exl3 bit rate is invalid", __FILE__, __LINE__);
+    }
+    const uint64_t words = 16u * ka + (half ? 8u : 0u);
+    const uint64_t row_bytes = words * 2u;
+    const uint64_t kt_global = k_global / 16u;
+    const uint64_t nt_global = m_global / 16u;
+
+    uint64_t expected_codes = 0;
+    st = checked_mul(kt_global, nt_global, expected_codes);
+    if (!st.ok()) return st;
+    st = checked_mul(expected_codes, row_bytes, expected_codes);
+    if (!st.ok()) return st;
+    st = require_stream(global.codes, expected_codes, "exl3 trellis stream size mismatch");
+    if (!st.ok()) return st;
+    st = require_stream(global.suh, k_global * 2u, "exl3 suh stream size mismatch");
+    if (!st.ok()) return st;
+    st = require_stream(global.svh, m_global * 2u, "exl3 svh stream size mismatch");
+    if (!st.ok()) return st;
+    st = require_stream(global.marker, 4u, "exl3 marker stream size mismatch");
+    if (!st.ok()) return st;
+
+    owned.logical_shape = local_shape;
+    owned.k_padded = k_axis ? static_cast<uint64_t>(local_shape[1]) : k_global;
+
+    auto slice_units = [&](const ByteSpan& src, uint64_t unit_bytes, uint64_t units_total,
+                           std::vector<uint8_t>& dst) -> Status {
+        uint64_t bytes = 0;
+        Status s = checked_mul(units_total, unit_bytes, bytes);
+        if (!s.ok()) return s;
+        if (bytes > std::numeric_limits<std::size_t>::max()) {
+            return Status::overflow("tensor partition byte count overflow", __FILE__,
+                                    __LINE__);
+        }
+        dst.resize(static_cast<std::size_t>(bytes));
+        const uint8_t* base = byte_ptr(src);
+        uint64_t offset = 0;
+        for (const TensorPartitionRange& range : partition.ranges) {
+            const uint64_t chunk = range.extent * unit_bytes;
+            std::memcpy(dst.data() + offset, base + range.global_offset * unit_bytes,
+                        static_cast<std::size_t>(chunk));
+            offset += chunk;
+        }
+        return Status::make_ok();
+    };
+
+    if (k_axis) {
+        const uint64_t kt_local = static_cast<uint64_t>(local_shape[1]) / 16u;
+        uint64_t codes_bytes = 0;
+        st = checked_mul(kt_local, nt_global, codes_bytes);
+        if (!st.ok()) return st;
+        st = checked_mul(codes_bytes, row_bytes, codes_bytes);
+        if (!st.ok()) return st;
+        if (codes_bytes > std::numeric_limits<std::size_t>::max()) {
+            return Status::overflow("tensor partition byte count overflow", __FILE__,
+                                    __LINE__);
+        }
+        owned.codes.resize(static_cast<std::size_t>(codes_bytes));
+        const uint8_t* src = byte_ptr(global.codes);
+        uint64_t dst_kt = 0;
+        for (const TensorPartitionRange& range : partition.ranges) {
+            const uint64_t units = range.extent / 16u;
+            const uint64_t chunk = units * nt_global * row_bytes;
+            std::memcpy(owned.codes.data() + dst_kt * nt_global * row_bytes,
+                        src + (range.global_offset / 16u) * nt_global * row_bytes,
+                        static_cast<std::size_t>(chunk));
+            dst_kt += units;
+        }
+        st = slice_units(global.suh, 2u, kt_local * 16u, owned.suh);
+        if (!st.ok()) return st;
+        owned.svh.assign(byte_ptr(global.svh),
+                         byte_ptr(global.svh) + static_cast<std::size_t>(global.svh.size));
+    } else {
+        const uint64_t nt_local = static_cast<uint64_t>(local_shape[0]) / 16u;
+        uint64_t codes_bytes = 0;
+        st = checked_mul(kt_global, nt_local, codes_bytes);
+        if (!st.ok()) return st;
+        st = checked_mul(codes_bytes, row_bytes, codes_bytes);
+        if (!st.ok()) return st;
+        if (codes_bytes > std::numeric_limits<std::size_t>::max()) {
+            return Status::overflow("tensor partition byte count overflow", __FILE__,
+                                    __LINE__);
+        }
+        owned.codes.resize(static_cast<std::size_t>(codes_bytes));
+        const uint8_t* src = byte_ptr(global.codes);
+        for (uint64_t kt = 0; kt < kt_global; ++kt) {
+            uint64_t dst_nt = 0;
+            for (const TensorPartitionRange& range : partition.ranges) {
+                const uint64_t units = range.extent / 16u;
+                std::memcpy(
+                    owned.codes.data() + (kt * nt_local + dst_nt) * row_bytes,
+                    src + (kt * nt_global + range.global_offset / 16u) * row_bytes,
+                    static_cast<std::size_t>(units * row_bytes));
+                dst_nt += units;
+            }
+        }
+        st = slice_units(global.svh, 2u, nt_local * 16u, owned.svh);
+        if (!st.ok()) return st;
+        owned.suh.assign(byte_ptr(global.suh),
+                         byte_ptr(global.suh) + static_cast<std::size_t>(global.suh.size));
+    }
+    owned.marker.assign(byte_ptr(global.marker),
+                        byte_ptr(global.marker) +
+                            static_cast<std::size_t>(global.marker.size));
+    return Status::make_ok();
+}
+
 }
 
 Status materialize_rank_local_canonical(
@@ -453,8 +604,11 @@ Status materialize_rank_local_canonical(
                 __FILE__, __LINE__);
             break;
         case QuantizedEncoding::Exl3:
+            st = materialize_exl3(partition, global, local_shape, k_axis, owned);
+            break;
+        case QuantizedEncoding::Fp8PerChannel:
             st = Status::unsupported(
-                "tp partition of exl3 weights is not supported",
+                "tp partition of per-channel fp8 weights is not supported",
                 __FILE__, __LINE__);
             break;
     }
@@ -470,6 +624,11 @@ Status materialize_rank_local_canonical(
     local.metadata2 = span_of(owned.metadata2);
     local.metadata3 = span_of(owned.metadata3);
     local.metadata4 = span_of(owned.metadata4);
+    local.suh = span_of(owned.suh);
+    local.svh = span_of(owned.svh);
+    local.marker = span_of(owned.marker);
+    local.exl3_ka = global.exl3_ka;
+    local.exl3_half = global.exl3_half;
     return Status::make_ok();
 }
 

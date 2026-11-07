@@ -37,6 +37,18 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_ROUTER: return {1, 0};
         case PrimitiveKind::MOE_GROUPED_LINEAR: return {1, 1};
         case PrimitiveKind::MOE_COMBINE: return {3, 1};
+        case PrimitiveKind::HYPER_MIX: return {2, 1};
+        case PrimitiveKind::HYPER_APPLY: return {3, 1};
+        case PrimitiveKind::PLE_GATE: return {1, 1};
+        case PrimitiveKind::PLE_BROADCAST_MUL: return {2, 1};
+        case PrimitiveKind::PLE_CONV: return {1, 1};
+        case PrimitiveKind::QSA_KEY_CACHE: return {1, 0};
+        case PrimitiveKind::QSA_SELECT: return {1, 1};
+        case PrimitiveKind::QSA_ROPE: return {1, 1};
+        case PrimitiveKind::PLE_STREAM_DOT: return {2, 1};
+        case PrimitiveKind::REPEAT_STREAMS: return {1, 1};
+        case PrimitiveKind::HYPER_INJECT: return {1, 1};
+        case PrimitiveKind::MEAN_STREAMS: return {1, 1};
     }
     return {0, 0};
 }
@@ -53,6 +65,10 @@ bool allowed_state_kind(PrimitiveStateKind sk, PrimitiveKind nk) noexcept {
             return nk == PrimitiveKind::STATEFUL_CAUSAL_CONV1D;
         case PrimitiveStateKind::GDN_RECURRENCE_STATE:
             return nk == PrimitiveKind::GDN_RECURRENCE;
+        case PrimitiveStateKind::PLE_CONV_STATE:
+            return nk == PrimitiveKind::PLE_CONV;
+        case PrimitiveStateKind::QSA_KEY_STATE:
+            return nk == PrimitiveKind::QSA_KEY_CACHE || nk == PrimitiveKind::QSA_SELECT;
     }
     return false;
 }
@@ -64,6 +80,9 @@ uint32_t node_state_index(const PrimitiveGraphNode& n) noexcept {
         else if constexpr (std::is_same_v<T, PagedAttentionNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, StatefulCausalConv1DNode>) return v.state_index;
         else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) return v.state_index;
+        else if constexpr (std::is_same_v<T, PleConvNode>) return v.state_index;
+        else if constexpr (std::is_same_v<T, QsaKeyCacheNode>) return v.state_index;
+        else if constexpr (std::is_same_v<T, QsaSelectNode>) return v.state_index;
         else return 0;
     }, n.node);
 }
@@ -142,7 +161,11 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, L2NormalizeNode>) shapes_ok = valid_shape_key(v.shape) && valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, ScaleNode>) shapes_ok = valid_shape_key(v.shape);
             else if constexpr (std::is_same_v<T, KvAppendNode>) shapes_ok = valid_shape_key(v.attention);
-            else if constexpr (std::is_same_v<T, PagedAttentionNode>) shapes_ok = valid_shape_key(v.attention);
+            else if constexpr (std::is_same_v<T, PagedAttentionNode>) {
+            shapes_ok = valid_shape_key(v.attention) &&
+                        (!v.has_block_mask ||
+                         (v.mask_bytes != 0u && v.block_size != 0u));
+        }
             else if constexpr (std::is_same_v<T, StatefulCausalConv1DNode>) shapes_ok = valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, GdnRecurrenceNode>) shapes_ok = valid_shape_key(v.gdn);
             else if constexpr (std::is_same_v<T, EmbeddingLookupNode>) shapes_ok = v.vocab_size != 0 && v.hidden_size != 0 && valid_shape_key(v.weight_shape);
@@ -161,12 +184,39 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
             else if constexpr (std::is_same_v<T, MoeCombineNode>) {
                 shapes_ok = valid_shape_key(v.shape) && v.top_k != 0u;
             }
+            else if constexpr (std::is_same_v<T, HyperMixNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, HyperApplyNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, MeanStreamsNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, PleGateNode>) {
+                shapes_ok = valid_shape_key(v.shape);
+            }
+            else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) {
+                shapes_ok = valid_shape_key(v.shape) && v.hc != 0u && v.hidden != 0u &&
+                            v.shape.features == static_cast<uint64_t>(v.hc) * v.hidden;
+            }
+            else if constexpr (std::is_same_v<T, PleConvNode>) {
+                shapes_ok = valid_shape_key(v.shape);
+            }
         }, n.node);
         if (!shapes_ok) return fail("invalid shape key");
 
         auto arity = arity_of(k);
-        if (n.inputs.size() != arity.tensor_inputs || n.outputs.size() != arity.tensor_outputs) {
-            return fail("primitive tensor arity mismatch");
+        size_t expected_inputs = arity.tensor_inputs;
+        if (k == PrimitiveKind::PAGED_ATTENTION &&
+            std::get<PagedAttentionNode>(n.node).has_block_mask) {
+            expected_inputs = 2u;
+        }
+        if (n.inputs.size() != expected_inputs || n.outputs.size() != arity.tensor_outputs) {
+            return fail((std::string("primitive tensor arity mismatch: ") + to_string(k)).c_str());
         }
 
         Status weight_status = Status::make_ok();
@@ -262,11 +312,151 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
         }, n.node);
         if (!moe_status.ok()) return moe_status;
 
+        Status hyper_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, HyperMixNode>) {
+                const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;
+                if (graph.value_features(n.inputs[0]) != width ||
+                    graph.value_features(n.inputs[1]) != width) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper mix inputs are not hc * hidden", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[1]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.outputs[0])) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper mix row domains disagree", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, HyperInjectNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper inject feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, MeanStreamsNode>) {
+                if (graph.value_features(n.inputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.hidden) {
+                    hyper_status = Status::invalid_argument(
+                        "mean streams feature counts are invalid", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, HyperApplyNode>) {
+                const uint64_t width = static_cast<uint64_t>(v.hc) * v.hidden;
+                if (graph.value_features(n.inputs[0]) != width ||
+                    graph.value_features(n.inputs[1]) != v.hidden ||
+                    graph.value_features(n.inputs[2]) != v.hc) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper apply input feature counts are invalid", __FILE__, __LINE__);
+                } else if (graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[1]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.inputs[2]) ||
+                           graph.value_row_domain(n.inputs[0]) !=
+                               graph.value_row_domain(n.outputs[0])) {
+                    hyper_status = Status::invalid_argument(
+                        "hyper apply row domains disagree", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!hyper_status.ok()) return hyper_status;
+
+        Status ple_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, PleGateNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "ple gate feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) {
+                const uint64_t hidden = v.hidden;
+                if (graph.value_features(n.inputs[0]) != v.hc ||
+                    graph.value_features(n.inputs[1]) != hidden ||
+                    graph.value_features(n.outputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * hidden) {
+                    ple_status = Status::invalid_argument(
+                        "ple broadcast feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleConvNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "ple conv feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, RepeatStreamsNode>) {
+                if (v.hc == 0u || v.hidden == 0u ||
+                    v.shape.features != static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.inputs[0]) != v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.shape.features) {
+                    ple_status = Status::invalid_argument(
+                        "repeat streams shape mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, PleStreamDotNode>) {
+                if (v.hc == 0u || v.hidden == 0u || v.shape.features != v.hc ||
+                    graph.value_features(n.inputs[0]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.inputs[1]) !=
+                        static_cast<uint64_t>(v.hc) * v.hidden ||
+                    graph.value_features(n.outputs[0]) != v.hc) {
+                    ple_status = Status::invalid_argument(
+                        "ple stream dot shape mismatch", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!ple_status.ok()) return ple_status;
+
+        Status qsa_status = Status::make_ok();
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, QsaKeyCacheNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    v.shape.features != 128u) {
+                    qsa_status = Status::invalid_argument(
+                        "qsa key cache feature count mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, QsaSelectNode>) {
+                if (graph.value_features(n.inputs[0]) !=
+                        static_cast<uint64_t>(v.n_heads) * v.head_dim ||
+                    graph.value_features(n.outputs[0]) != v.mask_bytes ||
+                    graph.value_dtype(n.outputs[0]) != ValueDType::U8) {
+                    qsa_status = Status::invalid_argument(
+                        "qsa select shape mismatch", __FILE__, __LINE__);
+                }
+            } else if constexpr (std::is_same_v<T, QsaRopeNode>) {
+                if (graph.value_features(n.inputs[0]) != v.shape.features ||
+                    graph.value_features(n.outputs[0]) != v.shape.features ||
+                    v.shape.features !=
+                        static_cast<uint64_t>(v.heads) * v.head_dim) {
+                    qsa_status = Status::invalid_argument(
+                        "qsa rope shape mismatch", __FILE__, __LINE__);
+                }
+            }
+        }, n.node);
+        if (!qsa_status.ok()) return qsa_status;
+
+        if (k == PrimitiveKind::PAGED_ATTENTION) {
+            const auto& pa = std::get<PagedAttentionNode>(n.node);
+            if (pa.has_block_mask) {
+                if (graph.value_dtype(n.inputs[1]) != ValueDType::U8 ||
+                    graph.value_row_domain(n.inputs[1]) != ValueRowDomain::TOKEN_ROWS ||
+                    graph.value_features(n.inputs[1]) != pa.mask_bytes) {
+                    return fail("paged attention block mask shape mismatch");
+                }
+            } else if (n.inputs.size() != 1u) {
+                return fail("paged attention without mask has extra inputs");
+            }
+        }
+
         const bool stateful =
             k == PrimitiveKind::KV_APPEND ||
             k == PrimitiveKind::PAGED_ATTENTION ||
             k == PrimitiveKind::STATEFUL_CAUSAL_CONV1D ||
-            k == PrimitiveKind::GDN_RECURRENCE;
+            k == PrimitiveKind::GDN_RECURRENCE ||
+            k == PrimitiveKind::PLE_CONV ||
+            k == PrimitiveKind::QSA_KEY_CACHE ||
+            k == PrimitiveKind::QSA_SELECT;
         if (!stateful && (!n.state_inputs.empty() || !n.state_outputs.empty())) {
             return fail("state reference on primitive without state access");
         }
@@ -313,6 +503,19 @@ Status validate_primitive_graph(const PrimitiveGraph& graph) noexcept {
                     !(n.state_inputs[0] == n.state_outputs[0])) {
                     return fail("gdn recurrence must read and write the same recurrence state");
                 }
+                break;
+            }
+            case PrimitiveKind::QSA_KEY_CACHE: {
+                if (!n.state_inputs.empty()) return fail("QSA_KEY_CACHE must not read state");
+                if (n.state_outputs.size() != 1)
+                    return fail("QSA_KEY_CACHE must write exactly one indexer state");
+                break;
+            }
+            case PrimitiveKind::QSA_SELECT: {
+                if (n.state_inputs.size() != 1)
+                    return fail("QSA_SELECT must read exactly one indexer state");
+                if (!n.state_outputs.empty())
+                    return fail("QSA_SELECT must not write state");
                 break;
             }
             default: break;

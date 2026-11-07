@@ -311,11 +311,69 @@ Status validate_sequence_append_commit(
     return Status::make_ok();
 }
 
+Status PagedSequenceState::append_pages(
+    std::span<const PageId> pages,
+    std::span<const uint8_t> owned,
+    hipStream_t stream) {
+    if (!is_usable()) {
+        return Status::invalid_argument("sequence state is not usable", __FILE__, __LINE__);
+    }
+    if (seq_pool_ == nullptr || kv_pool_ == nullptr) {
+        return Status::invalid_state("sequence pool ownership is invalid", __FILE__,
+                                     __LINE__);
+    }
+    if (pages.size() != owned.size()) {
+        return Status::invalid_argument("append_pages size mismatch", __FILE__, __LINE__);
+    }
+    if (pages.size() > max_blocks_ - block_table.size()) {
+        return Status::out_of_range("append_pages exceeds max_blocks", __FILE__,
+                                    __LINE__);
+    }
+    const std::size_t old_size = block_table.size();
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        const PageId page = pages[i];
+        if (page == kInvalidPageId || page >= kv_pool_->num_pages()) {
+            for (std::size_t j = old_size; j < block_table.size(); ++j) {
+                (void)kv_pool_->release(block_table[j]);
+            }
+            block_table.resize(old_size);
+            return Status::invalid_argument("append_pages page out of range", __FILE__,
+                                            __LINE__);
+        }
+        if (owned[i] == 0u) {
+            const Status attach_st = kv_pool_->attach(page);
+            if (!attach_st.ok()) {
+                for (std::size_t j = old_size; j < block_table.size(); ++j) {
+                    (void)kv_pool_->release(block_table[j]);
+                }
+                block_table.resize(old_size);
+                return attach_st;
+            }
+        }
+        block_table.push_back(page);
+    }
+    auto device_table = seq_pool_->device_block_table(slot);
+    const hipError_t err = hipMemcpyAsync(
+        device_table.data<uint32_t>() + old_size,
+        block_table.data() + old_size,
+        pages.size() * sizeof(uint32_t),
+        hipMemcpyHostToDevice,
+        stream);
+    if (err != hipSuccess) {
+        for (std::size_t j = old_size; j < block_table.size(); ++j) {
+            (void)kv_pool_->release(block_table[j]);
+        }
+        block_table.resize(old_size);
+        return Status::hip_error("append_pages hipMemcpyAsync", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Status commit_sequence_append(
     PagedSequenceState& seq,
     ::shelf::runtime::RequestHandle expected_handle,
     uint32_t committed_tokens) {
-
     auto st = validate_sequence_append_commit(seq, expected_handle, committed_tokens);
     if (!st.ok()) {
         return st;

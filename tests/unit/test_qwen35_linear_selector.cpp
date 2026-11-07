@@ -28,7 +28,7 @@ using shelf::execution::select_fp8_finegrained_gemm_config;
 
 std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uint32_t k,
                                        uint32_t stride, bool weight_aligned, bool input_aligned,
-                                       bool verify_exact) {
+                                       bool allow_exact_rows, bool allow_dot2_rows = false) {
     Bf16GemmSelectorInput in;
     in.rows = rows;
     in.out_features = out_features;
@@ -36,7 +36,8 @@ std::optional<Bf16GemmConfig> sel_bf16(uint32_t rows, uint32_t out_features, uin
     in.input_row_stride = stride != 0u ? stride : k;
     in.weight_aligned16 = weight_aligned;
     in.input_aligned16 = input_aligned;
-    in.verify_exact = verify_exact;
+    in.allow_exact_rows = allow_exact_rows;
+    in.allow_dot2_rows = allow_dot2_rows;
     return select_bf16_gemm_config(in);
 }
 
@@ -52,46 +53,60 @@ bool is_fp8(const std::optional<Fp8FinegrainedGemmConfig>& c, Fp8FinegrainedGemm
 
 bool is_bf16(const std::optional<Bf16GemmConfig>& c, Bf16GemmConfigId id,
              uint8_t exact_rows) {
-    return c.has_value() && c->id == id &&
-           (id != Bf16GemmConfigId::ExactRows || c->exact_rows == exact_rows);
+    if (!c.has_value() || c->id != id) return false;
+    if (id == Bf16GemmConfigId::ExactRows || id == Bf16GemmConfigId::ExactRowsDot2)
+        return c->exact_rows == exact_rows;
+    return true;
 }
 
 void test_bf16() {
-    check(!sel_bf16(1, 123, 456, 456, true, true, false).has_value(),
+    check(!sel_bf16(1, 123, 456, 456, true, true, true).has_value(),
           "bf16 unknown geometry -> no config");
-    check(!sel_bf16(0, 1024, 2560, 2560, true, true, false).has_value(),
+    check(!sel_bf16(0, 1024, 2560, 2560, true, true, true).has_value(),
           "bf16 rows=0 -> no config");
 
-    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, false),
+    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, true),
                   Bf16GemmConfigId::ExactRows, 1u),
           "bf16 rows=1 aligned -> ExactRows(1)");
-    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, false, true, false),
+    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, false, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
           "bf16 rows=1 weight unaligned -> Wmma");
+    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, false),
+                  Bf16GemmConfigId::Wmma, 0u),
+          "bf16 rows=1 without allow_exact_rows -> Wmma");
 
     bool exact_ok = true;
-    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsMax; ++rows) {
+    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsKernelMax; ++rows) {
         exact_ok = exact_ok &&
                    is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true),
                            Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows));
     }
-    check(exact_ok, "bf16 verify_exact rows 2..64 aligned -> ExactRows(rows)");
+    check(exact_ok, "bf16 rows 2..exact kernel max aligned -> ExactRows(rows)");
 
+    bool dot2_ok = true;
+    for (uint32_t rows = 2u; rows <= shelf::kernel::kBf16GemmExactRowsKernelMax; ++rows) {
+        dot2_ok = dot2_ok &&
+                  is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true, true),
+                          Bf16GemmConfigId::ExactRowsDot2, static_cast<uint8_t>(rows));
+    }
+    check(dot2_ok, "bf16 allow_dot2_rows rows 2..exact kernel max -> ExactRowsDot2(rows)");
+    check(is_bf16(sel_bf16(1, 1024, 2560, 2560, true, true, true, true),
+                  Bf16GemmConfigId::ExactRows, 1u),
+          "bf16 rows=1 ignores allow_dot2_rows -> ExactRows(1)");
+
+    check(is_bf16(sel_bf16(shelf::kernel::kBf16GemmExactRowsKernelMax + 1u, 1024, 2560, 2560,
+                           true, true, true),
+                  Bf16GemmConfigId::Wmma, 0u),
+          "bf16 rows past the exact kernel max -> Wmma");
     check(is_bf16(sel_bf16(8, 1024, 2560, 2560, false, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
-          "bf16 verify_exact weight unaligned -> Wmma");
+          "bf16 weight unaligned -> Wmma");
     check(is_bf16(sel_bf16(8, 1024, 2560, 2559, true, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
-          "bf16 verify_exact row stride unaligned -> Wmma");
+          "bf16 row stride unaligned -> Wmma");
     check(is_bf16(sel_bf16(65, 1024, 2560, 2560, true, true, true),
                   Bf16GemmConfigId::WmmaWide, 0u),
-          "bf16 verify_exact rows=65 -> WmmaWide");
-    check(is_bf16(sel_bf16(17, 1024, 2560, 2560, true, true, true),
-                  Bf16GemmConfigId::ExactRows, 17u),
-          "bf16 verify_exact rows=17 -> ExactRows(17)");
-    check(is_bf16(sel_bf16(64, 1024, 2560, 2560, true, true, true),
-                  Bf16GemmConfigId::ExactRows, 64u),
-          "bf16 verify_exact rows=64 -> ExactRows(64)");
+          "bf16 rows=65 -> WmmaWide");
 
     check(is_bf16(sel_bf16(2, 32, 2560, 2560, true, true, false),
                   Bf16GemmConfigId::WmmaKPartition, 0u),

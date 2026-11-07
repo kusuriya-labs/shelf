@@ -7,6 +7,7 @@
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/models/qwen35/kernels/dflash2/swiglu.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
+#include <shelf/inference/execution/selectors/linear_selector.h>
 #include <shelf/runtime/program/program.h>
 #include <shelf/runtime/program/linear_quant_contract.h>
 #include <shelf/runtime/program/activation_workspace_layout.h>
@@ -549,7 +550,22 @@ int run_gemm_bf16(Options& o) {
             }
             std::string eff = o.variant;
             shelf::kernel::Bf16GemmConfig bf16_cfg = bf16_config_for(rows, shape.n, shape.k);
-            if (o.impl != "auto") {
+            if (o.impl == "auto" && eff == "auto") {
+                shelf::execution::Bf16GemmSelectorInput lin;
+                lin.rows = rows;
+                lin.out_features = shape.n;
+                lin.k = shape.k;
+                lin.input_row_stride = shape.k;
+                lin.weight_aligned16 = true;
+                lin.input_aligned16 = true;
+                const auto selected = shelf::execution::select_bf16_gemm_config(lin);
+                if (selected) {
+                    bf16_cfg = *selected;
+                    eff = "gemm";
+                } else {
+                    eff = "correctness";
+                }
+            } else if (o.impl != "auto") {
                 using Id = shelf::kernel::Bf16GemmConfigId;
                 if (o.impl == "wmma")
                     bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::Wmma, 0u};
@@ -561,10 +577,6 @@ int run_gemm_bf16(Options& o) {
                     bf16_cfg = shelf::kernel::Bf16GemmConfig{Id::ExactRows,
                                                           static_cast<uint8_t>(rows)};
                 eff = "gemm";
-            } else if (eff == "auto") {
-                const bool supported = shelf::execution::linear_shape_supported(
-                    shelf::execution::LinearComputeFamily::Bf16, shape.n, shape.k);
-                eff = supported ? "gemm" : "correctness";
             }
             auto launch_one = [&]() -> hipError_t {
                 if (eff == "gemm")

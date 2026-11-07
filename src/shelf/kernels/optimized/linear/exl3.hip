@@ -1,11 +1,13 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/kernels/optimized/linear/exl3_decode_device.h>
+#include <shelf/kernels/optimized/linear/exl3_grouped.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace shelf::kernel {
 namespace {
@@ -394,8 +396,46 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
     const uint32_t n_tile_base = kPartial ? blockIdx.x / splits : blockIdx.x;
     const uint32_t split = kPartial ? blockIdx.x % splits : 0u;
     const uint32_t n0 = n_tile_base * kOutBlock;
-    const uint32_t r0 = blockIdx.y * kRows;
-    const uint32_t active_rows = args.rows - r0 < kRows ? args.rows - r0 : kRows;
+    uint32_t r0 = blockIdx.y * kRows;
+    uint32_t active_rows = args.rows - r0 < kRows ? args.rows - r0 : kRows;
+    const uint32_t group_index = blockIdx.z;
+    if (args.group_expert != nullptr) {
+        if (group_index >= args.group_count[0]) return;
+        const uint32_t expert = args.group_expert[group_index];
+        uint32_t rows_here = args.group_rows[group_index];
+        if (args.expert_group_begin != nullptr) {
+            const uint32_t begin = args.expert_group_begin[expert];
+            const uint32_t end = args.expert_group_begin[expert + 1u];
+            if (((group_index - begin) % kGroups) != 0u) return;
+            const uint32_t chunk_end =
+                (group_index + kGroups) < end ? (group_index + kGroups) : end;
+            rows_here = 0u;
+            for (uint32_t gi = group_index; gi < chunk_end; ++gi)
+                rows_here += args.group_rows[gi];
+        }
+        if (rows_here == 0u) return;
+        args.trellis = static_cast<const std::uint8_t*>(args.trellis) +
+                       static_cast<std::uint64_t>(expert) * args.trellis_batch_stride;
+        args.suh = static_cast<const std::uint8_t*>(args.suh) +
+                   static_cast<std::uint64_t>(expert) * args.suh_batch_stride;
+        args.svh = static_cast<const std::uint8_t*>(args.svh) +
+                   static_cast<std::uint64_t>(expert) * args.svh_batch_stride;
+        const std::uint64_t output_offset =
+            static_cast<std::uint64_t>(group_index) * kRowTile * args.output_row_stride;
+        if (args.row_token == nullptr) {
+            const std::uint64_t input_offset =
+                static_cast<std::uint64_t>(group_index) * kRowTile * args.input_row_stride;
+            args.input = static_cast<const shelf::bf16_t*>(args.input) + input_offset;
+        }
+        args.output = args.output_dtype == 0u
+                          ? static_cast<void*>(static_cast<shelf::bf16_t*>(args.output) +
+                                               output_offset)
+                          : static_cast<void*>(static_cast<float*>(args.output) +
+                                               output_offset);
+        args.rows = rows_here;
+        r0 = 0u;
+        active_rows = rows_here < kRows ? rows_here : kRows;
+    }
     const __half* xrot_global = static_cast<const __half*>(args.xrot);
 
     __shared__ __align__(16) __half xrot[kPre ? 1u : kRows * kXrotPitch];
@@ -438,10 +478,16 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 for (uint32_t ri = 0u; ri < 2u; ++ri) {
                     const uint32_t r = g * kRowTile + warp * 2u + ri;
                     if (r >= active_rows) continue;
-                    const uint32_t row = r0 + r;
+                    uint32_t input_row = r0 + r;
+                    if (args.row_token != nullptr) {
+                        const int32_t token =
+                            args.row_token[group_index * kRowTile + r];
+                        if (token < 0) continue;
+                        input_row = static_cast<uint32_t>(token);
+                    }
                     const shelf::bf16_t* src =
-                        input + static_cast<uint64_t>(row) * args.input_row_stride + k_base +
-                        lane * 4u;
+                        input + static_cast<uint64_t>(input_row) * args.input_row_stride +
+                        k_base + lane * 4u;
                     float v0 = bf16_value(src + 0) * suh_v[0];
                     float v1 = bf16_value(src + 1) * suh_v[1];
                     float v2 = bf16_value(src + 2) * suh_v[2];
@@ -710,11 +756,13 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
 struct LaunchPlan {
     uint32_t grid_x = 0;
     uint32_t grid_y = 0;
+    uint32_t grid_z = 1;
     uint32_t splits = 1;
     uint32_t groups = 1;
 };
 
 uint32_t pick_n_tiles(const Exl3GemmArgs& args) {
+    if (args.n_tiles != 0u) return args.n_tiles;
     if (args.rows < 4u) return 1u;
     if (args.out_features % (kOutBlockBase * 2u) != 0u) return 1u;
     if (args.out_features < kOutBlockBase * 8u) return 1u;
@@ -761,11 +809,12 @@ hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
                          hipStream_t stream) {
     if (plan.splits > 1u) {
         gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles>
-            <<<dim3(plan.grid_x * plan.splits, plan.grid_y), kThreads, 0, stream>>>(
-                args, plan.splits);
+            <<<dim3(plan.grid_x * plan.splits, plan.grid_y, plan.grid_z), kThreads, 0,
+               stream>>>(args, plan.splits);
     } else {
         gemm_exl3_w16a16_kernel<kGroups, false, kPre, kNTiles>
-            <<<dim3(plan.grid_x, plan.grid_y), kThreads, 0, stream>>>(args, 1u);
+            <<<dim3(plan.grid_x, plan.grid_y, plan.grid_z), kThreads, 0, stream>>>(args,
+                                                                                  1u);
     }
     return hipGetLastError();
 }
@@ -780,8 +829,9 @@ hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
               : plan.groups == 2u ? launch_kernel<2u, kPre, 2u>(args, plan, stream)
                                   : launch_kernel<1u, kPre, 2u>(args, plan, stream);
     } else {
-        err = plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
-                                : launch_kernel<1u, kPre, 1u>(args, plan, stream);
+        err = plan.groups == 4u   ? launch_kernel<4u, kPre, 1u>(args, plan, stream)
+              : plan.groups == 2u ? launch_kernel<2u, kPre, 1u>(args, plan, stream)
+                                  : launch_kernel<1u, kPre, 1u>(args, plan, stream);
     }
     if (err != hipSuccess) return err;
     if (plan.splits > 1u) {
@@ -812,6 +862,69 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
         return hipErrorInvalidValue;
     }
     return launch_plan<false>(args, make_launch_plan(args), stream);
+}
+
+hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
+                                           hipStream_t stream) {
+    if (args.trellis == nullptr || args.suh == nullptr || args.svh == nullptr ||
+        args.input == nullptr || args.output == nullptr || args.group_expert == nullptr ||
+        args.group_rows == nullptr || args.group_count == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (args.out_features == 0u || (args.out_features % kOutBlockBase) != 0u ||
+        args.k == 0u || (args.k % 128u) != 0u) {
+        return hipErrorInvalidValue;
+    }
+    if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
+        return hipErrorInvalidValue;
+    }
+    if (args.input_row_stride < args.k || args.output_row_stride < args.out_features ||
+        args.group_capacity == 0u || args.group_capacity > 65535u) {
+        return hipErrorInvalidValue;
+    }
+
+    Exl3GemmArgs dense;
+    dense.trellis = args.trellis;
+    dense.suh = args.suh;
+    dense.svh = args.svh;
+    dense.input = args.input;
+    dense.output = args.output;
+    dense.rows = kRowTile;
+    dense.out_features = args.out_features;
+    dense.k = args.k;
+    dense.input_row_stride = args.input_row_stride;
+    dense.output_row_stride = args.output_row_stride;
+    dense.output_dtype = args.output_dtype;
+    dense.ka = args.ka;
+    dense.half = args.half;
+    static const uint32_t fuse_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_GROUPED_FUSE");
+        if (e == nullptr) return kExl3GroupedFuse;
+        return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    }();
+    static const uint32_t ntiles_override = [] {
+        const char* e = std::getenv("SHELF_EXL3_GROUPED_NTILES");
+        return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    dense.n_tiles = ntiles_override;
+    dense.groups = (args.expert_group_begin != nullptr && fuse_override > 1u) ? fuse_override
+                                                                            : 1u;
+    dense.group_expert = args.group_expert;
+    dense.group_rows = args.group_rows;
+    dense.group_count = args.group_count;
+    dense.expert_group_begin = args.expert_group_begin;
+    dense.row_token = args.row_token;
+    dense.trellis_batch_stride = args.trellis_batch_stride;
+    dense.suh_batch_stride = args.suh_batch_stride;
+    dense.svh_batch_stride = args.svh_batch_stride;
+
+    LaunchPlan plan;
+    plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(dense));
+    plan.grid_y = 1u;
+    plan.grid_z = args.group_capacity;
+    plan.splits = 1u;
+    plan.groups = dense.groups;
+    return launch_plan<false>(dense, plan, stream);
 }
 
 hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float* rowsum,

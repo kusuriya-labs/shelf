@@ -17,7 +17,7 @@
 | `--max-concurrent-requests N` | max in-flight requests (default 4) |
 | `--max-num-batched-tokens N` | token budget per scheduled step; also sets the executor row bucket (default 2048) |
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
-| `--tensor-parallel N` | tensor parallel degree 1 \| 2 (default 1) |
+| `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
 | `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
@@ -38,27 +38,25 @@
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
-| `--prefix-cache-hot-tokens N` | prefix cache hot tier capacity in tokens (default 16384) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
-| `--prefix-cache-cold-tokens N` | prefix cache cold tier capacity in tokens (default 65536) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
-| `--prefix-cache-cold-state-slots N` | cold GDN state slots (default 0 = auto) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
 
 `--arena-gib auto` は起動時の空き VRAM から 1 GiB を引いた容量を arena に使う。
-KV の物理容量は個別に指定できない。model weight、prefix cache、`--working-set-reserve-gib`、
+KV の物理容量は個別に指定できない。model weight、`--working-set-reserve-gib`、
 DFlash2 の drafter（weight と session pool 等の runtime 領域）、または MTP の drafter
-（専用 KV pool、executor、GDN snapshot）を確保した後に残る arena の領域を
-すべて KV に割り当てる。
-KV を増やすには `--arena-gib` を増やすか、prefix cache と `--working-set-reserve-gib` を減らす。
+（専用 KV pool、executor、GDN snapshot）、prefix cache の GDN state / ring を確保した後に
+残る arena の領域をすべて KV に割り当てる。
+KV を増やすには `--arena-gib` を増やすか、`--working-set-reserve-gib` を減らす。
+prefix cache は KV を予約しない（active KV pool の page を共有する）。
 既定は `0`（auto）で、executor が plan 後に確保する量を row bucket から推定して予約する。
 実測値を大きくすれば KV、小さくすれば KV が増える。auto の推定と実測は起動 log の
 `MEMORY_PLAN auto: working set reserve` と `MEMORY_PLAN executor footprint` で比較できる。
 起動時には固定 / auto のどちらでも次の memory plan を stderr へ出す。
-`auto` で `required` が `available` を超える場合は、workspace と prefix cache の
-順に縮小し、それでも足りなければ明示エラーで終了する。
+`auto` で `required` が `available` を超える場合は workspace を縮小し、
+それでも足りなければ明示エラーで終了する。
 
 ```text
 MEMORY_PLAN mode=auto
@@ -67,7 +65,7 @@ MEMORY_PLAN mode=auto
   drafter runtime   xx.xx GiB
   runtime workspace xx.xx GiB
   KV budget         xx.xx GiB (NNNN tokens)
-  prefix cache      xx.xx GiB (NNNN tokens)
+  prefix cache      xx.xx GiB
   ------------------------------
   required          xx.xx GiB
   available         xx.xx GiB
@@ -80,7 +78,7 @@ MEMORY_PLAN mode=auto
 scratch と session pool の領域（DFlash2 は `--max-concurrent-requests` 分、MTP は
 専用 KV pool・executor・GDN snapshot）、`runtime workspace` は
 `--working-set-reserve-gib` の予約量である。`KV budget` は arena 残量から導出した
-physical KV capacity、`prefix cache` は hot tier の実サイズである。
+physical KV capacity、`prefix cache` は GDN state と ring の実サイズである。
 `left` は arena の未使用容量であり、workspace はこの後に executor が実際に確保する。
 
 `--arena-gib N` を明示した場合は arena 容量を N GiB に固定する（measurement の
@@ -184,11 +182,12 @@ DFlash2 経路でも受け付ける。
 ### prefix cache
 
 prefix cache は page（`--page-tokens` の既定 16 token）単位の radix tree で、共有 prefix の
-paged KV と GDN state を VRAM（hot、`--prefix-cache-hot-tokens`）と pinned DRAM
-（cold、`--prefix-cache-cold-tokens`）に保持する。共有 prefix への extension や
-multi-turn の output tail で prefill を省略する。作成に失敗したときは無効化して
-続行し、警告を 1 行 stderr に出す。同一プロンプトの再実行は restore せず、
-DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存される）。
+paged KV は active KV pool の page を refcount 付きで共有する。save は page を登録するだけで、
+restore は block table に page を map するだけで、KV のコピーも別の shadow pool も作らない。
+GDN state と DFlash2 ring だけを VRAM の shadow slot に保持する。
+共有 prefix への extension や multi-turn の output tail で prefill を省略する。
+entry が増えたときは LRU で evict する。同一プロンプトの再実行は restore せず、
+DFlash2 経路でも prefix cache を使う。
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 
 ### tensor parallel
@@ -199,11 +198,6 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 （例 `--device 0,1`）。個数が `--tensor-parallel` と一致しない場合・重複している場合・
 可視 device を超出する場合は明示エラー。model weight は rank ごとに
 順次 load するため load 時間は単 GPU より長い。
-
-`--tensor-parallel 2` で併用できない option（いずれも model load 前にエラー）:
-
-- prefix cache（`--prefix-cache 0` が必須）
-- `--dflash2-model-dir`（per-rank 配線が未実装）
 
 `--serve-stdio` も同じ runtime の TP 経路を使う。TP2 の serve 性能は未計測であり、
 性能値は [../perf/current.md](../perf/current.md)、数値互換性・対応範囲の契約は
@@ -227,7 +221,9 @@ DFlash2 経路でも prefix cache を使う（drafter ring も entry に保存�
 - 先頭 stage が embedding、最終 stage が final norm と lm_head を持つ。
 - stage 間の hidden は bf16 のまま pinned host 経由で直列に受け渡す。
 - `--pipeline-parallel` は prefix cache、DFlash2、MTP、hidden taps、
-  `--dump-logits` と併用できない。grouped expert model（MoE）では使えない。
+  `--dump-logits` と併用できない。grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も受理する
+  （layer を stage で割り、担当外 layer の expert 平面は読まない）。`--tensor-parallel` と
+  `--pipeline-parallel` を同時に 2 にはできない。
 - decode と prefill が同じ batch に混在する実行は未対応である。
   `--max-concurrent-requests 1` で運用するか、phase ごとに batch が分かれる条件で使う。
 - KV の page 数は stage 0 の auto-fit 結果を全 stage で共有する。

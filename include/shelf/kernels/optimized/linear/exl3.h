@@ -12,6 +12,7 @@ inline constexpr const char* kExl3W16A16Symbol = "shelf_gemm_exl3_w16a16";
 inline constexpr uint32_t kExl3W16A16OutBlock = 128u;
 inline constexpr uint32_t kExl3W16A16RowTile = 16u;
 inline constexpr uint32_t kExl3W16A16Threads = 256u;
+inline constexpr uint32_t kExl3GroupedFuse = 2u;
 
 struct Exl3GemmArgs {
     const void* trellis = nullptr;
@@ -32,6 +33,29 @@ struct Exl3GemmArgs {
     uint32_t splitk_splits = 0;
     void* xrot = nullptr;
     uint32_t groups = 0;
+    // Optional n-tile override for the grouped path. 0 keeps pick_n_tiles' shape choice.
+    uint32_t n_tiles = 0;
+
+    // Optional routed-expert group plan. When group_expert is non-null, blockIdx.z is
+    // the group, group_expert[g] selects the expert plane and group_rows[g] bounds the
+    // rows this group owns. The trellis/suh/svh pointers are bases and the batch
+    // strides select one expert. Input and output are the group-row planes; group g
+    // owns rows [g * kExl3W16A16RowTile, ...).
+    const uint32_t* group_expert = nullptr;
+    const uint32_t* group_rows = nullptr;
+    const uint32_t* group_count = nullptr;
+    // Optional per-expert group range. When non-null, consecutive groups of one expert are
+    // fused into one block: a block whose group index is the first of a kGroups stride inside
+    // [expert_group_begin[e], expert_group_begin[e+1]) owns up to kGroups groups of expert e
+    // and dequantizes its weight tiles once for all of them.
+    const uint32_t* expert_group_begin = nullptr;
+    // Optional token row for each group row. When non-null, the input plane is token rows
+    // and the kernel gathers through this table; when null, the input plane is already in
+    // group-row order.
+    const int32_t* row_token = nullptr;
+    uint64_t trellis_batch_stride = 0;
+    uint64_t suh_batch_stride = 0;
+    uint64_t svh_batch_stride = 0;
 };
 
 hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream);

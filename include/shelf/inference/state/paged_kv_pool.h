@@ -7,6 +7,7 @@
 #include <shelf/core/status.h>
 #include <shelf/kernels/kv_types.h>
 #include <hip/hip_runtime.h>
+#include <functional>
 #include <vector>
 
 namespace shelf {
@@ -124,6 +125,12 @@ class PagedKVPool {
 
     Status adopt(PageId page);
 
+    Status attach(PageId page);
+
+    Status retain_cache(PageId page);
+
+    Status release_cache(PageId page);
+
     Status release(PageId page);
 
     Status release_many(const std::vector<PageId>& pages);
@@ -160,7 +167,17 @@ class PagedKVPool {
 
     uint32_t num_used_pages() const noexcept { return used_count_; }
 
+    uint32_t num_cached_pages() const noexcept { return cached_count_; }
+
     uint32_t num_free_pages() const noexcept { return num_pages_ - used_count_; }
+
+    uint32_t num_truly_free_pages() const noexcept {
+        return static_cast<uint32_t>(free_list_.size());
+    }
+
+    void set_reclaimer(std::function<bool(uint32_t)> reclaimer) {
+        reclaimer_ = std::move(reclaimer);
+    }
 
     std::size_t used_bytes() const noexcept {
         return static_cast<std::size_t>(used_count_) * bytes_per_page();
@@ -185,6 +202,24 @@ class PagedKVPool {
 
     std::vector<bool> in_use_;
     std::vector<uint32_t> free_list_;
+
+    enum PageState : uint8_t {
+        kPageSeq = 0,
+        kPageFree = 1,
+        kPageCached = 2,
+    };
+
+    void free_remove(PageId page);
+    void cached_remove(PageId page);
+
+    std::vector<uint32_t> seq_refs_;
+    std::vector<uint32_t> cache_refs_;
+    std::vector<uint8_t> page_state_;
+    std::vector<uint32_t> free_pos_;
+    std::vector<uint32_t> cached_list_;
+    std::vector<uint32_t> cached_pos_;
+    uint32_t cached_count_ = 0;
+    std::function<bool(uint32_t)> reclaimer_;
 
     std::size_t reserved_bytes_;
     uint32_t used_count_;

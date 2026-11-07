@@ -96,8 +96,8 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
-    if opts.tp > 1:
-        argv += ["--tensor-parallel", str(opts.tp)]
+    if opts.tensor_parallel > 1:
+        argv += ["--tensor-parallel", str(opts.tensor_parallel)]
     if opts.verify_weights:
         argv += ["--verify-weights", "1"]
     return argv
@@ -306,12 +306,22 @@ async def handle_meta(request: web.Request) -> web.Response:
     meta["prefix_cache"] = compute.capabilities.prefix_cache
     meta["inflight"] = compute.inflight
     meta["queued"] = compute.queued
+    stale = False
     try:
         kv = await compute.kv_stats()
     except (ComputeError, asyncio.TimeoutError) as exc:
-        _log(f"/v1/meta kv stats unavailable: {exc}")
-        kv = None
-    meta["kv_cache"] = None if kv is None else kv.to_wire()
+        kv = compute.last_kv_stats
+        stale = kv is not None
+        now = time.monotonic()
+        if now - request.app.get("kv_stats_warn_at", 0.0) >= 60.0:
+            _log(f"/v1/meta kv stats unavailable: {exc}")
+            request.app["kv_stats_warn_at"] = now
+    if kv is None:
+        meta["kv_cache"] = None
+    else:
+        wire = kv.to_wire()
+        wire["stale"] = stale
+        meta["kv_cache"] = wire
     return web.json_response(meta)
 
 
@@ -418,8 +428,9 @@ def parse_args(argv=None):
     devices = [part.strip() for part in opts.device.split(",") if part.strip()]
     if not devices or any(not device.isdigit() for device in devices):
         parser.error(f"bad --device: {opts.device}")
-    if len(devices) != opts.tp:
-        parser.error(f"--device expects {opts.tp} entries for --tensor-parallel {opts.tp}, "
+    if len(devices) != opts.tensor_parallel:
+        parser.error(f"--device expects {opts.tensor_parallel} entries for "
+                     f"--tensor-parallel {opts.tensor_parallel}, "
                      f"got {len(devices)}")
     if len(set(devices)) != len(devices):
         parser.error(f"--device entries must be unique: {opts.device}")
@@ -510,7 +521,7 @@ async def _serve(opts) -> int:
         },
         "arena_gib": opts.arena_gib,
         "device": opts.device,
-        "tensor_parallel": opts.tp,
+        "tensor_parallel": opts.tensor_parallel,
         "kv_cache_dtype": opts.kv_cache_dtype,
         "working_set_reserve_gib": opts.working_set_reserve_gib,
         "speculative": speculative,

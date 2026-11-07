@@ -8,6 +8,7 @@ enum class ValueDType : uint8_t {
     BF16 = 0,
     F32 = 1,
     I32 = 2,
+    U8 = 3,
 };
 
 enum class ValueRowDomain : uint8_t {
@@ -24,6 +25,8 @@ constexpr uint32_t value_dtype_bytes(ValueDType dtype) noexcept {
         case ValueDType::F32:
         case ValueDType::I32:
             return 4;
+        case ValueDType::U8:
+            return 1;
     }
     return 0;
 }

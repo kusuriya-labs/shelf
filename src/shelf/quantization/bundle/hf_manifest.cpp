@@ -402,6 +402,75 @@ Status load_hf_tensor(HfShardSet& shards, const std::string& name, LoadedHfTenso
     return Status::make_ok();
 }
 
+
+Status synthesize_fp8_perchannel_tensor(
+    const shelf::io::SafetensorsReader* reader,
+    HfQuantizedSource& source,
+    const std::string& canonical,
+    const std::string& scale_name,
+    const std::string& codes_shard,
+    const std::string& scale_shard,
+    QuantizedTensorMetadata& out,
+    bool with_crc) {
+    auto spec_result = reader->tensor_spec(canonical);
+    if (!spec_result.ok()) return spec_result.status();
+    const shelf::io::StTensorSpec& codes_spec = spec_result.value();
+    if (codes_spec.dtype != shelf::io::SType::F8_E4M3 || codes_spec.shape.size() != 2) {
+        return Status::unsupported(
+            ("hf per-channel fp8 weight payload must be a rank-2 F8_E4M3 matrix: " +
+             canonical)
+                .c_str(),
+            __FILE__, __LINE__);
+    }
+    const uint64_t n = codes_spec.shape[0];
+    const uint64_t k = codes_spec.shape[1];
+    uint64_t codes_bytes = 0;
+    Status st = spec_bytes(codes_spec, 1, codes_bytes);
+    if (!st.ok()) return st;
+
+    auto scale_spec_result = reader->tensor_spec(scale_name);
+    if (!scale_spec_result.ok()) return scale_spec_result.status();
+    const shelf::io::StTensorSpec& scale_spec = scale_spec_result.value();
+    if (scale_spec.dtype != shelf::io::SType::F32 ||
+        !((scale_spec.shape.size() == 1u && scale_spec.shape[0] == n) ||
+          (scale_spec.shape.size() == 2u && scale_spec.shape[0] == n &&
+           scale_spec.shape[1] == 1u))) {
+        return Status::unsupported(
+            ("hf fp8 per-channel scale must be F32 [n]: " + scale_name).c_str(),
+            __FILE__, __LINE__);
+    }
+    std::size_t scale_src_bytes = 0;
+    auto scale_data = reader->tensor_data(scale_name, scale_src_bytes);
+    if (!scale_data.ok()) return scale_data.status();
+    if (scale_src_bytes != n * sizeof(float)) {
+        return Status::invalid_argument(
+            ("hf fp8 per-channel scale byte count mismatch: " + scale_name).c_str(),
+            __FILE__, __LINE__);
+    }
+    std::size_t codes_src_bytes = 0;
+    auto codes_data = reader->tensor_data(canonical, codes_src_bytes);
+    if (!codes_data.ok()) return codes_data.status();
+    if (codes_src_bytes != codes_bytes) {
+        return Status::invalid_argument(
+            ("hf fp8 per-channel weight byte count mismatch: " + canonical).c_str(),
+            __FILE__, __LINE__);
+    }
+
+    out.role = "weight";
+    out.encoding = QuantizedEncoding::Fp8PerChannel;
+    out.layout = quantization::manifest::kFp8PerChannelLayoutName;
+    out.logical_shape = {static_cast<int64_t>(n), static_cast<int64_t>(k)};
+    out.k_padded = k;
+    out.scale_block_n = 1;
+    out.scale_block_k = 0;
+    out.codes = make_ref(canonical, "U8", codes_data.value(), codes_src_bytes, with_crc);
+    out.metadata1 =
+        make_ref(scale_name, "F32", scale_data.value(), scale_src_bytes, with_crc);
+    source.shard_for_physical[canonical] = codes_shard;
+    source.shard_for_physical[scale_name] = scale_shard;
+    return Status::make_ok();
+}
+
 std::string strip_weight_suffix(const std::string& name) {
     static const std::string kSuffix = ".weight";
     if (name.size() > kSuffix.size() &&
@@ -715,9 +784,22 @@ Result<HfQuantizedSource> synthesize_hf_quantized_source(
                             .c_str(),
                         __FILE__, __LINE__);
                 }
-                Status adapter = synthesize_mxfp4_tensor(
-                    reader, source, canonical, scale_name, *codes_shard, *scale_shard, meta,
-                    with_crc);
+                auto codes_spec_result = reader->tensor_spec(canonical);
+                if (!codes_spec_result.ok()) return codes_spec_result.status();
+                Status adapter = Status::make_ok();
+                if (codes_spec_result.value().dtype == shelf::io::SType::U8) {
+                    adapter = synthesize_mxfp4_tensor(
+                        reader, source, canonical, scale_name, *codes_shard, *scale_shard,
+                        meta, with_crc);
+                } else if (codes_spec_result.value().dtype == shelf::io::SType::F8_E4M3) {
+                    adapter = synthesize_fp8_perchannel_tensor(
+                        reader, source, canonical, scale_name, *codes_shard, *scale_shard,
+                        meta, with_crc);
+                } else {
+                    return Status::unsupported(
+                        ("hf quark weight dtype is not U8 or F8_E4M3: " + canonical).c_str(),
+                        __FILE__, __LINE__);
+                }
                 if (!adapter.ok()) return adapter;
             } else {
                 Status adapter = synthesize_bf16_tensor(

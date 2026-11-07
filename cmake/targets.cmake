@@ -86,6 +86,7 @@ shelf_set_hip_archs(shelf_kernels_correctness)
 set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/bf16.hip
     src/shelf/kernels/optimized/linear/fp8.hip
+    src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/linear/exl3.hip
     src/shelf/kernels/optimized/linear/exl3_int8.hip
@@ -97,6 +98,12 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/embedding.hip
     src/shelf/kernels/optimized/elementwise.hip
     src/shelf/kernels/optimized/rmsnorm.hip
+    src/shelf/kernels/optimized/hyper_connection.hip
+    src/shelf/kernels/optimized/mean_streams.hip
+    src/shelf/kernels/optimized/ple.hip
+    src/shelf/kernels/optimized/ple_conv.hip
+    src/shelf/kernels/optimized/repeat_streams.hip
+    src/shelf/kernels/optimized/qsa.hip
     src/shelf/kernels/optimized/l2_normalize.hip
     src/shelf/kernels/optimized/output_gather.hip
     src/shelf/kernels/optimized/activation_quantize.hip
@@ -107,6 +114,21 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/stochastic_sampling.hip
     src/shelf/kernels/optimized/radix_topn.hip
 )
+
+# Fused kernels: more than one logical operation in one launch, separate from the
+# single-operation optimized family.
+set(SHELF_FUSED_KERNEL_SOURCES
+    src/shelf/kernels/fused/hyper_connection.hip
+    src/shelf/kernels/fused/silu_scale.hip
+    src/shelf/kernels/fused/tp_combine.hip
+)
+
+add_library(shelf_kernels_fused STATIC ${SHELF_FUSED_KERNEL_SOURCES})
+target_compile_features(shelf_kernels_fused PRIVATE cxx_std_20)
+target_include_directories(shelf_kernels_fused PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(shelf_kernels_fused PUBLIC shelf_core shelf_gpu)
+target_compile_options(shelf_kernels_fused PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+shelf_set_hip_archs(shelf_kernels_fused)
 
 # Qwen35 speculative-decode kernels (DFlash2). Model-specific drafter kernels
 # stay under models/qwen35 until a second model needs them.
@@ -128,7 +150,7 @@ add_library(shelf_kernels_optimized STATIC ${SHELF_OPTIMIZED_KERNEL_SOURCES})
 target_compile_features(shelf_kernels_optimized PRIVATE cxx_std_20)
 target_include_directories(shelf_kernels_optimized PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_kernels_optimized PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state)
+target_link_libraries(shelf_kernels_optimized PUBLIC shelf_gpu shelf_runtime shelf_inference_state shelf_kernels_fused)
 target_compile_options(shelf_kernels_optimized PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_kernels_optimized)
 
@@ -153,7 +175,7 @@ add_library(shelf_runtime STATIC
 )
 target_compile_features(shelf_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu)
+target_link_libraries(shelf_runtime PUBLIC shelf_core shelf_gpu shelf_kernels_fused)
 target_compile_options(shelf_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_runtime)
 
@@ -161,6 +183,8 @@ add_library(shelf_inference_state STATIC
     src/shelf/inference/state/paged_sequence_state.cpp
     src/shelf/inference/state/sequence_slot_pool.cpp
     src/shelf/inference/state/gdn_state_pool.cpp
+    src/shelf/inference/state/qsa_state_pool.cpp
+    src/shelf/inference/state/ple_conv_state_pool.cpp
     src/shelf/inference/state/paged_kv_pool.cpp
 )
 target_compile_features(shelf_inference_state PRIVATE cxx_std_20)
@@ -182,6 +206,17 @@ target_include_directories(shelf_inference_scheduling PUBLIC "${CMAKE_CURRENT_SO
 target_link_libraries(shelf_inference_scheduling PUBLIC shelf_core shelf_gpu shelf_inference_state)
 target_compile_options(shelf_inference_scheduling PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+# Model-independent paged-KV prefix cache. Owns the radix tree, refcounted page
+# sharing and eviction; model-specific recurrent state is supplied by a
+# per-family adapter.
+add_library(shelf_inference_prefix STATIC
+    src/shelf/inference/prefix/prefix_kv_cache.cpp
+)
+target_compile_features(shelf_inference_prefix PRIVATE cxx_std_20)
+target_include_directories(shelf_inference_prefix PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(shelf_inference_prefix PUBLIC shelf_core shelf_gpu shelf_inference_state)
+target_compile_options(shelf_inference_prefix PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 # Model-independent op selectors (choose optimized kernel variants from
 # Program / DispatchBinding shape facts). Shared by Qwen35 and future
 # Qwen-family runtimes; never touches model weights or model config.
@@ -200,6 +235,8 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/decode_perf_stats.cpp
     src/shelf/inference/execution/elementwise_dispatch.hip
     src/shelf/inference/execution/exl3_dense_gemm.hip
+    src/shelf/inference/execution/gemm_lt.hip
+    src/shelf/inference/execution/fp8_ptpc_dispatch.hip
     src/shelf/inference/execution/embedding_dispatch.hip
     src/shelf/inference/execution/gdn_conv_dispatch.hip
     src/shelf/inference/execution/gdn_recurrence_dispatch.hip
@@ -207,6 +244,9 @@ add_library(shelf_inference_execution STATIC
     src/shelf/inference/execution/kv_calib_dump.cpp
     src/shelf/inference/execution/linear_input_dump.cpp
     src/shelf/inference/execution/moe_dispatch.hip
+    src/shelf/inference/execution/hyper_connection_dispatch.hip
+    src/shelf/inference/execution/ple_dispatch.hip
+    src/shelf/inference/execution/qsa_dispatch.hip
     src/shelf/inference/execution/l2_normalize_dispatch.hip
     src/shelf/inference/execution/optimized_dispatch.hip
     src/shelf/inference/execution/paged_attention_dispatch.hip
@@ -292,16 +332,44 @@ target_include_directories(shelf_qwen35moe SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/v
 target_link_libraries(shelf_qwen35moe PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
 target_compile_options(shelf_qwen35moe PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
+# Qwen3.8-Flash-Next (model_type qwen4_exp): EXL3 body, PLE n-gram table and the
+# expert-axis tensor-parallel load path. This target owns the load contract only; the
+# forward/executor path is a later family port.
+set(
+    SHELF_QWEN4EXP_SOURCES
+    src/shelf/models/qwen4exp/model/qwen4exp_config.cpp
+    src/shelf/models/qwen4exp/model/qwen4exp_model.cpp
+    src/shelf/models/qwen4exp/model/lower_to_primitives.cpp
+    src/shelf/models/qwen4exp/model/hyper_connection_lowering.cpp
+    src/shelf/models/qwen4exp/model/moe_lowering.cpp
+    src/shelf/models/qwen4exp/model/layer_lowering.cpp
+    src/shelf/models/qwen4exp/model/ple_lowering.cpp
+    src/shelf/models/qwen4exp/model/qsa_lowering.cpp
+    src/shelf/models/qwen4exp/weights/ple_table.cpp
+    src/shelf/models/qwen4exp/runtime/ple_input.cpp
+    src/shelf/models/qwen4exp/runtime/ple_input.cpp
+    src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
+)
+
+add_library(shelf_qwen4exp STATIC ${SHELF_QWEN4EXP_SOURCES})
+target_compile_features(shelf_qwen4exp PRIVATE cxx_std_20)
+target_include_directories(shelf_qwen4exp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_qwen4exp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_qwen4exp SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+target_link_libraries(shelf_qwen4exp PUBLIC shelf_qwen_hybrid shelf_weights shelf_io shelf_quant_bundle shelf_gpu)
+target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC
     src/shelf/models/model_weights_factory.cpp
     src/shelf/models/loaded_model.cpp
+    src/shelf/models/pipeline_stage_model.cpp
     src/shelf/models/tp_rank_model.cpp)
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_gpu)
+target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen4exp shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 add_library(shelf_qwen35_runtime STATIC
@@ -326,7 +394,7 @@ add_library(shelf_qwen35_runtime STATIC
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
+target_link_libraries(shelf_qwen35_runtime PUBLIC shelf_qwen35 shelf_inference_state shelf_inference_scheduling shelf_inference_execution shelf_inference_prefix shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_runtime shelf_gpu)
 target_compile_options(shelf_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 shelf_set_hip_archs(shelf_qwen35_runtime)
 if(SHELF_HIP_GRAPH)

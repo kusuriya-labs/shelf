@@ -61,6 +61,22 @@ hipError_t launch_activation_quantize_fp8_finegrained(
     hipStream_t stream,
     bool* specialized = nullptr);
 
+// Per-token FP8 E4M3 activation quantization. One f32 scale per row; codes use
+// the gfx1201 FP8 WMMA fragment order (16 rows x 64 K per block). Rows in
+// [rows, padded_rows) are zero-filled so the consumer can read full row tiles.
+hipError_t launch_activation_quantize_fp8_pertoken(
+    const ::shelf::bf16_t* input,
+    uint8_t* codes,
+    float* scales,
+    uint32_t rows,
+    uint32_t padded_rows,
+    uint32_t max_rows,
+    uint32_t k,
+    uint32_t input_row_stride,
+    uint32_t code_row_stride_bytes,
+    uint32_t scale_row_stride_bytes,
+    hipStream_t stream);
+
 // MXFP4 W4A8 activation plane: E8M0 group scales folded into the E4M3 codes against
 // the row's maximum group exponent, plus one f32 row reference in scales column 0.
 // Contract: docs/developer/quantization.md (activation quantization contract).

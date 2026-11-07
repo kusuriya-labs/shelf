@@ -17,6 +17,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -329,6 +330,65 @@ Status build_host_execution_context(
     return Status::make_ok();
 }
 
+// Debug-only layer output dump (SHELF_LAYER_DUMP_DIR). The values are captured by the
+// value trace right after the producing dispatch, because the workspace is reused by later
+// layers and a post-run copy would read a different value.
+struct LayerOutputDump {
+    const std::vector<std::pair<std::string, std::uint32_t>>* entries = nullptr;
+    int rank = 0;
+    std::uint32_t run = 0;
+    std::string dir;
+
+    void on_value(std::uint32_t value_id, const void* device_ptr, std::uint32_t row_stride,
+                  std::uint32_t feature_count, ::shelf::runtime::ValueDType dtype,
+                  std::uint32_t rows, hipStream_t stream) const {
+        if (device_ptr == nullptr ||
+            (dtype != ::shelf::runtime::ValueDType::BF16 &&
+             dtype != ::shelf::runtime::ValueDType::F32) ||
+            rows == 0u || feature_count == 0u || entries == nullptr)
+            return;
+        const std::string* name = nullptr;
+        for (const auto& entry : *entries) {
+            if (entry.second == value_id) {
+                name = &entry.first;
+                break;
+            }
+        }
+        if (name == nullptr) return;
+        if (hipStreamSynchronize(stream) != hipSuccess) return;
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/tp%d_run%u_%s.bin", dir.c_str(), rank, run,
+                      name->c_str());
+        FILE* file = std::fopen(path, "wb");
+        if (file == nullptr) return;
+        const std::size_t element_bytes =
+            dtype == ::shelf::runtime::ValueDType::F32 ? 4u : 2u;
+        std::vector<std::uint8_t> row(static_cast<std::size_t>(feature_count) *
+                                      element_bytes);
+        for (std::uint32_t r = 0; r < rows; ++r) {
+            const void* src = static_cast<const std::uint8_t*>(device_ptr) +
+                              static_cast<std::size_t>(r) * row_stride * element_bytes;
+            if (hipMemcpy(row.data(), src, row.size(), hipMemcpyDeviceToHost) != hipSuccess)
+                break;
+            std::fwrite(row.data(), element_bytes, feature_count, file);
+        }
+        std::fclose(file);
+        std::snprintf(path, sizeof(path), "%s/tp%d_run%u_%s.meta", dir.c_str(), rank,
+                      run, name->c_str());
+        if (FILE* meta = std::fopen(path, "w")) {
+            std::fprintf(meta, "rows %u\nfeatures %u\nstride %u\nelem %zu\nid %u\nptr %p\n",
+                         rows, feature_count, row_stride, element_bytes, value_id,
+                         device_ptr);
+            std::fclose(meta);
+        }
+    }
+};
+
+bool layer_output_dump_enabled() {
+    const char* dir = std::getenv("SHELF_LAYER_DUMP_DIR");
+    return dir != nullptr && dir[0] != '\0';
+}
+
 // One program run starts here, whichever execution path it then takes. The plan scratch of a
 // grouped expert FFN is accumulated into by the router, so the run has to be prepared before
 // the first op: a multi-rank run is not allowed to skip it, and a rank prepares its own scratch
@@ -354,6 +414,38 @@ Status launch_program_run(
 
     const size_t program_index = static_cast<size_t>(
         &program - executor.program_set.programs.data());
+    const bool dump_layers = layer_output_dump_enabled() &&
+                             (!executor.layer_output_value_ids.empty() ||
+                              !executor.trace_value_ids.empty());
+    std::vector<std::pair<std::string, std::uint32_t>> dump_entries;
+    LayerOutputDump dump;
+    ::shelf::execution::ValueTraceSink dump_sink;
+    if (dump_layers) {
+        for (std::size_t i = 0; i < executor.layer_output_value_ids.size(); ++i) {
+            dump_entries.emplace_back("L" + std::to_string(executor.layer_output_layers[i]),
+                                      executor.layer_output_value_ids[i]);
+        }
+        for (std::size_t i = 0; i < executor.trace_value_ids.size(); ++i) {
+            std::string name = executor.trace_names[i];
+            for (char& c : name)
+                if (c == '.' || c == '/') c = '_';
+            dump_entries.emplace_back(std::move(name), executor.trace_value_ids[i]);
+        }
+        static std::atomic<std::uint32_t> dump_run{0};
+        dump.entries = &dump_entries;
+        dump.rank = executor.tp_rank;
+        dump.run = dump_run.fetch_add(1);
+        dump.dir = std::getenv("SHELF_LAYER_DUMP_DIR");
+        dump_sink.on_value = [&dump](std::uint32_t value_id, const void* device_ptr,
+                                     std::uint32_t row_stride, std::uint32_t feature_count,
+                                     ::shelf::runtime::ValueDType dtype, std::uint32_t rows,
+                                     hipStream_t value_stream) {
+            dump.on_value(value_id, device_ptr, row_stride, feature_count, dtype, rows,
+                          value_stream);
+        };
+        ctx.value_trace = &dump_sink;
+    }
+    Status run = Status::make_ok();
     if (!executor.tp_schedules.empty()) {
         if (program_index >= executor.tp_schedules.size() ||
             !executor.tp_schedules[program_index].active() ||
@@ -362,11 +454,14 @@ Status launch_program_run(
                 "tp execution schedule is active but cannot be launched",
                 __FILE__, __LINE__);
         }
-        return runtime::execute_program_tp_ranges(
+        run = runtime::execute_program_tp_ranges(
             program, ctx, stream, executor.tp_schedules[program_index],
             executor.tp_barrier, executor.tp_rank);
+    } else {
+        run = runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
     }
-    return runtime::execute_program_range(program, ctx, stream, 0u, dispatch_count);
+    if (dump_layers) ctx.value_trace = nullptr;
+    return run;
 }
 
 template <typename T>
@@ -559,6 +654,23 @@ Result<PendingBatch> submit_co_batch(
 
     auto vst = validate_scheduled_batch(batch, executor.config.max_batch_rows, executor.config.max_scheduled_requests);
     if (!vst.ok()) return vst;
+
+    // Qwen4Exp model-level state starts at the first scheduled token of a sequence. A
+    // continuing prefill chunk or a decode step leaves it alone.
+    if (executor.qsa_state_pool != nullptr || executor.ple_conv_state_pool != nullptr) {
+        for (uint32_t i = 0; i < batch.num_requests; ++i) {
+            const auto* sequence = batch.requests[i].sequence;
+            if (sequence == nullptr || sequence->position != 0u) continue;
+            if (executor.qsa_state_pool != nullptr) {
+                Status rst = executor.qsa_state_pool->reset(sequence->slot, stream);
+                if (!rst.ok()) return rst;
+            }
+            if (executor.ple_conv_state_pool != nullptr) {
+                Status rst = executor.ple_conv_state_pool->reset(sequence->slot, stream);
+                if (!rst.ok()) return rst;
+            }
+        }
+    }
 
     const uint32_t N = batch.num_tokens;
     const uint32_t R = batch.num_requests;
@@ -869,6 +981,7 @@ Result<PendingBatch> submit_co_batch(
         N > 0 &&
         graph_slot_idx >= 0 &&
         executor.value_trace == nullptr &&
+        !executor.external_input_preparer &&
         !spec_verify_without_history &&
         !tree_batch &&
         exec_role == ::shelf::runtime::ExecutionRole::Decode;
@@ -920,6 +1033,29 @@ Result<PendingBatch> submit_co_batch(
         stq = ::shelf::runtime::launch_prepare_batch_descriptor(
             executor.batch_context, executor.config.max_scheduled_requests, stream);
         if (!stq.ok()) return stq;
+
+        if (executor.external_input_preparer &&
+            executor.input_hidden.data<void>() != nullptr) {
+            std::vector<bf16_t> host;
+            stq = executor.external_input_preparer(batch, host);
+            if (!stq.ok()) return stq;
+            const std::size_t expected =
+                static_cast<std::size_t>(N) * executor.model.config->hidden_size;
+            if (host.size() != expected) {
+                return Status::invalid_state(
+                    "external input preparer returned a wrong row count", __FILE__,
+                    __LINE__);
+            }
+            const hipError_t copy_error =
+                hipMemcpyAsync(executor.input_hidden.data<void>(), host.data(),
+                               host.size() * sizeof(bf16_t), hipMemcpyHostToDevice,
+                               stream);
+            if (copy_error != hipSuccess) {
+                return Status::hip_error("external input upload",
+                                         hipGetErrorString(copy_error), __FILE__,
+                                         __LINE__);
+            }
+        }
 
         stq = launch_program_run(executor, *program, ctx, stream, dispatch_count);
         if (!stq.ok()) return stq;
@@ -1092,6 +1228,9 @@ Executor::Executor(Executor&& other) noexcept
       sequence_pool(other.sequence_pool),
       gdn_state_pool(other.gdn_state_pool),
       kv_pool(other.kv_pool),
+      qsa_state_pool(std::move(other.qsa_state_pool)),
+      ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
+      external_input_preparer(std::move(other.external_input_preparer)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1143,6 +1282,10 @@ Executor::Executor(Executor&& other) noexcept
       stochastic_topk_active_counts(std::move(other.stochastic_topk_active_counts)),
       stochastic_topk_partitions(other.stochastic_topk_partitions),
       stochastic_topk_scratch_bytes(other.stochastic_topk_scratch_bytes),
+      layer_output_layers(std::move(other.layer_output_layers)),
+      layer_output_value_ids(std::move(other.layer_output_value_ids)),
+      trace_names(std::move(other.trace_names)),
+      trace_value_ids(std::move(other.trace_value_ids)),
       layer_override_value_ids(std::move(other.layer_override_value_ids)),
       layer_override_rows(std::move(other.layer_override_rows)),
       layer_override_hidden(std::move(other.layer_override_hidden)),
@@ -1212,6 +1355,9 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         sequence_pool = other.sequence_pool;
         gdn_state_pool = other.gdn_state_pool;
         kv_pool = other.kv_pool;
+        qsa_state_pool = std::move(other.qsa_state_pool);
+        ple_conv_state_pool = std::move(other.ple_conv_state_pool);
+        external_input_preparer = std::move(other.external_input_preparer);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1285,6 +1431,10 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         stochastic_topk_active_counts = std::move(other.stochastic_topk_active_counts);
         stochastic_topk_partitions = other.stochastic_topk_partitions;
         stochastic_topk_scratch_bytes = other.stochastic_topk_scratch_bytes;
+        layer_output_layers = std::move(other.layer_output_layers);
+        layer_output_value_ids = std::move(other.layer_output_value_ids);
+        trace_names = std::move(other.trace_names);
+        trace_value_ids = std::move(other.trace_value_ids);
         layer_override_value_ids = std::move(other.layer_override_value_ids);
         layer_override_rows = std::move(other.layer_override_rows);
         layer_override_hidden = std::move(other.layer_override_hidden);
@@ -1315,6 +1465,9 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.sequence_pool = nullptr;
         other.gdn_state_pool = nullptr;
         other.kv_pool = nullptr;
+        other.qsa_state_pool.reset();
+        other.ple_conv_state_pool.reset();
+        other.external_input_preparer = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -1499,6 +1652,9 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.sequence_pool = nullptr;
     ex.gdn_state_pool = nullptr;
     ex.kv_pool = nullptr;
+    ex.qsa_state_pool.reset();
+    ex.ple_conv_state_pool.reset();
+    ex.external_input_preparer = nullptr;
     ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};
@@ -1671,10 +1827,14 @@ Result<Executor> create_executor(
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc = *input.model.config;
     {
-        auto expected_gdn_result = make_qwen35_gdn_state_layout_stage(
-            tc, config.stage, config.tp != nullptr ? config.tp->tp_size : 1u);
-        if (!expected_gdn_result.ok()) return expected_gdn_result.status();
-        const GdnStatePoolLayout& expected_gdn = expected_gdn_result.value();
+        const GdnStatePoolLayout expected_storage =
+            make_qwen35_gdn_state_layout_local(
+                tc, qwen35_stage_gdn_layers(tc, config.stage),
+                config.tp != nullptr ? config.tp->local_gdn_key_heads
+                                     : static_cast<std::uint32_t>(tc.linear_num_key_heads),
+                config.tp != nullptr ? config.tp->local_gdn_value_heads
+                                     : static_cast<std::uint32_t>(tc.linear_num_value_heads));
+        const GdnStatePoolLayout& expected_gdn = expected_storage;
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||
@@ -1796,11 +1956,17 @@ Result<Executor> create_executor(
     st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.token_hidden);
     if (!st.ok()) return st;
     if (input.lowered.graph.external_inputs.size() > 1u) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.input_hidden);
+        const std::size_t external_width =
+            config.external_hidden_width != 0u ? config.external_hidden_width : H;
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, external_width},
+                                                ex.input_hidden);
         if (!st.ok()) return st;
     }
     if (config.emit_normed_token_hidden) {
-        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.normed_token_hidden);
+        const std::size_t normed_width =
+            config.normed_token_hidden_width != 0u ? config.normed_token_hidden_width : H;
+        st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, normed_width},
+                                                ex.normed_token_hidden);
         if (!st.ok()) return st;
     }
     for (uint32_t t = 0; t < config.target_hidden_tap_count; ++t) {
@@ -1888,10 +2054,41 @@ Result<Executor> create_executor(
     }
 #endif
 
+    if (input.uses_qsa_state) {
+        auto pool = ::shelf::state::QsaKeyStatePool::create(
+            arena, sequence_pool.max_sequences(),
+            ::shelf::state::QsaKeyStatePoolLayout::make(
+                input.qsa_layers, input.qsa_head_dim, input.qsa_compress_ratio,
+                input.qsa_max_blocks));
+        if (!pool.ok()) return pool.status();
+        ex.qsa_state_pool =
+            std::make_unique<::shelf::state::QsaKeyStatePool>(pool.release());
+    }
+    if (input.uses_ple_conv_state) {
+        auto pool = ::shelf::state::PleConvStatePool::create(
+            arena, sequence_pool.max_sequences(),
+            ::shelf::state::PleConvStatePoolLayout::make(input.ple_conv_layers,
+                                                         input.ple_conv_channels));
+        if (!pool.ok()) return pool.status();
+        ex.ple_conv_state_pool =
+            std::make_unique<::shelf::state::PleConvStatePool>(pool.release());
+    }
     {
         ::shelf::kernel::ModelDispatchStateView ms{};
         ms.block_table = sequence_pool.device_view();
         ms.gdn = gdn_state_pool.device_view();
+        if (ex.qsa_state_pool != nullptr) ms.qsa = ex.qsa_state_pool->device_view();
+        if (ex.ple_conv_state_pool != nullptr) {
+            const auto view = ex.ple_conv_state_pool->device_view();
+            ms.ple_conv = ::shelf::kernel::PleConvStateView{
+                .base = view.base,
+                .max_sequences = view.max_sequences,
+                .channels = view.channels,
+                .slot_stride = view.slot_stride,
+                .layer_stride = view.layer_stride,
+                .history_stride = view.history_stride,
+            };
+        }
         if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
             ms.kv_fp8 = make_paged_kv_fp8_view(kv_pool);
         } else {
@@ -1929,6 +2126,14 @@ Result<Executor> create_executor(
                     break;
                 }
             }
+        }
+        for (const auto& lv : lowered.layer_output_values) {
+            ex.layer_output_layers.push_back(lv.first);
+            ex.layer_output_value_ids.push_back(lv.second.id);
+        }
+        for (const auto& lv : lowered.trace_values) {
+            ex.trace_names.push_back(lv.first);
+            ex.trace_value_ids.push_back(lv.second.id);
         }
         std::vector<::shelf::runtime::WeightSlot> weight_slots =
             std::move(lowered.weights);

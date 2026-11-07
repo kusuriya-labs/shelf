@@ -1,6 +1,7 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 
 #include <shelf/core/gpu/cleanup.h>
+#include <shelf/weights/weight_bytes.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/core/memory/size_format.h>
 #include <shelf/runtime/request_handle.h>
@@ -15,12 +16,16 @@
 #include <algorithm>
 #include <cstdio>
 #include <sstream>
+#include <thread>
+#include <utility>
 
 namespace shelf {
 namespace qwen35 {
 namespace runtime {
 
 namespace {
+
+using ::shelf::weights::add_matrix_bytes;
 
 std::uint32_t ceil_div(std::uint32_t a, std::uint32_t b) {
     return (a + b - 1u) / b;
@@ -36,20 +41,6 @@ std::uint64_t tensor_bytes(const gpu::Tensor& t) {
     std::size_t bytes = 0;
     if (!t.required_span_bytes(bytes).ok()) return 0;
     return bytes;
-}
-
-void add_matrix_bytes(std::uint64_t& total, const shelf::weights::MatrixWeight& w) {
-    if (w.encoding == shelf::weights::MatrixEncoding::Bf16) {
-        total += static_cast<std::uint64_t>(w.rows) * w.cols * 2u;
-        return;
-    }
-    total += tensor_bytes(w.codes);
-    total += tensor_bytes(w.scales);
-    total += tensor_bytes(w.compute_codes);
-    total += tensor_bytes(w.compute_scales_bf16);
-    total += tensor_bytes(w.exl3_suh);
-    total += tensor_bytes(w.exl3_svh);
-    total += tensor_bytes(w.exl3_marker);
 }
 
 }
@@ -143,9 +134,10 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
 
-    auto gdn_layout_result =
-        make_qwen35_gdn_state_layout_tp(tc, config.tp_size);
-    if (!gdn_layout_result.ok()) return gdn_layout_result.status();
+    const auto& rank_context = rank->context();
+    const auto gdn_layout_result = make_qwen35_gdn_state_layout_local(
+        tc, qwen35_stage_gdn_layers(tc, {}), rank_context.local_gdn_key_heads,
+        rank_context.local_gdn_value_heads);
 
     if (config.load_private_weights && config.tp_rank == 0u) {
         Status private_status = config.load_private_weights(
@@ -161,7 +153,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     auto gdn_result = GdnStatePool::create(rank->arena_.value(),
                                            config.max_scheduled_requests,
-                                           gdn_layout_result.value());
+                                           gdn_layout_result);
     if (!gdn_result.ok()) return gdn_result.status();
     rank->gdn_pool_.emplace(gdn_result.release());
 
@@ -181,13 +173,19 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size,
             rank->model_->uses_exl3_linear());
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
+        const std::size_t state_pools =
+            rank->model_->executor_state_reserve_bytes(config.max_scheduled_requests);
+        reserved += state_pools;
         // The capacity formula is an estimate, and it is short of the executor's real footprint
-        // by a little (measured: 10 - 130 MiB on a 40 layer model). The KV pool is sized from
-        // what is left, so an estimate that is too small turns into a failed allocation after
-        // the pool already took the arena. The auto path keeps slack back; an explicit
-        // --working-set-reserve is taken as given.
+        // because the real workspace is the max program workspace, which the estimate only
+        // approximates. The gap grows with the row bucket (measured: 10 - 130 MiB on a 40 layer
+        // model, ~210 MiB on a 48 layer EXL3 model at a 2048 row bucket). The KV pool is sized
+        // from what is left, so an estimate that is too small turns into a failed allocation
+        // after the pool already took the arena. The auto path keeps slack back, scaled to the
+        // estimate so it tracks the row bucket; an explicit --working-set-reserve is taken as
+        // given.
         const std::size_t slack =
-            std::max<std::size_t>(64ull << 20ull, arena_free_now / 100ull);
+            std::max<std::size_t>(64ull << 20ull, reserved / 3ull);
         reserved += slack;
         std::fprintf(stderr,
                      "MEMORY_PLAN auto tp rank %u: working set reserve %s (row bucket %u, "
@@ -199,23 +197,13 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     }
     if (config.prefix_cache) {
         PrefixCacheConfig prefix_config;
-        prefix_config.hot_capacity_tokens = config.prefix_hot_tokens;
-        prefix_config.cold_capacity_tokens = config.prefix_cold_tokens;
         prefix_config.max_concurrent = config.prefix_concurrency;
-        prefix_config.cold_state_slots = config.prefix_cold_state_slots;
         prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
-        const PrefixCacheGeometry prefix_geometry{
-            .page_tokens = config.page_tokens,
-            .num_attention_layers = attention_layers,
-            .kv_heads = local_kv_heads,
-            .head_dim = head_dim,
-            .dtype = config.kv_cache_dtype,
-        };
-        const PrefixCacheBytes prefix_bytes = prefix_cache_bytes(
-            prefix_config, gdn_layout_result.value(), prefix_geometry);
-        reserved += prefix_bytes.hot_total();
+        const PrefixCacheBytes prefix_bytes =
+            prefix_cache_bytes(prefix_config, gdn_layout_result);
+        reserved += prefix_bytes.total();
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
-                     gpu::format_gib(prefix_bytes.hot_total()).c_str());
+                     gpu::format_gib(prefix_bytes.total()).c_str());
     }
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
@@ -293,6 +281,12 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     exec_config.target_hidden_taps = config.target_hidden_taps;
     exec_config.target_hidden_tap_count = config.target_hidden_tap_count;
     exec_config.tp_combine_f32 = config.tp_combine_f32;
+    exec_config.emit_normed_token_hidden = config.emit_normed_token_hidden;
+    if (config.emit_normed_token_hidden) {
+        const std::uint32_t width = rank->model_->normed_token_hidden_width();
+        if (width != 0u) exec_config.normed_token_hidden_width = width;
+    }
+    exec_config.max_context_tokens = config.max_seq_len + 1u;
     exec_config.rope_profile = config.rope_profile;
     exec_config.tp = &rank->context();
 
@@ -445,10 +439,6 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
         return Status::invalid_argument("tp coordinator requires at least 2 devices",
                                         __FILE__, __LINE__);
     }
-    if (config.devices.size() > 2) {
-        return Status::unsupported(
-            "tp execution currently supports tp_size = 2 only", __FILE__, __LINE__);
-    }
 
     std::unique_ptr<TpCoordinator> coordinator(new TpCoordinator());
     Status init = coordinator->initialize(config);
@@ -459,10 +449,25 @@ Result<std::unique_ptr<TpCoordinator>> TpCoordinator::create(
 Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
     devices_ = config.devices;
 
+    std::jthread model_prefetch;
+    if (config.prefetch_rank_model != nullptr) {
+        model_prefetch = std::jthread(
+            [model_dir = config.model_dir, prefetch = config.prefetch_rank_model]() {
+                prefetch(model_dir);
+            });
+    }
+
     auto transport_result = ::shelf::runtime::create_tp_transport(devices_);
     if (!transport_result.ok()) return transport_result.status();
     transport_ = std::move(transport_result.value().transport);
 
+    struct RankSlot {
+        std::unique_ptr<TpRankRuntime> runtime;
+        Status status = Status::make_ok();
+    };
+    std::vector<RankSlot> slots(devices_.size());
+    std::vector<std::thread> loaders;
+    loaders.reserve(devices_.size());
     for (std::size_t r = 0; r < devices_.size(); ++r) {
         TpRankRuntimeConfig rank_config;
         rank_config.model_dir = config.model_dir;
@@ -483,21 +488,32 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.drafter_sessions = config.drafter_sessions;
         rank_config.drafter_lm_head_k = config.drafter_lm_head_k;
         rank_config.prefix_cache = config.prefix_cache;
-        rank_config.prefix_hot_tokens = config.prefix_hot_tokens;
-        rank_config.prefix_cold_tokens = config.prefix_cold_tokens;
         rank_config.prefix_concurrency = config.prefix_concurrency;
-        rank_config.prefix_cold_state_slots = config.prefix_cold_state_slots;
         rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;
+        rank_config.emit_normed_token_hidden = config.emit_normed_token_hidden;
         rank_config.tp_combine_f32 = config.tp_combine_f32;
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
-        auto rank_result = TpRankRuntime::create(rank_config);
-        if (!rank_result.ok()) return rank_result.status();
-        ranks_.push_back(rank_result.release());
+        loaders.emplace_back(
+            [&slots, r, rank_config = std::move(rank_config)]() {
+                auto rank_result = TpRankRuntime::create(rank_config);
+                if (rank_result.ok()) {
+                    slots[r].runtime = rank_result.release();
+                } else {
+                    slots[r].status = rank_result.status();
+                }
+            });
+    }
+    for (std::thread& loader : loaders) loader.join();
+    if (model_prefetch.joinable()) model_prefetch.join();
+    if (config.release_rank_model != nullptr) config.release_rank_model();
+    for (RankSlot& slot : slots) {
+        if (!slot.status.ok()) return slot.status;
+        ranks_.push_back(std::move(slot.runtime));
     }
 
     Status verify_status = transport_->verify();

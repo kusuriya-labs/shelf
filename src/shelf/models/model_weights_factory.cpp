@@ -15,6 +15,11 @@ ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
 Result<ModelFamily> probe_model_dir(const std::string& model_dir) {
     auto experts = shelf::qwen35moe::read_declared_num_experts(model_dir);
     if (!experts.ok()) return experts.status();
+    auto ple = shelf::qwen_hybrid::has_text_config_key(model_dir, "ple_layer_ids");
+    if (!ple.ok()) return ple.status();
+    auto hc = shelf::qwen_hybrid::has_text_config_key(model_dir, "hc_count");
+    if (!hc.ok()) return hc.status();
+    if (ple.value() && hc.value()) return ModelFamily::Qwen4Exp;
     return experts.value() > 0u ? ModelFamily::Moe : ModelFamily::Dense;
 }
 
@@ -25,6 +30,13 @@ Result<LoadedModelWeights> load_model_weights(
     const shelf::qwen35::Qwen35LoadOptions& options) {
     auto family = probe_model_dir(model_dir);
     if (!family.ok()) return family.status();
+
+    if (family.value() == ModelFamily::Qwen4Exp) {
+        return Status::unsupported(
+            "Qwen4Exp checkpoints use the qwen4exp load path, not the compute "
+            "LoadedModel family",
+            __FILE__, __LINE__);
+    }
 
     if (family.value() == ModelFamily::Moe) {
         if (options.stage.enabled) {

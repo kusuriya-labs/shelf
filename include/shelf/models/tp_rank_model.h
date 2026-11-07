@@ -8,6 +8,8 @@
 #include <shelf/models/qwen35/runtime/tensor_parallel.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_model.h>
+#include <shelf/models/qwen4exp/model/qwen4exp_model.h>
+#include <shelf/models/qwen4exp/weights/ple_table.h>
 
 #include <hip/hip_runtime.h>
 
@@ -52,6 +54,15 @@ public:
     // executor's staging planes for that form are large, and the memory plan only reserves
     // them when a program will actually run such a linear.
     virtual bool uses_exl3_linear() const = 0;
+    // State pools the executor owns and allocates after the memory plan has sized the KV
+    // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
+    // the rank runtime already holds.
+    virtual std::size_t executor_state_reserve_bytes(std::size_t) const {
+        return 0u;
+    }
+    // Width of the hidden the family exposes for MTP. Zero means the model's hidden size.
+    // Qwen4Exp exposes the pre-mixer wide residual (hc * hidden).
+    virtual std::uint32_t normed_token_hidden_width() const { return 0u; }
 
     virtual shelf::Result<shelf::qwen35::Executor> create_executor(
         shelf::qwen35::SequenceSlotPool& sequence_pool,
@@ -67,6 +78,8 @@ public:
     // rank runtime cannot see this: the interface declares it, and only this layer's
     // implementations override it.
     virtual const shelf::qwen35moe::Qwen35MoeModel* grouped_model() const { return nullptr; }
+    // The Qwen4Exp model behind this rank. Null for the other families.
+    virtual const shelf::qwen4exp::Qwen4ExpModel* qwen4exp_model() const { return nullptr; }
 
 protected:
     TpRankModel() = default;
@@ -78,9 +91,16 @@ using TpRankModelBuilder = shelf::qwen35::runtime::TpRankModelBuilder;
 
 // The grouped-expert family's builder. The dense family's is
 // shelf::qwen35::runtime::build_dense_tp_rank_model.
+shelf::Result<std::unique_ptr<TpRankModel>> build_qwen4exp_tp_rank_model(
+    const shelf::qwen35::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
+    hipStream_t stream);
+
 shelf::Result<std::unique_ptr<TpRankModel>> build_moe_tp_rank_model(
     const shelf::qwen35::runtime::TpRankRuntimeConfig& config, gpu::GpuArena& arena,
     hipStream_t stream);
+
+void prefetch_qwen4exp_ple_table(const std::string& model_dir);
+void release_prefetched_qwen4exp_ple_table();
 
 // Sets config.build_rank_model to the family config.model_dir declares, read from
 // num_experts before any tensor is opened.
@@ -89,6 +109,15 @@ shelf::Status select_tp_rank_model(shelf::qwen35::runtime::TpCoordinatorConfig& 
 // Lowers a grouped-expert model with this rank's expert range and hands the shared lowered
 // form to the executor. LoadedModel and a tensor parallel rank both reach the executor this
 // way, so the lowering options are stated once.
+shelf::Result<shelf::qwen35::Executor> create_qwen4exp_model_executor(
+    const shelf::qwen4exp::Qwen4ExpModel& model,
+    const std::shared_ptr<const shelf::qwen4exp::PleTable>& ple_table,
+    shelf::qwen35::SequenceSlotPool& sequence_pool,
+    shelf::qwen35::GdnStatePool& gdn_state_pool,
+    shelf::qwen35::PagedKVPool& kv_pool,
+    gpu::GpuArena& arena,
+    const shelf::qwen35::ExecutorConfig& config);
+
 shelf::Result<shelf::qwen35::Executor> create_moe_model_executor(
     const shelf::qwen35moe::Qwen35MoeModel& model,
     shelf::qwen35::SequenceSlotPool& sequence_pool,

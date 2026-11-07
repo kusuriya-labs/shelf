@@ -40,6 +40,7 @@ SERVER_DIR = Path(__file__).resolve().parent
 #   support.py                  shared helpers, not a test
 GROUPS = OrderedDict([
     ("core", [
+        "test_compute_client_reader.py",
         "test_compute_pids_scope.py",
         "test_compute_service.py",
         "test_compute_dflash2.py",

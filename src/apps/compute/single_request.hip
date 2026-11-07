@@ -560,8 +560,18 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             return 1;
         }
         auto& rank0 = tp->rank(0);
-        private_lm_head = &rank0.private_lm_head();
-        private_embed = &rank0.private_embed_tokens();
+        const auto* q4 = rank0.rank_model() != nullptr
+                             ? rank0.rank_model()->qwen4exp_model()
+                             : nullptr;
+        if (q4 != nullptr) {
+            private_lm_head = const_cast<shelf::weights::MatrixWeight*>(
+                &q4->weights().lm_head);
+            private_embed = const_cast<shelf::weights::MatrixWeight*>(
+                &q4->weights().embed_tokens);
+        } else {
+            private_lm_head = &rank0.private_lm_head();
+            private_embed = &rank0.private_embed_tokens();
+        }
     }
     shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);

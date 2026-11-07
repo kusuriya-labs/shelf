@@ -408,11 +408,117 @@ static void test_reject_cases() {
     check(!bf16_codes.ok(), "bf16 view carrying codes rejected");
 }
 
+static QuantizedTensorView make_exl3_view(const std::vector<uint8_t>& codes,
+                                          const std::vector<uint8_t>& suh,
+                                          const std::vector<uint8_t>& svh,
+                                          const std::vector<uint8_t>& marker,
+                                          std::vector<int64_t> shape) {
+    QuantizedTensorView v;
+    v.name = "w";
+    v.encoding = QuantizedEncoding::Exl3;
+    v.logical_shape = std::move(shape);
+    v.k_padded = v.logical_shape.back();
+    v.exl3_ka = 1;
+    v.exl3_half = false;
+    v.codes = ByteSpan{codes.data(), codes.size()};
+    v.suh = ByteSpan{suh.data(), suh.size()};
+    v.svh = ByteSpan{svh.data(), svh.size()};
+    v.marker = ByteSpan{marker.data(), marker.size()};
+    return v;
+}
+
+static void test_exl3_partition() {
+    const uint64_t m = 32, k = 32;
+    const uint64_t kt = k / 16, nt = m / 16;
+    const uint64_t row_bytes = 32;
+    std::vector<uint8_t> codes(kt * nt * row_bytes);
+    for (std::size_t i = 0; i < codes.size(); ++i) codes[i] = static_cast<uint8_t>(i);
+    std::vector<uint8_t> suh(k * 2), svh(m * 2);
+    for (uint64_t i = 0; i < k; ++i) {
+        suh[2 * i] = static_cast<uint8_t>(0x10 + i);
+        suh[2 * i + 1] = static_cast<uint8_t>(0x40 + i);
+    }
+    for (uint64_t i = 0; i < m; ++i) {
+        svh[2 * i] = static_cast<uint8_t>(0x20 + i);
+        svh[2 * i + 1] = static_cast<uint8_t>(0x50 + i);
+    }
+    const std::vector<uint8_t> marker{0xAA, 0xBB, 0xCC, 0xDD};
+    const QuantizedTensorView g = make_exl3_view(codes, suh, svh, marker, {32, 32});
+
+    {
+        OwnedCanonicalTensor owned;
+        QuantizedTensorView local;
+        Status st = materialize_rank_local_canonical(
+            desc_of(0, {32, 32}, 0, 2, {rng(0, 16)}), g, owned, local);
+        check(st.ok(), "exl3 axis0 rank0 materialize");
+        if (st.ok()) {
+            check(local.logical_shape == std::vector<int64_t>({16, 32}),
+                  "exl3 axis0 local shape");
+            check(local.k_padded == 32, "exl3 axis0 local k_padded");
+            check(local.exl3_ka == 1 && !local.exl3_half, "exl3 axis0 carries the bit rate");
+            check(local.marker.size == 4, "exl3 axis0 keeps the marker");
+            std::vector<uint8_t> want;
+            want.insert(want.end(), codes.begin(), codes.begin() + row_bytes);
+            want.insert(want.end(), codes.begin() + 2 * row_bytes,
+                        codes.begin() + 3 * row_bytes);
+            check_bytes("exl3 axis0 rank0 trellis", owned.codes, want);
+            check_bytes("exl3 axis0 rank0 suh", owned.suh, suh);
+            check_bytes("exl3 axis0 rank0 svh", owned.svh,
+                        std::vector<uint8_t>(svh.begin(), svh.begin() + 16 * 2));
+            check_bytes("exl3 axis0 rank0 marker", owned.marker, marker);
+        }
+    }
+    {
+        OwnedCanonicalTensor owned;
+        QuantizedTensorView local;
+        Status st = materialize_rank_local_canonical(
+            desc_of(0, {32, 32}, 1, 2, {rng(16, 16)}), g, owned, local);
+        check(st.ok(), "exl3 axis0 rank1 materialize");
+        if (st.ok()) {
+            std::vector<uint8_t> want;
+            want.insert(want.end(), codes.begin() + row_bytes,
+                        codes.begin() + 2 * row_bytes);
+            want.insert(want.end(), codes.begin() + 3 * row_bytes,
+                        codes.begin() + 4 * row_bytes);
+            check_bytes("exl3 axis0 rank1 trellis", owned.codes, want);
+            check_bytes("exl3 axis0 rank1 svh", owned.svh,
+                        std::vector<uint8_t>(svh.begin() + 16 * 2, svh.end()));
+        }
+    }
+    {
+        OwnedCanonicalTensor owned;
+        QuantizedTensorView local;
+        Status st = materialize_rank_local_canonical(
+            desc_of(1, {32, 32}, 1, 2, {rng(16, 16)}), g, owned, local);
+        check(st.ok(), "exl3 axis1 rank1 materialize");
+        if (st.ok()) {
+            check(local.logical_shape == std::vector<int64_t>({32, 16}),
+                  "exl3 axis1 local shape");
+            check(local.k_padded == 16, "exl3 axis1 local k_padded");
+            std::vector<uint8_t> want(codes.begin() + 2 * row_bytes, codes.end());
+            check_bytes("exl3 axis1 rank1 trellis", owned.codes, want);
+            check_bytes("exl3 axis1 rank1 suh", owned.suh,
+                        std::vector<uint8_t>(suh.begin() + 16 * 2, suh.end()));
+            check_bytes("exl3 axis1 rank1 svh", owned.svh, svh);
+        }
+    }
+    {
+        OwnedCanonicalTensor owned;
+        QuantizedTensorView local;
+        QuantizedTensorView bad = g;
+        bad.suh = ByteSpan{};
+        Status st = materialize_rank_local_canonical(
+            desc_of(0, {32, 32}, 0, 2, {rng(0, 16)}), bad, owned, local);
+        check(!st.ok(), "exl3 view missing suh rejected");
+    }
+}
+
 int main() {
     test_bf16_partitions();
     test_segmented_gdn();
     test_expert_3d_partition();
     test_fp8_partition();
+    test_exl3_partition();
     test_reject_cases();
 
     std::printf(g_fail == 0 ? "PASS\n" : "FAIL (%d)\n", g_fail);

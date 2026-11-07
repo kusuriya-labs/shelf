@@ -17,6 +17,9 @@ struct HybridHeadLowering {
     uint32_t hidden_features = 0;
     float eps = 1e-6f;
     uint32_t final_norm_param = UINT32_MAX;
+    // Qwen4Exp has no output norm: the final hyper-connection mixer already collapsed the
+    // streams. The selected hidden goes straight to the LM projection.
+    bool apply_final_norm = true;
 
     // The LM projection as it stands in the weight table. When the head is tied, the
     // caller names the embedding's index and shape.
@@ -58,8 +61,9 @@ inline HybridHeadOutput emit_hybrid_head(
         pg.nodes.back().debug_name = debug_prefix + "selected_hidden";
     }
 
-    RT::ValueId normed_hidden = em.value(head.hidden_features);
-    {
+    RT::ValueId normed_hidden = selected_hidden;
+    if (head.apply_final_norm) {
+        normed_hidden = em.value(head.hidden_features);
         RT::RmsNormNode head_rms;
         head_rms.shape = hidden_key;
         head_rms.eps = head.eps;

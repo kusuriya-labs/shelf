@@ -80,7 +80,7 @@ shelf::qwen35::execute_batch(executor, batch, stream)
 | `GdnStatePool` | app | GDN linear attention state GPU buffer |
 | `SequenceSlotPool` | app | sequence slot GPU buffer |
 | `Executor` | app | ProgramSet / GPU scratch / submission state。RAII + 明示shutdown |
-| `PrefixCache` | app | compute アプリが所有する radix prefix KV / GDN state の shadow pool と cold pinned buffer。`lookup` / `save_*` / `restore` / 明示 `shutdown` |
+| `PrefixCache` | app | compute アプリが所有する radix prefix KV（active KV pool の page sharing）と GDN state / ring の shadow slot。`lookup` / `save_*` / `restore` / 明示 `shutdown` |
 | `DFlash2Executor` / `DFlash2SpecBatchContext` | app | DFlash2 drafter と共有 batch scratch。serve 終了時に明示 shutdown。`ContinuousBatcher` へは非所有ポインタで bind する |
 | `DFlash2ContextState` / `DFlash2SpecDecoder` | `RuntimeRequest`（`ContinuousBatcher`） | DFlash2 request の sequence state と decoder。admission で作成し `finish_request` で解放する |
 
@@ -118,7 +118,7 @@ MEMORY_PLAN mode=auto
   drafter runtime   drafter の scratch + session pool slot × request 数
   runtime workspace --working-set-reserve-gib
   KV budget         arena 残量から導出した physical KV pool
-  prefix cache      hot tier の実サイズ
+  prefix cache      GDN state と ring の実サイズ（KV は KV pool を共有）
   required          target + draft + drafter runtime + workspace + KV + prefix
   available         起動時の空き VRAM（fixed では arena capacity）
   arena capacity    reserved virtual address
@@ -179,6 +179,18 @@ values_per_row = 44 × (hidden + intermediate / tp) / (hidden + intermediate)
   `token_hidden {Npad, H}`、target hidden taps、sampling radix、
   `create_device_batch_context` の各 buffer、scratch 32 KiB、attention partials 32 MiB）
 
+grouped expert と QSA を持つ family（Qwen4Exp）は、上の式に加えて
+`TpRankModel::ffn_workspace_reserve_bytes()` と
+`TpRankModel::executor_state_reserve_bytes()` を reserve へ加える。
+
+- `ffn_workspace_reserve_bytes()` は grouped row 容量の activation、`MoePlanScratch`、
+  QSA の block bitmap（行あたり `ceil(blocks / 32) * 4` byte）
+- `executor_state_reserve_bytes()` は executor が plan 後に作る state pool
+  （`QsaKeyStatePool` の pooled / partial / counts、`PleConvStatePool`）で、
+  `max_scheduled_requests` 個の slot 分を確保する。byte 数は
+  `qsa_key_state_pool_bytes()` と `ple_conv_state_pool_bytes()` が決め、pool の `create`
+  と同じ関数を使う。`test_executor_state_reserve` が arena の実消費と一致することを検証する
+
 executor footprint の実測内訳（TP1 / bucket 4096 / requests 4）は program workspace が
 ほぼ全てである（合計 1.78 GiB のうち 1,780.66 MiB。うち max program 1,748.62 MiB）。
 `logits` は 3.79 MiB、`token_hidden` + sampling で 40.24 MiB、batch context 類は 1 MiB 未満。
@@ -195,12 +207,10 @@ MEMORY_PLAN tp rank 0 executor footprint: 1.16 GiB (reserve 2.06 GiB)
 `DFLASH2_WEIGHT_ARENA_BYTES` は serve 時に drafter 重みが入った実測増分であり、
 `draft weights` の見積（safetensors 合計）と対応させる。
 
-auto で `required` が `available` を超えるときは次の順で縮小する。
-
-1. `runtime workspace` を KV と drafter を引いた残りへ縮小する。
-   128 MiB を下回る場合は model load 前に `insufficient_memory` で失敗する。
-2. `prefix cache` の hot tokens を 1 page 単位で縮小する。
-3. 1 page も入らなければ prefix cache を無効化する。
+auto で `required` が `available` を超えるときは、`runtime workspace` を
+KV と drafter を引いた残りへ縮小する。128 MiB を下回る場合は model load 前に
+`insufficient_memory` で失敗する。prefix cache は KV を予約せず active KV pool の
+page を共有するため、縮小・無効化の対象にしない。
 
 縮小は stderr に 1 行ずつ出す。`--arena-gib N` は measurement の再現用であり、
 N GiB を固定値として使う（auto の縮小はしない）。TP=2 では上の内訳ではなく、
@@ -282,13 +292,13 @@ Queued requestをadmissionする。`max_concurrent_requests > 1` でも全reques
 `DeviceBatchContext::num_requests` が1 stepでco-batchされたrequest数である。debug時は
 `SHELF_BATCH_TRACE=1` でstderrへ `SHELF_BATCH_STEP requests=R tokens=T` を出す。
 
-注意: 通常decodeのlinear kernelはbatch行数に応じてGEMV / GEMM configを選択する
+注意: 通常decodeのlinear kernelはbatch行数に応じてconfigを選択する
 （`inference/execution/selectors/linear_selector.cpp`）。このためco-batchされたrequestのgreedy tokenは、
 single-request実行と一致しない場合がある（argmaxが僅差のとき）。これはcross-request
-混入ではなく、kernel選択に依存する浮動小数の差である。batch行数に依らずdecodeと
-bit一致する経路はtarget verify（`role == Verify`）のexact系kernelに限られる
-（GEMMのmulti-row `ExactRows`とGDN recurrenceのserial variant、mode切替なしの
-role固定）。request間の
+混入ではなく、kernel選択に依存する浮動小数の差である。bf16 GEMM は行数だけで config が
+決まるため（`rows == 1` と `2 <= rows <= 16` は `ExactRows`、`rows >= 17` は WMMA 系）、
+target verify も decode と同じ config になる。batch 行数に依らず bit 一致する経路は
+GDN recurrence の serial variant（`role == Verify` 固定）だけである。request間の
 event demultiplexと `token* == done.generated_ids` はco-batchでも保証される。
 
 ## Request retirement
@@ -356,7 +366,8 @@ host-side request objectは解放しない。
 
 prefix cache は compute アプリが所有する `PrefixCache`
 （`shelf/models/qwen35/runtime/prefix_cache.h`）である。radix tree 上の
-page 単位 prefix KV / GDN state を VRAM（hot）と pinned DRAM（cold）に保持し、
+page 単位 prefix KV は active KV pool の page を共有し、GDN state と ring を
+VRAM の shadow slot に保持する。
 `ContinuousBatcher` が request admission 時に lookup・restore、
 prefill 完了時・decode 境界通過時・出力末尾で save を行う。
 `PrefixCache::create` に失敗した場合は無効化して続行し、

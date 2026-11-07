@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <utility>
+#include <string>
 #include <vector>
 
 namespace shelf {
@@ -19,6 +20,8 @@ struct HybridLoweredPrimitives {
     std::vector<::shelf::runtime::WeightSlot> weights;
     std::vector<::shelf::runtime::StaticParameterSlot> parameters;
     std::vector<std::pair<std::uint32_t, ::shelf::runtime::ValueId>> layer_input_values;
+    std::vector<std::pair<std::uint32_t, ::shelf::runtime::ValueId>> layer_output_values;
+    std::vector<std::pair<std::string, ::shelf::runtime::ValueId>> trace_values;
 };
 
 }

@@ -87,7 +87,6 @@ std::optional<shelf::kernel::Bf16GemmConfig> select_bf16_gemm(
     lin.weight_aligned16 = (reinterpret_cast<uintptr_t>(weight_ptr) & 15u) == 0u;
     lin.input_aligned16 = (reinterpret_cast<uintptr_t>(input_ptr) & 15u) == 0u;
     lin.allow_exact_rows = allow_exact_rows;
-    lin.verify_exact = allow_exact_rows;
     lin.allow_dot2_rows = allow_exact_rows;
     return runtime::select_bf16_gemm_config(lin);
 }

@@ -2,6 +2,7 @@
 #include "detail/activation_quantize_device.h"
 #include <shelf/quantization/codec/e4m3_detail.h>
 #include <shelf/quantization/codec/e2m1_detail.h>
+#include <shelf/quantization/fp8/fp8_frag.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cmath>
@@ -249,6 +250,63 @@ activation_quantize_fp8_finegrained_vec_kernel(
         scale_row_stride);
 }
 
+__global__ __launch_bounds__(kThreadsPerRow) void activation_quantize_fp8_pertoken_kernel(
+    const ::shelf::bf16_t* __restrict__ input,
+    uint8_t* __restrict__ codes,
+    float* __restrict__ scales,
+    const uint32_t rows,
+    const uint32_t padded_rows,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t code_row_stride,
+    const uint32_t scale_row_stride) {
+    const uint32_t row = blockIdx.x;
+    if (row >= padded_rows) return;
+    __shared__ float scratch[kThreadsPerRow];
+    const bool valid = row < rows;
+
+    float scale = 1.0f;
+    const ::shelf::bf16_t* input_row =
+        valid ? input + static_cast<std::uint64_t>(row) * input_row_stride : nullptr;
+    if (valid) {
+        float amax = 0.0f;
+        for (uint32_t i = threadIdx.x; i < k; i += blockDim.x)
+            amax = fmaxf(amax, fabsf(__bfloat162float(
+                                   reinterpret_cast<const __hip_bfloat16*>(input_row)[i])));
+        scratch[threadIdx.x] = amax;
+        __syncthreads();
+        for (uint32_t stride = kThreadsPerRow / 2u; stride > 0u; stride >>= 1u) {
+            if (threadIdx.x < stride)
+                scratch[threadIdx.x] =
+                    fmaxf(scratch[threadIdx.x], scratch[threadIdx.x + stride]);
+            __syncthreads();
+        }
+        scale = scratch[0] > 0.0f ? scratch[0] / 448.0f : 1.0f;
+    }
+    if (threadIdx.x == 0u) {
+        scales[static_cast<std::uint64_t>(row) * (scale_row_stride / sizeof(float))] =
+            scale;
+    }
+
+    const std::uint64_t tile_base =
+        static_cast<std::uint64_t>(row >> 4u) * code_row_stride * 16u;
+    uint8_t* tile = codes + tile_base;
+    const uint32_t tile_row = row & 15u;
+    for (uint32_t i = threadIdx.x; i < k; i += blockDim.x) {
+        const uint32_t k_block = i >> 6u;
+        const std::size_t offset =
+            static_cast<std::size_t>(k_block) *
+                ::shelf::quantization::fp8::kFragBlockBytes +
+            ::shelf::quantization::fp8::fp8_frag_offset(tile_row, i & 63u);
+        tile[offset] =
+            valid ? ::shelf::quantization::codec::device::e4m3_encode_u8(
+                        __bfloat162float(
+                            reinterpret_cast<const __hip_bfloat16*>(input_row)[i]) /
+                        scale)
+                  : 0u;
+    }
+}
+
 }  // namespace
 
 bool activation_quantize_fp8_finegrained_vec_supported(
@@ -318,6 +376,31 @@ hipError_t launch_activation_quantize_fp8_finegrained_generic(
 extern "C" __global__ __launch_bounds__(256)
 void shelf_activation_quantize_fp8_finegrained_k5120(
     ActivationQuantizeFp8FinegrainedK5120Args args);
+
+hipError_t launch_activation_quantize_fp8_pertoken(
+    const ::shelf::bf16_t* input,
+    uint8_t* codes,
+    float* scales,
+    uint32_t rows,
+    uint32_t padded_rows,
+    uint32_t max_rows,
+    uint32_t k,
+    uint32_t input_row_stride,
+    uint32_t code_row_stride_bytes,
+    uint32_t scale_row_stride_bytes,
+    hipStream_t stream) {
+    if (input == nullptr || codes == nullptr || scales == nullptr)
+        return hipErrorInvalidValue;
+    if (rows == 0u || padded_rows < rows || padded_rows > max_rows || k == 0u ||
+        input_row_stride < k || code_row_stride_bytes < k ||
+        scale_row_stride_bytes < sizeof(float) ||
+        (code_row_stride_bytes % ::shelf::quantization::fp8::kFragBlockK) != 0u)
+        return hipErrorInvalidValue;
+    activation_quantize_fp8_pertoken_kernel<<<padded_rows, kThreadsPerRow, 0, stream>>>(
+        input, codes, scales, rows, padded_rows, k, input_row_stride,
+        code_row_stride_bytes, scale_row_stride_bytes);
+    return hipGetLastError();
+}
 
 hipError_t launch_activation_quantize_fp8_finegrained(
     const ::shelf::bf16_t* input,

@@ -134,18 +134,50 @@ Result<PagedKVPool> PagedKVPool::create(
 
     pool.in_use_.assign(num_pages, false);
     pool.free_list_.reserve(num_pages);
+    pool.seq_refs_.assign(num_pages, 0);
+    pool.cache_refs_.assign(num_pages, 0);
+    pool.page_state_.assign(num_pages, kPageFree);
+    pool.free_pos_.assign(num_pages, 0);
+    pool.cached_pos_.assign(num_pages, 0);
     for (uint32_t i = 0; i < num_pages; ++i) {
         pool.free_list_.push_back(i);
+        pool.free_pos_[i] = i;
     }
 
     return Result<PagedKVPool>(std::move(pool));
 }
 
+void PagedKVPool::free_remove(PageId page) {
+    const uint32_t pos = free_pos_[page];
+    const PageId last = free_list_.back();
+    free_list_[pos] = last;
+    free_pos_[last] = pos;
+    free_list_.pop_back();
+    free_pos_[page] = kInvalidPageId;
+}
+
+void PagedKVPool::cached_remove(PageId page) {
+    const uint32_t pos = cached_pos_[page];
+    const PageId last = cached_list_.back();
+    cached_list_[pos] = last;
+    cached_pos_[last] = pos;
+    cached_list_.pop_back();
+    cached_pos_[page] = kInvalidPageId;
+}
+
 Result<PageId> PagedKVPool::allocate() {
-    if (free_list_.empty()) return Status::insufficient_memory("KV page pool exhausted", __FILE__, __LINE__);
+    if (free_list_.empty() && reclaimer_) {
+        (void)reclaimer_(1u);
+    }
+    if (free_list_.empty()) {
+        return Status::insufficient_memory("KV page pool exhausted", __FILE__, __LINE__);
+    }
 
     PageId page = free_list_.back();
     free_list_.pop_back();
+    free_pos_[page] = kInvalidPageId;
+    page_state_[page] = kPageSeq;
+    seq_refs_[page] = 1u;
     in_use_[page] = true;
     ++used_count_;
 
@@ -156,27 +188,93 @@ Status PagedKVPool::adopt(PageId page) {
     if (page >= num_pages_) {
         return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
     }
-    if (in_use_[page]) {
+    if (page_state_[page] != kPageFree) {
         return Status::invalid_argument("page already in use", __FILE__, __LINE__);
     }
-    auto it = std::find(free_list_.begin(), free_list_.end(), page);
-    if (it == free_list_.end()) {
-        return Status::invalid_state("page is not in the free list", __FILE__, __LINE__);
-    }
-    if (it + 1 != free_list_.end()) *it = free_list_.back();
-    free_list_.pop_back();
+    free_remove(page);
+    page_state_[page] = kPageSeq;
+    seq_refs_[page] = 1u;
     in_use_[page] = true;
     ++used_count_;
     return Status::make_ok();
 }
 
+Status PagedKVPool::attach(PageId page) {
+    if (page >= num_pages_) {
+        return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
+    }
+    if (page_state_[page] == kPageSeq) {
+        ++seq_refs_[page];
+        return Status::make_ok();
+    }
+    if (page_state_[page] == kPageCached) {
+        cached_remove(page);
+        --cached_count_;
+    } else {
+        free_remove(page);
+    }
+    page_state_[page] = kPageSeq;
+    seq_refs_[page] = 1u;
+    in_use_[page] = true;
+    ++used_count_;
+    return Status::make_ok();
+}
+
+Status PagedKVPool::retain_cache(PageId page) {
+    if (page >= num_pages_) {
+        return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
+    }
+    if (page_state_[page] == kPageFree) {
+        free_remove(page);
+        page_state_[page] = kPageCached;
+        ++cached_count_;
+    }
+    ++cache_refs_[page];
+    return Status::make_ok();
+}
+
+Status PagedKVPool::release_cache(PageId page) {
+    if (page >= num_pages_) {
+        return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
+    }
+    if (cache_refs_[page] == 0u) {
+        return Status::invalid_state("page has no cache reference", __FILE__, __LINE__);
+    }
+    --cache_refs_[page];
+    if (cache_refs_[page] != 0u) return Status::make_ok();
+    if (page_state_[page] == kPageCached) {
+        cached_remove(page);
+        --cached_count_;
+        page_state_[page] = kPageFree;
+        free_pos_[page] = static_cast<uint32_t>(free_list_.size());
+        free_list_.push_back(page);
+    }
+    return Status::make_ok();
+}
+
 Status PagedKVPool::release(PageId page) {
-    if (page >= num_pages_) return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
-    if (!in_use_[page]) return Status::invalid_argument("page not in use", __FILE__, __LINE__);
+    if (page >= num_pages_) {
+        return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
+    }
+    if (page_state_[page] != kPageSeq || seq_refs_[page] == 0u) {
+        return Status::invalid_argument("page not in use", __FILE__, __LINE__);
+    }
+
+    --seq_refs_[page];
+    if (seq_refs_[page] != 0u) return Status::make_ok();
 
     in_use_[page] = false;
-    free_list_.push_back(page);
     --used_count_;
+    if (cache_refs_[page] != 0u) {
+        page_state_[page] = kPageCached;
+        cached_pos_[page] = static_cast<uint32_t>(cached_list_.size());
+        cached_list_.push_back(page);
+        ++cached_count_;
+    } else {
+        page_state_[page] = kPageFree;
+        free_pos_[page] = static_cast<uint32_t>(free_list_.size());
+        free_list_.push_back(page);
+    }
     return Status::make_ok();
 }
 
@@ -184,7 +282,9 @@ Status PagedKVPool::validate_release_many(const std::vector<PageId>& pages) cons
     for (PageId page : pages) {
         if (page == kInvalidPageId) return Status::invalid_argument("invalid page id", __FILE__, __LINE__);
         if (page >= num_pages_) return Status::invalid_argument("page id out of range", __FILE__, __LINE__);
-        if (!in_use_[page]) return Status::invalid_argument("page not in use", __FILE__, __LINE__);
+        if (page_state_[page] != kPageSeq || seq_refs_[page] == 0u) {
+            return Status::invalid_argument("page not in use", __FILE__, __LINE__);
+        }
     }
 
     for (std::size_t i = 0; i < pages.size(); ++i) {
@@ -201,9 +301,7 @@ Status PagedKVPool::release_many(const std::vector<PageId>& pages) {
     if (!validate_st.ok()) return validate_st;
 
     for (PageId page : pages) {
-        in_use_[page] = false;
-        free_list_.push_back(page);
-        --used_count_;
+        (void)release(page);
     }
 
     return Status::make_ok();

@@ -211,8 +211,25 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
                                         __FILE__, __LINE__);
     }
     Status status = validate_qwen35moe_weights(weights, config, options.tp_size,
-                                               options.tp_rank);
+                                               options.tp_rank, options.stage);
     if (!status.ok()) return status;
+
+    const bool stage_load = options.stage.enabled;
+    const std::size_t num_layers = weights.layers.size();
+    const std::size_t layer_lo = stage_load ? options.stage.layers.layer_lo : 0u;
+    const std::size_t layer_hi = stage_load ? options.stage.layers.layer_hi : num_layers;
+    const bool first_stage = !stage_load || options.stage.first();
+    const bool last_stage =
+        !stage_load || options.stage.last(static_cast<uint32_t>(num_layers));
+    if (stage_load && !options.hidden_taps.empty()) {
+        return Status::unsupported(
+            "pipeline stage lowering does not accept hidden taps", __FILE__, __LINE__);
+    }
+    if (stage_load && !options.override_layers.empty()) {
+        return Status::unsupported(
+            "pipeline stage lowering does not accept layer overrides", __FILE__, __LINE__);
+    }
+
     status = validate_hidden_taps(options, weights.layers.size());
     if (!status.ok()) return status;
 
@@ -290,8 +307,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
 
     std::vector<MoeExpertGroupPlan> plans(weights.layers.size());
     std::vector<LayerWeightIndices> layer_weights(weights.layers.size());
-    const uint32_t embed_index = add_weight(weights.embed_tokens);
-    for (std::size_t li = 0; li < weights.layers.size(); ++li) {
+    const bool embed_loaded = first_stage || (last_stage && weights.lm_head_tied);
+    const uint32_t embed_index = embed_loaded ? add_weight(weights.embed_tokens) : UINT32_MAX;
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
         auto plan_result = build_moe_expert_group_plan(config, li, tp_size, options.tp_rank);
         if (!plan_result.ok()) return plan_result.status();
         plans[li] = plan_result.release();
@@ -319,7 +337,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         idx.shared_scale = add_weight(lw.ffn.shared_gate);
     }
     const bool lm_tied = weights.lm_head_tied;
-    const uint32_t lm_index = lm_tied ? embed_index : add_weight(weights.lm_head);
+    const uint32_t lm_index =
+        last_stage ? (lm_tied ? embed_index : add_weight(weights.lm_head)) : UINT32_MAX;
 
     float eps = config.rms_norm_eps;
     float rope_theta = config.rope_theta;
@@ -341,7 +360,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         return static_cast<uint32_t>(lowered.parameters.size() - 1);
     };
     std::vector<LayerParamIndices> layer_params(weights.layers.size());
-    for (std::size_t li = 0; li < weights.layers.size(); ++li) {
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.layers[li];
         auto& lp = layer_params[li];
         if (lw.input_layernorm_weight.ndim() > 0)
@@ -364,9 +383,9 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     QH::Emitter em{pg};
     const RT::RowwiseShapeKey hidden_key{hidden_size};
 
-    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
     RT::ValueId layer_input = em.value(hidden_size);
-    {
+    if (first_stage) {
+        RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
         RT::EmbeddingLookupNode n;
         n.vocab_size = weights.embed_tokens.rows;
         n.hidden_size = hidden_size;
@@ -376,6 +395,8 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         em.emit(RT::PrimitiveNode{n}, {tokens}, {layer_input});
         pg.nodes.back().debug_name = "embedding";
         pg.external_inputs.push_back(tokens);
+    } else {
+        pg.external_inputs.push_back(layer_input);
     }
 
     std::vector<RT::ValueId> hidden_tap_values(options.hidden_taps.size());
@@ -384,7 +405,7 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
     uint32_t next_gdn_state_index = 0;
     uint32_t next_attention_state_index = 0;
 
-    for (std::size_t li = 0; li < weights.layers.size(); ++li) {
+    for (std::size_t li = layer_lo; li < layer_hi; ++li) {
         const auto& lw = weights.layers[li];
         const auto& lw_idx = layer_weights[li];
         const auto& lp = layer_params[li];
@@ -466,19 +487,23 @@ Result<QH::HybridLoweredPrimitives> lower_qwen35_moe_to_primitives(
         }
     }
 
-    const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
-    if (lmw->rows != config.vocab_size) {
-        return Status::unsupported("MoE lowering requires an unsharded lm_head", __FILE__,
-                                   __LINE__);
+    if (!last_stage) {
+        pg.external_outputs.push_back(layer_input);
+    } else {
+        const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
+        if (lmw->rows != config.vocab_size) {
+            return Status::unsupported("MoE lowering requires an unsharded lm_head", __FILE__,
+                                       __LINE__);
+        }
+        QH::HybridHeadLowering head;
+        head.hidden_features = hidden_size;
+        head.eps = eps;
+        head.final_norm_param = final_norm_param;
+        head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
+        head.lm_weight_index = lm_index;
+        head.out_vocab = lmw->rows;
+        QH::emit_hybrid_head(em, head, layer_input);
     }
-    QH::HybridHeadLowering head;
-    head.hidden_features = hidden_size;
-    head.eps = eps;
-    head.final_norm_param = final_norm_param;
-    head.lm_shape = RT::MatrixwiseShapeKey{lmw->rows, lmw->cols};
-    head.lm_weight_index = lm_index;
-    head.out_vocab = lmw->rows;
-    QH::emit_hybrid_head(em, head, layer_input);
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {
         if (hidden_tap_found[t] == 0) {

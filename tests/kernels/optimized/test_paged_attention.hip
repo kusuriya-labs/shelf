@@ -98,7 +98,24 @@ struct Config {
     uint32_t seed = 1;
     bool tree = false;
     uint32_t tree_committed_end = 0;
+    // QSA block selection: one bit per indexer block of (1 << mask_block_shift) tokens.
+    // Zero disables the mask.
+    uint32_t mask_blocks = 0;
+    uint32_t mask_block_shift = 0;
 };
+
+uint32_t mask_stride_bytes(const Config& cfg) {
+    return ((cfg.mask_blocks + 31u) / 32u) * 4u;
+}
+
+bool mask_visible(const Config& cfg, const std::vector<uint8_t>& mask, uint32_t row,
+                  uint32_t position) {
+    const uint32_t block = position >> cfg.mask_block_shift;
+    if (block >= cfg.mask_blocks) return false;
+    return ((mask[static_cast<size_t>(row) * mask_stride_bytes(cfg) + (block >> 3u)]
+             >> (block & 7u)) &
+            1u) != 0u;
+}
 
 struct Dev {
     void* q = nullptr;
@@ -114,6 +131,7 @@ struct Dev {
     void* v_pool = nullptr;
     void* k_scale = nullptr;
     void* v_scale = nullptr;
+    void* mask = nullptr;
 };
 
 void free_dev(Dev& d) {
@@ -130,6 +148,7 @@ void free_dev(Dev& d) {
     if (d.v_pool) shelf::gpu::discard_cleanup_result(hipFree(d.v_pool));
     if (d.k_scale) shelf::gpu::discard_cleanup_result(hipFree(d.k_scale));
     if (d.v_scale) shelf::gpu::discard_cleanup_result(hipFree(d.v_scale));
+    if (d.mask) shelf::gpu::discard_cleanup_result(hipFree(d.mask));
     d = Dev{};
 }
 
@@ -159,6 +178,20 @@ bool run_case(const Config& cfg, const char* label) {
     for (uint32_t slot = 0; slot < cfg.max_sequences; ++slot)
         for (uint32_t lb = 0; lb < cfg.block_table_stride; ++lb)
             block_tables[static_cast<size_t>(slot) * cfg.block_table_stride + lb] = lb % cfg.num_pages;
+
+    const uint32_t mask_stride = mask_stride_bytes(cfg);
+    std::vector<uint8_t> mask(static_cast<size_t>(cfg.rows) * mask_stride, 0u);
+    if (cfg.mask_blocks != 0u) {
+        for (uint32_t r = 0; r < cfg.rows; ++r) {
+            for (uint32_t b = 0; b < cfg.mask_blocks; ++b) {
+                // Block 0 stays visible so no row can end up with an empty softmax.
+                const bool keep = b == 0u || (h32(cfg.seed * 7717u + r * 1024u + b) % 3u) != 0u;
+                if (!keep) continue;
+                mask[static_cast<size_t>(r) * mask_stride + (b >> 3u)] |=
+                    static_cast<uint8_t>(1u << (b & 7u));
+            }
+        }
+    }
 
     std::vector<uint16_t> q(q_elems);
     for (size_t i = 0; i < q_elems; ++i)
@@ -289,7 +322,10 @@ bool run_case(const Config& cfg, const char* label) {
         } else {
             const uint32_t visible = row_pos[r] + 1;
             keys.reserve(visible);
-            for (uint32_t p = 0; p < visible; ++p) keys.push_back(p);
+            for (uint32_t p = 0; p < visible; ++p) {
+                if (cfg.mask_blocks != 0u && !mask_visible(cfg, mask, r, p)) continue;
+                keys.push_back(p);
+            }
         }
         const uint32_t visible = static_cast<uint32_t>(keys.size());
         for (uint32_t qh = 0; qh < cfg.q_heads; ++qh) {
@@ -379,6 +415,8 @@ bool run_case(const Config& cfg, const char* label) {
         if (hipMalloc(&d.anc_pos, anc_positions.size() * 4) != hipSuccess) ok = false;
     }
     if (hipMalloc(&d.block_tables, bt_elems * 4) != hipSuccess) ok = false;
+    if (cfg.mask_blocks != 0u &&
+        hipMalloc(&d.mask, mask.size()) != hipSuccess) ok = false;
     if (hipMalloc(&d.k_pool, pool_bytes) != hipSuccess) ok = false;
     if (hipMalloc(&d.v_pool, pool_bytes) != hipSuccess) ok = false;
     if (cfg.fp8) {
@@ -398,6 +436,8 @@ bool run_case(const Config& cfg, const char* label) {
                       hipMemcpyHostToDevice) != hipSuccess) ok = false;
     }
     if (hipMemcpy(d.block_tables, block_tables.data(), bt_elems * 4, hipMemcpyHostToDevice) != hipSuccess) ok = false;
+    if (cfg.mask_blocks != 0u &&
+        hipMemcpy(d.mask, mask.data(), mask.size(), hipMemcpyHostToDevice) != hipSuccess) ok = false;
     if (hipMemcpy(d.k_pool, k_pool.data(), pool_bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
     if (hipMemcpy(d.v_pool, v_pool.data(), pool_bytes, hipMemcpyHostToDevice) != hipSuccess) ok = false;
     if (cfg.fp8) {
@@ -434,6 +474,12 @@ bool run_case(const Config& cfg, const char* label) {
     c.elems_per_page = epp;
     c.elems_per_layer = epl;
     c.scale = cfg.scale;
+    if (cfg.mask_blocks != 0u) {
+        c.block_mask = static_cast<const uint8_t*>(d.mask);
+        c.mask_stride = mask_stride;
+        c.mask_blocks = cfg.mask_blocks;
+        c.mask_block_shift = cfg.mask_block_shift;
+    }
 
     hipError_t h = hipSuccess;
     if (cfg.prefill && cfg.fp8) {
@@ -478,7 +524,7 @@ bool run_case(const Config& cfg, const char* label) {
     // A geometry the planner would send down the split path has to agree with the non-split
     // kernel here: the split body and the reduce are separate instantiations per q_per_kv, so
     // only this comparison catches a wrong pairing (the planner cannot).
-    if (!cfg.prefill && !cfg.tree
+    if (!cfg.prefill && !cfg.tree && cfg.mask_blocks == 0u
         && (cfg.fp8 ? ::shelf::kernel::paged_attention_fp8_split_supports(q_per_kv)
                     : ::shelf::kernel::paged_attention_bf16_split_supports(q_per_kv))) {
         const uint32_t splits = 16u;
@@ -887,6 +933,59 @@ int main() {
     run_case(c, "fp8 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=4096 rows=1");
     c.visible_override = 64;
     run_case(c, "fp8 MOE DECODE qh=16 kvh=2 hd=256 page=64 vis=64 rows=1");
+
+    // QSA block selection at the Qwen4Exp tensor-parallel rank geometry: one bit per
+    // indexer block of compress_ratio tokens. These cover the two kernels the runtime
+    // actually uses with a mask: the bf16 tiled prefill (rows >= 256 in the plan) and the
+    // per-row decode kernel, which also carries the fp8 KV prefill rows.
+    c = Config{};
+    c.rows = 16;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 16;
+    c.num_pages = 16;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 16;
+    c.max_sequences = 2;
+    c.visible_override = 256;
+    c.mask_blocks = 64u;
+    c.mask_block_shift = 2u;
+    run_case(c, "bf16 QSA MASKED DECODE qh=12 kvh=2 hd=256 page=16 vis=256 blocks=64 rows=16");
+    c.fp8 = true;
+    run_case(c, "fp8 QSA MASKED DECODE qh=12 kvh=2 hd=256 page=16 vis=256 blocks=64 rows=16");
+    c = Config{};
+    c.rows = 64;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 16;
+    c.num_pages = 16;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 16;
+    c.max_sequences = 4;
+    c.mask_blocks = 64u;
+    c.mask_block_shift = 2u;
+    run_case(c, "bf16 QSA MASKED PREFILL qh=12 kvh=2 hd=256 page=16 blocks=64 rows=64");
+    c = Config{};
+    c.rows = 1;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 64;
+    c.num_pages = 32;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 32;
+    c.max_sequences = 1;
+    c.visible_override = 2048;
+    c.mask_blocks = 512u;
+    c.mask_block_shift = 2u;
+    run_case(c, "bf16 QSA MASKED DECODE qh=12 kvh=2 hd=256 page=64 vis=2048 blocks=512");
+    c.fp8 = true;
+    run_case(c, "fp8 QSA MASKED DECODE qh=12 kvh=2 hd=256 page=64 vis=2048 blocks=512");
 
     std::printf("\nResults: %d passed, %d failed, %d skipped\n", passed, failed, skipped_cases);
     if (failed == 0 && passed == 0)

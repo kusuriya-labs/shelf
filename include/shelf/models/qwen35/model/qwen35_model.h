@@ -1,7 +1,7 @@
 #pragma once
 
 #include <shelf/models/qwen35/model/qwen35_config.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/core/status.h>
 #include <shelf/core/memory/arena.h>
@@ -10,6 +10,8 @@
 #include <string>
 
 namespace shelf::qwen35 {
+
+using ::shelf::qwen_hybrid::PipelineStage;
 
 // Model invariants of a loaded dense weight set: the shared hybrid part (embed / lm_head
 // vocab, hidden width, final norm, layer count, per-layer backbone topology) plus the

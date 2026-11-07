@@ -10,6 +10,7 @@ std::string quantized_encoding_name(QuantizedEncoding enc) {
         case QuantizedEncoding::Fp8: return kFp8EncodingName;
         case QuantizedEncoding::Mxfp4: return kMxfp4EncodingName;
         case QuantizedEncoding::Exl3: return kExl3EncodingName;
+        case QuantizedEncoding::Fp8PerChannel: return kFp8PerChannelEncodingName;
     }
     return "unknown";
 }
@@ -19,6 +20,7 @@ Result<QuantizedEncoding> parse_quantized_encoding(const std::string& name) {
     if (name == kFp8EncodingName) return QuantizedEncoding::Fp8;
     if (name == kMxfp4EncodingName) return QuantizedEncoding::Mxfp4;
     if (name == kExl3EncodingName) return QuantizedEncoding::Exl3;
+    if (name == kFp8PerChannelEncodingName) return QuantizedEncoding::Fp8PerChannel;
     return Status::invalid_argument("unsupported quantized tensor encoding", __FILE__, __LINE__);
 }
 
@@ -28,6 +30,7 @@ shelf::quantization::QuantFormatId quant_format_id(QuantizedEncoding enc) {
         case QuantizedEncoding::Fp8: return shelf::quantization::QuantFormatId::Fp8Finegrained;
         case QuantizedEncoding::Mxfp4: return shelf::quantization::QuantFormatId::Mxfp4Finegrained;
         case QuantizedEncoding::Exl3: return shelf::quantization::QuantFormatId::Exl3Trellis;
+        case QuantizedEncoding::Fp8PerChannel: return shelf::quantization::QuantFormatId::Fp8PerChannel;
     }
     return shelf::quantization::QuantFormatId::None;
 }

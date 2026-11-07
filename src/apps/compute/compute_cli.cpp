@@ -68,7 +68,7 @@ void compute_usage(const char* prog) {
     printf("  --max-num-batched-tokens N   token budget per scheduled step; also sets\n");
     printf("                         the executor row bucket (default 2048)\n");
     printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
-    printf("  --tensor-parallel N    tensor parallel degree 1 | 2 (default 1)\n");
+    printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
     printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
@@ -96,16 +96,11 @@ void compute_usage(const char* prog) {
     printf("                         max %u)\n", shelf::qwen35::runtime::kMtpMaxDrafts);
     printf("  --mtp-stats 0|1        print MTP speculative decode statistics (default 1)\n");
     printf("  --prefix-cache 0|1     enable prefix cache (default 1)\n");
-    printf("  --prefix-cache-hot-tokens N    prefix cache hot tier capacity in tokens\n");
-    printf("                                 (default 16384)\n");
     printf("  --working-set-reserve-gib N    arena headroom kept free for the working set\n");
     printf("                                 (executor workspace allocated after the\n");
     printf("                                 memory plan; 0 = size it from the row\n");
     printf("                                 bucket, default 0)\n");
-    printf("  --prefix-cache-cold-tokens N   prefix cache cold tier capacity in tokens\n");
-    printf("                                 (default 65536)\n");
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
-    printf("  --prefix-cache-cold-state-slots N  cold GDN state slots (default 0 = auto)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }
@@ -171,10 +166,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& mtp_drafts = opt.mtp_drafts;
     auto& mtp_stats = opt.mtp_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
-    auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
-    auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
     auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
-    auto& prefix_cache_cold_state_slots = opt.prefix_cache_cold_state_slots;
     auto& working_set_reserve_gib = opt.working_set_reserve_gib;
     auto& rope_factor = opt.rope_factor;
     unsigned long top_k = 0;
@@ -217,8 +209,8 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_devices(argv[++i], devices)) { fprintf(stderr, "bad --device\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--tensor-parallel") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2)) {
-                fprintf(stderr, "bad --tensor-parallel (expected 1 or 2)\n");
+            if (!parse_uint(argv[++i], tp) || (tp != 1 && tp != 2 && tp != 4)) {
+                fprintf(stderr, "bad --tensor-parallel (expected 1, 2 or 4)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--pipeline-parallel") == 0 && i + 1 < argc) {
@@ -310,32 +302,15 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 fprintf(stderr, "bad --prefix-cache (expected 0 or 1)\n");
                 return kComputeParseError;
             }
-        } else if (std::strcmp(argv[i], "--prefix-cache-hot-tokens") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_hot_tokens) ||
-                prefix_cache_hot_tokens == 0) {
-                fprintf(stderr, "bad --prefix-cache-hot-tokens\n");
-                return kComputeParseError;
-            }
         } else if (std::strcmp(argv[i], "--working-set-reserve-gib") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], working_set_reserve_gib)) {
                 fprintf(stderr, "bad --working-set-reserve-gib\n");
-                return kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--prefix-cache-cold-tokens") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_cold_tokens) ||
-                prefix_cache_cold_tokens == 0) {
-                fprintf(stderr, "bad --prefix-cache-cold-tokens\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--prefix-cache-concurrency") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], prefix_cache_concurrency) ||
                 prefix_cache_concurrency == 0 || prefix_cache_concurrency > 65535) {
                 fprintf(stderr, "bad --prefix-cache-concurrency (expected 1..65535)\n");
-                return kComputeParseError;
-            }
-        } else if (std::strcmp(argv[i], "--prefix-cache-cold-state-slots") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_cold_state_slots)) {
-                fprintf(stderr, "bad --prefix-cache-cold-state-slots\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--serve-stdio") == 0) {
@@ -374,17 +349,14 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& mtp_drafts = opt.mtp_drafts;
     const auto& mtp_stats = opt.mtp_stats;
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
-    const auto& prefix_cache_hot_tokens = opt.prefix_cache_hot_tokens;
-    const auto& prefix_cache_cold_tokens = opt.prefix_cache_cold_tokens;
     const auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
-    const auto& prefix_cache_cold_state_slots = opt.prefix_cache_cold_state_slots;
     const auto& working_set_reserve_gib = opt.working_set_reserve_gib;
     if (model_dir.empty()) {
         fprintf(stderr, "model-dir required\n");
         return kComputeParseError;
     }
-    if (tp != 1 && tp != 2) {
-        fprintf(stderr, "--tensor-parallel must be 1 or 2\n");
+    if (tp != 1 && tp != 2 && tp != 4) {
+        fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
         return kComputeParseError;
     }
     if (pipeline_parallel > 1) {
@@ -469,11 +441,6 @@ int validate_compute_options(const ComputeOptions& opt) {
                     sampling_status.message().c_str());
             return kComputeParseError;
         }
-    }
-
-    if (prefix_cache_hot_tokens < page_tokens) {
-        fprintf(stderr, "--prefix-cache-hot-tokens must be >= page-tokens\n");
-        return kComputeParseError;
     }
 
     return kComputeParseOk;

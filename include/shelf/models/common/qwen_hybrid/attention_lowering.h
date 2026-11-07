@@ -19,6 +19,9 @@ struct GatedAttentionLoweringGeometry {
     float rope_attention_factor = 1.0f;
     float eps = 1e-6f;
     RT::ValueDType out_dtype = RT::ValueDType::BF16;
+    // True when the o projection is column-split across ranks and its partial sums must be
+    // reduced. A family that replicates the attention weights clears this.
+    bool tp_combine = true;
 };
 
 struct GatedAttentionLoweringWeights {
@@ -36,6 +39,11 @@ struct GatedAttentionLoweringIndices {
     std::uint32_t p_q_norm = 0;
     std::uint32_t p_k_norm = 0;
     std::uint32_t state_index = 0;
+    // QSA sparse selection: when set, the paged attention consumes this block bitmap,
+    // whose rows hold one bit per indexer block of `block_size` tokens.
+    bool has_block_mask = false;
+    RT::ValueId block_mask{};
+    std::uint32_t block_size = 0;
 };
 
 inline RT::ValueId emit_gated_attention(
@@ -119,10 +127,15 @@ inline RT::ValueId emit_gated_attention(
         RT::PagedAttentionNode pan{
             attn_key,
             geo.head_dim ? 1.0f / sqrtf(static_cast<float>(geo.head_dim)) : 1.0f,
-            idx.state_index};
+            idx.state_index,
+            idx.has_block_mask,
+            idx.has_block_mask ? em.pg.value_features(idx.block_mask) : 0u,
+            idx.has_block_mask ? idx.block_size : 0u,
+        };
         v_ctx = em.value(q_features, RT::ValueDType::F32);
         auto& pgn = pg.add_node(RT::PrimitiveNode{pan});
-        pgn.inputs = {v_qr};
+        pgn.inputs = idx.has_block_mask ? std::vector<RT::ValueId>{v_qr, idx.block_mask}
+                                        : std::vector<RT::ValueId>{v_qr};
         pgn.outputs = {v_ctx};
         pgn.state_inputs = {kv_state};
         name_last("attn_core");
@@ -143,7 +156,7 @@ inline RT::ValueId emit_gated_attention(
     const RT::ValueId block_out =
         em.linear(*w.o, idx.w_o, v_att, geo.out_dtype);
     name_last("o_proj");
-    pg.nodes.back().tp_combine = 1;
+    if (geo.tp_combine) pg.nodes.back().tp_combine = 1;
     return block_out;
 }
 

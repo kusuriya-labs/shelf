@@ -86,11 +86,17 @@ static_assert(offsetof(Bf16GemmWmmaArgs, output_row_stride) == 44);
 inline constexpr uint32_t kBf16WmmaOutTile = 16u;
 inline constexpr uint32_t kBf16WmmaRowTile = 16u;
 inline constexpr uint32_t kBf16WmmaWideRowTiles = 4u;
+inline constexpr uint32_t kBf16WmmaWideOutTiles = 4u;
 inline constexpr uint32_t kBf16WmmaThreads = 32u;
 inline constexpr uint32_t kBf16SplitKWmmaThreads = 256u;
 
 constexpr uint32_t bf16_wmma_grid_x(uint32_t out_features) noexcept {
     return (out_features + kBf16WmmaOutTile - 1u) / kBf16WmmaOutTile;
+}
+
+constexpr uint32_t bf16_wmma_grid_x_wide(uint32_t out_features) noexcept {
+    constexpr uint32_t kWidth = kBf16WmmaOutTile * kBf16WmmaWideOutTiles;
+    return (out_features + kWidth - 1u) / kWidth;
 }
 
 constexpr uint32_t bf16_wmma_grid_y(uint32_t rows, uint32_t row_tiles) noexcept {

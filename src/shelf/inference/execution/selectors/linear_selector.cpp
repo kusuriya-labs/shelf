@@ -45,6 +45,7 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 8192, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 9216, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 256, 5120, kFamilyBf16 },
+    { 256, 2560, kFamilyBf16 },
     { 10240, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 12288, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 12288, 4096, kFamilyBf16 },
@@ -90,6 +91,27 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 2048, 2048, kFamilyBf16 },
     { 2048, 256, kFamilyBf16 },
     { 16, 2048, kFamilyBf16 },
+    // Qwen3.8-Flash-Next (Qwen4Exp): the replicated backbone and hyper-connection widths.
+    { 320, 10240, kFamilyBf16 },
+    { 10240, 320, kFamilyBf16 },
+    { 4, 10240, kFamilyBf16 },
+    { 10240, 2560, kFamilyBf16 },
+    { 6144, 2560, kFamilyBf16 },
+    { 48, 2560, kFamilyBf16 },
+    { 2560, 6144, kFamilyBf16 },
+    { 12288, 2560, kFamilyBf16 },
+    { 512, 2560, kFamilyBf16 },
+    { 24, 2560, kFamilyBf16 },
+    { 640, 2560, kFamilyBf16 | kFamilyMxfp4 },
+    { 1, 2560, kFamilyBf16 },
+    { 2560, 640, kFamilyBf16 | kFamilyMxfp4 },
+    { 2560, 2560, kFamilyBf16 },
+    // Qwen3.8-Flash-Next DFlash2 drafter: q/k/v/o, gate/up, down, and the fc over five
+    // target taps (5 * 2560).
+    { 7680, 2560, kFamilyBf16 },
+    { 2560, 7680, kFamilyBf16 },
+    { 2560, 12800, kFamilyBf16 },
+    { 512, 2560, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {
@@ -156,9 +178,9 @@ select_bf16_gemm_config(const Bf16GemmSelectorInput& input) {
         input.input_aligned16)
         return shelf::kernel::Bf16GemmConfig{Id::ExactRows, 1u};
 
-    if (input.allow_exact_rows && input.verify_exact
+    if (input.allow_exact_rows
         && input.rows >= 2u
-        && input.rows <= shelf::kernel::kBf16GemmExactRowsMax
+        && input.rows <= shelf::kernel::kBf16GemmExactRowsKernelMax
         && k_aligned
         && input.weight_aligned16
         && input.input_aligned16

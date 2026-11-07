@@ -80,6 +80,8 @@ constexpr WeightBlockShape default_weight_block(manifest::QuantizedEncoding enc)
             return WeightBlockShape{1u, kMxfp4ScaleBlockK};
         case manifest::QuantizedEncoding::Exl3:
             return WeightBlockShape{1u, 1u};
+        case manifest::QuantizedEncoding::Fp8PerChannel:
+            return WeightBlockShape{1u, 1u};
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -184,6 +186,8 @@ inline KVQuantSpec kv_quant_spec(manifest::QuantizedEncoding enc, uint32_t head_
             break;
         case manifest::QuantizedEncoding::Exl3:
             break;
+        case manifest::QuantizedEncoding::Fp8PerChannel:
+            break;
         case manifest::QuantizedEncoding::Bf16:
             break;
     }
@@ -220,6 +224,8 @@ inline Status validate_kv_quant_spec(const KVQuantSpec& spec) {
         case manifest::QuantizedEncoding::Mxfp4:
             break;
         case manifest::QuantizedEncoding::Exl3:
+            break;
+        case manifest::QuantizedEncoding::Fp8PerChannel:
             break;
     }
     return Status::unsupported("unsupported kv cache encoding", __FILE__, __LINE__);

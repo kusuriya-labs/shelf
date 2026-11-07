@@ -3,6 +3,7 @@
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/moe_dispatch.h>
 #include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/fused/silu_scale.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/selectors/elementwise_selector.h>
 #include <shelf/inference/execution/selectors/embedding_selector.h>
@@ -165,6 +166,74 @@ Result<PhysicalResolveStatus> resolve_unary_f32_to_bf16(
     out.out0_stride = dst.row_stride;
     out.rows = rows;
     out.features = in.feature_count;
+    fill_geometry(out);
+    return select_profile(out);
+}
+
+Result<PhysicalResolveStatus> resolve_unary_bf16_bf16(
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
+    const HostExecutionContext& ctx, ElementwiseProfile profile,
+    PhysicalElementwiseLaunch& out) {
+    auto in_res =
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+    if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
+    const HostResolvedValue in = in_res.value();
+    auto out_res =
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+    if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
+    const HostResolvedValue dst = out_res.value();
+    if (in.dtype != ValueDType::BF16 || dst.dtype != ValueDType::BF16)
+        return PhysicalResolveStatus::NotApplicable;
+    if (!same_shape(in, dst)) return PhysicalResolveStatus::NotApplicable;
+    if (in.feature_count == 0u || in.row_stride < in.feature_count ||
+        dst.row_stride < in.feature_count) {
+        return PhysicalResolveStatus::NotApplicable;
+    }
+    const uint32_t rows = rows_for(dst, ctx, b);
+    if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
+    const ByteRange ranges[2] = {value_range(in, rows), value_range(dst, rows)};
+    if (!all_alias_ok(ranges, 2)) return PhysicalResolveStatus::NotApplicable;
+    out.profile = profile;
+    out.in0 = reinterpret_cast<uint64_t>(in.ptr);
+    out.in0_stride = in.row_stride;
+    out.out0 = reinterpret_cast<uint64_t>(dst.ptr);
+    out.out0_stride = dst.row_stride;
+    out.rows = rows;
+    out.features = in.feature_count;
+    fill_geometry(out);
+    return select_profile(out);
+}
+
+Result<PhysicalResolveStatus> resolve_unary_bf16_scale(
+    const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
+    const HostExecutionContext& ctx, PhysicalElementwiseLaunch& out) {
+    auto in_res =
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+    if (!in_res.ok()) return PhysicalResolveStatus::NotApplicable;
+    const HostResolvedValue in = in_res.value();
+    auto out_res =
+        resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+    if (!out_res.ok()) return PhysicalResolveStatus::NotApplicable;
+    const HostResolvedValue dst = out_res.value();
+    if (in.dtype != ValueDType::BF16 || dst.dtype != ValueDType::BF16)
+        return PhysicalResolveStatus::NotApplicable;
+    if (!same_shape(in, dst)) return PhysicalResolveStatus::NotApplicable;
+    if (in.feature_count == 0u || in.row_stride < in.feature_count ||
+        dst.row_stride < in.feature_count) {
+        return PhysicalResolveStatus::NotApplicable;
+    }
+    const uint32_t rows = rows_for(dst, ctx, b);
+    if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
+    const ByteRange ranges[2] = {value_range(in, rows), value_range(dst, rows)};
+    if (!all_alias_ok(ranges, 2)) return PhysicalResolveStatus::NotApplicable;
+    out.profile = ElementwiseProfile::ScaleBf16;
+    out.in0 = reinterpret_cast<uint64_t>(in.ptr);
+    out.in0_stride = in.row_stride;
+    out.out0 = reinterpret_cast<uint64_t>(dst.ptr);
+    out.out0_stride = dst.row_stride;
+    out.rows = rows;
+    out.features = in.feature_count;
+    out.scalar_a = b.scalar_a;
     fill_geometry(out);
     return select_profile(out);
 }
@@ -449,6 +518,26 @@ hipError_t launch_elementwise_physical(const PhysicalElementwiseLaunch& d,
                 reinterpret_cast<const float*>(d.in0), d.in0_stride,
                 reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
                 d.scalar_a, stream);
+        case ElementwiseProfile::ScaleBf16:
+            return ::shelf::kernel::launch_scale_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
+                d.features, d.scalar_a, stream);
+        case ElementwiseProfile::SigmoidBf16:
+            return ::shelf::kernel::launch_sigmoid_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
+                d.features, stream);
+        case ElementwiseProfile::SigmoidF32:
+            return ::shelf::kernel::launch_sigmoid_f32(
+                reinterpret_cast<const float*>(d.in0), d.in0_stride,
+                reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
+                stream);
+        case ElementwiseProfile::SiluBf16:
+            return ::shelf::kernel::launch_silu_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
+                d.features, d.scalar_a, stream);
         case ElementwiseProfile::SplitBf16Halves:
         case ElementwiseProfile::SplitBf16InterleavedHeads:
             return ::shelf::kernel::launch_split_bf16(
@@ -490,23 +579,82 @@ Result<PhysicalResolveStatus> resolve_elementwise_physical(
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_binary_bf16(program, b, ctx,
                                        ElementwiseProfile::SwigluBf16, out);
-        case ::shelf::runtime::KernelId::SIGMOID:
+        case ::shelf::runtime::KernelId::SIGMOID: {
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
+            auto out_probe =
+                resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+            if (out_probe.ok() && out_probe.value().dtype == ValueDType::BF16) {
+                return resolve_unary_bf16_bf16(
+                    program, b, ctx, ElementwiseProfile::SigmoidBf16, out);
+            }
+            auto in_probe =
+                resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+            if (in_probe.ok() && out_probe.ok() &&
+                in_probe.value().dtype == ValueDType::F32 &&
+                out_probe.value().dtype == ValueDType::F32) {
+                auto out_res = resolve_host_value(
+                    program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+                if (!in_probe.ok() || !out_res.ok())
+                    return PhysicalResolveStatus::NotApplicable;
+                const HostResolvedValue in = in_probe.value();
+                const HostResolvedValue dst = out_res.value();
+                if (!same_shape(in, dst) || in.feature_count == 0u ||
+                    in.row_stride < in.feature_count ||
+                    dst.row_stride < in.feature_count)
+                    return PhysicalResolveStatus::NotApplicable;
+                const uint32_t rows = rows_for(dst, ctx, b);
+                if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
+                const ByteRange ranges[2] = {value_range(in, rows),
+                                             value_range(dst, rows)};
+                if (!all_alias_ok(ranges, 2))
+                    return PhysicalResolveStatus::NotApplicable;
+                out.profile = ElementwiseProfile::SigmoidF32;
+                out.in0 = reinterpret_cast<uint64_t>(in.ptr);
+                out.in0_stride = in.row_stride;
+                out.out0 = reinterpret_cast<uint64_t>(dst.ptr);
+                out.out0_stride = dst.row_stride;
+                out.rows = rows;
+                out.features = in.feature_count;
+                fill_geometry(out);
+                return select_profile(out);
+            }
             return resolve_unary_bf16_to_f32(
                 program, b, ctx, ElementwiseProfile::SigmoidBf16ToF32, out);
-        case ::shelf::runtime::KernelId::SILU:
+        }
+        case ::shelf::runtime::KernelId::SILU: {
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
+            auto in_probe =
+                resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+            auto out_probe =
+                resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+            if (in_probe.ok() && out_probe.ok() &&
+                in_probe.value().dtype == ValueDType::BF16 &&
+                out_probe.value().dtype == ValueDType::BF16) {
+                auto resolved = resolve_unary_bf16_bf16(
+                    program, b, ctx, ElementwiseProfile::SiluBf16, out);
+                if (resolved.ok() &&
+                    resolved.value() == PhysicalResolveStatus::Applicable)
+                    out.scalar_a = b.scalar_a;
+                return resolved;
+            }
             return resolve_silu_desc(program, b, ctx, out);
+        }
         case ::shelf::runtime::KernelId::MUL:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
             return resolve_binary_f32_to_bf16(program, b, ctx, out);
-        case ::shelf::runtime::KernelId::SCALE:
+        case ::shelf::runtime::KernelId::SCALE: {
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
+            auto in_res =
+                resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+            if (in_res.ok() && in_res.value().dtype == ValueDType::BF16) {
+                return resolve_unary_bf16_scale(program, b, ctx, out);
+            }
             return resolve_unary_f32_scale(program, b, ctx, out);
+        }
         case ::shelf::runtime::KernelId::SPLIT:
             return resolve_split_desc(program, b, ctx, out);
         case ::shelf::runtime::KernelId::CONCAT:

@@ -3,7 +3,7 @@
 #include <shelf/models/common/qwen_hybrid/layer_weights.h>
 #include <shelf/models/common/qwen_hybrid/weight_loader.h>
 #include <shelf/models/common/qwen_hybrid/model_weights.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/weights/dense_ffn_weights.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -13,6 +13,8 @@
 
 namespace shelf {
 namespace qwen35 {
+
+using ::shelf::qwen_hybrid::PipelineStage;
 
 // A dense qwen35 layer: the shared hybrid backbone (layernorms and whichever attention
 // the layer carries) plus the dense FFN. The FFN is a member, so a layer of this type

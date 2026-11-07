@@ -2,12 +2,14 @@
 
 #include <shelf/models/common/qwen_hybrid/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
-#include <shelf/models/qwen35/model/stage_range.h>
+#include <shelf/models/common/qwen_hybrid/stage_range.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/core/status.h>
 
 namespace shelf {
 namespace qwen35 {
+
+using ::shelf::qwen_hybrid::PipelineStage;
 
 inline std::uint32_t qwen35_stage_layer_count(const shelf::qwen_hybrid::QwenHybridConfig& tc,
                                               const PipelineStage& stage) {
@@ -54,6 +56,19 @@ inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
     if (kern == 0) kern = 4;
     return state::GdnStatePoolLayout::make(
         gdn_layers, 2 * kh * khd + vh * vhd, kern - 1, vh, khd, vhd);
+}
+
+inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout_local(
+    const shelf::qwen_hybrid::QwenHybridConfig& tc, uint32_t gdn_layers,
+    uint32_t local_key_heads, uint32_t local_value_heads) {
+    if (gdn_layers == 0) gdn_layers = 1;
+    const uint32_t khd = tc.linear_key_head_dim != 0 ? tc.linear_key_head_dim : 128;
+    const uint32_t vhd = tc.linear_value_head_dim != 0 ? tc.linear_value_head_dim : 128;
+    uint32_t kern = tc.linear_conv_kernel_dim != 0 ? tc.linear_conv_kernel_dim : 4;
+    if (kern == 0) kern = 4;
+    return state::GdnStatePoolLayout::make(
+        gdn_layers, 2u * local_key_heads * khd + local_value_heads * vhd, kern - 1,
+        local_value_heads, khd, vhd);
 }
 
 inline Result<state::GdnStatePoolLayout> make_qwen35_gdn_state_layout_stage(

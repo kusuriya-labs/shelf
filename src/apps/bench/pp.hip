@@ -48,6 +48,8 @@ struct BenchOptions {
     bool arena_auto = true;
     int runs = 3;
     int warmup = 0;
+    std::string tokens_file;
+    int tokens_offset = 0;
     std::string output;
     std::string perf_stats_output;
     shelf::qwen35::runtime::DecodeBackend decode_backend =
@@ -65,13 +67,15 @@ void print_usage(FILE* out) {
         "  --mode forward|greedy        (default forward)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
-        "  --tensor-parallel N          tensor parallel degree 1 | 2 (default 1)\n"
+        "  --tensor-parallel N          tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
+        "  --tokens-file PATH           PSKLDTOK corpus file used as the prompt\n"
+        "  --tokens-offset N            corpus position to start the prompt (default 0)\n"
         "  --perf-stats-output PATH     (default none; per-kernel dispatch counters JSON,\n"
         "                                needs SHELF_QWEN35_PERF_STATS=1)\n"
         "  --decode-backend TYPE        hip (default)\n"
@@ -163,8 +167,9 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 return false;
             }
         } else if (key == "--tensor-parallel") {
-            if (!parse_int(need_value(), opts.tp) || (opts.tp != 1 && opts.tp != 2)) {
-                fprintf(stderr, "--tensor-parallel must be 1 or 2\n");
+            if (!parse_int(need_value(), opts.tp) ||
+                (opts.tp != 1 && opts.tp != 2 && opts.tp != 4)) {
+                fprintf(stderr, "--tensor-parallel must be 1, 2 or 4\n");
                 return false;
             }
         } else if (key == "--model-dir") {
@@ -204,6 +209,13 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         } else if (key == "--warmup") {
             if (!parse_int(need_value(), opts.warmup) || opts.warmup < 0) {
                 fprintf(stderr, "invalid --warmup\n");
+                return false;
+            }
+        } else if (key == "--tokens-file") {
+            opts.tokens_file = need_value();
+        } else if (key == "--tokens-offset") {
+            if (!parse_int(need_value(), opts.tokens_offset) || opts.tokens_offset < 0) {
+                fprintf(stderr, "invalid --tokens-offset\n");
                 return false;
             }
         } else if (key == "--output") {
@@ -268,6 +280,25 @@ uint32_t ceil_div(uint32_t a, uint32_t b) {
 uint32_t count_attention_layers(const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     return static_cast<uint32_t>(
         shelf::qwen_hybrid::count_layer_topology(tc).attention_layers);
+}
+
+std::vector<int32_t> read_token_corpus(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return {};
+    char magic[8] = {};
+    uint32_t version = 0;
+    uint64_t count = 0;
+    bool ok = std::fread(magic, 1, 8, f) == 8 && std::memcmp(magic, "PSKLDTOK", 8) == 0;
+    ok = ok && std::fread(&version, 4, 1, f) == 1 && version == 1u;
+    ok = ok && std::fread(&count, 8, 1, f) == 1 && count > 0u && count < (1u << 22);
+    std::vector<int32_t> tokens;
+    if (ok) {
+        tokens.resize(static_cast<std::size_t>(count));
+        ok = std::fread(tokens.data(), sizeof(int32_t), tokens.size(), f) == tokens.size();
+    }
+    std::fclose(f);
+    if (!ok) return {};
+    return tokens;
 }
 
 }  // anonymous namespace
@@ -468,6 +499,27 @@ int run_pp(int argc, char** argv) {
     }
     for (int i = 0; i < static_cast<int>(required_seq_len); ++i) {
         prompt_tokens_host[i] = token_id;
+    }
+    if (!opts.tokens_file.empty()) {
+        const std::vector<int32_t> corpus = read_token_corpus(opts.tokens_file);
+        if (corpus.empty()) {
+            fprintf(stderr, "failed to read token corpus: %s\n", opts.tokens_file.c_str());
+            return 1;
+        }
+        if (static_cast<std::size_t>(opts.tokens_offset) + prompt_tokens > corpus.size()) {
+            fprintf(stderr, "tokens-offset %d + prompt %u exceeds corpus size %zu\n",
+                    opts.tokens_offset, prompt_tokens, corpus.size());
+            return 1;
+        }
+        for (uint32_t i = 0; i < prompt_tokens; ++i) {
+            const int32_t token = corpus[static_cast<std::size_t>(opts.tokens_offset) + i];
+            if (token < 0 || static_cast<std::size_t>(token) >= vocab_size) {
+                fprintf(stderr, "corpus token %d out of vocab range: vocab_size=%zu\n",
+                        token, vocab_size);
+                return 1;
+            }
+            prompt_tokens_host[i] = token;
+        }
     }
 
     hipEvent_t start_event = nullptr;

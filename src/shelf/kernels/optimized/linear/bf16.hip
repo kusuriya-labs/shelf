@@ -20,6 +20,7 @@ using short2_t = short __attribute__((ext_vector_type(2)));
 constexpr uint32_t kTileOut = 16u;
 constexpr uint32_t kTileRow = 16u;
 constexpr uint32_t kWideRowTiles = 4u;
+constexpr uint32_t kWideOutTiles = 4u;
 constexpr uint32_t kThreadsPerBlock = 32u;
 
 constexpr uint32_t kSplitWarps = 8u;
@@ -30,6 +31,7 @@ static_assert(kExactRowsThreads == kBf16GemmExactRowsThreads);
 static_assert(kTileOut == kBf16WmmaOutTile);
 static_assert(kTileRow == kBf16WmmaRowTile);
 static_assert(kWideRowTiles == kBf16WmmaWideRowTiles);
+static_assert(kWideOutTiles == kBf16WmmaWideOutTiles);
 static_assert(kThreadsPerBlock == kBf16WmmaThreads);
 static_assert(kSplitThreadsPerBlock == kBf16SplitKWmmaThreads);
 
@@ -76,37 +78,40 @@ __device__ __forceinline__ short8_t wide_load_a(
     return assemble_short8(a0, a1);
 }
 
-__device__ __forceinline__ void wide_tile(
-    uint32_t ks, const short8_t& a, const shelf::bf16_t* xrow, bool row_valid,
-    float8_t& acc, uint32_t k, uint32_t k_half) {
-    uint64_t b0 = 0, b1 = 0;
-    if (row_valid) {
-        b0 = load_bf16x4_masked(xrow, ks + k_half * 4u, k);
-        b1 = load_bf16x4_masked(xrow, ks + 8u + k_half * 4u, k);
-    }
-    acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, assemble_short8(b0, b1), acc);
-}
-
-template <uint32_t kRowTiles>
+template <uint32_t kRowTiles, uint32_t kOutTiles>
 __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
-    const shelf::bf16_t* wrow,
+    const shelf::bf16_t* const* wrow,
     const shelf::bf16_t* const* xrow,
     const bool* row_valid,
+    const bool* out_valid,
     float8_t* acc,
     uint32_t k_tiles,
     uint32_t k,
-    uint32_t k_half,
-    bool out_valid) {
+    uint32_t k_half) {
     for (uint32_t kb = 0; kb < k_tiles; ++kb) {
         const uint32_t ks = kb * 16u;
-        const short8_t a = wide_load_a(wrow, ks, out_valid, k, k_half);
+        short8_t a[kOutTiles];
         #pragma unroll
-        for (uint32_t rt = 0; rt < kRowTiles; ++rt)
-            wide_tile(ks, a, xrow[rt], row_valid[rt], acc[rt], k, k_half);
+        for (uint32_t ot = 0; ot < kOutTiles; ++ot)
+            a[ot] = wide_load_a(wrow[ot], ks, out_valid[ot], k, k_half);
+        #pragma unroll
+        for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
+            uint64_t b0 = 0, b1 = 0;
+            if (row_valid[rt]) {
+                b0 = load_bf16x4_masked(xrow[rt], ks + k_half * 4u, k);
+                b1 = load_bf16x4_masked(xrow[rt], ks + 8u + k_half * 4u, k);
+            }
+            const short8_t b = assemble_short8(b0, b1);
+            #pragma unroll
+            for (uint32_t ot = 0; ot < kOutTiles; ++ot)
+                acc[ot * kRowTiles + rt] =
+                    __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(
+                        a[ot], b, acc[ot * kRowTiles + rt]);
+        }
     }
 }
 
-template <uint32_t kRowTiles>
+template <uint32_t kRowTiles, uint32_t kOutTiles>
 __device__ __forceinline__ void bf16_wmma_body(
     const shelf::bf16_t* __restrict__ weight,
     const shelf::bf16_t* __restrict__ input,
@@ -118,26 +123,30 @@ __device__ __forceinline__ void bf16_wmma_body(
     const uint32_t input_row_stride,
     const uint32_t output_row_stride) {
     static_assert(kRowTiles >= 1u, "bf16 wmma row tiles must be positive");
+    static_assert(kOutTiles >= 1u, "bf16 wmma output tiles must be positive");
 
     const uint32_t lane = threadIdx.x;
     const uint32_t lane_low4 = lane & 15u;
     const uint32_t k_half = lane >> 4;
 
-    const uint32_t out_start = blockIdx.x * kTileOut;
+    const uint32_t out_start = blockIdx.x * (kTileOut * kOutTiles);
     const uint32_t row_start = blockIdx.y * (kRowTiles * kTileRow);
 
     if (out_start >= out_features || row_start >= rows)
         return;
 
-    const uint32_t a_row = out_start + lane_low4;
-    const bool out_valid = a_row < out_features;
-
-    const shelf::bf16_t* wrow = weight + static_cast<size_t>(a_row) * k;
-
-    float8_t acc[kRowTiles];
+    const shelf::bf16_t* wrow[kOutTiles];
+    bool out_valid[kOutTiles];
+    float8_t acc[kOutTiles][kRowTiles];
     #pragma unroll
-    for (uint32_t rt = 0; rt < kRowTiles; ++rt)
-        acc[rt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t ot = 0; ot < kOutTiles; ++ot) {
+        const uint32_t a_row = out_start + ot * kTileOut + lane_low4;
+        out_valid[ot] = a_row < out_features;
+        wrow[ot] = weight + static_cast<size_t>(a_row) * k;
+        #pragma unroll
+        for (uint32_t rt = 0; rt < kRowTiles; ++rt)
+            acc[ot][rt] = float8_t{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    }
 
     const shelf::bf16_t* xrow[kRowTiles];
     bool row_valid[kRowTiles];
@@ -150,51 +159,58 @@ __device__ __forceinline__ void bf16_wmma_body(
 
     const uint32_t k_tiles = (k + 15u) >> 4;
     if constexpr (kRowTiles == 1u) {
-        gemm_bf16_wmma_ktiles<1u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
+        gemm_bf16_wmma_ktiles<1u, kOutTiles>(wrow, xrow, row_valid, out_valid, &acc[0][0],
+                                             k_tiles, k, k_half);
     } else {
         const uint32_t active = (rows - row_start + kTileRow - 1u) / kTileRow;
         switch (active) {
         case 1u:
-            gemm_bf16_wmma_ktiles<1u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
+            gemm_bf16_wmma_ktiles<1u, kOutTiles>(wrow, xrow, row_valid, out_valid, &acc[0][0],
+                                                 k_tiles, k, k_half);
             break;
         case 2u:
             if constexpr (kRowTiles >= 2u)
-                gemm_bf16_wmma_ktiles<2u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
+                gemm_bf16_wmma_ktiles<2u, kOutTiles>(wrow, xrow, row_valid, out_valid, &acc[0][0],
+                                                     k_tiles, k, k_half);
             break;
         case 3u:
             if constexpr (kRowTiles >= 3u)
-                gemm_bf16_wmma_ktiles<3u>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
+                gemm_bf16_wmma_ktiles<3u, kOutTiles>(wrow, xrow, row_valid, out_valid, &acc[0][0],
+                                                     k_tiles, k, k_half);
             break;
         default:
-            gemm_bf16_wmma_ktiles<kRowTiles>(wrow, xrow, row_valid, acc, k_tiles, k, k_half, out_valid);
+            gemm_bf16_wmma_ktiles<kRowTiles, kOutTiles>(wrow, xrow, row_valid, out_valid,
+                                                        &acc[0][0], k_tiles, k, k_half);
             break;
         }
     }
 
     #pragma unroll
-    for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
-        if (row_start + rt * kTileRow < rows) {
+    for (uint32_t ot = 0; ot < kOutTiles; ++ot) {
+        if (out_start + ot * kTileOut >= out_features) continue;
+        #pragma unroll
+        for (uint32_t rt = 0; rt < kRowTiles; ++rt) {
+            if (row_start + rt * kTileRow >= rows) continue;
             const uint32_t r = row_start + rt * kTileRow + lane_low4;
-            if (r < rows) {
-                #pragma unroll
-                for (int j = 0; j < 8; ++j) {
-                    const uint32_t o = out_start + 8u * (lane >> 4) + static_cast<uint32_t>(j);
-                    if (o >= out_features)
-                        continue;
-                    const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
-                    if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
-                        static_cast<shelf::bf16_t*>(output)[out_idx] =
-                            shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[rt][j]))};
-                    } else {
-                        static_cast<float*>(output)[out_idx] = acc[rt][j];
-                    }
+            if (r >= rows) continue;
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const uint32_t o = out_start + ot * kTileOut + 8u * (lane >> 4) +
+                                   static_cast<uint32_t>(j);
+                if (o >= out_features) continue;
+                const size_t out_idx = static_cast<size_t>(r) * output_row_stride + o;
+                if (output_dtype == static_cast<uint32_t>(Bf16GemmOutputDType::BF16)) {
+                    static_cast<shelf::bf16_t*>(output)[out_idx] =
+                        shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(acc[ot][rt][j]))};
+                } else {
+                    static_cast<float*>(output)[out_idx] = acc[ot][rt][j];
                 }
             }
         }
     }
 }
 
-template <uint32_t kRowTiles>
+template <uint32_t kRowTiles, uint32_t kOutTiles>
 __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
     const shelf::bf16_t* __restrict__ weight,
     const shelf::bf16_t* __restrict__ input,
@@ -205,9 +221,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
     const uint32_t k,
     const uint32_t input_row_stride,
     const uint32_t output_row_stride) {
-    bf16_wmma_body<kRowTiles>(weight, input, output, output_dtype, rows,
-                              out_features, k, input_row_stride,
-                              output_row_stride);
+    bf16_wmma_body<kRowTiles, kOutTiles>(weight, input, output, output_dtype, rows,
+                                         out_features, k, input_row_stride,
+                                         output_row_stride);
 }
 
 __device__ __forceinline__ void bf16_splitk_wmma_body(
@@ -611,7 +627,7 @@ PS_BF16_EXACT_ROWS_ENTRY(16)
 
 extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
 void shelf_gemm_bf16_wmma(Bf16GemmWmmaArgs args) {
-    bf16_wmma_body<1u>(
+    bf16_wmma_body<1u, 1u>(
         static_cast<const shelf::bf16_t*>(args.weight),
         static_cast<const shelf::bf16_t*>(args.input), args.output,
         args.output_dtype, args.rows, args.out_features, args.k,
@@ -620,7 +636,7 @@ void shelf_gemm_bf16_wmma(Bf16GemmWmmaArgs args) {
 
 extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
 void shelf_gemm_bf16_wmma_wide(Bf16GemmWmmaArgs args) {
-    bf16_wmma_body<kWideRowTiles>(
+    bf16_wmma_body<kWideRowTiles, kWideOutTiles>(
         static_cast<const shelf::bf16_t*>(args.weight),
         static_cast<const shelf::bf16_t*>(args.input), args.output,
         args.output_dtype, args.rows, args.out_features, args.k,
@@ -679,17 +695,29 @@ hipError_t launch_gemm_bf16(
         return hipGetLastError();
     }
     case Bf16GemmConfigId::WmmaWide: {
-        const dim3 grid(out_tiles, bf16_wmma_grid_y(rows, kWideRowTiles), 1);
-        gemm_bf16_wmma_kernel<kWideRowTiles><<<grid, kThreadsPerBlock, 0, stream>>>(
-            weight, input, output,
-            static_cast<uint32_t>(output_dtype), rows, out_features, k,
-            input_row_stride, output_row_stride);
+        if (rows >= 512u) {
+            const dim3 grid(bf16_wmma_grid_x_wide(out_features),
+                            bf16_wmma_grid_y(rows, kWideRowTiles), 1);
+            gemm_bf16_wmma_kernel<kWideRowTiles, kWideOutTiles>
+                <<<grid, kThreadsPerBlock, 0, stream>>>(
+                weight, input, output,
+                static_cast<uint32_t>(output_dtype), rows, out_features, k,
+                input_row_stride, output_row_stride);
+        } else {
+            const dim3 grid(bf16_wmma_grid_x(out_features),
+                            bf16_wmma_grid_y(rows, kWideRowTiles), 1);
+            gemm_bf16_wmma_kernel<kWideRowTiles, 1u>
+                <<<grid, kThreadsPerBlock, 0, stream>>>(
+                weight, input, output,
+                static_cast<uint32_t>(output_dtype), rows, out_features, k,
+                input_row_stride, output_row_stride);
+        }
         return hipGetLastError();
     }
     case Bf16GemmConfigId::Wmma:
     default: {
         const dim3 grid(out_tiles, bf16_wmma_grid_y(rows, 1u), 1);
-        gemm_bf16_wmma_kernel<1u><<<grid, kThreadsPerBlock, 0, stream>>>(
+        gemm_bf16_wmma_kernel<1u, 1u><<<grid, kThreadsPerBlock, 0, stream>>>(
             weight, input, output,
             static_cast<uint32_t>(output_dtype), rows, out_features, k,
             input_row_stride, output_row_stride);

@@ -44,6 +44,7 @@ enum class PhysicalRmsNormVariant : uint8_t {
     Unsupported = 1,
     F32PgDirect = 2,
     Bf16F32PgOnePlus = 3,
+    Bf16PgOnePlus = 4,
 };
 
 struct PhysicalRmsNormLaunch {

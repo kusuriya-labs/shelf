@@ -573,14 +573,22 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         build_serve_rank_bindings(runtime);
     const std::vector<shelf::qwen35::runtime::DFlash2GdnRankBinding>* serve_rank_ptr =
         serve_rank_bindings.empty() ? nullptr : &serve_rank_bindings;
-    shelf::weights::MatrixWeight* private_lm_head = nullptr;
-    shelf::weights::MatrixWeight* private_embed = nullptr;
+    const shelf::weights::MatrixWeight* private_lm_head = nullptr;
+    const shelf::weights::MatrixWeight* private_embed = nullptr;
     if (runtime.config().tp > 1) {
         auto* tp = runtime.tp_coordinator();
         if (tp != nullptr && tp->tp_size() > 0) {
             auto& rank0 = tp->rank(0);
-            private_lm_head = &rank0.private_lm_head();
-            private_embed = &rank0.private_embed_tokens();
+            const auto* q4 = rank0.rank_model() != nullptr
+                                 ? rank0.rank_model()->qwen4exp_model()
+                                 : nullptr;
+            if (q4 != nullptr) {
+                private_lm_head = &q4->weights().lm_head;
+                private_embed = &q4->weights().embed_tokens;
+            } else {
+                private_lm_head = &rank0.private_lm_head();
+                private_embed = &rank0.private_embed_tokens();
+            }
         }
     }
     if (dflash.enabled) {

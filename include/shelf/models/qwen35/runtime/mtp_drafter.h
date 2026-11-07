@@ -94,6 +94,8 @@ struct MtpDrafter {
     SamplingConfig sampling;
     uint32_t max_seq_len = 0;
     uint32_t num_drafts = 0;
+    uint32_t hidden_width = 0;
+    bool wide_hidden = false;
     MtpTiming timing;
     bool initialized = false;
 };
@@ -109,6 +111,10 @@ struct MtpDrafterInput {
     shelf::qwen_hybrid::HybridLoweredPrimitives lowered;
     std::size_t token_row_intermediate = 0;
     std::size_t grouped_executor_bytes = 0;
+    // The target hidden the drafter consumes. Qwen4Exp feeds the pre-mixer wide residual
+    // (hc * hidden); the Qwen35 families feed the final normed hidden.
+    std::uint32_t hidden_width = 0;
+    bool wide_hidden = false;
 };
 
 // The row count the drafter's executor runs at: its own batch limit, widened to hold the

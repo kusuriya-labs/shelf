@@ -20,6 +20,7 @@ from typing import AsyncIterator, Optional
 
 
 _PR_SET_PDEATHSIG = 1
+_STDOUT_LIMIT_BYTES = 16 * 1024 * 1024
 _libc = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
 
 
@@ -136,6 +137,7 @@ class AsyncComputeClient:
         self._shutdown_started = False
         self._stdout_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
+        self._last_kv_stats: Optional[ComputeKVStats] = None
         self.capabilities = ComputeCapabilities()
 
     # ---------------------------------------------------------------- lifecycle
@@ -151,6 +153,7 @@ class AsyncComputeClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_STDOUT_LIMIT_BYTES,
             **subprocess_kwargs,
         )
         self._stdout_task = asyncio.create_task(self._read_stdout())
@@ -168,32 +171,45 @@ class AsyncComputeClient:
     async def _read_stdout(self) -> None:
         assert self._proc is not None
         assert self._proc.stdout is not None
-        while True:
-            line = await self._proc.stdout.readline()
+        try:
+            while True:
+                line = await self._proc.stdout.readline()
 
-            if not line:
-                await self._broadcast_error(ComputeError(
-                    f"compute process exited with code {self._proc.returncode}"))
-                return
+                if not line:
+                    await self._broadcast_error(ComputeError(
+                        f"compute process exited with code {self._proc.returncode}"))
+                    return
 
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    await self._broadcast_error(
+                        ComputeProtocolError(f"invalid compute JSON: {exc}"))
+                    return
+
+                request_id = event.get("request_id")
+
+                if request_id is None:
+                    await self._control.put(event)
+                    continue
+
+                async with self._state_lock:
+                    mailbox = self._mailboxes.get(int(request_id))
+
+                if mailbox is not None:
+                    await mailbox.put(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reader death must reach pending requests
+            error = ComputeProtocolError(f"compute stdout reader failed: {exc}")
+            self._log.write(f"[compute] stdout reader failed: {exc}\n")
+            self._log.flush()
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                await self._broadcast_error(
-                    ComputeProtocolError(f"invalid compute JSON: {exc}"))
-                return
-
-            request_id = event.get("request_id")
-
-            if request_id is None:
-                await self._control.put(event)
-                continue
-
-            async with self._state_lock:
-                mailbox = self._mailboxes.get(int(request_id))
-
-            if mailbox is not None:
-                await mailbox.put(event)
+                await self._broadcast_error(error)
+            except Exception as broadcast_exc:  # noqa: BLE001 - reader is already terminal
+                self._log.write(
+                    f"[compute] stdout failure broadcast failed: {broadcast_exc}\n")
+                self._log.flush()
 
     async def _read_stderr(self) -> None:
         assert self._proc is not None
@@ -280,7 +296,12 @@ class AsyncComputeClient:
                     raise event
                 stats = ComputeKVStats.from_event(event)
                 if stats is not None:
+                    self._last_kv_stats = stats
                     return stats
+
+    @property
+    def last_kv_stats(self) -> Optional[ComputeKVStats]:
+        return self._last_kv_stats
 
     # ----------------------------------------------------------------- requests
 
@@ -353,6 +374,8 @@ class AsyncComputeClient:
             pass
 
     async def _drain_terminal(self, mailbox: asyncio.Queue, timeout: float = 30.0) -> None:
+        if self._stdout_task is None or self._stdout_task.done():
+            return
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_running_loop().time()

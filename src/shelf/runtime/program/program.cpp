@@ -360,9 +360,20 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                         in_spec != nullptr ? in_spec->row_domain : ValueRowDomain::TOKEN_ROWS);
                     if (aw.max_rows == 0) return fail("activation workspace has no rows");
                     Int8ActivationWorkspaceLayout a8l;
-                    const Status layout_status = make_activation_workspace_layout(
-                        contract.activation, kp, aw.max_rows, a8l);
+                    const Status layout_status =
+                        contract.activation_kernel ==
+                                KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN
+                            ? (aw.max_rows == 0
+                                   ? Status::invalid_argument(
+                                         "activation workspace has no rows", __FILE__,
+                                         __LINE__)
+                                   : Status::make_ok())
+                            : make_activation_workspace_layout(
+                                  contract.activation, kp, aw.max_rows, a8l);
                     if (!layout_status.ok()) return layout_status;
+                    if (contract.activation_kernel ==
+                        KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN)
+                        a8l = Int8ActivationWorkspaceLayout::make(kp, aw.max_rows);
                     aw.activation = contract.activation;
                     aw.activation_kernel = contract.activation_kernel;
                     aw.total_bytes = a8l.total_bytes;
@@ -400,9 +411,17 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 b.activation_max_rows = aw.max_rows;
                 {
                     Int8ActivationWorkspaceLayout a8l;
-                    const Status layout_status = make_activation_workspace_layout(
-                        aw.activation, aw.k_padded, aw.max_rows, a8l);
+                    const Status layout_status =
+                        aw.activation_kernel ==
+                                KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN
+                            ? Status::make_ok()
+                            : make_activation_workspace_layout(
+                                  aw.activation, aw.k_padded, aw.max_rows, a8l);
                     if (!layout_status.ok()) return layout_status;
+                    if (aw.activation_kernel ==
+                        KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN)
+                        a8l = Int8ActivationWorkspaceLayout::make(aw.k_padded,
+                                                                  aw.max_rows);
                     b.activation_code_stride = a8l.code_row_stride_bytes;
                     b.activation_scale_stride = a8l.scale_row_stride_bytes;
                 }
@@ -480,7 +499,9 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             uint32_t rot = 0;
             uint32_t group = 0;
             if (kind == PrimitiveKind::SIGMOID) kid = KernelId::SIGMOID;
-            else if (kind == PrimitiveKind::L2_NORMALIZE) {
+            else if (kind == PrimitiveKind::SILU) {
+                sa = node_as<SiLUNode>(node).scale;
+            } else if (kind == PrimitiveKind::L2_NORMALIZE) {
                 kid = KernelId::L2_NORMALIZE;
                 sa = node_as<L2NormalizeNode>(node).eps;
                 group = node_as<L2NormalizeNode>(node).group_size;
@@ -536,6 +557,195 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::HYPER_MIX: {
+            const auto& hn = node_as<HyperMixNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_MIX);
+            b.group_size = hn.hc;
+            b.flags = hn.hidden;
+            b.compute_spec = hn.sigmoid_gate ? 1u : 0u;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::HYPER_INJECT: {
+            const auto& n = node_as<HyperInjectNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_INJECT);
+            b.group_size = static_cast<uint32_t>(n.shape.features);
+            b.scalar_a = n.scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::MEAN_STREAMS: {
+            const auto& n = node_as<MeanStreamsNode>(node);
+            DispatchBinding b = base_binding(KernelId::MEAN_STREAMS);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::HYPER_APPLY: {
+            const auto& hn = node_as<HyperApplyNode>(node);
+            DispatchBinding b = base_binding(KernelId::HYPER_APPLY);
+            b.group_size = hn.hc;
+            b.flags = hn.hidden;
+            for (uint32_t i = 0; i < 3; ++i) b.input_slots[i] = node.inputs[i].id;
+            b.input_count = 3;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::REPEAT_STREAMS: {
+            const auto& n = node_as<RepeatStreamsNode>(node);
+            DispatchBinding b = base_binding(KernelId::REPEAT_STREAMS);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_STREAM_DOT: {
+            const auto& n = node_as<PleStreamDotNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_STREAM_DOT);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_GATE: {
+            DispatchBinding b = base_binding(KernelId::PLE_GATE);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_BROADCAST_MUL: {
+            const auto& n = node_as<PleBroadcastMulNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_BROADCAST_MUL);
+            b.group_size = n.hc;
+            b.flags = n.hidden;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_slots[1] = node.inputs[1].id;
+            b.input_count = 2;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::PLE_CONV: {
+            const auto& n = node_as<PleConvNode>(node);
+            DispatchBinding b = base_binding(KernelId::PLE_CONV);
+            b.descriptor_slot =
+                register_state(c, node.state_inputs.front(),
+                               PrimitiveStateKind::PLE_CONV_STATE, n.state_index) +
+                1;
+            b.parameter_index0 = n.parameter_index;
+            b.flags = static_cast<uint32_t>(n.shape.features);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_KEY_CACHE: {
+            const auto& n = node_as<QsaKeyCacheNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_KEY_CACHE);
+            b.descriptor_slot =
+                register_state(c, node.state_outputs.front(),
+                               PrimitiveStateKind::QSA_KEY_STATE, n.state_index) +
+                1;
+            b.parameter_index0 = n.parameter_index;
+            b.group_size = n.compress_ratio;
+            b.rotary_dim = n.rotary_dim;
+            b.flags = n.max_blocks;
+            b.scalar_a = n.theta;
+            b.scalar_b = n.position_scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            b.output_count = 0;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_SELECT: {
+            const auto& n = node_as<QsaSelectNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_SELECT);
+            b.descriptor_slot =
+                register_state(c, node.state_inputs.front(),
+                               PrimitiveStateKind::QSA_KEY_STATE, n.state_index) +
+                1;
+            b.group_size = n.n_heads;
+            b.rotary_dim = n.head_dim;
+            b.flags = n.blocks;
+            b.compute_spec = n.top_k;
+            b.scalar_a = n.scale;
+            b.scalar_b = static_cast<float>(n.compress_ratio);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto first = c.produce(node.outputs[0]);
+            if (!first.ok()) return first;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::QSA_ROPE: {
+            const auto& n = node_as<QsaRopeNode>(node);
+            DispatchBinding b = base_binding(KernelId::QSA_ROPE);
+            b.group_size = n.heads;
+            b.rotary_dim = n.rotary_dim;
+            b.flags = n.head_dim;
+            b.scalar_a = n.theta;
+            b.scalar_b = n.position_scale;
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            return Status::make_ok();
+        }
         case PrimitiveKind::KV_APPEND: {
             const auto& n = node_as<KvAppendNode>(node);
             DispatchBinding b = base_binding(KernelId::KV_APPEND);
@@ -560,8 +770,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                n.state_index) +
                 1;
             b.group_size = n.attention.head_dim;
-            b.input_slots[0] = node.inputs[0].id;
-            b.input_count = 1;
+            b.rotary_dim = n.has_block_mask ? n.block_size : 0u;
+            for (uint32_t i = 0; i < node.inputs.size() && i < kMaxIoSlots; ++i)
+                b.input_slots[i] = node.inputs[i].id;
+            b.input_count = static_cast<uint32_t>(node.inputs.size());
             auto po = c.produce(node.outputs[0]);
             if (!po.ok()) return po;
             b.output_slots[0] = node.outputs[0].id;
@@ -662,6 +874,27 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                 resolve_linear_quant_contract(w.encoding, w.compute_spec);
             if (!resolved.ok()) return resolved.status();
             const ResolvedLinearQuantContract& contract = resolved.value();
+            if (w.encoding == 4u) {
+                if (contract.requires_activation_quant)
+                    return fail("exl3 grouped linear must not quantize its activation");
+                if (w.k_padded != w.cols || (w.cols & 127u) != 0u ||
+                    (w.rows & 127u) != 0u)
+                    return fail("exl3 grouped linear shape is not 128-aligned");
+                if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+                DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_W16A16_GROUPED);
+                b.weight_index = n.weight_index;
+                b.compute_spec = w.compute_spec;
+                b.flags = c.graph->value_dtype(node.outputs[0]) == ValueDType::F32 ? 1u : 0u;
+                b.input_slots[0] = node.inputs[0].id;
+                b.input_count = 1;
+                c.use_moe_scratch(b);
+                auto po = c.produce(node.outputs[0]);
+                if (!po.ok()) return po;
+                b.output_slots[0] = node.outputs[0].id;
+                b.output_count = 1;
+                c.push(b);
+                return Status::make_ok();
+            }
             if (contract.activation_kernel != KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF)
                 return fail("moe grouped linear needs the mxfp4 rowref activation form");
             const uint32_t kdim = w.cols;
@@ -672,7 +905,11 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             const uint32_t rows_cap = c.rows_for(ValueRowDomain::GROUPED_ROWS);
             if (rows_cap == 0) return fail("grouped row capacity is empty");
 
-            const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id);
+            // Group rows are a different activation plane from the token rows of the
+            // same input value; sharing one workspace would make a dense consumer read
+            // group rows. The high bit separates the two forms.
+            const uint64_t act_ws_key = static_cast<uint64_t>(node.inputs[0].id) |
+                                        (std::uint64_t{1} << 63);
             const uint32_t cmd_idx = static_cast<uint32_t>(c.plan->dispatches.size());
             const auto* in_spec = c.graph->value_spec(node.inputs[0]);
             const bool gather_rows =

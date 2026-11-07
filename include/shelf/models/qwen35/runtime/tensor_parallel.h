@@ -66,15 +66,13 @@ struct TpRankRuntimeConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_hot_tokens = 0;
-    std::uint32_t prefix_cold_tokens = 0;
     std::uint32_t prefix_concurrency = 4;
-    std::uint32_t prefix_cold_state_slots = 0;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
     std::uint32_t tp_combine_f32 = 0;
+    bool emit_normed_token_hidden = false;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
 };
@@ -132,9 +130,14 @@ private:
 Result<std::unique_ptr<shelf::models::TpRankModel>> build_dense_tp_rank_model(
     const TpRankRuntimeConfig& config, gpu::GpuArena& arena, hipStream_t stream);
 
+using TpRankModelPrefetch = void (*)(const std::string&);
+using TpRankModelRelease = void (*)();
+
 struct TpCoordinatorConfig {
     std::string model_dir;
     TpRankModelBuilder build_rank_model = nullptr;
+    TpRankModelPrefetch prefetch_rank_model = nullptr;
+    TpRankModelRelease release_rank_model = nullptr;
     std::vector<int> devices;
     std::uint32_t max_batch_rows = 0;
     std::uint32_t max_scheduled_requests = 0;
@@ -150,15 +153,13 @@ struct TpCoordinatorConfig {
     std::uint32_t drafter_sessions = 0;
     std::size_t drafter_lm_head_k = 0;
     bool prefix_cache = false;
-    std::uint32_t prefix_hot_tokens = 0;
-    std::uint32_t prefix_cold_tokens = 0;
     std::uint32_t prefix_concurrency = 4;
-    std::uint32_t prefix_cold_state_slots = 0;
     std::uint32_t prefix_spec_ring_bytes = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
     std::uint32_t tp_combine_f32 = 0;
+    bool emit_normed_token_hidden = false;
     EffectiveRopeProfile rope_profile;
     Qwen35LoadOptions load_options;
 };

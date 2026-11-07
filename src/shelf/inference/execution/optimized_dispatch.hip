@@ -8,9 +8,14 @@
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/inference/execution/hyper_connection_dispatch.h>
+#include <shelf/inference/execution/ple_dispatch.h>
+#include <shelf/inference/execution/qsa_dispatch.h>
+#include <shelf/inference/execution/fp8_ptpc_dispatch.h>
 #include <shelf/kernels/optimized/linear/exl3_int8.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
+#include <shelf/inference/execution/gemm_lt.h>
 #include <shelf/inference/execution/kv_append_dispatch.h>
 #include <shelf/inference/execution/paged_attention_dispatch.h>
 #include <shelf/inference/execution/gdn_recurrence_dispatch.h>
@@ -436,7 +441,6 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
         (reinterpret_cast<uintptr_t>(weight) & 15u) == 0u;
     lin.input_aligned16 =
         (reinterpret_cast<uintptr_t>(input) & 15u) == 0u;
-    lin.verify_exact = ctx.role == ::shelf::runtime::ExecutionRole::Verify;
     const auto config = select_bf16_gemm_config(lin);
     if (!config) {
         return PhysicalResolveStatus::NotApplicable;
@@ -476,7 +480,9 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
             break;
         case ::shelf::kernel::Bf16GemmConfigId::WmmaWide:
             out.variant = PhysicalBf16Variant::WmmaWide;
-            out.grid_x = ::shelf::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_x = rows >= 512u
+                             ? ::shelf::kernel::bf16_wmma_grid_x_wide(e.rows)
+                             : ::shelf::kernel::bf16_wmma_grid_x(e.rows);
             out.grid_y = ::shelf::kernel::bf16_wmma_grid_y(
                 rows, ::shelf::kernel::kBf16WmmaWideRowTiles);
             out.workgroup = ::shelf::kernel::kBf16WmmaThreads;
@@ -822,12 +828,24 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::shelf::kernel::launch_gemm_bf16(
-        launch.config, reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
-        reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
-        reinterpret_cast<void*>(launch.output), launch.output_dtype,
-        launch.rows, launch.out_features, launch.k, launch.input_row_stride,
-        launch.output_row_stride, stream);
+    constexpr uint32_t kLtMinRows = 128u;
+    hipError_t herr = hipErrorNotSupported;
+    if (launch.rows >= kLtMinRows) {
+        herr = shelf::execution::gemm_bf16_lt(
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+            reinterpret_cast<void*>(launch.output), launch.rows, launch.out_features,
+            launch.k, launch.input_row_stride, launch.output_row_stride,
+            launch.output_dtype == ::shelf::kernel::Bf16GemmOutputDType::BF16, stream);
+    }
+    if (herr == hipErrorNotSupported) {
+        herr = ::shelf::kernel::launch_gemm_bf16(
+            launch.config, reinterpret_cast<const ::shelf::bf16_t*>(launch.weight),
+            reinterpret_cast<const ::shelf::bf16_t*>(launch.input),
+            reinterpret_cast<void*>(launch.output), launch.output_dtype,
+            launch.rows, launch.out_features, launch.k, launch.input_row_stride,
+            launch.output_row_stride, stream);
+    }
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (herr != hipSuccess)
@@ -865,8 +883,12 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::ACTIVATION_QUANTIZE_FP8_FINEGRAINED:
         case KernelId::ACTIVATION_QUANTIZE_MXFP4_ROWREF:
             return try_launch_activation_quantize(program, b, ctx, stream);
+        case KernelId::ACTIVATION_QUANTIZE_FP8_PERTOKEN:
+            return try_launch_activation_quantize_fp8_pertoken(program, b, ctx, stream);
         case KernelId::LINEAR_FP8_FINEGRAINED:
             return try_launch_linear_fp8(program, b, ctx, stream);
+        case KernelId::LINEAR_FP8_PTPC:
+            return try_launch_linear_fp8_ptpc(program, b, ctx, stream);
         case KernelId::LINEAR_MXFP4_W4A8:
             return try_launch_linear_mxfp4(program, b, ctx, stream);
         case KernelId::MOE_ROUTER:
@@ -877,6 +899,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_moe_plan_scatter(program, b, ctx, stream);
         case KernelId::LINEAR_MXFP4_W4A8_GROUPED:
             return try_launch_moe_grouped_linear(program, b, ctx, stream);
+        case KernelId::LINEAR_EXL3_W16A16_GROUPED:
+            return try_launch_moe_grouped_exl3(program, b, ctx, stream);
         case KernelId::MOE_COMBINE:
             return try_launch_moe_combine(program, b, ctx, stream);
         case KernelId::LINEAR_EXL3_W16A16:
@@ -910,6 +934,30 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_gdn_conv1d(program, dispatch_index, ctx, stream);
         case KernelId::GDN_RECURRENCE:
             return try_launch_gdn_recurrence(program, dispatch_index, ctx, stream);
+        case KernelId::HYPER_MIX:
+            return try_launch_hyper_mix(program, b, ctx, stream);
+        case KernelId::HYPER_INJECT:
+            return try_launch_hyper_inject(program, b, ctx, stream);
+        case KernelId::HYPER_APPLY:
+            return try_launch_hyper_apply(program, b, ctx, stream);
+        case KernelId::MEAN_STREAMS:
+            return try_launch_mean_streams(program, b, ctx, stream);
+        case KernelId::PLE_STREAM_DOT:
+            return try_launch_ple_stream_dot(program, b, ctx, stream);
+        case KernelId::REPEAT_STREAMS:
+            return try_launch_repeat_streams(program, b, ctx, stream);
+        case KernelId::PLE_GATE:
+            return try_launch_ple_gate(program, b, ctx, stream);
+        case KernelId::PLE_BROADCAST_MUL:
+            return try_launch_ple_broadcast_mul(program, b, ctx, stream);
+        case KernelId::PLE_CONV:
+            return try_launch_ple_conv(program, b, ctx, stream);
+        case KernelId::QSA_KEY_CACHE:
+            return try_launch_qsa_key_cache(program, b, ctx, stream);
+        case KernelId::QSA_SELECT:
+            return try_launch_qsa_select(program, b, ctx, stream);
+        case KernelId::QSA_ROPE:
+            return try_launch_qsa_rope(program, b, ctx, stream);
         default:
             return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     }

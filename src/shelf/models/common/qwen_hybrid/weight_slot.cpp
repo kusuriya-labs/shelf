@@ -16,6 +16,9 @@ RT::WeightSlot make_weight_slot(const W::MatrixWeight& w) {
     s.experts = w.experts != 0u ? w.experts : 1u;
     s.codes_batch_stride_bytes = w.codes_batch_stride_bytes;
     s.scales_batch_stride_bytes = w.scales_batch_stride_bytes;
+    s.exl3_suh_batch_stride_bytes = w.exl3_suh_batch_stride_bytes;
+    s.exl3_svh_batch_stride_bytes = w.exl3_svh_batch_stride_bytes;
+    s.exl3_marker_batch_stride_bytes = w.exl3_marker_batch_stride_bytes;
     if (w.encoding == W::MatrixEncoding::Bf16) {
         s.device_ptr = w.bf16.data<void>();
         s.bytes = static_cast<uint64_t>(s.experts) * w.rows * w.cols * sizeof(uint16_t);

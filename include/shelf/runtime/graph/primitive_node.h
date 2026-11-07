@@ -31,6 +31,18 @@ enum class PrimitiveKind : uint16_t {
     MOE_ROUTER = 19,
     MOE_GROUPED_LINEAR = 20,
     MOE_COMBINE = 21,
+    HYPER_MIX = 22,
+    HYPER_APPLY = 23,
+    PLE_GATE = 24,
+    PLE_BROADCAST_MUL = 25,
+    PLE_CONV = 26,
+    QSA_KEY_CACHE = 27,
+    QSA_SELECT = 28,
+    QSA_ROPE = 29,
+    PLE_STREAM_DOT = 30,
+    REPEAT_STREAMS = 31,
+    HYPER_INJECT = 32,
+    MEAN_STREAMS = 33,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -57,6 +69,18 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::MOE_ROUTER: return "MOE_ROUTER";
         case PrimitiveKind::MOE_GROUPED_LINEAR: return "MOE_GROUPED_LINEAR";
         case PrimitiveKind::MOE_COMBINE: return "MOE_COMBINE";
+        case PrimitiveKind::HYPER_MIX: return "HYPER_MIX";
+        case PrimitiveKind::HYPER_APPLY: return "HYPER_APPLY";
+        case PrimitiveKind::PLE_GATE: return "PLE_GATE";
+        case PrimitiveKind::PLE_BROADCAST_MUL: return "PLE_BROADCAST_MUL";
+        case PrimitiveKind::PLE_CONV: return "PLE_CONV";
+        case PrimitiveKind::QSA_KEY_CACHE: return "QSA_KEY_CACHE";
+        case PrimitiveKind::QSA_SELECT: return "QSA_SELECT";
+        case PrimitiveKind::QSA_ROPE: return "QSA_ROPE";
+        case PrimitiveKind::PLE_STREAM_DOT: return "PLE_STREAM_DOT";
+        case PrimitiveKind::REPEAT_STREAMS: return "REPEAT_STREAMS";
+        case PrimitiveKind::HYPER_INJECT: return "HYPER_INJECT";
+        case PrimitiveKind::MEAN_STREAMS: return "MEAN_STREAMS";
     }
     return "UNKNOWN";
 }
@@ -107,6 +131,7 @@ struct SplitNode {
 
 struct SiLUNode {
     RowwiseShapeKey shape;
+    float scale = 1.0f;
 };
 
 struct SigmoidNode {
@@ -150,6 +175,12 @@ struct PagedAttentionNode {
     AttentionShapeKey attention;
     float scale = 0.0f;
     uint32_t state_index = 0;
+    // When true, the second tensor input is the QSA block selection: one bit per indexer
+    // block, `mask_bytes` bytes per row. A key is visible only when its block's bit is set,
+    // so the attention consumes the indexer selection without a per-token mask.
+    bool has_block_mask = false;
+    uint32_t mask_bytes = 0;
+    uint32_t block_size = 0;
 };
 
 struct StatefulCausalConv1DNode {
@@ -214,6 +245,109 @@ struct MoeCombineNode {
     uint32_t top_k = 0;
 };
 
+// Qwen4Exp hyper-connection mix: gate * normed averaged over hc streams.
+struct HyperMixNode {
+    RowwiseShapeKey shape;  // hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+    bool sigmoid_gate = true;
+};
+
+// Qwen4Exp injection gate: 2 * sigmoid(x / hc) in one pass.
+struct HyperInjectNode {
+    RowwiseShapeKey shape;  // hc
+    float scale = 1.0f;
+};
+
+// Qwen4Exp hyper-connection injection: raw[h] + y * injection[h].
+struct HyperApplyNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// Repeat one hidden row across hc streams: out[r, h*hidden+i] = in[r, i].
+struct RepeatStreamsNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// Mean one hidden row over hc streams: out[r, i] = mean_h in[r, h*hidden + i].
+struct MeanStreamsNode {
+    RowwiseShapeKey shape;  // hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// PLE per-stream dot over one stream's hidden lanes.
+struct PleStreamDotNode {
+    RowwiseShapeKey shape;  // hc
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// PLE gate shaping: sign(x) * sqrt(max(|x|, 1e-6)).
+struct PleGateNode {
+    RowwiseShapeKey shape;  // hidden
+};
+
+// PLE sigmoid(gate) * value broadcast over hc streams.
+struct PleBroadcastMulNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t hc = 0;
+    uint32_t hidden = 0;
+};
+
+// PLE depthwise causal conv, kernel 4, dilation 3, SiLU; state is per sequence.
+struct PleConvNode {
+    RowwiseShapeKey shape;  // hc * hidden
+    uint32_t parameter_index = UINT32_MAX;
+    uint32_t state_index = 0;
+};
+
+// Partial rotary of the QSA indexer query heads. Unlike ROPE, this carries the position
+// scale explicitly and runs the QSA rope kernel (up to 2x).
+struct QsaRopeNode {
+    RowwiseShapeKey shape;  // heads * head_dim
+    uint32_t heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t rotary_dim = 0;
+    float theta = 10000000.0f;
+    float position_scale = 1.0f;
+};
+
+// Qwen4Exp QSA indexer key cache. Raw indexer keys are appended to the per-sequence
+// partial block; every `compress_ratio` rows complete one pooled block key. The pooled
+// key is mean -> RMSNorm(1 + parameter) -> partial RoPE at the block's first position.
+struct QsaKeyCacheNode {
+    RowwiseShapeKey shape;  // indexer head_dim
+    uint32_t parameter_index = UINT32_MAX;
+    uint32_t state_index = 0;
+    uint32_t compress_ratio = 4;
+    uint32_t rotary_dim = 0;
+    uint32_t max_blocks = 0;
+    float theta = 10000000.0f;
+    float position_scale = 1.0f;
+};
+
+// Qwen4Exp QSA block selection. The query is scored against the sequence's pooled block
+// keys in chunks and the top-k blocks are kept, so no per-block score row is materialized.
+// The first output is the selected block indices, unused entries are -1. The optional
+// second output is a bitmap over the block indices, 1 bit per block, row stride padded to
+// a multiple of 4 bytes.
+struct QsaSelectNode {
+    RowwiseShapeKey shape;
+    uint32_t state_index = 0;
+    uint32_t n_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t blocks = 0;
+    uint32_t compress_ratio = 4;
+    uint32_t top_k = 0;
+    uint32_t mask_bytes = 0;
+    float scale = 1.0f;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -236,7 +370,19 @@ using PrimitiveNode = std::variant<
     ConcatNode,
     MoeRouterNode,
     MoeGroupedLinearNode,
-    MoeCombineNode
+    MoeCombineNode,
+    HyperMixNode,
+    HyperApplyNode,
+    PleGateNode,
+    PleBroadcastMulNode,
+    PleConvNode,
+    QsaKeyCacheNode,
+    QsaSelectNode,
+    QsaRopeNode,
+    PleStreamDotNode,
+    RepeatStreamsNode,
+    HyperInjectNode,
+    MeanStreamsNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -264,6 +410,18 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, MoeRouterNode>) return PrimitiveKind::MOE_ROUTER;
         else if constexpr (std::is_same_v<T, MoeGroupedLinearNode>) return PrimitiveKind::MOE_GROUPED_LINEAR;
         else if constexpr (std::is_same_v<T, MoeCombineNode>) return PrimitiveKind::MOE_COMBINE;
+        else if constexpr (std::is_same_v<T, HyperMixNode>) return PrimitiveKind::HYPER_MIX;
+        else if constexpr (std::is_same_v<T, HyperApplyNode>) return PrimitiveKind::HYPER_APPLY;
+        else if constexpr (std::is_same_v<T, PleGateNode>) return PrimitiveKind::PLE_GATE;
+        else if constexpr (std::is_same_v<T, PleBroadcastMulNode>) return PrimitiveKind::PLE_BROADCAST_MUL;
+        else if constexpr (std::is_same_v<T, PleConvNode>) return PrimitiveKind::PLE_CONV;
+        else if constexpr (std::is_same_v<T, QsaKeyCacheNode>) return PrimitiveKind::QSA_KEY_CACHE;
+        else if constexpr (std::is_same_v<T, QsaSelectNode>) return PrimitiveKind::QSA_SELECT;
+        else if constexpr (std::is_same_v<T, QsaRopeNode>) return PrimitiveKind::QSA_ROPE;
+        else if constexpr (std::is_same_v<T, PleStreamDotNode>) return PrimitiveKind::PLE_STREAM_DOT;
+        else if constexpr (std::is_same_v<T, RepeatStreamsNode>) return PrimitiveKind::REPEAT_STREAMS;
+        else if constexpr (std::is_same_v<T, HyperInjectNode>) return PrimitiveKind::HYPER_INJECT;
+        else if constexpr (std::is_same_v<T, MeanStreamsNode>) return PrimitiveKind::MEAN_STREAMS;
         else return PrimitiveKind::LINEAR;
     }, n);
 }
