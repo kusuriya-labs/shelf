@@ -156,3 +156,94 @@ Saber は `c8a1e84` の第三者コードを読み取りのみで参照した。
 | host | `pp` event と server TTFT の区間は別 | forward wall と TTFT を別計測 | エンジン外の差は分離できない |
 
 具体的な Saber 箇所は `crates/saber-kernels/hip/mxfp4_gemm_atiled.hip`、`mxfp4_atiled_wm.h` と先行 `OPTIMIZATIONS.md`。第三者コードの build・実行は行っていない。
+
+
+## Saber との比較
+
+Saber は評価コピー `saber-review/eval/repo`、27B TP=1、同じ R9700 の 300 W、ROCm 7.14。Saber は NVFP4 由来 MXFP4 重み・FP8 活性・FP8 KV、shelf は EXL3-INT8・BF16 KV である。数値は異なる精度・投影結合・計測区間を含む。Saber の既存 serving 実測は `logs/saber-paired.jsonl` の host counter で、2048 token / 1 step の forward は 482.473 / 482.361 ms、8192 token / 4 step は 1979.187 / 1980.791 ms。これは GPU kernel 時間ではない。shelf 通常 GPU event はそれぞれ 1143.59 / 4896.15 ms（5 回 p50）。要求処理や KV 状態は完全には一致しない。
+
+
+### 実サーバーの kernel trace（主たる結果）
+
+評価コピーの `saber_prof_run_save.sh` を `flock /tmp/r9700.lock timeout 300 ./saber_prof_run_save.sh` で実行。server の実行経路は通常、prefill を HIP の `hipModuleLaunchKernel`、capture 対象を `hipGraphLaunch` で発行する。`saber-hsa` の AQL 直接 replay は別の `step-capture --fn63` 試作であり、今回の serving 経路と区別する。ROCm 7.14 の `rocprofv3 --kernel-trace` は、読み取り専用 `/work` で終了時に `/work/.rocprofv3` を作ろうとして abort した。`-w /tmp` に変更し、評価ディレクトリ内の trace 出力専用 directory のみを `/output:rw` として追加したところ、外部遮断 internal network・read-only root・capability 全削除・no-new-privileges・指定 2 device のまま trace を保存できた。元の server の `/tmp` は tmpfs なので停止後には消える。登録 error 16 は今回観測していない。
+
+512、2048、8192 token を同じ server に順に送り、2048 行の `saber_embed_bf16` と最終 `layer.63.mlp.down_proj` を起点・終点とする各 chunk を特定した。末尾 chunk は続く row gather、最終 norm、FP8 `lm_head`、argmax、device row も含める。body には DFlash2 の補助 tap 5 launch を含む。chunk 間の DFlash2 context store、入力 copy、最初の kernel 前と最後の kernel 後の待ち、最終 chunk の後処理は含まない。8192 token の最初の 3 chunk は 758、最後は 764 launch で計 3038。2048 token は 764 launch。別実行の event 計装で取得した op 名 / kernel 名の列と各 chunk の trace kernel 名を全件、順番に照合し一致した。全対象 launch は 1 queue、時刻順に重複なし。trace の CSV は出力順が時刻順ではないため開始 timestamp で sort してから照合した。
+
+| 対象 | kernel 合計 | 範囲の開始〜終了 | kernel 間の隙間 | launch |
+|---|---:|---:|---:|---:|
+| 2048 token / 1 chunk | 461.676 ms | 467.112 ms | 5.437 ms / 1.16% | 764 |
+| 8192 token / 4 chunk の和 | 1902.349 ms | 1924.370 ms | 22.021 ms / 1.14% | 3038 |
+
+隙間は各 chunk の trace 範囲から同プロセス・queue の kernel 実行時間を引いた値で、profiler の影響を含み、DMA・別 process などの GPU 全体の idle を直接示さない。4 chunk 間の待ちも含まない。各 chunk は prefix 0 / 2048 / 4096 / 6144 token で、GPU 範囲 465.350 / 475.272 / 485.557 / 498.190 ms、kernel 合計 459.954 / 469.742 / 480.025 / 492.628 ms。最後の chunk だけ head を含む。
+
+同一の prompt ID と設定による別 server process の host forward counter は、2048 で profiler なし **483.131 ms**、あり **488.126 ms**（+4.995 ms / +1.03%）、8192 で **1990.811 → 2008.719 ms**（+17.908 ms / +0.90%）。別実行の各 1 回であり、差を純粋な profiler overhead と断定しない。event 計装ありではそれぞれ **510.608 ms**（+27.477 ms / +5.69%）と **2088.908 ms**（+98.097 ms / +4.93%）。event 計装は op の直前・直後に HIP event を入れ、最後に同期してログに出すため、kernel 間の待ちと CPU の event 管理を増やし得る。event あり / なしの出力 token ID は 512 / 2048 / 8192 の各 1 回で一致した（順に 685 / 248068 / 321）。これは限定された出力一致であり品質評価ではない。
+
+下表の合計・平均は profiler が記録した kernel 開始〜終了の和と平均。比率は上表の各 chunk 範囲の合計を分母とする。N/K は同じ順序の event op 名と graph の形状の照合による。1 chunk 1 回 / 4 chunk 1 回であり、各行を独立反復の中央値と誤認しない。
+
+| kernel / N×K | 2048 回数 | 合計 ms | 平均 ms | 区間比 | 8192 回数 | 合計 ms | 平均 ms | 区間比 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (34816×5120) | 64 | 179.371 | 2.8027 | 38.40% | 256 | 721.526 | 2.8185 | 37.49% |
+| `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (5120×17408) | 64 | 91.401 | 1.4281 | 19.57% | 256 | 361.795 | 1.4133 | 18.80% |
+| `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (16384×5120) | 48 | 64.006 | 1.3335 | 13.70% | 192 | 255.614 | 1.3313 | 13.28% |
+| `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (5120×6144) | 64 | 32.507 | 0.5079 | 6.96% | 256 | 129.152 | 0.5045 | 6.71% |
+| `silu_mul_quant_t512_tiled1` | 64 | 19.273 | 0.3011 | 4.13% | 256 | 77.322 | 0.3020 | 4.02% |
+| `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (14336×5120) | 16 | 18.594 | 1.1622 | 3.98% | 64 | 74.994 | 1.1718 | 3.90% |
+| `add_rms_quant_t512_tiled1` | 128 | 14.657 | 0.1145 | 3.14% | 512 | 58.473 | 0.1142 | 3.04% |
+| `saber_gdn_chunk_scan_f16s_k128_v128_c64` | 48 | 10.174 | 0.2120 | 2.18% | 192 | 41.088 | 0.2140 | 2.14% |
+| `saber_attn_prefill_h256_gqa6_fp8kv_qk8pv8` | 16 | 7.363 | 0.4602 | 1.58% | 64 | 92.009 | 1.4376 | 4.78% |
+| `saber_gdn_conv_prep_w4_h128_hpb8_ab1` | 48 | 6.713 | 0.1398 | 1.44% | 192 | 26.956 | 0.1404 | 1.40% |
+| `gdn_norm_quant_t256_tiled1` | 48 | 4.666 | 0.0972 | 1.00% | 192 | 18.704 | 0.0974 | 0.97% |
+| `qk_norm_rope_wg8_h256_rot64_mi1_red5` | 16 | 3.797 | 0.2373 | 0.81% | 64 | 15.429 | 0.2411 | 0.80% |
+| `attn_gate_quant_t256_tiled1` | 16 | 2.313 | 0.1445 | 0.50% | 64 | 9.094 | 0.1421 | 0.47% |
+| `saber_gdn_kkt_solve_k128_c64_r3` | 48 | 2.290 | 0.0477 | 0.49% | 192 | 9.207 | 0.0480 | 0.48% |
+| `dflash_bgemm_w8_m32n16_w128_u16_nt` (248320×5120) | 1 | 2.070 | 2.0698 | 0.44% | 1 | 2.059 | 2.0593 | 0.11% |
+| `mxfp4_gemm_skinny_n1t_w4_u8_wperm1` (96×5120) | 48 | 1.516 | 0.0316 | 0.32% | 192 | 6.079 | 0.0317 | 0.32% |
+| `kv_append_h256_b16_fp8` | 16 | 0.452 | 0.0283 | 0.10% | 64 | 1.807 | 0.0282 | 0.09% |
+| `saber_argmax_bf16` | 1 | 0.316 | 0.3161 | 0.07% | 1 | 0.309 | 0.3094 | 0.02% |
+| `saber_row_copy_bf16` | 5 | 0.161 | 0.0322 | 0.03% | 20 | 0.642 | 0.0321 | 0.03% |
+| `saber_embed_bf16` | 1 | 0.022 | 0.0223 | 0.00% | 4 | 0.077 | 0.0192 | 0.00% |
+| `saber_row_gather_bf16` | 2 | 0.007 | 0.0033 | 0.00% | 2 | 0.007 | 0.0033 | 0.00% |
+| `saber_add_rms_bf16` | 1 | 0.005 | 0.0046 | 0.00% | 1 | 0.005 | 0.0047 | 0.00% |
+| `saber_device_row_stage_t1024_bf16` | 1 | 0.003 | 0.0025 | 0.00% | 1 | 0.003 | 0.0025 | 0.00% |
+
+線形 304 / 1216 回は 2048 / 8192 token で **387.395 / 1549.159 ms**、形状から `2*M*N*K` を積算した実効値は **257.5 / 257.5 TOPS 相当**。2048 の大きな形状は **253.7〜260.5 TFLOPS**。96×5120 は実 server の skinny kernel に切り替わり、48 回 1.516 ms・63.7 TFLOPS。shelf の 400 EXL3 行列の hipBLASLt は 529.68 ms / 約 208 TOPS だが、Saber の 304 回と投影結合・weight format が違う。Saber の MXFP4 fold は GEMM の中、shelf の EXL3 復号展開 51.90 ms は別である。
+
+Saber の GDN conv / KKT / scan は 2048 で 6.713 / 2.290 / 10.174 ms、8192 で 26.956 / 9.207 / 41.088 ms。shelf の conv / recurrence は 2048 で 9.24 / 51.10 ms だが、GDN state 型と処理範囲が異なる。Saber の attention は 2048 で 7.363 ms / **112.0 TFLOPS**、8192 で 92.009 ms / **143.4 TFLOPS**。演算量は 16 層、24 query head、head 256、各 query の causal 対数で QK と PV の合計 `4*256*24*対数` を計上したモデル値。8192 の各 chunk の attention は 7.417 / 17.694 / 28.236 / 38.662 ms（111.2 / 139.8 / 146.0 / 149.3 TFLOPS）。shelf の BF16 KV は 2048 で 25.30 ms、別の 32K 診断の先頭 8192 token で 372.27 ms。FP8/BF16 KV と context・診断方式の差があるため一対一の最適化幅ではない。
+
+2048 の層別 kernel 和は GDN 48 層 **342.486 ms**、attention 16 層 **116.607 ms**。8192 はそれぞれ **1369.288 / 529.959 ms**。各層の MLP・norm 等を含み、表の kernel 時間と重複する。8192 では attention 層の線形以外の時間が context と共に増える。
+
+生データは `/home/homelab1/coding-local/saber-review/eval/logs/saber-prof-save-output/148364e58f22/1_kernel_trace.csv`、対応する `logs/profiler-p2048-{ops,kernels,layers,opgroups}.csv` と `logs/profiler-p8192-{ops,kernels,layers,opgroups}.csv`、`logs/profiler-p2048-summary.json` / `logs/profiler-p8192-summary.json`。`analyze_profiler_serving.py` が event 計装の `serving-*-ops.csv` と照合して生成する。event の生ログは `logs/saber-events-on-server.log`、計装差分は `patches/serving-prefill-events.patch`、計装あり / なしと profiler の条件・counter は各 `saber-events-{on,off}-requests.jsonl`、`saber-prof-save-requests.jsonl`。電力 cap の読取りと binary hash は `logs/prefill-power-cap-microwatts.txt` / `logs/prefill-binary-sha256.txt`。CPU 利用のみのビルドは network none、`nice -n 10 cargo build --offline --locked --release -j 8 -p saber-cli`。
+
+### 2048 行の診断 capture
+
+`flock /tmp/r9700.lock timeout 300 env PREFILL_ROWS=2048 ./saber_capture_prefill.sh` を `saber-review/eval` で実行。各実行の container は `/dev/kfd` と `renderD130` のみ、network none、read-only mount、capability 全削除、no-new-privileges。元の Saber clone は変更せず、FP8 head と body snapshot の既存評価差分を使った。`--rows 5` で graph の構築幅を既定 5 に揃える回避策を使用。body 753 op / 753 node、head 2 node、row gather 等 3 node を含む全 758 node。warmup 1、交互 2 回の event 計測で whole graph **463.643 ms**、eager **464.436 ms**。1 回の replay で eager と arena 612029440 B、state 584187904 B が byte 一致した。これは実行結果間の一致であり、BF16 reference に対する精度確認ではない。通常 server は少なくとも小さい N の GEMM に別の skinny kernel を選ぶため、下表は実 server の厳密な内訳ではない。
+
+per-op は body の各 op を別々の graph にして event 測定し、その合計 **466.997 ms** と whole graph との差 **+3.354 ms / +0.7%** を 753 個へ等分した **4.45 µs/op** を既存ツールが引いた値。表の合計は形状ごとにまとめた op の中央値から作った値であり、各 dispatch の生 kernel 占有時間でも、観測差を正確に補正した値でもない。各 op の event は graph 間待ちを含み得る。whole は head と選択を含むのに per-op は body のみであり、補正の残差ゼロは計算で作られた値である。特に短い kernel の比率と TFLOPS に補正が与える影響に注意。合計・平均・全体比は表示値から算出し、形状別 GEMM 行は同名 kernel でも N/K で分けた。
+
+| 区分 | kernel / N×K | 回数 | 合計 ms | 平均 µs | whole 比 |
+|---|---|---:|---:|---:|---:|
+| GEMM | `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (34816×5120) | 64 | 178.743 | 2792.9 | 38.6% |
+| GEMM | `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (5120×17408) | 64 | 91.050 | 1422.7 | 19.6% |
+| GEMM | `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (16384×5120) | 48 | 63.743 | 1328.0 | 13.7% |
+| GEMM | `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (5120×6144) | 64 | 32.402 | 506.3 | 7.0% |
+| GEMM | `mxfp4_gemm_atiled_tn4_lbk64_wperm1_wm8sp` (14336×5120) | 16 | 18.676 | 1167.3 | 4.0% |
+| GEMM | `mxfp4_gemm_atiled_tn2_lbk128_wperm1` (96×5120) | 48 | 2.630 | 54.8 | 0.6% |
+| GDN | `saber_gdn_chunk_scan_k128_v128_c64` | 48 | 10.508 | 218.9 | 2.3% |
+| GDN | `saber_gdn_conv_prep_w4_h128_hpb8_ab1` | 48 | 7.347 | 153.1 | 1.6% |
+| attention | `saber_attn_prefill_h256_gqa6_fp8kv_qk8pv8` | 16 | 7.491 | 468.2 | 1.6% |
+| GDN | `saber_gdn_kkt_solve_k128_c64_r3` | 48 | 2.564 | 53.4 | 0.6% |
+| producers | `qk_norm_rope_wg8_h256_rot64_mi1_red5` | 16 | 3.817 | 238.6 | 0.8% |
+| producers | `silu_mul_quant_t512_tiled1` | 64 | 19.768 | 308.9 | 4.3% |
+| producers | `add_rms_quant_t512_tiled1` | 128 | 16.270 | 127.1 | 3.5% |
+| attention | `attn_gate_quant_t256_tiled1` | 16 | 2.482 | 155.1 | 0.5% |
+| GDN | `gdn_norm_quant_t256_tiled1` | 48 | 5.143 | 107.1 | 1.1% |
+| producers | `kv_append_h256_b16_fp8` | 16 | 0.504 | 31.5 | 0.1% |
+| embed+head | `saber_embed_bf16` | 1 | 0.026 | 25.6 | 0.0% |
+
+GEMM の 6 形状は 304 回、各形状集約値の和 387.244 ms、`2*M*N*K*回数` の和 99.740 TOP より **257.6 TOPS 相当**。大きい 5 形状は 254.5〜261.4 TFLOPS、小さい 96×5120 は 36.7 TFLOPS。均等補正分を各呼び出しに戻す概算は合計約 388.6 ms、約 256.7 TOPS 相当。Saber の総合計は展開を kernel 内に含む。一方 shelf の 400 行列は 529.68 ms / 約 208 TOPS、展開 51.90 ms は別。線形の形式・形状・演算回数は一致せず差額 142.4 ms は削減保証ではない。Saber attention の 110.1 TFLOPS はツールの causal 演算量モデルによる値で、shelf の BF16 KV attention 25.30 ms と直接の同一演算ではない。
+
+同じ capture の層別 graph event 中央値は GDN 48 層 345.724 ms、attention 16 層 117.806 ms、全 64 層の平均 7.243 ms（範囲 7.156〜7.453 ms）。層にはそれぞれ MLP・norm・投影が含まれ、kernel 表と重複する。層リンクの合計 463.560 ms、全 graph 463.643 ms、層リンク chain の wall 466.296 ms。層の分類は 3 GDN + 1 attention の繰り返しに基づく。
+
+前回の `--verify-width 8` による p2048 fault は、診断コマンドが幅 5 で作った graph の `verify_width` field だけを 8 に変更し、GDN conv state の allocation と kernel stride の根拠が食い違うコードに対応する。今回 512 行でも修正前の幅 8 で同じ kernel に fault、既定幅 5 では成功した。graph を最初から要求幅で構築する評価コピー向け `patches/step-capture-verify-width-state.patch` をオフラインビルドした後、幅 8 / 512 行で exit 0、arena 153410560 B と state 590086144 B は eager と graph の replay で byte 一致した（`logs/prefill-capture-512-width8-fixed.log`）。幅 5 の state は 584187904 B、幅 8 で 5898240 B 増加した。48 層・各 2 slot・10240 channel・幅差 3・BF16 2 B から計算される 48×2×10240×3×2 = 5898240 B と一致する。幅による state と stride の不整合が原因という説明を修正前後の結果が支持するが、故障アドレスを特定の state buffer に対応付けたわけではない。
+
+生ログ・再現用 script は `/home/homelab1/coding-local/saber-review/eval/logs/prefill-capture-2048-width5.log`、`logs/prefill-capture-512-width5.log`、kernel 集計 CSV は `logs/prefill-capture-2048-kernels.csv`、各層 CSV は `logs/prefill-capture-2048-layers.csv`。計算を再生成する `extract_capture_prefill.py` とパッチは同 eval にある。
