@@ -331,6 +331,12 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
 
 bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u) {
     constexpr uint32_t rows = 8u;
+    for (uint32_t scratch_rows : {8u, 16u, 32u, 48u, 64u, 1024u}) {
+        const uint32_t one = shelf::kernel::exl3_int8_gemm_splits(1u, n, k, scratch_rows, bits);
+        for (uint32_t count = 2u; count <= std::min(16u, scratch_rows); ++count) {
+            if (one != shelf::kernel::exl3_int8_gemm_splits(count, n, k, scratch_rows, bits)) return false;
+        }
+    }
     const uint32_t scale_stride = ((k / 128u * 4u) + 15u) & ~15u;
     std::mt19937 rng(123456u + bits);
     std::uniform_real_distribution<float> dist(-3.0f, 3.0f);

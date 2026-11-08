@@ -86,6 +86,8 @@ Saber の公開実装 `GGZ14/saber-engine`、revision `c8a1e84b39e73363495e549d4
 
 基準の 27B・最大 batch rows 47 は 64 行 bucket を使う。body の最大 N=17408 から見積もった F32 accum は `(64+16)*17408*4` byte で、N=248320 の head には 5 行分しかない。基準 selector の scratch_rows=5 では rows=1 で split 2、複数行の最初の 5 行で split 1 を選ぶ。
 
+容量の小さい他の呼び出しでも行数によって split が変わらないよう、selector の容量判定は 16 行分を基準とし、16 行分を確保できない場合は split 1 にする。推論用に新しく確保する容量では従来選択された split を収容できるため、今回の 27B の測定対象における split 数は変わらない。容量 8 / 16 / 32 / 48 / 64 / 1024 行に対して、実行可能な rows=1..16 の選択一致もテストする。
+
 合成 trellis・同一活性で基準 kernel を実行すると、F32 の 248320 要素中 189831、BF16 換算で 50 要素が不一致で、F32 の最大絶対差は 6.86645508e-5。同じ合成 logits の全語彙 softmax で計算した KL(split 2 || split 1) は 1.21e-12 nats。これは基準に存在した数値差で、生成列の違いを実モデルで確認したという意味ではない。
 
 試験修正では EXL3-INT8 の各行列について `16 * min(16,max(1,K/1024)) * N * sizeof(float)` を decode accum 容量の下限にする。これにより selector が許す最大 split 数を 16 行まで収容する。27B の head は 79,462,400 byte。前述の合成入力で scratch_rows=80、rows=1 / 8 とも split 2 となり、F32・BF16 は 248320 要素すべて bit 一致した。これは verify 側の縮約順を基準から変えるため、実モデルの logits と生成列を別途比較する。
@@ -380,10 +382,13 @@ split selector は 32 WGP に対して `32 * 4 * 6 = 768` wave slot を仮定す
 勝つことの説明候補になる。ただし動作中の residency や wave 発行率を直接測っていないため、
 この差だけを律速の確定原因とはしない。
 
-NT 不採用後の split 4 実行では、graph OFF の `shelf-compute` SHA-256 は
+NT 不採用後、容量の小さい呼び出しへの selector 補強前の split 4 実行では、graph OFF の `shelf-compute` SHA-256 は
 `d88f8e24ff513118aa2c28654cb355ed65e8718a9e478bae133e8151d18d92aa`、
 graph ON は `dcd4ebc16ac7e9d92126164b6c25d40441c241fe54181fee64615eb7b613397d` を使用する。
 NT を含む先行の DFlash2 試験値は final 版の性能として集計しない。
+selector 補強後の SHA-256 はそれぞれ `96cc4e7b464980b46cd92b843a7b928d06e0d606972df8291b71157686f55be4`、
+`22869f4b4f554462e37873c76e7cc4b6084650eac5cf858871e3a6f889358c82`。27B の対象形状と
+確保済み scratch では両版の選択 split は等しいが、二つの binary を同一とは扱わない。
 
 split 4 の BetterBench 非投機の初回は、基準非投機と 8 件中 3 件で生成列が変化した。
 初めて異なる 0 始まり位置は chat 128、code 153、reasoning 92。残る 5 件は一致した。
