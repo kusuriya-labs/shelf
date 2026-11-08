@@ -1,13 +1,13 @@
 # MTP speculative decoding
 
-checkpoint の MTP block（`mtp.*`）を drafter として使う単一 request の compute 経路である。
+checkpoint の MTP block（`mtp.*`）を drafter として使う compute / serve 経路である。
 DFlash2 とは排他的で、`--mtp` を指定したときだけ有効になる。
 
 MTP block は checkpoint が `mtp.*` として持つ tensor から作り、dense / grouped expert
 （MoE）のどちらの model でも load / lower / 実行できる。MTP block を持たない checkpoint で
 `--mtp` を指定すると `LoadedModel::mtp_drafter_input` が `unsupported` を返す。
-dense model は `--tensor-parallel 2` と併用できる。`--pipeline-parallel 2`、
-`--serve-stdio`、`--dump-logits` との併用は起動時に拒否する。
+dense model は `--tensor-parallel 2` と併用できる。`--pipeline-parallel 2` と
+`--dump-logits` との併用は起動時に拒否する。
 
 grouped expert を使う model の MTP block は、routed expert を checkpoint で fused rank-3 の
 BF16（`mtp.layers.0.mlp.experts.gate_up_proj` / `experts.down_proj`）として保持する。
@@ -36,24 +36,28 @@ target sequence と対応付ける。MTP+TP のときは TP executor に
 `emit_normed_token_hidden` を立て、rank0 の normed hidden を drafter に渡す。
 
 MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool の後ろに必要になる。
-`Qwen35ComputeRuntime::initialize_tensor_parallel` は `--mtp` のとき working set reserve を
-最低 4 GiB 確保する。
+`TpRankRuntime` は `MtpBatchReserveConfig` を受け取り、rank model の
+`token_row_ffn_size` / `mtp_grouped_reserve_bytes` / `uses_exl3_linear` から
+`mtp_spec_batch_reserve_bytes` を計算して working set reserve に加える。
 
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
 `build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
 
 ## serve-stdio
 
-`--mtp --serve-stdio` は 1 request ずつ処理する直列 serve である。`shelf-server` の
-MTP 経路はこれを使う。
+`--mtp --serve-stdio` は複数 request を同時に保持する継続バッチ serve である。
+`shelf-server` の MTP 経路はこれを使う。
 
-- 起動時に MTP drafter を 1 つ作り、request ごとに target sequence を作成する。
-- request の開始時に `mtp_drafter_reset_sequence` で drafter の sequence を
-  release / recreate し、KV / GDN state を空にする。
-- prefill / step の結果を `token` event として逐次 emit し、最後に `done` event を返す。
-- 生成中は次の JSONL request を読まない。`max-concurrent-requests` は実質 1 である。
-- TP では既存の `TpCoordinator` 経路を使い、rank0 の drafter と全 rank の target
-  verify / GDN restore を実行する。
+- 起動時に `MtpSpecBatchContext` を作る。request 数分の `MtpDrafter`、target verify 用の
+  共有 GDN history / compact log、QSA / PLE の per-row history を持つ。
+- request の prefill は admit 時に行い、以後の round は active な request をまとめて進める。
+  終了した request は sequence と drafter slot を解放する。
+- 各 round は request ごとに draft し、active な request の target verify を 1 forward に
+  融合する。target が QSA / PLE の per-row rollback を持つ場合（qwen4exp）は、融合 verify の
+  共有 history がまだ検証できていないため request ごとに verify する。
+- `token` event を request ごとに emit し、`done` で `generated_ids` を返す。
+- TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの GDN / QSA / PLE
+  history と snapshot で rollback する。
 
 ## Forward contract
 
@@ -212,15 +216,19 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 
 - MTP block を持たない checkpoint では使えない。dense / MoE のどちらの family でも
   block があれば load される。
-- `--tensor-parallel 2` / `--pipeline-parallel 2` / `--serve-stdio` / `--dump-logits` は未対応である。
+- `--pipeline-parallel 2` / `--dump-logits` は未対応である。
 - prefix cache は MTP の単一 request compute 経路では使わない。
 - partial accept は GDN snapshot + compact log replay で復元する。target rerun は行わない。
 - MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は
   target-only と同じ値を使う。
-- MTP KV は target KV とは別 pool である。KV 容量計画には
-  `LoadedModel::mtp_drafter_reserve_bytes` の見積を使う。これは drafter の executor 項として
-  dense 相当の token row 項と、grouped expert を使う model では
-  `moe_executor_grouped_bytes` を加える。
+- MTP KV は target KV とは別 pool である。容量計画は
+  `mtp_spec_batch_reserve_bytes`（request 数分の drafter + 共有 history / compact log）と、
+  single request 経路の `LoadedModel::mtp_drafter_reserve_bytes` を使う。
+- qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
+  pre-mixer の wide residual（`hc * hidden`）である。speculative verify は
+  `PleConvStatePool` と `QsaKeyStatePool` の partial 状態を row 単位の history から復元する。
+- QSA / PLE を持つ target の fused verify は request ごとの verify に落とす。融合 verify の
+  共有 history は dense / MoE で検証済みだが、QSA / PLE の rollback を含む形では未検証である。
 
 ## Source map
 
@@ -232,6 +240,10 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - `include/shelf/models/loaded_model.h`（`has_mtp_block` / `mtp_drafter_input` / `mtp_drafter_reserve_bytes`）
 - `src/shelf/models/qwen35/runtime/executor.hip`（hidden external input / normed output）
 - `src/apps/compute/single_request.hip`（`run_mtp_shot`）
+- `src/apps/compute/stdio_server.hip`（`serve_mtp_admit` / `serve_mtp_step`）
+- `include/shelf/models/qwen4exp/runtime/executor_footprint.h`（`mtp_grouped_executor_bytes`）
+- `include/shelf/inference/state/qsa_state_pool.h`（`restore_qsa_spec_state`）
+- `include/shelf/inference/state/ple_conv_state_pool.h`（`restore_ple_conv_spec_state`）
 - `src/apps/compute/compute_cli.cpp`（`--mtp*`）
 
 required test:

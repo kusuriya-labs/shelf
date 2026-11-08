@@ -5,6 +5,8 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
+#include <shelf/inference/execution/spec_decode_context.h>
+#include <shelf/kernels/optimized/ple_conv.h>
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
@@ -79,6 +81,14 @@ class PleConvStatePool {
 
     PleConvStatePool() = default;
 };
+
+// Puts one slot's conv window back to the state recorded before verify row `row`.
+Status restore_ple_conv_spec_state(
+    const PleConvStatePool& pool,
+    SequenceSlotId slot,
+    const ::shelf::execution::PleConvSpecHistoryDeviceView& history,
+    uint32_t row,
+    hipStream_t stream);
 
 }  // namespace state
 }  // namespace shelf

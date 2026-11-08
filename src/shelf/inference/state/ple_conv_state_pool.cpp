@@ -18,6 +18,46 @@ std::size_t ple_conv_state_pool_bytes(uint32_t max_sequences,
                                   kPleConvStatePoolAlignment);
 }
 
+Status restore_ple_conv_spec_state(
+    const PleConvStatePool& pool,
+    SequenceSlotId slot,
+    const ::shelf::execution::PleConvSpecHistoryDeviceView& history,
+    uint32_t row,
+    hipStream_t stream) {
+    if (history.store == nullptr || history.state_stride == 0u) {
+        return Status::invalid_argument("restore_ple_conv_spec_state: history is empty",
+                                        __FILE__, __LINE__);
+    }
+    if (row >= history.rows) {
+        return Status::out_of_range("restore_ple_conv_spec_state: row out of range",
+                                    __FILE__, __LINE__);
+    }
+    const PleConvStatePoolDeviceView view = pool.device_view();
+    if (slot >= view.max_sequences) {
+        return Status::out_of_range("restore_ple_conv_spec_state: slot out of range",
+                                    __FILE__, __LINE__);
+    }
+    const std::size_t history_elems = static_cast<std::size_t>(view.history_stride) *
+                                      ::shelf::kernel::kPleConvHistory;
+    for (uint32_t state = 0u; state < pool.num_ple_states(); ++state) {
+        const ::shelf::bf16_t* src =
+            history.store +
+            static_cast<std::uint64_t>(state) * history.state_stride +
+            static_cast<std::uint64_t>(row) * history_elems;
+        ::shelf::bf16_t* dst =
+            view.base + static_cast<std::uint64_t>(slot) * view.slot_stride +
+            static_cast<std::uint64_t>(state) * view.layer_stride;
+        const hipError_t err = hipMemcpyAsync(dst, src,
+                                              history_elems * sizeof(::shelf::bf16_t),
+                                              hipMemcpyDeviceToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("restore_ple_conv_spec_state copy",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+    }
+    return Status::make_ok();
+}
+
 Result<PleConvStatePool> PleConvStatePool::create(
     gpu::GpuArena& arena, uint32_t max_sequences,
     const PleConvStatePoolLayout& layout) {

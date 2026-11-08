@@ -39,6 +39,72 @@ QsaKeyStatePoolBytes qsa_key_state_pool_bytes(uint32_t max_sequences,
     };
 }
 
+Status restore_qsa_spec_state(
+    const QsaKeyStatePool& pool,
+    SequenceSlotId slot,
+    const ::shelf::execution::QsaSpecHistoryDeviceView& history,
+    uint32_t row,
+    hipStream_t stream) {
+    if (history.partial == nullptr || history.counts == nullptr ||
+        history.partial_state_stride == 0u || history.count_state_stride == 0u) {
+        return Status::invalid_argument("restore_qsa_spec_state: history is empty",
+                                        __FILE__, __LINE__);
+    }
+    if (row >= history.rows) {
+        return Status::out_of_range("restore_qsa_spec_state: row out of range", __FILE__,
+                                    __LINE__);
+    }
+    const QsaKeyStatePoolDeviceView view = pool.device_view();
+    if (slot >= view.max_sequences) {
+        return Status::out_of_range("restore_qsa_spec_state: slot out of range", __FILE__,
+                                    __LINE__);
+    }
+    const std::size_t partial_elems =
+        static_cast<std::size_t>(view.compress_ratio) * view.head_dim;
+    for (uint32_t state = 0u; state < view.num_qsa_states; ++state) {
+        const ::shelf::bf16_t* src_partial =
+            history.partial +
+            static_cast<std::uint64_t>(state) * history.partial_state_stride +
+            static_cast<std::uint64_t>(row) * partial_elems;
+        ::shelf::bf16_t* dst_partial =
+            view.partial_base +
+            static_cast<std::uint64_t>(slot) * view.partial_slot_stride +
+            static_cast<std::uint64_t>(state) * view.partial_layer_stride;
+        hipError_t err = hipMemcpyAsync(dst_partial, src_partial,
+                                        partial_elems * sizeof(::shelf::bf16_t),
+                                        hipMemcpyDeviceToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("restore_qsa_spec_state partial",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        const std::uint32_t* src_counts =
+            history.counts +
+            static_cast<std::uint64_t>(state) * history.count_state_stride +
+            static_cast<std::uint64_t>(row) * 2u;
+        std::uint32_t* dst_pool =
+            view.pool_count_base +
+            static_cast<std::uint64_t>(slot) * view.count_slot_stride +
+            static_cast<std::uint64_t>(state) * view.count_layer_stride;
+        std::uint32_t* dst_partial_count =
+            view.partial_count_base +
+            static_cast<std::uint64_t>(slot) * view.count_slot_stride +
+            static_cast<std::uint64_t>(state) * view.count_layer_stride;
+        err = hipMemcpyAsync(dst_pool, src_counts, sizeof(std::uint32_t),
+                             hipMemcpyDeviceToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("restore_qsa_spec_state pool count",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        err = hipMemcpyAsync(dst_partial_count, src_counts + 1, sizeof(std::uint32_t),
+                             hipMemcpyDeviceToDevice, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("restore_qsa_spec_state partial count",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+    }
+    return Status::make_ok();
+}
+
 Result<QsaKeyStatePool> QsaKeyStatePool::create(
     gpu::GpuArena& arena,
     uint32_t max_sequences,

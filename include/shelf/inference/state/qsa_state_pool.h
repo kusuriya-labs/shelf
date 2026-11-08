@@ -3,6 +3,7 @@
 #include <shelf/inference/state/paged_types.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/memory/tensor.h>
+#include <shelf/inference/execution/spec_decode_context.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
 #include <hip/hip_runtime.h>
@@ -141,6 +142,16 @@ class QsaKeyStatePool {
 
     QsaKeyStatePool() = default;
 };
+
+// Puts one slot's partial accumulation back to the state recorded before verify row
+// `row`. A speculative verify advances the partial block over rows the target then
+// rejects; without this the next completed block would average the rejected keys.
+Status restore_qsa_spec_state(
+    const QsaKeyStatePool& pool,
+    SequenceSlotId slot,
+    const ::shelf::execution::QsaSpecHistoryDeviceView& history,
+    uint32_t row,
+    hipStream_t stream);
 
 }  // namespace state
 }  // namespace shelf

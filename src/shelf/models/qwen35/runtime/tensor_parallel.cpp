@@ -9,6 +9,7 @@
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+#include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/tp_rank_model.h>
@@ -229,6 +230,26 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                      gpu::format_gib(footprint.spec_batch).c_str(),
                      gpu::format_gib(footprint.session_slot).c_str(),
                      static_cast<unsigned>(footprint.sessions));
+    }
+    if (config.mtp_batch.enabled && config.mtp_batch.max_requests != 0u) {
+        qwen35::runtime::MtpDrafterConfig mtp_options;
+        mtp_options.num_drafts = config.mtp_batch.num_drafts;
+        mtp_options.max_seq_len = config.mtp_batch.max_seq_len;
+        mtp_options.page_tokens = config.mtp_batch.page_tokens;
+        mtp_options.max_batch_rows = config.mtp_batch.max_batch_rows;
+        mtp_options.kv_dtype = config.mtp_batch.kv_dtype;
+        const std::size_t batch_bytes =
+            qwen35::runtime::mtp_spec_batch_reserve_bytes(
+                tc, mtp_options, config.mtp_batch.max_requests,
+                rank->model_->token_row_ffn_size(),
+                rank->model_->mtp_grouped_reserve_bytes(
+                    qwen35::runtime::mtp_drafter_rows(mtp_options),
+                    mtp_options.max_seq_len + 1u),
+                rank->model_->uses_exl3_linear());
+        reserved += batch_bytes;
+        std::fprintf(stderr, "MEMORY_PLAN tp mtp batch reserve: %s (%u slots)\n",
+                     gpu::format_gib(batch_bytes).c_str(),
+                     static_cast<unsigned>(config.mtp_batch.max_requests));
     }
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
@@ -507,6 +528,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.rope_profile = config.rope_profile;
         rank_config.build_rank_model = config.build_rank_model;
         rank_config.load_options = config.load_options;
+        rank_config.mtp_batch = config.mtp_batch;
         loaders.emplace_back(
             [&slots, r, rank_config = std::move(rank_config)]() {
                 auto rank_result = TpRankRuntime::create(rank_config);

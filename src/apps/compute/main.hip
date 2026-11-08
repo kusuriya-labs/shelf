@@ -61,12 +61,22 @@ int main(int argc, char** argv) {
     config.model_dir = opt.model_dir;
     config.dflash2_model_dir = shelf::app::compute_dflash_enabled(opt) ? opt.dflash2_model_dir : std::string();
     config.mtp = opt.mtp;
+    config.mtp_serve = opt.serve_stdio;
     config.mtp_drafts = static_cast<uint32_t>(opt.mtp_drafts);
     config.max_seq_len = static_cast<uint32_t>(opt.max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(opt.max_concurrent_requests);
-    config.arena_bytes = opt.arena_gib_auto
-        ? 0u
-        : static_cast<std::size_t>(opt.arena_gib) * 1024ull * 1024ull * 1024ull;
+    if (opt.arena_gib_auto) {
+        config.arena_mode = shelf::app::ArenaBudgetMode::Auto;
+        config.arena_bytes = 0u;
+    } else if (opt.arena_gib < 0.0) {
+        config.arena_mode = shelf::app::ArenaBudgetMode::TotalMinus;
+        config.arena_bytes = static_cast<std::size_t>(
+            -opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
+    } else {
+        config.arena_mode = shelf::app::ArenaBudgetMode::Fixed;
+        config.arena_bytes = static_cast<std::size_t>(
+            opt.arena_gib * 1024.0 * 1024.0 * 1024.0);
+    }
     config.page_tokens = static_cast<uint32_t>(opt.page_tokens);
     config.devices = opt.devices;
     config.tp = static_cast<uint32_t>(opt.tp);
@@ -131,6 +141,14 @@ int main(int argc, char** argv) {
         config.max_num_batched_tokens = static_cast<uint32_t>(opt.max_num_batched_tokens);
         if (config.max_num_batched_tokens < config.max_concurrent_requests) {
             config.max_num_batched_tokens = config.max_concurrent_requests;
+        }
+        if (config.mtp) {
+            const uint32_t verify_rows = static_cast<uint32_t>(opt.mtp_drafts) + 1u;
+            const uint32_t batch_rows = config.max_concurrent_requests * verify_rows;
+            if (config.max_num_batched_tokens < batch_rows) {
+                config.max_num_batched_tokens = batch_rows;
+            }
+            config.max_scheduled_output_rows = batch_rows;
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
             const uint32_t batch_rows = config.max_concurrent_requests *

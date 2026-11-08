@@ -1,5 +1,9 @@
 #include "compute_cli.h"
 
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -61,7 +65,8 @@ void compute_usage(const char* prog) {
     printf("  --input-ids-file PATH  whitespace separated prompt token ids\n");
     printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
     printf("  --max-seq-len N        max sequence length (default 512)\n");
-    printf("  --arena-gib N|auto     arena capacity in GiB; auto uses free VRAM minus 1 GiB\n");
+    printf("  --arena-gib N|auto|-N  arena capacity in GiB; auto = free VRAM minus 0.5 GiB,\n"
+           "                         -N = total VRAM minus N GiB\n");
     printf("                         (default auto)\n");
     printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
     printf("  --max-concurrent-requests N  max in-flight requests (default 4)\n");
@@ -188,11 +193,17 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             const char* value = argv[++i];
             if (std::strcmp(value, "auto") == 0) {
                 arena_gib_auto = true;
-            } else if (!parse_uint(value, arena_gib) || arena_gib == 0) {
-                fprintf(stderr, "bad --arena-gib (expected N or auto)\n");
-                return kComputeParseError;
             } else {
+                char* end = nullptr;
+                errno = 0;
+                const double gib = std::strtod(value, &end);
+                if (errno != 0 || end == value || *end != '\0' || !std::isfinite(gib) ||
+                    gib == 0.0) {
+                    fprintf(stderr, "bad --arena-gib (expected N, -N or auto)\n");
+                    return kComputeParseError;
+                }
                 arena_gib_auto = false;
+                arena_gib = gib;
             }
         } else if (std::strcmp(argv[i], "--page-tokens") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], page_tokens) || page_tokens == 0) { fprintf(stderr, "bad --page-tokens\n"); return kComputeParseError; }

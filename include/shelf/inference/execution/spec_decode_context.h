@@ -26,6 +26,24 @@ struct GdnCompactLogDeviceView {
     uint64_t a_layer_stride = 0u;
 };
 
+struct QsaSpecHistoryDeviceView {
+    bf16_t* partial = nullptr;
+    uint32_t* counts = nullptr;
+
+    uint32_t rows = 0u;
+
+    uint64_t partial_state_stride = 0u;
+    uint64_t count_state_stride = 0u;
+};
+
+struct PleConvSpecHistoryDeviceView {
+    bf16_t* store = nullptr;
+
+    uint32_t rows = 0u;
+
+    uint64_t state_stride = 0u;
+};
+
 struct SpecDecodeContext {
     const uint32_t* tree_anc_offsets = nullptr;
     const uint32_t* tree_anc_positions = nullptr;
@@ -38,6 +56,9 @@ struct SpecDecodeContext {
 
     GdnSpecHistoryDeviceView gdn_spec_history{};
     GdnCompactLogDeviceView gdn_compact{};
+
+    QsaSpecHistoryDeviceView qsa_spec_history{};
+    PleConvSpecHistoryDeviceView ple_conv_history{};
 };
 
 }

@@ -347,6 +347,7 @@ set(
     src/shelf/models/qwen4exp/model/qsa_lowering.cpp
     src/shelf/models/qwen4exp/weights/ple_table.cpp
     src/shelf/models/qwen4exp/runtime/ple_input.cpp
+    src/shelf/models/qwen4exp/runtime/executor_footprint.cpp
     src/shelf/models/qwen4exp/runtime/ple_input.cpp
     src/shelf/models/qwen4exp/weights/qwen4exp_load.cpp
 )

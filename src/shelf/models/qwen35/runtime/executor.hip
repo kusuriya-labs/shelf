@@ -184,6 +184,8 @@ Status build_host_execution_context(
     ctx.role = role;
     ctx.spec.gdn_spec_history = options.gdn_spec_history;
     ctx.spec.gdn_compact = options.gdn_compact;
+    ctx.spec.qsa_spec_history = options.qsa_spec_history;
+    ctx.spec.ple_conv_history = options.ple_conv_history;
     ctx.spec.tree_anc_offsets = options.tree_anc_offsets;
     ctx.spec.tree_anc_positions = options.tree_anc_positions;
     ctx.spec.tree_committed_end = options.tree_committed_end;

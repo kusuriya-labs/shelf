@@ -274,6 +274,24 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_batch_kernel(
     for (uint32_t t = 0; t < request.row_count; ++t) {
         const uint32_t row = request.row_begin + t;
         if (row >= args.actual_rows) break;
+        if (args.partial_history != nullptr && row < args.history_rows) {
+            bf16_t* hp = args.partial_history +
+                static_cast<std::uint64_t>(args.state_index) *
+                    args.history_partial_state_stride +
+                static_cast<std::uint64_t>(row) * args.compress_ratio * args.head_dim;
+            for (uint32_t i = 0; i < args.compress_ratio; ++i) {
+                hp[static_cast<std::uint64_t>(i) * args.head_dim + d] =
+                    partial[static_cast<std::uint64_t>(i) * args.head_dim + d];
+            }
+            if (d == 0u && args.count_history != nullptr) {
+                uint32_t* hc = args.count_history +
+                    static_cast<std::uint64_t>(args.state_index) *
+                        args.history_count_state_stride +
+                    static_cast<std::uint64_t>(row) * 2u;
+                hc[0] = pool_count;
+                hc[1] = partial_count;
+            }
+        }
         const bf16_t* raw =
             args.raw_keys + static_cast<std::uint64_t>(row) * args.raw_row_stride;
         partial[static_cast<std::uint64_t>(partial_count) * args.head_dim + d] = raw[d];

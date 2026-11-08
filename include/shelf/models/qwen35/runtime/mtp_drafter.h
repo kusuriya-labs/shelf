@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace shelf {
@@ -34,6 +35,9 @@ struct MtpDrafterConfig {
     uint32_t max_batch_rows = 0;
     kernel::KVCacheDType kv_dtype = kernel::KVCacheDType::BF16;
     EffectiveRopeProfile rope_profile;
+    // A batched context shares one history / compact log per rank, so its per-request
+    // drafters leave those planes to the context.
+    bool allocate_spec_buffers = true;
 };
 
 struct MtpPrefillOutput {
@@ -70,6 +74,7 @@ struct MtpGdnRankBinding {
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = -1;
+    Executor* executor = nullptr;
 };
 
 struct MtpGdnRankState {
@@ -90,6 +95,15 @@ struct MtpGdnRankState {
     ::shelf::runtime::DeviceRequestDescriptor* commit_request = nullptr;
     ::shelf::runtime::DeviceRequestDescriptor commit_request_host{};
     std::uint32_t gdn_key_heads = 0;
+    Executor* target = nullptr;
+    bf16_t* qsa_partial_history = nullptr;
+    std::uint32_t* qsa_count_history = nullptr;
+    std::uint64_t qsa_partial_state_stride = 0;
+    std::uint64_t qsa_count_state_stride = 0;
+    std::uint32_t qsa_history_rows = 0;
+    bf16_t* ple_conv_history = nullptr;
+    std::uint64_t ple_conv_state_stride = 0;
+    std::uint32_t ple_conv_history_rows = 0;
 };
 
 struct MtpDrafter {
@@ -121,6 +135,19 @@ struct MtpDrafter {
     int target_device = -1;
     std::vector<MtpGdnRankState> extra_ranks;
     TpBatchHook* tp_hook = nullptr;
+
+    // The target hidden of the tokens the drafter has committed, copied out of the target
+    // batch so a request that sits out a round still has its input.
+    gpu::Tensor hidden_cache;
+    Executor* target_executor = nullptr;
+    bf16_t* qsa_partial_history = nullptr;
+    std::uint32_t* qsa_count_history = nullptr;
+    std::uint64_t qsa_partial_state_stride = 0;
+    std::uint64_t qsa_count_state_stride = 0;
+    std::uint32_t qsa_history_rows = 0;
+    bf16_t* ple_conv_history = nullptr;
+    std::uint64_t ple_conv_state_stride = 0;
+    std::uint32_t ple_conv_history_rows = 0;
 
     std::vector<int32_t> last_tokens;
     uint32_t last_position = 0;
@@ -170,6 +197,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,
+    Executor* target,
     const state::GdnStatePool& target_gdn_pool,
     gpu::GpuArena& arena,
     hipStream_t stream,
@@ -195,6 +223,92 @@ Result<MtpIterationOutput> mtp_spec_step(
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
     uint32_t remaining_tokens);
+
+// The draft phase of one MTP round: it advances the drafter's own 1-layer state over the
+// tokens the target committed last round, samples the draft proposals, and snapshots the
+// target GDN state so a partial accept can be rolled back. It does not run the target.
+struct MtpDraftResult {
+    std::array<int32_t, kMtpMaxDrafts> proposals{};
+    uint32_t drafts = 0u;
+    uint32_t position = 0u;
+    bool decode_only = false;
+};
+
+Result<MtpDraftResult> mtp_draft(
+    MtpDrafter& drafter,
+    Executor& target,
+    state::PagedSequenceState& target_sequence,
+    int32_t pending_token,
+    uint32_t remaining_tokens);
+
+// One request's place in a batched MTP round. The drafter and the target sequence are the
+// request's own; the batch context supplies the shared verify buffer and the target.
+struct MtpSpecBatchSlot {
+    MtpDrafter* drafter = nullptr;
+    state::PagedSequenceState* sequence = nullptr;
+    int32_t pending_token = 0;
+    uint32_t num_drafts = 0u;
+    uint32_t remaining_tokens = 0u;
+    uint32_t page_tokens = 0u;
+};
+
+struct MtpSpecBatchOutput {
+    std::vector<MtpIterationOutput> slots;
+    uint32_t total_rows = 0u;
+    uint32_t rounds = 0u;
+    double round_ms = 0.0;
+};
+
+// Shared state for a batched MTP round: the target executor the verifies run on, the
+// per-request drafters, and the per-rank GDN history / compact log sized for the whole
+// batch. The draft and accept phases stay per-request; only the target verify is fused
+// into one forward.
+struct MtpSpecBatchContext {
+    Executor* target = nullptr;
+    std::vector<std::unique_ptr<MtpDrafter>> drafters;
+    // One entry per rank: pool / stream / device, the shared history and compact log, and
+    // the commit descriptor this rank's accept path uploads.
+    std::vector<MtpGdnRankState> ranks;
+    uint32_t max_rows = 0u;
+    uint32_t max_requests = 0u;
+    uint32_t num_drafts = 0u;
+    // A target whose rollback also has to restore per-row indexer (QSA) and PLE conv
+    // state verifies one request at a time: the fused verify's shared history is not
+    // validated for that rollback yet.
+    bool solo_verify = false;
+    bool initialized = false;
+};
+
+// The arena bytes a batch context reserves: one drafter per request plus the shared
+// history / compact log for the whole batch and its commit descriptors. The caller adds
+// the per-drafter KV pools (see mtp_drafter_reserve_bytes).
+std::size_t mtp_spec_batch_reserve_bytes(
+    const shelf::qwen_hybrid::QwenHybridConfig& config,
+    const MtpDrafterConfig& options,
+    std::size_t max_requests,
+    std::size_t token_row_intermediate,
+    std::size_t grouped_executor_bytes,
+    bool exl3_linear_workspace) noexcept;
+
+Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
+    Executor& target,
+    const MtpDrafterInput& input,
+    const state::GdnStatePool& target_gdn_pool,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const MtpDrafterConfig& options,
+    uint32_t max_requests,
+    const std::vector<MtpGdnRankBinding>* extra_ranks = nullptr,
+    TpBatchHook* tp_hook = nullptr);
+
+Status shutdown_mtp_spec_batch_context(MtpSpecBatchContext& context) noexcept;
+
+// Runs one batched round: every slot drafts on its own drafter, the target verifies all
+// proposals in one forward, and each slot accepts its own prefix. Slots whose room or
+// budget leaves no draft fall back to a single decode on their own sequence.
+Result<MtpSpecBatchOutput> mtp_spec_step_batch(
+    MtpSpecBatchContext& context,
+    std::span<const MtpSpecBatchSlot> slots);
 
 }  // namespace runtime
 }  // namespace qwen35

@@ -363,12 +363,12 @@ def arena_gib_value(text: str):
     if text == "auto":
         return "auto"
     try:
-        value = int(text)
+        value = float(text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("expected N or auto") from exc
-    if value <= 0:
-        raise argparse.ArgumentTypeError("expected a positive integer or auto")
-    return value
+        raise argparse.ArgumentTypeError("expected N, -N or auto") from exc
+    if value == 0 or value != value or value in (float("inf"), float("-inf")):
+        raise argparse.ArgumentTypeError("expected N, -N or auto")
+    return text
 
 
 def parse_args(argv=None):
@@ -401,7 +401,8 @@ def parse_args(argv=None):
                              "longer than --large-context-tokens (default 65536)")
 
     parser.add_argument("--arena-gib", type=arena_gib_value, default="auto", metavar="N|auto",
-                        help="GPU arena capacity in GiB; auto = free VRAM minus 1 GiB (default auto)")
+                        help="GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, "
+                             "-N = total VRAM minus N GiB (default auto)")
     parser.add_argument("--device", default="0",
                         help="comma separated GPU devices, one per rank; "
                              "count must match --tensor-parallel (default 0)")

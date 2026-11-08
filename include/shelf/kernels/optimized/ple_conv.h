@@ -32,6 +32,10 @@ struct PleConvArgs {
     uint64_t state_slot_stride = 0;
     uint64_t state_layer_stride = 0;
     uint64_t state_history_stride = 0;
+
+    shelf::bf16_t* state_history_store = nullptr;
+    uint32_t history_rows = 0;
+    uint64_t history_state_stride = 0;
 };
 
 inline constexpr uint32_t kPleConvThreads = 256u;

@@ -28,6 +28,15 @@
 namespace shelf {
 namespace app {
 
+enum class ArenaBudgetMode {
+    // Free VRAM at startup minus a small margin.
+    Auto,
+    // Exactly `arena_bytes`.
+    Fixed,
+    // Total VRAM minus `arena_bytes` (a margin).
+    TotalMinus,
+};
+
 struct Qwen35RuntimeConfig {
     std::string model_dir;
     std::string dflash2_model_dir;
@@ -35,10 +44,12 @@ struct Qwen35RuntimeConfig {
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
     bool mtp = false;
+    bool mtp_serve = false;
     uint32_t mtp_drafts = 7;
     uint32_t max_seq_len = 512;
     uint32_t max_num_batched_tokens = 0;
     uint32_t max_concurrent_requests = 4;
+    ArenaBudgetMode arena_mode = ArenaBudgetMode::Auto;
     std::size_t arena_bytes = 0;
     std::size_t draft_bytes = 0;
     bool private_target_weights = false;
@@ -180,6 +191,9 @@ class Qwen35ComputeRuntime {
     Status initialize_pipeline_parallel();
 
     std::size_t drafter_reserve_bytes(const ::shelf::state::GdnStatePool& pool) const;
+
+    std::size_t mtp_batch_requests(
+        const qwen35::runtime::MtpDrafterConfig& options) const;
 
     void apply_auto_working_set_reserve();
 
