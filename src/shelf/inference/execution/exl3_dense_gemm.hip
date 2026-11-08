@@ -1,9 +1,12 @@
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 
 #include <hipblaslt/hipblaslt.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace shelf::execution {
 namespace {
@@ -119,7 +122,31 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
         pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_limit,
         sizeof(workspace_limit));
 
-    const hipblasLtMatmulAlgo_t* cached = find_algo(lt, int8, rows, out_features, kdim);
+    int prefill_slot = -1;
+    int prefill_index = -1;
+    if (int8 && rows == 2048u) {
+        if (out_features == 5120u && kdim == 17408u) { prefill_slot = 0; prefill_index = 140674; }
+        else if (out_features == 5120u && kdim == 6144u) { prefill_slot = 1; prefill_index = 140561; }
+        else if (out_features == 6144u && kdim == 5120u) { prefill_slot = 2; prefill_index = 140561; }
+    }
+    bool use_prefill_choice = false;
+    if (prefill_slot >= 0) {
+        static const bool enabled = [] {
+            const char* e = std::getenv("SHELF_EXL3_INT8_PREFILL_ALGO");
+            return e != nullptr && std::strtoul(e, nullptr, 10) != 0ul;
+        }();
+        use_prefill_choice = enabled;
+    }
+    struct PrefillCache {
+        int device = -1;
+        hipblasLtMatmulAlgo_t algo{};
+        bool valid = false;
+    };
+    static thread_local PrefillCache prefill_cache[3];
+    const hipblasLtMatmulAlgo_t* cached = use_prefill_choice
+        ? (prefill_cache[prefill_slot].valid && prefill_cache[prefill_slot].device == cur_device
+               ? &prefill_cache[prefill_slot].algo : nullptr)
+        : find_algo(lt, int8, rows, out_features, kdim);
     hipblasLtMatmulAlgo_t algo{};
     size_t workspace_size = 0u;
     const float alpha = 1.0f;
@@ -146,6 +173,23 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
             return hipErrorNotSupported;
         }
         bool tuned = false;
+        if (use_prefill_choice) {
+            hipDeviceProp_t props{};
+            char revision[64]{};
+            if (hipGetDeviceProperties(&props, cur_device) == hipSuccess &&
+                std::strncmp(props.gcnArchName, "gfx1201", 7u) == 0 &&
+                hipblasLtGetGitRevision(lt.handle, revision) == HIPBLAS_STATUS_SUCCESS &&
+                std::strncmp(revision, "cd957402", 8u) == 0) {
+                for (int i = 0; i < found; ++i) {
+                    if (results[i].state == HIPBLAS_STATUS_SUCCESS && results[i].workspaceSize == 0u &&
+                        hipblaslt_ext::getIndexFromAlgo(results[i].algo) == prefill_index) {
+                        algo = results[i].algo;
+                        tuned = true;
+                        break;
+                    }
+                }
+            }
+        }
         // Timing the candidates costs about a second the first time a row count is seen, which a request-sized
         // prompt pays on every new length. The fp16 path has always done it; the int8 path only on request.
         static const bool tune_fp16 = [] {
@@ -156,7 +200,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
             const char* e = std::getenv("SHELF_EXL3_INT8_TUNE");
             return e != nullptr && std::strtoul(e, nullptr, 10) != 0ul;
         }();
-        if ((int8 ? tune_int8 : tune_fp16) && found > 1) {
+        if (!tuned && (int8 ? tune_int8 : tune_fp16) && found > 1) {
             double best_ms = 1.0e30;
             int best = -1;
             for (int i = 0; i < found; ++i) {
@@ -200,7 +244,16 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
             algo = results[0].algo;
             workspace_size = results[0].workspaceSize;
         }
-        store_algo(lt, int8, rows, out_features, kdim, algo);
+        if (use_prefill_choice) {
+            prefill_cache[prefill_slot].device = cur_device;
+            prefill_cache[prefill_slot].algo = algo;
+            prefill_cache[prefill_slot].valid = true;
+            if (std::getenv("SHELF_EXL3_INT8_PREFILL_ALGO_LOG") != nullptr)
+                std::fprintf(stderr, "EXL3 prefill algo device=%d rows=%u n=%u k=%u index=%d workspace=0\n",
+                             cur_device, rows, out_features, kdim, hipblaslt_ext::getIndexFromAlgo(algo));
+        } else {
+            store_algo(lt, int8, rows, out_features, kdim, algo);
+        }
     }
 
     void* workspace = nullptr;
