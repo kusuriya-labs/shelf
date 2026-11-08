@@ -124,6 +124,20 @@ Saber の `mxfp4_gemm_atiled.hip` と `mxfp4_atiled_wm.h` は読み取りのみ�
 
 試作は p50 で 2.28 倍かかり、この方式自体は不採用。出力回転や flag 補正は含まず、これは decode 型の直接復号試作に対する結果であって、復号 ALU の実測上限でも、LDS を使う設計すべてへの結論でもない。別に M 方向の 2 wave で復号済み fragment を LDS 共有する 128×64×128 試作は、同じ形状と検証条件で INT32 不一致 0、現行 2.066823 ms に対して 5.445274 ms であり、不採用。A は LDS に置かず、double buffer と出力回転の融合は未実装。この結果から全ての LDS 方式を否定することはできない。コンパイラの `-Rpass-analysis=kernel-resource-usage` は VGPR 101、LDS 8192 bytes/block、spill 0、占有率 12 waves/SIMD と報告した。これは静的な資源推定で、実行時の占有率ではない。
 
+## 交互 A/B の途中値
+
+5 組の収集中であり、以下はいずれも最初の 1 組のみの GPU 時間である。warmup は各プロセス 1 回、chunk 2048。**p50 や採否判定ではない。**
+
+| 条件 | prompt | 現行 ms | 候補 ms |
+|---|---:|---:|---:|
+| 出力回転のみ | 2048 | 1132.6847 | 1124.8898 |
+| 出力回転のみ | 8192 | 4924.41 | 4812.56 |
+| 出力回転のみ | 32768 | 24163.45 | 23595.59 |
+| algorithm のみ | 2048 | 1157.68 | 1110.30 |
+| 両候補 | 2048 | 1150.5142 | 1074.7476 |
+| 両候補 | 8192 | 5203.56 | 4750.25 |
+| 両候補 | 32768 | 23992.0625 | 22860.7754 |
+
 ## 精度と総合判定
 
 `shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。既存 `test_exl3_int8_linear` と `test_exl3_int8_tp` もそれぞれ lock 下で実行し、両方 exit 0・ALL PASS。総合 A/B は計測中。
