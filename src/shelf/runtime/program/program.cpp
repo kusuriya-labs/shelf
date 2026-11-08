@@ -875,9 +875,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             if (!resolved.ok()) return resolved.status();
             const ResolvedLinearQuantContract& contract = resolved.value();
             if (w.encoding == 4u) {
-                // The grouped kernel decodes the mul1 codebook only; a mul24 expert would be read as garbage.
-                if (contract.linear_kernel == KernelId::LINEAR_EXL3_INT8)
-                    return fail("exl3 grouped linear supports mul1 only (mul24 experts have no grouped kernel)");
+                // mul24 experts run through the same grouped kernel (decode switched by the weight's compute spec),
+                // as an FP16 GEMM; neither format quantizes its activation here.
+                if (contract.linear_kernel == KernelId::LINEAR_EXL3_INT8 && w.exl3_half)
+                    return fail("exl3 mul24 grouped linear supports integer bit rates only");
                 if (contract.requires_activation_quant)
                     return fail("exl3 grouped linear must not quantize its activation");
                 if (w.k_padded != w.cols || (w.cols & 127u) != 0u ||

@@ -374,6 +374,34 @@ int main() {
         check(got == want, "the EXL3 MoE FFN skips activation quantization");
     }
 
+    for (const bool half : {false, true}) {
+        // mul24 experts run through the same grouped dispatch; only integer bit rates exist for them.
+        auto m = build_moe_graph(true, true, true);
+        for (const uint32_t i : {1u, 2u}) {
+            m.slot_at(i).compute_spec = static_cast<uint8_t>(
+                shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16);
+            m.slot_at(i).exl3_half = half ? 1u : 0u;
+            const uint64_t words = 16u * 3u + (half ? 8u : 0u);
+            const uint32_t rows = m.slot_at(i).rows;
+            m.slot_at(i).codes_row_stride_bytes =
+                static_cast<uint32_t>((static_cast<uint64_t>(rows) / 16u) * words * 2u);
+            m.slot_at(i).codes_batch_stride_bytes = m.slot_at(i).codes_row_stride_bytes;
+        }
+        std::vector<rt::WeightSlot> weights = m.weights;
+        const rt::WeightTableView view{weights.data(), weights.size()};
+        auto built = rt::build_program(m.g, view, rt::RowBucket::R16, rt::ExecutionClass::DECODE,
+                                       rt::ProgramBuildOptions{});
+        check(built.ok() == !half,
+              half ? "a mul24 expert plane with a half bit rate is rejected"
+                   : "a mul24 expert plane builds a grouped EXL3 program");
+        if (built.ok()) {
+            bool grouped = false;
+            for (const auto& d : built.value().dispatches)
+                grouped = grouped || d.kernel_id == rt::KernelId::LINEAR_EXL3_W16A16_GROUPED;
+            check(grouped, "the mul24 expert plane dispatches the grouped EXL3 kernel");
+        }
+    }
+
     {
         auto m = build_moe_graph(false);
         check(!rt::validate_primitive_graph(m.g).ok(),

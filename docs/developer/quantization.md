@@ -355,7 +355,7 @@ linear kernel 内で行い、出力は `svh` を掛けてから BF16 / F32 で�
   EXL3 の lm_head に対して vocab shard は行わない。
 - tensor partition（TP）は EXL3 の trellis / `suh` / `svh` / marker を軸ごとに分割できる
   （`materialize_rank_local_canonical`。n 軸は kt ごとに nt を、k 軸は kt を選ぶ）。mul24 の INT8 実行は下記。
-- MoE routed expert と DFlash2 drafter の重みは EXL3 を受理しない。
+- DFlash2 drafter の重みは EXL3 を受理しない。MoE routed expert（Qwen4Exp）は grouped EXL3 として受理する（mul24 は下記）。
 - DFlash2 の verify が使う target lm_head は EXL3 を受理し、融合 W16A16 で
   logits を計算する（drafter の重みは BF16 / FP8 のまま）。
 
@@ -402,8 +402,46 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   INT8 経路、結合（n は連結、k は加算）を 1 GPU で再現して照合する（tp=2/4、実モデル形状を含む）。
   hipBLASLt の handle と algorithm cache は rank の worker thread ごと（device ごと）に持つ。
   **複数 GPU での実行（collective を含む）は未検証。**
-- 制約: 整数 bit rate のみ（half は拒否）、K と N が 128 の倍数。MoE の expert（grouped EXL3）は mul1 のみで、
-  mul24 の expert は program 構築時に拒否する（grouped 版の INT8 kernel は無い）。correctness fallback は持たない。
+- MoE の routed expert（rank-3 の grouped EXL3）: mul24 の expert plane も `LINEAR_EXL3_W16A16_GROUPED` で実行する
+  （dispatch は `WeightSlot` の `compute_spec` が `EXL3_MUL24_INT8_W8A8_F32_BF16` のとき `Exl3GroupedArgs::mul24` を立てる）。
+  mul24 は専用の kernel（`exl3_mul24_grouped.hip`、group plan は mul1 の grouped と共通の
+  `exl3_group_plan_device.h`）で、活性の形を 2 つ持つ。
+  - **FP16 活性（既定、`SHELF_EXL3_INT8_MOE=0`）**: 活性は mul1 と同じく `suh` と H128 を掛けて FP16 にし、重みは
+    `q`（−128..127 の整数、FP16 で厳密）を WMMA(f16) の A フラグメントとして直接作る。`kExl3Int8GridStep` は
+    FP16 の重みに焼き込まず epilogue の scale（`kInvSqrt128 * kExl3Int8GridStep`）に畳む（`q * step` は FP16 で丸まるため）。
+  - **INT8 活性（`SHELF_EXL3_INT8_MOE=1`、`Exl3GroupedArgs::int8_act`）**: dense の decode 経路と同じ考え方で、回転後の活性を
+    **行ごと・128 ごと**に `amax / 127` の scale で int8 化し（`rint(v * (1 / scale))`、−128..127 に clamp）、復号した
+    `q` を iu8 WMMA に直接渡して 128 ごとに int32 で厳密に累積、fp32 の行 scale を block ごとに掛けて足す。最後に
+    `kExl3Int8GridStep`、H128、`svh`。行 scale＋flagged 行（dense の prefill 方式）は採らない: grouped には hipBLASLt の
+    1 本の GEMM がなく、decode 経路と同じ group scale のまま kernel 内で完結するほうが実装が小さく、massive activation の
+    行を特別扱いせずに済むため。
+  - 回転と INT8 化は **GEMM kernel に融合**し、workspace を持たない。回転は expert ごとの `suh` を掛けるので、gate/up/down
+    の間はもちろん、同じ token が複数 expert に行く場合も共有できない（gather の前に置けない）。gather は kernel 内で
+    `row_token` を引く。代償として、1 つの group（最大 2 group を融合）の行を n 方向の block 数だけ回転し直す
+    （Flash Next の gate は 5 回、down は 10 回）。
+  - 復号は bit rate（1..8）をテンプレートにし、窓の位置とシフトを定数にする（dense の INT8 kernel と同じ復号）。
+    この変更で FP16 の mul24 は prefill 2048 token の gate+down で 7.74 ms から 5.88 ms になった（実形状、R9700）。
+  - 融合 group 数は 1 か 2（それ以上は 2 として実行する。4 はレジスタが溢れて遅かった）。n-tile の上書き
+    （`SHELF_EXL3_GROUPED_NTILES`）が出力幅を割り切れない場合は launch を拒否する（列が落ちるため）。
+  - expert plane の trellis は dense のように n-major に並べ替えず、canonical の `[kt][nt]` のまま常駐する
+    （`load_expert_matrix` は expert ごとに trellis をそのまま upload する）。expert の分割は expert parallel（expert 軸の
+    切り出しのみ）で、trellis の中は分割しないため、rank-local の view でも並びは変わらない。
+  - loader は expert plane の全 expert の marker が同じ乗数であることを検査し、mul1 と mul24 の混在（plane 内、
+    1 層の gate / up / down の間、層をまたぐ plane 間）を明示エラーにする。dense の linear と expert の format の混在は
+    禁止していない（dispatch は weight ごと）。
+  - **速度（R9700、`bench_exl3_int8_grouped`、Flash Next の実形状 hidden 2560 / intermediate 640 / 512 expert / top-10、
+    3 bit、一様な routing、gate+down の 1 層ぶん）**: INT8 活性は FP16 より速くない。decode 相当（1〜16 token）は
+    0.96〜1.02 倍、prefill（256〜2048 token）は 0.91〜0.98 倍。このため既定は FP16 活性のまま
+    （`kExl3Int8MoeDefault`、`moe_dispatch.hip`）。支配項は重みの復号と、n block ごとに繰り返す回転で、WMMA の
+    型（f16 か iu8 か）ではない。回転を省いた実験では gate が約 1.4 倍になったので、回転と INT8 化を別 kernel に出して
+    1 回だけ行えば INT8 が優位になる余地はあるが、その場合は workspace（行 × k の int8 と scale）が必要で未実装。
+- 制約: 整数 bit rate のみ（half は拒否。expert も同じで、loader と program 構築の両方で拒否する）、K と N が 128 の倍数。
+  expert の trellis は n-major ではない。correctness fallback は持たない。
+  **未検証**: 実モデル（Qwen3.8-Flash-Next の mul24 版 80 GB）の実行、複数 GPU（expert parallel と collective）、
+  dispatch 経由（`SHELF_EXL3_INT8_MOE` の切り替え）での実行、モデル全体の精度と速度。検証済みなのは
+  `test_exl3_int8_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照（活性の丸めまで鏡像）と照合、
+  INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、`bench_exl3_int8_grouped`（kernel 単体の速度）、
+  `test_program_moe_plan`（program 構築）である。
 
 ## KV quantization
 
