@@ -391,6 +391,7 @@ add_library(shelf_qwen35_runtime STATIC
     src/shelf/models/qwen35/runtime/gdn_spec_history.hip
     src/shelf/models/qwen35/runtime/decode_backend.cpp
     src/shelf/models/qwen35/dflash2/executor.hip
+    src/shelf/models/common/drafter/linear.hip
 )
 target_compile_features(shelf_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(shelf_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

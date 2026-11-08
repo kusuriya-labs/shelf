@@ -161,6 +161,11 @@ Status conv_apply_dynamic_conv(
     return Status::make_ok();
 }
 
+Status executor_linear(DFlash2Executor& executor, const shelf::weights::MatrixWeight& weight,
+                       const bf16_t* input, uint32_t input_row_stride, bf16_t* output,
+                       uint32_t output_row_stride, uint32_t rows, const char* tag,
+                       hipStream_t stream, bool allow_exact_rows = true);
+
 Status grouped_conv_prepare_rows(
     DFlash2Executor& executor,
     const bf16_t* hidden,
@@ -179,7 +184,7 @@ Status grouped_conv_prepare_rows(
     const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
     const shelf::weights::MatrixWeight& projection = conv_kernel_projection(layer, attention_conv);
 
-    Status gemm_st = dflash2_linear(projection, hidden, hidden_size,
+    Status gemm_st = executor_linear(executor, projection, hidden, hidden_size,
                                     executor.conv_dynamic.data<bf16_t>(),
                                     static_cast<uint32_t>(executor.conv_dynamic.dim(1)), rows,
                                     "conv kernel_projection", stream);
@@ -243,6 +248,18 @@ Status layer_gemm_bf16(
                                  hipGetErrorString(err), __FILE__, __LINE__);
     }
     return Status::make_ok();
+}
+
+
+Status executor_linear(DFlash2Executor& executor, const shelf::weights::MatrixWeight& weight,
+                       const bf16_t* input, uint32_t input_row_stride, bf16_t* output,
+                       uint32_t output_row_stride, uint32_t rows, const char* tag,
+                       hipStream_t stream, bool allow_exact_rows) {
+    if (weight.encoding == shelf::weights::MatrixEncoding::Bf16)
+        return layer_gemm_bf16(weight, input, input_row_stride, output, output_row_stride,
+                               rows, tag, stream, allow_exact_rows);
+    return shelf::drafter::quantized_linear(weight, input, input_row_stride, output,
+                                            output_row_stride, rows, executor.linear_workspace, stream);
 }
 
 
@@ -426,6 +443,27 @@ Result<DFlash2Executor> create_dflash2_executor(
         if (!st.ok()) return st;
     }
 
+    bool quantized_linear = weights.fc.encoding != shelf::weights::MatrixEncoding::Bf16;
+    for (const auto& layer : weights.layers) {
+        for (const auto* w : {&layer.attn_q_proj, &layer.attn_k_proj, &layer.attn_v_proj,
+                              &layer.attn_o_proj, &layer.mlp_gate_proj, &layer.mlp_up_proj,
+                              &layer.mlp_down_proj})
+            quantized_linear |= w->encoding != shelf::weights::MatrixEncoding::Bf16;
+    }
+    if (quantized_linear) {
+        const auto workspace_rows = std::max(rows, ctx_rows);
+        const auto max_k = std::max({hidden, intermediate, config.tap_feature_size()});
+        const auto max_n = std::max({hidden, intermediate, q_features, kv_features});
+        const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(
+            static_cast<uint32_t>(max_k), static_cast<uint32_t>(workspace_rows));
+        st = allocate_contiguous_tensor<int8_t>(arena, {layout.codes_bytes()}, ex.linear_workspace.codes);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {layout.scales_bytes() / sizeof(float)}, ex.linear_workspace.scales);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {std::max(rows * 4u, ctx_rows) * max_n}, ex.linear_workspace.accum);
+        if (!st.ok()) return st;
+    }
+
     st = allocate_contiguous_tensor<uint32_t>(arena, {rows}, ex.conv_row_has_prev);
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<uint8_t>(
@@ -494,6 +532,7 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.proposal_tokens = gpu::Tensor{};
     executor.topk_scratch_ids = gpu::Tensor{};
     executor.topk_scratch_logits = gpu::Tensor{};
+    executor.linear_workspace = shelf::drafter::LinearWorkspace{};
     executor.activation_codes = gpu::Tensor{};
     executor.activation_scales = gpu::Tensor{};
     executor.exl3_lm_head_accum = gpu::Tensor{};
@@ -546,7 +585,7 @@ Status dflash2_project_target_features(
     }
 
     const shelf::weights::MatrixWeight& fc = executor.weights->fc;
-    Status st = dflash2_linear(fc, executor.target_concat.data<bf16_t>(),
+    Status st = executor_linear(executor, fc, executor.target_concat.data<bf16_t>(),
                                concat_stride, executor.target_fc.data<bf16_t>(),
                                static_cast<uint32_t>(executor.target_fc.dim(1)), rows, "fc",
                                stream);
@@ -622,7 +661,7 @@ Status layer_attention_tail(
     const uint32_t intermediate = static_cast<uint32_t>(config.intermediate_size);
     const float eps = config.rms_norm_eps;
 
-    Status st = dflash2_linear(layer.attn_o_proj,
+    Status st = executor_linear(executor, layer.attn_o_proj,
                                executor.attention_context.data<bf16_t>(), q_features,
                                executor.attention_o.data<bf16_t>(), hidden, block_rows,
                                "o_proj", stream);
@@ -656,11 +695,11 @@ Status layer_attention_tail(
 
     const bf16_t* mlp_prepared = executor.mlp_prepared.data<bf16_t>();
 
-        st = layer_gemm_bf16(layer.mlp_gate_proj, mlp_prepared, hidden,
+        st = executor_linear(executor, layer.mlp_gate_proj, mlp_prepared, hidden,
                              executor.mlp_gate.data<bf16_t>(), intermediate, block_rows,
                              "mlp_gate", stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.mlp_up_proj, mlp_prepared, hidden,
+        st = executor_linear(executor, layer.mlp_up_proj, mlp_prepared, hidden,
                              executor.mlp_up.data<bf16_t>(), intermediate, block_rows, "mlp_up",
                              stream);
         if (!st.ok()) return st;
@@ -674,7 +713,7 @@ Status layer_attention_tail(
         return Status::hip_error("dflash2 mlp swiglu launch", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
-    st = dflash2_linear(layer.mlp_down_proj, executor.mlp_swiglu.data<bf16_t>(),
+    st = executor_linear(executor, layer.mlp_down_proj, executor.mlp_swiglu.data<bf16_t>(),
                         intermediate, executor.mlp_down.data<bf16_t>(), hidden, block_rows,
                         "mlp_down", stream);
     if (!st.ok()) return st;
@@ -755,11 +794,11 @@ Status dflash2_context_append(
         const DFlash2LayerWeights& layer = executor.weights->layers[li];
         Status st = Status::make_ok();
     
-            st = layer_gemm_bf16(layer.attn_k_proj, feature, hidden,
+            st = executor_linear(executor, layer.attn_k_proj, feature, hidden,
                                  executor.k_ctx_raw.data<bf16_t>(), kv_features,
                                  effective_rows, "k_ctx_proj", stream, false);
             if (!st.ok()) return st;
-            st = layer_gemm_bf16(layer.attn_v_proj, feature, hidden,
+            st = executor_linear(executor, layer.attn_v_proj, feature, hidden,
                                  executor.v_ctx.data<bf16_t>(), kv_features, effective_rows,
                                  "v_ctx_proj", stream, false);
             if (!st.ok()) return st;
@@ -856,23 +895,23 @@ Status dflash2_forward_layer_stateless(
     const bf16_t* attention_prepared = executor.attention_prepared.data<bf16_t>();
 
 
-        st = layer_gemm_bf16(layer.attn_q_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_q_proj, attention_prepared, hidden,
                              executor.q_raw.data<bf16_t>(), q_features, block_rows, "q_proj",
                              stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_k_proj, target_feature, hidden,
+        st = executor_linear(executor, layer.attn_k_proj, target_feature, hidden,
                              executor.k_ctx_raw.data<bf16_t>(), kv_features, context_rows,
                              "k_ctx_proj", stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_v_proj, target_feature, hidden,
+        st = executor_linear(executor, layer.attn_v_proj, target_feature, hidden,
                              executor.v_ctx.data<bf16_t>(), kv_features, context_rows,
                              "v_ctx_proj", stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_k_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_k_proj, attention_prepared, hidden,
                              executor.k_noise_raw.data<bf16_t>(), kv_features, block_rows,
                              "k_noise_proj", stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_v_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_v_proj, attention_prepared, hidden,
                              executor.v_noise.data<bf16_t>(), kv_features, block_rows,
                              "v_noise_proj", stream);
         if (!st.ok()) return st;
@@ -1492,15 +1531,15 @@ Status dflash2_forward_layer_cached(
 
     const bf16_t* attention_prepared = executor.attention_prepared.data<bf16_t>();
 
-        st = layer_gemm_bf16(layer.attn_q_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_q_proj, attention_prepared, hidden,
                              executor.q_raw.data<bf16_t>(), q_features, block_rows, "q_proj",
                              stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_k_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_k_proj, attention_prepared, hidden,
                              executor.k_noise_raw.data<bf16_t>(), kv_features, block_rows,
                              "k_noise_proj", stream);
         if (!st.ok()) return st;
-        st = layer_gemm_bf16(layer.attn_v_proj, attention_prepared, hidden,
+        st = executor_linear(executor, layer.attn_v_proj, attention_prepared, hidden,
                              executor.v_noise.data<bf16_t>(), kv_features, block_rows,
                              "v_noise_proj", stream);
         if (!st.ok()) return st;
@@ -1749,15 +1788,15 @@ Status dflash2_forward_layer_cached_batch(
     if (!st.ok()) return st;
 
     const bf16_t* attention_prepared = executor.attention_prepared.data<bf16_t>();
-    st = layer_gemm_bf16(layer.attn_q_proj, attention_prepared, hidden,
+    st = executor_linear(executor, layer.attn_q_proj, attention_prepared, hidden,
                          executor.q_raw.data<bf16_t>(), q_features, total_rows, "q_proj",
                          stream);
     if (!st.ok()) return st;
-    st = layer_gemm_bf16(layer.attn_k_proj, attention_prepared, hidden,
+    st = executor_linear(executor, layer.attn_k_proj, attention_prepared, hidden,
                          executor.k_noise_raw.data<bf16_t>(), kv_features, total_rows,
                          "k_noise_proj", stream);
     if (!st.ok()) return st;
-    st = layer_gemm_bf16(layer.attn_v_proj, attention_prepared, hidden,
+    st = executor_linear(executor, layer.attn_v_proj, attention_prepared, hidden,
                          executor.v_noise.data<bf16_t>(), kv_features, total_rows,
                          "v_noise_proj", stream);
     if (!st.ok()) return st;

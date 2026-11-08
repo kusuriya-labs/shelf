@@ -1,6 +1,7 @@
 #pragma once
 
 #include <shelf/core/memory/arena.h>
+#include <shelf/models/common/drafter/linear.h>
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
@@ -82,6 +83,7 @@ struct DFlash2Executor {
     gpu::Tensor proposal_tokens;
     gpu::Tensor topk_scratch_ids;
     gpu::Tensor topk_scratch_logits;
+    shelf::drafter::LinearWorkspace linear_workspace;
     gpu::Tensor activation_codes;
     gpu::Tensor activation_scales;
     gpu::Tensor exl3_lm_head_accum;

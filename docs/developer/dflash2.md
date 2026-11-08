@@ -92,24 +92,23 @@ verify し、一致した prefix だけを commit する。
 
 ### weight
 
-- BF16 safetensors、または全 tensor が BF16 entry の self-contained 量子化
-  safetensors を受け付ける。
-- tensor 名と shape は `dflash2_expected_tensors(config)` が唯一の定義。
-- missing tensor / unexpected tensor / shape 不一致 / dtype 不一致はすべて error。
-  error message には tensor 名を含める。
-- embedding / lm_head は checkpoint に存在しない。target 側を再利用する。
-- 27B 用 checkpoint は 81 tensor、3,848,808,960 bytes。
-- 量子化 bundle は `is_quantized_model_dir()` で判定し、`QuantizedModelReader` で開く。
-
-### weight encoding contract
-
-drafter の backbone は BF16 のみを受け付ける。
-
-- runtime 側の contract（`validate_dflash2_tensor_contract` / `load_dflash2_weights`）は
-  manifest `architecture == "dflash2_draft"`、logical tensor set の完全一致、
-  全 tensor の encoding が Bf16 であることを検証する。load 後は
+- BF16 safetensors、Shelf 量子化 bundle、HF 形式の EXL3-INT8 mul24 または
+  block128 FP8 を受け付ける。`--dflash2-model-dir` の metadata または
+  `quantization_config` により形式を判定する。
+- `fc.weight` と各層の Q/K/V/O・gate/up/down projection は BF16、EXL3-INT8、
+  FP8 を層ごとに混在できる。dynamic convolution、candidate selector、norm は
+  BF16 を要求する。
+- tensor 名と shape は `dflash2_expected_tensors(config)` が定義する。欠落、余分な
+  tensor、shape または dtype の不一致はロード時に拒否する。EXL3 は整数 bit rate の
+  mul24、FP8 は 128×128 block scale の E4M3 を要求する。
+- HF 形式の EXL3 では `.trellis`、`.suh`、`.svh`、`.mul1` を、FP8 では
+  `.weight` と `.weight_scale_inv` を既存の HF adapter で読む。Shelf bundle の
+  `architecture` は `dflash2_draft` である。
+- 量子化 linear は共通の `shelf::drafter::quantized_linear` で実行し、出力を BF16 に
+  戻す。EXL3-INT8 は group-scale fused GEMM、FP8 は activation を量子化して既存の
+  block128 GEMM を使う。作業領域は executor が確保して再利用する。
+- embedding / lm_head は checkpoint に存在せず、target 側を再利用する。ロード後は
   `hipStreamSynchronize` する。
-- BF16 以外の encoding は silent fallback せず error で拒否する。
 
 ---
 

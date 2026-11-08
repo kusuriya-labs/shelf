@@ -1,5 +1,10 @@
 #include <shelf/models/qwen35/dflash2/weights.h>
 #include <shelf/io/safetensors_reader.h>
+#include <shelf/quantization/bundle/hf_manifest.h>
+#include <shelf/quantization/manifest/quantized_manifest.h>
+#include <shelf/quantization/exl3/exl3_int8.h>
+#include <cstring>
+#include <filesystem>
 #include <shelf/quantization/bundle/quantized_model_reader.h>
 #include <set>
 #include <string>
@@ -92,6 +97,58 @@ Status source_load_vector(const WeightSource& src, const std::string& name, gpu:
     return load_vector(*src.collection, name, *src.arena, src.stream, dst);
 }
 
+bool quantizable_linear(const std::string& name) {
+    if (name == "fc.weight") return true;
+    static const char* suffixes[] = {
+        ".self_attn.q_proj.weight", ".self_attn.k_proj.weight",
+        ".self_attn.v_proj.weight", ".self_attn.o_proj.weight",
+        ".mlp.gate_proj.weight", ".mlp.up_proj.weight", ".mlp.down_proj.weight"};
+    for (const char* suffix : suffixes) {
+        const std::string s(suffix);
+        if (name.size() >= s.size() && name.compare(name.size() - s.size(), s.size(), s) == 0)
+            return true;
+    }
+    return false;
+}
+
+Result<shelf::quantization::bundle::QuantizedModelReader> open_draft_reader(
+    const std::string& model_dir, const DFlash2Config& config, bool verify) {
+    namespace qb = shelf::quantization::bundle;
+    namespace qm = shelf::quantization::manifest;
+    if (std::filesystem::exists(std::filesystem::path(model_dir) / qm::kQuantizedMetadataFile))
+        return qb::QuantizedModelReader::open(model_dir, verify);
+    std::vector<std::string> logical;
+    std::set<std::string> allowed;
+    for (const auto& e : dflash2_expected_tensors(config)) {
+        logical.push_back(e.name);
+        allowed.insert(e.name);
+        if (quantizable_linear(e.name)) {
+            const std::string prefix = e.name.substr(0, e.name.size() - 7u);
+            for (const char* suffix : {".trellis", ".suh", ".svh", ".mul1"})
+                allowed.insert(prefix + suffix);
+            allowed.insert(e.name + "_scale_inv");
+        }
+    }
+    auto collection = shelf::weights::SafetensorsCollection::open(model_dir);
+    if (!collection.ok()) return collection.status();
+    auto names = collection.value().tensor_names();
+    if (!names.ok()) return names.status();
+    for (const auto& name : names.value()) {
+        if (!allowed.count(name)) return Status::invalid_argument(
+            ("DFlash2 checkpoint has unexpected tensor: " + name).c_str(), __FILE__, __LINE__);
+    }
+    auto source = qb::synthesize_hf_quantized_source(model_dir, logical, verify);
+    if (!source.ok()) return source.status();
+    for (const auto& name : names.value()) {
+        if (!source.value().shard_for_physical.count(name))
+            return Status::invalid_argument(
+                ("DFlash2 checkpoint has unused or ambiguous tensor: " + name).c_str(),
+                __FILE__, __LINE__);
+    }
+    source.value().manifest.architecture = kDFlash2QuantizedArchitecture;
+    return qb::QuantizedModelReader::open_hf_source(source.release(), verify);
+}
+
 Status validate_quantized_contract(
     const shelf::quantization::bundle::QuantizedModelReader& reader,
     const DFlash2Config& config) {
@@ -136,10 +193,24 @@ Status validate_quantized_contract(
                 __FILE__, __LINE__);
         }
         const auto& v = view_result.value();
-        if (v.encoding != QuantizedEncoding::Bf16) {
+        if (v.encoding != QuantizedEncoding::Bf16 &&
+            !(quantizable_linear(e.name) && (v.encoding == QuantizedEncoding::Exl3 ||
+                                             v.encoding == QuantizedEncoding::Fp8))) {
             return Status::invalid_argument(
-                ("DFlash2 quantized tensor '" + e.name + "' must be BF16").c_str(),
+                ("DFlash2 quantized tensor '" + e.name + "' has unsupported encoding").c_str(),
                 __FILE__, __LINE__);
+        }
+        if (v.encoding == QuantizedEncoding::Exl3) {
+            uint32_t multiplier = 0;
+            if (v.marker.size != sizeof(multiplier) || !v.marker.data || v.exl3_half)
+                return Status::invalid_argument(
+                    ("DFlash2 EXL3-INT8 marker or bit rate invalid: " + e.name).c_str(),
+                    __FILE__, __LINE__);
+            std::memcpy(&multiplier, v.marker.data, sizeof(multiplier));
+            if (multiplier != shelf::quantization::exl3::kExl3Mul24Multiplier)
+                return Status::unsupported(
+                    ("DFlash2 EXL3 multiplier must be mul24: " + e.name).c_str(),
+                    __FILE__, __LINE__);
         }
         if (v.logical_shape.size() != e.shape.size()) {
             return Status::invalid_argument(
@@ -224,47 +295,6 @@ Status load_dflash2_weights_from(
     return Status::make_ok();
 }
 
-Status validate_quantized_loaded(DFlash2Weights& weights) {
-    auto check_bf16 = [](const shelf::weights::MatrixWeight& w,
-                         const std::string& name) -> Status {
-        if (w.encoding != shelf::weights::MatrixEncoding::Bf16) {
-            return Status::invalid_argument(
-                ("DFlash2 backbone matrix not BF16: " + name).c_str(), __FILE__, __LINE__);
-        }
-        if (w.bf16.ndim() == 0) {
-            return Status::invalid_argument(
-                ("DFlash2 backbone matrix payload missing: " + name).c_str(), __FILE__, __LINE__);
-        }
-        return Status::make_ok();
-    };
-    Status st = check_bf16(weights.fc, "fc.weight");
-    if (!st.ok()) return st;
-    for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
-        DFlash2LayerWeights& lw = weights.layers[layer];
-        shelf::weights::MatrixWeight* matrices[] = {
-            &lw.attn_q_proj, &lw.attn_k_proj, &lw.attn_v_proj, &lw.attn_o_proj,
-            &lw.mlp_gate_proj, &lw.mlp_up_proj, &lw.mlp_down_proj,
-            &lw.attention_conv_kernel_projection, &lw.mlp_conv_kernel_projection,
-        };
-        const char* names[] = {
-            "self_attn.q_proj",        "self_attn.k_proj",
-            "self_attn.v_proj",        "self_attn.o_proj",
-            "mlp.gate_proj",           "mlp.up_proj",
-            "mlp.down_proj",           "attention_conv.kernel_projection",
-            "mlp_conv.kernel_projection",
-        };
-        for (std::size_t i = 0; i < 9; ++i) {
-            st = check_bf16(*matrices[i], std::to_string(layer) + "." + names[i]);
-            if (!st.ok()) return st;
-        }
-    }
-    if (weights.selector.hidden_projection.encoding != shelf::weights::MatrixEncoding::Bf16) {
-        return Status::invalid_argument(
-            "DFlash2 selector hidden_projection must remain BF16", __FILE__, __LINE__);
-    }
-    return Status::make_ok();
-}
-
 }  // namespace
 
 std::vector<DFlash2ExpectedTensor> dflash2_expected_tensors(const DFlash2Config& config) {
@@ -314,7 +344,7 @@ Status validate_dflash2_tensor_contract(
     const std::string& model_dir,
     const DFlash2Config& config) {
     if (shelf::weights::is_quantized_model_dir(model_dir)) {
-        auto reader_result = shelf::quantization::bundle::QuantizedModelReader::open(model_dir, false);
+        auto reader_result = open_draft_reader(model_dir, config, false);
         if (!reader_result.ok()) return reader_result.status();
         shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
         return validate_quantized_contract(reader, config);
@@ -389,7 +419,7 @@ Result<DFlash2Weights> load_dflash2_weights(
 
     if (shelf::weights::is_quantized_model_dir(model_dir)) {
         auto reader_result =
-            shelf::quantization::bundle::QuantizedModelReader::open(model_dir, true);
+            open_draft_reader(model_dir, config, true);
         if (!reader_result.ok()) return reader_result.status();
         shelf::quantization::bundle::QuantizedModelReader reader = reader_result.release();
 
@@ -404,8 +434,6 @@ Result<DFlash2Weights> load_dflash2_weights(
         src.options = options;
 
         Status st = load_dflash2_weights_from(src, config, weights);
-        if (!st.ok()) return st;
-        st = validate_quantized_loaded(weights);
         if (!st.ok()) return st;
     } else {
         Status contract = validate_dflash2_tensor_contract(model_dir, config);
