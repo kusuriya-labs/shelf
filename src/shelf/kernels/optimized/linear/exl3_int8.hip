@@ -20,17 +20,20 @@ constexpr float kInvSqrt128 = 0.08838834764831845f;
 // Sylvester Walsh-Hadamard transform of one 128-wide block, one element per thread (128
 // threads). Result is unnormalised.
 __device__ __forceinline__ float fwht128(float v, float* smem, uint32_t t) {
-    smem[t] = v;
-    __syncthreads();
     #pragma unroll
-    for (uint32_t h = 1u; h < kBlock; h <<= 1u) {
-        const float a = smem[t];
+    for (uint32_t h = 1u; h < 32u; h <<= 1u) {
+        const float b = __shfl_xor(v, h);
+        v = (t & h) ? (b - v) : (v + b);
+    }
+    #pragma unroll
+    for (uint32_t h = 32u; h < kBlock; h <<= 1u) {
+        smem[t] = v;
+        __syncthreads();
         const float b = smem[t ^ h];
         __syncthreads();
-        smem[t] = (t & h) ? (b - a) : (a + b);
-        __syncthreads();
+        v = (t & h) ? (b - v) : (v + b);
     }
-    return smem[t];
+    return v;
 }
 
 __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {

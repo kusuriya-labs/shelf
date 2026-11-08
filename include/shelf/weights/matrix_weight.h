@@ -95,19 +95,29 @@ inline MatrixEncoding quant_spec_to_encoding(quantization::QuantSpecId id) noexc
     return MatrixEncoding::Bf16;
 }
 
-// The staging planes the rotated-domain trellis form needs are sized by the largest linear
-// a rank actually runs: xrot by k, the dense copy by k * n, the accumulators by n. The LM
-// head is excluded because it stays on the fused path.
 struct Exl3LinearShape {
     std::size_t max_k = 0;
     std::size_t max_out_features = 0;
     std::size_t max_dense_bytes = 0;
+    std::size_t max_int8_decode_accum_bytes = 0;
 
     bool present() const noexcept { return max_k != 0u; }
 };
 
+inline void note_exl3_int8_decode_accum(const MatrixWeight& w, Exl3LinearShape& shape) noexcept {
+    if (w.encoding != MatrixEncoding::Exl3 ||
+        w.quant_spec != quantization::QuantSpecId::EXL3_MUL24_INT8_V1) return;
+    const std::size_t k = w.k_padded > w.cols ? w.k_padded : w.cols;
+    std::size_t splits = k / 1024u;
+    if (splits < 1u) splits = 1u;
+    if (splits > 16u) splits = 16u;
+    const std::size_t bytes = 16u * splits * static_cast<std::size_t>(w.rows) * sizeof(float);
+    if (bytes > shape.max_int8_decode_accum_bytes) shape.max_int8_decode_accum_bytes = bytes;
+}
+
 inline void note_exl3_linear(const MatrixWeight& w, Exl3LinearShape& shape) noexcept {
     if (w.encoding != MatrixEncoding::Exl3) return;
+    note_exl3_int8_decode_accum(w, shape);
     const std::size_t k = w.k_padded > w.cols ? w.k_padded : w.cols;
     if (k > shape.max_k) shape.max_k = k;
     if (w.rows > shape.max_out_features) shape.max_out_features = w.rows;

@@ -9,6 +9,7 @@ int run_quality(int argc, char** argv);
 int run_batch(int argc, char** argv);
 int run_activation_quantize(int argc, char** argv);
 int run_gemm(int argc, char** argv);
+int run_exl3_int8(int argc, char** argv);
 int run_rmsnorm(int argc, char** argv);
 int run_l2_normalize(int argc, char** argv);
 int run_kv_append(int argc, char** argv);
@@ -35,6 +36,7 @@ void usage() {
     std::printf("Linear:\n");
     std::printf("  activation-quantize A8 activation quantization micro-benchmark\n");
     std::printf("  gemm               linear GEMV/GEMM micro-benchmark\n");
+    std::printf("  exl3-int8          EXL3-INT8 decode linear micro-benchmark\n");
     std::printf("\n");
     std::printf("Normalization:\n");
     std::printf("  rmsnorm            RMSNorm micro-benchmark\n");
@@ -82,6 +84,7 @@ int main(int argc, char** argv) {
     if (sub == "batch") return run_batch(argc - 1, argv + 1);
     if (sub == "activation-quantize") return run_activation_quantize(argc - 1, argv + 1);
     if (sub == "gemm") return run_gemm(argc - 1, argv + 1);
+    if (sub == "exl3-int8") return run_exl3_int8(argc - 1, argv + 1);
     if (sub == "rmsnorm") return run_rmsnorm(argc - 1, argv + 1);
     if (sub == "l2-normalize") return run_l2_normalize(argc - 1, argv + 1);
     if (sub == "kv-append") return run_kv_append(argc - 1, argv + 1);

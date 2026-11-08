@@ -19,6 +19,7 @@
 #include <hip/hip_bf16.h>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -969,12 +970,22 @@ Result<PendingBatch> submit_co_batch(
 #ifdef SHELF_HIP_GRAPH
     // Graph 用 staging は capture / replay を実際に行う時だけ通す。
     const int graph_slot_idx = graph_slot_index(bucket);
+    const bool compact_history = options.gdn_spec_history.conv_history != nullptr &&
+        options.gdn_compact.delta != nullptr && options.gdn_compact.k != nullptr &&
+        options.gdn_compact.a != nullptr;
     const bool spec_verify_without_history =
-        batch.speculative_verify && options.gdn_spec_history.recurrent_history == nullptr;
+        exec_role == ::shelf::runtime::ExecutionRole::Verify &&
+        options.gdn_spec_history.recurrent_history == nullptr && !compact_history;
+    const char* verify_graph_env = std::getenv("SHELF_GRAPH_VERIFY");
+    const bool verify_graph = verify_graph_env != nullptr && verify_graph_env[0] != '\0' &&
+        verify_graph_env[0] != '0' && exec_role == ::shelf::runtime::ExecutionRole::Verify && R == 1u &&
+        prep.num_stochastic_outputs == 0u &&
+        options.qsa_spec_history.partial == nullptr && options.qsa_spec_history.counts == nullptr &&
+        options.ple_conv_history.store == nullptr;
     const bool tree_batch =
-        options.tree_anc_offsets != nullptr || options.rope_positions != nullptr ||
-        options.tree_row_parent != nullptr ||
-        options.tree_committed_end_rows != nullptr;
+        options.tree_anc_offsets != nullptr || options.tree_anc_positions != nullptr ||
+        options.tree_committed_end != 0u || options.rope_positions != nullptr ||
+        options.tree_row_parent != nullptr || options.tree_committed_end_rows != nullptr;
     const bool graph_eligible =
         !executor.graph_failed &&
         executor.tp_schedules.empty() &&
@@ -984,7 +995,7 @@ Result<PendingBatch> submit_co_batch(
         !executor.external_input_preparer &&
         !spec_verify_without_history &&
         !tree_batch &&
-        exec_role == ::shelf::runtime::ExecutionRole::Decode;
+        (exec_role == ::shelf::runtime::ExecutionRole::Decode || verify_graph);
     auto stage_graph_inputs = [&]() {
         if (!token_ids_on_device) {
             std::memcpy(executor.host_token_graph_staging, batch.token_ids,
@@ -1090,12 +1101,20 @@ Result<PendingBatch> submit_co_batch(
                 gslot->capture_rows == graph_capture_rows &&
                 gslot->gdn_conv_history == graph_gdn_conv_history &&
                 gslot->gdn_recurrent_history == graph_gdn_recurrent_history &&
+                gslot->gdn_conv_row_stride == options.gdn_spec_history.conv_row_stride &&
+                gslot->gdn_recurrent_row_stride == options.gdn_spec_history.recurrent_row_stride &&
+                gslot->gdn_compact.delta == options.gdn_compact.delta &&
+                gslot->gdn_compact.k == options.gdn_compact.k &&
+                gslot->gdn_compact.a == options.gdn_compact.a &&
+                gslot->gdn_compact.delta_layer_stride == options.gdn_compact.delta_layer_stride &&
+                gslot->gdn_compact.k_layer_stride == options.gdn_compact.k_layer_stride &&
+                gslot->gdn_compact.a_layer_stride == options.gdn_compact.a_layer_stride &&
                 gslot->token_device_src ==
                     (token_ids_on_device ? batch.token_ids : nullptr)) {
                 stage_graph_inputs();
                 if (hipGraphLaunch(gslot->exec, stream) == hipSuccess) {
                     enqueued = true;
-                    if (graph_debug_first(static_cast<uint32_t>(gslot_idx)))
+                    if (graph_debug_enabled())
                         std::fprintf(stderr, "[graph] replay bucket=%d N=%u\n", gslot_idx, N);
                 } else {
                     if (graph_debug_enabled())
@@ -1117,13 +1136,18 @@ Result<PendingBatch> submit_co_batch(
                     *gslot = GraphCacheSlot{};
                 }
                 stage_graph_inputs();
+                const auto capture_start = std::chrono::steady_clock::now();
                 if (hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal) == hipSuccess) {
                     Status cap_st = enqueue_batch();
                     hipGraph_t graph = nullptr;
                     hipError_t ec = hipStreamEndCapture(stream, &graph);
                     if (cap_st.ok() && ec == hipSuccess && graph != nullptr) {
                         hipGraphExec_t ge = nullptr;
+                        size_t node_count = 0u;
+                        if (graph_debug_enabled()) (void)hipGraphGetNodes(graph, nullptr, &node_count);
                         hipError_t ic = hipGraphInstantiate(&ge, graph, nullptr, nullptr, 0);
+                        const double capture_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - capture_start).count();
                         shelf::gpu::discard_cleanup_result(hipGraphDestroy(graph));
                         if (ic == hipSuccess && ge != nullptr) {
                             gslot->exec = ge;
@@ -1137,14 +1161,17 @@ Result<PendingBatch> submit_co_batch(
                             gslot->capture_rows = graph_capture_rows;
                             gslot->gdn_conv_history = graph_gdn_conv_history;
                             gslot->gdn_recurrent_history = graph_gdn_recurrent_history;
+                            gslot->gdn_conv_row_stride = options.gdn_spec_history.conv_row_stride;
+                            gslot->gdn_recurrent_row_stride = options.gdn_spec_history.recurrent_row_stride;
+                            gslot->gdn_compact = options.gdn_compact;
                             gslot->token_device_src =
                                 token_ids_on_device ? batch.token_ids : nullptr;
                             gslot->valid = true;
                             if (hipGraphLaunch(ge, stream) == hipSuccess) {
                                 enqueued = true;
                                 if (graph_debug_enabled())
-                                    std::fprintf(stderr, "[graph] capture ok bucket=%d N=%u\n",
-                                                 gslot_idx, N);
+                                    std::fprintf(stderr, "[graph] capture ok bucket=%d N=%u nodes=%zu host_ms=%.3f\n",
+                                                 gslot_idx, N, node_count, capture_ms);
                             } else {
                                 if (graph_debug_enabled())
                                     std::fprintf(stderr, "[graph] capture launch failed bucket=%d N=%u\n",
