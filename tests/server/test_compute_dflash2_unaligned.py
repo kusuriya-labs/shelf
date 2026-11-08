@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""prefix cache 無効時の非整列 prompt の DFlash2 一致性を検証する。"""
-
 import os
 from support import Checker, ComputeHarness, model_dir
 from test_compute_dflash2 import collect, generated_ids, run_single_shot

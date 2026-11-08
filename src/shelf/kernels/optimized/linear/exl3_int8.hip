@@ -481,8 +481,10 @@ hipError_t launch_exl3_int8_rotate_quantize(
     return hipGetLastError();
 }
 
-uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows) {
+uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
+                                uint32_t bits) {
     if (rows > 16u || rows == 0u || scratch_rows < rows) return 1u;
+    if (bits == 4u && n == 17408u && k == 5120u && scratch_rows >= 64u) return 4u;
     // Wave slots of the device (6 resident waves per SIMD at ~215 VGPRs), queried once.
     static const uint32_t slots = [] {
         int dev = 0, wgp = 0;

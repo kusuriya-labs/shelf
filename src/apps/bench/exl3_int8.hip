@@ -33,7 +33,7 @@ int run_exl3_int8(int argc, char** argv) {
         else return 2;
     }
     if (!n || n % 128 || !k || k % 128 || !rows || rows > 16 || bits < 1 || bits > 8 || !iterations || !working_mib || scratch_rows < rows) return 2;
-    if (!split) split = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, scratch_rows);
+    if (!split) split = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, scratch_rows, bits);
     if (!split || split > k / 128 || split * rows > scratch_rows) return 2;
     const size_t weight_bytes = size_t(n) * k * bits / 8;
     const size_t copies = std::max<size_t>(1, (size_t(working_mib) * 1024 * 1024 + weight_bytes - 1) / weight_bytes);

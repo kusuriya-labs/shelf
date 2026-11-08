@@ -329,9 +329,9 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
 
 
 
-bool row_parity(uint32_t bits) {
-    constexpr uint32_t rows = 8u, n = 1024u, k = 5120u;
-    constexpr uint32_t scale_stride = ((k / 128u * 4u) + 15u) & ~15u;
+bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u) {
+    constexpr uint32_t rows = 8u;
+    const uint32_t scale_stride = ((k / 128u * 4u) + 15u) & ~15u;
     std::mt19937 rng(123456u + bits);
     std::uniform_real_distribution<float> dist(-3.0f, 3.0f);
     std::vector<uint16_t> input(rows * k), suh(k), svh(n);
@@ -340,8 +340,8 @@ bool row_parity(uint32_t bits) {
     for (auto& x : svh) x = (rng() & 1u) ? 0x3c00u : 0xbc00u;
     std::vector<uint16_t> weights(static_cast<size_t>(n) * k * bits / 16u);
     for (auto& x : weights) x = static_cast<uint16_t>(rng());
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1024u);
-    if (splits != shelf::kernel::exl3_int8_gemm_splits(1u, n, k, 1024u)) return false;
+    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1024u, bits);
+    if (splits != shelf::kernel::exl3_int8_gemm_splits(1u, n, k, 1024u, bits)) return false;
     Dev<uint16_t> dx(rows * k), dsuh(k), dsvh(n), dw(weights.size());
     Dev<int8_t> codes(rows * k);
     Dev<float> scales(rows * scale_stride / 4u), accum(static_cast<size_t>(splits) * rows * n), out(rows * n);
@@ -431,7 +431,7 @@ bool bench_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits) {
     Dev<uint16_t> d_trellis(static_cast<size_t>(kt) * nt * 16u * bits);
     Dev<int8_t> d_codes(static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride);
     Dev<float> d_scales(static_cast<size_t>(rows) * scale_stride_bytes / 4u), d_y(static_cast<size_t>(rows) * n * 16u);
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1u << 20);
+    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1u << 20, bits);
     HIP_OK(hipMemset(d_trellis.p, 0x5A, static_cast<size_t>(kt) * nt * 16u * bits * 2));
     HIP_OK(hipMemset(d_codes.p, 1, static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride));
     HIP_OK(hipMemset(d_scales.p, 0, static_cast<size_t>(rows) * scale_stride_bytes));
@@ -462,6 +462,8 @@ int main() {
     }
     ok &= row_parity(4u);
     ok &= row_parity(6u);
+    ok &= row_parity(4u, 5120u, 17408u);
+    ok &= row_parity(4u, 17408u, 5120u);
     ok &= head_row_parity();
     for (uint32_t rows : {1u, 5u, 16u, 17u, 33u, 70u}) ok &= run_case(rows, 256, 256, 4, 1234u + rows);
     for (uint32_t bits = 1; bits <= 8; ++bits) ok &= run_case(19, 128, 256, bits, 77u + bits);
