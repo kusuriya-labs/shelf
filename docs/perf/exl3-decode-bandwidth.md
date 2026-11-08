@@ -88,6 +88,8 @@ Saber の公開実装 `GGZ14/saber-engine`、revision `c8a1e84b39e73363495e549d4
 
 容量の小さい他の呼び出しでも行数によって split が変わらないよう、selector の容量判定は 16 行分を基準とし、16 行分を確保できない場合は split 1 にする。推論用に新しく確保する容量では従来選択された split を収容できるため、今回の 27B の測定対象における split 数は変わらない。容量 8 / 16 / 32 / 48 / 64 / 1024 行に対して、実行可能な rows=1..16 の選択一致もテストする。
 
+最終 selector の GPU テストでは gate/up の容量 1024 行・split 4 と容量 16 行・split 1 の両方で rows=1 / 8 の F32 出力が bit 一致した。head は容量 80 行・split 2 で一致し、EXL3-INT8 linear テスト全体が通過した。
+
 合成 trellis・同一活性で基準 kernel を実行すると、F32 の 248320 要素中 189831、BF16 換算で 50 要素が不一致で、F32 の最大絶対差は 6.86645508e-5。同じ合成 logits の全語彙 softmax で計算した KL(split 2 || split 1) は 1.21e-12 nats。これは基準に存在した数値差で、生成列の違いを実モデルで確認したという意味ではない。
 
 試験修正では EXL3-INT8 の各行列について `16 * min(16,max(1,K/1024)) * N * sizeof(float)` を decode accum 容量の下限にする。これにより selector が許す最大 split 数を 16 行まで収容する。27B の head は 79,462,400 byte。前述の合成入力で scratch_rows=80、rows=1 / 8 とも split 2 となり、F32・BF16 は 248320 要素すべて bit 一致した。これは verify 側の縮約順を基準から変えるため、実モデルの logits と生成列を別途比較する。
@@ -331,7 +333,7 @@ cache 有効、各カテゴリの最初の入力、同じ process 内の 8 reque
 | reasoning | 83 | 152.2 / 149.7 | 299.4 / 296.6 |
 | summarization | 103 | 162.7 / 159.9 | 318.1 / 315.8 |
 
-json の追加ありは 391.2 / 260.3 ms と変動が大きく、この 2 回だけでは安定値としない。単独の交互再測定を実行中。prefill の追加費用を decode の token / round 時間へ加算していない。
+json の追加ありは 391.2 / 260.3 ms と変動が大きく、この 2 回だけでは安定値としない。json のみを別 process で追加なし → 追加あり → 追加あり → 追加なしと再測定すると 186.7 / 306.8 / 309.2 / 181.8 ms だった。8 request を連続処理した表とは条件が異なる。prefill の追加費用を decode の token / round 時間へ加算していない。
 
 `SHELF_EXL3_SPLIT` / `SHELF_EXL3_GROUPS` は現行 source では W16A16 の dispatch に渡され、
 EXL3-INT8 の split selector には適用されない。INT8 の候補比較には microbenchmark の
@@ -363,8 +365,8 @@ NT を外した最終 binary でも同じ 128 位置の KL、PPL、top-1、top-5
 split 4 の EXL3-INT8 GPU テストは gate/up 形状の rows=1 / 8 の bit 一致を含め
 通過し、TP テストも通過した。非整列 prompt の server 回帰テストは cache OFF / ON と
 96 token prefix の再利用を含め 7/7 通過。code の非投機 256 token は基準と一致し、
-同じ版の MTP も graph OFF / ON の双方で非投機と一致した。prose・日本語・DFlash2 の
-判定は実行中。
+同じ版の MTP も graph OFF / ON の双方で非投機と一致した。最終 selector での prose・
+日本語・DFlash2 の同一版内比較も後述の通り一致した。
 
 split 2 を基準に追加した同形状の測定では、split 3 は rows=1 で 101.15 / 101.95 →
 94.22 / 93.87 µs、rows=8 で 111.86 / 113.22 → 102.81 / 103.16 µs。split 5 は
@@ -390,10 +392,26 @@ selector 補強後の SHA-256 はそれぞれ `96cc4e7b464980b46cd92b843a7b928d0
 `22869f4b4f554462e37873c76e7cc4b6084650eac5cf858871e3a6f889358c82`。27B の対象形状と
 確保済み scratch では両版の選択 split は等しいが、二つの binary を同一とは扱わない。
 
-split 4 の BetterBench 非投機の初回は、基準非投機と 8 件中 3 件で生成列が変化した。
+split 4 の BetterBench 非投機は、基準非投機と 8 件中 3 件で生成列が変化した。
 初めて異なる 0 始まり位置は chat 128、code 153、reasoning 92。残る 5 件は一致した。
 これは異なる実装版の greedy 同士の比較であり、投機一致の判定ではない。split 4 の
-DFlash2 / MTP は、別途 split 4 の非投機生成列と比較する。結果の 2 回目と投機側は実行中。
+DFlash2 / MTP は、別途 split 4 の非投機生成列と比較する。
+
+cache OFF の非投機を基準 → split 4 → split 4 → 基準で交互測定した各回の decode tok/s を示す。
+旧版・新版とも同じ版内の 2 回は 8/8 件で生成列が一致した。split 4 は selector の容量補強前、
+前述の SHA-256 `d88f8e24...` の binary である。版間で生成列の異なる 3 ケースでは、
+異なる token に対する速度比較となる。
+
+| ケース | 基準 1 | split 4 1 | split 4 2 | 基準 2 | 版間生成一致 |
+|---|---:|---:|---:|---:|---|
+| chat | 26.62 | 27.48 | 27.17 | 26.78 | 不一致 |
+| code | 25.91 | 27.30 | 27.03 | 26.71 | 不一致 |
+| file_edit | 26.39 | 27.21 | 26.97 | 26.26 | 一致 |
+| json | 26.40 | 27.22 | 27.00 | 26.57 | 一致 |
+| math | 26.33 | 27.13 | 26.60 | 26.47 | 一致 |
+| prose | 26.38 | 27.09 | 27.00 | 26.45 | 一致 |
+| reasoning | 26.37 | 27.10 | 27.03 | 26.40 | 不一致 |
+| summarization | 26.42 | 27.14 | 27.08 | 26.42 | 一致 |
 
 NT を除いた split 4 版の BetterBench では、graph ON・DFlash2 の各 1 回が、同じ split 4 版の
 非投機と 8/8 ケースで完全一致した。比較には旧版ではなく、新版の greedy token 列を使った。
@@ -402,10 +420,27 @@ split 4 の `/tmp/prompt_prose.ids` 非投機は、旧版と 0 始まり 38 番�
 異なった。両版とも 256 token。これは版間の数値変更であり、同一版での投機一致は
 その版の非投機を基準に別途判定する。
 
+`/tmp/prompt_ja.ids` の split 4 非投機も、旧版の非投機と
+0 始まり 192 番目から異なった（各 256 token）。最終 selector の server 非投機では、code / prose /
+ja とも graph OFF / ON の生成列が完全一致した（各 256 token）。各 1 回の decode tok/s は
+OFF 27.31 / 27.34 / 27.24、ON 28.69 / 28.56 / 28.09 だった。
+同じ server・3 入力の MTP 固定 4 も graph OFF / ON とも非投機と 256 token 完全一致し、
+各 1 回の decode tok/s は OFF 73.72 / 53.06 / 57.86、ON 75.37 / 54.38 / 59.01 だった。
+同じ条件の DFlash2 draft 7 も graph OFF / ON とも非投機と 256 token 完全一致し、
+各 1 回の decode tok/s は OFF 94.27 / 49.73 / 46.53、ON 96.22 / 50.79 / 47.29 だった。
+いずれも server、prefix cache OFF、最大生成 256、最大系列 1024、temperature 0。
+
 NT を外した split 4 版の code・DFlash2・graph OFF は 1 回で 102.66 tok/s、46 round、
 verify GPU 2012.29 / 46 = 43.75 ms/round、draft GPU 383.31 / 46 = 8.33 ms/round、
 round 2482.74 / 46 = 53.97 ms/round。同じ版の非投機生成列と完全一致した。基準の
 98.00 tok/s・46.31 / 56.54 ms は各 1 回で、反転反復を待つ参考比較である。
+
+code の単発非投機を基準 → split 4 → split 4 → 基準で測ると、26.12 / 27.42 /
+27.40 / 26.69 tok/s。4 回の生成列は一致した。split 4 の graph build で MTP verify
+OFF → ON → ON → OFF の順に測った結果は、73.78 / 75.72 / 75.74 / 74.31 tok/s、
+verify 41.34 / 40.06 / 40.04 / 41.01 ms/round、round 50.83 / 49.53 / 49.51 /
+50.47 ms/round。68 round、すべて同じ版の非投機と生成列が一致した。graph の最終 OFF
+は容量補強後の binary、先行 3 回は補強前であり、このモデルでは split は同一である。
 
 今回の read-only p50 を 100% とすると、85% は約 530.2 GB/s。上記の 403 GB/s は
 単純推算にすぎず、この目標の達成とは扱わない。
