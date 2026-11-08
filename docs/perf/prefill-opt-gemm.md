@@ -77,6 +77,8 @@ flock /tmp/r9700.lock ./build-gfx1201/tests/test_exl3_int8_prefill_rotate
 | rowscale・flag | scales read 最低 0.186 GB（rowstat）と 0.186 GB（rowfinish の各 group を 1 回と仮定）、通常行の codes read/write 最大 11.878 GB。flag 行は codes/scales の compact copy、slots/count の read/write が別途必要 | 47.79 ms。通常行の codes 全量 read/write と scales 2 回の仮定で 12.249 GB / 時間 = 256.3 GB/s。flag、同値 scale の書込み省略を考慮しない |
 | 出力回転 | INT32 または flag の F32 結果 read 31.944 GB、BF16 output write 15.972 GB、`svh` は列ごとに最低 0.0078 GB、行ごとに読めば 15.972 GB。slots と rowscale は行ごとに計 0.0066 GB | 204.73 ms。主な read/write 47.916 GB / 時間 = 234.0 GB/s。F32 出力では write が増える |
 
+Saber の `mxfp4_quant.hip` の add+rms+quant、silu+mul+quant は、BF16 の中間丸めを明示してから FP8 quant を行う。shelf は重み固有の `suh` と 128 要素ごとの scale / flag を持つため、その融合をそのまま同等とはみなせない。残差加算・norm や複数行列との融合は、producer の共有可能性と既存の BF16 丸め位置を実モデルで確認する必要があり、今回の実装・実測対象には含めていない。
+
 これらは実効 DRAM 帯域の測定ではない。帯域だけが律速と断定できず、現 kernel は Hadamard の各段で shared memory と barrier も使う。rowscale と回転量子化の単純融合では、全 group の scale を集計してから各 code の再丸めと、決定的な flag 順序・cap 選別を行う依存が残る。
 
 ### 出力回転の shuffle 試作
