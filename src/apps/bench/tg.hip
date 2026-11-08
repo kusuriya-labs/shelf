@@ -71,7 +71,7 @@ void print_usage(FILE* out) {
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
         "  --kv-cache-dtype bf16|fp8   (default bf16)\n"
-        "  --arena-gib N                (default auto = free VRAM minus 1 GiB)\n"
+        "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --output PATH                (default none)\n"
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"

@@ -52,7 +52,7 @@ void print_usage(FILE* out) {
         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
         "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
         "  --page-tokens N              (default 16)\n"
-        "  --arena-gib N|auto           (default auto = free VRAM minus 1 GiB)\n"
+        "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
         "                                (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N          1 | 2 | 4 (default 1)\n"

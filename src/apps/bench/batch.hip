@@ -36,7 +36,7 @@ void usage(FILE* f) {
         "                         (default 0; e.g. --device 0,2)\n"
         "  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --page-tokens N        (default 16)\n"
-        "  --arena-gib N          (default auto = free VRAM minus 1 GiB)\n"
+        "  --arena-gib N          (default auto = free VRAM minus 0.5 GiB)\n"
         "  --prefix-tokens N      shared prefix length (default 512)\n"
         "  --suffix-tokens N      per-request suffix length (default 8)\n"
         "  --max-new-tokens N     decode tokens per request (default 8)\n"

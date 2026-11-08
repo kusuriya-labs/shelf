@@ -400,7 +400,8 @@ def parse_args(argv=None):
                         help="max generated tokens for a request whose prompt is "
                              "longer than --large-context-tokens (default 65536)")
 
-    parser.add_argument("--arena-gib", type=arena_gib_value, default="auto", metavar="N|auto",
+    parser.add_argument("--arena-gib", type=arena_gib_value, default="auto",
+                        metavar="N|auto|-N",
                         help="GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, "
                              "-N = total VRAM minus N GiB (default auto)")
     parser.add_argument("--device", default="0",
@@ -424,10 +425,10 @@ def parse_args(argv=None):
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
     parser.add_argument("--mtp", action="store_true",
-                        help="enable the checkpoint's MTP block as the drafter "
-                             "(served requests are serialized)")
+                        help="checkpoint の MTP block を drafter として使う"
+                             "（複数 request を同時に処理する）")
     parser.add_argument("--mtp-drafts", type=int, default=4,
-                        help="MTP draft tokens per round (default 4)")
+                        help="MTP の draft tokens per round（default 4）")
 
     parser.add_argument("--verify-weights", action="store_true",
                         help="verify quantized payload CRC32 on load")
