@@ -5,6 +5,10 @@
 
 #include "tp_transport_internal.h"
 
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+
 namespace shelf::runtime {
 
 TpBarrierGroup::TpBarrierGroup(int rank_count, std::vector<int> devices,
@@ -132,7 +136,20 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
         cv_.notify_all();
         return Status::make_ok();
     }
-    cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
+    const char* flag = std::getenv("SHELF_TP_PEER_FLAG");
+    const bool bounded = rank_count_ == 2 && flag != nullptr && std::strcmp(flag, "1") == 0 &&
+                         transport_ != nullptr && std::strcmp(transport_->name(), "hip-p2p") == 0;
+    if (bounded) {
+        if (!cv_.wait_for(lock, std::chrono::seconds(30),
+                          [&] { return completed_barriers_ > seq || aborted_; })) {
+            aborted_ = true;
+            abort_status_ = Status::invalid_state("tp peer flag rank arrival timeout", __FILE__, __LINE__);
+            arrived_ = 0;
+            cv_.notify_all();
+        }
+    } else {
+        cv_.wait(lock, [&] { return completed_barriers_ > seq || aborted_; });
+    }
     return aborted_ ? abort_status_ : Status::make_ok();
 }
 

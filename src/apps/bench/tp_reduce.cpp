@@ -43,11 +43,12 @@ BenchTarget target_for(const std::string& backend) {
 
 void usage() {
     std::printf("usage: shelf-bench tp-reduce [--rows 1,2,...] [--features N] "
-                "[--iters N] [--backend auto|p2p|host] [--check]\n");
+                "[--iters N] [--dtype bf16|f32] [--backend auto|p2p|host] [--compare-flag] [--check]\n");
     std::printf("  measures tp sum_hidden latency for the implemented transports\n");
     std::printf("  default rows: 1,2,4,8,16,32,64,128,256,512,1024,2048\n");
     std::printf("  default features: 5120 (Qwen3.8 hidden), dtype bf16\n");
     std::printf("  bandwidth definition: 2 * payload_bytes / elapsed (one read + one write)\n");
+    std::printf("  --compare-flag compares p2p paths; use --rows 1,4,16,64 and --features 5120 or 2560\n");
     std::printf("  --check enforces the backend target and fails when it is missed\n");
     std::printf("  targets: hip-p2p >= 20.0 GB/s (large rows) and <= 150 us (rows=1)\n");
     std::printf("           host-mediated >= 1.2 GB/s (large rows) and <= 400 us (rows=1)\n");
@@ -129,16 +130,16 @@ struct RowResult {
 RowResult run_row(TpTransport* transport, BenchPair& pair,
                   const std::vector<std::uint8_t>& host_a,
                   const std::vector<std::uint8_t>& host_b, uint64_t rows,
-                  uint32_t features, int iters) {
+                  uint32_t features, int iters, ValueDType dtype) {
     RowResult result;
     result.rows = rows;
-    const std::size_t bytes = static_cast<std::size_t>(rows) * features * 2u;
+    const std::size_t bytes = static_cast<std::size_t>(rows) * features * (dtype == ValueDType::F32 ? 4u : 2u);
     TpSumTarget target_a;
     target_a.ptr = pair.buffer_a;
     target_a.rows = rows;
     target_a.row_stride = features;
     target_a.feature_count = features;
-    target_a.dtype = ValueDType::BF16;
+    target_a.dtype = dtype;
     TpSumTarget target_b = target_a;
     target_b.ptr = pair.buffer_b;
     std::vector<TpSumTarget> targets{target_a, target_b};
@@ -194,17 +195,17 @@ bool run_backend(TpTransport* transport, BenchPair& pair,
                  const std::vector<std::uint8_t>& host_a,
                  const std::vector<std::uint8_t>& host_b,
                  const std::vector<uint64_t>& rows, uint32_t features, int iters,
-                 bool check) {
+                 bool check, ValueDType dtype) {
     const std::string backend = transport->name();
     std::printf("backend: %s\n", backend.c_str());
     BenchTarget target = target_for(backend);
     double us_rows1 = 0.0;
     double gbps_large = 0.0;
     for (uint64_t r : rows) {
-        RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters);
+        RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters, dtype);
         std::printf("  %-14s rows=%-5llu payload=%-9llu us=%.1f GB/s=%.2f\n",
                     backend.c_str(), static_cast<unsigned long long>(r),
-                    static_cast<unsigned long long>(r) * features * 2u, result.us,
+                    static_cast<unsigned long long>(r) * features * (dtype == ValueDType::F32 ? 4u : 2u), result.us,
                     result.gbps);
         if (!result.ok) {
             std::printf("  %-14s rows=%-5llu FAILED\n", backend.c_str(),
@@ -231,7 +232,9 @@ int run_tp_reduce(int argc, char** argv) {
     uint32_t features = 5120;
     int iters = 50;
     std::string backend = "auto";
+    std::string dtype_name = "bf16";
     bool check = false;
+    bool compare_flag = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -244,8 +247,12 @@ int run_tp_reduce(int argc, char** argv) {
             features = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--iters" && i + 1 < argc) {
             iters = std::atoi(argv[++i]);
+        } else if (arg == "--dtype" && i + 1 < argc) {
+            dtype_name = argv[++i];
         } else if (arg == "--backend" && i + 1 < argc) {
             backend = argv[++i];
+        } else if (arg == "--compare-flag") {
+            compare_flag = true;
         } else if (arg == "--check") {
             check = true;
         } else {
@@ -256,6 +263,15 @@ int run_tp_reduce(int argc, char** argv) {
     }
     if (rows.empty() || features == 0 || iters <= 0) {
         std::fprintf(stderr, "invalid rows/features/iters\n");
+        return 1;
+    }
+    if (dtype_name != "bf16" && dtype_name != "f32") {
+        std::fprintf(stderr, "invalid dtype: %s\n", dtype_name.c_str());
+        return 1;
+    }
+    const ValueDType dtype = dtype_name == "f32" ? ValueDType::F32 : ValueDType::BF16;
+    if (compare_flag && backend == "host") {
+        std::fprintf(stderr, "--compare-flag requires p2p\n");
         return 1;
     }
     if (backend != "auto" && backend != "p2p" && backend != "host") {
@@ -273,7 +289,7 @@ int run_tp_reduce(int argc, char** argv) {
     std::uint64_t max_rows = 0;
     for (uint64_t r : rows) max_rows = r > max_rows ? r : max_rows;
     const std::size_t max_bytes =
-        static_cast<std::size_t>(max_rows) * features * sizeof(std::uint16_t);
+        static_cast<std::size_t>(max_rows) * features * (dtype == ValueDType::F32 ? 4u : 2u);
 
     BenchPair pair;
     if (!allocate_pair(pair, max_bytes)) {
@@ -289,14 +305,19 @@ int run_tp_reduce(int argc, char** argv) {
     }
 
     const std::vector<int> devices{0, 1};
-    std::printf("tp-reduce devices=0,1 features=%u dtype=bf16 iters=%d\n", features,
-                iters);
+    std::printf("tp-reduce devices=0,1 features=%u dtype=%s iters=%d\n", features,
+                dtype_name.c_str(), iters);
     std::printf("bandwidth definition: 2 * payload_bytes / elapsed\n");
 
     bool all_ok = true;
     bool measured = false;
 
     if (backend == "auto" || backend == "p2p") {
+      for (int variant = 0; variant < (compare_flag ? 2 : 1); ++variant) {
+        if (compare_flag) {
+            ::setenv("SHELF_TP_PEER_FLAG", variant ? "1" : "0", 1);
+            std::printf("peer-flag: %s\n", variant ? "on" : "off");
+        }
         std::unique_ptr<TpTransport> peer;
         if (backend == "p2p") {
             ::setenv("SHELF_TP_TRANSPORT", "p2p", 1);
@@ -319,9 +340,10 @@ int run_tp_reduce(int argc, char** argv) {
         if (peer != nullptr) {
             measured = true;
             all_ok = run_backend(peer.get(), pair, host_a, host_b, rows, features, iters,
-                                 check) &&
+                                 check, dtype) &&
                      all_ok;
         }
+      }
     }
 
     if (backend == "auto" || backend == "host" || !measured) {
@@ -330,7 +352,7 @@ int run_tp_reduce(int argc, char** argv) {
             std::printf("skipping host-mediated measurement for --backend p2p\n");
         } else {
             all_ok = run_backend(&host_transport, pair, host_a, host_b, rows, features,
-                                 iters, check) &&
+                                 iters, check, dtype) &&
                      all_ok;
         }
     }

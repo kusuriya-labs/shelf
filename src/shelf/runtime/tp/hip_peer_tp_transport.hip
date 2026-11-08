@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <limits>
+#include <cstring>
 #include <vector>
 
 namespace shelf::runtime {
@@ -19,6 +21,55 @@ namespace {
 constexpr std::size_t kProbeMaxBytes = 1u << 20;
 constexpr std::size_t kProbeSizes[] = {8192u, 131072u, 1048576u};
 constexpr int kProbeRounds = 4;
+
+bool peer_flag_enabled() {
+    const char* value = std::getenv("SHELF_TP_PEER_FLAG");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+__global__ void tp_flag_send(const unsigned char* src, unsigned char* dst,
+                             unsigned long long* flag, unsigned long long tag,
+                             std::size_t bytes) {
+    for (std::size_t i = threadIdx.x; i < bytes; i += blockDim.x) dst[i] = src[i];
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0)
+        __hip_atomic_store(flag, tag, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
+}
+
+__global__ void tp_flag_receive(void* own, const void* inbox,
+                                const unsigned long long* flag, unsigned long long tag,
+                                unsigned int* error, std::size_t count, bool bf16,
+                                unsigned long long limit) {
+    __shared__ int ready;
+    if (threadIdx.x == 0) {
+        const unsigned long long start = clock64();
+        ready = 0;
+        while (clock64() - start < limit) {
+            if (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) == tag) {
+                ready = 1;
+                break;
+            }
+        }
+        if (!ready) *error = 1;
+    }
+    __syncthreads();
+    if (!ready) return;
+    for (std::size_t i = threadIdx.x; i < count; i += blockDim.x) {
+        if (bf16) {
+            auto* a = static_cast<unsigned short*>(own);
+            const auto* b = static_cast<const unsigned short*>(inbox);
+            float x = __uint_as_float(static_cast<unsigned int>(a[i]) << 16);
+            float y = __uint_as_float(static_cast<unsigned int>(b[i]) << 16);
+            unsigned int v = __float_as_uint(x + y);
+            if ((v & 0x7f800000u) == 0x7f800000u && (v & 0x007fffffu)) v = 0x7fc00000u;
+            else v += 0x7fffu + ((v >> 16) & 1u);
+            a[i] = static_cast<unsigned short>(v >> 16);
+        } else {
+            static_cast<float*>(own)[i] += static_cast<const float*>(inbox)[i];
+        }
+    }
+}
 
 __device__ inline float tp_bf16_to_f32(uint16_t v) {
     return __uint_as_float(static_cast<uint32_t>(v) << 16);
@@ -233,14 +284,48 @@ Status launch_add(const TpSumTarget& target, const void* peers_device, uint32_t 
 
 }
 
+hipError_t tp_flag_test_baseline(void* own, const void* peer_ptrs, std::size_t count,
+                                 bool bf16, hipStream_t stream) {
+    if (bf16) {
+        tp_add_peers_bf16_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
+            static_cast<const uint16_t*>(own), static_cast<const uint16_t* const*>(peer_ptrs),
+            1, static_cast<uint16_t*>(own), count);
+    } else {
+        tp_add_peers_f32_kernel<<<tp_grid_for(count), 256, 0, stream>>>(
+            static_cast<const float*>(own), static_cast<const float* const*>(peer_ptrs),
+            1, static_cast<float*>(own), count);
+    }
+    return hipGetLastError();
+}
+
+hipError_t tp_flag_test_send(const void* src, void* dst, void* flag, std::uint64_t tag,
+                             std::size_t bytes, hipStream_t stream) {
+    tp_flag_send<<<1, 256, 0, stream>>>(static_cast<const unsigned char*>(src),
+        static_cast<unsigned char*>(dst), static_cast<unsigned long long*>(flag), tag, bytes);
+    return hipGetLastError();
+}
+
+hipError_t tp_flag_test_receive(void* own, const void* inbox, void* flag, std::uint64_t tag,
+                                std::size_t count, bool bf16, std::uint64_t limit,
+                                hipStream_t stream) {
+    auto* word = static_cast<unsigned long long*>(flag);
+    tp_flag_receive<<<1, 256, 0, stream>>>(own, inbox, word, tag,
+        reinterpret_cast<unsigned int*>(word + 1), count, bf16, limit);
+    return hipGetLastError();
+}
+
 HipPeerTpTransport::HipPeerTpTransport(std::vector<int> devices)
-    : devices_(std::move(devices)) {}
+    : devices_(std::move(devices)),
+      peer_flag_enabled_(peer_flag_enabled() && devices_.size() == 2) {}
 
 HipPeerTpTransport::~HipPeerTpTransport() {
     const std::size_t rank_count = devices_.size();
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
         if (!scope.ok()) continue;
+        if (r < peer_flags_.size() && peer_flags_[r] != nullptr) {
+            shelf::gpu::discard_cleanup_result(hipFree(peer_flags_[r]));
+        }
         if (r < inbox_.size()) {
             for (std::size_t q = 0; q < rank_count; ++q) {
                 if (q == r) continue;
@@ -303,6 +388,7 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
         transport->inbox_[r].assign(rank_count, {nullptr, nullptr});
         transport->inbox_ptrs_dev_[r] = {nullptr, nullptr};
     }
+    transport->peer_flags_.assign(rank_count, nullptr);
     transport->probe_buffers_.assign(rank_count, nullptr);
     transport->probe_streams_.assign(rank_count, nullptr);
     transport->probe_ready_.assign(rank_count, nullptr);
@@ -310,6 +396,12 @@ Result<std::unique_ptr<HipPeerTpTransport>> HipPeerTpTransport::create(
     for (std::size_t r = 0; r < rank_count; ++r) {
         auto scope = shelf::gpu::ScopedDevice::create(devices[r]);
         if (!scope.ok()) return scope.status();
+        if (transport->peer_flag_enabled_) {
+            if (hipExtMallocWithFlags(&transport->peer_flags_[r], 16, hipDeviceMallocFinegrained) != hipSuccess ||
+                hipMemset(transport->peer_flags_[r], 0, 16) != hipSuccess) {
+                return Status::hip_error("tp flag allocation", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+            }
+        }
         for (std::size_t q = 0; q < rank_count; ++q) {
             if (q == r) continue;
             if (hipEventCreateWithFlags(&transport->sent_[r][q], hipEventDisableTiming) !=
@@ -370,7 +462,9 @@ Status HipPeerTpTransport::ensure_buffers(std::size_t bytes, std::size_t rank_co
                     shelf::gpu::discard_cleanup_result(hipFree(slot));
                     slot = nullptr;
                 }
-                if (hipMalloc(&slot, bytes) != hipSuccess) {
+                if ((peer_flag_enabled_ ?
+                     hipExtMallocWithFlags(&slot, bytes, hipDeviceMallocFinegrained) :
+                     hipMalloc(&slot, bytes)) != hipSuccess) {
                     return Status::hip_error("hipMalloc tp inbox",
                                              hipGetErrorString(hipGetLastError()), __FILE__,
                                              __LINE__);
@@ -418,6 +512,58 @@ Status HipPeerTpTransport::enqueue_sum(const TpSumInvocation& invocation) {
     st = ensure_buffers(bytes, rank_count);
     if (!st.ok()) return st;
     const std::size_t parity = parity_;
+
+    if (peer_flag_enabled_) {
+        if (peer_failed_) return Status::invalid_state("tp peer flag transport aborted", __FILE__, __LINE__);
+        if (peer_generation_ == std::numeric_limits<std::uint64_t>::max()) {
+            peer_failed_ = true;
+            return Status::overflow("tp peer flag generation exhausted", __FILE__, __LINE__);
+        }
+        if (invocation.peer_write_complete || invocation.targets[0].fusion != TpCombineFusion::None ||
+            invocation.targets[1].fusion != TpCombineFusion::None) {
+            return Status::invalid_argument("tp peer flag does not support fused targets", __FILE__, __LINE__);
+        }
+        const auto tag = ++peer_generation_;
+        for (std::size_t r = 0; r < 2; ++r) {
+            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
+            if (!scope.ok()) { peer_failed_ = true; return scope.status(); }
+            auto* flag = static_cast<unsigned long long*>(peer_flags_[1-r]);
+            tp_flag_send<<<1, 256, 0, invocation.streams[r]>>>(
+                static_cast<const unsigned char*>(invocation.targets[r].ptr),
+                static_cast<unsigned char*>(inbox_[1-r][r][parity]), flag, tag, bytes);
+            hipError_t err = hipGetLastError();
+            if (err != hipSuccess) { peer_failed_ = true; return Status::hip_error("tp flag send", hipGetErrorString(err), __FILE__, __LINE__); }
+        }
+        for (std::size_t r = 0; r < 2; ++r) {
+            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
+            if (!scope.ok()) { peer_failed_ = true; return scope.status(); }
+            hipDeviceProp_t props{};
+            hipError_t err = hipGetDeviceProperties(&props, devices_[r]);
+            if (err != hipSuccess) { peer_failed_ = true; return Status::hip_error("tp flag clock", hipGetErrorString(err), __FILE__, __LINE__); }
+            auto* flag = static_cast<unsigned long long*>(peer_flags_[r]);
+            auto* error = reinterpret_cast<unsigned int*>(flag + 1);
+            tp_flag_receive<<<1, 256, 0, invocation.streams[r]>>>(invocation.targets[r].ptr,
+                inbox_[r][1-r][parity], flag, tag, error,
+                bytes / (dtype == ValueDType::BF16 ? 2 : 4), dtype == ValueDType::BF16,
+                static_cast<unsigned long long>(props.clockRate) * 5000ull);
+            err = hipGetLastError();
+            if (err != hipSuccess) { peer_failed_ = true; return Status::hip_error("tp flag receive", hipGetErrorString(err), __FILE__, __LINE__); }
+        }
+        bool timed_out = false;
+        for (std::size_t r = 0; r < 2; ++r) {
+            auto scope = shelf::gpu::ScopedDevice::create(devices_[r]);
+            if (!scope.ok()) { peer_failed_ = true; return scope.status(); }
+            hipError_t err = hipStreamSynchronize(invocation.streams[r]);
+            if (err != hipSuccess) { peer_failed_ = true; return Status::hip_error("tp flag synchronize", hipGetErrorString(err), __FILE__, __LINE__); }
+            unsigned int error = 0;
+            err = hipMemcpy(&error, static_cast<char*>(peer_flags_[r]) + 8, sizeof(error), hipMemcpyDeviceToHost);
+            if (err != hipSuccess) { peer_failed_ = true; return Status::hip_error("tp flag error read", hipGetErrorString(err), __FILE__, __LINE__); }
+            timed_out |= error != 0;
+        }
+        if (timed_out) { peer_failed_ = true; return Status::invalid_state("tp peer flag timeout", __FILE__, __LINE__); }
+        parity_ ^= 1u;
+        return Status::make_ok();
+    }
 
     if (!invocation.peer_write_complete) {
         for (std::size_t r = 0; r < rank_count; ++r) {
@@ -472,7 +618,7 @@ Status HipPeerTpTransport::peer_write_target(int rank, std::size_t bytes, void*&
     peer_out = nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t rank_count = devices_.size();
-    if (rank_count != 2) return Status::make_ok();
+    if (rank_count != 2 || peer_flag_enabled_) return Status::make_ok();
     if (rank < 0 || static_cast<std::size_t>(rank) >= rank_count) {
         return Status::invalid_argument("tp peer write rank out of range", __FILE__,
                                         __LINE__);
@@ -586,6 +732,7 @@ Status HipPeerTpTransport::verify() {
 }
 
 bool HipPeerTpTransport::supports_combine_fusion() const noexcept {
+    if (peer_flag_enabled_) return false;
     static const bool enabled = [] {
         const char* e = std::getenv("SHELF_TP_FUSE");
         return e == nullptr || std::strtoul(e, nullptr, 10) != 0ul;

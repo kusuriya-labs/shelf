@@ -35,6 +35,10 @@ private:
     std::vector<std::array<void*, 2>> inbox_ptrs_dev_;
     std::size_t inbox_bytes_ = 0;
     std::size_t parity_ = 0;
+    std::vector<void*> peer_flags_;
+    std::uint64_t peer_generation_ = 0;
+    bool peer_failed_ = false;
+    bool peer_flag_enabled_ = false;
     std::vector<void*> probe_buffers_;
     std::vector<hipStream_t> probe_streams_;
     std::vector<hipEvent_t> probe_ready_;

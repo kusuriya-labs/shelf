@@ -133,6 +133,7 @@ shelf_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_tp_barrier_group SOURCE unit/test_tp_barrier_group.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_runtime)
 target_include_directories(test_tp_barrier_group PRIVATE "${CMAKE_SOURCE_DIR}/src")
+shelf_add_test(NAME test_tp_peer_flag SOURCE unit/test_tp_peer_flag.cpp LABELS "gpu1;required" TIMEOUT 90 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES shelf_runtime)
 shelf_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
