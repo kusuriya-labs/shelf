@@ -329,6 +329,7 @@ add_custom_target(
         test_exl3_dense
         test_exl3_int8_linear
         test_exl3_int8_grouped
+        test_exl3_int8_prefill_rotate
         test_exl3_int8_tp
         test_mxfp4_canonical_payload
         test_mxfp4_linear
