@@ -1096,3 +1096,7 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 - optional / external files（model dir が必要）: `test_dflash2_weight_real` /
   `test_dflash2_target_taps` / `test_dflash2_mixed_batch` /
   `test_dflash2_batch_e2e` / `test_dflash2_tp_e2e`（label `gpu2`）
+
+verify の受理結果は残り token 数と停止 token の最初の位置で制限してから、
+target と DFlash2 context の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
+step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。

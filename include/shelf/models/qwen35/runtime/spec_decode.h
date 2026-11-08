@@ -2,6 +2,7 @@
 
 #include <shelf/core/memory/types.h>
 #include <shelf/core/status.h>
+#include <shelf/models/common/qwen_hybrid/stop_tokens.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -40,6 +41,9 @@ Status spec_greedy_accept(
     const int32_t* target_tokens,
     bool bonus_token_enabled,
     SpecVerifyResult& out);
+
+bool spec_bound_result(SpecVerifyResult& result, uint32_t remaining_tokens,
+                       const qwen_hybrid::StopTokens& stop_tokens);
 
 std::size_t spec_gdn_conv_bytes(const GdnStatePool& pool) noexcept;
 

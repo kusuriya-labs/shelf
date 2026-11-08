@@ -916,8 +916,12 @@ Result<MtpIterationOutput> accept_verified(
     SpecVerifyResult accepted_result;
     Status accepted = spec_greedy_accept(proposals, drafts, sampled, true, accepted_result);
     if (!accepted.ok()) return accepted;
+    // Cut at the first stop token before the state commit, so rows past it are not committed.
+    const bool stopped = spec_bound_result(accepted_result, remaining_tokens,
+        target.model.config->stop_tokens);
     const uint32_t accepted_drafts = accepted_result.num_accepted_drafts;
     MtpIterationOutput output;
+    output.finished = stopped;
     output.num_accepted = accepted_drafts;
     output.emitted_count = std::min(
         static_cast<uint32_t>(accepted_result.emitted_tokens.size()), remaining_tokens);
@@ -1126,6 +1130,13 @@ Result<MtpIterationOutput> mtp_spec_step(
     state::PagedSequenceState& target_sequence,
     int32_t pending_token,
     uint32_t remaining_tokens) {
+    if (qwen_hybrid::is_stop_token(target.model.config->stop_tokens, pending_token)) {
+        // The stop token was already emitted by the caller; do not draft past it.
+        MtpIterationOutput stopped;
+        stopped.pending_token = pending_token;
+        stopped.finished = true;
+        return stopped;
+    }
     const auto started = std::chrono::steady_clock::now();
     auto draft = mtp_draft(drafter, target, target_sequence, pending_token,
                            remaining_tokens);
@@ -1375,6 +1386,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     out.slots.resize(slots.size());
     std::vector<MtpDraftResult> drafts(slots.size());
     std::vector<uint32_t> row_begin(slots.size(), 0u);
+    std::vector<char> stopped_slot(slots.size(), 0);
     uint32_t total_rows = 0u;
     for (std::size_t i = 0u; i < slots.size(); ++i) {
         const MtpSpecBatchSlot& slot = slots[i];
@@ -1383,6 +1395,15 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                                             __LINE__);
         }
         row_begin[i] = total_rows;
+        if (qwen_hybrid::is_stop_token(context.target->model.config->stop_tokens,
+                                       slot.pending_token)) {
+            // The stop token was already emitted by the caller; this slot runs nothing.
+            stopped_slot[i] = 1;
+            drafts[i].decode_only = true;
+            out.slots[i].pending_token = slot.pending_token;
+            out.slots[i].finished = true;
+            continue;
+        }
         auto draft = mtp_draft(*slot.drafter, *context.target, *slot.sequence,
                                slot.pending_token, slot.remaining_tokens);
         if (!draft.ok()) return draft.status();
@@ -1550,7 +1571,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     }
 
     for (std::size_t i = 0u; i < slots.size(); ++i) {
-        if (!drafts[i].decode_only) continue;
+        if (!drafts[i].decode_only || stopped_slot[i]) continue;
         const MtpSpecBatchSlot& slot = slots[i];
         auto output = mtp_decode_only(*slot.drafter, *context.target, *slot.sequence,
                                       slot.pending_token, slot.remaining_tokens, stream);

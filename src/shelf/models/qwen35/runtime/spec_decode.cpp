@@ -1,5 +1,6 @@
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace shelf::qwen35::runtime {
@@ -68,6 +69,32 @@ Status spec_greedy_accept(
     out.num_emitted_tokens = static_cast<uint32_t>(out.emitted_tokens.size());
     out.num_committed_target_tokens = accepted + 1u;
     return Status::make_ok();
+}
+
+bool spec_bound_result(SpecVerifyResult& result, uint32_t remaining_tokens,
+                       const qwen_hybrid::StopTokens& stop_tokens) {
+    const uint32_t limit = std::min(remaining_tokens,
+        static_cast<uint32_t>(result.emitted_tokens.size()));
+    uint32_t count = limit;
+    bool stopped = false;
+    for (uint32_t i = 0u; i < limit; ++i) {
+        if (qwen_hybrid::is_stop_token(stop_tokens, result.emitted_tokens[i])) {
+            count = i + 1u;
+            stopped = true;
+            break;
+        }
+    }
+    if (count > 0u && count < result.emitted_tokens.size()) {
+        result.emitted_tokens.resize(count);
+        result.num_accepted_drafts = std::min(result.num_accepted_drafts, count - 1u);
+        result.num_committed_target_tokens = result.num_accepted_drafts + 1u;
+        result.first_reject_index = result.num_accepted_drafts;
+        result.correction_valid = true;
+        result.correction_token = result.emitted_tokens.back();
+        result.bonus_token_valid = false;
+    }
+    result.num_emitted_tokens = count;
+    return stopped;
 }
 
 std::size_t spec_gdn_conv_bytes(const GdnStatePool& pool) noexcept {
