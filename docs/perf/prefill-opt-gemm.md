@@ -2,7 +2,7 @@
 
 ## 対象と判定方法
 
-ベースは `feature/prefill-breakdown` の `7e6916a`。gfx1201、ROCm 7.14、Release、R9700 `GPU-a8e9ddefa2d60f55`、BF16 KV、chunk 2048。GPU を使う各実行は `flock /tmp/r9700.lock` で排他し、ビルドは `nice -n 10`、最大 16 並列。`rocprofv3` は使用しない。性能の採否は warmup 後に交互 A/B で各 5 回、中央値と幅 / 中央値を確認し、幅が 30% 以上なら FAIL とする。独立 microbenchmark の結果と実モデルの実行結果を区別する。
+ベースは `feature/prefill-breakdown` の `7e6916a`。gfx1201、ROCm 7.14、Release、R9700 `GPU-a8e9ddefa2d60f55`、BF16 KV、chunk 2048。途中で `renderD130/device/hwmon/hwmon5/power1_cap` を読み、300000000 µW を確認した（測定中の連続記録ではない）。GPU を使う各実行は `flock /tmp/r9700.lock` で排他し、ビルドは `nice -n 10`、最大 16 並列。`rocprofv3` は使用しない。性能の採否は warmup 後に交互 A/B で各 5 回、中央値と幅 / 中央値を確認し、幅が 30% 以上なら FAIL とする。独立 microbenchmark の結果と実モデルの実行結果を区別する。
 
 対象モデルは `/home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-27b-exl3-4bpw-mul24`。prompt は `sql_code_1025.psktok` の反復 32768 ID、SHA256 `3e01d5113e00df82bf116cba9b3ad8e6e851a132ddc379a1481480745bd2a6bb`。生成方法と基準診断の定義は [内訳](prefill-breakdown-r9700.md) にある。品質用 `/tmp/corpus_long.tok` は SHA256 `5b8becd6ebe6f41d104b6d5b8b39036b163fb7e2b8c13541b9280c1ac0ba0c49`。
 
@@ -49,7 +49,7 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
 | 1024 / 5120 | 139963 | 139994 | 128×128×64 | 0.127559 / 0.123959 | 2.8% | 0 |
 | 12288 / 5120 | 140562 | 140558 | 128×128×64 | 1.067151 / 1.044151 | 2.2% | 0 |
 
-64 MiB を許可した探索でも返された上位 16 候補は全形状で workspace 0 だった。したがって有限 workspace を使う algorithm がないことや、それによる改善がないことまでは証明できない。差が比較的大きく、workspace 上限を変えた別の探索でも改善方向が一致した 3 形状（5120×17408 は 140674、5120×6144 と 6144×5120 は 140561）について、`SHELF_EXL3_INT8_PREFILL_ALGO=1` の opt-in で試す。M=2048、INT8→INT32、workspace 0、gfx1201、および hipBLASLt git revision `cd957402` のとき、実行時 heuristic の上位に該当 index がある場合にだけ選ぶ。その他は既存 heuristic に戻る。初回に探索計測は行わず、thread-local に device と固定された形状・dtype・workspace に対する algorithm を cache する。追加 VRAM は 0。`SHELF_EXL3_INT8_PREFILL_ALGO_LOG=1` で最初の選択 index を出す。すべての形状と workspace の自動 tuning や永続 cache は未実装である。
+64 MiB を許可した heuristic 上位 16 候補も全形状で workspace 0 だった。追加で `hipblaslt_ext::getAllAlgos` の INT8 / INT32・転置条件に合う 780 algorithm を各形状に対して `matmulIsAlgoSupported` で問い合わせた結果、必要量が 1 byte 以上 64 MiB 以下の対応候補は 7 形状とも 0 件だった。個別の split-K 設定を書き換えた探索は行っていないため、それを含む全構成に有限 workspace の候補がないとは断定しない。差が比較的大きく、workspace 上限を変えた別の探索でも改善方向が一致した 3 形状（5120×17408 は 140674、5120×6144 と 6144×5120 は 140561）について、`SHELF_EXL3_INT8_PREFILL_ALGO=1` の opt-in で試す。M=2048、INT8→INT32、workspace 0、gfx1201、および hipBLASLt git revision `cd957402` のとき、実行時 heuristic の上位に該当 index がある場合にだけ選ぶ。その他は既存 heuristic に戻る。初回に探索計測は行わず、thread-local に device と固定された形状・dtype・workspace に対する algorithm を cache する。追加 VRAM は 0。`SHELF_EXL3_INT8_PREFILL_ALGO_LOG=1` で最初の選択 index を出す。すべての形状と workspace の自動 tuning や永続 cache は未実装である。
 
 実モデルの quality 実行時ログで 3 形状について index 140561、140561、140674 が選択されたことを確認した。context 2048、64 位置、chunk 2048 の全語彙比較は `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`。実モデル 2048 token の別プロセス診断では INT8 GEMM の 400 行列合計 p50 が 497.276 → 459.114 ms（7.7%）だった。交互 A/B は計測中。
 
@@ -93,6 +93,10 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
 | flag GEMM | 26.454 | 26.730 | 26.095 |
 | 出力回転 | 207.836 | 177.660 | 206.430 |
 
+両候補同時有効の 2048 token 診断初回は、出力回転の stage p50 175.830 ms、GEMM p50 485.839 ms だったが、入力回転量子化の 5 回幅 / p50 が `(356.733 - 126.117) / 127.296 = 181.2%` と 30% を超えたため、**診断全体を FAIL** とし採否根拠に使わない。原因は未特定で再測定中。
+
+長文の診断を 5 回同一プロセスで行うと、semantic timing の累積上限 65536 event pairs に達する。8192 の試行は 10404 pairs、32768 の試行は 238224 pairs が欠落したため、欠落部分を stage の p50 に使わない。32768 は 1 回でも 60752 pairs なので、1 回ずつ別プロセスで診断する必要がある。先行基準の 32768 token は [内訳データ](prefill-breakdown-r9700-data/measurement-logs.tar.gz) の `long`〜`long5` 各 60752 event を集計し、5 回の stage 合計 p50 が回転量子化 2063.630、rowscale 776.467、展開 830.869、GEMM 8031.289、flag GEMM 429.383、出力回転 3352.038 ms だった。これは別時点の基準であり、候補との交互比較ではない。
+
 出力回転の診断上の差は 30.176 ms（14.5%）。同一環境の交互実行ではないため、総合改善の判定は別途行う。専用テスト `flock /tmp/r9700.lock ./build-gfx1201/tests/test_exl3_int8_prefill_rotate` は BF16 / F32、通常行と flag 行、余白を含む出力 stride で bit 比較に成功した。
 
 
@@ -110,6 +114,8 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
 
 ## 案 2: trellis 復号と WMMA の融合
 
+Saber の `mxfp4_gemm_atiled.hip` と `mxfp4_atiled_wm.h` は読み取りのみで参照した。MXFP4 の重みを LDS に stage して M 方向の wave で再利用し、fragment 形式の FP8 活性を使う構造だが、EXL3 trellis の復号や整数累積とは異なる。試作は shelf の既存 kernel を基に実装し、Saber からコードを複写していない。Saber は Apache-2.0。
+
 既存の decode 型 kernel を出発点に、通常行について group ごとの F32 scale を外して K 全体を INT32 で累積する 4-bit trellis / WMMA の予備試作を作った。64 行 × 64 列の workgroup で、復号重みは波ごとに直接生成し、M 方向の複数 wave 間で LDS に共有しない。入力は合成した INT8 codes と trellis である。現行の復号展開 + hipBLASLt を同じ入力の対照とし、warmup 後に 5 回交互に GPU event で計測した。
 
 | M / N / K | 復号 + hipBLASLt min / p50 / max ms | 試作 min / p50 / max ms | INT32 不一致 |
@@ -120,4 +126,4 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
 
 ## 精度と総合判定
 
-`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。総合 A/B は計測中。
+`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。既存 `test_exl3_int8_linear` と `test_exl3_int8_tp` もそれぞれ lock 下で実行し、両方 exit 0・ALL PASS。総合 A/B は計測中。
