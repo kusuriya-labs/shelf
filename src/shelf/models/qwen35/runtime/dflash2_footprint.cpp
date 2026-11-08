@@ -107,6 +107,14 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
         ::shelf::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
     total += align_up(act_layout.codes_bytes()) + align_up(act_layout.scales_bytes());
 
+    const std::size_t linear_rows = std::max(rows, ctx_rows);
+    const auto linear_layout = ::shelf::runtime::Int8ActivationWorkspaceLayout::make(
+        static_cast<uint32_t>(std::max({hidden, intermediate, config.tap_feature_size()})),
+        static_cast<uint32_t>(linear_rows));
+    total += align_up(linear_layout.codes_bytes()) + align_up(linear_layout.scales_bytes());
+    total += align_up(std::max(rows * 4u, ctx_rows) *
+                      std::max({hidden, intermediate, q_features, kv_features}) * sizeof(float));
+
     total += align_up(rows * (sizeof(uint32_t) + sizeof(int32_t) +
                               sizeof(::shelf::kernel::DFlash2RequestDescriptor)));
     return total;
