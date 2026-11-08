@@ -80,6 +80,16 @@ Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2`
 `--tokens-file` を指定すると PSKLDTOK corpus の先頭（`--tokens-offset` 以降）を prompt に
 使う。省略時は token id 1 の繰り返しになる。
 
+`SHELF_QWEN35_PERF_STATS=1 --perf-stats-output PATH` で dispatch 統計を保存できる。
+さらに `SHELF_QWEN35_PERF_TIMING=1` を指定すると、同じ directory の
+`semantic_timing.csv` に各 dispatch と EXL3-INT8 dense の各段階の GPU event 時間を保存する。
+この診断は TP=1 と `--perf-stats-output` が必要で、最大 65536 event ペアを記録し、
+超過時は stderr に欠落を警告する。親 dispatch と内側の段階は入れ子であり合算しない。
+測定自体の負荷があるため、速度は timing 無効時にも測る。
+`SHELF_PP_HOST_TIMING=1` は sequence setup、chunk の `execute_batch` 呼び出し、
+最後の event wait の CPU 時間を stderr に出す。TP=1 の測定区間では submit と
+complete も分ける。complete は GPU 同期と commit を含み、submit も GPU 作業と重なり得る。
+
 grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も `--tensor-parallel 2` を受理する
 （expert 軸分割で、rank が expert の contiguous 範囲を持つ）。rank local shape は
 backbone kernel の allowlist に登録済みで、prefill の throughput は TP=2 が TP=1 の

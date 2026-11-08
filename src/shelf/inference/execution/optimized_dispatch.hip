@@ -774,26 +774,57 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             float* scales_f = reinterpret_cast<float*>(xr + scales_f_off);
             float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + yprime2_off);
             const uint32_t cap = static_cast<uint32_t>(::shelf::kernel::exl3_int8_flag_cap(n_rows));
-            herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
-                x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
-            if (herr == hipSuccess)
+            {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+                herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
+                    x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0000u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_int8_rowscale(
                     codes, scales, rowscale, slots, count, codes_f, scales_f, n_rows, cap, k, code_stride,
                     scale_stride_bytes, flag_share, stream);
-            if (herr == hipSuccess)
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0001u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_int8_recon(
                     static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
-            if (herr == hipSuccess)
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0002u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::execution::exl3_dense_gemm_int8(n_rows, n, k, dense, codes, yprime, stream);
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0003u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
             // The flagged rows (count of them, at most cap) go through the fused per-group kernel.
-            if (herr == hipSuccess)
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_int8_gemm(
                     codes_f, scales_f, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes),
                     e.exl3_ka, yprime2, cap, n, k, 1u, stream, count);
-            if (herr == hipSuccess)
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0004u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
                 herr = ::shelf::kernel::launch_exl3_int8_rotate_out_i32(
                     static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh, out_ptr, out_dtype,
                     n_rows, n, dst.row_stride, stream);
+                if (semantic_timing_enabled())
+                    semantic_timing_finish(stream, timing, 0xffff0005u,
+                                           static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
             done = herr == hipSuccess;
             launches += done ? 7u : 0u;
             // hipBLASLt has no int8 algorithm for this shape: run the fused kernel instead (it needs the group scales back).
