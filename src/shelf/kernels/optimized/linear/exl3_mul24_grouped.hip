@@ -72,7 +72,49 @@ __device__ __forceinline__ void decode_biased(const uint32_t* tile, uint32_t lan
     }
 }
 
-template <bool kInt8, uint32_t kGroups, uint32_t kNTiles, uint32_t BITS>
+__global__ __launch_bounds__(kThreads) void rotate_quant_grouped(Exl3GemmArgs args) {
+    const uint32_t group = blockIdx.x;
+    const uint32_t kc = blockIdx.y;
+    if (group >= args.group_count[0]) return;
+    const uint32_t expert = args.group_expert[group];
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t pitch = args.k + (args.k / 128u) * sizeof(float);
+    const uint16_t* suh = reinterpret_cast<const uint16_t*>(
+        static_cast<const uint8_t*>(args.suh) + static_cast<uint64_t>(expert) * args.suh_batch_stride);
+    for (uint32_t ri = 0; ri < 2u; ++ri) {
+        const uint32_t r = warp * 2u + ri;
+        if (r >= args.group_rows[group]) continue;
+        const uint32_t row = group * kRowTile + r;
+        const int32_t input_row = args.row_token ? args.row_token[row] : static_cast<int32_t>(row);
+        if (input_row < 0) continue;
+        const uint32_t k = kc * 128u + lane * 4u;
+        const auto* src = static_cast<const shelf::bf16_t*>(args.input) +
+                          static_cast<uint64_t>(input_row) * args.input_row_stride + k;
+        float v0 = bf16_value(src) * __half2float(__ushort_as_half(suh[k]));
+        float v1 = bf16_value(src + 1) * __half2float(__ushort_as_half(suh[k + 1]));
+        float v2 = bf16_value(src + 2) * __half2float(__ushort_as_half(suh[k + 2]));
+        float v3 = bf16_value(src + 3) * __half2float(__ushort_as_half(suh[k + 3]));
+        exl3_detail::fwht128(v0, v1, v2, v3, lane);
+        v0 *= kInvSqrt128; v1 *= kInvSqrt128; v2 *= kInvSqrt128; v3 *= kInvSqrt128;
+        float peak = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
+        peak = fmaxf(peak, __shfl_xor(peak, 16, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 8, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 4, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 2, 32));
+        peak = fmaxf(peak, __shfl_xor(peak, 1, 32));
+        const float scale = peak / 127.0f;
+        const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+        auto quant = [&](float v) -> uint32_t {
+            return static_cast<uint32_t>(static_cast<int32_t>(fminf(fmaxf(rintf(v * inv), -128.0f), 127.0f))) & 255u;
+        };
+        auto* dst = static_cast<uint8_t*>(args.mul24_activation_workspace) + static_cast<uint64_t>(row) * pitch;
+        *reinterpret_cast<uint32_t*>(dst + k) = quant(v0) | (quant(v1) << 8) | (quant(v2) << 16) | (quant(v3) << 24);
+        if (lane == 0u) reinterpret_cast<float*>(dst + args.k)[kc] = scale;
+    }
+}
+
+template <bool kInt8, bool kPre, uint32_t kGroups, uint32_t kNTiles, uint32_t BITS>
 __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmArgs args) {
     constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
     constexpr uint32_t kNTilesPerBlock = kOutBlock / 16u;
@@ -108,6 +150,22 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     for (uint32_t kc = 0u; kc < k_chunks; ++kc) {
         const uint32_t k_base = kc * 128u;
         __syncthreads();
+        if constexpr (kPre) {
+            const uint32_t pitch = args.k + (args.k / 128u) * sizeof(float);
+            for (uint32_t r = warp; r < kRows; r += 8u) {
+                if (r >= active_rows) continue;
+                const uint32_t row = group_index * kRowTile + r;
+                if (args.row_token && args.row_token[row] < 0) {
+                    if (lane == 0u) xs[r] = 0.f;
+                    continue;
+                }
+                const auto* src = static_cast<const uint8_t*>(args.mul24_activation_workspace) +
+                                  static_cast<uint64_t>(row) * pitch;
+                *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + lane * 4u) =
+                    *reinterpret_cast<const uint32_t*>(src + k_base + lane * 4u);
+                if (lane == 0u) xs[r] = reinterpret_cast<const float*>(src + args.k)[kc];
+            }
+        } else {
         float suh_v[4];
 #pragma unroll
         for (uint32_t i = 0u; i < 4u; ++i)
@@ -163,6 +221,7 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
                     dst[3] = __float2half(v3);
                 }
             }
+        }
         }
         __syncthreads();
 
@@ -249,7 +308,7 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
 #pragma unroll
         for (uint32_t ri = 0u; ri < 2u; ++ri) {
             const uint32_t r = g * kRowTile + warp * 2u + ri;
-            if (r >= active_rows) continue;
+            if (r >= active_rows || (args.row_token && args.row_token[group_index * kRowTile + r] < 0)) continue;
 #pragma unroll
             for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
                 const float* src = accum + (r - g * kRowTile) * kOutBlock + cb * 128u + lane * 4u;
@@ -285,10 +344,219 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     }
 }
 
-template <bool kInt8, uint32_t kGroups, uint32_t kNTiles>
+template <bool kInt8, bool kPre, uint32_t BITS>
+__global__ __launch_bounds__(kThreads) void gemm_mul24_lds_kernel(Exl3GemmArgs args) {
+    constexpr uint32_t kGroups = 3u;
+    constexpr uint32_t kNTiles = 1u;
+    constexpr uint32_t kNTilesPerBlock = 8u;
+    constexpr uint32_t kOutBlock = 128u;
+    constexpr uint32_t kRows = kRowTile * kGroups;
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t lane16 = lane & 15u;
+    const uint32_t lane_high = lane >> 4;
+    const uint32_t n0 = blockIdx.x * kOutBlock;
+    const uint32_t group_index = blockIdx.z;
+    uint32_t r0 = 0u, active_rows = 0u;
+    if (!exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows)) return;
+    __shared__ __align__(16) uint8_t xbuf[kInt8 ? kRows * kXqPitch : kRows * kXrotPitch * 2u];
+    __shared__ __align__(16) float xs[kInt8 ? kRows : 1u];
+    __shared__ __align__(16) float accum[kRows * kOutBlock];
+    __shared__ __align__(16) int32x2_t weights[8u * 8u * 32u];
+    const uint16_t* suh = static_cast<const uint16_t*>(args.suh);
+    const uint16_t* svh = static_cast<const uint16_t*>(args.svh);
+    const shelf::bf16_t* input = static_cast<const shelf::bf16_t*>(args.input);
+    const uint32_t n_tiles_total = args.out_features / 16u;
+    const uint32_t* trellis = static_cast<const uint32_t*>(args.trellis);
+
+    for (uint32_t i = threadIdx.x; i < kRows * kOutBlock; i += kThreads) accum[i] = 0.0f;
+    const uint32_t k_chunks = args.k / 128u;
+    for (uint32_t kc = 0u; kc < k_chunks; ++kc) {
+        const uint32_t k_base = kc * 128u;
+        __syncthreads();
+        if constexpr (kPre) {
+            const uint32_t pitch = args.k + (args.k / 128u) * sizeof(float);
+            for (uint32_t r = warp; r < kRows; r += 8u) {
+                if (r >= active_rows) continue;
+                const uint32_t row = group_index * kRowTile + r;
+                if (args.row_token && args.row_token[row] < 0) {
+                    if (lane == 0u) xs[r] = 0.f;
+                    continue;
+                }
+                const auto* src = static_cast<const uint8_t*>(args.mul24_activation_workspace) +
+                                  static_cast<uint64_t>(row) * pitch;
+                *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + lane * 4u) =
+                    *reinterpret_cast<const uint32_t*>(src + k_base + lane * 4u);
+                if (lane == 0u) xs[r] = reinterpret_cast<const float*>(src + args.k)[kc];
+            }
+        } else {
+        float suh_v[4];
+#pragma unroll
+        for (uint32_t i = 0u; i < 4u; ++i)
+            suh_v[i] = __half2float(__ushort_as_half(suh[k_base + lane * 4u + i]));
+#pragma unroll
+        for (uint32_t g = 0u; g < kGroups; ++g) {
+#pragma unroll
+            for (uint32_t ri = 0u; ri < 2u; ++ri) {
+                const uint32_t r = g * kRowTile + warp * 2u + ri;
+                int32_t token = static_cast<int32_t>(r);
+                if (args.row_token != nullptr && r < active_rows)
+                    token = args.row_token[group_index * kRowTile + r];
+                if (r >= active_rows || token < 0) {
+
+                    if constexpr (kInt8) {
+                        if (lane == 0u) xs[r] = 0.f;
+                    }
+                    continue;
+                }
+                const uint32_t input_row = args.row_token != nullptr ? static_cast<uint32_t>(token) : r;
+                const shelf::bf16_t* src =
+                    input + static_cast<uint64_t>(input_row) * args.input_row_stride + k_base + lane * 4u;
+                float v0 = bf16_value(src + 0) * suh_v[0];
+                float v1 = bf16_value(src + 1) * suh_v[1];
+                float v2 = bf16_value(src + 2) * suh_v[2];
+                float v3 = bf16_value(src + 3) * suh_v[3];
+                exl3_detail::fwht128(v0, v1, v2, v3, lane);
+                v0 *= kInvSqrt128;
+                v1 *= kInvSqrt128;
+                v2 *= kInvSqrt128;
+                v3 *= kInvSqrt128;
+                if constexpr (kInt8) {
+                    float peak = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
+                    peak = fmaxf(peak, __shfl_xor(peak, 16, 32));
+                    peak = fmaxf(peak, __shfl_xor(peak, 8, 32));
+                    peak = fmaxf(peak, __shfl_xor(peak, 4, 32));
+                    peak = fmaxf(peak, __shfl_xor(peak, 2, 32));
+                    peak = fmaxf(peak, __shfl_xor(peak, 1, 32));
+                    const float scale = peak / 127.0f;
+                    const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+                    auto quant = [&](float v) -> uint32_t {
+                        const float q = fminf(fmaxf(rintf(v * inv), -128.0f), 127.0f);
+                        return static_cast<uint32_t>(static_cast<int32_t>(q)) & 0xFFu;
+                    };
+                    const uint32_t packed = quant(v0) | (quant(v1) << 8) | (quant(v2) << 16) | (quant(v3) << 24);
+                    *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + lane * 4u) = packed;
+                    if (lane == 0u) xs[r] = scale;
+                } else {
+                    __half* dst = reinterpret_cast<__half*>(xbuf) + r * kXrotPitch + lane * 4u;
+                    dst[0] = __float2half(v0);
+                    dst[1] = __float2half(v1);
+                    dst[2] = __float2half(v2);
+                    dst[3] = __float2half(v3);
+                }
+            }
+        }
+        }
+        __syncthreads();
+
+
+        for (uint32_t ks = 0u; ks < 8u; ++ks) {
+            const uint32_t nt = blockIdx.x * kNTilesPerBlock + warp;
+            const uint32_t* tile = trellis +
+                (static_cast<uint64_t>(kc * 8u + ks) * n_tiles_total + nt) * (8u * BITS);
+            uint32_t q[8];
+            decode_biased<BITS>(tile, lane, q);
+            int32x2_t a;
+            a[0] = static_cast<int32_t>((q[0] | (q[1] << 8) | (q[2] << 16) | (q[3] << 24)) ^ 0x80808080u);
+            a[1] = static_cast<int32_t>((q[4] | (q[5] << 8) | (q[6] << 16) | (q[7] << 24)) ^ 0x80808080u);
+            weights[(ks * 8u + warp) * 32u + lane] = a;
+        }
+        __syncthreads();
+        for (uint32_t g = 0; g < kGroups && g * kRowTile < active_rows; ++g) {
+            const uint32_t offset = g * kRowTile * kOutBlock + lane16 * kOutBlock +
+                                    warp * 16u + lane_high * 8u;
+            f32x8_t acc;
+            for (uint32_t j = 0; j < 8u; ++j) acc[j] = accum[offset + j];
+            int32x8_t acci = {0, 0, 0, 0, 0, 0, 0, 0};
+            for (uint32_t ks = 0; ks < 8u; ++ks) {
+                const int32x2_t a8 = weights[(ks * 8u + warp) * 32u + lane];
+                if constexpr (kInt8) {
+                    const int32x2_t b = *reinterpret_cast<const int32x2_t*>(
+                        xbuf + (g * kRowTile + lane16) * kXqPitch + ks * 16u + lane_high * 8u);
+                    acci = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, a8, true, b, acci, false);
+                } else {
+                    const f16x8_t b = *reinterpret_cast<const f16x8_t*>(
+                        reinterpret_cast<const __half*>(xbuf) + (g * kRowTile + lane16) * kXrotPitch +
+                        ks * 16u + lane_high * 8u);
+                    f16x8_t a;
+                    for (uint32_t j = 0; j < 8u; ++j) {
+                        const uint32_t bits = static_cast<uint32_t>(a8[j / 4u]);
+                        const int32_t q = static_cast<int8_t>(bits >> (8u * (j % 4u)));
+                        a[j] = static_cast<_Float16>(q);
+                    }
+                    acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
+                }
+            }
+            if constexpr (kInt8) {
+                const float row_scale = xs[g * kRowTile + lane16];
+                for (uint32_t j = 0; j < 8u; ++j) acc[j] += static_cast<float>(acci[j]) * row_scale;
+            }
+            for (uint32_t j = 0; j < 8u; ++j) accum[offset + j] = acc[j];
+        }
+    }
+    __syncthreads();
+
+    const float scale = kInvSqrt128 * ::shelf::quantization::exl3::kExl3Int8GridStep;
+#pragma unroll
+    for (uint32_t g = 0u; g < kGroups; ++g) {
+        if constexpr (kGroups > 1u) {
+            if (g * kRowTile >= active_rows) continue;
+        }
+#pragma unroll
+        for (uint32_t ri = 0u; ri < 2u; ++ri) {
+            const uint32_t r = g * kRowTile + warp * 2u + ri;
+            if (r >= active_rows || (args.row_token && args.row_token[group_index * kRowTile + r] < 0)) continue;
+#pragma unroll
+            for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
+                const float* src = accum + g * kRowTile * kOutBlock + (r - g * kRowTile) * kOutBlock + cb * 128u + lane * 4u;
+                float v0 = src[0];
+                float v1 = src[1];
+                float v2 = src[2];
+                float v3 = src[3];
+                exl3_detail::fwht128(v0, v1, v2, v3, lane);
+                const uint32_t col = n0 + cb * 128u + lane * 4u;
+                const float y0 = v0 * scale * __half2float(__ushort_as_half(svh[col + 0]));
+                const float y1 = v1 * scale * __half2float(__ushort_as_half(svh[col + 1]));
+                const float y2 = v2 * scale * __half2float(__ushort_as_half(svh[col + 2]));
+                const float y3 = v3 * scale * __half2float(__ushort_as_half(svh[col + 3]));
+                const uint64_t out_base = static_cast<uint64_t>(r) * args.output_row_stride + col;
+                if (args.output_dtype == 0u) {
+                    shelf::bf16_t* dst = static_cast<shelf::bf16_t*>(args.output) + out_base;
+                    dst[0] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y0))};
+                    dst[1] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y1))};
+                    dst[2] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y2))};
+                    dst[3] = shelf::bf16_t{__bfloat16_as_ushort(__float2bfloat16(y3))};
+                } else {
+                    float* dst = static_cast<float*>(args.output) + out_base;
+                    dst[0] = y0;
+                    dst[1] = y1;
+                    dst[2] = y2;
+                    dst[3] = y3;
+                }
+            }
+        }
+        if constexpr (kGroups > 1u) {
+            __syncthreads();
+        }
+    }
+}
+
+template <bool kInt8, bool kPre>
+hipError_t launch_lds_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
+#define SHELF_MUL24_LDS_BITS(B) case B: gemm_mul24_lds_kernel<kInt8, kPre, B><<<grid, kThreads, 0, stream>>>(args); break
+    switch (args.ka) {
+        SHELF_MUL24_LDS_BITS(1u); SHELF_MUL24_LDS_BITS(2u); SHELF_MUL24_LDS_BITS(3u); SHELF_MUL24_LDS_BITS(4u);
+        SHELF_MUL24_LDS_BITS(5u); SHELF_MUL24_LDS_BITS(6u); SHELF_MUL24_LDS_BITS(7u); SHELF_MUL24_LDS_BITS(8u);
+        default: return hipErrorInvalidValue;
+    }
+#undef SHELF_MUL24_LDS_BITS
+    return hipGetLastError();
+}
+
+template <bool kInt8, bool kPre, uint32_t kGroups, uint32_t kNTiles>
 hipError_t launch_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
 #define SHELF_MUL24_BITS(B) \
-    case B: gemm_mul24_grouped_kernel<kInt8, kGroups, kNTiles, B><<<grid, kThreads, 0, stream>>>(args); break
+    case B: gemm_mul24_grouped_kernel<kInt8, kPre, kGroups, kNTiles, B><<<grid, kThreads, 0, stream>>>(args); break
     switch (args.ka) {
         SHELF_MUL24_BITS(1u);
         SHELF_MUL24_BITS(2u);
@@ -304,11 +572,11 @@ hipError_t launch_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) 
     return hipGetLastError();
 }
 
-template <bool kInt8, uint32_t kNTiles>
+template <bool kInt8, bool kPre, uint32_t kNTiles>
 hipError_t launch_groups(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
     // Fusing more than two groups spills registers and measured slower, so it runs as two.
-    return args.groups >= 2u ? launch_bits<kInt8, 2u, kNTiles>(args, grid, stream)
-                             : launch_bits<kInt8, 1u, kNTiles>(args, grid, stream);
+    return args.groups >= 2u ? launch_bits<kInt8, kPre, 2u, kNTiles>(args, grid, stream)
+                             : launch_bits<kInt8, kPre, 1u, kNTiles>(args, grid, stream);
 }
 
 }  // namespace
@@ -316,10 +584,22 @@ hipError_t launch_groups(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream
 hipError_t launch_exl3_mul24_grouped(const Exl3GemmArgs& args, bool int8_act, uint32_t n_tiles, uint32_t grid_x,
                                      uint32_t grid_z, hipStream_t stream) {
     if (args.half != 0u || args.group_expert == nullptr || (n_tiles != 1u && n_tiles != 2u)) return hipErrorInvalidValue;
-    const dim3 grid(grid_x, 1u, grid_z);
+    const dim3 grid(args.mul24_lds ? args.out_features / 128u : grid_x, 1u, grid_z);
+    if (args.mul24_lds && args.expert_group_begin == nullptr) return hipErrorInvalidValue;
+    if (args.mul24_activation_workspace != nullptr) {
+        if (!int8_act) return hipErrorInvalidValue;
+        rotate_quant_grouped<<<dim3(grid_z, args.k / 128u), kThreads, 0, stream>>>(args);
+        const hipError_t err = hipGetLastError();
+        if (err != hipSuccess) return err;
+        if (args.mul24_lds) return launch_lds_bits<true, true>(args, grid, stream);
+        return n_tiles == 2u ? launch_groups<true, true, 2u>(args, grid, stream)
+                             : launch_groups<true, true, 1u>(args, grid, stream);
+    }
+    if (args.mul24_lds) return int8_act ? launch_lds_bits<true, false>(args, grid, stream)
+                                       : launch_lds_bits<false, false>(args, grid, stream);
     if (int8_act)
-        return n_tiles == 2u ? launch_groups<true, 2u>(args, grid, stream) : launch_groups<true, 1u>(args, grid, stream);
-    return n_tiles == 2u ? launch_groups<false, 2u>(args, grid, stream) : launch_groups<false, 1u>(args, grid, stream);
+        return n_tiles == 2u ? launch_groups<true, false, 2u>(args, grid, stream) : launch_groups<true, false, 1u>(args, grid, stream);
+    return n_tiles == 2u ? launch_groups<false, false, 2u>(args, grid, stream) : launch_groups<false, false, 1u>(args, grid, stream);
 }
 
 }  // namespace shelf::kernel

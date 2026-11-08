@@ -878,6 +878,12 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.n_tiles = ntiles_override;
     dense.groups = (args.expert_group_begin != nullptr && fuse_override > 1u) ? fuse_override
                                                                             : 1u;
+    if (args.mul24_activation_workspace != nullptr &&
+        (args.mul24 == 0u || args.int8_act == 0u ||
+         args.mul24_activation_workspace_bytes < static_cast<uint64_t>(args.group_capacity) * kRowTile *
+             (args.k + (args.k / 128u) * sizeof(float)))) return hipErrorInvalidValue;
+    dense.mul24_lds = args.mul24_lds;
+    dense.mul24_activation_workspace = args.mul24_activation_workspace;
     dense.group_expert = args.group_expert;
     dense.group_rows = args.group_rows;
     dense.group_count = args.group_count;

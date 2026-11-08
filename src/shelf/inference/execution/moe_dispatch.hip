@@ -317,13 +317,32 @@ Result<OptimizedLaunchResult> try_launch_moe_grouped_exl3(const Program& program
     args.expert_group_begin = plan.value().arrays.expert_group_begin;
     args.row_token = token_rows ? plan.value().arrays.row_token : nullptr;
     args.group_capacity = plan.value().group_capacity;
+    const char* lds = std::getenv("SHELF_EXL3_MUL24_LDS");
+    args.mul24_lds = args.mul24 && lds && std::atoi(lds) != 0 ? 1u : 0u;
+    const char* pre = std::getenv("SHELF_EXL3_MUL24_PRE");
+    const char* automatic = std::getenv("SHELF_EXL3_MUL24_AUTO");
+    const bool auto_enabled = args.mul24 && automatic && std::atoi(automatic) != 0;
+    const bool auto_pre = auto_enabled &&
+        ::shelf::kernel::exl3_mul24_auto_pre(plan.value().tokens, args.k, args.out_features, args.ka);
+    const bool force_pre = pre && std::atoi(pre) != 0;
+    if (auto_enabled && !force_pre) args.int8_act = auto_pre ? 1u : 0u;
+    if (args.int8_act && (force_pre || auto_pre)) {
+        const auto capacity = MoePlanScratch::make(b.scratch_tokens, b.scratch_experts, b.scratch_top_k);
+        const auto& range = program.workspace.ranges[b.scratch_slot];
+        const uint64_t offset = capacity.mul24_offset();
+        const uint64_t bytes = MoePlanScratch::mul24_bytes(plan.value().row_capacity, args.k);
+        if (range.bytes < offset || range.bytes - offset < bytes)
+            return bad("moe grouped exl3: activation scratch too small");
+        args.mul24_activation_workspace = ctx.workspace + range.offset + offset;
+        args.mul24_activation_workspace_bytes = range.bytes - offset;
+    }
 
     const hipError_t herr =
         ::shelf::kernel::launch_gemm_exl3_w16a16_grouped(args, stream);
     if (herr != hipSuccess)
         return Status::hip_error("moe grouped exl3 launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
-    record_physical_launch(1u);
+    record_physical_launch(args.mul24_activation_workspace ? 2u : 1u);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }

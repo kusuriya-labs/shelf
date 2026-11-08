@@ -16,6 +16,8 @@
 #include <shelf/runtime/graph/grouped_row_shape.h>
 #include <shelf/runtime/program/moe_plan_scratch.h>
 
+#include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -235,6 +237,10 @@ public:
         const std::size_t mask_bytes = ((blocks + 31u) / 32u) * 4u;
         total += rows * ((mask_bytes + 15u) / 16u) * 16u;
         total += ::shelf::runtime::MoePlanScratch::make(tokens, local_experts, top_k).bytes();
+        const char* pre = std::getenv("SHELF_EXL3_MUL24_PRE");
+        const char* automatic = std::getenv("SHELF_EXL3_MUL24_AUTO");
+        if ((pre && std::atoi(pre) != 0) || (automatic && std::atoi(automatic) != 0))
+            total += 255u + ::shelf::runtime::MoePlanScratch::mul24_bytes(group_rows, std::max(hidden, inter));
         return total;
     }
 

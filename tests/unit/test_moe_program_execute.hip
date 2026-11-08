@@ -1,4 +1,6 @@
 #include <shelf/inference/execution/program_executor.h>
+#include <shelf/inference/execution/moe_dispatch.h>
+#include <shelf/kernels/optimized/linear/exl3_grouped.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
 #include <shelf/kernels/optimized/elementwise.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
@@ -185,6 +187,85 @@ uint64_t binding_rows(const rt::Program& program, rt::ValueId v) {
     if (b == nullptr || b->row_stride == 0u) return 0ull;
     return b->bytes / (static_cast<uint64_t>(b->row_stride) *
                        rt::value_dtype_bytes(b->dtype));
+}
+
+void test_mul24_auto_dispatch(hipStream_t stream) {
+    constexpr uint32_t tokens = 256u, experts = 2u, topk = 1u, k = 2560u, n = 640u, bits = 3u;
+    const auto layout = rt::MoePlanScratch::make(tokens, experts, topk);
+    const uint64_t act_bytes = rt::MoePlanScratch::mul24_bytes(layout.row_capacity, k);
+    const uint64_t scratch_bytes = layout.mul24_offset() + act_bytes;
+    auto* workspace = dalloc<uint8_t>(scratch_bytes);
+    auto* words = reinterpret_cast<uint32_t*>(workspace);
+    auto* input = dalloc<uint16_t>(static_cast<size_t>(tokens) * k);
+    auto* output = dalloc<uint16_t>(static_cast<size_t>(layout.row_capacity) * n);
+    auto* reference = dalloc<uint16_t>(static_cast<size_t>(layout.row_capacity) * n);
+    const uint64_t plane_bytes = static_cast<uint64_t>(k) * n * bits / 8u;
+    auto* codes = dalloc<uint8_t>(plane_bytes * experts);
+    auto* suh = dalloc<uint16_t>(static_cast<size_t>(experts) * k);
+    auto* svh = dalloc<uint16_t>(static_cast<size_t>(experts) * n);
+    std::vector<uint16_t> in(static_cast<size_t>(tokens) * k);
+    for (size_t i = 0; i < in.size(); ++i) in[i] = (i & 1u) ? 0x3e80u : 0xbe80u;
+    std::vector<uint16_t> hs(static_cast<size_t>(experts) * k, 0x3c00u);
+    std::vector<uint16_t> hv(static_cast<size_t>(experts) * n, 0x3c00u);
+    std::vector<uint32_t> ge(16u, 0u), gr(16u, 16u), begin{0u, 16u, 16u};
+    std::vector<int32_t> rows(layout.row_capacity, -1);
+    for (uint32_t i = 0; i < tokens; ++i) rows[i] = static_cast<int32_t>(i);
+    const uint32_t group_count = 16u;
+    const size_t out_bytes = static_cast<size_t>(layout.row_capacity) * n * 2u;
+    bool ok = hipMemset(workspace, 0, scratch_bytes) == hipSuccess &&
+        hipMemset(codes, 0, plane_bytes * experts) == hipSuccess &&
+        hipMemset(output, 0xff, out_bytes) == hipSuccess &&
+        hipMemset(reference, 0xff, out_bytes) == hipSuccess &&
+        hipMemcpy(input, in.data(), in.size() * 2u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(suh, hs.data(), hs.size() * 2u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(svh, hv.data(), hv.size() * 2u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(words + layout.group_expert_offset, ge.data(), ge.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(words + layout.group_rows_offset, gr.data(), gr.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(words + layout.group_count_offset, &group_count, 4u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(words + layout.expert_group_begin_offset, begin.data(), begin.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(words + layout.row_token_offset, rows.data(), rows.size() * 4u, hipMemcpyHostToDevice) == hipSuccess;
+    rt::WeightSlot weight{};
+    weight.rows = n; weight.cols = k; weight.k_padded = k; weight.experts = experts;
+    weight.encoding = 4u;
+    weight.compute_spec = static_cast<uint8_t>(shelf::quantization::ComputeSpecId::EXL3_MUL24_INT8_W8A8_F32_BF16);
+    weight.codes = codes; weight.exl3_suh = suh; weight.exl3_svh = svh; weight.exl3_ka = bits;
+    weight.codes_batch_stride_bytes = plane_bytes;
+    weight.exl3_suh_batch_stride_bytes = static_cast<uint64_t>(k) * 2u;
+    weight.exl3_svh_batch_stride_bytes = static_cast<uint64_t>(n) * 2u;
+    rt::Program p;
+    p.workspace.ranges.push_back(rt::WorkspaceRange{0u, static_cast<size_t>(scratch_bytes), 0u, 0u});
+    rt::ValueBinding vin{}; vin.logical_value = rt::ValueId{0u}; vin.storage = rt::ValueStorage::EXTERNAL_INPUT;
+    vin.feature_count = k; vin.row_stride = k;
+    rt::ValueBinding vout{}; vout.logical_value = rt::ValueId{1u}; vout.storage = rt::ValueStorage::EXTERNAL_OUTPUT;
+    vout.feature_count = n; vout.row_stride = n; vout.row_domain = rt::ValueRowDomain::GROUPED_ROWS;
+    p.values = {vin, vout};
+    rt::DispatchBinding b{}; b.input_count = 1u; b.output_count = 1u; b.input_slots[0] = 0u;
+    b.output_slots[0] = 1u; b.weight_index = 0u; b.scratch_slot = 0u;
+    b.scratch_tokens = tokens; b.scratch_experts = experts; b.scratch_top_k = topk;
+    const void* inputs[] = {input}; void* outputs[] = {output};
+    ex::HostExecutionContext ctx{}; ctx.weights = &weight; ctx.weight_count = 1u;
+    ctx.workspace = workspace; ctx.actual_rows = tokens;
+    ctx.external_inputs = inputs; ctx.external_input_count = 1u;
+    ctx.external_outputs = outputs; ctx.external_output_count = 1u;
+    setenv("SHELF_EXL3_MUL24_AUTO", "1", 1);
+    auto launched = ex::try_launch_moe_grouped_exl3(p, b, ctx, stream);
+    unsetenv("SHELF_EXL3_MUL24_AUTO");
+    ok = ok && launched.ok();
+    kn::Exl3GroupedArgs a{}; a.trellis = codes; a.suh = suh; a.svh = svh; a.input = input; a.output = reference;
+    a.out_features = n; a.k = k; a.input_row_stride = k; a.output_row_stride = n; a.ka = bits; a.mul24 = 1u;
+    a.int8_act = 1u; a.trellis_batch_stride = plane_bytes; a.suh_batch_stride = weight.exl3_suh_batch_stride_bytes;
+    a.svh_batch_stride = weight.exl3_svh_batch_stride_bytes; a.group_expert = words + layout.group_expert_offset;
+    a.group_rows = words + layout.group_rows_offset; a.group_count = words + layout.group_count_offset;
+    a.expert_group_begin = words + layout.expert_group_begin_offset;
+    a.row_token = reinterpret_cast<int32_t*>(words + layout.row_token_offset); a.group_capacity = layout.group_capacity;
+    a.mul24_activation_workspace = workspace + layout.mul24_offset(); a.mul24_activation_workspace_bytes = act_bytes;
+    ok = ok && kn::launch_gemm_exl3_w16a16_grouped(a, stream) == hipSuccess && hipStreamSynchronize(stream) == hipSuccess;
+    std::vector<uint16_t> got(static_cast<size_t>(layout.row_capacity) * n), expected(got.size());
+    ok = ok && hipMemcpy(got.data(), output, out_bytes, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(expected.data(), reference, out_bytes, hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && got == expected, "mul24 の自動選択と scratch の実行結果が直接呼び出しと一致する");
+    (void)hipFree(workspace); (void)hipFree(input); (void)hipFree(output); (void)hipFree(reference);
+    (void)hipFree(codes); (void)hipFree(suh); (void)hipFree(svh);
 }
 
 }  // namespace
@@ -515,6 +596,7 @@ int main() {
     check(first_mismatch == ref_out.size(),
           "the program path and the direct kernel path give the same MoE FFN");
 
+    test_mul24_auto_dispatch(stream);
     std::printf("%s (%d failed)\n", failed == 0 ? "PASS" : "FAIL", failed);
     return failed == 0 ? 0 : 1;
 }

@@ -69,13 +69,17 @@ struct Plan {
     int32_t* row_token = nullptr;
 };
 
-Plan make_plan(uint32_t tokens, uint32_t experts, uint32_t topk, bool skew, std::mt19937& rng) {
+Plan make_plan(uint32_t tokens, uint32_t experts, uint32_t topk, bool skew, bool single, std::mt19937& rng) {
     std::vector<double> w(experts, 1.0);
     if (skew)
         for (uint32_t i = 0; i < experts; ++i) w[i] = 1.0 / (i + 1.0);
     std::vector<std::vector<int32_t>> per_expert(experts);
     std::vector<uint32_t> perm(experts);
     for (uint32_t t = 0; t < tokens; ++t) {
+        if (single) {
+            per_expert[0].push_back(static_cast<int32_t>(t));
+            continue;
+        }
         // topk distinct experts, sampled by weight (Efraimidis-Spirakis keys).
         std::vector<std::pair<double, uint32_t>> keys(experts);
         std::uniform_real_distribution<double> u(1e-12, 1.0);
@@ -122,7 +126,7 @@ void free_plan(Plan& p) {
 
 // Returns ms per launch.
 double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_t input_stride, void* output,
-                   uint32_t bits, bool token_rows, uint32_t int8_act, int iters) {
+                   uint32_t bits, bool token_rows, uint32_t int8_act, int iters, uint32_t tokens) {
     kernel::Exl3GroupedArgs a;
     a.trellis = pl.trellis;
     a.suh = pl.suh;
@@ -146,6 +150,17 @@ double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_
     a.expert_group_begin = plan.expert_begin;
     a.row_token = token_rows ? plan.row_token : nullptr;
     a.group_capacity = std::max(plan.groups, 1u);
+    a.mul24_lds = std::getenv("SHELF_BENCH_MUL24_LDS") ? 1u : 0u;
+    void* act_workspace = nullptr;
+    const bool automatic = std::getenv("SHELF_BENCH_MUL24_AUTO") != nullptr;
+    const bool auto_pre = automatic && kernel::exl3_mul24_auto_pre(tokens, a.k, a.out_features, bits);
+    if (automatic && int8_act) a.int8_act = auto_pre ? 1u : 0u;
+    if (a.int8_act && (std::getenv("SHELF_BENCH_MUL24_PRE") || auto_pre)) {
+        a.mul24_activation_workspace_bytes = static_cast<uint64_t>(a.group_capacity) * kRowTile *
+                                              (a.k + a.k / 128u * 4u);
+        HIP_CHECK(hipMalloc(&act_workspace, a.mul24_activation_workspace_bytes));
+        a.mul24_activation_workspace = act_workspace;
+    }
     for (int i = 0; i < 3; ++i) HIP_CHECK(kernel::launch_gemm_exl3_w16a16_grouped(a, nullptr));
     hipEvent_t t0, t1;
     HIP_CHECK(hipEventCreate(&t0));
@@ -159,6 +174,7 @@ double time_launch(const Plane& pl, const Plan& plan, const void* input, uint32_
     HIP_CHECK(hipEventElapsedTime(&ms, t0, t1));
     (void)hipEventDestroy(t0);
     (void)hipEventDestroy(t1);
+    if (act_workspace) HIP_CHECK(hipFree(act_workspace));
     return ms / iters;
 }
 
@@ -168,12 +184,18 @@ int main(int argc, char** argv) {
     std::string model_dir = "/home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-flash-next-exl3-3.05bpw-mul24";
     uint32_t bits = 3;
     bool skew = false;
+    bool single = false;
+    bool reverse = false;
     int iters = 20;
+    uint32_t only_tokens = 0;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--model-dir") && i + 1 < argc) model_dir = argv[++i];
         else if (!std::strcmp(argv[i], "--bits") && i + 1 < argc) bits = static_cast<uint32_t>(std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--skew")) skew = true;
+        else if (!std::strcmp(argv[i], "--single-expert")) single = true;
+        else if (!std::strcmp(argv[i], "--reverse")) reverse = true;
+        else if (!std::strcmp(argv[i], "--tokens") && i + 1 < argc) only_tokens = static_cast<uint32_t>(std::atoi(argv[++i]));
     }
     nlohmann::json cfg;
     {
@@ -185,7 +207,7 @@ int main(int argc, char** argv) {
     const uint32_t hidden = t["hidden_size"], inter = t["moe_intermediate_size"], experts = t["num_experts"],
                    topk = t["num_experts_per_tok"];
     std::printf("hidden=%u moe_intermediate=%u experts=%u topk=%u bits=%u routing=%s iters=%d fuse=%s\n", hidden, inter,
-                experts, topk, bits, skew ? "skew" : "uniform", iters,
+                experts, topk, bits, single ? "single" : (skew ? "skew" : "uniform"), iters,
                 std::getenv("SHELF_EXL3_GROUPED_FUSE") ? std::getenv("SHELF_EXL3_GROUPED_FUSE") : "default(2)");
 
     std::mt19937 rng(7);
@@ -213,12 +235,20 @@ int main(int argc, char** argv) {
                 "gate fp16", "gate i8", "x", "down fp16", "down i8", "x", "sum fp16", "sum i8", "x");
     const uint32_t token_counts[] = {1, 2, 4, 8, 16, 64, 256, 512, 1024, 2048};
     for (const uint32_t tokens : token_counts) {
-        Plan plan = make_plan(tokens, experts, topk, skew, rng);
+        if (only_tokens && tokens != only_tokens) continue;
+        Plan plan = make_plan(tokens, experts, topk, skew, single, rng);
         double gf = 0, g8 = 0, df = 0, d8 = 0;
-        gf = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 0, iters);
-        g8 = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 1, iters);
-        df = time_launch(down, plan, d_gin, inter, d_out, bits, false, 0, iters);
-        d8 = time_launch(down, plan, d_gin, inter, d_out, bits, false, 1, iters);
+        if (reverse) {
+            g8 = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 1, iters, tokens);
+            gf = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 0, iters, tokens);
+            d8 = time_launch(down, plan, d_gin, inter, d_out, bits, false, 1, iters, tokens);
+            df = time_launch(down, plan, d_gin, inter, d_out, bits, false, 0, iters, tokens);
+        } else {
+            gf = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 0, iters, tokens);
+            g8 = time_launch(gate, plan, d_tokens, hidden, d_out, bits, true, 1, iters, tokens);
+            df = time_launch(down, plan, d_gin, inter, d_out, bits, false, 0, iters, tokens);
+            d8 = time_launch(down, plan, d_gin, inter, d_out, bits, false, 1, iters, tokens);
+        }
         std::printf("%6u %7u %7u %7u | %8.3fms %8.3fms %5.2fx | %8.3fms %8.3fms %5.2fx | %8.3fms %8.3fms %5.2fx\n",
                     tokens, plan.active_experts, plan.groups, plan.rows, gf, g8, gf / g8, df, d8, df / d8, gf + df,
                     g8 + d8, (gf + df) / (g8 + d8));

@@ -53,6 +53,8 @@ struct Exl3GemmArgs {
     // and the kernel gathers through this table; when null, the input plane is already in
     // group-row order.
     const int32_t* row_token = nullptr;
+    uint32_t mul24_lds = 0;
+    void* mul24_activation_workspace = nullptr;
     uint64_t trellis_batch_stride = 0;
     uint64_t suh_batch_stride = 0;
     uint64_t svh_batch_stride = 0;
