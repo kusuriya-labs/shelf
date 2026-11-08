@@ -301,6 +301,19 @@ int main() {
     run({"heavy-expert", 2, 384, 512, 4, {{0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 7}, {1, 2}},
          true, true, false});
     run({"heavy-expert-nt2-bf16", 2, 384, 1024, 2, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, true});
+    for (uint32_t bits : {3u, 4u}) {
+        for (uint32_t rows : {31u, 32u, 33u, 63u, 64u, 65u, 127u, 128u, 129u}) {
+            std::vector<Group> groups = {{0, 1}};
+            for (uint32_t remaining = rows; remaining != 0u;) {
+                const uint32_t count = std::min(remaining, 16u);
+                groups.push_back({1, count});
+                remaining -= count;
+            }
+            groups.push_back({2, 1});
+            run({"row-boundary", 3, 128, 128, bits, groups, true, true, false});
+            run({"row-boundary-bf16", 3, 128, 128, bits, groups, true, false, true});
+        }
+    }
     if (failed != 0) {
         std::printf("FAILED: %d case(s)\n", failed);
         return 1;
