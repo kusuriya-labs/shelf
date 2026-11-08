@@ -288,3 +288,7 @@ optional external test:
     `GENERATED_IDS` が target-only greedy と一致し、partial accept の GDN compact log replay
     が走る）。grouped expert model の forward は batch 行数に依存しないことを
     `test_qwen35moe_rows_parity` が別に固定する（[qwen35moe.md](qwen35moe.md) §7）
+
+MTP の verify は出力可能な残り token 数と停止 token の最初の位置で受理結果を
+制限してから target の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
+step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。

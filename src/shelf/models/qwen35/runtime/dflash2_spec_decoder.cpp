@@ -760,14 +760,21 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_step: not initialized", __FILE__, __LINE__);
     }
+    if (remaining_tokens == 0u) {
+        return Status::invalid_argument("dflash2_spec_step: remaining_tokens is zero", __FILE__,
+                                        __LINE__);
+    }
+    if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, pending_token)) {
+        // The stop token was already emitted by the caller; do not draft past it.
+        DFlash2SpecIterationOutput stopped;
+        stopped.pending_token = pending_token;
+        stopped.finished = true;
+        return stopped;
+    }
     if (decoder.target == nullptr || decoder.sequence == nullptr || decoder.gdn_ranks.empty() ||
         decoder.draft == nullptr || decoder.context == nullptr) {
         return Status::invalid_state("dflash2_spec_step: state pointers are null", __FILE__,
                                      __LINE__);
-    }
-    if (remaining_tokens == 0u) {
-        return Status::invalid_argument("dflash2_spec_step: remaining_tokens is zero", __FILE__,
-                                        __LINE__);
     }
 
     DFlash2SpecIterationOutput out;
@@ -1047,6 +1054,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
     Status accept = spec_greedy_accept(drafts.data(), total_k, sampled.data(), true, result);
     if (!accept.ok()) return accept;
+    out.finished = spec_bound_result(result, remaining_tokens, decoder.config.eos_tokens);
     const uint32_t accepted = result.num_accepted_drafts;
     out.num_accepted = accepted;
     out.emitted_count = std::min(static_cast<uint32_t>(result.emitted_tokens.size()),
@@ -1211,6 +1219,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
         int32_t thinking_close_token = -1;
         bool batched = false;
+        bool stopped = false;
     };
 
     std::vector<SlotPlan> plans;
@@ -1255,6 +1264,12 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plan.thinking_allowance = slot.thinking_allowance;
         plan.thinking_close_token = slot.thinking_close_token;
         plan.batched = drafts > 0u;
+        if (qwen_hybrid::is_stop_token(decoder->config.eos_tokens, slot.anchor_token)) {
+            // The stop token was already emitted by the caller; this slot runs nothing.
+            plan.stopped = true;
+            plan.batched = false;
+            plan.drafts = 0u;
+        }
         plan.total_rows = drafts + 1u;
         if (plan.batched) {
             plan.row_begin = row_cursor;
@@ -1546,6 +1561,11 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         DFlash2SpecDecoder& decoder = *plan.decoder;
         DFlash2SpecIterationOutput& result_out = out.slots[i];
 
+        if (plan.stopped) {
+            result_out.pending_token = plan.anchor;
+            result_out.finished = true;
+            continue;
+        }
         if (!plan.batched) {
             const int32_t forced =
                 plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
@@ -1561,6 +1581,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         const Status accept_st = spec_greedy_accept(
             drafts[i].data(), plan.drafts, sampled.data() + plan.row_begin, true, verify);
         if (!accept_st.ok()) return accept_st;
+        result_out.finished = spec_bound_result(verify, plan.remaining, decoder.config.eos_tokens);
         const uint32_t accepted = verify.num_accepted_drafts;
         result_out.num_drafts = plan.drafts;
         result_out.num_dflash_drafts = plan.drafts;
@@ -1578,7 +1599,8 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             result_out.pending_token = -1;
         }
 
-        if (plan.thinking_allowance != kDFlash2NoThinkingAllowance &&
+        if (!result_out.finished &&
+            plan.thinking_allowance != kDFlash2NoThinkingAllowance &&
             plan.thinking_close_token >= 0 && accepted == plan.thinking_allowance &&
             result_out.emitted_count == accepted + 1u) {
             result_out.emitted[accepted] = plan.thinking_close_token;

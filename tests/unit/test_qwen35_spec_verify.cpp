@@ -1,5 +1,7 @@
+#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -156,6 +158,73 @@ int main() {
         SpecVerifyResult out;
         auto st = shelf::qwen35::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
         check(!st.ok(), "null drafts with num_drafts>0 rejected");
+    }
+
+    {
+        const int32_t drafts[] = {10, 11, 12, 13};
+        const int32_t target[] = {10, 11, 12, 13, 99};
+        for (uint32_t stop = 0u; stop < 5u; ++stop) {
+            SpecVerifyResult result;
+            auto st = shelf::qwen35::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
+            const bool stopped = shelf::qwen35::runtime::spec_bound_result(
+                result, 5u, {target[stop]});
+            check(st.ok() && stopped, "stop detected");
+            check(result.emitted_tokens.size() == stop + 1u, "stop emitted bound");
+            check(result.num_committed_target_tokens == stop + 1u, "stop commit bound");
+            check(result.num_accepted_drafts == (stop < 4u ? stop : 4u), "stop accepted bound");
+        }
+        for (uint32_t limit = 1u; limit <= 5u; ++limit) {
+            SpecVerifyResult result;
+            auto st = shelf::qwen35::runtime::spec_greedy_accept(drafts, 4u, target, true, result);
+            const bool stopped = shelf::qwen35::runtime::spec_bound_result(result, limit, {});
+            check(st.ok() && !stopped, "limit without stop");
+            check(result.emitted_tokens.size() == limit, "limit emitted bound");
+            check(result.num_committed_target_tokens == limit, "limit commit bound");
+        }
+    }
+
+    {
+        const std::vector<int32_t> expected = {2, 3, 4, 5, 6, 7, 8, 9};
+        for (uint32_t window = 1u; window <= 5u; ++window) {
+            std::vector<int32_t> generated;
+            while (generated.size() < expected.size()) {
+                const uint32_t remaining = static_cast<uint32_t>(expected.size() - generated.size());
+                const uint32_t n = std::min(window, remaining - 1u);
+                if (n == 0u) {
+                    generated.push_back(expected[generated.size()]);
+                    break;
+                }
+                std::vector<int32_t> target(expected.begin() + generated.size(),
+                                            expected.begin() + generated.size() + n + 1u);
+                std::vector<int32_t> draft(target.begin(), target.begin() + n);
+                if ((generated.size() % 2u) == 0u && n > 1u) draft[1] = -1;
+                SpecVerifyResult result;
+                auto st = shelf::qwen35::runtime::spec_greedy_accept(
+                    draft.data(), n, target.data(), true, result);
+                shelf::qwen35::runtime::spec_bound_result(result, remaining, {9});
+                check(st.ok(), "synthetic accept");
+                generated.insert(generated.end(), result.emitted_tokens.begin(), result.emitted_tokens.end());
+            }
+            check(generated == expected, "synthetic windows preserve tokens");
+        }
+    }
+
+    {
+        // A stop token as the round input ends the request before any state or pointer is used.
+        shelf::qwen35::runtime::DFlash2SpecDecoder decoder;
+        decoder.initialized = true;
+        decoder.config.eos_tokens = {7, 11};
+        for (const int32_t stop : {7, 11}) {
+            auto step = shelf::qwen35::runtime::dflash2_spec_step(decoder, stop, 5u);
+            check(step.ok(), "pending stop: step ok");
+            if (!step.ok()) continue;
+            check(step.value().finished, "pending stop: finished");
+            check(step.value().emitted_count == 0u, "pending stop: nothing emitted");
+            check(step.value().pending_token == stop, "pending stop: pending kept");
+        }
+        // A non-stop pending token still reaches the state validation.
+        auto not_stop = shelf::qwen35::runtime::dflash2_spec_step(decoder, 3, 5u);
+        check(!not_stop.ok(), "non-stop pending: null state is rejected");
     }
 
     std::printf("test_qwen35_spec_verify: passed=%d failed=%d\n", g_pass, g_fail);
