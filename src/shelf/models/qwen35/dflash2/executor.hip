@@ -17,6 +17,7 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_int8.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/runtime/selector_types.h>
 #include <cstdint>
@@ -418,6 +419,12 @@ Result<DFlash2Executor> create_dflash2_executor(
     st = allocate_contiguous_tensor<float>(
         arena, {act_layout.scales_bytes() / sizeof(float)}, ex.activation_scales);
     if (!st.ok()) return st;
+    if (exec_config.target_lm_head != nullptr &&
+        exec_config.target_lm_head->quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
+        st = allocate_contiguous_tensor<float>(arena, {draft, config.vocab_size},
+                                                ex.exl3_lm_head_accum);
+        if (!st.ok()) return st;
+    }
 
     st = allocate_contiguous_tensor<uint32_t>(arena, {rows}, ex.conv_row_has_prev);
     if (!st.ok()) return st;
@@ -489,6 +496,7 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.topk_scratch_logits = gpu::Tensor{};
     executor.activation_codes = gpu::Tensor{};
     executor.activation_scales = gpu::Tensor{};
+    executor.exl3_lm_head_accum = gpu::Tensor{};
     executor.conv_row_has_prev = gpu::Tensor{};
     executor.batch_descriptors = gpu::Tensor{};
     executor.max_rows = 0;
@@ -1030,6 +1038,17 @@ Status lm_head_validate(
             return Status::invalid_argument("dflash2 target lm_head exl3 layout invalid",
                                             __FILE__, __LINE__);
         }
+        if (weight.quant_spec != quantization::QuantSpecId::EXL3_W16A16_V1 &&
+            weight.quant_spec != quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
+            return Status::unsupported("dflash2 target lm_head exl3 format unsupported",
+                                       __FILE__, __LINE__);
+        }
+        if (weight.quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+            (weight.exl3_half || weight.k_padded != weight.cols ||
+             executor.exl3_lm_head_accum.ndim() == 0)) {
+            return Status::invalid_argument("dflash2 target lm_head exl3 int8 layout invalid",
+                                            __FILE__, __LINE__);
+        }
     }
     if (rows == 0u || rows > executor.max_rows) {
         return Status::invalid_argument("dflash2 logits rows out of range", __FILE__, __LINE__);
@@ -1079,6 +1098,33 @@ Status lm_head_gemm(
     uint32_t logits_row_stride,
     hipStream_t stream) {
     if (weight.encoding == shelf::weights::MatrixEncoding::Exl3) {
+        if (weight.quant_spec == quantization::QuantSpecId::EXL3_MUL24_INT8_V1) {
+            const auto layout = shelf::runtime::Int8ActivationWorkspaceLayout::make(
+                weight.k_padded, executor.max_rows);
+            auto* codes = executor.activation_codes.data<int8_t>();
+            auto* scales = executor.activation_scales.data<float>();
+            auto* accum = executor.exl3_lm_head_accum.data<float>();
+            hipError_t err = shelf::kernel::launch_exl3_int8_rotate_quantize(
+                hidden, weight.cols, weight.exl3_suh.data<uint16_t>(), codes, scales, rows,
+                weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
+            if (err == hipSuccess) {
+                err = shelf::kernel::launch_exl3_int8_gemm(
+                    codes, scales, layout.code_row_stride_bytes, layout.scale_row_stride_bytes,
+                    weight.codes.data<uint16_t>(), weight.exl3_ka, accum, rows, weight.rows,
+                    weight.cols, 1u, stream);
+            }
+            if (err == hipSuccess) {
+                err = shelf::kernel::launch_exl3_int8_rotate_out(
+                    accum, weight.exl3_svh.data<uint16_t>(), logits,
+                    shelf::kernel::Exl3Int8OutputDType::F32, rows, weight.rows,
+                    logits_row_stride, 1u, stream);
+            }
+            if (err != hipSuccess) {
+                return Status::hip_error("dflash2 target lm_head exl3 int8 launch",
+                                         hipGetErrorString(err), __FILE__, __LINE__);
+            }
+            return Status::make_ok();
+        }
         ::shelf::kernel::Exl3GemmArgs args;
         args.trellis = weight.codes.data<void>();
         args.suh = weight.exl3_suh.data<void>();

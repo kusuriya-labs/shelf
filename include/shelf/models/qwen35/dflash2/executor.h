@@ -84,6 +84,7 @@ struct DFlash2Executor {
     gpu::Tensor topk_scratch_logits;
     gpu::Tensor activation_codes;
     gpu::Tensor activation_scales;
+    gpu::Tensor exl3_lm_head_accum;
 
     gpu::Tensor conv_row_has_prev;
     gpu::Tensor batch_descriptors;

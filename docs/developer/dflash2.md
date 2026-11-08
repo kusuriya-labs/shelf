@@ -182,6 +182,8 @@ weight を掛ける。
   - FP8 K128N128: `launch_activation_quantize_fp8_finegrained`（活性は行ごとの
     `peak/448` scale、累算 F32）で activation を e4m3 へ量子化し、block-scaled
     W8A8 WMMA GEMM で F32 logits を作る。
+  - EXL3: mul1 は W16A16 kernel、mul24 は activation の回転・INT8 量子化、
+    INT8 GEMM、出力回転の順に実行する。両形式は codebook と trellis の配置が異なる。
 - proposal logits は **F32** で出す（bf16 へ落とさない。top-16 ordering が proposal に
   直結するため）。
 - `create_dflash2_spec_decoder()` が target との shape 一致
@@ -483,7 +485,7 @@ final_hidden の anchor row を除く draft row
 
 ### proposal head
 
-- `lm_head_logits()` が target `lm_head` の encoding（BF16 / FP8 K128N128）に
+- `lm_head_logits()` が target `lm_head` の encoding（BF16 / FP8 K128N128 / EXL3）に
   応じた GEMM で `proposal_logits [draft_rows, vocab_size]` F32 を作る。
 
 ### top-16

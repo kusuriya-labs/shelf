@@ -83,7 +83,7 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
     const std::size_t q_features = config.attention_q_rows();
     const std::size_t kv_features = config.attention_kv_rows();
     const std::size_t ctx_rows = config.sliding_window == 0u ? rows : config.sliding_window;
-    const std::size_t draft = config.block_size != 0u ? config.block_size : rows;
+    const std::size_t draft = rows;
 
     std::size_t bf16_rows = 0u;
     bf16_rows += 16u * rows * hidden;
@@ -96,7 +96,7 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
     bf16_rows += draft * config.selector_rank;
     std::size_t total = align_up(bf16_rows * sizeof(bf16_t));
 
-    total += align_up(draft * config.vocab_size * sizeof(float));
+    total += 2u * align_up(draft * config.vocab_size * sizeof(float));
     total += align_up(draft * config.selector_top_k * (sizeof(int32_t) + sizeof(float)));
     total += align_up(draft * (1u + 2u * ::shelf::kernel::kDflash2TopKScratchPerRow) *
                       sizeof(int32_t));
