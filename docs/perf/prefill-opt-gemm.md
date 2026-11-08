@@ -120,4 +120,4 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
 
 ## 精度と総合判定
 
-`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補の同時有効時の品質比較および総合 A/B は検証中。
+`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。総合 A/B は計測中。
