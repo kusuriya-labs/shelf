@@ -53,11 +53,24 @@ grouped expert（MoE）の TP load は MTP block を分割しないため、MTP 
 - request の prefill は admit 時に行い、以後の round は active な request をまとめて進める。
   終了した request は sequence と drafter slot を解放する。
 - 各 round は request ごとに draft し、active な request の target verify を 1 forward に
-  融合する。target が QSA / PLE の per-row rollback を持つ場合（qwen4exp）は、融合 verify の
-  共有 history がまだ検証できていないため request ごとに verify する。
+  融合する。融合する request の数は round ごとに変わるため、verify の数値が round の
+  row 数に依存しないことが要件になる（下記「verify の行数不変性」）。
 - `token` event を request ごとに emit し、`done` で `generated_ids` を返す。
 - TP では `TpCoordinator` の per-rank options 経路を使い、rank ごとの GDN / QSA / PLE
   history と snapshot で rollback する。
+
+## verify の行数不変性
+
+speculative verify の行数は、その round に active な request 数で変わる。EXL3 の split-K は
+`rows` から分割数を選ぶ（`rows <= 8` で 8、`rows == 1` で grid 依存、それ以外は 4 または 1）
+ため、同じ request でも同居する request 数によって K の縮約順が変わり、argmax が
+入れ替わることがある。qwen4exp では 0.2 logit 差の near-tie が実際に存在し、
+admission のタイミングで生成列が分岐した。
+
+`Exl3GemmArgs::splitk_tuning_rows` に verify の行容量
+（`ExecutorConfig::max_scheduled_output_rows`）を渡し、分割数と scratch の見積をその容量で
+計算する。実行する行数ではなく容量で決まるため、同じ request は同居する request 数に
+関係なく同じ分割数を使う。decode（`rows == 1`）と prefill は従来どおりである。
 
 ## Forward contract
 
@@ -227,10 +240,12 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
   pre-mixer の wide residual（`hc * hidden`）である。speculative verify は
   `PleConvStatePool` と `QsaKeyStatePool` の partial 状態を row 単位の history から復元する。
-- QSA / PLE を持つ target の fused verify は request ごとの verify に落とす。融合 verify の
-  共有 history は dense / MoE で検証済みだが、QSA / PLE の rollback を含む形では未検証である。
+- verify の split-K は行容量で固定する。これがないと、同居する request 数で argmax が
+  変わる（[../research/20261108/qwen4exp_mtp.md](../research/20261108/qwen4exp_mtp.md)）。
 
 ## Source map
+
+- `include/shelf/kernels/optimized/linear/exl3.h`（`splitk_tuning_rows`）
 
 - `include/shelf/models/qwen35/runtime/mtp_drafter.h`（`MtpDrafterInput`、`mtp_drafter_rows`）
 - `src/shelf/models/qwen35/runtime/mtp_drafter.cpp`

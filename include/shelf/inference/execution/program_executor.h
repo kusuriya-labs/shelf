@@ -73,6 +73,10 @@ struct HostExecutionContext {
     void* exl3_rowsum = nullptr;
     uint64_t exl3_rowsum_bytes = 0;
     uint32_t* error_word = nullptr;
+    // Row capacity the split-K choice is tuned for when this run is a speculative verify:
+    // a verify's row count follows how many requests are active, and the split count
+    // changes the K reduction order. 0 tunes on the actual row count.
+    uint32_t splitk_tuning_rows = 0;
     uint32_t bucket_m = 0;
     void* staging = nullptr;
     uint64_t staging_bytes = 0;

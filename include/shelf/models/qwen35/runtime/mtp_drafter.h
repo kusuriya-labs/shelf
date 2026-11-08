@@ -272,10 +272,6 @@ struct MtpSpecBatchContext {
     uint32_t max_rows = 0u;
     uint32_t max_requests = 0u;
     uint32_t num_drafts = 0u;
-    // A target whose rollback also has to restore per-row indexer (QSA) and PLE conv
-    // state verifies one request at a time: the fused verify's shared history is not
-    // validated for that rollback yet.
-    bool solo_verify = false;
     bool initialized = false;
 };
 

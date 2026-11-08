@@ -11,10 +11,9 @@
 - **ACCEPT**: speculative verify は target の `PleConvStatePool` と `QsaKeyStatePool` の
   partial 状態を row 単位の history から復元する。これがないと partial accept 後の
   greedy 列が target-only と一致しない。
-- **ACCEPT（限定）**: QSA / PLE を持つ target では verify を request ごとに実行する。
-  融合 verify（複数 request を 1 forward）は dense / MoE の 27B で一致するが、
-  qwen4exp では admission のタイミングによって片方の request が分岐する。
-- **REJECT**: qwen4exp の融合 verify を現状のまま qualified とする。
+- **ACCEPT**: 融合 verify の分岐原因は EXL3 split-K の分割数が `rows` 依存だったこと。
+  verify の行容量で分割数を固定すると、同居する request 数に関係なく同じ生成列になる。
+- **REJECT**: 分割数を実行行数から選ぶこと（verify の数値が round の構成に依存する）。
 
 ## 1. 直列 MTP の移植
 
@@ -54,7 +53,7 @@ MTP         : 60,271,550,4558,10586,220,247074,95905
 
 これで直列 MTP の greedy 列は target-only と一致した（8 token、`MTP_ACCEPTED_DRAFTS=4`）。
 
-## 3. 融合 verify の限界
+## 3. 融合 verify の分岐（原因と修正）
 
 2 request を同時に流すと、次の 2 経路で結果が変わる。
 
@@ -64,13 +63,28 @@ MTP         : 60,271,550,4558,10586,220,247074,95905
 
 融合 verify の前後で QSA の pooled / partial checksum、`pool_count` / `partial_count`、
 PLE の window を採取したところ、**分岐する run と一致する run で state は同一**だった。
-融合 verify の forward 自体が経路依存で変わるため、共有 history の row 対応だけでは
-説明できない。admission のタイミングを固定すると再現性が変わるので、実行順に依存する
-要因が残っている。
+状態の巻き戻しは正しく、forward の数値だけが変わっていた。
 
-このため QSA / PLE を持つ target では `MtpSpecBatchContext::solo_verify` を立て、
-verify を request ごとに実行する。dense / MoE の 27B は融合 verify のままで、
-2 request 同時の greedy 列が target-only と一致することを確認している。
+分岐する row の logits を採取すると、pos=4 で top1 220（16.2129）と top2 4558（16.0078）、
+差 0.205 の near-tie だった。同じ request / 同じ位置で、verify の行数だけを変えると
+
+| verify rows | top1 | top2 | 差 |
+| ---: | ---: | ---: | ---: |
+| 5 | 16.2129 | 16.0078 | 0.205 |
+| 10 | 16.6415 | 16.6329 | 0.009 |
+
+となり、10 行では 4558 が勝つ。`SHELF_EXL3_SPLIT=1` で分割数を固定すると 5 行と 10 行の
+logits が完全一致したため、差は **EXL3 split-K の分割数が `rows` から選ばれている**こと
+による K 縮約順の違いである。
+
+`make_launch_plan` は `rows == 1` / `rows <= 8` / それ以外で分割数を変える。verify は
+同居する request 数で `rows` が変わるため、同じ request が別の分割数で走っていた。
+
+修正は `Exl3GemmArgs::splitk_tuning_rows` を追加し、`ExecutorConfig::
+max_scheduled_output_rows`（verify の行容量）で分割数と scratch 見積を計算する。
+実行行数ではなく容量で決まるので、1 request でも 2 request でも同じ分割数になる。
+1 request の serve では容量 = `drafts + 1` なので従来と同じ分割数であり、
+decode（`rows == 1`）と prefill は変更していない。
 
 ## 4. 再現
 
@@ -84,7 +98,9 @@ verify を request ごとに実行する。dense / MoE の 27B は融合 verify 
 #   request 11: [248041,77091]  request 22: [248041,77091,279,2614]
 ```
 
-## 5. 残り
+## 5. 検証
 
-- 融合 verify が経路依存で変わる原因の特定（executor / TP の batch 実行）。
-- 特定後に `solo_verify` を外し、qwen4exp でも 1 forward verify にする。
+- 直列 MTP の greedy 列が target-only と一致（両 model）。
+- qwen4exp 2 request 同時（同一 prompt）を 4 回、dense 27B 2 request を 1 回、
+  融合 verify のまま target-only と一致。
+- `ctest -L required` 191 件 pass。

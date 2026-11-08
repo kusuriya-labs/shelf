@@ -31,6 +31,12 @@ struct Exl3GemmArgs {
     float* splitk_scratch = nullptr;
     uint32_t splitk_floats = 0;
     uint32_t splitk_splits = 0;
+    // Row count the split-K choice is tuned for. A speculative verify runs a different
+    // number of rows from round to round (how many requests are active), and the split
+    // count changes the K reduction order, so tuning on the row count would make the
+    // same request produce a different token depending on its batch neighbours. The
+    // executor passes the verify capacity here; 0 tunes on `rows`.
+    uint32_t splitk_tuning_rows = 0;
     void* xrot = nullptr;
     uint32_t groups = 0;
     // Optional n-tile override for the grouped path. 0 keeps pick_n_tiles' shape choice.

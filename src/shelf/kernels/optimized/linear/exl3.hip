@@ -893,11 +893,13 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
     LaunchPlan plan;
     plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(args));
     if (args.splitk_scratch != nullptr) {
+        const uint32_t tuning_rows =
+            args.splitk_tuning_rows != 0u ? args.splitk_tuning_rows : args.rows;
         uint32_t desired = args.splitk_splits;
         if (desired == 0u) {
-            if (args.rows == 1u) {
+            if (tuning_rows == 1u) {
                 desired = plan.grid_x <= 160u ? 8u : 1u;
-            } else if (args.rows <= 8u) {
+            } else if (tuning_rows <= 8u) {
                 desired = 8u;
             } else {
                 desired = plan.grid_x <= 16u ? 8u : (plan.grid_x <= 160u ? 4u : 1u);
@@ -906,7 +908,7 @@ LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
         const uint32_t k_chunks = args.k / 128u;
         if (desired > k_chunks) desired = k_chunks;
         const uint64_t per_split =
-            static_cast<uint64_t>(args.rows) * args.out_features + args.rows;
+            static_cast<uint64_t>(tuning_rows) * args.out_features + tuning_rows;
         while (desired > 1u &&
                static_cast<uint64_t>(desired) * per_split > args.splitk_floats) {
             --desired;

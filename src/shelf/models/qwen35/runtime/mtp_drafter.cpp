@@ -1331,8 +1331,6 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
             context.ranks.push_back(std::move(state.value()));
         }
     }
-    context.solo_verify = target.qsa_state_pool != nullptr ||
-                          target.ple_conv_state_pool != nullptr;
     context.initialized = true;
     return context;
 }
@@ -1371,19 +1369,6 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         return Status::out_of_range("mtp batch: more slots than the context holds",
                                     __FILE__, __LINE__);
     }
-    if (slots.size() > 1u && context.solo_verify) {
-        MtpSpecBatchOutput out;
-        out.slots.resize(slots.size());
-        for (std::size_t i = 0u; i < slots.size(); ++i) {
-            auto single = mtp_spec_step_batch(context, slots.subspan(i, 1u));
-            if (!single.ok()) return single.status();
-            out.slots[i] = single.value().slots.front();
-            out.total_rows += single.value().total_rows;
-            out.round_ms += single.value().round_ms;
-        }
-        out.rounds = 1u;
-        return out;
-    }
     const auto started = std::chrono::steady_clock::now();
     MtpSpecBatchOutput out;
     out.slots.resize(slots.size());
@@ -1409,7 +1394,6 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         return Status::out_of_range("mtp batch: rows exceed the context capacity",
                                     __FILE__, __LINE__);
     }
-
     const hipStream_t stream = context.ranks.empty() ? nullptr
                                                      : context.ranks.front().stream;
     std::vector<int32_t> token_ids;

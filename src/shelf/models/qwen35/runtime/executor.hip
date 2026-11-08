@@ -321,6 +321,10 @@ Status build_host_execution_context(
         executor.stochastic_topk_active_counts.data<uint32_t>();
     ctx.spec.min_visible_tokens = min_visible_tokens;
     ctx.spec.max_visible_tokens = max_visible_tokens;
+    ctx.splitk_tuning_rows =
+        role == ::shelf::runtime::ExecutionRole::Verify
+            ? executor.config.max_scheduled_output_rows
+            : 0u;
     return Status::make_ok();
 }
 

@@ -566,6 +566,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     args.half = e.exl3_half ? 1u : 0u;
     args.splitk_scratch = ctx.scratch;
     args.splitk_floats = ctx.scratch_floats;
+    args.splitk_tuning_rows = ctx.splitk_tuning_rows;
     static const uint32_t split_override = [] {
         const char* e = std::getenv("SHELF_EXL3_SPLIT");
         return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
