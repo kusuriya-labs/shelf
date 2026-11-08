@@ -19,6 +19,22 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
   --prompt-tokens 2048 --prefill-chunk 2048 --kv-cache-dtype bf16 --warmup 1 --runs 5
 ```
 
+交互 A/B は、次のコマンドの `prompt` を 2048 / 8192 / 32768 に、環境変数を algorithm のみ・回転のみ・両方に変えて実行した。各 run のログは [e2e-ab.tar.gz](prefill-opt-gemm-data/e2e-ab.tar.gz) にある。
+
+```sh
+prompt=2048
+for i in 1 2 3 4 5; do
+  if (( i % 2 )); then order='0 1'; else order='1 0'; fi
+  for variant in $order; do
+    flock /tmp/r9700.lock env SHELF_EXL3_INT8_PREFILL_ALGO=$variant \
+      SHELF_EXL3_INT8_PREFILL_ROTATE=$variant ./build-gfx1201/shelf-bench pp \
+      --model-dir /home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-27b-exl3-4bpw-mul24 \
+      --mode forward --tokens-file /tmp/shelf-prefill-32768.psktok \
+      --prompt-tokens "$prompt" --prefill-chunk 2048 --kv-cache-dtype bf16 --warmup 1 --runs 1
+  done
+done
+```
+
 単体試作は以下の形で build directory にビルドし、各実行を個別に lock した。`gemm_sweep`、`workspace_sweep`、`fused_probe`、`lds_probe` は `-L/opt/rocm/core-7.14/lib -lhipblaslt` が必要。独立 GEMM bench の初回起動で library path が欠けていたため、`rotate_sweep` も次の共通リンク設定で再ビルドした。ファイル名は上記 data のログ名と対応する。
 
 ```sh
@@ -63,7 +79,7 @@ flock /tmp/r9700.lock ./build-gfx1201/tests/test_exl3_int8_prefill_rotate
 
 64 MiB を許可した heuristic 上位 16 候補も全形状で workspace 0 だった。追加で `hipblaslt_ext::getAllAlgos` の INT8 / INT32・転置条件に合う 780 algorithm を各形状に対して `matmulIsAlgoSupported` で問い合わせた結果、必要量が 1 byte 以上 64 MiB 以下の対応候補は 7 形状とも 0 件だった。個別の split-K 設定を書き換えた探索は行っていないため、それを含む全構成に有限 workspace の候補がないとは断定しない。差が比較的大きく、workspace 上限を変えた別の探索でも改善方向が一致した 3 形状（5120×17408 は 140674、5120×6144 と 6144×5120 は 140561）について、`SHELF_EXL3_INT8_PREFILL_ALGO=1` の opt-in で試す。M=2048、INT8→INT32、workspace 0、gfx1201、および hipBLASLt git revision `cd957402` のとき、実行時 heuristic の上位に該当 index がある場合にだけ選ぶ。その他は既存 heuristic に戻る。初回に探索計測は行わず、thread-local に device と固定された形状・dtype・workspace に対する algorithm を cache する。追加 VRAM は 0。`SHELF_EXL3_INT8_PREFILL_ALGO_LOG=1` で最初の選択 index を出す。すべての形状と workspace の自動 tuning や永続 cache は未実装である。
 
-実モデルの quality 実行時ログで 3 形状について index 140561、140561、140674 が選択されたことを確認した。context 2048、64 位置、chunk 2048 の全語彙比較は `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`。実モデル 2048 token の別プロセス診断では INT8 GEMM の 400 行列合計 p50 が 497.276 → 459.114 ms（7.7%）だった。交互 A/B は計測中。
+実モデルの quality 実行時ログで 3 形状について index 140561、140561、140674 が選択されたことを確認した。context 2048、64 位置、chunk 2048 の全語彙比較は `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`。実モデル 2048 token の別プロセス診断では INT8 GEMM の 400 行列合計 p50 が 497.276 → 459.114 ms（7.7%）だった。交互 A/B は下表のとおり 3 長さすべてで PASS。該当 3 形状だけに限定した opt-in の採用候補として残す。
 
 ## 案 3: 回転・scale・量子化
 
@@ -94,7 +110,7 @@ Saber の `mxfp4_quant.hip` の add+rms+quant、silu+mul+quant は、BF16 の中
 | 17408 | BF16 | 0.848521 / 0.852721 / 0.856721 | 0.727046 / 0.728926 / 0.733606 | 0 |
 | 17408 | F32 | 0.997434 / 1.020233 / 1.027952 | 0.917917 / 0.923637 / 0.964516 | 0 |
 
-全条件の幅 / p50 は 30% 未満。ただし合成データの単体結果であり、総合 A/B を満たすまでは採用候補と確定しない。これはメモリ traffic を減らす試作ではなく同期削減である。
+全条件の幅 / p50 は 30% 未満。この単体結果は合成データによるもの。実モデルの交互 A/B と品質も検証し、opt-in の採用候補として残す。これはメモリ traffic を減らす試作ではなく同期削減である。
 
 実モデル 2048 token の各候補単独・両候補有効時の opt-in semantic timing は別プロセスで各 warmup 1・5 回。各 run の stage event を 400 行列分合計し、その 5 合計の p50 を示す（交互 A/B ではない診断値）。5 run × 3797 event 行で欠落なし。
 
@@ -168,6 +184,7 @@ Saber の `mxfp4_gemm_atiled.hip` と `mxfp4_atiled_wm.h` は読み取りのみ�
 |---|---:|---:|---:|---:|---|
 | algorithm のみ（再測定） | 2048 | 1154.1302 | 1111.2179 | 3.72% | 0.53% / 1.93% |
 | algorithm のみ | 8192 | 4924.0879 | 4743.3711 | 3.67% | 0.90% / 1.46% |
+| algorithm のみ | 32768 | 24098.0312 | 23305.1133 | 3.29% | 1.82% / 1.38% |
 | 出力回転のみ | 2048 | 1152.8561 | 1122.5214 | 2.63% | 2.07% / 3.90% |
 | 出力回転のみ | 8192 | 4915.5439 | 4812.5615 | 2.10% | 1.34% / 7.86% |
 | 出力回転のみ | 32768 | 24211.7305 | 23595.5859 | 2.54% | 0.61% / 0.52% |
@@ -175,23 +192,9 @@ Saber の `mxfp4_gemm_atiled.hip` と `mxfp4_atiled_wm.h` は読み取りのみ�
 | 両候補 | 8192 | 4937.9331 | 4630.9897 | 6.22% | 6.30% / 4.37% |
 | 両候補 | 32768 | 23992.0625 | 22906.3516 | 4.53% | 1.17% / 1.00% |
 
-いずれも PASS。回転候補は stage の短縮と最終 logits の一致に加え、3 長さすべてで交互 A/B の全体短縮を確認し、opt-in の採用候補として残す。両候補同時も 3 長さすべてで PASS。algorithm 単独は継続中。
+いずれも PASS。両候補はそれぞれ stage の短縮と最終 logits の一致に加え、3 長さすべてで交互 A/B の全体短縮を確認し、opt-in の採用候補として残す。両候補同時も 3 長さすべてで PASS。
 
 algorithm 単独 2048 token の初回 5 組は現行 p50 1153.4523 ms、候補 1110.3031 ms だったが、現行の幅 / p50 が 32.95%（候補 12.85%）であるため **FAIL**。この短縮率を採用根拠にせず、独立した 5 組を再測定した結果は上表のとおり PASS。外れ値の原因は未特定。
-
-## 交互 A/B の途中値
-
-5 組の収集中であり、以下はいずれも最初の 1 組のみの GPU 時間である。warmup は各プロセス 1 回、chunk 2048。**p50 や採否判定ではない。**
-
-| 条件 | prompt | 現行 ms | 候補 ms |
-|---|---:|---:|---:|
-| 出力回転のみ | 2048 | 1132.6847 | 1124.8898 |
-| 出力回転のみ | 8192 | 4924.41 | 4812.56 |
-| 出力回転のみ | 32768 | 24163.45 | 23595.59 |
-| algorithm のみ | 2048 | 1157.68 | 1110.30 |
-| 両候補 | 2048 | 1150.5142 | 1074.7476 |
-| 両候補 | 8192 | 5203.56 | 4750.25 |
-| 両候補 | 32768 | 23992.0625 | 22860.7754 |
 
 ## 精度と総合判定
 
