@@ -68,9 +68,21 @@ speculative verify の行数は、その round に active な request 数で変�
 admission のタイミングで生成列が分岐した。
 
 `Exl3GemmArgs::splitk_tuning_rows` に verify の行容量
-（`ExecutorConfig::max_scheduled_output_rows`）を渡し、分割数と scratch の見積をその容量で
-計算する。実行する行数ではなく容量で決まるため、同じ request は同居する request 数に
-関係なく同じ分割数を使う。decode（`rows == 1`）と prefill は従来どおりである。
+（`ExecutorConfig::max_scheduled_output_rows` を GDN verify kernel の上限 32 行で頭打ちに
+した値）を渡し、分割数と scratch の見積をその容量で計算する。実行する行数ではなく容量で
+決まるため、同じ request は同居する request 数にも設定した同時実行数にも関係なく同じ
+分割数を使う。decode（`rows == 1`）と prefill は従来どおりである。
+
+## verify の 1 forward 上限
+
+GDN の verify kernel は 1 launch あたり **4 request / 32 行**
+（`kGdnRecurrenceVerifyMaxRequests` / `kGdnRecurrenceVerifyBatchRows`）までである。
+DFlash2 の 4 session × block 8 と同じ上限で、これが融合 verify の実効上限になる。
+
+MTP の batch context 自体は `min(max_num_batched_tokens, 512)` 行まで request を保持でき、
+1 round の verify は 4 request / 32 行ずつの chunk に分けて実行する。8 request ×
+(drafts 7) なら 64 行を 2 forward、16 request なら 128 行を 4 forward になる。chunk は
+行容量で分割数を固定しているため、chunk に分けても数値は変わらない。
 
 ## Forward contract
 

@@ -9,6 +9,7 @@
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/models/qwen35/runtime/exl3_dense_workspace.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
 #include <shelf/runtime/program/program.h>
 #include <shelf/models/qwen35/model/lower_to_primitives.h>
@@ -323,7 +324,8 @@ Status build_host_execution_context(
     ctx.spec.max_visible_tokens = max_visible_tokens;
     ctx.splitk_tuning_rows =
         role == ::shelf::runtime::ExecutionRole::Verify
-            ? executor.config.max_scheduled_output_rows
+            ? std::min(executor.config.max_scheduled_output_rows,
+                       ::shelf::kernel::kGdnRecurrenceVerifyBatchRows)
             : 0u;
     return Status::make_ok();
 }

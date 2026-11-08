@@ -3,6 +3,7 @@
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/models/qwen35/runtime/executor_footprint.h>
+#include <shelf/kernels/optimized/gdn/recurrence.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 
@@ -1396,56 +1397,90 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
     }
     const hipStream_t stream = context.ranks.empty() ? nullptr
                                                      : context.ranks.front().stream;
-    std::vector<int32_t> token_ids;
-    token_ids.reserve(total_rows);
-    std::vector<ScheduledRequest> requests;
+    std::vector<std::size_t> pending;
+    pending.reserve(slots.size());
     for (std::size_t i = 0u; i < slots.size(); ++i) {
-        if (drafts[i].decode_only) continue;
-        MtpSpecBatchSlot slot = slots[i];
-        std::vector<MtpGdnRankState> request_ranks = all_rank_states(*slot.drafter);
-        for (MtpGdnRankState& state : request_ranks) {
-            auto scope = shelf::gpu::ScopedDevice::create(state.device);
-            if (!scope.ok()) return scope.status();
-            ::shelf::runtime::DeviceRequestDescriptor request = state.commit_request_host;
-            request.request_handle = slot.sequence->request_handle();
-            request.row_begin = row_begin[i];
-            request.row_count = 0u;
-            if (state.commit_request != nullptr) {
-                const hipError_t err = hipMemcpy(
-                    state.commit_request, &request, sizeof(request),
-                    hipMemcpyHostToDevice);
-                if (err != hipSuccess) {
-                    return Status::hip_error("mtp batch commit descriptor",
-                                             hipGetErrorString(err), __FILE__, __LINE__);
-                }
-            }
-        }
-        token_ids.push_back(slot.pending_token);
-        for (uint32_t j = 0u; j < drafts[i].drafts; ++j) {
-            token_ids.push_back(drafts[i].proposals[j]);
-        }
-        ScheduledRequest req;
-        req.sequence = slot.sequence;
-        req.handle = slot.sequence->request_handle();
-        req.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
-        req.token_begin = row_begin[i];
-        req.num_tokens = drafts[i].drafts + 1u;
-        req.prefix_tokens = drafts[i].position;
-        req.compute_logits = true;
-        req.sample = true;
-        req.num_output_rows = drafts[i].drafts + 1u;
-        req.sampling = slot.drafter->sampling;
-        req.sampling_index = slot.drafter->sample_index;
-        requests.push_back(req);
+        if (!drafts[i].decode_only) pending.push_back(i);
     }
 
+    std::vector<std::size_t> chunk;
+    std::vector<uint32_t> chunk_row_begin;
+    std::vector<int32_t> token_ids;
+    std::vector<ScheduledRequest> requests;
     std::vector<int32_t> sampled;
-    if (!requests.empty()) {
+    std::size_t cursor = 0u;
+    while (cursor < pending.size()) {
+        chunk.clear();
+        chunk_row_begin.clear();
+        uint32_t chunk_rows = 0u;
+        while (cursor < pending.size() &&
+               chunk.size() < ::shelf::kernel::kGdnRecurrenceVerifyMaxRequests) {
+            const std::size_t i = pending[cursor];
+            const uint32_t rows = drafts[i].drafts + 1u;
+            if (!chunk.empty() &&
+                chunk_rows + rows > ::shelf::kernel::kGdnRecurrenceVerifyBatchRows) {
+                break;
+            }
+            chunk.push_back(i);
+            chunk_row_begin.push_back(chunk_rows);
+            chunk_rows += rows;
+            ++cursor;
+        }
+        if (chunk.empty()) {
+            return Status::invalid_state("mtp batch verify chunk is empty", __FILE__,
+                                         __LINE__);
+        }
+        token_ids.clear();
+        token_ids.reserve(chunk_rows);
+        requests.clear();
+        requests.reserve(chunk.size());
+        for (std::size_t c = 0u; c < chunk.size(); ++c) {
+            const std::size_t i = chunk[c];
+            const MtpSpecBatchSlot& slot = slots[i];
+            std::vector<MtpGdnRankState> request_ranks = all_rank_states(*slot.drafter);
+            for (MtpGdnRankState& state : request_ranks) {
+                auto scope = shelf::gpu::ScopedDevice::create(state.device);
+                if (!scope.ok()) return scope.status();
+                ::shelf::runtime::DeviceRequestDescriptor request =
+                    state.commit_request_host;
+                request.request_handle = slot.sequence->request_handle();
+                request.row_begin = chunk_row_begin[c];
+                request.row_count = 0u;
+                if (state.commit_request != nullptr) {
+                    const hipError_t err = hipMemcpy(
+                        state.commit_request, &request, sizeof(request),
+                        hipMemcpyHostToDevice);
+                    if (err != hipSuccess) {
+                        return Status::hip_error("mtp batch commit descriptor",
+                                                 hipGetErrorString(err), __FILE__,
+                                                 __LINE__);
+                    }
+                }
+            }
+            token_ids.push_back(slot.pending_token);
+            for (uint32_t j = 0u; j < drafts[i].drafts; ++j) {
+                token_ids.push_back(drafts[i].proposals[j]);
+            }
+            ScheduledRequest req;
+            req.sequence = slot.sequence;
+            req.handle = slot.sequence->request_handle();
+            req.execution_class = ::shelf::runtime::ExecutionClass::SPEC_VERIFY;
+            req.token_begin = chunk_row_begin[c];
+            req.num_tokens = drafts[i].drafts + 1u;
+            req.prefix_tokens = drafts[i].position;
+            req.compute_logits = true;
+            req.sample = true;
+            req.num_output_rows = drafts[i].drafts + 1u;
+            req.sampling = slot.drafter->sampling;
+            req.sampling_index = slot.drafter->sample_index;
+            requests.push_back(req);
+        }
+
         ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.token_ids_location = shelf::qwen35::TokenIdsLocation::Host;
         batch.requests = requests;
-        batch.num_tokens = total_rows;
+        batch.num_tokens = chunk_rows;
         batch.num_requests = static_cast<uint32_t>(requests.size());
         batch.num_decode_requests = 0u;
         batch.num_verify_requests = static_cast<uint32_t>(requests.size());
@@ -1455,7 +1490,7 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
         std::vector<ExecuteBatchOptions> options(context.ranks.size());
         for (std::size_t r = 0u; r < options.size(); ++r) {
             options[r].gdn_spec_history =
-                gdn_spec_history_view(context.ranks[r].history, total_rows);
+                gdn_spec_history_view(context.ranks[r].history, chunk_rows);
             options[r].gdn_compact.delta = context.ranks[r].compact_delta;
             options[r].gdn_compact.k = context.ranks[r].compact_k;
             options[r].gdn_compact.a = context.ranks[r].compact_a;
@@ -1472,47 +1507,48 @@ Result<MtpSpecBatchOutput> mtp_spec_step_batch(
                 context.ranks[r].qsa_count_state_stride;
             options[r].ple_conv_history.store = context.ranks[r].ple_conv_history;
             options[r].ple_conv_history.rows = context.ranks[r].ple_conv_history_rows;
-            options[r].ple_conv_history.state_stride =
-                context.ranks[r].ple_conv_state_stride;
+            options[r].ple_conv_history.state_stride = context.ranks[r].ple_conv_state_stride;
         }
-        MtpDrafter& leader = *slots.front().drafter;
+        MtpDrafter& leader = *slots[chunk.front()].drafter;
         auto executed = leader.tp_hook != nullptr
             ? leader.tp_hook->on_execute(batch, options.data())
             : execute_batch(*context.target, batch, stream, options[0]);
         if (!executed.ok()) return executed.status();
         const BatchExecutionOutput output = executed.release();
-        if (output.num_outputs < total_rows) {
+        if (output.num_outputs < chunk_rows) {
             return Status::invalid_state("mtp batch verify output rows mismatch", __FILE__,
                                          __LINE__);
         }
-        sampled.resize(total_rows, -1);
+        sampled.assign(chunk_rows, -1);
         const hipError_t err = hipMemcpy(
             sampled.data(), output.sampled_tokens.data<int32_t>(),
-            static_cast<std::size_t>(total_rows) * sizeof(int32_t), hipMemcpyDeviceToHost);
+            static_cast<std::size_t>(chunk_rows) * sizeof(int32_t),
+            hipMemcpyDeviceToHost);
         if (err != hipSuccess) {
             return Status::hip_error("mtp batch sample copy", hipGetErrorString(err),
                                      __FILE__, __LINE__);
         }
+
+        for (std::size_t c = 0u; c < chunk.size(); ++c) {
+            const std::size_t i = chunk[c];
+            const MtpSpecBatchSlot& slot = slots[i];
+            std::vector<MtpGdnRankState> request_ranks = all_rank_states(*slot.drafter);
+            std::vector<int32_t> verify_tokens(drafts[i].drafts + 1u);
+            verify_tokens[0] = slot.pending_token;
+            for (uint32_t j = 0u; j < drafts[i].drafts; ++j) {
+                verify_tokens[j + 1u] = drafts[i].proposals[j];
+            }
+            auto accepted = accept_verified(
+                *slot.drafter, *context.target, *slot.sequence, drafts[i].position,
+                drafts[i].proposals.data(), drafts[i].drafts, verify_tokens,
+                sampled.data() + chunk_row_begin[c], slot.remaining_tokens, request_ranks,
+                context.ranks, chunk_row_begin[c], stream);
+            if (!accepted.ok()) return accepted.status();
+            slot.drafter->sample_index += static_cast<uint64_t>(drafts[i].drafts) + 1u;
+            out.slots[i] = accepted.value();
+        }
     }
 
-    for (std::size_t i = 0u; i < slots.size(); ++i) {
-        if (drafts[i].decode_only) continue;
-        const MtpSpecBatchSlot& slot = slots[i];
-        std::vector<MtpGdnRankState> request_ranks = all_rank_states(*slot.drafter);
-        std::vector<int32_t> verify_tokens(drafts[i].drafts + 1u);
-        verify_tokens[0] = slot.pending_token;
-        for (uint32_t j = 0u; j < drafts[i].drafts; ++j) {
-            verify_tokens[j + 1u] = drafts[i].proposals[j];
-        }
-        auto output = accept_verified(
-            *slot.drafter, *context.target, *slot.sequence, drafts[i].position,
-            drafts[i].proposals.data(), drafts[i].drafts, verify_tokens,
-            sampled.data() + row_begin[i], slot.remaining_tokens, request_ranks,
-            context.ranks, row_begin[i], stream);
-        if (!output.ok()) return output.status();
-        slot.drafter->sample_index += static_cast<uint64_t>(drafts[i].drafts) + 1u;
-        out.slots[i] = output.value();
-    }
     for (std::size_t i = 0u; i < slots.size(); ++i) {
         if (!drafts[i].decode_only) continue;
         const MtpSpecBatchSlot& slot = slots[i];
