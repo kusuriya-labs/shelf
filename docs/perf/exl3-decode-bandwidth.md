@@ -94,7 +94,7 @@ Saber の公開実装 `GGZ14/saber-engine`、revision `c8a1e84b39e73363495e549d4
 
 基準の 27B・最大 batch rows 47 は 64 行 bucket を使う。body の最大 N=17408 から見積もった F32 accum は `(64+16)*17408*4` byte で、N=248320 の head には 5 行分しかない。基準 selector の scratch_rows=5 では rows=1 で split 2、複数行の最初の 5 行で split 1 を選ぶ。
 
-容量の小さい他の呼び出しでも行数によって split が変わらないよう、selector の容量判定は 16 行分を基準とし、16 行分を確保できない場合は split 1 にする。推論用に新しく確保する容量では従来選択された split を収容できるため、今回の 27B の測定対象における split 数は変わらない。容量 8 / 16 / 32 / 48 / 64 / 1024 行に対して、実行可能な rows=1..16 の選択一致もテストする。
+容量の小さい他の呼び出しでも行数によって split が変わらないよう、selector の容量判定は 16 行分を基準とし、16 行分を確保できない場合は split 1 にする。推論用に新しく確保する容量では従来選択された split を収容できるため、今回の 27B の測定対象における split 数は変わらない。容量 8 / 16 / 32 / 48 / 64 / 1024 行に対して、実行可能な rows=1..16 の選択一致もテストした。
 
 最終 selector の GPU テストでは gate/up の容量 1024 行・split 4 と容量 16 行・split 1 の両方で rows=1 / 8 の F32 出力が bit 一致した。head は容量 80 行・split 2 で一致し、EXL3-INT8 linear テスト全体が通過した。
 最終 selector に再 link した `test_dflash2_exl3_head` と `test_qwen35_spec_verify` も通過し、
@@ -215,7 +215,7 @@ N=1024、rows=1 の通常側は 23.013 / 20.458 µs と時間順に変動し、�
 
 同一バイナリ構成の基準 → 候補 → 候補 → 基準、各回は 5 sample p50。N=1024・K=5120・4 bit の 3 kernel 合計は rows=1 で 23.248 / 22.688 / 22.623 / 23.425 µs、rows=8 で 24.825 / 24.405 / 24.300 / 24.784 µs。N=17408・K=5120・rows=1 では 103.501 / 101.199 / 102.663 / 102.408 µs。単体の差は小さく、実モデルの tok/s に同じ比率が出るとは限らない。
 
-## BetterBench での未解決の一致性
+## BetterBench で発見した一致性の問題と修正
 
 `shelf-compute --serve-stdio --max-seq-len 1024 --max-concurrent-requests 1 --prefix-cache 0`、BF16 KV、temperature 0、8 カテゴリの先頭各 1 件・最大 256 token。非投機と MTP 固定 4 は基準 / scratch 修正後とも各 2 回の全 8 ケースで生成列が一致した。一方 DFlash2 draft 7 は、基準と scratch 修正後の DFlash2 同士は全 8 ケースで一致するが、非投機とは chat、code、prose、reasoning の 4 ケースで不一致だった。初めて異なる token の 0 始まり位置はそれぞれ 128、153、120、92。file_edit、json、math、summarization は一致した。この不一致は基準 revision にも存在した。後述の prefill 修正後の結果を参照。3 基本 prompt の一致だけでは一般の greedy 一致を保証できない。
 
@@ -259,6 +259,9 @@ scratch 修正後の code・DFlash2 交互測定（graph verify OFF → ON → O
 server の chat ケースで旧 page 分割と分割を外した候補を一時計測 build で比較した。最初の verify で token 入力が一致する 7 行の F32 logits は 1,738,234 要素で bit 差、最大絶対差 0.251702309、有限な全語彙の KL(旧 || 修正後) は平均 1.57143487831e-4、最大 1.05084140547e-3 nats、top-1 は 7/7 一致した。次の draft 入力は異なるため、以降を同一入力の KL として集計していない。旧・新の生成列は 0 始まり 128 token 目から異なり、新しい列は非投機と一致した。これらは logits を同期して取り出した診断実行であり、速度には用いない。
 
 page 境界で分割しないだけの候補は、既存 `test_compute_dflash2.py` で BF16 / FP8 KV の prefix 入力境界復元が各 2 件失敗した（64 token を復元できず 0 token）。これを保つ実装では、prefix cache が有効で cache miss、単一 GPU、非整列かつ境界が 1024 token 以下の場合に限り、先に境界まで prefill して cache に保存し、GDN・KV・drafter context を元に戻してから全入力を通常の区切りで prefill する。余分な prefill と一時 KV が発生する。より長い境界、既存の prefix hit、TP ではこの追加保存を行わず、自然な chunk 終端が境界に一致する場合のみ保存する。既存 `test_compute_dflash2.py` は BF16 / FP8 KV で 60 件すべて通過した。新しい非整列 prompt テストは cache 無効・有効の生成一致に加え、96 token の prefix を復元した次 request も単発非投機と一致し、7 件すべて通過した。追加 prefill の費用は後述する。
+
+容量 selector 補強後の最終 binary で非整列 prompt テストを再実行し、graph OFF / ON とも
+7 passed / 0 failed。各 1 回で cache 無効・有効と 96 token prefix 再利用を含む。
 
 追加 prefill 版で cache 有効の BetterBench 8 ケースを各 1 回実行し、同じ cache 設定の非投機 8 件と生成列がすべて一致した。file_edit の prompt は 96 token で page に整列し、追加の境界 prefill は不要。交互測定を後述する。
 
@@ -483,14 +486,39 @@ prose 27.34 / 28.56 / 28.17 / 27.27、ja 27.24 / 28.09 / 28.38 / 27.20。
 全 12 実行の生成列はそれぞれ同じ入力の graph OFF 非投機と一致した。
 同じ server・3 入力の MTP 固定 4 も graph OFF / ON とも非投機と 256 token 完全一致し、
 各 1 回の decode tok/s は OFF 73.72 / 53.06 / 57.86、ON 75.37 / 54.38 / 59.01 だった。
+OFF → ON → ON → OFF の反復では、code 73.72 / 75.37 / 75.60 / 73.63、
+prose 53.06 / 54.38 / 54.60 / 52.87、ja 57.86 / 59.01 / 58.63 / 57.74 tok/s。
+全 12 実行は同じ入力の非投機生成列と一致した。
 同じ条件の DFlash2 draft 7 も graph OFF / ON とも非投機と 256 token 完全一致し、
 各 1 回の decode tok/s は OFF 94.27 / 49.73 / 46.53、ON 96.22 / 50.79 / 47.29 だった。
+OFF → ON → ON → OFF の反復では、code 94.27 / 96.22 / 96.45 / 94.30、
+prose 49.73 / 50.79 / 50.94 / 49.65、ja 46.53 / 47.29 / 47.41 / 46.52 tok/s。
+全 12 実行は同じ入力の非投機生成列と一致した。
 いずれも server、prefix cache OFF、最大生成 256、最大系列 1024、temperature 0。
+
+同じ server 条件での基準 → split 4 → split 4 → 基準の decode tok/s。各版の非投機は
+2 回とも再現した。MTP は全実行で同じ版の非投機に一致し、DFlash2 の split 4 も 2 回とも
+3/3 入力で一致した。基準版の DFlash2 は prose / ja で両回とも非投機と不一致なので、
+その速度は正しい出力の比較基準として使わない。code の基準 DFlash2 は両回とも非投機に
+一致したが、102.50 / 94.69 tok/s と変動があり、単独で効果を結論しない。版間では
+prose / ja の非投機 token 列自体が異なる。
+
+| 経路 | 入力 | 基準 1 | split 4 1 | split 4 2 | 基準 2 |
+|---|---|---:|---:|---:|---:|
+| 非投機 | code | 26.51 | 27.44 | 27.16 | 26.71 |
+| 非投機 | prose | 26.39 | 27.07 | 27.27 | 26.55 |
+| 非投機 | ja | 26.16 | 27.24 | 27.19 | 26.30 |
+| MTP | code | 71.72 | 73.79 | 73.49 | 71.48 |
+| MTP | prose | 51.22 | 52.94 | 52.79 | 51.03 |
+| MTP | ja | 57.71 | 57.79 | 57.60 | 57.40 |
+| DFlash2 | code | 102.50 | 94.26 | 94.24 | 94.69 |
+| DFlash2 | prose | 52.72 | 52.40 | 49.98 | 48.80 |
+| DFlash2 | ja | 47.64 | 50.18 | 50.24 | 45.32 |
 
 NT を外した split 4 版の code・DFlash2・graph OFF は 1 回で 102.66 tok/s、46 round、
 verify GPU 2012.29 / 46 = 43.75 ms/round、draft GPU 383.31 / 46 = 8.33 ms/round、
 round 2482.74 / 46 = 53.97 ms/round。同じ版の非投機生成列と完全一致した。基準の
-98.00 tok/s・46.31 / 56.54 ms は各 1 回で、反転反復を待つ参考比較である。
+98.00 tok/s・46.31 / 56.54 ms は各 1 回の参考比較である。反復結果は下表に示す。
 
 code の単発非投機を基準 → split 4 → split 4 → 基準で測ると、26.12 / 27.42 /
 27.40 / 26.69 tok/s。4 回の生成列は一致した。split 4 の graph build で MTP verify
