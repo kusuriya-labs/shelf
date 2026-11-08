@@ -59,11 +59,13 @@ int main() {
     const std::size_t logits_delta = 8u * (config.vocab_size - small_vocab.vocab_size) *
                                      sizeof(float);
     check(scratch > small_scratch, "draft scratch grows with the vocabulary");
-    check(scratch - small_scratch >= logits_delta,
-          "draft scratch covers the proposal logits");
+    check(scratch - small_scratch >= 2u * logits_delta,
+          "draft scratch covers the proposal logits and EXL3 accumulator");
 
     const std::size_t wide_rows = dflash2_draft_scratch_bytes(config, 64u, 0u);
     check(wide_rows > scratch, "draft scratch grows with the row count");
+    check(wide_rows - scratch >= 2u * (64u - 8u) * config.vocab_size * sizeof(float),
+          "batched logits and EXL3 accumulator cover all rows");
 
     DFlash2Footprint footprint;
     footprint.draft_weights = 1024u;
