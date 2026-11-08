@@ -171,8 +171,9 @@ Saber の `mxfp4_gemm_atiled.hip` と `mxfp4_atiled_wm.h` は読み取りのみ�
 | 出力回転のみ | 32768 | 24211.7305 | 23595.5859 | 2.54% | 0.61% / 0.52% |
 | 両候補 | 2048 | 1151.9254 | 1073.9244 | 6.77% | 2.20% / 1.90% |
 | 両候補 | 8192 | 4937.9331 | 4630.9897 | 6.22% | 6.30% / 4.37% |
+| 両候補 | 32768 | 23992.0625 | 22906.3516 | 4.53% | 1.17% / 1.00% |
 
-いずれも PASS。回転候補は stage の短縮と最終 logits の一致に加え、3 長さすべてで交互 A/B の全体短縮を確認し、opt-in の採用候補として残す。algorithm 単独と両候補は継続中。
+いずれも PASS。回転候補は stage の短縮と最終 logits の一致に加え、3 長さすべてで交互 A/B の全体短縮を確認し、opt-in の採用候補として残す。両候補同時も 3 長さすべてで PASS。algorithm 単独は継続中。
 
 algorithm 単独 2048 token の初回 5 組は現行 p50 1153.4523 ms、候補 1110.3031 ms だったが、現行の幅 / p50 が 32.95%（候補 12.85%）であるため **FAIL**。この短縮率を採用根拠にせず、独立した 5 組を再測定中。外れ値の原因は未特定。
 
@@ -192,4 +193,4 @@ algorithm 単独 2048 token の初回 5 組は現行 p50 1153.4523 ms、候補 1
 
 ## 精度と総合判定
 
-`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。既存 `test_exl3_int8_linear` と `test_exl3_int8_tp` もそれぞれ lock 下で実行し、両方 exit 0・ALL PASS。総合 A/B は計測中。
+`shelf-bench quality --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16` で baseline dump と回転候補を比較した。vocab 248320、score start 2049、全語彙 64 位置について `QUALITY_KL_MEAN=0`、`QUALITY_LOGIT_MAX_ABS_DELTA=0`、top-1 一致 1、PPL は両者 12.132562。B0 の logits 一致はこの条件で確認した。異なる chunk 長の比較は含めない。algorithm 単独の同条件比較も KL=0、最大絶対差=0。両候補を同時に有効にした同条件比較も KL=0、最大絶対差=0。既存 `test_exl3_int8_linear` と `test_exl3_int8_tp` もそれぞれ lock 下で実行し、両方 exit 0・ALL PASS。総合 A/B は全長さで PASS。
