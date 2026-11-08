@@ -3,7 +3,7 @@
 ## 測定条件
 
 - 日付: 2026-11-08〜09（Asia/Tokyo）。GPU: Radeon AI PRO R9700、gfx1201、UUID `GPU-a8e9ddefa2d60f55`。
-- 基準 revision: `8dcb8a6`。回転・scratch・graph の中間 revision は `febd92a`、prefill の一致性修正は `0983624`。後述の NT / split は各測定時点の試験差分を明示する。対象は Qwen3.8-27B の EXL3-INT8 4 bpw mul24、lm_head 6 bpw。
+- 基準 revision: `8dcb8a6`。回転・scratch・graph の中間 revision は `febd92a`、prefill の一致性修正は `0983624`、split 4 は `68f5163`、scratch 容量による行数依存の補強は `20bd6ff`。後述の NT は試験後に取り除いた。対象は Qwen3.8-27B の EXL3-INT8 4 bpw mul24、lm_head 6 bpw。
 - 各 GPU プロセスは `flock /tmp/r9700.lock` で排他。別の prefill 測定も同じ GPU を利用している。
 - 推論は BF16 KV、prompt `/tmp/prompt_{code,prose,ja}.ids`、最大生成 256、最大系列長 1024、temperature 0。DFlash2 は BF16 drafter、draft 7。MTP は固定 draft 4。
 - 以下の `GB/s` は 10 進数。GEMM 単体は trellis、3 kernel 合計は trellis と `suh` / `svh` の F16 バイト数を分子に使う。いずれも実 DRAM 転送量を直接測った値ではない。
@@ -65,6 +65,14 @@ GEMM の 4 bit、MT=1 は 4 wave / block、各 wave が 16 出力を担当する
 
 同 code object の静的逆アセンブルでは 4 bit / MT=1 の unrolled 部分に `v_mul_u32_u24` と `v_dot4_u32_u8` が各 64、`v_wmma_i32_16x16x16_iu8` が 8 現れる。6 bit ではこれに `v_alignbit_b32` が 64 現れる。命令の存在は trellis 復号に相応の演算が必要な根拠だが、これだけで ALU 律速とは断定できない。
 
+各 16×16 trellis tile のサイズは 4 bit で 128 B、6 bit で 192 B。tile の先頭間隔は
+どちらも 64 B の倍数で、GPU allocation の先頭が整列していれば tile 先頭も同じ境界に整列する。
+各 lane は window の位置から 32 bit word の添字を作り、4 bit は隣接 2 word、6 bit は
+3 word を読む。基準の 4 / 6 bit・MT=1 の逆アセンブルには `global_load_b32` が現れ、
+隣接 lane 間に共有される word がある。activation も含む kernel 全体には `global_load_b64` もある。
+単純に lane ごとの load を 128 bit に拡大すると余分な word を読み得るため、wave 間の
+再配置と整列を含む設計が必要になる。128 bit load の production 候補は実装・測定していない。
+
 Saber の公開実装 `GGZ14/saber-engine`、revision `c8a1e84b39e73363495e549d480a6f6c3893800c`、`crates/saber-kernels/hip/mxfp4_gemm_decode.hip` を読み、MXFP4 と EXL3 の形式差を比較した。Saber は LDS staging と MXFP4 W4A8 WMMA を使い、EXL3 は trellis の復号が必要で同じ重み表現ではない。Saber のコードはコピーしていない。
 
 ## Graph の試験
@@ -89,6 +97,9 @@ Saber の公開実装 `GGZ14/saber-engine`、revision `c8a1e84b39e73363495e549d4
 容量の小さい他の呼び出しでも行数によって split が変わらないよう、selector の容量判定は 16 行分を基準とし、16 行分を確保できない場合は split 1 にする。推論用に新しく確保する容量では従来選択された split を収容できるため、今回の 27B の測定対象における split 数は変わらない。容量 8 / 16 / 32 / 48 / 64 / 1024 行に対して、実行可能な rows=1..16 の選択一致もテストする。
 
 最終 selector の GPU テストでは gate/up の容量 1024 行・split 4 と容量 16 行・split 1 の両方で rows=1 / 8 の F32 出力が bit 一致した。head は容量 80 行・split 2 で一致し、EXL3-INT8 linear テスト全体が通過した。
+最終 selector に再 link した `test_dflash2_exl3_head` と `test_qwen35_spec_verify` も通過し、
+後者は 94 passed / 0 failed。`test_exl3_int8_tp` は同じ 27B の split 選択を持つ容量補強前の
+split 4 版で通過した。CPU の codec・INT8 decode・footprint・bench help・CLI 文書同期は 5/5 通過。
 
 合成 trellis・同一活性で基準 kernel を実行すると、F32 の 248320 要素中 189831、BF16 換算で 50 要素が不一致で、F32 の最大絶対差は 6.86645508e-5。同じ合成 logits の全語彙 softmax で計算した KL(split 2 || split 1) は 1.21e-12 nats。これは基準に存在した数値差で、生成列の違いを実モデルで確認したという意味ではない。
 
@@ -174,6 +185,13 @@ scratch 修正後の code・DFlash2 各 1 回では、graph verify OFF / ON の�
 
 これらは head で重み読み出しの比重が高いことと、body で復号と WMMA の除去により時間が減ることを示唆する。head の試験版間の逆転は測定差や別の実行特性を含みうる。ALU・LDS・帯域の占有率を直接測定した結果ではない。GEMM の LDS は 0 B で、入出力回転には LDS と block barrier がある。
 
+演算側の別試験として、重み load と trellis 復号を取り除き、lane・group から合成した B fragment、
+activation load、8 回/group の int8 WMMA、scale、出力書き込みを残した。split 2、各 5 sample の p50、
+各 1 sweep の GEMM 時間は gate/up（N=17408、K=5120）の rows 1 / 8 が 24.35 / 27.06 µs、
+head（N=248320、K=5120）の rows 1 / 8 が 270.31 / 293.24 µs。逆アセンブルで WMMA 命令の存在を
+確認した。実行コード、register 使用量と load との重なりが通常 kernel と異なるため、通常との差を
+独立した重みロード時間としない。重みを読まない試験なので表示された weight_GBps は使わない。
+
 scratch 修正後の code・MTP 交互測定（graph verify OFF → ON → ON → OFF）は 72.84 / 74.23 / 74.25 / 72.88 tok/s、verify は 41.95 / 40.96 / 40.95 / 41.93 ms/round、round は 51.48 / 50.51 / 50.50 / 51.46 ms/round。
 
 ## 重み load の候補
@@ -199,7 +217,7 @@ N=1024、rows=1 の通常側は 23.013 / 20.458 µs と時間順に変動し、�
 
 ## BetterBench での未解決の一致性
 
-`shelf-compute --serve-stdio --max-seq-len 1024 --max-concurrent-requests 1 --prefix-cache 0`、BF16 KV、temperature 0、8 カテゴリの先頭各 1 件・最大 256 token。非投機と MTP 固定 4 は基準 / scratch 修正後とも各 2 回の全 8 ケースで生成列が一致した。一方 DFlash2 draft 7 は、基準と scratch 修正後の DFlash2 同士は全 8 ケースで一致するが、非投機とは chat、code、prose、reasoning の 4 ケースで不一致だった。初めて異なる token の 0 始まり位置はそれぞれ 128、153、120、92。file_edit、json、math、summarization は一致した。この不一致は基準 revision でも存在し、scratch 修正や graph の効果とは分離して調査中。3 基本 prompt の一致だけでは一般の greedy 一致を保証できない。
+`shelf-compute --serve-stdio --max-seq-len 1024 --max-concurrent-requests 1 --prefix-cache 0`、BF16 KV、temperature 0、8 カテゴリの先頭各 1 件・最大 256 token。非投機と MTP 固定 4 は基準 / scratch 修正後とも各 2 回の全 8 ケースで生成列が一致した。一方 DFlash2 draft 7 は、基準と scratch 修正後の DFlash2 同士は全 8 ケースで一致するが、非投機とは chat、code、prose、reasoning の 4 ケースで不一致だった。初めて異なる token の 0 始まり位置はそれぞれ 128、153、120、92。file_edit、json、math、summarization は一致した。この不一致は基準 revision にも存在した。後述の prefill 修正後の結果を参照。3 基本 prompt の一致だけでは一般の greedy 一致を保証できない。
 
 ### BetterBench 交互測定（scratch 修正まで、NT 適用前）
 
@@ -263,7 +281,7 @@ page 境界で分割しないだけの候補は、既存 `test_compute_dflash2.p
 | 1024 | 5120 | 8 | 5 | 2 | 22.24 | 33.49 | +50.60% |
 | 1024 | 5120 | 8 | 5 | 4 | 22.26 | 23.78 | +6.86% |
 
-N=17408・K=5120・4 bit の gate/up について、16 行 × 4 split 分の scratch がある場合に split 4 を選ぶ候補を実装し、行数間の bit 一致、KLD と生成列、E2E を検証中。これは演算順を変える。ほかの測定候補は悪化したため採用しない。
+N=17408・K=5120・4 bit の gate/up について、16 行 × 4 split 分の scratch がある場合に split 4 を選ぶ実装を採用した。これは演算順を変えるため、行数間の bit 一致、KLD、生成列と E2E を後述する。ほかの測定候補は悪化したため採用しない。
 
 ## 再現に使うコマンド
 
@@ -344,7 +362,8 @@ split 2 → 4 の teacher-forced 実モデル比較は、PSKLDTOK の同一 toke
 全語彙 KL(基準 || 候補) 平均 0.000212619884 nats、top-1 一致 128/128、top-5 overlap
 0.9875、最大 logits 絶対差 2.03755474、PPL 2.92298264 → 2.92570221（+0.0930%）。
 累積順を変えた事実と、この限定された 128 位置での差を明示する。code prompt の
-非投機 256 token は基準と一致したが、他の生成列と投機一致の確認は続行中。
+非投機 256 token は基準と一致したが、prose・日本語などには版間の生成差がある。
+同一版内の投機一致とともに後述する。
 
 split の KLD 比較では、同じ PSKLDTOK 入力に対し、基準 binary で
 `flock /tmp/r9700.lock ./build-gfx1201/shelf-bench-baseline quality --model-dir "$EXL3_BW_TARGET" --tokens-file /tmp/shelf-prefill-32768.psktok --context 128 --positions 128 --prefill-chunk 128 --dump /tmp/exl3-quality-base.bin`、
@@ -415,6 +434,7 @@ cache OFF の非投機を基準 → split 4 → split 4 → 基準で交互測�
 
 NT を除いた split 4 版の BetterBench では、graph ON・DFlash2 の各 1 回が、同じ split 4 版の
 非投機と 8/8 ケースで完全一致した。比較には旧版ではなく、新版の greedy token 列を使った。
+容量補強後の split 4・graph OFF・MTP も初回 8/8 ケースで同じ版の非投機と一致した。
 
 split 4 の `/tmp/prompt_prose.ids` 非投機は、旧版と 0 始まり 38 番目の生成 token から
 異なった。両版とも 256 token。これは版間の数値変更であり、同一版での投機一致は
