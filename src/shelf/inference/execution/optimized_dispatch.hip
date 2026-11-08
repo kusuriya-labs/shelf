@@ -13,6 +13,7 @@
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
 #include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3_int8_prefill.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -818,9 +819,15 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_int8_rotate_out_i32(
-                    static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh, out_ptr, out_dtype,
-                    n_rows, n, dst.row_stride, stream);
+                static const bool prefill_rotate = [] {
+                    const char* env = std::getenv("SHELF_EXL3_INT8_PREFILL_ROTATE");
+                    return env != nullptr && std::strtoul(env, nullptr, 10) != 0ul;
+                }();
+                auto launch = prefill_rotate && n_rows >= 256u
+                    ? ::shelf::kernel::launch_exl3_int8_prefill_rotate_out_i32
+                    : ::shelf::kernel::launch_exl3_int8_rotate_out_i32;
+                herr = launch(static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
+                              out_ptr, out_dtype, n_rows, n, dst.row_stride, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0005u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
