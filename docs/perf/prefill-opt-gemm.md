@@ -19,6 +19,18 @@ flock /tmp/r9700.lock ./build-gfx1201/shelf-bench pp \
   --prompt-tokens 2048 --prefill-chunk 2048 --kv-cache-dtype bf16 --warmup 1 --runs 5
 ```
 
+単体試作は以下の形で build directory にビルドし、各実行を個別に lock した。`gemm_sweep`、`workspace_sweep`、`fused_probe`、`lds_probe` は `-L/opt/rocm/core-7.14/lib -lhipblaslt` が必要。独立 GEMM bench の初回起動で library path が欠けていたため、`rotate_sweep` も次の共通リンク設定で再ビルドした。ファイル名は上記 data のログ名と対応する。
+
+```sh
+nice -n 10 /opt/rocm/core-7.14/bin/hipcc --offload-arch=gfx1201 -O3 -Iinclude \
+  build-gfx1201/rotate_sweep.hip -L/opt/rocm/core-7.14/lib \
+  -Wl,-rpath,/opt/rocm/core-7.14/lib -lhipblaslt -o build-gfx1201/rotate_sweep
+flock /tmp/r9700.lock ./build-gfx1201/rotate_sweep
+flock /tmp/r9700.lock ./build-gfx1201/tests/test_exl3_int8_prefill_rotate
+```
+
+品質比較は上記環境変数のまま `flock /tmp/r9700.lock ./build-gfx1201/shelf-bench quality --model-dir /home/homelab1/datapool/rocm-exl3-rdna2/models/qwen38-27b-exl3-4bpw-mul24 --tokens-file /tmp/corpus_long.tok --context 2048 --positions 64 --prefill-chunk 2048 --kv-cache-dtype bf16 --dump build-gfx1201/quality-baseline.bin` で基準を作り、各候補の環境変数を設定して `--dump` を `--compare build-gfx1201/quality-baseline.bin` に置き換えて行った。
+
 ## 現行の実行と形状
 
 2048 token の現行基準は GPU event p50 1154.8744 ms、min 1148.7068、max 1157.1355、幅 / p50 0.73%。これはこの実験での単一プロセス 5 回の測定であり、別の日の 1143.59 ms との比較を採否判定に使わない。
