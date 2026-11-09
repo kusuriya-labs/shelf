@@ -68,7 +68,7 @@ high bits で 8-entry bank を選ぶ 2〜4 段の perm tree とする。table dw
 `paged_prefill.hip` と BF16/EXL3 WMMA kernel の `lane & 15`、`lane >> 4`、8-element fragment
 配置に合わせる。最初に 16x16x16 の単体テストで A/B/C の lane 対応を固定する。
 
-## 回転空間 prefill
+## 旧回転空間 prefill
 
 既定実装は 1 workgroup = 1 KV head × 10 causal query row とする。M 次元を
 `6 GQA head × 10 row = 60`（64 row に zero pad）へ flatten し、8 wave を
@@ -89,9 +89,31 @@ fallback を使う。online softmax は fp32、probability は hi/lo fp16、PV a
 である。LDS は約 32 KiB で、`__launch_bounds__(256, 2)` により 2 workgroup/CU を許す。
 
 prefix と current chunk は区別せず、append 済み packed cache 全体を causal position と
-block mask で読むため、全量量子化後という意味論を維持する。旧 packed-direct は
-`SHELF_OCTAVE_PREFILL_LEGACY=1` で残す。HIP graph では row position、block table、mask を
-device pointer のまま参照し、capture 中に allocation と同期を行わない。
+block mask で読むため、全量量子化後という意味論を維持する。この 10-row 経路は
+`SHELF_OCTAVE_PREFILL_LEGACY=1` で残す。
+
+## split-KV prefill
+
+既定実装は KV を 2048-token block に分ける。各 block の packed K/V は KV head 4 本を
+original space の BF16 scratch へ一度だけ展開し、固定符号と compact H256 または block
+4×H64 の逆変換もこの段階で行う。連続 8 dimension の bit-plane word は
+`octave_unpack8_direct` で一括展開する。次に既存の 256-thread BF16 WMMA prefill kernel が
+その block に対して全 query tile を処理する。これにより unpack 回数は
+`query tile 数 × prefix block 数` から `prefix block 数` へ減り、prefix 長に線形となる。
+
+block 間では query head ごとの fp32 `(max, sum)` と未正規化 O を保持する。O は既存 output
+buffer に BF16 または F32 で置き、最終可視 block だけで正規化する。`(max, sum)` は
+`rows * 24 * 2 * 4` B である。K/V scratch は
+`2 * 2048 * 4 * 256 * 2 = 8,388,608 B`、8192 rows の softmax state は 1.5 MiB で、
+executor が decode partial 用に既に確保する 32 MiB workspace 内に収まる。新しい arena
+allocation は無く、永続 KV token 容量は変わらない。workspace が不足する geometry は
+旧回転空間経路へ fallback する。
+
+HIP graph では host から見える最大可視 token 数を 2048 単位の block 数へ丸めて graph
+signature に含める。同じ block 数なら row position、block table、mask は device pointer の
+まま変化できる。capture 中の allocation と host 同期は無い。prefix cache 復元後の追い
+prefill も同じ logical block table を使い、current chunk を特別扱いしないため、全量量子化後の
+意味論を維持する。
 
 ## 試行結果と不採用案
 
@@ -104,11 +126,21 @@ device pointer のまま参照し、capture 中に allocation と同期を行わ
   1661 tok/s を下回ったため採用しなかった。
 - K/V double buffer は 10-row/60-M tile の score、probability、accumulator と同居すると
   64 KiB LDS とレジスタ圧を越える。loader/compute overlap より 2 block/CU を優先した。
-- 最終 FP8 比は 2048 が 93.7〜94.7%、8192 が 81.2〜84.1%、32768 が 58.6〜63.2% で
-  95% gate は未達。残る律速は 10-row tile ごとの prefix 全体の再 unpack であり、次は
-  split-KV prefill、または複数 query pass の softmax/PV state を保持して同じ K/V tile を
-  さらに共有する設計が必要である。
+- A の 32-row/M192 tile は 24 wave、約 58 KiB LDS、768 thread とした。8192 c4v4 は
+  1529.66 tok/s、32768 は 1008.06 tok/s で、10-row から有意に伸びなかった。1 workgroup/CU、
+  barrier、wave ごとの 8 個の Q/O fragment によるレジスタ圧が unpack 償却を相殺した。
+- B の KV block を 2048 から 7680 token に広げても、8192 c4v4 は 1720.25 から
+  1723.35 tok/s と誤差範囲だった。block 境界の state 往復は主律速ではなく、scratch を
+  8 MiB に抑えられる 2048 を採用した。
+- C として split-KV scratch に M192 GQA kernel を組み合わせると parity は 0.0000051 だったが、
+  8192 c4v4 は 1545.82 tok/s に低下した。大 workgroup の occupancy と LDS barrier が
+  復号済み K/V の head 間共有利得を上回るため採用しなかった。
+- 採用 B の FP8 比は c4v4 が 100.8% / 100.2% / 96.1%、c5v5 が
+  100.4% / 100.0% / 95.9%、b4n3v3 が 100.3% / 100.2% / 96.1% で、
+  2048 / 8192 / 32768 の全条件で 95% gate を満たした。32768 の旧比は
+  c4v4 1.480 倍、c5v5 1.589 倍、b4n3v3 1.508 倍である。
 
-この経路でも pool 全体を BF16 化する K/V 各 1-layer scratch（合計 4096 B/token）は不要で、
-arena/page footprint は永続 packed bytes のままである。
+pool 全体を BF16 化する K/V 各 1-layer scratch（合計 4096 B/token）は不要である。
+固定 2048-token block だけを既存 workspace へ展開するため、arena/page footprint は永続
+packed bytes のままである。
 
