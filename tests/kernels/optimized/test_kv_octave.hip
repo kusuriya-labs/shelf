@@ -417,8 +417,10 @@ double normalized_mse(uint32_t bits, const std::vector<float>& levels) {
 void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                           bool tree_visibility, const char* name,
                           const std::vector<float>& levels,
-                          bool prefill = false, uint32_t prefix = 0u) {
-    const uint32_t tokens = prefill ? prefix + query_rows : 64u;
+                          bool prefill = false, uint32_t prefix = 0u,
+                          uint32_t decode_tokens = 64u,
+                          bool microbench = false) {
+    const uint32_t tokens = prefill ? prefix + query_rows : decode_tokens;
     constexpr uint32_t kv_heads = 4u;
     constexpr uint32_t q_heads = 24u;
     constexpr uint32_t page_tokens = 16u;
@@ -429,9 +431,9 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     std::vector<shelf::bf16_t> k(static_cast<std::size_t>(tokens) * kv_features);
     std::vector<shelf::bf16_t> v(k.size());
     for (std::size_t i = 0u; i < k.size(); ++i) {
-        k[i].data = shelf::f32_to_bf16_rne(
+        k[i].data = microbench ? 0u : shelf::f32_to_bf16_rne(
             std::sin(static_cast<float>(i) * 0.013f) * 1.5f);
-        v[i].data = shelf::f32_to_bf16_rne(
+        v[i].data = microbench ? 0u : shelf::f32_to_bf16_rne(
             std::cos(static_cast<float>(i) * 0.017f) * 1.3f);
     }
     std::vector<shelf::bf16_t> q(static_cast<std::size_t>(query_rows) * q_features);
@@ -605,6 +607,33 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
         }
         ok = ok && hip_ok(hipDeviceSynchronize(), name);
     }
+    if (ok && microbench) {
+        hipEvent_t start = nullptr;
+        hipEvent_t stop = nullptr;
+        ok = hip_ok(hipEventCreate(&start), name) &&
+             hip_ok(hipEventCreate(&stop), name);
+        std::vector<float> elapsed;
+        for (uint32_t iteration = 0u; ok && iteration < 6u; ++iteration) {
+            ok = hip_ok(hipEventRecord(start), name) &&
+                 hip_ok(shelf::kernel::launch_attention_paged_octave_split(
+                            attention, d_k_pool, d_v_pool, d_levels, format,
+                            d_partials, splits, nullptr), name) &&
+                 hip_ok(shelf::kernel::launch_attention_paged_octave_reduce(
+                            attention, d_partials, splits, nullptr), name) &&
+                 hip_ok(hipEventRecord(stop), name) &&
+                 hip_ok(hipEventSynchronize(stop), name);
+            float milliseconds = 0.0f;
+            if (ok) ok = hip_ok(hipEventElapsedTime(&milliseconds, start, stop), name);
+            if (ok && iteration != 0u) elapsed.push_back(milliseconds);
+        }
+        if (!elapsed.empty()) {
+            std::sort(elapsed.begin(), elapsed.end());
+            std::printf("%s gpu_ms_p50=%.4f rows=%u context=%u\n", name,
+                        elapsed[elapsed.size() / 2u], query_rows, tokens);
+        }
+        if (start != nullptr) hipEventDestroy(start);
+        if (stop != nullptr) hipEventDestroy(stop);
+    }
     std::vector<float> reference(q.size()), fused(q.size()), legacy(q.size());
     if (ok) {
         ok = hip_ok(hipMemcpy(reference.data(), d_reference,
@@ -674,6 +703,11 @@ int main() {
     run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 8192u, false,
                          "Octave prefill rows 8192 parity", levels,
                          true, 16u);
+    const char* long_bench = std::getenv("SHELF_OCTAVE_LONG_BENCH");
+    if (long_bench != nullptr && long_bench[0] == '1' && long_bench[1] == '\0')
+        run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 4u, false,
+                             "Octave decode rows 4 context 131072", levels,
+                             false, 0u, 131072u, true);
 
     const double mse3 = normalized_mse(3u, levels);
     const double mse4 = normalized_mse(4u, levels);
