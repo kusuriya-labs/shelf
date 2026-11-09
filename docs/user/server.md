@@ -494,6 +494,8 @@ client が tool 結果を `role: "tool"` message として返すと、Shelf は�
 assistant 応答を生成する。
 
 `tool_choice` は `auto` / `none` のみ受け付ける。`none` は tool 定義を model へ渡さない。
+`required` と関数名指定は HTTP 400 とする。文法制約を使わない生成では tool call の
+発生や指定した関数の選択を保証できないためである。存在しない関数名も拒否する。
 
 tool calling は best-effort である。生成された tool call は Transformers の Qwen response
 parser で解析し、schema の enforce や生成後の修復は行わない。parser が tool-call-like な
