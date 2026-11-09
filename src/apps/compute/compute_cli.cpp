@@ -415,9 +415,9 @@ int validate_compute_options(const ComputeOptions& opt) {
     shelf::kernel::OctaveKVCacheFormat octave_format{};
     const bool octave = shelf::kernel::parse_octave_kv_cache_format(
         kv_cache_dtype, octave_format);
-    if (octave && (tp != 1 || pipeline_parallel != 1 || dflash_enabled)) {
+    if (octave && (tp != 1 || pipeline_parallel != 1)) {
         fprintf(stderr,
-                "Octave KV cache currently requires TP=1, PP=1 and DFlash2 disabled\n");
+                "Octave KV cache currently requires TP=1 and PP=1\n");
         return kComputeParseError;
     }
     if (dflash_enabled) {

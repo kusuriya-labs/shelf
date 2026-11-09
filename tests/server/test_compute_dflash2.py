@@ -4,7 +4,7 @@
 serve 経路で DFlash2 が動作すること、target-only greedy と完全一致すること、
 通常の stochastic sampling が成立すること、および constraint 相当の
 request field が fail-closed に拒否されることを確認する。
-bf16 と fp8 の両方の KV dtype で回す。
+bf16、fp8、Octave c4v4 の KV dtype で回す。
 """
 
 from __future__ import annotations
@@ -312,7 +312,7 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
 
 def main() -> int:
     checker = Checker("compute-dflash2")
-    for kv_cache_dtype in ("bf16", "fp8"):
+    for kv_cache_dtype in ("bf16", "fp8", "octave:c4v4"):
         run_suite(kv_cache_dtype, checker)
     return checker.done()
 

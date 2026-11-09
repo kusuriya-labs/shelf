@@ -82,6 +82,36 @@ c4v4 target-only は 3773 decode token、26.81 tok/s だった。MTP は 2.23 �
 `SHELF_HIP_GRAPH=ON` と `SHELF_GRAPH_VERIFY=1` の smoke では rows 2〜5 の verify graph を
 capture / replay し、非 graph MTP と 19 case の生成 ID が一致した。
 
+## DFlash2
+
+`--dflash2-drafts 7`、19 input、各最大 256 token、temperature 0 で測定した。drafter の
+K/V ring は target KV dtype に関係なく独立した BF16 pool である。
+
+| target KV | decode token | rounds | accepted drafts | accepted/round | emitted/round | tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BF16 | 3723 | 973 | 2750 | 2.826 | 3.826 | 68.16 |
+| FP8 | 3717 | 964 | 2753 | 2.856 | 3.856 | 69.88 |
+| c4v4 | 3773 | 1006 | 2767 | 2.750 | 3.750 | 64.79 |
+| c5v5 | 3713 | 976 | 2737 | 2.804 | 3.804 | 64.25 |
+
+c4v4 は spec 無しと同じ 3773 token を生成し、19 case の suite hash も
+`5dc858f907a6ff0300718b44076f576093298989b25f7f1e91e2932ef3b186f7` で一致した。
+single-shot の 64 token も target-only と一致した。
+
+32Ki prompt と 64 token の結果は次のとおりである。
+
+| target KV | TTFT (s) | decode tok/s |
+| --- | ---: | ---: |
+| BF16 | 23.90 | 31.19 |
+| FP8 | 23.62 | 33.74 |
+| c4v4 | 30.09 | 12.32 |
+| c5v5 | 29.72 | 10.22 |
+
+c4v4 の concurrent 2、3、4 request は stream/done 整合、完走、同じ concurrent shape の
+再実行一致を確認した。4 request の人工 prompt の 1 本は単独実行と 11 token 目以降が
+分岐した。同じ mixed batch では再現し、resource ownership の破綻は無い。verify row shape
+での near-tie が疑われるが、logit margin は未計測である。
+
 ## Prefill
 
 単位は token/s の p50 である。Octave は対象 layer の cache を BF16 scratch へ展開して
@@ -107,6 +137,6 @@ primitive graph は KV append と paged attention を別 dispatch とし、atten
 current chunk の K/V value が無いため、追加するには lowering と primitive contract の変更が
 必要になる。M3 は安全側として全量量子化後の M2 prefill を維持する。
 
-DFlash2 と MTP、TP、PP、MoE、HIP graph 実行は起動時に拒否する。M3 fused kernel 自体は
-rows 1〜32 と tree visibility を実装したが、speculative runtime 全体は resource ownership と
-混在 batch の受入試験が未完了なので有効化していない。
+MTP、DFlash2、HIP graph は有効である。TP、PP、MoE は起動時に拒否する。M3 fused kernel は
+rows 1〜32 と tree visibility を実装し、speculative runtime の独立 resource ownership と
+混在 batch を受入試験で固定する。

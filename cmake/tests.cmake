@@ -549,6 +549,15 @@ set_tests_properties(test_compute_mtp_accepts_octave PROPERTIES
                      PASS_REGULAR_EXPRESSION "cannot open config.json"
                      FAIL_REGULAR_EXPRESSION "Octave KV cache currently requires")
 
+add_test(NAME test_compute_dflash2_accepts_octave
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --dflash2-model-dir placeholder
+             --dflash2-drafts 7 --kv-cache-dtype octave:c4v4)
+set_tests_properties(test_compute_dflash2_accepts_octave PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json"
+                     FAIL_REGULAR_EXPRESSION "Octave KV cache currently requires")
+
 add_test(NAME test_compute_rope_cap_native_over
          COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_shelf_rope_fixture}" --rope-factor 1 --max-seq-len 262145)

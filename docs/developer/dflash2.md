@@ -396,6 +396,9 @@ kernel の出力 buffer を次 kernel の入力 pointer として直接渡す。
 | `k_ring` | `[num_layers, capacity, kv_features]` | BF16 |
 | `v_ring` | `[num_layers, capacity, kv_features]` | BF16 |
 
+ring は target KV pool と独立して所有し、target が Octave の場合も BF16 のままである。
+target の Octave descriptor、page table、量子化 table を drafter へ伝播しない。
+
 - production では `capacity == config.sliding_window`（2048）を要求する。
 - `kv_features = attention_kv_rows() = num_key_value_heads * head_dim`（27B は 8 × 128 = 1024）。
 - 27B の実 allocation は `2 * 5 * 2048 * 1024 * 2 = 41,943,040 bytes`（40 MiB / sequence）。
@@ -1038,7 +1041,7 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 ## Known limitations
 
 - `--dump-logits` との併用は非対応。
-- `--serve-stdio` と `--kv-cache-dtype fp8` は serve mode と併用できる。
+- `--serve-stdio` と `--kv-cache-dtype fp8|octave:FORMAT` は serve mode と併用できる。
 - target 層数 > 最大 tap、`num_target_layer_ids == 5`、`conv_kernel_size == 2` を要求する。
 - context ring は sliding_window 分しか保持しない。`capacity == sliding_window` を要求する。
 - attention GQA kernel は `q_heads == 4 * kv_heads`、`head_dim == 128` を要求し、それ以外は

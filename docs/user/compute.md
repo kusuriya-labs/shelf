@@ -177,7 +177,8 @@ dense checkpoint を TP=2 で動かす場合:
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
 
-`--serve-stdio` と `--kv-cache-dtype fp8` は併用できる。serve mode では
+`--serve-stdio` と `--kv-cache-dtype fp8|octave:FORMAT` は併用できる。DFlash2 の
+drafter ring は target の KV dtype と独立して BF16 のままである。serve mode では
 `prefix_cache_checkpoint_position`（`0` のみ受理）と `temperature > 0` を
 DFlash2 経路でも受け付ける。
 stdio serving の prefill 行数、環境変数、追加メモリは
