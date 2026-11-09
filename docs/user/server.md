@@ -368,9 +368,12 @@ temperature / top_p / min_p / top_k / seed / stop
 tools / tool_choice
 reasoning_effort（low / medium / xhigh）
 chat_template_kwargs（enable_thinking / preserve_thinking）
+n=1 / frequency_penalty=0 / presence_penalty=0
 ```
 
-`stop` は非空文字列または 1〜4 個の非空文字列の配列を受理する。最初に一致した文字列より前の `content` を返し、生成を cancel して `finish_reason="stop"` とする。stream では一致しうる末尾を保留する。`reasoning_content` と tool call の markup・引数には適用せず、tool call の前後をまたぐ一致も扱わない。stop の一致時の `completion_tokens` は一致までにサーバが受信した生成 token 数であり、非表示の stop や reasoning を含む。cancel 前に compute が先行生成した token は含まれない場合がある。prefix cache の hit 数は cancel 時には返らない。
+`stop` は非空文字列または 1〜4 個の非空文字列の配列を受理する。最初に一致した文字列より前の `content` を返し、生成を cancel して `finish_reason="stop"` とする。stream では一致しうる末尾を保留する。`reasoning_content` と、tools を指定した場合の tool call の markup・引数には適用せず、tool call の前後をまたぐ一致も扱わない。stop の一致時の `completion_tokens` は一致までにサーバが受信した生成 token 数であり、非表示の stop や reasoning を含む。cancel 前に compute が先行生成した token は含まれない場合がある。prefix cache の hit 数は cancel 時には返らない。
+
+`user`、`store`、`metadata`、`service_tier`、`parallel_tool_calls=true` は受理するが、保存、優先度変更、tool call 数の制御には使用しない。`frequency_penalty` と `presence_penalty` は未指定または 0 のみ受理する。
 
 `top_k` / `min_p` は Shelf extension である。指定がない値の既定は
 `temperature=0`（greedy）/ `top_p=1.0` / `min_p=0.0` / `top_k=0` / `seed=0` である。
@@ -521,8 +524,6 @@ N を下げると program workspace が減り、その分だけ KV capacity が�
 stream client が connection を切断すると、in-flight generation は cancel される
 （`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight
 request の KV / GDN / token stream には影響しない。
-
-`user`、`store`、`metadata`、`service_tier`、`parallel_tool_calls=true` は受理するが、保存、優先度変更、tool call 数の制御には使用しない。`frequency_penalty` と `presence_penalty` は未指定または 0 のみ受理する。
 
 ## サポート外の API
 

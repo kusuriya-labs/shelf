@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -10,9 +11,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "src/apps/server"), str(ROOT / "src/apps/common"), str(Path(__file__).resolve().parent)]
 
+from aiohttp.test_utils import TestClient, TestServer
+from shelf_server import create_app
 from support import Checker
-from serverlib.chat_service import ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta
-from serverlib.openai_protocol import OpenAIProtocolError, parse_chat_request
+from serverlib.chat_service import AssistantResult, ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta
+from serverlib.openai_protocol import OpenAIProtocolError, encode_chat_completion, parse_chat_request
 
 
 class Processor:
@@ -30,6 +33,9 @@ class Compute:
         self.ids = ids
         self.cancelled = 0
         self.completed = 0
+
+    async def shutdown(self):
+        pass
 
     async def generate_stream(self, *args, **kwargs):
         finished = False
@@ -105,6 +111,26 @@ async def run(checker):
     service = ChatService(Processor(), shared, "shelf", 1000)
     first, second = await asyncio.gather(service.complete(request(stop="STOP", chat_template_kwargs={"enable_thinking": False})), service.complete(request(stop="NEVER", chat_template_kwargs={"enable_thinking": False})))
     checker.check("concurrent-isolation", first.content == "alpha " and second.content == "alpha STOP trailing" and shared.cancelled == 1 and shared.completed == 1, repr((first, second)))
+    both = AssistantResult(content="prefix", tool_calls=[{"function": {"name": "f", "arguments": "{}"}}], finish_reason="stop", prompt_tokens=2, completion_tokens=3)
+    message = encode_chat_completion(request(stop="END"), both)["choices"][0]["message"]
+    checker.check("content-with-prior-tool-call", message["content"] == "prefix" and bool(message["tool_calls"]), repr(message))
+
+    compute = Compute(data)
+    service = ChatService(Processor(), compute, "shelf", 1000)
+    async with TestClient(TestServer(create_app(service, compute))) as client:
+        body = {"model": "shelf", "messages": [{"role": "user", "content": "hi"}], "stop": "STOP", "chat_template_kwargs": {"enable_thinking": False}}
+        response = await client.post("/v1/chat/completions", json=body)
+        payload = await response.json()
+        checker.check("http-stop", response.status == 200 and payload["choices"][0]["message"]["content"] == "before " and payload["choices"][0]["finish_reason"] == "stop", repr(payload))
+        response = await client.post("/v1/chat/completions", json={**body, "stream": True, "stream_options": {"include_usage": True}})
+        raw = await response.text()
+        chunks = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
+        choices = [choice for chunk in chunks for choice in chunk.get("choices", [])]
+        streamed = "".join(choice.get("delta", {}).get("content", "") for choice in choices)
+        checker.check("http-stream-stop", response.status == 200 and streamed == "before " and choices[-1]["finish_reason"] == "stop" and any(chunk.get("usage") for chunk in chunks), raw)
+        response = await client.post("/v1/chat/completions", json={**body, "stop": ""})
+        payload = await response.json()
+        checker.check("http-invalid-stop", response.status == 400 and payload["error"]["param"] == "stop", repr(payload))
 
 
 def main():

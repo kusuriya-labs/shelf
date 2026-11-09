@@ -1,14 +1,8 @@
-"""OpenAI Chat Completions subset: request validation and wire encoding.
+"""OpenAI Chat Completions の入力検証と応答エンコード。
 
-Shelf implements an explicit subset of the OpenAI Chat Completions API.
-Every parameter that belongs to a removed feature (Structured Output, strict
-tools, constrained decoding, the ``reasoning`` transport object) is rejected
-with HTTP 400 instead of being ignored.
-
-Reasoning is exposed the way the Qwen3.8 model card documents it:
-``reasoning_effort`` at the top level plus ``enable_thinking`` /
-``preserve_thinking`` inside ``chat_template_kwargs``. The generated thinking
-region is returned as ``reasoning_content``.
+対応するパラメータは明示的に列挙し、未対応・未知のキーは拒否する。
+user、store、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
+構造化出力、strict tool、文法制約には対応しない。
 """
 
 from __future__ import annotations
@@ -655,7 +649,7 @@ def encode_chat_completion(request: ChatRequest, result,
                            created: int | None = None) -> dict:
     message: dict[str, Any] = {"role": "assistant"}
     if result.tool_calls:
-        message["content"] = None
+        message["content"] = (result.content if request.stop and result.finish_reason == "stop" else None)
         message["tool_calls"] = wire_tool_calls(result.tool_calls)
     else:
         message["content"] = result.content
