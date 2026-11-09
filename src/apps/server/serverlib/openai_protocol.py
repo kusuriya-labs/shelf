@@ -100,13 +100,31 @@ def _reject(body: dict, key: str, message: str, code: str = "unsupported_paramet
 
 
 def reject_unsupported(body: dict) -> None:
+    allowed = {
+        "model", "messages", "tools", "tool_choice", "stream", "stream_options",
+        "max_tokens", "max_completion_tokens", "temperature", "top_p", "min_p",
+        "top_k", "seed", "chat_template_kwargs", "reasoning_effort", "n",
+        "user", "store", "metadata", "service_tier", "parallel_tool_calls",
+        "frequency_penalty", "presence_penalty", "stop",
+    }
+    for key in body:
+        if key not in allowed:
+            raise OpenAIProtocolError(
+                f"{key} is not supported", param=key, code="unsupported_parameter")
+    _reject(body, "stop", "stop is not supported")
+    for key in ("frequency_penalty", "presence_penalty"):
+        value = body.get(key)
+        if value is not None and (isinstance(value, bool) or
+                                  not isinstance(value, (int, float)) or value != 0):
+            raise OpenAIProtocolError(
+                f"only {key}=0 is supported", param=key, code="unsupported_parameter")
     _reject(body, "response_format", "response_format is not supported")
     _reject(body, "reasoning", "reasoning is not supported")
     _reject(body, "text", "text is not supported")
     _reject(body, "logit_bias", "logit_bias is not supported")
     _reject(body, "logprobs", "logprobs is not supported")
 
-    if body.get("parallel_tool_calls") is False:
+    if body.get("parallel_tool_calls") is not None and body["parallel_tool_calls"] is not True:
         raise OpenAIProtocolError(
             "parallel_tool_calls=false is not supported",
             param="parallel_tool_calls",
@@ -114,7 +132,7 @@ def reject_unsupported(body: dict) -> None:
         )
 
     n = body.get("n")
-    if n is not None and int(n) != 1:
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n != 1):
         raise OpenAIProtocolError(
             "only n=1 is supported",
             param="n",

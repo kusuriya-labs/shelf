@@ -17,7 +17,12 @@ from support import (  # noqa: E402
     http_json,
     http_post_status,
     model_dir,
+    ensure_chat_import,
 )
+
+ensure_chat_import()
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "apps" / "server"))
+from serverlib.openai_protocol import OpenAIProtocolError, parse_chat_request  # noqa: E402
 
 MESSAGES = [{"role": "user", "content": "hello"}]
 
@@ -48,6 +53,13 @@ PLAIN_TOOL = {
 }
 
 REJECTED = [
+    ("stop", {"stop": "END"}, "stop"),
+    ("frequency-penalty", {"frequency_penalty": 1}, "frequency_penalty"),
+    ("presence-penalty", {"presence_penalty": -1}, "presence_penalty"),
+    *[(key, {key: value}, key) for key, value in [
+        ("logit_bias", {}), ("logprobs", True), ("top_logprobs", 2),
+        ("prediction", {}), ("modalities", ["audio"]), ("audio", {}),
+        ("web_search_options", {}), ("unknown_parameter", 1)]],
     ("response_format", {"response_format": {"type": "json_object"}},
      "response_format"),
     ("response_format-json-schema",
@@ -70,6 +82,28 @@ REJECTED = [
     ("stream-options-unknown", {"stream_options": {"extra": True}},
      "stream_options.extra"),
 ]
+
+
+def unit_main() -> int:
+    checker = Checker("server-unsupported-unit")
+    base = {"model": "shelf", "messages": MESSAGES}
+    for label, extra, param in REJECTED:
+        try:
+            parse_chat_request({**base, **extra})
+        except OpenAIProtocolError as exc:
+            checker.check(label, exc.param == param and exc.code == "unsupported_parameter",
+                          repr((exc.param, exc.code)))
+        else:
+            checker.check(label, False, "accepted")
+    for key, value in [("user", "u"), ("store", True), ("metadata", {"x": "y"}),
+                       ("service_tier", "auto"), ("parallel_tool_calls", True),
+                       ("frequency_penalty", 0), ("presence_penalty", 0)]:
+        try:
+            parse_chat_request({**base, key: value})
+            checker.check(f"accept-{key}", True)
+        except OpenAIProtocolError as exc:
+            checker.check(f"accept-{key}", False, str(exc))
+    return checker.done()
 
 
 def main() -> int:
@@ -152,4 +186,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(unit_main() if "--unit" in sys.argv else main())

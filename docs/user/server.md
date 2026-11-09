@@ -518,9 +518,13 @@ stream client が connection を切断すると、in-flight generation は cance
 （`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight
 request の KV / GDN / token stream には影響しない。
 
+`user`、`store`、`metadata`、`service_tier`、`parallel_tool_calls=true` は受理するが、保存、優先度変更、tool call 数の制御には使用しない。`frequency_penalty` と `presence_penalty` は未指定または 0 のみ受理する。
+
 ## サポート外の API
 
-以下は明示的に HTTP 400（`code=unsupported_parameter`）で拒否する。silent ignore はしない。
+以下および未知のトップレベルキーは HTTP 400（`code=unsupported_parameter`）で拒否する。上記の明示的に無視するキー以外は silent ignore しない。
+
+`stop`、非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。
 
 ```text
 response_format
