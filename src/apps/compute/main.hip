@@ -85,9 +85,14 @@ int main(int argc, char** argv) {
         config.private_target_lm_head = true;
     }
     config.pipeline_parallel = static_cast<uint32_t>(opt.pipeline_parallel);
-    config.kv_cache_dtype = opt.kv_cache_dtype == "fp8"
-        ? shelf::kernel::KVCacheDType::FP8_E4M3
-        : shelf::kernel::KVCacheDType::BF16;
+    if (shelf::kernel::parse_octave_kv_cache_format(
+            opt.kv_cache_dtype, config.octave_kv_format)) {
+        config.kv_cache_dtype = shelf::kernel::KVCacheDType::OCTAVE;
+    } else {
+        config.kv_cache_dtype = opt.kv_cache_dtype == "fp8"
+            ? shelf::kernel::KVCacheDType::FP8_E4M3
+            : shelf::kernel::KVCacheDType::BF16;
+    }
     config.verify_weights = opt.verify_weights != 0;
     config.tp_combine_f32 = static_cast<uint32_t>(opt.tp_combine_f32);
     config.decode_backend = opt.decode_backend;

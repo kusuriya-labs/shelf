@@ -18,10 +18,13 @@ inline constexpr uint32_t kDumpVersion = 1u;
 enum class KvDtype : uint32_t {
     Bf16 = 0u,
     Fp8E4M3 = 1u,
+    Octave = 2u,
 };
 
 inline const char* kv_dtype_name(KvDtype dtype) {
-    return dtype == KvDtype::Fp8E4M3 ? "fp8" : "bf16";
+    if (dtype == KvDtype::Fp8E4M3) return "fp8";
+    if (dtype == KvDtype::Octave) return "octave";
+    return "bf16";
 }
 
 struct DumpHeader {

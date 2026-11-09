@@ -130,7 +130,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     const std::size_t kv_page_bytes = PagedKVPool::page_bytes(
         config.page_tokens, attention_layers, local_kv_heads, head_dim,
-        config.kv_cache_dtype);
+        config.kv_cache_dtype, config.octave_kv_format);
     if (kv_page_bytes == 0u) {
         return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
@@ -288,7 +288,7 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
 
     auto kv_result = PagedKVPool::create(
         rank->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
-        local_kv_heads, head_dim, config.kv_cache_dtype);
+        local_kv_heads, head_dim, config.kv_cache_dtype, config.octave_kv_format);
     if (!kv_result.ok()) return kv_result.status();
     rank->kv_pool_.emplace(kv_result.release());
 
@@ -442,6 +442,11 @@ std::uint64_t TpRankRuntime::kv_bytes() const {
             return body * 4u;
         case KVCacheDType::FP8_E4M3:
             return body * 2u + (body / pool.head_dim()) * 8u;
+        case KVCacheDType::OCTAVE:
+            return static_cast<std::uint64_t>(pool.num_attention_layers()) *
+                   pool.num_pages() * pool.page_tokens() * pool.kv_heads() *
+                   (::shelf::kernel::octave_k_slot_bytes(pool.octave_format()) +
+                    ::shelf::kernel::octave_v_slot_bytes(pool.octave_format()));
     }
     return 0;
 }
@@ -510,6 +515,7 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.max_seq_len = config.max_seq_len;
         rank_config.page_tokens = config.page_tokens;
         rank_config.kv_cache_dtype = config.kv_cache_dtype;
+        rank_config.octave_kv_format = config.octave_kv_format;
         rank_config.arena_bytes = config.arena_bytes;
         rank_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
         rank_config.drafter_config = config.drafter_config;

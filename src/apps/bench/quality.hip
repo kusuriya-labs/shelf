@@ -36,6 +36,7 @@ struct QualityOptions {
     double arena_gib = 0.0;
     bool arena_auto = true;
     shelf::kernel::KVCacheDType kv_dtype = shelf::kernel::KVCacheDType::BF16;
+    shelf::kernel::OctaveKVCacheFormat octave_format{};
     std::string dump_path;
     std::string compare_path;
 };
@@ -50,7 +51,7 @@ void print_usage(FILE* out) {
         "                                (default context+1; must be > context)\n"
         "  --positions N                scored positions (default 0 = to end, max 2048)\n"
         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
-        "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
+        "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --page-tokens N              (default 16)\n"
         "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
         "  --device LIST                comma separated GPUs, one per --tensor-parallel rank\n"
@@ -151,6 +152,9 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 opts.kv_dtype = shelf::kernel::KVCacheDType::BF16;
             } else if (dtype == "fp8") {
                 opts.kv_dtype = shelf::kernel::KVCacheDType::FP8_E4M3;
+            } else if (shelf::kernel::parse_octave_kv_cache_format(
+                           dtype, opts.octave_format)) {
+                opts.kv_dtype = shelf::kernel::KVCacheDType::OCTAVE;
             } else {
                 fprintf(stderr, "invalid --kv-cache-dtype: %s\n", dtype.c_str());
                 return false;
@@ -209,6 +213,10 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 opts.tp, opts.tp, opts.devices.size());
         return false;
     }
+    if (opts.kv_dtype == shelf::kernel::KVCacheDType::OCTAVE && opts.tp != 1) {
+        fprintf(stderr, "Octave KV cache currently requires --tensor-parallel 1\n");
+        return false;
+    }
     std::vector<int> sorted_devices = opts.devices;
     std::sort(sorted_devices.begin(), sorted_devices.end());
     if (std::adjacent_find(sorted_devices.begin(), sorted_devices.end()) !=
@@ -248,9 +256,11 @@ std::vector<int32_t> read_token_corpus(const std::string& path) {
 }
 
 shelf::bench::quality::KvDtype to_quality_dtype(shelf::kernel::KVCacheDType dtype) {
-    return dtype == shelf::kernel::KVCacheDType::FP8_E4M3
-               ? shelf::bench::quality::KvDtype::Fp8E4M3
-               : shelf::bench::quality::KvDtype::Bf16;
+    if (dtype == shelf::kernel::KVCacheDType::FP8_E4M3)
+        return shelf::bench::quality::KvDtype::Fp8E4M3;
+    if (dtype == shelf::kernel::KVCacheDType::OCTAVE)
+        return shelf::bench::quality::KvDtype::Octave;
+    return shelf::bench::quality::KvDtype::Bf16;
 }
 
 }
@@ -441,7 +451,7 @@ int run_quality(int argc, char** argv) {
 
         auto kv_pool_result = shelf::state::PagedKVPool::create(
             *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens), num_attn_layers,
-            kv_heads, head_dim, opts.kv_dtype);
+            kv_heads, head_dim, opts.kv_dtype, opts.octave_format);
         if (!kv_pool_result.ok()) {
             fprintf(stderr, "PagedKVPool::create failed: %s\n",
                     kv_pool_result.status().message().c_str());
@@ -680,7 +690,7 @@ int run_quality(int argc, char** argv) {
     printf("QUALITY_SCORE_START=%u\n", score_start);
     printf("QUALITY_VOCAB=%u\n", vocab);
     printf("QUALITY_KV_DTYPE=%s\n",
-           opts.kv_dtype == shelf::kernel::KVCacheDType::FP8_E4M3 ? "fp8" : "bf16");
+           shelf::bench::quality::kv_dtype_name(to_quality_dtype(opts.kv_dtype)));
     if (!opts.dump_path.empty()) {
         printf("QUALITY_DUMP=%s\n", opts.dump_path.c_str());
         printf("QUALITY_DUMP_POSITIONS=%llu\n",

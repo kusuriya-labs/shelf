@@ -55,6 +55,7 @@ struct Env {
     shelf::gpu::GpuArena* arena = nullptr;
     PagedKVPool* kv_bf16 = nullptr;
     PagedKVPool* kv_fp8 = nullptr;
+    PagedKVPool* kv_octave = nullptr;
     GdnStatePool* gdn = nullptr;
     SequenceSlotPool* slots = nullptr;
     hipStream_t stream = nullptr;
@@ -99,6 +100,10 @@ std::vector<uint32_t> make_tokens(uint32_t count, uint32_t base) {
 }
 
 std::size_t kv_page_bytes(const PagedKVPool& pool) {
+    if (pool.dtype() == KVCacheDType::OCTAVE) {
+        return static_cast<std::size_t>(pool.page_tokens()) * pool.kv_heads() *
+               shelf::kernel::octave_k_slot_bytes(pool.octave_format());
+    }
     const std::size_t elems = static_cast<std::size_t>(pool.page_tokens())
         * pool.kv_heads() * pool.head_dim();
     return pool.dtype() == KVCacheDType::FP8_E4M3
@@ -983,11 +988,15 @@ int main() {
     auto kv_fp8_result = PagedKVPool::create(
         arena, 64, kPageTokens, kAttnLayers, kKvHeads, kHeadDim,
         KVCacheDType::FP8_E4M3);
+    auto kv_octave_result = PagedKVPool::create(
+        arena, 64, kPageTokens, kAttnLayers, kKvHeads, 256,
+        KVCacheDType::OCTAVE,
+        {shelf::kernel::OctaveKMode::Compact, 4, 4, 4});
     auto gdn_result = GdnStatePool::create(
         arena, 12, GdnStatePoolLayout::make(2, 8, 3, 2, 4, 4));
     auto slots_result = SequenceSlotPool::create(arena, 12, 64);
 
-    if (!kv_bf16_result.ok() || !kv_fp8_result.ok() || !gdn_result.ok() ||
+    if (!kv_bf16_result.ok() || !kv_fp8_result.ok() || !kv_octave_result.ok() || !gdn_result.ok() ||
         !slots_result.ok()) {
         std::printf("FAIL: pool create\n");
         (void)hipStreamDestroy(stream);
@@ -996,6 +1005,7 @@ int main() {
 
     PagedKVPool kv_bf16 = kv_bf16_result.release();
     PagedKVPool kv_fp8 = kv_fp8_result.release();
+    PagedKVPool kv_octave = kv_octave_result.release();
     GdnStatePool gdn = gdn_result.release();
     SequenceSlotPool slots = slots_result.release();
 
@@ -1003,6 +1013,7 @@ int main() {
     env.arena = &arena;
     env.kv_bf16 = &kv_bf16;
     env.kv_fp8 = &kv_fp8;
+    env.kv_octave = &kv_octave;
     env.gdn = &gdn;
     env.slots = &slots;
     env.stream = stream;
@@ -1016,6 +1027,7 @@ int main() {
     run("rule", test_hit_rule);
     run("roundtrip-bf16", +[](Env& e) { test_roundtrip(e, *e.kv_bf16, 77); });
     run("roundtrip-fp8", +[](Env& e) { test_roundtrip(e, *e.kv_fp8, 78); });
+    run("roundtrip-octave", +[](Env& e) { test_roundtrip(e, *e.kv_octave, 79); });
     run("capture", test_capture);
     run("eviction", test_eviction);
     run("ring", test_spec_ring);

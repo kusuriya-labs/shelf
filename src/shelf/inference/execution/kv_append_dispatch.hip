@@ -27,6 +27,7 @@ namespace {
 
 using ::shelf::state::PagedKVPoolBF16View;
 using ::shelf::state::PagedKVPoolFP8View;
+using ::shelf::state::PagedKVPoolOctaveView;
 using ::shelf::runtime::KernelId;
 
 const ::shelf::runtime::StateBinding* find_state_binding_for_descriptor(
@@ -86,17 +87,30 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
         return Status::invalid_state("kv-append: block table invalid", __FILE__, __LINE__);
 
     const uint32_t dtype_raw = ctx.model_state.kv_dtype;
+    if (dtype_raw > static_cast<uint32_t>(::shelf::kernel::KVCacheDType::OCTAVE))
+        return Status::invalid_state("kv-append: unknown KV dtype", __FILE__, __LINE__);
     const ::shelf::kernel::KVCacheDType kv_dtype =
-        dtype_raw == 1u ? ::shelf::kernel::KVCacheDType::FP8_E4M3
-                        : ::shelf::kernel::KVCacheDType::BF16;
+        static_cast<::shelf::kernel::KVCacheDType>(dtype_raw);
     const bool fp8 = kv_dtype == ::shelf::kernel::KVCacheDType::FP8_E4M3;
+    const bool octave = kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE;
 
     KvAppendResolvedArgs out;
     out.kv_dtype = kv_dtype;
 
     uint32_t page_tokens = 0, num_pages = 0, num_layers = 0, kv_heads = 0, head_dim = 0;
     uint32_t ept = 0, epp = 0, epl = 0;
-    if (fp8) {
+    if (octave) {
+        const PagedKVPoolOctaveView& kv = ctx.model_state.kv_octave;
+        if (kv.k_pool == nullptr || kv.v_pool == nullptr || kv.levels == nullptr)
+            return Status::invalid_state("kv-append: Octave pool null", __FILE__, __LINE__);
+        page_tokens = kv.page_tokens; num_pages = kv.num_pages;
+        num_layers = kv.num_attention_layers; kv_heads = kv.kv_heads; head_dim = kv.head_dim;
+        ept = kv.kv_heads * kv.head_dim;
+        epp = kv.page_tokens * ept;
+        epl = kv.num_pages * epp;
+        out.k_octave_pool = kv.k_pool; out.v_octave_pool = kv.v_pool;
+        out.octave_levels = kv.levels; out.octave_format = kv.format;
+    } else if (fp8) {
         const PagedKVPoolFP8View& kv = ctx.model_state.kv_fp8;
         if (kv.k_pool == nullptr || kv.v_pool == nullptr ||
             kv.k_scale_pool == nullptr || kv.v_scale_pool == nullptr)
@@ -188,6 +202,13 @@ Result<PhysicalResolveStatus> resolve_kv_append_physical(
             out.k_scale_pool = reinterpret_cast<uint64_t>(a.k_scale_pool);
             out.v_scale_pool = reinterpret_cast<uint64_t>(a.v_scale_pool);
             break;
+        case ::shelf::kernel::KVCacheDType::OCTAVE:
+            out.variant = PhysicalKvAppendVariant::Octave;
+            out.k_pool = reinterpret_cast<uint64_t>(a.k_octave_pool);
+            out.v_pool = reinterpret_cast<uint64_t>(a.v_octave_pool);
+            out.k_extra_pool = reinterpret_cast<uint64_t>(a.octave_levels);
+            out.octave_format = a.octave_format;
+            break;
         default:
             return PhysicalResolveStatus::NotApplicable;
     }
@@ -215,6 +236,11 @@ hipError_t launch_kv_append_physical(const PhysicalKvAppendLaunch& d,
                 reinterpret_cast<::shelf::kernel::fp8e4m3_storage_t*>(d.v_pool),
                 reinterpret_cast<float*>(d.k_scale_pool),
                 reinterpret_cast<float*>(d.v_scale_pool), stream);
+        case PhysicalKvAppendVariant::Octave:
+            return ::shelf::kernel::launch_kv_append_octave(
+                d.common, reinterpret_cast<uint8_t*>(d.k_pool),
+                reinterpret_cast<uint8_t*>(d.v_pool),
+                reinterpret_cast<const float*>(d.k_extra_pool), d.octave_format, stream);
         default:
             return hipErrorNotSupported;
     }

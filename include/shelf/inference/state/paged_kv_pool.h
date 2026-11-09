@@ -15,6 +15,7 @@ namespace state {
 
 using ::shelf::kernel::KVCacheDType;
 using ::shelf::kernel::fp8e4m3_storage_t;
+using ::shelf::kernel::OctaveKVCacheFormat;
 
 struct PagedKVBatchDeviceView {
     bf16_t* k_pool = nullptr;
@@ -88,6 +89,26 @@ struct PagedKVPoolFP8View {
     uint32_t elems_per_layer = 0;
 };
 
+struct PagedKVPoolOctaveView {
+    uint8_t* k_pool = nullptr;
+    uint8_t* v_pool = nullptr;
+    const float* levels = nullptr;
+    uint32_t page_tokens = 0;
+    uint32_t num_pages = 0;
+    uint32_t num_attention_layers = 0;
+    uint32_t kv_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t k_slot_bytes = 0;
+    uint32_t v_slot_bytes = 0;
+    uint32_t k_bytes_per_token = 0;
+    uint32_t v_bytes_per_token = 0;
+    uint32_t k_bytes_per_page = 0;
+    uint32_t v_bytes_per_page = 0;
+    uint32_t k_bytes_per_layer = 0;
+    uint32_t v_bytes_per_layer = 0;
+    OctaveKVCacheFormat format{};
+};
+
 class PagedKVPool {
  public:
     static Result<PagedKVPool> create(
@@ -112,14 +133,16 @@ class PagedKVPool {
         uint32_t num_attention_layers,
         uint32_t kv_heads,
         uint32_t head_dim,
-        KVCacheDType dtype);
+        KVCacheDType dtype,
+        OctaveKVCacheFormat octave_format = {});
 
     static std::size_t page_bytes(
         uint32_t page_tokens,
         uint32_t num_attention_layers,
         uint32_t kv_heads,
         uint32_t head_dim,
-        KVCacheDType dtype) noexcept;
+        KVCacheDType dtype,
+        OctaveKVCacheFormat octave_format = {}) noexcept;
 
     Result<PageId> allocate();
 
@@ -151,7 +174,9 @@ class PagedKVPool {
     const gpu::Tensor& v_pool() const noexcept { return v_pool_; }
     const gpu::Tensor& k_scale_pool() const noexcept { return k_scale_pool_; }
     const gpu::Tensor& v_scale_pool() const noexcept { return v_scale_pool_; }
+    const gpu::Tensor& octave_levels() const noexcept { return octave_levels_; }
     KVCacheDType dtype() const noexcept { return dtype_; }
+    OctaveKVCacheFormat octave_format() const noexcept { return octave_format_; }
 
     uint32_t num_pages() const noexcept { return num_pages_; }
     uint32_t page_tokens() const noexcept { return page_tokens_; }
@@ -192,7 +217,9 @@ class PagedKVPool {
     gpu::Tensor v_pool_;
     gpu::Tensor k_scale_pool_;
     gpu::Tensor v_scale_pool_;
+    gpu::Tensor octave_levels_;
     KVCacheDType dtype_ = KVCacheDType::BF16;
+    OctaveKVCacheFormat octave_format_{};
 
     uint32_t num_pages_;
     uint32_t page_tokens_;
@@ -256,6 +283,28 @@ inline PagedKVPoolFP8View make_paged_kv_fp8_view(const PagedKVPool& pool) {
     v.elems_per_token = pool.kv_heads() * pool.head_dim();
     v.elems_per_page = v.page_tokens * v.elems_per_token;
     v.elems_per_layer = v.num_pages * v.elems_per_page;
+    return v;
+}
+
+inline PagedKVPoolOctaveView make_paged_kv_octave_view(const PagedKVPool& pool) {
+    PagedKVPoolOctaveView v{};
+    v.k_pool = pool.k_pool().data<uint8_t>();
+    v.v_pool = pool.v_pool().data<uint8_t>();
+    v.levels = pool.octave_levels().data<float>();
+    v.page_tokens = pool.page_tokens();
+    v.num_pages = pool.num_pages();
+    v.num_attention_layers = pool.num_attention_layers();
+    v.kv_heads = pool.kv_heads();
+    v.head_dim = pool.head_dim();
+    v.format = pool.octave_format();
+    v.k_slot_bytes = ::shelf::kernel::octave_k_slot_bytes(v.format);
+    v.v_slot_bytes = ::shelf::kernel::octave_v_slot_bytes(v.format);
+    v.k_bytes_per_token = v.kv_heads * v.k_slot_bytes;
+    v.v_bytes_per_token = v.kv_heads * v.v_slot_bytes;
+    v.k_bytes_per_page = v.page_tokens * v.k_bytes_per_token;
+    v.v_bytes_per_page = v.page_tokens * v.v_bytes_per_token;
+    v.k_bytes_per_layer = v.num_pages * v.k_bytes_per_page;
+    v.v_bytes_per_layer = v.num_pages * v.v_bytes_per_page;
     return v;
 }
 

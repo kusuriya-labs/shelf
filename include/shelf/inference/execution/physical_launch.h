@@ -283,6 +283,7 @@ hipError_t launch_rope_physical(const PhysicalRopeLaunch& d, hipStream_t stream)
 enum class PhysicalKvAppendVariant : uint8_t {
     Bf16 = 0,
     Fp8E4M3 = 1,
+    Octave = 2,
     Unsupported = 255,
 };
 
@@ -296,6 +297,7 @@ struct PhysicalKvAppendLaunch {
     uint64_t k_extra_pool = 0;
     uint64_t v_extra_pool = 0;
     uint32_t blocks_per_head = 0;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
     uint32_t grid = 0;
     uint32_t workgroup = 0;
 };

@@ -59,6 +59,7 @@ struct PipelineStageRuntimeConfig {
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
+    ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     std::size_t working_set_reserve_bytes = 0;
     std::uint32_t kv_pool_pages = 0;
@@ -112,6 +113,7 @@ struct PipelineParallelConfig {
     std::uint32_t max_seq_len = 16;
     std::uint32_t page_tokens = 16;
     KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
+    ::shelf::kernel::OctaveKVCacheFormat octave_kv_format{};
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     std::size_t working_set_reserve_bytes = 0;
     EffectiveRopeProfile rope_profile;

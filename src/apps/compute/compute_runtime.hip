@@ -303,7 +303,8 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
 
     const std::size_t kv_page_bytes = state::PagedKVPool::page_bytes(
-        config_.page_tokens, num_attn_layers, kv_heads, head_dim, config_.kv_cache_dtype);
+        config_.page_tokens, num_attn_layers, kv_heads, head_dim, config_.kv_cache_dtype,
+        config_.octave_kv_format);
     if (kv_page_bytes == 0u) {
         return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
@@ -405,7 +406,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 
     auto kv_pool_result = state::PagedKVPool::create(
         *arena_, kv_pool_pages, config_.page_tokens, num_attn_layers, kv_heads, head_dim,
-        config_.kv_cache_dtype);
+        config_.kv_cache_dtype, config_.octave_kv_format);
     if (!kv_pool_result.ok()) {
         return kv_pool_result.status();
     }
@@ -569,6 +570,7 @@ Status Qwen35ComputeRuntime::initialize_pipeline_parallel() {
     pp_config.max_seq_len = config_.max_seq_len;
     pp_config.page_tokens = config_.page_tokens;
     pp_config.kv_cache_dtype = config_.kv_cache_dtype;
+    pp_config.octave_kv_format = config_.octave_kv_format;
     pp_config.arena_bytes = config_.arena_bytes;
     pp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
     if (config_.rope_profile.has_value()) {
@@ -625,6 +627,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.max_seq_len = config_.max_seq_len;
     tp_config.page_tokens = config_.page_tokens;
     tp_config.kv_cache_dtype = config_.kv_cache_dtype;
+    tp_config.octave_kv_format = config_.octave_kv_format;
     tp_config.arena_bytes = config_.arena_bytes;
     tp_config.working_set_reserve_bytes = config_.working_set_reserve_bytes;
     tp_config.prefix_cache = config_.prefix_cache;
