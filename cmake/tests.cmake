@@ -261,6 +261,7 @@ shelf_add_test(NAME test_rmsnorm SOURCE kernels/optimized/test_rmsnorm.hip LABEL
 shelf_add_test(NAME test_l2_normalize SOURCE kernels/optimized/test_l2_normalize.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_output_gather SOURCE kernels/optimized/test_output_gather.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_kv_append SOURCE kernels/optimized/test_kv_append.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_kv_octave SOURCE kernels/optimized/test_kv_octave.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_paged_attention SOURCE kernels/optimized/test_paged_attention.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_rope SOURCE kernels/optimized/test_rope.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_rope_yarn SOURCE kernels/optimized/test_rope_yarn.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
@@ -538,6 +539,24 @@ add_test(NAME test_compute_mtp_drafts_reject_over_ceiling
 set_tests_properties(test_compute_mtp_drafts_reject_over_ceiling PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --mtp-drafts")
+
+add_test(NAME test_compute_mtp_accepts_octave
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --mtp-drafts 4
+             --kv-cache-dtype octave:c4v4)
+set_tests_properties(test_compute_mtp_accepts_octave PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json"
+                     FAIL_REGULAR_EXPRESSION "Octave KV cache currently requires")
+
+add_test(NAME test_compute_dflash2_accepts_octave
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --dflash2-model-dir placeholder
+             --dflash2-drafts 7 --kv-cache-dtype octave:c4v4)
+set_tests_properties(test_compute_dflash2_accepts_octave PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json"
+                     FAIL_REGULAR_EXPRESSION "Octave KV cache currently requires")
 
 add_test(NAME test_compute_rope_cap_native_over
          COMMAND $<TARGET_FILE:shelf-compute>

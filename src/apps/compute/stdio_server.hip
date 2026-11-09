@@ -1101,7 +1101,9 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         mtp_config.max_batch_rows = std::min(
             runtime.executor().config.max_batch_rows,
             shelf::qwen35::runtime::kMtpMaxPrefillRows);
-        mtp_config.kv_dtype = runtime.config().kv_cache_dtype;
+        mtp_config.kv_dtype =
+            runtime.config().kv_cache_dtype == shelf::kernel::KVCacheDType::OCTAVE
+                ? shelf::kernel::KVCacheDType::BF16 : runtime.config().kv_cache_dtype;
         if (runtime.config().rope_profile.has_value()) {
             mtp_config.rope_profile = *runtime.config().rope_profile;
         }

@@ -1820,9 +1820,10 @@ Result<Executor> create_executor(
     }
 
     if (kv_pool.dtype() != KVCacheDType::BF16
-        && kv_pool.dtype() != KVCacheDType::FP8_E4M3) {
+        && kv_pool.dtype() != KVCacheDType::FP8_E4M3
+        && kv_pool.dtype() != KVCacheDType::OCTAVE) {
         return Status::unsupported(
-            "Qwen35 target executor supports BF16 or FP8_E4M3 KV only",
+            "Qwen35 target executor supports BF16, FP8_E4M3 or Octave KV only",
             __FILE__, __LINE__);
     }
     if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
@@ -1851,8 +1852,34 @@ Result<Executor> create_executor(
                 __FILE__, __LINE__);
         }
     }
+    if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
+        if (!::shelf::kernel::octave_format_valid(kv_pool.octave_format()) ||
+            kv_pool.head_dim() != 256u || kv_pool.octave_levels().dim(0) != 7u * 64u) {
+            return Status::invalid_state(
+                "Octave KV pool format, head dimension or Lloyd-Max table is invalid",
+                __FILE__, __LINE__);
+        }
+        const int device = kv_pool.k_pool().physical_device();
+        if (device != kv_pool.v_pool().physical_device() ||
+            device != kv_pool.octave_levels().physical_device() ||
+            device != arena.device()) {
+            return Status::invalid_state(
+                "Octave KV pools and Lloyd-Max table must share the executor arena device",
+                __FILE__, __LINE__);
+        }
+    }
 
     const shelf::qwen_hybrid::QwenHybridConfig& tc = *input.model.config;
+    if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
+        const uint32_t rotary_dim = static_cast<uint32_t>(
+            static_cast<double>(tc.attention_head_dim) * tc.partial_rotary_factor);
+        if (tc.identity_declares_routed_experts || tc.attention_head_dim != 256u ||
+            rotary_dim != 64u || config.tp != nullptr || config.stage.enabled) {
+            return Status::unsupported(
+                "Octave KV cache requires dense Qwen, head_dim 256, rotary_dim 64, TP=1 and PP=1",
+                __FILE__, __LINE__);
+        }
+    }
     {
         const GdnStatePoolLayout expected_storage =
             make_qwen35_gdn_state_layout_local(
@@ -2118,6 +2145,8 @@ Result<Executor> create_executor(
         }
         if (kv_pool.dtype() == KVCacheDType::FP8_E4M3) {
             ms.kv_fp8 = make_paged_kv_fp8_view(kv_pool);
+        } else if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
+            ms.kv_octave = make_paged_kv_octave_view(kv_pool);
         } else {
             ms.kv_bf16 = make_paged_kv_bf16_view(kv_pool);
         }

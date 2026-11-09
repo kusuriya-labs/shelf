@@ -72,6 +72,7 @@ cmake -S . -B build -DSHELF_HIP_GRAPH=ON
 単一 request の speculative verify も graph で実行する場合は、実行時に
 `SHELF_GRAPH_VERIFY=1` を指定する。tree verify、stochastic verify、QSA / PLE
 history を使う verify は通常の実行経路に戻る。
+Octave KV cache の append と decode / verify attention も同じ graph に capture される。
 
 ## 成果物
 

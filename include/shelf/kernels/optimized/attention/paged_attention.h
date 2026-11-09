@@ -14,6 +14,16 @@ inline constexpr uint32_t kPagedAttentionBlock = 256u;
 inline constexpr uint32_t kPagedAttentionSplitBlock = 128u;
 inline constexpr uint32_t kPagedAttentionPrefillBlock = 256u;
 inline constexpr uint32_t kPagedAttentionPrefillTileRows = 32u;
+inline constexpr uint32_t kOctavePrefillKvBlockTokens = 2048u;
+
+inline constexpr uint64_t octave_prefill_splitkv_scratch_bytes(
+    uint32_t rows, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim) {
+    const uint64_t decoded = 2ull * kOctavePrefillKvBlockTokens *
+        kv_heads * head_dim * sizeof(bf16_t);
+    const uint64_t softmax = 2ull * rows * q_heads * sizeof(float);
+    return decoded + softmax;
+}
 
 // The split-KV decode kernels are instantiated per (kv dtype, q_per_kv). A geometry outside
 // the table runs the non-split decode kernel, which walks the whole visible range in one
@@ -210,6 +220,27 @@ launch_attention_paged_prefill_bf16(
     hipStream_t stream);
 
 hipError_t
+launch_attention_paged_prefill_octave(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    hipStream_t stream);
+
+hipError_t
+launch_attention_paged_prefill_octave_splitkv(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    void* scratch,
+    uint64_t scratch_bytes,
+    uint32_t max_visible_tokens,
+    hipStream_t stream);
+
+hipError_t
 launch_attention_paged_prefill_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
 
@@ -267,6 +298,35 @@ launch_attention_paged_fp8_split(
     float* partials,
     uint32_t splits,
 
+    hipStream_t stream);
+
+hipError_t launch_octave_kv_dequant(
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    bf16_t* k_scratch,
+    bf16_t* v_scratch,
+    OctaveKVCacheFormat format,
+    uint32_t layer,
+    uint32_t num_pages,
+    uint32_t page_tokens,
+    uint32_t kv_heads,
+    hipStream_t stream);
+
+hipError_t launch_attention_paged_octave_split(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    float* partials,
+    uint32_t splits,
+    hipStream_t stream);
+
+hipError_t launch_attention_paged_octave_reduce(
+    const PagedAttentionCommonArgs& common,
+    const float* partials,
+    uint32_t splits,
     hipStream_t stream);
 
 }  // namespace shelf::kernel

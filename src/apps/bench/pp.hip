@@ -44,6 +44,7 @@ struct BenchOptions {
     std::string model_dir;
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
+    shelf::kernel::OctaveKVCacheFormat octave_format{};
     double arena_gib = 0.0;
     bool arena_auto = true;
     int runs = 3;
@@ -70,7 +71,7 @@ void print_usage(FILE* out) {
         "  --tensor-parallel N          tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
-        "  --kv-cache-dtype bf16|fp8    (default bf16)\n"
+        "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
@@ -176,9 +177,15 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             opts.model_dir = need_value();
         } else if (key == "--kv-cache-dtype") {
             opts.kv_cache_dtype = need_value();
-            if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8") {
+            if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8" &&
+                !shelf::kernel::parse_octave_kv_cache_format(
+                    opts.kv_cache_dtype, opts.octave_format)) {
                 fprintf(stderr, "invalid --kv-cache-dtype\n");
                 return 1;
+            }
+            if (opts.kv_cache_dtype.starts_with("octave") && opts.tp != 1) {
+                fprintf(stderr, "Octave KV cache requires tensor parallel 1\n");
+                return false;
             }
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
@@ -430,11 +437,14 @@ int run_pp(int argc, char** argv) {
         }
         tp1_rec_pool.emplace(rec_pool_result.release());
 
+        const bool octave = shelf::kernel::parse_octave_kv_cache_format(
+            opts.kv_cache_dtype, opts.octave_format);
+        const auto kv_dtype = octave ? shelf::kernel::KVCacheDType::OCTAVE
+            : opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                             : shelf::kernel::KVCacheDType::BF16;
         auto kv_pool_result = shelf::state::PagedKVPool::create(
             *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-            num_attn_layers, kv_heads, head_dim,
-            opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
-                                         : shelf::kernel::KVCacheDType::BF16);
+            num_attn_layers, kv_heads, head_dim, kv_dtype, opts.octave_format);
         if (!kv_pool_result.ok()) {
             fprintf(stderr, "PagedKVPool::create failed: %s\n",
                 kv_pool_result.status().message().c_str());

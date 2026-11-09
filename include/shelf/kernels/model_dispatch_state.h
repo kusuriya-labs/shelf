@@ -23,6 +23,7 @@ struct ModelDispatchStateView {
     ::shelf::state::GdnStatePoolDeviceView gdn{};
     ::shelf::state::PagedKVPoolBF16View kv_bf16{};
     ::shelf::state::PagedKVPoolFP8View kv_fp8{};
+    ::shelf::state::PagedKVPoolOctaveView kv_octave{};
     PleConvStateView ple_conv{};
     ::shelf::state::QsaKeyStatePoolDeviceView qsa{};
     uint32_t kv_dtype = 0;

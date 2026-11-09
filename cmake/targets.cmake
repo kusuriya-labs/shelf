@@ -96,6 +96,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
     src/shelf/kernels/optimized/attention/paged_prefill.hip
+    src/shelf/kernels/optimized/attention/octave.hip
     src/shelf/kernels/optimized/attention/rope.hip
     src/shelf/kernels/optimized/embedding.hip
     src/shelf/kernels/optimized/elementwise.hip

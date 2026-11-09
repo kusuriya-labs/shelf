@@ -60,6 +60,7 @@ struct Qwen35RuntimeConfig {
     uint32_t tp = 1;
     uint32_t pipeline_parallel = 1;
     kernel::KVCacheDType kv_cache_dtype = kernel::KVCacheDType::BF16;
+    kernel::OctaveKVCacheFormat octave_kv_format{};
     bool verify_weights = false;
     uint32_t max_scheduled_output_rows = 0;
     std::array<uint32_t, qwen35::kMaxTargetHiddenTaps> target_hidden_taps{};

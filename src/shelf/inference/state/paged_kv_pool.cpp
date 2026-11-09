@@ -1,16 +1,54 @@
 #include <shelf/inference/state/paged_kv_pool.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace shelf {
 namespace state {
+namespace {
+
+double octave_phi(double x) {
+    return std::exp(-0.5 * x * x) / std::sqrt(2.0 * 3.14159265358979323846);
+}
+
+double octave_Phi(double x) {
+    return 0.5 * std::erfc(-x / std::sqrt(2.0));
+}
+
+std::vector<float> make_octave_levels() {
+    std::vector<float> table(7u * 64u, 0.0f);
+    for (int bits = 3; bits <= 6; ++bits) {
+        const int n = 1 << bits;
+        std::vector<double> levels(n);
+        for (int i = 0; i < n; ++i)
+            levels[i] = -2.5 + 5.0 * (static_cast<double>(i) + 0.5) / n;
+        for (int it = 0; it < 4000; ++it) {
+            std::vector<double> boundaries(n + 1);
+            boundaries[0] = -12.0;
+            boundaries[n] = 12.0;
+            for (int i = 1; i < n; ++i)
+                boundaries[i] = 0.5 * (levels[i - 1] + levels[i]);
+            for (int i = 0; i < n; ++i) {
+                const double mass = octave_Phi(boundaries[i + 1]) - octave_Phi(boundaries[i]);
+                if (mass > 1e-300)
+                    levels[i] = (octave_phi(boundaries[i]) - octave_phi(boundaries[i + 1])) / mass;
+            }
+        }
+        for (int i = 0; i < n; ++i)
+            table[static_cast<std::size_t>(bits) * 64u + i] = static_cast<float>(levels[i]);
+    }
+    return table;
+}
+
+}  // namespace
 
 std::size_t PagedKVPool::page_bytes(
     uint32_t page_tokens,
     uint32_t num_attention_layers,
     uint32_t kv_heads,
     uint32_t head_dim,
-    KVCacheDType dtype) noexcept {
+    KVCacheDType dtype,
+    OctaveKVCacheFormat octave_format) noexcept {
     if (page_tokens == 0u || num_attention_layers == 0u || kv_heads == 0u ||
         head_dim == 0u) {
         return 0u;
@@ -19,6 +57,13 @@ std::size_t PagedKVPool::page_bytes(
         static_cast<std::size_t>(page_tokens) * kv_heads * head_dim;
     const std::size_t body =
         2u * static_cast<std::size_t>(num_attention_layers) * layer_page;
+    if (dtype == KVCacheDType::OCTAVE) {
+        if (head_dim != 256u || !::shelf::kernel::octave_format_valid(octave_format))
+            return 0u;
+        return static_cast<std::size_t>(num_attention_layers) * page_tokens * kv_heads *
+               (::shelf::kernel::octave_k_slot_bytes(octave_format) +
+                ::shelf::kernel::octave_v_slot_bytes(octave_format));
+    }
     if (dtype == KVCacheDType::FP8_E4M3) {
         const std::size_t scales =
             2u * static_cast<std::size_t>(num_attention_layers) *
@@ -56,14 +101,23 @@ Result<PagedKVPool> PagedKVPool::create(
     uint32_t num_attention_layers,
     uint32_t kv_heads,
     uint32_t head_dim,
-    KVCacheDType dtype) {
+    KVCacheDType dtype,
+    OctaveKVCacheFormat octave_format) {
     if (num_pages == 0) return Status::invalid_argument("num_pages must be > 0", __FILE__, __LINE__);
     if (page_tokens == 0) return Status::invalid_argument("page_tokens must be > 0", __FILE__, __LINE__);
     if (num_attention_layers == 0) return Status::invalid_argument("num_attention_layers must be > 0", __FILE__, __LINE__);
     if (kv_heads == 0) return Status::invalid_argument("kv_heads must be > 0", __FILE__, __LINE__);
     if (head_dim == 0) return Status::invalid_argument("head_dim must be > 0", __FILE__, __LINE__);
-    if (dtype != KVCacheDType::BF16 && dtype != KVCacheDType::FP8_E4M3) {
+    if (dtype != KVCacheDType::BF16 && dtype != KVCacheDType::FP8_E4M3 &&
+        dtype != KVCacheDType::OCTAVE) {
         return Status::invalid_argument("unknown KV cache dtype", __FILE__, __LINE__);
+    }
+    if (dtype == KVCacheDType::OCTAVE && head_dim != 256u) {
+        return Status::invalid_argument("Octave KV cache requires head_dim 256", __FILE__, __LINE__);
+    }
+    if (dtype == KVCacheDType::OCTAVE &&
+        !::shelf::kernel::octave_format_valid(octave_format)) {
+        return Status::invalid_argument("invalid Octave KV cache format", __FILE__, __LINE__);
     }
 
     PagedKVPool pool;
@@ -73,6 +127,7 @@ Result<PagedKVPool> PagedKVPool::create(
     pool.kv_heads_ = kv_heads;
     pool.head_dim_ = head_dim;
     pool.dtype_ = dtype;
+    pool.octave_format_ = octave_format;
     pool.used_count_ = 0;
 
     const std::size_t pool_elems =
@@ -88,7 +143,39 @@ Result<PagedKVPool> PagedKVPool::create(
         * static_cast<std::size_t>(page_tokens)
         * static_cast<std::size_t>(kv_heads);
 
-    if (dtype == KVCacheDType::FP8_E4M3) {
+    if (dtype == KVCacheDType::OCTAVE) {
+        const std::size_t slots = static_cast<std::size_t>(num_attention_layers) *
+                                  num_pages * page_tokens * kv_heads;
+        const std::size_t k_bytes =
+            slots * ::shelf::kernel::octave_k_slot_bytes(octave_format);
+        const std::size_t v_bytes =
+            slots * ::shelf::kernel::octave_v_slot_bytes(octave_format);
+        auto k_alloc = arena.allocate_aligned(k_bytes, 256);
+        if (!k_alloc.ok()) return k_alloc.status();
+        auto k_tensor = gpu::Tensor::create<uint8_t>(k_alloc.release(), {k_bytes}, {1});
+        if (!k_tensor.ok()) return k_tensor.status();
+        pool.k_pool_ = k_tensor.release();
+
+        auto v_alloc = arena.allocate_aligned(v_bytes, 256);
+        if (!v_alloc.ok()) return v_alloc.status();
+        auto v_tensor = gpu::Tensor::create<uint8_t>(v_alloc.release(), {v_bytes}, {1});
+        if (!v_tensor.ok()) return v_tensor.status();
+        pool.v_pool_ = v_tensor.release();
+        const std::vector<float> levels = make_octave_levels();
+        auto levels_alloc = arena.allocate_aligned(levels.size() * sizeof(float), 256);
+        if (!levels_alloc.ok()) return levels_alloc.status();
+        auto levels_tensor = gpu::Tensor::create<float>(levels_alloc.release(), {levels.size()}, {1});
+        if (!levels_tensor.ok()) return levels_tensor.status();
+        pool.octave_levels_ = levels_tensor.release();
+        const hipError_t levels_copy = hipMemcpy(
+            pool.octave_levels_.data<float>(), levels.data(), levels.size() * sizeof(float),
+            hipMemcpyHostToDevice);
+        if (levels_copy != hipSuccess) {
+            return Status::hip_error("upload Octave Lloyd-Max levels",
+                                     hipGetErrorString(levels_copy), __FILE__, __LINE__);
+        }
+        pool.reserved_bytes_ = k_bytes + v_bytes;
+    } else if (dtype == KVCacheDType::FP8_E4M3) {
         auto k_alloc = arena.allocate_aligned(pool_elems * sizeof(fp8e4m3_storage_t), 256);
         if (!k_alloc.ok()) return k_alloc.status();
         auto k_tensor = gpu::Tensor::create<fp8e4m3_storage_t>(k_alloc.release(), {pool_elems}, {1});
@@ -311,7 +398,10 @@ gpu::Tensor PagedKVPool::k_view(uint32_t layer, PageId page) const {
     if (layer >= num_attention_layers_) return gpu::Tensor{};
     if (page >= num_pages_) return gpu::Tensor{};
 
-    std::size_t elems_per_page = static_cast<std::size_t>(page_tokens_) * kv_heads_ * head_dim_;
+    std::size_t elems_per_page = dtype_ == KVCacheDType::OCTAVE
+        ? static_cast<std::size_t>(page_tokens_) * kv_heads_ *
+              ::shelf::kernel::octave_k_slot_bytes(octave_format_)
+        : static_cast<std::size_t>(page_tokens_) * kv_heads_ * head_dim_;
     std::size_t elems_per_layer = static_cast<std::size_t>(num_pages_) * elems_per_page;
 
     std::size_t layer_offset = static_cast<std::size_t>(layer) * elems_per_layer;
@@ -333,7 +423,10 @@ gpu::Tensor PagedKVPool::v_view(uint32_t layer, PageId page) const {
     if (layer >= num_attention_layers_) return gpu::Tensor{};
     if (page >= num_pages_) return gpu::Tensor{};
 
-    std::size_t elems_per_page = static_cast<std::size_t>(page_tokens_) * kv_heads_ * head_dim_;
+    std::size_t elems_per_page = dtype_ == KVCacheDType::OCTAVE
+        ? static_cast<std::size_t>(page_tokens_) * kv_heads_ *
+              ::shelf::kernel::octave_v_slot_bytes(octave_format_)
+        : static_cast<std::size_t>(page_tokens_) * kv_heads_ * head_dim_;
     std::size_t elems_per_layer = static_cast<std::size_t>(num_pages_) * elems_per_page;
 
     std::size_t layer_offset = static_cast<std::size_t>(layer) * elems_per_layer;
@@ -359,6 +452,9 @@ Status PagedKVPool::copy_page_from(
     if (dtype_ != src.dtype_) {
         return Status::invalid_argument("KV page copy dtype mismatch", __FILE__, __LINE__);
     }
+    if (dtype_ == KVCacheDType::OCTAVE && octave_format_ != src.octave_format_) {
+        return Status::invalid_argument("KV page copy Octave format mismatch", __FILE__, __LINE__);
+    }
     if (page_tokens_ != src.page_tokens_ ||
         num_attention_layers_ != src.num_attention_layers_ ||
         kv_heads_ != src.kv_heads_ ||
@@ -377,6 +473,10 @@ Status PagedKVPool::copy_page_from(
     const std::size_t kv_bytes = dtype_ == KVCacheDType::FP8_E4M3
         ? elems_per_page * sizeof(fp8e4m3_storage_t)
         : elems_per_page * sizeof(bf16_t);
+    const std::size_t octave_k_bytes = static_cast<std::size_t>(page_tokens_) * kv_heads_ *
+        ::shelf::kernel::octave_k_slot_bytes(octave_format_);
+    const std::size_t octave_v_bytes = static_cast<std::size_t>(page_tokens_) * kv_heads_ *
+        ::shelf::kernel::octave_v_slot_bytes(octave_format_);
     const std::size_t scale_elems_per_page =
         static_cast<std::size_t>(page_tokens_) * kv_heads_;
     const std::size_t scale_bytes = scale_elems_per_page * sizeof(float);
@@ -390,7 +490,20 @@ Status PagedKVPool::copy_page_from(
             return Status::invalid_state("KV page copy view unavailable", __FILE__, __LINE__);
         }
 
-        if (dtype_ == KVCacheDType::FP8_E4M3) {
+        if (dtype_ == KVCacheDType::OCTAVE) {
+            hipError_t err = hipMemcpyAsync(
+                dst_k.data<uint8_t>(), src_k.data<uint8_t>(), octave_k_bytes,
+                hipMemcpyDeviceToDevice, stream);
+            if (err != hipSuccess) {
+                return Status::hip_error("copy_page_from Octave K", hipGetErrorString(err), __FILE__, __LINE__);
+            }
+            err = hipMemcpyAsync(
+                dst_v.data<uint8_t>(), src_v.data<uint8_t>(), octave_v_bytes,
+                hipMemcpyDeviceToDevice, stream);
+            if (err != hipSuccess) {
+                return Status::hip_error("copy_page_from Octave V", hipGetErrorString(err), __FILE__, __LINE__);
+            }
+        } else if (dtype_ == KVCacheDType::FP8_E4M3) {
             hipError_t err = hipMemcpyAsync(
                 dst_k.data<fp8e4m3_storage_t>(), src_k.data<fp8e4m3_storage_t>(),
                 kv_bytes, hipMemcpyDeviceToDevice, stream);

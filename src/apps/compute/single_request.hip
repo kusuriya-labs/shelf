@@ -826,7 +826,9 @@ int run_mtp_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     drafter_config.max_batch_rows = std::min(
         executor.config.max_batch_rows,
         shelf::qwen35::runtime::kMtpMaxPrefillRows);
-    drafter_config.kv_dtype = runtime.config().kv_cache_dtype;
+    drafter_config.kv_dtype =
+        runtime.config().kv_cache_dtype == shelf::kernel::KVCacheDType::OCTAVE
+            ? shelf::kernel::KVCacheDType::BF16 : runtime.config().kv_cache_dtype;
     if (runtime.config().rope_profile.has_value()) {
         drafter_config.rope_profile = *runtime.config().rope_profile;
     }

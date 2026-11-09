@@ -25,6 +25,8 @@ constexpr uint32_t kMeasuredMaxVisible24 = 524288;
 constexpr uint32_t kMeasuredMaxVisible16x2 = 262144;
 
 constexpr PagedAttentionRule kPagedAttentionRules[] = {
+    { ::shelf::kernel::KVCacheDType::OCTAVE, ::shelf::runtime::ValueDType::F32,
+      24, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible24 },
     { ::shelf::kernel::KVCacheDType::BF16, ::shelf::runtime::ValueDType::F32,
       16, 4, 256, 16, 1, kMeasuredMaxRows, 1, kMeasuredMaxVisible },
     { ::shelf::kernel::KVCacheDType::FP8_E4M3, ::shelf::runtime::ValueDType::F32,

@@ -21,6 +21,10 @@ struct KvAppendResolvedArgs {
     ::shelf::kernel::fp8e4m3_storage_t* v_fp8_pool = nullptr;
     float* k_scale_pool = nullptr;
     float* v_scale_pool = nullptr;
+    uint8_t* k_octave_pool = nullptr;
+    uint8_t* v_octave_pool = nullptr;
+    const float* octave_levels = nullptr;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
 };
 
 Result<KvAppendResolvedArgs>

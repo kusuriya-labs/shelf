@@ -283,6 +283,7 @@ hipError_t launch_rope_physical(const PhysicalRopeLaunch& d, hipStream_t stream)
 enum class PhysicalKvAppendVariant : uint8_t {
     Bf16 = 0,
     Fp8E4M3 = 1,
+    Octave = 2,
     Unsupported = 255,
 };
 
@@ -296,6 +297,7 @@ struct PhysicalKvAppendLaunch {
     uint64_t k_extra_pool = 0;
     uint64_t v_extra_pool = 0;
     uint32_t blocks_per_head = 0;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
     uint32_t grid = 0;
     uint32_t workgroup = 0;
 };
@@ -323,6 +325,9 @@ enum class PhysicalPagedAttentionVariant : uint8_t {
     Fp8SplitOther = 10,
     Bf16Prefill = 14,
     Fp8E4M3Prefill = 15,
+    OctaveSplit = 17,
+    OctaveReduce = 18,
+    OctavePrefill = 19,
     Unsupported = 255,
 };
 
@@ -343,12 +348,14 @@ struct PhysicalPagedAttentionKernel {
     uint32_t grid = 0;
     uint32_t workgroup = 0;
     uint32_t row_begin = 0;
+    uint32_t source_layer = 0;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
 };
 
 inline constexpr uint32_t kPhysicalPagedAttentionMaxPrefillRegions = 16u;
 
 inline constexpr uint32_t kPhysicalPagedAttentionMaxKernels =
-    2u + kPhysicalPagedAttentionMaxPrefillRegions;
+    4u + 2u * kPhysicalPagedAttentionMaxPrefillRegions;
 
 struct PhysicalPagedAttentionPlan {
     bool optimized = false;

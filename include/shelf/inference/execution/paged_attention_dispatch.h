@@ -22,6 +22,11 @@ struct PagedAttentionResolvedArgs {
     const ::shelf::kernel::fp8e4m3_storage_t* v_fp8_pool = nullptr;
     const float* k_scale_pool = nullptr;
     const float* v_scale_pool = nullptr;
+    const uint8_t* k_octave_pool = nullptr;
+    const uint8_t* v_octave_pool = nullptr;
+    const float* octave_levels = nullptr;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
+    uint32_t octave_source_layer = 0u;
 };
 
 Result<PagedAttentionResolvedArgs>
@@ -34,6 +39,7 @@ struct PagedAttentionPlan {
     bool optimized = false;
     bool use_prefill = false;
     uint32_t splits = 1u;
+    uint32_t prefill_kv_blocks = 0u;
 };
 
 constexpr uint32_t kPagedAttentionPrefillMinRows = 128u;

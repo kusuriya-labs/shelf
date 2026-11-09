@@ -371,6 +371,17 @@ def arena_gib_value(text: str):
     return text
 
 
+def kv_cache_dtype_value(text: str):
+    if text in ("bf16", "fp8", "octave_k3v3_compact", "octave_k3v3", "octave_k3v4"):
+        return text
+    import re
+    if re.fullmatch(r"octave:c[3-6]v[3-6]", text):
+        return text
+    if re.fullmatch(r"octave:b[3-6]n[3-6]v[3-6]", text):
+        return text
+    raise argparse.ArgumentTypeError("expected bf16, fp8, or a valid octave format")
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Shelf Server")
     parser.add_argument("--model-dir", required=True, help="model directory")
@@ -410,7 +421,7 @@ def parse_args(argv=None):
     parser.add_argument("--tensor-parallel", type=int, default=1, choices=(1, 2),
                         help="tensor parallel size forwarded to compute (default 1)")
     parser.add_argument("--kv-cache-dtype", default="bf16",
-                        choices=("bf16", "fp8"),
+                        type=kv_cache_dtype_value,
                         help="KV cache dtype (default bf16)")
     parser.add_argument("--page-tokens", type=int, default=16,
                         help="paged KV page size in tokens (default 16)")

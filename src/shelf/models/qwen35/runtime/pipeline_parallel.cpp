@@ -197,7 +197,8 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
     const std::uint32_t head_dim = static_cast<std::uint32_t>(tc.attention_head_dim);
 
     const std::size_t kv_page_bytes = PagedKVPool::page_bytes(
-        config.page_tokens, attention_layers, kv_heads, head_dim, config.kv_cache_dtype);
+        config.page_tokens, attention_layers, kv_heads, head_dim, config.kv_cache_dtype,
+        config.octave_kv_format);
     if (kv_page_bytes == 0u) {
         return Status::invalid_state("KV page geometry is zero", __FILE__, __LINE__);
     }
@@ -286,7 +287,7 @@ Result<std::unique_ptr<PipelineStageRuntime>> PipelineStageRuntime::create(
 
     auto kv_result = PagedKVPool::create(
         stage->arena_.value(), kv_pool_pages, config.page_tokens, attention_layers,
-        kv_heads, head_dim, config.kv_cache_dtype);
+        kv_heads, head_dim, config.kv_cache_dtype, config.octave_kv_format);
     if (!kv_result.ok()) return kv_result.status();
     stage->kv_pool_.emplace(kv_result.release());
 
@@ -365,6 +366,7 @@ Status PipelineParallelCoordinator::initialize(const PipelineParallelConfig& con
         stage_config.max_seq_len = config.max_seq_len;
         stage_config.page_tokens = config.page_tokens;
         stage_config.kv_cache_dtype = config.kv_cache_dtype;
+        stage_config.octave_kv_format = config.octave_kv_format;
         stage_config.arena_bytes = config.arena_bytes;
         stage_config.working_set_reserve_bytes = config.working_set_reserve_bytes;
         stage_config.kv_pool_pages = i == 0 ? 0u : kv_pages;

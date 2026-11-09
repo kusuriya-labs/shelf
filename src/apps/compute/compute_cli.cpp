@@ -1,4 +1,5 @@
 #include "compute_cli.h"
+#include <shelf/kernels/kv_types.h>
 
 #include <cerrno>
 #include <cmath>
@@ -75,7 +76,7 @@ void compute_usage(const char* prog) {
     printf("  --device N|N,M         GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0)\n");
     printf("  --tensor-parallel N    tensor parallel degree 1 | 2 | 4 (default 1)\n");
     printf("  --pipeline-parallel N  pipeline-parallel stage count (default 1; requires --tensor-parallel 1)\n");
-    printf("  --kv-cache-dtype TYPE  bf16 | fp8 (default bf16)\n");
+    printf("  --kv-cache-dtype TYPE  bf16 | fp8 | octave:cKvV | octave:bRnNvV (default bf16)\n");
     printf("  --rope-factor MODE     auto | 1 | 2 | 4; static YaRN rope factor\n");
     printf("                         (default auto = model config: native unless the\n");
     printf("                         checkpoint requests yarn)\n");
@@ -231,8 +232,10 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--kv-cache-dtype") == 0 && i + 1 < argc) {
             kv_cache_dtype = argv[++i];
-            if (kv_cache_dtype != "bf16" && kv_cache_dtype != "fp8") {
-                fprintf(stderr, "bad --kv-cache-dtype: %s (expected bf16 | fp8)\n", kv_cache_dtype.c_str());
+            shelf::kernel::OctaveKVCacheFormat octave_format{};
+            if (kv_cache_dtype != "bf16" && kv_cache_dtype != "fp8" &&
+                !shelf::kernel::parse_octave_kv_cache_format(kv_cache_dtype, octave_format)) {
+                fprintf(stderr, "bad --kv-cache-dtype: %s\n", kv_cache_dtype.c_str());
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--rope-factor") == 0 && i + 1 < argc) {
@@ -409,6 +412,14 @@ int validate_compute_options(const ComputeOptions& opt) {
     }
 
     const bool dflash_enabled = !dflash2_model_dir.empty();
+    shelf::kernel::OctaveKVCacheFormat octave_format{};
+    const bool octave = shelf::kernel::parse_octave_kv_cache_format(
+        kv_cache_dtype, octave_format);
+    if (octave && (tp != 1 || pipeline_parallel != 1)) {
+        fprintf(stderr,
+                "Octave KV cache currently requires TP=1 and PP=1\n");
+        return kComputeParseError;
+    }
     if (dflash_enabled) {
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
