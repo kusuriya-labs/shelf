@@ -82,3 +82,18 @@ descriptor は runtime の所有値として伝播させ、enum 値だけから�
 head dimension 256 と rotary dimension 64 以外、TP、PP、MoE、HIP graph、DFlash2 以外の
 特殊 attention 経路は実装済みと確認できるまで起動時に明示的に拒否する。
 BF16/FP8 の selector rule、layout、kernel symbol は変更しない。
+
+## M2 実測
+
+`s2k_0`〜`s2k_2`、context 2048、score 256、prefill chunk 2048 で、実 cache と
+fake-quant の全量量子化モードを比較した。いずれも BF16 KV dump を基準とした KL 平均である。
+
+| 形式 | 実 cache | fake-quant `PREFILL=1` | 比 |
+| --- | ---: | ---: | ---: |
+| c4v4 | 0.005331 | 0.005776 | 0.923 |
+| c5v5 | 0.002624 | 0.002640 | 0.994 |
+| b4n3v3 | 0.014150 | 0.013798 | 1.026 |
+
+M2 は attention 呼び出しごとに該当 layer の全物理 page を 1-layer BF16 scratch へ
+逆量子化する。未使用 page も変換するため遅いが、既存 BF16 attention と数値契約を共有できる。
+scratch は K/V 各 1 layer 分を pool と同時に確保し、page 当たりの memory plan に含めた。

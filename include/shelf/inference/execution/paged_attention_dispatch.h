@@ -22,6 +22,13 @@ struct PagedAttentionResolvedArgs {
     const ::shelf::kernel::fp8e4m3_storage_t* v_fp8_pool = nullptr;
     const float* k_scale_pool = nullptr;
     const float* v_scale_pool = nullptr;
+    const uint8_t* k_octave_pool = nullptr;
+    const uint8_t* v_octave_pool = nullptr;
+    const float* octave_levels = nullptr;
+    bf16_t* k_octave_scratch = nullptr;
+    bf16_t* v_octave_scratch = nullptr;
+    ::shelf::kernel::OctaveKVCacheFormat octave_format{};
+    uint32_t octave_source_layer = 0u;
 };
 
 Result<PagedAttentionResolvedArgs>

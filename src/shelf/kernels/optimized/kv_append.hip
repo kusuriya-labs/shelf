@@ -370,7 +370,11 @@ __device__ __forceinline__ void pack_plane(const uint8_t* codes, uint8_t* dst,
             const uint32_t code = codes[tid * fields + field];
             word |= ((code >> shift) & mask) << (field * plane_bits);
         }
-        reinterpret_cast<uint32_t*>(dst)[tid] = word;
+        uint8_t* bytes = dst + tid * 4u;
+        bytes[0] = static_cast<uint8_t>(word);
+        bytes[1] = static_cast<uint8_t>(word >> 8u);
+        bytes[2] = static_cast<uint8_t>(word >> 16u);
+        bytes[3] = static_cast<uint8_t>(word >> 24u);
     }
 }
 

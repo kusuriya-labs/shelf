@@ -1,5 +1,6 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/kv_append.h>
+#include <shelf/kernels/optimized/attention/paged_attention.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -220,6 +221,8 @@ void run_gpu_case(OctaveKVCacheFormat format, const char* name,
     uint8_t* d_k_pool = nullptr;
     uint8_t* d_v_pool = nullptr;
     float* d_levels = nullptr;
+    shelf::bf16_t* d_k_scratch = nullptr;
+    shelf::bf16_t* d_v_scratch = nullptr;
     uint32_t* d_slot = nullptr;
     uint32_t* d_position = nullptr;
     uint32_t* d_table = nullptr;
@@ -228,6 +231,8 @@ void run_gpu_case(OctaveKVCacheFormat format, const char* name,
               hip_ok(hipMalloc(&d_k_pool, expected_k.size()), "alloc K pool") &&
               hip_ok(hipMalloc(&d_v_pool, expected_v.size()), "alloc V pool") &&
               hip_ok(hipMalloc(&d_levels, levels.size() * sizeof(float)), "alloc levels") &&
+              hip_ok(hipMalloc(&d_k_scratch, 256u * sizeof(shelf::bf16_t)), "alloc K scratch") &&
+              hip_ok(hipMalloc(&d_v_scratch, 256u * sizeof(shelf::bf16_t)), "alloc V scratch") &&
               hip_ok(hipMalloc(&d_slot, sizeof(uint32_t)), "alloc slot") &&
               hip_ok(hipMalloc(&d_position, sizeof(uint32_t)), "alloc position") &&
               hip_ok(hipMalloc(&d_table, sizeof(uint32_t)), "alloc table");
@@ -281,11 +286,40 @@ void run_gpu_case(OctaveKVCacheFormat format, const char* name,
         check(actual_k.size() == shelf::kernel::octave_k_slot_bytes(format), name);
         check(actual_v.size() == shelf::kernel::octave_v_slot_bytes(format), name);
     }
+    std::vector<shelf::bf16_t> actual_k_dequant(256u), actual_v_dequant(256u);
+    if (ok) {
+        ok = hip_ok(shelf::kernel::launch_octave_kv_dequant(
+            d_k_pool, d_v_pool, d_levels, d_k_scratch, d_v_scratch, format,
+            0u, 1u, 1u, 1u, nullptr), "Octave dequant") &&
+             hip_ok(hipDeviceSynchronize(), "synchronize Octave dequant") &&
+             hip_ok(hipMemcpy(actual_k_dequant.data(), d_k_scratch,
+                              256u * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost),
+                    "read K scratch") &&
+             hip_ok(hipMemcpy(actual_v_dequant.data(), d_v_scratch,
+                              256u * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost),
+                    "read V scratch");
+    }
+    if (ok) {
+        float max_difference = 0.0f;
+        for (uint32_t i = 0u; i < 256u; ++i) {
+            uint32_t ku = static_cast<uint32_t>(actual_k_dequant[i].data) << 16u;
+            uint32_t vu = static_cast<uint32_t>(actual_v_dequant[i].data) << 16u;
+            float ka = 0.0f;
+            float va = 0.0f;
+            std::memcpy(&ka, &ku, sizeof(float));
+            std::memcpy(&va, &vu, sizeof(float));
+            max_difference = std::max(max_difference, std::fabs(ka - kq.reconstructed[i]));
+            max_difference = std::max(max_difference, std::fabs(va - vq.reconstructed[i]));
+        }
+        check(max_difference < 0.02f, name);
+    }
     if (d_k != nullptr) hipFree(d_k);
     if (d_v != nullptr) hipFree(d_v);
     if (d_k_pool != nullptr) hipFree(d_k_pool);
     if (d_v_pool != nullptr) hipFree(d_v_pool);
     if (d_levels != nullptr) hipFree(d_levels);
+    if (d_k_scratch != nullptr) hipFree(d_k_scratch);
+    if (d_v_scratch != nullptr) hipFree(d_v_scratch);
     if (d_slot != nullptr) hipFree(d_slot);
     if (d_position != nullptr) hipFree(d_position);
     if (d_table != nullptr) hipFree(d_table);

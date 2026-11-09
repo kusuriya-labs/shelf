@@ -1832,9 +1832,19 @@ Result<Executor> create_executor(
                 "Octave KV pool format, head dimension or Lloyd-Max table is invalid",
                 __FILE__, __LINE__);
         }
+        const std::size_t scratch_elems = static_cast<std::size_t>(kv_pool.num_pages()) *
+            kv_pool.page_tokens() * kv_pool.kv_heads() * kv_pool.head_dim();
+        if (kv_pool.octave_k_scratch().dim(0) != scratch_elems ||
+            kv_pool.octave_v_scratch().dim(0) != scratch_elems) {
+            return Status::invalid_state(
+                "Octave KV BF16 scratch element count mismatch", __FILE__, __LINE__);
+        }
         const int device = kv_pool.k_pool().physical_device();
         if (device != kv_pool.v_pool().physical_device() ||
-            device != kv_pool.octave_levels().physical_device() || device != arena.device()) {
+            device != kv_pool.octave_levels().physical_device() ||
+            device != kv_pool.octave_k_scratch().physical_device() ||
+            device != kv_pool.octave_v_scratch().physical_device() ||
+            device != arena.device()) {
             return Status::invalid_state(
                 "Octave KV pools and Lloyd-Max table must share the executor arena device",
                 __FILE__, __LINE__);

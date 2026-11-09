@@ -269,4 +269,17 @@ launch_attention_paged_fp8_split(
 
     hipStream_t stream);
 
+hipError_t launch_octave_kv_dequant(
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    bf16_t* k_scratch,
+    bf16_t* v_scratch,
+    OctaveKVCacheFormat format,
+    uint32_t layer,
+    uint32_t num_pages,
+    uint32_t page_tokens,
+    uint32_t kv_heads,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel
