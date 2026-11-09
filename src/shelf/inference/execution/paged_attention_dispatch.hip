@@ -290,13 +290,16 @@ PagedAttentionPlan plan_paged_attention(
         && ctx.decode_attn_partials != nullptr
         && args.common.q_heads % args.common.kv_heads == 0u) {
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
-        const uint32_t s = 16u;
-        const uint64_t need =
-            static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
-            * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
-        if (need <= ctx.decode_attn_partial_bytes) {
-            plan.splits = s;
-            return plan;
+        uint32_t s = 16u;
+        while (s > 1u) {
+            const uint64_t need =
+                static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+                * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
+            if (need <= ctx.decode_attn_partial_bytes) {
+                plan.splits = s;
+                return plan;
+            }
+            s >>= 1u;
         }
     }
     if (!plan.use_prefill
@@ -455,8 +458,8 @@ PhysicalResolveStatus append_decode_region(
         split.splits = splits;
         split.q_per_kv = q_per_kv;
         split.octave_format = a.octave_format;
-        split.grid = region.rows * region.q_heads * splits;
-        split.workgroup = 256u;
+        split.grid = region.rows * region.kv_heads * splits;
+        split.workgroup = 1024u;
         PhysicalPagedAttentionKernel& reduce = out.kernels[out.physical_count++];
         reduce.variant = PhysicalPagedAttentionVariant::OctaveReduce;
         reduce.common = region;

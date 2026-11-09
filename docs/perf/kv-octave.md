@@ -30,14 +30,30 @@ fp32 蓄積、専用 reduce と V 出力の逆回転を行う。
 
 | context | BF16 | FP8 | c4v4 | c5v5 | b4n3v3 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2048 | 26.26 | 26.23 | 23.40 | 22.94 | 23.42 |
-| 8192 | 25.52 | 25.60 | 18.19 | 17.28 | 18.15 |
-| 32768 | 23.05 | 22.91 | 9.58 | 8.74 | 9.60 |
+| 2048 | 26.99 | 27.16 | 26.08 | 26.01 | 25.83 |
+| 8192 | 26.45 | 26.34 | 23.22 | 22.92 | 22.93 |
+| 32768 | 23.51 | 23.40 | 16.04 | 15.66 | 15.90 |
 
-現実装は容量を減らすが decode を高速化しない。1 query head ごとの workgroup が token を
-直列走査し、K/V unpack と LUT load を query head 間で再利用していないため、context が
-長いほど BF16/FP8 に対する差が広がる。採用候補にするには、1 KV head の unpack を
-q_per_kv=6 query heads で共有し、複数 token を wave 間で並列化する再設計が必要である。
+融合 kernel は 1 workgroup を 1 KV head と 4 token lane に割り当てる。K/V の unpack と
+LUT 参照を 6 query head で共有し、6 本の score dot は 6 wave で同時に計算する。
+bit-plane の 32 bit word は wave shuffle で同じ field group 内に配る。
+
+| context | 形式 | 変更前 | 変更後 | 変更前比 | FP8 比 |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2048 | c4v4 | 23.40 | 26.08 | 1.115 | 0.960 |
+| 2048 | c5v5 | 22.94 | 26.01 | 1.134 | 0.958 |
+| 2048 | b4n3v3 | 23.42 | 25.83 | 1.103 | 0.951 |
+| 8192 | c4v4 | 18.19 | 23.22 | 1.277 | 0.882 |
+| 8192 | c5v5 | 17.28 | 22.92 | 1.326 | 0.870 |
+| 8192 | b4n3v3 | 18.15 | 22.93 | 1.263 | 0.871 |
+| 32768 | c4v4 | 9.58 | 16.04 | 1.674 | 0.685 |
+| 32768 | c5v5 | 8.74 | 15.66 | 1.792 | 0.669 |
+| 32768 | b4n3v3 | 9.60 | 15.90 | 1.656 | 0.679 |
+
+2048 は FP8 比 0.95 以上だが 8192 と 32768 は未達である。残る差は token 数に比例し、
+scalar code 復号と LUT、query head ごとの online softmax、1024-thread workgroup の barrier が
+支配する。256-thread と split 64 の候補は 32768 c4v4 が 15.73 tok/s で、split 16 と
+4 token lane の 15.86 tok/s を上回らず run 内の外れ値も出たため採用しなかった。
 
 ## Prefill
 
@@ -53,8 +69,11 @@ q_per_kv=6 query heads で共有し、複数 token を wave 間で並列化す�
 ## 正しさと制約
 
 M3 fused kernel と M2 BF16 scratch reference の最大絶対差は、rows=1 c4v4 が
-0.001774、rows=4 b4n3v3 が 0.002820 だった。c4v4 の `s2k_0` quality KL は
-M2 の 0.002038 に対して fused decode が 0.002160 だった。
+0.001774、rows=4 b4n3v3 が 0.002820 だった。追加した rows=8 c5v5、rows=32
+b4n3v3、tree visibility c4v4 はそれぞれ 0.001934、0.002768、0.003710 だった。
+
+c4v4 の `s2k_0`〜`s2k_2` quality KL は 0.002136、0.006197、0.007421、平均
+0.005251 だった。M2 実 cache の既存平均 0.005331 に対して -1.49% である。
 
 prefill の current chunk を量子化前の K/V から直接読む A mode は見送った。現在の
 primitive graph は KV append と paged attention を別 dispatch とし、attention binding に
