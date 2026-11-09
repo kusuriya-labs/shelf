@@ -815,51 +815,39 @@ Result<std::vector<std::uint64_t>> PleTable::ngram_rows(
     }
 
     const std::size_t n = history.size();
-    std::vector<std::int32_t> previous_eos_inclusive(n, -1);
-    std::int32_t last_eos = -1;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (history[i] == eos_token_id_) last_eos = static_cast<std::int32_t>(i);
-        previous_eos_inclusive[i] = last_eos;
-    }
-
-    std::vector<std::vector<std::int32_t>> shifted(ngram_size_,
-                                                   std::vector<std::int32_t>(n, eos_token_id_));
-    for (std::uint32_t shift = 0; shift < ngram_size_; ++shift) {
-        for (std::size_t i = 0; i < n; ++i) {
-            const std::int32_t previous_eos =
-                i == 0u ? -1 : previous_eos_inclusive[i - 1u];
-            const std::int32_t segment_start = previous_eos + 1;
-            const std::int64_t source = static_cast<std::int64_t>(i) - shift;
-            const bool valid = (static_cast<std::int64_t>(i) - segment_start >= shift) &&
-                               source >= 0;
-            shifted[shift][i] =
-                valid ? history[static_cast<std::size_t>(source)] : eos_token_id_;
-        }
-    }
-
     std::vector<std::uint64_t> rows;
     rows.reserve(out_len * head_count);
-    const std::size_t first = history.size() - out_len;
+    const std::size_t first = n - out_len;
     for (std::uint32_t ngram = 2; ngram <= ngram_size_; ++ngram) {
         const std::size_t head_begin = (ngram - 2u) * heads_per_ngram_;
         const std::size_t head_end = head_begin + heads_per_ngram_;
         for (std::size_t position = first; position < n; ++position) {
-            std::uint64_t mixed =
-                static_cast<std::uint64_t>(static_cast<std::int64_t>(shifted[0][position])) *
-                static_cast<std::uint64_t>(layer_multipliers_[0]);
-            for (std::uint32_t p = 1; p < ngram; ++p) {
-                mixed ^= static_cast<std::uint64_t>(
-                             static_cast<std::int64_t>(shifted[p][position])) *
-                         static_cast<std::uint64_t>(layer_multipliers_[p]);
+            std::uint64_t mixed = 0u;
+            for (std::uint32_t shift = 0; shift < ngram; ++shift) {
+                std::int32_t token = eos_token_id_;
+                if (position >= shift) {
+                    bool in_segment = true;
+                    for (std::size_t i = position - shift; i < position; ++i) {
+                        if (history[i] == eos_token_id_) {
+                            in_segment = false;
+                            break;
+                        }
+                    }
+                    if (in_segment) token = history[position - shift];
+                }
+                const std::uint64_t weighted =
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(token)) *
+                    static_cast<std::uint64_t>(layer_multipliers_[shift]);
+                if (shift == 0u) mixed = weighted;
+                else mixed ^= weighted;
             }
             for (std::size_t head = head_begin; head < head_end; ++head) {
                 const std::int64_t size = head_vocab_sizes_[head];
                 if (size <= 0) {
-                    return Status::invalid_argument("PLE head vocab size is not positive",
-                                                    __FILE__, __LINE__);
+                    return Status::invalid_argument(
+                        "PLE head vocab size is not positive", __FILE__, __LINE__);
                 }
-                std::int64_t remainder =
-                    static_cast<std::int64_t>(mixed) % size;
+                std::int64_t remainder = static_cast<std::int64_t>(mixed) % size;
                 if (remainder < 0) remainder += size;
                 rows.push_back(static_cast<std::uint64_t>(head_offsets_[head]) +
                                static_cast<std::uint64_t>(remainder));
