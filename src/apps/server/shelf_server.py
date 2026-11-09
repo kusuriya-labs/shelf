@@ -47,6 +47,7 @@ from shelf_chat import codec  # noqa: E402
 
 from serverlib import openai_protocol, responses_protocol  # noqa: E402
 from serverlib.chat_service import ChatService, StreamDone  # noqa: E402
+from serverlib.responses_service import stream_response  # noqa: E402
 from serverlib.compute_client import AsyncComputeClient, ComputeError  # noqa: E402
 from serverlib.openai_protocol import (  # noqa: E402
     ChatServiceError,
@@ -208,8 +209,8 @@ async def handle_responses(request: web.Request) -> web.Response:
                 f"model not found: {chat.model}", param="model",
                 code="model_not_found", status=404)
         if chat.stream:
-            raise OpenAIProtocolError("stream is not supported yet", param="stream",
-                                      code="unsupported_parameter")
+            prepared = service.prepare(chat)
+            return await stream_response(request, service, chat, prepared)
         result = await service.complete(chat)
         _log_request(chat, result.finish_reason)
         return web.json_response(responses_protocol.encode_response(chat, result))
