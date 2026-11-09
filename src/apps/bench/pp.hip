@@ -715,7 +715,7 @@ int run_pp(int argc, char** argv) {
         return 1;
     }
 
-    auto median = [](std::vector<double>& v) -> double {
+    auto median = [](std::vector<double> v) -> double {
         std::sort(v.begin(), v.end());
         const size_t n = v.size();
         if (n == 0) return 0.0;
@@ -723,7 +723,7 @@ int run_pp(int argc, char** argv) {
         return (v[n / 2 - 1] + v[n / 2]) * 0.5;
     };
 
-    auto percentile = [](std::vector<double>& v, double p) -> double {
+    auto percentile = [](std::vector<double> v, double p) -> double {
         std::sort(v.begin(), v.end());
         const size_t n = v.size();
         if (n == 0) return 0.0;
