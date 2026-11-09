@@ -5,6 +5,8 @@ import asyncio
 import json
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
@@ -13,7 +15,7 @@ sys.path.insert(0, str(root / "src/apps/common"))
 
 from aiohttp.test_utils import TestClient, TestServer
 from shelf_server import create_app
-from serverlib.chat_service import AssistantResult, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta
+from serverlib.chat_service import AssistantResult, ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta
 from serverlib.openai_protocol import openai_messages_to_hf
 
 
@@ -157,6 +159,32 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
         await response.content.readline()
         response.close()
         await asyncio.wait_for(self.service.closed.wait(), 2)
+
+
+class ComputeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_responses_reuses_chat_compute(self):
+        class FakeCompute:
+            async def generate(self, ids, maximum, **kwargs):
+                self.ids, self.maximum, self.kwargs = ids, maximum, kwargs
+                return {"generated_ids": [7, 8], "finish_reason": "stop", "restored_tokens": 2}
+
+            async def shutdown(self):
+                pass
+
+        compute = FakeCompute()
+        service = ChatService(object(), compute, "shelf", 128, inference_budget_tokens=32)
+        with patch('serverlib.chat_service.codec.prompt_ids', return_value=[1, 2, 3]), \
+             patch('serverlib.chat_service.codec.split_generation', return_value=SimpleNamespace(answer="ok", reasoning="", reasoning_tokens=0)), \
+             patch('serverlib.chat_service.codec.parse_answer', return_value={"content": "ok", "tool_calls": []}):
+            async with TestClient(TestServer(create_app(service, compute))) as client:
+                response = await client.post('/v1/responses', json={"model": "shelf", "input": "hello", "max_output_tokens": 12, "seed": 5})
+                data = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(compute.ids, [1, 2, 3])
+        self.assertEqual(compute.maximum, 12)
+        self.assertEqual(compute.kwargs['seed'], 5)
+        self.assertEqual(data['usage']['input_tokens_details']['cached_tokens'], 2)
+        self.assertEqual(data['output'][0]['content'][0]['text'], 'ok')
 
 
 if __name__ == '__main__':
