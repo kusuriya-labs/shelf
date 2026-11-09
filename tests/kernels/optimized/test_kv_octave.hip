@@ -484,11 +484,15 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     float* d_fused = nullptr;
     float* d_legacy = nullptr;
     float* d_partials = nullptr;
+    void* d_prefill_scratch = nullptr;
     const std::size_t vectors = static_cast<std::size_t>(pages) * page_tokens * kv_heads;
     const std::size_t scratch_elems = vectors * head_dim;
     const uint32_t splits = tree_visibility ? 1u : 4u;
     const std::size_t partial_elems = static_cast<std::size_t>(query_rows) *
         kv_heads * splits * (q_heads / kv_heads) * 258u;
+    const uint64_t prefill_scratch_bytes =
+        shelf::kernel::octave_prefill_splitkv_scratch_bytes(
+            query_rows, q_heads, kv_heads, head_dim);
     bool ok = allocate(reinterpret_cast<void**>(&d_k), k.size() * sizeof(shelf::bf16_t)) &&
               allocate(reinterpret_cast<void**>(&d_v), v.size() * sizeof(shelf::bf16_t)) &&
               allocate(reinterpret_cast<void**>(&d_q), q.size() * sizeof(shelf::bf16_t)) &&
@@ -509,6 +513,8 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
               allocate(reinterpret_cast<void**>(&d_fused), q.size() * sizeof(float)) &&
               (!prefill || allocate(reinterpret_cast<void**>(&d_legacy),
                                     q.size() * sizeof(float))) &&
+              (!prefill || allocate(&d_prefill_scratch,
+                                    prefill_scratch_bytes)) &&
               allocate(reinterpret_cast<void**>(&d_partials), partial_elems * sizeof(float));
     if (ok) {
         ok = hip_ok(hipMemcpy(d_k, k.data(), k.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
@@ -586,9 +592,11 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                             attention, d_k_scratch, d_v_scratch, nullptr), name);
             attention.output = d_fused;
             unsetenv("SHELF_OCTAVE_PREFILL_LEGACY");
-            ok = ok && hip_ok(shelf::kernel::launch_attention_paged_prefill_octave(
-                                  attention, d_k_pool, d_v_pool, d_levels, format,
-                                  nullptr), name);
+            ok = ok && hip_ok(
+                shelf::kernel::launch_attention_paged_prefill_octave_splitkv(
+                    attention, d_k_pool, d_v_pool, d_levels, format,
+                    d_prefill_scratch, prefill_scratch_bytes, tokens, nullptr),
+                name);
             attention.output = d_legacy;
             setenv("SHELF_OCTAVE_PREFILL_LEGACY", "1", 1);
             ok = ok && hip_ok(shelf::kernel::launch_attention_paged_prefill_octave(

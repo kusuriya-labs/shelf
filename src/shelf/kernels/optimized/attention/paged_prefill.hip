@@ -277,7 +277,10 @@ void attention_paged_prefill_bf16_body(
     uint32_t blocks_per_head,
     const float* octave_levels,
     OctaveKVCacheFormat octave_format,
-    void* out_base) {
+    void* out_base,
+    uint32_t kv_block_start,
+    float* state_max,
+    float* state_sum) {
     const uint32_t q_heads = a.q_heads;
     const uint32_t kv_heads = a.kv_heads;
     const uint32_t q_per_kv = q_heads / kv_heads;
@@ -313,12 +316,24 @@ void attention_paged_prefill_bf16_body(
         }
         if (valid == 0u) s.invalid = 1u;
         s.visible_max = vis_max;
-        s.page_count = (vis_max + kPageTokens - 1u) / kPageTokens;
+        if constexpr (kMode == 3u) {
+            const uint32_t block_end = min(
+                vis_max, kv_block_start + kOctavePrefillKvBlockTokens);
+            s.page_count = block_end > kv_block_start
+                ? (block_end - kv_block_start + kPageTokens - 1u) /
+                      kPageTokens
+                : 0u;
+        } else {
+            s.page_count = (vis_max + kPageTokens - 1u) / kPageTokens;
+        }
         s.block_table = a.block_tables
             + static_cast<size_t>(valid != 0u ? slot : 0u) * a.block_table_stride;
     }
     detail::lds_barrier();
     if (s.invalid != 0u) return;
+    if constexpr (kMode == 3u) {
+        if (s.page_count == 0u) return;
+    }
 
     const uint32_t rows = s.rows_here;
     const uint32_t visible_max = s.visible_max;
@@ -327,8 +342,11 @@ void attention_paged_prefill_bf16_body(
 
     if (tid < kTileRows) {
         s.vis[tid] = (tid < rows) ? (a.row_positions[row0 + tid] + 1u) : 0u;
-        s.row_max[tid] = -FLT_MAX;
-        s.row_sum[tid] = 0.0f;
+        const size_t state = static_cast<size_t>(row0 + tid) * q_heads + q_head;
+        s.row_max[tid] = kMode == 3u && kv_block_start != 0u && tid < rows
+            ? state_max[state] : -FLT_MAX;
+        s.row_sum[tid] = kMode == 3u && kv_block_start != 0u && tid < rows
+            ? state_sum[state] : 0.0f;
         s.row_alpha[tid] = 0.0f;
     }
 
@@ -352,21 +370,49 @@ void attention_paged_prefill_bf16_body(
 
     wf8_t oacc[4];
     #pragma unroll
-    for (uint32_t nt = 0u; nt < 4u; ++nt) oacc[nt] = wf8_t{};
+    for (uint32_t nt = 0u; nt < 4u; ++nt) {
+        oacc[nt] = wf8_t{};
+        if constexpr (kMode == 3u) {
+            if (kv_block_start != 0u) {
+                const uint32_t r_base = mt * 16u + 8u * hi;
+                const uint32_t dim = nq * 64u + nt * 16u + lo;
+                #pragma unroll
+                for (uint32_t e = 0u; e < 8u; ++e) {
+                    const uint32_t r = r_base + e;
+                    if (r < rows) {
+                        const size_t o = static_cast<size_t>(row0 + r) *
+                            a.output_row_stride +
+                            static_cast<size_t>(q_head) * kHeadDim + dim;
+                        oacc[nt][e] = a.output_dtype ==
+                                PagedAttentionOutputDType::F32
+                            ? reinterpret_cast<const float*>(out_base)[o]
+                            : __bfloat162float(
+                                  reinterpret_cast<const bf16*>(out_base)[o]);
+                    }
+                }
+            }
+        }
+    }
 
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     const uint64_t head_off = static_cast<uint64_t>(kv_head) * kHeadDim;
 
     for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
-        const uint32_t page = block_table[page_index];
-        if (page >= a.num_pages) {
-            if (tid == 0u) s.invalid = 1u;
-            break;
+        const uint32_t page = kMode == 3u ? page_index : block_table[page_index];
+        if constexpr (kMode != 3u) {
+            if (page >= a.num_pages) {
+                if (tid == 0u) s.invalid = 1u;
+                break;
+            }
         }
-        const uint32_t page_start = page_index * kPageTokens;
+        const uint32_t page_start = (kMode == 3u ? kv_block_start : 0u) +
+            page_index * kPageTokens;
         uint32_t tokens_here = visible_max - page_start;
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
-        const uint64_t page_base = layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
+        const uint64_t page_base = kMode == 3u
+            ? static_cast<uint64_t>(page_index) * kPageTokens *
+                  a.elems_per_token
+            : layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
         const bf16* k_src = kMode == 2u ? nullptr : k_pool + page_base + head_off;
         const bf16* v_src = kMode == 2u ? nullptr : v_pool + page_base + head_off;
         if constexpr (kMode != 0u) {
@@ -548,7 +594,17 @@ void attention_paged_prefill_bf16_body(
 
     if (s.invalid != 0u) return;
 
-    if (tid < kTileRows && tid < rows) s.row_sum[tid] = 1.0f / s.row_sum[tid];
+    const bool final_block = kMode != 3u ||
+        kv_block_start + kOctavePrefillKvBlockTokens >= visible_max;
+    if constexpr (kMode == 3u) {
+        if (tid < kTileRows && tid < rows) {
+            const size_t state = static_cast<size_t>(row0 + tid) * q_heads + q_head;
+            state_max[state] = s.row_max[tid];
+            state_sum[state] = s.row_sum[tid];
+        }
+    }
+    if (final_block && tid < kTileRows && tid < rows)
+        s.row_sum[tid] = 1.0f / s.row_sum[tid];
     detail::lds_barrier();
 
     const uint32_t r_base = mt * 16u + 8u * hi;
@@ -559,7 +615,8 @@ void attention_paged_prefill_bf16_body(
         for (uint32_t e = 0u; e < 8u; ++e) {
             const uint32_t r = r_base + e;
             if (r < rows) {
-                const float v = oacc[nt][e] * s.row_sum[r];
+                const float v = final_block
+                    ? oacc[nt][e] * s.row_sum[r] : oacc[nt][e];
                 const size_t o = static_cast<size_t>(row0 + r) * a.output_row_stride
                     + static_cast<size_t>(q_head) * kHeadDim + dim;
                 if (a.output_dtype == PagedAttentionOutputDType::F32) {
@@ -585,10 +642,14 @@ void attention_paged_prefill_bf16_impl(
     uint32_t blocks_per_head,
     const float* octave_levels,
     OctaveKVCacheFormat octave_format,
-    void* out_base) {
+    void* out_base,
+    uint32_t kv_block_start = 0u,
+    float* state_max = nullptr,
+    float* state_sum = nullptr) {
     attention_paged_prefill_bf16_body<kMode>(
         a, k_pool, v_pool, k_code_pool, v_code_pool, k_scale_pool, v_scale_pool,
-        blocks_per_head, octave_levels, octave_format, out_base);
+        blocks_per_head, octave_levels, octave_format, out_base,
+        kv_block_start, state_max, state_sum);
 }
 
 } }  // namespace v_prefill_bf16
@@ -597,23 +658,28 @@ namespace { namespace v_prefill_octave {
 
 using namespace v_prefill_bf16;
 
-// One workgroup owns one KV head and ten causal query rows.  The M dimension
+// One workgroup owns one KV head and a causal query-row tile.  The M dimension
 // is flattened as [query-head-within-GQA, query-row], so the packed K/V page is
-// decoded once and shared by all six Qwen3.8 query heads.  The WMMA fragment
-// layout follows shelf's gfx12 paged-prefill kernel (lane & 15, lane >> 4 and
-// eight accumulator elements).  The packed-page tiling is structurally based
-// on vLLM's Apache-2.0 csrc/attention/octave_prefill_rdna3.cu, but this path is
-// independently implemented for gfx1201 wave32.
-constexpr uint32_t kQueryRows = 10u;
-constexpr uint32_t kFlatRows = 64u;
-constexpr uint32_t kFlatTiles = kFlatRows / 16u;
+// decoded once and shared by all six Qwen3.8 query heads.  The default 32-row
+// tile therefore performs 192 rows of WMMA work per unpack.  The former
+// 10-row/64-flat-row kernel remains available for controlled A/B measurements.
+// The WMMA fragment layout follows shelf's gfx12 paged-prefill kernel
+// (lane & 15, lane >> 4 and eight accumulator elements).  The packed-page
+// tiling is structurally based on vLLM's Apache-2.0
+// csrc/attention/octave_prefill_rdna3.cu, but this path is independently
+// implemented for gfx1201 wave32.
+constexpr uint32_t kLegacyQueryRows = 10u;
+constexpr uint32_t kLegacyFlatRows = 64u;
+constexpr uint32_t kLegacyTileWaves = 8u;
+constexpr uint32_t kLegacyPPitch = kPPitch;
+constexpr uint32_t kWideQueryRows = 32u;
+constexpr uint32_t kWideFlatRows = 192u;
+constexpr uint32_t kWideTileWaves = 24u;
+constexpr uint32_t kWidePPitch = 16u;
 constexpr uint32_t kOctavePitch = kHeadDim;
 constexpr uint32_t kOctaveTokens = 16u;
 constexpr uint32_t kOctaveTokenHalves = kOctaveTokens / 16u;
 constexpr uint32_t kOctaveSmaxPitch = kOctaveTokens + 1u;
-constexpr uint32_t kDimParts = kWaves / kFlatTiles;
-constexpr uint32_t kDimsPerPart = kHeadDim / kDimParts;
-constexpr uint32_t kKSteps = kDimsPerPart / 16u;
 
 using hf8_t = _Float16 __attribute__((ext_vector_type(8)));
 
@@ -656,18 +722,22 @@ __device__ __forceinline__ wf8_t octave_wmma_f16(
     return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
 }
 
+template <uint32_t kTileFlatRows, uint32_t kTileWaves,
+          uint32_t kTilePPitch>
 struct OctavePrefillShared {
+    static constexpr uint32_t kFlatTiles = kTileFlatRows / 16u;
+    static constexpr uint32_t kDimParts = kTileWaves / kFlatTiles;
     unsigned short k_page[kOctaveTokens][kOctavePitch];
     unsigned short v_page[kOctaveTokens][kOctavePitch];
     float s_part[kFlatTiles][kDimParts][16][kOctaveSmaxPitch];
-    unsigned short p_tile[kFlatRows][kPPitch];
-    unsigned short p_tile_lo[kFlatRows][kPPitch];
+    unsigned short p_tile[kTileFlatRows][kTilePPitch];
+    unsigned short p_tile_lo[kTileFlatRows][kTilePPitch];
     float k_scale[kOctaveTokens];
     float v_scale[kOctaveTokens];
-    float row_max[kFlatRows];
-    float row_sum[kFlatRows];
-    float row_alpha[kFlatRows];
-    uint32_t vis[kFlatRows];
+    float row_max[kTileFlatRows];
+    float row_sum[kTileFlatRows];
+    float row_alpha[kTileFlatRows];
+    uint32_t vis[kTileFlatRows];
     uint32_t rows_here;
     uint32_t flat_rows;
     uint32_t visible_max;
@@ -675,8 +745,6 @@ struct OctavePrefillShared {
     uint32_t invalid;
     const uint32_t* block_table;
 };
-
-static_assert(sizeof(OctavePrefillShared) <= 64u * 1024u);
 
 __global__ __launch_bounds__(kThreads, 2)
 void attention_paged_prefill_octave_rotate_q(
@@ -710,13 +778,14 @@ void attention_paged_prefill_octave_rotate_q(
     }
 }
 
+template <uint32_t kTileQueryRows>
 __device__ __forceinline__ hf8_t octave_flat_q_frag(
     const PagedAttentionCommonArgs& a, const void* output_base,
     uint32_t row0, uint32_t kv_head, uint32_t q_per_kv,
     uint32_t flat_base, uint32_t kbase, uint32_t lane) {
     const uint32_t flat = flat_base + (lane & 15u);
-    const uint32_t local_q_head = flat / kQueryRows;
-    const uint32_t local_row = flat % kQueryRows;
+    const uint32_t local_q_head = flat / kTileQueryRows;
+    const uint32_t local_row = flat % kTileQueryRows;
     const bool active = local_q_head < q_per_kv && row0 + local_row < a.rows;
     const size_t base = static_cast<size_t>(row0 + local_row) * a.output_row_stride +
         static_cast<size_t>(kv_head * q_per_kv + local_q_head) * kHeadDim +
@@ -741,8 +810,114 @@ __device__ __forceinline__ hf8_t octave_flat_q_frag(
     return result.f;
 }
 
-template <uint32_t kFixedBits>
-__global__ __launch_bounds__(kThreads, 2)
+__global__ __launch_bounds__(32)
+void attention_paged_prefill_octave_unpack_block(
+    const PagedAttentionCommonArgs a,
+    const uint8_t* k_code_pool,
+    const uint8_t* v_code_pool,
+    const float* octave_levels,
+    OctaveKVCacheFormat octave_format,
+    uint32_t block_start,
+    bf16* k_scratch,
+    bf16* v_scratch) {
+    const uint32_t lane = threadIdx.x;
+    const uint32_t token = blockIdx.x / a.kv_heads;
+    const uint32_t kv_head = blockIdx.x % a.kv_heads;
+    const uint32_t position = block_start + token;
+    const uint32_t slot = a.row_sequence_slots[0];
+    const uint32_t visible = a.row_positions[a.rows - 1u] + 1u;
+    bool active = position < visible && slot < a.max_sequences;
+    uint32_t page = 0u;
+    uint32_t page_offset = 0u;
+    if (active) {
+        const uint32_t logical_page = position / kPageTokens;
+        page_offset = position % kPageTokens;
+        if (logical_page >= a.block_table_stride) {
+            active = false;
+        } else {
+            page = a.block_tables[static_cast<size_t>(slot) *
+                a.block_table_stride + logical_page];
+            active = page < a.num_pages;
+        }
+    }
+
+    const uint32_t k_slot_bytes = octave_k_slot_bytes(octave_format);
+    const uint32_t v_slot_bytes = octave_v_slot_bytes(octave_format);
+    const uint64_t vectors_per_layer = static_cast<uint64_t>(a.num_pages) *
+        kPageTokens * a.kv_heads;
+    const uint64_t vector = static_cast<uint64_t>(a.layer) *
+        vectors_per_layer +
+        (static_cast<uint64_t>(page) * kPageTokens + page_offset) *
+            a.kv_heads + kv_head;
+    const uint8_t* ks = k_code_pool + vector * k_slot_bytes;
+    const uint8_t* vs = v_code_pool + vector * v_slot_bytes;
+    const uint32_t dimension_base = lane * 8u;
+    const uint32_t segment = octave_format.k_mode == OctaveKMode::Compact
+        ? 256u : 64u;
+    const uint32_t kblock = dimension_base / segment;
+    const uint32_t local_base = dimension_base & (segment - 1u);
+    const uint32_t bits = octave_format.k_mode == OctaveKMode::Compact ||
+            kblock != 0u
+        ? octave_format.k_nope_bits : octave_format.k_rope_bits;
+    const uint32_t code_offset = octave_format.k_mode ==
+            OctaveKMode::Compact || kblock == 0u
+        ? 0u
+        : octave_plane_bytes(64u, octave_format.k_rope_bits) +
+              (kblock - 1u) * octave_plane_bytes(
+                  64u, octave_format.k_nope_bits);
+    const uint32_t scale_count = octave_format.k_mode ==
+            OctaveKMode::Compact
+        ? 1u : 4u;
+    const float kscale = active
+        ? octave_half_at(ks + k_slot_bytes - scale_count * 2u +
+              kblock * 2u)
+        : 0.0f;
+    const float vscale = active
+        ? octave_half_at(vs + v_slot_bytes - 2u) : 0.0f;
+    uint32_t kcodes[8];
+    uint32_t vcodes[8];
+    if (active) {
+        octave_unpack8_direct(
+            ks + code_offset, local_base, segment, bits, kcodes);
+        octave_unpack8_direct(
+            vs, dimension_base, 256u, octave_format.v_bits, vcodes);
+    } else {
+        #pragma unroll
+        for (uint32_t e = 0u; e < 8u; ++e) {
+            kcodes[e] = 0u;
+            vcodes[e] = 0u;
+        }
+    }
+    float kval[8];
+    float vval[8];
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        kval[e] = active
+            ? octave_levels[bits * 64u + kcodes[e]] * kscale : 0.0f;
+        vval[e] = active
+            ? octave_levels[octave_format.v_bits * 64u + vcodes[e]] * vscale
+            : 0.0f;
+    }
+    octave_inverse_wave(
+        kval, lane, octave_format.k_mode == OctaveKMode::Compact);
+    octave_inverse_wave(vval, lane, true);
+    const size_t output =
+        (static_cast<size_t>(token) * a.kv_heads + kv_head) * kHeadDim +
+        dimension_base;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        const uint32_t dimension = dimension_base + e;
+        k_scratch[output + e] = __float2bfloat16(
+            kval[e] * octave_sign(dimension, 11u));
+        v_scratch[output + e] = __float2bfloat16(
+            vval[e] * octave_sign(dimension, 29u));
+    }
+}
+
+template <uint32_t kFixedBits, uint32_t kTileQueryRows,
+          uint32_t kTileFlatRows, uint32_t kTileWaves,
+          uint32_t kTilePPitch, uint32_t kMinBlocks>
+__global__ __launch_bounds__(kTileWaves * 32u, kMinBlocks)
 void attention_paged_prefill_octave_rotated(
     const PagedAttentionCommonArgs a,
     const uint8_t* k_code_pool,
@@ -750,21 +925,32 @@ void attention_paged_prefill_octave_rotated(
     const float* octave_levels,
     OctaveKVCacheFormat octave_format,
     void* out_base) {
-    __shared__ OctavePrefillShared s;
+    static_assert(kTileFlatRows % 16u == 0u);
+    static_assert(kTileWaves % (kTileFlatRows / 16u) == 0u);
+    static_assert(kTilePPitch >= 16u);
+    using Shared = OctavePrefillShared<
+        kTileFlatRows, kTileWaves, kTilePPitch>;
+    static_assert(sizeof(Shared) <= 64u * 1024u);
+    constexpr uint32_t kFlatTiles = kTileFlatRows / 16u;
+    constexpr uint32_t kDimParts = kTileWaves / kFlatTiles;
+    constexpr uint32_t kDimsPerPart = kHeadDim / kDimParts;
+    constexpr uint32_t kKSteps = kDimsPerPart / 16u;
+    constexpr uint32_t kTileThreads = kTileWaves * 32u;
+    __shared__ Shared s;
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
     const uint32_t wave = tid >> 5u;
     const uint32_t hi = lane >> 4u;
     const uint32_t lo = lane & 15u;
     const uint32_t q_per_kv = a.q_heads / a.kv_heads;
-    const uint32_t row0 = blockIdx.x * kQueryRows;
+    const uint32_t row0 = blockIdx.x * kTileQueryRows;
     const uint32_t kv_head = blockIdx.y;
     if (row0 >= a.rows) return;
 
     if (tid == 0u) {
-        s.rows_here = min(kQueryRows, a.rows - row0);
-        s.flat_rows = q_per_kv * kQueryRows;
-        s.invalid = s.flat_rows > kFlatRows ? 1u : 0u;
+        s.rows_here = min(kTileQueryRows, a.rows - row0);
+        s.flat_rows = q_per_kv * kTileQueryRows;
+        s.invalid = s.flat_rows > kTileFlatRows ? 1u : 0u;
         const uint32_t slot = a.row_sequence_slots[row0];
         if (slot >= a.max_sequences) s.invalid = 1u;
         s.visible_max = 0u;
@@ -787,8 +973,8 @@ void attention_paged_prefill_octave_rotated(
     if (s.invalid != 0u) return;
     const uint32_t rows = s.rows_here;
     const uint32_t flat_rows = s.flat_rows;
-    if (tid < kFlatRows) {
-        const uint32_t local_row = tid % kQueryRows;
+    if (tid < kTileFlatRows) {
+        const uint32_t local_row = tid % kTileQueryRows;
         const bool active = tid < flat_rows && local_row < rows;
         s.vis[tid] = active ? a.row_positions[row0 + local_row] + 1u : 0u;
         s.row_max[tid] = -FLT_MAX;
@@ -801,7 +987,7 @@ void attention_paged_prefill_octave_rotated(
     hf8_t q_frag[kKSteps];
     #pragma unroll
     for (uint32_t ks = 0u; ks < kKSteps; ++ks)
-        q_frag[ks] = octave_flat_q_frag(
+        q_frag[ks] = octave_flat_q_frag<kTileQueryRows>(
             a, out_base, row0, kv_head, q_per_kv, mt * 16u,
             (kq * kKSteps + ks) * 16u, lane);
 
@@ -821,7 +1007,8 @@ void attention_paged_prefill_octave_rotated(
 
         // Decode codebook values directly in rotated space.  No per-token
         // inverse WHT or sign restoration occurs here.
-        for (uint32_t token = wave; token < kOctaveTokens; token += kWaves) {
+        for (uint32_t token = wave; token < kOctaveTokens;
+             token += kTileWaves) {
             bool active = token < tokens_here;
             const uint32_t position = tile_start + token;
             const uint32_t logical_page = position / kPageTokens;
@@ -920,8 +1107,8 @@ void attention_paged_prefill_octave_rotated(
                 const uint32_t pb_index = tg + 8u;
                 const uint32_t ta = token_half * 16u + pa_index;
                 const uint32_t tb = token_half * 16u + pb_index;
-                for (uint32_t flat = tid >> 3u; flat < kFlatRows;
-                     flat += kThreads / 8u) {
+                for (uint32_t flat = tid >> 3u; flat < kTileFlatRows;
+                     flat += kTileThreads / 8u) {
                 const uint32_t pmt = flat >> 4u;
                 const uint32_t rr = flat & 15u;
                 float sa = 0.0f;
@@ -931,7 +1118,7 @@ void attention_paged_prefill_octave_rotated(
                     sa += s.s_part[pmt][part][rr][ta];
                     sb += s.s_part[pmt][part][rr][tb];
                 }
-                const uint32_t local_row = flat % kQueryRows;
+                const uint32_t local_row = flat % kTileQueryRows;
                 const uint32_t mask_row = row0 + local_row;
                 const uint32_t vis = s.vis[flat];
                 const uint32_t tok_a = tile_start + ta;
@@ -983,9 +1170,9 @@ void attention_paged_prefill_octave_rotated(
             detail::lds_barrier();
 
             const hf8_t probability = octave_frag_nk_f16(
-                &s.p_tile[0][0], kPPitch, mt * 16u, 0u, lane);
+                &s.p_tile[0][0], kTilePPitch, mt * 16u, 0u, lane);
             const hf8_t probability_lo = octave_frag_nk_f16(
-                &s.p_tile_lo[0][0], kPPitch, mt * 16u, 0u, lane);
+                &s.p_tile_lo[0][0], kTilePPitch, mt * 16u, 0u, lane);
             #pragma unroll
             for (uint32_t e = 0u; e < 8u; ++e) {
                 const float alpha = s.row_alpha[mt * 16u + 8u * hi + e];
@@ -1006,7 +1193,7 @@ void attention_paged_prefill_octave_rotated(
     }
 
     if (s.invalid != 0u) return;
-    if (tid < kFlatRows)
+    if (tid < kTileFlatRows)
         s.row_sum[tid] = s.row_sum[tid] > 0.0f ? 1.0f / s.row_sum[tid] : 0.0f;
     detail::lds_barrier();
 
@@ -1017,8 +1204,8 @@ void attention_paged_prefill_octave_rotated(
         #pragma unroll
         for (uint32_t e = 0u; e < 8u; ++e) {
             const uint32_t flat = flat_base + e;
-            const uint32_t local_q_head = flat / kQueryRows;
-            const uint32_t local_row = flat % kQueryRows;
+            const uint32_t local_q_head = flat / kTileQueryRows;
+            const uint32_t local_row = flat % kTileQueryRows;
             if (flat < flat_rows && local_row < rows) {
                 const float rotated = oacc[nt][e] * s.row_sum[flat];
                 const size_t output = static_cast<size_t>(row0 + local_row) *
@@ -1069,6 +1256,53 @@ void attention_paged_prefill_octave_inverse_output(
     }
 }
 
+template <uint32_t kTileQueryRows, uint32_t kTileFlatRows,
+          uint32_t kTileWaves, uint32_t kTilePPitch,
+          uint32_t kMinBlocks>
+hipError_t launch_attention_paged_prefill_octave_tile(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    hipStream_t stream) {
+    const uint32_t tiles =
+        (common.rows + kTileQueryRows - 1u) / kTileQueryRows;
+    const dim3 grid(tiles, common.kv_heads);
+    constexpr uint32_t kTileThreads = kTileWaves * 32u;
+    if (format.k_mode == OctaveKMode::Compact &&
+        format.k_nope_bits == format.v_bits && format.v_bits == 3u) {
+        attention_paged_prefill_octave_rotated<
+            3u, kTileQueryRows, kTileFlatRows, kTileWaves,
+            kTilePPitch, kMinBlocks><<<grid, kTileThreads, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, common.output);
+    } else if (format.k_mode == OctaveKMode::Compact &&
+               format.k_nope_bits == format.v_bits && format.v_bits == 4u) {
+        attention_paged_prefill_octave_rotated<
+            4u, kTileQueryRows, kTileFlatRows, kTileWaves,
+            kTilePPitch, kMinBlocks><<<grid, kTileThreads, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, common.output);
+    } else if (format.k_mode == OctaveKMode::Compact &&
+               format.k_nope_bits == format.v_bits && format.v_bits == 5u) {
+        attention_paged_prefill_octave_rotated<
+            5u, kTileQueryRows, kTileFlatRows, kTileWaves,
+            kTilePPitch, kMinBlocks><<<grid, kTileThreads, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, common.output);
+    } else if (format.k_mode == OctaveKMode::Compact &&
+               format.k_nope_bits == format.v_bits && format.v_bits == 6u) {
+        attention_paged_prefill_octave_rotated<
+            6u, kTileQueryRows, kTileFlatRows, kTileWaves,
+            kTilePPitch, kMinBlocks><<<grid, kTileThreads, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, common.output);
+    } else {
+        attention_paged_prefill_octave_rotated<
+            0u, kTileQueryRows, kTileFlatRows, kTileWaves,
+            kTilePPitch, kMinBlocks><<<grid, kTileThreads, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, common.output);
+    }
+    return hipGetLastError();
+}
+
 } }  // namespace v_prefill_octave
 
 extern "C" __global__ __launch_bounds__(kPagedAttentionPrefillBlock)
@@ -1080,7 +1314,7 @@ void shelf_attention_paged_prefill_bf16(
         reinterpret_cast<const bf16*>(args.v_pool),
         nullptr, nullptr, nullptr, nullptr, 0u,
         nullptr, {},
-        args.common.output);
+        args.common.output, 0u, nullptr, nullptr);
 }
 
 hipError_t launch_attention_paged_prefill_bf16(
@@ -1128,51 +1362,103 @@ hipError_t launch_attention_paged_prefill_octave(
     const char* legacy_value = std::getenv("SHELF_OCTAVE_PREFILL_LEGACY");
     const bool legacy = legacy_value != nullptr && legacy_value[0] == '1' &&
                         legacy_value[1] == '\0';
-    if (legacy || common.q_heads / common.kv_heads >
-                      v_prefill_octave::kFlatRows / v_prefill_octave::kQueryRows) {
+    if (common.q_heads / common.kv_heads >
+            v_prefill_octave::kWideFlatRows /
+                v_prefill_octave::kWideQueryRows) {
         const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
         attention_paged_prefill_bf16_impl<2u>
             <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
                 common, nullptr, nullptr, k_pool, v_pool, nullptr, nullptr, 0u,
                 levels, format, common.output);
     } else {
-        const uint32_t tiles =
-            (common.rows + v_prefill_octave::kQueryRows - 1u) /
-            v_prefill_octave::kQueryRows;
-        const dim3 grid(tiles, common.kv_heads);
         const uint64_t vectors = static_cast<uint64_t>(common.rows) * common.q_heads;
         const uint32_t transform_blocks = static_cast<uint32_t>(
             (vectors + v_prefill_bf16::kWaves - 1u) / v_prefill_bf16::kWaves);
         v_prefill_octave::attention_paged_prefill_octave_rotate_q
             <<<transform_blocks, kThreads, 0, stream>>>(
                 common, format.k_mode == OctaveKMode::Compact, common.output);
-        if (format.k_mode == OctaveKMode::Compact &&
-            format.k_nope_bits == format.v_bits && format.v_bits == 3u) {
-            v_prefill_octave::attention_paged_prefill_octave_rotated<3u>
-                <<<grid, kThreads, 0, stream>>>(
-                    common, k_pool, v_pool, levels, format, common.output);
-        } else if (format.k_mode == OctaveKMode::Compact &&
-                   format.k_nope_bits == format.v_bits && format.v_bits == 4u) {
-            v_prefill_octave::attention_paged_prefill_octave_rotated<4u>
-                <<<grid, kThreads, 0, stream>>>(
-                    common, k_pool, v_pool, levels, format, common.output);
-        } else if (format.k_mode == OctaveKMode::Compact &&
-                   format.k_nope_bits == format.v_bits && format.v_bits == 5u) {
-            v_prefill_octave::attention_paged_prefill_octave_rotated<5u>
-                <<<grid, kThreads, 0, stream>>>(
-                    common, k_pool, v_pool, levels, format, common.output);
-        } else if (format.k_mode == OctaveKMode::Compact &&
-                   format.k_nope_bits == format.v_bits && format.v_bits == 6u) {
-            v_prefill_octave::attention_paged_prefill_octave_rotated<6u>
-                <<<grid, kThreads, 0, stream>>>(
-                    common, k_pool, v_pool, levels, format, common.output);
+        hipError_t tile_error = hipSuccess;
+        if (legacy) {
+            tile_error =
+                v_prefill_octave::launch_attention_paged_prefill_octave_tile<
+                v_prefill_octave::kLegacyQueryRows,
+                v_prefill_octave::kLegacyFlatRows,
+                v_prefill_octave::kLegacyTileWaves,
+                v_prefill_octave::kLegacyPPitch, 2u>(
+                    common, k_pool, v_pool, levels, format, stream);
         } else {
-            v_prefill_octave::attention_paged_prefill_octave_rotated<0u>
-                <<<grid, kThreads, 0, stream>>>(
-                    common, k_pool, v_pool, levels, format, common.output);
+            tile_error =
+                v_prefill_octave::launch_attention_paged_prefill_octave_tile<
+                v_prefill_octave::kWideQueryRows,
+                v_prefill_octave::kWideFlatRows,
+                v_prefill_octave::kWideTileWaves,
+                v_prefill_octave::kWidePPitch, 1u>(
+                    common, k_pool, v_pool, levels, format, stream);
         }
+        if (tile_error != hipSuccess) return tile_error;
         v_prefill_octave::attention_paged_prefill_octave_inverse_output
             <<<transform_blocks, kThreads, 0, stream>>>(common, common.output);
+    }
+    return hipGetLastError();
+}
+
+hipError_t launch_attention_paged_prefill_octave_splitkv(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    void* scratch,
+    uint64_t scratch_bytes,
+    uint32_t max_visible_tokens,
+    hipStream_t stream) {
+    const char* legacy_value = std::getenv("SHELF_OCTAVE_PREFILL_LEGACY");
+    const bool legacy = legacy_value != nullptr && legacy_value[0] == '1' &&
+                        legacy_value[1] == '\0';
+    if (legacy)
+        return launch_attention_paged_prefill_octave(
+            common, k_pool, v_pool, levels, format, stream);
+    if (common.rows == 0u || common.head_dim != v_prefill_bf16::kHeadDim ||
+        common.page_tokens != v_prefill_bf16::kPageTokens ||
+        common.q_heads == 0u || common.kv_heads == 0u ||
+        common.q_heads % common.kv_heads != 0u ||
+        common.block_table_stride == 0u || common.num_pages == 0u ||
+        common.q == nullptr || common.output == nullptr ||
+        common.row_sequence_slots == nullptr || common.row_positions == nullptr ||
+        common.block_tables == nullptr || k_pool == nullptr || v_pool == nullptr ||
+        levels == nullptr || scratch == nullptr || max_visible_tokens == 0u ||
+        !octave_format_valid(format))
+        return hipErrorInvalidValue;
+    const uint64_t required = octave_prefill_splitkv_scratch_bytes(
+        common.rows, common.q_heads, common.kv_heads, common.head_dim);
+    if (scratch_bytes < required) return hipErrorOutOfMemory;
+
+    const uint64_t decoded_elems =
+        static_cast<uint64_t>(kOctavePrefillKvBlockTokens) *
+        common.kv_heads * common.head_dim;
+    auto* k_scratch = reinterpret_cast<v_prefill_bf16::bf16*>(scratch);
+    auto* v_scratch = k_scratch + decoded_elems;
+    auto* state_max = reinterpret_cast<float*>(v_scratch + decoded_elems);
+    auto* state_sum = state_max +
+        static_cast<uint64_t>(common.rows) * common.q_heads;
+    const uint32_t tiles =
+        (common.rows + v_prefill_bf16::kTileRows - 1u) /
+        v_prefill_bf16::kTileRows;
+    const dim3 attention_grid(tiles, common.q_heads);
+    const uint32_t unpack_grid =
+        kOctavePrefillKvBlockTokens * common.kv_heads;
+
+    for (uint32_t block_start = 0u; block_start < max_visible_tokens;
+         block_start += kOctavePrefillKvBlockTokens) {
+        v_prefill_octave::attention_paged_prefill_octave_unpack_block
+            <<<unpack_grid, 32u, 0, stream>>>(
+                common, k_pool, v_pool, levels, format, block_start,
+                k_scratch, v_scratch);
+        v_prefill_bf16::attention_paged_prefill_bf16_impl<3u>
+            <<<attention_grid, v_prefill_bf16::kThreads, 0, stream>>>(
+                common, k_scratch, v_scratch, nullptr, nullptr, nullptr,
+                nullptr, 0u, nullptr, {}, common.output, block_start,
+                state_max, state_sum);
     }
     return hipGetLastError();
 }

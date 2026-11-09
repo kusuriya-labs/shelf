@@ -17,7 +17,9 @@
 #include <shelf/inference/execution/selectors/sampling_selector.h>
 #include <shelf/inference/execution/selectors/selector_limits.h>
 #include <hip/hip_runtime.h>
+#include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -272,6 +274,16 @@ PagedAttentionPlan plan_paged_attention(
         return plan;
     plan.optimized = true;
     plan.use_prefill = use_prefill;
+    if (plan.use_prefill &&
+        args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
+        const uint64_t capacity = static_cast<uint64_t>(
+            args.common.block_table_stride) * args.common.page_tokens;
+        const uint64_t visible = ctx.spec.max_visible_tokens != 0u
+            ? ctx.spec.max_visible_tokens : capacity;
+        plan.prefill_kv_blocks = static_cast<uint32_t>(
+            (visible + ::shelf::kernel::kOctavePrefillKvBlockTokens - 1u) /
+            ::shelf::kernel::kOctavePrefillKvBlockTokens);
+    }
     // The bf16 prefill kernel applies the per-row block mask. The fp8 prefill kernel
     // does not, so masked fp8 KV keeps the per-(row, q_head) decode kernel.
     if (args.common.block_mask != nullptr &&
@@ -527,6 +539,7 @@ PhysicalResolveStatus append_decode_region(
 PhysicalResolveStatus append_prefill_region(
     const PagedAttentionResolvedArgs& a,
     const ::shelf::kernel::PagedAttentionCommonArgs& region,
+    const HostExecutionContext& ctx,
     PhysicalPagedAttentionPlan& out) {
     if (out.physical_count >= kPhysicalPagedAttentionMaxKernels)
         return PhysicalResolveStatus::NotApplicable;
@@ -535,6 +548,23 @@ PhysicalResolveStatus append_prefill_region(
     fill_prefill_pools(a, k);
     if (k.variant == PhysicalPagedAttentionVariant::Unsupported)
         return PhysicalResolveStatus::NotApplicable;
+    if (k.variant == PhysicalPagedAttentionVariant::OctavePrefill &&
+        ctx.decode_attn_partials != nullptr) {
+        const uint64_t required =
+            ::shelf::kernel::octave_prefill_splitkv_scratch_bytes(
+                region.rows, region.q_heads, region.kv_heads,
+                region.head_dim);
+        if (required <= ctx.decode_attn_partial_bytes) {
+            k.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+            k.blocks_per_head = ctx.decode_attn_partial_bytes;
+            const uint64_t capacity = static_cast<uint64_t>(
+                region.block_table_stride) * region.page_tokens;
+            const uint64_t visible = ctx.spec.max_visible_tokens != 0u
+                ? ctx.spec.max_visible_tokens : capacity;
+            k.splits = static_cast<uint32_t>(std::min<uint64_t>(
+                visible, UINT32_MAX));
+        }
+    }
     return PhysicalResolveStatus::Applicable;
 }
 
@@ -577,7 +607,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         out.kv_dtype = a.kv_dtype;
         out.splits = plan.splits;
         if (plan.use_prefill) {
-            if (append_prefill_region(a, a.common, out) !=
+            if (append_prefill_region(a, a.common, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
             return PhysicalResolveStatus::Applicable;
@@ -631,7 +661,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const uint32_t before = out.physical_count;
         if (a.common.block_mask == nullptr &&
             d.row_count >= kPagedAttentionPrefillMinRows) {
-            if (append_prefill_region(a, region, out) !=
+            if (append_prefill_region(a, region, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
             out.use_prefill = true;
@@ -742,11 +772,23 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                     reinterpret_cast<const float*>(k.v_scale_pool), stream);
                 break;
             case PhysicalPagedAttentionVariant::OctavePrefill:
-                herr = ::shelf::kernel::launch_attention_paged_prefill_octave(
-                    k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
-                    reinterpret_cast<const uint8_t*>(k.v_pool),
-                    reinterpret_cast<const float*>(k.k_extra_pool),
-                    k.octave_format, stream);
+                if (k.partials != 0u) {
+                    herr = ::shelf::kernel::
+                        launch_attention_paged_prefill_octave_splitkv(
+                            k.common,
+                            reinterpret_cast<const uint8_t*>(k.k_pool),
+                            reinterpret_cast<const uint8_t*>(k.v_pool),
+                            reinterpret_cast<const float*>(k.k_extra_pool),
+                            k.octave_format,
+                            reinterpret_cast<void*>(k.partials),
+                            k.blocks_per_head, k.splits, stream);
+                } else {
+                    herr = ::shelf::kernel::launch_attention_paged_prefill_octave(
+                        k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
+                        reinterpret_cast<const uint8_t*>(k.v_pool),
+                        reinterpret_cast<const float*>(k.k_extra_pool),
+                        k.octave_format, stream);
+                }
                 break;
             default:
                 return hipErrorNotSupported;
@@ -760,6 +802,7 @@ uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan) {
     uint32_t key = plan.optimized ? 1u : 0u;
     key |= plan.use_prefill ? 2u : 0u;
     key |= (plan.splits & 0xFFFFu) << 2;
+    key |= (plan.prefill_kv_blocks & 0x3FFFu) << 18;
     return key;
 }
 

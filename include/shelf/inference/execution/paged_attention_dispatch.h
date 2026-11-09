@@ -39,6 +39,7 @@ struct PagedAttentionPlan {
     bool optimized = false;
     bool use_prefill = false;
     uint32_t splits = 1u;
+    uint32_t prefill_kv_blocks = 0u;
 };
 
 constexpr uint32_t kPagedAttentionPrefillMinRows = 128u;
