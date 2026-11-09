@@ -60,7 +60,7 @@ void print_usage(FILE* out) {
     fprintf(out,
         "Usage: shelf-bench pp [options]\n"
         "  --prompt-tokens N            (default 128)\n"
-        "  --prefill-chunk N            (default 0 = whole prompt in one batch)\n"
+        "  --prefill-chunk N            (default 0 = up to 8192 tokens per batch)\n"
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"
         "                                -1 = hipEventCreate)\n"
@@ -759,6 +759,7 @@ int run_pp(int argc, char** argv) {
         static_cast<double>(opts.prompt_tokens) / (median_wall_ms / 1000.0);
 
     const std::size_t kv_reserved_bytes = kv_pool.reserved_bytes();
+    const auto& rank0_arena = tp_coordinator ? tp_coordinator->rank(0).arena() : *tp1_arena;
 
     const int roctx_enabled = roctx_available() ? 1 : 0;
 
@@ -791,6 +792,9 @@ int run_pp(int argc, char** argv) {
     printf("wall_tokens_per_sec=%.2f\n", median_wall_tokens_per_sec);
     printf("\n");
     printf("kv_reserved_bytes=%zu\n", kv_reserved_bytes);
+    printf("execution_workspace_bytes=%zu\n", executor.execution_workspace.allocation_bytes());
+    printf("rank0_arena_used_bytes=%zu\n", rank0_arena.used());
+    printf("rank0_arena_committed_bytes=%zu\n", rank0_arena.committed());
     printf("roctx=%s\n", roctx_enabled ? "enabled" : "disabled");
     printf("\n");
     printf("run_detail:\n");
