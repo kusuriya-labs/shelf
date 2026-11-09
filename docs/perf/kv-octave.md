@@ -7,13 +7,15 @@ full-attention 16 層、KV heads 4、head dimension 256 で測定した。
 `flock /tmp/r9700.lock` で GPU を排他し、decode は warmup 2 token 後の 5 token の
 per-token GPU event p50、prefill は warmup 1 回後の 5 回の GPU p50 である。
 32Ki prefill だけは executor の row 上限に合わせて 8192 token の 4 chunk とした。
-測定対象は `feature/kv-octave` の M3 実装である。
+測定対象は `feature/kv-octave` の回転空間 prefill 実装（`0e8cbc8`）である。
 
 ## 容量
 
 packed-direct prefill への移行により、M2 の K/V 各 1 layer BF16 scratch
 （合計 4096 B/token）は削除した。cache bytes は arena が確保する永続 cache 本体であり、
 Lloyd-Max table の 1792 B は表から除外した。
+回転空間 prefill は既存 output buffer を Q の一時領域として再利用するため、
+永続 cache と arena 容量は packed-direct 版から増えていない。
 
 | 形式 | cache B/token/head/layer | cache B/token（16 層、4 heads） | 32Ki cache GiB |
 | --- | ---: | ---: | ---: |
@@ -79,14 +81,16 @@ token 後から done までの総 decode token / 総時間である。
 
 | target KV | decode token | rounds | accepted drafts | accepted/round | emitted/round | tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| BF16 | 3723 | 1149 | 2574 | 2.240 | 3.240 | 63.16 |
-| FP8 | 3717 | 1139 | 2578 | 2.263 | 3.263 | 63.51 |
-| c4v4 | 3773 | 1192 | 2581 | 2.165 | 3.165 | 59.83 |
-| c5v5 | 3713 | 1155 | 2558 | 2.215 | 3.215 | 60.46 |
+| BF16 | 3723 | 1149 | 2574 | 2.240 | 3.240 | 63.04 |
+| FP8 | 3717 | 1139 | 2578 | 2.263 | 3.263 | 63.40 |
+| c4v4 | 3784 | 1178 | 2606 | 2.212 | 3.212 | 62.10 |
+| c5v5 | 3720 | 1146 | 2574 | 2.246 | 3.246 | 62.74 |
 
-c4v4 target-only は 3773 decode token、26.81 tok/s だった。MTP は 2.23 倍で、19 case の
+c4v4 target-only は 3784 decode token、27.03 tok/s だった。MTP は 2.30 倍で、19 case の
 生成 ID を case ごとに SHA-256 化した suite hash は双方
-`5dc858f907a6ff0300718b44076f576093298989b25f7f1e91e2932ef3b186f7` で一致した。
+`f114e375eddd4e4225532622a3a26d73a2a4471a6cdd5302016fe67c7efd88fb` で一致した。
+c5v5 も target-only / MTP が `82917c1cd7b44df949202d8aad171b2d614c7c0985715e7fea0ed238d2bd8541`
+で一致した。
 `SHELF_HIP_GRAPH=ON` と `SHELF_GRAPH_VERIFY=1` の smoke では rows 2〜5 の verify graph を
 capture / replay し、非 graph MTP と 19 case の生成 ID が一致した。
 
@@ -97,13 +101,15 @@ K/V ring は target KV dtype に関係なく独立した BF16 pool である。
 
 | target KV | decode token | rounds | accepted drafts | accepted/round | emitted/round | tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| BF16 | 3723 | 973 | 2750 | 2.826 | 3.826 | 68.16 |
-| FP8 | 3717 | 964 | 2753 | 2.856 | 3.856 | 69.88 |
-| c4v4 | 3773 | 1006 | 2767 | 2.750 | 3.750 | 64.79 |
-| c5v5 | 3713 | 976 | 2737 | 2.804 | 3.804 | 64.25 |
+| BF16 | 3723 | 973 | 2750 | 2.826 | 3.826 | 67.50 |
+| FP8 | 3717 | 964 | 2753 | 2.856 | 3.856 | 68.09 |
+| c4v4 | 3784 | 999 | 2785 | 2.788 | 3.788 | 66.98 |
+| c5v5 | 3720 | 972 | 2748 | 2.827 | 3.827 | 68.18 |
 
-c4v4 は spec 無しと同じ 3773 token を生成し、19 case の suite hash も
-`5dc858f907a6ff0300718b44076f576093298989b25f7f1e91e2932ef3b186f7` で一致した。
+c4v4 は spec 無しと同じ 3784 token を生成し、19 case の suite hash も
+`f114e375eddd4e4225532622a3a26d73a2a4471a6cdd5302016fe67c7efd88fb` で一致した。
+c5v5 も spec 無し / DFlash2 が `82917c1cd7b44df949202d8aad171b2d614c7c0985715e7fea0ed238d2bd8541`
+で一致した。
 single-shot の 64 token も target-only と一致した。
 
 32Ki prompt と 64 token の結果は次のとおりである。
@@ -115,10 +121,9 @@ single-shot の 64 token も target-only と一致した。
 | c4v4 | 30.09 | 12.32 |
 | c5v5 | 29.72 | 10.22 |
 
-packed-direct prefill 後の c4v4 再測定は TTFT 52.05 s、decode 35.12 tok/s だった。
-decode は改善した一方、TTFT は旧 M2 の 30.09 s と FP8 の 23.62 s の双方より悪化した。
-長い context で GQA 6 head が同じ page の unpack と inverse WHT を繰り返すことが原因で、
-R2 の 95% prefill gate は未達である。
+回転空間 prefill 後の c4v4 再測定は TTFT 36.03 s、decode 35.20 tok/s だった。
+packed-direct の 52.05 s から 30.8% 改善したが、旧 M2 の 30.09 s と FP8 の 23.62 s の
+双方より遅く、FP8 の 105% gate は未達である。
 
 c4v4 の concurrent 2、3、4 request は stream/done 整合、完走、同じ concurrent shape の
 再実行一致を確認した。4 request の人工 prompt の 1 本は単独実行と 11 token 目以降が
@@ -127,21 +132,22 @@ c4v4 の concurrent 2、3、4 request は stream/done 整合、完走、同じ c
 
 ## Prefill
 
-単位は token/s の p50 である。旧値は対象 layer の pool 全体を BF16 scratch へ展開する
-M2 経路、新値は packed page を LDS へ直接復号し、既存 gfx12 BF16 WMMA tile で消費する
-経路である。新経路は global scratch と全 pool dequant dispatch を持たない。
+単位は token/s の p50 である。Octave は packed K/V を回転空間のまま fp16 WMMA で消費する。
+Q は先行 kernel で回転し、V の重み付き和だけを後続 kernel で逆回転する。
+旧 packed-direct は `SHELF_OCTAVE_PREFILL_LEGACY=1` で選択できる。
 
 | context | BF16 | FP8 | c4v4 | c5v5 | b4n3v3 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2048 | 1828.97 | 1839.46 | 1841.11 | 1830.93 | 1832.71 |
-| 8192 | 1855.88 | 1887.33 | 1871.53 | 1872.14 | 1873.91 |
-| 32768 | 1504.56 | 1526.01 | 1483.80 | 1481.40 | 1487.03 |
+| 2048 | 1828.97 | 1937.19 | 1820.47 | 1814.10 | 1834.17 |
+| 8192 | 1855.88 | 1966.33 | 1654.59 | 1597.36 | 1646.91 |
+| 32768 | 1504.56 | 1593.49 | 1007.60 | 933.10 | 989.18 |
 
-packed-direct c4v4 の初期測定は 2048 が 1759.97 token/s（FP8 比 95.7%）、8192 が
-1381.55 token/s（同 73.2%）だった。2048 は目標を満たすが、8192 は未達である。現在の
-kernel は 32 query row × 1 query head の block ごとに同じ KV head の packed page を復号するため、
-GQA 6 head 間で inverse WHT と unpack を共有できていない。global scratch は解消したが、長い
-prefill ではこの重複計算が新しい律速である。
+FP8 比は c4v4 が 94.0% / 84.1% / 63.2%、c5v5 が 93.7% / 81.2% / 58.6%、
+b4n3v3 が 94.7% / 83.8% / 62.1% で、95% gate は全形式で未達だった。回転空間化により
+per-token inverse WHT は消え、10 query row × 6 GQA head が packed K/V を共有する。
+一方、10-row tile ごとに prefix 全体を再走査して unpack するため、context が長いほど
+FP8 との差が拡大する。次の本命は split-KV prefill または複数 query pass の同時保持である。
+単純な 32-token KV tile は 8192 で 1590.23 tok/s と逆効果だったため採用しなかった。
 
 ## 正しさと制約
 
@@ -156,10 +162,21 @@ int8 codebook/fp16 WMMA decode の再測定は 0.002142、0.006791、0.007433、
 0.005455 で、旧 fused kernel 平均に対して +3.9% と ±5% gate 内だった。packed-direct
 prefill を含む `s2k_0` の再測定は 0.001995 だった。
 
+回転空間 prefill と M2 BF16 scratch reference の最大絶対差は、causal + prefix が
+0.011832、chunk 境界の block K が 0.003819、rows=2048 / 8192 が 0.011832 だった。
+旧 packed-direct との差も同じ範囲である。c4v4 の `s2k_0`〜`s2k_2` quality KL は
+0.001839、0.006500、0.007184、平均 0.005174 だった。基準 0.005455 に対して -5.14% で、
+低下方向だが指定した ±5% の下限を 0.14 percentage point 外れた。
+
+rows=4 / context=131072 の decode attention 単体は warmup 1 回後 5 回の GPU event p50 が
+4.2558 ms だった。2〜4 並列の `test_compute_dflash2_octave.py` は 26/26 PASS した。
+graph build では c4v4 の prefill + decode が完走し、context 2048 の decode p50 は
+28.64 tok/s だった。
+
 prefill の current chunk を量子化前の K/V から直接読む A mode は見送った。現在の
 primitive graph は KV append と paged attention を別 dispatch とし、attention binding に
 current chunk の K/V value が無いため、追加するには lowering と primitive contract の変更が
-必要になる。M3 は安全側として全量量子化後の M2 prefill を維持する。
+必要になる。回転空間 prefill は安全側として全量量子化後の意味論を維持する。
 
 MTP、DFlash2、HIP graph は有効である。TP、PP、MoE は起動時に拒否する。M3 fused kernel は
 rows 1〜32 と tree visibility を実装し、speculative runtime の独立 resource ownership と

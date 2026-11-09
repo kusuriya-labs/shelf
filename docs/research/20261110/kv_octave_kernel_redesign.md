@@ -68,17 +68,47 @@ high bits で 8-entry bank を選ぶ 2〜4 段の perm tree とする。table dw
 `paged_prefill.hip` と BF16/EXL3 WMMA kernel の `lane & 15`、`lane >> 4`、8-element fragment
 配置に合わせる。最初に 16x16x16 の単体テストで A/B/C の lane 対応を固定する。
 
-## Packed-direct prefill
+## 回転空間 prefill
 
-prefill は query 32 row × KV 16 token を基本 tile とする。8 wave のうち loader wave が
-packed K/V を次の LDS buffer へ復号し、compute wave が現在 buffer で QK、online softmax、
-PV を行う。K/V double buffer は約 33 KiB、Q と score/probability を合わせて 64 KiB 未満に
-収める。GQA の 6 query head は同じ K/V tile を共有する。prefix と chunk を区別せず、append
-済み packed cache を causal position と block mask で mask するため、全量量子化後という
-現在の意味論を維持する。
+既定実装は 1 workgroup = 1 KV head × 10 causal query row とする。M 次元を
+`6 GQA head × 10 row = 60`（64 row に zero pad）へ flatten し、8 wave を
+4 M tile × 2 dimension half に割り当てる。これにより K/V 16-token tile の unpack と
+LDS staging を 6 query head が共有する。workgroup 数は 2048 row で 820、8192 row で
+3280 となり、64 CU を埋める。
 
-この経路により pool 全体を BF16 化する K/V 各 1-layer scratch（合計 4096 B/token）と
-dequant dispatch を削除する。arena/page footprint は永続 packed bytes と小さい attention
-partials だけに更新する。HIP graph では host length を読まず、row position、block table、
-tree 配列を device pointer のまま参照し、capture 中に allocation と同期を行わない。
+Q は小さい先行 kernel で固定符号と H256（compact）または 4×H64（block）を適用し、
+既存 output buffer を一時領域として使う。main kernel は回転済み Q と codebook 値を
+gfx12 fp16 WMMA / fp32 accumulator で積算するため、K の inverse WHT を行わない。
+V も回転空間で PV を積算し、後続 kernel が query row ごとに H256 と固定符号を 1 回だけ
+適用する。3 kernel は同一 stream 上で順序付けられ、追加 allocation と host 同期は無い。
+
+compact 3〜6 bit は decode と同じ signed-int8 固定 codebook と係数を用いる。lane が担当する
+連続 8 dimension は bit-plane word を 1〜3 回だけ読み、8 code へ展開する。K scale は score、
+V scale は probability に畳み込む。block K は segment ごとの scale が必要なため exact table
+fallback を使う。online softmax は fp32、probability は hi/lo fp16、PV accumulator は fp32
+である。LDS は約 32 KiB で、`__launch_bounds__(256, 2)` により 2 workgroup/CU を許す。
+
+prefix と current chunk は区別せず、append 済み packed cache 全体を causal position と
+block mask で読むため、全量量子化後という意味論を維持する。旧 packed-direct は
+`SHELF_OCTAVE_PREFILL_LEGACY=1` で残す。HIP graph では row position、block table、mask を
+device pointer のまま参照し、capture 中に allocation と同期を行わない。
+
+## 試行結果と不採用案
+
+- 4-row tile は GQA 共有しても workgroup 数が旧経路より増え、2048 c4v4 が 1635 tok/s と
+  旧 packed-direct 1721 tok/s を下回った。
+- 8-row tile は 1695 tok/s、10-row tile は 1736 tok/s まで改善した。bit-plane word の
+  8-code 一括展開、固定 int8 codebook、Q-LDS の除去、fp16 WMMA により最終的に 1820 tok/s。
+- 32-token KV tile は Q-LDS を output buffer へ移して収容したが、softmax/PV の 16-token
+  half が 2 回必要で barrier 削減にならず、8192 c4v4 は 1590 tok/s と 16-token tile の
+  1661 tok/s を下回ったため採用しなかった。
+- K/V double buffer は 10-row/60-M tile の score、probability、accumulator と同居すると
+  64 KiB LDS とレジスタ圧を越える。loader/compute overlap より 2 block/CU を優先した。
+- 最終 FP8 比は 2048 が 93.7〜94.7%、8192 が 81.2〜84.1%、32768 が 58.6〜63.2% で
+  95% gate は未達。残る律速は 10-row tile ごとの prefix 全体の再 unpack であり、次は
+  split-KV prefill、または複数 query pass の softmax/PV state を保持して同じ K/V tile を
+  さらに共有する設計が必要である。
+
+この経路でも pool 全体を BF16 化する K/V 各 1-layer scratch（合計 4096 B/token）は不要で、
+arena/page footprint は永続 packed bytes のままである。
 
