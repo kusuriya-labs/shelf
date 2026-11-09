@@ -111,13 +111,20 @@ async def stream_response(request, service, chat, prepared):
     await response.prepare(request)
     state = ResponseStream(chat)
     events = service.stream(chat, prepared)
+    finished = False
     try:
         for chunk in state.start():
             await response.write(chunk)
         async for event in events:
-            chunks = state.finish(event) if isinstance(event, StreamDone) else state.feed(event)
+            if isinstance(event, StreamDone):
+                finished = True
+                chunks = state.finish(event)
+            else:
+                chunks = state.feed(event)
             for chunk in chunks:
                 await response.write(chunk)
+        if not finished:
+            await response.write(state.fail(RuntimeError("generation ended without a terminal event")))
         await response.write_eof()
     except (ConnectionResetError, BrokenPipeError):
         pass

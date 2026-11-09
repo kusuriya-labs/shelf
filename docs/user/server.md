@@ -639,6 +639,18 @@ model は `shelf/shelf` を選ぶ。
 ただし現行 Codex CLI は `web_search` や `namespace`、
 `include: ["reasoning.encrypted_content"]` など本サーバが拒否する項目を送るため、
 現状は接続して会話を完了できない。これらを要求しない Responses クライアントを使う。
+接続先の設定例は次のとおり（この設定だけでは上記の非対応項目は解消しない）。
+
+```toml
+model_provider = "shelf"
+model = "shelf"
+
+[model_providers.shelf]
+name = "Shelf"
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "responses"
+supports_websockets = false
+```
 
 ### DeepSeek Harness
 
