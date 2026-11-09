@@ -16,7 +16,6 @@ from support import (  # noqa: E402
     ServerHarness,
     compute_pids,
     http_json,
-    http_post_status,
     model_dir,
 )
 
@@ -74,11 +73,20 @@ def main() -> int:
                           chat_latency < 120.0,
                           f"latency={chat_latency:.1f}s (cancelled if well below full generation)")
 
-            # Responses API must stay absent; a disconnect test there is meaningless.
-            status, body = http_post_status(
-                f"http://127.0.0.1:{server.port}/v1/responses",
-                {"model": "shelf", "input": "hello"})
-            checker.check("responses-unsupported", status == 404, f"{status} {body[:200]}")
+            first = open_stream_and_disconnect(
+                server.port, "/v1/responses", {
+                    "model": "shelf", "input": LONG_MESSAGE["content"],
+                    "stream": True, "temperature": 0, "max_output_tokens": STREAM_BUDGET})
+            checker.check("responses-disconnect-started", "event: response.created" in first,
+                          repr(first[:120]))
+
+            recovered = http_json(f"{server.base_url}/chat/completions", {
+                "model": "shelf", "messages": [{"role": "user", "content": "Hello"}],
+                "temperature": 0, "max_tokens": 16,
+                "chat_template_kwargs": {"enable_thinking": False}})
+            checker.check("responses-after-disconnect",
+                          bool(recovered["choices"][0]["message"]["content"].strip()),
+                          repr(recovered))
 
             checker.check("compute-pid-stable", compute_pids() == pids_before,
                           f"{pids_before} -> {compute_pids()}")

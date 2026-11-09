@@ -46,8 +46,8 @@ def main() -> int:
 
             status, body = http_post_status(
                 f"{server.base_url}/responses",
-                {"model": "shelf", "input": "hello"})
-            checker.check("responses-404", status == 404, f"{status} {body[:300]}")
+                {"model": "does-not-exist", "input": "hello"})
+            checker.check("responses-unknown-model-404", status == 404, f"{status} {body[:300]}")
 
             status, body = http_post_status(
                 f"{server.base_url}/completions",
