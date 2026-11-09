@@ -1014,6 +1014,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_batch_rows = batch_max_rows;
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
+        draft_config.max_prefill_feature_rows = runtime.config().dflash2_prefill_rows;
         draft_config.target_lm_head = serve_tp_sharded ? private_lm_head
                                        : &runtime.model().lm_head();
         draft_config.target_embed_tokens =

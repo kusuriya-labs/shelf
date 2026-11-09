@@ -10,6 +10,7 @@
 #include <shelf/models/qwen35/kernels/dflash2/topk.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace shelf::qwen35 {
 namespace runtime {
@@ -30,6 +31,16 @@ std::size_t rows_for(const dflash2::DFlash2Config& config, uint32_t sessions) no
 }
 
 }  // namespace
+
+bool dflash2_prefill_rows(const dflash2::DFlash2Config& config, uint32_t tp,
+                          const char* value, uint32_t& rows) noexcept {
+    if (value != nullptr && std::strcmp(value, "8") != 0 &&
+        std::strcmp(value, "256") != 0) return false;
+    const bool enabled = value == nullptr || std::strcmp(value, "256") == 0;
+    rows = enabled && tp == 1u && config.block_size == 8u &&
+                   config.sliding_window >= 256u ? 256u : 0u;
+    return true;
+}
 
 std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) noexcept {
     return align_up(config.context_ring_bytes());
@@ -77,13 +88,15 @@ std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool&
 
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,
-                                        std::size_t lm_head_k) noexcept {
+                                        std::size_t lm_head_k,
+                                        std::size_t prefill_rows) noexcept {
     const std::size_t hidden = config.hidden_size;
     const std::size_t intermediate = config.intermediate_size;
     const std::size_t q_features = config.attention_q_rows();
     const std::size_t kv_features = config.attention_kv_rows();
     const std::size_t ctx_rows = config.sliding_window == 0u ? rows : config.sliding_window;
     const std::size_t draft = rows;
+    const std::size_t feature_rows = std::max(rows, std::min(prefill_rows, ctx_rows));
 
     std::size_t bf16_rows = 0u;
     bf16_rows += 16u * rows * hidden;
@@ -92,6 +105,7 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
     bf16_rows += 4u * ctx_rows * kv_features;
     bf16_rows += 3u * rows * intermediate;
     bf16_rows += rows * config.tap_feature_size();
+    bf16_rows += (feature_rows - rows) * (config.tap_feature_size() + 2u * hidden);
     bf16_rows += rows * config.conv_projection_rows();
     bf16_rows += draft * config.selector_rank;
     std::size_t total = align_up(bf16_rows * sizeof(bf16_t));
@@ -125,11 +139,13 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    const ::shelf::state::GdnStatePool& pool,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
-                                   uint32_t sessions) noexcept {
+                                   uint32_t sessions,
+                                   std::size_t prefill_rows) noexcept {
     DFlash2Footprint footprint;
     footprint.draft_weights = draft_weights_bytes;
     footprint.draft_scratch =
-        dflash2_draft_scratch_bytes(config, rows_for(config, sessions), lm_head_k);
+        dflash2_draft_scratch_bytes(config, rows_for(config, sessions), lm_head_k,
+                                    prefill_rows);
     footprint.session_slot =
         dflash2_context_state_bytes(config) + dflash2_spec_workspace_bytes(spec_config, pool);
     const std::size_t batch_rows = std::min<std::size_t>(

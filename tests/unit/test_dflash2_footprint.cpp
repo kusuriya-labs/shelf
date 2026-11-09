@@ -8,6 +8,7 @@ using shelf::qwen35::dflash2::DFlash2Config;
 using shelf::qwen35::runtime::DFlash2Footprint;
 using shelf::qwen35::runtime::dflash2_context_state_bytes;
 using shelf::qwen35::runtime::dflash2_draft_scratch_bytes;
+using shelf::qwen35::runtime::dflash2_prefill_rows;
 
 static int g_fail = 0;
 
@@ -43,6 +44,29 @@ static DFlash2Config dflash2_reference_config() {
 int main() {
     const DFlash2Config config = dflash2_reference_config();
 
+    uint32_t rows = 0u;
+    check(dflash2_prefill_rows(config, 1u, nullptr, rows) && rows == 256u,
+          "serving defaults to 256 feature rows");
+    check(dflash2_prefill_rows(config, 1u, "8", rows) && rows == 0u,
+          "8 restores legacy feature rows");
+    check(dflash2_prefill_rows(config, 1u, "256", rows) && rows == 256u,
+          "256 explicitly enables feature rows");
+    check(dflash2_prefill_rows(config, 2u, nullptr, rows) && rows == 0u,
+          "tensor parallel defaults to the legacy capacity");
+    check(dflash2_prefill_rows(config, 2u, "256", rows) && rows == 0u,
+          "tensor parallel falls back");
+    DFlash2Config unsupported = config;
+    unsupported.sliding_window = 255u;
+    check(dflash2_prefill_rows(unsupported, 1u, nullptr, rows) && rows == 0u,
+          "small sliding window falls back");
+    unsupported = config;
+    unsupported.block_size = 16u;
+    check(dflash2_prefill_rows(unsupported, 1u, nullptr, rows) && rows == 0u,
+          "other block sizes fall back");
+    for (const char* invalid : {"", "0", "9", "257", "-1", " 8", "8x"}) {
+        check(!dflash2_prefill_rows(config, 1u, invalid, rows), "invalid value is rejected");
+    }
+
     const std::size_t context = dflash2_context_state_bytes(config);
     check(context == 2u * 5u * 2048u * (8u * 128u) * sizeof(shelf::bf16_t),
           "context state bytes match the ring geometry");
@@ -52,6 +76,19 @@ int main() {
     const std::size_t scratch = dflash2_draft_scratch_bytes(config, 8u, 0u);
     check(scratch > 0u, "draft scratch is positive");
     check((scratch % 256u) == 0u, "draft scratch is alignment padded");
+    const std::size_t prefill_scratch = dflash2_draft_scratch_bytes(config, 8u, 0u, 256u);
+    const std::size_t feature_delta = (256u - 8u) *
+        (config.tap_feature_size() + 2u * config.hidden_size) * sizeof(shelf::bf16_t);
+    check(prefill_scratch - scratch == feature_delta,
+          "prefill scratch accounts for exactly the additional feature rows");
+    const std::size_t batch_scratch = dflash2_draft_scratch_bytes(config, 32u, 0u);
+    const std::size_t batch_prefill = dflash2_draft_scratch_bytes(config, 32u, 0u, 256u);
+    check(batch_prefill - batch_scratch == (256u - 32u) *
+              (config.tap_feature_size() + 2u * config.hidden_size) * sizeof(shelf::bf16_t),
+          "prefill scratch accounts for the existing batched row capacity");
+    check(dflash2_draft_scratch_bytes(config, 8u, 0u, 4096u) ==
+              dflash2_draft_scratch_bytes(config, 8u, 0u, 2048u),
+          "prefill scratch is capped to context capacity");
 
     DFlash2Config small_vocab = config;
     small_vocab.vocab_size = config.vocab_size / 2u;
