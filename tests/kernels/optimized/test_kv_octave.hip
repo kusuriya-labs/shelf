@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -415,12 +416,13 @@ double normalized_mse(uint32_t bits, const std::vector<float>& levels) {
 
 void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                           bool tree_visibility, const char* name,
-                          const std::vector<float>& levels) {
-    constexpr uint32_t tokens = 64u;
+                          const std::vector<float>& levels,
+                          bool prefill = false, uint32_t prefix = 0u) {
+    const uint32_t tokens = prefill ? prefix + query_rows : 64u;
     constexpr uint32_t kv_heads = 4u;
     constexpr uint32_t q_heads = 24u;
     constexpr uint32_t page_tokens = 16u;
-    constexpr uint32_t pages = 4u;
+    const uint32_t pages = (tokens + page_tokens - 1u) / page_tokens;
     constexpr uint32_t head_dim = 256u;
     constexpr uint32_t kv_features = kv_heads * head_dim;
     constexpr uint32_t q_features = q_heads * head_dim;
@@ -438,10 +440,11 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
             std::sin(static_cast<float>(i) * 0.021f) * 0.8f);
     std::vector<uint32_t> append_slots(tokens, 0u), append_positions(tokens);
     for (uint32_t i = 0u; i < tokens; ++i) append_positions[i] = i;
-    std::vector<uint32_t> table = {0u, 1u, 2u, 3u};
+    std::vector<uint32_t> table(pages);
+    for (uint32_t i = 0u; i < pages; ++i) table[i] = i;
     std::vector<uint32_t> query_slots(query_rows, 0u), query_positions(query_rows);
     for (uint32_t row = 0u; row < query_rows; ++row)
-        query_positions[row] = tokens - query_rows + row;
+        query_positions[row] = prefill ? prefix + row : tokens - query_rows + row;
     std::vector<uint32_t> tree_offsets(query_rows + 1u, 0u);
     std::vector<uint32_t> tree_positions;
     if (tree_visibility) {
@@ -477,8 +480,9 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     uint32_t* d_tree_positions = nullptr;
     float* d_reference = nullptr;
     float* d_fused = nullptr;
+    float* d_legacy = nullptr;
     float* d_partials = nullptr;
-    const std::size_t vectors = static_cast<std::size_t>(tokens) * kv_heads;
+    const std::size_t vectors = static_cast<std::size_t>(pages) * page_tokens * kv_heads;
     const std::size_t scratch_elems = vectors * head_dim;
     const uint32_t splits = tree_visibility ? 1u : 4u;
     const std::size_t partial_elems = static_cast<std::size_t>(query_rows) *
@@ -501,6 +505,8 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                 allocate(reinterpret_cast<void**>(&d_tree_positions), tree_positions.size() * sizeof(uint32_t)))) &&
               allocate(reinterpret_cast<void**>(&d_reference), q.size() * sizeof(float)) &&
               allocate(reinterpret_cast<void**>(&d_fused), q.size() * sizeof(float)) &&
+              (!prefill || allocate(reinterpret_cast<void**>(&d_legacy),
+                                    q.size() * sizeof(float))) &&
               allocate(reinterpret_cast<void**>(&d_partials), partial_elems * sizeof(float));
     if (ok) {
         ok = hip_ok(hipMemcpy(d_k, k.data(), k.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
@@ -573,29 +579,64 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     attention.elems_per_layer = pages * attention.elems_per_page;
     attention.scale = 0.0625f;
     if (ok) {
-        ok = hip_ok(shelf::kernel::launch_attention_paged_bf16(
-                        attention, d_k_scratch, d_v_scratch, nullptr), name);
-        attention.output = d_fused;
-        ok = ok && hip_ok(shelf::kernel::launch_attention_paged_octave_split(
-                              attention, d_k_pool, d_v_pool, d_levels, format,
-                              d_partials, splits, nullptr), name) &&
-             hip_ok(shelf::kernel::launch_attention_paged_octave_reduce(
-                        attention, d_partials, splits, nullptr), name) &&
-             hip_ok(hipDeviceSynchronize(), name);
+        if (prefill) {
+            ok = hip_ok(shelf::kernel::launch_attention_paged_prefill_bf16(
+                            attention, d_k_scratch, d_v_scratch, nullptr), name);
+            attention.output = d_fused;
+            unsetenv("SHELF_OCTAVE_PREFILL_LEGACY");
+            ok = ok && hip_ok(shelf::kernel::launch_attention_paged_prefill_octave(
+                                  attention, d_k_pool, d_v_pool, d_levels, format,
+                                  nullptr), name);
+            attention.output = d_legacy;
+            setenv("SHELF_OCTAVE_PREFILL_LEGACY", "1", 1);
+            ok = ok && hip_ok(shelf::kernel::launch_attention_paged_prefill_octave(
+                                  attention, d_k_pool, d_v_pool, d_levels, format,
+                                  nullptr), name);
+            unsetenv("SHELF_OCTAVE_PREFILL_LEGACY");
+        } else {
+            ok = hip_ok(shelf::kernel::launch_attention_paged_bf16(
+                            attention, d_k_scratch, d_v_scratch, nullptr), name);
+            attention.output = d_fused;
+            ok = ok && hip_ok(shelf::kernel::launch_attention_paged_octave_split(
+                                  attention, d_k_pool, d_v_pool, d_levels, format,
+                                  d_partials, splits, nullptr), name) &&
+                 hip_ok(shelf::kernel::launch_attention_paged_octave_reduce(
+                            attention, d_partials, splits, nullptr), name);
+        }
+        ok = ok && hip_ok(hipDeviceSynchronize(), name);
     }
-    std::vector<float> reference(q.size()), fused(q.size());
+    std::vector<float> reference(q.size()), fused(q.size()), legacy(q.size());
     if (ok) {
         ok = hip_ok(hipMemcpy(reference.data(), d_reference,
                               reference.size() * sizeof(float), hipMemcpyDeviceToHost), name) &&
              hip_ok(hipMemcpy(fused.data(), d_fused,
                               fused.size() * sizeof(float), hipMemcpyDeviceToHost), name);
+        if (ok && prefill)
+            ok = hip_ok(hipMemcpy(legacy.data(), d_legacy,
+                                  legacy.size() * sizeof(float), hipMemcpyDeviceToHost), name);
     }
     if (ok) {
         float maximum = 0.0f;
-        for (std::size_t i = 0u; i < reference.size(); ++i)
-            maximum = std::max(maximum, std::fabs(reference[i] - fused[i]));
+        for (std::size_t i = 0u; i < reference.size(); ++i) {
+            const float difference = std::fabs(reference[i] - fused[i]);
+            maximum = std::max(maximum, difference);
+        }
         std::printf("%s max_abs=%.7f\n", name, maximum);
         check(maximum < 0.025f, name);
+        if (prefill) {
+            float legacy_maximum = 0.0f;
+            float new_legacy_maximum = 0.0f;
+            for (std::size_t i = 0u; i < reference.size(); ++i) {
+                legacy_maximum = std::max(
+                    legacy_maximum, std::fabs(reference[i] - legacy[i]));
+                new_legacy_maximum = std::max(
+                    new_legacy_maximum, std::fabs(fused[i] - legacy[i]));
+            }
+            std::printf("%s legacy_max_abs=%.7f new_legacy_max_abs=%.7f\n",
+                        name, legacy_maximum, new_legacy_maximum);
+            check(legacy_maximum < 0.025f, name);
+            check(new_legacy_maximum < 0.025f, name);
+        }
     }
     for (void* pointer : allocations) hipFree(pointer);
 }
@@ -621,6 +662,18 @@ int main() {
                          "Octave rows 32 parity", levels);
     run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 8u, true,
                          "Octave tree visibility parity", levels);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave prefill causal prefix parity", levels,
+                         true, 17u);
+    run_attention_parity({OctaveKMode::Block, 4u, 3u, 3u}, 33u, false,
+                         "Octave prefill chunk boundary parity", levels,
+                         true, 16u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 2048u, false,
+                         "Octave prefill rows 2048 parity", levels,
+                         true, 17u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 8192u, false,
+                         "Octave prefill rows 8192 parity", levels,
+                         true, 16u);
 
     const double mse3 = normalized_mse(3u, levels);
     const double mse4 = normalized_mse(4u, levels);

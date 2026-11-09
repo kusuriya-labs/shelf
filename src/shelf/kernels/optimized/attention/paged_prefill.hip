@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cmath>
 #include <cfloat>
+#include <cstdlib>
 #include <type_traits>
 
 namespace shelf::kernel {
@@ -115,6 +116,80 @@ __device__ __forceinline__ uint32_t octave_unpack_direct(
     uint32_t code = octave_unpack_plane_direct(source, index, 2u);
     source += dimensions / 4u;
     return code | (octave_unpack_plane_direct(source, index, 1u) << 2u);
+}
+
+// A wave lane always owns an aligned group of eight dimensions.  Decode the
+// corresponding bit-plane words once instead of reloading the same word for
+// every scalar code.
+__device__ __forceinline__ void octave_unpack8_direct(
+    const uint8_t* source, uint32_t base, uint32_t dimensions, uint32_t bits,
+    uint32_t (&codes)[8]) {
+    if (bits >= 4u) {
+        const uint32_t low = octave_load_word(source + (base / 8u) * 4u);
+        source += dimensions / 2u;
+        uint32_t high = 0u;
+        if (bits == 5u)
+            high = octave_load_word(source + (base / 32u) * 4u);
+        else if (bits == 6u)
+            high = octave_load_word(source + (base / 16u) * 4u);
+        #pragma unroll
+        for (uint32_t e = 0u; e < 8u; ++e) {
+            codes[e] = (low >> (4u * e)) & 15u;
+            if (bits == 5u)
+                codes[e] |= ((high >> ((base & 31u) + e)) & 1u) << 4u;
+            else if (bits == 6u)
+                codes[e] |= ((high >> (2u * ((base & 15u) + e))) & 3u) << 4u;
+        }
+        return;
+    }
+    const uint32_t low = octave_load_word(source + (base / 16u) * 4u);
+    source += dimensions / 4u;
+    const uint32_t high = octave_load_word(source + (base / 32u) * 4u);
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e)
+        codes[e] = ((low >> (2u * ((base & 15u) + e))) & 3u) |
+                   (((high >> ((base & 31u) + e)) & 1u) << 2u);
+}
+
+template <uint32_t kBits>
+__device__ __forceinline__ int32_t octave_codebook_int8_prefill(uint32_t code) {
+    const uint32_t bank = code >> 3u;
+    const uint32_t selector = code & 7u;
+    uint32_t value;
+    if constexpr (kBits == 3u) {
+        value = __builtin_amdgcn_perm(0x7f4f2d0eu, 0xf2d3b181u, selector);
+    } else if constexpr (kBits == 4u) {
+        const uint32_t v0 = __builtin_amdgcn_perm(0xfaeee1d4u, 0xc6b5a081u, selector);
+        const uint32_t v1 = __builtin_amdgcn_perm(0x7f604b3au, 0x2c1f1206u, selector);
+        value = bank == 0u ? v0 : v1;
+    } else if constexpr (kBits == 5u) {
+        const uint32_t v0 = __builtin_amdgcn_perm(0xd1cac3bau, 0xb1a69781u, selector);
+        const uint32_t v1 = __builtin_amdgcn_perm(0xfdf8f3eeu, 0xe8e3ddd7u, selector);
+        const uint32_t v2 = __builtin_amdgcn_perm(0x29231d18u, 0x120d0803u, selector);
+        const uint32_t v3 = __builtin_amdgcn_perm(0x7f695a4fu, 0x463d362fu, selector);
+        value = bank == 0u ? v0 : bank == 1u ? v1 : bank == 2u ? v2 : v3;
+    } else {
+        const uint32_t v0 = __builtin_amdgcn_perm(0xbcb7b2acu, 0xa59d9281u, selector);
+        const uint32_t v1 = __builtin_amdgcn_perm(0xd8d5d2cfu, 0xcbc8c4c0u, selector);
+        const uint32_t v2 = __builtin_amdgcn_perm(0xeceae8e5u, 0xe2e0dddau, selector);
+        const uint32_t v3 = __builtin_amdgcn_perm(0xfffdfaf8u, 0xf6f3f1efu, selector);
+        const uint32_t v4 = __builtin_amdgcn_perm(0x110f0d0au, 0x08060301u, selector);
+        const uint32_t v5 = __builtin_amdgcn_perm(0x2623201eu, 0x1b181614u, selector);
+        const uint32_t v6 = __builtin_amdgcn_perm(0x403c3835u, 0x312e2b28u, selector);
+        const uint32_t v7 = __builtin_amdgcn_perm(0x7f6e635bu, 0x544e4944u, selector);
+        value = bank == 0u ? v0 : bank == 1u ? v1 : bank == 2u ? v2
+              : bank == 3u ? v3 : bank == 4u ? v4 : bank == 5u ? v5
+              : bank == 6u ? v6 : v7;
+    }
+    return static_cast<int32_t>(static_cast<int8_t>(value & 0xffu));
+}
+
+template <uint32_t kBits>
+__device__ __forceinline__ constexpr float octave_codebook_scale_prefill() {
+    if constexpr (kBits == 3u) return 0.0169444544f;
+    if constexpr (kBits == 4u) return 0.0215164533f;
+    if constexpr (kBits == 5u) return 0.0256750590f;
+    return 0.0294811393f;
 }
 
 __device__ __forceinline__ float octave_sign(uint32_t index, uint32_t salt) {
@@ -518,6 +593,484 @@ void attention_paged_prefill_bf16_impl(
 
 } }  // namespace v_prefill_bf16
 
+namespace { namespace v_prefill_octave {
+
+using namespace v_prefill_bf16;
+
+// One workgroup owns one KV head and ten causal query rows.  The M dimension
+// is flattened as [query-head-within-GQA, query-row], so the packed K/V page is
+// decoded once and shared by all six Qwen3.8 query heads.  The WMMA fragment
+// layout follows shelf's gfx12 paged-prefill kernel (lane & 15, lane >> 4 and
+// eight accumulator elements).  The packed-page tiling is structurally based
+// on vLLM's Apache-2.0 csrc/attention/octave_prefill_rdna3.cu, but this path is
+// independently implemented for gfx1201 wave32.
+constexpr uint32_t kQueryRows = 10u;
+constexpr uint32_t kFlatRows = 64u;
+constexpr uint32_t kFlatTiles = kFlatRows / 16u;
+constexpr uint32_t kOctavePitch = kHeadDim;
+constexpr uint32_t kOctaveTokens = 16u;
+constexpr uint32_t kOctaveTokenHalves = kOctaveTokens / 16u;
+constexpr uint32_t kOctaveSmaxPitch = kOctaveTokens + 1u;
+constexpr uint32_t kDimParts = kWaves / kFlatTiles;
+constexpr uint32_t kDimsPerPart = kHeadDim / kDimParts;
+constexpr uint32_t kKSteps = kDimsPerPart / 16u;
+
+using hf8_t = _Float16 __attribute__((ext_vector_type(8)));
+
+__device__ __forceinline__ unsigned short octave_f2h(float value) {
+    return __half_as_ushort(__float2half(value));
+}
+
+__device__ __forceinline__ hf8_t octave_frag_nk_f16(
+    const unsigned short* source, uint32_t pitch, uint32_t row_base,
+    uint32_t kbase, uint32_t lane) {
+    const unsigned short* p = source +
+        static_cast<size_t>(row_base + (lane & 15u)) * pitch + kbase +
+        4u * (lane >> 4u);
+    union { unsigned short h[8]; hf8_t f; } result;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 4u; ++e) {
+        result.h[e] = p[e];
+        result.h[4u + e] = p[8u + e];
+    }
+    return result.f;
+}
+
+__device__ __forceinline__ hf8_t octave_frag_kn_f16(
+    const unsigned short* source, uint32_t pitch, uint32_t column_base,
+    uint32_t kbase, uint32_t lane) {
+    const uint32_t column = column_base + (lane & 15u);
+    const uint32_t k0 = kbase + 4u * (lane >> 4u);
+    union { unsigned short h[8]; hf8_t f; } result;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 4u; ++e) {
+        result.h[e] = source[static_cast<size_t>(k0 + e) * pitch + column];
+        result.h[4u + e] =
+            source[static_cast<size_t>(k0 + 8u + e) * pitch + column];
+    }
+    return result.f;
+}
+
+__device__ __forceinline__ wf8_t octave_wmma_f16(
+    hf8_t a, hf8_t b, wf8_t c) {
+    return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+}
+
+struct OctavePrefillShared {
+    unsigned short k_page[kOctaveTokens][kOctavePitch];
+    unsigned short v_page[kOctaveTokens][kOctavePitch];
+    float s_part[kFlatTiles][kDimParts][16][kOctaveSmaxPitch];
+    unsigned short p_tile[kFlatRows][kPPitch];
+    unsigned short p_tile_lo[kFlatRows][kPPitch];
+    float k_scale[kOctaveTokens];
+    float v_scale[kOctaveTokens];
+    float row_max[kFlatRows];
+    float row_sum[kFlatRows];
+    float row_alpha[kFlatRows];
+    uint32_t vis[kFlatRows];
+    uint32_t rows_here;
+    uint32_t flat_rows;
+    uint32_t visible_max;
+    uint32_t page_count;
+    uint32_t invalid;
+    const uint32_t* block_table;
+};
+
+static_assert(sizeof(OctavePrefillShared) <= 64u * 1024u);
+
+__global__ __launch_bounds__(kThreads, 2)
+void attention_paged_prefill_octave_rotate_q(
+    PagedAttentionCommonArgs a, bool compact, void* output_base) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t vector = blockIdx.x * kWaves + wave;
+    const uint32_t vectors = a.rows * a.q_heads;
+    if (vector >= vectors) return;
+    const uint32_t row = vector / a.q_heads;
+    const uint32_t q_head = vector % a.q_heads;
+    const bf16* source = reinterpret_cast<const bf16*>(a.q) +
+        static_cast<size_t>(row) * a.q_row_stride +
+        static_cast<size_t>(q_head) * kHeadDim + lane * 8u;
+    float value[8];
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        const uint32_t dimension = lane * 8u + e;
+        value[e] = __bfloat162float(source[e]) * octave_sign(dimension, 11u);
+    }
+    octave_inverse_wave(value, lane, compact);
+    const size_t base = static_cast<size_t>(row) * a.output_row_stride +
+        static_cast<size_t>(q_head) * kHeadDim + lane * 8u;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        if (a.output_dtype == PagedAttentionOutputDType::F32)
+            reinterpret_cast<float*>(output_base)[base + e] = value[e];
+        else
+            reinterpret_cast<bf16*>(output_base)[base + e] =
+                __float2bfloat16(value[e]);
+    }
+}
+
+__device__ __forceinline__ hf8_t octave_flat_q_frag(
+    const PagedAttentionCommonArgs& a, const void* output_base,
+    uint32_t row0, uint32_t kv_head, uint32_t q_per_kv,
+    uint32_t flat_base, uint32_t kbase, uint32_t lane) {
+    const uint32_t flat = flat_base + (lane & 15u);
+    const uint32_t local_q_head = flat / kQueryRows;
+    const uint32_t local_row = flat % kQueryRows;
+    const bool active = local_q_head < q_per_kv && row0 + local_row < a.rows;
+    const size_t base = static_cast<size_t>(row0 + local_row) * a.output_row_stride +
+        static_cast<size_t>(kv_head * q_per_kv + local_q_head) * kHeadDim +
+        kbase + 4u * (lane >> 4u);
+    union { unsigned short h[8]; hf8_t f; } result;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 4u; ++e) {
+        if (active && a.output_dtype == PagedAttentionOutputDType::F32) {
+            result.h[e] = octave_f2h(reinterpret_cast<const float*>(output_base)[base + e]);
+            result.h[4u + e] = octave_f2h(
+                reinterpret_cast<const float*>(output_base)[base + 8u + e]);
+        } else if (active) {
+            result.h[e] = octave_f2h(__bfloat162float(
+                reinterpret_cast<const bf16*>(output_base)[base + e]));
+            result.h[4u + e] = octave_f2h(__bfloat162float(
+                reinterpret_cast<const bf16*>(output_base)[base + 8u + e]));
+        } else {
+            result.h[e] = 0u;
+            result.h[4u + e] = 0u;
+        }
+    }
+    return result.f;
+}
+
+template <uint32_t kFixedBits>
+__global__ __launch_bounds__(kThreads, 2)
+void attention_paged_prefill_octave_rotated(
+    const PagedAttentionCommonArgs a,
+    const uint8_t* k_code_pool,
+    const uint8_t* v_code_pool,
+    const float* octave_levels,
+    OctaveKVCacheFormat octave_format,
+    void* out_base) {
+    __shared__ OctavePrefillShared s;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t hi = lane >> 4u;
+    const uint32_t lo = lane & 15u;
+    const uint32_t q_per_kv = a.q_heads / a.kv_heads;
+    const uint32_t row0 = blockIdx.x * kQueryRows;
+    const uint32_t kv_head = blockIdx.y;
+    if (row0 >= a.rows) return;
+
+    if (tid == 0u) {
+        s.rows_here = min(kQueryRows, a.rows - row0);
+        s.flat_rows = q_per_kv * kQueryRows;
+        s.invalid = s.flat_rows > kFlatRows ? 1u : 0u;
+        const uint32_t slot = a.row_sequence_slots[row0];
+        if (slot >= a.max_sequences) s.invalid = 1u;
+        s.visible_max = 0u;
+        s.page_count = 0u;
+        s.block_table = a.block_tables;
+        if (s.invalid == 0u) {
+            s.visible_max = a.row_positions[row0 + s.rows_here - 1u] + 1u;
+            const uint64_t capacity =
+                static_cast<uint64_t>(a.block_table_stride) * a.page_tokens;
+            if (static_cast<uint64_t>(s.visible_max) > capacity) {
+                s.invalid = 1u;
+            } else {
+                s.page_count = (s.visible_max + kPageTokens - 1u) / kPageTokens;
+                s.block_table = a.block_tables +
+                    static_cast<size_t>(slot) * a.block_table_stride;
+            }
+        }
+    }
+    detail::lds_barrier();
+    if (s.invalid != 0u) return;
+    const uint32_t rows = s.rows_here;
+    const uint32_t flat_rows = s.flat_rows;
+    if (tid < kFlatRows) {
+        const uint32_t local_row = tid % kQueryRows;
+        const bool active = tid < flat_rows && local_row < rows;
+        s.vis[tid] = active ? a.row_positions[row0 + local_row] + 1u : 0u;
+        s.row_max[tid] = -FLT_MAX;
+        s.row_sum[tid] = 0.0f;
+        s.row_alpha[tid] = 0.0f;
+    }
+
+    const uint32_t mt = wave % kFlatTiles;
+    const uint32_t kq = wave / kFlatTiles;
+    hf8_t q_frag[kKSteps];
+    #pragma unroll
+    for (uint32_t ks = 0u; ks < kKSteps; ++ks)
+        q_frag[ks] = octave_flat_q_frag(
+            a, out_base, row0, kv_head, q_per_kv, mt * 16u,
+            (kq * kKSteps + ks) * 16u, lane);
+
+    wf8_t oacc[kKSteps];
+    #pragma unroll
+    for (uint32_t nt = 0u; nt < kKSteps; ++nt) oacc[nt] = wf8_t{};
+
+    const uint32_t k_slot_bytes = octave_k_slot_bytes(octave_format);
+    const uint32_t v_slot_bytes = octave_v_slot_bytes(octave_format);
+    const uint64_t vectors_per_layer = static_cast<uint64_t>(a.num_pages) *
+        kPageTokens * a.kv_heads;
+
+    for (uint32_t tile_start = 0u; tile_start < s.visible_max;
+         tile_start += kOctaveTokens) {
+        const uint32_t tokens_here =
+            min(kOctaveTokens, s.visible_max - tile_start);
+
+        // Decode codebook values directly in rotated space.  No per-token
+        // inverse WHT or sign restoration occurs here.
+        for (uint32_t token = wave; token < kOctaveTokens; token += kWaves) {
+            bool active = token < tokens_here;
+            const uint32_t position = tile_start + token;
+            const uint32_t logical_page = position / kPageTokens;
+            const uint32_t page_offset = position % kPageTokens;
+            uint32_t page = active ? s.block_table[logical_page] : 0u;
+            if (active && page >= a.num_pages) {
+                active = false;
+                if (lane == 0u) s.invalid = 1u;
+                page = 0u;
+            }
+            const uint64_t vector = static_cast<uint64_t>(a.layer) * vectors_per_layer +
+                (static_cast<uint64_t>(page) * kPageTokens + page_offset) * a.kv_heads +
+                kv_head;
+            const uint8_t* ks = k_code_pool + vector * k_slot_bytes;
+            const uint8_t* vs = v_code_pool + vector * v_slot_bytes;
+            const float vscale = active
+                ? octave_half_at(vs + v_slot_bytes - 2u) : 0.0f;
+            const uint32_t dimension_base = lane * 8u;
+            const uint32_t segment = octave_format.k_mode == OctaveKMode::Compact
+                ? 256u : 64u;
+            const uint32_t block = dimension_base / segment;
+            const uint32_t local_base = dimension_base & (segment - 1u);
+            const uint32_t bits = octave_format.k_mode == OctaveKMode::Compact || block != 0u
+                ? octave_format.k_nope_bits : octave_format.k_rope_bits;
+            const uint32_t code_offset = octave_format.k_mode == OctaveKMode::Compact || block == 0u
+                ? 0u
+                : octave_plane_bytes(64u, octave_format.k_rope_bits) +
+                      (block - 1u) * octave_plane_bytes(64u, octave_format.k_nope_bits);
+            const uint32_t scale_count = octave_format.k_mode == OctaveKMode::Compact ? 1u : 4u;
+            const float kscale = active ? octave_half_at(
+                ks + k_slot_bytes - scale_count * 2u + block * 2u) : 0.0f;
+            if constexpr (kFixedBits != 0u) {
+                if (lane == 0u) {
+                    s.k_scale[token] = kscale;
+                    s.v_scale[token] = vscale;
+                }
+            }
+            uint32_t kcodes[8];
+            uint32_t vcodes[8];
+            if (active) {
+                octave_unpack8_direct(
+                    ks + code_offset, local_base, segment, bits, kcodes);
+                octave_unpack8_direct(
+                    vs, dimension_base, 256u, octave_format.v_bits, vcodes);
+            } else {
+                #pragma unroll
+                for (uint32_t e = 0u; e < 8u; ++e) {
+                    kcodes[e] = 0u;
+                    vcodes[e] = 0u;
+                }
+            }
+            #pragma unroll
+            for (uint32_t e = 0u; e < 8u; ++e) {
+                const uint32_t dimension = dimension_base + e;
+                if constexpr (kFixedBits != 0u) {
+                    s.k_page[token][dimension] = octave_f2h(active
+                        ? static_cast<float>(octave_codebook_int8_prefill<kFixedBits>(
+                              kcodes[e]))
+                        : 0.0f);
+                    s.v_page[token][dimension] = octave_f2h(active
+                        ? static_cast<float>(octave_codebook_int8_prefill<kFixedBits>(
+                              vcodes[e]))
+                        : 0.0f);
+                } else {
+                    s.k_page[token][dimension] = octave_f2h(active
+                        ? octave_levels[bits * 64u + kcodes[e]] * kscale : 0.0f);
+                    s.v_page[token][dimension] = octave_f2h(active
+                        ? octave_levels[octave_format.v_bits * 64u + vcodes[e]] * vscale : 0.0f);
+                }
+            }
+        }
+        detail::lds_barrier();
+
+        #pragma unroll
+        for (uint32_t token_half = 0u; token_half < kOctaveTokenHalves;
+             ++token_half) {
+            wf8_t score_acc = wf8_t{};
+            #pragma unroll
+            for (uint32_t ks = 0u; ks < kKSteps; ++ks) {
+                const uint32_t k0 = (kq * kKSteps + ks) * 16u;
+                score_acc = octave_wmma_f16(
+                    q_frag[ks],
+                    octave_frag_nk_f16(&s.k_page[0][0], kOctavePitch,
+                                       token_half * 16u, k0, lane),
+                    score_acc);
+            }
+            #pragma unroll
+            for (uint32_t e = 0u; e < 8u; ++e)
+                s.s_part[mt][kq][8u * hi + e][token_half * 16u + lo] =
+                    score_acc[e];
+            detail::lds_barrier();
+
+            {
+                const uint32_t tg = tid & 7u;
+                const uint32_t pa_index = tg;
+                const uint32_t pb_index = tg + 8u;
+                const uint32_t ta = token_half * 16u + pa_index;
+                const uint32_t tb = token_half * 16u + pb_index;
+                for (uint32_t flat = tid >> 3u; flat < kFlatRows;
+                     flat += kThreads / 8u) {
+                const uint32_t pmt = flat >> 4u;
+                const uint32_t rr = flat & 15u;
+                float sa = 0.0f;
+                float sb = 0.0f;
+                #pragma unroll
+                for (uint32_t part = 0u; part < kDimParts; ++part) {
+                    sa += s.s_part[pmt][part][rr][ta];
+                    sb += s.s_part[pmt][part][rr][tb];
+                }
+                const uint32_t local_row = flat % kQueryRows;
+                const uint32_t mask_row = row0 + local_row;
+                const uint32_t vis = s.vis[flat];
+                const uint32_t tok_a = tile_start + ta;
+                const uint32_t tok_b = tile_start + tb;
+                const bool va = tok_a < vis &&
+                    paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                        a.mask_block_shift, mask_row, tok_a);
+                const bool vb = tok_b < vis &&
+                    paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                        a.mask_block_shift, mask_row, tok_b);
+                if constexpr (kFixedBits != 0u) {
+                    constexpr float codebook_scale =
+                        octave_codebook_scale_prefill<kFixedBits>();
+                    sa *= s.k_scale[ta] * codebook_scale;
+                    sb *= s.k_scale[tb] * codebook_scale;
+                }
+                sa = va ? sa * a.scale : -FLT_MAX;
+                sb = vb ? sb * a.scale : -FLT_MAX;
+                const float tile_max = group_max8(fmaxf(sa, sb));
+                const float old_max = s.row_max[flat];
+                const float next_max = fmaxf(old_max, tile_max);
+                const float alpha = __expf(old_max - next_max);
+                const float pa = va ? __expf(sa - next_max) : 0.0f;
+                const float pb = vb ? __expf(sb - next_max) : 0.0f;
+                const float tile_sum = group_sum8(pa + pb);
+                float pva = pa;
+                float pvb = pb;
+                if constexpr (kFixedBits != 0u) {
+                    constexpr float codebook_scale =
+                        octave_codebook_scale_prefill<kFixedBits>();
+                    pva *= s.v_scale[ta] * codebook_scale;
+                    pvb *= s.v_scale[tb] * codebook_scale;
+                }
+                const unsigned short pa_hi = octave_f2h(pva);
+                const unsigned short pb_hi = octave_f2h(pvb);
+                s.p_tile[flat][pa_index] = pa_hi;
+                s.p_tile[flat][pb_index] = pb_hi;
+                s.p_tile_lo[flat][pa_index] = octave_f2h(
+                    pva - __half2float(__ushort_as_half(pa_hi)));
+                s.p_tile_lo[flat][pb_index] = octave_f2h(
+                    pvb - __half2float(__ushort_as_half(pb_hi)));
+                if (tg == 0u) {
+                    s.row_max[flat] = next_max;
+                    s.row_sum[flat] = s.row_sum[flat] * alpha + tile_sum;
+                    s.row_alpha[flat] = alpha;
+                }
+            }
+            }
+            detail::lds_barrier();
+
+            const hf8_t probability = octave_frag_nk_f16(
+                &s.p_tile[0][0], kPPitch, mt * 16u, 0u, lane);
+            const hf8_t probability_lo = octave_frag_nk_f16(
+                &s.p_tile_lo[0][0], kPPitch, mt * 16u, 0u, lane);
+            #pragma unroll
+            for (uint32_t e = 0u; e < 8u; ++e) {
+                const float alpha = s.row_alpha[mt * 16u + 8u * hi + e];
+                #pragma unroll
+                for (uint32_t nt = 0u; nt < kKSteps; ++nt)
+                    oacc[nt][e] *= alpha;
+            }
+            #pragma unroll
+            for (uint32_t nt = 0u; nt < kKSteps; ++nt) {
+                const hf8_t value = octave_frag_kn_f16(
+                    &s.v_page[0][0], kOctavePitch,
+                    kq * kDimsPerPart + nt * 16u, token_half * 16u, lane);
+                oacc[nt] = octave_wmma_f16(probability, value, oacc[nt]);
+                oacc[nt] = octave_wmma_f16(probability_lo, value, oacc[nt]);
+            }
+            detail::lds_barrier();
+        }
+    }
+
+    if (s.invalid != 0u) return;
+    if (tid < kFlatRows)
+        s.row_sum[tid] = s.row_sum[tid] > 0.0f ? 1.0f / s.row_sum[tid] : 0.0f;
+    detail::lds_barrier();
+
+    const uint32_t flat_base = mt * 16u + 8u * hi;
+    #pragma unroll
+    for (uint32_t nt = 0u; nt < kKSteps; ++nt) {
+        const uint32_t dimension = kq * kDimsPerPart + nt * 16u + lo;
+        #pragma unroll
+        for (uint32_t e = 0u; e < 8u; ++e) {
+            const uint32_t flat = flat_base + e;
+            const uint32_t local_q_head = flat / kQueryRows;
+            const uint32_t local_row = flat % kQueryRows;
+            if (flat < flat_rows && local_row < rows) {
+                const float rotated = oacc[nt][e] * s.row_sum[flat];
+                const size_t output = static_cast<size_t>(row0 + local_row) *
+                    a.output_row_stride +
+                    static_cast<size_t>(kv_head * q_per_kv + local_q_head) *
+                        kHeadDim + dimension;
+                if (a.output_dtype == PagedAttentionOutputDType::F32)
+                    reinterpret_cast<float*>(out_base)[output] = rotated;
+                else
+                    reinterpret_cast<bf16*>(out_base)[output] =
+                        __float2bfloat16(rotated);
+            }
+        }
+    }
+}
+
+__global__ __launch_bounds__(kThreads, 2)
+void attention_paged_prefill_octave_inverse_output(
+    PagedAttentionCommonArgs a, void* output_base) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t wave = threadIdx.x >> 5u;
+    const uint32_t vector = blockIdx.x * kWaves + wave;
+    const uint32_t vectors = a.rows * a.q_heads;
+    if (vector >= vectors) return;
+    const uint32_t row = vector / a.q_heads;
+    const uint32_t q_head = vector % a.q_heads;
+    const size_t base = static_cast<size_t>(row) * a.output_row_stride +
+        static_cast<size_t>(q_head) * kHeadDim;
+    float value[8];
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        const size_t index = base + lane * 8u + e;
+        value[e] = a.output_dtype == PagedAttentionOutputDType::F32
+            ? reinterpret_cast<const float*>(output_base)[index]
+            : __bfloat162float(reinterpret_cast<const bf16*>(output_base)[index]);
+    }
+    octave_inverse_wave(value, lane, true);
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e) {
+        const uint32_t dimension = lane * 8u + e;
+        const size_t index = base + dimension;
+        const float restored = value[e] * octave_sign(dimension, 29u);
+        if (a.output_dtype == PagedAttentionOutputDType::F32)
+            reinterpret_cast<float*>(output_base)[index] = restored;
+        else
+            reinterpret_cast<bf16*>(output_base)[index] =
+                __float2bfloat16(restored);
+    }
+}
+
+} }  // namespace v_prefill_octave
+
 extern "C" __global__ __launch_bounds__(kPagedAttentionPrefillBlock)
 void shelf_attention_paged_prefill_bf16(
     ::shelf::kernel::PagedAttentionBf16Args args) {
@@ -572,11 +1125,55 @@ hipError_t launch_attention_paged_prefill_octave(
         common.block_tables == nullptr || k_pool == nullptr || v_pool == nullptr ||
         levels == nullptr || !octave_format_valid(format))
         return hipErrorInvalidValue;
-    const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
-    attention_paged_prefill_bf16_impl<2u>
-        <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
-            common, nullptr, nullptr, k_pool, v_pool, nullptr, nullptr, 0u,
-            levels, format, common.output);
+    const char* legacy_value = std::getenv("SHELF_OCTAVE_PREFILL_LEGACY");
+    const bool legacy = legacy_value != nullptr && legacy_value[0] == '1' &&
+                        legacy_value[1] == '\0';
+    if (legacy || common.q_heads / common.kv_heads >
+                      v_prefill_octave::kFlatRows / v_prefill_octave::kQueryRows) {
+        const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
+        attention_paged_prefill_bf16_impl<2u>
+            <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
+                common, nullptr, nullptr, k_pool, v_pool, nullptr, nullptr, 0u,
+                levels, format, common.output);
+    } else {
+        const uint32_t tiles =
+            (common.rows + v_prefill_octave::kQueryRows - 1u) /
+            v_prefill_octave::kQueryRows;
+        const dim3 grid(tiles, common.kv_heads);
+        const uint64_t vectors = static_cast<uint64_t>(common.rows) * common.q_heads;
+        const uint32_t transform_blocks = static_cast<uint32_t>(
+            (vectors + v_prefill_bf16::kWaves - 1u) / v_prefill_bf16::kWaves);
+        v_prefill_octave::attention_paged_prefill_octave_rotate_q
+            <<<transform_blocks, kThreads, 0, stream>>>(
+                common, format.k_mode == OctaveKMode::Compact, common.output);
+        if (format.k_mode == OctaveKMode::Compact &&
+            format.k_nope_bits == format.v_bits && format.v_bits == 3u) {
+            v_prefill_octave::attention_paged_prefill_octave_rotated<3u>
+                <<<grid, kThreads, 0, stream>>>(
+                    common, k_pool, v_pool, levels, format, common.output);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == format.v_bits && format.v_bits == 4u) {
+            v_prefill_octave::attention_paged_prefill_octave_rotated<4u>
+                <<<grid, kThreads, 0, stream>>>(
+                    common, k_pool, v_pool, levels, format, common.output);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == format.v_bits && format.v_bits == 5u) {
+            v_prefill_octave::attention_paged_prefill_octave_rotated<5u>
+                <<<grid, kThreads, 0, stream>>>(
+                    common, k_pool, v_pool, levels, format, common.output);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == format.v_bits && format.v_bits == 6u) {
+            v_prefill_octave::attention_paged_prefill_octave_rotated<6u>
+                <<<grid, kThreads, 0, stream>>>(
+                    common, k_pool, v_pool, levels, format, common.output);
+        } else {
+            v_prefill_octave::attention_paged_prefill_octave_rotated<0u>
+                <<<grid, kThreads, 0, stream>>>(
+                    common, k_pool, v_pool, levels, format, common.output);
+        }
+        v_prefill_octave::attention_paged_prefill_octave_inverse_output
+            <<<transform_blocks, kThreads, 0, stream>>>(common, common.output);
+    }
     return hipGetLastError();
 }
 
