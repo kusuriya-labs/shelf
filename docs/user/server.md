@@ -637,7 +637,8 @@ model は `shelf/shelf` を選ぶ。
 [公式設定](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)に
 従い `model_provider`、`base_url`、`wire_api = "responses"` を設定できる。
 ただし現行 Codex CLI は `web_search` や `namespace`、
-`include: ["reasoning.encrypted_content"]` など本サーバが拒否する項目を送るため、
+`include: ["reasoning.encrypted_content"]`、`prompt_cache_key`、
+`client_metadata` など本サーバが拒否する項目を送るため、
 現状は接続して会話を完了できない。これらを要求しない Responses クライアントを使う。
 接続先の設定例は次のとおり（この設定だけでは上記の非対応項目は解消しない）。
 
