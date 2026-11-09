@@ -2,6 +2,7 @@
 #include <shelf/kernels/optimized/linear/exl3_int8.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>
+#include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -327,6 +328,108 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
 }
 
 
+
+bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u, uint32_t capacity = 1024u) {
+    constexpr uint32_t rows = 8u;
+    for (uint32_t scratch_rows : {8u, 16u, 32u, 48u, 64u, 1024u}) {
+        const uint32_t one = shelf::kernel::exl3_int8_gemm_splits(1u, n, k, scratch_rows, bits);
+        for (uint32_t count = 2u; count <= std::min(16u, scratch_rows); ++count) {
+            if (one != shelf::kernel::exl3_int8_gemm_splits(count, n, k, scratch_rows, bits)) return false;
+        }
+    }
+    const uint32_t scale_stride = ((k / 128u * 4u) + 15u) & ~15u;
+    std::mt19937 rng(123456u + bits);
+    std::uniform_real_distribution<float> dist(-3.0f, 3.0f);
+    std::vector<uint16_t> input(rows * k), suh(k), svh(n);
+    for (auto& x : input) x = shelf::f32_to_bf16_rne(dist(rng));
+    for (auto& x : suh) x = (rng() & 1u) ? 0x3c00u : 0xbc00u;
+    for (auto& x : svh) x = (rng() & 1u) ? 0x3c00u : 0xbc00u;
+    std::vector<uint16_t> weights(static_cast<size_t>(n) * k * bits / 16u);
+    for (auto& x : weights) x = static_cast<uint16_t>(rng());
+    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, capacity, bits);
+    if (splits != shelf::kernel::exl3_int8_gemm_splits(1u, n, k, capacity, bits)) return false;
+    Dev<uint16_t> dx(rows * k), dsuh(k), dsvh(n), dw(weights.size());
+    Dev<int8_t> codes(rows * k);
+    Dev<float> scales(rows * scale_stride / 4u), accum(static_cast<size_t>(splits) * rows * n), out(rows * n);
+    HIP_OK(hipMemcpy(dx.p, input.data(), input.size() * 2u, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(dsuh.p, suh.data(), k * 2u, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(dsvh.p, svh.data(), n * 2u, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(dw.p, weights.data(), weights.size() * 2u, hipMemcpyHostToDevice));
+    auto launch = [&](uint32_t count, const uint16_t* x) {
+        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(x), k, dsuh.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(codes.p, scales.p, k, scale_stride, dw.p, bits, accum.p, count, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(accum.p, dsvh.p, out.p, shelf::kernel::Exl3Int8OutputDType::F32, count, n, n, splits, nullptr));
+        return true;
+    };
+    if (!launch(rows, dx.p)) return false;
+    std::vector<float> batch(rows * n), single(n);
+    HIP_OK(hipMemcpy(batch.data(), out.p, batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+    for (uint32_t row = 0; row < rows; ++row) {
+        if (!launch(1u, dx.p + static_cast<size_t>(row) * k)) return false;
+        HIP_OK(hipMemcpy(single.data(), out.p, n * sizeof(float), hipMemcpyDeviceToHost));
+        if (std::memcmp(single.data(), batch.data() + static_cast<size_t>(row) * n, n * sizeof(float)) != 0) {
+            std::printf("FAIL row parity bits=%u row=%u\n", bits, row);
+            return false;
+        }
+    }
+    std::printf("PASS row parity bits=%u splits=%u\n", bits, splits);
+    return true;
+}
+
+
+__global__ void fill_head_trellis(uint32_t* words, size_t count) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
+         i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        uint32_t x = static_cast<uint32_t>(i) * 747796405u + 2891336453u;
+        x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+        words[i] = (x >> 22u) ^ x;
+    }
+}
+
+bool head_row_parity() {
+    constexpr uint32_t rows = 8u, n = 248320u, k = 5120u, bits = 6u, scale_stride = 160u;
+    shelf::weights::MatrixWeight weight;
+    weight.encoding = shelf::weights::MatrixEncoding::Exl3;
+    weight.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    weight.rows = n;
+    weight.cols = k;
+    shelf::weights::Exl3LinearShape shape;
+    shelf::weights::note_exl3_int8_decode_accum(weight, shape);
+    const uint32_t scratch_rows = static_cast<uint32_t>(shape.max_int8_decode_accum_bytes / (n * sizeof(float)));
+    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(1u, n, k, scratch_rows);
+    if (splits != shelf::kernel::exl3_int8_gemm_splits(rows, n, k, scratch_rows)) return false;
+    std::mt19937 rng(42u);
+    std::uniform_real_distribution<float> dist(-3.0f, 3.0f);
+    std::vector<uint16_t> input(rows * k), ones(std::max(k, n), 0x3c00u);
+    for (uint32_t i = 0; i < k; ++i) input[i] = shelf::f32_to_bf16_rne(dist(rng));
+    for (uint32_t row = 1; row < rows; ++row)
+        std::copy_n(input.data(), k, input.data() + static_cast<size_t>(row) * k);
+    const size_t words = static_cast<size_t>(n) * k * bits / 32u;
+    Dev<uint16_t> dx(input.size()), ds(ones.size());
+    Dev<uint32_t> dw(words);
+    Dev<int8_t> codes(rows * k);
+    Dev<float> scales(rows * scale_stride / 4u), accum(static_cast<size_t>(rows) * n * splits), out(static_cast<size_t>(rows) * n);
+    HIP_OK(hipMemcpy(dx.p, input.data(), input.size() * 2u, hipMemcpyHostToDevice));
+    HIP_OK(hipMemcpy(ds.p, ones.data(), ones.size() * 2u, hipMemcpyHostToDevice));
+    hipLaunchKernelGGL(fill_head_trellis, dim3(4096), dim3(256), 0, nullptr, dw.p, words);
+    HIP_OK(hipGetLastError());
+    auto launch = [&](uint32_t count) {
+        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(dx.p), k, ds.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(codes.p, scales.p, k, scale_stride, reinterpret_cast<uint16_t*>(dw.p), bits, accum.p, count, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(accum.p, ds.p, out.p, shelf::kernel::Exl3Int8OutputDType::F32, count, n, n, splits, nullptr));
+        return true;
+    };
+    std::vector<float> one(n), batch(static_cast<size_t>(rows) * n);
+    if (!launch(1u)) return false;
+    HIP_OK(hipMemcpy(one.data(), out.p, n * sizeof(float), hipMemcpyDeviceToHost));
+    if (!launch(rows)) return false;
+    HIP_OK(hipMemcpy(batch.data(), out.p, batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+    for (uint32_t row = 0; row < rows; ++row)
+        if (std::memcmp(one.data(), batch.data() + static_cast<size_t>(row) * n, n * sizeof(float)) != 0) return false;
+    std::printf("PASS head row parity splits=%u scratch_rows=%u\n", splits, scratch_rows);
+    return true;
+}
+
 bool bench_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits) {
     const uint32_t kt = k / 16u, nt = n / 16u;
     const uint32_t code_stride = k, groups = k / 128u;
@@ -334,7 +437,7 @@ bool bench_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits) {
     Dev<uint16_t> d_trellis(static_cast<size_t>(kt) * nt * 16u * bits);
     Dev<int8_t> d_codes(static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride);
     Dev<float> d_scales(static_cast<size_t>(rows) * scale_stride_bytes / 4u), d_y(static_cast<size_t>(rows) * n * 16u);
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1u << 20);
+    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1u << 20, bits);
     HIP_OK(hipMemset(d_trellis.p, 0x5A, static_cast<size_t>(kt) * nt * 16u * bits * 2));
     HIP_OK(hipMemset(d_codes.p, 1, static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride));
     HIP_OK(hipMemset(d_scales.p, 0, static_cast<size_t>(rows) * scale_stride_bytes));
@@ -363,6 +466,12 @@ int main() {
         bench_case(1, 5120, 17408, 4); bench_case(600, 5120, 17408, 4); bench_case(1, 12288, 5120, 4); bench_case(1, 248320, 5120, 6);
         return 0;
     }
+    ok &= row_parity(4u);
+    ok &= row_parity(6u);
+    ok &= row_parity(4u, 5120u, 17408u);
+    ok &= row_parity(4u, 17408u, 5120u);
+    ok &= row_parity(4u, 17408u, 5120u, 16u);
+    ok &= head_row_parity();
     for (uint32_t rows : {1u, 5u, 16u, 17u, 33u, 70u}) ok &= run_case(rows, 256, 256, 4, 1234u + rows);
     for (uint32_t bits = 1; bits <= 8; ++bits) ok &= run_case(19, 128, 256, bits, 77u + bits);
     ok &= run_case(40, 384, 640, 6, 99u);

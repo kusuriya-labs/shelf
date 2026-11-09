@@ -580,6 +580,7 @@ if(SHELF_BUILD_BENCHMARKS)
             batch
             activation-quantize
             gemm
+            exl3-int8
             rmsnorm
             l2-normalize
             kv-append

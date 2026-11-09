@@ -42,6 +42,8 @@ inline Exl3WorkspaceBytes exl3_workspace_bytes(
         out.dense = align_up(kExl3DenseBytes);
         out.accum = align_up(exl3_dense_accum_bytes(rows, kExl3MaxOutFeatures));
     }
+    if (out.accum < shape.max_int8_decode_accum_bytes)
+        out.accum = align_up(shape.max_int8_decode_accum_bytes);
     out.rowsum = align_up(rows * sizeof(float));
     return out;
 }
