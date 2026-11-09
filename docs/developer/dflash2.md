@@ -153,6 +153,14 @@ external tap と internal layer output の bit 一致を確認する。tap の�
 3. `launch_dflash2_rmsnorm_direct_bf16`: `hidden_norm.weight` で
    `target_feature [rows, 5120]`。
 
+stdio serving の TP=1 では、block size が 8 かつ sliding window が 256 以上の
+場合、prefill の feature projection と context append を最大 256 行ずつ実行する。
+その他の条件、および `SHELF_DFLASH2_PREFILL_ROWS=8` の場合は従来の容量を使う。
+バッチ用 executor が複数 request 分を持つ場合、従来の容量は block size より大きい。
+FC の 8 行経路は `ExactRowsDot2`、256 行経路は `WmmaWide` を選ぶため、K/V は
+bit 一致せず 2 ULP を超える差も生じる。原因と測定条件は
+[行数による K/V 差の調査](../research/20261109/dflash2_prefill_rows_kv_diff.md)を参照。
+
 RMSNorm は **DIRECT**（`ONE_PLUS` は使わない）、`group_size = hidden_size`、
 `eps = rms_norm_eps`。公式実装の `Qwen3RMSNorm` と同じく、norm を bf16 に落としてから
 weight を掛ける。

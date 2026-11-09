@@ -586,7 +586,7 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         }
         Status appended = dflash2::dflash2_append_target_taps(
             *decoder.draft, *decoder.context, taps.data(), tap_count, n, offset,
-            decoder.stream);
+            decoder.stream, true);
         if (!appended.ok()) return appended;
 
         if (final_chunk) {

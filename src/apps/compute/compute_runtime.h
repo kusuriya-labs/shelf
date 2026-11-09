@@ -43,6 +43,7 @@ struct Qwen35RuntimeConfig {
     qwen35::dflash2::DFlash2Config draft_config;
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
+    uint32_t dflash2_prefill_rows = 0;
     bool mtp = false;
     bool mtp_serve = false;
     uint32_t mtp_drafts = 7;
