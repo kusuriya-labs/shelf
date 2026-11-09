@@ -310,6 +310,12 @@ int run_pp(int argc, char** argv) {
         return 2;
     }
 
+    if (shelf::qwen35::runtime::semantic_timing_enabled() &&
+        (opts.tp != 1 || opts.perf_stats_output.empty())) {
+        fprintf(stderr, "pp semantic timing requires TP=1 and --perf-stats-output\n");
+        return 2;
+    }
+
     roctx_pause();
 
     hipError_t hip_err = hipSetDevice(opts.devices[0]);
@@ -540,7 +546,9 @@ int run_pp(int argc, char** argv) {
     gpu_times_ms.reserve(static_cast<size_t>(opts.runs));
     wall_times_ms.reserve(static_cast<size_t>(opts.runs));
 
+    const bool host_timing = std::getenv("SHELF_PP_HOST_TIMING") != nullptr;
     auto run_once = [&](int run, bool measured) -> int {
+        const auto setup_start = host_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto seq_result = shelf::state::create_paged_sequence_state(
             seq_pool, rec_pool, kv_pool, required_seq_len, stream);
         if (!seq_result.ok()) {
@@ -569,6 +577,9 @@ int run_pp(int argc, char** argv) {
             return 1;
         }
 
+        if (host_timing && measured)
+            fprintf(stderr, "PP_HOST run=%d setup_ms=%.3f\n", run,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - setup_start).count());
         roctx_resume();
 
         auto wall_start = std::chrono::high_resolution_clock::now();
@@ -598,9 +609,24 @@ int run_pp(int argc, char** argv) {
             batch.num_decode_requests = 0;
             batch.num_verify_requests = 0;
             batch.num_prefill_requests = 1;
-            auto st = tp_coordinator != nullptr
-                          ? tp_coordinator->on_execute(batch)
-                          : shelf::qwen35::execute_batch(executor, batch, stream);
+            const auto submit_start = host_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            auto st = [&]() -> shelf::Result<shelf::qwen35::BatchExecutionOutput> {
+                if (!host_timing || !measured || tp_coordinator != nullptr)
+                    return tp_coordinator != nullptr ? tp_coordinator->on_execute(batch)
+                                                     : shelf::qwen35::execute_batch(executor, batch, stream);
+                auto pending = shelf::qwen35::submit_batch(executor, batch, stream);
+                const auto complete_start = std::chrono::steady_clock::now();
+                fprintf(stderr, "PP_HOST run=%d begin=%u submit_ms=%.3f\n", run, processed,
+                        std::chrono::duration<double, std::milli>(complete_start - submit_start).count());
+                if (!pending.ok()) return pending.status();
+                auto result = shelf::qwen35::complete_batch(executor, std::move(pending.release()), stream);
+                fprintf(stderr, "PP_HOST run=%d begin=%u complete_ms=%.3f\n", run, processed,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - complete_start).count());
+                return result;
+            }();
+            if (host_timing && measured)
+                fprintf(stderr, "PP_HOST run=%d begin=%u rows=%u execute_ms=%.3f\n", run, processed, chunk_len,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - submit_start).count());
             if (!st.ok()) {
                 fprintf(stderr, "execute_batch failed at %u: %s\n", processed,
                         st.status().message().c_str());
@@ -616,6 +642,7 @@ int run_pp(int argc, char** argv) {
             fprintf(stderr, "hipEventRecord failed: %s\n", hipGetErrorString(hip_err));
             return 1;
         }
+        const auto wait_start = host_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         hip_err = hipEventSynchronize(stop_event);
         if (hip_err != hipSuccess) {
             fprintf(stderr, "hipEventSynchronize failed: %s\n", hipGetErrorString(hip_err));
@@ -623,6 +650,9 @@ int run_pp(int argc, char** argv) {
         }
 
         auto wall_stop = std::chrono::high_resolution_clock::now();
+        if (host_timing && measured)
+            fprintf(stderr, "PP_HOST run=%d final_wait_ms=%.3f\n", run,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count());
 
         roctx_pause();
 
@@ -688,11 +718,19 @@ int run_pp(int argc, char** argv) {
     }
 
     shelf::qwen35::runtime::perf_stats_reset();
+    if (shelf::qwen35::runtime::semantic_timing_enabled())
+        shelf::qwen35::runtime::semantic_timing_begin(stream, 65536);
     for (int run = 0; run < opts.runs; ++run) {
         if (run_once(run, true) != 0) return 1;
     }
     if (!opts.perf_stats_output.empty()) {
         shelf::qwen35::runtime::perf_stats_dump(opts.perf_stats_output.c_str(), 0u);
+        if (shelf::qwen35::runtime::semantic_timing_enabled()) {
+            const auto slash = opts.perf_stats_output.find_last_of('/');
+            const std::string path = (slash == std::string::npos ? std::string() :
+                opts.perf_stats_output.substr(0, slash + 1)) + "semantic_timing.csv";
+            shelf::qwen35::runtime::semantic_timing_end(stream, path.c_str());
+        }
     }
 
     if (opts.gap_keepalive > 0) {
