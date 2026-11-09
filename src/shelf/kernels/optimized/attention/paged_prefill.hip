@@ -87,6 +87,84 @@ __device__ __forceinline__ float group_sum8(float x) {
     return x;
 }
 
+__device__ __forceinline__ uint32_t octave_load_word(const uint8_t* source) {
+    uint32_t value;
+    __builtin_memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+__device__ __forceinline__ uint32_t octave_unpack_plane_direct(
+    const uint8_t* source, uint32_t index, uint32_t bits) {
+    const uint32_t fields = 32u / bits;
+    const uint32_t word = octave_load_word(source + (index / fields) * 4u);
+    return (word >> ((index % fields) * bits)) & ((1u << bits) - 1u);
+}
+
+__device__ __forceinline__ uint32_t octave_unpack_direct(
+    const uint8_t* source, uint32_t index, uint32_t dimensions,
+    uint32_t bits) {
+    if (bits >= 4u) {
+        uint32_t code = octave_unpack_plane_direct(source, index, 4u);
+        source += dimensions / 2u;
+        if (bits == 5u)
+            code |= octave_unpack_plane_direct(source, index, 1u) << 4u;
+        if (bits == 6u)
+            code |= octave_unpack_plane_direct(source, index, 2u) << 4u;
+        return code;
+    }
+    uint32_t code = octave_unpack_plane_direct(source, index, 2u);
+    source += dimensions / 4u;
+    return code | (octave_unpack_plane_direct(source, index, 1u) << 2u);
+}
+
+__device__ __forceinline__ float octave_sign(uint32_t index, uint32_t salt) {
+    uint32_t x = index * 2654435761u + salt * 40503u + 12345u;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return (x & 1u) != 0u ? -1.0f : 1.0f;
+}
+
+__device__ __forceinline__ float octave_half_at(const uint8_t* source) {
+    const uint16_t bits = static_cast<uint16_t>(source[0]) |
+                          static_cast<uint16_t>(source[1]) << 8u;
+    return __half2float(__ushort_as_half(bits));
+}
+
+__device__ __forceinline__ void octave_wht8(float (&x)[8]) {
+    #pragma unroll
+    for (uint32_t half = 1u; half < 8u; half <<= 1u) {
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; ++i) {
+            if ((i & half) == 0u) {
+                const float a = x[i], b = x[i + half];
+                x[i] = a + b;
+                x[i + half] = a - b;
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void octave_inverse_wave(
+    float (&x)[8], uint32_t lane, bool compact) {
+    octave_wht8(x);
+    const uint32_t limit = compact ? 16u : 4u;
+    #pragma unroll
+    for (uint32_t mask = 1u; mask <= 16u; mask <<= 1u) {
+        if (mask > limit) break;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; ++i) {
+            const float other = __shfl_xor(x[i], mask, 32);
+            x[i] = (lane & mask) != 0u ? other - x[i] : x[i] + other;
+        }
+    }
+    const float norm = compact ? 0.0625f : 0.125f;
+    #pragma unroll
+    for (uint32_t i = 0u; i < 8u; ++i) x[i] *= norm;
+}
+
 struct PrefillSharedBase {
     float s_part[2][kWaves / 2u][16][kSmaxPitch];
     unsigned short p_tile[kTileRows][kPPitch];
@@ -122,6 +200,8 @@ void attention_paged_prefill_bf16_body(
     const bf16* k_scale_pool,
     const bf16* v_scale_pool,
     uint32_t blocks_per_head,
+    const float* octave_levels,
+    OctaveKVCacheFormat octave_format,
     void* out_base) {
     const uint32_t q_heads = a.q_heads;
     const uint32_t kv_heads = a.kv_heads;
@@ -212,8 +292,8 @@ void attention_paged_prefill_bf16_body(
         uint32_t tokens_here = visible_max - page_start;
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
         const uint64_t page_base = layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
-        const bf16* k_src = k_pool + page_base + head_off;
-        const bf16* v_src = v_pool + page_base + head_off;
+        const bf16* k_src = kMode == 2u ? nullptr : k_pool + page_base + head_off;
+        const bf16* v_src = kMode == 2u ? nullptr : v_pool + page_base + head_off;
         if constexpr (kMode != 0u) {
             (void)k_src;
             (void)v_src;
@@ -235,7 +315,57 @@ void attention_paged_prefill_bf16_body(
                 *reinterpret_cast<uint4*>(&s.k_page[t][c * 8u]) = kv;
             *reinterpret_cast<uint4*>(&s.v_page[vbuf][t][c * 8u]) = vv;
         };
-        if (page_index + 1u < page_count) {
+        if constexpr (kMode == 2u) {
+            const uint32_t k_slot_bytes = octave_k_slot_bytes(octave_format);
+            const uint32_t v_slot_bytes = octave_v_slot_bytes(octave_format);
+            const uint64_t vectors_per_layer = static_cast<uint64_t>(a.num_pages) *
+                kPageTokens * a.kv_heads;
+            for (uint32_t token = warp; token < kPageTokens; token += kWaves) {
+                const bool active = token < tokens_here;
+                const uint64_t vector = static_cast<uint64_t>(a.layer) * vectors_per_layer +
+                    (static_cast<uint64_t>(page) * kPageTokens + token) * a.kv_heads +
+                    kv_head;
+                const uint8_t* ks = k_code_pool + vector * k_slot_bytes;
+                const uint8_t* vs = v_code_pool + vector * v_slot_bytes;
+                float kval[8];
+                float vval[8];
+                #pragma unroll
+                for (uint32_t e = 0u; e < 8u; ++e) {
+                    const uint32_t dimension = lane * 8u + e;
+                    const uint32_t segment = octave_format.k_mode == OctaveKMode::Compact
+                        ? 256u : 64u;
+                    const uint32_t block = dimension / segment;
+                    const uint32_t local = dimension & (segment - 1u);
+                    const uint32_t bits = octave_format.k_mode == OctaveKMode::Compact || block != 0u
+                        ? octave_format.k_nope_bits : octave_format.k_rope_bits;
+                    const uint32_t code_offset = octave_format.k_mode == OctaveKMode::Compact || block == 0u
+                        ? 0u
+                        : octave_plane_bytes(64u, octave_format.k_rope_bits) +
+                              (block - 1u) * octave_plane_bytes(64u, octave_format.k_nope_bits);
+                    const uint32_t scale_count = octave_format.k_mode == OctaveKMode::Compact ? 1u : 4u;
+                    const float kscale = active ? octave_half_at(
+                        ks + k_slot_bytes - scale_count * 2u + block * 2u) : 0.0f;
+                    const uint32_t kcode = active
+                        ? octave_unpack_direct(ks + code_offset, local, segment, bits) : 0u;
+                    const uint32_t vcode = active
+                        ? octave_unpack_direct(vs, dimension, 256u, octave_format.v_bits) : 0u;
+                    kval[e] = active ? octave_levels[bits * 64u + kcode] * kscale : 0.0f;
+                    vval[e] = active ? octave_levels[octave_format.v_bits * 64u + vcode] *
+                        octave_half_at(vs + v_slot_bytes - 2u) : 0.0f;
+                }
+                octave_inverse_wave(
+                    kval, lane, octave_format.k_mode == OctaveKMode::Compact);
+                octave_inverse_wave(vval, lane, true);
+                #pragma unroll
+                for (uint32_t e = 0u; e < 8u; ++e) {
+                    const uint32_t dimension = lane * 8u + e;
+                    s.k_page[token][dimension] = f2bf(
+                        kval[e] * octave_sign(dimension, 11u));
+                    s.v_page[vbuf][token][dimension] = f2bf(
+                        vval[e] * octave_sign(dimension, 29u));
+                }
+            }
+        } else if (page_index + 1u < page_count) {
             for (uint32_t i = tid; i < kChunksPerPage; i += kThreads) {
                 const uint32_t t = i / kChunksPerRow;
                 const uint32_t c = i % kChunksPerRow;
@@ -378,10 +508,12 @@ void attention_paged_prefill_bf16_impl(
     const bf16* k_scale_pool,
     const bf16* v_scale_pool,
     uint32_t blocks_per_head,
+    const float* octave_levels,
+    OctaveKVCacheFormat octave_format,
     void* out_base) {
     attention_paged_prefill_bf16_body<kMode>(
         a, k_pool, v_pool, k_code_pool, v_code_pool, k_scale_pool, v_scale_pool,
-        blocks_per_head, out_base);
+        blocks_per_head, octave_levels, octave_format, out_base);
 }
 
 } }  // namespace v_prefill_bf16
@@ -394,6 +526,7 @@ void shelf_attention_paged_prefill_bf16(
         args.common, reinterpret_cast<const bf16*>(args.k_pool),
         reinterpret_cast<const bf16*>(args.v_pool),
         nullptr, nullptr, nullptr, nullptr, 0u,
+        nullptr, {},
         args.common.output);
 }
 
@@ -417,7 +550,33 @@ hipError_t launch_attention_paged_prefill_bf16(
     attention_paged_prefill_bf16_impl<0u><<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
         a, reinterpret_cast<const bf16*>(k_pool), reinterpret_cast<const bf16*>(v_pool),
         nullptr, nullptr, nullptr, nullptr, 0u,
+        nullptr, {},
         common.output);
+    return hipGetLastError();
+}
+
+hipError_t launch_attention_paged_prefill_octave(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    hipStream_t stream) {
+    using namespace v_prefill_bf16;
+    if (common.rows == 0u || common.head_dim != kHeadDim ||
+        common.page_tokens != kPageTokens || common.q_heads == 0u ||
+        common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u ||
+        common.block_table_stride == 0u || common.num_pages == 0u ||
+        common.q == nullptr || common.output == nullptr ||
+        common.row_sequence_slots == nullptr || common.row_positions == nullptr ||
+        common.block_tables == nullptr || k_pool == nullptr || v_pool == nullptr ||
+        levels == nullptr || !octave_format_valid(format))
+        return hipErrorInvalidValue;
+    const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
+    attention_paged_prefill_bf16_impl<2u>
+        <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
+            common, nullptr, nullptr, k_pool, v_pool, nullptr, nullptr, 0u,
+            levels, format, common.output);
     return hipGetLastError();
 }
 

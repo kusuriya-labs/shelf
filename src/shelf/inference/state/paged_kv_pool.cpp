@@ -62,9 +62,7 @@ std::size_t PagedKVPool::page_bytes(
             return 0u;
         return static_cast<std::size_t>(num_attention_layers) * page_tokens * kv_heads *
                (::shelf::kernel::octave_k_slot_bytes(octave_format) +
-                ::shelf::kernel::octave_v_slot_bytes(octave_format)) +
-               2u * static_cast<std::size_t>(page_tokens) * kv_heads * head_dim *
-                   sizeof(bf16_t);
+                ::shelf::kernel::octave_v_slot_bytes(octave_format));
     }
     if (dtype == KVCacheDType::FP8_E4M3) {
         const std::size_t scales =
@@ -176,21 +174,7 @@ Result<PagedKVPool> PagedKVPool::create(
             return Status::hip_error("upload Octave Lloyd-Max levels",
                                      hipGetErrorString(levels_copy), __FILE__, __LINE__);
         }
-        const std::size_t scratch_elems = static_cast<std::size_t>(num_pages) *
-            page_tokens * kv_heads * head_dim;
-        auto k_scratch_alloc = arena.allocate_aligned(scratch_elems * sizeof(bf16_t), 256);
-        if (!k_scratch_alloc.ok()) return k_scratch_alloc.status();
-        auto k_scratch_tensor = gpu::Tensor::create<bf16_t>(
-            k_scratch_alloc.release(), {scratch_elems}, {1});
-        if (!k_scratch_tensor.ok()) return k_scratch_tensor.status();
-        pool.octave_k_scratch_ = k_scratch_tensor.release();
-        auto v_scratch_alloc = arena.allocate_aligned(scratch_elems * sizeof(bf16_t), 256);
-        if (!v_scratch_alloc.ok()) return v_scratch_alloc.status();
-        auto v_scratch_tensor = gpu::Tensor::create<bf16_t>(
-            v_scratch_alloc.release(), {scratch_elems}, {1});
-        if (!v_scratch_tensor.ok()) return v_scratch_tensor.status();
-        pool.octave_v_scratch_ = v_scratch_tensor.release();
-        pool.reserved_bytes_ = k_bytes + v_bytes + 2u * scratch_elems * sizeof(bf16_t);
+        pool.reserved_bytes_ = k_bytes + v_bytes;
     } else if (dtype == KVCacheDType::FP8_E4M3) {
         auto k_alloc = arena.allocate_aligned(pool_elems * sizeof(fp8e4m3_storage_t), 256);
         if (!k_alloc.ok()) return k_alloc.status();

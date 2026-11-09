@@ -11,17 +11,17 @@ per-token GPU event p50、prefill は warmup 1 回後の 5 回の GPU p50 であ
 
 ## 容量
 
-cache bytes は BF16 scratch を含まない永続 cache 本体である。M2 prefill 用 scratch は
-K/V 各 1 layer 分なので、全形式で 4096 B/token、32Ki token で 0.125 GiB を別途使う。
+packed-direct prefill への移行により、M2 の K/V 各 1 layer BF16 scratch
+（合計 4096 B/token）は削除した。cache bytes は arena が確保する永続 cache 本体であり、
 Lloyd-Max table の 1792 B は表から除外した。
 
-| 形式 | cache B/token/head/layer | cache B/token（16 層、4 heads） | 32Ki cache GiB | scratch 込み GiB |
-| --- | ---: | ---: | ---: | ---: |
-| BF16 | 1024 | 65536 | 2.000 | 2.000 |
-| FP8 | 520 | 33280 | 1.016 | 1.016 |
-| c4v4 | 260 | 16640 | 0.508 | 0.633 |
-| c5v5 | 324 | 20736 | 0.633 | 0.758 |
-| b4n3v3 | 212 | 13568 | 0.414 | 0.539 |
+| 形式 | cache B/token/head/layer | cache B/token（16 層、4 heads） | 32Ki cache GiB |
+| --- | ---: | ---: | ---: |
+| BF16 | 1024 | 65536 | 2.000 |
+| FP8 | 520 | 33280 | 1.016 |
+| c4v4 | 260 | 16640 | 0.508 |
+| c5v5 | 324 | 20736 | 0.633 |
+| b4n3v3 | 212 | 13568 | 0.414 |
 
 ## Decode
 
@@ -114,14 +114,21 @@ c4v4 の concurrent 2、3、4 request は stream/done 整合、完走、同じ c
 
 ## Prefill
 
-単位は token/s の p50 である。Octave は対象 layer の cache を BF16 scratch へ展開して
-既存 BF16 paged prefill attention を使う。
+単位は token/s の p50 である。旧値は対象 layer の pool 全体を BF16 scratch へ展開する
+M2 経路、新値は packed page を LDS へ直接復号し、既存 gfx12 BF16 WMMA tile で消費する
+経路である。新経路は global scratch と全 pool dequant dispatch を持たない。
 
 | context | BF16 | FP8 | c4v4 | c5v5 | b4n3v3 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2048 | 1828.97 | 1839.46 | 1841.11 | 1830.93 | 1832.71 |
 | 8192 | 1855.88 | 1887.33 | 1871.53 | 1872.14 | 1873.91 |
 | 32768 | 1504.56 | 1526.01 | 1483.80 | 1481.40 | 1487.03 |
+
+packed-direct c4v4 の初期測定は 2048 が 1759.97 token/s（FP8 比 95.7%）、8192 が
+1381.55 token/s（同 73.2%）だった。2048 は目標を満たすが、8192 は未達である。現在の
+kernel は 32 query row × 1 query head の block ごとに同じ KV head の packed page を復号するため、
+GQA 6 head 間で inverse WHT と unpack を共有できていない。global scratch は解消したが、長い
+prefill ではこの重複計算が新しい律速である。
 
 ## 正しさと制約
 

@@ -210,6 +210,15 @@ launch_attention_paged_prefill_bf16(
     hipStream_t stream);
 
 hipError_t
+launch_attention_paged_prefill_octave(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    hipStream_t stream);
+
+hipError_t
 launch_attention_paged_prefill_fp8_e4m3(
     const PagedAttentionCommonArgs& common,
 

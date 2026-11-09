@@ -93,8 +93,6 @@ struct PagedKVPoolOctaveView {
     uint8_t* k_pool = nullptr;
     uint8_t* v_pool = nullptr;
     const float* levels = nullptr;
-    bf16_t* k_scratch = nullptr;
-    bf16_t* v_scratch = nullptr;
     uint32_t page_tokens = 0;
     uint32_t num_pages = 0;
     uint32_t num_attention_layers = 0;
@@ -177,8 +175,6 @@ class PagedKVPool {
     const gpu::Tensor& k_scale_pool() const noexcept { return k_scale_pool_; }
     const gpu::Tensor& v_scale_pool() const noexcept { return v_scale_pool_; }
     const gpu::Tensor& octave_levels() const noexcept { return octave_levels_; }
-    const gpu::Tensor& octave_k_scratch() const noexcept { return octave_k_scratch_; }
-    const gpu::Tensor& octave_v_scratch() const noexcept { return octave_v_scratch_; }
     KVCacheDType dtype() const noexcept { return dtype_; }
     OctaveKVCacheFormat octave_format() const noexcept { return octave_format_; }
 
@@ -222,8 +218,6 @@ class PagedKVPool {
     gpu::Tensor k_scale_pool_;
     gpu::Tensor v_scale_pool_;
     gpu::Tensor octave_levels_;
-    gpu::Tensor octave_k_scratch_;
-    gpu::Tensor octave_v_scratch_;
     KVCacheDType dtype_ = KVCacheDType::BF16;
     OctaveKVCacheFormat octave_format_{};
 
@@ -297,8 +291,6 @@ inline PagedKVPoolOctaveView make_paged_kv_octave_view(const PagedKVPool& pool) 
     v.k_pool = pool.k_pool().data<uint8_t>();
     v.v_pool = pool.v_pool().data<uint8_t>();
     v.levels = pool.octave_levels().data<float>();
-    v.k_scratch = pool.octave_k_scratch().data<bf16_t>();
-    v.v_scratch = pool.octave_v_scratch().data<bf16_t>();
     v.page_tokens = pool.page_tokens();
     v.num_pages = pool.num_pages();
     v.num_attention_layers = pool.num_attention_layers();

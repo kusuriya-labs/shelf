@@ -325,9 +325,9 @@ enum class PhysicalPagedAttentionVariant : uint8_t {
     Fp8SplitOther = 10,
     Bf16Prefill = 14,
     Fp8E4M3Prefill = 15,
-    OctaveDequant = 16,
     OctaveSplit = 17,
     OctaveReduce = 18,
+    OctavePrefill = 19,
     Unsupported = 255,
 };
 

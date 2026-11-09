@@ -371,20 +371,6 @@ __device__ __forceinline__ f16x8_t octave_frag_nk(
     return fragment;
 }
 
-__device__ __forceinline__ f16x8_t octave_frag_kn(
-    const _Float16* source, uint32_t pitch, uint32_t column_base,
-    uint32_t k_base, uint32_t lane) {
-    const uint32_t column = column_base + (lane & 15u);
-    const uint32_t k0 = k_base + 4u * (lane >> 4u);
-    f16x8_t fragment;
-    #pragma unroll
-    for (uint32_t e = 0u; e < 4u; ++e) {
-        fragment[e] = source[static_cast<size_t>(k0 + e) * pitch + column];
-        fragment[4u + e] = source[static_cast<size_t>(k0 + 8u + e) * pitch + column];
-    }
-    return fragment;
-}
-
 __device__ __forceinline__ _Float16 octave_biased_byte_to_half(uint8_t value) {
     return __builtin_bit_cast(_Float16, static_cast<uint16_t>(0x6400u + value)) -
            static_cast<_Float16>(1152.0f);
