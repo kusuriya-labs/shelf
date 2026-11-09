@@ -45,7 +45,7 @@ _bootstrap_paths()
 
 from shelf_chat import codec  # noqa: E402
 
-from serverlib import openai_protocol  # noqa: E402
+from serverlib import openai_protocol, responses_protocol  # noqa: E402
 from serverlib.chat_service import ChatService, StreamDone  # noqa: E402
 from serverlib.compute_client import AsyncComputeClient, ComputeError  # noqa: E402
 from serverlib.openai_protocol import (  # noqa: E402
@@ -197,6 +197,39 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             status=500)
 
 
+async def handle_responses(request: web.Request) -> web.Response:
+    service: ChatService = request.app["chat_service"]
+    try:
+        body = await _read_json(request)
+        chat = responses_protocol.parse_responses_request(
+            body, inference_budget_tokens=service.inference_budget_ceiling)
+        if chat.model != service.model_name:
+            raise OpenAIProtocolError(
+                f"model not found: {chat.model}", param="model",
+                code="model_not_found", status=404)
+        if chat.stream:
+            raise OpenAIProtocolError("stream is not supported yet", param="stream",
+                                      code="unsupported_parameter")
+        result = await service.complete(chat)
+        _log_request(chat, result.finish_reason)
+        return web.json_response(responses_protocol.encode_response(chat, result))
+    except OpenAIProtocolError as exc:
+        return _error_response(exc)
+    except ChatServiceError as exc:
+        return web.json_response(openai_protocol.error_body(exc.message, code=exc.code),
+                                 status=exc.status)
+    except ComputeError as exc:
+        return web.json_response(openai_protocol.error_body(str(exc), code="compute_error"),
+                                 status=500)
+    except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+        raise
+    except Exception as exc:
+        _log("unhandled response failure:")
+        _log(traceback.format_exc())
+        return web.json_response(openai_protocol.error_body(
+            f"internal error: {exc}", code="internal_error"), status=500)
+
+
 async def _read_json(request: web.Request):
     try:
         raw = await request.text()
@@ -341,7 +374,7 @@ def create_app(service: ChatService, compute: AsyncComputeClient,
     app.router.add_get("/v1/meta", handle_meta)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/responses", handle_not_found)
-    app.router.add_post("/v1/responses", handle_not_found)
+    app.router.add_post("/v1/responses", handle_responses)
     app.router.add_route("*", "/{tail:.*}", handle_not_found)
 
     app.cleanup_ctx.append(compute_cleanup)
