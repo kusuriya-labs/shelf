@@ -508,7 +508,7 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     }
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
-        config_.max_concurrent_requests).total();
+        config_.max_concurrent_requests, config_.dflash2_prefill_rows).total();
 }
 
 std::size_t Qwen35ComputeRuntime::mtp_batch_requests(

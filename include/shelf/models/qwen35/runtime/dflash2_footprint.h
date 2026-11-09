@@ -22,6 +22,9 @@ struct DFlash2Footprint {
     }
 };
 
+bool dflash2_prefill_rows(const dflash2::DFlash2Config& config, uint32_t tp,
+                          const char* value, uint32_t& rows) noexcept;
+
 std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) noexcept;
 
 std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
@@ -29,7 +32,8 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
 
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,
-                                        std::size_t lm_head_k) noexcept;
+                                        std::size_t lm_head_k,
+                                        std::size_t prefill_rows = 0u) noexcept;
 
 std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,
                                              std::size_t max_rows) noexcept;
@@ -39,7 +43,8 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    const ::shelf::state::GdnStatePool& pool,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
-                                   uint32_t sessions) noexcept;
+                                   uint32_t sessions,
+                                   std::size_t prefill_rows = 0u) noexcept;
 
 }  // namespace runtime
 }  // namespace shelf::qwen35

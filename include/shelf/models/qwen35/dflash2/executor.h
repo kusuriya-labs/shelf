@@ -22,6 +22,7 @@ struct DFlash2ExecutorConfig {
     uint32_t max_rows = 0;
     uint32_t max_batch_rows = 0;
     uint32_t max_context_rows = 0;
+    uint32_t max_prefill_feature_rows = 0;
     const shelf::weights::MatrixWeight* target_lm_head = nullptr;
     const shelf::weights::MatrixWeight* target_embed_tokens = nullptr;
 };
@@ -262,6 +263,7 @@ Status dflash2_append_target_taps(
     uint32_t tap_count,
     uint32_t rows,
     uint32_t position_start,
-    hipStream_t stream);
+    hipStream_t stream,
+    bool prefill = false);
 
 }
