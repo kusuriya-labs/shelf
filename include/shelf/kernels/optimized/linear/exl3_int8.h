@@ -57,7 +57,8 @@ hipError_t launch_exl3_int8_gemm(
 
 // K splits for the decode-sized gemm (rows <= 16): each split writes its own yprime slice, so yprime must hold
 // splits * rows * n floats (scratch_rows is the capacity in rows). Chosen so the grid fills the wave slots.
-uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows);
+uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
+                                uint32_t bits = 0u);
 
 hipError_t launch_exl3_int8_rotate_out(
     const float* yprime,

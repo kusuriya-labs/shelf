@@ -14,6 +14,7 @@ struct Options {
     int iterations = 20;
     int iters = 1000;
     int device = 0;
+    bool stream_read = false;
 };
 
 void usage(FILE* f) {
@@ -22,7 +23,68 @@ void usage(FILE* f) {
                  "  --warmup N\n"
                  "  --iterations N\n"
                  "  --iters N        inner loop iterations (LDS probes)\n"
-                 "  --device N\n");
+                 "  --device N\n"
+                 "  --stream-read   512 MiB read-only and device copy benchmark\n");
+}
+
+__global__ void stream_read4(const uint4* src, unsigned int* out, std::size_t n) {
+    unsigned int sum = 0;
+    for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        const uint4 v = src[i];
+        sum += v.x + v.y + v.z + v.w;
+    }
+    out[blockIdx.x * blockDim.x + threadIdx.x] = sum;
+}
+
+int run_stream_read(const Options& opt) {
+    constexpr std::size_t bytes = 512ull * 1024 * 1024;
+    void *src = nullptr, *dst = nullptr;
+    unsigned int* out = nullptr;
+    hipEvent_t start = nullptr, stop = nullptr;
+    if (opt.warmup < 0 || opt.iterations <= 0 || opt.iters <= 0 ||
+        hipMalloc(&src, bytes) != hipSuccess || hipMalloc(&dst, bytes) != hipSuccess ||
+        hipMalloc(&out, 4096 * 256 * sizeof(unsigned int)) != hipSuccess ||
+        hipMemset(src, 1, bytes) != hipSuccess || hipEventCreate(&start) != hipSuccess ||
+        hipEventCreate(&stop) != hipSuccess) {
+        if (start) (void)hipEventDestroy(start);
+        if (stop) (void)hipEventDestroy(stop);
+        if (src) (void)hipFree(src);
+        if (dst) (void)hipFree(dst);
+        if (out) (void)hipFree(out);
+        return 1;
+    }
+    int rc = 0;
+    for (int mode = 0; mode < 2; ++mode) {
+        std::vector<float> samples;
+        for (int rep = 0; rep < opt.warmup + opt.iterations; ++rep) {
+            if (hipEventRecord(start) != hipSuccess) { rc = 1; break; }
+            for (int i = 0; i < opt.iters; ++i) {
+                if (mode == 0) {
+                    if (hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice) != hipSuccess) { rc = 1; break; }
+                } else {
+                    hipLaunchKernelGGL(stream_read4, dim3(4096), dim3(256), 0, 0,
+                                       static_cast<const uint4*>(src), out, bytes / sizeof(uint4));
+                    if (hipGetLastError() != hipSuccess) { rc = 1; break; }
+                }
+            }
+            if (rc || hipEventRecord(stop) != hipSuccess || hipEventSynchronize(stop) != hipSuccess) { rc = 1; break; }
+            float ms = 0;
+            if (hipEventElapsedTime(&ms, start, stop) != hipSuccess) { rc = 1; break; }
+            if (rep >= opt.warmup) samples.push_back(ms / opt.iters);
+        }
+        if (rc) break;
+        std::sort(samples.begin(), samples.end());
+        std::printf("%s bytes=%zu ms=", mode ? "read" : "copy", bytes);
+        for (float ms : samples) std::printf(" %.4f", ms);
+        std::printf(" p50_GBps=%.2f\n", bytes / samples[samples.size() / 2] / 1e6);
+    }
+    if (hipEventDestroy(start) != hipSuccess) rc = 1;
+    if (hipEventDestroy(stop) != hipSuccess) rc = 1;
+    if (hipFree(src) != hipSuccess) rc = 1;
+    if (hipFree(dst) != hipSuccess) rc = 1;
+    if (hipFree(out) != hipSuccess) rc = 1;
+    return rc;
 }
 
 __global__ void global_copy4(float4* dst, const float4* src, std::size_t n4) {
@@ -130,7 +192,8 @@ int run_gpu_memory(int argc, char** argv) {
             usage(stdout);
             return 0;
         }
-        if (a == "--warmup") next(opt.warmup);
+        if (a == "--stream-read") opt.stream_read = true;
+        else if (a == "--warmup") next(opt.warmup);
         else if (a == "--iterations") next(opt.iterations);
         else if (a == "--iters") next(opt.iters);
         else if (a == "--device") next(opt.device);
@@ -143,6 +206,7 @@ int run_gpu_memory(int argc, char** argv) {
         std::printf("FAIL: hipSetDevice\n");
         return 1;
     }
+    if (opt.stream_read) return run_stream_read(opt);
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 

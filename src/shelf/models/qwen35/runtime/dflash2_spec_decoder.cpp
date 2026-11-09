@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <vector>
 
 namespace shelf::qwen35::runtime {
@@ -576,7 +577,25 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,
             final_chunk ? &decoder.sampling : nullptr, decoder.sample_index);
         const std::vector<ExecuteBatchOptions> poptions = build_gdn_options(decoder, 1u);
+        struct TimingEvents {
+            hipEvent_t begin = nullptr;
+            hipEvent_t target_end = nullptr;
+            hipEvent_t append_end = nullptr;
+            ~TimingEvents() {
+                if (begin != nullptr) (void)hipEventDestroy(begin);
+                if (target_end != nullptr) (void)hipEventDestroy(target_end);
+                if (append_end != nullptr) (void)hipEventDestroy(append_end);
+            }
+        } timing;
+        const bool timing_on = env_flag_enabled("SHELF_DFLASH_PREFILL_TIMING", false);
+        if (timing_on && (hipEventCreate(&timing.begin) != hipSuccess ||
+                          hipEventCreate(&timing.target_end) != hipSuccess ||
+                          hipEventCreate(&timing.append_end) != hipSuccess ||
+                          hipEventRecord(timing.begin, decoder.stream) != hipSuccess))
+            return Status::invalid_state("dflash2 prefill timing event setup failed", __FILE__, __LINE__);
         auto executed = run_target_batch(decoder, batch, poptions);
+        if (timing_on && hipEventRecord(timing.target_end, decoder.stream) != hipSuccess)
+            return Status::invalid_state("dflash2 prefill target event failed", __FILE__, __LINE__);
         if (!executed.ok()) return executed.status();
         BatchExecutionOutput output = executed.release();
 
@@ -586,8 +605,18 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         }
         Status appended = dflash2::dflash2_append_target_taps(
             *decoder.draft, *decoder.context, taps.data(), tap_count, n, offset,
-            decoder.stream);
+            decoder.stream, true);
         if (!appended.ok()) return appended;
+        if (timing_on) {
+            float target_ms = 0.0f, append_ms = 0.0f;
+            if (hipEventRecord(timing.append_end, decoder.stream) != hipSuccess ||
+                hipEventSynchronize(timing.append_end) != hipSuccess ||
+                hipEventElapsedTime(&target_ms, timing.begin, timing.target_end) != hipSuccess ||
+                hipEventElapsedTime(&append_ms, timing.target_end, timing.append_end) != hipSuccess)
+                return Status::invalid_state("dflash2 prefill timing event failed", __FILE__, __LINE__);
+            std::fprintf(stderr, "DFLASH_PREFILL_TIMING offset=%u rows=%u target_ms=%.3f append_ms=%.3f\n",
+                         offset, n, target_ms, append_ms);
+        }
 
         if (final_chunk) {
             const hipError_t err = hipMemcpy(

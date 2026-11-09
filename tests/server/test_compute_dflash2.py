@@ -77,7 +77,7 @@ def run_single_shot(input_ids, max_new_tokens, *, device, kv_cache_dtype,
         "--max-new-tokens", str(max_new_tokens),
         "--max-seq-len", "512",
         "--arena-gib", "auto",
-        "--device", str(device),
+        "--device", os.environ.get("SHELF_TEST_DEVICE", str(device)),
         "--temperature", "0",
         "--top-p", "1.0",
         "--top-k", "0",
@@ -265,6 +265,25 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
             checker.check(f"{label} prefix replay deterministic",
                           generated_ids(ext2_done) == ext_ids,
                           f"{generated_ids(ext2_done)} vs {ext_ids}")
+
+        long_seed = paged_prompt(PROMPT[::-1], 328)
+        long_extension = long_seed[:320] + long_seed[1:9]
+        harness.send({"op": "generate", "request_id": 10, "input_ids": long_seed,
+                      "max_new_tokens": 16, "temperature": 0.0})
+        _, long_done, long_errors = collect(harness, 10)
+        checker.check(f"{label} long prefix seed", not long_errors and long_done is not None,
+                      str(long_errors))
+        harness.send({"op": "generate", "request_id": 11, "input_ids": long_extension,
+                      "max_new_tokens": 16, "temperature": 0.0})
+        _, long_ext_done, long_ext_errors = collect(harness, 11)
+        checker.check(f"{label} long prefix extension",
+                      not long_ext_errors and long_ext_done is not None,
+                      str(long_ext_errors))
+        if long_ext_done is not None:
+            checker.check(f"{label} long prefix restored",
+                          long_ext_done.get("restored_tokens") == 320 and
+                          long_ext_done.get("prefill_tokens") == 8,
+                          str(long_ext_done))
     finally:
         harness.close()
 
@@ -276,10 +295,11 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
                       f"first={used[0]} max={max(used)} delta={max(used) - used[0]}")
 
     if serve_ids:
-        target_only = run_single_shot(PROMPT, MAX_NEW_TOKENS, device=1,
+        device = int(os.environ.get("SHELF_TEST_DEVICE", "1"))
+        target_only = run_single_shot(PROMPT, MAX_NEW_TOKENS, device=device,
                                       kv_cache_dtype=kv_cache_dtype,
                                       dflash2=False)
-        shot_dflash = run_single_shot(PROMPT, MAX_NEW_TOKENS, device=1,
+        shot_dflash = run_single_shot(PROMPT, MAX_NEW_TOKENS, device=device,
                                       kv_cache_dtype=kv_cache_dtype,
                                       dflash2=True)
         checker.check(f"{label} serve == target-only greedy",

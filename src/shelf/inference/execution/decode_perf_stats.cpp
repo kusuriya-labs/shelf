@@ -85,6 +85,7 @@ struct SemState {
     bool begun = false;
     uint32_t max_pairs = 0;
     uint32_t next = 0;
+    uint32_t dropped = 0;
     std::vector<hipEvent_t> events;
     struct Rec {
         uint32_t seq = 0;
@@ -101,6 +102,7 @@ void semantic_timing_begin(hipStream_t stream, uint32_t max_pairs) {
     (void)stream;
     g_sem.max_pairs = max_pairs;
     g_sem.next = 0;
+    g_sem.dropped = 0;
     g_sem.recs.clear();
     g_sem.events.resize(2u * max_pairs);
     for (uint32_t i = 0; i < 2u * max_pairs; ++i)
@@ -109,8 +111,11 @@ void semantic_timing_begin(hipStream_t stream, uint32_t max_pairs) {
 }
 
 uint32_t semantic_timing_start(hipStream_t stream) {
-    if (!g_sem.begun || g_sem.next >= g_sem.max_pairs)
+    if (!g_sem.begun) return 0xFFFFFFFFu;
+    if (g_sem.next >= g_sem.max_pairs) {
+        ++g_sem.dropped;
         return 0xFFFFFFFFu;
+    }
     const uint32_t seq = g_sem.next++;
     (void)hipEventRecord(g_sem.events[2u * seq], stream);
     return seq;
@@ -128,6 +133,8 @@ void semantic_timing_end(hipStream_t stream, const char* csv_path) {
     if (!g_sem.begun)
         return;
     (void)hipStreamSynchronize(stream);
+    if (g_sem.dropped != 0)
+        std::fprintf(stderr, "semantic timing: dropped %u event pairs; CSV is incomplete\n", g_sem.dropped);
     std::FILE* f = std::fopen(csv_path, "w");
     if (f != nullptr) {
         std::fprintf(f, "seq,kernel_id,path,implementation,logical_consumed,duration_us\n");
@@ -135,8 +142,11 @@ void semantic_timing_end(hipStream_t stream, const char* csv_path) {
             float ms = 0.0f;
             (void)hipEventElapsedTime(&ms, g_sem.events[2u * r.seq], g_sem.events[2u * r.seq + 1u]);
             const double us = static_cast<double>(ms) * 1000.0;
-            const char* kid = ::shelf::runtime::kernel_to_name(
-                static_cast<::shelf::runtime::KernelId>(r.kernel_id));
+            const char* stages[] = {"EXL3_ROTATE_QUANT", "EXL3_ROWSCALE", "EXL3_RECON",
+                                    "EXL3_DENSE_GEMM", "EXL3_FLAG_GEMM", "EXL3_ROTATE_OUT"};
+            const char* kid = r.kernel_id >= 0xffff0000u && r.kernel_id < 0xffff0006u
+                ? stages[r.kernel_id - 0xffff0000u]
+                : ::shelf::runtime::kernel_to_name(static_cast<::shelf::runtime::KernelId>(r.kernel_id));
             const char* path =
                 r.path == static_cast<uint32_t>(SemPath::Correctness) ? "correctness"
                                                                       : "optimized";

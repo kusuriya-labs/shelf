@@ -138,7 +138,7 @@ Qwen runtime や GPU へこの値は渡さない。
 
 - 同一プロンプトの再実行は、input 長が page 境界に一致するとき restore しない
   （`state_position == input_len` となり `state_position < input_len` を満たさない）。
-  input 長が page 境界に一致しない場合は、その直前の境界まで restore する。
+  input 長が page 境界に一致しない場合は、適合する保存済み境界があれば restore する。
 - KV page sharing は Tensor Parallel の rank shards に対応する。
 - 物理 page が枯渇したときは LRU entry を evict する。
 
@@ -163,10 +163,13 @@ restore / save の入力は次のとおりである。
 - output tail の entry は page 揃えした position の prefix である。ring の
   `length` / `next_position` は **entry position へ clamp して** 保存する
   （final position のまま保存すると entry の KV 範囲と ring の範囲がずれる）。
-- 入力境界の save は `dflash2_spec_prefill` の最後の page 境界で 1 回だけ行う。
-  その時点の `DFlash2ContextState` ring を `SpecRingRef` として渡し、ring も
-  entry に保存する。後続の suffix prefill で ring が進む前にコピーするため、
-  entry position と ring の範囲は一致する。
+- DFlash2 の本 prefill は保存目的の page 境界では分割せず、通常 greedy と同じ
+  `max_batch_rows` の区切りで実行する。cache miss の単一 GPU request で、最後の
+  page 境界が入力末尾より前かつ 1024 token 以下の場合は、先にその境界まで別途
+  prefill して `SpecRingRef` と target state を保存する。GDN・sequence の page table・
+  drafter context と sampling index を元に戻した後、本 prefill を実行する。
+  prefix hit、TP、1024 token を超える境界では別途 prefill しない。自然な chunk
+  終端が page 境界に一致する場合も、その位置を保存できる。
 - 入力境界の entry は assistant の再レンダリングに依存しないため、強制 close や
   trim で出力末尾の token 列が変わる場合でも restore できる。
 - DFlash2 request は **ring を持つ entry だけ** を restore する。`lookup` は entry の

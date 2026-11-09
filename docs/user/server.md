@@ -109,6 +109,11 @@ KV のコピーも shadow pool も作らない。cache は KV pool の全 page �
 Qwen3.8-27B / TP=2 / DFlash2 ではこの予約は約 0.45 GiB/rank である。
 起動時に compute の stderr に出る `MEMORY_PLAN tp prefix cache` で確認する。
 
+DFlash2 の単一 GPU 実行では、cache miss の非整列 prompt に対し、入力の prefix を
+保存するため追加の prefill を行う場合がある。その場合は最初の token までの時間と
+一時 KV 使用量が増える。境界が 1024 token を超える場合、prefix hit の場合、または
+TP の場合はこの追加保存を行わず、自然な prefill 終端が page 境界と重なったときに保存する。
+
 ## 推論予算
 
 request 1 個あたりの生成予算（推論予算）は `--inference-budget-tokens`（default 32768）である。
@@ -142,6 +147,17 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
+
+TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
+context 構築は既定で最大 256 行ずつ処理する。`SHELF_DFLASH2_PREFILL_ROWS=8` で
+従来の処理に戻せる。`256` は明示的に既定を選択し、それ以外の値は起動エラーになる。
+TP>1 または上記の drafter 条件を満たさない場合は従来の処理に戻る。
+
+Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。KV の自動予算は
+その分減るため、収容できる context の上限も下がる。実際の容量は起動 log の
+`KV budget` で確認する。測定では長い prompt の TTFT が短縮した一方、入力によっては
+平均受理数が低下した。行数による数値差と測定結果は
+[性能記録](../perf/dflash2-prefill-rows-default.md)を参照。
 
 ```bash
 ./build/shelf-server \

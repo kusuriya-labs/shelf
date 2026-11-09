@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/dflash2_footprint.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -122,6 +123,20 @@ int main(int argc, char** argv) {
             return 1;
         }
         dflash_config = dflash_config_result.release();
+        if (opt.serve_stdio) {
+            const char* value = std::getenv("SHELF_DFLASH2_PREFILL_ROWS");
+            if (!shelf::qwen35::runtime::dflash2_prefill_rows(
+                    dflash_config, config.tp, value, config.dflash2_prefill_rows)) {
+                fprintf(stderr, "invalid SHELF_DFLASH2_PREFILL_ROWS: expected 8 or 256\n");
+                return 2;
+            }
+            if (config.dflash2_prefill_rows == 0u) {
+                fprintf(stderr, "DFLASH2 prefill feature rows: legacy\n");
+            } else {
+                fprintf(stderr, "DFLASH2 prefill feature rows: %u\n",
+                        config.dflash2_prefill_rows);
+            }
+        }
         fprintf(stderr, "DFLASH2 rope: type=default theta=%g source=checkpoint\n",
                 dflash_config.rope_theta);
         if (opt.dflash2_drafts > dflash_config.max_draft_tokens()) {

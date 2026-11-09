@@ -20,17 +20,20 @@ constexpr float kInvSqrt128 = 0.08838834764831845f;
 // Sylvester Walsh-Hadamard transform of one 128-wide block, one element per thread (128
 // threads). Result is unnormalised.
 __device__ __forceinline__ float fwht128(float v, float* smem, uint32_t t) {
-    smem[t] = v;
-    __syncthreads();
     #pragma unroll
-    for (uint32_t h = 1u; h < kBlock; h <<= 1u) {
-        const float a = smem[t];
+    for (uint32_t h = 1u; h < 32u; h <<= 1u) {
+        const float b = __shfl_xor(v, h);
+        v = (t & h) ? (b - v) : (v + b);
+    }
+    #pragma unroll
+    for (uint32_t h = 32u; h < kBlock; h <<= 1u) {
+        smem[t] = v;
+        __syncthreads();
         const float b = smem[t ^ h];
         __syncthreads();
-        smem[t] = (t & h) ? (b - a) : (a + b);
-        __syncthreads();
+        v = (t & h) ? (b - v) : (v + b);
     }
-    return smem[t];
+    return v;
 }
 
 __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {
@@ -478,8 +481,10 @@ hipError_t launch_exl3_int8_rotate_quantize(
     return hipGetLastError();
 }
 
-uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows) {
+uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
+                                uint32_t bits) {
     if (rows > 16u || rows == 0u || scratch_rows < rows) return 1u;
+    if (bits == 4u && n == 17408u && k == 5120u && scratch_rows >= 64u) return 4u;
     // Wave slots of the device (6 resident waves per SIMD at ~215 VGPRs), queried once.
     static const uint32_t slots = [] {
         int dev = 0, wgp = 0;
@@ -492,7 +497,7 @@ uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t s
     double best_fill = 0.0;
     // Fill = waves / (slots * rounds): the last round of a grid that is not a multiple of the slots runs partly empty.
     // Keep >= 8 groups per split so the weight prefetch pipeline still pays off.
-    for (uint32_t s = 1u; s <= 16u && s * rows <= scratch_rows && groups / s >= 8u; ++s) {
+    for (uint32_t s = 1u; s <= 16u && s * 16u <= scratch_rows && groups / s >= 8u; ++s) {
         const uint64_t waves = static_cast<uint64_t>(tiles) * s;
         const uint64_t rounds = (waves + slots - 1u) / slots;
         const double fill = static_cast<double>(waves) / static_cast<double>(rounds * slots);

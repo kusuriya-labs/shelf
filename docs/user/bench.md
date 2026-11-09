@@ -11,6 +11,7 @@ E2E:
 Linear:
   activation-quantize A8 activation quantization micro-benchmark
   gemm               linear GEMV/GEMM micro-benchmark
+  exl3-int8          EXL3-INT8 decode linear micro-benchmark
 
 Normalization:
   rmsnorm            RMSNorm micro-benchmark
@@ -79,6 +80,16 @@ Qwen3.8-27B の FP8 は単一 GPU に収まらないため `--tensor-parallel 2`
 
 `--tokens-file` を指定すると PSKLDTOK corpus の先頭（`--tokens-offset` 以降）を prompt に
 使う。省略時は token id 1 の繰り返しになる。
+
+`SHELF_QWEN35_PERF_STATS=1 --perf-stats-output PATH` で dispatch 統計を保存できる。
+さらに `SHELF_QWEN35_PERF_TIMING=1` を指定すると、同じ directory の
+`semantic_timing.csv` に各 dispatch と EXL3-INT8 dense の各段階の GPU event 時間を保存する。
+この診断は TP=1 と `--perf-stats-output` が必要で、最大 65536 event ペアを記録し、
+超過時は stderr に欠落を警告する。親 dispatch と内側の段階は入れ子であり合算しない。
+測定自体の負荷があるため、速度は timing 無効時にも測る。
+`SHELF_PP_HOST_TIMING=1` は sequence setup、chunk の `execute_batch` 呼び出し、
+最後の event wait の CPU 時間を stderr に出す。TP=1 の測定区間では submit と
+complete も分ける。complete は GPU 同期と commit を含み、submit も GPU 作業と重なり得る。
 
 grouped expert checkpoint（Qwen3.6-35B-A3B MoE）も `--tensor-parallel 2` を受理する
 （expert 軸分割で、rank が expert の contiguous 範囲を持つ）。rank local shape は
@@ -282,3 +293,18 @@ greedy argmax sampling。
 ./build/shelf-bench gemm --check --rows 1,16,128
 ./build/shelf-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv
 ```
+
+## exl3-int8
+
+`rows <= 16` の EXL3-INT8 の入力回転・GEMM・出力回転と連結時間を GPU event で測る。
+重みは合成データで、`--working-mib` 以上になるよう複数コピーを巡回する。
+各値は warmup の後に取得した 5 回の中央値で、`min` と `max` はその範囲である。
+`weight_GBps` は trellis のバイト数を時間で割った値で、実際の DRAM 転送量ではない。
+
+```sh
+./build/shelf-bench exl3-int8 --n 17408 --k 5120 --rows 8 --bits 4 --working-mib 256
+```
+
+`--split` を省略すると `--scratch-rows` で指定した容量を使って本番の分割数を選ぶ。
+容量が実モデルと異なれば選択結果も異なる。GPU の分離と比較手順は
+[計測方法](../perf/methodology.md) を参照。

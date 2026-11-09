@@ -321,16 +321,18 @@ Result<DFlash2Executor> create_dflash2_executor(
     const std::size_t q_features = config.attention_q_rows();
     const std::size_t kv_features = config.attention_kv_rows();
     const std::size_t intermediate = config.intermediate_size;
+    const std::size_t feature_rows = std::max(
+        rows, std::min<std::size_t>(exec_config.max_prefill_feature_rows, ctx_rows));
 
     auto alloc = [&](const std::vector<std::size_t>& shape, gpu::Tensor& dst) -> Status {
         return allocate_contiguous_tensor<bf16_t>(arena, shape, dst);
     };
 
-    Status st = alloc({rows, config.tap_feature_size()}, ex.target_concat);
+    Status st = alloc({feature_rows, config.tap_feature_size()}, ex.target_concat);
     if (!st.ok()) return st;
-    st = alloc({rows, hidden}, ex.target_fc);
+    st = alloc({feature_rows, hidden}, ex.target_fc);
     if (!st.ok()) return st;
-    st = alloc({rows, hidden}, ex.target_feature);
+    st = alloc({feature_rows, hidden}, ex.target_feature);
     if (!st.ok()) return st;
     st = alloc({rows, config.conv_projection_rows()}, ex.conv_dynamic);
     if (!st.ok()) return st;
@@ -561,8 +563,8 @@ Status dflash2_project_target_features(
     if (tap_count != shelf::kernel::kDFlash2TargetTaps) {
         return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
     }
-    if (rows > executor.max_rows) {
-        return Status::invalid_argument("dflash2 rows exceed max_rows", __FILE__, __LINE__);
+    if (rows > executor.target_feature.dim(0)) {
+        return Status::invalid_argument("dflash2 rows exceed feature capacity", __FILE__, __LINE__);
     }
     if (rows == 0u) {
         return Status::make_ok();
@@ -2123,7 +2125,8 @@ Status dflash2_append_target_taps(
     uint32_t tap_count,
     uint32_t rows,
     uint32_t position_start,
-    hipStream_t stream) {
+    hipStream_t stream,
+    bool prefill) {
     if (!executor.initialized) {
         return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
     }
@@ -2151,7 +2154,9 @@ Status dflash2_append_target_taps(
     std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> ptrs{};
     uint32_t offset = 0u;
     while (offset < rows) {
-        const uint32_t n = std::min(executor.max_rows, rows - offset);
+        const uint32_t limit = prefill ? static_cast<uint32_t>(executor.target_feature.dim(0))
+                                       : executor.max_rows;
+        const uint32_t n = std::min(limit, rows - offset);
         for (uint32_t t = 0; t < tap_count; ++t) {
             if (target_taps[t] == nullptr) {
                 return Status::invalid_argument("dflash2 target tap is null", __FILE__,
