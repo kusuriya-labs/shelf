@@ -19,11 +19,81 @@ using shelf::kernel::OctaveKVCacheFormat;
 
 int failures = 0;
 
+using f16x8_t = _Float16 __attribute__((ext_vector_type(8)));
+using f32x8_t = float __attribute__((ext_vector_type(8)));
+
+__global__ void octave_wmma_layout_test_kernel(const _Float16* a,
+                                                const _Float16* b,
+                                                float* c) {
+    const uint32_t lane = static_cast<uint32_t>(threadIdx.x) & 31u;
+    const uint32_t lo = lane & 15u;
+    const uint32_t hi = lane >> 4u;
+    f16x8_t af;
+    f16x8_t bf;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 4u; ++e) {
+        af[e] = a[lo * 16u + hi * 4u + e];
+        af[4u + e] = a[lo * 16u + hi * 4u + 8u + e];
+        bf[e] = b[(hi * 4u + e) * 16u + lo];
+        bf[4u + e] = b[(hi * 4u + 8u + e) * 16u + lo];
+    }
+    const f32x8_t out =
+        __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(af, bf, f32x8_t{});
+    #pragma unroll
+    for (uint32_t e = 0u; e < 8u; ++e)
+        c[(hi * 8u + e) * 16u + lo] = out[e];
+}
+
 void check(bool condition, const char* name) {
     if (!condition) {
         ++failures;
         std::printf("FAIL: %s\n", name);
     }
+}
+
+void run_wmma_layout_test() {
+    std::vector<_Float16> a(256u), b(256u);
+    std::vector<float> expected(256u, 0.0f), actual(256u, 0.0f);
+    for (uint32_t r = 0u; r < 16u; ++r) {
+        for (uint32_t k = 0u; k < 16u; ++k) {
+            a[r * 16u + k] = static_cast<_Float16>((static_cast<int>(r) - 7) * 0.125f +
+                                                   static_cast<int>(k) * 0.03125f);
+            b[k * 16u + r] = static_cast<_Float16>((static_cast<int>(k) - 5) * 0.0625f -
+                                                   static_cast<int>(r) * 0.015625f);
+        }
+    }
+    for (uint32_t r = 0u; r < 16u; ++r)
+        for (uint32_t col = 0u; col < 16u; ++col)
+            for (uint32_t k = 0u; k < 16u; ++k)
+                expected[r * 16u + col] +=
+                    static_cast<float>(a[r * 16u + k]) *
+                    static_cast<float>(b[k * 16u + col]);
+
+    _Float16* da = nullptr;
+    _Float16* db = nullptr;
+    float* dc = nullptr;
+    bool ok = hipMalloc(&da, a.size() * sizeof(_Float16)) == hipSuccess &&
+              hipMalloc(&db, b.size() * sizeof(_Float16)) == hipSuccess &&
+              hipMalloc(&dc, actual.size() * sizeof(float)) == hipSuccess;
+    if (ok) {
+        ok = hipMemcpy(da, a.data(), a.size() * sizeof(_Float16), hipMemcpyHostToDevice) == hipSuccess &&
+             hipMemcpy(db, b.data(), b.size() * sizeof(_Float16), hipMemcpyHostToDevice) == hipSuccess;
+    }
+    if (ok) {
+        octave_wmma_layout_test_kernel<<<1u, 32u>>>(da, db, dc);
+        ok = hipGetLastError() == hipSuccess && hipDeviceSynchronize() == hipSuccess &&
+             hipMemcpy(actual.data(), dc, actual.size() * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    }
+    float maximum = 0.0f;
+    if (ok) {
+        for (std::size_t i = 0u; i < actual.size(); ++i)
+            maximum = std::max(maximum, std::fabs(actual[i] - expected[i]));
+    }
+    std::printf("gfx12 WMMA layout max_abs=%.7f\n", maximum);
+    check(ok && maximum < 1.0e-5f, "gfx12 WMMA operand/result layout");
+    if (da != nullptr) hipFree(da);
+    if (db != nullptr) hipFree(db);
+    if (dc != nullptr) hipFree(dc);
 }
 
 double phi(double x) {
@@ -533,6 +603,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
 }  // namespace
 
 int main() {
+    run_wmma_layout_test();
     const std::vector<float> levels = make_levels();
     run_gpu_case({OctaveKMode::Compact, 3u, 3u, 3u}, "Octave c3v3", levels);
     run_gpu_case({OctaveKMode::Compact, 4u, 4u, 4u}, "Octave c4v4", levels);
