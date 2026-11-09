@@ -634,9 +634,9 @@ async def _serve(opts) -> int:
          f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)")
     _log(f"Efforts:      {', '.join(codec.REASONING_EFFORTS)}")
     _log("")
-    _log("Supported:   Chat Completions, SSE, tools, reasoning, sampling, "
+    _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
          "concurrency, cancel")
-    _log("Unsupported: Responses, structured output, strict tools, "
+    _log("Unsupported: structured output, strict tools, "
          "reasoning object")
     _log("")
     _log("Ready.")
