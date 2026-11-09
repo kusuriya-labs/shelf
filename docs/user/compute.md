@@ -180,6 +180,9 @@ dense checkpoint を TP=2 で動かす場合:
 `--serve-stdio` と `--kv-cache-dtype fp8` は併用できる。serve mode では
 `prefix_cache_checkpoint_position`（`0` のみ受理）と `temperature > 0` を
 DFlash2 経路でも受け付ける。
+stdio serving の prefill 行数、環境変数、追加メモリは
+[server の DFlash2 設定](server.md#dflash2-speculative-decoding)を参照。
+単発推論にはこの設定を適用しない。
 
 ### static YaRN（`--rope-factor`）
 

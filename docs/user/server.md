@@ -143,6 +143,17 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
 
+TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
+context 構築は既定で最大 256 行ずつ処理する。`SHELF_DFLASH2_PREFILL_ROWS=8` で
+従来の処理に戻せる。`256` は明示的に既定を選択し、それ以外の値は起動エラーになる。
+TP>1 または上記の drafter 条件を満たさない場合は従来の処理に戻る。
+
+Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。KV の自動予算は
+その分減るため、収容できる context の上限も下がる。実際の容量は起動 log の
+`KV budget` で確認する。測定では長い prompt の TTFT が短縮した一方、入力によっては
+平均受理数が低下した。行数による数値差と測定結果は
+[性能記録](../perf/dflash2-prefill-rows-default.md)を参照。
+
 ```bash
 ./build/shelf-server \
     --model-dir models/Qwen3.8-27B-FP8 \
