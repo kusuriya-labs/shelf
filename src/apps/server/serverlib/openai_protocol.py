@@ -66,6 +66,7 @@ class ChatRequest:
     min_p: float
     top_k: int
     seed: int
+    stop: tuple[str, ...] = ()
     include_usage: bool = False
     enable_thinking: bool = True
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
@@ -111,7 +112,6 @@ def reject_unsupported(body: dict) -> None:
         if key not in allowed:
             raise OpenAIProtocolError(
                 f"{key} is not supported", param=key, code="unsupported_parameter")
-    _reject(body, "stop", "stop is not supported")
     for key in ("frequency_penalty", "presence_penalty"):
         value = body.get(key)
         if value is not None and (isinstance(value, bool) or
@@ -365,6 +365,17 @@ def _stream_options_include_usage(body: dict) -> bool:
     return flag
 
 
+def parse_stop(value) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if (not isinstance(value, list) or not 1 <= len(value) <= 4 or
+            any(not isinstance(item, str) or not item for item in value)):
+        raise OpenAIProtocolError("stop must be a non-empty string or an array of 1 to 4 non-empty strings", param="stop")
+    return tuple(value)
+
+
 def parse_chat_request(body: Any,
                        *,
                        inference_budget_tokens: int = DEFAULT_MAX_NEW_TOKENS) -> ChatRequest:
@@ -423,6 +434,7 @@ def parse_chat_request(body: Any,
         min_p=min_p,
         top_k=top_k,
         seed=seed,
+        stop=parse_stop(body.get("stop")),
         include_usage=include_usage,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,

@@ -364,11 +364,13 @@ TP=2 と FP8 KV を使う。
 model / messages / stream
 stream_options（include_usage のみ）
 max_tokens / max_completion_tokens（両方指定で値が異なる場合は reject）
-temperature / top_p / min_p / top_k / seed
+temperature / top_p / min_p / top_k / seed / stop
 tools / tool_choice
 reasoning_effort（low / medium / xhigh）
 chat_template_kwargs（enable_thinking / preserve_thinking）
 ```
+
+`stop` は非空文字列または 1〜4 個の非空文字列の配列を受理する。最初に一致した文字列より前の `content` を返し、生成を cancel して `finish_reason="stop"` とする。stream では一致しうる末尾を保留する。`reasoning_content` と tool call の markup・引数には適用せず、tool call の前後をまたぐ一致も扱わない。stop の一致時の `completion_tokens` は一致までにサーバが受信した生成 token 数であり、非表示の stop や reasoning を含む。cancel 前に compute が先行生成した token は含まれない場合がある。prefix cache の hit 数は cancel 時には返らない。
 
 `top_k` / `min_p` は Shelf extension である。指定がない値の既定は
 `temperature=0`（greedy）/ `top_p=1.0` / `min_p=0.0` / `top_k=0` / `seed=0` である。
@@ -524,7 +526,7 @@ request の KV / GDN / token stream には影響しない。
 
 以下および未知のトップレベルキーは HTTP 400（`code=unsupported_parameter`）で拒否する。上記の明示的に無視するキー以外は silent ignore しない。
 
-`stop`、非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。
+非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。
 
 ```text
 response_format

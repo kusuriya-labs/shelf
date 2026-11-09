@@ -226,6 +226,26 @@ class ChatService:
 
     async def complete(self, request: ChatRequest) -> AssistantResult:
         prepared = self.prepare(request)
+        if request.stop:
+            content, reasoning_parts, calls = [], [], []
+            done = None
+            async for event in self.stream(request, prepared):
+                if isinstance(event, ContentDelta):
+                    content.append(event.text)
+                elif isinstance(event, ReasoningDelta):
+                    reasoning_parts.append(event.text)
+                elif isinstance(event, ToolCallDelta):
+                    calls.append({"type": "function", "function": {
+                        "name": event.name, "arguments": event.arguments}})
+                elif isinstance(event, StreamDone):
+                    done = event
+            if done is None:
+                raise ChatServiceError("compute ended without a done event", code="compute_error")
+            return AssistantResult(
+                content="".join(content), tool_calls=calls,
+                finish_reason=done.finish_reason, prompt_tokens=done.prompt_tokens,
+                completion_tokens=done.completion_tokens, cached_tokens=done.cached_tokens,
+                reasoning_content="".join(reasoning_parts))
 
         done = await self._generate(prepared, request)
 
@@ -304,12 +324,38 @@ class ChatService:
 
     async def _stream_impl(self, prepared: PreparedChat,
                            request: ChatRequest) -> AsyncIterator[Any]:
-        if prepared.tools:
-            async for event in self._stream_tools(prepared, request):
-                yield event
-        else:
-            async for event in self._stream_text(prepared, request):
-                yield event
+        tracker = {"tokens": 0}
+        inner = (self._stream_tools(prepared, request, tracker) if prepared.tools
+                 else self._stream_text(prepared, request, tracker))
+        pending = ""
+        try:
+            async for event in inner:
+                if isinstance(event, ContentDelta) and request.stop:
+                    pending += event.text
+                    matches = [pending.find(stop) for stop in request.stop]
+                    matches = [position for position in matches if position >= 0]
+                    if matches:
+                        prefix = pending[:min(matches)]
+                        await inner.aclose()
+                        if prefix:
+                            yield ContentDelta(prefix)
+                        yield StreamDone("stop", prompt_tokens=len(prepared.prompt_ids),
+                                         completion_tokens=tracker["tokens"])
+                        return
+                    hold = max((size for stop in request.stop
+                                for size in range(1, min(len(stop) - 1, len(pending)) + 1)
+                                if pending.endswith(stop[:size])), default=0)
+                    ready = pending[:-hold] if hold else pending
+                    pending = pending[-hold:] if hold else ""
+                    if ready:
+                        yield ContentDelta(ready)
+                else:
+                    if pending and isinstance(event, (ToolCallDelta, StreamDone)):
+                        yield ContentDelta(pending)
+                        pending = ""
+                    yield event
+        finally:
+            await inner.aclose()
 
     def _stream_open(self, prepared: PreparedChat, request: ChatRequest):
         return self._compute.generate_stream(
@@ -326,7 +372,7 @@ class ChatService:
         )
 
     async def _stream_text(self, prepared: PreparedChat,
-                           request: ChatRequest) -> AsyncIterator[Any]:
+                           request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
         regions = codec.new_region_parser(
             self._processor, thinking=prepared.enable_thinking)
         generated: list[int] = []
@@ -336,12 +382,14 @@ class ChatService:
             async for event in stream:
                 if "token_id" in event:
                     generated.append(int(event["token_id"]))
+                    tracker["tokens"] = len(generated)
                     for delta in regions.feed(generated[-1:]):
                         yield _region_event(delta)
                 elif "done" in event:
                     done = event["done"]
                     final_ids = [int(x) for x in done.get("generated_ids", generated)]
                     log_tokens(final_ids)
+                    tracker["tokens"] = len(final_ids)
                     for delta in self._region_tail(regions, generated, final_ids):
                         yield _region_event(delta)
                     yield StreamDone(map_finish_reason(
@@ -358,7 +406,7 @@ class ChatService:
             await stream.aclose()
 
     async def _stream_tools(self, prepared: PreparedChat,
-                            request: ChatRequest) -> AsyncIterator[Any]:
+                            request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
         regions = codec.new_region_parser(
             self._processor, thinking=prepared.enable_thinking)
         parser = codec.new_response_parser(self._processor)
@@ -371,6 +419,7 @@ class ChatService:
             async for event in stream:
                 if "token_id" in event:
                     generated.append(int(event["token_id"]))
+                    tracker["tokens"] = len(generated)
                     for delta in regions.feed(generated[-1:]):
                         for item in self._consume_region(delta, parser, state):
                             yield item
@@ -378,6 +427,7 @@ class ChatService:
                     done = event["done"]
                     final_ids = [int(x) for x in done.get("generated_ids", generated)]
                     log_tokens(final_ids)
+                    tracker["tokens"] = len(final_ids)
                     for delta in self._region_tail(regions, generated, final_ids):
                         for item in self._consume_region(delta, parser, state):
                             yield item

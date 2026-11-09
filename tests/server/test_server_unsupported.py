@@ -53,7 +53,6 @@ PLAIN_TOOL = {
 }
 
 REJECTED = [
-    ("stop", {"stop": "END"}, "stop"),
     ("frequency-penalty", {"frequency_penalty": 1}, "frequency_penalty"),
     ("presence-penalty", {"presence_penalty": -1}, "presence_penalty"),
     *[(key, {key: value}, key) for key, value in [
