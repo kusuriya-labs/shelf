@@ -1,6 +1,8 @@
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
+#include <shelf/models/qwen35/runtime/spec_decode.h>
+#include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/runtime/executor.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <algorithm>
@@ -902,9 +904,40 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
                          st.message().c_str());
         }
     };
+    constexpr uint32_t kMaxShadowPrefixTokens = 1024u;
+    if (prefix_cache_ != nullptr && tp_batch_hook_ == nullptr &&
+        request.restored_tokens == 0u && last_boundary > 0u && last_boundary < prompt_count &&
+        last_boundary <= kMaxShadowPrefixTokens) {
+        for (DFlash2GdnRankState& rank : session.decoder->gdn_ranks) {
+            auto scope = shelf::gpu::ScopedDevice::create(rank.device);
+            if (!scope.ok()) return scope.status();
+            Status st = spec_gdn_snapshot(*rank.pool, request.sequence.slot, rank.conv_snapshot,
+                                          rank.rec_snapshot, rank.conv_bytes, rank.rec_bytes,
+                                          rank.stream);
+            if (!st.ok()) return st;
+        }
+        auto boundary = dflash2_spec_prefill(*session.decoder, request.input_tokens.data(),
+                                             last_boundary, 0u, 0u, save_input_boundary);
+        if (!boundary.ok()) return boundary.status();
+        for (DFlash2GdnRankState& rank : session.decoder->gdn_ranks) {
+            auto scope = shelf::gpu::ScopedDevice::create(rank.device);
+            if (!scope.ok()) return scope.status();
+            Status st = spec_gdn_restore(*rank.pool, request.sequence.slot, rank.conv_snapshot,
+                                         rank.rec_snapshot, rank.conv_bytes, rank.rec_bytes,
+                                         rank.stream);
+            if (!st.ok()) return st;
+        }
+        request.sequence.position = 0u;
+        Status rollback = rollback_sequence_append(request.sequence, 0u, stream_);
+        if (!rollback.ok()) return rollback;
+        Status reset = dflash2::dflash2_context_reset(*session.context, 0u);
+        if (!reset.ok()) return reset;
+        session.decoder->token_history.clear();
+        session.decoder->sample_index = 0u;
+    }
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(), prompt_count,
-        request.restored_tokens, page_tokens, save_input_boundary);
+        request.restored_tokens, 0u, save_input_boundary);
     request.prefill_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - prefill_started)
                               .count();

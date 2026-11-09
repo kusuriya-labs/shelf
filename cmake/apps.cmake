@@ -63,6 +63,7 @@ if(SHELF_BUILD_BENCHMARKS)
         src/apps/bench/quality.hip
         src/apps/bench/batch.hip
         src/apps/bench/gemm.hip
+        src/apps/bench/exl3_int8.hip
         src/apps/bench/activation_quantize.hip
         src/apps/bench/rmsnorm.hip
         src/apps/bench/l2_normalize.hip

@@ -109,6 +109,11 @@ KV のコピーも shadow pool も作らない。cache は KV pool の全 page �
 Qwen3.8-27B / TP=2 / DFlash2 ではこの予約は約 0.45 GiB/rank である。
 起動時に compute の stderr に出る `MEMORY_PLAN tp prefix cache` で確認する。
 
+DFlash2 の単一 GPU 実行では、cache miss の非整列 prompt に対し、入力の prefix を
+保存するため追加の prefill を行う場合がある。その場合は最初の token までの時間と
+一時 KV 使用量が増える。境界が 1024 token を超える場合、prefix hit の場合、または
+TP の場合はこの追加保存を行わず、自然な prefill 終端が page 境界と重なったときに保存する。
+
 ## 推論予算
 
 request 1 個あたりの生成予算（推論予算）は `--inference-budget-tokens`（default 32768）である。

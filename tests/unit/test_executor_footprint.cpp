@@ -94,6 +94,18 @@ int main() {
     exl3_shape.max_k = 5120u;
     exl3_shape.max_out_features = 17408u;
     exl3_shape.max_dense_bytes = 5120ull * 17408ull * 2ull;
+    shelf::weights::MatrixWeight head;
+    head.encoding = shelf::weights::MatrixEncoding::Exl3;
+    head.quant_spec = shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    head.rows = 248320u;
+    head.cols = 5120u;
+    shelf::weights::note_exl3_int8_decode_accum(head, exl3_shape);
+    check(exl3_shape.max_int8_decode_accum_bytes == 16ull * 5u * 248320u * sizeof(float),
+          "EXL3 INT8 decode scratch covers every split for sixteen head rows");
+    check(shelf::qwen35::runtime::exl3_workspace_bytes(16u, exl3_shape).accum >=
+              exl3_shape.max_int8_decode_accum_bytes,
+          "EXL3 workspace preserves the decode split capacity");
+    exl3_shape.max_int8_decode_accum_bytes = 0u;
     ExecutorConfig shaped_config = exec_config(4096u, 4u, 0u);
     shaped_config.exl3_linear_shape = exl3_shape;
     const std::size_t exl3_shaped = qwen35_executor_reserve_bytes(

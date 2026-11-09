@@ -230,10 +230,12 @@ class ComputeHarness:
                  working_set_reserve_gib: int | None = None,
                  tp: int = 1,
                  devices: str | None = None,
-                 auto_arena: bool = False):
+                 auto_arena: bool = False,
+                 prefix_cache_enabled: bool = True):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
+        self.prefix_cache_enabled = prefix_cache_enabled
         self.max_seq_len = max_seq_len
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
@@ -270,6 +272,8 @@ class ComputeHarness:
         ]
         if not self.auto_arena:
             argv += ["--arena-gib", str(arena_gib)]
+        if not self.prefix_cache_enabled:
+            argv += ["--prefix-cache", "0"]
         if self.tp > 1:
             argv += ["--tensor-parallel", str(self.tp)]
         reserve = _test_working_set_reserve_gib(self.working_set_reserve_gib)

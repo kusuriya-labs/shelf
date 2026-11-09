@@ -800,7 +800,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             if (herr == hipErrorNotSupported) herr = hipSuccess;
         }
         if (!done && herr == hipSuccess) {
-            const uint32_t splits = ::shelf::kernel::exl3_int8_gemm_splits(n_rows, n, k, scratch_rows);
+            const uint32_t splits = ::shelf::kernel::exl3_int8_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
             herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
             if (herr == hipSuccess)

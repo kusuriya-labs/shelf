@@ -11,6 +11,7 @@ E2E:
 Linear:
   activation-quantize A8 activation quantization micro-benchmark
   gemm               linear GEMV/GEMM micro-benchmark
+  exl3-int8          EXL3-INT8 decode linear micro-benchmark
 
 Normalization:
   rmsnorm            RMSNorm micro-benchmark
@@ -282,3 +283,18 @@ greedy argmax sampling。
 ./build/shelf-bench gemm --check --rows 1,16,128
 ./build/shelf-bench gemm --dtype fp8 --variant auto --actual-qwen-shapes --model-dir models/Qwen3.8-27B-FP8 --out gemm.csv
 ```
+
+## exl3-int8
+
+`rows <= 16` の EXL3-INT8 の入力回転・GEMM・出力回転と連結時間を GPU event で測る。
+重みは合成データで、`--working-mib` 以上になるよう複数コピーを巡回する。
+各値は warmup の後に取得した 5 回の中央値で、`min` と `max` はその範囲である。
+`weight_GBps` は trellis のバイト数を時間で割った値で、実際の DRAM 転送量ではない。
+
+```sh
+./build/shelf-bench exl3-int8 --n 17408 --k 5120 --rows 8 --bits 4 --working-mib 256
+```
+
+`--split` を省略すると `--scratch-rows` で指定した容量を使って本番の分割数を選ぶ。
+容量が実モデルと異なれば選択結果も異なる。GPU の分離と比較手順は
+[計測方法](../perf/methodology.md) を参照。
