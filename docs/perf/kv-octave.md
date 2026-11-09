@@ -55,6 +55,14 @@ scalar code 復号と LUT、query head ごとの online softmax、1024-thread wo
 支配する。256-thread と split 64 の候補は 32768 c4v4 が 15.73 tok/s で、split 16 と
 4 token lane の 15.86 tok/s を上回らず run 内の外れ値も出たため採用しなかった。
 
+## HIP graph
+
+`SHELF_HIP_GRAPH=ON` build で c4v4、context 2048、warmup 5 token 後の 5 token を
+測定した。非 graph は 26.15 tok/s、graph replay は 27.44 tok/s で 4.9% 改善した。
+生成 10 token の ID と合計は一致した。graph debug では decode graph が 2223 node で
+capture され、以後 replay された。Octave append、split attention、reduce は capture 中に
+割り当てや host 同期を行わず、position、visible length、block table を device 配列から読む。
+
 ## Prefill
 
 単位は token/s の p50 である。Octave は対象 layer の cache を BF16 scratch へ展開して

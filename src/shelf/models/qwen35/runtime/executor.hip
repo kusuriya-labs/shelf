@@ -1853,11 +1853,6 @@ Result<Executor> create_executor(
         }
     }
     if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
-#ifdef SHELF_HIP_GRAPH
-        return Status::unsupported(
-            "Octave KV cache is not supported by SHELF_HIP_GRAPH builds",
-            __FILE__, __LINE__);
-#endif
         if (!::shelf::kernel::octave_format_valid(kv_pool.octave_format()) ||
             kv_pool.head_dim() != 256u || kv_pool.octave_levels().dim(0) != 7u * 64u) {
             return Status::invalid_state(

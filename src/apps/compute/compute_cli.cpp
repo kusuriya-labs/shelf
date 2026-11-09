@@ -420,12 +420,6 @@ int validate_compute_options(const ComputeOptions& opt) {
                 "Octave KV cache currently requires TP=1, PP=1, MTP disabled and DFlash2 disabled\n");
         return kComputeParseError;
     }
-#ifdef SHELF_HIP_GRAPH
-    if (octave) {
-        fprintf(stderr, "Octave KV cache is not supported by SHELF_HIP_GRAPH builds\n");
-        return kComputeParseError;
-    }
-#endif
     if (dflash_enabled) {
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
