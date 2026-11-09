@@ -1,7 +1,7 @@
 # shelf-server
 
 OpenAI互換のchat servingアプリ。model directoryを指定して起動すると、
-`/v1` 配下でOpenAI Chat Completions APIのsubsetを提供する。
+`/v1` 配下で OpenAI Chat Completions API と Responses API の subset を提供する。
 
 ```bash
 ./build/shelf-server \
@@ -20,8 +20,9 @@ http://127.0.0.1:8000/v1
 * `GET /v1/models`
 * `GET /v1/meta`
 * `POST /v1/chat/completions`（非stream / stream）
+* `POST /v1/responses`（非stream / stream）
 
-embeddings、vision、audio、Responses API、認証、TLS、複数modelは対象外。
+embeddings、vision、audio、認証、TLS、複数modelは対象外。
 
 依存は Python / `aiohttp` / `transformers==5.14.1` のみである。
 LocalAI・gRPC・protobuf・XGrammar は要らない。
@@ -54,8 +55,8 @@ Inference budget: 32768 tokens (thinking 24576, answer reserve 8192)
 Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
 Efforts:      low, medium, xhigh
 
-Supported:   Chat Completions, SSE, tools, reasoning, sampling, concurrency, cancel
-Unsupported: Responses, structured output, strict tools, reasoning object
+Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
+Unsupported: structured output, strict tools, reasoning object
 
 Ready.
 ```
@@ -518,9 +519,43 @@ stream client が connection を切断すると、in-flight generation は cance
 （`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight
 request の KV / GDN / token stream には影響しない。
 
+## Responses API
+
+`POST /v1/responses` はテキストと function calling に対応し、`stream: true` では
+イベント名と sequence number を含む SSE を返す。`input` は文字列、または
+`message`（user / assistant / system / developer）、`function_call`、
+`function_call_output`、`reasoning` の item 配列である。message の content は
+文字列または `input_text` / `output_text` の配列とし、`instructions` は system
+message として扱う。tool は `type: function`、`name`、`description`、
+`parameters` を同じ object に置く。tool の実行と結果の再送はクライアントが行う。
+
+`max_output_tokens`、`temperature`、`top_p`、`seed`、`reasoning.effort`
+（`low` / `medium` / `xhigh`）、`tool_choice`（`auto` / `none`）、
+`parallel_tool_calls: true`、`truncation: disabled`、空の `include` を受け付ける。
+`store`、`metadata`、`user` は受理するが使用しない。`store: true` でも保存せず、
+履歴はリクエストごとに送る。usage の `input_tokens_details.cached_tokens` は
+compute の prefix cache の復元数である。非 stream の `output_tokens_details` は
+reasoning token 数を含む。stream では reasoning token 数を取得できない。
+
+`previous_response_id`、`conversation`、画像・音声・ファイル、hosted tool、
+`strict: true`、`text.format` の JSON schema、`parallel_tool_calls: false`、
+`truncation: auto`、空でない `include`、未対応の項目は HTTP 400 で拒否する。
+`GET /v1/responses` と保存済み response の取得には対応しない。
+
+OpenAI Python SDK の例（認証は行わないため API key は任意の値）:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+for event in client.responses.create(model="shelf", input="こんにちは", stream=True):
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
+```
+
 ## サポート外の API
 
-以下は明示的に HTTP 400（`code=unsupported_parameter`）で拒否する。silent ignore はしない。
+Chat Completions の以下の項目は明示的に HTTP 400（`code=unsupported_parameter`）で拒否する。silent ignore はしない。
 
 ```text
 response_format
@@ -535,7 +570,6 @@ n != 1 / logit_bias / logprobs
 以下は route 自体を持たない。
 
 ```text
-POST /v1/responses   -> HTTP 404 {"error": {"code": "unsupported_endpoint"}}
 その他の未登録 path -> HTTP 404 {"error": {"code": "not_found"}}
 ```
 
@@ -598,7 +632,13 @@ stream 応答に usage チャンクが載っていればそのまま表示され
 `SHELF_API_KEY` は任意の dummy 値でよい（Shelf は認証を行わない）。
 model は `shelf/shelf` を選ぶ。
 
-Codex CLI は Responses API を使うため対象外である。
+### Codex CLI
+
+[公式設定](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)に
+従い `model_provider`、`base_url`、`wire_api = "responses"` を設定できる。
+ただし現行 Codex CLI は `web_search` や `namespace`、
+`include: ["reasoning.encrypted_content"]` など本サーバが拒否する項目を送るため、
+現状は接続して会話を完了できない。これらを要求しない Responses クライアントを使う。
 
 ### DeepSeek Harness
 
