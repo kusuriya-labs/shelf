@@ -227,6 +227,21 @@ MEMORY_PLAN mode=auto tp=2 arena=xx.xx GiB used=xx.xx GiB available=xx.xx GiB
 行容量（`min(max_num_batched_tokens, 最上位 row bucket)` から導出）である。
 旧 `max_scheduled_tokens` は両方の意味で使われていたため廃止した。
 
+`shelf-compute --serve-stdio` の `--max-num-batched-tokens` は既定 2048、指定範囲は
+16〜8192 である。単発実行ではこの値を使わず、通常は prompt 長 + 1 を最低 16 行にし、
+MTP ではさらに draft 数 + 1 以上にする。DFlash2 では prompt 長と draft block の大きい方を
+2048 以下に収めた行数を使う。どちらも executor の
+上限は 8192 行である。行容量を増やすと executor の作業領域が増え、同じ arena を共有する
+KV pool の予算が減る。
+`shelf-bench pp` の既定 chunk は prompt 全体だが、prompt が 8192 を超える場合は
+8192 に分割する。明示指定は prompt 長に切り詰められるが、実際の batch は 8192 行を
+超えられない。pp の executor 行容量は chunk 指定ではなく prompt 長から最大 8192 行で
+決まるため、chunk を小さくしても executor の予約量は小さくならない。
+pp は rank 0 の `execution_workspace_bytes`、`rank0_arena_used_bytes`、
+`rank0_arena_committed_bytes` と `kv_reserved_bytes` を表示する。arena の使用量には
+weight や KV も含まれる。committed は arena の物理確保量であり、外部ライブラリを含む
+GPU 全体のピーク使用量ではない。
+
 `schedule_requests(span<const RuntimeRequest*>, max_num_batched_tokens,
 max_scheduled_requests, page_tokens, KVBankerState*)` はfree function
 （`runtime/token_budget_scheduler.h`）。token budgetとKV capacityの制約下で

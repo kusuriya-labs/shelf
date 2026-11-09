@@ -4,6 +4,7 @@
 
 - [current.md](current.md) — 現在再現可能な performance baseline（未計測の場合はその状態を書く）
 - [methodology.md](methodology.md) — 今後も使う測定原則
+- [prefill-chunk-reference.md](prefill-chunk-reference.md) — prefill chunk の参考測定
 
 ## ルール
 
