@@ -30,9 +30,9 @@ fp32 蓄積、専用 reduce と V 出力の逆回転を行う。
 
 | context | BF16 | FP8 | c4v4 | c5v5 | b4n3v3 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2048 | 26.99 | 27.16 | 26.08 | 26.01 | 25.83 |
-| 8192 | 26.45 | 26.34 | 23.22 | 22.92 | 22.93 |
-| 32768 | 23.51 | 23.40 | 16.04 | 15.66 | 15.90 |
+| 2048 | 27.18 | 27.01 | 27.02 | 27.08 | 27.10 |
+| 8192 | 26.28 | 26.31 | 26.40 | 26.53 | 26.55 |
+| 32768 | 23.60 | 23.40 | 24.43 | 24.26 | 24.17 |
 
 融合 kernel は 1 workgroup を 1 KV head と 4 token lane に割り当てる。K/V の unpack と
 LUT 参照を 6 query head で共有し、6 本の score dot は 6 wave で同時に計算する。
@@ -50,15 +50,23 @@ bit-plane の 32 bit word は wave shuffle で同じ field group 内に配る。
 | 32768 | c5v5 | 8.74 | 15.66 | 1.792 | 0.669 |
 | 32768 | b4n3v3 | 9.60 | 15.90 | 1.656 | 0.679 |
 
-2048 は FP8 比 0.95 以上だが 8192 と 32768 は未達である。残る差は token 数に比例し、
+旧 scalar 融合 kernel は 2048 が FP8 比 0.95 以上だが 8192 と 32768 は未達だった。
+残る差は token 数に比例し、
 scalar code 復号と LUT、query head ごとの online softmax、1024-thread workgroup の barrier が
 支配する。256-thread と split 64 の候補は 32768 c4v4 が 15.73 tok/s で、split 16 と
 4 token lane の 15.86 tok/s を上回らず run 内の外れ値も出たため採用しなかった。
 
+gfx12 WMMA 再実装後は 256-thread、32-token tile とし、QK の 4 個の 64 次元 segment を
+4 wave、PV の 4 個の 64 次元出力を別の 4 wave へ割り当てた。4 code を 1 回の
+`v_perm_b32` で signed int8 codebook 値へ復号し、fp16 WMMA/fp32 accumulator で計算する。
+新値の FP8 比は c4v4 が 100.0% / 100.3% / 104.4%、c5v5 が
+100.3% / 100.8% / 103.7%、b4n3v3 が 100.3% / 100.9% / 103.3% であり、
+2048 / 8192 / 32768 の全条件で 95% gate を満たした。
+
 ## HIP graph
 
-`SHELF_HIP_GRAPH=ON` build で c4v4、context 2048、warmup 5 token 後の 5 token を
-測定した。非 graph は 26.15 tok/s、graph replay は 27.44 tok/s で 4.9% 改善した。
+`SHELF_HIP_GRAPH=ON` build で c4v4、context 2048、warmup 2 token 後の 5 token を
+測定した。graph replay の p50 は 28.56 tok/s だった。
 生成 10 token の ID と合計は一致した。graph debug では decode graph が 2223 node で
 capture され、以後 replay された。Octave append、split attention、reduce は capture 中に
 割り当てや host 同期を行わず、position、visible length、block table を device 配列から読む。
@@ -107,6 +115,11 @@ single-shot の 64 token も target-only と一致した。
 | c4v4 | 30.09 | 12.32 |
 | c5v5 | 29.72 | 10.22 |
 
+packed-direct prefill 後の c4v4 再測定は TTFT 52.05 s、decode 35.12 tok/s だった。
+decode は改善した一方、TTFT は旧 M2 の 30.09 s と FP8 の 23.62 s の双方より悪化した。
+長い context で GQA 6 head が同じ page の unpack と inverse WHT を繰り返すことが原因で、
+R2 の 95% prefill gate は未達である。
+
 c4v4 の concurrent 2、3、4 request は stream/done 整合、完走、同じ concurrent shape の
 再実行一致を確認した。4 request の人工 prompt の 1 本は単独実行と 11 token 目以降が
 分岐した。同じ mixed batch では再現し、resource ownership の破綻は無い。verify row shape
@@ -132,12 +145,16 @@ prefill ではこの重複計算が新しい律速である。
 
 ## 正しさと制約
 
-M3 fused kernel と M2 BF16 scratch reference の最大絶対差は、rows=1 c4v4 が
-0.001774、rows=4 b4n3v3 が 0.002820 だった。追加した rows=8 c5v5、rows=32
-b4n3v3、tree visibility c4v4 はそれぞれ 0.001934、0.002768、0.003710 だった。
+gfx12 WMMA kernel と M2 BF16 scratch reference の最大絶対差は、rows=1 c4v4 が
+0.006647、rows=4 b4n3v3 が 0.010037 だった。追加した rows=8 c5v5、rows=32
+b4n3v3、tree visibility c4v4 はそれぞれ 0.009135、0.012936、0.011914 だった。
 
 c4v4 の `s2k_0`〜`s2k_2` quality KL は 0.002136、0.006197、0.007421、平均
 0.005251 だった。M2 実 cache の既存平均 0.005331 に対して -1.49% である。
+
+int8 codebook/fp16 WMMA decode の再測定は 0.002142、0.006791、0.007433、平均
+0.005455 で、旧 fused kernel 平均に対して +3.9% と ±5% gate 内だった。packed-direct
+prefill を含む `s2k_0` の再測定は 0.001995 だった。
 
 prefill の current chunk を量子化前の K/V から直接読む A mode は見送った。現在の
 primitive graph は KV append と paged attention を別 dispatch とし、attention binding に
