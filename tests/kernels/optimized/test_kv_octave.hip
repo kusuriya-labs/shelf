@@ -343,6 +343,165 @@ double normalized_mse(uint32_t bits, const std::vector<float>& levels) {
     return error / reference;
 }
 
+void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
+                          const char* name, const std::vector<float>& levels) {
+    constexpr uint32_t tokens = 64u;
+    constexpr uint32_t kv_heads = 4u;
+    constexpr uint32_t q_heads = 24u;
+    constexpr uint32_t page_tokens = 16u;
+    constexpr uint32_t pages = 4u;
+    constexpr uint32_t head_dim = 256u;
+    constexpr uint32_t kv_features = kv_heads * head_dim;
+    constexpr uint32_t q_features = q_heads * head_dim;
+    std::vector<shelf::bf16_t> k(static_cast<std::size_t>(tokens) * kv_features);
+    std::vector<shelf::bf16_t> v(k.size());
+    for (std::size_t i = 0u; i < k.size(); ++i) {
+        k[i].data = shelf::f32_to_bf16_rne(
+            std::sin(static_cast<float>(i) * 0.013f) * 1.5f);
+        v[i].data = shelf::f32_to_bf16_rne(
+            std::cos(static_cast<float>(i) * 0.017f) * 1.3f);
+    }
+    std::vector<shelf::bf16_t> q(static_cast<std::size_t>(query_rows) * q_features);
+    for (std::size_t i = 0u; i < q.size(); ++i)
+        q[i].data = shelf::f32_to_bf16_rne(
+            std::sin(static_cast<float>(i) * 0.021f) * 0.8f);
+    std::vector<uint32_t> append_slots(tokens, 0u), append_positions(tokens);
+    for (uint32_t i = 0u; i < tokens; ++i) append_positions[i] = i;
+    std::vector<uint32_t> table = {0u, 1u, 2u, 3u};
+    std::vector<uint32_t> query_slots(query_rows, 0u), query_positions(query_rows);
+    for (uint32_t row = 0u; row < query_rows; ++row)
+        query_positions[row] = tokens - query_rows + row;
+
+    std::vector<void*> allocations;
+    auto allocate = [&](void** pointer, std::size_t bytes) {
+        if (!hip_ok(hipMalloc(pointer, bytes), name)) return false;
+        allocations.push_back(*pointer);
+        return true;
+    };
+    shelf::bf16_t* d_k = nullptr;
+    shelf::bf16_t* d_v = nullptr;
+    shelf::bf16_t* d_q = nullptr;
+    uint8_t* d_k_pool = nullptr;
+    uint8_t* d_v_pool = nullptr;
+    shelf::bf16_t* d_k_scratch = nullptr;
+    shelf::bf16_t* d_v_scratch = nullptr;
+    float* d_levels = nullptr;
+    uint32_t* d_append_slots = nullptr;
+    uint32_t* d_append_positions = nullptr;
+    uint32_t* d_query_slots = nullptr;
+    uint32_t* d_query_positions = nullptr;
+    uint32_t* d_table = nullptr;
+    float* d_reference = nullptr;
+    float* d_fused = nullptr;
+    float* d_partials = nullptr;
+    const std::size_t vectors = static_cast<std::size_t>(tokens) * kv_heads;
+    const std::size_t scratch_elems = vectors * head_dim;
+    const uint32_t splits = 4u;
+    const std::size_t partial_elems = static_cast<std::size_t>(query_rows) *
+        kv_heads * splits * (q_heads / kv_heads) * 258u;
+    bool ok = allocate(reinterpret_cast<void**>(&d_k), k.size() * sizeof(shelf::bf16_t)) &&
+              allocate(reinterpret_cast<void**>(&d_v), v.size() * sizeof(shelf::bf16_t)) &&
+              allocate(reinterpret_cast<void**>(&d_q), q.size() * sizeof(shelf::bf16_t)) &&
+              allocate(reinterpret_cast<void**>(&d_k_pool), vectors * shelf::kernel::octave_k_slot_bytes(format)) &&
+              allocate(reinterpret_cast<void**>(&d_v_pool), vectors * shelf::kernel::octave_v_slot_bytes(format)) &&
+              allocate(reinterpret_cast<void**>(&d_k_scratch), scratch_elems * sizeof(shelf::bf16_t)) &&
+              allocate(reinterpret_cast<void**>(&d_v_scratch), scratch_elems * sizeof(shelf::bf16_t)) &&
+              allocate(reinterpret_cast<void**>(&d_levels), levels.size() * sizeof(float)) &&
+              allocate(reinterpret_cast<void**>(&d_append_slots), tokens * sizeof(uint32_t)) &&
+              allocate(reinterpret_cast<void**>(&d_append_positions), tokens * sizeof(uint32_t)) &&
+              allocate(reinterpret_cast<void**>(&d_query_slots), query_rows * sizeof(uint32_t)) &&
+              allocate(reinterpret_cast<void**>(&d_query_positions), query_rows * sizeof(uint32_t)) &&
+              allocate(reinterpret_cast<void**>(&d_table), table.size() * sizeof(uint32_t)) &&
+              allocate(reinterpret_cast<void**>(&d_reference), q.size() * sizeof(float)) &&
+              allocate(reinterpret_cast<void**>(&d_fused), q.size() * sizeof(float)) &&
+              allocate(reinterpret_cast<void**>(&d_partials), partial_elems * sizeof(float));
+    if (ok) {
+        ok = hip_ok(hipMemcpy(d_k, k.data(), k.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_v, v.data(), v.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_q, q.data(), q.size() * sizeof(shelf::bf16_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_levels, levels.data(), levels.size() * sizeof(float), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_append_slots, append_slots.data(), tokens * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_append_positions, append_positions.data(), tokens * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_query_slots, query_slots.data(), query_rows * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_query_positions, query_positions.data(), query_rows * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
+             hip_ok(hipMemcpy(d_table, table.data(), table.size() * sizeof(uint32_t), hipMemcpyHostToDevice), name);
+    }
+    shelf::kernel::KvAppendCommonArgs append{};
+    append.k_input = d_k;
+    append.v_input = d_v;
+    append.k_row_stride = kv_features;
+    append.v_row_stride = kv_features;
+    append.row_sequence_slots = d_append_slots;
+    append.row_positions = d_append_positions;
+    append.block_tables = d_table;
+    append.block_table_stride = pages;
+    append.max_sequences = 1u;
+    append.rows = tokens;
+    append.page_tokens = page_tokens;
+    append.num_pages = pages;
+    append.num_attention_layers = 1u;
+    append.kv_heads = kv_heads;
+    append.head_dim = head_dim;
+    append.elems_per_token = kv_features;
+    append.elems_per_page = page_tokens * kv_features;
+    append.elems_per_layer = pages * append.elems_per_page;
+    if (ok) {
+        ok = hip_ok(shelf::kernel::launch_kv_append_octave(
+                        append, d_k_pool, d_v_pool, d_levels, format, nullptr), name) &&
+             hip_ok(shelf::kernel::launch_octave_kv_dequant(
+                        d_k_pool, d_v_pool, d_levels, d_k_scratch, d_v_scratch,
+                        format, 0u, pages, page_tokens, kv_heads, nullptr), name);
+    }
+    shelf::kernel::PagedAttentionCommonArgs attention{};
+    attention.q = d_q;
+    attention.output = d_reference;
+    attention.output_dtype = shelf::kernel::PagedAttentionOutputDType::F32;
+    attention.q_row_stride = q_features;
+    attention.output_row_stride = q_features;
+    attention.row_sequence_slots = d_query_slots;
+    attention.row_positions = d_query_positions;
+    attention.block_tables = d_table;
+    attention.block_table_stride = pages;
+    attention.max_sequences = 1u;
+    attention.rows = query_rows;
+    attention.page_tokens = page_tokens;
+    attention.num_pages = pages;
+    attention.num_attention_layers = 1u;
+    attention.q_heads = q_heads;
+    attention.kv_heads = kv_heads;
+    attention.head_dim = head_dim;
+    attention.elems_per_token = kv_features;
+    attention.elems_per_page = page_tokens * kv_features;
+    attention.elems_per_layer = pages * attention.elems_per_page;
+    attention.scale = 0.0625f;
+    if (ok) {
+        ok = hip_ok(shelf::kernel::launch_attention_paged_bf16(
+                        attention, d_k_scratch, d_v_scratch, nullptr), name);
+        attention.output = d_fused;
+        ok = ok && hip_ok(shelf::kernel::launch_attention_paged_octave_split(
+                              attention, d_k_pool, d_v_pool, d_levels, format,
+                              d_partials, splits, nullptr), name) &&
+             hip_ok(shelf::kernel::launch_attention_paged_octave_reduce(
+                        attention, d_partials, splits, nullptr), name) &&
+             hip_ok(hipDeviceSynchronize(), name);
+    }
+    std::vector<float> reference(q.size()), fused(q.size());
+    if (ok) {
+        ok = hip_ok(hipMemcpy(reference.data(), d_reference,
+                              reference.size() * sizeof(float), hipMemcpyDeviceToHost), name) &&
+             hip_ok(hipMemcpy(fused.data(), d_fused,
+                              fused.size() * sizeof(float), hipMemcpyDeviceToHost), name);
+    }
+    if (ok) {
+        float maximum = 0.0f;
+        for (std::size_t i = 0u; i < reference.size(); ++i)
+            maximum = std::max(maximum, std::fabs(reference[i] - fused[i]));
+        std::printf("%s max_abs=%.7f\n", name, maximum);
+        check(maximum < 0.025f, name);
+    }
+    for (void* pointer : allocations) hipFree(pointer);
+}
+
 }  // namespace
 
 int main() {
@@ -353,6 +512,10 @@ int main() {
     run_gpu_case({OctaveKMode::Compact, 6u, 6u, 6u}, "Octave c6v6", levels);
     run_gpu_case({OctaveKMode::Block, 4u, 3u, 3u}, "Octave b4n3v3", levels);
     run_gpu_case({OctaveKMode::Block, 4u, 3u, 4u}, "Octave b4n3v4", levels);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 1u,
+                         "Octave decode parity", levels);
+    run_attention_parity({OctaveKMode::Block, 4u, 3u, 3u}, 4u,
+                         "Octave verify parity", levels);
 
     const double mse3 = normalized_mse(3u, levels);
     const double mse4 = normalized_mse(4u, levels);

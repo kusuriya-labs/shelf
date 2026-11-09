@@ -285,6 +285,21 @@ PagedAttentionPlan plan_paged_attention(
         return plan;
     }
     if (!plan.use_prefill
+        && args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE
+        && args.common.tree_anc_offsets == nullptr
+        && ctx.decode_attn_partials != nullptr
+        && args.common.q_heads % args.common.kv_heads == 0u) {
+        const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
+        const uint32_t s = 16u;
+        const uint64_t need =
+            static_cast<uint64_t>(args.common.rows) * args.common.kv_heads * s
+            * q_per_kv * (2u + ::shelf::kernel::kPagedAttentionHeadLimit) * 4u;
+        if (need <= ctx.decode_attn_partial_bytes) {
+            plan.splits = s;
+            return plan;
+        }
+    }
+    if (!plan.use_prefill
         && args.common.tree_anc_offsets == nullptr
         && ctx.decode_attn_partials != nullptr
         && ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible
@@ -398,12 +413,61 @@ void fill_prefill_pools(const PagedAttentionResolvedArgs& a,
     }
 }
 
+PhysicalResolveStatus append_octave_dequant(
+    const PagedAttentionResolvedArgs& a, PhysicalPagedAttentionPlan& out) {
+    if (out.physical_count >= kPhysicalPagedAttentionMaxKernels)
+        return PhysicalResolveStatus::NotApplicable;
+    PhysicalPagedAttentionKernel& dequant = out.kernels[out.physical_count++];
+    dequant.variant = PhysicalPagedAttentionVariant::OctaveDequant;
+    dequant.common = a.common;
+    dequant.k_pool = reinterpret_cast<uint64_t>(a.k_octave_pool);
+    dequant.v_pool = reinterpret_cast<uint64_t>(a.v_octave_pool);
+    dequant.k_scale_pool = reinterpret_cast<uint64_t>(a.k_octave_scratch);
+    dequant.v_scale_pool = reinterpret_cast<uint64_t>(a.v_octave_scratch);
+    dequant.k_extra_pool = reinterpret_cast<uint64_t>(a.octave_levels);
+    dequant.source_layer = a.octave_source_layer;
+    dequant.octave_format = a.octave_format;
+    dequant.grid = a.common.num_pages * a.common.page_tokens * a.common.kv_heads;
+    dequant.workgroup = 256u;
+    return PhysicalResolveStatus::Applicable;
+}
+
 PhysicalResolveStatus append_decode_region(
     const PagedAttentionResolvedArgs& a,
     const ::shelf::kernel::PagedAttentionCommonArgs& region,
     const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out, uint32_t splits) {
     if (splits > 1u && region.tree_anc_offsets != nullptr)
         splits = 1u;
+
+    if (a.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
+        if (ctx.decode_attn_partials == nullptr ||
+            out.physical_count + 2u > kPhysicalPagedAttentionMaxKernels)
+            return PhysicalResolveStatus::NotApplicable;
+        const uint32_t q_per_kv = region.q_heads / region.kv_heads;
+        PhysicalPagedAttentionKernel& split = out.kernels[out.physical_count++];
+        split.variant = PhysicalPagedAttentionVariant::OctaveSplit;
+        split.common = region;
+        split.common.layer = a.octave_source_layer;
+        split.k_pool = reinterpret_cast<uint64_t>(a.k_octave_pool);
+        split.v_pool = reinterpret_cast<uint64_t>(a.v_octave_pool);
+        split.k_extra_pool = reinterpret_cast<uint64_t>(a.octave_levels);
+        split.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+        split.splits = splits;
+        split.q_per_kv = q_per_kv;
+        split.octave_format = a.octave_format;
+        split.grid = region.rows * region.q_heads * splits;
+        split.workgroup = 256u;
+        PhysicalPagedAttentionKernel& reduce = out.kernels[out.physical_count++];
+        reduce.variant = PhysicalPagedAttentionVariant::OctaveReduce;
+        reduce.common = region;
+        reduce.partials = reinterpret_cast<uint64_t>(ctx.decode_attn_partials);
+        reduce.splits = splits;
+        reduce.q_per_kv = q_per_kv;
+        reduce.octave_format = a.octave_format;
+        reduce.grid = region.rows * region.q_heads;
+        reduce.workgroup = 256u;
+        return PhysicalResolveStatus::Applicable;
+    }
 
     if (splits <= 1u) {
         if (out.physical_count >= kPhysicalPagedAttentionMaxKernels)
@@ -485,6 +549,9 @@ PhysicalResolveStatus append_prefill_region(
     const PagedAttentionResolvedArgs& a,
     const ::shelf::kernel::PagedAttentionCommonArgs& region,
     PhysicalPagedAttentionPlan& out) {
+    if (a.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE &&
+        append_octave_dequant(a, out) != PhysicalResolveStatus::Applicable)
+        return PhysicalResolveStatus::NotApplicable;
     if (out.physical_count >= kPhysicalPagedAttentionMaxKernels)
         return PhysicalResolveStatus::NotApplicable;
     PhysicalPagedAttentionKernel& k = out.kernels[out.physical_count++];
@@ -514,20 +581,6 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (!res.ok()) return res.status();
     const PagedAttentionResolvedArgs a = res.value();
     if (a.common.rows == 0u) return PhysicalResolveStatus::Skipped;
-    if (a.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
-        PhysicalPagedAttentionKernel& dequant = out.kernels[out.physical_count++];
-        dequant.variant = PhysicalPagedAttentionVariant::OctaveDequant;
-        dequant.common = a.common;
-        dequant.k_pool = reinterpret_cast<uint64_t>(a.k_octave_pool);
-        dequant.v_pool = reinterpret_cast<uint64_t>(a.v_octave_pool);
-        dequant.k_scale_pool = reinterpret_cast<uint64_t>(a.k_octave_scratch);
-        dequant.v_scale_pool = reinterpret_cast<uint64_t>(a.v_octave_scratch);
-        dequant.k_extra_pool = reinterpret_cast<uint64_t>(a.octave_levels);
-        dequant.source_layer = a.octave_source_layer;
-        dequant.octave_format = a.octave_format;
-        dequant.grid = a.common.num_pages * a.common.page_tokens * a.common.kv_heads;
-        dequant.workgroup = 256u;
-    }
 
     const auto* bc = ctx.batch_context;
     const bool static_plan = mode != PagedAttentionResolveMode::HostImmediate;
@@ -658,6 +711,19 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
                     reinterpret_cast<::shelf::bf16_t*>(k.v_scale_pool),
                     k.octave_format, k.source_layer, k.common.num_pages,
                     k.common.page_tokens, k.common.kv_heads, stream);
+                break;
+            case PhysicalPagedAttentionVariant::OctaveSplit:
+                herr = ::shelf::kernel::launch_attention_paged_octave_split(
+                    k.common, reinterpret_cast<const uint8_t*>(k.k_pool),
+                    reinterpret_cast<const uint8_t*>(k.v_pool),
+                    reinterpret_cast<const float*>(k.k_extra_pool),
+                    k.octave_format, reinterpret_cast<float*>(k.partials),
+                    k.splits, stream);
+                break;
+            case PhysicalPagedAttentionVariant::OctaveReduce:
+                herr = ::shelf::kernel::launch_attention_paged_octave_reduce(
+                    k.common, reinterpret_cast<const float*>(k.partials),
+                    k.splits, stream);
                 break;
             case PhysicalPagedAttentionVariant::Bf16FullHead:
             case PhysicalPagedAttentionVariant::Bf16PartialHead:

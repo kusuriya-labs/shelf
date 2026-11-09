@@ -282,4 +282,20 @@ hipError_t launch_octave_kv_dequant(
     uint32_t kv_heads,
     hipStream_t stream);
 
+hipError_t launch_attention_paged_octave_split(
+    const PagedAttentionCommonArgs& common,
+    const uint8_t* k_pool,
+    const uint8_t* v_pool,
+    const float* levels,
+    OctaveKVCacheFormat format,
+    float* partials,
+    uint32_t splits,
+    hipStream_t stream);
+
+hipError_t launch_attention_paged_octave_reduce(
+    const PagedAttentionCommonArgs& common,
+    const float* partials,
+    uint32_t splits,
+    hipStream_t stream);
+
 }  // namespace shelf::kernel

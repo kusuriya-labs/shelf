@@ -43,6 +43,7 @@ struct BenchOptions {
     std::string model_dir;
     int page_tokens = 16;
     std::string kv_cache_dtype = "bf16";
+    shelf::kernel::OctaveKVCacheFormat octave_format{};
     double arena_gib = 0.0;
     bool arena_auto = true;
     std::string output;
@@ -70,7 +71,7 @@ void print_usage(FILE* out) {
         "  --tensor-parallel N          tensor parallel degree 1 | 2 | 4 (default 1)\n"
         "  --model-dir PATH             (required)\n"
         "  --page-tokens N              (default 16)\n"
-        "  --kv-cache-dtype bf16|fp8   (default bf16)\n"
+        "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --arena-gib N                (default auto = free VRAM minus 0.5 GiB)\n"
         "  --output PATH                (default none)\n"
         "  --gap-keepalive US           (default 0 = off; keep the CP awake)\n"
@@ -208,8 +209,14 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             }
         } else if (key == "--kv-cache-dtype") {
             opts.kv_cache_dtype = need_value();
-            if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8") {
-                fprintf(stderr, "invalid --kv-cache-dtype: expected bf16|fp8\n");
+            if (opts.kv_cache_dtype != "bf16" && opts.kv_cache_dtype != "fp8" &&
+                !shelf::kernel::parse_octave_kv_cache_format(
+                    opts.kv_cache_dtype, opts.octave_format)) {
+                fprintf(stderr, "invalid --kv-cache-dtype\n");
+                return false;
+            }
+            if (opts.kv_cache_dtype.starts_with("octave") && opts.tp != 1) {
+                fprintf(stderr, "Octave KV cache requires tensor parallel 1\n");
                 return false;
             }
         } else if (key == "--arena-gib") {
@@ -468,11 +475,14 @@ int run_tg(int argc, char** argv) {
             std::make_unique<shelf::state::GdnStatePool>(rec_pool_result.release());
         rec_pool = tp1_rec_pool.get();
 
+        const bool octave = shelf::kernel::parse_octave_kv_cache_format(
+            opts.kv_cache_dtype, opts.octave_format);
+        const auto kv_dtype = octave ? shelf::kernel::KVCacheDType::OCTAVE
+            : opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
+                                             : shelf::kernel::KVCacheDType::BF16;
         auto kv_pool_result = shelf::state::PagedKVPool::create(
             *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens),
-            num_attn_layers, kv_heads, head_dim,
-            opts.kv_cache_dtype == "fp8" ? shelf::kernel::KVCacheDType::FP8_E4M3
-                                        : shelf::kernel::KVCacheDType::BF16);
+            num_attn_layers, kv_heads, head_dim, kv_dtype, opts.octave_format);
         if (!kv_pool_result.ok()) {
             fprintf(stderr, "PagedKVPool::create failed: %s\n",
                 kv_pool_result.status().message().c_str());
@@ -702,6 +712,15 @@ int run_tg(int argc, char** argv) {
     hipStream_t keepalive_stream = nullptr;
     hipEvent_t keepalive_event = nullptr;
     std::thread keepalive_thread;
+    std::vector<hipEvent_t> token_start_events(static_cast<std::size_t>(opts.tokens), nullptr);
+    std::vector<hipEvent_t> token_stop_events(static_cast<std::size_t>(opts.tokens), nullptr);
+    for (int i = 0; i < opts.tokens; ++i) {
+        if (hipEventCreate(&token_start_events[static_cast<std::size_t>(i)]) != hipSuccess ||
+            hipEventCreate(&token_stop_events[static_cast<std::size_t>(i)]) != hipSuccess) {
+            fprintf(stderr, "per-token event create failed\n");
+            return 1;
+        }
+    }
     if (opts.gap_keepalive > 0) {
         if (hipStreamCreate(&keepalive_stream) != hipSuccess) {
             fprintf(stderr, "keepalive hipStreamCreate failed\n");
@@ -735,6 +754,7 @@ int run_tg(int argc, char** argv) {
     if (opts.mode == "forward") {
         shelf::qwen35::BatchExecutionOutput last_out;
         for (int i = 0; i < opts.tokens; ++i) {
+            hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
             std::vector<int32_t> token_ids = {token_id};
             shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
@@ -759,6 +779,7 @@ int run_tg(int argc, char** argv) {
                 return 1;
             }
             last_out = std::move(res.release());
+            hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
         }
         hip_err = hipEventRecord(stop_event, stream);
         if (hip_err != hipSuccess) {
@@ -797,6 +818,7 @@ int run_tg(int argc, char** argv) {
         std::vector<int32_t> sampled_tokens;
         sampled_tokens.reserve(opts.tokens);
         for (int i = 0; i < opts.tokens; ++i) {
+            hipEventRecord(token_start_events[static_cast<std::size_t>(i)], stream);
             std::vector<int32_t> token_ids = {token_id};
             shelf::qwen35::ScheduledRequest req;
             req.sequence = &seq; req.handle = seq.request_handle();
@@ -840,6 +862,7 @@ int run_tg(int argc, char** argv) {
             token_id = sampled;
             sampled_tokens.push_back(sampled);
             token_sum += sampled;
+            hipEventRecord(token_stop_events[static_cast<std::size_t>(i)], stream);
         }
         printf("GREEDY_TOKEN_SUM=%d\n", token_sum);
         printf("GREEDY_FIRST_TOKENS=");
@@ -893,6 +916,17 @@ int run_tg(int argc, char** argv) {
         static_cast<double>(measured_tokens) / (gpu_ms / 1000.0);
     const double wall_tokens_per_sec =
         static_cast<double>(measured_tokens) / (wall_ms / 1000.0);
+    std::vector<float> token_ms(static_cast<std::size_t>(opts.tokens));
+    for (int i = 0; i < opts.tokens; ++i) {
+        hipEventElapsedTime(&token_ms[static_cast<std::size_t>(i)],
+                            token_start_events[static_cast<std::size_t>(i)],
+                            token_stop_events[static_cast<std::size_t>(i)]);
+        hipEventDestroy(token_start_events[static_cast<std::size_t>(i)]);
+        hipEventDestroy(token_stop_events[static_cast<std::size_t>(i)]);
+    }
+    std::sort(token_ms.begin(), token_ms.end());
+    const double gpu_us_per_token_p50 = token_ms[token_ms.size() / 2u] * 1000.0;
+    const double gpu_tokens_per_sec_p50 = 1000000.0 / gpu_us_per_token_p50;
 
     const int final_position = opts.context + static_cast<int>(measured_tokens);
     const char* mode_label = opts.mode.c_str();
@@ -928,6 +962,8 @@ int run_tg(int argc, char** argv) {
     printf("gpu_us_per_token=%.2f\n", gpu_us_per_token);
     printf("wall_us_per_token=%.2f\n", wall_us_per_token);
     printf("gpu_tokens_per_sec=%.2f\n", gpu_tokens_per_sec);
+    printf("gpu_us_per_token_p50=%.2f\n", gpu_us_per_token_p50);
+    printf("gpu_tokens_per_sec_p50=%.2f\n", gpu_tokens_per_sec_p50);
     printf("wall_tokens_per_sec=%.2f\n", wall_tokens_per_sec);
     printf("\n");
     printf("final_position=%d\n", final_position);

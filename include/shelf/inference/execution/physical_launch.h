@@ -326,6 +326,8 @@ enum class PhysicalPagedAttentionVariant : uint8_t {
     Bf16Prefill = 14,
     Fp8E4M3Prefill = 15,
     OctaveDequant = 16,
+    OctaveSplit = 17,
+    OctaveReduce = 18,
     Unsupported = 255,
 };
 
@@ -353,7 +355,7 @@ struct PhysicalPagedAttentionKernel {
 inline constexpr uint32_t kPhysicalPagedAttentionMaxPrefillRegions = 16u;
 
 inline constexpr uint32_t kPhysicalPagedAttentionMaxKernels =
-    3u + kPhysicalPagedAttentionMaxPrefillRegions;
+    4u + 2u * kPhysicalPagedAttentionMaxPrefillRegions;
 
 struct PhysicalPagedAttentionPlan {
     bool optimized = false;

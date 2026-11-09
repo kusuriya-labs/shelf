@@ -97,3 +97,14 @@ fake-quant の全量量子化モードを比較した。いずれも BF16 KV dum
 M2 は attention 呼び出しごとに該当 layer の全物理 page を 1-layer BF16 scratch へ
 逆量子化する。未使用 page も変換するため遅いが、既存 BF16 attention と数値契約を共有できる。
 scratch は K/V 各 1 layer 分を pool と同時に確保し、page 当たりの memory plan に含めた。
+
+## M3 所見
+
+packed-direct decode/verify は 16-way split-KV と専用 reduce で実装した。Q/K の dot と
+V の重み付き和は回転空間の fp32 で行い、reduce 後の V 出力だけを H256 と固定符号で
+元空間へ戻す。rows=1 c4v4 の M2 reference との差は最大 0.001774、rows=4 b4n3v3 は
+0.002820 だった。性能と容量の実測は `docs/perf/kv-octave.md` を正本とする。
+
+current chunk の量子化前 K/V を prefill attention へ渡す A mode は、現在の attention
+primitive が append 入力を参照できないため見送った。lowering の value binding を増やす
+変更は BF16/FP8 の既存 graph contract に及ぶため、既存挙動を壊さない側を選んだ。
