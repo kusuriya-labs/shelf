@@ -485,7 +485,8 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
         mtp_config.page_tokens = config_.page_tokens;
         mtp_config.max_batch_rows = std::min(
             exec_max_tokens_, qwen35::runtime::kMtpMaxPrefillRows);
-        mtp_config.kv_dtype = config_.kv_cache_dtype;
+        mtp_config.kv_dtype = config_.kv_cache_dtype == kernel::KVCacheDType::OCTAVE
+            ? kernel::KVCacheDType::BF16 : config_.kv_cache_dtype;
         if (config_.rope_profile.has_value()) {
             mtp_config.rope_profile = *config_.rope_profile;
         }
@@ -666,7 +667,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         mtp_options.page_tokens = config_.page_tokens;
         mtp_options.max_batch_rows = std::min(
             exec_max_tokens_, qwen35::runtime::kMtpMaxPrefillRows);
-        mtp_options.kv_dtype = config_.kv_cache_dtype;
+        mtp_options.kv_dtype = config_.kv_cache_dtype == kernel::KVCacheDType::OCTAVE
+            ? kernel::KVCacheDType::BF16 : config_.kv_cache_dtype;
         if (config_.rope_profile.has_value()) {
             mtp_options.rope_profile = *config_.rope_profile;
         }

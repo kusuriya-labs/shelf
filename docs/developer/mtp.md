@@ -133,8 +133,9 @@ external input index 0 を token buffer、index 1 以降を `input_hidden` に b
 
 MTP 層は target とは独立した KV pool を持つ。
 
-- pool は 1 attention layer、`num_key_value_heads`、`attention_head_dim`、target と同じ
-  KV dtype で作る。
+- pool は 1 attention layer、`num_key_value_heads`、`attention_head_dim` で作る。target が
+  BF16 / FP8 のときは target と同じ KV dtype、target が Octave のときは BF16 を使う。
+  Octave target pool と MTP pool は所有権も page table も共有しない。
 - page 数は `ceil((max_seq_len + 1) / page_tokens) + 1` である。target pool の page 数
   ではない。
 - MTP 用の `SequenceSlotPool` / `GdnStatePool` / `PagedSequenceState` を別に持つ。
@@ -249,6 +250,8 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - MTP KV は target KV とは別 pool である。容量計画は
   `mtp_spec_batch_reserve_bytes`（request 数分の drafter + 共有 history / compact log）と、
   single request 経路の `LoadedModel::mtp_drafter_reserve_bytes` を使う。
+- Octave target と併用した MTP KV は BF16 であり、target の descriptor を MTP block へ
+  伝播しない。
 - qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく
   pre-mixer の wide residual（`hc * hidden`）である。speculative verify は
   `PleConvStatePool` と `QsaKeyStatePool` の partial 状態を row 単位の history から復元する。

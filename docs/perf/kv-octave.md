@@ -63,6 +63,25 @@ scalar code 復号と LUT、query head ごとの online softmax、1024-thread wo
 capture され、以後 replay された。Octave append、split attention、reduce は capture 中に
 割り当てや host 同期を行わず、position、visible length、block table を device 配列から読む。
 
+## MTP
+
+`--mtp --mtp-drafts 4`、19 input、各最大 256 token、temperature 0 で測定した。target KV が
+Octave のときも MTP block 自身の独立 KV pool は BF16 とした。tok/s は各 request の最初の
+token 後から done までの総 decode token / 総時間である。
+
+| target KV | decode token | rounds | accepted drafts | accepted/round | emitted/round | tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BF16 | 3723 | 1149 | 2574 | 2.240 | 3.240 | 63.16 |
+| FP8 | 3717 | 1139 | 2578 | 2.263 | 3.263 | 63.51 |
+| c4v4 | 3773 | 1192 | 2581 | 2.165 | 3.165 | 59.83 |
+| c5v5 | 3713 | 1155 | 2558 | 2.215 | 3.215 | 60.46 |
+
+c4v4 target-only は 3773 decode token、26.81 tok/s だった。MTP は 2.23 倍で、19 case の
+生成 ID を case ごとに SHA-256 化した suite hash は双方
+`5dc858f907a6ff0300718b44076f576093298989b25f7f1e91e2932ef3b186f7` で一致した。
+`SHELF_HIP_GRAPH=ON` と `SHELF_GRAPH_VERIFY=1` の smoke では rows 2〜5 の verify graph を
+capture / replay し、非 graph MTP と 19 case の生成 ID が一致した。
+
 ## Prefill
 
 単位は token/s の p50 である。Octave は対象 layer の cache を BF16 scratch へ展開して

@@ -540,6 +540,15 @@ set_tests_properties(test_compute_mtp_drafts_reject_over_ceiling PROPERTIES
                      LABELS "cpu;required"
                      PASS_REGULAR_EXPRESSION "bad --mtp-drafts")
 
+add_test(NAME test_compute_mtp_accepts_octave
+         COMMAND $<TARGET_FILE:shelf-compute>
+             --model-dir placeholder --mtp --mtp-drafts 4
+             --kv-cache-dtype octave:c4v4)
+set_tests_properties(test_compute_mtp_accepts_octave PROPERTIES
+                     LABELS "cpu;required"
+                     PASS_REGULAR_EXPRESSION "cannot open config.json"
+                     FAIL_REGULAR_EXPRESSION "Octave KV cache currently requires")
+
 add_test(NAME test_compute_rope_cap_native_over
          COMMAND $<TARGET_FILE:shelf-compute>
              --model-dir "${_shelf_rope_fixture}" --rope-factor 1 --max-seq-len 262145)
