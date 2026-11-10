@@ -1,10 +1,17 @@
 #include <shelf/models/plamo3/model/lower_to_primitives.h>
+#include <shelf/models/qwen35/model/gdn_state_layout.h>
 #include <shelf/runtime/graph/primitive_node.h>
 #include <shelf/runtime/program/program.h>
 #include <cstdio>
 #include <variant>
 
 int main() {
+    shelf::qwen_hybrid::QwenHybridConfig hybrid;
+    hybrid.declared_model_type = "plamo3"; hybrid.num_hidden_layers = 8;
+    hybrid.layer_types.assign(8, 1);
+    if (shelf::qwen35::make_qwen35_gdn_state_layout(hybrid).num_gdn_states != 0) return 1;
+    hybrid.declared_model_type = "qwen3_5";
+    if (shelf::qwen35::make_qwen35_gdn_state_layout(hybrid).num_gdn_states != 1) return 1;
     shelf::plamo3::Config c;
     c.hidden_size=1536; c.head_dim=128; c.num_attention_heads=16; c.num_key_value_heads=1;
     c.intermediate_size=6144; c.vocab_size=107520; c.num_hidden_layers=8;
@@ -20,7 +27,12 @@ int main() {
     auto lower = shelf::plamo3::lower_to_primitives(c,w);
     if (!lower.ok()) { std::fprintf(stderr,"%s\n",lower.status().message().c_str()); return 1; }
     auto& v=lower.value(); unsigned ropes=0, kv=0, attention=0, norms=0;
+    bool rounded_logits = false;
     for (const auto& n : v.graph.nodes) {
+        if (n.debug_name == "logits_bf16") {
+            const auto* linear = std::get_if<shelf::runtime::LinearNode>(&n.node);
+            rounded_logits = linear && linear->out_dtype == shelf::runtime::ValueDType::BF16;
+        }
         if (auto* r=std::get_if<shelf::runtime::RoPENode>(&n.node)) {
             unsigned layer=ropes/2;
             if (r->frequency_table_index != (layer==7 ? 1u : 0u) || !r->bf16_intermediates) return 1;
@@ -33,7 +45,8 @@ int main() {
             ++norms;
         }
     }
-    if (ropes!=16 || kv!=8 || attention!=8 || norms!=49 || v.graph.external_outputs.size()!=4) return 1;
+    if (ropes!=16 || kv!=8 || attention!=8 || norms!=49 || !rounded_logits ||
+        v.graph.external_outputs.size()!=4) return 1;
     shelf::runtime::ProgramBuildOptions options; options.max_token_rows=16; options.max_output_rows=16;
     auto program=shelf::runtime::build_program(v.graph, {v.weights.data(),v.weights.size()},
         shelf::runtime::RowBucket::R16, shelf::runtime::ExecutionClass::PREFILL, options);

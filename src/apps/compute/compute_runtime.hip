@@ -126,6 +126,12 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     {
         auto family = shelf::models::probe_model_dir(config_.model_dir);
         if (!family.ok()) return family.status();
+        if (family.value() == shelf::models::ModelFamily::Plamo3) {
+            if (config_.max_seq_len > 2048)
+                return Status::invalid_argument("plamo3: max_seq_len must not exceed 2048", __FILE__, __LINE__);
+            if (config_.tp != 1 || config_.pipeline_parallel != 1 || config_.mtp || config_.draft_config_ready)
+                return Status::unsupported("plamo3: parallel and speculative execution are not supported", __FILE__, __LINE__);
+        }
         if (family.value() == shelf::models::ModelFamily::Qwen4Exp) {
             if (config_.tp < 2) {
                 return Status::unsupported(

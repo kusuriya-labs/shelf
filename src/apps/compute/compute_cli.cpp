@@ -116,8 +116,24 @@ void compute_usage(const char* prog) {
 
 std::vector<int32_t> read_input_ids(const std::string& path) {
     std::vector<int32_t> ids;
-    FILE* f = std::fopen(path.c_str(), "r");
+    FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) return ids;
+    char magic[8]{};
+    if (std::fread(magic, 1, sizeof(magic), f) == sizeof(magic) &&
+        std::memcmp(magic, "PSKLDTOK", sizeof(magic)) == 0) {
+        uint32_t version = 0;
+        uint64_t count = 0;
+        bool ok = std::fread(&version, sizeof(version), 1, f) == 1 && version == 1u &&
+            std::fread(&count, sizeof(count), 1, f) == 1 && count > 0 && count < (1u << 22);
+        if (ok) {
+            ids.resize(static_cast<std::size_t>(count));
+            ok = std::fread(ids.data(), sizeof(int32_t), ids.size(), f) == ids.size();
+        }
+        std::fclose(f);
+        if (!ok) ids.clear();
+        return ids;
+    }
+    std::rewind(f);
     long v = 0;
     while (std::fscanf(f, "%ld", &v) == 1) {
         ids.push_back(static_cast<int32_t>(v));

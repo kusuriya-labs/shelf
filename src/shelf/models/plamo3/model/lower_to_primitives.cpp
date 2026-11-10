@@ -103,16 +103,26 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
         out = norm(out, h, h, l.post_mlp_norm, static_cast<float>(1.0 / std::pow(5.0, 1.5)), p + "post_mlp_norm");
         x = residual(ar, out, p + "output"); lowered.layer_output_values.emplace_back(i, x);
     }
-    QH::HybridHeadLowering head; head.hidden_features = h; head.eps = static_cast<float>(c.rms_norm_eps);
-    head.final_norm_param = param(w.final_norm); head.lm_shape = {w.lm_head.rows,w.lm_head.cols};
-    head.lm_weight_index = weight(w.lm_head); head.out_vocab = w.lm_head.rows;
-    auto head_output = QH::emit_hybrid_head(em, head, x);
-    // The shared head defaults to Qwen's one-plus norm; PLaMo rounds the offset and normalized value in BF16.
-    for (auto& node : pg.nodes) if (node.debug_name == "final_norm") {
-        auto& rms = std::get<RT::RmsNormNode>(node.node);
-        rms.weight_mode = RT::RmsNormWeightMode::OFFSET_BF16; rms.weight_offset = 1.0f;
-    }
-    (void)head_output;
+    // The reference returns BF16 lm_head logits. Convert them to F32 only after
+    // rounding, since the executor's external logits buffer is F32.
+    auto selected = em.value(h, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
+    em.emit(RT::PrimitiveNode{RT::OutputGatherNode{RT::RowwiseShapeKey{h}}}, {x}, {selected});
+    pg.nodes.back().debug_name = "selected_hidden";
+    RT::RmsNormNode final_norm; final_norm.shape = RT::RowwiseShapeKey{h};
+    final_norm.eps = static_cast<float>(c.rms_norm_eps); final_norm.group_size = h;
+    final_norm.parameter_index = param(w.final_norm);
+    final_norm.weight_mode = RT::RmsNormWeightMode::OFFSET_BF16; final_norm.weight_offset = 1.0f;
+    auto normalized = em.value(h, RT::ValueDType::BF16, RT::ValueRowDomain::OUTPUT_ROWS);
+    em.emit(RT::PrimitiveNode{final_norm}, {selected}, {normalized}); pg.nodes.back().debug_name = "final_norm";
+    auto logits_bf16 = em.linear(w.lm_head, weight(w.lm_head), normalized);
+    pg.nodes.back().debug_name = "logits_bf16";
+    auto logits = em.value(w.lm_head.rows, RT::ValueDType::F32, RT::ValueRowDomain::OUTPUT_ROWS);
+    em.emit(RT::PrimitiveNode{RT::ScaleNode{RT::RowwiseShapeKey{w.lm_head.rows}, 1.0f}},
+            {logits_bf16}, {logits}); pg.nodes.back().debug_name = "logits";
+    auto sampled = em.value(1, RT::ValueDType::I32, RT::ValueRowDomain::OUTPUT_ROWS);
+    em.emit(RT::PrimitiveNode{RT::SamplingNode{w.lm_head.rows}}, {logits}, {sampled});
+    pg.nodes.back().debug_name = "sampled";
+    pg.external_outputs = {selected, logits, sampled, x};
     return lowered;
 }
 }  // namespace shelf::plamo3

@@ -45,6 +45,7 @@ public:
 
     [[nodiscard]]
     ModelFamily family() const noexcept {
+        if (plamo_ != nullptr) return ModelFamily::Plamo3;
         if (qwen4exp_ != nullptr) return ModelFamily::Qwen4Exp;
         return dense_ != nullptr ? ModelFamily::Dense : ModelFamily::Moe;
     }
@@ -131,6 +132,12 @@ public:
 private:
     LoadedModel() = default;
 
+    struct PlamoModel {
+        shelf::plamo3::Config config;
+        shelf::qwen_hybrid::QwenHybridConfig hybrid;
+        shelf::plamo3::ModelWeights weights;
+    };
+    std::unique_ptr<PlamoModel> plamo_;
     std::unique_ptr<shelf::qwen35::Qwen35Model> owns_dense_;
     std::unique_ptr<shelf::qwen35moe::Qwen35MoeModel> owns_moe_;
     std::unique_ptr<shelf::qwen4exp::Qwen4ExpModel> owns_qwen4exp_;
