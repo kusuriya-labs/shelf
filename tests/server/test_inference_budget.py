@@ -53,6 +53,7 @@ def parse(checked, name, payload, expected):
 
 def main() -> int:
     checked = Checker("inference-budget")
+    checked.check("tokenizer-batch-encoding", codec._flatten_ids({"input_ids": [[1, 2]]}) == [1, 2], "")
 
     checked.check("reserve-32768", answer_reserve_tokens(BASE_BUDGET) == 8192,
                   str(answer_reserve_tokens(BASE_BUDGET)))

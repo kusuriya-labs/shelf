@@ -111,13 +111,15 @@ _TOOL_CLOSE = "</tool_call>"
 
 
 def load_processor(model_dir: str, trust_remote_code: bool = True):
-    """Load the Hugging Face processor for ``model_dir``."""
-    from transformers import AutoProcessor
+    """テキスト生成に必要な tokenizer と chat template を読み込む。"""
+    from transformers import AutoTokenizer
 
-    return AutoProcessor.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    return AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
 
 
 def _flatten_ids(ids: Any) -> list[int]:
+    if isinstance(ids, dict) or hasattr(ids, "keys"):
+        ids = ids["input_ids"]
     if isinstance(ids, list) and ids and isinstance(ids[0], list):
         return list(ids[0])
     return list(ids)
