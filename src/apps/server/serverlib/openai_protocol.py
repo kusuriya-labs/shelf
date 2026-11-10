@@ -19,6 +19,7 @@ from typing import Any
 from shelf_chat.codec import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
 
 CHAT_TEMPLATE_KWARGS = ("enable_thinking", "preserve_thinking")
+TRANSLATION_TEMPLATE_KWARGS = ("target_lang", "source_lang", "context", "glossary", "form")
 
 DEFAULT_MAX_NEW_TOKENS = 4096
 
@@ -69,6 +70,7 @@ class ChatRequest:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     preserve_thinking: bool = True
     forced_tool_name: str | None = None
+    template_kwargs: dict[str, Any] | None = None
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -312,7 +314,7 @@ def parse_chat_template_kwargs(body: dict) -> tuple[bool, bool]:
         )
 
     for key in raw:
-        if key not in CHAT_TEMPLATE_KWARGS:
+        if key not in CHAT_TEMPLATE_KWARGS + TRANSLATION_TEMPLATE_KWARGS:
             raise OpenAIProtocolError(
                 f"chat_template_kwargs.{key} is not supported",
                 param=f"chat_template_kwargs.{key}",
@@ -417,6 +419,9 @@ def parse_chat_request(body: Any,
     include_usage = _stream_options_include_usage(body)
 
     enable_thinking, preserve_thinking = parse_chat_template_kwargs(body)
+    template_kwargs = {key: value for key, value in
+                       (body.get("chat_template_kwargs") or {}).items()
+                       if key in TRANSLATION_TEMPLATE_KWARGS}
     reasoning_effort, effort_given = parse_reasoning_effort(body)
     if effort_given and not enable_thinking:
         raise OpenAIProtocolError(
@@ -443,6 +448,7 @@ def parse_chat_request(body: Any,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         preserve_thinking=preserve_thinking,
+        template_kwargs=template_kwargs,
     )
 
 

@@ -54,6 +54,7 @@ GROUPS = OrderedDict([
         "test_server_responses.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
+        "test_plamo3_template.py",
         "test_inference_budget.py",
     ]),
     ("tools", [
