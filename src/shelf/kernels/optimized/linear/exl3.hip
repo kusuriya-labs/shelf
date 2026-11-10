@@ -1,7 +1,7 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
 #include <shelf/kernels/optimized/linear/detail/exl3_group_plan_device.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/detail/launch_plan.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -840,67 +840,10 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
     }
 }
 
-struct LaunchPlan {
-    uint32_t grid_x = 0;
-    uint32_t grid_y = 0;
-    uint32_t grid_z = 1;
-    uint32_t splits = 1;
-    uint32_t groups = 1;
-};
-
-uint32_t pick_n_tiles(const Exl3GemmArgs& args) {
-    if (args.n_tiles != 0u) return args.n_tiles;
-    if (args.rows < 4u) return 1u;
-    if (args.out_features % (kOutBlockBase * 2u) != 0u) return 1u;
-    if (args.out_features < kOutBlockBase * 8u) return 1u;
-    return 2u;
-}
-
-LaunchPlan make_launch_plan(const Exl3GemmArgs& args) {
-    LaunchPlan plan;
-    plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(args));
-    if (args.splitk_scratch != nullptr) {
-        const uint32_t tuning_rows =
-            args.splitk_tuning_rows != 0u ? args.splitk_tuning_rows : args.rows;
-        uint32_t desired = args.splitk_splits;
-        if (desired == 0u) {
-            if (tuning_rows == 1u) {
-                desired = plan.grid_x <= 160u ? 8u : 1u;
-            } else if (tuning_rows <= 8u) {
-                desired = 8u;
-            } else {
-                desired = plan.grid_x <= 16u ? 8u : (plan.grid_x <= 160u ? 4u : 1u);
-            }
-        }
-        const uint32_t k_chunks = args.k / 128u;
-        if (desired > k_chunks) desired = k_chunks;
-        const uint64_t per_split =
-            static_cast<uint64_t>(tuning_rows) * args.out_features + tuning_rows;
-        while (desired > 1u &&
-               static_cast<uint64_t>(desired) * per_split > args.splitk_floats) {
-            --desired;
-        }
-        plan.splits = desired;
-    }
-    const uint32_t row_blocks2 = (args.rows + 2u * kRowTile - 1u) / (2u * kRowTile);
-    if (args.groups == 1u) {
-        plan.groups = 1u;
-    } else if (args.groups == 2u || args.groups == 4u) {
-        plan.groups = args.groups;
-    } else if (pick_n_tiles(args) == 2u && args.rows >= 16u * kRowTile &&
-               plan.grid_x >= 8u) {
-        plan.groups = 4u;
-    } else if (args.rows >= 2u * kRowTile &&
-               plan.grid_x * row_blocks2 * plan.splits >= 128u) {
-        plan.groups = 2u;
-    }
-    const uint32_t rows_per_block = kRowTile * plan.groups;
-    plan.grid_y = (args.rows + rows_per_block - 1u) / rows_per_block;
-    return plan;
-}
+using Exl3LaunchPlan = exl3_detail::Exl3LaunchPlan;
 
 template <uint32_t kGroups, bool kPre, uint32_t kNTiles, uint32_t kDecode>
-hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
+hipError_t launch_kernel(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
                          hipStream_t stream) {
     if (plan.splits > 1u) {
         gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles, kDecode>
@@ -915,9 +858,9 @@ hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
 }
 
 template <bool kPre, uint32_t kDecode>
-hipError_t launch_plan_typed(const Exl3GemmArgs& args, const LaunchPlan& plan,
+hipError_t launch_plan_typed(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
                              hipStream_t stream) {
-    const uint32_t n_tiles = pick_n_tiles(args);
+    const uint32_t n_tiles = plan.n_tiles;
     hipError_t err = hipSuccess;
     if (n_tiles == 2u) {
         err = plan.groups == 4u   ? launch_kernel<4u, kPre, 2u, kDecode>(args, plan, stream)
@@ -943,7 +886,7 @@ hipError_t launch_plan_typed(const Exl3GemmArgs& args, const LaunchPlan& plan,
 }
 
 template <bool kPre>
-hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
+hipError_t launch_plan(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
                        hipStream_t stream) {
     if (args.fast_decode != 0u) {
         if (args.ka == 5u && args.half == 0u) {
@@ -973,7 +916,7 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
         return hipErrorInvalidValue;
     }
-    return launch_plan<false>(args, make_launch_plan(args), stream);
+    return launch_plan<false>(args, exl3_detail::make_mul1_launch_plan(args), stream);
 }
 
 hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
@@ -1038,16 +981,17 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.svh_batch_stride = args.svh_batch_stride;
 
     // An n-tile override (SHELF_EXL3_GROUPED_NTILES) that does not divide the output would silently drop columns.
-    if ((args.out_features % (kOutBlockBase * pick_n_tiles(dense))) != 0u) return hipErrorInvalidValue;
-    LaunchPlan plan;
-    plan.grid_x = args.out_features / (kOutBlockBase * pick_n_tiles(dense));
+    if ((args.out_features % (kOutBlockBase * exl3_detail::exl3_mul1_pick_n_tiles(dense))) != 0u) return hipErrorInvalidValue;
+    Exl3LaunchPlan plan;
+    plan.n_tiles = exl3_detail::exl3_mul1_pick_n_tiles(dense);
+    plan.grid_x = args.out_features / (kOutBlockBase * plan.n_tiles);
     plan.grid_y = 1u;
     plan.grid_z = args.group_capacity;
     plan.splits = 1u;
     plan.groups = dense.groups;
     // mul24 has its own kernel (exl3_mul24_grouped.hip): same group plan, mul24 decode, FP16 or INT8 activations.
     if (args.mul24 != 0u)
-        return launch_exl3_mul24_grouped(dense, args.int8_act != 0u, pick_n_tiles(dense), plan.grid_x,
+        return launch_exl3_mul24_grouped(dense, args.int8_act != 0u, exl3_detail::exl3_mul1_pick_n_tiles(dense), plan.grid_x,
                                          plan.grid_z, stream);
     return launch_plan<false>(dense, plan, stream);
 }
@@ -1133,7 +1077,7 @@ hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xro
     }
     Exl3GemmArgs pre_args = args;
     pre_args.xrot = const_cast<void*>(xrot);
-    return launch_plan<true>(pre_args, make_launch_plan(pre_args), stream);
+    return launch_plan<true>(pre_args, exl3_detail::make_mul1_launch_plan(pre_args), stream);
 }
 
 }

@@ -93,6 +93,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_mul24.hip
     src/shelf/kernels/optimized/linear/exl3_mul24_prefill.hip
     src/shelf/kernels/optimized/linear/exl3/workspace.cpp
+    src/shelf/kernels/optimized/linear/exl3/launch_plan.cpp
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
