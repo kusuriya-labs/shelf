@@ -7,6 +7,7 @@
 // elements. Byte strides appear only where the public launch signature names them
 // explicitly (code_row_stride_bytes, scale_row_stride_bytes).
 
+#include "config.h"
 #include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <cstdint>
@@ -77,25 +78,6 @@ struct GroupedContract {
 // row order. Every other row is re-rounded in place onto rowscale[row].
 struct FlaggedContract {
     static constexpr uint32_t kFlagStrideElements = 1u;
-};
-
-// ---- kernel traits ----
-// mul1 and mul24 are separate even where the numbers currently coincide; changing one
-// must not silently change the other. Lengths are in elements and threads, not bytes.
-struct Exl3Mul1Traits {
-    static constexpr uint32_t kRowTile = 16u;    // output rows per block tile
-    static constexpr uint32_t kOutBlock = 128u;  // output columns per block
-    static constexpr uint32_t kThreads = 256u;   // threads per block
-    static constexpr uint32_t kTrellisTile = 16u;
-    static constexpr uint32_t kKBlock = 128u;
-};
-
-struct Exl3Mul24Traits {
-    static constexpr uint32_t kRowTile = 16u;
-    static constexpr uint32_t kOutBlock = 128u;
-    static constexpr uint32_t kThreads = 256u;
-    static constexpr uint32_t kTrellisTile = 16u;
-    static constexpr uint32_t kKBlock = 128u;
 };
 
 enum class Exl3Backend : uint8_t { Direct, ReconDense };

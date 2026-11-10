@@ -1,14 +1,17 @@
 #pragma once
 
-// Shared constants and device helpers for the mul24 (EXL3-INT8 weights) kernels. Internal
-// to the kernel layer; include it from the decode / prefill / grouped translation units.
+// Shared constants and device helpers for the mul24 (EXL3-INT8 weights) kernels. The
+// FWHT variants live in fwht.h; decode / prefill / grouped translation units include
+// this header.
+
+#include "fwht.h"
 
 #include <shelf/core/memory/types.h>
 
-#include <hip/hip_runtime.h>
-
 #include <cstdint>
 #include <cstdlib>
+
+#include <hip/hip_runtime.h>
 
 namespace shelf::kernel::exl3_detail {
 
@@ -42,25 +45,6 @@ inline uint32_t rotate_tile_blocks() {
         return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
     }();
     return blocks;
-}
-
-// Sylvester Walsh-Hadamard transform of one 128-wide block, one element per thread (128
-// threads). Result is unnormalised.
-__device__ __forceinline__ float fwht128_smem(float v, float* smem, uint32_t t) {
-    #pragma unroll
-    for (uint32_t h = 1u; h < 32u; h <<= 1u) {
-        const float b = __shfl_xor(v, h);
-        v = (t & h) ? (b - v) : (v + b);
-    }
-    #pragma unroll
-    for (uint32_t h = 32u; h < kBlock; h <<= 1u) {
-        smem[t] = v;
-        __syncthreads();
-        const float b = smem[t ^ h];
-        __syncthreads();
-        v = (t & h) ? (b - v) : (v + b);
-    }
-    return v;
 }
 
 __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {
