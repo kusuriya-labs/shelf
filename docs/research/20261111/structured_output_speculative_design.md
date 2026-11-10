@@ -68,3 +68,17 @@ EOS、空 draft、例外時の rollback を検証した。
 verify sampler への接続、採用 token の server matcher 反映が必要である。現行の
 constraint 付き request は引き続き通常 decode にフォールバックし、DFlash2 との
 併用、greedy 一致、性能と往復時間は未検証・未測定である。
+
+## M6 の行別 mask 基盤
+
+`ScheduledRequest` は verify に device 上の mask 行列と word 単位の行間隔を
+渡せる。descriptor 展開時に各 output 行の pointer を進め、既存の sampling 前の
+mask kernel を使う。行間隔が語彙サイズに必要な word 数より短い場合は拒否する。
+通常の単一行 mask は行間隔 0 の従来契約を保つ。mask が無い request では従来の
+sampling 経路を使用する。
+
+これは sampler 側の基盤であり、DFlash2 から mask 行列を供給する経路ではない。
+draft / verify 分割、round ID と cancel を含む stdio 往復、採用 token の matcher
+反映は未実装である。制約付き request は引き続き通常 decode にフォールバックする。
+reasoning 中の draft が close token を含む場合は close token で打ち切り、次の
+round から grammar を開始する方針だが、この境界処理も未実装である。

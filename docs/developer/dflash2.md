@@ -1130,3 +1130,10 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 verify の受理結果は残り token 数と停止 token の最初の位置で制限してから、
 target と DFlash2 context の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
 step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。
+
+### 構造化出力との接続状況
+
+verify sampler は request ごとに連続した行別 token bitmask を扱えるが、
+DFlash2 の draft / verify 間で server と mask を交換する処理は未実装である。
+構造化出力付き request は DFlash2 / MTP を使用せず通常 decode にフォールバックする。
+実装上の残作業は [接続案](../research/20261111/structured_output_speculative_design.md) を参照。
