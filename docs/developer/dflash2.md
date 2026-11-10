@@ -946,8 +946,10 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 - `target_hidden_taps = dflash_config.target_layer_ids`、順序も config 通り
 - `target_hidden_tap_count = dflash_config.num_target_layer_ids`
 - `max_scheduled_output_rows = block_size`（`shelf-compute` の単一 request 経路）。
-  serve mode では `min(max_concurrent_requests × block_size, kDFlash2SpecMaxVerifyRows)`
-  であり、1 round の batch verify 行合計の上限になる。
+  serve mode では `min(dflash2_sessions × dflash2_session_rows(block_size, K), kDFlash2SpecMaxVerifyRows)`
+  （`dflash2_session_rows` は `min(block_size, K + 1)`）であり、1 round の batch verify 行合計の上限になる。
+  drafter の scratch、batch の history / compact log、target の出力行数もこの行数で見積もる
+  （K=7 なら従来どおり `dflash2_sessions × 8`）。
 - `max_batch_rows = min(2048, max(prompt_tokens, block_size))`
 - `max_scheduled_output_rows` は `max(max_scheduled_output_rows, max_scheduled_requests)`
   で切り上げられた後 `max_batch_rows` で上限されるため、

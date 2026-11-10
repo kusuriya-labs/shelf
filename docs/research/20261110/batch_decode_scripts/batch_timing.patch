@@ -1,0 +1,90 @@
+diff --git a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+index c492ad7..3d94c91 100644
+--- a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
++++ b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+@@ -4,6 +4,7 @@
+ #include <shelf/models/qwen35/runtime/spec_decode.h>
+ #include <shelf/core/gpu/scoped_device.h>
+ #include <shelf/models/qwen35/runtime/executor.h>
++#include <shelf/inference/execution/decode_perf_stats.h>
+ #include <shelf/models/qwen35/state/state_types.h>
+ #include <algorithm>
+ #include <chrono>
+@@ -443,6 +444,7 @@ KVCapacitySnapshot ContinuousBatcher::kv_capacity_snapshot() const {
+ }
+ 
+ Result<StepResult> ContinuousBatcher::step() {
++    const auto bt_step_t0 = std::chrono::steady_clock::now();
+     const bool banker_mode = config_.admission_policy == KVAdmissionPolicy::BankerSafe;
+     KVBankerState kv_state = build_kv_banker_state();
+     uint32_t dflash_prefilled_requests = 0u;
+@@ -641,9 +643,25 @@ Result<StepResult> ContinuousBatcher::step() {
+     };
+ 
+     const auto exec_started = std::chrono::steady_clock::now();
++    static const char* const bt_dump = std::getenv("SHELF_BATCH_SEM_DUMP");
++    static const bool bt_wall = std::getenv("SHELF_BATCH_STEPWALL") != nullptr;
++    static std::unordered_map<uint32_t, uint32_t> bt_seen;
++    const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
++    bool bt_sem = false;
++    if (bt_dump != nullptr && bt_decode && ::shelf::execution::semantic_timing_enabled() &&
++        tp_batch_hook_ == nullptr && ++bt_seen[plan.batch.num_requests] == 8u) {
++        bt_sem = true;
++        ::shelf::execution::semantic_timing_begin(stream_, 16384);
++    }
+     auto exec_result = tp_batch_hook_ != nullptr
+                           ? tp_batch_hook_->on_execute(plan.batch)
+                           : execute_batch(executor_, plan.batch, stream_);
++    const auto bt_exec_end = std::chrono::steady_clock::now();
++    if (bt_sem) {
++        char path[512];
++        std::snprintf(path, sizeof(path), "%s_rows%u.csv", bt_dump, plan.batch.num_requests);
++        ::shelf::execution::semantic_timing_end(stream_, path);
++    }
+     const double exec_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - exec_started)
+                                .count();
+@@ -714,6 +732,7 @@ Result<StepResult> ContinuousBatcher::step() {
+         }
+     }
+ 
++    const auto bt_sync_end = std::chrono::steady_clock::now();
+     Status first_error = Status::make_ok();
+     uint32_t row = 0;
+     for (auto& scheduled : plan.scheduled_requests) {
+@@ -791,6 +810,16 @@ Result<StepResult> ContinuousBatcher::step() {
+         return first_error;
+     }
+ 
++    if (bt_wall && bt_decode) {
++        const auto bt_end = std::chrono::steady_clock::now();
++        auto ms = [](auto x, auto y) {
++            return std::chrono::duration<double, std::milli>(y - x).count();
++        };
++        std::fprintf(stderr, "STEPWALL rows=%u pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f\n",
++                     plan.batch.num_requests, ms(bt_step_t0, exec_started),
++                     ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end),
++                     ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end));
++    }
+     return StepResult{true, plan.batch.num_tokens + dflash_tokens,
+                       plan.batch.num_requests + dflash_requests};
+ }
+@@ -1031,7 +1060,18 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
+                 timing_before.push_back(request->dflash->timing);
+             }
+         }
++        static const char* const bt_dump2 = std::getenv("SHELF_BATCH_SEM_DUMP");
++        static std::unordered_map<uint32_t, uint32_t> bt_seen2;
++        const bool bt_sem2 = bt_dump2 != nullptr &&
++            ::shelf::execution::semantic_timing_enabled() &&
++            ++bt_seen2[static_cast<uint32_t>(slots.size())] == 8u;
++        if (bt_sem2) ::shelf::execution::semantic_timing_begin(stream_, 32768);
+         auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots);
++        if (bt_sem2) {
++            char path2[512];
++            std::snprintf(path2, sizeof(path2), "%s_dfround%zu.csv", bt_dump2, slots.size());
++            ::shelf::execution::semantic_timing_end(stream_, path2);
++        }
+         if (!batch_result.ok()) {
+             for (RuntimeRequest* request : slot_requests) {
+                 const Status st = finish_request(*request, FinishReason::Error, stream_);
