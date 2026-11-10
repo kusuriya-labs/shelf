@@ -232,11 +232,13 @@ class ComputeHarness:
                  tp: int = 1,
                  devices: str | None = None,
                  auto_arena: bool = False,
-                 prefix_cache_enabled: bool = True):
+                 prefix_cache_enabled: bool = True,
+                 mtp: bool = False):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.auto_arena = auto_arena
         self.prefix_cache_enabled = prefix_cache_enabled
+        self.mtp = mtp
         self.max_seq_len = max_seq_len
         self.device = device
         self.max_concurrent_requests = max_concurrent_requests
@@ -283,6 +285,8 @@ class ComputeHarness:
         if self.dflash2_model_dir is not None:
             argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
                      "--dflash2-drafts", str(self.dflash2_drafts)]
+        if self.mtp:
+            argv += ["--mtp", "--mtp-drafts", "4"]
         env = dict(os.environ)
         if self.batch_trace:
             env["SHELF_BATCH_TRACE"] = "1"

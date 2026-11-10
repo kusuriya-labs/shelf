@@ -16,7 +16,10 @@ def mask(token):
 
 
 def main():
-    h = ComputeHarness(max_concurrent_requests=4, device=int(os.environ.get("SHELF_TEST_DEVICE", "0")))
+    mode = os.environ.get("SHELF_TEST_MASK_SPEC", "")
+    h = ComputeHarness(max_concurrent_requests=4, device=int(os.environ.get("SHELF_TEST_DEVICE", "0")),
+                       mtp=mode == "mtp",
+                       dflash2_model_dir=os.environ.get("SHELF_DFLASH2_MODEL_DIR") if mode == "dflash2" else None)
     try:
         h.start(); h.wait_ready()
         for rid, temperature in ((10, 0.0), (11, 0.8)):
