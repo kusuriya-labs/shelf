@@ -44,7 +44,7 @@ compute の logits 行を一致させるには model config の vocab_size を�
 - `test_token_bitmask` は R9700 上で成功し、GPU の mask 適用結果が CPU 参照と一致した。
 - compute の stdio を直接使い、greedy と temperature 0.8 の各 4 token で指定した
   token のみが出ること、mask 待ち中に別 request が進み、待機 request を cancel
-  できることを確認した。
+  できることを確認した。同じ検査は DFlash2 / MTP 有効時にも成功した。
 - XGrammar 0.2.9 では `{"type":"integer","enum":["foo",1]}` に対して
   `"foo"` が受理される。型と enum が積集合にならないため、型に一致しない enum と
   object / array の enum はサーバが 400 で拒否する。
@@ -69,3 +69,10 @@ XGrammar で長い string enum の mask を毎回計算し、IPC 往復を含め
 37.26 ms（通常との差 +0.64 ms、27.05 tok/s）だった。XGrammar ケースは replay と
 生成 token 列が異なる。各値は単回測定であり、変動と schema による差を含む。後者は
 compute との往復を測定し、HTTP / SSE の処理時間は含まない。
+
+指定 regression の初回実行は 25 test 通過・3 test 失敗。失敗は不正な grammar
+flag の error code、および structured output を旧仕様の 400 と期待する 2 test
+だった。修正後、該当 test を個別に再実行し、`test_compute_dflash2.py` 99 件、
+`test_server_dflash2.py` 21 件、`test_server_unsupported.py` 76 件が通過した。
+reasoning の thinking budget test 内の DFlash2 / 複数 GPU ケースは環境不足で skip。
+追加した compute / server structured test は個別実行で成功し、core に登録した。

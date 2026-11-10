@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end structured Chat Completions, including streaming and rejection."""
 import json
+import importlib.util
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,6 +33,9 @@ def check(value, schema):
 
 
 def main():
+    if importlib.util.find_spec("xgrammar") is None:
+        print("SKIP: xgrammar is not installed")
+        return 77
     with ServerHarness() as server:
         url = server.base_url + "/chat/completions"
         base = {"model":"shelf", "messages":[{"role":"user", "content":"Return a short JSON value matching the requested format."}],

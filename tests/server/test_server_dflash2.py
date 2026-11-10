@@ -8,6 +8,7 @@ structured output が通常 decode に切り替わって動作することを確
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import time
@@ -109,7 +110,11 @@ def main() -> int:
              "messages": [{"role": "user", "content": "Produce the JSON value."}],
              "temperature": 0, "max_tokens": 256, "chat_template_kwargs": {"enable_thinking": False},
              "response_format": {"type": "json_object"}})
-        checker.check("structured accepted", status == 200, f"{status} {body[:300]}")
+        if importlib.util.find_spec("xgrammar") is None:
+            checker.check("structured requires xgrammar", status == 400 and
+                          json.loads(body)["error"]["code"] == "unsupported_parameter", body[:300])
+        else:
+            checker.check("structured accepted", status == 200, f"{status} {body[:300]}")
         if status == 200:
             content = json.loads(body)["choices"][0]["message"]["content"]
             checker.check("structured object", isinstance(json.loads(content), dict), content)
