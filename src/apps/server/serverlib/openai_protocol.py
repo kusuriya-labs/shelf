@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ class ChatRequest:
     enable_thinking: bool = True
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     preserve_thinking: bool = True
+    forced_tool_name: str | None = None
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -168,18 +170,16 @@ def thinking_budget_tokens(budget_tokens: int) -> int:
     return max(1, budget_tokens - reserve)
 
 
-def parse_tool_choice(value) -> str:
+def parse_tool_choice(value) -> tuple[str, str | None]:
     if value is None:
-        return "auto"
-
-    if value in ("auto", "none"):
-        return value
-
-    raise OpenAIProtocolError(
-        "only tool_choice='auto' and 'none' are supported",
-        param="tool_choice",
-        code="unsupported_parameter",
-    )
+        return "auto", None
+    if isinstance(value, str) and value in ("auto", "none", "required"):
+        return value, None
+    if isinstance(value, dict) and set(value) == {"type", "function"} and value.get("type") == "function":
+        function = value.get("function")
+        if isinstance(function, dict) and set(function) == {"name"} and isinstance(function["name"], str) and function["name"]:
+            return "named", function["name"]
+    raise OpenAIProtocolError("invalid tool_choice", param="tool_choice")
 
 
 def normalize_tools(raw_tools) -> list[dict] | None:
@@ -396,8 +396,14 @@ def parse_chat_request(body: Any,
     if not isinstance(stream, bool):
         raise OpenAIProtocolError("stream must be a boolean", param="stream")
 
-    tool_choice = parse_tool_choice(body.get("tool_choice"))
+    tool_choice, forced_tool_name = parse_tool_choice(body.get("tool_choice"))
     tools = normalize_tools(body.get("tools"))
+    if tool_choice in ("required", "named"):
+        if not tools or (forced_tool_name is not None and forced_tool_name not in {tool["function"]["name"] for tool in tools}):
+            raise OpenAIProtocolError("tool_choice requires a matching function in tools", param="tool_choice", code="unsupported_parameter")
+        if forced_tool_name is not None:
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", forced_tool_name) is None:
+                raise OpenAIProtocolError("invalid function name", param="tool_choice")
     max_new_tokens = _max_new_tokens(body, inference_budget_tokens)
 
     temperature = _number(body, "temperature", 0.0, low=0.0)
@@ -423,6 +429,7 @@ def parse_chat_request(body: Any,
         messages=list(messages),
         tools=tools,
         tool_choice=tool_choice,
+        forced_tool_name=forced_tool_name,
         stream=stream,
         max_new_tokens=max_new_tokens,
         temperature=temperature,

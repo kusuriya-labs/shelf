@@ -48,6 +48,7 @@ class PreparedChat:
     enable_thinking: bool = True
     reasoning_budget_tokens: int = 0
     reasoning_close_token: int = -1
+    tool_prefix: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,15 @@ class ChatService:
                 param="messages",
             ) from exc
 
+        tool_prefix = ""
+        if request.tool_choice in ("required", "named"):
+            tool_prefix = "<tool_call>\n<function="
+            if request.forced_tool_name is not None:
+                tool_prefix += request.forced_tool_name + ">\n"
+            prefix = ("</think>\n\n" if request.enable_thinking else "") + tool_prefix
+            tokenizer = getattr(self._processor, "tokenizer", self._processor)
+            prompt_ids += list(tokenizer.encode(prefix, add_special_tokens=False))
+
         if len(prompt_ids) >= self._max_seq_len:
             raise OpenAIProtocolError(
                 "context length exceeded",
@@ -208,14 +218,15 @@ class ChatService:
         max_new_tokens = min(request.max_new_tokens, budget, remaining)
 
         reasoning_budget_tokens = 0
-        if request.enable_thinking and self._reasoning_close_token >= 0:
+        if request.enable_thinking and not tool_prefix and self._reasoning_close_token >= 0:
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
         return PreparedChat(
             prompt_ids=prompt_ids,
             tools=tools,
             max_new_tokens=max_new_tokens,
-            enable_thinking=request.enable_thinking,
+            enable_thinking=request.enable_thinking and not tool_prefix,
+            tool_prefix=tool_prefix,
             reasoning_budget_tokens=reasoning_budget_tokens,
             reasoning_close_token=self._reasoning_close_token,
         )
@@ -224,7 +235,7 @@ class ChatService:
 
     async def complete(self, request: ChatRequest) -> AssistantResult:
         prepared = self.prepare(request)
-        if request.stop:
+        if request.stop or prepared.tool_prefix:
             content, reasoning_parts, calls = [], [], []
             done = None
             async for event in self.stream(request, prepared):
@@ -257,7 +268,7 @@ class ChatService:
         try:
             parsed = codec.parse_answer(
                 self._processor,
-                split.answer,
+                prepared.tool_prefix + split.answer,
                 tools=prepared.tools,
             )
         except codec.ToolParseError as exc:
@@ -273,6 +284,7 @@ class ChatService:
             ) from exc
 
         tool_calls = parsed["tool_calls"]
+        self._validate_forced_calls(request, tool_calls, str(done.get("finish_reason", "")))
 
         return AssistantResult(
             content=parsed["content"],
@@ -323,7 +335,8 @@ class ChatService:
     async def _stream_impl(self, prepared: PreparedChat,
                            request: ChatRequest) -> AsyncIterator[Any]:
         tracker = {"tokens": 0}
-        inner = (self._stream_tools(prepared, request, tracker) if prepared.tools
+        inner = (self._stream_forced_tools(prepared, request, tracker) if prepared.tool_prefix
+                 else self._stream_tools(prepared, request, tracker) if prepared.tools
                  else self._stream_text(prepared, request, tracker))
         pending = ""
         try:
@@ -402,6 +415,52 @@ class ChatService:
             raise ChatServiceError(str(exc), code="compute_error") from exc
         finally:
             await stream.aclose()
+
+    async def _stream_forced_tools(self, prepared: PreparedChat,
+                                   request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
+        generated = []
+        done = None
+        stream = self._stream_open(prepared, request)
+        try:
+            async for event in stream:
+                if "token_id" in event:
+                    generated.append(int(event["token_id"]))
+                    tracker["tokens"] = len(generated)
+                elif "done" in event:
+                    done = event["done"]
+                    break
+        except ComputeInvalidArgument as exc:
+            raise OpenAIProtocolError(str(exc)) from exc
+        except ComputeError as exc:
+            raise ChatServiceError(str(exc), code="compute_error") from exc
+        finally:
+            await stream.aclose()
+        if done is None:
+            raise ChatServiceError("compute ended without a done event", code="compute_error")
+        final_ids = [int(x) for x in done.get("generated_ids", generated)]
+        tracker["tokens"] = len(final_ids)
+        log_tokens(final_ids)
+        answer = prepared.tool_prefix + codec.split_generation(
+            self._processor, final_ids, thinking=False).answer
+        close = answer.rfind("</tool_call>")
+        calls = []
+        if close >= 0:
+            complete = answer[:close + len("</tool_call>")]
+            if "</function>" not in complete:
+                raise ChatServiceError("incomplete tool call", code="tool_parse_failure")
+            try:
+                calls = codec.parse_answer(self._processor, complete, tools=prepared.tools)["tool_calls"]
+            except codec.ToolParseError as exc:
+                raise ChatServiceError(f"tool call parse failure: {exc}", code="tool_parse_failure") from exc
+        finish = str(done.get("finish_reason", ""))
+        self._validate_forced_calls(request, calls, finish)
+        for index, call in enumerate(calls):
+            delta = _tool_call_delta(call, index)
+            if delta is not None:
+                yield delta
+        yield StreamDone(map_finish_reason(finish, has_tool_calls=bool(calls)),
+            prompt_tokens=len(prepared.prompt_ids), completion_tokens=len(final_ids),
+            cached_tokens=_cached_tokens(done))
 
     async def _stream_tools(self, prepared: PreparedChat,
                             request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
@@ -511,6 +570,19 @@ class ChatService:
                 if call is not None:
                     state["calls"] += 1
                     yield call
+
+    def _validate_forced_name(self, request, name):
+        if request is not None and request.tool_choice in ("required", "named"):
+            allowed = {tool["function"]["name"] for tool in request.tools}
+            if name not in allowed or (request.forced_tool_name is not None and name != request.forced_tool_name):
+                raise ChatServiceError(f"unknown function in required tool call: {name}", code="tool_parse_failure")
+
+    def _validate_forced_calls(self, request, calls, finish):
+        if request.tool_choice in ("required", "named"):
+            if not calls and finish != "length":
+                raise ChatServiceError("required tool call was not generated", code="tool_parse_failure")
+            for call in calls:
+                self._validate_forced_name(request, call["function"]["name"])
 
     def _content_delta(self, state: dict, chunk: str) -> str:
         state["content"] += chunk

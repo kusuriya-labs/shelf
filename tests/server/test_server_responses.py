@@ -16,7 +16,8 @@ sys.path.insert(0, str(root / "src/apps/common"))
 from aiohttp.test_utils import TestClient, TestServer
 from shelf_server import create_app
 from serverlib.chat_service import AssistantResult, ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta, map_finish_reason
-from serverlib.openai_protocol import openai_messages_to_hf
+from serverlib.openai_protocol import ChatServiceError, openai_messages_to_hf, parse_chat_request
+from serverlib.responses_protocol import parse_responses_request
 
 
 class FakeService:
@@ -240,6 +241,70 @@ class FinishReasonTests(unittest.TestCase):
         for calls in (False, True):
             with self.assertRaises(Exception):
                 map_finish_reason("unexpected", has_tool_calls=calls)
+
+
+class ToolChoiceTests(unittest.IsolatedAsyncioTestCase):
+    class Tokenizer:
+        def encode(self, text, **kwargs):
+            self.last_text = text
+            return [8, 9]
+
+    class Compute:
+        def __init__(self, finish="stop"):
+            self.finish = finish
+
+        async def generate_stream(self, ids, maximum, **kwargs):
+            yield {"token_id": 7}
+            yield {"done": {"generated_ids": [7], "finish_reason": self.finish}}
+
+    def request(self, choice):
+        return parse_chat_request({"model": "shelf", "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "weather", "parameters": {"type": "object"}}}],
+            "tool_choice": choice, "max_tokens": 20})
+
+    async def test_prefix_and_complete_tool(self):
+        tokenizer = self.Tokenizer()
+        service = ChatService(tokenizer, self.Compute(), "shelf", 128, inference_budget_tokens=32)
+        request = self.request({"type": "function", "function": {"name": "weather"}})
+        parsed = {"content": "", "tool_calls": [{"function": {"name": "weather", "arguments": {"city": "Tokyo"}}}]}
+        with patch('serverlib.chat_service.codec.prompt_ids', return_value=[1, 2, 3]), \
+             patch('serverlib.chat_service.codec.split_generation', return_value=SimpleNamespace(answer="</function></tool_call>")), \
+             patch('serverlib.chat_service.codec.parse_answer', return_value=parsed) as parse:
+            prepared = service.prepare(request)
+            self.assertEqual(tokenizer.last_text, "</think>\n\n<tool_call>\n<function=weather>\n")
+            self.assertFalse(prepared.enable_thinking)
+            self.assertEqual(prepared.reasoning_budget_tokens, 0)
+            events = [event async for event in service.stream(request, prepared)]
+        self.assertEqual(events[0].name, "weather")
+        self.assertEqual(json.loads(events[0].arguments), {"city": "Tokyo"})
+        self.assertEqual(events[-1].finish_reason, "tool_calls")
+        self.assertTrue(parse.call_args.args[1].startswith("<tool_call>\n<function=weather>"))
+
+    async def test_partial_markup_and_unknown_name(self):
+        tokenizer = self.Tokenizer()
+        request = self.request("required")
+        service = ChatService(tokenizer, self.Compute("length"), "shelf", 128, inference_budget_tokens=32)
+        with patch('serverlib.chat_service.codec.prompt_ids', return_value=[1]), \
+             patch('serverlib.chat_service.codec.split_generation', return_value=SimpleNamespace(answer="weather")), \
+             patch('serverlib.chat_service.codec.parse_answer') as parse:
+            events = [event async for event in service.stream(request)]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].finish_reason, "length")
+        parse.assert_not_called()
+        service = ChatService(tokenizer, self.Compute(), "shelf", 128, inference_budget_tokens=32)
+        invalid = {"content": "", "tool_calls": [{"function": {"name": "unknown", "arguments": {}}}]}
+        with patch('serverlib.chat_service.codec.prompt_ids', return_value=[1]), \
+             patch('serverlib.chat_service.codec.split_generation', return_value=SimpleNamespace(answer="unknown></function></tool_call>")), \
+             patch('serverlib.chat_service.codec.parse_answer', return_value=invalid):
+            with self.assertRaises(ChatServiceError):
+                _ = [event async for event in service.stream(request)]
+
+    def test_responses_named_choice(self):
+        request = parse_responses_request({"model": "shelf", "input": "hello", "tools": [
+            {"type": "function", "name": "weather", "parameters": {"type": "object"}}],
+            "tool_choice": {"type": "function", "name": "weather"}}, inference_budget_tokens=128)
+        self.assertEqual(request.forced_tool_name, "weather")
+        self.assertEqual(request.tool_choice, "named")
 
 
 class ComputeIntegrationTests(unittest.IsolatedAsyncioTestCase):

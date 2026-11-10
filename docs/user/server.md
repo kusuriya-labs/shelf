@@ -497,7 +497,12 @@ Shelf Server は tool を実行しない。実際の tool 実行は client 側�
 client が tool 結果を `role: "tool"` message として返すと、Shelf はそれを読んで次の
 assistant 応答を生成する。
 
-`tool_choice` は `auto` / `none` のみ受け付ける。`none` は tool 定義を model へ渡さない。
+`tool_choice` は `auto`、`none`、`required`、関数名指定を受け付ける。`none` は tool 定義を model へ渡さない。
+`required` と関数名指定では思考を閉じ、tool call の開始部分を prompt に補って生成する。
+その開始部分は prompt token に含み、生成上限には含まない。tool call が閉じるまで stream 出力を保留する。
+関数名指定は指定した名前以外を返さない。`required` で未定義の関数名が生成された場合はエラーとする。
+引数の構文と意味はモデルの生成次第で、schema に対する保証はない。生成上限に到達して未完了の
+markup は tool call に変換せず、`length` を返す。tools 未指定や存在しない関数名は 400 とする。
 `required` と関数名指定は HTTP 400 とする。文法制約を使わない生成では tool call の
 発生や指定した関数の選択を保証できないためである。存在しない関数名も拒否する。
 
@@ -537,7 +542,7 @@ message として扱う。tool は `type: function`、`name`、`description`、
 `parameters` を同じ object に置く。tool の実行と結果の再送はクライアントが行う。
 
 `max_output_tokens`、`temperature`、`top_p`、`seed`、`reasoning.effort`
-（`low` / `medium` / `xhigh`）、`tool_choice`（`auto` / `none`）、
+（`low` / `medium` / `xhigh`）、`tool_choice`（`auto` / `none` / `required` / 関数名指定）、
 `parallel_tool_calls: true`、`truncation: disabled`、空の `include` または
 `include: ["reasoning.encrypted_content"]` を受け付ける。後者を指定しても暗号化された思考は返さない。
 `reasoning.summary: "auto"` は受理するが summary の生成は指定できない。
@@ -573,7 +578,6 @@ for event in client.responses.create(model="shelf", input="こんにちは", str
 response_format
 reasoning
 text
-tool_choice="required" / named function
 tools[].function.strict=true
 parallel_tool_calls=false
 n != 1 / logit_bias / logprobs

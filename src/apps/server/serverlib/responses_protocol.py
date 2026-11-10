@@ -135,6 +135,12 @@ def parse_responses_request(body, *, inference_budget_tokens):
     for source, target in (("stream", "stream"), ("max_output_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"), ("seed", "seed"), ("tool_choice", "tool_choice")):
         if source in body:
             chat[target] = body[source]
+    choice = chat.get("tool_choice")
+    if isinstance(choice, dict):
+        fields(choice, {"type", "name"}, "tool_choice")
+        if choice.get("type") != "function" or not isinstance(choice.get("name"), str):
+            raise OpenAIProtocolError("invalid tool_choice", param="tool_choice")
+        chat["tool_choice"] = {"type": "function", "function": {"name": choice["name"]}}
     if body.get("reasoning") is not None:
         fields(body["reasoning"], {"effort", "summary"}, "reasoning")
         if body["reasoning"].get("summary") not in (None, "auto"):
