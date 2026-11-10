@@ -488,6 +488,73 @@ void shelf_split_bf16(ElementwiseArgs args) {
     }
 }
 
+__global__ void scale_bf16_f32_kernel(const bf16* input, uint32_t in_stride,
+    float* output, uint32_t out_stride, uint32_t rows, uint32_t features, float scale) {
+    const uint32_t row = elementwise_row();
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && col < features)
+        output[static_cast<size_t>(row) * out_stride + col] =
+            __bfloat162float(input[static_cast<size_t>(row) * in_stride + col]) * scale;
+}
+
+hipError_t launch_scale_bf16_f32(const bf16_t* input, uint32_t in_stride,
+    float* output, uint32_t out_stride, uint32_t rows, uint32_t features,
+    float scale, hipStream_t stream) {
+    if (!input || !output || !rows || !features) return hipErrorInvalidValue;
+    const dim3 grid((features + kThreads - 1u) / kThreads, elementwise_grid_y(rows),
+                    (rows + kElementwiseGridYMax - 1u) / kElementwiseGridYMax);
+    scale_bf16_f32_kernel<<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const bf16*>(input), in_stride, output, out_stride, rows, features, scale);
+    return hipGetLastError();
+}
+
+__global__ void mul_bf16_kernel(
+    const bf16* a, uint32_t as, const bf16* b, uint32_t bs,
+    bf16* out, uint32_t os, uint32_t rows, uint32_t features) {
+    const uint32_t row = elementwise_row();
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows || col >= features) return;
+    const float av = __bfloat162float(a[static_cast<size_t>(row) * as + col]);
+    const float bv = __bfloat162float(b[static_cast<size_t>(row) * bs + col]);
+    out[static_cast<size_t>(row) * os + col] = __float2bfloat16(av * bv);
+}
+
+hipError_t launch_mul_bf16(
+    const bf16_t* a, uint32_t as, const bf16_t* b, uint32_t bs,
+    bf16_t* out, uint32_t os, uint32_t rows, uint32_t features, hipStream_t stream) {
+    if (!a || !b || !out || !rows || !features) return hipErrorInvalidValue;
+    const dim3 grid((features + kThreads - 1u) / kThreads, elementwise_grid_y(rows),
+                    (rows + kElementwiseGridYMax - 1u) / kElementwiseGridYMax);
+    mul_bf16_kernel<<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const bf16*>(a), as, reinterpret_cast<const bf16*>(b), bs,
+        reinterpret_cast<bf16*>(out), os, rows, features);
+    return hipGetLastError();
+}
+
+__global__ void split_uneven_bf16_kernel(
+    const bf16* input, uint32_t input_stride, bf16* a, uint32_t a_stride,
+    bf16* b, uint32_t b_stride, uint32_t rows, uint32_t fa, uint32_t fb) {
+    const uint32_t row = elementwise_row();
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows || col >= fa + fb) return;
+    const bf16 v = input[static_cast<size_t>(row) * input_stride + col];
+    if (col < fa) a[static_cast<size_t>(row) * a_stride + col] = v;
+    else b[static_cast<size_t>(row) * b_stride + col - fa] = v;
+}
+
+hipError_t launch_split_uneven_bf16(
+    const bf16_t* input, uint32_t input_stride, bf16_t* a, uint32_t a_stride,
+    bf16_t* b, uint32_t b_stride, uint32_t rows, uint32_t fa, uint32_t fb,
+    hipStream_t stream) {
+    if (!input || !a || !b || !rows || !fa || !fb) return hipErrorInvalidValue;
+    const uint32_t gx = (fa + fb + kThreads - 1u) / kThreads;
+    const dim3 grid(gx, elementwise_grid_y(rows), (rows + kElementwiseGridYMax - 1u) / kElementwiseGridYMax);
+    split_uneven_bf16_kernel<<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const bf16*>(input), input_stride, reinterpret_cast<bf16*>(a), a_stride,
+        reinterpret_cast<bf16*>(b), b_stride, rows, fa, fb);
+    return hipGetLastError();
+}
+
 hipError_t launch_split_bf16(
     const bf16_t* input, uint32_t input_row_stride,
     bf16_t* o0, uint32_t o0_row_stride,

@@ -106,7 +106,12 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
     si.features = F;
     si.group_size = G;
     si.rows = rows;
-    if (select_rmsnorm_implementation(si) != RmsNormImplementation::Optimized)
+    const bool offset_bf16 =
+        b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16) &&
+        in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::BF16 && wptr != nullptr &&
+        (wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE ||
+         wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP);
+    if (!offset_bf16 && select_rmsnorm_implementation(si) != RmsNormImplementation::Optimized)
         return PhysicalResolveStatus::NotApplicable;
 
     out.input = reinterpret_cast<uint64_t>(in.ptr);
@@ -118,6 +123,7 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
     out.input_row_stride = in.row_stride;
     out.output_row_stride = dst.row_stride;
     out.eps = b.scalar_a;
+    out.weight_offset = b.scalar_b;
     out.input_dtype = rmsnorm_kd(in.dtype);
     out.weight_dtype = rmsnorm_kd(wdt);
     out.output_dtype = rmsnorm_kd(dst.dtype);

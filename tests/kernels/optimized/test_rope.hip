@@ -400,6 +400,17 @@ bool run_plamo_reference() {
             hipMemcpy(&device_error, err, sizeof(device_error), hipMemcpyDeviceToHost) != hipSuccess) {
             pass = false; break;
         }
+        uint16_t optimized[512];
+        if (shelf::kernel::launch_rope_bf16_rounded(
+                static_cast<const shelf::bf16_t*>(in), 128,
+                static_cast<shelf::bf16_t*>(out), 128,
+                static_cast<const uint32_t*>(pos), 4, 128, 128, 128,
+                index == 0 ? 10000.f : 1000000.f,
+                static_cast<const double*>(table) + index * 64, b.scalar_a, nullptr) != hipSuccess ||
+            hipMemcpy(optimized, out, sizeof(optimized), hipMemcpyDeviceToHost) != hipSuccess) {
+            pass = false; break;
+        }
+        for (size_t j = 0; j < 512; ++j) if (optimized[j] != actual[j]) pass = false;
         const uint16_t* expected = index == 0 ? plamo_output_0 : plamo_output_1;
         size_t mismatches = 0; float max_diff = 0;
         for (size_t j = 0; j < 512; ++j) {

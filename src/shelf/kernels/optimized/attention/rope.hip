@@ -250,6 +250,48 @@ hipError_t launch_rope_inv_freq_yarn_init(
     return hipGetLastError();
 }
 
+namespace {
+__global__ void rope_bf16_rounded_kernel(
+    const bf16* in, uint32_t in_stride, bf16* out, uint32_t out_stride,
+    const uint32_t* positions, uint32_t features, uint32_t head_dim,
+    uint32_t rotary, float theta, const double* inv_freq, float factor) {
+    const uint32_t row = blockIdx.y;
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= features) return;
+    const uint32_t hc = col % head_dim, half = rotary / 2u;
+    const bf16* x = in + static_cast<size_t>(row) * in_stride;
+    float value = __bfloat162float(x[col]);
+    if (hc < rotary) {
+        const uint32_t pos = positions ? positions[row] : row;
+        const uint32_t rc = hc % half;
+        const double freq = inv_freq ? inv_freq[rc] : 1.0 / pow(static_cast<double>(theta), static_cast<double>(rc) / half);
+        const float angle = static_cast<float>(pos) * static_cast<float>(freq);
+        float cs = __bfloat162float(__float2bfloat16(cosf(angle)));
+        float sn = __bfloat162float(__float2bfloat16(sinf(angle)));
+        cs = __bfloat162float(__float2bfloat16(cs * factor));
+        sn = __bfloat162float(__float2bfloat16(sn * factor));
+        const uint32_t partner = col - hc + (hc < half ? hc + half : hc - half);
+        const float lhs = __bfloat162float(__float2bfloat16(value * cs));
+        const float rhs = __bfloat162float(__float2bfloat16(__bfloat162float(x[partner]) * sn));
+        value = hc < half ? lhs - rhs : lhs + rhs;
+    }
+    out[static_cast<size_t>(row) * out_stride + col] = __float2bfloat16(value);
+}
+}
+
+hipError_t launch_rope_bf16_rounded(
+    const bf16_t* input, uint32_t input_stride, bf16_t* output, uint32_t output_stride,
+    const uint32_t* positions, uint32_t rows, uint32_t features, uint32_t head_dim,
+    uint32_t rotary, float theta, const double* inv_freq, float factor, hipStream_t stream) {
+    if (!input || !output || input == output || !rows || !features || !head_dim ||
+        features % head_dim || !rotary || (rotary & 1u) || rotary > head_dim || rows > 65535u)
+        return hipErrorInvalidValue;
+    rope_bf16_rounded_kernel<<<dim3((features + 255u) / 256u, rows), 256, 0, stream>>>(
+        reinterpret_cast<const bf16*>(input), input_stride, reinterpret_cast<bf16*>(output),
+        output_stride, positions, features, head_dim, rotary, theta, inv_freq, factor);
+    return hipGetLastError();
+}
+
 hipError_t launch_rope_f32_bf16_generic(
     const float* input, uint32_t input_row_stride,
     bf16_t* output, uint32_t output_row_stride,

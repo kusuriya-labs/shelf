@@ -144,6 +144,51 @@ void shelf_rmsnorm_f32_pg_direct(RmsNormF32PgDirectArgs args) {
         args.eps);
 }
 
+namespace {
+__global__ void rmsnorm_offset_bf16_kernel(
+    const __hip_bfloat16* input, const __hip_bfloat16* weight, __hip_bfloat16* output,
+    uint32_t features, uint32_t group, uint32_t in_stride, uint32_t out_stride,
+    bool per_feature, float eps, float offset) {
+    const uint32_t groups = features / group;
+    const uint32_t row = blockIdx.x / groups, g = blockIdx.x % groups;
+    const uint32_t tid = threadIdx.x;
+    const auto* x = input + static_cast<size_t>(row) * in_stride + g * group;
+    auto* y = output + static_cast<size_t>(row) * out_stride + g * group;
+    float sum = 0.f;
+    for (uint32_t i = tid; i < group; i += blockDim.x) {
+        const float v = __bfloat162float(x[i]);
+        sum += v * v;
+    }
+    __shared__ float partial[256];
+    partial[tid] = sum;
+    __syncthreads();
+    for (uint32_t step = blockDim.x / 2; step; step >>= 1) {
+        if (tid < step) partial[tid] += partial[tid + step];
+        __syncthreads();
+    }
+    const float inv = rsqrtf(partial[0] / static_cast<float>(group) + eps);
+    const auto* w = weight + (per_feature ? g * group : 0);
+    for (uint32_t i = tid; i < group; i += blockDim.x) {
+        const float norm = __bfloat162float(__float2bfloat16(__bfloat162float(x[i]) * inv));
+        const float scale = __bfloat162float(__float2bfloat16(offset + __bfloat162float(w[i])));
+        y[i] = __float2bfloat16(norm * scale);
+    }
+}
+}
+
+hipError_t launch_rmsnorm_offset_bf16(
+    const void* input, const void* weight, void* output, uint32_t rows,
+    uint32_t features, uint32_t group_size, uint32_t input_stride,
+    uint32_t output_stride, bool weight_per_feature, float eps, float offset,
+    hipStream_t stream) {
+    if (!group_size || !features || features % group_size) return hipErrorInvalidValue;
+    rmsnorm_offset_bf16_kernel<<<rows * (features / group_size), 256, 0, stream>>>(
+        static_cast<const __hip_bfloat16*>(input), static_cast<const __hip_bfloat16*>(weight),
+        static_cast<__hip_bfloat16*>(output), features, group_size, input_stride,
+        output_stride, weight_per_feature, eps, offset);
+    return hipGetLastError();
+}
+
 uint32_t rmsnorm_bf16_pf_oneplus_block_size(uint32_t group_size) noexcept {
     const uint32_t chunks = (group_size + 3u) / 4u;
     return chunks <= 32u ? 32u : chunks <= 64u ? 64u : chunks <= 128u ? 128u

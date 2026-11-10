@@ -56,6 +56,12 @@ hipError_t launch_rope_inv_freq_yarn_init(
     uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,
     bool truncate, hipStream_t stream);
 
+hipError_t launch_rope_bf16_rounded(
+    const bf16_t* input, uint32_t input_row_stride, bf16_t* output,
+    uint32_t output_row_stride, const uint32_t* positions, uint32_t rows,
+    uint32_t features, uint32_t head_dim, uint32_t rotary_dim, float theta,
+    const double* inv_freq, float attention_factor, hipStream_t stream);
+
 hipError_t launch_rope_f32_bf16_generic(
     const float* input, uint32_t input_row_stride,
     bf16_t* output, uint32_t output_row_stride,

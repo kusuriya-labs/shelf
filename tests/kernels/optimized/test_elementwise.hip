@@ -461,6 +461,55 @@ bool test_offset_rmsnorm() {
     return true;
 }
 
+bool test_scale_bf16_f32() {
+    constexpr uint32_t rows = 2, features = 257, stride = 273;
+    Buf in, out;
+    const size_t count = rows * stride;
+    if (!in.alloc(count * 2) || !out.alloc(count * 4)) return false;
+    std::vector<uint16_t> values(count);
+    for (size_t i = 0; i < count; ++i)
+        values[i] = bf16_bits((static_cast<int>(i % 37) - 18) / 8.f);
+    if (!in.fill_u16(values) || !out.poison()) return false;
+    if (::shelf::kernel::launch_scale_bf16_f32(
+            static_cast<const ::shelf::bf16_t*>(in.dev), stride,
+            static_cast<float*>(out.dev), stride, rows, features, 0.5f, nullptr) != hipSuccess)
+        return false;
+    std::vector<float> got;
+    if (!out.read_f(got)) return false;
+    for (uint32_t r = 0; r < rows; ++r) for (uint32_t c = 0; c < features; ++c) {
+        const size_t i = static_cast<size_t>(r) * stride + c;
+        const uint32_t bits = static_cast<uint32_t>(values[i]) << 16;
+        float v; std::memcpy(&v, &bits, 4);
+        if (got[i] != v * 0.5f) return false;
+    }
+    return true;
+}
+
+bool test_mul_bf16() {
+    constexpr uint32_t rows = 3, features = 257, stride = 273;
+    Buf a, b, out;
+    const size_t count = rows * stride;
+    if (!a.alloc(count * 2) || !b.alloc(count * 2) || !out.alloc(count * 2)) return false;
+    std::vector<uint16_t> av(count), bv(count), got;
+    for (size_t i = 0; i < count; ++i) {
+        av[i] = bf16_bits((static_cast<int>(i % 31) - 15) / 8.f);
+        bv[i] = bf16_bits((static_cast<int>(i % 19) - 9) / 4.f);
+    }
+    if (!a.fill_u16(av) || !b.fill_u16(bv) || !out.poison()) return false;
+    if (::shelf::kernel::launch_mul_bf16(
+            static_cast<const ::shelf::bf16_t*>(a.dev), stride,
+            static_cast<const ::shelf::bf16_t*>(b.dev), stride,
+            static_cast<::shelf::bf16_t*>(out.dev), stride, rows, features, nullptr) != hipSuccess ||
+        !out.read_u16(got)) return false;
+    for (uint32_t r = 0; r < rows; ++r) for (uint32_t c = 0; c < features; ++c) {
+        const size_t i = static_cast<size_t>(r) * stride + c;
+        uint32_t aa = static_cast<uint32_t>(av[i]) << 16, bb = static_cast<uint32_t>(bv[i]) << 16;
+        float af, bf; std::memcpy(&af, &aa, 4); std::memcpy(&bf, &bb, 4);
+        if (got[i] != bf16_bits(af * bf)) return false;
+    }
+    return true;
+}
+
 bool test_unequal_split() {
     constexpr uint32_t rows = 3u, q = 2048u, kv = 128u;
     constexpr uint32_t total = q + 2u * kv;
@@ -481,6 +530,12 @@ bool test_unequal_split() {
     set_val(vals[1], 1, q, q, query.dev, DT::BF16);
     set_val(vals[2], 2, 2u * kv, 2u * kv, kv_pair.dev, DT::BF16);
     if (!ctx.run(vals, 3, b)) return false;
+    if (!query.poison() || !kv_pair.poison()) return false;
+    if (::shelf::kernel::launch_split_uneven_bf16(
+            static_cast<const ::shelf::bf16_t*>(input.dev), total,
+            static_cast<::shelf::bf16_t*>(query.dev), q,
+            static_cast<::shelf::bf16_t*>(kv_pair.dev), 2u * kv,
+            rows, q, 2u * kv, nullptr) != hipSuccess) return false;
     set_val(vals[0], 0, 2u * kv, 2u * kv, kv_pair.dev, DT::BF16);
     set_val(vals[1], 1, kv, kv, key.dev, DT::BF16);
     set_val(vals[2], 2, kv, kv, value.dev, DT::BF16);
@@ -503,6 +558,14 @@ int main(int argc, char** argv) {
     if (hipSetDevice(0) != hipSuccess) return 1;
     if (!test_offset_rmsnorm()) {
         std::printf("FAIL: offset RMSNorm\n");
+        return 1;
+    }
+    if (!test_scale_bf16_f32()) {
+        std::printf("FAIL: bf16 to f32 scale\n");
+        return 1;
+    }
+    if (!test_mul_bf16()) {
+        std::printf("FAIL: bf16 multiply\n");
         return 1;
     }
     if (!test_unequal_split()) {

@@ -20,6 +20,21 @@ struct Rule {
 constexpr uint32_t kMeasuredMaxGroupRows = 36608u;
 
 constexpr Rule kRules[] = {
+    // PLaMo 3 BF16 residuals, SwiGLU components and contiguous halves.
+    {ElementwiseProfile::ScaleBf16ToF32, 107520u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::MulBf16, 6144u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::MulBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::MulBf16, 16384u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ResidualBf16, 1536u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::ResidualBf16, 4096u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 6144u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SiluBf16, 16384u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16Halves, 128u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16Halves, 512u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16Halves, 6144u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16Halves, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SplitBf16Halves, 16384u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::ResidualBf16, 2560u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SwigluBf16, 9216u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::SigmoidBf16ToF32, 4096u, 0u, 1u, kOptimizedMaxRows},

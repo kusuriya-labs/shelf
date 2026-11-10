@@ -59,7 +59,11 @@ int main() {
 
     check(sel(KVCacheDType::BF16, 8, 256, 16, 1) == KvAppendImplementation::Correctness,
           "bf16 unknown kv_heads -> Correctness");
-    check(sel(KVCacheDType::BF16, 4, 128, 16, 1) == KvAppendImplementation::Correctness,
+    check(sel(KVCacheDType::BF16, 4, 128, 16, 1) == KvAppendImplementation::Optimized,
+          "bf16 PLaMo head_dim 128 -> Optimized");
+    check(sel(KVCacheDType::BF16, 1, 128, 16, 1) == KvAppendImplementation::Optimized,
+          "bf16 PLaMo single KV head -> Optimized");
+    check(sel(KVCacheDType::BF16, 4, 64, 16, 1) == KvAppendImplementation::Correctness,
           "bf16 unknown head_dim -> Correctness");
     check(sel(KVCacheDType::BF16, 4, 256, 32, 1) == KvAppendImplementation::Correctness,
           "bf16 unknown page_tokens -> Correctness");

@@ -153,6 +153,19 @@ hipError_t launch_scale_bf16(
     bf16_t* output, uint32_t output_row_stride,
     uint32_t rows, uint32_t features, float scale, hipStream_t stream);
 
+hipError_t launch_scale_bf16_f32(const bf16_t* input, uint32_t input_stride,
+    float* output, uint32_t output_stride, uint32_t rows, uint32_t features,
+    float scale, hipStream_t stream);
+
+hipError_t launch_mul_bf16(
+    const bf16_t* a, uint32_t a_stride, const bf16_t* b, uint32_t b_stride,
+    bf16_t* out, uint32_t out_stride, uint32_t rows, uint32_t features, hipStream_t stream);
+
+hipError_t launch_split_uneven_bf16(
+    const bf16_t* input, uint32_t input_row_stride, bf16_t* o0, uint32_t o0_row_stride,
+    bf16_t* o1, uint32_t o1_row_stride, uint32_t rows, uint32_t features_a,
+    uint32_t features_b, hipStream_t stream);
+
 hipError_t launch_split_bf16(
     const bf16_t* input, uint32_t input_row_stride,
     bf16_t* o0, uint32_t o0_row_stride,
