@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -158,8 +159,8 @@ def main() -> int:
         print(f"model dir not found: {model_dir()}", file=sys.stderr)
         return 2
 
-    boundary_log = Path("/tmp/shelf-g11c-boundary-compute.log")
-    concurrency_log = Path("/tmp/shelf-g11c-concurrency-compute.log")
+    boundary_log = Path(tempfile.gettempdir()) / "shelf-g11c-boundary-compute.log"
+    concurrency_log = Path(tempfile.gettempdir()) / "shelf-g11c-concurrency-compute.log"
     for path in (boundary_log, concurrency_log):
         path.unlink(missing_ok=True)
     try:

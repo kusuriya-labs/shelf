@@ -122,27 +122,30 @@ def run_test(name, env, tail):
     path = SERVER_DIR / name
     started = time.monotonic()
     proc = subprocess.run(
-        [sys.executable, str(path)],
+        [sys.executable, "-I", "-u", str(path)],
         cwd=str(SERVER_DIR), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     duration = time.monotonic() - started
     output = proc.stdout or ""
     if proc.returncode == 77:
         print(f"[SKIP] {name} ({duration:.1f}s)")
-        return True
+        return "skip"
     if proc.returncode != 0:
         lines = output.rstrip().splitlines()
         shown = "\n".join(lines[-tail:]) if tail > 0 else ""
         print(shown)
         print(f"[FAIL] {name} (rc={proc.returncode}, {duration:.1f}s)")
-        return False
+        return "fail"
+    for line in output.splitlines():
+        if "skip" in line.lower():
+            print(f"  {name}: {line.strip()}")
     summary = ""
     for line in reversed(output.splitlines()):
         if "passed=" in line:
             summary = line.strip()
             break
     print(f"[PASS] {name} ({duration:.1f}s) {summary}")
-    return True
+    return "pass"
 
 
 def main(argv=None) -> int:
@@ -158,17 +161,23 @@ def main(argv=None) -> int:
     env = test_env()
 
     failures = []
-    passed = 0
+    passed = []
+    skipped = []
     print(f"server regression: groups={','.join(groups)}")
     for group in groups:
         print(f"===== group {group} =====")
         for test in GROUPS[group]:
-            if run_test(test, env, args.tail):
-                passed += 1
+            result = run_test(test, env, args.tail)
+            if result == "pass":
+                passed.append(test)
+            elif result == "skip":
+                skipped.append(test)
             else:
                 failures.append(test)
 
-    print(f"===== SUMMARY passed={passed} failed={len(failures)}")
+    print(f"===== SUMMARY passed={len(passed)} skipped={len(skipped)} failed={len(failures)}")
+    for test in skipped:
+        print(f"  SKIP {test}")
     if failures:
         for test in failures:
             print(f"  FAIL {test}")

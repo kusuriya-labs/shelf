@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from support import Checker, ComputeHarness, model_dir
 from test_compute_dflash2 import collect, generated_ids, run_single_shot
 

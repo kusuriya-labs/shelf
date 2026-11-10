@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -440,7 +441,7 @@ class ServerHarness:
                  dflash2_drafts: int = 7,
                  arena_override: int | None = None,
                  working_set_reserve_gib: int | None = None):
-        self.log_path = log_path or (Path("/tmp") / f"shelf-server-{os.getpid()}.log")
+        self.log_path = log_path or (Path(tempfile.gettempdir()) / f"shelf-server-{os.getpid()}.log")
         self.env = dict(os.environ)
         if env:
             self.env.update(env)

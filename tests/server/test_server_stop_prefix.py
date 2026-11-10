@@ -110,8 +110,9 @@ def run_case(checker, root, draft):
 
 
 def main():
-    if not model_dir().is_dir() or not compute_binary().is_file():
-        print("SKIP: モデルまたは compute binary がありません")
+    if (not model_dir().is_dir() or not compute_binary().is_file() or
+            not os.access("/dev/kfd", os.R_OK | os.W_OK)):
+        print("SKIP: モデル、compute binary、または GPU がありません")
         return 77
     checker = Checker("server-stop-prefix")
     try:

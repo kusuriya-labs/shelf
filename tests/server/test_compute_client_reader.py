@@ -81,7 +81,7 @@ async def run(checker: Checker) -> None:
         script.write_text(FAKE_COMPUTE, encoding="utf-8")
 
         huge = compute_client.AsyncComputeClient(
-            [sys.executable, str(script), "huge"], max_inflight=1)
+            [sys.executable, "-I", str(script), "huge"], max_inflight=1)
         await huge.start()
         try:
             events = await collect(huge, 10.0)
@@ -97,7 +97,7 @@ async def run(checker: Checker) -> None:
             await huge.shutdown()
 
         fault = compute_client.AsyncComputeClient(
-            [sys.executable, str(script), "fault"], max_inflight=1)
+            [sys.executable, "-I", str(script), "fault"], max_inflight=1)
         await fault.start()
         try:
             await collect(fault, 10.0)

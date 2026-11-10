@@ -60,6 +60,8 @@ def check_prompt_matrix(checker, processor):
     direct = processor.apply_chat_template(
         MESSAGES, tokenize=True, add_generation_prompt=True,
         enable_thinking=True, reasoning_effort="xhigh", preserve_thinking=True)
+    if hasattr(direct, "keys"):
+        direct = direct["input_ids"]
     direct = direct[0] if direct and isinstance(direct[0], list) else direct
 
     checker.check("u01-defaults-match-xhigh", defaults == explicit,
@@ -67,11 +69,11 @@ def check_prompt_matrix(checker, processor):
     checker.check("u01-codec-matches-template", explicit == list(direct),
                   f"codec={len(explicit)} template={len(direct)}")
 
-    open_ids = processor.tokenizer.encode("<think>", add_special_tokens=False)
+    open_ids = getattr(processor, "tokenizer", processor).encode("<think>", add_special_tokens=False)
     close_ids = list(codec.reasoning_close_ids(processor))
     checker.check("boundary-single-token", len(close_ids) == 1, repr(close_ids))
     checker.check("boundary-is-close-tag",
-                  close_ids == processor.tokenizer.encode(
+                  close_ids == getattr(processor, "tokenizer", processor).encode(
                       "</think>", add_special_tokens=False),
                   repr(close_ids))
 
@@ -102,6 +104,8 @@ def check_prompt_matrix(checker, processor):
     tools_ids = processor.apply_chat_template(
         MESSAGES, tokenize=True, add_generation_prompt=True, tools=[TOOL],
         enable_thinking=True, reasoning_effort="xhigh", preserve_thinking=True)
+    if hasattr(tools_ids, "keys"):
+        tools_ids = tools_ids["input_ids"]
     tools_ids = tools_ids[0] if tools_ids and isinstance(tools_ids[0], list) else tools_ids
     checker.check("u01-tools-match-template", tools_on == list(tools_ids),
                   f"{len(tools_on)} vs {len(tools_ids)}")
@@ -139,9 +143,9 @@ def check_history(checker, processor):
 
 def check_answer_parsing(checker, processor):
     close = codec.reasoning_close_ids(processor)
-    reasoning_ids = processor.tokenizer.encode(
+    reasoning_ids = getattr(processor, "tokenizer", processor).encode(
         "この依頼はtoolを呼ぶべきだ。" + TOOL_CALL_TEXT, add_special_tokens=False)
-    answer_ids = processor.tokenizer.encode("\n\n天気は晴れです。", add_special_tokens=False)
+    answer_ids = getattr(processor, "tokenizer", processor).encode("\n\n天気は晴れです。", add_special_tokens=False)
     generated = list(reasoning_ids) + list(close) + list(answer_ids)
 
     split = codec.split_generation(processor, generated, thinking=True)
@@ -152,7 +156,7 @@ def check_answer_parsing(checker, processor):
     checker.check("u12-no-tool-call-from-reasoning", parsed["tool_calls"] == [],
                   repr(parsed))
 
-    generated = list(close) + processor.tokenizer.encode(
+    generated = list(close) + getattr(processor, "tokenizer", processor).encode(
         TOOL_CALL_TEXT, add_special_tokens=False)
     split = codec.split_generation(processor, generated, thinking=True)
     parsed = codec.parse_answer(processor, split.answer, tools=[TOOL])
@@ -179,7 +183,7 @@ def check_answer_parsing(checker, processor):
     except codec.ToolParseError as exc:
         checker.check("u14-broken-tool-call-rejected", True, str(exc))
 
-    split = codec.split_generation(processor, processor.tokenizer.encode(
+    split = codec.split_generation(processor, getattr(processor, "tokenizer", processor).encode(
         "天気の話だけです。", add_special_tokens=False), thinking=False)
     checker.check("u20-nothink-answer-only",
                   split.reasoning == "" and split.closed

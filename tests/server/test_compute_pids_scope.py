@@ -20,7 +20,7 @@ def spawn(args: list[str], *, owned: bool) -> subprocess.Popen:
     env = dict(os.environ)
     if not owned:
         env.pop(OWNER_ENV, None)
-    return subprocess.Popen([sys.executable, "-c", SLEEPER, *args], env=env)
+    return subprocess.Popen([sys.executable, "-I", "-c", SLEEPER, *args], env=env)
 
 
 def main() -> int:

@@ -402,7 +402,7 @@ def arena_gib_value(text: str):
         raise argparse.ArgumentTypeError("expected N, -N or auto") from exc
     if value == 0 or value != value or value in (float("inf"), float("-inf")):
         raise argparse.ArgumentTypeError("expected N, -N or auto")
-    return text
+    return int(value) if value.is_integer() else value
 
 
 def kv_cache_dtype_value(text: str):
