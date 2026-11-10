@@ -38,3 +38,34 @@ CPU 単体の値であり、生成中の各状態、並行 batch、IPC、GPU 転
 この tokenizer を `TokenizerInfo.from_huggingface` にそのまま渡すと語彙数は
 248077 になる一方、model config の vocab_size は 248320 である。mask の word 数と
 compute の logits 行を一致させるには model config の vocab_size を明示する。
+
+## M2 実装時の検証
+
+- `test_token_bitmask` は R9700 上で成功し、GPU の mask 適用結果が CPU 参照と一致した。
+- compute の stdio を直接使い、greedy と temperature 0.8 の各 4 token で指定した
+  token のみが出ること、mask 待ち中に別 request が進み、待機 request を cancel
+  できることを確認した。
+- XGrammar 0.2.9 では `{"type":"integer","enum":["foo",1]}` に対して
+  `"foo"` が受理される。型と enum が積集合にならないため、型に一致しない enum と
+  object / array の enum はサーバが 400 で拒否する。
+- thinking 有効、tools、stop との併用は 400。長さ上限で途中終了した出力は未完成の
+  JSON になりうる。strict tools、tool_choice の schema 強制、Responses `text.format`、
+  DFlash2 / MTP の投機と mask の併用は M3 の残作業である。
+
+### 実生成での速度（R9700、Qwen3.8 27B EXL3、単回）
+
+`structured_output_decode_bench.py` を用い、prefix cache と投機を無効にして
+128 token、温度 0、同じ prompt を使用。比較元は `origin/main` の `34f3d42` を
+同じ toolchain で別ビルドした。全 request が生成中の区間の合計 token/s を示す。
+
+| 同時 request | main | M2 | 変化 |
+| ---: | ---: | ---: | ---: |
+| 1 | 27.59 tok/s | 27.67 tok/s | +0.30% |
+| 4 | 98.68 tok/s | 98.57 tok/s | -0.12% |
+
+単一 request を同一プロセスで再測定した平均 token 間隔は、通常 36.62 ms、
+通常生成 token を 1 token ずつ許可する mask replay は 37.28 ms（差 +0.66 ms）。
+XGrammar で長い string enum の mask を毎回計算し、IPC 往復を含めた場合は
+37.26 ms（通常との差 +0.64 ms、27.05 tok/s）だった。XGrammar ケースは replay と
+生成 token 列が異なる。各値は単回測定であり、変動と schema による差を含む。後者は
+compute との往復を測定し、HTTP / SSE の処理時間は含まない。
