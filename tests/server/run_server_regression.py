@@ -44,6 +44,7 @@ GROUPS = OrderedDict([
         "test_compute_pids_scope.py",
         "test_compute_service.py",
         "test_compute_dflash2.py",
+        "test_compute_dflash2_tree.py",
         "test_compute_dflash2_octave.py",
         "test_compute_dflash2_unaligned.py",
         "test_compute_dflash2_prefix_long.py",

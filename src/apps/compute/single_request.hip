@@ -514,6 +514,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
+                     bool dflash2_tree,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
@@ -628,6 +629,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
+    decoder_config.tree = dflash2_tree;
     decoder_config.eos_tokens = text_config.stop_tokens;
     auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
@@ -670,7 +672,8 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
         auto step_result =
-            shelf::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+            dflash2_tree ? shelf::qwen35::runtime::dflash2_spec_step_tree(decoder, pending, remaining)
+                         : shelf::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
         if (!step_result.ok()) {
             fprintf(stderr, "dflash2 step failed: %s\n",
                     step_result.status().message().c_str());

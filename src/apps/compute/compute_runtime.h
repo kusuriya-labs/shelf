@@ -43,6 +43,7 @@ struct Qwen35RuntimeConfig {
     qwen35::dflash2::DFlash2Config draft_config;
     bool draft_config_ready = false;
     uint32_t dflash2_drafts = 7;
+    bool dflash2_tree = false;
     // 0 = min(max_concurrent_requests, 8). Requests beyond this run without speculation.
     uint32_t dflash2_max_sessions = 0;
     uint32_t dflash2_sessions() const noexcept {

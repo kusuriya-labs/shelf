@@ -38,6 +38,8 @@ struct ComputeOptions {
     unsigned long dflash2_drafts = 7;
     unsigned long dflash2_max_sessions = 0;
     int dflash2_stats = 1;
+    bool dflash2_tree = false;
+    unsigned long dflash2_tree_extra = 0;
     bool mtp = false;
     unsigned long mtp_drafts = 7;
     int mtp_stats = 1;

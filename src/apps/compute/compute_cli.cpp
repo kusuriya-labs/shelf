@@ -95,6 +95,7 @@ void compute_usage(const char* prog) {
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
+    printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
     printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
@@ -293,6 +294,12 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 fprintf(stderr, "bad --dflash2-drafts\n");
                 return kComputeParseError;
             }
+        } else if (std::strcmp(argv[i], "--dflash2-tree-extra") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], opt.dflash2_tree_extra) || opt.dflash2_tree_extra != 0) {
+                fprintf(stderr, "--dflash2-tree-extra currently supports only 0\n");
+                return kComputeParseError;
+            }
+            opt.dflash2_tree = true;
         } else if (std::strcmp(argv[i], "--dflash2-max-sessions") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], dflash2_max_sessions) || dflash2_max_sessions == 0) {
                 fprintf(stderr, "bad --dflash2-max-sessions\n");
@@ -427,6 +434,10 @@ int validate_compute_options(const ComputeOptions& opt) {
     if (octave && (tp != 1 || pipeline_parallel != 1)) {
         fprintf(stderr,
                 "Octave KV cache currently requires TP=1 and PP=1\n");
+        return kComputeParseError;
+    }
+    if (opt.dflash2_tree && (!dflash_enabled || serve_stdio || tp != 1 || sampling.temperature != 0.0f)) {
+        fprintf(stderr, "--dflash2-tree-extra requires single-request DFlash2, TP=1, and greedy sampling\n");
         return kComputeParseError;
     }
     if (dflash_enabled) {

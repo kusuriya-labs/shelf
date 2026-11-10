@@ -3,6 +3,7 @@
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
+#include <shelf/models/qwen35/runtime/dflash2_tree.h>
 #include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
 
 #include <algorithm>
@@ -250,7 +251,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
         workspace.verify_stop_event = events[3];
     }
 
-    const uint32_t history_rows = config.num_drafts;
+    const uint32_t history_rows = config.num_drafts + (config.tree ? 1u : 0u);
     const shelf::qwen_hybrid::QwenHybridConfig& tc = *target.model.config;
     workspace.gdn_key_heads =
         static_cast<uint32_t>(tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u);
@@ -297,12 +298,26 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
         // context, so per-session sessions skip them (step_buffers == false).
         if (step_buffers) {
             auto history_result = create_gdn_spec_history(rank_arena, rank_pool, history_rows,
-                                                          false);
+                                                          config.tree);
             if (!history_result.ok()) {
                 (void)shutdown_dflash2_spec_workspace(workspace);
                 return history_result.status();
             }
             g.history = history_result.release();
+            if (config.tree) {
+                const size_t rows = history_rows;
+                auto metadata = rank_arena.allocate_aligned(
+                    (3u * rows + 1u + rows * (rows + 1u) / 2u) * sizeof(uint32_t), 256u);
+                if (!metadata.ok()) {
+                    (void)shutdown_dflash2_spec_workspace(workspace);
+                    return metadata.status();
+                }
+                auto* base = static_cast<uint32_t*>(metadata.release().data());
+                g.tree_parent = reinterpret_cast<int32_t*>(base);
+                g.tree_offsets = base + rows;
+                g.tree_rope = base + 2u * rows + 1u;
+                g.tree_ancestors = base + 3u * rows + 1u;
+            }
 
             const uint64_t states = pool_view.num_gdn_states;
             const uint64_t log_rows = static_cast<uint64_t>(config.num_drafts) + 1u;
@@ -796,7 +811,7 @@ Status run_single_target(
 
 }  // namespace
 
-Result<DFlash2SpecIterationOutput> dflash2_spec_step(
+static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
     uint32_t remaining_tokens) {
@@ -900,7 +915,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     const int32_t* sampled_device_ptr = nullptr;
-    const bool need_host_seed = decoder.host_proposal_visibility;
+    const bool need_host_seed = decoder.host_proposal_visibility || decoder.config.tree;
     if (!bridge || need_host_seed) {
         ScopedTimer t(want_timing ? &tm->draft_d2h_ms : nullptr);
         {
@@ -960,7 +975,32 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                 total_k + 1u, true, TokenIdsLocation::Host, &decoder.sampling,
                 round_sample_index);
         }
-        std::vector<ExecuteBatchOptions> options = build_gdn_options(decoder, total_k);
+        std::vector<ExecuteBatchOptions> options = build_gdn_options(
+            decoder, total_k + (decoder.config.tree ? 1u : 0u));
+        if (decoder.config.tree) {
+            const auto tree = make_dflash2_tree(pending_token,
+                std::span<const int32_t>(drafts.data(), total_k), {}, 0u, position);
+            for (std::size_t r = 0; r < options.size(); ++r) {
+                auto& g = decoder.gdn_ranks[r];
+                auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                if (!scope.ok()) return scope.status();
+                const auto copy = [&](void* dst, const void* src, size_t bytes) {
+                    return hipMemcpy(dst, src, bytes, hipMemcpyHostToDevice);
+                };
+                if (copy(g.tree_parent, tree.parent.data(), tree.parent.size() * sizeof(int32_t)) != hipSuccess ||
+                    copy(g.tree_offsets, tree.ancestor_offsets.data(), tree.ancestor_offsets.size() * sizeof(uint32_t)) != hipSuccess ||
+                    copy(g.tree_ancestors, tree.ancestor_positions.data(), tree.ancestor_positions.size() * sizeof(uint32_t)) != hipSuccess ||
+                    copy(g.tree_rope, tree.rope_positions.data(), tree.rope_positions.size() * sizeof(uint32_t)) != hipSuccess) {
+                    return Status::hip_error("dflash2 tree metadata upload", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+                }
+                options[r].tree_row_parent = g.tree_parent;
+                options[r].tree_anc_offsets = g.tree_offsets;
+                options[r].tree_anc_positions = g.tree_ancestors;
+                options[r].rope_positions = g.tree_rope;
+                options[r].tree_committed_end = position;
+                options[r].gdn_compact = {};
+            }
+        }
         if (want_timing) {
             const hipError_t start_err =
                 hipEventRecord(decoder.verify_start_event, decoder.stream);
@@ -1095,8 +1135,34 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         return Status::invalid_state("verify produced no sampled token", __FILE__,
                                      __LINE__);
     }
-    Status accept = spec_greedy_accept(drafts.data(), total_k, sampled.data(), true, result);
-    if (!accept.ok()) return accept;
+    if (decoder.config.tree) {
+        const auto tree = make_dflash2_tree(pending_token,
+            std::span<const int32_t>(drafts.data(), total_k), {}, 0u, position);
+        DFlash2TreeWalk walk;
+        if (!walk_dflash2_tree(tree.tokens, tree.parent,
+                               std::span<const int32_t>(sampled.data(), total_k + 1u), walk)) {
+            return Status::invalid_state("dflash2 tree walk failed", __FILE__, __LINE__);
+        }
+        const uint32_t accepted = static_cast<uint32_t>(walk.rows.size() - 1u);
+        result.num_drafts = total_k;
+        result.num_accepted_drafts = accepted;
+        for (uint32_t i = 1u; i < walk.rows.size(); ++i)
+            result.emitted_tokens.push_back(tree.tokens[walk.rows[i]]);
+        if (accepted == total_k) {
+            result.bonus_token_valid = true;
+            result.bonus_token = walk.correction;
+        } else {
+            result.first_reject_index = accepted;
+            result.correction_valid = true;
+            result.correction_token = walk.correction;
+        }
+        result.emitted_tokens.push_back(walk.correction);
+        result.num_emitted_tokens = static_cast<uint32_t>(result.emitted_tokens.size());
+        result.num_committed_target_tokens = accepted + 1u;
+    } else {
+        Status accept = spec_greedy_accept(drafts.data(), total_k, sampled.data(), true, result);
+        if (!accept.ok()) return accept;
+    }
     out.finished = spec_bound_result(result, remaining_tokens, decoder.config.eos_tokens);
     const uint32_t accepted = result.num_accepted_drafts;
     out.num_accepted = accepted;
@@ -1118,7 +1184,25 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                                      __LINE__);
     }
 
-    if (accepted == total_k) {
+    if (decoder.config.tree) {
+        for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+            auto scope = shelf::gpu::ScopedDevice::create(g.device);
+            if (!scope.ok()) return scope.status();
+            Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
+                                                 accepted, g.stream);
+            if (!st.ok()) return st;
+        }
+        decoder.sequence->position = position + accepted + 1u;
+        Status st = append_committed(decoder, position, accepted + 1u);
+        if (!st.ok()) return st;
+        st = rollback_sequence_append(*decoder.sequence,
+            ceil_div_u32(decoder.sequence->position, page_tokens), decoder.stream);
+        if (!st.ok()) return st;
+        if (tm != nullptr) {
+            if (accepted == total_k) ++tm->full_accepts;
+            else ++tm->partial_accepts;
+        }
+    } else if (accepted == total_k) {
         ScopedTimer t(tm != nullptr ? &tm->dflash_commit_ms : nullptr);
         Status st = append_committed(decoder, position, total_k + 1u);
         if (!st.ok()) return st;
@@ -1196,6 +1280,18 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
     commit_history_tokens(decoder, out.emitted.data(), out.emitted_count);
     return out;
+}
+
+Result<DFlash2SpecIterationOutput> dflash2_spec_step(
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
+    if (decoder.config.tree) return Status::invalid_state("chain step with tree workspace", __FILE__, __LINE__);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens);
+}
+
+Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
+    if (!decoder.config.tree) return Status::invalid_state("tree step without tree workspace", __FILE__, __LINE__);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens);
 }
 
 namespace {

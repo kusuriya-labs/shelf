@@ -39,6 +39,7 @@ constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
+    bool tree = false;
     qwen_hybrid::StopTokens eos_tokens;
 };
 
@@ -62,6 +63,10 @@ struct DFlash2GdnRankState {
     std::size_t conv_bytes = 0u;
     std::size_t rec_bytes = 0u;
     GdnSpecHistory history;
+    int32_t* tree_parent = nullptr;
+    uint32_t* tree_offsets = nullptr;
+    uint32_t* tree_ancestors = nullptr;
+    uint32_t* tree_rope = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
@@ -226,6 +231,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
     uint32_t remaining_tokens);
+
+Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens);
 
 struct DFlash2SpecBatchCompact {
     float* delta = nullptr;
