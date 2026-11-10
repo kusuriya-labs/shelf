@@ -180,6 +180,17 @@ const RuntimeRequest* ContinuousBatcher::request(uint64_t id) const {
     return &*it->second;
 }
 
+Status ContinuousBatcher::set_token_bitmask(uint64_t id, const uint32_t* mask,
+                                             bool waiting) {
+    auto it = request_index_.find(id);
+    if (it == request_index_.end() || it->second->state == RequestState::Finished) {
+        return Status::invalid_argument("request is not active", __FILE__, __LINE__);
+    }
+    it->second->token_bitmask = mask;
+    it->second->waiting_for_token_bitmask = waiting;
+    return Status::make_ok();
+}
+
 Status ContinuousBatcher::set_external_request_id(uint64_t id,
                                                   int64_t external_request_id) {
     auto it = request_index_.find(id);

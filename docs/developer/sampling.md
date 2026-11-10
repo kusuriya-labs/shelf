@@ -286,3 +286,10 @@ bitmask を含む batch は HIP graph を使用しない。
 
 これは executor の入力 contract であり、server の構造化出力 API や
 compute の stdio protocol からはまだ利用できない。
+
+## 構造化出力の mask 待ち
+
+stdio の制約付き request は最初の prefill sample より前に device mask を受け取り、
+以降は token event ごとに次の mask を待つ。scheduler は待機中の request を飛ばし、
+他 request を batch に含める。bitmask は request ごとで、通常 request は null のまま。
+GPU 上の logits への適用は greedy / stochastic 共通の sampling 前に行う。

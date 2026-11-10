@@ -132,6 +132,8 @@ class ContinuousBatcher {
 
     const RuntimeRequest* request(uint64_t id) const;
 
+    Status set_token_bitmask(uint64_t id, const uint32_t* mask, bool waiting);
+
     Status set_external_request_id(uint64_t id, int64_t external_request_id);
 
     std::size_t queued_count() const noexcept;

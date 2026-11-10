@@ -85,7 +85,51 @@ struct ServeGeneration {
     std::chrono::steady_clock::time_point last_log_at;
     std::size_t last_log_tokens = 0;
     bool has_first_token = false;
+    std::shared_ptr<uint32_t> token_bitmask;
+    bool waiting_for_mask = false;
 };
+
+// Strict RFC 4648 decoding; reject malformed or non-canonical input.
+bool decode_mask(const std::string& encoded, std::vector<uint8_t>& bytes) {
+    if (encoded.empty() || encoded.size() % 4 != 0) return false;
+    auto digit = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    for (size_t i = 0; i < encoded.size(); i += 4) {
+        int a = digit(encoded[i]), b = digit(encoded[i + 1]);
+        int c = encoded[i + 2] == '=' ? -2 : digit(encoded[i + 2]);
+        int d = encoded[i + 3] == '=' ? -2 : digit(encoded[i + 3]);
+        if (a < 0 || b < 0 || c == -1 || d == -1 ||
+            (c == -2 && d != -2) ||
+            ((c == -2 || d == -2) && i + 4 != encoded.size()) ||
+            (c == -2 && (b & 15)) || (d == -2 && c >= 0 && (c & 3))) return false;
+        bytes.push_back(static_cast<uint8_t>((a << 2) | (b >> 4)));
+        if (c >= 0) bytes.push_back(static_cast<uint8_t>((b << 4) | (c >> 2)));
+        if (d >= 0) bytes.push_back(static_cast<uint8_t>((c << 6) | d));
+    }
+    return true;
+}
+
+bool upload_mask(shelf::app::Qwen35ComputeRuntime& runtime,
+                 ServeGeneration& generation, const nlohmann::json& value) {
+    if (!value.is_string()) return false;
+    std::vector<uint8_t> bytes;
+    const size_t expected = ((runtime.model().hybrid_config().vocab_size + 31) / 32) * 4;
+    if (!decode_mask(value.get<std::string>(), bytes) || bytes.size() != expected ||
+        std::none_of(bytes.begin(), bytes.end(), [](uint8_t b) { return b != 0; })) return false;
+    if (!generation.token_bitmask) {
+        uint32_t* device = nullptr;
+        if (hipMalloc(reinterpret_cast<void**>(&device), expected) != hipSuccess) return false;
+        generation.token_bitmask = std::shared_ptr<uint32_t>(device, [](uint32_t* p) { (void)hipFree(p); });
+    }
+    return hipMemcpy(generation.token_bitmask.get(), bytes.data(), expected,
+                     hipMemcpyHostToDevice) == hipSuccess;
+}
 
 struct MtpRequest {
     int64_t external_id = 0;
@@ -166,6 +210,12 @@ void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
         emit_token(generation.external_request_id,
                    request->generated[generation.emitted_tokens]);
         ++generation.emitted_tokens;
+        if (generation.token_bitmask &&
+            request->state != shelf::qwen35::runtime::RequestState::Finished) {
+            generation.waiting_for_mask = true;
+            (void)runtime.set_token_bitmask(generation.internal_request_id,
+                                            generation.token_bitmask.get(), true);
+        }
     }
     if (!generation.has_first_token) return;
     const auto now = std::chrono::steady_clock::now();
@@ -329,6 +379,8 @@ void serve_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state) {
         return;
     }
     if (!step_result.value().executed) {
+        if (std::all_of(state.inflight.begin(), state.inflight.end(),
+                        [](const auto& entry) { return entry.second.waiting_for_mask; })) return;
         std::string detail = "decode stuck: pending request remains but step did not execute";
         for (const auto& entry : state.inflight) {
             const auto* request = runtime.request(entry.second.internal_request_id);
@@ -404,7 +456,13 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         emit_error(request_id, "duplicate request_id");
         return false;
     }
-    if (state.inflight.size() >= state.max_inflight) {
+    for (const auto& active : state.mtp.active) {
+        if (active->external_id == external_request_id) {
+            emit_error(request_id, "duplicate request_id");
+            return false;
+        }
+    }
+    if (state.inflight.size() + state.mtp.active.size() >= state.max_inflight) {
         emit_error(request_id, "compute concurrency limit reached");
         return false;
     }
@@ -415,7 +473,8 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
             key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
             key != "min_p" && key != "top_k" && key != "seed" &&
             key != "reasoning_budget_tokens" && key != "reasoning_close_token" &&
-            key != "prefix_cache_checkpoint_position") {
+            key != "prefix_cache_checkpoint_position" && key != "grammar" &&
+            key != "bitmask") {
             emit_error_with_code(request_id, "invalid_argument",
                                  "unknown request field: " + key);
             return false;
@@ -551,8 +610,25 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     generation.max_new_tokens = max_new_tokens;
     generation.submitted_at = std::chrono::steady_clock::now();
 
+    if (request.contains("grammar") && !request["grammar"].is_boolean()) {
+        emit_error(request_id, "grammar must be a boolean");
+        return false;
+    }
+    const bool grammar = request.value("grammar", false);
+    if (grammar && thinking.tokens > 0) {
+        emit_error_with_code(request_id, "invalid_argument", "grammar cannot use a reasoning budget");
+        return false;
+    }
+    if ((grammar && (!request.contains("bitmask") ||
+                     !upload_mask(runtime, generation, request["bitmask"]))) ||
+        (!grammar && request.contains("bitmask"))) {
+        emit_error_with_code(request_id, "invalid_argument", "invalid initial bitmask");
+        return false;
+    }
+
     shelf::Result<uint64_t> submit_result =
-        runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
+        grammar ? runtime.submit_unconstrained_decode(std::move(input_ids), max_new_tokens, sampling, thinking)
+                : runtime.submit(std::move(input_ids), max_new_tokens, sampling, thinking);
     if (!submit_result.ok()) {
         emit_error_with_code(request_id,
                              status_error_code(submit_result.status().code()),
@@ -560,6 +636,16 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
     generation.internal_request_id = submit_result.release();
+    if (grammar) {
+        auto st = runtime.set_token_bitmask(generation.internal_request_id,
+                                            generation.token_bitmask.get(), false);
+        if (!st.ok()) {
+            (void)runtime.cancel(generation.internal_request_id);
+            (void)runtime.retire(generation.internal_request_id);
+            emit_error(request_id, st.message());
+            return false;
+        }
+    }
     const shelf::Status external_status = runtime.set_external_request_id(
         generation.internal_request_id, external_request_id);
     if (!external_status.ok()) {
@@ -606,6 +692,11 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     }
     const nlohmann::json request_id = request["request_id"];
     const int64_t external_request_id = request_id.get<int64_t>();
+    if (state.inflight.count(external_request_id) ||
+        state.inflight.size() + mtp.active.size() >= state.max_inflight) {
+        emit_error(request_id, "duplicate request_id or compute concurrency limit reached");
+        return false;
+    }
     for (const auto& entry : mtp.active) {
         if (entry->external_id == external_request_id) {
             emit_error(request_id, "duplicate or concurrent request_id");
@@ -908,6 +999,10 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         }
         const nlohmann::json request_id = request["request_id"];
         const int64_t id = request_id.get<int64_t>();
+        if (state.inflight.count(id) > 0) {
+            serve_cancel_one(runtime, state, id);
+            return;
+        }
         if (state.mtp.enabled) {
             for (std::size_t i = 0u; i < state.mtp.active.size(); ++i) {
                 if (state.mtp.active[i]->external_id != id) continue;
@@ -928,8 +1023,32 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         }
         return;
     }
+    if (op == "mask") {
+        if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
+            emit_error(nullptr, "missing or invalid request_id");
+            return;
+        }
+        const int64_t id = request["request_id"].get<int64_t>();
+        auto it = state.inflight.find(id);
+        if (it == state.inflight.end() && serve_is_recent_terminal(state, id)) return;
+        if (it == state.inflight.end() || !it->second.waiting_for_mask ||
+            !request.contains("bitmask") || !upload_mask(runtime, it->second, request["bitmask"])) {
+            emit_error_with_code(request["request_id"], "invalid_argument", "unexpected or invalid bitmask");
+            if (it != state.inflight.end()) {
+                (void)runtime.cancel(it->second.internal_request_id);
+                serve_push_terminal(state, id);
+                serve_retire(runtime, state, it->second);
+            }
+            return;
+        }
+        auto st = runtime.set_token_bitmask(it->second.internal_request_id,
+                                            it->second.token_bitmask.get(), false);
+        if (!st.ok()) { emit_error(request["request_id"], st.message()); return; }
+        it->second.waiting_for_mask = false;
+        return;
+    }
     if (op == "generate") {
-        if (state.mtp.enabled) {
+        if (state.mtp.enabled && !request.contains("grammar")) {
             serve_mtp_admit(runtime, state, state.mtp, request);
         } else {
             serve_parse_generate(runtime, state, dflash, request);
@@ -1161,7 +1280,9 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
     state.max_inflight = runtime.config().max_concurrent_requests;
     while (!state.exit_requested) {
         const bool mtp_idle = !state.mtp.enabled || state.mtp.active.empty();
-        jsonl_poll_and_read(input, state.inflight.empty() && mtp_idle);
+        const bool all_waiting = std::all_of(state.inflight.begin(), state.inflight.end(),
+            [](const auto& entry) { return entry.second.waiting_for_mask; });
+        jsonl_poll_and_read(input, all_waiting && mtp_idle);
         std::string line;
         while (jsonl_take_line(input, line)) {
             if (line.empty()) continue;
@@ -1169,19 +1290,16 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             if (state.exit_requested) break;
         }
         if (state.exit_requested) break;
-        if (state.mtp.enabled) {
-            if (!state.mtp.active.empty()) {
-                serve_mtp_step(runtime, state, state.mtp);
-            } else if (input.eof) {
-                break;
-            }
-        } else if (!state.inflight.empty()) {
+        if (state.mtp.enabled && !state.mtp.active.empty()) {
+            serve_mtp_step(runtime, state, state.mtp);
+        }
+        if (!state.inflight.empty()) {
             if (input.eof) {
                 serve_cancel_all_inflight(runtime, state);
             } else {
                 serve_step(runtime, state);
             }
-        } else if (input.eof) {
+        } else if (input.eof && mtp_idle) {
             break;
         }
     }

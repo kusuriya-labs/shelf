@@ -373,3 +373,19 @@ logitsはraw f32、1行 = 1 token step（prefill行が先頭）。
   --max-new-tokens 32 \
   --kv-cache-dtype fp8
 ```
+
+### token bitmask
+
+`generate` に `"grammar":true` と `"bitmask":"..."` を指定すると、最終
+prefill の最初の sample から mask を適用する。bitmask は token ID を bit 番号とする
+little-endian 32-bit word 列を base64 化した文字列で、長さは
+`ceil(vocab_size / 32) * 4` byte である。sample された token event の後、次の
+mask を次のように送る。
+
+```json
+{"op":"mask","request_id":1,"bitmask":"<base64>"}
+```
+
+次の mask を受け取るまでその request はスケジュールされない。他の request は
+進行できる。完了、cancel 後の mask は無視される。制約付き request は通常 decode を
+使い、DFlash2 / MTP による投機は行わない。

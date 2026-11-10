@@ -103,6 +103,13 @@ class Qwen35ComputeRuntime {
         const qwen35::runtime::SamplingConfig& sampling,
         const qwen35::runtime::ThinkingBudget& thinking);
 
+    Result<uint64_t> submit_unconstrained_decode(
+        std::vector<int32_t> input_ids, uint32_t max_new_tokens,
+        const qwen35::runtime::SamplingConfig& sampling,
+        const qwen35::runtime::ThinkingBudget& thinking);
+
+    Status set_token_bitmask(uint64_t id, const uint32_t* mask, bool waiting);
+
     Result<qwen35::runtime::StepResult> step();
 
     bool has_pending() const;

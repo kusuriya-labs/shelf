@@ -767,6 +767,24 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, thinking);
 }
 
+Result<uint64_t> Qwen35ComputeRuntime::submit_unconstrained_decode(
+    std::vector<int32_t> input_ids, uint32_t max_new_tokens,
+    const qwen35::runtime::SamplingConfig& sampling,
+    const qwen35::runtime::ThinkingBudget& thinking) {
+    if (batcher_ == nullptr) {
+        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    }
+    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, false, thinking);
+}
+
+Status Qwen35ComputeRuntime::set_token_bitmask(uint64_t id, const uint32_t* mask,
+                                                bool waiting) {
+    if (batcher_ == nullptr) {
+        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    }
+    return batcher_->set_token_bitmask(id, mask, waiting);
+}
+
 Status Qwen35ComputeRuntime::set_dflash2_batcher(
     const qwen35::runtime::DFlash2BatcherBinding& binding) {
     if (batcher_ == nullptr) {
