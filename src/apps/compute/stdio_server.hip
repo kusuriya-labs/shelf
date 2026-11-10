@@ -293,6 +293,44 @@ bool jsonl_take_line(JsonlInput& input, std::string& line) {
     return true;
 }
 
+// MTP prefill runs the whole prompt before the serve loop can read stdin. Poll it between
+// chunks and consume a matching cancel line so the prompt does not have to finish first.
+struct MtpPrefillCancel {
+    JsonlInput* input = nullptr;
+    int64_t external_id = 0;
+    bool cancelled = false;
+};
+
+bool serve_mtp_prefill_should_stop(void* context) {
+    auto* cancel = static_cast<MtpPrefillCancel*>(context);
+    if (cancel->input == nullptr) return false;
+    jsonl_poll_and_read(*cancel->input, false);
+    const std::string& buffer = cancel->input->buffer;
+    std::size_t line_begin = 0u;
+    while (true) {
+        const std::size_t newline = buffer.find('\n', line_begin);
+        if (newline == std::string::npos) break;
+        std::string line = buffer.substr(line_begin, newline - line_begin);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        bool matches = false;
+        if (!line.empty() && line.front() == '{') {
+            try {
+                const nlohmann::json op = nlohmann::json::parse(line);
+                matches = op.value("op", std::string{}) == "cancel" &&
+                          op.value("request_id", int64_t{0}) == cancel->external_id;
+            } catch (const nlohmann::json::exception&) {
+            }
+        }
+        if (matches) {
+            cancel->input->buffer.erase(line_begin, newline + 1u - line_begin);
+            cancel->cancelled = true;
+            return true;
+        }
+        line_begin = newline + 1u;
+    }
+    return false;
+}
+
 void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
                        ServeGeneration& generation) {
     const auto* request = runtime.request(generation.internal_request_id);
@@ -797,7 +835,8 @@ void serve_mtp_release(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& st
 }
 
 bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
-                     MtpServeContext& mtp, const nlohmann::json& request) {
+                     MtpServeContext& mtp, JsonlInput& input,
+                     const nlohmann::json& request) {
     if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
         emit_error(nullptr, "missing or invalid request_id");
         return false;
@@ -943,9 +982,14 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     drafter.sampling = sampling;
     MtpPrefillLog prefill_log;
     prefill_log.external_id = external_request_id;
+    MtpPrefillCancel prefill_cancel;
+    prefill_cancel.input = &input;
+    prefill_cancel.external_id = external_request_id;
     shelf::qwen35::runtime::MtpPrefillProgress prefill_progress;
     prefill_progress.context = &prefill_log;
     prefill_progress.report = serve_mtp_prefill_progress;
+    prefill_progress.should_stop = serve_mtp_prefill_should_stop;
+    prefill_progress.stop_context = &prefill_cancel;
     const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill = shelf::qwen35::runtime::mtp_spec_prefill(
         drafter, runtime.executor(), *sequence, input_ids.data(),
@@ -954,12 +998,21 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
                                   std::chrono::steady_clock::now() - prefill_started)
                                   .count();
     if (!prefill.ok()) {
-        emit_error_with_code(request_id, "internal",
-                             "mtp prefill failed: " + prefill.status().message());
+        if (prefill_cancel.cancelled) {
+            MtpRequest cancelled;
+            cancelled.external_id = external_request_id;
+            cancelled.prompt_tokens = input_ids.size();
+            cancelled.timing = timing;
+            cancelled.prefill_ms = prefill_ms;
+            serve_mtp_emit_done(state, cancelled, "cancelled");
+        } else {
+            emit_error_with_code(request_id, "internal",
+                                 "mtp prefill failed: " + prefill.status().message());
+        }
         mtp.free_slots.push_back(slot);
         if (tp != nullptr) (void)tp->on_sequence_released(*sequence);
         (void)shelf::state::release_paged_sequence_state(*sequence, runtime.stream());
-        return false;
+        return prefill_cancel.cancelled;
     }
 
     auto admitted = std::make_unique<MtpRequest>();
@@ -1068,7 +1121,8 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
 }
 
 void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
-                          DFlashServeContext& dflash, const std::string& line) {
+                          DFlashServeContext& dflash, JsonlInput& input,
+                          const std::string& line) {
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(line);
@@ -1177,7 +1231,7 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     }
     if (op == "generate") {
         if (state.mtp.enabled && !request.contains("grammar")) {
-            serve_mtp_admit(runtime, state, state.mtp, request);
+            serve_mtp_admit(runtime, state, state.mtp, input, request);
         } else {
             serve_parse_generate(runtime, state, dflash, request);
         }
@@ -1419,7 +1473,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         std::string line;
         while (jsonl_take_line(input, line)) {
             if (line.empty()) continue;
-            serve_handle_command(runtime, state, dflash, line);
+            serve_handle_command(runtime, state, dflash, input, line);
             if (state.exit_requested) break;
         }
         if (state.exit_requested) break;

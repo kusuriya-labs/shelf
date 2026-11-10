@@ -187,8 +187,8 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
 
 - server の MTP は **1 request ずつ直列**に処理する。`--max-concurrent-requests` を
   2 以上にしても、生成中の request が完了するまで次を開始しない。
-- tool calling / sampling / cancel は MTP 経路でも利用できる。ただし生成中の
-  cancel はその request が終わるまで反映されない。
+- tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
+  次の chunk 境界、生成中なら次の spec round で反映される。
 - 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。
 - `--mtp-drafts` は 4 前後が目安。大きすぎると verify の固定費が増える。
 
@@ -537,8 +537,9 @@ executor の row bucket も決める。prompt が N を超えても prefill は 
 N を下げると program workspace が減り、その分だけ KV capacity が増える
 （context を大きく取る構成では N が実質的な容量ダイヤルになる）。
 
-stream client が connection を切断すると、in-flight generation は cancel される
-（`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight
+client が connection を切断すると、stream / 非 stream のどちらでも in-flight generation は
+cancel される（`finish_reason="cancelled"`）。MTP の prefill は次の chunk 境界（`--max-num-batched-tokens`）、
+生成は次の spec round で反映する。cancel は request-specific であり、他の in-flight
 request の KV / GDN / token stream には影響しない。
 
 ## Responses API

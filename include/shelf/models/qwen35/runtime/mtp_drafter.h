@@ -48,6 +48,10 @@ struct MtpPrefillProgress {
     void* context = nullptr;
     void (*report)(void* context, uint32_t processed_tokens,
                    double elapsed_ms) = nullptr;
+    // Polled between prefill chunks. Returning true aborts the prefill before the
+    // next target forward, so a cancelled request does not finish the whole prompt.
+    bool (*should_stop)(void* stop_context) = nullptr;
+    void* stop_context = nullptr;
 };
 
 struct MtpIterationOutput {

@@ -158,6 +158,38 @@ def _log_request(chat, result) -> None:
         pass
 
 
+async def _complete_watching_disconnect(request: web.Request, service: ChatService,
+                                        chat):
+    """Run a non-stream completion and cancel it when the client goes away.
+
+    A non-stream response writes nothing until the whole generation is done, so
+    aiohttp cannot raise a broken pipe for us. Poll the transport and cancel the
+    compute request instead of generating tokens nobody will receive.
+    """
+    task = asyncio.create_task(service.complete(chat))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=0.25)
+            if done:
+                return task.result()
+            transport = request.transport
+            if transport is None or transport.is_closing():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return None
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        raise
+
+
 async def handle_chat_completions(request: web.Request) -> web.Response:
     service: ChatService = request.app["chat_service"]
 
@@ -178,7 +210,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             prepared = service.prepare(chat)
             return await handle_streaming(request, service, chat, prepared)
 
-        result = await service.complete(chat)
+        result = await _complete_watching_disconnect(request, service, chat)
+        if result is None:
+            return web.Response(status=499)
         _log_request(chat, result.finish_reason)
         return web.json_response(openai_protocol.encode_chat_completion(chat, result))
 
@@ -216,7 +250,9 @@ async def handle_responses(request: web.Request) -> web.Response:
         if chat.stream:
             prepared = service.prepare(chat)
             return await stream_response(request, service, chat, prepared)
-        result = await service.complete(chat)
+        result = await _complete_watching_disconnect(request, service, chat)
+        if result is None:
+            return web.Response(status=499)
         _log_request(chat, result.finish_reason)
         return web.json_response(responses_protocol.encode_response(chat, result))
     except OpenAIProtocolError as exc:
@@ -571,7 +607,8 @@ def _validate_model_dirs(opts) -> None:
 
 
 async def _serve(opts) -> int:
-    processor = await asyncio.to_thread(codec.load_processor, opts.model_dir)
+    processor = await asyncio.to_thread(
+        codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
 
     try:
         config = json.loads((Path(opts.model_dir) / "config.json").read_text())

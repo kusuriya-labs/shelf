@@ -64,3 +64,16 @@ FlashNext 32K prefill、`SHELF_EXL3_MUL24_PREFILL_AB=B`:
 FlashNext の octave は TP2 で実行でき、masked prefill は q_per_kv=12 の専用 tile、
 decode は 16 head の 1 launch になる。32K では fp8 より速くなった。dense Qwen 27B も
 TP2 で実行できる。
+
+## QSA mask と cancel の追記
+
+- octave の split-KV prefill は `kMode==3` で page filter を無効にしていた。QSA の
+  block mask が渡っていても全 page を unpack して WMMA していたため、context 長に
+  比例して prefill が遅くなっていた。
+- `paged_build_page_bits_range` を追加し、KV block 内の選択 page だけを unpack /
+  WMMA するようにした。FlashNext 88k prompt、TP2、`octave:c4v4` の serve は
+  1,028 -> 1,670-2,000 tok/s になり、同じ条件の fp8（1,731-2,340）と同等になった。
+- MTP prefill は chunk 境界で stdin を poll し、`cancel` を検出したら次の chunk の
+  target forward を実行せずに `finish_reason="cancelled"` を返す。
+- server は非 stream request でも client の切断を検出して compute に cancel を送る。
+  従来は非 stream では完了まで書き込みがなく、切断を検出できなかった。

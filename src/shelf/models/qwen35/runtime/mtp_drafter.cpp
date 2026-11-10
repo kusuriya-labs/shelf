@@ -814,6 +814,10 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     };
 
     for (uint32_t begin = 0; begin < prompt_count; begin += chunk_limit) {
+        if (progress != nullptr && progress->should_stop != nullptr &&
+            progress->should_stop(progress->stop_context)) {
+            return Status::invalid_state("mtp prefill cancelled", __FILE__, __LINE__);
+        }
         const uint32_t end = std::min(prompt_count, begin + chunk_limit);
         const uint32_t rows = end - begin;
         const bool final_chunk = end == prompt_count;

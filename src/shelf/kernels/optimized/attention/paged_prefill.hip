@@ -343,7 +343,18 @@ void attention_paged_prefill_bf16_body(
     const uint32_t* block_table = s.block_table;
 
     bool page_filter = false;
-    if constexpr (kMode != 3u) {
+    if constexpr (kMode == 3u) {
+        page_filter = a.block_mask != nullptr && page_count <= kPageBitmapWords * 32u;
+        if (page_filter) {
+            const uint32_t block_end =
+                min(visible_max, kv_block_start + kOctavePrefillKvBlockTokens);
+            paged_build_page_bits_range(
+                a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift,
+                row0, rows, kv_block_start, block_end, kPageTokens,
+                kv_block_start / kPageTokens, page_count, kPageBitmapWords,
+                s.page_bits);
+        }
+    } else {
         page_filter = a.block_mask != nullptr && page_count <= kPageBitmapWords * 32u;
         if (page_filter)
             paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row0,
