@@ -1130,3 +1130,7 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
 verify の受理結果は残り token 数と停止 token の最初の位置で制限してから、
 target と DFlash2 context の状態を確定する。停止 token 自体は出力し、その後の行は確定しない。round の入力 `pending_token` が停止 token の場合は、
 step の先頭で何も draft せず `finished=true`（出力 0 個）を返す。
+
+## 木検証（開発中）
+
+単一 request の木検証は未接続であり、現時点の推論は従来の chain のみである。CPU 用の木メタデータ生成と greedy accept walk は `dflash2_tree.h` にある。木の各行は物理 KV 位置と depth に基づく RoPE 位置を別々に持ち、accept walk は anchor から target 出力と一致する子をたどる。GPU への接続や採用経路の状態確定、実機での一致検証は未完了である。

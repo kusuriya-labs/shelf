@@ -26,8 +26,12 @@ int main() {
     CHECK((walk.rows == std::vector<uint32_t>{0,1,5}) && walk.correction == 77);
     CHECK(walk_dflash2_tree(tree.tokens, tree.parent, std::vector<int32_t>{33,12,13,99,88,77}, walk));
     CHECK((walk.rows == std::vector<uint32_t>{0}) && walk.correction == 33);
+    CHECK(!walk_dflash2_tree(std::vector<int32_t>{10,11,11}, std::vector<int32_t>{-1,0,0}, std::vector<int32_t>{11,12,13}, walk));
     CHECK(!walk_dflash2_tree(tree.tokens, std::vector<int32_t>{-1,0,1,2,4,1}, std::vector<int32_t>{11,12,13,99,88,77}, walk));
     CHECK(!walk_dflash2_tree(tree.tokens, std::vector<int32_t>{-1,0,1,2,0,1}, std::vector<int32_t>{11}, walk));
+    const auto four = make_dflash2_tree(10, std::vector<int32_t>{11,12,13,14},
+                                        std::vector<int32_t>{21,22,23,24}, 4, 0);
+    CHECK(four.tokens.size() == 9 && four.parent.back() == 3 && four.depth.back() == 4);
     const auto no_extra = make_dflash2_tree(10, chain, alt, 0, 0);
     CHECK(no_extra.tokens.size() == 4);
     const auto skip = make_dflash2_tree(10, chain, std::vector<int32_t>{11,-1,23}, 2, 0);
