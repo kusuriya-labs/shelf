@@ -516,6 +516,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      int dflash2_stats,
                      bool dflash2_tree,
                      unsigned long dflash2_tree_extra,
+                     unsigned long dflash2_tree_budget,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
@@ -632,6 +633,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
     decoder_config.tree = dflash2_tree;
     decoder_config.tree_extra = static_cast<uint32_t>(dflash2_tree_extra);
+    decoder_config.tree_budget = static_cast<uint32_t>(dflash2_tree_budget);
     decoder_config.eos_tokens = text_config.stop_tokens;
     auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
@@ -738,8 +740,13 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge && !dflash2_tree ? 1 : 0);
         printf("DFLASH2_RERUN_MS=%.2f\n", timing.rerun_ms);
         printf("DFLASH2_TREE_SELECT_MS=%.2f\n", timing.tree_select_ms);
+        if (timing.tree_probability_rows != 0u)
+            printf("DFLASH2_TREE_RESIDUAL_MASS=%.6f\n", 1.0 - timing.tree_retained_mass / timing.tree_probability_rows);
         printf("DFLASH2_TREE_WALK_MS=%.2f\n", timing.tree_walk_ms);
         printf("DFLASH2_TREE_COMMIT_MS=%.2f\n", timing.tree_commit_ms);
+        printf("DFLASH2_TREE_RESTORE_MS=%.2f\n", timing.tree_restore_ms);
+        printf("DFLASH2_TREE_GATHER_MS=%.2f\n", timing.tree_gather_ms);
+        printf("DFLASH2_TREE_APPEND_MS=%.2f\n", timing.tree_append_ms);
         printf("DFLASH2_TREE_REPLAYS=%u\n", timing.tree_replays);
         printf("DFLASH2_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
         printf("DFLASH2_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);

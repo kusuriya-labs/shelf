@@ -32,13 +32,15 @@ def run(ids, mode, logits_path=None):
                 "--dflash2-drafts", "7"]
     if mode.startswith("tree"):
         cmd += ["--dflash2-tree-extra", mode[4:]]
+    if mode.startswith("budget"):
+        cmd += ["--dflash2-tree-budget", mode[6:]]
     proc = subprocess.run(cmd, input="\n".join(map(str, ids)) + "\n", text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900)
     if proc.returncode:
         raise RuntimeError(f"{mode} failed: {proc.stderr[-4000:]}")
     metrics = dict(line.split("=", 1) for line in proc.stdout.splitlines()
                    if line.startswith("DFLASH2_") and "=" in line)
-    if mode.startswith("tree"):
+    if mode.startswith(("tree", "budget")):
         rounds = int(metrics["DFLASH2_ROUNDS"])
         elapsed = float(metrics["DFLASH2_ROUND_MS"])
         print(f"MEASURE {mode} rounds={rounds} accepted={metrics['DFLASH2_ACCEPTED_DRAFTS']} "
@@ -76,12 +78,12 @@ def main():
         ids = prompt_ids(prompt)
         with tempfile.TemporaryDirectory() as tmp:
             target, margins = run(ids, "target", Path(tmp) / "logits.bin")
-        outputs = {mode: run(ids, mode) for mode in ("chain", "tree0", "tree1", "tree2", "tree4")}
+        outputs = {mode: run(ids, mode) for mode in ("chain", "tree0", "tree1", "tree2", "tree4", "budget8", "budget10", "budget12", "budget16", "budget24")}
         if len(target) != 256:
             raise AssertionError(f"expected 256 generated tokens, got {len(target)}: {prompt}")
-        if outputs["chain"] != target or outputs["tree0"] != outputs["chain"]:
+        if outputs["chain"] != target or outputs["tree0"] != outputs["chain"] or outputs["budget8"] != outputs["chain"]:
             raise AssertionError(f"chain or tree0 differs: {prompt}")
-        for mode in ("tree1", "tree2", "tree4"):
+        for mode in ("tree1", "tree2", "tree4", "budget10", "budget12", "budget16", "budget24"):
             actual = outputs[mode]
             if len(actual) != len(target):
                 raise AssertionError(f"{mode} length differs: {len(actual)}")

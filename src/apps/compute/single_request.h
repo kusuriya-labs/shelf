@@ -35,6 +35,7 @@ int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      int dflash2_stats,
                      bool dflash2_tree,
                      unsigned long dflash2_tree_extra,
+                     unsigned long dflash2_tree_budget,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling);
 

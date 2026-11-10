@@ -4,6 +4,7 @@
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
+#include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
 #include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 #include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
 
@@ -1023,56 +1024,88 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     uint32_t verify_rows = dflash_k + 1u;
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_select_ms : nullptr);
-        std::vector<int32_t> alternatives(dflash_k, -1);
-        const uint32_t extra = std::min({decoder.config.tree_extra, 2u,
-                                         room - verify_rows, dflash_k});
-        if (extra != 0u) {
-            auto& g = decoder.gdn_ranks.front();
+        if (decoder.config.tree_budget != 0u) {
             const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
-            if (top_k < 2u || top_k > shelf::kernel::kDflash2SelectorMaxTopK)
-                return Status::unsupported("dflash2 tree requires selector top-k between 2 and 16", __FILE__, __LINE__);
-            std::vector<int32_t> predecessors(dflash_k);
-            predecessors[0] = pending_token;
-            for (uint32_t i = 1; i < dflash_k; ++i) predecessors[i] = drafts[i - 1u];
-            hipError_t err = hipMemcpyAsync(g.tree_predecessors, predecessors.data(),
-                dflash_k * sizeof(int32_t), hipMemcpyHostToDevice, decoder.stream);
-            if (err != hipSuccess) return Status::hip_error("dflash2 tree predecessor upload", hipGetErrorString(err), __FILE__, __LINE__);
-            shelf::kernel::DFlash2CandidateSelectorArgs args;
-            args.hidden_proj = decoder.draft->selector_hidden_proj.data<bf16_t>();
-            args.topk_ids = decoder.draft->proposal_topk_ids.data<int32_t>();
-            args.topk_logits = decoder.draft->proposal_topk_logits.data<float>();
-            args.predecessor_codebook = decoder.draft->weights->selector.predecessor_codebook.data<bf16_t>();
-            args.successor_codebook = decoder.draft->weights->selector.successor_codebook.data<bf16_t>();
-            args.row_predecessors = g.tree_predecessors;
-            args.output_tokens = g.tree_selected;
-            args.output_scores = g.tree_scores;
-            args.draft_rows = dflash_k;
-            args.rank = static_cast<uint32_t>(decoder.draft->config->selector_rank);
-            args.top_k = top_k;
-            args.vocab_size = static_cast<uint32_t>(decoder.draft->config->vocab_size);
-            err = shelf::kernel::launch_dflash2_candidate_selector(args, decoder.stream);
-            if (err != hipSuccess) return Status::hip_error("dflash2 tree selector", hipGetErrorString(err), __FILE__, __LINE__);
+            const uint32_t vocab = static_cast<uint32_t>(decoder.draft->config->vocab_size);
+            const uint32_t retained = std::min(top_k, 4u);
             std::vector<int32_t> ids(dflash_k * top_k);
-            std::vector<float> scores(dflash_k * top_k);
-            err = hipMemcpyAsync(ids.data(), args.topk_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost, decoder.stream);
-            if (err == hipSuccess) err = hipMemcpyAsync(scores.data(), g.tree_scores, scores.size() * sizeof(float), hipMemcpyDeviceToHost, decoder.stream);
-            if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
-            if (err != hipSuccess) return Status::hip_error("dflash2 tree scores copy", hipGetErrorString(err), __FILE__, __LINE__);
-            for (uint32_t i = 0; i < extra; ++i) {
-                float best = -std::numeric_limits<float>::infinity();
-                for (uint32_t j = 0; j < top_k; ++j) {
-                    const uint32_t n = i * top_k + j;
-                    if (ids[n] == drafts[i]) continue;
-                    if (scores[n] > best || (scores[n] == best && (alternatives[i] < 0 || ids[n] < alternatives[i]))) {
-                        alternatives[i] = ids[n];
-                        best = scores[n];
+            std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
+            hipError_t err = hipMemcpy(ids.data(), decoder.draft->proposal_topk_ids.data<int32_t>(),
+                ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
+            if (err == hipSuccess) err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>(),
+                logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+            if (err != hipSuccess) return Status::hip_error("dflash2 budget logits copy", hipGetErrorString(err), __FILE__, __LINE__);
+            std::vector<std::vector<DFlash2TreeCandidate>> choices(dflash_k);
+            for (uint32_t i = 0; i < dflash_k; ++i) {
+                const float* row = logits.data() + static_cast<size_t>(i) * vocab;
+                const float maximum = *std::max_element(row, row + vocab);
+                double sum = 0.0;
+                for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
+                double mass = 0.0;
+                for (uint32_t j = 0; j < retained; ++j) {
+                    const int32_t id = ids[i * top_k + j];
+                    const double probability = std::exp(static_cast<double>(row[id] - maximum)) / sum;
+                    choices[i].push_back({id, probability});
+                    mass += probability;
+                }
+                if (tm != nullptr) { tm->tree_retained_mass += mass; ++tm->tree_probability_rows; }
+            }
+            if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
+                    dflash_k, position, [&](uint32_t depth, int32_t) { return choices[depth]; }, tree))
+                return Status::invalid_state("dflash2 budget tree selection failed", __FILE__, __LINE__);
+            verify_rows = static_cast<uint32_t>(tree.tokens.size());
+        } else {
+            std::vector<int32_t> alternatives(dflash_k, -1);
+            const uint32_t extra = std::min({decoder.config.tree_extra, 2u,
+                                             room - verify_rows, dflash_k});
+            if (extra != 0u) {
+                auto& g = decoder.gdn_ranks.front();
+                const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
+                if (top_k < 2u || top_k > shelf::kernel::kDflash2SelectorMaxTopK)
+                    return Status::unsupported("dflash2 tree requires selector top-k between 2 and 16", __FILE__, __LINE__);
+                std::vector<int32_t> predecessors(dflash_k);
+                predecessors[0] = pending_token;
+                for (uint32_t i = 1; i < dflash_k; ++i) predecessors[i] = drafts[i - 1u];
+                hipError_t err = hipMemcpyAsync(g.tree_predecessors, predecessors.data(),
+                    dflash_k * sizeof(int32_t), hipMemcpyHostToDevice, decoder.stream);
+                if (err != hipSuccess) return Status::hip_error("dflash2 tree predecessor upload", hipGetErrorString(err), __FILE__, __LINE__);
+                shelf::kernel::DFlash2CandidateSelectorArgs args;
+                args.hidden_proj = decoder.draft->selector_hidden_proj.data<bf16_t>();
+                args.topk_ids = decoder.draft->proposal_topk_ids.data<int32_t>();
+                args.topk_logits = decoder.draft->proposal_topk_logits.data<float>();
+                args.predecessor_codebook = decoder.draft->weights->selector.predecessor_codebook.data<bf16_t>();
+                args.successor_codebook = decoder.draft->weights->selector.successor_codebook.data<bf16_t>();
+                args.row_predecessors = g.tree_predecessors;
+                args.output_tokens = g.tree_selected;
+                args.output_scores = g.tree_scores;
+                args.draft_rows = dflash_k;
+                args.rank = static_cast<uint32_t>(decoder.draft->config->selector_rank);
+                args.top_k = top_k;
+                args.vocab_size = static_cast<uint32_t>(decoder.draft->config->vocab_size);
+                err = shelf::kernel::launch_dflash2_candidate_selector(args, decoder.stream);
+                if (err != hipSuccess) return Status::hip_error("dflash2 tree selector", hipGetErrorString(err), __FILE__, __LINE__);
+                std::vector<int32_t> ids(dflash_k * top_k);
+                std::vector<float> scores(dflash_k * top_k);
+                err = hipMemcpyAsync(ids.data(), args.topk_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost, decoder.stream);
+                if (err == hipSuccess) err = hipMemcpyAsync(scores.data(), g.tree_scores, scores.size() * sizeof(float), hipMemcpyDeviceToHost, decoder.stream);
+                if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
+                if (err != hipSuccess) return Status::hip_error("dflash2 tree scores copy", hipGetErrorString(err), __FILE__, __LINE__);
+                for (uint32_t i = 0; i < extra; ++i) {
+                    float best = -std::numeric_limits<float>::infinity();
+                    for (uint32_t j = 0; j < top_k; ++j) {
+                        const uint32_t n = i * top_k + j;
+                        if (ids[n] == drafts[i]) continue;
+                        if (scores[n] > best || (scores[n] == best && (alternatives[i] < 0 || ids[n] < alternatives[i]))) {
+                            alternatives[i] = ids[n];
+                            best = scores[n];
+                        }
                     }
                 }
             }
+            tree = make_dflash2_tree(pending_token,
+                std::span<const int32_t>(drafts.data(), dflash_k), alternatives, extra, position);
+            verify_rows = static_cast<uint32_t>(tree.tokens.size());
         }
-        tree = make_dflash2_tree(pending_token,
-            std::span<const int32_t>(drafts.data(), dflash_k), alternatives, extra, position);
-        verify_rows = static_cast<uint32_t>(tree.tokens.size());
     }
 
     out.num_dflash_drafts = dflash_k;
@@ -1322,18 +1355,23 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_commit_ms : nullptr);
-        for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-            auto scope = shelf::gpu::ScopedDevice::create(g.device);
-            if (!scope.ok()) return scope.status();
-            Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
-                                                 walk.rows[accepted], g.stream);
-            if (!st.ok()) return st;
+        {
+            ScopedTimer restore_timer(want_timing ? &tm->tree_restore_ms : nullptr);
+            for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+                auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                if (!scope.ok()) return scope.status();
+                Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
+                                                     walk.rows[accepted], g.stream);
+                if (!st.ok()) return st;
+            }
         }
-        if (decoder.config.tree_extra != 0u) {
+        if (decoder.config.tree_extra != 0u || decoder.config.tree_budget != 0u) {
+            ScopedTimer gather_timer(want_timing ? &tm->tree_gather_ms : nullptr);
             Status st = gather_tree_path(decoder, position,
                 std::span<const uint32_t>(walk.rows.data(), accepted + 1u));
             if (!st.ok()) return st;
         }
+        ScopedTimer append_timer(want_timing ? &tm->tree_append_ms : nullptr);
         decoder.sequence->position = position + accepted + 1u;
         Status st = append_committed(decoder, position, accepted + 1u);
         if (!st.ok()) return st;

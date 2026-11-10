@@ -41,6 +41,7 @@ struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
     bool tree = false;
     uint32_t tree_extra = 0u;
+    uint32_t tree_budget = 0u;
     qwen_hybrid::StopTokens eos_tokens;
 };
 
@@ -204,8 +205,13 @@ struct DFlash2SpecTiming {
     double proposal_copy_ms = 0.0;
     double gdn_snapshot_ms = 0.0;
     double tree_select_ms = 0.0;
+    double tree_retained_mass = 0.0;
+    uint64_t tree_probability_rows = 0u;
     double tree_walk_ms = 0.0;
     double tree_commit_ms = 0.0;
+    double tree_restore_ms = 0.0;
+    double tree_gather_ms = 0.0;
+    double tree_append_ms = 0.0;
     double verify_ms = 0.0;
     double verify_gpu_ms = 0.0;
     double decision_wait_ms = 0.0;

@@ -916,6 +916,15 @@ samples を別途 D2H する。
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
+- `--dflash2-tree-budget N`: 単一 request・TP=1・greedy 用の実験的な木検証。
+  anchor を含む総行数を指定し、`--dflash2-tree-extra` とは併用できない。
+  N は draft 数 + 1 以上、512 以下。draft 数 + 1 の場合は通常の chain を使う。
+  より大きな予算では各位置の drafter logits を全語彙で softmax 正規化し、
+  top 4 の確率の積を使って prefix-closed な木を best-first で選ぶ。
+  分岐後も位置ごとの marginal を共有し、親条件付き補正は選択に使わない。
+  選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
+  採用した経路の KV と target tap は連続位置に集め、最終行の GDN history を復元する。
+  浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × block_size`）、drafter scratch の大きさがこの値で決まる。pool に空きが無い間に
