@@ -71,6 +71,7 @@ GROUPS = OrderedDict([
     ("unsupported", [
         "test_server_unsupported.py",
         "test_server_stop.py",
+        "test_server_stop_prefix.py",
         "test_compute_prefix_contract.py",
     ]),
     ("concurrency-cancel", [
