@@ -106,8 +106,9 @@ XGrammar 0.2.9 で確認した。これは文法単体の検証であり server 
 
 特に、XGrammar は enum `" a "` の XML 値として前後の空白を含む文字列を受け入れるが、
 既存 parser は parameter 値の前後を strip する。そのまま型変換するだけでは
-schema 適合を壊す。strict 側は生成テキストから元の値を保存し、文字列以外を
-schema に応じて JSON decode する必要がある。文字列中の tool markup が parser の
+schema 適合を壊す。grammar で検証済みの parameter 本文について、文字列を保持し、
+文字列以外を JSON decode する CPU 補助関数を追加した。server への接続と、
+生成テキストから正しい parameter 本文を安全に取り出す実装は未完である。文字列中の tool markup が parser の
 区切りと衝突するケースも制約または parser の修正と検証が必要。非 strict の
 既存挙動は変えない方針である。
 

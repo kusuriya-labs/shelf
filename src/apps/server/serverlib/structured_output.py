@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 
 from .openai_protocol import OpenAIProtocolError
 
@@ -88,6 +89,39 @@ def tool_structural_tag(tools, choice, forced_name=None):
     else:
         fmt = {"type": "or", "elements": tags} if len(tags) > 1 else tags[0]
     return {"type": "structural_tag", "format": fmt}
+
+
+def parse_qwen_strict_arguments(body, schema):
+    """Decode XML parameter bodies using the schema, preserving string bytes.
+
+    The caller must supply a grammar-validated function body. Unlike the
+    generic tool parser, this does not strip whitespace from string values.
+    """
+    properties = schema.get("properties", {})
+    result = {}
+    position = 0
+    for match in re.finditer(r"<parameter=([^>\s]+)>(.*?)</parameter>", body, re.DOTALL):
+        if body[position:match.start()].strip():
+            raise ValueError("unexpected text between parameters")
+        name, value = match.groups()
+        if name in result:
+            raise ValueError("duplicate parameter")
+        child = properties.get(name)
+        if child is None:
+            if not schema.get("additionalProperties", True):
+                raise ValueError("unexpected parameter")
+            # An unknown property has no type constraint; a string is valid.
+            result[name] = value
+        elif child["type"] == "string":
+            result[name] = value
+        else:
+            result[name] = json.loads(value)
+        position = match.end()
+    if body[position:].strip():
+        raise ValueError("unexpected text after parameters")
+    if not set(schema.get("required", [])) <= result.keys():
+        raise ValueError("missing required parameter")
+    return result
 
 
 class GrammarFactory:

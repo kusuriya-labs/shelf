@@ -9,7 +9,7 @@ sys.path[:0] = [str(ROOT / "src/apps/server"), str(ROOT / "src/apps/common")]
 
 import xgrammar as xgr
 from xgrammar.testing import _is_grammar_accept_string
-from serverlib.structured_output import tool_structural_tag
+from serverlib.structured_output import parse_qwen_strict_arguments, tool_structural_tag
 
 
 def call(name, body):
@@ -49,6 +49,23 @@ class ToolGrammarTest(unittest.TestCase):
         self.assertTrue(self.accepts("auto", "answer " + self.valid))
         self.assertFalse(self.accepts("auto", self.valid.replace(">2</parameter>", ">bad</parameter>")))
         self.assertFalse(self.accepts("auto", "<tool_call>invalid"))
+
+    def test_decode_types_and_preserve_string_whitespace(self):
+        schema = {"type": "object", "properties": {
+            "s": {"type": "string"}, "i": {"type": "integer"},
+            "n": {"type": "number"}, "b": {"type": "boolean"},
+            "a": {"type": "array"}, "o": {"type": "object"}},
+            "required": ["s", "i", "n", "b", "a", "o"],
+            "additionalProperties": False}
+        body = ('<parameter=s> 42 </parameter>\n<parameter=i>42</parameter>\n'
+                '<parameter=n>1.5</parameter>\n<parameter=b>true</parameter>\n'
+                '<parameter=a>[1, "x"]</parameter>\n'
+                '<parameter=o>{"x": false}</parameter>')
+        self.assertEqual(parse_qwen_strict_arguments(body, schema), {
+            "s": " 42 ", "i": 42, "n": 1.5, "b": True,
+            "a": [1, "x"], "o": {"x": False}})
+        with self.assertRaises(ValueError):
+            parse_qwen_strict_arguments(body + "<parameter=i>1</parameter>", schema)
 
 
 if __name__ == "__main__":
