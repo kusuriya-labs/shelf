@@ -283,14 +283,15 @@ constexpr uint32_t kQsaScoreChunk = 32u;
 __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
     QsaScoreArgs args) {
     const uint32_t row_group = blockIdx.x * kQsaScoreRowsPerCta;
-    const uint32_t block_group = blockIdx.y * kQsaScoreBlocksPerCta;
+    const uint32_t block_tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    const uint32_t block_group = blockIdx.y * block_tile;
     if (row_group >= args.rows || block_group >= args.blocks) return;
     const uint32_t valid_rows = args.rows - row_group < kQsaScoreRowsPerCta
         ? args.rows - row_group
         : kQsaScoreRowsPerCta;
-    const uint32_t block_here = args.blocks - block_group < kQsaScoreBlocksPerCta
+    const uint32_t block_here = args.blocks - block_group < block_tile
         ? args.blocks - block_group
-        : kQsaScoreBlocksPerCta;
+        : block_tile;
     const uint32_t t = threadIdx.x;
     const uint32_t lane = t & 31u;
     const uint32_t hi = lane >> 4u;
@@ -1111,8 +1112,9 @@ hipError_t launch_qsa_score_wmma(const QsaScoreArgs& args, hipStream_t stream) {
     }
     const uint32_t row_groups =
         (args.rows + kQsaScoreRowsPerCta - 1u) / kQsaScoreRowsPerCta;
-    const uint32_t block_tiles =
-        (args.blocks + kQsaScoreBlocksPerCta - 1u) / kQsaScoreBlocksPerCta;
+    const uint32_t tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    if (tile > kQsaScoreBlockTile) return hipErrorInvalidValue;
+    const uint32_t block_tiles = (args.blocks + tile - 1u) / tile;
     const dim3 grid(row_groups, block_tiles);
     qsa_score_wmma_kernel<<<grid, kQsaThreads, 0, stream>>>(args);
     return hipGetLastError();

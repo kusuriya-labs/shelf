@@ -177,7 +177,7 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
     args.scale = b.scalar_a;
     if (ctx.qsa_scores != nullptr && ctx.qsa_topk_scores != nullptr &&
         ctx.qsa_topk_indices != nullptr && ctx.staged_requests != nullptr &&
-        ctx.staged_request_count != 0u && args.rows >= 256u &&
+        ctx.staged_request_count != 0u && args.rows >= 1u &&
         args.n_heads == 4u && args.head_dim == ::shelf::kernel::kQsaHeadDim) {
         constexpr uint32_t kMaxSlices = 256u;
         struct Slice {
@@ -256,6 +256,11 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
                         sa.row_begin = slice.begin - rc;
                         sa.block_begin = bt;
                         sa.blocks = std::min(tile_blocks, slice.blocks - bt);
+                        sa.block_tile = args.rows < 64u
+                                            ? 64u
+                                            : (args.rows < 256u
+                                                   ? 256u
+                                                   : ::shelf::kernel::kQsaScoreBlocksPerCta);
                         sa.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
                         sa.n_heads = args.n_heads;
                         sa.head_dim = args.head_dim;

@@ -94,6 +94,7 @@ struct QsaScoreArgs {
     uint32_t row_begin = 0;
     uint32_t block_begin = 0;
     uint32_t blocks = 0;
+    uint32_t block_tile = kQsaScoreBlocksPerCta;
     uint32_t score_row_stride = 0;
     uint32_t n_heads = 0;
     uint32_t head_dim = 0;
