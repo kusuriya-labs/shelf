@@ -1018,6 +1018,22 @@ int main() {
     env.slots = &slots;
     env.stream = stream;
 
+    auto empty_result = GdnStatePool::create(arena, 12, GdnStatePoolLayout{});
+    check(empty_result.ok(), "empty GDN pool create");
+    if (empty_result.ok()) {
+        GdnStatePool empty = empty_result.release();
+        check(empty.reserved_bytes() == 0, "empty GDN pool allocates no state");
+        check(empty.initialize(0, stream).ok(), "empty GDN slot initialize");
+        check(!empty.initialize(0, stream).ok(), "empty GDN rejects duplicate initialize");
+        check(empty.reset(0, stream).ok(), "empty GDN slot reset");
+        check(empty.copy_slot_from(1, empty, 0, stream).ok(), "empty GDN slot copy");
+        check(empty.release(0).ok() && empty.num_used_slots() == 0,
+              "empty GDN slot release");
+        Env empty_env = env;
+        empty_env.gdn = &empty;
+        test_roundtrip(empty_env, *env.kv_bf16, 80);
+    }
+
     const char* only = std::getenv("SHELF_PFX_TEST");
     auto run = [&](const char* name, void (*fn)(Env&)) {
         if (only == nullptr || std::strcmp(only, name) == 0) fn(env);
