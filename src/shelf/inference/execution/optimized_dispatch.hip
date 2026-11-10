@@ -673,6 +673,12 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_rows,
+                          uint64_t rowsum_bytes) {
+    return dense_ok && n_rows >= dense_min_rows &&
+           static_cast<uint64_t>(n_rows) * sizeof(float) <= rowsum_bytes;
+}
+
 // EXL3-INT8 (mul24): rotate + int8-quantize the activations, run the int8 WMMA GEMM that decodes the resident
 // trellis on every read, then rotate the output back. The three launches share the EXL3 workspace of the executor:
 // the xrot region holds the int8 codes and their scales, the accum region the F32 pre-rotation output.
@@ -748,8 +754,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
-        const bool use_dense = dense_ok && n_rows >= dense_min_rows &&
-                               static_cast<uint64_t>(n_rows) * sizeof(float) <= ctx.exl3_rowsum_bytes;
+        const bool use_dense =
+            exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, ctx.exl3_rowsum_bytes);
         const ::shelf::bf16_t* x = reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride;
         const uint16_t* suh = static_cast<const uint16_t*>(e.exl3_suh);
         const uint16_t* svh = static_cast<const uint16_t*>(e.exl3_svh);
