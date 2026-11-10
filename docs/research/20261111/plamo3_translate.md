@@ -53,3 +53,17 @@ Shelf の Qwen 実装は gated query、Qwen 固有の層構成と weight 名を�
 | 明日の午後、駅でお会いしましょう。 | I'll see you at the station tomorrow afternoon. |
 | The train will arrive in five minutes. | 列車は5分後に到着します。 |
 | Please let me know if you have any questions. | ご質問があればお知らせください。 |
+
+## M1 推論実装の途中経過
+
+GDN を持たない attention-only モデルに向けて、状態を確保しない空の GDN pool と系列・prefix cache の操作を追加した。既存 Qwen のダミー pool は維持し、executor は GDN が実際に 0 層のとき空 pool も受け付ける。
+
+PLaMo 0.8B の結合 QKV は幅 2304 を 2048 と 256 に分け、後者を幅 128 の K と V に分ける必要がある。従来の correctness split は出力幅が等しい場合しか動作しなかったため、不均等分割を追加した。RMSNorm には正規化結果と offset 加算後の weight を BF16 に丸める実装を追加した。既存 Qwen の RMSNorm とは別の mode であり、最適化済み kernel は未実装である。
+
+RoPE 周波数表は executor が 32 要素に固定していたため、rotary 次元に応じて確保するよう変更した。ただし executor が使用する周波数表は現状 1 種類であり、PLaMo の局所 RoPE と全域 YaRN を同一 request の層ごとに切り替える接続は未実装である。BF16 の cos/sin と Q/K の丸めも参照実装に合わせて検証する必要がある。
+
+これらの部品はモデルの接続を意味しない。PLaMo 用 config・BF16 weight loader、非 gated attention と 4 個の norm を含む lowering、層別 RoPE、2048 token の admission 制限、compute / server の family 接続と停止 token が残る。GPU logits、翻訳品質、性能はまだ測定していない。M2 以降の 2B / 8B、真の SWA kernel、`rocm_exl3` の architecture 登録と量子化、長文脈の検証も未着手である。
+
+実モデルで `shelf-compute --input-ids-file /tmp/plamo3_case_0.tokens --max-new-tokens 1` を試した結果、`check_config_identity` が `model_type='plamo3'` を未対応として拒否した。これは weight 読み込み前の失敗である。identity の許可だけでは Qwen 用 loader や gated attention に進むため不十分である。
+
+GPU の `test_prefix_cache`、`test_elementwise`、`test_rope`、`test_rope_yarn`、`test_qwen35moe_executor` は通過した。CPU の `test_executor_footprint`、`test_program_workspace_lifetime`、`test_qwen35_tp_context`、`test_qwen35_rope_selector`、`test_qwen35_rope_profile` も通過した。これらは部品と既存モデルの限定的な検証であり、PLaMo の end-to-end 推論の検証ではない。
