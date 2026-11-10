@@ -106,7 +106,7 @@ def input_messages(value):
 
 
 def parse_responses_request(body, *, inference_budget_tokens):
-    allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature", "top_p", "seed", "reasoning", "store", "metadata", "user", "parallel_tool_calls", "truncation", "include", "stream", "previous_response_id", "conversation", "text"}
+    allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature", "top_p", "seed", "reasoning", "store", "metadata", "user", "parallel_tool_calls", "truncation", "include", "stream", "previous_response_id", "conversation", "text", "prompt_cache_key", "client_metadata"}
     if not isinstance(body, dict):
         raise OpenAIProtocolError("request body must be a JSON object")
     for key in body:
@@ -152,6 +152,12 @@ def parse_responses_request(body, *, inference_budget_tokens):
     for key in ("store", "parallel_tool_calls"):
         if body.get(key) is not None and not isinstance(body[key], bool):
             raise OpenAIProtocolError(f"{key} must be a boolean", param=key)
+    if body.get("store") is True:
+        reject("store", "store=true is not supported")
+    if body.get("prompt_cache_key") is not None and not isinstance(body["prompt_cache_key"], str):
+        raise OpenAIProtocolError("prompt_cache_key must be a string", param="prompt_cache_key")
+    if body.get("client_metadata") is not None and not isinstance(body["client_metadata"], dict):
+        raise OpenAIProtocolError("client_metadata must be an object", param="client_metadata")
     if body.get("parallel_tool_calls") is False:
         reject("parallel_tool_calls")
     if body.get("truncation") not in (None, "disabled"):

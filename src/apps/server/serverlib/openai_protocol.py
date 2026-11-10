@@ -1,7 +1,7 @@
 """OpenAI Chat Completions の入力検証と応答エンコード。
 
 対応するパラメータは明示的に列挙し、未対応・未知のキーは拒否する。
-user、store、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
+user、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
 構造化出力、strict tool、文法制約には対応しない。
 """
 
@@ -107,6 +107,10 @@ def reject_unsupported(body: dict) -> None:
         if key not in allowed:
             raise OpenAIProtocolError(
                 f"{key} is not supported", param=key, code="unsupported_parameter")
+    if body.get("store") is not None and not isinstance(body["store"], bool):
+        raise OpenAIProtocolError("store must be a boolean", param="store")
+    if body.get("store") is True:
+        raise OpenAIProtocolError("store=true is not supported", param="store", code="unsupported_parameter")
     for key in ("frequency_penalty", "presence_penalty"):
         value = body.get(key)
         if value is not None and (isinstance(value, bool) or

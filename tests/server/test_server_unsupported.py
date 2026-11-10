@@ -53,6 +53,7 @@ PLAIN_TOOL = {
 }
 
 REJECTED = [
+    ("store-true", {"store": True}, "store"),
     ("frequency-penalty", {"frequency_penalty": 1}, "frequency_penalty"),
     ("presence-penalty", {"presence_penalty": -1}, "presence_penalty"),
     *[(key, {key: value}, key) for key, value in [
@@ -98,7 +99,7 @@ def unit_main() -> int:
                           repr((exc.param, exc.code)))
         else:
             checker.check(label, False, "accepted")
-    for key, value in [("user", "u"), ("store", True), ("metadata", {"x": "y"}),
+    for key, value in [("user", "u"), ("store", False), ("metadata", {"x": "y"}),
                        ("service_tier", "auto"), ("parallel_tool_calls", True),
                        ("frequency_penalty", 0), ("presence_penalty", 0)]:
         try:

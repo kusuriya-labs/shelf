@@ -87,7 +87,7 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_basic_usage_and_incomplete(self):
         self.service.length = True
-        response = await self.post(max_output_tokens=4, store=True, metadata={}, user="x")
+        response = await self.post(max_output_tokens=4, store=False, metadata={}, user="x", prompt_cache_key="key", client_metadata={"client": "codex"})
         data = await response.json()
         self.assertEqual(response.status, 200)
         self.assertTrue(data['id'].startswith('resp_'))
@@ -115,6 +115,8 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejections(self):
         cases = [({"previous_response_id": "resp_1"}, "previous_response_id"),
                  ({"conversation": "c"}, "conversation"),
+                 ({"store": True}, "store"), ({"prompt_cache_key": 3}, "prompt_cache_key"),
+                 ({"client_metadata": []}, "client_metadata"),
                  ({"text": {"format": {"type": "json_schema"}}}, "text.format"),
                  ({"tools": [{"type": "function", "name": "x", "strict": True}]}, "tools[0].strict"),
                  ({"tools": [{"type": "web_search"}]}, "tools[0].type"),
