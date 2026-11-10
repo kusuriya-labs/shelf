@@ -982,15 +982,15 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         }
     }
     if (dflash.enabled) {
+        const uint32_t session_rows =
+            shelf::qwen35::runtime::dflash2_session_rows(dflash.config.block_size, dflash.drafts);
         if (runtime.config().dflash2_sessions() >
-            shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows /
-                static_cast<uint32_t>(dflash.config.block_size)) {
+            shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows / session_rows) {
             fprintf(stderr,
                     "dflash2 serve: dflash2_sessions %u exceeds verify row cap %u "
-                    "for block_size %zu\n",
+                    "for %u rows per session\n",
                     runtime.config().dflash2_sessions(),
-                    shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows,
-                    dflash.config.block_size);
+                    shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows, session_rows);
             return 1;
         }
         const std::size_t weights_before = runtime.arena().used();
@@ -1006,8 +1006,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
 
         const auto& text_config = runtime.model().hybrid_config();
         const uint32_t batch_max_rows = std::min<uint32_t>(
-            runtime.config().dflash2_sessions() *
-                static_cast<uint32_t>(dflash.config.block_size),
+            runtime.config().dflash2_sessions() * session_rows,
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
         const bool serve_tp_sharded = runtime.config().tp > 1;
         shelf::qwen35::dflash2::DFlash2ExecutorConfig draft_config;

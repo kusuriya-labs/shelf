@@ -173,7 +173,8 @@ int main(int argc, char** argv) {
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
             const uint32_t batch_rows = config.dflash2_sessions() *
-                static_cast<uint32_t>(dflash_config.block_size);
+                shelf::qwen35::runtime::dflash2_session_rows(
+                    dflash_config.block_size, config.dflash2_drafts);
             if (config.max_num_batched_tokens < batch_rows) {
                 config.max_num_batched_tokens = batch_rows;
             }
