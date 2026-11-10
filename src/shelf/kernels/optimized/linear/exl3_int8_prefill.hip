@@ -1,11 +1,23 @@
 #include <shelf/kernels/optimized/linear/exl3_int8_prefill.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 
+#include <cstdlib>
+
 namespace shelf::kernel {
 namespace {
 
 constexpr uint32_t kBlock = 128u;
 constexpr float kInvSqrt128 = 0.08838834764831845f;
+
+// SHELF_EXL3_INT8_ROTATE_F4=1 replaces the 5-shuffle / 2-smem hybrid below with the full float4 form
+// (launch_exl3_int8_rotate_out_i32), so all 7 H128 stages stay inside one wave.
+bool rotate_f4_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHELF_EXL3_INT8_ROTATE_F4");
+        return env != nullptr && std::strtoul(env, nullptr, 10) != 0ul;
+    }();
+    return enabled;
+}
 
 __device__ __forceinline__ uint16_t f32_to_bf16_rne(float f) {
     uint32_t u = __float_as_uint(f);
@@ -58,6 +70,10 @@ hipError_t launch_exl3_int8_prefill_rotate_out_i32(
     void* out, Exl3Int8OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
+    if (rotate_f4_enabled()) {
+        return launch_exl3_int8_rotate_out_i32(acc, rowscale, slots, yprime2, svh, out, out_dtype, rows, n,
+                                               out_row_stride, stream);
+    }
     const dim3 grid(rows, n / kBlock);
     if (out_dtype == Exl3Int8OutputDType::BF16)
         rotate_out_i32_prefill<true><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
