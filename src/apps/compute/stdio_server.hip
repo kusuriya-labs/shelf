@@ -133,6 +133,98 @@ bool upload_mask(shelf::app::Qwen35ComputeRuntime& runtime,
                      hipMemcpyHostToDevice) == hipSuccess;
 }
 
+struct MtpPrefillLog {
+    int64_t external_id = 0;
+    uint32_t last_tokens = 0;
+    double last_ms = 0.0;
+};
+
+void serve_mtp_prefill_progress(void* context, uint32_t processed_tokens,
+                                double elapsed_ms) {
+    auto* log = static_cast<MtpPrefillLog*>(context);
+    const double interval_s = (elapsed_ms - log->last_ms) / 1000.0;
+    if (interval_s < 3.0 || processed_tokens <= log->last_tokens) return;
+    const uint32_t delta = processed_tokens - log->last_tokens;
+    std::fprintf(stderr,
+                 "[req %lld] prefill_tok_s=%.1f tokens=%u interval_s=%.2f\n",
+                 static_cast<long long>(log->external_id),
+                 static_cast<double>(delta) / interval_s, processed_tokens,
+                 interval_s);
+    log->last_ms = elapsed_ms;
+    log->last_tokens = processed_tokens;
+}
+
+struct MtpRequestTiming {
+    std::chrono::steady_clock::time_point submitted_at;
+    std::chrono::steady_clock::time_point first_token_at;
+    std::chrono::steady_clock::time_point last_log_at;
+    std::size_t last_log_tokens = 0;
+    bool has_first_token = false;
+};
+
+void mtp_timing_submitted(MtpRequestTiming& timing) {
+    timing.submitted_at = std::chrono::steady_clock::now();
+}
+
+void mtp_timing_first_token(MtpRequestTiming& timing) {
+    timing.first_token_at = std::chrono::steady_clock::now();
+    timing.last_log_at = timing.first_token_at;
+    timing.last_log_tokens = 0;
+    timing.has_first_token = true;
+}
+
+void mtp_log_decode_interval(int64_t external_id, MtpRequestTiming& timing,
+                             std::size_t emitted_tokens) {
+    if (!timing.has_first_token) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double interval_s =
+        std::chrono::duration<double>(now - timing.last_log_at).count();
+    if (interval_s < 3.0 || emitted_tokens <= timing.last_log_tokens) return;
+    const std::size_t delta = emitted_tokens - timing.last_log_tokens;
+    std::fprintf(stderr,
+                 "[req %lld] decode_tok_s=%.1f tokens=%zu interval_s=%.2f\n",
+                 static_cast<long long>(external_id),
+                 static_cast<double>(delta) / interval_s, emitted_tokens, interval_s);
+    timing.last_log_at = now;
+    timing.last_log_tokens = emitted_tokens;
+}
+
+void mtp_log_request_summary(int64_t external_id, const MtpRequestTiming& timing,
+                             std::size_t prompt, std::size_t restored,
+                             std::size_t generated, double prefill_ms) {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(
+                                finished_at - timing.submitted_at)
+                                .count();
+    const double ttft_ms =
+        timing.has_first_token
+            ? std::chrono::duration<double, std::milli>(
+                  timing.first_token_at - timing.submitted_at)
+                  .count()
+            : total_ms;
+    const double decode_ms =
+        timing.has_first_token
+            ? std::chrono::duration<double, std::milli>(
+                  finished_at - timing.first_token_at)
+                  .count()
+            : 0.0;
+    const std::size_t prefill = prompt - std::min(restored, prompt);
+    const std::size_t decode_tokens = generated > 0u ? generated - 1u : 0u;
+    const double prefill_tok_s =
+        prefill_ms > 0.0 ? static_cast<double>(prefill) * 1000.0 / prefill_ms : 0.0;
+    const double decode_tok_s =
+        decode_ms > 0.0 && decode_tokens > 0u
+            ? static_cast<double>(decode_tokens) * 1000.0 / decode_ms
+            : 0.0;
+    std::fprintf(
+        stderr,
+        "[req %lld] prompt=%zu restored=%zu prefill=%zu gen=%zu "
+        "prefill_ms=%.1f prefill_tok_s=%.1f ttft_ms=%.1f decode_ms=%.1f "
+        "decode_tok_s=%.1f\n",
+        static_cast<long long>(external_id), prompt, restored, prefill, generated,
+        prefill_ms, prefill_tok_s, ttft_ms, decode_ms, decode_tok_s);
+}
+
 struct MtpRequest {
     int64_t external_id = 0;
     std::unique_ptr<shelf::state::PagedSequenceState> sequence;
@@ -142,6 +234,8 @@ struct MtpRequest {
     uint32_t generated = 0u;
     std::size_t prompt_tokens = 0u;
     std::vector<int32_t> generated_ids;
+    MtpRequestTiming timing;
+    double prefill_ms = 0.0;
 };
 
 struct MtpServeContext {
@@ -673,6 +767,9 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
 }
 
 void serve_mtp_emit_done(ServeState& state, MtpRequest& request, const char* reason) {
+    mtp_log_request_summary(request.external_id, request.timing, request.prompt_tokens,
+                            0u, request.generated, request.prefill_ms);
+
     nlohmann::json done;
     done["event"] = "done";
     done["request_id"] = request.external_id;
@@ -707,6 +804,8 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     }
     const nlohmann::json request_id = request["request_id"];
     const int64_t external_request_id = request_id.get<int64_t>();
+    MtpRequestTiming timing;
+    mtp_timing_submitted(timing);
     if (state.inflight.count(external_request_id) ||
         state.inflight.size() + mtp.active.size() >= state.max_inflight) {
         emit_error(request_id, "duplicate request_id or compute concurrency limit reached");
@@ -842,9 +941,18 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     }
     mtp.free_slots.pop_back();
     drafter.sampling = sampling;
+    MtpPrefillLog prefill_log;
+    prefill_log.external_id = external_request_id;
+    shelf::qwen35::runtime::MtpPrefillProgress prefill_progress;
+    prefill_progress.context = &prefill_log;
+    prefill_progress.report = serve_mtp_prefill_progress;
+    const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill = shelf::qwen35::runtime::mtp_spec_prefill(
         drafter, runtime.executor(), *sequence, input_ids.data(),
-        static_cast<uint32_t>(input_ids.size()), sampling);
+        static_cast<uint32_t>(input_ids.size()), sampling, &prefill_progress);
+    const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - prefill_started)
+                                  .count();
     if (!prefill.ok()) {
         emit_error_with_code(request_id, "internal",
                              "mtp prefill failed: " + prefill.status().message());
@@ -863,6 +971,9 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     admitted->prompt_tokens = input_ids.size();
     admitted->generated = 1u;
     admitted->generated_ids.push_back(prefill.value().pending_token);
+    admitted->timing = timing;
+    admitted->prefill_ms = prefill_ms;
+    mtp_timing_first_token(admitted->timing);
     emit_token(external_request_id, prefill.value().pending_token);
     const bool stop = shelf::qwen_hybrid::is_stop_token(
         runtime.model().hybrid_config().stop_tokens, prefill.value().pending_token);
@@ -934,6 +1045,8 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
         request.pending_token = out.pending_token;
         mtp.accepted_drafts += out.num_accepted;
         mtp.emitted_tokens += out.emitted_count;
+        mtp_log_decode_interval(request.external_id, request.timing,
+                                request.generated);
         const bool length_done = request.generated >= request.max_new_tokens;
         finished[j] = out.finished || length_done;
         reasons[j] = out.finished ? "stop" : "length";

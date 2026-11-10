@@ -170,6 +170,8 @@ dense checkpoint を TP=2 で動かす場合:
   を 2 以上にしても、MTP の生成中は次の request を開始しない。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
+- `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
+  `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
 - grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は
   target-only の greedy 列と一致する。MoE でも speedup がある（`--mtp-drafts 4` で 1.88 倍）。
   実測値は [../perf/current.md](../perf/current.md)、経緯は

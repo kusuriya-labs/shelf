@@ -776,7 +776,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     state::PagedSequenceState& target_sequence,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    const SamplingConfig& sampling) {
+    const SamplingConfig& sampling,
+    const MtpPrefillProgress* progress) {
 
     if (!drafter.initialized) {
         return Status::invalid_state("mtp_spec_prefill: drafter is not initialized",
@@ -803,6 +804,14 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     int32_t pending = -1;
     std::vector<int32_t> chunk_tokens;
     std::vector<int32_t> mtp_tokens;
+    const auto prefill_started = std::chrono::steady_clock::now();
+    auto report_progress = [&](uint32_t processed_tokens) {
+        if (progress == nullptr || progress->report == nullptr) return;
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - prefill_started)
+                                      .count();
+        progress->report(progress->context, processed_tokens, elapsed_ms);
+    };
 
     for (uint32_t begin = 0; begin < prompt_count; begin += chunk_limit) {
         const uint32_t end = std::min(prompt_count, begin + chunk_limit);
@@ -841,6 +850,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
             drafter.last_tokens.assign(1u, prompt_tokens[last_row]);
             drafter.last_position = last_row;
             drafter.last_hidden_offset = 0u;
+            report_progress(end);
             continue;
         }
 
@@ -858,6 +868,7 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
                                               stream);
             if (!mtp_output.ok()) return mtp_output.status();
         }
+        report_progress(end);
     }
 
     MtpPrefillOutput output;

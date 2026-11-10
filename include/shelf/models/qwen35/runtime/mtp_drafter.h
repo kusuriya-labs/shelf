@@ -44,6 +44,12 @@ struct MtpPrefillOutput {
     int32_t pending_token = -1;
 };
 
+struct MtpPrefillProgress {
+    void* context = nullptr;
+    void (*report)(void* context, uint32_t processed_tokens,
+                   double elapsed_ms) = nullptr;
+};
+
 struct MtpIterationOutput {
     std::array<int32_t, kMtpMaxDrafts + 1u> emitted{};
     uint32_t emitted_count = 0;
@@ -215,7 +221,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     state::PagedSequenceState& target_sequence,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    const SamplingConfig& sampling);
+    const SamplingConfig& sampling,
+    const MtpPrefillProgress* progress = nullptr);
 
 Result<MtpIterationOutput> mtp_spec_step(
     MtpDrafter& drafter,
