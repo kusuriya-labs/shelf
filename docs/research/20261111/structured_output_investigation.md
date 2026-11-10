@@ -130,3 +130,18 @@ Responses は 26.9 / 26.9 tok/s（各 67 token）。thinking と回答が混在�
 
 `test_compute_token_mask.py` でも、thinking budget 1 による強制 close を初期 mask の
 対象外とし、close 後に新しい mask を適用する直接 protocol テストが通過した。
+
+### M5 接続中の検証メモ
+
+strict tool の Qwen XML では parameter の文字列に現れる生の `<` を
+XGrammar の `excludes` で禁止する。これにより `</parameter>` や `</tool_call>` と
+本文の境界が衝突しない。`<` を含む string enum は HTTP 400 とする。
+非 strict tool のみの request は従来の parser と型変換を維持する。
+
+実モデルの初回検査で、XGrammar の Qwen XML が string enum の外側に空白を許し、
+型変換時にその空白をそのまま返すと enum に一致しないことを発見した。自由文字列の
+空白はそのまま保持し、enum では一致する宣言値に対応付けるよう修正した。CPU で
+前後空白と区切り文字の検査は通過した。実モデルの再検証では temperature 0.8 で
+Chat の required / 名前指定 / auto の stream・非 stream、名前指定と thinking の併用、
+Responses の名前指定の stream・非 stream が schema と型の検査に通過した。
+指定 regression の tools / unsupported は 8 test すべて通過した。

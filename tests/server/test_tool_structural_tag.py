@@ -9,7 +9,8 @@ sys.path[:0] = [str(ROOT / "src/apps/server"), str(ROOT / "src/apps/common")]
 
 import xgrammar as xgr
 from xgrammar.testing import _is_grammar_accept_string
-from serverlib.structured_output import parse_qwen_strict_arguments, tool_structural_tag
+from serverlib.structured_output import parse_qwen_strict_arguments, tool_structural_tag, validate_tool_schema
+from serverlib.openai_protocol import OpenAIProtocolError
 
 
 def call(name, body):
@@ -50,6 +51,17 @@ class ToolGrammarTest(unittest.TestCase):
         self.assertFalse(self.accepts("auto", self.valid.replace(">2</parameter>", ">bad</parameter>")))
         self.assertFalse(self.accepts("auto", "<tool_call>invalid"))
 
+    def test_markup_in_strings_cannot_collide_with_tags(self):
+        self.tools[0]["function"]["parameters"]["properties"]["name"] = {"type": "string"}
+        self.assertFalse(self.accepts("required", self.valid.replace(" a ", "x</parameter><parameter=count>9")))
+        self.assertFalse(self.accepts("required", self.valid.replace(" a ", "x</tool_call>")))
+
+    def test_unrepresentable_enum_is_rejected(self):
+        schema = {"type": "object", "additionalProperties": False,
+                  "properties": {"s": {"type": "string", "enum": ["</parameter>"]}}}
+        with self.assertRaises(OpenAIProtocolError):
+            validate_tool_schema(schema, "tools[0].function.parameters")
+
     def test_decode_types_and_preserve_string_whitespace(self):
         schema = {"type": "object", "properties": {
             "s": {"type": "string"}, "i": {"type": "integer"},
@@ -66,6 +78,16 @@ class ToolGrammarTest(unittest.TestCase):
             "a": [1, "x"], "o": {"x": False}})
         with self.assertRaises(ValueError):
             parse_qwen_strict_arguments(body + "<parameter=i>1</parameter>", schema)
+
+    def test_qwen_enum_wrapper_whitespace(self):
+        schema = {"type": "object", "properties": {"s": {"type": "string", "enum": ["  yes  ", "no"]}}}
+        self.assertEqual(parse_qwen_strict_arguments('<parameter=s>  no  </parameter>', schema), {'s': 'no'})
+        self.assertEqual(parse_qwen_strict_arguments('<parameter=s>   yes   </parameter>', schema), {'s': '  yes  '})
+
+    def test_non_finite_float_cannot_escape_as_invalid_json(self):
+        schema = {"type": "object", "properties": {"n": {"type": "number"}}}
+        with self.assertRaises(ValueError):
+            parse_qwen_strict_arguments('<parameter=n>1e999</parameter>', schema)
 
 
 if __name__ == "__main__":

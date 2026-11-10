@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
@@ -193,6 +194,9 @@ class ChatService:
         messages = openai_messages_to_hf(request.messages)
 
         tools = request.tools if request.tool_choice != "none" else None
+        strict_tools = bool(tools and any(t["function"].get("strict") for t in tools))
+        if strict_tools and request.stop:
+            raise OpenAIProtocolError("strict tools do not support stop", param="stop", code="unsupported_parameter")
 
         try:
             prompt_ids = codec.prompt_ids(
@@ -212,7 +216,7 @@ class ChatService:
             ) from exc
 
         tool_prefix = ""
-        if request.tool_choice in ("required", "named"):
+        if request.tool_choice in ("required", "named") and not strict_tools:
             tool_prefix = "<tool_call>\n<function="
             if request.forced_tool_name is not None:
                 tool_prefix += request.forced_tool_name + ">\n"
@@ -235,10 +239,14 @@ class ChatService:
         if request.enable_thinking and not tool_prefix and self._reasoning_close_token >= 0:
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
-        if request.response_schema is not None and request.enable_thinking and self._reasoning_close_token < 0:
+        if (request.response_schema is not None or strict_tools) and request.enable_thinking and self._reasoning_close_token < 0:
             raise OpenAIProtocolError("structured output with thinking requires a single close token", param="response_format", code="unsupported_parameter")
         grammar = (self._grammar_factory.create(request.response_schema)
                    if request.response_schema is not None else None)
+        if strict_tools:
+            from .structured_output import tool_structural_tag
+            grammar = self._grammar_factory.create(
+                tool_structural_tag(tools, request.tool_choice, request.forced_tool_name), tools=True)
         if grammar is not None:
             grammar.after_reasoning = request.enable_thinking
 
@@ -362,7 +370,9 @@ class ChatService:
     async def _stream_impl(self, prepared: PreparedChat,
                            request: ChatRequest) -> AsyncIterator[Any]:
         tracker = {"tokens": 0}
-        inner = (self._stream_forced_tools(prepared, request, tracker) if prepared.tool_prefix
+        strict = bool(prepared.tools and any(t["function"].get("strict") for t in prepared.tools))
+        inner = (self._stream_strict_tools(prepared, request, tracker) if strict
+                 else self._stream_forced_tools(prepared, request, tracker) if prepared.tool_prefix
                  else self._stream_tools(prepared, request, tracker) if prepared.tools
                  else self._stream_text(prepared, request, tracker))
         pending = ""
@@ -444,6 +454,68 @@ class ChatService:
             raise ChatServiceError(str(exc), code="compute_error") from exc
         finally:
             await stream.aclose()
+
+    async def _stream_strict_tools(self, prepared: PreparedChat,
+                                   request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:
+        # Buffer until a complete call is available: the generic incremental
+        # parser strips parameter whitespace and emits untyped values.
+        from .structured_output import parse_qwen_strict_arguments
+        generated, done = [], None
+        stream = self._stream_open(prepared, request)
+        try:
+            async for event in stream:
+                if "token_id" in event:
+                    generated.append(int(event["token_id"]))
+                    tracker["tokens"] = len(generated)
+                elif "done" in event:
+                    done = event["done"]
+                    break
+        except ComputeInvalidArgument as exc:
+            raise OpenAIProtocolError(str(exc)) from exc
+        except ComputeError as exc:
+            raise ChatServiceError(str(exc), code="compute_error") from exc
+        finally:
+            await stream.aclose()
+        if done is None:
+            raise ChatServiceError("compute ended without a done event", code="compute_error")
+        final_ids = [int(x) for x in done.get("generated_ids", generated)]
+        tracker["tokens"] = len(final_ids)
+        log_tokens(final_ids)
+        split = codec.split_generation(self._processor, final_ids, thinking=prepared.enable_thinking)
+        if split.reasoning:
+            yield ReasoningDelta(split.reasoning)
+        answer, complete = _complete_tool_text(split.answer)
+        finish = str(done.get("finish_reason", ""))
+        if not complete and finish != "length":
+            raise ChatServiceError("incomplete tool call", code="tool_parse_failure")
+        functions = {t["function"]["name"]: t["function"] for t in prepared.tools}
+        calls, position = [], 0
+        pattern = r"<tool_call>\n<function=([^>]+)>\n(.*?)\n</function>\n</tool_call>"
+        for match in re.finditer(pattern, answer, re.DOTALL):
+            if match.start() > position:
+                yield ContentDelta(answer[position:match.start()])
+            name, body = match.groups()
+            function = functions.get(name)
+            try:
+                if function and function.get("strict"):
+                    arguments = parse_qwen_strict_arguments(body, function["parameters"])
+                    call = {"function": {"name": name, "arguments": arguments}}
+                else:
+                    parsed = codec.parse_answer(self._processor, match.group(), tools=prepared.tools)
+                    call = parsed["tool_calls"][0]
+            except (ValueError, IndexError, codec.ToolParseError) as exc:
+                raise ChatServiceError(f"tool call parse failure: {exc}", code="tool_parse_failure") from exc
+            calls.append(call)
+            delta = _tool_call_delta(call, len(calls) - 1)
+            if delta is not None:
+                yield delta
+            position = match.end()
+        if answer[position:]:
+            yield ContentDelta(answer[position:])
+        self._validate_forced_calls(request, calls, finish)
+        yield StreamDone(map_finish_reason(finish, has_tool_calls=bool(calls)),
+                         prompt_tokens=len(prepared.prompt_ids), completion_tokens=len(final_ids),
+                         cached_tokens=_cached_tokens(done))
 
     async def _stream_forced_tools(self, prepared: PreparedChat,
                                    request: ChatRequest, tracker: dict) -> AsyncIterator[Any]:

@@ -293,3 +293,10 @@ stdio の制約付き request は最初の prefill sample より前に device ma
 以降は token event ごとに次の mask を待つ。scheduler は待機中の request を飛ばし、
 他 request を batch に含める。bitmask は request ごとで、通常 request は null のまま。
 GPU 上の logits への適用は greedy / stochastic 共通の sampling 前に行う。
+
+strict tool は Qwen XML structural tag を使用する。`auto` は `<tool_call>` で
+dispatch し、`required` / 名前指定は先頭から強制する。XGrammar の `excludes` で
+文字列の生の `<` を禁止し、parameter 終了タグとの衝突を防ぐ。型変換前の本文は
+空白を保持するが、enum 値の外側に XGrammar が許可する空白は宣言値へ対応付ける。
+非 strict のみの場合は従来の parser を使う。制約付き request は現時点では
+DFlash2 / MTP を使わず通常 decode へフォールバックする。

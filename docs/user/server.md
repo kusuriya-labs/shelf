@@ -56,8 +56,7 @@ Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
 Efforts:      low, medium, xhigh
 
 Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
-Structured output: json_object and json_schema (requires xgrammar, thinking off)
-Unsupported: strict tools
+Structured output: json_object, json_schema, strict tools (requires xgrammar)
 
 Ready.
 ```
@@ -500,16 +499,16 @@ client が tool 結果を `role: "tool"` message として返すと、Shelf は�
 assistant 応答を生成する。
 
 `tool_choice` は `auto`、`none`、`required`、関数名指定を受け付ける。`none` は tool 定義を model へ渡さない。
-`required` と関数名指定では思考を閉じ、tool call の開始部分を prompt に補って生成する。
+非 strict の `required` と関数名指定では思考を閉じ、tool call の開始部分を prompt に補って生成する。
 その開始部分は prompt token に含み、生成上限には含まない。強制指定では生成完了まで stream 出力を保留する。
 関数名指定は指定した名前以外を返さない。`required` で未定義の関数名が生成された場合はエラーとする。
-引数の構文と意味はモデルの生成次第で、schema に対する保証はない。生成上限に到達して未完了の
+非 strict の引数の構文と意味はモデルの生成次第で、schema に対する保証はない。生成上限に到達して未完了の
 markup は tool call に変換せず、`length` を返す。tools 未指定や存在しない関数名は 400 とする。
 Chat での関数名指定は `{"type":"function","function":{"name":"get_weather"}}`、
 Responses では `{"type":"function","name":"get_weather"}` とする。正常に完了した tool call の
 `finish_reason` は `tool_calls`、出力上限に達した場合は tool call の有無にかかわらず `length` である。
 
-tool calling は best-effort である。生成された tool call は Transformers の Qwen response
+非 strict の tool calling は best-effort である。生成された tool call は Transformers の Qwen response
 parser で解析し、schema の enforce や生成後の修復は行わない。parser が tool-call-like な
 出力を解析できない場合は parse failure として扱い、生の markup を content として捏造しない。
 
@@ -558,7 +557,7 @@ reasoning token 数を含む。stream では reasoning token 数を取得でき�
 stream では `response.incomplete` で終了する。正常終了時は `response.completed` で終了する。
 
 `previous_response_id`、`conversation`、画像・音声・ファイル、`custom` tool、
-`strict: true` の tools、`parallel_tool_calls: false`、
+`parallel_tool_calls: false`、
 `truncation: auto`、その他の `include`、暗号化された入力、未対応の項目は HTTP 400 で拒否する。
 `web_search` と `namespace` tool はモデルに渡さず除外するため、検索や namespace 内の tool は使えない。
 `GET /v1/responses` と保存済み response の取得には対応しない。
@@ -583,7 +582,6 @@ Chat Completions では、非 0 の `frequency_penalty` / `presence_penalty`、`
 ```text
 reasoning
 text
-tools[].function.strict=true
 parallel_tool_calls=false
 n != 1 / logit_bias / logprobs
 ```
@@ -747,5 +745,15 @@ JSON Schema は `type`、`properties`、`required`、`items`、`enum`、
 `enum` は scalar 型のみで、すべての値が指定された型と一致する必要がある。
 未対応キーワードは HTTP 400 とする。生成上限に達した場合は JSON が未完成となりうる。
 
-制約付き request は DFlash2 / MTP が有効でも通常 decode を使用する。strict tools、
-制約付き tool_choice、投機 decode との併用は未対応である。
+Chat の `tools[].function.strict: true` と Responses の function tool の `strict: true` は、
+引数を同じ schema subset で制約する。parameters の最上位は `additionalProperties: false` の
+object、parameter 名は英数字、`_`、`-` に限る。`required` / 関数名指定は文法で強制し、
+`auto` は tool 開始後のみに制約を適用する。thinking 時は close token の後から有効になる。
+string 内の tool markup による区切り衝突を避けるため、生成される文字列中の生の `<` は
+禁止し、`<` を含む string enum は 400 とする。XML parameter の enum は XGrammar が
+値の外側に許す空白を除いて schema の enum 値へ対応付ける。非 strict の型変換は行わない。浮動小数点に変換できないほど大きい値は
+不正な JSON を返さず tool parse failure とする。
+strict tools の stream は完成した tool call をまとめて送る。生成上限に達した未完成の call は
+返さない。strict tools と stop の併用、および response_format と tools の併用は 400 とする。
+
+制約付き request は DFlash2 / MTP が有効でも通常 decode を使用し、投機との併用は未対応である。

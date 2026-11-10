@@ -2,7 +2,7 @@
 
 明示的に列挙した metadata は推論に使用しない。暗号化 reasoning は返さない。
 web_search と namespace はモデルに渡さず、未知のキーは拒否する。
-strict tool、保存済み response の参照には対応しない。
+保存済み response の参照には対応しない。
 """
 
 from __future__ import annotations
@@ -184,9 +184,7 @@ def parse_responses_request(body, *, inference_budget_tokens):
             fields(tool, {"type", "name", "description", "parameters", "strict"}, p)
             if tool.get("type") != "function":
                 reject(p + ".type")
-            if tool.get("strict") is not None and tool.get("strict") is not False:
-                reject(p + ".strict")
-            converted.append({"type": "function", "function": {k: v for k, v in tool.items() if k not in ("type", "strict")}})
+            converted.append({"type": "function", "function": {k: v for k, v in tool.items() if k != "type"}})
         chat["tools"] = converted or None
     for key in ("store", "parallel_tool_calls"):
         if body.get(key) is not None and not isinstance(body[key], bool):

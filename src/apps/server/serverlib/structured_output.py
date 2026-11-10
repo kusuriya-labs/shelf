@@ -62,6 +62,24 @@ def validate_schema(schema, path="response_format.json_schema.schema"):
         fail("items requires type array")
 
 
+def validate_tool_schema(schema, path):
+    validate_schema(schema, path)
+    if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+        raise OpenAIProtocolError("strict tool parameters must be an object with additionalProperties=false", param=path, code="unsupported_parameter")
+    def check(node):
+        if any(isinstance(v, str) and "<" in v for v in node.get("enum", [])):
+            raise OpenAIProtocolError("strict tool string enum cannot contain '<'", param=path, code="unsupported_parameter")
+        for name, child in node.get("properties", {}).items():
+            if "<" in name:
+                raise OpenAIProtocolError("strict tool property cannot contain '<'", param=path, code="unsupported_parameter")
+            check(child)
+        if "items" in node:
+            check(node["items"])
+    check(schema)
+    if any(re.fullmatch(r"[A-Za-z0-9_-]+", name) is None for name in schema.get("properties", {})):
+        raise OpenAIProtocolError("invalid parameter name", param=path, code="unsupported_parameter")
+
+
 def tool_structural_tag(tools, choice, forced_name=None):
     """Build Qwen XML tags; preserve the declared order of schema properties.
 
@@ -76,7 +94,7 @@ def tool_structural_tag(tools, choice, forced_name=None):
         if forced_name is not None and function["name"] != forced_name:
             continue
         content = ({"type": "json_schema", "json_schema": function["parameters"],
-                    "style": "qwen_xml", "any_order": False}
+                    "style": "qwen_xml", "any_order": False, "excludes": ["<"]}
                    if function.get("strict") else {"type": "any_text"})
         tags.append({"type": "tag",
                      "begin": "<tool_call>\n<function=" + function["name"] + ">\n",
@@ -98,6 +116,11 @@ def parse_qwen_strict_arguments(body, schema):
     generic tool parser, this does not strip whitespace from string values.
     """
     properties = schema.get("properties", {})
+    def finite_float(value):
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("number is outside the supported range")
+        return result
     result = {}
     position = 0
     for match in re.finditer(r"<parameter=([^>\s]+)>(.*?)</parameter>", body, re.DOTALL):
@@ -113,9 +136,17 @@ def parse_qwen_strict_arguments(body, schema):
             # An unknown property has no type constraint; a string is valid.
             result[name] = value
         elif child["type"] == "string":
+            # qwen_xml permits whitespace around enum alternatives inside a
+            # parameter. Remove only that grammar whitespace, never whitespace
+            # belonging to the declared enum value (or a free-form string).
+            if "enum" in child and value not in child["enum"]:
+                candidates = [item for item in child["enum"] if item.strip() == value.strip()]
+                if not candidates:
+                    raise ValueError("string is outside enum")
+                value = candidates[0]
             result[name] = value
         else:
-            result[name] = json.loads(value)
+            result[name] = json.loads(value, parse_float=finite_float)
         position = match.end()
     if body[position:].strip():
         raise ValueError("unexpected text after parameters")
@@ -130,7 +161,7 @@ class GrammarFactory:
         self.vocab_size = vocab_size
         self.compiler = None
 
-    def create(self, schema):
+    def create(self, schema, *, tools=False):
         try:
             import xgrammar as xgr
             if not self.vocab_size:
@@ -139,12 +170,13 @@ class GrammarFactory:
                 tokenizer = getattr(self.processor, "tokenizer", self.processor)
                 info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=self.vocab_size)
                 self.compiler = xgr.GrammarCompiler(info)
-            grammar = self.compiler.compile_json_schema(json.dumps(schema), strict_mode=False)
+            grammar = (self.compiler.compile_structural_tag(schema) if tools else
+                       self.compiler.compile_json_schema(json.dumps(schema), strict_mode=False))
             return GrammarState(xgr, grammar, self.vocab_size)
         except ImportError as exc:
-            raise OpenAIProtocolError("structured output requires xgrammar", param="response_format", code="unsupported_parameter") from exc
+            raise OpenAIProtocolError("structured output requires xgrammar", param="tools" if tools else "response_format", code="unsupported_parameter") from exc
         except Exception as exc:
-            raise OpenAIProtocolError(f"cannot compile schema: {exc}", param="response_format", code="unsupported_parameter") from exc
+            raise OpenAIProtocolError(f"cannot compile schema: {exc}", param="tools" if tools else "response_format", code="unsupported_parameter") from exc
 
 
 class GrammarState:

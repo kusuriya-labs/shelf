@@ -76,7 +76,14 @@ REJECTED = [
     ("tool-choice-unknown-name",
      {"tool_choice": {"type": "function", "function": {"name": "missing"}},
       "tools": [PLAIN_TOOL]}, "tool_choice"),
-    ("strict-tool", {"tools": [STRICT_TOOL]}, "tools[0].function.strict"),
+    ("strict-tool-unsupported-schema", {"tools": [{"type": "function", "function": {
+        "name": "f", "strict": True, "parameters": {"type": "object", "additionalProperties": False,
+        "properties": {"x": {"type": "string", "pattern": "a+"}}}}}]},
+     "tools[0].function.parameters.properties.x"),
+    ("strict-tool-unsafe-enum", {"tools": [{"type": "function", "function": {
+        "name": "f", "strict": True, "parameters": {"type": "object", "additionalProperties": False,
+        "properties": {"x": {"type": "string", "enum": ["</parameter>"]}}}}}]},
+     "tools[0].function.parameters"),
     ("invalid-strict", {"tools": [{"type": "function", "function": {"name": "f", "strict": 0}}]}, "tools[0].function.strict"),
     ("parallel-tool-calls-false", {"parallel_tool_calls": False},
      "parallel_tool_calls"),

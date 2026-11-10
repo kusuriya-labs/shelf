@@ -643,8 +643,7 @@ async def _serve(opts) -> int:
     _log("")
     _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
          "concurrency, cancel")
-    _log("Structured output: json_object and json_schema (requires xgrammar)")
-    _log("Unsupported: strict tools")
+    _log("Structured output: json_object, json_schema, strict tools (requires xgrammar)")
     _log("")
     _log("Ready.")
 

@@ -62,6 +62,7 @@ GROUPS = OrderedDict([
         "test_server_tools.py",
         "test_server_stream_tools.py",
         "test_server_tool_regression.py",
+        "test_server_strict_tools.py",
     ]),
     ("reasoning", [
         "test_reasoning_parser.py",

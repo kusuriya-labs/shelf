@@ -2,8 +2,8 @@
 
 対応するパラメータは明示的に列挙し、未対応・未知のキーは拒否する。
 user、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
-store=true と strict tool には対応しない。
-required と関数名指定は生成 prompt に tool call の開始部分を補う。
+store=true には対応しない。
+非 strict の required と関数名指定は生成 prompt に tool call の開始部分を補う。
 """
 
 from __future__ import annotations
@@ -215,9 +215,9 @@ def normalize_tools(raw_tools) -> list[dict] | None:
                 param=f"tools[{index}].function.name",
             )
 
-        if fn.get("strict") is not None and fn.get("strict") is not False:
+        if fn.get("strict") is not None and not isinstance(fn.get("strict"), bool):
             raise OpenAIProtocolError(
-                "strict tool schemas are not supported",
+                "strict must be a boolean",
                 param=f"tools[{index}].function.strict",
                 code="unsupported_parameter",
             )
@@ -226,7 +226,14 @@ def normalize_tools(raw_tools) -> list[dict] | None:
             "type": "function",
             "function": dict(fn),
         }
-        normalized["function"].pop("strict", None)
+        if fn.get("strict") is True:
+            from .structured_output import validate_tool_schema
+            name = fn["name"]
+            if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) is None:
+                raise OpenAIProtocolError("invalid function name", param=f"tools[{index}].function.name")
+            validate_tool_schema(fn.get("parameters"), f"tools[{index}].function.parameters")
+        else:
+            normalized["function"].pop("strict", None)
         result.append(normalized)
 
     if not result:
@@ -234,6 +241,12 @@ def normalize_tools(raw_tools) -> list[dict] | None:
             "tools must not be empty",
             param="tools",
         )
+
+    if any(t["function"].get("strict") for t in result):
+        names = [t["function"]["name"] for t in result]
+        if (any(not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) is None for name in names)
+                or len(set(names)) != len(names)):
+            raise OpenAIProtocolError("strict tools require unique valid function names", param="tools", code="unsupported_parameter")
     return result
 
 

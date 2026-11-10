@@ -39,12 +39,14 @@ compute の親プロセス死亡時の扱い:
 
 - `GET /v1/models`（各 model に `context_length` を含む）
 - `GET /v1/meta`（起動オプションの正本値、`inflight` / `queued`、compute の `kv_cache`）
-- `POST /v1/chat/completions`（`stream=false` / `stream=true` の SSE）
+- `POST /v1/chat/completions` と `POST /v1/responses`（非 stream / SSE）
+- 構造化出力: Chat の `json_object` / `json_schema`、Responses の `text.format`、
+  strict tool schema の subset（[server.md](../user/server.md)）
 - stream の usage: `stream_options.include_usage` 指定時のみ `[DONE]` 直前に
   `choices: []` の usage チャンク（`prompt_tokens_details.cached_tokens` 付き）
 - sampling: `temperature` / `top_p` / `top_k` / `seed` / `max_tokens` /
   `max_completion_tokens`
-- tools: `tools`、`tool_choice="auto"` / `"none"`、`assistant.tool_calls`、
+- tools: `tools`、`tool_choice="auto"` / `"none"` / `"required"` / 名前指定、`assistant.tool_calls`、
   `role=tool` の round-trip、OpenCode agent loop
 - best-effort tool calling（生成は Transformers の Qwen response parser で解析する。
   parse に失敗した output を捏造・修復しない）
@@ -59,17 +61,13 @@ compute の親プロセス死亡時の扱い:
 
 以下は明示的に HTTP 400（`code=unsupported_parameter`）で拒否する。silent ignore はしない。
 
-- `response_format`（Structured Output）
 - `reasoning`（OpenAI の reasoning transport object）
-- `text`
-- `tool_choice="required"` / named function
-- `strict:true`（tool 単位で拒否）
 - `parallel_tool_calls=false`
 - `n != 1` / `logit_bias` / `logprobs`
 
 以下は route 自体を持たない。
 
-- `POST /v1/responses` → HTTP 404 `code=unsupported_endpoint`
+- 保存済み Responses の取得
 - `POST /v1/completions` など未登録 path → HTTP 404 `code=not_found`
 
 ## Prefix cache
@@ -154,7 +152,7 @@ compute は request が完了するたびに stderr へ 1 行を出す。server 
   client からの thinking 予算指定、履歴の server 側永続化は未実装である。
   thinking 予算自体は server 既定値で compute 側に強制される
   （[reasoning.md](reasoning.md) 「thinking 予算」）。
-- `Full JSON Schema semantics` は保証しない。tool の JSON Schema は chat template へ
-  tool 説明として渡すだけで、生成時の schema enforcement は行わない。
+- `Full JSON Schema semantics` は保証しない。非 strict tool の schema は chat template へ
+  説明として渡すだけである。strict tool は対応する subset を生成時に制約する。
 - embeddings / vision / audio / realtime API / authentication / TLS termination /
   multi-model hot loading は対象外。
