@@ -86,19 +86,14 @@ def main():
             if len(actual) != len(target):
                 raise AssertionError(f"{mode} length differs: {len(actual)}")
             mismatches = [i for i, (a, b) in enumerate(zip(target, actual)) if a != b]
-            # The target's own greedy run is teacher-forced on its generated prefix.
-            # After divergence, later tokens have different contexts: their margins
-            # are useful diagnostics but cannot establish the cause of divergence.
             if mismatches:
                 first = mismatches[0]
                 print(f"{mode} mismatches={len(mismatches)} first={first} "
                       f"first_margin={margins[first]:.6f}", flush=True)
-                for index in mismatches:
-                    if margins[index] > 0.1:
-                        failures.append(f"{mode} mismatch at {index}: "
-                                        f"target margin {margins[index]:.6f} > 0.1; "
-                                        f"prompt={prompt}")
-                        break
+                if margins[first] > 0.1:
+                    failures.append(f"{mode} first mismatch at {first}: "
+                                    f"target margin {margins[first]:.6f} > 0.1; "
+                                    f"prompt={prompt}")
         print(f"CHECKED: {prompt} ({len(target)} tokens)", flush=True)
     if failures:
         raise AssertionError("\n".join(failures))
