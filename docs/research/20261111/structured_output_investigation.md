@@ -24,3 +24,17 @@ prefix cache は prompt の計算状態を復元するものであり、生成�
 | p99 | 0.3268 ms |
 
 これは Python 同士の pipe と encode 済みマスクの parse / decode に限る予備測定である。XGrammar のマスク生成、base64 encode、C++ JSON parse、GPU 転送、スケジューリング、実際の decode、負荷時の混合バッチは含まれない。したがってこの値だけでは採用可否や end-to-end の性能を判断できない。制約あり／なしの速度、コンパイル時間、および同条件での本番 IPC は未測定である。
+
+## XGrammar の CPU 予備測定
+
+専用環境 `/tmp/venv-so` の xgrammar 0.2.9 と Qwen3.8 の tokenizer を使用し、
+`name`（string）と `count`（integer）を必須とする object schema を測定した。
+compiler の作成は 0.856 秒、schema の初回 compile は 36.7 ms だった。
+同じ初期 matcher 状態で mask 生成を 100 回の warmup 後に 1000 回繰り返した
+中央値は 0.00247 ms、p95 は 0.00251 ms だった。これは一つの文法状態に限る
+CPU 単体の値であり、生成中の各状態、並行 batch、IPC、GPU 転送、decode の
+実効速度は含まない。
+
+この tokenizer を `TokenizerInfo.from_huggingface` にそのまま渡すと語彙数は
+248077 になる一方、model config の vocab_size は 248320 である。mask の word 数と
+compute の logits 行を一致させるには model config の vocab_size を明示する。
