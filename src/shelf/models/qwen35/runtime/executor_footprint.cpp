@@ -103,7 +103,9 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     total += align_up(sizeof(::shelf::runtime::DeviceBatchContext));
 
     total += align_up(sizeof(std::uint32_t));
-    total += align_up(32u * sizeof(double));
+    const std::size_t rotary_dim = static_cast<std::size_t>(
+        static_cast<double>(text_config.attention_head_dim) * text_config.partial_rotary_factor);
+    total += align_up(std::max<std::size_t>(32u, rotary_dim / 2u) * sizeof(double));
     return total;
 }
 

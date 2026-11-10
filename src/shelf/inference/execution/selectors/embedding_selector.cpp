@@ -6,7 +6,9 @@
 namespace shelf::execution {
 namespace {
 
-const std::array<EmbeddingRule, 3> kRules = {{
+const std::array<EmbeddingRule, 5> kRules = {{
+    {EmbeddingStorage::Bf16, 1536u, 1u, kOptimizedMaxRows},
+    {EmbeddingStorage::Bf16, 4096u, 1u, kOptimizedMaxRows},
     {EmbeddingStorage::Bf16, 2560u, 1u, kOptimizedMaxRows},
     {EmbeddingStorage::Bf16, 5120u, 1u, kOptimizedMaxRows},
     {EmbeddingStorage::Bf16, 2048u, 1u, kOptimizedMaxRows},

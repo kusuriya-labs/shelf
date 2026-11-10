@@ -122,7 +122,14 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = ::shelf::kernel::launch_rmsnorm(
+    const hipError_t herr = b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16)
+        ? ::shelf::kernel::launch_rmsnorm_offset_bf16(
+            reinterpret_cast<const void*>(launch.input), reinterpret_cast<const void*>(launch.weight),
+            reinterpret_cast<void*>(launch.output), launch.rows, launch.features, launch.group_size,
+            launch.input_row_stride, launch.output_row_stride,
+            launch.weight_layout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE,
+            launch.eps, launch.weight_offset, stream)
+        : ::shelf::kernel::launch_rmsnorm(
         reinterpret_cast<const void*>(launch.input), launch.input_dtype,
         reinterpret_cast<const void*>(launch.weight), launch.weight_dtype,
         launch.weight_layout, launch.weight_mode,

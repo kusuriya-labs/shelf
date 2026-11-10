@@ -549,6 +549,8 @@ Status select_tp_rank_model(q35r::TpCoordinatorConfig& config) {
     }
     auto family = probe_model_dir(config.model_dir);
     if (!family.ok()) return family.status();
+    if (family.value() == ModelFamily::Plamo3)
+        return Status::unsupported("plamo3: runtime path is not connected", __FILE__, __LINE__);
     if (family.value() == ModelFamily::Qwen4Exp) {
         config.build_rank_model = &build_qwen4exp_tp_rank_model;
         config.prefetch_rank_model = &prefetch_qwen4exp_ple_table;

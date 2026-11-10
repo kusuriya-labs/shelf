@@ -50,6 +50,8 @@ struct HostExecutionContext {
     const uint32_t* row_positions = nullptr;
     const uint32_t* rope_positions = nullptr;
     const double* rope_inv_freq = nullptr;
+    uint32_t rope_table_stride = 0;
+    uint32_t rope_table_count = 0;
     const uint32_t* row_sequence_slots = nullptr;
     ::shelf::execution::SpecDecodeContext spec{};
     const void* const* external_inputs = nullptr;

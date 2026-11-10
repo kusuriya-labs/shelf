@@ -47,6 +47,7 @@ inline state::GdnStatePoolLayout make_qwen35_gdn_state_layout(
     const shelf::qwen_hybrid::QwenHybridConfig& tc) {
     uint32_t gdn_layers =
         static_cast<uint32_t>(shelf::qwen_hybrid::count_layer_topology(tc).gdn_layers);
+    if (gdn_layers == 0 && tc.declared_model_type == "plamo3") return {};
     if (gdn_layers == 0) gdn_layers = 1;
     const uint32_t kh = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16;
     const uint32_t vh = tc.linear_num_value_heads != 0 ? tc.linear_num_value_heads : 16;

@@ -76,6 +76,12 @@ int main() {
            "unknown vocab allgreedy");
     expect(select_sampling_implementation(mk(248320u, 0, 0, 8192u)), C, 0, "outputs=0");
 
+    expect(select_sampling_implementation(mk(107520u, 1, 1, 8192u)), P, 64,
+           "PLaMo allgreedy out=1");
+    expect(select_sampling_implementation(mk(107520u, 1, 0, 8192u)), S, 0,
+           "PLaMo no sampling");
+    expect(select_sampling_implementation(mk_stochastic(107520u, 1, 1, 1, 8192u)), St, 0,
+           "PLaMo stochastic");
     expect(select_sampling_implementation(mk(248320u, 1, 1, 8192u)), P, 64,
            "allgreedy out=1");
     expect(select_sampling_implementation(mk(248320u, 8, 8, 8192u)), P, 64,

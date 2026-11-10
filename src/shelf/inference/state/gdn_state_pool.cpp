@@ -11,10 +11,10 @@ Result<GdnStatePool> GdnStatePool::create(
     if (max_sequences == 0) {
         return Status::invalid_argument("max_sequences must be > 0", __FILE__, __LINE__);
     }
-    if (layout.num_gdn_states == 0 || layout.conv_dim == 0 ||
+    if (layout.num_gdn_states != 0 && (layout.conv_dim == 0 ||
         layout.conv_dim_padded == 0 || layout.conv_history == 0 ||
         layout.conv_history_stride == 0 || layout.num_v_heads == 0 ||
-        layout.head_k == 0 || layout.head_v == 0) {
+        layout.head_k == 0 || layout.head_v == 0)) {
         return Status::invalid_argument(
             "GdnStatePoolLayout must be fully specified", __FILE__, __LINE__);
     }
@@ -24,6 +24,9 @@ Result<GdnStatePool> GdnStatePool::create(
     pool.max_slots_ = max_sequences;
     pool.layout_ = layout;
     pool.used_count_ = 0;
+    pool.reserved_bytes_ = 0;
+    pool.initialized_.resize(max_sequences, false);
+    if (layout.num_gdn_states == 0) return pool;
 
     std::size_t conv_bytes =
         static_cast<std::size_t>(max_sequences)
@@ -102,8 +105,6 @@ Result<GdnStatePool> GdnStatePool::create(
     pool.recurrent_memory_ = rec_tensor.value();
     pool.reserved_bytes_ = conv_bytes + rec_bytes;
 
-    pool.initialized_.resize(max_sequences, false);
-
     return pool;
 }
 
@@ -117,6 +118,12 @@ Status GdnStatePool::initialize(
 
     if (initialized_[slot]) {
         return Status::invalid_state("slot already initialized", __FILE__, __LINE__);
+    }
+
+    if (layout_.num_gdn_states == 0) {
+        initialized_[slot] = true;
+        ++used_count_;
+        return Status::make_ok();
     }
 
     bf16_t* conv_base = conv_memory_.data<bf16_t>();
@@ -177,6 +184,8 @@ Status GdnStatePool::reset(
     if (!initialized_[slot]) {
         return Status::invalid_state("slot not initialized", __FILE__, __LINE__);
     }
+
+    if (layout_.num_gdn_states == 0) return Status::make_ok();
 
     bf16_t* conv_base = conv_memory_.data<bf16_t>();
     std::size_t slot_offset_conv =
@@ -315,6 +324,8 @@ Status GdnStatePool::copy_slot_from(
         a.head_v != b.head_v) {
         return Status::invalid_argument("GDN slot copy layout mismatch", __FILE__, __LINE__);
     }
+
+    if (layout_.num_gdn_states == 0) return Status::make_ok();
 
     const std::size_t conv_slot_elems =
         static_cast<std::size_t>(layout_.num_gdn_states)

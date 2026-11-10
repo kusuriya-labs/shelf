@@ -41,6 +41,7 @@ SERVER_DIR = Path(__file__).resolve().parent
 GROUPS = OrderedDict([
     ("core", [
         "test_compute_client_reader.py",
+        "test_compute_input_ids.py",
         "test_compute_pids_scope.py",
         "test_compute_service.py",
         "test_compute_token_mask.py",
@@ -56,6 +57,7 @@ GROUPS = OrderedDict([
         "test_server_responses.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
+        "test_plamo3_template.py",
         "test_inference_budget.py",
     ]),
     ("tools", [

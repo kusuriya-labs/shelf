@@ -132,6 +132,7 @@ def prompt_ids(
     enable_thinking: bool = True,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     preserve_thinking: bool = True,
+    template_kwargs: Optional[dict[str, Any]] = None,
 ) -> list[int]:
     """Render ``messages`` through the model chat template and return token IDs.
 
@@ -143,11 +144,11 @@ def prompt_ids(
     """
     return _render(
         processor, messages, tools, enable_thinking, True,
-        reasoning_effort, preserve_thinking)
+        reasoning_effort, preserve_thinking, template_kwargs)
 
 
 def _render(processor, messages, tools, enable_thinking, add_generation_prompt,
-            reasoning_effort, preserve_thinking):
+            reasoning_effort, preserve_thinking, template_kwargs=None):
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": add_generation_prompt,
@@ -157,6 +158,8 @@ def _render(processor, messages, tools, enable_thinking, add_generation_prompt,
     }
     if tools is not None:
         kwargs["tools"] = tools
+    if template_kwargs:
+        kwargs.update(template_kwargs)
     ids = processor.apply_chat_template(messages, **kwargs)
     return _flatten_ids(ids)
 
@@ -216,7 +219,7 @@ def new_region_parser(processor, *, thinking: bool):
     """Create the per-request reasoning/answer splitter."""
     return reasoning.GenerationRegionParser(
         lambda ids: decode_generated(processor, ids),
-        reasoning_close_ids(processor),
+        reasoning_close_ids(processor) if thinking else (),
         thinking=thinking,
     )
 
@@ -228,7 +231,7 @@ def split_generation(processor, generated_ids: Iterable[int], *,
     return reasoning.split_regions(
         lambda chunk: decode_generated(processor, chunk),
         ids,
-        reasoning_close_ids(processor),
+        reasoning_close_ids(processor) if thinking else (),
         thinking=thinking,
     )
 

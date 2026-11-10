@@ -204,6 +204,8 @@ Status build_host_execution_context(
     ctx.host_parameter_count = static_cast<uint32_t>(executor.host_parameter_slots.size());
     ctx.row_positions = executor.batch_context_storage.row_positions.data<uint32_t>();
     ctx.rope_inv_freq = executor.rope_inv_freq.data<double>();
+    ctx.rope_table_stride = executor.rope_table_stride;
+    ctx.rope_table_count = executor.rope_table_count;
     ctx.row_sequence_slots = executor.batch_context_storage.row_sequence_slots.data<uint32_t>();
     ctx.external_input_count = program.external_input_count;
     ctx.external_output_count = program.external_output_count;
@@ -872,6 +874,8 @@ Result<PendingBatch> submit_co_batch(
         executor.batch_context_storage.output_sampling_params
             .data<::shelf::runtime::DeviceSamplingParams>();
     host_ctx.rope_inv_freq = executor.rope_inv_freq.data<double>();
+    host_ctx.rope_table_stride = executor.rope_table_stride;
+    host_ctx.rope_table_count = executor.rope_table_count;
     host_ctx.device_ptr = executor.batch_context;
 
     bool gpu_started = false;
@@ -1301,6 +1305,8 @@ Executor::Executor(Executor&& other) noexcept
       input_ids(std::move(other.input_ids)),
       input_hidden(std::move(other.input_hidden)),
       rope_inv_freq(std::move(other.rope_inv_freq)),
+      rope_table_stride(other.rope_table_stride),
+      rope_table_count(other.rope_table_count),
       output_hidden(std::move(other.output_hidden)),
       logits(std::move(other.logits)),
       sampled_tokens(std::move(other.sampled_tokens)),
@@ -1450,6 +1456,8 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         input_ids = std::move(other.input_ids);
         input_hidden = std::move(other.input_hidden);
         rope_inv_freq = std::move(other.rope_inv_freq);
+        rope_table_stride = other.rope_table_stride;
+        rope_table_count = other.rope_table_count;
         output_hidden = std::move(other.output_hidden);
         logits = std::move(other.logits);
         sampled_tokens = std::move(other.sampled_tokens);
@@ -1896,12 +1904,15 @@ Result<Executor> create_executor(
                                      : static_cast<std::uint32_t>(tc.linear_num_value_heads));
         const GdnStatePoolLayout& expected_gdn = expected_storage;
         const auto& actual_gdn = gdn_state_pool.layout();
-        if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
-            actual_gdn.conv_dim != expected_gdn.conv_dim ||
-            actual_gdn.conv_history != expected_gdn.conv_history ||
-            actual_gdn.num_v_heads != expected_gdn.num_v_heads ||
-            actual_gdn.head_k != expected_gdn.head_k ||
-            actual_gdn.head_v != expected_gdn.head_v) {
+        const bool empty_gdn = actual_gdn.num_gdn_states == 0u &&
+            qwen35_stage_gdn_layers(tc, config.stage) == 0u;
+        if (!empty_gdn &&
+            (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
+             actual_gdn.conv_dim != expected_gdn.conv_dim ||
+             actual_gdn.conv_history != expected_gdn.conv_history ||
+             actual_gdn.num_v_heads != expected_gdn.num_v_heads ||
+             actual_gdn.head_k != expected_gdn.head_k ||
+             actual_gdn.head_v != expected_gdn.head_v)) {
             std::string msg =
                 "GDN state pool geometry does not match model config: actual("
                 + std::to_string(actual_gdn.num_gdn_states) + ","
@@ -2277,26 +2288,53 @@ Result<Executor> create_executor(
                 }
             }
 
-            st = allocate_contiguous_tensor<double>(arena, {32}, ex.rope_inv_freq);
+            const uint32_t rope_dim = static_cast<uint32_t>(
+                static_cast<double>(tc.attention_head_dim) * tc.partial_rotary_factor);
+            if (rope_dim < 2u || rope_dim > 256u || (rope_dim & 1u) != 0u) {
+                shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                return Status::invalid_argument("unsupported RoPE dimension", __FILE__, __LINE__);
+            }
+            const uint32_t rope_half = rope_dim / 2u;
+            ex.rope_table_stride = rope_half;
+            ex.rope_table_count = config.rope_profiles.empty()
+                ? 1u : static_cast<uint32_t>(config.rope_profiles.size());
+            st = allocate_contiguous_tensor<double>(
+                arena, {static_cast<std::size_t>(rope_half) * ex.rope_table_count}, ex.rope_inv_freq);
             if (!st.ok()) {
                 shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                 return st;
             }
-            {
-                float rope_theta = tc.rope_theta;
+            for (uint32_t i = 0; i < ex.rope_table_count; ++i) {
+                const auto& profile = config.rope_profiles.empty()
+                    ? config.rope_profile : config.rope_profiles[i];
+                if (profile.rotary_dim != 0u && profile.rotary_dim != rope_dim) {
+                    shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                    return Status::invalid_argument("RoPE table dimension mismatch", __FILE__, __LINE__);
+                }
+                float rope_theta = config.rope_profiles.empty()
+                    ? tc.rope_theta : static_cast<float>(profile.theta);
                 if (rope_theta <= 0.0f) rope_theta = 10000000.0f;
+                double* table = ex.rope_inv_freq.data<double>() + i * rope_half;
                 hipError_t rerr = hipSuccess;
-                if (ex.config.rope_profile.type == EffectiveRopeProfile::Type::Yarn) {
+                if (profile.float32_frequencies) {
+                    if (profile.type == EffectiveRopeProfile::Type::Yarn && profile.truncate) {
+                        shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        return Status::invalid_argument("float32 YaRN requires non-truncated ramp", __FILE__, __LINE__);
+                    }
+                    rerr = ::shelf::kernel::launch_rope_inv_freq_f32_init(
+                        table, rope_half, rope_theta, static_cast<float>(profile.factor),
+                        profile.original_max_position_embeddings, static_cast<float>(profile.beta_fast),
+                        static_cast<float>(profile.beta_slow),
+                        profile.type == EffectiveRopeProfile::Type::Yarn, upload_stream);
+                } else if (profile.type == EffectiveRopeProfile::Type::Yarn) {
                     rerr = ::shelf::kernel::launch_rope_inv_freq_yarn_init(
-                        ex.rope_inv_freq.data<double>(), 32, rope_theta,
-                        static_cast<float>(ex.config.rope_profile.factor),
-                        ex.config.rope_profile.original_max_position_embeddings,
-                        static_cast<float>(ex.config.rope_profile.beta_fast),
-                        static_cast<float>(ex.config.rope_profile.beta_slow),
-                        ex.config.rope_profile.truncate, upload_stream);
+                        table, rope_half, rope_theta, static_cast<float>(profile.factor),
+                        profile.original_max_position_embeddings,
+                        static_cast<float>(profile.beta_fast), static_cast<float>(profile.beta_slow),
+                        profile.truncate, upload_stream);
                 } else {
                     rerr = ::shelf::kernel::launch_rope_inv_freq_init(
-                        ex.rope_inv_freq.data<double>(), 32, rope_theta, upload_stream);
+                        table, rope_half, rope_theta, upload_stream);
                 }
                 if (rerr != hipSuccess) {
                     shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));

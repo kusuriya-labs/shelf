@@ -757,3 +757,26 @@ strict tools の stream は完成した tool call をまとめて送る。生成
 返さない。strict tools と stop の併用、および response_format と tools の併用は 400 とする。
 
 制約付き request は DFlash2 / MTP が有効でも通常 decode を使用し、投機との併用は未対応である。
+
+## PLaMo 3 Translate
+
+PLaMo 3 Translate の BF16 checkpoint は翻訳用 chat template を使う。サーバーの
+`--max-seq-len` の既定値は 2048、上限も 2048 token である。これは prompt と
+生成を合わせた上限で、長い sliding-window 文脈への対応を意味しない。
+reasoning は無効である。
+
+```bash
+./build/shelf-server --model-dir /path/to/plamo-3-translate-0.8b --port 8123
+curl http://127.0.0.1:8123/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"shelf","messages":[{"role":"user","content":"今日は良い天気ですね。"}],
+       "temperature":0,"chat_template_kwargs":{"source_lang":"ja","target_lang":"en",
+       "context":"天気についての会話","glossary":[{"source":"天気","target":"weather"}]}}'
+```
+
+`target_lang` は必須。`source_lang`、`context`、`glossary` は任意で、
+日本語への翻訳では `form` に `polite` または `plain` を指定できる。
+配布 tokenizer の custom code を使用するため、必要な Python 依存も導入する。
+PLaMo の利用には [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en)
+が適用される。商用利用には事前登録と年間売上高の条件があり、再配布や
+出力の利用にも条件があるため、使用前に原文を確認する。

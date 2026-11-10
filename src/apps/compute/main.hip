@@ -3,6 +3,7 @@
 #include "stdio_server.h"
 
 #include <shelf/models/qwen35/dflash2/config.h>
+#include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
@@ -25,8 +26,19 @@ int main(int argc, char** argv) {
     const int validate_rc = shelf::app::validate_compute_options(opt);
     if (validate_rc != shelf::app::kComputeParseOk) return validate_rc;
 
+    auto plamo_result = shelf::plamo3::is_plamo3_config(opt.model_dir);
+    if (!plamo_result.ok()) { fprintf(stderr, "%s\n", plamo_result.status().message().c_str()); return 1; }
+    const bool is_plamo = plamo_result.value();
+    if (is_plamo && opt.rope_factor != "auto") {
+        fprintf(stderr, "plamo3: --rope-factor override is not supported\n");
+        return 1;
+    }
+    if (is_plamo && opt.max_seq_len > 2048) {
+        fprintf(stderr, "plamo3: --max-seq-len must be at most 2048 (sliding attention limit)\n");
+        return 1;
+    }
     shelf::qwen35::EffectiveRopeProfile rope_profile;
-    {
+    if (!is_plamo) {
         auto selection_result = shelf::qwen35::parse_rope_factor_selection(opt.rope_factor);
         if (!selection_result.ok()) {
             fprintf(stderr, "rope factor resolve failed: %s\n",
@@ -104,8 +116,8 @@ int main(int argc, char** argv) {
     config.prefix_cache_concurrency = static_cast<uint32_t>(opt.prefix_cache_concurrency);
     config.working_set_reserve_bytes =
         static_cast<std::size_t>(opt.working_set_reserve_gib) * 1024ull * 1024ull * 1024ull;
-    config.rope_profile = rope_profile;
-    fprintf(stderr, "ROPE profile: type=%s factor=%g theta=%g rotary_dim=%u "
+    if (!is_plamo) config.rope_profile = rope_profile;
+    if (!is_plamo) fprintf(stderr, "ROPE profile: type=%s factor=%g theta=%g rotary_dim=%u "
                     "original_max_position_embeddings=%u attention_factor=%.9f "
                     "beta_fast=%g beta_slow=%g truncate=%d source=%s\n",
             rope_profile.type == shelf::qwen35::EffectiveRopeProfile::Type::Yarn ? "yarn" : "default",

@@ -167,6 +167,36 @@ int main() {
               "final value is external output");
     }
 
+    {
+        rt::PrimitiveGraph norm_graph;
+        const auto x = norm_graph.alloc_value(128, rt::ValueDType::BF16,
+                                              rt::ValueRowDomain::TOKEN_ROWS);
+        const auto y = norm_graph.alloc_value(128, rt::ValueDType::BF16,
+                                              rt::ValueRowDomain::TOKEN_ROWS);
+        norm_graph.external_inputs.push_back(x);
+        norm_graph.external_outputs.push_back(y);
+        rt::RmsNormNode norm{};
+        norm.shape = rt::RowwiseShapeKey{128};
+        norm.group_size = 128;
+        norm.parameter_index = 0;
+        norm.weight_mode = rt::RmsNormWeightMode::OFFSET_BF16;
+        norm.weight_offset = 0.2f;
+        auto& node = norm_graph.add_node(norm);
+        node.inputs = {x};
+        node.outputs = {y};
+        auto result = rt::build_program(norm_graph, {}, rt::RowBucket::R16,
+                                        rt::ExecutionClass::DECODE, options);
+        check(result.ok(), "offset RMSNorm program builds");
+        if (result.ok() && result.value().dispatches.size() == 1u) {
+            const auto& binding = result.value().dispatches[0];
+            check(binding.flags == static_cast<uint32_t>(rt::RmsNormWeightMode::OFFSET_BF16) &&
+                      binding.scalar_b == 0.2f,
+                  "offset RMSNorm mode and offset reach dispatch");
+        } else {
+            check(false, "offset RMSNorm emits one dispatch");
+        }
+    }
+
     std::printf("test_program_workspace_lifetime: passed=%d failed=%d\n",
                 passed, failed);
     return failed == 0 ? 0 : 1;

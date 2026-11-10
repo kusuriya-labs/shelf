@@ -1,5 +1,6 @@
 #include <shelf/models/model_weights_factory.h>
 
+#include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
@@ -7,12 +8,20 @@
 namespace shelf::models {
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
+    if (std::holds_alternative<shelf::plamo3::ModelWeights>(loaded)) return ModelFamily::Plamo3;
     return std::holds_alternative<shelf::qwen35moe::Qwen35MoeModelWeights>(loaded)
         ? ModelFamily::Moe
         : ModelFamily::Dense;
 }
 
 Result<ModelFamily> probe_model_dir(const std::string& model_dir) {
+    auto plamo = shelf::plamo3::is_plamo3_config(model_dir);
+    if (!plamo.ok()) return plamo.status();
+    if (plamo.value()) {
+        auto config = shelf::plamo3::read_config(model_dir);
+        if (!config.ok()) return config.status();
+        return ModelFamily::Plamo3;
+    }
     auto experts = shelf::qwen35moe::read_declared_num_experts(model_dir);
     if (!experts.ok()) return experts.status();
     auto ple = shelf::qwen_hybrid::has_text_config_key(model_dir, "ple_layer_ids");
@@ -31,6 +40,16 @@ Result<LoadedModelWeights> load_model_weights(
     auto family = probe_model_dir(model_dir);
     if (!family.ok()) return family.status();
 
+    if (family.value() == ModelFamily::Plamo3) {
+        if (options.stage.enabled || options.load_mtp_layers || options.weights.partition_plan ||
+            !options.load_embedding || !options.load_lm_head || !options.load_final_norm)
+            return Status::unsupported("plamo3: pipeline, MTP and tensor parallel loading are not supported", __FILE__, __LINE__);
+        auto config = shelf::plamo3::read_config(model_dir);
+        if (!config.ok()) return config.status();
+        auto weights = shelf::plamo3::load_weights(model_dir, config.value(), arena, stream);
+        if (!weights.ok()) return weights.status();
+        return LoadedModelWeights{weights.release()};
+    }
     if (family.value() == ModelFamily::Qwen4Exp) {
         return Status::unsupported(
             "Qwen4Exp checkpoints use the qwen4exp load path, not the compute "

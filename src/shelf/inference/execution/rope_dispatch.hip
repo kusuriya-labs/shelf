@@ -40,6 +40,7 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalRopeLaunch& out) {
     out = PhysicalRopeLaunch{};
+    if (b.flags > 1u) return PhysicalResolveStatus::NotApplicable;
     if (b.input_count != 1u || b.output_count != 1u)
         return PhysicalResolveStatus::NotApplicable;
 
@@ -50,8 +51,10 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     if (!out_res.ok()) return out_res.status();
     const HostResolvedValue dst = out_res.value();
 
-    if (in.dtype != ValueDType::F32 || dst.dtype != ValueDType::BF16)
+    const bool rounded = b.flags == 1u && in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::BF16;
+    if (!rounded && (b.flags != 0u || in.dtype != ValueDType::F32 || dst.dtype != ValueDType::BF16))
         return PhysicalResolveStatus::NotApplicable;
+    if (rounded && in.ptr == dst.ptr) return PhysicalResolveStatus::NotApplicable;
     const uint32_t F = in.feature_count;
     if (F == 0u || F != dst.feature_count) return PhysicalResolveStatus::NotApplicable;
     if (in.ptr == nullptr || dst.ptr == nullptr)
@@ -68,7 +71,14 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     if (rotary == 0u) return PhysicalResolveStatus::NotApplicable;
 
     const uint32_t rows = rope_rows_for(dst, ctx);
-    if (rows == 0u) return PhysicalResolveStatus::NotApplicable;
+    if (rows == 0u || (rounded && rows > 65535u)) return PhysicalResolveStatus::NotApplicable;
+    if (rounded) {
+        const uintptr_t ib = reinterpret_cast<uintptr_t>(in.ptr);
+        const uintptr_t ob = reinterpret_cast<uintptr_t>(dst.ptr);
+        const size_t isz = (static_cast<size_t>(rows - 1u) * in.row_stride + F) * sizeof(::shelf::bf16_t);
+        const size_t osz = (static_cast<size_t>(rows - 1u) * dst.row_stride + F) * sizeof(::shelf::bf16_t);
+        if (ib < ob + osz && ob < ib + isz) return PhysicalResolveStatus::NotApplicable;
+    }
 
     const float theta = b.scalar_b > 0.0f ? b.scalar_b : 10000000.0f;
 
@@ -79,24 +89,31 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     si.head_dim = head_dim;
     si.rotary_dim = rotary;
     si.rows = rows;
-    if (select_rope_implementation(si) != RopeImplementation::Optimized)
+    if (!rounded && select_rope_implementation(si) != RopeImplementation::Optimized)
         return PhysicalResolveStatus::NotApplicable;
 
+    if (b.rope_table_index != 0u &&
+        (ctx.rope_inv_freq == nullptr || b.rope_table_index >= ctx.rope_table_count ||
+         ctx.rope_table_stride < rotary / 2u))
+        return Status::invalid_argument("invalid RoPE table index", __FILE__, __LINE__);
+    const double* table = ctx.rope_inv_freq == nullptr ? nullptr
+        : ctx.rope_inv_freq + b.rope_table_index * ctx.rope_table_stride;
     const uint32_t* positions =
         ctx.rope_positions != nullptr ? ctx.rope_positions : ctx.row_positions;
     const bool pair =
-        ctx.rope_inv_freq != nullptr &&
+        !rounded && table != nullptr &&
         ::shelf::kernel::rope_pair_shape_supported(
             static_cast<const float*>(in.ptr),
             static_cast<::shelf::bf16_t*>(dst.ptr), in.row_stride, dst.row_stride, F,
             head_dim, rotary);
 
-    out.variant = pair ? PhysicalRopeVariant::F32Bf16Pair
+    out.variant = rounded ? PhysicalRopeVariant::Bf16Rounded
+                : pair ? PhysicalRopeVariant::F32Bf16Pair
                        : PhysicalRopeVariant::F32Bf16Generic;
     out.input = reinterpret_cast<uint64_t>(in.ptr);
     out.output = reinterpret_cast<uint64_t>(dst.ptr);
     out.positions = reinterpret_cast<uint64_t>(positions);
-    out.inv_freq = reinterpret_cast<uint64_t>(ctx.rope_inv_freq);
+    out.inv_freq = reinterpret_cast<uint64_t>(table);
     out.input_row_stride = in.row_stride;
     out.output_row_stride = dst.row_stride;
     out.rows = rows;
@@ -113,6 +130,14 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
 }
 
 hipError_t launch_rope_physical(const PhysicalRopeLaunch& d, hipStream_t stream) {
+    if (d.variant == PhysicalRopeVariant::Bf16Rounded) {
+        return ::shelf::kernel::launch_rope_bf16_rounded(
+            reinterpret_cast<const ::shelf::bf16_t*>(d.input), d.input_row_stride,
+            reinterpret_cast<::shelf::bf16_t*>(d.output), d.output_row_stride,
+            reinterpret_cast<const uint32_t*>(d.positions), d.rows, d.features, d.head_dim,
+            d.rotary_dim, d.theta, reinterpret_cast<const double*>(d.inv_freq),
+            d.attention_factor, stream);
+    }
     if (d.variant == PhysicalRopeVariant::F32Bf16Pair) {
         return ::shelf::kernel::launch_rope_f32_bf16_pair(
             reinterpret_cast<const float*>(d.input), d.input_row_stride,

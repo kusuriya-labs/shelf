@@ -1,6 +1,7 @@
 #pragma once
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/models/plamo3/weights/model_weights.h>
 #include <shelf/models/qwen35/weights/model_weights.h>
 #include <shelf/models/qwen35moe/weights/qwen35moe_model_load.h>
 
@@ -12,13 +13,12 @@
 
 namespace shelf::models {
 
-// Which weight family a model directory needs. The decision is num_experts in
-// config.json, never the model_type string (docs/developer/qwen35moe.md sec.2), and it
-// lives here because this module is the one place that links both family loaders.
+// PLaMo is selected by identity; Qwen families are distinguished by their config topology.
 enum class ModelFamily : std::uint8_t {
     Dense,
     Moe,
     Qwen4Exp,
+    Plamo3,
 };
 
 // A loaded model holds exactly one family's weights. There is no empty member of the
@@ -27,11 +27,12 @@ enum class ModelFamily : std::uint8_t {
 // null for a dense model.
 using LoadedModelWeights = std::variant<
     shelf::qwen35::Qwen35ModelWeights,
-    shelf::qwen35moe::Qwen35MoeModelWeights>;
+    shelf::qwen35moe::Qwen35MoeModelWeights,
+    shelf::plamo3::ModelWeights>;
 
 ModelFamily model_family(const LoadedModelWeights& loaded) noexcept;
 
-// num_experts > 0 selects Moe. Fails only when config.json cannot be read.
+// Selects the checkpoint family from its config.
 Result<ModelFamily> probe_model_dir(const std::string& model_dir);
 
 // Reads config.json, loads with that family's loader, and runs that family's validation.

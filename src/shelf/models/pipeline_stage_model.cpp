@@ -101,6 +101,8 @@ Result<std::unique_ptr<PipelineStageModel>> build_moe_pipeline_stage_model(
 Result<PipelineStageModelBuilder> select_pipeline_stage_model(const std::string& model_dir) {
     const auto family = probe_model_dir(model_dir);
     if (!family.ok()) return family.status();
+    if (family.value() == ModelFamily::Plamo3)
+        return Status::unsupported("plamo3: runtime path is not connected", __FILE__, __LINE__);
     if (family.value() == ModelFamily::Moe) return &build_moe_pipeline_stage_model;
     return &q35r::build_dense_pipeline_stage_model;
 }

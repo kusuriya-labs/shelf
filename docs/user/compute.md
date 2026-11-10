@@ -3,13 +3,20 @@
 単一request推論アプリ。greedy / temperature / top-k / top-p / min-p デコード。BF16 modelと量子化model
 （`shelf_quantization.json` による自動検出）の両方に対応。
 
+PLaMo 3 Translate 0.8B / 2B / 8B の BF16 checkpoint は単一 GPU の `shelf-compute` で利用できる。
+`--max-seq-len` は 2048 以下にする。局所 attention の窓内では全層を causal
+attention として実行し、局所 RoPE と全域 YaRN を層ごとに切り替える。
+TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
+2B の teacher-forced 比較では CPU BF16 参照との top-1 に不一致がある。
+入力 ID の作り方と測定結果は [PLaMo 3 開発メモ](../developer/plamo3.md) を参照。
+
 ## options
 
 <!-- cli:compute -->
 | option | 説明 |
 | --- | --- |
 | `--model-dir PATH` | BF16 or quantized model directory (auto-detected via shelf_quantization.json) (required) |
-| `--input-ids-file PATH` | whitespace separated prompt token ids |
+| `--input-ids-file PATH` | whitespace separated or PSKLDTOK binary prompt token ids |
 | `--max-new-tokens N` | max tokens to generate (default 32) |
 | `--max-seq-len N` | max sequence length (default 512) |
 | `--arena-gib N\|auto\|-N` | arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
@@ -389,3 +396,7 @@ mask を次のように送る。
 次の mask を受け取るまでその request はスケジュールされない。他の request は
 進行できる。完了、cancel 後の mask は無視される。制約付き request は通常 decode を
 使い、DFlash2 / MTP による投機は行わない。
+
+R9700 の PLaMo 3 Translate BF16 の短文日→英（23 token、greedy）では、
+0.8B / 2B / 8B の prefill は 24.7 / 40.9 / 109.0 ms、decode は
+247.38 / 90.45 / 33.27 token/s（各 9 token）の実測例がある。

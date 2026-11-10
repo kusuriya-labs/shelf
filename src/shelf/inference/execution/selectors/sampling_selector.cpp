@@ -12,6 +12,10 @@ SamplingBatchMode derive_mode(const SamplingSelectorInput& in) {
 }
 
 const SamplingRule kRules[] = {
+    {107520, SamplingBatchMode::HasStochastic, 1, 256, SamplingImplementation::StochasticSingleBlock, 0},
+    {107520, SamplingBatchMode::AllGreedy, 1, 64, SamplingImplementation::Partitioned, 64},
+    {107520, SamplingBatchMode::Mixed, 1, 64, SamplingImplementation::Partitioned, 64},
+    {107520, SamplingBatchMode::NoSampling, 1, 256, SamplingImplementation::SingleBlock, 0},
     {248320, SamplingBatchMode::HasStochastic, 1, 256, SamplingImplementation::StochasticSingleBlock, 0},
     {248320, SamplingBatchMode::AllGreedy, 1, 64, SamplingImplementation::Partitioned, 64},
     {248320, SamplingBatchMode::Mixed, 1, 64, SamplingImplementation::Partitioned, 64},

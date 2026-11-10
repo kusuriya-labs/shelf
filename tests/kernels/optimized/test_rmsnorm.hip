@@ -428,6 +428,38 @@ int main() {
                  false);
     }
 
+    // Check the offset and both BF16 rounding points across heads and padded rows.
+    for (bool per_feature : {false, true}) {
+        constexpr uint32_t F = 256, G = 128, rows = 2, stride = 272;
+        Config cfg{false, false, per_feature ? L::PER_FEATURE : L::PER_GROUP,
+                   M::DIRECT, per_feature ? F : G};
+        std::vector<double> in(static_cast<size_t>(rows) * stride, 1.0);
+        std::vector<double> weights(cfg.weight_elements);
+        for (uint32_t i = 0; i < cfg.weight_elements; ++i)
+            weights[i] = (static_cast<int>(i % 17) - 8) / 64.0;
+        UploadResult up{};
+        if (!upload(arena, cfg, in, stride, weights, rows, stride, up, true)) {
+            check(false, "offset RMSNorm allocation");
+            continue;
+        }
+        constexpr float offset = 0.2f;
+        const auto err = shelf::kernel::launch_rmsnorm_offset_bf16(
+            up.in_dev, up.wt_dev, up.out_dev, rows, F, G, stride, stride,
+            per_feature, 0.f, offset, stream);
+        (void)hipStreamSynchronize(stream);
+        std::vector<uint16_t> got(static_cast<size_t>(rows) * stride);
+        (void)hipMemcpy(got.data(), up.out_dev, got.size() * sizeof(uint16_t), hipMemcpyDeviceToHost);
+        bool ok = err == hipSuccess;
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t i = 0; i < F; ++i) {
+                const float w = bf16_rne_f32(static_cast<float>(weights[per_feature ? i : i % G]));
+                const uint16_t expected = shelf::f32_to_bf16_rne(offset + w);
+                ok = ok && got[static_cast<size_t>(r) * stride + i] == expected;
+            }
+        }
+        check(ok, per_feature ? "offset RMSNorm per-feature" : "offset RMSNorm per-head");
+    }
+
     std::printf("\n=== %d passed, %d failed ===\n", passed, failed);
     return failed == 0 ? 0 : 1;
 }

@@ -375,20 +375,23 @@ Result<PhysicalResolveStatus> resolve_split_desc(
         o1.dtype != ValueDType::BF16) {
         return PhysicalResolveStatus::NotApplicable;
     }
-    if (o0.feature_count != o1.feature_count || o0.row_domain != o1.row_domain)
+    if (o0.row_domain != o1.row_domain)
         return PhysicalResolveStatus::NotApplicable;
     if (o0.row_domain != in.row_domain || o1.row_domain != in.row_domain)
         return PhysicalResolveStatus::NotApplicable;
     const uint32_t f0 = o0.feature_count;
-    if (f0 == 0u || in.feature_count != 2u * f0)
+    const uint32_t f1 = o1.feature_count;
+    if (f0 == 0u || f1 == 0u || in.feature_count != f0 + f1)
         return PhysicalResolveStatus::NotApplicable;
-    if (in.row_stride < in.feature_count || o0.row_stride < f0 || o1.row_stride < f0)
+    if (in.row_stride < in.feature_count || o0.row_stride < f0 || o1.row_stride < f1)
         return PhysicalResolveStatus::NotApplicable;
     const bool interleaved =
         (b.flags == static_cast<uint32_t>(::shelf::runtime::SplitLayout::INTERLEAVED_HEADS));
+    if (f0 != f1 && b.flags != static_cast<uint32_t>(::shelf::runtime::SplitLayout::HALVES))
+        return PhysicalResolveStatus::NotApplicable;
     const uint32_t head_dim = b.group_size;
     if (interleaved) {
-        if (head_dim == 0u || f0 % head_dim != 0u)
+        if (f0 != f1 || head_dim == 0u || f0 % head_dim != 0u)
             return PhysicalResolveStatus::NotApplicable;
     }
     const uint32_t rows = rows_for(o0, ctx, b);
@@ -397,7 +400,8 @@ Result<PhysicalResolveStatus> resolve_split_desc(
                                  value_range(o1, rows)};
     if (!all_alias_ok(ranges, 3)) return PhysicalResolveStatus::NotApplicable;
     out.profile = interleaved ? ElementwiseProfile::SplitBf16InterleavedHeads
-                              : ElementwiseProfile::SplitBf16Halves;
+                  : f0 != f1 ? ElementwiseProfile::SplitBf16Uneven
+                             : ElementwiseProfile::SplitBf16Halves;
     out.in0 = reinterpret_cast<uint64_t>(in.ptr);
     out.in0_stride = in.row_stride;
     out.out0 = reinterpret_cast<uint64_t>(o0.ptr);
@@ -406,9 +410,10 @@ Result<PhysicalResolveStatus> resolve_split_desc(
     out.out1_stride = o1.row_stride;
     out.rows = rows;
     out.features = f0;
+    out.features_b = f1;
     out.aux = head_dim;
     fill_geometry(out);
-    return select_profile(out);
+    return f0 != f1 ? PhysicalResolveStatus::Applicable : select_profile(out);
 }
 
 Result<PhysicalResolveStatus> resolve_silu_desc(
@@ -538,6 +543,23 @@ hipError_t launch_elementwise_physical(const PhysicalElementwiseLaunch& d,
                 reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
                 reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
                 d.features, d.scalar_a, stream);
+        case ElementwiseProfile::ScaleBf16ToF32:
+            return ::shelf::kernel::launch_scale_bf16_f32(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<float*>(d.out0), d.out0_stride, d.rows, d.features,
+                d.scalar_a, stream);
+        case ElementwiseProfile::MulBf16:
+            return ::shelf::kernel::launch_mul_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in1), d.in1_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride,
+                d.rows, d.features, stream);
+        case ElementwiseProfile::SplitBf16Uneven:
+            return ::shelf::kernel::launch_split_uneven_bf16(
+                reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride,
+                reinterpret_cast<::shelf::bf16_t*>(d.out1), d.out1_stride,
+                d.rows, d.features, d.features_b, stream);
         case ElementwiseProfile::SplitBf16Halves:
         case ElementwiseProfile::SplitBf16InterleavedHeads:
             return ::shelf::kernel::launch_split_bf16(
@@ -644,6 +666,11 @@ Result<PhysicalResolveStatus> resolve_elementwise_physical(
         case ::shelf::runtime::KernelId::MUL:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
+            {
+                auto in = resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
+                if (in.ok() && in.value().dtype == ValueDType::BF16)
+                    return resolve_binary_bf16(program, b, ctx, ElementwiseProfile::MulBf16, out);
+            }
             return resolve_binary_f32_to_bf16(program, b, ctx, out);
         case ::shelf::runtime::KernelId::SCALE: {
             if (b.input_count != 1u || b.output_count != 1u)
@@ -651,6 +678,14 @@ Result<PhysicalResolveStatus> resolve_elementwise_physical(
             auto in_res =
                 resolve_host_value(program, ::shelf::runtime::ValueId{b.input_slots[0]}, ctx);
             if (in_res.ok() && in_res.value().dtype == ValueDType::BF16) {
+                auto dst = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+                if (dst.ok() && dst.value().dtype == ValueDType::F32) {
+                    auto result = resolve_unary_bf16_to_f32(program, b, ctx,
+                        ElementwiseProfile::ScaleBf16ToF32, out);
+                    if (result.ok() && result.value() == PhysicalResolveStatus::Applicable)
+                        out.scalar_a = b.scalar_a;
+                    return result;
+                }
                 return resolve_unary_bf16_scale(program, b, ctx, out);
             }
             return resolve_unary_f32_scale(program, b, ctx, out);

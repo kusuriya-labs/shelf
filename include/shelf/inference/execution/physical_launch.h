@@ -57,6 +57,7 @@ struct PhysicalRmsNormLaunch {
     uint32_t input_row_stride = 0;
     uint32_t output_row_stride = 0;
     float eps = 0.0f;
+    float weight_offset = 0.0f;
     ::shelf::kernel::RmsNormDataType input_dtype =
         ::shelf::kernel::RmsNormDataType::BF16;
     ::shelf::kernel::RmsNormDataType weight_dtype =
@@ -251,6 +252,7 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
 enum class PhysicalRopeVariant : uint8_t {
     F32Bf16Pair = 0,
     F32Bf16Generic = 1,
+    Bf16Rounded = 2,
     Unsupported = 255,
 };
 

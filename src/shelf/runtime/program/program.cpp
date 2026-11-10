@@ -447,6 +447,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             const auto& n = node_as<RmsNormNode>(node);
             DispatchBinding b = base_binding(KernelId::RMS_NORM);
             b.scalar_a = n.eps;
+            b.scalar_b = n.weight_offset;
             b.group_size = n.group_size;
             b.parameter_index0 = n.parameter_index;
             b.flags = static_cast<uint32_t>(n.weight_mode);
@@ -520,6 +521,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.scalar_b = sb;
             b.rotary_dim = rot;
             b.group_size = group;
+            if (kind == PrimitiveKind::ROPE) {
+                b.rope_table_index = node_as<RoPENode>(node).frequency_table_index;
+                b.flags = node_as<RoPENode>(node).bf16_intermediates ? 1u : 0u;
+            }
             b.input_slots[0] = node.inputs[0].id;
             b.input_count = 1;
             auto po = c.produce(node.outputs[0]);

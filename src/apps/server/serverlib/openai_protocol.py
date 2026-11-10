@@ -19,6 +19,7 @@ from typing import Any
 from shelf_chat.codec import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
 
 CHAT_TEMPLATE_KWARGS = ("enable_thinking", "preserve_thinking")
+TRANSLATION_TEMPLATE_KWARGS = ("target_lang", "source_lang", "context", "glossary", "form")
 
 DEFAULT_MAX_NEW_TOKENS = 4096
 
@@ -70,6 +71,7 @@ class ChatRequest:
     preserve_thinking: bool = True
     forced_tool_name: str | None = None
     response_schema: dict | None = None
+    template_kwargs: dict[str, Any] | None = None
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -325,7 +327,7 @@ def parse_chat_template_kwargs(body: dict) -> tuple[bool, bool]:
         )
 
     for key in raw:
-        if key not in CHAT_TEMPLATE_KWARGS:
+        if key not in CHAT_TEMPLATE_KWARGS + TRANSLATION_TEMPLATE_KWARGS:
             raise OpenAIProtocolError(
                 f"chat_template_kwargs.{key} is not supported",
                 param=f"chat_template_kwargs.{key}",
@@ -453,6 +455,9 @@ def parse_chat_request(body: Any,
             validate_schema(response_schema)
         if response_schema is not None and (tools or body.get("stop") is not None):
             raise OpenAIProtocolError("structured output does not support tools or stop", param="response_format", code="unsupported_parameter")
+    template_kwargs = {key: value for key, value in
+                       (body.get("chat_template_kwargs") or {}).items()
+                       if key in TRANSLATION_TEMPLATE_KWARGS}
     reasoning_effort, effort_given = parse_reasoning_effort(body)
     if effort_given and not enable_thinking:
         raise OpenAIProtocolError(
@@ -480,6 +485,7 @@ def parse_chat_request(body: Any,
         reasoning_effort=reasoning_effort,
         preserve_thinking=preserve_thinking,
         response_schema=response_schema,
+        template_kwargs=template_kwargs,
     )
 
 

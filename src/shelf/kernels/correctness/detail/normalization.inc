@@ -23,6 +23,11 @@ __device__ __forceinline__ ProgramStatus exec_row_norm_like(
     if (want_weight && !weight_per_row && !weight_per_group)
         return ProgramStatus::INVALID_BINDING;
     const bool one_plus = b.flags == 0u;
+    const bool offset_bf16 = !l2_mode &&
+        b.flags == static_cast<uint32_t>(shelf::runtime::RmsNormWeightMode::OFFSET_BF16);
+    if (offset_bf16 && (!want_weight || in.dtype != ValueDType::BF16 ||
+                        out.dtype != ValueDType::BF16 || weight_dtype != ValueDType::BF16))
+        return ProgramStatus::INVALID_BINDING;
     const uint32_t rows = value_rows(env, out);
     for (uint32_t r = blockIdx.x; r < rows; r += gridDim.x) {
         for (uint32_t g0 = 0; g0 < f; g0 += group) {
@@ -46,12 +51,15 @@ __device__ __forceinline__ ProgramStatus exec_row_norm_like(
             for (uint32_t h = threadIdx.x; h < group; h += blockDim.x) {
                 const size_t idx = static_cast<size_t>(r) * in.row_stride + g0 + h;
                 float y = load_elem(in, idx) * inv;
-                if (!l2_mode && in.dtype == ValueDType::F32)
+                if (!l2_mode && (in.dtype == ValueDType::F32 || offset_bf16))
                     y = __bfloat162float(__float2bfloat16(y));
                 if (want_weight) {
                     const uint32_t widx = weight_per_row ? (g0 + h) : h;
                     const float w = load_parameter_elem(weight_raw, weight_dtype, widx);
-                    y *= one_plus ? (1.f + w) : w;
+                    if (offset_bf16)
+                        y *= __bfloat162float(__float2bfloat16(b.scalar_b + w));
+                    else
+                        y *= one_plus ? (1.f + w) : w;
                 }
                 store_elem(out, static_cast<size_t>(r) * out.row_stride + g0 + h, y);
             }

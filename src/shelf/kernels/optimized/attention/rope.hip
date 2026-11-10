@@ -76,6 +76,22 @@ __global__ void rope_inv_freq_init_kernel(
                             static_cast<double>(i) / static_cast<double>(half));
 }
 
+__global__ void rope_inv_freq_f32_init_kernel(
+    double* inv_freq, uint32_t half, float theta, float factor,
+    float low, float high, bool yarn) {
+    const uint32_t i = threadIdx.x;
+    if (i >= half) return;
+    const float freq = powf(theta, static_cast<float>(i) / static_cast<float>(half));
+    float value = 1.0f / freq;
+    if (yarn) {
+        const float ramp = fminf(1.0f, fmaxf(0.0f, (static_cast<float>(i) - low) / (high - low)));
+        const float mask = 1.0f - ramp;
+        const float interpolation = 1.0f / (factor * freq);
+        value = interpolation * (1.0f - mask) + value * mask;
+    }
+    inv_freq[i] = static_cast<double>(value);
+}
+
 __global__ void rope_inv_freq_yarn_init_kernel(
     double* __restrict__ inv_freq, uint32_t half, float theta,
     float factor, float original_len, float beta_fast, float beta_slow,
@@ -186,11 +202,28 @@ hipError_t launch_rope_inv_freq_init(
     double* inv_freq, uint32_t half, float theta, hipStream_t stream) {
     if (inv_freq == nullptr)
         return hipErrorInvalidValue;
-    if (half == 0u || half > 32u)
+    if (half == 0u || half > kRopeMaxHalf)
         return hipErrorNotSupported;
     if (theta <= 0.0f)
         return hipErrorInvalidValue;
     rope_inv_freq_init_kernel<<<1, half, 0, stream>>>(inv_freq, half, theta);
+    return hipGetLastError();
+}
+
+hipError_t launch_rope_inv_freq_f32_init(
+    double* inv_freq, uint32_t half, float theta, float factor,
+    uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,
+    bool yarn, hipStream_t stream) {
+    if (!inv_freq || half == 0u || half > kRopeMaxHalf || !(theta > 1.0f) ||
+        (yarn && (!(factor > 1.0f) || original_max_position_embeddings == 0u ||
+                  !(beta_fast > 0.0f) || !(beta_slow > 0.0f))))
+        return hipErrorInvalidValue;
+    const double pi2 = 6.283185307179586;
+    const double scale = static_cast<double>(half) / log(static_cast<double>(theta));
+    const float low = yarn ? static_cast<float>(scale * log(original_max_position_embeddings / (beta_fast * pi2))) : 0.0f;
+    const float high = yarn ? static_cast<float>(scale * log(original_max_position_embeddings / (beta_slow * pi2))) : 1.0f;
+    if (yarn && !(high > low)) return hipErrorInvalidValue;
+    rope_inv_freq_f32_init_kernel<<<1, half, 0, stream>>>(inv_freq, half, theta, factor, low, high, yarn);
     return hipGetLastError();
 }
 
@@ -200,7 +233,7 @@ hipError_t launch_rope_inv_freq_yarn_init(
     bool truncate, hipStream_t stream) {
     if (inv_freq == nullptr)
         return hipErrorInvalidValue;
-    if (half == 0u || half > 32u)
+    if (half == 0u || half > kRopeMaxHalf)
         return hipErrorNotSupported;
     if (theta <= 0.0f)
         return hipErrorInvalidValue;
@@ -214,6 +247,48 @@ hipError_t launch_rope_inv_freq_yarn_init(
         inv_freq, half, theta, factor,
         static_cast<float>(original_max_position_embeddings), beta_fast, beta_slow,
         truncate ? 1u : 0u);
+    return hipGetLastError();
+}
+
+namespace {
+__global__ void rope_bf16_rounded_kernel(
+    const bf16* in, uint32_t in_stride, bf16* out, uint32_t out_stride,
+    const uint32_t* positions, uint32_t features, uint32_t head_dim,
+    uint32_t rotary, float theta, const double* inv_freq, float factor) {
+    const uint32_t row = blockIdx.y;
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= features) return;
+    const uint32_t hc = col % head_dim, half = rotary / 2u;
+    const bf16* x = in + static_cast<size_t>(row) * in_stride;
+    float value = __bfloat162float(x[col]);
+    if (hc < rotary) {
+        const uint32_t pos = positions ? positions[row] : row;
+        const uint32_t rc = hc % half;
+        const double freq = inv_freq ? inv_freq[rc] : 1.0 / pow(static_cast<double>(theta), static_cast<double>(rc) / half);
+        const float angle = static_cast<float>(pos) * static_cast<float>(freq);
+        float cs = __bfloat162float(__float2bfloat16(cosf(angle)));
+        float sn = __bfloat162float(__float2bfloat16(sinf(angle)));
+        cs = __bfloat162float(__float2bfloat16(cs * factor));
+        sn = __bfloat162float(__float2bfloat16(sn * factor));
+        const uint32_t partner = col - hc + (hc < half ? hc + half : hc - half);
+        const float lhs = __bfloat162float(__float2bfloat16(value * cs));
+        const float rhs = __bfloat162float(__float2bfloat16(__bfloat162float(x[partner]) * sn));
+        value = hc < half ? lhs - rhs : lhs + rhs;
+    }
+    out[static_cast<size_t>(row) * out_stride + col] = __float2bfloat16(value);
+}
+}
+
+hipError_t launch_rope_bf16_rounded(
+    const bf16_t* input, uint32_t input_stride, bf16_t* output, uint32_t output_stride,
+    const uint32_t* positions, uint32_t rows, uint32_t features, uint32_t head_dim,
+    uint32_t rotary, float theta, const double* inv_freq, float factor, hipStream_t stream) {
+    if (!input || !output || input == output || !rows || !features || !head_dim ||
+        features % head_dim || !rotary || (rotary & 1u) || rotary > head_dim || rows > 65535u)
+        return hipErrorInvalidValue;
+    rope_bf16_rounded_kernel<<<dim3((features + 255u) / 256u, rows), 256, 0, stream>>>(
+        reinterpret_cast<const bf16*>(input), input_stride, reinterpret_cast<bf16*>(output),
+        output_stride, positions, features, head_dim, rotary, theta, inv_freq, factor);
     return hipGetLastError();
 }
 

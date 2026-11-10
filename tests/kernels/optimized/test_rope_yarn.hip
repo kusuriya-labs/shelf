@@ -123,6 +123,36 @@ int main() {
     }
 
     shelf::gpu::discard_cleanup_result(hipFree(d_table));
+    constexpr uint32_t plamo_half = 64u;
+    const uint32_t indices[] = {0u, 8u, 16u, 24u, 32u, 40u, 48u, 56u, 63u};
+    const double golden_local[] = {1.0, 0.3162277638912201, 0.10000000149011612,
+        0.03162277862429619, 0.009999999776482582, 0.003162277862429619,
+        0.0010000000474974513, 0.0003162277862429619, 0.00011547819303814322};
+    const double golden_full[] = {1.0, 0.17782793939113617, 0.027626225724816322,
+        0.0021215747110545635, 3.906250185536919e-06, 6.946403914298571e-07,
+        1.2352646194813133e-07, 2.1966458874089767e-08, 4.847413137554213e-09};
+    d_table = nullptr;
+    if (hipMalloc(reinterpret_cast<void**>(&d_table), plamo_half * sizeof(double)) != hipSuccess) {
+        std::printf("FAIL plamo hipMalloc\n");
+        return 1;
+    }
+    for (int pass = 0; pass < 2; ++pass) {
+        const hipError_t err = pass == 0
+            ? ::shelf::kernel::launch_rope_inv_freq_init(d_table, plamo_half, 10000.0f, nullptr)
+            : ::shelf::kernel::launch_rope_inv_freq_yarn_init(
+                d_table, plamo_half, 1000000.0f, 256.0f, 4096u, 32.0f, 1.0f, false,
+                nullptr);
+        check(err == hipSuccess, "PLaMo RoPE table launch");
+        std::vector<double> table(plamo_half);
+        check(hipMemcpy(table.data(), d_table, plamo_half * sizeof(double),
+                        hipMemcpyDeviceToHost) == hipSuccess, "PLaMo RoPE table readback");
+        const double* golden = pass == 0 ? golden_local : golden_full;
+        for (size_t i = 0; i < sizeof(indices) / sizeof(indices[0]); ++i) {
+            check(std::fabs(table[indices[i]] - golden[i]) / golden[i] < 1e-6,
+                  "PLaMo RoPE table matches reference");
+        }
+    }
+    shelf::gpu::discard_cleanup_result(hipFree(d_table));
     if (g_fail != 0) {
         std::printf("%d FAIL\n", g_fail);
         return 1;

@@ -23,6 +23,18 @@ struct LinearShapeRule {
 };
 
 constexpr LinearShapeRule kLinearShapeRules[] = {
+    // PLaMo 3 Translate BF16 QKV, output, MLP and vocabulary projections.
+    { 2304, 1536, kFamilyBf16 },
+    { 1536, 2048, kFamilyBf16 },
+    { 12288, 1536, kFamilyBf16 },
+    { 1536, 6144, kFamilyBf16 },
+    { 107520, 1536, kFamilyBf16 },
+    { 2560, 3072, kFamilyBf16 },
+    { 20480, 2560, kFamilyBf16 },
+    { 107520, 2560, kFamilyBf16 },
+    { 32768, 4096, kFamilyBf16 },
+    { 4096, 16384, kFamilyBf16 },
+    { 107520, 4096, kFamilyBf16 },
     { 32, 2560, kFamilyBf16 | kFamilyFp8Finegrained },
     { 48, 5120, kFamilyBf16 | kFamilyFp8Finegrained | kFamilyMxfp4 },
     { 1024, 2560, kFamilyBf16 | kFamilyFp8Finegrained },

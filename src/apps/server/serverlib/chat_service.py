@@ -197,6 +197,17 @@ class ChatService:
         strict_tools = bool(tools and any(t["function"].get("strict") for t in tools))
         if strict_tools and request.stop:
             raise OpenAIProtocolError("strict tools do not support stop", param="stop", code="unsupported_parameter")
+        tokenizer = getattr(self._processor, "tokenizer", self._processor)
+        translation = type(tokenizer).__name__ == "Plamo3Tokenizer"
+        if request.template_kwargs and not translation:
+            raise OpenAIProtocolError(
+                "translation template arguments require a PLaMo 3 tokenizer",
+                param="chat_template_kwargs", code="unsupported_parameter")
+        if translation and (request.response_schema is not None or strict_tools):
+            raise OpenAIProtocolError(
+                "structured output is not supported by PLaMo 3 translation models",
+                param="response_format" if request.response_schema is not None else "tools",
+                code="unsupported_parameter")
 
         try:
             prompt_ids = codec.prompt_ids(
@@ -206,6 +217,7 @@ class ChatService:
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
                 preserve_thinking=request.preserve_thinking,
+                template_kwargs=request.template_kwargs,
             )
         except OpenAIProtocolError:
             raise
@@ -236,7 +248,7 @@ class ChatService:
         max_new_tokens = min(request.max_new_tokens, budget, remaining)
 
         reasoning_budget_tokens = 0
-        if request.enable_thinking and not tool_prefix and self._reasoning_close_token >= 0:
+        if request.enable_thinking and not translation and not tool_prefix and self._reasoning_close_token >= 0:
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
         if (request.response_schema is not None or strict_tools) and request.enable_thinking and self._reasoning_close_token < 0:
@@ -254,7 +266,7 @@ class ChatService:
             prompt_ids=prompt_ids,
             tools=tools,
             max_new_tokens=max_new_tokens,
-            enable_thinking=request.enable_thinking and not tool_prefix,
+            enable_thinking=request.enable_thinking and not translation and not tool_prefix,
             tool_prefix=tool_prefix,
             reasoning_budget_tokens=reasoning_budget_tokens,
             reasoning_close_token=self._reasoning_close_token,

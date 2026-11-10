@@ -62,7 +62,8 @@ void print_model_geometry(const shelf::models::LoadedModel& model) {
         shelf::qwen35::make_qwen35_gdn_state_layout(text_config);
 
     printf("MODEL_HIDDEN_SIZE=%zu\n", text_config.hidden_size);
-    printf("MODEL_FAMILY=%s\n", model.runs_grouped_experts() ? "moe" : "dense");
+    printf("MODEL_FAMILY=%s\n", model.family() == shelf::models::ModelFamily::Plamo3
+        ? "plamo3" : (model.runs_grouped_experts() ? "moe" : "dense"));
     if (const auto* dense = model.dense_model()) {
         printf("MODEL_INTERMEDIATE_SIZE=%zu\n", dense->text_config().ffn.intermediate_size);
     }
