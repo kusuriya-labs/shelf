@@ -352,7 +352,7 @@ struct PhysicalPagedAttentionKernel {
     ::shelf::kernel::OctaveKVCacheFormat octave_format{};
 };
 
-inline constexpr uint32_t kPhysicalPagedAttentionMaxPrefillRegions = 16u;
+inline constexpr uint32_t kPhysicalPagedAttentionMaxPrefillRegions = 64u;
 
 inline constexpr uint32_t kPhysicalPagedAttentionMaxKernels =
     4u + 2u * kPhysicalPagedAttentionMaxPrefillRegions;
