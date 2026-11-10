@@ -326,7 +326,7 @@ __global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
             const uint32_t b = i / kQsaHeadDim;
             const uint32_t d = i % kQsaHeadDim;
             k_tile[d][b] = b < n
-                ? pooled[static_cast<uint64_t>(block_group + chunk + b) *
+                ? pooled[static_cast<uint64_t>(args.block_begin + block_group + chunk + b) *
                              kQsaHeadDim + d]
                 : bf16_t{0};
         }
@@ -385,7 +385,8 @@ __device__ __forceinline__ float qsa_radix_value(uint32_t key) {
 // Exact top-k over scores[0..usable). Writes the selected indices (unsorted) to out.
 // Ties on the score keep the smaller index, matching the sort/merge path.
 __device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t k,
-                                 uint32_t* hist, uint32_t* state, std::int32_t* out) {
+                                 uint32_t* hist, uint32_t* state, std::int32_t* out,
+                                 float* out_scores, uint32_t index_base) {
     const uint32_t t = threadIdx.x;
     const uint32_t stride = blockDim.x;
     uint32_t rank = k;
@@ -461,7 +462,8 @@ __device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t 
         const float value = scores[i];
         if (value > threshold || (value == threshold && i <= index_prefix)) {
             const uint32_t pos = atomicAdd(&state[3], 1u);
-            out[pos] = static_cast<std::int32_t>(i);
+            out[pos] = static_cast<std::int32_t>(index_base + i);
+            if (out_scores != nullptr) out_scores[pos] = value;
         }
     }
     __syncthreads();
@@ -472,7 +474,6 @@ __global__ __launch_bounds__(kQsaThreads) void qsa_topk_kernel(QsaTopkArgs args)
     if (row >= args.rows) return;
     const uint32_t t = threadIdx.x;
 
-    __shared__ uint32_t candidate_count;
     __shared__ uint32_t hist[256];
     __shared__ uint32_t radix_state[4];
     extern __shared__ uint8_t qsa_topk_dynamic[];
@@ -503,13 +504,10 @@ __global__ __launch_bounds__(kQsaThreads) void qsa_topk_kernel(QsaTopkArgs args)
         if (block_max != 0u)
             qsa_radix_select(
                 args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
-                usable, block_max, hist, radix_state, indices);
+                usable, block_max, hist, radix_state, indices, nullptr, 0u);
     } else {
         for (uint32_t i = t; i < count; i += kQsaThreads) {
-            if (i >= half) {
-                scores[i] = -INFINITY;
-                indices[i] = -1;
-            } else if (args.first != 0u) {
+            if (i >= half || args.first != 0u) {
                 scores[i] = -INFINITY;
                 indices[i] = -1;
             } else {
@@ -517,36 +515,18 @@ __global__ __launch_bounds__(kQsaThreads) void qsa_topk_kernel(QsaTopkArgs args)
                 indices[i] = args.state_indices[static_cast<uint64_t>(row) * count + i];
             }
         }
-        if (t == 0u) candidate_count = 0u;
         __syncthreads();
 
-        for (uint32_t off = 0u; off < usable; off += half) {
-            const uint32_t n = usable - off < half ? usable - off : half;
-            const uint32_t c0 = candidate_count;
-            for (uint32_t i = t; i < n; i += kQsaThreads) {
-                scores[half + c0 + i] =
-                    args.scores[static_cast<uint64_t>(row) * args.score_row_stride + off + i];
-                indices[half + c0 + i] = static_cast<int32_t>(args.block_begin + off + i);
-            }
-            __syncthreads();
-            if (t == 0u) candidate_count = c0 + n;
-            __syncthreads();
-            if (candidate_count == half) {
-                qsa_sort_candidates_ascending(scores, indices, half, half);
-                qsa_merge_descending(scores, indices, count);
-                if (t == 0u) candidate_count = 0u;
-                for (uint32_t i = t; i < half; i += kQsaThreads) {
-                    scores[half + i] = -INFINITY;
-                    indices[half + i] = -1;
-                }
-                __syncthreads();
-            }
+        if (usable != 0u) {
+            const uint32_t want = usable < top_k ? usable : top_k;
+            qsa_radix_select(
+                args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
+                usable, want, hist, radix_state, indices + half, scores + half,
+                args.block_begin);
         }
 
-        if (candidate_count != 0u) {
-            qsa_sort_candidates_ascending(scores, indices, half, half);
-            qsa_merge_descending(scores, indices, count);
-        }
+        qsa_sort_candidates_ascending(scores, indices, half, half);
+        qsa_merge_descending(scores, indices, count);
 
         if (args.last == 0u) {
             for (uint32_t i = t; i < half; i += kQsaThreads) {

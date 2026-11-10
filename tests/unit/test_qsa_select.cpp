@@ -110,7 +110,7 @@ std::vector<float> reference_scores(const std::vector<shelf::bf16_t>& q,
     return scores;
 }
 
-void run_scenario(const Scenario& s, bool split = false) {
+void run_scenario(const Scenario& s, bool split = false, std::uint32_t tiles = 1u) {
     constexpr std::uint32_t kHeadDim = shelf::kernel::kQsaHeadDim;
     constexpr std::uint32_t kStates = 2u;
     constexpr std::uint32_t kPooledState = 1u;
@@ -217,8 +217,6 @@ void run_scenario(const Scenario& s, bool split = false) {
         sa.pooled_slot_stride = static_cast<std::uint64_t>(kStates) * s.blocks * kHeadDim;
         sa.pooled_layer_stride = static_cast<std::uint64_t>(s.blocks) * kHeadDim;
         sa.scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
-        hipError_t error = shelf::kernel::launch_qsa_score_wmma(sa, nullptr);
-        if (error != hipSuccess) return error;
         shelf::kernel::QsaTopkArgs ta;
         ta.scores = static_cast<const float*>(d_scores);
         ta.state_scores = static_cast<float*>(d_state_scores);
@@ -237,7 +235,21 @@ void run_scenario(const Scenario& s, bool split = false) {
         ta.selected_row_stride = s.top_k;
         ta.first = 1u;
         ta.last = 1u;
-        return shelf::kernel::launch_qsa_topk(ta, nullptr);
+        const std::uint32_t tile_blocks = (s.blocks + tiles - 1u) / tiles;
+        for (std::uint32_t begin = 0u; begin < s.blocks; begin += tile_blocks) {
+            const std::uint32_t count = std::min(tile_blocks, s.blocks - begin);
+            sa.block_begin = begin;
+            sa.blocks = count;
+            hipError_t error = shelf::kernel::launch_qsa_score_wmma(sa, nullptr);
+            if (error != hipSuccess) return error;
+            ta.block_begin = begin;
+            ta.block_count = count;
+            ta.first = begin == 0u ? 1u : 0u;
+            ta.last = begin + count >= s.blocks ? 1u : 0u;
+            error = shelf::kernel::launch_qsa_topk(ta, nullptr);
+            if (error != hipSuccess) return error;
+        }
+        return hipSuccess;
     };
     check(run_kernel() == hipSuccess, label + ": select launch");
     check(hipDeviceSynchronize() == hipSuccess, label + ": select sync");
@@ -426,6 +438,26 @@ int main() {
                   .row_slots = {0u, 0u, 0u, 0u},
                   .max_sequences = 1u},
                  true);
+
+    run_scenario({.label = "blocks 12000 / compress 4 / split 2 tiles",
+                  .blocks = 12000u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {47996u, 47999u, 47991u, 47987u},
+                  .row_slots = {0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 2u);
+
+    run_scenario({.label = "blocks 12000 / compress 4 / split 3 tiles",
+                  .blocks = 12000u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 131u,
+                  .positions = {47996u, 47999u, 47991u, 47987u},
+                  .row_slots = {0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true, 3u);
 
     std::printf("%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
