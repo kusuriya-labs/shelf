@@ -29,6 +29,25 @@ enum class Exl3Codebook : uint8_t { Mul1, Mul24 };
 enum class Exl3Phase : uint8_t { Prefill, Decode, Verify };
 enum class Exl3ActivationType : uint8_t { FP16, BF16, INT8 };
 
+// ---- I/O contracts ----
+//
+// Activation / output rows are [rows][stride] with stride in elements of that plane's
+// type (bf16 input, Exl3OutputDType output). `code_row_stride_bytes` and
+// `scale_row_stride_bytes` are the exceptions and are named in bytes.
+//
+// The vectorized float4 rotation paths need the corresponding row stride to be a
+// multiple of 4 elements; otherwise the launch falls back to the scalar form. The
+// mul24 gemm needs n % 64 == 0 and k % 128 == 0; recon needs n % 16 == 0 and k % 128 == 0.
+//
+// In-place operation is not supported: input, output, codes, scales and workspace are
+// distinct buffers. All device pointers must stay valid until the launch completes on
+// `stream`; the launch does not synchronise.
+//
+// Split-K: `splitk_scratch` holds splits * rows * n f32 partials followed by
+// splits * rows f32 row sums, and `splitk_floats` is its capacity in floats. The reduce
+// pass sums splits in split index order, so the split count must be stable for a given
+// request (see `splitk_tuning_rows`).
+
 struct Exl3GemmArgs {
     const void* trellis = nullptr;
     const void* suh = nullptr;
