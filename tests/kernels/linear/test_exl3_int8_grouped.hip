@@ -28,6 +28,12 @@ namespace exl3 = shelf::quantization::exl3;
 
 constexpr float kInvSqrt128 = 0.08838834764831845f;
 constexpr uint32_t kRowTile = kernel::kExl3W16A16RowTile;
+static_assert(!kernel::exl3_mul24_auto_pre(255u, 2560u, 640u, 3u));
+static_assert(kernel::exl3_mul24_auto_pre(256u, 2560u, 640u, 3u));
+static_assert(kernel::exl3_mul24_auto_pre(256u, 640u, 2560u, 3u));
+static_assert(!kernel::exl3_mul24_auto_pre(2048u, 2560u, 1280u, 3u));
+static_assert(kernel::exl3_mul24_auto_pre(2048u, 2560u, 640u, 4u));
+static_assert(!kernel::exl3_mul24_auto_pre(2048u, 2560u, 640u, 5u));
 
 float bf16_to_f32(uint16_t b) {
     uint32_t u = static_cast<uint32_t>(b) << 16;
@@ -114,6 +120,7 @@ bool run_case(const Case& c, uint32_t seed) {
         ++expert_begin[c.groups[g].expert + 1u];
     }
     for (uint32_t e = 0; e < c.experts; ++e) expert_begin[e + 1u] += expert_begin[e];
+    if (std::strcmp(c.name, "invalid-token") == 0) row_token[1] = -1;
 
     const size_t out_elems = static_cast<size_t>(plane_rows) * n;
     Dev<uint16_t> d_trellis(trellis.size()), d_suh(suh.size()), d_svh(svh.size()), d_in(input.size());
@@ -152,6 +159,7 @@ bool run_case(const Case& c, uint32_t seed) {
     args.row_token = c.token_rows ? d_rt.p : nullptr;
     args.group_capacity = group_count;
 
+    Dev<uint8_t> d_act(static_cast<size_t>(plane_rows) * (k + k / 128u * 4u));
     const size_t out_bytes = out_elems * (c.bf16_out ? 2u : 4u);
     std::vector<uint8_t> raw[2];
     for (uint32_t mode = 0; mode < 2; ++mode) {  // 0: FP16 GEMM, 1: INT8 activations
@@ -162,6 +170,38 @@ bool run_case(const Case& c, uint32_t seed) {
         HIP_OK(hipDeviceSynchronize());
         raw[mode].resize(out_bytes);
         HIP_OK(hipMemcpy(raw[mode].data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+    }
+
+    HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+    args.int8_act = 1u;
+    args.mul24_activation_workspace = d_act.p;
+    args.mul24_activation_workspace_bytes = static_cast<uint64_t>(plane_rows) * (k + k / 128u * 4u);
+    HIP_OK(kernel::launch_gemm_exl3_w16a16_grouped(args, nullptr));
+    HIP_OK(hipDeviceSynchronize());
+    std::vector<uint8_t> pre(out_bytes);
+    HIP_OK(hipMemcpy(pre.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+    if (pre != raw[1]) {
+        std::printf("%s: INT8 前処理の結果が一致しません\n", c.name);
+        return false;
+    }
+
+    if (c.fuse) {
+        for (uint32_t mode = 0; mode < 2u; ++mode) {
+            for (uint32_t pre_mode = 0; pre_mode <= mode; ++pre_mode) {
+                HIP_OK(hipMemset(d_out.p, 0xFF, out_bytes));
+                args.mul24_lds = 1u;
+                args.int8_act = mode;
+                args.mul24_activation_workspace = pre_mode ? d_act.p : nullptr;
+                HIP_OK(kernel::launch_gemm_exl3_w16a16_grouped(args, nullptr));
+                HIP_OK(hipDeviceSynchronize());
+                std::vector<uint8_t> lds(out_bytes);
+                HIP_OK(hipMemcpy(lds.data(), d_out.p, out_bytes, hipMemcpyDeviceToHost));
+                if (lds != raw[mode]) {
+                    std::printf("%s: LDS の結果が一致しません mode=%u pre=%u\n", c.name, mode, pre_mode);
+                    return false;
+                }
+            }
+        }
     }
 
     // CPU reference per expert: q from the canonical trellis.
@@ -179,6 +219,7 @@ bool run_case(const Case& c, uint32_t seed) {
         const uint32_t e = group_expert[g];
         for (uint32_t r = 0; r < group_rows[g]; ++r) {
             const uint32_t out_row = g * kRowTile + r;
+            if (c.token_rows && row_token[out_row] < 0) continue;
             row_written[out_row] = 1;
             const uint32_t in_row = c.token_rows ? static_cast<uint32_t>(row_token[out_row]) : out_row;
             std::vector<float> xrot(k), xq(k), scale(k / 128u);
@@ -286,7 +327,7 @@ int main() {
     };
     // Experts: 0 has a full group, 1 has no token, 2 has 3 rows, 3 has three groups (16 / 16 / 5 rows, fused on request).
     const std::vector<Group> mixed = {{0, 16}, {2, 3}, {3, 16}, {3, 16}, {3, 5}};
-    for (uint32_t bits : {1u, 2u, 3u, 4u, 5u, 6u, 8u}) {
+    for (uint32_t bits : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}) {
         run({"nt1", 4, 256, 512, bits, mixed, false, false, false});
         run({"nt1-fuse", 4, 256, 512, bits, mixed, true, false, false});
     }
@@ -295,12 +336,26 @@ int main() {
     run({"nt2-fuse-tokenrows", 4, 384, 1024, 4, mixed, true, true, false});
     run({"nt1-tokenrows", 4, 256, 512, 2, mixed, false, true, false});
     run({"bf16-out", 4, 256, 512, 3, mixed, true, true, true});
+    run({"invalid-token", 2, 128, 128, 3, {{0, 16}, {0, 16}, {0, 5}}, true, true, false});
     run({"single-row", 2, 128, 128, 4, {{1, 1}}, false, false, false});
     // Zero-row groups, one-token experts and a heavily loaded expert (six full groups plus a short one).
     run({"zero-and-one", 3, 256, 512, 3, {{0, 0}, {1, 1}, {2, 16}, {2, 0}}, true, true, false});
     run({"heavy-expert", 2, 384, 512, 4, {{0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 7}, {1, 2}},
          true, true, false});
     run({"heavy-expert-nt2-bf16", 2, 384, 1024, 2, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, true});
+    for (uint32_t bits : {3u, 4u}) {
+        for (uint32_t rows : {31u, 32u, 33u, 63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u}) {
+            std::vector<Group> groups = {{0, 1}};
+            for (uint32_t remaining = rows; remaining != 0u;) {
+                const uint32_t count = std::min(remaining, 16u);
+                groups.push_back({1, count});
+                remaining -= count;
+            }
+            groups.push_back({2, 1});
+            run({"row-boundary", 3, 128, 128, bits, groups, true, true, false});
+            run({"row-boundary-bf16", 3, 128, 128, bits, groups, true, false, true});
+        }
+    }
     if (failed != 0) {
         std::printf("FAILED: %d case(s)\n", failed);
         return 1;

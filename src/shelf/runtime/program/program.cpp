@@ -885,6 +885,15 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                     (w.rows & 127u) != 0u)
                     return fail("exl3 grouped linear shape is not 128-aligned");
                 if (!c.open_moe_scratch()) return fail("moe plan scratch has no capacity");
+                const char* pre = std::getenv("SHELF_EXL3_MUL24_PRE");
+                const char* automatic = std::getenv("SHELF_EXL3_MUL24_AUTO");
+                if (contract.linear_kernel == KernelId::LINEAR_EXL3_INT8 &&
+                    ((pre && std::atoi(pre) != 0) || (automatic && std::atoi(automatic) != 0))) {
+                    const auto scratch = MoePlanScratch::make(c.moe_scratch.tokens, c.moe_scratch.experts,
+                                                              c.moe_scratch.top_k);
+                    c.moe_scratch.bytes = std::max(c.moe_scratch.bytes, scratch.mul24_offset() +
+                        MoePlanScratch::mul24_bytes(scratch.row_capacity, w.cols));
+                }
                 DispatchBinding b = base_binding(KernelId::LINEAR_EXL3_W16A16_GROUPED);
                 b.weight_index = n.weight_index;
                 b.compute_spec = w.compute_spec;

@@ -8,6 +8,11 @@
 
 namespace shelf::kernel {
 
+constexpr bool exl3_mul24_auto_pre(uint32_t tokens, uint32_t k, uint32_t n, uint32_t bits) noexcept {
+    return tokens >= 256u && (bits == 3u || bits == 4u) &&
+           ((k == 2560u && n == 640u) || (k == 640u && n == 2560u));
+}
+
 // One routed-expert projection over a grouped row plan. The expert planes are the
 // packed EXL3 layout the Qwen4Exp loader produces:
 //
@@ -48,6 +53,9 @@ struct Exl3GroupedArgs {
     const uint32_t* expert_group_begin = nullptr;
     const int32_t* row_token = nullptr;
     uint32_t group_capacity = 0;
+    uint32_t mul24_lds = 0;
+    void* mul24_activation_workspace = nullptr;
+    uint64_t mul24_activation_workspace_bytes = 0;
 };
 
 // Correctness-first grouped EXL3 linear. It dispatches the existing dense EXL3

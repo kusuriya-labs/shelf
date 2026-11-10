@@ -84,6 +84,12 @@ struct MoePlanScratch {
         return static_cast<uint64_t>(capacity_units) * sizeof(uint32_t);
     }
 
+    uint64_t mul24_offset() const noexcept { return (bytes() + 255u) & ~uint64_t{255u}; }
+
+    static uint64_t mul24_bytes(uint32_t rows, uint32_t k) noexcept {
+        return static_cast<uint64_t>(rows) * (static_cast<uint64_t>(k) + (k / 128u) * sizeof(float));
+    }
+
     bool valid() const noexcept {
         return tokens != 0u && experts != 0u && top_k != 0u && capacity_units != 0u;
     }

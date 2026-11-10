@@ -6,6 +6,7 @@
 #include <shelf/runtime/program/moe_plan_scratch.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace shelf::qwen35moe {
 
@@ -66,6 +67,12 @@ std::size_t moe_executor_grouped_bytes(const Qwen35MoeTextConfig& config,
     total += align_up(::shelf::runtime::MoePlanScratch::make(
                           static_cast<std::uint32_t>(tokens), shape.experts, shape.top_k)
                           .bytes());
+    const char* pre = std::getenv("SHELF_EXL3_MUL24_PRE");
+    const char* automatic = std::getenv("SHELF_EXL3_MUL24_AUTO");
+    if ((pre && std::atoi(pre) != 0) || (automatic && std::atoi(automatic) != 0)) {
+        const auto k = static_cast<uint32_t>(std::max(plan.w13_k_padded, plan.w2_k_padded));
+        total += align_up(::shelf::runtime::MoePlanScratch::mul24_bytes(static_cast<uint32_t>(group_rows), k));
+    }
     return total;
 }
 

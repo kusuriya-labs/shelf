@@ -5,6 +5,7 @@
 #include <shelf/weights/matrix_weight.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -399,6 +400,21 @@ int main() {
             for (const auto& d : built.value().dispatches)
                 grouped = grouped || d.kernel_id == rt::KernelId::LINEAR_EXL3_W16A16_GROUPED;
             check(grouped, "the mul24 expert plane dispatches the grouped EXL3 kernel");
+            for (const char* env_name : {"SHELF_EXL3_MUL24_PRE", "SHELF_EXL3_MUL24_AUTO"}) {
+                setenv(env_name, "1", 1);
+                auto pre = rt::build_program(m.g, view, rt::RowBucket::R16, rt::ExecutionClass::DECODE,
+                                             rt::ProgramBuildOptions{});
+                unsetenv(env_name);
+                check(pre.ok(), "mul24 の活性 workspace を持つ program を作成する");
+                if (pre.ok()) {
+                    const auto scratch = rt::MoePlanScratch::make(kBucketTokens, kExperts, kTopK);
+                    const auto slot = pre.value().plan_scratch_slot;
+                    check(slot < pre.value().workspace.ranges.size() &&
+                          pre.value().workspace.ranges[slot].bytes >= scratch.mul24_offset() +
+                              rt::MoePlanScratch::mul24_bytes(scratch.row_capacity, kHidden),
+                          "mul24 の活性 workspace は group row の容量を含む");
+                }
+            }
         }
     }
 
