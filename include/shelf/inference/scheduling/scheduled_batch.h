@@ -30,6 +30,8 @@ struct ScheduledRequest {
     ::shelf::scheduling::SamplingConfig sampling{};
     uint64_t sampling_index = 0;
     const uint32_t* token_bitmask = nullptr;
+    // Device mask rows for SPEC_VERIFY, in uint32_t words; zero for a single row.
+    uint32_t token_bitmask_row_stride = 0;
 
     uint32_t num_output_rows = 1;
 };

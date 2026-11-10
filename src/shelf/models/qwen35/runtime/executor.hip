@@ -709,6 +709,7 @@ Result<PendingBatch> submit_co_batch(
             const runtime::SamplingRequest sampling = runtime::make_sampling_request(
                 req.sampling, req.sample, req.sampling_index);
             staging[i].sampling.token_bitmask = req.token_bitmask;
+            staging[i].sampling.token_bitmask_row_stride = req.token_bitmask_row_stride;
             staging[i].sampling.mode = static_cast<uint8_t>(sampling.mode);
             staging[i].sampling.temperature = sampling.temperature;
             staging[i].sampling.top_p = sampling.top_p;

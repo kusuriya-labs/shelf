@@ -19,6 +19,8 @@ struct DeviceSamplingParams {
     float top_p = 1.0f;
     float min_p = 0.0f;
     uint32_t top_k = 0;
+    // Distance in uint32_t words between output-row masks; zero shares one mask.
+    uint32_t token_bitmask_row_stride = 0;
     uint8_t mode = 0;
     uint8_t reserved[3] = {};
 };

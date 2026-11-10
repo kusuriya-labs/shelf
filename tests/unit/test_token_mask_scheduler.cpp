@@ -27,5 +27,25 @@ int main() {
     plan = schedule_requests(active, 16, 0, 16, nullptr);
     if (!plan.ok() || plan.value().scheduled_requests.size() != 3 ||
         plan.value().scheduled_requests[0].token_bitmask != &mask) return 2;
+
+    // A verify request has one independent mask per output row.
+    shelf::state::PagedSequenceState seq;
+    seq.slot = 1; seq.generation = 1; seq.max_seq_len = 32;
+    int32_t tokens[] = {1, 2, 3};
+    shelf::scheduling::ScheduledRequest verify;
+    verify.sequence = &seq; verify.handle = seq.request_handle();
+    verify.execution_class = shelf::runtime::ExecutionClass::SPEC_VERIFY;
+    verify.num_tokens = 3; verify.num_output_rows = 3;
+    verify.compute_logits = true; verify.sample = true;
+    verify.token_bitmask = &mask; verify.token_bitmask_row_stride = 2;
+    shelf::scheduling::ScheduledBatch batch;
+    batch.token_ids = tokens; batch.requests = std::span(&verify, 1);
+    batch.num_tokens = 3; batch.num_requests = 1; batch.num_verify_requests = 1;
+    batch.speculative_verify = true;
+    if (!shelf::scheduling::validate_scheduled_batch(batch, 0, 0).ok()) return 3;
+    verify.token_bitmask_row_stride = 0;
+    if (shelf::scheduling::validate_scheduled_batch(batch, 0, 0).ok()) return 4;
+    verify.token_bitmask = nullptr; verify.token_bitmask_row_stride = 2;
+    if (shelf::scheduling::validate_scheduled_batch(batch, 0, 0).ok()) return 5;
     std::puts("token mask scheduling passed");
 }

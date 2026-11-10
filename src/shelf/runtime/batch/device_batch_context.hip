@@ -84,6 +84,9 @@ __global__ void prepare_batch_descriptor_kernel(DeviceBatchContext* ctx) {
             ctx->output_rows[req.output_index + j] = first + j;
             DeviceSamplingParams sp = req.sampling;
             sp.sample_index = req.sampling.sample_index + j;
+            if (sp.token_bitmask != nullptr) {
+                sp.token_bitmask += static_cast<size_t>(j) * sp.token_bitmask_row_stride;
+            }
             ctx->output_sampling_params[req.output_index + j] = sp;
         }
     }

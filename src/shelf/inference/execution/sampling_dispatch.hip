@@ -80,7 +80,11 @@ Result<OptimizedLaunchResult> resolve_sampling(
     for (uint32_t i = 0; i < ctx.staged_request_count; ++i) {
         if (ctx.staged_requests[i].sampling.token_bitmask != nullptr) {
             has_token_bitmask = true;
-            break;
+            const uint32_t stride = ctx.staged_requests[i].sampling.token_bitmask_row_stride;
+            if (stride != 0u && stride < (vocab + 31u) / 32u) {
+                return Status::invalid_argument("token bitmask row stride is too small",
+                                                __FILE__, __LINE__);
+            }
         }
     }
     if (choice.implementation == SamplingImplementation::Correctness) {

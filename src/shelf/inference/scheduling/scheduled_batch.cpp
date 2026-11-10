@@ -146,11 +146,14 @@ Status validate_scheduled_batch(
                     __LINE__);
         }
 
-        if (req.token_bitmask != nullptr &&
-            (!req.sample || req.num_output_rows != 1u ||
-             req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
+        if ((req.token_bitmask == nullptr && req.token_bitmask_row_stride != 0u) ||
+            (req.token_bitmask != nullptr &&
+             (!req.sample ||
+              (req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY
+                   ? req.token_bitmask_row_stride == 0u
+                   : req.num_output_rows != 1u || req.token_bitmask_row_stride != 0u)))) {
             return Status::invalid_argument(
-                "token bitmask requires one sampled non-speculative output", __FILE__, __LINE__);
+                "invalid token bitmask or output row stride", __FILE__, __LINE__);
         }
         if (req.sample && !req.compute_logits) {
             return Status::invalid_argument(
