@@ -8,6 +8,7 @@ user、store、metadata、service_tier と parallel_tool_calls=true は受理す
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -135,26 +136,15 @@ def reject_unsupported(body: dict) -> None:
 
 
 def _max_new_tokens(body: dict, inference_budget_tokens: int) -> int:
-    old = body.get("max_tokens")
-    new = body.get("max_completion_tokens")
-
-    if old is not None and new is not None and int(old) != int(new):
+    old = _integer(body, "max_tokens", None, low=1, high=(1 << 63) - 1)
+    new = _integer(body, "max_completion_tokens", None, low=1, high=(1 << 63) - 1)
+    if old is not None and new is not None and old != new:
         raise OpenAIProtocolError(
             "max_tokens and max_completion_tokens disagree",
             param="max_completion_tokens",
         )
-
     value = new if new is not None else old
-    if value is None:
-        return int(inference_budget_tokens)
-
-    value = int(value)
-    if value <= 0:
-        raise OpenAIProtocolError(
-            "max tokens must be positive",
-            param="max_tokens",
-        )
-    return min(value, int(inference_budget_tokens))
+    return min(value, int(inference_budget_tokens)) if value is not None else int(inference_budget_tokens)
 
 
 ANSWER_RESERVE_MIN_TOKENS = 512
@@ -249,7 +239,12 @@ def _number(body: dict, key: str, default: float, *, low: float | None = None,
         return default
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise OpenAIProtocolError(f"{key} must be a number", param=key)
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError:
+        raise OpenAIProtocolError(f"{key} must be finite", param=key) from None
+    if not math.isfinite(value) or abs(value) > 3.4028234663852886e38:
+        raise OpenAIProtocolError(f"{key} must be a finite float32", param=key)
     if low is not None and value < low:
         raise OpenAIProtocolError(f"{key} must be >= {low}", param=key)
     if high is not None and value > high:
@@ -257,7 +252,8 @@ def _number(body: dict, key: str, default: float, *, low: float | None = None,
     return value
 
 
-def _integer(body: dict, key: str, default: int, *, low: int | None = None) -> int:
+def _integer(body: dict, key: str, default: int | None, *, low: int | None = None,
+             high: int | None = None) -> int | None:
     value = body.get(key)
     if value is None:
         return default
@@ -265,7 +261,9 @@ def _integer(body: dict, key: str, default: int, *, low: int | None = None) -> i
         raise OpenAIProtocolError(f"{key} must be an integer", param=key)
     if low is not None and value < low:
         raise OpenAIProtocolError(f"{key} must be >= {low}", param=key)
-    return int(value)
+    if high is not None and value > high:
+        raise OpenAIProtocolError(f"{key} must be <= {high}", param=key)
+    return value
 
 
 def parse_reasoning_effort(body: dict) -> tuple[str, bool]:
@@ -403,8 +401,8 @@ def parse_chat_request(body: Any,
     if top_p == 0.0:
         raise OpenAIProtocolError("top_p must be > 0", param="top_p")
     min_p = _number(body, "min_p", 0.0, low=0.0, high=1.0)
-    top_k = _integer(body, "top_k", 0, low=0)
-    seed = _integer(body, "seed", 0)
+    top_k = _integer(body, "top_k", 0, low=0, high=(1 << 32) - 1)
+    seed = _integer(body, "seed", 0, low=-(1 << 63), high=(1 << 63) - 1)
     include_usage = _stream_options_include_usage(body)
 
     enable_thinking, preserve_thinking = parse_chat_template_kwargs(body)

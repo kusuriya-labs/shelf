@@ -122,7 +122,7 @@ def parse_responses_request(body, *, inference_budget_tokens):
             reject("text.format")
     if body.get("max_output_tokens") is not None:
         value = body["max_output_tokens"]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= (1 << 63) - 1:
             raise OpenAIProtocolError("max_output_tokens must be a positive integer", param="max_output_tokens")
     messages = input_messages(body.get("input"))
     if body.get("instructions") is not None:

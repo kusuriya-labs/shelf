@@ -131,6 +131,45 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error['param'], param)
                 self.assertEqual(error['type'], 'invalid_request_error')
 
+    async def test_numeric_validation(self):
+        integer_bad = ["2", True, False, 1.5, 0, -1, 1 << 63]
+        number_bad = ["0.5", True, False, float("nan"), float("inf"), -float("inf"), 10**400]
+        cases = {
+            "max_tokens": integer_bad,
+            "max_completion_tokens": integer_bad,
+            "top_k": ["1", True, 1.5, -1, 1 << 32],
+            "seed": ["1", True, 1.5, -(1 << 63) - 1, 1 << 63],
+            "temperature": number_bad + [-1],
+            "top_p": number_bad + [-1, 0, 1.1],
+            "min_p": number_bad + [-1, 1.1],
+        }
+        for key, values in cases.items():
+            for value in values:
+                with self.subTest(endpoint="chat", key=key, value=value):
+                    response = await self.client.post('/v1/chat/completions', json={
+                        "model": "shelf", "messages": [{"role": "user", "content": "hello"}], key: value})
+                    self.assertEqual(response.status, 400, await response.text())
+                    self.assertEqual((await response.json())["error"]["param"], key)
+        for key, values in {"max_output_tokens": integer_bad, "seed": cases["seed"],
+                            "temperature": cases["temperature"], "top_p": cases["top_p"]}.items():
+            for value in values:
+                with self.subTest(endpoint="responses", key=key, value=value):
+                    response = await self.post(**{key: value})
+                    self.assertEqual(response.status, 400, await response.text())
+                    self.assertEqual((await response.json())["error"]["param"], key)
+        for key in cases:
+            response = await self.client.post('/v1/chat/completions', json={
+                "model": "shelf", "messages": [{"role": "user", "content": "hello"}], key: None})
+            self.assertEqual(response.status, 200, await response.text())
+        for key in ("max_output_tokens", "seed", "temperature", "top_p"):
+            response = await self.post(**{key: None})
+            self.assertEqual(response.status, 200, await response.text())
+        response = await self.client.post('/v1/chat/completions', json={
+            "model": "shelf", "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": "2", "max_completion_tokens": 2})
+        self.assertEqual(response.status, 400)
+        self.assertEqual((await response.json())["error"]["param"], "max_tokens")
+
     async def test_text_stream(self):
         events = await self.stream_events()
         names = [e['type'] for e in events]
