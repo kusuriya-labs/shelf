@@ -1,3 +1,10 @@
+"""Responses API の入力検証と応答エンコード。
+
+明示的に列挙した metadata は推論に使用しない。暗号化 reasoning は返さない。
+web_search と namespace はモデルに渡さず、未知のキーは拒否する。
+構造化出力、strict tool、保存済み response の参照には対応しない。
+"""
+
 from __future__ import annotations
 
 import json
@@ -159,11 +166,19 @@ def parse_responses_request(body, *, inference_budget_tokens):
                 continue
             if tool.get("type") == "namespace":
                 fields(tool, {"type", "name", "description", "tools"}, p)
+                nested = tool.get("tools", [])
+                if not isinstance(nested, list):
+                    raise OpenAIProtocolError(f"{p}.tools must be an array", param=p + ".tools")
+                for j, child in enumerate(nested):
+                    if not isinstance(child, dict):
+                        raise OpenAIProtocolError(f"{p}.tools[{j}] must be an object", param=f"{p}.tools[{j}]")
+                    if child.get("strict") is not None and child.get("strict") is not False:
+                        reject(f"{p}.tools[{j}].strict")
                 continue
             fields(tool, {"type", "name", "description", "parameters", "strict"}, p)
             if tool.get("type") != "function":
                 reject(p + ".type")
-            if tool.get("strict") not in (None, False):
+            if tool.get("strict") is not None and tool.get("strict") is not False:
                 reject(p + ".strict")
             converted.append({"type": "function", "function": {k: v for k, v in tool.items() if k not in ("type", "strict")}})
         chat["tools"] = converted or None

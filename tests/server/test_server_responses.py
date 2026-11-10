@@ -121,6 +121,8 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
                  ({"client_metadata": []}, "client_metadata"),
                  ({"text": {"format": {"type": "json_schema"}}}, "text.format"),
                  ({"tools": [{"type": "function", "name": "x", "strict": True}]}, "tools[0].strict"),
+                 ({"tools": [{"type": "function", "name": "x", "strict": 0}]}, "tools[0].strict"),
+                 ({"tools": [{"type": "namespace", "name": "n", "tools": [{"type": "function", "name": "x", "strict": True}]}]}, "tools[0].tools[0].strict"),
                  ({"tools": [{"type": "unsupported"}]}, "tools[0].type"),
                  ({"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "x"}]}]}, "input[0].content[0].image_url"),
                  ({"tool_choice": "required"}, "tool_choice"),

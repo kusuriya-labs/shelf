@@ -2,7 +2,8 @@
 
 対応するパラメータは明示的に列挙し、未対応・未知のキーは拒否する。
 user、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
-構造化出力、strict tool、文法制約には対応しない。
+store=true、構造化出力、strict tool、文法制約には対応しない。
+required と関数名指定は生成 prompt に tool call の開始部分を補う。
 """
 
 from __future__ import annotations
@@ -214,7 +215,7 @@ def normalize_tools(raw_tools) -> list[dict] | None:
                 param=f"tools[{index}].function.name",
             )
 
-        if fn.get("strict") is True:
+        if fn.get("strict") is not None and fn.get("strict") is not False:
             raise OpenAIProtocolError(
                 "strict tool schemas are not supported",
                 param=f"tools[{index}].function.strict",

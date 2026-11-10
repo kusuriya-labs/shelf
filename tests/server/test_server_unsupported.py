@@ -74,6 +74,7 @@ REJECTED = [
      {"tool_choice": {"type": "function", "function": {"name": "missing"}},
       "tools": [PLAIN_TOOL]}, "tool_choice"),
     ("strict-tool", {"tools": [STRICT_TOOL]}, "tools[0].function.strict"),
+    ("invalid-strict", {"tools": [{"type": "function", "function": {"name": "f", "strict": 0}}]}, "tools[0].function.strict"),
     ("parallel-tool-calls-false", {"parallel_tool_calls": False},
      "parallel_tool_calls"),
     ("stream-options-unknown", {"stream_options": {"extra": True}},
