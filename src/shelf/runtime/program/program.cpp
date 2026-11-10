@@ -447,6 +447,7 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             const auto& n = node_as<RmsNormNode>(node);
             DispatchBinding b = base_binding(KernelId::RMS_NORM);
             b.scalar_a = n.eps;
+            b.scalar_b = n.weight_offset;
             b.group_size = n.group_size;
             b.parameter_index0 = n.parameter_index;
             b.flags = static_cast<uint32_t>(n.weight_mode);

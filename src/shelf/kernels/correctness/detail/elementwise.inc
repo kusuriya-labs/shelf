@@ -89,7 +89,7 @@ __device__ __forceinline__ ProgramStatus exec_split(
     if (!resolve_value(env, b.input_slots[0], in)) return ProgramStatus::INVALID_BINDING;
     if (!resolve_value(env, b.output_slots[0], o0)) return ProgramStatus::INVALID_BINDING;
     if (!resolve_value(env, b.output_slots[1], o1)) return ProgramStatus::INVALID_BINDING;
-    if (o0.features != o1.features || in.features < o0.features + o1.features)
+    if (in.features != o0.features + o1.features)
         return ProgramStatus::INVALID_BINDING;
     const uint32_t rows = value_rows(env, o0);
     const uint32_t f0 = o0.features;
@@ -97,7 +97,8 @@ __device__ __forceinline__ ProgramStatus exec_split(
     const size_t total = static_cast<size_t>(rows) * f0;
     if (b.flags == static_cast<uint32_t>(shelf::runtime::SplitLayout::INTERLEAVED_HEADS)) {
         const uint32_t hd = b.group_size;
-        if (hd == 0u || f0 % hd != 0u || in.features < 2u * hd)
+        if (o0.features != o1.features || hd == 0u || f0 % hd != 0u ||
+            in.features < 2u * hd)
             return ProgramStatus::INVALID_BINDING;
         for (size_t idx = global_tid(env); idx < total; idx += stride) {
             const uint32_t m = static_cast<uint32_t>(idx / f0);
@@ -109,12 +110,16 @@ __device__ __forceinline__ ProgramStatus exec_split(
         }
         return ProgramStatus::COMPLETE;
     }
-    for (size_t idx = global_tid(env); idx < total; idx += stride) {
-        const uint32_t m = static_cast<uint32_t>(idx / f0);
-        const uint32_t j = static_cast<uint32_t>(idx % f0);
-        const size_t src = static_cast<size_t>(m) * in.row_stride + j;
-        store_elem(o0, static_cast<size_t>(m) * o0.row_stride + j, load_elem(in, src));
-        store_elem(o1, static_cast<size_t>(m) * o1.row_stride + j, load_elem(in, src + f0));
+    const uint32_t features = in.features;
+    const size_t all = static_cast<size_t>(rows) * features;
+    for (size_t idx = global_tid(env); idx < all; idx += stride) {
+        const uint32_t m = static_cast<uint32_t>(idx / features);
+        const uint32_t j = static_cast<uint32_t>(idx % features);
+        const float x = load_elem(in, static_cast<size_t>(m) * in.row_stride + j);
+        if (j < f0)
+            store_elem(o0, static_cast<size_t>(m) * o0.row_stride + j, x);
+        else
+            store_elem(o1, static_cast<size_t>(m) * o1.row_stride + j - f0, x);
     }
     return ProgramStatus::COMPLETE;
 }

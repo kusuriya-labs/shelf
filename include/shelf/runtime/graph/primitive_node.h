@@ -101,6 +101,7 @@ struct LinearNode {
 enum class RmsNormWeightMode : uint8_t {
     ONE_PLUS = 0,
     DIRECT = 1,
+    OFFSET_BF16 = 2,
 };
 
 struct RmsNormNode {
@@ -109,6 +110,7 @@ struct RmsNormNode {
     uint32_t group_size = 0;
     uint32_t parameter_index = UINT32_MAX;
     RmsNormWeightMode weight_mode = RmsNormWeightMode::ONE_PLUS;
+    float weight_offset = 0.0f;
 };
 
 struct ResidualAddNode {

@@ -103,8 +103,9 @@ struct Ctx {
     void* scratch = nullptr;
     void* err = nullptr;
     void* vals_dev = nullptr;
+    void* params_dev = nullptr;
     ~Ctx() {
-        void* b[] = {dev, scratch, err, vals_dev};
+        void* b[] = {dev, scratch, err, vals_dev, params_dev};
         for (auto* q : b)
             if (q) shelf::gpu::discard_cleanup_result(hipFree(q));
     }
@@ -117,9 +118,12 @@ struct Ctx {
         if (hipMalloc(&scratch, (size_t)256 * 4096 * sizeof(float)) != hipSuccess) return false;
         if (hipMalloc(&err, sizeof(uint32_t)) != hipSuccess) return false;
         if (hipMalloc(&vals_dev, kMaxVals * sizeof(V)) != hipSuccess) return false;
+        if (hipMalloc(&params_dev, sizeof(::shelf::runtime::StaticParameterSlot)) != hipSuccess)
+            return false;
         return true;
     }
-    bool run(const V* host_vals, uint32_t vcount, const B& b) {
+    bool run(const V* host_vals, uint32_t vcount, const B& b,
+             const ::shelf::runtime::StaticParameterSlot* parameter = nullptr) {
         if (vcount > kMaxVals) return false;
         if (hipMemcpy(vals_dev, host_vals, (size_t)vcount * sizeof(V),
                       hipMemcpyHostToDevice) != hipSuccess) {
@@ -128,6 +132,12 @@ struct Ctx {
         P p{};
         p.values = (const V*)vals_dev;
         p.value_count = vcount;
+        if (parameter != nullptr) {
+            if (hipMemcpy(params_dev, parameter, sizeof(*parameter), hipMemcpyHostToDevice) !=
+                hipSuccess) return false;
+            p.parameter_table = params_dev;
+            p.parameter_slot_count = 1;
+        }
         p.workspace_base = 0;
         shelf::gpu::discard_cleanup_result(hipMemsetAsync(err, 0, sizeof(uint32_t), nullptr));
         ::shelf::kernel::ModelDispatchStateView sv{};
@@ -409,10 +419,96 @@ bool run_case(const Case& c, size_t* mm_out) {
     return true;
 }
 
+float bf16_float(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16u;
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+bool test_offset_rmsnorm() {
+    constexpr uint32_t rows = 2u, group = 128u, features = 2u * group;
+    Ctx ctx;
+    Buf input, output, weight;
+    if (!ctx.init(rows) || !input.alloc(rows * features * 2u) ||
+        !output.alloc(rows * features * 2u) || !weight.alloc(group * 2u)) return false;
+    std::vector<uint16_t> x(rows * features), w(group);
+    for (uint32_t i = 0; i < x.size(); ++i) x[i] = bf16_bits(0.25f * (1u + i % 4u));
+    for (uint32_t i = 0; i < group; ++i) w[i] = bf16_bits((static_cast<int>(i % 11u) - 5) / 64.0f);
+    if (!input.fill_u16(x) || !weight.fill_u16(w)) return false;
+    V vals[2];
+    set_val(vals[0], 0, features, features, input.dev, DT::BF16);
+    set_val(vals[1], 1, features, features, output.dev, DT::BF16);
+    ::shelf::runtime::StaticParameterSlot param{};
+    param.device_ptr = weight.dev; param.elements = group; param.dtype = DT::BF16;
+    B b{};
+    b.kernel_id = ::shelf::runtime::KernelId::RMS_NORM;
+    b.input_slots[0] = 0; b.input_count = 1; b.output_slots[0] = 1; b.output_count = 1;
+    b.parameter_index0 = 0; b.group_size = group; b.scalar_a = 1e-6f;
+    b.flags = static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16);
+    for (float offset : {1.0f, 0.2f, 1.0f / std::sqrt(125.0f)}) {
+        b.scalar_b = offset;
+        if (!ctx.run(vals, 2, b, &param)) return false;
+        std::vector<uint16_t> got;
+        if (!output.read_u16(got)) return false;
+        const float inv = 1.0f / std::sqrt(0.46875f + b.scalar_a);
+        for (uint32_t i = 0; i < x.size(); ++i) {
+            const float normalized = bf16_float(bf16_bits(bf16_float(x[i]) * inv));
+            const float scale = bf16_float(bf16_bits(offset + bf16_float(w[i % group])));
+            if (got[i] != bf16_bits(normalized * scale)) return false;
+        }
+    }
+    return true;
+}
+
+bool test_unequal_split() {
+    constexpr uint32_t rows = 3u, q = 2048u, kv = 128u;
+    constexpr uint32_t total = q + 2u * kv;
+    Ctx ctx;
+    Buf input, query, kv_pair, key, value;
+    if (!ctx.init(rows) || !input.alloc(rows * total * 2u) || !query.alloc(rows * q * 2u) ||
+        !kv_pair.alloc(rows * 2u * kv * 2u) || !key.alloc(rows * kv * 2u) ||
+        !value.alloc(rows * kv * 2u)) return false;
+    std::vector<uint16_t> source(rows * total);
+    for (uint32_t i = 0; i < source.size(); ++i) source[i] = bf16_bits((i % 101u) / 32.0f);
+    if (!input.fill_u16(source)) return false;
+    B b{};
+    b.kernel_id = ::shelf::runtime::KernelId::SPLIT;
+    b.input_slots[0] = 0; b.input_count = 1;
+    b.output_slots[0] = 1; b.output_slots[1] = 2; b.output_count = 2;
+    V vals[3];
+    set_val(vals[0], 0, total, total, input.dev, DT::BF16);
+    set_val(vals[1], 1, q, q, query.dev, DT::BF16);
+    set_val(vals[2], 2, 2u * kv, 2u * kv, kv_pair.dev, DT::BF16);
+    if (!ctx.run(vals, 3, b)) return false;
+    set_val(vals[0], 0, 2u * kv, 2u * kv, kv_pair.dev, DT::BF16);
+    set_val(vals[1], 1, kv, kv, key.dev, DT::BF16);
+    set_val(vals[2], 2, kv, kv, value.dev, DT::BF16);
+    if (!ctx.run(vals, 3, b)) return false;
+    std::vector<uint16_t> got_q, got_k, got_v;
+    if (!query.read_u16(got_q) || !key.read_u16(got_k) || !value.read_u16(got_v)) return false;
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t i = 0; i < q; ++i)
+            if (got_q[r * q + i] != source[r * total + i]) return false;
+        for (uint32_t i = 0; i < kv; ++i)
+            if (got_k[r * kv + i] != source[r * total + q + i] ||
+                got_v[r * kv + i] != source[r * total + q + kv + i]) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (hipSetDevice(0) != hipSuccess) return 1;
+    if (!test_offset_rmsnorm()) {
+        std::printf("FAIL: offset RMSNorm\n");
+        return 1;
+    }
+    if (!test_unequal_split()) {
+        std::printf("FAIL: unequal QKV split\n");
+        return 1;
+    }
     const Case cases[] = {
         {"residual", Op::Residual, 2560, 16, 2560, 2560, 0, 0.0f, 101},
         {"residual-tail", Op::Residual, 33, 4, 33, 33, 0, 0.0f, 102},
