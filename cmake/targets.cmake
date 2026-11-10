@@ -375,6 +375,7 @@ target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=r
 # Model weight loading entry for the qwen35 family: the one place that links both the
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC
+    src/shelf/models/plamo3/model/config.cpp
     src/shelf/models/model_weights_factory.cpp
     src/shelf/models/loaded_model.cpp
     src/shelf/models/pipeline_stage_model.cpp
@@ -382,6 +383,7 @@ add_library(shelf_models STATIC
 target_compile_features(shelf_models PRIVATE cxx_std_20)
 target_include_directories(shelf_models PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(shelf_models PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(shelf_models SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
 target_link_libraries(shelf_models PUBLIC shelf_qwen35 shelf_qwen35_runtime shelf_qwen35moe shelf_qwen4exp shelf_gpu)
 target_compile_options(shelf_models PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 

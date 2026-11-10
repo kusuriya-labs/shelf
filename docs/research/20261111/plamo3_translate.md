@@ -67,3 +67,9 @@ RoPE 周波数表は executor が 32 要素に固定していたため、rotary 
 実モデルで `shelf-compute --input-ids-file /tmp/plamo3_case_0.tokens --max-new-tokens 1` を試した結果、`check_config_identity` が `model_type='plamo3'` を未対応として拒否した。これは weight 読み込み前の失敗である。identity の許可だけでは Qwen 用 loader や gated attention に進むため不十分である。
 
 GPU の `test_prefix_cache`、`test_elementwise`、`test_rope`、`test_rope_yarn`、`test_qwen35moe_executor` は通過した。CPU の `test_executor_footprint`、`test_program_workspace_lifetime`、`test_qwen35_tp_context`、`test_qwen35_rope_selector`、`test_qwen35_rope_profile` も通過した。これらは部品と既存モデルの限定的な検証であり、PLaMo の end-to-end 推論の検証ではない。
+
+## M1b 設定読み込みの途中経過
+
+`plamo3` の config を検出して専用 reader で層数、head 形状、FFN 幅、局所・全域 RoPE、window と全域層周期を読み取る経路を追加した。公開 0.8B と 2B の config で値を読み取り、7 層目が局所、8 層目が全域であること、および不正な負の head 数の拒否を確認した。ビルドと CPU の `test_model_identity` は通過した。
+
+この段階では weight loader と lowering、複数 RoPE 表の executor 接続が未実装である。`probe_model_dir` は PLaMo の設定を検証した後、未接続であることを明示して拒否する。誤って Qwen 用の loader に入らないよう、共通 identity gate に `plamo3` はまだ追加していない。2048 token の admission 制限、GPU 生成、品質・速度計測、Qwen GPU 回帰も未実施である。したがって M1b の受け入れ条件は満たしていない。

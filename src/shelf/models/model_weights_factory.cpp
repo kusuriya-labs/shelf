@@ -1,5 +1,6 @@
 #include <shelf/models/model_weights_factory.h>
 
+#include <shelf/models/plamo3/model/config.h>
 #include <shelf/models/qwen35/model/qwen35_config.h>
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35moe/model/qwen35moe_config.h>
@@ -13,6 +14,14 @@ ModelFamily model_family(const LoadedModelWeights& loaded) noexcept {
 }
 
 Result<ModelFamily> probe_model_dir(const std::string& model_dir) {
+    auto plamo = shelf::plamo3::is_plamo3_config(model_dir);
+    if (!plamo.ok()) return plamo.status();
+    if (plamo.value()) {
+        auto config = shelf::plamo3::read_config(model_dir);
+        if (!config.ok()) return config.status();
+        return Status::unsupported("plamo3: weight loader and inference are not yet connected",
+                                   __FILE__, __LINE__);
+    }
     auto experts = shelf::qwen35moe::read_declared_num_experts(model_dir);
     if (!experts.ok()) return experts.status();
     auto ple = shelf::qwen_hybrid::has_text_config_key(model_dir, "ple_layer_ids");
