@@ -7,6 +7,8 @@
 // elements. Byte strides appear only where the public launch signature names them
 // explicitly (code_row_stride_bytes, scale_row_stride_bytes).
 
+#include <shelf/kernels/optimized/linear/exl3.h>
+
 #include <cstdint>
 
 namespace shelf::kernel::exl3_detail {
@@ -76,5 +78,43 @@ struct GroupedContract {
 struct FlaggedContract {
     static constexpr uint32_t kFlagStrideElements = 1u;
 };
+
+// ---- kernel traits ----
+// mul1 and mul24 are separate even where the numbers currently coincide; changing one
+// must not silently change the other. Lengths are in elements and threads, not bytes.
+struct Exl3Mul1Traits {
+    static constexpr uint32_t kRowTile = 16u;    // output rows per block tile
+    static constexpr uint32_t kOutBlock = 128u;  // output columns per block
+    static constexpr uint32_t kThreads = 256u;   // threads per block
+    static constexpr uint32_t kTrellisTile = 16u;
+    static constexpr uint32_t kKBlock = 128u;
+};
+
+struct Exl3Mul24Traits {
+    static constexpr uint32_t kRowTile = 16u;
+    static constexpr uint32_t kOutBlock = 128u;
+    static constexpr uint32_t kThreads = 256u;
+    static constexpr uint32_t kTrellisTile = 16u;
+    static constexpr uint32_t kKBlock = 128u;
+};
+
+enum class Exl3Backend : uint8_t { Direct, ReconDense };
+
+// Host-side description of one launch. It normalises the independent axes without
+// changing the kernel argument ABI or adding a dynamic branch to any __global__.
+struct Exl3KernelVariant {
+    Exl3Phase phase = Exl3Phase::Decode;
+    Exl3Codebook codebook = Exl3Codebook::Mul1;
+    Exl3ActivationType activation_type = Exl3ActivationType::BF16;
+    Exl3OutputDType output_type = Exl3OutputDType::BF16;
+    Exl3Backend backend = Exl3Backend::Direct;
+    bool grouped = false;
+    bool pre_rotated = false;
+};
+
+// Rejects combinations the kernels do not implement. The external return codes and
+// side effects of the launch functions stay unchanged; callers may use this before
+// choosing a path.
+bool exl3_variant_supported(const Exl3KernelVariant& variant);
 
 }  // namespace shelf::kernel::exl3_detail

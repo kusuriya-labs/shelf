@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/linear/detail/launch_plan.h>
+#include <shelf/kernels/optimized/linear/detail/types.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <hip/hip_runtime.h>
@@ -10,7 +11,6 @@ namespace {
 
 constexpr uint32_t kOutBlockBase = kExl3W16A16OutBlock;
 constexpr uint32_t kRowTile = kExl3W16A16RowTile;
-constexpr uint32_t kKBlock = 128u;
 
 }  // namespace
 
@@ -63,6 +63,19 @@ Exl3LaunchPlan make_mul1_launch_plan(const Exl3GemmArgs& args) {
     const uint32_t rows_per_block = kRowTile * plan.groups;
     plan.grid_y = (args.rows + rows_per_block - 1u) / rows_per_block;
     return plan;
+}
+
+bool exl3_variant_supported(const Exl3KernelVariant& v) {
+    if (v.codebook == Exl3Codebook::Mul1) {
+        // mul1 runs FP16 WMMA; INT8 activations exist for mul24 only.
+        if (v.activation_type == Exl3ActivationType::INT8) return false;
+    } else {
+        // mul24 has FP16 and INT8 activation kernels; BF16 is not a kernel mode.
+        if (v.activation_type == Exl3ActivationType::BF16) return false;
+    }
+    // The grouped path rotates internally, so a pre-rotated input is not accepted.
+    if (v.grouped && v.pre_rotated) return false;
+    return true;
 }
 
 }  // namespace shelf::kernel::exl3_detail
