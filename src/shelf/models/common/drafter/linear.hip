@@ -1,7 +1,8 @@
 #include <shelf/models/common/drafter/linear.h>
 #include <shelf/inference/execution/selectors/linear_selector.h>
 #include <shelf/kernels/optimized/activation_quantize.h>
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <algorithm>
@@ -31,14 +32,14 @@ Status quantized_linear(const weights::MatrixWeight& w, const bf16_t* input,
         const uint32_t scratch_rows = static_cast<uint32_t>(workspace.accum.dim(0) / w.rows);
         if (scratch_rows < rows)
             return Status::insufficient_memory("drafter linear: EXL3 workspace", __FILE__, __LINE__);
-        const uint32_t splits = kernel::exl3_int8_gemm_splits(rows, w.rows, w.cols, scratch_rows);
-        err = kernel::launch_exl3_int8_rotate_quantize(input, input_stride, w.exl3_suh.data<uint16_t>(),
+        const uint32_t splits = kernel::exl3_mul24_gemm_splits(rows, w.rows, w.cols, scratch_rows);
+        err = kernel::launch_exl3_mul24_rotate_quantize(input, input_stride, w.exl3_suh.data<uint16_t>(),
             codes, scales, rows, w.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
-        if (err == hipSuccess) err = kernel::launch_exl3_int8_gemm(codes, scales,
+        if (err == hipSuccess) err = kernel::launch_exl3_mul24_gemm(codes, scales,
             layout.code_row_stride_bytes, layout.scale_row_stride_bytes, w.codes.data<uint16_t>(),
             w.exl3_ka, workspace.accum.data<float>(), rows, w.rows, w.cols, splits, stream);
-        if (err == hipSuccess) err = kernel::launch_exl3_int8_rotate_out(workspace.accum.data<float>(),
-            w.exl3_svh.data<uint16_t>(), output, kernel::Exl3Int8OutputDType::BF16,
+        if (err == hipSuccess) err = kernel::launch_exl3_mul24_rotate_out(workspace.accum.data<float>(),
+            w.exl3_svh.data<uint16_t>(), output, kernel::Exl3OutputDType::BF16,
             rows, w.rows, output_stride, splits, stream);
     } else if (w.encoding == weights::MatrixEncoding::Fp8Finegrained) {
         if (!w.preshuffled || !w.scales.ndim() || w.weight_scale_group != 128u)

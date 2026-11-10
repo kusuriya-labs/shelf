@@ -2,7 +2,8 @@
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
-#include <shelf/kernels/optimized/linear/exl3_grouped.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/kernels/optimized/moe/combine.h>
 #include <shelf/kernels/optimized/moe/router.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>

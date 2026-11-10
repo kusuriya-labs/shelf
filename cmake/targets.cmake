@@ -88,10 +88,19 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
-    src/shelf/kernels/optimized/linear/exl3.hip
-    src/shelf/kernels/optimized/linear/exl3_mul24_grouped.hip
-    src/shelf/kernels/optimized/linear/exl3_int8.hip
-    src/shelf/kernels/optimized/linear/exl3_int8_prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/decode.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/epilogue.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/rotate_quantize.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/grouped.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/verify.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/workspace.cpp
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.cpp
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/split_plan.cpp
+    src/shelf/kernels/optimized/linear/exl3_family/variant.cpp
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip

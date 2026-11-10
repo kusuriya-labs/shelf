@@ -210,3 +210,4 @@ option(SHELF_BUILD_BENCHMARKS "Build Shelf benchmark executables" ON)
 # per-submission kernel sequence). Experimental.
 option(SHELF_HIP_GRAPH "Enable HIP graph execution mode" OFF)
 
+

@@ -1,4 +1,5 @@
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <hip/hip_runtime.h>
 #include <algorithm>
 #include <cstdint>
@@ -33,7 +34,7 @@ int run_exl3_int8(int argc, char** argv) {
         else return 2;
     }
     if (!n || n % 128 || !k || k % 128 || !rows || rows > 16 || bits < 1 || bits > 8 || !iterations || !working_mib || scratch_rows < rows) return 2;
-    if (!split) split = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, scratch_rows, bits);
+    if (!split) split = shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, scratch_rows, bits);
     if (!split || split > k / 128 || split * rows > scratch_rows) return 2;
     const size_t weight_bytes = size_t(n) * k * bits / 8;
     const size_t copies = std::max<size_t>(1, (size_t(working_mib) * 1024 * 1024 + weight_bytes - 1) / weight_bytes);
@@ -47,9 +48,9 @@ int run_exl3_int8(int argc, char** argv) {
     HIP_CHECK(hipMemset(suh, 0x3c, k * 2)); HIP_CHECK(hipMemset(svh, 0x3c, n * 2));
     auto run = [&](int stage, size_t i) -> hipError_t {
         hipError_t e = hipSuccess;
-        if (stage == 0 || stage == 3) e = shelf::kernel::launch_exl3_int8_rotate_quantize(static_cast<shelf::bf16_t*>(x), k, static_cast<uint16_t*>(suh), static_cast<int8_t*>(codes), static_cast<float*>(scales), rows, k, k, scale_stride, nullptr);
-        if (e == hipSuccess && (stage == 1 || stage == 3)) e = shelf::kernel::launch_exl3_int8_gemm(static_cast<int8_t*>(codes), static_cast<float*>(scales), k, scale_stride, reinterpret_cast<uint16_t*>(static_cast<char*>(weights) + (i % copies) * weight_bytes), bits, static_cast<float*>(accum), rows, n, k, split, nullptr);
-        if (e == hipSuccess && (stage == 2 || stage == 3)) e = shelf::kernel::launch_exl3_int8_rotate_out(static_cast<float*>(accum), static_cast<uint16_t*>(svh), out, shelf::kernel::Exl3Int8OutputDType::BF16, rows, n, n, split, nullptr);
+        if (stage == 0 || stage == 3) e = shelf::kernel::launch_exl3_mul24_rotate_quantize(static_cast<shelf::bf16_t*>(x), k, static_cast<uint16_t*>(suh), static_cast<int8_t*>(codes), static_cast<float*>(scales), rows, k, k, scale_stride, nullptr);
+        if (e == hipSuccess && (stage == 1 || stage == 3)) e = shelf::kernel::launch_exl3_mul24_gemm(static_cast<int8_t*>(codes), static_cast<float*>(scales), k, scale_stride, reinterpret_cast<uint16_t*>(static_cast<char*>(weights) + (i % copies) * weight_bytes), bits, static_cast<float*>(accum), rows, n, k, split, nullptr);
+        if (e == hipSuccess && (stage == 2 || stage == 3)) e = shelf::kernel::launch_exl3_mul24_rotate_out(static_cast<float*>(accum), static_cast<uint16_t*>(svh), out, shelf::kernel::Exl3OutputDType::BF16, rows, n, n, split, nullptr);
         return e;
     };
     for (uint32_t i = 0; i < std::max<uint32_t>(iterations, copies); ++i) HIP_CHECK(run(3, i));

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/weights/matrix_weight.h>
 
 #include <cstddef>
@@ -20,10 +20,10 @@ struct Exl3WorkspaceBytes {
     std::size_t total() const noexcept { return xrot + dense + accum + rowsum; }
 };
 
-// The EXL3-INT8 prefill path also keeps ::shelf::kernel::exl3_int8_flag_cap(rows) rows of F32 output after the int32 accumulators.
+// The EXL3-INT8 prefill path also keeps ::shelf::kernel::exl3_mul24_flag_cap(rows) rows of F32 output after the int32 accumulators.
 inline constexpr std::size_t exl3_dense_accum_bytes(std::size_t rows,
                                                     std::size_t max_out_features) noexcept {
-    return (rows + ::shelf::kernel::exl3_int8_flag_cap(rows)) * max_out_features * sizeof(float);
+    return (rows + ::shelf::kernel::exl3_mul24_flag_cap(rows)) * max_out_features * sizeof(float);
 }
 
 // The rotated-domain trellis form keeps the rotated activations, a dense copy of one

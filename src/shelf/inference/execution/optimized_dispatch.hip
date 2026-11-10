@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
+#include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -7,13 +8,14 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
-#include <shelf/kernels/optimized/linear/exl3_int8_prefill.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -567,7 +569,15 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     args.half = e.exl3_half ? 1u : 0u;
     args.splitk_scratch = ctx.scratch;
     args.splitk_floats = ctx.scratch_floats;
-    args.splitk_tuning_rows = ctx.splitk_tuning_rows;
+    {
+        const ::shelf::kernel::Exl3Phase phase =
+            ctx.splitk_tuning_rows != 0u
+                ? ::shelf::kernel::Exl3Phase::Verify
+                : (rows >= 256u ? ::shelf::kernel::Exl3Phase::Prefill
+                                : ::shelf::kernel::Exl3Phase::Decode);
+        ::shelf::kernel::exl3_detail::apply_execution_policy(
+            args, ::shelf::kernel::Exl3ExecutionPolicy{phase, ctx.splitk_tuning_rows});
+    }
     static const uint32_t split_override = [] {
         const char* e = std::getenv("SHELF_EXL3_SPLIT");
         return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
@@ -606,15 +616,6 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
                            accum_bytes <= ctx.exl3_accum_bytes &&
                            static_cast<uint64_t>(args.rows) * sizeof(float) <=
                                ctx.exl3_rowsum_bytes;
-    static const uint32_t sim_mode = [] {
-        const char* e = std::getenv("SHELF_EXL3_SIM");
-        if (e == nullptr) return 0u;
-        if (std::strcmp(e, "w8") == 0) return 1u;
-        if (std::strcmp(e, "x8") == 0) return 2u;
-        if (std::strcmp(e, "w8x8") == 0) return 3u;
-        if (std::strcmp(e, "x8res") == 0) return 6u;
-        return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-    }();
     hipError_t herr = hipSuccess;
     bool dense_done = false;
     if (use_dense) {
@@ -622,16 +623,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         dense_args.xrot = ctx.exl3_xrot;
         herr = ::shelf::kernel::launch_rotate_exl3_rowsum(
             dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum), stream);
-        if (herr == hipSuccess && (sim_mode & 2u) != 0u) {
-            herr = ::shelf::kernel::launch_quantize_xrot_x8(
-                dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum),
-                (sim_mode & 4u) != 0u, stream);
-        }
         if (herr == hipSuccess) {
             herr = ::shelf::kernel::launch_recon_exl3_dense(dense_args, ctx.exl3_dense, stream);
-        }
-        if (herr == hipSuccess && (sim_mode & 1u) != 0u) {
-            herr = ::shelf::kernel::launch_quantize_dense_w8(dense_args, ctx.exl3_dense, stream);
         }
         if (herr == hipSuccess) {
             herr = ::shelf::execution::exl3_dense_gemm(dense_args, ctx.exl3_dense,
@@ -665,10 +658,16 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+bool exl3_mul24_use_dense(bool dense_ok, uint32_t n_rows, uint32_t dense_min_rows,
+                          uint64_t rowsum_bytes) {
+    return dense_ok && n_rows >= dense_min_rows &&
+           static_cast<uint64_t>(n_rows) * sizeof(float) <= rowsum_bytes;
+}
+
 // EXL3-INT8 (mul24): rotate + int8-quantize the activations, run the int8 WMMA GEMM that decodes the resident
 // trellis on every read, then rotate the output back. The three launches share the EXL3 workspace of the executor:
 // the xrot region holds the int8 codes and their scales, the accum region the F32 pre-rotation output.
-Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
+Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
@@ -709,22 +708,17 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
         return Status::invalid_state("exl3 int8 linear: no EXL3 workspace", __FILE__, __LINE__);
 
     const uint32_t n = e.rows, k = e.cols;
-    const uint32_t groups = k / 128u;
-    const uint32_t code_stride = k;
-    const uint32_t scale_stride_bytes = (groups * 4u + 15u) & ~15u;
-    // Rows per pass: the codes + scales must fit the xrot region and the F32 output the accum region.
-    const uint64_t per_row_in = static_cast<uint64_t>(code_stride) + scale_stride_bytes;
-    const uint64_t rows_in = ctx.exl3_xrot_bytes / per_row_in;
-    const uint64_t rows_out = ctx.exl3_accum_bytes / (static_cast<uint64_t>(n) * sizeof(float));
-    // Rows the F32 output region can hold: split-K writes one slice per split, so decode (1 row) can use many.
-    const uint32_t scratch_rows = static_cast<uint32_t>(std::min<uint64_t>(rows_out, 0xFFFFFFFFull));
-    const uint32_t chunk = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(rows_in, rows_out), rows));
-    if (chunk == 0u)
+    const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
+        rows, n, k, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+    if (layout.chunk_rows == 0u)
         return Status::insufficient_memory("exl3 int8 linear: workspace smaller than one row", __FILE__, __LINE__);
-    int8_t* codes = static_cast<int8_t*>(ctx.exl3_xrot);
-    float* scales = reinterpret_cast<float*>(
-        static_cast<uint8_t*>(ctx.exl3_xrot) + ((static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull));
-    float* yprime = static_cast<float*>(ctx.exl3_accum);
+    const uint32_t chunk = layout.chunk_rows;
+    const uint32_t scratch_rows = layout.scratch_rows;
+    const uint32_t code_stride = layout.code_stride;
+    const uint32_t scale_stride_bytes = layout.scale_stride_bytes;
+    int8_t* codes = reinterpret_cast<int8_t*>(static_cast<uint8_t*>(ctx.exl3_xrot) + layout.codes_offset);
+    float* scales = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_xrot) + layout.scales_offset);
+    float* yprime = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + layout.yprime_offset);
     const uint32_t out_elem_bytes = out_bf16 ? 2u : 4u;
     // Prefill: like the W16A16 dense path, expand the trellis to a dense int8 matrix and run one hipBLASLt int8 GEMM.
     // That GEMM takes one activation scale per row (decode keeps one per 128-K group).
@@ -734,50 +728,81 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
         const unsigned long v = std::strtoul(env, nullptr, 10);
         return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
     }();
+    // A (default): hipBLASLt row-scale dense prefill + flagged-row correction.
+    // B: hand-written gfx12 iu8 WMMA, K128 scale/FMA and no row re-quantization.
+    static const bool prefill_wmma_b = [] {
+        const char* env = std::getenv("SHELF_EXL3_MUL24_PREFILL_AB");
+        return env != nullptr && (env[0] == 'B' || env[0] == 'b') && env[1] == '\0';
+    }();
     static const float flag_share = [] {
         const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
         return env != nullptr ? std::strtof(env, nullptr) : 0.5f;
     }();
-    // Workspace layout of the dense path (xrot region after codes + scales): slots[chunk] (+ the slot count),
-    // then the compact codes / scales of the flagged rows; the accum region holds acc[chunk][n] (int32) followed by
-    // the flagged rows' F32 output yprime2[cap][n].
-    const uint64_t cap_rows = ::shelf::kernel::exl3_int8_flag_cap(chunk);
-    const uint64_t scales_off = (static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull;
-    const uint64_t slots_off = (scales_off + static_cast<uint64_t>(chunk) * scale_stride_bytes + 255u) & ~255ull;
-    const uint64_t codes_f_off = (slots_off + (static_cast<uint64_t>(chunk) + 1u) * 4u + 255u) & ~255ull;
-    const uint64_t scales_f_off = (codes_f_off + cap_rows * code_stride + 255u) & ~255ull;
-    const uint64_t xrot_need = scales_f_off + cap_rows * scale_stride_bytes;
-    const uint64_t yprime2_off = (static_cast<uint64_t>(chunk) * n * 4u + 255u) & ~255ull;
-    const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr &&
-                          static_cast<uint64_t>(k) * n <= ctx.exl3_dense_bytes && xrot_need <= ctx.exl3_xrot_bytes &&
-                          yprime2_off + cap_rows * n * 4u <= ctx.exl3_accum_bytes;
+    // Workspace layout of the dense path: slots[chunk] (+ the slot count), then the compact
+    // codes / scales of the flagged rows in the xrot region; the accum region holds
+    // acc[chunk][n] followed by the flagged rows' F32 output yprime2[cap][n].
+    const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr && layout.fits;
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
-        const bool use_dense = dense_ok && n_rows >= dense_min_rows &&
-                               static_cast<uint64_t>(n_rows) * sizeof(float) <= ctx.exl3_rowsum_bytes;
+        const bool use_dense =
+            exl3_mul24_use_dense(dense_ok, n_rows, dense_min_rows, ctx.exl3_rowsum_bytes);
         const ::shelf::bf16_t* x = reinterpret_cast<const ::shelf::bf16_t*>(in.ptr) + static_cast<size_t>(r0) * in.row_stride;
         const uint16_t* suh = static_cast<const uint16_t*>(e.exl3_suh);
         const uint16_t* svh = static_cast<const uint16_t*>(e.exl3_svh);
         void* out_ptr = static_cast<uint8_t*>(dst.ptr) +
             (static_cast<uint64_t>(e.output_col_offset) + static_cast<uint64_t>(r0) * dst.row_stride) * out_elem_bytes;
         const auto out_dtype =
-            out_bf16 ? ::shelf::kernel::Exl3Int8OutputDType::BF16 : ::shelf::kernel::Exl3Int8OutputDType::F32;
+            out_bf16 ? ::shelf::kernel::Exl3OutputDType::BF16 : ::shelf::kernel::Exl3OutputDType::F32;
         hipError_t herr = hipSuccess;
         bool done = false;
-        if (use_dense) {
+        if (use_dense && prefill_wmma_b) {
+            // B uses the exact original group codes/scales and the same dense
+            // int8 weight reconstruction as A. No rowscale, slots or flagged GEMM.
+            const uint32_t timing0 = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+            herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
+                x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
+            if (semantic_timing_enabled()) semantic_timing_finish(
+                stream, timing0, 0xffff0010u, static_cast<uint32_t>(SemPath::Optimized), 0);
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+                herr = ::shelf::kernel::launch_exl3_mul24_recon_wmma(
+                    static_cast<const uint16_t*>(e.codes), e.exl3_ka,
+                    static_cast<int8_t*>(ctx.exl3_dense), n, k, stream);
+                if (semantic_timing_enabled()) semantic_timing_finish(
+                    stream, timing, 0xffff0011u, static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+                herr = ::shelf::kernel::launch_exl3_mul24_prefill_wmma(
+                    codes, scales, code_stride, scale_stride_bytes,
+                    static_cast<const int8_t*>(ctx.exl3_dense), yprime, n_rows, n, k, stream);
+                if (semantic_timing_enabled()) semantic_timing_finish(
+                    stream, timing, 0xffff0012u, static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            if (herr == hipSuccess) {
+                const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+                herr = ::shelf::kernel::launch_exl3_mul24_rotate_out(
+                    yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, 1u, stream);
+                if (semantic_timing_enabled()) semantic_timing_finish(
+                    stream, timing, 0xffff0013u, static_cast<uint32_t>(SemPath::Optimized), 0);
+            }
+            done = herr == hipSuccess;
+            launches += done ? 4u : 0u;
+        }
+        if (use_dense && !prefill_wmma_b) {
             float* rowscale = static_cast<float*>(ctx.exl3_rowsum);
             int8_t* dense = static_cast<int8_t*>(ctx.exl3_dense);
             uint8_t* xr = static_cast<uint8_t*>(ctx.exl3_xrot);
-            int32_t* slots = reinterpret_cast<int32_t*>(xr + slots_off);
-            uint32_t* count = reinterpret_cast<uint32_t*>(slots + chunk);
-            int8_t* codes_f = reinterpret_cast<int8_t*>(xr + codes_f_off);
-            float* scales_f = reinterpret_cast<float*>(xr + scales_f_off);
-            float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + yprime2_off);
-            const uint32_t cap = static_cast<uint32_t>(::shelf::kernel::exl3_int8_flag_cap(n_rows));
+            int32_t* slots = reinterpret_cast<int32_t*>(xr + layout.slots_offset);
+            uint32_t* count = reinterpret_cast<uint32_t*>(xr + layout.count_offset);
+            int8_t* codes_f = reinterpret_cast<int8_t*>(xr + layout.flagged_codes_offset);
+            float* scales_f = reinterpret_cast<float*>(xr + layout.flagged_scales_offset);
+            float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + layout.flagged_yprime_offset);
+            const uint32_t cap = static_cast<uint32_t>(::shelf::kernel::exl3_mul24_flag_cap(n_rows));
             {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
+                herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                     x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0000u,
@@ -785,7 +810,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_int8_rowscale(
+                herr = ::shelf::kernel::launch_exl3_mul24_rowscale(
                     codes, scales, rowscale, slots, count, codes_f, scales_f, n_rows, cap, k, code_stride,
                     scale_stride_bytes, flag_share, stream);
                 if (semantic_timing_enabled())
@@ -794,7 +819,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_int8_recon(
+                herr = ::shelf::kernel::launch_exl3_mul24_recon(
                     static_cast<const uint16_t*>(e.codes), e.exl3_ka, dense, n, k, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0002u,
@@ -810,7 +835,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             // The flagged rows (count of them, at most cap) go through the fused per-group kernel.
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_int8_gemm(
+                herr = ::shelf::kernel::launch_exl3_mul24_gemm(
                     codes_f, scales_f, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes),
                     e.exl3_ka, yprime2, cap, n, k, 1u, stream, count);
                 if (semantic_timing_enabled())
@@ -819,15 +844,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                static const bool prefill_rotate = [] {
-                    const char* env = std::getenv("SHELF_EXL3_INT8_PREFILL_ROTATE");
-                    return env != nullptr && std::strtoul(env, nullptr, 10) != 0ul;
-                }();
-                auto launch = prefill_rotate && n_rows >= 256u
-                    ? ::shelf::kernel::launch_exl3_int8_prefill_rotate_out_i32
-                    : ::shelf::kernel::launch_exl3_int8_rotate_out_i32;
-                herr = launch(static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
-                              out_ptr, out_dtype, n_rows, n, dst.row_stride, stream);
+                herr = ::shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+                    static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
+                    out_ptr, out_dtype, n_rows, n, dst.row_stride, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0005u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
@@ -838,15 +857,15 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_int8(
             if (herr == hipErrorNotSupported) herr = hipSuccess;
         }
         if (!done && herr == hipSuccess) {
-            const uint32_t splits = ::shelf::kernel::exl3_int8_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
-            herr = ::shelf::kernel::launch_exl3_int8_rotate_quantize(
+            const uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
             if (herr == hipSuccess)
-                herr = ::shelf::kernel::launch_exl3_int8_gemm(
+                herr = ::shelf::kernel::launch_exl3_mul24_gemm(
                     codes, scales, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes), e.exl3_ka,
                     yprime, n_rows, n, k, splits, stream);
             if (herr == hipSuccess)
-                herr = ::shelf::kernel::launch_exl3_int8_rotate_out(
+                herr = ::shelf::kernel::launch_exl3_mul24_rotate_out(
                     yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, splits, stream);
             launches += 3u;
         }
@@ -950,7 +969,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::LINEAR_EXL3_W16A16:
             return try_launch_linear_exl3(program, b, ctx, stream);
         case KernelId::LINEAR_EXL3_INT8:
-            return try_launch_linear_exl3_int8(program, b, ctx, stream);
+            return try_launch_linear_exl3_mul24(program, b, ctx, stream);
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM:
