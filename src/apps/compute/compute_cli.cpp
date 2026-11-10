@@ -119,8 +119,8 @@ std::vector<int32_t> read_input_ids(const std::string& path) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) return ids;
     char magic[8]{};
-    if (std::fread(magic, 1, sizeof(magic), f) == sizeof(magic) &&
-        std::memcmp(magic, "PSKLDTOK", sizeof(magic)) == 0) {
+    const std::size_t prefix_size = std::fread(magic, 1, sizeof(magic), f);
+    if (prefix_size == sizeof(magic) && std::memcmp(magic, "PSKLDTOK", sizeof(magic)) == 0) {
         uint32_t version = 0;
         uint64_t count = 0;
         bool ok = std::fread(&version, sizeof(version), 1, f) == 1 && version == 1u &&
@@ -133,7 +133,14 @@ std::vector<int32_t> read_input_ids(const std::string& path) {
         if (!ok) ids.clear();
         return ids;
     }
-    std::rewind(f);
+    // /dev/stdin can be a pipe, so fseek/rewind is not available. Return the
+    // probe bytes in reverse order before using the existing text parser.
+    for (std::size_t i = prefix_size; i > 0; --i) {
+        if (std::ungetc(static_cast<unsigned char>(magic[i - 1]), f) == EOF) {
+            std::fclose(f);
+            return {};
+        }
+    }
     long v = 0;
     while (std::fscanf(f, "%ld", &v) == 1) {
         ids.push_back(static_cast<int32_t>(v));
