@@ -44,3 +44,12 @@ Shelf の Qwen 実装は gated query、Qwen 固有の層構成と weight 名を�
 0.8B と 2B の CPU BF16 参照について、日英・英日の入力をそれぞれ 23・26 token に変換し、全位置の logits を `/tmp/plamo3_reference_{0,1}.pt` と `/tmp/plamo3_2b_reference_{0,1}.pt` に保存した。同じ token 列と `shelf-bench quality` 形式の参照は `/tmp/plamo3_case_{0,1}.{tokens,quality}` と `/tmp/plamo3_2b_case_{0,1}.{tokens,quality}` に保存した。これらは一時ファイルであり、比較自体は GPU 実装が必要で未実施である。
 
 量子化も未実施。`rocm_exl3/exllamav3/architecture/architectures.py` の architecture 登録には PLaMo 3 がなく、既存の Qwen 用変換をそのまま適用する根拠はない。PLaMo 3 の変換用 architecture と shelf 側の量子化 weight loader、結合行列の配置を対応させ、BF16 との比較を行う必要がある。
+
+0.8B の CPU 参照で、BF16、greedy、最大 80 token、停止 token 1 / 16 の条件で次の出力を得た。これは Shelf の推論結果ではない。
+
+| 入力 | CPU 参照出力 |
+| --- | --- |
+| 今日は良い天気ですね。 | The weather is nice today, isn't it? |
+| 明日の午後、駅でお会いしましょう。 | I'll see you at the station tomorrow afternoon. |
+| The train will arrive in five minutes. | 列車は5分後に到着します。 |
+| Please let me know if you have any questions. | ご質問があればお知らせください。 |
