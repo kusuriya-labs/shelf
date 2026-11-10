@@ -15,7 +15,7 @@ sys.path.insert(0, str(root / "src/apps/common"))
 
 from aiohttp.test_utils import TestClient, TestServer
 from shelf_server import create_app
-from serverlib.chat_service import AssistantResult, ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta
+from serverlib.chat_service import AssistantResult, ChatService, ContentDelta, ReasoningDelta, StreamDone, ToolCallDelta, map_finish_reason
 from serverlib.openai_protocol import openai_messages_to_hf
 
 
@@ -192,12 +192,35 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
         events = await self.stream_events()
         self.assertEqual(events[-1]['type'], 'response.incomplete')
 
+    async def test_length_with_tool_call(self):
+        self.service.length = True
+        self.service.tool = True
+        response = await self.post()
+        data = await response.json()
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(data['incomplete_details']['reason'], 'max_output_tokens')
+        self.assertEqual(data['output'][1]['type'], 'function_call')
+        events = await self.stream_events()
+        self.assertEqual(events[-1]['type'], 'response.incomplete')
+        self.assertEqual(events[-1]['response']['incomplete_details']['reason'], 'max_output_tokens')
+
     async def test_disconnect_closes_generator(self):
         self.service.slow = True
         response = await self.post(stream=True)
         await response.content.readline()
         response.close()
         await asyncio.wait_for(self.service.closed.wait(), 2)
+
+
+class FinishReasonTests(unittest.TestCase):
+    def test_tool_calls_only_on_stop(self):
+        for calls in (False, True):
+            self.assertEqual(map_finish_reason("length", has_tool_calls=calls), "length")
+        self.assertEqual(map_finish_reason("stop", has_tool_calls=True), "tool_calls")
+        self.assertEqual(map_finish_reason("stop", has_tool_calls=False), "stop")
+        for calls in (False, True):
+            with self.assertRaises(Exception):
+                map_finish_reason("unexpected", has_tool_calls=calls)
 
 
 class ComputeIntegrationTests(unittest.IsolatedAsyncioTestCase):

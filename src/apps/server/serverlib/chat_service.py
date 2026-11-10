@@ -96,15 +96,13 @@ def _cached_tokens(done: dict) -> Optional[int]:
 
 
 def map_finish_reason(raw: str, *, has_tool_calls: bool) -> str:
-    if has_tool_calls:
-        return "tool_calls"
     mapped = _FINISH_REASON_MAP.get(raw)
     if mapped is None:
         raise ChatServiceError(
             f"unsupported compute finish reason: {raw!r}",
             code="compute_error",
         )
-    return mapped
+    return "tool_calls" if mapped == "stop" and has_tool_calls else mapped
 
 
 def log_tokens(generated_ids) -> None:
