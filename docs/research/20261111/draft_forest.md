@@ -100,3 +100,5 @@ B=1 は 57 round 中 10 回、採用葉を再実行した。B=1 の追加は１�
 ### snapshot コピー省略の試行
 
 木では chain の compact log 用 snapshot を復元せず、選択行の history を復元する。木の round だけ snapshot コピーを省く試作を、shell prompt、B=1 で３回測った。変更前は 62.301, 62.501, 62.613 ms/round、71.78, 71.55, 71.42 tok/s、変更後は 62.416, 62.420, 62.412 ms/round、71.64, 71.64, 71.65 tok/s だった。ばらつきに比べて改善は明確でなく、この変更は採用しない。主な負担である採用葉の再実行には影響しない。
+
+試作版に対する `tests/server/test_compute_dflash2_tree.py` は３ prompt の B=0/1/2/4、chain と非投機 target の 256 token 一致を確認した。試作は性能上の効果が明確でないため取り消した。全回帰は実行していない。
