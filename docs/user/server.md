@@ -24,7 +24,7 @@ http://127.0.0.1:8000/v1
 
 embeddings、vision、audio、認証、TLS、複数modelは対象外。
 
-依存は Python / `aiohttp` / `transformers==5.14.1` のみである。
+依存は Python / `aiohttp` / `transformers==5.14.1` / `jinja2` である。
 LocalAI・gRPC・protobuf・XGrammar は要らない。
 
 ## 起動
@@ -538,15 +538,18 @@ message として扱う。tool は `type: function`、`name`、`description`、
 
 `max_output_tokens`、`temperature`、`top_p`、`seed`、`reasoning.effort`
 （`low` / `medium` / `xhigh`）、`tool_choice`（`auto` / `none`）、
-`parallel_tool_calls: true`、`truncation: disabled`、空の `include` を受け付ける。
+`parallel_tool_calls: true`、`truncation: disabled`、空の `include` または
+`include: ["reasoning.encrypted_content"]` を受け付ける。後者を指定しても暗号化された思考は返さない。
+`reasoning.summary: "auto"` は受理するが summary の生成は指定できない。
 Responses では `metadata`、`user`、`prompt_cache_key`、`client_metadata` を受理するが使用しない。
 `store` は `false` のみ受理し、`true` は拒否する。履歴はリクエストごとに送る。usage の `input_tokens_details.cached_tokens` は
 compute の prefix cache の復元数である。非 stream の `output_tokens_details` は
 reasoning token 数を含む。stream では reasoning token 数を取得できない。
 
-`previous_response_id`、`conversation`、画像・音声・ファイル、hosted tool、
+`previous_response_id`、`conversation`、画像・音声・ファイル、`custom` tool、
 `strict: true`、`text.format` の JSON schema、`parallel_tool_calls: false`、
-`truncation: auto`、空でない `include`、未対応の項目は HTTP 400 で拒否する。
+`truncation: auto`、その他の `include`、暗号化された入力、未対応の項目は HTTP 400 で拒否する。
+`web_search` と `namespace` tool はモデルに渡さず除外するため、検索や namespace 内の tool は使えない。
 `GET /v1/responses` と保存済み response の取得には対応しない。
 
 OpenAI Python SDK の例（認証は行わないため API key は任意の値）:
@@ -643,13 +646,13 @@ model は `shelf/shelf` を選ぶ。
 
 ### Codex CLI
 
-[公式設定](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)に
-従い `model_provider`、`base_url`、`wire_api = "responses"` を設定できる。
-ただし現行 Codex CLI は `web_search` や `namespace`、
-`include: ["reasoning.encrypted_content"]`、`prompt_cache_key`、
-`client_metadata` など本サーバが拒否する項目を送るため、
-現状は接続して会話を完了できない。これらを要求しない Responses クライアントを使う。
-接続先の設定例は次のとおり（この設定だけでは上記の非対応項目は解消しない）。
+Codex CLI を Responses API の custom provider として接続する例を示す。
+Codex の `prompt_cache_key` と `client_metadata` は受理するが推論には使用しない。
+`include: ["reasoning.encrypted_content"]` と `reasoning.summary: "auto"` は受理するが、
+暗号化 reasoning と summary は返さない。履歴中の `encrypted_content: null` は受理し、
+暗号化された実データは拒否する。`web_search` と `namespace` は除外するため、
+それらに依存する作業は実行できない。function tool はクライアントが実行し、
+その結果を次のリクエストに含める。`custom` tool は未対応である。
 
 ```toml
 model_provider = "shelf"

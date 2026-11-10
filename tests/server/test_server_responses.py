@@ -101,7 +101,7 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.service.tool = True
         data = await (await self.post(input=[
             {"role": "user", "content": [{"type": "input_text", "text": "weather?"}]},
-            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "think"}]},
+            {"type": "reasoning", "encrypted_content": None, "summary": [{"type": "summary_text", "text": "think"}]},
             {"type": "function_call", "call_id": "c1", "name": "weather", "arguments": "{}"},
             {"type": "function_call_output", "call_id": "c1", "output": "sunny"},
         ], instructions="system", tools=[{"type": "function", "name": "weather", "parameters": {"type": "object"}}], reasoning={"effort": "low"})).json()
@@ -115,11 +115,12 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejections(self):
         cases = [({"previous_response_id": "resp_1"}, "previous_response_id"),
                  ({"conversation": "c"}, "conversation"),
+                 ({"input": [{"type": "reasoning", "encrypted_content": "opaque", "summary": []}]}, "input[0].encrypted_content"),
                  ({"store": True}, "store"), ({"prompt_cache_key": 3}, "prompt_cache_key"),
                  ({"client_metadata": []}, "client_metadata"),
                  ({"text": {"format": {"type": "json_schema"}}}, "text.format"),
                  ({"tools": [{"type": "function", "name": "x", "strict": True}]}, "tools[0].strict"),
-                 ({"tools": [{"type": "web_search"}]}, "tools[0].type"),
+                 ({"tools": [{"type": "unsupported"}]}, "tools[0].type"),
                  ({"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "x"}]}]}, "input[0].content[0].image_url"),
                  ({"tool_choice": "required"}, "tool_choice"),
                  ({"unknown": 1}, "unknown"), ({"parallel_tool_calls": False}, "parallel_tool_calls"),
@@ -132,6 +133,22 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
                 error = (await response.json())['error']
                 self.assertEqual(error['param'], param)
                 self.assertEqual(error['type'], 'invalid_request_error')
+
+    async def test_codex_request_fields(self):
+        response = await self.post(store=False, include=["reasoning.encrypted_content"],
+            reasoning={"summary": "auto"}, prompt_cache_key="cache", client_metadata={},
+            tools=[{"type": "web_search", "external_web_access": True},
+                   {"type": "namespace", "name": "multi_agent_v1", "tools": []},
+                   {"type": "function", "name": "exec_command", "strict": False,
+                    "parameters": {"type": "object"}}])
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual([tool["function"]["name"] for tool in self.service.request.tools], ["exec_command"])
+        for extra, param in [({"include": ["reasoning.encrypted_content", "other"]}, "include"),
+                             ({"reasoning": {"summary": "detailed"}}, "reasoning.summary"),
+                             ({"tools": [{"type": "custom", "name": "x"}]}, "tools[0].type")]:
+            response = await self.post(**extra)
+            self.assertEqual(response.status, 400, await response.text())
+            self.assertEqual((await response.json())["error"]["param"], param)
 
     async def test_numeric_validation(self):
         integer_bad = ["2", True, False, 1.5, 0, -1, 1 << 63]

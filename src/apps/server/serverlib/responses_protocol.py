@@ -52,7 +52,9 @@ def input_messages(value):
             raise OpenAIProtocolError(f"{p} must be an object", param=p)
         kind = item.get("type", "message")
         if kind == "reasoning":
-            fields(item, {"type", "id", "summary", "content", "status"}, p)
+            fields(item, {"type", "id", "summary", "content", "status", "encrypted_content"}, p)
+            if item.get("encrypted_content") is not None:
+                reject(p + ".encrypted_content")
             if pending_reasoning is not None:
                 reject(p, "consecutive reasoning items are not supported")
             content = item.get("content") or item.get("summary") or []
@@ -134,7 +136,9 @@ def parse_responses_request(body, *, inference_budget_tokens):
         if source in body:
             chat[target] = body[source]
     if body.get("reasoning") is not None:
-        fields(body["reasoning"], {"effort"}, "reasoning")
+        fields(body["reasoning"], {"effort", "summary"}, "reasoning")
+        if body["reasoning"].get("summary") not in (None, "auto"):
+            reject("reasoning.summary")
         chat["reasoning_effort"] = body["reasoning"].get("effort")
     if body.get("tools") is not None:
         if not isinstance(body["tools"], list):
@@ -142,6 +146,14 @@ def parse_responses_request(body, *, inference_budget_tokens):
         converted = []
         for i, tool in enumerate(body["tools"]):
             p = f"tools[{i}]"
+            if not isinstance(tool, dict):
+                raise OpenAIProtocolError(f"{p} must be an object", param=p)
+            if tool.get("type") == "web_search":
+                fields(tool, {"type", "external_web_access"}, p)
+                continue
+            if tool.get("type") == "namespace":
+                fields(tool, {"type", "name", "description", "tools"}, p)
+                continue
             fields(tool, {"type", "name", "description", "parameters", "strict"}, p)
             if tool.get("type") != "function":
                 reject(p + ".type")
@@ -162,7 +174,7 @@ def parse_responses_request(body, *, inference_budget_tokens):
         reject("parallel_tool_calls")
     if body.get("truncation") not in (None, "disabled"):
         reject("truncation")
-    if body.get("include") not in (None, []):
+    if body.get("include") not in (None, [], ["reasoning.encrypted_content"]):
         reject("include")
     if body.get("metadata") is not None and not isinstance(body["metadata"], dict):
         raise OpenAIProtocolError("metadata must be an object", param="metadata")
