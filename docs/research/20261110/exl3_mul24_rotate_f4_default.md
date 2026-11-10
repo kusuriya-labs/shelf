@@ -25,14 +25,47 @@
   `template <bool kF4, bool kBF16>`（quantize は `kF4` のみ）の実装関数へ分岐を
   追い出し、カーネル選択が実行時 `if` の内側に残らない形にした。
 
-## 性能（2048 prefill、3 run 中央値）
+## 性能（2048 prefill、5 run 中央値）
 
 | 経路 | F4 既定 OFF（旧） | F4 既定 ON（新） | 差 |
 |---|---:|---:|---:|
-| A hipBLASLt | 1224.5 ms | **1069.8 ms** | -12.6% |
-| B WMMA | 1427.3 ms | **1265.9 ms** | -11.3% |
+| A hipBLASLt | 1224.5 ms | **1075.0 ms** | -12.2% |
+| B WMMA | 1427.3 ms | **1272.7 ms** | -10.8% |
+| fused（DENSE=0） | 2474.4 ms | **2322.7 ms** | -6.1% |
 
-wall の短縮は rotate_quantize と rotate_out の分。GEMM は変わらない。
+内訳（5 run 平均、1 run 換算）:
+
+| stage | A | B |
+|---|---:|---:|
+| GEMM | 569.4 ms | 854.5 ms |
+| ROTATE_QUANT | 36.8 ms | 36.9 ms |
+| ROWSCALE | 52.7 ms | — |
+| RECON | 55.4 ms | 52.0 ms |
+| FLAG_GEMM | 28.6 ms | — |
+| ROTATE_OUT | 88.1 ms | 88.2 ms |
+
+wall の短縮は rotate_quantize（約 117 → 37 ms）と rotate_out（約 184 → 88 ms）の分。
+GEMM は F4 に依存しない。今回の GEMM は F4 OFF を測った回より 3% 高いが、
+これはセッション間のクロック/熱ドリフトで、リグレッションではない。
+
+## 品質（teacher-forced、context 2048、positions 256、bf16 KV）
+
+基準は fused の logits dump（`/tmp/exl3_fused256.bin`）。
+
+| 経路 | PPL | PPL 差 | KL 平均 | top-1 | top-5 | logit 最大差 |
+|---|---:|---:|---:|---:|---:|---:|
+| fused（基準） | 1.14538204 | — | — | — | — | — |
+| **B（既定）** | **1.14538204** | **0** | **0** | **1.000** | **1.000** | **0** |
+| A（既定） | 1.09654741 | -4.26% | 0.06085 | 0.977 | 0.847 | 17.02 |
+
+B は fused と bit 一致する。F4 を既定 ON にしても数値は変わらない
+（F4 OFF で生成した基準 dump と KL=0）。
+
+A の差は RowScale 再量子化に由来する。活性の追加誤差は RRMS 約 1.1% で、
+これは元の INT8 量子化誤差の約 2 倍に相当する。位置ごとの KL は中央値 2.4e-4、
+94.9% の位置が 0.1 未満で、平均は 13 位置の裾が支配する。
+256 token の低エントロピーなコーパスでは PPL 差の符号は安定しないため、
+A の PPL が低いことを品質優位とは読めない。
 
 ## 検証
 
