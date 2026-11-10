@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <vector>
 
 namespace shelf::qwen35::runtime {
@@ -371,7 +372,10 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
                                       const MtpDrafterConfig& options,
                                       std::size_t token_row_intermediate,
                                       std::size_t grouped_executor_bytes,
-                                      bool exl3_linear_workspace) noexcept {
+                                      bool exl3_linear_workspace,
+                                      const shelf::weights::Exl3LinearShape&
+                                          exl3_linear_shape,
+                                      const state::GdnStatePoolLayout* target_gdn) noexcept {
     if (options.max_seq_len == 0u || options.page_tokens == 0u) {
         return 0u;
     }
@@ -389,18 +393,19 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
     executor_config.max_scheduled_requests = 1u;
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
+    executor_config.exl3_linear_shape = exl3_linear_shape;
     const std::size_t executor = qwen35_executor_reserve_bytes(
         mtp, token_row_intermediate, executor_config, 1u, exl3_linear_workspace) +
         grouped_executor_bytes;
 
-    const state::GdnStatePoolLayout gdn = make_qwen35_gdn_state_layout(config);
-    const std::size_t gdn_state =
+    const state::GdnStatePoolLayout gdn =
+        target_gdn != nullptr ? *target_gdn : make_qwen35_gdn_state_layout(config);
+    const std::size_t snapshot =
         static_cast<std::size_t>(gdn.num_gdn_states) *
         (static_cast<std::size_t>(gdn.conv_history_stride) * gdn.conv_history *
              sizeof(bf16_t) +
          static_cast<std::size_t>(gdn.num_v_heads) * gdn.head_k * gdn.head_v *
              sizeof(fp16_t));
-    const std::size_t snapshots = 2u * gdn_state;
     std::size_t history = 0u;
     std::size_t compact = 0u;
     if (options.allocate_spec_buffers) {
@@ -415,7 +420,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
             (vdim + qkdim + gdn.num_v_heads) * sizeof(float);
     }
     constexpr std::size_t kMargin = 64ull * 1024ull * 1024ull;
-    return kv + executor + gdn_state + snapshots + history + compact + kMargin;
+    return kv + executor + snapshot + history + compact + kMargin;
 }
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
@@ -504,6 +509,7 @@ Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     executor_config.max_scheduled_output_rows = 1u;
     executor_config.external_hidden_input = true;
     executor_config.external_hidden_width = drafter->hidden_width;
+    executor_config.exl3_linear_shape = input.exl3_linear_shape;
     executor_config.emit_normed_token_hidden = drafter->wide_hidden;
     executor_config.normed_token_hidden_width = drafter->hidden_width;
     executor_config.rope_profile = options.rope_profile;
@@ -1218,31 +1224,19 @@ Result<MtpIterationOutput> mtp_spec_step(
     return output;
 }
 
-std::size_t mtp_spec_batch_reserve_bytes(
-    const shelf::qwen_hybrid::QwenHybridConfig& config,
-    const MtpDrafterConfig& options,
-    std::size_t max_requests,
-    std::size_t token_row_intermediate,
-    std::size_t grouped_executor_bytes,
-    bool exl3_linear_workspace) noexcept {
-    if (max_requests == 0u || options.max_seq_len == 0u || options.page_tokens == 0u) {
+std::size_t mtp_batch_rank_state_reserve_bytes(
+    const state::GdnStatePoolLayout& gdn, std::uint32_t spec_rows) noexcept {
+    if (spec_rows == 0u) {
         return 0u;
     }
-    MtpDrafterConfig per_request = options;
-    per_request.allocate_spec_buffers = false;
-    const std::size_t fixed = mtp_drafter_reserve_bytes(
-        config, per_request, token_row_intermediate, grouped_executor_bytes,
-        exl3_linear_workspace);
-
-    const state::GdnStatePoolLayout gdn = make_qwen35_gdn_state_layout(config);
-    const std::uint64_t rows = options.max_batch_rows;
+    const std::uint64_t rows = spec_rows;
     const std::size_t history = static_cast<std::size_t>(rows) * gdn.num_gdn_states *
         gdn.conv_history_stride * gdn.conv_history * sizeof(bf16_t);
     const std::uint64_t vdim = static_cast<std::uint64_t>(gdn.num_v_heads) * gdn.head_v;
     const std::uint64_t qkdim = static_cast<std::uint64_t>(gdn.num_v_heads) * gdn.head_k;
     const std::size_t compact = static_cast<std::size_t>(gdn.num_gdn_states) * rows *
         (vdim + qkdim + gdn.num_v_heads) * sizeof(float);
-    return fixed * max_requests + history + compact;
+    return history + compact;
 }
 
 Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
@@ -1265,7 +1259,8 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     }
     MtpSpecBatchContext context;
     context.target = &target;
-    context.max_rows = options.max_batch_rows;
+    const std::uint32_t spec_rows = mtp_spec_rows(max_requests, options.num_drafts);
+    context.max_rows = spec_rows;
     context.max_requests = max_requests;
     context.num_drafts = options.num_drafts;
 
@@ -1293,22 +1288,21 @@ Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
         state.device = device;
         state.target = executor;
         Status qsa = allocate_qsa_history(
-            executor, rank_arena, options.max_batch_rows, state.qsa_partial_history,
+            executor, rank_arena, spec_rows, state.qsa_partial_history,
             state.qsa_count_history, state.qsa_partial_state_stride,
             state.qsa_count_state_stride);
         if (!qsa.ok()) return qsa;
-        state.qsa_history_rows = options.max_batch_rows;
+        state.qsa_history_rows = spec_rows;
         Status ple = allocate_ple_conv_history(
-            executor, rank_arena, options.max_batch_rows, state.ple_conv_history,
+            executor, rank_arena, spec_rows, state.ple_conv_history,
             state.ple_conv_state_stride);
         if (!ple.ok()) return ple;
-        state.ple_conv_history_rows = options.max_batch_rows;
-        auto history = create_gdn_spec_history(rank_arena, pool, options.max_batch_rows,
-                                               false);
+        state.ple_conv_history_rows = spec_rows;
+        auto history = create_gdn_spec_history(rank_arena, pool, spec_rows, false);
         if (!history.ok()) return history.status();
         state.history = history.release();
         const auto view = pool.device_view();
-        const std::uint64_t rows = options.max_batch_rows;
+        const std::uint64_t rows = spec_rows;
         const std::uint64_t vdim = static_cast<std::uint64_t>(view.num_v_heads) * view.head_v;
         const std::uint64_t qkdim = static_cast<std::uint64_t>(view.num_v_heads) * view.head_k;
         state.compact_delta_layer_stride = rows * vdim;

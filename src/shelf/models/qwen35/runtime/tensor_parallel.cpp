@@ -248,18 +248,30 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         mtp_options.page_tokens = config.mtp_batch.page_tokens;
         mtp_options.max_batch_rows = config.mtp_batch.max_batch_rows;
         mtp_options.kv_dtype = config.mtp_batch.kv_dtype;
-        const std::size_t batch_bytes =
-            qwen35::runtime::mtp_spec_batch_reserve_bytes(
-                tc, mtp_options, config.mtp_batch.max_requests,
-                rank->model_->token_row_ffn_size(),
-                rank->model_->mtp_grouped_reserve_bytes(
-                    qwen35::runtime::mtp_drafter_rows(mtp_options),
-                    mtp_options.max_seq_len + 1u),
-                rank->model_->uses_exl3_linear());
+        std::size_t drafter_bytes = 0u;
+        if (config.tp_rank == 0u) {
+            drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+                                tc, mtp_options, rank->model_->token_row_ffn_size(),
+                                rank->model_->mtp_grouped_reserve_bytes(
+                                    qwen35::runtime::mtp_drafter_rows(mtp_options),
+                                    mtp_options.max_seq_len + 1u),
+                                rank->model_->uses_exl3_linear(),
+                                rank->model_->mtp_exl3_linear_shape(),
+                                &gdn_layout_result) *
+                            config.mtp_batch.max_requests;
+        }
+        const std::size_t state_bytes =
+            qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                gdn_layout_result,
+                qwen35::runtime::mtp_spec_rows(config.mtp_batch.max_requests,
+                                               mtp_options.num_drafts));
+        const std::size_t batch_bytes = drafter_bytes + state_bytes;
         reserved += batch_bytes;
-        std::fprintf(stderr, "MEMORY_PLAN tp mtp batch reserve: %s (%u slots)\n",
+        std::fprintf(stderr,
+                     "MEMORY_PLAN tp mtp batch reserve: %s (%u slots, drafter %s)\n",
                      gpu::format_gib(batch_bytes).c_str(),
-                     static_cast<unsigned>(config.mtp_batch.max_requests));
+                     static_cast<unsigned>(config.mtp_batch.max_requests),
+                     gpu::format_gib(drafter_bytes).c_str());
     }
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
