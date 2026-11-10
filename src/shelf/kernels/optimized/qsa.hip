@@ -469,7 +469,7 @@ __device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t 
     __syncthreads();
 }
 
-__global__ __launch_bounds__(kQsaThreads) void qsa_topk_kernel(QsaTopkArgs args) {
+__global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArgs args) {
     const uint32_t row = blockIdx.x;
     if (row >= args.rows) return;
     const uint32_t t = threadIdx.x;
@@ -1117,7 +1117,10 @@ hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream) {
     const std::size_t dynamic_bytes =
         2u * static_cast<std::size_t>(half) *
         (sizeof(float) + sizeof(std::int32_t));
-    qsa_topk_kernel<<<args.rows, kQsaThreads, dynamic_bytes, stream>>>(args);
+    const uint32_t threads = args.rows <= kQsaTopkSmallRows
+                                 ? kQsaTopkMaxThreads
+                                 : kQsaThreads;
+    qsa_topk_kernel<<<args.rows, threads, dynamic_bytes, stream>>>(args);
     return hipGetLastError();
 }
 

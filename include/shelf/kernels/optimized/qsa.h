@@ -25,6 +25,8 @@ struct QsaPoolArgs {
 
 inline constexpr uint32_t kQsaHeadDim = 128u;
 inline constexpr uint32_t kQsaThreads = 128u;
+inline constexpr uint32_t kQsaTopkMaxThreads = 512u;
+inline constexpr uint32_t kQsaTopkSmallRows = 32u;
 
 inline constexpr uint32_t kQsaSelectChunk = 64u;
 inline constexpr uint32_t kQsaSelectMaxHeads = 8u;
