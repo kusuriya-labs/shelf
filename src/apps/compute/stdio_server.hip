@@ -982,13 +982,13 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         }
     }
     if (dflash.enabled) {
-        if (runtime.config().max_concurrent_requests >
+        if (runtime.config().dflash2_sessions() >
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows /
                 static_cast<uint32_t>(dflash.config.block_size)) {
             fprintf(stderr,
-                    "dflash2 serve: max_concurrent_requests %u exceeds verify row cap %u "
+                    "dflash2 serve: dflash2_sessions %u exceeds verify row cap %u "
                     "for block_size %zu\n",
-                    runtime.config().max_concurrent_requests,
+                    runtime.config().dflash2_sessions(),
                     shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows,
                     dflash.config.block_size);
             return 1;
@@ -1006,7 +1006,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
 
         const auto& text_config = runtime.model().hybrid_config();
         const uint32_t batch_max_rows = std::min<uint32_t>(
-            runtime.config().max_concurrent_requests *
+            runtime.config().dflash2_sessions() *
                 static_cast<uint32_t>(dflash.config.block_size),
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows);
         const bool serve_tp_sharded = runtime.config().tp > 1;
@@ -1059,7 +1059,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             auto sessions_result = shelf::qwen35::runtime::DFlash2SessionPool::create(
                 runtime.executor(), &dflash.executor, runtime.gdn_pool(),
                 runtime.arena(), session_config,
-                runtime.config().max_concurrent_requests, runtime.stream(), serve_rank_ptr);
+                runtime.config().dflash2_sessions(), runtime.stream(), serve_rank_ptr);
             if (!sessions_result.ok()) {
                 fprintf(stderr, "dflash2 session pool create failed: %s\n",
                         sessions_result.status().message().c_str());

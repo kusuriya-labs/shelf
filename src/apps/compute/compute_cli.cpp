@@ -96,6 +96,9 @@ void compute_usage(const char* prog) {
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
+    printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
+    printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
+    printf("                            without speculation\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
     printf("  --mtp                  enable the checkpoint's MTP block as the drafter\n");
     printf("  --mtp-drafts N         speculative draft tokens per round (default 7,\n");
@@ -167,6 +170,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     shelf::qwen35::runtime::SamplingConfig& sampling = opt.sampling;
     auto& dflash2_model_dir = opt.dflash2_model_dir;
     auto& dflash2_drafts = opt.dflash2_drafts;
+    auto& dflash2_max_sessions = opt.dflash2_max_sessions;
     auto& dflash2_stats = opt.dflash2_stats;
     auto& mtp = opt.mtp;
     auto& mtp_drafts = opt.mtp_drafts;
@@ -287,6 +291,11 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--dflash2-drafts") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--dflash2-max-sessions") == 0 && i + 1 < argc) {
+            if (!parse_uint(argv[++i], dflash2_max_sessions) || dflash2_max_sessions == 0) {
+                fprintf(stderr, "bad --dflash2-max-sessions\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--dflash2-stats") == 0 && i + 1 < argc) {

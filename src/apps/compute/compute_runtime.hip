@@ -510,7 +510,7 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     }
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
-        config_.max_concurrent_requests, config_.dflash2_prefill_rows).total();
+        config_.dflash2_sessions(), config_.dflash2_prefill_rows).total();
 }
 
 std::size_t Qwen35ComputeRuntime::mtp_batch_requests(
@@ -638,7 +638,7 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         tp_config.drafter_config = &config_.draft_config;
         tp_config.drafter_weights_bytes = config_.draft_bytes;
         tp_config.drafter_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
-        tp_config.drafter_sessions = config_.max_concurrent_requests;
+        tp_config.drafter_sessions = config_.dflash2_sessions();
     }
     if (config_.tp > 1 && config_.private_target_weights) {
         const bool load_lm_head = config_.private_target_lm_head;

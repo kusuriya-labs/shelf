@@ -28,7 +28,9 @@ bool dflash2_prefill_rows(const dflash2::DFlash2Config& config, uint32_t tp,
 std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) noexcept;
 
 std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
-                                         const ::shelf::state::GdnStatePool& pool) noexcept;
+                                         const ::shelf::state::GdnStatePool& pool,
+                                         bool step_buffers = true,
+                                         bool rec_snapshot = true) noexcept;
 
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,

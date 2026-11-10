@@ -185,7 +185,9 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
     gpu::GpuArena& arena,
     const DFlash2SpecDecoderConfig& config,
     hipStream_t stream,
-    const std::vector<DFlash2GdnRankBinding>* tp_ranks) {
+    const std::vector<DFlash2GdnRankBinding>* tp_ranks,
+    bool step_buffers,
+    const std::vector<void*>* shared_rec_snapshots) {
     if (target.model.config == nullptr || target.model.embed_tokens == nullptr) {
         return Status::invalid_state("create_dflash2_spec_workspace: target model is null",
                                      __FILE__, __LINE__);
@@ -277,52 +279,62 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
             workspace.gdn_snapshot_bytes += g.conv_bytes;
         }
         if (g.rec_bytes != 0u) {
-            auto rec_alloc = rank_arena.allocate_aligned(g.rec_bytes, 256u);
-            if (!rec_alloc.ok()) {
-                (void)shutdown_dflash2_spec_workspace(workspace);
-                return rec_alloc.status();
+            if (shared_rec_snapshots != nullptr && r < shared_rec_snapshots->size()) {
+                // The recurrent snapshot is only used by serialized paths (prefix
+                // shadow prefill); sessions share one buffer per rank.
+                g.rec_snapshot = (*shared_rec_snapshots)[r];
+            } else {
+                auto rec_alloc = rank_arena.allocate_aligned(g.rec_bytes, 256u);
+                if (!rec_alloc.ok()) {
+                    (void)shutdown_dflash2_spec_workspace(workspace);
+                    return rec_alloc.status();
+                }
+                g.rec_snapshot = rec_alloc.release().data();
+                workspace.gdn_snapshot_bytes += g.rec_bytes;
             }
-            g.rec_snapshot = rec_alloc.release().data();
-            workspace.gdn_snapshot_bytes += g.rec_bytes;
         }
-        auto history_result = create_gdn_spec_history(rank_arena, rank_pool, history_rows,
-                                                      false);
-        if (!history_result.ok()) {
-            (void)shutdown_dflash2_spec_workspace(workspace);
-            return history_result.status();
-        }
-        g.history = history_result.release();
+        // The batched serve path keeps history / compact log in the shared batch
+        // context, so per-session sessions skip them (step_buffers == false).
+        if (step_buffers) {
+            auto history_result = create_gdn_spec_history(rank_arena, rank_pool, history_rows,
+                                                          false);
+            if (!history_result.ok()) {
+                (void)shutdown_dflash2_spec_workspace(workspace);
+                return history_result.status();
+            }
+            g.history = history_result.release();
 
-        const uint64_t states = pool_view.num_gdn_states;
-        const uint64_t log_rows = static_cast<uint64_t>(config.num_drafts) + 1u;
-        const uint64_t vdim =
-            static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
-        const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
-        const uint64_t dper = log_rows * vdim;
-        const uint64_t kper = log_rows * qkdim;
-        const uint64_t aper = log_rows * pool_view.num_v_heads;
-        auto d_alloc = rank_arena.allocate_aligned(states * dper * sizeof(float), 256u);
-        if (!d_alloc.ok()) {
-            (void)shutdown_dflash2_spec_workspace(workspace);
-            return d_alloc.status();
+            const uint64_t states = pool_view.num_gdn_states;
+            const uint64_t log_rows = static_cast<uint64_t>(config.num_drafts) + 1u;
+            const uint64_t vdim =
+                static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
+            const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
+            const uint64_t dper = log_rows * vdim;
+            const uint64_t kper = log_rows * qkdim;
+            const uint64_t aper = log_rows * pool_view.num_v_heads;
+            auto d_alloc = rank_arena.allocate_aligned(states * dper * sizeof(float), 256u);
+            if (!d_alloc.ok()) {
+                (void)shutdown_dflash2_spec_workspace(workspace);
+                return d_alloc.status();
+            }
+            g.compact_delta = static_cast<float*>(d_alloc.release().data());
+            auto k_alloc = rank_arena.allocate_aligned(states * kper * sizeof(float), 256u);
+            if (!k_alloc.ok()) {
+                (void)shutdown_dflash2_spec_workspace(workspace);
+                return k_alloc.status();
+            }
+            g.compact_k = static_cast<float*>(k_alloc.release().data());
+            auto a_alloc = rank_arena.allocate_aligned(states * aper * sizeof(float), 256u);
+            if (!a_alloc.ok()) {
+                (void)shutdown_dflash2_spec_workspace(workspace);
+                return a_alloc.status();
+            }
+            g.compact_a = static_cast<float*>(a_alloc.release().data());
+            g.compact_delta_layer_stride = dper;
+            g.compact_k_layer_stride = kper;
+            g.compact_a_layer_stride = aper;
+            workspace.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
         }
-        g.compact_delta = static_cast<float*>(d_alloc.release().data());
-        auto k_alloc = rank_arena.allocate_aligned(states * kper * sizeof(float), 256u);
-        if (!k_alloc.ok()) {
-            (void)shutdown_dflash2_spec_workspace(workspace);
-            return k_alloc.status();
-        }
-        g.compact_k = static_cast<float*>(k_alloc.release().data());
-        auto a_alloc = rank_arena.allocate_aligned(states * aper * sizeof(float), 256u);
-        if (!a_alloc.ok()) {
-            (void)shutdown_dflash2_spec_workspace(workspace);
-            return a_alloc.status();
-        }
-        g.compact_a = static_cast<float*>(a_alloc.release().data());
-        g.compact_delta_layer_stride = dper;
-        g.compact_k_layer_stride = kper;
-        g.compact_a_layer_stride = aper;
-        workspace.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
 
         auto req_alloc = rank_arena.allocate_aligned(
             sizeof(::shelf::runtime::DeviceRequestDescriptor), 256u);
@@ -347,9 +359,11 @@ Result<DFlash2SpecWorkspace> create_dflash2_spec_workspace_for_drafts(
     gpu::GpuArena& arena,
     const DFlash2SpecDecoderConfig& config,
     hipStream_t stream,
-    const std::vector<DFlash2GdnRankBinding>* tp_ranks) {
+    const std::vector<DFlash2GdnRankBinding>* tp_ranks,
+    bool step_buffers,
+    const std::vector<void*>* shared_rec_snapshots) {
     return create_spec_workspace_impl(target, draft_max_drafts, gdn_pool, arena, config,
-                                      stream, tp_ranks);
+                                      stream, tp_ranks, step_buffers, shared_rec_snapshots);
 }
 
 Result<DFlash2SpecWorkspace> create_dflash2_spec_workspace(
@@ -365,7 +379,7 @@ Result<DFlash2SpecWorkspace> create_dflash2_spec_workspace(
                                      __FILE__, __LINE__);
     }
     return create_spec_workspace_impl(target, static_cast<uint32_t>(draft.config->max_draft_tokens()),
-                                      gdn_pool, arena, config, stream, tp_ranks);
+                                      gdn_pool, arena, config, stream, tp_ranks, true, nullptr);
 }
 
 Status bind_dflash2_spec_workspace(
@@ -1198,6 +1212,9 @@ std::vector<ExecuteBatchOptions> build_batch_gdn_options(
         options[r].gdn_compact.delta_layer_stride = ctx.compact[r].delta_layer_stride;
         options[r].gdn_compact.k_layer_stride = ctx.compact[r].k_layer_stride;
         options[r].gdn_compact.a_layer_stride = ctx.compact[r].a_layer_stride;
+        // Verify keeps the live recurrent state at the base; the batch commit below
+        // replays the accepted prefix from the compact log.
+        options[r].gdn_compact.defer_state_store = 1u;
     }
     return options;
 }
@@ -1415,9 +1432,9 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         for (DFlash2GdnRankState& state : decoder.gdn_ranks) {
             auto scope = shelf::gpu::ScopedDevice::create(state.device);
             if (!scope.ok()) return scope.status();
-            const Status st = spec_gdn_snapshot(
+            const Status st = spec_gdn_snapshot_conv(
                 *state.pool, decoder.sequence->slot, state.conv_snapshot,
-                state.rec_snapshot, state.conv_bytes, state.rec_bytes, state.stream);
+                state.conv_bytes, state.stream);
             if (!st.ok()) return st;
             if (state.commit_request != nullptr) {
                 ::shelf::runtime::DeviceRequestDescriptor req{};
@@ -1641,6 +1658,36 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             return Status::invalid_state("batch step page_tokens is zero", __FILE__, __LINE__);
         }
 
+        // Verify deferred the recurrent state write, so the live slot still holds the
+        // base state: replay the accepted prefix (all K+1 rows on a full accept).
+        for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
+            DFlash2GdnRankState& state = decoder.gdn_ranks[r];
+            auto scope = shelf::gpu::ScopedDevice::create(state.device);
+            if (!scope.ok()) return scope.status();
+            Status st = Status::make_ok();
+            if (accepted != plan.drafts) {
+                st = spec_gdn_restore_conv(
+                    *state.pool, decoder.sequence->slot, state.conv_snapshot,
+                    state.conv_bytes, state.stream);
+                if (!st.ok()) return st;
+                st = restore_gdn_spec_conv(
+                    *state.pool, decoder.sequence->slot, context.history[r],
+                    plan.row_begin + accepted, state.stream);
+                if (!st.ok()) return st;
+            }
+            GdnCompactLogDeviceView compact{};
+            compact.delta = context.compact[r].delta;
+            compact.k = context.compact[r].k;
+            compact.a = context.compact[r].a;
+            compact.delta_layer_stride = context.compact[r].delta_layer_stride;
+            compact.k_layer_stride = context.compact[r].k_layer_stride;
+            compact.a_layer_stride = context.compact[r].a_layer_stride;
+            st = commit_gdn_compact_log(
+                *state.pool, decoder.sequence->slot, compact, state.commit_request,
+                accepted + 1u, decoder.gdn_key_heads, state.stream);
+            if (!st.ok()) return st;
+        }
+
         if (accepted == plan.drafts) {
             const auto taps = batch_target_taps(decoder, plan.row_begin);
             Status st = dflash2::dflash2_append_target_taps(
@@ -1653,30 +1700,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             st = rollback_sequence_append(*decoder.sequence, required, decoder.stream);
             if (!st.ok()) return st;
         } else {
-            for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
-                DFlash2GdnRankState& state = decoder.gdn_ranks[r];
-                auto scope = shelf::gpu::ScopedDevice::create(state.device);
-                if (!scope.ok()) return scope.status();
-                Status st = spec_gdn_restore(
-                    *state.pool, decoder.sequence->slot, state.conv_snapshot,
-                    state.rec_snapshot, state.conv_bytes, state.rec_bytes, state.stream);
-                if (!st.ok()) return st;
-                st = restore_gdn_spec_conv(
-                    *state.pool, decoder.sequence->slot, context.history[r],
-                    plan.row_begin + accepted, state.stream);
-                if (!st.ok()) return st;
-                GdnCompactLogDeviceView compact{};
-                compact.delta = context.compact[r].delta;
-                compact.k = context.compact[r].k;
-                compact.a = context.compact[r].a;
-                compact.delta_layer_stride = context.compact[r].delta_layer_stride;
-                compact.k_layer_stride = context.compact[r].k_layer_stride;
-                compact.a_layer_stride = context.compact[r].a_layer_stride;
-                st = commit_gdn_compact_log(
-                    *state.pool, decoder.sequence->slot, compact, state.commit_request,
-                    accepted + 1u, decoder.gdn_key_heads, state.stream);
-                if (!st.ok()) return st;
-            }
             decoder.sequence->position = plan.position + accepted + 1u;
             const auto taps = batch_target_taps(decoder, plan.row_begin);
             Status st = dflash2::dflash2_append_target_taps(

@@ -118,7 +118,13 @@ Result<DFlash2SpecWorkspace> create_dflash2_spec_workspace_for_drafts(
     gpu::GpuArena& arena,
     const DFlash2SpecDecoderConfig& config,
     hipStream_t stream,
-    const std::vector<DFlash2GdnRankBinding>* tp_ranks = nullptr);
+    const std::vector<DFlash2GdnRankBinding>* tp_ranks = nullptr,
+    // false: skip the decoder-private history / compact log that only
+    // dflash2_spec_step uses (batched serve keeps them in the batch context).
+    bool step_buffers = true,
+    // Per-rank recurrent snapshot buffers owned by another workspace (sessions share
+    // one); nullptr allocates a private one.
+    const std::vector<void*>* shared_rec_snapshots = nullptr);
 
 Result<DFlash2SpecWorkspace> create_dflash2_spec_workspace(
     Executor& target,

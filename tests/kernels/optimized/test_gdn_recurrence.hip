@@ -70,6 +70,8 @@ struct Case {
     uint32_t seed;
     bool poison_v = false;
     bool verify = false;
+    // Verify with skip_state_store: outputs match the reference, the state is untouched.
+    bool skip_store = false;
 };
 
 struct Bufs {
@@ -301,6 +303,7 @@ bool run_case(const Case& c) {
     ka.head_v = c.head_v;
     ka.recurrent_slot_stride = slot_stride;
     ka.recurrent_layer_stride = layer_stride;
+    ka.skip_state_store = c.skip_store ? 1u : 0u;
     hipError_t he = hipSuccess;
     if (c.verify) {
         he = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ka, nullptr);
@@ -327,6 +330,7 @@ bool run_case(const Case& c) {
     for (size_t i = 0; i < state_total; ++i) {
         sc[i] = shelf::fp16_to_f32(sc16[i]);
         so[i] = shelf::fp16_to_f32(so16[i]);
+        if (c.skip_store) sc[i] = shelf::fp16_to_f32(h_state16[i]);
     }
 
     const auto out_hit = [&](size_t i) {
@@ -506,6 +510,14 @@ int main() {
          {{0, 0, 8}, {1, 8, 8}, {2, 16, 8}, {3, 24, 8}}, 32, 3030, false, true});
     run({"wmma-verify-m32-27b", 8, 24, 128, 128, 0, 1, 4,
          {{0, 0, 8}, {1, 8, 8}, {2, 16, 8}, {3, 24, 8}}, 32, 3031, false, true});
+    {
+        std::vector<Req> eight, sixteen;
+        for (uint32_t i = 0; i < 8u; ++i) eight.push_back({i, i * 8u, 8u});
+        for (uint32_t i = 0; i < 16u; ++i) sixteen.push_back({i, i * 8u, 8u});
+        run({"wmma-verify-nr8-m64", 16, 32, 128, 128, 0, 1, 8, eight, 64, 3032, false, true});
+        run({"wmma-verify-nr16-m128-27b", 8, 24, 128, 128, 0, 1, 16, sixteen, 128, 3033, false, true});
+        run({"wmma-verify-skip-store", 8, 24, 128, 128, 0, 1, 8, eight, 64, 3034, false, true, true});
+    }
     run({"nan-input", 16, 32, 128, 128, 0, 1, 1, {{0, 0, 33}}, 33, 1119, true});
     std::printf("%s: %d failures\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

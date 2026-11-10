@@ -64,6 +64,8 @@ struct GdnRecurrenceArgs {
     uint32_t compact_rows = 0;
     const int32_t* compact_row_indices = nullptr;
     uint32_t compact_row_capacity = 0;
+    // 1: the verify kernel does not write the final state back (replay commits it).
+    uint32_t skip_state_store = 0;
 };
 
 hipError_t
@@ -97,6 +99,10 @@ inline constexpr uint32_t kGdnRecurrenceWmmaVGroup = 64u;
 inline constexpr uint32_t kGdnRecurrenceVerifyBatchRows = 32u;
 inline constexpr uint32_t kGdnRecurrenceVerifyRowsPerRequest = 8u;
 inline constexpr uint32_t kGdnRecurrenceVerifyMaxRequests = 4u;
+// Launch-time bound of the verify kernel itself (one block per request, so it is
+// not tied to the M32 tuning range above). Batched DFlash2 verify relies on it.
+inline constexpr uint32_t kGdnRecurrenceVerifyLaunchMaxRequests = 64u;
+inline constexpr uint32_t kGdnRecurrenceVerifyLaunchMaxRows = 512u;
 
 constexpr uint32_t gdn_recurrence_wmma_grid_x(uint32_t num_requests,
                                               uint32_t num_v_heads,

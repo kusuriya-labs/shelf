@@ -36,6 +36,7 @@ struct ComputeOptions {
     shelf::qwen35::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
+    unsigned long dflash2_max_sessions = 0;
     int dflash2_stats = 1;
     bool mtp = false;
     unsigned long mtp_drafts = 7;

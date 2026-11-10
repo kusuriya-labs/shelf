@@ -34,7 +34,7 @@ verify し、一致した prefix だけを commit する。
 - runtime 統合は `shelf-compute` の `run_dflash2_shot()` にある。executor / pool /
   arena / stream は `Qwen35ComputeRuntime` の accessor から取得する。
 - `--serve-stdio` は `DFlashServeContext` 経由で同じ decoder 設定を作る。
-  `shelf-server` も `--dflash2-model-dir` / `--dflash2-drafts` のみ転送する。
+  `shelf-server` も `--dflash2-model-dir` / `--dflash2-drafts` / `--dflash2-max-sessions` を転送する。
 - serve mode は複数 request の target verify を 1 batch に統合する（batched verify）。
   scheduler の in-flight request をまとめて 1 round 実行し、draft も 1 回の batched
   drafter forward（`dflash2_propose_batch`）で生成する。
@@ -699,12 +699,19 @@ acceptance の間は変更しない。
   `position_start = position` で ring へ append し、余剰 KV page を
   `rollback_sequence_append(ceil(sequence.position / page_tokens))` で trim する。
   pending は bonus token。
-- partial（`accepted < K`）: verify 前の slot snapshot へ restore し、
+- partial（`accepted < K`）: verify 前の conv snapshot を restore し、
   `restore_gdn_spec_conv(pool, slot, history, accepted)` で conv を live へ戻した後、
   `commit_gdn_compact_log(pool, slot, log, requests, accepted + 1, key_heads)` で
   accept prefix の recurrent を再構成する。`sequence.position = position + accepted + 1` に
   設定し、verify の target tap rows `0..accepted` を ring へ append し、KV page を trim する。
   pending は correction token。target rerun は行わない。
+
+batched step（serve）の verify は live の recurrent state を書き換えない
+（`GdnCompactLogDeviceView::defer_state_store`、verify kernel は最終 state の store を
+省略する）。live slot は base state のままなので、recurrent の snapshot / restore は
+無く、full accept でも `commit_gdn_compact_log` で `K + 1` 行を replay して確定する。
+conv は shift register のため、従来どおり conv snapshot（約 2.8 MiB）から戻す。
+単一 request の `dflash2_spec_step` は従来どおり verify が state を書き込む。
 
 ### GDN state history
 
@@ -732,8 +739,13 @@ decoder あたりの GDN 消費（27B geometry、K=7）:
 - conv history rows = `config.num_drafts`。capture_rows は round の実 draft 数（`K`）。
 - compact log rows = `config.num_drafts + 1`（anchor + draft の実使用行）。
 - allocation は create 時の 1 回のみ。hot path allocation は行わない。
-- history / compact log は `DFlash2SpecDecoder` ごとに確保する。arena は bump のみで
-  個別 free が無いため、同時 N decoder はこの値を N 倍で確保する。
+- history / compact log は `DFlash2SpecDecoder` ごとに確保する（単一 request 用）。
+  serve の session pool は確保しない（`step_buffers=false`）。batched step は
+  `DFlash2SpecBatchContext` の共有 history / compact log だけを使う。
+- serve の session ごとの確保は、drafter context ring（約 40 MiB）と conv snapshot
+  （約 2.8 MiB）である。recurrent snapshot（約 72 MiB）は全 session で 1 つを共有する。
+  共有 buffer を使うのは直列に実行される prefix cache の shadow prefill だけである。
+- arena は bump のみで個別 free が無いため、同時 N session はこの値を N 倍で確保する。
 - create 時に `history bytes > kDFlash2SpecHistoryBytesMax`（2.25 GiB）なら
   decoder create を FAIL する（FP16 化等で逃げない）。27B geometry
   （146.8 MiB/row）では rows ≤ 15 が上限である。
@@ -884,11 +896,16 @@ samples を別途 D2H する。
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
+- `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
+  `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
+  （`N × block_size`）、drafter scratch の大きさがこの値で決まる。pool に空きが無い間に
+  admit された request は投機せず通常 decode になる（その request は完了まで投機しない）。
+  session pool の VRAM は `--max-concurrent-requests` ではなくこの値に比例する。
 
 DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path である。
 
-`shelf-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
-`shelf-compute` へ転送する（= compute の既定をそのまま使う）。
+`shelf-server` は `--dflash2-model-dir` / `--dflash2-drafts` /
+`--dflash2-max-sessions`（0 以外のとき）を `shelf-compute` へ転送する。
 
 ### invalid combinations（model load 前に exit 2）
 

@@ -172,4 +172,52 @@ Status spec_gdn_restore(
     return Status::make_ok();
 }
 
+Status spec_gdn_snapshot_conv(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    void* conv_dst,
+    std::size_t conv_bytes,
+    hipStream_t stream) {
+    if (conv_dst == nullptr) {
+        return Status::invalid_argument("spec_gdn_snapshot_conv output is null", __FILE__, __LINE__);
+    }
+    if (slot >= pool.max_sequences()) {
+        return Status::out_of_range("spec_gdn_snapshot_conv slot out of range", __FILE__, __LINE__);
+    }
+    if (conv_bytes != spec_gdn_conv_bytes(pool)) {
+        return Status::invalid_argument("spec_gdn_snapshot_conv byte size mismatch", __FILE__, __LINE__);
+    }
+    const GdnStatePoolDeviceView view = pool.device_view();
+    const bf16_t* conv_src = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
+    const hipError_t err = hipMemcpyAsync(conv_dst, conv_src, conv_bytes, hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("spec_gdn_snapshot_conv copy", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status spec_gdn_restore_conv(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    const void* conv_src,
+    std::size_t conv_bytes,
+    hipStream_t stream) {
+    if (conv_src == nullptr) {
+        return Status::invalid_argument("spec_gdn_restore_conv input is null", __FILE__, __LINE__);
+    }
+    if (slot >= pool.max_sequences()) {
+        return Status::out_of_range("spec_gdn_restore_conv slot out of range", __FILE__, __LINE__);
+    }
+    if (conv_bytes != spec_gdn_conv_bytes(pool)) {
+        return Status::invalid_argument("spec_gdn_restore_conv byte size mismatch", __FILE__, __LINE__);
+    }
+    const GdnStatePoolDeviceView view = pool.device_view();
+    bf16_t* conv_dst = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
+    const hipError_t err = hipMemcpyAsync(conv_dst, conv_src, conv_bytes, hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("spec_gdn_restore_conv copy", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 }  // namespace shelf::qwen35::runtime

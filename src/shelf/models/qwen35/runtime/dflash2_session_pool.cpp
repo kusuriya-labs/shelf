@@ -29,6 +29,7 @@ Result<DFlash2SessionPool> DFlash2SessionPool::create(
     const std::size_t start_bytes = arena.used();
     DFlash2SessionPool pool;
     pool.slots_.resize(max_sessions);
+    std::vector<void*> shared_rec;
     for (uint32_t i = 0; i < max_sessions; ++i) {
         DFlash2SessionSlot& slot = pool.slots_[i];
         if (draft != nullptr) {
@@ -44,16 +45,28 @@ Result<DFlash2SessionPool> DFlash2SessionPool::create(
         const uint32_t ws_draft_cap =
             static_cast<uint32_t>(draft->config->max_draft_tokens());
         auto workspace_result = create_dflash2_spec_workspace_for_drafts(
-            target, ws_draft_cap, gdn_pool, arena, config, stream, rank_bindings);
+            target, ws_draft_cap, gdn_pool, arena, config, stream, rank_bindings,
+            /*step_buffers=*/false, i == 0u ? nullptr : &shared_rec);
         if (!workspace_result.ok()) {
             (void)pool.shutdown();
             return workspace_result.status();
         }
         slot.workspace = workspace_result.release();
+        if (i == 0u) {
+            for (const DFlash2GdnRankState& g : slot.workspace.gdn_ranks) {
+                shared_rec.push_back(g.rec_snapshot);
+            }
+        }
 
         if (i == 0u) {
             const std::size_t per_slot = arena.used() - start_bytes;
-            const std::size_t projected = per_slot * max_sessions;
+            std::size_t shared_rec_bytes = 0u;
+            for (const DFlash2GdnRankState& g : slot.workspace.gdn_ranks) {
+                shared_rec_bytes += g.rec_bytes;
+            }
+            // Slot 0 owns the recurrent snapshot every other slot shares.
+            const std::size_t projected =
+                per_slot * max_sessions - shared_rec_bytes * (max_sessions - 1u);
             const std::size_t arena_free = arena.capacity() - start_bytes;
             if (projected > arena_free) {
                 (void)pool.shutdown();

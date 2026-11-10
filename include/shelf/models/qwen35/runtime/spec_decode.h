@@ -67,4 +67,20 @@ Status spec_gdn_restore(
     std::size_t recurrent_bytes,
     hipStream_t stream);
 
+// Conv-only variants: batched DFlash2 verify defers the recurrent state write, so
+// only the (small) conv state needs a restore point.
+Status spec_gdn_snapshot_conv(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    void* conv_dst,
+    std::size_t conv_bytes,
+    hipStream_t stream);
+
+Status spec_gdn_restore_conv(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    const void* conv_src,
+    std::size_t conv_bytes,
+    hipStream_t stream);
+
 }  // namespace shelf::qwen35::runtime

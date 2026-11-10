@@ -601,6 +601,9 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         detail::lds_barrier();
     }
 
+    if constexpr (kSerialRows) {
+        if (a.skip_state_store != 0u) return;
+    }
     const uint32_t slot_store = a.requests[request_index].request_handle.slot;
     fp16_t* const store_head = a.recurrent_state
         + static_cast<uint64_t>(slot_store) * a.recurrent_slot_stride
@@ -825,8 +828,8 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     if (args.num_v_heads % args.key_heads != 0u) return hipErrorInvalidValue;
     if (args.num_requests == 0u || args.actual_rows == 0u) return hipErrorInvalidValue;
     if (args.execution_class_filter == 0u) {
-        if (args.num_requests > kGdnRecurrenceVerifyMaxRequests) return hipErrorInvalidValue;
-        if (args.actual_rows > kGdnRecurrenceVerifyBatchRows) return hipErrorInvalidValue;
+        if (args.num_requests > kGdnRecurrenceVerifyLaunchMaxRequests) return hipErrorInvalidValue;
+        if (args.actual_rows > kGdnRecurrenceVerifyLaunchMaxRows) return hipErrorInvalidValue;
     }
     if (args.q == nullptr || args.k == nullptr || args.v == nullptr || args.a == nullptr ||
         args.b == nullptr)

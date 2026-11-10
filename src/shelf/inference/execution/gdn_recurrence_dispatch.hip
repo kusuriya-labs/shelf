@@ -213,6 +213,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.compact_delta_layer_stride = compact.delta_layer_stride;
         c.compact_k_layer_stride = compact.k_layer_stride;
         c.compact_a_layer_stride = compact.a_layer_stride;
+        c.skip_state_store = compact.defer_state_store;
     }
     return ra;
 }

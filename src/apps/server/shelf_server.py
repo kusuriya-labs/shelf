@@ -97,6 +97,8 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
+        if opts.dflash2_max_sessions > 0:
+            argv += ["--dflash2-max-sessions", str(opts.dflash2_max_sessions)]
     if opts.mtp:
         argv += ["--mtp", "--mtp-drafts", str(opts.mtp_drafts)]
     if opts.tensor_parallel > 1:
@@ -469,6 +471,9 @@ def parse_args(argv=None):
                         help="DFlash2 draft model directory (enables speculative decoding)")
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
+    parser.add_argument("--dflash2-max-sessions", type=int, default=0,
+                        help="requests that may speculate at once; the rest decode "
+                             "without speculation (0 = min(--max-concurrent-requests, 8))")
     parser.add_argument("--mtp", action="store_true",
                         help="checkpoint の MTP block を drafter として使う"
                              "（複数 request を同時に処理する）")

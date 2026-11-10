@@ -124,10 +124,9 @@ Status ContinuousBatcher::set_dflash2(const DFlash2BatcherBinding& binding) {
         return Status::invalid_argument("dflash2 binding num_drafts out of range",
                                         __FILE__, __LINE__);
     }
-    if (binding.sessions->capacity() < config_.max_scheduled_requests) {
-        return Status::invalid_argument(
-            "dflash2 session pool is smaller than max_scheduled_requests", __FILE__,
-            __LINE__);
+    if (binding.sessions->capacity() == 0u) {
+        return Status::invalid_argument("dflash2 session pool is empty", __FILE__,
+                                        __LINE__);
     }
     dflash_ = binding;
     return Status::make_ok();
@@ -483,7 +482,10 @@ Result<StepResult> ContinuousBatcher::step() {
                          static_cast<int>(dflash2_available()),
                          static_cast<const void*>(prefix_cache_));
         }
-        if (request.speculative_decode && dflash2_available()) {
+        // The pool may be smaller than the request count; requests that find no
+        // free session decode without speculation.
+        if (request.speculative_decode && dflash2_available() &&
+            dflash_.sessions->num_free() > 0u) {
             const Status open_st = open_dflash2_context(request);
             if (!open_st.ok()) {
                 request.error_message = open_st.message();

@@ -24,6 +24,10 @@ struct GdnCompactLogDeviceView {
     uint64_t delta_layer_stride = 0u;
     uint64_t k_layer_stride = 0u;
     uint64_t a_layer_stride = 0u;
+
+    // Verify leaves the live recurrent state untouched; the accepted prefix is
+    // replayed from this log afterwards (commit_gdn_compact_log).
+    uint32_t defer_state_store = 0u;
 };
 
 struct QsaSpecHistoryDeviceView {

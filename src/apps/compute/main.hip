@@ -150,6 +150,7 @@ int main(int argc, char** argv) {
         config.draft_config = dflash_config;
         config.draft_config_ready = true;
         config.dflash2_drafts = static_cast<uint32_t>(opt.dflash2_drafts);
+        config.dflash2_max_sessions = static_cast<uint32_t>(opt.dflash2_max_sessions);
         if (opt.tp > 1) {
             config.private_target_weights = true;
             config.private_target_lm_head = true;
@@ -171,15 +172,20 @@ int main(int argc, char** argv) {
             config.max_scheduled_output_rows = batch_rows;
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
-            const uint32_t batch_rows = config.max_concurrent_requests *
+            const uint32_t batch_rows = config.dflash2_sessions() *
                 static_cast<uint32_t>(dflash_config.block_size);
             if (config.max_num_batched_tokens < batch_rows) {
                 config.max_num_batched_tokens = batch_rows;
             }
-            config.max_scheduled_output_rows =
+            uint32_t output_rows =
                 batch_rows < shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows
                     ? batch_rows
                     : shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows;
+            // Non-speculative requests still need one output row each.
+            if (output_rows < config.max_concurrent_requests) {
+                output_rows = config.max_concurrent_requests;
+            }
+            config.max_scheduled_output_rows = output_rows;
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
             for (std::size_t t = 0; t < dflash_config.num_target_layer_ids; ++t) {

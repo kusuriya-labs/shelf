@@ -47,14 +47,19 @@ std::size_t dflash2_context_state_bytes(const dflash2::DFlash2Config& config) no
 }
 
 std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
-                                         const ::shelf::state::GdnStatePool& pool) noexcept {
+                                         const ::shelf::state::GdnStatePool& pool,
+                                         bool step_buffers,
+                                         bool rec_snapshot) noexcept {
     const std::size_t verify_rows = kDFlash2SpecMaxVerifyRows;
     std::size_t total = align_up(verify_rows * sizeof(int32_t)) +
                         align_up(2u * verify_rows * sizeof(int32_t));
 
     const std::size_t conv_bytes = spec_gdn_conv_bytes(pool);
     const std::size_t rec_bytes = spec_gdn_recurrent_bytes(pool);
-    total += align_up(conv_bytes) + align_up(rec_bytes);
+    total += align_up(conv_bytes) + (rec_snapshot ? align_up(rec_bytes) : 0u);
+    if (!step_buffers) {
+        return total + align_up(sizeof(::shelf::runtime::DeviceRequestDescriptor));
+    }
 
     const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
     const uint32_t history_rows = config.num_drafts == 0u ? 1u : config.num_drafts;
@@ -146,12 +151,19 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
     footprint.draft_scratch =
         dflash2_draft_scratch_bytes(config, rows_for(config, sessions), lm_head_k,
                                     prefill_rows);
+    // Serve sessions skip the decoder-private history / compact log; one decoder's
+    // worth stays in spec_batch so the single-request path is still covered.
     footprint.session_slot =
-        dflash2_context_state_bytes(config) + dflash2_spec_workspace_bytes(spec_config, pool);
+        dflash2_context_state_bytes(config) +
+        dflash2_spec_workspace_bytes(spec_config, pool, /*step_buffers=*/false,
+                                     /*rec_snapshot=*/false);
     const std::size_t batch_rows = std::min<std::size_t>(
         kDFlash2SpecMaxVerifyRows,
         (sessions == 0u ? 1u : sessions) * (config.block_size == 0u ? 1u : config.block_size));
-    footprint.spec_batch = dflash2_spec_batch_context_bytes(pool, batch_rows);
+    footprint.spec_batch =
+        dflash2_spec_batch_context_bytes(pool, batch_rows) +
+        (dflash2_spec_workspace_bytes(spec_config, pool, true, true) -
+         dflash2_spec_workspace_bytes(spec_config, pool, false, false));
     footprint.sessions = sessions == 0u ? 1u : sessions;
     return footprint;
 }

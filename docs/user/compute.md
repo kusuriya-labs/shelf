@@ -33,6 +33,7 @@
 | `--seed N` | sampling seed (default 0) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
+| `--dflash2-max-sessions N` | serve only: requests that may speculate at once (default min(`--max-concurrent-requests`, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
