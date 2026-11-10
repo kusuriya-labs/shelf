@@ -106,6 +106,17 @@ def map_finish_reason(raw: str, *, has_tool_calls: bool) -> str:
     return "tool_calls" if mapped == "stop" and has_tool_calls else mapped
 
 
+def _complete_tool_text(text: str) -> tuple[str, bool]:
+    start = text.rfind("<tool_call>")
+    if start > text.rfind("</tool_call>"):
+        return text[:start], False
+    marker = "<tool_call>"
+    for size in range(len(marker) - 1, 4, -1):
+        if text.endswith(marker[:size]):
+            return text[:-size], False
+    return text, True
+
+
 def log_tokens(generated_ids) -> None:
     path = os.environ.get("SHELF_SERVER_TOKEN_LOG")
     if not path:
@@ -265,10 +276,15 @@ class ChatService:
             self._processor, generated_ids,
             thinking=prepared.enable_thinking)
 
+        answer = prepared.tool_prefix + split.answer
+        if prepared.tools:
+            answer, complete = _complete_tool_text(answer)
+            if not complete and done.get("finish_reason") != "length":
+                raise ChatServiceError("incomplete tool call", code="tool_parse_failure")
         try:
             parsed = codec.parse_answer(
                 self._processor,
-                prepared.tool_prefix + split.answer,
+                answer,
                 tools=prepared.tools,
             )
         except codec.ToolParseError as exc:
@@ -467,7 +483,7 @@ class ChatService:
         regions = codec.new_region_parser(
             self._processor, thinking=prepared.enable_thinking)
         parser = codec.new_response_parser(self._processor)
-        state: dict[str, Any] = {"content": "", "calls": 0}
+        state: dict[str, Any] = {"content": "", "calls": 0, "answer": ""}
         generated: list[int] = []
         done: dict | None = None
 
@@ -497,6 +513,12 @@ class ChatService:
                             code="tool_parse_failure",
                         ) from exc
 
+                    _, complete = _complete_tool_text(state["answer"])
+                    if not complete:
+                        if done.get("finish_reason") != "length":
+                            raise ChatServiceError("incomplete tool call", code="tool_parse_failure")
+                        final_events = []
+                        message = {"content": state["content"], "tool_calls": []}
                     if final_events:
                         for item in self._feed_parser(parser, "", state,
                                                       events=final_events):
@@ -549,6 +571,7 @@ class ChatService:
         if delta.region == codec.REASONING:
             yield ReasoningDelta(delta.text)
             return
+        state["answer"] += delta.text
         for item in self._feed_parser(parser, delta.text, state):
             yield item
 

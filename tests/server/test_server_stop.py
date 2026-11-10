@@ -105,7 +105,31 @@ async def run(checker):
     service = ChatService(Processor(), compute, "shelf", 1000)
     with patch("serverlib.chat_service.codec.new_response_parser", return_value=FakeParser()):
         events = [e async for e in service.stream(request(stop="STOP", tools=[tool], chat_template_kwargs={"enable_thinking": False}))]
-    checker.check("tool-markup-excluded", any(isinstance(e, ToolCallDelta) and "STOP" in e.arguments for e in events) and events[-1].finish_reason == "tool_calls" and compute.cancelled == 0, repr(events))
+    checker.check("tool-markup-excluded", any(isinstance(e, ToolCallDelta) and "STOP" in e.arguments for e in events) and events[-1].finish_reason == "length" and compute.cancelled == 0, repr(events))
+
+    class IncompleteParser:
+        def feed(self, text):
+            return []
+        def finalize(self):
+            call = {"function": {"name": "f", "arguments": {}}}
+            return ({"content": "", "tool_calls": [call]},
+                    [{"type": "region_close", "field": "tool_calls", "value": call}])
+    unfinished = list("<tool_call>\n<function=f>\n<parameter=x>\npartial".encode())
+    compute = Compute(unfinished)
+    service = ChatService(Processor(), compute, "shelf", 1000)
+    with patch("serverlib.chat_service.codec.new_response_parser", return_value=IncompleteParser()):
+        events = [e async for e in service.stream(request(tools=[tool], chat_template_kwargs={"enable_thinking": False}))]
+    checker.check("truncated-tool-stream-not-invented", not any(isinstance(e, (ToolCallDelta, ContentDelta)) for e in events)
+                  and events[-1].finish_reason == "length", repr(events))
+
+    class CompleteCompute:
+        async def generate(self, *args, **kwargs):
+            return {"generated_ids": unfinished, "finish_reason": "length"}
+    service = ChatService(Processor(), CompleteCompute(), "shelf", 1000)
+    with patch("serverlib.chat_service.codec.parse_answer", return_value={"content": "", "tool_calls": []}) as parse:
+        result = await service.complete(request(tools=[tool], chat_template_kwargs={"enable_thinking": False}))
+    checker.check("truncated-tool-nonstream-not-invented", result.finish_reason == "length" and not result.tool_calls
+                  and parse.call_args.args[1] == "", repr(result))
 
     shared = Compute(list("alpha STOP trailing".encode()))
     service = ChatService(Processor(), shared, "shelf", 1000)
