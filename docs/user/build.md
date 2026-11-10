@@ -16,10 +16,12 @@
 
 `shelf-compute` 単体は Python 非依存。
 
-server runtime dependency は次の 2 package のみである。
+server の通常実行に必要な package は次のとおり。構造化出力には別途 `xgrammar==0.2.9` を Python 環境にインストールする。未導入の場合、通常 request は動作し、構造化出力 request は HTTP 400 で拒否する。
 
 ```bash
 pip install 'aiohttp' 'transformers==5.14.1'
+# 構造化出力を利用する場合
+pip install 'xgrammar==0.2.9'
 ```
 
 `transformers==5.14.1` は chat template / Qwen response parser の regression を避けるため固定する。

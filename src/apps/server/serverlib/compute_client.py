@@ -349,6 +349,7 @@ class AsyncComputeClient:
         prefix_cache_checkpoint_position: int = 0,
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
+        grammar=None,
     ) -> None:
         payload = {
             "op": "generate",
@@ -365,6 +366,9 @@ class AsyncComputeClient:
         if reasoning_budget_tokens > 0:
             payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
             payload["reasoning_close_token"] = int(reasoning_close_token)
+        if grammar is not None:
+            payload["grammar"] = True
+            payload["bitmask"] = grammar.next_mask()
         await self._send(payload)
 
     async def cancel(self, request_id: int) -> None:
@@ -443,6 +447,7 @@ class AsyncComputeClient:
         prefix_cache_checkpoint_position: int = 0,
         reasoning_budget_tokens: int = 0,
         reasoning_close_token: int = -1,
+        grammar=None,
     ) -> AsyncIterator[dict]:
         """Yield ``{"token_id": N}`` events, then one ``{"done": event}``.
 
@@ -459,7 +464,7 @@ class AsyncComputeClient:
             await self._send_generate(
                 request_id, input_ids, max_new_tokens, temperature,
                 top_p, min_p, top_k, seed, prefix_cache_checkpoint_position,
-                reasoning_budget_tokens, reasoning_close_token)
+                reasoning_budget_tokens, reasoning_close_token, grammar)
 
             sent = True
 
@@ -472,8 +477,12 @@ class AsyncComputeClient:
                 kind = event.get("event")
 
                 if kind == "token":
+                    token = int(event["token_id"])
+                    if grammar is not None and grammar.accept(token):
+                        await self._send({"op": "mask", "request_id": request_id,
+                                          "bitmask": grammar.next_mask()})
                     yield {
-                        "token_id": int(event["token_id"])
+                        "token_id": token
                     }
 
                 elif kind == "error":

@@ -46,6 +46,7 @@ add_custom_command(
         "${SHELF_SERVERLIB_DIR}/openai_protocol.py"
         "${SHELF_SERVERLIB_DIR}/compute_client.py"
         "${SHELF_SERVERLIB_DIR}/chat_service.py"
+        "${SHELF_SERVERLIB_DIR}/structured_output.py"
         "${SHELF_SERVERLIB_DIR}/responses_protocol.py"
         "${SHELF_SERVERLIB_DIR}/responses_service.py"
         "${SHELF_CHAT_DIR}/__init__.py"

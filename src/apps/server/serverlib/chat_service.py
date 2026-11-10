@@ -49,6 +49,7 @@ class PreparedChat:
     reasoning_budget_tokens: int = 0
     reasoning_close_token: int = -1
     tool_prefix: str = ""
+    grammar: Any = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,7 @@ class ChatService:
                  inference_budget_tokens: int = 32768,
                  large_context_tokens: int = 0,
                  large_context_inference_budget_tokens: int = 0,
-                 reasoning_close_token: int = -1):
+                 reasoning_close_token: int = -1, vocab_size: int = 0):
         self._processor = processor
         self._compute = compute
         self._model_name = model_name
@@ -143,6 +144,8 @@ class ChatService:
         self._large_context_inference_budget_tokens = (
             large_context_inference_budget_tokens)
         self._reasoning_close_token = reasoning_close_token
+        from .structured_output import GrammarFactory
+        self._grammar_factory = GrammarFactory(processor, vocab_size)
 
     @property
     def model_name(self) -> str:
@@ -240,13 +243,15 @@ class ChatService:
             tool_prefix=tool_prefix,
             reasoning_budget_tokens=reasoning_budget_tokens,
             reasoning_close_token=self._reasoning_close_token,
+            grammar=(self._grammar_factory.create(request.response_schema)
+                     if request.response_schema is not None else None),
         )
 
     # ----------------------------------------------------------------- non-stream
 
     async def complete(self, request: ChatRequest) -> AssistantResult:
         prepared = self.prepare(request)
-        if request.stop or prepared.tool_prefix:
+        if request.stop or prepared.tool_prefix or prepared.grammar is not None:
             content, reasoning_parts, calls = [], [], []
             done = None
             async for event in self.stream(request, prepared):
@@ -385,6 +390,7 @@ class ChatService:
             await inner.aclose()
 
     def _stream_open(self, prepared: PreparedChat, request: ChatRequest):
+        kwargs = {"grammar": prepared.grammar} if prepared.grammar is not None else {}
         return self._compute.generate_stream(
             prepared.prompt_ids,
             prepared.max_new_tokens,
@@ -396,6 +402,7 @@ class ChatService:
             prefix_cache_checkpoint_position=0,
             reasoning_budget_tokens=prepared.reasoning_budget_tokens,
             reasoning_close_token=prepared.reasoning_close_token,
+            **kwargs,
         )
 
     async def _stream_text(self, prepared: PreparedChat,

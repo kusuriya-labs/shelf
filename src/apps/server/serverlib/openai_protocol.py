@@ -69,6 +69,7 @@ class ChatRequest:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     preserve_thinking: bool = True
     forced_tool_name: str | None = None
+    response_schema: dict | None = None
 
 
 def error_body(message: str, *, param: str | None = None,
@@ -104,7 +105,7 @@ def reject_unsupported(body: dict) -> None:
         "max_tokens", "max_completion_tokens", "temperature", "top_p", "min_p",
         "top_k", "seed", "chat_template_kwargs", "reasoning_effort", "n",
         "user", "store", "metadata", "service_tier", "parallel_tool_calls",
-        "frequency_penalty", "presence_penalty", "stop",
+        "frequency_penalty", "presence_penalty", "stop", "response_format",
     }
     for key in body:
         if key not in allowed:
@@ -120,7 +121,6 @@ def reject_unsupported(body: dict) -> None:
                                   not isinstance(value, (int, float)) or value != 0):
             raise OpenAIProtocolError(
                 f"only {key}=0 is supported", param=key, code="unsupported_parameter")
-    _reject(body, "response_format", "response_format is not supported")
     _reject(body, "reasoning", "reasoning is not supported")
     _reject(body, "text", "text is not supported")
     _reject(body, "logit_bias", "logit_bias is not supported")
@@ -417,6 +417,29 @@ def parse_chat_request(body: Any,
     include_usage = _stream_options_include_usage(body)
 
     enable_thinking, preserve_thinking = parse_chat_template_kwargs(body)
+    response_schema = None
+    fmt = body.get("response_format")
+    if fmt is not None:
+        if not isinstance(fmt, dict) or fmt.get("type") not in ("text", "json_object", "json_schema"):
+            raise OpenAIProtocolError("invalid response_format", param="response_format", code="unsupported_parameter")
+        kind = fmt["type"]
+        if set(fmt) != ({"type", "json_schema"} if kind == "json_schema" else {"type"}):
+            raise OpenAIProtocolError("unsupported response_format fields", param="response_format", code="unsupported_parameter")
+        if kind == "json_object":
+            response_schema = {"type": "object"}
+        elif kind == "json_schema":
+            spec = fmt["json_schema"]
+            if (not isinstance(spec, dict) or set(spec) - {"name", "description", "schema", "strict"}
+                or not isinstance(spec.get("name"), str) or not spec["name"]
+                or not isinstance(spec.get("schema"), dict)
+                or ("strict" in spec and not isinstance(spec["strict"], bool))
+                or ("description" in spec and not isinstance(spec["description"], str))):
+                raise OpenAIProtocolError("invalid json_schema format", param="response_format", code="unsupported_parameter")
+            response_schema = spec["schema"]
+            from .structured_output import validate_schema
+            validate_schema(response_schema)
+        if response_schema is not None and (enable_thinking or tools or body.get("stop") is not None):
+            raise OpenAIProtocolError("structured output requires enable_thinking=false and does not support tools or stop", param="response_format", code="unsupported_parameter")
     reasoning_effort, effort_given = parse_reasoning_effort(body)
     if effort_given and not enable_thinking:
         raise OpenAIProtocolError(
@@ -443,6 +466,7 @@ def parse_chat_request(body: Any,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         preserve_thinking=preserve_thinking,
+        response_schema=response_schema,
     )
 
 

@@ -25,7 +25,7 @@ http://127.0.0.1:8000/v1
 embeddings、vision、audio、認証、TLS、複数modelは対象外。
 
 依存は Python / `aiohttp` / `transformers==5.14.1` / `jinja2` である。
-LocalAI・gRPC・protobuf・XGrammar は要らない。
+構造化出力には `xgrammar==0.2.9` が必要である。未導入でも通常の request は利用できる。
 
 ## 起動
 
@@ -580,7 +580,6 @@ for event in client.responses.create(model="shelf", input="こんにちは", str
 Chat Completions では、非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。次の一覧も Chat Completions に適用する。Responses の未対応項目は上記の節に記載する。
 
 ```text
-response_format
 reasoning
 text
 tools[].function.strict=true
@@ -734,3 +733,15 @@ python3 tests/server/run_server_regression.py --all
 `tests/server/run_server_regression.py` が canonical な server regression runner である。
 non-zero return は失敗として扱う。`--list` で group と test の一覧を表示できる。
 suite の詳細は [../developer/testing.md](../developer/testing.md) を参照する。
+
+## 構造化出力
+
+Chat Completions は `response_format` の `json_object` と `json_schema` を受理する。
+`chat_template_kwargs.enable_thinking=false` を指定する。tools、stop、thinking との
+併用は HTTP 400 で拒否する。stream と非 stream、temperature > 0 に対応する。
+JSON Schema は `type`、`properties`、`required`、`items`、`enum`、
+`additionalProperties`（boolean）、`title`、`description` の subset を受け付ける。
+未対応キーワードは HTTP 400 とする。生成上限に達した場合は JSON が未完成となりうる。
+
+制約付き request は DFlash2 / MTP が有効でも通常 decode を使用する。strict tools、
+制約付き tool_choice、Responses の `text.format`、投機 decode との併用は M3 の作業である。

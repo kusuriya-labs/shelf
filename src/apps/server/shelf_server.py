@@ -564,6 +564,8 @@ async def _serve(opts) -> int:
         large_context_inference_budget_tokens=(
             opts.large_context_inference_budget_tokens),
         reasoning_close_token=reasoning_capability["close_token"],
+        vocab_size=(lambda config: config.get("text_config", config).get("vocab_size", 0))(
+            json.loads((Path(opts.model_dir) / "config.json").read_text())),
     )
 
     if opts.dflash2_model_dir:
@@ -641,7 +643,8 @@ async def _serve(opts) -> int:
     _log("")
     _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
          "concurrency, cancel")
-    _log("Unsupported: structured output, strict tools")
+    _log("Structured output: json_object and json_schema (requires xgrammar, thinking off)")
+    _log("Unsupported: strict tools")
     _log("")
     _log("Ready.")
 
