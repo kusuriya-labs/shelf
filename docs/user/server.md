@@ -56,7 +56,7 @@ Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
 Efforts:      low, medium, xhigh
 
 Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
-Unsupported: structured output, strict tools, reasoning object
+Unsupported: structured output, strict tools
 
 Ready.
 ```
@@ -307,7 +307,7 @@ curl http://127.0.0.1:8000/v1/meta
 | `max_seq_len` | `--max-seq-len`。コンテキスト上限の正本 |
 | `max_concurrent_requests` | `--max-concurrent-requests`。最大 in-flight 数 |
 | `inference_budget` | 推論予算。`tokens`（`--inference-budget-tokens`）、`large_context_tokens`、`large_context_inference_budget_tokens`、既定予算での `answer_reserve_tokens` / `thinking_budget_tokens` |
-| `arena_gib` | `--arena-gib`（`"auto"` または整数 GiB） |
+| `arena_gib` | `--arena-gib`（`"auto"` または数値 GiB） |
 | `device` / `tensor_parallel` | `--device` / `--tensor-parallel` |
 | `kv_cache_dtype` | KV cache の dtype |
 | `working_set_reserve_gib` | `--working-set-reserve-gib` |
@@ -499,12 +499,13 @@ assistant 応答を生成する。
 
 `tool_choice` は `auto`、`none`、`required`、関数名指定を受け付ける。`none` は tool 定義を model へ渡さない。
 `required` と関数名指定では思考を閉じ、tool call の開始部分を prompt に補って生成する。
-その開始部分は prompt token に含み、生成上限には含まない。tool call が閉じるまで stream 出力を保留する。
+その開始部分は prompt token に含み、生成上限には含まない。強制指定では生成完了まで stream 出力を保留する。
 関数名指定は指定した名前以外を返さない。`required` で未定義の関数名が生成された場合はエラーとする。
 引数の構文と意味はモデルの生成次第で、schema に対する保証はない。生成上限に到達して未完了の
 markup は tool call に変換せず、`length` を返す。tools 未指定や存在しない関数名は 400 とする。
-`required` と関数名指定は HTTP 400 とする。文法制約を使わない生成では tool call の
-発生や指定した関数の選択を保証できないためである。存在しない関数名も拒否する。
+Chat での関数名指定は `{"type":"function","function":{"name":"get_weather"}}`、
+Responses では `{"type":"function","name":"get_weather"}` とする。正常に完了した tool call の
+`finish_reason` は `tool_calls`、出力上限に達した場合は tool call の有無にかかわらず `length` である。
 
 tool calling は best-effort である。生成された tool call は Transformers の Qwen response
 parser で解析し、schema の enforce や生成後の修復は行わない。parser が tool-call-like な
@@ -546,10 +547,13 @@ message として扱う。tool は `type: function`、`name`、`description`、
 `parallel_tool_calls: true`、`truncation: disabled`、空の `include` または
 `include: ["reasoning.encrypted_content"]` を受け付ける。後者を指定しても暗号化された思考は返さない。
 `reasoning.summary: "auto"` は受理するが summary の生成は指定できない。
-Responses では `metadata`、`user`、`prompt_cache_key`、`client_metadata` を受理するが使用しない。
+Responses では `metadata`、`user`、`prompt_cache_key`、`client_metadata`、
+`parallel_tool_calls: true` を受理するが使用しない。
 `store` は `false` のみ受理し、`true` は拒否する。履歴はリクエストごとに送る。usage の `input_tokens_details.cached_tokens` は
 compute の prefix cache の復元数である。非 stream の `output_tokens_details` は
 reasoning token 数を含む。stream では reasoning token 数を取得できない。
+出力上限に達すると `status: "incomplete"`、`incomplete_details.reason: "max_output_tokens"` を返し、
+stream では `response.incomplete` で終了する。正常終了時は `response.completed` で終了する。
 
 `previous_response_id`、`conversation`、画像・音声・ファイル、`custom` tool、
 `strict: true`、`text.format` の JSON schema、`parallel_tool_calls: false`、
@@ -570,9 +574,9 @@ for event in client.responses.create(model="shelf", input="こんにちは", str
 
 ## サポート外の API
 
-以下および未知のトップレベルキーは HTTP 400（`code=unsupported_parameter`）で拒否する。上記の明示的に無視するキー以外は silent ignore しない。
+未知のトップレベルキーは HTTP 400（`code=unsupported_parameter`）で拒否する。明示的に受理して無視するキーは、Chat と Responses の各節に列挙したものに限る。
 
-非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。
+Chat Completions では、非 0 の `frequency_penalty` / `presence_penalty`、`top_logprobs`、`prediction`、`modalities`、`audio`、`web_search_options` も未対応。次の一覧も Chat Completions に適用する。Responses の未対応項目は上記の節に記載する。
 
 ```text
 response_format

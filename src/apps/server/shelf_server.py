@@ -636,8 +636,7 @@ async def _serve(opts) -> int:
     _log("")
     _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
          "concurrency, cancel")
-    _log("Unsupported: structured output, strict tools, "
-         "reasoning object")
+    _log("Unsupported: structured output, strict tools")
     _log("")
     _log("Ready.")
 
