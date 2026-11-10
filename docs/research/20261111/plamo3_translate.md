@@ -158,3 +158,50 @@ Qwen の `--group core` は最初、パイプ入力の format 判定で先頭 to
 3 個別テストを再実行し、DFlash2 99 件、unaligned prefill 7 件、server-chat 10 件が
 すべて通過した。core グループ全体を修正後に再実行したわけではない。text / binary の
 通常ファイルと stdin パイプの 4 条件も専用テストで通過した。全回帰は実行していない。
+
+## M2: 最適化経路の調査
+
+PLaMo の BF16 出力・head 次元 128 は paged attention selector の許可リストに
+含まれていなかった。256 次元専用の tiled prefill はそのまま使えないため、
+128 次元では prefill の行にも部分 head 用 decode kernel を使用する。局所層の
+真の sliding-window kernel は未実装であり、2048 token の制限は維持する。
+
+`SHELF_OP_FALLBACK_DEBUG=1` で 0.8B の prefill と decode を調べると、
+attention 以外にも BF16 linear、offset RMSNorm（Q/K の head 単位を含む）、
+RoPE、KV append、split、SiLU、mul、残差加算などが汎用経路であった。
+0.8B の linear 形状も一時的に高速経路へ載せた実験では attention と linear の
+fallback は消え、greedy の日英出力は一致したが、英日の teacher-forced top-1 は
+95.83% だったため、この linear 変更は採用しなかった。平均 KL は日英 0.000958、
+英日 0.000953。これは精度条件を満たす実装として扱わない。
+
+その実験の semantic timing（イベント計測を含む、短い decode 4 token）では、
+RMSNorm が約 34.3 ms/token、split が 9.0、RoPE と residual が各 6.0、KV append が
+4.0、SiLU と mul が各 3.0、linear が 3.0、attention が 0.2 ms/token だった。
+これらは実行間の待ちを含みうる時間で、kernel 単体の純粋な GPU 時間ではない。
+150 token/s には attention の selector だけでなく、offset RMSNorm と多数の
+汎用演算の高速化が必要である。
+
+attention のみを最適化した採用候補では、日英の greedy token 列は旧経路と一致し、
+23 token prefill は 250.4 ms、decode は 10.10 token/s（9 token）だった。
+CPU 参照との平均 KL は日英 0.000525、英日 0.000493、top-1 はそれぞれ 100%。
+`test_paged_attention`、selector、planner、split reduce の 4 テストは通過した。
+速度目標は未達である。
+
+## M2: 2B / 8B の BF16 実測
+
+8B の shard 4 個は取得済みで、保存済みの CPU BF16 logits を teacher-forced 比較に
+使用した。R9700、単一 GPU、greedy、prompt 23 / 26 token、decode は最初の token を
+除いた計測。arena は自動確保で KV budget に空き VRAM を割り当てるため、使用量は
+モデルの最低必要 VRAM ではない。
+
+| model | 方向 | 出力 | prefill | decode | 平均 KL | top-1 一致 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 2B | 日→英 | The weather is nice today, isn't it? | 461.2 ms | 7.26 token/s | 0.000551 | 95.24% |
+| 2B | 英→日 | 列車は5分後に到着します。 | 502.5 ms | 7.18 token/s | 0.000492 | 95.83% |
+| 8B | 日→英 | The weather is nice today, isn't it? | 1646.4 ms | 3.01 token/s | 0.000700 | 100% |
+| 8B | 英→日 | 列車はあと5分で到着します。 | 1818.3 ms | 3.00 token/s | 0.000968 | 100% |
+
+2B の top-1 は 21 / 24 位置中それぞれ 1 位置が不一致。8B の重みは 15.89 GiB、
+KV budget 14.40 GiB、arena 使用 30.340 GiB（確保 31.289 GiB）で 32 GiB に収まった。
+2B の重みは 5.36 GiB、arena 使用 30.338 GiB。8B の真の最低使用量はこの計測では
+求めていない。2B の精度判断と、いずれのサイズも速度改善が残る。
