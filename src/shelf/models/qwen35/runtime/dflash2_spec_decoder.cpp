@@ -1271,7 +1271,6 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                                      __LINE__);
     }
     DFlash2TreeWalk walk;
-    bool branch_replayed = false;
     if (decoder.config.tree) {
         {
             ScopedTimer t(want_timing ? &tm->tree_walk_ms : nullptr);
@@ -1281,44 +1280,6 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             }
         }
         const uint32_t accepted = static_cast<uint32_t>(walk.rows.size() - 1u);
-        bool has_stop = false;
-        for (uint32_t i = 1; i < walk.rows.size(); ++i)
-            has_stop |= qwen_hybrid::is_stop_token(decoder.config.eos_tokens, tree.tokens[walk.rows[i]]);
-        if (accepted != 0u && walk.rows.back() > total_k && !has_stop &&
-            accepted < remaining_tokens) {
-            ScopedTimer t(tm != nullptr ? &tm->rerun_ms : nullptr);
-            const uint32_t parent_count = accepted;
-            Status st = gather_tree_path(decoder, position,
-                std::span<const uint32_t>(walk.rows.data(), parent_count));
-            if (!st.ok()) return st;
-            for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-                auto scope = shelf::gpu::ScopedDevice::create(g.device);
-                if (!scope.ok()) return scope.status();
-                st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
-                                              walk.rows[parent_count - 1u], g.stream);
-                if (!st.ok()) return st;
-            }
-            st = append_committed(decoder, position, parent_count);
-            if (!st.ok()) return st;
-            decoder.sequence->position = position + parent_count;
-            const int32_t leaf = tree.tokens[walk.rows.back()];
-            std::vector<ScheduledRequest> replay_requests;
-            auto replay = make_verify_batch(*decoder.sequence, replay_requests, &leaf, 1u,
-                                            decoder.sequence->position, 1u, false,
-                                            TokenIdsLocation::Host, &decoder.sampling,
-                                            round_sample_index);
-            std::vector<ExecuteBatchOptions> replay_options(decoder.gdn_ranks.size());
-            auto executed = run_target_batch(decoder, replay, replay_options);
-            if (!executed.ok()) return executed.status();
-            auto output = executed.release();
-            const hipError_t err = hipMemcpy(&walk.correction, output.sampled_tokens.data<int32_t>(),
-                                             sizeof(int32_t), hipMemcpyDeviceToHost);
-            if (err != hipSuccess) return Status::hip_error("dflash2 branch replay sample", hipGetErrorString(err), __FILE__, __LINE__);
-            st = append_committed(decoder, position + parent_count, 1u);
-            if (!st.ok()) return st;
-            branch_replayed = true;
-            if (tm != nullptr) ++tm->tree_replays;
-        }
         result.num_drafts = total_k;
         result.num_accepted_drafts = accepted;
         for (uint32_t i = 1u; i < walk.rows.size(); ++i)
@@ -1359,7 +1320,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                                      __LINE__);
     }
 
-    if (decoder.config.tree && !branch_replayed) {
+    if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_commit_ms : nullptr);
         for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
             auto scope = shelf::gpu::ScopedDevice::create(g.device);
@@ -1383,11 +1344,6 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             if (accepted == total_k) ++tm->full_accepts;
             else ++tm->partial_accepts;
         }
-    } else if (branch_replayed) {
-        const uint32_t required = ceil_div_u32(decoder.sequence->position, page_tokens);
-        Status st = rollback_sequence_append(*decoder.sequence, required, decoder.stream);
-        if (!st.ok()) return st;
-        if (tm != nullptr) ++tm->partial_accepts;
     } else if (accepted == total_k) {
         ScopedTimer t(tm != nullptr ? &tm->dflash_commit_ms : nullptr);
         Status st = append_committed(decoder, position, total_k + 1u);

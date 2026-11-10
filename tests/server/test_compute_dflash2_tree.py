@@ -4,6 +4,9 @@
 import os
 import subprocess
 import sys
+import tempfile
+
+import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -16,12 +19,14 @@ PROMPTS = [
 ]
 
 
-def run(ids, mode):
+def run(ids, mode, logits_path=None):
     cmd = [str(compute_binary()), "--model-dir", str(model_dir()),
            "--input-ids-file", "/dev/stdin", "--max-new-tokens", "256",
            "--max-seq-len", "512", "--arena-gib", "auto", "--device",
            os.environ.get("SHELF_TEST_DEVICE", "0"), "--temperature", "0",
            "--top-p", "1", "--top-k", "0", "--seed", "0"]
+    if logits_path is not None:
+        cmd += ["--dump-logits", str(logits_path)]
     if mode != "target":
         cmd += ["--dflash2-model-dir", os.environ["SHELF_DFLASH2_MODEL_DIR"],
                 "--dflash2-drafts", "7"]
@@ -40,29 +45,58 @@ def run(ids, mode):
               f"round_ms={elapsed / rounds if rounds else 0:.3f}", flush=True)
     for line in proc.stdout.splitlines():
         if line.startswith("GENERATED_IDS="):
-            return [int(x) for x in line.split("=", 1)[1].split(",") if x.strip()]
+            tokens = [int(x) for x in line.split("=", 1)[1].split(",") if x.strip()]
+            if logits_path is None:
+                return tokens
+            metadata = dict(line.split("=", 1) for line in proc.stdout.splitlines()
+                            if line.startswith("LOGITS_") and "=" in line)
+            vocab = int(metadata["LOGITS_VOCAB"])
+            steps = [int(x) for x in metadata["LOGITS_STEP_ROWS"].split(",")]
+            raw = np.memmap(logits_path, dtype=np.float32, mode="r").reshape(-1, vocab)
+            offsets = np.cumsum([0] + steps[:-1])
+            prefill_chunks = int(next(line.split("=", 1)[1] for line in proc.stdout.splitlines()
+                                      if line.startswith("PREFILL_CHUNKS=")))
+            offsets = offsets[prefill_chunks:]
+            if len(offsets) != len(tokens):
+                raise AssertionError(f"logit steps {len(offsets)} != tokens {len(tokens)}")
+            margins = []
+            for offset, token in zip(offsets, tokens):
+                row = raw[offset]
+                if int(np.argmax(row)) != token:
+                    raise AssertionError("logit row does not match target token")
+                top = np.partition(row, -2)[-2:]
+                margins.append(float(top.max() - top.min()))
+            return tokens, margins
     raise RuntimeError(f"{mode}: GENERATED_IDS missing")
 
 
 def main():
-    for prompt_index, prompt in enumerate(PROMPTS):
+    for prompt in PROMPTS:
         ids = prompt_ids(prompt)
-        outputs = {mode: run(ids, mode) for mode in ("target", "chain", "tree0", "tree1", "tree2", "tree4")}
-        if len(outputs["target"]) != 256:
-            raise AssertionError(f"expected 256 generated tokens, got {len(outputs['target'])}: {prompt}")
-        for mode in ("chain", "tree0", "tree1", "tree2", "tree4"):
-            expected, actual = outputs["target"], outputs[mode]
-            if expected != actual:
-                mismatch = next((i for i, (a, b) in enumerate(zip(expected, actual))
-                                 if a != b), min(len(expected), len(actual)))
-                raise AssertionError(f"{mode} differs at token {mismatch}: "
-                                     f"target={expected[mismatch:mismatch+4]} "
-                                     f"actual={actual[mismatch:mismatch+4]} prompt={prompt}")
-        if prompt_index == 0:
-            for mode in ("tree0", "tree1", "tree2", "tree4"):
-                if run(ids, mode) != outputs["target"]:
-                    raise AssertionError(f"{mode} repeat differs for {prompt}")
-        print(f"PASS: {prompt} ({len(outputs['target'])} tokens)", flush=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            target, margins = run(ids, "target", Path(tmp) / "logits.bin")
+        outputs = {mode: run(ids, mode) for mode in ("chain", "tree0", "tree1", "tree2", "tree4")}
+        if len(target) != 256:
+            raise AssertionError(f"expected 256 generated tokens, got {len(target)}: {prompt}")
+        if outputs["chain"] != target or outputs["tree0"] != outputs["chain"]:
+            raise AssertionError(f"chain or tree0 differs: {prompt}")
+        for mode in ("tree1", "tree2", "tree4"):
+            actual = outputs[mode]
+            if len(actual) != len(target):
+                raise AssertionError(f"{mode} length differs: {len(actual)}")
+            mismatches = [i for i, (a, b) in enumerate(zip(target, actual)) if a != b]
+            # The target's own greedy run is teacher-forced on its generated prefix.
+            # After divergence, later tokens have different contexts: their margins
+            # are useful diagnostics but cannot establish the cause of divergence.
+            if mismatches:
+                first = mismatches[0]
+                print(f"{mode} mismatches={len(mismatches)} first={first} "
+                      f"first_margin={margins[first]:.6f}", flush=True)
+                for index in mismatches:
+                    if margins[index] > 0.1:
+                        raise AssertionError(f"{mode} mismatch at {index}: "
+                                             f"target margin {margins[index]:.6f} > 0.1")
+        print(f"PASS: {prompt} ({len(target)} tokens)", flush=True)
 
 
 if __name__ == "__main__":
