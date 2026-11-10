@@ -1,9 +1,10 @@
-# QSA 長文 decode の top-k タイル選択
+# QSA 長文 decode の top-k タイル選択と decode 経路
 
 測定日: 2026-11-11、R9700 (gfx1201) × 2、TP=2。
-対象: `src/shelf/kernels/optimized/qsa.hip`、`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`、
-`--kv-cache-dtype fp8`。
-比較: `1c5376f`（変更前）と `3e81dd6`（変更後）。
+対象: `src/shelf/kernels/optimized/qsa.hip`、`src/shelf/kernels/optimized/attention/paged_decode.hip`、
+`src/shelf/inference/execution/paged_attention_dispatch.hip`、
+`models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw`。
+比較: `1c5376f`（変更前）と `2407d24`（変更後）。
 
 ## 結論
 
@@ -19,24 +20,37 @@
   block 0 から読んでいた。32K を超える context では選択する block がずれていた。
 
 tile ごとの radix select と 1 回の merge に変更し、score の block offset を修正した。
-decode は 65K で 20.48 → 23.04 tok/s（+12.5%）、1 token 当たりの追加コストは
-8.87 → 3.45 ms（-61%）になった。8K 以下は変化しない。
+さらに decode の top-k を 512 thread で走らせ、BF16 KV の decode で選択 page を直接
+列挙するようにした。FP8 KV の decode は 65K で 20.48 → 23.85 tok/s（+16.4%）、
+128K で 21.60 → 22.99 tok/s、BF16 KV は 65K で 21.47 → 24.03 tok/s（+11.9%）に
+なった。8K 以下は変化しない。
 
 ## 計測
 
 `shelf-bench tg --mode forward --context <N> --tokens 32 --prefill-chunk 2048
---kv-cache-dtype fp8 --device 2,3 --tensor-parallel 2 --warmup 1`。
+--kv-cache-dtype <fp8|bf16> --device 2,3 --tensor-parallel 2 --warmup 1`。
 32 token の p50、tok/s（括弧内は ms/token）。
 
-| context | `1c5376f` | `3e81dd6` |
-|---|---:|---:|
-| 128 | 26.45（37.81） | 26.43（37.83） |
-| 8K | 25.02（39.96） | 25.03（39.95） |
-| 32K | 22.67（44.10） | **23.99（41.68）** |
-| 65K | 20.48（48.84） | **23.04（43.40）** |
-| 128K | - | 21.60（46.30） |
+FP8 KV:
 
-8K からの増分は、変更前が 65K で 8.87 ms/token、変更後が 3.45 ms/token である。
+| context | `1c5376f` | `2407d24` |
+|---|---:|---:|
+| 128 | 26.45（37.81） | 26.46（37.79） |
+| 8K | 25.02（39.96） | 25.09（39.86） |
+| 32K | 22.67（44.10） | **24.47（40.87）** |
+| 65K | 20.48（48.84） | **23.85（41.92）** |
+| 128K | - | 22.99（43.49） |
+
+BF16 KV:
+
+| context | `1c5376f` | `2407d24` |
+|---|---:|---:|
+| 8K | 25.30（39.52） | 25.24（39.59） |
+| 65K | 21.47（46.55） | **24.03（41.61）** |
+| 128K | - | 23.16（43.17） |
+
+8K からの増分は、FP8 KV の 65K で 8.87 → 2.06 ms/token、BF16 KV の 65K で
+7.03 → 2.02 ms/token になった。
 
 32K の改善は、32 token の decode が position 32768 以降で走るため、最初の token から
 複数 tile 経路に入ることで説明できる。32768 と 32772 の A/B では差が出ない。
@@ -46,29 +60,37 @@ decode は 65K で 20.48 → 23.04 tok/s（+12.5%）、1 token 当たりの追�
 
 65K、8 token の decode 区間、両 rank 合計、ms/token。
 
-| kernel | `1c5376f` | `3e81dd6` |
+| kernel | `1c5376f` | `2407d24` |
 |---|---:|---:|
-| `qsa_topk_kernel` | 16.28 | **5.51** |
-| decode attention | 7.78 | 6.95 |
-| `qsa_score_wmma_kernel` | 1.09 | 1.24 |
-| `shelf_gdn_recurrence_wmma_lossy` | 0.99 | 1.00 |
-| その他（MoE / EXL3 / elementwise） | 50.69 | 50.95 |
-| 合計 | 76.84 | **65.65** |
+| `qsa_topk_kernel` | 16.28 | **2.42** |
+| decode attention | 7.78 | 6.90 |
+| `qsa_score_wmma_kernel` | 1.09 | 1.23 |
+| `shelf_gdn_recurrence_wmma_lossy` | 0.99 | 0.99 |
+| その他（MoE / EXL3 / elementwise） | 50.69 | 50.69 |
+| 合計 | 76.84 | **62.23** |
 
-`qsa_topk_kernel` の 1 起動（8192 block）は約 258 µs から約 90 µs になった。
-8K（2048 block、radix select）の 35 µs と比べても、block 当たりのコストは同等以下である。
+`qsa_topk_kernel` の 1 起動（8192 block）は約 258 µs から約 38 µs になった。
+131K でも 1 起動 40.6 µs、4.50 ms/token である。decode attention は 8K 6.02、
+65K 6.90、131K 6.71 で、差は run 間のばらつきの範囲に収まる。
 
 ## 変更
 
 - `qsa_topk_kernel`
   - 各 tile の score を radix select で上位 k に絞り、直前までの上位 k と 1 回だけ merge する。
     512 候補ごとの sort と merge の繰り返しを除去した。
-  - 512 要素の sort と 1024 要素の merge は tile 当たり 1 回になる。
+  - batch 行数が `kQsaTopkSmallRows` 以下なら 512 thread で起動する。decode は
+    1 行 1 CTA なので、128 thread では GPU の大部分が遊んでいた。
 - `qsa_radix_select`
   - 選択した score と block index を同時に書き出せるようにした。
 - `qsa_score_wmma_kernel`
   - pooled key の読み出しに `args.block_begin` を加算した。scores は tile 先頭を 0 とした
     相対位置のままなので、workspace の幅は変わらない。
+- `attention_paged_bf16_impl`
+  - 全 page の走査と bitmap による skip をやめ、FP8 経路と同じく選択 page を
+    wave へ分配して直接列挙する。
+- `resolve_paged_attention_physical_impl`
+  - mixed batch でも `block_mask` 付きの prefill 要求が prefill kernel を使うようにした。
+    条件は単一 request と同じ `kMaskedPrefillMinRows`（256 行）である。
 - `test_qsa_select`
   - `blocks = 12000` を 2 分割・3 分割するケースを追加した。CPU 参照の top-k、
     同点時の小さい index 優先、bitmap の tail block を比較する。
@@ -81,21 +103,37 @@ decode は 65K で 20.48 → 23.04 tok/s（+12.5%）、1 token 当たりの追�
 - `test_paged_attention`: 56 passed
 - `test_qwen4exp_qsa_site`: 11 passed
 - `test_qwen4exp_qsa_layer`: 7 passed
+- mixed batch: `shelf-bench batch --requests 2 --prefix-tokens 512` の kernel trace で
+  `v_prefill_bf16::attention_paged_prefill_bf16_impl<0u>` が使われ、decode kernel が
+  起動しないことを確認した。
 
 score offset の修正により、32K 超の選択結果は変更前と異なる。変更前の 32K 超は
 pooled block 0 側の score で別の block を選んでいたため、出力の一致は比較できない。
 
+## prefill
+
+FP8 KV、`shelf-bench pp --prefill-chunk 2048 --warmup 1 --runs 1`。
+
+| prompt | 修正後 |
+|---|---:|
+| 32K | 2,811 tok/s |
+| 64K | 2,622 tok/s |
+| 128K | 2,419 tok/s |
+
+128K の kernel trace では prefill attention が GPU 時間の 18.4%、`qsa_score` が 11.0%、
+`qsa_topk` が 3.4% だった。page 単位の和集合は最大 4 倍の token を WMMA に渡すが、
+32K から 128K まで share はほぼ一定で、崖は出ていない。
+
 ## 残る課題
 
-- top-k は依然として最大のコンテキスト依存項である。65K で 5.51 ms/token、
-  131K で 10.25 ms/token。radix select は全 block を数回走査するため、
-  block 数に比例する。threads の増加、threshold に同点がない場合の index pass の省略、
-  score と選択の融合が候補になる。
-- decode attention は 65K で 6.95 ms/token。page が 16 token、圧縮 block が 4 token の
-  ため、選択 block の page を処理すると最大 4 倍の token を WMMA に渡す。
-  また `q_heads / kv_heads = 12` では split-KV の instantiation が無く、
-  q head ごとに同じ K/V を読み直す。
-- mixed batch では `block_mask != nullptr` の prefill 要求が decode 経路に落ちる
-  （`paged_attention_dispatch.hip`）。単一 request では prefill 経路を使う。
-- prefill は最大 32 行の選択 page の和集合を WMMA に渡す。選択が行間で分散すると
-  密な prefill に近づく。
+- decode の top-k は 65K で 2.42 ms/token、131K で 4.50 ms/token。radix select は
+  全 block を数回走査するため、なお block 数に比例する。境界 bucket の候補を圧縮して
+  残りの pass を小さくする案が残っている。
+- prefill attention は選択 page の 16 token をまとめて WMMA に渡すため、4 token block
+  の選択が page 内で疎でも 16 token 分を処理する。token 粒度で K/V を詰め直すには
+  内側ループの再設計が要る。
+- mixed batch の masked prefill は kernel 選択のみ変更した。multi-request の
+  end-to-end 品質は server 側の受入で確認する必要がある。
+- BF16 の split-KV decode は担当範囲の全 page を走査する。Flash-Next の
+  `q_heads / kv_heads = 12` では split の instantiation が無いため、現状この経路は
+  使われない。

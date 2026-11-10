@@ -52,20 +52,35 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 ## 2026-11-11 Qwen3.8-Flash-Next EXL3 long-context decode reference
 
 QSA の複数タイル top-k をタイルごとの radix select と 1 回の merge に変更し、
-score kernel の block offset を修正した。変更内容と切り分けは
+score kernel の block offset を修正した。decode の top-k は小 batch で 512 thread を
+使い、BF16 KV の decode は選択 page を直接列挙する。mixed batch の masked prefill も
+prefill kernel へ切り替えた。変更内容と切り分けは
 [../research/20261111/qsa_long_context_decode.md](../research/20261111/qsa_long_context_decode.md)。
+
+FP8 KV:
 
 | context | 変更前 | 変更後 |
 |---|---:|---:|
-| 8K | 25.02 tok/s（39.96 ms/token） | 25.03（39.95） |
-| 32K | 22.67（44.10） | **23.99（41.68）** |
-| 65K | 20.48（48.84） | **23.04（43.40）** |
-| 128K | - | 21.60（46.30） |
+| 8K | 25.02 tok/s（39.96 ms/token） | 25.09（39.86） |
+| 32K | 22.67（44.10） | **24.47（40.87）** |
+| 65K | 20.48（48.84） | **23.85（41.92）** |
+| 128K | - | 22.99（43.49） |
 
-- measurement revision: `3e81dd6`（比較は `1c5376f`）
+BF16 KV:
+
+| context | 変更前 | 変更後 |
+|---|---:|---:|
+| 8K | 25.30（39.52） | 25.24（39.59） |
+| 65K | 21.47（46.55） | **24.03（41.61）** |
+| 128K | - | 23.16（43.17） |
+
+prefill（FP8 KV、`--prefill-chunk 2048`）: 32K 2,811 tok/s、64K 2,622 tok/s、
+128K 2,419 tok/s。
+
+- measurement revision: `2407d24`（比較は `1c5376f`）
 - GPU: R9700 × 2（device 2,3）、TP=2
-- command: `shelf-bench tg --mode forward --context <N> --tokens 32 --prefill-chunk 2048 --kv-cache-dtype fp8 --device 2,3 --tensor-parallel 2 --warmup 1`
-- 32 token の p50。ctx 128 は 26.43 tok/s、変更前は 26.45 tok/s。
+- command: `shelf-bench tg --mode forward --context <N> --tokens 32 --prefill-chunk 2048 --kv-cache-dtype <fp8|bf16> --device 2,3 --tensor-parallel 2 --warmup 1`
+- 32 token の p50。ctx 128 は 26.46 tok/s、変更前は 26.45 tok/s。
 - この節は reference run であり、qualified baseline ではない。
 
 ## 2026-11-10 Flash Next EXL3 prefill (QSA / grouped)
