@@ -1,6 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/exl3_decode_device.h>
-#include <shelf/kernels/optimized/linear/exl3_group_plan_device.h>
+#include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
+#include <shelf/kernels/optimized/linear/detail/exl3_group_plan_device.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
