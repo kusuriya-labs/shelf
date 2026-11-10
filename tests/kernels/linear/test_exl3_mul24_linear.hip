@@ -211,6 +211,29 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     worst_ideal = std::sqrt(err2 / std::max(1e-30, ideal_norm));
 
 
+    // B prefill (reconstructed dense weights + per-128-K scales): must reproduce the fused per-group
+    // accumulator, because the only difference is the weight storage (trellis decode vs dense int8).
+    bool wmma_pass = true;
+    {
+        Dev<int8_t> d_dense_w(static_cast<size_t>(n) * k);
+        Dev<float> d_yw(static_cast<size_t>(rows) * n);
+        HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense_w.p, n, k, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_wmma(d_codes.p, d_scales.p, code_stride,
+                                                            scale_stride_bytes, d_dense_w.p, d_yw.p, rows, n, k,
+                                                            nullptr));
+        HIP_OK(hipDeviceSynchronize());
+        std::vector<float> yw(static_cast<size_t>(rows) * n);
+        HIP_OK(hipMemcpy(yw.data(), d_yw.p, yw.size() * 4, hipMemcpyDeviceToHost));
+        double d2 = 0.0, r2 = 0.0;
+        for (size_t i = 0; i < y.size(); ++i) {
+            d2 += (yw[i] - y[i]) * static_cast<double>(yw[i] - y[i]);
+            r2 += static_cast<double>(y[i]) * y[i];
+        }
+        const double rel = std::sqrt(d2 / std::max(1e-30, r2));
+        wmma_pass = rel < 1e-6;
+        std::printf("  prefill_wmma: vs_fused_rel_l2=%.3g %s\n", rel, wmma_pass ? "PASS" : "FAIL");
+    }
+
     // Prefill (dense) path: recon must reproduce the CPU decode exactly; for the rows without a slot the row-scale
     // re-rounding and the int32 GEMM must match the CPU integer math exactly; rows with a slot must give the
     // per-group result above; rotate_out_i32 must match the float reference. The whole result is also compared with
@@ -322,7 +345,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         }
     }
 
-    const bool ok = dense_pass && code_mismatch == 0 && worst_scale == 0.0 && worst_y < 1e-5 && worst_out < 1e-5 && worst_ideal < 0.02;
+    const bool ok = dense_pass && wmma_pass && code_mismatch == 0 && worst_scale == 0.0 && worst_y < 1e-5 && worst_out < 1e-5 && worst_ideal < 0.02;
     std::printf("%s rows=%u n=%u k=%u: code_mismatch=%zu scale_err=%.3g gemm_rel=%.3g out_rel=%.3g ideal_rel_l2=%.4f\n",
                 ok ? "PASS" : "FAIL", rows, n, k, code_mismatch, worst_scale, worst_y, worst_out, worst_ideal);
     return ok;

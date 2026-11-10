@@ -144,9 +144,14 @@ void semantic_timing_end(hipStream_t stream, const char* csv_path) {
             const double us = static_cast<double>(ms) * 1000.0;
             const char* stages[] = {"EXL3_ROTATE_QUANT", "EXL3_ROWSCALE", "EXL3_RECON",
                                     "EXL3_DENSE_GEMM", "EXL3_FLAG_GEMM", "EXL3_ROTATE_OUT"};
+            const char* stages_b[] = {"EXL3_PREFILL_ROTATE_QUANT", "EXL3_PREFILL_RECON",
+                                      "EXL3_PREFILL_WMMA", "EXL3_PREFILL_ROTATE_OUT"};
             const char* kid = r.kernel_id >= 0xffff0000u && r.kernel_id < 0xffff0006u
                 ? stages[r.kernel_id - 0xffff0000u]
-                : ::shelf::runtime::kernel_to_name(static_cast<::shelf::runtime::KernelId>(r.kernel_id));
+                : (r.kernel_id >= 0xffff0010u && r.kernel_id < 0xffff0014u
+                       ? stages_b[r.kernel_id - 0xffff0010u]
+                       : ::shelf::runtime::kernel_to_name(
+                             static_cast<::shelf::runtime::KernelId>(r.kernel_id)));
             const char* path =
                 r.path == static_cast<uint32_t>(SemPath::Correctness) ? "correctness"
                                                                       : "optimized";

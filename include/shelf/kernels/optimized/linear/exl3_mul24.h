@@ -78,6 +78,15 @@ hipError_t launch_exl3_mul24_rowscale(
     float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, float share, hipStream_t stream);
 
+// B prefill: reconstructed dense INT8 weights, per-128-K activation scales,
+// gfx12 iu8 WMMA into int32 followed by group-scale FP32 FMA.
+// Writes F32 yprime [rows][n] including the EXL3 grid-step factor.
+hipError_t launch_exl3_mul24_prefill_wmma(
+    const int8_t* codes, const float* scales,
+    uint32_t code_stride, uint32_t scale_stride_bytes,
+    const int8_t* dense_weights, float* yprime,
+    uint32_t rows, uint32_t n, uint32_t k, hipStream_t stream);
+
 hipError_t launch_exl3_mul24_recon(
     const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k, hipStream_t stream);
 

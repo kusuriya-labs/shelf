@@ -95,6 +95,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3_family/mul24/grouped.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_wmma.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/prefill_rotate.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul1/verify.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/workspace.cpp
