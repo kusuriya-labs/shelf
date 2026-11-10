@@ -172,6 +172,8 @@ shelf_add_test(NAME test_quality_metrics SOURCE unit/test_quality_metrics.cpp LA
 target_include_directories(test_quality_metrics PRIVATE "${CMAKE_SOURCE_DIR}/src/apps/bench")
 shelf_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
 shelf_add_test(NAME test_moe_config SOURCE unit/test_moe_config.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe shelf_qwen35)
+shelf_add_test(NAME test_plamo3_load_real SOURCE unit/test_plamo3_load_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_models)
+shelf_add_test(NAME test_plamo3_checkpoint SOURCE unit/test_plamo3_checkpoint.cpp LABELS "cpu;optional;external_files" TIMEOUT 30 LIBRARIES shelf_models)
 shelf_add_test(NAME test_model_identity SOURCE unit/test_model_identity.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35moe shelf_qwen35)
 shelf_add_test(NAME test_moe_weight_plan SOURCE unit/test_moe_weight_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe)
 shelf_add_test(NAME test_qwen35moe_tensor_parallel_plan SOURCE unit/test_qwen35moe_tensor_parallel_plan.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_qwen35moe shelf_qwen35)

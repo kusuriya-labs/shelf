@@ -376,6 +376,7 @@ target_compile_options(shelf_qwen4exp PRIVATE -Wall -Wextra -Wpedantic -Werror=r
 # dense and the MoE loaders and picks between them.
 add_library(shelf_models STATIC
     src/shelf/models/plamo3/model/config.cpp
+    src/shelf/models/plamo3/weights/model_weights.cpp
     src/shelf/models/model_weights_factory.cpp
     src/shelf/models/loaded_model.cpp
     src/shelf/models/pipeline_stage_model.cpp

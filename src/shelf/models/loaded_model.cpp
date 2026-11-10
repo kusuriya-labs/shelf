@@ -45,6 +45,8 @@ Result<LoadedModel> LoadedModel::load(
     auto family_result = probe_model_dir(model_dir);
     if (!family_result.ok()) return family_result.status();
     LoadedModel out;
+    if (family_result.value() == ModelFamily::Plamo3)
+        return Status::unsupported("plamo3: runtime path is not connected", __FILE__, __LINE__);
     if (family_result.value() == ModelFamily::Qwen4Exp) {
         auto loaded = shelf::qwen4exp::Qwen4ExpModel::load_from_safetensors(
             model_dir, 1u, 0u, arena, stream, shelf::qwen4exp::Qwen4ExpLoadOptions{});
