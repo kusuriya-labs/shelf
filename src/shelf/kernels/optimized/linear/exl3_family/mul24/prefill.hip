@@ -103,11 +103,12 @@ __global__ void __launch_bounds__(256) exl3_mul24_rowfinish_kernel(
     }
 }
 
-// trellis -> dense int8 weight matrix [n][k] (k contiguous), for a hipBLASLt int8 GEMM with A transposed.
-// One wave per 16x16 tile, the same lane / window / decode as the gemm kernel: lane l holds column n = l % 16 and
-// the eight k rows 8 * (l / 16) .. +7 of the tile. A block is 8 consecutive k tiles of one n tile, so a row of the
-// output is written in 128 contiguous bytes.
-template <int BITS>
+// trellis -> dense int8 weights. kTileMajor keeps the trellis layout (one 256-byte 16x16 tile per
+// (n tile, k tile), lane l owning its eight weights), which makes a WMMA B fragment one contiguous
+// 256-byte read; otherwise the output is [n][k] (k contiguous) for a hipBLASLt int8 GEMM with A
+// transposed. One wave per 16x16 tile, the same lane / window / decode as the gemm kernel: lane l
+// holds column n = l % 16 and the eight k rows 8 * (l / 16) .. +7 of the tile.
+template <int BITS, bool kTileMajor>
 __global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     const uint32_t* __restrict__ trellis,
     int8_t* __restrict__ dense,
@@ -139,7 +140,10 @@ __global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     uint2 v;
     v.x = packed[0] ^ 0x80808080u;
     v.y = packed[1] ^ 0x80808080u;
-    *reinterpret_cast<uint2*>(dense + static_cast<size_t>(nt * 16u + (lane & 15u)) * k + kt * 16u + (lane >> 4u) * 8u) = v;
+    int8_t* dst = kTileMajor
+        ? dense + (static_cast<size_t>(nt) * (k >> 4u) + kt) * 256u + static_cast<size_t>(lane) * 8u
+        : dense + static_cast<size_t>(nt * 16u + (lane & 15u)) * k + kt * 16u + (lane >> 4u) * 8u;
+    *reinterpret_cast<uint2*>(dst) = v;
 }
 
 // Same as rotate_out but the input is the int32 hipBLASLt accumulator: yprime = acc * row scale * S_FIX.
@@ -243,23 +247,34 @@ hipError_t launch_exl3_mul24_rowscale(
     return hipGetLastError();
 }
 
-hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
-                                  hipStream_t stream) {
+template <bool kTileMajor>
+hipError_t launch_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
+                        hipStream_t stream) {
     if ((n % 16u) != 0u || (k % kBlock) != 0u) return hipErrorInvalidValue;
     const dim3 grid(k / 128u, n / 16u);
     const uint32_t* t32 = reinterpret_cast<const uint32_t*>(trellis);
     switch (bits) {
-        case 1: exl3_mul24_recon_kernel<1><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 2: exl3_mul24_recon_kernel<2><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 3: exl3_mul24_recon_kernel<3><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 4: exl3_mul24_recon_kernel<4><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 5: exl3_mul24_recon_kernel<5><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 6: exl3_mul24_recon_kernel<6><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 7: exl3_mul24_recon_kernel<7><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 8: exl3_mul24_recon_kernel<8><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 1: exl3_mul24_recon_kernel<1, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 2: exl3_mul24_recon_kernel<2, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 3: exl3_mul24_recon_kernel<3, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 4: exl3_mul24_recon_kernel<4, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 5: exl3_mul24_recon_kernel<5, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 6: exl3_mul24_recon_kernel<6, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 7: exl3_mul24_recon_kernel<7, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 8: exl3_mul24_recon_kernel<8, kTileMajor><<<grid, 256, 0, stream>>>(t32, dense, k); break;
         default: return hipErrorInvalidValue;
     }
     return hipGetLastError();
+}
+
+hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
+                                  hipStream_t stream) {
+    return launch_recon<false>(trellis, bits, dense, n, k, stream);
+}
+
+hipError_t launch_exl3_mul24_recon_wmma(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
+                                        hipStream_t stream) {
+    return launch_recon<true>(trellis, bits, dense, n, k, stream);
 }
 
 hipError_t launch_exl3_mul24_rotate_out_i32(

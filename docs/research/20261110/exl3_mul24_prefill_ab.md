@@ -87,17 +87,53 @@ tile 順で、wave が連続した stream を読むため、この問題がな�
 つまり B は「trellis decode の ALU を消す」代わりに「重みアクセスの空間局所性を
 失う」設計になっており、現状では後者が大きい。
 
+## 追記: RECON の swizzle（tile-major）
+
+上の計測後、recon の出力を WMMA fragment 順へ swizzle した。
+
+- `launch_exl3_mul24_recon_wmma` を追加した。trellis と同じ n-major の 16x16 tile 順で、
+  1 tile = 256 バイト、lane `l` が 8 重みを持つ。WMMA の B fragment（32 lane × 8 バイト）が
+  1 回の連続 256 バイト読みになる。
+- A 経路の `launch_exl3_mul24_recon` は `[N][K]` 行優先のまま変更していない。
+- recon kernel は `bool kTileMajor` で 2 つの出力レイアウトを切り替える。
+- B の数値は swizzle 前後で不変（fused と完全一致、KL=0、logit 差 0）。
+- 単体テストの `prefill_wmma` 検査も `recon_wmma` を使うように更新した。
+
+性能（1 run 換算）:
+
+| 経路 | wall median | WMMA GEMM | 対 A |
+|---|---|---|---|
+| A | 1225.43 ms | 552.3 ms（hipBLASLt） | 1.00x |
+| B（swizzle 前） | 3955.98 ms | 3392.2 ms | 3.23x |
+| **B（swizzle 後）** | **3026.09 ms** | **2457.7 ms** | **2.47x** |
+| B（swizzle 後、MT=8） | 5924.66 ms | 5384.5 ms | 4.83x |
+
+swizzle で GEMM が 28%、wall が 24% 短縮した。MT=8 は register pressure で悪化し、
+MT=4 が最良だった。
+
+## 残差の原因
+
+swizzle 後も B は A の 2.47 倍かかる。B の出力タイルは 1 wave あたり
+16 列 × 64 行で、重み（16 列 × K）と活性（64 行 × K）を
+`rows / 64` 回再読する。2048 行では 32 回で、重みと活性を合わせて
+1 レイヤーあたり約 1.7 TB に相当する。実測の GEMM 時間はこの DRAM 帯域
+（640 GB/s）とほぼ一致しており、B の GEMM は実質的に帯域律速である。
+
+つまり swizzle は「fragment の並び」を直したが、「行タイルが小さいため
+重みと活性を繰り返し読む」という構造は残っている。MT を増やす案は
+レジスタで破綻するため、次に効くのは共有メモリで重みタイルを保持して
+行方向の再利用を増やす GEMM 化であり、単純なレイアウト変更ではない。
+
 ## 判断
 
 - B の数値は正しく、fused と完全一致する。実装としての妥当性は確認できた。
-- ただし現状の性能は A の 3.23 倍遅く、このままでは採用できない。
-- 改善するなら、recon の出力を `[N][K]` ではなく WMMA fragment 順
-  （trellis と同じ n-major tile 順）の INT8 に変え、B の重みロードを
-  wave 内連続にする。これで decode ALU を消しつつ帯域を揃えられる。
-- その変更までは既定 A を維持する。B は opt-in の比較経路として残す。
+- swizzle で 24% 速くなったが、A の 2.47 倍遅く、このままでは採用できない。
+- 既定 A を維持する。B は opt-in の比較経路として残す。
+- さらに詰めるなら、共有メモリで重みタイルを再利用する GEMM 構造への変更が必要。
+  レイアウトの追加変更だけでは A には届かない。
 
 ## 未実施・注意
 
-- 重みレイアウトの変更（fragment 順 recon）と、それによる再計測は未実施。
+- 共有メモリを使った重みタイル再利用と、それによる再計測は未実施。
 - 計測は単一 GPU、単一コーパス、1 prefill チャンクによる。
 - `SHELF_EXL3_MUL24_PREFILL_AB` は `SHELF_EXL3_INT8_DENSE` が有効な行数でのみ効く。

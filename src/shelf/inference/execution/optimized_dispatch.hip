@@ -766,7 +766,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
                 stream, timing0, 0xffff0010u, static_cast<uint32_t>(SemPath::Optimized), 0);
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_recon(
+                herr = ::shelf::kernel::launch_exl3_mul24_recon_wmma(
                     static_cast<const uint16_t*>(e.codes), e.exl3_ka,
                     static_cast<int8_t*>(ctx.exl3_dense), n, k, stream);
                 if (semantic_timing_enabled()) semantic_timing_finish(

@@ -217,7 +217,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     {
         Dev<int8_t> d_dense_w(static_cast<size_t>(n) * k);
         Dev<float> d_yw(static_cast<size_t>(rows) * n);
-        HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense_w.p, n, k, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_recon_wmma(d_trellis.p, bits, d_dense_w.p, n, k, nullptr));
         HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_wmma(d_codes.p, d_scales.p, code_stride,
                                                             scale_stride_bytes, d_dense_w.p, d_yw.p, rows, n, k,
                                                             nullptr));
