@@ -558,7 +558,7 @@ reasoning token 数を含む。stream では reasoning token 数を取得でき�
 stream では `response.incomplete` で終了する。正常終了時は `response.completed` で終了する。
 
 `previous_response_id`、`conversation`、画像・音声・ファイル、`custom` tool、
-`strict: true`、`text.format` の JSON schema、`parallel_tool_calls: false`、
+`strict: true` の tools、`parallel_tool_calls: false`、
 `truncation: auto`、その他の `include`、暗号化された入力、未対応の項目は HTTP 400 で拒否する。
 `web_search` と `namespace` tool はモデルに渡さず除外するため、検索や namespace 内の tool は使えない。
 `GET /v1/responses` と保存済み response の取得には対応しない。
@@ -738,6 +738,7 @@ suite の詳細は [../developer/testing.md](../developer/testing.md) を参照�
 ## 構造化出力
 
 Chat Completions は `response_format` の `json_object` と `json_schema` を受理する。
+Responses は `text.format` の `json_schema` を同じ制約経路で受理する。
 thinking 有効時は `</think>` まで自由に生成し、その後の回答に制約を適用する。
 単一 token の close tag を持たないモデルでの thinking 併用、tools、stop との
 併用は HTTP 400 で拒否する。stream と非 stream、temperature > 0 に対応する。
@@ -747,4 +748,4 @@ JSON Schema は `type`、`properties`、`required`、`items`、`enum`、
 未対応キーワードは HTTP 400 とする。生成上限に達した場合は JSON が未完成となりうる。
 
 制約付き request は DFlash2 / MTP が有効でも通常 decode を使用する。strict tools、
-制約付き tool_choice、Responses の `text.format`、投機 decode との併用は M3 の作業である。
+制約付き tool_choice、投機 decode との併用は未対応である。

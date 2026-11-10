@@ -36,7 +36,7 @@ def main():
     if importlib.util.find_spec("xgrammar") is None:
         print("SKIP: xgrammar is not installed")
         return 77
-    with ServerHarness() as server:
+    with ServerHarness(max_seq_len=2048) as server:
         url = server.base_url + "/chat/completions"
         base = {"model":"shelf", "messages":[{"role":"user", "content":"Return a short JSON value matching the requested format."}],
                 "chat_template_kwargs":{"enable_thinking":False}, "max_tokens":128}
@@ -79,6 +79,20 @@ def main():
             body = dict(base, stream=stream, response_format={"type":"json_schema", "json_schema":{"name":"x", "schema":bad, "strict":True}})
             status, raw = http_post_status(url, body)
             assert status == 400 and json.loads(raw)["error"]["code"] == "unsupported_parameter", raw
+        # Responses uses the same schema and matcher path as Chat.
+        responses_url = server.base_url + "/responses"
+        for stream in (False, True):
+            body = {"model":"shelf", "input":"Return a short answer as JSON.", "max_output_tokens":1024,
+                    "temperature":0.8, "stream":stream,
+                    "text":{"format":{"type":"json_schema", "name":"answer", "schema":schema, "strict":True}}}
+            if stream:
+                events = list(http_sse(responses_url, body))
+                text = "".join(e.get("delta", "") for e in events if e.get("type") == "response.output_text.delta")
+            else:
+                data = http_json(responses_url, body)
+                text = "".join(part["text"] for item in data["output"] if item["type"] == "message" for part in item["content"] if part["type"] == "output_text")
+            check(json.loads(text), schema)
+            print("responses structured stream", stream, "OK", flush=True)
         print("structured output passed")
     return 0
 

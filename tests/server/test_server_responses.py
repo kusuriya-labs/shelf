@@ -98,6 +98,17 @@ class ResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['usage']['output_tokens_details']['reasoning_tokens'], 2)
         self.assertEqual([x['type'] for x in data['output']], ['reasoning', 'message'])
 
+    async def test_text_format_json_schema(self):
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
+        for stream in (False, True):
+            response = await self.post(stream=stream, text={"format": {"type": "json_schema", "name": "result", "schema": schema, "strict": True}})
+            self.assertEqual(response.status, 200)
+            await response.read()
+            self.assertEqual(self.service.request.response_schema, schema)
+        response = await self.post(text={"format": {"type": "json_schema", "name": "bad", "schema": {"type": "string", "pattern": "x"}}})
+        self.assertEqual(response.status, 400)
+        self.assertEqual((await response.json())["error"]["param"], "text.format.schema")
+
     async def test_input_history_and_tools(self):
         self.service.tool = True
         data = await (await self.post(input=[

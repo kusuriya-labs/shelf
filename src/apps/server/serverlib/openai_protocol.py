@@ -2,7 +2,7 @@
 
 対応するパラメータは明示的に列挙し、未対応・未知のキーは拒否する。
 user、metadata、service_tier と parallel_tool_calls=true は受理するが使用しない。
-store=true、構造化出力、strict tool、文法制約には対応しない。
+store=true と strict tool には対応しない。
 required と関数名指定は生成 prompt に tool call の開始部分を補う。
 """
 

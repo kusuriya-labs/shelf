@@ -2,7 +2,7 @@
 
 明示的に列挙した metadata は推論に使用しない。暗号化 reasoning は返さない。
 web_search と namespace はモデルに渡さず、未知のキーは拒否する。
-構造化出力、strict tool、保存済み response の参照には対応しない。
+strict tool、保存済み response の参照には対応しない。
 """
 
 from __future__ import annotations
@@ -124,11 +124,15 @@ def parse_responses_request(body, *, inference_budget_tokens):
     for key in ("previous_response_id", "conversation"):
         if body.get(key) is not None:
             reject(key)
+    response_format = None
     if body.get("text") is not None:
         fields(body["text"], {"format"}, "text")
         fmt = body["text"].get("format")
         if fmt is not None and fmt != {"type": "text"}:
-            reject("text.format")
+            fields(fmt, {"type", "name", "description", "schema", "strict"}, "text.format")
+            if fmt.get("type") != "json_schema":
+                reject("text.format")
+            response_format = {"type": "json_schema", "json_schema": {k: v for k, v in fmt.items() if k != "type"}}
     if body.get("max_output_tokens") is not None:
         value = body["max_output_tokens"]
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= (1 << 63) - 1:
@@ -139,6 +143,8 @@ def parse_responses_request(body, *, inference_budget_tokens):
             raise OpenAIProtocolError("instructions must be a string", param="instructions")
         messages.insert(0, {"role": "system", "content": body["instructions"]})
     chat = {"model": body.get("model"), "messages": messages}
+    if response_format is not None:
+        chat["response_format"] = response_format
     for source, target in (("stream", "stream"), ("max_output_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"), ("seed", "seed"), ("tool_choice", "tool_choice")):
         if source in body:
             chat[target] = body[source]
@@ -204,6 +210,8 @@ def parse_responses_request(body, *, inference_budget_tokens):
     try:
         return parse_chat_request(chat, inference_budget_tokens=inference_budget_tokens)
     except OpenAIProtocolError as exc:
+        if exc.param and exc.param.startswith("response_format"):
+            exc.param = exc.param.replace("response_format.json_schema.schema", "text.format.schema", 1).replace("response_format", "text.format", 1)
         exc.param = {"messages": "input", "max_tokens": "max_output_tokens", "reasoning_effort": "reasoning.effort"}.get(exc.param, exc.param)
         raise
 
