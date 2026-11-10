@@ -88,7 +88,9 @@ close tag が単一 token でないモデルは 400 とする。Responses の `t
 
 strict tools は未実装で引き続き 400 とする。XGrammar 0.2.9 の `qwen_3_5` structural
  tag は `<tool_call>\n<function=...>` と `qwen_xml` parameter を提供するが、Shelf の
-parser が XML 値を JSON の型に変換する挙動と schema 制約が一致するかの検証が必要。
+parser の `xml-inline` は値 parser 未指定のため parameter の値を文字列として返す。
+したがって integer / boolean / object 等は schema に沿う型へ変換しなければならず、
+string 値との区別や streaming 中の扱いを schema に基づいて検証する必要がある。
 `any_order=true` は XGrammar 側で required と重複を検査しないため使えない。残作業は、
 strict / 非 strict 混在時の分岐、auto の trigger と required / 名前指定の強制、既存の
 prefill と thinking 境界との整合、schema の 400 検証、温度付き stream / 非 stream での
