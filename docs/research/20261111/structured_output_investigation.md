@@ -100,5 +100,17 @@ parser 後の引数検証である。Responses tools も同じ実装へ通す必
 具体的な分割、検証、および MTP の残作業は [投機 decode の接続案](structured_output_speculative_design.md)
 に記載した。M3 の reasoning 併用時と投機併用時の性能は未測定であり、M2 の測定値は
 上記の通りである。issue #26 のうち通常 JSON Schema・未対応 schema の 400・stream / 非
-stream・非制約速度・投機方針は M2 で検証済みだが、M3 追加分の実機検証と strict tool、
-投機 decode の動作検証は別途必要である。
+stream・非制約速度・投機方針は M2 で検証済みだが、strict tool と投機 decode の動作検証は別途必要である。
+
+### M3 実機検証（R9700、Qwen3.8 27B EXL3、単回）
+
+`test_server_structured_output.py` で thinking 有効の Chat と Responses `text.format`
+について、stream / 非 stream、temperature 0.8 の schema 適合と reasoning / content の
+分離を確認した。thinking 無効の schema と `json_object`、非対応 schema の 400 も成功。
+実行ログでは thinking 付き Chat の decode は 26.9 / 26.8 tok/s（各 115 token）、
+Responses は 26.9 / 26.9 tok/s（各 67 token）。thinking と回答が混在する単回値であり、
+同一 token 列の制約なし比較はないため、overhead の測定値ではない。投機併用は未測定。
+最初の試行は server の staging が旧版で 400 となり、staging 更新後に再実行して成功した。
+
+`test_compute_token_mask.py` でも、thinking budget 1 による強制 close を初期 mask の
+対象外とし、close 後に新しい mask を適用する直接 protocol テストが通過した。

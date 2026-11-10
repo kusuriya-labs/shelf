@@ -39,6 +39,31 @@ def main():
                 if event.get("event") == "done":
                     assert seen == expected and event["generated_ids"] == seen, event
                     break
+        # A forced reasoning close activates the initial mask, and the close
+        # itself is not sampled through it.
+        h.send({"op":"generate", "request_id":12, "input_ids":[248041,77091],
+                "max_new_tokens":4, "grammar":True, "grammar_after_reasoning":True,
+                "reasoning_budget_tokens":1, "reasoning_close_token":104,
+                "bitmask":mask(100)})
+        seen = []
+        while True:
+            event = h.recv()
+            assert event.get("event") != "error", event
+            if event.get("event") == "token":
+                seen.append(event["token_id"])
+                if len(seen) == 1:
+                    assert seen[0] != 104, event
+                elif len(seen) == 2:
+                    assert seen[-1] == 104, event
+                    h.send({"op":"mask", "request_id":12, "bitmask":mask(101)})
+                elif len(seen) == 3:
+                    assert seen[-1] == 101, event
+                    h.send({"op":"mask", "request_id":12, "bitmask":mask(102)})
+                else:
+                    assert seen[-1] == 102, event
+            elif event.get("event") == "done":
+                assert len(seen) == 4 and event["generated_ids"] == seen, event
+                break
         # A waiting grammar request must not block its unconstrained peer.
         h.send({"op":"generate", "request_id":20, "input_ids":[248041,77091],
                 "max_new_tokens":10, "grammar":True, "bitmask":mask(100)})
