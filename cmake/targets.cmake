@@ -89,9 +89,10 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
     src/shelf/kernels/optimized/linear/exl3.hip
-    src/shelf/kernels/optimized/linear/exl3_mul24_grouped.hip
-    src/shelf/kernels/optimized/linear/exl3_mul24.hip
-    src/shelf/kernels/optimized/linear/exl3_mul24_prefill.hip
+    src/shelf/kernels/optimized/linear/exl3/grouped.hip
+    src/shelf/kernels/optimized/linear/exl3/decode.hip
+    src/shelf/kernels/optimized/linear/exl3/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3/prefill_rotate.hip
     src/shelf/kernels/optimized/linear/exl3/workspace.cpp
     src/shelf/kernels/optimized/linear/exl3/launch_plan.cpp
     src/shelf/kernels/optimized/moe/router.hip
