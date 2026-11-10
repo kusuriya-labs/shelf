@@ -88,7 +88,9 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
-    src/shelf/kernels/optimized/linear/exl3_family/mul1/linear.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/decode.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/mul1/epilogue.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/rotate_quantize.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/grouped.hip
     src/shelf/kernels/optimized/linear/exl3_family/mul24/decode.hip
