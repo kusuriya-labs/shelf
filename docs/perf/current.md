@@ -49,6 +49,25 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
+## 2026-11-11 Qwen3.8-Flash-Next EXL3 long-context decode reference
+
+QSA の複数タイル top-k をタイルごとの radix select と 1 回の merge に変更し、
+score kernel の block offset を修正した。変更内容と切り分けは
+[../research/20261111/qsa_long_context_decode.md](../research/20261111/qsa_long_context_decode.md)。
+
+| context | 変更前 | 変更後 |
+|---|---:|---:|
+| 8K | 25.02 tok/s（39.96 ms/token） | 25.03（39.95） |
+| 32K | 22.67（44.10） | **23.99（41.68）** |
+| 65K | 20.48（48.84） | **23.04（43.40）** |
+| 128K | - | 21.60（46.30） |
+
+- measurement revision: `3e81dd6`（比較は `1c5376f`）
+- GPU: R9700 × 2（device 2,3）、TP=2
+- command: `shelf-bench tg --mode forward --context <N> --tokens 32 --prefill-chunk 2048 --kv-cache-dtype fp8 --device 2,3 --tensor-parallel 2 --warmup 1`
+- 32 token の p50。ctx 128 は 26.43 tok/s、変更前は 26.45 tok/s。
+- この節は reference run であり、qualified baseline ではない。
+
 ## 2026-11-10 Flash Next EXL3 prefill (QSA / grouped)
 
 QSA の prefill 経路と grouped EXL3 を変更した。QSA は key cache を圧縮ブロック単位で
