@@ -501,6 +501,10 @@ int main() {
     ok &= run_case(40, 384, 640, 6, 99u);
     // More flagged rows than slots (rows / 8 rounded up to 16): the surplus rows stay on the row-scale path.
     ok &= run_case(100, 128, 768, 4, 98u);
+    // Full-row CTAs and the swizzled grid: 1024 rows is a multiple of the 128-row CTA, 129 is not.
+    ok &= run_case(128, 128, 256, 4, 200u);
+    ok &= run_case(129, 128, 256, 4, 201u);
+    ok &= run_case(1024, 128, 256, 4, 202u);
     // split-K (decode-sized rows only): even and uneven splits, including a split that owns a short tail.
     ok &= run_case(1, 256, 256, 4, 5u, 2u);
     ok &= run_case(7, 384, 640, 4, 6u, 3u);
