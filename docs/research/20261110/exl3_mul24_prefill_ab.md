@@ -124,16 +124,60 @@ swizzle 後も B は A の 2.47 倍かかる。B の出力タイルは 1 wave �
 レジスタで破綻するため、次に効くのは共有メモリで重みタイルを保持して
 行方向の再利用を増やす GEMM 化であり、単純なレイアウト変更ではない。
 
+## 追記: 2D wave レイアウト（FP8 blockwise prefill 準拠）
+
+FP8 の `gemm_fp8_finegrained_w8a8_wmma_prefill_2d_kernel` に合わせ、8 wave を
+`wave_m × wave_n` に分け、1 wave が複数の出力タイルを持つ形にした。
+
+- 1 CTA = 8 wave。`wave_m = wave % WM`、`wave_n = wave / WM`。
+- 1 wave は `MT` 個の row tile と `NT` 個の output tile を担当する。
+- 1 回の活性 fragment ロードで `NT` 回の WMMA、1 回の重み fragment ロードで
+  `MT` 回の WMMA を実行する。
+- したがって 1 wave の担当面積は `MT * NT * 256`、ロード回数は
+  重みが `rows / (MT*16)`、活性が `n / (NT*16)` に比例して減る。
+- 数値は変えていない。int32 の group 累積と FP32 の scale 適用順序は同じで、
+  fused との完全一致を維持する。
+
+計測（1 run 換算、2048 prefill）:
+
+| 構成 | wall | WMMA GEMM | 対 A |
+|---|---|---|---|
+| B: 4 wave, MT=4, NT=1（swizzle 後） | 3026.09 ms | 2457.7 ms | 2.47x |
+| B: 8 wave, MT=4, NT=2, WM=4 | 2369.92 ms | 1829.4 ms | 1.93x |
+| B: 8 wave, MT=4, NT=2, WM=2 | 2419.11 ms | 1875.1 ms | 1.97x |
+| **B: 8 wave, MT=2, NT=2, WM=4** | **2113.47 ms** | **1536.3 ms** | **1.72x** |
+| A（hipBLASLt） | 1225.43 ms | 552.3 ms | 1.00x |
+| fused（`DENSE=0`） | 2474.43 ms | 約 1959 ms | 2.02x |
+
+2D 化で B の WMMA は 2458 → 1536 ms（-37%）になり、fused より速くなった。
+
+MT=4 は重みの再読みを MT=2 の半分にできるが、int32 accumulator と FP32
+accumulator がそれぞれ `MT*NT*8` 個必要で、MT=4/NT=2 は 128 VGPR を超える。
+実測では占有率の低下が再読み削減を上回り、MT=2 が最速だった。MT=8（旧構成）が
+大きく悪化したのと同じ理由である。
+
+## 残るロード削減
+
+効く順に次の 2 つが残っている。
+
+1. 活性 codes の fragment 化。FP8 は `kFragLaneBytes` 単位で活性を
+   row-tile 順に保持しており、A fragment が連続読みになる。mul24 の codes は
+   現状 `[row][k]` で、1 回の A fragment ロードが 16 row 分の strided 8 バイト読み
+   になっている。rotate_quantize の出力を tile 順にするか、変換パスを足せば
+   重みと同じ効果が期待できる。
+2. 共有メモリでの重みタイル再利用。MT を増やさずに重みの再読みを減らせる。
+
 ## 判断
 
-- B の数値は正しく、fused と完全一致する。実装としての妥当性は確認できた。
-- swizzle で 24% 速くなったが、A の 2.47 倍遅く、このままでは採用できない。
-- 既定 A を維持する。B は opt-in の比較経路として残す。
-- さらに詰めるなら、共有メモリで重みタイルを再利用する GEMM 構造への変更が必要。
-  レイアウトの追加変更だけでは A には届かない。
+- B の数値は正しく、fused と完全一致する。
+- 2D 化で A の 1.72 倍まで詰まった。fused よりは速い。
+- ただし A の hipBLASLt にはまだ届かないため、既定 A を維持し、
+  B は opt-in の比較経路として残す。
+- 次に効くのは活性 codes の fragment 化。レイアウト変更だけでなく、
+  rotate_quantize の出力形式に手を入れる必要がある。
 
 ## 未実施・注意
 
-- 共有メモリを使った重みタイル再利用と、それによる再計測は未実施。
+- 活性 codes の fragment 化と、共有メモリでの重み再利用は未実施。
 - 計測は単一 GPU、単一コーパス、1 prefill チャンクによる。
 - `SHELF_EXL3_MUL24_PREFILL_AB` は `SHELF_EXL3_INT8_DENSE` が有効な行数でのみ効く。
