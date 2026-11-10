@@ -31,6 +31,38 @@ __device__ __forceinline__ bool paged_token_visible(const uint8_t* mask, uint32_
     return ((mask[byte] >> (block & 7u)) & 1u) != 0u;
 }
 
+__device__ __forceinline__ void paged_build_page_bits(
+    const uint8_t* mask, uint32_t stride, uint32_t block_shift, uint32_t row0,
+    uint32_t rows, uint32_t visible_max, uint32_t page_tokens, uint32_t page_count,
+    uint32_t words, uint32_t* page_bits) {
+    for (uint32_t i = threadIdx.x; i < words; i += blockDim.x) page_bits[i] = 0u;
+    __syncthreads();
+    if (mask == nullptr || rows == 0u) return;
+    const uint32_t visible_blocks = (visible_max + (1u << block_shift) - 1u) >> block_shift;
+    const uint32_t mask_words = (visible_blocks + 31u) >> 5u;
+    for (uint32_t r = 0u; r < rows; ++r) {
+        const uint8_t* row_mask =
+            mask + static_cast<size_t>(row0 + r) * stride;
+        for (uint32_t wi = threadIdx.x; wi < mask_words; wi += blockDim.x) {
+            uint32_t bits = reinterpret_cast<const uint32_t*>(row_mask)[wi];
+            while (bits != 0u) {
+                const uint32_t block =
+                    wi * 32u + static_cast<uint32_t>(__ffs(bits) - 1);
+                const uint32_t page = (block << block_shift) / page_tokens;
+                if (page < page_count)
+                    atomicOr(&page_bits[page >> 5u], 1u << (page & 31u));
+                bits &= bits - 1u;
+            }
+        }
+    }
+    __syncthreads();
+}
+
+__device__ __forceinline__ bool paged_page_selected(const uint32_t* page_bits,
+                                                    uint32_t page_index) {
+    return ((page_bits[page_index >> 5u] >> (page_index & 31u)) & 1u) != 0u;
+}
+
 __device__ __forceinline__ PagedTokenAddress
 resolve_paged_token(
     uint32_t p,

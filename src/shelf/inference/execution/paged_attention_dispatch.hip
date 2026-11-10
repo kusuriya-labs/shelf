@@ -286,10 +286,8 @@ PagedAttentionPlan plan_paged_attention(
             (visible + ::shelf::kernel::kOctavePrefillKvBlockTokens - 1u) /
             ::shelf::kernel::kOctavePrefillKvBlockTokens);
     }
-    // The bf16 prefill kernel applies the per-row block mask. The fp8 prefill kernel
-    // does not, so masked fp8 KV keeps the per-(row, q_head) decode kernel.
     if (args.common.block_mask != nullptr &&
-        (args.kv_dtype != ::shelf::kernel::KVCacheDType::BF16 ||
+        (args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE ||
          args.common.rows < kMaskedPrefillMinRows)) {
         plan.use_prefill = false;
         plan.splits = 1u;

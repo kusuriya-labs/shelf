@@ -1075,6 +1075,7 @@ constexpr uint32_t kWaves = 8u;
 constexpr uint32_t kThreads = kWaves * 32u;
 constexpr uint32_t kHeadLimit = 256u;
 constexpr uint32_t kElemsPerLane = kHeadLimit / 32u;
+constexpr uint32_t kPageBitmapWords = 1024u;
 
 __device__ __forceinline__ float warp_sum_all(float x) {
     x += __shfl_xor(x, 16, 32);
@@ -1141,6 +1142,7 @@ void attention_paged_fp8_impl(
     __shared__ unsigned short decode_lut[256];
     __shared__ uint32_t anc_base_shared;
     __shared__ uint32_t anc_count_shared;
+    __shared__ uint32_t page_bits[1024];
 
     for (uint32_t i = tid; i < 256u; i += kThreads)
         decode_lut[i] = f2bf_p8(e4m3_decode_f32(static_cast<uint8_t>(i)));
@@ -1211,13 +1213,56 @@ void attention_paged_fp8_impl(
     const size_t scale_layer_base =
         static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.kv_heads;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
+    const uint32_t page_words = (page_count + 31u) / 32u;
+    const bool sparse_pages =
+        a.block_mask != nullptr && page_words <= kPageBitmapWords;
+
+    if (sparse_pages) {
+        for (uint32_t wi = tid; wi < page_words; wi += kThreads) page_bits[wi] = 0u;
+        detail::lds_barrier();
+        const uint32_t shift = a.mask_block_shift;
+        const uint32_t visible_blocks = (visible + (1u << shift) - 1u) >> shift;
+        const uint32_t mask_words = (visible_blocks + 31u) >> 5u;
+        const uint8_t* row_mask = a.block_mask + static_cast<size_t>(row) * a.mask_stride;
+        for (uint32_t wi = tid; wi < mask_words; wi += kThreads) {
+            uint32_t bits = reinterpret_cast<const uint32_t*>(row_mask)[wi];
+            while (bits != 0u) {
+                const uint32_t block =
+                    wi * 32u + static_cast<uint32_t>(__ffs(bits) - 1);
+                const uint32_t page = (block << shift) / page_tokens;
+                if (page < page_count)
+                    atomicOr(&page_bits[page >> 5u], 1u << (page & 31u));
+                bits &= bits - 1u;
+            }
+        }
+        detail::lds_barrier();
+    }
 
     float run_max = -FLT_MAX;
     float run_sum = 0.0f;
     float acc[kElemsPerLane] = {};
     uint32_t bad = 0u;
 
-    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
+    uint32_t scan_word = sparse_pages ? wave : 0u;
+    uint32_t scan_bits = (sparse_pages && scan_word < page_words)
+                             ? page_bits[scan_word]
+                             : 0u;
+    for (;;) {
+        uint32_t page_index;
+        if (!sparse_pages) {
+            if (scan_word >= page_count) break;
+            page_index = scan_word++;
+        } else {
+            while (scan_bits == 0u) {
+                scan_word += kWaves;
+                if (scan_word >= page_words) break;
+                scan_bits = page_bits[scan_word];
+            }
+            if (scan_word >= page_words) break;
+            page_index = scan_word * 32u + static_cast<uint32_t>(__ffs(scan_bits) - 1);
+            scan_bits &= scan_bits - 1u;
+            if (page_index >= page_count) break;
+        }
         const uint32_t page = block_table[page_index];
         if (page >= a.num_pages) {
             bad = 1u;
@@ -1230,7 +1275,9 @@ void attention_paged_fp8_impl(
         const uint32_t page_start = page_index * page_tokens;
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        for (uint32_t off = wave; off < tokens_here; off += kWaves) {
+        const uint32_t off_begin = sparse_pages ? 0u : wave;
+        const uint32_t off_step = sparse_pages ? 1u : kWaves;
+        for (uint32_t off = off_begin; off < tokens_here; off += off_step) {
             if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
