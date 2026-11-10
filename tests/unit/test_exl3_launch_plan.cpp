@@ -1,6 +1,6 @@
 // Golden test: the host launch policy must reproduce the previous decision rules exactly.
 
-#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
@@ -90,7 +90,7 @@ int g_failures = 0;
 
 void check_plan(const char* name, const shelf::kernel::Exl3GemmArgs& a) {
     const RefPlan r = ref_plan(a);
-    const auto p = shelf::kernel::exl3_detail::make_mul1_launch_plan(a);
+    const auto p = shelf::kernel::exl3_detail::mul1::make_launch_plan(a);
     if (p.n_tiles != r.n_tiles || p.grid_x != r.grid_x || p.grid_y != r.grid_y ||
         p.grid_z != r.grid_z || p.splits != r.splits || p.groups != r.groups) {
         std::printf("FAIL %s: plan (%u,%u,%u,%u,%u,%u) vs (%u,%u,%u,%u,%u,%u)\n", name, p.n_tiles,

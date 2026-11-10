@@ -1,6 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/linear/exl3_family/decode_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -403,7 +403,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 const uint32_t row = r0 + r;
                 const float* src =
                     area.accum + (r - g * kRowTile) * kOutBlock + lane * 4u;
-                const float bias = exl3_detail::kMul1BiasOverInv * rowsum[r];
+                const float bias = exl3_detail::mul1::kMul1BiasOverInv * rowsum[r];
                 float v0 = src[0] + bias;
                 float v1 = src[1] + bias;
                 float v2 = src[2] + bias;
@@ -416,7 +416,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
                 const uint64_t out_base =
                     static_cast<uint64_t>(row) * args.output_row_stride + col;
-                const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+                const float scale = kInvSqrt128 * exl3_detail::mul1::kMul1Inv;
                 const float y0 = v0 * scale * s0;
                 const float y1 = v1 * scale * s1;
                 const float y2 = v2 * scale * s2;
@@ -454,7 +454,7 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
     const uint64_t partial_plane = static_cast<uint64_t>(args.rows) * args.out_features;
     const float* partials = args.splitk_scratch;
     const float* rowsums = partials + static_cast<uint64_t>(splits) * partial_plane;
-    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+    const float scale = kInvSqrt128 * exl3_detail::mul1::kMul1Inv;
 
 #pragma unroll
     for (uint32_t ri = 0u; ri < 2u; ++ri) {
@@ -465,7 +465,7 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
         for (uint32_t s = 0u; s < splits; ++s) {
             row_sum += rowsums[static_cast<uint64_t>(s) * args.rows + row];
         }
-        const float bias = exl3_detail::kMul1BiasOverInv * row_sum;
+        const float bias = exl3_detail::mul1::kMul1BiasOverInv * row_sum;
         const uint32_t col = n0 + lane * 4u;
         float v0 = bias;
         float v1 = bias;

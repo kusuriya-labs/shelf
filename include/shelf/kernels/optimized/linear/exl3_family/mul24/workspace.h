@@ -8,9 +8,9 @@
 
 #include <cstdint>
 
-namespace shelf::kernel::exl3_detail {
+namespace shelf::kernel::exl3_detail::mul24 {
 
-struct Exl3Mul24WorkspaceLayout {
+struct WorkspaceLayout {
     // xrot arena
     uint64_t codes_offset = 0;
     uint64_t scales_offset = 0;
@@ -37,8 +37,8 @@ struct Exl3Mul24WorkspaceLayout {
 // `xrot_capacity`, `accum_capacity` and `dense_capacity` are the arena sizes in bytes.
 // `chunk_rows` is the largest row count whose codes + scales + flagged buffers fit the
 // xrot arena and whose F32 output fits the accum arena, capped by `rows`.
-Exl3Mul24WorkspaceLayout make_mul24_workspace_layout(
+WorkspaceLayout make_workspace_layout(
     uint32_t rows, uint32_t n, uint32_t k,
     uint64_t xrot_capacity, uint64_t accum_capacity, uint64_t dense_capacity);
 
-}  // namespace shelf::kernel::exl3_detail
+}  // namespace shelf::kernel::exl3_detail::mul24

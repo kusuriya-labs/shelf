@@ -1,7 +1,7 @@
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/linear/exl3_family/decode_mul1.h>
-#include <shelf/kernels/optimized/linear/exl3_family/decode_mul24.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_runtime.h>
 #include <cmath>
@@ -12,6 +12,7 @@
 namespace shelf::kernel {
 namespace {
 using namespace exl3_detail;
+using namespace exl3_detail::mul24;
 
 __global__ void __launch_bounds__(256) exl3_mul24_rowstat_kernel(
     const float* __restrict__ scales,

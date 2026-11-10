@@ -1,6 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/linear/exl3_family/decode_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
 #include <shelf/kernels/optimized/linear/exl3_family/group_plan.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>

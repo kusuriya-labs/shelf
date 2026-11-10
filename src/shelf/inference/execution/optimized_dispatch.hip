@@ -14,8 +14,8 @@
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
-#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
-#include <shelf/kernels/optimized/linear/exl3_family/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -708,7 +708,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         return Status::invalid_state("exl3 int8 linear: no EXL3 workspace", __FILE__, __LINE__);
 
     const uint32_t n = e.rows, k = e.cols;
-    const auto layout = ::shelf::kernel::exl3_detail::make_mul24_workspace_layout(
+    const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
         rows, n, k, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
     if (layout.chunk_rows == 0u)
         return Status::insufficient_memory("exl3 int8 linear: workspace smaller than one row", __FILE__, __LINE__);

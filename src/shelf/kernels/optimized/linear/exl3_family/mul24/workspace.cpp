@@ -1,11 +1,11 @@
-#include <shelf/kernels/optimized/linear/exl3_family/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <algorithm>
 #include <cstdint>
 
-namespace shelf::kernel::exl3_detail {
+namespace shelf::kernel::exl3_detail::mul24 {
 namespace {
 
 inline uint64_t align256(uint64_t x) noexcept {
@@ -14,10 +14,10 @@ inline uint64_t align256(uint64_t x) noexcept {
 
 }  // namespace
 
-Exl3Mul24WorkspaceLayout make_mul24_workspace_layout(
+WorkspaceLayout make_workspace_layout(
     uint32_t rows, uint32_t n, uint32_t k,
     uint64_t xrot_capacity, uint64_t accum_capacity, uint64_t dense_capacity) {
-    Exl3Mul24WorkspaceLayout l;
+    WorkspaceLayout l;
     const uint32_t groups = k / 128u;
     l.code_stride = k;
     l.scale_stride_bytes = (groups * 4u + 15u) & ~15u;
@@ -51,4 +51,4 @@ Exl3Mul24WorkspaceLayout make_mul24_workspace_layout(
     return l;
 }
 
-}  // namespace shelf::kernel::exl3_detail
+}  // namespace shelf::kernel::exl3_detail::mul24

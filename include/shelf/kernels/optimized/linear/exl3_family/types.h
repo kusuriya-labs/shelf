@@ -7,7 +7,7 @@
 // elements. Byte strides appear only where the launch signature names them explicitly
 // (code_row_stride_bytes, scale_row_stride_bytes).
 
-#include "config.h"
+#include <shelf/kernels/optimized/linear/exl3_family/config.h>
 
 #include <shelf/core/memory/types.h>
 
@@ -242,5 +242,11 @@ struct Exl3KernelVariant {
 // side effects of the launch functions stay unchanged; callers may use this before
 // choosing a path.
 bool exl3_variant_supported(const Exl3KernelVariant& variant);
+
+// Adapter from the execution policy to the existing argument field. Verify passes a
+// fixed tuning capacity; decode / prefill pass 0 (tune on the active rows).
+inline void apply_execution_policy(Exl3GemmArgs& args, const Exl3ExecutionPolicy& policy) {
+    args.splitk_tuning_rows = policy.tuning_rows;
+}
 
 }  // namespace shelf::kernel::exl3_detail

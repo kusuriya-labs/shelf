@@ -27,12 +27,12 @@ int main() {
     using namespace shelf::kernel::exl3_detail;
 
     // Traits agree with the public constants they currently mirror.
-    static_assert(Exl3Mul1Traits::kRowTile == kExl3W16A16RowTile);
-    static_assert(Exl3Mul1Traits::kOutBlock == kExl3W16A16OutBlock);
-    static_assert(Exl3Mul1Traits::kThreads == kExl3W16A16Threads);
-    static_assert(Exl3Mul24Traits::kRowTile == kExl3W16A16RowTile);
-    static_assert(Exl3Mul24Traits::kOutBlock == kExl3W16A16OutBlock);
-    static_assert(Exl3Mul24Traits::kThreads == kExl3W16A16Threads);
+    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kRowTile == kExl3W16A16RowTile);
+    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kOutBlock == kExl3W16A16OutBlock);
+    static_assert(shelf::kernel::exl3_detail::mul1::Traits::kThreads == kExl3W16A16Threads);
+    static_assert(shelf::kernel::exl3_detail::mul24::Traits::kRowTile == kExl3W16A16RowTile);
+    static_assert(shelf::kernel::exl3_detail::mul24::Traits::kOutBlock == kExl3W16A16OutBlock);
+    static_assert(shelf::kernel::exl3_detail::mul24::Traits::kThreads == kExl3W16A16Threads);
 
     // The kernel argument ABI did not grow: these are the fields P0 kept stable.
     check("gemm args size", sizeof(Exl3GemmArgs) > 0u);

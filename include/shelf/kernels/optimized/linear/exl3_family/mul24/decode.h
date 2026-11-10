@@ -4,7 +4,7 @@
 // FWHT variants live in fwht.h; decode / prefill / grouped translation units include
 // this header.
 
-#include "fwht.h"
+#include <shelf/kernels/optimized/linear/exl3_family/fwht.h>
 
 #include <shelf/core/memory/types.h>
 
@@ -13,7 +13,7 @@
 
 #include <hip/hip_runtime.h>
 
-namespace shelf::kernel::exl3_detail {
+namespace shelf::kernel::exl3_detail::mul24 {
 
 using int32x2_t = int32_t __attribute__((ext_vector_type(2)));
 using int32x8_t = int32_t __attribute__((ext_vector_type(8)));
@@ -67,4 +67,4 @@ __device__ __forceinline__ float bf16_bits_to_f32(uint16_t bits) {
     return __uint_as_float(static_cast<uint32_t>(bits) << 16);
 }
 
-}  // namespace shelf::kernel::exl3_detail
+}  // namespace shelf::kernel::exl3_detail::mul24

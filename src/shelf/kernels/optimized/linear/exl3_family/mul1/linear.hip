@@ -1,8 +1,8 @@
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
-#include <shelf/kernels/optimized/linear/exl3_family/decode_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/decode.h>
 #include <shelf/kernels/optimized/linear/exl3_family/group_plan.h>
-#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -322,8 +322,8 @@ __global__ __launch_bounds__(256) void exl3_dense_epilogue_kernel(Exl3GemmArgs a
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t row = blockIdx.x * 8u + warp;
     if (row >= args.rows) return;
-    const float bias = exl3_detail::kMul1BiasOverInv * rowsum[row];
-    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+    const float bias = exl3_detail::mul1::kMul1BiasOverInv * rowsum[row];
+    const float scale = kInvSqrt128 * exl3_detail::mul1::kMul1Inv;
     const uint16_t* svh = static_cast<const uint16_t*>(args.svh);
     const uint32_t n_blocks = args.out_features / 128u;
     for (uint32_t cb = 0u; cb < n_blocks; ++cb) {
@@ -641,7 +641,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                 const uint32_t r = g * kRowTile + warp * 2u + ri;
                 if (r >= active_rows) continue;
                 const uint32_t row = r0 + r;
-                const float bias = exl3_detail::kMul1BiasOverInv * rowsum[r];
+                const float bias = exl3_detail::mul1::kMul1BiasOverInv * rowsum[r];
 #pragma unroll
                 for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
                     const float* src = area.accum + (r - g * kRowTile) * kOutBlock +
@@ -658,7 +658,7 @@ __global__ __launch_bounds__(kThreads) void gemm_exl3_w16a16_kernel(Exl3GemmArgs
                     const float s3 = __half2float(__ushort_as_half(svh[col + 3]));
                     const uint64_t out_base =
                         static_cast<uint64_t>(row) * args.output_row_stride + col;
-                    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+                    const float scale = kInvSqrt128 * exl3_detail::mul1::kMul1Inv;
                     const float y0 = v0 * scale * s0;
                     const float y1 = v1 * scale * s1;
                     const float y2 = v2 * scale * s2;
@@ -700,7 +700,7 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
     const uint64_t partial_plane = static_cast<uint64_t>(args.rows) * args.out_features;
     const float* partials = args.splitk_scratch;
     const float* rowsums = partials + static_cast<uint64_t>(splits) * partial_plane;
-    const float scale = kInvSqrt128 * exl3_detail::kMul1Inv;
+    const float scale = kInvSqrt128 * exl3_detail::mul1::kMul1Inv;
 
 #pragma unroll
     for (uint32_t ri = 0u; ri < 2u; ++ri) {
@@ -711,7 +711,7 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
         for (uint32_t s = 0u; s < splits; ++s) {
             row_sum += rowsums[static_cast<uint64_t>(s) * args.rows + row];
         }
-        const float bias = exl3_detail::kMul1BiasOverInv * row_sum;
+        const float bias = exl3_detail::mul1::kMul1BiasOverInv * row_sum;
 #pragma unroll
         for (uint32_t cb = 0u; cb < kNTiles; ++cb) {
             const uint32_t col = n0 + cb * 128u + lane * 4u;
@@ -757,10 +757,10 @@ __global__ __launch_bounds__(kThreads) void exl3_splitk_reduce_kernel(Exl3GemmAr
     }
 }
 
-using Exl3LaunchPlan = exl3_detail::Exl3LaunchPlan;
+using LaunchPlan = exl3_detail::mul1::LaunchPlan;
 
 template <uint32_t kGroups, bool kPre, uint32_t kNTiles, uint32_t kDecode>
-hipError_t launch_kernel(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
+hipError_t launch_kernel(const Exl3GemmArgs& args, const LaunchPlan& plan,
                          hipStream_t stream) {
     if (plan.splits > 1u) {
         gemm_exl3_w16a16_kernel<kGroups, true, kPre, kNTiles, kDecode>
@@ -775,7 +775,7 @@ hipError_t launch_kernel(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
 }
 
 template <bool kPre, uint32_t kDecode>
-hipError_t launch_plan_typed(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
+hipError_t launch_plan_typed(const Exl3GemmArgs& args, const LaunchPlan& plan,
                              hipStream_t stream) {
     const uint32_t n_tiles = plan.n_tiles;
     hipError_t err = hipSuccess;
@@ -803,7 +803,7 @@ hipError_t launch_plan_typed(const Exl3GemmArgs& args, const Exl3LaunchPlan& pla
 }
 
 template <bool kPre>
-hipError_t launch_plan(const Exl3GemmArgs& args, const Exl3LaunchPlan& plan,
+hipError_t launch_plan(const Exl3GemmArgs& args, const LaunchPlan& plan,
                        hipStream_t stream) {
     if (args.fast_decode != 0u) {
         if (args.ka == 5u && args.half == 0u) {
@@ -833,7 +833,7 @@ hipError_t launch_gemm_exl3_w16a16(const Exl3GemmArgs& args, hipStream_t stream)
     if (args.ka < 1u || args.ka > 8u || (args.half != 0u && args.ka > 3u)) {
         return hipErrorInvalidValue;
     }
-    return launch_plan<false>(args, exl3_detail::make_mul1_launch_plan(args), stream);
+    return launch_plan<false>(args, exl3_detail::mul1::make_launch_plan(args), stream);
 }
 
 hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
@@ -898,9 +898,9 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     dense.svh_batch_stride = args.svh_batch_stride;
 
     // An n-tile override (SHELF_EXL3_GROUPED_NTILES) that does not divide the output would silently drop columns.
-    if ((args.out_features % (kOutBlockBase * exl3_detail::exl3_mul1_pick_n_tiles(dense))) != 0u) return hipErrorInvalidValue;
-    Exl3LaunchPlan plan;
-    plan.n_tiles = exl3_detail::exl3_mul1_pick_n_tiles(dense);
+    if ((args.out_features % (kOutBlockBase * exl3_detail::mul1::pick_n_tiles(dense))) != 0u) return hipErrorInvalidValue;
+    LaunchPlan plan;
+    plan.n_tiles = exl3_detail::mul1::pick_n_tiles(dense);
     plan.grid_x = args.out_features / (kOutBlockBase * plan.n_tiles);
     plan.grid_y = 1u;
     plan.grid_z = args.group_capacity;
@@ -908,7 +908,7 @@ hipError_t launch_gemm_exl3_w16a16_grouped(const Exl3GroupedArgs& args,
     plan.groups = dense.groups;
     // mul24 has its own kernel (exl3_mul24_grouped.hip): same group plan, mul24 decode, FP16 or INT8 activations.
     if (args.mul24 != 0u)
-        return launch_exl3_mul24_grouped(dense, args.int8_act != 0u, exl3_detail::exl3_mul1_pick_n_tiles(dense), plan.grid_x,
+        return launch_exl3_mul24_grouped(dense, args.int8_act != 0u, exl3_detail::mul1::pick_n_tiles(dense), plan.grid_x,
                                          plan.grid_z, stream);
     return launch_plan<false>(dense, plan, stream);
 }
@@ -971,7 +971,7 @@ hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xro
     }
     Exl3GemmArgs pre_args = args;
     pre_args.xrot = const_cast<void*>(xrot);
-    return launch_plan<true>(pre_args, exl3_detail::make_mul1_launch_plan(pre_args), stream);
+    return launch_plan<true>(pre_args, exl3_detail::mul1::make_launch_plan(pre_args), stream);
 }
 
 }

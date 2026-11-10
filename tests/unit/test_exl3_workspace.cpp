@@ -1,7 +1,7 @@
-// Golden test: make_mul24_workspace_layout must reproduce the previous hand calculation
+// Golden test: make_workspace_layout must reproduce the previous hand calculation
 // exactly (same offsets, same chunk / scratch rows, same fit decision).
 
-#include <shelf/kernels/optimized/linear/exl3_family/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
@@ -57,7 +57,7 @@ int g_failures = 0;
 void check(const char* name, uint32_t rows, uint32_t n, uint32_t k, uint64_t xrot_cap,
            uint64_t accum_cap, uint64_t dense_cap) {
     const Ref r = reference(rows, n, k, xrot_cap, accum_cap, dense_cap);
-    const auto l = shelf::kernel::exl3_detail::make_mul24_workspace_layout(rows, n, k, xrot_cap,
+    const auto l = shelf::kernel::exl3_detail::mul24::make_workspace_layout(rows, n, k, xrot_cap,
                                                                           accum_cap, dense_cap);
     const bool same =
         l.codes_offset == r.codes_offset && l.scales_offset == r.scales_offset &&

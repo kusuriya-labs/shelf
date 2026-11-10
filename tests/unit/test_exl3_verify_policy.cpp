@@ -1,7 +1,7 @@
 // Verify reproducibility policy: with a fixed tuning capacity the split count (and so
 // the K reduction order) must not change with the active row count.
 
-#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/kernels/optimized/linear/exl3_mul1.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
@@ -25,7 +25,7 @@ bool stable_mul1(uint32_t tuning, uint32_t n, uint32_t k) {
         a.splitk_floats = 1u << 22;
         a.splitk_splits = 0u;
         a.splitk_tuning_rows = tuning;
-        const auto p = shelf::kernel::exl3_detail::make_mul1_launch_plan(a);
+        const auto p = shelf::kernel::exl3_detail::mul1::make_launch_plan(a);
         if (rows == 1u) {
             splits = p.splits;
             groups = p.groups;
