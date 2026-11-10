@@ -429,8 +429,8 @@ def parse_args(argv=None):
                         help="listen port (default 8000)")
     parser.add_argument("--compute", default=None, help="shelf-compute path")
 
-    parser.add_argument("--max-seq-len", type=int, default=32768,
-                        help="max sequence length (default 32768)")
+    parser.add_argument("--max-seq-len", type=int, default=None,
+                        help="max sequence length (default 32768; PLaMo 3: 2048)")
     parser.add_argument("--max-num-batched-tokens", type=int, default=2048,
                         help="token budget per scheduled step; also sets the executor "
                              "row bucket (default 2048)")
@@ -495,7 +495,7 @@ def parse_args(argv=None):
         parser.error(f"--device entries must be unique: {opts.device}")
     opts.device = ",".join(devices)
 
-    if opts.max_seq_len < 1:
+    if opts.max_seq_len is not None and opts.max_seq_len < 1:
         parser.error("--max-seq-len must be >= 1")
     if not 16 <= opts.max_num_batched_tokens <= 8192:
         parser.error("--max-num-batched-tokens must be between 16 and 8192")
@@ -540,9 +540,20 @@ def _validate_model_dirs(opts) -> None:
 async def _serve(opts) -> int:
     processor = await asyncio.to_thread(codec.load_processor, opts.model_dir)
 
-    reasoning_capability = await asyncio.to_thread(
-        codec.reasoning_capability, processor)
-    if not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
+    try:
+        config = json.loads((Path(opts.model_dir) / "config.json").read_text())
+    except (OSError, ValueError):
+        config = {}
+    is_plamo = config.get("model_type") == "plamo3"
+    if opts.max_seq_len is None:
+        opts.max_seq_len = 2048 if is_plamo else 32768
+    if is_plamo and opts.max_seq_len > 2048:
+        _log("PLaMo 3 requires --max-seq-len <= 2048")
+        return 2
+    reasoning_capability = ({"thinking": False, "effort": False, "close_token": -1}
+                            if is_plamo else await asyncio.to_thread(
+                                codec.reasoning_capability, processor))
+    if not is_plamo and not (reasoning_capability["thinking"] and reasoning_capability["effort"]):
         _log("Reasoning is part of the Chat Completions contract, but the "
              "loaded chat template does not support it.")
         _log(f"  probe: {reasoning_capability}")
@@ -594,10 +605,12 @@ async def _serve(opts) -> int:
         "speculative": speculative,
         "reasoning": {
             "enabled": bool(reasoning_capability["thinking"]),
-            "default_enable_thinking": True,
-            "default_reasoning_effort": codec.DEFAULT_REASONING_EFFORT,
-            "default_preserve_thinking": True,
-            "reasoning_efforts": list(codec.REASONING_EFFORTS),
+            "default_enable_thinking": bool(reasoning_capability["thinking"]),
+            "default_reasoning_effort": (codec.DEFAULT_REASONING_EFFORT
+                                         if reasoning_capability["thinking"] else None),
+            "default_preserve_thinking": bool(reasoning_capability["thinking"]),
+            "reasoning_efforts": (list(codec.REASONING_EFFORTS)
+                                  if reasoning_capability["thinking"] else []),
         },
     }
 
@@ -632,15 +645,22 @@ async def _serve(opts) -> int:
              f"{opts.large_context_inference_budget_tokens} tokens "
              f"(thinking "
              f"{thinking_budget_tokens(opts.large_context_inference_budget_tokens)})")
-    if reasoning_capability["close_token"] < 0:
+    if reasoning_capability["thinking"] and reasoning_capability["close_token"] < 0:
         _log("  thinking budget is not enforced "
              "(the reasoning close tag is not one token)")
-    _log(f"Reasoning:    enabled (thinking on, effort "
-         f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)")
-    _log(f"Efforts:      {', '.join(codec.REASONING_EFFORTS)}")
+    if reasoning_capability["thinking"]:
+        _log(f"Reasoning:    enabled (thinking on, effort "
+             f"{codec.DEFAULT_REASONING_EFFORT}, preserve_thinking on)")
+        _log(f"Efforts:      {', '.join(codec.REASONING_EFFORTS)}")
+    else:
+        _log("Reasoning:    disabled")
     _log("")
-    _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
-         "concurrency, cancel")
+    if is_plamo:
+        _log("Supported:   Chat Completions, Responses, SSE, translation, sampling, "
+             "concurrency, cancel")
+    else:
+        _log("Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, "
+             "concurrency, cancel")
     _log("Unsupported: structured output, strict tools")
     _log("")
     _log("Ready.")
