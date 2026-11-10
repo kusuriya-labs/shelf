@@ -197,5 +197,7 @@ struct QsaKeyCacheBatchArgs {
 
 hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
                                       hipStream_t stream);
+hipError_t launch_qsa_key_cache_blocks(const QsaKeyCacheBatchArgs& args,
+                                       hipStream_t stream);
 
 }  // namespace shelf::kernel

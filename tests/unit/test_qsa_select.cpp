@@ -417,6 +417,16 @@ int main() {
                   .max_sequences = 1u},
                  true);
 
+    run_scenario({.label = "blocks 8192 / compress 4 / split full block tile",
+                  .blocks = 8192u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 512u,
+                  .positions = {32767u, 32768u, 4u, 40u},
+                  .row_slots = {0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true);
+
     std::printf("%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
 }

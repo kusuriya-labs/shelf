@@ -109,7 +109,13 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     args.theta = b.scalar_a;
     args.position_scale = b.scalar_b;
     args.inv_freq = ctx.rope_inv_freq;
-    const hipError_t error = ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);
+    // Prefill blocks are independent: one CTA per compressed block removes the serial
+    // per-token loop. Speculative snapshots still need the ordered path.
+    const bool parallel_blocks = args.partial_history == nullptr &&
+                                 args.actual_rows >= 256u;
+    const hipError_t error = parallel_blocks
+                                 ? ::shelf::kernel::launch_qsa_key_cache_blocks(args, stream)
+                                 : ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);
     if (error != hipSuccess)
         return Status::hip_error("qsa key cache launch", hipGetErrorString(error),
                                  __FILE__, __LINE__);
