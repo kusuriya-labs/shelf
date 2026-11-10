@@ -5,7 +5,8 @@
 // The group plan is built on the host from a random top-k routing (uniform, or --skew: expert popularity ~ 1/(i+1)).
 // SHELF_EXL3_GROUPED_FUSE / SHELF_EXL3_GROUPED_NTILES apply as in the runtime.
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <hip/hip_runtime.h>
 #include <nlohmann/json.hpp>

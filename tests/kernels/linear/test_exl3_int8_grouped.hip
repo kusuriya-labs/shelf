@@ -5,7 +5,8 @@
 // checked against a CPU reference built on exl3_decode_int8. Covers several bit rates, experts with no / few / many
 // tokens (fused groups of one expert), token-row gather, and BF16 / F32 output.
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 
 #include <hip/hip_runtime.h>

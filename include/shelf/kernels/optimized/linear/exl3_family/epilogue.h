@@ -9,7 +9,8 @@
 //   apply H128, multiply by 1/sqrt(128) and svh, then round to the output type.
 // Split-K reductions sum the split slices in split index order before this sequence.
 
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
 

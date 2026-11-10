@@ -3,8 +3,7 @@
 // Internal dispatch selection for EXL3. Kept out of the public optimized_dispatch.h so
 // the public header does not depend on kernel-internal headers.
 
-#include <shelf/kernels/optimized/linear/exl3/detail/types.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_family/types.h>
 
 #include <cstdint>
 

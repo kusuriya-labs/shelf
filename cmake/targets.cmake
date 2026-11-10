@@ -88,14 +88,15 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/fp8.hip
     src/shelf/kernels/optimized/linear/fp8_ptpc.hip
     src/shelf/kernels/optimized/linear/mxfp4.hip
-    src/shelf/kernels/optimized/linear/exl3.hip
-    src/shelf/kernels/optimized/linear/exl3/grouped.hip
-    src/shelf/kernels/optimized/linear/exl3/decode.hip
-    src/shelf/kernels/optimized/linear/exl3/prefill.hip
-    src/shelf/kernels/optimized/linear/exl3/prefill_rotate.hip
-    src/shelf/kernels/optimized/linear/exl3/verify.hip
-    src/shelf/kernels/optimized/linear/exl3/workspace.cpp
-    src/shelf/kernels/optimized/linear/exl3/launch_plan.cpp
+    src/shelf/kernels/optimized/linear/exl3_mul1.hip
+    src/shelf/kernels/optimized/linear/exl3_mul24.hip
+    src/shelf/kernels/optimized/linear/exl3_family/grouped.hip
+    src/shelf/kernels/optimized/linear/exl3_family/decode.hip
+    src/shelf/kernels/optimized/linear/exl3_family/prefill.hip
+    src/shelf/kernels/optimized/linear/exl3_family/prefill_rotate.hip
+    src/shelf/kernels/optimized/linear/exl3_family/verify.hip
+    src/shelf/kernels/optimized/linear/exl3_family/workspace.cpp
+    src/shelf/kernels/optimized/linear/exl3_family/launch_plan.cpp
     src/shelf/kernels/optimized/moe/router.hip
     src/shelf/kernels/optimized/moe/combine.hip
     src/shelf/kernels/optimized/attention/paged_decode.hip
@@ -265,7 +266,6 @@ add_library(shelf_inference_execution STATIC
 )
 target_compile_features(shelf_inference_execution PRIVATE cxx_std_20)
 target_include_directories(shelf_inference_execution PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(shelf_inference_execution PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 find_library(SHELF_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 target_link_libraries(shelf_inference_execution PUBLIC shelf_core shelf_gpu shelf_runtime shelf_inference_state shelf_inference_scheduling shelf_kernels_optimized shelf_kernels_correctness)
 if(SHELF_HIPBLASLT_LIBRARY)

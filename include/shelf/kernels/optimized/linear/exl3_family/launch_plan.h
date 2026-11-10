@@ -3,7 +3,8 @@
 // Host-only launch policy. The numbers here are the existing decision rules moved out
 // of the .hip files; the kernel launch itself stays in the .hip files.
 
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
 

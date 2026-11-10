@@ -1,6 +1,7 @@
-#include "detail/launch_plan.h"
-#include "detail/types.h"
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/types.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <hip/hip_runtime.h>
 

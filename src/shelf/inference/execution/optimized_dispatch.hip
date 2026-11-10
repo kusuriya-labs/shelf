@@ -1,5 +1,5 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
-#include "detail/exl3_dispatch_decision.h"
+#include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -8,13 +8,14 @@
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/mxfp4.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/inference/execution/hyper_connection_dispatch.h>
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
-#include <shelf/kernels/optimized/linear/exl3/detail/launch_plan.h>
-#include <shelf/kernels/optimized/linear/exl3/detail/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>

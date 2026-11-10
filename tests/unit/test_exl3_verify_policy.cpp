@@ -1,8 +1,9 @@
 // Verify reproducibility policy: with a fixed tuning capacity the split count (and so
 // the K reduction order) must not change with the active row count.
 
-#include <shelf/kernels/optimized/linear/exl3/detail/launch_plan.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
 #include <cstdio>

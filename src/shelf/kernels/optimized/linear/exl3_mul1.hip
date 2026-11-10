@@ -1,7 +1,8 @@
-#include <shelf/kernels/optimized/linear/exl3.h>
-#include "exl3/detail/decode_mul1.h"
-#include "exl3/detail/group_plan.h"
-#include "exl3/detail/launch_plan.h"
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
+#include <shelf/kernels/optimized/linear/exl3_family/decode_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_family/group_plan.h>
+#include <shelf/kernels/optimized/linear/exl3_family/launch_plan.h>
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>

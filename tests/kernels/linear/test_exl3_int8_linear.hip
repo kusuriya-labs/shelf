@@ -1,5 +1,6 @@
 #include <shelf/inference/execution/exl3_dense_gemm.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/weights/matrix_weight.h>

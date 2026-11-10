@@ -16,8 +16,8 @@
 #include <shelf/kernels/optimized/embedding.h>
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/runtime/selector_types.h>
 #include <cstdint>

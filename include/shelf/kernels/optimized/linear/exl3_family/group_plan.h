@@ -1,7 +1,8 @@
 #pragma once
 
 #include <shelf/core/memory/types.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <hip/hip_runtime.h>
 

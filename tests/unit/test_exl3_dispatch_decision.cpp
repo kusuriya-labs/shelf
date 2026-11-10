@@ -1,9 +1,10 @@
 // P1-2: the mul24 prefill backend choice is a pure host function and can be tested
 // without a GPU workload.
 
-#include <shelf/inference/execution/detail/exl3_dispatch_decision.h>
-#include <shelf/kernels/optimized/linear/exl3/detail/types.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/inference/execution/exl3_dispatch_decision.h>
+#include <shelf/kernels/optimized/linear/exl3_family/types.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 
 #include <cstdint>
 #include <cstdio>

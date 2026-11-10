@@ -4,7 +4,8 @@
 // with the unsharded run of the same path. A real multi-GPU run only adds the collective on top of this.
 #include <shelf/core/memory/types.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul1.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/weights/canonical_partition.h>
 #include <hip/hip_runtime.h>

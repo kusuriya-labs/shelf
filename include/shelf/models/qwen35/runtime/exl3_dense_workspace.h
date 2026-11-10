@@ -1,6 +1,6 @@
 #pragma once
 
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/exl3_mul24.h>
 #include <shelf/weights/matrix_weight.h>
 
 #include <cstddef>
