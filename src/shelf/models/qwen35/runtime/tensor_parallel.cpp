@@ -264,7 +264,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
             qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
                 gdn_layout_result,
                 qwen35::runtime::mtp_spec_rows(config.mtp_batch.max_requests,
-                                               mtp_options.num_drafts));
+                                               mtp_options.num_drafts),
+                config.mtp_batch.max_requests);
         const std::size_t batch_bytes = drafter_bytes + state_bytes;
         reserved += batch_bytes;
         std::fprintf(stderr,

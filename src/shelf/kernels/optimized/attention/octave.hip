@@ -711,8 +711,8 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     if (row >= args.rows) return;
     const uint32_t q_per_kv = q_per_kv_total;
     const uint32_t group_heads =
-        q_per_kv - q_head_base < kOctaveQPerKv ? q_per_kv - q_head_base
-                                               : kOctaveQPerKv;
+        q_per_kv - q_head_base < kOctaveWmmaQueries ? q_per_kv - q_head_base
+                                                    : kOctaveWmmaQueries;
 
     (void)levels;
     for (uint32_t i = tid; i < kOctaveWmmaQueries * kOctaveWmmaPitch;
@@ -747,9 +747,10 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     __syncthreads();
     if (s.row_valid == 0u) return;
 
-    if (wave < group_heads) {
+    for (uint32_t qh = wave; qh < group_heads;
+         qh += kOctaveWmmaThreads / 32u) {
         float qv[8];
-        const uint32_t q_head = kv_head * q_per_kv + q_head_base + wave;
+        const uint32_t q_head = kv_head * q_per_kv + q_head_base + qh;
         const bf16_t* source = args.q +
             static_cast<uint64_t>(row) * args.q_row_stride +
             static_cast<uint64_t>(q_head) * 256u + lane * 8u;
@@ -762,7 +763,7 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
         octave_wht_query_wave(qv, lane, kCompact);
         #pragma unroll
         for (uint32_t e = 0u; e < 8u; ++e)
-            s.q[wave][lane * 8u + e] = static_cast<_Float16>(qv[e]);
+            s.q[qh][lane * 8u + e] = static_cast<_Float16>(qv[e]);
     }
     __syncthreads();
 
@@ -1073,7 +1074,8 @@ hipError_t launch_attention_paged_octave_split(
         return value != nullptr && value[0] == '1' && value[1] == '\0';
     }();
     const uint32_t q_per_kv = common.q_heads / common.kv_heads;
-    for (uint32_t q_base = 0u; q_base < q_per_kv; q_base += kOctaveQPerKv) {
+    const uint32_t q_group = legacy ? kOctaveQPerKv : kOctaveWmmaQueries;
+    for (uint32_t q_base = 0u; q_base < q_per_kv; q_base += q_group) {
         if (legacy) {
             octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
                 common, k_pool, v_pool, levels, format, partials, splits, q_base, q_per_kv);

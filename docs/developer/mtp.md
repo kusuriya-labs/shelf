@@ -37,13 +37,14 @@ target sequence と対応付ける。MTP+TP のときは TP executor に
 
 MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool の後ろに必要になる。
 `TpRankRuntime` は `MtpBatchReserveConfig` を受け取り、次の 2 項を working set reserve に加える。
-drafter を持たない rank は verify 行分の共有 GDN history / compact log だけを
-`mtp_batch_rank_state_reserve_bytes` で計上し、drafter を持つ rank 0 はそれに加えて
-request 数分の `mtp_drafter_reserve_bytes` を計上する。verify 行は
+各 rank は verify 行分の共有 GDN history / compact log と、drafter 数分の target GDN
+snapshot を `mtp_batch_rank_state_reserve_bytes` で計上する。drafter を持つ rank 0 は
+それに加えて request 数分の `mtp_drafter_reserve_bytes` を計上する。verify 行は
 `mtp_spec_rows(max_requests, num_drafts)` = `max_requests * (num_drafts + 1)` であり、
 drafter の prefill 行数（`max_batch_rows`）とは独立である。drafter の executor は
-MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もり、target GDN snapshot は
-その rank の local layout で 1 面だけ確保する。
+MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。target GDN snapshot は
+各 drafter が全 rank の local layout に 1 面ずつ確保するため、rank ごとに
+`max_requests` 面を計上する。
 
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
 `build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。

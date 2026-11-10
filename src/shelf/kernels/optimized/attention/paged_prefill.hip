@@ -688,6 +688,10 @@ constexpr uint32_t kWideQueryRows = 32u;
 constexpr uint32_t kWideFlatRows = 192u;
 constexpr uint32_t kWideTileWaves = 24u;
 constexpr uint32_t kWidePPitch = 16u;
+constexpr uint32_t kFlashNextQueryRows = 16u;
+constexpr uint32_t kFlashNextFlatRows = 192u;
+constexpr uint32_t kFlashNextTileWaves = 24u;
+constexpr uint32_t kFlashNextPPitch = 16u;
 constexpr uint32_t kOctavePitch = kHeadDim;
 constexpr uint32_t kOctaveTokens = 16u;
 constexpr uint32_t kOctaveTokenHalves = kOctaveTokens / 16u;
@@ -1383,11 +1387,10 @@ hipError_t launch_attention_paged_prefill_octave(
         levels == nullptr || !octave_format_valid(format))
         return hipErrorInvalidValue;
     const char* legacy_value = std::getenv("SHELF_OCTAVE_PREFILL_LEGACY");
+    const uint32_t q_per_kv = common.q_heads / common.kv_heads;
     const bool legacy = legacy_value != nullptr && legacy_value[0] == '1' &&
-                        legacy_value[1] == '\0';
-    if (common.q_heads / common.kv_heads >
-            v_prefill_octave::kWideFlatRows /
-                v_prefill_octave::kWideQueryRows) {
+                        legacy_value[1] == '\0' && q_per_kv <= 6u;
+    if (q_per_kv > 12u) {
         const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
         attention_paged_prefill_bf16_impl<2u>
             <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
@@ -1408,6 +1411,15 @@ hipError_t launch_attention_paged_prefill_octave(
                 v_prefill_octave::kLegacyFlatRows,
                 v_prefill_octave::kLegacyTileWaves,
                 v_prefill_octave::kLegacyPPitch, 2u>(
+                    common, k_pool, v_pool, levels, format, stream);
+        } else if (q_per_kv > v_prefill_octave::kWideFlatRows /
+                                v_prefill_octave::kWideQueryRows) {
+            tile_error =
+                v_prefill_octave::launch_attention_paged_prefill_octave_tile<
+                v_prefill_octave::kFlashNextQueryRows,
+                v_prefill_octave::kFlashNextFlatRows,
+                v_prefill_octave::kFlashNextTileWaves,
+                v_prefill_octave::kFlashNextPPitch, 1u>(
                     common, k_pool, v_pool, levels, format, stream);
         } else {
             tile_error =

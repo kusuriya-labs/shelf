@@ -51,19 +51,29 @@ int main() {
         static_cast<std::size_t>(gdn_full.num_v_heads) * gdn_full.head_k;
     const std::size_t compact = gdn_full.num_gdn_states * rows *
         (vdim + qkdim + gdn_full.num_v_heads) * sizeof(float);
-    check(mtp_batch_rank_state_reserve_bytes(gdn_full, static_cast<std::uint32_t>(rows)) ==
-              history + compact,
-          "batch rank state covers the history and compact log");
+    const std::size_t snapshot = gdn_full.num_gdn_states *
+        (static_cast<std::size_t>(gdn_full.conv_history_stride) * gdn_full.conv_history *
+             sizeof(shelf::bf16_t) +
+         static_cast<std::size_t>(gdn_full.num_v_heads) * gdn_full.head_k *
+             gdn_full.head_v * sizeof(shelf::fp16_t));
+    check(mtp_batch_rank_state_reserve_bytes(gdn_full, static_cast<std::uint32_t>(rows),
+                                             1u) ==
+              history + compact + snapshot,
+          "batch rank state covers the history, compact log and one snapshot");
+    check(mtp_batch_rank_state_reserve_bytes(gdn_full, static_cast<std::uint32_t>(rows),
+                                             3u) ==
+              history + compact + 3u * snapshot,
+          "batch rank state covers one snapshot per drafter");
 
-    const std::size_t small = mtp_batch_rank_state_reserve_bytes(gdn_full, 5u);
-    const std::size_t prefill_rows = mtp_batch_rank_state_reserve_bytes(gdn_full, 512u);
-    check(small * 100u < prefill_rows,
+    const std::size_t small = mtp_batch_rank_state_reserve_bytes(gdn_full, 5u, 1u);
+    const std::size_t prefill_rows = mtp_batch_rank_state_reserve_bytes(gdn_full, 512u, 1u);
+    check(small < prefill_rows,
           "batch rank state follows the verify rows, not the prefill row limit");
 
-    check(mtp_batch_rank_state_reserve_bytes(gdn_local, 5u) < small,
+    check(mtp_batch_rank_state_reserve_bytes(gdn_local, 5u, 1u) < small,
           "a tp rank reserves its local gdn geometry");
 
-    check(mtp_batch_rank_state_reserve_bytes(gdn_full, 0u) == 0u,
+    check(mtp_batch_rank_state_reserve_bytes(gdn_full, 0u, 1u) == 0u,
           "no verify rows reserve nothing");
 
     shelf::qwen35::runtime::MtpDrafterConfig options;

@@ -400,12 +400,6 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
 
     const state::GdnStatePoolLayout gdn =
         target_gdn != nullptr ? *target_gdn : make_qwen35_gdn_state_layout(config);
-    const std::size_t snapshot =
-        static_cast<std::size_t>(gdn.num_gdn_states) *
-        (static_cast<std::size_t>(gdn.conv_history_stride) * gdn.conv_history *
-             sizeof(bf16_t) +
-         static_cast<std::size_t>(gdn.num_v_heads) * gdn.head_k * gdn.head_v *
-             sizeof(fp16_t));
     std::size_t history = 0u;
     std::size_t compact = 0u;
     if (options.allocate_spec_buffers) {
@@ -420,7 +414,7 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
             (vdim + qkdim + gdn.num_v_heads) * sizeof(float);
     }
     constexpr std::size_t kMargin = 64ull * 1024ull * 1024ull;
-    return kv + executor + snapshot + history + compact + kMargin;
+    return kv + executor + history + compact + kMargin;
 }
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
@@ -1225,7 +1219,8 @@ Result<MtpIterationOutput> mtp_spec_step(
 }
 
 std::size_t mtp_batch_rank_state_reserve_bytes(
-    const state::GdnStatePoolLayout& gdn, std::uint32_t spec_rows) noexcept {
+    const state::GdnStatePoolLayout& gdn, std::uint32_t spec_rows,
+    std::uint32_t drafter_count) noexcept {
     if (spec_rows == 0u) {
         return 0u;
     }
@@ -1236,7 +1231,12 @@ std::size_t mtp_batch_rank_state_reserve_bytes(
     const std::uint64_t qkdim = static_cast<std::uint64_t>(gdn.num_v_heads) * gdn.head_k;
     const std::size_t compact = static_cast<std::size_t>(gdn.num_gdn_states) * rows *
         (vdim + qkdim + gdn.num_v_heads) * sizeof(float);
-    return history + compact;
+    const std::size_t snapshot = static_cast<std::size_t>(gdn.num_gdn_states) *
+        (static_cast<std::size_t>(gdn.conv_history_stride) * gdn.conv_history *
+             sizeof(bf16_t) +
+         static_cast<std::size_t>(gdn.num_v_heads) * gdn.head_k * gdn.head_v *
+             sizeof(fp16_t));
+    return history + compact + static_cast<std::size_t>(drafter_count) * snapshot;
 }
 
 Result<MtpSpecBatchContext> create_mtp_spec_batch_context(

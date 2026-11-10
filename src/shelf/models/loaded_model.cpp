@@ -316,7 +316,8 @@ std::size_t LoadedModel::mtp_spec_batch_reserve_bytes(
     const std::size_t state = shelf::qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
         shelf::qwen35::make_qwen35_gdn_state_layout(hybrid_config()),
         shelf::qwen35::runtime::mtp_spec_rows(
-            static_cast<std::uint32_t>(max_requests), options.num_drafts));
+            static_cast<std::uint32_t>(max_requests), options.num_drafts),
+        static_cast<std::uint32_t>(max_requests));
     return drafter * max_requests + state;
 }
 

@@ -299,11 +299,14 @@ inline uint32_t mtp_spec_rows(uint32_t max_requests, uint32_t num_drafts) noexce
 }
 
 // The arena bytes a rank reserves for one fused verify batch: the shared target GDN history
-// and compact log. The caller adds the per-request drafters, which only the drafter's rank
-// allocates (see mtp_drafter_reserve_bytes).
+// and compact log, plus one target GDN snapshot per drafter. Every rank allocates its own
+// snapshot for each drafter in the batch, so the caller passes the request count. The caller
+// adds the per-request drafters themselves, which only the drafter's rank allocates (see
+// mtp_drafter_reserve_bytes).
 std::size_t mtp_batch_rank_state_reserve_bytes(
     const state::GdnStatePoolLayout& rank_gdn,
-    std::uint32_t spec_rows) noexcept;
+    std::uint32_t spec_rows,
+    std::uint32_t drafter_count) noexcept;
 
 Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     Executor& target,
