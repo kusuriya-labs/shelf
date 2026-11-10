@@ -93,7 +93,7 @@ hipError_t launch_exl3_mul24_prefill_rotate_out_i32(
     const int32_t* acc, const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
     void* out, Exl3OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream);
 
-// Grouped mul24 GEMM (exl3_family/grouped.hip). `args` is the grouped plan as
+// Grouped mul24 GEMM (exl3_family/mul24/grouped.hip). `args` is the grouped plan as
 // launch_gemm_exl3_w16a16_grouped builds it (rows = one group tile, groups = fused
 // groups per block, 1 or 2; more is run as 2). int8_act selects INT8 activations with
 // an iu8 WMMA; otherwise an FP16 WMMA on the exact integer weights. n_tiles is 1 or 2

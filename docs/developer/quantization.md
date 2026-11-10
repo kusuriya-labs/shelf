@@ -398,7 +398,7 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   分割は 128 の倍数でなければならない（Hadamard の block）。n 分割（列並列）は出力が列ごとに独立で、
   1 GPU で全体を実行した結果とビット一致する。k 分割（行並列）は各 rank が自分の K 区間の部分和を出し、
   collective で足す。group scale は 128 ごとなので分割の影響を受けず、dense 経路の行 scale だけが
-  rank-local の K 区間の最大になる（活性の丸めが変わるだけ）。`test_exl3_int8_tp` が partition 実装、rank ごとの
+  rank-local の K 区間の最大になる（活性の丸めが変わるだけ）。`test_exl3_mul24_tp` が partition 実装、rank ごとの
   INT8 経路、結合（n は連結、k は加算）を 1 GPU で再現して照合する（tp=2/4、実モデル形状を含む）。
   hipBLASLt の handle と algorithm cache は rank の worker thread ごと（device ごと）に持つ。
   **複数 GPU での実行（collective を含む）は未検証。**
@@ -429,7 +429,7 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   - loader は expert plane の全 expert の marker が同じ乗数であることを検査し、mul1 と mul24 の混在（plane 内、
     1 層の gate / up / down の間、層をまたぐ plane 間）を明示エラーにする。dense の linear と expert の format の混在は
     禁止していない（dispatch は weight ごと）。
-  - **速度（R9700、`bench_exl3_int8_grouped`、Flash Next の実形状 hidden 2560 / intermediate 640 / 512 expert / top-10、
+  - **速度（R9700、`bench_exl3_mul24_grouped`、Flash Next の実形状 hidden 2560 / intermediate 640 / 512 expert / top-10、
     3 bit、一様な routing、gate+down の 1 層ぶん）**: INT8 活性は FP16 より速くない。decode 相当（1〜16 token）は
     0.96〜1.02 倍、prefill（256〜2048 token）は 0.91〜0.98 倍。このため既定は FP16 活性のまま
     （`kExl3Int8MoeDefault`、`moe_dispatch.hip`）。支配項は重みの復号と、n block ごとに繰り返す回転で、WMMA の
@@ -439,8 +439,8 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   expert の trellis は n-major ではない。correctness fallback は持たない。
   **未検証**: 実モデル（Qwen3.8-Flash-Next の mul24 版 80 GB）の実行、複数 GPU（expert parallel と collective）、
   dispatch 経由（`SHELF_EXL3_INT8_MOE` の切り替え）での実行、モデル全体の精度と速度。検証済みなのは
-  `test_exl3_int8_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照（活性の丸めまで鏡像）と照合、
-  INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、`bench_exl3_int8_grouped`（kernel 単体の速度）、
+  `test_exl3_mul24_grouped`（合成した expert plane を、FP16 と INT8 活性それぞれの CPU 参照（活性の丸めまで鏡像）と照合、
+  INT8 と FP16 の差は相対 RMS で 0.63〜0.69%、単一 GPU）、`bench_exl3_mul24_grouped`（kernel 単体の速度）、
   `test_program_moe_plan`（program 構築）である。
 
 ## KV quantization
