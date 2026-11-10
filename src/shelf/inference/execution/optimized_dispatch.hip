@@ -736,11 +736,12 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         const unsigned long v = std::strtoul(env, nullptr, 10);
         return v == 0ul ? 0xFFFFFFFFu : static_cast<uint32_t>(v);
     }();
-    // A (default): hipBLASLt row-scale dense prefill + flagged-row correction.
+    // A: hipBLASLt row-scale dense prefill + flagged-row correction.
     // B: hand-written gfx12 iu8 WMMA, K128 scale/FMA and no row re-quantization.
     static const bool prefill_wmma_b = [] {
         const char* env = std::getenv("SHELF_EXL3_MUL24_PREFILL_AB");
-        return env != nullptr && (env[0] == 'B' || env[0] == 'b') && env[1] == '\0';
+        if (env == nullptr) return true;
+        return (env[0] == 'B' || env[0] == 'b') && env[1] == '\0';
     }();
     static const float flag_share = [] {
         const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
