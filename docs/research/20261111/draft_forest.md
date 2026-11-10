@@ -21,7 +21,7 @@
 - 現在の verify は各行の target 出力を sample し、draft と一致する間を受理する。確率的経路でも選択済み prefix の各 target 分布から sample する契約を維持する。行番号と深さが異なると sampling index の対応が変わるため、seed の扱いと履歴依存 sampling を確認する。
 - 現在のバッチ行数、target scratch、GDN history、ページ境界は chain の `K+1` 行を前提に確保される。木の予算に応じた容量、複数 session の parent と ancestor の行オフセット、ページ境界、EOS・残り出力長を合わせて扱う必要がある。
 
-## 現状
+## M1b 時点の状態
 
 M1b は単一 request の `shelf-compute` に接続した。既定は従来の chain で、
 `--dflash2-tree-extra` を明示した場合だけ木として検証する。chain と最大２個の
