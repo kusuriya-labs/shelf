@@ -113,7 +113,8 @@ std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool&
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,
                                         std::size_t lm_head_k,
-                                        std::size_t prefill_rows) noexcept {
+                                        std::size_t prefill_rows,
+                                        bool exl3_mul24_head) noexcept {
     const std::size_t hidden = config.hidden_size;
     const std::size_t intermediate = config.intermediate_size;
     const std::size_t q_features = config.attention_q_rows();
@@ -134,7 +135,9 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
     bf16_rows += draft * config.selector_rank;
     std::size_t total = align_up(bf16_rows * sizeof(bf16_t));
 
-    total += 2u * align_up(draft * config.vocab_size * sizeof(float));
+    const std::size_t logits_bytes = align_up(draft * config.vocab_size * sizeof(float));
+    total += logits_bytes;
+    if (exl3_mul24_head) total += logits_bytes;
     total += align_up(draft * config.selector_top_k * (sizeof(int32_t) + sizeof(float)));
     total += align_up(draft * (1u + 2u * ::shelf::kernel::kDflash2TopKScratchPerRow) *
                       sizeof(int32_t));
@@ -164,12 +167,15 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
                                    uint32_t sessions,
-                                   std::size_t prefill_rows) noexcept {
+                                   std::size_t prefill_rows,
+                                   bool exl3_mul24_head) noexcept {
     DFlash2Footprint footprint;
     footprint.draft_weights = draft_weights_bytes;
     footprint.draft_scratch =
-        dflash2_draft_scratch_bytes(config, rows_for(config, spec_config.num_drafts, sessions, spec_config.tree_budget), lm_head_k,
-                                    prefill_rows);
+        dflash2_draft_scratch_bytes(
+            config,
+            rows_for(config, spec_config.num_drafts, sessions, spec_config.tree_budget),
+            lm_head_k, prefill_rows, exl3_mul24_head);
     // Serve sessions skip the decoder-private history / compact log; one decoder's
     // worth stays in spec_batch so the single-request path is still covered.
     footprint.session_slot =

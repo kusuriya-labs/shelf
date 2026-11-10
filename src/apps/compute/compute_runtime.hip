@@ -514,12 +514,16 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     spec_config.tree_extra = config_.dflash2_tree_extra;
     spec_config.tree_budget = config_.dflash2_tree_budget;
     std::size_t lm_head_k = 0u;
+    bool exl3_mul24_head = false;
     if (model_) {
         lm_head_k = static_cast<std::size_t>(model_->lm_head().k_padded);
+        exl3_mul24_head = model_->lm_head().quant_spec ==
+            quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
     }
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
-        config_.dflash2_sessions(), config_.dflash2_prefill_rows).total();
+        config_.dflash2_sessions(), config_.dflash2_prefill_rows,
+        exl3_mul24_head).total();
 }
 
 std::size_t Qwen35ComputeRuntime::mtp_batch_requests(

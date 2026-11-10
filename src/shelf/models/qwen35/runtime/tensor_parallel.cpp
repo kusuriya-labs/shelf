@@ -213,14 +213,23 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
         spec_config.num_drafts = config.drafter_drafts == 0u ? 7u : config.drafter_drafts;
+        const auto* q4 = rank->rank_model() != nullptr
+            ? rank->rank_model()->qwen4exp_model()
+            : nullptr;
+        const weights::MatrixWeight* drafter_head = q4 != nullptr
+            ? &q4->weights().lm_head
+            : &rank->private_lm_head();
         const std::size_t lm_head_k = config.drafter_lm_head_k != 0u
             ? config.drafter_lm_head_k
-            : static_cast<std::size_t>(rank->private_lm_head().k_padded);
+            : static_cast<std::size_t>(drafter_head->k_padded);
+        const bool exl3_mul24_head = drafter_head->quant_spec ==
+            quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
         const DFlash2Footprint footprint = dflash2_footprint(
             *config.drafter_config, spec_config, *rank->gdn_pool_,
             config.drafter_weights_bytes, lm_head_k,
             config.drafter_sessions == 0u ? config.max_scheduled_requests
-                                          : config.drafter_sessions);
+                                          : config.drafter_sessions,
+            0u, exl3_mul24_head);
         reserved += footprint.total();
         std::fprintf(stderr,
                      "MEMORY_PLAN tp drafter: weights %s scratch %s spec batch %s "
