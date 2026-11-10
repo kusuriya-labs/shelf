@@ -296,7 +296,9 @@ greedy argmax sampling。
 
 ## exl3-int8
 
-`rows <= 16` の EXL3-INT8 の入力回転・GEMM・出力回転と連結時間を GPU event で測る。
+`rows <= 64` の EXL3-INT8 の入力回転・GEMM・出力回転と連結時間を GPU event で測る。
+`--random 1` は重み・活性・符号ベクトルを決定的な乱数で埋め、`--dump FILE` は最終出力（bf16）を書き出す
+（実装間の出力比較用）。
 重みは合成データで、`--working-mib` 以上になるよう複数コピーを巡回する。
 各値は warmup の後に取得した 5 回の中央値で、`min` と `max` はその範囲である。
 `weight_GBps` は trellis のバイト数を時間で割った値で、実際の DRAM 転送量ではない。

@@ -410,6 +410,22 @@ __global__ void fill_head_trellis(uint32_t* words, size_t count) {
     }
 }
 
+// Rows 17..64 share one split count per shape (so a row's K-sum order does not depend on how many rows are batched),
+// the count fits the scratch, and wider launches stay unsplit.
+bool mid_row_splits_constant(uint32_t bits, uint32_t n, uint32_t k) {
+    const uint32_t first = shelf::kernel::exl3_mul24_gemm_splits(17u, n, k, 1u << 20, bits);
+    if (first < 2u) return false;
+    for (uint32_t rows = 18u; rows <= 64u; ++rows)
+        if (shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, 1u << 20, bits) != first) return false;
+    for (uint32_t rows = 17u; rows <= 64u; ++rows) {
+        const uint32_t fit = shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, 3u * rows, bits);
+        if (fit > 3u) return false;
+    }
+    if (shelf::kernel::exl3_mul24_gemm_splits(65u, n, k, 1u << 20, bits) != 1u) return false;
+    std::printf("PASS mid-row splits n=%u k=%u splits=%u\n", n, k, first);
+    return true;
+}
+
 bool head_row_parity() {
     constexpr uint32_t rows = 8u, n = 248320u, k = 5120u, bits = 6u, scale_stride = 160u;
     shelf::weights::MatrixWeight weight;
@@ -505,6 +521,16 @@ int main() {
     ok &= run_case(128, 128, 256, 4, 200u);
     ok &= run_case(129, 128, 256, 4, 201u);
     ok &= run_case(1024, 128, 256, 4, 202u);
+    // Mid-size batches (17..64 rows) run K-split too: MT = 2, 3 and 4 row tiles, with even / uneven / tail splits.
+    ok &= run_case(17, 256, 1024, 4, 11u, 3u);
+    ok &= run_case(32, 384, 640, 3, 12u, 5u);
+    ok &= run_case(33, 256, 1024, 4, 13u, 4u);
+    ok &= run_case(48, 384, 896, 5, 14u, 7u);
+    ok &= run_case(49, 256, 1280, 4, 15u, 5u);
+    ok &= run_case(64, 384, 1024, 6, 16u, 2u);
+    ok &= mid_row_splits_constant(4u, 17408u, 5120u);
+    ok &= mid_row_splits_constant(4u, 5120u, 17408u);
+    ok &= mid_row_splits_constant(4u, 5120u, 5120u);
     // split-K (decode-sized rows only): even and uneven splits, including a split that owns a short tail.
     ok &= run_case(1, 256, 256, 4, 5u, 2u);
     ok &= run_case(7, 384, 640, 4, 6u, 3u);

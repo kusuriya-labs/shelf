@@ -7,14 +7,21 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <type_traits>
 
 namespace shelf::kernel {
 namespace {
 using namespace exl3_detail;
 using namespace exl3_detail::mul24;
 
-template <int BITS, int MT>
-__global__ void __launch_bounds__(128) exl3_mul24_gemm_kernel(
+// MT >= 3 keeps 8 waves per SIMD resident: left to itself the compiler takes ~236 VGPRs for MT=4 (6 waves) and the
+// decode / WMMA chains are then too exposed. 9+ waves spill.
+// kHighOcc selects that cap. Measured per bit width (MT=4, 64 rows, gate/up shape): 4 bit 231 -> 185 us, but 3 bit
+// 180 -> 210, 5 bit 202 -> 276, 6 bit 207 -> 276 (the wider windows need more live registers and spill), so only the
+// 4 bit kernels use it. The 4 bit gain holds from n = 5120 up to the 248320-row lm_head.
+template <int BITS, int MT, bool kHighOcc>
+__global__ void __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu((MT >= 3 && kHighOcc) ? 8 : 1))) exl3_mul24_gemm_kernel(
     const int8_t* __restrict__ codes,
     const float* __restrict__ scales,
     const uint32_t code_row_stride,
@@ -25,10 +32,14 @@ __global__ void __launch_bounds__(128) exl3_mul24_gemm_kernel(
     const uint32_t* __restrict__ active_rows,
     const uint32_t n,
     const uint32_t k,
-    const uint32_t groups_per_split) {
+    const uint32_t groups_per_split,
+    const uint32_t row_blocks) {
+    // Row blocks of one n tile are adjacent in blockIdx.x, so they start together and the second one reads the weights from L2.
+    const uint32_t rb = blockIdx.x % row_blocks;
+    const uint32_t nb = blockIdx.x / row_blocks;
     // active_rows (device) lets a launch sized for an upper bound skip the row tiles that hold nothing.
     const uint32_t rows = active_rows != nullptr ? min(rows_cap, *active_rows) : rows_cap;
-    if (blockIdx.y * (16u * MT) >= rows) return;
+    if (rb * (16u * MT) >= rows) return;
     constexpr uint32_t kWords = 8u * BITS;
     constexpr uint32_t kBits = 256u * BITS;
     constexpr bool kAlignedWindows = (BITS % 4) == 0;
@@ -37,9 +48,9 @@ __global__ void __launch_bounds__(128) exl3_mul24_gemm_kernel(
 
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t wave = threadIdx.x >> 5u;
-    const uint32_t nt = blockIdx.x * 4u + wave;
+    const uint32_t nt = nb * 4u + wave;
     const uint32_t n0 = nt * 16u;
-    const uint32_t m0 = blockIdx.y * (16u * MT);
+    const uint32_t m0 = rb * (16u * MT);
     const uint32_t col = lane & 15u;
     const uint32_t half = lane >> 4u;
 
@@ -180,19 +191,25 @@ hipError_t launch_gemm_bits(
     const int8_t* codes, const float* scales, uint32_t code_stride, uint32_t sstride,
     const uint32_t* trellis, float* yprime, uint32_t rows, const uint32_t* active_rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream) {
     const dim3 block(128);
-    // Only the decode-sized (MT=1) kernel splits K; wider row tiles already have enough waves.
-    const uint32_t sp = rows <= 16u ? splits : 1u;
+    // Every row-tile width splits K: the grid is only n / 64 x row blocks, which leaves most of the device idle for
+    // the projection shapes of a 27B model. Wider launches (> 64 rows, the prefill fallback) pass splits == 1.
+    const uint32_t sp = splits;
     const uint32_t gps = (k / kBlock + sp - 1u) / sp;
-    if (rows <= 16u) {
-        exl3_mul24_gemm_kernel<BITS, 1><<<dim3(n / 64u, 1, sp), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
-    } else if (rows <= 32u) {
-        exl3_mul24_gemm_kernel<BITS, 2><<<dim3(n / 64u, (rows + 31u) / 32u), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
-    } else {
-        exl3_mul24_gemm_kernel<BITS, 4><<<dim3(n / 64u, (rows + 63u) / 64u), block, 0, stream>>>(
-            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
-    }
+    // One K-split slice per blockIdx.z. The row-tile width follows the row count so a launch decodes the trellis once:
+    // 16 rows per WMMA tile, MT tiles per wave.
+    constexpr bool high_occ = BITS == 4;
+    auto go = [&](auto mt_tag) {
+        constexpr int MT = decltype(mt_tag)::value;
+        const uint32_t rb = (rows + 16u * MT - 1u) / (16u * MT);
+        const dim3 grid((n / 64u) * rb, 1, sp);
+        exl3_mul24_gemm_kernel<BITS, MT, high_occ><<<grid, block, 0, stream>>>(
+            codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps, rb);
+    };
+    using std::integral_constant;
+    if (rows <= 16u) go(integral_constant<int, 1>{});
+    else if (rows <= 32u) go(integral_constant<int, 2>{});
+    else if (rows <= 48u) go(integral_constant<int, 3>{});
+    else go(integral_constant<int, 4>{});
     return hipGetLastError();
 }
 

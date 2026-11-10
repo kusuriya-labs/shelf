@@ -10,7 +10,8 @@ Issue #10。仕様は rocm_exl3 の `doc/exl3_int8.md`（固定 INT8 grid + mul2
   GEMM kernel が重みを読むたびに trellis から INT8 grid へ展開し、iu8 WMMA に渡す。
 - 形式は **mul24**（`mul1` tensor の値が 0xDCD12D）。mul1 の artifact（0x83DCD12D）は読まず、
   `Status::unsupported`（再量子化を促す）で拒否する。mul24 は rocm_exl3 側の量子化器（`EXL3_MUL1_MULT=0xDCD12D` でビルド）が作る。
-- decode 用 GEMM（rows <= 16）は K 方向に split し、各 split が `yprime` の別スライスへ書いて `rotate_out` が足す（決定的）。
+- decode 用 GEMM（rows <= 64）は K 方向に split し、各 split が `yprime` の別スライスへ書いて `rotate_out` が足す（決定的）。
+  17〜64 行の扱いは [mid-size batch の GEMM](../20261110/exl3_int8_mid_rows.md) を参照。
 
 ## 形式の選択（mul24）
 

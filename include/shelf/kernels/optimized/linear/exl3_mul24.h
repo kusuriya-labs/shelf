@@ -50,8 +50,10 @@ hipError_t launch_exl3_mul24_gemm(
     hipStream_t stream,
     const uint32_t* active_rows = nullptr);
 
-// K splits for the decode-sized gemm (rows <= 16): each split writes its own yprime slice, so yprime must hold
-// splits * rows * n floats (scratch_rows is the capacity in rows). Chosen so the grid fills the wave slots.
+// K splits for the fused gemm (rows <= 64; 1 above): each split writes its own yprime slice, so yprime must hold
+// splits * rows * n floats (scratch_rows is the capacity in rows). Chosen so the grid fills the wave slots. The count is
+// the same for every row count of 1..16 and for every row count of 17..64 (given enough scratch), so a row's K-sum order
+// does not depend on how many rows are batched within one of those ranges.
 uint32_t exl3_mul24_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
                                 uint32_t bits = 0u);
 

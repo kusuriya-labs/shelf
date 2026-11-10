@@ -13,13 +13,15 @@ namespace {
 }
 
 int run_exl3_int8(int argc, char** argv) {
-    uint32_t n = 5120, k = 5120, rows = 1, bits = 4, split = 0, scratch_rows = 1024, working_mib = 256, iterations = 16;
+    uint32_t n = 5120, k = 5120, rows = 1, bits = 4, split = 0, scratch_rows = 2048, working_mib = 256, iterations = 16, random_fill = 0;
+    const char* dump_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--help")) {
-            std::printf("shelf-bench exl3-int8 --n N --k K --rows R --bits B [--split S] [--scratch-rows R] [--working-mib M] [--iterations N]\n");
+            std::printf("shelf-bench exl3-int8 --n N --k K --rows R(1..64) --bits B [--split S] [--scratch-rows R] [--working-mib M] [--iterations N] [--random 1] [--dump FILE]\n");
             return 0;
         }
         if (i + 1 >= argc) return 2;
+        if (!std::strcmp(argv[i], "--dump")) { dump_path = argv[i + 1]; ++i; continue; }
         const char* key = argv[i++]; char* end = nullptr;
         unsigned long value = std::strtoul(argv[i], &end, 10);
         if (*end || value > UINT32_MAX) return 2;
@@ -31,9 +33,10 @@ int run_exl3_int8(int argc, char** argv) {
         else if (!std::strcmp(key, "--scratch-rows")) scratch_rows = value;
         else if (!std::strcmp(key, "--working-mib")) working_mib = value;
         else if (!std::strcmp(key, "--iterations")) iterations = value;
+        else if (!std::strcmp(key, "--random")) random_fill = value;
         else return 2;
     }
-    if (!n || n % 128 || !k || k % 128 || !rows || rows > 16 || bits < 1 || bits > 8 || !iterations || !working_mib || scratch_rows < rows) return 2;
+    if (!n || n % 128 || !k || k % 128 || !rows || rows > 64 || bits < 1 || bits > 8 || !iterations || !working_mib || scratch_rows < rows) return 2;
     if (!split) split = shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, scratch_rows, bits);
     if (!split || split > k / 128 || split * rows > scratch_rows) return 2;
     const size_t weight_bytes = size_t(n) * k * bits / 8;
@@ -44,8 +47,23 @@ int run_exl3_int8(int argc, char** argv) {
     HIP_CHECK(hipMalloc(&suh, k * 2)); HIP_CHECK(hipMalloc(&svh, n * 2));
     HIP_CHECK(hipMalloc(&codes, size_t(rows) * k)); HIP_CHECK(hipMalloc(&scales, size_t(rows) * scale_stride));
     HIP_CHECK(hipMalloc(&accum, size_t(split) * rows * n * 4)); HIP_CHECK(hipMalloc(&out, size_t(rows) * n * 2));
-    HIP_CHECK(hipMemset(weights, 0x35, weight_bytes * copies)); HIP_CHECK(hipMemset(x, 0x3f, size_t(rows) * k * 2));
-    HIP_CHECK(hipMemset(suh, 0x3c, k * 2)); HIP_CHECK(hipMemset(svh, 0x3c, n * 2));
+    if (random_fill) {
+        // Deterministic xorshift fill: random trellis words, activations in [-2, 2) (bf16), sign-flip vectors of +-1 (f16).
+        uint64_t st = 0x9E3779B97F4A7C15ull;
+        auto rnd = [&]() { st ^= st << 13; st ^= st >> 7; st ^= st << 17; return static_cast<uint32_t>(st >> 16); };
+        std::vector<uint32_t> w(weight_bytes * copies / 4);
+        for (auto& v : w) v = rnd();
+        HIP_CHECK(hipMemcpy(weights, w.data(), w.size() * 4, hipMemcpyHostToDevice));
+        std::vector<uint16_t> xv(size_t(rows) * k);
+        for (auto& v : xv) { const float f = (static_cast<int>(rnd() & 0xFFFF) - 32768) / 16384.0f; uint32_t u; std::memcpy(&u, &f, 4); v = static_cast<uint16_t>(u >> 16); }
+        HIP_CHECK(hipMemcpy(x, xv.data(), xv.size() * 2, hipMemcpyHostToDevice));
+        std::vector<uint16_t> sv(std::max(k, n));
+        for (auto& v : sv) v = (rnd() & 1u) ? 0x3c00 : 0xbc00;
+        HIP_CHECK(hipMemcpy(suh, sv.data(), k * 2, hipMemcpyHostToDevice)); HIP_CHECK(hipMemcpy(svh, sv.data(), n * 2, hipMemcpyHostToDevice));
+    } else {
+        HIP_CHECK(hipMemset(weights, 0x35, weight_bytes * copies)); HIP_CHECK(hipMemset(x, 0x3f, size_t(rows) * k * 2));
+        HIP_CHECK(hipMemset(suh, 0x3c, k * 2)); HIP_CHECK(hipMemset(svh, 0x3c, n * 2));
+    }
     auto run = [&](int stage, size_t i) -> hipError_t {
         hipError_t e = hipSuccess;
         if (stage == 0 || stage == 3) e = shelf::kernel::launch_exl3_mul24_rotate_quantize(static_cast<shelf::bf16_t*>(x), k, static_cast<uint16_t*>(suh), static_cast<int8_t*>(codes), static_cast<float*>(scales), rows, k, k, scale_stride, nullptr);
@@ -55,6 +73,12 @@ int run_exl3_int8(int argc, char** argv) {
     };
     for (uint32_t i = 0; i < std::max<uint32_t>(iterations, copies); ++i) HIP_CHECK(run(3, i));
     HIP_CHECK(hipDeviceSynchronize());
+    if (dump_path != nullptr) {
+        HIP_CHECK(run(3, 0)); HIP_CHECK(hipDeviceSynchronize());
+        std::vector<uint16_t> o(size_t(rows) * n);
+        HIP_CHECK(hipMemcpy(o.data(), out, o.size() * 2, hipMemcpyDeviceToHost));
+        if (FILE* f = std::fopen(dump_path, "wb")) { std::fwrite(o.data(), 2, o.size(), f); std::fclose(f); }
+    }
     hipEvent_t begin, end; HIP_CHECK(hipEventCreate(&begin)); HIP_CHECK(hipEventCreate(&end));
     std::printf("n=%u k=%u rows=%u bits=%u split=%u weight_bytes=%zu copies=%zu", n, k, rows, bits, split, weight_bytes, copies);
     for (int stage = 0; stage < 4; ++stage) {
