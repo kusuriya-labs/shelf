@@ -71,6 +71,7 @@ def run(ids, mode, logits_path=None):
 
 
 def main():
+    failures = []
     for prompt in PROMPTS:
         ids = prompt_ids(prompt)
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,9 +95,14 @@ def main():
                       f"first_margin={margins[first]:.6f}", flush=True)
                 for index in mismatches:
                     if margins[index] > 0.1:
-                        raise AssertionError(f"{mode} mismatch at {index}: "
-                                             f"target margin {margins[index]:.6f} > 0.1")
-        print(f"PASS: {prompt} ({len(target)} tokens)", flush=True)
+                        failures.append(f"{mode} mismatch at {index}: "
+                                        f"target margin {margins[index]:.6f} > 0.1; "
+                                        f"prompt={prompt}")
+                        break
+        print(f"CHECKED: {prompt} ({len(target)} tokens)", flush=True)
+    if failures:
+        raise AssertionError("\n".join(failures))
+    print("PASS: all prompts", flush=True)
 
 
 if __name__ == "__main__":
