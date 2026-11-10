@@ -27,3 +27,28 @@ compute 内への XGrammar C++ core 組み込みはこの IPC を省けるが、
 受け入れ時は同じ model、prompt、seed、sampling 条件で、制約あり通常 decode と
 DFlash2 の greedy 出力を token 単位で比較し、temperature > 0 でも JSON Schema
 への適合を確認する。制約なしの投機速度、および混合 batch の速度を別途測る。
+
+## M3 時点の残作業
+
+現行実装は制約付き request を `submit_unconstrained_decode` へ送り、DFlash2 / MTP を
+使わない。reasoning 併用でも同じ通常 decode を使い、close token から制約を開始する。
+`dflash2_spec_step_batch` は draft、target verify、採用結果の確定までを同期関数内で
+行うため、単に request に mask pointer を追加しても server との往復を挟めない。
+
+1. batcher と decoder の round を draft 完了・mask 待ち・verify に分割し、待機中の
+   request のみ scheduler から除外する。request ID、round ID、draft token 列を stdio
+   event として送り、応答の行数と round ID を照合する。cancel、disconnect、終了済み
+   request に対する遅延応答を処理する。
+2. server の matcher で各 draft 手前の mask を埋め、受理可能な token のみ一時 accept
+   する。最初の不正 token で draft を切り、そこで target の correction を sample する
+   行まで返す。EOS、matcher 終端、最大長も考慮する。一時 accept した個数を rollback
+   してから、compute が実際に採用した token 列だけを順に accept する。
+3. verify の各 logits 行に対応する mask 行を GPU へ転送して sampling 前に適用する。
+   draft 打ち切り後の行数と GDN / KV の rollback、bonus token の処理を一致させる。
+   reasoning 中に close token が draft に含まれる場合はその境界で round を切り、次の
+   round から grammar を開始する。制約なし batch は既存の高速経路を維持する。
+4. MTP は別 serve 経路のため別途対応する。通常 decode と DFlash2 の greedy token 列
+   完全一致、temperature > 0 の schema 適合、混合 batch・cancel・強制 close を検証し、
+   制約なし投機速度と制約あり / reasoning ありの overhead を測定する。
+
+matcher の手動 accept / rollback と各 verify 行の mask は [XGrammar の統合ガイド](https://xgrammar.mlc.ai/docs/latest/using_xgrammar/engine_integration.html) に沿う。

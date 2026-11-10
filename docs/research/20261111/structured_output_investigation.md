@@ -76,3 +76,27 @@ flag の error code、および structured output を旧仕様の 400 と期待�
 `test_server_dflash2.py` 21 件、`test_server_unsupported.py` 76 件が通過した。
 reasoning の thinking budget test 内の DFlash2 / 複数 GPU ケースは環境不足で skip。
 追加した compute / server structured test は個別実行で成功し、core に登録した。
+
+## M3 の実装と残課題
+
+reasoning と JSON Schema を併用する場合、単一 close token を境界とする方式を採用した。
+通常 decode のまま thinking 生成中は matcher を進めず、自然な close または budget による
+強制 close の直後に compute が待機し、server が初期 mask を渡す。thinking 予算が無い
+短い要求でも自然な close を待つ。生成上限まで close が現れない場合は回答は空になる。
+close tag が単一 token でないモデルは 400 とする。Responses の `text.format` の
+`json_schema` は Chat の schema 検証と matcher へ変換する。
+
+strict tools は未実装で引き続き 400 とする。XGrammar 0.2.9 の `qwen_3_5` structural
+ tag は `<tool_call>\n<function=...>` と `qwen_xml` parameter を提供するが、Shelf の
+parser が XML 値を JSON の型に変換する挙動と schema 制約が一致するかの検証が必要。
+`any_order=true` は XGrammar 側で required と重複を検査しないため使えない。残作業は、
+strict / 非 strict 混在時の分岐、auto の trigger と required / 名前指定の強制、既存の
+prefill と thinking 境界との整合、schema の 400 検証、温度付き stream / 非 stream での
+parser 後の引数検証である。Responses tools も同じ実装へ通す必要がある。
+
+投機 decode は引き続き無効化して通常 decode にフォールバックする。DFlash2 向けの
+具体的な分割、検証、および MTP の残作業は [投機 decode の接続案](structured_output_speculative_design.md)
+に記載した。M3 の reasoning 併用時と投機併用時の性能は未測定であり、M2 の測定値は
+上記の通りである。issue #26 のうち通常 JSON Schema・未対応 schema の 400・stream / 非
+stream・非制約速度・投機方針は M2 で検証済みだが、M3 追加分の実機検証と strict tool、
+投機 decode の動作検証は別途必要である。
