@@ -1,0 +1,36 @@
+#include <shelf/models/qwen35/runtime/dflash2_tree.h>
+
+#include <cstdio>
+#include <vector>
+
+using namespace shelf::qwen35::runtime;
+
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+
+int main() {
+    const std::vector<int32_t> chain{11, 12, 13};
+    const std::vector<int32_t> alt{21, 22, 23};
+    const auto tree = make_dflash2_tree(10, chain, alt, 2, 100);
+    CHECK((tree.tokens == std::vector<int32_t>{10, 11, 12, 13, 21, 22}));
+    CHECK((tree.parent == std::vector<int32_t>{-1, 0, 1, 2, 0, 1}));
+    CHECK((tree.depth == std::vector<uint32_t>{0, 1, 2, 3, 1, 2}));
+    CHECK((tree.rope_positions == std::vector<uint32_t>{100, 101, 102, 103, 101, 102}));
+    CHECK((tree.ancestor_offsets == std::vector<uint32_t>{0, 1, 3, 6, 10, 12, 15}));
+    CHECK((tree.ancestor_positions == std::vector<uint32_t>{100, 100,101, 100,101,102, 100,101,102,103, 100,104, 100,101,105}));
+    DFlash2TreeWalk walk;
+    CHECK(walk_dflash2_tree(tree.tokens, tree.parent, std::vector<int32_t>{11,12,13,99,88,77}, walk));
+    CHECK((walk.rows == std::vector<uint32_t>{0,1,2,3}) && walk.correction == 99);
+    CHECK(walk_dflash2_tree(tree.tokens, tree.parent, std::vector<int32_t>{21,12,13,99,88,77}, walk));
+    CHECK((walk.rows == std::vector<uint32_t>{0,4}) && walk.correction == 88);
+    CHECK(walk_dflash2_tree(tree.tokens, tree.parent, std::vector<int32_t>{11,22,13,99,88,77}, walk));
+    CHECK((walk.rows == std::vector<uint32_t>{0,1,5}) && walk.correction == 77);
+    CHECK(walk_dflash2_tree(tree.tokens, tree.parent, std::vector<int32_t>{33,12,13,99,88,77}, walk));
+    CHECK((walk.rows == std::vector<uint32_t>{0}) && walk.correction == 33);
+    CHECK(!walk_dflash2_tree(tree.tokens, std::vector<int32_t>{-1,0,1,2,4,1}, std::vector<int32_t>{11,12,13,99,88,77}, walk));
+    CHECK(!walk_dflash2_tree(tree.tokens, std::vector<int32_t>{-1,0,1,2,0,1}, std::vector<int32_t>{11}, walk));
+    const auto no_extra = make_dflash2_tree(10, chain, alt, 0, 0);
+    CHECK(no_extra.tokens.size() == 4);
+    const auto skip = make_dflash2_tree(10, chain, std::vector<int32_t>{11,-1,23}, 2, 0);
+    CHECK((skip.tokens == std::vector<int32_t>{10,11,12,13,23}));
+    return 0;
+}
