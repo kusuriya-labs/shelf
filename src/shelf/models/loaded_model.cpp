@@ -170,7 +170,8 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
         : moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
                           : shelf::qwen35::uses_exl3_linear(dense_->weights());
     std::size_t total = shelf::qwen35::runtime::qwen35_executor_reserve_bytes(
-        hybrid_config(), token_row_ffn, reserve_config, tp_size, exl3);
+        hybrid_config(), token_row_ffn, reserve_config, tp_size, exl3,
+        qwen4exp_ != nullptr);
     // PLaMo's combined projections and BF16 intermediate values need more scratch
     // than the Qwen estimate at small row buckets. Keep room after the KV plan.
     if (plamo_ != nullptr) total = std::max<std::size_t>(total, 1ull << 30);

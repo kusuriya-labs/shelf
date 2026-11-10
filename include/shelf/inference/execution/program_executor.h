@@ -74,6 +74,9 @@ struct HostExecutionContext {
     uint64_t exl3_accum_bytes = 0;
     void* exl3_rowsum = nullptr;
     uint64_t exl3_rowsum_bytes = 0;
+    float* qsa_scores = nullptr;
+    float* qsa_topk_scores = nullptr;
+    int32_t* qsa_topk_indices = nullptr;
     uint32_t* error_word = nullptr;
     // Row capacity the split-K choice is tuned for when this run is a speculative verify:
     // a verify's row count follows how many requests are active, and the split count

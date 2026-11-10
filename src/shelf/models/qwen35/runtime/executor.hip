@@ -29,6 +29,7 @@
 #include <vector>
 #include <shelf/inference/execution/selectors/embedding_selector.h>
 #include <shelf/kernels/optimized/radix_topn.h>
+#include <shelf/kernels/optimized/qsa.h>
 #include <shelf/kernels/optimized/sampling_common.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
@@ -222,13 +223,32 @@ Status build_host_execution_context(
     }
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
+    uint64_t qsa_end = (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+    if (program_needs_qsa_workspace(program)) {
+        const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
+        const uint64_t score_bytes =
+            static_cast<uint64_t>(::shelf::kernel::kQsaScoreRowTile) *
+            ::shelf::kernel::kQsaScoreBlockTile * sizeof(float);
+        const uint64_t state_bytes =
+            static_cast<uint64_t>(::shelf::kernel::kQsaScoreRowTile) * 2u *
+            ::shelf::kernel::kQsaSelectMaxTopK * sizeof(float);
+        const uint64_t total = score_bytes + 2u * state_bytes;
+        if (qsa_end + total > workspace_bytes) {
+            return Status::insufficient_memory("execution workspace too small for QSA scores",
+                                               __FILE__, __LINE__);
+        }
+        ctx.qsa_scores = reinterpret_cast<float*>(ws_base + qsa_end);
+        ctx.qsa_topk_scores = reinterpret_cast<float*>(ws_base + qsa_end + score_bytes);
+        ctx.qsa_topk_indices = reinterpret_cast<int32_t*>(
+            ws_base + qsa_end + score_bytes + state_bytes);
+        qsa_end = (qsa_end + total + 255ull) & ~255ull;
+    }
     if (program_needs_exl3_workspace(program)) {
         const runtime::Exl3WorkspaceBytes exl3 = runtime::exl3_workspace_bytes(
             runtime::qwen35_padded_row_count(executor.config.max_batch_rows),
             executor.config.exl3_linear_shape);
         const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
-        const uint64_t exl3_xrot_offset =
-            (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+        const uint64_t exl3_xrot_offset = qsa_end;
         if (exl3_xrot_offset + exl3.xrot > workspace_bytes) {
             return Status::insufficient_memory("execution workspace too small for EXL3 xrot",
                                                __FILE__, __LINE__);
@@ -1813,6 +1833,20 @@ bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noex
     return false;
 }
 
+bool program_needs_qsa_workspace(const ::shelf::runtime::Program& program) noexcept {
+    for (const ::shelf::runtime::DispatchBinding& binding : program.dispatches) {
+        if (binding.kernel_id == ::shelf::runtime::KernelId::QSA_SELECT) return true;
+    }
+    return false;
+}
+
+bool program_set_needs_qsa_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept {
+    for (const ::shelf::runtime::Program& prog : programs.programs) {
+        if (program_needs_qsa_workspace(prog)) return true;
+    }
+    return false;
+}
+
 bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept {
     for (const ::shelf::runtime::Program& prog : programs.programs) {
         if (program_needs_exl3_workspace(prog)) return true;
@@ -2267,11 +2301,13 @@ Result<Executor> create_executor(
             }
             constexpr std::size_t kScratchBytes = 3145728 * sizeof(float);
             const bool exl3_workspace = program_set_needs_exl3_workspace(built_set);
+            const bool qsa_workspace = program_set_needs_qsa_workspace(built_set);
             const std::size_t exec_workspace_bytes =
                 max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes +
                 (exl3_workspace
                      ? runtime::exl3_workspace_bytes(Npad, config.exl3_linear_shape).total()
                      : 0u) +
+                (qsa_workspace ? ::shelf::kernel::qsa_select_workspace_bytes() : 0u) +
                 512u;
             if (exec_workspace_bytes > 0) {
                 st = allocate_contiguous_tensor<uint8_t>(

@@ -140,6 +140,12 @@ bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noex
 // True when any program of the set does. This is what sizes the execution workspace.
 bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept;
 
+// True when one program runs the QSA selector, which keeps its score and top-k state in
+// the execution workspace.
+bool program_needs_qsa_workspace(const ::shelf::runtime::Program& program) noexcept;
+
+bool program_set_needs_qsa_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept;
+
 struct Executor {
     Executor();
     ~Executor() noexcept;

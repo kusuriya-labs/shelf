@@ -110,12 +110,16 @@ std::vector<float> reference_scores(const std::vector<shelf::bf16_t>& q,
     return scores;
 }
 
-void run_scenario(const Scenario& s) {
+void run_scenario(const Scenario& s, bool split = false) {
     constexpr std::uint32_t kHeadDim = shelf::kernel::kQsaHeadDim;
     constexpr std::uint32_t kStates = 2u;
     constexpr std::uint32_t kPooledState = 1u;
     const std::uint32_t rows = static_cast<std::uint32_t>(s.positions.size());
     const std::uint32_t mask_row_bytes = ((s.blocks + 31u) / 32u) * 4u;
+    std::uint32_t half = shelf::kernel::kQsaSelectChunk;
+    while (half < s.top_k) half <<= 1u;
+    const std::uint32_t state_count = half * 2u;
+    const std::string label = std::string(s.label) + (split ? " [split]" : "");
 
     std::mt19937 rng(20261106u);
     const auto q = random_bf16(rows * s.heads * kHeadDim, rng);
@@ -127,12 +131,24 @@ void run_scenario(const Scenario& s) {
     void* d_slots = nullptr;
     void* d_selected = nullptr;
     void* d_mask = nullptr;
+    void* d_scores = nullptr;
+    void* d_state_scores = nullptr;
+    void* d_state_indices = nullptr;
     bool ok = hipMalloc(&d_q, q.size() * sizeof(shelf::bf16_t)) == hipSuccess;
     ok = ok && hipMalloc(&d_pooled, pooled.size() * sizeof(shelf::bf16_t)) == hipSuccess;
     ok = ok && hipMalloc(&d_positions, s.positions.size() * sizeof(std::uint32_t)) == hipSuccess;
     ok = ok && hipMalloc(&d_slots, s.row_slots.size() * sizeof(std::uint32_t)) == hipSuccess;
     ok = ok && hipMalloc(&d_selected, rows * s.top_k * sizeof(std::int32_t)) == hipSuccess;
     ok = ok && hipMalloc(&d_mask, rows * mask_row_bytes) == hipSuccess;
+    if (split) {
+        ok = ok && hipMalloc(&d_scores,
+                             static_cast<std::size_t>(rows) *
+                                 shelf::kernel::kQsaScoreBlockTile * sizeof(float)) == hipSuccess;
+        ok = ok && hipMalloc(&d_state_scores,
+                             static_cast<std::size_t>(rows) * state_count * sizeof(float)) == hipSuccess;
+        ok = ok && hipMalloc(&d_state_indices,
+                             static_cast<std::size_t>(rows) * state_count * sizeof(std::int32_t)) == hipSuccess;
+    }
     ok = ok && hipMemcpy(d_q, q.data(), q.size() * sizeof(shelf::bf16_t),
                          hipMemcpyHostToDevice) == hipSuccess;
     ok = ok && hipMemcpy(d_pooled, pooled.data(), pooled.size() * sizeof(shelf::bf16_t),
@@ -143,7 +159,7 @@ void run_scenario(const Scenario& s) {
                          s.row_slots.size() * sizeof(std::uint32_t),
                          hipMemcpyHostToDevice) == hipSuccess;
     ok = ok && hipMemset(d_mask, 0, rows * mask_row_bytes) == hipSuccess;
-    check(ok, std::string(s.label) + ": device setup");
+    check(ok, label + ": device setup");
     if (!ok) {
         hipFree(d_q);
         hipFree(d_pooled);
@@ -151,6 +167,9 @@ void run_scenario(const Scenario& s) {
         hipFree(d_slots);
         hipFree(d_selected);
         hipFree(d_mask);
+        hipFree(d_scores);
+        hipFree(d_state_scores);
+        hipFree(d_state_indices);
         return;
     }
 
@@ -176,9 +195,52 @@ void run_scenario(const Scenario& s) {
     args.pooled_layer_stride = static_cast<std::uint64_t>(s.blocks) * kHeadDim;
     args.scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
 
-    check(shelf::kernel::launch_qsa_select_batch(args, nullptr) == hipSuccess,
-          std::string(s.label) + ": select launch");
-    check(hipDeviceSynchronize() == hipSuccess, std::string(s.label) + ": select sync");
+    auto run_kernel = [&]() -> hipError_t {
+        if (!split) return shelf::kernel::launch_qsa_select_batch(args, nullptr);
+        if (s.heads != 4u) return hipErrorInvalidValue;
+        shelf::kernel::QsaScoreArgs sa;
+        sa.q = static_cast<const shelf::bf16_t*>(d_q);
+        sa.pooled_base = static_cast<const shelf::bf16_t*>(d_pooled);
+        sa.scores = static_cast<float*>(d_scores);
+        sa.row_sequence_slots = static_cast<const std::uint32_t*>(d_slots);
+        sa.rows = rows;
+        sa.row_begin = 0u;
+        sa.block_begin = 0u;
+        sa.blocks = s.blocks;
+        sa.score_row_stride = shelf::kernel::kQsaScoreBlockTile;
+        sa.n_heads = s.heads;
+        sa.head_dim = kHeadDim;
+        sa.compress_ratio = s.compress;
+        sa.state_index = kPooledState;
+        sa.max_sequences = s.max_sequences;
+        sa.q_row_stride = s.heads * kHeadDim;
+        sa.pooled_slot_stride = static_cast<std::uint64_t>(kStates) * s.blocks * kHeadDim;
+        sa.pooled_layer_stride = static_cast<std::uint64_t>(s.blocks) * kHeadDim;
+        sa.scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+        hipError_t error = shelf::kernel::launch_qsa_score_wmma(sa, nullptr);
+        if (error != hipSuccess) return error;
+        shelf::kernel::QsaTopkArgs ta;
+        ta.scores = static_cast<const float*>(d_scores);
+        ta.state_scores = static_cast<float*>(d_state_scores);
+        ta.state_indices = static_cast<std::int32_t*>(d_state_indices);
+        ta.block_mask = static_cast<std::uint8_t*>(d_mask);
+        ta.selected = static_cast<std::int32_t*>(d_selected);
+        ta.positions = static_cast<const std::uint32_t*>(d_positions);
+        ta.rows = rows;
+        ta.block_begin = 0u;
+        ta.block_count = s.blocks;
+        ta.score_row_stride = shelf::kernel::kQsaScoreBlockTile;
+        ta.blocks = s.blocks;
+        ta.compress_ratio = s.compress;
+        ta.top_k = s.top_k;
+        ta.mask_row_bytes = mask_row_bytes;
+        ta.selected_row_stride = s.top_k;
+        ta.first = 1u;
+        ta.last = 1u;
+        return shelf::kernel::launch_qsa_topk(ta, nullptr);
+    };
+    check(run_kernel() == hipSuccess, label + ": select launch");
+    check(hipDeviceSynchronize() == hipSuccess, label + ": select sync");
 
     std::vector<std::int32_t> got_selected(rows * s.top_k, -2);
     std::vector<std::uint8_t> got_mask(rows * mask_row_bytes, 0u);
@@ -186,7 +248,7 @@ void run_scenario(const Scenario& s) {
                    hipMemcpyDeviceToHost) == hipSuccess;
     ok = ok && hipMemcpy(got_mask.data(), d_mask, got_mask.size(),
                          hipMemcpyDeviceToHost) == hipSuccess;
-    check(ok, std::string(s.label) + ": read back");
+    check(ok, label + ": read back");
 
     for (std::uint32_t row = 0; row < rows; ++row) {
         const std::uint32_t visible =
@@ -195,13 +257,13 @@ void run_scenario(const Scenario& s) {
             check(std::all_of(got_selected.begin() + row * s.top_k,
                               got_selected.begin() + (row + 1u) * s.top_k,
                               [](std::int32_t v) { return v == -1; }),
-                  std::string(s.label) + ": row " + std::to_string(row) +
+                  label + ": row " + std::to_string(row) +
                       " with an invalid slot selects nothing");
             bool clear = true;
             for (std::uint32_t b = 0; b < mask_row_bytes * 8u; ++b) {
                 if (mask_bit(got_mask, mask_row_bytes, row, b) != 0u) clear = false;
             }
-            check(clear, std::string(s.label) + ": row " + std::to_string(row) +
+            check(clear, label + ": row " + std::to_string(row) +
                              " with an invalid slot leaves the bitmap clear");
             continue;
         }
@@ -209,7 +271,7 @@ void run_scenario(const Scenario& s) {
         auto want = reference_select(scores, visible, s.top_k);
         std::sort(want.begin(), want.end());
         const auto got = selected_row(got_selected, row, s.top_k);
-        check(got == want, std::string(s.label) + ": row " + std::to_string(row) +
+        check(got == want, label + ": row " + std::to_string(row) +
                                " visible " + std::to_string(visible) +
                                " matches the CPU reference top-k");
 
@@ -219,7 +281,7 @@ void run_scenario(const Scenario& s) {
             if (got_selected[row * s.top_k + i] == -1) ++padding;
         }
         check(padding == s.top_k - take,
-              std::string(s.label) + ": row " + std::to_string(row) +
+              label + ": row " + std::to_string(row) +
                   " pads unused entries with -1");
 
         const std::uint32_t tail = (s.positions[row] + 1u) / s.compress;
@@ -237,11 +299,11 @@ void run_scenario(const Scenario& s) {
             if (bit != expected) mask_matches = false;
             if (bit) ++set_bits;
         }
-        check(mask_matches, std::string(s.label) + ": row " + std::to_string(row) +
+        check(mask_matches, label + ": row " + std::to_string(row) +
                                 " bitmap marks the selection, the partial tail block and "
                                 "nothing past the last block");
         check(set_bits == static_cast<std::uint32_t>(visible_blocks.size()),
-              std::string(s.label) + ": row " + std::to_string(row) +
+              label + ": row " + std::to_string(row) +
                   " bitmap bit count matches the selection plus the tail block");
     }
 
@@ -250,7 +312,7 @@ void run_scenario(const Scenario& s) {
         ok = hipMemcpy(d_q, zero_q.data(), zero_q.size() * sizeof(shelf::bf16_t),
                        hipMemcpyHostToDevice) == hipSuccess;
         ok = ok && hipMemset(d_mask, 0, rows * mask_row_bytes) == hipSuccess;
-        ok = ok && shelf::kernel::launch_qsa_select_batch(args, nullptr) == hipSuccess;
+        ok = ok && run_kernel() == hipSuccess;
         ok = ok && hipDeviceSynchronize() == hipSuccess;
         ok = ok && hipMemcpy(got_selected.data(), d_selected,
                              got_selected.size() * sizeof(std::int32_t),
@@ -277,8 +339,8 @@ void run_scenario(const Scenario& s) {
                     tie_mask_ok = false;
             }
         }
-        check(tie_ok, std::string(s.label) + ": equal scores keep the smaller block indices");
-        check(tie_mask_ok, std::string(s.label) + ": equal scores mark the leading blocks");
+        check(tie_ok, label + ": equal scores keep the smaller block indices");
+        check(tie_mask_ok, label + ": equal scores mark the leading blocks");
     }
 
     (void)hipFree(d_q);
@@ -287,6 +349,9 @@ void run_scenario(const Scenario& s) {
     (void)hipFree(d_slots);
     (void)hipFree(d_selected);
     (void)hipFree(d_mask);
+    (void)hipFree(d_scores);
+    (void)hipFree(d_state_scores);
+    (void)hipFree(d_state_indices);
 }
 
 }  // namespace
@@ -330,6 +395,27 @@ int main() {
                   .positions = {1u, 77u, 79u, 81u, 127u, 129u, 131u, 259u},
                   .row_slots = {0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u},
                   .max_sequences = 3u});
+
+    run_scenario({.label = "blocks 600 / compress 4 / split score+topk",
+                  .blocks = 600u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 131u,
+                  .positions = {251u, 255u, 259u, 511u, 515u, 519u, 2043u, 2047u,
+                                2051u},
+                  .row_slots = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true);
+
+    run_scenario({.label = "blocks 8 / compress 4 / split no visible block",
+                  .blocks = 8u,
+                  .compress = 4u,
+                  .heads = 4u,
+                  .top_k = 40u,
+                  .positions = {0u, 1u, 2u, 2u},
+                  .row_slots = {0u, 0u, 0u, 0u},
+                  .max_sequences = 1u},
+                 true);
 
     std::printf("%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

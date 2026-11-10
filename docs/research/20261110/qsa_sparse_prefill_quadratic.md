@@ -45,10 +45,11 @@ per-kernel 時間は `rocprofv3 --kernel-trace` の 1 run。trace は両 rank �
 | 変更前 | 46.87 s / 699 tok/s | 50.30 s | 18.93 s |
 | qsa_select のみ変更 | 25.58 s / 1,281 tok/s | 6.43 s | 19.56 s |
 | page bitmap 追加後 | 21.82 s / 1,502 tok/s | 6.55 s | 11.51 s |
-| fp8 prefill + top-k merge | 14.84 s / 2,208 tok/s | 4.87 s | 5.23 s |
+| fp8 prefill + top-k merge | 14.84 s / 2,208 tok/s | 2.43 s | 2.62 s |
+| score / top-k 分離 | **13.19 s / 2,484 tok/s** | **1.21 s** | 2.62 s |
 
 trace なしの最終値は `SHELF_EXL3_MUL24_PREFILL_AB=B` 指定で
-8K 3.56 s / 2,303 tok/s、32K 13.93 s / 2,352 tok/s。
+8K 3.46 s / 2,368 tok/s、32K 13.19 s / 2,484 tok/s。
 
 chunk 末尾 32K の 12 layer 合計（1 rank）:
 
@@ -58,6 +59,7 @@ chunk 末尾 32K の 12 layer 合計（1 rank）:
 | qsa_select のみ変更 | 0.35 s | 1.00 s |
 | page bitmap 追加後 | 0.36 s | 0.37 s |
 | fp8 prefill + top-k merge | 0.15 s | 0.11 s |
+| score / top-k 分離 | 0.07 s | 0.10 s |
 
 ## 検証
 

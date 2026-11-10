@@ -5,6 +5,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace shelf::kernel {
@@ -28,6 +29,19 @@ inline constexpr uint32_t kQsaThreads = 128u;
 inline constexpr uint32_t kQsaSelectChunk = 64u;
 inline constexpr uint32_t kQsaSelectMaxHeads = 8u;
 inline constexpr uint32_t kQsaSelectMaxTopK = 1024u;
+inline constexpr uint32_t kQsaScoreRowTile = 2048u;
+inline constexpr uint32_t kQsaScoreBlockTile = 8192u;
+inline constexpr uint32_t kQsaScoreRowsPerCta = 16u;
+inline constexpr uint32_t kQsaScoreBlocksPerCta = 1024u;
+
+inline constexpr std::size_t qsa_select_workspace_bytes() noexcept {
+    const std::size_t scores = static_cast<std::size_t>(kQsaScoreRowTile) *
+                               kQsaScoreBlockTile * sizeof(float);
+    const std::size_t state = static_cast<std::size_t>(kQsaScoreRowTile) *
+                              2u * kQsaSelectMaxTopK *
+                              (sizeof(float) + sizeof(std::int32_t));
+    return scores + state;
+}
 
 struct QsaSelectBatchArgs {
     const bf16_t* q = nullptr;
@@ -70,6 +84,50 @@ struct QsaRopeArgs {
     float position_scale = 1.0f;
     float attention_factor = 1.0f;
 };
+
+struct QsaScoreArgs {
+    const bf16_t* q = nullptr;
+    const bf16_t* pooled_base = nullptr;
+    float* scores = nullptr;
+    const uint32_t* row_sequence_slots = nullptr;
+    uint32_t rows = 0;
+    uint32_t row_begin = 0;
+    uint32_t block_begin = 0;
+    uint32_t blocks = 0;
+    uint32_t score_row_stride = 0;
+    uint32_t n_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t compress_ratio = 0;
+    uint32_t state_index = 0;
+    uint32_t max_sequences = 0;
+    uint32_t q_row_stride = 0;
+    uint64_t pooled_slot_stride = 0;
+    uint64_t pooled_layer_stride = 0;
+    float scale = 0.0f;
+};
+
+struct QsaTopkArgs {
+    const float* scores = nullptr;
+    float* state_scores = nullptr;
+    int32_t* state_indices = nullptr;
+    uint8_t* block_mask = nullptr;
+    int32_t* selected = nullptr;
+    const uint32_t* positions = nullptr;
+    uint32_t rows = 0;
+    uint32_t block_begin = 0;
+    uint32_t block_count = 0;
+    uint32_t score_row_stride = 0;
+    uint32_t blocks = 0;
+    uint32_t compress_ratio = 0;
+    uint32_t top_k = 0;
+    uint32_t mask_row_bytes = 0;
+    uint32_t selected_row_stride = 0;
+    uint32_t first = 0;
+    uint32_t last = 0;
+};
+
+hipError_t launch_qsa_score_wmma(const QsaScoreArgs& args, hipStream_t stream);
+hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream);
 
 hipError_t launch_qsa_pool(const QsaPoolArgs& args, hipStream_t stream);
 hipError_t launch_qsa_select_batch(const QsaSelectBatchArgs& args, hipStream_t stream);
