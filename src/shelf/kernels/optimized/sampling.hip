@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <cmath>
 
 namespace shelf::kernel {
 namespace {
@@ -215,7 +216,30 @@ __global__ void argmax_top2_impl(const float* __restrict__ logits,
     }
 }
 
+__global__ void apply_token_bitmask_impl(
+    float* logits, const ::shelf::runtime::DeviceSamplingParams* sampling,
+    uint32_t vocab, uint32_t stride) {
+    const uint32_t row = blockIdx.y;
+    const uint32_t token = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t* mask = sampling[row].token_bitmask;
+    if (token < vocab && mask != nullptr && (mask[token >> 5] & (1u << (token & 31u))) == 0u) {
+        logits[static_cast<size_t>(row) * stride + token] = -INFINITY;
+    }
+}
+
 }  // namespace
+
+hipError_t launch_apply_token_bitmask_f32(
+    float* logits, const ::shelf::runtime::DeviceSamplingParams* sampling,
+    uint32_t outputs, uint32_t vocab_size, uint32_t row_stride, hipStream_t stream) {
+    if (outputs == 0u) return hipSuccess;
+    if (logits == nullptr || sampling == nullptr || vocab_size == 0u || row_stride < vocab_size)
+        return hipErrorInvalidValue;
+    hipLaunchKernelGGL(apply_token_bitmask_impl,
+        dim3((vocab_size + kThreads - 1u) / kThreads, outputs), dim3(kThreads),
+        0, stream, logits, sampling, vocab_size, row_stride);
+    return hipGetLastError();
+}
 
 hipError_t launch_argmax_f32_top2(
     const float* logits,

@@ -310,6 +310,7 @@ target_include_directories(test_qwen35_sampling_selector PRIVATE "${CMAKE_SOURCE
 shelf_add_test(NAME test_qwen35_sampling_params SOURCE unit/test_qwen35_sampling_params.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 target_include_directories(test_qwen35_sampling_params PRIVATE "${CMAKE_SOURCE_DIR}/src")
 shelf_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampling_rng.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_token_bitmask SOURCE kernels/optimized/test_token_bitmask.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES shelf_kernels_correctness shelf_qwen35_kernels_optimized shelf_gpu)
 

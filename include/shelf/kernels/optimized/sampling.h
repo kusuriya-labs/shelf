@@ -8,6 +8,10 @@
 
 namespace shelf::kernel {
 
+hipError_t launch_apply_token_bitmask_f32(
+    float* logits, const ::shelf::runtime::DeviceSamplingParams* sampling,
+    uint32_t outputs, uint32_t vocab_size, uint32_t row_stride, hipStream_t stream);
+
 struct ArgMaxPair {
     float value;
     uint32_t token;

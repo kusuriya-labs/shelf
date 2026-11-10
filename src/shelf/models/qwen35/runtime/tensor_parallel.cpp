@@ -705,6 +705,11 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& bat
 
 Result<BatchExecutionOutput> TpCoordinator::on_execute(
     const ScheduledBatch& batch, const ExecuteBatchOptions* per_rank) {
+    for (const auto& request : batch.requests) {
+        if (request.token_bitmask != nullptr) {
+            return Status::unsupported("token bitmask requires single-device execution", __FILE__, __LINE__);
+        }
+    }
     if (ranks_.size() < 2) {
         return Status::invalid_state("tp coordinator has no ranks", __FILE__, __LINE__);
     }

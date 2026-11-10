@@ -76,7 +76,27 @@ Result<OptimizedLaunchResult> resolve_sampling(
         ctx.stochastic_topk_scratch != nullptr && ctx.stochastic_topk_scratch_bytes > 0u;
 
     SamplingChoice choice = select_sampling_implementation(si);
-    if (choice.implementation == SamplingImplementation::Correctness) return kNone;
+    bool has_token_bitmask = false;
+    for (uint32_t i = 0; i < ctx.staged_request_count; ++i) {
+        if (ctx.staged_requests[i].sampling.token_bitmask != nullptr) {
+            has_token_bitmask = true;
+            break;
+        }
+    }
+    if (choice.implementation == SamplingImplementation::Correctness) {
+        if (has_token_bitmask)
+            return Status::unsupported("token bitmask requires optimized sampling", __FILE__, __LINE__);
+        return kNone;
+    }
+    if (has_token_bitmask) {
+        const hipError_t err = ::shelf::kernel::launch_apply_token_bitmask_f32(
+            static_cast<float*>(in.ptr), ctx.output_sampling_params, outputs, vocab,
+            in.row_stride, stream);
+        if (err != hipSuccess)
+            return Status::hip_error("token bitmask launch", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        record_physical_launch(1);
+    }
 
     if (choice.implementation == SamplingImplementation::StochasticRadixTopK) {
         if (ctx.stochastic_topk_ids == nullptr || ctx.stochastic_topk_logits == nullptr ||

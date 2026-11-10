@@ -243,7 +243,7 @@ stochastic が 0 なら従来の greedy path を使う。
 
 ## Device contract
 
-- `DeviceSamplingParams`（40 byte）が `DeviceRequestDescriptor` に入る
+- `DeviceSamplingParams`（48 byte）が `DeviceRequestDescriptor` に入る
 - `DeviceBatchContext::output_sampling_params` に per-output の sampling params が並ぶ
 - `prepare_batch_descriptor_kernel` が `output_index + j` へ書き、multi-output では
   `sample_index + j` とする
@@ -273,3 +273,16 @@ device 上の params を D2H して eligibility を判断することはない�
 correctness backend と optimized kernel が同じ方式を使うときは
 `sampling_sample_row` / `sampling_topk_active_row` / `sampling_topk_select_reference`
 のいずれかを共有するため、RNG と数学は 1 か所にしかない。
+
+## token bitmask
+
+`ScheduledRequest::token_bitmask` は device 上の `uint32_t` 配列を指し、
+token ID の下位 5 bit が word 内の bit を表す。bit が 0 の token は
+sampling 前に logit を `-Inf` にする。呼び出し元は語彙数に応じた
+word 数と、実行完了までのメモリ寿命を保証する。bitmask がない batch では
+追加の device kernel を起動しない。単一出力の通常 decode と最終 prefill
+のみで使用でき、投機検証、tensor parallel、pipeline parallel では拒否する。
+bitmask を含む batch は HIP graph を使用しない。
+
+これは executor の入力 contract であり、server の構造化出力 API や
+compute の stdio protocol からはまだ利用できない。

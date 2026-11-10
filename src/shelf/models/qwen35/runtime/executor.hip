@@ -43,6 +43,7 @@ struct PreparedBatch {
     uint32_t num_sampled_outputs = 0;
     uint32_t num_stochastic_outputs = 0;
     bool stochastic_topk_eligible = false;
+    bool has_token_bitmask = false;
     uint32_t stochastic_top_k = 0;
 };
 
@@ -692,6 +693,7 @@ Result<PendingBatch> submit_co_batch(
     uint32_t row_offset = 0;
     for (uint32_t i = 0; i < R; ++i) {
         const ScheduledRequest& req = batch.requests[i];
+        prep.has_token_bitmask = prep.has_token_bitmask || req.token_bitmask != nullptr;
         pending_commits[i].sequence = req.sequence;
         pending_commits[i].handle = req.handle;
         pending_commits[i].committed_tokens = req.num_tokens;
@@ -706,6 +708,7 @@ Result<PendingBatch> submit_co_batch(
         if (req.compute_logits) {
             const runtime::SamplingRequest sampling = runtime::make_sampling_request(
                 req.sampling, req.sample, req.sampling_index);
+            staging[i].sampling.token_bitmask = req.token_bitmask;
             staging[i].sampling.mode = static_cast<uint8_t>(sampling.mode);
             staging[i].sampling.temperature = sampling.temperature;
             staging[i].sampling.top_p = sampling.top_p;
@@ -988,6 +991,7 @@ Result<PendingBatch> submit_co_batch(
         options.tree_row_parent != nullptr || options.tree_committed_end_rows != nullptr;
     const bool graph_eligible =
         !executor.graph_failed &&
+        !prep.has_token_bitmask &&
         executor.tp_schedules.empty() &&
         N > 0 &&
         graph_slot_idx >= 0 &&

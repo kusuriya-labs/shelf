@@ -14,6 +14,7 @@ namespace shelf::runtime {
 struct DeviceSamplingParams {
     uint64_t seed = 0;
     uint64_t sample_index = 0;
+    const uint32_t* token_bitmask = nullptr;
     float temperature = 0.0f;
     float top_p = 1.0f;
     float min_p = 0.0f;
@@ -22,7 +23,7 @@ struct DeviceSamplingParams {
     uint8_t reserved[3] = {};
 };
 
-static_assert(sizeof(DeviceSamplingParams) == 40);
+static_assert(sizeof(DeviceSamplingParams) == 48);
 static_assert(alignof(DeviceSamplingParams) == 8);
 static_assert(std::is_standard_layout_v<DeviceSamplingParams>);
 static_assert(std::is_trivially_copyable_v<DeviceSamplingParams>);
@@ -44,7 +45,7 @@ struct DeviceRequestDescriptor {
     DeviceSamplingParams sampling{};
 };
 
-static_assert(sizeof(DeviceRequestDescriptor) == 72);
+static_assert(sizeof(DeviceRequestDescriptor) == 80);
 static_assert(alignof(DeviceRequestDescriptor) == 8);
 static_assert(std::is_standard_layout_v<DeviceRequestDescriptor>);
 static_assert(std::is_trivially_copyable_v<DeviceRequestDescriptor>);
