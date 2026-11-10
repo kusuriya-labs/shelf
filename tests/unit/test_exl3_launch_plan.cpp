@@ -64,7 +64,17 @@ RefPlan ref_plan(const shelf::kernel::Exl3GemmArgs& a) {
 }
 
 uint32_t ref_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows, uint32_t bits) {
-    if (rows > 16u || rows == 0u || scratch_rows < rows) return 1u;
+    if (rows > 64u || rows == 0u || scratch_rows < rows) return 1u;
+    if (rows > 16u) {
+        // 17..64 rows: split K until about 3000 waves are in flight (the grid is n / 16 waves).
+        const uint32_t tiles = n / 16u, groups = k / 128u;
+        uint32_t s = (3000u + tiles / 2u) / tiles;
+        if (s < 1u) s = 1u;
+        if (s > 16u) s = 16u;
+        if (groups / 8u < s) s = groups / 8u < 1u ? 1u : groups / 8u;
+        while (s > 1u && static_cast<uint64_t>(s) * rows > scratch_rows) --s;
+        return s;
+    }
     if (bits == 4u && n == 17408u && k == 5120u && scratch_rows >= 64u) return 4u;
     static const uint32_t slots = [] {
         int dev = 0, wgp = 0;
@@ -150,7 +160,7 @@ int main() {
         }
     }
 
-    for (uint32_t rows : {0u, 1u, 2u, 4u, 8u, 16u, 17u, 32u}) {
+    for (uint32_t rows : {0u, 1u, 2u, 4u, 8u, 16u, 17u, 32u, 33u, 48u, 64u, 65u}) {
         for (uint32_t n : {128u, 5120u, 17408u, 248320u}) {
             for (uint32_t k : {128u, 5120u, 17408u}) {
                 for (uint32_t scratch : {1u, 16u, 64u, 1024u}) {
