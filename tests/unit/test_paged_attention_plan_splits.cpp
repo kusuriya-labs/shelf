@@ -50,12 +50,13 @@ PagedAttentionPlan plan_for(uint32_t q_heads, uint32_t kv_heads, uint32_t visibl
 
 constexpr uint32_t kPlentyBytes = 1u << 20;
 
-PagedAttentionPlan masked_plan(bool prefill_intent) {
+PagedAttentionPlan masked_plan(bool prefill_intent, uint32_t rows = 1u,
+                               KVCacheDType dtype = KVCacheDType::BF16) {
     PagedAttentionResolvedArgs a;
-    a.kv_dtype = KVCacheDType::BF16;
+    a.kv_dtype = dtype;
     a.output_dtype = ValueDType::F32;
-    a.common.rows = 1u;
-    a.common.q_heads = 16u;
+    a.common.rows = rows;
+    a.common.q_heads = dtype == KVCacheDType::OCTAVE ? 24u : 16u;
     a.common.kv_heads = 4u;
     a.common.head_dim = 256u;
     a.common.page_tokens = 16u;
@@ -115,7 +116,13 @@ int main() {
     check(masked_plan(false).splits == 1u,
           "a block mask disables the split decode kernel");
     check(!masked_plan(false).use_prefill && !masked_plan(true).use_prefill,
-          "a block mask disables the tiled prefill kernel");
+          "a block mask keeps the decode kernel below the prefill row threshold");
+    check(masked_plan(true, 256u).use_prefill,
+          "bf16 block mask uses the tiled prefill at 256 rows");
+    check(masked_plan(true, 256u, KVCacheDType::FP8_E4M3).use_prefill,
+          "fp8 block mask uses the tiled prefill at 256 rows");
+    check(masked_plan(true, 256u, KVCacheDType::OCTAVE).use_prefill,
+          "octave block mask uses the tiled prefill at 256 rows");
 
     check(::shelf::kernel::paged_attention_bf16_split_supports(4u) &&
               ::shelf::kernel::paged_attention_bf16_split_supports(6u) &&

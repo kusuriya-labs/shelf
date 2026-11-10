@@ -756,6 +756,7 @@ struct OctavePrefillShared {
     uint32_t page_count;
     uint32_t invalid;
     const uint32_t* block_table;
+    uint32_t page_bits[512];
 };
 
 __global__ __launch_bounds__(kThreads, 2)
@@ -985,6 +986,13 @@ void attention_paged_prefill_octave_rotated(
     if (s.invalid != 0u) return;
     const uint32_t rows = s.rows_here;
     const uint32_t flat_rows = s.flat_rows;
+    const bool page_filter =
+        a.block_mask != nullptr && s.page_count <= 512u * 32u;
+    if (page_filter) {
+        paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row0,
+                              rows, s.visible_max, kPageTokens, s.page_count, 512u,
+                              s.page_bits);
+    }
     if (tid < kTileFlatRows) {
         const uint32_t local_row = tid % kTileQueryRows;
         const bool active = tid < flat_rows && local_row < rows;
@@ -1014,6 +1022,9 @@ void attention_paged_prefill_octave_rotated(
 
     for (uint32_t tile_start = 0u; tile_start < s.visible_max;
          tile_start += kOctaveTokens) {
+        if (page_filter &&
+            !paged_page_selected(s.page_bits, tile_start / kPageTokens))
+            continue;
         const uint32_t tokens_here =
             min(kOctaveTokens, s.visible_max - tile_start);
 

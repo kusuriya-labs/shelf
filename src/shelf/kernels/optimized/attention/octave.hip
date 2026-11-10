@@ -458,6 +458,7 @@ struct OctaveWmmaShared {
     uint64_t k_source[kOctaveWmmaTokens];
     uint64_t v_source[kOctaveWmmaTokens];
     uint32_t active[kOctaveWmmaTokens];
+    uint32_t chunk_active;
     uint32_t row_valid;
     uint32_t visible;
     uint32_t ancestor_begin;
@@ -827,6 +828,14 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
                 : 0.0f);
         }
         __syncthreads();
+        if (tid == 0u) {
+            uint32_t any = 0u;
+            for (uint32_t i = 0u; i < kOctaveWmmaTokens; ++i)
+                any |= s.active[i];
+            s.chunk_active = any;
+        }
+        __syncthreads();
+        if (s.chunk_active == 0u) continue;
 
         if constexpr (kCompact) {
             octave_unpack_segment_cooperative<kNopeBits>(

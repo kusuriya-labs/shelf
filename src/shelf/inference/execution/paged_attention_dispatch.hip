@@ -287,8 +287,7 @@ PagedAttentionPlan plan_paged_attention(
             ::shelf::kernel::kOctavePrefillKvBlockTokens);
     }
     if (args.common.block_mask != nullptr &&
-        (args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE ||
-         args.common.rows < kMaskedPrefillMinRows)) {
+        args.common.rows < kMaskedPrefillMinRows) {
         plan.use_prefill = false;
         plan.splits = 1u;
         return plan;

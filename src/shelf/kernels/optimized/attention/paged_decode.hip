@@ -76,6 +76,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     __shared__ const uint32_t* block_table_shared;
     __shared__ uint32_t anc_base_shared;
     __shared__ uint32_t anc_count_shared;
+    __shared__ uint32_t page_bits[1024];
 
     if (tid == 0u) {
         const uint32_t slot = a.row_sequence_slots[row];
@@ -141,6 +142,12 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
+    const uint32_t page_words = (page_count + 31u) / 32u;
+    const bool page_filter = a.block_mask != nullptr && page_words <= 1024u;
+    if (page_filter) {
+        paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row, 1u,
+                              visible, page_tokens, page_count, 1024u, page_bits);
+    }
 
     float run_max = -FLT_MAX;
     float run_sum = 0.0f;
@@ -158,6 +165,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         const uint32_t page_start = page_index * page_tokens;
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
+        if (page_filter && !paged_page_selected(page_bits, page_index)) continue;
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
             if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
