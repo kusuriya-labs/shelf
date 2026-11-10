@@ -36,3 +36,21 @@ GPU 単体テストでは同じ候補列について親 3 と親 5 を指定し�
 ## M1 の未完了項目
 
 候補 top-2 の取得と単一 request への接続、全行 recurrent history の確保、tree metadata の GPU 転送、選択経路の KV と tap の確定、行数上限と memory plan の調整が必要である。既存の `restore_gdn_spec_history` は conv と recurrent の両方を復元できる。統合後に greedy 一致・B=0 の統計一致・受理長と round 時間の測定・全回帰を実施する。M2 では serve 経路、予算付き選択、確率的検証、性能最適化を扱う。
+
+## M1b の測定
+
+R9700、Qwen3.8-27B EXL3 4bpw mul24、Qwen3.8-27B-DFlash2、BF16 KV、
+`temperature=0`、`--dflash2-drafts 7`、生成 256 token。コマンドの長い解説を
+求める同じ prompt を各 B について２回実行した。受理長は受理した draft token 数を
+round 数で割り、round 時間は `DFLASH2_ROUND_MS / DFLASH2_ROUNDS` とした。
+測定には枝葉を採用した場合の１行再実行と同期を含む。速度の優劣は判断しない。
+
+| B | 受理長（２回） | round 時間 ms（２回） |
+| --- | --- | --- |
+| 0 | 3.048, 3.048 | 55.255, 55.372 |
+| 1 | 3.474, 3.474 | 62.611, 67.264 |
+| 2 | 3.474, 3.474 | 65.658, 65.758 |
+| 4 | 3.474, 3.474 | 65.715, 65.726 |
+
+先頭２位置について各１候補だけを追加するため、B=4 の実際の追加葉は最大２個である。
+測定は `tests/server/test_compute_dflash2_tree.py` の最初の prompt の２回実行で取得した。
