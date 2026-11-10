@@ -154,19 +154,35 @@ __global__ void rmsnorm_offset_bf16_kernel(
     const uint32_t tid = threadIdx.x;
     const auto* x = input + static_cast<size_t>(row) * in_stride + g * group;
     auto* y = output + static_cast<size_t>(row) * out_stride + g * group;
-    float sum = 0.f;
-    for (uint32_t i = tid; i < group; i += blockDim.x) {
-        const float v = __bfloat162float(x[i]);
-        sum += v * v;
-    }
+    __shared__ float inverse;
     __shared__ float partial[256];
-    partial[tid] = sum;
-    __syncthreads();
-    for (uint32_t step = blockDim.x / 2; step; step >>= 1) {
-        if (tid < step) partial[tid] += partial[tid + step];
+    if (group == 128u) {
+        // Preserve the correctness reduction order for PLaMo's Q/K head norms.
+        // A parallel reduction can cross a BF16 rounding boundary in deeper models.
+        if (tid == 0) {
+            float sum = 0.f;
+            for (uint32_t i = 0; i < group; ++i) {
+                const float v = __bfloat162float(x[i]);
+                sum += v * v;
+            }
+            inverse = rsqrtf(sum / static_cast<float>(group) + eps);
+        }
+    } else {
+        float sum = 0.f;
+        for (uint32_t i = tid; i < group; i += blockDim.x) {
+            const float v = __bfloat162float(x[i]);
+            sum += v * v;
+        }
+        partial[tid] = sum;
         __syncthreads();
+        for (uint32_t step = blockDim.x / 2; step; step >>= 1) {
+            if (tid < step) partial[tid] += partial[tid + step];
+            __syncthreads();
+        }
+        if (tid == 0) inverse = rsqrtf(partial[0] / static_cast<float>(group) + eps);
     }
-    const float inv = rsqrtf(partial[0] / static_cast<float>(group) + eps);
+    __syncthreads();
+    const float inv = inverse;
     const auto* w = weight + (per_feature ? g * group : 0);
     for (uint32_t i = tid; i < group; i += blockDim.x) {
         const float norm = __bfloat162float(__float2bfloat16(__bfloat162float(x[i]) * inv));
