@@ -203,6 +203,9 @@ struct DFlash2SpecTiming {
     double proposal_wait_ms = 0.0;
     double proposal_copy_ms = 0.0;
     double gdn_snapshot_ms = 0.0;
+    double tree_select_ms = 0.0;
+    double tree_walk_ms = 0.0;
+    double tree_commit_ms = 0.0;
     double verify_ms = 0.0;
     double verify_gpu_ms = 0.0;
     double decision_wait_ms = 0.0;
@@ -214,6 +217,7 @@ struct DFlash2SpecTiming {
     uint32_t rounds = 0u;
     uint32_t full_accepts = 0u;
     uint32_t partial_accepts = 0u;
+    uint32_t tree_replays = 0u;
     uint32_t accepted_drafts = 0u;
     uint32_t generated_tokens = 0u;
     uint32_t dflash_prefix_full_accepts = 0u;

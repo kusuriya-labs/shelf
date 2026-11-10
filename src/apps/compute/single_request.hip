@@ -737,6 +737,10 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_DECISION_D2H_MS=%.2f\n", timing.decision_copy_ms);
         printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge && !dflash2_tree ? 1 : 0);
         printf("DFLASH2_RERUN_MS=%.2f\n", timing.rerun_ms);
+        printf("DFLASH2_TREE_SELECT_MS=%.2f\n", timing.tree_select_ms);
+        printf("DFLASH2_TREE_WALK_MS=%.2f\n", timing.tree_walk_ms);
+        printf("DFLASH2_TREE_COMMIT_MS=%.2f\n", timing.tree_commit_ms);
+        printf("DFLASH2_TREE_REPLAYS=%u\n", timing.tree_replays);
         printf("DFLASH2_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
         printf("DFLASH2_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
         printf("DFLASH2_COMMIT_MS=%.2f\n", timing.dflash_commit_ms);

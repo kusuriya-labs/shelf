@@ -1022,6 +1022,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     DFlash2Tree tree;
     uint32_t verify_rows = dflash_k + 1u;
     if (decoder.config.tree) {
+        ScopedTimer t(want_timing ? &tm->tree_select_ms : nullptr);
         std::vector<int32_t> alternatives(dflash_k, -1);
         const uint32_t extra = std::min({decoder.config.tree_extra, 2u,
                                          room - verify_rows, dflash_k});
@@ -1272,9 +1273,12 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     DFlash2TreeWalk walk;
     bool branch_replayed = false;
     if (decoder.config.tree) {
-        if (!walk_dflash2_tree(tree.tokens, tree.parent,
-                               std::span<const int32_t>(sampled.data(), verify_rows), walk)) {
-            return Status::invalid_state("dflash2 tree walk failed", __FILE__, __LINE__);
+        {
+            ScopedTimer t(want_timing ? &tm->tree_walk_ms : nullptr);
+            if (!walk_dflash2_tree(tree.tokens, tree.parent,
+                                   std::span<const int32_t>(sampled.data(), verify_rows), walk)) {
+                return Status::invalid_state("dflash2 tree walk failed", __FILE__, __LINE__);
+            }
         }
         const uint32_t accepted = static_cast<uint32_t>(walk.rows.size() - 1u);
         bool has_stop = false;
@@ -1313,6 +1317,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             st = append_committed(decoder, position + parent_count, 1u);
             if (!st.ok()) return st;
             branch_replayed = true;
+            if (tm != nullptr) ++tm->tree_replays;
         }
         result.num_drafts = total_k;
         result.num_accepted_drafts = accepted;
@@ -1355,6 +1360,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     }
 
     if (decoder.config.tree && !branch_replayed) {
+        ScopedTimer t(want_timing ? &tm->tree_commit_ms : nullptr);
         for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
             auto scope = shelf::gpu::ScopedDevice::create(g.device);
             if (!scope.ok()) return scope.status();
