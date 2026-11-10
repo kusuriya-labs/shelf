@@ -215,10 +215,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 fprintf(stderr, "invalid --kv-cache-dtype\n");
                 return false;
             }
-            if (opts.kv_cache_dtype.starts_with("octave") && opts.tp != 1) {
-                fprintf(stderr, "Octave KV cache requires tensor parallel 1\n");
-                return false;
-            }
         } else if (key == "--arena-gib") {
             const std::string text = need_value();
             if (text == "auto") {

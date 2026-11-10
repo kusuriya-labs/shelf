@@ -1922,10 +1922,10 @@ Result<Executor> create_executor(
     if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
         const uint32_t rotary_dim = static_cast<uint32_t>(
             static_cast<double>(tc.attention_head_dim) * tc.partial_rotary_factor);
-        if (tc.identity_declares_routed_experts || tc.attention_head_dim != 256u ||
-            rotary_dim != 64u || config.tp != nullptr || config.stage.enabled) {
+        if (tc.attention_head_dim != 256u || rotary_dim != 64u ||
+            config.stage.enabled) {
             return Status::unsupported(
-                "Octave KV cache requires dense Qwen, head_dim 256, rotary_dim 64, TP=1 and PP=1",
+                "Octave KV cache requires head_dim 256, rotary_dim 64 and PP=1",
                 __FILE__, __LINE__);
         }
     }

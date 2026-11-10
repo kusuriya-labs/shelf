@@ -162,7 +162,8 @@ __global__ __launch_bounds__(kOctaveThreads)
 void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
                          const uint8_t* v_pool, const float* levels,
                          OctaveKVCacheFormat format, float* partials,
-                         uint32_t splits) {
+                         uint32_t splits, uint32_t q_head_base,
+                         uint32_t q_per_kv_total) {
     __shared__ float q_shared[kOctaveQPerKv * 256u];
     __shared__ float k_values[kOctaveThreads];
     __shared__ float scores[kOctaveTokenLanes * kOctaveQPerKv];
@@ -183,7 +184,10 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     const uint32_t kv_head = task % args.kv_heads;
     const uint32_t row = task / args.kv_heads;
     if (row >= args.rows) return;
-    const uint32_t q_per_kv = args.q_heads / args.kv_heads;
+    const uint32_t q_per_kv = q_per_kv_total;
+    const uint32_t group_heads =
+        q_per_kv - q_head_base < kOctaveQPerKv ? q_per_kv - q_head_base
+                                               : kOctaveQPerKv;
 
     for (uint32_t i = tid; i < 7u * 64u; i += kOctaveThreads)
         level_shared[i] = levels[i];
@@ -212,10 +216,10 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     if (row_valid == 0u) return;
 
     const uint32_t q_segment = format.k_mode == OctaveKMode::Compact ? 256u : 64u;
-    for (uint32_t qh = 0u; qh < q_per_kv; ++qh) {
+    for (uint32_t qh = 0u; qh < group_heads; ++qh) {
         float q_value = 0.0f;
         if (tid < 256u) {
-            const uint32_t q_head = kv_head * q_per_kv + qh;
+            const uint32_t q_head = kv_head * q_per_kv + q_head_base + qh;
             const bf16_t* q_source = args.q +
                 static_cast<uint64_t>(row) * args.q_row_stride +
                 static_cast<uint64_t>(q_head) * 256u;
@@ -240,7 +244,7 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     float run_max[kOctaveQPerKv];
     float run_sum[kOctaveQPerKv];
     float accumulator[kOctaveQPerKv];
-    for (uint32_t qh = 0u; qh < q_per_kv; ++qh) {
+    for (uint32_t qh = 0u; qh < group_heads; ++qh) {
         run_max[qh] = -FLT_MAX;
         run_sum[qh] = 0.0f;
         accumulator[qh] = 0.0f;
@@ -284,7 +288,7 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
         __syncthreads();
         const uint32_t qh_wave = dimension >> 5u;
         const uint32_t wave_lane = dimension & 31u;
-        if (qh_wave < q_per_kv) {
+        if (qh_wave < group_heads) {
             float score = 0.0f;
             for (uint32_t d = wave_lane; d < 256u; d += 32u)
                 score += q_shared[qh_wave * 256u + d] *
@@ -292,11 +296,11 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
             for (uint32_t offset = 16u; offset != 0u; offset >>= 1u)
                 score += __shfl_down(score, offset);
             if (wave_lane == 0u)
-                scores[token_lane * q_per_kv + qh_wave] = score * args.scale;
+                scores[token_lane * group_heads + qh_wave] = score * args.scale;
         }
         __syncthreads();
-        for (uint32_t qh = 0u; qh < q_per_kv; ++qh) {
-            const float score = scores[token_lane * q_per_kv + qh];
+        for (uint32_t qh = 0u; qh < group_heads; ++qh) {
+            const float score = scores[token_lane * group_heads + qh];
             if (active) {
                 const float next_max = fmaxf(run_max[qh], score);
                 const float alpha = __expf(run_max[qh] - next_max);
@@ -311,34 +315,35 @@ void octave_split_legacy(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     const uint64_t partial_stride = static_cast<uint64_t>(q_per_kv) * 258u;
     float* base = partials +
         ((static_cast<uint64_t>(row) * args.kv_heads + kv_head) * splits + split) * partial_stride;
-    for (uint32_t qh = 0u; qh < q_per_kv; ++qh) {
-        lane_accumulators[(token_lane * q_per_kv + qh) * 256u + dimension] =
+    for (uint32_t qh = 0u; qh < group_heads; ++qh) {
+        lane_accumulators[(token_lane * group_heads + qh) * 256u + dimension] =
             accumulator[qh];
         if (dimension == 0u) {
-            lane_max[token_lane * q_per_kv + qh] = run_max[qh];
-            lane_sum_values[token_lane * q_per_kv + qh] = run_sum[qh];
+            lane_max[token_lane * group_heads + qh] = run_max[qh];
+            lane_sum_values[token_lane * group_heads + qh] = run_sum[qh];
         }
     }
     __syncthreads();
     if (token_lane != 0u) return;
-    for (uint32_t qh = 0u; qh < q_per_kv; ++qh) {
+    for (uint32_t qh = 0u; qh < group_heads; ++qh) {
         float combined_max = -FLT_MAX;
         for (uint32_t lane = 0u; lane < kOctaveTokenLanes; ++lane)
-            combined_max = fmaxf(combined_max, lane_max[lane * q_per_kv + qh]);
+            combined_max = fmaxf(combined_max, lane_max[lane * group_heads + qh]);
         float combined_sum = 0.0f;
         float combined_accumulator = 0.0f;
         for (uint32_t lane = 0u; lane < kOctaveTokenLanes; ++lane) {
             const float lane_weight = __expf(
-                lane_max[lane * q_per_kv + qh] - combined_max);
-            combined_sum += lane_weight * lane_sum_values[lane * q_per_kv + qh];
+                lane_max[lane * group_heads + qh] - combined_max);
+            combined_sum += lane_weight * lane_sum_values[lane * group_heads + qh];
             combined_accumulator += lane_weight *
-                lane_accumulators[(lane * q_per_kv + qh) * 256u + dimension];
+                lane_accumulators[(lane * group_heads + qh) * 256u + dimension];
         }
         if (dimension == 0u) {
-            base[qh] = combined_max;
-            base[q_per_kv + qh] = combined_sum;
+            base[q_head_base + qh] = combined_max;
+            base[q_per_kv + q_head_base + qh] = combined_sum;
         }
-        base[2u * q_per_kv + qh * 256u + dimension] = combined_accumulator;
+        base[2u * q_per_kv + (q_head_base + qh) * 256u + dimension] =
+            combined_accumulator;
     }
 }
 
@@ -693,7 +698,8 @@ __global__ __launch_bounds__(kOctaveWmmaThreads, 1)
 void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
                        const uint8_t* v_pool, const float* levels,
                        OctaveKVCacheFormat format, float* partials,
-                       uint32_t splits) {
+                       uint32_t splits, uint32_t q_head_base,
+                       uint32_t q_per_kv_total) {
     __shared__ OctaveWmmaShared s;
     const uint32_t tid = static_cast<uint32_t>(threadIdx.x);
     const uint32_t lane = tid & 31u;
@@ -703,7 +709,10 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     const uint32_t kv_head = task % args.kv_heads;
     const uint32_t row = task / args.kv_heads;
     if (row >= args.rows) return;
-    const uint32_t q_per_kv = args.q_heads / args.kv_heads;
+    const uint32_t q_per_kv = q_per_kv_total;
+    const uint32_t group_heads =
+        q_per_kv - q_head_base < kOctaveQPerKv ? q_per_kv - q_head_base
+                                               : kOctaveQPerKv;
 
     (void)levels;
     for (uint32_t i = tid; i < kOctaveWmmaQueries * kOctaveWmmaPitch;
@@ -738,9 +747,9 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     __syncthreads();
     if (s.row_valid == 0u) return;
 
-    if (wave < q_per_kv) {
+    if (wave < group_heads) {
         float qv[8];
-        const uint32_t q_head = kv_head * q_per_kv + wave;
+        const uint32_t q_head = kv_head * q_per_kv + q_head_base + wave;
         const bf16_t* source = args.q +
             static_cast<uint64_t>(row) * args.q_row_stride +
             static_cast<uint64_t>(q_head) * 256u + lane * 8u;
@@ -885,7 +894,7 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
         __syncthreads();
 
         if (wave == 0u && lane < kOctaveWmmaQueries) {
-            if (lane < q_per_kv) {
+            if (lane < group_heads) {
                 float tile_max = -FLT_MAX;
                 #pragma unroll
                 for (uint32_t token = 0u; token < kOctaveWmmaTokens; ++token) {
@@ -960,9 +969,9 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
     float* partial = partials +
         ((static_cast<uint64_t>(row) * args.kv_heads + kv_head) * splits + split) *
             partial_stride;
-    if (wave == 0u && lane < q_per_kv) {
-        partial[lane] = running_max;
-        partial[q_per_kv + lane] = running_sum;
+    if (wave == 0u && lane < group_heads) {
+        partial[q_head_base + lane] = running_max;
+        partial[q_per_kv + q_head_base + lane] = running_sum;
     }
     if (wave >= 1u && wave <= 4u) {
         const uint32_t query_base = (lane >> 4u) * 8u;
@@ -972,8 +981,8 @@ void octave_split_wmma(PagedAttentionCommonArgs args, const uint8_t* k_pool,
             #pragma unroll
             for (uint32_t e = 0u; e < 8u; ++e) {
                 const uint32_t query = query_base + e;
-                if (query < q_per_kv) {
-                    partial[2u * q_per_kv + query * 256u +
+                if (query < group_heads) {
+                    partial[2u * q_per_kv + (q_head_base + query) * 256u +
                             dimension_base + nt * 16u] = output_accumulator[nt][e];
                 }
             }
@@ -1050,8 +1059,9 @@ hipError_t launch_attention_paged_octave_split(
     const PagedAttentionCommonArgs& common, const uint8_t* k_pool,
     const uint8_t* v_pool, const float* levels, OctaveKVCacheFormat format,
     float* partials, uint32_t splits, hipStream_t stream) {
-    if (common.rows == 0u || common.head_dim != 256u || common.q_heads != 24u ||
-        common.kv_heads != 4u || k_pool == nullptr || v_pool == nullptr ||
+    if (common.rows == 0u || common.head_dim != 256u || common.q_heads == 0u ||
+        common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u ||
+        k_pool == nullptr || v_pool == nullptr ||
         levels == nullptr || partials == nullptr || splits == 0u ||
         splits > kOctaveMaxSplits ||
         !octave_format_valid(format))
@@ -1062,46 +1072,55 @@ hipError_t launch_attention_paged_octave_split(
         const char* value = std::getenv("SHELF_OCTAVE_DECODE_LEGACY");
         return value != nullptr && value[0] == '1' && value[1] == '\0';
     }();
-    if (legacy) {
-        octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
-            common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Compact &&
-               format.k_nope_bits == 3u && format.v_bits == 3u) {
-        octave_split_wmma<true, 3u, 3u, 3u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Compact &&
-               format.k_nope_bits == 4u && format.v_bits == 4u) {
-        octave_split_wmma<true, 4u, 4u, 4u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Compact &&
-               format.k_nope_bits == 5u && format.v_bits == 5u) {
-        octave_split_wmma<true, 5u, 5u, 5u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Compact &&
-               format.k_nope_bits == 6u && format.v_bits == 6u) {
-        octave_split_wmma<true, 6u, 6u, 6u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Block &&
-               format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
-               format.v_bits == 3u) {
-        octave_split_wmma<false, 4u, 3u, 3u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else if (format.k_mode == OctaveKMode::Block &&
-               format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
-               format.v_bits == 4u) {
-        octave_split_wmma<false, 4u, 3u, 4u>
-            <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
-                common, k_pool, v_pool, levels, format, partials, splits);
-    } else {
-        // Uncommon mixed bit-width descriptors keep the exact scalar path;
-        // the production descriptors above use the gfx12 WMMA path.
-        octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
-            common, k_pool, v_pool, levels, format, partials, splits);
+    const uint32_t q_per_kv = common.q_heads / common.kv_heads;
+    for (uint32_t q_base = 0u; q_base < q_per_kv; q_base += kOctaveQPerKv) {
+        if (legacy) {
+            octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
+                common, k_pool, v_pool, levels, format, partials, splits, q_base, q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == 3u && format.v_bits == 3u) {
+            octave_split_wmma<true, 3u, 3u, 3u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == 4u && format.v_bits == 4u) {
+            octave_split_wmma<true, 4u, 4u, 4u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == 5u && format.v_bits == 5u) {
+            octave_split_wmma<true, 5u, 5u, 5u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Compact &&
+                   format.k_nope_bits == 6u && format.v_bits == 6u) {
+            octave_split_wmma<true, 6u, 6u, 6u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Block &&
+                   format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
+                   format.v_bits == 3u) {
+            octave_split_wmma<false, 4u, 3u, 3u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else if (format.k_mode == OctaveKMode::Block &&
+                   format.k_rope_bits == 4u && format.k_nope_bits == 3u &&
+                   format.v_bits == 4u) {
+            octave_split_wmma<false, 4u, 3u, 4u>
+                <<<static_cast<uint32_t>(grid), kOctaveWmmaThreads, 0u, stream>>>(
+                    common, k_pool, v_pool, levels, format, partials, splits, q_base,
+                    q_per_kv);
+        } else {
+            // Uncommon mixed bit-width descriptors keep the exact scalar path;
+            // the production descriptors above use the gfx12 WMMA path.
+            octave_split_legacy<<<static_cast<uint32_t>(grid), kOctaveThreads, 0u, stream>>>(
+                common, k_pool, v_pool, levels, format, partials, splits, q_base, q_per_kv);
+        }
     }
     return hipGetLastError();
 }
@@ -1109,8 +1128,9 @@ hipError_t launch_attention_paged_octave_split(
 hipError_t launch_attention_paged_octave_reduce(
     const PagedAttentionCommonArgs& common, const float* partials,
     uint32_t splits, hipStream_t stream) {
-    if (common.rows == 0u || common.head_dim != 256u || common.q_heads != 24u ||
-        common.kv_heads != 4u || common.output == nullptr || partials == nullptr ||
+    if (common.rows == 0u || common.head_dim != 256u || common.q_heads == 0u ||
+        common.kv_heads == 0u || common.q_heads % common.kv_heads != 0u ||
+        common.output == nullptr || partials == nullptr ||
         splits == 0u || splits > kOctaveMaxSplits)
         return hipErrorInvalidValue;
     const uint64_t grid = static_cast<uint64_t>(common.rows) * common.q_heads;

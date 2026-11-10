@@ -419,15 +419,14 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                           const std::vector<float>& levels,
                           bool prefill = false, uint32_t prefix = 0u,
                           uint32_t decode_tokens = 64u,
-                          bool microbench = false, bool masked = false) {
+                          bool microbench = false, bool masked = false,
+                          uint32_t q_heads = 24u, uint32_t kv_heads = 4u) {
     const uint32_t tokens = prefill ? prefix + query_rows : decode_tokens;
-    constexpr uint32_t kv_heads = 4u;
-    constexpr uint32_t q_heads = 24u;
     constexpr uint32_t page_tokens = 16u;
     const uint32_t pages = (tokens + page_tokens - 1u) / page_tokens;
     constexpr uint32_t head_dim = 256u;
-    constexpr uint32_t kv_features = kv_heads * head_dim;
-    constexpr uint32_t q_features = q_heads * head_dim;
+    const uint32_t kv_features = kv_heads * head_dim;
+    const uint32_t q_features = q_heads * head_dim;
     std::vector<shelf::bf16_t> k(static_cast<std::size_t>(tokens) * kv_features);
     std::vector<shelf::bf16_t> v(k.size());
     for (std::size_t i = 0u; i < k.size(); ++i) {
@@ -740,6 +739,24 @@ int main() {
     run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
                          "Octave decode QSA mask parity", levels,
                          false, 0u, 64u, false, true);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave dense TP2 prefill parity", levels,
+                         true, 17u, 64u, false, false, 12u, 2u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave dense TP2 decode parity", levels,
+                         false, 0u, 64u, false, false, 12u, 2u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 prefill parity", levels,
+                         true, 17u, 64u, false, false, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 decode parity", levels,
+                         false, 0u, 64u, false, false, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 masked prefill parity", levels,
+                         true, 17u, 64u, false, true, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 masked decode parity", levels,
+                         false, 0u, 64u, false, true, 12u, 1u);
     const char* long_bench = std::getenv("SHELF_OCTAVE_LONG_BENCH");
     if (long_bench != nullptr && long_bench[0] == '1' && long_bench[1] == '\0')
         run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 4u, false,
