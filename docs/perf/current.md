@@ -49,24 +49,27 @@ date・build・GPU 割り当て・生成結果の一致アンカーとともに�
 | カテゴリ別 serving | `vendor/BetterBench`（methodology §9） | decode t/s、TTFT p50 |
 | fp8 KV の数値品質 | `tools/quality_gate.py` / `shelf-bench quality` | ppl 差、mean KL、top-1 一致率 |
 
-## 2026-11-10 Flash Next EXL3 prefill (QSA)
+## 2026-11-10 Flash Next EXL3 prefill (QSA / grouped)
 
-QSA の prefill 経路を変更した。key cache を圧縮ブロック単位で並列化し、top-k を
-radix select に置き換え、score WMMA の warp 重複を除去した。変更内容は
-[../research/20261110/qsa_prefill_parallel_and_radix.md](../research/20261110/qsa_prefill_parallel_and_radix.md)
-と [../research/20261110/qsa_score_warp_split.md](../research/20261110/qsa_score_warp_split.md)。
+QSA の prefill 経路と grouped EXL3 を変更した。QSA は key cache を圧縮ブロック単位で
+並列化し、top-k を radix select に置き換え、score WMMA の warp 重複を除去した。
+grouped EXL3 は gate/up の K chunk を 2 つずつ stage して barrier を半減した。
+変更内容は
+[../research/20261110/qsa_prefill_parallel_and_radix.md](../research/20261110/qsa_prefill_parallel_and_radix.md)、
+[../research/20261110/qsa_score_warp_split.md](../research/20261110/qsa_score_warp_split.md)、
+[../research/20261110/grouped_exl3_kchunk_pair.md](../research/20261110/grouped_exl3_kchunk_pair.md)。
 
 ### Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw / TP=2
 
 | prompt | 変更前 | 変更後 |
 |---|---:|---:|
-| 8K | 2,928 ms / 2,798 tok/s | **2,827 ms / 2,902 tok/s** |
-| 32K | 12,859 ms / 2,548 tok/s | **12,141 ms / 2,699 tok/s** |
+| 8K | 2,928 ms / 2,798 tok/s | **2,682 ms / 3,054 tok/s** |
+| 32K | 12,859 ms / 2,548 tok/s | **11,576 ms / 2,831 tok/s** |
 
-- measurement revision: `2829b3c`（比較は親 `5110114`）
+- measurement revision: `9601271`（比較は `5110114`）
 - GPU: R9700 × 2（device 2,3）、TP=2
 - command: `shelf-bench pp --model-dir models/kusuriya-labs/Qwen3.8-Flash-Next-EXL3-INT8-3.05bpw --prompt-tokens <8192|32768> --prefill-chunk 2048 --kv-cache-dtype fp8 --device 2,3 --tensor-parallel 2 --warmup 1 --runs 3`
-- 8K は 3.7%、32K は 5.6% の throughput 改善。
+- 8K は 8.4%、32K は 10.0% の prefill 時間短縮。
 
 ## 2026-11-06 model load
 
