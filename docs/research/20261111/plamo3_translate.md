@@ -36,3 +36,11 @@
 ## 実装上の未検証事項
 
 Shelf の Qwen 実装は gated query、Qwen 固有の層構成と weight 名を前提としており、この checkpoint の identity を許可するだけでは動作しない。独立した model lowering と loader、局所 attention と複数 RoPE profile、停止 token と翻訳 template 引数の server 接続が必要。EXL3 の形式そのものと checkpoint 固有の変換器・loader の対応は別問題であり、現時点では量子化・品質・速度を測定していない。
+
+## 実装作業の途中結果
+
+サーバーの request → chat template 経路に翻訳用引数を渡す変更を追加した。配布 tokenizer と模擬 compute による HTTP テストでは、引数付き prompt の一致、通常応答、streaming、必須引数と入力の拒否を確認した。これはモデル本体の推論や実際の翻訳品質の検証ではない。現時点では server の起動時 reasoning capability 検査と compute の model identity gate が PLaMo を拒否するため、PLaMo はまだ使用できない。
+
+0.8B と 2B の CPU BF16 参照について、日英・英日の入力をそれぞれ 23・26 token に変換し、全位置の logits を `/tmp/plamo3_reference_{0,1}.pt` と `/tmp/plamo3_2b_reference_{0,1}.pt` に保存した。同じ token 列と `shelf-bench quality` 形式の参照は `/tmp/plamo3_case_{0,1}.{tokens,quality}` と `/tmp/plamo3_2b_case_{0,1}.{tokens,quality}` に保存した。これらは一時ファイルであり、比較自体は GPU 実装が必要で未実施である。
+
+量子化も未実施。`rocm_exl3/exllamav3/architecture/architectures.py` の architecture 登録には PLaMo 3 がなく、既存の Qwen 用変換をそのまま適用する根拠はない。PLaMo 3 の変換用 architecture と shelf 側の量子化 weight loader、結合行列の配置を対応させ、BF16 との比較を行う必要がある。
