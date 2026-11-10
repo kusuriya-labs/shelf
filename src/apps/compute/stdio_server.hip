@@ -611,7 +611,7 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     generation.submitted_at = std::chrono::steady_clock::now();
 
     if (request.contains("grammar") && !request["grammar"].is_boolean()) {
-        emit_error(request_id, "grammar must be a boolean");
+        emit_error_with_code(request_id, "invalid_argument", "grammar must be a boolean");
         return false;
     }
     const bool grammar = request.value("grammar", false);
