@@ -661,8 +661,10 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const auto region =
             offset_paged_attention_rows(a.common, d.row_begin, d.row_count);
         const uint32_t before = out.physical_count;
-        if (a.common.block_mask == nullptr && a.common.head_dim == 256u &&
-            d.row_count >= kPagedAttentionPrefillMinRows) {
+        const uint32_t prefill_min_rows =
+            a.common.block_mask != nullptr ? kMaskedPrefillMinRows
+                                           : kPagedAttentionPrefillMinRows;
+        if (a.common.head_dim == 256u && d.row_count >= prefill_min_rows) {
             if (append_prefill_region(a, region, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;
