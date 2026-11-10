@@ -154,7 +154,26 @@ __device__ __forceinline__ void attention_paged_bf16_body(
     float acc[kElemsPerLane] = {};
     uint32_t bad = 0u;
 
-    for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
+    uint32_t scan_word = page_filter ? wave : 0u;
+    uint32_t scan_bits = (page_filter && scan_word < page_words)
+                             ? page_bits[scan_word]
+                             : 0u;
+    for (;;) {
+        uint32_t page_index;
+        if (!page_filter) {
+            if (scan_word >= page_count) break;
+            page_index = scan_word++;
+        } else {
+            while (scan_bits == 0u) {
+                scan_word += kWaves;
+                if (scan_word >= page_words) break;
+                scan_bits = page_bits[scan_word];
+            }
+            if (scan_word >= page_words) break;
+            page_index = scan_word * 32u + static_cast<uint32_t>(__ffs(scan_bits) - 1);
+            scan_bits &= scan_bits - 1u;
+            if (page_index >= page_count) break;
+        }
         const uint32_t page = block_table[page_index];
         if (page >= a.num_pages) {
             bad = 1u;
@@ -165,8 +184,9 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         const uint32_t page_start = page_index * page_tokens;
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
-        if (page_filter && !paged_page_selected(page_bits, page_index)) continue;
-        for (uint32_t off = wave; off < tokens_here; off += kWaves) {
+        const uint32_t off_begin = page_filter ? 0u : wave;
+        const uint32_t off_step = page_filter ? 1u : kWaves;
+        for (uint32_t off = off_begin; off < tokens_here; off += off_step) {
             if (!paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift, row,
                                      page_start + off))
                 continue;
