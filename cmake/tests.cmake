@@ -106,6 +106,7 @@ shelf_add_test(NAME test_mxfp4_codec SOURCE unit/test_mxfp4_codec.cpp LABELS "cp
 shelf_add_test(NAME test_exl3_codec SOURCE unit/test_exl3_codec.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_int8_decode SOURCE unit/test_exl3_int8_decode.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_quant_reference)
 shelf_add_test(NAME test_exl3_contracts SOURCE unit/test_exl3_contracts.cpp LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_gpu)
+shelf_add_test(NAME test_exl3_workspace SOURCE unit/test_exl3_workspace.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_kernels_optimized shelf_gpu)
 shelf_add_test(NAME test_exl3_linear SOURCE unit/test_exl3_linear.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_dense SOURCE unit/test_exl3_dense.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_kernels_optimized shelf_quant_reference shelf_gpu)
 shelf_add_test(NAME test_exl3_int8_linear SOURCE kernels/linear/test_exl3_int8_linear.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES shelf_inference_execution shelf_kernels_optimized shelf_quant_reference shelf_gpu)
@@ -328,6 +329,7 @@ add_custom_target(
         test_exl3_codec
         test_exl3_int8_decode
         test_exl3_contracts
+        test_exl3_workspace
         test_exl3_linear
         test_exl3_dense
         test_exl3_int8_linear

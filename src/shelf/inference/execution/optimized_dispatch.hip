@@ -12,8 +12,7 @@
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/exl3.h>
+#include <shelf/kernels/optimized/linear/detail/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -709,22 +708,17 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         return Status::invalid_state("exl3 int8 linear: no EXL3 workspace", __FILE__, __LINE__);
 
     const uint32_t n = e.rows, k = e.cols;
-    const uint32_t groups = k / 128u;
-    const uint32_t code_stride = k;
-    const uint32_t scale_stride_bytes = (groups * 4u + 15u) & ~15u;
-    // Rows per pass: the codes + scales must fit the xrot region and the F32 output the accum region.
-    const uint64_t per_row_in = static_cast<uint64_t>(code_stride) + scale_stride_bytes;
-    const uint64_t rows_in = ctx.exl3_xrot_bytes / per_row_in;
-    const uint64_t rows_out = ctx.exl3_accum_bytes / (static_cast<uint64_t>(n) * sizeof(float));
-    // Rows the F32 output region can hold: split-K writes one slice per split, so decode (1 row) can use many.
-    const uint32_t scratch_rows = static_cast<uint32_t>(std::min<uint64_t>(rows_out, 0xFFFFFFFFull));
-    const uint32_t chunk = static_cast<uint32_t>(std::min<uint64_t>(std::min<uint64_t>(rows_in, rows_out), rows));
-    if (chunk == 0u)
+    const auto layout = ::shelf::kernel::exl3_detail::make_mul24_workspace_layout(
+        rows, n, k, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+    if (layout.chunk_rows == 0u)
         return Status::insufficient_memory("exl3 int8 linear: workspace smaller than one row", __FILE__, __LINE__);
-    int8_t* codes = static_cast<int8_t*>(ctx.exl3_xrot);
-    float* scales = reinterpret_cast<float*>(
-        static_cast<uint8_t*>(ctx.exl3_xrot) + ((static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull));
-    float* yprime = static_cast<float*>(ctx.exl3_accum);
+    const uint32_t chunk = layout.chunk_rows;
+    const uint32_t scratch_rows = layout.scratch_rows;
+    const uint32_t code_stride = layout.code_stride;
+    const uint32_t scale_stride_bytes = layout.scale_stride_bytes;
+    int8_t* codes = reinterpret_cast<int8_t*>(static_cast<uint8_t*>(ctx.exl3_xrot) + layout.codes_offset);
+    float* scales = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_xrot) + layout.scales_offset);
+    float* yprime = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + layout.yprime_offset);
     const uint32_t out_elem_bytes = out_bf16 ? 2u : 4u;
     // Prefill: like the W16A16 dense path, expand the trellis to a dense int8 matrix and run one hipBLASLt int8 GEMM.
     // That GEMM takes one activation scale per row (decode keeps one per 128-K group).
@@ -738,19 +732,10 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
         const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
         return env != nullptr ? std::strtof(env, nullptr) : 0.5f;
     }();
-    // Workspace layout of the dense path (xrot region after codes + scales): slots[chunk] (+ the slot count),
-    // then the compact codes / scales of the flagged rows; the accum region holds acc[chunk][n] (int32) followed by
-    // the flagged rows' F32 output yprime2[cap][n].
-    const uint64_t cap_rows = ::shelf::kernel::exl3_mul24_flag_cap(chunk);
-    const uint64_t scales_off = (static_cast<uint64_t>(chunk) * code_stride + 255u) & ~255ull;
-    const uint64_t slots_off = (scales_off + static_cast<uint64_t>(chunk) * scale_stride_bytes + 255u) & ~255ull;
-    const uint64_t codes_f_off = (slots_off + (static_cast<uint64_t>(chunk) + 1u) * 4u + 255u) & ~255ull;
-    const uint64_t scales_f_off = (codes_f_off + cap_rows * code_stride + 255u) & ~255ull;
-    const uint64_t xrot_need = scales_f_off + cap_rows * scale_stride_bytes;
-    const uint64_t yprime2_off = (static_cast<uint64_t>(chunk) * n * 4u + 255u) & ~255ull;
-    const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr &&
-                          static_cast<uint64_t>(k) * n <= ctx.exl3_dense_bytes && xrot_need <= ctx.exl3_xrot_bytes &&
-                          yprime2_off + cap_rows * n * 4u <= ctx.exl3_accum_bytes;
+    // Workspace layout of the dense path: slots[chunk] (+ the slot count), then the compact
+    // codes / scales of the flagged rows in the xrot region; the accum region holds
+    // acc[chunk][n] followed by the flagged rows' F32 output yprime2[cap][n].
+    const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr && layout.fits;
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
         const uint32_t n_rows = std::min(chunk, rows - r0);
@@ -769,11 +754,11 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             float* rowscale = static_cast<float*>(ctx.exl3_rowsum);
             int8_t* dense = static_cast<int8_t*>(ctx.exl3_dense);
             uint8_t* xr = static_cast<uint8_t*>(ctx.exl3_xrot);
-            int32_t* slots = reinterpret_cast<int32_t*>(xr + slots_off);
-            uint32_t* count = reinterpret_cast<uint32_t*>(slots + chunk);
-            int8_t* codes_f = reinterpret_cast<int8_t*>(xr + codes_f_off);
-            float* scales_f = reinterpret_cast<float*>(xr + scales_f_off);
-            float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + yprime2_off);
+            int32_t* slots = reinterpret_cast<int32_t*>(xr + layout.slots_offset);
+            uint32_t* count = reinterpret_cast<uint32_t*>(xr + layout.count_offset);
+            int8_t* codes_f = reinterpret_cast<int8_t*>(xr + layout.flagged_codes_offset);
+            float* scales_f = reinterpret_cast<float*>(xr + layout.flagged_scales_offset);
+            float* yprime2 = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + layout.flagged_yprime_offset);
             const uint32_t cap = static_cast<uint32_t>(::shelf::kernel::exl3_mul24_flag_cap(n_rows));
             {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
