@@ -879,7 +879,9 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         if (prefix_cache_ == nullptr || page_tokens == 0u) {
             return;
         }
-        if (offset == 0u || offset != last_boundary || offset % page_tokens != 0u) {
+        // Like the non-speculative prefill: every page-aligned chunk end is a restore point. (Only
+        // `last_boundary` used to be saved, which a prompt longer than one chunk never ends on.)
+        if (offset == 0u || offset % page_tokens != 0u || offset > prompt_count) {
             return;
         }
         if (request.sequence.position != offset) {
@@ -906,6 +908,8 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
                          st.message().c_str());
         }
     };
+    // A prompt that fits in one chunk has no chunk end to save at, so a separate pass over its page-aligned head
+    // captures one (the prefill proper keeps the greedy chunking). Longer prompts are saved by the callback above.
     constexpr uint32_t kMaxShadowPrefixTokens = 1024u;
     if (prefix_cache_ != nullptr && tp_batch_hook_ == nullptr &&
         request.restored_tokens == 0u && last_boundary > 0u && last_boundary < prompt_count &&

@@ -78,8 +78,8 @@ save は page 揃え位置でのみ発生する。
   かつ input の範囲内なら `save_input_boundary` が input prefix を保存する。
   `save_input_boundary` は `seq.position == input_len を page 揃えした値` を必須検証し、
   違反は `invalid_argument` である。`min_prefix_tokens`（64）未満は保存しない。
-  DFlash2 は chunk ごとではなく `dflash2_spec_prefill` の最後の page 境界で 1 回だけ
-  `save_input_boundary` を呼ぶ。
+  DFlash2 も `dflash2_spec_prefill` の chunk 完了ごとに、page 揃えの位置なら
+  `save_input_boundary` を呼ぶ（通常 prefill と同じ。ring は chunk 完了時点のものを保存する）。
 - decode: 最終 prefill の完了時に capture を開始し、各 step 後に position が
   page 境界を新しく通過するたびに family state を rolling slot へ capture する。
   DFlash2 では次の page 境界までの残りトークン数に draft 数を制限し、境界を
@@ -164,12 +164,13 @@ restore / save の入力は次のとおりである。
   `length` / `next_position` は **entry position へ clamp して** 保存する
   （final position のまま保存すると entry の KV 範囲と ring の範囲がずれる）。
 - DFlash2 の本 prefill は保存目的の page 境界では分割せず、通常 greedy と同じ
-  `max_batch_rows` の区切りで実行する。cache miss の単一 GPU request で、最後の
-  page 境界が入力末尾より前かつ 1024 token 以下の場合は、先にその境界まで別途
-  prefill して `SpecRingRef` と target state を保存する。GDN・sequence の page table・
-  drafter context と sampling index を元に戻した後、本 prefill を実行する。
-  prefix hit、TP、1024 token を超える境界では別途 prefill しない。自然な chunk
-  終端が page 境界に一致する場合も、その位置を保存できる。
+  `max_batch_rows` の区切りで実行する。chunk の終端（`max_batch_rows` の倍数など、page 揃えの位置）は
+  通常 prefill と同じく restore 点として保存する。そのため prompt が 1 chunk を超える場合は、
+  長い共有 prefix も restore できる（`test_compute_dflash2_prefix_long.py`）。prompt が 1 chunk に収まる
+  場合は chunk 終端が入力末尾しかないので、cache miss の単一 GPU request で、最後の page 境界が
+  入力末尾より前かつ 1024 token 以下のときだけ、先にその境界まで別途 prefill して `SpecRingRef` と
+  target state を保存する。GDN・sequence の page table・drafter context と sampling index を元に戻した後、
+  本 prefill を実行する。prefix hit、TP、1024 token を超える境界では別途 prefill しない。
 - 入力境界の entry は assistant の再レンダリングに依存しないため、強制 close や
   trim で出力末尾の token 列が変わる場合でも restore できる。
 - DFlash2 request は **ring を持つ entry だけ** を restore する。`lookup` は entry の
