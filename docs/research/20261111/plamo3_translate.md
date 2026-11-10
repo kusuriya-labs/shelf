@@ -1,5 +1,35 @@
 # PLaMo 3 Translate の公開実装調査
 
+## M4 量子化の着手時点の障害（未実装）
+
+`rocm_exl3` の 1dfc6dc と Shelf の現行 loader を確認した。PLaMo の
+4bpw checkpoint はまだ作成しておらず、量子化品質・速度も未測定である。
+量子化器に architecture 名を追加するだけでは、次の点で変換できない。
+
+- 配布 checkpoint は `tokenizer.jsonl` と独自 tokenizer を使用する。
+  量子化器の `Tokenizer` は `tokenizer.json` を直接開くため、標準の
+  calibration data をトークン化するには adapter が必要である。
+- 量子化器の `Attention` の `key_fused_qkv` は入力を Q、K、V に分けて
+  それぞれ別の `q_proj` / `k_proj` / `v_proj` として量子化する。
+  `GatedMLP` の `key_fused_gate_up` も gate と up に分ける。一方 Shelf の
+  PLaMo loader と lowering は結合した qkv と gate_up を各 1 行列として扱う。
+  形式を統一し、0.8B の Q=2048、K=V=128 を含む不等幅で検証する必要がある。
+- 局所層と全域層の RoPE 設定と 4 個の offset RMSNorm を calibration の
+  forward に反映する必要がある。特に既存の YaRN 実装は original 長が指定
+  されると factor を `max_position_embeddings / original_max_position_embeddings`
+  から求める。PLaMo の値は 262144 / 4096 = 64 だが、参照実装の factor は
+  256 であり、そのまま流用すると全域層の calibration が変わる。
+- `RMSNorm` は load 時に重みを FP16 に変換し、既存 block も内部を FP16 で
+  実行する。参照の BF16 中間丸めとの差を確認し、calibration に許容できるか
+  判定する必要がある。単に登録して得た checkpoint を検証済みとは扱えない。
+
+変換器は module 完了時に checkpoint を保存し `--resume` で再開できる。
+`--max_module` は境界で終了するが、checkpoint は時間間隔に依存するため、
+分割実行では `--checkpoint_interval 0` と保存済み `next_module_idx` の確認が
+必要である。この組み合わせによる PLaMo の再開は未検証。量子化の前に再開と
+ロック解放を短い実行で確認する。量子化器の変更用 worktree は
+`/home/homelab1/coding-local/rocm_exl3-plamo3`、branch は `feature/plamo3-quant`。
+
 2026-11-11 に公開 BF16 checkpoint の config、modeling code、tokenizer、chat template を調査した。これは調査記録であり、Shelf の対応を意味しない。
 
 - [0.8B](https://huggingface.co/pfnet/plamo-3-translate-0.8b/tree/8b4d42855622093e610ba9b90c2d2b59f8d5c15d)
