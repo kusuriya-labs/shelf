@@ -1,4 +1,5 @@
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
+#include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
 
 #include <cstdio>
 #include <vector>
@@ -36,5 +37,42 @@ int main() {
     CHECK(no_extra.tokens.size() == 4);
     const auto skip = make_dflash2_tree(10, chain, std::vector<int32_t>{11,-1,23}, 2, 0);
     CHECK((skip.tokens == std::vector<int32_t>{10,11,12,13,23}));
+    // Conditional probabilities produce both a deep continuation and a
+    // competing sibling, in descending path-probability order.
+    auto candidates = [](uint32_t depth, int32_t parent) {
+        if (depth == 0) return std::vector<DFlash2TreeCandidate>{{11, 0.6}, {21, 0.4}};
+        if (depth == 1 && parent == 11) return std::vector<DFlash2TreeCandidate>{{12, 0.9}, {22, 0.1}};
+        if (depth == 1 && parent == 21) return std::vector<DFlash2TreeCandidate>{{32, 0.8}};
+        return std::vector<DFlash2TreeCandidate>{};
+    };
+    DFlash2Tree budgeted;
+    CHECK(make_budgeted_dflash2_tree(10, 5, 2, 100, candidates, budgeted));
+    CHECK((budgeted.tokens == std::vector<int32_t>{10, 11, 12, 21, 32}));
+    CHECK((budgeted.parent == std::vector<int32_t>{-1, 0, 1, 0, 3}));
+    CHECK((budgeted.rope_positions == std::vector<uint32_t>{100, 101, 102, 101, 102}));
+    CHECK((budgeted.ancestor_positions == std::vector<uint32_t>{100, 100,101, 100,101,102, 100,103, 100,103,104}));
+    CHECK(walk_dflash2_tree(budgeted.tokens, budgeted.parent,
+                             std::vector<int32_t>{21, 99, 99, 32, 77}, walk));
+    CHECK((walk.rows == std::vector<uint32_t>{0, 3, 4}) && walk.correction == 77);
+    CHECK(make_budgeted_dflash2_tree(10, 1, 2, 0, candidates, budgeted));
+    CHECK(budgeted.tokens.size() == 1);
+    CHECK(!make_budgeted_dflash2_tree(10, 0, 2, 0, candidates, budgeted));
+    auto duplicates = [](uint32_t, int32_t) { return std::vector<DFlash2TreeCandidate>{{1, 0.5}, {1, 0.5}}; };
+    CHECK(!make_budgeted_dflash2_tree(10, 2, 2, 0, duplicates, budgeted));
+    CHECK(make_budgeted_dflash2_tree(10, 1, 2, 0, duplicates, budgeted));
+    auto binary = [](uint32_t, int32_t parent) {
+        return std::vector<DFlash2TreeCandidate>{{parent * 2, 0.7}, {parent * 2 + 1, 0.3}};
+    };
+    for (const uint32_t budget : {8u, 10u, 12u, 16u, 24u}) {
+        CHECK(make_budgeted_dflash2_tree(1, budget, 5, 0, binary, budgeted));
+        CHECK(budgeted.tokens.size() == budget);
+        std::vector<double> probability(budget, 1.0);
+        for (uint32_t row = 1; row < budget; ++row) {
+            const uint32_t parent = static_cast<uint32_t>(budgeted.parent[row]);
+            CHECK(parent < row);
+            probability[row] = probability[parent] * ((budgeted.tokens[row] % 2 == 0) ? 0.7 : 0.3);
+            if (row > 1) CHECK(probability[row] <= probability[row - 1] + 1e-12);
+        }
+    }
     return 0;
 }
