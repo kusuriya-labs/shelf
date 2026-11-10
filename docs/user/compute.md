@@ -3,10 +3,11 @@
 単一request推論アプリ。greedy / temperature / top-k / top-p / min-p デコード。BF16 modelと量子化model
 （`shelf_quantization.json` による自動検出）の両方に対応。
 
-PLaMo 3 Translate 0.8B の BF16 checkpoint は単一 GPU の `shelf-compute` で利用できる。
+PLaMo 3 Translate 0.8B / 2B / 8B の BF16 checkpoint は単一 GPU の `shelf-compute` で利用できる。
 `--max-seq-len` は 2048 以下にする。局所 attention の窓内では全層を causal
 attention として実行し、局所 RoPE と全域 YaRN を層ごとに切り替える。
-TP、pipeline parallel、MTP、DFlash2 は未対応。長文と 2B / 8B の生成は未検証。
+TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
+2B の teacher-forced 比較では CPU BF16 参照との top-1 に不一致がある。
 入力 ID の作り方と測定結果は [PLaMo 3 開発メモ](../developer/plamo3.md) を参照。
 
 ## options
