@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
+#include <utility>
 #include <cstring>
 #include <vector>
 
@@ -642,6 +644,16 @@ bool run_case(const Config& cfg, const char* label) {
 int main() {
     g_wmma12 = true;
     Config c;
+    for (const auto [qh, kvh] : {std::pair{16u, 1u}, std::pair{24u, 4u}, std::pair{32u, 4u}}) {
+        for (const auto rows : {1u, 23u}) {
+            c = Config{};
+            c.q_heads = qh; c.kv_heads = kvh; c.head_dim = 128;
+            c.page_tokens = 16; c.num_pages = 16; c.block_table_stride = 16;
+            c.rows = rows;
+            run_case(c, "PLaMo partial-head BF16 attention");
+        }
+    }
+    c = Config{};
     c.rows = 8;
     run_case(c, "bf16 GQA qh=8 kvh=4 hd=64 rows=8 causal");
     c = Config{};

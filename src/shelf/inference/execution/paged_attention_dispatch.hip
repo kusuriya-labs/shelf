@@ -273,7 +273,9 @@ PagedAttentionPlan plan_paged_attention(
     if (select_paged_attention_implementation(si) != PagedAttentionImplementation::Optimized)
         return plan;
     plan.optimized = true;
-    plan.use_prefill = use_prefill;
+    // The tiled prefill implementation is specialized for head_dim 256.
+    // Use the optimized per-row decode kernel for shorter heads as well.
+    plan.use_prefill = use_prefill && args.common.head_dim == 256u;
     if (plan.use_prefill &&
         args.kv_dtype == ::shelf::kernel::KVCacheDType::OCTAVE) {
         const uint64_t capacity = static_cast<uint64_t>(
@@ -315,6 +317,7 @@ PagedAttentionPlan plan_paged_attention(
         && args.common.tree_anc_offsets == nullptr
         && ctx.decode_attn_partials != nullptr
         && ctx.spec.max_visible_tokens >= kPagedAttentionSplitMinVisible
+        && args.common.head_dim == ::shelf::kernel::kPagedAttentionHeadLimit
         && args.common.q_heads % args.common.kv_heads == 0u
         && split_capability(args)) {
         const uint32_t q_per_kv = args.common.q_heads / args.common.kv_heads;
@@ -659,7 +662,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const auto region =
             offset_paged_attention_rows(a.common, d.row_begin, d.row_count);
         const uint32_t before = out.physical_count;
-        if (a.common.block_mask == nullptr &&
+        if (a.common.block_mask == nullptr && a.common.head_dim == 256u &&
             d.row_count >= kPagedAttentionPrefillMinRows) {
             if (append_prefill_region(a, region, ctx, out) !=
                 PhysicalResolveStatus::Applicable)

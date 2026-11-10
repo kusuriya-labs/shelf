@@ -3,6 +3,7 @@
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 
 #include <cstdio>
+#include <initializer_list>
 #include <cstdint>
 
 namespace {
@@ -72,6 +73,20 @@ PagedAttentionPlan masked_plan(bool prefill_intent) {
 }  // namespace
 
 int main() {
+    for (uint32_t rows : {1u, 23u}) {
+        PagedAttentionResolvedArgs a;
+        a.kv_dtype = KVCacheDType::BF16;
+        a.output_dtype = ValueDType::BF16;
+        a.common.rows = rows; a.common.q_heads = 16; a.common.kv_heads = 1;
+        a.common.head_dim = 128; a.common.page_tokens = 16;
+        HostExecutionContext ctx;
+        ctx.spec.max_visible_tokens = 2048;
+        ctx.decode_attn_partials = kPartials;
+        ctx.decode_attn_partial_bytes = kPlentyBytes;
+        auto plan = shelf::execution::plan_paged_attention(a, ctx, true);
+        check(plan.optimized && !plan.use_prefill && plan.splits == 1,
+              "PLaMo uses partial-head decode kernel for all rows");
+    }
     check(plan_for(16, 4, 4096, kPlentyBytes, false).splits == 16u,
           "q_per_kv 4 with long visible takes splits");
     check(plan_for(12, 2, 4096, kPlentyBytes, false).splits == 16u,

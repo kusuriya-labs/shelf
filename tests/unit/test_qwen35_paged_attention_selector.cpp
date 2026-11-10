@@ -2,6 +2,8 @@
 #include <shelf/kernels/optimized/attention/paged_attention.h>
 
 #include <cstdio>
+#include <initializer_list>
+#include <utility>
 
 namespace {
 
@@ -40,6 +42,14 @@ sel(KVCacheDType dt, ValueDType out, uint32_t qh, uint32_t kvh, uint32_t hd,
 }  // namespace
 
 int main() {
+    for (const auto [qh, kvh] : {std::pair{16u, 1u}, std::pair{24u, 4u}, std::pair{32u, 4u}}) {
+        check(sel(KVCacheDType::BF16, ValueDType::BF16, qh, kvh, 128, 16, 1, 2048) ==
+                  PagedAttentionImplementation::Optimized, "PLaMo decode geometry");
+        check(sel(KVCacheDType::BF16, ValueDType::BF16, qh, kvh, 128, 16, 23, 23) ==
+                  PagedAttentionImplementation::Optimized, "PLaMo prefill geometry");
+        check(sel(KVCacheDType::BF16, ValueDType::BF16, qh, kvh, 128, 16, 1, 2049) ==
+                  PagedAttentionImplementation::Correctness, "PLaMo visible limit");
+    }
     check(sel(KVCacheDType::BF16, ValueDType::F32, 16, 4, 256, 16, 1, 1) ==
               PagedAttentionImplementation::Optimized,
           "bf16 actual rows=1 vis=1 -> Optimized");
