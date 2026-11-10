@@ -124,6 +124,35 @@ FP8 KV、`shelf-bench pp --prefill-chunk 2048 --warmup 1 --runs 1`。
 `qsa_topk` が 3.4% だった。page 単位の和集合は最大 4 倍の token を WMMA に渡すが、
 32K から 128K まで share はほぼ一定で、崖は出ていない。
 
+## octave KV
+
+octave は decode が `OctaveSplit` / `OctaveReduce`、prefill が `OctavePrefill` の専用経路で、
+bf16 decode の page 列挙変更の影響を受けない。QSA の変更だけが効く。
+
+decode（c4v4、32 token p50、tok/s）:
+
+| context | `1c5376f` | `2407d24` |
+|---|---:|---:|
+| 128 | 27.02（37.01） | 26.55（37.67） |
+| 8K | 25.27（39.57） | 25.28（39.57） |
+| 32K | 21.81（45.85） | **24.61（40.63）** |
+| 65K | 18.77（53.28） | **24.06（41.56）** |
+| 128K | 14.45（69.19） | **23.15（43.19）** |
+
+prefill（c4v4、tok/s）:
+
+| prompt | `1c5376f` | `2407d24` |
+|---|---:|---:|
+| 32K | 2,756 | 2,766 |
+| 64K | 2,449 | 2,577 |
+| 128K | 2,104 | 2,364 |
+
+128 token だけ最終版が 1.7% 遅い。top-k の 512 thread 化を無効にしても
+`__launch_bounds__` を 128 に戻しても再現したため、原因は特定できていない。
+32K 以上では大幅に速いため、採否には影響しない。
+
+FP8 KV の 128K は `1c5376f` で 17.04 tok/s（58.69 ms/token）だった。
+
 ## 残る課題
 
 - decode の top-k は 65K で 2.42 ms/token、131K で 4.50 ms/token。radix select は
