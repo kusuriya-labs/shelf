@@ -41,6 +41,21 @@ verify し、一致した prefix だけを commit する。
 
 ---
 
+## 単一 request の木検証
+
+`shelf-compute` の単一 request で `--dflash2-tree-extra B` を明示すると、
+DFlash2 の候補を木として verify する。省略時は従来の chain 経路を使う。
+B は 0、1、2、4 のいずれかで、0 は枝のない chain を木として扱う。B が正の場合は
+先頭２位置の selector による２位候補を、対応する親の兄弟葉として最大 B 個追加する。
+候補位置は２つなので追加葉は最大２個である。単一 request、TP=1、greedy に限る。
+
+各行の親・祖先・depth に対応する RoPE 位置を target に渡し、全行の GDN conv と
+recurrent history を保持する。target の greedy 出力と一致する子をたどり、採用した
+経路の paged KV と target tap を連続位置へ集める。非連続の葉を採用した場合は、
+親の状態を復元し、葉を連続位置で１行再実行する。この再実行は追加コストを伴う。
+
+---
+
 ## Checkpoint contract
 
 ### config

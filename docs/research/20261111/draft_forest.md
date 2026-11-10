@@ -23,19 +23,29 @@
 
 ## 現状
 
-M1 は未完了。CPU 上で chain と兄弟葉の親・深さ・祖先物理位置・RoPE 位置を組み立て、target token に一致する子をたどる純粋関数と単体テストを追加した。推論経路には接続していないため、木検証はまだ利用できない。tree の実機での正しさの検証、計測および既定値の判断は未完了である。
+M1b は単一 request の `shelf-compute` に接続した。既定は従来の chain で、
+`--dflash2-tree-extra` を明示した場合だけ木として検証する。chain と最大２個の
+兄弟葉を検証し、選択経路の KV・tap を gather する。採用した葉は連続位置で
+１行再実行して状態と補正 token を確定する。greedy の 256 token 出力はコマンド、
+コード、英語の推論の３ prompt について B=0,1,2,4 と非投機 target で一致した。
 
 ## 分岐ごとの候補 score の準備
 
 candidate selector は従来、1 行目の anchor 以降を直前行の選択結果で逐次採点する。分岐先ではその直前行が親とは限らないため、行ごとに GPU 上の親 token を指定して独立に採点できる経路を追加した。各行を別 block で処理し、同じ draft 位置を複数の親で採点できる。既存の batch request 経路とは同時に指定できない。親 token と候補 token の範囲は呼び出し側が保証する。
 
-GPU 単体テストでは同じ候補列について親 3 と親 5 を指定し、それぞれ異なる候補が選ばれ、各候補の score が CPU 参照に一致することを確認した。既存の chain も同じテストで確認した。この API はまだ drafter や verify に接続されておらず、tree 生成・検証は有効にならない。確率値への正規化（top-k 外の残余確率を含む）も実装していない。
+GPU 単体テストでは同じ候補列について親 3 と親 5 を指定し、それぞれ異なる候補が選ばれ、各候補の score が CPU 参照に一致することを確認した。既存の chain も同じテストで確認した。この selector を単一 request の枝候補選択に接続した。確率値への正規化（top-k 外の残余確率を含む）は実装していない。
 
-残作業は、候補の GPU バッファと prefix-closed な木の構築、行別の祖先・RoPE・GDN history と容量確保、採用経路の KV と tap の gather、GDN の最終行復元、深さに対応する sampling、greedy・確率 sampling の統合テスト、低・高同時数の性能と VRAM 測定である。性能判断に必要な測定がないため、既定値の変更は行わない。
+M2 では serve 経路への接続、DDTree の予算付き候補選択、確率的検証、
+KV gather と葉の再実行の最適化を扱う。枝ありの確率 sampling は現在拒否する。
 
-## M1 の未完了項目
+## 数値差の調査
 
-候補 top-2 の取得と単一 request への接続、全行 recurrent history の確保、tree metadata の GPU 転送、選択経路の KV と tap の確定、行数上限と memory plan の調整が必要である。既存の `restore_gdn_spec_history` は conv と recurrent の両方を復元できる。統合後に greedy 一致・B=0 の統計一致・受理長と round 時間の測定・全回帰を実施する。M2 では serve 経路、予算付き選択、確率的検証、性能最適化を扱う。
+コード prompt で枝葉の状態をそのまま復元すると、同一 token 列でも position 153 の
+verify 行 3 の greedy token が異なった。検証前の GDN recurrent state は最初に
+GDN index 9（モデル layer 12）で差があり、layer 5 の tap は一致、layer 19 の tap は
+不一致だった。連続しない祖先は attention の別の累算経路を通る。現在は採用葉を
+連続位置で再実行し、補正 token・KV・状態・tap をその結果から確定する。再実行を
+省いて同じ出力を保つ方法は未検証であり、M2 で扱う。
 
 ## M1b の測定
 
