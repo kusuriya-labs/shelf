@@ -1,6 +1,6 @@
 #include <shelf/quantization/exl3/exl3.h>
 
-#include "exl3_codec_golden.h"
+#include "exl3_mul1_codec_golden.h"
 
 #include <cmath>
 #include <cstdint>

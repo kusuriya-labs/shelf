@@ -70,7 +70,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     for (auto& s : suh) s = (rng() & 1u) ? 1.0f : -1.0f;
     for (auto& s : svh) s = static_cast<float>(static_cast<_Float16>(0.5f + std::fabs(nd(rng))));  // fp16-exact, as stored
     // Random trellis words; the expected q comes from the CPU reference decoder (itself checked against
-    // the real rocm_exl3 decoder in test_exl3_int8_decode).
+    // the real rocm_exl3 decoder in test_exl3_mul24_codec_decode).
     const uint64_t kt = k / 16u, nt = n / 16u;
     std::vector<uint16_t> trellis(kt * nt * 16u * bits);
     for (auto& w : trellis) w = static_cast<uint16_t>(rng());

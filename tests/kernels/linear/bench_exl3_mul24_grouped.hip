@@ -1,7 +1,7 @@
 // Micro benchmark of the grouped mul24 EXL3 kernel: FP16 GEMM vs INT8 activations (iu8 WMMA), on the routed-expert
 // shapes of a model config (default: Qwen3.8-Flash-Next mul24). One layer's gate_proj (k = hidden, n = moe
 // intermediate, token-row gather) and down_proj (k = intermediate, n = hidden, group rows) are timed per row count.
-//   bench_exl3_int8_grouped [--model-dir DIR] [--bits N] [--skew] [--iters N]
+//   bench_exl3_mul24_grouped [--model-dir DIR] [--bits N] [--skew] [--iters N]
 // The group plan is built on the host from a random top-k routing (uniform, or --skew: expert popularity ~ 1/(i+1)).
 // SHELF_EXL3_GROUPED_FUSE / SHELF_EXL3_GROUPED_NTILES apply as in the runtime.
 #include <shelf/core/memory/types.h>

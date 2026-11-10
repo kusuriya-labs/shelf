@@ -1,6 +1,6 @@
 #include <shelf/quantization/exl3/exl3_int8.h>
 
-#include "exl3_int8_fixture.h"
+#include "exl3_mul24_codec_fixture.h"
 
 #include <cstdio>
 #include <vector>
