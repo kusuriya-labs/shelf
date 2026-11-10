@@ -186,7 +186,7 @@ hipError_t launch_rope_inv_freq_init(
     double* inv_freq, uint32_t half, float theta, hipStream_t stream) {
     if (inv_freq == nullptr)
         return hipErrorInvalidValue;
-    if (half == 0u || half > 32u)
+    if (half == 0u || half > kRopeMaxHalf)
         return hipErrorNotSupported;
     if (theta <= 0.0f)
         return hipErrorInvalidValue;
@@ -200,7 +200,7 @@ hipError_t launch_rope_inv_freq_yarn_init(
     bool truncate, hipStream_t stream) {
     if (inv_freq == nullptr)
         return hipErrorInvalidValue;
-    if (half == 0u || half > 32u)
+    if (half == 0u || half > kRopeMaxHalf)
         return hipErrorNotSupported;
     if (theta <= 0.0f)
         return hipErrorInvalidValue;

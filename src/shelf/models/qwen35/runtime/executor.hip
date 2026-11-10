@@ -1891,12 +1891,15 @@ Result<Executor> create_executor(
                                      : static_cast<std::uint32_t>(tc.linear_num_value_heads));
         const GdnStatePoolLayout& expected_gdn = expected_storage;
         const auto& actual_gdn = gdn_state_pool.layout();
-        if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
-            actual_gdn.conv_dim != expected_gdn.conv_dim ||
-            actual_gdn.conv_history != expected_gdn.conv_history ||
-            actual_gdn.num_v_heads != expected_gdn.num_v_heads ||
-            actual_gdn.head_k != expected_gdn.head_k ||
-            actual_gdn.head_v != expected_gdn.head_v) {
+        const bool empty_gdn = actual_gdn.num_gdn_states == 0u &&
+            qwen35_stage_gdn_layers(tc, config.stage) == 0u;
+        if (!empty_gdn &&
+            (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
+             actual_gdn.conv_dim != expected_gdn.conv_dim ||
+             actual_gdn.conv_history != expected_gdn.conv_history ||
+             actual_gdn.num_v_heads != expected_gdn.num_v_heads ||
+             actual_gdn.head_k != expected_gdn.head_k ||
+             actual_gdn.head_v != expected_gdn.head_v)) {
             std::string msg =
                 "GDN state pool geometry does not match model config: actual("
                 + std::to_string(actual_gdn.num_gdn_states) + ","
@@ -2272,7 +2275,14 @@ Result<Executor> create_executor(
                 }
             }
 
-            st = allocate_contiguous_tensor<double>(arena, {32}, ex.rope_inv_freq);
+            const uint32_t rope_dim = static_cast<uint32_t>(
+                static_cast<double>(tc.attention_head_dim) * tc.partial_rotary_factor);
+            if (rope_dim < 2u || rope_dim > 256u || (rope_dim & 1u) != 0u) {
+                shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                return Status::invalid_argument("unsupported RoPE dimension", __FILE__, __LINE__);
+            }
+            const uint32_t rope_half = rope_dim / 2u;
+            st = allocate_contiguous_tensor<double>(arena, {rope_half}, ex.rope_inv_freq);
             if (!st.ok()) {
                 shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
                 return st;
@@ -2283,7 +2293,7 @@ Result<Executor> create_executor(
                 hipError_t rerr = hipSuccess;
                 if (ex.config.rope_profile.type == EffectiveRopeProfile::Type::Yarn) {
                     rerr = ::shelf::kernel::launch_rope_inv_freq_yarn_init(
-                        ex.rope_inv_freq.data<double>(), 32, rope_theta,
+                        ex.rope_inv_freq.data<double>(), rope_half, rope_theta,
                         static_cast<float>(ex.config.rope_profile.factor),
                         ex.config.rope_profile.original_max_position_embeddings,
                         static_cast<float>(ex.config.rope_profile.beta_fast),
@@ -2291,7 +2301,7 @@ Result<Executor> create_executor(
                         ex.config.rope_profile.truncate, upload_stream);
                 } else {
                     rerr = ::shelf::kernel::launch_rope_inv_freq_init(
-                        ex.rope_inv_freq.data<double>(), 32, rope_theta, upload_stream);
+                        ex.rope_inv_freq.data<double>(), rope_half, rope_theta, upload_stream);
                 }
                 if (rerr != hipSuccess) {
                     shelf::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));

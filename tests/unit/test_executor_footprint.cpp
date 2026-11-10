@@ -45,6 +45,16 @@ constexpr std::size_t kMiB = 1024ull * 1024ull;
 int main() {
     const Qwen35TextConfig text = reference_text_config();
 
+    Qwen35TextConfig rope64 = text;
+    rope64.attention_head_dim = 256u;
+    rope64.partial_rotary_factor = 0.25f;
+    Qwen35TextConfig rope128 = rope64;
+    rope128.partial_rotary_factor = 0.5f;
+    const ExecutorConfig rope_config = exec_config(1u, 1u, 1u);
+    check(qwen35_executor_reserve_bytes(rope128, text.ffn.intermediate_size, rope_config, 1u, false) ==
+              qwen35_executor_reserve_bytes(rope64, text.ffn.intermediate_size, rope_config, 1u, false) + 256u,
+          "reserve covers the 128-dimensional rotary frequency table");
+
     check(qwen35_padded_row_count(512u) >= 512u, "row padding keeps the requested rows");
     check(qwen35_padded_row_count(8192u) >= 8192u, "row padding covers the largest bucket");
 
