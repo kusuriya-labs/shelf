@@ -46,6 +46,7 @@ Result<SchedulePlan> schedule_requests(
     for (const RuntimeRequest* rp : active) {
         if (rp->state != RequestState::Active) continue;
         const std::size_t proc_idx = decode_proc++;
+        if (rp->waiting_for_token_bitmask) continue;
         if (rp->sequence.position < rp->input_tokens.size()) continue;
         if (rp->pending_decode_token < 0) continue;
         if (budget_left() < 1) break;
@@ -67,6 +68,7 @@ Result<SchedulePlan> schedule_requests(
         if (!append_st.ok()) {
             return append_st;
         }
+        plan.scheduled_requests.back().token_bitmask = rp->token_bitmask;
         commit_grant(proc_idx, delta);
     }
 
@@ -74,6 +76,7 @@ Result<SchedulePlan> schedule_requests(
     for (const RuntimeRequest* rp : active) {
         if (rp->state != RequestState::Active) continue;
         const std::size_t proc_idx = prefill_proc++;
+        if (rp->waiting_for_token_bitmask) continue;
         const uint32_t position = rp->sequence.position;
         if (position >= rp->input_tokens.size()) continue;
         if (budget_left() < 1) break;
@@ -125,6 +128,7 @@ Result<SchedulePlan> schedule_requests(
         if (!append_st.ok()) {
             return append_st;
         }
+        if (sample) plan.scheduled_requests.back().token_bitmask = rp->token_bitmask;
         commit_grant(proc_idx,
                      additional_kv_pages(position, blocks, take, page_tokens));
     }

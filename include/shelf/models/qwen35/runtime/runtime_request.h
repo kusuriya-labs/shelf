@@ -56,6 +56,11 @@ struct RuntimeRequest {
 
     SamplingConfig sampling{};
 
+    // The caller owns the device mask until the request is retired.  A null
+    // pointer preserves the ordinary, unconstrained sampling path.
+    const uint32_t* token_bitmask = nullptr;
+    bool waiting_for_token_bitmask = false;
+
     uint32_t max_kv_tokens = 0;
     uint32_t max_kv_pages = 0;
 

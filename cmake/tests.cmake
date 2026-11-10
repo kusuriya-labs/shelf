@@ -757,3 +757,5 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
 
 
 endif()
+
+shelf_add_test(NAME test_token_mask_scheduler SOURCE unit/test_token_mask_scheduler.cpp LABELS "cpu;required" LIBRARIES shelf_qwen35_runtime shelf_qwen35)
