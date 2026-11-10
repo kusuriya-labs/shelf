@@ -154,6 +154,8 @@ struct RoPENode {
     uint32_t head_dim = 0;
     float theta = 10000000.0f;
     float attention_factor = 1.0f;
+    uint32_t frequency_table_index = 0;
+    bool bf16_intermediates = false;
 };
 
 struct L2NormalizeNode {

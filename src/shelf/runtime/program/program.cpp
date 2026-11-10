@@ -521,6 +521,10 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             b.scalar_b = sb;
             b.rotary_dim = rot;
             b.group_size = group;
+            if (kind == PrimitiveKind::ROPE) {
+                b.rope_table_index = node_as<RoPENode>(node).frequency_table_index;
+                b.flags = node_as<RoPENode>(node).bf16_intermediates ? 1u : 0u;
+            }
             b.input_slots[0] = node.inputs[0].id;
             b.input_count = 1;
             auto po = c.produce(node.outputs[0]);

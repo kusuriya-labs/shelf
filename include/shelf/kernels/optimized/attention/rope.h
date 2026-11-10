@@ -46,6 +46,11 @@ bool rope_pair_shape_supported(
 hipError_t launch_rope_inv_freq_init(
     double* inv_freq, uint32_t half, float theta, hipStream_t stream);
 
+hipError_t launch_rope_inv_freq_f32_init(
+    double* inv_freq, uint32_t half, float theta, float factor,
+    uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,
+    bool yarn, hipStream_t stream);
+
 hipError_t launch_rope_inv_freq_yarn_init(
     double* inv_freq, uint32_t half, float theta, float factor,
     uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,

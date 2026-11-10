@@ -76,6 +76,22 @@ __global__ void rope_inv_freq_init_kernel(
                             static_cast<double>(i) / static_cast<double>(half));
 }
 
+__global__ void rope_inv_freq_f32_init_kernel(
+    double* inv_freq, uint32_t half, float theta, float factor,
+    float low, float high, bool yarn) {
+    const uint32_t i = threadIdx.x;
+    if (i >= half) return;
+    const float freq = powf(theta, static_cast<float>(i) / static_cast<float>(half));
+    float value = 1.0f / freq;
+    if (yarn) {
+        const float ramp = fminf(1.0f, fmaxf(0.0f, (static_cast<float>(i) - low) / (high - low)));
+        const float mask = 1.0f - ramp;
+        const float interpolation = 1.0f / (factor * freq);
+        value = interpolation * (1.0f - mask) + value * mask;
+    }
+    inv_freq[i] = static_cast<double>(value);
+}
+
 __global__ void rope_inv_freq_yarn_init_kernel(
     double* __restrict__ inv_freq, uint32_t half, float theta,
     float factor, float original_len, float beta_fast, float beta_slow,
@@ -191,6 +207,23 @@ hipError_t launch_rope_inv_freq_init(
     if (theta <= 0.0f)
         return hipErrorInvalidValue;
     rope_inv_freq_init_kernel<<<1, half, 0, stream>>>(inv_freq, half, theta);
+    return hipGetLastError();
+}
+
+hipError_t launch_rope_inv_freq_f32_init(
+    double* inv_freq, uint32_t half, float theta, float factor,
+    uint32_t original_max_position_embeddings, float beta_fast, float beta_slow,
+    bool yarn, hipStream_t stream) {
+    if (!inv_freq || half == 0u || half > kRopeMaxHalf || !(theta > 1.0f) ||
+        (yarn && (!(factor > 1.0f) || original_max_position_embeddings == 0u ||
+                  !(beta_fast > 0.0f) || !(beta_slow > 0.0f))))
+        return hipErrorInvalidValue;
+    const double pi2 = 6.283185307179586;
+    const double scale = static_cast<double>(half) / log(static_cast<double>(theta));
+    const float low = yarn ? static_cast<float>(scale * log(original_max_position_embeddings / (beta_fast * pi2))) : 0.0f;
+    const float high = yarn ? static_cast<float>(scale * log(original_max_position_embeddings / (beta_slow * pi2))) : 1.0f;
+    if (yarn && !(high > low)) return hipErrorInvalidValue;
+    rope_inv_freq_f32_init_kernel<<<1, half, 0, stream>>>(inv_freq, half, theta, factor, low, high, yarn);
     return hipGetLastError();
 }
 

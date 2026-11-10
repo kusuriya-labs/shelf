@@ -17,6 +17,13 @@ __device__ __forceinline__ ProgramStatus exec_rope(
             ? b.rotary_dim
             : (head_dim & ~1u);
     const uint32_t half = rotary / 2;
+    if (b.flags > 1u || (b.flags == 1u &&
+        (in.dtype != ValueDType::BF16 || out.dtype != ValueDType::BF16)))
+        return ProgramStatus::INVALID_BINDING;
+    if (b.rope_table_index != 0u &&
+        (env.context == nullptr || env.context->rope_inv_freq == nullptr ||
+         b.rope_table_index >= env.context->rope_table_count ||
+         env.context->rope_table_stride < half)) return ProgramStatus::INVALID_BINDING;
     const uint32_t rows = value_rows(env, out);
     const double theta_base = static_cast<double>(b.scalar_b > 0.f ? b.scalar_b : 10000000.f);
     const uint32_t stride = global_stride(env);
@@ -39,19 +46,33 @@ __device__ __forceinline__ ProgramStatus exec_rope(
                            ? env.context->row_positions[r]
                            : r);
             const double* inv_freq_table =
-                env.context != nullptr ? env.context->rope_inv_freq : nullptr;
+                env.context != nullptr && env.context->rope_inv_freq != nullptr
+                    ? env.context->rope_inv_freq + b.rope_table_index * env.context->rope_table_stride
+                    : nullptr;
             const double freq = inv_freq_table != nullptr
                 ? inv_freq_table[rotary_col]
                 : 1.0 / pow(theta_base,
                             static_cast<double>(rotary_col) / static_cast<double>(half));
             const float attention_factor =
                 b.scalar_a > 0.0f ? b.scalar_a : 1.0f;
-            const double angle = static_cast<double>(position) * freq;
-            const float cs = static_cast<float>(cos(angle)) * attention_factor;
-            const float sn = static_cast<float>(sin(angle)) * attention_factor;
             const float partner =
                 load_elem(in, row_base + (col - head_col) + partner_head_col);
-            y = head_col < half ? x * cs - partner * sn : x * cs + partner * sn;
+            if (b.flags == 1u) {
+                // PLaMo evaluates trigonometry in fp32, then each tensor operation in BF16.
+                const float angle = static_cast<float>(position) * static_cast<float>(freq);
+                float cs = __bfloat162float(__float2bfloat16(cosf(angle)));
+                float sn = __bfloat162float(__float2bfloat16(sinf(angle)));
+                cs = __bfloat162float(__float2bfloat16(cs * attention_factor));
+                sn = __bfloat162float(__float2bfloat16(sn * attention_factor));
+                const float lhs = __bfloat162float(__float2bfloat16(x * cs));
+                const float rhs = __bfloat162float(__float2bfloat16(partner * sn));
+                y = head_col < half ? lhs - rhs : lhs + rhs;
+            } else {
+                const double angle = static_cast<double>(position) * freq;
+                const float cs = static_cast<float>(cos(angle)) * attention_factor;
+                const float sn = static_cast<float>(sin(angle)) * attention_factor;
+                y = head_col < half ? x * cs - partner * sn : x * cs + partner * sn;
+            }
         }
         store_elem(out, static_cast<size_t>(r) * out.row_stride + col, y);
     }

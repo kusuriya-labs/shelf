@@ -54,6 +54,8 @@ struct ExecutorConfig {
     runtime::DecodeBackend backend = runtime::DecodeBackend::Hip;
     const Qwen35TensorParallelContext* tp = nullptr;
     EffectiveRopeProfile rope_profile;
+    // Empty retains the legacy single-table profile and theta.
+    std::vector<EffectiveRopeProfile> rope_profiles;
     PipelineStage stage;
     bool emit_normed_token_hidden = false;
     bool external_hidden_input = false;
@@ -196,6 +198,8 @@ struct Executor {
     gpu::Tensor input_hidden;
 
     gpu::Tensor rope_inv_freq;
+    uint32_t rope_table_stride = 0;
+    uint32_t rope_table_count = 0;
 
     gpu::Tensor output_hidden;
     gpu::Tensor logits;

@@ -83,6 +83,7 @@ struct DispatchBinding {
     float scalar_a = 1.0f;
     float scalar_b = 0.0f;
     uint32_t rotary_dim = 0;
+    uint32_t rope_table_index = 0;
     uint32_t input_slots[kMaxIoSlots] = {};
     uint32_t input_count = 0;
     uint32_t output_slots[kMaxIoSlots] = {};

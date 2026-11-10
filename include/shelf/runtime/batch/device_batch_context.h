@@ -62,6 +62,8 @@ struct DeviceBatchContext {
     uint32_t* row_positions = nullptr;
     const uint32_t* rope_positions = nullptr;
     const double* rope_inv_freq = nullptr;
+    uint32_t rope_table_stride = 0;
+    uint32_t rope_table_count = 0;
     uint32_t* output_rows = nullptr;
     DeviceSamplingParams* output_sampling_params = nullptr;
     hipDeviceptr_t device_ptr = nullptr;

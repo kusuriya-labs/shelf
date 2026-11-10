@@ -36,6 +36,8 @@ struct EffectiveRopeProfile {
     double beta_slow = 1.0;
     bool truncate = true;
     bool from_cli = false;
+    // Match models which construct inverse frequencies in float32.
+    bool float32_frequencies = false;
 };
 
 Result<Qwen35RopeParameters> read_qwen35_rope_parameters(const std::string& model_dir);

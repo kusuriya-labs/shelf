@@ -40,6 +40,7 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     const ::shelf::runtime::Program& program, const ::shelf::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx, PhysicalRopeLaunch& out) {
     out = PhysicalRopeLaunch{};
+    if (b.flags != 0u) return PhysicalResolveStatus::NotApplicable;
     if (b.input_count != 1u || b.output_count != 1u)
         return PhysicalResolveStatus::NotApplicable;
 
@@ -82,10 +83,16 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     if (select_rope_implementation(si) != RopeImplementation::Optimized)
         return PhysicalResolveStatus::NotApplicable;
 
+    if (b.rope_table_index != 0u &&
+        (ctx.rope_inv_freq == nullptr || b.rope_table_index >= ctx.rope_table_count ||
+         ctx.rope_table_stride < rotary / 2u))
+        return Status::invalid_argument("invalid RoPE table index", __FILE__, __LINE__);
+    const double* table = ctx.rope_inv_freq == nullptr ? nullptr
+        : ctx.rope_inv_freq + b.rope_table_index * ctx.rope_table_stride;
     const uint32_t* positions =
         ctx.rope_positions != nullptr ? ctx.rope_positions : ctx.row_positions;
     const bool pair =
-        ctx.rope_inv_freq != nullptr &&
+        table != nullptr &&
         ::shelf::kernel::rope_pair_shape_supported(
             static_cast<const float*>(in.ptr),
             static_cast<::shelf::bf16_t*>(dst.ptr), in.row_stride, dst.row_stride, F,
@@ -96,7 +103,7 @@ Result<PhysicalResolveStatus> resolve_rope_physical(
     out.input = reinterpret_cast<uint64_t>(in.ptr);
     out.output = reinterpret_cast<uint64_t>(dst.ptr);
     out.positions = reinterpret_cast<uint64_t>(positions);
-    out.inv_freq = reinterpret_cast<uint64_t>(ctx.rope_inv_freq);
+    out.inv_freq = reinterpret_cast<uint64_t>(table);
     out.input_row_stride = in.row_stride;
     out.output_row_stride = dst.row_stride;
     out.rows = rows;

@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/attention/rope.h>
+#include "plamo3_rope_fixture.h"
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
@@ -53,6 +54,7 @@ struct Case {
     float theta;
     uint32_t seed;
     PosMode mode;
+    bool second_table = false;
 };
 
 bool run_case(const Case& c) {
@@ -84,12 +86,19 @@ bool run_case(const Case& c) {
         !alloc(&dvals, 2 * sizeof(V)) ||
         !alloc(&dscratch, (size_t)256 * 4096 * sizeof(float)) ||
         !alloc(&derr, sizeof(uint32_t)) ||
-        !alloc(&dinv, 32 * sizeof(double))) {
+        !alloc(&dinv, 64 * sizeof(double))) {
         cleanup();
         return false;
     }
     if (::shelf::kernel::launch_rope_inv_freq_init((double*)dinv, 32, c.theta, nullptr)
         != hipSuccess) {
+        cleanup();
+        return false;
+    }
+
+    if (c.second_table && ::shelf::kernel::launch_rope_inv_freq_yarn_init(
+            (double*)dinv + 32, 32, 1000000.0f, 256.0f, 4096, 32.0f, 1.0f,
+            false, nullptr) != hipSuccess) {
         cleanup();
         return false;
     }
@@ -124,6 +133,8 @@ bool run_case(const Case& c) {
     ctx.rope_positions = (c.mode == PosMode::Rope) ? (const uint32_t*)dpos_rope : nullptr;
     ctx.row_positions = (c.mode == PosMode::Row) ? (uint32_t*)dpos_row : nullptr;
     if (c.rotary / 2u <= 32u) ctx.rope_inv_freq = (const double*)dinv;
+    ctx.rope_table_stride = 32;
+    ctx.rope_table_count = 2;
     if (hipMemcpy(dctx, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) { cleanup(); return false; }
 
     V vals[2];
@@ -157,6 +168,7 @@ bool run_case(const Case& c) {
     binding.group_size = c.head_dim;
     binding.rotary_dim = c.rotary;
     binding.scalar_b = c.theta;
+    binding.rope_table_index = c.second_table ? 1u : 0u;
 
     shelf::gpu::discard_cleanup_result(hipMemset(derr, 0, sizeof(uint32_t)));
     ::shelf::kernel::ModelDispatchStateView sv{};
@@ -168,7 +180,7 @@ bool run_case(const Case& c) {
 
     hipError_t he = ::shelf::kernel::launch_rope_f32_bf16(
         (const float*)din, in_stride, (bf16t*)dout_o, out_stride, positions,
-        rows, c.features, c.head_dim, c.rotary, c.theta, (const double*)dinv, 1.0f,
+        rows, c.features, c.head_dim, c.rotary, c.theta, (const double*)dinv + (c.second_table ? 32 : 0), 1.0f,
         nullptr);
     if (he != hipSuccess) { std::printf("  [%s] opt launch failed: %s\n", c.name, hipGetErrorString(he)); cleanup(); return false; }
     shelf::gpu::discard_cleanup_result(hipGetLastError());
@@ -325,6 +337,83 @@ bool run_freq_identity_case(float theta) {
     return pass;
 }
 
+// Compare both selected tables against the published model's CPU BF16 implementation.
+bool run_plamo_reference() {
+    void *in=nullptr, *out=nullptr, *pos=nullptr, *ctx_dev=nullptr, *vals_dev=nullptr,
+         *scratch=nullptr, *err=nullptr, *table=nullptr;
+    auto cleanup = [&]() {
+        for (auto p : {in, out, pos, ctx_dev, vals_dev, scratch, err, table})
+            if (p) shelf::gpu::discard_cleanup_result(hipFree(p));
+    };
+    auto alloc = [](void** p, size_t n) { return hipMalloc(p, n) == hipSuccess; };
+    if (!alloc(&in, sizeof(plamo_input)) || !alloc(&out, sizeof(plamo_input)) ||
+        !alloc(&pos, 4 * sizeof(uint32_t)) ||
+        !alloc(&ctx_dev, sizeof(::shelf::runtime::DeviceBatchContext)) ||
+        !alloc(&vals_dev, 2 * sizeof(V)) || !alloc(&scratch, 4096) ||
+        !alloc(&err, sizeof(uint32_t)) || !alloc(&table, 128 * sizeof(double))) {
+        cleanup(); return false;
+    }
+    const uint32_t positions[4] = {0, 1, 127, 2047};
+    if (hipMemcpy(in, plamo_input, sizeof(plamo_input), hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(pos, positions, sizeof(positions), hipMemcpyHostToDevice) != hipSuccess) {
+        cleanup(); return false;
+    }
+    if (shelf::kernel::launch_rope_inv_freq_f32_init(
+            static_cast<double*>(table), 64, 10000, 1, 0, 32, 1, false, nullptr) != hipSuccess ||
+        shelf::kernel::launch_rope_inv_freq_f32_init(
+            static_cast<double*>(table) + 64, 64, 1000000, 256, 4096, 32, 1, true, nullptr) != hipSuccess) {
+        cleanup(); return false;
+    }
+    ::shelf::runtime::DeviceBatchContext ctx{};
+    ctx.actual_rows = 4; ctx.row_positions = static_cast<uint32_t*>(pos);
+    ctx.rope_inv_freq = static_cast<double*>(table); ctx.rope_table_stride = 64;
+    ctx.rope_table_count = 2;
+    if (hipMemcpy(ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice) != hipSuccess) {
+        cleanup(); return false;
+    }
+    V vals[2]{};
+    for (unsigned i = 0; i < 2; ++i) {
+        vals[i].logical_value = i; vals[i].storage = ::shelf::runtime::ValueStorage::WORKSPACE;
+        vals[i].dtype = ::shelf::runtime::ValueDType::BF16;
+        vals[i].row_domain = ::shelf::runtime::ValueRowDomain::TOKEN_ROWS;
+        vals[i].feature_count = 128; vals[i].row_stride = 128;
+        vals[i].offset = reinterpret_cast<uint64_t>(i == 0 ? in : out);
+    }
+    if (hipMemcpy(vals_dev, vals, sizeof(vals), hipMemcpyHostToDevice) != hipSuccess) {
+        cleanup(); return false;
+    }
+    P prog{}; prog.values = static_cast<const V*>(vals_dev); prog.value_count = 2;
+    B b{}; b.kernel_id = ::shelf::runtime::KernelId::ROPE;
+    b.input_count = b.output_count = 1; b.input_slots[0] = 0; b.output_slots[0] = 1;
+    b.group_size = b.rotary_dim = 128; b.flags = 1;
+    ::shelf::kernel::ModelDispatchStateView state{};
+    bool pass = true;
+    for (uint32_t index = 0; index < 2; ++index) {
+        b.rope_table_index = index;
+        b.scalar_a = index == 0 ? 1.0f : static_cast<float>(1.0 + 0.1 * std::log(256.0));
+        if (hipMemset(err, 0, sizeof(uint32_t)) != hipSuccess) { pass = false; break; }
+        auto st = shelf::kernel::launch_model_dispatch_correctness(prog, b,
+            static_cast<::shelf::runtime::DeviceBatchContext*>(ctx_dev), state,
+            static_cast<float*>(scratch), static_cast<uint32_t*>(err), nullptr);
+        uint16_t actual[512]; uint32_t device_error = 0;
+        if (!st.ok() || hipMemcpy(actual, out, sizeof(actual), hipMemcpyDeviceToHost) != hipSuccess ||
+            hipMemcpy(&device_error, err, sizeof(device_error), hipMemcpyDeviceToHost) != hipSuccess) {
+            pass = false; break;
+        }
+        const uint16_t* expected = index == 0 ? plamo_output_0 : plamo_output_1;
+        size_t mismatches = 0; float max_diff = 0;
+        for (size_t j = 0; j < 512; ++j) {
+            if (actual[j] != expected[j]) ++mismatches;
+            max_diff = std::fmax(max_diff, std::fabs(bf16_to_f32(actual[j]) - bf16_to_f32(expected[j])));
+        }
+        std::printf("  [plamo table %u] mismatches=%zu max_abs=%.6g status=%u\n",
+                    index, mismatches, max_diff, device_error);
+        // One BF16 ULP can arise from GPU pow/sin/cos rounding versus CPU PyTorch.
+        if (device_error || max_diff > 0.015625f) pass = false;
+    }
+    cleanup(); return pass;
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -333,7 +422,10 @@ int main() {
     }
     if (hipSetDevice(0) != hipSuccess) return 1;
 
+    if (run_plamo_reference()) ++passed; else ++failed;
+
     const Case cases[] = {
+        {"second-yarn-table", 4, 512, 128, 64, 0, 0, 10000.0f, 31, PosMode::Row, true},
         {"q-27b-r1-row", 1, 6144, 256, 64, 0, 0, 1.0e7f, 1, PosMode::Row},
         {"k-27b-r1-row", 1, 1024, 256, 64, 0, 0, 1.0e7f, 2, PosMode::Row},
         {"q-27b-r1-rope", 1, 6144, 256, 64, 0, 0, 1.0e7f, 3, PosMode::Rope},
