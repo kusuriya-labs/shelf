@@ -2,7 +2,7 @@
 """DFlash2 構成に対する shelf-server の E2E 検証.
 
 通常の DFlash2 生成（chat / stream / tools / stochastic sampling）が成立し、
-structured output が fail-closed であることを確認する.
+structured output が通常 decode に切り替わって動作することを確認する.
 """
 
 from __future__ import annotations
@@ -109,11 +109,10 @@ def main() -> int:
              "messages": [{"role": "user", "content": "Produce the JSON value."}],
              "temperature": 0, "max_tokens": 256, "chat_template_kwargs": {"enable_thinking": False},
              "response_format": {"type": "json_object"}})
-        checker.check("structured rejected", status == 400, f"{status} {body[:300]}")
-        if status == 400:
-            checker.check("structured rejection code",
-                          json.loads(body)["error"]["code"] == "unsupported_parameter",
-                          body[:300])
+        checker.check("structured accepted", status == 200, f"{status} {body[:300]}")
+        if status == 200:
+            content = json.loads(body)["choices"][0]["message"]["content"]
+            checker.check("structured object", isinstance(json.loads(content), dict), content)
 
         tools = http_json(f"{harness.base_url}/chat/completions", {
             "model": "shelf",
