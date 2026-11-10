@@ -4,7 +4,7 @@
 // with the unsharded run of the same path. A real multi-GPU run only adds the collective on top of this.
 #include <shelf/core/memory/types.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/weights/canonical_partition.h>
 #include <hip/hip_runtime.h>
@@ -59,23 +59,23 @@ bool run_linear(bool dense, const std::vector<uint16_t>& canon, uint32_t bits, c
     HIP_OK(hipMemcpy(d_svh.p, svh_h.data(), n * 2, hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(d_trellis.p, resident.data(), resident.size() * 2, hipMemcpyHostToDevice));
     HIP_OK(hipMemset(d_codes.p, 0, static_cast<size_t>(rows_padded) * code_stride));
-    HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(d_x.p), k, d_suh.p,
+    HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(d_x.p), k, d_suh.p,
                                                            d_codes.p, d_scales.p, rows, k, code_stride,
                                                            scale_stride_bytes, nullptr));
     if (!dense) {
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes,
                                                    d_trellis.p, bits, d_y.p, rows, n, k, 1u, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(d_y.p, d_svh.p, d_out.p,
-                                                         shelf::kernel::Exl3Int8OutputDType::F32, rows, n, n, 1u,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out(d_y.p, d_svh.p, d_out.p,
+                                                         shelf::kernel::Exl3OutputDType::F32, rows, n, n, 1u,
                                                          nullptr));
     } else {
-        const uint32_t cap = static_cast<uint32_t>(shelf::kernel::exl3_int8_flag_cap(rows));
+        const uint32_t cap = static_cast<uint32_t>(shelf::kernel::exl3_mul24_flag_cap(rows));
         Dev<int8_t> d_dense(static_cast<size_t>(n) * k), d_codes_f(static_cast<size_t>(cap) * code_stride);
         Dev<float> d_rs(rows), d_scales_f(static_cast<size_t>(cap) * scale_stride_bytes / 4u), d_y2(static_cast<size_t>(cap) * n);
         Dev<int32_t> d_slots(rows), d_acc(static_cast<size_t>(rows) * n);
         Dev<uint32_t> d_count(1);
-        HIP_OK(shelf::kernel::launch_exl3_int8_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p,
                                                         d_codes_f.p, d_scales_f.p, rows, cap, k, code_stride,
                                                         scale_stride_bytes, 0.5f, nullptr));
         const hipError_t ge = shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr);
@@ -84,10 +84,10 @@ bool run_linear(bool dense, const std::vector<uint16_t>& canon, uint32_t bits, c
             return true;
         }
         HIP_OK(ge);
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
                                                    d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out_i32(d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out.p,
-                                                             shelf::kernel::Exl3Int8OutputDType::F32, rows, n, n,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out.p,
+                                                             shelf::kernel::Exl3OutputDType::F32, rows, n, n,
                                                              nullptr));
     }
     HIP_OK(hipDeviceSynchronize());

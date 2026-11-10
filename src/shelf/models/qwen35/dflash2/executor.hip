@@ -17,7 +17,7 @@
 #include <shelf/kernels/optimized/linear/bf16.h>
 #include <shelf/kernels/optimized/linear/fp8.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/runtime/selector_types.h>
 #include <cstdint>
@@ -1145,19 +1145,19 @@ Status lm_head_gemm(
             auto* codes = executor.activation_codes.data<int8_t>();
             auto* scales = executor.activation_scales.data<float>();
             auto* accum = executor.exl3_lm_head_accum.data<float>();
-            hipError_t err = shelf::kernel::launch_exl3_int8_rotate_quantize(
+            hipError_t err = shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 hidden, weight.cols, weight.exl3_suh.data<uint16_t>(), codes, scales, rows,
                 weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
             if (err == hipSuccess) {
-                err = shelf::kernel::launch_exl3_int8_gemm(
+                err = shelf::kernel::launch_exl3_mul24_gemm(
                     codes, scales, layout.code_row_stride_bytes, layout.scale_row_stride_bytes,
                     weight.codes.data<uint16_t>(), weight.exl3_ka, accum, rows, weight.rows,
                     weight.cols, 1u, stream);
             }
             if (err == hipSuccess) {
-                err = shelf::kernel::launch_exl3_int8_rotate_out(
+                err = shelf::kernel::launch_exl3_mul24_rotate_out(
                     accum, weight.exl3_svh.data<uint16_t>(), logits,
-                    shelf::kernel::Exl3Int8OutputDType::F32, rows, weight.rows,
+                    shelf::kernel::Exl3OutputDType::F32, rows, weight.rows,
                     logits_row_stride, 1u, stream);
             }
             if (err != hipSuccess) {

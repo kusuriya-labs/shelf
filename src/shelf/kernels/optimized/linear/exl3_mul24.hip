@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
@@ -81,7 +81,7 @@ __device__ __forceinline__ float bf16_bits_to_f32(uint16_t bits) {
     return __uint_as_float(static_cast<uint32_t>(bits) << 16);
 }
 
-__global__ void __launch_bounds__(kBlock) exl3_int8_rotate_quantize_kernel(
+__global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_quantize_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     const uint32_t input_row_stride,
     const uint16_t* __restrict__ suh,
@@ -115,7 +115,7 @@ __global__ void __launch_bounds__(kBlock) exl3_int8_rotate_quantize_kernel(
 // Same math, float4 form: one CTA per row, 8 waves, one wave per 128-K group (the rotate_exl3_kernel
 // structure). H128 stays inside one wave, so there is no shared memory and no barrier; the amax is a
 // warp shuffle and each quartet is one 64-bit input load / one 32-bit code store.
-__global__ void __launch_bounds__(256) exl3_int8_rotate_quantize_f4_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_rotate_quantize_f4_kernel(
     const ::shelf::bf16_t* __restrict__ input,
     const uint32_t input_row_stride,
     const uint16_t* __restrict__ suh,
@@ -174,7 +174,7 @@ __global__ void __launch_bounds__(256) exl3_int8_rotate_quantize_f4_kernel(
 //
 // One wave owns a 16-wide output tile and MT 16-row tiles; a block has 4 waves along N.
 template <int BITS, int MT>
-__global__ void __launch_bounds__(128) exl3_int8_gemm_kernel(
+__global__ void __launch_bounds__(128) exl3_mul24_gemm_kernel(
     const int8_t* __restrict__ codes,
     const float* __restrict__ scales,
     const uint32_t code_row_stride,
@@ -344,20 +344,20 @@ hipError_t launch_gemm_bits(
     const uint32_t sp = rows <= 16u ? splits : 1u;
     const uint32_t gps = (k / kBlock + sp - 1u) / sp;
     if (rows <= 16u) {
-        exl3_int8_gemm_kernel<BITS, 1><<<dim3(n / 64u, 1, sp), block, 0, stream>>>(
+        exl3_mul24_gemm_kernel<BITS, 1><<<dim3(n / 64u, 1, sp), block, 0, stream>>>(
             codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     } else if (rows <= 32u) {
-        exl3_int8_gemm_kernel<BITS, 2><<<dim3(n / 64u, (rows + 31u) / 32u), block, 0, stream>>>(
+        exl3_mul24_gemm_kernel<BITS, 2><<<dim3(n / 64u, (rows + 31u) / 32u), block, 0, stream>>>(
             codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     } else {
-        exl3_int8_gemm_kernel<BITS, 4><<<dim3(n / 64u, (rows + 63u) / 64u), block, 0, stream>>>(
+        exl3_mul24_gemm_kernel<BITS, 4><<<dim3(n / 64u, (rows + 63u) / 64u), block, 0, stream>>>(
             codes, scales, code_stride, sstride, trellis, yprime, rows, active_rows, n, k, gps);
     }
     return hipGetLastError();
 }
 
 template <bool BF16>
-__global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_kernel(
+__global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_kernel(
     const float* __restrict__ yprime,
     const uint16_t* __restrict__ svh,
     void* __restrict__ out,
@@ -384,7 +384,7 @@ __global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_kernel(
 // structure). The K-split sum, H128 and svh stay inside one wave; no shared memory and no barrier.
 // blockIdx.y splits the N axis into `blocks_per_cta` 128-column blocks (0 = the whole row in one CTA).
 template <bool BF16>
-__global__ void __launch_bounds__(256) exl3_int8_rotate_out_f4_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const float* __restrict__ yprime,
     const uint16_t* __restrict__ svh,
     void* __restrict__ out,
@@ -439,7 +439,7 @@ __global__ void __launch_bounds__(256) exl3_int8_rotate_out_f4_kernel(
 //            of the row's scale energy (a massive-activation token).
 //   rowslot: flagged rows get consecutive slots in row order (deterministic); beyond `cap` they stay unflagged.
 //   rowfinish: flagged rows are copied (codes + scales) to the compact buffers; the others are re-rounded in place.
-__global__ void __launch_bounds__(256) exl3_int8_rowstat_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_rowstat_kernel(
     const float* __restrict__ scales,
     float* __restrict__ rowscale,
     int32_t* __restrict__ slots,
@@ -470,7 +470,7 @@ __global__ void __launch_bounds__(256) exl3_int8_rowstat_kernel(
     }
 }
 
-__global__ void __launch_bounds__(1024) exl3_int8_rowslot_kernel(
+__global__ void __launch_bounds__(1024) exl3_mul24_rowslot_kernel(
     int32_t* __restrict__ slots,
     uint32_t* __restrict__ count,
     const uint32_t rows,
@@ -497,7 +497,7 @@ __global__ void __launch_bounds__(1024) exl3_int8_rowslot_kernel(
     }
 }
 
-__global__ void __launch_bounds__(256) exl3_int8_rowfinish_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_rowfinish_kernel(
     int8_t* __restrict__ codes,
     const float* __restrict__ scales,
     const float* __restrict__ rowscale,
@@ -533,7 +533,7 @@ __global__ void __launch_bounds__(256) exl3_int8_rowfinish_kernel(
 // the eight k rows 8 * (l / 16) .. +7 of the tile. A block is 8 consecutive k tiles of one n tile, so a row of the
 // output is written in 128 contiguous bytes.
 template <int BITS>
-__global__ void __launch_bounds__(256) exl3_int8_recon_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_recon_kernel(
     const uint32_t* __restrict__ trellis,
     int8_t* __restrict__ dense,
     const uint32_t k) {
@@ -570,7 +570,7 @@ __global__ void __launch_bounds__(256) exl3_int8_recon_kernel(
 // Same as rotate_out but the input is the int32 hipBLASLt accumulator: yprime = acc * row scale * S_FIX.
 // Rows with a slot take the F32 result of the fused per-group kernel (yprime2[slot]) instead.
 template <bool BF16>
-__global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_i32_kernel(
+__global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_i32_kernel(
     const int32_t* __restrict__ acc,
     const float* __restrict__ rowscale,
     const int32_t* __restrict__ slots,
@@ -600,7 +600,7 @@ __global__ void __launch_bounds__(kBlock) exl3_int8_rotate_out_i32_kernel(
 // float4 flagged-row load, H128 and svh inside one wave, one 64-bit output store.
 // blockIdx.y splits the N axis into `blocks_per_cta` 128-column blocks (0 = the whole row in one CTA).
 template <bool BF16>
-__global__ void __launch_bounds__(256) exl3_int8_rotate_out_i32_f4_kernel(
+__global__ void __launch_bounds__(256) exl3_mul24_rotate_out_i32_f4_kernel(
     const int32_t* __restrict__ acc,
     const float* __restrict__ rowscale,
     const int32_t* __restrict__ slots,
@@ -655,7 +655,7 @@ __global__ void __launch_bounds__(256) exl3_int8_rotate_out_i32_f4_kernel(
 }
 }
 
-hipError_t launch_exl3_int8_rotate_quantize(
+hipError_t launch_exl3_mul24_rotate_quantize(
     const ::shelf::bf16_t* input, uint32_t input_row_stride, const uint16_t* suh, int8_t* codes,
     float* scales, uint32_t rows, uint32_t k, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, hipStream_t stream) {
@@ -663,17 +663,17 @@ hipError_t launch_exl3_int8_rotate_quantize(
     if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u) return hipErrorInvalidValue;
     if (rotate_f4_enabled() && rows >= kRotateQuantizeF4MinRows && (input_row_stride % 4u) == 0u &&
         (code_row_stride_bytes % 4u) == 0u) {
-        exl3_int8_rotate_quantize_f4_kernel<<<rows, 256, 0, stream>>>(
+        exl3_mul24_rotate_quantize_f4_kernel<<<rows, 256, 0, stream>>>(
             input, input_row_stride, suh, codes, scales, code_row_stride_bytes,
             scale_row_stride_bytes / 4u, k / kBlock);
     } else {
-        exl3_int8_rotate_quantize_kernel<<<dim3(rows, k / kBlock), kBlock, 0, stream>>>(
+        exl3_mul24_rotate_quantize_kernel<<<dim3(rows, k / kBlock), kBlock, 0, stream>>>(
             input, input_row_stride, suh, codes, scales, code_row_stride_bytes, scale_row_stride_bytes / 4u);
     }
     return hipGetLastError();
 }
 
-uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
+uint32_t exl3_mul24_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t scratch_rows,
                                 uint32_t bits) {
     if (rows > 16u || rows == 0u || scratch_rows < rows) return 1u;
     if (bits == 4u && n == 17408u && k == 5120u && scratch_rows >= 64u) return 4u;
@@ -698,7 +698,7 @@ uint32_t exl3_int8_gemm_splits(uint32_t rows, uint32_t n, uint32_t k, uint32_t s
     return best;
 }
 
-hipError_t launch_exl3_int8_gemm(
+hipError_t launch_exl3_mul24_gemm(
     const int8_t* codes, const float* scales, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, const uint16_t* trellis, uint32_t bits, float* yprime,
     uint32_t rows, uint32_t n, uint32_t k, uint32_t splits, hipStream_t stream, const uint32_t* active_rows) {
@@ -721,8 +721,8 @@ hipError_t launch_exl3_int8_gemm(
     }
 }
 
-hipError_t launch_exl3_int8_rotate_out(
-    const float* yprime, const uint16_t* svh, void* out, Exl3Int8OutputDType out_dtype, uint32_t rows,
+hipError_t launch_exl3_mul24_rotate_out(
+    const float* yprime, const uint16_t* svh, void* out, Exl3OutputDType out_dtype, uint32_t rows,
     uint32_t n, uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
@@ -730,72 +730,72 @@ hipError_t launch_exl3_int8_rotate_out(
         const uint32_t tile = rotate_tile_blocks();
         const uint32_t gy = tile == 0u ? 1u : (n / kBlock + tile - 1u) / tile;
         const dim3 grid((rows + 7u) / 8u, gy);
-        if (out_dtype == Exl3Int8OutputDType::BF16)
-            exl3_int8_rotate_out_f4_kernel<true><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
+        if (out_dtype == Exl3OutputDType::BF16)
+            exl3_mul24_rotate_out_f4_kernel<true><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
         else
-            exl3_int8_rotate_out_f4_kernel<false><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
+            exl3_mul24_rotate_out_f4_kernel<false><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
     } else {
         const dim3 grid(rows, n / kBlock);
-        if (out_dtype == Exl3Int8OutputDType::BF16)
-            exl3_int8_rotate_out_kernel<true><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
+        if (out_dtype == Exl3OutputDType::BF16)
+            exl3_mul24_rotate_out_kernel<true><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
         else
-            exl3_int8_rotate_out_kernel<false><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
+            exl3_mul24_rotate_out_kernel<false><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
     }
     return hipGetLastError();
 }
 
 
-hipError_t launch_exl3_int8_rowscale(
+hipError_t launch_exl3_mul24_rowscale(
     int8_t* codes, const float* scales, float* rowscale, int32_t* slots, uint32_t* count, int8_t* codes_f,
     float* scales_f, uint32_t rows, uint32_t cap, uint32_t k, uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes, float share, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u) return hipErrorInvalidValue;
-    exl3_int8_rowstat_kernel<<<rows, 256, 0, stream>>>(scales, rowscale, slots, scale_row_stride_bytes / 4u, k / kBlock, share);
-    exl3_int8_rowslot_kernel<<<1, 1024, 0, stream>>>(slots, count, rows, cap);
-    exl3_int8_rowfinish_kernel<<<rows, 256, 0, stream>>>(
+    exl3_mul24_rowstat_kernel<<<rows, 256, 0, stream>>>(scales, rowscale, slots, scale_row_stride_bytes / 4u, k / kBlock, share);
+    exl3_mul24_rowslot_kernel<<<1, 1024, 0, stream>>>(slots, count, rows, cap);
+    exl3_mul24_rowfinish_kernel<<<rows, 256, 0, stream>>>(
         codes, scales, rowscale, slots, codes_f, scales_f, code_row_stride_bytes, scale_row_stride_bytes / 4u, k);
     return hipGetLastError();
 }
 
-hipError_t launch_exl3_int8_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
+hipError_t launch_exl3_mul24_recon(const uint16_t* trellis, uint32_t bits, int8_t* dense, uint32_t n, uint32_t k,
                                   hipStream_t stream) {
     if ((n % 16u) != 0u || (k % kBlock) != 0u) return hipErrorInvalidValue;
     const dim3 grid(k / 128u, n / 16u);
     const uint32_t* t32 = reinterpret_cast<const uint32_t*>(trellis);
     switch (bits) {
-        case 1: exl3_int8_recon_kernel<1><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 2: exl3_int8_recon_kernel<2><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 3: exl3_int8_recon_kernel<3><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 4: exl3_int8_recon_kernel<4><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 5: exl3_int8_recon_kernel<5><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 6: exl3_int8_recon_kernel<6><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 7: exl3_int8_recon_kernel<7><<<grid, 256, 0, stream>>>(t32, dense, k); break;
-        case 8: exl3_int8_recon_kernel<8><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 1: exl3_mul24_recon_kernel<1><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 2: exl3_mul24_recon_kernel<2><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 3: exl3_mul24_recon_kernel<3><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 4: exl3_mul24_recon_kernel<4><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 5: exl3_mul24_recon_kernel<5><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 6: exl3_mul24_recon_kernel<6><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 7: exl3_mul24_recon_kernel<7><<<grid, 256, 0, stream>>>(t32, dense, k); break;
+        case 8: exl3_mul24_recon_kernel<8><<<grid, 256, 0, stream>>>(t32, dense, k); break;
         default: return hipErrorInvalidValue;
     }
     return hipGetLastError();
 }
 
-hipError_t launch_exl3_int8_rotate_out_i32(
+hipError_t launch_exl3_mul24_rotate_out_i32(
     const int32_t* acc, const float* rowscale, const int32_t* slots, const float* yprime2, const uint16_t* svh,
-    void* out, Exl3Int8OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
+    void* out, Exl3OutputDType out_dtype, uint32_t rows, uint32_t n, uint32_t out_row_stride, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
     if (rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u) {
         const uint32_t tile = rotate_tile_blocks();
         const uint32_t gy = tile == 0u ? 1u : (n / kBlock + tile - 1u) / tile;
         const dim3 grid((rows + 7u) / 8u, gy);
-        if (out_dtype == Exl3Int8OutputDType::BF16)
-            exl3_int8_rotate_out_i32_f4_kernel<true><<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows, tile);
+        if (out_dtype == Exl3OutputDType::BF16)
+            exl3_mul24_rotate_out_i32_f4_kernel<true><<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows, tile);
         else
-            exl3_int8_rotate_out_i32_f4_kernel<false><<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows, tile);
+            exl3_mul24_rotate_out_i32_f4_kernel<false><<<grid, 256, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride, rows, tile);
     } else {
         const dim3 grid(rows, n / kBlock);
-        if (out_dtype == Exl3Int8OutputDType::BF16)
-            exl3_int8_rotate_out_i32_kernel<true><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
+        if (out_dtype == Exl3OutputDType::BF16)
+            exl3_mul24_rotate_out_i32_kernel<true><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
         else
-            exl3_int8_rotate_out_i32_kernel<false><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
+            exl3_mul24_rotate_out_i32_kernel<false><<<grid, kBlock, 0, stream>>>(acc, rowscale, slots, yprime2, svh, out, n, out_row_stride);
     }
     return hipGetLastError();
 }

@@ -1,5 +1,5 @@
 #include <shelf/inference/execution/exl3_dense_gemm.h>
-#include <shelf/kernels/optimized/linear/exl3_int8.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/weights/matrix_weight.h>
@@ -103,13 +103,13 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     HIP_OK(hipMemcpy(d_trellis.p, resident.data(), resident.size() * 2, hipMemcpyHostToDevice));
     HIP_OK(hipMemset(d_codes.p, 0x55, static_cast<size_t>(rows_padded) * code_stride));
 
-    HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(
+    HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(
         reinterpret_cast<const shelf::bf16_t*>(d_x.p), k, d_suh.p, d_codes.p, d_scales.p, rows, k,
         code_stride, scale_stride_bytes, nullptr));
-    HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes,
+    HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes,
                                                d_trellis.p, bits, d_y.p, rows, n, k, splits, nullptr));
-    HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(d_y.p, d_svh.p, d_out.p,
-                                                     shelf::kernel::Exl3Int8OutputDType::F32, rows, n, n, splits, nullptr));
+    HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out(d_y.p, d_svh.p, d_out.p,
+                                                     shelf::kernel::Exl3OutputDType::F32, rows, n, n, splits, nullptr));
     HIP_OK(hipDeviceSynchronize());
 
     std::vector<int8_t> codes(static_cast<size_t>(rows_padded) * code_stride);
@@ -216,7 +216,7 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
     // the per-group path (the row scale costs a little precision).
     bool dense_pass = true;
     {
-        const uint32_t cap = static_cast<uint32_t>(shelf::kernel::exl3_int8_flag_cap(rows));
+        const uint32_t cap = static_cast<uint32_t>(shelf::kernel::exl3_mul24_flag_cap(rows));
         Dev<int8_t> d_dense(static_cast<size_t>(n) * k);
         Dev<float> d_rs(rows);
         Dev<int32_t> d_slots(rows);
@@ -226,8 +226,8 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
         Dev<int32_t> d_acc(static_cast<size_t>(rows) * n);
         Dev<float> d_y2(static_cast<size_t>(cap) * n);
         Dev<float> d_out2(static_cast<size_t>(rows) * n);
-        HIP_OK(shelf::kernel::launch_exl3_int8_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_recon(d_trellis.p, bits, d_dense.p, n, k, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rowscale(d_codes.p, d_scales.p, d_rs.p, d_slots.p, d_count.p, d_codes_f.p,
                                                         d_scales_f.p, rows, cap, k, code_stride, scale_stride_bytes, 0.5f,
                                                         nullptr));
         const hipError_t ge = shelf::execution::exl3_dense_gemm_int8(rows, n, k, d_dense.p, d_codes.p, d_acc.p, nullptr);
@@ -235,10 +235,10 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
             std::printf("  dense int8 GEMM: no hipBLASLt algorithm for this shape, skipped\n");
         } else {
             HIP_OK(ge);
-            HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
+            HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes_f.p, d_scales_f.p, code_stride, scale_stride_bytes,
                                                        d_trellis.p, bits, d_y2.p, cap, n, k, 1u, nullptr, d_count.p));
-            HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out_i32(
-                d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out2.p, shelf::kernel::Exl3Int8OutputDType::F32, rows, n, n,
+            HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+                d_acc.p, d_rs.p, d_slots.p, d_y2.p, d_svh.p, d_out2.p, shelf::kernel::Exl3OutputDType::F32, rows, n, n,
                 nullptr));
             HIP_OK(hipDeviceSynchronize());
             std::vector<int8_t> dense(static_cast<size_t>(n) * k), codes2(codes.size());
@@ -332,9 +332,9 @@ bool run_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits, uint32_t see
 bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u, uint32_t capacity = 1024u) {
     constexpr uint32_t rows = 8u;
     for (uint32_t scratch_rows : {8u, 16u, 32u, 48u, 64u, 1024u}) {
-        const uint32_t one = shelf::kernel::exl3_int8_gemm_splits(1u, n, k, scratch_rows, bits);
+        const uint32_t one = shelf::kernel::exl3_mul24_gemm_splits(1u, n, k, scratch_rows, bits);
         for (uint32_t count = 2u; count <= std::min(16u, scratch_rows); ++count) {
-            if (one != shelf::kernel::exl3_int8_gemm_splits(count, n, k, scratch_rows, bits)) return false;
+            if (one != shelf::kernel::exl3_mul24_gemm_splits(count, n, k, scratch_rows, bits)) return false;
         }
     }
     const uint32_t scale_stride = ((k / 128u * 4u) + 15u) & ~15u;
@@ -346,8 +346,8 @@ bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u, uint32_t 
     for (auto& x : svh) x = (rng() & 1u) ? 0x3c00u : 0xbc00u;
     std::vector<uint16_t> weights(static_cast<size_t>(n) * k * bits / 16u);
     for (auto& x : weights) x = static_cast<uint16_t>(rng());
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, capacity, bits);
-    if (splits != shelf::kernel::exl3_int8_gemm_splits(1u, n, k, capacity, bits)) return false;
+    const uint32_t splits = shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, capacity, bits);
+    if (splits != shelf::kernel::exl3_mul24_gemm_splits(1u, n, k, capacity, bits)) return false;
     Dev<uint16_t> dx(rows * k), dsuh(k), dsvh(n), dw(weights.size());
     Dev<int8_t> codes(rows * k);
     Dev<float> scales(rows * scale_stride / 4u), accum(static_cast<size_t>(splits) * rows * n), out(rows * n);
@@ -356,9 +356,9 @@ bool row_parity(uint32_t bits, uint32_t n = 1024u, uint32_t k = 5120u, uint32_t 
     HIP_OK(hipMemcpy(dsvh.p, svh.data(), n * 2u, hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(dw.p, weights.data(), weights.size() * 2u, hipMemcpyHostToDevice));
     auto launch = [&](uint32_t count, const uint16_t* x) {
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(x), k, dsuh.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(codes.p, scales.p, k, scale_stride, dw.p, bits, accum.p, count, n, k, splits, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(accum.p, dsvh.p, out.p, shelf::kernel::Exl3Int8OutputDType::F32, count, n, n, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(x), k, dsuh.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(codes.p, scales.p, k, scale_stride, dw.p, bits, accum.p, count, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out(accum.p, dsvh.p, out.p, shelf::kernel::Exl3OutputDType::F32, count, n, n, splits, nullptr));
         return true;
     };
     if (!launch(rows, dx.p)) return false;
@@ -396,8 +396,8 @@ bool head_row_parity() {
     shelf::weights::Exl3LinearShape shape;
     shelf::weights::note_exl3_int8_decode_accum(weight, shape);
     const uint32_t scratch_rows = static_cast<uint32_t>(shape.max_int8_decode_accum_bytes / (n * sizeof(float)));
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(1u, n, k, scratch_rows);
-    if (splits != shelf::kernel::exl3_int8_gemm_splits(rows, n, k, scratch_rows)) return false;
+    const uint32_t splits = shelf::kernel::exl3_mul24_gemm_splits(1u, n, k, scratch_rows);
+    if (splits != shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, scratch_rows)) return false;
     std::mt19937 rng(42u);
     std::uniform_real_distribution<float> dist(-3.0f, 3.0f);
     std::vector<uint16_t> input(rows * k), ones(std::max(k, n), 0x3c00u);
@@ -414,9 +414,9 @@ bool head_row_parity() {
     hipLaunchKernelGGL(fill_head_trellis, dim3(4096), dim3(256), 0, nullptr, dw.p, words);
     HIP_OK(hipGetLastError());
     auto launch = [&](uint32_t count) {
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(dx.p), k, ds.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(codes.p, scales.p, k, scale_stride, reinterpret_cast<uint16_t*>(dw.p), bits, accum.p, count, n, k, splits, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out(accum.p, ds.p, out.p, shelf::kernel::Exl3Int8OutputDType::F32, count, n, n, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_quantize(reinterpret_cast<const shelf::bf16_t*>(dx.p), k, ds.p, codes.p, scales.p, count, k, k, scale_stride, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(codes.p, scales.p, k, scale_stride, reinterpret_cast<uint16_t*>(dw.p), bits, accum.p, count, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out(accum.p, ds.p, out.p, shelf::kernel::Exl3OutputDType::F32, count, n, n, splits, nullptr));
         return true;
     };
     std::vector<float> one(n), batch(static_cast<size_t>(rows) * n);
@@ -437,18 +437,18 @@ bool bench_case(uint32_t rows, uint32_t n, uint32_t k, uint32_t bits) {
     Dev<uint16_t> d_trellis(static_cast<size_t>(kt) * nt * 16u * bits);
     Dev<int8_t> d_codes(static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride);
     Dev<float> d_scales(static_cast<size_t>(rows) * scale_stride_bytes / 4u), d_y(static_cast<size_t>(rows) * n * 16u);
-    const uint32_t splits = shelf::kernel::exl3_int8_gemm_splits(rows, n, k, 1u << 20, bits);
+    const uint32_t splits = shelf::kernel::exl3_mul24_gemm_splits(rows, n, k, 1u << 20, bits);
     HIP_OK(hipMemset(d_trellis.p, 0x5A, static_cast<size_t>(kt) * nt * 16u * bits * 2));
     HIP_OK(hipMemset(d_codes.p, 1, static_cast<size_t>(((rows + 15) / 16) * 16) * code_stride));
     HIP_OK(hipMemset(d_scales.p, 0, static_cast<size_t>(rows) * scale_stride_bytes));
     hipEvent_t a, b;
     (void)hipEventCreate(&a); (void)hipEventCreate(&b);
     for (int i = 0; i < 5; ++i)
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes, d_trellis.p, bits, d_y.p, rows, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes, d_trellis.p, bits, d_y.p, rows, n, k, splits, nullptr));
     (void)hipEventRecord(a);
     const int iters = 50;
     for (int i = 0; i < iters; ++i)
-        HIP_OK(shelf::kernel::launch_exl3_int8_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes, d_trellis.p, bits, d_y.p, rows, n, k, splits, nullptr));
+        HIP_OK(shelf::kernel::launch_exl3_mul24_gemm(d_codes.p, d_scales.p, code_stride, scale_stride_bytes, d_trellis.p, bits, d_y.p, rows, n, k, splits, nullptr));
     (void)hipEventRecord(b); (void)hipEventSynchronize(b);
     float ms = 0; (void)hipEventElapsedTime(&ms, a, b); ms /= iters;
     const double bytes = static_cast<double>(kt) * nt * 32.0 * bits;

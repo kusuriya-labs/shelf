@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/linear/exl3_int8_prefill.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -41,13 +41,13 @@ int main() {
     HIP_OK(hipMemcpy(d_rowscale.ptr, rowscale.data(), rows * sizeof(float), hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(d_flagged.ptr, flagged.data(), entries * sizeof(float), hipMemcpyHostToDevice));
     HIP_OK(hipMemcpy(d_svh.ptr, svh.data(), n * sizeof(uint16_t), hipMemcpyHostToDevice));
-    for (auto dtype : {shelf::kernel::Exl3Int8OutputDType::BF16, shelf::kernel::Exl3Int8OutputDType::F32}) {
-        const size_t bytes = static_cast<size_t>(rows) * stride * (dtype == shelf::kernel::Exl3Int8OutputDType::BF16 ? 2u : 4u);
+    for (auto dtype : {shelf::kernel::Exl3OutputDType::BF16, shelf::kernel::Exl3OutputDType::F32}) {
+        const size_t bytes = static_cast<size_t>(rows) * stride * (dtype == shelf::kernel::Exl3OutputDType::BF16 ? 2u : 4u);
         HIP_OK(hipMemset(d_base.ptr, 0xa5, bytes));
         HIP_OK(hipMemset(d_test.ptr, 0xa5, bytes));
-        HIP_OK(shelf::kernel::launch_exl3_int8_rotate_out_i32(d_acc.ptr, d_rowscale.ptr, d_slots.ptr, d_flagged.ptr,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_rotate_out_i32(d_acc.ptr, d_rowscale.ptr, d_slots.ptr, d_flagged.ptr,
             d_svh.ptr, d_base.ptr, dtype, rows, n, stride, nullptr));
-        HIP_OK(shelf::kernel::launch_exl3_int8_prefill_rotate_out_i32(d_acc.ptr, d_rowscale.ptr, d_slots.ptr, d_flagged.ptr,
+        HIP_OK(shelf::kernel::launch_exl3_mul24_prefill_rotate_out_i32(d_acc.ptr, d_rowscale.ptr, d_slots.ptr, d_flagged.ptr,
             d_svh.ptr, d_test.ptr, dtype, rows, n, stride, nullptr));
         std::vector<uint8_t> base(bytes), test(bytes);
         HIP_OK(hipMemcpy(base.data(), d_base.ptr, bytes, hipMemcpyDeviceToHost));

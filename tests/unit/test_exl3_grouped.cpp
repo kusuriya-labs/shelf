@@ -1,5 +1,5 @@
 #include <shelf/io/safetensors_reader.h>
-#include <shelf/kernels/optimized/linear/exl3_grouped.h>
+#include <shelf/kernels/optimized/linear/exl3.h>
 #include <shelf/quantization/exl3/exl3.h>
 
 #include <hip/hip_runtime.h>
