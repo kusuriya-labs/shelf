@@ -48,6 +48,15 @@ enum class Exl3ActivationType : uint8_t { FP16, BF16, INT8 };
 // pass sums splits in split index order, so the split count must be stable for a given
 // request (see `splitk_tuning_rows`).
 
+// Verify reproducibility: the split-K choice changes the K reduction order, so it must
+// not depend on how many rows this particular call happens to run. `tuning_rows` is the
+// fixed capacity the plan is tuned for; the actual active row count stays in
+// Exl3GemmArgs::rows. 0 means "tune on the active rows" (decode / prefill).
+struct Exl3ExecutionPolicy {
+    Exl3Phase phase = Exl3Phase::Decode;
+    uint32_t tuning_rows = 0;
+};
+
 struct Exl3GemmArgs {
     const void* trellis = nullptr;
     const void* suh = nullptr;

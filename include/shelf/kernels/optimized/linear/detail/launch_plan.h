@@ -27,4 +27,10 @@ uint32_t exl3_mul1_pick_n_tiles(const Exl3GemmArgs& args);
 // decided.
 Exl3LaunchPlan make_mul1_launch_plan(const Exl3GemmArgs& args);
 
+// Adapter from the execution policy to the existing argument field. Verify passes a
+// fixed tuning capacity; decode / prefill pass 0 (tune on the active rows).
+inline void apply_execution_policy(Exl3GemmArgs& args, const Exl3ExecutionPolicy& policy) {
+    args.splitk_tuning_rows = policy.tuning_rows;
+}
+
 }  // namespace shelf::kernel::exl3_detail

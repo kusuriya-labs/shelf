@@ -12,6 +12,7 @@
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
+#include <shelf/kernels/optimized/linear/detail/launch_plan.h>
 #include <shelf/kernels/optimized/linear/detail/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
@@ -566,7 +567,15 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
     args.half = e.exl3_half ? 1u : 0u;
     args.splitk_scratch = ctx.scratch;
     args.splitk_floats = ctx.scratch_floats;
-    args.splitk_tuning_rows = ctx.splitk_tuning_rows;
+    {
+        const ::shelf::kernel::Exl3Phase phase =
+            ctx.splitk_tuning_rows != 0u
+                ? ::shelf::kernel::Exl3Phase::Verify
+                : (rows >= 256u ? ::shelf::kernel::Exl3Phase::Prefill
+                                : ::shelf::kernel::Exl3Phase::Decode);
+        ::shelf::kernel::exl3_detail::apply_execution_policy(
+            args, ::shelf::kernel::Exl3ExecutionPolicy{phase, ctx.splitk_tuning_rows});
+    }
     static const uint32_t split_override = [] {
         const char* e = std::getenv("SHELF_EXL3_SPLIT");
         return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
