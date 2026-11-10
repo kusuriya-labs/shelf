@@ -296,3 +296,18 @@ EXL3 量子化は未実施。`rocm_exl3` には PLaMo 3 の architecture 登録�
 Shelf の専用 loader は BF16 tensor のみを検査する。結合 QKV と gate/up の
 重み名・行順序、offset RMSNorm、`EXL3_MUL1_MULT=0xDCD12D` で作る mul24 の
 変換器と loader を実装し、BF16 と KLD・翻訳・速度を比較する必要がある。
+
+## M5: 事前 token 化入力の部分対応
+
+量子化器 worktree の `0fdcc5c` で、`--cal_data` の safetensors に入れた
+`input_ids` を `--cal_data_no_tokenizer` と共に渡す場合、量子化器内の
+tokenizer を初期化せず、モデル config の語彙数を使って ID を検査できるように
+した。二次元整数 tensor、正の行列サイズ、負または語彙外の ID も検査する。
+decision head の包装には tokenizer が必要なため、この組み合わせを拒否する。
+`92b9507` の CPU テストで正常入力と不正入力の拒否を確認した。
+
+これは入力経路のみであり、PLaMo architecture、層別 RoPE と BF16 丸めを含む
+calibration forward、分割重みの Shelf loader、実データの token 化は未実装。
+既存の `TransformerBlock` は norm の出力を FP16 に固定し、`RMSNorm` も重みを
+FP16 に変換するため、architecture を登録するだけでは HF の BF16 forward と
+一致しない。0.8B の変換・再開、生成、KLD・速度・VRAM、2B は未実施。
