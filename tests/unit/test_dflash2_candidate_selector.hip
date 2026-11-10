@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -160,13 +161,15 @@ static void run_case(
     shelf::gpu::Tensor predecessor;
     shelf::gpu::Tensor successor;
     shelf::gpu::Tensor out;
+    shelf::gpu::Tensor scores;
     const bool alloc_ok =
         alloc_bf16(arena, {fx.draft_rows, fx.rank}, hidden) &&
         alloc_i32(arena, {fx.draft_rows, fx.top_k}, ids) &&
         alloc_f32(arena, {fx.draft_rows, fx.top_k}, logits) &&
         alloc_bf16(arena, {fx.vocab, fx.rank}, predecessor) &&
         alloc_bf16(arena, {fx.vocab, fx.rank}, successor) &&
-        alloc_i32(arena, {fx.draft_rows}, out);
+        alloc_i32(arena, {fx.draft_rows}, out) &&
+        alloc_f32(arena, {fx.draft_rows, fx.top_k}, scores);
     check(alloc_ok, name + " alloc");
     if (!alloc_ok) return;
     const auto upload = [&](shelf::gpu::Tensor& dst, const auto& src) {
@@ -186,6 +189,7 @@ static void run_case(
     args.successor_codebook = successor.data<bf16_t>();
     args.anchor_token = fx.anchor;
     args.output_tokens = out.data<int32_t>();
+    args.output_scores = scores.data<float>();
     args.draft_rows = fx.draft_rows;
     args.rank = fx.rank;
     args.top_k = fx.top_k;
@@ -203,6 +207,31 @@ static void run_case(
 
     const std::vector<int32_t> ref = reference_selector(fx, true);
     check(got == ref, name + " token mismatch");
+    std::vector<float> got_scores(static_cast<std::size_t>(fx.draft_rows) * fx.top_k);
+    check(hipMemcpy(got_scores.data(), scores.data<float>(), got_scores.size() * sizeof(float),
+                    hipMemcpyDeviceToHost) == hipSuccess,
+          name + " scores read");
+    int32_t pred = fx.anchor;
+    bool scores_match = true;
+    for (uint32_t r = 0; r < fx.draft_rows; ++r) {
+        for (uint32_t j = 0; j < fx.top_k; ++j) {
+            const std::size_t idx = static_cast<std::size_t>(r) * fx.top_k + j;
+            const int32_t token = fx.ids[idx];
+            double correction = 0.0;
+            for (uint32_t d = 0; d < fx.rank; ++d) {
+                correction += static_cast<double>(f32_from_bf16(fx.predecessor[
+                                  static_cast<std::size_t>(pred) * fx.rank + d])) *
+                              f32_from_bf16(fx.hidden[static_cast<std::size_t>(r) * fx.rank + d]) *
+                              f32_from_bf16(fx.successor[
+                                  static_cast<std::size_t>(token) * fx.rank + d]);
+            }
+            const float expected = fx.logits[idx] + static_cast<float>(correction);
+            if (std::fabs(got_scores[idx] - expected) > 1e-4f * (1.0f + std::fabs(expected)))
+                scores_match = false;
+        }
+        pred = ref[r];
+    }
+    check(scores_match, name + " predecessor-conditioned scores");
     std::printf("  %-28s got:", name.c_str());
     for (int32_t t : got) std::printf(" %d", t);
     std::printf("  ref:");
@@ -287,6 +316,15 @@ int main() {
         set_succ(2, 0, 10.0f);
         set_succ(4, 1, 10.0f);
         run_case(arena, stream, "predecessor_dependency", fx);
+        fx.draft_rows = 1u;
+        fx.ids.erase(fx.ids.begin(), fx.ids.begin() + fx.top_k);
+        fx.logits.erase(fx.logits.begin(), fx.logits.begin() + fx.top_k);
+        fx.hidden.erase(fx.hidden.begin(), fx.hidden.begin() + fx.rank);
+        fx.dependency_sensitive = false;
+        fx.anchor = 3;
+        run_case(arena, stream, "branch_parent_3", fx);
+        fx.anchor = 5;
+        run_case(arena, stream, "branch_parent_5", fx);
     }
 
     {
