@@ -96,6 +96,21 @@ strict / 非 strict 混在時の分岐、auto の trigger と required / 名前�
 prefill と thinking 境界との整合、schema の 400 検証、温度付き stream / 非 stream での
 parser 後の引数検証である。Responses tools も同じ実装へ通す必要がある。
 
+### M4 の CPU 検証途中
+
+Qwen XML 用の structural tag 構築と CPU 単体テストを追加した。auto は
+`<tool_call>` を trigger にして strict / 非 strict の関数へ分岐し、required と
+名前指定はタグを先頭から制約する。strict 側は `any_order=false` とする。
+必須項目の不足、integer への不正な値、名前指定と異なる関数を拒否することを
+XGrammar 0.2.9 で確認した。これは文法単体の検証であり server には未接続。
+
+特に、XGrammar は enum `" a "` の XML 値として前後の空白を含む文字列を受け入れるが、
+既存 parser は parameter 値の前後を strip する。そのまま型変換するだけでは
+schema 適合を壊す。strict 側は生成テキストから元の値を保存し、文字列以外を
+schema に応じて JSON decode する必要がある。文字列中の tool markup が parser の
+区切りと衝突するケースも制約または parser の修正と検証が必要。非 strict の
+既存挙動は変えない方針である。
+
 投機 decode は引き続き無効化して通常 decode にフォールバックする。DFlash2 向けの
 具体的な分割、検証、および MTP の残作業は [投機 decode の接続案](structured_output_speculative_design.md)
 に記載した。M3 の reasoning 併用時と投機併用時の性能は未測定であり、M2 の測定値は

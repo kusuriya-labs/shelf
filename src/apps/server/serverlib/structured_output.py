@@ -61,6 +61,35 @@ def validate_schema(schema, path="response_format.json_schema.schema"):
         fail("items requires type array")
 
 
+def tool_structural_tag(tools, choice, forced_name=None):
+    """Build Qwen XML tags; preserve the declared order of schema properties.
+
+    Non-strict functions use free text within their tags.  The caller must
+    validate strict schemas and function names before compiling this structure.
+    """
+    if choice not in ("auto", "required", "named"):
+        raise ValueError("invalid tool choice")
+    tags = []
+    for tool in tools:
+        function = tool["function"]
+        if forced_name is not None and function["name"] != forced_name:
+            continue
+        content = ({"type": "json_schema", "json_schema": function["parameters"],
+                    "style": "qwen_xml", "any_order": False}
+                   if function.get("strict") else {"type": "any_text"})
+        tags.append({"type": "tag",
+                     "begin": "<tool_call>\n<function=" + function["name"] + ">\n",
+                     "content": content,
+                     "end": "\n</function>\n</tool_call>"})
+    if not tags:
+        raise ValueError("no matching tool")
+    if choice == "auto":
+        fmt = {"type": "triggered_tags", "triggers": ["<tool_call>"], "tags": tags}
+    else:
+        fmt = {"type": "or", "elements": tags} if len(tags) > 1 else tags[0]
+    return {"type": "structural_tag", "format": fmt}
+
+
 class GrammarFactory:
     def __init__(self, processor, vocab_size):
         self.processor = processor
