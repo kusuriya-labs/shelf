@@ -63,7 +63,7 @@ void compute_usage(const char* prog) {
     printf("options:\n");
     printf("  --model-dir PATH       BF16 or quantized model directory (auto-detected via\n");
     printf("                         shelf_quantization.json) (required)\n");
-    printf("  --input-ids-file PATH  whitespace separated prompt token ids\n");
+    printf("  --input-ids-file PATH  whitespace separated or PSKLDTOK binary prompt token ids\n");
     printf("  --max-new-tokens N     max tokens to generate (default 32)\n");
     printf("  --max-seq-len N        max sequence length (default 512)\n");
     printf("  --arena-gib N|auto|-N  arena capacity in GiB; auto = free VRAM minus 0.5 GiB,\n"

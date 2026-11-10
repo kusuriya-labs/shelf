@@ -123,6 +123,12 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
     em.emit(RT::PrimitiveNode{RT::SamplingNode{w.lm_head.rows}}, {logits}, {sampled});
     pg.nodes.back().debug_name = "sampled";
     pg.external_outputs = {selected, logits, sampled, x};
+    // The executor only captures these when SHELF_LAYER_DUMP_DIR is enabled.
+    // Expose the first block's operations to localize numerical drift.
+    for (const auto& node : pg.nodes) {
+        if (node.debug_name.rfind("L0.", 0) == 0 && !node.outputs.empty())
+            lowered.trace_values.emplace_back(node.debug_name, node.outputs[0]);
+    }
     return lowered;
 }
 }  // namespace shelf::plamo3
