@@ -1,6 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
-#include <shelf/kernels/optimized/linear/detail/mul24_common.h>
+#include "detail/decode_mul1.h"
+#include "detail/decode_mul24.h"
 #include <shelf/quantization/exl3/exl3_int8.h>
 #include <hip/hip_runtime.h>
 #include <cmath>

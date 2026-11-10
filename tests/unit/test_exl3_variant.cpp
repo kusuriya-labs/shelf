@@ -1,7 +1,7 @@
 // P1-1: kernel traits stay consistent with the public constants, and unsupported
 // phase / codebook / activation / grouped combinations are rejected on the host side.
 
-#include <shelf/kernels/optimized/linear/detail/types.h>
+#include <shelf/kernels/optimized/linear/exl3/detail/types.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <cstdint>

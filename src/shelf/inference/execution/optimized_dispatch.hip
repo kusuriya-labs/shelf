@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
+#include "detail/exl3_dispatch_decision.h"
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
 #include <shelf/inference/execution/program_executor.h>
@@ -12,8 +13,8 @@
 #include <shelf/inference/execution/ple_dispatch.h>
 #include <shelf/inference/execution/qsa_dispatch.h>
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
-#include <shelf/kernels/optimized/linear/detail/launch_plan.h>
-#include <shelf/kernels/optimized/linear/detail/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3/detail/launch_plan.h>
+#include <shelf/kernels/optimized/linear/exl3/detail/workspace.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -614,6 +615,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
                            accum_bytes <= ctx.exl3_accum_bytes &&
                            static_cast<uint64_t>(args.rows) * sizeof(float) <=
                                ctx.exl3_rowsum_bytes;
+#ifdef SHELF_EXL3_EXPERIMENTAL
     static const uint32_t sim_mode = [] {
         const char* e = std::getenv("SHELF_EXL3_SIM");
         if (e == nullptr) return 0u;
@@ -623,6 +625,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         if (std::strcmp(e, "x8res") == 0) return 6u;
         return static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
     }();
+#else
+    [[maybe_unused]] constexpr uint32_t sim_mode = 0u;
+#endif
     hipError_t herr = hipSuccess;
     bool dense_done = false;
     if (use_dense) {
@@ -630,17 +635,21 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3(
         dense_args.xrot = ctx.exl3_xrot;
         herr = ::shelf::kernel::launch_rotate_exl3_rowsum(
             dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum), stream);
+#ifdef SHELF_EXL3_EXPERIMENTAL
         if (herr == hipSuccess && (sim_mode & 2u) != 0u) {
             herr = ::shelf::kernel::launch_quantize_xrot_x8(
                 dense_args, ctx.exl3_xrot, static_cast<float*>(ctx.exl3_rowsum),
                 (sim_mode & 4u) != 0u, stream);
         }
+#endif
         if (herr == hipSuccess) {
             herr = ::shelf::kernel::launch_recon_exl3_dense(dense_args, ctx.exl3_dense, stream);
         }
+#ifdef SHELF_EXL3_EXPERIMENTAL
         if (herr == hipSuccess && (sim_mode & 1u) != 0u) {
             herr = ::shelf::kernel::launch_quantize_dense_w8(dense_args, ctx.exl3_dense, stream);
         }
+#endif
         if (herr == hipSuccess) {
             herr = ::shelf::execution::exl3_dense_gemm(dense_args, ctx.exl3_dense,
                                                        ctx.exl3_accum, stream);

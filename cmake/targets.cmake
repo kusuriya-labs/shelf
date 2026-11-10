@@ -264,6 +264,7 @@ add_library(shelf_inference_execution STATIC
 )
 target_compile_features(shelf_inference_execution PRIVATE cxx_std_20)
 target_include_directories(shelf_inference_execution PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(shelf_inference_execution PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 find_library(SHELF_HIPBLASLT_LIBRARY NAMES hipblaslt PATHS "${SHELF_ROCM_ROOT}/lib" NO_DEFAULT_PATH)
 target_link_libraries(shelf_inference_execution PUBLIC shelf_core shelf_gpu shelf_runtime shelf_inference_state shelf_inference_scheduling shelf_kernels_optimized shelf_kernels_correctness)
 if(SHELF_HIPBLASLT_LIBRARY)

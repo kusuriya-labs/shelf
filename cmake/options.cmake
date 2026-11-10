@@ -210,3 +210,10 @@ option(SHELF_BUILD_BENCHMARKS "Build Shelf benchmark executables" ON)
 # per-submission kernel sequence). Experimental.
 option(SHELF_HIP_GRAPH "Enable HIP graph execution mode" OFF)
 
+# Experimental EXL3 simulation / re-quantization paths (SHELF_EXL3_SIM w8/x8).
+# OFF by default: the production build does not compile or link them.
+option(SHELF_EXL3_EXPERIMENTAL "Enable experimental EXL3 simulation paths" OFF)
+if(SHELF_EXL3_EXPERIMENTAL)
+    add_compile_definitions(SHELF_EXL3_EXPERIMENTAL=1)
+endif()
+

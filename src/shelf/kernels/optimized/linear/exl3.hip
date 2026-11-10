@@ -1,7 +1,7 @@
 #include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
-#include <shelf/kernels/optimized/linear/detail/exl3_group_plan_device.h>
-#include <shelf/kernels/optimized/linear/detail/launch_plan.h>
+#include "exl3/detail/decode_mul1.h"
+#include "exl3/detail/group_plan.h"
+#include "exl3/detail/launch_plan.h"
 #include <shelf/core/memory/types.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -360,6 +360,8 @@ __global__ __launch_bounds__(256) void exl3_dense_epilogue_kernel(Exl3GemmArgs a
     }
 }
 
+#ifdef SHELF_EXL3_EXPERIMENTAL
+// Experimental re-quantization simulation (SHELF_EXL3_SIM).
 __global__ __launch_bounds__(256) void quantize_dense_w8_kernel(uint16_t* dense, uint32_t k,
                                                                uint32_t n) {
     const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -443,6 +445,7 @@ __global__ __launch_bounds__(256) void quantize_xrot_x8_kernel(__half* xrot, flo
     sum += __shfl_down(sum, 1, 32);
     if (lane == 0u) rowsum[row] = sum;
 }
+#endif  // SHELF_EXL3_EXPERIMENTAL
 
 template <bool kRowSum>
 __global__ __launch_bounds__(256) void rotate_exl3_kernel(const shelf::bf16_t* input,
@@ -1005,6 +1008,8 @@ hipError_t launch_rotate_exl3_rowsum(const Exl3GemmArgs& args, void* xrot, float
     return hipGetLastError();
 }
 
+#ifdef SHELF_EXL3_EXPERIMENTAL
+// Experimental re-quantization simulation (SHELF_EXL3_SIM).
 hipError_t launch_quantize_dense_w8(const Exl3GemmArgs& args, void* dense,
                                    hipStream_t stream) {
     if (dense == nullptr) return hipErrorInvalidValue;
@@ -1027,6 +1032,7 @@ hipError_t launch_quantize_xrot_x8(const Exl3GemmArgs& args, void* xrot, float* 
     }
     return hipGetLastError();
 }
+#endif  // SHELF_EXL3_EXPERIMENTAL
 
 hipError_t launch_recon_exl3_dense(const Exl3GemmArgs& args, void* dense, hipStream_t stream) {
     if (args.trellis == nullptr || dense == nullptr) return hipErrorInvalidValue;

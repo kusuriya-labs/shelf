@@ -1,6 +1,6 @@
 #include <shelf/core/memory/types.h>
 #include <shelf/kernels/optimized/linear/exl3.h>
-#include <shelf/kernels/optimized/linear/detail/exl3_decode_device.h>
+#include <shelf/kernels/optimized/linear/exl3/detail/decode_mul1.h>
 #include <shelf/quantization/exl3/exl3.h>
 #include <hip/hip_runtime.h>
 

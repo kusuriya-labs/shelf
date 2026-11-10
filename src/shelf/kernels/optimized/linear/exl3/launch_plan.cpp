@@ -1,5 +1,5 @@
-#include <shelf/kernels/optimized/linear/detail/launch_plan.h>
-#include <shelf/kernels/optimized/linear/detail/types.h>
+#include "detail/launch_plan.h"
+#include "detail/types.h"
 #include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <hip/hip_runtime.h>

@@ -1,4 +1,4 @@
-#include <shelf/kernels/optimized/linear/detail/workspace.h>
+#include "detail/workspace.h"
 #include <shelf/kernels/optimized/linear/exl3.h>
 
 #include <algorithm>
