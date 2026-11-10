@@ -515,6 +515,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
                      bool dflash2_tree,
+                     unsigned long dflash2_tree_extra,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
@@ -630,6 +631,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
     decoder_config.tree = dflash2_tree;
+    decoder_config.tree_extra = static_cast<uint32_t>(dflash2_tree_extra);
     decoder_config.eos_tokens = text_config.stop_tokens;
     auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
@@ -719,7 +721,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                static_cast<unsigned long long>(decoder.gdn_snapshot_bytes));
         printf("DFLASH2_GDN_COMPACT_BYTES=%llu\n",
                static_cast<unsigned long long>(decoder.gdn_compact_bytes));
-        printf("DFLASH2_GDN_MODE=compact\n");
+        printf("DFLASH2_GDN_MODE=%s\n", dflash2_tree ? "tree-history" : "compact");
         printf("DFLASH2_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
         printf("DFLASH2_MEAN_ACCEPTED=%.3f\n", mean_accepted);
         printf("DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
@@ -733,7 +735,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_VERIFY_GPU_MS=%.2f\n", timing.verify_gpu_ms);
         printf("DFLASH2_DECISION_WAIT_MS=%.2f\n", timing.decision_wait_ms);
         printf("DFLASH2_DECISION_D2H_MS=%.2f\n", timing.decision_copy_ms);
-        printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge ? 1 : 0);
+        printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge && !dflash2_tree ? 1 : 0);
         printf("DFLASH2_RERUN_MS=%.2f\n", timing.rerun_ms);
         printf("DFLASH2_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
         printf("DFLASH2_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);

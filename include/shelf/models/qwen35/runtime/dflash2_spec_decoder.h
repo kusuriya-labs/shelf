@@ -40,6 +40,7 @@ constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
     bool tree = false;
+    uint32_t tree_extra = 0u;
     qwen_hybrid::StopTokens eos_tokens;
 };
 
@@ -67,6 +68,9 @@ struct DFlash2GdnRankState {
     uint32_t* tree_offsets = nullptr;
     uint32_t* tree_ancestors = nullptr;
     uint32_t* tree_rope = nullptr;
+    int32_t* tree_predecessors = nullptr;
+    int32_t* tree_selected = nullptr;
+    float* tree_scores = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;

@@ -151,6 +151,7 @@ int main(int argc, char** argv) {
         config.draft_config_ready = true;
         config.dflash2_drafts = static_cast<uint32_t>(opt.dflash2_drafts);
         config.dflash2_tree = opt.dflash2_tree;
+        config.dflash2_tree_extra = static_cast<uint32_t>(opt.dflash2_tree_extra);
         config.dflash2_max_sessions = static_cast<uint32_t>(opt.dflash2_max_sessions);
         if (opt.tp > 1) {
             config.private_target_weights = true;
@@ -211,7 +212,7 @@ int main(int argc, char** argv) {
         }
         if (shelf::app::compute_dflash_enabled(opt)) {
             const unsigned long dflash_rows =
-                static_cast<unsigned long>(dflash_config.block_size);
+                static_cast<unsigned long>(dflash_config.block_size) + opt.dflash2_tree_extra;
             unsigned long dflash_tokens =
                 std::max<unsigned long>(prompt_ids.size(), dflash_rows);
             dflash_tokens = std::min<unsigned long>(dflash_tokens, 2048UL);
@@ -298,7 +299,7 @@ int main(int argc, char** argv) {
     if (shelf::app::compute_dflash_enabled(opt)) {
         return shelf::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
                                 opt.dflash2_model_dir, runtime->config().dflash2_drafts,
-                                opt.dflash2_stats, opt.dflash2_tree, opt.kv_cache_dtype, opt.sampling);
+                                opt.dflash2_stats, opt.dflash2_tree, opt.dflash2_tree_extra, opt.kv_cache_dtype, opt.sampling);
     }
     return shelf::app::run_single_shot(*runtime, prompt_ids, opt.max_new_tokens,
                                     opt.sampling, opt.kv_cache_dtype,

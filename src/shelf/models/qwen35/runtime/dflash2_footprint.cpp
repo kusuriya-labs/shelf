@@ -64,12 +64,13 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
 
     const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
     const uint32_t history_rows = (config.num_drafts == 0u ? 1u : config.num_drafts) +
-                                  (config.tree ? 1u : 0u);
+                                  (config.tree ? 1u + config.tree_extra : 0u);
     total += align_up(static_cast<std::size_t>(history_rows) * view.conv_slot_stride *
                       sizeof(bf16_t));
     if (config.tree) {
         total += align_up(static_cast<std::size_t>(history_rows) * view.recurrent_slot_stride *
                           sizeof(fp16_t));
+        total += align_up((2u * history_rows + 16u * history_rows) * sizeof(uint32_t));
         total += align_up((3u * history_rows + 1u + history_rows * (history_rows + 1u) / 2u) *
                           sizeof(uint32_t));
     }
