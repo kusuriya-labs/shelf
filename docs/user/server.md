@@ -56,7 +56,8 @@ Reasoning:    enabled (thinking on, effort xhigh, preserve_thinking on)
 Efforts:      low, medium, xhigh
 
 Supported:   Chat Completions, Responses, SSE, tools, reasoning, sampling, concurrency, cancel
-Unsupported: structured output, strict tools
+Structured output: json_object and json_schema (requires xgrammar, thinking off)
+Unsupported: strict tools
 
 Ready.
 ```
@@ -741,6 +742,7 @@ Chat Completions は `response_format` の `json_object` と `json_schema` を�
 併用は HTTP 400 で拒否する。stream と非 stream、temperature > 0 に対応する。
 JSON Schema は `type`、`properties`、`required`、`items`、`enum`、
 `additionalProperties`（boolean）、`title`、`description` の subset を受け付ける。
+`enum` は scalar 型のみで、すべての値が指定された型と一致する必要がある。
 未対応キーワードは HTTP 400 とする。生成上限に達した場合は JSON が未完成となりうる。
 
 制約付き request は DFlash2 / MTP が有効でも通常 decode を使用する。strict tools、

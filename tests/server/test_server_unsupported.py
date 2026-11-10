@@ -72,6 +72,11 @@ REJECTED = [
       "response_format": {"type": "json_schema", "json_schema": {
           "name": "probe", "schema": {"type": "string", "pattern": "a+"}}}},
      "response_format.json_schema.schema"),
+    ("response-format-conflicting-enum",
+     {"chat_template_kwargs": {"enable_thinking": False},
+      "response_format": {"type": "json_schema", "json_schema": {
+          "name": "probe", "schema": {"type": "integer", "enum": [1, "bad"]}}}},
+     "response_format.json_schema.schema"),
     ("reasoning_effort", {"reasoning_effort": "high"}, "reasoning_effort"),
     ("reasoning", {"reasoning": {"effort": "high"}}, "reasoning"),
     ("tool-choice-required-without-tools", {"tool_choice": "required"}, "tool_choice"),

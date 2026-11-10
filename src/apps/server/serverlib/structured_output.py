@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 
 from .openai_protocol import OpenAIProtocolError
 
@@ -24,6 +25,23 @@ def validate_schema(schema, path="response_format.json_schema.schema"):
             fail(f"{key} must be a string")
     if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
         fail("enum must be a non-empty array")
+    if "enum" in schema:
+        # XGrammar 0.2.9 treats enum as an alternative to type, rather than
+        # intersecting them. Reject cases that could admit invalid values.
+        if typ in ("object", "array"):
+            fail("enum for object or array is not supported")
+        def matches_type(value):
+            if typ == "string": return isinstance(value, str)
+            if typ == "boolean": return isinstance(value, bool)
+            if typ == "null": return value is None
+            if typ in ("number", "integer"):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return False
+                if isinstance(value, float) and not math.isfinite(value): return False
+                return typ == "number" or isinstance(value, int) or value.is_integer()
+            return False
+        if not all(matches_type(value) for value in schema["enum"]):
+            fail("enum values must match the schema type")
     if typ == "object":
         properties = schema.get("properties", {})
         required = schema.get("required", [])
