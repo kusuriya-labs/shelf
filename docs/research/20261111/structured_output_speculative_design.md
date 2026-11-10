@@ -52,3 +52,19 @@ DFlash2 の greedy 出力を token 単位で比較し、temperature > 0 でも J
    制約なし投機速度と制約あり / reasoning ありの overhead を測定する。
 
 matcher の手動 accept / rollback と各 verify 行の mask は [XGrammar の統合ガイド](https://xgrammar.mlc.ai/docs/latest/using_xgrammar/engine_integration.html) に沿う。
+
+## M5 の進捗
+
+server の `GrammarState.draft_masks` は draft 列を一時 accept し、最初の不正
+位置で打ち切った prefix の各位置と correction / bonus 用の mask を返して、最後に
+matcher を rollback する。EOS で matcher が終端する draft は、その位置の mask で
+通常の target sampling を行うため、終端 token の直前で打ち切る。例外時も一時状態を
+rollback する。XGrammar 0.2.9 の CPU 単体テストで、各 mask、正常・不正 prefix、
+EOS、空 draft、例外時の rollback を検証した。
+
+この補助関数はまだ stdio protocol や decoder に接続されていない。`dflash2_spec_step_batch`
+は proposal の直後に同期的に target verify まで実行する。接続には proposal の host
+取り出しと batch 状態の保持、待機 request の識別と cancel、行別 mask の検証・転送と
+verify sampler への接続、採用 token の server matcher 反映が必要である。現行の
+constraint 付き request は引き続き通常 decode にフォールバックし、DFlash2 との
+併用、greedy 一致、性能と往復時間は未検証・未測定である。

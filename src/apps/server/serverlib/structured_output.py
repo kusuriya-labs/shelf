@@ -193,3 +193,28 @@ class GrammarState:
         if not self.matcher.accept_token(token):
             raise RuntimeError(f"compute emitted token {token} outside grammar")
         return not self.matcher.is_terminated()
+
+    def draft_masks(self, draft_tokens):
+        """Return (valid prefix length, row masks), without changing state.
+
+        The last row samples the correction or bonus token. A terminating draft
+        token is left for that row to sample, so no mask is requested from an
+        already terminated matcher. All tentative accepts are rolled back even
+        if mask generation fails.
+        """
+        accepted = 0
+        rows = [self.next_mask()]
+        try:
+            for token in draft_tokens:
+                if not self.matcher.accept_token(token):
+                    break
+                accepted += 1
+                if self.matcher.is_terminated():
+                    accepted -= 1
+                    self.matcher.rollback(1)
+                    break
+                rows.append(self.next_mask())
+        finally:
+            if accepted:
+                self.matcher.rollback(accepted)
+        return accepted, rows
