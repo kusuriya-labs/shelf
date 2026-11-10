@@ -222,7 +222,7 @@ __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_kernel(
 
 // Same math, float4 form: one CTA per 8 rows, 8 waves, one wave per row (the exl3_dense_epilogue_kernel
 // structure). The K-split sum, H128 and svh stay inside one wave; no shared memory and no barrier.
-// blockIdx.y splits the N axis into `blocks_per_cta` 128-column blocks (0 = the whole row in one CTA).
+// Each wave walks the whole output row.
 template <bool BF16>
 __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const float* __restrict__ yprime,
@@ -231,15 +231,11 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const uint32_t n,
     const uint32_t out_row_stride,
     const uint32_t splits,
-    const uint32_t rows,
-    const uint32_t blocks_per_cta) {
+    const uint32_t rows) {
     const uint32_t m = blockIdx.x * 8u + (threadIdx.x >> 5u);
     if (m >= rows) return;
     const uint32_t lane = threadIdx.x & 31u;
-    const uint32_t blocks = blocks_per_cta == 0u ? n / kBlock : blocks_per_cta;
-    const uint32_t cb_begin = blockIdx.y * blocks;
-    const uint32_t cb_end = min(cb_begin + blocks, n / kBlock);
-    for (uint32_t cb = cb_begin; cb < cb_end; ++cb) {
+    for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
         const uint32_t col = cb * kBlock + lane * 4u;
         float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
         for (uint32_t z = 0u; z < splits; ++z) {
@@ -304,27 +300,33 @@ hipError_t launch_exl3_mul24_gemm(
     }
 }
 
+template <bool kF4, bool kBF16>
+hipError_t launch_rotate_out_impl(const float* yprime, const uint16_t* svh, void* out, uint32_t rows, uint32_t n,
+                                  uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
+    if constexpr (kF4) {
+        const dim3 grid((rows + 7u) / 8u);
+        exl3_mul24_rotate_out_f4_kernel<kBF16>
+            <<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows);
+    } else {
+        const dim3 grid(rows, n / kBlock);
+        exl3_mul24_rotate_out_kernel<kBF16>
+            <<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
+    }
+    return hipGetLastError();
+}
+
 hipError_t launch_exl3_mul24_rotate_out(
     const float* yprime, const uint16_t* svh, void* out, Exl3OutputDType out_dtype, uint32_t rows,
     uint32_t n, uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
-    if (rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u) {
-        const uint32_t tile = rotate_tile_blocks();
-        const uint32_t gy = tile == 0u ? 1u : (n / kBlock + tile - 1u) / tile;
-        const dim3 grid((rows + 7u) / 8u, gy);
-        if (out_dtype == Exl3OutputDType::BF16)
-            exl3_mul24_rotate_out_f4_kernel<true><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
-        else
-            exl3_mul24_rotate_out_f4_kernel<false><<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows, tile);
-    } else {
-        const dim3 grid(rows, n / kBlock);
-        if (out_dtype == Exl3OutputDType::BF16)
-            exl3_mul24_rotate_out_kernel<true><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
-        else
-            exl3_mul24_rotate_out_kernel<false><<<grid, kBlock, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits);
-    }
-    return hipGetLastError();
+    const bool f4 = rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u;
+    const bool bf16 = out_dtype == Exl3OutputDType::BF16;
+    if (f4)
+        return bf16 ? launch_rotate_out_impl<true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
+                    : launch_rotate_out_impl<true, false>(yprime, svh, out, rows, n, out_row_stride, splits, stream);
+    return bf16 ? launch_rotate_out_impl<false, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
+                : launch_rotate_out_impl<false, false>(yprime, svh, out, rows, n, out_row_stride, splits, stream);
 }
 
 

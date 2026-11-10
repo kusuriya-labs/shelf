@@ -21,12 +21,12 @@ using int32x8_t = int32_t __attribute__((ext_vector_type(8)));
 inline constexpr uint32_t kBlock = 128u;
 inline constexpr float kInvSqrt128 = 0.08838834764831845f;
 
-// Opt-in A/B switch: 0 keeps the scalar/smem H128 and the row-per-CTA layout, 1 uses the
-// float4 win32 H128 (fwht128) with one wave per 128-block and vectorized I/O.
+// The float4 win32 H128 (fwht128, one wave per 128-block, vectorized I/O) is the default.
+// SHELF_EXL3_INT8_ROTATE_F4=0 selects the scalar/smem form for A/B measurements.
 inline bool rotate_f4_enabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("SHELF_EXL3_INT8_ROTATE_F4");
-        return env != nullptr && std::strtoul(env, nullptr, 10) != 0ul;
+        return env == nullptr || std::strtoul(env, nullptr, 10) != 0ul;
     }();
     return enabled;
 }
@@ -36,16 +36,6 @@ inline bool rotate_f4_enabled() {
 // faster, so the f4 path is skipped.
 inline constexpr uint32_t kRotateQuantizeF4MinRows = 32u;
 inline constexpr uint32_t kRotateOutF4MinRows = 512u;
-
-// N-tile width of the float4 output rotation in 128-column blocks (0 = the whole row in
-// one CTA).
-inline uint32_t rotate_tile_blocks() {
-    static const uint32_t blocks = [] {
-        const char* env = std::getenv("SHELF_EXL3_INT8_ROTATE_TILE");
-        return env != nullptr ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 0u;
-    }();
-    return blocks;
-}
 
 __device__ __forceinline__ uint16_t f32_to_bf16_rne_device(float f) {
     uint32_t u = __float_as_uint(f);

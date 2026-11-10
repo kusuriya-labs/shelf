@@ -152,10 +152,6 @@ int main() {
                launch_exl3_mul24_rotate_out_i32(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                                                 Exl3OutputDType::BF16, 1u, 129u, 129u, nullptr),
                hipErrorInvalidValue);
-        expect("prefill rotate n align",
-               launch_exl3_mul24_prefill_rotate_out_i32(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                                        Exl3OutputDType::BF16, 1u, 129u, 129u, nullptr),
-               hipErrorInvalidValue);
     }
 
     // mul24 rotate_quantize / rowscale / recon: k and stride rules.

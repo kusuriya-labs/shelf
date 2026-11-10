@@ -108,14 +108,12 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_quantize_f4_kernel(
 // One wave owns a 16-wide output tile and MT 16-row tiles; a block has 4 waves along N.
 }  // namespace
 
-hipError_t launch_exl3_mul24_rotate_quantize(
-    const ::shelf::bf16_t* input, uint32_t input_row_stride, const uint16_t* suh, int8_t* codes,
-    float* scales, uint32_t rows, uint32_t k, uint32_t code_row_stride_bytes,
-    uint32_t scale_row_stride_bytes, hipStream_t stream) {
-    if (rows == 0u) return hipSuccess;
-    if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u) return hipErrorInvalidValue;
-    if (rotate_f4_enabled() && rows >= kRotateQuantizeF4MinRows && (input_row_stride % 4u) == 0u &&
-        (code_row_stride_bytes % 4u) == 0u) {
+template <bool kF4>
+hipError_t launch_rotate_quantize_impl(const ::shelf::bf16_t* input, uint32_t input_row_stride, const uint16_t* suh,
+                                       int8_t* codes, float* scales, uint32_t rows, uint32_t k,
+                                       uint32_t code_row_stride_bytes, uint32_t scale_row_stride_bytes,
+                                       hipStream_t stream) {
+    if constexpr (kF4) {
         exl3_mul24_rotate_quantize_f4_kernel<<<rows, 256, 0, stream>>>(
             input, input_row_stride, suh, codes, scales, code_row_stride_bytes,
             scale_row_stride_bytes / 4u, k / kBlock);
@@ -124,6 +122,20 @@ hipError_t launch_exl3_mul24_rotate_quantize(
             input, input_row_stride, suh, codes, scales, code_row_stride_bytes, scale_row_stride_bytes / 4u);
     }
     return hipGetLastError();
+}
+
+hipError_t launch_exl3_mul24_rotate_quantize(
+    const ::shelf::bf16_t* input, uint32_t input_row_stride, const uint16_t* suh, int8_t* codes,
+    float* scales, uint32_t rows, uint32_t k, uint32_t code_row_stride_bytes,
+    uint32_t scale_row_stride_bytes, hipStream_t stream) {
+    if (rows == 0u) return hipSuccess;
+    if (k == 0u || (k % kBlock) != 0u || (scale_row_stride_bytes % 4u) != 0u) return hipErrorInvalidValue;
+    const bool f4 = rotate_f4_enabled() && rows >= kRotateQuantizeF4MinRows &&
+                    (input_row_stride % 4u) == 0u && (code_row_stride_bytes % 4u) == 0u;
+    return f4 ? launch_rotate_quantize_impl<true>(input, input_row_stride, suh, codes, scales, rows, k,
+                                                  code_row_stride_bytes, scale_row_stride_bytes, stream)
+              : launch_rotate_quantize_impl<false>(input, input_row_stride, suh, codes, scales, rows, k,
+                                                   code_row_stride_bytes, scale_row_stride_bytes, stream);
 }
 
 
