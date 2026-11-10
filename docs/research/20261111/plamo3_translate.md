@@ -305,9 +305,13 @@ tokenizer を初期化せず、モデル config の語彙数を使って ID を�
 した。二次元整数 tensor、正の行列サイズ、負または語彙外の ID も検査する。
 decision head の包装には tokenizer が必要なため、この組み合わせを拒否する。
 `92b9507` の CPU テストで正常入力と不正入力の拒否を確認した。
+`633936f` で日英対訳 JSONL を配布 HF tokenizer と翻訳 template で両方向に
+token 化するツールを追加し、短い人工例の 64 token が入力経路を通ることを
+確認した。実際の calibration 用コーパスは未取得であり、利用時はそのライセンスを
+確認する。
 
 これは入力経路のみであり、PLaMo architecture、層別 RoPE と BF16 丸めを含む
-calibration forward、分割重みの Shelf loader、実データの token 化は未実装。
+calibration forward、分割重みの Shelf loader、実コーパスの token 化は未実施。
 既存の `TransformerBlock` は norm の出力を FP16 に固定し、`RMSNorm` も重みを
 FP16 に変換するため、architecture を登録するだけでは HF の BF16 forward と
 一致しない。0.8B の変換・再開、生成、KLD・速度・VRAM、2B は未実施。
