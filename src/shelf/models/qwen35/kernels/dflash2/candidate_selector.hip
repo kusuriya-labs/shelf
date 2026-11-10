@@ -26,6 +26,7 @@ __device__ __forceinline__ void candidate_selector_body(
     const bf16* predecessor_codebook,
     const bf16* successor_codebook,
     int32_t anchor_token,
+    const int32_t* row_predecessors,
     int32_t* output_tokens,
     float* output_scores,
     uint32_t draft_rows,
@@ -40,6 +41,7 @@ __device__ __forceinline__ void candidate_selector_body(
 
     int32_t predecessor = anchor_token;
     for (uint32_t row = 0u; row < draft_rows; ++row) {
+        if (row_predecessors != nullptr) predecessor = row_predecessors[row];
         const bf16* hidden = hidden_proj + static_cast<std::size_t>(row) * rank;
         const bf16* pred_row =
             predecessor_codebook + static_cast<std::size_t>(predecessor) * rank;
@@ -93,6 +95,7 @@ __global__ void dflash2_candidate_selector_kernel(
     const bf16* predecessor_codebook,
     const bf16* successor_codebook,
     int32_t anchor_token,
+    const int32_t* row_predecessors,
     int32_t* output_tokens,
     float* output_scores,
     uint32_t draft_rows,
@@ -100,8 +103,32 @@ __global__ void dflash2_candidate_selector_kernel(
     uint32_t top_k) {
     __shared__ float partial[kSelectorThreads];
     candidate_selector_body(hidden_proj, topk_ids, topk_logits, predecessor_codebook,
-                            successor_codebook, anchor_token, output_tokens, output_scores,
+                            successor_codebook, anchor_token, row_predecessors, output_tokens, output_scores,
                             draft_rows, rank, top_k, partial);
+}
+
+__global__ void dflash2_candidate_selector_parents_kernel(
+    const bf16* hidden_proj,
+    const int32_t* topk_ids,
+    const float* topk_logits,
+    const bf16* predecessor_codebook,
+    const bf16* successor_codebook,
+    const int32_t* row_predecessors,
+    int32_t* output_tokens,
+    float* output_scores,
+    uint32_t rank,
+    uint32_t top_k) {
+    __shared__ float partial[kSelectorThreads];
+    const uint32_t row = blockIdx.x;
+    candidate_selector_body(
+        hidden_proj + static_cast<std::size_t>(row) * rank,
+        topk_ids + static_cast<std::size_t>(row) * top_k,
+        topk_logits + static_cast<std::size_t>(row) * top_k,
+        predecessor_codebook, successor_codebook, 0, row_predecessors + row,
+        output_tokens + row,
+        output_scores != nullptr ? output_scores + static_cast<std::size_t>(row) * top_k
+                                 : nullptr,
+        1u, rank, top_k, partial);
 }
 
 __global__ void dflash2_candidate_selector_requests_kernel(
@@ -120,7 +147,7 @@ __global__ void dflash2_candidate_selector_requests_kernel(
         hidden_proj + static_cast<std::size_t>(request.row_begin + 1u) * rank,
         topk_ids + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
         topk_logits + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
-        predecessor_codebook, successor_codebook, request.anchor_token,
+        predecessor_codebook, successor_codebook, request.anchor_token, nullptr,
         request.output_drafts,
         output_scores != nullptr
             ? output_scores + static_cast<std::size_t>(request.row_begin + 1u) * top_k
@@ -145,6 +172,7 @@ hipError_t launch_dflash2_candidate_selector(
         return hipErrorInvalidValue;
     }
     if (args.requests != nullptr) {
+        if (args.row_predecessors != nullptr) return hipErrorInvalidValue;
         if (args.request_count == 0u) {
             return hipErrorInvalidValue;
         }
@@ -160,15 +188,24 @@ hipError_t launch_dflash2_candidate_selector(
         return hipErrorInvalidValue;
     }
     if (args.draft_rows == 0u) return hipSuccess;
-    if (args.anchor_token < 0 ||
-        static_cast<uint32_t>(args.anchor_token) >= args.vocab_size) {
+    if (args.row_predecessors == nullptr && (args.anchor_token < 0 ||
+        static_cast<uint32_t>(args.anchor_token) >= args.vocab_size)) {
         return hipErrorInvalidValue;
+    }
+    if (args.row_predecessors != nullptr) {
+        dflash2_candidate_selector_parents_kernel<<<args.draft_rows, kSelectorThreads, 0,
+                                                   stream>>>(
+            reinterpret_cast<const bf16*>(args.hidden_proj), args.topk_ids, args.topk_logits,
+            reinterpret_cast<const bf16*>(args.predecessor_codebook),
+            reinterpret_cast<const bf16*>(args.successor_codebook), args.row_predecessors,
+            args.output_tokens, args.output_scores, args.rank, args.top_k);
+        return hipGetLastError();
     }
     dflash2_candidate_selector_kernel<<<1u, kSelectorThreads, 0, stream>>>(
         reinterpret_cast<const bf16*>(args.hidden_proj), args.topk_ids,
         args.topk_logits, reinterpret_cast<const bf16*>(args.predecessor_codebook),
         reinterpret_cast<const bf16*>(args.successor_codebook), args.anchor_token,
-        args.output_tokens, args.output_scores, args.draft_rows, args.rank,
+        args.row_predecessors, args.output_tokens, args.output_scores, args.draft_rows, args.rank,
         args.top_k);
     return hipGetLastError();
 }

@@ -17,6 +17,7 @@ struct DFlash2CandidateSelectorArgs {
     const bf16_t* predecessor_codebook = nullptr;
     const bf16_t* successor_codebook = nullptr;
     int32_t anchor_token = 0;
+    const int32_t* row_predecessors = nullptr;
     int32_t* output_tokens = nullptr;
     float* output_scores = nullptr;
     uint32_t draft_rows = 0;

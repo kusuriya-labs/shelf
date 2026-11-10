@@ -105,6 +105,7 @@ struct SelectorFixture {
     uint32_t vocab = 0;
     int32_t anchor = 0;
     bool dependency_sensitive = false;
+    std::vector<int32_t> row_predecessors;
     std::vector<int32_t> ids;
     std::vector<float> logits;
     std::vector<bf16_t> hidden;
@@ -117,6 +118,7 @@ static std::vector<int32_t> reference_selector(
     std::vector<int32_t> out(fx.draft_rows, 0);
     int32_t pred = fx.anchor;
     for (uint32_t r = 0; r < fx.draft_rows; ++r) {
+        if (!fx.row_predecessors.empty()) pred = fx.row_predecessors[r];
         int32_t best_token = 0;
         float best_score = -std::numeric_limits<float>::infinity();
         bool have = false;
@@ -162,6 +164,7 @@ static void run_case(
     shelf::gpu::Tensor successor;
     shelf::gpu::Tensor out;
     shelf::gpu::Tensor scores;
+    shelf::gpu::Tensor row_predecessors;
     const bool alloc_ok =
         alloc_bf16(arena, {fx.draft_rows, fx.rank}, hidden) &&
         alloc_i32(arena, {fx.draft_rows, fx.top_k}, ids) &&
@@ -169,7 +172,9 @@ static void run_case(
         alloc_bf16(arena, {fx.vocab, fx.rank}, predecessor) &&
         alloc_bf16(arena, {fx.vocab, fx.rank}, successor) &&
         alloc_i32(arena, {fx.draft_rows}, out) &&
-        alloc_f32(arena, {fx.draft_rows, fx.top_k}, scores);
+        alloc_f32(arena, {fx.draft_rows, fx.top_k}, scores) &&
+        (fx.row_predecessors.empty() ||
+         alloc_i32(arena, {fx.draft_rows}, row_predecessors));
     check(alloc_ok, name + " alloc");
     if (!alloc_ok) return;
     const auto upload = [&](shelf::gpu::Tensor& dst, const auto& src) {
@@ -180,6 +185,8 @@ static void run_case(
     check(upload(hidden, fx.hidden) && upload(ids, fx.ids) && upload(logits, fx.logits) &&
               upload(predecessor, fx.predecessor) && upload(successor, fx.successor),
           name + " upload");
+    if (!fx.row_predecessors.empty())
+        check(upload(row_predecessors, fx.row_predecessors), name + " predecessor upload");
 
     shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = hidden.data<bf16_t>();
@@ -188,6 +195,7 @@ static void run_case(
     args.predecessor_codebook = predecessor.data<bf16_t>();
     args.successor_codebook = successor.data<bf16_t>();
     args.anchor_token = fx.anchor;
+    args.row_predecessors = fx.row_predecessors.empty() ? nullptr : row_predecessors.data<int32_t>();
     args.output_tokens = out.data<int32_t>();
     args.output_scores = scores.data<float>();
     args.draft_rows = fx.draft_rows;
@@ -214,6 +222,7 @@ static void run_case(
     int32_t pred = fx.anchor;
     bool scores_match = true;
     for (uint32_t r = 0; r < fx.draft_rows; ++r) {
+        if (!fx.row_predecessors.empty()) pred = fx.row_predecessors[r];
         for (uint32_t j = 0; j < fx.top_k; ++j) {
             const std::size_t idx = static_cast<std::size_t>(r) * fx.top_k + j;
             const int32_t token = fx.ids[idx];
@@ -325,6 +334,15 @@ int main() {
         run_case(arena, stream, "branch_parent_3", fx);
         fx.anchor = 5;
         run_case(arena, stream, "branch_parent_5", fx);
+        fx.draft_rows = 2u;
+        const auto ids_copy = fx.ids;
+        const auto logits_copy = fx.logits;
+        const auto hidden_copy = fx.hidden;
+        fx.ids.insert(fx.ids.end(), ids_copy.begin(), ids_copy.end());
+        fx.logits.insert(fx.logits.end(), logits_copy.begin(), logits_copy.end());
+        fx.hidden.insert(fx.hidden.end(), hidden_copy.begin(), hidden_copy.end());
+        fx.row_predecessors = {3, 5};
+        run_case(arena, stream, "independent_branch_parents", fx);
     }
 
     {
