@@ -213,3 +213,11 @@ reserve 16384 である。`B < 1024` では予算を課さない（compute へ�
   増分 decoder を検討する。
 - sampling の既定値は reasoning 有無で変えない（`temperature=0` / `top_p=1.0` / `top_k=0`）。
   Qwen3.8 の推奨 sampling を既定にすることは未実施である。
+
+## 構造化出力との併用
+
+単一 token の close tag を持つモデルでは、compute は thinking 中に mask を適用せず、
+自然な close token または予算による強制 close token の出力直後に request を mask 待ちへ
+移す。server は close token を matcher に渡さず、初期 mask を返す。以後は回答 token ごとに
+matcher を進める。thinking 予算が 0 でも同様に自然な close を待つ。thinking 中に上限や EOS
+で終了した場合は回答がなく、JSON の完成は保証されない。制約付き request は投機しない。

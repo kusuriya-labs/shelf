@@ -86,6 +86,7 @@ class GrammarFactory:
 
 class GrammarState:
     def __init__(self, xgr, grammar, vocab_size):
+        self.after_reasoning = False
         self.matcher = xgr.GrammarMatcher(grammar)
         self.mask = xgr.allocate_token_bitmask(1, vocab_size)
 

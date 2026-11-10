@@ -87,6 +87,8 @@ struct ServeGeneration {
     bool has_first_token = false;
     std::shared_ptr<uint32_t> token_bitmask;
     bool waiting_for_mask = false;
+    bool grammar_delayed = false;
+    int32_t grammar_close_token = -1;
 };
 
 // Strict RFC 4648 decoding; reject malformed or non-canonical input.
@@ -207,10 +209,13 @@ void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
             generation.last_log_at = generation.first_token_at;
             generation.has_first_token = true;
         }
-        emit_token(generation.external_request_id,
-                   request->generated[generation.emitted_tokens]);
+        const int32_t token = request->generated[generation.emitted_tokens];
+        emit_token(generation.external_request_id, token);
         ++generation.emitted_tokens;
-        if (generation.token_bitmask &&
+        if (generation.grammar_delayed && token == generation.grammar_close_token) {
+            generation.grammar_delayed = false;
+        }
+        if (generation.token_bitmask && !generation.grammar_delayed &&
             request->state != shelf::qwen35::runtime::RequestState::Finished) {
             generation.waiting_for_mask = true;
             (void)runtime.set_token_bitmask(generation.internal_request_id,
@@ -474,7 +479,7 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
             key != "min_p" && key != "top_k" && key != "seed" &&
             key != "reasoning_budget_tokens" && key != "reasoning_close_token" &&
             key != "prefix_cache_checkpoint_position" && key != "grammar" &&
-            key != "bitmask") {
+            key != "bitmask" && key != "grammar_after_reasoning") {
             emit_error_with_code(request_id, "invalid_argument",
                                  "unknown request field: " + key);
             return false;
@@ -615,10 +620,20 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
     const bool grammar = request.value("grammar", false);
-    if (grammar && thinking.tokens > 0) {
-        emit_error_with_code(request_id, "invalid_argument", "grammar cannot use a reasoning budget");
+    if (request.contains("grammar_after_reasoning") && !request["grammar_after_reasoning"].is_boolean()) {
+        emit_error_with_code(request_id, "invalid_argument", "grammar_after_reasoning must be a boolean");
         return false;
     }
+    generation.grammar_delayed = request.value("grammar_after_reasoning", false);
+    if (generation.grammar_delayed && (!grammar || thinking.close_token < 0)) {
+        emit_error_with_code(request_id, "invalid_argument", "delayed grammar requires a close token");
+        return false;
+    }
+    if (grammar && thinking.tokens > 0 && !generation.grammar_delayed) {
+        emit_error_with_code(request_id, "invalid_argument", "grammar with reasoning requires delayed grammar");
+        return false;
+    }
+    generation.grammar_close_token = thinking.close_token;
     if ((grammar && (!request.contains("bitmask") ||
                      !upload_mask(runtime, generation, request["bitmask"]))) ||
         (!grammar && request.contains("bitmask"))) {
@@ -636,7 +651,7 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         return false;
     }
     generation.internal_request_id = submit_result.release();
-    if (grammar) {
+    if (grammar && !generation.grammar_delayed) {
         auto st = runtime.set_token_bitmask(generation.internal_request_id,
                                             generation.token_bitmask.get(), false);
         if (!st.ok()) {

@@ -75,7 +75,44 @@ async def collect(client, timeout: float):
     return events
 
 
+async def delayed_grammar_test(checker: Checker) -> None:
+    class Grammar:
+        after_reasoning = True
+        def __init__(self):
+            self.tokens = []
+        def next_mask(self):
+            return "initial" if not self.tokens else "next"
+        def accept(self, token):
+            self.tokens.append(token)
+            return True
+
+    client = compute_client.AsyncComputeClient([sys.executable])
+    sent = []
+    mailbox = asyncio.Queue()
+    for event in ({"event": "token", "token_id": 10},
+                  {"event": "token", "token_id": 99},
+                  {"event": "token", "token_id": 20},
+                  {"event": "done", "finish_reason": "length"}):
+        mailbox.put_nowait(event)
+    async def begin(): return 1, mailbox
+    async def end(_): pass
+    async def send(payload): sent.append(payload)
+    client._begin_request = begin
+    client._end_request = end
+    client._send = send
+    grammar = Grammar()
+    events = [event async for event in client.generate_stream(
+        PROMPT, 10, reasoning_close_token=99, grammar=grammar)]
+    checker.check("delayed-grammar-transitions",
+                  [event.get("token_id") for event in events[:-1]] == [10, 99, 20]
+                  and grammar.tokens == [20]
+                  and sent[0].get("grammar_after_reasoning") is True
+                  and sent[0].get("reasoning_close_token") == 99
+                  and [item["bitmask"] for item in sent[1:]] == ["initial", "next"], repr(sent))
+
+
 async def run(checker: Checker) -> None:
+    await delayed_grammar_test(checker)
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "fake_compute.py"
         script.write_text(FAKE_COMPUTE, encoding="utf-8")

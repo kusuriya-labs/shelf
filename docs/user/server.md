@@ -738,7 +738,8 @@ suite の詳細は [../developer/testing.md](../developer/testing.md) を参照�
 ## 構造化出力
 
 Chat Completions は `response_format` の `json_object` と `json_schema` を受理する。
-`chat_template_kwargs.enable_thinking=false` を指定する。tools、stop、thinking との
+thinking 有効時は `</think>` まで自由に生成し、その後の回答に制約を適用する。
+単一 token の close tag を持たないモデルでの thinking 併用、tools、stop との
 併用は HTTP 400 で拒否する。stream と非 stream、temperature > 0 に対応する。
 JSON Schema は `type`、`properties`、`required`、`items`、`enum`、
 `additionalProperties`（boolean）、`title`、`description` の subset を受け付ける。

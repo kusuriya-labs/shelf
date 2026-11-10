@@ -51,6 +51,23 @@ def main():
                     text = http_json(url, body)["choices"][0]["message"]["content"]
                 check(json.loads(text), schema)
                 print("schema", i, "stream", stream, "OK", flush=True)
+        # Thinking is generated freely; only the answer is matched by XGrammar.
+        schema = {"type":"object", "properties":{"answer":{"type":"string", "enum":["yes", "no"]}}, "required":["answer"], "additionalProperties":False}
+        for stream in (False, True):
+            body = dict(base, chat_template_kwargs={"enable_thinking":True}, max_tokens=1024,
+                        temperature=0.8, stream=stream,
+                        response_format={"type":"json_schema", "json_schema":{"name":"answer", "schema":schema, "strict":True}})
+            if stream:
+                events = list(http_sse(url, body))
+                deltas = [e["choices"][0].get("delta", {}) for e in events if e.get("choices")]
+                text = "".join(d.get("content", "") or "" for d in deltas)
+                reasoning = "".join(d.get("reasoning_content", "") or "" for d in deltas)
+            else:
+                message = http_json(url, body)["choices"][0]["message"]
+                text, reasoning = message["content"], message.get("reasoning_content", "")
+            assert reasoning and "</think>" not in reasoning and "</think>" not in text
+            check(json.loads(text), schema)
+            print("thinking structured stream", stream, "OK", flush=True)
         body = dict(base, temperature=0.8, response_format={"type":"json_object"})
         assert isinstance(json.loads(http_json(url, body)["choices"][0]["message"]["content"]), dict)
         body["stream"] = True

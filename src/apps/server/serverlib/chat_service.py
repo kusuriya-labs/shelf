@@ -235,6 +235,13 @@ class ChatService:
         if request.enable_thinking and not tool_prefix and self._reasoning_close_token >= 0:
             reasoning_budget_tokens = thinking_budget_tokens(max_new_tokens)
 
+        if request.response_schema is not None and request.enable_thinking and self._reasoning_close_token < 0:
+            raise OpenAIProtocolError("structured output with thinking requires a single close token", param="response_format", code="unsupported_parameter")
+        grammar = (self._grammar_factory.create(request.response_schema)
+                   if request.response_schema is not None else None)
+        if grammar is not None:
+            grammar.after_reasoning = request.enable_thinking
+
         return PreparedChat(
             prompt_ids=prompt_ids,
             tools=tools,
@@ -243,8 +250,7 @@ class ChatService:
             tool_prefix=tool_prefix,
             reasoning_budget_tokens=reasoning_budget_tokens,
             reasoning_close_token=self._reasoning_close_token,
-            grammar=(self._grammar_factory.create(request.response_schema)
-                     if request.response_schema is not None else None),
+            grammar=grammar,
         )
 
     # ----------------------------------------------------------------- non-stream

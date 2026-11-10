@@ -438,8 +438,8 @@ def parse_chat_request(body: Any,
             response_schema = spec["schema"]
             from .structured_output import validate_schema
             validate_schema(response_schema)
-        if response_schema is not None and (enable_thinking or tools or body.get("stop") is not None):
-            raise OpenAIProtocolError("structured output requires enable_thinking=false and does not support tools or stop", param="response_format", code="unsupported_parameter")
+        if response_schema is not None and (tools or body.get("stop") is not None):
+            raise OpenAIProtocolError("structured output does not support tools or stop", param="response_format", code="unsupported_parameter")
     reasoning_effort, effort_given = parse_reasoning_effort(body)
     if effort_given and not enable_thinking:
         raise OpenAIProtocolError(

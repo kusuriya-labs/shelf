@@ -365,10 +365,13 @@ class AsyncComputeClient:
         }
         if reasoning_budget_tokens > 0:
             payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
+        if reasoning_budget_tokens > 0 or (grammar is not None and grammar.after_reasoning):
             payload["reasoning_close_token"] = int(reasoning_close_token)
         if grammar is not None:
             payload["grammar"] = True
             payload["bitmask"] = grammar.next_mask()
+            if grammar.after_reasoning:
+                payload["grammar_after_reasoning"] = True
         await self._send(payload)
 
     async def cancel(self, request_id: int) -> None:
@@ -459,6 +462,7 @@ class AsyncComputeClient:
 
         sent = False
         completed = False
+        grammar_waiting_for_reasoning = grammar is not None and grammar.after_reasoning
 
         try:
             await self._send_generate(
@@ -478,7 +482,12 @@ class AsyncComputeClient:
 
                 if kind == "token":
                     token = int(event["token_id"])
-                    if grammar is not None and grammar.accept(token):
+                    if grammar_waiting_for_reasoning:
+                        if token == reasoning_close_token:
+                            grammar_waiting_for_reasoning = False
+                            await self._send({"op": "mask", "request_id": request_id,
+                                              "bitmask": grammar.next_mask()})
+                    elif grammar is not None and grammar.accept(token):
                         await self._send({"op": "mask", "request_id": request_id,
                                           "bitmask": grammar.next_mask()})
                     yield {
