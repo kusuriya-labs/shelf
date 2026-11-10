@@ -380,3 +380,7 @@ logitsはraw f32、1行 = 1 token step（prefill行が先頭）。
   --max-new-tokens 32 \
   --kv-cache-dtype fp8
 ```
+
+R9700 の PLaMo 3 Translate BF16 の短文日→英（23 token、greedy）では、
+0.8B / 2B / 8B の prefill は 24.7 / 40.9 / 109.0 ms、decode は
+247.38 / 90.45 / 33.27 token/s（各 9 token）の実測例がある。

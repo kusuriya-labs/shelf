@@ -205,3 +205,64 @@ CPU 参照との平均 KL は日英 0.000525、英日 0.000493、top-1 はそれ
 KV budget 14.40 GiB、arena 使用 30.340 GiB（確保 31.289 GiB）で 32 GiB に収まった。
 2B の重みは 5.36 GiB、arena 使用 30.338 GiB。8B の真の最低使用量はこの計測では
 求めていない。2B の精度判断と、いずれのサイズも速度改善が残る。
+
+## M3: 全演算の高速化
+
+R9700、BF16、greedy、prompt 23 / 26 token、decode は最初の token を除く。
+CPU BF16 参照との teacher-forced 比較は 21 / 24 位置。すべての短文で greedy
+出力は M2 と一致し、平均 KL ≤ 0.001、top-1 一致率 ≥ 90% を満たした。
+
+| model | 方向 | prefill ms | decode token/s | 平均 KL | top-1 一致 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 0.8B | 日→英 | 24.7 | 247.38 | 0.000752 | 100% |
+| 0.8B | 英→日 | 24.3 | 246.13 | 0.000577 | 100% |
+| 2B | 日→英 | 40.9 | 90.45 | 0.000465 | 95.24% |
+| 2B | 英→日 | 41.6 | 90.45 | 0.000700 | 95.83% |
+| 8B | 日→英 | 109.0 | 33.27 | 0.000317 | 100% |
+| 8B | 英→日 | 109.7 | 33.25 | 0.000649 | 100% |
+
+初期の全並列 RMSNorm では 8B 英→日の KL が 0.001724 に悪化した。Q/K head の
+128 要素だけ correctness 経路と同じ順序で FP32 集計し、より広い norm は並列に
+集計することで品質と速度の両方を満たした。全 norm を逐次集計した候補は 8B の
+KL が 0.000915 だったが 23.32 token/s に低下したため採用しなかった。
+
+`SHELF_QWEN35_PERF_TIMING=1` と fallback 診断で context 23、decode 4 token を
+計測。0.8B / 2B / 8B はそれぞれ 1,368 / 2,040 / 2,712 dispatch 全件が最適化経路で、
+fallback は 0 件だった。下表のイベント計測は同期・待ち時間を含み、kernel 単体の
+純粋な時間ではない。
+
+| 演算 | 0.8B ms/token | 2B ms/token | 8B ms/token |
+| --- | ---: | ---: | ---: |
+| BF16 linear | 2.921 | 9.347 | 27.396 |
+| offset RMSNorm | 1.165 | 1.892 | 2.834 |
+| split | 0.433 | 0.641 | 0.849 |
+| RoPE | 0.299 | 0.445 | 0.581 |
+| 残差加算 | 0.290 | 0.429 | 0.567 |
+| paged attention | 0.211 | 0.302 | 0.402 |
+| KV append | 0.159 | 0.236 | 0.310 |
+| SiLU | 0.152 | 0.222 | 0.288 |
+| BF16 乗算 | 0.140 | 0.214 | 0.280 |
+| embedding / scale / output gather / sampling | 各 0.009〜0.010 | 各 0.009〜0.010 | 各 0.009〜0.010 |
+
+途中版の 0.8B では RoPE が 6.095 ms/token、乗算が 3.278 ms/token で fallback
+していた。最終版は BF16 の中間丸めと局所・全域 RoPE 表を保つ専用 kernel を使う。
+非等幅 QKV split、offset RMSNorm、BF16 linear、各要素演算・KV append、embedding、
+logits 変換と sampling の形状も最適化経路に接続した。現在は BF16 linear と norm が
+主要な時間を占める。
+
+英語の 218 token の段落を日本語へ greedy 翻訳し、246 token を生成した。prefill
+1187.7 ms、decode 226.94 token/s（245 token）で、3 段落の構成と内容を保つ出力を
+確認した。これは 2048 token 以下の確認であり、真の sliding-window kernel や
+長文脈の一致確認ではない。
+
+`test_rmsnorm`、`test_elementwise`、`test_rope*`、`test_paged_attention`、
+`test_stochastic_sampling` と `test_qwen35_*` の関連テストは通過した。既知の
+破損 fixture `test_qwen35_gdn_gate_reference` は失敗し、最終の対象テストでは除外。
+2 GPU の任意テスト 2 件は skip。サーバー `--group core` は 16 件通過・1 件 skip、
+skip された PLaMo template テストは個別に tokenizer を指定して 6 件通過した。
+全回帰は実行していない。
+
+EXL3 量子化は未実施。`rocm_exl3` には PLaMo 3 の architecture 登録がなく、
+Shelf の専用 loader は BF16 tensor のみを検査する。結合 QKV と gate/up の
+重み名・行順序、offset RMSNorm、`EXL3_MUL1_MULT=0xDCD12D` で作る mul24 の
+変換器と loader を実装し、BF16 と KLD・翻訳・速度を比較する必要がある。
