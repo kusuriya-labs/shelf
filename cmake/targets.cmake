@@ -93,6 +93,7 @@ set(SHELF_OPTIMIZED_KERNEL_SOURCES
     src/shelf/kernels/optimized/linear/exl3/decode.hip
     src/shelf/kernels/optimized/linear/exl3/prefill.hip
     src/shelf/kernels/optimized/linear/exl3/prefill_rotate.hip
+    src/shelf/kernels/optimized/linear/exl3/verify.hip
     src/shelf/kernels/optimized/linear/exl3/workspace.cpp
     src/shelf/kernels/optimized/linear/exl3/launch_plan.cpp
     src/shelf/kernels/optimized/moe/router.hip

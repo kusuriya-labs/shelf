@@ -171,6 +171,11 @@ hipError_t launch_epilogue_exl3_dense(const Exl3GemmArgs& args, const void* rows
 hipError_t launch_gemm_exl3_w16a16_pre(const Exl3GemmArgs& args, const void* xrot,
                                        hipStream_t stream);
 
+// Verify entry: applies the policy's fixed tuning rows and runs the mul1 gemm. The
+// kernel is the same as decode; only the split-K tuning input differs.
+hipError_t launch_exl3_mul1_verify(const Exl3GemmArgs& args, const Exl3ExecutionPolicy& policy,
+                                   hipStream_t stream);
+
 // ---- grouped (MoE) ----
 
 // Correctness-first grouped EXL3 linear. It dispatches the existing dense EXL3
