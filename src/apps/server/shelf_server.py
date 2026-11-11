@@ -97,8 +97,7 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
-        if opts.dflash2_tree_budget:
-            argv += ["--dflash2-tree-budget", str(opts.dflash2_tree_budget)]
+        argv += ["--dflash2-tree-budget", str(opts.dflash2_tree_budget)]
         if opts.dflash2_adaptive:
             argv.append("--dflash2-adaptive")
         if opts.dflash2_max_sessions > 0:
@@ -484,10 +483,10 @@ def parse_args(argv=None):
                         help="DFlash2 draft model directory (enables speculative decoding)")
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
-    parser.add_argument("--dflash2-tree-budget", type=tree_budget_value, default=0,
+    parser.add_argument("--dflash2-tree-budget", type=tree_budget_value, default=None,
                         metavar="N|auto",
-                        help="tree verify row budget; auto selects by batch size "
-                             "(default 0: disabled)")
+                        help="tree verify rows: auto uses 10 for one speculative request, "
+                             "8 for multiple (default auto; 0 disables)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
                         help="batch と受理数に応じて投機を制御する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
@@ -532,13 +531,20 @@ def parse_args(argv=None):
         parser.error("--page-tokens must be >= 1")
     if opts.dflash2_adaptive and not opts.dflash2_model_dir:
         parser.error("--dflash2-adaptive requires --dflash2-model-dir")
+    if opts.dflash2_tree_budget is None:
+        if opts.dflash2_model_dir and (opts.dflash2_drafts != 7 or opts.tensor_parallel != 1):
+            print("warning: automatic tree budget requires TP=1 and 7 drafts; using chain",
+                  file=sys.stderr, flush=True)
+            opts.dflash2_tree_budget = 0
+        else:
+            opts.dflash2_tree_budget = "auto"
     if opts.dflash2_tree_budget != "auto" and not 0 <= opts.dflash2_tree_budget <= 512:
         parser.error("--dflash2-tree-budget must be between 0 and 512")
-    if opts.dflash2_tree_budget and not opts.dflash2_model_dir:
+    if opts.dflash2_tree_budget not in (0, "auto") and not opts.dflash2_model_dir:
         parser.error("--dflash2-tree-budget requires --dflash2-model-dir")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
-    if opts.dflash2_tree_budget == "auto" and opts.dflash2_drafts != 7:
+    if opts.dflash2_model_dir and opts.dflash2_tree_budget == "auto" and opts.dflash2_drafts != 7:
         parser.error("--dflash2-tree-budget auto requires 7 drafts")
     if opts.mtp_drafts < 1:
         parser.error("--mtp-drafts must be >= 1")

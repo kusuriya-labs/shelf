@@ -8,8 +8,8 @@
 
 namespace shelf::qwen35::runtime {
 
-inline constexpr uint32_t auto_dflash2_tree_budget(uint32_t) noexcept {
-    return 8u;
+inline constexpr uint32_t auto_dflash2_tree_budget(uint32_t active) noexcept {
+    return active == 1u ? 10u : 8u;
 }
 
 // A probability is conditional on the candidate's parent token. The caller

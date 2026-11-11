@@ -30,6 +30,8 @@ def run(ids, mode, logits_path=None):
     if mode != "target":
         cmd += ["--dflash2-model-dir", os.environ["SHELF_DFLASH2_MODEL_DIR"],
                 "--dflash2-drafts", "7"]
+    if mode == "chain":
+        cmd += ["--dflash2-tree-budget", "0"]
     if mode.startswith("tree"):
         cmd += ["--dflash2-tree-extra", mode[4:]]
     if mode.startswith("budget"):

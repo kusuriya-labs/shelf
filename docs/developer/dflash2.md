@@ -927,9 +927,12 @@ samples を別途 D2H する。
   選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
   採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
   浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
-  `auto` は serve・draft 数 7 に限り、投機中の request 数に応じて行数を選ぶ。
-  現在は全ての同時数で chain の 8 行を使う。投機を停止した request は
-  木に含めない。既定値は 0 のままである。
+  既定の `auto` は draft 数 7・TP=1 で、その round に投機する request が
+  1 本なら 10 行、2 本以上なら chain の 8 行を使う。prefill 中、待機中、
+  非投機、policy により投機を停止中の request は数えない。auto では
+  stochastic request を投機せず通常 decode する。単発の greedy
+  生成でも 10 行を使う。明示的な整数指定は同時数に依存しない。
+  他の draft 数や TP では tree budget 省略時に chain を使う（server は警告する）。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × session ごとの verify 行数上限`）、drafter scratch の大きさがこの値で決まる。
@@ -940,7 +943,7 @@ samples を別途 D2H する。
 DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path である。
 
 `shelf-server` は `--dflash2-model-dir` / `--dflash2-drafts` /
-`--dflash2-max-sessions` / `--dflash2-tree-budget`（0 以外のとき）を
+`--dflash2-max-sessions` / `--dflash2-tree-budget` を
 `shelf-compute` へ転送する。
 
 ### invalid combinations（model load 前に exit 2）

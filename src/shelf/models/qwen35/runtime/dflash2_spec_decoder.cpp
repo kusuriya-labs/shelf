@@ -1835,10 +1835,13 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             break;
         }
     }
+    const uint32_t speculative_count = static_cast<uint32_t>(std::count_if(
+        plans.begin(), plans.end(), [](const SlotPlan& plan) { return plan.batched; }));
     const uint32_t tree_budget = context.tree_budget_auto
-        ? auto_dflash2_tree_budget(static_cast<uint32_t>(std::count_if(
-              plans.begin(), plans.end(), [](const SlotPlan& plan) { return !plan.stopped; })))
-        : context.tree_budget;
+        ? auto_dflash2_tree_budget(speculative_count) : context.tree_budget;
+    if (context.tree_budget_auto && env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_ROUND", false))
+        std::fprintf(stderr, "DFLASH2_TREE_ROUND speculative=%u budget=%u\n",
+                     speculative_count, tree_budget);
     const bool tree_mode = tree_budget != 0u &&
         tree_budget > plans.front().decoder->config.num_drafts + 1u;
     if (tree_mode) {

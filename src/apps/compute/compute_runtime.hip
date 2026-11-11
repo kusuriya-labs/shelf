@@ -773,6 +773,9 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
+    if (config_.dflash2_tree_budget_auto && sampling.temperature != 0.0f) {
+        return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, false, thinking);
+    }
     return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, thinking);
 }
 
