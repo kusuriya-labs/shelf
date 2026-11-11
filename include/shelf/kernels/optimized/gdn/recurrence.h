@@ -78,6 +78,11 @@ launch_gdn_recurrence_f32_wmma(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
 
+// Experimental: all requests must contain exactly one row, and inputs must be finite.
+hipError_t
+launch_gdn_recurrence_f32_wmma_single_row_experimental(
+    const GdnRecurrenceArgs& args, hipStream_t stream);
+
 hipError_t
 launch_gdn_recurrence_f32_wmma_verify(
     const GdnRecurrenceArgs& args,
