@@ -42,6 +42,7 @@ struct ComputeOptions {
     bool dflash2_tree = false;
     unsigned long dflash2_tree_extra = 0;
     unsigned long dflash2_tree_budget = 0;
+    bool dflash2_tree_budget_auto = false;
     bool mtp = false;
     unsigned long mtp_drafts = 7;
     int mtp_stats = 1;

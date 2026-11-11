@@ -1184,6 +1184,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
                 return 1;
             }
             dflash.batch = batch_result.release();
+            dflash.batch.tree_budget_auto = runtime.config().dflash2_tree_budget_auto;
             dflash.batch_ready = true;
         }
         {

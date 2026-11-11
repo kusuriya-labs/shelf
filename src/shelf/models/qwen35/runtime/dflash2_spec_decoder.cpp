@@ -1835,8 +1835,12 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             break;
         }
     }
-    const bool tree_mode = context.tree_budget != 0u &&
-        context.tree_budget > plans.front().decoder->config.num_drafts + 1u;
+    const uint32_t tree_budget = context.tree_budget_auto
+        ? auto_dflash2_tree_budget(static_cast<uint32_t>(std::count_if(
+              plans.begin(), plans.end(), [](const SlotPlan& plan) { return !plan.stopped; })))
+        : context.tree_budget;
+    const bool tree_mode = tree_budget != 0u &&
+        tree_budget > plans.front().decoder->config.num_drafts + 1u;
     if (tree_mode) {
         for (const SlotPlan& plan : plans) {
             if (plan.batched && plan.decoder->sampling.temperature != 0.0f)
@@ -1957,7 +1961,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             if (!plan.batched) continue;
             const uint32_t row = propose_requests.size() == 1u ? 0u : proposal_row + 1u;
             Status st = select_budget_tree(*plan.decoder, plan.anchor, plan.position, plan.max_tree_rows,
-                context.tree_budget, plan.drafts, row,
+                tree_budget, plan.drafts, row,
                 std::span<const int32_t>(drafts[i].data(), plan.drafts),
                 reinterpret_cast<shelf::kernel::DFlash2TreeProbabilities*>(context.tree.front().probability_scratch),
                 plan.tree);

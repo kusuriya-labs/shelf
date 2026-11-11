@@ -56,12 +56,16 @@ def main():
         chain = serve(0, draft, path)
         chain_tree = serve(8, draft, path)
         tree = serve(10, draft, path)
+        tree_twelve = serve(12, draft, path)
+        automatic = serve("auto", draft, path)
         reference = single_tree(draft)
     if len(chain) != 64 or chain_tree != chain:
         raise AssertionError("budget 8 differs from chain")
     if len(tree) != 64 or tree != reference:
         raise AssertionError("budget 10 differs from the single-request tree")
-    print("PASS: serve tree budget 8 and 10")
+    if automatic != tree_twelve or len(automatic) != 64:
+        raise AssertionError("automatic budget differs from budget 12 at concurrency 1")
+    print("PASS: serve tree budget 8, 10 and auto")
 
 
 if __name__ == "__main__":

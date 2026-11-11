@@ -9,6 +9,12 @@ using namespace shelf::qwen35::runtime;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 int main() {
+    CHECK(auto_dflash2_tree_budget(0) == 8);
+    CHECK(auto_dflash2_tree_budget(1) == 12);
+    CHECK(auto_dflash2_tree_budget(2) == 8);
+    CHECK(auto_dflash2_tree_budget(3) == 8);
+    CHECK(auto_dflash2_tree_budget(4) == 8);
+    CHECK(auto_dflash2_tree_budget(5) == 8);
     const std::vector<int32_t> chain{11, 12, 13};
     const std::vector<int32_t> alt{21, 22, 23};
     const auto tree = make_dflash2_tree(10, chain, alt, 2, 100);

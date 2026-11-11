@@ -95,7 +95,7 @@ void compute_usage(const char* prog) {
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
-    printf("  --dflash2-tree-budget N  enable experimental best-first tree (total rows)\n");
+    printf("  --dflash2-tree-budget N|auto  experimental tree verify row budget\n");
     printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-adaptive     control speculation with a batch policy\n");
@@ -322,7 +322,10 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--dflash2-tree-budget") == 0 && i + 1 < argc) {
-            if (opt.dflash2_tree || !parse_uint(argv[++i], opt.dflash2_tree_budget) ||
+            const char* value = argv[++i];
+            opt.dflash2_tree_budget_auto = std::strcmp(value, "auto") == 0;
+            if (opt.dflash2_tree_budget_auto) opt.dflash2_tree_budget = 12;
+            if (opt.dflash2_tree || (!opt.dflash2_tree_budget_auto && !parse_uint(value, opt.dflash2_tree_budget)) ||
                 (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < 2) || opt.dflash2_tree_budget > 512) {
                 fprintf(stderr, "invalid or conflicting --dflash2-tree-budget\n");
                 return kComputeParseError;
@@ -469,6 +472,10 @@ int validate_compute_options(const ComputeOptions& opt) {
     }
 
     const bool dflash_enabled = !dflash2_model_dir.empty();
+    if (opt.dflash2_tree_budget_auto && (!serve_stdio || dflash2_drafts != 7)) {
+        fprintf(stderr, "auto tree budget requires serve and 7 drafts\n");
+        return kComputeParseError;
+    }
     shelf::kernel::OctaveKVCacheFormat octave_format{};
     const bool octave = shelf::kernel::parse_octave_kv_cache_format(
         kv_cache_dtype, octave_format);

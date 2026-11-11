@@ -917,7 +917,7 @@ samples を別途 D2H する。
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
-- `--dflash2-tree-budget N`: TP=1・greedy 用の実験的な木検証。
+- `--dflash2-tree-budget N|auto`: TP=1・greedy 用の実験的な木検証。
   anchor を含む総行数を指定し、`--dflash2-tree-extra` とは併用できない。
   0 は無効。非ゼロの N は draft 数 + 1 以上、単一 request では 512 以下、
   serve では 32 以下。draft 数 + 1 の場合は通常の chain を使う。
@@ -927,6 +927,9 @@ samples を別途 D2H する。
   選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
   採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
   浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
+  `auto` は serve・draft 数 7 に限り、投機中の request 数に応じて行数を選ぶ。
+  1 件なら 12 行、2 件以上なら chain の 8 行を使う。投機を停止した request は
+  木に含めない。既定値は 0 のままである。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × session ごとの verify 行数上限`）、drafter scratch の大きさがこの値で決まる。

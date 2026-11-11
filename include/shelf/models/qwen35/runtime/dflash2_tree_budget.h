@@ -8,6 +8,10 @@
 
 namespace shelf::qwen35::runtime {
 
+inline constexpr uint32_t auto_dflash2_tree_budget(uint32_t active_requests) noexcept {
+    return active_requests == 1u ? 12u : 8u;
+}
+
 // A probability is conditional on the candidate's parent token. The caller
 // supplies the full-vocabulary normalization; top-k-only normalization can
 // overestimate the probability of a branch.

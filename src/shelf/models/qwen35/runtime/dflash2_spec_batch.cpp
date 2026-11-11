@@ -122,6 +122,7 @@ Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noe
     context.tree_replay_host.clear();
     context.max_rows = 0u;
     context.tree_budget = 0u;
+    context.tree_budget_auto = false;
     context.history_bytes = 0u;
     context.compact_bytes = 0u;
     context.verify_token_ids_device = nullptr;

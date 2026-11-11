@@ -287,6 +287,7 @@ struct DFlash2SpecBatchContext {
     bool initialized = false;
     int32_t* verify_token_ids_device = nullptr;
     int32_t* decision_staging_device = nullptr;
+    bool tree_budget_auto = false;
 };
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(

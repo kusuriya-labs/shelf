@@ -383,3 +383,21 @@ N=12 は page 境界の制約で 48 行が現れず、46 行を示す。
 この条件では行数増加に伴って verify と EXL3 の時間が増えた。semantic の attention
 は単発値であり、46 行の値を行数だけによる増分とは断定できない。詳細は
 [forest_serve_concurrency_profile.json](forest_serve_concurrency_profile.json) に記録した。
+
+### 自動 budget と精度試験
+
+A と B のどちらでも安定した向上が確認できた行数に限り自動選択する。c=1 は前述の
+8 prompt 平均で N=12 が向上した。c=2〜4 は少なくとも A が全て低下し、B の向上も
+小さい場合があるため chain を選ぶ。5 件以上は今回測定しておらず chain とする。
+
+| 投機中の request 数 | 自動選択する request あたり行数 |
+| ---: | ---: |
+| 1 | 12 |
+| 2 以上 | 8（chain） |
+
+c=3・A・N=12 の問題に対し、一時バイナリで tree chunk の内積だけを高精度化した。
+code 1 は 2 回とも基準 512 token と一致したが、c=4・A・N=9 の code 12 に差
+0.11907 が発生した。さらに出力側の積も高精度化すると同じ code 12 に差 0.17159 が
+発生した。どちらも限定的な修正で全条件のゲートを満たせなかったため採用しない。
+c=4・A・N=9 を verify 全体の exact chunk で試すと、4 request の差は 0.08289 以下だった。
+ただし今回の性能表は既定の lossy chunk であり、exact への切り替えは行わない。
