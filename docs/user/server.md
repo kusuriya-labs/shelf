@@ -85,6 +85,9 @@ Ready.
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
+| `--prefix-cache {0,1}` | enable prefix cache (default 1) |
+| `--prefix-cache-concurrency PREFIX_CACHE_CONCURRENCY` | max concurrent prefix captures and stored prefix entries (default 4; radix strategy) |
+| `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
@@ -615,6 +618,14 @@ page を refcount 付きで共有し、GDN state だけを page 単位で保持�
   `input - restored_tokens` になる
 - 同一プロンプトの再実行は restore しない（最長一致が input 全長に達するため）。
   DFlash2 経路でも prefix cache を使い、drafter ring を持つ entry だけを restore する
+- `--prefix-cache-strategy slot` では、request ごとに固定 slot を予約し、入力末尾直前の
+  page 境界 1 点だけを保存する。同じ会話を延長し続ける agent に向く。
+  既定の `radix` は chunk 終端ごとに entry を作り、先頭 prefix の共有に向く
+  （[../developer/prefix_cache.md](../developer/prefix_cache.md)）
+
+`--prefix-cache` / `--prefix-cache-concurrency` / `--prefix-cache-strategy` は
+`shelf-compute` へそのまま転送される。`GET /v1/meta` の
+`prefix_cache_strategy` / `prefix_cache_concurrency` が起動時の設定を示す。
 
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 
