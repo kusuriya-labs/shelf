@@ -307,3 +307,33 @@ chunk では基準 logit 差 0.1 超が 3/24 件（最大 0.2305）あり、非�
 平均的な品質劣化や発生率の保証ではない。serial・同時 1 の 24/24 一致は token 列
 の一致であり logits の bit 一致を示さない。chunk は同時 1 で 22/24 の生成列が
 変わり、逐語再現を要求する用途で bit 一致を手放すリスクがある。
+
+#### 固定 prefix の verify logits 診断
+
+上記の chunk・同時 1 における基準 logit 差 0.1 超の 3 件を選び、最初の
+分岐位置だけを追加測定した。対象は過学習、database transactions、Bayes の prompt。
+診断パッチは該当 verify 行の f32 logits と入力 token を記録する。基準 logits は
+非投機 `--dump-logits` を再実行して取得した。両方式の出力が分岐直前まで基準と
+一致すること、候補行の anchor と draft prefix が基準 token と一致することを確認し、
+同じ位置の行を比較した。`KL` は `KL(softmax(基準) || softmax(比較先))`、最大差は
+全語彙にわたる `max |logit_基準 - logit_比較先|`。位置は生成 token の 0 始まり。
+
+| prompt / 位置 | 基準 top-1 − top-2 | serial 対基準: KL / 最大差 / top-1 | chunk 対基準: KL / 最大差 / top-1 |
+| --- | ---: | --- | --- |
+| 過学習 / 223 | 0.2130 | 0 / 0 / 一致 | 0.007301 / 1.2705 / 不一致 |
+| transactions / 28 | 0.1223 | 0 / 0 / 一致 | 0.002568 / 0.2595 / 不一致 |
+| Bayes / 34 | 0.2305 | 0 / 0 / 一致 | 0.009551 / 0.3589 / 不一致 |
+
+serial の 3 行は基準と全 logits が完全一致した。chunk の 3 行はすべて top-1 が
+異なる。3 行は大きな分岐から選択したため、KL の平均や top-1 不一致率を全位置に
+一般化できない。非投機 batch 8 の全 logits はこの診断では取得していないので、
+上表の最大 logit 差を batch 8 の最大差と直接比較することもできない。分岐分布と
+logit margin の観測範囲からは、chunk を batch 数変更時と同程度の揺れと見なせず、
+既定を変更する前に品質と再現性の許容基準を決める必要がある。
+
+測定の全 token 列・基準 margin・集計用 round 数は
+`gdn_recurrence_data.json`、この 3 行の要約は `gdn_recurrence_diagnostic.json`。
+`gdn_recurrence_scripts/build_diagnostic.sh` は一時パッチで診断バイナリを作り、
+元のソースと通常バイナリを復元する。`run_diagnostic.sh` は既存の測定結果を前提に
+診断を実行する。診断バイナリと生 logits は `/tmp` に置き、git には含めない。
+GPU 使用時はいずれも `/tmp/r9700.lock` を使い、サーバー全回帰 `--all` は未実施。
