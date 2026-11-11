@@ -130,3 +130,100 @@ round 時間、decode tok/s と、同時 4/8/16/32 の速度・出力一致率�
 現行 chain/batch のどちらでも実験版が選ばれないため、そのまま測っても新 variant
 の比較にならない。既定を変更する判断は、呼び出し側が history の要否を明示できる
 ようにした後、実モデルの数値ゲートと速度を測定してから行う必要がある。
+
+## 実モデル batch 経路の再確認
+
+前節の「batch が recurrent history も要求する」という記述は誤りだった。
+`create_dflash2_spec_batch_context` は `create_gdn_spec_history(..., false)`
+で conv history のみを確保し、`build_batch_gdn_options` は全 compact log と
+`defer_state_store` を指定している。verify 後は受理 prefix の compact log を
+live state に replay し、conv は必要な行の history から復元する。従って recurrent
+history の要求元は batch にはなく、verify dispatch の tree parent は通常の chain
+では null である。条件を満たす batch の WMMA verify は元から環境変数を有効にすれば
+chunk を選択する。先の接続不能という推測を実モデルの測定前に訂正する。
+
+空の recurrent tensor に対する `data()` の呼び出しを避け、conv-only history view が
+recurrent pointer と stride を明示的に null / 0 にするようにした。conv history と
+capture 行数は維持し、この契約の単体テストを加えた。通常の batch では元から空の
+pointer であり、この修正を chunk 有効化による性能改善と混同しない。
+
+単発 `dflash2_spec_step` は部分受理時に snapshot へ戻して compact log を replay
+するが、全受理時は verify が更新した live state をそのまま採用する。deferred 化には
+全受理でも replay する変更が必要であり、今回は共有経路を広げず、max-concurrent 1
+の batched serve を単一 request の実測に用いる。環境変数を指定しなければ serial の
+ままである。
+
+### batch の実測
+
+`/tmp/agentx/conc3.py` の benchmark prompt、FP8 KV、greedy、各 request 最大
+160 token、K=7、`--max-num-batched-tokens 2048`、prefix cache 無効。全員が
+生成中の共通区間に出た token 数 / 区間長であり、全処理時間で割った速度ではない。
+各条件 2 回、単位 tok/s。短い共通区間（約 2.2〜3.1 秒）と request ごとの生成終了、
+生成列の変化による影響を含む。
+
+| 同時数 | serial 2回（平均） | chunk 2回（平均） | 平均比 |
+| ---: | --- | --- | ---: |
+| 4 | 194.15, 178.64（186.40） | 212.18, 212.93（212.56） | +14.0% |
+| 8 | 220.71, 246.90（233.81） | 295.45, 295.41（295.43） | +26.4% |
+| 16 | 237.67, 238.23（237.95） | 274.75, 274.59（274.67） | +15.4% |
+| 32 | 291.19, 297.10（294.15） | 333.15, 332.23（332.69） | +13.1% |
+
+過去の非投機値は別の測定回であり、同時実行の比較ではない。提示された値との比較は
+以下のとおり。差は各値 / 非投機 - 1 で、改善幅は serial から chunk への差の変化。
+
+| 同時数 | 過去の非投機 | 今回 serial（差） | 今回 chunk（差） | 差の改善 |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 286 | 237.95（-16.8%） | 274.67（-4.0%） | +12.8 pp |
+| 32 | 420 | 294.15（-30.0%） | 332.69（-20.8%） | +9.2 pp |
+
+実モデルの verify 中、8 request × 8 行の最初の 64 行を別の診断ビルドで捕捉した。
+semantic timing の hipEvent で GDN recurrence 48 層を合算すると、serial 34.282 ms、
+chunk 5.804 ms（5.91 倍、各 1 回）だった。各計時区間の event 投入と同期を含む
+診断で、上記 throughput 測定とは別である。両方とも `rows=64 requests=8` を確認した。
+
+### 実モデルの数値ゲートと単一 request の速度
+
+R9700、Qwen3.8 27B EXL3 4bpw mul24、DFlash2 K=7、BF16 KV、greedy、seed 0、
+最大生成 256 token。`draft_forest.md` の shell / code / reasoning と同じ prompt
+を使った。非投機は `shelf-compute --dump-logits`、serial と chunk は `--serve-stdio
+--max-concurrent-requests 1` の batched verify を用いた。各方式の生成 token を
+非投機と比較し、最初の不一致位置の非投機 logits の top-1 と top-2 の差を求めた。
+位置は **0 始まり**、一致は 256 token 全部が一致したことを表す。
+serial と chunk は各 3 回とも方式内の生成列が一致した。
+
+| prompt | serial 対非投機の最初の不一致 / 差 | chunk 対非投機の最初の不一致 / 差 | serial と chunk の先頭一致長（割合） |
+| --- | --- | --- | --- |
+| shell | 一致 / — | 37 / 0.051245 | 37 / 256（14.5%） |
+| code | 一致 / — | 118 / 0.020216 | 118 / 256（46.1%） |
+| reasoning | 一致 / — | 53 / 0.030224 | 53 / 256（20.7%） |
+
+最初の不一致位置では 3 件とも指定された logit 差 0.1 以下だった。これは同じ
+prefix における最初の分岐だけの検査であり、以後の異なる生成文脈での品質や
+全入力に対する一致を保証しない。3 prompt とも chunk は bit 一致しない。
+
+単一 request の各方式 3 回。受理長は draft token / round、round 時間は
+`DFLASH2_ROUND_MS / DFLASH2_ROUNDS` の各回平均、decode tok/s は serve の最初と
+最後の token 通知の時刻差で 255 token を割った各回の平均。通知や host 側処理を
+含むので単発 CLI の過去表とは直接同一視しない。括弧内は各回の tok/s。
+
+| prompt | 方式 | 受理/round | ms/round | decode tok/s 平均（各回） |
+| --- | --- | ---: | ---: | --- |
+| shell | serial | 3.048 | 58.790 | 68.74（68.51, 68.90, 68.80） |
+| shell | chunk | 3.180 | 55.956 | 75.00（75.36, 67.91, 81.74） |
+| code | serial | 3.636 | 57.686 | 79.29（79.29, 79.24, 79.33） |
+| code | chunk | 3.113 | 54.836 | 74.06（74.58, 72.98, 74.61） |
+| reasoning | serial | 3.322 | 58.760 | 73.43（73.51, 73.37, 73.40） |
+| reasoning | chunk | 3.113 | 55.457 | 74.03（73.99, 74.05, 74.06） |
+
+chunk は全 prompt で round 時間が短いが、出力の分岐後に受理長が変化する。code の
+平均 decode 速度は約 6.6% 低下し、全 prompt の速度改善は得られなかった。shell の
+chunk 速度は 67.91〜81.74 tok/s とばらつきが大きい。
+
+### 検証
+
+ビルド成功。`test_qwen35_gdn_recurrence_selector`、`test_gdn_recurrence`、
+`test_gdn_recurrence_exact_history`、`test_gdn_spec_history`、
+`test_gdn_compact_log_commit`、DFlash2 関連など計 10 ctest は全 pass。
+server `--group core` は 18 pass、1 skip（`test_plamo3_template.py`）、0 fail。
+全回帰 `--all` は実行していない。既定を変えるか、bit 一致を諦めるかの判断は
+この限定的な gate と速度結果を踏まえて別途必要である。
