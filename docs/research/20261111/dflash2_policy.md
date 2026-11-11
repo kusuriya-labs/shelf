@@ -6,7 +6,10 @@ R9700（gfx1201）、Qwen3.8 27B EXL3 4bpw mul24、DFlash2 K=7、FP8 KV、
 greedy、各 request 最大 160 token、prefix cache 無効。全 request が生成中の共通区間の
 合計 token/s を用いる。損益分岐は benchmark と日本語を各 2 回測る。比較は前回の
 6 種の入力（mixed の同時 1 は混在できないため対象外）で行う。
-各実行は `/tmp/r9700.lock` を取得する。単一 request は serial verify、複数の
+各実行は `/tmp/r9700.lock` を取得する。回数は依頼どおり 1〜2 回であり、
+通常の 5 回中央値ではない。順序は非投機、固定、ポリシーの固定順で、
+反復間で逆順にしていないため、clock 変動の影響が残る。日本語・同時 2 の
+非投機は 52.92 と 49.09 tok/s で 7% 以上変動し、3% 境界の判定は特に不確かである。単一 request は serial verify、複数の
 DFlash2 request は exact chunk verify を使う。exact は bit 一致を意味しない。
 
 ## ポリシー
