@@ -203,7 +203,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     const bool tree_chunk = ctx.spec.tree_row_parent != nullptr &&
         ctx.role == ::shelf::runtime::ExecutionRole::Verify && !mixed_verify &&
         select_gdn_recurrence_implementation(tree_selector) == GdnRecurrenceImplementation::Optimized &&
-        verify_chunk_env != nullptr && verify_chunk_env[0] != '\0' && verify_chunk_env[0] != '0' &&
+        (verify_chunk_env == nullptr || (verify_chunk_env[0] != '\0' && verify_chunk_env[0] != '0')) &&
         tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0' &&
         c.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
         c.head_v % ::shelf::kernel::kGdnRecurrenceWmmaVGroup == 0u &&
