@@ -8,7 +8,9 @@ for name in ('benchmark','japanese'):
   for rep in (1,2):
    for mode in ('off','fixed'):
     tag=f'{name}_{n}_r{rep}_{mode}'
-    env=dict(os.environ, ERRF=str(out/f'{tag}.err'),GENF=str(out/f'{tag}.json'),SHELF_GDN_VERIFY_CHUNKED='1',SHELF_GDN_VERIFY_CHUNKED_EXACT='1')
+    env=dict(os.environ, ERRF=str(out/f'{tag}.err'),GENF=str(out/f'{tag}.json'))
+    env.pop('SHELF_GDN_VERIFY_CHUNKED', None)
+    env.pop('SHELF_GDN_VERIFY_CHUNKED_EXACT', None)
     args=['flock','/tmp/r9700.lock','timeout','1500',sys.executable,'-I',str(script),str(n),'160',str(prompt_dir / f'{name}.json'),'--kv-cache-dtype','fp8','--max-num-batched-tokens','2048']
     if mode=='fixed': args += ['--dflash2-model-dir',os.environ['SHELF_DFLASH2_MODEL_DIR'],'--dflash2-drafts','7']
     print('start',tag,flush=True)

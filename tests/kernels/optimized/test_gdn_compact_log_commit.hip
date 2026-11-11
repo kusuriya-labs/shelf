@@ -211,7 +211,7 @@ void test_chunk_verify(hipStream_t stream) {
     a.capture_rows = 0u;
     a.skip_state_store = 1u;
     a.num_gdn_states = 1u;
-    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "0", 1);
     ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess;
     std::vector<float> ref(kRows * kVdim), chunk(ref.size());
     ok = ok && hipStreamSynchronize(stream) == hipSuccess &&
@@ -235,6 +235,14 @@ void test_chunk_verify(hipStream_t stream) {
     ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
          hipStreamSynchronize(stream) == hipSuccess &&
          hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    std::vector<float> explicit_chunk = chunk;
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && std::memcmp(explicit_chunk.data(), chunk.data(), chunk.size() * 4u) == 0,
+          "single-request default selects chunk verify");
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
     if (std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr) {
         std::vector<float> exact_output = chunk;
         unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");

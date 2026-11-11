@@ -893,7 +893,7 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     const dim3 grid(static_cast<uint32_t>(grid_x));
     const char* chunk_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
     const bool chunk_enabled = chunk_env != nullptr
-        ? chunk_env[0] != '\0' && chunk_env[0] != '0' : a.num_requests > 1u;
+        ? chunk_env[0] != '\0' && chunk_env[0] != '0' : true;
     const bool chunk = chunk_enabled &&
         a.skip_state_store != 0u && a.recurrent_history == nullptr && a.row_parent == nullptr &&
         a.compact_delta != nullptr && a.compact_k != nullptr && a.compact_a != nullptr &&
@@ -902,7 +902,7 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     if (chunk) {
         const char* exact_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
         const bool chunk_exact = exact_env != nullptr
-            ? exact_env[0] != '\0' && exact_env[0] != '0' : chunk_env == nullptr;
+            ? exact_env[0] != '\0' && exact_env[0] != '0' : false;
         if (!chunk_exact && gdn_recurrence_lossy_enabled())
             shelf_gdn_recurrence_wmma_verify_chunk_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
         else

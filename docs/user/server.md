@@ -149,6 +149,9 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
+- verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
+  生成列が一致しない場合がある。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
+  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` は exact chunk を選ぶが、bit 一致は保証しない。
 
 TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
 context 構築は既定で最大 256 行ずつ処理する。`SHELF_DFLASH2_PREFILL_ROWS=8` で

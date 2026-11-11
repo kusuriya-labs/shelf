@@ -311,6 +311,7 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
 
 
 def main() -> int:
+    os.environ["SHELF_GDN_VERIFY_CHUNKED"] = "0"
     checker = Checker("compute-dflash2")
     for kv_cache_dtype in ("bf16", "fp8", "octave:c4v4"):
         run_suite(kv_cache_dtype, checker)

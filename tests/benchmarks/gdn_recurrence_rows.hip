@@ -30,7 +30,7 @@ int main() {
       if (mode==4 && (nrow!=1 || !kernel::gdn_recurrence_lossy_enabled())) continue;
       a.recurrent_history=mode==2?history:nullptr; a.capture_rows=mode==2?rows:0;
       a.recurrent_history_row_stride=layer; a.skip_state_store=mode==3 || mode>=5;
-      if (mode==6) setenv("SHELF_GDN_VERIFY_CHUNKED","1",1); else unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+      if (mode==6) setenv("SHELF_GDN_VERIFY_CHUNKED","1",1); else setenv("SHELF_GDN_VERIFY_CHUNKED","0",1);
       auto run=[&](){return mode==0?kernel::launch_gdn_recurrence_f32_wmma(a,nullptr):mode==4?kernel::launch_gdn_recurrence_f32_wmma_single_row_experimental(a,nullptr):kernel::launch_gdn_recurrence_f32_wmma_verify(a,nullptr);};
       for(int i=0;i<3;++i) HIP(run()); HIP(hipDeviceSynchronize());
       HIP(hipEventRecord(start));for(int i=0;i<20;++i) HIP(run());HIP(hipEventRecord(stop));HIP(hipEventSynchronize(stop));

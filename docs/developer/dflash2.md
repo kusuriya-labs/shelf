@@ -1151,10 +1151,11 @@ DFlash2 の draft / verify 間で server と mask を交換する処理は未実
   0.6 を下回ると、その request は通常 decode に移る。停止中は 64 round ごとに
   一度だけ投機を試し、受理率が回復したら再開する。短い残り長に伴う打ち切り
   round は EMA に含めない。
-- DFlash2 の複数 request による compact verify は既定で exact chunk を使う。
-  単一 request は既定で serial のまま。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
-  明示的に `SHELF_GDN_VERIFY_CHUNKED=1` とした場合は単一 request も含め従来どおり lossy を選び、
-  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を併用すると exact を使う。
+- DFlash2 の serve における compact verify は request 数と draft 数に関係なく、
+  既定で lossy chunk を使う。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
+  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を指定すると exact chunk を使う。
+  `shelf-compute` の単発 decoder は state store の方式が異なるため、serial のままである。
 
-exact は逐次計算との bit 一致を意味しない。batch 形状でも greedy 出力が分岐する。
+chunk verify は lossy・exact とも逐次計算との bit 一致を保証せず、単一 request でも
+非投機 greedy と生成列が異なる場合がある。batch 形状でも生成列は分岐する。
 速度と生成列の評価、制限は [調査結果](../research/20261111/dflash2_policy.md) を参照。
