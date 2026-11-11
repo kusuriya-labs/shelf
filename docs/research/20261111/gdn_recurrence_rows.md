@@ -62,3 +62,71 @@ verify 1×8→1×10→1×16 は 93.5→113.2→176.6 µs と行にほぼ比例�
 - `test_compute_mtp_rejects_dflash2`、`test_compute_dflash2_accepts_octave` は基準実装で成功。サーバー `--group core` は 18 pass、1 skip（`test_plamo3_template.py`）、0 fail。通常 selector は実験 kernel を選ばないので、これらは実験 kernel を通した token 一致の証明ではない。
 - 実モデルの投機なし 16/32/64 および DFlash2 4/8/16/32 の before/after は未測定。通常経路で有効な改善がないため、37 ms と 1 step の実際の削減量も未測定。目標の 0.35 ms/行以下には到達を示せていない。
 - 次の課題は request ごとの行数と非有限値を安全に扱う selector と数値検証、実際の model state と層間アクセスを用いた測定、64×1 の state 読み書き効率と occupancy の分離、verify の 1 行あたりの WMMA/LDS コスト削減である。compact log 有効時と分岐あり tree も個別に計測する必要がある。
+
+## chunk verify の限定実験
+
+逐次 verify は fp16 丸めに加え、分岐時の親 state 読み戻し、行ごとの recurrent
+history 書き込み、compact log 生成を担う。chunk 内の三角解法で得られる各行の
+`delta` と元の `key`、各行の減衰係数を既存形式で記録すれば、compact commit で
+受理 prefix を再生できる。ただし commit は行ごとに fp16 に丸め、chunk 内部では
+丸めないため両者は完全一致しない。WMMA 自体にも lossy と 4 回 WMMA の差がある。
+
+実験版は `SHELF_GDN_VERIFY_CHUNKED=1` かつ deferred state store、完全な compact
+log、recurrent history なし、tree parent なしの場合だけ使う。既定と、それ以外の
+経路は serial のままである。現在の DFlash2 batched verify は compact replay を
+使うが同時に recurrent history を要求するため、この条件では実験版を選ばない。
+単一 request の chain も deferred store ではない。既存の呼び出し契約を暗黙に
+破らずに両経路を有効化するには、利用者が recurrent history を不要と明示する
+変更や、chunk 版が要求された history を生成する方式が必要である。tree は親の
+history を必要とするため別途設計が必要である。
+
+基準と同じゼロ入力・hipEvent、3 warmup、20 回平均。以下は compact log あり、
+最終 state 書き込みなしの serial と chunk、および通常 decode。µs/層。
+
+| request × 行 | decode lossy | serial lossy | chunk lossy | 速度比 serial/chunk |
+|---|---:|---:|---:|---:|
+| 1×8 | 19.074 | 105.055 | 19.438 | 5.40 |
+| 1×10 | 19.214 | 128.705 | 20.186 | 6.38 |
+| 1×16 | 19.954 | 177.171 | 19.762 | 8.97 |
+| 4×8 | 57.587 | 347.353 | 57.515 | 6.04 |
+| 8×8 | 110.767 | 695.556 | 108.862 | 6.39 |
+| 16×4 | 207.377 | 705.526 | 192.679 | 3.66 |
+
+同じ条件の 4 回 WMMA（exact）の実測は次のとおり。lossy との各行は別実行で、
+クロック等の差を含む。
+
+| request × 行 | decode exact | serial exact | chunk exact |
+|---|---:|---:|---:|
+| 1×8 | 21.912 | 124.338 | 22.584 |
+| 1×10 | 21.650 | 154.862 | 22.846 |
+| 1×16 | 22.178 | 215.019 | 22.136 |
+| 4×8 | 62.145 | 421.951 | 65.677 |
+| 8×8 | 115.719 | 817.661 | 120.270 |
+| 16×4 | 219.085 | 809.258 | 215.471 |
+
+数値比較は 1 request × 16 行、27B geometry、固定 seed の合成非ゼロ入力。
+q と k は一様乱数に 0.1 を掛けた。serial と chunk は同じ入力と fp16 初期 state
+を使い、deferred verify 後に 16 行の compact log を replay する。相対最大は
+最大絶対誤差を参照出力の絶対値の最大で割った値、相対平均は絶対誤差の平均を
+参照の絶対値の平均で割った値。state は replay 後の serial との差である。
+
+| WMMA | 出力 最大絶対誤差 | 出力 平均絶対誤差 | 出力 相対最大 | 出力 相対平均 | state 最大絶対誤差 | state 相対最大 |
+|---|---:|---:|---:|---:|---:|---:|
+| lossy | 3.9302e-5 | 1.9860e-6 | 1.4269e-4 | 1.5604e-4 | 6.1035e-5 | 2.4414e-4 |
+| exact | 3.1047e-5 | 1.6704e-6 | 1.1271e-4 | 1.3125e-4 | 6.1035e-5 | 2.4414e-4 |
+
+exact は出力誤差が小さいが、この入力では lossy も小さく、実測時間は lossy が
+短い。compact commit は元から lossy WMMA であり、exact verify の選択だけでは
+replay まで exact にはならない。各行の bit 一致は保証されない。履歴が要求された
+ときの serial への切替と deferred verify による live state 非更新はテストで確認した。
+この合成入力だけで実モデルの logit 誤差を保証することはできない。
+
+関連 ctest は recurrence、exact history、spec history、compact commit、selector の
+5 件が通過した。server core は 18 pass、1 skip（`test_plamo3_template.py`）、
+0 fail であり、skip を含むため全件通過ではない。全回帰は実行していない。
+
+実モデルの shell/code/reasoning 各 256 token の first-mismatch、logit 差、受理長、
+round 時間、decode tok/s と、同時 4/8/16/32 の速度・出力一致率は未測定である。
+現行 chain/batch のどちらでも実験版が選ばれないため、そのまま測っても新 variant
+の比較にならない。既定を変更する判断は、呼び出し側が history の要否を明示できる
+ようにした後、実モデルの数値ゲートと速度を測定してから行う必要がある。
