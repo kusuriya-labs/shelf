@@ -227,3 +227,33 @@ chunk 速度は 67.91〜81.74 tok/s とばらつきが大きい。
 server `--group core` は 18 pass、1 skip（`test_plamo3_template.py`）、0 fail。
 全回帰 `--all` は実行していない。既定を変えるか、bit 一致を諦めるかの判断は
 この限定的な gate と速度結果を踏まえて別途必要である。
+
+### 追加調査: 受理長の同値と分布比較の未完了事項
+
+上記の既存実行ログを再集計した。code と reasoning の chunk の 3.113 は
+丸めだけが同じなのではなく、どちらも 193 accepted / 62 rounds である。ただし
+位置 bucket 別の内訳は異なる（code: 0–256 で 160/52、256–512 で 33/10、
+reasoning: 164/52、29/10。位置は生成 token の offset ではなく実行時の絶対位置）。
+したがって同じ総数から各 round の受理長が同じとは言えず、同値の理由が偶然か
+どうかも、この集計だけでは判断できない。両実行は別の生成文面であり、これを
+固定文面の比較に用いることはできない。
+
+| 参考値 | mean KL | 条件 |
+| --- | ---: | --- |
+| Qwen3.8 27B 4bpw mul24 INT8 対 BF16 | 0.02167 | rocm_exl3、8 ケース・2632 位置、[既存記録](../20261105/exl3_int8_qwen38_27b.md) |
+| chunk verify 対非投機 decode | 未測定 | 同一 prefix の logits が必要 |
+| batch 1 対 batch 8 の非投機 decode | 未測定 | 同一 prefix の logits が必要 |
+
+上記の量子化値は別の実装・コーパスの参考値であり、今回の chunk の品質を推定
+する値ではない。`shelf-compute --dump-logits` は DFlash2 と併用不可、既存
+`shelf-bench quality` は固定 corpus を逐次 decode するが speculative verify の
+各行を dump しない。従って、既存の生成列とログから KL や固定文面の受理率を
+計算することはできない。`SHELF_GDN_RECURRENCE_EXACT=1` は exact WMMA の選択で、
+compact replay や chunk と逐次間の fp16 丸め差が消えるという意味ではない。
+
+残作業は、固定 prefix 上で draft と serial / chunk の verify 行 logits を同じ
+位置・同じ token 列で採取し、逐次 decode の参照と対応付ける診断を設けること、
+同じ入力で非投機 batch 1/8 を採取すること、および十分な corpus で KL の平均・
+p99・最大、top-1 一致、位置ごとの最大 logit 差を検証することである。受理長の
+変化が文面差か数値差か、chunk のずれが batch による数値ノイズと同程度か、
+bit 一致を手放してよいかは未判定である。
