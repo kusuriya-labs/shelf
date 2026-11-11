@@ -7,7 +7,7 @@ prompts=json.loads((P/'prompts.json').read_text())['prompts']
 def percentile(xs,q):
  xs=sorted(xs); j=(len(xs)-1)*q; a=int(j); b=min(a+1,len(xs)-1); return xs[a]+(xs[b]-xs[a])*(j-a)
 base=[json.loads((P/f'base-{i}.json').read_text()) for i in range(len(prompts))]
-for mode,n in [('base',8),('serial',1),('chunk',1),('serial',8),('chunk',8)]:
+for mode,n in [('base',8),('serial',1),('chunk',1),('serial',8),('chunk',8),('exact',1),('exact',8)]:
  results={}; rounds=accepted=0
  for start in ([0] if n == 1 else range(0,len(base),n)):
   tag='-group' if n == 1 else ''
@@ -27,7 +27,7 @@ for mode,n in [('base',8),('serial',1),('chunk',1),('serial',8),('chunk',8)]:
    elif len(a)==len(z): censored+=1
    else: early+=1
   print(json.dumps({'mode':mode,'n':n,'prompt':i,'first':k,'baseline_length':len(a),'output_length':len(z),'margin':b['margins'][k] if k<min(len(a),len(z)) else None}))
- print(json.dumps({'mode':mode,'n':n,'total':len(base),'median_capped':statistics.median(lens),'p10_capped':percentile(lens,.1),'match_512':full,'same_early_stop':censored,'length_mismatch':early,'margin_median':statistics.median(margins) if margins else None,'margin_max':max(margins) if margins else None,'rounds':rounds,'accepted':accepted,'accept_per_round':accepted/rounds if rounds else None}))
+ print(json.dumps({'mode':mode,'n':n,'total':len(base),'median_capped':statistics.median(lens),'p10_capped':percentile(lens,.1),'match_512':full,'same_early_stop':censored,'length_mismatch':early,'margin_median':statistics.median(margins) if margins else None,'margin_max':max(margins) if margins else None,'margin_over_0_1':sum(m > 0.1 for m in margins),'rounds':rounds,'accepted':accepted,'accept_per_round':accepted/rounds if rounds else None}))
 for mode in ('serial','chunk'):
  for n in (1,8):
   files=sorted(P.glob(f'{mode}-{n}-*-prefix.json'))

@@ -49,8 +49,9 @@ def baseline(i,ids):
 def serve(mode,n,indices,ids,limits=None,tag=''):
  path=OUT/f'{mode}-{n}-{indices[0]}{tag}.json'
  if path.exists(): return
- env=dict(os.environ); env['SHELF_DFLASH2_SERVE_STATS']='1'; env.pop('SHELF_GDN_VERIFY_CHUNKED',None)
- if mode=='chunk': env['SHELF_GDN_VERIFY_CHUNKED']='1'
+ env=dict(os.environ); env['SHELF_DFLASH2_SERVE_STATS']='1'; env.pop('SHELF_GDN_VERIFY_CHUNKED',None); env.pop('SHELF_GDN_VERIFY_CHUNKED_EXACT',None); env.pop('SHELF_GDN_RECURRENCE_EXACT',None)
+ if mode in ('chunk', 'exact'): env['SHELF_GDN_VERIFY_CHUNKED']='1'
+ if mode=='exact': env['SHELF_GDN_VERIFY_CHUNKED_EXACT']='1'
  cmd=['flock','/tmp/r9700.lock',BIN,'--model-dir',MODEL,'--serve-stdio','--device','0','--max-seq-len','1024','--max-concurrent-requests',str(n),'--prefix-cache','0','--kv-cache-dtype','bf16','--temperature','0']
  if mode!='base': cmd+=['--dflash2-model-dir',DRAFT,'--dflash2-drafts','7']
  err=OUT/f'{mode}-{n}-{indices[0]}{tag}.err'
