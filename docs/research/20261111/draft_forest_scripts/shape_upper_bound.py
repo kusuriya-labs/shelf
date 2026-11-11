@@ -89,6 +89,11 @@ def main():
         generated, rounds = run(ids, True)
         if len(target) != 256 or len(generated) != 256 or not rounds:
             raise ValueError('incomplete generation or missing trace')
+        if os.environ.get('SHELF_TREE_SHAPE_RECORD_DIR'):
+            output_dir = Path(os.environ['SHELF_TREE_SHAPE_RECORD_DIR'])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f'{name}.json').write_text(json.dumps(
+                {'target': target, 'generated': generated, 'rounds': rounds}))
         origin = rounds[0][0]
         result = {n: {'current': 0, 'oracle': 0, 'fixed': 0} for n in (8, 10, 12, 16)}
         usable = 0
