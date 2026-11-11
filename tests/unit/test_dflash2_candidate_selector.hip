@@ -3,6 +3,7 @@
 #include <shelf/core/memory/tensor.h>
 #include <shelf/core/memory/types.h>
 #include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <shelf/models/qwen35/runtime/dflash2_tree_budget.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -53,6 +54,7 @@ static void test_tree_probabilities(hipStream_t stream) {
         std::vector<shelf::kernel::DFlash2TreeProbabilities> output(rows);
         check(hipStreamSynchronize(stream) == hipSuccess, "tree probability sync");
         check(hipMemcpy(output.data(), d_output, rows * sizeof(*d_output), hipMemcpyDeviceToHost) == hipSuccess, "tree probability download");
+        std::vector<std::vector<shelf::qwen35::runtime::DFlash2TreeCandidate>> gpu_choices(rows), cpu_choices(rows);
         for (uint32_t r = 0; r < rows; ++r) {
             double sum = 0.0;
             for (uint32_t i = 0; i < vocab; ++i) sum += std::exp(static_cast<double>(logits[r * vocab + i]));
@@ -60,11 +62,23 @@ static void test_tree_probabilities(hipStream_t stream) {
             for (uint32_t j = 0; j < top_k; ++j) {
                 const double p = std::exp(static_cast<double>(top_logits[r * top_k + j])) / sum;
                 mass += p;
+                gpu_choices[r].push_back({output[r].ids[j], output[r].probabilities[j]});
+                cpu_choices[r].push_back({ids[r * top_k + j], p});
                 check(output[r].ids[j] == ids[r * top_k + j], "tree probability id");
                 check(std::abs(output[r].probabilities[j] - p) < 1e-5, "tree full vocabulary normalization");
             }
             check(std::abs(output[r].residual - (1.0 - mass)) < 1e-5, "tree residual probability");
         }
+        shelf::qwen35::runtime::DFlash2Tree gpu_tree, cpu_tree;
+        using shelf::qwen35::runtime::make_budgeted_dflash2_tree;
+        check(make_budgeted_dflash2_tree(7, 3, rows, 12,
+              [&](uint32_t depth, int32_t) { return gpu_choices[depth]; }, gpu_tree),
+              "GPU probability tree selection");
+        check(make_budgeted_dflash2_tree(7, 3, rows, 12,
+              [&](uint32_t depth, int32_t) { return cpu_choices[depth]; }, cpu_tree),
+              "CPU probability tree selection");
+        check(gpu_tree.tokens == cpu_tree.tokens && gpu_tree.parent == cpu_tree.parent &&
+              gpu_tree.depth == cpu_tree.depth, "GPU and CPU select the same tree");
     }
     if (d_output) check(hipFree(d_output) == hipSuccess, "tree output free");
     if (d_ids) check(hipFree(d_ids) == hipSuccess, "tree ids free");

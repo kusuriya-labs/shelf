@@ -112,7 +112,7 @@ int main() {
     using shelf::qwen35::runtime::dflash2_batch_tree_metadata_bytes;
     check(dflash2_batch_tree_metadata_bytes(16u, 0u) == 0u,
           "zero tree budget adds no batch metadata");
-    check(dflash2_batch_tree_metadata_bytes(16u, 10u) == 6u * 256u + 768u,
+    check(dflash2_batch_tree_metadata_bytes(16u, 10u) == 6u * 256u + 768u + 768u,
           "tree metadata footprint accounts for aligned arrays");
 
     DFlash2Footprint footprint;

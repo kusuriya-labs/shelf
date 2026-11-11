@@ -80,6 +80,77 @@ ScheduledBatch make_prefill_batch(
 
 }  // namespace
 
+Status select_budget_tree(DFlash2SpecDecoder& decoder, int32_t pending_token,
+                          uint32_t position, uint32_t room, uint32_t budget,
+                          uint32_t dflash_k, uint32_t proposal_row,
+                          std::span<const int32_t> drafts,
+                          shelf::kernel::DFlash2TreeProbabilities* device_probabilities,
+                          DFlash2Tree& tree) {
+    DFlash2SpecTiming* tm = decoder.timing;
+    const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
+    const uint32_t vocab = static_cast<uint32_t>(decoder.draft->config->vocab_size);
+    const uint32_t retained = std::min(top_k, shelf::kernel::kDflash2TreeRetained);
+    using Probabilities = shelf::kernel::DFlash2TreeProbabilities;
+    std::vector<Probabilities> probabilities(dflash_k);
+    hipError_t err = shelf::kernel::launch_dflash2_tree_probabilities(
+        decoder.draft->proposal_logits.data<float>() + static_cast<std::size_t>(proposal_row) * vocab, decoder.draft->proposal_topk_ids.data<int32_t>() + static_cast<std::size_t>(proposal_row) * top_k,
+        decoder.draft->proposal_topk_logits.data<float>() + static_cast<std::size_t>(proposal_row) * top_k, device_probabilities,
+        dflash_k, vocab, top_k, decoder.stream);
+    if (err == hipSuccess) err = hipMemcpyAsync(probabilities.data(), device_probabilities,
+        probabilities.size() * sizeof(Probabilities), hipMemcpyDeviceToHost, decoder.stream);
+    if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
+    if (err != hipSuccess) return Status::hip_error("dflash2 budget probabilities copy", hipGetErrorString(err), __FILE__, __LINE__);
+    std::vector<std::vector<DFlash2TreeCandidate>> choices(dflash_k);
+    for (uint32_t i = 0; i < dflash_k; ++i) {
+        for (uint32_t j = 0; j < retained; ++j) {
+            choices[i].push_back({probabilities[i].ids[j], probabilities[i].probabilities[j]});
+        }
+        if (tm != nullptr) { tm->tree_retained_mass += 1.0 - probabilities[i].residual; ++tm->tree_probability_rows; }
+    }
+    if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_SHAPE", false)) {
+        std::fprintf(stderr, "DFLASH2_TREE_SHAPE %u %d", position, pending_token);
+        std::fprintf(stderr, " drafts");
+        for (uint32_t i = 0; i < dflash_k; ++i) std::fprintf(stderr, " %d", drafts[i]);
+        for (const auto& row : choices) {
+            std::fprintf(stderr, " ;");
+            for (const auto& candidate : row)
+                std::fprintf(stderr, " %d:%.9g", candidate.token, candidate.probability);
+        }
+        std::fprintf(stderr, "\n");
+    }
+    if (!make_budgeted_dflash2_tree(pending_token, std::min(budget, room),
+            dflash_k, position, [&](uint32_t depth, int32_t) { return choices[depth]; }, tree))
+        return Status::invalid_state("dflash2 budget tree selection failed", __FILE__, __LINE__);
+    if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
+        tree = make_dflash2_tree(pending_token,
+            std::span<const int32_t>(drafts.data(), dflash_k), {}, 0u, position);
+    }
+    if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false)) {
+        std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
+        err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>() + static_cast<std::size_t>(proposal_row) * vocab,
+                logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+        if (err != hipSuccess) return Status::hip_error("dflash2 budget reference copy", hipGetErrorString(err), __FILE__, __LINE__);
+        std::vector<std::vector<DFlash2TreeCandidate>> reference(dflash_k);
+        for (uint32_t i = 0; i < dflash_k; ++i) {
+            const float* row = logits.data() + static_cast<size_t>(i) * vocab;
+            const float maximum = *std::max_element(row, row + vocab);
+            double sum = 0.0;
+            for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
+            for (uint32_t j = 0; j < retained; ++j) {
+                const int32_t id = probabilities[i].ids[j];
+                reference[i].push_back({id, std::exp(static_cast<double>(row[id] - maximum)) / sum});
+            }
+        }
+        DFlash2Tree expected;
+        if (!make_budgeted_dflash2_tree(pending_token, std::min(budget, room),
+                dflash_k, position, [&](uint32_t depth, int32_t) { return reference[depth]; }, expected))
+            return Status::invalid_state("dflash2 budget reference selection failed", __FILE__, __LINE__);
+        if (tree.tokens != expected.tokens || tree.parent != expected.parent)
+            std::fprintf(stderr, "DFLASH2_TREE_CPU_MISMATCH position=%u budget=%u\n", position, budget);
+    }
+    return Status::make_ok();
+}
+
 Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     Executor& target,
     dflash2::DFlash2Executor& draft,
@@ -1039,68 +1110,11 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_select_ms : nullptr);
         if (decoder.config.tree_budget != 0u) {
-            const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
-            const uint32_t vocab = static_cast<uint32_t>(decoder.draft->config->vocab_size);
-            const uint32_t retained = std::min(top_k, shelf::kernel::kDflash2TreeRetained);
-            using Probabilities = shelf::kernel::DFlash2TreeProbabilities;
-            auto* device_probabilities = reinterpret_cast<Probabilities*>(decoder.gdn_ranks.front().tree_scores);
-            std::vector<Probabilities> probabilities(dflash_k);
-            hipError_t err = shelf::kernel::launch_dflash2_tree_probabilities(
-                decoder.draft->proposal_logits.data<float>(), decoder.draft->proposal_topk_ids.data<int32_t>(),
-                decoder.draft->proposal_topk_logits.data<float>(), device_probabilities,
-                dflash_k, vocab, top_k, decoder.stream);
-            if (err == hipSuccess) err = hipMemcpyAsync(probabilities.data(), device_probabilities,
-                probabilities.size() * sizeof(Probabilities), hipMemcpyDeviceToHost, decoder.stream);
-            if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
-            if (err != hipSuccess) return Status::hip_error("dflash2 budget probabilities copy", hipGetErrorString(err), __FILE__, __LINE__);
-            std::vector<std::vector<DFlash2TreeCandidate>> choices(dflash_k);
-            for (uint32_t i = 0; i < dflash_k; ++i) {
-                for (uint32_t j = 0; j < retained; ++j) {
-                    choices[i].push_back({probabilities[i].ids[j], probabilities[i].probabilities[j]});
-                }
-                if (tm != nullptr) { tm->tree_retained_mass += 1.0 - probabilities[i].residual; ++tm->tree_probability_rows; }
-            }
-            if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_SHAPE", false)) {
-                std::fprintf(stderr, "DFLASH2_TREE_SHAPE %u %d", position, pending_token);
-                std::fprintf(stderr, " drafts");
-                for (uint32_t i = 0; i < dflash_k; ++i) std::fprintf(stderr, " %d", drafts[i]);
-                for (const auto& row : choices) {
-                    std::fprintf(stderr, " ;");
-                    for (const auto& candidate : row)
-                        std::fprintf(stderr, " %d:%.9g", candidate.token, candidate.probability);
-                }
-                std::fprintf(stderr, "\n");
-            }
-            if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
-                    dflash_k, position, [&](uint32_t depth, int32_t) { return choices[depth]; }, tree))
-                return Status::invalid_state("dflash2 budget tree selection failed", __FILE__, __LINE__);
-            if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
-                tree = make_dflash2_tree(pending_token,
-                    std::span<const int32_t>(drafts.data(), dflash_k), {}, 0u, position);
-            }
-            if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false)) {
-                std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
-                err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>(),
-                                logits.size() * sizeof(float), hipMemcpyDeviceToHost);
-                if (err != hipSuccess) return Status::hip_error("dflash2 budget reference copy", hipGetErrorString(err), __FILE__, __LINE__);
-                std::vector<std::vector<DFlash2TreeCandidate>> reference(dflash_k);
-                for (uint32_t i = 0; i < dflash_k; ++i) {
-                    const float* row = logits.data() + static_cast<size_t>(i) * vocab;
-                    const float maximum = *std::max_element(row, row + vocab);
-                    double sum = 0.0;
-                    for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
-                    for (uint32_t j = 0; j < retained; ++j) {
-                        const int32_t id = probabilities[i].ids[j];
-                        reference[i].push_back({id, std::exp(static_cast<double>(row[id] - maximum)) / sum});
-                    }
-                }
-                DFlash2Tree expected;
-                if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
-                        dflash_k, position, [&](uint32_t depth, int32_t) { return reference[depth]; }, expected))
-                    return Status::invalid_state("dflash2 budget reference selection failed", __FILE__, __LINE__);
-                if (tree.tokens != expected.tokens || tree.parent != expected.parent)
-                    std::fprintf(stderr, "DFLASH2_TREE_CPU_MISMATCH position=%u budget=%u\n", position, decoder.config.tree_budget);
-            }
+            Status st = select_budget_tree(decoder, pending_token, position, room,
+                decoder.config.tree_budget, dflash_k, 0u,
+                std::span<const int32_t>(drafts.data(), dflash_k),
+                reinterpret_cast<shelf::kernel::DFlash2TreeProbabilities*>(decoder.gdn_ranks.front().tree_scores), tree);
+            if (!st.ok()) return st;
             verify_rows = static_cast<uint32_t>(tree.tokens.size());
         } else {
             std::vector<int32_t> alternatives(dflash_k, -1);
@@ -1736,6 +1750,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         int32_t thinking_close_token = -1;
         bool batched = false;
         bool stopped = false;
+        DFlash2Tree tree;
     };
 
     std::vector<SlotPlan> plans;
@@ -1816,7 +1831,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             break;
         }
     }
-    bool bridge = context.verify_token_ids_device != nullptr &&
+    bool bridge = context.tree_budget == 0u && context.verify_token_ids_device != nullptr &&
                   context.decision_staging_device != nullptr;
     if (bridge) {
         for (const SlotPlan& plan : plans) {
@@ -1915,6 +1930,25 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 return Status::hip_error("batch draft copy", hipGetErrorString(err), __FILE__,
                                          __LINE__);
             }
+        }
+    }
+
+    if (context.tree_budget != 0u) {
+        if (context.tree.empty())
+            return Status::invalid_state("batch tree scratch is unavailable", __FILE__, __LINE__);
+        uint32_t proposal_row = 0u;
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            SlotPlan& plan = plans[i];
+            if (!plan.batched) continue;
+            const uint32_t row = propose_requests.size() == 1u ? 0u : proposal_row + 1u;
+            const uint32_t room = plan.decoder->sequence->max_seq_len - plan.position;
+            Status st = select_budget_tree(*plan.decoder, plan.anchor, plan.position, room,
+                context.tree_budget, plan.drafts, row,
+                std::span<const int32_t>(drafts[i].data(), plan.drafts),
+                reinterpret_cast<shelf::kernel::DFlash2TreeProbabilities*>(context.tree.front().probability_scratch),
+                plan.tree);
+            if (!st.ok()) return st;
+            proposal_row += plan.proposal_drafts + 1u;
         }
     }
 

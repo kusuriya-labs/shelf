@@ -1,6 +1,7 @@
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 
 #include <shelf/core/gpu/cleanup.h>
+#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 
 #include <vector>
 #include <type_traits>
@@ -67,6 +68,8 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
             if (st.ok()) st = allocate(max_rows, tree.rope_positions);
             if (st.ok()) st = allocate(max_rows, tree.committed_end);
             if (st.ok()) st = allocate(max_rows, tree.replay_rows);
+            if (st.ok()) st = allocate(static_cast<std::size_t>(max_rows) *
+                sizeof(shelf::kernel::DFlash2TreeProbabilities) / sizeof(float), tree.probability_scratch);
             if (!st.ok()) return st;
         }
         auto history = create_gdn_spec_history(arena, pool, max_rows, false);

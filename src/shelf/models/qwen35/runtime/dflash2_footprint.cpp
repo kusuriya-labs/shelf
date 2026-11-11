@@ -8,6 +8,7 @@
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/kernels/dflash2/batch.h>
 #include <shelf/models/qwen35/kernels/dflash2/topk.h>
+#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 
 #include <algorithm>
 #include <cstring>
@@ -89,7 +90,8 @@ std::size_t dflash2_batch_tree_metadata_bytes(std::size_t max_rows, uint32_t tre
     if (tree_budget == 0u) return 0u;
     return 5u * align_up(max_rows * sizeof(uint32_t)) +
         align_up((max_rows + 1u) * sizeof(uint32_t)) +
-        align_up(max_rows * tree_budget * sizeof(uint32_t));
+        align_up(max_rows * tree_budget * sizeof(uint32_t)) +
+        align_up(max_rows * sizeof(shelf::kernel::DFlash2TreeProbabilities));
 }
 
 std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,

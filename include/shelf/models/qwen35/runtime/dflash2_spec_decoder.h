@@ -269,6 +269,7 @@ struct DFlash2BatchTreeMetadata {
     uint32_t* rope_positions = nullptr;
     uint32_t* committed_end = nullptr;
     int32_t* replay_rows = nullptr;
+    float* probability_scratch = nullptr;
 };
 
 struct DFlash2SpecBatchContext {
