@@ -282,6 +282,81 @@ void test_chunk_verify(hipStream_t stream) {
     d.free_all();
 }
 
+void test_tree_chunk_batch(hipStream_t stream) {
+    constexpr uint32_t count = 4u, rows = 9u, total = count * rows;
+    Buf src, d;
+    if (!setup(src, 17003u)) { check(false, "batch tree setup"); src.free_all(); return; }
+    bool ok = true;
+    auto duplicate = [&](auto*& dst, const auto* input, size_t row_bytes) {
+        ok = ok && hipMalloc(&dst, total * row_bytes) == hipSuccess;
+        for (uint32_t i = 0; ok && i < count; ++i)
+            ok = hipMemcpy(reinterpret_cast<char*>(dst) + i * rows * row_bytes, input,
+                           rows * row_bytes, hipMemcpyDeviceToDevice) == hipSuccess;
+    };
+    duplicate(d.q, src.q, kQk * sizeof(float));
+    duplicate(d.k, src.k, kQk * sizeof(float));
+    duplicate(d.v, src.v, kVdim * sizeof(uint16_t));
+    duplicate(d.a, src.a, kHeads * sizeof(uint16_t));
+    duplicate(d.b, src.b, kHeads * sizeof(uint16_t));
+    ok = ok && hipMalloc(&d.state, count * kStates * kSlotStride * sizeof(shelf::fp16_t)) == hipSuccess;
+    for (uint32_t i = 0; ok && i < count; ++i)
+        ok = hipMemcpy(d.state + i * kStates * kSlotStride, src.state,
+                       kStates * kSlotStride * sizeof(shelf::fp16_t), hipMemcpyDeviceToDevice) == hipSuccess;
+    ok = ok && hipMalloc(&d.out, total * kVdim * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_delta, total * kVdim * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_k, total * kHeads * kHeadK * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_a, total * kHeads * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.requests, count * sizeof(::shelf::runtime::DeviceRequestDescriptor)) == hipSuccess;
+    int32_t* parents = nullptr;
+    ok = ok && hipMalloc(&parents, total * sizeof(int32_t)) == hipSuccess;
+    std::vector<int32_t> parent(total);
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> req(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        req[i].request_handle.slot = i;
+        req[i].row_begin = i * rows;
+        req[i].row_count = rows;
+        parent[i * rows] = -1;
+        for (uint32_t j = 1; j < rows; ++j)
+            parent[i * rows + j] = static_cast<int32_t>(i * rows + (j - 1u) / 2u);
+    }
+    ok = ok && hipMemcpy(d.requests, req.data(), req.size() * sizeof(req[0]), hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(parents, parent.data(), parent.size() * sizeof(parent[0]), hipMemcpyHostToDevice) == hipSuccess;
+    auto a = make_args(d);
+    a.dt_bias = reinterpret_cast<const shelf::bf16_t*>(src.dt_bias);
+    a.a_log = reinterpret_cast<const shelf::bf16_t*>(src.a_log);
+    a.num_requests = count;
+    a.actual_rows = total;
+    a.max_request_rows = rows;
+    a.max_sequences = count;
+    a.num_gdn_states = 1u;
+    a.row_parent = parents;
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    a.skip_state_store = 1u;
+    a.compact_delta_layer_stride = total * kVdim;
+    a.compact_k_layer_stride = total * kHeads * kHeadK;
+    a.compact_a_layer_stride = total * kHeads;
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess;
+    std::vector<float> batch(total * kVdim), separate(batch.size());
+    ok = ok && hipMemcpy(batch.data(), d.out, batch.size() * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        a.num_requests = 1u;
+        a.requests = static_cast<const ::shelf::runtime::DeviceRequestDescriptor*>(d.requests) + i;
+        ok = shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess;
+    }
+    ok = ok && hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(separate.data(), d.out, separate.size() * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && batch == separate, "tree chunk batch over 32 rows matches separate requests");
+    unsetenv("SHELF_GDN_TREE_CHUNKED");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    if (parents) shelf::gpu::discard_cleanup_result(hipFree(parents));
+    d.free_all();
+    src.free_all();
+}
+
 void test_tree_chunk(hipStream_t stream) {
     Buf d;
     if (!setup(d, 17002u)) { check(false, "tree chunk setup"); d.free_all(); return; }
@@ -479,6 +554,7 @@ int main() {
 
     test_chunk_verify(stream);
     test_tree_chunk(stream);
+    test_tree_chunk_batch(stream);
 
     Buf d;
     if (!setup(d, 20260930u)) {

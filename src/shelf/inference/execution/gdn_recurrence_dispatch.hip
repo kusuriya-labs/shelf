@@ -170,6 +170,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.requests = ctx.device_requests;
     c.num_requests = num_requests;
     c.actual_rows = actual_rows;
+    c.max_request_rows = max_request_rows;
     c.q_row_stride = q.row_stride;
     c.k_row_stride = k.row_stride;
     c.v_row_stride = v.row_stride;
@@ -207,7 +208,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0' &&
         c.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
         c.head_v % ::shelf::kernel::kGdnRecurrenceWmmaVGroup == 0u &&
-        ctx.spec.gdn_compact.defer_state_store != 0u && c.actual_rows <= 32u &&
+        ctx.spec.gdn_compact.defer_state_store != 0u && max_request_rows <= 32u &&
         ctx.spec.gdn_compact.delta != nullptr && ctx.spec.gdn_compact.k != nullptr &&
         ctx.spec.gdn_compact.a != nullptr && ctx.spec.gdn_compact.delta_layer_stride != 0u &&
         ctx.spec.gdn_compact.k_layer_stride != 0u && ctx.spec.gdn_compact.a_layer_stride != 0u;

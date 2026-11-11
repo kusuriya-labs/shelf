@@ -25,6 +25,7 @@ struct GdnRecurrenceArgs {
 
     uint32_t num_requests = 0;
     uint32_t actual_rows = 0;
+    uint32_t max_request_rows = 0;
 
     uint32_t q_row_stride = 0;
     uint32_t k_row_stride = 0;

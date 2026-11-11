@@ -936,7 +936,8 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     const char* tree_env = std::getenv("SHELF_GDN_TREE_CHUNKED");
     const bool tree_chunk = chunk_enabled &&
         tree_env != nullptr && tree_env[0] != '\0' && tree_env[0] != '0' &&
-        a.actual_rows <= gdngfx12::kWt && a.row_parent != nullptr &&
+        (a.max_request_rows != 0u ? a.max_request_rows : a.actual_rows) <= gdngfx12::kWt &&
+        a.row_parent != nullptr &&
         a.skip_state_store != 0u && a.recurrent_history == nullptr &&
         a.compact_delta != nullptr && a.compact_k != nullptr && a.compact_a != nullptr &&
         a.compact_delta_layer_stride != 0u && a.compact_k_layer_stride != 0u &&
