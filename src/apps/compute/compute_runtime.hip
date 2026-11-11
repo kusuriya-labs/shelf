@@ -512,6 +512,7 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     spec_config.num_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
     spec_config.tree = config_.dflash2_tree;
     spec_config.tree_extra = config_.dflash2_tree_extra;
+    spec_config.tree_budget = config_.dflash2_tree_budget;
     std::size_t lm_head_k = 0u;
     if (model_) {
         lm_head_k = static_cast<std::size_t>(model_->lm_head().k_padded);

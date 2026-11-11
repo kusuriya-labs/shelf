@@ -37,8 +37,11 @@ std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t lm_head_k,
                                         std::size_t prefill_rows = 0u) noexcept;
 
+std::size_t dflash2_batch_tree_metadata_bytes(std::size_t max_rows, uint32_t tree_budget) noexcept;
+
 std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,
-                                             std::size_t max_rows) noexcept;
+                                             std::size_t max_rows,
+                                             uint32_t tree_budget = 0u) noexcept;
 
 DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    const DFlash2SpecDecoderConfig& spec_config,

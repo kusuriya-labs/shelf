@@ -1117,7 +1117,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
     }
     if (dflash.enabled) {
         const uint32_t session_rows =
-            shelf::qwen35::runtime::dflash2_session_rows(dflash.config.block_size, dflash.drafts);
+            shelf::qwen35::runtime::dflash2_session_rows(dflash.config.block_size, dflash.drafts,
+                                                         runtime.config().dflash2_tree_budget);
         if (runtime.config().dflash2_sessions() >
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows / session_rows) {
             fprintf(stderr,

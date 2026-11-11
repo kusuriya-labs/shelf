@@ -3,6 +3,7 @@
 #include <shelf/core/gpu/cleanup.h>
 
 #include <vector>
+#include <type_traits>
 
 namespace shelf::qwen35::runtime {
 
@@ -20,6 +21,16 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     ctx.tree_budget = tree_budget;
     ctx.history.resize(bindings.size());
     ctx.compact.resize(bindings.size());
+    if (tree_budget != 0u) {
+        ctx.tree.resize(bindings.size());
+        ctx.tree_parent_host.resize(max_rows);
+        ctx.tree_depth_host.resize(max_rows);
+        ctx.tree_offsets_host.resize(static_cast<std::size_t>(max_rows) + 1u);
+        ctx.tree_ancestors_host.resize(static_cast<std::size_t>(max_rows) * tree_budget);
+        ctx.tree_rope_host.resize(max_rows);
+        ctx.tree_committed_end_host.resize(max_rows);
+        ctx.tree_replay_host.resize(max_rows);
+    }
     {
         gpu::GpuArena& leader_arena = *bindings.front().arena;
         auto scope = shelf::gpu::ScopedDevice::create(bindings.front().device);
@@ -41,6 +52,23 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
         auto scope = shelf::gpu::ScopedDevice::create(bindings[r].device);
         if (!scope.ok()) return scope.status();
 
+        if (tree_budget != 0u) {
+            DFlash2BatchTreeMetadata& tree = ctx.tree[r];
+            const auto allocate = [&](std::size_t count, auto*& ptr) -> Status {
+                auto allocation = arena.allocate_aligned(count * sizeof(*ptr), 256u);
+                if (!allocation.ok()) return allocation.status();
+                ptr = static_cast<std::remove_reference_t<decltype(*ptr)>*>(allocation.release().data());
+                return Status::make_ok();
+            };
+            Status st = allocate(max_rows, tree.parent);
+            if (st.ok()) st = allocate(max_rows, tree.depth);
+            if (st.ok()) st = allocate(static_cast<std::size_t>(max_rows) + 1u, tree.ancestor_offsets);
+            if (st.ok()) st = allocate(static_cast<std::size_t>(max_rows) * tree_budget, tree.ancestor_positions);
+            if (st.ok()) st = allocate(max_rows, tree.rope_positions);
+            if (st.ok()) st = allocate(max_rows, tree.committed_end);
+            if (st.ok()) st = allocate(max_rows, tree.replay_rows);
+            if (!st.ok()) return st;
+        }
         auto history = create_gdn_spec_history(arena, pool, max_rows, false);
         if (!history.ok()) return history.status();
         ctx.history[r] = history.release();
@@ -81,6 +109,14 @@ Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noe
     }
     context.history.clear();
     context.compact.clear();
+    context.tree.clear();
+    context.tree_parent_host.clear();
+    context.tree_depth_host.clear();
+    context.tree_offsets_host.clear();
+    context.tree_ancestors_host.clear();
+    context.tree_rope_host.clear();
+    context.tree_committed_end_host.clear();
+    context.tree_replay_host.clear();
     context.max_rows = 0u;
     context.tree_budget = 0u;
     context.history_bytes = 0u;

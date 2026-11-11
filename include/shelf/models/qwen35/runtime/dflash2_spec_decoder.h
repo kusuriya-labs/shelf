@@ -27,10 +27,12 @@ constexpr uint32_t kDFlash2SpecMaxVerifyRows = 512u;
 // Rows one speculating session puts through the drafter and the verify pass: the anchor plus `drafts` draft rows,
 // never more than the drafter's block. Serve sizes its row budgets (scratch, batch history / compact log, target output
 // rows) from this instead of block_size, so a small K does not pay for the 8-row block it never uses.
-constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts) noexcept {
+constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts,
+                                        uint32_t tree_budget = 0u) noexcept {
     const uint32_t wanted = drafts + 1u;
-    return block_size == 0u ? wanted
-                            : (wanted < block_size ? wanted : static_cast<uint32_t>(block_size));
+    const uint32_t chain = block_size == 0u ? wanted
+        : (wanted < block_size ? wanted : static_cast<uint32_t>(block_size));
+    return tree_budget > chain ? tree_budget : chain;
 }
 constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
 constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
@@ -259,9 +261,27 @@ struct DFlash2SpecBatchCompact {
     uint64_t a_layer_stride = 0u;
 };
 
+struct DFlash2BatchTreeMetadata {
+    int32_t* parent = nullptr;
+    uint32_t* depth = nullptr;
+    uint32_t* ancestor_offsets = nullptr;
+    uint32_t* ancestor_positions = nullptr;
+    uint32_t* rope_positions = nullptr;
+    uint32_t* committed_end = nullptr;
+    int32_t* replay_rows = nullptr;
+};
+
 struct DFlash2SpecBatchContext {
     std::vector<GdnSpecHistory> history;
     std::vector<DFlash2SpecBatchCompact> compact;
+    std::vector<DFlash2BatchTreeMetadata> tree;
+    std::vector<int32_t> tree_parent_host;
+    std::vector<uint32_t> tree_depth_host;
+    std::vector<uint32_t> tree_offsets_host;
+    std::vector<uint32_t> tree_ancestors_host;
+    std::vector<uint32_t> tree_rope_host;
+    std::vector<uint32_t> tree_committed_end_host;
+    std::vector<int32_t> tree_replay_host;
     uint32_t max_rows = 0u;
     uint32_t tree_budget = 0u;
     uint64_t history_bytes = 0u;
