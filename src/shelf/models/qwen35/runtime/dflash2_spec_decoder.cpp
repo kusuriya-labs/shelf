@@ -1385,18 +1385,21 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_commit_ms : nullptr);
+        const bool restore_needed = walk.rows[accepted] != verify_rows - 1u;
         const bool profile_commit = want_timing && decoder.gdn_ranks.size() == 1u &&
             env_flag_enabled("SHELF_DFLASH2_TREE_PROFILE_COMMIT", false);
         if (profile_commit && hipEventRecord(decoder.draft_start_event, decoder.stream) != hipSuccess)
             return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         {
             ScopedTimer restore_timer(want_timing ? &tm->tree_restore_ms : nullptr);
-            for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
-                auto scope = shelf::gpu::ScopedDevice::create(g.device);
-                if (!scope.ok()) return scope.status();
-                Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
-                                                     walk.rows[accepted], g.stream);
-                if (!st.ok()) return st;
+            if (restore_needed) {
+                for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+                    auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                    if (!scope.ok()) return scope.status();
+                    Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
+                                                         walk.rows[accepted], g.stream);
+                    if (!st.ok()) return st;
+                }
             }
         }
         if (profile_commit && hipEventRecord(decoder.draft_stop_event, decoder.stream) != hipSuccess)
@@ -1415,7 +1418,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 if (err == hipSuccess) err = hipEventElapsedTime(&restore_ms, decoder.draft_start_event, decoder.draft_stop_event);
                 if (err == hipSuccess) err = hipEventElapsedTime(&gather_ms, decoder.verify_start_event, decoder.verify_stop_event);
                 if (err != hipSuccess) return Status::hip_error("dflash2 commit timing", hipGetErrorString(err), __FILE__, __LINE__);
-                std::fprintf(stderr, "DFLASH2_TREE_COMMIT_GPU restore_ms=%.6f gather_ms=%.6f\n", restore_ms, gather_ms);
+                std::fprintf(stderr, "DFLASH2_TREE_COMMIT_GPU restore_ms=%.6f gather_ms=%.6f restore_skipped=%u\n", restore_ms, gather_ms, restore_needed ? 0u : 1u);
             }
         }
         ScopedTimer append_timer(want_timing ? &tm->tree_append_ms : nullptr);
