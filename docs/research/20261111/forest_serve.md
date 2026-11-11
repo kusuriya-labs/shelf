@@ -363,3 +363,23 @@ shell 0・日本語 3・reasoning 2 を使った。各セルは 2 回の平均�
 c=1 非投機との最初の不一致で基準差 0.12203 とゲートを超えた。ただし両者の生成列は
 512 token すべて一致した。N=10/12 および B の差は最大 0.09974 以下だった。
 これらは first-mismatch のみの結果で、chain が c=1 非投機と異なることも考慮する必要がある。
+
+### c=4 の verify GPU 診断
+
+A の別実行で、4 request の batch round を `DFCOST` の hipEvent と semantic timing で
+計測した。表の verify は指定行数が現れた round の GPU 時間中央値で、括弧は件数。
+semantic timing はその行数の最初の 1 round で記録した kernel 時間の和であり、
+event の記録負荷を含むため verify 中央値と直接加算・比較しない。EXL3 は
+`LINEAR_EXL3_INT8`、attention は `PAGED_ATTENTION`、GDN は `GDN_RECURRENCE`。
+N=12 は page 境界の制約で 48 行が現れず、46 行を示す。
+
+| 構成 | 実行行数 | verify GPU ms/round | EXL3 ms | attention ms | GDN ms | 記録 kernel 合計 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| chain | 32 | 59.158 (19) | 48.438 | 0.617 | 3.228 | 62.946 |
+| N=9 | 36 | 61.393 (9) | 49.968 | 0.704 | 3.429 | 65.026 |
+| N=10 | 40 | 63.313 (6) | 51.117 | 0.806 | 3.465 | 66.462 |
+| N=12 | 46 | 65.761 (1) | 52.662 | 2.425 | 3.582 | 69.974 |
+
+この条件では行数増加に伴って verify と EXL3 の時間が増えた。semantic の attention
+は単発値であり、46 行の値を行数だけによる増分とは断定できない。詳細は
+[forest_serve_concurrency_profile.json](forest_serve_concurrency_profile.json) に記録した。
