@@ -274,6 +274,160 @@ void test_chunk_verify(hipStream_t stream) {
     d.free_all();
 }
 
+void test_tree_chunk(hipStream_t stream) {
+    Buf d;
+    if (!setup(d, 17002u)) { check(false, "tree chunk setup"); d.free_all(); return; }
+    std::vector<float> q(kRows * kQk), k(kRows * kQk);
+    bool ok = hipMemcpy(q.data(), d.q, q.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(k.data(), d.k, k.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    for (auto& x : q) x *= 0.1f;
+    for (auto& x : k) x *= 0.1f;
+    ok = ok && hipMemcpy(d.q, q.data(), q.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(d.k, k.data(), k.size() * 4u, hipMemcpyHostToDevice) == hipSuccess;
+    std::vector<uint16_t> hv(kRows * kVdim), ha(kRows * kHeads), hb(kRows * kHeads);
+    std::vector<uint16_t> hdt(kHeads), hal(kHeads);
+    ok = ok && hipMemcpy(hv.data(), d.v, hv.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(ha.data(), d.a, ha.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hb.data(), d.b, hb.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hdt.data(), d.dt_bias, hdt.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hal.data(), d.a_log, hal.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess;
+    auto bf = [](uint16_t v) {
+        uint32_t bits = static_cast<uint32_t>(v) << 16u;
+        float x;
+        std::memcpy(&x, &bits, sizeof(x));
+        return static_cast<double>(x);
+    };
+    int32_t* parents_dev = nullptr;
+    int32_t* path_dev = nullptr;
+    ok = ok && hipMalloc(&parents_dev, kRows * sizeof(int32_t)) == hipSuccess &&
+         hipMalloc(&path_dev, kRows * sizeof(int32_t)) == hipSuccess;
+    const size_t state_n = (size_t)kStates * kSlotStride;
+    std::vector<float> base;
+    ok = ok && read_state_f16(d.state, base, state_n);
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+    for (uint32_t n : {8u, 10u, 16u}) {
+        for (uint32_t shape = 0; shape < 3; ++shape) {
+            std::vector<int32_t> parent(n, -1);
+            for (uint32_t i = 1; i < n; ++i)
+                parent[i] = shape == 0 ? static_cast<int32_t>(i - 1u) :
+                            shape == 1 ? 0 : static_cast<int32_t>((i - 1u) / 2u);
+            ::shelf::runtime::DeviceRequestDescriptor req{};
+            req.request_handle.slot = 0u;
+            req.row_count = n;
+            ok = ok && hipMemcpy(d.requests, &req, sizeof(req), hipMemcpyHostToDevice) == hipSuccess &&
+                 hipMemcpy(parents_dev, parent.data(), n * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess &&
+                 write_state_f16(d.state, base, state_n);
+            auto a = make_args(d);
+            a.actual_rows = n;
+            a.row_parent = parents_dev;
+            a.skip_state_store = 1u;
+            a.num_gdn_states = 1u;
+            unsetenv("SHELF_GDN_TREE_CHUNKED");
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> ref(n * kVdim), got(ref.size());
+            ok = ok && hipMemcpy(ref.data(), d.out, ref.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+            std::vector<float> ref_state;
+            ok = ok && read_state_f16(d.hist + (size_t)(n - 1u) * kStates * kSlotStride, ref_state, kSlotStride);
+            a.recurrent_history = nullptr;
+            a.capture_rows = 0;
+            setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess &&
+                 hipMemcpy(got.data(), d.out, got.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+            std::vector<int32_t> path;
+            for (int32_t i = static_cast<int32_t>(n) - 1; i >= 0; i = parent[i]) path.push_back(i);
+            std::reverse(path.begin(), path.end());
+            ok = ok && hipMemcpy(path_dev, path.data(), path.size() * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess;
+            a.compact_rows = static_cast<uint32_t>(path.size());
+            a.compact_row_indices = path_dev;
+            a.compact_row_capacity = n;
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> state;
+            ok = ok && read_state_f16(d.state, state, kSlotStride);
+            if (shape == 0u) {
+                ok = ok && write_state_f16(d.state, base, state_n);
+                a.row_parent = nullptr;
+                a.compact_row_indices = nullptr;
+                a.compact_rows = n;
+                ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                     hipStreamSynchronize(stream) == hipSuccess;
+                std::vector<float> chain(got.size()), chain_state;
+                ok = ok && hipMemcpy(chain.data(), d.out, chain.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+                     shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                     hipStreamSynchronize(stream) == hipSuccess &&
+                     read_state_f16(d.state, chain_state, kSlotStride);
+                check(ok && std::memcmp(chain.data(), got.data(), got.size() * sizeof(float)) == 0 &&
+                      chain_state == state, "tree chain matches chain chunk bitwise");
+            }
+            double diff = 0, peak = 0, sdiff = 0, speak = 0;
+            if (ok) {
+                for (size_t i = 0; i < ref.size(); ++i) {
+                    diff = std::max(diff, std::abs(double(ref[i]) - got[i]));
+                    peak = std::max(peak, std::abs(double(ref[i])));
+                }
+                for (size_t i = 0; i < state.size(); ++i) {
+                    sdiff = std::max(sdiff, std::abs(double(ref_state[i]) - state[i]));
+                    speak = std::max(speak, std::abs(double(ref_state[i])));
+                }
+            }
+            std::vector<std::vector<double>> cpu_states(n, std::vector<double>(kHeadK * kHeadV));
+            std::vector<double> cpu_output(n * kHeadV);
+            for (uint32_t i = 0; i < n; ++i) {
+                auto& dst = cpu_states[i];
+                for (uint32_t d0 = 0; d0 < kHeadK; ++d0)
+                    for (uint32_t v0 = 0; v0 < kHeadV; ++v0)
+                        dst[d0 * kHeadV + v0] = parent[i] < 0
+                            ? base[d0 * kHeadV + v0]
+                            : cpu_states[parent[i]][d0 * kHeadV + v0];
+                const double decay = std::exp(-std::exp(bf(hal[0])) *
+                    std::log1p(std::exp(bf(ha[i * kHeads]) + bf(hdt[0]))));
+                const double beta = 1.0 / (1.0 + std::exp(-bf(hb[i * kHeads])));
+                for (uint32_t v0 = 0; v0 < kHeadV; ++v0) {
+                    double product = 0.0;
+                    for (uint32_t d0 = 0; d0 < kHeadK; ++d0)
+                        product += k[i * kQk + d0] * dst[d0 * kHeadV + v0];
+                    const double delta = beta * (bf(hv[i * kVdim + v0]) - decay * product);
+                    double output = 0.0;
+                    for (uint32_t d0 = 0; d0 < kHeadK; ++d0) {
+                        auto& x = dst[d0 * kHeadV + v0];
+                        x = decay * x + k[i * kQk + d0] * delta;
+                        output += q[i * kQk + d0] * x;
+                    }
+                    cpu_output[i * kHeadV + v0] = output;
+                }
+            }
+            double cdiff = 0, cpeak = 0, csdiff = 0, cspeak = 0;
+            if (ok) {
+                for (uint32_t i = 0; i < n; ++i)
+                    for (uint32_t v0 = 0; v0 < kHeadV; ++v0) {
+                        const double x = cpu_output[i * kHeadV + v0];
+                        cdiff = std::max(cdiff, std::abs(x - got[i * kVdim + v0]));
+                        cpeak = std::max(cpeak, std::abs(x));
+                    }
+                for (uint32_t j = 0; j < kHeadK * kHeadV; ++j) {
+                    const double x = cpu_states[n - 1u][j];
+                    csdiff = std::max(csdiff, std::abs(x - state[j]));
+                    cspeak = std::max(cspeak, std::abs(x));
+                }
+            }
+            std::printf("tree CPU n=%u shape=%u output=%.6g state=%.6g\n", n, shape, cdiff / cpeak, csdiff / cspeak);
+            check(ok && cpeak > 0 && cspeak > 0 && cdiff / cpeak < 0.001 && csdiff / cspeak < 0.001,
+                  "tree chunk output and replay match CPU");
+            std::printf("tree n=%u shape=%u output=%.6g state=%.6g\n", n, shape, diff / peak, sdiff / speak);
+            check(ok && peak > 0 && speak > 0 && diff / peak < 0.001 && sdiff / speak < 0.001,
+                  "tree chunk output and replay match serial");
+        }
+    }
+    unsetenv("SHELF_GDN_TREE_CHUNKED");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    if (parents_dev) shelf::gpu::discard_cleanup_result(hipFree(parents_dev));
+    if (path_dev) shelf::gpu::discard_cleanup_result(hipFree(path_dev));
+    d.free_all();
+}
+
 bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, size_t& first) {
     if (x.size() != y.size()) return false;
     for (size_t i = 0; i < x.size(); ++i) {
@@ -316,6 +470,7 @@ int main() {
     }
 
     test_chunk_verify(stream);
+    test_tree_chunk(stream);
 
     Buf d;
     if (!setup(d, 20260930u)) {
