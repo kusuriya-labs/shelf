@@ -39,8 +39,8 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。
 
 | prompt | 同時数 | 非投機 | 固定 K=7 |
 | --- | ---: | --- | --- |
-| benchmark | 2 | 53.32 / — | 118.92 / — |
-| benchmark | 4 | — / — | — / — |
+| benchmark | 2 | 53.32 / 52.57 | 118.92 / 119.03 |
+| benchmark | 4 | 97.72 / 97.92 | 212.77 / — |
 | benchmark | 8 | — / — | — / — |
 | benchmark | 12 | — / — | — / — |
 | benchmark | 16 | — / — | — / — |
@@ -60,9 +60,9 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。
 
 | prompt | 同時数 | 非投機 | 固定 K=7 | ポリシー | 判定 | greedy 一致 |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| benchmark | 1 | 27.64 | 46.06 | — | 未測定 | 未確認 |
-| benchmark | 2 | — | — | — | 未測定 | 未確認 |
-| benchmark | 4 | — | — | — | 未測定 | 未確認 |
+| benchmark | 1 | 27.64 | 46.06 | 48.49 | 通過 | 不一致 |
+| benchmark | 2 | 52.33 | 118.87 | 119.25 | 通過 | 一致 |
+| benchmark | 4 | 97.61 | — | — | 未測定 | 未確認 |
 | benchmark | 8 | — | — | — | 未測定 | 未確認 |
 | benchmark | 16 | — | — | — | 未測定 | 未確認 |
 | benchmark | 32 | — | — | — | 未測定 | 未確認 |
@@ -96,10 +96,11 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。
 | mixed | 16 | — | — | — | 未測定 | 未確認 |
 | mixed | 32 | — | — | — | 未測定 | 未確認 |
 
-
 ## テストとサーバー確認
 
-再実行中。非投機との完全一致を検証する次の 3 テストは、serial を明示して比較する。
+関連 ctest 20 件はすべて通過し、exact override の専用実行も通過した。
+server の DFlash2 関連 5 本も 99 / 26 / 7 / 8 / 21 項目が通過し、失敗はない。
+非投機との完全一致を検証する次の 3 テストは、serial を明示して比較する。
 
 - `tests/server/test_compute_dflash2.py`
 - `tests/server/test_compute_dflash2_unaligned.py`
@@ -107,4 +108,7 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。
 
 `test_compute_dflash2_octave.py` と `test_server_dflash2.py` は既定の chunk で動作を確認する。
 `test_gdn_compact_log_commit` は serial 明示と、単一 request の既定 chunk 選択を検証する。
-全回帰 `--all` は実行しない。
+実サーバーでは英語・日本語・コード・shell が混在する 8 件すべてが完了し、
+合計 1280 completion token、エラーなし。全員生成中 200.8 chunk/s、
+全体の completion token / 壁時計は 138.23 token/s だった。通知 chunk/s と
+stdio の token/s は測定単位が異なる。全回帰 `--all` は実行していない。
