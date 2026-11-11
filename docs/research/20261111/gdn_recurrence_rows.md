@@ -417,3 +417,104 @@ batch と単一 request を測る。exact の token 列・round 数は既存の
 `gdn_recurrence_data.json`、速度の実測値は `gdn_recurrence_exact_performance.json`
 に追加した。GPU は各プロセスで flock を使用。ビルド成功、関連 ctest 4 件通過
 （chunk 専用 exact と lossy の異なる出力も確認）。全回帰 `--all` は未実施。
+
+### 固定 corpus の logits 分布比較
+
+非投機の同時 1 を基準とし、同じ token 列を teacher forcing で処理する。
+BF16 KV、先頭 128 token を prefill、位置 129 から 2048 位置を採点した。
+verify は入力 8 行ずつを処理し、全行を受理した場合と同じ compact log の
+replay で recurrent state を進める。conv state は全行の verify 後の値を使う。
+同時 8 は同じ corpus の独立した 8 request を同時に進め、最初の request を採点する。
+これは対象となる通常の DFlash2 の batch verify と同じ target 実行と state 更新を
+使うが、drafter 自体の出力品質や acceptance を測る実験ではない。
+
+corpus は BetterBench の英語 README、shelf の C++ 実装、開発文書の日本語、
+GSM8K の問題文である。reasoning は解答や思考過程ではなく問題文であり、
+文章と日本語には技術文書特有の記号やコードを含む。各 2177 token の SHA-256 は
+再現 script の出力に記録する。大規模な代表標本ではない。
+
+KL は各位置の全語彙にわたる `KL(R || X)`（nats）、p99 は位置ごとの KL の
+線形補間 99 percentile、top-1 一致率は基準との argmax 一致、最大差は全位置・
+全語彙の生 logits に対する最大絶対差。ΔPPL は各 corpus の候補 PPL 引く基準
+PPL であり、負値は候補の PPL が小さいことを示す。比較時には対象 token、位置、
+語彙、KV dtype を照合する。量子化誤差の参考値 0.02167 は別の実装・corpus の
+値であり、直接同条件の対照実験ではない。
+
+corpus の SHA-256（PSKLDTOK 全体）:
+
+| corpus | SHA-256 |
+| --- | --- |
+| prose | `a61bfa10045be1b41f36bc88f49f7bf02b5259e828dfbbc278d7d3b3c0deebe4` |
+| code | `48046eb0e2e0614cfc8c8fabf75f8b1586c8ff2e41da324c8753cd9b83ca082d` |
+| reasoning | `76265ce00d361cfd080279aed7be96a9db285cd7785330ecc517980f31b4db74` |
+| japanese | `b4a976cf8c437a8f70f378ebe159c0ef6b966004f4444bd44e8779584a25e9ae` |
+| corpus | 経路 | mean KL | p99 KL | top-1 一致率 | 最大 logit 差 | ΔPPL |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| prose | batch8 | 0 | 0 | 100.0000% | 0 | +0 |
+| prose | serial | 1.6298759e-05 | 0.00052913546 | 99.9023% | 1.71993 | +0.000509684 |
+| prose | chunk | 0.00073332814 | 0.0077253874 | 99.0723% | 16.1813 | +0.00489831 |
+| prose | exact | 0.00080016945 | 0.0087044364 | 99.2188% | 14.9718 | +0.00663615 |
+| prose | serial8 | 0.00062454242 | 0.0053111241 | 99.2188% | 14.6892 | +0.0047164 |
+| prose | exact8 | 0.00052487472 | 0.0051582258 | 99.2188% | 14.6194 | -0.00191307 |
+| code | batch8 | 0 | 0 | 100.0000% | 0 | +0 |
+| code | serial | 9.4921666e-06 | 0.00031619843 | 100.0000% | 1.14771 | -2.80264e-05 |
+| code | chunk | 0.00036395736 | 0.0045928694 | 99.7559% | 13.0609 | +0.000819235 |
+| code | exact | 0.00036918284 | 0.0042325002 | 99.6094% | 15.3654 | +0.000726469 |
+| code | serial8 | 0.00037777014 | 0.0041346909 | 99.7070% | 12.9535 | +0.00051251 |
+| code | exact8 | 0.0003462959 | 0.003968775 | 99.6582% | 12.9007 | -1.57536e-05 |
+| japanese | batch8 | 0 | 0 | 100.0000% | 0 | +0 |
+| japanese | serial | 3.0431045e-05 | 0.00069940244 | 99.9023% | 4.10706 | +0.00141894 |
+| japanese | chunk | 0.0004721282 | 0.002818064 | 98.6816% | 4.49221 | +0.0100577 |
+| japanese | exact | 0.00047704753 | 0.0026429248 | 98.7793% | 6.1174 | +0.00755767 |
+| japanese | serial8 | 0.00050336871 | 0.0031591705 | 98.6328% | 5.89864 | +0.00616536 |
+| japanese | exact8 | 0.00048736726 | 0.0031531221 | 98.4375% | 9.04007 | +0.00493079 |
+| reasoning | batch8 | 0 | 0 | 100.0000% | 0 | +0 |
+| reasoning | serial | 0.00013479616 | 0.00083791731 | 99.9023% | 3.76577 | +0.00125607 |
+| reasoning | chunk | 0.0025319055 | 0.025736457 | 99.1211% | 7.88539 | +0.0245614 |
+| reasoning | exact | 0.0074913881 | 0.027082249 | 98.4375% | 12.448 | +0.0246091 |
+| reasoning | serial8 | 0.003115757 | 0.02136205 | 98.6328% | 15.3148 | +0.0238708 |
+| reasoning | exact8 | 0.0020455222 | 0.023419284 | 98.7793% | 8.74503 | +0.0292075 |
+
+各 corpus の位置数は同じなので、4 corpus の mean KL の平均は 8192 位置の
+平均に等しい。lossy は **0.00102533 nats**（量子化参考値 0.02167 の約
+1/21.1）、exact は **0.00228445 nats**（約 1/9.49）。corpus 別では lossy は
+0.000364〜0.002532、exact は 0.000369〜0.007491。4 corpus の非投機・
+同時 8 は全位置・全語彙で基準と bit 一致したため、これを分母とする有限の比は
+出せない。今回の観測では chunk の差は batch 数変更時の差より大きい。同時 8 の
+各 request が同じ corpus であること、他の batch 構成に一般化できないことに注意する。
+
+exact の mean KL が大きい主因は reasoning の少数の位置である。上位 5 位置は
+KL 総和の 80.96% を占め、最大は位置 2129 の 7.502 nats。lossy の上位 5 位置は
+42.43%、最大 0.810 nats。p99 や top-1 と併せても、この標本では exact が
+lossy より一貫して小さいとは言えない。量子化参考値は異なる測定であり、上記の
+比は桁の目安である。ΔPPL は signed の絶対差で、基準 PPL は JSON に収録した。
+
+serial・同時 1 は全位置 bit 一致ではない。全語彙 logits が最初に異なる位置は
+prose 2042、code 2041、japanese 2041、reasoning 2041 であり、それ以前は
+一致した。paged attention は最大可視 token 数 2048 で split 経路の選択条件が
+変わるため、8 行 verify と 1 行 decode の切替時期がずれた可能性がある。
+これは観測位置との整合に基づく推測であり、原因は未確定。長い文脈における
+attention と compact replay の寄与はこの測定だけでは分離できない。
+
+再現方法（大きな処理はバックグラウンドで実行する）:
+
+```sh
+nohup bash docs/research/20261111/gdn_recurrence_scripts/build_quality.sh > /tmp/gdn-quality-build.log 2>&1 &
+# ビルドの終了とログを確認してから実行
+nohup bash docs/research/20261111/gdn_recurrence_scripts/run_quality.sh > /tmp/gdn-quality-full.log 2>&1 &
+# 実行の終了とログを確認してから集計表を表示
+/tmp/shelfvenv/bin/python docs/research/20261111/gdn_recurrence_scripts/quality_table.py /tmp/gdn-quality-full
+OPENBLAS_NUM_THREADS=1 /tmp/shelfvenv/bin/python docs/research/20261111/gdn_recurrence_scripts/quality_tail.py /tmp/gdn-quality-full/dumps/reasoning-base.psq /tmp/gdn-quality-full/dumps/reasoning-exact.psq
+```
+
+`build_quality.sh` は実験パッチを一時適用し `/tmp/gdn-quality-bench` を作ってから
+元の benchmark を復元する。`run_quality.sh` は各 GPU 実行を `flock /tmp/r9700.lock`
+で保護する。約 56 GB の raw dump は `/tmp` に保存し、集計値は
+`gdn_recurrence_quality.json` に収録した。通常の source と binary は復元済み。
+集計器は解析的な 2 語彙の例、および既存 quality の短い実モデル比較で確認した。
+最後の日本語 exact・同時 8 の GPU 実行は成功したが、実行中の script 編集により
+その CPU 集計だけ失敗したため、同じ dump に `quality_score.py` を単独実行して成功を
+確認した。全回帰 `--all` は実行していない。
+再現ビルドの適用・復元は再実行して成功し、`test_quality_metrics` も通過した。
+同テストの最初の実行は `LD_LIBRARY_PATH` の指定漏れで起動に失敗し、環境を
+設定して再実行した。
