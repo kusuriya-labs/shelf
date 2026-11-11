@@ -1930,7 +1930,10 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             }
         }
     }
-    if (!bridge) {
+    const bool need_host_drafts = !tree_mode ||
+        env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_SHAPE", false) ||
+        env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false);
+    if (!bridge && need_host_drafts) {
         for (std::size_t i = 0; i < plans.size(); ++i) {
             SlotPlan& plan = plans[i];
             if (!plan.batched) continue;
