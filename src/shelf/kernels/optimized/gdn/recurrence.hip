@@ -537,6 +537,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         }
         if constexpr (kSerialRows) {
             if (a.recurrent_history != nullptr && c0 < a.capture_rows &&
+                (a.recurrent_capture_mask == nullptr || a.recurrent_capture_mask[c0] != 0u) &&
                 (a.capture_verify_only == 0u ||
                  req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
                 fp16_t* hist_head = a.recurrent_history

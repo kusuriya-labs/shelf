@@ -9,6 +9,8 @@ namespace execution {
 struct GdnSpecHistoryDeviceView {
     bf16_t* conv_history = nullptr;
     fp16_t* recurrent_history = nullptr;
+    // Optional tree-only mask: save recurrent state only at marked rows.
+    const uint32_t* recurrent_capture_mask = nullptr;
 
     uint32_t capture_rows = 0u;
 

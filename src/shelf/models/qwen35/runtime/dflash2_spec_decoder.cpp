@@ -332,7 +332,9 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
             }
 
             const uint64_t states = pool_view.num_gdn_states;
-            const uint64_t log_rows = static_cast<uint64_t>(config.num_drafts) + 1u;
+            const uint64_t log_rows = config.tree &&
+                env_flag_enabled("SHELF_DFLASH2_TREE_COMPACT_BRANCH", false)
+                ? history_rows : static_cast<uint64_t>(config.num_drafts) + 1u;
             const uint64_t vdim =
                 static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
             const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
@@ -1023,6 +1025,8 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
     DFlash2Tree tree;
     uint32_t verify_rows = dflash_k + 1u;
+    const bool tree_compact = decoder.config.tree &&
+        env_flag_enabled("SHELF_DFLASH2_TREE_COMPACT_BRANCH", false);
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_select_ms : nullptr);
         if (decoder.config.tree_budget != 0u) {
@@ -1047,9 +1051,24 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 }
                 if (tm != nullptr) { tm->tree_retained_mass += 1.0 - probabilities[i].residual; ++tm->tree_probability_rows; }
             }
+            if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_SHAPE", false)) {
+                std::fprintf(stderr, "DFLASH2_TREE_SHAPE %u %d", position, pending_token);
+                std::fprintf(stderr, " drafts");
+                for (uint32_t i = 0; i < dflash_k; ++i) std::fprintf(stderr, " %d", drafts[i]);
+                for (const auto& row : choices) {
+                    std::fprintf(stderr, " ;");
+                    for (const auto& candidate : row)
+                        std::fprintf(stderr, " %d:%.9g", candidate.token, candidate.probability);
+                }
+                std::fprintf(stderr, "\n");
+            }
             if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
                     dflash_k, position, [&](uint32_t depth, int32_t) { return choices[depth]; }, tree))
                 return Status::invalid_state("dflash2 budget tree selection failed", __FILE__, __LINE__);
+            if (env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false)) {
+                tree = make_dflash2_tree(pending_token,
+                    std::span<const int32_t>(drafts.data(), dflash_k), {}, 0u, position);
+            }
             if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false)) {
                 std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
                 err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>(),
@@ -1194,7 +1213,21 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 options[r].tree_anc_positions = g.tree_ancestors;
                 options[r].rope_positions = g.tree_rope;
                 options[r].tree_committed_end = position;
-                options[r].gdn_compact = {};
+                if (!tree_compact) {
+                    options[r].gdn_compact = {};
+                    continue;
+                }
+                // A non-adjacent child reloads its parent's state. Adjacent
+                // children continue from registers and need no snapshot.
+                std::vector<uint32_t> capture(verify_rows, 0u);
+                for (uint32_t row = 1; row < verify_rows; ++row) {
+                    const int32_t parent = tree.parent[row];
+                    if (parent >= 0 && parent != static_cast<int32_t>(row) - 1)
+                        capture[static_cast<uint32_t>(parent)] = 1u;
+                }
+                if (copy(g.tree_selected, capture.data(), capture.size() * sizeof(uint32_t)) != hipSuccess)
+                    return Status::hip_error("dflash2 tree snapshot mask upload", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+                options[r].gdn_spec_history.recurrent_capture_mask = reinterpret_cast<const uint32_t*>(g.tree_selected);
             }
         }
         if (want_timing) {
@@ -1392,12 +1425,50 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         {
             ScopedTimer restore_timer(want_timing ? &tm->tree_restore_ms : nullptr);
-            if (restore_needed) {
+            if (restore_needed && !tree_compact) {
                 for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
                     auto scope = shelf::gpu::ScopedDevice::create(g.device);
                     if (!scope.ok()) return scope.status();
-                    Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
-                                                         walk.rows[accepted], g.stream);
+                    Status st = restore_gdn_spec_history(*g.pool, decoder.sequence->slot,
+                                                         g.history, walk.rows[accepted], g.stream);
+                    if (!st.ok()) return st;
+                }
+            } else if (restore_needed) {
+                // The last non-adjacent edge has a captured parent. Replay
+                // only the suffix after it, or the whole path from the round
+                // snapshot when the path has no such edge.
+                uint32_t suffix = 0u;
+                for (uint32_t i = 1u; i <= accepted; ++i)
+                    if (walk.rows[i] != walk.rows[i - 1u] + 1u) suffix = i;
+                for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+                    auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                    if (!scope.ok()) return scope.status();
+                    Status st = suffix != 0u
+                        ? restore_gdn_spec_history(*g.pool, decoder.sequence->slot, g.history,
+                                                   walk.rows[suffix - 1u], g.stream)
+                        : spec_gdn_restore(*g.pool, decoder.sequence->slot, g.conv_snapshot,
+                                           g.rec_snapshot, g.conv_bytes, g.rec_bytes, g.stream);
+                    if (!st.ok()) return st;
+                    st = restore_gdn_spec_conv(*g.pool, decoder.sequence->slot, g.history,
+                                               walk.rows[accepted], g.stream);
+                    if (!st.ok()) return st;
+                    std::vector<int32_t> replay_rows;
+                    for (uint32_t i = suffix; i <= accepted; ++i)
+                        replay_rows.push_back(static_cast<int32_t>(walk.rows[i]));
+                    const hipError_t err = hipMemcpy(g.tree_selected, replay_rows.data(),
+                        replay_rows.size() * sizeof(int32_t), hipMemcpyHostToDevice);
+                    if (err != hipSuccess)
+                        return Status::hip_error("dflash2 tree replay rows upload", hipGetErrorString(err), __FILE__, __LINE__);
+                    GdnCompactLogDeviceView compact{};
+                    compact.delta = g.compact_delta;
+                    compact.k = g.compact_k;
+                    compact.a = g.compact_a;
+                    compact.delta_layer_stride = g.compact_delta_layer_stride;
+                    compact.k_layer_stride = g.compact_k_layer_stride;
+                    compact.a_layer_stride = g.compact_a_layer_stride;
+                    st = commit_gdn_compact_log(*g.pool, decoder.sequence->slot, compact,
+                        g.commit_request, static_cast<uint32_t>(replay_rows.size()),
+                        decoder.gdn_key_heads, g.stream, g.tree_selected, verify_rows);
                     if (!st.ok()) return st;
                 }
             }

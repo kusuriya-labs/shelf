@@ -477,6 +477,35 @@ int main() {
                         conv_dim * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess,
               "tree branch conv row3 read");
 
+        // Only row 1 is a parent of a non-adjacent child. Verify that
+        // masking the other snapshots preserves the branch result and leaves
+        // their history slots untouched.
+        shelf::gpu::Tensor capture_mask;
+        check(alloc_u8(arena, 4u * sizeof(uint32_t), capture_mask), "tree capture mask alloc");
+        const uint32_t mask[4] = {0u, 1u, 0u, 0u};
+        check(hipMemcpy(capture_mask.data<uint8_t>(), mask, sizeof(mask), hipMemcpyHostToDevice) == hipSuccess,
+              "tree capture mask upload");
+        check(hipMemset(history.recurrent.data<fp16_t>(), 0x7f,
+                        4u * rec_slot_bytes) == hipSuccess, "tree history sentinel");
+        check(pool.reset(0u, stream).ok(), "tree masked reset");
+        ra.recurrent_capture_mask = reinterpret_cast<const uint32_t*>(capture_mask.data<uint8_t>());
+        check(::shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(ra, stream) == hipSuccess,
+              "tree masked recurrence launch");
+        check(hipStreamSynchronize(stream) == hipSuccess, "tree masked sync");
+        std::vector<float> masked(v_feat);
+        check(hipMemcpy(masked.data(), out.data<float>() + 3u * v_feat,
+                        v_feat * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess,
+              "tree masked branch read");
+        check(same_bytes(masked.data(), rec_a.data(), v_feat * sizeof(float)),
+              "tree masked branch equals full history");
+        for (uint32_t row : {0u, 2u, 3u}) {
+            uint16_t sentinel = 0u;
+            const fp16_t* slot = history.recurrent.data<fp16_t>() +
+                static_cast<std::size_t>(row) * history.recurrent.dim(1);
+            check(hipMemcpy(&sentinel, slot, sizeof(sentinel), hipMemcpyDeviceToHost) == hipSuccess &&
+                      sentinel == 0x7f7fu, "tree unmarked history unchanged");
+        }
+
         auto copy_row3_to_row2 = [&](auto* base, uint32_t stride, std::size_t bytes) {
             return hipMemcpy(base + static_cast<std::size_t>(2u) * stride,
                              base + static_cast<std::size_t>(3u) * stride,
