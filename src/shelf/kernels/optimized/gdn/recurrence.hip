@@ -229,7 +229,7 @@ struct LdsSmem {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-template <bool kLossy, bool kSerialRows = false, bool kSingleRow = false>
+template <bool kLossy, bool kSerialRows = false, bool kSingleRow = false, bool kChunkVerify = false>
 __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
@@ -252,7 +252,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     if (row_begin >= a.actual_rows) return;
     if (row_begin + row_count > a.actual_rows) row_count = a.actual_rows - row_begin;
     if (row_count == 0u) return;
-    if constexpr (kSerialRows) {
+    if constexpr (kSerialRows || kChunkVerify) {
         if (row_count > kGdnRecurrenceVerifyBatchRows) row_count = kGdnRecurrenceVerifyBatchRows;
     }
     const uint32_t repeat = a.num_v_heads / a.key_heads;
@@ -535,6 +535,26 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     Sacc[ki * 2u + vj] = g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
             }
         }
+        if constexpr (kChunkVerify) {
+            const uint64_t dbase = static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
+            const uint64_t kbase = static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
+            const uint64_t abase = static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride;
+            const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
+            const uint64_t kdim = static_cast<uint64_t>(a.num_v_heads) * hd;
+            for (uint32_t i = 0; i < nval; ++i) {
+                if (tid < g::kWv)
+                    a.compact_delta[dbase + static_cast<uint64_t>(c0 + i) * vdim +
+                                    static_cast<uint64_t>(v_head) * hv + v0 + tid] = s.mid.dT[tid][i];
+                if (tid == 0u && vg == 0u)
+                    a.compact_a[abase + static_cast<uint64_t>(c0 + i) * a.num_v_heads + v_head] =
+                        __expf(s.G[i] - (i == 0u ? 0.0f : s.G[i - 1u]));
+                if (vg == 0u)
+                    for (uint32_t col = tid; col < hd; col += g::kWthreads)
+                        a.compact_k[kbase + static_cast<uint64_t>(c0 + i) * kdim +
+                                    static_cast<uint64_t>(v_head) * hd + col] =
+                            a.k[static_cast<uint64_t>(c0 + i) * a.k_row_stride + qk_head * hd + col];
+            }
+        }
         if constexpr (kSerialRows) {
             if (a.recurrent_history != nullptr && c0 < a.capture_rows &&
                 (a.capture_verify_only == 0u ||
@@ -601,7 +621,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         detail::lds_barrier();
     }
 
-    if constexpr (kSerialRows) {
+    if constexpr (kSerialRows || kChunkVerify) {
         if (a.skip_state_store != 0u) return;
     }
     const uint32_t slot_store = a.requests[request_index].request_handle.slot;
@@ -791,6 +811,16 @@ void shelf_gdn_recurrence_wmma_verify_exact(
     gdn_recurrence_wmma_body<false, true>(a);
 }
 
+__global__ __launch_bounds__(gdngfx12::kWthreads)
+void shelf_gdn_recurrence_wmma_verify_chunk_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, false, false, true>(a);
+}
+
+__global__ __launch_bounds__(gdngfx12::kWthreads)
+void shelf_gdn_recurrence_wmma_verify_chunk_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<false, false, false, true>(a);
+}
+
 bool gdn_recurrence_lossy_enabled() {
     static const bool enabled = []() {
         const char* x = std::getenv("SHELF_GDN_RECURRENCE_EXACT");
@@ -861,6 +891,19 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
     const dim3 grid(static_cast<uint32_t>(grid_x));
+    const char* chunk_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
+    const bool chunk = chunk_env != nullptr && chunk_env[0] != '\0' && chunk_env[0] != '0' &&
+        a.skip_state_store != 0u && a.recurrent_history == nullptr && a.row_parent == nullptr &&
+        a.compact_delta != nullptr && a.compact_k != nullptr && a.compact_a != nullptr &&
+        a.compact_delta_layer_stride != 0u && a.compact_k_layer_stride != 0u &&
+        a.compact_a_layer_stride != 0u;
+    if (chunk) {
+        if (gdn_recurrence_lossy_enabled())
+            shelf_gdn_recurrence_wmma_verify_chunk_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        else
+            shelf_gdn_recurrence_wmma_verify_chunk_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        return hipGetLastError();
+    }
     if (gdn_recurrence_lossy_enabled())
         shelf_gdn_recurrence_wmma_verify_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     else

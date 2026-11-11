@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <cmath>
+#include <algorithm>
 
 namespace {
 
@@ -191,6 +193,74 @@ bool setup(Buf& d, uint32_t seed) {
     return a;
 }
 
+void test_chunk_verify(hipStream_t stream) {
+    Buf d;
+    if (!setup(d, 17001u)) { check(false, "chunk setup"); d.free_all(); return; }
+    std::vector<float> q(kRows * kQk), k(kRows * kQk);
+    bool ok = hipMemcpy(q.data(), d.q, q.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(k.data(), d.k, k.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    for (auto& x : q) x *= 0.1f;
+    for (auto& x : k) x *= 0.1f;
+    ok = ok && hipMemcpy(d.q, q.data(), q.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(d.k, k.data(), k.size() * 4u, hipMemcpyHostToDevice) == hipSuccess;
+    const size_t state_n = (size_t)kStates * kSlotStride;
+    std::vector<float> base, ref_state, chunk_state;
+    ok = ok && read_state_f16(d.state, base, state_n);
+    auto a = make_args(d);
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    a.skip_state_store = 1u;
+    a.num_gdn_states = 1u;
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess;
+    std::vector<float> ref(kRows * kVdim), chunk(ref.size());
+    ok = ok && hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(ref.data(), d.out, ref.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    a.recurrent_history = d.hist;
+    a.capture_rows = kRows;
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && std::memcmp(ref.data(), chunk.data(), ref.size() * 4u) == 0,
+          "chunk opt-in falls back when history is requested");
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    a.compact_rows = kRows;
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess && read_state_f16(d.state, ref_state, state_n) &&
+         write_state_f16(d.state, base, state_n);
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    std::vector<float> deferred_state;
+    ok = ok && read_state_f16(d.state, deferred_state, state_n);
+    check(ok && deferred_state == base, "chunk verify leaves live state unchanged");
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess && read_state_f16(d.state, chunk_state, state_n);
+    double maxdiff = 0, mean = 0, meanref = 0, maxref = 0, statemax = 0, stateref = 0;
+    if (ok) {
+        for (size_t i = 0; i < ref.size(); ++i) {
+            const double diff = std::abs((double)ref[i] - chunk[i]);
+            ok = ok && std::isfinite(diff);
+            maxdiff = std::max(maxdiff, diff); mean += diff; meanref += std::abs((double)ref[i]);
+            maxref = std::max(maxref, std::abs((double)ref[i]));
+        }
+        for (size_t i = 0; i < state_n; ++i) {
+            statemax = std::max(statemax, std::abs((double)ref_state[i] - chunk_state[i]));
+            stateref = std::max(stateref, std::abs((double)ref_state[i]));
+        }
+    }
+    std::printf("chunk output max_abs=%.9g mean_abs=%.9g mean_relative_to_mean=%.9g max_relative_to_peak=%.9g replay_max_abs=%.9g replay_relative_to_peak=%.9g\n",
+                maxdiff, mean / ref.size(), mean / meanref, maxdiff / maxref, statemax, statemax / stateref);
+    check(ok && maxref > 0 && stateref > 0 && maxdiff / maxref < 0.05 && statemax / stateref < 0.05,
+          "chunk verify output and replay close to serial");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    d.free_all();
+}
+
 bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, size_t& first) {
     if (x.size() != y.size()) return false;
     for (size_t i = 0; i < x.size(); ++i) {
@@ -206,7 +276,9 @@ bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, si
 
 int main() {
     std::printf("=== GDN compact-log commit bit-exactness ===\n");
-    unsetenv("SHELF_GDN_RECURRENCE_EXACT");
+    const bool chunk_exact = std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr;
+    if (chunk_exact) setenv("SHELF_GDN_RECURRENCE_EXACT", "1", 1);
+    else unsetenv("SHELF_GDN_RECURRENCE_EXACT");
     unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
 
     int device_count = 0;
@@ -218,10 +290,18 @@ int main() {
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 
+    if (chunk_exact) {
+        test_chunk_verify(stream);
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        return failed > 0 ? 1 : 0;
+    }
+
     if (!::shelf::kernel::gdn_recurrence_lossy_enabled()) {
         std::printf("FAIL: lossy mode expected for wmma commit path\n");
         return 1;
     }
+
+    test_chunk_verify(stream);
 
     Buf d;
     if (!setup(d, 20260930u)) {
