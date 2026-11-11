@@ -1028,8 +1028,9 @@ DFLASH2_ROUND_MS
 - DFlash ring に入るのは target が consume して commit した row だけ（commit-only）。
 - step 終了時に `context.next_position == sequence.position`、
   `context.length == min(sequence.position, capacity)`。
-- `GENERATED_IDS` は target-only greedy と完全一致する。
-- target verify は通常の forward 経路と同じ kernel で行う。
+- serve の chunk verify は単一 request でも target-only greedy と生成列が異なる場合がある。
+  serial verify は `SHELF_GDN_VERIFY_CHUNKED=0` で選べる。
+- target verify は通常の forward 経路を共有し、GDN recurrence は verify 用 kernel を使う。
 - drafter kernel は D2D memcpy による relay を行わない。
 - hot-path enqueue API は sync / D2H / H2D / allocation を行わない。
 - すべての契約違反・非対応構成は明示的な error とし、silent fallback しない。
