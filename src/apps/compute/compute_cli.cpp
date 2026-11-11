@@ -324,7 +324,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         } else if (std::strcmp(argv[i], "--dflash2-tree-budget") == 0 && i + 1 < argc) {
             const char* value = argv[++i];
             opt.dflash2_tree_budget_auto = std::strcmp(value, "auto") == 0;
-            if (opt.dflash2_tree_budget_auto) opt.dflash2_tree_budget = 12;
+            if (opt.dflash2_tree_budget_auto) opt.dflash2_tree_budget = 8;
             if (opt.dflash2_tree || (!opt.dflash2_tree_budget_auto && !parse_uint(value, opt.dflash2_tree_budget)) ||
                 (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < 2) || opt.dflash2_tree_budget > 512) {
                 fprintf(stderr, "invalid or conflicting --dflash2-tree-budget\n");

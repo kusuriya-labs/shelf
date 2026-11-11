@@ -928,7 +928,7 @@ samples を別途 D2H する。
   採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
   浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
   `auto` は serve・draft 数 7 に限り、投機中の request 数に応じて行数を選ぶ。
-  1 件なら 12 行、2 件以上なら chain の 8 行を使う。投機を停止した request は
+  現在は全ての同時数で chain の 8 行を使う。投機を停止した request は
   木に含めない。既定値は 0 のままである。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数

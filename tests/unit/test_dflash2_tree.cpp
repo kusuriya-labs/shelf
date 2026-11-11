@@ -10,7 +10,7 @@ using namespace shelf::qwen35::runtime;
 
 int main() {
     CHECK(auto_dflash2_tree_budget(0) == 8);
-    CHECK(auto_dflash2_tree_budget(1) == 12);
+    CHECK(auto_dflash2_tree_budget(1) == 8);
     CHECK(auto_dflash2_tree_budget(2) == 8);
     CHECK(auto_dflash2_tree_budget(3) == 8);
     CHECK(auto_dflash2_tree_budget(4) == 8);

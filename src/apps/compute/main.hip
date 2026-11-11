@@ -163,7 +163,8 @@ int main(int argc, char** argv) {
         config.draft_config_ready = true;
         config.dflash2_drafts = static_cast<uint32_t>(opt.dflash2_drafts);
         config.dflash2_tree = opt.dflash2_tree && !opt.serve_stdio;
-        config.dflash2_tree_budget = static_cast<uint32_t>(opt.dflash2_tree_budget);
+        config.dflash2_tree_budget = opt.dflash2_tree_budget_auto
+            ? 0u : static_cast<uint32_t>(opt.dflash2_tree_budget);
         config.dflash2_tree_budget_auto = opt.dflash2_tree_budget_auto;
         config.dflash2_tree_extra = opt.serve_stdio ? 0u : static_cast<uint32_t>(opt.dflash2_tree_budget ? opt.dflash2_tree_budget - opt.dflash2_drafts - 1 : opt.dflash2_tree_extra);
         config.dflash2_max_sessions = static_cast<uint32_t>(opt.dflash2_max_sessions);
