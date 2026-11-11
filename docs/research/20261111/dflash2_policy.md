@@ -31,6 +31,22 @@ EMA に含めない。損益分岐と閾値は lossy 既定の測定で評価す
 日本語・同時 8 で 142.13 → 102.44 tok/s に低下し、採用せず元の閾値に戻した。
 これらは exact の旧条件であり、lossy の結果には使わない。
 
+## 再現方法
+
+`SHELF_MODEL_DIR`、`SHELF_DFLASH2_MODEL_DIR`、`SHELF_BENCH_BINARY`、
+`LD_LIBRARY_PATH`、`ROCR_VISIBLE_DEVICES` を対象環境に設定する。
+`SHELF_GDN_VERIFY_CHUNKED`、`SHELF_GDN_VERIFY_CHUNKED_EXACT`、
+`SHELF_GDN_RECURRENCE_EXACT`、`SHELF_GDN_RECURRENCE_LOSSY` は未設定にし、
+`/tmp/venv-so` は読み取りのみで使用する。入力を作った後、各 driver は実行単位で
+GPU ロックを取得する。
+
+```sh
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/prepare_prompts.py /tmp/dflash2-policy-prompts
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_policy_scripts/breakeven.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-breakeven
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/run_comparison.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-comparison
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_policy_scripts/tables.py /tmp/dflash2-policy-lossy-breakeven /tmp/dflash2-policy-lossy-comparison
+```
+
 ## 損益分岐と比較
 
 lossy 既定の再測定中。未完了の欄は未測定を示す。
