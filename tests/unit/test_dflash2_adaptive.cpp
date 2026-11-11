@@ -1,10 +1,13 @@
 #include <shelf/models/qwen35/runtime/dflash2_adaptive_batch.h>
 
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <vector>
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--check-cap-override") == 0)
+        return shelf::qwen35::runtime::dflash2_policy_max_sessions() == 4u ? 0 : 1;
     int failures = 0;
     auto check = [&](bool condition, const char* name) {
         if (!condition) {
