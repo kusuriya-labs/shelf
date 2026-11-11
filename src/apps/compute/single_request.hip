@@ -677,7 +677,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             static_cast<uint32_t>(max_new_tokens - generated.size());
         if (adaptive_cost != nullptr) {
             ++adaptive_rounds;
-            const bool enabled = accepted_ema >= 1.2;
+            const bool enabled = accepted_ema >= 0.6;
             if (enabled) probe_age = 0;
             else if (probe_age < 64u) ++probe_age;
             const bool probe = !enabled && probe_age >= 64u;
@@ -699,7 +699,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         }
         auto step = step_result.release();
         if (adaptive_cost != nullptr && step.num_drafts == decoder_config.num_drafts) {
-            accepted_ema += 0.15 * (static_cast<double>(step.num_accepted) - accepted_ema);
+            accepted_ema += 0.03 * (static_cast<double>(step.num_accepted) - accepted_ema);
         }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
             generated.push_back(step.emitted[i]);

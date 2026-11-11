@@ -27,7 +27,7 @@ inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
                                      const DFlash2BatcherBinding& binding,
                                      const ContinuousBatcherConfig& config,
                                      uint64_t& round) {
-    constexpr double threshold = 1.2;
+    constexpr double threshold = 0.6;
     constexpr uint32_t probe_interval = 64;
     std::vector<RuntimeRequest*> candidates;
     uint32_t eligible = 0;
