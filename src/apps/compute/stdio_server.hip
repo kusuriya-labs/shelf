@@ -5,7 +5,6 @@
 
 #include <shelf/models/qwen35/dflash2/context_state.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
-#include <shelf/models/qwen35/runtime/dflash2_adaptive_costs.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -1210,11 +1209,6 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.sessions = &dflash.sessions;
         batcher_binding.num_drafts = dflash.drafts;
         batcher_binding.adaptive = dflash.adaptive;
-        if (dflash.adaptive) {
-            static const auto adaptive_cost =
-                shelf::qwen35::runtime::adaptive::qwen38_27b_exl3_fp8_cost_model();
-            batcher_binding.adaptive_cost = &adaptive_cost;
-        }
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
         const shelf::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);

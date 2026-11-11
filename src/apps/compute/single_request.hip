@@ -515,7 +515,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
-                     const shelf::qwen35::runtime::adaptive::CostModel* adaptive_cost,
+                     bool adaptive,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
@@ -675,7 +675,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
-        if (adaptive_cost != nullptr) {
+        if (adaptive) {
             ++adaptive_rounds;
             const bool enabled = accepted_ema >= 0.6;
             if (enabled) probe_age = 0;
@@ -687,7 +687,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         }
         auto step_result =
             shelf::qwen35::runtime::dflash2_spec_step(
-                decoder, pending, remaining, adaptive_cost != nullptr ? decoder_config.num_drafts : 0u);
+                decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u);
         if (!step_result.ok()) {
             fprintf(stderr, "dflash2 step failed: %s\n",
                     step_result.status().message().c_str());
@@ -698,7 +698,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             return 1;
         }
         auto step = step_result.release();
-        if (adaptive_cost != nullptr && step.num_drafts == decoder_config.num_drafts) {
+        if (adaptive && step.num_drafts == decoder_config.num_drafts) {
             accepted_ema += 0.03 * (static_cast<double>(step.num_accepted) - accepted_ema);
         }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
@@ -715,7 +715,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     }
     const auto t_decode_end = std::chrono::steady_clock::now();
 
-    if (adaptive_cost != nullptr) {
+    if (adaptive) {
         const double actual_ms = std::chrono::duration<double, std::milli>(
             t_decode_end - t_decode_start).count();
         printf("DFLASH2_ADAPTIVE rounds=%llu actual_tps=%.3f\n",

@@ -130,10 +130,6 @@ Status ContinuousBatcher::set_dflash2(const DFlash2BatcherBinding& binding) {
     if (binding.adaptive && tp_batch_hook_ != nullptr) {
         return Status::unsupported("dflash2 adaptive requires a single device", __FILE__, __LINE__);
     }
-    if (binding.adaptive && binding.adaptive_cost == nullptr) {
-        return Status::invalid_argument("dflash2 adaptive cost model is required",
-                                        __FILE__, __LINE__);
-    }
     if (binding.sessions->capacity() == 0u) {
         return Status::invalid_argument("dflash2 session pool is empty", __FILE__,
                                         __LINE__);
@@ -946,7 +942,6 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     }
     DFlash2RequestSession& session = *request.dflash;
     if (dflash_.adaptive) {
-        session.acceptance = adaptive::Acceptance(dflash_.num_drafts);
         session.adaptive_rows = dflash_.num_drafts + 1u;
     }
     if (request.max_new_tokens == 0u) {

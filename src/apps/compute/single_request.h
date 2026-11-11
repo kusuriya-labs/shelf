@@ -4,7 +4,6 @@
 
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
-#include <shelf/models/qwen35/runtime/dflash2_adaptive.h>
 
 #include <cstdint>
 #include <string>
@@ -34,7 +33,7 @@ int run_dflash2_shot(Qwen35ComputeRuntime& runtime,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
-                     const shelf::qwen35::runtime::adaptive::CostModel* adaptive_cost,
+                     bool adaptive,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling);
 

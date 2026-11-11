@@ -47,8 +47,6 @@ struct DFlash2BatcherStats {
     uint32_t rounds = 0;
     uint64_t adaptive_rounds = 0;
     std::vector<uint64_t> adaptive_k_counts;
-    double adaptive_predicted_tokens = 0.0;
-    double adaptive_predicted_ms = 0.0;
     double adaptive_actual_tokens = 0.0;
     double adaptive_actual_ms = 0.0;
     uint32_t full_accepts = 0;
@@ -84,7 +82,6 @@ struct DFlash2BatcherBinding {
     DFlash2SessionPool* sessions = nullptr;
     uint32_t num_drafts = 7u;
     bool adaptive = false;
-    const adaptive::CostModel* adaptive_cost = nullptr;
     DFlash2BatcherStats* stats = nullptr;
     const std::vector<DFlash2GdnRankBinding>* rank_bindings = nullptr;
 };
