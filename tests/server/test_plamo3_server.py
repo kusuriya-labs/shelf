@@ -39,6 +39,10 @@ def main():
             body["messages"][0]["content"] = "hello " * 4000
             status, detail = http_post_status(server.base_url + "/chat/completions", body)
             check.check("context-limit", status == 400 and "context" in detail.lower(), detail)
+            body["messages"][0]["content"] = "hello"
+            body["response_format"] = {"type": "json_object"}
+            status, detail = http_post_status(server.base_url + "/chat/completions", body)
+            check.check("structured-output-rejected", status == 400 and "structured output" in detail, detail)
     except Exception as exc:
         check.check("exception", False, repr(exc))
     return check.done()
