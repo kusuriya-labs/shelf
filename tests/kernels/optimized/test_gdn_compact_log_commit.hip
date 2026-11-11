@@ -235,6 +235,19 @@ void test_chunk_verify(hipStream_t stream) {
     ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
          hipStreamSynchronize(stream) == hipSuccess &&
          hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    if (std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr) {
+        std::vector<float> exact_output = chunk;
+        unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
+        ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+             hipStreamSynchronize(stream) == hipSuccess &&
+             hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+        check(ok && std::memcmp(exact_output.data(), chunk.data(), chunk.size() * 4u) != 0,
+              "chunk exact opt-in selects a different numeric result");
+        setenv("SHELF_GDN_VERIFY_CHUNKED_EXACT", "1", 1);
+        ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+             hipStreamSynchronize(stream) == hipSuccess;
+        chunk = std::move(exact_output);
+    }
     std::vector<float> deferred_state;
     ok = ok && read_state_f16(d.state, deferred_state, state_n);
     check(ok && deferred_state == base, "chunk verify leaves live state unchanged");
@@ -277,8 +290,9 @@ bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, si
 int main() {
     std::printf("=== GDN compact-log commit bit-exactness ===\n");
     const bool chunk_exact = std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr;
-    if (chunk_exact) setenv("SHELF_GDN_RECURRENCE_EXACT", "1", 1);
-    else unsetenv("SHELF_GDN_RECURRENCE_EXACT");
+    unsetenv("SHELF_GDN_RECURRENCE_EXACT");
+    if (chunk_exact) setenv("SHELF_GDN_VERIFY_CHUNKED_EXACT", "1", 1);
+    else unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
     unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
 
     int device_count = 0;

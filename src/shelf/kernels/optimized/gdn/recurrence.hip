@@ -898,7 +898,9 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
         a.compact_delta_layer_stride != 0u && a.compact_k_layer_stride != 0u &&
         a.compact_a_layer_stride != 0u;
     if (chunk) {
-        if (gdn_recurrence_lossy_enabled())
+        const char* exact_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
+        const bool chunk_exact = exact_env != nullptr && exact_env[0] != '\0' && exact_env[0] != '0';
+        if (!chunk_exact && gdn_recurrence_lossy_enabled())
             shelf_gdn_recurrence_wmma_verify_chunk_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
         else
             shelf_gdn_recurrence_wmma_verify_chunk_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
