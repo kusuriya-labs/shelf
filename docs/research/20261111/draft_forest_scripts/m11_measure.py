@@ -37,6 +37,7 @@ def prompt_group(i):
   for mode in (order if rep==0 else order[::-1]): run(i,mode,rep)
 
 def locked_group(kind, number):
+ if kind=='--repeat' and all((OUT/f'repeat-2-{m}-{number}.json').exists() for m in MODES): return
  env=dict(os.environ,M11_LOCK_HELD='1')
  subprocess.run(['flock','/tmp/r9700.lock',sys.executable,__file__,kind,str(number)],env=env,check=True)
 

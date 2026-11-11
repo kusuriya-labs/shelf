@@ -46,3 +46,17 @@ for label,ids in cats.items():
   wins=[max(modes[1:],key=lambda m:v[m]) for v in sel]
   print(f'| {label} | '+ ' / '.join(str(wins.count(m)) for m in modes[1:])+' |')
 print('\nTwo-repeat generated sequence disagreements:',sum(records[i,m,0]['tokens']!=records[i,m,1]['tokens'] for i,_,_ in rows for m in modes))
+if len(rows) == 24:
+ extra={}
+ for mode in modes:
+  files=[out/f'outlier-13-{mode}-{rep}.json' for rep in range(2)]
+  if all(p.exists() for p in files):
+   extra[mode]=st.mean([records[13,mode,rep]['tps'] for rep in range(2)]+[json.loads(p.read_text())['tps'] for p in files])
+ if len(extra)==4:
+  print('\nSensitivity: replace prompt 13 averages with all four runs:')
+  for mode in modes[1:]:
+   rs=[extra[mode]/extra['chain'] if i==13 else r[mode] for i,_,r in rows]
+   print(mode,f'arithmetic {(st.mean(rs)-1)*100:+.3f}%',f'geometric {(math.exp(st.mean(map(math.log,rs)))-1)*100:+.3f}%')
+if rows:
+ oracle=[max(r[m] for m in modes[1:]) for _,_,r in rows]
+ print('\nPost-hoc per-prompt best N (oracle among fixed budgets, no EMA):',f'{(st.mean(oracle)-1)*100:+.3f}%')
