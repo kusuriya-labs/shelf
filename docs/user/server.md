@@ -768,6 +768,8 @@ strict tools の stream は完成した tool call をまとめて送る。生成
 
 ## PLaMo 3 Translate
 
+実験的対応である。挙動や対応範囲は今後変わる可能性がある。
+
 PLaMo 3 Translate の BF16 checkpoint は翻訳用 chat template を使う。サーバーの
 `--max-seq-len` の既定値は 2048、上限も 2048 token である。これは prompt と
 生成を合わせた上限で、長い sliding-window 文脈への対応を意味しない。
