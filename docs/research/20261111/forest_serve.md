@@ -130,3 +130,178 @@ budget 8 はそれぞれ replay 精度修正前後で同じ生成列だった。
 引き続き要求する。
 更新後の `test_compute_dflash2_tree.py` は shell・code・reasoning の全 3 prompt、
 各 256 token で通過した。
+
+## c=1 の round 内訳と同期削減
+
+前節と同じ R9700・モデル・greedy・BF16 KV、512 token、N=10、c=1 で、
+prompt 1、0、13、4 を調べた。変更前の serve は計測専用ビルドで各木 round の
+host 時間を採り、verify GPU は hipEvent、replay と gather・append は追加同期を
+含む wall 時間で測った。CLI は M11 の同じ prompt の 2 回平均で、round 数で割った。
+同期付き診断は通常の速度測定と異なる。serve の表は木 round のみで、ページ境界の
+単一 token round を含まない。列の時間は重複するものがあり、単純に足せない。
+
+| prompt | CLI 発行 token/round | serve 発行 token/木 round | CLI round ms/token | serve 診断 ms/token | CLI verify GPU ms/round | serve verify GPU ms/木 round | serve 未使用 logits D2H ms/木 round |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5.44 | 4.49 | 9.82 | 12.43 | 42.14 | 39.93 | 1.11 |
+| 0 | 4.60 | 4.03 | 11.58 | 12.94 | 42.09 | 40.19 | 1.12 |
+| 13 | 4.87 | 4.83 | 10.90 | 11.63 | 41.92 | 40.18 | 1.14 |
+| 4 | 2.69 | 2.55 | 19.73 | 21.68 | 41.73 | 40.71 | 1.11 |
+
+CLI の round 時間は M11 の `DFLASH2_ROUND_MS / DFLASH2_ROUNDS` を発行数で割った。
+serve の診断時間は各木 round の drafter 投入・待機、選択、metadata、verify、
+転送、walk、replay、gather・append の wall 時間合計を発行数で割った。これには
+計時のための同期が含まれ、両者は厳密な同一条件の差分ではない。
+
+| 項目 | CLI ms/round | serve ms/木 round | 読み方 |
+| --- | ---: | ---: | --- |
+| drafter GPU | 8.43〜8.47 | 未分離 | CLI は hipEvent。serve の draft 待機は 8.17〜11.95 ms で、GPU 実行を含む |
+| 候補選択 | 0.38 | 0.37〜0.38 | host 時間。候補確率の GPU 計算・転送・待機を含む |
+| metadata | 未分離 | 0.25〜0.31 | snapshot と metadata の host 投入を含む |
+| accept walk | 0.003〜0.014 | 約 0.004 | host 時間 |
+| replay | 0.09〜0.12 | 0.47〜0.63 | CLI は投入時間、serve は追加同期付き wall 時間 |
+| KV・tap gather / context 追加 | 0.014〜0.025 / 0.046〜0.048 | 合計 1.28〜1.31 | CLI は投入時間、serve は追加同期付き wall 時間 |
+| logits D2H | なし | 1.11〜1.14 | serve は全語彙を使用せず転送していた |
+| batcher | 対象外 | 0.01〜0.02 | `DFHOST` と `DFCOST` の wall 平均差。stdio と token 送出は未分離 |
+
+CLI の `DFLASH2_GDN_MODE=tree-history` は tree 設定に基づく固定ラベルである。
+chunk verify の実装では CLI も受理経路の compact replay に exact を指定するため、
+このラベルだけで serve と復元方式が異なるとは判断できない。
+
+prefix cache の影響は、prompt 1、N=10、512 token の stdio 診断で cache のみを
+切り替えて調べた。有効時は 120 round・4.258 token/round・verify 7.150 行/round、
+無効時は 95 round・5.379 token/round・verify 9.968 行/round だった。生成列も変わる
+ため同一軌跡の比較ではないが、ページ境界の制約が受理数に影響することを示す。
+cache 無効を本測定の代替にせず、既存の capture 動作は維持した。
+
+変更前の木 round には draft の D2H、候補確率の D2H と明示同期、全 logits の D2H、
+sampled token の D2H があり、metadata に複数の同期コピーを使用していた。変更後は
+通常の木経路から全 logits と draft の D2H を除き、候補確率の取得時の同期にまとめた。
+これは呼び出し元で確認した回数であり、kernel や runtime 内部を含む全同期の総数ではない。
+trace が draft token を読む場合は従来どおりコピーする。
+
+各変更後の 4 prompt・N=10 の 512 token 速度を示す。各セルは 1 回のため変動を含む。
+最初の変更は未使用 logits の転送削除、次は draft の host 同期削除。2 つ目の変更前後の
+生成列は 4 件とも完全一致した。
+
+| prompt | 変更前 tok/s | logits 削除後 tok/s（前比） | draft 同期削除後 tok/s（前比） |
+| ---: | ---: | ---: | ---: |
+| 1 | 76.55 | 77.26 (+0.93%) | 82.20 (+6.40%) |
+| 0 | 69.07 | 70.24 (+1.68%) | 76.56 (+9.00%) |
+| 13 | 82.53 | 83.84 (+1.58%) | 91.93 (+9.65%) |
+| 4 | 45.95 | 44.20 (-3.81%) | 47.36 (+7.16%) |
+
+### verify の GPU 診断
+
+N=10 の verify が 10 行となった最初の round を、CLI と serve でそれぞれ
+semantic timing の hipEvent により別実行で測った。64 token の診断で、event 記録の
+負荷を含む。表の合計は記録された kernel 時間の和であり、通常実行の forward wall
+時間ではない。線形は `LINEAR_EXL3_INT8` と `LINEAR_BF16` の合計。
+
+| prompt | CLI 合計 / GDN / attention / 線形 ms | serve 合計 / GDN / attention / 線形 ms |
+| ---: | ---: | ---: |
+| 1 | 47.855 / 1.275 / 0.255 / 37.972 | 47.471 / 1.263 / 0.274 / 37.603 |
+| 0 | 47.685 / 1.274 / 0.256 / 37.806 | 47.812 / 1.278 / 0.277 / 37.880 |
+| 13 | 47.693 / 1.283 / 0.243 / 37.821 | 47.710 / 1.272 / 0.263 / 37.806 |
+| 4 | 47.772 / 1.271 / 0.236 / 37.882 | 47.693 / 1.268 / 0.250 / 37.821 |
+
+この診断では verify の主要 kernel に、CLI と serve の速度差を説明する大きな差は
+現れなかった。異なる入力位置と実行時状態での単発診断であり、全 round の差を
+保証するものではない。
+
+### 受理経路の GPU 診断
+
+128 token の別実行で、compact commit、KV・tap gather、drafter の context 追加を
+hipEvent で測った。比較のため診断ビルドのみで replay の積を lossy に切り替えた。
+計時は各木 round で追加同期を行い、通常測定の速度には使用しない。exact と lossy は
+生成経路が異なり得るため、差は同一入力 state での kernel 単体比較ではない。
+
+| prompt | exact commit ms/round | lossy commit ms/round | exact gather ms/round | exact context 追加 ms/round |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.394 | 0.295 | 0.056 | 1.264 |
+| 0 | 0.379 | 0.294 | 0.057 | 1.259 |
+| 13 | 0.387 | 0.296 | 0.065 | 1.251 |
+| 4 | 0.322 | 0.272 | 0.040 | 1.272 |
+
+exact の増分はこの診断で約 0.05〜0.10 ms/木 round であり、前節の日本語 N=12
+で lossy が数値ゲートを超えた事実を踏まえ、精度は変更しなかった。commit の event は
+replay kernel の投入前から完了までで、conv 復元や replay 行の H2D 待ちは含まない。
+CLI の M10 における shell N=10 の別診断は復元 0.508、gather 0.076 ms/round だった。
+
+変更前の同期付き診断では、compute が報告する decode 時間から `DFCOST` の全 round
+wall 時間を引いた残りは、4 prompt で 2.99〜5.19 ms/512 token だった。この残りは
+compute 内の round 外処理をまとめた値で、stdio、送出、scheduler を個別には分離できない。
+HTTP 側の通信や client への配送時間もこの差には含まれない。
+
+診断値を発行 token あたりに換算した差を、round 時間と発行数の寄与に算術的に
+分解すると次のようになる。前者は `(serve round - CLI round) / CLI 発行数`、
+後者は `serve round × (1 / serve 発行数 - 1 / CLI 発行数)`。前記のとおり同期方法・
+対象 round が異なるので、これは厳密な因果分解ではない。
+
+| prompt | serve − CLI ms/token | round 時間の項 | 発行数の項 |
+| ---: | ---: | ---: | ---: |
+| 1 | +2.61 | +0.45 | +2.16 |
+| 0 | +1.36 | -0.25 | +1.61 |
+| 13 | +0.73 | +0.64 | +0.09 |
+| 4 | +1.96 | +0.85 | +1.10 |
+
+prompt 1 では変更前の全 logits D2H 1.11 ms/木 round が round 時間の項に含まれ、
+発行数の項は prefix cache のページ制約とも整合する。前者は今回削除した。後者を
+除くために cache capture を無効化すると意味が変わるため、今回の修正には含めていない。
+
+### 候補選択と host 待機の診断
+
+同期削減後の 64 token の別実行で、候補確率 kernel の GPU event と、その結果の
+D2H 呼び出しおよび明示同期を測った。木構築は host 時間。各行は木 round の平均。
+`hipMemcpyAsync` の host buffer は pageable であり、serve の転送呼び出し時間には
+同じ stream に先行投入された drafter の完了待ちが含まれる。したがって転送の純粋な
+コピー時間として扱わない。CLI は候補確率の前に draft 同期を行う。
+
+| prompt | CLI 確率 GPU / D2H 呼出 / 同期 / 構築 ms | serve 確率 GPU / D2H 呼出 / 同期 / 構築 ms |
+| ---: | ---: | ---: |
+| 1 | 0.307 / 0.344 / 0.037 / 0.009 | 0.306 / 9.667 / 0.034 / 0.022 |
+| 0 | 0.308 / 0.343 / 0.032 / 0.008 | 0.306 / 9.607 / 0.038 / 0.021 |
+| 13 | 0.308 / 0.341 / 0.030 / 0.007 | 0.307 / 9.658 / 0.034 / 0.020 |
+| 4 | 0.308 / 0.341 / 0.030 / 0.008 | 0.306 / 9.634 / 0.036 / 0.020 |
+
+この GPU 時間は top-k 後の全語彙正規化と候補確率の計算である。候補の top-k 自体は
+drafter 内で実行され、上記とは別の処理である。
+
+別の 64 token・追加同期付き診断で、drafter 内の top-k に限定して hipEvent を
+記録した。serve の平均は prompt 1 / 0 / 13 / 4 の順に 0.148 / 0.153 / 0.157 /
+0.151 ms/木 round、平均 draft 行数は 5.18 / 5.76 / 6.14 / 5.62 だった。CLI の
+c=1 も同じ単一 request の drafter 実装を使うが、top-k の CLI 単独 event 値は
+この診断では採っていない。
+
+## c=1 の最終測定
+
+前節と同じ 8 prompt、各 512 token、chain / N=10 / N=12 を各 2 回、構成を交互に
+切り替えて測定した。速度は `generated tokens / decode_ms`、各セルは 2 回平均、
+chain 比の平均は prompt ごとの比の算術平均。基準ファイル 8 件の SHA-256 は前節と
+一致する。計測バイナリと最終ビルドの SHA-256 はいずれも
+`906f697e04d4b6e0eb3afdae4d8a7c00a7a97e6a385864237efccef9b10965f4`。
+
+| prompt | chain tok/s | N=10 tok/s（chain 比） | N=12 tok/s（chain 比） | 最初の不一致の最大差（0 / 10 / 12） |
+| --- | ---: | ---: | ---: | ---: |
+| code 1 (1) | 84.08 | 84.23 (+0.17%) | 82.78 (-1.54%) | 0.01429 / 0.02022 / 0.02022 |
+| code 2 (13) | 78.51 | 91.85 (+17.00%) | 91.63 (+16.72%) | 0.01471 / 0.01471 / 0.01471 |
+| shell 1 (0) | 73.01 | 75.35 (+3.20%) | 76.60 (+4.91%) | 0.05124 / 0.05124 / 0.05124 |
+| shell 2 (16) | 76.04 | 82.86 (+8.98%) | 82.65 (+8.70%) | 0.01984 / 0.00925 / 0.00925 |
+| 日本語 1 (3) | 37.90 | 44.10 (+16.36%) | 43.77 (+15.49%) | 0.00363 / 0.00363 / 0.00363 |
+| 日本語 2 (4) | 42.17 | 47.43 (+12.48%) | 50.82 (+20.51%) | 0.03569 / 0.03569 / 0.04575 |
+| reasoning 1 (2) | 74.75 | 79.58 (+6.46%) | 84.07 (+12.47%) | 0.03577 / 0.03306 / 0.03306 |
+| reasoning 2 (18) | 109.00 | 115.99 (+6.42%) | 116.81 (+7.17%) | 0.00121 / 0.00121 / 0.00121 |
+| 平均 | 71.93 | 77.67 (+8.88%) | 78.64 (+10.55%) | — |
+
+N=10 / N=12 の 8 prompt 平均は変更前の -0.18% / +1.41% から +8.88% /
++10.55% となり、目標の +5% を両方で超えた。参考として同一 8 prompt の CLI M11 は
++6.3% / +6.1% だった。測定時刻が異なるため、直接の対照試験ではない。
+
+48 回とも 512 token を生成し、first-mismatch の非投機 top-1/top-2 logit 差は
+最大 0.051245 で基準 0.1 以下。budget 0 の 16 回は変更前の対応 prompt と生成列の
+SHA-256 がすべて一致した。各回・診断値・基準 hash は
+[forest_serve_optimization_results.json](forest_serve_optimization_results.json) に記録。
+
+最終コードでは関連 ctest 7 件と `test_server_dflash2_tree.py` が通過。最初の変更後に
+`test_server_dflash2.py` は 20 項目、`test_compute_dflash2_tree.py` は 3 prompt すべて
+通過した。2 つ目の変更は budget 0 の経路を変更せず、前述の 16 回の生成列でも一致を確認した。
+サーバー全回帰は実行していない。c=2 以上は本測定に含まれない。
