@@ -692,7 +692,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             ++adaptive_counts[decoder.config.num_drafts];
         }
         auto step_result =
-            dflash2_tree && decoder.config.num_drafts > 0
+            dflash2_tree
                 ? shelf::qwen35::runtime::dflash2_spec_step_tree(decoder, pending, remaining)
                 : shelf::qwen35::runtime::dflash2_spec_step(
                       decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u);

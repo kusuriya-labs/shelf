@@ -1650,15 +1650,16 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 }
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
-    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens,
+    uint32_t proposal_drafts) {
     if (decoder.config.tree) return Status::invalid_state("chain step with tree workspace", __FILE__, __LINE__);
-    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, proposal_drafts);
 }
 
 Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
     DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens) {
     if (!decoder.config.tree) return Status::invalid_state("tree step without tree workspace", __FILE__, __LINE__);
-    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens);
+    return dflash2_spec_step_impl(decoder, pending_token, remaining_tokens, 0u);
 }
 
 namespace {
