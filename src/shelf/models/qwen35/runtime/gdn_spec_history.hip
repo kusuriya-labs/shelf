@@ -61,7 +61,11 @@ GdnSpecHistoryDeviceView gdn_spec_history_view(
         return view;
     }
     view.conv_history = history.conv.data<bf16_t>();
-    view.recurrent_history = history.recurrent.data<fp16_t>();
+    // Conv-only histories have no recurrent tensor. Avoid taking data() on an
+    // empty tensor and make the absence explicit to the recurrence selector.
+    if (history.recurrent_state_bytes != 0u) {
+        view.recurrent_history = history.recurrent.data<fp16_t>();
+    }
     view.capture_rows = capture_rows;
     view.conv_row_stride = static_cast<uint64_t>(history.conv.dim(1));
     view.recurrent_row_stride =

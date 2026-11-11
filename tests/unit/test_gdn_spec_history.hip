@@ -160,6 +160,18 @@ int main() {
               "history view rejects overflow rows");
     }
 
+    {
+        auto conv_only_result = create_gdn_spec_history(arena, pool, kRows, false);
+        check(conv_only_result.ok(), "conv-only history create");
+        if (!conv_only_result.ok()) return 1;
+        auto conv_only = conv_only_result.release();
+        const auto device = gdn_spec_history_view(conv_only, kRows);
+        check(device.conv_history != nullptr && device.recurrent_history == nullptr &&
+                  device.recurrent_row_stride == 0u && device.capture_rows == kRows,
+              "conv-only history explicitly omits recurrent state");
+        check(shutdown_gdn_spec_history(conv_only).ok(), "conv-only history shutdown");
+    }
+
     shelf::gpu::Tensor q;
     shelf::gpu::Tensor kk;
     shelf::gpu::Tensor v;
