@@ -333,7 +333,9 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
 
             const uint64_t states = pool_view.num_gdn_states;
             const uint64_t log_rows = config.tree &&
-                env_flag_enabled("SHELF_DFLASH2_TREE_COMPACT_BRANCH", false)
+                (env_flag_enabled("SHELF_DFLASH2_TREE_COMPACT_BRANCH", false) ||
+                 (env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", false) &&
+                  env_flag_enabled("SHELF_GDN_TREE_CHUNKED", false)))
                 ? history_rows : static_cast<uint64_t>(config.num_drafts) + 1u;
             const uint64_t vdim =
                 static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
@@ -1147,6 +1149,18 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         }
     }
 
+    bool chunk_geometry = decoder.gdn_ranks.size() == 1u && decoder.gdn_key_heads == 16u;
+    if (chunk_geometry) {
+        const auto view = decoder.gdn_ranks.front().pool->device_view();
+        chunk_geometry = view.head_k == 128u && view.head_v == 128u &&
+            (view.num_v_heads == 32u || view.num_v_heads == 48u);
+    }
+    const bool tree_chunk = chunk_geometry && decoder.config.tree && verify_rows <= 32u &&
+        env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", false) &&
+        env_flag_enabled("SHELF_GDN_TREE_CHUNKED", false);
+    const bool chain_chunk = chunk_geometry && !decoder.config.tree && verify_rows <= 32u &&
+        env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", false);
+
     out.num_dflash_drafts = dflash_k;
     const uint32_t total_k = dflash_k;
     out.num_drafts = total_k;
@@ -1194,6 +1208,9 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         }
         std::vector<ExecuteBatchOptions> options = build_gdn_options(
             decoder, decoder.config.tree ? verify_rows : total_k);
+        if (chain_chunk) {
+            for (auto& option : options) option.gdn_compact.defer_state_store = 1u;
+        }
         if (decoder.config.tree) {
             for (std::size_t r = 0; r < options.size(); ++r) {
                 auto& g = decoder.gdn_ranks[r];
@@ -1213,6 +1230,11 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 options[r].tree_anc_positions = g.tree_ancestors;
                 options[r].rope_positions = g.tree_rope;
                 options[r].tree_committed_end = position;
+                if (tree_chunk) {
+                    options[r].gdn_spec_history.recurrent_history = nullptr;
+                    options[r].gdn_compact.defer_state_store = 1u;
+                    continue;
+                }
                 if (!tree_compact) {
                     options[r].gdn_compact = {};
                     continue;
@@ -1425,7 +1447,33 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         {
             ScopedTimer restore_timer(want_timing ? &tm->tree_restore_ms : nullptr);
-            if (restore_needed && !tree_compact) {
+            if (tree_chunk) {
+                for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+                    auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                    if (!scope.ok()) return scope.status();
+                    Status st = restore_gdn_spec_conv(*g.pool, decoder.sequence->slot, g.history,
+                                                      walk.rows[accepted], g.stream);
+                    if (!st.ok()) return st;
+                    std::vector<int32_t> replay_rows;
+                    for (uint32_t i = 0u; i <= accepted; ++i)
+                        replay_rows.push_back(static_cast<int32_t>(walk.rows[i]));
+                    const hipError_t err = hipMemcpy(g.tree_selected, replay_rows.data(),
+                        replay_rows.size() * sizeof(int32_t), hipMemcpyHostToDevice);
+                    if (err != hipSuccess)
+                        return Status::hip_error("dflash2 tree replay rows upload", hipGetErrorString(err), __FILE__, __LINE__);
+                    GdnCompactLogDeviceView compact{};
+                    compact.delta = g.compact_delta;
+                    compact.k = g.compact_k;
+                    compact.a = g.compact_a;
+                    compact.delta_layer_stride = g.compact_delta_layer_stride;
+                    compact.k_layer_stride = g.compact_k_layer_stride;
+                    compact.a_layer_stride = g.compact_a_layer_stride;
+                    st = commit_gdn_compact_log(*g.pool, decoder.sequence->slot, compact,
+                        g.commit_request, static_cast<uint32_t>(replay_rows.size()),
+                        decoder.gdn_key_heads, g.stream, g.tree_selected, verify_rows);
+                    if (!st.ok()) return st;
+                }
+            } else if (restore_needed && !tree_compact) {
                 for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
                     auto scope = shelf::gpu::ScopedDevice::create(g.device);
                     if (!scope.ok()) return scope.status();
@@ -1489,7 +1537,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 if (err == hipSuccess) err = hipEventElapsedTime(&restore_ms, decoder.draft_start_event, decoder.draft_stop_event);
                 if (err == hipSuccess) err = hipEventElapsedTime(&gather_ms, decoder.verify_start_event, decoder.verify_stop_event);
                 if (err != hipSuccess) return Status::hip_error("dflash2 commit timing", hipGetErrorString(err), __FILE__, __LINE__);
-                std::fprintf(stderr, "DFLASH2_TREE_COMMIT_GPU restore_ms=%.6f gather_ms=%.6f restore_skipped=%u\n", restore_ms, gather_ms, restore_needed ? 0u : 1u);
+                std::fprintf(stderr, "DFLASH2_TREE_COMMIT_GPU restore_ms=%.6f gather_ms=%.6f restore_skipped=%u\n", restore_ms, gather_ms, restore_needed || tree_chunk ? 0u : 1u);
             }
         }
         ScopedTimer append_timer(want_timing ? &tm->tree_append_ms : nullptr);
@@ -1505,6 +1553,22 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         }
     } else if (accepted == total_k) {
         ScopedTimer t(tm != nullptr ? &tm->dflash_commit_ms : nullptr);
+        if (chain_chunk) {
+            for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
+                auto scope = shelf::gpu::ScopedDevice::create(g.device);
+                if (!scope.ok()) return scope.status();
+                GdnCompactLogDeviceView compact{};
+                compact.delta = g.compact_delta;
+                compact.k = g.compact_k;
+                compact.a = g.compact_a;
+                compact.delta_layer_stride = g.compact_delta_layer_stride;
+                compact.k_layer_stride = g.compact_k_layer_stride;
+                compact.a_layer_stride = g.compact_a_layer_stride;
+                Status st = commit_gdn_compact_log(*g.pool, decoder.sequence->slot, compact,
+                    g.commit_request, total_k + 1u, decoder.gdn_key_heads, g.stream);
+                if (!st.ok()) return st;
+            }
+        }
         Status st = append_committed(decoder, position, total_k + 1u);
         if (!st.ok()) return st;
         const uint32_t required = ceil_div_u32(decoder.sequence->position, page_tokens);

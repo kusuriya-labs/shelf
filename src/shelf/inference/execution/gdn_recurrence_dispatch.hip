@@ -196,11 +196,26 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.capture_verify_only = mixed_verify ? 1u : 0u;
     }
     c.row_parent = ctx.spec.tree_row_parent;
-    if (ctx.spec.tree_row_parent != nullptr && c.recurrent_history == nullptr) {
+    const char* verify_chunk_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
+    const char* tree_chunk_env = std::getenv("SHELF_GDN_TREE_CHUNKED");
+    const GdnRecurrenceSelectorInput tree_selector{
+        actual_rows, num_requests, max_request_rows, key_heads, num_v_heads, head_k, head_v};
+    const bool tree_chunk = ctx.spec.tree_row_parent != nullptr &&
+        ctx.role == ::shelf::runtime::ExecutionRole::Verify && !mixed_verify &&
+        select_gdn_recurrence_implementation(tree_selector) == GdnRecurrenceImplementation::Optimized &&
+        verify_chunk_env != nullptr && verify_chunk_env[0] != '\0' && verify_chunk_env[0] != '0' &&
+        tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0' &&
+        c.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
+        c.head_v % ::shelf::kernel::kGdnRecurrenceWmmaVGroup == 0u &&
+        ctx.spec.gdn_compact.defer_state_store != 0u && c.actual_rows <= 32u &&
+        ctx.spec.gdn_compact.delta != nullptr && ctx.spec.gdn_compact.k != nullptr &&
+        ctx.spec.gdn_compact.a != nullptr && ctx.spec.gdn_compact.delta_layer_stride != 0u &&
+        ctx.spec.gdn_compact.k_layer_stride != 0u && ctx.spec.gdn_compact.a_layer_stride != 0u;
+    if (ctx.spec.tree_row_parent != nullptr && c.recurrent_history == nullptr && !tree_chunk) {
         return Status::invalid_state("gdn recurrence tree requires spec history capture",
                                      __FILE__, __LINE__);
     }
-    if (ctx.spec.tree_row_parent != nullptr && c.capture_rows < c.actual_rows) {
+    if (ctx.spec.tree_row_parent != nullptr && !tree_chunk && c.capture_rows < c.actual_rows) {
         return Status::invalid_state("gdn recurrence tree capture rows too small", __FILE__,
                                      __LINE__);
     }
