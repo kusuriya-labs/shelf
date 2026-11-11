@@ -308,7 +308,6 @@ struct DFlash2SpecBatchSlot {
 
 struct DFlash2SpecBatchOutput {
     std::vector<DFlash2SpecIterationOutput> slots;
-    std::vector<std::vector<float>> tree_logits;
     uint32_t total_rows = 0u;
     uint32_t rounds = 0u;
     double round_ms = 0.0;

@@ -2043,7 +2043,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
 
     std::vector<int32_t> sampled;
     std::vector<int32_t> decision_host;
-    std::vector<std::vector<float>> tree_logits;
     if (total_rows > 0u) {
         DFlash2SpecDecoder& leader = *plans.front().decoder;
         std::vector<ExecuteBatchOptions> options = build_batch_gdn_options(context, total_rows);
@@ -2112,21 +2111,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             return Status::invalid_state("batch verify output rows mismatch", __FILE__,
                                          __LINE__);
         }
-        if (tree_mode) {
-            tree_logits.resize(plans.size());
-            const uint32_t vocab = static_cast<uint32_t>(leader.draft->config->vocab_size);
-            const float* logits = output.logits.data<float>();
-            for (std::size_t i = 0; i < plans.size(); ++i) {
-                const SlotPlan& plan = plans[i];
-                if (!plan.batched) continue;
-                tree_logits[i].resize(static_cast<std::size_t>(plan.total_rows) * vocab);
-                const hipError_t err = hipMemcpy(tree_logits[i].data(),
-                    logits + static_cast<std::size_t>(plan.row_begin) * vocab,
-                    tree_logits[i].size() * sizeof(float), hipMemcpyDeviceToHost);
-                if (err != hipSuccess)
-                    return Status::hip_error("batch tree logits copy", hipGetErrorString(err), __FILE__, __LINE__);
-            }
-        }
         sampled.resize(total_rows);
         if (bridge) {
             decision_host.assign(2u * context.max_rows, 0);
@@ -2184,7 +2168,6 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
 
     DFlash2SpecBatchOutput out;
     out.slots.resize(plans.size());
-    out.tree_logits = std::move(tree_logits);
     out.total_rows = total_rows;
     out.rounds = 1u;
     if (batch_timing) {
