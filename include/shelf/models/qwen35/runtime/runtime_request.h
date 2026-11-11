@@ -40,8 +40,7 @@ struct DFlash2RequestSession {
     adaptive::Acceptance acceptance{};
     uint32_t adaptive_rows = 0;
     uint32_t adaptive_probe_age = 0;
-    uint32_t adaptive_pre_probe_rows = 0;
-    bool adaptive_was_probe = false;
+    double adaptive_accepted_ema = 2.0;
     int32_t pending_token = -1;
     bool ready = false;
 };

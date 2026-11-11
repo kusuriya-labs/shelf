@@ -1138,27 +1138,22 @@ DFlash2 の draft / verify 間で server と mask を交換する処理は未実
 構造化出力付き request は DFlash2 / MTP を使用せず通常 decode にフォールバックする。
 実装上の残作業は [接続案](../research/20261111/structured_output_speculative_design.md) を参照。
 
-### 適応的な検証行数の検討（実験段階）
+### 投機の適応制御（実験段階）
 
-検証した試作では、request ごとに draft の各位置について、そこに到達したときの
-条件付き受理率を指数移動平均で記録する。第 i 位置までの受理確率を条件付き受理率の
-積で求め、その和を検証行数に対する期待受理数とする。到達しなかった位置は更新しない。
-初期値は 0.8、更新係数は 0.15 とした。
+`--dflash2-adaptive` は K を細かく変更せず、batch と request の状態から投機の
+有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget、prefix cache の
+ページ境界に近いときだけ、その制約に合わせて検証する draft 数を短くする。
 
-各 request の選択肢は通常 decode または 1〜上限 K 個の draft の検証である。
-動的計画法で投機 request 数 S と検証行数の合計 R ごとに最大の期待受理数を求め、
-`(batch 数 + 期待受理数) / 予測 round 時間` を最大にする選択を探索する。
-同じ行数に対する期待受理数の配列を入力する形なので、将来の木検証の予算も
-その行数と期待受理数が与えられれば同じ選択器で扱える。木検証自体は未実装である。
-計測点の間は行数について線形補間し、範囲外は選択しない。予測差が 3% 以内なら
-直前の選択を維持し、投機を停止した request は定期的に 1 round 再試行する。
+- 投機候補が `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
+  その batch は全員を通常 decode にする。0 を指定すると batch 投機を停止する。
+- 各 request の 1 round 当たり受理 draft 数の EMA（初期値 2、係数 0.15）が
+  1.2 未満なら、その request は通常 decode に移る。停止中は 64 round ごとに
+  一度だけ投機を試し、受理率が回復したら再開する。短い残り長に伴う打ち切り
+  round は EMA に含めない。
+- DFlash2 の複数 request による compact verify は既定で exact chunk を使う。
+  単一 request は serial のまま。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
+  明示的に `SHELF_GDN_VERIFY_CHUNKED=1` とした場合は従来どおり lossy を選び、
+  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を併用すると exact を使う。
 
-コストは通常 decode の時間と、S・R ごとの draft / verify を含む round 時間を
-加算して近似する。混在時の追加処理、GPU の同期、request の短い残り長や
-batch 形状に由来する誤差はこの単純なモデルで完全には表せない。
-試作では drafter 自体は上限 K の出力を生成し、検証する prefix だけを短くする。
-
-**この設計は出力一致と性能の受け入れ条件を満たしておらず、実運用可能と判断していない。**
-既存の固定 K と通常 decode の greedy 出力も batch 形状によって一致しないため、
-厳密な一致を保証するには target 計算の数値的な差の解決が必要である。
-測定条件、再現結果、制約は [調査結果](../research/20261111/dflash2_adaptive.md) を参照。
+exact は逐次計算との bit 一致を意味しない。batch 形状でも greedy 出力が分岐する。
+速度と生成列の評価、制限は [調査結果](../research/20261111/dflash2_policy.md) を参照。

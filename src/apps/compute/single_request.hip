@@ -667,58 +667,23 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
-    namespace adaptive = shelf::qwen35::runtime::adaptive;
-    std::vector<adaptive::Acceptance> acceptance;
-    std::vector<uint32_t> previous;
-    std::vector<uint32_t> probe_age;
-    std::vector<uint64_t> adaptive_counts;
-    uint32_t pre_probe_rows = 0;
-    bool was_probe = false;
+    double accepted_ema = 2.0;
+    uint32_t probe_age = 0;
+    std::vector<uint64_t> adaptive_counts(decoder_config.num_drafts + 1u);
     uint64_t adaptive_rounds = 0;
-    double predicted_tokens = 0.0;
-    double predicted_ms = 0.0;
-    if (adaptive_cost != nullptr) {
-        acceptance.emplace_back(decoder_config.num_drafts);
-        previous.push_back(decoder_config.num_drafts + 1u);
-        probe_age.push_back(0u);
-        adaptive_counts.resize(decoder_config.num_drafts + 1u);
-    }
     bool finished = shelf::qwen_hybrid::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
         if (adaptive_cost != nullptr) {
-            if (was_probe) previous[0] = pre_probe_rows;
-            const uint32_t position = decoder.sequence->position;
-            const uint32_t room = decoder.sequence->max_seq_len > position
-                                      ? decoder.sequence->max_seq_len - position : 0u;
-            uint32_t limit = decoder_config.num_drafts;
-            if (remaining <= 1u || room < 2u) limit = 0u;
-            else limit = std::min(limit, std::min(remaining - 1u, room - 1u));
-            auto candidate = acceptance;
-            candidate[0].conditional.resize(limit);
             ++adaptive_rounds;
-            const uint32_t probe = limit == decoder_config.num_drafts
-                                       ? adaptive::pick_probe(probe_age, adaptive_rounds, 16u)
-                                       : UINT32_MAX;
-            const auto cost = [adaptive_cost](uint32_t sessions, uint32_t rows) {
-                return adaptive_cost->milliseconds(1u, sessions, rows);
-            };
-            const auto decision = adaptive::choose(candidate, 1u, decoder_config.num_drafts,
-                                                   cost, previous, 0.03, 1u, probe,
-                                                   decoder_config.num_drafts + 1u);
-            pre_probe_rows = previous[0];
-            const uint32_t rows = decision.predicted > 0.0 ? decision.rows[0] : 0u;
-            was_probe = probe == 0u;
-            previous[0] = rows;
-            probe_age[0] = rows < decoder_config.num_drafts + 1u ? probe_age[0] + 1u : 0u;
-            decoder.config.num_drafts = rows != 0u ? rows - 1u : 0u;
+            const bool enabled = accepted_ema >= 1.2;
+            if (enabled) probe_age = 0;
+            else if (probe_age < 64u) ++probe_age;
+            const bool probe = !enabled && probe_age >= 64u;
+            decoder.config.num_drafts = (enabled || probe) ? decoder_config.num_drafts : 0u;
+            if (probe) probe_age = 0;
             ++adaptive_counts[decoder.config.num_drafts];
-            if (decision.predicted > 0.0) {
-                const double ms = cost(rows != 0u, rows);
-                predicted_ms += ms;
-                predicted_tokens += decision.predicted * ms;
-            }
         }
         auto step_result =
             shelf::qwen35::runtime::dflash2_spec_step(
@@ -733,7 +698,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             return 1;
         }
         auto step = step_result.release();
-        if (adaptive_cost != nullptr) acceptance[0].observe(step.num_drafts, step.num_accepted);
+        if (adaptive_cost != nullptr && step.num_drafts == decoder_config.num_drafts) {
+            accepted_ema += 0.15 * (static_cast<double>(step.num_accepted) - accepted_ema);
+        }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
             generated.push_back(step.emitted[i]);
             ++decode_tokens;
@@ -751,9 +718,8 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     if (adaptive_cost != nullptr) {
         const double actual_ms = std::chrono::duration<double, std::milli>(
             t_decode_end - t_decode_start).count();
-        printf("DFLASH2_ADAPTIVE rounds=%llu predicted_tps=%.3f actual_tps=%.3f\n",
+        printf("DFLASH2_ADAPTIVE rounds=%llu actual_tps=%.3f\n",
                static_cast<unsigned long long>(adaptive_rounds),
-               predicted_ms > 0.0 ? 1000.0 * predicted_tokens / predicted_ms : 0.0,
                actual_ms > 0.0 ? 1000.0 * decode_tokens / actual_ms : 0.0);
         for (std::size_t k = 0; k < adaptive_counts.size(); ++k) {
             printf("DFLASH2_ADAPTIVE_K k=%zu count=%llu\n", k,

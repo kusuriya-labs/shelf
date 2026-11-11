@@ -96,7 +96,7 @@ void compute_usage(const char* prog) {
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
-    printf("  --dflash2-adaptive     adapt speculation and draft count\n");
+    printf("  --dflash2-adaptive     control speculation with a batch policy\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
     printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
     printf("                            without speculation\n");

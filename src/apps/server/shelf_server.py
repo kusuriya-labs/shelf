@@ -474,7 +474,7 @@ def parse_args(argv=None):
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
-                        help="request ごとの投機と draft 数を自動調整する")
+                        help="batch と受理数に応じて投機を制御する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
                         help="requests that may speculate at once; the rest decode "
                              "without speculation (0 = min(--max-concurrent-requests, 8))")

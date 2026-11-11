@@ -1241,7 +1241,10 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             RuntimeRequest& request = *slot_requests[i];
             const DFlash2SpecIterationOutput& step = results.slots[i];
             if (dflash_.adaptive) {
-                request.dflash->acceptance.observe(step.num_drafts, step.num_accepted);
+                if (step.num_drafts == dflash_.num_drafts) {
+                    auto& ema = request.dflash->adaptive_accepted_ema;
+                    ema += 0.15 * (static_cast<double>(step.num_accepted) - ema);
+                }
             }
             for (uint32_t j = 0; j < step.emitted_count; ++j) {
                 request.generated.push_back(step.emitted[j]);

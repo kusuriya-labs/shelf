@@ -1342,10 +1342,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         const float emitted =
             t.rounds > 0u ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
         if (dflash.adaptive && t.adaptive_rounds != 0u) {
-            fprintf(stderr, "DFLASH2_ADAPTIVE rounds=%llu predicted_tps=%.3f actual_tps=%.3f\n",
+            fprintf(stderr, "DFLASH2_ADAPTIVE rounds=%llu actual_tps=%.3f\n",
                     static_cast<unsigned long long>(t.adaptive_rounds),
-                    t.adaptive_predicted_ms > 0.0
-                        ? 1000.0 * t.adaptive_predicted_tokens / t.adaptive_predicted_ms : 0.0,
                     t.adaptive_actual_ms > 0.0
                         ? 1000.0 * t.adaptive_actual_tokens / t.adaptive_actual_ms : 0.0);
             for (std::size_t k = 0; k < t.adaptive_k_counts.size(); ++k) {

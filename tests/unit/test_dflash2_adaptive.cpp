@@ -89,47 +89,50 @@ int main() {
     check(selected.rows == std::vector<uint32_t>({0, 3, 0}), "session capacity");
     {
         namespace rt = shelf::qwen35::runtime;
-        adaptive::CostModel costly;
-        costly.baseline_ms = {0.0, 9.0, 10.0};
-        costly.speculation_ms = {{}, {{2, 100.0}, {3, 101.0}}};
         rt::DFlash2BatcherStats stats;
         rt::DFlash2BatcherBinding binding;
         binding.num_drafts = 2u;
-        binding.adaptive_cost = &costly;
         binding.stats = &stats;
         rt::ContinuousBatcherConfig config;
-        std::vector<rt::RuntimeRequest> live(2);
+        std::vector<rt::RuntimeRequest> live(13);
         std::vector<rt::RuntimeRequest*> active;
         for (auto& request : live) {
             request.state = rt::RequestState::Active;
             request.max_new_tokens = 100u;
-            request.generated_tokens = 1u;
             request.sequence.position = 20u;
             request.sequence.max_seq_len = 512u;
             request.dflash = std::make_unique<rt::DFlash2RequestSession>();
             request.dflash->ready = true;
-            request.dflash->acceptance = adaptive::Acceptance(2, 0.5);
-            request.dflash->adaptive_probe_age = 64u;
             active.push_back(&request);
         }
-        uint64_t round = 63u;
+        uint64_t round = 0;
+        rt::select_dflash2_adaptive(active, binding, config, round);
+        check(live[0].dflash->adaptive_rows == 0u && live[12].dflash->adaptive_rows == 0u,
+              "above the capacity all requests decode normally");
+        active.resize(2);
+        live[1].dflash->adaptive_accepted_ema = 0.5;
         rt::select_dflash2_adaptive(active, binding, config, round);
         check(live[0].dflash->adaptive_rows == 3u && live[1].dflash->adaptive_rows == 0u,
-              "batch probe is limited to one request");
-        check(stats.adaptive_k_counts[2] == 1u && stats.adaptive_k_counts[0] == 1u,
-              "batch choice metrics");
+              "low acceptance request decodes normally");
+        live[1].dflash->adaptive_probe_age = 63;
         rt::select_dflash2_adaptive(active, binding, config, round);
-        check(live[0].dflash->adaptive_rows == 0u && live[1].dflash->adaptive_rows == 0u,
-              "probe returns to previous choice");
-        live[0].dflash.reset();
-        live[0].pending_decode_token = 12;
-        live[1].state = rt::RequestState::Finished;
-        stats = {};
+        check(live[1].dflash->adaptive_rows == 3u, "disabled request is probed");
         rt::select_dflash2_adaptive(active, binding, config, round);
-        check(stats.adaptive_rounds == 1u && stats.adaptive_k_counts[0] == 1u &&
-                  stats.adaptive_predicted_tokens == 1.0,
-              "normal-only batch metrics");
+        check(live[1].dflash->adaptive_rows == 0u, "probe lasts one round");
+        live[1].dflash->adaptive_accepted_ema = 1.5;
+        rt::select_dflash2_adaptive(active, binding, config, round);
+        check(live[1].dflash->adaptive_rows == 3u, "recovered request resumes speculation");
+        active.clear();
+        for (auto& request : live) active.push_back(&request);
+        for (auto* request : active) {
+            request->dflash->adaptive_accepted_ema = 0.5;
+            request->dflash->adaptive_probe_age = 63;
+        }
+        rt::select_dflash2_adaptive(active, binding, config, round);
+        check(live[0].dflash->adaptive_rows == 3u && live[1].dflash->adaptive_rows == 0u,
+              "simultaneous probes cannot deadlock above the capacity");
     }
+
     for (uint32_t seed = 1; seed <= 16; ++seed) {
         std::vector<adaptive::Acceptance> values(3, adaptive::Acceptance(3));
         for (uint32_t i = 0; i < values.size(); ++i) {
