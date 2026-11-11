@@ -13,7 +13,7 @@ print('| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
 for sessions in range(1, 9):
     for drafts in range(1, 8):
         path = root / f's{sessions}k{drafts}.err'
-        if not path.exists() or not path.with_suffix('.out').exists() or not path.with_suffix('.out').read_text().startswith('{'):
+        if not path.exists() or not path.with_suffix('.out').exists() or not path.with_suffix('.out').read_text().startswith('{') or 'Traceback (most recent call last)' in path.with_suffix('.out').read_text():
             continue
         rows = sessions * (drafts + 1)
         values = []
