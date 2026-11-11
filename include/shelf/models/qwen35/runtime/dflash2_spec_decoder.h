@@ -24,9 +24,6 @@ namespace shelf::qwen35::runtime {
 
 constexpr uint32_t kDFlash2SpecMaxVerifyRows = 512u;
 
-// Rows one speculating session puts through the drafter and the verify pass: the anchor plus `drafts` draft rows,
-// never more than the drafter's block. Serve sizes its row budgets (scratch, batch history / compact log, target output
-// rows) from this instead of block_size, so a small K does not pay for the 8-row block it never uses.
 constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts,
                                         uint32_t tree_budget = 0u) noexcept {
     const uint32_t wanted = drafts + 1u;
@@ -311,6 +308,7 @@ struct DFlash2SpecBatchSlot {
 
 struct DFlash2SpecBatchOutput {
     std::vector<DFlash2SpecIterationOutput> slots;
+    std::vector<std::vector<float>> tree_logits;
     uint32_t total_rows = 0u;
     uint32_t rounds = 0u;
     double round_ms = 0.0;
