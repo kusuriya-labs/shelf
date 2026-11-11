@@ -401,3 +401,30 @@ code 1 は 2 回とも基準 512 token と一致したが、c=4・A・N=9 の co
 発生した。どちらも限定的な修正で全条件のゲートを満たせなかったため採用しない。
 c=4・A・N=9 を verify 全体の exact chunk で試すと、4 request の差は 0.08289 以下だった。
 ただし今回の性能表は既定の lossy chunk であり、exact への切り替えは行わない。
+
+## 24 prompt の生成品質確認
+
+既存の teacher-forced quality 測定は bench 経路で corpus を verify 行へ直接渡す。
+serve の batched tree 経路には corpus token を drafter の出力として強制する入口が
+ないため、指定の代替として `gdn_recurrence_scripts/measure.py` の 24 prompt を
+各 512 token 生成し、c=1 非投機との最初の不一致で基準 top-1/top-2 の差を測った。
+c=4 は 4 件ずつ同時に投入した。chain と木の比較のため c=4・chain も測定した。
+平均と中央値は不一致があった prompt のみを対象とする。
+
+| 構成 | 512 token 完全一致 | 不一致時の差の平均 / 中央値 / 最大 | 差が 0.1 超 |
+| --- | ---: | ---: | ---: |
+| c=1、N=12 | 5/24 | 0.05294 / 0.03306 / 0.23051 | 3/24 |
+| c=4、chain | 6/24 | 0.04098 / 0.03313 / 0.12459 | 1/24 |
+| c=4、N=9 | 7/24 | 0.04526 / 0.03577 / 0.12964 | 2/24 |
+
+c=4・N=9 の超過のうち prompt 17 は chain と同じ token・位置で最初に不一致となった。
+prompt 15 は chain が 163 token 目で差 0.07274 で分岐し、tree は 504 token 目まで
+一致した後に差 0.12964 で分岐した。後者は厳密なゲートを満たさない。
+c=1 の N=12 も追加の prompt 10・17・19 で差 0.1 を超えた。24 件の個別値と基準
+SHA-256 は [forest_serve_concurrency_quality.json](forest_serve_concurrency_quality.json)
+に記録した。code 1、shell 17、日本語 3、reasoning 19 の c=1・c=4 tree 出力を目視し、
+いずれも質問に沿った内容で、明らかな反復退化は見られなかった。
+
+これは生成列の最初の不一致と一部の目視による代替評価であり、teacher-forced KLD・
+top-1 を測ったものではない。既存 chain chunk の mean KL 約 0.001、top-1 98.4〜99.8%
+とは定量比較できない。最初の不一致後の全位置の精度も保証しない。
