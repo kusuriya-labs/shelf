@@ -1144,7 +1144,8 @@ DFlash2 の draft / verify 間で server と mask を交換する処理は未実
 有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget、prefix cache の
 ページ境界に近いときだけ、その制約に合わせて検証する draft 数を短くする。
 
-- 投機候補が `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
+- 投機候補と、セッション枠が足りず通常 decode 中の request の合計が
+  `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
   その batch は全員を通常 decode にする。0 を指定すると batch 投機を停止する。
 - 各 request の 1 round 当たり受理 draft 数の EMA（初期値 2、係数 0.03）が
   0.6 を下回ると、その request は通常 decode に移る。停止中は 64 round ごとに

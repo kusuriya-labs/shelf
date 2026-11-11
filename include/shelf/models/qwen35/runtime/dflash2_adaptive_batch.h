@@ -31,14 +31,18 @@ inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
     constexpr uint32_t probe_interval = 64;
     std::vector<RuntimeRequest*> candidates;
     uint32_t eligible = 0;
+    uint32_t normal = 0;
     RuntimeRequest* probe = nullptr;
     ++round;
     for (RuntimeRequest* request : active) {
         if (request->state != RequestState::Active ||
             request->finish_reason != FinishReason::None ||
             request->generated_tokens >= request->max_new_tokens ||
-            request->waiting_for_token_bitmask || request->dflash == nullptr ||
-            !request->dflash->ready) continue;
+            request->waiting_for_token_bitmask) continue;
+        if (request->dflash == nullptr || !request->dflash->ready) {
+            if (request->pending_decode_token >= 0) ++normal;
+            continue;
+        }
         auto& session = *request->dflash;
         const bool enabled = session.adaptive_accepted_ema >= threshold;
         if (enabled) session.adaptive_probe_age = 0;
@@ -53,7 +57,7 @@ inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
         probe->dflash->adaptive_rows = binding.num_drafts + 1u;
         ++eligible;
     }
-    const bool too_many = eligible > dflash2_policy_max_sessions();
+    const bool too_many = eligible + normal > dflash2_policy_max_sessions();
     for (RuntimeRequest* request : candidates) {
         auto& session = *request->dflash;
         if (too_many) session.adaptive_rows = 0;

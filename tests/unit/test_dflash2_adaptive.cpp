@@ -109,6 +109,13 @@ int main() {
         rt::select_dflash2_adaptive(active, binding, config, round);
         check(live[0].dflash->adaptive_rows == 0u && live[12].dflash->adaptive_rows == 0u,
               "above the capacity all requests decode normally");
+        for (unsigned i = 8; i < 13; ++i) {
+            live[i].dflash.reset();
+            live[i].pending_decode_token = 1;
+        }
+        rt::select_dflash2_adaptive(active, binding, config, round);
+        check(live[0].dflash->adaptive_rows == 0u,
+              "normal decode requests count toward batch capacity");
         active.resize(2);
         live[1].dflash->adaptive_accepted_ema = 0.5;
         rt::select_dflash2_adaptive(active, binding, config, round);
@@ -123,7 +130,13 @@ int main() {
         rt::select_dflash2_adaptive(active, binding, config, round);
         check(live[1].dflash->adaptive_rows == 3u, "recovered request resumes speculation");
         active.clear();
-        for (auto& request : live) active.push_back(&request);
+        for (auto& request : live) {
+            if (!request.dflash) {
+                request.dflash = std::make_unique<rt::DFlash2RequestSession>();
+                request.dflash->ready = true;
+            }
+            active.push_back(&request);
+        }
         for (auto* request : active) {
             request->dflash->adaptive_accepted_ema = 0.5;
             request->dflash->adaptive_probe_age = 63;
