@@ -1119,6 +1119,7 @@ Result<PendingBatch> submit_co_batch(
                 gslot->gdn_compact.k_layer_stride == options.gdn_compact.k_layer_stride &&
                 gslot->gdn_compact.a_layer_stride == options.gdn_compact.a_layer_stride &&
                 gslot->gdn_compact.defer_state_store == options.gdn_compact.defer_state_store &&
+                gslot->gdn_compact.force_tree_chunk == options.gdn_compact.force_tree_chunk &&
                 gslot->token_device_src ==
                     (token_ids_on_device ? batch.token_ids : nullptr)) {
                 stage_graph_inputs();

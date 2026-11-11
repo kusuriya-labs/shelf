@@ -219,6 +219,9 @@ struct LdsSmem {
         float S[kWk][kSp];
     };
     float G[kWt];
+    float raw_g[kWt];
+    uint32_t ancestors[kWt];
+    uint32_t chain;
     float de[kWt];
     float bt[kWt];
     float oe[kWt];
@@ -229,7 +232,7 @@ struct LdsSmem {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-template <bool kLossy, bool kSerialRows = false>
+template <bool kLossy, bool kSerialRows = false, bool kSingleRow = false, bool kChunkVerify = false, bool kTree = false>
 __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
@@ -252,7 +255,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
     if (row_begin >= a.actual_rows) return;
     if (row_begin + row_count > a.actual_rows) row_count = a.actual_rows - row_begin;
     if (row_count == 0u) return;
-    if constexpr (kSerialRows) {
+    if constexpr (kSerialRows || kChunkVerify) {
         if (row_count > kGdnRecurrenceVerifyBatchRows) row_count = kGdnRecurrenceVerifyBatchRows;
     }
     const uint32_t repeat = a.num_v_heads / a.key_heads;
@@ -362,6 +365,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             const float bv = ok ? g::wbf2f(a.b + static_cast<size_t>(c0 + tid) * a.b_row_stride + v_head) : 0.0f;
             s.bt[tid] = ok ? 1.0f / (1.0f + __expf(-bv)) : 0.0f;
             s.oe[tid] = ok ? neg_exp_a_log * __logf(1.0f + __expf(av + dt_bias)) : 0.0f;
+            if constexpr (kTree) s.raw_g[tid] = s.oe[tid];
         }
         detail::lds_barrier();
         if (tid < 32u) {
@@ -371,7 +375,24 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                 const float up = __shfl_up(val, d);
                 if (tid >= d) val += up;
             }
-            s.G[tid] = val;
+            if constexpr (kTree) {
+                const bool chain = __all(tid >= nval || a.row_parent[c0 + tid] ==
+                    (tid == 0u ? -1 : static_cast<int32_t>(c0 + tid - 1u)));
+                if (tid == 0u) s.chain = chain ? 1u : 0u;
+                uint32_t mask = 0u;
+                int32_t node = tid < nval ? static_cast<int32_t>(c0 + tid) : -1;
+                float path = 0.0f;
+                while (node >= static_cast<int32_t>(c0) && node < static_cast<int32_t>(c0 + nval)) {
+                    const uint32_t local = static_cast<uint32_t>(node) - c0;
+                    mask |= 1u << local;
+                    path += s.raw_g[local];
+                    node = a.row_parent[node];
+                }
+                s.ancestors[tid] = mask;
+                s.G[tid] = chain ? val : path;
+            } else {
+                s.G[tid] = val;
+            }
         }
         detail::lds_barrier();
         if (tid < g::kWt) {
@@ -438,8 +459,9 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             for (uint32_t e = 0; e < 8u; ++e) {
                 const uint32_t i = i0 + e;
                 const float d = __expf(s.G[i] - gj);
-                s.mid.A[i][j0] = (j0 <= i) ? (d * p_acc[e]) : 0.0f;
-                s.mid.L[i][j0] = (j0 < i) ? (s.bt[i] * d * pk_acc[e]) : 0.0f;
+                const bool ancestor = !kTree || ((s.ancestors[i] >> j0) & 1u) != 0u;
+                s.mid.A[i][j0] = (ancestor && j0 <= i) ? (d * p_acc[e]) : 0.0f;
+                s.mid.L[i][j0] = (ancestor && j0 < i) ? (s.bt[i] * d * pk_acc[e]) : 0.0f;
             }
         }
         #pragma unroll
@@ -470,7 +492,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         detail::lds_barrier();
 
         #pragma unroll
-        for (uint32_t jt = 0; jt < g::kWt / 16u; ++jt) {
+        for (uint32_t jt = 0; jt < (kSingleRow ? 1u : g::kWt / 16u); ++jt) {
             float atmp[8];
             #pragma unroll
             for (uint32_t q = 0; q < 4u; ++q) {
@@ -501,7 +523,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             #pragma unroll
             for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
         #pragma unroll
-        for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
+        for (uint32_t tstep = 0; tstep < (kSingleRow ? 1u : g::kWt / 16u); ++tstep) {
             Frag2 bv[2];
             #pragma unroll
             for (uint32_t vj = 0; vj < 2u; ++vj) {
@@ -535,8 +557,30 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     Sacc[ki * 2u + vj] = g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
             }
         }
+        if constexpr (kChunkVerify) {
+            const uint64_t dbase = static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
+            const uint64_t kbase = static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
+            const uint64_t abase = static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride;
+            const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
+            const uint64_t kdim = static_cast<uint64_t>(a.num_v_heads) * hd;
+            for (uint32_t i = 0; i < nval; ++i) {
+                if (tid < g::kWv)
+                    a.compact_delta[dbase + static_cast<uint64_t>(c0 + i) * vdim +
+                                    static_cast<uint64_t>(v_head) * hv + v0 + tid] = s.mid.dT[tid][i];
+                if (tid == 0u && vg == 0u)
+                    a.compact_a[abase + static_cast<uint64_t>(c0 + i) * a.num_v_heads + v_head] =
+                        kTree && s.chain == 0u ? __expf(s.raw_g[i]) :
+                        __expf(s.G[i] - (i == 0u ? 0.0f : s.G[i - 1u]));
+                if (vg == 0u)
+                    for (uint32_t col = tid; col < hd; col += g::kWthreads)
+                        a.compact_k[kbase + static_cast<uint64_t>(c0 + i) * kdim +
+                                    static_cast<uint64_t>(v_head) * hd + col] =
+                            a.k[static_cast<uint64_t>(c0 + i) * a.k_row_stride + qk_head * hd + col];
+            }
+        }
         if constexpr (kSerialRows) {
             if (a.recurrent_history != nullptr && c0 < a.capture_rows &&
+                (a.recurrent_capture_mask == nullptr || a.recurrent_capture_mask[c0] != 0u) &&
                 (a.capture_verify_only == 0u ||
                  req.execution_class == ::shelf::runtime::ExecutionClass::SPEC_VERIFY)) {
                 fp16_t* hist_head = a.recurrent_history
@@ -601,7 +645,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         detail::lds_barrier();
     }
 
-    if constexpr (kSerialRows) {
+    if constexpr (kSerialRows || kChunkVerify) {
         if (a.skip_state_store != 0u) return;
     }
     const uint32_t slot_store = a.requests[request_index].request_handle.slot;
@@ -622,6 +666,12 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
 }
 #pragma clang diagnostic pop
 
+// Experimental one-row specialization; the existing kernels retain their original loops.
+extern "C" __global__ __launch_bounds__(256)
+void shelf_gdn_recurrence_wmma_single_row_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, false, true>(a);
+}
+
 extern "C" __global__ __launch_bounds__(256)
 __attribute__((amdgpu_num_vgpr(256)))
 void shelf_gdn_recurrence_wmma_lossy(GdnRecurrenceArgs a) {
@@ -641,12 +691,11 @@ struct RowSmem {
     _Float16 kqfrag[2][gdngfx12::kWk / 16u][32][16];
 };
 
-extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
+template <bool kLossy>
+__device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
     using g::f32x8_t;
     using g::Frag2;
-    constexpr bool kLossy = true;
 
     const uint32_t hd = a.head_k;
     const uint32_t hv = a.head_v;
@@ -774,6 +823,16 @@ void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
 
 
 extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_commit_body<true>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void shelf_gdn_recurrence_wmma_commit_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_commit_body<false>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
 void shelf_gdn_recurrence_wmma_verify_lossy(
     GdnRecurrenceArgs a) {
     gdn_recurrence_wmma_body<true, true>(a);
@@ -783,6 +842,26 @@ extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
 void shelf_gdn_recurrence_wmma_verify_exact(
     GdnRecurrenceArgs a) {
     gdn_recurrence_wmma_body<false, true>(a);
+}
+
+__global__ __launch_bounds__(gdngfx12::kWthreads)
+void shelf_gdn_recurrence_wmma_verify_chunk_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, false, false, true>(a);
+}
+
+__global__ __launch_bounds__(gdngfx12::kWthreads)
+void shelf_gdn_recurrence_wmma_verify_chunk_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<false, false, false, true>(a);
+}
+
+extern "C" __global__ __launch_bounds__(256)
+void shelf_gdn_recurrence_wmma_verify_tree_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, false, false, true, true>(a);
+}
+
+extern "C" __global__ __launch_bounds__(256)
+void shelf_gdn_recurrence_wmma_verify_tree_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<false, false, false, true, true>(a);
 }
 
 bool gdn_recurrence_lossy_enabled() {
@@ -820,6 +899,19 @@ hipError_t launch_gdn_recurrence_f32_wmma(
     return hipGetLastError();
 }
 
+hipError_t launch_gdn_recurrence_f32_wmma_single_row_experimental(
+    const GdnRecurrenceArgs& a, hipStream_t stream) {
+    if (a.head_k != gdngfx12::kWk || a.head_v == 0u || a.head_v % gdngfx12::kWv ||
+        a.key_heads == 0u || a.num_v_heads == 0u || a.num_v_heads % a.key_heads ||
+        a.num_requests == 0u || a.actual_rows != a.num_requests ||
+        !a.q || !a.k || !a.v || !a.a || !a.b || !a.dt_bias || !a.a_log ||
+        !a.recurrent_state || !a.output || !a.requests || !a.max_sequences ||
+        !gdn_recurrence_lossy_enabled()) return hipErrorInvalidValue;
+    const dim3 grid(gdn_recurrence_wmma_grid_x(a.num_requests, a.num_v_heads, a.head_v));
+    shelf_gdn_recurrence_wmma_single_row_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    return hipGetLastError();
+}
+
 hipError_t launch_gdn_recurrence_f32_wmma_verify(
     const GdnRecurrenceArgs& args, hipStream_t stream) {
     if (args.head_k != gdngfx12::kWk) return hipErrorInvalidValue;
@@ -842,6 +934,43 @@ hipError_t launch_gdn_recurrence_f32_wmma_verify(
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
     const dim3 grid(static_cast<uint32_t>(grid_x));
+    const char* chunk_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
+    const bool chunk_enabled = chunk_env != nullptr
+        ? chunk_env[0] != '\0' && chunk_env[0] != '0' : true;
+    const bool chunk = chunk_enabled &&
+        a.skip_state_store != 0u && a.recurrent_history == nullptr && a.row_parent == nullptr &&
+        a.compact_delta != nullptr && a.compact_k != nullptr && a.compact_a != nullptr &&
+        a.compact_delta_layer_stride != 0u && a.compact_k_layer_stride != 0u &&
+        a.compact_a_layer_stride != 0u;
+    const char* tree_env = std::getenv("SHELF_GDN_TREE_CHUNKED");
+    const bool tree_chunk = chunk_enabled &&
+        (a.force_tree_chunk != 0u ||
+         (tree_env != nullptr && tree_env[0] != '\0' && tree_env[0] != '0')) &&
+        (a.max_request_rows != 0u ? a.max_request_rows : a.actual_rows) <= gdngfx12::kWt &&
+        a.row_parent != nullptr &&
+        a.skip_state_store != 0u && a.recurrent_history == nullptr &&
+        a.compact_delta != nullptr && a.compact_k != nullptr && a.compact_a != nullptr &&
+        a.compact_delta_layer_stride != 0u && a.compact_k_layer_stride != 0u &&
+        a.compact_a_layer_stride != 0u;
+    if (tree_chunk) {
+        const char* exact_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
+        const bool exact = exact_env != nullptr && exact_env[0] != '\0' && exact_env[0] != '0';
+        if (!exact && gdn_recurrence_lossy_enabled())
+            shelf_gdn_recurrence_wmma_verify_tree_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        else
+            shelf_gdn_recurrence_wmma_verify_tree_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        return hipGetLastError();
+    }
+    if (chunk) {
+        const char* exact_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
+        const bool chunk_exact = exact_env != nullptr
+            ? exact_env[0] != '\0' && exact_env[0] != '0' : false;
+        if (!chunk_exact && gdn_recurrence_lossy_enabled())
+            shelf_gdn_recurrence_wmma_verify_chunk_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        else
+            shelf_gdn_recurrence_wmma_verify_chunk_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+        return hipGetLastError();
+    }
     if (gdn_recurrence_lossy_enabled())
         shelf_gdn_recurrence_wmma_verify_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     else
@@ -871,7 +1000,10 @@ hipError_t launch_gdn_recurrence_f32_wmma_commit(
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
     const dim3 grid(static_cast<uint32_t>(grid_x));
-    shelf_gdn_recurrence_wmma_commit<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    if (a.compact_exact_replay != 0u)
+        shelf_gdn_recurrence_wmma_commit_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    else
+        shelf_gdn_recurrence_wmma_commit<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     return hipGetLastError();
 }
 

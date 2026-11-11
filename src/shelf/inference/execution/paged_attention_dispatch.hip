@@ -355,6 +355,8 @@ uint32_t paged_attention_output_element_bytes(
         region.row_positions = base.row_positions + row_begin;
     if (base.tree_anc_offsets != nullptr)
         region.tree_anc_offsets = base.tree_anc_offsets + row_begin;
+    if (base.tree_committed_end_rows != nullptr)
+        region.tree_committed_end_rows = base.tree_committed_end_rows + row_begin;
     if (base.block_mask != nullptr)
         region.block_mask = base.block_mask +
                             static_cast<uint64_t>(row_begin) * base.mask_stride;

@@ -22,6 +22,7 @@ PROMPT = [
 
 
 def main():
+    os.environ["SHELF_GDN_VERIFY_CHUNKED"] = "0"
     draft = os.environ.get("SHELF_DFLASH2_MODEL_DIR")
     if not draft or not model_dir().is_dir():
         print("SKIP: target または DFlash2 model が指定されていない")

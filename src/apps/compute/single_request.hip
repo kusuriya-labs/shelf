@@ -515,6 +515,10 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
                      int dflash2_stats,
+                     bool adaptive,
+                     bool dflash2_tree,
+                     unsigned long dflash2_tree_extra,
+                     unsigned long dflash2_tree_budget,
                      const std::string& kv_cache_dtype,
                      const shelf::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
@@ -629,6 +633,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
 
     shelf::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
+    decoder_config.tree = dflash2_tree;
+    decoder_config.tree_extra = static_cast<uint32_t>(dflash2_tree_extra);
+    decoder_config.tree_budget = static_cast<uint32_t>(dflash2_tree_budget);
     decoder_config.eos_tokens = text_config.stop_tokens;
     auto decoder_result = shelf::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream,
@@ -666,12 +673,29 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
+    double accepted_ema = 2.0;
+    uint32_t probe_age = 0;
+    std::vector<uint64_t> adaptive_counts(decoder_config.num_drafts + 1u);
+    uint64_t adaptive_rounds = 0;
     bool finished = shelf::qwen_hybrid::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
+        if (adaptive) {
+            ++adaptive_rounds;
+            const bool enabled = accepted_ema >= 0.6;
+            if (enabled) probe_age = 0;
+            else if (probe_age < 64u) ++probe_age;
+            const bool probe = !enabled && probe_age >= 64u;
+            decoder.config.num_drafts = (enabled || probe) ? decoder_config.num_drafts : 0u;
+            if (probe) probe_age = 0;
+            ++adaptive_counts[decoder.config.num_drafts];
+        }
         auto step_result =
-            shelf::qwen35::runtime::dflash2_spec_step(decoder, pending, remaining);
+            dflash2_tree
+                ? shelf::qwen35::runtime::dflash2_spec_step_tree(decoder, pending, remaining)
+                : shelf::qwen35::runtime::dflash2_spec_step(
+                      decoder, pending, remaining, adaptive ? decoder_config.num_drafts : 0u);
         if (!step_result.ok()) {
             fprintf(stderr, "dflash2 step failed: %s\n",
                     step_result.status().message().c_str());
@@ -682,6 +706,9 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
             return 1;
         }
         auto step = step_result.release();
+        if (adaptive && step.num_drafts == decoder_config.num_drafts) {
+            accepted_ema += 0.03 * (static_cast<double>(step.num_accepted) - accepted_ema);
+        }
         for (uint32_t i = 0; i < step.emitted_count; ++i) {
             generated.push_back(step.emitted[i]);
             ++decode_tokens;
@@ -696,6 +723,17 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
     }
     const auto t_decode_end = std::chrono::steady_clock::now();
 
+    if (adaptive) {
+        const double actual_ms = std::chrono::duration<double, std::milli>(
+            t_decode_end - t_decode_start).count();
+        printf("DFLASH2_ADAPTIVE rounds=%llu actual_tps=%.3f\n",
+               static_cast<unsigned long long>(adaptive_rounds),
+               actual_ms > 0.0 ? 1000.0 * decode_tokens / actual_ms : 0.0);
+        for (std::size_t k = 0; k < adaptive_counts.size(); ++k) {
+            printf("DFLASH2_ADAPTIVE_K k=%zu count=%llu\n", k,
+                   static_cast<unsigned long long>(adaptive_counts[k]));
+        }
+    }
     if (dflash2_stats != 0) {
         const float mean_accepted = timing.rounds > 0u
             ? static_cast<float>(timing.accepted_drafts) / static_cast<float>(timing.rounds)
@@ -717,7 +755,7 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
                static_cast<unsigned long long>(decoder.gdn_snapshot_bytes));
         printf("DFLASH2_GDN_COMPACT_BYTES=%llu\n",
                static_cast<unsigned long long>(decoder.gdn_compact_bytes));
-        printf("DFLASH2_GDN_MODE=compact\n");
+        printf("DFLASH2_GDN_MODE=%s\n", dflash2_tree ? "tree-history" : "compact");
         printf("DFLASH2_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
         printf("DFLASH2_MEAN_ACCEPTED=%.3f\n", mean_accepted);
         printf("DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
@@ -731,8 +769,17 @@ int run_dflash2_shot(shelf::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_VERIFY_GPU_MS=%.2f\n", timing.verify_gpu_ms);
         printf("DFLASH2_DECISION_WAIT_MS=%.2f\n", timing.decision_wait_ms);
         printf("DFLASH2_DECISION_D2H_MS=%.2f\n", timing.decision_copy_ms);
-        printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge ? 1 : 0);
+        printf("DFLASH2_DEVICE_TOKEN_BRIDGE=%d\n", decoder.device_token_bridge && !dflash2_tree ? 1 : 0);
         printf("DFLASH2_RERUN_MS=%.2f\n", timing.rerun_ms);
+        printf("DFLASH2_TREE_SELECT_MS=%.2f\n", timing.tree_select_ms);
+        if (timing.tree_probability_rows != 0u)
+            printf("DFLASH2_TREE_RESIDUAL_MASS=%.6f\n", 1.0 - timing.tree_retained_mass / timing.tree_probability_rows);
+        printf("DFLASH2_TREE_WALK_MS=%.2f\n", timing.tree_walk_ms);
+        printf("DFLASH2_TREE_COMMIT_MS=%.2f\n", timing.tree_commit_ms);
+        printf("DFLASH2_TREE_RESTORE_MS=%.2f\n", timing.tree_restore_ms);
+        printf("DFLASH2_TREE_GATHER_MS=%.2f\n", timing.tree_gather_ms);
+        printf("DFLASH2_TREE_APPEND_MS=%.2f\n", timing.tree_append_ms);
+        printf("DFLASH2_TREE_REPLAYS=%u\n", timing.tree_replays);
         printf("DFLASH2_GDN_SNAPSHOT_MS=%.2f\n", timing.gdn_snapshot_ms);
         printf("DFLASH2_GDN_RESTORE_MS=%.2f\n", timing.gdn_restore_ms);
         printf("DFLASH2_COMMIT_MS=%.2f\n", timing.dflash_commit_ms);

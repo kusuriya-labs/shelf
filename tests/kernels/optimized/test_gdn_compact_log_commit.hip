@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <cmath>
+#include <algorithm>
 
 namespace {
 
@@ -191,6 +193,334 @@ bool setup(Buf& d, uint32_t seed) {
     return a;
 }
 
+void test_chunk_verify(hipStream_t stream) {
+    Buf d;
+    if (!setup(d, 17001u)) { check(false, "chunk setup"); d.free_all(); return; }
+    std::vector<float> q(kRows * kQk), k(kRows * kQk);
+    bool ok = hipMemcpy(q.data(), d.q, q.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(k.data(), d.k, k.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    for (auto& x : q) x *= 0.1f;
+    for (auto& x : k) x *= 0.1f;
+    ok = ok && hipMemcpy(d.q, q.data(), q.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(d.k, k.data(), k.size() * 4u, hipMemcpyHostToDevice) == hipSuccess;
+    const size_t state_n = (size_t)kStates * kSlotStride;
+    std::vector<float> base, ref_state, chunk_state;
+    ok = ok && read_state_f16(d.state, base, state_n);
+    auto a = make_args(d);
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    a.skip_state_store = 1u;
+    a.num_gdn_states = 1u;
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "0", 1);
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess;
+    std::vector<float> ref(kRows * kVdim), chunk(ref.size());
+    ok = ok && hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(ref.data(), d.out, ref.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    a.recurrent_history = d.hist;
+    a.capture_rows = kRows;
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && std::memcmp(ref.data(), chunk.data(), ref.size() * 4u) == 0,
+          "chunk opt-in falls back when history is requested");
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    a.compact_rows = kRows;
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess && read_state_f16(d.state, ref_state, state_n) &&
+         write_state_f16(d.state, base, state_n);
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    std::vector<float> explicit_chunk = chunk;
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && std::memcmp(explicit_chunk.data(), chunk.data(), chunk.size() * 4u) == 0,
+          "single-request default selects chunk verify");
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    if (std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr) {
+        std::vector<float> exact_output = chunk;
+        unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
+        ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+             hipStreamSynchronize(stream) == hipSuccess &&
+             hipMemcpy(chunk.data(), d.out, chunk.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+        check(ok && std::memcmp(exact_output.data(), chunk.data(), chunk.size() * 4u) != 0,
+              "chunk exact opt-in selects a different numeric result");
+        setenv("SHELF_GDN_VERIFY_CHUNKED_EXACT", "1", 1);
+        ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+             hipStreamSynchronize(stream) == hipSuccess;
+        chunk = std::move(exact_output);
+    }
+    std::vector<float> deferred_state;
+    ok = ok && read_state_f16(d.state, deferred_state, state_n);
+    check(ok && deferred_state == base, "chunk verify leaves live state unchanged");
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess && read_state_f16(d.state, chunk_state, state_n);
+    double maxdiff = 0, mean = 0, meanref = 0, maxref = 0, statemax = 0, stateref = 0;
+    if (ok) {
+        for (size_t i = 0; i < ref.size(); ++i) {
+            const double diff = std::abs((double)ref[i] - chunk[i]);
+            ok = ok && std::isfinite(diff);
+            maxdiff = std::max(maxdiff, diff); mean += diff; meanref += std::abs((double)ref[i]);
+            maxref = std::max(maxref, std::abs((double)ref[i]));
+        }
+        for (size_t i = 0; i < state_n; ++i) {
+            statemax = std::max(statemax, std::abs((double)ref_state[i] - chunk_state[i]));
+            stateref = std::max(stateref, std::abs((double)ref_state[i]));
+        }
+    }
+    std::printf("chunk output max_abs=%.9g mean_abs=%.9g mean_relative_to_mean=%.9g max_relative_to_peak=%.9g replay_max_abs=%.9g replay_relative_to_peak=%.9g\n",
+                maxdiff, mean / ref.size(), mean / meanref, maxdiff / maxref, statemax, statemax / stateref);
+    check(ok && maxref > 0 && stateref > 0 && maxdiff / maxref < 0.05 && statemax / stateref < 0.05,
+          "chunk verify output and replay close to serial");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    d.free_all();
+}
+
+void test_tree_chunk_batch(hipStream_t stream) {
+    constexpr uint32_t count = 4u, rows = 9u, total = count * rows;
+    Buf src, d;
+    if (!setup(src, 17003u)) { check(false, "batch tree setup"); src.free_all(); return; }
+    bool ok = true;
+    auto duplicate = [&](auto*& dst, const auto* input, size_t row_bytes) {
+        ok = ok && hipMalloc(&dst, total * row_bytes) == hipSuccess;
+        for (uint32_t i = 0; ok && i < count; ++i)
+            ok = hipMemcpy(reinterpret_cast<char*>(dst) + i * rows * row_bytes, input,
+                           rows * row_bytes, hipMemcpyDeviceToDevice) == hipSuccess;
+    };
+    duplicate(d.q, src.q, kQk * sizeof(float));
+    duplicate(d.k, src.k, kQk * sizeof(float));
+    duplicate(d.v, src.v, kVdim * sizeof(uint16_t));
+    duplicate(d.a, src.a, kHeads * sizeof(uint16_t));
+    duplicate(d.b, src.b, kHeads * sizeof(uint16_t));
+    ok = ok && hipMalloc(&d.state, count * kStates * kSlotStride * sizeof(shelf::fp16_t)) == hipSuccess;
+    for (uint32_t i = 0; ok && i < count; ++i)
+        ok = hipMemcpy(d.state + i * kStates * kSlotStride, src.state,
+                       kStates * kSlotStride * sizeof(shelf::fp16_t), hipMemcpyDeviceToDevice) == hipSuccess;
+    ok = ok && hipMalloc(&d.out, total * kVdim * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_delta, total * kVdim * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_k, total * kHeads * kHeadK * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.compact_a, total * kHeads * sizeof(float)) == hipSuccess &&
+         hipMalloc(&d.requests, count * sizeof(::shelf::runtime::DeviceRequestDescriptor)) == hipSuccess;
+    int32_t* parents = nullptr;
+    ok = ok && hipMalloc(&parents, total * sizeof(int32_t)) == hipSuccess;
+    std::vector<int32_t> parent(total);
+    std::vector<::shelf::runtime::DeviceRequestDescriptor> req(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        req[i].request_handle.slot = i;
+        req[i].row_begin = i * rows;
+        req[i].row_count = rows;
+        parent[i * rows] = -1;
+        for (uint32_t j = 1; j < rows; ++j)
+            parent[i * rows + j] = static_cast<int32_t>(i * rows + (j - 1u) / 2u);
+    }
+    ok = ok && hipMemcpy(d.requests, req.data(), req.size() * sizeof(req[0]), hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(parents, parent.data(), parent.size() * sizeof(parent[0]), hipMemcpyHostToDevice) == hipSuccess;
+    auto a = make_args(d);
+    a.dt_bias = reinterpret_cast<const shelf::bf16_t*>(src.dt_bias);
+    a.a_log = reinterpret_cast<const shelf::bf16_t*>(src.a_log);
+    a.num_requests = count;
+    a.actual_rows = total;
+    a.max_request_rows = rows;
+    a.max_sequences = count;
+    a.num_gdn_states = 1u;
+    a.row_parent = parents;
+    a.recurrent_history = nullptr;
+    a.capture_rows = 0u;
+    a.skip_state_store = 1u;
+    a.compact_delta_layer_stride = total * kVdim;
+    a.compact_k_layer_stride = total * kHeads * kHeadK;
+    a.compact_a_layer_stride = total * kHeads;
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+    ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+         hipStreamSynchronize(stream) == hipSuccess;
+    std::vector<float> batch(total * kVdim), separate(batch.size());
+    ok = ok && hipMemcpy(batch.data(), d.out, batch.size() * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        a.num_requests = 1u;
+        a.requests = static_cast<const ::shelf::runtime::DeviceRequestDescriptor*>(d.requests) + i;
+        ok = shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess;
+    }
+    ok = ok && hipStreamSynchronize(stream) == hipSuccess &&
+         hipMemcpy(separate.data(), d.out, separate.size() * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    check(ok && batch == separate, "tree chunk batch over 32 rows matches separate requests");
+    unsetenv("SHELF_GDN_TREE_CHUNKED");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    if (parents) shelf::gpu::discard_cleanup_result(hipFree(parents));
+    d.free_all();
+    src.free_all();
+}
+
+void test_tree_chunk(hipStream_t stream) {
+    Buf d;
+    if (!setup(d, 17002u)) { check(false, "tree chunk setup"); d.free_all(); return; }
+    std::vector<float> q(kRows * kQk), k(kRows * kQk);
+    bool ok = hipMemcpy(q.data(), d.q, q.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(k.data(), d.k, k.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+    for (auto& x : q) x *= 0.1f;
+    for (auto& x : k) x *= 0.1f;
+    ok = ok && hipMemcpy(d.q, q.data(), q.size() * 4u, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(d.k, k.data(), k.size() * 4u, hipMemcpyHostToDevice) == hipSuccess;
+    std::vector<uint16_t> hv(kRows * kVdim), ha(kRows * kHeads), hb(kRows * kHeads);
+    std::vector<uint16_t> hdt(kHeads), hal(kHeads);
+    ok = ok && hipMemcpy(hv.data(), d.v, hv.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(ha.data(), d.a, ha.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hb.data(), d.b, hb.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hdt.data(), d.dt_bias, hdt.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(hal.data(), d.a_log, hal.size() * 2u, hipMemcpyDeviceToHost) == hipSuccess;
+    auto bf = [](uint16_t v) {
+        uint32_t bits = static_cast<uint32_t>(v) << 16u;
+        float x;
+        std::memcpy(&x, &bits, sizeof(x));
+        return static_cast<double>(x);
+    };
+    int32_t* parents_dev = nullptr;
+    int32_t* path_dev = nullptr;
+    ok = ok && hipMalloc(&parents_dev, kRows * sizeof(int32_t)) == hipSuccess &&
+         hipMalloc(&path_dev, kRows * sizeof(int32_t)) == hipSuccess;
+    const size_t state_n = (size_t)kStates * kSlotStride;
+    std::vector<float> base;
+    ok = ok && read_state_f16(d.state, base, state_n);
+    setenv("SHELF_GDN_VERIFY_CHUNKED", "1", 1);
+    setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+    for (uint32_t n : {8u, 10u, 16u}) {
+        for (uint32_t shape = 0; shape < 3; ++shape) {
+            std::vector<int32_t> parent(n, -1);
+            for (uint32_t i = 1; i < n; ++i)
+                parent[i] = shape == 0 ? static_cast<int32_t>(i - 1u) :
+                            shape == 1 ? 0 : static_cast<int32_t>((i - 1u) / 2u);
+            ::shelf::runtime::DeviceRequestDescriptor req{};
+            req.request_handle.slot = 0u;
+            req.row_count = n;
+            ok = ok && hipMemcpy(d.requests, &req, sizeof(req), hipMemcpyHostToDevice) == hipSuccess &&
+                 hipMemcpy(parents_dev, parent.data(), n * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess &&
+                 write_state_f16(d.state, base, state_n);
+            auto a = make_args(d);
+            a.actual_rows = n;
+            a.row_parent = parents_dev;
+            a.skip_state_store = 1u;
+            a.num_gdn_states = 1u;
+            unsetenv("SHELF_GDN_TREE_CHUNKED");
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> ref(n * kVdim), got(ref.size());
+            ok = ok && hipMemcpy(ref.data(), d.out, ref.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+            std::vector<float> ref_state;
+            ok = ok && read_state_f16(d.hist + (size_t)(n - 1u) * kStates * kSlotStride, ref_state, kSlotStride);
+            a.recurrent_history = nullptr;
+            a.capture_rows = 0;
+            setenv("SHELF_GDN_TREE_CHUNKED", "1", 1);
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess &&
+                 hipMemcpy(got.data(), d.out, got.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess;
+            std::vector<int32_t> path;
+            for (int32_t i = static_cast<int32_t>(n) - 1; i >= 0; i = parent[i]) path.push_back(i);
+            std::reverse(path.begin(), path.end());
+            ok = ok && hipMemcpy(path_dev, path.data(), path.size() * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess;
+            a.compact_rows = static_cast<uint32_t>(path.size());
+            a.compact_row_indices = path_dev;
+            a.compact_row_capacity = n;
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> state;
+            ok = ok && read_state_f16(d.state, state, kSlotStride);
+            ok = ok && write_state_f16(d.state, base, state_n);
+            a.compact_exact_replay = 1u;
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> exact_state;
+            ok = ok && read_state_f16(d.state, exact_state, kSlotStride);
+            a.compact_exact_replay = 0u;
+            if (shape == 0u) {
+                ok = ok && write_state_f16(d.state, base, state_n);
+                a.row_parent = nullptr;
+                a.compact_row_indices = nullptr;
+                a.compact_rows = n;
+                ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_verify(a, stream) == hipSuccess &&
+                     hipStreamSynchronize(stream) == hipSuccess;
+                std::vector<float> chain(got.size()), chain_state;
+                ok = ok && hipMemcpy(chain.data(), d.out, chain.size() * 4u, hipMemcpyDeviceToHost) == hipSuccess &&
+                     shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                     hipStreamSynchronize(stream) == hipSuccess &&
+                     read_state_f16(d.state, chain_state, kSlotStride);
+                check(ok && std::memcmp(chain.data(), got.data(), got.size() * sizeof(float)) == 0 &&
+                      chain_state == state, "tree chain matches chain chunk bitwise");
+            }
+            double diff = 0, peak = 0, sdiff = 0, speak = 0;
+            if (ok) {
+                for (size_t i = 0; i < ref.size(); ++i) {
+                    diff = std::max(diff, std::abs(double(ref[i]) - got[i]));
+                    peak = std::max(peak, std::abs(double(ref[i])));
+                }
+                for (size_t i = 0; i < state.size(); ++i) {
+                    sdiff = std::max(sdiff, std::abs(double(ref_state[i]) - state[i]));
+                    speak = std::max(speak, std::abs(double(ref_state[i])));
+                }
+            }
+            std::vector<std::vector<double>> cpu_states(n, std::vector<double>(kHeadK * kHeadV));
+            std::vector<double> cpu_output(n * kHeadV);
+            for (uint32_t i = 0; i < n; ++i) {
+                auto& dst = cpu_states[i];
+                for (uint32_t d0 = 0; d0 < kHeadK; ++d0)
+                    for (uint32_t v0 = 0; v0 < kHeadV; ++v0)
+                        dst[d0 * kHeadV + v0] = parent[i] < 0
+                            ? base[d0 * kHeadV + v0]
+                            : cpu_states[parent[i]][d0 * kHeadV + v0];
+                const double decay = std::exp(-std::exp(bf(hal[0])) *
+                    std::log1p(std::exp(bf(ha[i * kHeads]) + bf(hdt[0]))));
+                const double beta = 1.0 / (1.0 + std::exp(-bf(hb[i * kHeads])));
+                for (uint32_t v0 = 0; v0 < kHeadV; ++v0) {
+                    double product = 0.0;
+                    for (uint32_t d0 = 0; d0 < kHeadK; ++d0)
+                        product += k[i * kQk + d0] * dst[d0 * kHeadV + v0];
+                    const double delta = beta * (bf(hv[i * kVdim + v0]) - decay * product);
+                    double output = 0.0;
+                    for (uint32_t d0 = 0; d0 < kHeadK; ++d0) {
+                        auto& x = dst[d0 * kHeadV + v0];
+                        x = decay * x + k[i * kQk + d0] * delta;
+                        output += q[i * kQk + d0] * x;
+                    }
+                    cpu_output[i * kHeadV + v0] = output;
+                }
+            }
+            double cdiff = 0, cpeak = 0, csdiff = 0, cspeak = 0, exact_diff = 0;
+            if (ok) {
+                for (uint32_t i = 0; i < n; ++i)
+                    for (uint32_t v0 = 0; v0 < kHeadV; ++v0) {
+                        const double x = cpu_output[i * kHeadV + v0];
+                        cdiff = std::max(cdiff, std::abs(x - got[i * kVdim + v0]));
+                        cpeak = std::max(cpeak, std::abs(x));
+                    }
+                for (uint32_t j = 0; j < kHeadK * kHeadV; ++j) {
+                    const double x = cpu_states[n - 1u][j];
+                    csdiff = std::max(csdiff, std::abs(x - state[j]));
+                    exact_diff = std::max(exact_diff, std::abs(x - exact_state[j]));
+                    cspeak = std::max(cspeak, std::abs(x));
+                }
+            }
+            std::printf("tree CPU n=%u shape=%u output=%.6g state=%.6g\n", n, shape, cdiff / cpeak, csdiff / cspeak);
+            check(ok && cpeak > 0 && cspeak > 0 && cdiff / cpeak < 0.001 && csdiff / cspeak < 0.001,
+                  "tree chunk output and replay match CPU");
+            check(ok && cspeak > 0 && exact_diff / cspeak < 0.001,
+                  "exact tree replay matches CPU");
+            std::printf("tree n=%u shape=%u output=%.6g state=%.6g\n", n, shape, diff / peak, sdiff / speak);
+            check(ok && peak > 0 && speak > 0 && diff / peak < 0.001 && sdiff / speak < 0.001,
+                  "tree chunk output and replay match serial");
+        }
+    }
+    unsetenv("SHELF_GDN_TREE_CHUNKED");
+    unsetenv("SHELF_GDN_VERIFY_CHUNKED");
+    if (parents_dev) shelf::gpu::discard_cleanup_result(hipFree(parents_dev));
+    if (path_dev) shelf::gpu::discard_cleanup_result(hipFree(path_dev));
+    d.free_all();
+}
+
 bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, size_t& first) {
     if (x.size() != y.size()) return false;
     for (size_t i = 0; i < x.size(); ++i) {
@@ -206,7 +536,10 @@ bool all_bits_equal(const std::vector<float>& x, const std::vector<float>& y, si
 
 int main() {
     std::printf("=== GDN compact-log commit bit-exactness ===\n");
+    const bool chunk_exact = std::getenv("SHELF_GDN_CHUNK_NUMERIC_EXACT") != nullptr;
     unsetenv("SHELF_GDN_RECURRENCE_EXACT");
+    if (chunk_exact) setenv("SHELF_GDN_VERIFY_CHUNKED_EXACT", "1", 1);
+    else unsetenv("SHELF_GDN_VERIFY_CHUNKED_EXACT");
     unsetenv("SHELF_GDN_RECURRENCE_LOSSY");
 
     int device_count = 0;
@@ -218,10 +551,20 @@ int main() {
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
 
+    if (chunk_exact) {
+        test_chunk_verify(stream);
+        shelf::gpu::discard_cleanup_result(hipStreamDestroy(stream));
+        return failed > 0 ? 1 : 0;
+    }
+
     if (!::shelf::kernel::gdn_recurrence_lossy_enabled()) {
         std::printf("FAIL: lossy mode expected for wmma commit path\n");
         return 1;
     }
+
+    test_chunk_verify(stream);
+    test_tree_chunk(stream);
+    test_tree_chunk_batch(stream);
 
     Buf d;
     if (!setup(d, 20260930u)) {

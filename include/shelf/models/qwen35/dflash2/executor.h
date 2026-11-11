@@ -7,9 +7,11 @@
 #include <shelf/core/status.h>
 #include <shelf/models/qwen35/dflash2/config.h>
 #include <shelf/models/qwen35/dflash2/weights.h>
+#include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
 #include <shelf/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -253,6 +255,18 @@ Status dflash2_propose_batch(
     DFlash2Executor& executor,
     const DFlash2ProposeRequest* requests,
     int32_t* const* output_drafts,
+    uint32_t request_count,
+    hipStream_t stream);
+
+struct DFlash2TargetTapAppendRequest {
+    DFlash2ContextState* context = nullptr;
+    std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> taps{};
+    uint32_t position = 0u;
+};
+
+Status dflash2_append_target_taps_batch(
+    DFlash2Executor& executor,
+    const DFlash2TargetTapAppendRequest* requests,
     uint32_t request_count,
     hipStream_t stream);
 

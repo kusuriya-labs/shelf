@@ -61,7 +61,11 @@ GdnSpecHistoryDeviceView gdn_spec_history_view(
         return view;
     }
     view.conv_history = history.conv.data<bf16_t>();
-    view.recurrent_history = history.recurrent.data<fp16_t>();
+    // Conv-only histories have no recurrent tensor. Avoid taking data() on an
+    // empty tensor and make the absence explicit to the recurrence selector.
+    if (history.recurrent_state_bytes != 0u) {
+        view.recurrent_history = history.recurrent.data<fp16_t>();
+    }
     view.capture_rows = capture_rows;
     view.conv_row_stride = static_cast<uint64_t>(history.conv.dim(1));
     view.recurrent_row_stride =
@@ -167,7 +171,8 @@ Status commit_gdn_compact_log(
     uint32_t key_heads,
     hipStream_t stream,
     const int32_t* row_indices,
-    uint32_t log_row_capacity) {
+    uint32_t log_row_capacity,
+    bool exact_replay) {
     if (log.delta == nullptr || log.k == nullptr || log.a == nullptr) {
         return Status::invalid_argument("commit_gdn_compact_log: log is null", __FILE__,
                                         __LINE__);
@@ -211,6 +216,7 @@ Status commit_gdn_compact_log(
     a.compact_rows = rows;
     a.compact_row_indices = row_indices;
     a.compact_row_capacity = log_row_capacity;
+    a.compact_exact_replay = exact_replay ? 1u : 0u;
     const hipError_t err = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream);
     if (err != hipSuccess) {
         return Status::hip_error("commit_gdn_compact_log launch", hipGetErrorString(err),

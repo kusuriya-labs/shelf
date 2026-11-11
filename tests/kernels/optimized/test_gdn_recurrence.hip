@@ -326,6 +326,31 @@ bool run_case(const Case& c) {
     if (hipMemcpy(oo.data(), buf.out_opt, oo.size() * 4, hipMemcpyDeviceToHost) != hipSuccess) return false;
     if (hipMemcpy(sc16.data(), buf.state_correct, sc16.size() * sizeof(fp16t), hipMemcpyDeviceToHost) != hipSuccess) return false;
     if (hipMemcpy(so16.data(), buf.state_opt, so16.size() * sizeof(fp16t), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    bool experimental_pass = true;
+    bool single_rows = c.rows == nreq && !c.verify && !c.poison_v && c.head_k == 128u && c.head_v % 64u == 0u;
+    for (const auto& req : c.reqs) single_rows = single_rows && req.row_count == 1u;
+    if (single_rows && ::shelf::kernel::gdn_recurrence_lossy_enabled()) {
+        if (hipMemcpy(buf.state_opt, h_state16.data(), h_state16.size() * sizeof(fp16t), hipMemcpyHostToDevice) != hipSuccess ||
+            ::shelf::kernel::launch_gdn_recurrence_f32_wmma_single_row_experimental(ka, nullptr) != hipSuccess) return false;
+        std::vector<float> candidate_out(oo.size());
+        std::vector<fp16t> candidate_state(so16.size());
+        if (hipMemcpy(candidate_out.data(), buf.out_opt, candidate_out.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess ||
+            hipMemcpy(candidate_state.data(), buf.state_opt, candidate_state.size() * sizeof(fp16t), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        size_t output_changed = 0, state_changed = 0;
+        double max_output_diff = 0.0, max_state_diff = 0.0;
+        for (size_t i = 0; i < oo.size(); ++i) {
+            if (std::memcmp(&oo[i], &candidate_out[i], sizeof(float))) ++output_changed;
+            max_output_diff = std::fmax(max_output_diff, std::fabs(double(oo[i]) - candidate_out[i]));
+        }
+        for (size_t i = 0; i < so16.size(); ++i) {
+            if (std::memcmp(&so16[i], &candidate_state[i], sizeof(fp16t))) ++state_changed;
+            max_state_diff = std::fmax(max_state_diff, std::fabs(double(shelf::fp16_to_f32(so16[i])) - shelf::fp16_to_f32(candidate_state[i])));
+        }
+        experimental_pass = output_changed == 0u && state_changed == 0u;
+        std::printf("  [%s] experimental vs WMMA: changed=%zu/%zu max_abs=%.3e/%.3e %s\n", c.name,
+                    output_changed, state_changed, max_output_diff, max_state_diff,
+                    experimental_pass ? "PASS" : "FAIL");
+    }
     std::vector<float> sc(state_total), so(state_total);
     for (size_t i = 0; i < state_total; ++i) {
         sc[i] = shelf::fp16_to_f32(sc16[i]);
@@ -452,7 +477,7 @@ bool run_case(const Case& c) {
         (void)max_rel;
     }
 
-    const bool pass = (c.poison_v || (out_nan == 0u && state_nan == 0u)) &&
+    const bool pass = experimental_pass && (c.poison_v || (out_nan == 0u && state_nan == 0u)) &&
                       (out_bigdiff == 0) && (state_bigdiff == 0) && (cpu_max_rel < 2e-2);
     std::printf("  [%s] kh=%u nvh=%u hk=%u hv=%u rows=%u nreq=%u si=%u | ew=%u nan=%zu/%zu "
                 "out(maxabs=%.3e meanabs=%.3e maxrel=%.3e bad=%zu) state(maxabs=%.3e meanabs=%.3e maxrel=%.3e bad=%zu) cpu_rel=%.3e mode=%s %s\n",

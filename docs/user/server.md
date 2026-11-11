@@ -87,6 +87,7 @@ Ready.
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
+| `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
 | `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(`--max-concurrent-requests`, 8)) |
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |
@@ -99,6 +100,8 @@ Ready.
 `--large-context-tokens` が 0 より大きい場合、
 `--large-context-inference-budget-tokens` は `--inference-budget-tokens` 以上でなければならない。
 `--arena-gib auto` は compute と同じ memory plan を compute 側の stderr に出す。
+DFlash2 で TP=1・draft 数 7 以外の場合、tree budget の省略時は警告を出して
+chain を使う。auto で stochastic sampling を使う request は通常 decode する。
 
 ### prefix cache
 
@@ -149,6 +152,11 @@ request 1 個あたりの生成予算（推論予算）は `--inference-budget-t
   KV admission は通常 decode と同じ KV Banker が行うため、不足時は一部の request が
   Queued になり、Active の完了後に admission される。
 - tool calling / sampling / cancel は DFlash2 経路でも利用できる。
+- verify は単一 request を含め既定で lossy chunk を使うため、非投機 greedy と
+  生成列が一致しない場合がある。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
+  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` は exact chunk を選ぶが、bit 一致は保証しない。
+- `--dflash2-adaptive` は投機を自動で停止・再試行する実験的な方式で、投機を停止する batch 負荷の
+  上限は `SHELF_DFLASH2_POLICY_MAX_SESSIONS` で上書きできる（既定 12）。
 
 TP=1 で drafter の block size が 8、sliding window が 256 以上の場合、prefill の
 context 構築は既定で最大 256 行ずつ処理する。`SHELF_DFLASH2_PREFILL_ROWS=8` で

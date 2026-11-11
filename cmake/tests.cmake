@@ -164,6 +164,13 @@ target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}
 shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_dflash2_adaptive SOURCE unit/test_dflash2_adaptive.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
+set_tests_properties(test_dflash2_adaptive PROPERTIES ENVIRONMENT "SHELF_DFLASH2_POLICY_MAX_SESSIONS=12")
+add_test(NAME test_dflash2_adaptive_cap_override COMMAND test_dflash2_adaptive --check-cap-override)
+set_tests_properties(test_dflash2_adaptive_cap_override PROPERTIES LABELS "cpu;required" TIMEOUT 30 ENVIRONMENT "SHELF_DFLASH2_POLICY_MAX_SESSIONS=4")
+shelf_add_test(NAME test_dflash2_tree SOURCE unit/test_dflash2_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
+add_test(NAME test_gdn_tree_chunk_reference COMMAND python3 "${CMAKE_SOURCE_DIR}/tests/unit/test_gdn_tree_chunk_reference.py")
+set_tests_properties(test_gdn_tree_chunk_reference PROPERTIES LABELS "cpu;required" TIMEOUT 30)
 shelf_add_test(NAME test_thinking_budget SOURCE unit/test_thinking_budget.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_dflash2_footprint SOURCE unit/test_dflash2_footprint.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_dflash2_exl3_head SOURCE unit/test_dflash2_exl3_head.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime shelf_quant_reference)
@@ -734,6 +741,7 @@ if(SHELF_BUILD_OPTIONAL_TESTS)
     # DFlash2 batched target verify: 2 requests in one verify batch must match the
     # per-request single path exactly.
     shelf_add_test(NAME test_dflash2_batch_e2e SOURCE unit/test_dflash2_batch_e2e.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
+    shelf_add_test(NAME test_dflash2_context_batch SOURCE unit/test_dflash2_context_batch.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 12 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)
 
     # DFlash2 batched target verify throughput scaling (perf, not correctness).
     shelf_add_test(NAME test_dflash2_batch_perf SOURCE unit/test_dflash2_batch_perf.hip LABELS "gpu1;perf;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES shelf_weights shelf_qwen35 shelf_qwen35_runtime)

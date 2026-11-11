@@ -36,8 +36,14 @@ struct ComputeOptions {
     shelf::qwen35::runtime::SamplingConfig sampling;
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
+    bool dflash2_adaptive = false;
     unsigned long dflash2_max_sessions = 0;
     int dflash2_stats = 1;
+    bool dflash2_tree = false;
+    unsigned long dflash2_tree_extra = 0;
+    unsigned long dflash2_tree_budget = 0;
+    bool dflash2_tree_budget_auto = false;
+    bool dflash2_tree_budget_explicit = false;
     bool mtp = false;
     unsigned long mtp_drafts = 7;
     int mtp_stats = 1;

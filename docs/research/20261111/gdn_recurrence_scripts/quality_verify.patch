@@ -1,0 +1,290 @@
+diff --git a/src/apps/bench/quality.hip b/src/apps/bench/quality.hip
+index fa7eb28..7b5c5b6 100644
+--- a/src/apps/bench/quality.hip
++++ b/src/apps/bench/quality.hip
+@@ -5,6 +5,7 @@
+ #include <shelf/models/loaded_model.h>
+ #include <shelf/models/tp_rank_model.h>
+ #include <shelf/models/qwen35/runtime/executor.h>
++#include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
+ #include <shelf/models/qwen35/runtime/scheduling_types.h>
+ #include <shelf/models/qwen35/runtime/tensor_parallel.h>
+ #include <shelf/models/qwen35/state/state_types.h>
+@@ -340,11 +341,13 @@ int run_quality(int argc, char** argv) {
+     const uint32_t num_pages =
+         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1u;
+ 
++    const uint32_t concurrency = std::getenv("SHELF_QUALITY_BATCH8") ? 8u : 1u;
++    if (concurrency > 1u && opts.tp != 1) { fprintf(stderr, "batch8 requires TP1\n"); return 1; }
+     shelf::qwen35::ExecutorConfig exec_config;
+     exec_config.max_batch_rows = static_cast<uint32_t>(
+-        std::max(opts.prefill_chunk, 2));
+-    exec_config.max_scheduled_requests = 1u;
+-    exec_config.max_scheduled_output_rows = 1u;
++        std::max(opts.prefill_chunk, 64));
++    exec_config.max_scheduled_requests = concurrency;
++    exec_config.max_scheduled_output_rows = concurrency * 8u;
+ 
+     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
+     std::unique_ptr<shelf::gpu::GpuArena> tp1_arena;
+@@ -430,7 +433,7 @@ int run_quality(int argc, char** argv) {
+     }
+ 
+     if (opts.tp == 1) {
+-        auto seq_pool_result = shelf::state::SequenceSlotPool::create(*tp1_arena, 1u, num_pages);
++        auto seq_pool_result = shelf::state::SequenceSlotPool::create(*tp1_arena, concurrency, num_pages);
+         if (!seq_pool_result.ok()) {
+             fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
+                     seq_pool_result.status().message().c_str());
+@@ -440,7 +443,7 @@ int run_quality(int argc, char** argv) {
+         seq_pool = tp1_seq_pool.get();
+ 
+         auto gdn_pool_result = shelf::state::GdnStatePool::create(
+-            *tp1_arena, 1u, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
++            *tp1_arena, concurrency, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
+         if (!gdn_pool_result.ok()) {
+             fprintf(stderr, "GdnStatePool::create failed: %s\n",
+                     gdn_pool_result.status().message().c_str());
+@@ -450,7 +453,7 @@ int run_quality(int argc, char** argv) {
+         gdn_pool = tp1_gdn_pool.get();
+ 
+         auto kv_pool_result = shelf::state::PagedKVPool::create(
+-            *tp1_arena, num_pages, static_cast<uint32_t>(opts.page_tokens), num_attn_layers,
++            *tp1_arena, concurrency * num_pages, static_cast<uint32_t>(opts.page_tokens), num_attn_layers,
+             kv_heads, head_dim, opts.kv_dtype, opts.octave_format);
+         if (!kv_pool_result.ok()) {
+             fprintf(stderr, "PagedKVPool::create failed: %s\n",
+@@ -488,18 +491,29 @@ int run_quality(int argc, char** argv) {
+         }
+     }
+ 
++    std::vector<shelf::state::PagedSequenceState> others;
++    others.reserve(concurrency - 1u);
++    for (uint32_t i = 1; i < concurrency; ++i) {
++        auto extra = shelf::state::create_paged_sequence_state(*seq_pool, *gdn_pool, *kv_pool, required_seq_len, stream);
++        if (!extra.ok()) { fprintf(stderr, "extra sequence: %s\n", extra.status().message().c_str()); return 1; }
++        others.push_back(extra.release());
++    }
++    std::vector<shelf::state::PagedSequenceState*> sequences = {&seq};
++    for (auto& other : others) sequences.push_back(&other);
++
+     const uint32_t chunk = std::min<uint32_t>(
+         static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows);
++    for (auto* sequence : sequences) {
+     uint32_t processed = 0u;
+     while (processed < context) {
+         const uint32_t chunk_len = std::min(chunk, context - processed);
+         shelf::qwen35::ScheduledRequest req;
+-        req.sequence = &seq;
+-        req.handle = seq.request_handle();
++        req.sequence = sequence;
++        req.handle = sequence->request_handle();
+         req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
+         req.token_begin = 0;
+         req.num_tokens = chunk_len;
+-        req.prefix_tokens = seq.position;
++        req.prefix_tokens = sequence->position;
+         req.compute_logits = tp_coord != nullptr;
+         req.sample = false;
+         std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+@@ -526,6 +540,7 @@ int run_quality(int argc, char** argv) {
+         (void)exec_out.release();
+         processed += chunk_len;
+     }
++    }
+     hip_err = hipStreamSynchronize(stream);
+     if (hip_err != hipSuccess) {
+         fprintf(stderr, "context sync failed: %s\n", hipGetErrorString(hip_err));
+@@ -576,104 +591,103 @@ int run_quality(int argc, char** argv) {
+         }
+     }
+ 
+-    std::vector<float> host_logits(vocab);
++    const bool verify = std::getenv("SHELF_QUALITY_VERIFY") != nullptr;
++    if (verify && (opts.tp != 1 || score_start != context + 1u || positions % 8u != 0u || context % 8u != 0u)) {
++        fprintf(stderr, "verify requires TP1, aligned context, and positions divisible by 8\n");
++        return 1;
++    }
++    shelf::qwen35::runtime::DFlash2SpecBatchContext spec;
++    shelf::runtime::DeviceRequestDescriptor* commit = nullptr;
++    shelf::qwen35::ExecuteBatchOptions verify_opts;
++    if (verify) {
++        shelf::qwen35::runtime::DFlash2GdnRankBinding binding;
++        binding.pool = gdn_pool;
++        binding.arena = tp1_arena.get();
++        binding.stream = stream;
++        binding.device = opts.devices[0];
++        auto result = shelf::qwen35::runtime::create_dflash2_spec_batch_context({binding}, concurrency * 8u);
++        if (!result.ok()) { fprintf(stderr, "spec context: %s\n", result.status().message().c_str()); return 1; }
++        spec = result.release();
++        auto alloc = tp1_arena->allocate_aligned(concurrency * sizeof(*commit), 256u);
++        if (!alloc.ok()) { fprintf(stderr, "commit allocation failed\n"); return 1; }
++        commit = static_cast<shelf::runtime::DeviceRequestDescriptor*>(alloc.release().data());
++        std::vector<shelf::runtime::DeviceRequestDescriptor> descriptors(concurrency);
++        for (uint32_t i = 0; i < concurrency; ++i) {
++            descriptors[i].request_handle.slot = sequences[i]->slot;
++            descriptors[i].row_begin = i * 8u;
++        }
++        if (hipMemcpy(commit, descriptors.data(), descriptors.size() * sizeof(*commit), hipMemcpyHostToDevice) != hipSuccess) return 1;
++        verify_opts.gdn_spec_history = shelf::qwen35::runtime::gdn_spec_history_view(spec.history[0], concurrency * 8u);
++        const auto& compact = spec.compact[0];
++        verify_opts.gdn_compact.delta = compact.delta;
++        verify_opts.gdn_compact.k = compact.k;
++        verify_opts.gdn_compact.a = compact.a;
++        verify_opts.gdn_compact.delta_layer_stride = compact.delta_layer_stride;
++        verify_opts.gdn_compact.k_layer_stride = compact.k_layer_stride;
++        verify_opts.gdn_compact.a_layer_stride = compact.a_layer_stride;
++        verify_opts.gdn_compact.defer_state_store = 1u;
++    }
++    std::vector<float> host_logits(static_cast<size_t>(vocab) * concurrency * (verify ? 8u : 1u));
+     std::vector<float> baseline_logits;
+     const uint32_t feed_begin = context;
+     const uint32_t feed_end = score_start + positions - 1u;
+-    for (uint32_t feed_index = feed_begin; feed_index < feed_end; ++feed_index) {
+-        const bool scoring = (feed_index + 1u) >= score_start;
+-        const int32_t feed_token = corpus[feed_index];
+-        const int32_t target = corpus[feed_index + 1u];
+-        std::vector<int32_t> token_ids = {feed_token};
+-        shelf::qwen35::ScheduledRequest req;
+-        req.sequence = &seq;
+-        req.handle = seq.request_handle();
+-        req.execution_class = shelf::runtime::ExecutionClass::DECODE;
+-        req.token_begin = 0;
+-        req.num_tokens = 1u;
+-        req.prefix_tokens = seq.position;
+-        req.compute_logits = true;
+-        req.sample = false;
+-        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
++    for (uint32_t feed_index = feed_begin; feed_index < feed_end;) {
++        const uint32_t rows = verify ? 8u : 1u;
++        std::vector<shelf::qwen35::ScheduledRequest> reqs;
++        std::vector<int32_t> tokens;
++        for (uint32_t i = 0; i < concurrency; ++i) {
++            shelf::qwen35::ScheduledRequest req;
++            req.sequence = sequences[i];
++            req.handle = sequences[i]->request_handle();
++            req.execution_class = verify ? shelf::runtime::ExecutionClass::SPEC_VERIFY : shelf::runtime::ExecutionClass::DECODE;
++            req.token_begin = i * rows;
++            req.num_tokens = rows;
++            req.prefix_tokens = sequences[i]->position;
++            req.compute_logits = true;
++            req.sample = verify;
++            req.num_output_rows = rows;
++            reqs.push_back(req);
++            tokens.insert(tokens.end(), corpus.begin() + feed_index, corpus.begin() + feed_index + rows);
++        }
+         shelf::qwen35::ScheduledBatch batch;
+-        batch.token_ids = token_ids.data();
++        batch.token_ids = tokens.data();
+         batch.requests = reqs;
+-        batch.num_tokens = 1u;
+-        batch.num_requests = 1u;
+-        batch.num_decode_requests = 1u;
+-        batch.num_verify_requests = 0u;
+-        batch.num_prefill_requests = 0u;
+-        shelf::Result<shelf::qwen35::BatchExecutionOutput> result{shelf::Status::invalid_state(
+-            "unbound batch execution", __FILE__, __LINE__)};
+-        if (tp_coord != nullptr) {
+-            result = tp_coord->on_execute(batch);
+-        } else {
+-            result = shelf::qwen35::execute_batch(*executor, batch, stream);
+-        }
+-        if (!result.ok()) {
+-            fprintf(stderr, "teacher-forced step %u failed: %s\n", feed_index,
+-                    result.status().message().c_str());
+-            return 1;
+-        }
+-        shelf::qwen35::BatchExecutionOutput out = std::move(result.release());
+-        if (out.num_outputs != 1u) {
+-            fprintf(stderr, "teacher-forced step %u produced %u outputs\n", feed_index,
+-                    out.num_outputs);
+-            return 1;
+-        }
+-        const auto& logits = out.logits;
+-        if (logits.ndim() != 2u || logits.dim(1) != vocab ||
+-            logits.element_size() != sizeof(float)) {
+-            fprintf(stderr,
+-                    "unexpected logits shape ndim=%zu dim0=%zu dim1=%zu elem=%zu\n",
+-                    logits.ndim(), logits.ndim() > 0u ? logits.dim(0) : 0u,
+-                    logits.ndim() > 1u ? logits.dim(1) : 0u, logits.element_size());
+-            return 1;
+-        }
+-        if (!scoring) continue;
+-        hip_err = hipStreamSynchronize(stream);
+-        if (hip_err != hipSuccess) {
+-            fprintf(stderr, "logits sync failed at %u: %s\n", feed_index,
+-                    hipGetErrorString(hip_err));
+-            return 1;
+-        }
+-        if (tp_coord != nullptr) {
+-            hip_err = hipStreamSynchronize(tp_coord->rank(0).stream());
+-            if (hip_err != hipSuccess) {
+-                fprintf(stderr, "tp logits sync failed at %u: %s\n", feed_index,
+-                        hipGetErrorString(hip_err));
+-                return 1;
++        batch.num_tokens = concurrency * rows;
++        batch.num_requests = concurrency;
++        batch.num_decode_requests = verify ? 0u : concurrency;
++        batch.num_verify_requests = verify ? concurrency : 0u;
++        batch.speculative_verify = verify;
++        auto result = tp_coord != nullptr ? tp_coord->on_execute(batch) :
++            shelf::qwen35::execute_batch(*executor, batch, stream, verify_opts);
++        if (!result.ok()) { fprintf(stderr, "step %u failed: %s\n", feed_index, result.status().message().c_str()); return 1; }
++        auto out = result.release();
++        if (out.num_outputs != concurrency * rows || out.logits.ndim() != 2u || out.logits.dim(1) != vocab || out.logits.element_size() != sizeof(float)) {
++            fprintf(stderr, "unexpected logits at %u: outputs=%u\n", feed_index, out.num_outputs); return 1;
++        }
++        if (verify) {
++            for (uint32_t i = 0; i < concurrency; ++i) {
++                auto st = shelf::qwen35::runtime::commit_gdn_compact_log(*gdn_pool, sequences[i]->slot, verify_opts.gdn_compact, commit + i, rows, static_cast<uint32_t>(tc.linear_num_key_heads), stream);
++                if (!st.ok()) { fprintf(stderr, "commit: %s\n", st.message().c_str()); return 1; }
+             }
+         }
+-        hip_err = hipMemcpy(host_logits.data(), logits.data<float>(), vocab * sizeof(float),
+-                            hipMemcpyDeviceToHost);
+-        if (hip_err != hipSuccess) {
+-            fprintf(stderr, "logits copy failed at %u: %s\n", feed_index,
+-                    hipGetErrorString(hip_err));
+-            return 1;
+-        }
+-        const uint32_t position = feed_index + 1u;
+-        if (!opts.dump_path.empty() && !writer.write(target, position, host_logits.data())) {
+-            fprintf(stderr, "dump write failed at %u\n", feed_index);
+-            return 1;
+-        }
+-        if (!opts.compare_path.empty()) {
+-            int32_t baseline_target = 0;
+-            uint32_t baseline_position = 0u;
+-            std::string error;
+-            if (!reader.read(baseline_logits, baseline_target, baseline_position, error)) {
+-                fprintf(stderr, "baseline read failed at %u: %s\n", feed_index, error.c_str());
+-                return 1;
+-            }
+-            if (baseline_target != target || baseline_position != position) {
+-                fprintf(stderr,
+-                        "baseline row %u mismatch target=%d/%d position=%u/%u\n",
+-                        feed_index, baseline_target, target, baseline_position, position);
+-                return 1;
++        if (hipStreamSynchronize(stream) != hipSuccess ||
++            (tp_coord && hipStreamSynchronize(tp_coord->rank(0).stream()) != hipSuccess) ||
++            hipMemcpy(host_logits.data(), out.logits.data<float>(), static_cast<size_t>(concurrency) * rows * vocab * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
++            fprintf(stderr, "logits copy failed at %u\n", feed_index); return 1;
++        }
++        for (uint32_t row = 0; row < rows; ++row) {
++            const uint32_t position = feed_index + row + 1u;
++            if (position < score_start) continue;
++            const int32_t target = corpus[position];
++            const float* logits = host_logits.data() + static_cast<size_t>(row) * vocab;
++            if (!opts.dump_path.empty() && !writer.write(target, position, logits)) { fprintf(stderr, "dump write failed\n"); return 1; }
++            if (!opts.compare_path.empty()) {
++                int32_t base_target = 0; uint32_t base_position = 0; std::string error;
++                if (!reader.read(baseline_logits, base_target, base_position, error) || base_target != target || base_position != position) { fprintf(stderr, "baseline mismatch at %u: %s\n", position, error.c_str()); return 1; }
++                shelf::bench::quality::accumulate_row(baseline_logits.data(), logits, vocab, target, metrics);
+             }
+-            shelf::bench::quality::accumulate_row(
+-                baseline_logits.data(), host_logits.data(), vocab, target, metrics);
+         }
++        feed_index += rows;
+     }
+ 
+     if (!opts.dump_path.empty() && !writer.close()) {

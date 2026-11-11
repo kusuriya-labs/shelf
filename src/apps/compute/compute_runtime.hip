@@ -510,6 +510,9 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     }
     qwen35::runtime::DFlash2SpecDecoderConfig spec_config;
     spec_config.num_drafts = config_.dflash2_drafts == 0u ? 7u : config_.dflash2_drafts;
+    spec_config.tree = config_.dflash2_tree;
+    spec_config.tree_extra = config_.dflash2_tree_extra;
+    spec_config.tree_budget = config_.dflash2_tree_budget;
     std::size_t lm_head_k = 0u;
     if (model_) {
         lm_head_k = static_cast<std::size_t>(model_->lm_head().k_padded);
@@ -769,6 +772,9 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     const qwen35::runtime::ThinkingBudget& thinking) {
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
+    }
+    if (config_.dflash2_tree_budget_auto && sampling.temperature != 0.0f) {
+        return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, false, thinking);
     }
     return batcher_->submit(std::move(input_ids), max_new_tokens, sampling, thinking);
 }

@@ -189,6 +189,13 @@ dense checkpoint を TP=2 で動かす場合:
 drafter ring は target の KV dtype と独立して BF16 のままである。serve mode では
 `prefix_cache_checkpoint_position`（`0` のみ受理）と `temperature > 0` を
 DFlash2 経路でも受け付ける。
+stdio serving の DFlash2 verify は単一 request でも既定で lossy chunk を使い、
+非投機 greedy と生成列が一致しない場合がある。`SHELF_GDN_VERIFY_CHUNKED=0` で
+serial verify に戻せる。`SHELF_GDN_VERIFY_CHUNKED_EXACT=1` は exact chunk を選ぶが、
+非投機との bit 一致を保証しない。単発 decoder は serial のままである。
+`--dflash2-adaptive` は投機を自動で停止・再試行する実験的な方式で、投機を停止する batch 負荷の
+上限は `SHELF_DFLASH2_POLICY_MAX_SESSIONS` で上書きできる（既定 12）。
+
 stdio serving の prefill 行数、環境変数、追加メモリは
 [server の DFlash2 設定](server.md#dflash2-speculative-decoding)を参照。
 単発推論にはこの設定を適用しない。

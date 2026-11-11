@@ -41,6 +41,26 @@ verify し、一致した prefix だけを commit する。
 
 ---
 
+## 単一 request の木検証
+
+`shelf-compute` の単一 request で `--dflash2-tree-extra B` を明示すると、
+DFlash2 の候補を木として verify する。省略時は従来の chain 経路を使う。
+B は 0、1、2、4 のいずれかで、0 は枝のない chain を木として扱う。B が正の場合は
+先頭２位置の selector による２位候補を、対応する親の兄弟葉として最大 B 個追加する。
+候補位置は２つなので追加葉は最大２個である。単一 request、TP=1、greedy に限る。
+
+各行の親・祖先・depth に対応する RoPE 位置を target に渡し、全行の GDN conv と
+recurrent history を保持する。target の greedy 出力と一致する子をたどり、採用した
+経路の paged KV と target tap を連続位置へ集め、最終行の GDN recurrent / conv
+history を復元する。葉の再実行は行わない。B=0 は chain との bit 一致を維持し、
+B>0 は異なる行配置による数値差と僅差での greedy 出力の不一致を許容する。
+これは浮動小数点の計算順序による差であり、投機検証の採否規則とは別の問題である。
+非投機の厳密な有限精度分布との一致を保証するものではない。数値検証は非投機との
+最初の不一致位置における top-1/top-2 logit 差を評価する。実験的経路は opt-in の
+ままである。
+
+---
+
 ## Checkpoint contract
 
 ### config
@@ -598,10 +618,11 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 複数 request の target verify を 1 つの `ScheduledBatch` に統合する。serve mode の
 既定経路であり、scheduler が in-flight な request をまとめて駆動する。
 
-`create_dflash2_spec_batch_context(bindings, max_rows)` は binding ごとに共有の
+`create_dflash2_spec_batch_context(bindings, max_rows, tree_budget)` は binding ごとに共有の
 `GdnSpecHistory`（conv のみ）と compact log を `max_rows` 行分確保する。`max_rows` は
-1 回の batch verify の行合計 `Σ(Kᵢ+1)` の上限であり、`kDFlash2SpecMaxVerifyRows`（512）
-以下でなければならない。serve は `max_concurrent_requests × block_size` を渡す。
+1 回の batch verify の行合計の上限であり、`kDFlash2SpecMaxVerifyRows`（512）
+以下でなければならない。serve は session 数と各 session の行数上限の積を渡す。
+非ゼロの tree budget では parent、祖先、RoPE、受理経路の metadata も共有する。
 あわせて leader rank の arena から device token buffer を確保する。
 
 | buffer | bytes | 用途 |
@@ -611,22 +632,23 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 
 release は `shutdown_dflash2_spec_batch_context()`。
 
-`dflash2_spec_step_batch(context, slots)` は slots を 1 round 実行する:
+`dflash2_spec_step_batch(context, slots, other_decoding_requests)` は slots を 1 round 実行する。
+最後の引数は slot 以外で通常 decode する request 数で、auto の budget 選択に使う。
 
 1. slot ごとに `K` を clamp する（`dflash2_spec_step` と同じ規則）。
 2. `K == 0` の slot は batch に含めず、`run_single_target`（単一 target decode）へ
    フォールバックし、verify 行数に数えない。
 3. `K > 0` の slot を連結する。draft は全 slot 分を 1 回の `dflash2_propose_batch` で
    生成し、token 列は slot 順に `[anchor, draft₀..draft_{K-1}]`、row 範囲は
-   `row_begin` から `K+1` 行、`prefix_tokens = position` とする。
+   `row_begin` から `K+1` 行、`prefix_tokens = position` とする。tree では
+   request ごとに確率正規化と best-first 選択を行い、選択した木の行を配置する。
 4. batch 全体を `execution_class = SPEC_VERIFY`, `num_verify_requests = slot 数`,
    `speculative_verify = true`, `num_output_rows = 合計行数` の 1 回の `execute_batch` で
    実行する。実行は先頭 slot の target を使い、複数 rank は `tp_hook->on_execute` で
-   展開する。
-5. slot ごとに `spec_greedy_accept` と commit（full / partial）を `row_begin` を基点に
-   共有 history / compact log で行う。手順は `dflash2_spec_step` と同一である。partial
-   reject の base 復元には decoder 個別の snapshot を使う。
-6. slot ごとに `sample_index += K+1`。
+   展開する。tree の logits は request ごとに host へコピーして結果に含める。
+5. slot ごとに chain の prefix または tree の受理経路を求める。共有 compact log を
+   replay して recurrent state を確定し、conv history と KV / target tap を復元する。
+6. slot ごとに verify した物理行数だけ `sample_index` を進める。
 
 出力は入力 slot と同順の `DFlash2SpecIterationOutput` 列で、`total_rows` は batch の
 実 verify 行数、`rounds` は常に 1 である。`DFlash2SpecBatchOutput` は timing として
@@ -757,7 +779,7 @@ decoder あたりの GDN 消費（27B geometry、K=7）:
 batch context（`DFlash2SpecBatchContext`）は binding ごとに conv history（`max_rows`
 行）と compact log（`max_rows` 行 × `{δ, k, a}`）を確保する。27B geometry では conv
 約 2.8 MiB/行、compact 約 2.3 MiB/行である。`max_rows` は 1 round の verify 行合計
-`Σ(Kᵢ+1)` に一致させる（serve は `max_concurrent_requests × block_size`）。これは
+の上限に合わせる。tree では budget に応じて増やす。これは
 decoder 個別の history / snapshot / compact log とは別に確保する。
 
 capture:
@@ -896,16 +918,34 @@ samples を別途 D2H する。
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
+- `--dflash2-tree-budget N|auto`: TP=1・greedy 用の実験的な木検証。
+  anchor を含む総行数を指定し、`--dflash2-tree-extra` とは併用できない。
+  0 は無効。非ゼロの N は draft 数 + 1 以上、単一 request では 512 以下、
+  serve では 32 以下。draft 数 + 1 の場合は通常の chain を使う。
+  より大きな予算では各位置の drafter logits を全語彙で softmax 正規化し、
+  top 4 の確率の積を使って prefix-closed な木を best-first で選ぶ。
+  分岐後も位置ごとの marginal を共有し、親条件付き補正は選択に使わない。
+  選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
+  採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
+  浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
+  既定の `auto` は draft 数 7・TP=1 で、その round の生成中 request が
+  1 本だけで投機中なら 10 行、それ以外は chain の 8 行を使う。通常 decode 中や
+  policy により投機を停止中の request も数え、prefill 中と待機中は数えない。auto では
+  stochastic request を投機せず通常 decode する。単発の greedy
+  生成でも 10 行を使う。明示的な整数指定は同時数に依存しない。
+  他の draft 数や TP では tree budget 省略時に chain を使う（server は警告する）。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
-  （`N × block_size`）、drafter scratch の大きさがこの値で決まる。pool に空きが無い間に
+  （`N × session ごとの verify 行数上限`）、drafter scratch の大きさがこの値で決まる。
+  pool に空きが無い間に
   admit された request は投機せず通常 decode になる（その request は完了まで投機しない）。
   session pool の VRAM は `--max-concurrent-requests` ではなくこの値に比例する。
 
 DFlash2 有効時の既定構成は **DFlash2 K=7**、GDN は compact log path である。
 
 `shelf-server` は `--dflash2-model-dir` / `--dflash2-drafts` /
-`--dflash2-max-sessions`（0 以外のとき）を `shelf-compute` へ転送する。
+`--dflash2-max-sessions` / `--dflash2-tree-budget` を
+`shelf-compute` へ転送する。
 
 ### invalid combinations（model load 前に exit 2）
 
@@ -925,7 +965,8 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
   `cache_checkpoint_tokens` は `done` event で `RuntimeRequest` から出る。
 - drafter weight と `DFlash2Executor` は `run_serve_stdio()` が serve 間保持し、
   `DFlash2SpecBatchContext` を 1 つだけ作成する。`max_rows` は
-  `max_concurrent_requests × block_size` を `kDFlash2SpecMaxVerifyRows` で上限した値である。
+  session 数と session ごとの verify 行数の積を `kDFlash2SpecMaxVerifyRows` で
+  上限した値である。
   serve 終了時に `shutdown_dflash2_spec_batch_context()` →
   `dflash2_executor_shutdown()` の順で解放する。
 - `ContinuousBatcher::set_dflash2` に drafter を bind すると、`submit` した request は
@@ -939,18 +980,25 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
   KV admission は通常 decode と同一の `ContinuousBatcher` 契約に従う。
 - `request` は `speculative_decode` で種別を持つ。`--dflash2-model-dir` 指定時の serve は
   全 request を speculative として submit する。
+- tree budget が draft 数 + 1 より大きい場合は、request ごとの候補木と祖先 mask を
+  batch context に置き、GDN chunk verify の compact log から受理経路を replay する。
+  verify は既定の lossy chunk を使い、tree 経路の replay は exact decomposition を使う。
+  木の物理行数は残りの sequence 容量で制限し、prefix capture 中は KV page 境界でも制限する。
+  この経路の request は greedy sampling を要求し、chunk verify を無効化できない。
 - serve 側に DFlash 専用の admission / prefix cache / KV 容量の自動拡張は無い。
 
 ### target executor config（DFlash 有効時）
 
 - `target_hidden_taps = dflash_config.target_layer_ids`、順序も config 通り
 - `target_hidden_tap_count = dflash_config.num_target_layer_ids`
-- `max_scheduled_output_rows = block_size`（`shelf-compute` の単一 request 経路）。
+- `max_scheduled_output_rows = max(block_size + tree_extra, tree_budget)`
+  （`shelf-compute` の単一 request 経路）。
   serve mode では `min(dflash2_sessions × dflash2_session_rows(block_size, K), kDFlash2SpecMaxVerifyRows)`
-  （`dflash2_session_rows` は `min(block_size, K + 1)`）であり、1 round の batch verify 行合計の上限になる。
+  （`dflash2_session_rows` は `max(min(block_size, K + 1), tree_budget)`）であり、
+  1 round の batch verify 行合計の上限になる。
   drafter の scratch、batch の history / compact log、target の出力行数もこの行数で見積もる
   （K=7 なら従来どおり `dflash2_sessions × 8`）。
-- `max_batch_rows = min(2048, max(prompt_tokens, block_size))`
+- 単一 request の `max_batch_rows = min(2048, max(prompt_tokens, max_scheduled_output_rows))`
 - `max_scheduled_output_rows` は `max(max_scheduled_output_rows, max_scheduled_requests)`
   で切り上げられた後 `max_batch_rows` で上限されるため、
   `block_size <= max_batch_rows` を満たす必要がある。prefill は
@@ -1028,8 +1076,9 @@ DFLASH2_ROUND_MS
 - DFlash ring に入るのは target が consume して commit した row だけ（commit-only）。
 - step 終了時に `context.next_position == sequence.position`、
   `context.length == min(sequence.position, capacity)`。
-- `GENERATED_IDS` は target-only greedy と完全一致する。
-- target verify は通常の forward 経路と同じ kernel で行う。
+- serve の chunk verify は単一 request でも target-only greedy と生成列が異なる場合がある。
+  serial verify は `SHELF_GDN_VERIFY_CHUNKED=0` で選べる。
+- target verify は通常の forward 経路を共有し、GDN recurrence は verify 用 kernel を使う。
 - drafter kernel は D2D memcpy による relay を行わない。
 - hot-path enqueue API は sync / D2H / H2D / allocation を行わない。
 - すべての契約違反・非対応構成は明示的な error とし、silent fallback しない。
@@ -1069,9 +1118,9 @@ target tap は層の完了出力を stream 方向に平均した `[rows, hidden=
   27B geometry では `num_drafts <= 15` が上限になる。
 - `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_batch_rows` を
   満たす必要がある。
-- batched verify は 1 round の行合計 `Σ(Kᵢ+1)` が `max_scheduled_output_rows` と
+- batched verify は 1 round の行合計が `max_scheduled_output_rows` と
   `kDFlash2SpecMaxVerifyRows`（512）以下でなければならない。serve では
-  `max_concurrent_requests × block_size <= 512` を要求する。
+  session 数と各 session の行数上限の積が 512 以下である必要がある。
 - batched proposal は drafter の weight traffic が request 数に比例して増える。draft の
   batching は launch 数と host stall を削減するが、weight 再読込は drafter の GEMM
   config に依存する。
@@ -1137,3 +1186,25 @@ verify sampler は request ごとに連続した行別 token bitmask を扱え�
 DFlash2 の draft / verify 間で server と mask を交換する処理は未実装である。
 構造化出力付き request は DFlash2 / MTP を使用せず通常 decode にフォールバックする。
 実装上の残作業は [接続案](../research/20261111/structured_output_speculative_design.md) を参照。
+
+### 投機の適応制御（実験段階）
+
+`--dflash2-adaptive` は K を細かく変更せず、batch と request の状態から投機の
+有無を選ぶ。既定 K は 7 である。生成上限、系列長、thinking budget、prefix cache の
+ページ境界に近いときだけ、その制約に合わせて検証する draft 数を短くする。
+
+- 投機候補と、セッション枠が足りず通常 decode 中の request の合計が
+  `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
+  その batch は全員を通常 decode にする。0 を指定すると batch 投機を停止する。
+- 各 request の 1 round 当たり受理 draft 数の EMA（初期値 2、係数 0.03）が
+  0.6 を下回ると、その request は通常 decode に移る。停止中は 64 round ごとに
+  一度だけ投機を試し、受理率が回復したら再開する。短い残り長に伴う打ち切り
+  round は EMA に含めない。
+- DFlash2 の serve における compact verify は request 数と draft 数に関係なく、
+  既定で lossy chunk を使う。`SHELF_GDN_VERIFY_CHUNKED=0` で serial に戻せる。
+  `SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を指定すると exact chunk を使う。
+  `shelf-compute` の単発 decoder は state store の方式が異なるため、serial のままである。
+
+chunk verify は lossy・exact とも逐次計算との bit 一致を保証せず、単一 request でも
+非投機 greedy と生成列が異なる場合がある。batch 形状でも生成列は分岐する。
+速度と生成列の評価、制限は [調査結果](../research/20261111/dflash2_policy.md) を参照。

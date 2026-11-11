@@ -8,6 +8,7 @@
 #include <shelf/runtime/program/int8_activation_workspace.h>
 #include <shelf/models/qwen35/kernels/dflash2/batch.h>
 #include <shelf/models/qwen35/kernels/dflash2/topk.h>
+#include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 
 #include <algorithm>
 #include <cstring>
@@ -23,10 +24,10 @@ std::size_t align_up(std::size_t bytes) noexcept {
     return ((bytes + kAlignBytes - 1u) / kAlignBytes) * kAlignBytes;
 }
 
-std::size_t rows_for(const dflash2::DFlash2Config& config, uint32_t drafts, uint32_t sessions) noexcept {
+std::size_t rows_for(const dflash2::DFlash2Config& config, uint32_t drafts, uint32_t sessions, uint32_t tree_budget) noexcept {
     const std::size_t block_size = config.block_size == 0u ? 1u : config.block_size;
     const std::size_t batch_rows =
-        dflash2_session_rows(block_size, drafts) * (sessions == 0u ? 1u : sessions);
+        dflash2_session_rows(block_size, drafts, tree_budget) * (sessions == 0u ? 1u : sessions);
     return std::max(block_size,
                     std::min<std::size_t>(batch_rows, kDFlash2SpecMaxVerifyRows));
 }
@@ -63,9 +64,17 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
     }
 
     const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
-    const uint32_t history_rows = config.num_drafts == 0u ? 1u : config.num_drafts;
+    const uint32_t history_rows = (config.num_drafts == 0u ? 1u : config.num_drafts) +
+                                  (config.tree ? 1u + config.tree_extra : 0u);
     total += align_up(static_cast<std::size_t>(history_rows) * view.conv_slot_stride *
                       sizeof(bf16_t));
+    if (config.tree) {
+        total += align_up(static_cast<std::size_t>(history_rows) * view.recurrent_slot_stride *
+                          sizeof(fp16_t));
+        total += align_up((2u * history_rows + 16u * history_rows) * sizeof(uint32_t));
+        total += align_up((3u * history_rows + 1u + history_rows * (history_rows + 1u) / 2u) *
+                          sizeof(uint32_t));
+    }
 
     const std::size_t log_rows = static_cast<std::size_t>(config.num_drafts) + 1u;
     const std::size_t states = view.num_gdn_states;
@@ -77,11 +86,20 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
     return total;
 }
 
+std::size_t dflash2_batch_tree_metadata_bytes(std::size_t max_rows, uint32_t tree_budget) noexcept {
+    if (tree_budget == 0u) return 0u;
+    return 5u * align_up(max_rows * sizeof(uint32_t)) +
+        align_up((max_rows + 1u) * sizeof(uint32_t)) +
+        align_up(max_rows * tree_budget * sizeof(uint32_t)) +
+        align_up(max_rows * sizeof(shelf::kernel::DFlash2TreeProbabilities));
+}
+
 std::size_t dflash2_spec_batch_context_bytes(const ::shelf::state::GdnStatePool& pool,
-                                             std::size_t max_rows) noexcept {
+                                             std::size_t max_rows, uint32_t tree_budget) noexcept {
     const ::shelf::state::GdnStatePoolDeviceView view = pool.device_view();
     std::size_t total = align_up(max_rows * sizeof(int32_t)) +
                         align_up(2u * max_rows * sizeof(int32_t));
+    total += dflash2_batch_tree_metadata_bytes(max_rows, tree_budget);
     total += align_up(max_rows * view.conv_slot_stride * sizeof(bf16_t));
 
     const std::size_t states = view.num_gdn_states;
@@ -150,7 +168,7 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
     DFlash2Footprint footprint;
     footprint.draft_weights = draft_weights_bytes;
     footprint.draft_scratch =
-        dflash2_draft_scratch_bytes(config, rows_for(config, spec_config.num_drafts, sessions), lm_head_k,
+        dflash2_draft_scratch_bytes(config, rows_for(config, spec_config.num_drafts, sessions, spec_config.tree_budget), lm_head_k,
                                     prefill_rows);
     // Serve sessions skip the decoder-private history / compact log; one decoder's
     // worth stays in spec_batch so the single-request path is still covered.
@@ -161,9 +179,9 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
     const std::size_t batch_rows = std::min<std::size_t>(
         kDFlash2SpecMaxVerifyRows,
         (sessions == 0u ? 1u : sessions) *
-            dflash2_session_rows(config.block_size == 0u ? 1u : config.block_size, spec_config.num_drafts));
+            dflash2_session_rows(config.block_size == 0u ? 1u : config.block_size, spec_config.num_drafts, spec_config.tree_budget));
     footprint.spec_batch =
-        dflash2_spec_batch_context_bytes(pool, batch_rows) +
+        dflash2_spec_batch_context_bytes(pool, batch_rows, spec_config.tree_budget) +
         (dflash2_spec_workspace_bytes(spec_config, pool, true, true) -
          dflash2_spec_workspace_bytes(spec_config, pool, false, false));
     footprint.sessions = sessions == 0u ? 1u : sessions;

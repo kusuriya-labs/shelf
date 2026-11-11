@@ -9,6 +9,8 @@ namespace execution {
 struct GdnSpecHistoryDeviceView {
     bf16_t* conv_history = nullptr;
     fp16_t* recurrent_history = nullptr;
+    // Optional tree-only mask: save recurrent state only at marked rows.
+    const uint32_t* recurrent_capture_mask = nullptr;
 
     uint32_t capture_rows = 0u;
 
@@ -28,6 +30,7 @@ struct GdnCompactLogDeviceView {
     // Verify leaves the live recurrent state untouched; the accepted prefix is
     // replayed from this log afterwards (commit_gdn_compact_log).
     uint32_t defer_state_store = 0u;
+    uint32_t force_tree_chunk = 0u;
 };
 
 struct QsaSpecHistoryDeviceView {

@@ -170,6 +170,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.requests = ctx.device_requests;
     c.num_requests = num_requests;
     c.actual_rows = actual_rows;
+    c.max_request_rows = max_request_rows;
     c.q_row_stride = q.row_stride;
     c.k_row_stride = k.row_stride;
     c.v_row_stride = v.row_stride;
@@ -192,14 +193,31 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.recurrent_history = hist.recurrent_history;
         c.recurrent_history_row_stride = hist.recurrent_row_stride;
         c.capture_rows = hist.capture_rows;
+        c.recurrent_capture_mask = hist.recurrent_capture_mask;
         c.capture_verify_only = mixed_verify ? 1u : 0u;
     }
     c.row_parent = ctx.spec.tree_row_parent;
-    if (ctx.spec.tree_row_parent != nullptr && c.recurrent_history == nullptr) {
+    const char* verify_chunk_env = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
+    const char* tree_chunk_env = std::getenv("SHELF_GDN_TREE_CHUNKED");
+    const GdnRecurrenceSelectorInput tree_selector{
+        actual_rows, num_requests, max_request_rows, key_heads, num_v_heads, head_k, head_v};
+    const bool tree_chunk = ctx.spec.tree_row_parent != nullptr &&
+        ctx.role == ::shelf::runtime::ExecutionRole::Verify && !mixed_verify &&
+        select_gdn_recurrence_implementation(tree_selector) == GdnRecurrenceImplementation::Optimized &&
+        (verify_chunk_env == nullptr || (verify_chunk_env[0] != '\0' && verify_chunk_env[0] != '0')) &&
+        (ctx.spec.gdn_compact.force_tree_chunk != 0u ||
+         (tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0')) &&
+        c.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
+        c.head_v % ::shelf::kernel::kGdnRecurrenceWmmaVGroup == 0u &&
+        ctx.spec.gdn_compact.defer_state_store != 0u && max_request_rows <= 32u &&
+        ctx.spec.gdn_compact.delta != nullptr && ctx.spec.gdn_compact.k != nullptr &&
+        ctx.spec.gdn_compact.a != nullptr && ctx.spec.gdn_compact.delta_layer_stride != 0u &&
+        ctx.spec.gdn_compact.k_layer_stride != 0u && ctx.spec.gdn_compact.a_layer_stride != 0u;
+    if (ctx.spec.tree_row_parent != nullptr && c.recurrent_history == nullptr && !tree_chunk) {
         return Status::invalid_state("gdn recurrence tree requires spec history capture",
                                      __FILE__, __LINE__);
     }
-    if (ctx.spec.tree_row_parent != nullptr && c.capture_rows < c.actual_rows) {
+    if (ctx.spec.tree_row_parent != nullptr && !tree_chunk && c.capture_rows < c.actual_rows) {
         return Status::invalid_state("gdn recurrence tree capture rows too small", __FILE__,
                                      __LINE__);
     }
@@ -214,6 +232,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.compact_k_layer_stride = compact.k_layer_stride;
         c.compact_a_layer_stride = compact.a_layer_stride;
         c.skip_state_store = compact.defer_state_store;
+        c.force_tree_chunk = compact.force_tree_chunk;
     }
     return ra;
 }

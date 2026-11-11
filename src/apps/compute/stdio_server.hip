@@ -1117,7 +1117,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
     }
     if (dflash.enabled) {
         const uint32_t session_rows =
-            shelf::qwen35::runtime::dflash2_session_rows(dflash.config.block_size, dflash.drafts);
+            shelf::qwen35::runtime::dflash2_session_rows(dflash.config.block_size, dflash.drafts,
+                                                         runtime.config().dflash2_tree_budget);
         if (runtime.config().dflash2_sessions() >
             shelf::qwen35::runtime::kDFlash2SpecMaxVerifyRows / session_rows) {
             fprintf(stderr,
@@ -1176,18 +1177,20 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             }
             auto batch_result =
                 shelf::qwen35::runtime::create_dflash2_spec_batch_context(
-                    bindings, batch_max_rows);
+                    bindings, batch_max_rows, runtime.config().dflash2_tree_budget);
             if (!batch_result.ok()) {
                 fprintf(stderr, "dflash2 batch context create failed: %s\n",
                         batch_result.status().message().c_str());
                 return 1;
             }
             dflash.batch = batch_result.release();
+            dflash.batch.tree_budget_auto = runtime.config().dflash2_tree_budget_auto;
             dflash.batch_ready = true;
         }
         {
             shelf::qwen35::runtime::DFlash2SpecDecoderConfig session_config;
             session_config.num_drafts = dflash.drafts;
+            session_config.tree_budget = runtime.config().dflash2_tree_budget;
             session_config.eos_tokens = text_config.stop_tokens;
             auto sessions_result = shelf::qwen35::runtime::DFlash2SessionPool::create(
                 runtime.executor(), &dflash.executor, runtime.gdn_pool(),
@@ -1208,6 +1211,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.arena = &runtime.arena();
         batcher_binding.sessions = &dflash.sessions;
         batcher_binding.num_drafts = dflash.drafts;
+        batcher_binding.tree_budget = runtime.config().dflash2_tree_budget;
+        batcher_binding.adaptive = dflash.adaptive;
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
         const shelf::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);
@@ -1324,8 +1329,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
 
     const char* serve_stats_env = std::getenv("SHELF_DFLASH2_SERVE_STATS");
     if (dflash.enabled &&
-        serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
-        serve_stats_env[0] != '0') {
+        (dflash.adaptive || (serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
+                             serve_stats_env[0] != '0'))) {
         const shelf::qwen35::runtime::DFlash2BatcherStats& t = dflash.stats;
         const float rounds = static_cast<float>(t.rounds);
         const float mean =
@@ -1334,6 +1339,16 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             t.rounds > 0u ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
         const float emitted =
             t.rounds > 0u ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
+        if (dflash.adaptive && t.adaptive_rounds != 0u) {
+            fprintf(stderr, "DFLASH2_ADAPTIVE rounds=%llu actual_tps=%.3f\n",
+                    static_cast<unsigned long long>(t.adaptive_rounds),
+                    t.adaptive_actual_ms > 0.0
+                        ? 1000.0 * t.adaptive_actual_tokens / t.adaptive_actual_ms : 0.0);
+            for (std::size_t k = 0; k < t.adaptive_k_counts.size(); ++k) {
+                fprintf(stderr, "DFLASH2_ADAPTIVE_K k=%zu count=%llu\n", k,
+                        static_cast<unsigned long long>(t.adaptive_k_counts[k]));
+            }
+        }
         fprintf(stderr, "DFLASH2_GDN_MODE=compact\n");
         fprintf(stderr, "DFLASH2_GDN_HISTORY_BYTES=%llu\n",
                 static_cast<unsigned long long>(t.gdn_history_bytes));

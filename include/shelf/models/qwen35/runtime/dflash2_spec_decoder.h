@@ -24,13 +24,12 @@ namespace shelf::qwen35::runtime {
 
 constexpr uint32_t kDFlash2SpecMaxVerifyRows = 512u;
 
-// Rows one speculating session puts through the drafter and the verify pass: the anchor plus `drafts` draft rows,
-// never more than the drafter's block. Serve sizes its row budgets (scratch, batch history / compact log, target output
-// rows) from this instead of block_size, so a small K does not pay for the 8-row block it never uses.
-constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts) noexcept {
+constexpr uint32_t dflash2_session_rows(std::size_t block_size, uint32_t drafts,
+                                        uint32_t tree_budget = 0u) noexcept {
     const uint32_t wanted = drafts + 1u;
-    return block_size == 0u ? wanted
-                            : (wanted < block_size ? wanted : static_cast<uint32_t>(block_size));
+    const uint32_t chain = block_size == 0u ? wanted
+        : (wanted < block_size ? wanted : static_cast<uint32_t>(block_size));
+    return tree_budget > chain ? tree_budget : chain;
 }
 constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
 constexpr uint32_t kDFlash2NoSessionSlot = 0xFFFFFFFFu;
@@ -39,6 +38,9 @@ constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
+    bool tree = false;
+    uint32_t tree_extra = 0u;
+    uint32_t tree_budget = 0u;
     qwen_hybrid::StopTokens eos_tokens;
 };
 
@@ -62,6 +64,13 @@ struct DFlash2GdnRankState {
     std::size_t conv_bytes = 0u;
     std::size_t rec_bytes = 0u;
     GdnSpecHistory history;
+    int32_t* tree_parent = nullptr;
+    uint32_t* tree_offsets = nullptr;
+    uint32_t* tree_ancestors = nullptr;
+    uint32_t* tree_rope = nullptr;
+    int32_t* tree_predecessors = nullptr;
+    int32_t* tree_selected = nullptr;
+    float* tree_scores = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
@@ -194,6 +203,14 @@ struct DFlash2SpecTiming {
     double proposal_wait_ms = 0.0;
     double proposal_copy_ms = 0.0;
     double gdn_snapshot_ms = 0.0;
+    double tree_select_ms = 0.0;
+    double tree_retained_mass = 0.0;
+    uint64_t tree_probability_rows = 0u;
+    double tree_walk_ms = 0.0;
+    double tree_commit_ms = 0.0;
+    double tree_restore_ms = 0.0;
+    double tree_gather_ms = 0.0;
+    double tree_append_ms = 0.0;
     double verify_ms = 0.0;
     double verify_gpu_ms = 0.0;
     double decision_wait_ms = 0.0;
@@ -205,6 +222,7 @@ struct DFlash2SpecTiming {
     uint32_t rounds = 0u;
     uint32_t full_accepts = 0u;
     uint32_t partial_accepts = 0u;
+    uint32_t tree_replays = 0u;
     uint32_t accepted_drafts = 0u;
     uint32_t generated_tokens = 0u;
     uint32_t dflash_prefix_full_accepts = 0u;
@@ -225,7 +243,11 @@ struct DFlash2SpecIterationOutput {
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
-    uint32_t remaining_tokens);
+    uint32_t remaining_tokens,
+    uint32_t proposal_drafts = 0u);
+
+Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens);
 
 struct DFlash2SpecBatchCompact {
     float* delta = nullptr;
@@ -236,20 +258,41 @@ struct DFlash2SpecBatchCompact {
     uint64_t a_layer_stride = 0u;
 };
 
+struct DFlash2BatchTreeMetadata {
+    int32_t* parent = nullptr;
+    uint32_t* depth = nullptr;
+    uint32_t* ancestor_offsets = nullptr;
+    uint32_t* ancestor_positions = nullptr;
+    uint32_t* rope_positions = nullptr;
+    uint32_t* committed_end = nullptr;
+    int32_t* replay_rows = nullptr;
+    float* probability_scratch = nullptr;
+};
+
 struct DFlash2SpecBatchContext {
     std::vector<GdnSpecHistory> history;
     std::vector<DFlash2SpecBatchCompact> compact;
+    std::vector<DFlash2BatchTreeMetadata> tree;
+    std::vector<int32_t> tree_parent_host;
+    std::vector<uint32_t> tree_depth_host;
+    std::vector<uint32_t> tree_offsets_host;
+    std::vector<uint32_t> tree_ancestors_host;
+    std::vector<uint32_t> tree_rope_host;
+    std::vector<uint32_t> tree_committed_end_host;
+    std::vector<int32_t> tree_replay_host;
     uint32_t max_rows = 0u;
+    uint32_t tree_budget = 0u;
     uint64_t history_bytes = 0u;
     uint64_t compact_bytes = 0u;
     bool initialized = false;
     int32_t* verify_token_ids_device = nullptr;
     int32_t* decision_staging_device = nullptr;
+    bool tree_budget_auto = false;
 };
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     const std::vector<DFlash2GdnRankBinding>& bindings,
-    uint32_t max_rows);
+    uint32_t max_rows, uint32_t tree_budget = 0u);
 
 Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noexcept;
 
@@ -257,6 +300,7 @@ struct DFlash2SpecBatchSlot {
     DFlash2SpecDecoder* decoder = nullptr;
     int32_t anchor_token = 0;
     uint32_t num_drafts = 0u;
+    uint32_t proposal_drafts = 0u;
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
     uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;
@@ -274,6 +318,7 @@ struct DFlash2SpecBatchOutput {
 
 Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,
-    std::span<const DFlash2SpecBatchSlot> slots);
+    std::span<const DFlash2SpecBatchSlot> slots,
+    uint32_t other_decoding_requests = 0u);
 
 }  // namespace shelf::qwen35::runtime

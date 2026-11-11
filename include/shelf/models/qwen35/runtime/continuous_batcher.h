@@ -45,6 +45,10 @@ struct DFlash2PositionStats {
 
 struct DFlash2BatcherStats {
     uint32_t rounds = 0;
+    uint64_t adaptive_rounds = 0;
+    std::vector<uint64_t> adaptive_k_counts;
+    double adaptive_actual_tokens = 0.0;
+    double adaptive_actual_ms = 0.0;
     uint32_t full_accepts = 0;
     uint32_t partial_accepts = 0;
     uint32_t accepted_drafts = 0;
@@ -77,6 +81,8 @@ struct DFlash2BatcherBinding {
     gpu::GpuArena* arena = nullptr;
     DFlash2SessionPool* sessions = nullptr;
     uint32_t num_drafts = 7u;
+    uint32_t tree_budget = 0u;
+    bool adaptive = false;
     DFlash2BatcherStats* stats = nullptr;
     const std::vector<DFlash2GdnRankBinding>* rank_bindings = nullptr;
 };
@@ -190,6 +196,7 @@ class ContinuousBatcher {
     TpBatchHook* tp_batch_hook_ = nullptr;
     PrefixCache* prefix_cache_ = nullptr;
     DFlash2BatcherBinding dflash_{};
+    uint64_t adaptive_round_ = 0;
 
     uint64_t next_id_ = 0;
 

@@ -36,6 +36,9 @@ struct DFlash2RequestSession {
     std::unique_ptr<DFlash2SpecDecoder> decoder;
     uint32_t pool_index = kDFlash2NoSessionSlot;
     DFlash2SpecTiming timing{};
+    uint32_t adaptive_rows = 0;
+    uint32_t adaptive_probe_age = 0;
+    double adaptive_accepted_ema = 2.0;
     int32_t pending_token = -1;
     bool ready = false;
 };

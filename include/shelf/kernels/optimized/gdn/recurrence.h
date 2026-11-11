@@ -25,6 +25,7 @@ struct GdnRecurrenceArgs {
 
     uint32_t num_requests = 0;
     uint32_t actual_rows = 0;
+    uint32_t max_request_rows = 0;
 
     uint32_t q_row_stride = 0;
     uint32_t k_row_stride = 0;
@@ -49,6 +50,7 @@ struct GdnRecurrenceArgs {
     fp16_t* recurrent_history = nullptr;
     uint64_t recurrent_history_row_stride = 0;
     uint32_t capture_rows = 0;
+    const uint32_t* recurrent_capture_mask = nullptr;
 
     int32_t row_override = -1;
     uint32_t capture_verify_only = 0;
@@ -64,8 +66,10 @@ struct GdnRecurrenceArgs {
     uint32_t compact_rows = 0;
     const int32_t* compact_row_indices = nullptr;
     uint32_t compact_row_capacity = 0;
+    uint32_t compact_exact_replay = 0;
     // 1: the verify kernel does not write the final state back (replay commits it).
     uint32_t skip_state_store = 0;
+    uint32_t force_tree_chunk = 0;
 };
 
 hipError_t
@@ -77,6 +81,11 @@ hipError_t
 launch_gdn_recurrence_f32_wmma(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
+
+// Experimental: all requests must contain exactly one row, and inputs must be finite.
+hipError_t
+launch_gdn_recurrence_f32_wmma_single_row_experimental(
+    const GdnRecurrenceArgs& args, hipStream_t stream);
 
 hipError_t
 launch_gdn_recurrence_f32_wmma_verify(

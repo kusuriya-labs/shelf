@@ -85,7 +85,8 @@ def run_single_shot(input_ids, max_new_tokens, *, device, kv_cache_dtype,
         "--kv-cache-dtype", kv_cache_dtype,
     ]
     if dflash2:
-        argv += ["--dflash2-model-dir", DFLASH2_MODEL_DIR, "--dflash2-drafts", "7"]
+        argv += ["--dflash2-model-dir", DFLASH2_MODEL_DIR, "--dflash2-drafts", "7",
+                 "--dflash2-tree-budget", "0"]
     with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True) as proc:
         stdout, stderr = proc.communicate(
@@ -311,6 +312,7 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
 
 
 def main() -> int:
+    os.environ["SHELF_GDN_VERIFY_CHUNKED"] = "0"
     checker = Checker("compute-dflash2")
     for kv_cache_dtype in ("bf16", "fp8", "octave:c4v4"):
         run_suite(kv_cache_dtype, checker)

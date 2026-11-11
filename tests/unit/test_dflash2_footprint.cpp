@@ -43,6 +43,11 @@ static DFlash2Config dflash2_reference_config() {
 
 int main() {
     const DFlash2Config config = dflash2_reference_config();
+    using shelf::qwen35::runtime::dflash2_session_rows;
+    check(dflash2_session_rows(8u, 7u) == 8u, "default chain capacity");
+    check(dflash2_session_rows(8u, 3u, 0u) == 4u, "zero budget retains chain capacity");
+    check(dflash2_session_rows(8u, 7u, 10u) == 10u, "tree budget increases verify rows");
+    check(dflash2_session_rows(8u, 7u, 6u) == 8u, "tree capacity never shrinks chain");
 
     uint32_t rows = 0u;
     check(dflash2_prefill_rows(config, 1u, nullptr, rows) && rows == 256u,
@@ -103,6 +108,12 @@ int main() {
     check(wide_rows > scratch, "draft scratch grows with the row count");
     check(wide_rows - scratch >= 2u * (64u - 8u) * config.vocab_size * sizeof(float),
           "batched logits and EXL3 accumulator cover all rows");
+
+    using shelf::qwen35::runtime::dflash2_batch_tree_metadata_bytes;
+    check(dflash2_batch_tree_metadata_bytes(16u, 0u) == 0u,
+          "zero tree budget adds no batch metadata");
+    check(dflash2_batch_tree_metadata_bytes(16u, 10u) == 6u * 256u + 768u + 768u,
+          "tree metadata footprint accounts for aligned arrays");
 
     DFlash2Footprint footprint;
     footprint.draft_weights = 1024u;

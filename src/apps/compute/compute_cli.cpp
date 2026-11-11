@@ -95,7 +95,11 @@ void compute_usage(const char* prog) {
     printf("  --seed N               sampling seed (default 0)\n");
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
+    printf("  --dflash2-tree-budget N|auto  tree verify rows (default auto; 0 disables)\n");
+    printf("                         auto: 10 for one decoding request if speculative, else 8\n");
+    printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
+    printf("  --dflash2-adaptive     control speculation with a batch policy\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
     printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
     printf("                            without speculation\n");
@@ -311,11 +315,33 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             if (!parse_u64(argv[++i], sampling.seed)) { fprintf(stderr, "bad --seed\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--dflash2-model-dir") == 0 && i + 1 < argc) {
             dflash2_model_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--dflash2-adaptive") == 0) {
+            opt.dflash2_adaptive = true;
         } else if (std::strcmp(argv[i], "--dflash2-drafts") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
                 return kComputeParseError;
             }
+        } else if (std::strcmp(argv[i], "--dflash2-tree-budget") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            opt.dflash2_tree_budget_explicit = true;
+            opt.dflash2_tree_budget_auto = std::strcmp(value, "auto") == 0;
+            if (opt.dflash2_tree_budget_auto) opt.dflash2_tree_budget = 10;
+            if (opt.dflash2_tree || (!opt.dflash2_tree_budget_auto && !parse_uint(value, opt.dflash2_tree_budget)) ||
+                (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < 2) || opt.dflash2_tree_budget > 512) {
+                fprintf(stderr, "invalid or conflicting --dflash2-tree-budget\n");
+                return kComputeParseError;
+            }
+            opt.dflash2_tree = opt.dflash2_tree_budget != 0;
+        } else if (std::strcmp(argv[i], "--dflash2-tree-extra") == 0 && i + 1 < argc) {
+            if (opt.dflash2_tree) { fprintf(stderr, "tree options are exclusive\n"); return kComputeParseError; }
+            if (!parse_uint(argv[++i], opt.dflash2_tree_extra) ||
+                (opt.dflash2_tree_extra != 0 && opt.dflash2_tree_extra != 1 &&
+                 opt.dflash2_tree_extra != 2 && opt.dflash2_tree_extra != 4)) {
+                fprintf(stderr, "--dflash2-tree-extra expects 0, 1, 2, or 4\n");
+                return kComputeParseError;
+            }
+            opt.dflash2_tree = true;
         } else if (std::strcmp(argv[i], "--dflash2-max-sessions") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], dflash2_max_sessions) || dflash2_max_sessions == 0) {
                 fprintf(stderr, "bad --dflash2-max-sessions\n");
@@ -368,6 +394,13 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
         }
     }
 
+    if (!dflash2_model_dir.empty() && !opt.dflash2_tree && opt.dflash2_tree_budget == 0 &&
+        !opt.dflash2_tree_budget_explicit && dflash2_drafts == 7 && tp == 1 &&
+        (serve_stdio || sampling.temperature == 0.0f)) {
+        opt.dflash2_tree_budget_auto = true;
+        opt.dflash2_tree_budget = 10;
+        opt.dflash2_tree = true;
+    }
     return kComputeParseOk;
 }
 
@@ -397,6 +430,10 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     const auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
     const auto& working_set_reserve_gib = opt.working_set_reserve_gib;
+    if (opt.dflash2_adaptive && (dflash2_model_dir.empty() || tp != 1)) {
+        fprintf(stderr, "--dflash2-adaptive requires --dflash2-model-dir and one device\n");
+        return kComputeParseError;
+    }
     if (model_dir.empty()) {
         fprintf(stderr, "model-dir required\n");
         return kComputeParseError;
@@ -444,12 +481,35 @@ int validate_compute_options(const ComputeOptions& opt) {
     }
 
     const bool dflash_enabled = !dflash2_model_dir.empty();
+    if (opt.dflash2_tree_budget_auto && dflash2_drafts != 7) {
+        fprintf(stderr, "auto tree budget requires 7 drafts\n");
+        return kComputeParseError;
+    }
     shelf::kernel::OctaveKVCacheFormat octave_format{};
     const bool octave = shelf::kernel::parse_octave_kv_cache_format(
         kv_cache_dtype, octave_format);
     if (octave && (tp != 1 || pipeline_parallel != 1)) {
         fprintf(stderr,
                 "Octave KV cache currently requires TP=1 and PP=1\n");
+        return kComputeParseError;
+    }
+    if (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < dflash2_drafts + 1) {
+        fprintf(stderr, "tree budget must include anchor and all draft positions\n");
+        return kComputeParseError;
+    }
+    if (serve_stdio && opt.dflash2_tree_budget > 32) {
+        fprintf(stderr, "serve dflash2 tree budget must be at most 32 rows\n");
+        return kComputeParseError;
+    }
+    if (serve_stdio && opt.dflash2_tree_budget > dflash2_drafts + 1 &&
+        std::getenv("SHELF_GDN_VERIFY_CHUNKED") != nullptr &&
+        (std::getenv("SHELF_GDN_VERIFY_CHUNKED")[0] == '\0' ||
+         std::getenv("SHELF_GDN_VERIFY_CHUNKED")[0] == '0')) {
+        fprintf(stderr, "serve dflash2 tree requires chunked GDN verify\n");
+        return kComputeParseError;
+    }
+    if (opt.dflash2_tree && (!dflash_enabled || (serve_stdio && opt.dflash2_tree_budget == 0) || tp != 1 || sampling.temperature != 0.0f)) {
+        fprintf(stderr, "--dflash2-tree-extra requires single-request DFlash2, TP=1, and greedy sampling\n");
         return kComputeParseError;
     }
     if (dflash_enabled) {

@@ -284,7 +284,8 @@ class ComputeHarness:
             argv += ["--working-set-reserve-gib", str(reserve)]
         if self.dflash2_model_dir is not None:
             argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
-                     "--dflash2-drafts", str(self.dflash2_drafts)]
+                     "--dflash2-drafts", str(self.dflash2_drafts),
+                     "--dflash2-tree-budget", "0"]
         if self.mtp:
             argv += ["--mtp", "--mtp-drafts", "4"]
         env = dict(os.environ)
@@ -443,6 +444,7 @@ class ServerHarness:
                  kv_cache_dtype: str = "bf16",
                  dflash2_model_dir: str | None = None,
                  dflash2_drafts: int = 7,
+                 dflash2_tree_budget: int | str | None = 0,
                  arena_override: int | None = None,
                  working_set_reserve_gib: int | None = None):
         self.log_path = log_path or (Path(tempfile.gettempdir()) / f"shelf-server-{os.getpid()}.log")
@@ -458,6 +460,7 @@ class ServerHarness:
         self.kv_cache_dtype = kv_cache_dtype
         self.dflash2_model_dir = dflash2_model_dir
         self.dflash2_drafts = dflash2_drafts
+        self.dflash2_tree_budget = dflash2_tree_budget
         self.arena_override = arena_override
         self.working_set_reserve_gib = working_set_reserve_gib
         self.proc: subprocess.Popen | None = None
@@ -491,6 +494,8 @@ class ServerHarness:
         if self.dflash2_model_dir is not None:
             argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
                      "--dflash2-drafts", str(self.dflash2_drafts)]
+            if self.dflash2_tree_budget is not None:
+                argv += ["--dflash2-tree-budget", str(self.dflash2_tree_budget)]
         self._log = open(self.log_path, "w")
         self.proc = subprocess.Popen(
             argv, stdout=self._log, stderr=subprocess.STDOUT, env=self.env)

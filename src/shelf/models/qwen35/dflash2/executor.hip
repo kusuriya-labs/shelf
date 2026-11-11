@@ -2118,6 +2118,108 @@ Status dflash2_propose_batch(
                                              executor.backbone_output.data<bf16_t>(), stream);
 }
 
+Status dflash2_append_target_taps_batch(
+    DFlash2Executor& executor,
+    const DFlash2TargetTapAppendRequest* requests,
+    uint32_t request_count,
+    hipStream_t stream) {
+    if (request_count == 0u) return Status::make_ok();
+    if (!executor.initialized || executor.config == nullptr || executor.weights == nullptr ||
+        requests == nullptr) {
+        return Status::invalid_argument("dflash2 batch tap append is not initialized", __FILE__, __LINE__);
+    }
+    const DFlash2Config& config = *executor.config;
+    if (request_count > executor.max_rows || request_count > executor.max_context_rows ||
+        request_count > executor.target_feature.dim(0)) {
+        return Status::invalid_argument("dflash2 batch tap append exceeds capacity", __FILE__, __LINE__);
+    }
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t kv_features = static_cast<uint32_t>(config.attention_kv_rows());
+    const uint32_t head_dim = static_cast<uint32_t>(config.head_dim);
+    const uint32_t concat_stride = static_cast<uint32_t>(executor.target_concat.dim(1));
+    for (uint32_t i = 0; i < request_count; ++i) {
+        const auto& request = requests[i];
+        if (request.context == nullptr || !request.context->initialized ||
+            request.context->next_position != request.position ||
+            request.context->num_layers != config.num_hidden_layers ||
+            request.context->capacity != config.sliding_window ||
+            request.context->kv_features != kv_features) {
+            return Status::invalid_argument("dflash2 batch tap context mismatch", __FILE__, __LINE__);
+        }
+        for (const bf16_t* tap : request.taps) {
+            if (tap == nullptr) return Status::invalid_argument("dflash2 batch tap is null", __FILE__, __LINE__);
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            if (requests[j].context == request.context) {
+                return Status::invalid_argument("duplicate dflash2 batch tap context", __FILE__, __LINE__);
+            }
+        }
+    }
+    if (request_count == 1u) {
+        return dflash2_append_target_taps(executor, *requests[0].context,
+                                         requests[0].taps.data(), shelf::kernel::kDFlash2TargetTaps,
+                                         1u, requests[0].position, stream);
+    }
+    for (uint32_t i = 0; i < request_count; ++i) {
+        const auto& taps = requests[i].taps;
+        const hipError_t err = shelf::kernel::launch_dflash2_feature_concat(
+            taps[0], taps[1], taps[2], taps[3], taps[4], hidden, 1u,
+            executor.target_concat.data<bf16_t>() + static_cast<std::size_t>(i) * concat_stride,
+            concat_stride, stream);
+        if (err != hipSuccess) return Status::hip_error("dflash2 batch feature concat", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    Status st = executor_linear(executor, executor.weights->fc,
+                                executor.target_concat.data<bf16_t>(), concat_stride,
+                                executor.target_fc.data<bf16_t>(),
+                                static_cast<uint32_t>(executor.target_fc.dim(1)),
+                                request_count, "fc", stream);
+    if (!st.ok()) return st;
+    hipError_t err = shelf::kernel::launch_dflash2_rmsnorm_direct_bf16(
+        executor.target_fc.data<bf16_t>(), executor.weights->hidden_norm_weight.data<bf16_t>(),
+        executor.target_feature.data<bf16_t>(), request_count, hidden, hidden,
+        config.rms_norm_eps, stream);
+    if (err != hipSuccess) return Status::hip_error("dflash2 batch feature norm", hipGetErrorString(err), __FILE__, __LINE__);
+    for (uint32_t layer_index = 0; layer_index < config.num_hidden_layers; ++layer_index) {
+        const DFlash2LayerWeights& layer = executor.weights->layers[layer_index];
+        st = executor_linear(executor, layer.attn_k_proj, executor.target_feature.data<bf16_t>(), hidden,
+                             executor.k_ctx_raw.data<bf16_t>(), kv_features, request_count,
+                             "k_ctx_proj", stream, false);
+        if (!st.ok()) return st;
+        st = executor_linear(executor, layer.attn_v_proj, executor.target_feature.data<bf16_t>(), hidden,
+                             executor.v_ctx.data<bf16_t>(), kv_features, request_count,
+                             "v_ctx_proj", stream, false);
+        if (!st.ok()) return st;
+        st = layer_rmsnorm_direct(executor.k_ctx_raw.data<bf16_t>(), layer.attn_k_norm_weight,
+                                  executor.k_ctx_norm.data<bf16_t>(), request_count, kv_features,
+                                  head_dim, config.rms_norm_eps, "k_ctx_norm", stream);
+        if (!st.ok()) return st;
+        for (uint32_t i = 0; i < request_count; ++i) {
+            const std::size_t offset = static_cast<std::size_t>(i) * kv_features;
+            err = shelf::kernel::launch_dflash2_rope_bf16(
+                executor.k_ctx_norm.data<bf16_t>() + offset, kv_features,
+                executor.k_ctx_rope.data<bf16_t>() + offset, kv_features, 1u, kv_features,
+                head_dim, requests[i].position, config.rope_theta, stream);
+            if (err != hipSuccess) return Status::hip_error(
+                "dflash2 batch context rope", hipGetErrorString(err), __FILE__, __LINE__);
+            DFlash2ContextState& context = *requests[i].context;
+            const std::size_t layer_offset =
+                static_cast<std::size_t>(layer_index) * context.capacity * kv_features;
+            err = shelf::kernel::launch_dflash2_kv_ring_append_bf16(
+                executor.k_ctx_rope.data<bf16_t>() + offset, executor.v_ctx.data<bf16_t>() + offset,
+                context.k_ring.data<bf16_t>() + layer_offset, context.v_ring.data<bf16_t>() + layer_offset,
+                1u, kv_features, context.capacity, requests[i].position, stream);
+            if (err != hipSuccess) return Status::hip_error(
+                "dflash2 batch context append", hipGetErrorString(err), __FILE__, __LINE__);
+        }
+    }
+    for (uint32_t i = 0; i < request_count; ++i) {
+        DFlash2ContextState& context = *requests[i].context;
+        context.length = std::min(context.capacity, context.length + 1u);
+        ++context.next_position;
+    }
+    return Status::make_ok();
+}
+
 Status dflash2_append_target_taps(
     DFlash2Executor& executor,
     DFlash2ContextState& context,
