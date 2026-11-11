@@ -1,6 +1,6 @@
 # DFlash2 の draft tree 調査
 
-> **結論（2026-11-11）:** R9700 の低バッチ（同時 1）では、木検証に正味の速度向上がなかった。候補選択を GPU 化して host 転送を 6.95 MB → 252 byte/round、選択時間を約 12.5 → 0.38 ms/round にしても、測定した N=8/10/12/16/24 に「3 prompt 平均 +5% 以上かつ全 prompt で悪化しない」予算はなかった（N=10 で平均 +1.3%、code −1.8%）。残る費用は GDN recurrence の行数増加と状態の復元・gather で、減らすには状態管理の再設計（数日〜1 週間）が要る。実装は main に入れていない。コードは branch `feature/draft-forest`（`3ac1ff8`、`1009d68`、`73190aa`）にあり、以下の `--dflash2-tree-extra`・`--dflash2-tree-budget` はその branch にだけ存在する。
+> **結論（2026-11-11）:** lossy chunk verify の上での serve 測定では、同時生成 1 件の木検証は chain 比で約 9% 高速だった。同時生成 2 件以上では木の効果がなく、既定の `--dflash2-tree-budget auto` は生成中 request が 1 件のときだけ N=10 の木を使い、それ以外は chain にする。測定と品質評価の詳細は [forest_serve.md](forest_serve.md) を参照。以下の各節は調査時点の経過を記録している。
 
 ## 用語と文献
 
