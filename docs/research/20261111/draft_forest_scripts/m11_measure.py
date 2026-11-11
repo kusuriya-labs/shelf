@@ -43,6 +43,10 @@ def locked_group(kind, number):
 def main():
  if len(sys.argv)==3 and sys.argv[1]=='--prompt':
   prompt_group(int(sys.argv[2])); return
+ if len(sys.argv)==3 and sys.argv[1]=='--outlier':
+  rep=int(sys.argv[2]); order=MODES[rep%4:]+MODES[:rep%4]
+  for mode in order: run(13,mode,rep,'outlier')
+  return
  if len(sys.argv)==3 and sys.argv[1]=='--repeat256':
   group=int(sys.argv[2])
   for rep in range(group*5,(group+1)*5): run(2,'10',rep,'repeat256')
