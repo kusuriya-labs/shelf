@@ -591,3 +591,31 @@ JSON の `details` に出力される。N=10 の不足順位は shell で 1/2/3/
 
 変更のない既存実装で `test_dflash2_tree`、`test_dflash2_topk`、
 `test_dflash2_candidate_selector`、`test_gdn_spec_history` は GPU lock 下で通過した。
+
+## M9: 木の chunk verify の導出と CPU 参照
+
+行 i の親を p(i)、根の親を −1 とする。state は鍵次元 × 値次元の行列で、
+根の直前を S₀、各行の入力を qᵢ, kᵢ, vᵢ、対数 gate を gᵢ、更新率を βᵢ とする。
+逐次更新は aᵢ = exp(gᵢ)、uᵢ = βᵢ(vᵢ − aᵢ kᵢᵀSₚ₍ᵢ₎)、
+Sᵢ = aᵢSₚ₍ᵢ₎ + kᵢuᵢᵀ、oᵢ = qᵢᵀSᵢ である。p(i) = −1 の場合は
+Sₚ₍ᵢ₎ = S₀ とする。
+
+Gᵢ = gᵢ + Gₚ₍ᵢ₎、G₋₁ = 0 とし、j ≺ i を i の真の祖先とすると、
+トポロジカル順序の厳密下三角行列と右辺は次の通りである。
+
+```text
+A[i,j] = βᵢ (kᵢ · kⱼ) exp(Gᵢ − Gⱼ)  (j ≺ i)、それ以外は 0
+B[i]   = βᵢ (vᵢ − exp(Gᵢ) kᵢᵀ S₀)
+U      = (I + A)⁻¹ B
+O[i]   = exp(Gᵢ) qᵢᵀ S₀
+       + Σ[j は i 自身または祖先] exp(Gᵢ − Gⱼ) (qᵢ · kⱼ) U[j]
+```
+
+solve は前進代入でよい。log に (U[i], kᵢ, exp(gᵢ)) を保存すれば、
+受理経路を根から順に S ← exp(gᵢ)S + kᵢU[i]ᵀ と replay できる。
+祖先以外を混ぜないことが分岐の正しさに必要である。
+
+| CPU 参照 | 対象 | 結果 |
+| --- | --- | --- |
+| 逐次更新と木の solve、全 node の出力・経路 replay | N=1/8/10/16/32、chain・星形・混合、各 20 乱数例 | 最大絶対誤差 5.551e-17、許容 1e-5 |
+
