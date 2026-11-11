@@ -23,25 +23,11 @@ inline uint32_t dflash2_policy_max_sessions() {
     return value;
 }
 
-inline uint32_t dflash2_policy_decoding_count(std::span<RuntimeRequest*> active) {
-    uint32_t decoding = 0;
-    for (const RuntimeRequest* request : active) {
-        if (request->state == RequestState::Active &&
-            request->finish_reason == FinishReason::None &&
-            request->generated_tokens < request->max_new_tokens &&
-            !request->waiting_for_token_bitmask &&
-            ((request->dflash != nullptr && request->dflash->ready) ||
-             request->pending_decode_token >= 0)) ++decoding;
-    }
-    return decoding;
-}
-
 inline void select_dflash2_adaptive(std::span<RuntimeRequest*> active,
                                      const DFlash2BatcherBinding& binding,
                                      const ContinuousBatcherConfig& config,
                                      uint64_t& round) {
-    const uint32_t decoding = dflash2_policy_decoding_count(active);
-    const double threshold = decoding >= 6u ? 1.5 : 0.6;
+    constexpr double threshold = 0.6;
     constexpr uint32_t probe_interval = 64;
     std::vector<RuntimeRequest*> candidates;
     uint32_t eligible = 0;
