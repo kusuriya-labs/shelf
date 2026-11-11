@@ -485,8 +485,8 @@ def parse_args(argv=None):
                         help="speculative draft tokens per round (default 7)")
     parser.add_argument("--dflash2-tree-budget", type=tree_budget_value, default=None,
                         metavar="N|auto",
-                        help="tree verify rows: auto uses 10 for one speculative request, "
-                             "8 for multiple (default auto; 0 disables)")
+                        help="tree verify rows: auto uses 10 for one decoding request if speculative, "
+                             "8 otherwise (default auto; 0 disables)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
                         help="batch と受理数に応じて投機を制御する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,

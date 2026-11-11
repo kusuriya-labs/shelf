@@ -1111,8 +1111,13 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
     std::vector<DFlash2SpecBatchSlot> slots;
     std::vector<RuntimeRequest*> slot_requests;
     std::vector<RuntimeRequest*> pending_finish;
+    uint32_t other_decoding_requests = 0u;
     for (RuntimeRequest* request : active) {
-        if (request->state != RequestState::Active || request->dflash == nullptr) {
+        if (request->state != RequestState::Active) continue;
+        if (request->dflash == nullptr) {
+            if (request->generated_tokens > 0u &&
+                request->generated_tokens < request->max_new_tokens &&
+                request->finish_reason == FinishReason::None) ++other_decoding_requests;
             continue;
         }
         if (request->finish_reason != FinishReason::None) {
@@ -1130,6 +1135,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         }
         if (dflash_.adaptive && request->dflash->adaptive_rows == 0u) {
             request->pending_decode_token = request->dflash->pending_token;
+            ++other_decoding_requests;
             continue;
         }
         if (dflash_.adaptive) request->pending_decode_token = -1;
@@ -1183,7 +1189,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
         const auto cost_start = cost_trace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
-        auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots);
+        auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots, other_decoding_requests);
         if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
         const double cost_wall = cost_trace ? std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cost_start).count() : 0.0;

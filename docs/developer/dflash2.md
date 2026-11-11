@@ -632,7 +632,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 
 release は `shutdown_dflash2_spec_batch_context()`。
 
-`dflash2_spec_step_batch(context, slots)` は slots を 1 round 実行する:
+`dflash2_spec_step_batch(context, slots, other_decoding_requests)` は slots を 1 round 実行する。
+最後の引数は slot 以外で通常 decode する request 数で、auto の budget 選択に使う。
 
 1. slot ごとに `K` を clamp する（`dflash2_spec_step` と同じ規則）。
 2. `K == 0` の slot は batch に含めず、`run_single_target`（単一 target decode）へ
@@ -927,9 +928,9 @@ samples を別途 D2H する。
   選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
   採用した経路の KV と target tap は連続位置に集め、GDN state は受理経路から確定する。
   浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
-  既定の `auto` は draft 数 7・TP=1 で、その round に投機する request が
-  1 本なら 10 行、2 本以上なら chain の 8 行を使う。prefill 中、待機中、
-  非投機、policy により投機を停止中の request は数えない。auto では
+  既定の `auto` は draft 数 7・TP=1 で、その round の生成中 request が
+  1 本だけで投機中なら 10 行、それ以外は chain の 8 行を使う。通常 decode 中や
+  policy により投機を停止中の request も数え、prefill 中と待機中は数えない。auto では
   stochastic request を投機せず通常 decode する。単発の greedy
   生成でも 10 行を使う。明示的な整数指定は同時数に依存しない。
   他の draft 数や TP では tree budget 省略時に chain を使う（server は警告する）。

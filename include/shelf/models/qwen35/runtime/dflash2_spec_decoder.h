@@ -318,6 +318,7 @@ struct DFlash2SpecBatchOutput {
 
 Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,
-    std::span<const DFlash2SpecBatchSlot> slots);
+    std::span<const DFlash2SpecBatchSlot> slots,
+    uint32_t other_decoding_requests = 0u);
 
 }  // namespace shelf::qwen35::runtime

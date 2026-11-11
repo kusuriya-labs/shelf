@@ -87,7 +87,7 @@ Ready.
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
-| `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の投機 request が 1 本なら 10 行、2 本以上なら chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
+| `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
 | `--dflash2-max-sessions DFLASH2_MAX_SESSIONS` | requests that may speculate at once; the rest decode without speculation (0 = min(`--max-concurrent-requests`, 8)) |
 | `--mtp` | checkpoint の MTP block を drafter として使う（複数 request を同時に処理する） |
 | `--mtp-drafts MTP_DRAFTS` | MTP の draft tokens per round（default 4） |

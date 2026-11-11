@@ -96,7 +96,7 @@ void compute_usage(const char* prog) {
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-tree-budget N|auto  tree verify rows (default auto; 0 disables)\n");
-    printf("                         auto: 10 for one speculative request, else 8\n");
+    printf("                         auto: 10 for one decoding request if speculative, else 8\n");
     printf("  --dflash2-tree-extra B  enable experimental tree verification (B=0,1,2,4)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-adaptive     control speculation with a batch policy\n");

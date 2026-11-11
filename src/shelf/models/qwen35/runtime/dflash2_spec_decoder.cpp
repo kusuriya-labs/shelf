@@ -1728,7 +1728,8 @@ std::array<const bf16_t*, shelf::kernel::kDFlash2TargetTaps> batch_target_taps(
 
 Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     DFlash2SpecBatchContext& context,
-    std::span<const DFlash2SpecBatchSlot> slots) {
+    std::span<const DFlash2SpecBatchSlot> slots,
+    uint32_t other_decoding_requests) {
     if (!context.initialized) {
         return Status::invalid_state("batch context is not initialized", __FILE__, __LINE__);
     }
@@ -1837,11 +1838,13 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     }
     const uint32_t speculative_count = static_cast<uint32_t>(std::count_if(
         plans.begin(), plans.end(), [](const SlotPlan& plan) { return plan.batched; }));
+    const uint32_t decoding_count = other_decoding_requests + static_cast<uint32_t>(std::count_if(
+        plans.begin(), plans.end(), [](const SlotPlan& plan) { return !plan.stopped; }));
     const uint32_t tree_budget = context.tree_budget_auto
-        ? auto_dflash2_tree_budget(speculative_count) : context.tree_budget;
+        ? auto_dflash2_tree_budget(speculative_count, decoding_count) : context.tree_budget;
     if (context.tree_budget_auto && env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_ROUND", false))
-        std::fprintf(stderr, "DFLASH2_TREE_ROUND speculative=%u budget=%u\n",
-                     speculative_count, tree_budget);
+        std::fprintf(stderr, "DFLASH2_TREE_ROUND speculative=%u budget=%u decoding=%u\n",
+                     speculative_count, tree_budget, decoding_count);
     const bool tree_mode = tree_budget != 0u &&
         tree_budget > plans.front().decoder->config.num_drafts + 1u;
     if (tree_mode) {
