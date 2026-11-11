@@ -950,6 +950,7 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     }
     DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = dflash_.num_drafts;
+    decoder_config.tree_budget = dflash_.tree_budget;
     decoder_config.eos_tokens = config_.eos_token_ids;
     DFlash2SpecWorkspace* workspace = nullptr;
     if (dflash_.sessions != nullptr) {

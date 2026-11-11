@@ -8,7 +8,7 @@ namespace shelf::qwen35::runtime {
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     const std::vector<DFlash2GdnRankBinding>& bindings,
-    uint32_t max_rows) {
+    uint32_t max_rows, uint32_t tree_budget) {
     if (max_rows == 0u) {
         return Status::invalid_argument("batch context max_rows is zero", __FILE__, __LINE__);
     }
@@ -17,6 +17,7 @@ Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     }
     DFlash2SpecBatchContext ctx;
     ctx.max_rows = max_rows;
+    ctx.tree_budget = tree_budget;
     ctx.history.resize(bindings.size());
     ctx.compact.resize(bindings.size());
     {
@@ -81,6 +82,7 @@ Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noe
     context.history.clear();
     context.compact.clear();
     context.max_rows = 0u;
+    context.tree_budget = 0u;
     context.history_bytes = 0u;
     context.compact_bytes = 0u;
     context.verify_token_ids_device = nullptr;

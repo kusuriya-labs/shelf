@@ -323,11 +323,11 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             }
         } else if (std::strcmp(argv[i], "--dflash2-tree-budget") == 0 && i + 1 < argc) {
             if (opt.dflash2_tree || !parse_uint(argv[++i], opt.dflash2_tree_budget) ||
-                opt.dflash2_tree_budget < 2 || opt.dflash2_tree_budget > 512) {
+                (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < 2) || opt.dflash2_tree_budget > 512) {
                 fprintf(stderr, "invalid or conflicting --dflash2-tree-budget\n");
                 return kComputeParseError;
             }
-            opt.dflash2_tree = true;
+            opt.dflash2_tree = opt.dflash2_tree_budget != 0;
         } else if (std::strcmp(argv[i], "--dflash2-tree-extra") == 0 && i + 1 < argc) {
             if (opt.dflash2_tree) { fprintf(stderr, "tree options are exclusive\n"); return kComputeParseError; }
             if (!parse_uint(argv[++i], opt.dflash2_tree_extra) ||
@@ -479,6 +479,10 @@ int validate_compute_options(const ComputeOptions& opt) {
     }
     if (opt.dflash2_tree_budget != 0 && opt.dflash2_tree_budget < dflash2_drafts + 1) {
         fprintf(stderr, "tree budget must include anchor and all draft positions\n");
+        return kComputeParseError;
+    }
+    if (serve_stdio && opt.dflash2_tree_budget != 0) {
+        fprintf(stderr, "dflash2 tree budget is not supported in serve mode yet\n");
         return kComputeParseError;
     }
     if (opt.dflash2_tree && (!dflash_enabled || serve_stdio || tp != 1 || sampling.temperature != 0.0f)) {

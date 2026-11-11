@@ -97,6 +97,8 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
+        if opts.dflash2_tree_budget:
+            argv += ["--dflash2-tree-budget", str(opts.dflash2_tree_budget)]
         if opts.dflash2_adaptive:
             argv.append("--dflash2-adaptive")
         if opts.dflash2_max_sessions > 0:
@@ -473,6 +475,8 @@ def parse_args(argv=None):
                         help="DFlash2 draft model directory (enables speculative decoding)")
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
+    parser.add_argument("--dflash2-tree-budget", type=int, default=0,
+                        help="tree verify row budget (default 0: disabled)")
     parser.add_argument("--dflash2-adaptive", action="store_true",
                         help="batch と受理数に応じて投機を制御する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
@@ -517,6 +521,10 @@ def parse_args(argv=None):
         parser.error("--page-tokens must be >= 1")
     if opts.dflash2_adaptive and not opts.dflash2_model_dir:
         parser.error("--dflash2-adaptive requires --dflash2-model-dir")
+    if opts.dflash2_tree_budget < 0 or opts.dflash2_tree_budget > 512:
+        parser.error("--dflash2-tree-budget must be between 0 and 512")
+    if opts.dflash2_tree_budget and not opts.dflash2_model_dir:
+        parser.error("--dflash2-tree-budget requires --dflash2-model-dir")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
     if opts.mtp_drafts < 1:

@@ -263,6 +263,7 @@ struct DFlash2SpecBatchContext {
     std::vector<GdnSpecHistory> history;
     std::vector<DFlash2SpecBatchCompact> compact;
     uint32_t max_rows = 0u;
+    uint32_t tree_budget = 0u;
     uint64_t history_bytes = 0u;
     uint64_t compact_bytes = 0u;
     bool initialized = false;
@@ -272,7 +273,7 @@ struct DFlash2SpecBatchContext {
 
 Result<DFlash2SpecBatchContext> create_dflash2_spec_batch_context(
     const std::vector<DFlash2GdnRankBinding>& bindings,
-    uint32_t max_rows);
+    uint32_t max_rows, uint32_t tree_budget = 0u);
 
 Status shutdown_dflash2_spec_batch_context(DFlash2SpecBatchContext& context) noexcept;
 

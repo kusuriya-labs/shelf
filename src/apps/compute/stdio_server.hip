@@ -1176,7 +1176,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             }
             auto batch_result =
                 shelf::qwen35::runtime::create_dflash2_spec_batch_context(
-                    bindings, batch_max_rows);
+                    bindings, batch_max_rows, runtime.config().dflash2_tree_budget);
             if (!batch_result.ok()) {
                 fprintf(stderr, "dflash2 batch context create failed: %s\n",
                         batch_result.status().message().c_str());
@@ -1188,6 +1188,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         {
             shelf::qwen35::runtime::DFlash2SpecDecoderConfig session_config;
             session_config.num_drafts = dflash.drafts;
+            session_config.tree_budget = runtime.config().dflash2_tree_budget;
             session_config.eos_tokens = text_config.stop_tokens;
             auto sessions_result = shelf::qwen35::runtime::DFlash2SessionPool::create(
                 runtime.executor(), &dflash.executor, runtime.gdn_pool(),
@@ -1208,6 +1209,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.arena = &runtime.arena();
         batcher_binding.sessions = &dflash.sessions;
         batcher_binding.num_drafts = dflash.drafts;
+        batcher_binding.tree_budget = runtime.config().dflash2_tree_budget;
         batcher_binding.adaptive = dflash.adaptive;
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
