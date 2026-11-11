@@ -112,3 +112,21 @@ prompt 数が異なる。tree logits の host 転送と prefix capture 時の pa
 serve の処理に含まれるが、それぞれの寄与は分離測定していない。今回の確認は c=1 の
 生成列の最初の不一致に限り、c=2 以上の性能・数値ゲート、KLD、生成品質、自動 budget は
 未評価である。
+
+## 関連回帰
+
+final build で `test_server_dflash2.py` は 20 項目、Octave の DFlash2 は 26 項目、
+unaligned prefill は 7 項目、長い prefix は 8 項目が通過した。関連 ctest の tree、
+footprint、candidate selector、tree chunk、compact log commit も通過した。tree 無効の
+`test_compute_dflash2.py` は replay 精度修正前に 99 項目が通過し、修正前後の
+budget 0 の 512 token 生成列は 16 回すべて一致した。
+
+既存 `test_compute_dflash2_tree.py` は、lossy な chain と非投機の完全一致、および
+`tree-extra 0` と chain の完全一致を前提にして失敗した。shell prompt では修正前後とも
+chain と非投機は位置 37 で異なり、非投機の top-1/top-2 差は 0.051245 だった。
+`tree-extra 0` は非投機と一致し、budget 8 は chain と完全一致した。chain、tree-extra 0、
+budget 8 はそれぞれ replay 精度修正前後で同じ生成列だった。テストは chain と
+`tree-extra 0` を既定の lossy 数値ゲートで判定し、budget 8 と chain の完全一致は
+引き続き要求する。
+更新後の `test_compute_dflash2_tree.py` は shell・code・reasoning の全 3 prompt、
+各 256 token で通過した。
