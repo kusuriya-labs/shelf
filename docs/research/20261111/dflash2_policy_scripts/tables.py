@@ -5,6 +5,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 comparison = pathlib.Path(sys.argv[2])
+repeat = pathlib.Path(sys.argv[3]) if len(sys.argv) > 3 else None
 print('### 損益分岐（tok/s、各 2 回）\n')
 print('| prompt | 同時数 | 非投機 | 固定 K=7 |')
 print('| --- | ---: | --- | --- |')
@@ -34,6 +35,10 @@ for name in ('benchmark', 'japanese', 'shell', 'code', 'reasoning', 'mixed'):
             tag = f'{name}_{count}_{mode}'
             try:
                 value = json.loads((comparison / f'{tag}.out').read_text().splitlines()[0])['all_active_tps']
+                repeated = repeat / f'{name}_{count}_r1_{mode}.out' if repeat else None
+                if repeated is not None and repeated.exists():
+                    second = json.loads(repeated.read_text().splitlines()[0])['all_active_tps']
+                    value = (value + second) / 2
                 ids = json.loads((comparison / f'{tag}.json').read_text())
                 values.append(value)
                 tokens.append(ids if len(ids) == count and all(ids.values()) else None)
