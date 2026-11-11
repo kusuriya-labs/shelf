@@ -13,6 +13,50 @@ namespace {
 constexpr uint32_t kSelectorThreads = kDflash2SelectorThreads;
 constexpr uint32_t kSelectorMaxTopK = kDflash2SelectorMaxTopK;
 
+__global__ void tree_probabilities_kernel(
+    const float* logits, const int32_t* ids, const float* top_logits,
+    DFlash2TreeProbabilities* output, uint32_t vocab, uint32_t top_k) {
+    __shared__ float partial[kSelectorThreads];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t row = blockIdx.x;
+    const float* values = logits + static_cast<size_t>(row) * vocab;
+    float maximum = -INFINITY;
+    for (uint32_t i = tid; i < vocab; i += kSelectorThreads)
+        maximum = fmaxf(maximum, values[i]);
+    partial[tid] = maximum;
+    __syncthreads();
+    for (uint32_t step = kSelectorThreads / 2; step; step >>= 1) {
+        if (tid < step) partial[tid] = fmaxf(partial[tid], partial[tid + step]);
+        __syncthreads();
+    }
+    maximum = partial[0];
+    float sum = 0.0f;
+    for (uint32_t i = tid; i < vocab; i += kSelectorThreads)
+        sum += expf(values[i] - maximum);
+    __syncthreads();
+    partial[tid] = sum;
+    __syncthreads();
+    for (uint32_t step = kSelectorThreads / 2; step; step >>= 1) {
+        if (tid < step) partial[tid] += partial[tid + step];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float mass = 0.0f;
+        for (uint32_t j = 0; j < kDflash2TreeRetained; ++j) {
+            if (j >= top_k) {
+                output[row].ids[j] = -1;
+                output[row].probabilities[j] = 0.0f;
+                continue;
+            }
+            output[row].ids[j] = ids[static_cast<size_t>(row) * top_k + j];
+            const float p = expf(top_logits[static_cast<size_t>(row) * top_k + j] - maximum) / partial[0];
+            output[row].probabilities[j] = p;
+            mass += p;
+        }
+        output[row].residual = fmaxf(0.0f, 1.0f - mass);
+    }
+}
+
 __device__ __forceinline__ bool selector_better(float sa, int32_t ta, float sb, int32_t tb) {
     if (sa > sb) return true;
     if (sa < sb) return false;
@@ -156,6 +200,18 @@ __global__ void dflash2_candidate_selector_requests_kernel(
 }
 
 }  // namespace
+
+hipError_t launch_dflash2_tree_probabilities(
+    const float* logits, const int32_t* topk_ids, const float* topk_logits,
+    DFlash2TreeProbabilities* output, uint32_t rows, uint32_t vocab,
+    uint32_t top_k, hipStream_t stream) {
+    if (!logits || !topk_ids || !topk_logits || !output || !vocab || !top_k)
+        return hipErrorInvalidValue;
+    if (!rows) return hipSuccess;
+    tree_probabilities_kernel<<<rows, kSelectorThreads, 0, stream>>>(
+        logits, topk_ids, topk_logits, output, vocab, top_k);
+    return hipGetLastError();
+}
 
 hipError_t launch_dflash2_candidate_selector(
     const DFlash2CandidateSelectorArgs& args,

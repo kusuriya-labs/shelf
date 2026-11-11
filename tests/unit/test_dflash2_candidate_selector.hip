@@ -25,6 +25,53 @@ static void check(bool cond, const std::string& msg) {
 
 using shelf::bf16_t;
 
+static void test_tree_probabilities(hipStream_t stream) {
+    constexpr uint32_t rows = 2, vocab = 513, top_k = 4;
+    std::vector<float> logits(rows * vocab, -10.0f);
+    const std::vector<int32_t> ids = {0, 1, 2, 3, 512, 256, 128, 64};
+    std::vector<float> top_logits(rows * top_k);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t j = 0; j < top_k; ++j) {
+            const float value = 50.0f - static_cast<float>(r * 80 + j);
+            logits[r * vocab + ids[r * top_k + j]] = value;
+            top_logits[r * top_k + j] = value;
+        }
+    }
+    float *d_logits = nullptr, *d_top_logits = nullptr;
+    int32_t* d_ids = nullptr;
+    shelf::kernel::DFlash2TreeProbabilities* d_output = nullptr;
+    check(hipMalloc(&d_logits, logits.size() * sizeof(float)) == hipSuccess, "tree logits allocation");
+    check(hipMalloc(&d_top_logits, top_logits.size() * sizeof(float)) == hipSuccess, "tree top logits allocation");
+    check(hipMalloc(&d_ids, ids.size() * sizeof(int32_t)) == hipSuccess, "tree ids allocation");
+    check(hipMalloc(&d_output, rows * sizeof(*d_output)) == hipSuccess, "tree output allocation");
+    if (d_logits && d_top_logits && d_ids && d_output) {
+        check(hipMemcpy(d_logits, logits.data(), logits.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess, "tree logits upload");
+        check(hipMemcpy(d_top_logits, top_logits.data(), top_logits.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess, "tree top logits upload");
+        check(hipMemcpy(d_ids, ids.data(), ids.size() * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess, "tree ids upload");
+        check(shelf::kernel::launch_dflash2_tree_probabilities(d_logits, d_ids, d_top_logits,
+              d_output, rows, vocab, top_k, stream) == hipSuccess, "tree probability launch");
+        std::vector<shelf::kernel::DFlash2TreeProbabilities> output(rows);
+        check(hipStreamSynchronize(stream) == hipSuccess, "tree probability sync");
+        check(hipMemcpy(output.data(), d_output, rows * sizeof(*d_output), hipMemcpyDeviceToHost) == hipSuccess, "tree probability download");
+        for (uint32_t r = 0; r < rows; ++r) {
+            double sum = 0.0;
+            for (uint32_t i = 0; i < vocab; ++i) sum += std::exp(static_cast<double>(logits[r * vocab + i]));
+            double mass = 0.0;
+            for (uint32_t j = 0; j < top_k; ++j) {
+                const double p = std::exp(static_cast<double>(top_logits[r * top_k + j])) / sum;
+                mass += p;
+                check(output[r].ids[j] == ids[r * top_k + j], "tree probability id");
+                check(std::abs(output[r].probabilities[j] - p) < 1e-5, "tree full vocabulary normalization");
+            }
+            check(std::abs(output[r].residual - (1.0 - mass)) < 1e-5, "tree residual probability");
+        }
+    }
+    if (d_output) check(hipFree(d_output) == hipSuccess, "tree output free");
+    if (d_ids) check(hipFree(d_ids) == hipSuccess, "tree ids free");
+    if (d_top_logits) check(hipFree(d_top_logits) == hipSuccess, "tree top logits free");
+    if (d_logits) check(hipFree(d_logits) == hipSuccess, "tree logits free");
+}
+
 static float f32_from_bf16(bf16_t x) {
     const uint32_t u = static_cast<uint32_t>(x.data) << 16;
     float f;
@@ -270,6 +317,8 @@ int main() {
         std::printf("FAIL hipStreamCreate\n");
         return 1;
     }
+
+    test_tree_probabilities(stream);
 
     {
         SelectorFixture fx;

@@ -1,6 +1,7 @@
 #include <shelf/models/qwen35/runtime/dflash2_spec_decoder.h>
 
 #include <shelf/core/gpu/cleanup.h>
+#include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/models/qwen35/runtime/scheduling_types.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/models/qwen35/runtime/dflash2_tree.h>
@@ -1027,32 +1028,51 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         if (decoder.config.tree_budget != 0u) {
             const uint32_t top_k = static_cast<uint32_t>(decoder.draft->config->selector_top_k);
             const uint32_t vocab = static_cast<uint32_t>(decoder.draft->config->vocab_size);
-            const uint32_t retained = std::min(top_k, 4u);
-            std::vector<int32_t> ids(dflash_k * top_k);
-            std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
-            hipError_t err = hipMemcpy(ids.data(), decoder.draft->proposal_topk_ids.data<int32_t>(),
-                ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
-            if (err == hipSuccess) err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>(),
-                logits.size() * sizeof(float), hipMemcpyDeviceToHost);
-            if (err != hipSuccess) return Status::hip_error("dflash2 budget logits copy", hipGetErrorString(err), __FILE__, __LINE__);
+            const uint32_t retained = std::min(top_k, shelf::kernel::kDflash2TreeRetained);
+            using Probabilities = shelf::kernel::DFlash2TreeProbabilities;
+            auto* device_probabilities = reinterpret_cast<Probabilities*>(decoder.gdn_ranks.front().tree_scores);
+            std::vector<Probabilities> probabilities(dflash_k);
+            hipError_t err = shelf::kernel::launch_dflash2_tree_probabilities(
+                decoder.draft->proposal_logits.data<float>(), decoder.draft->proposal_topk_ids.data<int32_t>(),
+                decoder.draft->proposal_topk_logits.data<float>(), device_probabilities,
+                dflash_k, vocab, top_k, decoder.stream);
+            if (err == hipSuccess) err = hipMemcpyAsync(probabilities.data(), device_probabilities,
+                probabilities.size() * sizeof(Probabilities), hipMemcpyDeviceToHost, decoder.stream);
+            if (err == hipSuccess) err = hipStreamSynchronize(decoder.stream);
+            if (err != hipSuccess) return Status::hip_error("dflash2 budget probabilities copy", hipGetErrorString(err), __FILE__, __LINE__);
             std::vector<std::vector<DFlash2TreeCandidate>> choices(dflash_k);
             for (uint32_t i = 0; i < dflash_k; ++i) {
-                const float* row = logits.data() + static_cast<size_t>(i) * vocab;
-                const float maximum = *std::max_element(row, row + vocab);
-                double sum = 0.0;
-                for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
-                double mass = 0.0;
                 for (uint32_t j = 0; j < retained; ++j) {
-                    const int32_t id = ids[i * top_k + j];
-                    const double probability = std::exp(static_cast<double>(row[id] - maximum)) / sum;
-                    choices[i].push_back({id, probability});
-                    mass += probability;
+                    choices[i].push_back({probabilities[i].ids[j], probabilities[i].probabilities[j]});
                 }
-                if (tm != nullptr) { tm->tree_retained_mass += mass; ++tm->tree_probability_rows; }
+                if (tm != nullptr) { tm->tree_retained_mass += 1.0 - probabilities[i].residual; ++tm->tree_probability_rows; }
             }
             if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
                     dflash_k, position, [&](uint32_t depth, int32_t) { return choices[depth]; }, tree))
                 return Status::invalid_state("dflash2 budget tree selection failed", __FILE__, __LINE__);
+            if (env_flag_enabled("SHELF_DFLASH2_TREE_CHECK_CPU", false)) {
+                std::vector<float> logits(static_cast<size_t>(dflash_k) * vocab);
+                err = hipMemcpy(logits.data(), decoder.draft->proposal_logits.data<float>(),
+                                logits.size() * sizeof(float), hipMemcpyDeviceToHost);
+                if (err != hipSuccess) return Status::hip_error("dflash2 budget reference copy", hipGetErrorString(err), __FILE__, __LINE__);
+                std::vector<std::vector<DFlash2TreeCandidate>> reference(dflash_k);
+                for (uint32_t i = 0; i < dflash_k; ++i) {
+                    const float* row = logits.data() + static_cast<size_t>(i) * vocab;
+                    const float maximum = *std::max_element(row, row + vocab);
+                    double sum = 0.0;
+                    for (uint32_t j = 0; j < vocab; ++j) sum += std::exp(static_cast<double>(row[j] - maximum));
+                    for (uint32_t j = 0; j < retained; ++j) {
+                        const int32_t id = probabilities[i].ids[j];
+                        reference[i].push_back({id, std::exp(static_cast<double>(row[id] - maximum)) / sum});
+                    }
+                }
+                DFlash2Tree expected;
+                if (!make_budgeted_dflash2_tree(pending_token, std::min(decoder.config.tree_budget, room),
+                        dflash_k, position, [&](uint32_t depth, int32_t) { return reference[depth]; }, expected))
+                    return Status::invalid_state("dflash2 budget reference selection failed", __FILE__, __LINE__);
+                if (tree.tokens != expected.tokens || tree.parent != expected.parent)
+                    std::fprintf(stderr, "DFLASH2_TREE_CPU_MISMATCH position=%u budget=%u\n", position, decoder.config.tree_budget);
+            }
             verify_rows = static_cast<uint32_t>(tree.tokens.size());
         } else {
             std::vector<int32_t> alternatives(dflash_k, -1);
@@ -1128,6 +1148,14 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
     std::vector<ScheduledRequest> requests;
     const uint64_t round_sample_index = decoder.sample_index;
     decoder.sample_index += static_cast<uint64_t>(total_k) + 1u;
+    static thread_local bool semantic_verify_recorded = false;
+    const char* semantic_csv = std::getenv("SHELF_DFLASH2_VERIFY_TIMING_CSV");
+    const bool semantic_verify = semantic_csv != nullptr && semantic_csv[0] != '\0' &&
+        shelf::execution::semantic_timing_enabled() && !semantic_verify_recorded;
+    if (semantic_verify) {
+        shelf::execution::semantic_timing_begin(decoder.stream, 8192);
+        semantic_verify_recorded = true;
+    }
     {
         ScopedTimer t(want_timing ? &tm->verify_ms : nullptr);
         ScheduledBatch batch;
@@ -1283,6 +1311,8 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
         }
     }
 
+    if (semantic_verify) shelf::execution::semantic_timing_end(decoder.stream, semantic_csv);
+
     if (want_timing && draft_events_recorded) {
         float elapsed = 0.0f;
         if (hipEventElapsedTime(&elapsed, decoder.draft_start_event,
@@ -1355,6 +1385,10 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
 
     if (decoder.config.tree) {
         ScopedTimer t(want_timing ? &tm->tree_commit_ms : nullptr);
+        const bool profile_commit = want_timing && decoder.gdn_ranks.size() == 1u &&
+            env_flag_enabled("SHELF_DFLASH2_TREE_PROFILE_COMMIT", false);
+        if (profile_commit && hipEventRecord(decoder.draft_start_event, decoder.stream) != hipSuccess)
+            return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         {
             ScopedTimer restore_timer(want_timing ? &tm->tree_restore_ms : nullptr);
             for (DFlash2GdnRankState& g : decoder.gdn_ranks) {
@@ -1365,11 +1399,24 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                 if (!st.ok()) return st;
             }
         }
+        if (profile_commit && hipEventRecord(decoder.draft_stop_event, decoder.stream) != hipSuccess)
+            return Status::hip_error("dflash2 restore event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         if (decoder.config.tree_extra != 0u || decoder.config.tree_budget != 0u) {
+            if (profile_commit && hipEventRecord(decoder.verify_start_event, decoder.stream) != hipSuccess)
+                return Status::hip_error("dflash2 gather event", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
             ScopedTimer gather_timer(want_timing ? &tm->tree_gather_ms : nullptr);
             Status st = gather_tree_path(decoder, position,
                 std::span<const uint32_t>(walk.rows.data(), accepted + 1u));
             if (!st.ok()) return st;
+            if (profile_commit) {
+                hipError_t err = hipEventRecord(decoder.verify_stop_event, decoder.stream);
+                if (err == hipSuccess) err = hipEventSynchronize(decoder.verify_stop_event);
+                float restore_ms = 0.0f, gather_ms = 0.0f;
+                if (err == hipSuccess) err = hipEventElapsedTime(&restore_ms, decoder.draft_start_event, decoder.draft_stop_event);
+                if (err == hipSuccess) err = hipEventElapsedTime(&gather_ms, decoder.verify_start_event, decoder.verify_stop_event);
+                if (err != hipSuccess) return Status::hip_error("dflash2 commit timing", hipGetErrorString(err), __FILE__, __LINE__);
+                std::fprintf(stderr, "DFLASH2_TREE_COMMIT_GPU restore_ms=%.6f gather_ms=%.6f\n", restore_ms, gather_ms);
+            }
         }
         ScopedTimer append_timer(want_timing ? &tm->tree_append_ms : nullptr);
         decoder.sequence->position = position + accepted + 1u;
