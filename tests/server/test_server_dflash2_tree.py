@@ -34,9 +34,10 @@ def serve(budget, draft, token_path):
         server.close()
 
 
-def single_tree(draft):
+def single_tree(draft, budget=True):
     cmd = [str(compute_binary()), "--model-dir", str(model_dir()),
-           "--dflash2-model-dir", draft, "--dflash2-tree-budget", "10",
+           "--dflash2-model-dir", draft,
+           *(["--dflash2-tree-budget", "10"] if budget else []),
            "--input-ids-file", "/dev/stdin", "--max-new-tokens", "64",
            "--max-seq-len", "512", "--arena-gib", "auto", "--device",
            os.environ.get("SHELF_TEST_DEVICE", "0"), "--kv-cache-dtype", "bf16"]
@@ -58,8 +59,11 @@ def main():
         tree = serve(10, draft, path)
         automatic = serve(None, draft, path)
         reference = single_tree(draft)
+        default_reference = single_tree(draft, budget=False)
     if len(chain) != 64 or chain_tree != chain:
         raise AssertionError("budget 8 differs from chain")
+    if default_reference != reference:
+        raise AssertionError("compute default differs from budget 10")
     if len(tree) != 64 or tree != reference:
         raise AssertionError("budget 10 differs from the single-request tree")
     if automatic != tree or len(automatic) != 64:
