@@ -41,6 +41,26 @@ verify し、一致した prefix だけを commit する。
 
 ---
 
+## 単一 request の木検証
+
+`shelf-compute` の単一 request で `--dflash2-tree-extra B` を明示すると、
+DFlash2 の候補を木として verify する。省略時は従来の chain 経路を使う。
+B は 0、1、2、4 のいずれかで、0 は枝のない chain を木として扱う。B が正の場合は
+先頭２位置の selector による２位候補を、対応する親の兄弟葉として最大 B 個追加する。
+候補位置は２つなので追加葉は最大２個である。単一 request、TP=1、greedy に限る。
+
+各行の親・祖先・depth に対応する RoPE 位置を target に渡し、全行の GDN conv と
+recurrent history を保持する。target の greedy 出力と一致する子をたどり、採用した
+経路の paged KV と target tap を連続位置へ集め、最終行の GDN recurrent / conv
+history を復元する。葉の再実行は行わない。B=0 は chain との bit 一致を維持し、
+B>0 は異なる行配置による数値差と僅差での greedy 出力の不一致を許容する。
+これは浮動小数点の計算順序による差であり、投機検証の採否規則とは別の問題である。
+非投機の厳密な有限精度分布との一致を保証するものではない。数値検証は非投機との
+最初の不一致位置における top-1/top-2 logit 差を評価する。実験的経路は opt-in の
+ままである。
+
+---
+
 ## Checkpoint contract
 
 ### config
@@ -896,6 +916,15 @@ samples を別途 D2H する。
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
+- `--dflash2-tree-budget N`: 単一 request・TP=1・greedy 用の実験的な木検証。
+  anchor を含む総行数を指定し、`--dflash2-tree-extra` とは併用できない。
+  N は draft 数 + 1 以上、512 以下。draft 数 + 1 の場合は通常の chain を使う。
+  より大きな予算では各位置の drafter logits を全語彙で softmax 正規化し、
+  top 4 の確率の積を使って prefix-closed な木を best-first で選ぶ。
+  分岐後も位置ごとの marginal を共有し、親条件付き補正は選択に使わない。
+  選択候補の外にある確率の平均は `DFLASH2_TREE_RESIDUAL_MASS` に出力する。
+  採用した経路の KV と target tap は連続位置に集め、最終行の GDN history を復元する。
+  浮動小数点の累算順序の差により非投機生成との完全一致は保証しない。
 - `--dflash2-max-sessions N`: serve で同時に投機を行う request 数（default
   `min(--max-concurrent-requests, 8)`）。session pool の容量、batch verify の行数
   （`N × block_size`）、drafter scratch の大きさがこの値で決まる。pool に空きが無い間に

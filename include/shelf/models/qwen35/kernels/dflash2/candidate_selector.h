@@ -9,6 +9,18 @@ namespace shelf::kernel {
 
 inline constexpr uint32_t kDflash2SelectorThreads = 256u;
 inline constexpr uint32_t kDflash2SelectorMaxTopK = 16u;
+inline constexpr uint32_t kDflash2TreeRetained = 4u;
+
+struct DFlash2TreeProbabilities {
+    int32_t ids[kDflash2TreeRetained];
+    float probabilities[kDflash2TreeRetained];
+    float residual;
+};
+
+hipError_t launch_dflash2_tree_probabilities(
+    const float* logits, const int32_t* topk_ids, const float* topk_logits,
+    DFlash2TreeProbabilities* output, uint32_t rows, uint32_t vocab,
+    uint32_t top_k, hipStream_t stream);
 
 struct DFlash2CandidateSelectorArgs {
     const bf16_t* hidden_proj = nullptr;
@@ -17,6 +29,7 @@ struct DFlash2CandidateSelectorArgs {
     const bf16_t* predecessor_codebook = nullptr;
     const bf16_t* successor_codebook = nullptr;
     int32_t anchor_token = 0;
+    const int32_t* row_predecessors = nullptr;
     int32_t* output_tokens = nullptr;
     float* output_scores = nullptr;
     uint32_t draft_rows = 0;

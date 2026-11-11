@@ -13,6 +13,50 @@ namespace {
 constexpr uint32_t kSelectorThreads = kDflash2SelectorThreads;
 constexpr uint32_t kSelectorMaxTopK = kDflash2SelectorMaxTopK;
 
+__global__ void tree_probabilities_kernel(
+    const float* logits, const int32_t* ids, const float* top_logits,
+    DFlash2TreeProbabilities* output, uint32_t vocab, uint32_t top_k) {
+    __shared__ float partial[kSelectorThreads];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t row = blockIdx.x;
+    const float* values = logits + static_cast<size_t>(row) * vocab;
+    float maximum = -INFINITY;
+    for (uint32_t i = tid; i < vocab; i += kSelectorThreads)
+        maximum = fmaxf(maximum, values[i]);
+    partial[tid] = maximum;
+    __syncthreads();
+    for (uint32_t step = kSelectorThreads / 2; step; step >>= 1) {
+        if (tid < step) partial[tid] = fmaxf(partial[tid], partial[tid + step]);
+        __syncthreads();
+    }
+    maximum = partial[0];
+    float sum = 0.0f;
+    for (uint32_t i = tid; i < vocab; i += kSelectorThreads)
+        sum += expf(values[i] - maximum);
+    __syncthreads();
+    partial[tid] = sum;
+    __syncthreads();
+    for (uint32_t step = kSelectorThreads / 2; step; step >>= 1) {
+        if (tid < step) partial[tid] += partial[tid + step];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float mass = 0.0f;
+        for (uint32_t j = 0; j < kDflash2TreeRetained; ++j) {
+            if (j >= top_k) {
+                output[row].ids[j] = -1;
+                output[row].probabilities[j] = 0.0f;
+                continue;
+            }
+            output[row].ids[j] = ids[static_cast<size_t>(row) * top_k + j];
+            const float p = expf(top_logits[static_cast<size_t>(row) * top_k + j] - maximum) / partial[0];
+            output[row].probabilities[j] = p;
+            mass += p;
+        }
+        output[row].residual = fmaxf(0.0f, 1.0f - mass);
+    }
+}
+
 __device__ __forceinline__ bool selector_better(float sa, int32_t ta, float sb, int32_t tb) {
     if (sa > sb) return true;
     if (sa < sb) return false;
@@ -26,6 +70,7 @@ __device__ __forceinline__ void candidate_selector_body(
     const bf16* predecessor_codebook,
     const bf16* successor_codebook,
     int32_t anchor_token,
+    const int32_t* row_predecessors,
     int32_t* output_tokens,
     float* output_scores,
     uint32_t draft_rows,
@@ -40,6 +85,7 @@ __device__ __forceinline__ void candidate_selector_body(
 
     int32_t predecessor = anchor_token;
     for (uint32_t row = 0u; row < draft_rows; ++row) {
+        if (row_predecessors != nullptr) predecessor = row_predecessors[row];
         const bf16* hidden = hidden_proj + static_cast<std::size_t>(row) * rank;
         const bf16* pred_row =
             predecessor_codebook + static_cast<std::size_t>(predecessor) * rank;
@@ -93,6 +139,7 @@ __global__ void dflash2_candidate_selector_kernel(
     const bf16* predecessor_codebook,
     const bf16* successor_codebook,
     int32_t anchor_token,
+    const int32_t* row_predecessors,
     int32_t* output_tokens,
     float* output_scores,
     uint32_t draft_rows,
@@ -100,8 +147,32 @@ __global__ void dflash2_candidate_selector_kernel(
     uint32_t top_k) {
     __shared__ float partial[kSelectorThreads];
     candidate_selector_body(hidden_proj, topk_ids, topk_logits, predecessor_codebook,
-                            successor_codebook, anchor_token, output_tokens, output_scores,
+                            successor_codebook, anchor_token, row_predecessors, output_tokens, output_scores,
                             draft_rows, rank, top_k, partial);
+}
+
+__global__ void dflash2_candidate_selector_parents_kernel(
+    const bf16* hidden_proj,
+    const int32_t* topk_ids,
+    const float* topk_logits,
+    const bf16* predecessor_codebook,
+    const bf16* successor_codebook,
+    const int32_t* row_predecessors,
+    int32_t* output_tokens,
+    float* output_scores,
+    uint32_t rank,
+    uint32_t top_k) {
+    __shared__ float partial[kSelectorThreads];
+    const uint32_t row = blockIdx.x;
+    candidate_selector_body(
+        hidden_proj + static_cast<std::size_t>(row) * rank,
+        topk_ids + static_cast<std::size_t>(row) * top_k,
+        topk_logits + static_cast<std::size_t>(row) * top_k,
+        predecessor_codebook, successor_codebook, 0, row_predecessors + row,
+        output_tokens + row,
+        output_scores != nullptr ? output_scores + static_cast<std::size_t>(row) * top_k
+                                 : nullptr,
+        1u, rank, top_k, partial);
 }
 
 __global__ void dflash2_candidate_selector_requests_kernel(
@@ -120,7 +191,7 @@ __global__ void dflash2_candidate_selector_requests_kernel(
         hidden_proj + static_cast<std::size_t>(request.row_begin + 1u) * rank,
         topk_ids + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
         topk_logits + static_cast<std::size_t>(request.row_begin + 1u) * top_k,
-        predecessor_codebook, successor_codebook, request.anchor_token,
+        predecessor_codebook, successor_codebook, request.anchor_token, nullptr,
         request.output_drafts,
         output_scores != nullptr
             ? output_scores + static_cast<std::size_t>(request.row_begin + 1u) * top_k
@@ -129,6 +200,18 @@ __global__ void dflash2_candidate_selector_requests_kernel(
 }
 
 }  // namespace
+
+hipError_t launch_dflash2_tree_probabilities(
+    const float* logits, const int32_t* topk_ids, const float* topk_logits,
+    DFlash2TreeProbabilities* output, uint32_t rows, uint32_t vocab,
+    uint32_t top_k, hipStream_t stream) {
+    if (!logits || !topk_ids || !topk_logits || !output || !vocab || !top_k)
+        return hipErrorInvalidValue;
+    if (!rows) return hipSuccess;
+    tree_probabilities_kernel<<<rows, kSelectorThreads, 0, stream>>>(
+        logits, topk_ids, topk_logits, output, vocab, top_k);
+    return hipGetLastError();
+}
 
 hipError_t launch_dflash2_candidate_selector(
     const DFlash2CandidateSelectorArgs& args,
@@ -145,6 +228,7 @@ hipError_t launch_dflash2_candidate_selector(
         return hipErrorInvalidValue;
     }
     if (args.requests != nullptr) {
+        if (args.row_predecessors != nullptr) return hipErrorInvalidValue;
         if (args.request_count == 0u) {
             return hipErrorInvalidValue;
         }
@@ -160,15 +244,24 @@ hipError_t launch_dflash2_candidate_selector(
         return hipErrorInvalidValue;
     }
     if (args.draft_rows == 0u) return hipSuccess;
-    if (args.anchor_token < 0 ||
-        static_cast<uint32_t>(args.anchor_token) >= args.vocab_size) {
+    if (args.row_predecessors == nullptr && (args.anchor_token < 0 ||
+        static_cast<uint32_t>(args.anchor_token) >= args.vocab_size)) {
         return hipErrorInvalidValue;
+    }
+    if (args.row_predecessors != nullptr) {
+        dflash2_candidate_selector_parents_kernel<<<args.draft_rows, kSelectorThreads, 0,
+                                                   stream>>>(
+            reinterpret_cast<const bf16*>(args.hidden_proj), args.topk_ids, args.topk_logits,
+            reinterpret_cast<const bf16*>(args.predecessor_codebook),
+            reinterpret_cast<const bf16*>(args.successor_codebook), args.row_predecessors,
+            args.output_tokens, args.output_scores, args.rank, args.top_k);
+        return hipGetLastError();
     }
     dflash2_candidate_selector_kernel<<<1u, kSelectorThreads, 0, stream>>>(
         reinterpret_cast<const bf16*>(args.hidden_proj), args.topk_ids,
         args.topk_logits, reinterpret_cast<const bf16*>(args.predecessor_codebook),
         reinterpret_cast<const bf16*>(args.successor_codebook), args.anchor_token,
-        args.output_tokens, args.output_scores, args.draft_rows, args.rank,
+        args.row_predecessors, args.output_tokens, args.output_scores, args.draft_rows, args.rank,
         args.top_k);
     return hipGetLastError();
 }
