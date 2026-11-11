@@ -5,6 +5,7 @@
 
 #include <shelf/models/qwen35/dflash2/context_state.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
+#include <shelf/models/qwen35/runtime/dflash2_adaptive_costs.h>
 #include <shelf/models/qwen35/runtime/mtp_drafter.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/state/state_types.h>
@@ -1208,6 +1209,12 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         batcher_binding.arena = &runtime.arena();
         batcher_binding.sessions = &dflash.sessions;
         batcher_binding.num_drafts = dflash.drafts;
+        batcher_binding.adaptive = dflash.adaptive;
+        if (dflash.adaptive) {
+            static const auto adaptive_cost =
+                shelf::qwen35::runtime::adaptive::qwen38_27b_exl3_fp8_cost_model();
+            batcher_binding.adaptive_cost = &adaptive_cost;
+        }
         batcher_binding.stats = &dflash.stats;
         batcher_binding.rank_bindings = serve_rank_ptr;
         const shelf::Status bind_st = runtime.set_dflash2_batcher(batcher_binding);
@@ -1324,8 +1331,8 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
 
     const char* serve_stats_env = std::getenv("SHELF_DFLASH2_SERVE_STATS");
     if (dflash.enabled &&
-        serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
-        serve_stats_env[0] != '0') {
+        (dflash.adaptive || (serve_stats_env != nullptr && serve_stats_env[0] != '\0' &&
+                             serve_stats_env[0] != '0'))) {
         const shelf::qwen35::runtime::DFlash2BatcherStats& t = dflash.stats;
         const float rounds = static_cast<float>(t.rounds);
         const float mean =
@@ -1334,6 +1341,18 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
             t.rounds > 0u ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
         const float emitted =
             t.rounds > 0u ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
+        if (dflash.adaptive && t.adaptive_rounds != 0u) {
+            fprintf(stderr, "DFLASH2_ADAPTIVE rounds=%llu predicted_tps=%.3f actual_tps=%.3f\n",
+                    static_cast<unsigned long long>(t.adaptive_rounds),
+                    t.adaptive_predicted_ms > 0.0
+                        ? 1000.0 * t.adaptive_predicted_tokens / t.adaptive_predicted_ms : 0.0,
+                    t.adaptive_actual_ms > 0.0
+                        ? 1000.0 * t.adaptive_actual_tokens / t.adaptive_actual_ms : 0.0);
+            for (std::size_t k = 0; k < t.adaptive_k_counts.size(); ++k) {
+                fprintf(stderr, "DFLASH2_ADAPTIVE_K k=%zu count=%llu\n", k,
+                        static_cast<unsigned long long>(t.adaptive_k_counts[k]));
+            }
+        }
         fprintf(stderr, "DFLASH2_GDN_MODE=compact\n");
         fprintf(stderr, "DFLASH2_GDN_HISTORY_BYTES=%llu\n",
                 static_cast<unsigned long long>(t.gdn_history_bytes));

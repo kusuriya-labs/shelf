@@ -7,6 +7,7 @@
 #include <shelf/models/qwen35/model/rope_profile.h>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/models/qwen35/runtime/dflash2_footprint.h>
+#include <shelf/models/qwen35/runtime/dflash2_adaptive_costs.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -293,6 +294,7 @@ int main(int argc, char** argv) {
         dflash_serve.config = dflash_config;
         dflash_serve.model_dir = opt.dflash2_model_dir;
         dflash_serve.drafts = config.dflash2_drafts;
+        dflash_serve.adaptive = opt.dflash2_adaptive;
     }
 
     if (opt.serve_stdio) {
@@ -307,9 +309,15 @@ int main(int argc, char** argv) {
                                         opt.mtp_stats, opt.kv_cache_dtype, opt.sampling);
     }
     if (shelf::app::compute_dflash_enabled(opt)) {
+        const shelf::qwen35::runtime::adaptive::CostModel* adaptive_cost = nullptr;
+        if (opt.dflash2_adaptive) {
+            static const auto measured =
+                shelf::qwen35::runtime::adaptive::qwen38_27b_exl3_fp8_cost_model();
+            adaptive_cost = &measured;
+        }
         return shelf::app::run_dflash2_shot(*runtime, prompt_ids, opt.max_new_tokens, dflash_config,
                                 opt.dflash2_model_dir, runtime->config().dflash2_drafts,
-                                opt.dflash2_stats, opt.kv_cache_dtype, opt.sampling);
+                                opt.dflash2_stats, adaptive_cost, opt.kv_cache_dtype, opt.sampling);
     }
     return shelf::app::run_single_shot(*runtime, prompt_ids, opt.max_new_tokens,
                                     opt.sampling, opt.kv_cache_dtype,

@@ -799,7 +799,8 @@ Status run_single_target(
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
-    uint32_t remaining_tokens) {
+    uint32_t remaining_tokens,
+    uint32_t proposal_drafts) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_step: not initialized", __FILE__, __LINE__);
     }
@@ -876,7 +877,8 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             draft_events_recorded = true;
         }
         Status st = dflash2::dflash2_propose_cached(
-            *decoder.draft, *decoder.context, pending_token, dflash_k, proposal_device,
+            *decoder.draft, *decoder.context, pending_token,
+            std::max(dflash_k, std::min(proposal_drafts, room_max)), proposal_device,
             decoder.stream);
         if (!st.ok()) return st;
         if (bridge) {
@@ -1257,6 +1259,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         DFlash2SpecDecoder* decoder = nullptr;
         int32_t anchor = 0;
         uint32_t drafts = 0u;
+        uint32_t proposal_drafts = 0u;
         uint32_t remaining = 0u;
         uint32_t position = 0u;
         uint32_t row_begin = 0u;
@@ -1304,6 +1307,11 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plan.decoder = decoder;
         plan.anchor = slot.anchor_token;
         plan.drafts = drafts;
+        plan.proposal_drafts = std::max(drafts, std::min(slot.proposal_drafts, room_max));
+        if (plan.proposal_drafts > decoder->config.num_drafts) {
+            return Status::invalid_argument("batch proposal exceeds draft capacity", __FILE__,
+                                            __LINE__);
+        }
         plan.remaining = slot.remaining_tokens;
         plan.position = position;
         plan.sample_index = decoder->sample_index;
@@ -1375,9 +1383,15 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         dflash2::DFlash2ProposeRequest request;
         request.context = decoder.context;
         request.anchor_token = plan.anchor;
-        request.num_drafts = plan.drafts;
+        request.num_drafts = plan.proposal_drafts;
         propose_requests.push_back(request);
-        propose_outputs.push_back(context.verify_token_ids_device + plan.row_begin + 1u);
+        if (plan.proposal_drafts > plan.drafts && decoder.verify_token_ids_device == nullptr) {
+            return Status::invalid_state("batch proposal scratch is unavailable", __FILE__,
+                                         __LINE__);
+        }
+        propose_outputs.push_back(plan.proposal_drafts > plan.drafts
+                                      ? decoder.verify_token_ids_device
+                                      : context.verify_token_ids_device + plan.row_begin + 1u);
         if (bridge) {
             const hipError_t anchor_err = hipMemcpyAsync(
                 context.verify_token_ids_device + plan.row_begin, &plan.anchor,
@@ -1401,6 +1415,18 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             *propose_executor, propose_requests.data(), propose_outputs.data(),
             static_cast<uint32_t>(propose_requests.size()), propose_stream);
         if (!st.ok()) return st;
+        for (const SlotPlan& plan : plans) {
+            if (!plan.batched || plan.proposal_drafts == plan.drafts) continue;
+            const hipError_t relay = hipMemcpyAsync(
+                context.verify_token_ids_device + plan.row_begin + 1u,
+                plan.decoder->verify_token_ids_device,
+                static_cast<std::size_t>(plan.drafts) * sizeof(int32_t),
+                hipMemcpyDeviceToDevice, propose_stream);
+            if (relay != hipSuccess) {
+                return Status::hip_error("batch draft prefix relay", hipGetErrorString(relay),
+                                         __FILE__, __LINE__);
+            }
+        }
         if (batch_timing) {
             const hipError_t stop_err =
                 hipEventRecord(propose_leader->draft_stop_event, propose_stream);

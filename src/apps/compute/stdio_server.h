@@ -17,6 +17,7 @@ namespace shelf::app {
 
 struct DFlashServeContext {
     bool enabled = false;
+    bool adaptive = false;
     shelf::qwen35::dflash2::DFlash2Config config{};
     std::string model_dir;
     uint32_t drafts = 7u;

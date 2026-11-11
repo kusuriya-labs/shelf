@@ -96,6 +96,7 @@ void compute_usage(const char* prog) {
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables\n");
     printf("                            speculative decoding (greedy / stochastic)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
+    printf("  --dflash2-adaptive     adapt speculation and draft count\n");
     printf("  --dflash2-max-sessions N  requests that may speculate at once (serve; default\n");
     printf("                            min(--max-concurrent-requests, 8)); the rest decode\n");
     printf("                            without speculation\n");
@@ -311,6 +312,8 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             if (!parse_u64(argv[++i], sampling.seed)) { fprintf(stderr, "bad --seed\n"); return kComputeParseError; }
         } else if (std::strcmp(argv[i], "--dflash2-model-dir") == 0 && i + 1 < argc) {
             dflash2_model_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--dflash2-adaptive") == 0) {
+            opt.dflash2_adaptive = true;
         } else if (std::strcmp(argv[i], "--dflash2-drafts") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], dflash2_drafts) || dflash2_drafts == 0) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
@@ -397,6 +400,10 @@ int validate_compute_options(const ComputeOptions& opt) {
     const auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     const auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
     const auto& working_set_reserve_gib = opt.working_set_reserve_gib;
+    if (opt.dflash2_adaptive && (dflash2_model_dir.empty() || tp != 1)) {
+        fprintf(stderr, "--dflash2-adaptive requires --dflash2-model-dir and one device\n");
+        return kComputeParseError;
+    }
     if (model_dir.empty()) {
         fprintf(stderr, "model-dir required\n");
         return kComputeParseError;

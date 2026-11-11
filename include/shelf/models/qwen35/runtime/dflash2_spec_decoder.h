@@ -225,7 +225,8 @@ struct DFlash2SpecIterationOutput {
 Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
-    uint32_t remaining_tokens);
+    uint32_t remaining_tokens,
+    uint32_t proposal_drafts = 0u);
 
 struct DFlash2SpecBatchCompact {
     float* delta = nullptr;
@@ -257,6 +258,7 @@ struct DFlash2SpecBatchSlot {
     DFlash2SpecDecoder* decoder = nullptr;
     int32_t anchor_token = 0;
     uint32_t num_drafts = 0u;
+    uint32_t proposal_drafts = 0u;
     uint32_t remaining_tokens = 0u;
     uint32_t page_tokens = 0u;
     uint32_t thinking_allowance = kDFlash2NoThinkingAllowance;

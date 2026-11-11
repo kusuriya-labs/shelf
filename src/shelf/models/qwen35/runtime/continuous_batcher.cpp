@@ -1,13 +1,16 @@
 #include <shelf/models/qwen35/runtime/continuous_batcher.h>
+#include <shelf/models/qwen35/runtime/dflash2_adaptive_batch.h>
 #include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/runtime_request.h>
 #include <shelf/models/qwen35/runtime/spec_decode.h>
 #include <shelf/core/gpu/scoped_device.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <thread>
 
@@ -122,6 +125,13 @@ Status ContinuousBatcher::set_dflash2(const DFlash2BatcherBinding& binding) {
     if (binding.num_drafts == 0u ||
         binding.num_drafts > binding.config->max_draft_tokens()) {
         return Status::invalid_argument("dflash2 binding num_drafts out of range",
+                                        __FILE__, __LINE__);
+    }
+    if (binding.adaptive && tp_batch_hook_ != nullptr) {
+        return Status::unsupported("dflash2 adaptive requires a single device", __FILE__, __LINE__);
+    }
+    if (binding.adaptive && binding.adaptive_cost == nullptr) {
+        return Status::invalid_argument("dflash2 adaptive cost model is required",
                                         __FILE__, __LINE__);
     }
     if (binding.sessions->capacity() == 0u) {
@@ -453,6 +463,11 @@ KVCapacitySnapshot ContinuousBatcher::kv_capacity_snapshot() const {
 }
 
 Result<StepResult> ContinuousBatcher::step() {
+    static const bool bt_wall = std::getenv("SHELF_BATCH_STEPWALL") != nullptr;
+    const auto bt_step_t0 = bt_wall ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+    timespec bt_cpu_start{}, bt_cpu_end{};
+    if (bt_wall) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &bt_cpu_start);
     const bool banker_mode = config_.admission_policy == KVAdmissionPolicy::BankerSafe;
     KVBankerState kv_state = build_kv_banker_state();
     uint32_t dflash_prefilled_requests = 0u;
@@ -611,6 +626,25 @@ Result<StepResult> ContinuousBatcher::step() {
     std::vector<const RuntimeRequest*> active(active_requests.begin(),
                                               active_requests.end());
 
+    const auto adaptive_start = dflash_.adaptive ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+    uint64_t adaptive_before_tokens = 0;
+    uint64_t adaptive_before_rounds = 0;
+    if (dflash_.adaptive && dflash_.stats != nullptr) {
+        adaptive_before_rounds = dflash_.stats->adaptive_rounds;
+        for (const RuntimeRequest* request : active_requests) {
+            adaptive_before_tokens += request->generated_tokens;
+        }
+    }
+    auto record_adaptive_actual = [&] {
+        if (!dflash_.adaptive || dflash_.stats == nullptr ||
+            dflash_.stats->adaptive_rounds == adaptive_before_rounds) return;
+        uint64_t after = 0;
+        for (const RuntimeRequest* request : active_requests) after += request->generated_tokens;
+        dflash_.stats->adaptive_actual_tokens += static_cast<double>(after - adaptive_before_tokens);
+        dflash_.stats->adaptive_actual_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - adaptive_start).count();
+    };
     bool dflash_executed = false;
     uint32_t dflash_tokens = 0;
     uint32_t dflash_requests = 0;
@@ -627,6 +661,7 @@ Result<StepResult> ContinuousBatcher::step() {
     }
     SchedulePlan plan = plan_result.release();
     if (plan.empty()) {
+        record_adaptive_actual();
         return StepResult{dflash_executed, dflash_tokens, dflash_requests};
     }
 
@@ -653,10 +688,23 @@ Result<StepResult> ContinuousBatcher::step() {
         return request;
     };
 
+    if (dflash_.adaptive) {
+        for (auto& scheduled : plan.scheduled_requests) {
+            RuntimeRequest* request = resolve(scheduled);
+            if (request != nullptr && request->dflash != nullptr &&
+                request->pending_decode_token >= 0) {
+                scheduled.sampling_index = request->dflash->decoder->sample_index;
+            }
+        }
+    }
+
     const auto exec_started = std::chrono::steady_clock::now();
+    const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
     auto exec_result = tp_batch_hook_ != nullptr
                           ? tp_batch_hook_->on_execute(plan.batch)
                           : execute_batch(executor_, plan.batch, stream_);
+    const auto bt_exec_end = bt_wall ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
     const double exec_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - exec_started)
                                .count();
@@ -727,6 +775,36 @@ Result<StepResult> ContinuousBatcher::step() {
         }
     }
 
+    const auto bt_sync_end = bt_wall ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+    if (dflash_.adaptive) {
+        std::vector<dflash2::DFlash2TargetTapAppendRequest> tap_requests;
+        std::vector<DFlash2SpecDecoder*> tap_decoders;
+        tap_requests.reserve(plan.scheduled_requests.size());
+        tap_decoders.reserve(plan.scheduled_requests.size());
+        for (const auto& scheduled : plan.scheduled_requests) {
+            RuntimeRequest* request = resolve(scheduled);
+            if (request == nullptr || request->dflash == nullptr ||
+                scheduled.execution_class != ::shelf::runtime::ExecutionClass::DECODE ||
+                request->pending_decode_token < 0) continue;
+            DFlash2SpecDecoder& decoder = *request->dflash->decoder;
+            dflash2::DFlash2TargetTapAppendRequest tap_request;
+            tap_request.context = decoder.context;
+            tap_request.position = scheduled.prefix_tokens;
+            for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
+                tap_request.taps[t] = executor_.dflash_target_hidden[t].data<bf16_t>() +
+                    static_cast<std::size_t>(scheduled.token_begin) * decoder.hidden_size;
+            }
+            tap_requests.push_back(tap_request);
+            tap_decoders.push_back(&decoder);
+        }
+        if (!tap_requests.empty()) {
+            const Status st = dflash2::dflash2_append_target_taps_batch(
+                *dflash_.executor, tap_requests.data(), static_cast<uint32_t>(tap_requests.size()), stream_);
+            if (!st.ok()) return st;
+            for (DFlash2SpecDecoder* decoder : tap_decoders) ++decoder->sample_index;
+        }
+    }
     Status first_error = Status::make_ok();
     uint32_t row = 0;
     for (auto& scheduled : plan.scheduled_requests) {
@@ -765,6 +843,18 @@ Result<StepResult> ContinuousBatcher::step() {
                     }
                     const CommitAction action =
                         commit_sampled_token(request, token, config_.eos_token_ids);
+                    if (dflash_.adaptive && request.dflash != nullptr &&
+                        scheduled.execution_class == ::shelf::runtime::ExecutionClass::DECODE &&
+                        action == CommitAction::Continue) {
+                        DFlash2SpecDecoder& decoder = *request.dflash->decoder;
+                        decoder.token_history.push_back(request.generated.back());
+                        if (decoder.token_history.size() > 8192u) {
+                            decoder.token_history.erase(decoder.token_history.begin(),
+                                decoder.token_history.end() - 4096u);
+                        }
+                        request.dflash->pending_token = request.pending_decode_token;
+                        request.pending_decode_token = -1;
+                    }
                     if (action == CommitAction::Finished) {
                         auto st = finish_request(request, request.finish_reason, stream_);
                         if (!st.ok() && first_error.ok()) {
@@ -804,6 +894,20 @@ Result<StepResult> ContinuousBatcher::step() {
         return first_error;
     }
 
+    if (bt_wall && bt_decode) {
+        const auto bt_end = std::chrono::steady_clock::now();
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &bt_cpu_end);
+        const double cpu_ms = (bt_cpu_end.tv_sec - bt_cpu_start.tv_sec) * 1000.0 +
+                              (bt_cpu_end.tv_nsec - bt_cpu_start.tv_nsec) / 1000000.0;
+        auto ms = [](auto x, auto y) {
+            return std::chrono::duration<double, std::milli>(y - x).count();
+        };
+        std::fprintf(stderr, "STEPWALL rows=%u pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
+                     plan.batch.num_requests, ms(bt_step_t0, exec_started),
+                     ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end),
+                     ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end), cpu_ms);
+    }
+    record_adaptive_actual();
     return StepResult{true, plan.batch.num_tokens + dflash_tokens,
                       plan.batch.num_requests + dflash_requests};
 }
@@ -841,6 +945,10 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
                                      __LINE__);
     }
     DFlash2RequestSession& session = *request.dflash;
+    if (dflash_.adaptive) {
+        session.acceptance = adaptive::Acceptance(dflash_.num_drafts);
+        session.adaptive_rows = dflash_.num_drafts + 1u;
+    }
     if (request.max_new_tokens == 0u) {
         request.finish_reason = FinishReason::MaxNewTokens;
         return Status::make_ok();
@@ -994,6 +1102,16 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
     if (!dflash2_available()) {
         return Status::make_ok();
     }
+    static const bool host_trace = std::getenv("SHELF_DFLASH2_COST_TRACE") != nullptr;
+    timespec host_start{}, host_end{};
+    const auto host_wall_start = host_trace ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+    if (host_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &host_start);
+    uint32_t host_sessions = 0u;
+    uint32_t host_rows = 0u;
+    if (dflash_.adaptive) {
+        select_dflash2_adaptive(active, dflash_, config_, adaptive_round_);
+    }
     std::vector<DFlash2SpecBatchSlot> slots;
     std::vector<RuntimeRequest*> slot_requests;
     std::vector<RuntimeRequest*> pending_finish;
@@ -1014,10 +1132,26 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             return Status::invalid_state("dflash2 session is not ready", __FILE__,
                                          __LINE__);
         }
+        if (dflash_.adaptive && request->dflash->adaptive_rows == 0u) {
+            request->pending_decode_token = request->dflash->pending_token;
+            continue;
+        }
+        if (dflash_.adaptive) request->pending_decode_token = -1;
         DFlash2SpecBatchSlot slot;
         slot.decoder = request->dflash->decoder.get();
         slot.anchor_token = request->dflash->pending_token;
-        slot.num_drafts = dflash_.num_drafts;
+        slot.num_drafts = dflash_.adaptive ? request->dflash->adaptive_rows - 1u
+                                           : dflash_.num_drafts;
+        static const char* const measure_drafts = std::getenv("SHELF_DFLASH2_MEASURE_VERIFY_DRAFTS");
+        if (!dflash_.adaptive && measure_drafts != nullptr) {
+            char* end = nullptr;
+            const unsigned long requested = std::strtoul(measure_drafts, &end, 10);
+            if (end != measure_drafts && *end == '\0' && requested > 0u &&
+                requested <= dflash_.num_drafts) {
+                slot.num_drafts = static_cast<uint32_t>(requested);
+            }
+        }
+        if (dflash_.adaptive || measure_drafts != nullptr) slot.proposal_drafts = dflash_.num_drafts;
         slot.remaining_tokens = request->max_new_tokens - request->generated_tokens;
         slot.page_tokens =
             request->prefix_capture != 0u ? config_.page_tokens : 0u;
@@ -1048,7 +1182,15 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
                 timing_before.push_back(request->dflash->timing);
             }
         }
+        static const bool cost_trace = std::getenv("SHELF_DFLASH2_COST_TRACE") != nullptr;
+        timespec cpu_start{}, cpu_end{};
+        if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
+        const auto cost_start = cost_trace ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
         auto batch_result = dflash2_spec_step_batch(*dflash_.batch, slots);
+        if (cost_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
+        const double cost_wall = cost_trace ? std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cost_start).count() : 0.0;
         if (!batch_result.ok()) {
             for (RuntimeRequest* request : slot_requests) {
                 const Status st = finish_request(*request, FinishReason::Error, stream_);
@@ -1060,6 +1202,15 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             return batch_result.status();
         }
         auto results = batch_result.release();
+        host_sessions = static_cast<uint32_t>(slots.size());
+        host_rows = results.total_rows;
+        if (cost_trace) {
+            const double cpu_ms = (cpu_end.tv_sec - cpu_start.tv_sec) * 1000.0 +
+                                  (cpu_end.tv_nsec - cpu_start.tv_nsec) / 1000000.0;
+            std::fprintf(stderr, "DFCOST sessions=%zu rows=%u wall=%.3f draft_gpu=%.3f verify_gpu=%.3f cpu=%.3f\n",
+                         slots.size(), results.total_rows, cost_wall,
+                         results.draft_gpu_ms, results.verify_gpu_ms, cpu_ms);
+        }
         executed = true;
         requests = static_cast<uint32_t>(slots.size());
         tokens = results.total_rows;
@@ -1089,6 +1240,9 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         for (std::size_t i = 0; i < slot_requests.size(); ++i) {
             RuntimeRequest& request = *slot_requests[i];
             const DFlash2SpecIterationOutput& step = results.slots[i];
+            if (dflash_.adaptive) {
+                request.dflash->acceptance.observe(step.num_drafts, step.num_accepted);
+            }
             for (uint32_t j = 0; j < step.emitted_count; ++j) {
                 request.generated.push_back(step.emitted[j]);
                 note_generated_token(request, step.emitted[j]);
@@ -1136,6 +1290,15 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             }
             prefix_capture_after_step(*request);
         }
+    }
+    if (host_trace && host_sessions != 0u) {
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &host_end);
+        const double cpu_ms = (host_end.tv_sec - host_start.tv_sec) * 1000.0 +
+                              (host_end.tv_nsec - host_start.tv_nsec) / 1000000.0;
+        const double wall_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - host_wall_start).count();
+        std::fprintf(stderr, "DFHOST sessions=%u rows=%u wall=%.3f cpu=%.3f\n",
+                     host_sessions, host_rows, wall_ms, cpu_ms);
     }
     return first_error;
 }

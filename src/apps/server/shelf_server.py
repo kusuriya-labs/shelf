@@ -97,6 +97,8 @@ def build_compute_argv(opts) -> list[str]:
             "--dflash2-model-dir", opts.dflash2_model_dir,
             "--dflash2-drafts", str(opts.dflash2_drafts),
         ]
+        if opts.dflash2_adaptive:
+            argv.append("--dflash2-adaptive")
         if opts.dflash2_max_sessions > 0:
             argv += ["--dflash2-max-sessions", str(opts.dflash2_max_sessions)]
     if opts.mtp:
@@ -471,6 +473,8 @@ def parse_args(argv=None):
                         help="DFlash2 draft model directory (enables speculative decoding)")
     parser.add_argument("--dflash2-drafts", type=int, default=7,
                         help="speculative draft tokens per round (default 7)")
+    parser.add_argument("--dflash2-adaptive", action="store_true",
+                        help="request ごとの投機と draft 数を自動調整する")
     parser.add_argument("--dflash2-max-sessions", type=int, default=0,
                         help="requests that may speculate at once; the rest decode "
                              "without speculation (0 = min(--max-concurrent-requests, 8))")
@@ -511,6 +515,8 @@ def parse_args(argv=None):
                      "--inference-budget-tokens")
     if opts.page_tokens < 1:
         parser.error("--page-tokens must be >= 1")
+    if opts.dflash2_adaptive and not opts.dflash2_model_dir:
+        parser.error("--dflash2-adaptive requires --dflash2-model-dir")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
     if opts.mtp_drafts < 1:
