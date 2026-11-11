@@ -26,6 +26,11 @@ bool env_flag_enabled(const char* name, bool default_value) {
     return value[0] != '0';
 }
 
+bool gdn_verify_chunk_enabled() {
+    const char* value = std::getenv("SHELF_GDN_VERIFY_CHUNKED");
+    return value == nullptr || (value[0] != '\0' && value[0] != '0');
+}
+
 uint32_t max_target_tap(const dflash2::DFlash2Config& config) {
     uint32_t max_tap = 0u;
     for (std::size_t i = 0; i < config.num_target_layer_ids; ++i) {
@@ -334,7 +339,7 @@ Result<DFlash2SpecWorkspace> create_spec_workspace_impl(
             const uint64_t states = pool_view.num_gdn_states;
             const uint64_t log_rows = config.tree &&
                 (env_flag_enabled("SHELF_DFLASH2_TREE_COMPACT_BRANCH", false) ||
-                 (env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", true) &&
+                 (gdn_verify_chunk_enabled() &&
                   env_flag_enabled("SHELF_GDN_TREE_CHUNKED", false)))
                 ? history_rows : static_cast<uint64_t>(config.num_drafts) + 1u;
             const uint64_t vdim =
@@ -1158,10 +1163,10 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
             (view.num_v_heads == 32u || view.num_v_heads == 48u);
     }
     const bool tree_chunk = chunk_geometry && decoder.config.tree && verify_rows <= 32u &&
-        env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", true) &&
+        gdn_verify_chunk_enabled() &&
         env_flag_enabled("SHELF_GDN_TREE_CHUNKED", false);
     const bool chain_chunk = chunk_geometry && !decoder.config.tree && verify_rows <= 32u &&
-        env_flag_enabled("SHELF_GDN_VERIFY_CHUNKED", true);
+        gdn_verify_chunk_enabled();
 
     out.num_dflash_drafts = dflash_k;
     const uint32_t total_k = dflash_k;
