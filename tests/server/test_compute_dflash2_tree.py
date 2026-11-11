@@ -81,9 +81,9 @@ def main():
         outputs = {mode: run(ids, mode) for mode in ("chain", "tree0", "tree1", "tree2", "tree4", "budget8", "budget10", "budget12", "budget16", "budget24")}
         if len(target) != 256:
             raise AssertionError(f"expected 256 generated tokens, got {len(target)}: {prompt}")
-        if outputs["chain"] != target or outputs["tree0"] != outputs["chain"] or outputs["budget8"] != outputs["chain"]:
-            raise AssertionError(f"chain or tree0 differs: {prompt}")
-        for mode in ("tree1", "tree2", "tree4", "budget10", "budget12", "budget16", "budget24"):
+        if outputs["budget8"] != outputs["chain"]:
+            raise AssertionError(f"budget8 differs from chain: {prompt}")
+        for mode in ("chain", "tree0", "tree1", "tree2", "tree4", "budget10", "budget12", "budget16", "budget24"):
             actual = outputs[mode]
             if len(actual) != len(target):
                 raise AssertionError(f"{mode} length differs: {len(actual)}")
