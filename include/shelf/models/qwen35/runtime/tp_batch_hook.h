@@ -20,6 +20,13 @@ public:
         return Status::make_ok();
     }
 
+    virtual Status on_prefix_restored(const PagedSequenceState& source,
+                                      std::span<const int32_t> tokens) {
+        (void)source;
+        (void)tokens;
+        return Status::make_ok();
+    }
+
     virtual uint32_t on_prefix_rank_count() { return 1u; }
 
     virtual PagedSequenceState* on_prefix_rank_sequence(

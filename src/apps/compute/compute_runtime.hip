@@ -137,9 +137,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 return Status::unsupported(
                     "Qwen4Exp requires --tensor-parallel 2 or 4", __FILE__, __LINE__);
             }
-            // The PLE token history is built from the scheduled rows; a prefix cache that
-            // restores tokens the history never saw would make the n-gram rows wrong.
-            config_.prefix_cache = false;
             // The Qwen4Exp rank already holds a complete replicated lm_head / embedding, so
             // the drafter borrows those instead of loading a second private copy.
             config_.private_target_weights = false;
@@ -743,11 +740,14 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
             auto& rank = tp_coordinator_->rank(static_cast<std::size_t>(r));
             extra_ranks.push_back(qwen35::runtime::PrefixCacheRankContext{
                 &rank.kv_pool(), &rank.gdn_pool(), &rank.arena(), rank.stream(),
-                rank.device_id()});
+                rank.device_id(), rank.executor().qsa_state_pool.get(),
+                rank.executor().ple_conv_state_pool.get()});
         }
         if (config_.prefix_cache) {
             auto prefix_result = qwen35::runtime::PrefixCache::create(
-                arena(), kv_pool(), gdn_pool(), prefix_config, extra_ranks);
+                arena(), kv_pool(), gdn_pool(),
+                tp_executor_->qsa_state_pool.get(),
+                tp_executor_->ple_conv_state_pool.get(), prefix_config, extra_ranks);
             if (prefix_result.ok()) {
                 prefix_cache_.emplace(prefix_result.release());
                 (void)prefix_cache_->set_tp_hook(tp_coordinator_);

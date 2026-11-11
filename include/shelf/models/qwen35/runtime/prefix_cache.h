@@ -3,6 +3,8 @@
 #include <shelf/inference/prefix/prefix_kv_cache.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <hip/hip_runtime.h>
@@ -28,15 +30,18 @@ struct PrefixCacheConfig {
 
 struct PrefixCacheBytes {
     std::size_t state = 0;
+    std::size_t extra_state = 0;
     std::size_t ring = 0;
     std::size_t state_slot = 0;
 
-    std::size_t total() const noexcept { return state + ring; }
+    std::size_t total() const noexcept { return state + extra_state + ring; }
 };
 
 PrefixCacheBytes prefix_cache_bytes(
     const PrefixCacheConfig& config,
-    const GdnStatePoolLayout& layout) noexcept;
+    const GdnStatePoolLayout& layout,
+    const ::shelf::state::QsaKeyStatePoolLayout* qsa = nullptr,
+    const ::shelf::state::PleConvStatePoolLayout* ple_conv = nullptr) noexcept;
 
 struct SpecRingRef {
     const bf16_t* k = nullptr;
@@ -102,6 +107,8 @@ struct PrefixCacheRankContext {
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = 0;
+    ::shelf::state::QsaKeyStatePool* active_qsa = nullptr;
+    ::shelf::state::PleConvStatePool* active_ple_conv = nullptr;
 };
 
 class Qwen35PrefixState;
@@ -112,6 +119,15 @@ class PrefixCache {
         gpu::GpuArena& arena,
         PagedKVPool& active_kv_pool,
         GdnStatePool& active_state_pool,
+        const PrefixCacheConfig& config,
+        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
+
+    static Result<PrefixCache> create(
+        gpu::GpuArena& arena,
+        PagedKVPool& active_kv_pool,
+        GdnStatePool& active_state_pool,
+        ::shelf::state::QsaKeyStatePool* active_qsa_pool,
+        ::shelf::state::PleConvStatePool* active_ple_conv_pool,
         const PrefixCacheConfig& config,
         const std::vector<PrefixCacheRankContext>& extra_ranks = {});
 
@@ -177,6 +193,8 @@ class PrefixCache {
                                   const PagedSequenceState* seq);
 
     Result<uint32_t> acquire_state_slot(hipStream_t stream);
+
+    Result<uint32_t> acquire_ring_slot(hipStream_t stream);
 
     struct AuxSlot {
         uint32_t hot_slot = 0;

@@ -208,8 +208,13 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         const PrefixCacheBytes prefix_bytes =
             prefix_cache_bytes(prefix_config, gdn_layout_result);
         reserved += prefix_bytes.total();
-        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
-                     gpu::format_gib(prefix_bytes.total()).c_str());
+        const std::size_t family_shadow =
+            rank->model_->executor_state_reserve_bytes(
+                2u * static_cast<std::size_t>(config.prefix_concurrency));
+        reserved += family_shadow;
+        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
+                     gpu::format_gib(prefix_bytes.total()).c_str(),
+                     gpu::format_gib(family_shadow).c_str());
     }
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
@@ -661,6 +666,25 @@ Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
     }
     mirrors_.emplace(key, std::move(mirror));
     return Status::make_ok();
+}
+
+Status TpCoordinator::on_prefix_restored(const PagedSequenceState& source,
+                                         std::span<const int32_t> tokens) {
+    Status first_error = Status::make_ok();
+    for (auto& rank_ptr : ranks_) {
+        TpRankRuntime& rank = *rank_ptr;
+        const ExternalPrefixRestoreHandler& handler =
+            rank.executor().external_prefix_restore;
+        if (!handler) continue;
+        auto scope = shelf::gpu::ScopedDevice::create(rank.device_id());
+        if (!scope.ok()) {
+            if (first_error.ok()) first_error = scope.status();
+            continue;
+        }
+        const Status st = handler(source.slot, tokens);
+        if (!st.ok() && first_error.ok()) first_error = st;
+    }
+    return first_error;
 }
 
 uint32_t TpCoordinator::on_prefix_rank_count() {

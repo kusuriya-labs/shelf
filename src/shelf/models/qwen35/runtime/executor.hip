@@ -1289,6 +1289,7 @@ Executor::Executor(Executor&& other) noexcept
       qsa_state_pool(std::move(other.qsa_state_pool)),
       ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
       external_input_preparer(std::move(other.external_input_preparer)),
+      external_prefix_restore(std::move(other.external_prefix_restore)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1418,6 +1419,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         qsa_state_pool = std::move(other.qsa_state_pool);
         ple_conv_state_pool = std::move(other.ple_conv_state_pool);
         external_input_preparer = std::move(other.external_input_preparer);
+        external_prefix_restore = std::move(other.external_prefix_restore);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1530,6 +1532,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.qsa_state_pool.reset();
         other.ple_conv_state_pool.reset();
         other.external_input_preparer = nullptr;
+        other.external_prefix_restore = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -1717,6 +1720,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.qsa_state_pool.reset();
     ex.ple_conv_state_pool.reset();
     ex.external_input_preparer = nullptr;
+    ex.external_prefix_restore = nullptr;
     ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};

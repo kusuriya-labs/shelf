@@ -194,6 +194,9 @@ public:
     TpRankRuntime& rank(std::size_t index) { return *ranks_[index]; }
     const char* transport_name() const noexcept;
 
+    Status on_prefix_restored(const PagedSequenceState& source,
+                              std::span<const int32_t> tokens) override;
+
     uint32_t on_prefix_rank_count() override;
     PagedSequenceState* on_prefix_rank_sequence(
         const PagedSequenceState& source, uint32_t rank) override;

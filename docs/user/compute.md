@@ -50,7 +50,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
-| `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
+| `--prefix-cache-concurrency N` | max concurrent prefix captures and stored prefix entries (default 4) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->

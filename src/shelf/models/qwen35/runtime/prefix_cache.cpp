@@ -82,6 +82,8 @@ class Qwen35PrefixState {
     static Result<std::unique_ptr<Qwen35PrefixState>> create(
         gpu::GpuArena& arena,
         GdnStatePool& active_state,
+        ::shelf::state::QsaKeyStatePool* active_qsa,
+        ::shelf::state::PleConvStatePool* active_ple_conv,
         const std::vector<PrefixCacheRankContext>& extra_ranks,
         const PrefixCacheConfig& config) {
         auto state = std::unique_ptr<Qwen35PrefixState>(new Qwen35PrefixState());
@@ -91,6 +93,11 @@ class Qwen35PrefixState {
                                            active_state.layout());
         if (!shadow.ok()) return shadow.status();
         state->shadow_state_.emplace(shadow.release());
+        Status extra_st = attach_extra(arena, active_qsa, active_ple_conv,
+                                       config.max_concurrent, state->active_qsa_,
+                                       state->shadow_qsa_, state->active_ple_conv_,
+                                       state->shadow_ple_conv_);
+        if (!extra_st.ok()) return extra_st;
         for (const PrefixCacheRankContext& ctx : extra_ranks) {
             if (ctx.active_state == nullptr || ctx.arena == nullptr ||
                 ctx.stream == nullptr) {
@@ -107,6 +114,11 @@ class Qwen35PrefixState {
             rank->shadow.emplace(shard.release());
             rank->stream = ctx.stream;
             rank->device = ctx.device;
+            extra_st = attach_extra(*ctx.arena, ctx.active_qsa, ctx.active_ple_conv,
+                                    config.max_concurrent, rank->active_qsa,
+                                    rank->shadow_qsa, rank->active_ple_conv,
+                                    rank->shadow_ple_conv);
+            if (!extra_st.ok()) return extra_st;
             state->ranks_.push_back(std::move(rank));
         }
         const std::size_t ring_bytes = config.spec_ring_bytes;
@@ -269,14 +281,48 @@ class Qwen35PrefixState {
         std::optional<GdnStatePool> shadow;
         hipStream_t stream = nullptr;
         int device = 0;
+        ::shelf::state::QsaKeyStatePool* active_qsa = nullptr;
+        std::optional<::shelf::state::QsaKeyStatePool> shadow_qsa;
+        ::shelf::state::PleConvStatePool* active_ple_conv = nullptr;
+        std::optional<::shelf::state::PleConvStatePool> shadow_ple_conv;
     };
 
     Qwen35PrefixState() = default;
+
+    static Status attach_extra(gpu::GpuArena& arena,
+                               ::shelf::state::QsaKeyStatePool* active_qsa,
+                               ::shelf::state::PleConvStatePool* active_ple_conv,
+                               uint32_t slots,
+                               ::shelf::state::QsaKeyStatePool*& active_qsa_out,
+                               std::optional<::shelf::state::QsaKeyStatePool>& shadow_qsa,
+                               ::shelf::state::PleConvStatePool*& active_ple_conv_out,
+                               std::optional<::shelf::state::PleConvStatePool>&
+                                   shadow_ple_conv) {
+        active_qsa_out = active_qsa;
+        active_ple_conv_out = active_ple_conv;
+        if (active_qsa != nullptr) {
+            auto qsa = ::shelf::state::QsaKeyStatePool::create(arena, 2u * slots,
+                                                               active_qsa->layout());
+            if (!qsa.ok()) return qsa.status();
+            shadow_qsa.emplace(qsa.release());
+        }
+        if (active_ple_conv != nullptr) {
+            auto ple = ::shelf::state::PleConvStatePool::create(
+                arena, 2u * slots, active_ple_conv->layout());
+            if (!ple.ok()) return ple.status();
+            shadow_ple_conv.emplace(ple.release());
+        }
+        return Status::make_ok();
+    }
 
     Status copy_from_active(uint32_t shadow_slot, const Qwen35SequenceSet& seqs,
                             hipStream_t stream) {
         Status st = shadow_state_->copy_slot_from(shadow_slot, *active_state_,
                                                   seqs.state_slot(0u), stream);
+        if (!st.ok()) return st;
+        st = copy_extra_from(active_qsa_, shadow_qsa_, active_ple_conv_,
+                             shadow_ple_conv_, shadow_slot, seqs.state_slot(0u),
+                             stream);
         if (!st.ok()) return st;
         for (uint32_t r = 0; r < ranks_.size(); ++r) {
             Rank& rank = *ranks_[r];
@@ -284,6 +330,10 @@ class Qwen35PrefixState {
             if (!scope.ok()) return scope.status();
             st = rank.shadow->copy_slot_from(shadow_slot, *rank.active,
                                              seqs.state_slot(r + 1u), rank.stream);
+            if (!st.ok()) return st;
+            st = copy_extra_from(rank.active_qsa, rank.shadow_qsa, rank.active_ple_conv,
+                                 rank.shadow_ple_conv, shadow_slot,
+                                 seqs.state_slot(r + 1u), rank.stream);
             if (!st.ok()) return st;
         }
         return Status::make_ok();
@@ -294,12 +344,19 @@ class Qwen35PrefixState {
         Status st = active_state_->copy_slot_from(seqs.state_slot(0u),
                                                   *shadow_state_, shadow_slot, stream);
         if (!st.ok()) return st;
+        st = copy_extra_to(active_qsa_, shadow_qsa_, active_ple_conv_,
+                           shadow_ple_conv_, seqs.state_slot(0u), shadow_slot, stream);
+        if (!st.ok()) return st;
         for (uint32_t r = 0; r < ranks_.size(); ++r) {
             Rank& rank = *ranks_[r];
             auto scope = shelf::gpu::ScopedDevice::create(rank.device);
             if (!scope.ok()) return scope.status();
             st = rank.active->copy_slot_from(seqs.state_slot(r + 1u), *rank.shadow,
                                              shadow_slot, rank.stream);
+            if (!st.ok()) return st;
+            st = copy_extra_to(rank.active_qsa, rank.shadow_qsa, rank.active_ple_conv,
+                               rank.shadow_ple_conv, seqs.state_slot(r + 1u),
+                               shadow_slot, rank.stream);
             if (!st.ok()) return st;
         }
         return Status::make_ok();
@@ -308,10 +365,76 @@ class Qwen35PrefixState {
     Status copy_shadow(uint32_t dst, uint32_t src, hipStream_t stream) {
         Status st = shadow_state_->copy_slot_from(dst, *shadow_state_, src, stream);
         if (!st.ok()) return st;
+        st = copy_extra_shadow(active_qsa_, shadow_qsa_, active_ple_conv_,
+                               shadow_ple_conv_, dst, src, stream);
+        if (!st.ok()) return st;
         for (auto& rank : ranks_) {
             auto scope = shelf::gpu::ScopedDevice::create(rank->device);
             if (!scope.ok()) return scope.status();
             st = rank->shadow->copy_slot_from(dst, *rank->shadow, src, rank->stream);
+            if (!st.ok()) return st;
+            st = copy_extra_shadow(rank->active_qsa, rank->shadow_qsa,
+                                   rank->active_ple_conv, rank->shadow_ple_conv, dst,
+                                   src, rank->stream);
+            if (!st.ok()) return st;
+        }
+        return Status::make_ok();
+    }
+
+    static Status copy_extra_from(::shelf::state::QsaKeyStatePool* active_qsa,
+                                  std::optional<::shelf::state::QsaKeyStatePool>& shadow_qsa,
+                                  ::shelf::state::PleConvStatePool* active_ple,
+                                  std::optional<::shelf::state::PleConvStatePool>& shadow_ple,
+                                  uint32_t shadow_slot,
+                                  ::shelf::state::SequenceSlotId active_slot,
+                                  hipStream_t stream) {
+        if (active_qsa != nullptr && shadow_qsa.has_value()) {
+            Status st = shadow_qsa->copy_slot_from(shadow_slot, *active_qsa, active_slot,
+                                                    stream);
+            if (!st.ok()) return st;
+        }
+        if (active_ple != nullptr && shadow_ple.has_value()) {
+            Status st = shadow_ple->copy_slot_from(shadow_slot, *active_ple, active_slot,
+                                                   stream);
+            if (!st.ok()) return st;
+        }
+        return Status::make_ok();
+    }
+
+    static Status copy_extra_to(::shelf::state::QsaKeyStatePool* active_qsa,
+                                std::optional<::shelf::state::QsaKeyStatePool>& shadow_qsa,
+                                ::shelf::state::PleConvStatePool* active_ple,
+                                std::optional<::shelf::state::PleConvStatePool>& shadow_ple,
+                                ::shelf::state::SequenceSlotId active_slot,
+                                uint32_t shadow_slot,
+                                hipStream_t stream) {
+        if (active_qsa != nullptr && shadow_qsa.has_value()) {
+            Status st = active_qsa->copy_slot_from(active_slot, *shadow_qsa, shadow_slot,
+                                                    stream);
+            if (!st.ok()) return st;
+        }
+        if (active_ple != nullptr && shadow_ple.has_value()) {
+            Status st = active_ple->copy_slot_from(active_slot, *shadow_ple, shadow_slot,
+                                                    stream);
+            if (!st.ok()) return st;
+        }
+        return Status::make_ok();
+    }
+
+    static Status copy_extra_shadow(
+        ::shelf::state::QsaKeyStatePool* active_qsa,
+        std::optional<::shelf::state::QsaKeyStatePool>& shadow_qsa,
+        ::shelf::state::PleConvStatePool* active_ple,
+        std::optional<::shelf::state::PleConvStatePool>& shadow_ple,
+        uint32_t dst,
+        uint32_t src,
+        hipStream_t stream) {
+        if (active_qsa != nullptr && shadow_qsa.has_value()) {
+            Status st = shadow_qsa->copy_slot_from(dst, *shadow_qsa, src, stream);
+            if (!st.ok()) return st;
+        }
+        if (active_ple != nullptr && shadow_ple.has_value()) {
+            Status st = shadow_ple->copy_slot_from(dst, *shadow_ple, src, stream);
             if (!st.ok()) return st;
         }
         return Status::make_ok();
@@ -319,6 +442,10 @@ class Qwen35PrefixState {
 
     GdnStatePool* active_state_ = nullptr;
     std::optional<GdnStatePool> shadow_state_;
+    ::shelf::state::QsaKeyStatePool* active_qsa_ = nullptr;
+    std::optional<::shelf::state::QsaKeyStatePool> shadow_qsa_;
+    ::shelf::state::PleConvStatePool* active_ple_conv_ = nullptr;
+    std::optional<::shelf::state::PleConvStatePool> shadow_ple_conv_;
     std::vector<std::unique_ptr<Rank>> ranks_;
     uint32_t max_concurrent_ = 0;
     std::vector<uint32_t> capture_free_;
@@ -336,7 +463,9 @@ class Qwen35PrefixState {
 
 PrefixCacheBytes prefix_cache_bytes(
     const PrefixCacheConfig& config,
-    const GdnStatePoolLayout& layout) noexcept {
+    const GdnStatePoolLayout& layout,
+    const ::shelf::state::QsaKeyStatePoolLayout* qsa,
+    const ::shelf::state::PleConvStatePoolLayout* ple_conv) noexcept {
     PrefixCacheBytes bytes;
     if (config.max_concurrent == 0u) return bytes;
     bytes.state_slot =
@@ -346,6 +475,15 @@ PrefixCacheBytes prefix_cache_bytes(
             layout.head_k * layout.head_v * sizeof(fp16_t);
     bytes.state =
         bytes.state_slot * 2u * static_cast<std::size_t>(config.max_concurrent);
+    const uint32_t shadow_slots = 2u * config.max_concurrent;
+    if (qsa != nullptr) {
+        bytes.extra_state +=
+            ::shelf::state::qsa_key_state_pool_bytes(shadow_slots, *qsa).total();
+    }
+    if (ple_conv != nullptr) {
+        bytes.extra_state +=
+            ::shelf::state::ple_conv_state_pool_bytes(shadow_slots, *ple_conv);
+    }
     bytes.ring = static_cast<std::size_t>(config.spec_ring_bytes) *
                      static_cast<std::size_t>(
                          config.spec_ring_bytes > 0 ? config.max_concurrent : 0u);
@@ -367,12 +505,24 @@ Result<PrefixCache> PrefixCache::create(
     GdnStatePool& active_state_pool,
     const PrefixCacheConfig& config,
     const std::vector<PrefixCacheRankContext>& extra_ranks) {
+    return create(arena, active_kv_pool, active_state_pool, nullptr, nullptr, config,
+                  extra_ranks);
+}
+
+Result<PrefixCache> PrefixCache::create(
+    gpu::GpuArena& arena,
+    PagedKVPool& active_kv_pool,
+    GdnStatePool& active_state_pool,
+    ::shelf::state::QsaKeyStatePool* active_qsa_pool,
+    ::shelf::state::PleConvStatePool* active_ple_conv_pool,
+    const PrefixCacheConfig& config,
+    const std::vector<PrefixCacheRankContext>& extra_ranks) {
     if (config.max_concurrent == 0u) {
         return Status::invalid_argument("max_concurrent must be > 0", __FILE__,
                                         __LINE__);
     }
-    auto state = Qwen35PrefixState::create(arena, active_state_pool, extra_ranks,
-                                           config);
+    auto state = Qwen35PrefixState::create(arena, active_state_pool, active_qsa_pool,
+                                           active_ple_conv_pool, extra_ranks, config);
     if (!state.ok()) return state.status();
 
     std::vector<PagedKVPool*> extra_kv;
@@ -446,6 +596,14 @@ Result<uint32_t> PrefixCache::acquire_state_slot(hipStream_t) {
     return state_->acquire_hot_slot();
 }
 
+Result<uint32_t> PrefixCache::acquire_ring_slot(hipStream_t) {
+    auto ring = state_->acquire_ring_slot();
+    if (ring.ok()) return ring;
+    auto evicted = kv_->evict_lru();
+    if (!evicted.ok()) return ring;
+    return state_->acquire_ring_slot();
+}
+
 PrefixHit PrefixCache::lookup(const std::vector<uint32_t>& tokens) {
     PrefixHit out;
     if (!kv_ || !state_ || !aux_) return out;
@@ -490,12 +648,15 @@ Status PrefixCache::save_input_boundary(
     Status st = state_->capture_gdn_to_hot(hot.value(), seqs, stream);
     uint32_t ring_slot = 0xFFFFFFFFu;
     if (st.ok() && ring != nullptr && ring->valid()) {
-        auto acquired = state_->acquire_ring_slot();
-        if (!acquired.ok()) {
-            st = acquired.status();
-        } else {
+        auto acquired = acquire_ring_slot(stream);
+        if (acquired.ok()) {
             ring_slot = acquired.value();
-            st = state_->save_ring(ring_slot, *ring, input_len, stream);
+            const Status ring_st =
+                state_->save_ring(ring_slot, *ring, input_len, stream);
+            if (!ring_st.ok()) {
+                state_->release_ring_slot(ring_slot);
+                ring_slot = 0xFFFFFFFFu;
+            }
         }
     }
     if (!st.ok()) {
@@ -621,12 +782,15 @@ Status PrefixCache::save_output_tail(
     Status st = state_->copy_capture_to_hot(hot.value(), state->state_slot, stream);
     uint32_t ring_slot = 0xFFFFFFFFu;
     if (st.ok() && ring != nullptr && ring->valid()) {
-        auto acquired = state_->acquire_ring_slot();
-        if (!acquired.ok()) {
-            st = acquired.status();
-        } else {
+        auto acquired = acquire_ring_slot(stream);
+        if (acquired.ok()) {
             ring_slot = acquired.value();
-            st = state_->save_ring(ring_slot, *ring, boundary, stream);
+            const Status ring_st =
+                state_->save_ring(ring_slot, *ring, boundary, stream);
+            if (!ring_st.ok()) {
+                state_->release_ring_slot(ring_slot);
+                ring_slot = 0xFFFFFFFFu;
+            }
         }
     }
     if (!st.ok()) {

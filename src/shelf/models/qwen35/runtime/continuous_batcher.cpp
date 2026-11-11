@@ -572,6 +572,25 @@ Result<StepResult> ContinuousBatcher::step() {
                         return mirror_st;
                     }
                 }
+                const std::span<const int32_t> restored_prefix(
+                    request.input_tokens.data(), request.restored_tokens);
+                const Status seed_st = tp_batch_hook_ != nullptr
+                    ? tp_batch_hook_->on_prefix_restored(request.sequence,
+                                                         restored_prefix)
+                    : (executor_.external_prefix_restore
+                           ? executor_.external_prefix_restore(request.sequence.slot,
+                                                               restored_prefix)
+                           : Status::make_ok());
+                if (!seed_st.ok()) {
+                    request.error_message = seed_st.message();
+                    (void)capacity_.register_claim(request.id, request.max_kv_pages);
+                    const Status finish_st =
+                        finish_request(request, FinishReason::Error, stream_);
+                    if (!finish_st.ok()) {
+                        return finish_st;
+                    }
+                    continue;
+                }
                 prefix_begin_capture(request);
             }
         }

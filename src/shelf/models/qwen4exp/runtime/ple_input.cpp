@@ -16,6 +16,16 @@ void PleInputRuntime::reset_sequence(std::uint32_t slot) {
     history_.erase(slot);
 }
 
+Status PleInputRuntime::seed(std::uint32_t slot,
+                             std::span<const std::int32_t> tokens) {
+    if (table_ == nullptr) {
+        return Status::invalid_state("PLE input runtime is empty", __FILE__, __LINE__);
+    }
+    std::vector<std::int32_t>& history = history_[slot];
+    history.assign(tokens.begin(), tokens.end());
+    return Status::make_ok();
+}
+
 Status PleInputRuntime::prepare(const ::shelf::scheduling::ScheduledBatch& batch,
                                 std::vector<bf16_t>& out) {
     if (table_ == nullptr || batch.token_ids == nullptr || batch.num_requests == 0u) {

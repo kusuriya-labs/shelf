@@ -35,7 +35,10 @@ store は `PagedKVPool` の物理 page を refcount 付きで共有し、shadow 
 KV 以外のモデル状態は family 固有の adapter が管理する。
 
 - Qwen3.5 / 3.8: GDN state と DFlash2 drafter ring。
-- Qwen4Exp: QSA state、PLE conv state、必要な場合は GDN state。
+- Qwen4Exp: GDN state、QSA key state、PLE conv state。PLE の n-gram history は state では
+  なく token 列から作るため、restore 時に `Executor::external_prefix_restore` が復元 prefix
+  の token を family adapter へ渡し、history を再 seed する（TP では
+  `TpBatchHook::on_prefix_restored` が全 rank へ配る）。
 - 常駐 state は family の shadow pool の `2 × max_concurrent` slots
   （capture rolling と entry 保持用）。
 - entry 用 slot が不足すると、LRU entry を evict して slot を回収する。
@@ -189,6 +192,10 @@ drafter ring の shadow は `PrefixCacheConfig::spec_ring_bytes` で指定する
   27B では 40 MiB）を渡す。
 - 1 request は入力境界と出力末尾で最大 2 entry を作る。ring slot は hot slot と
   同じ `max_concurrent` で、枯渇時は LRU entry を evict して回収する。
+- ring を保存できなかった entry も KV page と family state は保存する。その entry は
+  DFlash2 request からは restore されない（`ring_covers_state()` を満たさないため
+  full prefill に戻る）が、非 DFlash2 request からは restore できる。ring の失敗で
+  entry 自体を捨てない。
 - 実体は arena（VRAM）上の連続 buffer で、save / load は D2D コピーである。
 - `spec_ring_bytes == 0`（既定）のときは slot を 1 つも確保しない。ring を渡した save は
   `insufficient_memory` で失敗し、entry が作られないため DFlash2 の restore も起きない。

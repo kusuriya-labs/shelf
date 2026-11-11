@@ -113,7 +113,8 @@ void compute_usage(const char* prog) {
     printf("                                 (executor workspace allocated after the\n");
     printf("                                 memory plan; 0 = size it from the row\n");
     printf("                                 bucket, default 0)\n");
-    printf("  --prefix-cache-concurrency N   max concurrent prefix captures (default 4)\n");
+    printf("  --prefix-cache-concurrency N   max concurrent prefix captures and stored\n");
+    printf("                                 prefix entries (default 4)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }

@@ -399,6 +399,11 @@ Result<q35::Executor> create_qwen4exp_model_executor(
                       std::vector<bf16_t>& out) {
                 return runtime->prepare(batch, out);
             };
+        executor.value().external_prefix_restore =
+            [runtime](::shelf::state::SequenceSlotId slot,
+                      std::span<const int32_t> tokens) {
+                return runtime->seed(slot, tokens);
+            };
     }
     return executor;
 }

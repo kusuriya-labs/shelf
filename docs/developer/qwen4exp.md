@@ -11,9 +11,10 @@ MXFP4、attention / GDN は per-channel FP8、PLE は per-tensor FP8）。
 checkpoint を Qwen4Exp と判定する。`model_type` は allowlist gate であり、
 `qwen4_exp` と `qwen4_exp_text` を受理する。identity で code path を選ばない。
 
-`shelf-compute` は `--tensor-parallel 2|4` で起動する。Qwen4Exp では prefix cache を
-無効にする（PLE の n-gram history が cache から復元した prefix を持たないため）。
-MTP は無効である。DFlash2 は `--dflash2-model-dir` で有効になる。
+`shelf-compute` は `--tensor-parallel 2|4` で起動する。prefix cache は QSA key state と
+PLE conv state を shadow slot に保持し（[prefix_cache.md](prefix_cache.md)）、restore 時に
+PLE の n-gram history を復元 prefix で再 seed する。MTP は無効である。DFlash2 は
+`--dflash2-model-dir` で有効になる。
 
 ## 2. 重みの形式とロード
 
