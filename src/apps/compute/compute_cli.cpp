@@ -481,11 +481,18 @@ int validate_compute_options(const ComputeOptions& opt) {
         fprintf(stderr, "tree budget must include anchor and all draft positions\n");
         return kComputeParseError;
     }
-    if (serve_stdio && opt.dflash2_tree_budget != 0) {
-        fprintf(stderr, "dflash2 tree budget is not supported in serve mode yet\n");
+    if (serve_stdio && opt.dflash2_tree_budget > 32) {
+        fprintf(stderr, "serve dflash2 tree budget must be at most 32 rows\n");
         return kComputeParseError;
     }
-    if (opt.dflash2_tree && (!dflash_enabled || serve_stdio || tp != 1 || sampling.temperature != 0.0f)) {
+    if (serve_stdio && opt.dflash2_tree_budget > dflash2_drafts + 1 &&
+        std::getenv("SHELF_GDN_VERIFY_CHUNKED") != nullptr &&
+        (std::getenv("SHELF_GDN_VERIFY_CHUNKED")[0] == '\0' ||
+         std::getenv("SHELF_GDN_VERIFY_CHUNKED")[0] == '0')) {
+        fprintf(stderr, "serve dflash2 tree requires chunked GDN verify\n");
+        return kComputeParseError;
+    }
+    if (opt.dflash2_tree && (!dflash_enabled || (serve_stdio && opt.dflash2_tree_budget == 0) || tp != 1 || sampling.temperature != 0.0f)) {
         fprintf(stderr, "--dflash2-tree-extra requires single-request DFlash2, TP=1, and greedy sampling\n");
         return kComputeParseError;
     }

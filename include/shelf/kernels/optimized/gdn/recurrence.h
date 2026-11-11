@@ -68,6 +68,7 @@ struct GdnRecurrenceArgs {
     uint32_t compact_row_capacity = 0;
     // 1: the verify kernel does not write the final state back (replay commits it).
     uint32_t skip_state_store = 0;
+    uint32_t force_tree_chunk = 0;
 };
 
 hipError_t

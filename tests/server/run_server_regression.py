@@ -51,6 +51,7 @@ GROUPS = OrderedDict([
         "test_compute_dflash2_unaligned.py",
         "test_compute_dflash2_prefix_long.py",
         "test_server_dflash2.py",
+        "test_server_dflash2_tree.py",
         "test_server_models.py",
         "test_server_meta.py",
         "test_server_chat.py",

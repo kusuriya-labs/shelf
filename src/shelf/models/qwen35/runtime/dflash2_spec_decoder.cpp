@@ -860,7 +860,7 @@ Status append_committed(
 }
 
 Status gather_tree_path(DFlash2SpecDecoder& decoder, uint32_t position,
-                        std::span<const uint32_t> rows) {
+                        std::span<const uint32_t> rows, uint32_t tap_row_begin = 0u) {
     auto& pool = *decoder.sequence->kv_pool();
     const uint32_t page_tokens = pool.page_tokens();
     const auto& pages = decoder.sequence->block_table;
@@ -920,8 +920,8 @@ Status gather_tree_path(DFlash2SpecDecoder& decoder, uint32_t position,
         }
         for (uint32_t t = 0; t < shelf::kernel::kDFlash2TargetTaps; ++t) {
             auto* tap = decoder.target->dflash_target_hidden[t].data<bf16_t>();
-            Status st = copy(tap + static_cast<std::size_t>(dst_row) * decoder.hidden_size,
-                             tap + static_cast<std::size_t>(src_row) * decoder.hidden_size,
+            Status st = copy(tap + static_cast<std::size_t>(tap_row_begin + dst_row) * decoder.hidden_size,
+                             tap + static_cast<std::size_t>(tap_row_begin + src_row) * decoder.hidden_size,
                              decoder.hidden_size * sizeof(bf16_t));
             if (!st.ok()) return st;
         }
@@ -1837,6 +1837,12 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     }
     const bool tree_mode = context.tree_budget != 0u &&
         context.tree_budget > plans.front().decoder->config.num_drafts + 1u;
+    if (tree_mode) {
+        for (const SlotPlan& plan : plans) {
+            if (plan.batched && plan.decoder->sampling.temperature != 0.0f)
+                return Status::unsupported("batch tree verification requires greedy sampling", __FILE__, __LINE__);
+        }
+    }
     bool bridge = !tree_mode && context.verify_token_ids_device != nullptr &&
                   context.decision_staging_device != nullptr;
     if (bridge) {
@@ -2071,6 +2077,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                     copy(tree.rope_positions, context.tree_rope_host.data(), total_rows * sizeof(uint32_t)) != hipSuccess ||
                     copy(tree.committed_end, context.tree_committed_end_host.data(), total_rows * sizeof(uint32_t)) != hipSuccess)
                     return Status::hip_error("batch tree metadata upload", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+                options[r].gdn_compact.force_tree_chunk = 1u;
                 options[r].tree_row_parent = tree.parent;
                 options[r].tree_anc_offsets = tree.ancestor_offsets;
                 options[r].tree_anc_positions = tree.ancestor_positions;
@@ -2206,9 +2213,32 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
 
         SpecVerifyResult verify;
-        const Status accept_st = spec_greedy_accept(
-            drafts[i].data(), plan.drafts, sampled.data() + plan.row_begin, true, verify);
-        if (!accept_st.ok()) return accept_st;
+        DFlash2TreeWalk walk;
+        if (tree_mode) {
+            if (!walk_dflash2_tree(plan.tree.tokens, plan.tree.parent,
+                    std::span<const int32_t>(sampled.data() + plan.row_begin, plan.total_rows), walk))
+                return Status::invalid_state("batch tree walk failed", __FILE__, __LINE__);
+            const uint32_t accepted = static_cast<uint32_t>(walk.rows.size() - 1u);
+            verify.num_drafts = plan.drafts;
+            verify.num_accepted_drafts = accepted;
+            for (uint32_t j = 1u; j < walk.rows.size(); ++j)
+                verify.emitted_tokens.push_back(plan.tree.tokens[walk.rows[j]]);
+            if (accepted == plan.drafts) {
+                verify.bonus_token_valid = true;
+                verify.bonus_token = walk.correction;
+            } else {
+                verify.first_reject_index = accepted;
+                verify.correction_valid = true;
+                verify.correction_token = walk.correction;
+            }
+            verify.emitted_tokens.push_back(walk.correction);
+            verify.num_emitted_tokens = static_cast<uint32_t>(verify.emitted_tokens.size());
+            verify.num_committed_target_tokens = accepted + 1u;
+        } else {
+            const Status accept_st = spec_greedy_accept(
+                drafts[i].data(), plan.drafts, sampled.data() + plan.row_begin, true, verify);
+            if (!accept_st.ok()) return accept_st;
+        }
         result_out.finished = spec_bound_result(verify, plan.remaining, decoder.config.eos_tokens);
         const uint32_t accepted = verify.num_accepted_drafts;
         result_out.num_drafts = plan.drafts;
@@ -2247,14 +2277,14 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             auto scope = shelf::gpu::ScopedDevice::create(state.device);
             if (!scope.ok()) return scope.status();
             Status st = Status::make_ok();
-            if (accepted != plan.drafts) {
+            if (tree_mode || accepted != plan.drafts) {
                 st = spec_gdn_restore_conv(
                     *state.pool, decoder.sequence->slot, state.conv_snapshot,
                     state.conv_bytes, state.stream);
                 if (!st.ok()) return st;
                 st = restore_gdn_spec_conv(
                     *state.pool, decoder.sequence->slot, context.history[r],
-                    plan.row_begin + accepted, state.stream);
+                    plan.row_begin + (tree_mode ? walk.rows[accepted] : accepted), state.stream);
                 if (!st.ok()) return st;
             }
             GdnCompactLogDeviceView compact{};
@@ -2264,13 +2294,36 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             compact.delta_layer_stride = context.compact[r].delta_layer_stride;
             compact.k_layer_stride = context.compact[r].k_layer_stride;
             compact.a_layer_stride = context.compact[r].a_layer_stride;
+            const int32_t* replay = nullptr;
+            if (tree_mode) {
+                for (uint32_t j = 0u; j <= accepted; ++j)
+                    context.tree_replay_host[j] = static_cast<int32_t>(plan.row_begin + walk.rows[j]);
+                replay = context.tree[r].replay_rows;
+                const hipError_t err = hipMemcpy(context.tree[r].replay_rows,
+                    context.tree_replay_host.data(), (accepted + 1u) * sizeof(int32_t), hipMemcpyHostToDevice);
+                if (err != hipSuccess)
+                    return Status::hip_error("batch tree replay rows upload", hipGetErrorString(err), __FILE__, __LINE__);
+            }
             st = commit_gdn_compact_log(
                 *state.pool, decoder.sequence->slot, compact, state.commit_request,
-                accepted + 1u, decoder.gdn_key_heads, state.stream);
+                accepted + 1u, decoder.gdn_key_heads, state.stream, replay,
+                tree_mode ? total_rows : 0u);
             if (!st.ok()) return st;
         }
 
-        if (accepted == plan.drafts) {
+        if (tree_mode) {
+            Status st = gather_tree_path(decoder, plan.position,
+                std::span<const uint32_t>(walk.rows.data(), accepted + 1u), plan.row_begin);
+            if (!st.ok()) return st;
+            decoder.sequence->position = plan.position + accepted + 1u;
+            const auto taps = batch_target_taps(decoder, plan.row_begin);
+            st = dflash2::dflash2_append_target_taps(*decoder.draft, *decoder.context, taps.data(),
+                shelf::kernel::kDFlash2TargetTaps, accepted + 1u, plan.position, decoder.stream);
+            if (!st.ok()) return st;
+            st = rollback_sequence_append(*decoder.sequence,
+                ceil_div_u32(decoder.sequence->position, page_tokens), decoder.stream);
+            if (!st.ok()) return st;
+        } else if (accepted == plan.drafts) {
             const auto taps = batch_target_taps(decoder, plan.row_begin);
             Status st = dflash2::dflash2_append_target_taps(
                 *decoder.draft, *decoder.context, taps.data(),

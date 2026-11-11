@@ -205,7 +205,8 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         ctx.role == ::shelf::runtime::ExecutionRole::Verify && !mixed_verify &&
         select_gdn_recurrence_implementation(tree_selector) == GdnRecurrenceImplementation::Optimized &&
         (verify_chunk_env == nullptr || (verify_chunk_env[0] != '\0' && verify_chunk_env[0] != '0')) &&
-        tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0' &&
+        (ctx.spec.gdn_compact.force_tree_chunk != 0u ||
+         (tree_chunk_env != nullptr && tree_chunk_env[0] != '\0' && tree_chunk_env[0] != '0')) &&
         c.head_k == ::shelf::kernel::kGdnRecurrenceWmmaK &&
         c.head_v % ::shelf::kernel::kGdnRecurrenceWmmaVGroup == 0u &&
         ctx.spec.gdn_compact.defer_state_store != 0u && max_request_rows <= 32u &&
@@ -231,6 +232,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.compact_k_layer_stride = compact.k_layer_stride;
         c.compact_a_layer_stride = compact.a_layer_stride;
         c.skip_state_store = compact.defer_state_store;
+        c.force_tree_chunk = compact.force_tree_chunk;
     }
     return ra;
 }
