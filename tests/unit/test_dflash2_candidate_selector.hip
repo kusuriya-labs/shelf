@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/kernels/dflash2/candidate_selector.h>
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,53 @@ static void check(bool cond, const std::string& msg) {
 }
 
 using shelf::bf16_t;
+
+static void test_tree_probabilities(hipStream_t stream) {
+    constexpr uint32_t rows = 2, vocab = 513, top_k = 4;
+    std::vector<float> logits(rows * vocab, -10.0f);
+    const std::vector<int32_t> ids = {0, 1, 2, 3, 512, 256, 128, 64};
+    std::vector<float> top_logits(rows * top_k);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t j = 0; j < top_k; ++j) {
+            const float value = 50.0f - static_cast<float>(r * 80 + j);
+            logits[r * vocab + ids[r * top_k + j]] = value;
+            top_logits[r * top_k + j] = value;
+        }
+    }
+    float *d_logits = nullptr, *d_top_logits = nullptr;
+    int32_t* d_ids = nullptr;
+    shelf::kernel::DFlash2TreeProbabilities* d_output = nullptr;
+    check(hipMalloc(&d_logits, logits.size() * sizeof(float)) == hipSuccess, "tree logits allocation");
+    check(hipMalloc(&d_top_logits, top_logits.size() * sizeof(float)) == hipSuccess, "tree top logits allocation");
+    check(hipMalloc(&d_ids, ids.size() * sizeof(int32_t)) == hipSuccess, "tree ids allocation");
+    check(hipMalloc(&d_output, rows * sizeof(*d_output)) == hipSuccess, "tree output allocation");
+    if (d_logits && d_top_logits && d_ids && d_output) {
+        check(hipMemcpy(d_logits, logits.data(), logits.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess, "tree logits upload");
+        check(hipMemcpy(d_top_logits, top_logits.data(), top_logits.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess, "tree top logits upload");
+        check(hipMemcpy(d_ids, ids.data(), ids.size() * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess, "tree ids upload");
+        check(shelf::kernel::launch_dflash2_tree_probabilities(d_logits, d_ids, d_top_logits,
+              d_output, rows, vocab, top_k, stream) == hipSuccess, "tree probability launch");
+        std::vector<shelf::kernel::DFlash2TreeProbabilities> output(rows);
+        check(hipStreamSynchronize(stream) == hipSuccess, "tree probability sync");
+        check(hipMemcpy(output.data(), d_output, rows * sizeof(*d_output), hipMemcpyDeviceToHost) == hipSuccess, "tree probability download");
+        for (uint32_t r = 0; r < rows; ++r) {
+            double sum = 0.0;
+            for (uint32_t i = 0; i < vocab; ++i) sum += std::exp(static_cast<double>(logits[r * vocab + i]));
+            double mass = 0.0;
+            for (uint32_t j = 0; j < top_k; ++j) {
+                const double p = std::exp(static_cast<double>(top_logits[r * top_k + j])) / sum;
+                mass += p;
+                check(output[r].ids[j] == ids[r * top_k + j], "tree probability id");
+                check(std::abs(output[r].probabilities[j] - p) < 1e-5, "tree full vocabulary normalization");
+            }
+            check(std::abs(output[r].residual - (1.0 - mass)) < 1e-5, "tree residual probability");
+        }
+    }
+    if (d_output) check(hipFree(d_output) == hipSuccess, "tree output free");
+    if (d_ids) check(hipFree(d_ids) == hipSuccess, "tree ids free");
+    if (d_top_logits) check(hipFree(d_top_logits) == hipSuccess, "tree top logits free");
+    if (d_logits) check(hipFree(d_logits) == hipSuccess, "tree logits free");
+}
 
 static float f32_from_bf16(bf16_t x) {
     const uint32_t u = static_cast<uint32_t>(x.data) << 16;
@@ -104,6 +152,7 @@ struct SelectorFixture {
     uint32_t vocab = 0;
     int32_t anchor = 0;
     bool dependency_sensitive = false;
+    std::vector<int32_t> row_predecessors;
     std::vector<int32_t> ids;
     std::vector<float> logits;
     std::vector<bf16_t> hidden;
@@ -116,6 +165,7 @@ static std::vector<int32_t> reference_selector(
     std::vector<int32_t> out(fx.draft_rows, 0);
     int32_t pred = fx.anchor;
     for (uint32_t r = 0; r < fx.draft_rows; ++r) {
+        if (!fx.row_predecessors.empty()) pred = fx.row_predecessors[r];
         int32_t best_token = 0;
         float best_score = -std::numeric_limits<float>::infinity();
         bool have = false;
@@ -160,13 +210,18 @@ static void run_case(
     shelf::gpu::Tensor predecessor;
     shelf::gpu::Tensor successor;
     shelf::gpu::Tensor out;
+    shelf::gpu::Tensor scores;
+    shelf::gpu::Tensor row_predecessors;
     const bool alloc_ok =
         alloc_bf16(arena, {fx.draft_rows, fx.rank}, hidden) &&
         alloc_i32(arena, {fx.draft_rows, fx.top_k}, ids) &&
         alloc_f32(arena, {fx.draft_rows, fx.top_k}, logits) &&
         alloc_bf16(arena, {fx.vocab, fx.rank}, predecessor) &&
         alloc_bf16(arena, {fx.vocab, fx.rank}, successor) &&
-        alloc_i32(arena, {fx.draft_rows}, out);
+        alloc_i32(arena, {fx.draft_rows}, out) &&
+        alloc_f32(arena, {fx.draft_rows, fx.top_k}, scores) &&
+        (fx.row_predecessors.empty() ||
+         alloc_i32(arena, {fx.draft_rows}, row_predecessors));
     check(alloc_ok, name + " alloc");
     if (!alloc_ok) return;
     const auto upload = [&](shelf::gpu::Tensor& dst, const auto& src) {
@@ -177,6 +232,8 @@ static void run_case(
     check(upload(hidden, fx.hidden) && upload(ids, fx.ids) && upload(logits, fx.logits) &&
               upload(predecessor, fx.predecessor) && upload(successor, fx.successor),
           name + " upload");
+    if (!fx.row_predecessors.empty())
+        check(upload(row_predecessors, fx.row_predecessors), name + " predecessor upload");
 
     shelf::kernel::DFlash2CandidateSelectorArgs args;
     args.hidden_proj = hidden.data<bf16_t>();
@@ -185,7 +242,9 @@ static void run_case(
     args.predecessor_codebook = predecessor.data<bf16_t>();
     args.successor_codebook = successor.data<bf16_t>();
     args.anchor_token = fx.anchor;
+    args.row_predecessors = fx.row_predecessors.empty() ? nullptr : row_predecessors.data<int32_t>();
     args.output_tokens = out.data<int32_t>();
+    args.output_scores = scores.data<float>();
     args.draft_rows = fx.draft_rows;
     args.rank = fx.rank;
     args.top_k = fx.top_k;
@@ -203,6 +262,32 @@ static void run_case(
 
     const std::vector<int32_t> ref = reference_selector(fx, true);
     check(got == ref, name + " token mismatch");
+    std::vector<float> got_scores(static_cast<std::size_t>(fx.draft_rows) * fx.top_k);
+    check(hipMemcpy(got_scores.data(), scores.data<float>(), got_scores.size() * sizeof(float),
+                    hipMemcpyDeviceToHost) == hipSuccess,
+          name + " scores read");
+    int32_t pred = fx.anchor;
+    bool scores_match = true;
+    for (uint32_t r = 0; r < fx.draft_rows; ++r) {
+        if (!fx.row_predecessors.empty()) pred = fx.row_predecessors[r];
+        for (uint32_t j = 0; j < fx.top_k; ++j) {
+            const std::size_t idx = static_cast<std::size_t>(r) * fx.top_k + j;
+            const int32_t token = fx.ids[idx];
+            double correction = 0.0;
+            for (uint32_t d = 0; d < fx.rank; ++d) {
+                correction += static_cast<double>(f32_from_bf16(fx.predecessor[
+                                  static_cast<std::size_t>(pred) * fx.rank + d])) *
+                              f32_from_bf16(fx.hidden[static_cast<std::size_t>(r) * fx.rank + d]) *
+                              f32_from_bf16(fx.successor[
+                                  static_cast<std::size_t>(token) * fx.rank + d]);
+            }
+            const float expected = fx.logits[idx] + static_cast<float>(correction);
+            if (std::fabs(got_scores[idx] - expected) > 1e-4f * (1.0f + std::fabs(expected)))
+                scores_match = false;
+        }
+        pred = ref[r];
+    }
+    check(scores_match, name + " predecessor-conditioned scores");
     std::printf("  %-28s got:", name.c_str());
     for (int32_t t : got) std::printf(" %d", t);
     std::printf("  ref:");
@@ -232,6 +317,8 @@ int main() {
         std::printf("FAIL hipStreamCreate\n");
         return 1;
     }
+
+    test_tree_probabilities(stream);
 
     {
         SelectorFixture fx;
@@ -287,6 +374,24 @@ int main() {
         set_succ(2, 0, 10.0f);
         set_succ(4, 1, 10.0f);
         run_case(arena, stream, "predecessor_dependency", fx);
+        fx.draft_rows = 1u;
+        fx.ids.erase(fx.ids.begin(), fx.ids.begin() + fx.top_k);
+        fx.logits.erase(fx.logits.begin(), fx.logits.begin() + fx.top_k);
+        fx.hidden.erase(fx.hidden.begin(), fx.hidden.begin() + fx.rank);
+        fx.dependency_sensitive = false;
+        fx.anchor = 3;
+        run_case(arena, stream, "branch_parent_3", fx);
+        fx.anchor = 5;
+        run_case(arena, stream, "branch_parent_5", fx);
+        fx.draft_rows = 2u;
+        const auto ids_copy = fx.ids;
+        const auto logits_copy = fx.logits;
+        const auto hidden_copy = fx.hidden;
+        fx.ids.insert(fx.ids.end(), ids_copy.begin(), ids_copy.end());
+        fx.logits.insert(fx.logits.end(), logits_copy.begin(), logits_copy.end());
+        fx.hidden.insert(fx.hidden.end(), hidden_copy.begin(), hidden_copy.end());
+        fx.row_predecessors = {3, 5};
+        run_case(arena, stream, "independent_branch_parents", fx);
     }
 
     {

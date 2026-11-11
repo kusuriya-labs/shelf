@@ -192,6 +192,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.recurrent_history = hist.recurrent_history;
         c.recurrent_history_row_stride = hist.recurrent_row_stride;
         c.capture_rows = hist.capture_rows;
+        c.recurrent_capture_mask = hist.recurrent_capture_mask;
         c.capture_verify_only = mixed_verify ? 1u : 0u;
     }
     c.row_parent = ctx.spec.tree_row_parent;

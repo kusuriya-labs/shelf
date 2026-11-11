@@ -39,6 +39,9 @@ constexpr uint32_t kDFlash2NoThinkingAllowance = 0xFFFFFFFFu;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
+    bool tree = false;
+    uint32_t tree_extra = 0u;
+    uint32_t tree_budget = 0u;
     qwen_hybrid::StopTokens eos_tokens;
 };
 
@@ -62,6 +65,13 @@ struct DFlash2GdnRankState {
     std::size_t conv_bytes = 0u;
     std::size_t rec_bytes = 0u;
     GdnSpecHistory history;
+    int32_t* tree_parent = nullptr;
+    uint32_t* tree_offsets = nullptr;
+    uint32_t* tree_ancestors = nullptr;
+    uint32_t* tree_rope = nullptr;
+    int32_t* tree_predecessors = nullptr;
+    int32_t* tree_selected = nullptr;
+    float* tree_scores = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
@@ -194,6 +204,14 @@ struct DFlash2SpecTiming {
     double proposal_wait_ms = 0.0;
     double proposal_copy_ms = 0.0;
     double gdn_snapshot_ms = 0.0;
+    double tree_select_ms = 0.0;
+    double tree_retained_mass = 0.0;
+    uint64_t tree_probability_rows = 0u;
+    double tree_walk_ms = 0.0;
+    double tree_commit_ms = 0.0;
+    double tree_restore_ms = 0.0;
+    double tree_gather_ms = 0.0;
+    double tree_append_ms = 0.0;
     double verify_ms = 0.0;
     double verify_gpu_ms = 0.0;
     double decision_wait_ms = 0.0;
@@ -205,6 +223,7 @@ struct DFlash2SpecTiming {
     uint32_t rounds = 0u;
     uint32_t full_accepts = 0u;
     uint32_t partial_accepts = 0u;
+    uint32_t tree_replays = 0u;
     uint32_t accepted_drafts = 0u;
     uint32_t generated_tokens = 0u;
     uint32_t dflash_prefix_full_accepts = 0u;
@@ -226,6 +245,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     DFlash2SpecDecoder& decoder,
     int32_t pending_token,
     uint32_t remaining_tokens);
+
+Result<DFlash2SpecIterationOutput> dflash2_spec_step_tree(
+    DFlash2SpecDecoder& decoder, int32_t pending_token, uint32_t remaining_tokens);
 
 struct DFlash2SpecBatchCompact {
     float* delta = nullptr;

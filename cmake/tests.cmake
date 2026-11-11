@@ -164,6 +164,7 @@ target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}
 shelf_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_weights shelf_qwen35)
 shelf_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35)
+shelf_add_test(NAME test_dflash2_tree SOURCE unit/test_dflash2_tree.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_core)
 shelf_add_test(NAME test_thinking_budget SOURCE unit/test_thinking_budget.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_dflash2_footprint SOURCE unit/test_dflash2_footprint.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES shelf_qwen35_runtime)
 shelf_add_test(NAME test_dflash2_exl3_head SOURCE unit/test_dflash2_exl3_head.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES shelf_qwen35_runtime shelf_quant_reference)

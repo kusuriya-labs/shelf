@@ -49,6 +49,7 @@ struct GdnRecurrenceArgs {
     fp16_t* recurrent_history = nullptr;
     uint64_t recurrent_history_row_stride = 0;
     uint32_t capture_rows = 0;
+    const uint32_t* recurrent_capture_mask = nullptr;
 
     int32_t row_override = -1;
     uint32_t capture_verify_only = 0;
