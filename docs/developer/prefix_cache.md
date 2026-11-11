@@ -6,6 +6,26 @@ radix tree 上の page 単位で、prefix の paged KV は active KV pool の pa
 admission / prefill / decode / 出力末尾で lookup・restore・save を行う。
 共有 prefix への extension と multi-turn の会話で prefill を省略する。
 
+## strategy
+
+`--prefix-cache-strategy` が entry の管理方式を選ぶ。KV の保存形式（`PrefixKVStore` の
+radix tree / page 共有）と family state の保存・復元は共通である。
+
+- `radix`（既定）: chunk 終端ごとに entry を作り、entry 単位で LRU する。
+  長い prompt では prefill chunk（既定 2048 token）ごとに entry が増えるため、
+  `--prefix-cache-concurrency` が小さいと浅い境界から追い出される。
+- `slot`: request ごとに固定 slot を予約し、**1 slot に付き entry 1 個**だけを保持する。
+  保存位置は入力末尾の直前の page 境界
+  `align_down(input_len - 1, --page-tokens)` の 1 点だけである。scheduler は prefill を
+  この位置で区切るため、state はその位置で確定する。出力末尾は保存しない（rolling
+  capture も使わない）。slot 数は `--max-concurrent-requests`、state slot は
+  `slot + 1`（更新中の旧 entry を保持するため）を確保する。
+  eviction は slot 単位の LRU で、更新は「新しい entry を保存してから旧 entry を解放」の
+  順に行い、保存に失敗した場合は旧 entry を残す。
+
+slot は、エージェントが同じ会話を延長し続ける workload（自分の prefix を何度も再利用する）
+に向く。radix は、複数 request が先頭の system prompt だけを共有する workload に向く。
+
 ## Radix tree
 
 - node は KV page（`--page-tokens` の既定 16 token）単位の token edge を保持する。
@@ -111,6 +131,9 @@ option の一覧と既定値は [../user/compute.md](../user/compute.md) の opt
 `capabilities.prefix_cache` は `PrefixCache::create` の成功時のみ `true` である。
 `capabilities` は map であり、将来の capability はここへ追加する。
 未知の key は client が無視してよい。
+
+`stats` の応答には `prefix` object が入る。`enabled`、`reuse_slots`（slot strategy の
+slot 数、radix では 0）、`entries`、`saves`、`hits`、`misses`、`restores`、`evictions`。
 
 `generate` の `prefix_cache_checkpoint_position` は `0` のみ受理する。
 非 `0` は `event=error` / `code=invalid_argument` で拒否し、silent ignore はしない。

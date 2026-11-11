@@ -51,6 +51,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
 | `--prefix-cache-concurrency N` | max concurrent prefix captures and stored prefix entries (default 4) |
+| `--prefix-cache-strategy MODE` | radix \| slot (default radix) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->

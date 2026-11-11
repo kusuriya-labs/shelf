@@ -205,12 +205,17 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         PrefixCacheConfig prefix_config;
         prefix_config.max_concurrent = config.prefix_concurrency;
         prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
+        prefix_config.strategy = config.prefix_strategy;
+        prefix_config.slot_count = config.prefix_slot_count;
+        if (prefix_config.strategy == PrefixCacheStrategy::Slot) {
+            prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+        }
         const PrefixCacheBytes prefix_bytes =
             prefix_cache_bytes(prefix_config, gdn_layout_result);
         reserved += prefix_bytes.total();
         const std::size_t family_shadow =
             rank->model_->executor_state_reserve_bytes(
-                2u * static_cast<std::size_t>(config.prefix_concurrency));
+                2u * static_cast<std::size_t>(prefix_config.max_concurrent));
         reserved += family_shadow;
         std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
                      gpu::format_gib(prefix_bytes.total()).c_str(),
@@ -554,6 +559,8 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.prefix_cache = config.prefix_cache;
         rank_config.prefix_concurrency = config.prefix_concurrency;
         rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
+        rank_config.prefix_strategy = config.prefix_strategy;
+        rank_config.prefix_slot_count = config.prefix_slot_count;
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;

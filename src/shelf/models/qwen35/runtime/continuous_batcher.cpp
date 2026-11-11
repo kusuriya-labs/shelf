@@ -241,6 +241,9 @@ Status ContinuousBatcher::finish_request(
     request.finish_reason = reason;
     request.pending_decode_token = -1;
     prefix_finish_capture(request, reason, stream);
+    if (prefix_cache_ != nullptr) {
+        prefix_cache_->release_reuse_slot(request.id);
+    }
     Status dflash_release = Status::make_ok();
     if (request.dflash != nullptr) {
         if (request.dflash->ready) {
@@ -286,11 +289,19 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
     if (prefix_cache_ == nullptr) {
         return;
     }
+    const bool slot_mode =
+        prefix_cache_->strategy() == PrefixCacheStrategy::Slot;
+    if (slot_mode && request.prefix_slot == kInvalidReuseSlot) {
+        return;
+    }
     const uint32_t position = request.sequence.position;
     if (position == 0 || position % config_.page_tokens != 0) {
         return;
     }
     if (position > request.input_tokens.size()) {
+        return;
+    }
+    if (slot_mode && position != request.prefix_save_position) {
         return;
     }
     const std::vector<uint32_t> tokens(
@@ -307,8 +318,11 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
         ring.next_position = request.dflash->context->next_position;
         ring_ptr = &ring;
     }
-    const Status save_st = prefix_cache_->save_input_boundary(
-        request.sequence, tokens, position, stream_, ring_ptr);
+    const Status save_st = slot_mode
+        ? prefix_cache_->save_slot_boundary(request.id, request.sequence, tokens,
+                                            position, stream_, ring_ptr)
+        : prefix_cache_->save_input_boundary(request.sequence, tokens, position,
+                                             stream_, ring_ptr);
     if (getenv("SHELF_PFXDBG") != nullptr) {
         if (!save_st.ok()) {
             std::fprintf(stderr, "PFXSAVE_FAIL pos=%u %s\n", position,
@@ -325,6 +339,9 @@ void ContinuousBatcher::prefix_save_prefill(RuntimeRequest& request) {
 
 void ContinuousBatcher::prefix_begin_capture(RuntimeRequest& request) {
     if (prefix_cache_ == nullptr || request.prefix_capture != 0) {
+        return;
+    }
+    if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
         return;
     }
     auto capture = prefix_cache_->begin_capture(request.sequence);
@@ -347,6 +364,9 @@ void ContinuousBatcher::prefix_capture_after_step(RuntimeRequest& request) {
     if (prefix_cache_ == nullptr || request.prefix_capture == 0) {
         return;
     }
+    if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
+        return;
+    }
     const uint32_t position = request.sequence.position;
     if (position == 0 || position % config_.page_tokens != 0) {
         return;
@@ -361,6 +381,11 @@ void ContinuousBatcher::prefix_capture_after_step(RuntimeRequest& request) {
 void ContinuousBatcher::prefix_finish_capture(RuntimeRequest& request, FinishReason reason,
                                               hipStream_t stream) {
     if (prefix_cache_ == nullptr || request.prefix_capture == 0) {
+        return;
+    }
+    if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
+        request.prefix_capture = 0;
+        request.prefix_boundary_pos = 0;
         return;
     }
     const CaptureId capture = request.prefix_capture;
@@ -592,6 +617,17 @@ Result<StepResult> ContinuousBatcher::step() {
                     continue;
                 }
                 prefix_begin_capture(request);
+            }
+            if (prefix_cache_->strategy() == PrefixCacheStrategy::Slot) {
+                const uint32_t input_len =
+                    static_cast<uint32_t>(request.input_tokens.size());
+                request.prefix_slot =
+                    prefix_cache_->reserve_reuse_slot(request.id, hit);
+                request.prefix_save_position =
+                    request.prefix_slot != kInvalidReuseSlot &&
+                            input_len > config_.page_tokens
+                        ? ((input_len - 1u) / config_.page_tokens) * config_.page_tokens
+                        : 0u;
             }
         }
         auto claim_st = capacity_.register_claim(request.id, request.max_kv_pages);
@@ -1013,39 +1049,17 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
         if (prefix_cache_ == nullptr || page_tokens == 0u) {
             return;
         }
-        // Like the non-speculative prefill: every page-aligned chunk end is a restore point. (Only
-        // `last_boundary` used to be saved, which a prompt longer than one chunk never ends on.)
-        if (offset == 0u || offset % page_tokens != 0u || offset > prompt_count) {
-            return;
-        }
         if (request.sequence.position != offset) {
             return;
         }
-        const std::vector<uint32_t> tokens(
-            request.input_tokens.begin(),
-            request.input_tokens.begin() + static_cast<std::ptrdiff_t>(offset));
-        SpecRingRef ring;
-        const SpecRingRef* ring_ptr = nullptr;
-        if (session.context != nullptr && session.context->initialized) {
-            ring.k = session.context->k_ring.data<bf16_t>();
-            ring.v = session.context->v_ring.data<bf16_t>();
-            ring.length = session.context->length;
-            ring.next_position = session.context->next_position;
-            ring_ptr = &ring;
-        }
-        const Status st = prefix_cache_->save_input_boundary(
-            request.sequence, tokens, offset, stream_, ring_ptr);
-        if (getenv("SHELF_PFXDBG") != nullptr) {
-            std::fprintf(stderr,
-                         "PFXDBG save_input_boundary at=%u ring=%d ok=%d %s\n", offset,
-                         static_cast<int>(ring_ptr != nullptr), static_cast<int>(st.ok()),
-                         st.message().c_str());
-        }
+        prefix_save_prefill(request);
     };
     // A prompt that fits in one chunk has no chunk end to save at, so a separate pass over its page-aligned head
     // captures one (the prefill proper keeps the greedy chunking). Longer prompts are saved by the callback above.
     constexpr uint32_t kMaxShadowPrefixTokens = 1024u;
-    if (prefix_cache_ != nullptr && tp_batch_hook_ == nullptr &&
+    if (prefix_cache_ != nullptr &&
+        prefix_cache_->strategy() == PrefixCacheStrategy::Radix &&
+        tp_batch_hook_ == nullptr &&
         request.restored_tokens == 0u && last_boundary > 0u && last_boundary < prompt_count &&
         last_boundary <= kMaxShadowPrefixTokens) {
         for (DFlash2GdnRankState& rank : session.decoder->gdn_ranks) {
@@ -1077,7 +1091,8 @@ Status ContinuousBatcher::open_dflash2_session(RuntimeRequest& request) {
     }
     auto prefill_result = dflash2_spec_prefill(
         *session.decoder, request.input_tokens.data(), prompt_count,
-        request.restored_tokens, 0u, save_input_boundary);
+        request.restored_tokens, 0u, save_input_boundary,
+        request.prefix_save_position);
     request.prefill_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - prefill_started)
                               .count();

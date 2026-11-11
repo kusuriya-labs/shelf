@@ -80,6 +80,38 @@ LRU で消え、B が一致できる境界が残らない。16 では 2048 の e
 3. 共有 prefix の境界（system prompt 末尾）を server から checkpoint として送り、
    そこで prefill を区切って保存する。chunk 境界に依存しなくなるが、protocol 変更になる。
 
+## 2.4 SlotReuse（`--prefix-cache-strategy slot`）の実装と実測
+
+2.3 の原因に対し、entry 管理だけを切り替える `slot` strategy を追加した（ACCEPT）。
+KV page 共有と family state の保存・復元は `radix` と共通である。
+
+- request ごとに固定 slot を予約し、1 slot に付き entry 1 個だけを保持する。
+- 保存位置は `align_down(input_len - 1, page_tokens)` の 1 点。通常 prefill は
+  `token_budget_scheduler` が、DFlash2 は `dflash2_spec_prefill` の checkpoint 引数が、
+  その位置で chunk を区切る。
+- 更新は新しい entry の保存成功後に旧 entry を解放する。slot 単位の LRU で置換する。
+- 出力末尾の rolling capture は slot では使わない。
+
+実測（27B EXL3 + DFlash2、TP2、fp8 KV、`--max-concurrent-requests 4`、16384 context、
+`--prefix-cache-strategy slot`）:
+
+| 操作 | `restored_tokens` | `prefill_tokens` | `prefix.entries` |
+| --- | ---: | ---: | ---: |
+| 12000 token の初回 | 0 | 12000 | 1 |
+| 同じ 12000 token の再実行 | 11984 | 16 | 1 |
+| 別の 10000 token の初回 | 0 | 10000 | 2 |
+| 12008 token（延長）の初回 | 11984 | 24 | 2 |
+| 同じ 12008 token の再実行 | 12000 | 8 | 3 |
+| 4000〜9000 token を 6 回追加 | 各回 hit | — | 3（evictions 6） |
+
+同じ入力の miss と restore で生成列が一致した。chunk ごとに entry が増えないこと、
+slot 数（4）を超えないこと、LRU 置換が起きることを確認した。
+
+Qwen4Exp（Flash Next、TP2、324 token）でも slot strategy で `restored_tokens=320`、
+`prefill_tokens=4`、生成列が miss と一致した（PLE history の再 seed を含む）。
+`tests/unit/test_prefix_cache.hip` の `slot` ケースが slot の保存・更新・LRU・
+並列 writer の排他・restore を固定する。
+
 ## 3. 実装した DFlash2 ring の堅牢化（ACCEPT）
 
 - ring slot が枯渇したとき、hot slot と同じく LRU entry を evict して回収する

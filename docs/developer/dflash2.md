@@ -590,6 +590,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
   有効で、`prefix_tokens >= prompt_count` は error である
   （[prefix_cache.md](prefix_cache.md)）。
 - prompt を `target->config.max_batch_rows` 単位で chunk 実行する。
+- `checkpoint_position` が非 0 のとき、その位置で chunk を必ず区切る。slot strategy の
+  prefix checkpoint 保存位置（[prefix_cache.md](prefix_cache.md)）である。
 - intermediate chunk: `compute_logits=false`, `sample=false`。
 - final chunk: `compute_logits=true`, `sample=true`, `num_output_rows=1`。
 - 各 chunk 実行直後に target tap を ring へ append する。

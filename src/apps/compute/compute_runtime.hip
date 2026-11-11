@@ -295,6 +295,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     qwen35::runtime::PrefixCacheConfig prefix_config;
     prefix_config.max_concurrent = config_.prefix_cache_concurrency;
     prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+    prefix_config.strategy = config_.prefix_cache_strategy;
+    prefix_config.slot_count = config_.prefix_cache_slot_count;
+    if (prefix_config.strategy == qwen35::runtime::PrefixCacheStrategy::Slot) {
+        prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+    }
 
     auto prefix_bytes_for = [&]() {
         return qwen35::runtime::prefix_cache_bytes(prefix_config, gdn_layout);
@@ -644,6 +649,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.prefix_cache = config_.prefix_cache;
     tp_config.prefix_concurrency = config_.prefix_cache_concurrency;
     tp_config.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+    tp_config.prefix_strategy = config_.prefix_cache_strategy;
+    tp_config.prefix_slot_count = config_.prefix_cache_slot_count;
     if (config_.draft_config_ready) {
         tp_config.drafter_config = &config_.draft_config;
         tp_config.drafter_weights_bytes = config_.draft_bytes;
@@ -734,6 +741,12 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         qwen35::runtime::PrefixCacheConfig prefix_config;
             prefix_config.max_concurrent = config_.prefix_cache_concurrency;
             prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+            prefix_config.strategy = config_.prefix_cache_strategy;
+            prefix_config.slot_count = config_.prefix_cache_slot_count;
+            if (prefix_config.strategy ==
+                qwen35::runtime::PrefixCacheStrategy::Slot) {
+                prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+            }
 
         std::vector<qwen35::runtime::PrefixCacheRankContext> extra_ranks;
         for (int r = 1; r < tp_coordinator_->tp_size(); ++r) {

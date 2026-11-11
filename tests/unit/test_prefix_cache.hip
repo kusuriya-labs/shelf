@@ -27,9 +27,11 @@ using shelf::state::commit_sequence_append;
 using shelf::state::create_paged_sequence_state;
 using shelf::state::release_paged_sequence_state;
 using shelf::state::reserve_sequence_append;
+using shelf::qwen35::runtime::kInvalidReuseSlot;
 using shelf::qwen35::runtime::PrefixCache;
 using shelf::qwen35::runtime::PrefixCacheConfig;
 using shelf::qwen35::runtime::PrefixCacheStats;
+using shelf::qwen35::runtime::PrefixCacheStrategy;
 using shelf::qwen35::runtime::PrefixHit;
 
 int g_pass = 0;
@@ -848,6 +850,115 @@ void test_eviction(Env& env) {
     free_seq(seq_a, env.stream);
 }
 
+uint32_t save_slot(PrefixCache& cache, PagedSequenceState& seq,
+                   const std::vector<uint32_t>& tokens, uint64_t owner,
+                   hipStream_t stream) {
+    const PrefixHit hit = cache.lookup(tokens);
+    const uint32_t slot = cache.reserve_reuse_slot(owner, hit);
+    if (slot == kInvalidReuseSlot) return slot;
+    const uint32_t input_len = static_cast<uint32_t>(tokens.size());
+    if (input_len == 0u || input_len % kPageTokens != 0u ||
+        seq.position != input_len) {
+        return kInvalidReuseSlot;
+    }
+    if (!cache.save_slot_boundary(owner, seq, tokens, input_len, stream).ok()) {
+        return kInvalidReuseSlot;
+    }
+    return slot;
+}
+
+void test_slot(Env& env) {
+    PrefixCacheConfig config;
+    config.max_concurrent = 3;
+    config.min_prefix_tokens = 4;
+    config.strategy = PrefixCacheStrategy::Slot;
+    config.slot_count = 2;
+    auto cache_opt = make_cache(env, *env.kv_bf16, config);
+    check(cache_opt.has_value(), "slot cache create");
+    if (!cache_opt.has_value()) return;
+    PrefixCache& cache = *cache_opt;
+    check(cache.reuse_slot_count() == 2, "slot count");
+
+    auto seq_a = make_seq(env, *env.kv_bf16);
+    auto seq_b = make_seq(env, *env.kv_bf16);
+    auto seq_c = make_seq(env, *env.kv_bf16);
+    check(seq_a.has_value() && seq_b.has_value() && seq_c.has_value(), "slot seqs");
+    if (!seq_a.has_value() || !seq_b.has_value() || !seq_c.has_value()) return;
+
+    check(append_tokens(*seq_a, 8, env.stream), "slot append a");
+    const std::vector<uint32_t> tokens_a = make_tokens(8, 1000);
+    check(seed_kv(*env.kv_bf16, *seq_a, 71, env.stream), "slot seed kv a");
+    check(seed_state(*env.gdn, seq_a->slot, 71, env.stream), "slot seed state a");
+    check(save_slot(cache, *seq_a, tokens_a, 1, env.stream) != kInvalidReuseSlot,
+          "slot save a");
+    check(cache.stats().entries == 1, "slot one entry after a");
+    check(cache.lookup(tokens_a).hit(), "slot a hits");
+
+    check(append_tokens(*seq_b, 8, env.stream), "slot append b");
+    const std::vector<uint32_t> tokens_b = make_tokens(8, 2000);
+    check(seed_kv(*env.kv_bf16, *seq_b, 72, env.stream), "slot seed kv b");
+    check(seed_state(*env.gdn, seq_b->slot, 72, env.stream), "slot seed state b");
+    check(save_slot(cache, *seq_b, tokens_b, 2, env.stream) != kInvalidReuseSlot,
+          "slot save b");
+    check(cache.stats().entries == 2, "slot two entries");
+
+    const PrefixHit hit_b = cache.lookup(tokens_b);
+    check(hit_b.hit() && hit_b.slot != kInvalidReuseSlot, "slot hit carries slot");
+
+    auto seq_a2 = make_seq(env, *env.kv_bf16);
+    check(seq_a2.has_value(), "slot extend seq");
+    if (!seq_a2.has_value()) return;
+    check(append_tokens(*seq_a2, 12, env.stream), "slot append extended a");
+    std::vector<uint32_t> tokens_a2 = tokens_a;
+    for (uint32_t i = 0; i < 4; ++i) tokens_a2.push_back(3000 + i);
+    check(seed_kv(*env.kv_bf16, *seq_a2, 73, env.stream), "slot seed kv extended");
+    check(seed_state(*env.gdn, seq_a2->slot, 73, env.stream), "slot seed state extended");
+    check(save_slot(cache, *seq_a2, tokens_a2, 3, env.stream) != kInvalidReuseSlot,
+          "slot update a");
+    check(cache.stats().entries == 2, "slot update keeps entry count");
+    const PrefixHit hit_a2 = cache.lookup(tokens_a2);
+    check(hit_a2.hit() && hit_a2.state_position == 12, "slot updated entry hits");
+    check(!cache.lookup(tokens_a).hit(), "slot old entry replaced");
+
+    check(append_tokens(*seq_c, 8, env.stream), "slot append c");
+    const std::vector<uint32_t> tokens_c = make_tokens(8, 4000);
+    check(seed_kv(*env.kv_bf16, *seq_c, 74, env.stream), "slot seed kv c");
+    check(seed_state(*env.gdn, seq_c->slot, 74, env.stream), "slot seed state c");
+    check(save_slot(cache, *seq_c, tokens_c, 4, env.stream) != kInvalidReuseSlot,
+          "slot save c evicts lru");
+    check(cache.stats().entries == 2, "slot lru keeps entry count");
+
+    const uint32_t slot_owner = cache.reserve_reuse_slot(5, cache.lookup(tokens_c));
+    check(slot_owner != kInvalidReuseSlot, "slot reserve for writer");
+    const PrefixHit same_hit = cache.lookup(tokens_c);
+    const uint32_t other_slot = cache.reserve_reuse_slot(6, same_hit);
+    check(other_slot != kInvalidReuseSlot && other_slot != slot_owner,
+          "slot parallel writer does not share reservation");
+    cache.release_reuse_slot(5);
+    cache.release_reuse_slot(6);
+
+    auto dst = make_seq(env, *env.kv_bf16);
+    check(dst.has_value(), "slot restore dst");
+    if (!dst.has_value()) return;
+    const PrefixHit hit_restore = cache.lookup(tokens_c);
+    check(hit_restore.hit(), "slot restore hit");
+    check(cache.restore(hit_restore.entry_id, *dst, env.stream).ok(), "slot restore");
+    if (hipStreamSynchronize(env.stream) == hipSuccess) {
+        check(dst->position == 8, "slot restore position");
+        check(verify_kv(*env.kv_bf16, *dst, 74, env.stream), "slot restore kv bytes");
+        check(verify_state(*env.gdn, dst->slot, 74, env.stream),
+              "slot restore state bytes");
+    } else {
+        check(false, "slot restore sync");
+    }
+    free_seq(dst, env.stream);
+
+    free_seq(seq_a2, env.stream);
+    free_seq(seq_c, env.stream);
+    free_seq(seq_b, env.stream);
+    free_seq(seq_a, env.stream);
+}
+
 void test_spec_ring(Env& env) {
     constexpr uint32_t kRingBytes = 64;
     PrefixCacheConfig config;
@@ -1046,6 +1157,7 @@ int main() {
     run("roundtrip-octave", +[](Env& e) { test_roundtrip(e, *e.kv_octave, 79); });
     run("capture", test_capture);
     run("eviction", test_eviction);
+    run("slot", test_slot);
     run("ring", test_spec_ring);
 
     const shelf::Status arena_release = arena.shutdown();

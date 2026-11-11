@@ -115,6 +115,7 @@ void compute_usage(const char* prog) {
     printf("                                 bucket, default 0)\n");
     printf("  --prefix-cache-concurrency N   max concurrent prefix captures and stored\n");
     printf("                                 prefix entries (default 4)\n");
+    printf("  --prefix-cache-strategy MODE   radix | slot (default radix)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }
@@ -205,6 +206,7 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
     auto& mtp_stats = opt.mtp_stats;
     auto& prefix_cache_enabled = opt.prefix_cache_enabled;
     auto& prefix_cache_concurrency = opt.prefix_cache_concurrency;
+    auto& prefix_cache_strategy = opt.prefix_cache_strategy;
     auto& working_set_reserve_gib = opt.working_set_reserve_gib;
     auto& rope_factor = opt.rope_factor;
     unsigned long top_k = 0;
@@ -384,6 +386,17 @@ auto& max_concurrent_requests = opt.max_concurrent_requests;
             if (!parse_uint(argv[++i], prefix_cache_concurrency) ||
                 prefix_cache_concurrency == 0 || prefix_cache_concurrency > 65535) {
                 fprintf(stderr, "bad --prefix-cache-concurrency (expected 1..65535)\n");
+                return kComputeParseError;
+            }
+        } else if (std::strcmp(argv[i], "--prefix-cache-strategy") == 0 &&
+                   i + 1 < argc) {
+            const char* value = argv[++i];
+            if (std::strcmp(value, "radix") == 0) {
+                prefix_cache_strategy = 0;
+            } else if (std::strcmp(value, "slot") == 0) {
+                prefix_cache_strategy = 1;
+            } else {
+                fprintf(stderr, "bad --prefix-cache-strategy (expected radix or slot)\n");
                 return kComputeParseError;
             }
         } else if (std::strcmp(argv[i], "--serve-stdio") == 0) {

@@ -1148,8 +1148,30 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         const qwen35::runtime::KVCapacitySnapshot snapshot =
             runtime.kv_capacity_snapshot();
         const uint64_t page_tokens = runtime.config().page_tokens;
+        nlohmann::json prefix = {
+            {"enabled", runtime.prefix_cache_active()},
+            {"reuse_slots", 0u},
+            {"entries", 0u},
+            {"saves", 0u},
+            {"hits", 0u},
+            {"misses", 0u},
+            {"restores", 0u},
+            {"evictions", 0u},
+        };
+        if (runtime.prefix_cache() != nullptr) {
+            const qwen35::runtime::PrefixCacheStats prefix_stats =
+                runtime.prefix_cache()->stats();
+            prefix["reuse_slots"] = runtime.prefix_cache()->reuse_slot_count();
+            prefix["entries"] = prefix_stats.entries;
+            prefix["saves"] = prefix_stats.saves;
+            prefix["hits"] = prefix_stats.hits;
+            prefix["misses"] = prefix_stats.misses;
+            prefix["restores"] = prefix_stats.restores;
+            prefix["evictions"] = prefix_stats.entries_evicted;
+        }
         emit_json(nlohmann::json{
             {"event", "stats"},
+            {"prefix", std::move(prefix)},
             {"kv",
              {
                  {"page_tokens", page_tokens},

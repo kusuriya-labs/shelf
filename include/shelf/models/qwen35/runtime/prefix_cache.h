@@ -22,11 +22,20 @@ namespace runtime {
 using ::shelf::inference::prefix::PrefixKVStore;
 using ::shelf::state::PageId;
 
+enum class PrefixCacheStrategy : uint8_t {
+    Radix = 0,
+    Slot = 1,
+};
+
 struct PrefixCacheConfig {
     uint32_t max_concurrent = 4;
     uint32_t min_prefix_tokens = 64;
     uint32_t spec_ring_bytes = 0;
+    PrefixCacheStrategy strategy = PrefixCacheStrategy::Radix;
+    uint32_t slot_count = 0;
 };
+
+inline constexpr uint32_t kInvalidReuseSlot = 0xFFFFFFFFu;
 
 struct PrefixCacheBytes {
     std::size_t state = 0;
@@ -67,6 +76,7 @@ struct PrefixHit {
     uint32_t match_tokens = 0;
     uint32_t ring_length = 0;
     uint32_t ring_next_position = 0;
+    uint32_t slot = kInvalidReuseSlot;
 
     bool hit() const noexcept { return entry_id != 0; }
 
@@ -143,6 +153,23 @@ class PrefixCache {
 
     PrefixHit lookup(const std::vector<uint32_t>& tokens);
 
+    PrefixCacheStrategy strategy() const noexcept { return config_.strategy; }
+
+    uint32_t reuse_slot_count() const noexcept {
+        return slots_ ? static_cast<uint32_t>(slots_->slots.size()) : 0u;
+    }
+
+    uint32_t reserve_reuse_slot(uint64_t owner, const PrefixHit& hit) noexcept;
+
+    void release_reuse_slot(uint64_t owner) noexcept;
+
+    Status save_slot_boundary(uint64_t owner,
+                              const PagedSequenceState& seq,
+                              const std::vector<uint32_t>& tokens,
+                              uint32_t input_len,
+                              hipStream_t stream,
+                              const SpecRingRef* ring = nullptr);
+
     Status save_input_boundary(
         const PagedSequenceState& seq,
         const std::vector<uint32_t>& tokens,
@@ -199,7 +226,23 @@ class PrefixCache {
     struct AuxSlot {
         uint32_t hot_slot = 0;
         uint32_t ring_slot = 0xFFFFFFFFu;
+        uint32_t reuse_slot = kInvalidReuseSlot;
     };
+
+    struct ReuseSlot {
+        uint64_t entry_id = 0;
+        uint64_t payload = 0;
+        uint64_t last_used = 0;
+        uint64_t owner = 0;
+        bool reserved = false;
+    };
+
+    struct SlotTable {
+        std::vector<ReuseSlot> slots;
+        uint64_t clock = 0;
+    };
+
+    std::shared_ptr<SlotTable> slots_;
 
     struct AuxTable {
         std::unordered_map<uint64_t, AuxSlot> slots;

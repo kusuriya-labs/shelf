@@ -521,6 +521,17 @@ Result<PrefixCache> PrefixCache::create(
         return Status::invalid_argument("max_concurrent must be > 0", __FILE__,
                                         __LINE__);
     }
+    uint32_t reuse_slots = 0u;
+    if (config.strategy == PrefixCacheStrategy::Slot) {
+        reuse_slots = config.slot_count != 0u
+            ? config.slot_count
+            : (config.max_concurrent > 0u ? config.max_concurrent - 1u : 0u);
+        if (reuse_slots == 0u || reuse_slots + 1u > config.max_concurrent) {
+            return Status::invalid_argument(
+                "slot strategy needs slot_count + 1 state slots", __FILE__,
+                __LINE__);
+        }
+    }
     auto state = Qwen35PrefixState::create(arena, active_state_pool, active_qsa_pool,
                                            active_ple_conv_pool, extra_ranks, config);
     if (!state.ok()) return state.status();
@@ -546,9 +557,24 @@ Result<PrefixCache> PrefixCache::create(
     cache.kv_ = std::make_unique<PrefixKVStore>(kv.release());
     cache.aux_ = std::make_shared<AuxTable>();
     cache.captures_.resize(config.max_concurrent);
+    std::shared_ptr<SlotTable> slots;
+    if (reuse_slots != 0u) {
+        slots = std::make_shared<SlotTable>();
+        slots->slots.resize(reuse_slots);
+    }
+    cache.slots_ = slots;
     Qwen35PrefixState* state_ptr = cache.state_.get();
     std::shared_ptr<AuxTable> aux = cache.aux_;
-    cache.kv_->set_evict_callback([state_ptr, aux](uint64_t payload) {
+    cache.kv_->set_evict_callback([state_ptr, aux, slots](uint64_t payload) {
+        if (slots) {
+            for (ReuseSlot& slot : slots->slots) {
+                if (slot.payload == payload) {
+                    slot.entry_id = 0;
+                    slot.payload = 0;
+                    break;
+                }
+            }
+        }
         auto it = aux->slots.find(payload);
         if (it == aux->slots.end()) return;
         const AuxSlot slot = it->second;
@@ -617,7 +643,134 @@ PrefixHit PrefixCache::lookup(const std::vector<uint32_t>& tokens) {
     out.match_tokens = hit.match_tokens;
     out.ring_length = state_->ring_length(it->second.ring_slot);
     out.ring_next_position = state_->ring_next(it->second.ring_slot);
+    out.slot = it->second.reuse_slot;
     return out;
+}
+
+uint32_t PrefixCache::reserve_reuse_slot(uint64_t owner, const PrefixHit& hit) noexcept {
+    if (!slots_ || slots_->slots.empty()) return kInvalidReuseSlot;
+    std::vector<ReuseSlot>& slots = slots_->slots;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved && slots[i].owner == owner) return i;
+    }
+    if (hit.hit() && hit.slot != kInvalidReuseSlot && hit.slot < slots.size() &&
+        !slots[hit.slot].reserved) {
+        ReuseSlot& slot = slots[hit.slot];
+        slot.reserved = true;
+        slot.owner = owner;
+        slot.last_used = ++slots_->clock;
+        return hit.slot;
+    }
+    uint32_t best = kInvalidReuseSlot;
+    uint64_t best_used = 0;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved) continue;
+        if (best == kInvalidReuseSlot || slots[i].last_used < best_used) {
+            best = i;
+            best_used = slots[i].last_used;
+        }
+    }
+    if (best == kInvalidReuseSlot) return kInvalidReuseSlot;
+    slots[best].reserved = true;
+    slots[best].owner = owner;
+    slots[best].last_used = ++slots_->clock;
+    return best;
+}
+
+void PrefixCache::release_reuse_slot(uint64_t owner) noexcept {
+    if (!slots_) return;
+    for (ReuseSlot& slot : slots_->slots) {
+        if (slot.reserved && slot.owner == owner) {
+            slot.reserved = false;
+            slot.owner = 0;
+        }
+    }
+}
+
+Status PrefixCache::save_slot_boundary(uint64_t owner,
+                                       const PagedSequenceState& seq,
+                                       const std::vector<uint32_t>& tokens,
+                                       uint32_t input_len,
+                                       hipStream_t stream,
+                                       const SpecRingRef* ring) {
+    if (!slots_) return Status::make_ok();
+    std::vector<ReuseSlot>& slots = slots_->slots;
+    uint32_t index = kInvalidReuseSlot;
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].reserved && slots[i].owner == owner) {
+            index = i;
+            break;
+        }
+    }
+    if (index == kInvalidReuseSlot) return Status::make_ok();
+    auto fail = [&](const Status& st) {
+        slots[index].reserved = false;
+        slots[index].owner = 0;
+        return st;
+    };
+    if (!kv_ || !state_ || !aux_) {
+        return fail(Status::invalid_state("prefix cache is not ready", __FILE__,
+                                          __LINE__));
+    }
+    if (input_len != tokens.size()) {
+        return fail(Status::invalid_argument("save position must equal token count",
+                                             __FILE__, __LINE__));
+    }
+    if ((input_len / page_tokens_) * page_tokens_ != seq.position) {
+        return fail(Status::invalid_argument(
+            "slot save requires a page-aligned sequence position", __FILE__,
+            __LINE__));
+    }
+    Qwen35SequenceSet seqs(seq, tp_hook_);
+    if (!seqs.valid()) {
+        return fail(Status::invalid_state("prefix cache rank sequence missing",
+                                          __FILE__, __LINE__));
+    }
+    auto hot = acquire_state_slot(stream);
+    if (!hot.ok()) return fail(hot.status());
+    Status st = state_->capture_gdn_to_hot(hot.value(), seqs, stream);
+    uint32_t ring_slot = 0xFFFFFFFFu;
+    if (st.ok() && ring != nullptr && ring->valid()) {
+        auto acquired = acquire_ring_slot(stream);
+        if (acquired.ok()) {
+            ring_slot = acquired.value();
+            const Status ring_st =
+                state_->save_ring(ring_slot, *ring, input_len, stream);
+            if (!ring_st.ok()) {
+                state_->release_ring_slot(ring_slot);
+                ring_slot = 0xFFFFFFFFu;
+            }
+        }
+    }
+    if (!st.ok()) {
+        state_->release_hot_slot(hot.value());
+        return fail(st);
+    }
+    const uint64_t payload = aux_->next++;
+    auto saved = kv_->save(seqs, tokens, input_len, payload, stream);
+    if (!saved.ok()) {
+        state_->release_hot_slot(hot.value());
+        if (ring_slot != 0xFFFFFFFFu) state_->release_ring_slot(ring_slot);
+        if (saved.status().code() == Status::Code::out_of_range) {
+            ++stats_.skipped_too_short;
+            return fail(Status::make_ok());
+        }
+        return fail(saved.status());
+    }
+    aux_->slots.emplace(payload, AuxSlot{hot.value(), ring_slot, index});
+    ReuseSlot& slot = slots[index];
+    const uint64_t old_entry = slot.entry_id;
+    slot.entry_id = saved.value();
+    slot.payload = payload;
+    slot.last_used = ++slots_->clock;
+    slot.reserved = false;
+    slot.owner = 0;
+    if (old_entry != 0u && old_entry != saved.value()) {
+        (void)kv_->erase(old_entry);
+    }
+    ++stats_.saves;
+    ++stats_.input_boundary_saves;
+    return Status::make_ok();
 }
 
 Status PrefixCache::save_input_boundary(
