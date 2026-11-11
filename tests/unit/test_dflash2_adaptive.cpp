@@ -55,6 +55,19 @@ int main() {
         rt::select_dflash2_adaptive(active, binding, config, round);
         check(live[1].dflash->adaptive_rows == 3u, "recovered request resumes speculation");
         active.clear();
+        for (unsigned i = 0; i < 8; ++i) {
+            if (!live[i].dflash) {
+                live[i].dflash = std::make_unique<rt::DFlash2RequestSession>();
+                live[i].dflash->ready = true;
+            }
+            live[i].dflash->adaptive_accepted_ema = 1.0;
+            live[i].dflash->adaptive_probe_age = 0;
+            active.push_back(&live[i]);
+        }
+        rt::select_dflash2_adaptive(active, binding, config, round);
+        check(live[0].dflash->adaptive_rows == 0u,
+              "larger batch disables marginal acceptance");
+        active.clear();
         for (auto& request : live) {
             if (!request.dflash) {
                 request.dflash = std::make_unique<rt::DFlash2RequestSession>();

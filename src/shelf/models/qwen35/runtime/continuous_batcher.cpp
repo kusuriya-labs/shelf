@@ -1104,6 +1104,7 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
     if (host_trace) clock_gettime(CLOCK_THREAD_CPUTIME_ID, &host_start);
     uint32_t host_sessions = 0u;
     uint32_t host_rows = 0u;
+    const bool high_load = dflash_.adaptive && dflash2_policy_decoding_count(active) >= 6u;
     if (dflash_.adaptive) {
         select_dflash2_adaptive(active, dflash_, config_, adaptive_round_);
     }
@@ -1238,7 +1239,8 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
             if (dflash_.adaptive) {
                 if (step.num_drafts == dflash_.num_drafts) {
                     auto& ema = request.dflash->adaptive_accepted_ema;
-                    ema += 0.03 * (static_cast<double>(step.num_accepted) - ema);
+                    const double alpha = high_load ? 0.10 : 0.03;
+                    ema += alpha * (static_cast<double>(step.num_accepted) - ema);
                 }
             }
             for (uint32_t j = 0; j < step.emitted_count; ++j) {

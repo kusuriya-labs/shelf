@@ -1147,8 +1147,9 @@ DFlash2 の draft / verify 間で server と mask を交換する処理は未実
 - 投機候補と、セッション枠が足りず通常 decode 中の request の合計が
   `SHELF_DFLASH2_POLICY_MAX_SESSIONS`（既定 12）を超える場合、
   その batch は全員を通常 decode にする。0 を指定すると batch 投機を停止する。
-- 各 request の 1 round 当たり受理 draft 数の EMA（初期値 2、係数 0.03）が
-  0.6 を下回ると、その request は通常 decode に移る。停止中は 64 round ごとに
+- 各 request の 1 round 当たり受理 draft 数の EMA の初期値は 2。
+  生成中の request が 5 件以下なら係数 0.03・停止閾値 0.6、6 件以上なら
+  係数 0.10・停止閾値 1.5 とし、閾値を下回る request は通常 decode に移る。停止中は 64 round ごとに
   一度だけ投機を試し、受理率が回復したら再開する。短い残り長に伴う打ち切り
   round は EMA に含めない。
 - DFlash2 の複数 request による compact verify は既定で exact chunk を使う。
