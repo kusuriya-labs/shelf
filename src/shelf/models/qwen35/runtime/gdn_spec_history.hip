@@ -171,7 +171,8 @@ Status commit_gdn_compact_log(
     uint32_t key_heads,
     hipStream_t stream,
     const int32_t* row_indices,
-    uint32_t log_row_capacity) {
+    uint32_t log_row_capacity,
+    bool exact_replay) {
     if (log.delta == nullptr || log.k == nullptr || log.a == nullptr) {
         return Status::invalid_argument("commit_gdn_compact_log: log is null", __FILE__,
                                         __LINE__);
@@ -215,6 +216,7 @@ Status commit_gdn_compact_log(
     a.compact_rows = rows;
     a.compact_row_indices = row_indices;
     a.compact_row_capacity = log_row_capacity;
+    a.compact_exact_replay = exact_replay ? 1u : 0u;
     const hipError_t err = ::shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream);
     if (err != hipSuccess) {
         return Status::hip_error("commit_gdn_compact_log launch", hipGetErrorString(err),

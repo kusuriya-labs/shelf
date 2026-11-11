@@ -691,12 +691,11 @@ struct RowSmem {
     _Float16 kqfrag[2][gdngfx12::kWk / 16u][32][16];
 };
 
-extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
-void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
+template <bool kLossy>
+__device__ __forceinline__ void gdn_recurrence_wmma_commit_body(GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
     using g::f32x8_t;
     using g::Frag2;
-    constexpr bool kLossy = true;
 
     const uint32_t hd = a.head_k;
     const uint32_t hv = a.head_v;
@@ -822,6 +821,16 @@ void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
     }
 }
 
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void shelf_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_commit_body<true>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void shelf_gdn_recurrence_wmma_commit_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_commit_body<false>(a);
+}
 
 extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
 void shelf_gdn_recurrence_wmma_verify_lossy(
@@ -991,7 +1000,10 @@ hipError_t launch_gdn_recurrence_f32_wmma_commit(
     if (grid_x == 0u) return hipErrorInvalidValue;
     const GdnRecurrenceArgs a = args;
     const dim3 grid(static_cast<uint32_t>(grid_x));
-    shelf_gdn_recurrence_wmma_commit<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    if (a.compact_exact_replay != 0u)
+        shelf_gdn_recurrence_wmma_commit_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    else
+        shelf_gdn_recurrence_wmma_commit<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     return hipGetLastError();
 }
 

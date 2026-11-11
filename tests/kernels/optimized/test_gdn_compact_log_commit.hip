@@ -430,6 +430,13 @@ void test_tree_chunk(hipStream_t stream) {
                  hipStreamSynchronize(stream) == hipSuccess;
             std::vector<float> state;
             ok = ok && read_state_f16(d.state, state, kSlotStride);
+            ok = ok && write_state_f16(d.state, base, state_n);
+            a.compact_exact_replay = 1u;
+            ok = ok && shelf::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream) == hipSuccess &&
+                 hipStreamSynchronize(stream) == hipSuccess;
+            std::vector<float> exact_state;
+            ok = ok && read_state_f16(d.state, exact_state, kSlotStride);
+            a.compact_exact_replay = 0u;
             if (shape == 0u) {
                 ok = ok && write_state_f16(d.state, base, state_n);
                 a.row_parent = nullptr;
@@ -482,7 +489,7 @@ void test_tree_chunk(hipStream_t stream) {
                     cpu_output[i * kHeadV + v0] = output;
                 }
             }
-            double cdiff = 0, cpeak = 0, csdiff = 0, cspeak = 0;
+            double cdiff = 0, cpeak = 0, csdiff = 0, cspeak = 0, exact_diff = 0;
             if (ok) {
                 for (uint32_t i = 0; i < n; ++i)
                     for (uint32_t v0 = 0; v0 < kHeadV; ++v0) {
@@ -493,12 +500,15 @@ void test_tree_chunk(hipStream_t stream) {
                 for (uint32_t j = 0; j < kHeadK * kHeadV; ++j) {
                     const double x = cpu_states[n - 1u][j];
                     csdiff = std::max(csdiff, std::abs(x - state[j]));
+                    exact_diff = std::max(exact_diff, std::abs(x - exact_state[j]));
                     cspeak = std::max(cspeak, std::abs(x));
                 }
             }
             std::printf("tree CPU n=%u shape=%u output=%.6g state=%.6g\n", n, shape, cdiff / cpeak, csdiff / cspeak);
             check(ok && cpeak > 0 && cspeak > 0 && cdiff / cpeak < 0.001 && csdiff / cspeak < 0.001,
                   "tree chunk output and replay match CPU");
+            check(ok && cspeak > 0 && exact_diff / cspeak < 0.001,
+                  "exact tree replay matches CPU");
             std::printf("tree n=%u shape=%u output=%.6g state=%.6g\n", n, shape, diff / peak, sdiff / speak);
             check(ok && peak > 0 && speak > 0 && diff / peak < 0.001 && sdiff / speak < 0.001,
                   "tree chunk output and replay match serial");

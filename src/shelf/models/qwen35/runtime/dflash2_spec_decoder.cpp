@@ -1491,7 +1491,7 @@ static Result<DFlash2SpecIterationOutput> dflash2_spec_step_impl(
                     compact.a_layer_stride = g.compact_a_layer_stride;
                     st = commit_gdn_compact_log(*g.pool, decoder.sequence->slot, compact,
                         g.commit_request, static_cast<uint32_t>(replay_rows.size()),
-                        decoder.gdn_key_heads, g.stream, g.tree_selected, verify_rows);
+                        decoder.gdn_key_heads, g.stream, g.tree_selected, verify_rows, true);
                     if (!st.ok()) return st;
                 }
             } else if (restore_needed && !tree_compact) {
@@ -2324,7 +2324,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             st = commit_gdn_compact_log(
                 *state.pool, decoder.sequence->slot, compact, state.commit_request,
                 accepted + 1u, decoder.gdn_key_heads, state.stream, replay,
-                tree_mode ? total_rows : 0u);
+                tree_mode ? total_rows : 0u, tree_mode);
             if (!st.ok()) return st;
         }
 

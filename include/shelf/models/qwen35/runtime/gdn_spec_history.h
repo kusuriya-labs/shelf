@@ -62,6 +62,7 @@ Status commit_gdn_compact_log(
     uint32_t key_heads,
     hipStream_t stream,
     const int32_t* row_indices = nullptr,
-    uint32_t log_row_capacity = 0u);
+    uint32_t log_row_capacity = 0u,
+    bool exact_replay = false);
 
 }  // namespace shelf::qwen35::runtime
