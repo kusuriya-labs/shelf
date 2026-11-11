@@ -305,3 +305,25 @@ SHA-256 がすべて一致した。各回・診断値・基準 hash は
 `test_server_dflash2.py` は 20 項目、`test_compute_dflash2_tree.py` は 3 prompt すべて
 通過した。2 つ目の変更は budget 0 の経路を変更せず、前述の 16 回の生成列でも一致を確認した。
 サーバー全回帰は実行していない。c=2 以上は本測定に含まれない。
+
+## 同時生成時の速度と数値：c=2
+
+R9700、同じ target / drafter、K=7、BF16 KV、greedy、thinking off、最大長 1024。
+`shelf-server` の同時 request 上限を 2 にし、policy と prefix cache は既定のままにした。
+各 request は最大 512 token、構成を chain / N=9 / 10 / 12 と逆順に切り替えて各 2 回実行した。
+A は code prompt 1・13、B は code 1・shell 0。prompt 番号は上記 24 件の基準と同じ。
+
+server が compute から受け取った各 token の単調時計時刻を計測用の一時 Python copy で記録し、
+全員の最初の token のうち最も遅い時刻から、最後の token のうち最も早い時刻までの token 数を
+区間秒数で割った。prefill と、1 件でも生成を終了した後の時間を含まない。時刻記録の
+オーバーヘッドを含む。セルは 2 回平均、括弧は同じ prompt 条件の chain 平均との比。
+
+| prompt | chain tok/s | N=9 tok/s | N=10 tok/s | N=12 tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| A：同種 | 130.76 | 124.77 (-4.58%) | 124.32 (-4.93%) | 126.12 (-3.55%) |
+| B：混在 | 122.51 | 118.36 (-3.39%) | 117.82 (-3.83%) | 131.19 (+7.09%) |
+
+32 request とも 512 token を生成した。c=1 の非投機基準で比較した first-mismatch の
+非投機 top-1/top-2 logit 差の最大は 0.05738 で、0.1 以下だった。結果の詳細は
+[forest_serve_concurrency_results.json](forest_serve_concurrency_results.json) に記録した。
+N=12 は B で向上するが A では低下したため、この 2 条件だけでは一律の改善とは言えない。
