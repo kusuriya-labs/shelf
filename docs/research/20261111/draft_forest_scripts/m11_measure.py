@@ -16,16 +16,19 @@ def run(i,mode,rep,tag='speed'):
  if path.exists(): return
  base=json.loads((BASE/f'base-{i}.json').read_text())
  assert base['prompt']==PROMPTS[i]
- cmd=[str(BINARY),'--model-dir',MODEL,'--input-ids-file','/dev/stdin','--max-new-tokens','512','--max-seq-len','1024','--arena-gib','auto','--device','0','--temperature','0','--top-p','1','--top-k','0','--seed','0','--dflash2-model-dir',DRAFT,'--dflash2-drafts','7']
+ length='256' if tag=='repeat256' else '512'
+ seq='512' if tag=='repeat256' else '1024'
+ cmd=[str(BINARY),'--model-dir',MODEL,'--input-ids-file','/dev/stdin','--max-new-tokens',length,'--max-seq-len',seq,'--arena-gib','auto','--device','0','--temperature','0','--top-p','1','--top-k','0','--seed','0','--dflash2-model-dir',DRAFT,'--dflash2-drafts','7']
  if mode!='chain': cmd+=['--dflash2-tree-budget',mode]
  env=dict(os.environ,SHELF_GDN_VERIFY_CHUNKED='1',SHELF_GDN_TREE_CHUNKED='1')
  for key in ('SHELF_GDN_VERIFY_CHUNKED_EXACT','SHELF_GDN_RECURRENCE_EXACT'): env.pop(key,None)
- start=time.time(); p=subprocess.run(([] if os.environ.get('M11_LOCK_HELD')=='1' else ['flock','/tmp/r9700.lock'])+cmd,input='\n'.join(map(str,base['input_ids']))+'\n',text=True,capture_output=True,env=env)
- if p.returncode: raise RuntimeError(f'{i} {mode} {rep}: {p.stderr[-4000:]}')
- data=dict(line.split('=',1) for line in p.stdout.splitlines() if '=' in line)
+ start=time.time(); p=subprocess.Popen(([] if os.environ.get('M11_LOCK_HELD')=='1' else ['flock','/tmp/r9700.lock'])+cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+ stdout,stderr=p.communicate('\n'.join(map(str,base['input_ids']))+'\n')
+ if p.returncode: raise RuntimeError(f'{i} {mode} {rep}: {stderr[-4000:]}')
+ data=dict(line.split('=',1) for line in stdout.splitlines() if '=' in line)
  toks=[int(x) for x in data['GENERATED_IDS'].split(',') if x.strip()]
  baseline=base['tokens']; mismatch=next((j for j,(x,y) in enumerate(zip(toks,baseline)) if x!=y),None)
- result={'prompt_index':i,'mode':mode,'rep':rep,'started':start,'finished':time.time(),'tps':float(data['DECODE_TOKENS_PER_SEC']),'n_tokens':len(toks),'tokens':toks,'first_mismatch':mismatch,'margin':base['margins'][mismatch] if mismatch is not None else None,'metrics':{k:v for k,v in data.items() if k.startswith('DFLASH2_')}}
+ result={'launched_pid':p.pid,'lock_held_by_parent':os.environ.get('M11_LOCK_HELD')=='1','prompt_index':i,'mode':mode,'rep':rep,'started':start,'finished':time.time(),'tps':float(data['DECODE_TOKENS_PER_SEC']),'n_tokens':len(toks),'tokens':toks,'first_mismatch':mismatch,'margin':base['margins'][mismatch] if mismatch is not None else None,'metrics':{k:v for k,v in data.items() if k.startswith('DFLASH2_')}}
  tmp=path.with_suffix('.tmp'); tmp.write_text(json.dumps(result)); tmp.replace(path)
  print(tag,i,mode,rep,result['tps'],len(toks),flush=True)
 def prompt_group(i):
@@ -40,6 +43,10 @@ def locked_group(kind, number):
 def main():
  if len(sys.argv)==3 and sys.argv[1]=='--prompt':
   prompt_group(int(sys.argv[2])); return
+ if len(sys.argv)==3 and sys.argv[1]=='--repeat256':
+  group=int(sys.argv[2])
+  for rep in range(group*5,(group+1)*5): run(2,'10',rep,'repeat256')
+  return
  if len(sys.argv)==3 and sys.argv[1]=='--repeat':
   rep=int(sys.argv[2]); order=MODES[rep%4:]+MODES[:rep%4]
   for mode in order: run(2,mode,rep,'repeat')

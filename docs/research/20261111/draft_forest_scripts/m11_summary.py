@@ -38,3 +38,11 @@ cats={'code':[1,5,12,13,21,23],'japanese':[3,4,5,6,7,8,9,10,22,23],'reasoning':[
 for label,ids in cats.items():
  sel=[r for i,_,r in rows if i in ids]
  if sel: print(f'| {label} | {len(sel)} | '+' | '.join(f'{(st.mean(r[m] for r in sel)-1)*100:+.2f}%' for m in modes[1:])+' |')
+print('\n| category | best N counts (10 / 12 / 16) |')
+print('|---|---:|')
+for label,ids in cats.items():
+ sel=[v for i,v,_ in rows if i in ids]
+ if sel:
+  wins=[max(modes[1:],key=lambda m:v[m]) for v in sel]
+  print(f'| {label} | '+ ' / '.join(str(wins.count(m)) for m in modes[1:])+' |')
+print('\nTwo-repeat generated sequence disagreements:',sum(records[i,m,0]['tokens']!=records[i,m,1]['tokens'] for i,_,_ in rows for m in modes))
