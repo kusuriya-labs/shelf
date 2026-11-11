@@ -1743,6 +1743,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         uint32_t proposal_drafts = 0u;
         uint32_t remaining = 0u;
         uint32_t position = 0u;
+        uint32_t max_tree_rows = 0u;
         uint32_t row_begin = 0u;
         uint32_t total_rows = 0u;
         uint64_t sample_index = 0u;
@@ -1796,6 +1797,9 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
         plan.remaining = slot.remaining_tokens;
         plan.position = position;
+        plan.max_tree_rows = room;
+        if (slot.page_tokens != 0u)
+            plan.max_tree_rows = std::min(plan.max_tree_rows, slot.page_tokens - position % slot.page_tokens);
         plan.sample_index = decoder->sample_index;
         plan.thinking_allowance = slot.thinking_allowance;
         plan.thinking_close_token = slot.thinking_close_token;
@@ -1814,7 +1818,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         plans.push_back(plan);
     }
 
-    const uint32_t total_rows = row_cursor;
+    uint32_t total_rows = row_cursor;
     if (total_rows > context.max_rows) {
         return Status::invalid_argument("batch rows exceed context capacity", __FILE__,
                                         __LINE__);
@@ -1831,7 +1835,9 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             break;
         }
     }
-    bool bridge = context.tree_budget == 0u && context.verify_token_ids_device != nullptr &&
+    const bool tree_mode = context.tree_budget != 0u &&
+        context.tree_budget > plans.front().decoder->config.num_drafts + 1u;
+    bool bridge = !tree_mode && context.verify_token_ids_device != nullptr &&
                   context.decision_staging_device != nullptr;
     if (bridge) {
         for (const SlotPlan& plan : plans) {
@@ -1933,7 +1939,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
     }
 
-    if (context.tree_budget != 0u) {
+    if (tree_mode) {
         if (context.tree.empty())
             return Status::invalid_state("batch tree scratch is unavailable", __FILE__, __LINE__);
         uint32_t proposal_row = 0u;
@@ -1941,8 +1947,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             SlotPlan& plan = plans[i];
             if (!plan.batched) continue;
             const uint32_t row = propose_requests.size() == 1u ? 0u : proposal_row + 1u;
-            const uint32_t room = plan.decoder->sequence->max_seq_len - plan.position;
-            Status st = select_budget_tree(*plan.decoder, plan.anchor, plan.position, room,
+            Status st = select_budget_tree(*plan.decoder, plan.anchor, plan.position, plan.max_tree_rows,
                 context.tree_budget, plan.drafts, row,
                 std::span<const int32_t>(drafts[i].data(), plan.drafts),
                 reinterpret_cast<shelf::kernel::DFlash2TreeProbabilities*>(context.tree.front().probability_scratch),
@@ -1950,6 +1955,16 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             if (!st.ok()) return st;
             proposal_row += plan.proposal_drafts + 1u;
         }
+        row_cursor = 0u;
+        for (SlotPlan& plan : plans) {
+            if (!plan.batched) continue;
+            plan.row_begin = row_cursor;
+            plan.total_rows = static_cast<uint32_t>(plan.tree.tokens.size());
+            row_cursor += plan.total_rows;
+        }
+        total_rows = row_cursor;
+        if (total_rows > context.max_rows || total_rows > kDFlash2SpecMaxVerifyRows)
+            return Status::invalid_argument("batch tree rows exceed capacity", __FILE__, __LINE__);
     }
 
     for (std::size_t i = 0; i < plans.size(); ++i) {
@@ -1986,7 +2001,9 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         SlotPlan& plan = plans[i];
         if (!plan.batched) continue;
         DFlash2SpecDecoder& decoder = *plan.decoder;
-        if (!bridge) {
+        if (tree_mode) {
+            token_ids.insert(token_ids.end(), plan.tree.tokens.begin(), plan.tree.tokens.end());
+        } else if (!bridge) {
             token_ids.push_back(plan.anchor);
             for (uint32_t j = 0; j < plan.drafts; ++j) {
                 token_ids.push_back(drafts[i][j]);
@@ -2023,6 +2040,44 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
     if (total_rows > 0u) {
         DFlash2SpecDecoder& leader = *plans.front().decoder;
         std::vector<ExecuteBatchOptions> options = build_batch_gdn_options(context, total_rows);
+        if (tree_mode) {
+            uint32_t ancestor_cursor = 0u;
+            for (const SlotPlan& plan : plans) {
+                if (!plan.batched) continue;
+                for (uint32_t j = 0; j < plan.total_rows; ++j) {
+                    const uint32_t row = plan.row_begin + j;
+                    const int32_t parent = plan.tree.parent[j];
+                    context.tree_parent_host[row] = parent < 0 ? -1 : parent + static_cast<int32_t>(plan.row_begin);
+                    context.tree_depth_host[row] = plan.tree.depth[j];
+                    context.tree_offsets_host[row] = ancestor_cursor;
+                    context.tree_rope_host[row] = plan.tree.rope_positions[j];
+                    context.tree_committed_end_host[row] = plan.position;
+                    for (uint32_t k = plan.tree.ancestor_offsets[j]; k < plan.tree.ancestor_offsets[j + 1u]; ++k)
+                        context.tree_ancestors_host[ancestor_cursor++] = plan.tree.ancestor_positions[k];
+                }
+            }
+            context.tree_offsets_host[total_rows] = ancestor_cursor;
+            for (std::size_t r = 0; r < options.size(); ++r) {
+                auto scope = shelf::gpu::ScopedDevice::create(leader.gdn_ranks[r].device);
+                if (!scope.ok()) return scope.status();
+                auto& tree = context.tree[r];
+                const auto copy = [](void* dst, const void* src, std::size_t bytes) {
+                    return hipMemcpy(dst, src, bytes, hipMemcpyHostToDevice);
+                };
+                if (copy(tree.parent, context.tree_parent_host.data(), total_rows * sizeof(int32_t)) != hipSuccess ||
+                    copy(tree.depth, context.tree_depth_host.data(), total_rows * sizeof(uint32_t)) != hipSuccess ||
+                    copy(tree.ancestor_offsets, context.tree_offsets_host.data(), (total_rows + 1u) * sizeof(uint32_t)) != hipSuccess ||
+                    copy(tree.ancestor_positions, context.tree_ancestors_host.data(), ancestor_cursor * sizeof(uint32_t)) != hipSuccess ||
+                    copy(tree.rope_positions, context.tree_rope_host.data(), total_rows * sizeof(uint32_t)) != hipSuccess ||
+                    copy(tree.committed_end, context.tree_committed_end_host.data(), total_rows * sizeof(uint32_t)) != hipSuccess)
+                    return Status::hip_error("batch tree metadata upload", hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+                options[r].tree_row_parent = tree.parent;
+                options[r].tree_anc_offsets = tree.ancestor_offsets;
+                options[r].tree_anc_positions = tree.ancestor_positions;
+                options[r].tree_committed_end_rows = tree.committed_end;
+                options[r].rope_positions = tree.rope_positions;
+            }
+        }
         if (batch_timing) {
             const hipError_t start_err =
                 hipEventRecord(leader.verify_start_event, leader.stream);
