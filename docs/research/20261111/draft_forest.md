@@ -628,3 +628,102 @@ replay する必要がある。convolution state の復元は別途必要であ�
 
 現段階では GPU kernel、decoder 接続、数値ゲート、速度測定、KLD は未実施。
 上記の CPU の倍精度一致は WMMA や fp16 state の誤差を評価していない。
+
+## M10: 木の chunk verify と受理経路 replay
+
+M9 の式を WMMA の chunk verify に適用した。親をたどった path gate と祖先 mask
+により三角 solve と出力の寄与を制限し、各 node の U、k、exp(g) を compact log に
+記録する。木の受理経路は最終物理行を採用した場合も含めて replay し、conv history
+は受理最終行から復元する。`SHELF_GDN_VERIFY_CHUNKED=1` と
+`SHELF_GDN_TREE_CHUNKED=1` の両方を指定した単一 GPU の対応形状、最大 32 行で
+有効にし、その他は従来経路に戻す。chain の単発 decoder も前者で chunk verify と
+全受理時の replay を使う。
+
+R9700、Qwen3.8-27B EXL3 mul24、DFlash2 draft 7、BF16 KV、greedy、256 token。
+M9 までと同じ shell / code / reasoning の prompt、各条件 3 回。基準は同じ prompt の
+chain + chunk verify の 3 回平均。比の平均は各 prompt の比の算術平均。性能測定後に対応形状のガードを追加し、
+最終ビルドの N=12 は 3 prompt とも測定時と同じ生成列であることを別途確認した。
+
+| prompt | chain tok/s | N=8 | N=10 | N=12 | N=16 | N=20 | N=24 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| shell | 81.13 | 79.16 (-2.42%) | 83.46 (+2.88%) | 81.72 (+0.73%) | 79.70 (-1.76%) | 77.22 (-4.82%) | 74.65 (-7.98%) |
+| code | 80.15 | 80.19 (+0.05%) | 93.13 (+16.19%) | 86.33 (+7.71%) | 83.97 (+4.77%) | 76.33 (-4.77%) | 77.55 (-3.24%) |
+| reasoning | 82.44 | 82.54 (+0.13%) | 76.15 (-7.63%) | 89.38 (+8.42%) | 90.98 (+10.37%) | 81.39 (-1.27%) | 78.74 (-4.48%) |
+
+| N | 3 prompt の chain 比平均 |
+| ---: | ---: |
+| 8 | -0.75% |
+| 10 | +3.81% |
+| 12 | +5.62% |
+| 16 | +4.46% |
+| 20 | -3.62% |
+| 24 | -5.24% |
+
+N=12 が 3 prompt 平均 +5% を超えた。reasoning の N=10 は 52.31 / 88.05 /
+88.08 tok/s とばらつき、遅い回の verify GPU は 4011.32 ms、他の 2 回は
+2282.85 / 2280.27 ms（いずれも全 round 合計）だった。除外せず上表に含めた。reasoning N=10 の追加 3 回は 88.17 / 88.15 /
+88.09 tok/s だった。遅い回の原因は特定できていない。
+shell N=8 も 81.20 / 75.07 / 81.21 tok/s とばらついた。
+
+数値ゲートの最初の不一致位置と非投機の top-1/top-2 差は次のとおり。
+差なしは 256 token の生成列が一致したことを示す。N=8 の生成列は全 prompt で
+chain + chunk verify と一致した。
+
+| prompt | N=8 | N=10 | N=12 | N=16 |
+| --- | --- | --- | --- | --- |
+| shell | 37 / 0.05124 | 一致 | 一致 | 144 / 0.05738 |
+| code | 118 / 0.02022 | 202 / 0.09041 | 118 / 0.02022 | 243 / 0.01429 |
+| reasoning | 53 / 0.03022 | 22 / 0.03577 | 22 / 0.03577 | 22 / 0.03577 |
+
+位置は 0 始まり。N=20/24 でも最初の不一致の差は全 prompt で 0.1 以下。
+
+通常測定の round 内訳は各回の合計時間を round 数で割り、その 3 回を平均した。
+verify は GPU event 時間、選択・復元・gather は host 投入時間であり、これらは
+重複し得る。
+
+| prompt | N | verify GPU ms/round | 選択 ms/round | 復元投入 ms/round | gather 投入 ms/round |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| shell | 8 | 42.353 | 0.000 | 0.000 | 0.000 |
+| shell | 10 | 41.576 | 0.377 | 0.120 | 0.024 |
+| shell | 12 | 42.717 | 0.383 | 0.108 | 0.029 |
+| shell | 16 | 46.032 | 0.375 | 0.123 | 0.028 |
+| shell | 20 | 49.955 | 0.386 | 0.125 | 0.029 |
+| shell | 24 | 52.034 | 0.392 | 0.127 | 0.035 |
+| code | 8 | 40.288 | 0.000 | 0.000 | 0.000 |
+| code | 10 | 41.510 | 0.382 | 0.114 | 0.033 |
+| code | 12 | 42.590 | 0.378 | 0.119 | 0.030 |
+| code | 16 | 46.144 | 0.375 | 0.123 | 0.045 |
+| code | 20 | 50.373 | 0.390 | 0.119 | 0.047 |
+| code | 24 | 51.992 | 0.394 | 0.106 | 0.053 |
+| reasoning | 8 | 40.944 | 0.000 | 0.000 | 0.000 |
+| reasoning | 10 | 51.966 | 0.421 | 0.124 | 0.030 |
+| reasoning | 12 | 42.672 | 0.382 | 0.122 | 0.036 |
+| reasoning | 16 | 46.076 | 0.377 | 0.126 | 0.028 |
+| reasoning | 20 | 50.098 | 0.404 | 0.126 | 0.057 |
+| reasoning | 24 | 52.219 | 0.395 | 0.128 | 0.047 |
+
+同期を伴う診断を shell で別実行した。最初の verify の GDN recurrence 合計は
+semantic timing、復元・gather は全 round の hipEvent 平均で、通常の速度測定とは
+別の値である。chain と N=8 は同じ chain 経路のため木の復元・gather は計測しない。
+
+| 方式 | 初回 verify GDN ms | 復元 GPU ms/round | gather GPU ms/round |
+| --- | ---: | ---: | ---: |
+| chain | 1.202 | — | — |
+| budget8 | 1.214 | — | — |
+| budget10 | 1.264 | 0.508 | 0.076 |
+| budget12 | 1.304 | 0.520 | 0.082 |
+| budget16 | 1.364 | 0.534 | 0.084 |
+| budget20 | 1.473 | 0.560 | 0.093 |
+| budget24 | 1.559 | 0.606 | 0.105 |
+
+GPU 単体テストでは N=8/10/16 の chain、星形、混合木について逐次 CPU 参照と
+1 value head の全 node 出力・最終 node への経路 replay を比較した。基準ピークに対する最大誤差は
+出力 0.000467、state 0.000884。線形木の chunk 出力と replay state は既存 chain
+chunk に bit 一致した。逐次 GPU 経路との最大誤差はそれぞれ 0.000174、0.000666。
+
+関連 ctest 8 件（`test_dflash2_tree`、`test_gdn_tree_chunk_reference`、
+`test_gdn_recurrence`、`test_gdn_recurrence_exact_history`、
+`test_gdn_compact_log_commit`、`test_gdn_compact_commit_poc`、
+`test_gdn_spec_history`、`test_qwen35_gdn_recurrence_selector`）は通過。
+GDN 系 ctest は既知の fixture 破損がある `test_qwen35_gdn_gate_reference` を
+除いて 12 件すべて通過した。全回帰は実行していない。
