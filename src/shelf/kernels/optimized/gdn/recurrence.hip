@@ -229,7 +229,7 @@ struct LdsSmem {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-template <bool kLossy, bool kSerialRows = false>
+template <bool kLossy, bool kSerialRows = false, bool kSingleRow = false>
 __device__ __forceinline__ void gdn_recurrence_wmma_body(
     const GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
@@ -470,7 +470,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         detail::lds_barrier();
 
         #pragma unroll
-        for (uint32_t jt = 0; jt < g::kWt / 16u; ++jt) {
+        for (uint32_t jt = 0; jt < (kSingleRow ? 1u : g::kWt / 16u); ++jt) {
             float atmp[8];
             #pragma unroll
             for (uint32_t q = 0; q < 4u; ++q) {
@@ -501,7 +501,7 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
             #pragma unroll
             for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
         #pragma unroll
-        for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
+        for (uint32_t tstep = 0; tstep < (kSingleRow ? 1u : g::kWt / 16u); ++tstep) {
             Frag2 bv[2];
             #pragma unroll
             for (uint32_t vj = 0; vj < 2u; ++vj) {
@@ -621,6 +621,12 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
         }
 }
 #pragma clang diagnostic pop
+
+// Experimental one-row specialization; the existing kernels retain their original loops.
+extern "C" __global__ __launch_bounds__(256)
+void shelf_gdn_recurrence_wmma_single_row_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, false, true>(a);
+}
 
 extern "C" __global__ __launch_bounds__(256)
 __attribute__((amdgpu_num_vgpr(256)))
@@ -817,6 +823,19 @@ hipError_t launch_gdn_recurrence_f32_wmma(
         shelf_gdn_recurrence_wmma_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     else
         shelf_gdn_recurrence_wmma_exact<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
+    return hipGetLastError();
+}
+
+hipError_t launch_gdn_recurrence_f32_wmma_single_row_experimental(
+    const GdnRecurrenceArgs& a, hipStream_t stream) {
+    if (a.head_k != gdngfx12::kWk || a.head_v == 0u || a.head_v % gdngfx12::kWv ||
+        a.key_heads == 0u || a.num_v_heads == 0u || a.num_v_heads % a.key_heads ||
+        a.num_requests == 0u || a.actual_rows != a.num_requests ||
+        !a.q || !a.k || !a.v || !a.a || !a.b || !a.dt_bias || !a.a_log ||
+        !a.recurrent_state || !a.output || !a.requests || !a.max_sequences ||
+        !gdn_recurrence_lossy_enabled()) return hipErrorInvalidValue;
+    const dim3 grid(gdn_recurrence_wmma_grid_x(a.num_requests, a.num_v_heads, a.head_v));
+    shelf_gdn_recurrence_wmma_single_row_lossy<<<grid, gdngfx12::kWthreads, 0, stream>>>(a);
     return hipGetLastError();
 }
 
