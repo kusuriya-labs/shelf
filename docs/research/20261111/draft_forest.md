@@ -619,3 +619,12 @@ solve は前進代入でよい。log に (U[i], kᵢ, exp(gᵢ)) を保存すれ
 | --- | --- | --- |
 | 逐次更新と木の solve、全 node の出力・経路 replay | N=1/8/10/16/32、chain・星形・混合、各 20 乱数例 | 最大絶対誤差 5.551e-17、許容 1e-5 |
 
+実装時は、既存の tree 経路が recurrent history を必須とし、非隣接の親を
+snapshot から読み直す点に注意する。木の chunk を選択する場合だけ、この前提を
+解除して state store を延期し、最終物理行が受理された場合も含めて必ず受理経路を
+replay する必要がある。convolution state の復元は別途必要である。32 行を超える
+場合は既存の逐次経路とその history 確保に戻す。chain と bit 一致させるには、
+線形木を既存 chain chunk の計算順序に通すことも検証する必要がある。
+
+現段階では GPU kernel、decoder 接続、数値ゲート、速度測定、KLD は未実施。
+上記の CPU の倍精度一致は WMMA や fp16 state の誤差を評価していない。
