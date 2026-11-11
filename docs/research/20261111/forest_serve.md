@@ -428,3 +428,9 @@ SHA-256 は [forest_serve_concurrency_quality.json](forest_serve_concurrency_qua
 これは生成列の最初の不一致と一部の目視による代替評価であり、teacher-forced KLD・
 top-1 を測ったものではない。既存 chain chunk の mean KL 約 0.001、top-1 98.4〜99.8%
 とは定量比較できない。最初の不一致後の全位置の精度も保証しない。
+
+比較用の c=1 chain は 24 prompt 中 6 件が基準と完全一致し、不一致 18 件の差の
+平均 / 中央値 / 最大は 0.03277 / 0.02488 / 0.12459、0.1 超は 1 件だった。
+N=12 の超過 3 件のうち prompt 17 は chain と同じ位置・token で不一致となった。
+prompt 10 は chain の差 0.00043 に対し N=12 は 0.12215、prompt 19 は chain が
+512 token 一致したのに対し N=12 は 34 token 目で 0.23051 だった。
