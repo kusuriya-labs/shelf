@@ -33,8 +33,9 @@ for name in ('benchmark', 'japanese', 'shell', 'code', 'reasoning', 'mixed'):
         for mode in ('off', 'fixed', 'adaptive'):
             tag = f'{name}_{count}_{mode}'
             try:
-                values.append(json.loads((comparison / f'{tag}.out').read_text().splitlines()[0])['all_active_tps'])
+                value = json.loads((comparison / f'{tag}.out').read_text().splitlines()[0])['all_active_tps']
                 ids = json.loads((comparison / f'{tag}.json').read_text())
+                values.append(value)
                 tokens.append(ids if len(ids) == count and all(ids.values()) else None)
             except (OSError, ValueError, IndexError, KeyError):
                 values.append(None)

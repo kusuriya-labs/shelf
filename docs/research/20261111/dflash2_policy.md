@@ -1,90 +1,52 @@
-# DFlash2 batch の単純な投機ポリシー
+# DFlash2 の lossy chunk verify と投機ポリシー
 
-## 条件
+## 条件と方針
 
 R9700（gfx1201）、Qwen3.8 27B EXL3 4bpw mul24、DFlash2 K=7、FP8 KV、
 greedy、各 request 最大 160 token、prefix cache 無効。全 request が生成中の共通区間の
-合計 token/s を用いる。損益分岐は benchmark と日本語を各 2 回測る。比較は前回の
-6 種の入力（mixed の同時 1 は混在できないため対象外）で行う。
-各実行は `/tmp/r9700.lock` を取得する。回数は依頼どおり 1〜2 回であり、
-通常の 5 回中央値ではない。実行途中に上限判定を修正し（`b40500a` → `ec6adb2`）、
-未使用の旧選択器を削除した（`f930138`）。同時 16 は修正後に測り直した。
-同時 8 以下は上限判定の影響を受けず、選択器の削除でも有効な規則は変えていないが、
-同一バイナリで全条件を測ったわけではない。その後、
-高同時数の受理閾値を調整したが（`3c411a3`）、悪化したため戻して再測定する。
-順序は非投機、固定、ポリシーの固定順で、
-反復間で逆順にしていないため、clock 変動の影響が残る。日本語・同時 2 の
-非投機は 52.92 と 49.09 tok/s で 7% 以上変動し、3% 境界の判定は特に不確かである。単一 request は serial verify、複数の
-DFlash2 request は exact chunk verify を使う。exact は bit 一致を意味しない。
+合計 token/s を用いる。損益分岐は benchmark と日本語を同時 2 / 4 / 8 / 12 / 16 /
+20 / 24 / 32 で各 2 回測る。比較は benchmark / japanese / shell / code /
+reasoning / mixed、同時 1 / 2 / 4 / 8 / 16 / 32 のうち mixed の同時 1 を除く
+35 条件とし、各 1〜2 回測る。各実行は `/tmp/r9700.lock` を取得する。
+依頼どおりの回数は通常の 5 回中央値ではなく、方式の実行順も固定である。
 
-## ポリシー
+ユーザー判断により、serve の DFlash2 compact verify は単一 request を含み
+lossy chunk を既定とする。serial は `SHELF_GDN_VERIFY_CHUNKED=0`、exact chunk は
+`SHELF_GDN_VERIFY_CHUNKED_EXACT=1` で選ぶ。ユーザーから提示された固定 corpus
+4 種の平均 mean KL は lossy 0.00103、exact 0.00228、top-1 一致率は 98.4〜99.8%。
+これは今回の性能実行とは別の測定である。chunk は単一 request でも非投機 greedy
+との生成列の完全一致を保証しない。単発 decoder は全受理時の state store と replay の
+変更が必要であり、今回は serial のままである。指定された外れ値の追加調査は行わない。
 
-K は 7、batch あたりの負荷上限は暫定 12（`SHELF_DFLASH2_POLICY_MAX_SESSIONS`
-で変更可）、受理 draft 数 / round の EMA 初期値 2、係数 0.03、停止閾値 0.6。
-既定の DFlash2 セッションプールは 8 件なので、投機候補だけでは 12 を超えない。
-したがって枠不足で通常 decode に入った request も負荷に数える。これは多人数時に
-投機と通常 decode が混在する実測を基にした保守的な判定である。
-停止中は 64 round ごとに 1 回の試行を行い、同時に複数 request が試行期限に
-到達した場合は順番に試す。短い生成残量で draft 数を減らした round は EMA に
-含めない。これらの閾値は本測定の結果により評価する。
+適応ポリシーは既定 K=7、負荷上限 12（`SHELF_DFLASH2_POLICY_MAX_SESSIONS` で
+上書き可能）、各 request の受理 draft 数 / round の EMA 初期値 2、係数 0.03、
+停止閾値 0.6、停止中の再試行間隔 64 round。複数 request が同時に再試行期限に
+達した場合は順番に試す。既定の DFlash2 セッションプールは 8 件なので、枠不足で
+通常 decode 中の request も上限判定に含める。短い残り長による打ち切り round は
+EMA に含めない。損益分岐と閾値は lossy 既定の測定で評価する。
 
-## 損益分岐と 35 条件の比較
+途中まで実施した exact chunk・単一 serial 前提の測定は、方針変更により中断した。
+旧実行では benchmark の損益分岐が同時 12 と 16 の間、日本語では 4 と 8 の間にあり、
+単一の同時数上限だけでは両入力に最適化できなかった。受理閾値を 1.5 に上げた試作は
+日本語・同時 8 で 142.13 → 102.44 tok/s に低下し、採用せず元の閾値に戻した。
+これらは exact の旧条件であり、lossy の結果には使わない。
 
-測定中。未完了の欄は未測定を示す。暫定閾値 1.2 / 係数 0.15 では
-benchmark 同時 1 が 30.68 tok/s（固定 45.25）、同時 2 が 97.79 tok/s
-（固定 118.46）と未達だった。閾値と係数を下げ、同時 1 は 45.28、同時 2 は
-118.36 に改善した。単一 request の serial round 約 58.9 ms と通常 decode 約
-36 ms から、単独の損益分岐は約 0.6 accepted/round と見積もった。閾値と
-係数の設定には他の入力での追加評価が必要である。
-日本語・同時 8 は非投機 175.00、固定 130.79、旧ポリシー 142.13 tok/s で
-大幅に未達だった。固定時の受理は 722 / 557 = 1.296 draft / request-round、
-round は 10221 / 85 = 120.2 ms。非投機はおよそ 8 / 175 = 45.7 ms/step で、
-単純な同時進行モデルの損益分岐は約 1.6 draft/round になる。この観測を基に
-高同時数の閾値を 1.5、係数を 0.10 として再測定したところ、ポリシーは
-102.44 tok/s とさらに低下した。K=0 は 910 回、K=7 は 125 回で、
-投機と通常 decode の混在費用が原因の候補だが内訳は未測定。この方式は採用せず
-閾値 0.6・係数 0.03 に戻した。
+## 損益分岐と比較
 
-同時 16 の初期測定は、投機候補だけを数えたため 8 セッションの上限に達せず、
-ポリシー 274.85 と非投機 288.33 tok/s で未達だった。セッション枠外の通常
-request を数える修正後は 279.55 tok/s（非投機比 -3.05%）だった。
-反復は非投機 288.38、固定 273.13、ポリシー 279.50 tok/s で、
-ポリシーは非投機比 -3.08% と未達が再現した。さらに高同時数の閾値を
-調整後のポリシーは 265.01 tok/s だった。以前の 279.55 の実行と生成列と
-K ごとの選択数は一致するが、性能差の原因は未特定で、3 方式を再測定する。同時 32 は調整前に非投機 423.20、ポリシー
-407.71 tok/s（-3.66%）で未達。調整後は 322.27 tok/s に低下し、
-両ポリシー実行の生成列と K 別選択数は同じだった。時間変動や実行条件を含む
-原因は未特定のため、調整後の 3 方式を再測定する。再開に必要な target tap の保持などが負荷に
-関与する可能性はあるが、内訳は未測定。高同時数閾値の調整後、
-日本語・同時 16 は非投機 288.23、ポリシー 274.94 tok/s（-4.61%）で
-未達だった。選択回数は K=0 が 1241、K=7 が 8 で、大半は非投機である。
-
-再現時は `/tmp/venv-so` を変更せず、環境変数 `SHELF_MODEL_DIR`、
-`SHELF_DFLASH2_MODEL_DIR`、`SHELF_BENCH_BINARY`、`LD_LIBRARY_PATH`、
-`ROCR_VISIBLE_DEVICES` を指定する。以下の各 driver は実行単位で GPU ロックを
-取得する。損益分岐の driver は `SHELF_GDN_VERIFY_CHUNKED=1` と
-`SHELF_GDN_VERIFY_CHUNKED_EXACT=1` を明示する。比較 driver は本 branch の
-既定動作を使用する。比較対象が 1 件だけの場合は serial を使用する。
-
-```sh
-/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/prepare_prompts.py /tmp/dflash2-policy-prompts
-/tmp/venv-so/bin/python docs/research/20261111/dflash2_policy_scripts/breakeven.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-breakeven
-/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/run_comparison.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-comparison
-/tmp/venv-so/bin/python docs/research/20261111/dflash2_policy_scripts/tables.py /tmp/dflash2-policy-breakeven /tmp/dflash2-policy-comparison
-```
+lossy 既定の再測定中。未完了の欄は未測定を示す。
 
 ### 損益分岐（tok/s、各 2 回）
 
 | prompt | 同時数 | 非投機 | 固定 K=7 |
 | --- | ---: | --- | --- |
-| benchmark | 2 | 53.34 / 53.16 | 118.56 / 118.42 |
-| benchmark | 4 | 98.72 / 98.28 | 222.56 / 222.49 |
-| benchmark | 8 | 175.35 / 174.14 | 295.06 / 294.85 |
-| benchmark | 12 | 239.39 / 240.34 | 259.32 / 258.19 |
-| benchmark | 16 | 288.27 / 287.72 | 273.35 / 274.65 |
-| benchmark | 20 | 327.22 / 325.47 | 291.42 / 294.12 |
-| benchmark | 24 | 362.66 / 365.45 | 303.62 / 303.35 |
-| benchmark | 32 | 426.79 / 423.06 | 334.60 / 333.59 |
+| benchmark | 2 | 53.32 / — | 118.92 / — |
+| benchmark | 4 | — / — | — / — |
+| benchmark | 8 | — / — | — / — |
+| benchmark | 12 | — / — | — / — |
+| benchmark | 16 | — / — | — / — |
+| benchmark | 20 | — / — | — / — |
+| benchmark | 24 | — / — | — / — |
+| benchmark | 32 | — / — | — / — |
 | japanese | 2 | — / — | — / — |
 | japanese | 4 | — / — | — / — |
 | japanese | 8 | — / — | — / — |
@@ -98,14 +60,14 @@ K ごとの選択数は一致するが、性能差の原因は未特定で、3 �
 
 | prompt | 同時数 | 非投機 | 固定 K=7 | ポリシー | 判定 | greedy 一致 |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| benchmark | 1 | 27.25 | 45.25 | 45.28 | 通過 | 一致 |
-| benchmark | 2 | 52.23 | 118.46 | 118.36 | 通過 | 不一致 |
-| benchmark | 4 | 97.73 | 223.51 | 223.18 | 通過 | 不一致 |
-| benchmark | 8 | 173.84 | 295.97 | 292.02 | 通過 | 不一致 |
-| benchmark | 16 | 288.33 | 274.93 | 279.55 | 未達 | 不一致 |
-| benchmark | 32 | 423.20 | 333.10 | 407.71 | 未達 | 不一致 |
-| japanese | 1 | 27.60 | 33.25 | 33.19 | 通過 | 一致 |
-| japanese | 2 | 52.49 | — | — | 未測定 | 未確認 |
+| benchmark | 1 | 27.64 | 46.06 | — | 未測定 | 未確認 |
+| benchmark | 2 | — | — | — | 未測定 | 未確認 |
+| benchmark | 4 | — | — | — | 未測定 | 未確認 |
+| benchmark | 8 | — | — | — | 未測定 | 未確認 |
+| benchmark | 16 | — | — | — | 未測定 | 未確認 |
+| benchmark | 32 | — | — | — | 未測定 | 未確認 |
+| japanese | 1 | — | — | — | 未測定 | 未確認 |
+| japanese | 2 | — | — | — | 未測定 | 未確認 |
 | japanese | 4 | — | — | — | 未測定 | 未確認 |
 | japanese | 8 | — | — | — | 未測定 | 未確認 |
 | japanese | 16 | — | — | — | 未測定 | 未確認 |
@@ -134,16 +96,15 @@ K ごとの選択数は一致するが、性能差の原因は未特定で、3 �
 | mixed | 16 | — | — | — | 未測定 | 未確認 |
 | mixed | 32 | — | — | — | 未測定 | 未確認 |
 
-## 関連テストとサーバー確認
 
-指定どおり configure と Release ビルドを実施。関連 ctest 19 件は通過し、
-最後の batch 上限修正後も CPU の `test_dflash2_adaptive` が通過した。
-`tests/server/` の DFlash2 関連 5 本は 99 / 26 / 7 / 8 / 21 項目が通過し、
-失敗はなかった。`--all` は実行していない。
+## テストとサーバー確認
 
-`shelf-server` で日本語・英語・コード・shell の混在 8 件を同時送信し、
-8 件すべて完了、エラーなし、合計 1280 completion token を確認した。
-旧選択器削除後の再確認でも 8 件すべて成功し、合計 1280 token だった。
-全員生成中の通知は 209.4 chunk/s、全体の completion token / 壁時計は
-137.78 token/s。高同時数の閾値を試した別実行も 8 件すべて成功した。chunk 数と token 数はこの実行でともに 1280 だったが、
-通知単位による値と stdio の token/s を同一視しない。
+再実行中。非投機との完全一致を検証する次の 3 テストは、serial を明示して比較する。
+
+- `tests/server/test_compute_dflash2.py`
+- `tests/server/test_compute_dflash2_unaligned.py`
+- `tests/server/test_compute_dflash2_prefix_long.py`
+
+`test_compute_dflash2_octave.py` と `test_server_dflash2.py` は既定の chunk で動作を確認する。
+`test_gdn_compact_log_commit` は serial 明示と、単一 request の既定 chunk 選択を検証する。
+全回帰 `--all` は実行しない。
