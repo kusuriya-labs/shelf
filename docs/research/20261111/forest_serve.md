@@ -546,3 +546,58 @@ c=3・B の trace 診断では投機 3 本・8 行が 101 round、2 本・8 行�
 Octave・非整列 prefill・長い prefix が通過した。server の全回帰は実行していない。
 個別実行値・基準 hash・生成列 hash は
 [forest_serve_auto_results.json](forest_serve_auto_results.json) に記録した。
+
+## 生成中 request 数による自動 tree 選択
+
+`auto` は各 round の投機 request が 1 本で、生成中の request 全体も 1 本の
+場合に限って 10 行を使う。それ以外は 8 行の chain にする。生成中の通常 decode、
+投機を停止した request、およびその round の draft 数が 0 の slot も数え、prefill
+中と待機中は数えない。明示した整数 budget は従来どおり同時数に依存しない。
+
+### server 経由の速度
+
+前節と同じ server、model、greedy、K=7、BF16 KV、prefix cache、および最大
+512 token を用いた。chain は budget 0、auto は既定値で、構成の実行順を交互に
+した。c=1 は各 prompt の decode tok/s の 2 回平均を求め、比を prompt ごとに
+計算して算術平均した。同時生成は混在 B の全員が生成中の共通区間における
+生成 token 数 / 区間秒数であり、token 記録の負荷を含む。全 request が 512 token
+で `length` 終了した。
+
+| 条件 | 各構成の回数 | chain tok/s | auto tok/s | chain 比 |
+| --- | ---: | ---: | ---: | ---: |
+| c=1、8 prompt の比の平均 | 2 | — | — | +9.76% |
+| c=2、混在 B | 2 | 122.80 | 122.76 | -0.04% |
+| c=3、混在 B | 2 | 121.46 | 121.80 | +0.28% |
+| c=4、混在 B | 8 | 151.53 | 149.93 | -1.05% |
+
+c=3 は初回 2 回で ±2% 内だった。3 request の生成 token 列は各回とも chain と
+一致した。c=4 は初回 2 回平均が -2.52%、4 回平均が -2.14% で ±2% を外れたため、
+さらに各 4 回を測った。8 回の chain は 147.81〜160.57、auto は 147.73〜156.53
+tok/s に分布し、両構成で高い値と低い値が現れた。8 回平均は ±2% 内だが、
+この変動の原因は特定できていない。全 8 回で 4 request 中 3 件の token 列は
+一致し、残る prompt 3 は index 282（0 始まり）で初めて分岐した。この位置は
+全員が生成中の共通区間の終了後である。
+
+c=4 の別実行で trace を有効にすると、投機 1 本・生成中 2 本・8 行が 1 round、
+投機 2 本・生成中 3〜4 本・8 行が 6 round 見られた。生成中 2 本以上で 10 行が
+選ばれた round はなく、生成中 1 本・投機 1 本では 10 行が 89 round 選ばれた。
+この trace は単独生成を含む全 round のもので、測定表には含めない。
+
+### prefill 混在の確認
+
+生成中の greedy request に、通常 decode 用 session を持たない別 request の
+3,019 token prefill を途中から重ねた。max sessions 1、max batched tokens 512、
+max sequence length 4096、2 回ずつ交互に実行し、prefill request の送信から最初の
+token までを区間とした。この区間には server の token 化、待機と配送も含まれる。
+区間秒数の平均は chain 4.211 秒、auto 4.238 秒（+0.64%）、同区間の生成中
+request の token 数は各回それぞれ 40、39 だった。区間速度の平均は 9.50、
+9.20 tok/s（-3.11%）だが、1 token の差が約 2.5% に相当する短い試験である。
+trace では prefill 中に 10 行の round が観測された。この試験だけでは prefill を
+人数に含める必要があるほどの影響は確定できず、含めない規則を維持する。
+
+関連 ctest 7 件、server の切り替え・tree・DFlash2、compute の DFlash2・tree・
+Octave・非整列 prefill・長い prefix は通過した。server 全回帰は実行していない。
+今回の変更は単独生成の tree 精度を変えず、前節の 24 prompt における最初の
+不一致の精度上の制約は残る。個別速度、生成 token の hash、prefill 比較、trace の
+集計は [forest_serve_decode_count_results.json](forest_serve_decode_count_results.json)
+に記録した。
