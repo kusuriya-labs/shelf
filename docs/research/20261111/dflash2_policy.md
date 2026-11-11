@@ -23,7 +23,9 @@ lossy chunk を既定とする。serial は `SHELF_GDN_VERIFY_CHUNKED=0`、exact
 停止閾値 0.6、停止中の再試行間隔 64 round。複数 request が同時に再試行期限に
 達した場合は順番に試す。既定の DFlash2 セッションプールは 8 件なので、枠不足で
 通常 decode 中の request も上限判定に含める。短い残り長による打ち切り round は
-EMA に含めない。損益分岐と閾値は lossy 既定の測定で評価する。
+EMA に含めない。lossy 既定の損益分岐は benchmark で同時 12 と 16 の間、
+日本語では同時 4 と 8 の間だった。上限 12 は benchmark の同時 8 / 12 の利得を
+維持する選択だが、日本語・同時 8 の未達を解決しない。
 
 途中まで実施した exact chunk・単一 serial 前提の測定は、方針変更により中断した。
 旧実行では benchmark の損益分岐が同時 12 と 16 の間、日本語では 4 と 8 の間にあり、
@@ -46,6 +48,11 @@ GPU ロックを取得する。
 /tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/run_comparison.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-comparison
 /tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat benchmark 16 1
 /tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat benchmark 32 1
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat japanese 2 1
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat japanese 16 1
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat shell 8 1
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat shell 16 1
+/tmp/venv-so/bin/python docs/research/20261111/dflash2_adaptive_scripts/repeat_case.py /tmp/dflash2-policy-prompts /tmp/dflash2-policy-lossy-repeat shell 8 1
 /tmp/venv-so/bin/python docs/research/20261111/dflash2_policy_scripts/tables.py /tmp/dflash2-policy-lossy-breakeven /tmp/dflash2-policy-lossy-comparison /tmp/dflash2-policy-lossy-repeat
 ```
 
@@ -55,12 +62,25 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。日本語�
 非投機 173.94、固定 126.67、ポリシー 126.83 tok/s で、最良値に対して
 27.08% 未達だった。ポリシーの選択は K=7 が 544 回、K=0 が 4 回で、
 受理 draft 数の平均 1.253 / request-round は停止閾値 0.6 を上回った。
-一方、同じ同時数の benchmark では固定が約 295、非投機が約 174 tok/s であり、
-同時数上限だけでは両方を選び分けられない。benchmark・同時 16 は
+損益分岐の 2 回測定でも日本語・同時 8 は非投機 173.09 / 173.62、固定
+128.91 / 126.16 tok/s と非投機が優位だった。一方、同じ同時数の benchmark は
+固定 295.70 / 295.79、非投機 173.71 / 173.60 tok/s であり、同時数上限だけでは
+両方を選び分けられない。shell・同時 8 の初回も固定 232.38、ポリシー
+222.66 tok/s（-4.18%）で未達だった。ポリシーは 320 回すべて K=7 を選び、
+固定との生成列も一致したため、選択以外の overhead または変動が候補だった。
+反復は固定 222.54、ポリシー 222.71 tok/s で、2 回平均では固定 227.46、
+ポリシー 222.69 tok/s（-2.10%）となり基準内だったが、初回は未達である。
+shell・同時 16 も境界に近かったため反復し、非投機 287.06 / 286.73、
+ポリシー 278.59 / 280.15 tok/s、2 回平均では約 -2.62% だった。benchmark・同時 16 は
 2 回平均で非投機 288.20、固定 265.10、ポリシー 279.68 tok/s、非投機比
 -2.96% で形式上は基準内だが、3% 境界に近い。比較表は反復のある条件について
 各方式の平均を表示する。同時 16 の固定は 274.79 / 255.41 tok/s と
-変動しており、境界に近い判定は不確かである。同時 32 の 2 回平均は非投機
+変動しており、境界に近い判定は不確かである。日本語・同時 2 の固定は
+比較で 68.97、損益分岐の初回で 74.95 tok/s と差があり、生成列は同一だった。
+日本語・同時 16 の非投機も 288.20 / 279.36 tok/s と約 3.1% 変動したが、
+生成列は同一だった。
+日本語・同時 16 は非投機 286.40 / 285.89、ポリシー 278.05 / 272.90 tok/s で、
+2 回平均では非投機 286.14、ポリシー 275.48 tok/s（-3.73%）の未達だった。同時 32 の 2 回平均は非投機
 421.48、固定 339.31、ポリシー 405.39 tok/s で、非投機比 -3.82% の未達だった。
 
 ### 損益分岐（tok/s、各 2 回）
@@ -75,14 +95,14 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。日本語�
 | benchmark | 20 | 323.82 / 323.76 | 292.56 / 292.23 |
 | benchmark | 24 | 359.94 / 359.45 | 304.11 / 304.71 |
 | benchmark | 32 | 420.47 / 420.54 | 331.04 / 331.61 |
-| japanese | 2 | — / — | — / — |
-| japanese | 4 | — / — | — / — |
-| japanese | 8 | — / — | — / — |
-| japanese | 12 | — / — | — / — |
-| japanese | 16 | — / — | — / — |
-| japanese | 20 | — / — | — / — |
-| japanese | 24 | — / — | — / — |
-| japanese | 32 | — / — | — / — |
+| japanese | 2 | 52.19 / 52.49 | 74.95 / 69.04 |
+| japanese | 4 | 97.46 / 97.38 | 108.34 / 108.33 |
+| japanese | 8 | 173.09 / 173.62 | 128.91 / 126.16 |
+| japanese | 12 | 237.63 / 239.12 | 123.84 / 124.56 |
+| japanese | 16 | 288.20 / 279.36 | 147.17 / 146.78 |
+| japanese | 20 | 311.84 / 324.44 | 162.61 / 159.79 |
+| japanese | 24 | 360.84 / 361.35 | 175.24 / 178.93 |
+| japanese | 32 | 414.75 / 422.67 | 208.75 / 202.40 |
 
 ### 比較（tok/s、各 1 回）
 
@@ -95,21 +115,21 @@ lossy 既定の再測定中。未完了の欄は未測定を示す。日本語�
 | benchmark | 16 | 288.20 | 265.10 | 279.68 | 通過 | 不一致 |
 | benchmark | 32 | 421.48 | 339.31 | 405.39 | 未達 | 不一致 |
 | japanese | 1 | 27.60 | 36.78 | 36.67 | 通過 | 不一致 |
-| japanese | 2 | 52.36 | 68.97 | 69.26 | 通過 | 不一致 |
+| japanese | 2 | 52.66 | 69.08 | 69.12 | 通過 | 不一致 |
 | japanese | 4 | 97.60 | 108.78 | 108.41 | 通過 | 不一致 |
 | japanese | 8 | 173.94 | 126.67 | 126.83 | 未達 | 不一致 |
-| japanese | 16 | 286.40 | — | — | 未測定 | 未確認 |
-| japanese | 32 | — | — | — | 未測定 | 未確認 |
-| shell | 1 | — | — | — | 未測定 | 未確認 |
-| shell | 2 | — | — | — | 未測定 | 未確認 |
-| shell | 4 | — | — | — | 未測定 | 未確認 |
-| shell | 8 | — | — | — | 未測定 | 未確認 |
-| shell | 16 | — | — | — | 未測定 | 未確認 |
-| shell | 32 | — | — | — | 未測定 | 未確認 |
-| code | 1 | — | — | — | 未測定 | 未確認 |
-| code | 2 | — | — | — | 未測定 | 未確認 |
-| code | 4 | — | — | — | 未測定 | 未確認 |
-| code | 8 | — | — | — | 未測定 | 未確認 |
+| japanese | 16 | 286.14 | 144.19 | 275.48 | 未達 | 不一致 |
+| japanese | 32 | 408.43 | 206.79 | 400.34 | 通過 | 不一致 |
+| shell | 1 | 27.17 | 73.33 | 73.94 | 通過 | 不一致 |
+| shell | 2 | 52.08 | 125.87 | 126.13 | 通過 | 不一致 |
+| shell | 4 | 97.51 | 172.46 | 181.83 | 通過 | 不一致 |
+| shell | 8 | 171.25 | 227.46 | 222.69 | 通過 | 不一致 |
+| shell | 16 | 286.89 | 221.09 | 279.37 | 通過 | 不一致 |
+| shell | 32 | 417.89 | 279.70 | 406.76 | 通過 | 不一致 |
+| code | 1 | 27.34 | 76.29 | 76.22 | 通過 | 一致 |
+| code | 2 | 51.42 | 129.78 | 129.76 | 通過 | 不一致 |
+| code | 4 | 98.01 | 186.31 | 186.21 | 通過 | 不一致 |
+| code | 8 | 172.02 | 236.34 | — | 未測定 | 未確認 |
 | code | 16 | — | — | — | 未測定 | 未確認 |
 | code | 32 | — | — | — | 未測定 | 未確認 |
 | reasoning | 1 | — | — | — | 未測定 | 未確認 |
