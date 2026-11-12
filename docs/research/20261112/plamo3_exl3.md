@@ -123,6 +123,10 @@ top-1 が 96.88% / 96.88% / 100% / 77.78% だった。変換側は全 32 / 9 位
 FP16 実行しており、Shelf の INT8 経路・位置範囲とは異なる。変換側の別の 10 対での
 KL 0.0147 / 0.0152、top-1 93.5% / 93.8% も入力が異なるため直接比較できない。
 平文は 7 位置のみで一致率が大きく変動する。
+正解訳部分に限ると、日→英 9 位置は KL 0.00187、top-1 100%、PPL は
+BF16 1.07675 / Shelf 1.06105、英→日 6 位置は KL 0.00169、top-1 100%、
+PPL は 1.14148 / 1.12558。変換側の同じ正解訳位置では KL 0.00102 / 0.00242、
+top-1 は両方向 100%、PPL は 1.06477 / 1.11783 だった。
 変換側の同一評価集合・WikiText と直接比較し、量子化誤差以外の差をさらに調べる必要がある。
 PPL は template 位置も含むため、変換側の正解訳部分だけの PPL と比較しない。
 
@@ -131,8 +135,60 @@ PPL は template 位置も含むため、変換側の正解訳部分だけの PP
 その出力を [比較スクリプト](plamo_quality.py) に渡す。GPU 実行は lock を取得する。
 
 ```bash
+sed 's/, device_map="cpu"//' /home/homelab1/coding-local/rocm_exl3-plamo3/eval/plamo3_logits.py \
+  > /tmp/plamo-exl3-cpu-reference.py
+/tmp/venv-plamo/bin/python /tmp/plamo-exl3-cpu-reference.py reference \
+  --model /home/homelab1/datapool/ai_models/safetensors/plamo-3-translate-2b \
+  --reference /tmp/plamo-exl3-reference.pt
+export LD_LIBRARY_PATH=/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib:/opt/rocm/core-7.14/lib
+export ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55
 flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_quality.py \
   --reference /tmp/plamo-exl3-reference.pt \
   --model /home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24 \
   --bench "$PWD/build-gfx1201/shelf-bench" --workdir /tmp/plamo-exl3-quality
 ```
+
+## 実 EXL3 のバッチ基準値
+
+同じ 8 文、入力 29〜52 token、出力 14〜37 token、greedy、BF16 KV、投機なし。
+server の `--max-concurrent-requests` は各 c、`--max-num-batched-tokens` は既定の
+2048、arena は auto、prefix cache は既定値とした。各条件で server を起動し、
+1 要求だけ warmup してから測定する。1 回目は c の昇順、2 回目は降順。
+完了 token 数を HTTP 要求開始から全完了までの時間で割った値である。
+この条件では batch 形状の初回実行時間が入る。
+
+| c | server 完了 token/s 1 回目 / 2 回目 | decode token/s 1 回目 / 2 回目 |
+| ---: | ---: | ---: |
+| 1 | 127.0 / 128.2 | 138.0 / 139.0 |
+| 2 | 225.6 / 227.5 | 270.4 / 267.7 |
+| 4 | 392.7 / 395.1 | 517.5 / 519.1 |
+| 8 | 167.1 / 167.2 | 967.6 / 969.5 |
+| 16 | 321.4 / 317.8 | 1717.9 / 1727.6 |
+| 32 | 564.3 / 538.7 | 2347.0 / 2333.8 |
+| 64 | 974.4 / 959.3 | 3864.7 / 1159.5 |
+| 128 | 1374.9 / 1458.7 | 4528.0 / 4525.8 |
+
+decode は `shelf-compute --serve-stdio` 経由、prefix cache 無効、上限 64 token、
+全要求の最初の token から最初の要求の完了までに観測された token 数を時間で割る。
+停止 token は有効なので出力は上限より短い。短い重複区間への一時的な stall 混入で
+c=64 は 0.133 / 0.442 秒と大きく揺れた。server 完了速度とは測定範囲が異なる。
+同じ英日段落（出力 37 token）を全要求に使い、同一 batch を warmup した場合の
+decode は c=1/4/16/64 で 135.0/510.0/1721.0/3779.9、逆順の再測定で
+135.2/511.6/1719.5/3743.9 token/s。混合 workload の代表値ではない。
+
+batch warmup 後の server 完了速度は EXL3 c=4 で 394.3 / 397.4、c=8 で
+579.5 / 584.2、c=64 で 2041.2 / 2024.1、c=128 で 2218.5 / 2224.7 token/s。
+c=64 は目標 4000 の約 51%。最適化前後の比較ではない。
+BF16 では単一要求 warmup の c=2/4/8 が 147.6〜147.9 / 105.8〜106.1 /
+122.6〜135.9 だったが、全 8 文を batch warmup した c=4 は 276.7、c=8 は
+433.0〜433.5。短い warmup の場合、BF16 c=4 の一部 prefill の実行区間が
+約 1.21 秒、EXL3 c=8 は約 0.89 秒となり、同じ batch の decode も待機した。
+EXL3 c=8 は warmup 後に該当区間が約 41 ms に縮まり、prefix 復元は 0。
+初回形状の処理が大きく影響するが、その内部原因は未特定。
+
+c=32 の EXL3 起動時 KV budget は 599,616 token。最大出力 192 token と入力
+52 token で見積もった必要量は約 7,808 token なので、この条件では容量不足を
+示していない。c=64 の入力合計は 2048 を超えるため、prefill は複数 step になり得る。
+詳細な出力数・時間・測定窓は [測定結果](plamo3_exl3_batch.json)、手順は
+[server 用](plamo_batch.py) と [decode 用](plamo_decode_batch.py) に記録した。
+server 用の `--warmup-batch` は測定前に同じ workload を全件流す。

@@ -49,6 +49,11 @@ async def main(args):
                         raise RuntimeError(f"HTTP {response.status}: {result}")
                     return result
             await request(0)
+            if args.warmup_batch:
+                warmup_rounds = max(1, (len(CASES) + args.concurrency - 1) // args.concurrency)
+                for round_index in range(warmup_rounds):
+                    await asyncio.gather(*(request(round_index * args.concurrency + i)
+                                           for i in range(args.concurrency)))
             start = time.monotonic()
             rounds = max(1, (len(CASES) + args.concurrency - 1) // args.concurrency)
             results = []
@@ -78,6 +83,7 @@ if __name__ == "__main__":
     parser.add_argument("--server", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrency", type=int, required=True)
+    parser.add_argument("--warmup-batch", action="store_true")
     parser.add_argument("--port", type=int, default=18231)
     parser.add_argument("--log", default="/tmp/plamo-batch-server.log")
     asyncio.run(main(parser.parse_args()))
