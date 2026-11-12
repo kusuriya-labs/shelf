@@ -105,6 +105,8 @@ async def run(args):
                 tokens = sum(record["output_tokens"] for record in records)
                 print(json.dumps({"concurrency": args.concurrency, "warmup_after_first_completion_s": args.warmup,
                                   "elapsed_before_measurement_s": start_measure - started,
+                                  "measurement_start_monotonic_s": start_measure,
+                                  "measurement_end_monotonic_s": end_measure,
                                   "measurement_s": args.duration, "max_num_batched_tokens": args.max_num_batched_tokens,
                                   "lengths": args.lengths,
                                   "kv_cache_dtype": args.kv_cache_dtype,
