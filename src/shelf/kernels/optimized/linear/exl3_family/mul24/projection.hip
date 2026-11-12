@@ -103,7 +103,7 @@ __global__ void __launch_bounds__(128) group_out(PlamoExl3ProjectionGroup args) 
         return;
     const uint32_t lane = threadIdx.x & 31u;
     for (uint32_t cb = blockIdx.y * WAVES + (threadIdx.x >> 5u);
-         cb < min(n / kBlock, (blockIdx.y + 1u) * WAVES); ++cb) {
+         cb < min(n / kBlock, (blockIdx.y + 1u) * WAVES); cb += WAVES) {
         const uint32_t col = cb * kBlock + lane * 4u;
         float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
         for (uint32_t z = 0u; z < splits; ++z) {

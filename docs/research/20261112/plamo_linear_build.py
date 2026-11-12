@@ -198,7 +198,7 @@ def generated_extra(source):
     epi = epi.replace('exl3_mul24_rotate_out_f4_kernel', 'tiled_out_kernel')
     epi = epi.replace('blockIdx.x * 8u + (threadIdx.x >> 5u)', 'blockIdx.x')
     epi = epi.replace('for (uint32_t cb = 0u; cb < n / kBlock; ++cb)',
-                      'for (uint32_t cb = blockIdx.y * WAVES + (threadIdx.x >> 5u); cb < min(n / kBlock, (blockIdx.y + 1u) * WAVES); ++cb)')
+                      'for (uint32_t cb = blockIdx.y * WAVES + (threadIdx.x >> 5u); cb < min(n / kBlock, (blockIdx.y + 1u) * WAVES); cb += WAVES)')
     epi = '\n'.join(line for line in epi.splitlines() if not line.lstrip().startswith('//'))
     dot = '''
 template<int BITS, int MR>
