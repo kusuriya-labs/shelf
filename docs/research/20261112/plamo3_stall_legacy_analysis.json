@@ -1,0 +1,83 @@
+{
+  "/tmp/plamo-cumulative-spike-1-64.server.log": {
+    "steps": 4706,
+    "step_wall_ms": 115230.069,
+    "decode_steps": 2277,
+    "decode_total_ms": 36510.321,
+    "decode_median_ms": 16.396,
+    "mixed_or_prefill_steps": 2429,
+    "mixed_or_prefill_total_ms": 78719.748,
+    "mixed_or_prefill_gross_excess_vs_decode_median_ms": 38893.864,
+    "spikes_including_startup": [
+      {
+        "step_index": 0,
+        "requests": 1,
+        "token_rows": 256,
+        "decode_only": false,
+        "total_ms": 773.946,
+        "prior_token_rows": 0,
+        "prior_shape": 0
+      },
+      {
+        "step_index": 2431,
+        "requests": 62,
+        "token_rows": 253,
+        "decode_only": false,
+        "total_ms": 350.623,
+        "prior_token_rows": 5,
+        "prior_shape": 5
+      }
+    ]
+  },
+  "/tmp/plamo-cumulative-spike-1-128.server.log": {
+    "steps": 2969,
+    "step_wall_ms": 119212.501,
+    "decode_steps": 711,
+    "decode_total_ms": 18469.44,
+    "decode_median_ms": 28.53,
+    "mixed_or_prefill_steps": 2258,
+    "mixed_or_prefill_total_ms": 100743.061,
+    "mixed_or_prefill_gross_excess_vs_decode_median_ms": 36322.320999999996,
+    "spikes_including_startup": [
+      {
+        "step_index": 0,
+        "requests": 1,
+        "token_rows": 256,
+        "decode_only": false,
+        "total_ms": 823.746,
+        "prior_token_rows": 0,
+        "prior_shape": 0
+      }
+    ]
+  },
+  "/tmp/plamo-cumulative-spike-2-128.server.log": {
+    "steps": 2966,
+    "step_wall_ms": 119167.73,
+    "decode_steps": 718,
+    "decode_total_ms": 18592.442,
+    "decode_median_ms": 28.5425,
+    "mixed_or_prefill_steps": 2248,
+    "mixed_or_prefill_total_ms": 100575.288,
+    "mixed_or_prefill_gross_excess_vs_decode_median_ms": 36411.748,
+    "spikes_including_startup": [
+      {
+        "step_index": 0,
+        "requests": 1,
+        "token_rows": 256,
+        "decode_only": false,
+        "total_ms": 885.418,
+        "prior_token_rows": 0,
+        "prior_shape": 0
+      },
+      {
+        "step_index": 531,
+        "requests": 125,
+        "token_rows": 398,
+        "decode_only": false,
+        "total_ms": 308.018,
+        "prior_token_rows": 0,
+        "prior_shape": 0
+      }
+    ]
+  }
+}

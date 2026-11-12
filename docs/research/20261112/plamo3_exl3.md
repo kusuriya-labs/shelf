@@ -977,3 +977,63 @@ warmup はそれぞれ約 774 / 824 / 885 ms で、上の定常停止とは別�
 累積実装の次の暫定 gate を c=4 で 480、c=64 で 2600 token/s とするなら、
 現在の平均からそれぞれ約 +4.38% / +3.31% が必要。いずれも実現可能性を
 保証する値ではなく、次の改善候補を判断するための提案である。
+
+### 散発停止の過去ログ再集計（調査継続中）
+
+上の `plamo_mixed_timing.patch` による既存ログを、起動時を含めて step 順に
+[再集計](plamo_stall_legacy.py) した。[結果](plamo3_stall_legacy_analysis.json)。
+同一形状とはここでは要求数・token 行数・decode-only 判定の組であり、各要求の
+長さや prefill 件数、選択 kernel の一致は意味しない。
+
+c=64 の 350.623 ms は 4,707 step 中の index 2431（0 始まり）で、同じ
+62 要求・253 token 行・非 decode-only の組がそれまでに 5 回あった。
+その 5 回は 38.878〜39.433 ms、停止後の同じ組 6 回も 39.104〜39.654 ms。
+したがって少なくともこの組の初回実行であることは停止の必要条件ではない。
+c=128 の 308.018 ms は同じ組が初出で、この比較だけでは初回実行を除外できない。
+
+起動時の合成 step を除く c=64 の 4,706 step は計 115.230 秒で、そのうち
+非 decode-only が 2,429 step・計 78.720 秒、decode-only が 2,277 step・計
+36.510 秒。非 decode-only の各 step から decode-only 中央値 16.396 ms を引いた
+合計は 38.894 秒で、停止時の追加約 0.32 秒より大きい。これは行数や要求長、
+実行経路が異なる step を同じ基準とした粗い比較で、厳密な prefill の因果費用や
+HTTP 全体の分解ではない。測定には workload warmup と drain も含む。少なくとも
+この run の単発停止だけで継続投入と decode-only の約 36% の差は説明できない。
+
+追加調査用の一時パッチは [step 記録](plamo_stall_trace.patch)、
+[測定窓の単調時計](plamo_stall_window.patch)、および別 run の
+[GPU event](plamo_stall_events.patch)。step の要求数、token 行数、prefill／decode
+件数、受付数、実行前後と後処理後の空き KV page 数、最大／最小の可視長を記録する。
+page 数は差分であり、同じ区間の確保と解放が相殺される場合は両方を検出できない。
+同一形状の既出判定は要求数・行数・prefill 件数・decode 件数の組に限る。
+GPU event は 32 dispatch 区間の開始・終了を記録し、host 側の launch 間隙も含む。
+そのため長い event 区間だけでは、その区間の特定 kernel が長時間実行したか、
+投入待ちや他の要因があったかは判別できない。
+
+[監視スクリプト](plamo_stall_monitor.py) は R9700 の sysfs センサーを目標 50 ms
+間隔で読み、monotonic 時計、各読み出し終了時刻と取得間隔を記録する。
+hwmon 電力は driver が提供する平均値であり、瞬間電力ではない。host の PSI・
+vmstat、CPU 統計、対象 process の `/proc` を約 1 秒ごと、GPU 利用 PID の照会は
+別スレッドから記録する。[集計スクリプト](plamo_stall_analyze.py) は測定窓と
+各停止の時刻が重なるセンサー値を対応付ける。計測中の logging、sysfs 読み出し、
+プロセス照会および event は本来の実行時間と停止頻度に影響し得る。
+
+#### 測定中断と共有 GPU の扱い
+
+他作業の全回帰プロセスが終了したことだけを待機解除条件にしてしまい、全回帰が
+正常終了したか、再実行されるか、および他の GPU 利用がないかを確認しないまま
+c=64 の計測を起動した。ユーザーから VRAM 不足による全回帰の失敗と GPU 使用停止の
+指示を受け、該当 server / compute と後続ジョブを停止した。途中で打ち切った
+`/tmp/plamo-stall-20261112/trace-1-64.*` は測定完了・競合なしを保証できず、
+性能値や原因判定には使わない。
+
+以後は `/tmp/agentx/gpu_release` の作成を待ち、各 GPU 実行の直前に lock 内で
+`rocm-smi --showpids` を確認する。別の GPU process がある場合や一覧の取得に
+失敗した場合は起動しない。全回帰中は GPU を使わない。単一 PID の終了を
+再開許可の代わりにしない。
+
+コード読解の補足: EXL3 dense GEMM の heuristic は workspace 上限 0 を要求し、
+返却された `workspaceSize > 0` の場合にのみ `hipMalloc` / `hipFree` を呼ぶ。
+コードに呼び出しが存在するだけでは今回の workload で実行された証拠にならない。
+通常の algorithm cache は最大 16 entry で、満杯後の未登録形状は保存されない。
+したがって batch 行数が過去に出現したことだけでは hipBLASLt heuristic が cache hit
+したとは言えない。ただし上記 c=64 の 253 行停止は dense GEMM 対象外である。

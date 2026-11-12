@@ -1,0 +1,7 @@
+diff --git a/docs/research/20261112/plamo_closed_loop.py b/docs/research/20261112/plamo_closed_loop.py
+index b8d388c..297a4a8 100644
+--- a/docs/research/20261112/plamo_closed_loop.py
++++ b/docs/research/20261112/plamo_closed_loop.py
+@@ -98,0 +99,2 @@ async def run(args):
++                    log.write(f"MEASURE start={start_measure:.9f} end={end_measure:.9f}\n")
++                    log.flush()
