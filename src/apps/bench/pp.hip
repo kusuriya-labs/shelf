@@ -183,10 +183,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
                 fprintf(stderr, "invalid --kv-cache-dtype\n");
                 return 1;
             }
-            if (opts.kv_cache_dtype.starts_with("octave") && opts.tp != 1) {
-                fprintf(stderr, "Octave KV cache requires tensor parallel 1\n");
-                return false;
-            }
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
                 fprintf(stderr, "invalid --page-tokens\n");

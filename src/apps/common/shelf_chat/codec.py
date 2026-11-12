@@ -110,11 +110,21 @@ _TOOL_OPEN = "<tool_call>"
 _TOOL_CLOSE = "</tool_call>"
 
 
-def load_processor(model_dir: str, trust_remote_code: bool = True):
-    """テキスト生成に必要な tokenizer と chat template を読み込む。"""
+def load_processor(model_dir: str, trust_remote_code: bool = True,
+                   max_seq_len: int = 0):
+    """テキスト生成に必要な tokenizer と chat template を読み込む。
+
+    ``max_seq_len`` はサーバが実際に受け付ける context 長である。tokenizer の
+    ``model_max_length`` は checkpoint の 262144 のままだと、rope scale で
+    524288 まで使う構成でも長い prompt ごとに警告を出すため、実効値へ合わせる。
+    """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir, trust_remote_code=trust_remote_code)
+    if max_seq_len > 0:
+        tokenizer.model_max_length = int(max_seq_len)
+    return tokenizer
 
 
 def _flatten_ids(ids: Any) -> list[int]:

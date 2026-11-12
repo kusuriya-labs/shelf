@@ -68,6 +68,7 @@ class PleConvStatePool {
     uint32_t max_sequences() const noexcept { return max_slots_; }
     uint32_t num_ple_states() const noexcept { return layout_.num_ple_states; }
     uint32_t channels() const noexcept { return layout_.channels; }
+    const PleConvStatePoolLayout& layout() const noexcept { return layout_; }
     std::size_t reserved_bytes() const noexcept { return reserved_bytes_; }
 
  private:

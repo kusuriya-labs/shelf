@@ -29,7 +29,7 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--device N\|N,M` | GPU device(s); count must match --tensor-parallel or --pipeline-parallel (default 0) |
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--pipeline-parallel N` | pipeline-parallel stage count (default 1; requires --tensor-parallel 1) |
-| `--kv-cache-dtype TYPE` | bf16 \| fp8 (default bf16) |
+| `--kv-cache-dtype TYPE` | bf16 \| fp8 \| octave:cKvV \| octave:bRnNvV (default bf16) |
 | `--rope-factor MODE` | auto \| 1 \| 2 \| 4; static YaRN rope factor (default auto = model config: native unless the checkpoint requests yarn) |
 | `--decode-backend TYPE` | hip (default) |
 | `--verify-weights 0\|1` | verify quantized payload CRC32 on load (default 0) |
@@ -43,14 +43,15 @@ TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。
 | `--seed N` | sampling seed (default 0) |
 | `--dflash2-model-dir PATH` | DFlash2 draft model directory; enables speculative decoding (greedy / stochastic) |
 | `--dflash2-drafts N` | speculative draft tokens per round (default 7) |
-| `--dflash2-max-sessions N` | serve only: requests that may speculate at once (default min(`--max-concurrent-requests`, 8)); the rest decode without speculation |
+| `--dflash2-max-sessions N` | requests that may speculate at once (serve; default min(--max-concurrent-requests, 8)); the rest decode without speculation |
 | `--dflash2-stats 0\|1` | print speculative decode statistics (default 1) |
 | `--mtp` | enable the checkpoint's MTP block as the drafter |
 | `--mtp-drafts N` | speculative draft tokens per round (default 7, max 31) |
 | `--mtp-stats 0\|1` | print MTP speculative decode statistics (default 1) |
 | `--prefix-cache 0\|1` | enable prefix cache (default 1) |
 | `--working-set-reserve-gib N` | arena headroom kept free for the working set (executor workspace allocated after the memory plan; 0 = size it from the row bucket, default 0) |
-| `--prefix-cache-concurrency N` | max concurrent prefix captures (default 4) |
+| `--prefix-cache-concurrency N` | max concurrent prefix captures and stored prefix entries (default 4) |
+| `--prefix-cache-strategy MODE` | radix \| slot (default radix) |
 | `--serve-stdio` | serve JSON Lines generation requests on stdin/stdout |
 | `--help` | show this help |
 <!-- /cli:compute -->
@@ -170,6 +171,8 @@ dense checkpoint を TP=2 で動かす場合:
   を 2 以上にしても、MTP の生成中は次の request を開始しない。
 - partial accept は GDN の compact log replay で復元する。target の再 forward は行わない。
 - prefix cache は MTP 経路では使わない。
+- `--mtp --serve-stdio` でも、prefill / decode 中は 3 秒ごとに `prefill_tok_s` /
+  `decode_tok_s` を出し、done 時に prefill / TTFT / decode の総括を stderr に出す。
 - grouped expert（MoE）checkpoint でも MTP block は load / 実行され、`--mtp` の生成列は
   target-only の greedy 列と一致する。MoE でも speedup がある（`--mtp-drafts 4` で 1.88 倍）。
   実測値は [../perf/current.md](../perf/current.md)、経緯は

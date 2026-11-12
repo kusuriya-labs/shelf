@@ -91,6 +91,9 @@ def build_compute_argv(opts) -> list[str]:
         "--max-num-batched-tokens", str(opts.max_num_batched_tokens),
         "--working-set-reserve-gib", str(opts.working_set_reserve_gib),
         "--rope-factor", opts.rope_factor,
+        "--prefix-cache", str(opts.prefix_cache),
+        "--prefix-cache-concurrency", str(opts.prefix_cache_concurrency),
+        "--prefix-cache-strategy", opts.prefix_cache_strategy,
     ]
     if opts.dflash2_model_dir:
         argv += [
@@ -158,6 +161,38 @@ def _log_request(chat, result) -> None:
         pass
 
 
+async def _complete_watching_disconnect(request: web.Request, service: ChatService,
+                                        chat):
+    """Run a non-stream completion and cancel it when the client goes away.
+
+    A non-stream response writes nothing until the whole generation is done, so
+    aiohttp cannot raise a broken pipe for us. Poll the transport and cancel the
+    compute request instead of generating tokens nobody will receive.
+    """
+    task = asyncio.create_task(service.complete(chat))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=0.25)
+            if done:
+                return task.result()
+            transport = request.transport
+            if transport is None or transport.is_closing():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return None
+    except asyncio.CancelledError:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        raise
+
+
 async def handle_chat_completions(request: web.Request) -> web.Response:
     service: ChatService = request.app["chat_service"]
 
@@ -178,7 +213,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             prepared = service.prepare(chat)
             return await handle_streaming(request, service, chat, prepared)
 
-        result = await service.complete(chat)
+        result = await _complete_watching_disconnect(request, service, chat)
+        if result is None:
+            return web.Response(status=499)
         _log_request(chat, result.finish_reason)
         return web.json_response(openai_protocol.encode_chat_completion(chat, result))
 
@@ -216,7 +253,9 @@ async def handle_responses(request: web.Request) -> web.Response:
         if chat.stream:
             prepared = service.prepare(chat)
             return await stream_response(request, service, chat, prepared)
-        result = await service.complete(chat)
+        result = await _complete_watching_disconnect(request, service, chat)
+        if result is None:
+            return web.Response(status=499)
         _log_request(chat, result.finish_reason)
         return web.json_response(responses_protocol.encode_response(chat, result))
     except OpenAIProtocolError as exc:
@@ -478,6 +517,14 @@ def parse_args(argv=None):
                              "(0 = size it from the row bucket, default 0)")
     parser.add_argument("--rope-factor", default="auto", choices=("auto", "1", "2", "4"),
                         help="static YaRN rope factor forwarded to compute (default auto)")
+    parser.add_argument("--prefix-cache", type=int, default=1, choices=(0, 1),
+                        help="enable prefix cache (default 1)")
+    parser.add_argument("--prefix-cache-concurrency", type=int, default=4,
+                        help="max concurrent prefix captures and stored prefix entries "
+                             "(default 4; radix strategy)")
+    parser.add_argument("--prefix-cache-strategy", default="radix",
+                        choices=("radix", "slot"),
+                        help="prefix cache entry strategy (default radix)")
 
     parser.add_argument("--dflash2-model-dir", default=None,
                         help="DFlash2 draft model directory (enables speculative decoding)")
@@ -542,6 +589,8 @@ def parse_args(argv=None):
         parser.error("--dflash2-tree-budget must be between 0 and 512")
     if opts.dflash2_tree_budget not in (0, "auto") and not opts.dflash2_model_dir:
         parser.error("--dflash2-tree-budget requires --dflash2-model-dir")
+    if not 1 <= opts.prefix_cache_concurrency <= 65535:
+        parser.error("--prefix-cache-concurrency must be between 1 and 65535")
     if opts.dflash2_drafts < 1:
         parser.error("--dflash2-drafts must be >= 1")
     if opts.dflash2_model_dir and opts.dflash2_tree_budget == "auto" and opts.dflash2_drafts != 7:
@@ -571,7 +620,8 @@ def _validate_model_dirs(opts) -> None:
 
 
 async def _serve(opts) -> int:
-    processor = await asyncio.to_thread(codec.load_processor, opts.model_dir)
+    processor = await asyncio.to_thread(
+        codec.load_processor, opts.model_dir, max_seq_len=opts.max_seq_len)
 
     try:
         config = json.loads((Path(opts.model_dir) / "config.json").read_text())
@@ -675,6 +725,8 @@ async def _serve(opts) -> int:
         "tensor_parallel": opts.tensor_parallel,
         "kv_cache_dtype": opts.kv_cache_dtype,
         "working_set_reserve_gib": opts.working_set_reserve_gib,
+        "prefix_cache_strategy": opts.prefix_cache_strategy,
+        "prefix_cache_concurrency": opts.prefix_cache_concurrency,
         "speculative": speculative,
         "reasoning": {
             "enabled": bool(reasoning_capability["thinking"]),
@@ -705,7 +757,9 @@ async def _serve(opts) -> int:
     _log(f"KV dtype:     {opts.kv_cache_dtype}")
     _log(f"Prefix cache: "
          f"{'enabled' if compute.capabilities.prefix_cache else 'disabled'} "
-         f"(capabilities.prefix_cache="
+         f"(strategy={opts.prefix_cache_strategy}, "
+         f"concurrency={opts.prefix_cache_concurrency}, "
+         f"capabilities.prefix_cache="
          f"{str(compute.capabilities.prefix_cache).lower()})")
     if opts.dflash2_model_dir:
         _log(f"Speculative:  DFlash2 ({opts.dflash2_drafts} drafts)")

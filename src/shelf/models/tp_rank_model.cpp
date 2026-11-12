@@ -282,6 +282,10 @@ public:
         return qwen4exp::exl3_linear_shape(model_.weights());
     }
 
+    shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const override {
+        return qwen4exp::mtp_exl3_linear_shape(model_.weights().mtp);
+    }
+
     std::uint32_t normed_token_hidden_width() const override {
         return static_cast<std::uint32_t>(model_.text_config().hc_count *
                                           model_.text_config().hidden_size);
@@ -394,6 +398,11 @@ Result<q35::Executor> create_qwen4exp_model_executor(
             [runtime](const ::shelf::scheduling::ScheduledBatch& batch,
                       std::vector<bf16_t>& out) {
                 return runtime->prepare(batch, out);
+            };
+        executor.value().external_prefix_restore =
+            [runtime](::shelf::state::SequenceSlotId slot,
+                      std::span<const int32_t> tokens) {
+                return runtime->seed(slot, tokens);
             };
     }
     return executor;

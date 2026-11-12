@@ -163,6 +163,22 @@ inline shelf::weights::Exl3LinearShape exl3_linear_shape(
     return shape;
 }
 
+// The staging-plane geometry of the MTP block, which runs in its own executor.
+inline shelf::weights::Exl3LinearShape mtp_exl3_linear_shape(
+    const Qwen4ExpMtpWeights& weights) noexcept {
+    shelf::weights::Exl3LinearShape shape;
+    if (!weights.present) return shape;
+    shelf::weights::note_exl3_linear(weights.fc_hidden, shape);
+    shelf::weights::note_exl3_linear(weights.fc_embedding, shape);
+    note_exl3_linear(weights.mixer, shape);
+    note_exl3_linear(weights.layer.attn_hyper_connection, shape);
+    note_exl3_linear(weights.layer.mlp_hyper_connection, shape);
+    note_exl3_linear(weights.layer.attention, shape);
+    note_exl3_linear(weights.layer.mlp, shape);
+    note_exl3_linear(weights.layer.ple, shape);
+    return shape;
+}
+
 struct Qwen4ExpLoadOptions {
     std::uint32_t tp_size = 1;
     std::uint32_t tp_rank = 0;

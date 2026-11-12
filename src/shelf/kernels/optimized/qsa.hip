@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 
 namespace shelf::kernel {
 namespace {
@@ -52,20 +53,61 @@ __device__ __forceinline__ bool qsa_worse(float a, uint32_t ia, float b, uint32_
     return a < b || (a == b && ia > ib);
 }
 
+__device__ __forceinline__ void qsa_swap_pair(float* scores, int32_t* indices,
+                                              uint32_t a, uint32_t b) {
+    const float score = scores[a];
+    const int32_t index = indices[a];
+    scores[a] = scores[b];
+    indices[a] = indices[b];
+    scores[b] = score;
+    indices[b] = index;
+}
+
+__device__ __forceinline__ void qsa_sort_candidates_ascending(
+    float* scores, int32_t* indices, uint32_t base, uint32_t count) {
+    for (uint32_t size = 2u; size <= count; size <<= 1u) {
+        for (uint32_t stride = size >> 1u; stride > 0u; stride >>= 1u) {
+            for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+                const uint32_t j = i ^ stride;
+                if (j <= i) continue;
+                const bool ascending = (i & size) == 0u;
+                const bool i_worse =
+                    qsa_worse(scores[base + i], static_cast<uint32_t>(indices[base + i]),
+                              scores[base + j], static_cast<uint32_t>(indices[base + j]));
+                if (ascending ? !i_worse : i_worse)
+                    qsa_swap_pair(scores, indices, base + i, base + j);
+            }
+            __syncthreads();
+        }
+    }
+}
+
+__device__ __forceinline__ void qsa_merge_descending(float* scores, int32_t* indices,
+                                                     uint32_t count) {
+    for (uint32_t stride = count >> 1u; stride > 0u; stride >>= 1u) {
+        for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+            const uint32_t j = i ^ stride;
+            if (j <= i) continue;
+            const bool i_worse =
+                qsa_worse(scores[i], static_cast<uint32_t>(indices[i]),
+                          scores[j], static_cast<uint32_t>(indices[j]));
+            if (i_worse) qsa_swap_pair(scores, indices, i, j);
+        }
+        __syncthreads();
+    }
+}
+
 __global__ __launch_bounds__(kQsaThreads) void qsa_select_batch_kernel(
     QsaSelectBatchArgs args) {
-    __shared__ bf16_t q_stage[kQsaSelectMaxHeads][kQsaHeadDim];
-    __shared__ bf16_t key_stage[kQsaSelectChunk][kQsaHeadDim + 2];
-    __shared__ float dot_part[kQsaSelectChunk][2][kQsaSelectMaxHeads];
-    __shared__ float part[kQsaSelectChunk];
-    __shared__ float kept_score[kQsaSelectMaxTopK];
-    __shared__ int32_t kept_index[kQsaSelectMaxTopK];
-    __shared__ int32_t pending[kQsaSelectChunk];
-    __shared__ float reduce_score[kQsaThreads + 1u];
-    __shared__ uint32_t reduce_pos[kQsaThreads + 1u];
-    __shared__ uint32_t warp_ballot[kQsaThreads / 32u];
-    __shared__ uint32_t pending_count;
+    constexpr uint32_t kWarps = kQsaThreads / 32u;
+    constexpr uint32_t kBlocksPerWarp = kQsaSelectChunk / kWarps;
+    constexpr uint32_t kDimsPerLane = kQsaHeadDim / 32u;
 
+    __shared__ bf16_t q_stage[kQsaSelectMaxHeads][kQsaHeadDim];
+    __shared__ float block_score[kQsaSelectChunk];
+    __shared__ uint32_t candidate_count;
+
+    extern __shared__ uint8_t qsa_select_dynamic[];
     const uint32_t row = blockIdx.x;
     const uint32_t t = threadIdx.x;
     const uint32_t heads = args.n_heads;
@@ -89,6 +131,12 @@ __global__ __launch_bounds__(kQsaThreads) void qsa_select_batch_kernel(
     const uint32_t complete = (args.positions[row] + 1u) / args.compress_ratio;
     const uint32_t visible = complete < args.blocks ? complete : args.blocks;
     const uint32_t top_k = args.top_k < kQsaSelectMaxTopK ? args.top_k : kQsaSelectMaxTopK;
+    uint32_t half = kQsaSelectChunk;
+    while (half < top_k) half <<= 1u;
+    const uint32_t count = half * 2u;
+    float* scores = reinterpret_cast<float*>(qsa_select_dynamic);
+    int32_t* indices =
+        reinterpret_cast<int32_t*>(qsa_select_dynamic + count * sizeof(float));
     __syncthreads();
     if (slot >= args.max_sequences) {
         if (out != nullptr) {
@@ -102,122 +150,424 @@ __global__ __launch_bounds__(kQsaThreads) void qsa_select_batch_kernel(
                            static_cast<uint64_t>(args.state_index) *
                                args.pooled_layer_stride;
 
-    uint32_t kept = 0u;
-    float worst = -INFINITY;
-    uint32_t worst_pos = 0u;
+    const uint32_t warp = t >> 5u;
+    const uint32_t lane = t & 31u;
+    const uint32_t lane_dim = lane * kDimsPerLane;
+    for (uint32_t i = t; i < count; i += kQsaThreads) {
+        scores[i] = -INFINITY;
+        indices[i] = -1;
+    }
+    if (t == 0u) candidate_count = 0u;
+    __syncthreads();
 
     for (uint32_t base = 0u; base < visible; base += kQsaSelectChunk) {
         const uint32_t n =
             visible - base < kQsaSelectChunk ? visible - base : kQsaSelectChunk;
-        const uint32_t elements = n * kQsaHeadDim;
-        for (uint32_t i = t; i < elements; i += kQsaThreads) {
-            const uint32_t b = i / kQsaHeadDim;
-            const uint32_t d = i % kQsaHeadDim;
-            key_stage[b][d] = pooled[static_cast<uint64_t>(base + b) * kQsaHeadDim + d];
-        }
-        __syncthreads();
-
-        const uint32_t b = t & (kQsaSelectChunk - 1u);
-        const uint32_t half = (t / kQsaSelectChunk) * (kQsaHeadDim / 2u);
-        const uint32_t side = half == 0u ? 0u : 1u;
-        if (b < n) {
+        for (uint32_t slot_in_warp = 0u; slot_in_warp < kBlocksPerWarp; ++slot_in_warp) {
+            const uint32_t b = warp * kBlocksPerWarp + slot_in_warp;
+            if (b >= n) continue;
+            const bf16_t* k_row =
+                pooled + static_cast<uint64_t>(base + b) * kQsaHeadDim + lane_dim;
+            const float k0 = bf16_value(k_row + 0u);
+            const float k1 = bf16_value(k_row + 1u);
+            const float k2 = bf16_value(k_row + 2u);
+            const float k3 = bf16_value(k_row + 3u);
+            float total = 0.0f;
             for (uint32_t head = 0u; head < heads; ++head) {
-                float dot = 0.0f;
-                for (uint32_t d = half; d < half + kQsaHeadDim / 2u; ++d)
-                    dot += bf16_value(&q_stage[head][d]) * bf16_value(&key_stage[b][d]);
-                dot_part[b][side][head] = dot;
+                const bf16_t* qp = &q_stage[head][lane_dim];
+                float dot = bf16_value(qp + 0u) * k0 + bf16_value(qp + 1u) * k1 +
+                            bf16_value(qp + 2u) * k2 + bf16_value(qp + 3u) * k3;
+                dot += __shfl_xor(dot, 16u);
+                dot += __shfl_xor(dot, 8u);
+                dot += __shfl_xor(dot, 4u);
+                dot += __shfl_xor(dot, 2u);
+                dot += __shfl_xor(dot, 1u);
+                total += fmaxf(dot, 0.0f);
             }
+            if (lane == 0u) block_score[b] = total * args.scale;
         }
         __syncthreads();
         if (t < n) {
-            float total = 0.0f;
-            for (uint32_t head = 0u; head < heads; ++head) {
-                total += fmaxf(dot_part[t][0][head] + dot_part[t][1][head], 0.0f);
-            }
-            part[t] = total * args.scale;
+            scores[half + candidate_count + t] = block_score[t];
+            indices[half + candidate_count + t] = static_cast<int32_t>(base + t);
         }
         __syncthreads();
-
-        const bool candidate = t < n;
-        const float score = candidate ? part[t] : 0.0f;
-        const bool accept = candidate && (kept < top_k || score > worst);
-        const uint64_t ballot = __ballot_sync(0xFFFFFFFFFFFFFFFFull, accept);
-        const uint32_t warp = t / 32u;
-        const uint32_t lane = t % 32u;
-        if (lane == 0u) warp_ballot[warp] = static_cast<uint32_t>(ballot);
+        if (t == 0u) candidate_count += n;
         __syncthreads();
-        uint32_t total = 0u;
-        uint32_t before = 0u;
-        for (uint32_t w = 0u; w < kQsaThreads / 32u; ++w) {
-            const uint32_t count = __popc(warp_ballot[w]);
-            total += count;
-            if (w < warp) before += count;
-        }
-        if (accept) {
-            pending[before + __popc(static_cast<uint32_t>(ballot) & ((1u << lane) - 1u))] =
-                static_cast<int32_t>(t);
-        }
-        __syncthreads();
-        const uint32_t accepted = total;
-
-        for (uint32_t p = 0u; p < accepted; ++p) {
-            const int32_t c = pending[p];
-            const float candidate_score = part[c];
-            if (kept == top_k && !(candidate_score > worst)) continue;
-            uint32_t target;
-            if (kept < top_k) {
-                target = kept;
-                ++kept;
-            } else {
-                target = worst_pos;
+        if (candidate_count == half) {
+            qsa_sort_candidates_ascending(scores, indices, half, half);
+            qsa_merge_descending(scores, indices, count);
+            if (t == 0u) candidate_count = 0u;
+            for (uint32_t i = t; i < half; i += kQsaThreads) {
+                scores[half + i] = -INFINITY;
+                indices[half + i] = -1;
             }
-            kept_score[target] = candidate_score;
-            kept_index[target] = static_cast<int32_t>(base) + c;
-            if (kept == top_k) {
-                float local = INFINITY;
-                uint32_t local_pos = 0u;
-                for (uint32_t i = t; i < kept; i += kQsaThreads) {
-                    if (qsa_worse(kept_score[i], i, local, local_pos)) {
-                        local = kept_score[i];
-                        local_pos = i;
-                    }
-                }
-                reduce_score[t] = local;
-                reduce_pos[t] = local_pos;
-                __syncthreads();
-                if (t == 0u) {
-                    float best = reduce_score[0];
-                    uint32_t best_pos = reduce_pos[0];
-                    for (uint32_t i = 1u; i < kQsaThreads; ++i) {
-                        if (qsa_worse(reduce_score[i], reduce_pos[i], best, best_pos)) {
-                            best = reduce_score[i];
-                            best_pos = reduce_pos[i];
-                        }
-                    }
-                    reduce_score[kQsaThreads] = best;
-                    reduce_pos[kQsaThreads] = best_pos;
-                }
-                __syncthreads();
-                worst = reduce_score[kQsaThreads];
-                worst_pos = reduce_pos[kQsaThreads];
-                __syncthreads();
-            }
+            __syncthreads();
         }
     }
 
+    if (candidate_count != 0u) {
+        qsa_sort_candidates_ascending(scores, indices, half, half);
+        qsa_merge_descending(scores, indices, count);
+    }
+
+    const uint32_t selected = visible < top_k ? visible : top_k;
     if (out != nullptr) {
+        if (t == 0u) {
+            for (uint32_t i = 1u; i < selected; ++i) {
+                const int32_t value = indices[i];
+                uint32_t j = i;
+                while (j > 0u && indices[j - 1u] > value) {
+                    indices[j] = indices[j - 1u];
+                    --j;
+                }
+                indices[j] = value;
+            }
+        }
+        __syncthreads();
         for (uint32_t i = t; i < args.top_k; i += kQsaThreads)
-            out[i] = i < kept ? kept_index[i] : -1;
+            out[i] = i < selected ? indices[i] : -1;
     }
     if (mask_words_ptr != nullptr) {
-        for (uint32_t i = t; i < kept; i += kQsaThreads) {
-            const uint32_t block = static_cast<uint32_t>(kept_index[i]);
+        for (uint32_t i = t; i < selected; i += kQsaThreads) {
+            const uint32_t block = static_cast<uint32_t>(indices[i]);
             atomicOr(&mask_words_ptr[block / 32u], 1u << (block % 32u));
         }
         if (t == 0u && complete < args.blocks) {
             atomicOr(&mask_words_ptr[complete / 32u], 1u << (complete % 32u));
         }
     }
+}
+
+using qsa_wbf8_t = short __attribute__((ext_vector_type(8)));
+using qsa_wf8_t = float __attribute__((ext_vector_type(8)));
+
+__device__ __forceinline__ qsa_wbf8_t qsa_pack_frag(uint2 a, uint2 b) {
+    union { unsigned w[4]; qsa_wbf8_t f; } u;
+    u.w[0] = a.x; u.w[1] = a.y; u.w[2] = b.x; u.w[3] = b.y;
+    return u.f;
+}
+
+__device__ __forceinline__ qsa_wbf8_t qsa_frag_a(
+    const bf16_t* src, uint32_t pitch, uint32_t kbase, uint32_t lane) {
+    const bf16_t* p = src + static_cast<size_t>(lane & 15u) * pitch
+        + 4u * (lane >> 4u) + kbase;
+    const uint2 a = *reinterpret_cast<const uint2*>(p);
+    const uint2 b = *reinterpret_cast<const uint2*>(p + 8);
+    return qsa_pack_frag(a, b);
+}
+
+__device__ __forceinline__ qsa_wbf8_t qsa_frag_b_kn(
+    const bf16_t* src, uint32_t pitch, uint32_t nbase, uint32_t kbase,
+    uint32_t lane) {
+    const uint32_t n = nbase + (lane & 15u);
+    const uint32_t k0 = kbase + 4u * (lane >> 4u);
+    union { unsigned short h[8]; qsa_wbf8_t f; } u;
+    #pragma unroll
+    for (uint32_t e = 0u; e < 4u; ++e) {
+        u.h[e] = src[static_cast<size_t>(k0 + e) * pitch + n].data;
+        u.h[4u + e] = src[static_cast<size_t>(k0 + 8u + e) * pitch + n].data;
+    }
+    return u.f;
+}
+
+__device__ __forceinline__ qsa_wf8_t qsa_wmma(qsa_wbf8_t a, qsa_wbf8_t b,
+                                              qsa_wf8_t c) {
+    return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, c);
+}
+
+constexpr uint32_t kQsaWmmaPitch = kQsaHeadDim + 8u;
+constexpr uint32_t kQsaWmmaKPitch = 40u;
+constexpr uint32_t kQsaScoreChunk = 32u;
+
+__global__ __launch_bounds__(kQsaThreads, 2) void qsa_score_wmma_kernel(
+    QsaScoreArgs args) {
+    const uint32_t row_group = blockIdx.x * kQsaScoreRowsPerCta;
+    const uint32_t block_tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    const uint32_t block_group = blockIdx.y * block_tile;
+    if (row_group >= args.rows || block_group >= args.blocks) return;
+    const uint32_t valid_rows = args.rows - row_group < kQsaScoreRowsPerCta
+        ? args.rows - row_group
+        : kQsaScoreRowsPerCta;
+    const uint32_t block_here = args.blocks - block_group < block_tile
+        ? args.blocks - block_group
+        : block_tile;
+    const uint32_t t = threadIdx.x;
+    const uint32_t lane = t & 31u;
+    const uint32_t hi = lane >> 4u;
+    const uint32_t lo = lane & 15u;
+
+    __shared__ bf16_t q_tile[64][kQsaWmmaPitch];
+    __shared__ bf16_t k_tile[kQsaHeadDim][kQsaWmmaKPitch];
+    __shared__ float score_tile[16][kQsaScoreChunk];
+
+    const uint32_t slot = args.row_sequence_slots[row_group];
+    const bf16_t* pooled = args.pooled_base +
+        static_cast<uint64_t>(slot) * args.pooled_slot_stride +
+        static_cast<uint64_t>(args.state_index) * args.pooled_layer_stride;
+
+    for (uint32_t i = t; i < 64u * kQsaHeadDim; i += kQsaThreads) {
+        const uint32_t m = i / kQsaHeadDim;
+        const uint32_t d = i % kQsaHeadDim;
+        const uint32_t r = m / 4u;
+        const uint32_t h = m % 4u;
+        q_tile[m][d] = r < valid_rows
+            ? args.q[static_cast<uint64_t>(row_group + r) * args.q_row_stride +
+                     static_cast<uint64_t>(h) * kQsaHeadDim + d]
+            : bf16_t{0};
+    }
+    __syncthreads();
+
+    for (uint32_t chunk = 0u; chunk < block_here; chunk += kQsaScoreChunk) {
+        const uint32_t n = block_here - chunk < kQsaScoreChunk
+            ? block_here - chunk
+            : kQsaScoreChunk;
+        for (uint32_t i = t; i < kQsaScoreChunk * kQsaHeadDim; i += kQsaThreads) {
+            const uint32_t b = i / kQsaHeadDim;
+            const uint32_t d = i % kQsaHeadDim;
+            k_tile[d][b] = b < n
+                ? pooled[static_cast<uint64_t>(args.block_begin + block_group + chunk + b) *
+                             kQsaHeadDim + d]
+                : bf16_t{0};
+        }
+        __syncthreads();
+
+        const uint32_t mt = t >> 5u;
+        if (mt * 4u < valid_rows) {
+            qsa_wbf8_t qfrag[8];
+            #pragma unroll
+            for (uint32_t ks = 0u; ks < 8u; ++ks)
+                qfrag[ks] = qsa_frag_a(&q_tile[mt * 16u][0], kQsaWmmaPitch,
+                                       ks * 16u, lane);
+            for (uint32_t nt = 0u; nt < 2u; ++nt) {
+                qsa_wf8_t c = {};
+                #pragma unroll
+                for (uint32_t ks = 0u; ks < 8u; ++ks) {
+                    const qsa_wbf8_t fb = qsa_frag_b_kn(
+                        &k_tile[0][0], kQsaWmmaKPitch, nt * 16u, ks * 16u, lane);
+                    c = qsa_wmma(qfrag[ks], fb, c);
+                }
+                const uint32_t col = nt * 16u + lo;
+                const uint32_t ra = mt * 4u + 2u * hi;
+                const float sa = (fmaxf(c[0], 0.0f) + fmaxf(c[1], 0.0f) +
+                                  fmaxf(c[2], 0.0f) + fmaxf(c[3], 0.0f)) * args.scale;
+                const float sb = (fmaxf(c[4], 0.0f) + fmaxf(c[5], 0.0f) +
+                                  fmaxf(c[6], 0.0f) + fmaxf(c[7], 0.0f)) * args.scale;
+                if (ra < valid_rows) score_tile[ra][col] = sa;
+                if (ra + 1u < valid_rows) score_tile[ra + 1u][col] = sb;
+            }
+        }
+        __syncthreads();
+
+        for (uint32_t i = t; i < valid_rows * kQsaScoreChunk; i += kQsaThreads) {
+            const uint32_t r = i / kQsaScoreChunk;
+            const uint32_t b = i % kQsaScoreChunk;
+            if (b < n) {
+                args.scores[static_cast<uint64_t>(args.row_begin + row_group + r) *
+                                args.score_row_stride +
+                            block_group + chunk + b] = score_tile[r][b];
+            }
+        }
+        __syncthreads();
+    }
+}
+
+__device__ __forceinline__ uint32_t qsa_radix_key(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+__device__ __forceinline__ float qsa_radix_value(uint32_t key) {
+    const uint32_t bits = (key & 0x80000000u) ? (key & 0x7FFFFFFFu) : ~key;
+    return __uint_as_float(bits);
+}
+
+// Exact top-k over scores[0..usable). Writes the selected indices (unsorted) to out.
+// Ties on the score keep the smaller index, matching the sort/merge path.
+__device__ void qsa_radix_select(const float* scores, uint32_t usable, uint32_t k,
+                                 uint32_t* hist, uint32_t* state, std::int32_t* out,
+                                 float* out_scores, uint32_t index_base) {
+    const uint32_t t = threadIdx.x;
+    const uint32_t stride = blockDim.x;
+    uint32_t rank = k;
+    uint32_t prefix = 0u;
+    uint32_t above = 0u;
+    for (uint32_t pass = 0u; pass < 4u; ++pass) {
+        const uint32_t shift = 24u - 8u * pass;
+        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
+        __syncthreads();
+        for (uint32_t i = t; i < usable; i += stride) {
+            const uint32_t key = qsa_radix_key(scores[i]);
+            if (pass == 0u || (key >> (shift + 8u)) == (prefix >> (shift + 8u)))
+                atomicAdd(&hist[(key >> shift) & 0xFFu], 1u);
+        }
+        __syncthreads();
+        if (t == 0u) {
+            uint32_t acc = 0u;
+            uint32_t bucket = 0u;
+            for (int b = 255; b >= 0; --b) {
+                const uint32_t count = hist[static_cast<uint32_t>(b)];
+                if (acc + count >= rank) {
+                    bucket = static_cast<uint32_t>(b);
+                    break;
+                }
+                acc += count;
+            }
+            state[0] = bucket;
+            state[1] = acc;
+            state[2] = rank - acc;
+        }
+        __syncthreads();
+        above += state[1];
+        rank = state[2];
+        prefix |= state[0] << shift;
+        __syncthreads();
+    }
+    const float threshold = qsa_radix_value(prefix);
+    uint32_t need = k - above;
+    uint32_t index_prefix = 0u;
+    for (uint32_t pass = 0u; pass < 2u && need != 0u; ++pass) {
+        const uint32_t shift = 8u - 8u * pass;
+        for (uint32_t i = t; i < 256u; i += stride) hist[i] = 0u;
+        __syncthreads();
+        for (uint32_t i = t; i < usable; i += stride) {
+            if (scores[i] != threshold) continue;
+            if (pass != 0u && (i >> (shift + 8u)) != (index_prefix >> (shift + 8u)))
+                continue;
+            atomicAdd(&hist[(i >> shift) & 0xFFu], 1u);
+        }
+        __syncthreads();
+        if (t == 0u) {
+            uint32_t acc = 0u;
+            uint32_t bucket = 0u;
+            for (uint32_t b = 0u; b < 256u; ++b) {
+                const uint32_t count = hist[b];
+                if (acc + count >= need) {
+                    bucket = b;
+                    break;
+                }
+                acc += count;
+            }
+            state[0] = bucket;
+            state[1] = need - acc;
+        }
+        __syncthreads();
+        index_prefix |= state[0] << shift;
+        need = state[1];
+        __syncthreads();
+    }
+    if (t == 0u) state[3] = 0u;
+    __syncthreads();
+    for (uint32_t i = t; i < usable; i += stride) {
+        const float value = scores[i];
+        if (value > threshold || (value == threshold && i <= index_prefix)) {
+            const uint32_t pos = atomicAdd(&state[3], 1u);
+            out[pos] = static_cast<std::int32_t>(index_base + i);
+            if (out_scores != nullptr) out_scores[pos] = value;
+        }
+    }
+    __syncthreads();
+}
+
+__global__ __launch_bounds__(kQsaTopkMaxThreads) void qsa_topk_kernel(QsaTopkArgs args) {
+    const uint32_t row = blockIdx.x;
+    if (row >= args.rows) return;
+    const uint32_t t = threadIdx.x;
+
+    __shared__ uint32_t hist[256];
+    __shared__ uint32_t radix_state[4];
+    extern __shared__ uint8_t qsa_topk_dynamic[];
+
+    const uint32_t top_k =
+        args.top_k < kQsaSelectMaxTopK ? args.top_k : kQsaSelectMaxTopK;
+    uint32_t half = kQsaSelectChunk;
+    while (half < top_k) half <<= 1u;
+    const uint32_t count = half * 2u;
+    float* scores = reinterpret_cast<float*>(qsa_topk_dynamic);
+    int32_t* indices =
+        reinterpret_cast<int32_t*>(qsa_topk_dynamic + count * sizeof(float));
+    const uint32_t visible = [] (uint32_t position, uint32_t compress, uint32_t blocks) {
+        const uint32_t complete = (position + 1u) / compress;
+        return complete < blocks ? complete : blocks;
+    }(args.positions[row], args.compress_ratio, args.blocks);
+    const uint32_t usable = visible > args.block_begin
+        ? (visible - args.block_begin < args.block_count
+               ? visible - args.block_begin
+               : args.block_count)
+        : 0u;
+
+    const uint32_t block_max = visible < top_k ? visible : top_k;
+    const bool select_once = args.first != 0u && args.last != 0u &&
+                             args.block_begin == 0u && usable == visible &&
+                             usable <= 65536u;
+    if (select_once) {
+        if (block_max != 0u)
+            qsa_radix_select(
+                args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
+                usable, block_max, hist, radix_state, indices, nullptr, 0u);
+    } else {
+        for (uint32_t i = t; i < count; i += kQsaThreads) {
+            if (i >= half || args.first != 0u) {
+                scores[i] = -INFINITY;
+                indices[i] = -1;
+            } else {
+                scores[i] = args.state_scores[static_cast<uint64_t>(row) * count + i];
+                indices[i] = args.state_indices[static_cast<uint64_t>(row) * count + i];
+            }
+        }
+        __syncthreads();
+
+        if (usable != 0u) {
+            const uint32_t want = usable < top_k ? usable : top_k;
+            qsa_radix_select(
+                args.scores + static_cast<uint64_t>(row) * args.score_row_stride,
+                usable, want, hist, radix_state, indices + half, scores + half,
+                args.block_begin);
+        }
+
+        qsa_sort_candidates_ascending(scores, indices, half, half);
+        qsa_merge_descending(scores, indices, count);
+
+        if (args.last == 0u) {
+            for (uint32_t i = t; i < half; i += kQsaThreads) {
+                args.state_scores[static_cast<uint64_t>(row) * count + i] = scores[i];
+                args.state_indices[static_cast<uint64_t>(row) * count + i] = indices[i];
+            }
+            return;
+        }
+    }
+
+    int32_t* out = args.selected != nullptr
+        ? args.selected + static_cast<uint64_t>(row) * args.selected_row_stride
+        : nullptr;
+    if (out != nullptr) {
+        if (t == 0u) {
+            for (uint32_t i = 1u; i < block_max; ++i) {
+                const int32_t value = indices[i];
+                uint32_t j = i;
+                while (j > 0u && indices[j - 1u] > value) {
+                    indices[j] = indices[j - 1u];
+                    --j;
+                }
+                indices[j] = value;
+            }
+        }
+        __syncthreads();
+        for (uint32_t i = t; i < args.top_k; i += kQsaThreads)
+            out[i] = i < block_max ? indices[i] : -1;
+    }
+    uint32_t* words = reinterpret_cast<uint32_t*>(
+        args.block_mask + static_cast<uint64_t>(row) * args.mask_row_bytes);
+    const uint32_t mask_words = (args.blocks + 31u) / 32u;
+    for (uint32_t i = t; i < mask_words; i += kQsaThreads) words[i] = 0u;
+    __syncthreads();
+    for (uint32_t i = t; i < block_max; i += kQsaThreads) {
+        const uint32_t block = static_cast<uint32_t>(indices[i]);
+        atomicOr(&words[block / 32u], 1u << (block % 32u));
+    }
+    const uint32_t complete = (args.positions[row] + 1u) / args.compress_ratio;
+    if (t == 0u && complete < args.blocks)
+        atomicOr(&words[complete / 32u], 1u << (complete % 32u));
 }
 
 __global__ __launch_bounds__(kQsaHeadDim) void qsa_rope_kernel(QsaRopeArgs args) {
@@ -362,6 +712,214 @@ __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_batch_kernel(
     }
 }
 
+__device__ __forceinline__ void qsa_rope_store(
+    bf16_t* dst, const float* normed, uint32_t d, uint32_t rotary_dim,
+    float start, float position_scale, const double* inv_freq, float theta) {
+    const uint32_t half = rotary_dim / 2u;
+    if (d < half) {
+        const float exponent = -2.0f * static_cast<float>(d) /
+                               static_cast<float>(rotary_dim);
+        const float frequency = inv_freq != nullptr
+                                    ? static_cast<float>(inv_freq[d])
+                                    : powf(theta, exponent);
+        const float angle = (start / position_scale) * frequency;
+        const float cosine = cosf(angle);
+        const float sine = sinf(angle);
+        const float x0 = normed[d];
+        const float x1 = normed[d + half];
+        dst[d] = bf16_from(x0 * cosine - x1 * sine);
+    } else if (d < rotary_dim) {
+        const uint32_t i = d - half;
+        const float exponent = -2.0f * static_cast<float>(i) /
+                               static_cast<float>(rotary_dim);
+        const float frequency = inv_freq != nullptr
+                                    ? static_cast<float>(inv_freq[i])
+                                    : powf(theta, exponent);
+        const float angle = (start / position_scale) * frequency;
+        const float cosine = cosf(angle);
+        const float sine = sinf(angle);
+        const float x0 = normed[i];
+        const float x1 = normed[d];
+        dst[d] = bf16_from(x1 * cosine + x0 * sine);
+    } else {
+        dst[d] = bf16_from(normed[d]);
+    }
+}
+
+// Prefill form of the batch key cache: one CTA per completed compressed block.
+// Each CTA reads its own rows from raw_keys, so no cross-block ordering is needed.
+// The caller uses this only when partial_history is null (no speculative snapshots).
+__global__ __launch_bounds__(kThreads) void qsa_key_cache_blocks_kernel(
+    QsaKeyCacheBatchArgs args) {
+    const uint32_t d = threadIdx.x;
+    const ::shelf::runtime::DeviceRequestDescriptor request = args.requests[blockIdx.y];
+    const uint32_t slot = request.request_handle.slot;
+    if (slot >= args.max_sequences) return;
+    const uint32_t row_begin = request.row_begin;
+    const uint32_t row_end = row_begin + request.row_count < args.actual_rows
+                                 ? row_begin + request.row_count
+                                 : args.actual_rows;
+    if (row_end <= row_begin) return;
+    const uint32_t rows_here = row_end - row_begin;
+    const uint32_t cr = args.compress_ratio;
+    const uint32_t unit = blockIdx.x;
+    if (cr < 2u || unit > (rows_here + cr - 1u) / cr + 1u) return;
+
+    bf16_t* pooled = args.pooled_base +
+        static_cast<std::uint64_t>(slot) * args.pooled_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.pooled_layer_stride;
+    bf16_t* partial = args.partial_base +
+        static_cast<std::uint64_t>(slot) * args.partial_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.partial_layer_stride;
+    uint32_t* pool_count_ptr = args.pool_count_base +
+        static_cast<std::uint64_t>(slot) * args.count_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.count_layer_stride;
+    uint32_t* partial_count_ptr = args.partial_count_base +
+        static_cast<std::uint64_t>(slot) * args.count_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.count_layer_stride;
+
+    __shared__ float scratch[kThreads];
+    __shared__ float normed[kQsaHeadDim];
+
+    const uint32_t pending = *partial_count_ptr;
+    const uint32_t pool_start = *pool_count_ptr;
+
+    uint32_t head = 0u;
+    uint32_t body = 0u;
+    uint32_t tail = 0u;
+    bool partial_only = false;
+    if (pending != 0u && rows_here < cr - pending) {
+        partial_only = true;
+    } else {
+        head = pending == 0u ? 0u : cr - pending;
+        body = (rows_here - head) / cr;
+        tail = rows_here - head - body * cr;
+    }
+    const uint32_t head_units = head != 0u ? 1u : 0u;
+    const uint32_t body_end = head_units + body;
+    const uint32_t tail_unit = head != 0u ? 0u : body_end;
+
+    if (partial_only) {
+        if (unit == 0u) {
+            for (uint32_t i = 0u; i < rows_here; ++i)
+                partial[(pending + i) * args.head_dim + d] =
+                    args.raw_keys[static_cast<std::uint64_t>(row_begin + i) *
+                                      args.raw_row_stride + d];
+        }
+        return;
+    }
+
+    if (head != 0u && unit == 0u) {
+        float sum = 0.0f;
+        for (uint32_t i = 0u; i < pending; ++i)
+            sum += bf16_value(partial + static_cast<std::uint64_t>(i) * args.head_dim + d);
+        for (uint32_t i = 0u; i < head; ++i)
+            sum += bf16_value(args.raw_keys +
+                              static_cast<std::uint64_t>(row_begin + i) *
+                                  args.raw_row_stride + d);
+        const float mean = sum / static_cast<float>(cr);
+        const float square = block_sum(scratch, mean * mean);
+        __syncthreads();
+        const float inv = rsqrtf(square / static_cast<float>(args.head_dim) + args.eps);
+        normed[d] = mean * inv * (1.0f + bf16_value(args.norm_weight + d));
+        __syncthreads();
+        if (pool_start < args.max_blocks) {
+            const uint32_t position = args.positions[row_begin + head - 1u];
+            const float start = position >= cr - 1u
+                                    ? static_cast<float>(position - (cr - 1u))
+                                    : 0.0f;
+            qsa_rope_store(pooled + static_cast<std::uint64_t>(pool_start) * args.head_dim,
+                           normed, d, args.rotary_dim, start, args.position_scale,
+                           args.inv_freq, args.theta);
+        }
+    }
+
+    if (unit >= head_units && unit < body_end) {
+        const uint32_t k = unit - head_units;
+        const uint32_t block_row = row_begin + head + k * cr;
+        float sum = 0.0f;
+        for (uint32_t i = 0u; i < cr; ++i)
+            sum += bf16_value(args.raw_keys +
+                              static_cast<std::uint64_t>(block_row + i) *
+                                  args.raw_row_stride + d);
+        const float mean = sum / static_cast<float>(cr);
+        const float square = block_sum(scratch, mean * mean);
+        __syncthreads();
+        const float inv = rsqrtf(square / static_cast<float>(args.head_dim) + args.eps);
+        normed[d] = mean * inv * (1.0f + bf16_value(args.norm_weight + d));
+        __syncthreads();
+        const uint32_t pool_index = pool_start + head_units + k;
+        if (pool_index < args.max_blocks) {
+            const uint32_t position = args.positions[block_row + cr - 1u];
+            const float start = position >= cr - 1u
+                                    ? static_cast<float>(position - (cr - 1u))
+                                    : 0.0f;
+            qsa_rope_store(pooled + static_cast<std::uint64_t>(pool_index) * args.head_dim,
+                           normed, d, args.rotary_dim, start, args.position_scale,
+                           args.inv_freq, args.theta);
+        }
+    }
+
+    if (unit == tail_unit && (tail != 0u || (head_units + body) != 0u)) {
+        const uint32_t tail_row = row_begin + head + body * cr;
+        for (uint32_t i = 0u; i < tail; ++i)
+            partial[i * args.head_dim + d] =
+                args.raw_keys[static_cast<std::uint64_t>(tail_row + i) *
+                                  args.raw_row_stride + d];
+        if (body != 0u) {
+            const uint32_t last_block_row = row_begin + head + (body - 1u) * cr;
+            for (uint32_t i = tail; i < cr; ++i)
+                partial[i * args.head_dim + d] =
+                    args.raw_keys[static_cast<std::uint64_t>(last_block_row + i) *
+                                      args.raw_row_stride + d];
+        } else if (head != 0u) {
+            for (uint32_t i = tail; i < cr; ++i) {
+                if (i < pending) continue;
+                partial[i * args.head_dim + d] =
+                    args.raw_keys[static_cast<std::uint64_t>(row_begin + i - pending) *
+                                      args.raw_row_stride + d];
+            }
+        }
+    }
+}
+
+// Written after the block kernel: the counters are shared by every block CTA, so they
+// cannot change while the block kernel is running.
+__global__ void qsa_key_cache_counts_kernel(QsaKeyCacheBatchArgs args) {
+    if (threadIdx.x != 0u) return;
+    const ::shelf::runtime::DeviceRequestDescriptor request = args.requests[blockIdx.x];
+    const uint32_t slot = request.request_handle.slot;
+    if (slot >= args.max_sequences) return;
+    const uint32_t row_begin = request.row_begin;
+    const uint32_t row_end = row_begin + request.row_count < args.actual_rows
+                                 ? row_begin + request.row_count
+                                 : args.actual_rows;
+    if (row_end <= row_begin) return;
+    const uint32_t rows_here = row_end - row_begin;
+    const uint32_t cr = args.compress_ratio;
+    if (cr < 2u) return;
+    uint32_t* pool_count_ptr = args.pool_count_base +
+        static_cast<std::uint64_t>(slot) * args.count_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.count_layer_stride;
+    uint32_t* partial_count_ptr = args.partial_count_base +
+        static_cast<std::uint64_t>(slot) * args.count_slot_stride +
+        static_cast<std::uint64_t>(args.state_index) * args.count_layer_stride;
+    const uint32_t pending = *partial_count_ptr;
+    const uint32_t pool_start = *pool_count_ptr;
+    if (pending != 0u && rows_here < cr - pending) {
+        *partial_count_ptr = pending + rows_here;
+        return;
+    }
+    const uint32_t head = pending == 0u ? 0u : cr - pending;
+    const uint32_t body = (rows_here - head) / cr;
+    const uint32_t tail = rows_here - head - body * cr;
+    uint32_t next_pool = pool_start + (head != 0u ? 1u : 0u) + body;
+    if (next_pool > args.max_blocks) next_pool = args.max_blocks;
+    *pool_count_ptr = next_pool;
+    *partial_count_ptr = tail;
+}
+
+
 __global__ __launch_bounds__(kQsaHeadDim) void qsa_key_cache_kernel(
     QsaKeyCacheArgs args) {
     const uint32_t d = threadIdx.x;
@@ -468,13 +1026,15 @@ hipError_t launch_qsa_key_cache(const QsaKeyCacheArgs& args, hipStream_t stream)
     return hipGetLastError();
 }
 
-hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
-                                      hipStream_t stream) {
+
+namespace {
+
+bool key_cache_batch_valid(const QsaKeyCacheBatchArgs& args) {
     if (args.raw_keys == nullptr || args.norm_weight == nullptr ||
         args.positions == nullptr || args.requests == nullptr ||
         args.pooled_base == nullptr || args.partial_base == nullptr ||
         args.pool_count_base == nullptr || args.partial_count_base == nullptr) {
-        return hipErrorInvalidValue;
+        return false;
     }
     if (args.num_requests == 0u || args.actual_rows == 0u || args.max_sequences == 0u ||
         args.max_blocks == 0u || args.head_dim != kQsaHeadDim ||
@@ -488,9 +1048,79 @@ hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
         args.partial_layer_stride <
             static_cast<std::uint64_t>(args.compress_ratio) * args.head_dim ||
         args.count_slot_stride < args.count_layer_stride) {
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+hipError_t launch_qsa_key_cache_batch(const QsaKeyCacheBatchArgs& args,
+                                      hipStream_t stream) {
+    if (!key_cache_batch_valid(args)) return hipErrorInvalidValue;
+    qsa_key_cache_batch_kernel<<<args.num_requests, kQsaHeadDim, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_key_cache_blocks(const QsaKeyCacheBatchArgs& args,
+                                       hipStream_t stream) {
+    if (!key_cache_batch_valid(args) || args.partial_history != nullptr) {
         return hipErrorInvalidValue;
     }
-    qsa_key_cache_batch_kernel<<<args.num_requests, kQsaHeadDim, 0, stream>>>(args);
+    const uint32_t blocks = (args.actual_rows + args.compress_ratio - 1u) /
+                                args.compress_ratio +
+                            1u;
+    const dim3 grid(blocks, args.num_requests);
+    qsa_key_cache_blocks_kernel<<<grid, kQsaHeadDim, 0, stream>>>(args);
+    qsa_key_cache_counts_kernel<<<args.num_requests, 1, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+
+hipError_t launch_qsa_score_wmma(const QsaScoreArgs& args, hipStream_t stream) {
+    if (args.q == nullptr || args.pooled_base == nullptr || args.scores == nullptr ||
+        args.row_sequence_slots == nullptr || args.rows == 0u || args.blocks == 0u ||
+        args.n_heads != 4u || args.head_dim != kQsaHeadDim ||
+        args.compress_ratio == 0u || args.max_sequences == 0u ||
+        args.score_row_stride < args.blocks ||
+        args.q_row_stride < 4u * kQsaHeadDim ||
+        args.pooled_slot_stride < args.pooled_layer_stride ||
+        args.pooled_layer_stride <
+            static_cast<uint64_t>(args.blocks) * kQsaHeadDim ||
+        args.scale == 0.0f) {
+        return hipErrorInvalidValue;
+    }
+    const uint32_t row_groups =
+        (args.rows + kQsaScoreRowsPerCta - 1u) / kQsaScoreRowsPerCta;
+    const uint32_t tile = args.block_tile == 0u ? kQsaScoreBlocksPerCta : args.block_tile;
+    if (tile > kQsaScoreBlockTile) return hipErrorInvalidValue;
+    const uint32_t block_tiles = (args.blocks + tile - 1u) / tile;
+    const dim3 grid(row_groups, block_tiles);
+    qsa_score_wmma_kernel<<<grid, kQsaThreads, 0, stream>>>(args);
+    return hipGetLastError();
+}
+
+hipError_t launch_qsa_topk(const QsaTopkArgs& args, hipStream_t stream) {
+    if (args.scores == nullptr || args.state_scores == nullptr ||
+        args.state_indices == nullptr || args.block_mask == nullptr ||
+        args.positions == nullptr || args.rows == 0u ||
+        args.top_k == 0u || args.compress_ratio == 0u ||
+        args.score_row_stride < args.block_count ||
+        args.mask_row_bytes < ((args.blocks + 31u) / 32u) * 4u) {
+        return hipErrorInvalidValue;
+    }
+    if (args.selected != nullptr && args.selected_row_stride < args.top_k) {
+        return hipErrorInvalidValue;
+    }
+    uint32_t half = kQsaSelectChunk;
+    while (half < args.top_k) half <<= 1u;
+    const std::size_t dynamic_bytes =
+        2u * static_cast<std::size_t>(half) *
+        (sizeof(float) + sizeof(std::int32_t));
+    const uint32_t threads = args.rows <= kQsaTopkSmallRows
+                                 ? kQsaTopkMaxThreads
+                                 : kQsaThreads;
+    qsa_topk_kernel<<<args.rows, threads, dynamic_bytes, stream>>>(args);
     return hipGetLastError();
 }
 
@@ -518,7 +1148,11 @@ hipError_t launch_qsa_select_batch(const QsaSelectBatchArgs& args, hipStream_t s
     if (args.selected != nullptr && args.selected_row_stride < args.top_k) {
         return hipErrorInvalidValue;
     }
-    qsa_select_batch_kernel<<<args.rows, kQsaThreads, 0, stream>>>(args);
+    uint32_t half = kQsaSelectChunk;
+    while (half < args.top_k) half <<= 1u;
+    const std::size_t dynamic_bytes =
+        static_cast<std::size_t>(half * 2u) * (sizeof(float) + sizeof(std::int32_t));
+    qsa_select_batch_kernel<<<args.rows, kQsaThreads, dynamic_bytes, stream>>>(args);
     return hipGetLastError();
 }
 

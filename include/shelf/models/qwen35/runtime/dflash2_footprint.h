@@ -35,7 +35,8 @@ std::size_t dflash2_spec_workspace_bytes(const DFlash2SpecDecoderConfig& config,
 std::size_t dflash2_draft_scratch_bytes(const dflash2::DFlash2Config& config,
                                         std::size_t rows,
                                         std::size_t lm_head_k,
-                                        std::size_t prefill_rows = 0u) noexcept;
+                                        std::size_t prefill_rows = 0u,
+                                        bool exl3_mul24_head = false) noexcept;
 
 std::size_t dflash2_batch_tree_metadata_bytes(std::size_t max_rows, uint32_t tree_budget) noexcept;
 
@@ -49,7 +50,8 @@ DFlash2Footprint dflash2_footprint(const dflash2::DFlash2Config& config,
                                    std::size_t draft_weights_bytes,
                                    std::size_t lm_head_k,
                                    uint32_t sessions,
-                                   std::size_t prefill_rows = 0u) noexcept;
+                                   std::size_t prefill_rows = 0u,
+                                   bool exl3_mul24_head = false) noexcept;
 
 }  // namespace runtime
 }  // namespace shelf::qwen35

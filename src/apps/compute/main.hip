@@ -114,6 +114,13 @@ int main(int argc, char** argv) {
         fprintf(stderr, "WARN: --pipeline-parallel disables prefix cache\n");
     }
     config.prefix_cache_concurrency = static_cast<uint32_t>(opt.prefix_cache_concurrency);
+    config.prefix_cache_strategy = opt.prefix_cache_strategy == 1
+        ? shelf::qwen35::runtime::PrefixCacheStrategy::Slot
+        : shelf::qwen35::runtime::PrefixCacheStrategy::Radix;
+    config.prefix_cache_slot_count = config.prefix_cache_strategy ==
+            shelf::qwen35::runtime::PrefixCacheStrategy::Slot
+        ? config.max_concurrent_requests
+        : 0u;
     config.working_set_reserve_bytes =
         static_cast<std::size_t>(opt.working_set_reserve_gib) * 1024ull * 1024ull * 1024ull;
     if (!is_plamo) config.rope_profile = rope_profile;

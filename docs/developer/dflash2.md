@@ -211,6 +211,9 @@ weight を掛ける。
     W8A8 WMMA GEMM で F32 logits を作る。
   - EXL3: mul1 は W16A16 kernel、mul24 は activation の回転・INT8 量子化、
     INT8 GEMM、出力回転の順に実行する。両形式は codebook と trellis の配置が異なる。
+    mul24 のみ INT8 GEMM の F32 累加 buffer `exl3_lm_head_accum`
+    （`[max_rows, vocab_size]` F32）を `create_dflash2_executor` で確保する。
+    BF16 / FP8 / EXL3 mul1 では確保しない。
 - proposal logits は **F32** で出す（bf16 へ落とさない。top-16 ordering が proposal に
   直結するため）。
 - `create_dflash2_spec_decoder()` が target との shape 一致
@@ -587,6 +590,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
   有効で、`prefix_tokens >= prompt_count` は error である
   （[prefix_cache.md](prefix_cache.md)）。
 - prompt を `target->config.max_batch_rows` 単位で chunk 実行する。
+- `checkpoint_position` が非 0 のとき、その位置で chunk を必ず区切る。slot strategy の
+  prefix checkpoint 保存位置（[prefix_cache.md](prefix_cache.md)）である。
 - intermediate chunk: `compute_logits=false`, `sample=false`。
 - final chunk: `compute_logits=true`, `sample=true`, `num_output_rows=1`。
 - 各 chunk 実行直後に target tap を ring へ append する。
@@ -1018,6 +1023,13 @@ batch proposal の scratch は `proposal_logits` が
 `max(max_rows, max_batch_rows) × vocab_size × 4` bytes になる（F32）。
 serve の既定（`max_concurrent_requests × block_size`）ではこの値が効くため、
 `max_concurrent_requests` を上げると drafter の logits buffer も増える。
+
+`dflash2_draft_scratch_bytes` / `dflash2_footprint` は target lm_head の形式
+（`exl3_mul24_head`）を受け取り、mul24 のときだけ `exl3_lm_head_accum` 分の
+logits buffer を 1 つ加算する。BF16 / FP8 / EXL3 mul1 では `proposal_logits`
+1 つ分のみである。呼び出し側は target の `lm_head` の `quant_spec` から
+`exl3_mul24_head` を導く（TP では drafter が実際に借りる head、すなわち
+Qwen4Exp の `weights().lm_head` か rank 0 の `private_lm_head()`）。
 
 ### env 一覧
 

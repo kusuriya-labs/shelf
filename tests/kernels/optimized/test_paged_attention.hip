@@ -980,7 +980,10 @@ int main() {
     c.max_sequences = 4;
     c.mask_blocks = 64u;
     c.mask_block_shift = 2u;
+    c.prefill = true;
     run_case(c, "bf16 QSA MASKED PREFILL qh=12 kvh=2 hd=256 page=16 blocks=64 rows=64");
+    c.fp8 = true;
+    run_case(c, "fp8 QSA MASKED PREFILL qh=12 kvh=2 hd=256 page=16 blocks=64 rows=64");
     c = Config{};
     c.rows = 1;
     c.q_heads = 12;

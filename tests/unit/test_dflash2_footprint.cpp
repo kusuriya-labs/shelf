@@ -81,6 +81,11 @@ int main() {
     const std::size_t scratch = dflash2_draft_scratch_bytes(config, 8u, 0u);
     check(scratch > 0u, "draft scratch is positive");
     check((scratch % 256u) == 0u, "draft scratch is alignment padded");
+    const std::size_t scratch_mul24 = dflash2_draft_scratch_bytes(config, 8u, 0u, 0u, true);
+    const std::size_t logits_buffer =
+        ((8u * config.vocab_size * sizeof(float) + 255u) / 256u) * 256u;
+    check(scratch_mul24 - scratch == logits_buffer,
+          "mul24 head adds exactly one logits buffer for the EXL3 accumulator");
     const std::size_t prefill_scratch = dflash2_draft_scratch_bytes(config, 8u, 0u, 256u);
     const std::size_t feature_delta = (256u - 8u) *
         (config.tap_feature_size() + 2u * config.hidden_size) * sizeof(shelf::bf16_t);
@@ -98,15 +103,24 @@ int main() {
     DFlash2Config small_vocab = config;
     small_vocab.vocab_size = config.vocab_size / 2u;
     const std::size_t small_scratch = dflash2_draft_scratch_bytes(small_vocab, 8u, 0u);
+    const std::size_t small_scratch_mul24 =
+        dflash2_draft_scratch_bytes(small_vocab, 8u, 0u, 0u, true);
     const std::size_t logits_delta = 8u * (config.vocab_size - small_vocab.vocab_size) *
                                      sizeof(float);
     check(scratch > small_scratch, "draft scratch grows with the vocabulary");
-    check(scratch - small_scratch >= 2u * logits_delta,
-          "draft scratch covers the proposal logits and EXL3 accumulator");
+    check(scratch - small_scratch >= logits_delta,
+          "draft scratch covers the proposal logits");
+    check(scratch_mul24 - small_scratch_mul24 >= 2u * logits_delta,
+          "mul24 draft scratch covers the proposal logits and EXL3 accumulator");
 
     const std::size_t wide_rows = dflash2_draft_scratch_bytes(config, 64u, 0u);
     check(wide_rows > scratch, "draft scratch grows with the row count");
-    check(wide_rows - scratch >= 2u * (64u - 8u) * config.vocab_size * sizeof(float),
+    check(wide_rows - scratch >= (64u - 8u) * config.vocab_size * sizeof(float),
+          "batched logits cover all rows");
+    const std::size_t wide_rows_mul24 =
+        dflash2_draft_scratch_bytes(config, 64u, 0u, 0u, true);
+    check(wide_rows_mul24 - scratch_mul24 >=
+              2u * (64u - 8u) * config.vocab_size * sizeof(float),
           "batched logits and EXL3 accumulator cover all rows");
 
     using shelf::qwen35::runtime::dflash2_batch_tree_metadata_bytes;

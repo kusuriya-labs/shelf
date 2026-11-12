@@ -5,6 +5,7 @@
 #include <shelf/models/qwen35/model/qwen35_model.h>
 #include <shelf/models/qwen35/model/tensor_parallel_context.h>
 #include <shelf/models/qwen35/runtime/executor.h>
+#include <shelf/models/qwen35/runtime/prefix_cache.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <shelf/runtime/tp/tp_barrier_group.h>
@@ -82,6 +83,8 @@ struct TpRankRuntimeConfig {
     bool prefix_cache = false;
     std::uint32_t prefix_concurrency = 4;
     std::uint32_t prefix_spec_ring_bytes = 0;
+    PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
+    std::uint32_t prefix_slot_count = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
@@ -171,6 +174,8 @@ struct TpCoordinatorConfig {
     bool prefix_cache = false;
     std::uint32_t prefix_concurrency = 4;
     std::uint32_t prefix_spec_ring_bytes = 0;
+    PrefixCacheStrategy prefix_strategy = PrefixCacheStrategy::Radix;
+    std::uint32_t prefix_slot_count = 0;
     PrivateWeightLoader load_private_weights;
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
@@ -193,6 +198,9 @@ public:
     int tp_size() const noexcept { return static_cast<int>(ranks_.size()); }
     TpRankRuntime& rank(std::size_t index) { return *ranks_[index]; }
     const char* transport_name() const noexcept;
+
+    Status on_prefix_restored(const PagedSequenceState& source,
+                              std::span<const int32_t> tokens) override;
 
     uint32_t on_prefix_rank_count() override;
     PagedSequenceState* on_prefix_rank_sequence(

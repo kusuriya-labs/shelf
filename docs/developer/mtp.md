@@ -36,9 +36,15 @@ target sequence と対応付ける。MTP+TP のときは TP executor に
 `emit_normed_token_hidden` を立て、rank0 の normed hidden を drafter に渡す。
 
 MTP+TP では drafter と各 rank の GDN snapshot / compact 領域が KV pool の後ろに必要になる。
-`TpRankRuntime` は `MtpBatchReserveConfig` を受け取り、rank model の
-`token_row_ffn_size` / `mtp_grouped_reserve_bytes` / `uses_exl3_linear` から
-`mtp_spec_batch_reserve_bytes` を計算して working set reserve に加える。
+`TpRankRuntime` は `MtpBatchReserveConfig` を受け取り、次の 2 項を working set reserve に加える。
+各 rank は verify 行分の共有 GDN history / compact log と、drafter 数分の target GDN
+snapshot を `mtp_batch_rank_state_reserve_bytes` で計上する。drafter を持つ rank 0 は
+それに加えて request 数分の `mtp_drafter_reserve_bytes` を計上する。verify 行は
+`mtp_spec_rows(max_requests, num_drafts)` = `max_requests * (num_drafts + 1)` であり、
+drafter の prefill 行数（`max_batch_rows`）とは独立である。drafter の executor は
+MTP block 自身の `mtp_exl3_linear_shape` で staging plane を見積もる。target GDN snapshot は
+各 drafter が全 rank の local layout に 1 面ずつ確保するため、rank ごとに
+`max_requests` 面を計上する。
 
 grouped expert（MoE）の TP load は MTP block を分割しないため、MTP との併用を
 `build_moe_tp_rank_model` が拒否する。TP=2 を qualified とし、TP=4 は未計測である。
@@ -248,8 +254,8 @@ MTP_DRAFT_MS MTP_VERIFY_MS MTP_GDN_RESTORE_MS MTP_COMPACT_REPLAY_MS MTP_ROUND_MS
 - MTP の prefill first pass は 512 行以下へ分割する。target の prefill chunk は
   target-only と同じ値を使う。
 - MTP KV は target KV とは別 pool である。容量計画は
-  `mtp_spec_batch_reserve_bytes`（request 数分の drafter + 共有 history / compact log）と、
-  single request 経路の `LoadedModel::mtp_drafter_reserve_bytes` を使う。
+  `mtp_batch_rank_state_reserve_bytes`（verify 行分の共有 history / compact log）と
+  `mtp_drafter_reserve_bytes`（drafter を持つ rank のみ、request 数分）で行う。
 - Octave target と併用した MTP KV は BF16 であり、target の descriptor を MTP block へ
   伝播しない。
 - qwen4exp の MTP block は rank0 だけが load し、drafter の入力は final norm ではなく

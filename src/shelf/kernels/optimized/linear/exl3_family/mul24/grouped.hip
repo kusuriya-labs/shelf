@@ -29,8 +29,10 @@ constexpr uint32_t kOutBlockBase = kExl3W16A16OutBlock;
 constexpr uint32_t kRowTile = kExl3W16A16RowTile;
 constexpr uint32_t kThreads = kExl3W16A16Threads;
 constexpr float kInvSqrt128 = 0.08838834764831844055f;
-constexpr uint32_t kXrotPitch = 136u;  // FP16 elements per row in LDS
-constexpr uint32_t kXqPitch = 144u;    // int8 elements per row in LDS (16-byte aligned rows)
+constexpr uint32_t kXrotPitch1 = 136u;  // FP16 elements per row for one K chunk
+constexpr uint32_t kXrotPitch2 = 264u;  // FP16 elements per row for two K chunks
+constexpr uint32_t kXqPitch1 = 144u;    // int8 elements per row for one K chunk
+constexpr uint32_t kXqPitch2 = 272u;    // int8 elements per row for two K chunks
 
 __device__ __forceinline__ float bf16_value(const shelf::bf16_t* p) {
     return __uint_as_float(static_cast<uint32_t>(p->data) << 16u);
@@ -73,7 +75,7 @@ __device__ __forceinline__ void decode_biased(const uint32_t* tile, uint32_t lan
     }
 }
 
-template <bool kInt8, uint32_t kGroups, uint32_t kNTiles, uint32_t BITS>
+template <bool kInt8, uint32_t kGroups, uint32_t kNTiles, uint32_t BITS, bool kPairK>
 __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmArgs args) {
     constexpr uint32_t kOutBlock = kOutBlockBase * kNTiles;
     constexpr uint32_t kNTilesPerBlock = kOutBlock / 16u;
@@ -88,9 +90,13 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     uint32_t active_rows = 0u;
     if (!exl3_detail::resolve_group_plan<kGroups>(args, group_index, r0, active_rows)) return;
 
+    constexpr uint32_t kXrotPitch = kPairK ? kXrotPitch2 : kXrotPitch1;
+    constexpr uint32_t kXqPitch = kPairK ? kXqPitch2 : kXqPitch1;
+    constexpr uint32_t kStageChunks = kPairK ? 2u : 1u;
+
     // INT8: int8 codes (+ a scale per row). FP16: xrot as half.
     __shared__ __align__(16) uint8_t xbuf[kInt8 ? kRows * kXqPitch : kRows * kXrotPitch * 2u];
-    __shared__ __align__(16) float xs[kInt8 ? kRows : 1u];
+    __shared__ __align__(16) float xs[kInt8 ? kRows * kStageChunks : 1u];
     __shared__ __align__(16) float accum[kRowTile * kOutBlock];
 
     f32x8_t acc[kGroups][kNTiles];
@@ -106,62 +112,71 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
     const uint32_t* trellis = static_cast<const uint32_t*>(args.trellis);
 
     const uint32_t k_chunks = args.k / 128u;
-    for (uint32_t kc = 0u; kc < k_chunks; ++kc) {
-        const uint32_t k_base = kc * 128u;
+    const uint32_t n_tile = blockIdx.x * kNTilesPerBlock + warp * kNTiles;
+
+    auto run_chunks = [&]<uint32_t kNc>(uint32_t first_kc) {
         __syncthreads();
-        float suh_v[4];
 #pragma unroll
-        for (uint32_t i = 0u; i < 4u; ++i)
-            suh_v[i] = __half2float(__ushort_as_half(suh[k_base + lane * 4u + i]));
+        for (uint32_t c = 0u; c < kNc; ++c) {
+            const uint32_t k_base = (first_kc + c) * 128u;
+            float suh_v[4];
 #pragma unroll
-        for (uint32_t g = 0u; g < kGroups; ++g) {
+            for (uint32_t i = 0u; i < 4u; ++i)
+                suh_v[i] = __half2float(__ushort_as_half(suh[k_base + lane * 4u + i]));
 #pragma unroll
-            for (uint32_t ri = 0u; ri < 2u; ++ri) {
-                const uint32_t r = g * kRowTile + warp * 2u + ri;
-                int32_t token = static_cast<int32_t>(r);
-                if (args.row_token != nullptr && r < active_rows)
-                    token = args.row_token[group_index * kRowTile + r];
-                if (r >= active_rows || token < 0) {
-                    // Nothing to compute: scale 0 (the stale codes are finite and contribute nothing).
-                    if constexpr (kInt8) {
-                        if (lane == 0u) xs[r] = 0.f;
+            for (uint32_t g = 0u; g < kGroups; ++g) {
+#pragma unroll
+                for (uint32_t ri = 0u; ri < 2u; ++ri) {
+                    const uint32_t r = g * kRowTile + warp * 2u + ri;
+                    int32_t token = static_cast<int32_t>(r);
+                    if (args.row_token != nullptr && r < active_rows)
+                        token = args.row_token[group_index * kRowTile + r];
+                    if (r >= active_rows || token < 0) {
+                        // Nothing to compute: scale 0 (the stale codes are finite and contribute nothing).
+                        if constexpr (kInt8) {
+                            if (lane == 0u) xs[c * kRows + r] = 0.f;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                const uint32_t input_row = args.row_token != nullptr ? static_cast<uint32_t>(token) : r;
-                const shelf::bf16_t* src =
-                    input + static_cast<uint64_t>(input_row) * args.input_row_stride + k_base + lane * 4u;
-                float v0 = bf16_value(src + 0) * suh_v[0];
-                float v1 = bf16_value(src + 1) * suh_v[1];
-                float v2 = bf16_value(src + 2) * suh_v[2];
-                float v3 = bf16_value(src + 3) * suh_v[3];
-                exl3_detail::fwht128(v0, v1, v2, v3, lane);
-                v0 *= kInvSqrt128;
-                v1 *= kInvSqrt128;
-                v2 *= kInvSqrt128;
-                v3 *= kInvSqrt128;
-                if constexpr (kInt8) {
-                    float peak = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
-                    peak = fmaxf(peak, __shfl_xor(peak, 16, 32));
-                    peak = fmaxf(peak, __shfl_xor(peak, 8, 32));
-                    peak = fmaxf(peak, __shfl_xor(peak, 4, 32));
-                    peak = fmaxf(peak, __shfl_xor(peak, 2, 32));
-                    peak = fmaxf(peak, __shfl_xor(peak, 1, 32));
-                    const float scale = peak / 127.0f;
-                    const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;  // one division per row, not per element
-                    auto quant = [&](float v) -> uint32_t {
-                        const float q = fminf(fmaxf(rintf(v * inv), -128.0f), 127.0f);
-                        return static_cast<uint32_t>(static_cast<int32_t>(q)) & 0xFFu;
-                    };
-                    const uint32_t packed = quant(v0) | (quant(v1) << 8) | (quant(v2) << 16) | (quant(v3) << 24);
-                    *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + lane * 4u) = packed;
-                    if (lane == 0u) xs[r] = scale;
-                } else {
-                    __half* dst = reinterpret_cast<__half*>(xbuf) + r * kXrotPitch + lane * 4u;
-                    dst[0] = __float2half(v0);
-                    dst[1] = __float2half(v1);
-                    dst[2] = __float2half(v2);
-                    dst[3] = __float2half(v3);
+                    const uint32_t input_row =
+                        args.row_token != nullptr ? static_cast<uint32_t>(token) : r;
+                    const shelf::bf16_t* src =
+                        input + static_cast<uint64_t>(input_row) * args.input_row_stride +
+                        k_base + lane * 4u;
+                    float v0 = bf16_value(src + 0) * suh_v[0];
+                    float v1 = bf16_value(src + 1) * suh_v[1];
+                    float v2 = bf16_value(src + 2) * suh_v[2];
+                    float v3 = bf16_value(src + 3) * suh_v[3];
+                    exl3_detail::fwht128(v0, v1, v2, v3, lane);
+                    v0 *= kInvSqrt128;
+                    v1 *= kInvSqrt128;
+                    v2 *= kInvSqrt128;
+                    v3 *= kInvSqrt128;
+                    if constexpr (kInt8) {
+                        float peak = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3)));
+                        peak = fmaxf(peak, __shfl_xor(peak, 16, 32));
+                        peak = fmaxf(peak, __shfl_xor(peak, 8, 32));
+                        peak = fmaxf(peak, __shfl_xor(peak, 4, 32));
+                        peak = fmaxf(peak, __shfl_xor(peak, 2, 32));
+                        peak = fmaxf(peak, __shfl_xor(peak, 1, 32));
+                        const float scale = peak / 127.0f;
+                        const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;  // one division per row, not per element
+                        auto quant = [&](float v) -> uint32_t {
+                            const float q = fminf(fmaxf(rintf(v * inv), -128.0f), 127.0f);
+                            return static_cast<uint32_t>(static_cast<int32_t>(q)) & 0xFFu;
+                        };
+                        const uint32_t packed = quant(v0) | (quant(v1) << 8) | (quant(v2) << 16) | (quant(v3) << 24);
+                        *reinterpret_cast<uint32_t*>(xbuf + r * kXqPitch + c * 128u +
+                                                     lane * 4u) = packed;
+                        if (lane == 0u) xs[c * kRows + r] = scale;
+                    } else {
+                        __half* dst = reinterpret_cast<__half*>(xbuf) + r * kXrotPitch +
+                                      c * 128u + lane * 4u;
+                        dst[0] = __float2half(v0);
+                        dst[1] = __float2half(v1);
+                        dst[2] = __float2half(v2);
+                        dst[3] = __float2half(v3);
+                    }
                 }
             }
         }
@@ -176,14 +191,13 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
 #pragma unroll
                     for (uint32_t j = 0u; j < 8u; ++j) acci[g][t][j] = 0;
         }
-        const uint32_t n_tile = blockIdx.x * kNTilesPerBlock + warp * kNTiles;
 #pragma unroll
-        for (uint32_t ks = 0u; ks < 8u; ++ks) {
+        for (uint32_t ks = 0u; ks < 8u * kNc; ++ks) {
             uint32_t biased[kNTiles][8];
 #pragma unroll
             for (uint32_t t = 0u; t < kNTiles; ++t) {
                 const uint32_t* tile =
-                    trellis + (static_cast<uint64_t>(kc * 8u + ks) * n_tiles_total + n_tile + t) * (8u * BITS);
+                    trellis + (static_cast<uint64_t>(first_kc * 8u + ks) * n_tiles_total + n_tile + t) * (8u * BITS);
                 decode_biased<BITS>(tile, lane, biased[t]);
             }
 #pragma unroll
@@ -206,8 +220,8 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
                     }
                 } else {
                     const f16x8_t b = *reinterpret_cast<const f16x8_t*>(
-                        reinterpret_cast<const __half*>(xbuf) + (g * kRowTile + lane16) * kXrotPitch + ks * 16u +
-                        lane_high * 8u);
+                        reinterpret_cast<const __half*>(xbuf) + (g * kRowTile + lane16) * kXrotPitch +
+                        ks * 16u + lane_high * 8u);
 #pragma unroll
                     for (uint32_t t = 0u; t < kNTiles; ++t) {
                         f16x8_t a;
@@ -220,18 +234,35 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
                     }
                 }
             }
-        }
-        if constexpr (kInt8) {
+            if constexpr (kInt8) {
+                if ((ks & 7u) == 7u) {
+                    const uint32_t c = ks >> 3u;
 #pragma unroll
-            for (uint32_t g = 0u; g < kGroups; ++g) {
-                const float row_scale = xs[g * kRowTile + lane16];
+                    for (uint32_t g = 0u; g < kGroups; ++g) {
+                        const float row_scale = xs[c * kRows + g * kRowTile + lane16];
 #pragma unroll
-                for (uint32_t t = 0u; t < kNTiles; ++t)
+                        for (uint32_t t = 0u; t < kNTiles; ++t)
 #pragma unroll
-                    for (uint32_t j = 0u; j < 8u; ++j)
-                        acc[g][t][j] += static_cast<float>(acci[g][t][j]) * row_scale;
+                            for (uint32_t j = 0u; j < 8u; ++j)
+                                acc[g][t][j] += static_cast<float>(acci[g][t][j]) * row_scale;
+                    }
+#pragma unroll
+                    for (uint32_t g = 0u; g < kGroups; ++g)
+#pragma unroll
+                        for (uint32_t t = 0u; t < kNTiles; ++t)
+#pragma unroll
+                            for (uint32_t j = 0u; j < 8u; ++j) acci[g][t][j] = 0;
+                }
             }
         }
+    };
+
+    if constexpr (kPairK) {
+        uint32_t kc = 0u;
+        for (; kc + 1u < k_chunks; kc += 2u) run_chunks.template operator()<2u>(kc);
+        if (kc < k_chunks) run_chunks.template operator()<1u>(kc);
+    } else {
+        for (uint32_t kc = 0u; kc < k_chunks; ++kc) run_chunks.template operator()<1u>(kc);
     }
 
     // Output: H128 over each 128-wide output block, then * svh (mul24 has no codebook bias).
@@ -288,8 +319,16 @@ __global__ __launch_bounds__(kThreads) void gemm_mul24_grouped_kernel(Exl3GemmAr
 
 template <bool kInt8, uint32_t kGroups, uint32_t kNTiles>
 hipError_t launch_bits(const Exl3GemmArgs& args, dim3 grid, hipStream_t stream) {
+    // Pairing two K chunks halves the stage barriers. It pays off when the K loop is long
+    // and the per-chunk WMMA count is small (gate/up); down has 5 chunks and regresses.
+    const bool pair_k = (args.k / 128u) >= 8u;
 #define SHELF_MUL24_BITS(B) \
-    case B: gemm_mul24_grouped_kernel<kInt8, kGroups, kNTiles, B><<<grid, kThreads, 0, stream>>>(args); break
+    case B: \
+        if (pair_k) \
+            gemm_mul24_grouped_kernel<kInt8, kGroups, kNTiles, B, true><<<grid, kThreads, 0, stream>>>(args); \
+        else \
+            gemm_mul24_grouped_kernel<kInt8, kGroups, kNTiles, B, false><<<grid, kThreads, 0, stream>>>(args); \
+        break
     switch (args.ka) {
         SHELF_MUL24_BITS(1u);
         SHELF_MUL24_BITS(2u);

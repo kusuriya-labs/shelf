@@ -391,6 +391,150 @@ int main() {
     check(selected_ok, "select matches the pooled keys of each sequence slot");
     check(mask_ok, "block mask marks the selection and the partial tail block");
 
+    {
+        constexpr std::uint32_t kCmpRows = 40u;
+        constexpr std::uint32_t kCmpBlocks = 16u;
+        auto serial_pool = shelf::state::QsaKeyStatePool::create(
+            arena.value(), 2u,
+            shelf::state::QsaKeyStatePoolLayout::make(1u, kHeadDim, kCompress, kCmpBlocks));
+        auto blocks_pool = shelf::state::QsaKeyStatePool::create(
+            arena.value(), 2u,
+            shelf::state::QsaKeyStatePoolLayout::make(1u, kHeadDim, kCompress, kCmpBlocks));
+        check(serial_pool.ok() && blocks_pool.ok(), "comparison pools create");
+        if (serial_pool.ok() && blocks_pool.ok()) {
+            check(serial_pool.value().initialize(0u, nullptr).ok(), "serial pool init");
+            check(blocks_pool.value().initialize(0u, nullptr).ok(), "blocks pool init");
+
+            const auto cmp_raw = random_bf16(kCmpRows * kHeadDim, rng);
+            std::vector<std::uint32_t> cmp_positions(kCmpRows);
+            for (std::uint32_t i = 0; i < kCmpRows; ++i) cmp_positions[i] = i;
+
+            void* d_cmp_raw = nullptr;
+            void* d_cmp_positions = nullptr;
+            void* d_cmp_request = nullptr;
+            check(hipMalloc(&d_cmp_raw, cmp_raw.size() * sizeof(shelf::bf16_t)) == hipSuccess,
+                  "cmp malloc raw");
+            check(hipMalloc(&d_cmp_positions,
+                            cmp_positions.size() * sizeof(std::uint32_t)) == hipSuccess,
+                  "cmp malloc positions");
+            check(hipMalloc(&d_cmp_request,
+                            sizeof(shelf::runtime::DeviceRequestDescriptor)) == hipSuccess,
+                  "cmp malloc request");
+            check(hipMemcpy(d_cmp_raw, cmp_raw.data(),
+                            cmp_raw.size() * sizeof(shelf::bf16_t),
+                            hipMemcpyHostToDevice) == hipSuccess,
+                  "cmp copy raw");
+            check(hipMemcpy(d_cmp_positions, cmp_positions.data(),
+                            cmp_positions.size() * sizeof(std::uint32_t),
+                            hipMemcpyHostToDevice) == hipSuccess,
+                  "cmp copy positions");
+
+            const auto serial_view = serial_pool.value().device_view();
+            const auto blocks_view = blocks_pool.value().device_view();
+            auto make_args = [&](const shelf::state::QsaKeyStatePoolDeviceView& v) {
+                shelf::kernel::QsaKeyCacheBatchArgs a;
+                a.raw_keys = static_cast<const shelf::bf16_t*>(d_cmp_raw);
+                a.norm_weight = static_cast<const shelf::bf16_t*>(d_weight);
+                a.positions = static_cast<const std::uint32_t*>(d_cmp_positions);
+                a.requests = static_cast<const shelf::runtime::DeviceRequestDescriptor*>(
+                    d_cmp_request);
+                a.pooled_base = v.pooled_base;
+                a.partial_base = v.partial_base;
+                a.pool_count_base = v.pool_count_base;
+                a.partial_count_base = v.partial_count_base;
+                a.num_requests = 1u;
+                a.actual_rows = kCmpRows;
+                a.max_sequences = v.max_sequences;
+                a.state_index = 0u;
+                a.max_blocks = v.max_blocks;
+                a.head_dim = v.head_dim;
+                a.compress_ratio = v.compress_ratio;
+                a.rotary_dim = 64u;
+                a.raw_row_stride = kHeadDim;
+                a.pooled_slot_stride = v.pooled_slot_stride;
+                a.pooled_layer_stride = v.pooled_layer_stride;
+                a.partial_slot_stride = v.partial_slot_stride;
+                a.partial_layer_stride = v.partial_layer_stride;
+                a.count_slot_stride = v.count_slot_stride;
+                a.count_layer_stride = v.count_layer_stride;
+                a.theta = 10000000.0f;
+                a.position_scale = 2.0f;
+                return a;
+            };
+            auto serial_args = make_args(serial_view);
+            auto blocks_args = make_args(blocks_view);
+
+            auto read_cmp = [&](shelf::state::QsaKeyStatePool& p, std::vector<shelf::bf16_t>& pooled,
+                                std::vector<shelf::bf16_t>& partial, std::uint32_t& pool_count,
+                                std::uint32_t& partial_count) {
+                auto state = p.qsa_state(0u, 0u);
+                pooled.resize(kCmpBlocks * kHeadDim);
+                partial.resize(kCompress * kHeadDim);
+                (void)hipMemcpy(pooled.data(), state.pooled.data<shelf::bf16_t>(),
+                                pooled.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost);
+                (void)hipMemcpy(partial.data(), state.partial.data<shelf::bf16_t>(),
+                                partial.size() * sizeof(shelf::bf16_t), hipMemcpyDeviceToHost);
+                (void)hipMemcpy(&pool_count, state.pool_count.data<std::uint32_t>(),
+                                sizeof(pool_count), hipMemcpyDeviceToHost);
+                (void)hipMemcpy(&partial_count, state.partial_count.data<std::uint32_t>(),
+                                sizeof(partial_count), hipMemcpyDeviceToHost);
+            };
+            std::vector<shelf::bf16_t> a_pooled, a_partial, b_pooled, b_partial;
+            std::uint32_t a_pool_count = 0, a_partial_count = 0;
+            std::uint32_t b_pool_count = 0, b_partial_count = 0;
+
+            const std::uint32_t chunks[][2] = {
+                {0u, 2u},  {2u, 1u},  {3u, 4u},  {7u, 4u},
+                {11u, 9u}, {20u, 1u}, {21u, 11u}, {32u, 8u}};
+            bool launched = true;
+            bool chunk_match = true;
+            for (const auto& chunk : chunks) {
+                shelf::runtime::DeviceRequestDescriptor descriptor{};
+                descriptor.request_handle.slot = 0u;
+                descriptor.row_begin = chunk[0];
+                descriptor.row_count = chunk[1];
+                launched = launched &&
+                           hipMemcpy(d_cmp_request, &descriptor, sizeof(descriptor),
+                                     hipMemcpyHostToDevice) == hipSuccess;
+                launched = launched &&
+                           shelf::kernel::launch_qsa_key_cache_batch(serial_args, nullptr) ==
+                               hipSuccess;
+                launched = launched &&
+                           shelf::kernel::launch_qsa_key_cache_blocks(blocks_args, nullptr) ==
+                               hipSuccess;
+                launched = launched && hipDeviceSynchronize() == hipSuccess;
+                if (!launched) break;
+                read_cmp(serial_pool.value(), a_pooled, a_partial, a_pool_count,
+                         a_partial_count);
+                read_cmp(blocks_pool.value(), b_pooled, b_partial, b_pool_count,
+                         b_partial_count);
+                chunk_match = chunk_match && a_pool_count == b_pool_count &&
+                              a_partial_count == b_partial_count &&
+                              std::memcmp(a_pooled.data(), b_pooled.data(),
+                                          a_pooled.size() * sizeof(shelf::bf16_t)) == 0 &&
+                              std::memcmp(a_partial.data(), b_partial.data(),
+                                          a_partial.size() * sizeof(shelf::bf16_t)) == 0;
+            }
+            check(launched, "serial and block key cache launches");
+            check(chunk_match, "block cache matches the serial path after every chunk");
+
+            read_cmp(serial_pool.value(), a_pooled, a_partial, a_pool_count, a_partial_count);
+            read_cmp(blocks_pool.value(), b_pooled, b_partial, b_pool_count, b_partial_count);
+            check(a_pool_count == b_pool_count, "block cache produces the same block count");
+            check(a_partial_count == b_partial_count, "block cache produces the same partial count");
+            check(std::memcmp(a_pooled.data(), b_pooled.data(),
+                              a_pooled.size() * sizeof(shelf::bf16_t)) == 0,
+                  "block cache reproduces pooled keys");
+            check(std::memcmp(a_partial.data(), b_partial.data(),
+                              a_partial.size() * sizeof(shelf::bf16_t)) == 0,
+                  "block cache reproduces partial keys");
+
+            (void)hipFree(d_cmp_raw);
+            (void)hipFree(d_cmp_positions);
+            (void)hipFree(d_cmp_request);
+        }
+    }
+
 
     check(pool.release(0u).ok(), "release slot 0");
     check(pool.release(1u).ok(), "release slot 1");

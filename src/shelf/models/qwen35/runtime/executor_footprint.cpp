@@ -6,6 +6,7 @@
 #include <shelf/runtime/execution/row_bucket.h>
 #include <shelf/kernels/optimized/radix_topn.h>
 #include <shelf/kernels/optimized/sampling_limits.h>
+#include <shelf/kernels/optimized/qsa.h>
 
 #include <algorithm>
 
@@ -42,7 +43,8 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
                                           std::size_t ffn_intermediate_size,
                                           const ExecutorConfig& config,
                                           std::size_t tp_size,
-                                          bool exl3_linear_workspace) noexcept {
+                                          bool exl3_linear_workspace,
+                                          bool qsa_workspace) noexcept {
     if (tp_size == 0u) {
         tp_size = 1u;
     }
@@ -71,6 +73,9 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
     total += align_up(::shelf::execution::kDecodeAttnPartialBytes);
     if (exl3_linear_workspace) {
         total += exl3_workspace_bytes(rows, config.exl3_linear_shape).total();
+    }
+    if (qsa_workspace) {
+        total += ::shelf::kernel::qsa_select_workspace_bytes();
     }
 
     total += align_up(rows * sizeof(int32_t));

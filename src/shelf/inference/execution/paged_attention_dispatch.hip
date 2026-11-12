@@ -286,11 +286,8 @@ PagedAttentionPlan plan_paged_attention(
             (visible + ::shelf::kernel::kOctavePrefillKvBlockTokens - 1u) /
             ::shelf::kernel::kOctavePrefillKvBlockTokens);
     }
-    // The bf16 prefill kernel applies the per-row block mask. The fp8 prefill kernel
-    // does not, so masked fp8 KV keeps the per-(row, q_head) decode kernel.
     if (args.common.block_mask != nullptr &&
-        (args.kv_dtype != ::shelf::kernel::KVCacheDType::BF16 ||
-         args.common.rows < kMaskedPrefillMinRows)) {
+        args.common.rows < kMaskedPrefillMinRows) {
         plan.use_prefill = false;
         plan.splits = 1u;
         return plan;
@@ -664,8 +661,10 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
         const auto region =
             offset_paged_attention_rows(a.common, d.row_begin, d.row_count);
         const uint32_t before = out.physical_count;
-        if (a.common.block_mask == nullptr && a.common.head_dim == 256u &&
-            d.row_count >= kPagedAttentionPrefillMinRows) {
+        const uint32_t prefill_min_rows =
+            a.common.block_mask != nullptr ? kMaskedPrefillMinRows
+                                           : kPagedAttentionPrefillMinRows;
+        if (a.common.head_dim == 256u && d.row_count >= prefill_min_rows) {
             if (append_prefill_region(a, region, ctx, out) !=
                 PhysicalResolveStatus::Applicable)
                 return PhysicalResolveStatus::NotApplicable;

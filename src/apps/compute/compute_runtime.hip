@@ -137,9 +137,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
                 return Status::unsupported(
                     "Qwen4Exp requires --tensor-parallel 2 or 4", __FILE__, __LINE__);
             }
-            // The PLE token history is built from the scheduled rows; a prefix cache that
-            // restores tokens the history never saw would make the n-gram rows wrong.
-            config_.prefix_cache = false;
             // The Qwen4Exp rank already holds a complete replicated lm_head / embedding, so
             // the drafter borrows those instead of loading a second private copy.
             config_.private_target_weights = false;
@@ -298,6 +295,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     qwen35::runtime::PrefixCacheConfig prefix_config;
     prefix_config.max_concurrent = config_.prefix_cache_concurrency;
     prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+    prefix_config.strategy = config_.prefix_cache_strategy;
+    prefix_config.slot_count = config_.prefix_cache_slot_count;
+    if (prefix_config.strategy == qwen35::runtime::PrefixCacheStrategy::Slot) {
+        prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+    }
 
     auto prefix_bytes_for = [&]() {
         return qwen35::runtime::prefix_cache_bytes(prefix_config, gdn_layout);
@@ -514,12 +516,16 @@ std::size_t Qwen35ComputeRuntime::drafter_reserve_bytes(
     spec_config.tree_extra = config_.dflash2_tree_extra;
     spec_config.tree_budget = config_.dflash2_tree_budget;
     std::size_t lm_head_k = 0u;
+    bool exl3_mul24_head = false;
     if (model_) {
         lm_head_k = static_cast<std::size_t>(model_->lm_head().k_padded);
+        exl3_mul24_head = model_->lm_head().quant_spec ==
+            quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
     }
     return qwen35::runtime::dflash2_footprint(
         config_.draft_config, spec_config, pool, config_.draft_bytes, lm_head_k,
-        config_.dflash2_sessions(), config_.dflash2_prefill_rows).total();
+        config_.dflash2_sessions(), config_.dflash2_prefill_rows,
+        exl3_mul24_head).total();
 }
 
 std::size_t Qwen35ComputeRuntime::mtp_batch_requests(
@@ -643,6 +649,8 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
     tp_config.prefix_cache = config_.prefix_cache;
     tp_config.prefix_concurrency = config_.prefix_cache_concurrency;
     tp_config.prefix_spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+    tp_config.prefix_strategy = config_.prefix_cache_strategy;
+    tp_config.prefix_slot_count = config_.prefix_cache_slot_count;
     if (config_.draft_config_ready) {
         tp_config.drafter_config = &config_.draft_config;
         tp_config.drafter_weights_bytes = config_.draft_bytes;
@@ -733,17 +741,26 @@ Status Qwen35ComputeRuntime::initialize_tensor_parallel() {
         qwen35::runtime::PrefixCacheConfig prefix_config;
             prefix_config.max_concurrent = config_.prefix_cache_concurrency;
             prefix_config.spec_ring_bytes = config_.prefix_cache_spec_ring_bytes;
+            prefix_config.strategy = config_.prefix_cache_strategy;
+            prefix_config.slot_count = config_.prefix_cache_slot_count;
+            if (prefix_config.strategy ==
+                qwen35::runtime::PrefixCacheStrategy::Slot) {
+                prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+            }
 
         std::vector<qwen35::runtime::PrefixCacheRankContext> extra_ranks;
         for (int r = 1; r < tp_coordinator_->tp_size(); ++r) {
             auto& rank = tp_coordinator_->rank(static_cast<std::size_t>(r));
             extra_ranks.push_back(qwen35::runtime::PrefixCacheRankContext{
                 &rank.kv_pool(), &rank.gdn_pool(), &rank.arena(), rank.stream(),
-                rank.device_id()});
+                rank.device_id(), rank.executor().qsa_state_pool.get(),
+                rank.executor().ple_conv_state_pool.get()});
         }
         if (config_.prefix_cache) {
             auto prefix_result = qwen35::runtime::PrefixCache::create(
-                arena(), kv_pool(), gdn_pool(), prefix_config, extra_ranks);
+                arena(), kv_pool(), gdn_pool(),
+                tp_executor_->qsa_state_pool.get(),
+                tp_executor_->ple_conv_state_pool.get(), prefix_config, extra_ranks);
             if (prefix_result.ok()) {
                 prefix_cache_.emplace(prefix_result.release());
                 (void)prefix_cache_->set_tp_hook(tp_coordinator_);

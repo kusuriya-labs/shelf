@@ -302,6 +302,16 @@ int main() {
     run({"heavy-expert", 2, 384, 512, 4, {{0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 16}, {0, 7}, {1, 2}},
          true, true, false});
     run({"heavy-expert-nt2-bf16", 2, 384, 1024, 2, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, true});
+    // Long K selects the paired-stage kernel (8+ K chunks), including an odd chunk count.
+    run({"pair-k10-nt1", 2, 1280, 512, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, false, false, false});
+    run({"pair-k10-nt1-fuse", 2, 1280, 512, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, false});
+    run({"pair-k9-nt1", 2, 1152, 512, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}}, true, true, false});
+    run({"pair-k8-nt2", 2, 1024, 1024, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}},
+         false, false, false});
+    run({"pair-k9-nt2", 2, 1152, 1024, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}},
+         true, true, false});
+    run({"pair-k11-nt2", 2, 1408, 1024, 3, {{0, 16}, {0, 16}, {0, 16}, {0, 9}, {1, 2}},
+         true, true, false});
     if (failed != 0) {
         std::printf("FAILED: %d case(s)\n", failed);
         return 1;

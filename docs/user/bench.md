@@ -52,7 +52,7 @@ detail and is not a `--variant` value.
 | option | 説明 |
 | --- | --- |
 | `--prompt-tokens N` | (default 128) |
-| `--prefill-chunk N` | (default 0 = whole prompt in one batch) |
+| `--prefill-chunk N` | (default 0 = up to 8192 tokens per batch) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |
 | `--gap-keepalive-flags N` | (default hipEventDisableSystemFence; -1 = hipEventCreate) |
 | `--mode forward\|greedy` | (default forward) |
@@ -60,7 +60,7 @@ detail and is not a `--variant` value.
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
-| `--kv-cache-dtype bf16\|fp8` | (default bf16) |
+| `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--runs N` | (default 3) |
 | `--warmup N` | (default 0) |
@@ -116,7 +116,7 @@ backbone kernel の allowlist に登録済みで、prefill の throughput は TP
 | `--tensor-parallel N` | tensor parallel degree 1 \| 2 \| 4 (default 1) |
 | `--model-dir PATH` | (required) |
 | `--page-tokens N` | (default 16) |
-| `--kv-cache-dtype bf16\|fp8` | (default bf16) |
+| `--kv-cache-dtype bf16\|fp8\|octave:FORMAT (default bf16)` |  |
 | `--arena-gib N` | (default auto = free VRAM minus 0.5 GiB) |
 | `--output PATH` | (default none) |
 | `--gap-keepalive US` | (default 0 = off; keep the CP awake) |

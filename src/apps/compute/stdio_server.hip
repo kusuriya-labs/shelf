@@ -133,6 +133,98 @@ bool upload_mask(shelf::app::Qwen35ComputeRuntime& runtime,
                      hipMemcpyHostToDevice) == hipSuccess;
 }
 
+struct MtpPrefillLog {
+    int64_t external_id = 0;
+    uint32_t last_tokens = 0;
+    double last_ms = 0.0;
+};
+
+void serve_mtp_prefill_progress(void* context, uint32_t processed_tokens,
+                                double elapsed_ms) {
+    auto* log = static_cast<MtpPrefillLog*>(context);
+    const double interval_s = (elapsed_ms - log->last_ms) / 1000.0;
+    if (interval_s < 3.0 || processed_tokens <= log->last_tokens) return;
+    const uint32_t delta = processed_tokens - log->last_tokens;
+    std::fprintf(stderr,
+                 "[req %lld] prefill_tok_s=%.1f tokens=%u interval_s=%.2f\n",
+                 static_cast<long long>(log->external_id),
+                 static_cast<double>(delta) / interval_s, processed_tokens,
+                 interval_s);
+    log->last_ms = elapsed_ms;
+    log->last_tokens = processed_tokens;
+}
+
+struct MtpRequestTiming {
+    std::chrono::steady_clock::time_point submitted_at;
+    std::chrono::steady_clock::time_point first_token_at;
+    std::chrono::steady_clock::time_point last_log_at;
+    std::size_t last_log_tokens = 0;
+    bool has_first_token = false;
+};
+
+void mtp_timing_submitted(MtpRequestTiming& timing) {
+    timing.submitted_at = std::chrono::steady_clock::now();
+}
+
+void mtp_timing_first_token(MtpRequestTiming& timing) {
+    timing.first_token_at = std::chrono::steady_clock::now();
+    timing.last_log_at = timing.first_token_at;
+    timing.last_log_tokens = 0;
+    timing.has_first_token = true;
+}
+
+void mtp_log_decode_interval(int64_t external_id, MtpRequestTiming& timing,
+                             std::size_t emitted_tokens) {
+    if (!timing.has_first_token) return;
+    const auto now = std::chrono::steady_clock::now();
+    const double interval_s =
+        std::chrono::duration<double>(now - timing.last_log_at).count();
+    if (interval_s < 3.0 || emitted_tokens <= timing.last_log_tokens) return;
+    const std::size_t delta = emitted_tokens - timing.last_log_tokens;
+    std::fprintf(stderr,
+                 "[req %lld] decode_tok_s=%.1f tokens=%zu interval_s=%.2f\n",
+                 static_cast<long long>(external_id),
+                 static_cast<double>(delta) / interval_s, emitted_tokens, interval_s);
+    timing.last_log_at = now;
+    timing.last_log_tokens = emitted_tokens;
+}
+
+void mtp_log_request_summary(int64_t external_id, const MtpRequestTiming& timing,
+                             std::size_t prompt, std::size_t restored,
+                             std::size_t generated, double prefill_ms) {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(
+                                finished_at - timing.submitted_at)
+                                .count();
+    const double ttft_ms =
+        timing.has_first_token
+            ? std::chrono::duration<double, std::milli>(
+                  timing.first_token_at - timing.submitted_at)
+                  .count()
+            : total_ms;
+    const double decode_ms =
+        timing.has_first_token
+            ? std::chrono::duration<double, std::milli>(
+                  finished_at - timing.first_token_at)
+                  .count()
+            : 0.0;
+    const std::size_t prefill = prompt - std::min(restored, prompt);
+    const std::size_t decode_tokens = generated > 0u ? generated - 1u : 0u;
+    const double prefill_tok_s =
+        prefill_ms > 0.0 ? static_cast<double>(prefill) * 1000.0 / prefill_ms : 0.0;
+    const double decode_tok_s =
+        decode_ms > 0.0 && decode_tokens > 0u
+            ? static_cast<double>(decode_tokens) * 1000.0 / decode_ms
+            : 0.0;
+    std::fprintf(
+        stderr,
+        "[req %lld] prompt=%zu restored=%zu prefill=%zu gen=%zu "
+        "prefill_ms=%.1f prefill_tok_s=%.1f ttft_ms=%.1f decode_ms=%.1f "
+        "decode_tok_s=%.1f\n",
+        static_cast<long long>(external_id), prompt, restored, prefill, generated,
+        prefill_ms, prefill_tok_s, ttft_ms, decode_ms, decode_tok_s);
+}
+
 struct MtpRequest {
     int64_t external_id = 0;
     std::unique_ptr<shelf::state::PagedSequenceState> sequence;
@@ -142,6 +234,8 @@ struct MtpRequest {
     uint32_t generated = 0u;
     std::size_t prompt_tokens = 0u;
     std::vector<int32_t> generated_ids;
+    MtpRequestTiming timing;
+    double prefill_ms = 0.0;
 };
 
 struct MtpServeContext {
@@ -197,6 +291,44 @@ bool jsonl_take_line(JsonlInput& input, std::string& line) {
     input.buffer.erase(0, newline + 1);
     if (!line.empty() && line.back() == '\r') line.pop_back();
     return true;
+}
+
+// MTP prefill runs the whole prompt before the serve loop can read stdin. Poll it between
+// chunks and consume a matching cancel line so the prompt does not have to finish first.
+struct MtpPrefillCancel {
+    JsonlInput* input = nullptr;
+    int64_t external_id = 0;
+    bool cancelled = false;
+};
+
+bool serve_mtp_prefill_should_stop(void* context) {
+    auto* cancel = static_cast<MtpPrefillCancel*>(context);
+    if (cancel->input == nullptr) return false;
+    jsonl_poll_and_read(*cancel->input, false);
+    const std::string& buffer = cancel->input->buffer;
+    std::size_t line_begin = 0u;
+    while (true) {
+        const std::size_t newline = buffer.find('\n', line_begin);
+        if (newline == std::string::npos) break;
+        std::string line = buffer.substr(line_begin, newline - line_begin);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        bool matches = false;
+        if (!line.empty() && line.front() == '{') {
+            try {
+                const nlohmann::json op = nlohmann::json::parse(line);
+                matches = op.value("op", std::string{}) == "cancel" &&
+                          op.value("request_id", int64_t{0}) == cancel->external_id;
+            } catch (const nlohmann::json::exception&) {
+            }
+        }
+        if (matches) {
+            cancel->input->buffer.erase(line_begin, newline + 1u - line_begin);
+            cancel->cancelled = true;
+            return true;
+        }
+        line_begin = newline + 1u;
+    }
+    return false;
 }
 
 void serve_emit_tokens(shelf::app::Qwen35ComputeRuntime& runtime,
@@ -673,6 +805,9 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
 }
 
 void serve_mtp_emit_done(ServeState& state, MtpRequest& request, const char* reason) {
+    mtp_log_request_summary(request.external_id, request.timing, request.prompt_tokens,
+                            0u, request.generated, request.prefill_ms);
+
     nlohmann::json done;
     done["event"] = "done";
     done["request_id"] = request.external_id;
@@ -700,13 +835,16 @@ void serve_mtp_release(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& st
 }
 
 bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
-                     MtpServeContext& mtp, const nlohmann::json& request) {
+                     MtpServeContext& mtp, JsonlInput& input,
+                     const nlohmann::json& request) {
     if (!request.contains("request_id") || !request["request_id"].is_number_integer()) {
         emit_error(nullptr, "missing or invalid request_id");
         return false;
     }
     const nlohmann::json request_id = request["request_id"];
     const int64_t external_request_id = request_id.get<int64_t>();
+    MtpRequestTiming timing;
+    mtp_timing_submitted(timing);
     if (state.inflight.count(external_request_id) ||
         state.inflight.size() + mtp.active.size() >= state.max_inflight) {
         emit_error(request_id, "duplicate request_id or compute concurrency limit reached");
@@ -842,16 +980,39 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     }
     mtp.free_slots.pop_back();
     drafter.sampling = sampling;
+    MtpPrefillLog prefill_log;
+    prefill_log.external_id = external_request_id;
+    MtpPrefillCancel prefill_cancel;
+    prefill_cancel.input = &input;
+    prefill_cancel.external_id = external_request_id;
+    shelf::qwen35::runtime::MtpPrefillProgress prefill_progress;
+    prefill_progress.context = &prefill_log;
+    prefill_progress.report = serve_mtp_prefill_progress;
+    prefill_progress.should_stop = serve_mtp_prefill_should_stop;
+    prefill_progress.stop_context = &prefill_cancel;
+    const auto prefill_started = std::chrono::steady_clock::now();
     auto prefill = shelf::qwen35::runtime::mtp_spec_prefill(
         drafter, runtime.executor(), *sequence, input_ids.data(),
-        static_cast<uint32_t>(input_ids.size()), sampling);
+        static_cast<uint32_t>(input_ids.size()), sampling, &prefill_progress);
+    const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - prefill_started)
+                                  .count();
     if (!prefill.ok()) {
-        emit_error_with_code(request_id, "internal",
-                             "mtp prefill failed: " + prefill.status().message());
+        if (prefill_cancel.cancelled) {
+            MtpRequest cancelled;
+            cancelled.external_id = external_request_id;
+            cancelled.prompt_tokens = input_ids.size();
+            cancelled.timing = timing;
+            cancelled.prefill_ms = prefill_ms;
+            serve_mtp_emit_done(state, cancelled, "cancelled");
+        } else {
+            emit_error_with_code(request_id, "internal",
+                                 "mtp prefill failed: " + prefill.status().message());
+        }
         mtp.free_slots.push_back(slot);
         if (tp != nullptr) (void)tp->on_sequence_released(*sequence);
         (void)shelf::state::release_paged_sequence_state(*sequence, runtime.stream());
-        return false;
+        return prefill_cancel.cancelled;
     }
 
     auto admitted = std::make_unique<MtpRequest>();
@@ -863,6 +1024,9 @@ bool serve_mtp_admit(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
     admitted->prompt_tokens = input_ids.size();
     admitted->generated = 1u;
     admitted->generated_ids.push_back(prefill.value().pending_token);
+    admitted->timing = timing;
+    admitted->prefill_ms = prefill_ms;
+    mtp_timing_first_token(admitted->timing);
     emit_token(external_request_id, prefill.value().pending_token);
     const bool stop = shelf::qwen_hybrid::is_stop_token(
         runtime.model().hybrid_config().stop_tokens, prefill.value().pending_token);
@@ -934,6 +1098,8 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
         request.pending_token = out.pending_token;
         mtp.accepted_drafts += out.num_accepted;
         mtp.emitted_tokens += out.emitted_count;
+        mtp_log_decode_interval(request.external_id, request.timing,
+                                request.generated);
         const bool length_done = request.generated >= request.max_new_tokens;
         finished[j] = out.finished || length_done;
         reasons[j] = out.finished ? "stop" : "length";
@@ -955,7 +1121,8 @@ void serve_mtp_step(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state
 }
 
 void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& state,
-                          DFlashServeContext& dflash, const std::string& line) {
+                          DFlashServeContext& dflash, JsonlInput& input,
+                          const std::string& line) {
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(line);
@@ -981,8 +1148,30 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
         const qwen35::runtime::KVCapacitySnapshot snapshot =
             runtime.kv_capacity_snapshot();
         const uint64_t page_tokens = runtime.config().page_tokens;
+        nlohmann::json prefix = {
+            {"enabled", runtime.prefix_cache_active()},
+            {"reuse_slots", 0u},
+            {"entries", 0u},
+            {"saves", 0u},
+            {"hits", 0u},
+            {"misses", 0u},
+            {"restores", 0u},
+            {"evictions", 0u},
+        };
+        if (runtime.prefix_cache() != nullptr) {
+            const qwen35::runtime::PrefixCacheStats prefix_stats =
+                runtime.prefix_cache()->stats();
+            prefix["reuse_slots"] = runtime.prefix_cache()->reuse_slot_count();
+            prefix["entries"] = prefix_stats.entries;
+            prefix["saves"] = prefix_stats.saves;
+            prefix["hits"] = prefix_stats.hits;
+            prefix["misses"] = prefix_stats.misses;
+            prefix["restores"] = prefix_stats.restores;
+            prefix["evictions"] = prefix_stats.entries_evicted;
+        }
         emit_json(nlohmann::json{
             {"event", "stats"},
+            {"prefix", std::move(prefix)},
             {"kv",
              {
                  {"page_tokens", page_tokens},
@@ -1064,7 +1253,7 @@ void serve_handle_command(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
     }
     if (op == "generate") {
         if (state.mtp.enabled && !request.contains("grammar")) {
-            serve_mtp_admit(runtime, state, state.mtp, request);
+            serve_mtp_admit(runtime, state, state.mtp, input, request);
         } else {
             serve_parse_generate(runtime, state, dflash, request);
         }
@@ -1306,7 +1495,7 @@ int run_serve_stdio(shelf::app::Qwen35ComputeRuntime& runtime,
         std::string line;
         while (jsonl_take_line(input, line)) {
             if (line.empty()) continue;
-            serve_handle_command(runtime, state, dflash, line);
+            serve_handle_command(runtime, state, dflash, input, line);
             if (state.exit_requested) break;
         }
         if (state.exit_requested) break;

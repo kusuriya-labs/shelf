@@ -29,6 +29,7 @@
 #include <vector>
 #include <shelf/inference/execution/selectors/embedding_selector.h>
 #include <shelf/kernels/optimized/radix_topn.h>
+#include <shelf/kernels/optimized/qsa.h>
 #include <shelf/kernels/optimized/sampling_common.h>
 #include <shelf/models/qwen35/model/gdn_state_layout.h>
 
@@ -222,13 +223,32 @@ Status build_host_execution_context(
     }
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
+    uint64_t qsa_end = (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+    if (program_needs_qsa_workspace(program)) {
+        const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
+        const uint64_t score_bytes =
+            static_cast<uint64_t>(::shelf::kernel::kQsaScoreRowTile) *
+            ::shelf::kernel::kQsaScoreBlockTile * sizeof(float);
+        const uint64_t state_bytes =
+            static_cast<uint64_t>(::shelf::kernel::kQsaScoreRowTile) * 2u *
+            ::shelf::kernel::kQsaSelectMaxTopK * sizeof(float);
+        const uint64_t total = score_bytes + 2u * state_bytes;
+        if (qsa_end + total > workspace_bytes) {
+            return Status::insufficient_memory("execution workspace too small for QSA scores",
+                                               __FILE__, __LINE__);
+        }
+        ctx.qsa_scores = reinterpret_cast<float*>(ws_base + qsa_end);
+        ctx.qsa_topk_scores = reinterpret_cast<float*>(ws_base + qsa_end + score_bytes);
+        ctx.qsa_topk_indices = reinterpret_cast<int32_t*>(
+            ws_base + qsa_end + score_bytes + state_bytes);
+        qsa_end = (qsa_end + total + 255ull) & ~255ull;
+    }
     if (program_needs_exl3_workspace(program)) {
         const runtime::Exl3WorkspaceBytes exl3 = runtime::exl3_workspace_bytes(
             runtime::qwen35_padded_row_count(executor.config.max_batch_rows),
             executor.config.exl3_linear_shape);
         const uint64_t workspace_bytes = executor.execution_workspace.allocation_bytes();
-        const uint64_t exl3_xrot_offset =
-            (attn_partial_offset + runtime::kDecodeAttnPartialBytes + 255ull) & ~255ull;
+        const uint64_t exl3_xrot_offset = qsa_end;
         if (exl3_xrot_offset + exl3.xrot > workspace_bytes) {
             return Status::insufficient_memory("execution workspace too small for EXL3 xrot",
                                                __FILE__, __LINE__);
@@ -1269,6 +1289,7 @@ Executor::Executor(Executor&& other) noexcept
       qsa_state_pool(std::move(other.qsa_state_pool)),
       ple_conv_state_pool(std::move(other.ple_conv_state_pool)),
       external_input_preparer(std::move(other.external_input_preparer)),
+      external_prefix_restore(std::move(other.external_prefix_restore)),
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
@@ -1398,6 +1419,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         qsa_state_pool = std::move(other.qsa_state_pool);
         ple_conv_state_pool = std::move(other.ple_conv_state_pool);
         external_input_preparer = std::move(other.external_input_preparer);
+        external_prefix_restore = std::move(other.external_prefix_restore);
         config = other.config;
         batch_context_storage = std::move(other.batch_context_storage);
         if (batch_context_storage.device_struct.allocation_base() != nullptr) {
@@ -1510,6 +1532,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.qsa_state_pool.reset();
         other.ple_conv_state_pool.reset();
         other.external_input_preparer = nullptr;
+        other.external_prefix_restore = nullptr;
         other.batch_context_storage = ::shelf::runtime::DeviceBatchContextStorage{};
         other.input_ids = gpu::Tensor{};
         other.input_hidden = gpu::Tensor{};
@@ -1697,6 +1720,7 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.qsa_state_pool.reset();
     ex.ple_conv_state_pool.reset();
     ex.external_input_preparer = nullptr;
+    ex.external_prefix_restore = nullptr;
     ex.host_model_state = ::shelf::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};
@@ -1813,6 +1837,20 @@ bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noex
     return false;
 }
 
+bool program_needs_qsa_workspace(const ::shelf::runtime::Program& program) noexcept {
+    for (const ::shelf::runtime::DispatchBinding& binding : program.dispatches) {
+        if (binding.kernel_id == ::shelf::runtime::KernelId::QSA_SELECT) return true;
+    }
+    return false;
+}
+
+bool program_set_needs_qsa_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept {
+    for (const ::shelf::runtime::Program& prog : programs.programs) {
+        if (program_needs_qsa_workspace(prog)) return true;
+    }
+    return false;
+}
+
 bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept {
     for (const ::shelf::runtime::Program& prog : programs.programs) {
         if (program_needs_exl3_workspace(prog)) return true;
@@ -1888,10 +1926,10 @@ Result<Executor> create_executor(
     if (kv_pool.dtype() == KVCacheDType::OCTAVE) {
         const uint32_t rotary_dim = static_cast<uint32_t>(
             static_cast<double>(tc.attention_head_dim) * tc.partial_rotary_factor);
-        if (tc.identity_declares_routed_experts || tc.attention_head_dim != 256u ||
-            rotary_dim != 64u || config.tp != nullptr || config.stage.enabled) {
+        if (tc.attention_head_dim != 256u || rotary_dim != 64u ||
+            config.stage.enabled) {
             return Status::unsupported(
-                "Octave KV cache requires dense Qwen, head_dim 256, rotary_dim 64, TP=1 and PP=1",
+                "Octave KV cache requires head_dim 256, rotary_dim 64 and PP=1",
                 __FILE__, __LINE__);
         }
     }
@@ -2267,11 +2305,13 @@ Result<Executor> create_executor(
             }
             constexpr std::size_t kScratchBytes = 3145728 * sizeof(float);
             const bool exl3_workspace = program_set_needs_exl3_workspace(built_set);
+            const bool qsa_workspace = program_set_needs_qsa_workspace(built_set);
             const std::size_t exec_workspace_bytes =
                 max_workspace_bytes + kScratchBytes + runtime::kDecodeAttnPartialBytes +
                 (exl3_workspace
                      ? runtime::exl3_workspace_bytes(Npad, config.exl3_linear_shape).total()
                      : 0u) +
+                (qsa_workspace ? ::shelf::kernel::qsa_select_workspace_bytes() : 0u) +
                 512u;
             if (exec_workspace_bytes > 0) {
                 st = allocate_contiguous_tensor<uint8_t>(

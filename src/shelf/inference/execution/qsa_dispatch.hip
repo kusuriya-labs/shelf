@@ -5,6 +5,8 @@
 #include <shelf/kernels/model_dispatch_state.h>
 #include <shelf/kernels/optimized/qsa.h>
 
+#include <algorithm>
+
 namespace shelf::execution {
 
 using ::shelf::runtime::DispatchBinding;
@@ -107,7 +109,13 @@ Result<OptimizedLaunchResult> try_launch_qsa_key_cache(
     args.theta = b.scalar_a;
     args.position_scale = b.scalar_b;
     args.inv_freq = ctx.rope_inv_freq;
-    const hipError_t error = ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);
+    // Prefill blocks are independent: one CTA per compressed block removes the serial
+    // per-token loop. Speculative snapshots still need the ordered path.
+    const bool parallel_blocks = args.partial_history == nullptr &&
+                                 args.actual_rows >= 256u;
+    const hipError_t error = parallel_blocks
+                                 ? ::shelf::kernel::launch_qsa_key_cache_blocks(args, stream)
+                                 : ::shelf::kernel::launch_qsa_key_cache_batch(args, stream);
     if (error != hipSuccess)
         return Status::hip_error("qsa key cache launch", hipGetErrorString(error),
                                  __FILE__, __LINE__);
@@ -167,6 +175,146 @@ Result<OptimizedLaunchResult> try_launch_qsa_select(
     args.pooled_slot_stride = view.pooled_slot_stride;
     args.pooled_layer_stride = view.pooled_layer_stride;
     args.scale = b.scalar_a;
+    if (ctx.qsa_scores != nullptr && ctx.qsa_topk_scores != nullptr &&
+        ctx.qsa_topk_indices != nullptr && ctx.staged_requests != nullptr &&
+        ctx.staged_request_count != 0u && args.rows >= 1u &&
+        args.n_heads == 4u && args.head_dim == ::shelf::kernel::kQsaHeadDim) {
+        constexpr uint32_t kMaxSlices = 256u;
+        struct Slice {
+            uint32_t begin = 0;
+            uint32_t count = 0;
+            uint32_t blocks = 0;
+        };
+        const auto* reqs = ctx.staged_requests;
+        const uint32_t req_count = ctx.staged_request_count;
+        if (req_count <= kMaxSlices) {
+            uint32_t launches = 0u;
+            for (uint32_t rc = 0u; rc < args.rows; rc += ::shelf::kernel::kQsaScoreRowTile) {
+                const uint32_t rc_rows = args.rows - rc < ::shelf::kernel::kQsaScoreRowTile
+                    ? args.rows - rc
+                    : ::shelf::kernel::kQsaScoreRowTile;
+                Slice slices[kMaxSlices];
+                uint32_t slice_count = 0u;
+                uint32_t max_blocks = 0u;
+                for (uint32_t i = 0u; i < req_count; ++i) {
+                    const auto& req = reqs[i];
+                    const uint32_t begin = std::max(req.row_begin, rc);
+                    const uint32_t end = std::min(req.row_begin + req.row_count, rc + rc_rows);
+                    if (end <= begin) continue;
+                    const uint32_t blocks = std::min(
+                        args.blocks, req.sequence_length / args.compress_ratio);
+                    slices[slice_count++] = Slice{begin, end - begin, blocks};
+                    if (blocks > max_blocks) max_blocks = blocks;
+                }
+                if (max_blocks == 0u) {
+                    ::shelf::kernel::QsaTopkArgs ta{};
+                    ta.scores = ctx.qsa_scores;
+                    ta.state_scores = ctx.qsa_topk_scores;
+                    ta.state_indices = ctx.qsa_topk_indices;
+                    ta.block_mask = args.block_mask +
+                        static_cast<uint64_t>(rc) * args.mask_row_bytes;
+                    ta.selected = args.selected != nullptr
+                        ? args.selected +
+                              static_cast<uint64_t>(rc) * args.selected_row_stride
+                        : nullptr;
+                    ta.positions = args.positions + rc;
+                    ta.rows = rc_rows;
+                    ta.block_begin = 0u;
+                    ta.block_count = 0u;
+                    ta.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
+                    ta.blocks = args.blocks;
+                    ta.compress_ratio = args.compress_ratio;
+                    ta.top_k = args.top_k;
+                    ta.mask_row_bytes = args.mask_row_bytes;
+                    ta.selected_row_stride = args.selected_row_stride;
+                    ta.first = 1u;
+                    ta.last = 1u;
+                    const hipError_t error =
+                        ::shelf::kernel::launch_qsa_topk(ta, stream);
+                    if (error != hipSuccess)
+                        return Status::hip_error("qsa topk launch",
+                                                 hipGetErrorString(error), __FILE__,
+                                                 __LINE__);
+                    ++launches;
+                    continue;
+                }
+                for (uint32_t bt = 0u; bt < max_blocks;
+                     bt += ::shelf::kernel::kQsaScoreBlockTile) {
+                    const uint32_t tile_blocks =
+                        max_blocks - bt < ::shelf::kernel::kQsaScoreBlockTile
+                            ? max_blocks - bt
+                            : ::shelf::kernel::kQsaScoreBlockTile;
+                    for (uint32_t si = 0u; si < slice_count; ++si) {
+                        const Slice& slice = slices[si];
+                        if (slice.blocks <= bt) continue;
+                        ::shelf::kernel::QsaScoreArgs sa{};
+                        sa.q = args.q + static_cast<uint64_t>(slice.begin) * args.q_row_stride;
+                        sa.pooled_base = args.pooled_base;
+                        sa.scores = ctx.qsa_scores;
+                        sa.row_sequence_slots = args.row_sequence_slots + slice.begin;
+                        sa.rows = slice.count;
+                        sa.row_begin = slice.begin - rc;
+                        sa.block_begin = bt;
+                        sa.blocks = std::min(tile_blocks, slice.blocks - bt);
+                        sa.block_tile = args.rows < 64u
+                                            ? 64u
+                                            : (args.rows < 256u
+                                                   ? 256u
+                                                   : ::shelf::kernel::kQsaScoreBlocksPerCta);
+                        sa.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
+                        sa.n_heads = args.n_heads;
+                        sa.head_dim = args.head_dim;
+                        sa.compress_ratio = args.compress_ratio;
+                        sa.state_index = args.state_index;
+                        sa.max_sequences = args.max_sequences;
+                        sa.q_row_stride = args.q_row_stride;
+                        sa.pooled_slot_stride = args.pooled_slot_stride;
+                        sa.pooled_layer_stride = args.pooled_layer_stride;
+                        sa.scale = args.scale;
+                        const hipError_t error =
+                            ::shelf::kernel::launch_qsa_score_wmma(sa, stream);
+                        if (error != hipSuccess)
+                            return Status::hip_error("qsa score launch",
+                                                     hipGetErrorString(error), __FILE__,
+                                                     __LINE__);
+                        ++launches;
+                    }
+                    ::shelf::kernel::QsaTopkArgs ta{};
+                    ta.scores = ctx.qsa_scores;
+                    ta.state_scores = ctx.qsa_topk_scores;
+                    ta.state_indices = ctx.qsa_topk_indices;
+                    ta.block_mask = args.block_mask +
+                        static_cast<uint64_t>(rc) * args.mask_row_bytes;
+                    ta.selected = args.selected != nullptr
+                        ? args.selected +
+                              static_cast<uint64_t>(rc) * args.selected_row_stride
+                        : nullptr;
+                    ta.positions = args.positions + rc;
+                    ta.rows = rc_rows;
+                    ta.block_begin = bt;
+                    ta.block_count = tile_blocks;
+                    ta.score_row_stride = ::shelf::kernel::kQsaScoreBlockTile;
+                    ta.blocks = args.blocks;
+                    ta.compress_ratio = args.compress_ratio;
+                    ta.top_k = args.top_k;
+                    ta.mask_row_bytes = args.mask_row_bytes;
+                    ta.selected_row_stride = args.selected_row_stride;
+                    ta.first = bt == 0u ? 1u : 0u;
+                    ta.last = bt + tile_blocks >= max_blocks ? 1u : 0u;
+                    const hipError_t error =
+                        ::shelf::kernel::launch_qsa_topk(ta, stream);
+                    if (error != hipSuccess)
+                        return Status::hip_error("qsa topk launch",
+                                                 hipGetErrorString(error), __FILE__,
+                                                 __LINE__);
+                    ++launches;
+                }
+            }
+            record_physical_launch(launches);
+            record_optimized_op();
+            return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
+        }
+    }
     const hipError_t error = ::shelf::kernel::launch_qsa_select_batch(args, stream);
     if (error != hipSuccess)
         return Status::hip_error("qsa select launch", hipGetErrorString(error), __FILE__,

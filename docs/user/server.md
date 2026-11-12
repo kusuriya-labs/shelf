@@ -81,10 +81,13 @@ Ready.
 | `--arena-gib N\|auto\|-N` | GPU arena capacity in GiB; auto = free VRAM minus 0.5 GiB, -N = total VRAM minus N GiB (default auto) |
 | `--device DEVICE` | comma separated GPU devices, one per rank; count must match --tensor-parallel (default 0) |
 | `--tensor-parallel {1,2}` | tensor parallel size forwarded to compute (default 1) |
-| `--kv-cache-dtype {bf16,fp8}` | KV cache dtype (default bf16) |
+| `--kv-cache-dtype KV_CACHE_DTYPE` | KV cache dtype (default bf16) |
 | `--page-tokens PAGE_TOKENS` | paged KV page size in tokens (default 16) |
 | `--working-set-reserve-gib WORKING_SET_RESERVE_GIB` | arena headroom kept free for the working set (0 = size it from the row bucket, default 0) |
 | `--rope-factor {auto,1,2,4}` | static YaRN rope factor forwarded to compute (default auto) |
+| `--prefix-cache {0,1}` | enable prefix cache (default 1) |
+| `--prefix-cache-concurrency PREFIX_CACHE_CONCURRENCY` | max concurrent prefix captures and stored prefix entries (default 4; radix strategy) |
+| `--prefix-cache-strategy {radix,slot}` | prefix cache entry strategy (default radix) |
 | `--dflash2-model-dir DFLASH2_MODEL_DIR` | DFlash2 draft model directory (enables speculative decoding) |
 | `--dflash2-drafts DFLASH2_DRAFTS` | speculative draft tokens per round (default 7) |
 | `--dflash2-tree-budget N\|auto` | 木検証の request あたり行数。既定の `auto` はその round の生成中 request が 1 本だけで投機中なら 10 行、それ以外は chain の 8 行。`0` は木検証を無効化。auto は TP=1・draft 数 7 用 |
@@ -187,8 +190,8 @@ Qwen3.8-27B-DFlash2、同時 request 1 件では追加 scratch は 16.953 MiB。
 
 - server の MTP は **1 request ずつ直列**に処理する。`--max-concurrent-requests` を
   2 以上にしても、生成中の request が完了するまで次を開始しない。
-- tool calling / sampling / cancel は MTP 経路でも利用できる。ただし生成中の
-  cancel はその request が終わるまで反映されない。
+- tool calling / sampling / cancel は MTP 経路でも利用できる。cancel は prefill 中なら
+  次の chunk 境界、生成中なら次の spec round で反映される。
 - 思考 budget（`reasoning_budget_tokens`）は MTP では無視し、通常の生成を行う。
 - `--mtp-drafts` は 4 前後が目安。大きすぎると verify の固定費が増える。
 
@@ -537,8 +540,9 @@ executor の row bucket も決める。prompt が N を超えても prefill は 
 N を下げると program workspace が減り、その分だけ KV capacity が増える
 （context を大きく取る構成では N が実質的な容量ダイヤルになる）。
 
-stream client が connection を切断すると、in-flight generation は cancel される
-（`finish_reason="cancelled"`）。cancel は request-specific であり、他の in-flight
+client が connection を切断すると、stream / 非 stream のどちらでも in-flight generation は
+cancel される（`finish_reason="cancelled"`）。MTP の prefill は次の chunk 境界（`--max-num-batched-tokens`）、
+生成は次の spec round で反映する。cancel は request-specific であり、他の in-flight
 request の KV / GDN / token stream には影響しない。
 
 ## Responses API
@@ -614,6 +618,14 @@ page を refcount 付きで共有し、GDN state だけを page 単位で保持�
   `input - restored_tokens` になる
 - 同一プロンプトの再実行は restore しない（最長一致が input 全長に達するため）。
   DFlash2 経路でも prefix cache を使い、drafter ring を持つ entry だけを restore する
+- `--prefix-cache-strategy slot` では、request ごとに固定 slot を予約し、入力末尾直前の
+  page 境界 1 点だけを保存する。同じ会話を延長し続ける agent に向く。
+  既定の `radix` は chunk 終端ごとに entry を作り、先頭 prefix の共有に向く
+  （[../developer/prefix_cache.md](../developer/prefix_cache.md)）
+
+`--prefix-cache` / `--prefix-cache-concurrency` / `--prefix-cache-strategy` は
+`shelf-compute` へそのまま転送される。`GET /v1/meta` の
+`prefix_cache_strategy` / `prefix_cache_concurrency` が起動時の設定を示す。
 
 詳細は [../developer/prefix_cache.md](../developer/prefix_cache.md) を参照。
 

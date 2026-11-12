@@ -44,6 +44,16 @@ struct MtpPrefillOutput {
     int32_t pending_token = -1;
 };
 
+struct MtpPrefillProgress {
+    void* context = nullptr;
+    void (*report)(void* context, uint32_t processed_tokens,
+                   double elapsed_ms) = nullptr;
+    // Polled between prefill chunks. Returning true aborts the prefill before the
+    // next target forward, so a cancelled request does not finish the whole prompt.
+    bool (*should_stop)(void* stop_context) = nullptr;
+    void* stop_context = nullptr;
+};
+
 struct MtpIterationOutput {
     std::array<int32_t, kMtpMaxDrafts + 1u> emitted{};
     uint32_t emitted_count = 0;
@@ -173,6 +183,9 @@ struct MtpDrafterInput {
     shelf::qwen_hybrid::HybridLoweredPrimitives lowered;
     std::size_t token_row_intermediate = 0;
     std::size_t grouped_executor_bytes = 0;
+    // Largest rotated-domain linear the draft block runs. An empty shape keeps the
+    // model-independent upper bound.
+    shelf::weights::Exl3LinearShape exl3_linear_shape;
     // The target hidden the drafter consumes. Qwen4Exp feeds the pre-mixer wide residual
     // (hc * hidden); the Qwen35 families feed the final normed hidden.
     std::uint32_t hidden_width = 0;
@@ -193,7 +206,11 @@ std::size_t mtp_drafter_reserve_bytes(const shelf::qwen_hybrid::QwenHybridConfig
                                       const MtpDrafterConfig& options,
                                       std::size_t token_row_intermediate,
                                       std::size_t grouped_executor_bytes,
-                                      bool exl3_linear_workspace) noexcept;
+                                      bool exl3_linear_workspace,
+                                      const shelf::weights::Exl3LinearShape&
+                                          exl3_linear_shape = {},
+                                      const state::GdnStatePoolLayout* target_gdn =
+                                          nullptr) noexcept;
 
 Result<std::unique_ptr<MtpDrafter>> create_mtp_drafter(
     const MtpDrafterInput& input,
@@ -215,7 +232,8 @@ Result<MtpPrefillOutput> mtp_spec_prefill(
     state::PagedSequenceState& target_sequence,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    const SamplingConfig& sampling);
+    const SamplingConfig& sampling,
+    const MtpPrefillProgress* progress = nullptr);
 
 Result<MtpIterationOutput> mtp_spec_step(
     MtpDrafter& drafter,
@@ -275,16 +293,24 @@ struct MtpSpecBatchContext {
     bool initialized = false;
 };
 
-// The arena bytes a batch context reserves: one drafter per request plus the shared
-// history / compact log for the whole batch and its commit descriptors. The caller adds
-// the per-drafter KV pools (see mtp_drafter_reserve_bytes).
-std::size_t mtp_spec_batch_reserve_bytes(
-    const shelf::qwen_hybrid::QwenHybridConfig& config,
-    const MtpDrafterConfig& options,
-    std::size_t max_requests,
-    std::size_t token_row_intermediate,
-    std::size_t grouped_executor_bytes,
-    bool exl3_linear_workspace) noexcept;
+// The rows one fused verify round can produce: every request contributes its drafts plus
+// the token the target verifies. The batch history / compact log is sized from this, not
+// from the drafter's prefill row limit.
+inline uint32_t mtp_spec_rows(uint32_t max_requests, uint32_t num_drafts) noexcept {
+    const std::uint64_t drafts = static_cast<std::uint64_t>(num_drafts) + 1u;
+    const std::uint64_t rows = static_cast<std::uint64_t>(max_requests) * drafts;
+    return rows < 0xffffffffull ? static_cast<uint32_t>(rows) : 0xffffffffu;
+}
+
+// The arena bytes a rank reserves for one fused verify batch: the shared target GDN history
+// and compact log, plus one target GDN snapshot per drafter. Every rank allocates its own
+// snapshot for each drafter in the batch, so the caller passes the request count. The caller
+// adds the per-request drafters themselves, which only the drafter's rank allocates (see
+// mtp_drafter_reserve_bytes).
+std::size_t mtp_batch_rank_state_reserve_bytes(
+    const state::GdnStatePoolLayout& rank_gdn,
+    std::uint32_t spec_rows,
+    std::uint32_t drafter_count) noexcept;
 
 Result<MtpSpecBatchContext> create_mtp_spec_batch_context(
     Executor& target,

@@ -34,6 +34,7 @@ constexpr uint32_t kKsPerWarp = 4u;
 constexpr uint32_t kChunksPerRow = kHeadDim / 8u;
 constexpr uint32_t kChunksPerPage = kPageTokens * kChunksPerRow;
 constexpr uint32_t kPPitch = 24u;
+constexpr uint32_t kPageBitmapWords = 512u;
 
 static_assert(kThreads == kPagedAttentionPrefillBlock);
 static_assert(kTileRows == kPagedAttentionPrefillTileRows);
@@ -253,6 +254,7 @@ struct PrefillSharedBase {
     uint32_t page_count;
     uint32_t invalid;
     const uint32_t* block_table;
+    uint32_t page_bits[kPageBitmapWords];
 };
 
 struct PrefillSharedV0 : PrefillSharedBase {
@@ -340,6 +342,26 @@ void attention_paged_prefill_bf16_body(
     const uint32_t page_count = s.page_count;
     const uint32_t* block_table = s.block_table;
 
+    bool page_filter = false;
+    if constexpr (kMode == 3u) {
+        page_filter = a.block_mask != nullptr && page_count <= kPageBitmapWords * 32u;
+        if (page_filter) {
+            const uint32_t block_end =
+                min(visible_max, kv_block_start + kOctavePrefillKvBlockTokens);
+            paged_build_page_bits_range(
+                a.block_mask, a.mask_stride, a.mask_blocks, a.mask_block_shift,
+                row0, rows, kv_block_start, block_end, kPageTokens,
+                kv_block_start / kPageTokens, page_count, kPageBitmapWords,
+                s.page_bits);
+        }
+    } else {
+        page_filter = a.block_mask != nullptr && page_count <= kPageBitmapWords * 32u;
+        if (page_filter)
+            paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row0,
+                                  rows, visible_max, kPageTokens, page_count,
+                                  kPageBitmapWords, s.page_bits);
+    }
+
     if (tid < kTileRows) {
         s.vis[tid] = (tid < rows) ? (a.row_positions[row0 + tid] + 1u) : 0u;
         const size_t state = static_cast<size_t>(row0 + tid) * q_heads + q_head;
@@ -409,6 +431,7 @@ void attention_paged_prefill_bf16_body(
             page_index * kPageTokens;
         uint32_t tokens_here = visible_max - page_start;
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
+        if (page_filter && !paged_page_selected(s.page_bits, page_index)) continue;
         const uint64_t page_base = kMode == 3u
             ? static_cast<uint64_t>(page_index) * kPageTokens *
                   a.elems_per_token
@@ -676,6 +699,10 @@ constexpr uint32_t kWideQueryRows = 32u;
 constexpr uint32_t kWideFlatRows = 192u;
 constexpr uint32_t kWideTileWaves = 24u;
 constexpr uint32_t kWidePPitch = 16u;
+constexpr uint32_t kFlashNextQueryRows = 16u;
+constexpr uint32_t kFlashNextFlatRows = 192u;
+constexpr uint32_t kFlashNextTileWaves = 24u;
+constexpr uint32_t kFlashNextPPitch = 16u;
 constexpr uint32_t kOctavePitch = kHeadDim;
 constexpr uint32_t kOctaveTokens = 16u;
 constexpr uint32_t kOctaveTokenHalves = kOctaveTokens / 16u;
@@ -744,6 +771,7 @@ struct OctavePrefillShared {
     uint32_t page_count;
     uint32_t invalid;
     const uint32_t* block_table;
+    uint32_t page_bits[512];
 };
 
 __global__ __launch_bounds__(kThreads, 2)
@@ -973,6 +1001,13 @@ void attention_paged_prefill_octave_rotated(
     if (s.invalid != 0u) return;
     const uint32_t rows = s.rows_here;
     const uint32_t flat_rows = s.flat_rows;
+    const bool page_filter =
+        a.block_mask != nullptr && s.page_count <= 512u * 32u;
+    if (page_filter) {
+        paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row0,
+                              rows, s.visible_max, kPageTokens, s.page_count, 512u,
+                              s.page_bits);
+    }
     if (tid < kTileFlatRows) {
         const uint32_t local_row = tid % kTileQueryRows;
         const bool active = tid < flat_rows && local_row < rows;
@@ -1002,6 +1037,9 @@ void attention_paged_prefill_octave_rotated(
 
     for (uint32_t tile_start = 0u; tile_start < s.visible_max;
          tile_start += kOctaveTokens) {
+        if (page_filter &&
+            !paged_page_selected(s.page_bits, tile_start / kPageTokens))
+            continue;
         const uint32_t tokens_here =
             min(kOctaveTokens, s.visible_max - tile_start);
 
@@ -1360,11 +1398,10 @@ hipError_t launch_attention_paged_prefill_octave(
         levels == nullptr || !octave_format_valid(format))
         return hipErrorInvalidValue;
     const char* legacy_value = std::getenv("SHELF_OCTAVE_PREFILL_LEGACY");
+    const uint32_t q_per_kv = common.q_heads / common.kv_heads;
     const bool legacy = legacy_value != nullptr && legacy_value[0] == '1' &&
-                        legacy_value[1] == '\0';
-    if (common.q_heads / common.kv_heads >
-            v_prefill_octave::kWideFlatRows /
-                v_prefill_octave::kWideQueryRows) {
+                        legacy_value[1] == '\0' && q_per_kv <= 6u;
+    if (q_per_kv > 12u) {
         const uint32_t tiles = (common.rows + kTileRows - 1u) / kTileRows;
         attention_paged_prefill_bf16_impl<2u>
             <<<dim3(tiles, common.q_heads), kThreads, 0, stream>>>(
@@ -1385,6 +1422,15 @@ hipError_t launch_attention_paged_prefill_octave(
                 v_prefill_octave::kLegacyFlatRows,
                 v_prefill_octave::kLegacyTileWaves,
                 v_prefill_octave::kLegacyPPitch, 2u>(
+                    common, k_pool, v_pool, levels, format, stream);
+        } else if (q_per_kv > v_prefill_octave::kWideFlatRows /
+                                v_prefill_octave::kWideQueryRows) {
+            tile_error =
+                v_prefill_octave::launch_attention_paged_prefill_octave_tile<
+                v_prefill_octave::kFlashNextQueryRows,
+                v_prefill_octave::kFlashNextFlatRows,
+                v_prefill_octave::kFlashNextTileWaves,
+                v_prefill_octave::kFlashNextPPitch, 1u>(
                     common, k_pool, v_pool, levels, format, stream);
         } else {
             tile_error =
@@ -1487,6 +1533,7 @@ constexpr uint32_t kChunksPerRow = kHeadDim / 8u;
 constexpr uint32_t kChunksPerPage = kPageTokens * kChunksPerRow;
 constexpr uint32_t kPPitch = 24u;
 constexpr uint32_t kRowsPerPass = kThreads / 8u;
+constexpr uint32_t kPageBitmapWords = 512u;
 
 using i32x2_t = int __attribute__((ext_vector_type(2)));
 constexpr uint32_t kPitch8 = kHeadDim + 8u;
@@ -1546,6 +1593,7 @@ struct PrefillShared {
     uint32_t page_count;
     uint32_t invalid;
     const uint32_t* block_table;
+    uint32_t page_bits[kPageBitmapWords];
 };
 
 __global__ __launch_bounds__(kThreads, 2)
@@ -1601,6 +1649,14 @@ void attention_paged_prefill_fp8_impl(
     const uint32_t visible_max = s.visible_max;
     const uint32_t page_count = s.page_count;
     const uint32_t* block_table = s.block_table;
+
+    bool page_filter = false;
+    if (a.block_mask != nullptr && page_count <= kPageBitmapWords * 32u) {
+        page_filter = true;
+        paged_build_page_bits(a.block_mask, a.mask_stride, a.mask_block_shift, row0,
+                              rows, visible_max, kPageTokens, page_count,
+                              kPageBitmapWords, s.page_bits);
+    }
 
     if (tid < kTileRows) {
         s.vis[tid] = (tid < rows) ? (a.row_positions[row0 + tid] + 1u) : 0u;
@@ -1685,6 +1741,7 @@ void attention_paged_prefill_fp8_impl(
         const uint32_t page_start = page_index * kPageTokens;
         uint32_t tokens_here = visible_max - page_start;
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
+        if (page_filter && !paged_page_selected(s.page_bits, page_index)) continue;
         const uint64_t page_base = layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
         const size_t scale_page_base =
             scale_layer_base + static_cast<size_t>(page) * kPageTokens * a.kv_heads;
@@ -1748,8 +1805,13 @@ void attention_paged_prefill_fp8_impl(
                     sb += s.s_part[pmt][kh][rr][tb];
                 }
                 const uint32_t visr = s.vis[r];
-                const bool va = (page_start + ta) < visr;
-                const bool vb = (page_start + tb) < visr;
+                const uint32_t mask_row = row0 + r;
+                const bool va = (page_start + ta) < visr &&
+                    paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                        a.mask_block_shift, mask_row, page_start + ta);
+                const bool vb = (page_start + tb) < visr &&
+                    paged_token_visible(a.block_mask, a.mask_stride, a.mask_blocks,
+                                        a.mask_block_shift, mask_row, page_start + tb);
                 const size_t sa_idx = scale_page_base + static_cast<size_t>(ta) * a.kv_heads + kv_head;
                 const size_t sb_idx = scale_page_base + static_cast<size_t>(tb) * a.kv_heads + kv_head;
                 const float qsc = s.q_scale[r];

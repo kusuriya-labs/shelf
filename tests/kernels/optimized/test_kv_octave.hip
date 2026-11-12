@@ -419,15 +419,14 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
                           const std::vector<float>& levels,
                           bool prefill = false, uint32_t prefix = 0u,
                           uint32_t decode_tokens = 64u,
-                          bool microbench = false) {
+                          bool microbench = false, bool masked = false,
+                          uint32_t q_heads = 24u, uint32_t kv_heads = 4u) {
     const uint32_t tokens = prefill ? prefix + query_rows : decode_tokens;
-    constexpr uint32_t kv_heads = 4u;
-    constexpr uint32_t q_heads = 24u;
     constexpr uint32_t page_tokens = 16u;
     const uint32_t pages = (tokens + page_tokens - 1u) / page_tokens;
     constexpr uint32_t head_dim = 256u;
-    constexpr uint32_t kv_features = kv_heads * head_dim;
-    constexpr uint32_t q_features = q_heads * head_dim;
+    const uint32_t kv_features = kv_heads * head_dim;
+    const uint32_t q_features = q_heads * head_dim;
     std::vector<shelf::bf16_t> k(static_cast<std::size_t>(tokens) * kv_features);
     std::vector<shelf::bf16_t> v(k.size());
     for (std::size_t i = 0u; i < k.size(); ++i) {
@@ -447,6 +446,20 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     std::vector<uint32_t> query_slots(query_rows, 0u), query_positions(query_rows);
     for (uint32_t row = 0u; row < query_rows; ++row)
         query_positions[row] = prefill ? prefix + row : tokens - query_rows + row;
+    const uint32_t mask_blocks = (tokens + 3u) / 4u;
+    const uint32_t mask_stride = ((mask_blocks + 31u) / 32u) * 4u;
+    std::vector<uint8_t> mask(static_cast<std::size_t>(query_rows) * mask_stride, 0u);
+    if (masked) {
+        for (uint32_t row = 0u; row < query_rows; ++row) {
+            const uint32_t tail = query_positions[row] / 4u;
+            for (uint32_t block = 0u; block < mask_blocks; ++block) {
+                if ((block % 3u) != 2u || block == tail) {
+                    mask[static_cast<std::size_t>(row) * mask_stride + (block >> 3u)] |=
+                        static_cast<uint8_t>(1u << (block & 7u));
+                }
+            }
+        }
+    }
     std::vector<uint32_t> tree_offsets(query_rows + 1u, 0u);
     std::vector<uint32_t> tree_positions;
     if (tree_visibility) {
@@ -480,6 +493,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     uint32_t* d_table = nullptr;
     uint32_t* d_tree_offsets = nullptr;
     uint32_t* d_tree_positions = nullptr;
+    uint8_t* d_mask = nullptr;
     float* d_reference = nullptr;
     float* d_fused = nullptr;
     float* d_legacy = nullptr;
@@ -509,6 +523,7 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
               (!tree_visibility ||
                (allocate(reinterpret_cast<void**>(&d_tree_offsets), tree_offsets.size() * sizeof(uint32_t)) &&
                 allocate(reinterpret_cast<void**>(&d_tree_positions), tree_positions.size() * sizeof(uint32_t)))) &&
+              (!masked || allocate(reinterpret_cast<void**>(&d_mask), mask.size())) &&
               allocate(reinterpret_cast<void**>(&d_reference), q.size() * sizeof(float)) &&
               allocate(reinterpret_cast<void**>(&d_fused), q.size() * sizeof(float)) &&
               (!prefill || allocate(reinterpret_cast<void**>(&d_legacy),
@@ -525,7 +540,8 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
              hip_ok(hipMemcpy(d_append_positions, append_positions.data(), tokens * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
              hip_ok(hipMemcpy(d_query_slots, query_slots.data(), query_rows * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
              hip_ok(hipMemcpy(d_query_positions, query_positions.data(), query_rows * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
-             hip_ok(hipMemcpy(d_table, table.data(), table.size() * sizeof(uint32_t), hipMemcpyHostToDevice), name);
+             hip_ok(hipMemcpy(d_table, table.data(), table.size() * sizeof(uint32_t), hipMemcpyHostToDevice), name) &&
+             (!masked || hip_ok(hipMemcpy(d_mask, mask.data(), mask.size(), hipMemcpyHostToDevice), name));
         if (ok && tree_visibility) {
             ok = hip_ok(hipMemcpy(d_tree_offsets, tree_offsets.data(),
                                   tree_offsets.size() * sizeof(uint32_t),
@@ -586,6 +602,12 @@ void run_attention_parity(OctaveKVCacheFormat format, uint32_t query_rows,
     attention.elems_per_page = page_tokens * kv_features;
     attention.elems_per_layer = pages * attention.elems_per_page;
     attention.scale = 0.0625f;
+    if (masked) {
+        attention.block_mask = d_mask;
+        attention.mask_stride = mask_stride;
+        attention.mask_blocks = mask_blocks;
+        attention.mask_block_shift = 2u;
+    }
     if (ok) {
         if (prefill) {
             ok = hip_ok(shelf::kernel::launch_attention_paged_prefill_bf16(
@@ -711,6 +733,30 @@ int main() {
     run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 8192u, false,
                          "Octave prefill rows 8192 parity", levels,
                          true, 16u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave prefill QSA mask parity", levels,
+                         true, 17u, 64u, false, true);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave decode QSA mask parity", levels,
+                         false, 0u, 64u, false, true);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave dense TP2 prefill parity", levels,
+                         true, 17u, 64u, false, false, 12u, 2u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave dense TP2 decode parity", levels,
+                         false, 0u, 64u, false, false, 12u, 2u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 prefill parity", levels,
+                         true, 17u, 64u, false, false, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 decode parity", levels,
+                         false, 0u, 64u, false, false, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 masked prefill parity", levels,
+                         true, 17u, 64u, false, true, 12u, 1u);
+    run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 32u, false,
+                         "Octave FlashNext TP2 masked decode parity", levels,
+                         false, 0u, 64u, false, true, 12u, 1u);
     const char* long_bench = std::getenv("SHELF_OCTAVE_LONG_BENCH");
     if (long_bench != nullptr && long_bench[0] == '1' && long_bench[1] == '\0')
         run_attention_parity({OctaveKMode::Compact, 4u, 4u, 4u}, 4u, false,

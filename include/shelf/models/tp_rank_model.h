@@ -58,6 +58,8 @@ public:
     // Largest rotated-domain linear this rank runs, which sizes those staging planes. An
     // empty shape keeps the model-independent upper bound.
     virtual shelf::weights::Exl3LinearShape exl3_linear_shape() const { return {}; }
+    // The same geometry for the MTP draft block, which runs in its own executor.
+    virtual shelf::weights::Exl3LinearShape mtp_exl3_linear_shape() const { return {}; }
     // State pools the executor owns and allocates after the memory plan has sized the KV
     // pool: the QSA pooled-key pool and the PLE conv pool. Zero for a family whose pools
     // the rank runtime already holds.

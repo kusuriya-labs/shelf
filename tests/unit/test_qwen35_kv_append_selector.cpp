@@ -81,6 +81,14 @@ int main() {
           "kv_heads 2 fp8 rows=2048 (measured) -> Optimized");
     check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 8193) == KvAppendImplementation::Correctness,
           "kv_heads 2 fp8 rows=8193 (above measured) -> Correctness");
+    check(sel(KVCacheDType::OCTAVE, 4, 256, 16, 1) == KvAppendImplementation::Optimized,
+          "octave kv_heads 4 rows=1 -> Optimized");
+    check(sel(KVCacheDType::OCTAVE, 2, 256, 16, 2048) == KvAppendImplementation::Optimized,
+          "octave kv_heads 2 rows=2048 (dense tp2) -> Optimized");
+    check(sel(KVCacheDType::OCTAVE, 1, 256, 16, 2048) == KvAppendImplementation::Optimized,
+          "octave kv_heads 1 rows=2048 (qwen3.8 tp2) -> Optimized");
+    check(sel(KVCacheDType::OCTAVE, 1, 256, 16, 8193) == KvAppendImplementation::Correctness,
+          "octave kv_heads 1 rows=8193 (above measured) -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

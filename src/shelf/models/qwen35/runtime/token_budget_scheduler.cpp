@@ -83,6 +83,10 @@ Result<SchedulePlan> schedule_requests(
         if (request_cap_reached()) break;
         const uint32_t remaining = static_cast<uint32_t>(rp->input_tokens.size()) - position;
         uint32_t take = remaining < budget_left() ? remaining : budget_left();
+        if (rp->prefix_save_position != 0u && position < rp->prefix_save_position &&
+            position + take > rp->prefix_save_position) {
+            take = rp->prefix_save_position - position;
+        }
         const uint32_t end = position + take;
         if (end > rp->sequence.max_seq_len) {
             take = rp->sequence.max_seq_len - position;

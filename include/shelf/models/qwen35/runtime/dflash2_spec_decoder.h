@@ -187,7 +187,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     uint32_t prompt_count,
     uint32_t prefix_tokens = 0u,
     uint32_t page_tokens = 0u,
-    const std::function<void(uint32_t)>& on_chunk_complete = {});
+    const std::function<void(uint32_t)>& on_chunk_complete = {},
+    uint32_t checkpoint_position = 0u);
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;

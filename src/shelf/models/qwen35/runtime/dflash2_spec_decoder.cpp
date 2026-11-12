@@ -655,7 +655,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     uint32_t prompt_count,
     uint32_t prefix_tokens,
     uint32_t page_tokens,
-    const std::function<void(uint32_t)>& on_chunk_complete) {
+    const std::function<void(uint32_t)>& on_chunk_complete,
+    uint32_t checkpoint_position) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -692,6 +693,9 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         if (page_tokens != 0u && offset < last_boundary &&
             offset + n > last_boundary) {
             n = last_boundary - offset;
+        }
+        if (checkpoint_position > offset && offset + n > checkpoint_position) {
+            n = checkpoint_position - offset;
         }
         const bool final_chunk = (offset + n == prompt_count);
         ScheduledBatch batch = make_prefill_batch(

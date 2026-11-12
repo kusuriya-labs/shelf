@@ -22,7 +22,8 @@ std::size_t qwen35_executor_reserve_bytes(const shelf::qwen_hybrid::QwenHybridCo
                                           std::size_t ffn_intermediate_size,
                                           const ExecutorConfig& config,
                                           std::size_t tp_size,
-                                          bool exl3_linear_workspace) noexcept;
+                                          bool exl3_linear_workspace,
+                                          bool qsa_workspace = false) noexcept;
 
 }  // namespace runtime
 }  // namespace shelf::qwen35

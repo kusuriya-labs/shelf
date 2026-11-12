@@ -3,6 +3,8 @@
 #include <shelf/inference/prefix/prefix_kv_cache.h>
 #include <shelf/core/memory/arena.h>
 #include <shelf/core/status.h>
+#include <shelf/inference/state/ple_conv_state_pool.h>
+#include <shelf/inference/state/qsa_state_pool.h>
 #include <shelf/models/qwen35/runtime/tp_batch_hook.h>
 #include <shelf/models/qwen35/state/state_types.h>
 #include <hip/hip_runtime.h>
@@ -20,23 +22,35 @@ namespace runtime {
 using ::shelf::inference::prefix::PrefixKVStore;
 using ::shelf::state::PageId;
 
+enum class PrefixCacheStrategy : uint8_t {
+    Radix = 0,
+    Slot = 1,
+};
+
 struct PrefixCacheConfig {
     uint32_t max_concurrent = 4;
     uint32_t min_prefix_tokens = 64;
     uint32_t spec_ring_bytes = 0;
+    PrefixCacheStrategy strategy = PrefixCacheStrategy::Radix;
+    uint32_t slot_count = 0;
 };
+
+inline constexpr uint32_t kInvalidReuseSlot = 0xFFFFFFFFu;
 
 struct PrefixCacheBytes {
     std::size_t state = 0;
+    std::size_t extra_state = 0;
     std::size_t ring = 0;
     std::size_t state_slot = 0;
 
-    std::size_t total() const noexcept { return state + ring; }
+    std::size_t total() const noexcept { return state + extra_state + ring; }
 };
 
 PrefixCacheBytes prefix_cache_bytes(
     const PrefixCacheConfig& config,
-    const GdnStatePoolLayout& layout) noexcept;
+    const GdnStatePoolLayout& layout,
+    const ::shelf::state::QsaKeyStatePoolLayout* qsa = nullptr,
+    const ::shelf::state::PleConvStatePoolLayout* ple_conv = nullptr) noexcept;
 
 struct SpecRingRef {
     const bf16_t* k = nullptr;
@@ -62,6 +76,7 @@ struct PrefixHit {
     uint32_t match_tokens = 0;
     uint32_t ring_length = 0;
     uint32_t ring_next_position = 0;
+    uint32_t slot = kInvalidReuseSlot;
 
     bool hit() const noexcept { return entry_id != 0; }
 
@@ -102,6 +117,8 @@ struct PrefixCacheRankContext {
     gpu::GpuArena* arena = nullptr;
     hipStream_t stream = nullptr;
     int device = 0;
+    ::shelf::state::QsaKeyStatePool* active_qsa = nullptr;
+    ::shelf::state::PleConvStatePool* active_ple_conv = nullptr;
 };
 
 class Qwen35PrefixState;
@@ -112,6 +129,15 @@ class PrefixCache {
         gpu::GpuArena& arena,
         PagedKVPool& active_kv_pool,
         GdnStatePool& active_state_pool,
+        const PrefixCacheConfig& config,
+        const std::vector<PrefixCacheRankContext>& extra_ranks = {});
+
+    static Result<PrefixCache> create(
+        gpu::GpuArena& arena,
+        PagedKVPool& active_kv_pool,
+        GdnStatePool& active_state_pool,
+        ::shelf::state::QsaKeyStatePool* active_qsa_pool,
+        ::shelf::state::PleConvStatePool* active_ple_conv_pool,
         const PrefixCacheConfig& config,
         const std::vector<PrefixCacheRankContext>& extra_ranks = {});
 
@@ -126,6 +152,23 @@ class PrefixCache {
     Status shutdown() noexcept;
 
     PrefixHit lookup(const std::vector<uint32_t>& tokens);
+
+    PrefixCacheStrategy strategy() const noexcept { return config_.strategy; }
+
+    uint32_t reuse_slot_count() const noexcept {
+        return slots_ ? static_cast<uint32_t>(slots_->slots.size()) : 0u;
+    }
+
+    uint32_t reserve_reuse_slot(uint64_t owner, const PrefixHit& hit) noexcept;
+
+    void release_reuse_slot(uint64_t owner) noexcept;
+
+    Status save_slot_boundary(uint64_t owner,
+                              const PagedSequenceState& seq,
+                              const std::vector<uint32_t>& tokens,
+                              uint32_t input_len,
+                              hipStream_t stream,
+                              const SpecRingRef* ring = nullptr);
 
     Status save_input_boundary(
         const PagedSequenceState& seq,
@@ -178,10 +221,28 @@ class PrefixCache {
 
     Result<uint32_t> acquire_state_slot(hipStream_t stream);
 
+    Result<uint32_t> acquire_ring_slot(hipStream_t stream);
+
     struct AuxSlot {
         uint32_t hot_slot = 0;
         uint32_t ring_slot = 0xFFFFFFFFu;
+        uint32_t reuse_slot = kInvalidReuseSlot;
     };
+
+    struct ReuseSlot {
+        uint64_t entry_id = 0;
+        uint64_t payload = 0;
+        uint64_t last_used = 0;
+        uint64_t owner = 0;
+        bool reserved = false;
+    };
+
+    struct SlotTable {
+        std::vector<ReuseSlot> slots;
+        uint64_t clock = 0;
+    };
+
+    std::shared_ptr<SlotTable> slots_;
 
     struct AuxTable {
         std::unordered_map<uint64_t, AuxSlot> slots;

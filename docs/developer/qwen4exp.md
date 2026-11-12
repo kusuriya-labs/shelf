@@ -11,9 +11,10 @@ MXFP4、attention / GDN は per-channel FP8、PLE は per-tensor FP8）。
 checkpoint を Qwen4Exp と判定する。`model_type` は allowlist gate であり、
 `qwen4_exp` と `qwen4_exp_text` を受理する。identity で code path を選ばない。
 
-`shelf-compute` は `--tensor-parallel 2|4` で起動する。Qwen4Exp では prefix cache を
-無効にする（PLE の n-gram history が cache から復元した prefix を持たないため）。
-MTP は無効である。DFlash2 は `--dflash2-model-dir` で有効になる。
+`shelf-compute` は `--tensor-parallel 2|4` で起動する。prefix cache は QSA key state と
+PLE conv state を shadow slot に保持し（[prefix_cache.md](prefix_cache.md)）、restore 時に
+PLE の n-gram history を復元 prefix で再 seed する。MTP は無効である。DFlash2 は
+`--dflash2-model-dir` で有効になる。
 
 ## 2. 重みの形式とロード
 
@@ -109,8 +110,11 @@ checkpoint は E4M3 code × per-tensor BF16 scale、EXL3 checkpoint は
 
 `QsaKeyStatePool` は sequence slot ごとに pooled key / partial key / counts を持つ。
 `QSA_KEY_CACHE` は 4 token が揃った時点で mean → RMSNorm → partial RoPE を行い、
-pooled key を書く。`QSA_SELECT` は block ごとに score を計算しながら top-k を保持する
-ため、`[rows, blocks]` の score buffer は確保しない。出力は行あたり
+pooled key を書く。`QSA_SELECT` は score と選択を分ける。score は
+`kQsaScoreRowTile × kQsaScoreBlockTile`（2048 row × 8192 block）の workspace に
+block tile 単位で書き、選択は tile ごとの radix select で上位 k を取り、tile を
+またぐ場合は直前までの上位 k と merge する。したがって score buffer は
+`rows × blocks` ではなく固定 workspace である。出力は行あたり
 `ceil(blocks / 32) * 4` byte の block bitmap（1 block = 1 bit、下位 block が下位 bit）で、
 選んだ block と、まだ揃っていない tail block の bit を立てる。
 `PagedAttentionNode` はこの bitmap を 2 番目の入力として、token を

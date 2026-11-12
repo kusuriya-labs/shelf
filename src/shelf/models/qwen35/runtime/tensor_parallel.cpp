@@ -175,7 +175,8 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         // expert. The routed experts add their own group-row term.
         reserved = qwen35::runtime::qwen35_executor_reserve_bytes(
             tc, rank->model_->token_row_ffn_size(), reserve_config, config.tp_size,
-            rank->model_->uses_exl3_linear());
+            rank->model_->uses_exl3_linear(),
+            rank->model_->qwen4exp_model() != nullptr);
         reserved += rank->model_->ffn_workspace_reserve_bytes(config.max_batch_rows);
         const std::size_t state_pools =
             rank->model_->executor_state_reserve_bytes(config.max_scheduled_requests);
@@ -204,23 +205,42 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         PrefixCacheConfig prefix_config;
         prefix_config.max_concurrent = config.prefix_concurrency;
         prefix_config.spec_ring_bytes = config.prefix_spec_ring_bytes;
+        prefix_config.strategy = config.prefix_strategy;
+        prefix_config.slot_count = config.prefix_slot_count;
+        if (prefix_config.strategy == PrefixCacheStrategy::Slot) {
+            prefix_config.max_concurrent = prefix_config.slot_count + 1u;
+        }
         const PrefixCacheBytes prefix_bytes =
             prefix_cache_bytes(prefix_config, gdn_layout_result);
         reserved += prefix_bytes.total();
-        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s\n",
-                     gpu::format_gib(prefix_bytes.total()).c_str());
+        const std::size_t family_shadow =
+            rank->model_->executor_state_reserve_bytes(
+                2u * static_cast<std::size_t>(prefix_config.max_concurrent));
+        reserved += family_shadow;
+        std::fprintf(stderr, "MEMORY_PLAN tp prefix cache: %s (family shadow %s)\n",
+                     gpu::format_gib(prefix_bytes.total()).c_str(),
+                     gpu::format_gib(family_shadow).c_str());
     }
     if (config.drafter_config != nullptr) {
         DFlash2SpecDecoderConfig spec_config;
         spec_config.num_drafts = config.drafter_drafts == 0u ? 7u : config.drafter_drafts;
+        const auto* q4 = rank->rank_model() != nullptr
+            ? rank->rank_model()->qwen4exp_model()
+            : nullptr;
+        const weights::MatrixWeight* drafter_head = q4 != nullptr
+            ? &q4->weights().lm_head
+            : &rank->private_lm_head();
         const std::size_t lm_head_k = config.drafter_lm_head_k != 0u
             ? config.drafter_lm_head_k
-            : static_cast<std::size_t>(rank->private_lm_head().k_padded);
+            : static_cast<std::size_t>(drafter_head->k_padded);
+        const bool exl3_mul24_head = drafter_head->quant_spec ==
+            quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
         const DFlash2Footprint footprint = dflash2_footprint(
             *config.drafter_config, spec_config, *rank->gdn_pool_,
             config.drafter_weights_bytes, lm_head_k,
             config.drafter_sessions == 0u ? config.max_scheduled_requests
-                                          : config.drafter_sessions);
+                                          : config.drafter_sessions,
+            0u, exl3_mul24_head);
         reserved += footprint.total();
         std::fprintf(stderr,
                      "MEMORY_PLAN tp drafter: weights %s scratch %s spec batch %s "
@@ -238,18 +258,31 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
         mtp_options.page_tokens = config.mtp_batch.page_tokens;
         mtp_options.max_batch_rows = config.mtp_batch.max_batch_rows;
         mtp_options.kv_dtype = config.mtp_batch.kv_dtype;
-        const std::size_t batch_bytes =
-            qwen35::runtime::mtp_spec_batch_reserve_bytes(
-                tc, mtp_options, config.mtp_batch.max_requests,
-                rank->model_->token_row_ffn_size(),
-                rank->model_->mtp_grouped_reserve_bytes(
-                    qwen35::runtime::mtp_drafter_rows(mtp_options),
-                    mtp_options.max_seq_len + 1u),
-                rank->model_->uses_exl3_linear());
+        std::size_t drafter_bytes = 0u;
+        if (config.tp_rank == 0u) {
+            drafter_bytes = qwen35::runtime::mtp_drafter_reserve_bytes(
+                                tc, mtp_options, rank->model_->token_row_ffn_size(),
+                                rank->model_->mtp_grouped_reserve_bytes(
+                                    qwen35::runtime::mtp_drafter_rows(mtp_options),
+                                    mtp_options.max_seq_len + 1u),
+                                rank->model_->uses_exl3_linear(),
+                                rank->model_->mtp_exl3_linear_shape(),
+                                &gdn_layout_result) *
+                            config.mtp_batch.max_requests;
+        }
+        const std::size_t state_bytes =
+            qwen35::runtime::mtp_batch_rank_state_reserve_bytes(
+                gdn_layout_result,
+                qwen35::runtime::mtp_spec_rows(config.mtp_batch.max_requests,
+                                               mtp_options.num_drafts),
+                config.mtp_batch.max_requests);
+        const std::size_t batch_bytes = drafter_bytes + state_bytes;
         reserved += batch_bytes;
-        std::fprintf(stderr, "MEMORY_PLAN tp mtp batch reserve: %s (%u slots)\n",
+        std::fprintf(stderr,
+                     "MEMORY_PLAN tp mtp batch reserve: %s (%u slots, drafter %s)\n",
                      gpu::format_gib(batch_bytes).c_str(),
-                     static_cast<unsigned>(config.mtp_batch.max_requests));
+                     static_cast<unsigned>(config.mtp_batch.max_requests),
+                     gpu::format_gib(drafter_bytes).c_str());
     }
     if (arena_free_now <= reserved) {
         return Status::insufficient_memory(
@@ -526,6 +559,8 @@ Status TpCoordinator::initialize(const TpCoordinatorConfig& config) {
         rank_config.prefix_cache = config.prefix_cache;
         rank_config.prefix_concurrency = config.prefix_concurrency;
         rank_config.prefix_spec_ring_bytes = config.prefix_spec_ring_bytes;
+        rank_config.prefix_strategy = config.prefix_strategy;
+        rank_config.prefix_slot_count = config.prefix_slot_count;
         rank_config.load_private_weights = config.load_private_weights;
         rank_config.target_hidden_taps = config.target_hidden_taps;
         rank_config.target_hidden_tap_count = config.target_hidden_tap_count;
@@ -638,6 +673,25 @@ Status TpCoordinator::on_sequence_created(const PagedSequenceState& source) {
     }
     mirrors_.emplace(key, std::move(mirror));
     return Status::make_ok();
+}
+
+Status TpCoordinator::on_prefix_restored(const PagedSequenceState& source,
+                                         std::span<const int32_t> tokens) {
+    Status first_error = Status::make_ok();
+    for (auto& rank_ptr : ranks_) {
+        TpRankRuntime& rank = *rank_ptr;
+        const ExternalPrefixRestoreHandler& handler =
+            rank.executor().external_prefix_restore;
+        if (!handler) continue;
+        auto scope = shelf::gpu::ScopedDevice::create(rank.device_id());
+        if (!scope.ok()) {
+            if (first_error.ok()) first_error = scope.status();
+            continue;
+        }
+        const Status st = handler(source.slot, tokens);
+        if (!st.ok() && first_error.ok()) first_error = st;
+    }
+    return first_error;
 }
 
 uint32_t TpCoordinator::on_prefix_rank_count() {

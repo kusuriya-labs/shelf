@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 #include <shelf/models/qwen35/runtime/decode_backend.h>
 #include <shelf/runtime/stream_bridge.h>
@@ -113,6 +114,12 @@ struct ExecutorModelInput {
 using ExternalInputPreparer =
     std::function<Status(const ScheduledBatch&, std::vector<bf16_t>&)>;
 
+// Re-seeds family state that is derived from the consumed token history (the Qwen4Exp
+// PLE n-gram history) after a prefix-cache restore advances a sequence past tokens this
+// process never scheduled.
+using ExternalPrefixRestoreHandler =
+    std::function<Status(::shelf::state::SequenceSlotId, std::span<const int32_t>)>;
+
 struct GraphCacheSlot {
     hipGraphExec_t exec = nullptr;
     uint32_t token_count = 0;
@@ -140,6 +147,12 @@ bool program_needs_exl3_workspace(const ::shelf::runtime::Program& program) noex
 // True when any program of the set does. This is what sizes the execution workspace.
 bool program_set_needs_exl3_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept;
 
+// True when one program runs the QSA selector, which keeps its score and top-k state in
+// the execution workspace.
+bool program_needs_qsa_workspace(const ::shelf::runtime::Program& program) noexcept;
+
+bool program_set_needs_qsa_workspace(const ::shelf::runtime::ProgramSet& programs) noexcept;
+
 struct Executor {
     Executor();
     ~Executor() noexcept;
@@ -156,6 +169,7 @@ struct Executor {
     std::unique_ptr<::shelf::state::QsaKeyStatePool> qsa_state_pool;
     std::unique_ptr<::shelf::state::PleConvStatePool> ple_conv_state_pool;
     ExternalInputPreparer external_input_preparer;
+    ExternalPrefixRestoreHandler external_prefix_restore;
 
     ExecutorConfig config;
 

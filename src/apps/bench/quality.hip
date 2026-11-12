@@ -224,10 +224,6 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
         fprintf(stderr, "--batch-size greater than 1 requires --tensor-parallel 1\n");
         return false;
     }
-    if (opts.kv_dtype == shelf::kernel::KVCacheDType::OCTAVE && opts.tp != 1) {
-        fprintf(stderr, "Octave KV cache currently requires --tensor-parallel 1\n");
-        return false;
-    }
     std::vector<int> sorted_devices = opts.devices;
     std::sort(sorted_devices.begin(), sorted_devices.end());
     if (std::adjacent_find(sorted_devices.begin(), sorted_devices.end()) !=

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,6 +26,8 @@ class PleInputRuntime {
                    std::vector<bf16_t>& out);
 
     void reset_sequence(std::uint32_t slot);
+
+    Status seed(std::uint32_t slot, std::span<const std::int32_t> tokens);
 
  private:
     PleInputRuntime(std::shared_ptr<const PleTable> table, std::uint32_t hidden)
