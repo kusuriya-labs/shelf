@@ -1737,6 +1737,28 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         return Status::invalid_argument("batch step requires a slot", __FILE__, __LINE__);
     }
 
+    // Diagnostic host intervals are disjoint, but GPU work may continue across them.
+    static const bool profile = env_flag_enabled("SHELF_DFLASH2_BATCH_PHASE_TRACE", false);
+    const bool profile_sync = profile && env_flag_enabled("SHELF_DFLASH2_BATCH_PHASE_SYNC", false);
+    using Clock = std::chrono::steady_clock;
+    double explicit_sync_ms = 0;
+    unsigned sync_errors = 0;
+    auto phase_start = profile ? Clock::now() : Clock::time_point{};
+    double setup_ms = 0, draft_ms = 0, selection_ms = 0, metadata_ms = 0;
+    double verify_submit_ms = 0, decision_wait_ms = 0, accept_ms = 0;
+    double replay_ms = 0, gather_append_ms = 0, single_ms = 0;
+    auto mark = [&](double& phase) {
+        if (profile) {
+            if (profile_sync) {
+                const auto sync_start = Clock::now();
+                if (hipStreamSynchronize(slots.front().decoder->stream) != hipSuccess) ++sync_errors;
+                explicit_sync_ms += std::chrono::duration<double, std::milli>(Clock::now() - sync_start).count();
+            }
+            const auto now = Clock::now();
+            phase += std::chrono::duration<double, std::milli>(now - phase_start).count();
+            phase_start = now;
+        }
+    };
     struct SlotPlan {
         DFlash2SpecDecoder* decoder = nullptr;
         int32_t anchor = 0;
@@ -1864,6 +1886,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             }
         }
     }
+    mark(setup_ms);
     const auto round_t0 = std::chrono::steady_clock::now();
     bool verify_events_recorded = false;
     std::vector<dflash2::DFlash2ProposeRequest> propose_requests;
@@ -1940,6 +1963,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             }
         }
     }
+    mark(draft_ms);
     const bool need_host_drafts = !tree_mode ||
         env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_SHAPE", false) ||
         env_flag_enabled("SHELF_DFLASH2_TREE_TRACE_CHAIN", false);
@@ -1986,6 +2010,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             return Status::invalid_argument("batch tree rows exceed capacity", __FILE__, __LINE__);
     }
 
+    mark(selection_ms);
     for (std::size_t i = 0; i < plans.size(); ++i) {
         SlotPlan& plan = plans[i];
         if (!plan.batched) continue;
@@ -2098,6 +2123,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 options[r].rope_positions = tree.rope_positions;
             }
         }
+        mark(metadata_ms);
         if (batch_timing) {
             const hipError_t start_err =
                 hipEventRecord(leader.verify_start_event, leader.stream);
@@ -2119,6 +2145,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                                          hipGetErrorString(stop_err), __FILE__, __LINE__);
             }
         }
+        mark(verify_submit_ms);
         BatchExecutionOutput output = executed.release();
         if (output.num_outputs < total_rows) {
             return Status::invalid_state("batch verify output rows mismatch", __FILE__,
@@ -2179,6 +2206,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
         }
     }
 
+    mark(decision_wait_ms);
     DFlash2SpecBatchOutput out;
     out.slots.resize(plans.size());
     out.total_rows = total_rows;
@@ -2219,6 +2247,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
                 plan.thinking_allowance == 0u ? plan.thinking_close_token : -1;
             const Status st = run_single_target(decoder, plan.anchor, result_out, forced);
             if (!st.ok()) return st;
+            mark(single_ms);
             if (qwen_hybrid::is_stop_token(decoder.config.eos_tokens, result_out.pending_token)) {
                 result_out.finished = true;
             }
@@ -2283,6 +2312,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             return Status::invalid_state("batch step page_tokens is zero", __FILE__, __LINE__);
         }
 
+        mark(accept_ms);
         // Verify deferred the recurrent state write, so the live slot still holds the
         // base state: replay the accepted prefix (all K+1 rows on a full accept).
         for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
@@ -2324,6 +2354,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             if (!st.ok()) return st;
         }
 
+        mark(replay_ms);
         if (tree_mode) {
             Status st = gather_tree_path(decoder, plan.position,
                 std::span<const uint32_t>(walk.rows.data(), accepted + 1u), plan.row_begin);
@@ -2361,6 +2392,7 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             if (!st.ok()) return st;
         }
 
+        mark(gather_append_ms);
         decoder.sample_index = plan.sample_index + plan.total_rows;
 
         if (decoder.timing != nullptr) {
@@ -2392,8 +2424,20 @@ Result<DFlash2SpecBatchOutput> dflash2_spec_step_batch(
             result_out.finished = true;
         }
         commit_history_tokens(decoder, result_out.emitted.data(), result_out.emitted_count);
+        if (profile) std::fprintf(stderr,
+            "DFPHASE_SLOT slot=%u rows=%u drafts=%u accepted=%u emitted=%u\n",
+            decoder.sequence->slot, plan.total_rows, plan.drafts, accepted, result_out.emitted_count);
     }
 
+    if (profile) {
+        mark(accept_ms);
+        std::fprintf(stderr, "DFPHASE time_ns=%lld sessions=%zu rows=%u tree=%u setup=%.6f draft_submit=%.6f selection_wait=%.6f metadata=%.6f verify_submit=%.6f decision_wait=%.6f accept=%.6f replay_submit=%.6f gather_append_submit=%.6f single=%.6f sync=%u sync_wait=%.6f sync_errors=%u\n",
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count()),
+                     plans.size(), total_rows, tree_mode ? 1u : 0u, setup_ms, draft_ms,
+                     selection_ms, metadata_ms, verify_submit_ms, decision_wait_ms,
+                     accept_ms, replay_ms, gather_append_ms, single_ms,
+                     profile_sync ? 1u : 0u, explicit_sync_ms, sync_errors);
+    }
     return out;
 }
 

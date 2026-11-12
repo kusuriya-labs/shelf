@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
@@ -120,6 +121,8 @@ class ComputeKVStats:
 
 class AsyncComputeClient:
     def __init__(self, argv: list[str], max_inflight: int = 4, log=None):
+        self._token_trace_path = os.environ.get("SHELF_DFLASH2_TOKEN_TIMESTAMPS")
+        self._token_trace: dict[int, list[int]] = {}
         self._argv = list(argv)
         self._log = log if log is not None else sys.stderr
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -188,6 +191,15 @@ class AsyncComputeClient:
                     return
 
                 request_id = event.get("request_id")
+                if self._token_trace_path and request_id is not None:
+                    if event.get("event") == "token":
+                        self._token_trace.setdefault(int(request_id), []).append(time.monotonic_ns())
+                    elif event.get("event") in ("done", "error"):
+                        record = {"request_id": request_id,
+                                  "timestamps_ns": self._token_trace.pop(int(request_id), []),
+                                  "event": event.get("event")}
+                        with open(self._token_trace_path, "a", encoding="utf-8") as handle:
+                            handle.write(json.dumps(record) + "\n")
 
                 if request_id is None:
                     await self._control.put(event)

@@ -1099,6 +1099,9 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         return Status::make_ok();
     }
     static const bool host_trace = std::getenv("SHELF_DFLASH2_COST_TRACE") != nullptr;
+    static const char* phase_trace_env = std::getenv("SHELF_DFLASH2_BATCH_PHASE_TRACE");
+    static const bool phase_trace = phase_trace_env != nullptr && phase_trace_env[0] != '\0' &&
+                                    phase_trace_env[0] != '0';
     timespec host_start{}, host_end{};
     const auto host_wall_start = host_trace ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
@@ -1242,6 +1245,11 @@ Status ContinuousBatcher::run_dflash2_round(std::vector<RuntimeRequest*>& active
         for (std::size_t i = 0; i < slot_requests.size(); ++i) {
             RuntimeRequest& request = *slot_requests[i];
             const DFlash2SpecIterationOutput& step = results.slots[i];
+            if (phase_trace) {
+                std::fprintf(stderr, "DFPHASE_REQUEST id=%lld slot=%u accepted=%u emitted=%u drafts=%u\n",
+                             static_cast<long long>(request.external_request_id),
+                             request.sequence.slot, step.num_accepted, step.emitted_count, step.num_drafts);
+            }
             if (dflash_.adaptive) {
                 if (step.num_drafts == dflash_.num_drafts) {
                     auto& ema = request.dflash->adaptive_accepted_ema;
