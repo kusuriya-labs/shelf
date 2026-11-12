@@ -1,0 +1,25 @@
+--- a/src/shelf/inference/execution/program_executor.hip
++++ b/src/shelf/inference/execution/program_executor.hip
+@@ -394,6 +394,14 @@
+     if (!mode_result.ok()) return mode_result.status();
+     const KernelMode mode = mode_result.value();
+     const bool sync_each_op = g_op_dump_enabled || g_op_sync_enabled;
++    static const char* trace = std::getenv("SHELF_PLAMO_LINEAR_TRACE");
++    static const char* trace_rows = std::getenv("SHELF_PLAMO_LINEAR_TRACE_ROWS");
++    static uint32_t seen[256]{};
++    const uint32_t trace_target = trace_rows ? static_cast<uint32_t>(std::strtoul(trace_rows, nullptr, 10)) : 0u;
++    const bool capture = trace && trace_target > 0u && trace_target < 256u &&
++        ctx.actual_rows == trace_target && ctx.num_prefill_requests == 0u && begin == 0u &&
++        end == program.dispatches.size() && semantic_timing_enabled() && ++seen[trace_target] == 8u;
++    if (capture) semantic_timing_begin(stream, 4096);
+     size_t i = begin;
+     while (i < end) {
+         const auto& binding = program.dispatches[i];
+@@ -544,6 +552,7 @@
+             ctx.staging_pool->bucket_ran[static_cast<std::size_t>(bidx)] = 1;
+     }
+ #endif
++    if (capture) semantic_timing_end(stream, trace);
+     return Status::make_ok();
+ }
+ 
