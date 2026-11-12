@@ -133,7 +133,11 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
                     {activated, up}, {product});
         }
         pg.nodes.back().debug_name = p + "mlp_product";
-        out = em.linear(l.down, weight(l.down), product); pg.nodes.back().debug_name = p + "down";
+        const auto down_weight = weight(l.down);
+        lowered.weights[down_weight].plamo_exl3_split4 = exl3_2b &&
+            l.down.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+            l.down.exl3_ka == 4 && l.down.rows == 2560 && l.down.cols == 10240;
+        out = em.linear(l.down, down_weight, product); pg.nodes.back().debug_name = p + "down";
         out = norm(out, h, h, l.post_mlp_norm, static_cast<float>(1.0 / std::pow(5.0, 1.5)), p + "post_mlp_norm");
         x = residual(ar, out, p + "output"); lowered.layer_output_values.emplace_back(i, x);
     }

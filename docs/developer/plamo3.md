@@ -98,3 +98,8 @@ PLaMo EXL3-INT8 の linear は実行行数に応じて kernel と split-K を選
 PLaMo 3 Translate 2B の対象 EXL3-INT8 checkpoint では、Q/K の 128 要素単位
 RMSNorm を 32 スレッドの workgroup で実行する。逐次の加算順と BF16 中間
 丸めを維持する。BF16 checkpoint と他モデルは従来の経路を使う。
+
+同 checkpoint の down projection は、prefill を含まない decode の処理 chunk が
+17〜64 行で、4 分割分の workspace がある場合に split-K 4 を使用する。
+split-K によって加算順と logits は変化する。他の行数、
+prefill、BF16 checkpoint、他モデルは従来の選択を使う。

@@ -865,7 +865,10 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (herr == hipErrorNotSupported) herr = hipSuccess;
         }
         if (!done && herr == hipSuccess) {
-            const uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
+                n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
+                splits = 4u;
             herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
             if (herr == hipSuccess)
