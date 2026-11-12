@@ -71,9 +71,17 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
         const auto& l = w.layers[i]; const std::string p = "L" + std::to_string(i) + ".";
         lowered.layer_input_values.emplace_back(i, x);
         auto n = norm(x, h, h, l.pre_mixer_norm, 1.0f, p + "pre_mixer_norm");
-        auto qkv = em.linear(l.qkv, weight(l.qkv), n); pg.nodes.back().debug_name = p + "qkv";
-        auto [qraw, kvraw] = split(qkv, q, 2 * kv, p + "q_kv_split");
-        auto [kraw, v] = split(kvraw, kv, kv, p + "k_v_split");
+        RT::ValueId qraw, kraw, v;
+        if (l.split_projections) {
+            qraw = em.linear(l.q, weight(l.q), n); pg.nodes.back().debug_name = p + "q_proj";
+            kraw = em.linear(l.k, weight(l.k), n); pg.nodes.back().debug_name = p + "k_proj";
+            v = em.linear(l.v, weight(l.v), n); pg.nodes.back().debug_name = p + "v_proj";
+        } else {
+            auto qkv = em.linear(l.qkv, weight(l.qkv), n); pg.nodes.back().debug_name = p + "qkv";
+            auto [qr, kvraw] = split(qkv, q, 2 * kv, p + "q_kv_split");
+            auto [kr, vr] = split(kvraw, kv, kv, p + "k_v_split");
+            qraw = qr; kraw = kr; v = vr;
+        }
         auto qn = norm(qraw, q, d, l.q_norm, 1.0f, p + "q_norm");
         auto kn = norm(kraw, kv, d, l.k_norm, 1.0f, p + "k_norm");
         const bool full = c.is_full_attention(i);
@@ -93,8 +101,15 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
         out = norm(out, h, h, l.post_mixer_norm, 0.2f, p + "post_mixer_norm");
         auto ar = residual(x, out, p + "attention_residual");
         n = norm(ar, h, h, l.pre_mlp_norm, 1.0f, p + "pre_mlp_norm");
-        auto gu = em.linear(l.gate_up, weight(l.gate_up), n); pg.nodes.back().debug_name = p + "gate_up";
-        auto [gate, up] = split(gu, f, f, p + "gate_up_split");
+        RT::ValueId gate, up;
+        if (l.split_projections) {
+            gate = em.linear(l.gate, weight(l.gate), n); pg.nodes.back().debug_name = p + "gate_proj";
+            up = em.linear(l.up, weight(l.up), n); pg.nodes.back().debug_name = p + "up_proj";
+        } else {
+            auto gu = em.linear(l.gate_up, weight(l.gate_up), n); pg.nodes.back().debug_name = p + "gate_up";
+            auto [g, u] = split(gu, f, f, p + "gate_up_split");
+            gate = g; up = u;
+        }
         auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);
         pg.nodes.back().debug_name = p + "silu";
         auto product = em.value(f); em.emit(RT::PrimitiveNode{RT::MulNode{RT::RowwiseShapeKey{f}}},

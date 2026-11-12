@@ -15,7 +15,8 @@ namespace shelf::plamo3 {
 struct LayerWeights {
     gpu::Tensor pre_mixer_norm, post_mixer_norm, pre_mlp_norm, post_mlp_norm;
     gpu::Tensor q_norm, k_norm;
-    shelf::weights::MatrixWeight qkv, o_proj, gate_up, down;
+    shelf::weights::MatrixWeight qkv, q, k, v, o_proj, gate_up, gate, up, down;
+    bool split_projections = false;
 };
 
 struct ModelWeights {

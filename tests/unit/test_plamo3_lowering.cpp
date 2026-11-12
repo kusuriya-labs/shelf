@@ -56,5 +56,22 @@ int main() {
         if (b.rope_table_index == 1) ++selected;
     }
     if (selected != 2) return 1;
+    for (auto& l : w.layers) {
+        l.split_projections = true;
+        shape(l.q,2048,1536); shape(l.k,128,1536); shape(l.v,128,1536);
+        shape(l.gate,6144,1536); shape(l.up,6144,1536);
+    }
+    auto separate = shelf::plamo3::lower_to_primitives(c,w);
+    if (!separate.ok()) return 1;
+    unsigned q_proj=0, k_proj=0, v_proj=0, gate_proj=0, up_proj=0, split_nodes=0;
+    for (const auto& n : separate.value().graph.nodes) {
+        if (n.debug_name.find(".q_proj") != std::string::npos) ++q_proj;
+        if (n.debug_name.find(".k_proj") != std::string::npos) ++k_proj;
+        if (n.debug_name.find(".v_proj") != std::string::npos) ++v_proj;
+        if (n.debug_name.find(".gate_proj") != std::string::npos) ++gate_proj;
+        if (n.debug_name.find(".up_proj") != std::string::npos) ++up_proj;
+        if (std::holds_alternative<shelf::runtime::SplitNode>(n.node)) ++split_nodes;
+    }
+    if (q_proj!=8 || k_proj!=8 || v_proj!=8 || gate_proj!=8 || up_proj!=8 || split_nodes!=0) return 1;
     std::puts("PLaMo graph and layer-specific RoPE bindings verified"); return 0;
 }
