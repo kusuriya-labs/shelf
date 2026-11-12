@@ -21,8 +21,11 @@ CASES = [
 ]
 
 async def main(args):
-    proc = subprocess.Popen([args.server, "--model-dir", args.model, "--port", str(args.port),
-        "--max-seq-len", "2048", "--max-concurrent-requests", str(args.concurrency)],
+    command = [args.server, "--model-dir", args.model, "--port", str(args.port),
+               "--max-seq-len", "2048", "--max-concurrent-requests", str(args.concurrency)]
+    if args.max_num_batched_tokens is not None:
+        command.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
+    proc = subprocess.Popen(command,
         stdout=subprocess.DEVNULL, stderr=open(args.log, "w"), start_new_session=True)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1200)) as session:
@@ -84,6 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--warmup-batch", action="store_true")
+    parser.add_argument("--max-num-batched-tokens", type=int)
     parser.add_argument("--port", type=int, default=18231)
     parser.add_argument("--log", default="/tmp/plamo-batch-server.log")
     asyncio.run(main(parser.parse_args()))

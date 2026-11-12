@@ -79,6 +79,7 @@ def main():
                     if event.get("event") == "done" and event.get("request_id", 0) >= 20000:
                         warmed.add(event["request_id"])
             first, done, times = {}, {}, {}
+            batch_start = time.monotonic()
             for i in range(args.concurrency):
                 generate(i + 1, prompts[i % len(prompts)], args.tokens)
             while len(done) < args.concurrency:
@@ -91,6 +92,7 @@ def main():
                     done[rid] = timestamp
             if len(first) != args.concurrency:
                 raise RuntimeError("missing token events")
+            batch_elapsed = time.monotonic() - batch_start
             start, end = max(first.values()), min(done.values())
             count = sum(sum(start <= timestamp <= end for timestamp in values) for values in times.values())
             if end <= start:
@@ -98,6 +100,8 @@ def main():
             print(json.dumps({"concurrency": args.concurrency, "max_new_tokens": args.tokens,
                               "observed_tokens": sum(map(len, times.values())),
                               "case_index": args.case_index, "warmup_batch": args.warmup_batch,
+                              "batch_elapsed_s": batch_elapsed,
+                              "total_completion_tokens_per_s": sum(map(len, times.values())) / batch_elapsed,
                               "window_s": end - start, "window_tokens": count,
                               "decode_tokens_per_s": count / (end - start),
                               "prompt_tokens": [len(ids) for ids in prompts]}), flush=True)

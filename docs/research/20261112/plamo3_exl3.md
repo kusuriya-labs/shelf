@@ -83,7 +83,7 @@ linear は MLP、attention projection、head が集約され、個別には分�
 batch での kernel 別時間、scheduler / host 時間、head と MLP の個別時間は未測定。
 量子化後に支配的な演算をこれから推定しない。
 
-## 検証と残作業
+## 前回時点の検証と残作業
 
 - 合成 EXL3 の正常系・marker 異常系、PLaMo の lowering / BF16 checkpoint / 既存 BF16 loader の実モデル ctest は通過。
 - 2B BF16 の PLaMo template 6 項目、サーバー 8 項目は通過。
@@ -213,6 +213,11 @@ event 計測は追加の launch と待機を含むため、通常 step の純粋
 ほぼ等しいが、GPU 完了の busy wait も含み、host の launch や scheduler だけの時間ではない。
 server と compute の IPC の厳密な内訳は未測定。
 
+別の[一時計測パッチ](plamo_exec_timing.patch) で `submit_batch` と `complete_batch`
+を分けた同条件の中央値は、c=1/4/16/64 の提出が 4.665/4.928/5.977/10.086 ms、
+完了が 2.982/2.879/3.221/6.618 ms。提出中も GPU は並行実行されるため、
+これらを独立した GPU 時間と足し合わせてはいけない。
+
 | c | EXL3 linear（うち head）ms | RMSNorm ms | attention ms | sampling ms | embedding ms |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 6.789（0.460） | 1.909 | 0.375 | 0.014 | 0.010 |
@@ -225,3 +230,98 @@ server と compute の IPC の厳密な内訳は未測定。
 SiLU 0.303、KV append 0.232 ms など。event 区間の合計は通常 step より大きく、
 overhead が無視できない。重み読み出し 2.8〜3 ms の単純な帯域上限に比べて実測は
 遅いが、このデータだけで host 支配とは結論できない。
+
+## 検討した経路と採用した変更
+
+2B の down projection（2560×10240、4 bit、64 行）の split-K 数を 10 から
+4 にすると、kernel 単体は 86.9〜87.3→77.7〜77.9 µs。server の c=64、
+batch warmup 後は 2024〜2041→2063〜2066 token/s、同一段落の decode は
+3744〜3780→3871〜3885 token/s になった。しかし同一の teacher-forced 30 位置、
+64 sequence の CPU BF16 比較で、日→英 KL が 0.005168→0.005481 と悪化した。
+英→日 KL は 0.007394→0.007311。split 数 6 は日→英 0.005088、英→日 0.007750、
+5 は 0.005342 / 0.007548、8 は 0.006228 / 0.006569 で、いずれも片方向以上の
+KL が悪化したため変更を外した。top-1 は元が 96.7% / 93.3%、split 4 が
+96.7% / 96.7%。検証は同じ列を 64 sequence に与えたもので、多様な列での評価ではない。
+
+prefill の既存 B 経路および fused 経路は初回形状の実行を回避し、EXL3 c=8 の
+初回 server 完了速度を 167→567 / 576、c=64 を 959〜974→1916 / 1921 token/s
+にした。一方 warmup 後の c=64 は 2024〜2041→1993 / 1958 と低下した。
+256 行 prefill の後の 30 位置では、CPU BF16 比較の KL が基準 0.027705 から
+両候補とも 0.027891 へ悪化し、top-1 は全て 93.3%。条件を満たさないため不採用。
+256 行は batch の prefill 形状を通すための検証であり、長文対応の評価ではない。
+比較は [スクリプト](plamo_prefill_quality.py) と CPU BF16 の参照出力で再実行できる。
+
+```bash
+/tmp/venv-plamo/bin/python - <<'PY'
+import json
+s = ('Our team compared several approaches before choosing the current design. '
+     'The first version was easier to build, but it required more memory and became '
+     'slower as the number of requests increased. We will continue to monitor '
+     'performance after release. ')
+open('/tmp/plamo-quality-long.jsonl', 'w').write(json.dumps({'text': s * 12}) + '\n')
+PY
+/tmp/venv-plamo/bin/python /tmp/plamo-exl3-cpu-reference.py reference \
+  --model /home/homelab1/datapool/ai_models/safetensors/plamo-3-translate-2b \
+  --reference /tmp/plamo-quality-long.pt --general-text /tmp/plamo-quality-long.jsonl --samples 1
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_prefill_quality.py \
+  --reference /tmp/plamo-quality-long.pt \
+  --model /home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24 \
+  --bench "$PWD/build-gfx1201/shelf-bench" --workdir /tmp/plamo-prefill-quality
+```
+
+既存の HIP graph を build で有効にした実験では、同一段落・batch warmup 後の
+decode は c=1/4/16/64 で 150/438/1345/3770 token/s。通常 build の約
+135/510/1720/3744〜3780 に対し c=4/16 が低下し、c=64 は改善しなかった。
+各 1 回の探索であり、標準設定には採用していない。
+
+採用した変更は、分割 projection の SiLU と乗算を 1 kernel にまとめるもの。
+SiLU 出力の BF16 丸めを保持する。64 行の翻訳完了速度は 2024〜2041→2086〜2090、
+同一段落の decode は 3744〜3780→3847〜3853 token/s。前後とも各 2 回、同じ条件で
+batch warmup した。c=1/64 の日英・英日 30 位置、256 行 prefill 後の 30 位置の
+logits dump は変更前後で byte 単位で一致した。kernel 単体でも元の 2 演算と完全一致した。
+長さや batch が異なる実務 workload 全般の品質・速度はこれだけでは保証できない。
+
+融合前後の全 c 掃引。各セルは昇順 / 降順の 2 回、token/s。server は単一要求のみを
+事前実行する上記の条件、decode は混在入力の全要求が生成中の窓であり、いずれも
+batch warmup 後の同一段落の値とは異なる。
+
+| c | server 前 | server 後 | decode 前 | decode 後 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 127.0 / 128.2 | 129.5 / 129.7 | 138.0 / 139.0 | 139.5 / 140.1 |
+| 2 | 225.6 / 227.5 | 231.2 / 176.9 | 270.4 / 267.7 | 271.1 / 271.7 |
+| 4 | 392.7 / 395.1 | 400.6 / 400.9 | 517.5 / 519.1 | 524.5 / 523.2 |
+| 8 | 167.1 / 167.2 | 188.3 / 172.7 | 967.6 / 969.5 | 967.3 / 972.5 |
+| 16 | 321.4 / 317.8 | 321.8 / 325.4 | 1717.9 / 1727.6 | 1728.7 / 1737.5 |
+| 32 | 564.3 / 538.7 | 570.6 / 572.1 | 2347.0 / 2333.8 | 2451.1 / 2443.2 |
+| 64 | 974.4 / 959.3 | 989.3 / 966.4 | 3864.7 / 1159.5 | 3926.6 / 3939.3 |
+| 128 | 1374.9 / 1458.7 | 1396.6 / 1400.2 | 4528.0 / 4525.8 | 4611.4 / 4581.7 |
+
+融合後の c=2 の 2 回目は最後の 2 要求で decode 時間が約 0.3 秒延びた。
+融合前 c=64 の decode 2 回目と同様、短い窓に対する一時的な停止の影響が大きい。
+融合後の [測定結果](plamo3_exl3_batch.json) に token 数と窓の長さを記録する。
+
+融合後 c=64 の batch warmup 条件で `--max-num-batched-tokens` を変更した場合、
+512 は 2074.6 / 2070.0、1024 は 2073.8 / 2084.0、4096 は 2076.1 / 2078.5、
+8192 は 2078.5 / 2077.1 token/s。既定 2048 の 2086〜2090 に対し改善は確認できず、
+設定変更は採用しない。
+
+同じ 8 文を繰り返す c=64・batch warmup の compute stdio 測定は、全完了まで
+2069 / 2078 token/s。server の 2086 / 2090 と近く、この比較では server 側の
+大きな追加負荷は見えない。ただし stdio は token ごとに出力、server は非 stream、
+出力上限はそれぞれ 64 / 192、prefix cache は無効 / 有効（server の復元は 0）で、
+生成 token 数も 1595〜1601 と変動するため、差を IPC 時間そのものとは解釈できない。
+c=128 の stdio は 2478 / 2482 token/s。scheduler、launch、同期、IPC の厳密な
+完全分解は引き続き未実施である。
+
+## 今後の課題
+
+- c=64 の server 完了速度 2086〜2090 token/s は最低目標 4000 の約 52%、
+  差は約 1910 token/s。c=128 の server は最適化後の batch warmup を未測定。
+- EXL3 linear は c=64 の最大項。分割 projection の grouped 実行、decode kernel の
+  メモリ利用・演算の重なり、正規化と残差の融合などは未実装・未評価。
+- server と compute の比較は上記の条件差があり、scheduler、GPU launch、同期、
+  IPC を独立した時間として完全には測っていない。
+- 品質は少数例での比較であり、変換側の held-out 10 対・WikiText と同じ全位置の
+  比較や、独立した大きい評価集合は未実施。c=64 の品質確認は同じ列の複製であり、
+  異なる翻訳を混在させた teacher-forced logits は未確認。
+- 分割数の変更や prefill の別経路は今回の品質基準を満たさず、採用していない。
