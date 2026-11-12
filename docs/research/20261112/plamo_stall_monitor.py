@@ -51,7 +51,7 @@ def host():
             pid = path.split('/')[2]
             status = read('/proc/' + pid + '/status').splitlines()
             wanted = ('Cpus_allowed_list:', 'voluntary_ctxt_switches:',
-                      'nonvoluntary_ctxt_switches:', 'VmRSS:', 'Threads:')
+                      'nonvoluntary_ctxt_switches:', 'VmRSS:', 'Threads:', 'THP_enabled:')
             pids.append({'pid': int(pid), 'name': name, 'stat': read('/proc/' + pid + '/stat'),
                          'status': [line for line in status if line.startswith(wanted)]})
     return {'vm': {k: int(v) for k, v in vm.items() if k in VM},
