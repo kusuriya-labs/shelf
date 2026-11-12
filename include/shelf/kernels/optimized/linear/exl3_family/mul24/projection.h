@@ -32,4 +32,14 @@ struct PlamoExl3ProjectionGroup {
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,
                                         hipStream_t stream);
 
+hipError_t launch_plamo_exl3_flagged_gemm(const int8_t *codes, const float *scales, uint32_t code_stride,
+                                          uint32_t scale_stride_bytes, const uint16_t *trellis,
+                                          uint32_t bits, float *yprime, uint32_t rows,
+                                          const uint32_t *active_rows, uint32_t n, uint32_t k,
+                                          hipStream_t stream);
+
+hipError_t launch_plamo_exl3_rotate_out_i32(const int32_t *acc, const float *rowscale, const int32_t *slots,
+                                            const float *yprime, const uint16_t *svh, void *out,
+                                            bool out_bf16, uint32_t rows, uint32_t n, uint32_t out_stride,
+                                            hipStream_t stream);
 }

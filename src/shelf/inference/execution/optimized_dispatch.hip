@@ -750,6 +750,13 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     // Workspace layout of the dense path: slots[chunk] (+ the slot count), then the compact
     // codes / scales of the flagged rows in the xrot region; the accum region holds
     // acc[chunk][n] followed by the flagged rows' F32 output yprime2[cap][n].
+    static const bool plamo_enabled = [] {
+        const char *env = std::getenv("SHELF_PLAMO_EXL3_LINEAR");
+        return env == nullptr || std::strcmp(env, "0") != 0;
+    }();
+    const bool plamo_prefill = e.plamo_exl3_linear && plamo_enabled &&
+                               std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr &&
+                               std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") == nullptr;
     const bool dense_ok = ctx.exl3_dense != nullptr && ctx.exl3_rowsum != nullptr && layout.fits;
     uint32_t launches = 0;
     for (uint32_t r0 = 0; r0 < rows; r0 += chunk) {
@@ -844,18 +851,30 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             // The flagged rows (count of them, at most cap) go through the fused per-group kernel.
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_gemm(
-                    codes_f, scales_f, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes),
-                    e.exl3_ka, yprime2, cap, n, k, 1u, stream, count);
+                if (plamo_prefill)
+                    herr = ::shelf::kernel::launch_plamo_exl3_flagged_gemm(
+                        codes_f, scales_f, code_stride, scale_stride_bytes,
+                        static_cast<const uint16_t *>(e.codes), e.exl3_ka, yprime2, cap, count, n, k,
+                        stream);
+                else
+                    herr = ::shelf::kernel::launch_exl3_mul24_gemm(
+                        codes_f, scales_f, code_stride, scale_stride_bytes,
+                        static_cast<const uint16_t *>(e.codes), e.exl3_ka, yprime2, cap, n, k, 1u, stream,
+                        count);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0004u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
             }
             if (herr == hipSuccess) {
                 const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
-                herr = ::shelf::kernel::launch_exl3_mul24_rotate_out_i32(
-                    static_cast<const int32_t*>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
-                    out_ptr, out_dtype, n_rows, n, dst.row_stride, stream);
+                if (plamo_prefill)
+                    herr = ::shelf::kernel::launch_plamo_exl3_rotate_out_i32(
+                        static_cast<const int32_t *>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
+                        out_ptr, out_bf16, n_rows, n, dst.row_stride, stream);
+                else
+                    herr = ::shelf::kernel::launch_exl3_mul24_rotate_out_i32(
+                        static_cast<const int32_t *>(ctx.exl3_accum), rowscale, slots, yprime2, svh,
+                        out_ptr, out_dtype, n_rows, n, dst.row_stride, stream);
                 if (semantic_timing_enabled())
                     semantic_timing_finish(stream, timing, 0xffff0005u,
                                            static_cast<uint32_t>(SemPath::Optimized), 0);
@@ -950,11 +969,13 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
     if (!output.ok()) return output.status();
     const uint32_t rows = rows_for(output.value(), ctx);
     if (rows == 0u || rows >= 256u || input.value().dtype != ValueDType::BF16 ||
-        output.value().dtype != ValueDType::BF16 || ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
+        output.value().dtype != ValueDType::BF16 ||
+        ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
         return miss;
     static const bool custom_prefill = std::getenv("SHELF_EXL3_INT8_DENSE") != nullptr ||
         std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") != nullptr;
-    if (custom_prefill || (rows > 64u && weight.rows == 107520u)) return miss;
+    if (custom_prefill)
+        return miss;
     const uint32_t count = weight.rows == 3072u && weight.cols == 2560u ? 3u :
                            weight.rows == 10240u && weight.cols == 2560u ? 2u : 1u;
     if (count > end - first) return miss;
@@ -981,8 +1002,9 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
             return miss;
         auto dst = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
         if (!dst.ok()) return dst.status();
-        if (dst.value().dtype != ValueDType::BF16 || dst.value().feature_count != w.rows ||
-            rows_for(dst.value(), ctx) != rows || input.value().feature_count != group.k)
+        if (dst.value().dtype != ValueDType::BF16 ||
+            dst.value().feature_count != w.rows || rows_for(dst.value(), ctx) != rows ||
+            input.value().feature_count != group.k)
             return miss;
         auto& p = group.p[j];
         p.n = w.rows;
@@ -1007,7 +1029,8 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
         yoffset += static_cast<uint64_t>(rows) * p.n * p.splits * 4u;
         if (xoffset > ctx.exl3_xrot_bytes || yoffset > ctx.exl3_accum_bytes) return miss;
     }
-    const hipError_t err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream);
+    const hipError_t err =
+        ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream);
     if (err != hipSuccess)
         return Status::hip_error("plamo exl3 projection", hipGetErrorString(err), __FILE__, __LINE__);
     record_physical_launch(3u);
