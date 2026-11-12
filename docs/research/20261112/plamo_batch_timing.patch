@@ -1,0 +1,34 @@
+diff --git a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+index 1148c79..116af45 100644
+--- a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
++++ b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+@@ -5,6 +5,7 @@
+ #include <shelf/models/qwen35/runtime/spec_decode.h>
+ #include <shelf/core/gpu/scoped_device.h>
+ #include <shelf/models/qwen35/runtime/executor.h>
++#include <shelf/inference/execution/decode_perf_stats.h>
+ #include <shelf/models/qwen35/kernels/dflash2/feature_concat.h>
+ #include <shelf/models/qwen35/state/state_types.h>
+ #include <algorithm>
+@@ -697,8 +698,21 @@ Result<StepResult> ContinuousBatcher::step() {
+     const auto exec_started = std::chrono::steady_clock::now();
+     const bool bt_decode = plan.batch.num_tokens == plan.batch.num_requests;
++    static const char* const sem_dump = std::getenv("SHELF_BATCH_SEM_DUMP");
++    static const char* const sem_rows = std::getenv("SHELF_BATCH_SEM_ROWS");
++    static std::unordered_map<uint32_t, uint32_t> sem_seen;
++    const bool sem_capture = sem_dump != nullptr && bt_decode &&
++        ::shelf::execution::semantic_timing_enabled() && tp_batch_hook_ == nullptr &&
++        (sem_rows == nullptr || std::strtoul(sem_rows, nullptr, 10) == plan.batch.num_requests) &&
++        ++sem_seen[plan.batch.num_requests] == 8u;
++    if (sem_capture) ::shelf::execution::semantic_timing_begin(stream_, 16384);
+     auto exec_result = tp_batch_hook_ != nullptr
+                           ? tp_batch_hook_->on_execute(plan.batch)
+                           : execute_batch(executor_, plan.batch, stream_);
++    if (sem_capture) {
++        char path[512];
++        std::snprintf(path, sizeof(path), "%s_rows%u.csv", sem_dump, plan.batch.num_requests);
++        ::shelf::execution::semantic_timing_end(stream_, path);
++    }
+     const auto bt_exec_end = bt_wall ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+     const double exec_ms = std::chrono::duration<double, std::milli>(

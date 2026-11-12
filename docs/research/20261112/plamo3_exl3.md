@@ -192,3 +192,36 @@ c=32 の EXL3 起動時 KV budget は 599,616 token。最大出力 192 token と
 詳細な出力数・時間・測定窓は [測定結果](plamo3_exl3_batch.json)、手順は
 [server 用](plamo_batch.py) と [decode 用](plamo_decode_batch.py) に記録した。
 server 用の `--warmup-batch` は測定前に同じ workload を全件流す。
+
+## 実 EXL3 の step 内訳
+
+同じ英日段落を各要求に使い、batch warmup 後に decode を実行した。既存の
+`SHELF_BATCH_STEPWALL=1` と [一時計測パッチ](plamo_batch_timing.patch) を用い、
+各行数の 8 回目の step に HIP event を挿入した。パッチは収集後に外した。
+event 計測は追加の launch と待機を含むため、通常 step の純粋な kernel 時間とは
+みなせない。数値は [集計](plamo3_exl3_profile.json) に記録した。
+
+| c | 通常 step 中央値 ms | scheduler 等の前処理 ms | `execute_batch` ms | token 転送等 ms | event 区間合計 ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 7.614 | 0.001 | 7.580 | 0.033 | 10.68 |
+| 4 | 7.883 | 0.006 | 7.848 | 0.032 | 11.08 |
+| 16 | 9.306 | 0.019 | 9.255 | 0.033 | 11.48 |
+| 64 | 16.758 | 0.043 | 16.660 | 0.034 | 19.03 |
+
+中央値は対象行数の step のうち、計測捕捉などで 100 ms 以上かかったものを除外した。
+`execute_batch` は GPU 完了の `hipStreamSynchronize` を含む。CPU 時間は壁時計時間に
+ほぼ等しいが、GPU 完了の busy wait も含み、host の launch や scheduler だけの時間ではない。
+server と compute の IPC の厳密な内訳は未測定。
+
+| c | EXL3 linear（うち head）ms | RMSNorm ms | attention ms | sampling ms | embedding ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.789（0.460） | 1.909 | 0.375 | 0.014 | 0.010 |
+| 4 | 7.137（0.482） | 1.894 | 0.405 | 0.033 | 0.010 |
+| 16 | 7.451（0.527） | 1.817 | 0.582 | 0.043 | 0.010 |
+| 64 | 12.751（0.818） | 2.514 | 1.850 | 0.045 | 0.010 |
+
+1 step に linear 169、RMSNorm 145、attention 24 が含まれる。head は最後の linear
+区間で、linear 合計に含む。c=64 の残りは RoPE 0.507、残差 0.441、mul 0.317、
+SiLU 0.303、KV append 0.232 ms など。event 区間の合計は通常 step より大きく、
+overhead が無視できない。重み読み出し 2.8〜3 ms の単純な帯域上限に比べて実測は
+遅いが、このデータだけで host 支配とは結論できない。

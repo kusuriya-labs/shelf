@@ -1,0 +1,254 @@
+{
+  "1": {
+    "timed_steps": 79,
+    "step_median_ms": {
+      "pre": 0.001,
+      "exec_submit": 7.58,
+      "sync": 0.033,
+      "post": 0.0,
+      "total": 7.614,
+      "cpu": 7.608
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "calls": 1,
+        "event_us": 10.161
+      },
+      "RMS_NORM": {
+        "calls": 145,
+        "event_us": 1908.583
+      },
+      "LINEAR_EXL3_INT8": {
+        "calls": 169,
+        "event_us": 6788.6489999999985
+      },
+      "ROPE": {
+        "calls": 48,
+        "event_us": 448.13399999999996
+      },
+      "KV_APPEND": {
+        "calls": 24,
+        "event_us": 239.011
+      },
+      "PAGED_ATTENTION": {
+        "calls": 24,
+        "event_us": 374.53099999999995
+      },
+      "RESIDUAL_ADD": {
+        "calls": 48,
+        "event_us": 431.6579999999999
+      },
+      "SILU": {
+        "calls": 24,
+        "event_us": 233.60799999999998
+      },
+      "MUL": {
+        "calls": 24,
+        "event_us": 209.56699999999998
+      },
+      "OUTPUT_GATHER": {
+        "calls": 1,
+        "event_us": 9.12
+      },
+      "SCALE": {
+        "calls": 1,
+        "event_us": 9.68
+      },
+      "SAMPLING": {
+        "calls": 1,
+        "event_us": 14.361
+      }
+    },
+    "event_total_us": 10677.062999999998,
+    "lm_head_event_us": 459.817
+  },
+  "4": {
+    "timed_steps": 70,
+    "step_median_ms": {
+      "pre": 0.006,
+      "exec_submit": 7.8475,
+      "sync": 0.032,
+      "post": 0.0,
+      "total": 7.883,
+      "cpu": 7.881
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "calls": 1,
+        "event_us": 10.04
+      },
+      "RMS_NORM": {
+        "calls": 145,
+        "event_us": 1894.4600000000007
+      },
+      "LINEAR_EXL3_INT8": {
+        "calls": 169,
+        "event_us": 7136.614000000004
+      },
+      "ROPE": {
+        "calls": 48,
+        "event_us": 454.5779999999999
+      },
+      "KV_APPEND": {
+        "calls": 24,
+        "event_us": 237.208
+      },
+      "PAGED_ATTENTION": {
+        "calls": 24,
+        "event_us": 404.8530000000001
+      },
+      "RESIDUAL_ADD": {
+        "calls": 48,
+        "event_us": 427.98099999999994
+      },
+      "SILU": {
+        "calls": 24,
+        "event_us": 241.64799999999997
+      },
+      "MUL": {
+        "calls": 24,
+        "event_us": 215.56700000000004
+      },
+      "OUTPUT_GATHER": {
+        "calls": 1,
+        "event_us": 9.6
+      },
+      "SCALE": {
+        "calls": 1,
+        "event_us": 12.64
+      },
+      "SAMPLING": {
+        "calls": 1,
+        "event_us": 33.282
+      }
+    },
+    "event_total_us": 11078.471000000005,
+    "lm_head_event_us": 481.497
+  },
+  "16": {
+    "timed_steps": 68,
+    "step_median_ms": {
+      "pre": 0.019,
+      "exec_submit": 9.255,
+      "sync": 0.033,
+      "post": 0.001,
+      "total": 9.3055,
+      "cpu": 9.3035
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "calls": 1,
+        "event_us": 9.72
+      },
+      "RMS_NORM": {
+        "calls": 145,
+        "event_us": 1816.6999999999987
+      },
+      "LINEAR_EXL3_INT8": {
+        "calls": 169,
+        "event_us": 7451.383000000005
+      },
+      "ROPE": {
+        "calls": 48,
+        "event_us": 450.13499999999993
+      },
+      "KV_APPEND": {
+        "calls": 24,
+        "event_us": 225.129
+      },
+      "PAGED_ATTENTION": {
+        "calls": 24,
+        "event_us": 581.9799999999999
+      },
+      "RESIDUAL_ADD": {
+        "calls": 48,
+        "event_us": 416.6979999999999
+      },
+      "SILU": {
+        "calls": 24,
+        "event_us": 230.65200000000002
+      },
+      "MUL": {
+        "calls": 24,
+        "event_us": 227.48799999999994
+      },
+      "OUTPUT_GATHER": {
+        "calls": 1,
+        "event_us": 9.36
+      },
+      "SCALE": {
+        "calls": 1,
+        "event_us": 20.761
+      },
+      "SAMPLING": {
+        "calls": 1,
+        "event_us": 43.081
+      }
+    },
+    "event_total_us": 11483.087000000003,
+    "lm_head_event_us": 526.619
+  },
+  "64": {
+    "timed_steps": 58,
+    "step_median_ms": {
+      "pre": 0.043,
+      "exec_submit": 16.6605,
+      "sync": 0.034,
+      "post": 0.004,
+      "total": 16.758,
+      "cpu": 16.753500000000003
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "calls": 1,
+        "event_us": 10.001
+      },
+      "RMS_NORM": {
+        "calls": 145,
+        "event_us": 2514.3700000000013
+      },
+      "LINEAR_EXL3_INT8": {
+        "calls": 169,
+        "event_us": 12750.688999999998
+      },
+      "ROPE": {
+        "calls": 48,
+        "event_us": 507.297
+      },
+      "KV_APPEND": {
+        "calls": 24,
+        "event_us": 232.00900000000001
+      },
+      "PAGED_ATTENTION": {
+        "calls": 24,
+        "event_us": 1849.5339999999999
+      },
+      "RESIDUAL_ADD": {
+        "calls": 48,
+        "event_us": 441.3750000000001
+      },
+      "SILU": {
+        "calls": 24,
+        "event_us": 303.2489999999999
+      },
+      "MUL": {
+        "calls": 24,
+        "event_us": 317.45300000000003
+      },
+      "OUTPUT_GATHER": {
+        "calls": 1,
+        "event_us": 10.401
+      },
+      "SCALE": {
+        "calls": 1,
+        "event_us": 50.201
+      },
+      "SAMPLING": {
+        "calls": 1,
+        "event_us": 45.201
+      }
+    },
+    "event_total_us": 19031.78,
+    "lm_head_event_us": 818.349
+  }
+}
