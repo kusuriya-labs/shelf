@@ -49,7 +49,11 @@ def host():
         name = read(path)
         if name in ('ninja', 'clang', 'clang-23', 'cc1', 'cc1plus', 'ld.lld', 'kcompactd0', 'kswapd0', 'shelf-compute', 'shelf-server'):
             pid = path.split('/')[2]
-            pids.append({'pid': int(pid), 'name': name, 'stat': read('/proc/' + pid + '/stat')})
+            status = read('/proc/' + pid + '/status').splitlines()
+            wanted = ('Cpus_allowed_list:', 'voluntary_ctxt_switches:',
+                      'nonvoluntary_ctxt_switches:', 'VmRSS:', 'Threads:')
+            pids.append({'pid': int(pid), 'name': name, 'stat': read('/proc/' + pid + '/stat'),
+                         'status': [line for line in status if line.startswith(wanted)]})
     return {'vm': {k: int(v) for k, v in vm.items() if k in VM},
             'cpu': read(FILES['cpu_stat']).splitlines()[0],
             'cpu_pressure': read(FILES['cpu_pressure']),

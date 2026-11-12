@@ -48,14 +48,17 @@ def main():
         samples = [json.loads(line) for line in f]
     if not steps:
         raise SystemExit('No STEPDIAG data; verify instrumented compute and environment')
-    seen_rows = set()
-    seen_pairs = set()
+    seen_rows = collections.Counter()
+    seen_pairs = collections.Counter()
     first_t = steps[0]['t']
     for s in steps:
-        s['first_token_rows'] = s['tokens'] not in seen_rows
-        s['first_shape'] = (s['rows'], s['tokens'], s['prefill'], s['decode']) not in seen_pairs
-        seen_rows.add(s['tokens'])
-        seen_pairs.add((s['rows'], s['tokens'], s['prefill'], s['decode']))
+        shape = (s['rows'], s['tokens'], s['prefill'], s['decode'])
+        s['prior_token_rows'] = seen_rows[s['tokens']]
+        s['prior_shape'] = seen_pairs[shape]
+        s['first_token_rows'] = s['prior_token_rows'] == 0
+        s['first_shape'] = s['prior_shape'] == 0
+        seen_rows[s['tokens']] += 1
+        seen_pairs[shape] += 1
         s['kind'] = 'mixed' if s['prefill'] and s['decode'] else 'prefill' if s['prefill'] else 'decode'
         s['age_s'] = s['t'] - first_t
     steady = [s for s in steps if window['start'] <= s['t'] < window['end']] if window else [s for s in steps if s['age_s'] >= a.warmup_s]
@@ -90,12 +93,15 @@ def main():
             entry['max_ms'] = max(entry['max_ms'], s['total'])
         correlations[label] = dict(counts)
     spikes = []
-    for s in steady:
+    outside_spikes = []
+    steady_ids = {id(s) for s in steady}
+    for s in steps:
         if s['total'] < a.spike_ms:
             continue
         relevant = [x for x in samples if x['t'] <= s['t'] + s['total'] / 1000 and x.get('gpu_end', x['end']) >= s['t']]
         context = [x for x in samples if s['t'] - 1 <= x['t'] <= s['t'] + s['total'] / 1000 + 1 and 'host' in x]
-        spikes.append({'step': s, 'gpu_samples': relevant, 'host_samples': context})
+        target = spikes if id(s) in steady_ids else outside_spikes
+        target.append({'step': s, 'gpu_samples': relevant, 'host_samples': context})
     in_window = [x for x in samples if window is None or window['start'] <= x['t'] < window['end']]
     gpu_summary = {}
     for key in ('gpu_busy_percent', 'sclk_hz', 'mclk_hz', 'power_uw', 'edge_millic', 'junction_millic', 'memory_millic'):
@@ -110,7 +116,7 @@ def main():
     print(json.dumps({'measurement_window': window, 'fallback_warmup_s_from_first_step': a.warmup_s, 'all_steps': len(steps),
                       'steady_steps': len(steady), 'summary': summary, 'correlations': correlations,
                       'gpu_summary': gpu_summary, 'host_vm_delta': host_delta,
-                      'first_steps': steps[:5], 'spikes': spikes,
+                      'first_steps': steps[:5], 'spikes': spikes, 'outside_window_spikes': outside_spikes,
                       'sampling_interval_ms': {'p50': quantile([(s['end'] - s['t']) * 1000 for s in samples], .5),
                                                'p99': quantile([(s['end'] - s['t']) * 1000 for s in samples], .99),
                                                'gap_p99': quantile([(b['t'] - a['t']) * 1000 for a, b in zip(samples, samples[1:])], .99)},
