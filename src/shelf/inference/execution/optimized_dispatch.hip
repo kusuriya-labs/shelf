@@ -1029,11 +1029,12 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
         yoffset += static_cast<uint64_t>(rows) * p.n * p.splits * 4u;
         if (xoffset > ctx.exl3_xrot_bytes || yoffset > ctx.exl3_accum_bytes) return miss;
     }
+    uint32_t launch_count = 0u;
     const hipError_t err =
-        ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream);
+        ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count);
     if (err != hipSuccess)
         return Status::hip_error("plamo exl3 projection", hipGetErrorString(err), __FILE__, __LINE__);
-    record_physical_launch(3u);
+    record_physical_launch(launch_count);
     for (uint32_t j = 0u; j < count; ++j) record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, count};
 }

@@ -79,7 +79,16 @@ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint3
     std::vector<uint16_t> baseline(plane * count), candidate(baseline.size());
     check(hipMemcpy(baseline.data(), out.p, baseline.size() * 2, hipMemcpyDeviceToHost));
     check(hipMemset(out.p, 0x55, plane * count * 2));
-    check(shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr));
+    uint32_t launches = 99u;
+    check(shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr, &launches));
+    const bool input_fused = rows == 1u && bits == 4u &&
+                             ((k == 2560u && args.p[0].n == 3072u) || (k == 3072u && args.p[0].n == 2560u));
+    const bool output_fused = rows <= 16u && args.p[0].n >= 10240u && count == 1u;
+    if (launches != (input_fused || output_fused ? 2u : 3u)) {
+        std::fprintf(stderr, "launch count rows=%u n=%u k=%u bits=%u actual=%u\n", rows, n, k, bits,
+                     launches);
+        return false;
+    }
     check(hipMemcpy(candidate.data(), out.p, candidate.size() * 2, hipMemcpyDeviceToHost));
     if (baseline != candidate) {
         size_t diffs = 0;
@@ -89,7 +98,9 @@ bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint3
         return false;
     }
     args.count = 4;
-    if (shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr) != hipErrorInvalidValue)
+    if (shelf::kernel::launch_plamo_exl3_projection(args, bits, nullptr, &launches) !=
+            hipErrorInvalidValue ||
+        launches != 0u)
         return false;
     return true;
 }

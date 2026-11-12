@@ -117,6 +117,10 @@ lm_head は OutputGather が選択した OUTPUT_ROWS だけを処理し、prefil
 投影しない。専用経路は 255 行以下で使用し、17〜64 行では 2 tile、65〜255 行では
 4 tile を使う。head の BF16 出力を丸めてから F32 に変換する contract を維持する。
 
+1 行の 4 bit QKV（K=2560、Q の N=3072）と O（K=3072、N=2560）は、各 workgroup が
+独立に入力を回転・量子化し、LDS から GEMM を実行する。16 行以下、N が 10240 以上、
+全 projection の split-K が 1 の場合は、8 wave の GEMM が出力を LDS で共有し、
+同じ launch 内で出力回転と BF16 丸めを行う。これらは 2 launch、それ以外の
 projection group は入力回転・GEMM・出力回転の 3 launch を使う。
 
 256 行以上は既存の dense / flagged-row 経路を使う。4 bit の flagged GEMM は
