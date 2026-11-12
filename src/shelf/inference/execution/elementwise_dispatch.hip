@@ -496,7 +496,7 @@ hipError_t launch_elementwise_physical(const PhysicalElementwiseLaunch& d,
                 reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
                 reinterpret_cast<const ::shelf::bf16_t*>(d.in1), d.in1_stride,
                 reinterpret_cast<::shelf::bf16_t*>(d.out0), d.out0_stride, d.rows,
-                d.features, stream);
+                d.features, stream, d.aux != 0u);
         case ElementwiseProfile::SigmoidBf16ToF32:
             return ::shelf::kernel::launch_sigmoid_bf16_f32(
                 reinterpret_cast<const ::shelf::bf16_t*>(d.in0), d.in0_stride,
@@ -599,8 +599,13 @@ Result<PhysicalResolveStatus> resolve_elementwise_physical(
         case ::shelf::runtime::KernelId::SWIGLU:
             if (b.input_count != 2u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;
-            return resolve_binary_bf16(program, b, ctx,
-                                       ElementwiseProfile::SwigluBf16, out);
+            {
+                auto resolved = resolve_binary_bf16(program, b, ctx,
+                                                    ElementwiseProfile::SwigluBf16, out);
+                if (resolved.ok() && resolved.value() == PhysicalResolveStatus::Applicable)
+                    out.aux = b.flags;
+                return resolved;
+            }
         case ::shelf::runtime::KernelId::SIGMOID: {
             if (b.input_count != 1u || b.output_count != 1u)
                 return PhysicalResolveStatus::NotApplicable;

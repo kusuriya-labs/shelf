@@ -538,6 +538,8 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
         case PrimitiveKind::SWIGLU: {
             DispatchBinding b = base_binding(kind == PrimitiveKind::MUL ? KernelId::MUL
                                                                           : KernelId::SWIGLU);
+            if (kind == PrimitiveKind::SWIGLU)
+                b.flags = node_as<SwiGluNode>(node).bf16_intermediate ? 1u : 0u;
             b.input_slots[0] = node.inputs[0].id;
             b.input_slots[1] = node.inputs[1].id;
             b.input_count = 2;

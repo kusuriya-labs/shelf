@@ -196,9 +196,10 @@ hipError_t launch_rmsnorm_offset_bf16(
     const void* input, const void* weight, void* output, uint32_t rows,
     uint32_t features, uint32_t group_size, uint32_t input_stride,
     uint32_t output_stride, bool weight_per_feature, float eps, float offset,
-    hipStream_t stream) {
+    hipStream_t stream, bool small_group) {
     if (!group_size || !features || features % group_size) return hipErrorInvalidValue;
-    rmsnorm_offset_bf16_kernel<<<rows * (features / group_size), 256, 0, stream>>>(
+    const uint32_t threads = small_group && group_size == 128u ? 32u : 256u;
+    rmsnorm_offset_bf16_kernel<<<rows * (features / group_size), threads, 0, stream>>>(
         static_cast<const __hip_bfloat16*>(input), static_cast<const __hip_bfloat16*>(weight),
         static_cast<__hip_bfloat16*>(output), features, group_size, input_stride,
         output_stride, weight_per_feature, eps, offset);

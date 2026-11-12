@@ -1,4 +1,5 @@
 #include <shelf/kernels/optimized/elementwise.h>
+#include <shelf/kernels/fused/silu_scale.h>
 #include <shelf/kernels/correctness/model_dispatch_correctness.h>
 #include <shelf/core/gpu/cleanup.h>
 #include <shelf/core/memory/types.h>
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -552,6 +554,49 @@ bool test_unequal_split() {
     return true;
 }
 
+bool test_rounded_swiglu() {
+    for (const auto [rows, features] : {std::pair{1u, 10240u}, std::pair{64u, 10240u},
+                                        std::pair{4u, 31u}}) {
+        const size_t count = static_cast<size_t>(rows) * features;
+        Buf gate, up, activated, reference, fused, fallback;
+        if (!gate.alloc(count * 2) || !up.alloc(count * 2) || !activated.alloc(count * 2) ||
+            !reference.alloc(count * 2) || !fused.alloc(count * 2) || !fallback.alloc(count * 2)) return false;
+        std::vector<uint16_t> gate_values(count), up_values(count);
+        for (size_t i = 0; i < count; ++i) {
+            gate_values[i] = bf16_bits(rng1k(i + 1000u) / 100.0f);
+            up_values[i] = bf16_bits(rng1k(i + 1000000u) / 100.0f);
+        }
+        if (!gate.fill_u16(gate_values) || !up.fill_u16(up_values)) return false;
+        if (shelf::kernel::launch_silu_bf16(static_cast<const shelf::bf16_t*>(gate.dev), features,
+                static_cast<shelf::bf16_t*>(activated.dev), features, rows, features, 1.0f, nullptr) != hipSuccess ||
+            shelf::kernel::launch_mul_bf16(static_cast<const shelf::bf16_t*>(activated.dev), features,
+                static_cast<const shelf::bf16_t*>(up.dev), features,
+                static_cast<shelf::bf16_t*>(reference.dev), features, rows, features, nullptr) != hipSuccess ||
+            shelf::kernel::launch_swiglu_bf16(static_cast<const shelf::bf16_t*>(gate.dev), features,
+                static_cast<const shelf::bf16_t*>(up.dev), features,
+                static_cast<shelf::bf16_t*>(fused.dev), features, rows, features, nullptr, true) != hipSuccess)
+            return false;
+        std::vector<uint16_t> expected, actual;
+        if (!reference.read_u16(expected) || !fused.read_u16(actual) || expected != actual) return false;
+        Ctx ctx;
+        if (!ctx.init(rows)) return false;
+        V values[3];
+        set_val(values[0], 0, features, features, gate.dev, DT::BF16);
+        set_val(values[1], 1, features, features, up.dev, DT::BF16);
+        set_val(values[2], 2, features, features, fallback.dev, DT::BF16);
+        B binding{};
+        binding.kernel_id = ::shelf::runtime::KernelId::SWIGLU;
+        binding.input_slots[0] = 0;
+        binding.input_slots[1] = 1;
+        binding.output_slots[0] = 2;
+        binding.input_count = 2;
+        binding.output_count = 1;
+        binding.flags = 1u;
+        if (!ctx.run(values, 3, binding) || !fallback.read_u16(actual) || expected != actual) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -570,6 +615,10 @@ int main(int argc, char** argv) {
     }
     if (!test_unequal_split()) {
         std::printf("FAIL: unequal QKV split\n");
+        return 1;
+    }
+    if (!test_rounded_swiglu()) {
+        std::printf("FAIL: rounded SwiGLU\n");
         return 1;
     }
     const Case cases[] = {

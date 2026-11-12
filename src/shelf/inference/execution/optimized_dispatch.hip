@@ -122,13 +122,14 @@ Result<OptimizedLaunchResult> try_launch_rmsnorm(
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     if (resolved.value() == PhysicalResolveStatus::Skipped)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
-    const hipError_t herr = b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16)
+    const bool small_group = b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP);
+    const hipError_t herr = (b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16) || small_group)
         ? ::shelf::kernel::launch_rmsnorm_offset_bf16(
             reinterpret_cast<const void*>(launch.input), reinterpret_cast<const void*>(launch.weight),
             reinterpret_cast<void*>(launch.output), launch.rows, launch.features, launch.group_size,
             launch.input_row_stride, launch.output_row_stride,
             launch.weight_layout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE,
-            launch.eps, launch.weight_offset, stream)
+            launch.eps, launch.weight_offset, stream, small_group)
         : ::shelf::kernel::launch_rmsnorm(
         reinterpret_cast<const void*>(launch.input), launch.input_dtype,
         reinterpret_cast<const void*>(launch.weight), launch.weight_dtype,
@@ -864,7 +865,10 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (herr == hipErrorNotSupported) herr = hipSuccess;
         }
         if (!done && herr == hipSuccess) {
-            const uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            uint32_t splits = ::shelf::kernel::exl3_mul24_gemm_splits(n_rows, n, k, scratch_rows, e.exl3_ka);
+            if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
+                n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
+                splits = 4u;
             herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
             if (herr == hipSuccess)

@@ -1,0 +1,51 @@
+diff --git a/src/shelf/inference/execution/exl3_dense_gemm.hip b/src/shelf/inference/execution/exl3_dense_gemm.hip
+--- a/src/shelf/inference/execution/exl3_dense_gemm.hip
++++ b/src/shelf/inference/execution/exl3_dense_gemm.hip
+@@ -3,6 +3,7 @@
+ #include <hipblaslt/hipblaslt.h>
+ #include <hipblaslt/hipblaslt-ext.hpp>
+
++#include <chrono>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -71,6 +72,7 @@
+     if (dense == nullptr || accum == nullptr || xrot == nullptr) {
+         return hipErrorInvalidValue;
+     }
++    const auto diag_begin = std::chrono::steady_clock::now();
+     LtState& lt = state();
+     // A handle is bound to the device current at creation. TP ranks run on one thread per device, so this holds
+     // already; recreate on a mismatch rather than launch on another device's handle.
+@@ -161,6 +163,7 @@
+         constexpr int kCandidates = 16;
+         hipblasLtMatmulHeuristicResult_t results[kCandidates]{};
+         int found = 0;
++        const auto diag_heuristic_start = std::chrono::steady_clock::now();
+         if (hipblasLtMatmulAlgoGetHeuristic(lt.handle, desc, la, lb, lc, lc, pref,
+                                             kCandidates, results, &found) !=
+                 HIPBLAS_STATUS_SUCCESS ||
+@@ -172,6 +175,7 @@
+             (void) hipblasLtMatmulDescDestroy(desc);
+             return hipErrorNotSupported;
+         }
++        if (std::getenv("SHELF_EXL3_DIAG")) std::fprintf(stderr, "DIAG heuristic rows=%u n=%u k=%u int8=%d ms=%.3f\n", rows, out_features, kdim, int8, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - diag_heuristic_start).count());
+         bool tuned = false;
+         if (use_prefill_choice) {
+             hipDeviceProp_t props{};
+@@ -267,9 +271,15 @@
+             return hipErrorOutOfMemory;
+         }
+     }
++    const auto diag_matmul_start = std::chrono::steady_clock::now();
+     const hipblasStatus_t status =
+         hipblasLtMatmul(lt.handle, desc, alpha_p, dense, la, xrot, lb, beta_p, accum, lc,
+                         accum, lc, &algo, workspace, workspace_size, stream);
++    if (std::getenv("SHELF_EXL3_DIAG")) {
++        const auto diag_end = std::chrono::steady_clock::now();
++        const auto all = std::chrono::duration<double, std::milli>(diag_end - diag_begin).count();
++        if (all > 1.0) std::fprintf(stderr, "DIAG gemm rows=%u n=%u k=%u int8=%d cached=%d total=%.3f matmul=%.3f\n", rows, out_features, kdim, int8, cached != nullptr, all, std::chrono::duration<double, std::milli>(diag_end - diag_matmul_start).count());
++    }
+     if (workspace != nullptr) (void) hipFree(workspace);
+     (void) hipblasLtMatmulPreferenceDestroy(pref);
+     (void) hipblasLtMatrixLayoutDestroy(la);

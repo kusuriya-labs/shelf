@@ -24,6 +24,13 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
     const uint32_t q = static_cast<uint32_t>(c.num_attention_heads * c.head_dim);
     const uint32_t kv = static_cast<uint32_t>(c.num_key_value_heads * c.head_dim);
     const uint32_t f = static_cast<uint32_t>(c.intermediate_size);
+    const bool exl3_2b = c.hidden_size == 2560 && c.intermediate_size == 10240 &&
+        c.vocab_size == 107520 && c.num_hidden_layers == 24 && c.num_attention_heads == 24 &&
+        c.num_key_value_heads == 4 && c.head_dim == 128 && !w.layers.empty() &&
+        w.layers[0].q.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+        w.layers[0].q.exl3_ka == 5 && w.layers[0].down.exl3_ka == 4 &&
+        w.lm_head.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+        w.lm_head.exl3_ka == 8;
     QH::HybridLoweredPrimitives lowered;
     auto& pg = lowered.graph;
     QH::Emitter em{pg};
@@ -42,7 +49,10 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
                     const gpu::Tensor& tensor, float offset, const std::string& name) {
         RT::RmsNormNode node; node.shape = RT::RowwiseShapeKey{width};
         node.eps = static_cast<float>(c.rms_norm_eps); node.group_size = group;
-        node.parameter_index = param(tensor); node.weight_mode = RT::RmsNormWeightMode::OFFSET_BF16;
+        node.parameter_index = param(tensor);
+        node.weight_mode = exl3_2b && group == 128
+            ? RT::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP
+            : RT::RmsNormWeightMode::OFFSET_BF16;
         node.weight_offset = offset;
         auto out = em.unary(RT::PrimitiveNode{node}, input, width);
         pg.nodes.back().debug_name = name; return out;
@@ -71,9 +81,17 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
         const auto& l = w.layers[i]; const std::string p = "L" + std::to_string(i) + ".";
         lowered.layer_input_values.emplace_back(i, x);
         auto n = norm(x, h, h, l.pre_mixer_norm, 1.0f, p + "pre_mixer_norm");
-        auto qkv = em.linear(l.qkv, weight(l.qkv), n); pg.nodes.back().debug_name = p + "qkv";
-        auto [qraw, kvraw] = split(qkv, q, 2 * kv, p + "q_kv_split");
-        auto [kraw, v] = split(kvraw, kv, kv, p + "k_v_split");
+        RT::ValueId qraw, kraw, v;
+        if (l.split_projections) {
+            qraw = em.linear(l.q, weight(l.q), n); pg.nodes.back().debug_name = p + "q_proj";
+            kraw = em.linear(l.k, weight(l.k), n); pg.nodes.back().debug_name = p + "k_proj";
+            v = em.linear(l.v, weight(l.v), n); pg.nodes.back().debug_name = p + "v_proj";
+        } else {
+            auto qkv = em.linear(l.qkv, weight(l.qkv), n); pg.nodes.back().debug_name = p + "qkv";
+            auto [qr, kvraw] = split(qkv, q, 2 * kv, p + "q_kv_split");
+            auto [kr, vr] = split(kvraw, kv, kv, p + "k_v_split");
+            qraw = qr; kraw = kr; v = vr;
+        }
         auto qn = norm(qraw, q, d, l.q_norm, 1.0f, p + "q_norm");
         auto kn = norm(kraw, kv, d, l.k_norm, 1.0f, p + "k_norm");
         const bool full = c.is_full_attention(i);
@@ -93,13 +111,33 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
         out = norm(out, h, h, l.post_mixer_norm, 0.2f, p + "post_mixer_norm");
         auto ar = residual(x, out, p + "attention_residual");
         n = norm(ar, h, h, l.pre_mlp_norm, 1.0f, p + "pre_mlp_norm");
-        auto gu = em.linear(l.gate_up, weight(l.gate_up), n); pg.nodes.back().debug_name = p + "gate_up";
-        auto [gate, up] = split(gu, f, f, p + "gate_up_split");
-        auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);
-        pg.nodes.back().debug_name = p + "silu";
-        auto product = em.value(f); em.emit(RT::PrimitiveNode{RT::MulNode{RT::RowwiseShapeKey{f}}},
-                                           {activated,up}, {product}); pg.nodes.back().debug_name = p + "mlp_product";
-        out = em.linear(l.down, weight(l.down), product); pg.nodes.back().debug_name = p + "down";
+        RT::ValueId gate, up;
+        if (l.split_projections) {
+            gate = em.linear(l.gate, weight(l.gate), n); pg.nodes.back().debug_name = p + "gate_proj";
+            up = em.linear(l.up, weight(l.up), n); pg.nodes.back().debug_name = p + "up_proj";
+        } else {
+            auto gu = em.linear(l.gate_up, weight(l.gate_up), n); pg.nodes.back().debug_name = p + "gate_up";
+            auto [g, u] = split(gu, f, f, p + "gate_up_split");
+            gate = g; up = u;
+        }
+        RT::ValueId product;
+        if (l.split_projections) {
+            product = em.value(f);
+            em.emit(RT::PrimitiveNode{RT::SwiGluNode{RT::RowwiseShapeKey{f}, true}},
+                    {gate, up}, {product});
+        } else {
+            auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);
+            pg.nodes.back().debug_name = p + "silu";
+            product = em.value(f);
+            em.emit(RT::PrimitiveNode{RT::MulNode{RT::RowwiseShapeKey{f}}},
+                    {activated, up}, {product});
+        }
+        pg.nodes.back().debug_name = p + "mlp_product";
+        const auto down_weight = weight(l.down);
+        lowered.weights[down_weight].plamo_exl3_split4 = exl3_2b &&
+            l.down.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+            l.down.exl3_ka == 4 && l.down.rows == 2560 && l.down.cols == 10240;
+        out = em.linear(l.down, down_weight, product); pg.nodes.back().debug_name = p + "down";
         out = norm(out, h, h, l.post_mlp_norm, static_cast<float>(1.0 / std::pow(5.0, 1.5)), p + "post_mlp_norm");
         x = residual(ar, out, p + "output"); lowered.layer_output_values.emplace_back(i, x);
     }

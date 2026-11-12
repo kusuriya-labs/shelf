@@ -583,6 +583,12 @@ hipError_t launch_split_bf16(
     return hipGetLastError();
 }
 
+__device__ __forceinline__ float swiglu_value(float gate, float up, bool bf16_intermediate) {
+    if (!bf16_intermediate) return target_swiglu_f32(gate, up);
+    const float activated = gate / (1.0f + __expf(-gate));
+    return up * __bfloat162float(__float2bfloat16(activated));
+}
+
 extern "C" __global__ __launch_bounds__(256)
 void shelf_swiglu_bf16(ElementwiseArgs args) {
     const bf16* gate = static_cast<const bf16*>(args.in0);
@@ -601,10 +607,10 @@ void shelf_swiglu_bf16(ElementwiseArgs args) {
         const F4 g = load_bf16x4(gate_row + col0);
         const F4 u = load_bf16x4(up_row + col0);
         F4 y;
-        y.v[0] = target_swiglu_f32(g.v[0], u.v[0]);
-        y.v[1] = target_swiglu_f32(g.v[1], u.v[1]);
-        y.v[2] = target_swiglu_f32(g.v[2], u.v[2]);
-        y.v[3] = target_swiglu_f32(g.v[3], u.v[3]);
+        y.v[0] = swiglu_value(g.v[0], u.v[0], args.aux != 0u);
+        y.v[1] = swiglu_value(g.v[1], u.v[1], args.aux != 0u);
+        y.v[2] = swiglu_value(g.v[2], u.v[2], args.aux != 0u);
+        y.v[3] = swiglu_value(g.v[3], u.v[3], args.aux != 0u);
         store_bf16x4(out_row + col0, y);
     } else {
         for (uint32_t i = 0u; i < kVec; ++i) {
@@ -612,7 +618,7 @@ void shelf_swiglu_bf16(ElementwiseArgs args) {
             if (c >= features) break;
             const float gv = __bfloat162float(gate_row[c]);
             const float uv = __bfloat162float(up_row[c]);
-            out_row[c] = __float2bfloat16(target_swiglu_f32(gv, uv));
+            out_row[c] = __float2bfloat16(swiglu_value(gv, uv, args.aux != 0u));
         }
     }
 }
@@ -621,7 +627,7 @@ hipError_t launch_swiglu_bf16(
     const bf16_t* gate, uint32_t gate_row_stride,
     const bf16_t* up, uint32_t up_row_stride,
     bf16_t* output, uint32_t output_row_stride,
-    uint32_t rows, uint32_t features, hipStream_t stream) {
+    uint32_t rows, uint32_t features, hipStream_t stream, bool bf16_intermediate) {
     if (rows == 0u || features == 0u) return hipErrorInvalidValue;
     if (gate == nullptr || up == nullptr || output == nullptr) return hipErrorInvalidValue;
     ElementwiseArgs args{};
@@ -632,6 +638,7 @@ hipError_t launch_swiglu_bf16(
     args.out0 = output;
     args.out0_row_stride = output_row_stride;
     args.features = features;
+    args.aux = bf16_intermediate ? 1u : 0u;
     args.rows = rows;
     const dim3 grid = elementwise_grid(features, rows);
     shelf_swiglu_bf16<<<grid, kThreads, 0, stream>>>(args);

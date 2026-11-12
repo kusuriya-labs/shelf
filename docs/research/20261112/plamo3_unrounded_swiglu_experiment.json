@@ -1,0 +1,172 @@
+{
+  "candidate": "PLaMo 2B EXL3: select existing SwiGLU without BF16 intermediate rounding",
+  "accepted": false,
+  "performance": [
+    {
+      "concurrency": 4,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 22.482561017153785,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 41308,
+      "completion_tokens_per_s": 458.97777777777776,
+      "completed_requests": 529,
+      "run": 1,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 67
+    },
+    {
+      "concurrency": 4,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 22.206756636034697,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 41271,
+      "completion_tokens_per_s": 458.56666666666666,
+      "completed_requests": 528,
+      "run": 2,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 80.0
+    },
+    {
+      "concurrency": 64,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 24.59039499401115,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 225317,
+      "completion_tokens_per_s": 2503.5222222222224,
+      "completed_requests": 2876,
+      "run": 1,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 67.0
+    },
+    {
+      "concurrency": 64,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 24.651097195921466,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 225697,
+      "completion_tokens_per_s": 2507.7444444444445,
+      "completed_requests": 2880,
+      "run": 2,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 79.0
+    }
+  ],
+  "quality": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.01712438978528,
+      "top1_agreement": 0.924571428624,
+      "max_logit_diff": 4.875
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.018091898111954285,
+      "top1_agreement": 0.9382857143919999,
+      "max_logit_diff": 8.015625
+    },
+    "wiki": {
+      "cases": 4,
+      "positions": 521,
+      "mean_kl": 0.05041445914376199,
+      "top1_agreement": 0.904030710143954,
+      "max_logit_diff": 9.21484375
+    }
+  },
+  "paired_kl": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_delta_kl": -5.507906103681713e-06,
+      "median_delta_kl": -9.436618153557674e-13,
+      "trimmed_1pct_mean_delta_kl": 0.0001403285721538724,
+      "case_bootstrap_95pct_ci": [
+        -0.0008520080248171788,
+        0.0007459561186468216
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_delta_kl": 0.000695992673209813,
+      "median_delta_kl": 2.1033122471472905e-07,
+      "trimmed_1pct_mean_delta_kl": 0.00025142330172234076,
+      "case_bootstrap_95pct_ci": [
+        -0.00015473603637816046,
+        0.0020407383967166923
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    },
+    "wiki": {
+      "cases": 4,
+      "positions": 521,
+      "mean_delta_kl": -0.00126201270551022,
+      "median_delta_kl": -1.4114596026764748e-05,
+      "trimmed_1pct_mean_delta_kl": -0.0011882610366598806,
+      "case_bootstrap_95pct_ci": [
+        -0.0024200703301226353,
+        -0.0003136977272475987
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    }
+  },
+  "paired_top1": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "lost_agreements": 6,
+      "gained_agreements": 3,
+      "one_sided_mcnemar_p": 0.25390625,
+      "one_sided_case_permutation_p": 0.296875
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "lost_agreements": 4,
+      "gained_agreements": 8,
+      "one_sided_mcnemar_p": 0.927001953125,
+      "one_sided_case_permutation_p": 0.876953125
+    }
+  }
+}

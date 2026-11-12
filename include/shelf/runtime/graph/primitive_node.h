@@ -102,6 +102,7 @@ enum class RmsNormWeightMode : uint8_t {
     ONE_PLUS = 0,
     DIRECT = 1,
     OFFSET_BF16 = 2,
+    OFFSET_BF16_SMALL_GROUP = 3,
 };
 
 struct RmsNormNode {
@@ -146,6 +147,7 @@ struct MulNode {
 
 struct SwiGluNode {
     RowwiseShapeKey shape;
+    bool bf16_intermediate = false;
 };
 
 struct RoPENode {

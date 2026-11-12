@@ -1,0 +1,206 @@
+diff --git a/src/apps/compute/stdio_server.hip b/src/apps/compute/stdio_server.hip
+index 440c3d8..edff54f 100644
+--- a/src/apps/compute/stdio_server.hip
++++ b/src/apps/compute/stdio_server.hip
+@@ -312,6 +312,9 @@ void serve_emit_done(shelf::app::Qwen35ComputeRuntime& runtime, ServeState& stat
+             prefill, generated, request->prefill_ms, prefill_tok_s, ttft_ms,
+             decode_ms, decode_tok_s);
+     }
++    if (std::getenv("SHELF_IPC_DIAG") != nullptr)
++        std::fprintf(stderr, "IPCDIAG emit id=%lld t=%.9f\n", static_cast<long long>(generation.external_request_id),
++                     std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+     emit_json(done);
+     serve_push_terminal(state, generation.external_request_id);
+ }
+@@ -614,6 +617,9 @@ bool serve_parse_generate(shelf::app::Qwen35ComputeRuntime& runtime, ServeState&
+     generation.emitted_tokens = 0;
+     generation.max_new_tokens = max_new_tokens;
+     generation.submitted_at = std::chrono::steady_clock::now();
++    if (std::getenv("SHELF_IPC_DIAG") != nullptr)
++        std::fprintf(stderr, "IPCDIAG received id=%lld t=%.9f\n", static_cast<long long>(external_request_id),
++                     std::chrono::duration<double>(generation.submitted_at.time_since_epoch()).count());
+ 
+     if (request.contains("grammar") && !request["grammar"].is_boolean()) {
+         emit_error_with_code(request_id, "invalid_argument", "grammar must be a boolean");
+diff --git a/src/apps/server/serverlib/compute_client.py b/src/apps/server/serverlib/compute_client.py
+index dad518d..d02f701 100644
+--- a/src/apps/server/serverlib/compute_client.py
++++ b/src/apps/server/serverlib/compute_client.py
+@@ -15,6 +15,7 @@ import json
+ import os
+ import signal
+ import sys
++import time
+ from dataclasses import dataclass
+ from typing import AsyncIterator, Optional
+ 
+@@ -189,6 +190,9 @@ class AsyncComputeClient:
+ 
+                 request_id = event.get("request_id")
+ 
++                if os.getenv("SHELF_IPC_DIAG") and event.get("event") == "done":
++                    self._log.write(f"IPCDIAG done id={request_id} t={time.monotonic():.9f}\n")
++
+                 if request_id is None:
+                     await self._control.put(event)
+                     continue
+@@ -253,12 +257,15 @@ class AsyncComputeClient:
+             separators=(",", ":"),
+         ).encode("utf-8") + b"\n"
+ 
++        started = time.monotonic() if os.getenv("SHELF_IPC_DIAG") else 0
+         async with self._write_lock:
+             if self._proc is None or self._proc.stdin is None:
+                 raise ComputeError("compute process is not running")
+             try:
+                 self._proc.stdin.write(line)
+                 await self._proc.stdin.drain()
++                if started and payload.get("op") == "generate":
++                    self._log.write(f"IPCDIAG send id={payload.get('request_id')} start={started:.9f} end={time.monotonic():.9f}\n")
+             except (BrokenPipeError, ConnectionResetError) as exc:
+                 raise ComputeError("compute process closed its stdin") from exc
+ 
+@@ -306,6 +313,7 @@ class AsyncComputeClient:
+     # ----------------------------------------------------------------- requests
+ 
+     async def _begin_request(self) -> tuple[int, asyncio.Queue]:
++        started = time.monotonic() if os.getenv("SHELF_IPC_DIAG") else 0
+         self._queued += 1
+         try:
+             await self._semaphore.acquire()
+@@ -320,6 +328,8 @@ class AsyncComputeClient:
+             mailbox: asyncio.Queue = asyncio.Queue()
+             self._mailboxes[request_id] = mailbox
+             self._inflight += 1
++        if started:
++            self._log.write(f"IPCDIAG queue id={request_id} start={started:.9f} end={time.monotonic():.9f}\n")
+         return request_id, mailbox
+ 
+     async def _end_request(self, request_id: int) -> None:
+diff --git a/src/shelf/inference/execution/exl3_dense_gemm.hip b/src/shelf/inference/execution/exl3_dense_gemm.hip
+index a95678a..c40d990 100644
+--- a/src/shelf/inference/execution/exl3_dense_gemm.hip
++++ b/src/shelf/inference/execution/exl3_dense_gemm.hip
+@@ -3,6 +3,7 @@
+ #include <hipblaslt/hipblaslt.h>
+ #include <hipblaslt/hipblaslt-ext.hpp>
+ 
++#include <chrono>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -71,6 +72,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
+     if (dense == nullptr || accum == nullptr || xrot == nullptr) {
+         return hipErrorInvalidValue;
+     }
++    const auto diag_begin = std::chrono::steady_clock::now();
+     LtState& lt = state();
+     // A handle is bound to the device current at creation. TP ranks run on one thread per device, so this holds
+     // already; recreate on a mismatch rather than launch on another device's handle.
+@@ -161,6 +163,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
+         constexpr int kCandidates = 16;
+         hipblasLtMatmulHeuristicResult_t results[kCandidates]{};
+         int found = 0;
++        const auto diag_heuristic_start = std::chrono::steady_clock::now();
+         if (hipblasLtMatmulAlgoGetHeuristic(lt.handle, desc, la, lb, lc, lc, pref,
+                                             kCandidates, results, &found) !=
+                 HIPBLAS_STATUS_SUCCESS ||
+@@ -172,6 +175,7 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
+             (void) hipblasLtMatmulDescDestroy(desc);
+             return hipErrorNotSupported;
+         }
++        if (std::getenv("SHELF_EXL3_DIAG")) std::fprintf(stderr, "DIAG heuristic rows=%u n=%u k=%u int8=%d ms=%.3f\n", rows, out_features, kdim, int8, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - diag_heuristic_start).count());
+         bool tuned = false;
+         if (use_prefill_choice) {
+             hipDeviceProp_t props{};
+@@ -267,9 +271,15 @@ hipError_t run_dense_gemm(bool int8, uint32_t rows, uint32_t out_features, uint3
+             return hipErrorOutOfMemory;
+         }
+     }
++    const auto diag_matmul_start = std::chrono::steady_clock::now();
+     const hipblasStatus_t status =
+         hipblasLtMatmul(lt.handle, desc, alpha_p, dense, la, xrot, lb, beta_p, accum, lc,
+                         accum, lc, &algo, workspace, workspace_size, stream);
++    if (std::getenv("SHELF_EXL3_DIAG")) {
++        const auto diag_end = std::chrono::steady_clock::now();
++        const auto all = std::chrono::duration<double, std::milli>(diag_end - diag_begin).count();
++        if (all > 1.0) std::fprintf(stderr, "DIAG gemm rows=%u n=%u k=%u int8=%d cached=%d total=%.3f matmul=%.3f\n", rows, out_features, kdim, int8, cached != nullptr, all, std::chrono::duration<double, std::milli>(diag_end - diag_matmul_start).count());
++    }
+     if (workspace != nullptr) (void) hipFree(workspace);
+     (void) hipblasLtMatmulPreferenceDestroy(pref);
+     (void) hipblasLtMatrixLayoutDestroy(la);
+diff --git a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+index 1148c79..3a71b8a 100644
+--- a/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
++++ b/src/shelf/models/qwen35/runtime/continuous_batcher.cpp
+@@ -890,7 +890,7 @@ Result<StepResult> ContinuousBatcher::step() {
+         return first_error;
+     }
+ 
+-    if (bt_wall && bt_decode) {
++    if (bt_wall) {
+         const auto bt_end = std::chrono::steady_clock::now();
+         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &bt_cpu_end);
+         const double cpu_ms = (bt_cpu_end.tv_sec - bt_cpu_start.tv_sec) * 1000.0 +
+@@ -898,8 +898,8 @@ Result<StepResult> ContinuousBatcher::step() {
+         auto ms = [](auto x, auto y) {
+             return std::chrono::duration<double, std::milli>(y - x).count();
+         };
+-        std::fprintf(stderr, "STEPWALL rows=%u pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
+-                     plan.batch.num_requests, ms(bt_step_t0, exec_started),
++        std::fprintf(stderr, "STEPWALL rows=%u tokens=%u decode=%d pre=%.3f exec_submit=%.3f sync=%.3f post=%.3f total=%.3f cpu=%.3f\n",
++                     plan.batch.num_requests, plan.batch.num_tokens, bt_decode, ms(bt_step_t0, exec_started),
+                      ms(exec_started, bt_exec_end), ms(bt_exec_end, bt_sync_end),
+                      ms(bt_sync_end, bt_end), ms(bt_step_t0, bt_end), cpu_ms);
+     }
+diff --git a/src/shelf/models/qwen35/runtime/executor.hip b/src/shelf/models/qwen35/runtime/executor.hip
+index 2e86f51..6b70a28 100644
+--- a/src/shelf/models/qwen35/runtime/executor.hip
++++ b/src/shelf/models/qwen35/runtime/executor.hip
+@@ -2564,7 +2564,10 @@ Result<BatchExecutionOutput> complete_batch(
+     if (done == nullptr) {
+         return Status::invalid_state("pending has no completion event", __FILE__, __LINE__);
+     }
++    const bool wait_diag = std::getenv("SHELF_BATCH_EXEC_TIMING") != nullptr;
++    const auto wait_begin = wait_diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     hipError_t se = hipStreamSynchronize(stream);
++    const auto wait_end = wait_diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     if (se != hipSuccess) {
+         poison_pending();
+         executor.active_submission_id = 0u;
+@@ -2572,6 +2575,13 @@ Result<BatchExecutionOutput> complete_batch(
+         return Status::hip_error("hipEventSynchronize", hipGetErrorString(se), __FILE__, __LINE__);
+     }
+     hipError_t de = hipEventDestroy(done);
++    if (wait_diag) {
++        const auto destroyed = std::chrono::steady_clock::now();
++        const double sync_ms = std::chrono::duration<double, std::milli>(wait_end - wait_begin).count();
++        const double destroy_ms = std::chrono::duration<double, std::milli>(destroyed - wait_end).count();
++        if (sync_ms + destroy_ms >= 100.0)
++            std::fprintf(stderr, "WAITDIAG stream_sync=%.3f event_destroy=%.3f\n", sync_ms, destroy_ms);
++    }
+     pending.done = nullptr;
+     if (de != hipSuccess) {
+         poison_pending();
+@@ -2660,10 +2670,20 @@ Result<BatchExecutionOutput> execute_batch(
+     const ScheduledBatch& batch,
+     hipStream_t stream,
+     const ExecuteBatchOptions& options) {
++    const bool timing = std::getenv("SHELF_BATCH_EXEC_TIMING") != nullptr;
++    const auto begin = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     auto pr = submit_batch(executor, batch, stream, options);
++    const auto submitted = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     if (!pr.ok()) return pr.status();
+     PendingBatch pending = pr.release();
+-    return complete_batch(executor, std::move(pending), stream);
++    auto result = complete_batch(executor, std::move(pending), stream);
++    if (timing) {
++        const auto end = std::chrono::steady_clock::now();
++        std::fprintf(stderr, "EXECTIMING rows=%u tokens=%u submit=%.3f complete=%.3f\n", batch.num_requests, batch.num_tokens,
++                     std::chrono::duration<double, std::milli>(submitted - begin).count(),
++                     std::chrono::duration<double, std::milli>(end - submitted).count());
++    }
++    return result;
+ }
+ 
+ 

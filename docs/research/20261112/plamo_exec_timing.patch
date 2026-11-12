@@ -1,0 +1,25 @@
+diff --git a/src/shelf/models/qwen35/runtime/executor.hip b/src/shelf/models/qwen35/runtime/executor.hip
+index 2e86f51..3af0cf7 100644
+--- a/src/shelf/models/qwen35/runtime/executor.hip
++++ b/src/shelf/models/qwen35/runtime/executor.hip
+@@ -2660,8 +2660,19 @@ Result<BatchExecutionOutput> execute_batch(
+     const ScheduledBatch& batch,
+     hipStream_t stream,
+     const ExecuteBatchOptions& options) {
++    const bool timing = std::getenv("SHELF_BATCH_EXEC_TIMING") != nullptr &&
++                        batch.num_tokens == batch.num_requests;
++    const auto begin = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     auto pr = submit_batch(executor, batch, stream, options);
++    const auto submitted = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     if (!pr.ok()) return pr.status();
+     PendingBatch pending = pr.release();
+-    return complete_batch(executor, std::move(pending), stream);
++    auto result = complete_batch(executor, std::move(pending), stream);
++    if (timing) {
++        const auto end = std::chrono::steady_clock::now();
++        std::fprintf(stderr, "EXECTIMING rows=%u submit=%.3f complete=%.3f\n", batch.num_requests,
++                     std::chrono::duration<double, std::milli>(submitted - begin).count(),
++                     std::chrono::duration<double, std::milli>(end - submitted).count());
++    }
++    return result;
+ }

@@ -1,0 +1,1149 @@
+{
+  "implementation": "3287919 (code 352bc1c)",
+  "batch_size": 64,
+  "summary": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.017129897694160002,
+      "top1_agreement": 0.9280000000674286,
+      "max_logit_diff": 4.125
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.01739590544186286,
+      "top1_agreement": 0.9337142858045714,
+      "max_logit_diff": 7.734375
+    },
+    "wiki": {
+      "cases": 4,
+      "positions": 521,
+      "mean_kl": 0.05167647184529751,
+      "top1_agreement": 0.9021113244510557,
+      "max_logit_diff": 4.03125
+    }
+  },
+  "cases": [
+    {
+      "name": "heldout-ja-en-0",
+      "tokens": 35,
+      "metrics": {
+        "QUALITY_POSITIONS": "33",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "33",
+        "QUALITY_PPL_BASELINE": "5107.23707",
+        "QUALITY_PPL_CANDIDATE": "5122.10025",
+        "QUALITY_PPL_DELTA_PCT": "0.291021921",
+        "QUALITY_NLL_DELTA_MEAN": "0.00290599272",
+        "QUALITY_KL_MEAN": "0.0182935062",
+        "QUALITY_TOP1_AGREEMENT": "0.848484848",
+        "QUALITY_TOP5_OVERLAP": "0.945454545",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.25"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 3.764983921428211e-05,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.0006287097930908,
+        "candidate_ppl": 1.0008282661437988
+      }
+    },
+    {
+      "name": "heldout-en-ja-0",
+      "tokens": 35,
+      "metrics": {
+        "QUALITY_POSITIONS": "33",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "33",
+        "QUALITY_PPL_BASELINE": "9420.70565",
+        "QUALITY_PPL_CANDIDATE": "9183.64095",
+        "QUALITY_PPL_DELTA_PCT": "-2.51642193",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0254862522",
+        "QUALITY_KL_MEAN": "0.0104121326",
+        "QUALITY_TOP1_AGREEMENT": "0.96969697",
+        "QUALITY_TOP5_OVERLAP": "0.957575758",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.12109375"
+      },
+      "target_metrics": {
+        "positions": 9,
+        "mean_kl": 0.001295663882046938,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.9471403360366821,
+        "candidate_ppl": 1.880003571510315
+      }
+    },
+    {
+      "name": "heldout-ja-en-1",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "8910.74127",
+        "QUALITY_PPL_CANDIDATE": "9829.69025",
+        "QUALITY_PPL_DELTA_PCT": "10.312823",
+        "QUALITY_NLL_DELTA_MEAN": "0.098149989",
+        "QUALITY_KL_MEAN": "0.0439029408",
+        "QUALITY_TOP1_AGREEMENT": "0.931034483",
+        "QUALITY_TOP5_OVERLAP": "0.924137931",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "3.140625"
+      },
+      "target_metrics": {
+        "positions": 6,
+        "mean_kl": 0.0927295982837677,
+        "top1_agreement": 1.0,
+        "ref_ppl": 17.70979118347168,
+        "candidate_ppl": 32.2728157043457
+      }
+    },
+    {
+      "name": "heldout-en-ja-1",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "7044.06268",
+        "QUALITY_PPL_CANDIDATE": "6569.13046",
+        "QUALITY_PPL_DELTA_PCT": "-6.74230536",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0698036146",
+        "QUALITY_KL_MEAN": "0.136696008",
+        "QUALITY_TOP1_AGREEMENT": "0.827586207",
+        "QUALITY_TOP5_OVERLAP": "0.903448276",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "7.734375"
+      },
+      "target_metrics": {
+        "positions": 6,
+        "mean_kl": 0.006640514824539423,
+        "top1_agreement": 1.0,
+        "ref_ppl": 32.88078689575195,
+        "candidate_ppl": 27.420318603515625
+      }
+    },
+    {
+      "name": "heldout-ja-en-2",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "15870.0673",
+        "QUALITY_PPL_CANDIDATE": "15821.5097",
+        "QUALITY_PPL_DELTA_PCT": "-0.305969841",
+        "QUALITY_NLL_DELTA_MEAN": "-0.00306438886",
+        "QUALITY_KL_MEAN": "0.00897904201",
+        "QUALITY_TOP1_AGREEMENT": "0.896551724",
+        "QUALITY_TOP5_OVERLAP": "0.951724138",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.609375"
+      },
+      "target_metrics": {
+        "positions": 5,
+        "mean_kl": 0.006381562445312738,
+        "top1_agreement": 0.800000011920929,
+        "ref_ppl": 54.69524002075195,
+        "candidate_ppl": 57.24115753173828
+      }
+    },
+    {
+      "name": "heldout-en-ja-2",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "12586.9685",
+        "QUALITY_PPL_CANDIDATE": "13400.1873",
+        "QUALITY_PPL_DELTA_PCT": "6.46079923",
+        "QUALITY_NLL_DELTA_MEAN": "0.0626066491",
+        "QUALITY_KL_MEAN": "0.00840420205",
+        "QUALITY_TOP1_AGREEMENT": "0.931034483",
+        "QUALITY_TOP5_OVERLAP": "0.951724138",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.421875"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 0.002365614753216505,
+        "top1_agreement": 0.8571428656578064,
+        "ref_ppl": 4.617800712585449,
+        "candidate_ppl": 4.6008992195129395
+      }
+    },
+    {
+      "name": "heldout-ja-en-3",
+      "tokens": 35,
+      "metrics": {
+        "QUALITY_POSITIONS": "33",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "33",
+        "QUALITY_PPL_BASELINE": "9407.00988",
+        "QUALITY_PPL_CANDIDATE": "10022.2234",
+        "QUALITY_PPL_DELTA_PCT": "6.53994717",
+        "QUALITY_NLL_DELTA_MEAN": "0.0633498196",
+        "QUALITY_KL_MEAN": "0.0133940067",
+        "QUALITY_TOP1_AGREEMENT": "0.96969697",
+        "QUALITY_TOP5_OVERLAP": "0.933333333",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.1875"
+      },
+      "target_metrics": {
+        "positions": 9,
+        "mean_kl": 0.00010214665962848812,
+        "top1_agreement": 1.0,
+        "ref_ppl": 2.6111409664154053,
+        "candidate_ppl": 2.683202028274536
+      }
+    },
+    {
+      "name": "heldout-en-ja-3",
+      "tokens": 35,
+      "metrics": {
+        "QUALITY_POSITIONS": "33",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "33",
+        "QUALITY_PPL_BASELINE": "21100.0638",
+        "QUALITY_PPL_CANDIDATE": "20338.9366",
+        "QUALITY_PPL_DELTA_PCT": "-3.60722711",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0367389572",
+        "QUALITY_KL_MEAN": "0.0146671707",
+        "QUALITY_TOP1_AGREEMENT": "0.909090909",
+        "QUALITY_TOP5_OVERLAP": "0.933333333",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.84179688"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 0.023334702476859093,
+        "top1_agreement": 0.7142857313156128,
+        "ref_ppl": 20.45688247680664,
+        "candidate_ppl": 22.256969451904297
+      }
+    },
+    {
+      "name": "heldout-ja-en-4",
+      "tokens": 38,
+      "metrics": {
+        "QUALITY_POSITIONS": "36",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "36",
+        "QUALITY_PPL_BASELINE": "4545.30457",
+        "QUALITY_PPL_CANDIDATE": "4317.32159",
+        "QUALITY_PPL_DELTA_PCT": "-5.01579112",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0514595305",
+        "QUALITY_KL_MEAN": "0.0429307479",
+        "QUALITY_TOP1_AGREEMENT": "0.944444444",
+        "QUALITY_TOP5_OVERLAP": "0.922222222",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.6875"
+      },
+      "target_metrics": {
+        "positions": 9,
+        "mean_kl": 0.010192244313657284,
+        "top1_agreement": 1.0,
+        "ref_ppl": 6.759908199310303,
+        "candidate_ppl": 6.170541286468506
+      }
+    },
+    {
+      "name": "heldout-en-ja-4",
+      "tokens": 38,
+      "metrics": {
+        "QUALITY_POSITIONS": "36",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "36",
+        "QUALITY_PPL_BASELINE": "4693.02733",
+        "QUALITY_PPL_CANDIDATE": "4397.91529",
+        "QUALITY_PPL_DELTA_PCT": "-6.28830861",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0649472298",
+        "QUALITY_KL_MEAN": "0.00994008025",
+        "QUALITY_TOP1_AGREEMENT": "0.972222222",
+        "QUALITY_TOP5_OVERLAP": "0.95",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.25"
+      },
+      "target_metrics": {
+        "positions": 10,
+        "mean_kl": 0.0020776772871613503,
+        "top1_agreement": 1.0,
+        "ref_ppl": 108.71002197265625,
+        "candidate_ppl": 91.18712615966797
+      }
+    },
+    {
+      "name": "heldout-ja-en-5",
+      "tokens": 37,
+      "metrics": {
+        "QUALITY_POSITIONS": "35",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "35",
+        "QUALITY_PPL_BASELINE": "6586.08414",
+        "QUALITY_PPL_CANDIDATE": "6360.6302",
+        "QUALITY_PPL_DELTA_PCT": "-3.42318647",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0348314991",
+        "QUALITY_KL_MEAN": "0.0113115011",
+        "QUALITY_TOP1_AGREEMENT": "0.942857143",
+        "QUALITY_TOP5_OVERLAP": "0.942857143",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.25"
+      },
+      "target_metrics": {
+        "positions": 8,
+        "mean_kl": 0.00037512360722757876,
+        "top1_agreement": 1.0,
+        "ref_ppl": 4.191568851470947,
+        "candidate_ppl": 4.1927056312561035
+      }
+    },
+    {
+      "name": "heldout-en-ja-5",
+      "tokens": 37,
+      "metrics": {
+        "QUALITY_POSITIONS": "35",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "35",
+        "QUALITY_PPL_BASELINE": "9202.22833",
+        "QUALITY_PPL_CANDIDATE": "9407.5625",
+        "QUALITY_PPL_DELTA_PCT": "2.23135267",
+        "QUALITY_NLL_DELTA_MEAN": "0.0220682223",
+        "QUALITY_KL_MEAN": "0.00717127836",
+        "QUALITY_TOP1_AGREEMENT": "0.942857143",
+        "QUALITY_TOP5_OVERLAP": "0.965714286",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.25"
+      },
+      "target_metrics": {
+        "positions": 10,
+        "mean_kl": 0.0004042474029120058,
+        "top1_agreement": 1.0,
+        "ref_ppl": 36.71092224121094,
+        "candidate_ppl": 37.17978286743164
+      }
+    },
+    {
+      "name": "heldout-ja-en-6",
+      "tokens": 33,
+      "metrics": {
+        "QUALITY_POSITIONS": "31",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "31",
+        "QUALITY_PPL_BASELINE": "14665.0324",
+        "QUALITY_PPL_CANDIDATE": "15197.9498",
+        "QUALITY_PPL_DELTA_PCT": "3.63393229",
+        "QUALITY_NLL_DELTA_MEAN": "0.035694622",
+        "QUALITY_KL_MEAN": "0.0142012686",
+        "QUALITY_TOP1_AGREEMENT": "0.870967742",
+        "QUALITY_TOP5_OVERLAP": "0.95483871",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.296875"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 0.0005805615219287574,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.5624569654464722,
+        "candidate_ppl": 1.6106953620910645
+      }
+    },
+    {
+      "name": "heldout-en-ja-6",
+      "tokens": 33,
+      "metrics": {
+        "QUALITY_POSITIONS": "31",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "31",
+        "QUALITY_PPL_BASELINE": "22193.8479",
+        "QUALITY_PPL_CANDIDATE": "23930.0781",
+        "QUALITY_PPL_DELTA_PCT": "7.82302468",
+        "QUALITY_NLL_DELTA_MEAN": "0.0753210367",
+        "QUALITY_KL_MEAN": "0.0080849811",
+        "QUALITY_TOP1_AGREEMENT": "0.935483871",
+        "QUALITY_TOP5_OVERLAP": "0.961290323",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.46875"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 0.0051993937231600285,
+        "top1_agreement": 1.0,
+        "ref_ppl": 6.667535305023193,
+        "candidate_ppl": 7.663298606872559
+      }
+    },
+    {
+      "name": "heldout-ja-en-7",
+      "tokens": 28,
+      "metrics": {
+        "QUALITY_POSITIONS": "26",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "26",
+        "QUALITY_PPL_BASELINE": "17915.6034",
+        "QUALITY_PPL_CANDIDATE": "17333.2799",
+        "QUALITY_PPL_DELTA_PCT": "-3.25037035",
+        "QUALITY_NLL_DELTA_MEAN": "-0.033043682",
+        "QUALITY_KL_MEAN": "0.00701709962",
+        "QUALITY_TOP1_AGREEMENT": "0.961538462",
+        "QUALITY_TOP5_OVERLAP": "0.938461538",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.75"
+      },
+      "target_metrics": {
+        "positions": 5,
+        "mean_kl": 8.310912846809515e-09,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.0000001192092896,
+        "candidate_ppl": 1.0000001192092896
+      }
+    },
+    {
+      "name": "heldout-en-ja-7",
+      "tokens": 28,
+      "metrics": {
+        "QUALITY_POSITIONS": "26",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "26",
+        "QUALITY_PPL_BASELINE": "21622.3874",
+        "QUALITY_PPL_CANDIDATE": "22058.1656",
+        "QUALITY_PPL_DELTA_PCT": "2.01540264",
+        "QUALITY_NLL_DELTA_MEAN": "0.0199536222",
+        "QUALITY_KL_MEAN": "0.00744389561",
+        "QUALITY_TOP1_AGREEMENT": "0.961538462",
+        "QUALITY_TOP5_OVERLAP": "0.961538462",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.9765625"
+      },
+      "target_metrics": {
+        "positions": 4,
+        "mean_kl": 9.847580258792732e-06,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.1906516551971436,
+        "candidate_ppl": 1.1904840469360352
+      }
+    },
+    {
+      "name": "heldout-ja-en-8",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "28886.3472",
+        "QUALITY_PPL_CANDIDATE": "26930.2549",
+        "QUALITY_PPL_DELTA_PCT": "-6.77168476",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0701186988",
+        "QUALITY_KL_MEAN": "0.00735375082",
+        "QUALITY_TOP1_AGREEMENT": "0.931034483",
+        "QUALITY_TOP5_OVERLAP": "0.95862069",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.67578125"
+      },
+      "target_metrics": {
+        "positions": 5,
+        "mean_kl": 0.0002152749802917242,
+        "top1_agreement": 1.0,
+        "ref_ppl": 549.0612182617188,
+        "candidate_ppl": 508.55194091796875
+      }
+    },
+    {
+      "name": "heldout-en-ja-8",
+      "tokens": 31,
+      "metrics": {
+        "QUALITY_POSITIONS": "29",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "29",
+        "QUALITY_PPL_BASELINE": "17499.8399",
+        "QUALITY_PPL_CANDIDATE": "18610.0918",
+        "QUALITY_PPL_DELTA_PCT": "6.34435449",
+        "QUALITY_NLL_DELTA_MEAN": "0.06151227",
+        "QUALITY_KL_MEAN": "0.00650163448",
+        "QUALITY_TOP1_AGREEMENT": "0.965517241",
+        "QUALITY_TOP5_OVERLAP": "0.944827586",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.46875"
+      },
+      "target_metrics": {
+        "positions": 7,
+        "mean_kl": 0.001682619797065854,
+        "top1_agreement": 1.0,
+        "ref_ppl": 7.385766983032227,
+        "candidate_ppl": 7.789032936096191
+      }
+    },
+    {
+      "name": "heldout-ja-en-9",
+      "tokens": 39,
+      "metrics": {
+        "QUALITY_POSITIONS": "37",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "37",
+        "QUALITY_PPL_BASELINE": "7921.72849",
+        "QUALITY_PPL_CANDIDATE": "8556.23821",
+        "QUALITY_PPL_DELTA_PCT": "8.00973827",
+        "QUALITY_NLL_DELTA_MEAN": "0.0770512062",
+        "QUALITY_KL_MEAN": "0.0147342444",
+        "QUALITY_TOP1_AGREEMENT": "0.891891892",
+        "QUALITY_TOP5_OVERLAP": "0.935135135",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "3.25"
+      },
+      "target_metrics": {
+        "positions": 9,
+        "mean_kl": 0.0014525807928293943,
+        "top1_agreement": 1.0,
+        "ref_ppl": 2.6752350330352783,
+        "candidate_ppl": 2.5807013511657715
+      }
+    },
+    {
+      "name": "heldout-en-ja-9",
+      "tokens": 39,
+      "metrics": {
+        "QUALITY_POSITIONS": "37",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "37",
+        "QUALITY_PPL_BASELINE": "10757.313",
+        "QUALITY_PPL_CANDIDATE": "11909.6201",
+        "QUALITY_PPL_DELTA_PCT": "10.7118486",
+        "QUALITY_NLL_DELTA_MEAN": "0.101760681",
+        "QUALITY_KL_MEAN": "0.0141831644",
+        "QUALITY_TOP1_AGREEMENT": "0.945945946",
+        "QUALITY_TOP5_OVERLAP": "0.951351351",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "3.125"
+      },
+      "target_metrics": {
+        "positions": 11,
+        "mean_kl": 0.004051567986607552,
+        "top1_agreement": 1.0,
+        "ref_ppl": 25.331893920898438,
+        "candidate_ppl": 27.35847282409668
+      }
+    },
+    {
+      "name": "heldout-ja-en-10",
+      "tokens": 53,
+      "metrics": {
+        "QUALITY_POSITIONS": "51",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "51",
+        "QUALITY_PPL_BASELINE": "1742.49602",
+        "QUALITY_PPL_CANDIDATE": "1600.72973",
+        "QUALITY_PPL_DELTA_PCT": "-8.1358175",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0848589768",
+        "QUALITY_KL_MEAN": "0.0229415868",
+        "QUALITY_TOP1_AGREEMENT": "0.901960784",
+        "QUALITY_TOP5_OVERLAP": "0.933333333",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.53125"
+      },
+      "target_metrics": {
+        "positions": 18,
+        "mean_kl": 0.005957720801234245,
+        "top1_agreement": 0.9444444179534912,
+        "ref_ppl": 6.162318229675293,
+        "candidate_ppl": 5.847279071807861
+      }
+    },
+    {
+      "name": "heldout-en-ja-10",
+      "tokens": 53,
+      "metrics": {
+        "QUALITY_POSITIONS": "51",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "51",
+        "QUALITY_PPL_BASELINE": "1800.02223",
+        "QUALITY_PPL_CANDIDATE": "1916.50493",
+        "QUALITY_PPL_DELTA_PCT": "6.47118119",
+        "QUALITY_NLL_DELTA_MEAN": "0.0627041634",
+        "QUALITY_KL_MEAN": "0.01902235",
+        "QUALITY_TOP1_AGREEMENT": "0.862745098",
+        "QUALITY_TOP5_OVERLAP": "0.960784314",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.875"
+      },
+      "target_metrics": {
+        "positions": 16,
+        "mean_kl": 0.008963814936578274,
+        "top1_agreement": 0.8125,
+        "ref_ppl": 5.144214630126953,
+        "candidate_ppl": 5.211622714996338
+      }
+    },
+    {
+      "name": "heldout-ja-en-11",
+      "tokens": 46,
+      "metrics": {
+        "QUALITY_POSITIONS": "44",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "44",
+        "QUALITY_PPL_BASELINE": "3255.1629",
+        "QUALITY_PPL_CANDIDATE": "3332.27131",
+        "QUALITY_PPL_DELTA_PCT": "2.36880334",
+        "QUALITY_NLL_DELTA_MEAN": "0.0234118253",
+        "QUALITY_KL_MEAN": "0.0154425855",
+        "QUALITY_TOP1_AGREEMENT": "0.931818182",
+        "QUALITY_TOP5_OVERLAP": "0.918181818",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.0390625"
+      },
+      "target_metrics": {
+        "positions": 12,
+        "mean_kl": 0.0001612939522601664,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.5071533918380737,
+        "candidate_ppl": 1.523386001586914
+      }
+    },
+    {
+      "name": "heldout-en-ja-11",
+      "tokens": 46,
+      "metrics": {
+        "QUALITY_POSITIONS": "44",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "44",
+        "QUALITY_PPL_BASELINE": "1116.60707",
+        "QUALITY_PPL_CANDIDATE": "1079.64955",
+        "QUALITY_PPL_DELTA_PCT": "-3.30980517",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0336581865",
+        "QUALITY_KL_MEAN": "0.0183695544",
+        "QUALITY_TOP1_AGREEMENT": "0.909090909",
+        "QUALITY_TOP5_OVERLAP": "0.940909091",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.4375"
+      },
+      "target_metrics": {
+        "positions": 15,
+        "mean_kl": 0.0014436505734920502,
+        "top1_agreement": 0.9333333373069763,
+        "ref_ppl": 2.127214193344116,
+        "candidate_ppl": 2.1390953063964844
+      }
+    },
+    {
+      "name": "heldout-ja-en-12",
+      "tokens": 69,
+      "metrics": {
+        "QUALITY_POSITIONS": "67",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "67",
+        "QUALITY_PPL_BASELINE": "2281.84449",
+        "QUALITY_PPL_CANDIDATE": "2200.49069",
+        "QUALITY_PPL_DELTA_PCT": "-3.56526498",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0363037274",
+        "QUALITY_KL_MEAN": "0.0101770058",
+        "QUALITY_TOP1_AGREEMENT": "0.940298507",
+        "QUALITY_TOP5_OVERLAP": "0.949253731",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.375"
+      },
+      "target_metrics": {
+        "positions": 26,
+        "mean_kl": 0.0009415718959644437,
+        "top1_agreement": 1.0,
+        "ref_ppl": 8.619077682495117,
+        "candidate_ppl": 8.944954872131348
+      }
+    },
+    {
+      "name": "heldout-en-ja-12",
+      "tokens": 69,
+      "metrics": {
+        "QUALITY_POSITIONS": "67",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "67",
+        "QUALITY_PPL_BASELINE": "1369.38418",
+        "QUALITY_PPL_CANDIDATE": "1363.06565",
+        "QUALITY_PPL_DELTA_PCT": "-0.461413648",
+        "QUALITY_NLL_DELTA_MEAN": "-0.00462481446",
+        "QUALITY_KL_MEAN": "0.0191490121",
+        "QUALITY_TOP1_AGREEMENT": "0.970149254",
+        "QUALITY_TOP5_OVERLAP": "0.952238806",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.78125"
+      },
+      "target_metrics": {
+        "positions": 24,
+        "mean_kl": 0.0014903346309438348,
+        "top1_agreement": 1.0,
+        "ref_ppl": 5.413040637969971,
+        "candidate_ppl": 5.436556339263916
+      }
+    },
+    {
+      "name": "heldout-ja-en-13",
+      "tokens": 82,
+      "metrics": {
+        "QUALITY_POSITIONS": "80",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "80",
+        "QUALITY_PPL_BASELINE": "1211.78285",
+        "QUALITY_PPL_CANDIDATE": "1247.88752",
+        "QUALITY_PPL_DELTA_PCT": "2.97946701",
+        "QUALITY_NLL_DELTA_MEAN": "0.029359433",
+        "QUALITY_KL_MEAN": "0.018384989",
+        "QUALITY_TOP1_AGREEMENT": "0.9375",
+        "QUALITY_TOP5_OVERLAP": "0.945",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.0625"
+      },
+      "target_metrics": {
+        "positions": 30,
+        "mean_kl": 0.01582237146794796,
+        "top1_agreement": 0.9333333373069763,
+        "ref_ppl": 6.46347713470459,
+        "candidate_ppl": 6.53588342666626
+      }
+    },
+    {
+      "name": "heldout-en-ja-13",
+      "tokens": 82,
+      "metrics": {
+        "QUALITY_POSITIONS": "80",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "80",
+        "QUALITY_PPL_BASELINE": "2198.25717",
+        "QUALITY_PPL_CANDIDATE": "2266.94662",
+        "QUALITY_PPL_DELTA_PCT": "3.12472309",
+        "QUALITY_NLL_DELTA_MEAN": "0.0307689735",
+        "QUALITY_KL_MEAN": "0.0124539095",
+        "QUALITY_TOP1_AGREEMENT": "0.95",
+        "QUALITY_TOP5_OVERLAP": "0.9425",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.828125"
+      },
+      "target_metrics": {
+        "positions": 33,
+        "mean_kl": 0.005167539231479168,
+        "top1_agreement": 0.939393937587738,
+        "ref_ppl": 53.84197998046875,
+        "candidate_ppl": 54.93510818481445
+      }
+    },
+    {
+      "name": "heldout-ja-en-14",
+      "tokens": 85,
+      "metrics": {
+        "QUALITY_POSITIONS": "83",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "83",
+        "QUALITY_PPL_BASELINE": "1748.68913",
+        "QUALITY_PPL_CANDIDATE": "1864.81216",
+        "QUALITY_PPL_DELTA_PCT": "6.64057587",
+        "QUALITY_NLL_DELTA_MEAN": "0.06429389",
+        "QUALITY_KL_MEAN": "0.0227436016",
+        "QUALITY_TOP1_AGREEMENT": "0.915662651",
+        "QUALITY_TOP5_OVERLAP": "0.930120482",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "4.125"
+      },
+      "target_metrics": {
+        "positions": 31,
+        "mean_kl": 0.009222292341291904,
+        "top1_agreement": 0.9677419066429138,
+        "ref_ppl": 5.191397666931152,
+        "candidate_ppl": 5.147117614746094
+      }
+    },
+    {
+      "name": "heldout-en-ja-14",
+      "tokens": 85,
+      "metrics": {
+        "QUALITY_POSITIONS": "83",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "83",
+        "QUALITY_PPL_BASELINE": "2239.50648",
+        "QUALITY_PPL_CANDIDATE": "2245.85344",
+        "QUALITY_PPL_DELTA_PCT": "0.283408622",
+        "QUALITY_NLL_DELTA_MEAN": "0.00283007777",
+        "QUALITY_KL_MEAN": "0.0124724208",
+        "QUALITY_TOP1_AGREEMENT": "0.939759036",
+        "QUALITY_TOP5_OVERLAP": "0.937349398",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.8125"
+      },
+      "target_metrics": {
+        "positions": 35,
+        "mean_kl": 0.0074212150648236275,
+        "top1_agreement": 0.9714285731315613,
+        "ref_ppl": 26.795494079589844,
+        "candidate_ppl": 28.690961837768555
+      }
+    },
+    {
+      "name": "heldout-ja-en-15",
+      "tokens": 83,
+      "metrics": {
+        "QUALITY_POSITIONS": "81",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "81",
+        "QUALITY_PPL_BASELINE": "682.844542",
+        "QUALITY_PPL_CANDIDATE": "666.662093",
+        "QUALITY_PPL_DELTA_PCT": "-2.36985851",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0239839136",
+        "QUALITY_KL_MEAN": "0.0158889577",
+        "QUALITY_TOP1_AGREEMENT": "0.962962963",
+        "QUALITY_TOP5_OVERLAP": "0.92345679",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.6484375"
+      },
+      "target_metrics": {
+        "positions": 35,
+        "mean_kl": 0.002561685862019658,
+        "top1_agreement": 1.0,
+        "ref_ppl": 2.3040363788604736,
+        "candidate_ppl": 2.268068790435791
+      }
+    },
+    {
+      "name": "heldout-en-ja-15",
+      "tokens": 83,
+      "metrics": {
+        "QUALITY_POSITIONS": "81",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "81",
+        "QUALITY_PPL_BASELINE": "808.787524",
+        "QUALITY_PPL_CANDIDATE": "864.154805",
+        "QUALITY_PPL_DELTA_PCT": "6.84571405",
+        "QUALITY_NLL_DELTA_MEAN": "0.0662156832",
+        "QUALITY_KL_MEAN": "0.0128481326",
+        "QUALITY_TOP1_AGREEMENT": "0.925925926",
+        "QUALITY_TOP5_OVERLAP": "0.930864198",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.9140625"
+      },
+      "target_metrics": {
+        "positions": 29,
+        "mean_kl": 0.0013038277393206954,
+        "top1_agreement": 1.0,
+        "ref_ppl": 4.047954082489014,
+        "candidate_ppl": 4.218523979187012
+      }
+    },
+    {
+      "name": "heldout-ja-en-16",
+      "tokens": 81,
+      "metrics": {
+        "QUALITY_POSITIONS": "79",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "79",
+        "QUALITY_PPL_BASELINE": "1252.09666",
+        "QUALITY_PPL_CANDIDATE": "1181.29242",
+        "QUALITY_PPL_DELTA_PCT": "-5.65485431",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0582103655",
+        "QUALITY_KL_MEAN": "0.0111297657",
+        "QUALITY_TOP1_AGREEMENT": "0.936708861",
+        "QUALITY_TOP5_OVERLAP": "0.949367089",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.5625"
+      },
+      "target_metrics": {
+        "positions": 33,
+        "mean_kl": 0.006941952742636204,
+        "top1_agreement": 1.0,
+        "ref_ppl": 2.4299275875091553,
+        "candidate_ppl": 2.292465925216675
+      }
+    },
+    {
+      "name": "heldout-en-ja-16",
+      "tokens": 81,
+      "metrics": {
+        "QUALITY_POSITIONS": "79",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "79",
+        "QUALITY_PPL_BASELINE": "571.038213",
+        "QUALITY_PPL_CANDIDATE": "601.206948",
+        "QUALITY_PPL_DELTA_PCT": "5.28313775",
+        "QUALITY_NLL_DELTA_MEAN": "0.051483085",
+        "QUALITY_KL_MEAN": "0.0174908087",
+        "QUALITY_TOP1_AGREEMENT": "0.949367089",
+        "QUALITY_TOP5_OVERLAP": "0.941772152",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "1.90625"
+      },
+      "target_metrics": {
+        "positions": 29,
+        "mean_kl": 0.004778906237334013,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.7981208562850952,
+        "candidate_ppl": 1.772385835647583
+      }
+    },
+    {
+      "name": "heldout-ja-en-17",
+      "tokens": 74,
+      "metrics": {
+        "QUALITY_POSITIONS": "72",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "72",
+        "QUALITY_PPL_BASELINE": "1237.68009",
+        "QUALITY_PPL_CANDIDATE": "1242.52117",
+        "QUALITY_PPL_DELTA_PCT": "0.391141914",
+        "QUALITY_NLL_DELTA_MEAN": "0.00390378943",
+        "QUALITY_KL_MEAN": "0.0143159259",
+        "QUALITY_TOP1_AGREEMENT": "0.930555556",
+        "QUALITY_TOP5_OVERLAP": "0.930555556",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.53125"
+      },
+      "target_metrics": {
+        "positions": 29,
+        "mean_kl": 0.0021430728957057,
+        "top1_agreement": 1.0,
+        "ref_ppl": 1.942525029182434,
+        "candidate_ppl": 1.9212286472320557
+      }
+    },
+    {
+      "name": "heldout-en-ja-17",
+      "tokens": 74,
+      "metrics": {
+        "QUALITY_POSITIONS": "72",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "72",
+        "QUALITY_PPL_BASELINE": "1158.32678",
+        "QUALITY_PPL_CANDIDATE": "1158.52517",
+        "QUALITY_PPL_DELTA_PCT": "0.0171268525",
+        "QUALITY_NLL_DELTA_MEAN": "0.00017125386",
+        "QUALITY_KL_MEAN": "0.0125579997",
+        "QUALITY_TOP1_AGREEMENT": "0.916666667",
+        "QUALITY_TOP5_OVERLAP": "0.930555556",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "2.015625"
+      },
+      "target_metrics": {
+        "positions": 26,
+        "mean_kl": 0.0019364042673259974,
+        "top1_agreement": 1.0,
+        "ref_ppl": 10.425544738769531,
+        "candidate_ppl": 10.485663414001465
+      }
+    },
+    {
+      "name": "general-corpus-0",
+      "tokens": 125,
+      "metrics": {
+        "QUALITY_POSITIONS": "123",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "123",
+        "QUALITY_PPL_BASELINE": "3588.76539",
+        "QUALITY_PPL_CANDIDATE": "3713.6107",
+        "QUALITY_PPL_DELTA_PCT": "3.4787815",
+        "QUALITY_NLL_DELTA_MEAN": "0.034196396",
+        "QUALITY_KL_MEAN": "0.0468262135",
+        "QUALITY_TOP1_AGREEMENT": "0.886178862",
+        "QUALITY_TOP5_OVERLAP": "0.891056911",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "4"
+      },
+      "target_metrics": {
+        "positions": 123,
+        "mean_kl": 0.04682779312133789,
+        "top1_agreement": 0.8861788511276245,
+        "ref_ppl": 3588.6337890625,
+        "candidate_ppl": 3713.476318359375
+      }
+    },
+    {
+      "name": "general-corpus-1",
+      "tokens": 137,
+      "metrics": {
+        "QUALITY_POSITIONS": "135",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "135",
+        "QUALITY_PPL_BASELINE": "5883.48044",
+        "QUALITY_PPL_CANDIDATE": "5622.66846",
+        "QUALITY_PPL_DELTA_PCT": "-4.43295389",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0453421313",
+        "QUALITY_KL_MEAN": "0.0552501291",
+        "QUALITY_TOP1_AGREEMENT": "0.888888889",
+        "QUALITY_TOP5_OVERLAP": "0.897777778",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "4.03125"
+      },
+      "target_metrics": {
+        "positions": 135,
+        "mean_kl": 0.05525215342640877,
+        "top1_agreement": 0.8888888955116272,
+        "ref_ppl": 5883.291015625,
+        "candidate_ppl": 5622.49072265625
+      }
+    },
+    {
+      "name": "general-corpus-2",
+      "tokens": 133,
+      "metrics": {
+        "QUALITY_POSITIONS": "131",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "131",
+        "QUALITY_PPL_BASELINE": "5094.55468",
+        "QUALITY_PPL_CANDIDATE": "4679.82983",
+        "QUALITY_PPL_DELTA_PCT": "-8.14055142",
+        "QUALITY_NLL_DELTA_MEAN": "-0.08491051",
+        "QUALITY_KL_MEAN": "0.0515830072",
+        "QUALITY_TOP1_AGREEMENT": "0.916030534",
+        "QUALITY_TOP5_OVERLAP": "0.882442748",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "3.85546875"
+      },
+      "target_metrics": {
+        "positions": 131,
+        "mean_kl": 0.0515839159488678,
+        "top1_agreement": 0.9160305261611938,
+        "ref_ppl": 5094.34716796875,
+        "candidate_ppl": 4679.63525390625
+      }
+    },
+    {
+      "name": "general-corpus-3",
+      "tokens": 134,
+      "metrics": {
+        "QUALITY_POSITIONS": "132",
+        "QUALITY_CONTEXT": "1",
+        "QUALITY_BATCH_SIZE": "64",
+        "QUALITY_SCORE_START": "2",
+        "QUALITY_VOCAB": "107520",
+        "QUALITY_KV_DTYPE": "bf16",
+        "QUALITY_DUMP_POSITIONS": "132",
+        "QUALITY_PPL_BASELINE": "6519.1017",
+        "QUALITY_PPL_CANDIDATE": "6356.17212",
+        "QUALITY_PPL_DELTA_PCT": "-2.49926425",
+        "QUALITY_NLL_DELTA_MEAN": "-0.0253102618",
+        "QUALITY_KL_MEAN": "0.0526339106",
+        "QUALITY_TOP1_AGREEMENT": "0.916666667",
+        "QUALITY_TOP5_OVERLAP": "0.890909091",
+        "QUALITY_LOGIT_MAX_ABS_DELTA": "3.875"
+      },
+      "target_metrics": {
+        "positions": 132,
+        "mean_kl": 0.05263535678386688,
+        "top1_agreement": 0.9166666865348816,
+        "ref_ppl": 6518.85205078125,
+        "candidate_ppl": 6355.9208984375
+      }
+    }
+  ]
+}

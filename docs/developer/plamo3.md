@@ -1,8 +1,9 @@
 # PLaMo 3 Translate（BF16）
 
 0.8B / 2B / 8B の BF16 checkpoint を単一 GPU の `shelf-compute` で検証した。
-0.8B はサーバー経由でも日英・英日を検証した。量子化、TP、pipeline parallel、
-投機 decoding は未対応。
+0.8B はサーバー経由でも日英・英日を検証した。2B の EXL3-INT8（mul24）
+loader と実行経路を実 checkpoint でも使用できる。
+TP、pipeline parallel、投機 decoding は未対応。
 `max_seq_len` は 2048 以下に制限する。この範囲では全層を通常の causal
 attention として計算しても局所窓と一致する。長文用 sliding window の実装ではない。
 
@@ -44,8 +45,6 @@ CPU BF16 参照との平均 KL は 2B が 0.000551 / 0.000492、8B が
 100% / 100%。8B の重みは 15.89 GiB で KV とともに 32 GiB に収まった。
 詳細は[調査記録](../research/20261111/plamo3_translate.md)を参照。
 
-今後の作業は、真の sliding-window kernel と長文脈の検証、`rocm_exl3` の
-PLaMo architecture 登録と量子化である。
 31B は対象外。
 
 サーバーは `model_type=plamo3` を検出し、reasoning を無効にする。
@@ -69,3 +68,38 @@ top-1 は 0.8B と 8B が両方向 100%、2B は 95.24% / 95.83%。
 greedy token 列は M2 と一致した。218 token の英語段落では 246 token を生成し、
 prefill 1187.7 ms、decode 226.94 token/s。演算別内訳、テストと精度の条件は
 [調査記録](../research/20261111/plamo3_translate.md)を参照。
+
+## EXL3-INT8 の実行経路
+
+HF EXL3 checkpoint では、変換器が結合 QKV と gate/up を個別の
+`q_proj` / `k_proj` / `v_proj`、`gate_proj` / `up_proj` に分割する。
+PLaMo loader は全層の形状を検査し、mul24 の整数 bit rate と BF16 tensor を
+共通の quantized weight loader に渡す。embedding と norm は非量子化、lm_head は
+BF16 または mul24 を受け付ける。非量子化 F16 は読み込み時に BF16 に変換する。
+分割 linear をグラフで個別に実行し、EXL3 workspace の最大形状を予約する。
+分割 gate/up の出力には SwiGLU を 1 回で適用する。SiLU の結果を BF16 に丸めてから
+up と乗算し、従来の 2 演算の丸めを維持する。結合重みの BF16 経路は従来どおり
+SiLU と乗算を別々に実行する。
+実 checkpoint の確認条件と精度の測定結果は
+[調査記録](../research/20261112/plamo3_exl3.md) に記載する。
+
+PLaMo 3 Translate 2B の 4.05 bpw EXL3、8 bit head では、サーバーは受付開始前に
+chat template と短い生成を初期化する。同時要求上限が 8 以上で、最大系列長が
+257 以上かつ batch token 上限が 256 以上の場合は、256 token の合成 prefill も
+実行し、INT8 GEMM の初回初期化を済ませる。合成要求の結果は利用者へ返さない。
+容量不足などで warmup の要求が拒否された場合は、その旨を記録して受付を続ける。
+
+EXL3 の CPU BF16 比較と翻訳サーバーの継続投入測定の手順は、
+[調査記録](../research/20261112/plamo3_exl3.md#拡大品質評価と継続投入の測定方法)を参照する。
+
+PLaMo EXL3-INT8 の linear は実行行数に応じて kernel と split-K を選択する。
+そのため同一入力でも batch 形状により丸め結果および greedy 出力が変わり得る。
+
+PLaMo 3 Translate 2B の対象 EXL3-INT8 checkpoint では、Q/K の 128 要素単位
+RMSNorm を 32 スレッドの workgroup で実行する。逐次の加算順と BF16 中間
+丸めを維持する。BF16 checkpoint と他モデルは従来の経路を使う。
+
+同 checkpoint の down projection は、prefill を含まない decode の処理 chunk が
+17〜64 行で、4 分割分の workspace がある場合に split-K 4 を使用する。
+split-K によって加算順と logits は変化する。他の行数、
+prefill、BF16 checkpoint、他モデルは従来の選択を使う。

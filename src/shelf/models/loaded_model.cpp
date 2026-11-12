@@ -122,6 +122,16 @@ LoadedModel LoadedModel::borrow(const shelf::qwen4exp::Qwen4ExpModel& model) {
 }
 
 shelf::weights::Exl3LinearShape LoadedModel::exl3_linear_shape() const {
+    if (plamo_ != nullptr) {
+        shelf::weights::Exl3LinearShape shape;
+        shelf::weights::note_exl3_linear(plamo_->weights.lm_head, shape);
+        for (const auto& layer : plamo_->weights.layers) {
+            for (const auto* w : {&layer.qkv, &layer.q, &layer.k, &layer.v, &layer.o_proj,
+                                  &layer.gate_up, &layer.gate, &layer.up, &layer.down})
+                shelf::weights::note_exl3_linear(*w, shape);
+        }
+        return shape;
+    }
     if (qwen4exp_ != nullptr) {
         return shelf::qwen4exp::exl3_linear_shape(qwen4exp_->weights());
     }
@@ -155,7 +165,7 @@ std::size_t LoadedModel::executor_reserve_bytes(std::size_t max_batch_rows,
         : moe_ != nullptr ? moe_->text_config().ffn.shared_expert_intermediate_size
                           : dense_->text_config().ffn.intermediate_size;
     const bool exl3 =
-        plamo_ != nullptr ? false
+        plamo_ != nullptr ? reserve_config.exl3_linear_shape.present()
         : qwen4exp_ != nullptr ? true
         : moe_ != nullptr ? shelf::qwen35moe::uses_exl3_linear(moe_->weights())
                           : shelf::qwen35::uses_exl3_linear(dense_->weights());
@@ -188,6 +198,7 @@ Result<shelf::qwen35::Executor> LoadedModel::create_executor(
         input.model.embed_tokens = &plamo_->weights.embed_tokens;
         input.lowered = lowered.release();
         shelf::qwen35::ExecutorConfig resolved = config;
+        resolved.exl3_linear_shape = exl3_linear_shape();
         const auto& c = plamo_->config;
         shelf::qwen35::EffectiveRopeProfile local;
         local.theta = c.local_rope.theta; local.rotary_dim = static_cast<uint32_t>(c.head_dim);
