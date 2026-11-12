@@ -30,6 +30,7 @@ struct QualityOptions {
     int score_start = 0;
     int positions = 0;
     int prefill_chunk = 2048;
+    int batch_size = 1;
     int page_tokens = 16;
     std::vector<int> devices = {0};
     int tp = 1;
@@ -51,6 +52,7 @@ void print_usage(FILE* out) {
         "                                (default context+1; must be > context)\n"
         "  --positions N                scored positions (default 0 = to end, max 2048)\n"
         "  --prefill-chunk N            prefill chunk size (default 2048)\n"
+        "  --batch-size N               identical teacher-forced sequences (default 1, max 64)\n"
         "  --kv-cache-dtype bf16|fp8|octave:FORMAT (default bf16)\n"
         "  --page-tokens N              (default 16)\n"
         "  --arena-gib N|auto           (default auto = free VRAM minus 0.5 GiB)\n"
@@ -141,6 +143,11 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
                 fprintf(stderr, "invalid --prefill-chunk\n");
                 return false;
             }
+        } else if (key == "--batch-size") {
+            if (!parse_int(need_value(), opts.batch_size) || opts.batch_size < 1 || opts.batch_size > 64) {
+                fprintf(stderr, "invalid --batch-size\n");
+                return false;
+            }
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
                 fprintf(stderr, "invalid --page-tokens\n");
@@ -211,6 +218,10 @@ bool parse_args(int argc, char** argv, QualityOptions& opts) {
     if (opts.devices.size() != static_cast<size_t>(opts.tp)) {
         fprintf(stderr, "--device expects %d entries for --tensor-parallel %d, got %zu\n",
                 opts.tp, opts.tp, opts.devices.size());
+        return false;
+    }
+    if (opts.batch_size > 1 && opts.tp != 1) {
+        fprintf(stderr, "--batch-size greater than 1 requires --tensor-parallel 1\n");
         return false;
     }
     if (opts.kv_dtype == shelf::kernel::KVCacheDType::OCTAVE && opts.tp != 1) {
@@ -337,14 +348,16 @@ int run_quality(int argc, char** argv) {
         return 1;
     }
     const uint32_t required_seq_len = score_start + positions;
-    const uint32_t num_pages =
+    const uint32_t batch_size = static_cast<uint32_t>(opts.batch_size);
+    const uint32_t pages_per_sequence =
         ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1u;
+    const uint32_t num_pages = pages_per_sequence * batch_size;
 
     shelf::qwen35::ExecutorConfig exec_config;
     exec_config.max_batch_rows = static_cast<uint32_t>(
-        std::max(opts.prefill_chunk, 2));
-    exec_config.max_scheduled_requests = 1u;
-    exec_config.max_scheduled_output_rows = 1u;
+        std::max(opts.prefill_chunk, std::max(2, static_cast<int>(batch_size))));
+    exec_config.max_scheduled_requests = batch_size;
+    exec_config.max_scheduled_output_rows = batch_size;
 
     std::unique_ptr<shelf::qwen35::runtime::TpCoordinator> tp_coord;
     std::unique_ptr<shelf::gpu::GpuArena> tp1_arena;
@@ -430,7 +443,7 @@ int run_quality(int argc, char** argv) {
     }
 
     if (opts.tp == 1) {
-        auto seq_pool_result = shelf::state::SequenceSlotPool::create(*tp1_arena, 1u, num_pages);
+        auto seq_pool_result = shelf::state::SequenceSlotPool::create(*tp1_arena, batch_size, pages_per_sequence);
         if (!seq_pool_result.ok()) {
             fprintf(stderr, "SequenceSlotPool::create failed: %s\n",
                     seq_pool_result.status().message().c_str());
@@ -440,7 +453,7 @@ int run_quality(int argc, char** argv) {
         seq_pool = tp1_seq_pool.get();
 
         auto gdn_pool_result = shelf::state::GdnStatePool::create(
-            *tp1_arena, 1u, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
+            *tp1_arena, batch_size, shelf::qwen35::make_qwen35_gdn_state_layout(tc));
         if (!gdn_pool_result.ok()) {
             fprintf(stderr, "GdnStatePool::create failed: %s\n",
                     gdn_pool_result.status().message().c_str());
@@ -471,46 +484,55 @@ int run_quality(int argc, char** argv) {
         executor = tp1_executor.get();
     }
 
-    auto seq_result = shelf::state::create_paged_sequence_state(
-        *seq_pool, *gdn_pool, *kv_pool, required_seq_len, stream);
-    if (!seq_result.ok()) {
-        fprintf(stderr, "create_paged_sequence_state failed: %s\n",
-                seq_result.status().message().c_str());
-        return 1;
-    }
-    shelf::state::PagedSequenceState seq = seq_result.release();
-    if (tp_coord != nullptr) {
-        shelf::Status mirror_status = tp_coord->on_sequence_created(seq);
-        if (!mirror_status.ok()) {
-            fprintf(stderr, "tp sequence mirror failed: %s\n",
-                    mirror_status.message().c_str());
+    std::vector<shelf::state::PagedSequenceState> sequences;
+    sequences.reserve(batch_size);
+    for (uint32_t i = 0; i < batch_size; ++i) {
+        auto seq_result = shelf::state::create_paged_sequence_state(
+            *seq_pool, *gdn_pool, *kv_pool, required_seq_len, stream);
+        if (!seq_result.ok()) {
+            fprintf(stderr, "create_paged_sequence_state failed: %s\n",
+                    seq_result.status().message().c_str());
             return 1;
+        }
+        sequences.push_back(seq_result.release());
+        if (tp_coord != nullptr) {
+            shelf::Status mirror_status = tp_coord->on_sequence_created(sequences.back());
+            if (!mirror_status.ok()) {
+                fprintf(stderr, "tp sequence mirror failed: %s\n",
+                        mirror_status.message().c_str());
+                return 1;
+            }
         }
     }
 
     const uint32_t chunk = std::min<uint32_t>(
-        static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows);
+        static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_batch_rows / batch_size);
     uint32_t processed = 0u;
     while (processed < context) {
         const uint32_t chunk_len = std::min(chunk, context - processed);
-        shelf::qwen35::ScheduledRequest req;
-        req.sequence = &seq;
-        req.handle = seq.request_handle();
-        req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
-        req.token_begin = 0;
-        req.num_tokens = chunk_len;
-        req.prefix_tokens = seq.position;
-        req.compute_logits = tp_coord != nullptr;
-        req.sample = false;
-        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+        std::vector<shelf::qwen35::ScheduledRequest> reqs(batch_size);
+        std::vector<int32_t> token_ids;
+        token_ids.reserve(static_cast<size_t>(batch_size) * chunk_len);
+        for (uint32_t i = 0; i < batch_size; ++i) {
+            auto& req = reqs[i];
+            req.sequence = &sequences[i];
+            req.handle = sequences[i].request_handle();
+            req.execution_class = shelf::runtime::ExecutionClass::PREFILL;
+            req.token_begin = i * chunk_len;
+            req.num_tokens = chunk_len;
+            req.prefix_tokens = sequences[i].position;
+            req.compute_logits = tp_coord != nullptr;
+            req.sample = false;
+            token_ids.insert(token_ids.end(), corpus.begin() + processed, corpus.begin() + processed + chunk_len);
+        }
         shelf::qwen35::ScheduledBatch batch;
-        batch.token_ids = corpus.data() + processed;
+        batch.token_ids = token_ids.data();
         batch.requests = reqs;
-        batch.num_tokens = chunk_len;
-        batch.num_requests = 1u;
+        batch.num_tokens = chunk_len * batch_size;
+        batch.num_requests = batch_size;
         batch.num_decode_requests = 0u;
         batch.num_verify_requests = 0u;
-        batch.num_prefill_requests = 1u;
+        batch.num_prefill_requests = batch_size;
         shelf::Result<shelf::qwen35::BatchExecutionOutput> exec_out{shelf::Status::invalid_state(
             "unbound batch execution", __FILE__, __LINE__)};
         if (tp_coord != nullptr) {
@@ -584,23 +606,25 @@ int run_quality(int argc, char** argv) {
         const bool scoring = (feed_index + 1u) >= score_start;
         const int32_t feed_token = corpus[feed_index];
         const int32_t target = corpus[feed_index + 1u];
-        std::vector<int32_t> token_ids = {feed_token};
-        shelf::qwen35::ScheduledRequest req;
-        req.sequence = &seq;
-        req.handle = seq.request_handle();
-        req.execution_class = shelf::runtime::ExecutionClass::DECODE;
-        req.token_begin = 0;
-        req.num_tokens = 1u;
-        req.prefix_tokens = seq.position;
-        req.compute_logits = true;
-        req.sample = false;
-        std::vector<shelf::qwen35::ScheduledRequest> reqs = {req};
+        std::vector<int32_t> token_ids(batch_size, feed_token);
+        std::vector<shelf::qwen35::ScheduledRequest> reqs(batch_size);
+        for (uint32_t i = 0; i < batch_size; ++i) {
+            auto& req = reqs[i];
+            req.sequence = &sequences[i];
+            req.handle = sequences[i].request_handle();
+            req.execution_class = shelf::runtime::ExecutionClass::DECODE;
+            req.token_begin = i;
+            req.num_tokens = 1u;
+            req.prefix_tokens = sequences[i].position;
+            req.compute_logits = true;
+            req.sample = false;
+        }
         shelf::qwen35::ScheduledBatch batch;
         batch.token_ids = token_ids.data();
         batch.requests = reqs;
-        batch.num_tokens = 1u;
-        batch.num_requests = 1u;
-        batch.num_decode_requests = 1u;
+        batch.num_tokens = batch_size;
+        batch.num_requests = batch_size;
+        batch.num_decode_requests = batch_size;
         batch.num_verify_requests = 0u;
         batch.num_prefill_requests = 0u;
         shelf::Result<shelf::qwen35::BatchExecutionOutput> result{shelf::Status::invalid_state(
@@ -616,7 +640,7 @@ int run_quality(int argc, char** argv) {
             return 1;
         }
         shelf::qwen35::BatchExecutionOutput out = std::move(result.release());
-        if (out.num_outputs != 1u) {
+        if (out.num_outputs != batch_size) {
             fprintf(stderr, "teacher-forced step %u produced %u outputs\n", feed_index,
                     out.num_outputs);
             return 1;
@@ -687,6 +711,7 @@ int run_quality(int argc, char** argv) {
 
     printf("QUALITY_POSITIONS=%u\n", positions);
     printf("QUALITY_CONTEXT=%u\n", context);
+    printf("QUALITY_BATCH_SIZE=%u\n", batch_size);
     printf("QUALITY_SCORE_START=%u\n", score_start);
     printf("QUALITY_VOCAB=%u\n", vocab);
     printf("QUALITY_KV_DTYPE=%s\n",

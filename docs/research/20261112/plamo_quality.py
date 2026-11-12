@@ -45,6 +45,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--bench", required=True)
     parser.add_argument("--workdir", required=True)
+    parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
     root = Path(args.workdir)
     root.mkdir(parents=True, exist_ok=True)
@@ -66,7 +67,8 @@ def main():
                 output.write(struct.pack("<iI", ids[index + 1], index + 1))
                 output.write(logits[index].numpy().tobytes())
         cmd = [args.bench, "quality", "--model-dir", args.model, "--tokens-file", str(tokens),
-               "--context", "1", "--compare", str(baseline), "--dump", str(root / f"{name}.candidate")]
+               "--context", "1", "--batch-size", str(args.batch_size), "--compare", str(baseline),
+               "--dump", str(root / f"{name}.candidate")]
         run = subprocess.run(cmd, text=True, capture_output=True)
         if run.returncode:
             raise RuntimeError(f"{name}: shelf-bench exited {run.returncode}\n{run.stdout}\n{run.stderr}")

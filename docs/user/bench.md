@@ -152,6 +152,10 @@ dump する。`--compare` で baseline dump と突き合わせ、perplexity / me
 top-1 一致率 / top-5 overlap を出力する。性能ではなく品質の測定であり、
 `shelf-bench pp/tg` の数値とは混ぜない。
 
+`--batch-size N`（既定 1、最大 64）は同じ token 列を N 個の独立した sequence に
+与え、最初の sequence の logits を dump・比較する。batch 用 kernel の数値確認に使える。
+N が 2 以上の場合は単一 GPU のみ対応する。
+
 `--model-dir` は dense / grouped expert（MoE）/ Qwen4Exp のいずれでもよく、
 `--tensor-parallel 1 / 2 / 4` が使える。Qwen4Exp は `--tensor-parallel 4` を使う。
 
