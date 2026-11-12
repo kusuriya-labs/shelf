@@ -1037,3 +1037,11 @@ c=64 の計測を起動した。ユーザーから VRAM 不足による全回帰
 通常の algorithm cache は最大 16 entry で、満杯後の未登録形状は保存されない。
 したがって batch 行数が過去に出現したことだけでは hipBLASLt heuristic が cache hit
 したとは言えない。ただし上記 c=64 の 253 行停止は dense GEMM 対象外である。
+
+再実行時はまず各一時 patch を `git apply --unidiff-zero` で適用してビルドし、
+除去するときは同じ引数に `--reverse` を加える。`plamo_gpu_guard.py` は lock の
+代わりにはならないため、必ず `flock /tmp/r9700.lock` の子として使う。
+解除ファイルの存在に加え、R9700 の sysfs UUID と render device の対応、
+全回帰・ビルド・server process がないこと、`rocm-smi --showpids` が空であること、
+render device が空いていることを確認する。確認不能でも実行しない。
+[CPU 専用の guard 検証](test_plamo_gpu_guard.py) は GPU を使用しない。

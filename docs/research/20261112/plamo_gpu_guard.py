@@ -13,6 +13,7 @@ import sys
 
 RELEASE = '/tmp/agentx/gpu_release'
 RENDER = '/dev/dri/renderD130'
+R9700_ID = 'a8e9ddefa2d60f55'
 
 
 def blocking_processes():
@@ -39,9 +40,19 @@ def blocking_processes():
     return blocked
 
 
+def device_is_expected():
+    card = '/sys/class/drm/card2/device'
+    render = '/sys/class/drm/renderD130/device'
+    with open(card + '/unique_id') as f:
+        unique_id = f.read().strip()
+    return unique_id == R9700_ID and os.path.realpath(card) == os.path.realpath(render)
+
+
 def guard():
     if not os.path.isfile(RELEASE):
         raise RuntimeError('release marker absent')
+    if not device_is_expected():
+        raise RuntimeError('R9700 sysfs or render device identity changed')
     blocked = blocking_processes()
     if blocked:
         raise RuntimeError(f'build, regression, or server process active: {blocked}')
