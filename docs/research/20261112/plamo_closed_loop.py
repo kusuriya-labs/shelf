@@ -31,6 +31,8 @@ async def run(args):
     cases = workload()
     command = [args.server, "--model-dir", args.model, "--port", str(args.port),
                "--max-seq-len", "2048", "--max-concurrent-requests", str(args.concurrency)]
+    if args.max_num_batched_tokens is not None:
+        command.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
     with open(args.log, "w") as log:
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
         try:
@@ -101,7 +103,8 @@ async def run(args):
                 tokens = sum(record["output_tokens"] for record in records)
                 print(json.dumps({"concurrency": args.concurrency, "warmup_after_first_completion_s": args.warmup,
                                   "elapsed_before_measurement_s": start_measure - started,
-                                  "measurement_s": args.duration, "completion_tokens": tokens,
+                                  "measurement_s": args.duration, "max_num_batched_tokens": args.max_num_batched_tokens,
+                                  "completion_tokens": tokens,
                                   "completion_tokens_per_s": tokens / args.duration,
                                   "completed_requests": len(records), "records": records},
                                  ensure_ascii=False), flush=True)
@@ -122,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--warmup", type=float, default=20)
     parser.add_argument("--duration", type=float, default=90)
+    parser.add_argument("--max-num-batched-tokens", type=int)
     parser.add_argument("--port", type=int, default=18232)
     parser.add_argument("--log", default="/tmp/plamo-closed-loop-server.log")
     asyncio.run(run(parser.parse_args()))
