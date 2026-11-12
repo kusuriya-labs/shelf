@@ -465,3 +465,72 @@ PLaMo / Qwen lowering と linear selector、Qwen structured output、および
 維持し、compute が停止済みなら起動を失敗させる CPU テストも通過。PLaMo の
 実モデル loader ctest は初回に 2B を誤指定して 3 GiB arena が不足したため失敗し、
 想定の 0.8B BF16 fixture を指定し直して通過した。全回帰 `--all` は実行していない。
+
+## 拡大品質評価と継続投入の測定方法
+
+現行の 2B EXL3、BF16 KV、投機なしの評価集合を拡張した。変換時評価の
+Tatoeba held-out 先頭 10 対に、業務・交通・研究・料理・公園などの 8 対を追加し、
+両方向の翻訳 template と正解訳を teacher forcing する。追加分は
+[データ](plamo_quality_extra.jsonl) に置く。WikiText-2 raw test の先頭から
+600 文字超の 4 段落は各 600 文字を一般文として別集計し、翻訳の採用判定には含めない。
+
+同じモデルの CPU Transformers BF16 logits と、`shelf-bench quality` の同一 token
+列を比較する。context は 1 token、各列の index 1 から末尾の 1 つ前までを集計する。
+各方向は全位置の KL と top-1 を位置数で重み付けし、最大 logits 差も記録する。
+64 行評価は各列を 64 本複製するため、異なる列が混在する batch の評価ではない。
+正解訳部分だけの補助指標も case ごとに出力する。Tatoeba の出典とライセンスは
+変換側の記録を参照し、原文の再配布を避けて固定 revision から再生成する。
+
+再現手順。Python の `pyarrow` と CPU 版 PyTorch、Transformers が必要。データ生成は
+入力ファイルの SHA-256 を検証する。WikiText は同じ revision の `wikitext-test.arrow`
+を指定する。元の reference script では `accelerate` の `device_map` を使うが、
+ここではそれを除いた CPU 実行を使う。
+
+```bash
+curl -fL -o /tmp/plamo-tatoeba.parquet \
+  https://huggingface.co/datasets/sentence-transformers/parallel-sentences-tatoeba/resolve/cec1343ab5a7a8befe99af4a2d0ca847b6c84743/en-ja/train-00000-of-00001.parquet
+python3 docs/research/20261112/plamo_eval_data.py \
+  --tatoeba /tmp/plamo-tatoeba.parquet --wiki /path/to/wikitext-test.arrow \
+  --output-dir /tmp/plamo-eval-data
+sed 's/, device_map="cpu"//' /home/homelab1/coding-local/rocm_exl3-plamo3/eval/plamo3_logits.py > /tmp/plamo-cpu-reference.py
+/tmp/venv-plamo/bin/python /tmp/plamo-cpu-reference.py reference \
+  --model /home/homelab1/datapool/ai_models/safetensors/plamo-3-translate-2b \
+  --reference /tmp/plamo-expanded-reference.pt --corpus /tmp/plamo-eval-data/heldout.jsonl \
+  --general-text /tmp/plamo-eval-data/wiki.jsonl --samples 18
+export LD_LIBRARY_PATH=/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib:/opt/rocm/core-7.14/lib
+export ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_quality.py \
+  --reference /tmp/plamo-expanded-reference.pt \
+  --model /home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24 \
+  --bench "$PWD/build-gfx1201/shelf-bench" --workdir /tmp/plamo-expanded-quality \
+  --batch-size 64 --prefix heldout-ja-en- --prefix heldout-en-ja- --prefix general-corpus-
+```
+
+[継続投入スクリプト](plamo_closed_loop.py) は翻訳方向ごとの既存 4 文を 1 / 2 / 4 / 6
+文結合して 32 入力を構成し、seed 17 で固定順に並べる。要求完了ごとに次の入力を
+投入して同時要求数 c を維持する。greedy、最大出力 320 token、prefix cache 既定値、
+`max_seq_len=2048`。全 worker が少なくとも一度完了してからさらに 20 秒温め、
+以降 90 秒の区間内に完了した要求の `completion_tokens` 合計を 90 秒で割る。
+区間境界をまたぐ要求は完了時刻に全 token を計上するため、有限区間の境界誤差がある。
+応答長と開始・完了時刻を JSON に残す。server は各実行で起動し直す。たとえば c=64:
+
+```bash
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_closed_loop.py \
+  --server "$PWD/build-gfx1201/shelf-server" \
+  --model /home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24 \
+  --concurrency 64 --warmup 20 --duration 90
+```
+
+現行実装の拡大集合、c=64 の基準は次のとおり。実行ごとの詳細は
+[JSON](plamo3_expanded_quality_baseline.json) に記録する。
+
+| 集合 | 位置数 | 平均 KL | top-1 一致 | 最大 logits 差 | 採用上限 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 日→英 | 875 | 0.017130 | 92.80% | 4.125 | 0.018130 |
+| 英→日 | 875 | 0.017396 | 93.37% | 7.734375 | 0.018396 |
+| WikiText | 521 | 0.051676 | 90.21% | 4.03125 | 対象外 |
+
+両方向とも現行の時点で絶対値 0.01 を超えるため、指示された例外に従い、
+それぞれの未丸め基準値 + 0.001 を上限とする。この例外を使う場合も
+「CPU BF16 比 KL < 0.01」を達成したことにはならない。top-1 の比較は同一位置で
+行い、有意な低下がある候補は採用しない。非翻訳文の WikiText は個別に観測する。

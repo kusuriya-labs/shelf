@@ -46,10 +46,15 @@ def main():
     parser.add_argument("--bench", required=True)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--prefix", action="append", help="評価する case 名の接頭辞")
     args = parser.parse_args()
     root = Path(args.workdir)
     root.mkdir(parents=True, exist_ok=True)
     cases = torch.load(args.reference, map_location="cpu", weights_only=True)
+    if args.prefix:
+        cases = [case for case in cases if case["name"].startswith(tuple(args.prefix))]
+    if not cases:
+        raise ValueError("no cases selected")
     results = []
     for case in cases:
         name = case["name"]
@@ -78,6 +83,27 @@ def main():
                         "target_metrics": target_metrics})
         print(json.dumps(results[-1], ensure_ascii=False), flush=True)
     (root / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
+    groups = {"ja-en": [], "en-ja": [], "wiki": []}
+    for result in results:
+        name = result["name"]
+        group = ("ja-en" if name.startswith("heldout-ja-en-") else
+                 "en-ja" if name.startswith("heldout-en-ja-") else
+                 "wiki" if name.startswith("general-corpus-") else None)
+        if group:
+            groups[group].append(result)
+    summary = {}
+    for group, items in groups.items():
+        if not items:
+            continue
+        positions = sum(int(item["metrics"]["QUALITY_POSITIONS"]) for item in items)
+        summary[group] = {
+            "cases": len(items), "positions": positions,
+            "mean_kl": sum(float(item["metrics"]["QUALITY_KL_MEAN"]) * int(item["metrics"]["QUALITY_POSITIONS"]) for item in items) / positions,
+            "top1_agreement": sum(float(item["metrics"]["QUALITY_TOP1_AGREEMENT"]) * int(item["metrics"]["QUALITY_POSITIONS"]) for item in items) / positions,
+            "max_logit_diff": max(float(item["metrics"]["QUALITY_LOGIT_MAX_ABS_DELTA"]) for item in items),
+        }
+    (root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"summary": summary}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
