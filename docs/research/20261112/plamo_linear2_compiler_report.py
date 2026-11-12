@@ -24,29 +24,35 @@ def analyze_asm(text,name):
     for block in re.split(r'(?=^\.LBB\d+_\d+:)',body,flags=re.M):
         ops=[m[1] for m in re.finditer(r'^\s+([a-z][a-z0-9_]+)\s',block,re.M)]
         if any(x.startswith('v_wmma') for x in ops):blocks.append({'label':block.splitlines()[0],'opcodes':dict(collections.Counter(ops)),'instructions':len(ops)})
-    return {'instruction_count':len(instructions),'opcodes':dict(counts),'wmma_instruction_distance':stats(gaps),'wmma_blocks':blocks}
+    return {'instruction_count':len(instructions),'nontemporal_load_hints':body.count('TH_LOAD_NT'),'wait_positions':[f'{i} {op}' for i,op in enumerate(instructions) if op.startswith('s_wait')],'opcodes':dict(counts),'wmma_instruction_distance':stats(gaps),'wmma_blocks':blocks}
 
 
 def main():
     root=Path(__file__).resolve().parents[3];build=root/'build-gfx1201/plamo-linear2';out=root/'docs/research/20261112'
     base=json.loads((build/'compiler/baseline/resources.json').read_text())
     resource=[]
-    new_resources=build/'compiler/accepted-prefill/resources.json'
     tus=base['translation_units']
-    if new_resources.exists():tus+=json.loads(new_resources.read_text())['translation_units']
+    for variant in ('accepted-prefill','rowscale-prefill','final-nocap-prefill'):
+        resource_path=build/'compiler'/variant/'resources.json'
+        if resource_path.exists():
+            for tu in json.loads(resource_path.read_text())['translation_units']:
+                tu['resource_variant']=variant
+                tus.append(tu)
     for tu in tus:
-        family=Path(tu['source']).stem;resource_dir=build/'compiler'/('accepted-prefill' if family=='projection_prefill' else 'baseline')/family;assembly=next(resource_dir.glob('*-gfx1201.s')).read_text()
+        family=Path(tu['source']).stem
+        resource_dir=build/'compiler'/tu.get('resource_variant','baseline')/family
+        assembly=next(resource_dir.glob('*-gfx1201.s')).read_text()
         for entry in tu['remarks']:
             name=entry['function'];demangled=subprocess.check_output(['/opt/rocm/core-7.14/lib/llvm/bin/llvm-cxxfilt',name],text=True).strip()
-            resource.append({'family':family,'name':demangled.split('(')[0].strip() if '(anonymous namespace)' not in demangled else demangled.replace('shelf::kernel::(anonymous namespace)::','').split('(')[0].strip(),**entry,'isa':analyze_asm(assembly,name)})
+            resource.append({'family':family,'resource_variant':tu.get('resource_variant','baseline'),'name':demangled.split('(')[0].strip() if '(anonymous namespace)' not in demangled else demangled.replace('shelf::kernel::(anonymous namespace)::','').split('(')[0].strip(),**entry,'isa':analyze_asm(assembly,name)})
     linear=json.loads((out/'plamo3_exl3_linear2.json').read_text());effective=[]
     body_nk=24*(3072*2560+2*512*2560+2560*3072+2*10240*2560+2560*10240);head_nk=107520*2560
     for event in linear['semantic_events']:
-        if event.get('within_measurement_window') and event['outputs']>0 and event['file'].startswith(('mix-before-exact-','mix-final2-','mix-prefill-')):
+        if event.get('within_measurement_window') and event['outputs']>0 and event['file'].startswith(('mix-before-exact-','mix-final2-','mix-prefill-','mix-rowscale-','mix-nocap-')):
             ops=2*(event['rows']*body_nk+event['outputs']*head_nk);us=event['us']['LINEAR_EXL3_INT8'];tops=ops/(us*1e6)
             effective.append({'file':event['file'],'concurrency':event['concurrency'],'rows':event['rows'],'outputs':event['outputs'],'band':event['band'],'useful_ops':ops,'linear_us':us,'effective_tops':tops,'dense_peak_percent':100*tops/383.0})
     groups={}
-    for phase in ('before-exact','final2','prefill'):
+    for phase in ('before-exact','final2','prefill','rowscale','nocap'):
         for c in (64,128):
             for band in ('1-64','65-128','129-255','256-511','512-2048'):
                 es=[e for e in effective if e['file'].startswith('mix-'+phase+'-') and e['concurrency']==c and e['band']==band]
@@ -67,6 +73,17 @@ def main():
                 match=re.search(r'Function Name:\s*(\S+)',chunk)
                 if match:remarks.append({'function':match[1],**{key:int(value) for key,value in re.findall(r'(TotalSGPRs|VGPRs|ScratchSize \[bytes/lane\]|Occupancy \[waves/SIMD\]|SGPRs Spill|VGPRs Spill|LDS Size \[bytes/block\]):\s*(\d+)',chunk)}})
             data['remarks']=remarks
+            assemblies=list(directory.glob('*-gfx1201.s'))
+            if assemblies:
+                assembly=assemblies[0].read_text()
+                selected_isa=[]
+                for entry in remarks:
+                    name=entry['function']
+                    demangled=subprocess.check_output(['/opt/rocm/core-7.14/lib/llvm/bin/llvm-cxxfilt',name],text=True).strip()
+                    if any(part in demangled for part in ('group_gemm<4, 1','group_gemm<4, 2','group_gemm<4, 4','group_gemm<5, 4','group_gemm_out<4','group_gemm_out<8')):
+                        selected_isa.append({'function':demangled,**analyze_asm(assembly,name)})
+                data['selected_isa']=selected_isa
+
         if data:variants[directory.name]=data
     prefill={}
     for directory in sorted((build/'prefill').glob('*')):
@@ -91,7 +108,7 @@ def main():
         '| family / kernel | SGPR | VGPR | LDS B/block | scratch B/lane | SGPR/VGPR spill | waves/SIMD |','| --- | ---: | ---: | ---: | ---: | --- | ---: |']
     for r in resource:
         name=r['name'];selected=('group_gemm<' in name or 'prefill_wmma_kernel<' in name or 'exl3_mul24_gemm_kernel<4,' in name or 'exl3_mul24_gemm_kernel<5,' in name or r['family']=='projection_prefill' or r['family']=='grouped' and '<true,' in name and name.endswith(('4u>','5u>')))
-        if selected:lines.append(f"| {r['family']} / `{name}` | {r.get('TotalSGPRs',0)} | {r.get('VGPRs',0)} | {r.get('LDS Size [bytes/block]',0)} | {r.get('ScratchSize [bytes/lane]',0)} | {r.get('SGPRs Spill',0)} / {r.get('VGPRs Spill',0)} | {r.get('Occupancy [waves/SIMD]',0)} |")
+        if selected:lines.append(f"| {r['family']} ({r['resource_variant']}) / `{name}` | {r.get('TotalSGPRs',0)} | {r.get('VGPRs',0)} | {r.get('LDS Size [bytes/block]',0)} | {r.get('ScratchSize [bytes/lane]',0)} | {r.get('SGPRs Spill',0)} / {r.get('VGPRs Spill',0)} | {r.get('Occupancy [waves/SIMD]',0)} |")
     lines+=['','## ISA','',
         '全 opcode と WMMA を含む basic block を JSON に保存した。WMMA の距離は ISA 上の命令数であり、実行時の cycle 間隔ではない。GFX12 の s_wait_loadcnt / s_wait_dscnt 等も集計する。','',
         '| kernel | mul24 | dot4 | alignbit | WMMA | global b32/b64/b128 | scratch load/store | WMMA命令距離 中央値 |','| --- | ---: | ---: | ---: | ---: | --- | --- | ---: |']
@@ -112,10 +129,20 @@ def main():
         if v.get('compiler_error'):lines.append(f"| {name} | compiler error | — | — | {v['compiler_error'][0].replace('|','/')} |")
         for r in v.get('runs',[]):
             b=statistics.median(r['before_us']);a=statistics.median(r['candidate_us']);lines.append(f"| {name} | {r['m']} / {r['n']}×{r['k']} / {r['bits']} / {r['count']} | {b:.2f} ({statistics.stdev(r['before_us']):.2f}) | {a:.2f} ({statistics.stdev(r['candidate_us']):.2f}) | {a/b:.3f} |")
+    lines += ['', '| variant | 設定 |', '| --- | --- |']
+    for name, variant in variants.items():
+        build_settings = variant.get('build', {})
+        settings = list(build_settings.get('flags', []))
+        if build_settings.get('occ') is not None:
+            settings.append('amdgpu_waves_per_eu min=' + str(build_settings['occ']))
+        if build_settings.get('nontemporal'):
+            settings.append('__builtin_nontemporal_load')
+        if settings:
+            lines.append('| ' + name + ' | `' + ' '.join(settings) + '` |')
     lines+=['','## large-M 試作','',
         '入力と scale を swizzle 付き LDS に二重 buffer で置く。INT8 fragment の2回分を128 bitで運び、GEMMと出力回転を融合する。',
         'cached は trellis を lane / K-pair 順の INT8 へ展開し、direct は元の trellis を使う。いずれも per-128-K の scale と累積順を維持し、旧 per-group reference と BF16 出力・padding の bit 一致を確認する。',
-        '256行以上の従来 RowScale 経路との値は一般に一致しないため、採用前に875位置/方向の品質評価を行う。','',
+        'exact版は256行以上の従来RowScale経路と丸めが変わる。M320の875位置/方向でtop1低下基準を超えたため不採用。最終候補はRowScale保持版である。','',
         '数値の全 p50・分散・資源・opcode は [JSON](plamo3_exl3_linear2_compiler.json) を参照。']
     lines += ['', '| variant | M / N×K / bit | dense before µs | direct µs (SD) | cached µs (SD) |', '| --- | --- | ---: | ---: | ---: |']
     for name, variant in prefill.items():

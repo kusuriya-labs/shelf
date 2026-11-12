@@ -31,10 +31,10 @@ def main():
         runs[(tag,r['concurrency'])].append({'file':path.name,**{k:v for k,v in r.items() if k!='records'}})
     for (tag,c),rs in runs.items():
         data['closed_loop'].setdefault(tag,{})[str(c)]={'tok_s':summary([r['completion_tokens_per_s'] for r in rs]),'runs':rs}
-    for phase in ('before','after','final'):
+    for phase in ('before','after','exact','capped','final'):
         pooled={}
         for c in (1,4,16,64,128):
-            rs=[r for (tag,cc),rr in runs.items() if cc==c and tag.startswith(phase+'-') for r in rr]
+            rs=[r for (tag,cc),rr in runs.items() if cc==c and tag.startswith({'exact':'final','capped':'accepted','final':'nocap-final'}.get(phase,phase)+'-') for r in rr]
             pooled[str(c)]={'tok_s':summary([r['completion_tokens_per_s'] for r in rs]),'runs':rs}
         data['closed_loop'][phase]=pooled
     for path in sorted(root.glob('*.jsonl')):
@@ -95,20 +95,30 @@ def main():
         within_window=bool(origin and context['start']<=origin[0]<context['end'])
         events.append({'file':path.name,'rows':int(m[1]),'outputs':int(m[2]),'prefills':int(m[3]),'band':band(int(m[1])),'concurrency':context['concurrency'] if context else None,'within_measurement_window':within_window,'trace_context':context['file'] if context else None,'us':dict(totals),'projection_us':dict(projections),'dispatch_counts':dict(counts),'head_us':linear[-1] if linear and int(m[2])>0 else None})
     data['semantic_events']=events
-    for name in ['quality','quality-final','quality-final3','quality-prefill','quality-prefill-320']:
+    for name in ['quality','quality-final','quality-final3','quality-prefill','quality-prefill-320','quality-prefill-192','quality-rowscale','quality-rowscale-192','quality-rowscale-320','quality-rowscale-first','quality-uncapped-320','quality-final-nocap','quality-final-nocap-192','quality-final-nocap-320']:
         p=root/name/'quality.json'
         if p.exists():data['quality'][name]=json.loads(p.read_text())
-    for name in ['cold','cold-final','cold-final3','cold-prefill']:
+    if (root/'quality-final-nocap-320/quality.json').exists():
+        rows_equal={}
+        for candidate in (root/'quality-final-nocap-320/candidate').glob('*.candidate'):
+            old=root/'quality-rowscale-first/before'/candidate.name
+            rows_equal[candidate.name]=old.exists() and hashlib.sha256(candidate.read_bytes()).digest()==hashlib.sha256(old.read_bytes()).digest()
+        data['quality']['nocap320_vs_old_first']=rows_equal
+    for name in ['cold','cold-final','cold-final3','cold-prefill','cold-rowscale','cold-uncapped','cold-final-nocap']:
         p=root/name/'cold.json'
         if p.exists():data[name]=json.loads(p.read_text())
     for path in root.glob('*test*.log'):
         data['tests'][path.name]=path.read_text()
-    for folder in ('server-tests','server-tests-final3','server-tests-accepted','server-tests-prefill'):
+    for folder in ('server-tests','server-tests-final3','server-tests-accepted','server-tests-prefill','server-tests-rowscale','server-tests-final-nocap'):
         for path in (root/folder).glob('tests.json'):
             data['tests']['server']=json.loads(path.read_text())
+    real_unit=root/'prefill/unit-final-nocap.log'
+    if real_unit.exists():data['tests']['prefill-real-shapes']=real_unit.read_text()
+    paired_final=root/'paired_positions-final-nocap.json'
+    if paired_final.exists():data['paired_positions-final-nocap']=json.loads(paired_final.read_text())
     data['protocol_exclusions']=[{'file':p.name,'reason':'計測窓後に親の出力待ちで lock 解放が遅延したため除外。before-c の同条件再測定に置換。'} for p in (root/'runs/discarded-lock-delay').glob('*.json')]
     event_groups={}
-    for variant in ('before-exact','final2','final3','prefill'):
+    for variant in ('before-exact','final2','final3','prefill','rowscale','nocap'):
         for c in (1,64,128):
             for b in ('1-64','65-128','129-255','256-511','512-2048'):
                 es=[e for e in events if e['file'].startswith('mix-'+variant+'-') and e['band']==b and e['concurrency']==c and e['within_measurement_window'] and e['outputs']>0]
@@ -117,40 +127,76 @@ def main():
     data['semantic_band_summary']=event_groups
     paired=root/'paired_positions.json'
     if paired.exists():data['paired_positions']=json.loads(paired.read_text())
+    cap_five=root/'cold-rowscale/cold-five.json'
+    if cap_five.exists():data['capped_cold_first_five']=json.loads(cap_five.read_text())
     rejected_five=root/'cold-final3/cold-five.json'
     if rejected_five.exists():data['rejected_input_slice_cold_first_five']=json.loads(rejected_five.read_text())
     data['accepted_variant']='final2'
-    if (root/'FINAL_PREFILL_ACCEPTED').exists():data['accepted_variant']='prefill'
+    if (root/'FINAL_NOCAP_ACCEPTED').exists():data['accepted_variant']='nocap'
     smoke=root/'quality96-smoke.log'
     if smoke.exists():data['quality96_smoke']={line.split('=',1)[0]:line.split('=',1)[1] for line in smoke.read_text().splitlines() if line.startswith('QUALITY_') and '=' in line}
     data['candidate_decisions']={
+        'prefill_exact':{'accepted':False,'reason':'M320の同条件before対比でtop1がJA1.83pt/EN1.49pt低下。KL基準は満たすがtop1基準を超えるため不採用。coldは改善するが採用しない。','closed_loop_tags':['final-a','final-b']},
+        'rowscale_capped':{'accepted':False,'reason':'M320全36dumpはbit一致、速度も改善したがcold10回のrun間差mean5.18→6.87/median6→7/max9→11で不採用。'},
+        'rowscale_uncapped':{'accepted':data['accepted_variant']=='nocap','reason':'RowScaleとenergy分類を維持し、compact不要になったflag行数制限を除去。通常行全K int32とflag行groupFMAを同じGEMMで処理。'},
         'mixed_split2':{'accepted':False,'reason':'c=64 の30秒探索が2854.97/2815.37 tok/sと不安定。拡大品質未評価で採用しない。'},
         'input_slice':{'accepted':False,'scope':'M=1、4bit の QKV/O/down。K split の入力 group のみをLDSへ回転。','validation':'c=1 90秒窓156.12/156.80、全80dump bit一致。cold10回の平均6.02は同じだが中央値6→7、最大11→13のため不採用。'},
         'greedy_argmax':{'implemented':False,'reason':'BF16丸めと公開logits出力のcontractを維持。今回の融合はGEMM+outまで。'}}
     if args.require_complete:
-        phases=('before','final') if data['accepted_variant']=='prefill' else ('before','after')
+        final_selected = data['accepted_variant'] == 'nocap'
+        phases = ('before', 'final') if final_selected else ('before', 'after')
         for phase in phases:
-            for c in ('1','4','16','64','128'):
-                if len(data['closed_loop'][phase][c]['runs'])<2:raise ValueError(f'{phase} c={c}: fewer than two runs')
-        if not all(data['quality']['quality-final'][c]['all_logits_bit_equal'] for c in ('1','64')):raise ValueError('quality dumps differ')
-        if len(data['tests'].get('server',[]))!=5 or any(r['exit_code'] for r in data['tests']['server']):raise ValueError('server tests incomplete')
-        if '100% tests passed' not in data['tests'].get('focused-accepted-tests.log',''):raise ValueError('focused tests incomplete')
-        if 'cold-final' not in data:raise ValueError('cold tests incomplete')
-        if 'paired_positions' not in data:raise ValueError('paired positions incomplete')
-        if data['accepted_variant']=='prefill':
-            if not all(data['quality']['quality-prefill'][c]['all_logits_bit_equal'] for c in ('1','64')):raise ValueError('prefill quality dumps differ')
-            q=data['quality']['quality-prefill-320']['variants']['candidate']['summary']
-            for direction in ('ja-en','en-ja'):
-                if q[direction]['positions']!=875 or q[direction]['mean_kl']>=0.02:raise ValueError('large-M quality KL/positions failed')
-                old=data['quality']['quality-final']['64']['summary'][direction]['top1_agreement']
-                if q[direction]['top1_agreement']<old-0.01:raise ValueError('large-M top1 failed')
-            cold=data['cold-prefill']
-            for key in ('pairwise_mean','pairwise_median','pairwise_max'):
-                if cold['final'][key]>cold['baseline'][key]:raise ValueError('cold output variation worsened: '+key)
-            if '100% tests passed' not in data['tests'].get('focused-prefill-tests.log',''):raise ValueError('prefill tests incomplete')
-            pp=root/'paired_positions320.json'
-            if not pp.exists():raise ValueError('large-M per-position KL missing')
-            data['paired_positions320']=json.loads(pp.read_text())
+            for c in ('1', '4', '16', '64', '128'):
+                runs_for_c = data['closed_loop'][phase][c]['runs']
+                if len(runs_for_c) < 2:
+                    raise ValueError(f'{phase} c={c}: fewer than two runs')
+                if any(r['measurement_s'] != 90 or r['warmup_after_first_completion_s'] != 20 for r in runs_for_c):
+                    raise ValueError(f'{phase} c={c}: unexpected measurement protocol')
+        selected_quality = data['quality']['quality-final-nocap' if final_selected else 'quality-final']
+        for c in ('1', '64'):
+            if not selected_quality[c]['all_logits_bit_equal'] or len(selected_quality[c]['logits']) != 40:
+                raise ValueError('standard quality dumps differ or are incomplete')
+        if len(data['tests'].get('server', [])) != 5 or any(r['exit_code'] for r in data['tests']['server']):
+            raise ValueError('server tests incomplete')
+        focused = 'focused-final-nocap-tests.log' if final_selected else 'focused-accepted-tests.log'
+        if '100% tests passed' not in data['tests'].get(focused, ''):
+            raise ValueError('focused tests incomplete')
+        if final_selected:
+            large = data['quality']['quality-final-nocap-320']
+            q = large['variants']['candidate']['summary']
+            for direction in ('ja-en', 'en-ja'):
+                if q[direction]['positions'] != 875 or q[direction]['mean_kl'] >= 0.02:
+                    raise ValueError('large-M quality KL/positions failed')
+                old = large['variants']['before']['summary'][direction]['top1_agreement']
+                if q[direction]['top1_agreement'] <= old - 0.01:
+                    raise ValueError('large-M top1 failed')
+            first_equal = data['quality']['nocap320_vs_old_first']
+            if len(first_equal) != 36 or not all(first_equal.values()):
+                raise ValueError('M320 row permutation check failed')
+            exact = data['quality']['quality-final-nocap-192']['bit_equal']
+            if len(exact) != 4 or not all(exact.values()):
+                raise ValueError('M192 full-model dump mismatch')
+            cold = data['cold-final-nocap']
+            for variant in ('baseline', 'final'):
+                if len(cold[variant]['cold64_vs_c1']) != 10:
+                    raise ValueError('cold repetitions incomplete')
+                if cold[variant]['c1_differ_between_repeats']:
+                    raise ValueError('c1 cold repetitions differ')
+            if cold['final_vs_baseline_c1']:
+                raise ValueError('c1 cold changed from baseline')
+            for key in ('pairwise_mean', 'pairwise_median', 'pairwise_max'):
+                if cold['final'][key] > cold['baseline'][key]:
+                    raise ValueError('cold output variation worsened: ' + key)
+            if 'PASS' not in data['tests'].get('prefill-real-shapes', ''):
+                raise ValueError('real grouped shapes test failed')
+            if 'paired_positions-final-nocap' not in data:
+                raise ValueError('final per-position KL missing')
+            pp = root / 'paired_positions320.json'
+            if not pp.exists():
+                raise ValueError('large-M per-position KL missing')
+            data['paired_positions320'] = json.loads(pp.read_text())
+        elif 'cold-final' not in data or 'paired_positions' not in data:
+            raise ValueError('prior quality or cold records incomplete')
 
     data['binaries']={path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in root.glob('shelf-*') if path.is_file()}
     args.output.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n')
