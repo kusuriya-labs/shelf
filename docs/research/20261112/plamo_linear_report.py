@@ -40,6 +40,10 @@ def main():
         for variant,name in [(0,'baseline'),(9,'final')]:
             row[name] = {d['stage']:stats(d['us']) for d in records if
                 (d['m'],d['n'],d['k'],d['bits'],d['variant'])==(m,n,k,bits,variant)}
+            for stage in ['rotate','gemm','out','linear']:
+                item=row[name][stage]
+                item['max_min_change_percent']=(item['max']/item['min']-1)*100
+                item['stability']='FAIL' if item['max_min_change_percent']>=30 else 'PASS'
             row[name]['gemm_roofline_ratio'] = row[name]['gemm']['median']/row['weight_only_roofline_us']
             row[name]['linear_roofline_ratio'] = row[name]['linear']['median']/row['weight_only_roofline_us']
         shape_rows.append(row)
@@ -73,6 +77,9 @@ def main():
             profile_summary[str(c)][variant] = {'events_us':summary,
                 'event_total_us':stats([r['event_total_us'] for r in values]),'stepwall_median_ms':stats(wall)}
     quality = json.loads((work/'quality-final/quality.json').read_text())
+    paired_positions = json.loads((work/'paired_positions.json').read_text())
+    roundoff = max(abs(v) for groups in paired_positions.values()
+        for row in groups['incumbent'] for v in row['delta_kl'])
     for batch in ['1','64']:
         assert quality[batch]['all_logits_bit_equal'] and len(quality[batch]['logits']) == 40
         for direction in ['ja-en','en-ja']:
@@ -89,12 +96,17 @@ def main():
         'gpu':'R9700 gfx1201 GPU-a8e9ddefa2d60f55','rocm':'7.14','gpu_lock':'/tmp/r9700.lock',
         'weight_only_bytes_per_step':sum(n*k*bits//8*count for (n,k,bits),count in counts.items()),
         'roofline_bandwidth_gb_s':636,'source_sha256':{p:digest(Path(p)) for p in source_paths},
-        'binary_sha256':{name:digest(work/name) for name in ['shelf-compute.baseline','shelf-compute.final3','shelf-bench.final3']},
+        'cache_prep_note':'raw の cold=true は event 前の128 MiB hipMemsetを表す。cache miss は計測しておらず、DRAM cold の保証ではない。',
+        'binary_sha256':{name:digest(work/name) for name in ['shelf-compute.baseline','shelf-compute.final4','shelf-bench.final4']},
+        'discarded_overlap_runs':[{k:v for k,v in json.loads(p.read_text()).items() if k!='records'} |
+            {'name':p.stem} for p in sorted((work/'runs/overlap-experiment').glob('*.json'))],
         'shape_profile':shape_rows,'group_profile':load_lines(work/'final-groups-selected.jsonl'),
+        'stability_followup':{name:load_lines(work/f'{name}.jsonl') for name in ['q5-repeat','q5-preroll','q4-preroll']},
         'exploration_mean20_us':{name:load_lines(work/f'{name}.jsonl') for name in ['stages','sweep','extra','groups']},
         'wide_candidate_p50_us':load_lines(work/'paired-selected.jsonl'),
         'closed_loop_runs':e2e,'throughput':throughput,'step_profile':profile_summary,'step_profile_raw':profiles,
-        'quality':quality,'cold':cold,'server_tests':json.loads((work/'server-tests-final/tests.json').read_text()),
+        'quality':quality,'paired_positions':paired_positions,'paired_incumbent_roundoff_max_abs':roundoff,
+        'cold':cold,'server_tests':json.loads((work/'server-tests-final/tests.json').read_text()),
         'focused_ctest_log':(work/'focused-tests-final.log').read_text()}
     args.output.with_suffix('.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
     lines = ['# PLaMo 3 EXL3-INT8 linear の最適化', '',
@@ -113,18 +125,26 @@ def main():
         'M は行数、N は出力、K は入力。shape micro は seed 17 の合成 resident trellis を使う。',
         '実 checkpoint の step event と継続投入は別に測定する。個別 projection の after は融合を含まない。',
         '各 run は warmup 20 回・測定 20 回の p50、5 run を AB / BA で交互に測定した。',
-        '表は 5 個の p50 の中央値。単位は µs。GEMM と linear の前には 128 MiB を書いて cache を置換する。',
+        '表は 5 個の p50 の中央値。単位は µs。GEMM と linear の前には 128 MiB の hipMemset を挿入した。',
+        'これは cache 置換を意図した前処理で、hardware の cache miss は計測していない。raw の cold=true はこの前処理の有無を表す。',
         '微小 kernel の event 区間には host / launch の影響もあるため、stage の和を全 linear 時間に足し直さない。',
-        'roofline は trellis bytes / 636 GB/s の weight-only 下限で、activation、partial、回転、launch を含まない。', '',
-        '| M | N × K / bit | calls | rotate before / after | GEMM before / after | out before / after | linear before / after | GEMM / roof before / after |',
-        '| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+        'roofline は既存測定の帯域 636 GB/s を使った weight-only 下限で、activation、partial、回転、launch を含まない。',
+        '実 step の全 linear trellis は cache 容量を超えるが、個別 shape の cache 状態は完全には再現していないため、比は参考値とする。', '',
+        '| M | N × K / bit | calls | rotate before / after | GEMM before / after | out before / after | linear before / after | GEMM / roof before / after | linear / roof before / after |',
+        '| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
     for r in shape_rows:
         b,a=r['baseline'],r['final']
-        columns=[f'{b[stage]["median"]:.2f} / {a[stage]["median"]:.2f}' for stage in ['rotate','gemm','out','linear']]
-        lines.append(f'| {r["m"]} | {r["n"]} × {r["k"]} / {r["bits"]} | {r["calls_per_step"]} | '+' | '.join(columns)+f' | {b["gemm_roofline_ratio"]:.2f} / {a["gemm_roofline_ratio"]:.2f} |')
+        columns=[f'{b[stage]["median"]:.2f}{"†" if b[stage]["stability"]=="FAIL" else ""} / {a[stage]["median"]:.2f}{"†" if a[stage]["stability"]=="FAIL" else ""}' for stage in ['rotate','gemm','out','linear']]
+        lines.append(f'| {r["m"]} | {r["n"]} × {r["k"]} / {r["bits"]} | {r["calls_per_step"]} | '+' | '.join(columns)+f' | {b["gemm_roofline_ratio"]:.2f} / {a["gemm_roofline_ratio"]:.2f} | {b["linear_roofline_ratio"]:.2f} / {a["linear_roofline_ratio"]:.2f} |')
+    lines += ['', '† M=64・4 / 5 bit Q の baseline 単体 linear は、run p50 の最大 / 最小差が 30% を超え、安定性判定を FAIL とした。',
+        '隔離再測定と warmup 1000 回でも約 59〜79 µs の変動が残った。原因は確定していない。',
+        'この単体 linear の改善率は採用根拠に使わず、下の projection 統合列・実 step・診断なし closed-loop の再現性で判断する。',
+        '再測定の全値を `stability_followup` に残す。']
     lines += ['', '## launch 統合', '',
         'QKV と gate/up は SUH が異なるので、量子化した同じ入力を使い回していない。各 projection の演算と丸めを保ったまま grid をまとめた。',
         'linear は論理 169 個のまま、1〜255 行の対象 step では物理 launch が 507→291、実 dispatch が 169→97 になる。',
+        'gfx12 の INT8 WMMA は従来から使用しており、最終経路でも維持する。M=64 の 4 bit GEMM は各 wave で weight fragment を 32 行に再利用し、行方向に 2 block を使う。',
+        '同じ N tile の行 block を隣接して配置する。cache miss は未計測なので、DRAM からの読み出しが厳密に 1 回になるとは主張しない。',
         '次表は既存の個別 projection 列と最終の統合列を交互に測定した値。表示は 5 run p50 の中央値 ± 標本標準偏差。', '',
         '| M | 対象 / bit | before µs | after µs |', '| ---: | --- | ---: | ---: |']
     groups = report['group_profile']
@@ -152,8 +172,9 @@ def main():
         lines.append(f'| {c} | {b["median"]:.2f} ± {b["stdev"]:.2f} | {a["median"]:.2f} ± {a["stdev"]:.2f} |')
     total_bytes=report['weight_only_bytes_per_step']
     lines += ['', f'linear の trellis は 1 step あたり {total_bytes/1e9:.4f} GB。1 回ずつ読む weight-only 下限は {total_bytes/636e6:.3f} ms。',
-        '以前の 2.8〜3.2 ms は embedding を含む checkpoint 全体からの概算であり、ここでの linear 限定の byte 数とは異なる。',
+        '既存文書の約 3.16 ms は embedding を含む checkpoint 全体（約 2.007 GB）からの概算であり、ここでの linear 限定の byte 数とは異なる。',
         '測定で得た最高値は探索した候補での到達値であり、今後の kernel も含む厳密な上限ではない。', '']
+    lines.append(f'修正版の closed-loop 観測最大は c=64 が {throughput["64"]["final"]["max"]:.2f}、c=4 が {throughput["4"]["final"]["max"]:.2f} tok/s。')
     for c,goal in [(64,4000),(4,700)]:
         value=throughput[str(c)]['final']['mean']
         lines.append(f'c={c} の目標 {goal:,} tok/s は未達。平均との差は {goal-value:.2f} tok/s、さらに {100*(goal/value-1):.2f}% のスループット改善が必要。')
@@ -162,14 +183,16 @@ def main():
         'RMSNorm、attention、その他の演算と待ち時間も残るが、今回それらの最適化や stall の因果調査は行っていない。', '',
         '## 品質', '',
         '各方向 18 文・875 位置を CPU BF16 と比較し、WikiText 521 位置を別集計した。各列を同じ batch 行数に複製する既存手順であり、混在文の teacher forcing ではない。',
-        'c=1 / 64 の全 80 dump は直前の採用済み実装と byte 一致した。今回の対応位置 KL 差・最大 logits 差・top-1 低下は全て 0。', '',
+        'c=1 / 64 の全 80 dump は直前の採用済み実装と byte 一致した。今回の対応位置 KL 差は数学的に 0 で、最大 logits 差・top-1 低下も 0。',
+        f'位置ごとの float64 再計算には最大 {roundoff:.2e} の丸め誤差がある。元の計算値を JSON に保存した。', '',
         '| batch | 方向 | KL | top-1 | CPU BF16 との最大 logits 差 |', '| ---: | --- | ---: | ---: | ---: |']
     for batch in ['1','64']:
         for direction in ['ja-en','en-ja']:
             q=quality[batch]['summary'][direction]
             lines.append(f'| {batch} | {direction} | {q["mean_kl"]:.8f} | {q["top1_agreement"]*100:.4f}% | {q["max_logit_diff"]:.6f} |')
     lines += ['', 'c=64 の元の基準（KL 0.017130 / 0.017396）との差は、既採用 split-K 4 の累積差である。今回の変更では増減していない。',
-        '元の基準に対する paired per-position KL と文単位 bootstrap 95% CI、および incumbent との差を JSON に保存する。', '',
+        '元の基準に対する paired per-position KL と文単位 bootstrap 95% CI、および incumbent との差を JSON に保存する。',
+        'case 名と dump 位置に対応する全 KL 差も `paired_positions` に格納する。', '',
         '## cold と batch 形状', '',
         '固定行数の kernel 比較は 1 / 4 / 16 / 17 / 32 / 33 / 48 / 49 / 64 / 70 / 128 / 192 / 255 行で BF16 出力と padding が一致した。',
         'HTTP の cold 64 件を各 5 回起動し直し、全 10 組の run 間出力差を比較した。',
@@ -184,6 +207,9 @@ def main():
         '関連 kernel / unit と PLaMo BF16 / EXL3 / synthetic / template / startup server テストを実行した。結果の詳細は JSON に保存する。`--all` は実行していない。',
         f'詳細データ: [{args.output.name}.json]({args.output.name}.json)。']
     lines += ['', '### 不採用と保留', '',
+        '途中の出力回転は、各 wave の列ループの刻みが 1 で、同じ列区間を複数 wave が重複して書いていた。',
+        '出力値は bit 一致していたが、列の所有者が一意になるよう刻みを wave 数に修正した。',
+        '修正前の closed-loop は `discarded_overlap_runs` に分離し、上の採用表から除外した。修正後に品質・kernel・server・速度を再検証した。', '',
         'INT8 への事前復号は、既存の WMMA fragment 順に展開した cache を使って試した。',
         '次表の cache は探索した MT / split-K の中の最速値で、baseline は production incumbent。split 数の変更も含む探索値であり、採用の精度検証を通した値ではない。', '',
         '| M | 対象 | baseline GEMM µs | 最速 cache GEMM µs | MT / split |',
@@ -208,26 +234,31 @@ def main():
         lines.append(f'| {shape[0]} | {name} | {statistics.median(before["us"]):.2f} | {statistics.median(after["us"]):.2f} | {sp} |')
     lines += ['', 'split-K は 1 / 2 / 4 / 5 / 8 / 10、row tile は 1 / 2 / 4、wave は 4 / 8 を探索した。',
         '8 wave と split の変更は形状により勝敗があり、統合後の全体速度と品質を根拠に採用できる優位を確定していない。',
-        '最終経路は 4 wave と既存 split を使い、加算順を維持する。5 bit の先読み省略は register の live 範囲を縮めるために選択した。', '',
+        '最終 GEMM は 4 wave と既存 split を使い、加算順を維持する。5 bit の先読み省略は register の live 範囲を縮めるために選択した。', '',
         '適用行数を拡大した途中の候補では、MT=2 のままの M=192 gate が約 +11%、M=128 / 192 head が約 +12% / +15% 遅くなった。',
         'その選択は外し、4 bit は 129 行以上を MT=4、head は 65 行以上を既存経路に戻した。生の比較は `wide_candidate_p50_us` にある。',
         'greedy の head+argmax 融合は未実装。head の採用変更は tile と出力回転までであり、sampling を変更したとは主張しない。', '',
         '### 再現手順', '',
-        '指定 worktree の root で実行する。baseline は開始時点 `d3a8a7b` の保存済み binary、final3 は最終コードの保存済み binary。',
+        '指定 worktree の root で実行する。baseline は開始時点 `d3a8a7b` の保存済み binary、final4 は最終コードの保存済み binary。',
         '参照データの作成は [既存手順](plamo3_exl3.md#拡大品質評価と継続投入の測定方法) に従う。',
         '各 runner が GPU UUID、library path、flock を設定する。CPU の build は GPU lock を取得しない。', '',
         '```bash',
         'export PATH=/tmp/venv-plamo/bin:/tmp/venv-so/bin:$PATH',
+        'export LD_LIBRARY_PATH=/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib:/opt/rocm/core-7.14/lib',
         'python3 docs/research/20261112/plamo_linear_build.py',
         'python3 docs/research/20261112/plamo_linear_scan.py --selected --output build-gfx1201/plamo-linear/final-selected.jsonl',
         'python3 docs/research/20261112/plamo_linear_scan.py --groups --output build-gfx1201/plamo-linear/final-groups-selected.jsonl',
         'python3 docs/research/20261112/plamo_linear_scan.py --sweep --mean20 --output build-gfx1201/plamo-linear/sweep.jsonl',
         'python3 docs/research/20261112/plamo_linear_scan.py --extra --mean20 --output build-gfx1201/plamo-linear/extra.jsonl',
-        'python3 docs/research/20261112/plamo_linear_quality.py --bench build-gfx1201/plamo-linear/shelf-bench.final3 --output build-gfx1201/plamo-linear/quality-final',
-        'python3 docs/research/20261112/plamo_linear_compare.py --baseline build-gfx1201/plamo-linear/shelf-compute.baseline --candidate build-gfx1201/plamo-linear/shelf-compute.final3 --output build-gfx1201/plamo-linear/runs --tag paired --concurrency 64 1 4 16 128',
-        'python3 docs/research/20261112/plamo_linear_runs.py --compute build-gfx1201/plamo-linear/shelf-compute.final3 --output build-gfx1201/plamo-linear/runs --tag final-repeat --concurrency 128 64 16 4 1',
-        'python3 docs/research/20261112/plamo_linear_cold.py --baseline build-gfx1201/plamo-linear/shelf-compute.baseline --candidate build-gfx1201/plamo-linear/shelf-compute.final3 --output build-gfx1201/plamo-linear/cold-final',
+        'flock /tmp/r9700.lock env ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 build-gfx1201/plamo-linear/micro 64 3072 2560 5 4 0 > build-gfx1201/plamo-linear/q5-repeat.jsonl',
+        'flock /tmp/r9700.lock env ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 build-gfx1201/plamo-linear/micro 64 3072 2560 5 4 0 1000 > build-gfx1201/plamo-linear/q5-preroll.jsonl',
+        'flock /tmp/r9700.lock env ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55 build-gfx1201/plamo-linear/micro 64 3072 2560 4 4 0 1000 > build-gfx1201/plamo-linear/q4-preroll.jsonl',
+        'python3 docs/research/20261112/plamo_linear_quality.py --bench build-gfx1201/plamo-linear/shelf-bench.final4 --output build-gfx1201/plamo-linear/quality-final',
+        'python3 docs/research/20261112/plamo_linear_compare.py --baseline build-gfx1201/plamo-linear/shelf-compute.baseline --candidate build-gfx1201/plamo-linear/shelf-compute.final4 --output build-gfx1201/plamo-linear/runs --tag paired --concurrency 64 1 4 16 128',
+        'python3 docs/research/20261112/plamo_linear_runs.py --compute build-gfx1201/plamo-linear/shelf-compute.final4 --output build-gfx1201/plamo-linear/runs --tag final-repeat --concurrency 128 64 16 4 1',
+        'python3 docs/research/20261112/plamo_linear_cold.py --baseline build-gfx1201/plamo-linear/shelf-compute.baseline --candidate build-gfx1201/plamo-linear/shelf-compute.final4 --output build-gfx1201/plamo-linear/cold-final',
         'python3 docs/research/20261112/plamo_linear_tests.py --output build-gfx1201/plamo-linear/server-tests-final',
+        'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /tmp/venv-plamo/bin/python docs/research/20261112/plamo_linear_positions.py',
         'python3 docs/research/20261112/plamo_linear_report.py',
         '```', '',
         '棄却した large-M の MT=2 候補は `plamo_linear_build.py --wide-mt2` で生成できる。',
@@ -245,7 +276,8 @@ def main():
         '### commit', '',
         '- `e8401e8` — 独立した projection をまとめる kernel と BF16 / padding 一致テスト。',
         '- `61bfe35` — 対象 checkpoint の flag、実行範囲と trace を保つ dispatch、selector、developer contract。',
-        '- 測定 harness の commit は Git history を参照。',
+        '- `1b0f262` — 再実行できる計測・比較・品質・cold・集計の harness。',
+        '- `bec6263` — 出力の列区間を各 wave が一度だけ担当する修正。',
         '- 計測記録の commit はこの文書を含む Git history を参照。']
     args.output.with_suffix('.md').write_text('\n'.join(lines)+'\n')
 

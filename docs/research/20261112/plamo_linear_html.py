@@ -35,7 +35,7 @@ th:first-child,td:first-child{text-align:left;padding-left:0}th{font-weight:500;
 </style>
 <div class="controls" role="group" aria-label="linear の行数"><button data-m="1" aria-pressed="false">M = 1</button><button data-m="64" aria-pressed="true">M = 64</button><span class="hint">projection 単体の GEMM・µs</span></div>
 <div class="scroll"><table><thead><tr><th>projection / N × K / bit</th><th>before</th><th>after</th><th>重みのみ<br>下限</th><th class="ratio">after / 下限</th></tr></thead><tbody id="rows"></tbody></table></div>
-<p class="notes">5 run の p50 中央値。HIP event、cold cache、seed 17 の合成 trellis。QKV / gate-up の launch 統合はこの表に含みません。下限は trellis bytes ÷ 636 GB/s で、activation、FP32 partial、回転、launch を含みません。</p>
+<p class="notes">5 run の p50 中央値。HIP event、128 MiB 書き込み前処理、seed 17 の合成 trellis。cache miss は未計測です。QKV / gate-up の launch 統合はこの表に含みません。下限は trellis bytes ÷ 636 GB/s で、activation、FP32 partial、回転、launch を含みません。</p>
 <script>
 const rows=PAYLOAD;
 function render(m){

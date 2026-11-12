@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
     const uint32_t bits = std::atoi(argv[4]);
     const int sweep = argc > 5 ? std::atoi(argv[5]) : 0;
     const bool mean20 = argc > 6 && std::atoi(argv[6]) != 0;
+    const int preroll = argc > 7 ? std::atoi(argv[7]) : 20;
     const uint32_t ss = (k / 128u * 4u + 15u) & ~15u;
     const uint32_t base_sp = m > 16 && m <= 64 && n == 2560 && k == 10240 ? 4u :
         shelf::kernel::exl3_mul24_gemm_splits(m, n, k, 1024, bits);
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
     rotate();
     hipEvent_t ev[2]; for(auto& e : ev) check(hipEventCreate(&e));
     auto time = [&](auto fn, bool cold, int runs = 5) {
-        for(int i=0;i<20;++i) fn();
+        for(int i=0;i<preroll;++i) fn();
         check(hipDeviceSynchronize());
         std::vector<float> samples;
         for(int run=0;run<runs;++run) {
@@ -72,7 +73,7 @@ int main(int argc, char** argv) {
         return samples;
     };
     auto emit = [&](const char* stage,int v,int mt,uint32_t sp,bool cold,const std::vector<float>& samples) {
-        std::printf("{\"m\":%u,\"n\":%u,\"k\":%u,\"bits\":%u,\"stage\":\"%s\",\"variant\":%d,\"mt\":%d,\"splits\":%u,\"cold\":%s,\"us\":[",m,n,k,bits,stage,v,mt,sp,cold?"true":"false");
+        std::printf("{\"m\":%u,\"n\":%u,\"k\":%u,\"bits\":%u,\"stage\":\"%s\",\"variant\":%d,\"mt\":%d,\"splits\":%u,\"cold\":%s,\"warmup_launches\":%d,\"us\":[",m,n,k,bits,stage,v,mt,sp,cold?"true":"false",preroll);
         for(size_t i=0;i<samples.size();++i) std::printf("%s%.4f",i?",":"",samples[i]);
         std::puts("]}"); std::fflush(stdout);
     };
