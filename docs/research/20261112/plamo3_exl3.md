@@ -1,16 +1,15 @@
 # PLaMo 3 Translate 2B: EXL3-INT8 の接続と BF16 基準値
 
 2026-11-12、R9700（gfx1201）、ROCm 7.14、単一 GPU。投機なし、KV は BF16、
-温度 0、`max_seq_len=2048`。対象の mul24 量子化成果物と `run.json` は確認時点で
-出力先に存在せず、実モデルの読み込み、翻訳品質、KLD、top-1、最大 logits 差、
-量子化直後と最適化後の速度比較は未実施である。
+温度 0、`max_seq_len=2048`。以下の BF16 基準値を取得した時点では量子化成果物が
+存在しなかった。その後、実 checkpoint を用いた検証を末尾に追記した。
 
 ## 接続
 
 変換器の PLaMo 実装は結合 QKV と gate/up の元重みを分割し、個別 projection
 として保存する。Shelf は個別 tensor の形状と mul24 marker を検査し、共通の
 EXL3 loader と linear kernel に渡す。embedding / norm の非量子化データ、BF16 または
-mul24 の lm_head に対応する。実 checkpoint の実際の tensor 構成は未確認。
+mul24 の lm_head に対応する。実 checkpoint の構成は末尾を参照。
 
 2B と同じ projection 幾何の 1 層合成 checkpoint（embedding と head はゼロ、
 7 つの EXL3 4-bit projection、非量子化 norm）で `shelf-compute` の prefill と
@@ -97,3 +96,43 @@ batch での kernel 別時間、scheduler / host 時間、head と MLP の個別
   compute / server、teacher-forced KLD / top-1 / 最大 logits 差、日英・英日の翻訳を
   確認する。同じ workload の初期速度を測ってから、一変更ずつ効果を比較する。
 - 今回は性能最適化を採用していない。batch 内訳・安定した反復測定も残る。
+
+## 実 EXL3 checkpoint の確認
+
+変換成果物は decoder 144 個が 4 bit、24 個が 5 bit、lm_head が 8 bit、
+embedding と norm は非量子化である。mul24 marker は `0x00dcd12d`。重みは
+2,006,936,944 bytes。`shelf-server` が起動し、日英・英日を含む 8 件の翻訳が
+正常に停止した。例: 「今日は良い天気ですね。午後は公園を散歩しましょう。」は
+“The weather is nice today, isn't it? Let's take a walk in the park this afternoon.”、
+“The train will arrive in five minutes. Please wait behind the yellow line.” は
+「列車は5分後に到着します。黄色い線の内側でお待ちください。」となった。
+
+CPU の Transformers BF16 を参照し、同一 token 列で Shelf の量子化モデルを
+teacher-forced decode した。context は先頭 1 token、比較は index 1 から末尾の
+1 つ前まで。両端の 2 位置を含まない。KV は BF16、全語彙の logits で集計した。
+
+| 入力 | 位置数 | 平均 KL | top-1 一致 | 最大 logits 差 |
+| --- | ---: | ---: | ---: | ---: |
+| 日→英、1 例 | 30 | 0.00578 | 96.67% | 1.875 |
+| 英→日、1 例 | 30 | 0.00813 | 96.67% | 1.781 |
+| 英語平文、1 例 | 7 | 0.05138 | 100% | 3.047 |
+| 日本語平文、1 例 | 7 | 0.04698 | 71.43% | 1.823 |
+
+変換側の同じ 4 例では KL が順に 0.00308 / 0.00597 / 0.04034 / 0.03956、
+top-1 が 96.88% / 96.88% / 100% / 77.78% だった。変換側は全 32 / 9 位置で
+FP16 実行しており、Shelf の INT8 経路・位置範囲とは異なる。変換側の別の 10 対での
+KL 0.0147 / 0.0152、top-1 93.5% / 93.8% も入力が異なるため直接比較できない。
+平文は 7 位置のみで一致率が大きく変動する。
+変換側の同一評価集合・WikiText と直接比較し、量子化誤差以外の差をさらに調べる必要がある。
+PPL は template 位置も含むため、変換側の正解訳部分だけの PPL と比較しない。
+
+再現には変換側 `eval/plamo3_logits.py` の reference mode で CPU BF16 logits を
+保存する。`accelerate` がない環境では `device_map="cpu"` を除いて CPU で実行できる。
+その出力を [比較スクリプト](plamo_quality.py) に渡す。GPU 実行は lock を取得する。
+
+```bash
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_quality.py \
+  --reference /tmp/plamo-exl3-reference.pt \
+  --model /home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24 \
+  --bench "$PWD/build-gfx1201/shelf-bench" --workdir /tmp/plamo-exl3-quality
+```

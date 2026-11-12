@@ -4,8 +4,9 @@
 （`shelf_quantization.json` による自動検出）の両方に対応。
 
 PLaMo 3 Translate（**実験的対応**）0.8B / 2B / 8B の BF16 checkpoint は単一 GPU の `shelf-compute` で利用できる。
-2B の EXL3-INT8（mul24）checkpoint は `--model-dir` に指定できるが、実モデルでの
-動作・品質は未検証である。量子化モデルにも配布 tokenizer などのファイルが必要。
+2B の EXL3-INT8（mul24）checkpoint も `--model-dir` に指定できる。
+embedding と norm は非量子化、lm_head は BF16 または mul24 を受け付ける。
+量子化モデルにも配布 tokenizer などのファイルが必要。
 `--max-seq-len` は 2048 以下にする。局所 attention の窓内では全層を causal
 attention として実行し、局所 RoPE と全域 YaRN を層ごとに切り替える。
 TP、pipeline parallel、MTP、DFlash2、2048 token 超の長文は未対応。

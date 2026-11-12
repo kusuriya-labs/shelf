@@ -2,7 +2,7 @@
 
 0.8B / 2B / 8B の BF16 checkpoint を単一 GPU の `shelf-compute` で検証した。
 0.8B はサーバー経由でも日英・英日を検証した。2B の EXL3-INT8（mul24）
-loader と実行経路は合成 checkpoint でのみ検証済みで、実モデルの品質と性能は未検証。
+loader と実行経路を実 checkpoint でも使用できる。
 TP、pipeline parallel、投機 decoding は未対応。
 `max_seq_len` は 2048 以下に制限する。この範囲では全層を通常の causal
 attention として計算しても局所窓と一致する。長文用 sliding window の実装ではない。
@@ -77,4 +77,5 @@ PLaMo loader は全層の形状を検査し、mul24 の整数 bit rate と BF16 
 共通の quantized weight loader に渡す。embedding と norm は非量子化、lm_head は
 BF16 または mul24 を受け付ける。非量子化 F16 は読み込み時に BF16 に変換する。
 分割 linear をグラフで個別に実行し、EXL3 workspace の最大形状を予約する。
-実モデルでの互換性・精度・性能は未確認である。
+実 checkpoint の確認条件と精度の測定結果は
+[調査記録](../research/20261112/plamo3_exl3.md) に記載する。
