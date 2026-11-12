@@ -526,6 +526,21 @@ hipError_t launch_group_bits(const PlamoExl3ProjectionGroup &args, hipStream_t s
     return hipGetLastError();
 }
 }
+hipError_t launch_plamo_exl3_projection_rotate(const PlamoExl3ProjectionGroup &args,
+                                               hipStream_t stream) {
+    if (!args.input || !args.rows || !args.k || args.k % 128u || !args.count || args.count > 3u ||
+        args.input_stride < args.k || args.scale_stride_bytes % 4u ||
+        args.scale_stride_bytes < args.k / 128u * 4u)
+        return hipErrorInvalidValue;
+    for (uint32_t i = 0u; i < args.count; ++i)
+        if (!args.p[i].suh || !args.p[i].codes || !args.p[i].scales)
+            return hipErrorInvalidValue;
+    if (args.rows >= 32u && args.input_stride % 4u == 0u)
+        group_rotate_f4<<<dim3(args.rows, 1, args.count), 256, 0, stream>>>(args);
+    else
+        group_rotate<<<dim3(args.rows, args.k / 128u, args.count), 128, 0, stream>>>(args);
+    return hipGetLastError();
+}
 hipError_t launch_plamo_exl3_projection(const PlamoExl3ProjectionGroup &args, uint32_t bits,
                                         hipStream_t stream, uint32_t *launch_count) {
     if (launch_count)

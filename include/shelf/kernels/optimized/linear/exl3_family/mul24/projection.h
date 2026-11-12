@@ -42,4 +42,22 @@ hipError_t launch_plamo_exl3_rotate_out_i32(const int32_t *acc, const float *row
                                             const float *yprime, const uint16_t *svh, void *out,
                                             bool out_bf16, uint32_t rows, uint32_t n, uint32_t out_stride,
                                             hipStream_t stream);
+struct PlamoExl3PrefillGroup {
+    PlamoExl3ProjectionGroup projection;
+    int8_t *packed[3]{};
+    bool cached = false;
+    bool rowscaled = false;
+    float flag_share = 0.5f;
+    float *rowscale[3]{};
+    int32_t *row_flags[3]{};
+};
+
+hipError_t launch_plamo_exl3_projection_rotate(const PlamoExl3ProjectionGroup &args,
+                                                hipStream_t stream);
+hipError_t launch_plamo_exl3_prefill_recon(const PlamoExl3PrefillGroup &args, uint32_t bits,
+                                           hipStream_t stream);
+hipError_t launch_plamo_exl3_prefill_rowscale(const PlamoExl3PrefillGroup &args, hipStream_t stream);
+hipError_t launch_plamo_exl3_prefill_gemm(const PlamoExl3PrefillGroup &args, uint32_t bits,
+                                          hipStream_t stream);
+
 }

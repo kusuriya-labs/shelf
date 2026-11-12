@@ -968,7 +968,17 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
     auto output = resolve_host_value(program, ::shelf::runtime::ValueId{binding.output_slots[0]}, ctx);
     if (!output.ok()) return output.status();
     const uint32_t rows = rows_for(output.value(), ctx);
-    if (rows == 0u || rows >= 256u || input.value().dtype != ValueDType::BF16 ||
+    static const uint32_t prefill_mode = [] {
+        const char* env = std::getenv("SHELF_PLAMO_EXL3_PREFILL");
+        return env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 10)) : 1u;
+    }();
+    static const uint32_t prefill_rows = [] {
+        const char* env = std::getenv("SHELF_PLAMO_EXL3_PREFILL_ROWS");
+        return env ? std::max(65u, static_cast<uint32_t>(std::strtoul(env, nullptr, 10))) : 65u;
+    }();
+    const bool use_prefill = prefill_mode != 0u && rows >= prefill_rows &&
+        (weight.exl3_ka == 4u || weight.exl3_ka == 5u);
+    if (rows == 0u || (rows >= 256u && !use_prefill) || input.value().dtype != ValueDType::BF16 ||
         output.value().dtype != ValueDType::BF16 ||
         ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
         return miss;
@@ -1030,8 +1040,63 @@ Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
         if (xoffset > ctx.exl3_xrot_bytes || yoffset > ctx.exl3_accum_bytes) return miss;
     }
     uint32_t launch_count = 0u;
-    const hipError_t err =
-        ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count);
+    hipError_t err = hipSuccess;
+    if (use_prefill) {
+        ::shelf::kernel::PlamoExl3PrefillGroup prefill{};
+        prefill.projection = group;
+        prefill.cached = prefill_mode == 3u || (prefill_mode == 1u && weight.exl3_ka == 5u);
+        prefill.rowscaled = rows >= 256u;
+        static const float flag_share = [] {
+            const char* env = std::getenv("SHELF_EXL3_INT8_FLAG");
+            return env ? std::strtof(env, nullptr) : 0.5f;
+        }();
+        prefill.flag_share = flag_share;
+        for (uint32_t j = 0u; j < count; ++j) {
+            prefill.rowscale[j] = group.p[j].yprime;
+            prefill.row_flags[j] = reinterpret_cast<int32_t*>(group.p[j].yprime + rows);
+        }
+        if (prefill.cached) {
+            if (ctx.exl3_dense == nullptr) return miss;
+            uint64_t offset = 0u;
+            for (uint32_t j = 0u; j < count; ++j) {
+                offset = align(offset);
+                prefill.packed[j] = static_cast<int8_t*>(ctx.exl3_dense) + offset;
+                offset += static_cast<uint64_t>(group.p[j].n) * group.k;
+            }
+            if (offset > ctx.exl3_dense_bytes) return miss;
+        }
+        auto stage = [&](uint32_t id, auto launch) {
+            const uint32_t timing = semantic_timing_enabled() ? semantic_timing_start(stream) : 0xffffffffu;
+            const hipError_t result = launch();
+            if (semantic_timing_enabled()) semantic_timing_finish(
+                stream, timing, id, static_cast<uint32_t>(SemPath::Optimized), 0);
+            return result;
+        };
+        err = stage(0xffff0010u, [&] {
+            return ::shelf::kernel::launch_plamo_exl3_projection_rotate(group, stream);
+        });
+        launch_count = 1u;
+        if (err == hipSuccess && prefill.rowscaled) {
+            err = stage(0xffff0001u, [&] {
+                return ::shelf::kernel::launch_plamo_exl3_prefill_rowscale(prefill, stream);
+            });
+            launch_count += 2u;
+        }
+        if (err == hipSuccess && prefill.cached) {
+            err = stage(0xffff0011u, [&] {
+                return ::shelf::kernel::launch_plamo_exl3_prefill_recon(prefill, weight.exl3_ka, stream);
+            });
+            ++launch_count;
+        }
+        if (err == hipSuccess) {
+            err = stage(0xffff0012u, [&] {
+                return ::shelf::kernel::launch_plamo_exl3_prefill_gemm(prefill, weight.exl3_ka, stream);
+            });
+            ++launch_count;
+        }
+    } else {
+        err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream, &launch_count);
+    }
     if (err != hipSuccess)
         return Status::hip_error("plamo exl3 projection", hipGetErrorString(err), __FILE__, __LINE__);
     record_physical_launch(launch_count);

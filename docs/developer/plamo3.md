@@ -104,15 +104,15 @@ RMSNorm を 32 スレッドの workgroup で実行する。逐次の加算順と
 split-K によって加算順と logits は変化する。他の行数、
 prefill、BF16 checkpoint、他モデルは従来の選択を使う。
 
-同 checkpoint の EXL3-INT8 linear は、1〜255 行で QKV と gate/up の連続する
+同 checkpoint の EXL3-INT8 linear は、QKV と gate/up の連続する
 projection をそれぞれまとめて実行する。各 projection の SUH、SVH、trellis、
 activation scale、split-K と BF16 出力は独立に保持する。共有入力の回転結果を
 projection 間で使い回さない。出力の liveness と value trace はグラフ上の各 projection
 のまま保持する。必要な workspace が不足する場合や実行範囲の末尾を越える場合は
 個別実行を使う。
 
-4 bit の GEMM は 16 行以下で 1 tile、17〜128 行で 2 tile、129〜255 行で
-4 tile を各 wave が担当する。5 bit は 17 行以上で次の K group の先読みを省略する。
+64 行以下の 4 bit GEMM は、16 行以下で 1 tile、17〜64 行で 2 tile を各 wave が
+担当する。5 bit は 17 行以上で次の K group の先読みを省略する。
 lm_head は OutputGather が選択した OUTPUT_ROWS だけを処理し、prefill の全行を
 投影しない。専用経路は 255 行以下で使用し、17〜64 行では 2 tile、65〜255 行では
 4 tile を使う。head の BF16 出力を丸めてから F32 に変換する contract を維持する。
@@ -120,15 +120,25 @@ lm_head は OutputGather が選択した OUTPUT_ROWS だけを処理し、prefil
 1 行の 4 bit QKV（K=2560、Q の N=3072）と O（K=3072、N=2560）は、各 workgroup が
 独立に入力を回転・量子化し、LDS から GEMM を実行する。16 行以下、N が 10240 以上、
 全 projection の split-K が 1 の場合は、8 wave の GEMM が出力を LDS で共有し、
-同じ launch 内で出力回転と BF16 丸めを行う。これらは 2 launch、それ以外の
-projection group は入力回転・GEMM・出力回転の 3 launch を使う。
+同じ launch 内で出力回転と BF16 丸めを行う。64 行以下では、これらは 2 launch、
+それ以外の projection group は入力回転・GEMM・出力回転の 3 launch を使う。
 
-256 行以上は既存の dense / flagged-row 経路を使う。4 bit の flagged GEMM は
-1 wave が 2 tile を処理し、5 bit は次の K group の先読みを省略する。
-int32 accumulator の出力回転は、行と列区間に workgroup を分割する。
-行単位への再量子化、flag と slot の決定、整数の group 内積、scale の適用順、
-split の加算順、BF16 中間丸めを維持する。
+65〜255 行の 4/5 bit projection は、128 K ごとの INT8 内積と FP32 scale の累積を使う。
+256 行以上は RowScale の決定、再量子化と energy による補正行の分類を使う。通常行は
+全 K の int32 内積に row scale を適用し、補正行は 128 K ごとの内積と scale を累積する。
+これらを同じ GEMM で処理し、重複 GEMM と compact copy を省く。補正行数の上限を設けず、
+入力行の分類に当てはまる全行を補正する。行順による予算の配分は行わない。
+出力回転と BF16 丸めも GEMM に融合する。
 
-`SHELF_PLAMO_EXL3_LINEAR=0` はこれらの専用経路を無効にする。
-明示的な `SHELF_EXL3_INT8_DENSE` / `SHELF_EXL3_MUL24_PREFILL_AB` の指定時は
-従来の経路を使う。BF16 checkpoint と他モデルはこの専用経路を選択しない。
+両経路は入力と scale を swizzle 付き LDS に二重 buffer で置く。4 bit は trellis を直接読み、
+5 bit は既存の dense workspace に K-pair / lane 順で一時展開する。weight ごとの永続
+buffer は持たない。4 bit は64行×128列、5 bit の QKV または N が512以下は32行×128列、
+それ以外は64行×128列の workgroup を使う。65〜255 行は入力回転を含めて2/3 launch、
+256 行以上は group 単位の rowstat / rowfinish を加えて4/5 launchになる。
+row scale と行ごとの flag は未使用の accumulation workspace を一時利用し、通常行と補正行の
+整数内積、scale の適用順、BF16 中間丸めを維持する。
+
+必要な workspace が不足する場合は個別実行へ戻る。
+`SHELF_PLAMO_EXL3_LINEAR=0` と明示的な dense / prefill AB 指定は従来経路を使う。
+`SHELF_PLAMO_EXL3_PREFILL=0` は 65〜255 行の旧 grouped 経路と、256 行以上の
+dense / RowScale / flagged-row 経路を選択する。
