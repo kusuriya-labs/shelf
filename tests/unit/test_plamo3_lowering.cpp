@@ -86,5 +86,34 @@ int main() {
     for (const auto& binding : split_program.value().dispatches)
         if (binding.kernel_id == shelf::runtime::KernelId::SWIGLU && binding.flags == 1u) ++rounded_bindings;
     if (rounded_bindings != 8) return 1;
+    c.hidden_size=2560; c.intermediate_size=10240; c.num_hidden_layers=24;
+    c.num_attention_heads=24; c.num_key_value_heads=4;
+    w.layers.resize(24);
+    for (auto& l : w.layers) {
+        l.split_projections=true;
+        shape(l.q,3072,2560); shape(l.k,512,2560); shape(l.v,512,2560);
+        shape(l.o_proj,2560,3072); shape(l.gate,10240,2560);
+        shape(l.up,10240,2560); shape(l.down,2560,10240);
+    }
+    w.layers[0].q.quant_spec=shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    w.layers[0].q.exl3_ka=5; w.layers[0].down.exl3_ka=4;
+    w.lm_head.quant_spec=shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+    w.lm_head.exl3_ka=8;
+    auto target = shelf::plamo3::lower_to_primitives(c,w);
+    if (!target.ok()) return 1;
+    unsigned small_groups=0;
+    for (const auto& n : target.value().graph.nodes)
+        if (const auto* norm=std::get_if<shelf::runtime::RmsNormNode>(&n.node))
+            if (norm->weight_mode == shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP) {
+                if (norm->group_size != 128) return 1;
+                ++small_groups;
+            }
+    if (small_groups != 48) return 1;
+    w.lm_head.quant_spec=shelf::quantization::QuantSpecId::BF16_V1;
+    auto other = shelf::plamo3::lower_to_primitives(c,w);
+    if (!other.ok()) return 1;
+    for (const auto& n : other.value().graph.nodes)
+        if (const auto* norm=std::get_if<shelf::runtime::RmsNormNode>(&n.node))
+            if (norm->weight_mode == shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP) return 1;
     std::puts("PLaMo graph and layer-specific RoPE bindings verified"); return 0;
 }

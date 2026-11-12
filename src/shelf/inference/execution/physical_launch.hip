@@ -107,7 +107,8 @@ Result<PhysicalResolveStatus> resolve_rmsnorm_physical(
     si.group_size = G;
     si.rows = rows;
     const bool offset_bf16 =
-        b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16) &&
+        (b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16) ||
+         b.flags == static_cast<uint32_t>(::shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP)) &&
         in.dtype == ValueDType::BF16 && dst.dtype == ValueDType::BF16 && wptr != nullptr &&
         (wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_FEATURE ||
          wlayout == ::shelf::kernel::RmsNormWeightLayout::PER_GROUP);

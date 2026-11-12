@@ -100,7 +100,7 @@ hipError_t launch_rmsnorm_offset_bf16(
     const void* input, const void* weight, void* output, uint32_t rows,
     uint32_t features, uint32_t group_size, uint32_t input_stride,
     uint32_t output_stride, bool weight_per_feature, float eps, float offset,
-    hipStream_t stream);
+    hipStream_t stream, bool small_group = false);
 
 hipError_t launch_rmsnorm(
     const void* input,

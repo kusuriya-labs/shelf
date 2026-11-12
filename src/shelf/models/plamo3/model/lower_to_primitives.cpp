@@ -24,6 +24,13 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
     const uint32_t q = static_cast<uint32_t>(c.num_attention_heads * c.head_dim);
     const uint32_t kv = static_cast<uint32_t>(c.num_key_value_heads * c.head_dim);
     const uint32_t f = static_cast<uint32_t>(c.intermediate_size);
+    const bool exl3_2b = c.hidden_size == 2560 && c.intermediate_size == 10240 &&
+        c.vocab_size == 107520 && c.num_hidden_layers == 24 && c.num_attention_heads == 24 &&
+        c.num_key_value_heads == 4 && c.head_dim == 128 && !w.layers.empty() &&
+        w.layers[0].q.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+        w.layers[0].q.exl3_ka == 5 && w.layers[0].down.exl3_ka == 4 &&
+        w.lm_head.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+        w.lm_head.exl3_ka == 8;
     QH::HybridLoweredPrimitives lowered;
     auto& pg = lowered.graph;
     QH::Emitter em{pg};
@@ -42,7 +49,10 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
                     const gpu::Tensor& tensor, float offset, const std::string& name) {
         RT::RmsNormNode node; node.shape = RT::RowwiseShapeKey{width};
         node.eps = static_cast<float>(c.rms_norm_eps); node.group_size = group;
-        node.parameter_index = param(tensor); node.weight_mode = RT::RmsNormWeightMode::OFFSET_BF16;
+        node.parameter_index = param(tensor);
+        node.weight_mode = exl3_2b && group == 128
+            ? RT::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP
+            : RT::RmsNormWeightMode::OFFSET_BF16;
         node.weight_offset = offset;
         auto out = em.unary(RT::PrimitiveNode{node}, input, width);
         pg.nodes.back().debug_name = name; return out;

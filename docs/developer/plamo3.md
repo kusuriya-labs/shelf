@@ -91,3 +91,10 @@ chat template と短い生成を初期化する。同時要求上限が 8 以上
 
 EXL3 の CPU BF16 比較と翻訳サーバーの継続投入測定の手順は、
 [調査記録](../research/20261112/plamo3_exl3.md#拡大品質評価と継続投入の測定方法)を参照する。
+
+PLaMo EXL3-INT8 の linear は実行行数に応じて kernel と split-K を選択する。
+そのため同一入力でも batch 形状により丸め結果および greedy 出力が変わり得る。
+
+PLaMo 3 Translate 2B の対象 EXL3-INT8 checkpoint では、Q/K の 128 要素単位
+RMSNorm を 32 スレッドの workgroup で実行する。逐次の加算順と BF16 中間
+丸めを維持する。BF16 checkpoint と他モデルは従来の経路を使う。

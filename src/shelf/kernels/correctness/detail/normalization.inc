@@ -24,7 +24,8 @@ __device__ __forceinline__ ProgramStatus exec_row_norm_like(
         return ProgramStatus::INVALID_BINDING;
     const bool one_plus = b.flags == 0u;
     const bool offset_bf16 = !l2_mode &&
-        b.flags == static_cast<uint32_t>(shelf::runtime::RmsNormWeightMode::OFFSET_BF16);
+        (b.flags == static_cast<uint32_t>(shelf::runtime::RmsNormWeightMode::OFFSET_BF16) ||
+         b.flags == static_cast<uint32_t>(shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP));
     if (offset_bf16 && (!want_weight || in.dtype != ValueDType::BF16 ||
                         out.dtype != ValueDType::BF16 || weight_dtype != ValueDType::BF16))
         return ProgramStatus::INVALID_BINDING;
