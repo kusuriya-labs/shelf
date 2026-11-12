@@ -598,6 +598,26 @@ async def _serve(opts) -> int:
     )
     await compute.start()
 
+    quant = config.get("quantization_config") or {}
+    warm_plamo_exl3 = (is_plamo and config.get("hidden_size") == 2560
+                       and config.get("num_hidden_layers") == 24
+                       and quant.get("quant_method") == "exl3"
+                       and quant.get("bits") == 4.05
+                       and quant.get("head_bits") == 8)
+    if (warm_plamo_exl3 and opts.max_concurrent_requests >= 8
+            and opts.max_seq_len >= 257
+            and opts.max_num_batched_tokens >= 256):
+        started = time.monotonic()
+        try:
+            await compute.generate(list(range(256)), max_new_tokens=1)
+        except ComputeError as exc:
+            if not compute.is_alive():
+                await compute.shutdown()
+                raise
+            _log(f"PLaMo EXL3 prefill warmup skipped: {exc}")
+        else:
+            _log(f"PLaMo EXL3 prefill warmup: {time.monotonic() - started:.2f}s")
+
     service = ChatService(
         processor=processor,
         compute=compute,
@@ -611,6 +631,24 @@ async def _serve(opts) -> int:
         vocab_size=(lambda config: config.get("text_config", config).get("vocab_size", 0))(
             json.loads((Path(opts.model_dir) / "config.json").read_text())),
     )
+
+    if warm_plamo_exl3 and opts.max_seq_len >= 64:
+        started = time.monotonic()
+        try:
+            chat = parse_chat_request({
+                "model": opts.model,
+                "messages": [{"role": "user", "content": "warmup"}],
+                "max_tokens": 1,
+                "chat_template_kwargs": {"source_lang": "en", "target_lang": "ja"},
+            }, inference_budget_tokens=service.inference_budget_ceiling)
+            await service.complete(chat)
+        except (ComputeError, ChatServiceError, OpenAIProtocolError) as exc:
+            if not compute.is_alive():
+                await compute.shutdown()
+                raise
+            _log(f"PLaMo EXL3 chat warmup skipped: {exc}")
+        else:
+            _log(f"PLaMo EXL3 chat warmup: {time.monotonic() - started:.2f}s")
 
     if opts.dflash2_model_dir:
         speculative = {"method": "dflash2", "drafts": opts.dflash2_drafts}

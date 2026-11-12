@@ -82,3 +82,9 @@ up と乗算し、従来の 2 演算の丸めを維持する。結合重みの B
 SiLU と乗算を別々に実行する。
 実 checkpoint の確認条件と精度の測定結果は
 [調査記録](../research/20261112/plamo3_exl3.md) に記載する。
+
+PLaMo 3 Translate 2B の 4.05 bpw EXL3、8 bit head では、サーバーは受付開始前に
+chat template と短い生成を初期化する。同時要求上限が 8 以上で、最大系列長が
+257 以上かつ batch token 上限が 256 以上の場合は、256 token の合成 prefill も
+実行し、INT8 GEMM の初回初期化を済ませる。合成要求の結果は利用者へ返さない。
+容量不足などで warmup の要求が拒否された場合は、その旨を記録して受付を続ける。
