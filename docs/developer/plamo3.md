@@ -1,8 +1,9 @@
 # PLaMo 3 Translate（BF16）
 
 0.8B / 2B / 8B の BF16 checkpoint を単一 GPU の `shelf-compute` で検証した。
-0.8B はサーバー経由でも日英・英日を検証した。量子化、TP、pipeline parallel、
-投機 decoding は未対応。
+0.8B はサーバー経由でも日英・英日を検証した。2B の EXL3-INT8（mul24）
+loader と実行経路は合成 checkpoint でのみ検証済みで、実モデルの品質と性能は未検証。
+TP、pipeline parallel、投機 decoding は未対応。
 `max_seq_len` は 2048 以下に制限する。この範囲では全層を通常の causal
 attention として計算しても局所窓と一致する。長文用 sliding window の実装ではない。
 
@@ -44,8 +45,6 @@ CPU BF16 参照との平均 KL は 2B が 0.000551 / 0.000492、8B が
 100% / 100%。8B の重みは 15.89 GiB で KV とともに 32 GiB に収まった。
 詳細は[調査記録](../research/20261111/plamo3_translate.md)を参照。
 
-今後の作業は、真の sliding-window kernel と長文脈の検証、`rocm_exl3` の
-PLaMo architecture 登録と量子化である。
 31B は対象外。
 
 サーバーは `model_type=plamo3` を検出し、reasoning を無効にする。
@@ -69,3 +68,13 @@ top-1 は 0.8B と 8B が両方向 100%、2B は 95.24% / 95.83%。
 greedy token 列は M2 と一致した。218 token の英語段落では 246 token を生成し、
 prefill 1187.7 ms、decode 226.94 token/s。演算別内訳、テストと精度の条件は
 [調査記録](../research/20261111/plamo3_translate.md)を参照。
+
+## EXL3-INT8 の実行経路
+
+HF EXL3 checkpoint では、変換器が結合 QKV と gate/up を個別の
+`q_proj` / `k_proj` / `v_proj`、`gate_proj` / `up_proj` に分割する。
+PLaMo loader は全層の形状を検査し、mul24 の整数 bit rate と BF16 tensor を
+共通の quantized weight loader に渡す。embedding と norm は非量子化、lm_head は
+BF16 または mul24 を受け付ける。非量子化 F16 は読み込み時に BF16 に変換する。
+分割 linear をグラフで個別に実行し、EXL3 workspace の最大形状を予約する。
+実モデルでの互換性・精度・性能は未確認である。
