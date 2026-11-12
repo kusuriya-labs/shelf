@@ -325,3 +325,143 @@ c=128 の stdio は 2478 / 2482 token/s。scheduler、launch、同期、IPC の�
   比較や、独立した大きい評価集合は未実施。c=64 の品質確認は同じ列の複製であり、
   異なる翻訳を混在させた teacher-forced logits は未確認。
 - 分割数の変更や prefill の別経路は今回の品質基準を満たさず、採用していない。
+
+## 初回要求の遅延と起動時 warmup
+
+再測定では「cold」を server 起動後の最初の HTTP 要求からと定義した。以前の
+表は最初に 1 要求を流していたため、chat template の初回費用を含まない。
+「warm」は先に 1 要求と同じ入力 batch 全体を実行した後の値。いずれも出力 token 数を
+全要求の投入開始から全完了までの壁時計時間で割る。入力 29〜52 token、出力は
+おおむね 14〜37 token の 8 文を繰り返し、greedy、BF16 KV、投機なし、prefix cache
+有効、最大 batch token 数 2048。client と server は同一ホスト。各値は 1 回で、
+短時間の停止や batching 順序の影響を受ける。
+
+初回の chat template `prepare` は 850.7 ms、次の 2 回は 0.391 / 0.275 ms。
+[CPU 計測スクリプト](plamo_template_timing.py) で計測した。別の
+[一時計測パッチ](plamo_lt_init_timing.patch) で c=8 の最初の大きな prefill を
+計測すると、INT8 hipBLASLt の最初の heuristic が 162.3 ms、最初の matmul API が
+674.0 ms、両者を含む最初の GEMM 呼び出しが 838.8 ms。後続の異なる projection
+形状の heuristic は 0.1〜0.4 ms 程度だった。c=16/64 でも最初の heuristic は
+162.7/163.1 ms、最初の matmul は 658.4/675.7 ms。これらは CPU 側 API の
+壁時計時間であり、matmul 内部の code object 読み込み、ライブラリ初期化、GPU 実行を
+区別していない。HIP event の GPU 演算時間ではない。
+
+以前の単一要求 warmup 後の c=8 では 7 要求の prefill がそれぞれ同じ 883.8 ms の
+実行区間を共有した。256 行の起動時 warmup 後は 41.7 ms で、別の先行 1 要求の
+prefill は 11.3 ms。これは各要求に共有区間を記録するため、7 倍してはいけない。
+c=16 の同様の batch は 11.3 / 50.8 / 30.4 ms の複数区間、c=64 では 11.2 ms の
+先行区間と約 42〜59 ms の複数区間がある。decode step の壁時計合計は冷間測定で
+c=8/16/64 が 288.8/303.3/466.5 ms。server と compute の比較は前節の通り近く、
+今回の結果は IPC を独立した時間として定量化しない。queue、token streaming、
+完了処理は重複のない独立区間に分解できていない。
+
+server の受付前に短い chat 生成を行い、c>=8 では 256 token の合成 prefill を
+行う変更を採用した。対象は 2B の 4.05 bpw EXL3 / 8 bit head のみ。最大系列長や
+batch token 上限が足りない場合は 256 token prefill を行わない。起動時の測定ログに
+よる warmup 自体の費用は chat が約 1 秒、prefill が約 0.8 秒。モデル読み込みを含む
+起動時間は、測定した範囲では warmup 追加前の約 9〜10 秒から約 10〜12 秒になった。
+HTTP 受付開始後に起動処理の費用を負担しない。
+
+起動 warmup 後の cold 測定について、同じ `prefill_ms` を持つ要求を同一の
+実行区間とみなして概算すると、次の内訳になる。prefill 区間には同時に走った
+既存要求の decode も含む。純 decode は `STEPWALL` の decode-only step の合計。
+残差には queue、server の token 化、IPC、完了処理、prefill の scheduler 部分、
+記録の丸めが混ざる。これは重複のない request 単位トレースではないので、
+残差を IPC や queue の単独値と解釈できない。
+
+| c | 全完了 ms | prefill / mixed 実行区間の概算 ms | decode-only step 合計 ms | 残差 ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 346.7 | 53.0 | 288.8 | 4.9 |
+| 16 | 399.7 | 92.5 | 303.3 | 3.9 |
+| 64 | 797.3 | 319.3 | 466.5 | 11.5 |
+
+c=64/128 の cold と batch warm の間では、それぞれ 64 件中 2 件、128 件中 13 件の
+訳文が異なった。これらの batch 形状の変化は warmup 追加前から存在し、原因は
+未特定。一方、追加前の単一要求 warmup 条件と追加後 cold 条件、および追加前後の
+batch warm 条件をそれぞれ比較すると、c=8/16/64 の全訳文は一致した。
+変更前後の真の cold 同士の比較は c=8/16 では全件一致、c=64 では 64 件中
+2 件が異なった。時間差と要求の到着順による batch 形状の変化を含むため、
+warmup のみで logits が一致することの直接証明にはならない。
+
+測定の例。`--skip-initial-warmup` は HTTP の最初の要求から測り、
+`--warmup-batch` は対象 batch を一度完了してから測る。`startup_s` には
+process の起動から `/v1/models` が利用可能になるまでを含む。0.1 秒間隔で
+確認するため、最大約 0.1 秒の観測誤差がある。
+
+```bash
+export PATH=/tmp/venv-plamo/bin:$PATH
+export LD_LIBRARY_PATH=/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib:/opt/rocm/core-7.14/lib
+export ROCR_VISIBLE_DEVICES=GPU-a8e9ddefa2d60f55
+model=/home/homelab1/datapool/rocm-exl3-rdna2/models/plamo-3-translate-2b-exl3-4.05bpw-mul24
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_batch.py \
+  --server "$PWD/build-gfx1201/shelf-server" --model "$model" --concurrency 64 \
+  --skip-initial-warmup --log /tmp/plamo-cold.log
+flock /tmp/r9700.lock /tmp/venv-plamo/bin/python docs/research/20261112/plamo_batch.py \
+  --server "$PWD/build-gfx1201/shelf-server" --model "$model" --concurrency 64 \
+  --warmup-batch --log /tmp/plamo-warm.log
+/tmp/venv-plamo/bin/python -I docs/research/20261112/plamo_template_timing.py --model "$model"
+```
+
+HIP API の内訳を再取得するときは上記 patch を作業用 build に一時適用し、
+`SHELF_EXL3_DIAG=1` を指定する。計測のたびに stderr 出力が発生するため、
+その計測の速度を通常 build の最終値として扱わない。patch は計測後に外す。
+
+### 初回と batch warm の結果
+
+server は上記の翻訳 workload、decode は全要求に token が出た後から最初の要求が
+完了するまでの共通窓。後者は prefill を含まず、両者は直接加算できない。変更前の
+c=1/4 は chat warmup のみを持たない段階の値で、他は変更前 server。各 1 回、
+c=128 の変更後だけ 2 回。decode の c=2/8/32 は前回の融合後の値であり、今回の
+再測定ではない。各測定の token 数、経過時間、起動時間は
+[結果 JSON](plamo3_startup_results.json) に記録した。
+
+| c | 変更前 cold | 変更後 cold | 変更後 batch warm | decode |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 79.0 | 128.5 | 131.5 | 140.2 |
+| 2 | 104.2 | 228.7 | 233.0 | 271.1 |
+| 4 | 144.3 | 396.2 | 403.3 | 525.2 |
+| 8 | 101.9 | 576.9 | 592.5 | 967.3 |
+| 16 | 174.3 | 1000.7 | 1006.6 | 1768.3 |
+| 32 | 326.4 | 1472.2 | 1489.1 | 2451.1 |
+| 64 | 631.2 | 1999.2 | 2085.9 | 3926.9 |
+| 128 | 875.7 | 2192.7 / 1731.1 | 1726.4 / 2245.8 | 4600.5 |
+
+c=128 は通常 50〜60 ms 程度の prefill 区間が cold の一回で 387 ms、warm の
+一回で 440 ms になった。初回ライブラリ初期化とは別の一時停止であり、原因と
+再現条件は未特定。cold と warm が常に一致するとは言えない。
+
+c=64 の batch warm 2085.9 token/s は 4000 の 52.1%、差は 1914.1。c=4 の
+403.3 は 700 の 57.6%、差は 296.7。入力合計は出力合計より長く、短い出力が
+先に終わるこの workload では、全要求が動いている decode 窓より完了速度が低い。
+変更前からの decode 内訳では c=64 の step は約 16.8 ms、c=1 は約 7.6 ms、
+重み読出しのみの単純下限は約 3 ms。c=64 の 10 ms 程度という以前の全体下限は
+推定であり、今回の計測だけで達成可能な server 速度とはみなせない。目標に向けては
+prefill だけでなく linear・normalization・launch の費用と、同時生成数が減る
+末尾を改善する必要がある。
+
+既存の `SHELF_EXL3_INT8_ROTATE_F4=0` を使って scalar 回転を試した。c=64 の
+batch warm 完了速度は 2001.0 / 2000.6 token/s で、既定経路の 2085.9 および
+前回の 2086〜2090 より遅く、不採用。c=64 の日英・英日各 30 位置の logits dump は
+既定経路と byte 一致した。別 prefill 経路と split-K 変更は再採用していない。
+
+CPU BF16 比の teacher-forced は c=1 の日英 / 英日 KL が 0.005784 / 0.008132、
+top-1 が 96.67% / 96.67%、c=64 は KL 0.005168 / 0.007394、top-1 96.67% /
+93.33%。各 30 位置、c=64 は同じ列の複製。前回保存した c=1/64 両方向の logits
+と byte 一致するが、この bench は server 起動 warmup 後の状態を直接検査しない。
+多様な列の混在、大きい評価集合、および server 上の warmup 前後 logits の直接比較は
+未実施。
+
+prefill / decode の scheduling では既存の `--max-num-batched-tokens` を
+c=16 で変えた。batch warm 2 回の完了速度は 512 が 1012.6 / 997.3、1024 が
+1004.2 / 1005.5 token/s。既定 2048 の 1006.6 と測定の揺らぎの範囲であり、
+設定は変更しない。c=64 の 512〜8192 の探索は前節の通り。decode を優先する
+新しい scheduler、最初の要求を短時間集める方式、grouped QKV / gate-up、
+正規化・残差の融合、launch 削減は未実装・未評価である。
+
+今回の関連検証は PLaMo EXL3 実モデル server の通常応答・stream と起動 warmup、
+BF16 2B server、合成 EXL3 checkpoint、PLaMo template、EXL3 mul24 linear / grouped、
+PLaMo / Qwen lowering と linear selector、Qwen structured output、および
+`concurrency-cancel` グループが通過。warmup の要求拒否で稼働中の compute を
+維持し、compute が停止済みなら起動を失敗させる CPU テストも通過。PLaMo の
+実モデル loader ctest は初回に 2B を誤指定して 3 GiB arena が不足したため失敗し、
+想定の 0.8B BF16 fixture を指定し直して通過した。全回帰 `--all` は実行していない。

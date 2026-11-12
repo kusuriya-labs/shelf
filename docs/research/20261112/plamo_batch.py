@@ -25,11 +25,12 @@ async def main(args):
                "--max-seq-len", "2048", "--max-concurrent-requests", str(args.concurrency)]
     if args.max_num_batched_tokens is not None:
         command.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
+    startup_started = time.monotonic()
     proc = subprocess.Popen(command,
         stdout=subprocess.DEVNULL, stderr=open(args.log, "w"), start_new_session=True)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1200)) as session:
-            for _ in range(600):
+            for _ in range(6000):
                 if proc.poll() is not None:
                     raise RuntimeError(f"server exited: {proc.returncode}")
                 try:
@@ -38,9 +39,10 @@ async def main(args):
                             break
                 except aiohttp.ClientError:
                     pass
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
             else:
                 raise RuntimeError("server startup timeout")
+            startup_elapsed = time.monotonic() - startup_started
             async def request(i):
                 source, target, text = CASES[i % len(CASES)]
                 body = {"model": "shelf", "messages": [{"role": "user", "content": text}],
@@ -51,7 +53,8 @@ async def main(args):
                     if response.status != 200:
                         raise RuntimeError(f"HTTP {response.status}: {result}")
                     return result
-            await request(0)
+            if not args.skip_initial_warmup:
+                await request(0)
             if args.warmup_batch:
                 warmup_rounds = max(1, (len(CASES) + args.concurrency - 1) // args.concurrency)
                 for round_index in range(warmup_rounds):
@@ -66,7 +69,7 @@ async def main(args):
             elapsed = time.monotonic() - start
             counts = [r["usage"] for r in results]
             tokens = sum(x["completion_tokens"] for x in counts)
-            print(json.dumps({"concurrency": args.concurrency, "rounds": rounds, "elapsed_s": elapsed,
+            print(json.dumps({"concurrency": args.concurrency, "rounds": rounds, "startup_s": startup_elapsed, "elapsed_s": elapsed,
                 "completion_tokens": tokens, "completion_tokens_per_s": tokens / elapsed,
                 "input_tokens": [x["prompt_tokens"] for x in counts],
                 "output_tokens": [x["completion_tokens"] for x in counts],
@@ -87,6 +90,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--warmup-batch", action="store_true")
+    parser.add_argument("--skip-initial-warmup", action="store_true")
     parser.add_argument("--max-num-batched-tokens", type=int)
     parser.add_argument("--port", type=int, default=18231)
     parser.add_argument("--log", default="/tmp/plamo-batch-server.log")
