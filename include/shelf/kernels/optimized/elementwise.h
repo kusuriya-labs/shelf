@@ -110,7 +110,8 @@ hipError_t launch_swiglu_bf16(
     const bf16_t* gate, uint32_t gate_row_stride,
     const bf16_t* up, uint32_t up_row_stride,
     bf16_t* output, uint32_t output_row_stride,
-    uint32_t rows, uint32_t features, hipStream_t stream);
+    uint32_t rows, uint32_t features, hipStream_t stream,
+    bool bf16_intermediate = false);
 
 hipError_t launch_sigmoid_bf16_f32(
     const bf16_t* input, uint32_t input_row_stride,

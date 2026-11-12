@@ -146,6 +146,7 @@ struct MulNode {
 
 struct SwiGluNode {
     RowwiseShapeKey shape;
+    bool bf16_intermediate = false;
 };
 
 struct RoPENode {

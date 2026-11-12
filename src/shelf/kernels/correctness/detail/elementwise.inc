@@ -48,7 +48,14 @@ __device__ __forceinline__ ProgramStatus exec_binary(
         float y = 0.f;
         if (kind == KernelId::RESIDUAL_ADD) y = av + bv;
         else if (kind == KernelId::MUL) y = av * bv;
-        else if (kind == KernelId::SWIGLU) y = bv * (av / (1.f + expf(-av)));
+        else if (kind == KernelId::SWIGLU) {
+            if (b.flags != 0u) {
+                const float activated = av / (1.f + __expf(-av));
+                y = bv * __bfloat162float(__float2bfloat16(activated));
+            } else {
+                y = bv * (av / (1.f + expf(-av)));
+            }
+        }
         store_elem(out, r * out.row_stride + c, y);
     }
     return ProgramStatus::COMPLETE;

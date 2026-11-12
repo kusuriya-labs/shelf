@@ -24,6 +24,7 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::ScaleBf16ToF32, 107520u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::MulBf16, 6144u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::MulBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
+    {ElementwiseProfile::SwigluBf16, 10240u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::MulBf16, 16384u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::ResidualBf16, 1536u, 0u, 1u, kOptimizedMaxRows},
     {ElementwiseProfile::ResidualBf16, 4096u, 0u, 1u, kOptimizedMaxRows},

@@ -26,7 +26,7 @@ int main() {
     }
     auto lower = shelf::plamo3::lower_to_primitives(c,w);
     if (!lower.ok()) { std::fprintf(stderr,"%s\n",lower.status().message().c_str()); return 1; }
-    auto& v=lower.value(); unsigned ropes=0, kv=0, attention=0, norms=0;
+    auto& v=lower.value(); unsigned ropes=0, kv=0, attention=0, norms=0, bf16_swiglu=0;
     bool rounded_logits = false;
     for (const auto& n : v.graph.nodes) {
         if (n.debug_name == "logits_bf16") {
@@ -40,12 +40,13 @@ int main() {
         }
         if (std::holds_alternative<shelf::runtime::KvAppendNode>(n.node)) ++kv;
         if (std::holds_alternative<shelf::runtime::PagedAttentionNode>(n.node)) ++attention;
+        if (std::holds_alternative<shelf::runtime::SwiGluNode>(n.node)) ++bf16_swiglu;
         if (auto* norm=std::get_if<shelf::runtime::RmsNormNode>(&n.node)) {
             if (norm->weight_mode != shelf::runtime::RmsNormWeightMode::OFFSET_BF16) return 1;
             ++norms;
         }
     }
-    if (ropes!=16 || kv!=8 || attention!=8 || norms!=49 || !rounded_logits ||
+    if (ropes!=16 || kv!=8 || attention!=8 || norms!=49 || bf16_swiglu!=0 || !rounded_logits ||
         v.graph.external_outputs.size()!=4) return 1;
     shelf::runtime::ProgramBuildOptions options; options.max_token_rows=16; options.max_output_rows=16;
     auto program=shelf::runtime::build_program(v.graph, {v.weights.data(),v.weights.size()},
@@ -63,7 +64,7 @@ int main() {
     }
     auto separate = shelf::plamo3::lower_to_primitives(c,w);
     if (!separate.ok()) return 1;
-    unsigned q_proj=0, k_proj=0, v_proj=0, gate_proj=0, up_proj=0, split_nodes=0;
+    unsigned q_proj=0, k_proj=0, v_proj=0, gate_proj=0, up_proj=0, split_nodes=0, rounded_swiglu=0;
     for (const auto& n : separate.value().graph.nodes) {
         if (n.debug_name.find(".q_proj") != std::string::npos) ++q_proj;
         if (n.debug_name.find(".k_proj") != std::string::npos) ++k_proj;
@@ -71,7 +72,19 @@ int main() {
         if (n.debug_name.find(".gate_proj") != std::string::npos) ++gate_proj;
         if (n.debug_name.find(".up_proj") != std::string::npos) ++up_proj;
         if (std::holds_alternative<shelf::runtime::SplitNode>(n.node)) ++split_nodes;
+        if (const auto* swiglu = std::get_if<shelf::runtime::SwiGluNode>(&n.node)) {
+            if (!swiglu->bf16_intermediate) return 1;
+            ++rounded_swiglu;
+        }
     }
-    if (q_proj!=8 || k_proj!=8 || v_proj!=8 || gate_proj!=8 || up_proj!=8 || split_nodes!=0) return 1;
+    if (q_proj!=8 || k_proj!=8 || v_proj!=8 || gate_proj!=8 || up_proj!=8 || split_nodes!=0 || rounded_swiglu!=8) return 1;
+    auto split_program = shelf::runtime::build_program(separate.value().graph,
+        {separate.value().weights.data(), separate.value().weights.size()},
+        shelf::runtime::RowBucket::R16, shelf::runtime::ExecutionClass::PREFILL, options);
+    if (!split_program.ok()) return 1;
+    unsigned rounded_bindings = 0;
+    for (const auto& binding : split_program.value().dispatches)
+        if (binding.kernel_id == shelf::runtime::KernelId::SWIGLU && binding.flags == 1u) ++rounded_bindings;
+    if (rounded_bindings != 8) return 1;
     std::puts("PLaMo graph and layer-specific RoPE bindings verified"); return 0;
 }

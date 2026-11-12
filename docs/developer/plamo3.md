@@ -77,5 +77,8 @@ PLaMo loader は全層の形状を検査し、mul24 の整数 bit rate と BF16 
 共通の quantized weight loader に渡す。embedding と norm は非量子化、lm_head は
 BF16 または mul24 を受け付ける。非量子化 F16 は読み込み時に BF16 に変換する。
 分割 linear をグラフで個別に実行し、EXL3 workspace の最大形状を予約する。
+分割 gate/up の出力には SwiGLU を 1 回で適用する。SiLU の結果を BF16 に丸めてから
+up と乗算し、従来の 2 演算の丸めを維持する。結合重みの BF16 経路は従来どおり
+SiLU と乗算を別々に実行する。
 実 checkpoint の確認条件と精度の測定結果は
 [調査記録](../research/20261112/plamo3_exl3.md) に記載する。

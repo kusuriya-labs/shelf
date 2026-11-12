@@ -110,10 +110,19 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
             auto [g, u] = split(gu, f, f, p + "gate_up_split");
             gate = g; up = u;
         }
-        auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);
-        pg.nodes.back().debug_name = p + "silu";
-        auto product = em.value(f); em.emit(RT::PrimitiveNode{RT::MulNode{RT::RowwiseShapeKey{f}}},
-                                           {activated,up}, {product}); pg.nodes.back().debug_name = p + "mlp_product";
+        RT::ValueId product;
+        if (l.split_projections) {
+            product = em.value(f);
+            em.emit(RT::PrimitiveNode{RT::SwiGluNode{RT::RowwiseShapeKey{f}, true}},
+                    {gate, up}, {product});
+        } else {
+            auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);
+            pg.nodes.back().debug_name = p + "silu";
+            product = em.value(f);
+            em.emit(RT::PrimitiveNode{RT::MulNode{RT::RowwiseShapeKey{f}}},
+                    {activated, up}, {product});
+        }
+        pg.nodes.back().debug_name = p + "mlp_product";
         out = em.linear(l.down, weight(l.down), product); pg.nodes.back().debug_name = p + "down";
         out = norm(out, h, h, l.post_mlp_norm, static_cast<float>(1.0 / std::pow(5.0, 1.5)), p + "post_mlp_norm");
         x = residual(ar, out, p + "output"); lowered.layer_output_values.emplace_back(i, x);
