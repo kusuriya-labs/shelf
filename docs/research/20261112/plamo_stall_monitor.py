@@ -28,7 +28,10 @@ FILES = {
     'cpu_stat': '/proc/stat',
 }
 VM = {'pgmajfault', 'pswpin', 'pswpout', 'compact_stall', 'compact_success',
-      'compact_fail', 'allocstall_normal', 'thp_fault_alloc', 'thp_collapse_alloc'}
+      'compact_fail', 'allocstall_normal', 'thp_fault_alloc', 'thp_collapse_alloc',
+      'compact_daemon_wake', 'compact_daemon_migrate_scanned', 'compact_daemon_free_scanned',
+      'compact_migrate_scanned', 'compact_free_scanned', 'compact_isolated',
+      'pgmigrate_success', 'pgmigrate_fail', 'thp_fault_fallback', 'thp_collapse_alloc_failed'}
 
 
 def read(path):
@@ -53,6 +56,13 @@ def host():
             'memory_pressure': read(FILES['memory_pressure']), 'processes': pids}
 
 
+def find_kcompactd():
+    for path in glob.glob('/proc/[0-9]*/comm'):
+        if read(path) == 'kcompactd0':
+            return path.split('/')[2]
+    return None
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--output', required=True)
@@ -63,6 +73,7 @@ def main():
     if not command or a.interval <= 0:
         p.error('positive interval and command required')
     stop = threading.Event()
+    compact_pid = find_kcompactd()
     def sample():
         next_host = 0.0
         with open(a.output, 'w', buffering=1) as out:
@@ -71,6 +82,8 @@ def main():
                 data = {'t': begin, 'gpu': {k: read(v) for k, v in FILES.items()
                                              if k not in ('vmstat', 'cpu_stat', 'cpu_pressure', 'memory_pressure')}}
                 data['gpu_end'] = time.monotonic()
+                if compact_pid is not None:
+                    data['kcompactd_stat'] = read('/proc/' + compact_pid + '/stat')
                 if begin >= next_host:
                     data['host'] = host()
                     next_host = begin + 1.0

@@ -1045,3 +1045,47 @@ c=64 の計測を起動した。ユーザーから VRAM 不足による全回帰
 全回帰・ビルド・server process がないこと、`rocm-smi --showpids` が空であること、
 render device が空いていることを確認する。確認不能でも実行しない。
 [CPU 専用の guard 検証](test_plamo_gpu_guard.py) は GPU を使用しない。
+
+#### 解除後の途中観測
+
+解除ファイル作成後、各回の直前に lock 内の guard で GPU 利用 PID が空であることを
+確認して測定した。診断出力と sysfs 監視ありの値である。c=64 の最初の 90 秒は
+3,577 step、150 ms 以上 0 回、最大 65.512 ms。c=128 の最初の 90 秒は
+2,146 step 中、334.538 ms が 1 回あった。停止時は 128 要求・269 token 行、
+prefill 3／decode 125、新規受付 3、実行前後の空き page は 36068→36054。
+この要求数・行数・種別件数の組は既出だった。実行区間は 334.337 ms、
+step thread の CPU 時間は 326.506 ms（同期の busy wait を含む）。
+
+停止中の約 50 ms ごとの sysfs では GPU 使用率が 98→67→7→3→3→8→6%、
+sclk は 2948→2582→1359→38→41→1619→1229 MHz、平均電力は
+293→213→55→50→48→51→42 W と変化した。センサー値は瞬間値ではなく、
+特に電力は driver の平均値である。低クロックが停止の原因か、仕事が流れず
+低下した結果かは決まらない。前後の system vmstat では swap・直接 compaction
+stall は増加せず、major fault は 1 件増加したが当該 compute の major fault は
+増えていない。これらの counter は約 1 秒間隔であり停止区間だけの値ではない。
+起動前の `rocm-smi --showpids` は空、run 中の 30 秒・70 秒の照会では自身の
+compute のみだったが、停止瞬間の全 PID を保証するものではない。
+
+同じ 1 秒区間に `kcompactd0` の CPU 時間が約 350 ms 増え、前後数秒は 0 ms。
+これは停止と背景 compaction の強い時間相関であり、因果関係の証明ではない。
+次の run から当該 thread の `/proc/<pid>/stat` を約 50 ms ごとに採取し、
+背景 compaction の走査・page migration counter も追加する。プロセス限定で
+`prctl(PR_SET_THP_DISABLE)` を子孫に継承する[比較用 wrapper](plamo_disable_thp.py)
+を用意した。host 全体の THP 設定は変更しない。THP 無効化は明示的 hugepage や
+全ての compaction を無効にするものではない。
+
+同じ 2 run の測定窓で 1 秒間の `kcompactd0` CPU 時間が 100 ms 以上の区間は、
+c=64 で 3 回（140 / 120 / 250 ms）、c=128 で 2 回（350 / 160 ms）だった。
+各区間内で開始した step の最大は c=64 が 52.309 / 49.859 / 62.185 ms、
+c=128 が 334.538 / 64.553 ms。活動間隔は両 run とも約 32.1 秒。
+背景 compaction が起きても常に長い停止が起きるわけではなく、1 秒間隔の
+標本だけでは細かい時間順序や原因を確定できない。直接 compaction stall の
+counter が増えていないことは、background の `kcompactd0` が動いていないことを
+意味しない。
+
+この 90 秒窓の step 時間合計は c=64 の混在 61.746 秒／decode-only 27.489 秒、
+c=128 の混在 76.420 秒／decode-only 12.790 秒。混在 step それぞれから同じ run の
+decode-only 中央値（16.748 / 28.784 ms）を引いた差の合計は 29.775 / 27.315 秒、
+step 時間合計の 33.37 / 30.62% である。混在と decode-only は要求数・入力長・
+実行経路が異なるため、これは仮想基準との差であり、prefill の独立した実測時間や
+そのまま回収可能な速度損失ではない。step 外の queue、IPC、HTTP 完了処理も含まない。
