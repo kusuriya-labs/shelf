@@ -106,7 +106,7 @@ async def trial(c, kind, budget, repeat, diagnostic):
                     'all_active_tokens': count, 'all_active_seconds': (high-low)/1e9,
                     'all_active_tps': count/((high-low)/1e9),
                     'request_wall_seconds': (end-launch)/1e9,
-                    'server_start_seconds': (time.monotonic()-started), 'log': str(log.relative_to(ROOT))}
+                    'trial_elapsed_seconds': (time.monotonic()-started), 'log': str(log.relative_to(ROOT))}
         finally:
             os.killpg(proc.pid, 15)
             try: proc.wait(timeout=45)

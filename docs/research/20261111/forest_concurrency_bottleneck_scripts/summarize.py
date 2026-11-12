@@ -6,12 +6,13 @@ Rounds overlapping an interval boundary are assigned by their end time; token
 receipt is asynchronous, so the window match is approximate.
 """
 import json
+import os
 from pathlib import Path
 import re
 import statistics
 
 ROOT=Path(__file__).resolve().parents[4]
-PATH=ROOT/'docs/research/20261111/forest_concurrency_bottleneck_results.json'
+PATH=Path(os.environ.get('FOREST_RESULTS', ROOT/'docs/research/20261111/forest_concurrency_bottleneck_results.json'))
 PAT=re.compile(r'(\w+)=([^\s]+)')
 KEYS=('setup','draft_submit','selection_wait','metadata','verify_submit','decision_wait',
       'accept','replay_submit','gather_append_submit','single','sync_wait')
@@ -50,15 +51,20 @@ def analyze(trial):
     req={}
     for r in rounds:
         for q in r['requests']:
-            x=req.setdefault(str(q['id']),{'rounds':0,'accepted':0,'emitted':0,'drafts':0})
+            x=req.setdefault(str(q['id']),{'rounds':0,'accepted':0,'emitted':0,'drafts':0,
+                                               'verify_rows':0,'rows_hist':{}})
             for key in ('accepted','emitted','drafts'): x[key]+=q[key]
+            slot=next((z for z in r['slots'] if z['slot']==q['slot']), None)
+            row_count=slot['rows'] if slot else 0
+            x['verify_rows']+=row_count
+            hist=x['rows_hist'];key=str(row_count);hist[key]=hist.get(key,0)+1
             x['rounds']+=1
     for line in log.read_text(errors='replace').splitlines():
         match=re.search(r'\[req (\d+)\] prompt=', line)
         if match and match[1] in req:
             req[match[1]]['compute_log']=fields(line)
     for v in req.values():
-        v['emitted_per_round']=v['emitted']/v['rounds']; v['accepted_per_round']=v['accepted']/v['rounds']
+        v['emitted_per_round']=v['emitted']/v['rounds']; v['accepted_per_round']=v['accepted']/v['rounds']; v['verify_rows_per_round']=v['verify_rows']/v['rounds']
     def summary(rs):
         if not rs: return None
         n=len(rs)
@@ -86,6 +92,8 @@ def analyze(trial):
 def main():
     data=json.loads(PATH.read_text())
     for trial in data['trials']:
+        if 'server_start_seconds' in trial:
+            trial['trial_elapsed_seconds'] = trial.pop('server_start_seconds')
         trial['compute_request_logs'] = {}
         for line in (ROOT / trial['log']).read_text(errors='replace').splitlines():
             match = re.search(r'\[req (\d+)\] prompt=', line)
@@ -93,6 +101,23 @@ def main():
                 trial['compute_request_logs'][match[1]] = fields(line)
         if trial['diagnostic']:
             trial['diagnostic_summary']=analyze(trial)
+    # Pool individual GPU events across repetitions before taking medians.
+    pooled={}
+    for trial in data['trials']:
+        if not trial['diagnostic']: continue
+        name=f"{trial['diagnostic']}|{trial['c']}|{trial['kind']}|{trial['budget']}"
+        rows=pooled.setdefault(name,{})
+        for r in parse(ROOT/trial['log']):
+            if 'cost' not in r or r['cost']['verify_gpu'] <= 0: continue
+            rows.setdefault(str(r['cost']['rows']),[]).append(r['cost']['verify_gpu'])
+    data['pooled_verify_gpu_by_rows']={}
+    for name,rows in pooled.items():
+        dest=data['pooled_verify_gpu_by_rows'][name]={}
+        for row,values in rows.items():
+            values.sort()
+            dest[row]={'count':len(values),'median_ms':statistics.median(values),
+                       'p10_ms':values[int((len(values)-1)*0.1)],
+                       'p90_ms':values[int((len(values)-1)*0.9)]}
     tmp=PATH.with_suffix('.tmp');tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n');tmp.replace(PATH)
     print('trials',len(data['trials']),'diagnostic',sum(bool(t['diagnostic']) for t in data['trials']))
 if __name__=='__main__':main()
