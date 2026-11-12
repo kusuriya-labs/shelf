@@ -76,7 +76,7 @@ HF EXL3 checkpoint では、変換器が結合 QKV と gate/up を個別の
 PLaMo loader は全層の形状を検査し、mul24 の整数 bit rate と BF16 tensor を
 共通の quantized weight loader に渡す。embedding と norm は非量子化、lm_head は
 BF16 または mul24 を受け付ける。非量子化 F16 は読み込み時に BF16 に変換する。
-分割 linear をグラフで個別に実行し、EXL3 workspace の最大形状を予約する。
+分割 linear をグラフで個別に表現し、EXL3 workspace の最大形状を予約する。
 分割 gate/up の出力には SwiGLU を 1 回で適用する。SiLU の結果を BF16 に丸めてから
 up と乗算し、従来の 2 演算の丸めを維持する。結合重みの BF16 経路は従来どおり
 SiLU と乗算を別々に実行する。
@@ -103,3 +103,20 @@ RMSNorm を 32 スレッドの workgroup で実行する。逐次の加算順と
 17〜64 行で、4 分割分の workspace がある場合に split-K 4 を使用する。
 split-K によって加算順と logits は変化する。他の行数、
 prefill、BF16 checkpoint、他モデルは従来の選択を使う。
+
+同 checkpoint の EXL3-INT8 linear は、1〜255 行で QKV と gate/up の連続する
+projection をそれぞれまとめて実行する。各 projection の SUH、SVH、trellis、
+activation scale、split-K と BF16 出力は独立に保持する。共有入力の回転結果を
+projection 間で使い回さない。3 projection の QKV と 2 projection の gate/up は、
+それぞれ回転・量子化、GEMM、出力回転の 3 launch を使う。
+出力の liveness と value trace はグラフ上の各 projection のまま保持する。
+必要な workspace が不足する場合や実行範囲の末尾を越える場合は個別実行を使う。
+
+4 bit の GEMM は 16 行以下で 1 tile、17〜128 行で 2 tile、129〜255 行で
+4 tile を各 wave が担当する。5 bit は 17 行以上で次の K group の先読みを省略する。
+lm_head の専用経路は 64 行以下で使用し、17〜64 行では 2 tile を使う。
+出力回転は 1 wave で 128 要素を処理し、複数の列区間を独立した workgroup に割り当てる。
+整数の group 内積、scale の適用順、split の加算順、BF16 中間丸めを維持する。
+256 行以上と明示的な `SHELF_EXL3_INT8_DENSE` / `SHELF_EXL3_MUL24_PREFILL_AB`
+の指定時は既存の実行経路を使う。`SHELF_PLAMO_EXL3_LINEAR=0` はこの専用経路を無効にする。
+BF16 checkpoint と他モデルはこの経路を選択しない。

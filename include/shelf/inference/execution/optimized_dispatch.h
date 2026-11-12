@@ -24,6 +24,7 @@ enum class OptimizedLaunchKind : uint8_t {
 
 struct OptimizedLaunchResult {
     OptimizedLaunchKind kind = OptimizedLaunchKind::NotApplicable;
+    uint32_t dispatch_count = 1;
 };
 Result<OptimizedLaunchResult> try_launch_rmsnorm(
     const ::shelf::runtime::Program& program,
@@ -40,6 +41,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
-    hipStream_t stream);
+    hipStream_t stream,
+    size_t dispatch_end);
 
 }

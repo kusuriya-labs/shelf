@@ -16,6 +16,7 @@
 #include <shelf/inference/execution/fp8_ptpc_dispatch.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -930,6 +931,90 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+Result<OptimizedLaunchResult> try_launch_plamo_exl3_projection(
+    const ::shelf::runtime::Program& program, size_t first, size_t end,
+    HostExecutionContext& ctx, hipStream_t stream) {
+    const auto miss = OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
+    const auto& binding = program.dispatches[first];
+    if (binding.weight_index >= ctx.weight_count || ctx.weights == nullptr) return miss;
+    const auto& weight = ctx.weights[binding.weight_index];
+    if (!weight.plamo_exl3_linear) return miss;
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHELF_PLAMO_EXL3_LINEAR");
+        return env == nullptr || std::strcmp(env, "0") != 0;
+    }();
+    if (!enabled || binding.input_count != 1u || binding.output_count != 1u) return miss;
+    auto input = resolve_host_value(program, ::shelf::runtime::ValueId{binding.input_slots[0]}, ctx);
+    if (!input.ok()) return input.status();
+    auto output = resolve_host_value(program, ::shelf::runtime::ValueId{binding.output_slots[0]}, ctx);
+    if (!output.ok()) return output.status();
+    const uint32_t rows = rows_for(output.value(), ctx);
+    if (rows == 0u || rows >= 256u || input.value().dtype != ValueDType::BF16 ||
+        output.value().dtype != ValueDType::BF16 || ctx.exl3_xrot == nullptr || ctx.exl3_accum == nullptr)
+        return miss;
+    static const bool custom_prefill = std::getenv("SHELF_EXL3_INT8_DENSE") != nullptr ||
+        std::getenv("SHELF_EXL3_MUL24_PREFILL_AB") != nullptr;
+    if (custom_prefill || (rows > 64u && weight.rows == 107520u)) return miss;
+    const uint32_t count = weight.rows == 3072u && weight.cols == 2560u ? 3u :
+                           weight.rows == 10240u && weight.cols == 2560u ? 2u : 1u;
+    if (count > end - first) return miss;
+    ::shelf::kernel::PlamoExl3ProjectionGroup group{};
+    group.input = static_cast<const ::shelf::bf16_t*>(input.value().ptr);
+    group.rows = rows;
+    group.k = weight.cols;
+    group.input_stride = input.value().row_stride;
+    group.scale_stride_bytes = (group.k / 128u * 4u + 15u) & ~15u;
+    group.count = count;
+    uint64_t xoffset = 0u, yoffset = 0u;
+    auto align = [](uint64_t offset) { return (offset + 255u) & ~uint64_t{255u}; };
+    for (uint32_t j = 0u; j < count; ++j) {
+        const auto& b = program.dispatches[first + j];
+        if (b.kernel_id != KernelId::LINEAR_EXL3_INT8 || b.input_count != 1u ||
+            b.output_count != 1u || b.input_slots[0] != binding.input_slots[0] ||
+            b.weight_index >= ctx.weight_count) return miss;
+        const auto& w = ctx.weights[b.weight_index];
+        const uint32_t expected_n = count == 3u && j != 0u ? 512u : weight.rows;
+        if (!w.plamo_exl3_linear || w.encoding != 4u || w.device_ptr != nullptr ||
+            w.exl3_ka != weight.exl3_ka || w.cols != group.k || w.rows != expected_n ||
+            w.output_col_total != 0u || w.preshuffled || w.exl3_half ||
+            w.codes == nullptr || w.exl3_suh == nullptr || w.exl3_svh == nullptr)
+            return miss;
+        auto dst = resolve_host_value(program, ::shelf::runtime::ValueId{b.output_slots[0]}, ctx);
+        if (!dst.ok()) return dst.status();
+        if (dst.value().dtype != ValueDType::BF16 || dst.value().feature_count != w.rows ||
+            rows_for(dst.value(), ctx) != rows || input.value().feature_count != group.k)
+            return miss;
+        auto& p = group.p[j];
+        p.n = w.rows;
+        p.out_stride = dst.value().row_stride;
+        p.out = static_cast<::shelf::bf16_t*>(dst.value().ptr);
+        p.trellis = static_cast<const uint16_t*>(w.codes);
+        p.suh = static_cast<const uint16_t*>(w.exl3_suh);
+        p.svh = static_cast<const uint16_t*>(w.exl3_svh);
+        const uint32_t scratch_rows = static_cast<uint32_t>(std::min<uint64_t>(
+            ctx.exl3_accum_bytes / (static_cast<uint64_t>(p.n) * 4u), UINT32_MAX));
+        p.splits = ::shelf::kernel::exl3_mul24_gemm_splits(rows, p.n, group.k, scratch_rows, w.exl3_ka);
+        if (w.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
+            rows > 16u && rows <= 64u && scratch_rows >= 4u * rows) p.splits = 4u;
+        xoffset = align(xoffset);
+        p.codes = reinterpret_cast<int8_t*>(static_cast<uint8_t*>(ctx.exl3_xrot) + xoffset);
+        xoffset += static_cast<uint64_t>(rows) * group.k;
+        xoffset = align(xoffset);
+        p.scales = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_xrot) + xoffset);
+        xoffset += static_cast<uint64_t>(rows) * group.scale_stride_bytes;
+        yoffset = align(yoffset);
+        p.yprime = reinterpret_cast<float*>(static_cast<uint8_t*>(ctx.exl3_accum) + yoffset);
+        yoffset += static_cast<uint64_t>(rows) * p.n * p.splits * 4u;
+        if (xoffset > ctx.exl3_xrot_bytes || yoffset > ctx.exl3_accum_bytes) return miss;
+    }
+    const hipError_t err = ::shelf::kernel::launch_plamo_exl3_projection(group, weight.exl3_ka, stream);
+    if (err != hipSuccess)
+        return Status::hip_error("plamo exl3 projection", hipGetErrorString(err), __FILE__, __LINE__);
+    record_physical_launch(3u);
+    for (uint32_t j = 0u; j < count; ++j) record_optimized_op();
+    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, count};
+}
+
 Result<KernelMode> read_kernel_mode() {
     const char* e = std::getenv("SHELF_QWEN35_KERNEL_MODE");
     if (e == nullptr || e[0] == '\0')
@@ -945,7 +1030,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,
-    hipStream_t stream) {
+    hipStream_t stream,
+    size_t dispatch_end) {
     if (dispatch_index >= program.dispatches.size())
         return Status::invalid_state("dispatch_index out of range", __FILE__, __LINE__);
     const auto& b = program.dispatches[dispatch_index];
@@ -979,8 +1065,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_moe_combine(program, b, ctx, stream);
         case KernelId::LINEAR_EXL3_W16A16:
             return try_launch_linear_exl3(program, b, ctx, stream);
-        case KernelId::LINEAR_EXL3_INT8:
+        case KernelId::LINEAR_EXL3_INT8: {
+            auto projected = try_launch_plamo_exl3_projection(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!projected.ok() || projected.value().kind == OptimizedLaunchKind::Launched) return projected;
             return try_launch_linear_exl3_mul24(program, b, ctx, stream);
+        }
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
         case KernelId::RMS_NORM:

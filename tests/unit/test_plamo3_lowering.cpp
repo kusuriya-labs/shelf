@@ -94,8 +94,10 @@ int main() {
         shape(l.q,3072,2560); shape(l.k,512,2560); shape(l.v,512,2560);
         shape(l.o_proj,2560,3072); shape(l.gate,10240,2560);
         shape(l.up,10240,2560); shape(l.down,2560,10240);
-        l.down.quant_spec=shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
-        l.down.exl3_ka=4;
+        for (auto* matrix : {&l.q,&l.k,&l.v,&l.o_proj,&l.gate,&l.up,&l.down}) {
+            matrix->quant_spec=shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
+            matrix->exl3_ka=4;
+        }
     }
     w.layers[0].q.quant_spec=shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1;
     w.layers[0].q.exl3_ka=5; w.layers[0].down.exl3_ka=4;
@@ -118,11 +120,15 @@ int main() {
             ++split4_weights;
         }
     if (split4_weights != 24) return 1;
+    unsigned projection_weights=0;
+    for (const auto& slot : target.value().weights)
+        if (slot.plamo_exl3_linear) ++projection_weights;
+    if (projection_weights != 169) return 1;
     w.lm_head.quant_spec=shelf::quantization::QuantSpecId::BF16_V1;
     auto other = shelf::plamo3::lower_to_primitives(c,w);
     if (!other.ok()) return 1;
     for (const auto& slot : other.value().weights)
-        if (slot.plamo_exl3_split4) return 1;
+        if (slot.plamo_exl3_split4 || slot.plamo_exl3_linear) return 1;
     for (const auto& n : other.value().graph.nodes)
         if (const auto* norm=std::get_if<shelf::runtime::RmsNormNode>(&n.node))
             if (norm->weight_mode == shelf::runtime::RmsNormWeightMode::OFFSET_BF16_SMALL_GROUP) return 1;
