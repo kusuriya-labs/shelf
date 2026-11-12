@@ -1105,3 +1105,24 @@ background compaction 活動と GPU 遊休が同じ 1 秒区間に現れた。�
 その後、別の全回帰を優先する新たな指示を受け、待機していた本タスクの `flock` と
 後続ジョブを停止した。その時点で本タスクの server / compute は実行されていない。
 解除ファイルは不在であり、新たに作成されるまで GPU 処理を行わない。
+
+次の解除後、c=64 の 90 秒窓内で 358.058 ms の停止を再現した。63 要求・341 行、
+prefill 2／decode 61 で、同じ組は既に 3 回出現していた。GPU 使用率は 99→75→9→
+5→3% と低下し、約 356 ms 後に戻り始めた。約 50 ms ごとの CPU tick 採取では、
+`kcompactd0` の連続活動は step 開始約 95 ms 前から終了付近まで、CPU 時間約
+360 ms だった。tick は標本間のどこで増えたかは分からない。同じ約 1 秒の host
+counter は background compaction の migrate scan が 11,016,389 page 増え、
+page migration の成功が 55,330 増えた。直接 compaction stall、swap in と major
+fault はこの区間では増えなかった。compute の step thread は 352.951 ms の CPU
+時間を使っており、単にスケジューリングされず待った時間とは異なる。これで
+GPU 遊休と background compaction の時間的一致は独立した 3 例となったが、
+因果の向きや driver 内部の待機箇所は未確定。
+
+同じ追加追跡の c=128・90 秒では 2,142 step 中に 305.823 ms が 1 回。
+126 要求・230 行、prefill 1／decode 125。約 50 ms ごとの `kcompactd0` tick 増加は
+step 開始約 74 ms 前から約 327 ms 後まで続き、その CPU 時間は約 330 ms。
+230 行は dense GEMM 対象外である。起動時 synthetic step の 895.790 ms は
+background compaction 活動と重ならず、既報の hipBLASLt 初期化とは別に扱う。
+4 件の定常 workload 上の長時間停止（うち 1 件は workload warmup）すべてが背景
+compaction 活動と重なった一方、活動に重なっても 150 ms 超にならない step はある。
+高頻度採取の集計は [スクリプト](plamo_compaction_analyze.py) で再現できる。
