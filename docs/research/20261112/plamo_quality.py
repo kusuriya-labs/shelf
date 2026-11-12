@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--bench", required=True)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--kv-cache-dtype", choices=["bf16", "fp8"], default="bf16")
     parser.add_argument("--prefix", action="append", help="評価する case 名の接頭辞")
     args = parser.parse_args()
     root = Path(args.workdir)
@@ -74,6 +75,8 @@ def main():
         cmd = [args.bench, "quality", "--model-dir", args.model, "--tokens-file", str(tokens),
                "--context", "1", "--batch-size", str(args.batch_size), "--compare", str(baseline),
                "--dump", str(root / f"{name}.candidate")]
+        if args.kv_cache_dtype != "bf16":
+            cmd.extend(["--kv-cache-dtype", args.kv_cache_dtype])
         run = subprocess.run(cmd, text=True, capture_output=True)
         if run.returncode:
             raise RuntimeError(f"{name}: shelf-bench exited {run.returncode}\n{run.stdout}\n{run.stderr}")

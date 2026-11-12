@@ -1,0 +1,172 @@
+{
+  "candidate": "PLaMo EXL3 SwiGLU without BF16 intermediate rounding, after RMSNorm and split-K 4",
+  "accepted": false,
+  "performance": [
+    {
+      "concurrency": 4,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 22.190974596887827,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 41308,
+      "completion_tokens_per_s": 458.97777777777776,
+      "completed_requests": 529,
+      "run": 1,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 67
+    },
+    {
+      "concurrency": 4,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 22.193874404998496,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 41404,
+      "completion_tokens_per_s": 460.0444444444444,
+      "completed_requests": 530,
+      "run": 2,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 80.0
+    },
+    {
+      "concurrency": 64,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 24.50962061015889,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 226477,
+      "completion_tokens_per_s": 2516.411111111111,
+      "completed_requests": 2891,
+      "run": 1,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 67
+    },
+    {
+      "concurrency": 64,
+      "warmup_after_first_completion_s": 20.0,
+      "elapsed_before_measurement_s": 24.50170121109113,
+      "measurement_s": 90.0,
+      "max_num_batched_tokens": null,
+      "lengths": [
+        1,
+        2,
+        4,
+        6
+      ],
+      "kv_cache_dtype": "bf16",
+      "completion_tokens": 227178,
+      "completion_tokens_per_s": 2524.2,
+      "completed_requests": 2899,
+      "run": 2,
+      "output_tokens_min": 14,
+      "output_tokens_max": 167,
+      "output_tokens_median": 67
+    }
+  ],
+  "quality": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.017368154178537144,
+      "top1_agreement": 0.9280000001142856,
+      "max_logit_diff": 5.625
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.01743191723737143,
+      "top1_agreement": 0.9417142858091428,
+      "max_logit_diff": 7.5
+    },
+    "wiki": {
+      "cases": 4,
+      "positions": 521,
+      "mean_kl": 0.05015743882226488,
+      "top1_agreement": 0.9001919385604606,
+      "max_logit_diff": 6.625
+    }
+  },
+  "paired_kl_vs_split4": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_delta_kl": -0.0006080553327317343,
+      "median_delta_kl": -3.329098980221854e-08,
+      "trimmed_1pct_mean_delta_kl": -0.00013694518134644543,
+      "case_bootstrap_95pct_ci": [
+        -0.0015221831608102988,
+        8.366527025918881e-05
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_delta_kl": 0.0028089362316744675,
+      "median_delta_kl": -1.8026902384868304e-07,
+      "trimmed_1pct_mean_delta_kl": 0.00027964356364712707,
+      "case_bootstrap_95pct_ci": [
+        0.0001999217134155994,
+        0.008536035007760274
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    },
+    "wiki": {
+      "cases": 4,
+      "positions": 521,
+      "mean_delta_kl": -0.0003572295448669639,
+      "median_delta_kl": -1.7855189444057688e-05,
+      "trimmed_1pct_mean_delta_kl": -0.0006088476417981544,
+      "case_bootstrap_95pct_ci": [
+        -0.0017781630424811461,
+        0.0011268647439826168
+      ],
+      "bootstrap_samples": 10000,
+      "seed": 17
+    }
+  },
+  "paired_top1_vs_split4": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "lost_agreements": 6,
+      "gained_agreements": 4,
+      "one_sided_mcnemar_p": 0.376953125,
+      "one_sided_case_permutation_p": 0.375
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "lost_agreements": 2,
+      "gained_agreements": 3,
+      "one_sided_mcnemar_p": 0.8125,
+      "one_sided_case_permutation_p": 0.8125
+    }
+  }
+}

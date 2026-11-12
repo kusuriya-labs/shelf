@@ -1,0 +1,30 @@
+diff --git a/src/shelf/models/plamo3/model/lower_to_primitives.cpp b/src/shelf/models/plamo3/model/lower_to_primitives.cpp
+index 7bb63d4..f5f6852 100644
+--- a/src/shelf/models/plamo3/model/lower_to_primitives.cpp
++++ b/src/shelf/models/plamo3/model/lower_to_primitives.cpp
+@@ -4,6 +4,7 @@
+ #include <shelf/models/common/qwen_hybrid/weight_slot.h>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdlib>
+ #include <limits>
+ #include <string>
+ 
+@@ -31,6 +32,8 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
+         w.layers[0].q.exl3_ka == 5 && w.layers[0].down.exl3_ka == 4 &&
+         w.lm_head.quant_spec == shelf::quantization::QuantSpecId::EXL3_MUL24_INT8_V1 &&
+         w.lm_head.exl3_ka == 8;
++    const char* unrounded = std::getenv("SHELF_PLAMO_EXL3_UNROUNDED_SWIGLU");
++    const bool unrounded_swiglu = exl3_2b && unrounded != nullptr && unrounded[0] == '1' && unrounded[1] == '\0';
+     QH::HybridLoweredPrimitives lowered;
+     auto& pg = lowered.graph;
+     QH::Emitter em{pg};
+@@ -123,7 +126,7 @@ Result<QH::HybridLoweredPrimitives> lower_to_primitives(const Config& c, const M
+         RT::ValueId product;
+         if (l.split_projections) {
+             product = em.value(f);
+-            em.emit(RT::PrimitiveNode{RT::SwiGluNode{RT::RowwiseShapeKey{f}, true}},
++            em.emit(RT::PrimitiveNode{RT::SwiGluNode{RT::RowwiseShapeKey{f}, !unrounded_swiglu}},
+                     {gate, up}, {product});
+         } else {
+             auto activated = em.unary(RT::PrimitiveNode{RT::SiLUNode{RT::RowwiseShapeKey{f}}}, gate, f);

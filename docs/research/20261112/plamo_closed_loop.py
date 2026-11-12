@@ -13,11 +13,11 @@ import aiohttp
 from plamo_batch import CASES
 
 
-def workload():
+def workload(lengths):
     cases = []
     for language in ("ja", "en"):
         examples = [case for case in CASES if case[0] == language]
-        for length in (1, 2, 4, 6):
+        for length in lengths:
             for offset in range(4):
                 texts = [examples[(offset + i) % len(examples)][2] for i in range(length)]
                 cases.append((language, examples[0][1], " ".join(texts)))
@@ -28,11 +28,13 @@ def workload():
 async def run(args):
     if args.concurrency < 1 or args.warmup < 0 or args.duration <= 0:
         raise ValueError("invalid concurrency or measurement duration")
-    cases = workload()
+    cases = workload(args.lengths)
     command = [args.server, "--model-dir", args.model, "--port", str(args.port),
                "--max-seq-len", "2048", "--max-concurrent-requests", str(args.concurrency)]
     if args.max_num_batched_tokens is not None:
         command.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
+    if args.kv_cache_dtype != "bf16":
+        command.extend(["--kv-cache-dtype", args.kv_cache_dtype])
     with open(args.log, "w") as log:
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
         try:
@@ -104,6 +106,8 @@ async def run(args):
                 print(json.dumps({"concurrency": args.concurrency, "warmup_after_first_completion_s": args.warmup,
                                   "elapsed_before_measurement_s": start_measure - started,
                                   "measurement_s": args.duration, "max_num_batched_tokens": args.max_num_batched_tokens,
+                                  "lengths": args.lengths,
+                                  "kv_cache_dtype": args.kv_cache_dtype,
                                   "completion_tokens": tokens,
                                   "completion_tokens_per_s": tokens / args.duration,
                                   "completed_requests": len(records), "records": records},
@@ -126,6 +130,11 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=float, default=20)
     parser.add_argument("--duration", type=float, default=90)
     parser.add_argument("--max-num-batched-tokens", type=int)
+    parser.add_argument("--lengths", type=int, nargs="+", default=[1, 2, 4, 6])
+    parser.add_argument("--kv-cache-dtype", choices=["bf16", "fp8"], default="bf16")
     parser.add_argument("--port", type=int, default=18232)
     parser.add_argument("--log", default="/tmp/plamo-closed-loop-server.log")
-    asyncio.run(run(parser.parse_args()))
+    args = parser.parse_args()
+    if not args.lengths or any(length < 1 for length in args.lengths):
+        parser.error("lengths must be positive")
+    asyncio.run(run(args))

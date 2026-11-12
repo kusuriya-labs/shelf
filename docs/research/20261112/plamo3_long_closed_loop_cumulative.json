@@ -1,0 +1,50 @@
+[
+  {
+    "concurrency": 4,
+    "warmup_after_first_completion_s": 20.0,
+    "elapsed_before_measurement_s": 22.074143674923107,
+    "measurement_s": 90.0,
+    "max_num_batched_tokens": null,
+    "lengths": [
+      1,
+      2,
+      4,
+      6,
+      10,
+      12
+    ],
+    "kv_cache_dtype": "bf16",
+    "completion_tokens": 39986,
+    "completion_tokens_per_s": 444.2888888888889,
+    "completed_requests": 286,
+    "output_tokens_min": 14,
+    "output_tokens_max": 305,
+    "output_tokens_median": 111.5,
+    "output_tokens_at_least_280": 38,
+    "length_finish_count": 0
+  },
+  {
+    "concurrency": 64,
+    "warmup_after_first_completion_s": 20.0,
+    "elapsed_before_measurement_s": 28.616102250060067,
+    "measurement_s": 90.0,
+    "max_num_batched_tokens": null,
+    "lengths": [
+      1,
+      2,
+      4,
+      6,
+      10,
+      12
+    ],
+    "kv_cache_dtype": "bf16",
+    "completion_tokens": 214726,
+    "completion_tokens_per_s": 2385.8444444444444,
+    "completed_requests": 1530,
+    "output_tokens_min": 14,
+    "output_tokens_max": 308,
+    "output_tokens_median": 119.0,
+    "output_tokens_at_least_280": 201,
+    "length_finish_count": 0
+  }
+]

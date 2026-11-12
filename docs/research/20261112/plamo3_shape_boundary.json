@@ -1,0 +1,61 @@
+{
+  "case": "heldout-ja-en-0",
+  "comparisons": [
+    {
+      "rows_before": 1,
+      "rows_after": 16,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "rows_before": 16,
+      "rows_after": 17,
+      "positions": 33,
+      "logits_differ_positions": 33,
+      "argmax_differ_positions": 1,
+      "max_absolute_difference": 0.625
+    },
+    {
+      "rows_before": 17,
+      "rows_after": 32,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "rows_before": 32,
+      "rows_after": 33,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "rows_before": 33,
+      "rows_after": 48,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "rows_before": 48,
+      "rows_after": 49,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "rows_before": 49,
+      "rows_after": 64,
+      "positions": 33,
+      "logits_differ_positions": 0,
+      "argmax_differ_positions": 0,
+      "max_absolute_difference": 0.0
+    }
+  ]
+}
