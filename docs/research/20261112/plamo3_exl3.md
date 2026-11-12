@@ -612,3 +612,29 @@ Qwen3.8 に切り替えた。候補の case 別値と検定結果は
 そのまま使う。復元後に同じ拡大集合を再評価し、翻訳 36 ケースと WikiText 4 ケースの
 logits dump が基準とすべて byte 一致した。累積 KL は日→英 0.017130、英→日
 0.017396 のままで、例外上限 0.018130 / 0.018396 以下だが絶対 0.01 は超える。
+
+### 今回の検証と残作業
+
+復元後、関連 ctest 7 件、PLaMo 2B BF16 の実モデル server、2B EXL3 の実モデル
+server と起動 warmup、合成 EXL3 の正常系・marker 拒否は通過した。Qwen3.8 27B
+EXL3 では `concurrency-cancel` の 5 テストが通過し、構造化出力は既存の
+`/tmp/venv-so` で通常・stream、thinking、Responses を通過した。
+構造化出力単独の専用 `--group` は現在の runner にないため、個別テストで確認した。
+`--all` は実行していない。
+
+最初に Qwen3.5 2B BF16 で `concurrency-cancel` を実行すると 2 件通過、3 件失敗。
+server log は chat template が `reasoning_effort` を処理しないため起動時検査で
+拒否したことを示した。PLaMo 用 `/tmp/venv-plamo` には `xgrammar` がなく
+構造化出力が skip されたため、依存がある既存 venv で再実行した。
+
+目標 4000 / 700 token/s には未達。継続投入 c=64 は単純な重み帯域の目安 6000、
+c=1 は目安 350 よりも低い。ただしこれらは上限の概算であり、prefill、sampling、
+scheduler を含む今回の測定で達成可能な値を示さない。次の暫定 gate としては
+c=64 で 2600、c=4 で 480 token/s（基準比約 +6.3% / +4.6%）を提案する。
+実現可能性を実測した目標ではなく、段階的に検証する値である。
+
+残る優先項目は、c=64 の最大項である EXL3 linear の grouped QKV / gate-up、
+RMSNorm と残差など小 kernel の融合、および mixed prefill/decode 時の GPU・host
+内訳の特定。c=128 の散発停止は HIP API と実行区間を対応付けて追跡する必要がある。
+異なる列を混在させた teacher-forced 品質、複数 batch サイズでの拡大評価、
+300 token 近い出力を含む追加 workload は未実施。採用した性能変更はない。
