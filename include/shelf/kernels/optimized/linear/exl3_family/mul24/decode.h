@@ -31,9 +31,6 @@ inline bool rotate_f4_enabled() {
     return enabled;
 }
 
-// The float4 forms need enough CTAs to fill the device. Below these row counts the
-// scalar/row-per-CTA layout (grid = rows x k/128) has more parallelism and measured
-// faster, so the f4 path is skipped.
 inline constexpr uint32_t kRotateQuantizeF4MinRows = 32u;
 inline constexpr uint32_t kRotateOutF4MinRows = 512u;
 

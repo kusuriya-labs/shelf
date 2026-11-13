@@ -1,5 +1,6 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include <shelf/kernels/optimized/linear/exl3_mul24.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/decode.h>
 #include <hip/hip_runtime.h>
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +23,68 @@ template <class T> struct Buffer {
             check(hipFree(p));
     }
 };
+
+template <bool BF16>
+__global__ void scalar_rotate_reference(const float* y, const uint16_t* svh, void* out,
+                                        uint32_t rows, uint32_t n, uint32_t stride, uint32_t splits) {
+    using namespace shelf::kernel::exl3_detail;
+    using namespace shelf::kernel::exl3_detail::mul24;
+    __shared__ float smem[128];
+    const uint32_t m = blockIdx.x, col = blockIdx.y * 128u + threadIdx.x;
+    float v = 0.0f;
+    for (uint32_t z = 0; z < splits; ++z)
+        v += y[(static_cast<size_t>(z) * rows + m) * n + col];
+    v = fwht128_smem(v, smem, threadIdx.x) * kInvSqrt128 * f16_bits_to_f32(svh[col]);
+    const size_t pos = static_cast<size_t>(m) * stride + col;
+    if constexpr (BF16) reinterpret_cast<uint16_t*>(out)[pos] = f32_to_bf16_rne_device(v);
+    else reinterpret_cast<float*>(out)[pos] = v;
+}
+
+bool run_out_exact(uint32_t rows, uint32_t n, uint32_t splits, bool bf16, uint32_t padding,
+                   bool unaligned = false, bool special = false) {
+    const uint32_t stride = n + padding;
+    const size_t values = static_cast<size_t>(rows) * stride;
+    Buffer<float> y(static_cast<size_t>(splits) * rows * n + 1u);
+    Buffer<uint16_t> svh(n);
+    Buffer<uint32_t> reference(values + 1u), candidate(values + 1u);
+    std::mt19937 rng(917u + rows + n + splits);
+    std::vector<float> hy(static_cast<size_t>(splits) * rows * n);
+    std::vector<uint16_t> hs(n);
+    for (auto& v : hy) v = static_cast<float>(static_cast<int32_t>(rng() % 65536u) - 32768) / 8192.0f;
+    if (special) {
+        constexpr uint32_t patterns[] = {0u, 0x80000000u, 0x7f800000u, 0xff800000u,
+                                         0x7fc00001u, 0xffc01002u, 1u, 0x80000001u};
+        for (size_t i = 0; i < hy.size(); i += 128u)
+            hy[i] = __builtin_bit_cast(float, patterns[(i / 128u) % 8u]);
+    }
+    for (auto& v : hs) v = static_cast<uint16_t>(0x3800u + rng() % 2048u);
+    if (special) {
+        constexpr uint16_t patterns[] = {0u, 0x8000u, 0x7c00u, 0xfc00u,
+                                         0x7e01u, 0xfe02u, 1u, 0x8001u};
+        for (size_t i = 0; i < hs.size(); ++i) hs[i] = patterns[i % 8u];
+    }
+    float* yp = y.p + (unaligned ? 1u : 0u);
+    void* ref_out = reinterpret_cast<uint8_t*>(reference.p) + (unaligned ? (bf16 ? 2u : 4u) : 0u);
+    void* candidate_out = reinterpret_cast<uint8_t*>(candidate.p) + (unaligned ? (bf16 ? 2u : 4u) : 0u);
+    check(hipMemcpy(yp, hy.data(), hy.size() * sizeof(float), hipMemcpyHostToDevice));
+    check(hipMemcpy(svh.p, hs.data(), hs.size() * sizeof(uint16_t), hipMemcpyHostToDevice));
+    check(hipMemset(reference.p, 0xa5, (values + 1u) * sizeof(uint32_t)));
+    check(hipMemset(candidate.p, 0xa5, (values + 1u) * sizeof(uint32_t)));
+    const dim3 grid(rows, n / 128u);
+    if (bf16) scalar_rotate_reference<true><<<grid, 128>>>(yp, svh.p, ref_out, rows, n, stride, splits);
+    else scalar_rotate_reference<false><<<grid, 128>>>(yp, svh.p, ref_out, rows, n, stride, splits);
+    check(hipGetLastError());
+    check(shelf::kernel::launch_exl3_mul24_rotate_out(
+        yp, svh.p, candidate_out, bf16 ? shelf::kernel::Exl3OutputDType::BF16 : shelf::kernel::Exl3OutputDType::F32,
+        rows, n, stride, splits, nullptr));
+    std::vector<uint32_t> before(values + 1u), after(values + 1u);
+    check(hipMemcpy(before.data(), reference.p, (values + 1u) * sizeof(uint32_t), hipMemcpyDeviceToHost));
+    check(hipMemcpy(after.data(), candidate.p, (values + 1u) * sizeof(uint32_t), hipMemcpyDeviceToHost));
+    if (before != after)
+        std::fprintf(stderr, "rotate rows=%u n=%u splits=%u bf16=%d padding=%u mismatch\n",
+                     rows, n, splits, bf16, padding);
+    return before == after;
+}
 
 bool run(uint32_t rows, uint32_t bits, uint32_t count, uint32_t k = 1024u, uint32_t n = 384u,
          uint32_t splits = 0u, bool allow_shape_fusion = true) {
@@ -181,6 +244,38 @@ bool run_i32(uint32_t rows, bool bf16) {
 }
 
 int main() {
+    for (uint32_t rows : {1u, 7u, 8u, 10u, 16u, 32u, 38u, 40u, 64u, 255u, 256u, 257u, 258u, 272u, 288u, 319u, 320u, 384u, 448u, 511u, 512u, 513u})
+        for (bool bf16 : {false, true})
+            for (uint32_t splits : {1u, 2u, 5u})
+                if (!run_out_exact(rows, 5120u, splits, bf16, 4u)) return 1;
+    for (uint32_t rows : {1u, 8u, 32u})
+        for (bool bf16 : {false, true})
+            if (!run_out_exact(rows, 65536u, 2u, bf16, 4u) ||
+                !run_out_exact(rows, 5120u, 2u, bf16, 1u) ||
+                !run_out_exact(rows, 65536u, 2u, bf16, 4u, true) ||
+                !run_out_exact(rows, 65536u, 2u, bf16, 4u, false, true)) return 1;
+    for (uint32_t rows : {511u, 512u, 513u})
+        for (bool bf16 : {false, true})
+            if (!run_out_exact(rows, 1024u, 2u, bf16, 4u, false, true)) return 1;
+    for (uint32_t rows : {256u, 511u})
+        for (bool bf16 : {false, true})
+            for (uint32_t splits : {1u, 5u})
+                if (!run_out_exact(rows, 17408u, splits, bf16, 4u)) return 1;
+    for (uint32_t rows : {256u, 511u})
+        for (bool bf16 : {false, true})
+            if (!run_out_exact(rows, 65536u, 1u, bf16, 4u)) return 1;
+    for (uint32_t n : {6144u, 10240u, 12288u})
+        for (uint32_t rows : {256u, 511u})
+            for (bool bf16 : {false, true})
+                if (!run_out_exact(rows, n, 2u, bf16, 4u)) return 1;
+    for (bool bf16 : {false, true})
+        for (uint32_t splits : {1u, 5u})
+            if (!run_out_exact(128u, 10240u, splits, bf16, 4u) ||
+                !run_out_exact(16u, 81920u, splits, bf16, 4u) ||
+                !run_out_exact(128u, 12288u, splits, bf16, 4u) ||
+                !run_out_exact(16u, 98304u, splits, bf16, 4u) ||
+                !run_out_exact(128u, 8192u, splits, bf16, 4u) ||
+                !run_out_exact(16u, 65536u, splits, bf16, 4u)) return 1;
     for (uint32_t rows : {1u, 4u, 16u, 17u, 32u, 33u, 48u, 49u, 64u, 70u, 128u, 192u, 255u})
         for (uint32_t bits : {4u, 5u, 8u})
             for (uint32_t count : {1u, 2u, 3u})

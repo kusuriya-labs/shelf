@@ -237,10 +237,7 @@ __global__ void __launch_bounds__(kBlock) exl3_mul24_rotate_out_kernel(
     }
 }
 
-// Same math, float4 form: one CTA per 8 rows, 8 waves, one wave per row (the exl3_dense_epilogue_kernel
-// structure). The K-split sum, H128 and svh stay inside one wave; no shared memory and no barrier.
-// Each wave walks the whole output row.
-template <bool BF16>
+template <bool BF16, bool TILED>
 __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const float* __restrict__ yprime,
     const uint16_t* __restrict__ svh,
@@ -249,10 +246,12 @@ __global__ void __launch_bounds__(256) exl3_mul24_rotate_out_f4_kernel(
     const uint32_t out_row_stride,
     const uint32_t splits,
     const uint32_t rows) {
-    const uint32_t m = blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint32_t m = TILED ? blockIdx.x : blockIdx.x * 8u + (threadIdx.x >> 5u);
     if (m >= rows) return;
     const uint32_t lane = threadIdx.x & 31u;
-    for (uint32_t cb = 0u; cb < n / kBlock; ++cb) {
+    const uint32_t first = TILED ? blockIdx.y * 8u + (threadIdx.x >> 5u) : 0u;
+    const uint32_t limit = TILED ? min(n / kBlock, (blockIdx.y + 1u) * 8u) : n / kBlock;
+    for (uint32_t cb = first; cb < limit; cb += TILED ? 8u : 1u) {
         const uint32_t col = cb * kBlock + lane * 4u;
         float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
         for (uint32_t z = 0u; z < splits; ++z) {
@@ -317,12 +316,12 @@ hipError_t launch_exl3_mul24_gemm(
     }
 }
 
-template <bool kF4, bool kBF16>
+template <bool kF4, bool kBF16, bool kTiled = false>
 hipError_t launch_rotate_out_impl(const float* yprime, const uint16_t* svh, void* out, uint32_t rows, uint32_t n,
                                   uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if constexpr (kF4) {
-        const dim3 grid((rows + 7u) / 8u);
-        exl3_mul24_rotate_out_f4_kernel<kBF16>
+        const dim3 grid(kTiled ? rows : (rows + 7u) / 8u, kTiled ? (n / kBlock + 7u) / 8u : 1u);
+        exl3_mul24_rotate_out_f4_kernel<kBF16, kTiled>
             <<<grid, 256, 0, stream>>>(yprime, svh, out, n, out_row_stride, splits, rows);
     } else {
         const dim3 grid(rows, n / kBlock);
@@ -337,8 +336,24 @@ hipError_t launch_exl3_mul24_rotate_out(
     uint32_t n, uint32_t out_row_stride, uint32_t splits, hipStream_t stream) {
     if (rows == 0u) return hipSuccess;
     if (n == 0u || (n % kBlock) != 0u) return hipErrorInvalidValue;
-    const bool f4 = rotate_f4_enabled() && rows >= kRotateOutF4MinRows && (out_row_stride % 4u) == 0u;
+    const bool aligned = rotate_f4_enabled() && (out_row_stride % 4u) == 0u;
     const bool bf16 = out_dtype == Exl3OutputDType::BF16;
+    const bool tiled_rows = rows < 256u ||
+        (rows < kRotateOutF4MinRows &&
+         ((n == 5120u && rows > 256u) || n == 6144u || n == 10240u ||
+          n == 12288u || n == 17408u || n >= 65536u));
+    const uint64_t plane_bytes = static_cast<uint64_t>(rows) * n * sizeof(float);
+    const bool tiled = aligned && tiled_rows &&
+        plane_bytes != 4ull * 1024ull * 1024ull && plane_bytes != 5ull * 1024ull * 1024ull &&
+        plane_bytes != 6ull * 1024ull * 1024ull &&
+        !(bf16 && n == 5120u && rows == 255u && splits == 1u) &&
+        (reinterpret_cast<uintptr_t>(yprime) % 16u) == 0u &&
+        (reinterpret_cast<uintptr_t>(out) % (bf16 ? 8u : 16u)) == 0u &&
+        ((rows >= 8u && n >= 5120u) || n >= 65536u);
+    const bool f4 = aligned && rows >= kRotateOutF4MinRows;
+    if (tiled)
+        return bf16 ? launch_rotate_out_impl<true, true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
+                    : launch_rotate_out_impl<true, false, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream);
     if (f4)
         return bf16 ? launch_rotate_out_impl<true, true>(yprime, svh, out, rows, n, out_row_stride, splits, stream)
                     : launch_rotate_out_impl<true, false>(yprime, svh, out, rows, n, out_row_stride, splits, stream);
