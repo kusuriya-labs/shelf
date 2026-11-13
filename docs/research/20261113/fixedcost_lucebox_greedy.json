@@ -1,0 +1,14 @@
+[
+  {
+    "prompt": "code",
+    "exit": 0,
+    "count": 256,
+    "text": "```python\n\"\"\"\nINI-style config file parser with type inference.\n\nParses INI files into nested dictionaries, inferring types for\nintegers, floats, and booleans.\n\"\"\"\n\nimport re\nfrom typing import Any, Dict, Union\n\n\ndef _infer_type(value: str) -> Union[int, float, bool, str]:\n    \"\"\"\n    Infer the type of a string value.\n    \n    Returns:\n        int, float, bool, or str depending on the value.\n    \"\"\"\n    stripped = value.strip()\n    \n    # Check for boolean values\n    bool_map = {\n        'true': True,\n        'false': False,\n        'yes': True,\n        'no': False,\n        'on': True,\n        'off': False,\n        '1': True,\n        '0': False,\n    }\n    lower = stripped.lower()\n    if lower in bool_map:\n        return bool_map[lower]\n    \n    # Check for integer\n    try:\n        return int(stripped)\n    except ValueError:\n        pass\n    \n    # Check for float\n    try:\n        return float(stripped)"
+  },
+  {
+    "prompt": "prose",
+    "exit": 0,
+    "count": 256,
+    "text": "Speculative decoding is a technique designed to mitigate the primary bottleneck in Large Language Model (LLM) inference: memory bandwidth. Standard autoregressive generation is sequential; the model must generate one token at a time, waiting for the previous token’s computation to finish before starting the next. This process is often \"memory-bound,\" meaning the GPU spends most of its time moving large model weights from high-bandwidth memory to the processor, rather than performing actual arithmetic.\n\nSpeculative decoding addresses this by introducing a smaller, faster \"draft\" model. The process works in two phases. First, the draft model quickly generates a sequence of $k$ candidate tokens. Because the draft model is small, it can produce these tokens rapidly with minimal memory overhead. Second, the large \"target\" model evaluates these $k$ tokens in a single parallel forward pass. Since the target model processes all $k$ tokens simultaneously, it utilizes its computational power more efficiently, effectively amortizing the cost of loading its massive weights over multiple tokens at once.\n\nIf the target model accepts the draft tokens (based on probability thresholds), the system immediately gains $k$ tokens in the time it would have taken to generate just one. If a token is rejected, the target model generates the correct token and the"
+  }
+]

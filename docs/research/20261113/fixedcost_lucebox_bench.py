@@ -24,7 +24,7 @@ for kind in ('none', 'bf16', 'mul24'):
             if any(r['kind'] == kind and r['repeat'] == repeat and r['variant'] == label and r['exit'] == 0 for r in rows):
                 continue
             exe = base if label == 'base' else candidate
-            cmd = ['flock', '-w', '900', '/tmp/r9700.lock', 'timeout', '240', str(exe), '--model-dir', model, '--input-ids-file', str(root / 'docs/research/20261113/exl3_general/prompt_code.ids'), '--max-new-tokens', '128', '--max-seq-len', '1024', '--temperature', '0']
+            cmd = ['flock', '-w', '1800', '/tmp/r9700.lock', 'timeout', '240', str(exe), '--model-dir', model, '--input-ids-file', str(root / 'docs/research/20261113/exl3_general/prompt_code.ids'), '--max-new-tokens', '128', '--max-seq-len', '1024', '--temperature', '0']
             if kind != 'none':
                 cmd += ['--dflash2-model-dir', drafters[kind], '--dflash2-drafts', '7']
             p = subprocess.run(cmd, env=env, text=True, capture_output=True)

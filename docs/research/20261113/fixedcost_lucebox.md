@@ -58,3 +58,11 @@ Luce-Org/lucebox `cbc6d7c27108e984599e22670564aae16e0e7eb4`、Apache-2.0。`serv
 BetterBench の 29 cases、2,203 tokens から corpus を生成し、context 128、256 位置、BF16 KV、batch 1 で基準 dump と候補 dump を `shelf-bench quality --compare` で 1 回比較した。平均 KL は **0.001283664**、top-1 一致率 **98.828125%**、top-5 overlap 98.671875%、perplexity 22.6990 → 22.3631。目安の KL < 0.005 と top-1 ≥ 98% を満たす。logit 最大絶対差は 1.15759。corpus は `tools/quality_gate.py corpus` を使用し、SHA-256 は `99fe6aa90b4f52a9427361391f0dc3e17377391d67793c1c716e890d8c28799d`。詳細は [fixedcost_lucebox_quality.json](fixedcost_lucebox_quality.json)。
 
 `shelf-compute` と `shelf-bench` の Release build に成功。関連 CPU selector test `test_qwen35_rmsnorm_selector`、`test_qwen35_l2_normalize_selector` は 2/2 通過。最初の ctest は `LD_LIBRARY_PATH` 未指定でライブラリ読み込みに失敗し、指定して再実行した。これは新しい融合自体を単体テストしたものではなく、上記の実モデル品質比較が融合を含む確認である。
+
+`optimizations/megakernel/README.md` も設計上の参考とした。0.8B CUDA の全層 persistent kernel は、launch 削減と引き換えに resident block の上限、grid 同期、register 圧力を制約に持つ。27B の HIP 移植対象とはしていない。
+
+## 速度測定の途中結果
+
+[fixedcost_lucebox_bench.py](fixedcost_lucebox_bench.py) で code prompt、128 token、temperature 0 の process を交互に実行する。[fixedcost_lucebox_e2e.json](fixedcost_lucebox_e2e.json) は途中結果であり、非投機は基準 29.37 / 29.40 tok/s 2 回、候補 30.15 / 29.98 tok/s 2 回。基準と候補それぞれ 3 回以上という条件を満たしておらず、この値から平均・標本 SD や採否を確定できない。共有 GPU の待ち行列が長く、1 回はロック取得前に 300 秒 timeout となり、待機のみを延ばして再開した。
+
+生成確認は code と prose の固定 prompt が各 256 token を完走し、確認範囲で文字化け・明白な反復・早期 EOS はなかった。日本語 prompt は未完了。[fixedcost_lucebox_greedy.json](fixedcost_lucebox_greedy.json) に取得分を保存した。
