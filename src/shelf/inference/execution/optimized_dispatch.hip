@@ -17,6 +17,7 @@
 #include <shelf/kernels/optimized/linear/exl3_family/mul1/launch_plan.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/workspace.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/producer_rotate_rows.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
 #include <shelf/inference/execution/exl3_dense_gemm.h>
 #include <shelf/inference/execution/gemm_lt.h>
@@ -680,7 +681,7 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     const ::shelf::runtime::Program& program,
     const ::shelf::runtime::DispatchBinding& b,
     HostExecutionContext& ctx,
-    hipStream_t stream) {
+    hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer = nullptr) {
     if (b.output_count != 1 || b.input_count != 1)
         return Status::invalid_state("exl3 int8 linear: bad io count", __FILE__, __LINE__);
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
@@ -890,7 +891,9 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
             if (e.plamo_exl3_split4 && ctx.num_prefill_requests == 0u && ctx.splitk_tuning_rows == 0u &&
                 n_rows > 16u && n_rows <= 64u && scratch_rows >= 4u * n_rows)
                 splits = 4u;
-            herr = ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
+            herr = producer ? ::shelf::kernel::launch_exl3_swiglu_rotate_rows(
+                *producer, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream) :
+                ::shelf::kernel::launch_exl3_mul24_rotate_quantize(
                 x, in.row_stride, suh, codes, scales, n_rows, k, code_stride, scale_stride_bytes, stream);
             if (herr == hipSuccess)
                 herr = ::shelf::kernel::launch_exl3_mul24_gemm(
@@ -1295,6 +1298,47 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_l2_normalize(program, dispatch_index, ctx, stream);
         }
         case KernelId::SWIGLU: {
+            static const bool rq_enabled = std::getenv("SHELF_DISABLE_SWIGLU_RQ") == nullptr &&
+                std::getenv("SHELF_OP_DUMP") == nullptr && std::getenv("SHELF_OP_SYNC") == nullptr &&
+                std::getenv("SHELF_LINEAR_INPUT_DUMP") == nullptr &&
+                std::getenv("SHELF_EXL3_INT8_DENSE") == nullptr;
+            if (rq_enabled && ctx.value_trace == nullptr && ctx.layer_override_count == 0u &&
+                ctx.num_prefill_requests == 0u && dispatch_index >= 2u && dispatch_index + 1u < dispatch_end &&
+                program.dispatches[dispatch_index - 1u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
+                program.dispatches[dispatch_index - 2u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
+                b.input_count == 2u && b.output_count == 1u) {
+                const auto& linear = program.dispatches[dispatch_index + 1u];
+                bool exclusive = linear.kernel_id == KernelId::LINEAR_EXL3_INT8 && linear.input_count == 1u &&
+                    linear.input_slots[0] == b.output_slots[0] && linear.weight_index < ctx.weight_count && ctx.weights;
+                for (size_t j = dispatch_index + 2u; exclusive && j < program.dispatches.size(); ++j)
+                    for (uint32_t n = 0; n < program.dispatches[j].input_count; ++n)
+                        if (program.dispatches[j].input_slots[n] == b.output_slots[0]) exclusive = false;
+                if (exclusive) {
+                    const auto& w = ctx.weights[linear.weight_index];
+                    PhysicalElementwiseLaunch elem{};
+                    auto resolved = resolve_elementwise_physical(program, b, ctx, elem);
+                    if (!resolved.ok()) return resolved.status();
+                    const auto* binding = program.find_value(::shelf::runtime::ValueId{b.output_slots[0]});
+                    const auto layout = ::shelf::kernel::exl3_detail::mul24::make_workspace_layout(
+                        elem.rows, w.rows, w.cols, ctx.exl3_xrot_bytes, ctx.exl3_accum_bytes, ctx.exl3_dense_bytes);
+                    if (resolved.value() == PhysicalResolveStatus::Applicable && elem.rows >= 1u && elem.rows <= 16u &&
+                        w.rows == 5120u && w.cols == 17408u && w.k_padded == w.cols && w.exl3_ka == 4u &&
+                        w.encoding == 4u && w.experts == 1u && !w.plamo_exl3_linear && !w.device_ptr &&
+                        w.codes && w.exl3_suh && w.exl3_svh && !w.preshuffled && !w.exl3_half &&
+                        !w.output_col_total && !w.output_col_offset && binding &&
+                        binding->storage == ::shelf::runtime::ValueStorage::WORKSPACE &&
+                        elem.features == w.cols && layout.chunk_rows == elem.rows) {
+                        ::shelf::kernel::Exl3SwigluProducer producer{
+                            reinterpret_cast<const ::shelf::bf16_t*>(elem.in0),
+                            reinterpret_cast<const ::shelf::bf16_t*>(elem.in1), elem.in0_stride, elem.in1_stride,
+                            elem.aux != 0u};
+                        auto result = try_launch_linear_exl3_mul24(program, linear, ctx, stream, &producer);
+                        if (!result.ok()) return result;
+                        if (result.value().kind == OptimizedLaunchKind::Launched)
+                            return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2u};
+                    }
+                }
+            }
             static const bool producer_enabled = [] {
                 const char* env = std::getenv("SHELF_PLAMO_EXL3_PRODUCER_ROTATE");
                 return (env == nullptr || std::strcmp(env, "0") != 0) &&
