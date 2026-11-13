@@ -43,7 +43,7 @@ def opencode_binary():
 
 
 def run_opencode(workspace: Path, message: str, base_url: str, env: dict,
-                 timeout: int = 1500) -> subprocess.CompletedProcess:
+                 timeout: int = 400) -> subprocess.CompletedProcess:
     (workspace / "opencode.jsonc").write_text(
         PROVIDER_CONFIG.format(base_url=base_url, context=MODEL_CONTEXT,
                                output=MODEL_OUTPUT))
