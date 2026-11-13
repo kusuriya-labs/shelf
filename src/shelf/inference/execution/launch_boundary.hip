@@ -109,6 +109,9 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
                 source->rows != rows || source->features != 5120 || !source->yprime || !source->svh ||
                 (source->output != reinterpret_cast<void*>(a.in0) && source->output != reinterpret_cast<void*>(a.in1)) ||
                 a.in0 == a.in1) return none;
+            const auto* produced = p.find_value(ValueId{p.dispatches[i - 1].output_slots[0]});
+            if (!produced || (produced->storage != ValueStorage::WORKSPACE &&
+                              produced->storage != ValueStorage::WORKSPACE_VIEW)) return none;
             for (size_t j = i + 1; j < p.dispatches.size(); ++j)
                 for (uint32_t k = 0; k < p.dispatches[j].input_count; ++k)
                     if (p.dispatches[j].input_slots[k] == p.dispatches[i - 1].output_slots[0]) return none;
