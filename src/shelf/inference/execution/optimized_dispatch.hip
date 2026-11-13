@@ -960,6 +960,10 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched};
 }
 
+Result<OptimizedLaunchResult> try_launch_boundary_i8(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t,
+    const ::shelf::kernel::PlamoExl3ProjectionGroup&);
+
 Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const ::shelf::runtime::Program& program, size_t first, size_t end,
     HostExecutionContext& ctx, hipStream_t stream,
@@ -1134,6 +1138,12 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
             reinterpret_cast<::shelf::bf16_t*>(norm.output), norm.eps, norm.weight_offset, stream);
         if (err != hipSuccess)
             return Status::hip_error("plamo norm rotate", hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    if (producer != nullptr && producer->kernel_id == KernelId::RESIDUAL_ADD) {
+        if (is_plamo || first < 2u || rows > 16u || group.k != 5120u) return miss;
+        auto fused = try_launch_boundary_i8(program, first - 2u, end, ctx, stream, group);
+        if (!fused.ok()) return fused.status();
+        if (fused.value().kind != OptimizedLaunchKind::Launched) return miss;
     }
     if (use_prefill) {
         ::shelf::kernel::PlamoExl3PrefillGroup prefill{};
@@ -1456,6 +1466,14 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
         case KernelId::RESIDUAL_ADD: {
+            if (dispatch_index + 2u < dispatch_end &&
+                program.dispatches[dispatch_index + 1u].kernel_id == KernelId::RMS_NORM &&
+                program.dispatches[dispatch_index + 2u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
+                auto projected = try_launch_exl3_projection(program, dispatch_index + 2u, dispatch_end, ctx, stream, &b);
+                if (!projected.ok()) return projected;
+                if (projected.value().kind == OptimizedLaunchKind::Launched)
+                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, projected.value().dispatch_count + 2u};
+            }
             auto fused = try_launch_boundary_i1(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_elementwise(program, dispatch_index, ctx, stream);

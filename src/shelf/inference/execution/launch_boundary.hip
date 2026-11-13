@@ -2,6 +2,7 @@
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include "../../kernels/optimized/detail/rmsnorm_device.h"
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
@@ -34,11 +35,16 @@ __global__ void residual_norm(const bf16* a, const bf16* b, bf16* residual,
 }
 }
 
-Result<OptimizedLaunchResult> try_launch_boundary_i1(
-    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream) {
+hipError_t launch_boundary_rotate(const ::shelf::kernel::PlamoExl3ProjectionGroup&,
+    const bf16*, const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, uint32_t, float, hipStream_t);
+
+Result<OptimizedLaunchResult> try_launch_boundary_core(
+    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
+    const ::shelf::kernel::PlamoExl3ProjectionGroup* group) {
     const OptimizedLaunchResult none{OptimizedLaunchKind::NotApplicable};
     static const bool enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
-    if (!enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
+    static const bool rotate_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr;
+    if ((group && !rotate_enabled) || !enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
         ctx.actual_rows == 0 || ctx.actual_rows > 16 || ctx.tp_active) return none;
     const auto& add = p.dispatches[i];
     const auto& norm = p.dispatches[i + 1];
@@ -87,15 +93,34 @@ Result<OptimizedLaunchResult> try_launch_boundary_i1(
     if (overlap(a.out0, rb, a.in0, ab) || overlap(a.out0, rb, a.in1, bb) ||
         overlap(n.output, nb, a.in0, ab) || overlap(n.output, nb, a.in1, bb) ||
         overlap(n.output, nb, a.out0, rb)) return none;
-    residual_norm<<<dim3(5, rows), 256, 0, stream>>>(
-        reinterpret_cast<const bf16*>(a.in0), reinterpret_cast<const bf16*>(a.in1),
-        reinterpret_cast<bf16*>(a.out0), reinterpret_cast<const bf16*>(n.weight),
-        reinterpret_cast<bf16*>(n.output), a.in0_stride, a.in1_stride, a.out0_stride,
-        n.output_row_stride, n.eps);
-    const auto err = hipGetLastError();
+    hipError_t err;
+    if (group) {
+        if (group->rows != rows || group->k != 5120 || group->count < 2 ||
+            reinterpret_cast<uint64_t>(group->input) != n.output) return none;
+        err = launch_boundary_rotate(*group, reinterpret_cast<const bf16*>(a.in0),
+            reinterpret_cast<const bf16*>(a.in1), reinterpret_cast<bf16*>(a.out0),
+            reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
+            a.in0_stride, a.in1_stride, a.out0_stride, n.output_row_stride, n.eps, stream);
+    } else {
+        residual_norm<<<dim3(5, rows), 256, 0, stream>>>(
+            reinterpret_cast<const bf16*>(a.in0), reinterpret_cast<const bf16*>(a.in1),
+            reinterpret_cast<bf16*>(a.out0), reinterpret_cast<const bf16*>(n.weight),
+            reinterpret_cast<bf16*>(n.output), a.in0_stride, a.in1_stride, a.out0_stride,
+            n.output_row_stride, n.eps);
+        err = hipGetLastError();
+    }
     if (err != hipSuccess) return Status::hip_error("boundary i1", hipGetErrorString(err), __FILE__, __LINE__);
-    record_physical_launch(1);
+    if (!group) record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 2};
+}
+Result<OptimizedLaunchResult> try_launch_boundary_i1(
+    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream) {
+    return try_launch_boundary_core(p, i, end, ctx, stream, nullptr);
+}
+Result<OptimizedLaunchResult> try_launch_boundary_i8(
+    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
+    const ::shelf::kernel::PlamoExl3ProjectionGroup& group) {
+    return try_launch_boundary_core(p, i, end, ctx, stream, &group);
 }
 }
