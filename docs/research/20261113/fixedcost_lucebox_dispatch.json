@@ -1,0 +1,403 @@
+{
+  "baseline": {
+    "stats": {
+      "tokens": 4,
+      "logical_dispatches": 5588,
+      "optimized_operations": 5588,
+      "correctness_fallbacks": 0,
+      "physical_kernel_launches": 7068,
+      "kernels": {
+        "EMBEDDING_LOOKUP": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "LINEAR_BF16": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "RMS_NORM": {
+          "logical": 836,
+          "optimized": 836,
+          "fallback": 0
+        },
+        "RESIDUAL_ADD": {
+          "logical": 512,
+          "optimized": 512,
+          "fallback": 0
+        },
+        "SPLIT": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "SILU": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "SIGMOID": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "MUL": {
+          "logical": 256,
+          "optimized": 256,
+          "fallback": 0
+        },
+        "SWIGLU": {
+          "logical": 256,
+          "optimized": 256,
+          "fallback": 0
+        },
+        "ROPE": {
+          "logical": 128,
+          "optimized": 128,
+          "fallback": 0
+        },
+        "L2_NORMALIZE": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "SCALE": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "KV_APPEND": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "PAGED_ATTENTION": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "STATEFUL_CAUSAL_CONV1D": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "GDN_RECURRENCE": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "OUTPUT_GATHER": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "SAMPLING": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "LINEAR_EXL3_INT8": {
+          "logical": 1604,
+          "optimized": 1604,
+          "fallback": 0
+        }
+      }
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.02022075
+      },
+      "RMS_NORM": {
+        "events": 836,
+        "logical": 836,
+        "ms_per_token": 2.327371000000001
+      },
+      "LINEAR_EXL3_INT8": {
+        "events": 1028,
+        "logical": 1604,
+        "ms_per_token": 28.761006000000044
+      },
+      "LINEAR_BF16": {
+        "events": 384,
+        "logical": 384,
+        "ms_per_token": 1.3441777499999992
+      },
+      "STATEFUL_CAUSAL_CONV1D": {
+        "events": 192,
+        "logical": 192,
+        "ms_per_token": 0.48643250000000016
+      },
+      "SILU": {
+        "events": 384,
+        "logical": 384,
+        "ms_per_token": 0.8900925000000005
+      },
+      "L2_NORMALIZE": {
+        "events": 384,
+        "logical": 384,
+        "ms_per_token": 0.9063722499999997
+      },
+      "SCALE": {
+        "events": 192,
+        "logical": 192,
+        "ms_per_token": 0.4375929999999998
+      },
+      "GDN_RECURRENCE": {
+        "events": 192,
+        "logical": 192,
+        "ms_per_token": 1.1296035000000004
+      },
+      "MUL": {
+        "events": 256,
+        "logical": 256,
+        "ms_per_token": 0.5873485000000003
+      },
+      "RESIDUAL_ADD": {
+        "events": 512,
+        "logical": 512,
+        "ms_per_token": 1.1804464999999997
+      },
+      "SWIGLU": {
+        "events": 256,
+        "logical": 256,
+        "ms_per_token": 0.5955884999999996
+      },
+      "SPLIT": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.14694849999999998
+      },
+      "ROPE": {
+        "events": 128,
+        "logical": 128,
+        "ms_per_token": 0.3258567499999999
+      },
+      "KV_APPEND": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.15505624999999998
+      },
+      "PAGED_ATTENTION": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.28669300000000003
+      },
+      "SIGMOID": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.14984499999999995
+      },
+      "OUTPUT_GATHER": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.009510000000000001
+      },
+      "SAMPLING": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.00895
+      }
+    }
+  },
+  "candidate": {
+    "stats": {
+      "tokens": 4,
+      "logical_dispatches": 5588,
+      "optimized_operations": 4844,
+      "correctness_fallbacks": 0,
+      "physical_kernel_launches": 6324,
+      "kernels": {
+        "EMBEDDING_LOOKUP": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "LINEAR_BF16": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "RMS_NORM": {
+          "logical": 836,
+          "optimized": 836,
+          "fallback": 0
+        },
+        "RESIDUAL_ADD": {
+          "logical": 512,
+          "optimized": 512,
+          "fallback": 0
+        },
+        "SPLIT": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "SILU": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "SIGMOID": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "MUL": {
+          "logical": 256,
+          "optimized": 256,
+          "fallback": 0
+        },
+        "SWIGLU": {
+          "logical": 256,
+          "optimized": 256,
+          "fallback": 0
+        },
+        "ROPE": {
+          "logical": 128,
+          "optimized": 128,
+          "fallback": 0
+        },
+        "L2_NORMALIZE": {
+          "logical": 384,
+          "optimized": 384,
+          "fallback": 0
+        },
+        "SCALE": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "KV_APPEND": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "PAGED_ATTENTION": {
+          "logical": 64,
+          "optimized": 64,
+          "fallback": 0
+        },
+        "STATEFUL_CAUSAL_CONV1D": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "GDN_RECURRENCE": {
+          "logical": 192,
+          "optimized": 192,
+          "fallback": 0
+        },
+        "OUTPUT_GATHER": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "SAMPLING": {
+          "logical": 4,
+          "optimized": 4,
+          "fallback": 0
+        },
+        "LINEAR_EXL3_INT8": {
+          "logical": 1604,
+          "optimized": 1604,
+          "fallback": 0
+        }
+      }
+    },
+    "events": {
+      "EMBEDDING_LOOKUP": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.010150000000000001
+      },
+      "RMS_NORM": {
+        "events": 836,
+        "logical": 1196,
+        "ms_per_token": 2.327729750000001
+      },
+      "LINEAR_EXL3_INT8": {
+        "events": 1028,
+        "logical": 1604,
+        "ms_per_token": 28.679341999999977
+      },
+      "LINEAR_BF16": {
+        "events": 384,
+        "logical": 384,
+        "ms_per_token": 1.3225929999999992
+      },
+      "STATEFUL_CAUSAL_CONV1D": {
+        "events": 192,
+        "logical": 192,
+        "ms_per_token": 0.47609925000000014
+      },
+      "SILU": {
+        "events": 204,
+        "logical": 204,
+        "ms_per_token": 0.4608074999999998
+      },
+      "L2_NORMALIZE": {
+        "events": 192,
+        "logical": 576,
+        "ms_per_token": 0.43022724999999973
+      },
+      "GDN_RECURRENCE": {
+        "events": 192,
+        "logical": 192,
+        "ms_per_token": 1.1265842499999992
+      },
+      "MUL": {
+        "events": 76,
+        "logical": 76,
+        "ms_per_token": 0.17067625
+      },
+      "RESIDUAL_ADD": {
+        "events": 512,
+        "logical": 512,
+        "ms_per_token": 1.1515937500000013
+      },
+      "SWIGLU": {
+        "events": 256,
+        "logical": 256,
+        "ms_per_token": 0.5844667499999996
+      },
+      "SPLIT": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.14271424999999996
+      },
+      "ROPE": {
+        "events": 128,
+        "logical": 128,
+        "ms_per_token": 0.31836450000000016
+      },
+      "KV_APPEND": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.15462525000000002
+      },
+      "PAGED_ATTENTION": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.2866595
+      },
+      "SIGMOID": {
+        "events": 64,
+        "logical": 64,
+        "ms_per_token": 0.144326
+      },
+      "OUTPUT_GATHER": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.009460000000000001
+      },
+      "SAMPLING": {
+        "events": 4,
+        "logical": 4,
+        "ms_per_token": 0.0088705
+      }
+    }
+  }
+}
