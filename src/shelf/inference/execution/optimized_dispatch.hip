@@ -1209,6 +1209,12 @@ Result<OptimizedLaunchResult> try_fixedcost_lucebox(
 Result<OptimizedLaunchResult> try_fixedcost_lucebox_qk(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
 
+Result<OptimizedLaunchResult> try_launch_attn_q(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
+Result<OptimizedLaunchResult> try_launch_attn_kv(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -1273,6 +1279,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
                     return OptimizedLaunchResult{OptimizedLaunchKind::Launched,
                                                  projected.value().dispatch_count + 1u};
             }
+            auto attn = try_launch_attn_kv(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!attn.ok() || attn.value().kind == OptimizedLaunchKind::Launched) return attn;
             auto fused = try_fixedcost_lucebox(program, dispatch_index, dispatch_end, ctx, stream);
             if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_rmsnorm(program, b, ctx, stream);
@@ -1306,7 +1314,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
             }
             return try_launch_elementwise(program, dispatch_index, ctx, stream);
         }
-        case KernelId::SPLIT:
+        case KernelId::SPLIT: {
+            auto fused = try_launch_attn_q(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
+            return try_launch_elementwise(program, dispatch_index, ctx, stream);
+        }
         case KernelId::SIGMOID:
         case KernelId::RESIDUAL_ADD:
         case KernelId::SILU:
