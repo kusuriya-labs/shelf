@@ -1155,6 +1155,9 @@ Result<KernelMode> read_kernel_mode() {
     return Status::invalid_argument("invalid SHELF_QWEN35_KERNEL_MODE", __FILE__, __LINE__);
 }
 
+Result<OptimizedLaunchResult> try_fixedcost_lucebox(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t);
+
 Result<OptimizedLaunchResult> try_launch_optimized(
     const ::shelf::runtime::Program& program,
     size_t dispatch_index,
@@ -1201,8 +1204,11 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         }
         case KernelId::LINEAR_BF16:
             return try_launch_linear_bf16(program, b, ctx, stream);
-        case KernelId::RMS_NORM:
+        case KernelId::RMS_NORM: {
+            auto fused = try_fixedcost_lucebox(program, dispatch_index, dispatch_end, ctx, stream);
+            if (!fused.ok() || fused.value().kind == OptimizedLaunchKind::Launched) return fused;
             return try_launch_rmsnorm(program, b, ctx, stream);
+        }
         case KernelId::ROPE:
             return try_launch_rope(program, dispatch_index, ctx, stream);
         case KernelId::OUTPUT_GATHER:
