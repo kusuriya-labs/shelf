@@ -1,4 +1,5 @@
 #include <shelf/inference/execution/optimized_dispatch.h>
+#include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/inference/execution/exl3_dispatch_decision.h>
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/quantization/quant_contract.h>
@@ -683,7 +684,8 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
     HostExecutionContext& ctx,
     hipStream_t stream, const ::shelf::kernel::Exl3SwigluProducer* producer,
     const ::shelf::kernel::Exl3GdnProducer* gdn_producer,
-    const ::shelf::kernel::Exl3AttnProducer* attn_producer) {
+    const ::shelf::kernel::Exl3AttnProducer* attn_producer, BoundaryDeferred* deferred) {
+    if (deferred) *deferred = {};
     if (b.output_count != 1 || b.input_count != 1)
         return Status::invalid_state("exl3 int8 linear: bad io count", __FILE__, __LINE__);
     if (b.weight_index >= ctx.weight_count || ctx.weights == nullptr)
@@ -905,10 +907,15 @@ Result<OptimizedLaunchResult> try_launch_linear_exl3_mul24(
                 herr = ::shelf::kernel::launch_exl3_mul24_gemm(
                     codes, scales, code_stride, scale_stride_bytes, static_cast<const uint16_t*>(e.codes), e.exl3_ka,
                     yprime, n_rows, n, k, splits, stream);
-            if (herr == hipSuccess)
+            const bool can_defer = deferred && r0 == 0u && n_rows == rows && n == 5120u &&
+                out_bf16 && e.output_col_total == 0u && !e.plamo_exl3_linear && rows <= 16u;
+            if (herr == hipSuccess && can_defer) {
+                *deferred = {yprime, svh, out_ptr, rows, n, dst.row_stride, splits};
+            } else if (herr == hipSuccess) {
                 herr = ::shelf::kernel::launch_exl3_mul24_rotate_out(
                     yprime, svh, out_ptr, out_dtype, n_rows, n, dst.row_stride, splits, stream);
-            launches += 3u;
+            }
+            launches += can_defer ? 2u : 3u;
         }
         if (herr != hipSuccess)
             return Status::hip_error("exl3 int8 launch", hipGetErrorString(herr), __FILE__, __LINE__);
@@ -963,11 +970,15 @@ Result<OptimizedLaunchResult> try_launch_linear_bf16(
 Result<OptimizedLaunchResult> try_launch_boundary_i8(
     const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t,
     const ::shelf::kernel::PlamoExl3ProjectionGroup&);
+Result<OptimizedLaunchResult> try_launch_boundary_i9(
+    const ::shelf::runtime::Program&, size_t, size_t, HostExecutionContext&, hipStream_t,
+    const ::shelf::kernel::PlamoExl3ProjectionGroup&, const BoundaryDeferred&);
 
 Result<OptimizedLaunchResult> try_launch_exl3_projection(
     const ::shelf::runtime::Program& program, size_t first, size_t end,
     HostExecutionContext& ctx, hipStream_t stream,
-    const ::shelf::runtime::DispatchBinding* producer = nullptr) {
+    const ::shelf::runtime::DispatchBinding* producer = nullptr,
+    const BoundaryDeferred* deferred = nullptr) {
     const auto miss = OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable};
     const auto& binding = program.dispatches[first];
     if (binding.weight_index >= ctx.weight_count || ctx.weights == nullptr) return miss;
@@ -1141,7 +1152,8 @@ Result<OptimizedLaunchResult> try_launch_exl3_projection(
     }
     if (producer != nullptr && producer->kernel_id == KernelId::RESIDUAL_ADD) {
         if (is_plamo || first < 2u || rows > 16u || group.k != 5120u) return miss;
-        auto fused = try_launch_boundary_i8(program, first - 2u, end, ctx, stream, group);
+        auto fused = deferred ? try_launch_boundary_i9(program, first - 2u, end, ctx, stream, group, *deferred)
+                              : try_launch_boundary_i8(program, first - 2u, end, ctx, stream, group);
         if (!fused.ok()) return fused.status();
         if (fused.value().kind != OptimizedLaunchKind::Launched) return miss;
     }
@@ -1279,6 +1291,29 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         case KernelId::LINEAR_EXL3_INT8: {
             auto projected = try_launch_exl3_projection(program, dispatch_index, dispatch_end, ctx, stream);
             if (!projected.ok() || projected.value().kind == OptimizedLaunchKind::Launched) return projected;
+            static const bool i9_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr &&
+                std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr && std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
+            if (i9_enabled && !ctx.tp_active && !ctx.value_trace && !ctx.layer_override_count &&
+                ctx.actual_rows > 0 && ctx.actual_rows <= 16 && dispatch_index + 4u < dispatch_end &&
+                program.dispatches[dispatch_index + 1u].kernel_id == KernelId::RESIDUAL_ADD &&
+                program.dispatches[dispatch_index + 2u].kernel_id == KernelId::RMS_NORM &&
+                program.dispatches[dispatch_index + 3u].kernel_id == KernelId::LINEAR_EXL3_INT8 &&
+                program.dispatches[dispatch_index + 4u].kernel_id == KernelId::LINEAR_EXL3_INT8) {
+                BoundaryDeferred deferred{};
+                auto linear = try_launch_linear_exl3_mul24(program, b, ctx, stream, nullptr, nullptr, nullptr, &deferred);
+                if (!linear.ok() || !deferred.yprime) return linear;
+                auto fused = try_launch_exl3_projection(program, dispatch_index + 3u, dispatch_end, ctx, stream,
+                                                          &program.dispatches[dispatch_index + 1u], &deferred);
+                if (!fused.ok()) return fused;
+                if (fused.value().kind == OptimizedLaunchKind::Launched)
+                    return OptimizedLaunchResult{OptimizedLaunchKind::Launched, fused.value().dispatch_count + 3u};
+                const auto err = ::shelf::kernel::launch_exl3_mul24_rotate_out(
+                    deferred.yprime, deferred.svh, deferred.output, ::shelf::kernel::Exl3OutputDType::BF16,
+                    deferred.rows, deferred.features, deferred.output_stride, deferred.splits, stream);
+                if (err != hipSuccess) return Status::hip_error("boundary rotate fallback", hipGetErrorString(err), __FILE__, __LINE__);
+                record_physical_launch(1);
+                return linear;
+            }
             return try_launch_linear_exl3_mul24(program, b, ctx, stream);
         }
         case KernelId::LINEAR_BF16:

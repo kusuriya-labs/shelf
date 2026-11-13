@@ -2,6 +2,7 @@
 #include <shelf/inference/execution/physical_launch.h>
 #include <shelf/inference/execution/program_executor.h>
 #include <shelf/inference/execution/decode_perf_stats.h>
+#include <shelf/inference/execution/boundary_deferred.h>
 #include <shelf/kernels/optimized/linear/exl3_family/mul24/projection.h>
 #include "../../kernels/optimized/detail/rmsnorm_device.h"
 #include <hip/hip_bf16.h>
@@ -38,13 +39,17 @@ __global__ void residual_norm(const bf16* a, const bf16* b, bf16* residual,
 hipError_t launch_boundary_rotate(const ::shelf::kernel::PlamoExl3ProjectionGroup&,
     const bf16*, const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, uint32_t, float, hipStream_t);
 
+hipError_t launch_boundary_out_rotate(const ::shelf::kernel::PlamoExl3ProjectionGroup&, const BoundaryDeferred&,
+    const bf16*, bf16*, const bf16*, bf16*, uint32_t, uint32_t, uint32_t, float, bool, bool, hipStream_t);
+
 Result<OptimizedLaunchResult> try_launch_boundary_core(
     const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
-    const ::shelf::kernel::PlamoExl3ProjectionGroup* group) {
+    const ::shelf::kernel::PlamoExl3ProjectionGroup* group, const BoundaryDeferred* source) {
     const OptimizedLaunchResult none{OptimizedLaunchKind::NotApplicable};
     static const bool enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I1") == nullptr;
     static const bool rotate_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I8") == nullptr;
-    if ((group && !rotate_enabled) || !enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
+    static const bool out_enabled = std::getenv("SHELF_DISABLE_BOUNDARY_I9") == nullptr;
+    if ((source && !out_enabled) || (group && !rotate_enabled) || !enabled || ctx.value_trace || ctx.layer_override_count || i == 0 || i + 3 >= end ||
         ctx.actual_rows == 0 || ctx.actual_rows > 16 || ctx.tp_active) return none;
     const auto& add = p.dispatches[i];
     const auto& norm = p.dispatches[i + 1];
@@ -97,7 +102,23 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
     if (group) {
         if (group->rows != rows || group->k != 5120 || group->count < 2 ||
             reinterpret_cast<uint64_t>(group->input) != n.output) return none;
-        err = launch_boundary_rotate(*group, reinterpret_cast<const bf16*>(a.in0),
+        if (source) {
+            if (p.dispatches[i - 1].output_count != 1 || add.input_count != 2 ||
+                (add.input_slots[0] != p.dispatches[i - 1].output_slots[0] &&
+                 add.input_slots[1] != p.dispatches[i - 1].output_slots[0]) ||
+                source->rows != rows || source->features != 5120 || !source->yprime || !source->svh ||
+                (source->output != reinterpret_cast<void*>(a.in0) && source->output != reinterpret_cast<void*>(a.in1)) ||
+                a.in0 == a.in1) return none;
+            for (size_t j = i + 1; j < p.dispatches.size(); ++j)
+                for (uint32_t k = 0; k < p.dispatches[j].input_count; ++k)
+                    if (p.dispatches[j].input_slots[k] == p.dispatches[i - 1].output_slots[0]) return none;
+            const bool first = source->output == reinterpret_cast<void*>(a.in0);
+            static const bool serial = std::getenv("SHELF_BOUNDARY_I9_SERIAL") != nullptr;
+            err = launch_boundary_out_rotate(*group, *source,
+                reinterpret_cast<const bf16*>(first ? a.in1 : a.in0), reinterpret_cast<bf16*>(a.out0),
+                reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
+                first ? a.in1_stride : a.in0_stride, a.out0_stride, n.output_row_stride, n.eps, first, serial, stream);
+        } else err = launch_boundary_rotate(*group, reinterpret_cast<const bf16*>(a.in0),
             reinterpret_cast<const bf16*>(a.in1), reinterpret_cast<bf16*>(a.out0),
             reinterpret_cast<const bf16*>(n.weight), reinterpret_cast<bf16*>(n.output),
             a.in0_stride, a.in1_stride, a.out0_stride, n.output_row_stride, n.eps, stream);
@@ -116,11 +137,17 @@ Result<OptimizedLaunchResult> try_launch_boundary_core(
 }
 Result<OptimizedLaunchResult> try_launch_boundary_i1(
     const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream) {
-    return try_launch_boundary_core(p, i, end, ctx, stream, nullptr);
+    return try_launch_boundary_core(p, i, end, ctx, stream, nullptr, nullptr);
 }
 Result<OptimizedLaunchResult> try_launch_boundary_i8(
     const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
     const ::shelf::kernel::PlamoExl3ProjectionGroup& group) {
-    return try_launch_boundary_core(p, i, end, ctx, stream, &group);
+    return try_launch_boundary_core(p, i, end, ctx, stream, &group, nullptr);
 }
+Result<OptimizedLaunchResult> try_launch_boundary_i9(
+    const Program& p, size_t i, size_t end, HostExecutionContext& ctx, hipStream_t stream,
+    const ::shelf::kernel::PlamoExl3ProjectionGroup& group, const BoundaryDeferred& source) {
+    return try_launch_boundary_core(p, i, end, ctx, stream, &group, &source);
+}
+
 }
