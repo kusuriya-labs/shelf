@@ -1,0 +1,338 @@
+{
+  "baseline_commit": "ca29aa1a6bd997ca2cc331405606091ecc41ef9b",
+  "implementation_commit": "d7519a2",
+  "gpu": "GPU-a8e9ddefa2d60f55",
+  "measurement_note": "HIP event and host enqueue overlap; floor kernel timings cannot be subtracted from model step times.",
+  "plamo_closed_loop": {
+    "runs": [
+      {
+        "label": "baseline",
+        "tokens_per_s": 151.24444444444444,
+        "tokens": 13612,
+        "requests": 174
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 175.48888888888888,
+        "tokens": 15794,
+        "requests": 202
+      },
+      {
+        "label": "baseline",
+        "tokens_per_s": 154.6,
+        "tokens": 13914,
+        "requests": 177
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 175.48888888888888,
+        "tokens": 15794,
+        "requests": 202
+      },
+      {
+        "label": "baseline",
+        "tokens_per_s": 155.27777777777777,
+        "tokens": 13975,
+        "requests": 178
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 175.48888888888888,
+        "tokens": 15794,
+        "requests": 202
+      }
+    ],
+    "summary": {
+      "baseline": {
+        "values": [
+          151.24444444444444,
+          154.6,
+          155.27777777777777
+        ],
+        "mean": 153.7074074074074,
+        "sample_sd": 2.1597420208691163
+      },
+      "graph": {
+        "values": [
+          175.48888888888888,
+          175.48888888888888,
+          175.48888888888888
+        ],
+        "mean": 175.48888888888888,
+        "sample_sd": 0.0
+      },
+      "change_percent": 14.170742873665688
+    }
+  },
+  "qwen_compute": {
+    "runs": [
+      {
+        "label": "baseline",
+        "tokens_per_s": 29.35
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 30.61
+      },
+      {
+        "label": "baseline",
+        "tokens_per_s": 29.42
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 30.72
+      },
+      {
+        "label": "baseline",
+        "tokens_per_s": 29.46
+      },
+      {
+        "label": "graph",
+        "tokens_per_s": 30.7
+      }
+    ],
+    "summary": {
+      "baseline": {
+        "values": [
+          29.35,
+          29.42,
+          29.46
+        ],
+        "mean": 29.41,
+        "sample_sd": 0.05567764362829999
+      },
+      "graph": {
+        "values": [
+          30.61,
+          30.72,
+          30.7
+        ],
+        "mean": 30.676666666666666,
+        "sample_sd": 0.058594652770822916
+      },
+      "change_percent": 4.3069250821715865
+    }
+  },
+  "dispatch_diagnostic": {
+    "plamo": {
+      "logical_per_step": 486,
+      "physical_per_step": 547,
+      "host_program_enqueue_ms_samples": [
+        5.662397,
+        5.750808,
+        5.813649,
+        5.771208,
+        5.671317,
+        5.746178,
+        5.779098,
+        5.773959,
+        5.776168,
+        5.714337,
+        5.749178,
+        5.749158,
+        5.689308,
+        5.806279,
+        5.713858
+      ],
+      "host_program_enqueue_median_ms": 5.749178,
+      "host_batch_enqueue_ms_samples": [
+        5.717148,
+        5.811219,
+        5.87653,
+        5.827559,
+        5.733448,
+        5.801418,
+        5.838319,
+        5.831669,
+        5.830139,
+        5.772068,
+        5.808189,
+        5.802569,
+        5.748218,
+        5.85898,
+        5.771119
+      ],
+      "host_batch_enqueue_median_ms": 5.808189,
+      "gpu_event_step_p50_ms": 6.36445,
+      "floor": [
+        {
+          "run": 0,
+          "count": 547,
+          "host_ms": 1.159487,
+          "gpu_ms": 2.407341
+        },
+        {
+          "run": 1,
+          "count": 547,
+          "host_ms": 0.858914,
+          "gpu_ms": 1.725152
+        },
+        {
+          "run": 2,
+          "count": 547,
+          "host_ms": 0.765971,
+          "gpu_ms": 1.709351
+        },
+        {
+          "run": 3,
+          "count": 547,
+          "host_ms": 0.785621,
+          "gpu_ms": 1.720672
+        }
+      ]
+    },
+    "qwen": {
+      "logical_per_step": 1397,
+      "physical_per_step": 1767,
+      "host_program_enqueue_ms_samples": [
+        23.88143,
+        24.096433,
+        23.89921,
+        23.841179,
+        23.741358,
+        23.879709,
+        23.700768,
+        23.628036,
+        23.640227,
+        23.477925,
+        23.460105,
+        23.459794,
+        23.492145,
+        23.666137,
+        23.675178
+      ],
+      "host_program_enqueue_median_ms": 23.675178,
+      "host_batch_enqueue_ms_samples": [
+        23.93551,
+        24.183154,
+        23.954091,
+        23.89734,
+        23.799129,
+        23.93721,
+        23.753909,
+        23.681337,
+        23.696867,
+        23.538705,
+        23.527136,
+        23.514155,
+        23.547206,
+        23.732618,
+        23.744209
+      ],
+      "host_batch_enqueue_median_ms": 23.744209,
+      "gpu_event_step_p50_ms": 33.3932,
+      "floor": [
+        {
+          "run": 0,
+          "count": 1767,
+          "host_ms": 3.096574,
+          "gpu_ms": 5.579571
+        },
+        {
+          "run": 1,
+          "count": 1767,
+          "host_ms": 2.600281,
+          "gpu_ms": 5.119802
+        },
+        {
+          "run": 2,
+          "count": 1767,
+          "host_ms": 2.813966,
+          "gpu_ms": 5.116202
+        },
+        {
+          "run": 3,
+          "count": 1767,
+          "host_ms": 2.653202,
+          "gpu_ms": 5.116277
+        }
+      ]
+    }
+  },
+  "plamo_quality": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.018016113282697144,
+      "top1_agreement": 0.9291428571611428,
+      "max_logit_diff": 4.75
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.015159608365474286,
+      "top1_agreement": 0.9371428571725714,
+      "max_logit_diff": 6.06640625
+    }
+  },
+  "qwen_quality": {
+    "QUALITY_POSITIONS": "256",
+    "QUALITY_CONTEXT": "128",
+    "QUALITY_BATCH_SIZE": "1",
+    "QUALITY_SCORE_START": "129",
+    "QUALITY_VOCAB": "248320",
+    "QUALITY_KV_DTYPE": "bf16",
+    "QUALITY_PPL_CANDIDATE": "22.6990172",
+    "QUALITY_PPL_DELTA_PCT": "0",
+    "QUALITY_NLL_DELTA_MEAN": "0",
+    "QUALITY_KL_MEAN": "0",
+    "QUALITY_TOP1_AGREEMENT": "1",
+    "QUALITY_TOP5_OVERLAP": "1",
+    "QUALITY_LOGIT_MAX_ABS_DELTA": "0"
+  },
+  "greedy_comparisons": {
+    "code": {
+      "equal": true,
+      "sha256": [
+        "241c8add10e69a3397f46ec4a1a84149182a4029b60e390b79b3938e18276078",
+        "241c8add10e69a3397f46ec4a1a84149182a4029b60e390b79b3938e18276078"
+      ]
+    },
+    "ja": {
+      "equal": true,
+      "sha256": [
+        "79d44809a19025ed74f9388a1a7b48e201a799568cf8c1dd6e779b35b8e46553",
+        "79d44809a19025ed74f9388a1a7b48e201a799568cf8c1dd6e779b35b8e46553"
+      ]
+    },
+    "prose": {
+      "equal": true,
+      "sha256": [
+        "f1338e648839057e458f4ce5564a3c4303b5e10e7062adcd47e726c28a235543",
+        "f1338e648839057e458f4ce5564a3c4303b5e10e7062adcd47e726c28a235543"
+      ]
+    }
+  },
+  "long_graph_greedy": {
+    "plamo": {
+      "steps": 2000,
+      "final_position": 2000,
+      "exit": 0
+    },
+    "qwen": {
+      "steps": 2000,
+      "final_position": 2000,
+      "exit": 0
+    }
+  },
+  "redline": {
+    "commit": "274c196359dcc4a5f76ea41e5226cf720f5f93e4",
+    "plamo_original": {
+      "hip_nodes": 554,
+      "redline_nodes": 548,
+      "branch": "native"
+    },
+    "qwen_original": {
+      "hip_nodes": 1774,
+      "redline_nodes": 1768,
+      "branch": "native"
+    },
+    "plamo_split_experiment": {
+      "hip_nodes": 548,
+      "redline_nodes": 548,
+      "lower_error": "Gfx12Build(UnsupportedKernelProperties(2))",
+      "branch": "native"
+    },
+    "faults": "No new amdgpu/kfd journal entries during four preload trials; dmesg access denied; no HSA error reported."
+  }
+}
