@@ -66,3 +66,5 @@ BetterBench の 29 cases、2,203 tokens から corpus を生成し、context 128
 [fixedcost_lucebox_bench.py](fixedcost_lucebox_bench.py) で code prompt、128 token、temperature 0 の process を交互に実行する。[fixedcost_lucebox_e2e.json](fixedcost_lucebox_e2e.json) は途中結果であり、非投機は基準 29.37 / 29.40 tok/s 2 回、候補 30.15 / 29.98 tok/s 2 回。基準と候補それぞれ 3 回以上という条件を満たしておらず、この値から平均・標本 SD や採否を確定できない。共有 GPU の待ち行列が長く、1 回はロック取得前に 300 秒 timeout となり、待機のみを延ばして再開した。
 
 生成確認は code と prose の固定 prompt が各 256 token を完走し、確認範囲で文字化け・明白な反復・早期 EOS はなかった。日本語 prompt は未完了。[fixedcost_lucebox_greedy.json](fixedcost_lucebox_greedy.json) に取得分を保存した。
+
+排他待ちが指示された時間の目安を大幅に超えたため、待機中の自分の実行を停止した。非投機の各 3 回と BF16 / mul24 drafter の速度比較、日本語 prompt の 256 token 生成、draft step と verify 前後の launch 内訳は未完了。DFlash2 の速度・品質や全部入りの採否は判断できない。上記 script は保存済み JSON を初期値として成功済み run を飛ばし、残りを `/tmp/fc_lucebox/bench.json` に記録する。統合前に残項目を実施する。

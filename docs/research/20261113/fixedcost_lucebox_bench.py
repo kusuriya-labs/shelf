@@ -17,7 +17,9 @@ drafters = {
 env = os.environ.copy()
 env.update(ROCR_VISIBLE_DEVICES='GPU-a8e9ddefa2d60f55', LD_LIBRARY_PATH='/home/homelab1/coding-local/sLLM/.local-artifacts/phaseshift-draft-vocab/toolchain/root/usr/lib/llvm-23/lib:/opt/rocm/core-7.14/lib')
 result_path = tmp / 'bench.json'
-rows = json.loads(result_path.read_text()) if result_path.exists() else []
+seed_path = root / 'docs/research/20261113/fixedcost_lucebox_e2e.json'
+source = result_path if result_path.exists() else seed_path
+rows = json.loads(source.read_text()) if source.exists() else []
 for kind in ('none', 'bf16', 'mul24'):
     for repeat in range(3):
         for label in (('base', 'candidate') if repeat % 2 == 0 else ('candidate', 'base')):
