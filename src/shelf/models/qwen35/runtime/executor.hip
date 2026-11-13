@@ -1030,8 +1030,10 @@ Result<PendingBatch> submit_co_batch(
         (plamo_graph_env[0] != '\0' && std::strcmp(plamo_graph_env, "0") != 0);
     const bool graph_eligible =
         !executor.graph_failed &&
-        (!plamo || (plamo_graph_enabled && R == 1u && N == 1u &&
-                    exec_role == ::shelf::runtime::ExecutionRole::Decode)) &&
+        (plamo ? (plamo_graph_enabled && R == 1u && N == 1u &&
+                  exec_role == ::shelf::runtime::ExecutionRole::Decode)
+               : ((R == 1u && N == 1u && exec_role == ::shelf::runtime::ExecutionRole::Decode) ||
+                  verify_graph)) &&
         !prep.has_token_bitmask &&
         executor.tp_schedules.empty() &&
         N > 0 &&
