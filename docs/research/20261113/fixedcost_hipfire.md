@@ -28,11 +28,16 @@ linear 内部の `group_rotate` / `group_out` の単独 event は今回の実 st
 
 候補側の同じ診断 capture では RMSNorm と後続 projection を合わせた event 合計が 4.169 ms、SwiGLU と down の合計が 1.126 ms、その他の linear が 0.663 ms。対応する baseline の RMSNorm + SwiGLU + linear は 6.604 ms、候補は 5.959 ms。差の約 0.65 ms は同じ区間の診断上の概算であり、clean throughput や個別案の寄与ではない。2 案の相互作用があるため単独寄与は未測定。
 
-## 暫定の速度・品質と検証
+## 暫定速度・品質と検証
 
-継続投入の初回は baseline 155.28、候補 159.08 tok/s。残りの ABAB と品質全例は共有 GPU ロックの待機中であり、これは採用判定ではない。候補の品質は先頭 3 ケースだけ終了した。どのケースも既存 main の同じケースとの top-1 一致率に差はなかったが、各方向 875 位置の集計は未了である。
+継続投入の初回は baseline 155.28、候補 159.08 tok/s。残りの ABAB と品質全例は共有 GPU ロックの待機中であり、これは採用判定ではない。品質は CPU BF16 比較の各方向 18 文・875 位置。KL はどちらも 0.02 未満、既存 main 比の top-1 低下は 1 ポイント未満。
 
-`test_plamo_exl3_projection` と、新規 `test_fixedcost_hipfire_producer` が通過した。後者は通常入力とゼロ入力で、融合 producer の BF16 出力と従来量子化経路の code / scale の整合、RMSNorm 値の誤差を検査する。`--all` は実行していない。品質と反復速度の確定までは統合候補として未検証である。
+| 方向 | KL | top-1 一致率 | 既存 main top-1 | 最大 logits 差 |
+| --- | ---: | ---: | ---: | ---: |
+| ja-en | 0.0183034 | 92.9143% | 92.9143% | 5.500000 |
+| en-ja | 0.0151106 | 93.6000% | 93.7143% | 6.066406 |
+
+`test_plamo_exl3_projection` と、新規 `test_fixedcost_hipfire_producer` が通過した。後者は通常入力とゼロ入力で、融合 producer の BF16 出力と従来量子化経路の code / scale の整合、RMSNorm 値の誤差を検査する。`--all` は実行していない。反復速度の確定までは速度に基づく採否は未確定である。
 
 ## 他の候補
 
@@ -45,4 +50,4 @@ linear 内部の `group_rotate` / `group_out` の単独 event は今回の実 st
 
 設計の参考: `warpfront/hipfire` commit `89e32856d25d6f6e6645319f2ec2c641c46be525`、Apache-2.0。`kernels/src/fused_rmsnorm_mq_rotate.hip`、`fused_silu_mul_mq_rotate.hip`、`ffn_grouped_activation_rotate_i8.gfx1201.hip`、`attention_flash_q8_0_reduce_gated_mq_rotate.gfx1100.hip`、`fused_rmsnorm_proj4_mq4g256v2_fold.gfx1201.hip`、`argmax_pair_merge.hip` と `docs/perf-checkpoints/` を参照。shelf の H128、重み固有 SUH、INT8 量子化と実行計画に合わせて独自に実装した。
 
-計測集計と条件は [JSON](fixedcost_hipfire.json)、再実行用 runner は [fixedcost_hipfire_runs.py](fixedcost_hipfire_runs.py)。
+計測集計と条件は [JSON](fixedcost_hipfire.json)、再実行用 runner は [速度](fixedcost_hipfire_runs.py) と [品質](fixedcost_hipfire_quality.sh)。

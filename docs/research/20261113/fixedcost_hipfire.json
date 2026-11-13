@@ -193,8 +193,24 @@
     "candidate_tok_s": [
       159.07777777777778
     ],
-    "quality_cases_completed": 3,
-    "final_quality": "未完了",
+    "quality_cases_completed": 36,
+    "final_quality": "pass",
     "note": "ABAB 各3回と品質全例は GPU ロック待ち。暫定値。"
+  },
+  "quality": {
+    "ja-en": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.018303400795302856,
+      "top1_agreement": 0.9291428571611428,
+      "max_logit_diff": 5.5
+    },
+    "en-ja": {
+      "cases": 18,
+      "positions": 875,
+      "mean_kl": 0.015110553361188571,
+      "top1_agreement": 0.9360000000525714,
+      "max_logit_diff": 6.06640625
+    }
   }
 }
