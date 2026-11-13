@@ -387,6 +387,15 @@ marker の値が `0xDCD12D` の EXL3 を、`EXL3_MUL24_INT8_V1` / `EXL3_MUL24_IN
   split 数と加算順を保持する。workspace 不足、入出力の重なり、出力列の部分書き込み、
   debug override などの条件では個別実行へ戻る。routed expert と DFlash2 の独立した linear 実行は
   この dispatch 統合の対象外である。
+- 出力回転は、整列した buffer と stride を満たす小・中行数について 128 列単位を wave に分ける。
+  256〜511 行では N=5120（256 行を除く）、6144、10240、12288、17408、65536 以上を対象とし、
+  512 行以上は従来の f4 経路を使う。新しい列分割では、F32 plane が 4 / 5 / 6 MiB の場合と、
+  BF16・N=5120・255 行・split=1 は scalar 経路に戻る。split の加算順は変えない。
+- 通常 GEMM は active rows の device 指定がなく、N=512 または 1024 の一部の 4 / 5 bit 形状で
+  行数と K に応じて tile を選ぶ。K は 1024 以上を要する。4 bit の N=512 は K<=17408・49〜64 行、
+  N=1024 は K<=5120・49〜64 行または K<=8192・56〜64 行が対象。5 bit の N=512 は K<=17408・
+  17〜64 行、N=1024 は K<=8192・17〜64 行または K<=17408・33〜64 行が対象で、次の K group の
+  先読みを省略する。適用外の形状と device 指定の補正行は従来の tile を使う。
 - decode（rows <= 16）の GEMM は K を split して wave を埋める（各 split が F32 出力の別スライスに書き、
   (3) が足す。決定的）。n の小さい線形は wave が足りず帯域が落ちるため。
 - prefill（rows >= 256、`SHELF_EXL3_INT8_DENSE` で変更、0 で無効）は W16A16 の dense 経路と同じ構造で、
